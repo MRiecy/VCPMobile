@@ -1001,7 +1001,7 @@ class SseProxyService : Service() {
             .setCategory(Notification.CATEGORY_SERVICE)
             .addAction(
                 applicationInfo.icon,
-                "Open",
+                "打开",
                 openPendingIntent
             )
 

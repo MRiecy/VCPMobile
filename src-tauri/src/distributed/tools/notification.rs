@@ -44,7 +44,7 @@ body:「始」通知内容「末」\n\
         let title = args
             .get("title")
             .and_then(|v| v.as_str())
-            .unwrap_or("VCP Notification")
+            .unwrap_or("VCP 通知")
             .to_string();
         let body = args
             .get("body")

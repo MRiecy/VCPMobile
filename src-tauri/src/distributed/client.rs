@@ -1338,7 +1338,9 @@ fn acquire_wake_lock_helper(app: &tauri::AppHandle, tag: &str) {
         app,
         tag,
         10, // priority = PRIORITY_DISTRIBUTED
-        "[分布式连接]",
+        // 通知文案标签：统一使用 "distributed"，由 Kotlin 侧 StreamKeepaliveService
+        // 映射为标题 "VCP Mobile" + "分布式后台连接维系中..."，避免内部标识泄漏到通知栏。
+        "distributed",
         false, // screen_keep_on = false
     ) {
         log::warn!(

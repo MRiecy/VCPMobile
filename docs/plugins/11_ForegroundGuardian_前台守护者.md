@@ -84,7 +84,9 @@ const val PRIORITY_DISTRIBUTED = 10 // 分布式后台保活 — 低，不保持
 | `"sync"` | 40 | ✅ | `[数据同步]` | `VcpMobilePlugin.startStreamingService()` 识别人工 Agent 名 |
 | `"prerender"` | 30 | ✅ | `[预渲染重建]` | `VcpMobilePlugin.startStreamingService()` 识别人工 Agent 名 |
 | `"stream:{AgentName}"` | 20 | ❌ | 用户可见 Agent 名 | `stream.rs` → `start_stream_service_inner()` |
-| `"distributed"` | 10 | ❌ | `distributed`（`StreamKeepaliveService.buildNotification` 将其映射为"分布式后台连接维系中..."） | `stream.rs` → `set_keepalive_mode_inner()` / `vcp_log_service` linger |
+| `"distributed"` | 10 | ❌ | `distributed`（`resolveNotificationCopy` 映射为标题 "VCP Mobile" + "分布式后台连接维系中..."） | `stream.rs` → `set_keepalive_mode_inner()` / `vcp_log_service` linger |
+| `"distributed:connect"` / `"distributed:tool:*"` / `"distributed:placeholder_push:*"` | 10 | ❌ | `distributed`（统一内部标签，标题同样回落为 "VCP Mobile"） | `distributed/client.rs` → `acquire_wake_lock_helper()` |
+| `"vcp_log"` | 10 | ❌ | `VCP Log Linger`（`resolveNotificationCopy` 识别为内部 label：标题 "VCP Mobile" + "正在保持后台连接..."） | `lifecycle_controller.rs` 后台 linger |
 | `"manual_keepalive"` | 10 | ❌ | `[后台保活]` | `VcpMobilePlugin.acquireWakeLock()`（旧 API 兼容） |
 
 > **通知文案选择逻辑**：`getNotificationLabel()` 遍历 `consumers.values`，返回 `maxByOrNull { it.priority }?.displayLabel`。若有同步任务在运行，通知始终展示"正在与云端服务器进行高精度同步..."而非普通 Agent 名。
@@ -494,7 +496,7 @@ ForegroundGuardian.release(context, "manual_keepalive")
 
 4. **不要跨进程共享 ForegroundGuardian**：`WakeLock` 和 `WifiLock` 是进程级资源，Binder 无法传递。ForegroundGuardian 必须始终作为调用进程内的单例使用。`distributed/` 的保活调用通过 `set_keepalive_mode_inner()` 而非跨进程方式正是基于此原则。
 
-5. **通知文案语义化**：`displayLabel` 直接出现在通知栏，需确保中文文本精炼（≤ 15 字）且不含技术内部 ID。`StreamKeepaliveService.buildNotification()` 会基于 label 内容做二次语义化（如包含"数据同步"→显示"正在与云端服务器进行高精度同步..."）。
+5. **通知文案语义化**：`displayLabel` 直接出现在通知栏，需确保中文文本精炼（≤ 15 字）且不含技术内部 ID。`StreamKeepaliveService.resolveNotificationCopy()`（纯函数，由 `NotificationCopyTest` 锁定契约）会基于 label 内容做二次语义化（如包含"数据同步"→显示"正在与云端服务器进行高精度同步..."），并将所有内部标识（`distributed`、`VCP Log Linger`、任何 `"[...]"` 域标签）的标题统一回落为应用名 "VCP Mobile"。新增消费者时**不要**把内部 tag 或 `"[...]"` 标识当作 label 传入并期望其成为标题。
 
 6. **updateFgs 不是免费操作**：每次 `updateFgs` 都通过 `startForegroundService()` 触发完整的 `onStartCommand` → `startForeground()` 链路。高频 acquire/release 场景下应考虑合并更新。当前设计中，Rust 侧的 `start_stream_service_inner` / `stop_stream_service_inner` 已做了去重优化（同一 Agent 名重复调用仅更新计数而非重复通知 Service）。
 

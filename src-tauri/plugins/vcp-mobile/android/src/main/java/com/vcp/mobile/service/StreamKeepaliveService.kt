@@ -40,6 +40,43 @@ internal fun allocateCliNotificationId(
     error("CLI notification id namespace is exhausted")
 }
 
+/** 前台服务常驻通知的用户可见文案。 */
+internal data class NotificationCopy(val title: String, val contentText: String)
+
+/**
+ * 将 ForegroundGuardian 消费者 label 映射为通知标题与正文。
+ *
+ * 纯函数（无 Android 依赖），供 JVM 单测直接覆盖。规则：
+ * - CLI 任务运行中时正文优先提示 CLI 状态；
+ * - 已知领域标签（[数据同步] / [预渲染重建]）仅作正文分支依据，从标题中剥离；
+ * - 内部标识（"distributed"、"VCP Log Linger"、任何残留的 "[...]" 域标签、空 label）
+ *   一律回落为应用名 "VCP Mobile"，避免内部实现细节泄漏到通知栏；
+ * - 其余 label 视为 Agent 名，直接作为标题。
+ */
+internal fun resolveNotificationCopy(label: String, hasCliJobs: Boolean): NotificationCopy {
+    val stripped = label
+        .replace("[数据同步]", "")
+        .replace("[预渲染重建]", "")
+        .trim()
+    val isBracketTag = stripped.startsWith("[") && stripped.endsWith("]")
+    val contentText = when {
+        hasCliJobs -> "CLI 任务正在运行；系统仍可能中断"
+        label.contains("[数据同步]") -> "正在与云端服务器进行高精度同步..."
+        label.contains("[预渲染重建]") -> "正在优化与加速本地响应缓存..."
+        label == "distributed" || label.contains("分布式") -> "分布式后台连接维系中..."
+        // Guardian 内部 label（VCP Log Linger）与未单独列出的 "[...]" 域标签（如 [后台保活]）
+        label == "VCP Log Linger" || isBracketTag -> "正在保持后台连接..."
+        label.isNotEmpty() -> "思考中……"
+        else -> "已连接"
+    }
+    val isInternalLabel = stripped.isEmpty() ||
+        stripped == "distributed" ||
+        stripped == "VCP Log Linger" ||
+        isBracketTag
+    val title = if (isInternalLabel) "VCP Mobile" else stripped
+    return NotificationCopy(title, contentText)
+}
+
 /**
  * ForegroundGuardian 的唯一前台服务壳。
  *
@@ -140,7 +177,7 @@ class StreamKeepaliveService : Service() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                "后台服务增强通道",
+                "后台连接保持",
                 NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 description = "Agent 流式响应与后台保活"
@@ -184,20 +221,14 @@ class StreamKeepaliveService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val contentText = when {
-            ForegroundGuardian.activeCliTargets().isNotEmpty() -> "CLI 任务正在运行；系统仍可能中断"
-            label.contains("[数据同步]") -> "正在与云端服务器进行高精度同步..."
-            label.contains("[预渲染重建]") -> "正在优化与加速本地响应缓存..."
-            label == "distributed" || label.contains("分布式") -> "分布式后台连接维系中..."
-            label.isNotEmpty() -> "思考中……"
-            else -> "已连接"
-        }
-        val cleanTitle = label.replace("[数据同步]", "").replace("[预渲染重建]", "").trim()
-        val title = if (cleanTitle.isEmpty() || cleanTitle == "distributed") "VCP Mobile" else cleanTitle
+        val copy = resolveNotificationCopy(
+            label,
+            ForegroundGuardian.activeCliTargets().isNotEmpty(),
+        )
 
         val builder = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle(title)
-            .setContentText(contentText)
+            .setContentTitle(copy.title)
+            .setContentText(copy.contentText)
             .setSmallIcon(applicationInfo.icon)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
