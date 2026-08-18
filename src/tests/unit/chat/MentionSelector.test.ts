@@ -30,6 +30,13 @@ describe('extractMentionQuery', () => {
     expect(extractMentionQuery('hello', 5)).toBeNull();
     expect(extractMentionQuery('@ab', 99)).toBeNull();
   });
+
+  it('accepts the full-width ＠ from Chinese IMEs as a trigger', () => {
+    expect(extractMentionQuery('＠', 1)).toEqual({ start: 0, end: 1, query: '' });
+    expect(extractMentionQuery('你好 ＠Nov', 7)).toEqual({ start: 3, end: 7, query: 'Nov' });
+    // 全角触发同样遵守邮箱规则
+    expect(extractMentionQuery('user＠host', 9)).toBeNull();
+  });
 });
 
 describe('useMentionSelector', () => {

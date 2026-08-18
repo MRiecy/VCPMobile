@@ -23,13 +23,14 @@ export const MENTION_ALL_ID = '__mention_all__';
  * 从文本与光标位置提取进行中的 @提及 token。纯函数，便于测试。
  *
  * 规则：
- * - `@` 必须位于行首或前置为空白（防止 user@host 邮箱误触发）；
- * - `@` 到光标之间不含空白（含空白视为提及已结束）。
+ * - 触发符为半角 `@` 或中文输入法全角 `＠`（U+FF20）；
+ * - 触发符必须位于行首或前置为空白（防止 user@host 邮箱误触发）；
+ * - 触发符到光标之间不含空白（含空白视为提及已结束）。
  */
 export function extractMentionQuery(text: string, cursor: number): MentionTarget | null {
   if (cursor < 0 || cursor > text.length) return null;
   const before = text.slice(0, cursor);
-  const atIndex = before.lastIndexOf('@');
+  const atIndex = Math.max(before.lastIndexOf('@'), before.lastIndexOf('＠'));
   if (atIndex === -1) return null;
   if (atIndex > 0 && !/\s/.test(before[atIndex - 1])) return null;
   const token = before.slice(atIndex + 1);
@@ -112,6 +113,7 @@ export function useMentionSelector(input: Ref<string>) {
     isOpen,
     target,
     filtered,
+    members,
     groupMode,
     updateCursor,
     dismiss,

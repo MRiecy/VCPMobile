@@ -16,6 +16,7 @@ import GroupStopAllButton from './components/GroupStopAllButton.vue';
 import GroupInviteBar from './components/GroupInviteBar.vue';
 import VcpAvatar from '../../components/ui/VcpAvatar.vue';
 import { useMentionSelector, MENTION_ALL_ID, type MentionMember } from './composables/useMentionSelector';
+import { splitMentionSegments } from '../../core/utils/mention';
 
 const tarvenStore = useTarvenStore();
 
@@ -338,6 +339,7 @@ const autoResize = () => {
 watch(input, () => {
   nextTick(() => {
     autoResize();
+    syncHighlightScroll();
   });
 });
 
@@ -403,9 +405,15 @@ const {
   isOpen: mentionOpen,
   target: mentionTarget,
   filtered: mentionFiltered,
+  members: mentionMembers,
+  groupMode: mentionGroupMode,
   updateCursor: updateMentionCursor,
   dismiss: dismissMention,
 } = useMentionSelector(input);
+
+// 输入法组合态（拼音上屏前）：v-model 此时尚未更新，覆盖层必须全部让位，
+// 否则富文本提示/高亮背板会盖住正在组合的拼音串
+const isComposing = ref(false);
 
 const isGroupChat = computed(() => {
   const item = sessionStore.currentSelectedItem;
@@ -418,16 +426,40 @@ const inputPlaceholder = computed(() => {
   return isGroupChat.value ? '' : '说点什么...';
 });
 
-// 群聊富文本提示：仅纯文本输入态且内容为空时显示
+// 群聊富文本提示：仅纯文本输入态且内容为空、且不在输入法组合中时显示
 const showMentionHint = computed(
   () =>
     isGroupChat.value &&
     !props.disabled &&
     !input.value &&
+    !isComposing.value &&
     !isAudioMode.value &&
     !isSTTActive.value &&
     !isLongPressRecording.value,
 );
+
+// ----------------------------------------------------
+// @提及 标签化高亮：textarea 文字透明，由同版式背板提供可见文本，
+// 命中群成员名的 @名字 段渲染为橙色标签（与蓝色 @ 提示组 CP）。
+// 组合态下停用：背板不含正在上屏的拼音，避免双渲染/不可见。
+// ----------------------------------------------------
+const mentionHighlightSegments = computed(() => {
+  if (!isGroupChat.value || !input.value) return null;
+  const names = mentionMembers.value.map((m) => m.name);
+  if (mentionGroupMode.value === 'naturerandom') names.unshift('所有人');
+  return splitMentionSegments(input.value, names);
+});
+
+const highlightActive = computed(
+  () => !isComposing.value && !!mentionHighlightSegments.value?.some((s) => s.mention),
+);
+
+const highlightRef = ref<HTMLElement | null>(null);
+const syncHighlightScroll = () => {
+  if (highlightRef.value && textareaRef.value) {
+    highlightRef.value.scrollTop = textareaRef.value.scrollTop;
+  }
+};
 
 const syncMentionCursor = (e: Event) => {
   const el = e.target as HTMLTextAreaElement | null;
@@ -602,20 +634,34 @@ onUnmounted(() => {
             </div>
           </Transition>
 
+          <!-- @提及 高亮背板：与 textarea 完全同版式（字体/行高/内边距/换行规则），
+               textarea 文字透明时由它提供全部可见文本，@名字 段渲染橙色标签。
+               不加任何水平 padding/margin，保证与光标位置逐像素对齐 -->
+          <div
+            v-if="highlightActive && !isAudioMode && !isLongPressRecording"
+            ref="highlightRef"
+            aria-hidden="true"
+            class="absolute left-0 right-0 top-[1px] bottom-[1px] py-[8px] text-[15px] leading-[1.25] whitespace-pre-wrap break-words overflow-hidden pointer-events-none select-none text-[var(--primary-text)]"
+          ><template v-for="(seg, i) in mentionHighlightSegments" :key="i"><span v-if="seg.mention" class="text-orange-500 bg-orange-500/15 rounded-sm font-semibold">{{ seg.text }}</span><template v-else>{{ seg.text }}</template></template>&#8203;</div>
+
           <!-- 情况 1：普通文本输入键盘状态 -->
-          <textarea 
+          <textarea
             v-if="!isAudioMode && !isLongPressRecording"
-            ref="textareaRef" 
-            v-model="input" 
+            ref="textareaRef"
+            v-model="input"
             @focus="handleFocus"
             @keydown="handleKeydown"
             @input="syncMentionCursor"
             @keyup="syncMentionCursor"
             @click="syncMentionCursor"
+            @scroll="syncHighlightScroll"
+            @compositionstart="isComposing = true"
+            @compositionend="isComposing = false"
             @paste="handlePaste"
             @beforeinput="handleBeforeInput"
             rows="1"
-            class="w-full bg-transparent border-none focus:outline-none focus:ring-0 text-[var(--primary-text)] text-[15px] placeholder-opacity-40 resize-none leading-[1.25] py-[8px] scrollbar-hide vcp-textarea"
+            class="w-full bg-transparent border-none focus:outline-none focus:ring-0 text-[15px] placeholder-opacity-40 resize-none leading-[1.25] py-[8px] scrollbar-hide vcp-textarea relative"
+            :class="highlightActive ? 'text-transparent [caret-color:var(--primary-text)]' : 'text-[var(--primary-text)]'"
             style="max-height: 114px;"
             :placeholder="inputPlaceholder"
             :disabled="disabled"
