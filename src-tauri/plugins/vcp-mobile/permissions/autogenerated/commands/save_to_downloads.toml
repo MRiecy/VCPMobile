@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-save-to-downloads"
+description = "Enables the save_to_downloads command without any pre-configured scope."
+commands.allow = ["save_to_downloads"]
+
+[[permission]]
+identifier = "deny-save-to-downloads"
+description = "Denies the save_to_downloads command without any pre-configured scope."
+commands.deny = ["save_to_downloads"]

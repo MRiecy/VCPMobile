@@ -55,6 +55,7 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             system::capture_window_snapshot,
             system::save_image_to_gallery,
             system::save_image_from_path,
+            system::save_to_downloads,
             system::write_temp_file,
             system::delete_temp_file,
             system::start_download_notification,

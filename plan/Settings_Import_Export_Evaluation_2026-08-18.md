@@ -89,8 +89,26 @@
 - L5 契约：插件命令四重注册快照
 - L7 真机：导出 → 卸载重装 → 导入 → 验证连接
 
-## 6. 待决策
+## 6. 决策记录（2026-08-18 用户确认）
 
-1. 导出文件是否需要口令加密？（建议 v1 不做，仅警告）
-2. API 26–28 fallback：直接写 + 权限申请，还是 SAF 对话框？（建议前者，Manifest 已有权限声明）
-3. 导出范围是否包含分布式节点配置（`distributed*`）？当前评估按需求仅含身份+连接两页。
+1. **不加密**：导出成功提示警告妥善保管；文件使用**专用后缀**（`.vcpcfg`），内容仍为 JSON，其他应用无法直接关联打开。
+2. **API 26–28 兜底**：运行时申请 `WRITE_EXTERNAL_STORAGE` 后直写公共 Downloads（Manifest 已声明 `maxSdkVersion=32`）。
+3. **导出范围扩大**：除「用户身份」+「服务器连接」外，**包含分布式节点配置**（`distributedEnabled`、`distributedWsUrl`、`distributedVcpKey`、`distributedDeviceName`），重装后免手填。
+4. **头像不导出**（实施阶段用户补充）：头像属于数据同步职责，重装后由同步带回，不属于配置导出任务。备份文件为纯配置 JSON（15 个白名单字段）。
+
+### 6.1 决策对原方案的修订
+
+- 文件名改为 `vcp-mobile-config-YYYYMMDD-HHmm.vcpcfg`；MIME 传 `application/json`（MediaStore 内部记录用），后缀不影响写入。
+- 导入 `accept` 改为 `.vcpcfg`；解析仍按 JSON。
+- 导出白名单追加 4 个 `distributed*` 字段（共 15 个设置字段；头像不导出，由数据同步带回）。
+
+### 6.2 最终白名单
+
+| 分组 | 字段 |
+|---|---|
+| 用户身份 | `userName`、`adminUsername`、`adminPassword` |
+| 核心连接 | `vcpServerUrl`、`vcpApiKey`、`vcpLogUrl`、`vcpLogKey` |
+| 数据同步 | `syncHttpUrl`、`syncServerUrl`、`syncToken`、`fileKey` |
+| 分布式节点 | `distributedEnabled`、`distributedWsUrl`、`distributedVcpKey`、`distributedDeviceName` |
+
+显式排除：`agentOrder`/`groupOrder`（排序数据，同步会带回）、`topicSummaryModel`/`syncLogLevel`/`currentThemeMode`/`syncPrerenderEnabled`（本地偏好）、`enableAssistant`/`assistantAgentId`（已暂停功能）、`extra`（防垃圾键灌入）。

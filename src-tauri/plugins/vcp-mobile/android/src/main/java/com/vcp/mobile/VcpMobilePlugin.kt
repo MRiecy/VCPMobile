@@ -252,6 +252,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     companion object {
         const val TAG = "VcpMobilePlugin"
+        // 下载目录导出上限：设置备份（JSON + base64 头像）正常远低于此值
+        private const val MAX_DOWNLOAD_EXPORT_BYTES = 8 * 1024 * 1024
         private var instanceRef: java.lang.ref.WeakReference<VcpMobilePlugin>? = null
 
         fun getInstance(): VcpMobilePlugin? {
@@ -2260,6 +2262,108 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         })
     }
 
+    // ==================================================================
+    // Downloads Exporter (设置备份等任意小文件写入公共下载目录)
+    // ==================================================================
+    @Command
+    fun saveToDownloads(invoke: Invoke) {
+        val args = invoke.parseArgs(SaveToDownloadsArgs::class.java)
+        if (args.fileName.isBlank()) {
+            invoke.reject("文件名为空")
+            return
+        }
+        if (args.contentBase64.isBlank()) {
+            invoke.reject("写入内容为空")
+            return
+        }
+
+        executePluginTask(executorDomains.fileIoExecutor, invoke, "saveToDownloads", fileTask@{
+            try {
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+                    val writeGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+                    if (!writeGranted) {
+                        invoke.reject("保存到下载目录需要储存空间权限")
+                        return@fileTask
+                    }
+                }
+
+                val bytes = try {
+                    android.util.Base64.decode(args.contentBase64, android.util.Base64.DEFAULT)
+                } catch (e: IllegalArgumentException) {
+                    invoke.reject("内容不是合法的 Base64 数据")
+                    return@fileTask
+                }
+                if (bytes.isEmpty() || bytes.size > MAX_DOWNLOAD_EXPORT_BYTES) {
+                    invoke.reject("文件大小超出允许范围 (最大 ${MAX_DOWNLOAD_EXPORT_BYTES / 1024 / 1024}MB)")
+                    return@fileTask
+                }
+
+                val displayName = args.fileName
+                    .replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), "_")
+                    .trim()
+                if (displayName.isBlank()) {
+                    invoke.reject("文件名非法")
+                    return@fileTask
+                }
+                val mimeType = args.mimeType?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
+
+                val savedUri = writeFileToDownloads(bytes, displayName, mimeType)
+                val result = JSObject().apply {
+                    put("uri", savedUri.toString())
+                    put("displayName", displayName)
+                    put("mimeType", mimeType)
+                    put("size", bytes.size)
+                }
+                invoke.resolve(result)
+            } catch (e: Throwable) {
+                Log.e(TAG, "saveToDownloads failed", e)
+                invoke.reject("保存到下载目录失败: ${e.message}")
+            }
+        })
+    }
+
+    private fun writeFileToDownloads(bytes: ByteArray, displayName: String, mimeType: String): Uri {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val resolver = activity.contentResolver
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, displayName)
+                put(MediaStore.Downloads.MIME_TYPE, mimeType)
+                put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/VCPMobile")
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                ?: throw IllegalStateException("无法在下载目录创建文件")
+            try {
+                resolver.openOutputStream(uri)?.use { it.write(bytes) }
+                    ?: throw IllegalStateException("无法写入下载目录文件")
+                values.clear()
+                values.put(MediaStore.Downloads.IS_PENDING, 0)
+                resolver.update(uri, values, null, null)
+                return uri
+            } catch (e: Throwable) {
+                resolver.delete(uri, null, null)
+                throw e
+            }
+        }
+
+        val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val appDir = java.io.File(downloadsDir, "VCPMobile").apply { mkdirs() }
+        var outputFile = java.io.File(appDir, displayName)
+        if (outputFile.exists()) {
+            val base = displayName.substringBeforeLast('.', displayName)
+            val ext = displayName.substringAfterLast('.', "")
+            var index = 1
+            do {
+                outputFile = java.io.File(appDir, if (ext.isBlank()) "${base}_$index" else "${base}_$index.$ext")
+                index += 1
+            } while (outputFile.exists())
+        }
+
+        java.io.FileOutputStream(outputFile).use { it.write(bytes) }
+        MediaScannerConnection.scanFile(activity, arrayOf(outputFile.absolutePath), arrayOf(mimeType), null)
+        return Uri.fromFile(outputFile)
+    }
+
     private data class LoadedImage(val bytes: ByteArray, val mimeType: String)
 
     private fun loadImageBytes(sourceUrl: String): LoadedImage {
@@ -2714,6 +2818,13 @@ class SaveImageArgs {
 class SaveImageFromPathArgs {
     lateinit var imagePath: String
     var fileName: String? = null
+}
+
+@InvokeArg
+class SaveToDownloadsArgs {
+    lateinit var fileName: String
+    lateinit var contentBase64: String
+    var mimeType: String? = null
 }
 
 @InvokeArg

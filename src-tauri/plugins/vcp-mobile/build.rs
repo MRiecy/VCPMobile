@@ -22,6 +22,7 @@ const COMMANDS: &[&str] = &[
     "capture_window_snapshot",
     "save_image_to_gallery",
     "save_image_from_path",
+    "save_to_downloads",
     "write_temp_file",
     "delete_temp_file",
     "start_download_notification",

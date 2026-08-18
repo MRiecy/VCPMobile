@@ -514,6 +514,49 @@ pub fn save_image_from_path<R: Runtime>(
     }
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadsSaveResult {
+    pub uri: String,
+    pub display_name: String,
+    pub mime_type: String,
+    pub size: i32,
+}
+
+#[tauri::command]
+pub fn save_to_downloads<R: Runtime>(
+    app: AppHandle<R>,
+    file_name: String,
+    content_base64: String,
+    mime_type: Option<String>,
+) -> Result<DownloadsSaveResult, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let plugin_handle = state.mobile_plugin_handle()?;
+
+        let result = plugin_handle
+            .run_mobile_plugin::<DownloadsSaveResult>(
+                "saveToDownloads",
+                serde_json::json!({
+                    "fileName": file_name,
+                    "contentBase64": content_base64,
+                    "mimeType": mime_type,
+                }),
+            )
+            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        Ok(result)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        let _ = file_name;
+        let _ = content_base64;
+        let _ = mime_type;
+        Err("该接口仅在 Android 物理端可用".to_string())
+    }
+}
+
 #[tauri::command]
 pub fn write_temp_file<R: Runtime>(
     app: AppHandle<R>,

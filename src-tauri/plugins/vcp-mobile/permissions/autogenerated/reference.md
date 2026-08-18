@@ -829,6 +829,32 @@ Denies the save_image_to_gallery command without any pre-configured scope.
 <tr>
 <td>
 
+`vcp-mobile:allow-save-to-downloads`
+
+</td>
+<td>
+
+Enables the save_to_downloads command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:deny-save-to-downloads`
+
+</td>
+<td>
+
+Denies the save_to_downloads command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `vcp-mobile:allow-set-keep-screen-on`
 
 </td>

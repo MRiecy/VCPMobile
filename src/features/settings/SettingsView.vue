@@ -14,6 +14,7 @@ import SettingsCard from "../../components/settings/SettingsCard.vue";
 import SettingsRow from "../../components/settings/SettingsRow.vue";
 const UserProfileSection = defineAsyncComponent(() => import("./components/UserProfileSection.vue"));
 const SyncSettingsSection = defineAsyncComponent(() => import("./components/SyncSettingsSection.vue"));
+const ConfigBackupSection = defineAsyncComponent(() => import("./components/ConfigBackupSection.vue"));
 const VcpCoreSettingsSection = defineAsyncComponent(() => import("./components/VcpCoreSettingsSection.vue"));
 const ThemePicker = defineAsyncComponent(() => import("./ThemePicker.vue"));
 const ModelSelector = defineAsyncComponent(() => import("../../components/ModelSelector.vue"));
@@ -127,6 +128,15 @@ const loadSettings = async () => {
     console.error("[SettingsView] Failed to load settings:", e);
   } finally {
     loading.value = false;
+  }
+};
+
+// 配置导入完成后：用持久化后的设置重置工作副本与基线，避免 goBack 时重复 diff 落盘
+const onConfigImported = () => {
+  if (settingsStore.settings) {
+    const persisted = cloneSettings(settingsStore.settings);
+    settings.value = persisted;
+    settingsBaseline.value = cloneSettings(persisted);
   }
 };
 
@@ -303,6 +313,16 @@ watch(currentSubPage, (val) => {
                       <SyncSettingsSection
                         :settings="settings"
                         @save-request="saveSettings"
+                      />
+                    </SettingsCard>
+                  </div>
+                  <div>
+                    <h3 class="text-[11px] font-black uppercase tracking-[0.15em] opacity-50 mb-3 px-1">配置备份</h3>
+                    <SettingsCard>
+                      <ConfigBackupSection
+                        :settings="settings"
+                        @save-request="saveSettings"
+                        @config-imported="onConfigImported"
                       />
                     </SettingsCard>
                   </div>

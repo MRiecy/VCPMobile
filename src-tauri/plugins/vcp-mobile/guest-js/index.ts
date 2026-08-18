@@ -60,6 +60,17 @@ export function saveImageFromPath(imagePath: string, fileName?: string): Promise
   return invoke<GallerySaveResult>('plugin:vcp-mobile|save_image_from_path', { imagePath, fileName });
 }
 
+export interface DownloadsSaveResult {
+  uri: string;
+  displayName: string;
+  mimeType: string;
+  size: number;
+}
+
+export function saveToDownloads(fileName: string, contentBase64: string, mimeType?: string): Promise<DownloadsSaveResult> {
+  return invoke<DownloadsSaveResult>('plugin:vcp-mobile|save_to_downloads', { fileName, contentBase64, mimeType });
+}
+
 export function writeTempFile(bytes: Uint8Array, fileName: string): Promise<string> {
   return invoke<string>('plugin:vcp-mobile|write_temp_file', { bytes: Array.from(bytes), fileName });
 }
