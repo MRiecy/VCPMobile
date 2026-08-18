@@ -425,6 +425,15 @@ export interface DelegationItem {
   /** 当前轮次（1 起）；无则 null。 */
   currentRound: number | null;
   maxRounds: number | null;
+  /** 任务提示词预览（详情面板用）。 */
+  promptPreview: string;
+  /** 最近响应预览（详情面板用）。 */
+  responsePreview: string;
+  /** 完成/失败报告预览（详情面板用）。 */
+  reportPreview: string;
+  /** 已耗时（毫秒）；无则 null。 */
+  elapsedMs: number | null;
+  cancelRequested: boolean;
 }
 
 /** 时间戳归一：上游快照用 epoch millis（Date.now()），兼容 ISO 字符串。 */
@@ -443,6 +452,7 @@ function normalizeDelegationSnapshot(item: unknown): DelegationItem | null {
   if (!id) return null;
   const currentRound = asNumber(record.currentRound, 0);
   const maxRounds = asNumber(record.maxRounds, 0);
+  const elapsed = asNumber(record.elapsedMs, 0);
   return {
     id,
     agentName: asString(record.agentName ?? record.agent_name) || '未知 Agent',
@@ -454,6 +464,11 @@ function normalizeDelegationSnapshot(item: unknown): DelegationItem | null {
     ),
     currentRound: currentRound > 0 ? currentRound : null,
     maxRounds: maxRounds > 0 ? maxRounds : null,
+    promptPreview: asString(record.taskPromptPreview),
+    responsePreview: asString(record.lastResponsePreview),
+    reportPreview: asString(record.finalReportPreview),
+    elapsedMs: elapsed > 0 ? elapsed : null,
+    cancelRequested: !!record.cancelRequested,
   };
 }
 

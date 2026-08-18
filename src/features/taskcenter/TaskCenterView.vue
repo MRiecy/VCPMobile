@@ -19,6 +19,7 @@ import SettingsSwitch from '../../components/settings/SettingsSwitch.vue';
 import TaskEditorView from './TaskEditorView.vue';
 import DelegationPanel from './components/DelegationPanel.vue';
 import HistoryDetailSheet from './components/HistoryDetailSheet.vue';
+import DelegationDetailSheet from './components/DelegationDetailSheet.vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 import { useTaskCenterStore } from './taskCenterStore';
 import {
@@ -31,6 +32,7 @@ import {
   formatDuration,
   scheduleSummary,
   splitRandomTag,
+  type DelegationItem,
   type RunRecord,
   type TaskDraft,
   type TaskItem,
@@ -91,6 +93,17 @@ function openHistoryDetail(record: RunRecord): void {
 
 function closeHistoryDetail(): void {
   historyDetail.value = null;
+}
+
+// ---------- 委托详情 ----------
+const delegationDetail = ref<DelegationItem | null>(null);
+
+function openDelegationDetail(item: DelegationItem): void {
+  delegationDetail.value = item;
+}
+
+function closeDelegationDetail(): void {
+  delegationDetail.value = null;
 }
 
 watch(
@@ -365,7 +378,10 @@ const emptyState = computed(() => {
         class="tc-scroll vcp-scrollable no-rubber-band"
         data-taskcenter-role="delegation-list"
       >
-        <DelegationPanel :active="activeTab === 'delegations' && props.isOpen" />
+        <DelegationPanel
+          :active="activeTab === 'delegations' && props.isOpen"
+          @open-detail="openDelegationDetail"
+        />
       </div>
 
       <!-- 任务编辑器（滑入子页） -->
@@ -379,6 +395,9 @@ const emptyState = computed(() => {
 
       <!-- 执行历史详情 -->
       <HistoryDetailSheet :record="historyDetail" @close="closeHistoryDetail" />
+
+      <!-- 委托详情 -->
+      <DelegationDetailSheet :item="delegationDetail" @close="closeDelegationDetail" />
     </div>
   </SlidePage>
 </template>

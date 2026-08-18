@@ -73,15 +73,15 @@ const handleAction = (action: ActionItem) => {
             :disabled="action.disabled"
             class="flex items-center justify-start rounded-2xl active:scale-[0.98] transition-all border"
             :class="[
-              props.compact ? 'px-4 py-2.5 text-[13px] font-bold' : 'px-6 py-4 text-[16px] font-black',
+              props.compact ? 'px-5 py-3 text-[14px] font-bold' : 'px-6 py-4 text-[16px] font-black',
               action.danger
                 ? 'bg-red-50 dark:bg-red-500/10 text-red-600 dark:text-red-400 border-red-100 dark:border-red-500/20 shadow-sm shadow-red-500/10'
                 : 'bg-black/5 dark:bg-white/5 text-gray-800 dark:text-gray-200 border-transparent hover:bg-black/10 dark:hover:bg-white/10 shadow-sm',
               action.disabled ? 'opacity-40 cursor-not-allowed' : ''
             ]">
-            <component v-if="action.icon" :is="action.icon" :size="props.compact ? 16 : 20"
+            <component v-if="action.icon" :is="action.icon" :size="props.compact ? 18 : 20"
               class="opacity-90" :class="[
-                props.compact ? 'mr-2.5' : 'mr-4',
+                props.compact ? 'mr-3' : 'mr-4',
                 action.danger ? 'text-red-500' : 'text-blue-500/80 dark:text-blue-400/80'
               ]" />
             <span class="tracking-wide">{{ action.label }}</span>
@@ -90,7 +90,7 @@ const handleAction = (action: ActionItem) => {
           <!-- 取消按钮 -->
           <button @click="close"
             class="rounded-2xl font-bold bg-black/5 dark:bg-white/5 text-gray-500 dark:text-gray-400 active:scale-[0.98] transition-all border border-transparent flex items-center justify-center"
-            :class="props.compact ? 'mt-2 py-2.5 text-[13px]' : 'mt-3 py-4 text-[16px]'">
+            :class="props.compact ? 'mt-2 py-3 text-[14px]' : 'mt-3 py-4 text-[16px]'">
             取消
           </button>
         </div>

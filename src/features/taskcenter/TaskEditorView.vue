@@ -360,10 +360,11 @@ async function remove(): Promise<void> {
             v-for="chip in placeholderChips"
             :key="chip"
             type="button"
-            class="tce-chip tce-mono"
+            class="tce-ph-chip"
             @click="insertPlaceholder(chip)"
           >
-            {{ chip }}
+            <Plus :size="11" />
+            <span>{{ chip }}</span>
           </button>
         </div>
         <textarea
@@ -440,8 +441,14 @@ async function remove(): Promise<void> {
             class="tce-picker-row"
             @click="pickAgent(option.chineseName)"
           >
-            <span class="tce-picker-row-name">{{ option.chineseName }}</span>
-            <span class="tce-picker-row-desc">{{ option.description || option.modelId || '—' }}</span>
+            <span class="tce-picker-avatar" aria-hidden="true">{{ option.chineseName.slice(0, 1) }}</span>
+            <span class="tce-picker-row-main">
+              <span class="tce-picker-row-head">
+                <span class="tce-picker-row-name">{{ option.chineseName }}</span>
+                <span v-if="option.modelId" class="tce-picker-row-model">{{ option.modelId }}</span>
+              </span>
+              <span v-if="option.description" class="tce-picker-row-desc">{{ option.description }}</span>
+            </span>
           </button>
         </div>
       </section>
@@ -619,6 +626,35 @@ async function remove(): Promise<void> {
   font-weight: 700;
 }
 
+/* 占位符注入按钮：token 风格——等宽字体 + 主色描边 + 极淡底色，
+   与「选择」按钮（tce-add-btn）同一视觉族 */
+.tce-ph-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  padding: 0 11px;
+  border-radius: 6px;
+  border: 1px solid var(--border-color);
+  background: var(--secondary-bg);
+  color: var(--highlight-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.tce-ph-chip:active {
+  opacity: 0.75;
+}
+
+@supports (background-color: color-mix(in srgb, black, transparent)) {
+  .tce-ph-chip {
+    border-color: color-mix(in srgb, var(--highlight-text) 40%, transparent);
+    background: color-mix(in srgb, var(--highlight-text) 7%, transparent);
+  }
+}
+
 .tce-agent-chips {
   display: flex;
   flex-wrap: wrap;
@@ -711,7 +747,9 @@ async function remove(): Promise<void> {
   opacity: 0.75;
 }
 
-/* ---- Agent 选择器滑升面板 ---- */
+/* ---- Agent 选择器滑升面板 ----
+   配色层级与编辑器页面一致：面板用 primary-bg（页面级底色），
+   搜索框/行内元素用 secondary-bg（字段级底色），与下层页面同向。 */
 .tce-picker-mask {
   position: absolute;
   inset: 0;
@@ -727,7 +765,7 @@ async function remove(): Promise<void> {
   max-height: 68%;
   display: flex;
   flex-direction: column;
-  background: var(--secondary-bg);
+  background: var(--primary-bg);
   border-top: 1px solid var(--border-color);
   border-radius: 14px 14px 0 0;
   padding-bottom: calc(var(--vcp-safe-bottom, 48px) + 8px);
@@ -738,7 +776,8 @@ async function remove(): Promise<void> {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 14px 8px;
+  padding: 12px 14px 10px;
+  border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
 }
 
@@ -751,12 +790,12 @@ async function remove(): Promise<void> {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin: 0 14px 8px;
-  height: 36px;
-  padding: 0 10px;
+  margin: 10px 14px 6px;
+  height: 38px;
+  padding: 0 12px;
   border: 1px solid var(--border-color);
   border-radius: 8px;
-  background: var(--primary-bg);
+  background: var(--secondary-bg);
   flex-shrink: 0;
 }
 
@@ -779,7 +818,7 @@ async function remove(): Promise<void> {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 0 8px;
+  padding: 4px 8px 8px;
 }
 
 .tce-picker-empty {
@@ -791,12 +830,12 @@ async function remove(): Promise<void> {
 
 .tce-picker-row {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
+  align-items: center;
+  gap: 10px;
   width: 100%;
-  padding: 10px 12px;
+  padding: 9px 10px;
   border: none;
+  border-left: 2px solid transparent;
   border-bottom: 1px solid var(--border-color);
   background: transparent;
   color: var(--primary-text);
@@ -804,12 +843,53 @@ async function remove(): Promise<void> {
 }
 
 .tce-picker-row:active {
-  opacity: 0.7;
+  border-left-color: var(--highlight-text);
+  background: var(--secondary-bg);
+}
+
+.tce-picker-avatar {
+  width: 34px;
+  height: 34px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--border-color);
+  background: var(--secondary-bg);
+  color: var(--highlight-text);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.tce-picker-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.tce-picker-row-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
 }
 
 .tce-picker-row-name {
   font-size: 13.5px;
   font-weight: 700;
+  flex-shrink: 0;
+}
+
+.tce-picker-row-model {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  opacity: 0.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tce-picker-row-desc {
@@ -818,7 +898,6 @@ async function remove(): Promise<void> {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 100%;
 }
 
 .tce-fade-enter-active,

@@ -73,6 +73,12 @@ function scrollMetrics() {
 }
 
 function handleScroll(): void {
+  const el = container.value;
+  if (el) {
+    // 内容收缩后浏览器对 scrollTop 的钳制不一定触发 scroll 事件，主动钳制
+    const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
+    if (el.scrollTop > maxScroll) el.scrollTop = maxScroll;
+  }
   containerProps.onScroll();
   const { nearEnd } = scrollMetrics();
   isNearEnd.value = nearEnd;
@@ -86,11 +92,26 @@ async function jumpToEnd(): Promise<void> {
   if (store.isReverse) {
     el.scrollTop = 0;
   } else {
-    el.scrollTop = el.scrollHeight;
+    el.scrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
   }
   containerProps.onScroll();
   store.acknowledgeNewLines();
   showJumpFab.value = false;
+}
+
+/**
+ * 数据源收缩后的虚拟窗口校正。
+ * useVirtualList 的 calculateRange 用旧 scrollTop 计算渲染窗口：当列表变短，
+ * start 可能越界（start > end）渲染出空窗口；且浏览器 clamp 未必触发 scroll
+ * 事件。这里先归零强制一次有效重算，下一拍再跳到末尾，双重重算保证收敛。
+ */
+async function recoverScrollWindow(): Promise<void> {
+  const el = container.value;
+  if (!el) return;
+  el.scrollTop = 0;
+  containerProps.onScroll();
+  await nextTick();
+  await jumpToEnd();
 }
 
 // 新内容到达：吸底或累计徽标
@@ -112,13 +133,15 @@ watch(
   },
 );
 
-// 行数限制变化（尤其从大改小）：虚拟列表总高收缩后原滚动位置会悬空白屏，
-// 必须等 DOM 更新后重新钳制到末尾。
+// 行数限制变化（尤其从大改小）：虚拟列表总高收缩后渲染窗口可能越界白屏。
+// 同时监听显示行数（刷新填满缓冲也会改变总长），双重重算校正。
 watch(
-  () => store.lineLimit,
-  async () => {
+  () => [store.lineLimit, store.displayedLines.length],
+  async (_new, old) => {
+    // 仅在收缩场景校正（行数变少）；增量追加由 logVersion 吸底逻辑处理
+    if (old && store.displayedLines.length >= old[1] && store.lineLimit >= old[0]) return;
     await nextTick();
-    await jumpToEnd();
+    await recoverScrollWindow();
   },
 );
 

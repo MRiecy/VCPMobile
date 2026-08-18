@@ -10,8 +10,14 @@ import { DELEGATION_STATUS_LABEL, formatDateTime, type DelegationItem } from '..
 
 const props = defineProps<{ active: boolean }>();
 
+const emit = defineEmits<{ openDetail: [item: DelegationItem] }>();
+
 const store = useTaskCenterStore();
 const overlayStore = useOverlayStore();
+
+function openDetail(item: DelegationItem): void {
+  emit('openDetail', item);
+}
 
 watch(
   () => props.active,
@@ -60,7 +66,15 @@ async function confirmCancel(item: DelegationItem): Promise<void> {
     <template v-else>
       <h4 class="dp-group-title">运行中（{{ running.length }}）</h4>
       <div v-if="running.length === 0" class="dp-group-empty">暂无运行中的委托</div>
-      <article v-for="item in running" :key="item.id" class="dp-row dp-row-active">
+      <article
+        v-for="item in running"
+        :key="item.id"
+        class="dp-row dp-row-active"
+        role="button"
+        tabindex="0"
+        @click="openDetail(item)"
+        @keyup.enter="openDetail(item)"
+      >
         <div class="dp-head">
           <span class="dp-agent">{{ item.agentName }}</span>
           <span class="dp-status">{{ statusLabel(item) }}</span>
@@ -75,7 +89,7 @@ async function confirmCancel(item: DelegationItem): Promise<void> {
             type="button"
             class="dp-cancel-btn"
             :disabled="store.cancellingIds.has(item.id) || item.status === 'cancelling'"
-            @click="confirmCancel(item)"
+            @click.stop="confirmCancel(item)"
           >
             {{ item.status === 'cancelling' ? '取消中…' : '请求取消' }}
           </button>
@@ -89,6 +103,10 @@ async function confirmCancel(item: DelegationItem): Promise<void> {
         :key="item.id"
         class="dp-row"
         :class="`dp-${item.status}`"
+        role="button"
+        tabindex="0"
+        @click="openDetail(item)"
+        @keyup.enter="openDetail(item)"
       >
         <div class="dp-head">
           <span class="dp-agent">{{ item.agentName }}</span>
