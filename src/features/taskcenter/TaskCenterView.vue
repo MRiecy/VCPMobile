@@ -11,20 +11,26 @@ import {
   CalendarClock,
   CircleAlert,
   Play,
+  Plus,
   RefreshCw,
 } from 'lucide-vue-next';
 import SlidePage from '../../components/ui/SlidePage.vue';
 import SettingsSwitch from '../../components/settings/SettingsSwitch.vue';
+import TaskEditorView from './TaskEditorView.vue';
+import DelegationPanel from './components/DelegationPanel.vue';
 import { useTaskCenterStore } from './taskCenterStore';
 import {
   RUN_STATUS_LABEL,
   TASK_TYPE_LABEL,
   TRIGGER_SOURCE_LABEL,
+  draftFromTask,
+  emptyDraft,
   formatDateTime,
   formatDuration,
   scheduleSummary,
   splitRandomTag,
   type RunRecord,
+  type TaskDraft,
   type TaskItem,
 } from './taskTypes';
 
@@ -37,7 +43,28 @@ const emit = defineEmits<{ close: [] }>();
 
 const store = useTaskCenterStore();
 
-const activeTab = ref<'tasks' | 'history'>('tasks');
+const activeTab = ref<'tasks' | 'history' | 'delegations'>('tasks');
+
+// ---------- 编辑器（S2b 滑入子页） ----------
+const editorDraft = ref<TaskDraft | null>(null);
+const isEditorOpen = ref(false);
+
+function openCreateEditor(): void {
+  void store.loadAgentOptions();
+  editorDraft.value = emptyDraft();
+  isEditorOpen.value = true;
+}
+
+function openEditEditor(task: TaskItem): void {
+  void store.loadAgentOptions();
+  editorDraft.value = draftFromTask(task, store.rawPayloadById.get(task.id));
+  isEditorOpen.value = true;
+}
+
+function closeEditor(): void {
+  isEditorOpen.value = false;
+  editorDraft.value = null;
+}
 
 watch(
   () => props.isOpen,
@@ -171,6 +198,16 @@ const emptyState = computed(() => {
         >
           执行历史
         </button>
+        <button
+          type="button"
+          role="tab"
+          class="tc-tab"
+          :class="{ 'is-active': activeTab === 'delegations' }"
+          :aria-selected="activeTab === 'delegations'"
+          @click="activeTab = 'delegations'"
+        >
+          异步委托
+        </button>
       </nav>
 
       <!-- 错误横幅（已加载配置后的轮询失败不打断浏览） -->
@@ -203,7 +240,7 @@ const emptyState = computed(() => {
         <div v-if="store.tasks.length === 0" class="tc-empty">
           <p class="tc-empty-title">{{ store.isLoading ? '正在读取任务…' : '尚未配置任务' }}</p>
           <p class="tc-empty-detail" v-if="!store.isLoading">
-            任务编辑器将在后续版本提供；当前可查看与触发既有任务。
+            点击下方「新建任务」创建你的第一个自动任务。
           </p>
         </div>
 
@@ -212,17 +249,23 @@ const emptyState = computed(() => {
           :key="task.id"
           class="tc-card"
           :class="`tc-card-${cardState(task)}`"
+          role="button"
+          tabindex="0"
+          @click="openEditEditor(task)"
+          @keyup.enter="openEditEditor(task)"
         >
           <div class="tc-card-head">
             <div class="tc-card-title-block">
               <span class="tc-card-name">{{ task.name }}</span>
               <span class="tc-card-type">{{ TASK_TYPE_LABEL[task.type] }}</span>
             </div>
-            <SettingsSwitch
-              :model-value="task.enabled"
-              :disabled="store.togglingIds.has(task.id)"
-              @update:model-value="(value: boolean) => store.setTaskEnabled(task.id, value)"
-            />
+            <div @click.stop @keyup.stop>
+              <SettingsSwitch
+                :model-value="task.enabled"
+                :disabled="store.togglingIds.has(task.id)"
+                @update:model-value="(value: boolean) => store.setTaskEnabled(task.id, value)"
+              />
+            </div>
           </div>
 
           <p class="tc-card-line">{{ scheduleSummary(task) }} · {{ agentsLabel(task) }}</p>
@@ -239,18 +282,24 @@ const emptyState = computed(() => {
               type="button"
               class="tc-trigger-btn"
               :disabled="store.triggeringIds.has(task.id) || task.runtime.running"
-              @click="store.triggerTask(task.id)"
+              @click.stop="store.triggerTask(task.id)"
             >
               <Play :size="13" />
               {{ store.triggeringIds.has(task.id) ? '派发中…' : '立即触发' }}
             </button>
           </div>
         </article>
+
+        <!-- 新建任务 -->
+        <button type="button" class="tc-create-btn" @click="openCreateEditor">
+          <Plus :size="15" />
+          新建任务
+        </button>
       </div>
 
       <!-- 执行历史 -->
       <div
-        v-else
+        v-else-if="activeTab === 'history'"
         class="tc-scroll vcp-scrollable no-rubber-band"
         data-taskcenter-role="history-list"
       >
@@ -276,16 +325,36 @@ const emptyState = computed(() => {
           <p v-if="record.message" class="tc-history-message">{{ record.message }}</p>
         </article>
       </div>
+
+      <!-- 异步委托 -->
+      <div
+        v-else
+        class="tc-scroll vcp-scrollable no-rubber-band"
+        data-taskcenter-role="delegation-list"
+      >
+        <DelegationPanel :active="activeTab === 'delegations' && props.isOpen" />
+      </div>
+
+      <!-- 任务编辑器（滑入子页） -->
+      <Transition name="tc-editor-slide">
+        <TaskEditorView
+          v-if="isEditorOpen && editorDraft"
+          :initial-draft="editorDraft"
+          @close="closeEditor"
+        />
+      </Transition>
     </div>
   </SlidePage>
 </template>
 
 <style scoped>
 .task-center {
+  position: relative;
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  overflow: hidden;
   background: var(--primary-bg);
   color: var(--primary-text);
 }
@@ -574,6 +643,36 @@ const emptyState = computed(() => {
 
 .tc-trigger-btn:disabled {
   opacity: 0.45;
+}
+
+.tc-create-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 44px;
+  margin-top: 10px;
+  border: 1px dashed var(--border-color);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--highlight-text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* 编辑器滑入动画（内敛：位移 + 透明度，无缩放弹跳） */
+.tc-editor-slide-enter-active,
+.tc-editor-slide-leave-active {
+  transition:
+    transform 0.3s cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 0.3s ease;
+}
+
+.tc-editor-slide-enter-from,
+.tc-editor-slide-leave-to {
+  transform: translateX(100%);
+  opacity: 0.6;
 }
 
 /* ---- 执行历史 ---- */

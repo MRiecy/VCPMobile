@@ -266,3 +266,194 @@ export const RUN_STATUS_LABEL: Record<RunStatus, string> = {
   partial_success: '部分成功',
   error: '失败',
 };
+
+// ============================================================
+// S2b：任务编辑器草稿模型
+// ============================================================
+
+export interface AgentOption {
+  chineseName: string;
+  baseName: string;
+  description: string;
+  modelId: string;
+}
+
+export interface TaskDraft {
+  /** 空字符串表示新建。 */
+  id: string;
+  name: string;
+  type: TaskType;
+  enabled: boolean;
+  schedule: TaskSchedule;
+  /** 已选目标 Agent（chineseName 列表，不含 randomN 标签）。 */
+  agents: string[];
+  /** 随机抽取：null = 关闭；否则序列化为 `randomN` 标签追加进 agents。 */
+  randomCount: number | null;
+  maid: string;
+  temporaryContact: boolean;
+  taskDelegation: boolean;
+  promptTemplate: string;
+  includeForumPostList: boolean;
+  forumListPlaceholder: string;
+  maxPosts: number;
+}
+
+export function emptyDraft(): TaskDraft {
+  return {
+    id: '',
+    name: '',
+    type: 'custom_prompt',
+    enabled: true,
+    schedule: {
+      mode: 'manual',
+      intervalMinutes: 60,
+      runAt: null,
+      cronValue: null,
+      jitterSeconds: 0,
+    },
+    agents: [],
+    randomCount: null,
+    maid: 'VCP系统',
+    temporaryContact: true,
+    taskDelegation: false,
+    promptTemplate: '',
+    includeForumPostList: true,
+    forumListPlaceholder: '{{forum_post_list}}',
+    maxPosts: 200,
+  };
+}
+
+/** 从既有任务构造编辑草稿（randomN 标签拆回控件态）。 */
+export function draftFromTask(task: TaskItem, payloadRaw: unknown): TaskDraft {
+  const payload = (payloadRaw ?? {}) as Record<string, unknown>;
+  const { agents, randomCount } = splitRandomTag(task.agents);
+  return {
+    ...emptyDraft(),
+    id: task.id,
+    name: task.name,
+    type: task.type,
+    enabled: task.enabled,
+    schedule: { ...task.schedule },
+    agents,
+    randomCount,
+    maid: task.maid,
+    taskDelegation: task.taskDelegation,
+    promptTemplate: asString(payload.promptTemplate),
+    includeForumPostList: payload.includeForumPostList !== false,
+    forumListPlaceholder: asString(payload.forumListPlaceholder, '{{forum_post_list}}'),
+    maxPosts: Math.max(asNumber(payload.maxPosts, 200), 1),
+  };
+}
+
+/** 草稿校验（对齐后端 sanitizeTaskInput；返回 null 表示合法）。 */
+export function validateDraft(draft: TaskDraft): string | null {
+  if (!draft.name.trim()) return '任务名称不能为空';
+  if (draft.agents.length === 0 && draft.randomCount === null) {
+    return '至少需要配置一个目标 Agent（或开启随机抽取）';
+  }
+  if (draft.type === 'custom_prompt' && !draft.promptTemplate.trim()) {
+    return '通用提示词任务必须填写提示词模板';
+  }
+  if (draft.schedule.mode === 'once' && !draft.schedule.runAt) {
+    return '一次性任务必须指定执行时间';
+  }
+  if (draft.schedule.mode === 'cron' && !draft.schedule.cronValue?.trim()) {
+    return 'CRON 任务必须填写表达式';
+  }
+  return null;
+}
+
+/** 序列化为后端 Task 契约（randomN 控件态拼回 agents 数组）。 */
+export function draftToPayload(draft: TaskDraft): Record<string, unknown> {
+  const agents = [...draft.agents];
+  if (draft.randomCount !== null && draft.randomCount > 0) {
+    agents.push(`random${Math.trunc(draft.randomCount)}`);
+  }
+  return {
+    name: draft.name.trim(),
+    type: draft.type,
+    enabled: draft.enabled,
+    schedule: {
+      mode: draft.schedule.mode,
+      intervalMinutes: Math.max(
+        Math.trunc(draft.schedule.intervalMinutes) || 60,
+        MIN_INTERVAL_MINUTES,
+      ),
+      runAt: draft.schedule.runAt,
+      cronValue: draft.schedule.cronValue,
+      jitterSeconds: Math.max(Math.trunc(draft.schedule.jitterSeconds) || 0, 0),
+    },
+    targets: { agents },
+    dispatch: {
+      channel: 'AgentAssistant',
+      temporaryContact: draft.temporaryContact,
+      maid: draft.maid.trim() || 'VCP系统',
+      taskDelegation: draft.taskDelegation,
+    },
+    payload:
+      draft.type === 'custom_prompt'
+        ? { promptTemplate: draft.promptTemplate, availablePlaceholders: [] }
+        : {
+            promptTemplate: draft.promptTemplate,
+            includeForumPostList: draft.includeForumPostList,
+            forumListPlaceholder: draft.forumListPlaceholder.trim() || '{{forum_post_list}}',
+            maxPosts: Math.max(Math.trunc(draft.maxPosts) || 200, 1),
+            availablePlaceholders: ['{{forum_post_list}}'],
+          },
+  };
+}
+
+/** CRON 常用预设（编辑器 chips）。 */
+export const CRON_PRESETS: { label: string; value: string }[] = [
+  { label: '每小时', value: '0 0 * * * *' },
+  { label: '每天 9 点', value: '0 0 9 * * *' },
+  { label: '工作日 9 点', value: '0 0 9 * * 1-5' },
+  { label: '每 30 分钟', value: '0 */30 * * * *' },
+];
+
+// ============================================================
+// S2b：异步委托
+// ============================================================
+
+export interface DelegationItem {
+  id: string;
+  agentName: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+  summary: string;
+}
+
+export function normalizeDelegations(raw: unknown): DelegationItem[] {
+  const list = Array.isArray(raw)
+    ? raw
+    : ((raw as Record<string, unknown>)?.delegations ??
+      (raw as Record<string, unknown>)?.items ??
+      []);
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((item): DelegationItem | null => {
+      if (!item || typeof item !== 'object') return null;
+      const record = item as Record<string, unknown>;
+      const id = asString(record.id ?? record.delegationId).trim();
+      if (!id) return null;
+      return {
+        id,
+        agentName: asString(record.agentName ?? record.agent_name) || '未知 Agent',
+        status: asString(record.status, 'unknown'),
+        createdAt: asString(record.createdAt ?? record.created_at),
+        updatedAt: asString(record.updatedAt ?? record.updated_at),
+        summary: asString(record.summary ?? record.lastReply ?? record.message),
+      };
+    })
+    .filter((entry): entry is DelegationItem => entry !== null);
+}
+
+export const DELEGATION_STATUS_LABEL: Record<string, string> = {
+  running: '运行中',
+  waiting: '等待中',
+  cancelling: '取消中',
+  completed: '已完成',
+  failed: '失败',
+  cancelled: '已取消',
+};

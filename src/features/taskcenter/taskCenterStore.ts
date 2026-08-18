@@ -12,8 +12,11 @@ import { useAppLifecycleStore } from '../../core/stores/appLifecycle';
 import { useNotificationStore } from '../../core/stores/notification';
 import {
   mergeRuntimeIntoTasks,
+  normalizeDelegations,
   normalizeHistory,
   normalizeTaskList,
+  type AgentOption,
+  type DelegationItem,
   type RunRecord,
   type TaskItem,
 } from './taskTypes';
@@ -68,6 +71,22 @@ export const useTaskCenterStore = defineStore('taskCenter', () => {
   /** 启停切换中的任务 id 集合。 */
   const togglingIds = ref<Set<string>>(new Set());
   const globalToggling = ref(false);
+
+  // ---------- S2b：编辑器支持 ----------
+  /** 原始 payload 按任务 id 留存（编辑器回填用；归一化层不携带 payload）。 */
+  const rawPayloadById = ref<Map<string, unknown>>(new Map());
+  /** Agent 快选列表（懒加载一次；失败仅降级为手动输入）。 */
+  const agentOptions = ref<AgentOption[]>([]);
+  const agentsLoaded = ref(false);
+  const saving = ref(false);
+  const deletingId = ref<string | null>(null);
+
+  // ---------- S2b：异步委托 ----------
+  const delegations = ref<DelegationItem[]>([]);
+  const delegationsLoading = ref(false);
+  const delegationWatchActive = ref(false);
+  let delegationTimer: ReturnType<typeof setTimeout> | null = null;
+  const cancellingIds = ref<Set<string>>(new Set());
 
   // ---------- 轮询引擎 ----------
   const sessionActive = ref(false);
@@ -131,6 +150,16 @@ export const useTaskCenterStore = defineStore('taskCenter', () => {
   function applyConfig(payload: Record<string, unknown>): void {
     const config = (payload.config ?? {}) as Record<string, unknown>;
     tasks.value = normalizeTaskList(config.tasks);
+    const rawList = Array.isArray(config.tasks) ? config.tasks : [];
+    const payloadMap = new Map<string, unknown>();
+    for (const raw of rawList) {
+      if (!raw || typeof raw !== 'object') continue;
+      const id = (raw as Record<string, unknown>).id;
+      if (typeof id === 'string' && id) {
+        payloadMap.set(id, (raw as Record<string, unknown>).payload);
+      }
+    }
+    rawPayloadById.value = payloadMap;
     history.value = normalizeHistory(config.history).slice(-50).reverse();
     globalEnabled.value = !!config.globalEnabled;
     configLoaded.value = true;
@@ -166,13 +195,16 @@ export const useTaskCenterStore = defineStore('taskCenter', () => {
   /** 卸载时彻底复位（重开重新全量）。 */
   function resetSession(): void {
     stopSession();
+    stopDelegationWatch();
     tasks.value = [];
     history.value = [];
+    delegations.value = [];
     configLoaded.value = false;
     error.value = null;
     pluginUnavailable.value = false;
     triggeringIds.value = new Set();
     togglingIds.value = new Set();
+    cancellingIds.value = new Set();
   }
 
   async function refresh(): Promise<void> {
@@ -250,6 +282,137 @@ export const useTaskCenterStore = defineStore('taskCenter', () => {
     }
   }
 
+  // ---------- S2b：编辑器 CRUD ----------
+  /** 懒加载 Agent 快选列表（只拉一次；失败降级为手动输入，toast 警告）。 */
+  async function loadAgentOptions(): Promise<void> {
+    if (agentsLoaded.value) return;
+    agentsLoaded.value = true;
+    try {
+      const list = await invoke<unknown[]>('task_agent_list');
+      agentOptions.value = (Array.isArray(list) ? list : [])
+        .map((item) => {
+          if (!item || typeof item !== 'object') return null;
+          const record = item as Record<string, unknown>;
+          const chineseName = String(record.chineseName ?? '').trim();
+          if (!chineseName) return null;
+          return {
+            chineseName,
+            baseName: String(record.baseName ?? ''),
+            description: String(record.description ?? ''),
+            modelId: String(record.modelId ?? ''),
+          } as AgentOption;
+        })
+        .filter((entry): entry is AgentOption => entry !== null);
+    } catch (raw) {
+      console.warn('[TaskCenter] Agent 列表加载失败:', toError(raw).message);
+      toast('warning', 'Agent 列表加载失败，可手动输入目标名');
+    }
+  }
+
+  /** 保存（新建或更新）。成功后标记 config 待重拉并立即刷新。 */
+  async function saveTask(taskId: string, payload: Record<string, unknown>): Promise<boolean> {
+    if (saving.value) return false;
+    saving.value = true;
+    try {
+      if (taskId) {
+        await invoke('task_update', { taskId, task: payload });
+        toast('success', '任务已保存');
+      } else {
+        await invoke('task_create', { task: payload });
+        toast('success', '任务已创建');
+      }
+      configLoaded.value = false;
+      await pollTick();
+      scheduleNext();
+      return true;
+    } catch (raw) {
+      const err = toError(raw);
+      toast('error', `保存失败：${err.message}`);
+      return false;
+    } finally {
+      saving.value = false;
+    }
+  }
+
+  async function deleteTask(taskId: string): Promise<boolean> {
+    if (deletingId.value) return false;
+    deletingId.value = taskId;
+    try {
+      await invoke('task_delete', { taskId });
+      toast('success', '任务已删除');
+      configLoaded.value = false;
+      await pollTick();
+      scheduleNext();
+      return true;
+    } catch (raw) {
+      const err = toError(raw);
+      toast('error', `删除失败：${err.message}`);
+      return false;
+    } finally {
+      deletingId.value = null;
+    }
+  }
+
+  // ---------- S2b：异步委托 ----------
+  async function loadDelegations(): Promise<void> {
+    delegationsLoading.value = true;
+    try {
+      const payload = await invoke<unknown>('delegation_list');
+      delegations.value = normalizeDelegations(payload);
+    } catch (raw) {
+      // 委托面板失败不打断主流程，仅在面板内显示错误态
+      console.warn('[TaskCenter] 委托列表加载失败:', toError(raw).message);
+    } finally {
+      delegationsLoading.value = false;
+    }
+  }
+
+  function clearDelegationTimer(): void {
+    if (delegationTimer !== null) {
+      clearTimeout(delegationTimer);
+      delegationTimer = null;
+    }
+  }
+
+  /** 委托 Tab 激活时启动 8s 轮询；离开即停。 */
+  function startDelegationWatch(): void {
+    if (delegationWatchActive.value) return;
+    delegationWatchActive.value = true;
+    const tick = async () => {
+      clearDelegationTimer();
+      if (!delegationWatchActive.value) return;
+      const lifecycle = useAppLifecycleStore();
+      if (sessionActive.value && !lifecycle.isBackground) {
+        await loadDelegations();
+      }
+      if (delegationWatchActive.value) {
+        delegationTimer = setTimeout(tick, 8000);
+      }
+    };
+    void tick();
+  }
+
+  function stopDelegationWatch(): void {
+    delegationWatchActive.value = false;
+    clearDelegationTimer();
+  }
+
+  async function cancelDelegation(delegationId: string): Promise<void> {
+    if (cancellingIds.value.has(delegationId)) return;
+    cancellingIds.value = new Set(cancellingIds.value).add(delegationId);
+    try {
+      await invoke('delegation_cancel', { delegationId, reason: '移动端手动取消' });
+      toast('success', '已请求取消委托');
+      await loadDelegations();
+    } catch (raw) {
+      toast('error', `取消失败：${toError(raw).message}`);
+    } finally {
+      const next = new Set(cancellingIds.value);
+      next.delete(delegationId);
+      cancellingIds.value = next;
+    }
+  }
+
   // ---------- 前后台感知 ----------
   const lifecycleStore = useAppLifecycleStore();
   watch(
@@ -288,5 +451,21 @@ export const useTaskCenterStore = defineStore('taskCenter', () => {
     setTaskEnabled,
     triggerTask,
     setGlobalEnabled,
+    // S2b
+    rawPayloadById,
+    agentOptions,
+    agentsLoaded,
+    saving,
+    deletingId,
+    delegations,
+    delegationsLoading,
+    cancellingIds,
+    loadAgentOptions,
+    saveTask,
+    deleteTask,
+    loadDelegations,
+    startDelegationWatch,
+    stopDelegationWatch,
+    cancelDelegation,
   };
 });
