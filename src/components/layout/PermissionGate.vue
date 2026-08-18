@@ -175,7 +175,7 @@ onUnmounted(() => {
 <template>
   <div class="vcp-permission-gate vcp-safe-inline fixed inset-0 z-gate bg-white flex flex-col items-center select-none overflow-hidden no-rubber-band">
     <!-- Top Section: 米白（所有步骤共享） -->
-    <div class="vcp-permission-hero w-full bg-[#FAF6EE] flex flex-col items-center pt-12 px-5 pb-3 shrink-0">
+    <div class="vcp-permission-hero w-full bg-[#FAF6EE] flex flex-col items-center px-5 pb-3 shrink-0">
       <!-- Top Illustration Area -->
       <div class="relative w-full flex flex-col items-center mb-1">
         <!-- Background Decorative Blobs -->
@@ -234,7 +234,7 @@ onUnmounted(() => {
             <div class="w-full space-y-3 mb-4">
               <!-- Permission Cards -->
               <div v-for="item in [
-                { id: 'notification', name: '系统通知', desc: '前台保活服务的运行状态可见性，未授予时后台保活静默生效但无任何提示', icon: 'i-heroicons-bell' },
+                { id: 'notification', name: '系统通知', desc: '显示 Agent 运行状态和即时提醒', icon: 'i-heroicons-bell' },
                 { id: 'battery', name: '后台运行权限', desc: '切换到后台时保持连接不被系统中断', icon: 'i-heroicons-arrow-path' }
               ]" :key="item.id"
                 class="group flex items-center gap-4 px-4 py-3 rounded-2xl bg-gray-100/50 active:bg-gray-200/60 transition-all"
@@ -472,13 +472,15 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
-.vcp-permission-gate {
-  padding-top: var(--vcp-safe-top, 0px);
+/* 顶部安全区内边距落在米色 hero 上（而非白色容器），
+   保证刘海/状态栏区域与头图一体米色 */
+.vcp-permission-hero {
+  padding-top: calc(var(--vcp-safe-top, 0px) + 3rem);
 }
 
 @media (max-height: 520px) {
   .vcp-permission-hero {
-    padding-top: 0.75rem;
+    padding-top: calc(var(--vcp-safe-top, 0px) + 0.75rem);
     padding-bottom: 0.25rem;
   }
 

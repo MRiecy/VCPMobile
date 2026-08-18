@@ -256,7 +256,12 @@ async function collectStatus() {
   const pid = installed
     ? runAdb(['shell', 'pidof', '-s', DEBUG_PACKAGE], { allowFailure: true }).trim() || null
     : null;
-  const windowDump = runAdb(['shell', 'dumpsys', 'window', 'windows'], { allowFailure: true });
+  // Android 16+ 的 `dumpsys window windows` 输出不再携带 mCurrentFocus 汇总行，
+  // 焦点信息只在 `displays` 子命令（或全量 dump）中保留；优先轻量子命令，回退旧格式。
+  const displayDump = runAdb(['shell', 'dumpsys', 'window', 'displays'], { allowFailure: true });
+  const windowDump = displayDump.includes('mCurrentFocus=')
+    ? displayDump
+    : runAdb(['shell', 'dumpsys', 'window', 'windows'], { allowFailure: true });
   const focus = windowDump.split(/\r?\n/).find((line) => line.includes('mCurrentFocus='))?.trim() || null;
   const sizeOutput = runAdb(['shell', 'wm', 'size'], { allowFailure: true });
   const densityOutput = runAdb(['shell', 'wm', 'density'], { allowFailure: true });
