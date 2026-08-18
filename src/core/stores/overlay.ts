@@ -17,7 +17,8 @@ export type OverlayPageType =
   | 'ragObserver'
   | 'diaryCenter'
   | 'cliManifest'
-  | 'logCenter';
+  | 'logCenter'
+  | 'taskCenter';
 
 interface DiaryOpenTarget {
   folder: string;
@@ -55,6 +56,7 @@ export const useOverlayStore = defineStore('overlay', () => {
   const isDiaryCenterOpen = computed(() => pageStack.value.some(p => p.type === 'diaryCenter'));
   const isCliManifestOpen = computed(() => pageStack.value.some(p => p.type === 'cliManifest'));
   const isLogCenterOpen = computed(() => pageStack.value.some(p => p.type === 'logCenter'));
+  const isTaskCenterOpen = computed(() => pageStack.value.some(p => p.type === 'taskCenter'));
 
 
   const agentSettingsId = computed(() => {
@@ -244,6 +246,15 @@ export const useOverlayStore = defineStore('overlay', () => {
     popPage();
   };
 
+  const openTaskCenter = () => {
+    pushPage('taskCenter');
+  };
+
+  const closeTaskCenter = () => {
+    if (pageStackTop.value?.type !== 'taskCenter') return;
+    popPage();
+  };
+
   // --- Modal API (unchanged) ---
   const openPrompt = (config: PromptConfig) => {
     promptConfig.value = config;
@@ -338,6 +349,7 @@ export const useOverlayStore = defineStore('overlay', () => {
     isDiaryCenterOpen,
     isCliManifestOpen,
     isLogCenterOpen,
+    isTaskCenterOpen,
     diaryOpenTarget,
     // Legacy open/close (now backed by page stack)
     openSettings,
@@ -363,6 +375,8 @@ export const useOverlayStore = defineStore('overlay', () => {
     closeCliManifest,
     openLogCenter,
     closeLogCenter,
+    openTaskCenter,
+    closeTaskCenter,
     // Modals
     promptConfig,
     confirmConfig,

@@ -30,6 +30,7 @@ const SettingsView = defineAsyncComponent(() => import('../features/settings/Set
 const RagObserverView = defineAsyncComponent(() => import('../features/rag/RagObserver.vue'));
 const DiaryCenterView = defineAsyncComponent(() => import('../features/diary/DiaryCenterView.vue'));
 const LogCenterView = defineAsyncComponent(() => import('../features/logcenter/LogCenterView.vue'));
+const TaskCenterView = defineAsyncComponent(() => import('../features/taskcenter/TaskCenterView.vue'));
 const VcpCliManifestView = defineAsyncComponent(() => import('../features/cli/components/VcpCliManifestView.vue'));
 const TarvenSettingsView = defineAsyncComponent(() => import('../features/chat/components/TarvenSettings.vue'));
 
@@ -54,6 +55,7 @@ const ragObserverMounted = createFirstOpenLatch(() => overlayStore.isRagObserver
 const diaryMounted = createFirstOpenLatch(() => overlayStore.isDiaryCenterOpen);
 const cliManifestMounted = createFirstOpenLatch(() => overlayStore.isCliManifestOpen);
 const logCenterMounted = createFirstOpenLatch(() => overlayStore.isLogCenterOpen);
+const taskCenterMounted = createFirstOpenLatch(() => overlayStore.isTaskCenterOpen);
 </script>
 
 <template>
@@ -123,6 +125,13 @@ const logCenterMounted = createFirstOpenLatch(() => overlayStore.isLogCenterOpen
       :is-open="overlayStore.isLogCenterOpen"
       :z-index="overlayStore.getPageZIndex('logCenter')"
       @close="overlayStore.closeLogCenter()"
+    />
+
+    <TaskCenterView
+      v-if="taskCenterMounted"
+      :is-open="overlayStore.isTaskCenterOpen"
+      :z-index="overlayStore.getPageZIndex('taskCenter')"
+      @close="overlayStore.closeTaskCenter()"
     />
 
     <Suspense v-if="diaryMounted">

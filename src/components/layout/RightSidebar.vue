@@ -12,6 +12,7 @@ import {
   Settings,
   SquareTerminal,
   ScrollText,
+  CalendarClock,
 } from 'lucide-vue-next';
 import { useNotificationStore } from '../../core/stores/notification';
 import { useNotificationProcessor } from '../../core/composables/useNotificationProcessor';
@@ -61,6 +62,12 @@ const moreTools = [
     label: '日志中心',
     icon: ScrollText,
     open: () => overlayStore.openLogCenter(),
+  },
+  {
+    id: 'task-center',
+    label: '任务调度',
+    icon: CalendarClock,
+    open: () => overlayStore.openTaskCenter(),
   },
   {
     id: 'vcp-cli',
