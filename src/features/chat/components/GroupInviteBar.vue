@@ -57,7 +57,7 @@ const invite = (agentId: string) => {
       :disabled="isGenerating"
       @click="invite(member.id)"
     >
-      <VcpAvatar owner-type="agent" :owner-id="member.id" :fallback-name="member.name" size="w-5 h-5" rounded="rounded-md" />
+      <VcpAvatar owner-type="agent" :owner-id="member.id" :fallback-name="member.name" size="w-5 h-5" rounded="rounded-full" />
       <span class="text-xs font-semibold text-primary-text whitespace-nowrap">{{ member.name }}</span>
     </button>
   </div>

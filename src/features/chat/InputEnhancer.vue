@@ -14,6 +14,7 @@ import { attachMenuOpen, toggleAttachMenu } from './attachMenuController';
 import StagedAttachmentPreview from './StagedAttachmentPreview.vue';
 import GroupStopAllButton from './components/GroupStopAllButton.vue';
 import GroupInviteBar from './components/GroupInviteBar.vue';
+import VcpAvatar from '../../components/ui/VcpAvatar.vue';
 import { useMentionSelector, MENTION_ALL_ID, type MentionMember } from './composables/useMentionSelector';
 
 const tarvenStore = useTarvenStore();
@@ -402,7 +403,6 @@ const {
   isOpen: mentionOpen,
   target: mentionTarget,
   filtered: mentionFiltered,
-  groupMode: mentionGroupMode,
   updateCursor: updateMentionCursor,
   dismiss: dismissMention,
 } = useMentionSelector(input);
@@ -414,9 +414,20 @@ const isGroupChat = computed(() => {
 
 const inputPlaceholder = computed(() => {
   if (props.disabled) return '请先选择话题以开启对话';
-  // 群聊提示必须保持单行，过长占位文字会撑出幻影高度
-  return isGroupChat.value ? '@ 提及成员...' : '说点什么...';
+  // 群聊使用富文本覆盖层提示（可高亮 @），原生 placeholder 留空避免双重渲染
+  return isGroupChat.value ? '' : '说点什么...';
 });
+
+// 群聊富文本提示：仅纯文本输入态且内容为空时显示
+const showMentionHint = computed(
+  () =>
+    isGroupChat.value &&
+    !props.disabled &&
+    !input.value &&
+    !isAudioMode.value &&
+    !isSTTActive.value &&
+    !isLongPressRecording.value,
+);
 
 const syncMentionCursor = (e: Event) => {
   const el = e.target as HTMLTextAreaElement | null;
@@ -427,16 +438,7 @@ const handleMentionSelect = (member: MentionMember) => {
   const target = mentionTarget.value;
   if (!target) return;
 
-  // invite_only：@提及 策略层不消费，选择成员等价于直接邀约
-  if (mentionGroupMode.value === 'invite_only' && member.id !== MENTION_ALL_ID) {
-    input.value = input.value.slice(0, target.start) + input.value.slice(target.end);
-    dismissMention();
-    if (!streamStore.isGroupGenerating) {
-      historyStore.inviteGroupMember(member.id);
-    }
-    return;
-  }
-
+  // 全模式统一插入 @名字 文本；invite_only 下发送时由 store 自动邀约被提及成员
   const insertText = `@${member.name} `;
   input.value = input.value.slice(0, target.start) + insertText + input.value.slice(target.end);
   dismissMention();
@@ -565,22 +567,38 @@ onUnmounted(() => {
           <Transition name="fade">
             <div
               v-if="mentionOpen"
-              class="absolute bottom-full left-0 right-0 mb-1 z-local bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-lg shadow-lg max-h-44 overflow-y-auto"
+              class="absolute bottom-full left-1 right-1 mb-1.5 z-local bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-xl shadow-lg overflow-hidden"
             >
-              <button
-                v-for="member in mentionFiltered"
-                :key="member.id"
-                class="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-                @touchend.prevent="handleMentionSelect(member)"
-                @click="handleMentionSelect(member)"
-              >
-                <span class="text-[10px] font-mono font-bold text-blue-500 shrink-0">@</span>
-                <span class="text-sm font-semibold text-primary-text">{{ member.name }}</span>
-                <span
-                  v-if="mentionGroupMode === 'invite_only' && member.id !== MENTION_ALL_ID"
-                  class="ml-auto text-[10px] text-primary-text opacity-40"
-                >邀其发言</span>
-              </button>
+              <div class="px-3 pt-2 pb-1 text-[10px] font-bold uppercase tracking-wider text-primary-text opacity-40 select-none">
+                提及成员
+              </div>
+              <div class="max-h-44 overflow-y-auto pb-1">
+                <button
+                  v-for="member in mentionFiltered"
+                  :key="member.id"
+                  class="w-full flex items-center gap-2.5 px-3 py-2 text-left active:bg-blue-500/10 transition-colors"
+                  @mousedown.prevent
+                  @click="handleMentionSelect(member)"
+                >
+                  <div
+                    v-if="member.id === MENTION_ALL_ID"
+                    class="w-6 h-6 shrink-0 rounded-full bg-blue-500/15 text-blue-500 flex items-center justify-center text-[12px] font-bold"
+                  >@</div>
+                  <VcpAvatar
+                    v-else
+                    owner-type="agent"
+                    :owner-id="member.id"
+                    :fallback-name="member.name"
+                    size="w-6 h-6"
+                    rounded="rounded-full"
+                  />
+                  <span class="text-sm font-semibold text-primary-text">{{ member.name }}</span>
+                  <span
+                    v-if="member.id === MENTION_ALL_ID"
+                    class="ml-auto text-[10px] text-primary-text opacity-40"
+                  >全员发言</span>
+                </button>
+              </div>
             </div>
           </Transition>
 
@@ -639,6 +657,14 @@ onUnmounted(() => {
           
           <div class="absolute top-0 left-0 right-0 h-4 pointer-events-none bg-[var(--secondary-bg)] opacity-90"
             style="mask-image: linear-gradient(to bottom, black, transparent); -webkit-mask-image: linear-gradient(to bottom, black, transparent);"></div>
+
+          <!-- 群聊富文本占位提示：高亮 @，内容为空时显示（替代原生 placeholder） -->
+          <div
+            v-if="showMentionHint"
+            class="absolute left-0 right-0 top-[9px] pointer-events-none select-none text-[15px] leading-[1.25] text-[var(--primary-text)] whitespace-nowrap overflow-hidden"
+          >
+            <span class="opacity-40">输入 </span><span class="text-blue-500 font-bold">@</span><span class="opacity-40"> 提及成员或 Tag …</span>
+          </div>
         </div>
 
         <!-- 右侧动态操作区 (始终正常、平静地保留，保证视觉绝无抖动！) -->
