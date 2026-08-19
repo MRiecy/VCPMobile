@@ -90,7 +90,8 @@ export interface ParsedPost {
   floors: PostFloor[];
 }
 
-const COMMENT_SPLIT = /\n\s*-{3,}\s*\n\s*##\s*评论区\s*\n\s*-{3,}\s*\n/;
+// 尾部 \n 可有可无：新帖文件以 `## 评论区\n---` 直接结尾（上游 .trim() 无尾换行）
+const COMMENT_SPLIT = /\n\s*-{3,}\s*\n\s*##\s*评论区\s*\n\s*-{3,}\s*(?:\n|$)/;
 // 允许行首或字符串起始（COMMENT_SPLIT 会吞掉分隔后的前置换行）
 const FLOOR_SPLIT = /(?:^|\n)\s*-{3,}\s*\n\s*###\s*楼层\s*#(\d+)\s*\n/;
 const FLOOR_AUTHOR = /\*\*回复者:\*\*\s*(.+)/;

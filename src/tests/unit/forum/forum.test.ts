@@ -308,3 +308,28 @@ describe('论坛删除（store.remove）', () => {
     expect(await store.remove('post_uid_3', 1)).toBe(false);
   });
 });
+
+describe('parsePostContent 边界', () => {
+  it('零评论帖子（文件以 评论区 分隔符直接结尾）不残留"评论区"标题', () => {
+    // 上游 CreatePost 的初始文件：.trim() 后无尾换行
+    const content = [
+      '# 标题',
+      '',
+      '**作者:** 小娜',
+      '**UID:** abc',
+      '',
+      '---',
+      '',
+      '正文内容',
+      '',
+      '---',
+      '',
+      '## 评论区',
+      '---',
+    ].join('\n');
+    const parsed = parsePostContent(content);
+    expect(parsed.mainBody).toBe('正文内容');
+    expect(parsed.mainBody).not.toContain('评论区');
+    expect(parsed.floors).toEqual([]);
+  });
+});
