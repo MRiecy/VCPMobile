@@ -9,7 +9,7 @@
  * 结果项点击 → 关闭搜索页 → 切换会话 → 锚点窗口加载 → scrollIntoView + 高亮闪烁。
  */
 import { computed, nextTick, ref, watch } from 'vue';
-import { ArrowLeft, ArrowUpDown, Clock, Search, X } from 'lucide-vue-next';
+import { ArrowLeft, ArrowUpDown, ChevronDown, Clock, Search, SlidersHorizontal, X } from 'lucide-vue-next';
 import SlidePage from '../../components/ui/SlidePage.vue';
 import { useOverlayStore, type GlobalSearchOpenTarget } from '../../core/stores/overlay';
 import { useChatSessionStore } from '../../core/stores/chatSessionStore';
@@ -139,10 +139,55 @@ const setTimeRange = (t: TimeFilter) => {
 
 const toggleSort = () => {
   store.sort = store.sort === 'time' ? 'rank' : 'time';
+  notificationStore.addNotification({
+    type: 'info',
+    title: '全局搜索',
+    message:
+      store.sort === 'rank'
+        ? '已切换为按相关度排序（bm25，仅对 ≥3 字关键词生效）'
+        : '已切换为按时间倒序',
+    toastOnly: true,
+    duration: 2000,
+  });
 };
+
+/**
+ * 与后端 split_trigram_terms 同规则：任一空格分隔词 ≥3 字即走 FTS，bm25 才有意义。
+ * 纯短词查询后端强制时间倒序，此时 rank 模式结果与 time 完全一致，需提示用户。
+ */
+const queryHasLongTerm = computed(() =>
+  store.query
+    .trim()
+    .split(/\s+/)
+    .some((t) => [...t].length >= 3),
+);
+const rankIneffective = computed(
+  () =>
+    store.sort === 'rank' &&
+    store.hasSearched &&
+    store.query.trim().length >= SEARCH_MIN_CHARS &&
+    !queryHasLongTerm.value,
+);
 
 const roleFilters: RoleFilter[] = ['all', 'user', 'assistant', 'system'];
 const timeFilters: TimeFilter[] = ['all', 'today', 'week', 'month'];
+
+// ---------- 筛选面板（摘要条 + 展开分组） ----------
+const filterOpen = ref(false);
+
+const scopeSummary = computed(() =>
+  store.scope === 'all' ? '全部范围' : scopeLabel.value,
+);
+const filterSummary = computed(
+  () =>
+    `${scopeSummary.value} · ${ROLE_LABELS[store.role]} · ${TIME_LABELS[store.timeRange]}`,
+);
+const activeFilterCount = computed(
+  () =>
+    (store.scope !== 'all' ? 1 : 0) +
+    (store.role !== 'all' ? 1 : 0) +
+    (store.timeRange !== 'all' ? 1 : 0),
+);
 
 // ---------- 结果渲染 ----------
 interface SnippetSegment {
@@ -238,13 +283,12 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
         <span class="gs-title">全局搜索</span>
         <button
           type="button"
-          class="gs-icon-btn"
-          :class="{ 'is-active': store.sort === 'rank' }"
+          class="gs-sort-btn"
           :aria-label="store.sort === 'time' ? '当前：时间倒序，点击切换为相关度' : '当前：相关度，点击切换为时间倒序'"
-          :title="store.sort === 'time' ? '按时间排序' : '按相关度排序'"
           @click="toggleSort"
         >
-          <component :is="store.sort === 'time' ? Clock : ArrowUpDown" :size="17" />
+          <component :is="store.sort === 'time' ? Clock : ArrowUpDown" :size="14" />
+          <span class="gs-sort-label">{{ store.sort === 'time' ? '时间' : '相关度' }}</span>
         </button>
       </header>
 
@@ -272,37 +316,63 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
         </div>
       </div>
 
-      <!-- 过滤器 chips（单行横滑） -->
-      <div class="gs-chips" role="group" aria-label="搜索过滤条件">
+      <!-- 筛选：摘要条 + 展开分组面板（替代旧单行横滑 chips） -->
+      <div class="gs-filter">
         <button
-          type="button" class="gs-chip" :class="{ active: store.scope === 'all' }"
-          @click="setScopeAll"
-        >全部</button>
-        <button
-          type="button" class="gs-chip" :class="{ active: store.scope === 'topic' }"
-          :disabled="!currentTopicAvailable"
-          @click="setScopeCurrentTopic"
-        >当前话题</button>
-        <button
-          type="button" class="gs-chip gs-chip-ellipsis" :class="{ active: store.scope === 'owner' }"
-          @click="openOwnerPicker"
-        >{{ store.scope === 'owner' ? scopeLabel : '指定助手' }}</button>
+          type="button"
+          class="gs-filter-toggle"
+          :aria-expanded="filterOpen"
+          aria-controls="gs-filter-panel"
+          @click="filterOpen = !filterOpen"
+        >
+          <SlidersHorizontal :size="13" class="gs-filter-icon" />
+          <span class="gs-filter-summary">{{ filterSummary }}</span>
+          <span v-if="activeFilterCount" class="gs-filter-badge">{{ activeFilterCount }}</span>
+          <ChevronDown :size="14" class="gs-filter-chevron" :class="{ open: filterOpen }" />
+        </button>
 
-        <span class="gs-chip-divider" aria-hidden="true" />
+        <div v-if="filterOpen" id="gs-filter-panel" class="gs-filter-panel">
+          <div class="gs-filter-group">
+            <span class="gs-filter-label">范围</span>
+            <div class="gs-filter-row" role="group" aria-label="搜索范围">
+              <button
+                type="button" class="gs-chip" :class="{ active: store.scope === 'all' }"
+                @click="setScopeAll"
+              >全部</button>
+              <button
+                type="button" class="gs-chip" :class="{ active: store.scope === 'topic' }"
+                :disabled="!currentTopicAvailable"
+                @click="setScopeCurrentTopic"
+              >当前话题</button>
+              <button
+                type="button" class="gs-chip gs-chip-ellipsis" :class="{ active: store.scope === 'owner' }"
+                @click="openOwnerPicker"
+              >{{ store.scope === 'owner' ? scopeLabel : '指定助手' }}</button>
+            </div>
+          </div>
 
-        <button
-          v-for="r in roleFilters" :key="r"
-          type="button" class="gs-chip" :class="{ active: store.role === r }"
-          @click="setRole(r)"
-        >{{ ROLE_LABELS[r] }}</button>
+          <div class="gs-filter-group">
+            <span class="gs-filter-label">角色</span>
+            <div class="gs-filter-row" role="group" aria-label="消息角色">
+              <button
+                v-for="r in roleFilters" :key="r"
+                type="button" class="gs-chip" :class="{ active: store.role === r }"
+                @click="setRole(r)"
+              >{{ ROLE_LABELS[r] }}</button>
+            </div>
+          </div>
 
-        <span class="gs-chip-divider" aria-hidden="true" />
-
-        <button
-          v-for="t in timeFilters" :key="t"
-          type="button" class="gs-chip" :class="{ active: store.timeRange === t }"
-          @click="setTimeRange(t)"
-        >{{ TIME_LABELS[t] }}</button>
+          <div class="gs-filter-group">
+            <span class="gs-filter-label">时间</span>
+            <div class="gs-filter-row" role="group" aria-label="时间范围">
+              <button
+                v-for="t in timeFilters" :key="t"
+                type="button" class="gs-chip" :class="{ active: store.timeRange === t }"
+                @click="setTimeRange(t)"
+              >{{ TIME_LABELS[t] }}</button>
+            </div>
+          </div>
+        </div>
       </div>
 
       <!-- 索引构建中提示条 -->
@@ -339,6 +409,9 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
         </div>
 
         <template v-else>
+          <p v-if="rankIneffective" class="gs-limit-hint">
+            相关度排序仅对 ≥3 字的关键词生效，当前查询已按时间倒序展示
+          </p>
           <button
             v-for="item in store.results"
             :key="`${item.topicId}:${item.msgId}`"
@@ -426,6 +499,28 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
   color: var(--accent-bg, #3b82f6);
 }
 
+.gs-sort-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(128, 128, 128, 0.25);
+  color: var(--primary-text);
+  transition: background 0.15s ease;
+  flex-shrink: 0;
+}
+
+.gs-sort-btn:active {
+  background: rgba(128, 128, 128, 0.12);
+}
+
+.gs-sort-label {
+  font-size: 12px;
+  line-height: 1;
+}
+
 .gs-toolbar {
   padding: 10px 12px 6px;
   flex-shrink: 0;
@@ -480,18 +575,97 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
   opacity: 0.7;
 }
 
-.gs-chips {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px 8px;
-  overflow-x: auto;
-  scrollbar-width: none;
+/* 筛选：摘要条常驻可见（当前过滤状态一目了然），点击展开分组面板 */
+.gs-filter {
+  padding: 4px 12px 8px;
   flex-shrink: 0;
 }
 
-.gs-chips::-webkit-scrollbar {
-  display: none;
+.gs-filter-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--secondary-bg);
+  color: var(--secondary-text);
+  font-size: 12px;
+  text-align: left;
+  transition: background 0.15s ease;
+}
+
+.gs-filter-toggle:active {
+  background: rgba(128, 128, 128, 0.18);
+}
+
+.gs-filter-icon {
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+
+.gs-filter-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gs-filter-badge {
+  flex-shrink: 0;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent-bg, #3b82f6);
+  color: #fff;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+  font-family: monospace;
+}
+
+.gs-filter-chevron {
+  flex-shrink: 0;
+  opacity: 0.6;
+  transition: transform 0.15s ease;
+}
+
+.gs-filter-chevron.open {
+  transform: rotate(180deg);
+}
+
+.gs-filter-panel {
+  margin-top: 6px;
+  padding: 8px 10px 4px;
+  border-radius: 6px;
+  background: var(--secondary-bg);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.gs-filter-group {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.gs-filter-label {
+  flex-shrink: 0;
+  width: 28px;
+  padding-top: 5px;
+  font-size: 11px;
+  color: var(--secondary-text);
+  opacity: 0.7;
+}
+
+.gs-filter-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
 }
 
 .gs-chip {
@@ -499,7 +673,7 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
   font-size: 12px;
   padding: 4px 10px;
   border-radius: 6px;
-  background: var(--secondary-bg);
+  background: var(--primary-bg);
   color: var(--secondary-text);
   border: 1px solid transparent;
   transition: all 0.15s ease;
@@ -520,13 +694,6 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
   max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.gs-chip-divider {
-  flex-shrink: 0;
-  width: 1px;
-  height: 14px;
-  background: rgba(128, 128, 128, 0.25);
 }
 
 .gs-index-banner {
