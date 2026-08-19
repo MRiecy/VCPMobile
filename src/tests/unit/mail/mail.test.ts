@@ -218,3 +218,139 @@ describe('邮箱 · Store 读写流', () => {
     store.stopSession();
   });
 });
+
+describe('邮箱 · V1.1（补丁端点）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    clearInvokeMocks();
+  });
+
+  function mockBase() {
+    mockInvoke('mail_state', () => baseState());
+    mockInvoke('mail_list', () => ({
+      status: 'success',
+      meta: {},
+      emails: baseMails(),
+      markdown: '',
+    }));
+  }
+
+  it('normalizeFolders 与 normalizeAttachments', async () => {
+    const { normalizeFolders, normalizeAttachments } = await import('@/features/mail/mailTypes');
+    expect(normalizeFolders([
+      { id: '1', name: 'INBOX', unreadCount: 3 },
+      { fid: '5', name: 'Archive' },
+      { name: '无id丢弃' },
+    ])).toEqual([
+      { id: '1', name: 'INBOX', unreadCount: 3 },
+      { id: '5', name: 'Archive', unreadCount: null },
+    ]);
+    expect(normalizeAttachments([
+      { partId: '2', filename: 'a.pdf', contentType: 'application/pdf', size: 1024 },
+      { attachmentId: 'att-1', filename: 'b.png', cid: 'cid1' },
+      { filename: '无id丢弃' },
+    ]).map((att) => att.partId)).toEqual(['2', 'att-1']);
+  });
+
+  it('文件夹选择与 fid 透传', async () => {
+    let listArgs: Record<string, unknown> | undefined;
+    mockInvoke('mail_state', () => baseState());
+    mockInvoke('mail_folders', () => ({
+      status: 'success',
+      meta: {},
+      folders: [{ id: '4', name: '已发送' }],
+    }));
+    mockInvoke('mail_list', (args) => {
+      listArgs = args;
+      return { status: 'success', emails: [], markdown: '' };
+    });
+
+    const store = useMailStore();
+    await store.startSession();
+    expect(store.folders.map((folder) => folder.name)).toEqual(['已发送']);
+
+    await store.selectFolder('4');
+    expect(listArgs?.fid).toBe('4');
+    store.stopSession();
+  });
+
+  it('文件夹端点 404 时降级隐藏扩展 UI', async () => {
+    mockInvoke('mail_state', () => baseState());
+    mockInvoke('mail_list', () => ({ status: 'success', emails: [], markdown: '' }));
+    mockInvoke('mail_folders', () => Promise.reject(new Error('邮箱操作失败: Cannot GET /admin_api/claw-mail/folders')));
+
+    const store = useMailStore();
+    await store.startSession();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(store.extendedApiSupported).toBe(false);
+    store.stopSession();
+  });
+
+  it('搜索模式替换列表展示，清除后恢复', async () => {
+    mockBase();
+    mockInvoke('mail_search', (args) => ({
+      status: 'success',
+      meta: {},
+      emails: args?.keyword === 'CI' ? [baseMails()[0]] : [],
+      markdown: '',
+    }));
+
+    const store = useMailStore();
+    await store.startSession();
+
+    await store.search('CI');
+    expect(store.displayedMails.map((mail) => mail.mailId)).toEqual(['msg_001']);
+
+    store.clearSearch();
+    expect(store.displayedMails).toHaveLength(2);
+    store.stopSession();
+  });
+
+  it('setRead(false) 标为未读并同步列表状态', async () => {
+    mockBase();
+    let markArgs: Record<string, unknown> | undefined;
+    mockInvoke('mail_mark', (args) => {
+      markArgs = args;
+      return { status: 'success', meta: {}, markdown: '' };
+    });
+    mockInvoke('mail_read', () => ({ status: 'success', markdown: '正文', meta: {}, attachments: [] }));
+
+    const store = useMailStore();
+    await store.startSession();
+    await store.openDetail('msg_002');
+    await store.setRead(true);
+
+    expect(markArgs?.read).toBe(true);
+    expect(store.mails.find((mail) => mail.mailId === 'msg_002')?.readState).toBe('read');
+    store.stopSession();
+  });
+
+  it('sendMail 成功重拉列表；replyMail 标读原邮件', async () => {
+    const calls: string[] = [];
+    mockInvoke('mail_state', () => baseState());
+    mockInvoke('mail_list', () => {
+      calls.push('list');
+      return { status: 'success', emails: baseMails(), markdown: '' };
+    });
+    mockInvoke('mail_send', () => {
+      calls.push('send');
+      return { status: 'success', meta: {}, markdown: '' };
+    });
+    mockInvoke('mail_reply', () => {
+      calls.push('reply');
+      return { status: 'success', meta: {}, markdown: '' };
+    });
+
+    const store = useMailStore();
+    await store.startSession();
+    calls.length = 0;
+
+    expect(await store.sendMail({ to: 'a@b.com', subject: 's', body: 'b' })).toBe(true);
+    expect(calls).toEqual(['send', 'list']);
+
+    expect(await store.replyMail('msg_001', '回复正文')).toBe(true);
+    expect(store.mails.find((mail) => mail.mailId === 'msg_001')?.readState).toBe('read');
+    store.stopSession();
+  });
+});

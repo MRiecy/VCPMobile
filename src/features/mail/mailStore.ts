@@ -12,13 +12,17 @@ import { computed, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppLifecycleStore } from '../../core/stores/appLifecycle';
 import { useNotificationStore } from '../../core/stores/notification';
+import { saveToDownloads } from '../../../src-tauri/plugins/vcp-mobile/guest-js';
 import {
   addressingOf,
-  extractDetailMarkdown,
+  normalizeDetail,
+  normalizeFolders,
   normalizeMailboxes,
   normalizeMailList,
   normalizeWsStates,
+  type FolderInfo,
   type MailboxInfo,
+  type MailDetail,
   type MailSummary,
   type WsState,
 } from './mailTypes';
@@ -73,11 +77,26 @@ export const useMailStore = defineStore('mail', () => {
 
   /** 详情（当前打开的邮件）。 */
   const detailMailId = ref<string | null>(null);
-  const detailMarkdown = ref('');
+  const detail = ref<MailDetail | null>(null);
   const detailLoading = ref(false);
   const detailError = ref<string | null>(null);
 
   const trashing = ref(false);
+
+  // ---------- V1.1：文件夹 / 搜索 / 发送 ----------
+  const folders = ref<FolderInfo[]>([]);
+  /** 服务器是否提供 folders/search 等补丁端点（404 时降级隐藏）。 */
+  const extendedApiSupported = ref(true);
+  /** 当前文件夹 fid（null = 默认收件箱）。 */
+  const currentFid = ref<string | null>(null);
+  /** 搜索模式：非 null 时列表展示搜索结果。 */
+  const searchKeyword = ref('');
+  const searchResults = ref<MailSummary[] | null>(null);
+  const searching = ref(false);
+  const sending = ref(false);
+
+  /** 展示中的列表（搜索模式优先）。 */
+  const displayedMails = computed(() => searchResults.value ?? mails.value);
 
   const selectedMailbox = computed(
     () => mailboxes.value.find((box) => keyOf(box) === selectedKey.value) ?? null,
@@ -171,6 +190,7 @@ export const useMailStore = defineStore('mail', () => {
         limit: PAGE_SIZE,
         start,
         unreadOnly: unreadOnly.value,
+        fid: currentFid.value ?? undefined,
       });
       const batch = normalizeMailList(payload.emails);
       mails.value = reset ? batch : [...mails.value, ...batch];
@@ -197,7 +217,11 @@ export const useMailStore = defineStore('mail', () => {
     if (key === selectedKey.value) return;
     selectedKey.value = key;
     mails.value = [];
+    folders.value = [];
+    currentFid.value = null;
+    clearSearch();
     await loadList(true);
+    void loadFolders();
   }
 
   async function toggleUnreadOnly(): Promise<void> {
@@ -209,7 +233,7 @@ export const useMailStore = defineStore('mail', () => {
   async function openDetail(mailId: string): Promise<void> {
     const box = selectedMailbox.value;
     detailMailId.value = mailId;
-    detailMarkdown.value = '';
+    detail.value = null;
     detailError.value = null;
     if (!box) return;
     detailLoading.value = true;
@@ -219,7 +243,7 @@ export const useMailStore = defineStore('mail', () => {
         ...addressingOf(box),
         markRead: false,
       });
-      detailMarkdown.value = extractDetailMarkdown(payload);
+      detail.value = normalizeDetail(payload);
     } catch (raw) {
       detailError.value = toMessage(raw);
     } finally {
@@ -229,24 +253,24 @@ export const useMailStore = defineStore('mail', () => {
 
   function closeDetail(): void {
     detailMailId.value = null;
-    detailMarkdown.value = '';
+    detail.value = null;
     detailError.value = null;
   }
 
-  /** 显式标为已读（详情内用户主动操作）。 */
-  async function markRead(): Promise<void> {
+  /** 显式标记已读/未读（补丁端点 mail_mark）。 */
+  async function setRead(read: boolean): Promise<void> {
     const box = selectedMailbox.value;
     const mailId = detailMailId.value;
     if (!box || !mailId) return;
     try {
-      await invoke('mail_read', {
+      await invoke('mail_mark', {
         mailId,
+        read,
         ...addressingOf(box),
-        markRead: true,
       });
       const target = mails.value.find((mail) => mail.mailId === mailId);
-      if (target) target.readState = 'read';
-      toast('success', '已标记为已读');
+      if (target) target.readState = read ? 'read' : 'unread';
+      toast('success', read ? '已标记为已读' : '已标记为未读');
     } catch (raw) {
       toast('error', `标记失败：${toMessage(raw)}`);
     }
@@ -271,6 +295,132 @@ export const useMailStore = defineStore('mail', () => {
     }
   }
 
+  // ---------- V1.1：文件夹 ----------
+  /** 懒加载文件夹列表（404 = 服务器未打补丁，降级隐藏文件夹 UI）。 */
+  async function loadFolders(): Promise<void> {
+    const box = selectedMailbox.value;
+    if (!box || !extendedApiSupported.value) return;
+    try {
+      const payload = await invoke<Record<string, unknown>>('mail_folders', {
+        ...addressingOf(box),
+      });
+      folders.value = normalizeFolders(payload.folders);
+    } catch (raw) {
+      const message = toMessage(raw);
+      if (message.includes('404') || message.includes('Cannot')) {
+        extendedApiSupported.value = false;
+      }
+      console.warn('[Mail] 文件夹列表不可用:', message);
+    }
+  }
+
+  async function selectFolder(fid: string | null): Promise<void> {
+    if (fid === currentFid.value) return;
+    currentFid.value = fid;
+    clearSearch();
+    await loadList(true);
+  }
+
+  // ---------- V1.1：搜索 ----------
+  async function search(keyword: string): Promise<void> {
+    const box = selectedMailbox.value;
+    const trimmed = keyword.trim();
+    if (!box || !trimmed || searching.value) return;
+    searching.value = true;
+    searchKeyword.value = trimmed;
+    try {
+      const payload = await invoke<Record<string, unknown>>('mail_search', {
+        keyword: trimmed,
+        ...addressingOf(box),
+        limit: 50,
+      });
+      searchResults.value = normalizeMailList(payload.emails);
+    } catch (raw) {
+      const message = toMessage(raw);
+      if (message.includes('404') || message.includes('Cannot')) {
+        extendedApiSupported.value = false;
+      }
+      toast('error', `搜索失败：${message}`);
+    } finally {
+      searching.value = false;
+    }
+  }
+
+  function clearSearch(): void {
+    searchKeyword.value = '';
+    searchResults.value = null;
+  }
+
+  // ---------- V1.1：发送 / 回复 ----------
+  async function sendMail(draft: {
+    to: string;
+    cc?: string;
+    bcc?: string;
+    subject: string;
+    body: string;
+  }): Promise<boolean> {
+    const box = selectedMailbox.value;
+    if (!box || sending.value) return false;
+    sending.value = true;
+    try {
+      await invoke('mail_send', { ...addressingOf(box), ...draft });
+      toast('success', '邮件已发送');
+      await loadList(true);
+      return true;
+    } catch (raw) {
+      toast('error', `发送失败：${toMessage(raw)}`);
+      return false;
+    } finally {
+      sending.value = false;
+    }
+  }
+
+  async function replyMail(mailId: string, body: string): Promise<boolean> {
+    const box = selectedMailbox.value;
+    if (!box || sending.value) return false;
+    sending.value = true;
+    try {
+      await invoke('mail_reply', { mailId, ...addressingOf(box), body });
+      toast('success', '回复已发送');
+      const target = mails.value.find((mail) => mail.mailId === mailId);
+      if (target) target.readState = 'read';
+      return true;
+    } catch (raw) {
+      toast('error', `回复失败：${toMessage(raw)}`);
+      return false;
+    } finally {
+      sending.value = false;
+    }
+  }
+
+  // ---------- V1.1：附件下载 ----------
+  async function downloadAttachment(
+    mailId: string,
+    partId: string,
+    filename: string,
+  ): Promise<void> {
+    const box = selectedMailbox.value;
+    if (!box) return;
+    try {
+      const payload = await invoke<Record<string, unknown>>('mail_attachment', {
+        mailId,
+        partId,
+        ...addressingOf(box),
+      });
+      const dataBase64 = String(payload.dataBase64 ?? '');
+      const name = String(payload.filename ?? filename);
+      if (!dataBase64) throw new Error('附件内容为空');
+      const result = await saveToDownloads(
+        name,
+        dataBase64,
+        typeof payload.contentType === 'string' ? payload.contentType : undefined,
+      );
+      toast('success', `附件已保存到下载目录：${result.displayName}`);
+    } catch (raw) {
+      toast('error', `附件下载失败：${toMessage(raw)}`);
+    }
+  }
+
   // ---------- 会话 ----------
   async function startSession(): Promise<void> {
     if (sessionActive.value) return;
@@ -278,6 +428,7 @@ export const useMailStore = defineStore('mail', () => {
     isLoading.value = true;
     await loadState(false);
     await loadList(true);
+    void loadFolders();
     isLoading.value = false;
     scheduleNext();
   }
@@ -300,6 +451,11 @@ export const useMailStore = defineStore('mail', () => {
     isLoading.value = false;
     error.value = null;
     pluginUnavailable.value = false;
+    folders.value = [];
+    extendedApiSupported.value = true;
+    currentFid.value = null;
+    clearSearch();
+    sending.value = false;
     closeDetail();
   }
 
@@ -333,10 +489,18 @@ export const useMailStore = defineStore('mail', () => {
     error,
     pluginUnavailable,
     detailMailId,
-    detailMarkdown,
+    detail,
     detailLoading,
     detailError,
     trashing,
+    folders,
+    extendedApiSupported,
+    currentFid,
+    searchKeyword,
+    searchResults,
+    searching,
+    sending,
+    displayedMails,
     keyOf,
     loadState,
     loadList,
@@ -345,8 +509,15 @@ export const useMailStore = defineStore('mail', () => {
     toggleUnreadOnly,
     openDetail,
     closeDetail,
-    markRead,
+    setRead,
     trash,
+    loadFolders,
+    selectFolder,
+    search,
+    clearSearch,
+    sendMail,
+    replyMail,
+    downloadAttachment,
     startSession,
     stopSession,
     resetSession,

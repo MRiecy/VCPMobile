@@ -165,6 +165,91 @@ export function extractDetailMarkdown(raw: unknown): string {
   return typeof record.markdown === 'string' ? record.markdown : '';
 }
 
+// ---------- 文件夹（V1.1） ----------
+
+export interface FolderInfo {
+  id: string;
+  name: string;
+  unreadCount: number | null;
+}
+
+export function normalizeFolders(raw: unknown): FolderInfo[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null;
+      const record = item as Record<string, unknown>;
+      const id = String(record.id ?? record.fid ?? '');
+      if (!id) return null;
+      const unread = Number(record.unreadCount);
+      return {
+        id,
+        name: String(record.name ?? id),
+        unreadCount: Number.isFinite(unread) ? unread : null,
+      } as FolderInfo;
+    })
+    .filter((entry): entry is FolderInfo => entry !== null);
+}
+
+// ---------- 附件元数据（V1.1） ----------
+
+export interface AttachmentMeta {
+  /** 下载优先使用 partId，回退 attachmentId。 */
+  partId: string;
+  filename: string;
+  contentType: string;
+  size: number | null;
+  /** cid 非空 = HTML 内嵌图。 */
+  inline: boolean;
+}
+
+export function normalizeAttachments(raw: unknown): AttachmentMeta[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => {
+      if (!item || typeof item !== 'object') return null;
+      const record = item as Record<string, unknown>;
+      const partId = String(
+        record.partId ?? record.attachmentId ?? record.id ?? record.cid ?? '',
+      );
+      if (!partId) return null;
+      const size = Number(record.size);
+      return {
+        partId,
+        filename: String(record.filename ?? record.name ?? `${partId}.bin`),
+        contentType: String(record.contentType ?? 'application/octet-stream'),
+        size: Number.isFinite(size) ? size : null,
+        inline: !!record.cid,
+      } as AttachmentMeta;
+    })
+    .filter((entry): entry is AttachmentMeta => entry !== null);
+}
+
+/** 详情归一化（V1.1：markdown + 附件元数据）。 */
+export interface MailDetail {
+  markdown: string;
+  attachments: AttachmentMeta[];
+}
+
+export function normalizeDetail(raw: unknown): MailDetail {
+  return {
+    markdown: extractDetailMarkdown(raw),
+    attachments: normalizeAttachments(
+      raw && typeof raw === 'object'
+        ? (raw as Record<string, unknown>).attachments
+        : undefined,
+    ),
+  };
+}
+
+/** 附件大小展示。 */
+export function attachmentSizeLabel(size: number | null): string {
+  if (size === null || !Number.isFinite(size)) return '—';
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /** 邮件正文渲染唯一 v-html 边界（共享安全管线）。 */
 export function renderMailMarkdown(content: string): string {
   return renderSafeMarkdown(content);

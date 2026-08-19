@@ -3,14 +3,27 @@
  * MailDetailView.vue — 邮件详情（滑入子页）。
  *
  * 正文渲染 renderMailMarkdown（共享安全管线，唯一 v-html 边界）。
- * 阅读默认不标读（markRead=false）；「标为已读」与「移入垃圾箱」为显式操作。
+ * 阅读默认不标读；操作：回复 / 标为已读或未读 / 附件下载 / 移入垃圾箱。
  * mailId 等标识使用 Monospace。
  */
-import { computed } from 'vue';
-import { ArrowLeft, MailCheck, Trash2 } from 'lucide-vue-next';
+import { ref } from 'vue';
+import {
+  ArrowLeft,
+  Download,
+  MailCheck,
+  MailPlus,
+  Reply,
+  Trash2,
+} from 'lucide-vue-next';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { useMailStore } from './mailStore';
-import { mailTimeLabel, renderMailMarkdown, type MailSummary } from './mailTypes';
+import MailComposeView from './MailComposeView.vue';
+import {
+  attachmentSizeLabel,
+  mailTimeLabel,
+  renderMailMarkdown,
+  type MailSummary,
+} from './mailTypes';
 
 const props = defineProps<{ mail: MailSummary }>();
 const emit = defineEmits<{ close: [] }>();
@@ -18,10 +31,10 @@ const emit = defineEmits<{ close: [] }>();
 const store = useMailStore();
 const overlayStore = useOverlayStore();
 
-const canMarkRead = computed(() => props.mail.readState === 'unread');
+const isReplyOpen = ref(false);
 
-async function markRead(): Promise<void> {
-  await store.markRead();
+async function toggleRead(): Promise<void> {
+  await store.setRead(props.mail.readState !== 'read');
 }
 
 async function trash(): Promise<void> {
@@ -33,6 +46,10 @@ async function trash(): Promise<void> {
   if (!confirmed) return;
   const ok = await store.trash(props.mail.mailId);
   if (ok) emit('close');
+}
+
+async function download(partId: string, filename: string): Promise<void> {
+  await store.downloadAttachment(props.mail.mailId, partId, filename);
 }
 </script>
 
@@ -47,14 +64,23 @@ async function trash(): Promise<void> {
         <span class="md-subtitle">{{ mail.mailId }}</span>
       </div>
       <button
-        v-if="canMarkRead"
         type="button"
         class="md-icon-btn"
-        aria-label="标为已读"
-        title="标为已读"
-        @click="markRead"
+        aria-label="回复"
+        title="回复"
+        @click="isReplyOpen = true"
       >
-        <MailCheck :size="17" />
+        <Reply :size="17" />
+      </button>
+      <button
+        type="button"
+        class="md-icon-btn"
+        :aria-label="mail.readState === 'read' ? '标为未读' : '标为已读'"
+        :title="mail.readState === 'read' ? '标为未读' : '标为已读'"
+        @click="toggleRead"
+      >
+        <MailPlus v-if="mail.readState === 'read'" :size="17" />
+        <MailCheck v-else :size="17" />
       </button>
       <button
         type="button"
@@ -93,9 +119,46 @@ async function trash(): Promise<void> {
           重试
         </button>
       </div>
-      <!-- eslint-disable-next-line vue/no-v-html -->
-      <div v-else class="md-body markdown-body" v-html="renderMailMarkdown(store.detailMarkdown)" />
+      <template v-else-if="store.detail">
+        <!-- eslint-disable-next-line vue/no-v-html -->
+        <div class="md-body markdown-body" v-html="renderMailMarkdown(store.detail.markdown)" />
+
+        <!-- 附件列表 -->
+        <section v-if="store.detail.attachments.length > 0" class="md-attachments">
+          <h3 class="md-attachments-title">附件 · {{ store.detail.attachments.length }}</h3>
+          <div
+            v-for="att in store.detail.attachments"
+            :key="att.partId"
+            class="md-attachment-row"
+          >
+            <div class="md-attachment-info">
+              <span class="md-attachment-name">{{ att.filename }}</span>
+              <span class="md-attachment-meta">
+                {{ att.contentType }} · {{ attachmentSizeLabel(att.size) }}{{ att.inline ? ' · 内嵌' : '' }}
+              </span>
+            </div>
+            <button
+              type="button"
+              class="md-attachment-btn"
+              :aria-label="`下载 ${att.filename}`"
+              @click="download(att.partId, att.filename)"
+            >
+              <Download :size="15" />
+            </button>
+          </div>
+        </section>
+      </template>
     </div>
+
+    <!-- 回复（滑入子页） -->
+    <Transition name="md-compose-slide">
+      <MailComposeView
+        v-if="isReplyOpen"
+        mode="reply"
+        :reply-to="mail"
+        @close="isReplyOpen = false"
+      />
+    </Transition>
   </div>
 </template>
 
@@ -260,6 +323,79 @@ async function trash(): Promise<void> {
 .md-body :deep(td) {
   border: 1px solid var(--border-color);
   padding: 4px 8px;
+}
+
+/* ---- 附件 ---- */
+.md-attachments {
+  margin-top: 14px;
+  border-top: 1px solid var(--border-color);
+  padding-top: 10px;
+}
+
+.md-attachments-title {
+  margin: 0 0 8px;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  opacity: 0.45;
+}
+
+.md-attachment-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 2px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.md-attachment-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.md-attachment-name {
+  font-size: 12.5px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.md-attachment-meta {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  opacity: 0.45;
+}
+
+.md-attachment-btn {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-color);
+  border-radius: 50%;
+  background: var(--secondary-bg);
+  color: var(--highlight-text);
+}
+
+/* 回复子页滑入动画 */
+.md-compose-slide-enter-active,
+.md-compose-slide-leave-active {
+  transition:
+    transform 0.3s cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 0.3s ease;
+}
+
+.md-compose-slide-enter-from,
+.md-compose-slide-leave-to {
+  transform: translateX(100%);
+  opacity: 0.6;
 }
 
 @media (min-width: 768px) {
