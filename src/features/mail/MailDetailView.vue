@@ -14,6 +14,7 @@ import {
   MailPlus,
   Reply,
   Trash2,
+  Undo2,
 } from 'lucide-vue-next';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { filterTrustedRichHtml } from '../../core/utils/astRenderer';
@@ -53,14 +54,22 @@ async function toggleRead(): Promise<void> {
   await store.setRead(props.mail.readState !== 'read');
 }
 
+/** 当前是否「已删除」文件夹视图（该视图下删除按钮替换为恢复）。 */
+const isTrashView = computed(() => store.currentFolderKind === 'trash');
+
 async function trash(): Promise<void> {
   const confirmed = await overlayStore.showConfirm({
-    title: '移入垃圾箱',
-    message: `确定把「${props.mail.subject}」移入垃圾箱吗？（软删除，可在网页端恢复）`,
+    title: '移入已删除',
+    message: `确定把「${props.mail.subject}」移入已删除文件夹吗？（软删除，之后可以移回收件箱）`,
     isDanger: true,
   });
   if (!confirmed) return;
   const ok = await store.trash(props.mail.mailId);
+  if (ok) emit('close');
+}
+
+async function restore(): Promise<void> {
+  const ok = await store.restoreToInbox(props.mail.mailId);
   if (ok) emit('close');
 }
 
@@ -109,13 +118,24 @@ async function download(partId: string, filename: string): Promise<void> {
         <span class="md-action-label">{{ mail.readState === 'read' ? '标为未读' : '标为已读' }}</span>
       </button>
       <button
+        v-if="isTrashView"
+        type="button"
+        class="md-action"
+        :disabled="store.trashing || !store.inboxFolderId"
+        @click="restore"
+      >
+        <Undo2 :size="18" />
+        <span class="md-action-label">移回收件箱</span>
+      </button>
+      <button
+        v-else
         type="button"
         class="md-action md-action-danger"
         :disabled="store.trashing"
         @click="trash"
       >
         <Trash2 :size="18" />
-        <span class="md-action-label">垃圾箱</span>
+        <span class="md-action-label">删除</span>
       </button>
     </nav>
 

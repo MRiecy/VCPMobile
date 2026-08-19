@@ -16,7 +16,15 @@ import {
   renderForumMarkdown,
   type PostMeta,
 } from './forumTypes';
-import { nameAvatarBackground, nameInitial } from '../../core/utils/nameHue';
+import { resolveForumAuthor } from './forumAuthor';
+import { nameInitial } from '../../core/utils/nameHue';
+import VcpAvatar from '../../components/ui/VcpAvatar.vue';
+import type { AvatarTarget } from '../../components/ui/VcpAvatar.vue';
+
+/** 署名 → 本地实体头像目标（解析失败回退占位头像）。 */
+function authorTargetOf(author: string): AvatarTarget | null {
+  return resolveForumAuthor(author);
+}
 
 const props = defineProps<{ uid: string; postMeta: PostMeta }>();
 const emit = defineEmits<{ close: [] }>();
@@ -131,11 +139,13 @@ async function deletePost(): Promise<void> {
         <!-- 主帖 -->
         <article class="fd-main">
           <div class="fd-author-row">
-            <span
-              class="fd-avatar"
-              :style="{ background: nameAvatarBackground(postMeta.author) }"
-              aria-hidden="true"
-            >{{ nameInitial(postMeta.author) }}</span>
+            <VcpAvatar
+              v-if="authorTargetOf(postMeta.author)"
+              :target="authorTargetOf(postMeta.author)"
+              size="w-[34px] h-[34px]"
+              rounded="rounded-full"
+            />
+            <span v-else class="fd-avatar" aria-hidden="true">{{ nameInitial(postMeta.author) }}</span>
             <div class="fd-author-block">
               <span class="fd-author">
                 {{ postMeta.author }}
@@ -152,13 +162,16 @@ async function deletePost(): Promise<void> {
         <div v-if="detail.floors.length > 0" class="fd-floors-head">
           评论区 · {{ detail.floors.length }} 楼
         </div>
+        <div v-else class="fd-no-comments">还没有评论，来抢沙发</div>
         <article v-for="floor in detail.floors" :key="floor.index" class="fd-floor">
           <div class="fd-floor-head">
-            <span
-              class="fd-avatar fd-avatar-sm"
-              :style="{ background: nameAvatarBackground(floor.author) }"
-              aria-hidden="true"
-            >{{ nameInitial(floor.author) }}</span>
+            <VcpAvatar
+              v-if="authorTargetOf(floor.author)"
+              :target="authorTargetOf(floor.author)"
+              size="w-[28px] h-[28px]"
+              rounded="rounded-full"
+            />
+            <span v-else class="fd-avatar fd-avatar-sm" aria-hidden="true">{{ nameInitial(floor.author) }}</span>
             <div class="fd-author-block">
               <span class="fd-author">{{ floor.author }}</span>
               <span class="fd-time">{{ relativeTime(floor.timeMs) }}</span>
@@ -313,10 +326,11 @@ async function deletePost(): Promise<void> {
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  color: #fff;
+  border: 1px solid var(--border-color);
+  background: var(--secondary-bg);
+  color: var(--highlight-text);
   font-size: 14px;
   font-weight: 800;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 
 .fd-avatar-sm {
@@ -401,6 +415,16 @@ async function deletePost(): Promise<void> {
   letter-spacing: 0.16em;
   text-transform: uppercase;
   opacity: 0.45;
+}
+
+/* 无评论时的占位（避免主帖直接怼到回复栏，两条分割线夹在一起） */
+.fd-no-comments {
+  margin-top: 6px;
+  padding: 30px 0;
+  border-top: 1px solid var(--border-color);
+  text-align: center;
+  font-size: 12px;
+  opacity: 0.4;
 }
 
 .fd-floor {

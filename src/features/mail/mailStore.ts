@@ -15,6 +15,7 @@ import { useNotificationStore } from '../../core/stores/notification';
 import { saveToDownloads } from '../../../src-tauri/plugins/vcp-mobile/guest-js';
 import {
   addressingOf,
+  folderKindOf,
   normalizeDetail,
   normalizeFolders,
   normalizeMailboxes,
@@ -22,6 +23,7 @@ import {
   normalizeWsStates,
   organizeFolders,
   type FolderInfo,
+  type FolderKind,
   type MailboxInfo,
   type MailDetail,
   type MailSummary,
@@ -98,8 +100,21 @@ export const useMailStore = defineStore('mail', () => {
 
   // ---------- V1.1：文件夹 / 搜索 / 发送 ----------
   const folders = ref<FolderInfo[]>([]);
-  /** 展示用文件夹（收件箱去重 + 系统文件夹按用途排序）。 */
+  /** 展示用文件夹（收件箱去重 + 草稿箱隐藏 + 系统文件夹按用途排序）。 */
   const displayFolders = computed(() => organizeFolders(folders.value));
+
+  /** 当前文件夹类别（null fid = 收件箱）。 */
+  const currentFolderKind = computed<FolderKind>(() => {
+    if (currentFid.value === null) return 'inbox';
+    const folder = folders.value.find((entry) => entry.id === currentFid.value);
+    return folder ? folderKindOf(folder.name) : 'custom';
+  });
+
+  /** 收件箱文件夹 id（「移回收件箱」的目标；服务器未返回则不可恢复）。 */
+  const inboxFolderId = computed(() => {
+    const inbox = folders.value.find((entry) => folderKindOf(entry.name) === 'inbox');
+    return inbox?.id ?? null;
+  });
   /** 服务器是否提供 folders/search 等补丁端点（404 时降级隐藏）。 */
   const extendedApiSupported = ref(true);
   /** 当前文件夹 fid（null = 默认收件箱）。 */
@@ -310,6 +325,26 @@ export const useMailStore = defineStore('mail', () => {
     }
   }
 
+  /** 从「已删除」恢复到收件箱（SDK moveMessages；网页端无此入口）。 */
+  async function restoreToInbox(mailId: string): Promise<boolean> {
+    const box = selectedMailbox.value;
+    const target = inboxFolderId.value;
+    if (!box || !target || trashing.value) return false;
+    trashing.value = true;
+    try {
+      await invoke('mail_move', { mailId, target, ...addressingOf(box) });
+      toast('success', '已移回收件箱');
+      closeDetail();
+      await loadList(true);
+      return true;
+    } catch (raw) {
+      toast('error', `恢复失败：${toMessage(raw)}`);
+      return false;
+    } finally {
+      trashing.value = false;
+    }
+  }
+
   // ---------- V1.1：文件夹 ----------
   /** 懒加载文件夹列表（404 = 服务器未打补丁，降级隐藏文件夹 UI）。 */
   async function loadFolders(): Promise<void> {
@@ -513,6 +548,8 @@ export const useMailStore = defineStore('mail', () => {
     trashing,
     folders,
     displayFolders,
+    currentFolderKind,
+    inboxFolderId,
     extendedApiSupported,
     currentFid,
     searchKeyword,
@@ -530,6 +567,7 @@ export const useMailStore = defineStore('mail', () => {
     closeDetail,
     setRead,
     trash,
+    restoreToInbox,
     loadFolders,
     selectFolder,
     search,

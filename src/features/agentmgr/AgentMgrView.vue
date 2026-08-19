@@ -11,7 +11,7 @@ import SlidePage from '../../components/ui/SlidePage.vue';
 import AgentEditorView from './AgentEditorView.vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 import { useAgentMgrStore } from './agentMgrStore';
-import { nameAvatarBackground, nameInitial } from '../../core/utils/nameHue';
+import { nameInitial } from '../../core/utils/nameHue';
 import {
   emptyAgentDraft,
   type AgentDraft,
@@ -206,16 +206,10 @@ const emptyState = computed(() => {
           class="am-row"
           @click="openEditEditor(entry)"
         >
-          <span
-            class="am-avatar"
-            :style="{ background: nameAvatarBackground(entry.chineseName) }"
-            aria-hidden="true"
-          >{{ nameInitial(entry.chineseName) }}</span>
+          <span class="am-avatar" aria-hidden="true">{{ nameInitial(entry.chineseName) }}</span>
           <span class="am-row-main">
-            <span class="am-row-head">
-              <span class="am-row-name">{{ entry.chineseName }}</span>
-              <span class="am-row-model">{{ entry.modelId || '未绑定模型' }}</span>
-            </span>
+            <span class="am-row-name">{{ entry.chineseName }}</span>
+            <span class="am-row-model">{{ entry.modelId || '未绑定模型' }}</span>
             <span v-if="entry.description" class="am-row-desc">{{ entry.description }}</span>
             <span class="am-row-meta">
               {{ entry.baseName || entry.chineseName.toUpperCase() }} · tokens {{ entry.maxOutputTokens }} · temp {{ entry.temperature }}
@@ -486,10 +480,11 @@ const emptyState = computed(() => {
   align-items: center;
   justify-content: center;
   border-radius: 12px;
-  color: #fff;
+  border: 1px solid var(--border-color);
+  background: var(--primary-bg);
+  color: var(--highlight-text);
   font-size: 17px;
   font-weight: 800;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 
 .am-row-main {
@@ -497,25 +492,20 @@ const emptyState = computed(() => {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 1px;
-}
-
-.am-row-head {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
+  gap: 2px;
 }
 
 .am-row-name {
   font-size: 14px;
   font-weight: 800;
-  flex-shrink: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .am-row-model {
-  margin-left: auto;
-  flex-shrink: 1;
+  align-self: flex-start;
+  max-width: 100%;
   padding: 2px 8px;
   border-radius: 6px;
   background: var(--primary-bg);

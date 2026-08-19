@@ -21,7 +21,15 @@ import ForumComposeView from './ForumComposeView.vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 import { useForumStore } from './forumStore';
 import { relativeTime, type PostMeta } from './forumTypes';
-import { nameAvatarBackground, nameInitial } from '../../core/utils/nameHue';
+import { resolveForumAuthor } from './forumAuthor';
+import { nameInitial } from '../../core/utils/nameHue';
+import VcpAvatar from '../../components/ui/VcpAvatar.vue';
+import type { AvatarTarget } from '../../components/ui/VcpAvatar.vue';
+
+/** 署名 → 本地实体头像目标（帖子行渲染用；解析失败回退占位头像）。 */
+function authorTargetOf(author: string): AvatarTarget | null {
+  return resolveForumAuthor(author);
+}
 
 const props = withDefaults(defineProps<{ isOpen?: boolean; zIndex?: number }>(), {
   isOpen: false,
@@ -169,11 +177,13 @@ onBeforeUnmount(() => {
           class="fm-row"
           @click="openDetail(post)"
         >
-          <span
-            class="fm-avatar"
-            :style="{ background: nameAvatarBackground(post.author) }"
-            aria-hidden="true"
-          >{{ nameInitial(post.author) }}</span>
+          <VcpAvatar
+            v-if="authorTargetOf(post.author)"
+            :target="authorTargetOf(post.author)"
+            size="w-[38px] h-[38px]"
+            rounded="rounded-full"
+          />
+          <span v-else class="fm-avatar" aria-hidden="true">{{ nameInitial(post.author) }}</span>
           <span class="fm-row-main">
             <span class="fm-row-head">
               <Pin v-if="post.pinned" :size="12" class="fm-pin" aria-label="置顶" />
@@ -415,10 +425,11 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   border-radius: 50%;
-  color: #fff;
+  border: 1px solid var(--border-color);
+  background: var(--primary-bg);
+  color: var(--highlight-text);
   font-size: 15px;
   font-weight: 800;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 
 .fm-row-main {

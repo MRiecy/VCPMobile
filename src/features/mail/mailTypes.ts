@@ -284,47 +284,88 @@ export function mailBodyOf(detail: MailDetail): MailBody | null {
 // ---------- 文件夹语义化 ----------
 
 /**
- * 已知系统文件夹 → 中文名。clawEmail 云端（WuKongIM）文件夹名为英文约定，
- * 原样展示对中文用户不友好；未知自定义文件夹保留原名。
+ * 文件夹规范类别。clawEmail 云端（WuKongIM）返回的文件夹名可能是英文约定
+ * 也可能已是中文，统一按别名表归类；未识别的视为用户自定义文件夹。
  */
-const KNOWN_FOLDER_NAMES: Record<string, string> = {
+export type FolderKind =
+  | 'inbox'
+  | 'sent'
+  | 'drafts'
+  | 'junk'
+  | 'quarantine'
+  | 'trash'
+  | 'archive'
+  | 'custom';
+
+const FOLDER_KIND_ALIASES: Record<string, FolderKind> = {
+  inbox: 'inbox',
+  '收件箱': 'inbox',
+  sent: 'sent',
+  'sent items': 'sent',
+  'sent messages': 'sent',
+  '已发送': 'sent',
+  '发件箱': 'sent',
+  drafts: 'drafts',
+  draft: 'drafts',
+  '草稿箱': 'drafts',
+  '草稿': 'drafts',
+  junk: 'junk',
+  spam: 'junk',
+  '垃圾邮件': 'junk',
+  '垃圾邮箱': 'junk',
+  quarantine: 'quarantine',
+  '病毒文件夹': 'quarantine',
+  '隔离区': 'quarantine',
+  trash: 'trash',
+  deleted: 'trash',
+  'deleted items': 'trash',
+  'deleted messages': 'trash',
+  '已删除': 'trash',
+  '垃圾箱': 'trash',
+  '回收站': 'trash',
+  archive: 'archive',
+  '归档': 'archive',
+};
+
+export function folderKindOf(name: string): FolderKind {
+  return FOLDER_KIND_ALIASES[name.trim().toLowerCase()] ?? 'custom';
+}
+
+const FOLDER_KIND_LABEL: Record<Exclude<FolderKind, 'custom'>, string> = {
   inbox: '收件箱',
   sent: '已发送',
-  'sent items': '已发送',
-  'sent messages': '已发送',
   drafts: '草稿箱',
-  draft: '草稿箱',
-  trash: '垃圾箱',
-  deleted: '垃圾箱',
-  'deleted items': '垃圾箱',
-  junk: '垃圾邮件',
-  spam: '垃圾邮件',
+  junk: '垃圾邮箱',
+  quarantine: '病毒文件夹',
+  trash: '已删除',
   archive: '归档',
 };
 
+/** 系统文件夹显示规范中文名；自定义文件夹保留服务器原名。 */
 export function folderDisplayName(name: string): string {
-  return KNOWN_FOLDER_NAMES[name.trim().toLowerCase()] ?? name;
+  const kind = folderKindOf(name);
+  return kind === 'custom' ? name : FOLDER_KIND_LABEL[kind];
 }
 
-/** 是否收件箱（客户端已有固定的「收件箱」入口，服务器列表里的要去重）。 */
-export function isInboxFolder(name: string): boolean {
-  return KNOWN_FOLDER_NAMES[name.trim().toLowerCase()] === '收件箱';
-}
+/**
+ * 文件夹列表整理：
+ * - 收件箱：去重（客户端有固定的「收件箱」入口，fid=null）；
+ * - 草稿箱：隐藏（SDK 无草稿 API，移动端永远无法写入，纯空壳只读夹）；
+ * - 其余系统文件夹按用途排序：已发送 → 垃圾邮箱 → 病毒文件夹 → 已删除 → 归档；
+ * - 自定义文件夹排最后，按名称字典序。
+ */
+const KIND_SORT_ORDER: FolderKind[] = ['sent', 'junk', 'quarantine', 'trash', 'archive', 'custom'];
 
-/** 系统文件夹的规范排序权重（未知名排最后，按名称字典序）。 */
-function folderSortWeight(name: string): number {
-  const key = name.trim().toLowerCase();
-  const order = ['sent', 'sent items', 'sent messages', 'drafts', 'draft', 'archive', 'junk', 'spam', 'trash', 'deleted', 'deleted items'];
-  const index = order.indexOf(key);
-  return index === -1 ? 100 : index;
-}
-
-/** 文件夹列表整理：去收件箱（已有固定入口）+ 系统文件夹按用途排序。 */
 export function organizeFolders(folders: FolderInfo[]): FolderInfo[] {
   return folders
-    .filter((folder) => !isInboxFolder(folder.name))
+    .filter((folder) => {
+      const kind = folderKindOf(folder.name);
+      return kind !== 'inbox' && kind !== 'drafts';
+    })
     .sort((a, b) => {
-      const diff = folderSortWeight(a.name) - folderSortWeight(b.name);
+      const diff =
+        KIND_SORT_ORDER.indexOf(folderKindOf(a.name)) -
+        KIND_SORT_ORDER.indexOf(folderKindOf(b.name));
       return diff !== 0 ? diff : a.name.localeCompare(b.name);
     });
 }

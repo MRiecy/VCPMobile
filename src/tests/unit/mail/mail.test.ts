@@ -4,6 +4,7 @@ import {
   addressingOf,
   extractDetailMarkdown,
   folderDisplayName,
+  folderKindOf,
   mailBodyOf,
   mailPartyText,
   mailTimeLabel,
@@ -413,22 +414,89 @@ describe('邮件详情正文提取（mailBodyOf）', () => {
   });
 });
 
-describe('文件夹语义化（organizeFolders / folderDisplayName）', () => {
-  it('收件箱去重 + 系统文件夹中文化', () => {
+describe('文件夹语义化（organizeFolders / folderDisplayName / folderKindOf）', () => {
+  it('收件箱去重 + 草稿箱隐藏 + 系统文件夹中文化排序', () => {
     const folders = normalizeFolders([
       { id: '1', name: 'INBOX' },
       { id: '2', name: 'Trash' },
       { id: '3', name: 'Sent Messages' },
       { id: '4', name: '项目归档2026' },
       { id: '5', name: 'Drafts' },
+      { id: '6', name: '病毒文件夹' },
     ]);
     const organized = organizeFolders(folders);
-    // INBOX 被去重（客户端有固定入口）
-    expect(organized.map((folder) => folder.id)).toEqual(['3', '5', '2', '4']);
+    // INBOX 去重（固定入口）；Drafts 隐藏（SDK 无草稿 API）；
+    // 排序：已发送 → 病毒文件夹 → 已删除 → 自定义
+    expect(organized.map((folder) => folder.id)).toEqual(['3', '6', '2', '4']);
     expect(folderDisplayName('Sent Messages')).toBe('已发送');
-    expect(folderDisplayName('Drafts')).toBe('草稿箱');
-    expect(folderDisplayName('Trash')).toBe('垃圾箱');
+    expect(folderDisplayName('Trash')).toBe('已删除');
+    expect(folderDisplayName('垃圾邮箱')).toBe('垃圾邮箱');
     // 自定义文件夹保留原名
     expect(folderDisplayName('项目归档2026')).toBe('项目归档2026');
+  });
+
+  it('中文服务器文件夹名同样正确归类（真实去重场景）', () => {
+    const folders = normalizeFolders([
+      { id: '1', name: '收件箱' },
+      { id: '2', name: '已发送' },
+      { id: '3', name: '已删除' },
+    ]);
+    expect(organizeFolders(folders).map((folder) => folder.id)).toEqual(['2', '3']);
+    expect(folderKindOf('已删除')).toBe('trash');
+    expect(folderKindOf('收件箱')).toBe('inbox');
+  });
+});
+
+
+describe('从已删除恢复（restoreToInbox）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    clearInvokeMocks();
+  });
+
+  it('移回收件箱 = mail_move 到收件箱文件夹 id', async () => {
+    const moved: Record<string, unknown> = {};
+    mockInvoke('mail_state', () => baseState());
+    mockInvoke('mail_list', () => ({ status: 'success', emails: baseMails(), markdown: '' }));
+    mockInvoke('mail_folders', () => ({
+      status: 'success',
+      folders: [
+        { id: 'f-inbox', name: '收件箱' },
+        { id: 'f-trash', name: '已删除' },
+      ],
+    }));
+    mockInvoke('mail_move', (args) => {
+      Object.assign(moved, args);
+      return { status: 'success' };
+    });
+
+    const store = useMailStore();
+    await store.startSession();
+    // 等 loadFolders 完成
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(store.currentFolderKind).toBe('inbox');
+    await store.selectFolder('f-trash');
+    expect(store.currentFolderKind).toBe('trash');
+
+    expect(await store.restoreToInbox('msg_001')).toBe(true);
+    expect(moved).toMatchObject({ mailId: 'msg_001', target: 'f-inbox', user: 'bot@claw.163.com' });
+    store.stopSession();
+  });
+
+  it('服务器未返回收件箱文件夹时不可恢复', async () => {
+    mockInvoke('mail_state', () => baseState());
+    mockInvoke('mail_list', () => ({ status: 'success', emails: [], markdown: '' }));
+    mockInvoke('mail_folders', () => ({
+      status: 'success',
+      folders: [{ id: 'f-trash', name: '已删除' }],
+    }));
+
+    const store = useMailStore();
+    await store.startSession();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(store.inboxFolderId).toBeNull();
+    expect(await store.restoreToInbox('msg_001')).toBe(false);
+    store.stopSession();
   });
 });
