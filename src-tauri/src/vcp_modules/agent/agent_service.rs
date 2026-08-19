@@ -706,9 +706,7 @@ pub async fn get_assistants_snapshot(
 }
 
 /// 快照查询主体（与 Tauri State 解耦，便于内存库单测）。
-async fn build_assistants_snapshot(
-    pool: &sqlx::SqlitePool,
-) -> Result<AssistantsSnapshot, String> {
+async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<AssistantsSnapshot, String> {
     let start_total = std::time::Instant::now();
 
     // 1. 获取 agents。批量快照不写实体缓存，避免并发删除后迟到回填 ghost。

@@ -508,14 +508,10 @@ pub async fn invite_group_member_to_speak(
     }
 
     // 被邀成员配置加载失败必须显式报错，不得静默跳过
-    let speaker = read_agent_config_internal(
-        &app_handle,
-        &agent_state,
-        &payload.agent_id,
-        Some(false),
-    )
-    .await
-    .map_err(|e| format!("加载被邀请成员 {} 的配置失败: {e}", payload.agent_id))?;
+    let speaker =
+        read_agent_config_internal(&app_handle, &agent_state, &payload.agent_id, Some(false))
+            .await
+            .map_err(|e| format!("加载被邀请成员 {} 的配置失败: {e}", payload.agent_id))?;
 
     // 全部成员配置供群上下文组装使用
     let mut active_member_configs = Vec::new();

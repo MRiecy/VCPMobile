@@ -31,8 +31,7 @@ pub fn normalize_server_base(raw: &str) -> Result<Url, String> {
         return Err("VCP Server URL 含控制字符".to_string());
     }
 
-    let mut url =
-        Url::parse(trimmed).map_err(|_| "VCP Server URL 格式无效".to_string())?;
+    let mut url = Url::parse(trimmed).map_err(|_| "VCP Server URL 格式无效".to_string())?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
         || !url.username().is_empty()

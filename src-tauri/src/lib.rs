@@ -70,9 +70,22 @@ use vcp_modules::settings_manager::{
     get_settings_recovery_status, read_settings, set_theme, update_settings,
 };
 
+use vcp_modules::agentmgr::{agentmgr_get_config, agentmgr_list_models, agentmgr_save_config};
+use vcp_modules::forum::{
+    forum_create_post, forum_delete, forum_get_post, forum_list_posts, forum_reply,
+};
+use vcp_modules::logcenter::{logcenter_clear_server, logcenter_fetch};
+use vcp_modules::mail::{
+    mail_attachment, mail_folders, mail_list, mail_mark, mail_move, mail_read, mail_reply,
+    mail_search, mail_send, mail_state, mail_trash,
+};
 use vcp_modules::sync_service::{
     clear_old_sync_logs, get_sync_session_log_path, get_sync_status, list_sync_log_files,
     read_sync_log_file, start_manual_sync, stop_sync,
+};
+use vcp_modules::taskcenter::{
+    delegation_cancel, delegation_list, task_agent_list, task_create, task_delete, task_get_config,
+    task_get_status, task_set_enabled, task_set_global_enabled, task_trigger, task_update,
 };
 use vcp_modules::topic_service::{
     create_topic, delete_topic, get_topics, get_topics_streamed, get_unread_counts,
@@ -93,20 +106,6 @@ use vcp_modules::vcp_info_service::{
 };
 use vcp_modules::vcp_log_service::{
     init_vcp_log_connection, send_vcp_log_message, set_vcp_log_heartbeat,
-};
-use vcp_modules::logcenter::{logcenter_clear_server, logcenter_fetch};
-use vcp_modules::agentmgr::{agentmgr_get_config, agentmgr_list_models, agentmgr_save_config};
-use vcp_modules::forum::{
-    forum_create_post, forum_delete, forum_get_post, forum_list_posts, forum_reply,
-};
-use vcp_modules::mail::{
-    mail_attachment, mail_folders, mail_list, mail_mark, mail_move, mail_read, mail_reply, mail_search,
-    mail_send, mail_state, mail_trash,
-};
-use vcp_modules::taskcenter::{
-    delegation_cancel, delegation_list, task_agent_list, task_create, task_delete,
-    task_get_config, task_get_status, task_set_enabled, task_set_global_enabled, task_trigger,
-    task_update,
 };
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

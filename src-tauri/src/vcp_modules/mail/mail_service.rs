@@ -83,8 +83,8 @@ async fn send_json(
         ));
     }
 
-    let body: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| "服务器返回了不符合契约的 JSON".to_string())?;
+    let body: Value =
+        serde_json::from_slice(&bytes).map_err(|_| "服务器返回了不符合契约的 JSON".to_string())?;
 
     if !status.is_success() {
         // clawMail 错误包裹：{status:'error', error:'...'}
@@ -128,8 +128,13 @@ pub async fn mail_state<R: Runtime>(
     let url = build_url(&settings, &["claw-mail", "state"])?;
     let refresh = refresh.unwrap_or(false);
     send_json(
-        admin_api::client_get(&settings, &url)?.query(&[("refresh", if refresh { "true" } else { "false" })]),
-        if refresh { REFRESH_TIMEOUT } else { DEFAULT_TIMEOUT },
+        admin_api::client_get(&settings, &url)?
+            .query(&[("refresh", if refresh { "true" } else { "false" })]),
+        if refresh {
+            REFRESH_TIMEOUT
+        } else {
+            DEFAULT_TIMEOUT
+        },
         MAX_LIST_BYTES,
     )
     .await
@@ -158,10 +163,8 @@ pub async fn mail_list<R: Runtime>(
     let start = start.unwrap_or(0);
 
     let url = build_url(&settings, &["claw-mail", "messages"])?;
-    let mut query: Vec<(&str, String)> = vec![
-        ("limit", limit.to_string()),
-        ("start", start.to_string()),
-    ];
+    let mut query: Vec<(&str, String)> =
+        vec![("limit", limit.to_string()), ("start", start.to_string())];
     if let Some(mailbox) = mailbox.as_deref() {
         query.push(("mailbox", mailbox.trim().to_string()));
     }

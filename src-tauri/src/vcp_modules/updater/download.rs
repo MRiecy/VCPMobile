@@ -62,9 +62,7 @@ pub async fn download_once(
 ) -> Result<DownloadAttempt, String> {
     let offset = file_len(part_path).await;
 
-    let mut request = client
-        .get(url.clone())
-        .header("User-Agent", "VCPMobile");
+    let mut request = client.get(url.clone()).header("User-Agent", "VCPMobile");
     if offset > 0 {
         request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
     }

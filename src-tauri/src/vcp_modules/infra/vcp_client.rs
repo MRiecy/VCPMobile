@@ -462,8 +462,7 @@ pub async fn perform_vcp_request_registered<R: Runtime>(
     }
 
     // === 6. 配置网络请求（共享 ChatStream 画像 Client，克隆仅复制 Arc 句柄、共享连接池） ===
-    let client = super::http_clients::client(super::http_clients::HttpProfile::ChatStream)
-        .clone();
+    let client = super::http_clients::client(super::http_clients::HttpProfile::ChatStream).clone();
 
     // === 7. 分发至专职处理器执行请求 ===
     if is_stream {
@@ -2235,8 +2234,7 @@ async fn resume_claimed_generation<R: Runtime>(
     );
 
     // 共享 ChatStream 画像 Client（见 http_clients.rs；克隆仅复制 Arc 句柄）
-    let client =
-        super::http_clients::client(super::http_clients::HttpProfile::ChatStream).clone();
+    let client = super::http_clients::client(super::http_clients::HttpProfile::ChatStream).clone();
 
     let pool = app.state::<DbState>().pool.clone();
 

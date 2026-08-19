@@ -18,7 +18,10 @@ const TRIGGER_TIMEOUT: Duration = Duration::from_secs(200);
 /// 响应体上限：config 含 tasks + history(≤200) + 模板提示词，4 MiB 绰绰有余。
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
 
-fn build_url(settings: &crate::vcp_modules::settings_manager::Settings, suffix: &[&str]) -> Result<String, String> {
+fn build_url(
+    settings: &crate::vcp_modules::settings_manager::Settings,
+    suffix: &[&str],
+) -> Result<String, String> {
     Ok(admin_api::admin_url(settings, suffix)?.to_string())
 }
 
@@ -58,8 +61,8 @@ async fn send_json(request: RequestBuilder, timeout: Duration) -> Result<Value, 
         ));
     }
 
-    let body: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| "服务器返回了不符合契约的 JSON".to_string())?;
+    let body: Value =
+        serde_json::from_slice(&bytes).map_err(|_| "服务器返回了不符合契约的 JSON".to_string())?;
 
     if status == StatusCode::SERVICE_UNAVAILABLE {
         let detail = body
@@ -101,11 +104,7 @@ pub async fn task_get_config<R: Runtime>(
 ) -> Result<Value, String> {
     let settings = settings_of(app_handle, settings_state).await?;
     let url = build_url(&settings, &["task-assistant", "config"])?;
-    send_json(
-        admin_api::client_get(&settings, &url)?,
-        DEFAULT_TIMEOUT,
-    )
-    .await
+    send_json(admin_api::client_get(&settings, &url)?, DEFAULT_TIMEOUT).await
 }
 
 /// 拉取轻量状态（globalEnabled / activeTimerCount / tasks.runtime / 最近 20 条 history）。
@@ -116,11 +115,7 @@ pub async fn task_get_status<R: Runtime>(
 ) -> Result<Value, String> {
     let settings = settings_of(app_handle, settings_state).await?;
     let url = build_url(&settings, &["task-assistant", "status"])?;
-    send_json(
-        admin_api::client_get(&settings, &url)?,
-        DEFAULT_TIMEOUT,
-    )
-    .await
+    send_json(admin_api::client_get(&settings, &url)?, DEFAULT_TIMEOUT).await
 }
 
 /// 手动触发任务（忽略调度时间）。长耗时操作：后端同步等待 Agent 响应。
@@ -253,11 +248,7 @@ pub async fn task_agent_list<R: Runtime>(
 ) -> Result<Value, String> {
     let settings = settings_of(app_handle, settings_state).await?;
     let url = build_url(&settings, &["agent-assistant", "config"])?;
-    let config = send_json(
-        admin_api::client_get(&settings, &url)?,
-        DEFAULT_TIMEOUT,
-    )
-    .await?;
+    let config = send_json(admin_api::client_get(&settings, &url)?, DEFAULT_TIMEOUT).await?;
 
     let agents = config
         .get("agents")
@@ -290,11 +281,7 @@ pub async fn delegation_list<R: Runtime>(
 ) -> Result<Value, String> {
     let settings = settings_of(app_handle, settings_state).await?;
     let url = build_url(&settings, &["agent-assistant", "delegations"])?;
-    send_json(
-        admin_api::client_get(&settings, &url)?,
-        DEFAULT_TIMEOUT,
-    )
-    .await
+    send_json(admin_api::client_get(&settings, &url)?, DEFAULT_TIMEOUT).await
 }
 
 /// 请求取消异步委托。

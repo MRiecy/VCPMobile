@@ -97,8 +97,8 @@ async fn send_json_with_status(
         ));
     }
 
-    let body: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| "服务器返回了不符合契约的 JSON".to_string())?;
+    let body: Value =
+        serde_json::from_slice(&bytes).map_err(|_| "服务器返回了不符合契约的 JSON".to_string())?;
 
     if !status.is_success() && status != StatusCode::NOT_FOUND {
         let detail = body
@@ -239,7 +239,10 @@ fn shield_escape_literals(raw: &str) -> String {
 
 /// 以 ESCAPE 定界符拼装一个协议字段。
 fn escape_field(key: &str, value: &str) -> String {
-    format!("{key}:「始ESCAPE」{}「末ESCAPE」", shield_escape_literals(value))
+    format!(
+        "{key}:「始ESCAPE」{}「末ESCAPE」",
+        shield_escape_literals(value)
+    )
 }
 
 /// 拼装 VCPForum CreatePost 的 TOOL_REQUEST 纯文本请求体。

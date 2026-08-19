@@ -104,9 +104,7 @@ fn validate_and_filter_diff_items(
         let action = item
             .get("action")
             .and_then(Value::as_str)
-            .filter(|action| {
-                matches!(*action, "PULL" | "PUSH" | "DELETE" | "PUSH_DELETE" | "SKIP")
-            })
+            .filter(|action| matches!(*action, "PULL" | "PUSH" | "DELETE" | "PUSH_DELETE" | "SKIP"))
             .ok_or_else(|| format!("SYNC_DIFF_RESULTS item {id} has an invalid action"))?;
         parse_delete_timestamp(item, id, action)?;
         if item.get("mismatchedContent").is_some()
@@ -912,9 +910,8 @@ mod tests {
             {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-a"},
             {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-b"},
         ]);
-        let err =
-            validate_and_filter_diff_items(items.as_array().unwrap(), &SyncDataType::Topic)
-                .expect_err("duplicate non-default ids must fail");
+        let err = validate_and_filter_diff_items(items.as_array().unwrap(), &SyncDataType::Topic)
+            .expect_err("duplicate non-default ids must fail");
         assert!(err.contains("duplicate id"));
     }
 
@@ -924,11 +921,10 @@ mod tests {
             {"id": "default", "action": "PULL"},
             {"id": "default", "action": "PULL"},
         ]);
-        assert!(validate_and_filter_diff_items(
-            items.as_array().unwrap(),
-            &SyncDataType::Agent
-        )
-        .is_err());
+        assert!(
+            validate_and_filter_diff_items(items.as_array().unwrap(), &SyncDataType::Agent)
+                .is_err()
+        );
     }
 
     #[test]

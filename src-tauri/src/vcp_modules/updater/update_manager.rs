@@ -212,9 +212,9 @@ fn select_checksum_asset<'a>(assets: &'a [GitHubAsset], apk_name: &str) -> Optio
 /// 从按创建时间倒序的 Release 列表中选出第一个标签为合法 semver 的应用版本
 /// Release。非版本标签（如同步模块的独立发布）不参与应用 OTA 比较。
 fn select_latest_version_release(releases: Vec<GitHubRelease>) -> Option<GitHubRelease> {
-    releases.into_iter().find(|release| {
-        semver::Version::parse(release.tag_name.trim_start_matches('v')).is_ok()
-    })
+    releases
+        .into_iter()
+        .find(|release| semver::Version::parse(release.tag_name.trim_start_matches('v')).is_ok())
 }
 
 fn version_is_newer(latest: &str, current: &str) -> bool {
@@ -230,7 +230,9 @@ fn version_is_newer(latest: &str, current: &str) -> bool {
 /// 严格解析 `sha256sum` 标准格式：`<64hex>  <文件名>`（兼容二进制模式的 `*文件名`）。
 fn parse_sha256_sidecar(content: &str, expected_name: &str) -> Result<String, String> {
     let mut parts = content.trim().split_whitespace();
-    let hash = parts.next().ok_or_else(|| "SHA-256 校验文件为空".to_string())?;
+    let hash = parts
+        .next()
+        .ok_or_else(|| "SHA-256 校验文件为空".to_string())?;
     if hash.len() != 64 || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("SHA-256 校验文件哈希格式无效".to_string());
     }
@@ -239,7 +241,9 @@ fn parse_sha256_sidecar(content: &str, expected_name: &str) -> Result<String, St
         .ok_or_else(|| "SHA-256 校验文件缺少文件名".to_string())?;
     let name = name.strip_prefix('*').unwrap_or(name);
     if name != expected_name {
-        return Err(format!("SHA-256 校验文件名 {name} 与 APK {expected_name} 不一致"));
+        return Err(format!(
+            "SHA-256 校验文件名 {name} 与 APK {expected_name} 不一致"
+        ));
     }
     if parts.next().is_some() {
         return Err("SHA-256 校验文件包含多余内容".to_string());
@@ -352,7 +356,11 @@ async fn fetch_latest_release(client: &Client) -> Result<GitHubRelease, String> 
     Err(format!("GitHub API 错误 ({}): {}", status.as_u16(), text))
 }
 
-async fn fetch_apk_checksum(client: &Client, asset: &GitHubAsset, apk_name: &str) -> Result<String, String> {
+async fn fetch_apk_checksum(
+    client: &Client,
+    asset: &GitHubAsset,
+    apk_name: &str,
+) -> Result<String, String> {
     let url = validate_release_asset_url(&asset.browser_download_url, CHECKSUM_ASSET_SUFFIX)?;
     let res = client
         .get(url)
@@ -361,7 +369,10 @@ async fn fetch_apk_checksum(client: &Client, asset: &GitHubAsset, apk_name: &str
         .await
         .map_err(|e| format!("获取 SHA-256 校验文件失败: {e}"))?;
     if !res.status().is_success() {
-        return Err(format!("获取 SHA-256 校验文件失败 ({})", res.status().as_u16()));
+        return Err(format!(
+            "获取 SHA-256 校验文件失败 ({})",
+            res.status().as_u16()
+        ));
     }
     let text = res
         .text()
@@ -459,8 +470,8 @@ fn remove_canonical_legacy_dir(base_dir: &Path, leaf_name: &str) -> Result<bool,
 
     let canonical_base =
         std::fs::canonicalize(base_dir).map_err(|error| format!("规范化应用目录失败: {error}"))?;
-    let canonical_candidate =
-        std::fs::canonicalize(&candidate).map_err(|error| format!("规范化遗留目录失败: {error}"))?;
+    let canonical_candidate = std::fs::canonicalize(&candidate)
+        .map_err(|error| format!("规范化遗留目录失败: {error}"))?;
     if canonical_candidate.parent() != Some(canonical_base.as_path())
         || canonical_candidate.file_name() != Some(std::ffi::OsStr::new(leaf_name))
     {
@@ -630,12 +641,8 @@ pub async fn check_for_update(
     let (info, artifact) = match outcome {
         Ok(value) => value,
         Err(message) => {
-            let status = transition_failed(
-                &app,
-                &session,
-                UpdateError::new("check", message, true),
-            )
-            .await;
+            let status =
+                transition_failed(&app, &session, UpdateError::new("check", message, true)).await;
             return Ok(status);
         }
     };
@@ -683,7 +690,10 @@ pub async fn check_for_update(
 
     // 过期的残断文件不应参与续传
     let part_path = updates.join(APK_PART_FILENAME);
-    let part_len = tokio::fs::metadata(&part_path).await.map(|m| m.len()).unwrap_or(0);
+    let part_len = tokio::fs::metadata(&part_path)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
     if part_len > artifact.size {
         remove_file_if_exists(&part_path).await?;
     }
@@ -771,12 +781,7 @@ async fn run_update_download(
         .await;
 
         let progress_app = app.clone();
-        let progress_info = session
-            .inner
-            .read()
-            .await
-            .info
-            .clone();
+        let progress_info = session.inner.read().await.info.clone();
         let progress_downloaded = downloaded_arc.clone();
         let total = artifact.size;
         let last_emit = std::sync::Mutex::new(Instant::now() - PROGRESS_EMIT_INTERVAL);
@@ -833,12 +838,9 @@ async fn run_update_download(
                 continue;
             }
             Err(fatal) => {
-                let status = transition_failed(
-                    &app,
-                    &session,
-                    UpdateError::new("download", fatal, false),
-                )
-                .await;
+                let status =
+                    transition_failed(&app, &session, UpdateError::new("download", fatal, false))
+                        .await;
                 return Ok(status);
             }
         }
@@ -1135,8 +1137,8 @@ mod tests {
         cleanup_stale_installer_apks_at, parse_sha256_sidecar, remove_canonical_legacy_dir,
         select_apk_asset, select_checksum_asset, select_latest_version_release,
         stage_installer_apk_in_updates, validate_installer_path_in_updates,
-        validate_release_asset_url, version_is_newer, GitHubAsset, GitHubRelease,
-        APK_ASSET_SUFFIX, APK_FILENAME, STALE_INSTALLER_AGE,
+        validate_release_asset_url, version_is_newer, GitHubAsset, GitHubRelease, APK_ASSET_SUFFIX,
+        APK_FILENAME, STALE_INSTALLER_AGE,
     };
 
     fn asset(name: &str) -> GitHubAsset {
@@ -1206,13 +1208,11 @@ mod tests {
             hash
         );
         // sha256sum 二进制模式的 `*文件名` 兼容
-        assert!(
-            parse_sha256_sidecar(
-                &format!("{hash} *VCPMobile_v1.1.4_arm64-v8a.apk"),
-                "VCPMobile_v1.1.4_arm64-v8a.apk"
-            )
-            .is_ok()
-        );
+        assert!(parse_sha256_sidecar(
+            &format!("{hash} *VCPMobile_v1.1.4_arm64-v8a.apk"),
+            "VCPMobile_v1.1.4_arm64-v8a.apk"
+        )
+        .is_ok());
         // 大写哈希归一化为小写
         assert_eq!(
             parse_sha256_sidecar(
@@ -1223,7 +1223,11 @@ mod tests {
             "a".repeat(64)
         );
         // 文件名不匹配 / 畸形 / 多余内容全部拒绝
-        assert!(parse_sha256_sidecar(&format!("{hash}  other.apk"), "VCPMobile_v1.1.4_arm64-v8a.apk").is_err());
+        assert!(parse_sha256_sidecar(
+            &format!("{hash}  other.apk"),
+            "VCPMobile_v1.1.4_arm64-v8a.apk"
+        )
+        .is_err());
         assert!(parse_sha256_sidecar("not-a-hash  x.apk", "x.apk").is_err());
         assert!(parse_sha256_sidecar("", "x.apk").is_err());
         assert!(parse_sha256_sidecar(&format!("{hash}"), "x.apk").is_err());

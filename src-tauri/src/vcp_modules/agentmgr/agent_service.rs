@@ -38,7 +38,9 @@ async fn send_json(request: RequestBuilder, timeout: Duration) -> Result<Value, 
     let status = resp.status();
     if let Some(len) = resp.content_length() {
         if len > MAX_RESPONSE_BYTES {
-            return Err(format!("Agent 管理响应体异常庞大（{len} 字节），已拒绝读取"));
+            return Err(format!(
+                "Agent 管理响应体异常庞大（{len} 字节），已拒绝读取"
+            ));
         }
     }
     let bytes = resp
@@ -52,8 +54,8 @@ async fn send_json(request: RequestBuilder, timeout: Duration) -> Result<Value, 
         ));
     }
 
-    let body: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| "服务器返回了不符合契约的 JSON".to_string())?;
+    let body: Value =
+        serde_json::from_slice(&bytes).map_err(|_| "服务器返回了不符合契约的 JSON".to_string())?;
 
     if !status.is_success() {
         let detail = body
@@ -93,7 +95,9 @@ fn validate_agents(agents: &[Value]) -> Result<(), String> {
             .map(str::trim)
             .unwrap_or("");
         if chinese_name.is_empty() {
-            return Err(format!("{label}缺少 chineseName（运行时被静默跳过），已中止保存"));
+            return Err(format!(
+                "{label}缺少 chineseName（运行时被静默跳过），已中止保存"
+            ));
         }
         let model_id = agent
             .get("modelId")
