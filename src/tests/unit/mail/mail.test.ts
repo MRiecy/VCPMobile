@@ -3,12 +3,17 @@ import { createPinia, setActivePinia } from 'pinia';
 import {
   addressingOf,
   extractDetailMarkdown,
+  folderDisplayName,
+  mailBodyOf,
   mailPartyText,
   mailTimeLabel,
+  normalizeDetail,
+  normalizeFolders,
   normalizeMailboxes,
   normalizeMailList,
   normalizeMailSummary,
   normalizeWsStates,
+  organizeFolders,
   parseMailDate,
   renderMailMarkdown,
 } from '@/features/mail/mailTypes';
@@ -352,5 +357,78 @@ describe('邮箱 · V1.1（补丁端点）', () => {
     expect(await store.replyMail('msg_001', '回复正文')).toBe(true);
     expect(store.mails.find((mail) => mail.mailId === 'msg_001')?.readState).toBe('read');
     store.stopSession();
+  });
+});
+
+
+describe('邮件详情正文提取（mailBodyOf）', () => {
+  it('优先使用结构化 html 字段', () => {
+    const detail = normalizeDetail({
+      markdown: '# ClawEmail 邮件详情\n## 基本信息\n- 主题：x',
+      html: '<p>你好</p>',
+      text: '你好',
+      attachments: [],
+    });
+    expect(mailBodyOf(detail)).toEqual({ kind: 'html', html: '<p>你好</p>' });
+  });
+
+  it('无 html 时使用纯文本正文', () => {
+    const detail = normalizeDetail({ markdown: '', html: null, text: '第一行\n第二行', attachments: [] });
+    expect(mailBodyOf(detail)).toEqual({ kind: 'text', text: '第一行\n第二行' });
+  });
+
+  it('旧服务器兜底：从 AI markdown 中只提取正文段落', () => {
+    const aiMarkdown = [
+      '# ClawEmail 邮件详情',
+      '',
+      '## 基本信息',
+      '',
+      '- 邮箱：bot@claw.163.com',
+      '- mailId：`msg_1`',
+      '',
+      '## HTML 正文转 Markdown',
+      '',
+      '真正的正文内容',
+      '',
+      '## 附件',
+      '',
+      '无附件。',
+      '',
+      '## 可执行后续动作',
+      '',
+      '- 回复：调用 reply_mail',
+    ].join('\n');
+    const detail = normalizeDetail({ markdown: aiMarkdown, attachments: [] });
+    const body = mailBodyOf(detail);
+    expect(body?.kind).toBe('markdown');
+    if (body?.kind === 'markdown') {
+      expect(body.markdown).toBe('真正的正文内容');
+      expect(body.markdown).not.toContain('基本信息');
+      expect(body.markdown).not.toContain('可执行后续动作');
+    }
+  });
+
+  it('空详情返回 null', () => {
+    expect(mailBodyOf(normalizeDetail({}))).toBeNull();
+  });
+});
+
+describe('文件夹语义化（organizeFolders / folderDisplayName）', () => {
+  it('收件箱去重 + 系统文件夹中文化', () => {
+    const folders = normalizeFolders([
+      { id: '1', name: 'INBOX' },
+      { id: '2', name: 'Trash' },
+      { id: '3', name: 'Sent Messages' },
+      { id: '4', name: '项目归档2026' },
+      { id: '5', name: 'Drafts' },
+    ]);
+    const organized = organizeFolders(folders);
+    // INBOX 被去重（客户端有固定入口）
+    expect(organized.map((folder) => folder.id)).toEqual(['3', '5', '2', '4']);
+    expect(folderDisplayName('Sent Messages')).toBe('已发送');
+    expect(folderDisplayName('Drafts')).toBe('草稿箱');
+    expect(folderDisplayName('Trash')).toBe('垃圾箱');
+    // 自定义文件夹保留原名
+    expect(folderDisplayName('项目归档2026')).toBe('项目归档2026');
   });
 });

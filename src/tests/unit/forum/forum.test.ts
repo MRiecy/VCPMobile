@@ -250,3 +250,61 @@ describe('论坛 · Store 读写流', () => {
     expect(store.listLoaded).toBe(false);
   });
 });
+
+
+describe('replyCount 归一化（上游补丁字段）', () => {
+  it('数字保留；缺失/非法为 null', () => {
+    const posts = normalizePostList([
+      { uid: 'a', title: 'x', author: 'u', timestamp: '2026-08-01T10-30-00.000', replyCount: 5, mtimeMs: 2 },
+      { uid: 'b', title: 'y', author: 'u', timestamp: '2026-08-01T10-30-00.000', mtimeMs: 1 },
+    ]);
+    expect(posts[0].replyCount).toBe(5);
+    expect(posts[1].replyCount).toBeNull();
+  });
+});
+
+describe('论坛删除（store.remove）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    clearInvokeMocks();
+  });
+
+  it('删楼层携带 floor 参数；成功后详情缓存失效并重拉', async () => {
+    const calls: Array<{ cmd: string; args: Record<string, unknown> }> = [];
+    mockInvoke('forum_delete', (args) => {
+      calls.push({ cmd: 'forum_delete', args: args as Record<string, unknown> });
+      return { success: true };
+    });
+    mockInvoke('forum_get_post', () => {
+      calls.push({ cmd: 'forum_get_post', args: {} });
+      return { success: true, content: '# t\n\n**作者:** u\n\n---\n\n正文' };
+    });
+    mockInvoke('forum_list_posts', () => {
+      calls.push({ cmd: 'forum_list_posts', args: {} });
+      return { success: true, posts: [] };
+    });
+
+    const store = useForumStore();
+    expect(await store.remove('post_uid_1', 3)).toBe(true);
+    expect(calls[0]).toEqual({ cmd: 'forum_delete', args: { uid: 'post_uid_1', floor: 3 } });
+    expect(calls.slice(1).map((c) => c.cmd).sort()).toEqual(['forum_get_post', 'forum_list_posts']);
+  });
+
+  it('删整帖不传 floor；失败后返回 false', async () => {
+    const seen: Record<string, unknown> = {};
+    mockInvoke('forum_delete', (args) => {
+      Object.assign(seen, args);
+      return { success: true };
+    });
+    mockInvoke('forum_list_posts', () => ({ success: true, posts: [] }));
+
+    const store = useForumStore();
+    expect(await store.remove('post_uid_2')).toBe(true);
+    expect(seen).toEqual({ uid: 'post_uid_2', floor: null });
+
+    mockInvoke('forum_delete', () => {
+      throw new Error('服务器忙');
+    });
+    expect(await store.remove('post_uid_3', 1)).toBe(false);
+  });
+});
