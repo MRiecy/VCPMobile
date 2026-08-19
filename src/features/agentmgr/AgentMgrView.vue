@@ -27,6 +27,10 @@ const emit = defineEmits<{ close: [] }>();
 
 const store = useAgentMgrStore();
 
+// 模板插值无法内联包含 }} 的字符串字面量，提示文案走 v-text
+const delegationTemplateHint =
+  '可用占位符：{{SenderName}}、{{TaskPrompt}}。留空使用内置默认。';
+
 const activeTab = ref<'agents' | 'global'>('agents');
 
 // ---------- 编辑器（滑入子页） ----------
@@ -281,7 +285,7 @@ const emptyState = computed(() => {
               rows="4"
               placeholder="留空 = 使用后端内置模板"
             />
-            <p class="am-hint">可用占位符：{{ '{{SenderName}}' }}、{{ '{{TaskPrompt}}' }}。留空使用内置默认。</p>
+            <p class="am-hint" v-text="delegationTemplateHint" />
           </label>
           <label class="am-field">
             <span class="am-label">委托催促提示词</span>

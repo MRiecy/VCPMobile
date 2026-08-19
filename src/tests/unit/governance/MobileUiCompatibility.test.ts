@@ -118,6 +118,20 @@ describe('Android mobile UI compatibility contracts', () => {
     }
   });
 
+  it('forbids brace-literal interpolations that break the Vue template parser', () => {
+    // {{ '...'}}...' }} 这类内联字符串字面量会让模板解析器报
+    // "Unterminated string constant"（插值内的 }} 被当作提前闭合），
+    // 且只在运行/构建时暴露——用 v-text 绑定代替。
+    const forbiddenPattern = /\{\{\s*['"`][^'"`]*\{\{|\{\{\s*['"`][^'"`]*\}\}/;
+    for (const [path, source] of productionUiSources) {
+      if (!path.endsWith('.vue')) continue;
+      expect(
+        forbiddenPattern.test(source),
+        `${path} contains a brace-literal interpolation (use v-text instead)`,
+      ).toBe(false);
+    }
+  });
+
   it('requires explicit blur approval and forbids direct safe-area env consumers', () => {
     for (const [path, source] of productionUiSources) {
       const hasBackdropBlur = /\bbackdrop-blur(?:-|\b)|(?:-webkit-)?backdrop-filter\s*:/.test(

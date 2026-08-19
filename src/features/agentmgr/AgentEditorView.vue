@@ -66,6 +66,9 @@ function pickModel(modelId: string): void {
 // ---------- 占位符 chips ----------
 const promptTextarea = ref<HTMLTextAreaElement | null>(null);
 const PLACEHOLDER_CHIPS = ['{{MaidName}}', '{{角色卡别名}}'];
+// 模板插值无法内联包含 }} 的字符串字面量，提示文案走 v-text
+const systemPromptHint =
+  '{{MaidName}} 运行时替换为中文名；{{角色卡别名}} 引用服务器 Agent 目录的角色卡。';
 
 function insertPlaceholder(placeholder: string): void {
   const textarea = promptTextarea.value;
@@ -283,9 +286,7 @@ async function remove(): Promise<void> {
           rows="7"
           placeholder="留空 = You are a helpful AI assistant named {{MaidName}}."
         />
-        <p class="ae-hint">
-          {{ '{{MaidName}}' }} 运行时替换为中文名；{{ '{{角色卡别名}}' }} 引用服务器 Agent 目录的角色卡。
-        </p>
+        <p class="ae-hint" v-text="systemPromptHint" />
       </section>
 
       <div class="ae-footer-spacer" />
