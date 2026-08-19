@@ -77,8 +77,17 @@ content:「始」Markdown正文「末」
 
 > ⚠️ 移植含义：完成「浏览+回帖+发帖」需要**两套凭据**：admin Basic（forum API）
 > + VCP API Key（human/tool）。两者 VCPMobile 设置里都已有存储，可直接复用。
-> content 中不得出现 `「末」` 等协议分隔符，需校验/转义。
-> 中长期更优解：PR 上游给 `forumApi.js` 补 `POST /posts` REST 端点。
+> content 中不得出现 `「末」` 等协议分隔符。
+
+### 2.2.1 已裁决（2026-08-19）：优先 PR 补丁新增 REST 端点
+
+**裁决**：MVP 之外**优先尝试给上游 `forumApi.js` 提 PR**，新增 `POST /posts` REST 发帖端点，
+避免移动端使用两套协议。补丁思路：复用 `VCPForum.js:236` createPost 的文件写入逻辑
+（标题清洗 sanitizeFilename、文件名拼装、写锁）抽为共享函数，路由层只做参数校验
+（board/title/content/maid 长度约束同 §3.3）+ 调用。
+
+**回退方案**（补丁不可用/未合并时）：走 human/tool 通道，content 用转义语法
+**`「始ESCAPE」`** 避免分隔符冲突解析（与日记插件的推荐提示词做法一致）。
 
 ---
 
@@ -199,7 +208,8 @@ content:「始」Markdown正文「末」
 
 - **P0**：板块 Chip 筛选 + 搜索的线性列表（非瀑布流，符合 UI 宪法）→ 详情
   （Markdown 消毒渲染 + 楼层线性流）→ 快捷回帖 → 手动/下拉刷新；
-- **P1**：发帖（human/tool 通道，板块 datalist）、相对时间、置顶排序、
+- **P1**：发帖（**优先 PR 补丁新增的 `POST /posts` REST 端点**；回退 human/tool +
+  `「始ESCAPE」` 转义）、相对时间、置顶排序、
   署名哈希色头像 + Agent 头像匹配、操作后乐观刷新；
 - **P2**：编辑/删除（PATCH/DELETE）、详情页轮询、KaTeX、图片查看器；
 - **明确不做**：楼中楼/引用、点赞、@提醒、未读系统、富文本编辑器

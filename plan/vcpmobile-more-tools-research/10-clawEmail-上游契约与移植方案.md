@@ -21,8 +21,10 @@
   幂等状态/附件文件；列表/详情请求实时穿透到云端。
 - 现有 4 条 `/admin_api/claw-mail/*` 路由已能支撑 **MVP：账户切换 + 列表分页 + 详情 + 移入垃圾箱**。
 - **最大缺口：发信/回复无 HTTP 出口**；但插件内 sendMail/replyMail/listFolders/
-  downloadAttachment 均已实现，上游补丁 <150 行。
-- **移动端直连 IMAP/SMTP 基本不可行**（API Key 认证体系，非邮箱密码）→ 推荐经 VCP 后端代理。
+  downloadAttachment 均已实现，上游补丁量小。
+- **SDK 已是最新（0.2.4），且其实际能力比插件封装的多得多**：标读/全文搜索/移动/
+  转发/附件流/原始 HTML 均可直接补封装（§8.0），无需升级 SDK。
+- **移动端直连 IMAP/SMTP 基本不可行**（API Key 认证体系，非邮箱密码）→ 已裁决经 VCP 后端代理。
 
 ---
 
@@ -148,7 +150,30 @@ Base `/admin_api/claw-mail`，Basic Auth。成功 `{status:'success', ...}`，
 
 ## 8. 移植路线评估
 
-### 路线 A：经 VCP 后端代理（✅ 推荐）
+### 8.0 SDK 版本核查与能力修正（2026-08-19 裁决补充）
+
+- **版本核查**：`@clawemail/node-sdk` npm latest = **0.2.4**（2026-04-13），插件已在用，
+  **无新版本可升级**；官方另有 `@clawemail/mail-cli` 0.2.4（CLI 封装，可作为接口调用参考实现）。
+- **⚠️ 重要修正**：直接核查 0.2.4 的类型定义（`dist/types/shared/ajax-transport.d.ts`）后确认，
+  插件 README 对 SDK 能力的摸底**不完整**。`AjaxTransport` 实际完整方法面：
+
+  | 方法 | 能力 | 插件是否已封装 |
+  | --- | --- | --- |
+  | `listMessages` / `listFolders` / `moveMessages` | 列表/文件夹/移动 | ✅ 已用 |
+  | `searchMessages({fid, from, to, subject, keyword, since, before, unread, fts, limit})` | **搜索（含 fts 全文）** | ❌ 未封装但可用 |
+  | `markMessages(ids, {read})` | **独立标读/标未读** | ❌ 未封装但可用 |
+  | `forwardMessage` | 转发 | ❌ 未封装但可用 |
+  | `readMessage({id, fid, mode:'html'\|'text'\|'both', markRead})` | **可取原始 HTML** | ❌ 插件只走 mail.read |
+  | `getAttachmentStream(msgId, partId)` | **附件流式下载** | ❌ 未封装但可用 |
+
+  **结论：V1.1/V2 的几乎全部缺口（标读/搜索/移动/转发/附件流/原始 HTML）都不需要
+  SDK 升级，只需在插件内补封装 + admin 路由**——上游补丁的成功率与价值大幅提高。
+  官方文档（https://claw.163.com/projects/doc/#mailcli ）证实这些能力与 mail-cli 的
+  `mail search/mark/move`、`read body --html`、`compose send` 一一对应；
+  文档中"IMAP 账户"指 mail-cli 绑定的外部邮箱，与 clawEmail 账户体系无关，
+  不改变"移动端不直连 IMAP"的裁决。
+
+### 路线 A：经 VCP 后端代理（✅ 推荐，已裁决）
 
 - 利：与 Agent 看到**同一邮箱视图/已读状态/缓存**，无状态漂移；认证复用 Admin Basic；
   服务端 WS 保证移动端轮询拿到热数据；附件解析/HTML→Markdown 全部白嫖服务端；
@@ -162,19 +187,23 @@ Base `/admin_api/claw-mail`，Basic Auth。成功 `{status:'success', ...}`，
 - 即便可行：需引入 Android 邮件库自建 MIME/长连保活，已读状态与 Agent 侧漂移，密钥面扩大；
 - 变体 B'（直连 ClawEmail HTTP API）：协议私有文档不足、API Key 下发设备不安全——明确不建议。
 
-### 能力缺口与上游补丁（<150 行，风险低）
+### 能力缺口与上游补丁（已裁决：走 PR 补丁路线）
 
 | 能力 | 现状 | 补救 |
 | --- | --- | --- |
 | 列表/详情/分页/垃圾箱 | ✅ 现有路由 | — |
-| 标读 | ⚠️ 仅详情顺带 | 上游加独立 mark-read/unread |
+| 标读/标未读 | ⚠️ 仅详情顺带 | 插件封装 `transport.markMessages` + admin 路由（SDK 现成） |
 | **发送/回复** | ❌ 无路由 | 插件 `sendMail`:1254 / `replyMail`:1345 成熟，加路由+admin 包装 |
-| 文件夹列表 | ❌ | `listFolders`:803 已实现 |
-| 附件下载 | ❌ | 需新增字节流响应的 admin 方法 |
-| 推送出口/搜索/星标 | ❌ | V2 上游需求 |
+| 文件夹列表 | ❌ | `listFolders`:803 已实现，加路由即可 |
+| 附件下载 | ❌ | 封装 `getAttachmentStream` → admin 字节流响应 |
+| 搜索（含全文 fts） | ❌ | 封装 `transport.searchMessages`（SDK 现成） |
+| 原始 HTML 详情 | ❌ | 封装 `transport.readMessage({mode:'html'})`（SDK 现成） |
+| 推送出口/星标 | ❌ | V2：SSE/回调路由；星标需确认 SDK MarkFlags 扩展性 |
 
 补丁模式：参照现有 `adminListEmails`/`adminReadMail` 包装（每个约 10 行）+
-clawMail.js 加 4-5 条路由。VCPToolBox 为用户自部署，可先本地补丁验证再提上游 PR。
+clawMail.js 加 4-6 条路由。**因 SDK 能力现成，补丁量比原估更小、覆盖面更大**。
+VCPToolBox 为用户自部署，先本地补丁验证再提上游 PR（补丁开发不在本参考检出上进行，
+属后续施工议题）。
 
 ---
 
@@ -191,15 +220,16 @@ clawMail.js 加 4-5 条路由。VCPToolBox 为用户自部署，可先本地补�
 5. 新邮件感知：前台 30-60s 轮询 state 比对 updatedAt/未读数；
 6. 错误处理：401（凭据错误，停轮询）/429（读 Retry-After）/503（插件未加载专态）。
 
-### V1.1（依赖上游 <150 行补丁）
+### V1.1（依赖上游补丁，SDK 能力现成无需升级）
 
 发送/回复 + 编辑器 UI（reply 传 mailId，服务端自动带原邮件上下文与标读）；
-文件夹列表 + fid 切换；附件字节流下载 + 预览/保存；独立标读/标未读。
+文件夹列表 + fid 切换；附件字节流下载（getAttachmentStream）+ 预览/保存；
+独立标读/标未读（markMessages）；搜索（searchMessages，含 fts 全文）。
 
 ### V2（上游需求清单）
 
-新邮件 SSE/回调 → 推送通知；全文搜索（SDK mail.search）；星标；移动任意文件夹；
-详情返回原始 HTML 保真渲染。
+新邮件 SSE/回调 → 推送通知；星标（需确认 SDK MarkFlags 扩展）；
+详情返回原始 HTML（readMessage mode:'html'，SDK 已支持，纳入补丁即可提前）。
 
 ---
 

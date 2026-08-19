@@ -145,6 +145,8 @@
 1. 任务编辑器的 Agent 选择器底部加「管理 Agent…」条目 → 打开 Agent 管理页；
 2. Agent 管理页保存后，任务中心 store 的 agent options 缓存失效重拉。
 
+> ✅ **已裁决（2026-08-19）**：采纳 A，独立入口。二期角色卡/复杂占位符解析功能暂不做。
+
 **额外的移动端增值点（引用完整性）**：chineseName 是 dispatch key，**改名/删除 Agent
 会使引用它的任务静默失效**。后端无外键概念，移动端可在改名/删除时扫描
 task-assistant config 的 `targets.agents`，弹确认列出受影响任务——这是桌面端和
@@ -167,9 +169,10 @@ AdminPanel 都没有的能力，成本低价值高。
   → 替换 agents → POST → 再 GET 校验；编辑期间检测他端变更提示冲突；
 - **保留未知字段**：浅拷贝改键，不重建对象（吸取 AdminPanel-Vue 教训）。
 
-### 二期
+### 二期（已裁决：本期不做）
 
-角色卡（Agent/*.txt）查看/编辑（`/admin_api/agents*` 族）；agent_scores 积分展示。
+角色卡（Agent/*.txt）查看/编辑（`/admin_api/agents*` 族）——涉及复杂占位符解析，暂缓；
+agent_scores 积分展示。
 
 ### 明确不做
 
