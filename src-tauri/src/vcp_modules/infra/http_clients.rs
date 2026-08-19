@@ -27,17 +27,16 @@ pub enum HttpProfile {
     /// 聊天流式请求（SSE）。无总超时（流式响应时长不可预估），
     /// TCP keepalive 20s 保活探测，空闲连接 60s 淘汰。
     ChatStream,
-    /// VCP 服务器 admin_api 调用（日记/表情/日志中心/任务调度等）。
+    /// VCP 服务器 admin_api 调用（表情/日志中心/任务调度等）。
     /// 连接超时 10s；禁止重定向（admin_api 不应跳转，跳转即异常）。
     AdminApi,
-    /// 大文件下载（APK 等）。仅连接超时，整体时长由调用方的
-    /// 停滞判死与重试编排控制。
-    Download,
+    // 备注：updater 的下载 Client 为其场景特化（GitHub redirect 策略 + 停滞判死
+    // 编排），按 S0 裁决不迁入本注册表；若未来出现第二个下载类消费者，
+    // 再考虑增设 Download 画像。
 }
 
 static CHAT_STREAM_CLIENT: OnceLock<Client> = OnceLock::new();
 static ADMIN_API_CLIENT: OnceLock<Client> = OnceLock::new();
-static DOWNLOAD_CLIENT: OnceLock<Client> = OnceLock::new();
 
 fn build_client(profile: HttpProfile) -> Client {
     let builder = Client::builder();
@@ -49,9 +48,6 @@ fn build_client(profile: HttpProfile) -> Client {
             .connect_timeout(Duration::from_secs(10))
             .pool_idle_timeout(Duration::from_secs(60))
             .redirect(reqwest::redirect::Policy::none()),
-        HttpProfile::Download => builder
-            .connect_timeout(Duration::from_secs(15))
-            .pool_idle_timeout(Duration::from_secs(30)),
     };
     // Client::build 仅在 TLS 后端初始化失败等极端情况下失败；
     // 此时进程内网络栈已不可用，panic 信息带画像名便于定位。
@@ -65,7 +61,6 @@ pub fn client(profile: HttpProfile) -> &'static Client {
     match profile {
         HttpProfile::ChatStream => CHAT_STREAM_CLIENT.get_or_init(|| build_client(profile)),
         HttpProfile::AdminApi => ADMIN_API_CLIENT.get_or_init(|| build_client(profile)),
-        HttpProfile::Download => DOWNLOAD_CLIENT.get_or_init(|| build_client(profile)),
     }
 }
 
@@ -84,10 +79,7 @@ mod tests {
     fn different_profiles_are_distinct_instances() {
         let chat = client(HttpProfile::ChatStream);
         let admin = client(HttpProfile::AdminApi);
-        let download = client(HttpProfile::Download);
         assert!(!std::ptr::eq(chat, admin));
-        assert!(!std::ptr::eq(chat, download));
-        assert!(!std::ptr::eq(admin, download));
     }
 
     #[test]

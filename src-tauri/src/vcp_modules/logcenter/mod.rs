@@ -6,4 +6,4 @@
 
 mod log_service;
 
-pub use log_service::{logcenter_clear_server, logcenter_fetch, LogFetchResult};
+pub use log_service::{logcenter_clear_server, logcenter_fetch};

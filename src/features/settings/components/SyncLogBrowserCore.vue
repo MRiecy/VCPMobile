@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { FileText, Trash2, Copy, ChevronLeft, ChevronRight } from 'lucide-vue-next';
 import { useOverlayStore } from '../../../core/stores/overlay';
 import { useNotificationStore } from '../../../core/stores/notification';
+import { useSyncSessionStore } from '../../../core/stores/syncSession';
 
 interface LogFile {
   filename: string;
@@ -22,6 +23,7 @@ const errorText = ref('');
 
 const overlayStore = useOverlayStore();
 const notificationStore = useNotificationStore();
+const syncSessionStore = useSyncSessionStore();
 const currentFile = ref<string | null>(null);
 const fileContent = ref<string>('');
 const currentPage = ref(0);
@@ -148,6 +150,18 @@ const lineClass = (line: string) => {
   if (line.includes('[INFO]') && /success|completed/i.test(line)) return 'text-green-400';
   return 'text-white/70';
 };
+
+// 本组件随同步页打开即挂载（与实时视图同处水平滚动容器），onMounted 只能拿到打开页时的快照。
+// 同步完成后新日志已落盘但列表不会自动更新，因此切到“历史”页签时重新拉取；
+// 正在查看某个文件内容时不打断当前阅读。
+watch(
+  () => syncSessionStore.activeTab,
+  (tab) => {
+    if (tab === 'history' && !currentFile.value) {
+      loadFiles();
+    }
+  },
+);
 
 onMounted(() => {
   loadFiles();
