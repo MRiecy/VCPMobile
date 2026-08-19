@@ -309,9 +309,9 @@ const handlePrerenderToggle = async (val: boolean) => {
                 </span>
               </div>
 
-              <!-- 统计条：messages 阶段起随进度事件实时跳动，直至终态 -->
+              <!-- 统计条：messages 阶段起随进度事件实时跳动；终态即使全零也展示 -->
               <div
-                v-if="store.summary.totalTopics > 0"
+                v-if="store.summary.totalTopics > 0 || store.status === 'completed' || store.status === 'completed_with_warnings' || store.status === 'error'"
                 class="grid grid-cols-4 mt-3 border-y border-white/8 py-2 font-mono text-center"
               >
                 <div>
