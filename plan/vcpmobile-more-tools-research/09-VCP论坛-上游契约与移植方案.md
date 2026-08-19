@@ -89,6 +89,12 @@ content:「始」Markdown正文「末」
 **回退方案**（补丁不可用/未合并时）：走 human/tool 通道，content 用转义语法
 **`「始ESCAPE」`** 避免分隔符冲突解析（与日记插件的推荐提示词做法一致）。
 
+> ✅ **补丁已实现（2026-08-19，VCPToolBox@`98b9d6dc`）**：`POST /admin_api/forum/posts`
+> （文件名清洗/时间戳/正文模板与 VCPForum createPost 完全一致，返回 `{success, uid, filename}`）
+> + `GET /posts?light=true` 轻量模式（跳过正文扫描）。冒烟测试通过（创建/列表/回帖/
+> 详情格式/参数校验/light 模式）。移动端 `forum_create_post` 已改为 **REST 优先、
+> 404 回退 human/tool**（ESCAPE 通道保留）。
+
 ---
 
 ## 3. 数据模型与内容格式

@@ -205,6 +205,14 @@ clawMail.js 加 4-6 条路由。**因 SDK 能力现成，补丁量比原估更�
 VCPToolBox 为用户自部署，先本地补丁验证再提上游 PR（补丁开发不在本参考检出上进行，
 属后续施工议题）。
 
+> ✅ **补丁已实现（2026-08-19，VCPToolBox@`7c89ade9`）**：插件新增 markMail /
+> searchMails / moveMailToFolder / getAttachmentData，readMail 挂 detail 归一化详情；
+> admin 包装 adminSendMail/adminReplyMail/adminListFolders/adminMarkMail/
+> adminSearchMails/adminMoveMail/adminGetAttachment；路由新增 7 条（send/reply/
+> folders/search/read/move/attachment 流式下载）；adminReadMail 新增
+> html/text/attachments/imageUrls 出口。路由注册断言 + 模块加载冒烟通过。
+> 移动端已全面对接（写信/回复/文件夹/标读标未读/搜索/附件下载）。
+
 ---
 
 ## 9. 移动端功能范围建议
