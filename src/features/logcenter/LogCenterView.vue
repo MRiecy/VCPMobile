@@ -14,11 +14,11 @@ import {
   Ellipsis,
   Pause,
   Play,
-  RefreshCw,
   Search,
   ArrowDownUp,
 } from 'lucide-vue-next';
 import SlidePage from '../../components/ui/SlidePage.vue';
+import RefreshButton from '../../components/ui/RefreshButton.vue';
 import BottomSheet, { type ActionItem } from '../../components/ui/BottomSheet.vue';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { useNotificationStore } from '../../core/stores/notification';
@@ -307,9 +307,7 @@ const statusLine = computed(() => {
           >
             <component :is="store.isPaused ? Play : Pause" :size="17" />
           </button>
-          <button type="button" class="log-icon-btn" aria-label="全量刷新" @click="store.refresh()">
-            <RefreshCw :size="17" :class="{ 'custom-spin': store.isLoading }" />
-          </button>
+          <RefreshButton label="全量刷新" :loading="store.isLoading" @refresh="store.refresh()" />
           <button
             type="button"
             class="log-icon-btn"

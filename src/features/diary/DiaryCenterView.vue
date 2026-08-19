@@ -5,12 +5,12 @@ import {
   ChevronLeft,
   FolderCog,
   Plus,
-  RefreshCw,
   Search,
   Sparkles,
   X,
 } from "lucide-vue-next";
 import SlidePage from "../../components/ui/SlidePage.vue";
+import RefreshButton from "../../components/ui/RefreshButton.vue";
 import { useKeyboardInsets } from "../../core/composables/useKeyboardInsets";
 import { useModalHistory } from "../../core/composables/useModalHistory";
 import { useNotificationStore } from "../../core/stores/notification";
@@ -655,9 +655,7 @@ onBeforeUnmount(() => {
               >
                 <Search :size="18" />
               </button>
-              <button type="button" class="diary-icon-button" aria-label="刷新" :disabled="listLoading" @click="refreshCurrent">
-                <RefreshCw :size="17" :class="listRefreshing ? 'animate-spin' : ''" />
-              </button>
+              <RefreshButton bare class="diary-icon-button" label="刷新" :size="17" :loading="listRefreshing" :disabled="listLoading" @refresh="refreshCurrent" />
               <button type="button" class="diary-icon-button" aria-label="管理文件夹" @click="openSheet('folderManager')">
                 <FolderCog :size="18" />
               </button>

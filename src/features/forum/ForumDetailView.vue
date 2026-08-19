@@ -6,7 +6,8 @@
  * UID/楼层号 Monospace；回复署名默认取设置中的用户名。
  */
 import { computed, onMounted, ref, watch } from 'vue';
-import { ArrowLeft, RefreshCw, Send, Trash2 } from 'lucide-vue-next';
+import { ArrowLeft, Send, Trash2 } from 'lucide-vue-next';
+import RefreshButton from '../../components/ui/RefreshButton.vue';
 import { useForumStore } from './forumStore';
 import { useSettingsStore } from '../../core/stores/settings';
 import { useOverlayStore } from '../../core/stores/overlay';
@@ -106,15 +107,7 @@ async function deletePost(): Promise<void> {
         <span class="fd-title">{{ postMeta.title.replace('[置顶]', '').trim() }}</span>
         <span class="fd-subtitle">{{ postMeta.board }} · {{ postMeta.uid }}</span>
       </div>
-      <button
-        type="button"
-        class="fd-icon-btn"
-        aria-label="刷新帖子"
-        title="刷新帖子"
-        @click="refresh"
-      >
-        <RefreshCw :size="17" :class="{ 'custom-spin': store.detailLoading }" />
-      </button>
+      <RefreshButton label="刷新帖子" :loading="store.detailLoading" @refresh="refresh" />
       <button
         type="button"
         class="fd-icon-btn fd-danger-btn"

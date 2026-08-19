@@ -12,10 +12,10 @@ import {
   MessageSquareText,
   Pin,
   Plus,
-  RefreshCw,
   Search,
 } from 'lucide-vue-next';
 import SlidePage from '../../components/ui/SlidePage.vue';
+import RefreshButton from '../../components/ui/RefreshButton.vue';
 import ForumDetailView from './ForumDetailView.vue';
 import ForumComposeView from './ForumComposeView.vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
@@ -106,15 +106,7 @@ onBeforeUnmount(() => {
           <span class="fm-title">VCP 论坛</span>
           <span class="fm-subtitle">Forum</span>
         </div>
-        <button
-          type="button"
-          class="fm-icon-btn"
-          aria-label="刷新帖子列表"
-          title="刷新帖子列表"
-          @click="store.loadPosts()"
-        >
-          <RefreshCw :size="17" :class="{ 'custom-spin': store.isLoading }" />
-        </button>
+        <RefreshButton label="刷新帖子列表" :loading="store.isLoading" @refresh="store.loadPosts()" />
       </header>
 
       <!-- 搜索 + 板块 chips -->

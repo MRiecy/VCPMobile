@@ -6,8 +6,9 @@
  * 「全局设置」Tab 编辑 7 个顶层字段。改名/删除前的任务引用扫描在编辑器内完成。
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
-import { ArrowLeft, Bot, ChevronRight, Plus, RefreshCw } from 'lucide-vue-next';
+import { ArrowLeft, Bot, ChevronRight, Plus } from 'lucide-vue-next';
 import SlidePage from '../../components/ui/SlidePage.vue';
+import RefreshButton from '../../components/ui/RefreshButton.vue';
 import AgentEditorView from './AgentEditorView.vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 import { useAgentMgrStore } from './agentMgrStore';
@@ -143,15 +144,7 @@ const emptyState = computed(() => {
           <span class="am-title">Agent 管理</span>
           <span class="am-subtitle">AgentAssistant</span>
         </div>
-        <button
-          type="button"
-          class="am-icon-btn"
-          aria-label="刷新配置"
-          title="刷新配置"
-          @click="store.loadConfig()"
-        >
-          <RefreshCw :size="17" :class="{ 'custom-spin': store.isLoading }" />
-        </button>
+        <RefreshButton label="刷新配置" :loading="store.isLoading" @refresh="store.loadConfig()" />
       </header>
 
       <!-- 分段控件 -->

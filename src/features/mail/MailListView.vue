@@ -14,11 +14,11 @@ import {
   Mail,
   Paperclip,
   PenLine,
-  RefreshCw,
   Search,
   X,
 } from 'lucide-vue-next';
 import SlidePage from '../../components/ui/SlidePage.vue';
+import RefreshButton from '../../components/ui/RefreshButton.vue';
 import MailDetailView from './MailDetailView.vue';
 import MailComposeView from './MailComposeView.vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
@@ -119,15 +119,7 @@ onBeforeUnmount(() => {
           <span class="ml-title">邮箱</span>
           <span class="ml-subtitle">clawEmail</span>
         </div>
-        <button
-          type="button"
-          class="ml-icon-btn"
-          aria-label="刷新邮箱"
-          title="刷新邮箱（穿透云端）"
-          @click="store.refresh()"
-        >
-          <RefreshCw :size="17" :class="{ 'custom-spin': store.isLoading }" />
-        </button>
+        <RefreshButton label="刷新邮箱（穿透云端）" :loading="store.isLoading" @refresh="store.refresh()" />
       </header>
 
       <!-- 账户切换条 + 未读过滤 -->

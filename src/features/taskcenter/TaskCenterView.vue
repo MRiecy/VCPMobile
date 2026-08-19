@@ -12,9 +12,9 @@ import {
   CircleAlert,
   Play,
   Plus,
-  RefreshCw,
 } from 'lucide-vue-next';
 import SlidePage from '../../components/ui/SlidePage.vue';
+import RefreshButton from '../../components/ui/RefreshButton.vue';
 import SettingsSwitch from '../../components/settings/SettingsSwitch.vue';
 import TaskEditorView from './TaskEditorView.vue';
 import DelegationPanel from './components/DelegationPanel.vue';
@@ -185,15 +185,7 @@ const emptyState = computed(() => {
           <span class="tc-title">任务调度</span>
           <span class="tc-subtitle">TaskAssistant</span>
         </div>
-        <button
-          type="button"
-          class="tc-icon-btn"
-          aria-label="刷新任务状态"
-          title="刷新任务状态"
-          @click="store.refresh()"
-        >
-          <RefreshCw :size="17" :class="{ 'custom-spin': store.isLoading }" />
-        </button>
+        <RefreshButton label="刷新任务状态" :loading="store.isLoading" @refresh="store.refresh()" />
       </header>
 
       <!-- 状态条：全局开关 + 统计 -->

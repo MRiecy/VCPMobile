@@ -6,8 +6,8 @@ import {
   Copy,
   FolderInput,
   PackageCheck,
-  RefreshCw,
 } from "lucide-vue-next";
+import RefreshButton from "../../../components/ui/RefreshButton.vue";
 import { useVcpCliStore } from "../vcpCliStore";
 
 const store = useVcpCliStore();
@@ -160,15 +160,15 @@ watch(selectedSkillId, () => {
       >
         <FolderInput :size="13" />导入 ZIP
       </button>
-      <button
-        type="button"
+      <RefreshButton
+        bare
         class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg opacity-45 active:opacity-100"
-        aria-label="刷新 Skills"
+        label="刷新 Skills"
+        :size="14"
+        :loading="skillsLoading"
         :disabled="skillsLoading"
-        @click="store.loadSkills(true)"
-      >
-        <RefreshCw :size="14" :class="skillsLoading ? 'animate-spin' : ''" />
-      </button>
+        @refresh="store.loadSkills(true)"
+      />
     </div>
 
     <div

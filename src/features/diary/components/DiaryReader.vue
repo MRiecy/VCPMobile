@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { ChevronLeft, MoreHorizontal, Pencil, RefreshCw } from "lucide-vue-next";
+import { ChevronLeft, MoreHorizontal, Pencil } from "lucide-vue-next";
+import RefreshButton from "../../../components/ui/RefreshButton.vue";
 import type { DiaryDocument, DiaryUiError } from "../types";
 import { parseDiaryFileName } from "../types";
 import { renderDiaryMarkdownWithHighlight } from "../diaryMarkdown";
@@ -41,15 +42,15 @@ const renderedContent = computed(() =>
           <span class="diary-page-eyebrow">VCP MEMO · {{ document?.key.folder || "DOCUMENT" }}</span>
           <h2>{{ presentation?.title || "日记正文" }}</h2>
         </div>
-        <button
-          type="button"
+        <RefreshButton
+          bare
           class="diary-icon-button"
+          label="刷新正文"
+          :size="17"
+          :loading="refreshing"
           :disabled="loading || refreshing"
-          aria-label="刷新正文"
-          @click="emit('refresh')"
-        >
-          <RefreshCw :size="17" :class="refreshing ? 'animate-spin' : ''" />
-        </button>
+          @refresh="emit('refresh')"
+        />
         <button
           type="button"
           class="diary-icon-button"
