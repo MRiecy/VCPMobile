@@ -386,6 +386,41 @@ pub async fn mail_mark<R: Runtime>(
     .await
 }
 
+/// 移动到指定文件夹（target = 文件夹 id；从「已删除」恢复 = 移到收件箱 id）。
+#[tauri::command]
+pub async fn mail_move<R: Runtime>(
+    app_handle: AppHandle<R>,
+    settings_state: State<'_, SettingsState>,
+    mail_id: String,
+    target: String,
+    mailbox: Option<String>,
+    user: Option<String>,
+) -> Result<Value, String> {
+    let settings = settings_of(app_handle, settings_state).await?;
+    let mail_id = validate_mail_id(&mail_id)?;
+    validate_addressing(&mailbox, &user)?;
+    let target = target.trim();
+    if target.is_empty() || target.chars().count() > 128 || target.chars().any(char::is_control) {
+        return Err("目标文件夹 id 无效".to_string());
+    }
+
+    let url = build_url(&settings, &["claw-mail", "messages", mail_id, "move"])?;
+    send_json(
+        admin_api::client_post_json(
+            &settings,
+            &url,
+            &serde_json::json!({
+                "target": target,
+                "mailbox": mailbox.as_deref().map(str::trim),
+                "user": user.as_deref().map(str::trim),
+            }),
+        )?,
+        DEFAULT_TIMEOUT,
+        MAX_DETAIL_BYTES,
+    )
+    .await
+}
+
 /// 搜索邮件（keyword 必填；fts=true 全文搜索）。
 #[tauri::command]
 pub async fn mail_search<R: Runtime>(

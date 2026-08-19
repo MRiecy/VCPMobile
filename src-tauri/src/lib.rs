@@ -100,7 +100,7 @@ use vcp_modules::forum::{
     forum_create_post, forum_delete, forum_get_post, forum_list_posts, forum_reply,
 };
 use vcp_modules::mail::{
-    mail_attachment, mail_folders, mail_list, mail_mark, mail_read, mail_reply, mail_search,
+    mail_attachment, mail_folders, mail_list, mail_mark, mail_move, mail_read, mail_reply, mail_search,
     mail_send, mail_state, mail_trash,
 };
 use vcp_modules::taskcenter::{
@@ -347,6 +347,7 @@ pub fn run() {
             mail_reply,
             mail_folders,
             mail_mark,
+            mail_move,
             mail_search,
             mail_attachment,
             handle_group_chat_message,
