@@ -327,6 +327,8 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
   let lastLoggedPhase = "";
   let lastCompletedPhase = "";
   let lastConnectionStatus = "";
+  // 活进度行：阶段内原地刷新的单条日志，避免刷屏又保留进度感知
+  let progressLineId: string | null = null;
 
   const isCurrentView = (generation: number) =>
     isOpen.value && generation === viewGeneration;
@@ -355,6 +357,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     lastLoggedPhase = "";
     lastCompletedPhase = "";
     lastConnectionStatus = "";
+    progressLineId = null;
     activeTab.value = "live";
     logs.value = [];
     progressData.value = {
@@ -390,6 +393,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     };
     lastLoggedPhase = "";
     lastCompletedPhase = "";
+    progressLineId = null;
 
     // 启动命令一旦进入异步链路，后端就可能在任意 await 后建立会话。
     // 必须在第一个 await 前锁定页面，避免系统返回卸载视图后留下隐形同步。
@@ -498,6 +502,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       lastLoggedPhase = "";
       lastCompletedPhase = "";
       lastConnectionStatus = "";
+      progressLineId = null;
       progressData.value = {
         phase: "initialization",
         total: 0,
@@ -651,6 +656,28 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     return readSyncError(payload.error) ?? localTerminalError("SYNC_ATTEMPT_FAILED");
   };
 
+  // 阶段内进度以「活进度行」呈现：原地刷新同一条日志，既保留进度感知又不刷屏。
+  // 阶段完成或切换时定格该行，使其作为普通历史行留在日志中。
+  const updateLiveProgressLine = (
+    phase: string,
+    completed: number,
+    total: number,
+  ) => {
+    const text =
+      phase === "messages"
+        ? `已同步会话 ${completed}/${total}`
+        : `${PHASE_LABELS[phase] ?? "同步处理"}进度 ${completed}/${total}`;
+    const existing = progressLineId
+      ? logs.value.find((l) => l.id === progressLineId)
+      : undefined;
+    if (existing) {
+      if (existing.message !== text) existing.message = text;
+    } else {
+      pushLog("info", text);
+      progressLineId = logs.value[logs.value.length - 1]?.id ?? null;
+    }
+  };
+
   const applySessionEvent = (
     kind: BufferedSessionEvent["kind"],
     payload: Record<string, unknown>,
@@ -699,14 +726,19 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         message: "",
       };
       if (nextPhase !== lastLoggedPhase) {
+        progressLineId = null; // 定格上一阶段的进度行
         pushLog("info", `开始${PHASE_LABELS[nextPhase] ?? "同步处理"}`);
         lastLoggedPhase = nextPhase;
+      }
+      if (nextTotal > 0) {
+        updateLiveProgressLine(nextPhase, nextCompleted, nextTotal);
       }
       if (
         nextTotal > 0 &&
         nextCompleted >= nextTotal &&
         nextPhase !== lastCompletedPhase
       ) {
+        progressLineId = null; // 定格在 n/n，随后输出阶段完成行
         pushLog("success", `${PHASE_LABELS[nextPhase] ?? "当前阶段"}完成`);
         lastCompletedPhase = nextPhase;
       }

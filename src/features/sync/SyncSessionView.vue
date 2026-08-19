@@ -305,12 +305,13 @@ const handlePrerenderToggle = async (val: boolean) => {
               <div class="flex justify-between text-[10px] mt-1 opacity-50">
                 <span>{{ phaseLabel }}</span>
                 <span v-if="store.progressData.total > 0">
-                  {{ store.progressData.completed }}/{{ store.progressData.total }}
+                  {{ store.progressData.completed }}/{{ store.progressData.total }} · {{ progressPercent }}%
                 </span>
               </div>
 
+              <!-- 统计条：messages 阶段起随进度事件实时跳动，直至终态 -->
               <div
-                v-if="store.status === 'completed' || store.status === 'completed_with_warnings' || store.status === 'error'"
+                v-if="store.summary.totalTopics > 0"
                 class="grid grid-cols-4 mt-3 border-y border-white/8 py-2 font-mono text-center"
               >
                 <div>
