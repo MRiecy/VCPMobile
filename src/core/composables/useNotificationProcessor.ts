@@ -139,6 +139,12 @@ export function useNotificationProcessor() {
       return { silent: true };
     }
 
+    // 全局搜索 FTS 回填进度：由 globalSearchStore 直接监听驱动页内进度条，
+    // 通知层必须静默（每批 500 条一次事件，走 Toast 会刷屏）
+    if (payload.type === 'vcp-fts-rebuild') {
+      return { silent: true };
+    }
+
     // --- 核心引擎状态处理 (P0 级别) ---
     if (payload.type === 'vcp-core-status') {
       const { status, message } = payload;

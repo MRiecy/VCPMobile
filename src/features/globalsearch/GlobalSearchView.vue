@@ -66,6 +66,8 @@ watch(
     await nextTick();
     searchInput.value?.focus();
   },
+  // 组件由首开 latch 挂载时 isOpen 已为 true，必须 immediate 才能触发首开逻辑
+  { immediate: true },
 );
 
 // ---------- 输入防抖（275ms，对齐日记搜索） ----------
