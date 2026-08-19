@@ -321,7 +321,8 @@ const showModeHelp = ref(false);
 
         <!-- 2. Members Section -->
         <SettingsSection title="群组成员" description="勾选要加入群组的助手，并设置其触发标签">
-          <div class="card-modern overflow-hidden !p-0">
+          <!-- 成员多时容器限高滚动（max-h-80 = 5 行成员），避免列表无限拉长设置页 -->
+          <div class="card-modern !p-0 max-h-80 overflow-y-auto vcp-scrollable">
             <div v-for="agent in allAgents" :key="agent.id"
               class="flex items-center gap-3 p-3 border-b border-black/5 dark:border-white/5 last:border-0 active:bg-black/5 dark:active:bg-white/5 transition-all">
               <input type="checkbox" :checked="isMember(agent.id)" @change="toggleMember(agent.id)"
