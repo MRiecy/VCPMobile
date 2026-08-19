@@ -14,6 +14,7 @@ import {
   Loader2,
   Square
 } from 'lucide-vue-next';
+import RefreshButton from './ui/RefreshButton.vue';
 
 const props = defineProps<{
   modelValue: boolean;
@@ -301,12 +302,11 @@ onUnmounted(() => {
                 title="测试当前列表中模型的延迟">
                 <Zap :size="18" />
               </button>
-              <button @click="refresh"
+              <RefreshButton bare @refresh="refresh"
                 class="p-2 rounded-xl bg-black/5 dark:bg-white/5 active:scale-95 transition-all text-gray-600 dark:text-gray-300"
-                :class="{ 'animate-spin will-change-transform': modelStore.isLoading }"
-                title="同步模型列表">
-                <RefreshCw :size="18" />
-              </button>
+                label="同步模型列表"
+                :size="18"
+                :loading="modelStore.isLoading" />
             </div>
           </div>
         </div>

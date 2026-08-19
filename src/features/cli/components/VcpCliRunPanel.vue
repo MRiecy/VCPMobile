@@ -9,6 +9,7 @@ import {
   RefreshCw,
   Send,
 } from "lucide-vue-next";
+import RefreshButton from "../../../components/ui/RefreshButton.vue";
 import {
   VCP_CLI_SHELL,
   VCP_CLI_WORKSPACE,
@@ -351,18 +352,15 @@ onMounted(() => void refreshNotificationPermission());
           <code class="font-mono text-[9px] opacity-55">{{
             VCP_CLI_WORKSPACE
           }}</code>
-          <button
-            type="button"
+          <RefreshButton
+            bare
             class="ml-auto flex h-8 w-8 items-center justify-center rounded-lg opacity-45 active:opacity-100"
-            aria-label="刷新 CLI 状态"
+            label="刷新 CLI 状态"
+            :size="14"
+            :loading="runtimeLoading || jobsLoading"
             :disabled="runtimeLoading || jobsLoading"
-            @click="store.refreshView()"
-          >
-            <RefreshCw
-              :size="14"
-              :class="runtimeLoading || jobsLoading ? 'animate-spin' : ''"
-            />
-          </button>
+            @refresh="store.refreshView()"
+          />
         </div>
         <div class="mt-2 flex items-start gap-2 text-[10px] leading-5">
           <span

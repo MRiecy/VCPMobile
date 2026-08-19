@@ -8,6 +8,7 @@ import {
   RefreshCw,
   Share2,
 } from "lucide-vue-next";
+import RefreshButton from "../../../components/ui/RefreshButton.vue";
 import {
   VCP_CLI_MANIFEST_COMMAND,
   manifestExportFileName,
@@ -207,14 +208,15 @@ onBeforeUnmount(() => {
                 backend canonical serializer
               </p>
             </div>
-            <button
-              type="button"
+            <RefreshButton
+              bare
               class="flex h-9 w-9 items-center justify-center rounded-lg opacity-55 active:opacity-100"
-              aria-label="刷新 manifest"
-              @click="loadManifest"
-            >
-              <RefreshCw :size="14" />
-            </button>
+              label="刷新 manifest"
+              :size="14"
+              :loading="loading"
+              :disabled="loading"
+              @refresh="loadManifest"
+            />
           </div>
           <pre
             class="no-swipe max-h-[42vh] overflow-auto bg-black/[0.03] px-3 py-3 font-mono text-[9px] leading-[1.55] text-[var(--primary-text)] dark:bg-white/[0.03]"
