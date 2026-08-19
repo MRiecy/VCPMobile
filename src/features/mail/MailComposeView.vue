@@ -31,6 +31,21 @@ const draft = reactive({
 // 抄送/密送默认折叠（低频字段，展开后带白话说明）
 const showCcBcc = ref(false);
 
+/** 我的邮箱快捷填充：全部已配置邮箱（子邮箱优先，显示 Agent 名/标签，填入真实地址）。 */
+const mailboxShortcuts = computed(() => {
+  const own = store.selectedMailbox?.user;
+  const subs = store.mailboxes.filter(
+    (box) => box.enabled && box.mailbox.startsWith('mail') && box.user !== own,
+  );
+  const publics = store.mailboxes.filter(
+    (box) => box.enabled && !box.mailbox.startsWith('mail') && box.user !== own,
+  );
+  return [...subs, ...publics].map((box) => ({
+    label: box.agentName ?? box.label,
+    address: box.user,
+  }));
+});
+
 /** 最近联系人：从已加载邮件的发件人去重（点按填入收件人）。 */
 const recentContacts = computed(() => {
   const seen = new Set<string>();
@@ -102,7 +117,22 @@ async function submit(): Promise<void> {
           <input v-model="draft.to" type="text" class="mc-input" placeholder="someone@example.com"
             autocapitalize="off" autocorrect="off" spellcheck="false" />
         </label>
+        <div v-if="mailboxShortcuts.length > 0" class="mc-contacts">
+          <span class="mc-contacts-label">我的邮箱</span>
+          <button
+            v-for="shortcut in mailboxShortcuts"
+            :key="shortcut.address"
+            type="button"
+            class="mc-contact-chip mc-mailbox-chip"
+            :title="shortcut.address"
+            @click="pickContact(shortcut.address)"
+          >
+            <Plus :size="11" />
+            <span>{{ shortcut.label }}</span>
+          </button>
+        </div>
         <div v-if="recentContacts.length > 0" class="mc-contacts">
+          <span class="mc-contacts-label">最近联系人</span>
           <button
             v-for="contact in recentContacts"
             :key="contact"
@@ -281,8 +311,21 @@ async function submit(): Promise<void> {
 .mc-contacts {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
   margin: -4px 0 12px;
+}
+
+.mc-contacts-label {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  opacity: 0.45;
+  flex-shrink: 0;
+}
+
+.mc-mailbox-chip {
+  border-color: var(--highlight-text);
 }
 
 .mc-contact-chip {
