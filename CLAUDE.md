@@ -220,6 +220,7 @@ pnpm android:debug:dev
 - **错误处理**: Tauri command handler 中**严禁使用 `unwrap()` 或 `expect()`**。必须转换为 `Result<T, String>`（`map_err(|e| e.to_string())?`）。
 - **异步 IO**: 所有网络、文件、数据库操作必须异步，基于 `tokio`。
 - **状态共享**: 使用 Tauri `app.manage(...)` 注入单例状态。并发结构偏好 `DashMap`/`DashSet`、`tokio::sync::RwLock`、`AtomicU32`。
+- **IPC 防爆栈总闸**: 所有 app 命令经 `lib.rs` 中央 `invoke_handler` 统一 offload 到 tokio worker 线程分发（JavaBridge 线程栈仅 ~1MB，禁止在其上构造业务 future——1.1.4 Release 附件闪退的血训）；新增命令直接注册即可，**无需**评估/壳化 future 尺寸。
 
 ### 4.3 跨层与工程纪律
 

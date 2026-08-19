@@ -245,7 +245,39 @@ pub fn run() {
         )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_vcp_mobile::init())
-        .invoke_handler(tauri::generate_handler![
+        // ──────────────────────────────────────────────────────────────────
+        // IPC 防爆栈总闸（治理 1.1.4 Release「输入附件必闪退」的同类隐患）
+        //
+        // 机制背景：Android 上 Tauri 的 IPC 在 WebView 的 JavaBridge 线程
+        // （ART HandlerThread，栈仅 ~1MB）上【同步】完成命令分发——匹配命令名、
+        // 反序列化参数、【按值构造】命令 future、再把 future【按值】移交
+        // tokio::spawn。而 async 命令的 future 类型尺寸 = 各 await 点存活变量
+        // 总和的最大值（编译期固定），业务一复杂就会胖到几十~几百 KB；Release
+        // 的 LTO + codegen-units=1 又会把按值搬运链摊平成巨型单栈帧（实测
+        // 266KB 的 future 放大出 ~1.15MB 一帧）。栈探测踩穿 guard page →
+        // SIGSEGV。这不是 panic，Result/catch_unwind 都拦不住，进程直接被
+        // 内核杀死；且 Debug 构建因布局不同往往不发作，极具隐蔽性。
+        //
+        // 治理方式：JavaBridge 线程上从此只做一件事——把 Invoke【整体】spawn
+        // 到 tokio worker 线程（栈 2MB）；命令分发、参数反序列化、future 构造
+        // 全部在 worker 上发生。单条命令的 future 尺寸从此与栈安全彻底解耦，
+        // 新增命令无需再人肉评估「这条命令的 future 会不会太胖」。
+        //
+        // 不受影响的路径（tauri 在 webview on_message 里前置分流，不经本闭包）：
+        //   - `plugin:*` 命令（插件命令 future 实测 ≤15.5KB，本就安全）；
+        //   - Channel 流式通道（聊天 SSE 等）、ACL 检查、invoke key 校验。
+        //
+        // 语义说明：
+        //   - 命令体原本就在 worker 上执行（respond_async 内部即 spawn），此处
+        //     仅把「构造 future」这半步一并挪走，行为与响应通道完全不变；
+        //   - 每次 invoke 多一次 spawn 调度（微秒级），无热路径影响；
+        //   - 未知命令在 worker 上补发 not found 拒绝，与原生行为一致。
+        // ──────────────────────────────────────────────────────────────────
+        .invoke_handler({
+            // 显式钉住 Wry 运行时类型：generate_handler! 脱离 invoke_handler 的
+            // 直接上下文后无法自行推断 R。
+            let app_commands: std::sync::Arc<tauri::ipc::InvokeHandler<tauri::Wry>> =
+                std::sync::Arc::new(tauri::generate_handler![
             sendToVCP,
             get_active_generations,
             recover_active_generation,
@@ -420,7 +452,20 @@ pub fn run() {
             install_update,
             tauri_plugin_vcp_mobile::stream::set_keepalive_mode,
             restart_or_exit_app,
-        ])
+            ]);
+            // 壳闭包本体：极薄，任何命令的胖瘦都不再经过 JavaBridge 的栈。
+            move |invoke| {
+                let commands = std::sync::Arc::clone(&app_commands);
+                tauri::async_runtime::spawn(async move {
+                    let cmd = invoke.message.command().to_string();
+                    let resolver = invoke.resolver.clone();
+                    if !commands(invoke) {
+                        resolver.reject(format!("Command {cmd} not found"));
+                    }
+                });
+                true
+            }
+        })
         .build(context)
         .expect("error while building tauri application");
 
