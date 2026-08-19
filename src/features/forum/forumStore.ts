@@ -71,6 +71,7 @@ export const useForumStore = defineStore('forum', () => {
   // ---------- 写操作状态 ----------
   const replying = ref(false);
   const creating = ref(false);
+  const deleting = ref(false);
 
   // ---------- 读 ----------
   async function loadPosts(): Promise<void> {
@@ -122,6 +123,7 @@ export const useForumStore = defineStore('forum', () => {
     detailError.value = null;
     replying.value = false;
     creating.value = false;
+    deleting.value = false;
   }
 
   // ---------- 写 ----------
@@ -165,6 +167,31 @@ export const useForumStore = defineStore('forum', () => {
     }
   }
 
+  /**
+   * 删除（上游 DELETE /forum/post/:uid）。floor 传入 = 删该楼层（后端重排
+   * 楼层号）；省略 = 删整帖。成功后失效缓存并重拉。
+   */
+  async function remove(uid: string, floor?: number): Promise<boolean> {
+    if (deleting.value) return false;
+    deleting.value = true;
+    try {
+      await invoke('forum_delete', { uid, floor: floor ?? null });
+      toast('success', floor !== undefined ? `已删除 #${floor} 楼` : '帖子已删除');
+      detailCache.value.delete(uid);
+      if (floor !== undefined) {
+        await Promise.all([loadDetail(uid, true), loadPosts()]);
+      } else {
+        await loadPosts();
+      }
+      return true;
+    } catch (raw) {
+      toast('error', `删除失败：${toMessage(raw)}`);
+      return false;
+    } finally {
+      deleting.value = false;
+    }
+  }
+
   return {
     posts,
     listLoaded,
@@ -179,10 +206,12 @@ export const useForumStore = defineStore('forum', () => {
     detailError,
     replying,
     creating,
+    deleting,
     loadPosts,
     loadDetail,
     resetSession,
     reply,
     createPost,
+    remove,
   };
 });

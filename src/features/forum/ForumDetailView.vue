@@ -6,22 +6,24 @@
  * UID/楼层号 Monospace；回复署名默认取设置中的用户名。
  */
 import { computed, onMounted, ref, watch } from 'vue';
-import { ArrowLeft, RefreshCw, Send } from 'lucide-vue-next';
+import { ArrowLeft, RefreshCw, Send, Trash2 } from 'lucide-vue-next';
 import { useForumStore } from './forumStore';
 import { useSettingsStore } from '../../core/stores/settings';
+import { useOverlayStore } from '../../core/stores/overlay';
 import { useKeyboardInsets } from '../../core/composables/useKeyboardInsets';
 import {
-  authorHue,
   relativeTime,
   renderForumMarkdown,
   type PostMeta,
 } from './forumTypes';
+import { nameAvatarBackground, nameInitial } from '../../core/utils/nameHue';
 
 const props = defineProps<{ uid: string; postMeta: PostMeta }>();
 const emit = defineEmits<{ close: [] }>();
 
 const store = useForumStore();
 const settingsStore = useSettingsStore();
+const overlayStore = useOverlayStore();
 const { keyboardHeight } = useKeyboardInsets();
 
 const detail = computed(() => store.detailCache.get(props.uid) ?? null);
@@ -62,6 +64,28 @@ function refresh(): void {
   void store.loadDetail(props.uid, true);
   void store.loadPosts();
 }
+
+// ---------- 删除管理（对齐桌面端：删楼层 / 删整帖） ----------
+async function deleteFloor(floorIndex: number, author: string): Promise<void> {
+  const confirmed = await overlayStore.showConfirm({
+    title: '删除楼层',
+    message: `确定删除 ${author} 的 #${floorIndex} 楼吗？删除后楼层号会重新排序，且无法撤销。`,
+    isDanger: true,
+  });
+  if (!confirmed) return;
+  await store.remove(props.uid, floorIndex);
+}
+
+async function deletePost(): Promise<void> {
+  const confirmed = await overlayStore.showConfirm({
+    title: '删除帖子',
+    message: `确定删除整个帖子「${props.postMeta.title.replace('[置顶]', '').trim()}」吗？包括全部楼层，无法撤销。`,
+    isDanger: true,
+  });
+  if (!confirmed) return;
+  const ok = await store.remove(props.uid);
+  if (ok) emit('close');
+}
 </script>
 
 <template>
@@ -83,6 +107,16 @@ function refresh(): void {
       >
         <RefreshCw :size="17" :class="{ 'custom-spin': store.detailLoading }" />
       </button>
+      <button
+        type="button"
+        class="fd-icon-btn fd-danger-btn"
+        aria-label="删除帖子"
+        title="删除帖子"
+        :disabled="store.deleting"
+        @click="deletePost"
+      >
+        <Trash2 :size="16" />
+      </button>
     </header>
 
     <div class="fd-scroll vcp-scrollable no-rubber-band" data-forum-role="post-detail">
@@ -99,12 +133,16 @@ function refresh(): void {
           <div class="fd-author-row">
             <span
               class="fd-avatar"
-              :style="{ backgroundColor: `hsl(${authorHue(postMeta.author)} 55% 55%)` }"
-            >
-              {{ postMeta.author.slice(0, 1) }}
-            </span>
-            <span class="fd-author">{{ postMeta.author }}</span>
-            <span class="fd-time">{{ relativeTime(postMeta.timestampMs) }}</span>
+              :style="{ background: nameAvatarBackground(postMeta.author) }"
+              aria-hidden="true"
+            >{{ nameInitial(postMeta.author) }}</span>
+            <div class="fd-author-block">
+              <span class="fd-author">
+                {{ postMeta.author }}
+                <span class="fd-op-badge">楼主</span>
+              </span>
+              <span class="fd-time">{{ relativeTime(postMeta.timestampMs) }}</span>
+            </div>
           </div>
           <!-- eslint-disable-next-line vue/no-v-html -->
           <div class="fd-body markdown-body" v-html="renderForumMarkdown(detail.mainBody)" />
@@ -115,16 +153,26 @@ function refresh(): void {
           评论区 · {{ detail.floors.length }} 楼
         </div>
         <article v-for="floor in detail.floors" :key="floor.index" class="fd-floor">
-          <div class="fd-author-row">
+          <div class="fd-floor-head">
             <span
               class="fd-avatar fd-avatar-sm"
-              :style="{ backgroundColor: `hsl(${authorHue(floor.author)} 55% 55%)` }"
-            >
-              {{ floor.author.slice(0, 1) }}
-            </span>
-            <span class="fd-author">{{ floor.author }}</span>
-            <span class="fd-time">{{ relativeTime(floor.timeMs) }}</span>
+              :style="{ background: nameAvatarBackground(floor.author) }"
+              aria-hidden="true"
+            >{{ nameInitial(floor.author) }}</span>
+            <div class="fd-author-block">
+              <span class="fd-author">{{ floor.author }}</span>
+              <span class="fd-time">{{ relativeTime(floor.timeMs) }}</span>
+            </div>
             <span class="fd-floor-no">#{{ floor.index }}</span>
+            <button
+              type="button"
+              class="fd-floor-delete"
+              :aria-label="`删除 #${floor.index} 楼`"
+              :disabled="store.deleting"
+              @click="deleteFloor(floor.index, floor.author)"
+            >
+              <Trash2 :size="13" />
+            </button>
           </div>
           <!-- eslint-disable-next-line vue/no-v-html -->
           <div class="fd-body markdown-body" v-html="renderForumMarkdown(floor.body)" />
@@ -247,43 +295,63 @@ function refresh(): void {
 }
 
 .fd-main {
-  padding: 6px 2px 12px;
-  border-bottom: 1px solid var(--border-color);
+  padding: 8px 2px 14px;
 }
 
 .fd-author-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: 10px;
+  margin-bottom: 10px;
 }
 
 .fd-avatar {
-  width: 30px;
-  height: 30px;
+  width: 34px;
+  height: 34px;
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 50%;
   color: #fff;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 800;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 
 .fd-avatar-sm {
-  width: 24px;
-  height: 24px;
-  font-size: 11px;
+  width: 28px;
+  height: 28px;
+  font-size: 12px;
+}
+
+.fd-author-block {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
 }
 
 .fd-author {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
   font-weight: 700;
 }
 
+.fd-op-badge {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--highlight-text);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+}
+
 .fd-time {
-  font-size: 11px;
+  font-size: 10.5px;
   opacity: 0.45;
 }
 
@@ -326,7 +394,8 @@ function refresh(): void {
 }
 
 .fd-floors-head {
-  padding: 12px 2px 4px;
+  padding: 14px 2px 8px;
+  border-top: 1px solid var(--border-color);
   font-size: 10px;
   font-weight: 800;
   letter-spacing: 0.16em;
@@ -335,9 +404,46 @@ function refresh(): void {
 }
 
 .fd-floor {
-  padding: 10px 2px 12px 12px;
-  border-left: 2px solid var(--border-color);
-  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 8px;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--secondary-bg);
+}
+
+.fd-floor-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 8px;
+}
+
+.fd-floor-delete {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: #ef4444;
+  opacity: 0.35;
+}
+
+.fd-floor-delete:active {
+  opacity: 1;
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.fd-floor-delete:disabled {
+  opacity: 0.2;
+}
+
+.fd-danger-btn {
+  color: #ef4444;
+  opacity: 0.8;
 }
 
 .fd-bottom-spacer {

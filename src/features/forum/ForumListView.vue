@@ -8,6 +8,7 @@
 import { onBeforeUnmount, ref, watch } from 'vue';
 import {
   ArrowLeft,
+  MessagesSquare,
   MessageSquareText,
   Pin,
   Plus,
@@ -19,7 +20,8 @@ import ForumDetailView from './ForumDetailView.vue';
 import ForumComposeView from './ForumComposeView.vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 import { useForumStore } from './forumStore';
-import { authorHue, relativeTime, type PostMeta } from './forumTypes';
+import { relativeTime, type PostMeta } from './forumTypes';
+import { nameAvatarBackground, nameInitial } from '../../core/utils/nameHue';
 
 const props = withDefaults(defineProps<{ isOpen?: boolean; zIndex?: number }>(), {
   isOpen: false,
@@ -167,20 +169,26 @@ onBeforeUnmount(() => {
           class="fm-row"
           @click="openDetail(post)"
         >
-          <span class="fm-row-head">
-            <Pin v-if="post.pinned" :size="12" class="fm-pin" aria-label="置顶" />
-            <span class="fm-row-board">{{ post.board }}</span>
-            <span class="fm-row-title">{{ post.title.replace('[置顶]', '').trim() }}</span>
+          <span
+            class="fm-avatar"
+            :style="{ background: nameAvatarBackground(post.author) }"
+            aria-hidden="true"
+          >{{ nameInitial(post.author) }}</span>
+          <span class="fm-row-main">
+            <span class="fm-row-head">
+              <Pin v-if="post.pinned" :size="12" class="fm-pin" aria-label="置顶" />
+              <span class="fm-row-title">{{ post.title.replace('[置顶]', '').trim() }}</span>
+            </span>
+            <span class="fm-row-meta">
+              <span class="fm-row-board">{{ post.board }}</span>
+              <span class="fm-row-meta-text">
+                {{ post.author }} · {{ relativeTime(post.timestampMs) }}<template v-if="post.lastReplyBy"> · 最后回复 {{ post.lastReplyBy }}</template>
+              </span>
+            </span>
           </span>
-          <span class="fm-row-meta">
-            <span
-              class="fm-author-dot"
-              :style="{ backgroundColor: `hsl(${authorHue(post.author)} 55% 55%)` }"
-            />
-            {{ post.author }} · {{ relativeTime(post.timestampMs) }}
-            <template v-if="post.lastReplyBy">
-              · 最后回复 {{ post.lastReplyBy }}
-            </template>
+          <span v-if="post.replyCount !== null && post.replyCount > 0" class="fm-reply-badge">
+            <MessagesSquare :size="11" aria-hidden="true" />
+            {{ post.replyCount }}
           </span>
         </button>
       </div>
@@ -379,37 +387,58 @@ onBeforeUnmount(() => {
   font-weight: 700;
 }
 
-/* ---- 帖子行（高密度线性 + 2px accent） ---- */
+/* ---- 帖子卡片行（作者头像 + 标题 + 元信息 + 回复数徽标） ---- */
 .fm-row {
   display: flex;
-  flex-direction: column;
-  gap: 3px;
+  align-items: center;
+  gap: 11px;
   width: 100%;
-  padding: 10px 10px 10px 12px;
-  border: none;
-  border-left: 2px solid transparent;
-  border-bottom: 1px solid var(--border-color);
-  background: transparent;
+  margin-bottom: 8px;
+  padding: 11px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--secondary-bg);
   color: var(--primary-text);
   text-align: left;
+  transition: opacity 0.15s ease;
 }
 
 .fm-row:active {
-  border-left-color: var(--highlight-text);
-  background: var(--secondary-bg);
+  opacity: 0.75;
+}
+
+.fm-avatar {
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 15px;
+  font-weight: 800;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.fm-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }
 
 .fm-row-head {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
 }
 
 .fm-pin {
   color: #f59e0b;
   flex-shrink: 0;
-  align-self: center;
 }
 
 .fm-row-board {
@@ -434,7 +463,11 @@ onBeforeUnmount(() => {
 .fm-row-meta {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
+  min-width: 0;
+}
+
+.fm-row-meta-text {
   font-size: 11px;
   opacity: 0.55;
   overflow: hidden;
@@ -442,11 +475,18 @@ onBeforeUnmount(() => {
   white-space: nowrap;
 }
 
-.fm-author-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+.fm-reply-badge {
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--primary-bg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  font-weight: 700;
+  opacity: 0.7;
 }
 
 /* ---- 发帖 FAB ---- */

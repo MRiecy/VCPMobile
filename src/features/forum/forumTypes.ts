@@ -20,6 +20,8 @@ export interface PostMeta {
   timestampMs: number;
   lastReplyBy: string | null;
   lastReplyAt: string | null;
+  /** 楼层总数（上游补丁字段；旧服务器/轻量模式为 null）。 */
+  replyCount: number | null;
   mtimeMs: number;
   pinned: boolean;
 }
@@ -56,6 +58,9 @@ export function normalizePostMeta(raw: unknown): PostMeta | null {
     timestampMs: parseForumTime(record.timestamp),
     lastReplyBy: typeof record.lastReplyBy === 'string' ? record.lastReplyBy : null,
     lastReplyAt: typeof record.lastReplyAt === 'string' ? record.lastReplyAt : null,
+    replyCount: typeof record.replyCount === 'number' && Number.isFinite(record.replyCount)
+      ? record.replyCount
+      : null,
     mtimeMs: Number(record.mtimeMs) || 0,
     pinned: isPinnedTitle(title),
   };
@@ -160,11 +165,5 @@ export function relativeTime(timeMs: number): string {
   return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
 }
 
-/** 署名 → 稳定 HSL 色相（头像底色用；VCPChat 同款思路）。 */
-export function authorHue(author: string): number {
-  let hash = 0;
-  for (let i = 0; i < author.length; i += 1) {
-    hash = (hash * 31 + author.charCodeAt(i)) >>> 0;
-  }
-  return hash % 360;
-}
+/** 署名 → 稳定 HSL 色相（头像底色用；共享散列见 core/utils/nameHue）。 */
+export { nameHue as authorHue } from '../../core/utils/nameHue';

@@ -6,7 +6,7 @@
  * 阅读默认不标读；操作：回复 / 标为已读或未读 / 附件下载 / 移入垃圾箱。
  * mailId 等标识使用 Monospace。
  */
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import {
   ArrowLeft,
   Download,
@@ -16,10 +16,12 @@ import {
   Trash2,
 } from 'lucide-vue-next';
 import { useOverlayStore } from '../../core/stores/overlay';
+import { filterTrustedRichHtml } from '../../core/utils/astRenderer';
 import { useMailStore } from './mailStore';
 import MailComposeView from './MailComposeView.vue';
 import {
   attachmentSizeLabel,
+  mailBodyOf,
   mailTimeLabel,
   renderMailMarkdown,
   type MailSummary,
@@ -32,6 +34,20 @@ const store = useMailStore();
 const overlayStore = useOverlayStore();
 
 const isReplyOpen = ref(false);
+
+/**
+ * 详情正文：优先结构化 html/text（补丁服务器），旧服务器回退到
+ * 从 AI 导向 markdown 中提取的正文段落。html 走与聊天一致的护栏管线。
+ */
+const body = computed(() => (store.detail ? mailBodyOf(store.detail) : null));
+
+const renderedBody = computed(() => {
+  const current = body.value;
+  if (!current) return '';
+  if (current.kind === 'html') return filterTrustedRichHtml(current.html);
+  if (current.kind === 'markdown') return renderMailMarkdown(current.markdown);
+  return '';
+});
 
 async function toggleRead(): Promise<void> {
   await store.setRead(props.mail.readState !== 'read');
@@ -63,35 +79,6 @@ async function download(partId: string, filename: string): Promise<void> {
         <span class="md-title">{{ mail.subject }}</span>
         <span class="md-subtitle">{{ mail.mailId }}</span>
       </div>
-      <button
-        type="button"
-        class="md-icon-btn"
-        aria-label="回复"
-        title="回复"
-        @click="isReplyOpen = true"
-      >
-        <Reply :size="17" />
-      </button>
-      <button
-        type="button"
-        class="md-icon-btn"
-        :aria-label="mail.readState === 'read' ? '标为未读' : '标为已读'"
-        :title="mail.readState === 'read' ? '标为未读' : '标为已读'"
-        @click="toggleRead"
-      >
-        <MailPlus v-if="mail.readState === 'read'" :size="17" />
-        <MailCheck v-else :size="17" />
-      </button>
-      <button
-        type="button"
-        class="md-icon-btn md-trash-btn"
-        aria-label="移入垃圾箱"
-        title="移入垃圾箱"
-        :disabled="store.trashing"
-        @click="trash"
-      >
-        <Trash2 :size="17" />
-      </button>
     </header>
 
     <!-- 头信息 -->
@@ -110,6 +97,28 @@ async function download(partId: string, filename: string): Promise<void> {
       </div>
     </section>
 
+    <!-- 操作条（图标 + 小字说明） -->
+    <nav class="md-actions" aria-label="邮件操作">
+      <button type="button" class="md-action" @click="isReplyOpen = true">
+        <Reply :size="18" />
+        <span class="md-action-label">回复</span>
+      </button>
+      <button type="button" class="md-action" @click="toggleRead">
+        <MailPlus v-if="mail.readState === 'read'" :size="18" />
+        <MailCheck v-else :size="18" />
+        <span class="md-action-label">{{ mail.readState === 'read' ? '标为未读' : '标为已读' }}</span>
+      </button>
+      <button
+        type="button"
+        class="md-action md-action-danger"
+        :disabled="store.trashing"
+        @click="trash"
+      >
+        <Trash2 :size="18" />
+        <span class="md-action-label">垃圾箱</span>
+      </button>
+    </nav>
+
     <!-- 正文 -->
     <div class="md-scroll vcp-scrollable no-rubber-band" data-mail-role="mail-detail">
       <div v-if="store.detailLoading" class="md-status">正在读取邮件…</div>
@@ -120,8 +129,11 @@ async function download(partId: string, filename: string): Promise<void> {
         </button>
       </div>
       <template v-else-if="store.detail">
+        <!-- 正文：html/markdown 走护栏渲染；纯文本预格式化展示 -->
+        <pre v-if="body?.kind === 'text'" class="md-text">{{ body.text }}</pre>
         <!-- eslint-disable-next-line vue/no-v-html -->
-        <div class="md-body markdown-body" v-html="renderMailMarkdown(store.detail.markdown)" />
+        <div v-else-if="renderedBody" class="md-body markdown-body" v-html="renderedBody" />
+        <div v-else class="md-status">这封邮件没有可显示的正文。</div>
 
         <!-- 附件列表 -->
         <section v-if="store.detail.attachments.length > 0" class="md-attachments">
@@ -219,9 +231,52 @@ async function download(partId: string, filename: string): Promise<void> {
   flex-shrink: 0;
 }
 
-.md-trash-btn {
+/* ---- 操作条（图标 + 小字） ---- */
+.md-actions {
+  flex-shrink: 0;
+  display: flex;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.md-action {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 9px 0 8px;
+  border: none;
+  background: transparent;
+  color: var(--primary-text);
+  opacity: 0.75;
+}
+
+.md-action:active {
+  opacity: 1;
+  background: var(--secondary-bg);
+}
+
+.md-action:disabled {
+  opacity: 0.3;
+}
+
+.md-action-label {
+  font-size: 10px;
+  font-weight: 700;
+  opacity: 0.8;
+}
+
+.md-action-danger {
   color: #ef4444;
-  opacity: 0.9;
+}
+
+.md-text {
+  margin: 0;
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .md-meta {

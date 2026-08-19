@@ -225,21 +225,108 @@ export function normalizeAttachments(raw: unknown): AttachmentMeta[] {
     .filter((entry): entry is AttachmentMeta => entry !== null);
 }
 
-/** 详情归一化（V1.1：markdown + 附件元数据）。 */
+/** 详情归一化（V1.1：markdown + 附件元数据；V1.2：html/text 结构化正文）。 */
 export interface MailDetail {
   markdown: string;
+  /** 原始 HTML 正文（补丁服务器的结构化字段；无 HTML 邮件时为 null）。 */
+  html: string | null;
+  /** 纯文本正文（同上）。 */
+  text: string | null;
   attachments: AttachmentMeta[];
 }
 
 export function normalizeDetail(raw: unknown): MailDetail {
+  const record = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
   return {
-    markdown: extractDetailMarkdown(raw),
-    attachments: normalizeAttachments(
-      raw && typeof raw === 'object'
-        ? (raw as Record<string, unknown>).attachments
-        : undefined,
-    ),
+    markdown: extractDetailMarkdown(record),
+    html: typeof record.html === 'string' && record.html.trim() ? record.html : null,
+    text: typeof record.text === 'string' && record.text.trim() ? record.text : null,
+    attachments: normalizeAttachments(record.attachments),
   };
+}
+
+/**
+ * 详情正文提取（唯一入口）。
+ *
+ * 优先级：
+ * 1. `html` —— 补丁服务器的结构化 HTML 正文，保真渲染（经 filterTrustedRichHtml）；
+ * 2. `text` —— 纯文本正文，按预格式化文本展示；
+ * 3. AI 导向的 markdown 大杂烩（旧服务器兜底）——剥离「基本信息/正文预览/
+ *    附件/可执行后续动作」等 AI 段落，只保留正文区。
+ */
+export type MailBody =
+  | { kind: 'html'; html: string }
+  | { kind: 'text'; text: string }
+  | { kind: 'markdown'; markdown: string };
+
+/** 从 AI 导向 markdown 中提取正文段落（旧服务器兼容兜底）。 */
+function extractBodyFromAiMarkdown(markdown: string): string {
+  // 「## HTML 正文转 Markdown」或「## 纯文本正文」段落到下一个二级标题之间
+  const section = markdown.match(
+    /##\s*(?:HTML 正文转 Markdown|纯文本正文)\s*\n([\s\S]*?)(?=\n##\s|$)/,
+  );
+  if (section?.[1]?.trim()) return section[1].trim();
+  // 再兜底「正文预览」段落
+  const preview = markdown.match(/##\s*正文预览\s*\n([\s\S]*?)(?=\n##\s|$)/);
+  if (preview?.[1]?.trim()) return preview[1].trim();
+  return markdown;
+}
+
+export function mailBodyOf(detail: MailDetail): MailBody | null {
+  if (detail.html) return { kind: 'html', html: detail.html };
+  if (detail.text) return { kind: 'text', text: detail.text };
+  if (detail.markdown) {
+    return { kind: 'markdown', markdown: extractBodyFromAiMarkdown(detail.markdown) };
+  }
+  return null;
+}
+
+// ---------- 文件夹语义化 ----------
+
+/**
+ * 已知系统文件夹 → 中文名。clawEmail 云端（WuKongIM）文件夹名为英文约定，
+ * 原样展示对中文用户不友好；未知自定义文件夹保留原名。
+ */
+const KNOWN_FOLDER_NAMES: Record<string, string> = {
+  inbox: '收件箱',
+  sent: '已发送',
+  'sent items': '已发送',
+  'sent messages': '已发送',
+  drafts: '草稿箱',
+  draft: '草稿箱',
+  trash: '垃圾箱',
+  deleted: '垃圾箱',
+  'deleted items': '垃圾箱',
+  junk: '垃圾邮件',
+  spam: '垃圾邮件',
+  archive: '归档',
+};
+
+export function folderDisplayName(name: string): string {
+  return KNOWN_FOLDER_NAMES[name.trim().toLowerCase()] ?? name;
+}
+
+/** 是否收件箱（客户端已有固定的「收件箱」入口，服务器列表里的要去重）。 */
+export function isInboxFolder(name: string): boolean {
+  return KNOWN_FOLDER_NAMES[name.trim().toLowerCase()] === '收件箱';
+}
+
+/** 系统文件夹的规范排序权重（未知名排最后，按名称字典序）。 */
+function folderSortWeight(name: string): number {
+  const key = name.trim().toLowerCase();
+  const order = ['sent', 'sent items', 'sent messages', 'drafts', 'draft', 'archive', 'junk', 'spam', 'trash', 'deleted', 'deleted items'];
+  const index = order.indexOf(key);
+  return index === -1 ? 100 : index;
+}
+
+/** 文件夹列表整理：去收件箱（已有固定入口）+ 系统文件夹按用途排序。 */
+export function organizeFolders(folders: FolderInfo[]): FolderInfo[] {
+  return folders
+    .filter((folder) => !isInboxFolder(folder.name))
+    .sort((a, b) => {
+      const diff = folderSortWeight(a.name) - folderSortWeight(b.name);
+      return diff !== 0 ? diff : a.name.localeCompare(b.name);
+    });
 }
 
 /** 附件大小展示。 */

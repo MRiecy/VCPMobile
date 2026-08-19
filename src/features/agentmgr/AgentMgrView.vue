@@ -6,11 +6,12 @@
  * 「全局设置」Tab 编辑 7 个顶层字段。改名/删除前的任务引用扫描在编辑器内完成。
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
-import { ArrowLeft, Bot, Plus, RefreshCw } from 'lucide-vue-next';
+import { ArrowLeft, Bot, ChevronRight, Plus, RefreshCw } from 'lucide-vue-next';
 import SlidePage from '../../components/ui/SlidePage.vue';
 import AgentEditorView from './AgentEditorView.vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 import { useAgentMgrStore } from './agentMgrStore';
+import { nameAvatarBackground, nameInitial } from '../../core/utils/nameHue';
 import {
   emptyAgentDraft,
   type AgentDraft,
@@ -205,7 +206,11 @@ const emptyState = computed(() => {
           class="am-row"
           @click="openEditEditor(entry)"
         >
-          <span class="am-avatar" aria-hidden="true">{{ entry.chineseName.slice(0, 1) }}</span>
+          <span
+            class="am-avatar"
+            :style="{ background: nameAvatarBackground(entry.chineseName) }"
+            aria-hidden="true"
+          >{{ nameInitial(entry.chineseName) }}</span>
           <span class="am-row-main">
             <span class="am-row-head">
               <span class="am-row-name">{{ entry.chineseName }}</span>
@@ -216,6 +221,7 @@ const emptyState = computed(() => {
               {{ entry.baseName || entry.chineseName.toUpperCase() }} · tokens {{ entry.maxOutputTokens }} · temp {{ entry.temperature }}
             </span>
           </span>
+          <ChevronRight :size="16" class="am-row-chevron" aria-hidden="true" />
         </button>
 
         <button type="button" class="am-create-btn" @click="openCreateEditor">
@@ -452,39 +458,38 @@ const emptyState = computed(() => {
   font-weight: 700;
 }
 
-/* ---- Agent 行（高密度线性） ---- */
+/* ---- Agent 卡片行（实体卡：弱化分隔线，按对象分组信息） ---- */
 .am-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   width: 100%;
-  padding: 10px 10px 10px 12px;
-  border: none;
-  border-left: 2px solid transparent;
-  border-bottom: 1px solid var(--border-color);
-  background: transparent;
+  margin-bottom: 8px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--secondary-bg);
   color: var(--primary-text);
   text-align: left;
+  transition: opacity 0.15s ease;
 }
 
 .am-row:active {
-  border-left-color: var(--highlight-text);
-  background: var(--secondary-bg);
+  opacity: 0.75;
 }
 
 .am-avatar {
-  width: 36px;
-  height: 36px;
+  width: 42px;
+  height: 42px;
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 50%;
-  border: 1px solid var(--border-color);
-  background: var(--secondary-bg);
-  color: var(--highlight-text);
-  font-size: 15px;
+  border-radius: 12px;
+  color: #fff;
+  font-size: 17px;
   font-weight: 800;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 
 .am-row-main {
@@ -509,12 +514,22 @@ const emptyState = computed(() => {
 }
 
 .am-row-model {
+  margin-left: auto;
+  flex-shrink: 1;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--primary-bg);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 10.5px;
-  opacity: 0.5;
+  font-size: 10px;
+  opacity: 0.75;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.am-row-chevron {
+  flex-shrink: 0;
+  opacity: 0.3;
 }
 
 .am-row-desc {

@@ -13,6 +13,7 @@ import { useModalHistory } from '../../core/composables/useModalHistory';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { useTaskCenterStore } from './taskCenterStore';
 import { useKeyboardInsets } from '../../core/composables/useKeyboardInsets';
+import { nameAvatarBackground, nameInitial } from '../../core/utils/nameHue';
 import {
   CRON_PRESETS,
   MIN_INTERVAL_MINUTES,
@@ -449,7 +450,11 @@ async function remove(): Promise<void> {
             class="tce-picker-row"
             @click="pickAgent(option.chineseName)"
           >
-            <span class="tce-picker-avatar" aria-hidden="true">{{ option.chineseName.slice(0, 1) }}</span>
+            <span
+              class="tce-picker-avatar"
+              :style="{ background: nameAvatarBackground(option.chineseName) }"
+              aria-hidden="true"
+            >{{ nameInitial(option.chineseName) }}</span>
             <span class="tce-picker-row-main">
               <span class="tce-picker-row-head">
                 <span class="tce-picker-row-name">{{ option.chineseName }}</span>
@@ -870,35 +875,34 @@ async function remove(): Promise<void> {
 .tce-picker-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 11px;
   width: 100%;
-  padding: 9px 10px;
-  border: none;
-  border-left: 2px solid transparent;
-  border-bottom: 1px solid var(--border-color);
-  background: transparent;
+  margin-bottom: 6px;
+  padding: 10px 11px;
+  border: 1px solid var(--border-color);
+  border-radius: 11px;
+  background: var(--secondary-bg);
   color: var(--primary-text);
   text-align: left;
+  transition: opacity 0.15s ease;
 }
 
 .tce-picker-row:active {
-  border-left-color: var(--highlight-text);
-  background: var(--secondary-bg);
+  opacity: 0.75;
 }
 
 .tce-picker-avatar {
-  width: 34px;
-  height: 34px;
+  width: 38px;
+  height: 38px;
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 50%;
-  border: 1px solid var(--border-color);
-  background: var(--secondary-bg);
-  color: var(--highlight-text);
-  font-size: 14px;
+  border-radius: 11px;
+  color: #fff;
+  font-size: 15px;
   font-weight: 800;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
 }
 
 .tce-picker-row-main {
@@ -923,9 +927,14 @@ async function remove(): Promise<void> {
 }
 
 .tce-picker-row-model {
+  margin-left: auto;
+  flex-shrink: 1;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--primary-bg);
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 10px;
-  opacity: 0.45;
+  opacity: 0.75;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

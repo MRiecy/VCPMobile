@@ -20,6 +20,7 @@ import {
   normalizeMailboxes,
   normalizeMailList,
   normalizeWsStates,
+  organizeFolders,
   type FolderInfo,
   type MailboxInfo,
   type MailDetail,
@@ -60,6 +61,18 @@ export const useMailStore = defineStore('mail', () => {
   const mailboxes = ref<MailboxInfo[]>([]);
   const wsStates = ref<WsState[]>([]);
   const serverError = ref<string | null>(null);
+  /** 用户已关闭的 serverError 文案（同文案不再打扰；新错误仍会弹出）。 */
+  const dismissedServerError = ref<string | null>(null);
+  /** 可见的服务器最近错误（已关闭的同文案错误不再显示）。 */
+  const visibleServerError = computed(() =>
+    serverError.value && serverError.value !== dismissedServerError.value
+      ? serverError.value
+      : null,
+  );
+
+  function dismissServerError(): void {
+    dismissedServerError.value = serverError.value;
+  }
   /** state.updatedAt 指纹（轮询脏检查键）。 */
   const stateUpdatedAt = ref<string | null>(null);
 
@@ -85,6 +98,8 @@ export const useMailStore = defineStore('mail', () => {
 
   // ---------- V1.1：文件夹 / 搜索 / 发送 ----------
   const folders = ref<FolderInfo[]>([]);
+  /** 展示用文件夹（收件箱去重 + 系统文件夹按用途排序）。 */
+  const displayFolders = computed(() => organizeFolders(folders.value));
   /** 服务器是否提供 folders/search 等补丁端点（404 时降级隐藏）。 */
   const extendedApiSupported = ref(true);
   /** 当前文件夹 fid（null = 默认收件箱）。 */
@@ -443,6 +458,7 @@ export const useMailStore = defineStore('mail', () => {
     mailboxes.value = [];
     wsStates.value = [];
     serverError.value = null;
+    dismissedServerError.value = null;
     stateUpdatedAt.value = null;
     selectedKey.value = '';
     mails.value = [];
@@ -477,6 +493,8 @@ export const useMailStore = defineStore('mail', () => {
     mailboxes,
     wsStates,
     serverError,
+    visibleServerError,
+    dismissServerError,
     selectedKey,
     selectedMailbox,
     wsConnected,
@@ -494,6 +512,7 @@ export const useMailStore = defineStore('mail', () => {
     detailError,
     trashing,
     folders,
+    displayFolders,
     extendedApiSupported,
     currentFid,
     searchKeyword,

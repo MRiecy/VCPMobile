@@ -9,6 +9,7 @@
 import { onBeforeUnmount, ref, watch } from 'vue';
 import {
   ArrowLeft,
+  ChevronDown,
   CircleAlert,
   Mail,
   Paperclip,
@@ -22,7 +23,7 @@ import MailDetailView from './MailDetailView.vue';
 import MailComposeView from './MailComposeView.vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 import { useMailStore } from './mailStore';
-import { mailTimeLabel, type MailSummary } from './mailTypes';
+import { folderDisplayName, mailTimeLabel, type MailSummary } from './mailTypes';
 
 const props = withDefaults(defineProps<{ isOpen?: boolean; zIndex?: number }>(), {
   isOpen: false,
@@ -40,6 +41,7 @@ const isComposeOpen = ref(false);
 const { registerModal, unregisterModal } = useModalHistory();
 const DETAIL_MODAL_ID = 'Mail:Detail';
 const COMPOSE_MODAL_ID = 'Mail:Compose';
+const BOXES_MODAL_ID = 'Mail:Boxes';
 
 watch(activeMail, (mail) => {
   if (mail) registerModal(DETAIL_MODAL_ID, () => closeDetail());
@@ -50,6 +52,19 @@ watch(isComposeOpen, (open) => {
   if (open) registerModal(COMPOSE_MODAL_ID, () => (isComposeOpen.value = false));
   else unregisterModal(COMPOSE_MODAL_ID);
 });
+
+// ---------- 邮箱切换面板 ----------
+const isBoxSheetOpen = ref(false);
+
+watch(isBoxSheetOpen, (open) => {
+  if (open) registerModal(BOXES_MODAL_ID, () => (isBoxSheetOpen.value = false));
+  else unregisterModal(BOXES_MODAL_ID);
+});
+
+function pickMailbox(key: string): void {
+  isBoxSheetOpen.value = false;
+  void store.selectMailbox(key);
+}
 
 function openDetail(mail: MailSummary): void {
   activeMail.value = mail;
@@ -87,6 +102,7 @@ watch(
 onBeforeUnmount(() => {
   unregisterModal(DETAIL_MODAL_ID);
   unregisterModal(COMPOSE_MODAL_ID);
+  unregisterModal(BOXES_MODAL_ID);
   store.resetSession();
 });
 </script>
@@ -114,33 +130,41 @@ onBeforeUnmount(() => {
         </button>
       </header>
 
-      <!-- 邮箱切换 + 仅未读 -->
-      <section v-if="store.mailboxes.length > 0" class="ml-boxes">
-        <div class="ml-box-row vcp-scrollable">
+      <!-- 账户切换条 + 未读过滤 -->
+      <section v-if="store.mailboxes.length > 0" class="ml-top">
+        <div class="ml-account-row">
           <button
-            v-for="box in store.mailboxes"
-            :key="store.keyOf(box)"
             type="button"
-            class="ml-box-chip"
-            :class="{ 'is-active': store.selectedKey === store.keyOf(box), 'is-disabled': !box.enabled }"
-            @click="store.selectMailbox(store.keyOf(box))"
+            class="ml-account-btn"
+            aria-label="切换邮箱"
+            @click="isBoxSheetOpen = true"
           >
             <span
               class="ml-ws-dot"
-              :class="{
-                'is-on': store.wsStates.find((s) => s.user === box.user)?.connected,
-              }"
-              :title="store.wsStates.find((s) => s.user === box.user)?.connected ? '推送在线' : '推送离线'"
+              :class="{ 'is-on': store.wsConnected }"
+              :title="store.wsConnected ? '推送在线' : '推送离线'"
             />
-            {{ box.agentName ?? box.label }}
+            <span class="ml-account-main">
+              <span class="ml-account-name">
+                {{ store.selectedMailbox?.agentName ?? store.selectedMailbox?.label ?? '选择邮箱' }}
+                <span v-if="store.selectedMailbox" class="ml-account-type">
+                  {{ store.selectedMailbox.mailbox.startsWith('mail') ? '子邮箱' : '公共邮箱' }}
+                </span>
+              </span>
+              <span class="ml-account-addr">{{ store.selectedMailbox?.user }}</span>
+            </span>
+            <ChevronDown :size="16" class="ml-account-chevron" />
           </button>
           <button
             type="button"
-            class="ml-box-chip ml-unread-chip"
+            class="ml-unread-toggle"
             :class="{ 'is-active': store.unreadOnly }"
+            :aria-pressed="store.unreadOnly"
+            title="只看未读邮件"
             @click="store.toggleUnreadOnly()"
           >
-            仅未读
+            <span class="ml-unread-toggle-dot" aria-hidden="true" />
+            未读
           </button>
         </div>
 
@@ -166,8 +190,8 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <!-- 文件夹 chips（补丁端点；不可用时隐藏） -->
-        <div v-if="store.folders.length > 0" class="ml-folder-row vcp-scrollable">
+        <!-- 文件夹（收件箱去重 + 系统文件夹语义化排序） -->
+        <div v-if="store.displayFolders.length > 0" class="ml-folder-row vcp-scrollable">
           <button
             type="button"
             class="ml-folder-chip"
@@ -177,22 +201,32 @@ onBeforeUnmount(() => {
             收件箱
           </button>
           <button
-            v-for="folder in store.folders"
+            v-for="folder in store.displayFolders"
             :key="folder.id"
             type="button"
             class="ml-folder-chip"
             :class="{ 'is-active': store.currentFid === folder.id }"
             @click="store.selectFolder(folder.id)"
           >
-            {{ folder.name }}<template v-if="folder.unreadCount"> ({{ folder.unreadCount }})</template>
+            {{ folderDisplayName(folder.name) }}
           </button>
         </div>
       </section>
 
-      <!-- 服务端错误横幅 -->
-      <div v-if="store.serverError" class="ml-banner" role="alert">
-        <CircleAlert :size="14" />
-        <span>{{ store.serverError }}</span>
+      <!-- 服务器最近错误（可关闭；仅提示，不代表当前操作失败） -->
+      <div v-if="store.visibleServerError" class="ml-server-note" role="status">
+        <CircleAlert :size="14" class="ml-server-note-icon" />
+        <span class="ml-server-note-text">
+          服务器最近报告了一个错误（可能来自后台同步）：{{ store.visibleServerError }}
+        </span>
+        <button
+          type="button"
+          class="ml-server-note-close"
+          aria-label="知道了"
+          @click="store.dismissServerError()"
+        >
+          <X :size="13" />
+        </button>
       </div>
 
       <!-- 整页空态 -->
@@ -275,6 +309,59 @@ onBeforeUnmount(() => {
         <span>{{ store.error }}</span>
       </div>
 
+      <!-- 邮箱切换面板（底部滑升） -->
+      <Transition name="ml-fade">
+        <div
+          v-if="isBoxSheetOpen"
+          class="ml-sheet-mask"
+          @click="isBoxSheetOpen = false"
+          @touchmove.prevent
+        />
+      </Transition>
+      <Transition name="ml-sheet-slide">
+        <section v-if="isBoxSheetOpen" class="ml-sheet" role="dialog" aria-label="切换邮箱">
+          <header class="ml-sheet-header">
+            <span class="ml-sheet-title">切换邮箱</span>
+            <button
+              type="button"
+              class="ml-icon-btn"
+              aria-label="关闭"
+              @click="isBoxSheetOpen = false"
+            >
+              <X :size="17" />
+            </button>
+          </header>
+          <div class="ml-sheet-list vcp-scrollable">
+            <button
+              v-for="box in store.mailboxes"
+              :key="store.keyOf(box)"
+              type="button"
+              class="ml-sheet-row"
+              :class="{ 'is-active': store.selectedKey === store.keyOf(box), 'is-disabled': !box.enabled }"
+              @click="pickMailbox(store.keyOf(box))"
+            >
+              <span
+                class="ml-ws-dot"
+                :class="{ 'is-on': store.wsStates.find((s) => s.user === box.user)?.connected }"
+              />
+              <span class="ml-sheet-row-main">
+                <span class="ml-sheet-row-name">{{ box.agentName ?? box.label }}</span>
+                <span class="ml-sheet-row-addr">{{ box.user }}</span>
+              </span>
+              <span class="ml-sheet-row-side">
+                <span
+                  class="ml-sheet-row-type"
+                  :class="{ 'is-sub': box.mailbox.startsWith('mail') }"
+                >{{ box.mailbox.startsWith('mail') ? '子邮箱' : '公共' }}</span>
+                <span class="ml-sheet-row-meta">
+                  {{ store.wsStates.find((s) => s.user === box.user)?.connected ? '推送在线' : '推送离线' }} · 缓存 {{ box.cachedCount }}
+                </span>
+              </span>
+            </button>
+          </div>
+        </section>
+      </Transition>
+
       <!-- 详情（滑入子页） -->
       <Transition name="ml-detail-slide">
         <MailDetailView v-if="activeMail" :mail="activeMail" @close="closeDetail" />
@@ -346,28 +433,90 @@ onBeforeUnmount(() => {
   opacity: 1;
 }
 
-.ml-boxes {
+.ml-top {
   flex-shrink: 0;
-  padding: 8px 14px;
+  padding: 8px 14px 10px;
   border-bottom: 1px solid var(--border-color);
 }
 
-.ml-box-row {
+/* ---- 账户切换条 ---- */
+.ml-account-row {
   display: flex;
+  align-items: stretch;
   gap: 8px;
-  overflow-x: auto;
+}
+
+.ml-account-btn {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--secondary-bg);
+  color: var(--primary-text);
+  text-align: left;
+  transition: opacity 0.15s ease;
+}
+
+.ml-account-btn:active {
+  opacity: 0.75;
+}
+
+.ml-account-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ml-account-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 800;
+  overflow: hidden;
   white-space: nowrap;
 }
 
-.ml-box-chip {
+.ml-account-type {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  font-size: 9px;
+  font-weight: 700;
+  opacity: 0.6;
+}
+
+.ml-account-addr {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  opacity: 0.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ml-account-chevron {
+  flex-shrink: 0;
+  opacity: 0.4;
+}
+
+/* ---- 未读过滤开关 ---- */
+.ml-unread-toggle {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  min-height: 30px;
-  padding: 0 12px;
-  border-radius: 999px;
+  padding: 0 14px;
   border: 1px solid var(--border-color);
+  border-radius: 12px;
   background: transparent;
   color: var(--primary-text);
   font-size: 12px;
@@ -375,18 +524,21 @@ onBeforeUnmount(() => {
   opacity: 0.6;
 }
 
-.ml-box-chip.is-active {
+.ml-unread-toggle-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--border-color);
+}
+
+.ml-unread-toggle.is-active {
   opacity: 1;
   color: var(--highlight-text);
   border-color: var(--highlight-text);
 }
 
-.ml-box-chip.is-disabled {
-  opacity: 0.35;
-}
-
-.ml-unread-chip {
-  margin-left: auto;
+.ml-unread-toggle.is-active .ml-unread-toggle-dot {
+  background: var(--highlight-text);
 }
 
 .ml-search {
@@ -502,6 +654,186 @@ onBeforeUnmount(() => {
   color: #ef4444;
   border-bottom: 1px solid var(--border-color);
   flex-shrink: 0;
+}
+
+/* ---- 服务器最近错误（琥珀色提示条，可关闭） ---- */
+.ml-server-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 14px 0;
+  padding: 8px 10px 8px 12px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 10px;
+  background: rgba(245, 158, 11, 0.08);
+  font-size: 11px;
+  color: var(--primary-text);
+  flex-shrink: 0;
+}
+
+.ml-server-note-icon {
+  color: #f59e0b;
+  flex-shrink: 0;
+}
+
+.ml-server-note-text {
+  flex: 1;
+  min-width: 0;
+  opacity: 0.8;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.ml-server-note-close {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--primary-text);
+  opacity: 0.5;
+}
+
+/* ---- 邮箱切换底部面板 ---- */
+.ml-sheet-mask {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: var(--layer-local);
+}
+
+.ml-sheet {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-height: 62%;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border-color);
+  border-radius: 16px 16px 0 0;
+  background: var(--primary-bg);
+  z-index: calc(var(--layer-local) + 1);
+  padding-bottom: var(--vcp-safe-bottom, 48px);
+}
+
+.ml-sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px 8px;
+}
+
+.ml-sheet-title {
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.ml-sheet-list {
+  overflow-y: auto;
+  padding: 0 12px 12px;
+}
+
+.ml-sheet-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 11px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--secondary-bg);
+  color: var(--primary-text);
+  text-align: left;
+}
+
+.ml-sheet-row.is-active {
+  border-color: var(--highlight-text);
+}
+
+.ml-sheet-row.is-disabled {
+  opacity: 0.4;
+}
+
+.ml-sheet-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.ml-sheet-row-name {
+  font-size: 13px;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ml-sheet-row-addr {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  opacity: 0.45;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ml-sheet-row-side {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
+.ml-sheet-row-type {
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  font-size: 9px;
+  font-weight: 700;
+  opacity: 0.6;
+}
+
+.ml-sheet-row-type.is-sub {
+  color: var(--highlight-text);
+  border-color: var(--highlight-text);
+  opacity: 0.9;
+}
+
+.ml-sheet-row-meta {
+  font-size: 9.5px;
+  opacity: 0.45;
+}
+
+/* 面板动画 */
+.ml-fade-enter-active,
+.ml-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.ml-fade-enter-from,
+.ml-fade-leave-to {
+  opacity: 0;
+}
+
+.ml-sheet-slide-enter-active,
+.ml-sheet-slide-leave-active {
+  transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.ml-sheet-slide-enter-from,
+.ml-sheet-slide-leave-to {
+  transform: translateY(100%);
 }
 
 .ml-scroll {
@@ -672,7 +1004,7 @@ onBeforeUnmount(() => {
 
 @media (min-width: 768px) {
   .ml-scroll,
-  .ml-boxes {
+  .ml-top {
     max-width: 860px;
     width: 100%;
     margin: 0 auto;
