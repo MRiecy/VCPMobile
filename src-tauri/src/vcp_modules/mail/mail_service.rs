@@ -142,6 +142,7 @@ pub async fn mail_state<R: Runtime>(
 
 /// 邮件列表（offset 分页 + 仅未读 + 文件夹过滤）。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn mail_list<R: Runtime>(
     app_handle: AppHandle<R>,
     settings_state: State<'_, SettingsState>,
@@ -254,6 +255,7 @@ pub async fn mail_trash<R: Runtime>(
 
 /// 发送新邮件。
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn mail_send<R: Runtime>(
     app_handle: AppHandle<R>,
     settings_state: State<'_, SettingsState>,

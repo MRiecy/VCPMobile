@@ -1142,6 +1142,7 @@ impl PullExecutor {
     /// 在途原始帧预算为 32 MiB；有界 mpsc channel 实时推送进度日志并施加背压。
     ///
     /// 返回每个 topic 的处理结果。
+    #[allow(clippy::too_many_arguments)]
     pub async fn pull_messages_batch<R: Runtime>(
         app: &AppHandle<R>,
         client: &reqwest::Client,

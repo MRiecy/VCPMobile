@@ -229,7 +229,7 @@ fn version_is_newer(latest: &str, current: &str) -> bool {
 
 /// 严格解析 `sha256sum` 标准格式：`<64hex>  <文件名>`（兼容二进制模式的 `*文件名`）。
 fn parse_sha256_sidecar(content: &str, expected_name: &str) -> Result<String, String> {
-    let mut parts = content.trim().split_whitespace();
+    let mut parts = content.split_whitespace();
     let hash = parts
         .next()
         .ok_or_else(|| "SHA-256 校验文件为空".to_string())?;
@@ -1230,7 +1230,7 @@ mod tests {
         .is_err());
         assert!(parse_sha256_sidecar("not-a-hash  x.apk", "x.apk").is_err());
         assert!(parse_sha256_sidecar("", "x.apk").is_err());
-        assert!(parse_sha256_sidecar(&format!("{hash}"), "x.apk").is_err());
+        assert!(parse_sha256_sidecar(&hash.to_string(), "x.apk").is_err());
         assert!(parse_sha256_sidecar(&format!("{hash}  x.apk extra"), "x.apk").is_err());
     }
 
