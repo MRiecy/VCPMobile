@@ -30,6 +30,7 @@ describe("mobile performance governance", () => {
       "isTaskCenterOpen",
       "isAgentMgrOpen",
       "isForumOpen",
+      "isMailOpen",
     ];
 
     for (const openState of latches) {

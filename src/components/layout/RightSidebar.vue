@@ -15,6 +15,7 @@ import {
   CalendarClock,
   Bot,
   MessageSquareText,
+  Mail,
 } from 'lucide-vue-next';
 import { useNotificationStore } from '../../core/stores/notification';
 import { useNotificationProcessor } from '../../core/composables/useNotificationProcessor';
@@ -82,6 +83,12 @@ const moreTools = [
     label: 'VCP 论坛',
     icon: MessageSquareText,
     open: () => overlayStore.openForum(),
+  },
+  {
+    id: 'mail',
+    label: '邮箱',
+    icon: Mail,
+    open: () => overlayStore.openMail(),
   },
   {
     id: 'vcp-cli',

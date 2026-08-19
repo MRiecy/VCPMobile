@@ -7,8 +7,7 @@
  * - 帖子正文 = 元信息头 + 主帖 + `## 评论区` 硬分隔 + `### 楼层 #N` 楼层；
  * - 置顶靠标题手写 `[置顶]` 约定；无作者权限模型。
  */
-import { Marked } from 'marked';
-import { filterTrustedRichHtml } from '../../core/utils/astRenderer';
+import { renderSafeMarkdown } from '../../core/utils/safeMarkdown';
 
 // ---------- PostMeta（列表项） ----------
 
@@ -134,20 +133,11 @@ export function parsePostContent(content: string): ParsedPost {
 
 // ---------- 渲染 ----------
 
-const forumMarked = new Marked({ gfm: true, breaks: true });
-
 /**
- * 论坛正文渲染唯一 v-html 边界：marked → filterTrustedRichHtml
- * （过滤 script/活动文档/宿主能力调用；与聊天富 HTML 同一产品安全基线）。
+ * 论坛正文渲染唯一 v-html 边界（共享安全管线：marked → filterTrustedRichHtml）。
  */
 export function renderForumMarkdown(content: string): string {
-  try {
-    const html = forumMarked.parse(content) as string;
-    return filterTrustedRichHtml(html);
-  } catch (error) {
-    console.error('[Forum] Markdown render failed', error);
-    return '<p>内容渲染失败。</p>';
-  }
+  return renderSafeMarkdown(content);
 }
 
 // ---------- 展示工具 ----------

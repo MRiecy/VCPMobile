@@ -20,7 +20,8 @@ export type OverlayPageType =
   | 'logCenter'
   | 'taskCenter'
   | 'agentMgr'
-  | 'forum';
+  | 'forum'
+  | 'mail';
 
 interface DiaryOpenTarget {
   folder: string;
@@ -61,6 +62,7 @@ export const useOverlayStore = defineStore('overlay', () => {
   const isTaskCenterOpen = computed(() => pageStack.value.some(p => p.type === 'taskCenter'));
   const isAgentMgrOpen = computed(() => pageStack.value.some(p => p.type === 'agentMgr'));
   const isForumOpen = computed(() => pageStack.value.some(p => p.type === 'forum'));
+  const isMailOpen = computed(() => pageStack.value.some(p => p.type === 'mail'));
 
 
   const agentSettingsId = computed(() => {
@@ -277,6 +279,15 @@ export const useOverlayStore = defineStore('overlay', () => {
     popPage();
   };
 
+  const openMail = () => {
+    pushPage('mail');
+  };
+
+  const closeMail = () => {
+    if (pageStackTop.value?.type !== 'mail') return;
+    popPage();
+  };
+
   // --- Modal API (unchanged) ---
   const openPrompt = (config: PromptConfig) => {
     promptConfig.value = config;
@@ -374,6 +385,7 @@ export const useOverlayStore = defineStore('overlay', () => {
     isTaskCenterOpen,
     isAgentMgrOpen,
     isForumOpen,
+    isMailOpen,
     diaryOpenTarget,
     // Legacy open/close (now backed by page stack)
     openSettings,
@@ -405,6 +417,8 @@ export const useOverlayStore = defineStore('overlay', () => {
     closeAgentMgr,
     openForum,
     closeForum,
+    openMail,
+    closeMail,
     // Modals
     promptConfig,
     confirmConfig,
