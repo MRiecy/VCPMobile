@@ -419,7 +419,7 @@ async fn finalize_high_speed_upload<R: Runtime>(
         .map_err(|e| format!("创建附件目录失败: {e}"))?;
     let dest_path = dest.join(internal_name);
 
-    install_verified_upload(temp_path, &dest_path, &hash, size).await?;
+    install_verified_upload(temp_path, &dest_path, size).await?;
 
     let internal_path = dest_path
         .to_str()
@@ -441,7 +441,6 @@ async fn finalize_high_speed_upload<R: Runtime>(
 async fn install_verified_upload(
     temp_path: &std::path::Path,
     dest_path: &std::path::Path,
-    expected_hash: &str,
     expected_size: u64,
 ) -> Result<(), String> {
     if !dest_path.exists() {
@@ -461,7 +460,7 @@ async fn install_verified_upload(
         }
     }
 
-    crate::vcp_modules::file_manager::verify_existing_cas(dest_path, expected_hash, expected_size)
+    crate::vcp_modules::file_manager::check_existing_cas_size_async(dest_path, expected_size)
         .await?;
 
     if temp_path.exists() {
@@ -532,17 +531,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn existing_cas_must_be_verified_before_upload_temp_is_discarded() {
+    async fn existing_cas_is_reused_by_size_gate_and_temp_is_discarded() {
         let temp = tempfile::tempdir().expect("tempdir");
         let source = temp.path().join("upload.tmp");
         let destination = temp.path().join("cas.bin");
         let expected = b"expected";
-        let hash = crate::vcp_modules::infra::utils::calculate_sha256(expected);
 
+        // 尺寸不符（截断/半文件）的已有 CAS：拒绝复用，暂存文件保留以便重试。
         std::fs::write(&source, expected).expect("source");
-        std::fs::write(&destination, b"corrupt!").expect("corrupt destination");
+        std::fs::write(&destination, b"bad").expect("truncated destination");
         assert!(
-            install_verified_upload(&source, &destination, &hash, expected.len() as u64)
+            install_verified_upload(&source, &destination, expected.len() as u64)
                 .await
                 .is_err()
         );
@@ -551,8 +550,9 @@ mod tests {
             "unverified upload temp must remain retryable"
         );
 
+        // 尺寸匹配的已有 CAS：文件名即内容哈希 + 原子发布，直接复用并清理暂存。
         std::fs::write(&destination, expected).expect("valid destination");
-        install_verified_upload(&source, &destination, &hash, expected.len() as u64)
+        install_verified_upload(&source, &destination, expected.len() as u64)
             .await
             .expect("matching CAS should be reusable");
         assert!(
@@ -567,10 +567,9 @@ mod tests {
         let source = temp.path().join("upload.tmp");
         let destination = temp.path().join("cas.bin");
         let expected = b"new-cas";
-        let hash = crate::vcp_modules::infra::utils::calculate_sha256(expected);
         std::fs::write(&source, expected).expect("source");
 
-        install_verified_upload(&source, &destination, &hash, expected.len() as u64)
+        install_verified_upload(&source, &destination, expected.len() as u64)
             .await
             .expect("new CAS should install");
         assert!(!source.exists());

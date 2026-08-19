@@ -56,27 +56,24 @@ fn verify_expected_hash(expected_hash: Option<&str>, actual_hash: &str) -> Resul
     Ok(())
 }
 
-fn verify_small_existing_cas(
-    path: &std::path::Path,
-    expected_hash: &str,
-    expected_size: u64,
-) -> Result<(), String> {
+/// CAS 命中复用校验（瘦身版，只做元数据闸门）。
+///
+/// 为什么可以不做全量重哈希：正式路径的文件名即内容哈希（写入端先对新内容全量
+/// 计算 SHA-256 再命名），且所有发布路径都是 temp+rename 原子提交，正式位置不可能
+/// 存在半文件。「同尺寸不同内容」仅剩磁盘级损坏一种来源，而「能改写应用私有目录
+/// 的攻击者」本就超出哈希校验能防的威胁模型。去掉重哈希后，重复附件命中不再产生
+/// 第三次全量读盘（Kotlin 拷入一次 + Rust staging 重算一次已经足够）。
+fn check_existing_cas_size(path: &std::path::Path, expected_size: u64) -> Result<(), String> {
     let metadata =
         fs::metadata(path).map_err(|error| format!("CAS 文件元数据读取失败: {}", error))?;
     if !metadata.is_file() || metadata.len() != expected_size {
         return Err("已存在的 CAS 文件大小不匹配，拒绝复用".to_string());
     }
-    let bytes = fs::read(path).map_err(|error| format!("CAS 文件校验读取失败: {}", error))?;
-    let actual_hash = crate::vcp_modules::infra::utils::calculate_sha256(&bytes);
-    if actual_hash != expected_hash {
-        return Err("已存在的 CAS 文件内容哈希不匹配，拒绝复用".to_string());
-    }
     Ok(())
 }
 
-pub(crate) async fn verify_existing_cas(
+pub(crate) async fn check_existing_cas_size_async(
     path: &std::path::Path,
-    expected_hash: &str,
     expected_size: u64,
 ) -> Result<(), String> {
     let metadata = tokio::fs::metadata(path)
@@ -84,24 +81,6 @@ pub(crate) async fn verify_existing_cas(
         .map_err(|error| format!("CAS 文件元数据读取失败: {}", error))?;
     if !metadata.is_file() || metadata.len() != expected_size {
         return Err("已存在的 CAS 文件大小不匹配，拒绝复用".to_string());
-    }
-    let mut file = tokio::fs::File::open(path)
-        .await
-        .map_err(|error| format!("CAS 文件校验打开失败: {}", error))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 65536];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .await
-            .map_err(|error| format!("CAS 文件校验读取失败: {}", error))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    if hex::encode(hasher.finalize()) != expected_hash {
-        return Err("已存在的 CAS 文件内容哈希不匹配，拒绝复用".to_string());
     }
     Ok(())
 }
@@ -685,7 +664,7 @@ pub async fn store_file(
             .unwrap_or_else(|| hash.clone());
         let internal_file_path = attachments_dir.join(internal_file_name);
         if internal_file_path.exists() {
-            verify_small_existing_cas(&internal_file_path, &hash, file_bytes.len() as u64)?;
+            check_existing_cas_size(&internal_file_path, file_bytes.len() as u64)?;
         } else {
             let temporary_path =
                 attachments_dir.join(format!(".ingest-{}-{}.tmp", hash, uuid::Uuid::new_v4()));
@@ -698,7 +677,7 @@ pub async fn store_file(
                 if !internal_file_path.exists() {
                     return Err(error.to_string());
                 }
-                verify_small_existing_cas(&internal_file_path, &hash, file_bytes.len() as u64)?;
+                check_existing_cas_size(&internal_file_path, file_bytes.len() as u64)?;
             }
         }
         Ok::<_, String>((hash, internal_file_path))
@@ -747,6 +726,9 @@ pub async fn register_local_file(
     stable_id: Option<String>,
     expected_hash: Option<String>,
 ) -> Result<AttachmentData, String> {
+    // 注：本命令的 future 体积较大（CAS 校验 + sqlx 事务），栈安全由 lib.rs 的
+    // 「IPC 防爆栈总闸」统一保障（命令分发整体在 tokio worker 线程上进行），
+    // 此处无需再做壳化或其他特殊处理。
     let uploads_root = app_handle
         .path()
         .app_cache_dir()
@@ -861,7 +843,7 @@ pub async fn register_local_file(
         Copied,
     }
     let placement = if dest_path.exists() {
-        verify_existing_cas(&dest_path, &hash, size).await?;
+        check_existing_cas_size_async(&dest_path, size).await?;
         log::info!(
             "[FileManager] Duplicated local file found for staging path: {}",
             local_path
@@ -907,7 +889,7 @@ pub async fn register_local_file(
                     if !dest_path.exists() {
                         return Err(format!("提交文件到正式目录失败: {}", error));
                     }
-                    verify_existing_cas(&dest_path, &hash, size).await?;
+                    check_existing_cas_size_async(&dest_path, size).await?;
                     Placement::Existing
                 }
             }
@@ -1383,9 +1365,9 @@ mod security_boundary_tests {
     use super::{
         canonical_file_within_root, commit_registered_attachment, normalize_attachment_mime,
         safe_storage_extension, validate_attachment_cas_path, validated_attachment_file,
-        validated_direct_file, verify_existing_cas, verify_expected_hash,
-        verify_small_existing_cas,
+        validated_direct_file, verify_expected_hash,
     };
+    use super::{check_existing_cas_size, check_existing_cas_size_async};
     use std::fs;
 
     #[test]
@@ -1521,23 +1503,26 @@ mod security_boundary_tests {
     }
 
     #[tokio::test]
-    async fn existing_cas_file_must_match_size_and_hash_before_reuse() {
+    async fn existing_cas_file_is_reused_by_size_after_atomic_publish() {
+        // 语义锚点：正式路径文件名即内容哈希（写入端全量算哈希后命名 + temp+rename
+        // 原子提交），命中复用只做大小闸门；同尺寸不同内容属于已接受的残余风险
+        // （仅剩磁盘级损坏一种来源），不再做全量重哈希。
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("cas.bin");
-        let bytes = b"complete";
-        let hash = crate::vcp_modules::infra::utils::calculate_sha256(bytes);
-        fs::write(&path, bytes).expect("complete cas");
+        fs::write(&path, b"complete").expect("complete cas");
 
-        assert!(verify_small_existing_cas(&path, &hash, bytes.len() as u64).is_ok());
-        assert!(verify_existing_cas(&path, &hash, bytes.len() as u64)
-            .await
-            .is_ok());
+        assert!(check_existing_cas_size(&path, 8).is_ok());
+        assert!(check_existing_cas_size_async(&path, 8).await.is_ok());
 
-        fs::write(&path, b"corrupt!").expect("corrupt cas");
-        assert!(verify_small_existing_cas(&path, &hash, bytes.len() as u64).is_err());
-        assert!(verify_existing_cas(&path, &hash, bytes.len() as u64)
-            .await
-            .is_err());
+        // 同尺寸内容差异：按设计接受（防截断，不防篡改）。
+        fs::write(&path, b"corrupt!").expect("same-size corruption");
+        assert!(check_existing_cas_size(&path, 8).is_ok());
+        assert!(check_existing_cas_size_async(&path, 8).await.is_ok());
+
+        // 截断/尺寸不符：拒绝复用。
+        fs::write(&path, b"trunc").expect("truncated cas");
+        assert!(check_existing_cas_size(&path, 8).is_err());
+        assert!(check_existing_cas_size_async(&path, 8).await.is_err());
     }
 
     #[tokio::test]
