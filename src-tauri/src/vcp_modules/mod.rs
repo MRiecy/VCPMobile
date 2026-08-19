@@ -8,6 +8,7 @@ pub mod forum;
 pub mod group;
 pub mod infra;
 pub mod logcenter;
+pub mod mail;
 pub mod persistence;
 pub mod sync;
 pub mod taskcenter;
