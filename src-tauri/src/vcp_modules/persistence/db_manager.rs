@@ -746,21 +746,100 @@ pub struct FtsSearchResult {
     pub snippet: String,
 }
 
-/// 构造 FTS5 MATCH 查询串：按空白分词，每个词转义后包成双引号短语，AND 连接。
+/// 构造 FTS5 MATCH 查询串：每个词转义后包成双引号短语，AND 连接。
 /// trigram 分词器（migration 0008 起）下短语即"保序子串"语义，存原文直接匹配；
 /// 双引号加倍转义防 MATCH 语法注入。
-pub fn build_fts_match_query(input: &str) -> Option<String> {
-    let terms: Vec<String> = input
-        .split_whitespace()
+pub fn build_fts_match_query(terms: &[String]) -> Option<String> {
+    let quoted: Vec<String> = terms
+        .iter()
         .map(|t| t.replace('"', "\"\""))
         .filter(|t| !t.is_empty())
         .map(|t| format!("\"{}\"", t))
         .collect();
-    if terms.is_empty() {
+    if quoted.is_empty() {
         None
     } else {
-        Some(terms.join(" AND "))
+        Some(quoted.join(" AND "))
     }
+}
+
+/// trigram 分词器的硬性边界：MATCH 模式少于 3 个字符时**静默返回零结果**
+///（无全表扫描兜底，已在 bundled SQLite 上实测验证）。
+/// 中文双字词（部署/模型/天气…）是搜索高频词，必须绕开 FTS 走 instr() 子串匹配。
+const TRIGRAM_MIN_TERM_CHARS: usize = 3;
+
+/// 按词长分流：(走 FTS 的长词, 走 instr() 子串匹配的短词)
+pub fn split_trigram_terms(input: &str) -> (Vec<String>, Vec<String>) {
+    let mut long_terms = Vec::new();
+    let mut short_terms = Vec::new();
+    for term in input.split_whitespace() {
+        if term.chars().count() >= TRIGRAM_MIN_TERM_CHARS {
+            long_terms.push(term.to_string());
+        } else if !term.is_empty() {
+            short_terms.push(term.to_string());
+        }
+    }
+    (long_terms, short_terms)
+}
+
+/// 纯短词查询的本地 snippet：以首个命中词为中心截取窗口，全部命中包 <mark>。
+/// 匹配语义与 SQL instr() 一致（区分大小写；FTS 路径的大小写折叠由 snippet() 自理）。
+pub fn build_local_snippet(content: &str, terms: &[String], window_chars: usize) -> String {
+    let valid: Vec<&String> = terms.iter().filter(|t| !t.is_empty()).collect();
+    let first_hit = valid.iter().filter_map(|t| content.find(t.as_str())).min();
+    let total_chars = content.chars().count();
+    let (start_char, prefix_ellipsis) = match first_hit {
+        Some(pos) => {
+            let char_pos = content[..pos].chars().count();
+            let half = window_chars / 2;
+            if char_pos > half {
+                (char_pos - half, true)
+            } else {
+                (0, false)
+            }
+        }
+        None => (0, false),
+    };
+    let window: String = content
+        .chars()
+        .skip(start_char)
+        .take(window_chars)
+        .collect();
+    let suffix_ellipsis = start_char + window_chars < total_chars;
+
+    // 收集窗口内全部命中区间（按起点排序，跳过重叠）
+    let mut marks: Vec<(usize, usize)> = Vec::new();
+    for term in &valid {
+        let mut from = 0;
+        while let Some(i) = window[from..].find(term.as_str()) {
+            let start = from + i;
+            let end = start + term.len();
+            marks.push((start, end));
+            from = end;
+        }
+    }
+    marks.sort_unstable();
+
+    let mut out = String::with_capacity(window.len() + 64);
+    let mut cursor = 0;
+    for (start, end) in marks {
+        if start < cursor {
+            continue; // 与上一命中区间重叠，跳过
+        }
+        out.push_str(&window[cursor..start]);
+        out.push_str("<mark>");
+        out.push_str(&window[start..end]);
+        out.push_str("</mark>");
+        cursor = end;
+    }
+    out.push_str(&window[cursor..]);
+
+    format!(
+        "{}{}{}",
+        if prefix_ellipsis { "…" } else { "" },
+        out,
+        if suffix_ellipsis { "…" } else { "" }
+    )
 }
 
 #[derive(serde::Deserialize)]
@@ -788,37 +867,64 @@ pub async fn search_messages_fts(
     filter: FtsSearchFilter,
 ) -> Result<Vec<FtsSearchResult>, String> {
     let trimmed = filter.query.trim();
-    // trigram 对 <3 字查询退化为全索引扫描；中文双字词合法，最小 2 字符起搜
     if trimmed.chars().count() < 2 {
         return Ok(Vec::new());
     }
-    let Some(fts_query) = build_fts_match_query(trimmed) else {
-        return Ok(Vec::new());
-    };
     if filter.before_timestamp.is_some() != filter.before_message_id.is_some() {
         return Err("search cursor requires both beforeTimestamp and beforeMessageId".to_string());
     }
-    let sort_by_rank = filter.sort.as_deref() == Some("rank");
+    let limit_val = filter.limit.unwrap_or(50).clamp(1, 200);
+
+    // 按词长分流：≥3 字走 trigram FTS，<3 字（中文双字高频词）走 instr() 子串匹配。
+    // trigram 对 <3 字 MATCH 静默返回零结果（无扫描兜底），这是硬性分流而非优化。
+    let (long_terms, short_terms) = split_trigram_terms(trimmed);
+    let use_fts = !long_terms.is_empty();
+    let fts_query = build_fts_match_query(&long_terms);
+    // bm25 仅在 FTS 路径有意义；纯短词路径强制时间倒序
+    let sort_by_rank = use_fts && filter.sort.as_deref() == Some("rank");
     if sort_by_rank && filter.before_timestamp.is_some() {
         return Err("cursor pagination is only supported in time sort mode".to_string());
     }
-    let limit_val = filter.limit.unwrap_or(50).clamp(1, 200);
 
-    let mut sql = String::from(
-        "SELECT
-            m.msg_id,
-            m.topic_id,
-            m.role,
-            m.timestamp,
-            t.title AS topic_title,
-            t.owner_id,
-            t.owner_type,
-            snippet(messages_fts, 2, '<mark>', '</mark>', '…', 48) AS snippet
-         FROM messages_fts
-         INNER JOIN messages m ON messages_fts.msg_id = m.msg_id AND messages_fts.topic_id = m.topic_id
-         INNER JOIN topics t ON m.topic_id = t.topic_id
-         WHERE messages_fts.content MATCH ? AND m.deleted_at IS NULL AND t.deleted_at IS NULL",
-    );
+    let mut sql = if use_fts {
+        String::from(
+            "SELECT
+                m.msg_id,
+                m.topic_id,
+                m.role,
+                m.timestamp,
+                t.title AS topic_title,
+                t.owner_id,
+                t.owner_type,
+                snippet(messages_fts, 2, '<mark>', '</mark>', '…', 48) AS snippet,
+                NULL AS full_content
+             FROM messages_fts
+             INNER JOIN messages m ON messages_fts.msg_id = m.msg_id AND messages_fts.topic_id = m.topic_id
+             INNER JOIN topics t ON m.topic_id = t.topic_id
+             WHERE messages_fts.content MATCH ? AND m.deleted_at IS NULL AND t.deleted_at IS NULL",
+        )
+    } else {
+        String::from(
+            "SELECT
+                m.msg_id,
+                m.topic_id,
+                m.role,
+                m.timestamp,
+                t.title AS topic_title,
+                t.owner_id,
+                t.owner_type,
+                '' AS snippet,
+                substr(m.content, 1, 262144) AS full_content
+             FROM messages m
+             INNER JOIN topics t ON m.topic_id = t.topic_id
+             WHERE m.deleted_at IS NULL AND t.deleted_at IS NULL",
+        )
+    };
+
+    // 短词子串条件（两条路径通用，全部参数化绑定）
+    for _ in &short_terms {
+        sql.push_str(" AND instr(m.content, ?) > 0");
+    }
 
     // 动态过滤条件（全部参数化绑定，无注入面）
     if filter.topic_id.is_some() {
@@ -839,7 +945,7 @@ pub async fn search_messages_fts(
     if filter.end_time.is_some() {
         sql.push_str(" AND m.timestamp <= ?");
     }
-    if !sort_by_rank && filter.before_timestamp.is_some() {
+    if filter.before_timestamp.is_some() {
         sql.push_str(" AND (m.timestamp < ? OR (m.timestamp = ? AND m.msg_id < ?))");
     }
 
@@ -850,7 +956,15 @@ pub async fn search_messages_fts(
     }
     sql.push_str(" LIMIT ?");
 
-    let mut final_query = sqlx::query(&sql).bind(&fts_query);
+    // 按 SQL 文本顺序绑定：MATCH 词 → 短词 instr → 过滤器 → 游标 → limit
+    let mut final_query = sqlx::query(&sql);
+    if let Some(ref fq) = fts_query {
+        final_query = final_query.bind(fq);
+    }
+    for term in &short_terms {
+        final_query = final_query.bind(term);
+    }
+
     if let Some(ref tid) = filter.topic_id {
         final_query = final_query.bind(tid);
     }
@@ -869,10 +983,8 @@ pub async fn search_messages_fts(
     if let Some(et) = filter.end_time {
         final_query = final_query.bind(et);
     }
-    if !sort_by_rank {
-        if let (Some(bts), Some(ref bid)) = (filter.before_timestamp, &filter.before_message_id) {
-            final_query = final_query.bind(bts).bind(bts).bind(bid);
-        }
+    if let (Some(bts), Some(ref bid)) = (filter.before_timestamp, &filter.before_message_id) {
+        final_query = final_query.bind(bts).bind(bts).bind(bid);
     }
     final_query = final_query.bind(limit_val);
 
@@ -883,6 +995,13 @@ pub async fn search_messages_fts(
 
     let mut results = Vec::with_capacity(rows.len());
     for row in rows {
+        // FTS 路径用 snippet()；纯短词路径用本地窗口摘要（高亮全部短词命中）
+        let snippet: String = if use_fts {
+            row.get("snippet")
+        } else {
+            let full_content: String = row.get("full_content");
+            build_local_snippet(&full_content, &short_terms, 96)
+        };
         results.push(FtsSearchResult {
             msg_id: row.get("msg_id"),
             topic_id: row.get("topic_id"),
@@ -891,7 +1010,7 @@ pub async fn search_messages_fts(
             topic_title: row.get("topic_title"),
             owner_id: row.get("owner_id"),
             owner_type: row.get("owner_type"),
-            snippet: row.get("snippet"),
+            snippet,
         });
     }
 
@@ -1216,24 +1335,65 @@ mod tests {
     fn test_build_fts_match_query() {
         // 单词短语
         assert_eq!(
-            build_fts_match_query("机器学习"),
+            build_fts_match_query(&["机器学习".to_string()]),
             Some("\"机器学习\"".into())
         );
         // 多词 AND
         assert_eq!(
-            build_fts_match_query("机器学习 部署"),
+            build_fts_match_query(&["机器学习".to_string(), "部署".to_string()]),
             Some("\"机器学习\" AND \"部署\"".into())
         );
-        // 多余空白压缩
-        assert_eq!(
-            build_fts_match_query("  Hello   World  "),
-            Some("\"Hello\" AND \"World\"".into())
-        );
         // 双引号加倍转义，防 MATCH 语法注入
-        assert_eq!(build_fts_match_query("a\"b"), Some("\"a\"\"b\"".into()));
+        assert_eq!(
+            build_fts_match_query(&["a\"b".to_string()]),
+            Some("\"a\"\"b\"".into())
+        );
         // 空输入
-        assert_eq!(build_fts_match_query(""), None);
-        assert_eq!(build_fts_match_query("   "), None);
+        assert_eq!(build_fts_match_query(&[]), None);
+    }
+
+    #[test]
+    fn test_split_trigram_terms() {
+        // ≥3 字进 FTS，<3 字走 instr()
+        let (long, short) = split_trigram_terms("机器学习 部署 ai 模型训练");
+        assert_eq!(long, vec!["机器学习", "模型训练"]);
+        assert_eq!(short, vec!["部署", "ai"]);
+        // 纯长词 / 纯短词
+        let (long, short) = split_trigram_terms("神经网络");
+        assert_eq!(long, vec!["神经网络"]);
+        assert!(short.is_empty());
+        let (long, short) = split_trigram_terms("部署 天气");
+        assert!(long.is_empty());
+        assert_eq!(short, vec!["部署", "天气"]);
+        // 空输入
+        let (long, short) = split_trigram_terms("   ");
+        assert!(long.is_empty());
+        assert!(short.is_empty());
+    }
+
+    #[test]
+    fn test_build_local_snippet() {
+        let terms = vec!["部署".to_string()];
+        // 命中居中 + 双侧省略号 + 高亮
+        let content = "今天天气不错，我们来讨论一下服务的部署问题，部署上线后还要观察日志。";
+        let snippet = build_local_snippet(content, &terms, 20);
+        assert!(
+            snippet.contains("<mark>部署</mark>"),
+            "snippet: {}",
+            snippet
+        );
+        assert!(snippet.ends_with('…'), "snippet: {}", snippet);
+        // 窗口内多次命中全部高亮
+        assert_eq!(snippet.matches("<mark>").count(), 2, "snippet: {}", snippet);
+        // 无命中时取开头窗口，无 <mark>
+        let miss = build_local_snippet(content, &["火星".to_string()], 20);
+        assert!(!miss.contains("<mark>"));
+        // 短内容无省略号
+        let short = build_local_snippet("部署吧", &terms, 96);
+        assert_eq!(short, "<mark>部署</mark>吧");
+        // 重叠区间跳过（"aba" 在 "ababa" 中两处重叠命中只取第一处）
+        let overlap = build_local_snippet("ababa", &["aba".to_string()], 96);
+        assert_eq!(overlap, "<mark>aba</mark>ba");
     }
 
     #[test]
@@ -1489,7 +1649,7 @@ mod tests {
         // 保序子串命中
         let hit: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE content MATCH ?")
-                .bind(build_fts_match_query("机器学习").unwrap())
+                .bind(build_fts_match_query(&["机器学习".to_string()]).unwrap())
                 .fetch_one(&pool)
                 .await
                 .expect("fts match");
@@ -1498,11 +1658,28 @@ mod tests {
         // 乱序不命中（unicode61 单字方案的假阳性在此被消灭）
         let miss: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE content MATCH ?")
-                .bind(build_fts_match_query("学习机器").unwrap())
+                .bind(build_fts_match_query(&["学习机器".to_string()]).unwrap())
                 .fetch_one(&pool)
                 .await
                 .expect("fts match");
         assert_eq!(miss, 0, "out-of-order query must not match");
+
+        // 硬性边界文档化：<3 字 MATCH 静默返回零结果（无扫描兜底），
+        // 这是 search_messages_fts 对短词走 instr() 分流的原因
+        let short_zero: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE content MATCH ?")
+                .bind(build_fts_match_query(&["部署".to_string()]).unwrap())
+                .fetch_one(&pool)
+                .await
+                .expect("fts match");
+        assert_eq!(short_zero, 0, "trigram <3-char MATCH must yield zero rows");
+        // 同一短词经 instr() 可命中（分流路径的正确性）
+        let instr_hit: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE instr(content, '部署') > 0")
+                .fetch_one(&pool)
+                .await
+                .expect("instr match");
+        assert_eq!(instr_hit, 1, "instr() fallback must hit short term");
 
         // 逻辑删除触发器清索引
         sqlx::query("UPDATE messages SET deleted_at = 2000 WHERE topic_id='t1' AND msg_id='m1'")
@@ -1511,7 +1688,7 @@ mod tests {
             .expect("soft delete");
         let after_delete: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE content MATCH ?")
-                .bind(build_fts_match_query("机器学习").unwrap())
+                .bind(build_fts_match_query(&["机器学习".to_string()]).unwrap())
                 .fetch_one(&pool)
                 .await
                 .expect("fts match");

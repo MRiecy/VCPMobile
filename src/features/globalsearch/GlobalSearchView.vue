@@ -454,6 +454,15 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
   outline: none;
   border: 1px solid rgba(128, 128, 128, 0.15);
   transition: border-color 0.15s ease;
+  /* 隐藏 type=search 聚焦时的原生清除按钮，避免与自定义 X 叠加 */
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.gs-search-input::-webkit-search-cancel-button,
+.gs-search-input::-webkit-search-decoration {
+  display: none;
+  -webkit-appearance: none;
 }
 
 .gs-search-input:focus {
