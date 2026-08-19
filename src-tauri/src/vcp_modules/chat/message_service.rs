@@ -360,6 +360,30 @@ pub async fn load_chat_history_internal(
     }
     let rows = q.fetch_all(pool).await.map_err(|e| e.to_string())?;
 
+    let mut history = convert_history_rows(
+        _app_handle,
+        pool,
+        topic_id,
+        rows,
+        include_content,
+        include_extracted_text,
+    )
+    .await?;
+
+    history.reverse();
+    Ok(history)
+}
+
+/// 将历史查询结果行转换为 ChatMessage 列表（保持输入行序，调用方负责排序/反转）。
+/// 从 load_chat_history_internal 抽出的共享逻辑，供锚点加载 API 复用。
+async fn convert_history_rows(
+    app_handle: &AppHandle,
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    topic_id: &str,
+    rows: Vec<sqlx::sqlite::SqliteRow>,
+    include_content: bool,
+    include_extracted_text: bool,
+) -> Result<Vec<ChatMessage>, String> {
     // 收集所有 msg_id，用于批量查询附件
     let mut msg_ids = Vec::new();
     for row in &rows {
@@ -434,7 +458,7 @@ pub async fn load_chat_history_internal(
 
     // 预计算外壳属性所需的全局数据（避免调用 get_agents 触发昂贵的多余 topics 联表查询）
     let agents = match sqlx::query(
-        "SELECT a.agent_id, a.name, av.dominant_color 
+        "SELECT a.agent_id, a.name, av.dominant_color
          FROM agents a
          LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent' AND av.deleted_at IS NULL
          WHERE a.deleted_at IS NULL",
@@ -465,12 +489,10 @@ pub async fn load_chat_history_internal(
         Err(_) => Vec::new(),
     };
 
-    let settings = crate::vcp_modules::settings_manager::read_settings(
-        _app_handle.clone(),
-        _app_handle.state(),
-    )
-    .await
-    .ok();
+    let settings =
+        crate::vcp_modules::settings_manager::read_settings(app_handle.clone(), app_handle.state())
+            .await
+            .ok();
     let user_name = settings
         .map(|s| s.user_name)
         .unwrap_or_else(|| "User".to_string());
@@ -576,8 +598,104 @@ pub async fn load_chat_history_internal(
         history.push(message);
     }
 
-    history.reverse();
     Ok(history)
+}
+
+/// 锚点加载：以指定消息为中心，取前 before_n 条 + 锚点 + 后 after_n 条，
+/// 按 (timestamp, msg_id) 升序返回。为全局搜索结果跳转定位服务。
+pub async fn load_chat_history_around_internal(
+    app_handle: &AppHandle,
+    owner_id: &str,
+    owner_type: &str,
+    topic_id: &str,
+    anchor_msg_id: &str,
+    before_n: usize,
+    after_n: usize,
+) -> Result<Vec<ChatMessage>, String> {
+    let db_state = app_handle.state::<crate::vcp_modules::db_manager::DbState>();
+    let pool = &db_state.pool;
+
+    let owner_matches: i64 = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM topics
+            WHERE topic_id = ? AND owner_id = ? AND owner_type = ? AND deleted_at IS NULL
+         )",
+    )
+    .bind(topic_id)
+    .bind(owner_id)
+    .bind(owner_type)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    if owner_matches == 0 {
+        return Err("topic does not belong to the selected owner".to_string());
+    }
+
+    let anchor_ts: i64 = sqlx::query_scalar(
+        "SELECT timestamp FROM messages WHERE topic_id = ? AND msg_id = ? AND deleted_at IS NULL",
+    )
+    .bind(topic_id)
+    .bind(anchor_msg_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| "anchor message not found".to_string())?;
+
+    const ROW_SELECT: &str =
+        "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, r.content_hash AS cache_content_hash, r.renderer_schema_version, m.content_hash
+         FROM messages m
+         LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
+         LEFT JOIN agents a ON m.agent_id = a.agent_id";
+
+    let mut rows: Vec<sqlx::sqlite::SqliteRow> = Vec::new();
+
+    // 前向窗口（早于锚点，含锚点本身）
+    let before_rows = sqlx::query(&format!(
+        "{} WHERE m.topic_id = ? AND m.deleted_at IS NULL
+           AND (m.timestamp < ? OR (m.timestamp = ? AND m.msg_id <= ?))
+         ORDER BY m.timestamp DESC, m.msg_id DESC LIMIT ?",
+        ROW_SELECT
+    ))
+    .bind(topic_id)
+    .bind(anchor_ts)
+    .bind(anchor_ts)
+    .bind(anchor_msg_id)
+    .bind(before_n as i64 + 1)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    rows.extend(before_rows);
+
+    // 后向窗口（晚于锚点）
+    if after_n > 0 {
+        let after_rows = sqlx::query(&format!(
+            "{} WHERE m.topic_id = ? AND m.deleted_at IS NULL
+               AND (m.timestamp > ? OR (m.timestamp = ? AND m.msg_id > ?))
+             ORDER BY m.timestamp ASC, m.msg_id ASC LIMIT ?",
+            ROW_SELECT
+        ))
+        .bind(topic_id)
+        .bind(anchor_ts)
+        .bind(anchor_ts)
+        .bind(anchor_msg_id)
+        .bind(after_n as i64)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+        rows.extend(after_rows);
+    }
+
+    // 统一按 (timestamp, msg_id) 升序排序后转换
+    rows.sort_by(|a, b| {
+        use sqlx::Row;
+        let ta: i64 = a.get("timestamp");
+        let tb: i64 = b.get("timestamp");
+        let ia: std::string::String = a.get("msg_id");
+        let ib: std::string::String = b.get("msg_id");
+        (ta, ia).cmp(&(tb, ib))
+    });
+
+    convert_history_rows(app_handle, pool, topic_id, rows, false, false).await
 }
 
 /// 为 Agent 和 Group 组装大模型上下文提供专用的轻量历史查询。

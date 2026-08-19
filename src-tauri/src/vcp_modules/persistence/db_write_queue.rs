@@ -1215,11 +1215,10 @@ impl DbWriteQueue {
             let mut stmt_ins_fts = tx.prepare_cached(&sql_ins_fts)?;
             let mut params_fts: Vec<String> = Vec::new();
             for msg in chunk {
-                let search_content =
-                    crate::vcp_modules::db_manager::preprocess_fts_text(&msg.content);
+                // trigram 分词器（migration 0008 起）直接索引原文，无需 CJK 预处理
                 params_fts.push(msg.id.clone());
                 params_fts.push(topic_id.to_string());
-                params_fts.push(search_content);
+                params_fts.push(msg.content.clone());
             }
             stmt_ins_fts.execute(rusqlite::params_from_iter(params_fts))?;
         }

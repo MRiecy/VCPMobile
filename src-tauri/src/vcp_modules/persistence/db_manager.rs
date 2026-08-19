@@ -443,15 +443,146 @@ async fn archive_corrupt_db(db_path: &Path) -> Result<PathBuf, String> {
     Ok(archive_path)
 }
 
+/// Baseline 版本号：全新安装快速路径只执行该版本文件（终态 schema 存档点）。
+const BASELINE_VERSION: i64 = 100;
+/// baseline 创建时增量链的最大版本号。区间 (BASELINE_INCREMENTAL_MAX, BASELINE_VERSION)
+/// 内严禁出现新迁移（会被全新安装快速路径 seed 跳过），由单元测试钉死。
+const BASELINE_INCREMENTAL_MAX: i64 = 8;
+
 async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), String> {
     let migrator = sqlx::migrate!("./migrations");
-    // 处理 1.1.2 存量用户（有业务表但无任何迁移追踪记录）
-    bootstrap_legacy_if_needed(pool, &migrator).await?;
+    if is_fresh_install(pool).await? {
+        // 全新安装：直接执行 baseline 终态 schema，seed 全部既有迁移记录，
+        // 跳过 0001→0008 增量链（永不经过 unicode61 FTS 中间态）
+        bootstrap_fresh_install(pool, &migrator).await?;
+    } else {
+        // 存量安装（含 1.1.2 无追踪记录的老库）：桥接迁移状态
+        bootstrap_legacy_if_needed(pool, &migrator).await?;
+    }
     // sqlx 内置迁移引擎：底层用 sqlite3_exec()，原生支持触发器等多语句 DDL
     migrator
         .run(pool)
         .await
         .map_err(|e| format!("数据库初始化失败: {}", e))
+}
+
+/// 全新安装判定：无 messages 业务表且无任何已应用迁移记录。
+/// 若 _sqlx_migrations 有记录但 messages 缺失（极端半迁移状态），
+/// 交给 migrator 正常续跑，不走快速路径。
+async fn is_fresh_install(pool: &Pool<Sqlite>) -> Result<bool, String> {
+    let has_messages: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Fresh check: failed to inspect messages table: {e}"))?;
+    if has_messages {
+        return Ok(false);
+    }
+    let has_tracking: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Fresh check: failed to inspect tracking table: {e}"))?;
+    if !has_tracking {
+        return Ok(true);
+    }
+    let applied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("Fresh check: failed to count applied migrations: {e}"))?;
+    Ok(applied == 0)
+}
+
+/// 全新安装快速路径：直接执行 baseline 文件，并将「baseline 创建时已存在」的
+/// 全部迁移 seed 为已应用。
+///
+/// Seed 规则（铁律）：只覆盖 version <= BASELINE_INCREMENTAL_MAX 的增量迁移
+/// 和 baseline 自身；baseline 之后新增的迁移（版本号均 > BASELINE_VERSION）
+/// 不在 seed 范围内，由 migrator 正常排队执行。
+async fn bootstrap_fresh_install(
+    pool: &Pool<Sqlite>,
+    migrator: &sqlx::migrate::Migrator,
+) -> Result<(), String> {
+    let baseline = migrator
+        .migrations
+        .iter()
+        .find(|m| m.version == BASELINE_VERSION)
+        .ok_or_else(|| {
+            format!(
+                "Fresh bootstrap: baseline migration v{} not found in ./migrations",
+                BASELINE_VERSION
+            )
+        })?;
+
+    log::info!(
+        "[DBManager] Fresh install detected. Running baseline v{} (full schema snapshot)...",
+        BASELINE_VERSION
+    );
+
+    // 整份执行 baseline（sqlx::raw_sql 支持多语句 DDL）
+    sqlx::raw_sql(baseline.sql.as_ref())
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Fresh bootstrap: baseline v{} execution failed: {e}", BASELINE_VERSION))?;
+
+    // 单事务内 seed 迁移记录（原子、可重试），checksum 与 sqlx 运行期校验同源
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Fresh bootstrap: failed to begin transaction: {e}"))?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS _sqlx_migrations (
+            version        BIGINT PRIMARY KEY,
+            description    TEXT NOT NULL,
+            installed_on   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            success        BOOLEAN NOT NULL,
+            checksum       BLOB NOT NULL,
+            execution_time BIGINT NOT NULL
+        )",
+    )
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| format!("Fresh bootstrap: failed to create _sqlx_migrations: {e}"))?;
+
+    for migration in migrator.migrations.iter() {
+        let covered = migration.version <= BASELINE_INCREMENTAL_MAX
+            || migration.version == BASELINE_VERSION;
+        if !covered {
+            continue;
+        }
+        sqlx::query(
+            "INSERT OR IGNORE INTO _sqlx_migrations
+             (version, description, installed_on, success, checksum, execution_time)
+             VALUES (?, ?, datetime('now'), 1, ?, 0)",
+        )
+        .bind(migration.version)
+        .bind(migration.description.as_ref())
+        .bind(migration.checksum.as_ref())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            format!(
+                "Fresh bootstrap: failed to seed migration v{}: {}",
+                migration.version, e
+            )
+        })?;
+    }
+    tx.commit()
+        .await
+        .map_err(|e| format!("Fresh bootstrap: failed to commit seed records: {e}"))?;
+
+    log::info!(
+        "[DBManager] Fresh bootstrap complete: baseline v{} applied, {} migrations seeded.",
+        BASELINE_VERSION,
+        migrator
+            .migrations
+            .iter()
+            .filter(|m| m.version <= BASELINE_INCREMENTAL_MAX || m.version == BASELINE_VERSION)
+            .count()
+    );
+    Ok(())
 }
 
 /// 为 1.1.2 原始用户（有业务表但无迁移追踪表）构建初始迁移状态。
@@ -508,6 +639,16 @@ async fn bootstrap_legacy_if_needed(
     .await
     .map_err(|e| format!("Bootstrap: failed to inspect FTS table: {e}"))?;
 
+    // v8 探针：messages_fts 的建表 SQL 含 'trigram' 说明 0008 已执行。
+    // 必须与 v3 的 has_fts 区分——unicode61 版 FTS 存在不代表 trigram 重建完成。
+    let fts_ddl: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='messages_fts'",
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| format!("Bootstrap: failed to inspect FTS DDL: {e}"))?;
+    let has_trigram_fts = fts_ddl.is_some_and(|ddl| ddl.contains("trigram"));
+
     let avatar_columns = sqlx::query("PRAGMA table_info(avatars)")
         .fetch_all(&mut *tx)
         .await
@@ -547,6 +688,8 @@ async fn bootstrap_legacy_if_needed(
             2 => has_deleted_at, // deleted_at 列存在则 Migration 2 已执行
             3 => has_fts,        // messages_fts 表存在则 Migration 3 已执行
             6 => has_avatar_deleted_at,
+            8 => has_trigram_fts, // trigram 版 FTS 存在则 Migration 8 已执行
+            BASELINE_VERSION => true, // baseline 仅对全新安装执行；有业务表的库一律跳过
             _ => false,
         };
 
@@ -590,36 +733,29 @@ pub struct FtsSearchResult {
     pub msg_id: String,
     pub topic_id: String,
     pub role: String,
-    pub content: String,
     pub timestamp: i64,
     pub topic_title: String,
+    pub owner_id: String,
+    pub owner_type: String,
+    /// FTS5 snippet() 生成的命中摘要（含 <mark> 高亮标记），非完整正文
+    pub snippet: String,
 }
 
-pub fn preprocess_fts_text(text: &str) -> String {
-    let mut result = String::with_capacity(text.len() * 2);
-    let mut last_was_cjk = false;
-
-    for c in text.chars() {
-        let is_cjk = ('\u{4e00}'..='\u{9fff}').contains(&c)
-            || ('\u{3400}'..='\u{4dbf}').contains(&c)
-            || ('\u{20000}'..='\u{2a6df}').contains(&c);
-
-        if is_cjk {
-            if !result.is_empty() && !last_was_cjk && !result.ends_with(' ') {
-                result.push(' ');
-            }
-            result.push(c);
-            result.push(' ');
-            last_was_cjk = true;
-        } else {
-            if last_was_cjk && c != ' ' && !result.ends_with(' ') {
-                result.push(' ');
-            }
-            result.push(c);
-            last_was_cjk = false;
-        }
+/// 构造 FTS5 MATCH 查询串：按空白分词，每个词转义后包成双引号短语，AND 连接。
+/// trigram 分词器（migration 0008 起）下短语即"保序子串"语义，存原文直接匹配；
+/// 双引号加倍转义防 MATCH 语法注入。
+pub fn build_fts_match_query(input: &str) -> Option<String> {
+    let terms: Vec<String> = input
+        .split_whitespace()
+        .map(|t| t.replace('"', "\"\""))
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{}\"", t))
+        .collect();
+    if terms.is_empty() {
+        None
+    } else {
+        Some(terms.join(" AND "))
     }
-    result.trim().to_string()
 }
 
 #[derive(serde::Deserialize)]
@@ -627,11 +763,18 @@ pub fn preprocess_fts_text(text: &str) -> String {
 pub struct FtsSearchFilter {
     pub query: String,
     pub topic_id: Option<String>,
-    pub agent_id: Option<String>,
+    /// 会话归属过滤（决策 B）：topics.owner_id / owner_type，而非消息发送者
+    pub owner_id: Option<String>,
+    pub owner_type: Option<String>,
     pub role: Option<String>,
     pub start_time: Option<i64>,
     pub end_time: Option<i64>,
     pub limit: Option<i64>,
+    /// keyset 分页游标（仅时间倒序模式有效，须成对出现）
+    pub before_timestamp: Option<i64>,
+    pub before_message_id: Option<String>,
+    /// 排序："time"（默认，时间倒序）| "rank"（bm25 相关度，游标分页不可用）
+    pub sort: Option<String>,
 }
 
 #[tauri::command]
@@ -640,42 +783,49 @@ pub async fn search_messages_fts(
     filter: FtsSearchFilter,
 ) -> Result<Vec<FtsSearchResult>, String> {
     let trimmed = filter.query.trim();
-    if trimmed.is_empty() {
+    // trigram 对 <3 字查询退化为全索引扫描；中文双字词合法，最小 2 字符起搜
+    if trimmed.chars().count() < 2 {
         return Ok(Vec::new());
     }
-
-    // 编译全文检索 MATCH 条件
-    let processed = preprocess_fts_text(trimmed);
-    let terms: Vec<String> = processed
-        .split_whitespace()
-        .map(|s| format!("\"{}\"", s))
-        .collect();
-    if terms.is_empty() {
+    let Some(fts_query) = build_fts_match_query(trimmed) else {
         return Ok(Vec::new());
+    };
+    if filter.before_timestamp.is_some() != filter.before_message_id.is_some() {
+        return Err(
+            "search cursor requires both beforeTimestamp and beforeMessageId".to_string(),
+        );
     }
-    let fts_query = terms.join(" AND ");
+    let sort_by_rank = filter.sort.as_deref() == Some("rank");
+    if sort_by_rank && filter.before_timestamp.is_some() {
+        return Err("cursor pagination is only supported in time sort mode".to_string());
+    }
+    let limit_val = filter.limit.unwrap_or(50).clamp(1, 200);
 
-    // 动态构建 SQL 语句，联合复合主键 (topic_id, msg_id) 过滤
     let mut sql = String::from(
-        "SELECT 
-            m.msg_id, 
-            m.topic_id, 
-            m.role, 
-            m.content, 
-            m.timestamp, 
-            t.title AS topic_title
-         FROM messages_fts fts
-         INNER JOIN messages m ON fts.msg_id = m.msg_id AND fts.topic_id = m.topic_id
+        "SELECT
+            m.msg_id,
+            m.topic_id,
+            m.role,
+            m.timestamp,
+            t.title AS topic_title,
+            t.owner_id,
+            t.owner_type,
+            snippet(messages_fts, 2, '<mark>', '</mark>', '…', 48) AS snippet
+         FROM messages_fts
+         INNER JOIN messages m ON messages_fts.msg_id = m.msg_id AND messages_fts.topic_id = m.topic_id
          INNER JOIN topics t ON m.topic_id = t.topic_id
-         WHERE fts.content MATCH ? AND m.deleted_at IS NULL AND t.deleted_at IS NULL",
+         WHERE messages_fts.content MATCH ? AND m.deleted_at IS NULL AND t.deleted_at IS NULL",
     );
 
-    // 动态添加过滤条件
+    // 动态过滤条件（全部参数化绑定，无注入面）
     if filter.topic_id.is_some() {
         sql.push_str(" AND m.topic_id = ?");
     }
-    if filter.agent_id.is_some() {
-        sql.push_str(" AND m.agent_id = ?");
+    if filter.owner_id.is_some() {
+        sql.push_str(" AND t.owner_id = ?");
+    }
+    if filter.owner_type.is_some() {
+        sql.push_str(" AND t.owner_type = ?");
     }
     if filter.role.is_some() {
         sql.push_str(" AND m.role = ?");
@@ -686,16 +836,26 @@ pub async fn search_messages_fts(
     if filter.end_time.is_some() {
         sql.push_str(" AND m.timestamp <= ?");
     }
+    if !sort_by_rank && filter.before_timestamp.is_some() {
+        sql.push_str(" AND (m.timestamp < ? OR (m.timestamp = ? AND m.msg_id < ?))");
+    }
 
-    sql.push_str(" ORDER BY m.timestamp DESC LIMIT ?");
+    if sort_by_rank {
+        sql.push_str(" ORDER BY bm25(messages_fts), m.timestamp DESC, m.msg_id DESC");
+    } else {
+        sql.push_str(" ORDER BY m.timestamp DESC, m.msg_id DESC");
+    }
+    sql.push_str(" LIMIT ?");
 
-    // 重新按顺序绑定参数
     let mut final_query = sqlx::query(&sql).bind(&fts_query);
     if let Some(ref tid) = filter.topic_id {
         final_query = final_query.bind(tid);
     }
-    if let Some(ref aid) = filter.agent_id {
-        final_query = final_query.bind(aid);
+    if let Some(ref oid) = filter.owner_id {
+        final_query = final_query.bind(oid);
+    }
+    if let Some(ref ot) = filter.owner_type {
+        final_query = final_query.bind(ot);
     }
     if let Some(ref r) = filter.role {
         final_query = final_query.bind(r);
@@ -706,7 +866,11 @@ pub async fn search_messages_fts(
     if let Some(et) = filter.end_time {
         final_query = final_query.bind(et);
     }
-    let limit_val = filter.limit.unwrap_or(100);
+    if !sort_by_rank {
+        if let (Some(bts), Some(ref bid)) = (filter.before_timestamp, &filter.before_message_id) {
+            final_query = final_query.bind(bts).bind(bts).bind(bid);
+        }
+    }
     final_query = final_query.bind(limit_val);
 
     let rows = final_query
@@ -716,24 +880,119 @@ pub async fn search_messages_fts(
 
     let mut results = Vec::with_capacity(rows.len());
     for row in rows {
-        let msg_id: String = row.get("msg_id");
-        let topic_id: String = row.get("topic_id");
-        let role: String = row.get("role");
-        let content: String = row.get("content");
-        let timestamp: i64 = row.get("timestamp");
-        let topic_title: String = row.get("topic_title");
-
         results.push(FtsSearchResult {
-            msg_id,
-            topic_id,
-            role,
-            content,
-            timestamp,
-            topic_title,
+            msg_id: row.get("msg_id"),
+            topic_id: row.get("topic_id"),
+            role: row.get("role"),
+            timestamp: row.get("timestamp"),
+            topic_title: row.get("topic_title"),
+            owner_id: row.get("owner_id"),
+            owner_type: row.get("owner_type"),
+            snippet: row.get("snippet"),
         });
     }
 
     Ok(results)
+}
+
+#[derive(serde::Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct FtsIndexStatus {
+    pub total_messages: i64,
+    pub indexed_messages: i64,
+    pub rebuilding: bool,
+}
+
+static FTS_REBUILD_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+async fn fts_index_status(pool: &Pool<Sqlite>) -> Result<FtsIndexStatus, String> {
+    let total: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE deleted_at IS NULL")
+            .fetch_one(pool)
+            .await
+            .map_err(|e| format!("统计消息总数失败: {}", e))?;
+    let indexed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("统计索引条目失败: {}", e))?;
+    Ok(FtsIndexStatus {
+        total_messages: total,
+        indexed_messages: indexed,
+        rebuilding: FTS_REBUILD_RUNNING.load(std::sync::atomic::Ordering::SeqCst),
+    })
+}
+
+/// 查询 FTS 索引覆盖率状态（前端搜索页首开时调用，决定是否展示"索引构建中"）
+#[tauri::command]
+pub async fn get_fts_index_status(
+    db_state: tauri::State<'_, DbState>,
+) -> Result<FtsIndexStatus, String> {
+    fts_index_status(&db_state.pool).await
+}
+
+/// 回填 FTS 索引（决策 G：首次打开搜索页时由前端触发，不在启动路径执行）。
+/// 幂等断点续跑：NOT EXISTS 跳过已索引条目，任意时刻中断后重入安全。
+#[tauri::command]
+pub async fn rebuild_messages_fts(
+    app_handle: AppHandle,
+    db_state: tauri::State<'_, DbState>,
+) -> Result<FtsIndexStatus, String> {
+    use std::sync::atomic::Ordering;
+    // 并发护栏：同一时刻只允许一个回填任务，重入直接返回当前状态
+    if FTS_REBUILD_RUNNING.swap(true, Ordering::SeqCst) {
+        return fts_index_status(&db_state.pool).await;
+    }
+    let result = rebuild_messages_fts_inner(&app_handle, &db_state.pool).await;
+    FTS_REBUILD_RUNNING.store(false, Ordering::SeqCst);
+    result
+}
+
+async fn rebuild_messages_fts_inner(
+    app_handle: &AppHandle,
+    pool: &Pool<Sqlite>,
+) -> Result<FtsIndexStatus, String> {
+    const BATCH_SIZE: i64 = 500;
+    loop {
+        // 单事务内 SELECT+INSERT：WAL 快照一致；中断后已提交批次不回滚（断点续跑）
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| format!("回填事务开启失败: {}", e))?;
+        let inserted = sqlx::query(
+            "INSERT INTO messages_fts (msg_id, topic_id, content)
+             SELECT m.msg_id, m.topic_id, m.content FROM messages m
+             WHERE m.deleted_at IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM messages_fts f
+                   WHERE f.msg_id = m.msg_id AND f.topic_id = m.topic_id
+               )
+             LIMIT ?",
+        )
+        .bind(BATCH_SIZE)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("回填批次执行失败: {}", e))?;
+        let batch_count = inserted.rows_affected();
+        tx.commit()
+            .await
+            .map_err(|e| format!("回填事务提交失败: {}", e))?;
+        if batch_count == 0 {
+            break;
+        }
+        // 批次间发射进度事件，驱动搜索页"索引构建中"进度 UI
+        let status = fts_index_status(pool).await?;
+        let _ = app_handle.emit(
+            "vcp-system-event",
+            serde_json::json!({
+                "type": "vcp-fts-rebuild",
+                "indexedMessages": status.indexed_messages,
+                "totalMessages": status.total_messages,
+                "source": "GlobalSearch"
+            }),
+        );
+    }
+    fts_index_status(pool).await
 }
 
 pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<bool, String> {
@@ -859,13 +1118,13 @@ pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<boo
                 .map_err(|e| format!("Failed to delete stale FTS entry: {}", e))?;
 
             if deleted_at.is_none() {
-                let search_content = preprocess_fts_text(&content);
+                // trigram 分词器（migration 0008 起）直接索引原文，无需 CJK 预处理
                 sqlx::query(
                     "INSERT INTO messages_fts (msg_id, topic_id, content) VALUES (?, ?, ?)",
                 )
                 .bind(&msg_id)
                 .bind(&topic_id)
-                .bind(&search_content)
+                .bind(&content)
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| format!("Failed to insert FTS entry: {}", e))?;
@@ -952,11 +1211,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_preprocess_fts_text() {
-        assert_eq!(preprocess_fts_text("我喜欢AI"), "我 喜 欢 AI");
-        assert_eq!(preprocess_fts_text("AI智能体"), "AI 智 能 体");
-        assert_eq!(preprocess_fts_text("Hello World"), "Hello World");
-        assert_eq!(preprocess_fts_text(""), "");
+    fn test_build_fts_match_query() {
+        // 单词短语
+        assert_eq!(build_fts_match_query("机器学习"), Some("\"机器学习\"".into()));
+        // 多词 AND
+        assert_eq!(
+            build_fts_match_query("机器学习 部署"),
+            Some("\"机器学习\" AND \"部署\"".into())
+        );
+        // 多余空白压缩
+        assert_eq!(
+            build_fts_match_query("  Hello   World  "),
+            Some("\"Hello\" AND \"World\"".into())
+        );
+        // 双引号加倍转义，防 MATCH 语法注入
+        assert_eq!(
+            build_fts_match_query("a\"b"),
+            Some("\"a\"\"b\"".into())
+        );
+        // 空输入
+        assert_eq!(build_fts_match_query(""), None);
+        assert_eq!(build_fts_match_query("   "), None);
     }
 
     #[test]
@@ -1020,7 +1295,217 @@ mod tests {
                 .fetch_all(&pool)
                 .await
                 .expect("read seeded versions");
-        assert_eq!(versions, vec![1, 2, 3]);
+        // v1/v2/v3 由 schema 探针判定已应用；baseline(v100) 对一切有业务表的库直接 seed
+        assert_eq!(versions, vec![1, 2, 3, BASELINE_VERSION]);
+    }
+
+    /// 铁律守护：(BASELINE_INCREMENTAL_MAX, BASELINE_VERSION) 版本号区间内严禁出现迁移，
+    /// 否则全新安装快速路径会将其 seed 跳过，造成永久 schema 缺失。
+    #[test]
+    fn baseline_version_gap_is_free_of_migrations() {
+        let migrator = sqlx::migrate!("./migrations");
+        for migration in migrator.migrations.iter() {
+            assert!(
+                migration.version <= BASELINE_INCREMENTAL_MAX
+                    || migration.version >= BASELINE_VERSION,
+                "migration v{} falls in the forbidden gap ({}, {}); \
+                 versions below baseline are seeded-and-skipped on fresh installs",
+                migration.version,
+                BASELINE_INCREMENTAL_MAX,
+                BASELINE_VERSION
+            );
+        }
+        // baseline 文件必须存在
+        assert!(
+            migrator
+                .migrations
+                .iter()
+                .any(|m| m.version == BASELINE_VERSION),
+            "baseline migration v{} must exist",
+            BASELINE_VERSION
+        );
+    }
+
+    /// 全新安装快速路径：空库 → 只执行 baseline → 全部既有迁移 seed 为已应用，
+    /// 直接得到 trigram 终态 FTS，不经过 unicode61 中间态。
+    #[tokio::test]
+    async fn fresh_install_fast_path_runs_only_baseline() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database");
+
+        run_migrations(&pool).await.expect("run migrations");
+
+        // 全部 1..=8 + baseline 记录已 seed，migrator 无事可做
+        let versions: Vec<i64> =
+            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(&pool)
+                .await
+                .expect("read seeded versions");
+        let mut expected: Vec<i64> = (1..=BASELINE_INCREMENTAL_MAX).collect();
+        expected.push(BASELINE_VERSION);
+        assert_eq!(versions, expected);
+
+        // FTS 直接是 trigram 终态
+        let fts_ddl: String =
+            sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name='messages_fts'")
+                .fetch_one(&pool)
+                .await
+                .expect("read fts ddl");
+        assert!(fts_ddl.contains("trigram"), "baseline FTS must be trigram");
+
+        // 代表性表与 0007/0008 产物齐全
+        for name in ["messages", "topics", "active_generations", "render_cache"] {
+            let exists: bool = sqlx::query_scalar(&format!(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='{}')",
+                name
+            ))
+            .fetch_one(&pool)
+            .await
+            .expect("inspect table");
+            assert!(exists, "baseline must create {}", name);
+        }
+        let has_agent_idx: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='idx_messages_agent_id')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect index");
+        assert!(has_agent_idx, "baseline must include idx_messages_agent_id");
+    }
+
+    /// 漂移防护：baseline 快速路径建库 与 全增量链建库 的 schema 必须等价。
+    /// 逐表比对列集合（name/type/notnull/default）+ 索引/触发器/虚表清单。
+    /// 注意不按文本比对 sqlite_master.sql：ALTER ADD COLUMN 的列序与内联定义天然不同。
+    #[tokio::test]
+    async fn baseline_schema_matches_incremental_chain() {
+        // 路径 A：全新安装快速路径（只跑 baseline）
+        let pool_a = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open baseline db");
+        run_migrations(&pool_a).await.expect("baseline path");
+
+        // 路径 B：全增量链（空库直接跑 migrator，0001→0008→0100 全执行）
+        let pool_b = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open incremental db");
+        sqlx::migrate!("./migrations")
+            .run(&pool_b)
+            .await
+            .expect("incremental path");
+
+        let snap_a = schema_snapshot(&pool_a).await;
+        let snap_b = schema_snapshot(&pool_b).await;
+        assert_eq!(snap_a, snap_b, "baseline schema drifted from incremental chain");
+    }
+
+    /// schema 快照：表 → 排序后的列定义集合；外加索引/触发器/虚表名清单。
+    async fn schema_snapshot(pool: &sqlx::SqlitePool) -> String {
+        let mut out = String::new();
+        let objects: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT type, name, COALESCE(sql,'') FROM sqlite_master \
+             WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_sqlx%' ESCAPE '\\' \
+             ORDER BY type, name",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("read sqlite_master");
+
+        for (obj_type, name, sql) in objects {
+            if obj_type == "table" && !sql.contains("fts5") {
+                // 普通表：比对列集合（列序无关）
+                let cols: Vec<(String, String, i64, Option<String>, i64)> = sqlx::query_as(
+                    &format!(
+                        "SELECT name, type, \"notnull\", dflt_value, pk FROM pragma_table_info('{}')",
+                        name
+                    ),
+                )
+                .fetch_all(pool)
+                .await
+                .expect("read table info");
+                let mut col_sigs: Vec<String> = cols
+                    .iter()
+                    .map(|(n, t, nn, d, pk)| format!("{}:{}:{}:{:?}:{}", n, t, nn, d, pk))
+                    .collect();
+                col_sigs.sort();
+                out.push_str(&format!("TABLE {}\n  {}\n", name, col_sigs.join("\n  ")));
+            } else {
+                // 虚表/索引/触发器：比对规范化 DDL 文本（空白压缩）
+                let normalized: String = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+                out.push_str(&format!("{} {} = {}\n", obj_type.to_uppercase(), name, normalized));
+            }
+        }
+        out
+    }
+
+    /// trigram FTS 端到端验证：保序子串命中、乱序不命中、逻辑删除触发器清索引。
+    #[tokio::test]
+    async fn trigram_fts_matches_cjk_in_order_and_respects_delete_trigger() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database");
+        run_migrations(&pool).await.expect("run migrations");
+
+        sqlx::query(
+            "INSERT INTO topics (topic_id, owner_type, owner_id, title, created_at, updated_at)
+             VALUES ('t1', 'agent', 'a1', '测试话题', 0, 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert topic");
+        sqlx::query(
+            "INSERT INTO messages (topic_id, msg_id, role, content, timestamp, created_at, updated_at)
+             VALUES ('t1', 'm1', 'assistant', '我想讨论机器学习模型的部署问题', 1000, 1000, 1000)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert message");
+        sqlx::query(
+            "INSERT INTO messages_fts (msg_id, topic_id, content)
+             SELECT msg_id, topic_id, content FROM messages",
+        )
+        .execute(&pool)
+        .await
+        .expect("backfill fts");
+
+        // 保序子串命中
+        let hit: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE content MATCH ?")
+                .bind(build_fts_match_query("机器学习").unwrap())
+                .fetch_one(&pool)
+                .await
+                .expect("fts match");
+        assert_eq!(hit, 1, "in-order substring must match");
+
+        // 乱序不命中（unicode61 单字方案的假阳性在此被消灭）
+        let miss: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE content MATCH ?")
+                .bind(build_fts_match_query("学习机器").unwrap())
+                .fetch_one(&pool)
+                .await
+                .expect("fts match");
+        assert_eq!(miss, 0, "out-of-order query must not match");
+
+        // 逻辑删除触发器清索引
+        sqlx::query("UPDATE messages SET deleted_at = 2000 WHERE topic_id='t1' AND msg_id='m1'")
+            .execute(&pool)
+            .await
+            .expect("soft delete");
+        let after_delete: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE content MATCH ?")
+                .bind(build_fts_match_query("机器学习").unwrap())
+                .fetch_one(&pool)
+                .await
+                .expect("fts match");
+        assert_eq!(after_delete, 0, "logical delete must purge fts entry");
     }
 
     #[tokio::test]
@@ -1061,7 +1546,8 @@ mod tests {
                 topic_id TEXT PRIMARY KEY, owner_type TEXT, owner_id TEXT, deleted_at BIGINT
              );
              CREATE TABLE messages (
-                topic_id TEXT NOT NULL, msg_id TEXT NOT NULL, content TEXT NOT NULL DEFAULT '',
+                topic_id TEXT NOT NULL, msg_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT '',
+                agent_id TEXT, content TEXT NOT NULL DEFAULT '',
                 finish_reason TEXT, deleted_at BIGINT, PRIMARY KEY(topic_id, msg_id)
              );
              CREATE TABLE _sqlx_migrations (
@@ -1080,7 +1566,8 @@ mod tests {
         for migration in migrator
             .migrations
             .iter()
-            .filter(|migration| migration.version <= 5)
+            // 模拟生产行为：baseline(v100) 由 legacy 桥接对一切有业务表的库 seed 跳过
+            .filter(|migration| migration.version <= 5 || migration.version == BASELINE_VERSION)
         {
             sqlx::query(
                 "INSERT INTO _sqlx_migrations
@@ -1160,6 +1647,7 @@ mod tests {
         sqlx::query(
             "CREATE TABLE messages (
                 topic_id TEXT NOT NULL, msg_id TEXT NOT NULL, deleted_at BIGINT,
+                role TEXT NOT NULL DEFAULT '', agent_id TEXT,
                 PRIMARY KEY(topic_id, msg_id)
              );
              CREATE TABLE message_attachments (hash TEXT, deleted_at BIGINT);

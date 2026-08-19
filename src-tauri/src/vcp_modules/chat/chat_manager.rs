@@ -151,6 +151,31 @@ pub async fn load_chat_history(
     .await
 }
 
+/// 锚点加载：以指定消息为中心加载前后上下文窗口（全局搜索跳转定位用）。
+/// 返回按 (timestamp, msg_id) 升序排列的消息列表。
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+pub async fn load_chat_history_around(
+    app_handle: tauri::AppHandle,
+    owner_id: String,
+    owner_type: String,
+    topic_id: String,
+    anchor_msg_id: String,
+    before_n: Option<usize>,
+    after_n: Option<usize>,
+) -> Result<Vec<ChatMessage>, String> {
+    crate::vcp_modules::message_service::load_chat_history_around_internal(
+        &app_handle,
+        &owner_id,
+        &owner_type,
+        &topic_id,
+        &anchor_msg_id,
+        before_n.unwrap_or(10).min(50),
+        after_n.unwrap_or(10).min(50),
+    )
+    .await
+}
+
 #[tauri::command]
 pub async fn append_single_message(
     app_handle: tauri::AppHandle,

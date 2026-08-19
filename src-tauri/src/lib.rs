@@ -14,7 +14,8 @@ use vcp_modules::avatar_service::{
     batch_get_avatars, get_avatar, save_avatar_data, store_dominant_color,
 };
 use vcp_modules::chat_manager::{
-    append_single_message, delete_messages, load_chat_history, load_chat_history_streamed,
+    append_single_message, delete_messages, load_chat_history, load_chat_history_around,
+    load_chat_history_streamed,
     patch_single_message, truncate_history_after_timestamp,
 };
 use vcp_modules::cli::{
@@ -30,7 +31,7 @@ use vcp_modules::context_injection::{
     save_tarven_rule, toggle_rule_enabled,
 };
 use vcp_modules::context_sanitizer::ContextSanitizer;
-use vcp_modules::db_manager::search_messages_fts;
+use vcp_modules::db_manager::{get_fts_index_status, rebuild_messages_fts, search_messages_fts};
 use vcp_modules::diary::{
     diary_cancel_search, diary_cancel_semantic_search, diary_create_note,
     diary_delete_empty_folder, diary_delete_notes, diary_get_note, diary_list_folders,
@@ -260,12 +261,15 @@ pub fn run() {
             test_vcp_connection,
             handle_agent_chat_message,
             load_chat_history,
+            load_chat_history_around,
             load_chat_history_streamed,
             append_single_message,
             patch_single_message,
             delete_messages,
             delete_message_attachment,
             search_messages_fts,
+            get_fts_index_status,
+            rebuild_messages_fts,
             truncate_history_after_timestamp,
             process_message_content,
             rebuild_all_pre_renders,

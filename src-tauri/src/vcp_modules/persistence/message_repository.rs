@@ -616,7 +616,7 @@ impl MessageRepository {
         .map_err(|e| e.to_string())?;
 
         // 2.2 同步写入全文检索 FTS5 虚拟表 (仅在消息未删除时同步明文，FTS5 不支持 ON CONFLICT)
-        let search_content = crate::vcp_modules::db_manager::preprocess_fts_text(&message.content);
+        // trigram 分词器（migration 0008 起）直接索引原文，无需 CJK 预处理
         sqlx::query("DELETE FROM messages_fts WHERE topic_id = ? AND msg_id = ?")
             .bind(topic_id)
             .bind(&message.id)
@@ -627,7 +627,7 @@ impl MessageRepository {
         sqlx::query("INSERT INTO messages_fts (msg_id, topic_id, content) VALUES (?, ?, ?)")
             .bind(&message.id)
             .bind(topic_id)
-            .bind(&search_content)
+            .bind(&message.content)
             .execute(&mut **tx)
             .await
             .map_err(|e| e.to_string())?;
