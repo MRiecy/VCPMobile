@@ -2,7 +2,9 @@ use crate::vcp_modules::db_write_queue::DbWriteQueue;
 use crate::vcp_modules::sync_error::{
     encode_wire_sync_error, parse_wire_sync_error, WireSyncError,
 };
-use crate::vcp_modules::sync_executor::{BatchPullResult, PullExecutor, PushExecutor};
+use crate::vcp_modules::sync_executor::{
+    BatchPullResult, PullExecutor, PullProgressContext, PushExecutor,
+};
 use crate::vcp_modules::sync_logger::SyncLogger;
 use crate::vcp_modules::sync_service::{Phase3Tracker, SyncCommand};
 use serde::de::{self, MapAccess, Visitor};
@@ -486,6 +488,17 @@ impl BatchDiffHandler {
                         .iter()
                         .map(|(topic_id, _)| topic_id.clone())
                         .collect::<Vec<_>>();
+                    // 展示型进度基数：批次开始前快照 tracker，使 NDJSON 流内
+                    // 逐 topic 上报的 completed = 基数 + 本批次已成功数
+                    let pull_progress = PullProgressContext {
+                        session_id: tracker.session_id,
+                        base_completed: tracker.completed.lock().await.len(),
+                        total: tracker.total.load(std::sync::atomic::Ordering::SeqCst),
+                        failed: tracker.failed.lock().await.len(),
+                        legacy_attachment_warnings: tracker
+                            .legacy_attachment_warnings
+                            .load(std::sync::atomic::Ordering::SeqCst),
+                    };
                     let pull_result = PullExecutor::pull_messages_batch(
                         app_handle,
                         http_client,
@@ -494,6 +507,7 @@ impl BatchDiffHandler {
                         &pull_batch,
                         write_queue,
                         prerender_enabled,
+                        Some(pull_progress),
                     )
                     .await
                     .map(|results| {
