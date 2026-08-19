@@ -95,6 +95,7 @@ use vcp_modules::vcp_log_service::{
     init_vcp_log_connection, send_vcp_log_message, set_vcp_log_heartbeat,
 };
 use vcp_modules::logcenter::{logcenter_clear_server, logcenter_fetch};
+use vcp_modules::agentmgr::{agentmgr_get_config, agentmgr_list_models, agentmgr_save_config};
 use vcp_modules::taskcenter::{
     delegation_cancel, delegation_list, task_agent_list, task_create, task_delete,
     task_get_config, task_get_status, task_set_enabled, task_set_global_enabled, task_trigger,
@@ -323,6 +324,9 @@ pub fn run() {
             task_agent_list,
             delegation_list,
             delegation_cancel,
+            agentmgr_get_config,
+            agentmgr_save_config,
+            agentmgr_list_models,
             handle_group_chat_message,
             invite_group_member_to_speak,
             create_agent,

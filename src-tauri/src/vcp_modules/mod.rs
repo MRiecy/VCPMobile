@@ -1,5 +1,6 @@
 // 1. 声明物理子领域
 pub mod agent;
+pub mod agentmgr;
 pub mod chat;
 pub mod cli;
 pub mod diary;
