@@ -15,8 +15,7 @@ use vcp_modules::avatar_service::{
 };
 use vcp_modules::chat_manager::{
     append_single_message, delete_messages, load_chat_history, load_chat_history_around,
-    load_chat_history_streamed,
-    patch_single_message, truncate_history_after_timestamp,
+    load_chat_history_streamed, patch_single_message, truncate_history_after_timestamp,
 };
 use vcp_modules::cli::{
     close_vcp_mobile_cli_terminal, commit_vcp_mobile_cli_skill_import,

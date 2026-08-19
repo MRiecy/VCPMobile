@@ -1175,3 +1175,14 @@ html:not(.dark) .vcp-tool-call-summary-chip.status-unknown {
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+/* ---- 全局搜索/锚点跳转：命中消息高亮闪烁 ---- */
+@keyframes vcp-anchor-flash {
+  0% { background-color: var(--vcp-accent-bg-25); }
+  100% { background-color: transparent; }
+}
+
+.vcp-message-anchor-flash {
+  animation: vcp-anchor-flash 1.5s ease-out 1;
+  border-radius: 8px;
+}

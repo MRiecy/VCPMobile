@@ -330,6 +330,77 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   };
 
   /**
+   * 锚点窗口加载（全局搜索跳转定位）：以 anchorMessageId 为中心，
+   * 用"前 beforeN + 锚点 + 后 afterN"的消息窗口整体替换当前历史。
+   * 与 loadHistory 共用 loadId/AbortController 竞态防护：后发起者胜出。
+   */
+  const loadHistoryAround = async (
+    ownerId: string,
+    ownerType: string,
+    topicId: string,
+    anchorMessageId: string,
+    beforeN = 12,
+    afterN = 8,
+  ): Promise<{ ok: boolean; anchorMissing?: boolean; error?: unknown }> => {
+    const key = sessionStore.currentConversationKey;
+    if (
+      !key ||
+      key.ownerId !== ownerId ||
+      key.ownerType !== ownerType ||
+      key.topicId !== topicId
+    ) {
+      return { ok: false };
+    }
+    const loadId = ++currentLoadId;
+    if (currentLoadAbortController) {
+      currentLoadAbortController.abort();
+    }
+    const controller = new AbortController();
+    currentLoadAbortController = controller;
+    loading.value = true;
+    isLoadingHistory.value = true;
+
+    try {
+      const messages = await invoke<ChatMessage[]>('load_chat_history_around', {
+        ownerId,
+        ownerType,
+        topicId,
+        anchorMsgId: anchorMessageId,
+        beforeN,
+        afterN,
+      });
+
+      if (controller.signal.aborted || loadId !== currentLoadId || !sessionStore.isConversationCurrent(key)) {
+        return { ok: false };
+      }
+
+      const anchorIndex = messages.findIndex((m) => m.id === anchorMessageId);
+      if (anchorIndex === -1) {
+        return { ok: false, anchorMissing: true };
+      }
+
+      const hydrated = messages.map(msg => streamStore.activeStreamMessages.get(msg.id) || msg);
+      currentChatHistory.value = mergeHistoryWindow([], hydrated, false);
+      loadedConversationKey.value = key;
+      historyOffset.value = currentChatHistory.value.length;
+      // 锚点上方未取满 beforeN 说明已触顶；下方未取满 afterN 说明已在最新端
+      hasMoreHistory.value = anchorIndex >= beforeN;
+      hasEvictedNewer.value = messages.length - anchorIndex - 1 >= afterN;
+      hydrated.forEach(msg => attachmentStore.resolveMessageAssets(msg));
+      return { ok: true };
+    } catch (e) {
+      console.error("[ChatHistoryStore] Failed to load history around anchor:", e);
+      return { ok: false, error: e };
+    } finally {
+      if (currentLoadAbortController === controller && loadId === currentLoadId) {
+        currentLoadAbortController = null;
+        loading.value = false;
+        isLoadingHistory.value = false;
+      }
+    }
+  };
+
+  /**
    * 构造群聊/单聊共用的流式事件 Channel 接线
    */
   const makeStreamChannel = (key: ConversationKey) => {
@@ -830,6 +901,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     loadHistory,
     loadHistoryPaginated,
     loadMoreHistory,
+    loadHistoryAround,
     returnToLatest,
     resetHistoryForConversation,
     sendMessage,

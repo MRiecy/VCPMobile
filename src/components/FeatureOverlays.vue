@@ -34,6 +34,7 @@ const TaskCenterView = defineAsyncComponent(() => import('../features/taskcenter
 const AgentMgrView = defineAsyncComponent(() => import('../features/agentmgr/AgentMgrView.vue'));
 const ForumListView = defineAsyncComponent(() => import('../features/forum/ForumListView.vue'));
 const MailListView = defineAsyncComponent(() => import('../features/mail/MailListView.vue'));
+const GlobalSearchView = defineAsyncComponent(() => import('../features/globalsearch/GlobalSearchView.vue'));
 const VcpCliManifestView = defineAsyncComponent(() => import('../features/cli/components/VcpCliManifestView.vue'));
 const TarvenSettingsView = defineAsyncComponent(() => import('../features/chat/components/TarvenSettings.vue'));
 
@@ -62,6 +63,7 @@ const taskCenterMounted = createFirstOpenLatch(() => overlayStore.isTaskCenterOp
 const agentMgrMounted = createFirstOpenLatch(() => overlayStore.isAgentMgrOpen);
 const forumMounted = createFirstOpenLatch(() => overlayStore.isForumOpen);
 const mailMounted = createFirstOpenLatch(() => overlayStore.isMailOpen);
+const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSearchOpen);
 </script>
 
 <template>
@@ -159,6 +161,15 @@ const mailMounted = createFirstOpenLatch(() => overlayStore.isMailOpen);
       :is-open="overlayStore.isMailOpen"
       :z-index="overlayStore.getPageZIndex('mail')"
       @close="overlayStore.closeMail()"
+    />
+
+    <GlobalSearchView
+      v-if="globalSearchMounted"
+      :is-open="overlayStore.isGlobalSearchOpen"
+      :z-index="overlayStore.getPageZIndex('globalSearch')"
+      :open-target="overlayStore.globalSearchOpenTarget"
+      @target-consumed="overlayStore.clearGlobalSearchOpenTarget()"
+      @close="overlayStore.closeGlobalSearch()"
     />
 
     <Suspense v-if="diaryMounted">

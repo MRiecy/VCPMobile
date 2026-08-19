@@ -21,11 +21,21 @@ export type OverlayPageType =
   | 'taskCenter'
   | 'agentMgr'
   | 'forum'
-  | 'mail';
+  | 'mail'
+  | 'globalSearch';
 
 interface DiaryOpenTarget {
   folder: string;
   file: string;
+}
+
+/** 全局搜索打开时的初始过滤条件（如从话题菜单"搜索此话题"进入） */
+export interface GlobalSearchOpenTarget {
+  topicId?: string;
+  topicTitle?: string;
+  ownerId?: string;
+  ownerType?: 'agent' | 'group';
+  ownerLabel?: string;
 }
 
 interface PageStackItem {
@@ -42,6 +52,7 @@ export const useOverlayStore = defineStore('overlay', () => {
   const contextMenuConfig = shallowRef<ContextMenuConfig | null>(null);
   const editorConfig = ref<EditorConfig | null>(null);
   const diaryOpenTarget = ref<DiaryOpenTarget | null>(null);
+  const globalSearchOpenTarget = ref<GlobalSearchOpenTarget | null>(null);
 
   // --- Page Stack (Virtual Navigation Stack) ---
   const pageStack = ref<PageStackItem[]>([]);
@@ -63,6 +74,7 @@ export const useOverlayStore = defineStore('overlay', () => {
   const isAgentMgrOpen = computed(() => pageStack.value.some(p => p.type === 'agentMgr'));
   const isForumOpen = computed(() => pageStack.value.some(p => p.type === 'forum'));
   const isMailOpen = computed(() => pageStack.value.some(p => p.type === 'mail'));
+  const isGlobalSearchOpen = computed(() => pageStack.value.some(p => p.type === 'globalSearch'));
 
 
   const agentSettingsId = computed(() => {
@@ -288,6 +300,22 @@ export const useOverlayStore = defineStore('overlay', () => {
     popPage();
   };
 
+  const openGlobalSearch = (target?: GlobalSearchOpenTarget) => {
+    if (target) globalSearchOpenTarget.value = { ...target };
+    if (isGlobalSearchOpen.value) return;
+    pushPage('globalSearch');
+  };
+
+  const clearGlobalSearchOpenTarget = () => {
+    globalSearchOpenTarget.value = null;
+  };
+
+  const closeGlobalSearch = () => {
+    if (pageStackTop.value?.type !== 'globalSearch') return;
+    globalSearchOpenTarget.value = null;
+    popPage();
+  };
+
   // --- Modal API (unchanged) ---
   const openPrompt = (config: PromptConfig) => {
     promptConfig.value = config;
@@ -386,7 +414,9 @@ export const useOverlayStore = defineStore('overlay', () => {
     isAgentMgrOpen,
     isForumOpen,
     isMailOpen,
+    isGlobalSearchOpen,
     diaryOpenTarget,
+    globalSearchOpenTarget,
     // Legacy open/close (now backed by page stack)
     openSettings,
     closeSettings,
@@ -419,6 +449,9 @@ export const useOverlayStore = defineStore('overlay', () => {
     closeForum,
     openMail,
     closeMail,
+    openGlobalSearch,
+    closeGlobalSearch,
+    clearGlobalSearchOpenTarget,
     // Modals
     promptConfig,
     confirmConfig,

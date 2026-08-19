@@ -2,6 +2,7 @@ import { onMounted, onUnmounted, type Ref } from "vue";
 import { openUrl as openExternal } from "@tauri-apps/plugin-opener";
 import { useChatHistoryStore } from "../stores/chatHistoryStore";
 import { openRenderedImageViewer } from "./useRenderedImageViewer";
+import { scrollToMessageById } from "../utils/scrollToMessage";
 
 export function useMessageEvents(containerRef: Ref<HTMLElement | null>) {
   const historyStore = useChatHistoryStore();
@@ -62,13 +63,13 @@ export function useMessageEvents(containerRef: Ref<HTMLElement | null>) {
       return;
     }
 
-    // 3. 内部锚点（消息引用跳转，暂时留空或按需实现）
+    // 3. 内部锚点（消息引用跳转）：仅当消息在当前已加载窗口内时可定位
     const messageRef = target.closest('a[href^="#msg-"]');
     if (messageRef) {
       e.preventDefault();
       const msgId = messageRef.getAttribute('href')?.replace('#msg-', '');
       if (msgId) {
-          // TODO: implement scrollToMessage
+        scrollToMessageById(msgId);
       }
       return;
     }

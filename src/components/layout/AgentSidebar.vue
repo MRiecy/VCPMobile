@@ -52,6 +52,12 @@ const handleSelectTopic = () => {
 const openSettings = () => {
   overlayStore.openSettings();
 };
+
+// 打开全局搜索页：抽屉层级（drawer, 20）低于页面栈（page, 40+），必须先收起抽屉
+const openGlobalSearch = () => {
+  layoutStore.setLeftDrawer(false);
+  overlayStore.openGlobalSearch();
+};
 </script>
 
 <template>
@@ -65,8 +71,23 @@ const openSettings = () => {
 
     <!-- 顶部 Tabs -->
     <div class="vcp-drawer-header px-4 pb-2 shrink-0 border-b border-black/5 dark:border-white/5">
-      <h2 class="text-xl font-black opacity-90 mb-4 tracking-tighter text-blue-500 dark:text-blue-400 px-2">VCP MOBILE
-      </h2>
+      <div class="flex items-center justify-between mb-4 px-2">
+        <h2 class="text-xl font-black opacity-90 tracking-tighter text-blue-500 dark:text-blue-400">VCP MOBILE
+        </h2>
+        <button
+          type="button"
+          class="p-1.5 rounded-lg text-primary-text opacity-60 hover:opacity-100 active:scale-95 transition-all"
+          aria-label="全局搜索"
+          title="全局搜索（搜索全部消息内容）"
+          @click="openGlobalSearch"
+        >
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+            stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="8"></circle>
+            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+          </svg>
+        </button>
+      </div>
 
       <SidebarTabs v-model:activeTab="activeTab" />
       <SidebarSearch v-model="searchQuery" :activeTab="activeTab" />

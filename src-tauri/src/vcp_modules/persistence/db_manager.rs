@@ -525,7 +525,12 @@ async fn bootstrap_fresh_install(
     sqlx::raw_sql(baseline.sql.as_ref())
         .execute(pool)
         .await
-        .map_err(|e| format!("Fresh bootstrap: baseline v{} execution failed: {e}", BASELINE_VERSION))?;
+        .map_err(|e| {
+            format!(
+                "Fresh bootstrap: baseline v{} execution failed: {e}",
+                BASELINE_VERSION
+            )
+        })?;
 
     // 单事务内 seed 迁移记录（原子、可重试），checksum 与 sqlx 运行期校验同源
     let mut tx = pool
@@ -547,8 +552,8 @@ async fn bootstrap_fresh_install(
     .map_err(|e| format!("Fresh bootstrap: failed to create _sqlx_migrations: {e}"))?;
 
     for migration in migrator.migrations.iter() {
-        let covered = migration.version <= BASELINE_INCREMENTAL_MAX
-            || migration.version == BASELINE_VERSION;
+        let covered =
+            migration.version <= BASELINE_INCREMENTAL_MAX || migration.version == BASELINE_VERSION;
         if !covered {
             continue;
         }
@@ -791,9 +796,7 @@ pub async fn search_messages_fts(
         return Ok(Vec::new());
     };
     if filter.before_timestamp.is_some() != filter.before_message_id.is_some() {
-        return Err(
-            "search cursor requires both beforeTimestamp and beforeMessageId".to_string(),
-        );
+        return Err("search cursor requires both beforeTimestamp and beforeMessageId".to_string());
     }
     let sort_by_rank = filter.sort.as_deref() == Some("rank");
     if sort_by_rank && filter.before_timestamp.is_some() {
@@ -907,11 +910,10 @@ static FTS_REBUILD_RUNNING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 async fn fts_index_status(pool: &Pool<Sqlite>) -> Result<FtsIndexStatus, String> {
-    let total: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE deleted_at IS NULL")
-            .fetch_one(pool)
-            .await
-            .map_err(|e| format!("统计消息总数失败: {}", e))?;
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE deleted_at IS NULL")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("统计消息总数失败: {}", e))?;
     let indexed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts")
         .fetch_one(pool)
         .await
@@ -1213,7 +1215,10 @@ mod tests {
     #[test]
     fn test_build_fts_match_query() {
         // 单词短语
-        assert_eq!(build_fts_match_query("机器学习"), Some("\"机器学习\"".into()));
+        assert_eq!(
+            build_fts_match_query("机器学习"),
+            Some("\"机器学习\"".into())
+        );
         // 多词 AND
         assert_eq!(
             build_fts_match_query("机器学习 部署"),
@@ -1225,10 +1230,7 @@ mod tests {
             Some("\"Hello\" AND \"World\"".into())
         );
         // 双引号加倍转义，防 MATCH 语法注入
-        assert_eq!(
-            build_fts_match_query("a\"b"),
-            Some("\"a\"\"b\"".into())
-        );
+        assert_eq!(build_fts_match_query("a\"b"), Some("\"a\"\"b\"".into()));
         // 空输入
         assert_eq!(build_fts_match_query(""), None);
         assert_eq!(build_fts_match_query("   "), None);
@@ -1402,7 +1404,10 @@ mod tests {
 
         let snap_a = schema_snapshot(&pool_a).await;
         let snap_b = schema_snapshot(&pool_b).await;
-        assert_eq!(snap_a, snap_b, "baseline schema drifted from incremental chain");
+        assert_eq!(
+            snap_a, snap_b,
+            "baseline schema drifted from incremental chain"
+        );
     }
 
     /// schema 快照：表 → 排序后的列定义集合；外加索引/触发器/虚表名清单。
@@ -1438,7 +1443,12 @@ mod tests {
             } else {
                 // 虚表/索引/触发器：比对规范化 DDL 文本（空白压缩）
                 let normalized: String = sql.split_whitespace().collect::<Vec<_>>().join(" ");
-                out.push_str(&format!("{} {} = {}\n", obj_type.to_uppercase(), name, normalized));
+                out.push_str(&format!(
+                    "{} {} = {}\n",
+                    obj_type.to_uppercase(),
+                    name,
+                    normalized
+                ));
             }
         }
         out
