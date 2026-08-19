@@ -63,6 +63,17 @@ async fn send_json(
     timeout: Duration,
     max_bytes: u64,
 ) -> Result<Value, String> {
+    send_json_with_status(request, timeout, max_bytes)
+        .await
+        .map(|(_, body)| body)
+}
+
+/// 带状态码的发送（供需要按状态码回退的调用方，如发帖的 REST→human/tool 降级）。
+async fn send_json_with_status(
+    request: RequestBuilder,
+    timeout: Duration,
+    max_bytes: u64,
+) -> Result<(StatusCode, Value), String> {
     let resp = request
         .timeout(timeout)
         .send()
@@ -89,7 +100,7 @@ async fn send_json(
     let body: Value = serde_json::from_slice(&bytes)
         .map_err(|_| "服务器返回了不符合契约的 JSON".to_string())?;
 
-    if !status.is_success() {
+    if !status.is_success() && status != StatusCode::NOT_FOUND {
         let detail = body
             .get("error")
             .and_then(|e| e.as_str())
@@ -105,7 +116,7 @@ async fn send_json(
             _ => format!("论坛操作失败: {detail}"),
         });
     }
-    Ok(body)
+    Ok((status, body))
 }
 
 async fn settings_of<R: Runtime>(
@@ -217,7 +228,9 @@ fn build_create_post_body(maid: &str, board: &str, title: &str, content: &str) -
     )
 }
 
-/// 发帖（唯一通道：human/tool，Bearer 主 API Key）。
+/// 发帖。优先走补丁新增的 REST 端点 `POST /admin_api/forum/posts`（admin Basic）；
+/// 旧版服务器无此端点（404）时回退 `/v1/human/tool`（Bearer 主 API Key +
+/// TOOL_REQUEST 文本协议）。
 #[tauri::command]
 pub async fn forum_create_post<R: Runtime>(
     app_handle: AppHandle<R>,
@@ -228,9 +241,6 @@ pub async fn forum_create_post<R: Runtime>(
     content: String,
 ) -> Result<Value, String> {
     let settings = settings_of(app_handle, settings_state).await?;
-    if settings.vcp_api_key.trim().is_empty() {
-        return Err("发帖需要 VCP API Key，请在 设置 中填写".to_string());
-    }
 
     let maid = maid.trim();
     let board = board.trim();
@@ -245,14 +255,42 @@ pub async fn forum_create_post<R: Runtime>(
     }
     validate_length("正文", &content, MAX_CONTENT_CHARS)?;
 
+    // 1) REST 优先
+    let rest_url = build_url(&settings, &["forum", "posts"])?;
+    let (status, body) = send_json_with_status(
+        admin_api::client_post_json(
+            &settings,
+            &rest_url,
+            &serde_json::json!({
+                "maid": maid,
+                "board": board,
+                "title": title,
+                "content": content,
+            }),
+        )?,
+        DEFAULT_TIMEOUT,
+        MAX_DETAIL_BYTES,
+    )
+    .await?;
+    if status != StatusCode::NOT_FOUND {
+        return Ok(body);
+    }
+
+    // 2) 404（服务器未打补丁）→ human/tool 回退
+    if settings.vcp_api_key.trim().is_empty() {
+        return Err(
+            "服务器缺少 REST 发帖端点，且未配置 VCP API Key 作为回退通道，请在 设置 中填写"
+                .to_string(),
+        );
+    }
     let mut url = admin_api::normalize_server_base(&settings.vcp_server_url)?;
     admin_api::append_url_segments(&mut url, &["v1", "human", "tool"])?;
 
-    let body = build_create_post_body(maid, board, title, &content);
+    let tool_body = build_create_post_body(maid, board, title, &content);
     let request = admin_api::client_request(&settings, Method::POST, url.as_str())?
         .bearer_auth(settings.vcp_api_key.trim())
         .header(reqwest::header::CONTENT_TYPE, "text/plain;charset=UTF-8")
-        .body(body);
+        .body(tool_body);
 
     send_json(request, DEFAULT_TIMEOUT, MAX_DETAIL_BYTES).await
 }

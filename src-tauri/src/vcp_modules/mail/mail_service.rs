@@ -247,6 +247,289 @@ pub async fn mail_trash<R: Runtime>(
     .await
 }
 
+// ===== V1.1/V2 端点（依赖上游补丁；404/非 2xx 走统一错误语义） =====
+
+/// 发送新邮件。
+#[tauri::command]
+pub async fn mail_send<R: Runtime>(
+    app_handle: AppHandle<R>,
+    settings_state: State<'_, SettingsState>,
+    mailbox: Option<String>,
+    user: Option<String>,
+    to: String,
+    cc: Option<String>,
+    bcc: Option<String>,
+    subject: String,
+    body: String,
+) -> Result<Value, String> {
+    let settings = settings_of(app_handle, settings_state).await?;
+    validate_addressing(&mailbox, &user)?;
+    if to.trim().is_empty() {
+        return Err("收件人不能为空".to_string());
+    }
+    if subject.trim().is_empty() {
+        return Err("主题不能为空".to_string());
+    }
+    if body.trim().is_empty() {
+        return Err("正文不能为空".to_string());
+    }
+
+    let url = build_url(&settings, &["claw-mail", "messages"])?;
+    send_json(
+        admin_api::client_post_json(
+            &settings,
+            &url,
+            &serde_json::json!({
+                "mailbox": mailbox.as_deref().map(str::trim),
+                "user": user.as_deref().map(str::trim),
+                "to": to.trim(),
+                "cc": cc.as_deref().map(str::trim),
+                "bcc": bcc.as_deref().map(str::trim),
+                "subject": subject.trim(),
+                "body": body,
+            }),
+        )?,
+        DEFAULT_TIMEOUT,
+        MAX_DETAIL_BYTES,
+    )
+    .await
+}
+
+/// 回复邮件（服务端自动带原邮件上下文并标读原邮件）。
+#[tauri::command]
+pub async fn mail_reply<R: Runtime>(
+    app_handle: AppHandle<R>,
+    settings_state: State<'_, SettingsState>,
+    mail_id: String,
+    mailbox: Option<String>,
+    user: Option<String>,
+    body: String,
+) -> Result<Value, String> {
+    let settings = settings_of(app_handle, settings_state).await?;
+    let mail_id = validate_mail_id(&mail_id)?;
+    validate_addressing(&mailbox, &user)?;
+    if body.trim().is_empty() {
+        return Err("回复正文不能为空".to_string());
+    }
+
+    let url = build_url(&settings, &["claw-mail", "messages", mail_id, "reply"])?;
+    send_json(
+        admin_api::client_post_json(
+            &settings,
+            &url,
+            &serde_json::json!({
+                "mailbox": mailbox.as_deref().map(str::trim),
+                "user": user.as_deref().map(str::trim),
+                "body": body,
+            }),
+        )?,
+        DEFAULT_TIMEOUT,
+        MAX_DETAIL_BYTES,
+    )
+    .await
+}
+
+/// 文件夹列表。
+#[tauri::command]
+pub async fn mail_folders<R: Runtime>(
+    app_handle: AppHandle<R>,
+    settings_state: State<'_, SettingsState>,
+    mailbox: Option<String>,
+    user: Option<String>,
+) -> Result<Value, String> {
+    let settings = settings_of(app_handle, settings_state).await?;
+    validate_addressing(&mailbox, &user)?;
+    let url = build_url(&settings, &["claw-mail", "folders"])?;
+    let mut query: Vec<(&str, String)> = Vec::new();
+    if let Some(mailbox) = mailbox.as_deref() {
+        query.push(("mailbox", mailbox.trim().to_string()));
+    }
+    if let Some(user) = user.as_deref() {
+        query.push(("user", user.trim().to_string()));
+    }
+    send_json(
+        admin_api::client_get(&settings, &url)?.query(&query),
+        DEFAULT_TIMEOUT,
+        MAX_LIST_BYTES,
+    )
+    .await
+}
+
+/// 标记已读/未读。
+#[tauri::command]
+pub async fn mail_mark<R: Runtime>(
+    app_handle: AppHandle<R>,
+    settings_state: State<'_, SettingsState>,
+    mail_id: String,
+    read: bool,
+    mailbox: Option<String>,
+    user: Option<String>,
+) -> Result<Value, String> {
+    let settings = settings_of(app_handle, settings_state).await?;
+    let mail_id = validate_mail_id(&mail_id)?;
+    validate_addressing(&mailbox, &user)?;
+
+    let url = build_url(&settings, &["claw-mail", "messages", mail_id, "read"])?;
+    send_json(
+        admin_api::client_post_json(
+            &settings,
+            &url,
+            &serde_json::json!({
+                "read": read,
+                "mailbox": mailbox.as_deref().map(str::trim),
+                "user": user.as_deref().map(str::trim),
+            }),
+        )?,
+        DEFAULT_TIMEOUT,
+        MAX_DETAIL_BYTES,
+    )
+    .await
+}
+
+/// 搜索邮件（keyword 必填；fts=true 全文搜索）。
+#[tauri::command]
+pub async fn mail_search<R: Runtime>(
+    app_handle: AppHandle<R>,
+    settings_state: State<'_, SettingsState>,
+    keyword: String,
+    fts: Option<bool>,
+    mailbox: Option<String>,
+    user: Option<String>,
+    limit: Option<u32>,
+) -> Result<Value, String> {
+    let settings = settings_of(app_handle, settings_state).await?;
+    validate_addressing(&mailbox, &user)?;
+    let keyword = keyword.trim();
+    if keyword.is_empty() {
+        return Err("搜索关键词不能为空".to_string());
+    }
+    let limit = limit.unwrap_or(20).clamp(1, 100);
+
+    let url = build_url(&settings, &["claw-mail", "search"])?;
+    let mut query: Vec<(&str, String)> = vec![
+        ("keyword", keyword.to_string()),
+        ("limit", limit.to_string()),
+    ];
+    if fts.unwrap_or(false) {
+        query.push(("fts", "true".to_string()));
+    }
+    if let Some(mailbox) = mailbox.as_deref() {
+        query.push(("mailbox", mailbox.trim().to_string()));
+    }
+    if let Some(user) = user.as_deref() {
+        query.push(("user", user.trim().to_string()));
+    }
+    send_json(
+        admin_api::client_get(&settings, &url)?.query(&query),
+        DEFAULT_TIMEOUT,
+        MAX_LIST_BYTES,
+    )
+    .await
+}
+
+/// 附件下载上限（base64 经 IPC 回传，限制 16 MiB 原始字节）。
+const MAX_ATTACHMENT_BYTES: usize = 16 * 1024 * 1024;
+
+/// 下载附件（base64 回传；前端负责落盘/预览）。
+#[tauri::command]
+pub async fn mail_attachment<R: Runtime>(
+    app_handle: AppHandle<R>,
+    settings_state: State<'_, SettingsState>,
+    mail_id: String,
+    part_id: String,
+    mailbox: Option<String>,
+    user: Option<String>,
+) -> Result<Value, String> {
+    let settings = settings_of(app_handle, settings_state).await?;
+    let mail_id = validate_mail_id(&mail_id)?;
+    let part_id = part_id.trim();
+    if part_id.is_empty() || part_id.chars().any(char::is_control) {
+        return Err("partId 参数无效".to_string());
+    }
+    validate_addressing(&mailbox, &user)?;
+
+    let url = build_url(
+        &settings,
+        &["claw-mail", "messages", mail_id, "attachments", part_id],
+    )?;
+    let mut query: Vec<(&str, String)> = Vec::new();
+    if let Some(mailbox) = mailbox.as_deref() {
+        query.push(("mailbox", mailbox.trim().to_string()));
+    }
+    if let Some(user) = user.as_deref() {
+        query.push(("user", user.trim().to_string()));
+    }
+
+    let resp = admin_api::client_get(&settings, &url)?
+        .query(&query)
+        .timeout(DEFAULT_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| format!("附件下载失败: {e}"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(match status {
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+                "管理员凭据校验失败，请检查 设置 中的管理员账号与密码".to_string()
+            }
+            StatusCode::NOT_FOUND => "附件不存在或服务器未打补丁（404）".to_string(),
+            _ => format!("附件下载失败: HTTP {status}"),
+        });
+    }
+
+    let content_type = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let filename = resp
+        .headers()
+        .get(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split("filename*=UTF-8''").nth(1).map(str::to_string))
+        .and_then(|v| urlencoding_decode(&v))
+        .unwrap_or_else(|| format!("attachment-{part_id}.bin"));
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("读取附件失败: {e}"))?;
+    if bytes.len() > MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "附件超过 16 MiB 上限（{} 字节），请在网页端下载",
+            bytes.len()
+        ));
+    }
+
+    use base64::Engine;
+    Ok(serde_json::json!({
+        "filename": filename,
+        "contentType": content_type,
+        "size": bytes.len(),
+        "dataBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+    }))
+}
+
+/// 极简 percent-decode（Content-Disposition filename* 用）。
+fn urlencoding_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = input.get(i + 1..i + 3)?;
+            out.push(u8::from_str_radix(hex, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

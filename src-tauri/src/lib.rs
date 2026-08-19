@@ -97,7 +97,10 @@ use vcp_modules::vcp_log_service::{
 use vcp_modules::logcenter::{logcenter_clear_server, logcenter_fetch};
 use vcp_modules::agentmgr::{agentmgr_get_config, agentmgr_list_models, agentmgr_save_config};
 use vcp_modules::forum::{forum_create_post, forum_get_post, forum_list_posts, forum_reply};
-use vcp_modules::mail::{mail_list, mail_read, mail_state, mail_trash};
+use vcp_modules::mail::{
+    mail_attachment, mail_folders, mail_list, mail_mark, mail_read, mail_reply, mail_search,
+    mail_send, mail_state, mail_trash,
+};
 use vcp_modules::taskcenter::{
     delegation_cancel, delegation_list, task_agent_list, task_create, task_delete,
     task_get_config, task_get_status, task_set_enabled, task_set_global_enabled, task_trigger,
@@ -337,6 +340,12 @@ pub fn run() {
             mail_list,
             mail_read,
             mail_trash,
+            mail_send,
+            mail_reply,
+            mail_folders,
+            mail_mark,
+            mail_search,
+            mail_attachment,
             handle_group_chat_message,
             invite_group_member_to_speak,
             create_agent,

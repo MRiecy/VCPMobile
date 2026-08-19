@@ -5,4 +5,7 @@
 
 mod mail_service;
 
-pub use mail_service::{mail_list, mail_read, mail_state, mail_trash};
+pub use mail_service::{
+    mail_attachment, mail_folders, mail_list, mail_mark, mail_read, mail_reply, mail_search,
+    mail_send, mail_state, mail_trash,
+};
