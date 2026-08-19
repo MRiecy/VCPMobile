@@ -5,4 +5,6 @@
 
 mod forum_service;
 
-pub use forum_service::{forum_create_post, forum_get_post, forum_list_posts, forum_reply};
+pub use forum_service::{
+    forum_create_post, forum_delete, forum_get_post, forum_list_posts, forum_reply,
+};

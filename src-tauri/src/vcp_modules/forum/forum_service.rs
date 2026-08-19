@@ -196,6 +196,36 @@ pub async fn forum_reply<R: Runtime>(
     .await
 }
 
+/// 删除整个帖子或单个楼层（上游 `DELETE /forum/post/:uid`，body `{floor?}`；
+/// floor 省略 = 删整帖。后端会重排剩余楼层号）。
+#[tauri::command]
+pub async fn forum_delete<R: Runtime>(
+    app_handle: AppHandle<R>,
+    settings_state: State<'_, SettingsState>,
+    uid: String,
+    floor: Option<u32>,
+) -> Result<Value, String> {
+    let settings = settings_of(app_handle, settings_state).await?;
+    let uid = validate_uid(&uid)?;
+    if let Some(floor) = floor {
+        if floor == 0 || floor > 500 {
+            return Err("楼层号无效".to_string());
+        }
+    }
+
+    let url = build_url(&settings, &["forum", "post", uid])?;
+    let body = match floor {
+        Some(floor) => serde_json::json!({ "floor": floor }),
+        None => serde_json::json!({}),
+    };
+    send_json(
+        admin_api::client_request(&settings, Method::DELETE, &url)?.json(&body),
+        DEFAULT_TIMEOUT,
+        MAX_DETAIL_BYTES,
+    )
+    .await
+}
+
 // ---------- 发帖：/v1/human/tool + TOOL_REQUEST 文本协议 ----------
 
 /// ESCAPE 定界保护：内容中的字面 ESCAPE 标记会被服务端还原折叠，
