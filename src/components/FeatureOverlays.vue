@@ -32,6 +32,7 @@ const DiaryCenterView = defineAsyncComponent(() => import('../features/diary/Dia
 const LogCenterView = defineAsyncComponent(() => import('../features/logcenter/LogCenterView.vue'));
 const TaskCenterView = defineAsyncComponent(() => import('../features/taskcenter/TaskCenterView.vue'));
 const AgentMgrView = defineAsyncComponent(() => import('../features/agentmgr/AgentMgrView.vue'));
+const ForumListView = defineAsyncComponent(() => import('../features/forum/ForumListView.vue'));
 const VcpCliManifestView = defineAsyncComponent(() => import('../features/cli/components/VcpCliManifestView.vue'));
 const TarvenSettingsView = defineAsyncComponent(() => import('../features/chat/components/TarvenSettings.vue'));
 
@@ -58,6 +59,7 @@ const cliManifestMounted = createFirstOpenLatch(() => overlayStore.isCliManifest
 const logCenterMounted = createFirstOpenLatch(() => overlayStore.isLogCenterOpen);
 const taskCenterMounted = createFirstOpenLatch(() => overlayStore.isTaskCenterOpen);
 const agentMgrMounted = createFirstOpenLatch(() => overlayStore.isAgentMgrOpen);
+const forumMounted = createFirstOpenLatch(() => overlayStore.isForumOpen);
 </script>
 
 <template>
@@ -141,6 +143,13 @@ const agentMgrMounted = createFirstOpenLatch(() => overlayStore.isAgentMgrOpen);
       :is-open="overlayStore.isAgentMgrOpen"
       :z-index="overlayStore.getPageZIndex('agentMgr')"
       @close="overlayStore.closeAgentMgr()"
+    />
+
+    <ForumListView
+      v-if="forumMounted"
+      :is-open="overlayStore.isForumOpen"
+      :z-index="overlayStore.getPageZIndex('forum')"
+      @close="overlayStore.closeForum()"
     />
 
     <Suspense v-if="diaryMounted">

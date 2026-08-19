@@ -14,6 +14,7 @@ import {
   ScrollText,
   CalendarClock,
   Bot,
+  MessageSquareText,
 } from 'lucide-vue-next';
 import { useNotificationStore } from '../../core/stores/notification';
 import { useNotificationProcessor } from '../../core/composables/useNotificationProcessor';
@@ -75,6 +76,12 @@ const moreTools = [
     label: 'Agent 管理',
     icon: Bot,
     open: () => overlayStore.openAgentMgr(),
+  },
+  {
+    id: 'forum',
+    label: 'VCP 论坛',
+    icon: MessageSquareText,
+    open: () => overlayStore.openForum(),
   },
   {
     id: 'vcp-cli',
