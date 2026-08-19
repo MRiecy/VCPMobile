@@ -4,6 +4,7 @@ pub mod agentmgr;
 pub mod chat;
 pub mod cli;
 pub mod diary;
+pub mod forum;
 pub mod group;
 pub mod infra;
 pub mod logcenter;
