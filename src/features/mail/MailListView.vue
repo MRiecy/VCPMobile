@@ -258,9 +258,9 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <!-- 写信 FAB -->
+      <!-- 写信 FAB（子页打开时隐藏，避免浮在详情/写信页之上） -->
       <button
-        v-if="store.extendedApiSupported && store.stateLoaded"
+        v-if="store.extendedApiSupported && store.stateLoaded && !activeMail && !isComposeOpen"
         type="button"
         class="ml-fab"
         aria-label="写邮件"

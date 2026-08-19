@@ -9,6 +9,7 @@ import { computed, onMounted, ref, watch } from 'vue';
 import { ArrowLeft, RefreshCw, Send } from 'lucide-vue-next';
 import { useForumStore } from './forumStore';
 import { useSettingsStore } from '../../core/stores/settings';
+import { useKeyboardInsets } from '../../core/composables/useKeyboardInsets';
 import {
   authorHue,
   relativeTime,
@@ -21,6 +22,7 @@ const emit = defineEmits<{ close: [] }>();
 
 const store = useForumStore();
 const settingsStore = useSettingsStore();
+const { keyboardHeight } = useKeyboardInsets();
 
 const detail = computed(() => store.detailCache.get(props.uid) ?? null);
 
@@ -132,8 +134,8 @@ function refresh(): void {
       <div class="fd-bottom-spacer" />
     </div>
 
-    <!-- 快捷回复条 -->
-    <footer class="fd-reply-bar">
+    <!-- 快捷回复条（键盘弹出时随 --keyboard-offset 抬升，不顶起整个页面） -->
+    <footer class="fd-reply-bar" :style="{ marginBottom: `${keyboardHeight}px` }">
       <input
         v-model="replyMaid"
         type="text"
@@ -145,7 +147,7 @@ function refresh(): void {
         v-model="replyContent"
         class="fd-reply-input"
         rows="1"
-        placeholder="写下你的回复…（Markdown）"
+        placeholder="回复…"
         enterkeyhint="send"
         @keydown.enter.exact.prevent="sendReply"
       />

@@ -12,6 +12,7 @@ import SettingsSwitch from '../../components/settings/SettingsSwitch.vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { useTaskCenterStore } from './taskCenterStore';
+import { useKeyboardInsets } from '../../core/composables/useKeyboardInsets';
 import {
   CRON_PRESETS,
   MIN_INTERVAL_MINUTES,
@@ -30,6 +31,7 @@ const emit = defineEmits<{ close: [] }>();
 
 const store = useTaskCenterStore();
 const overlayStore = useOverlayStore();
+const { keyboardHeight } = useKeyboardInsets();
 
 const draft = reactive<TaskDraft>(
   props.initialDraft ? { ...props.initialDraft, schedule: { ...props.initialDraft.schedule }, agents: [...props.initialDraft.agents] } : emptyDraft(),
@@ -402,7 +404,7 @@ async function remove(): Promise<void> {
     </div>
 
     <!-- 底部操作条 -->
-    <footer class="tce-footer">
+    <footer class="tce-footer" :style="{ marginBottom: `${keyboardHeight}px` }">
       <p v-if="validationError" class="tce-validation">{{ validationError }}</p>
       <button
         type="button"

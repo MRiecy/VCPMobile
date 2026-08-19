@@ -5,9 +5,10 @@
  * send 模式：to/cc/bcc/subject/body；reply 模式：仅正文
  * （服务端自动带原邮件上下文并标读原邮件）。
  */
-import { computed, reactive } from 'vue';
-import { ArrowLeft } from 'lucide-vue-next';
+import { computed, reactive, ref } from 'vue';
+import { ArrowLeft, Plus } from 'lucide-vue-next';
 import { useMailStore } from './mailStore';
+import { useKeyboardInsets } from '../../core/composables/useKeyboardInsets';
 import type { MailSummary } from './mailTypes';
 
 const props = withDefaults(
@@ -17,6 +18,7 @@ const props = withDefaults(
 const emit = defineEmits<{ close: [] }>();
 
 const store = useMailStore();
+const { keyboardHeight } = useKeyboardInsets();
 
 const draft = reactive({
   to: props.mode === 'reply' ? (props.replyTo?.fromText ?? '') : '',
@@ -25,6 +27,33 @@ const draft = reactive({
   subject: props.mode === 'reply' ? `Re: ${props.replyTo?.subject ?? ''}` : '',
   body: '',
 });
+
+// 抄送/密送默认折叠（低频字段，展开后带白话说明）
+const showCcBcc = ref(false);
+
+/** 最近联系人：从已加载邮件的发件人去重（点按填入收件人）。 */
+const recentContacts = computed(() => {
+  const seen = new Set<string>();
+  const contacts: string[] = [];
+  const own = store.selectedMailbox?.user;
+  for (const mail of store.mails) {
+    const text = mail.fromText.trim();
+    if (!text || text === own || seen.has(text)) continue;
+    seen.add(text);
+    contacts.push(text);
+    if (contacts.length >= 6) break;
+  }
+  return contacts;
+});
+
+function pickContact(contact: string): void {
+  const current = draft.to.trim();
+  if (!current) {
+    draft.to = contact;
+  } else if (!current.includes(contact)) {
+    draft.to = `${current.replace(/[,，]\s*$/, '')}, ${contact}`;
+  }
+}
 
 const validationError = computed(() => {
   if (props.mode === 'send') {
@@ -65,21 +94,50 @@ async function submit(): Promise<void> {
 
     <div class="mc-scroll vcp-scrollable no-rubber-band">
       <section v-if="mode === 'send'" class="mc-section">
+        <p v-if="store.selectedMailbox?.agentName" class="mc-agent-hint">
+          将以 Agent「{{ store.selectedMailbox.agentName }}」的绑定邮箱发出
+        </p>
         <label class="mc-field">
           <span class="mc-label">收件人（多个用英文逗号分隔）</span>
           <input v-model="draft.to" type="text" class="mc-input" placeholder="someone@example.com"
             autocapitalize="off" autocorrect="off" spellcheck="false" />
         </label>
-        <label class="mc-field">
-          <span class="mc-label">抄送（选填）</span>
-          <input v-model="draft.cc" type="text" class="mc-input"
-            autocapitalize="off" autocorrect="off" spellcheck="false" />
-        </label>
-        <label class="mc-field">
-          <span class="mc-label">密送（选填）</span>
-          <input v-model="draft.bcc" type="text" class="mc-input"
-            autocapitalize="off" autocorrect="off" spellcheck="false" />
-        </label>
+        <div v-if="recentContacts.length > 0" class="mc-contacts">
+          <button
+            v-for="contact in recentContacts"
+            :key="contact"
+            type="button"
+            class="mc-contact-chip"
+            @click="pickContact(contact)"
+          >
+            <Plus :size="11" />
+            <span>{{ contact }}</span>
+          </button>
+        </div>
+
+        <button
+          v-if="!showCcBcc"
+          type="button"
+          class="mc-ccbcc-toggle"
+          @click="showCcBcc = true"
+        >
+          添加抄送 / 密送
+        </button>
+        <template v-else>
+          <label class="mc-field">
+            <span class="mc-label">抄送（选填）</span>
+            <input v-model="draft.cc" type="text" class="mc-input"
+              autocapitalize="off" autocorrect="off" spellcheck="false" />
+            <p class="mc-hint">副本公开：所有收件人都能看到抄送人。</p>
+          </label>
+          <label class="mc-field">
+            <span class="mc-label">密送（选填）</span>
+            <input v-model="draft.bcc" type="text" class="mc-input"
+              autocapitalize="off" autocorrect="off" spellcheck="false" />
+            <p class="mc-hint">副本隐藏：其他收件人看不到密送人。</p>
+          </label>
+        </template>
+
         <label class="mc-field">
           <span class="mc-label">主题</span>
           <input v-model="draft.subject" type="text" class="mc-input" placeholder="邮件主题" />
@@ -106,7 +164,7 @@ async function submit(): Promise<void> {
       <div class="mc-footer-spacer" />
     </div>
 
-    <footer class="mc-footer">
+    <footer class="mc-footer" :style="{ marginBottom: `${keyboardHeight}px` }">
       <p v-if="validationError" class="mc-validation">{{ validationError }}</p>
       <button
         type="button"
@@ -218,6 +276,61 @@ async function submit(): Promise<void> {
   margin: 0;
   font-size: 12px;
   opacity: 0.6;
+}
+
+.mc-contacts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -4px 0 12px;
+}
+
+.mc-contact-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-color);
+  background: var(--secondary-bg);
+  color: var(--highlight-text);
+  font-size: 11px;
+  font-weight: 700;
+  max-width: 100%;
+}
+
+.mc-contact-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mc-ccbcc-toggle {
+  display: block;
+  margin: -4px 0 12px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--highlight-text);
+  font-size: 12px;
+  font-weight: 700;
+  opacity: 0.85;
+}
+
+.mc-hint {
+  margin: 5px 0 0;
+  font-size: 11px;
+  opacity: 0.5;
+}
+
+.mc-agent-hint {
+  margin: 0 0 12px;
+  padding: 7px 10px;
+  border-left: 2px solid var(--highlight-text);
+  background: var(--secondary-bg);
+  font-size: 11.5px;
+  opacity: 0.85;
 }
 
 .mc-textarea {

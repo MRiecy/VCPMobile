@@ -8,11 +8,13 @@
 import { computed, onMounted, ref } from 'vue';
 import { ArrowLeft } from 'lucide-vue-next';
 import { useForumStore } from './forumStore';
+import { useKeyboardInsets } from '../../core/composables/useKeyboardInsets';
 import { useSettingsStore } from '../../core/stores/settings';
 
 const emit = defineEmits<{ close: [] }>();
 
 const store = useForumStore();
+const { keyboardHeight } = useKeyboardInsets();
 const settingsStore = useSettingsStore();
 
 const maid = ref('');
@@ -108,7 +110,7 @@ async function submit(): Promise<void> {
       <div class="fc-footer-spacer" />
     </div>
 
-    <footer class="fc-footer">
+    <footer class="fc-footer" :style="{ marginBottom: `${keyboardHeight}px` }">
       <p v-if="validationError" class="fc-validation">{{ validationError }}</p>
       <button
         type="button"

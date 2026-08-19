@@ -185,8 +185,14 @@ onBeforeUnmount(() => {
         </button>
       </div>
 
-      <!-- 发帖 FAB -->
-      <button type="button" class="fm-fab" aria-label="发布新帖" @click="openCompose">
+      <!-- 发帖 FAB（子页打开时隐藏，避免浮在详情/发帖页之上） -->
+      <button
+        v-if="!activePostUid && !isComposeOpen"
+        type="button"
+        class="fm-fab"
+        aria-label="发布新帖"
+        @click="openCompose"
+      >
         <Plus :size="22" />
       </button>
 

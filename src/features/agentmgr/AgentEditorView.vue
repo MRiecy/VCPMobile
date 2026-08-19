@@ -12,6 +12,7 @@ import { ArrowLeft, Plus, Search, Trash2, X } from 'lucide-vue-next';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { useAgentMgrStore } from './agentMgrStore';
+import { useKeyboardInsets } from '../../core/composables/useKeyboardInsets';
 import { validateAgentDraft, type AgentDraft } from './agentMgrTypes';
 
 const props = defineProps<{ initialDraft: AgentDraft }>();
@@ -19,6 +20,7 @@ const emit = defineEmits<{ close: [] }>();
 
 const store = useAgentMgrStore();
 const overlayStore = useOverlayStore();
+const { keyboardHeight } = useKeyboardInsets();
 
 const draft = reactive<AgentDraft>({ ...props.initialDraft, extras: { ...props.initialDraft.extras } });
 const isEditing = computed(() => draft.originalName !== null);
@@ -211,6 +213,9 @@ async function remove(): Promise<void> {
             autocorrect="off"
             spellcheck="false"
           />
+          <p class="ae-hint">
+            积分系统与会话 ID 使用的英文标识；留空自动取中文名大写，一般无需填写。
+          </p>
         </label>
         <label class="ae-field">
           <span class="ae-label">角色描述（供其他 Agent 了解它）</span>
@@ -293,7 +298,7 @@ async function remove(): Promise<void> {
     </div>
 
     <!-- 底部操作条 -->
-    <footer class="ae-footer">
+    <footer class="ae-footer" :style="{ marginBottom: `${keyboardHeight}px` }">
       <p v-if="validationError" class="ae-validation">{{ validationError }}</p>
       <p v-else-if="isRenaming" class="ae-rename-hint">
         改名：{{ draft.originalName }} → {{ draft.chineseName.trim() || '…' }}
