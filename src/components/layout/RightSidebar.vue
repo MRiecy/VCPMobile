@@ -13,6 +13,7 @@ import {
   SquareTerminal,
   ScrollText,
   CalendarClock,
+  Bot,
 } from 'lucide-vue-next';
 import { useNotificationStore } from '../../core/stores/notification';
 import { useNotificationProcessor } from '../../core/composables/useNotificationProcessor';
@@ -68,6 +69,12 @@ const moreTools = [
     label: '任务调度',
     icon: CalendarClock,
     open: () => overlayStore.openTaskCenter(),
+  },
+  {
+    id: 'agent-mgr',
+    label: 'Agent 管理',
+    icon: Bot,
+    open: () => overlayStore.openAgentMgr(),
   },
   {
     id: 'vcp-cli',

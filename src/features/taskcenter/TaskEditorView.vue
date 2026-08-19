@@ -7,7 +7,7 @@
  * 占位符 chips 点击插入光标处（解决软键盘输入 {{...}} 的痛苦）。
  */
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
-import { ArrowLeft, Plus, Search, Trash2, X } from 'lucide-vue-next';
+import { ArrowLeft, Bot, Plus, Search, Trash2, X } from 'lucide-vue-next';
 import SettingsSwitch from '../../components/settings/SettingsSwitch.vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 import { useOverlayStore } from '../../core/stores/overlay';
@@ -109,6 +109,12 @@ function closeAgentPicker(): void {
 function pickAgent(name: string): void {
   if (!draft.agents.includes(name)) draft.agents.push(name);
   closeAgentPicker();
+}
+
+/** 联动：跳到 Agent 管理页（08 篇 §6 裁决的轻量联动）。 */
+function openAgentMgr(): void {
+  closeAgentPicker();
+  overlayStore.openAgentMgr();
 }
 
 function addManualAgent(): void {
@@ -451,6 +457,12 @@ async function remove(): Promise<void> {
             </span>
           </button>
         </div>
+        <footer class="tce-picker-footer">
+          <button type="button" class="tce-picker-manage" @click="openAgentMgr">
+            <Bot :size="14" />
+            <span>管理 Agent…</span>
+          </button>
+        </footer>
       </section>
     </Transition>
   </div>
@@ -826,6 +838,31 @@ async function remove(): Promise<void> {
   text-align: center;
   font-size: 12px;
   opacity: 0.5;
+}
+
+/* 「管理 Agent…」联动入口：选择器底部通栏，弱强调 */
+.tce-picker-footer {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border-color);
+  padding: 6px 14px 4px;
+}
+
+.tce-picker-manage {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 0 4px;
+  border: none;
+  background: transparent;
+  color: var(--highlight-text);
+  font-size: 12px;
+  font-weight: 700;
+  opacity: 0.85;
+}
+
+.tce-picker-manage:active {
+  opacity: 1;
 }
 
 .tce-picker-row {

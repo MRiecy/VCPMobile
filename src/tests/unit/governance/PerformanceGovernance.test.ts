@@ -28,6 +28,7 @@ describe("mobile performance governance", () => {
       "isCliManifestOpen",
       "isLogCenterOpen",
       "isTaskCenterOpen",
+      "isAgentMgrOpen",
     ];
 
     for (const openState of latches) {
