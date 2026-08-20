@@ -18,8 +18,12 @@ const isLoading = computed(() => props.file.status === "loading");
 </script>
 
 <template>
+  <!-- 注意：本层严禁加 overflow-hidden——删除按钮（AttachmentPreviewBase 内
+       -top-1.5 -right-1.5 的悬浮徽章）会被卡片框裁掉。圆角裁剪已由
+       ImageAttachment 内层 rounded-xl overflow-hidden 与下方 Loading
+       Overlay 自带的 rounded-xl 各自承担，无需本层代劳。 -->
   <div
-    class="relative shrink-0 rounded-xl overflow-hidden"
+    class="relative shrink-0 rounded-xl"
     :class="[isImage ? 'w-14 h-14' : 'max-w-[180px]']"
   >
     <!-- Use new component system -->
