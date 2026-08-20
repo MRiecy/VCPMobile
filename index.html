@@ -7,8 +7,9 @@
     <title>VCP Mobile</title>
     <style>
       body, html { margin: 0; padding: 0; width: 100%; height: 100%; }
-      body { background-color: #030712; }
-      @media (prefers-color-scheme: light) { body { background-color: #ffffff; } }
+      /* 首帧占位底色：默认对齐「星渊雪境」亮色底盘；存储了暗色偏好的用户由下方内联脚本压暗 */
+      body { background-color: #f4f6f8; }
+      html.boot-dark body { background-color: #101014; }
       .preloader {
         display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh;
       }
@@ -16,6 +17,20 @@
       .preloader-logo { width: 80px; height: 80px; animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
       @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .7; transform: scale(0.95); } }
     </style>
+    <script>
+      // 首帧底色对齐应用内主题偏好（在 body 绘制前同步执行）。
+      // 不能用媒体查询猜：系统偏好代表不了用户的应用内选择——存了暗色偏好的用户
+      // 在亮色系统上会看到「白色预载页 → 暗色主题接管」的黑帧闪烁。
+      // boot-dark 的使命止于主题变量注入，由 theme.ts injectVariables 移除。
+      (function () {
+        try {
+          var m = localStorage.getItem('vcp-theme-mode');
+          if (m === 'dark' || (m === 'system' && matchMedia('(prefers-color-scheme: dark)').matches)) {
+            document.documentElement.classList.add('boot-dark');
+          }
+        } catch (e) { /* localStorage 不可用时保持亮色默认 */ }
+      })();
+    </script>
   </head>
 
   <body>

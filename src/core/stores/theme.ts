@@ -57,7 +57,7 @@ export interface ThemeInfo {
   };
 }
 
-const DEFAULT_THEME = 'themes-bear-holiday.ts';
+const DEFAULT_THEME = 'themes-star-abyss.ts';
 const THEME_NAME_STORAGE_KEY = 'vcp-theme-name';
 const PRESENTATION_STORAGE_KEY = 'vcp-chat-presentation-mode';
 
@@ -171,11 +171,15 @@ export const useThemeStore = defineStore('theme', () => {
   };
 
   const storedMode = readStoredValue('vcp-theme-mode');
-  const initialMode: ThemeMode = storedMode === 'light' || storedMode === 'system'
+  // 默认主题「星渊雪境」以亮色示人：无本地偏好时默认 light；
+  // 已存储 dark / system 偏好的老用户完全不受影响。
+  const initialMode: ThemeMode = storedMode === 'dark' || storedMode === 'system'
     ? storedMode
-    : 'dark';
+    : 'light';
   const mode = ref<ThemeMode>(initialMode);
-  const isDarkResolved = ref(true);
+  // 初值与默认模式（light）保持一致；store 创建时 mode 的 immediate watch
+  // 会同步执行 applyTheme 将其纠正为真实值。
+  const isDarkResolved = ref(false);
   const lastModeSwitchAt = ref(0);
   const MODE_SWITCH_DEBOUNCE_MS = 420;
 
@@ -218,6 +222,9 @@ export const useThemeStore = defineStore('theme', () => {
       document.documentElement.style.setProperty(key, value);
     }
     lastAppliedVarKeys.value = Object.keys(vars);
+    // 首帧占位底色（index.html 的 boot-dark）使命完成：真实主题变量已就绪，
+    // body 背景职责移交 var(--primary-bg)。幂等，后续主题切换时为无操作。
+    document.documentElement.classList.remove('boot-dark');
   };
 
   const fetchThemes = async () => {
