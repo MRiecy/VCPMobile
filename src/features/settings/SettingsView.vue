@@ -6,12 +6,14 @@ import {
   useSettingsStore,
   type AppSettings,
 } from "../../core/stores/settings";
+import { useThemeStore } from "../../core/stores/theme";
 import SlidePage from "../../components/ui/SlidePage.vue";
 
 // 轻量原语保持静态；全部区块组件改为懒加载——设置主页只渲染分类列表，
 // 首次打开不再解析 UserProfile/Theme/ModelSelector/About 等与主页无关的代码
 import SettingsCard from "../../components/settings/SettingsCard.vue";
 import SettingsRow from "../../components/settings/SettingsRow.vue";
+import FluidBackground from "../../components/ui/WebGLFluidBackground.vue";
 const UserProfileSection = defineAsyncComponent(() => import("./components/UserProfileSection.vue"));
 const SyncSettingsSection = defineAsyncComponent(() => import("./components/SyncSettingsSection.vue"));
 const ConfigBackupSection = defineAsyncComponent(() => import("./components/ConfigBackupSection.vue"));
@@ -164,12 +166,31 @@ onMounted(() => {
   if (props.isOpen) loadSettings();
 });
 
+// 子页面预热：设置页打开后，在浏览器空闲时后台预载主题/关于子页的异步 chunk。
+// 否则进入子页时「chunk 下载 → fetchThemes → 预览区空态切内容 → 卡片轨吸附定位」
+// 全部挤在 0.35s 滑入动画中段，产生果冻式顿挫（加载越慢越明显）。
+// 预热的成果是幂等缓存：ThemePicker 挂载时若清单已在内存则不再重复拉取。
+// 注意：清单本身由 themeStore.initTheme 在启动 idle 时预扫描（eager glob，纯内存组装），
+// 这里真正需要预热的只有 chunk；挂到 idle 是为避免与设置页首开动画
+// 争抢主线程——与 initTheme 的空闲加载模式保持同构，不开同步预热的后门。
+const themeStore = useThemeStore();
+const warmSubPages = () => {
+  const idle: (cb: () => void) => void =
+    (window as any).requestIdleCallback?.bind(window) || ((cb) => setTimeout(cb, 1000));
+  idle(() => {
+    if (themeStore.availableThemes.length === 0) void themeStore.fetchThemes();
+    void import("./ThemePicker.vue");
+    void import("./components/AboutSection.vue");
+  });
+};
+
 watch(
   () => props.isOpen,
   (val: boolean) => {
     if (val) {
       currentSubPage.value = null; // 重新打开时，先确保重置回设置主页，防止滞留子页面
       loadSettings();
+      warmSubPages();
     } else {
       // 关闭时绝不重置，防止与外层 SlidePage 的退场 Transition 动画产生 DOM 突兀卸载冲突
     }
@@ -199,16 +220,44 @@ watch(currentSubPage, (val) => {
     }, 350);
   }
 });
+
+// ── 关于页：独立沉浸式覆盖层 ─────────────────────────────────────────────
+// 关于页是全局设置中唯一的全屏沉浸页（自带返回按钮与 WebGL 流体背景），
+// 因此不套用列表子页的侧滑模板，而是作为覆盖整个设置页（含头部）的独立层，
+// 以淡入+轻微上浮进场。背景宿主常驻保活（v-show），经 idle 预编译着色器，
+// 仅在关于页可见期间运行渲染循环。
+const fluidBgRef = ref<{ setActive: (value: boolean) => void } | null>(null);
+const aboutVisible = computed(() => currentSubPage.value === "about");
+
+let fluidDeactivateTimer: ReturnType<typeof setTimeout> | null = null;
+const syncFluidActive = () => {
+  const shouldActive = props.isOpen && aboutVisible.value;
+  if (shouldActive) {
+    if (fluidDeactivateTimer) {
+      clearTimeout(fluidDeactivateTimer);
+      fluidDeactivateTimer = null;
+    }
+    fluidBgRef.value?.setActive(true);
+  } else {
+    // 延迟停用：覆盖层/设置页退场动画期间保留最后一帧，动画结束后再停 GPU 循环
+    if (fluidDeactivateTimer) clearTimeout(fluidDeactivateTimer);
+    fluidDeactivateTimer = setTimeout(() => {
+      fluidDeactivateTimer = null;
+      if (!(props.isOpen && aboutVisible.value)) fluidBgRef.value?.setActive(false);
+    }, 400);
+  }
+};
+watch(aboutVisible, syncFluidActive);
+watch(() => props.isOpen, syncFluidActive);
 </script>
 
 <template>
   <SlidePage :is-open="props.isOpen" :z-index="props.zIndex">
     <div
-      class="settings-view flex flex-col h-full w-full bg-secondary-bg text-primary-text pointer-events-auto"
+      class="settings-view relative flex flex-col h-full w-full bg-secondary-bg text-primary-text pointer-events-auto"
     >
       <!-- Header -->
       <header
-        v-if="currentSubPage !== 'about'"
         class="px-4 py-3 flex items-center justify-between border-b border-white/10 pt-[calc(var(--vcp-safe-top,24px)+12px)] pb-3 shrink-0"
       >
         <h2 class="text-xl font-bold">{{ currentSubPage ? subPageTitle : '全局设置' }}</h2>
@@ -284,11 +333,9 @@ watch(currentSubPage, (val) => {
 
             <div
               class="flex-1"
-              :class="currentSubPage === 'about'
-                ? 'overflow-hidden flex flex-col pb-[calc(var(--vcp-safe-bottom,48px))]'
-                : currentSubPage === 'theme'
-                  ? 'overflow-hidden flex flex-col min-h-0'
-                  : 'overflow-y-auto px-3 pt-6 space-y-6 no-rubber-band pb-[calc(var(--vcp-safe-bottom,48px))]'"
+              :class="currentSubPage === 'theme'
+                ? 'overflow-hidden flex flex-col min-h-0'
+                : 'overflow-y-auto px-3 pt-6 space-y-6 no-rubber-band pb-[calc(var(--vcp-safe-bottom,48px))]'"
             >
               <!-- 用户身份 -->
               <template v-if="visibleSubPage === 'identity'">
@@ -389,11 +436,6 @@ watch(currentSubPage, (val) => {
               <template v-if="visibleSubPage === 'guide'">
                 <GuideCenterSection />
               </template>
-
-              <!-- 关于 -->
-              <template v-if="visibleSubPage === 'about'">
-                <AboutSection @back="currentSubPage = null" />
-              </template>
             </div>
           </div>
         </Transition>
@@ -407,6 +449,21 @@ watch(currentSubPage, (val) => {
           @select="onSummaryModelSelect"
         />
       </div>
+
+      <!-- 关于页流体背景宿主：常驻保活（v-show），idle 预编译着色器，仅关于页可见时渲染 -->
+      <FluidBackground
+        ref="fluidBgRef"
+        v-show="aboutVisible"
+        class="about-fluid z-20"
+        :class="{ 'about-fluid-active': aboutVisible }"
+      />
+
+      <!-- 关于页：独立全屏沉浸层，覆盖整个设置页（含头部），不套用子页面侧滑模板 -->
+      <Transition name="about-immersive">
+        <div v-if="aboutVisible" class="absolute inset-0 z-30">
+          <AboutSection @back="currentSubPage = null" />
+        </div>
+      </Transition>
     </div>
   </SlidePage>
 </template>
@@ -427,5 +484,39 @@ watch(currentSubPage, (val) => {
 .slide-subpage-enter-from,
 .slide-subpage-leave-to {
   transform: translateX(100%);
+}
+
+/* 关于页流体背景：随 aboutVisible 淡入淡出（组件常驻保活，不受 Transition 卸载影响） */
+.about-fluid {
+  opacity: 0;
+  transition: opacity 0.35s ease;
+}
+
+.about-fluid-active {
+  opacity: 1;
+  transition-duration: 0.5s;
+}
+
+/* 关于页独立进场：淡入 + 轻微上浮，与列表子页的右滑形成明确的层级区分 */
+.about-immersive-enter-active {
+  transition:
+    opacity 0.4s ease,
+    transform 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.about-immersive-leave-active {
+  transition:
+    opacity 0.28s ease,
+    transform 0.32s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.about-immersive-enter-from {
+  opacity: 0;
+  transform: translateY(2.5%) scale(0.985);
+}
+
+.about-immersive-leave-to {
+  opacity: 0;
+  transform: translateY(1.5%);
 }
 </style>

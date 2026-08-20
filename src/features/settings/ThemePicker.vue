@@ -58,17 +58,24 @@ const cardStyle = (theme: ThemeInfo, variant: 'dark' | 'light'): Record<string, 
   };
 };
 
+// 定位所有权收归本函数：手动计算吸附点精确滚动，不再使用 scrollIntoView。
+// scrollIntoView 的落点由浏览器与 CSS scroll-snap 协商决定，一旦不是精确吸附点，
+// mandatory snap 会追加一段纠偏动画；若发生在子页滑入动画中段，看起来就是
+// "卡片撞出去再弹回来"。
 const scrollThemeIntoView = (themeKey: string, smooth = false) => {
   const rail = railRef.value;
   if (!rail) return;
   const card = Array.from(rail.querySelectorAll<HTMLElement>('[data-theme-key]')).find(
     (element) => element.dataset.themeKey === themeKey,
   );
-  card?.scrollIntoView?.({
-    behavior: smooth ? 'smooth' : 'auto',
-    block: 'nearest',
-    inline: 'center',
-  });
+  if (!card) return;
+  // scroll-padding-inline 左右对称（max(0.75rem, 8vw)），snapport 中心即滚动口中心。
+  // 用视口矩形差值求目标位置：祖先 transform（滑入动画）对两者同向叠加，差值中抵消。
+  const railRect = rail.getBoundingClientRect();
+  const cardRect = card.getBoundingClientRect();
+  const delta = cardRect.left + cardRect.width / 2 - (railRect.left + railRect.width / 2);
+  if (Math.abs(delta) < 1) return;
+  rail.scrollTo({ left: rail.scrollLeft + delta, behavior: smooth ? 'smooth' : 'auto' });
 };
 
 const selectTheme = (theme: ThemeInfo, alignCard = true) => {
@@ -143,10 +150,20 @@ const selectPresentationMode = (mode: ChatPresentationMode) => {
 
 onMounted(async () => {
   try {
-    await themeStore.fetchThemes();
-    if (!isActive) return;
+    // 设置页打开时已预热主题清单（见 SettingsView.warmSubPages）；
+    // 仅在未经预热直接进入时才自行拉取，避免重复构建清单数组引发的二次渲染。
+    if (themeStore.availableThemes.length === 0) {
+      await themeStore.fetchThemes();
+      if (!isActive) return;
+      draftThemeKey.value = appliedThemeKey.value || themeStore.availableThemes[0]?.fileName || '';
+      // 冷路径：卡片刚渲染，等一帧 DOM 再定位
+      await nextTick();
+      scrollThemeIntoView(draftThemeKey.value);
+      return;
+    }
+    // 热路径（预热命中）：同步完成定位，抢在首帧绘制与子页滑入动画之前，
+    // 避免定位动作漏进动画时段被用户感知为回弹
     draftThemeKey.value = appliedThemeKey.value || themeStore.availableThemes[0]?.fileName || '';
-    await nextTick();
     scrollThemeIntoView(draftThemeKey.value);
   } catch (e) {
     initializationError.value = e instanceof Error ? e.message : String(e);

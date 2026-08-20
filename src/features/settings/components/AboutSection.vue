@@ -7,7 +7,8 @@ import SettingsRow from '../../../components/settings/SettingsRow.vue';
 import UpdateSection from './UpdateSection.vue';
 import { useNotificationStore } from '../../../core/stores/notification';
 import { useThemeStore } from '../../../core/stores/theme';
-import WebGLFluidBackground from '../../../components/ui/WebGLFluidBackground.vue';
+
+// 背景（WebGL 流体 + 噪点）由 SettingsView 的常驻宿主层承担，本组件只负责内容。
 
 const themeStore = useThemeStore();
 
@@ -173,9 +174,6 @@ const openFeedback = () => {
     class="flex flex-col flex-1 h-full relative bg-transparent overflow-hidden transition-colors duration-300"
     :class="themeStore.isDarkResolved ? 'theme-dark' : 'theme-light'"
   >
-    <!-- WebGL Fluid Background promoted to fullscreen backdrop (Z-0) -->
-    <WebGLFluidBackground class="absolute inset-0 w-full h-full pointer-events-none z-0" />
-
     <!-- Immersive Back Button -->
     <button 
       @click="$emit('back')"
@@ -196,12 +194,6 @@ const openFeedback = () => {
         <path d="m15 18-6-6 6-6"/>
       </svg>
     </button>
-
-    <!-- 电影级胶片噪点层 (Film Grain Dithering) - 采用 0KB 纯 SVG 分形噪声物理抹平大模糊带来的色彩渐变断层(等高线条纹) -->
-    <div 
-      class="noise-overlay absolute inset-0 pointer-events-none z-1 overflow-hidden transition-opacity duration-300"
-      :class="themeStore.isDarkResolved ? '' : 'light-mode-noise'"
-    />
 
     <!-- Header with 3D Logo (Invisible Hitbox Layer) -->
     <div 
@@ -294,29 +286,13 @@ const openFeedback = () => {
 
 <style scoped>
 
-
-/* 胶片颗粒噪点层，使用 0KB 纯 SVG 分形噪声物理抹除大渐变色带 */
-.noise-overlay {
-  opacity: 0.06; /* 从 0.045 提升至 0.06，增强像素打散强度以抵抗物理干涉，颗粒质感更细腻高级 */
-  mix-blend-mode: overlay;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
-  transition: opacity 0.5s ease;
-}
-
-/* 亮色模式下的胶片颗粒 - 呈 multiply 模式，不透明度略降，提供 pure white 磨砂玻璃颗粒触感 */
-.noise-overlay.light-mode-noise {
-  mix-blend-mode: multiply;
-  opacity: 0.038;
-}
-
 /* ==========================================================================
    Theme Adaptations (Dynamic Dark/Light Overrides via Scoped Deep Selectors)
    ========================================================================== */
 
-/* 1. Dark Theme Base Variables */
+/* 1. Dark Theme Base Variables（底盘底色由流体背景宿主绘制，这里只接管前景色） */
 .theme-dark {
   color: #ffffff;
-  background-color: #0f172a !important; /* 强制接管关于页面暗色底盘背景 */
 }
 
 .theme-dark :deep(.settings-card) {
@@ -336,7 +312,6 @@ const openFeedback = () => {
 /* 2. Light Theme Refined Adaptations (Surgical deep-selector overrides) */
 .theme-light {
   color: #1e293b; /* text-slate-800 */
-  background-color: #f8fafc !important; /* 强制接管关于页面亮色底盘背景 */
 }
 
 /* 亮色半透明卡片：滚动内容禁用 backdrop blur，避免移动端合成层抖动。 */

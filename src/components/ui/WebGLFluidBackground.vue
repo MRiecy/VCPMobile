@@ -2,14 +2,29 @@
 import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { useThemeStore } from '../../core/stores/theme';
 
+// 常驻型流体背景宿主（空间换时间设计）：
+// - 挂载后经 requestIdleCallback 预热：创建 WebGL 上下文并完成着色器编译
+//  （KHR_parallel_shader_compile 可用时全程异步轮询，绝不阻塞主线程），
+//   编译产物之后永久持有，About 页打开即热；
+// - setActive(true/false) 控制 rAF 渲染循环与交互监听，About 页关闭即停，空闲零 GPU 开销；
+// - 冷路径（预热未完成就打开 About）：主题化 CSS 极光渐变兜底，首帧绘制完成后画布交叉淡入，
+//   用户全程看不到黑屏或动画冻结。
 const themeStore = useThemeStore();
+const hostRef = ref<HTMLElement | null>(null);
 const canvasRef = ref<HTMLCanvasElement | null>(null);
+
+/** 着色器编译链接完成，随时可以开始渲染 */
+const ready = ref(false);
+/** 激活后已绘制至少一帧 —— 驱动画布从兜底渐变上交叉淡入 */
+const firstFrame = ref(false);
 
 let gl: WebGLRenderingContext | null = null;
 let program: WebGLProgram | null = null;
 let animationFrameId = 0;
 let startTime = 0;
 let resizeObserver: ResizeObserver | null = null;
+let active = false;
+let warmStarted = false;
 
 // WebGL uniform locations
 let uResolutionLoc: WebGLUniformLocation | null = null;
@@ -141,34 +156,9 @@ const createShader = (gl: WebGLRenderingContext, type: number, source: string): 
   return shader;
 };
 
-const initWebGL = () => {
-  const canvas = canvasRef.value;
-  if (!canvas) return;
-
-  gl = canvas.getContext('webgl', { 
-    alpha: false, 
-    antialias: true,
-    depth: false,
-    stencil: false,
-    powerPreference: 'high-performance'
-  });
-
-  if (!gl) {
-    console.warn('[WebGL] WebGL context is not supported, falling back.');
-    return;
-  }
-
-  const vs = createShader(gl, gl.VERTEX_SHADER, vsSource);
-  const fs = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
-  if (!vs || !fs) return;
-
-  program = gl.createProgram();
-  if (!program) return;
-
-  gl.attachShader(program, vs);
-  gl.attachShader(program, fs);
-  gl.linkProgram(program);
-
+/** 链接完成后的收尾：建立顶点缓冲与 uniform 定位，标记就绪并按需启动渲染循环 */
+const finishLink = () => {
+  if (!gl || !program) return;
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
     console.error('[WebGL] Link error:', gl.getProgramInfoLog(program));
     return;
@@ -202,11 +192,64 @@ const initWebGL = () => {
   uIsDarkLoc = gl.getUniformLocation(program, 'u_is_dark');
 
   startTime = performance.now();
-  renderLoop();
+  ready.value = true;
+  if (active) startLoop();
+};
+
+/**
+ * 预热（幂等）：创建 WebGL 上下文并编译链接着色器，但不启动渲染循环。
+ * KHR_parallel_shader_compile 可用时异步轮询编译完成状态，主线程零阻塞；
+ * 不可用时退化为同步等待——但 warm 只在空闲回调中被调用，不会卡任何进场动画。
+ */
+const warm = () => {
+  if (warmStarted) return;
+  warmStarted = true;
+
+  const canvas = canvasRef.value;
+  if (!canvas) return;
+
+  gl = canvas.getContext('webgl', {
+    alpha: false,
+    antialias: false, // 程序化全屏 quad 无几何边缘，MSAA 纯属浪费上下文创建开销
+    depth: false,
+    stencil: false,
+    powerPreference: 'default', // 环境光背景无需强制高性能 GPU 档位
+  });
+
+  if (!gl) {
+    console.warn('[WebGL] WebGL context is not supported, falling back.');
+    return;
+  }
+
+  const vs = createShader(gl, gl.VERTEX_SHADER, vsSource);
+  const fs = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+  if (!vs || !fs) return;
+
+  program = gl.createProgram();
+  if (!program) return;
+
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+
+  const parallelExt = gl.getExtension('KHR_parallel_shader_compile');
+  if (parallelExt) {
+    const poll = () => {
+      if (!gl || !program) return;
+      if (gl.getProgramParameter(program, parallelExt.COMPLETION_STATUS_KHR)) {
+        finishLink();
+      } else {
+        requestAnimationFrame(poll);
+      }
+    };
+    requestAnimationFrame(poll);
+  } else {
+    finishLink();
+  }
 };
 
 const renderLoop = () => {
-  if (!gl || !program) return;
+  if (!gl || !program || !active) return;
 
   const canvas = canvasRef.value;
   if (!canvas) return;
@@ -231,8 +274,37 @@ const renderLoop = () => {
 
   // Draw full viewport quad
   gl.drawArrays(gl.TRIANGLES, 0, 6);
+  if (!firstFrame.value) firstFrame.value = true;
 
   animationFrameId = requestAnimationFrame(renderLoop);
+};
+
+const startLoop = () => {
+  if (animationFrameId) return;
+  animationFrameId = requestAnimationFrame(renderLoop);
+};
+
+const stopLoop = () => {
+  if (animationFrameId) {
+    cancelAnimationFrame(animationFrameId);
+    animationFrameId = 0;
+  }
+};
+
+/** 按宿主实际尺寸重设画布分辨率；v-show 隐藏期间尺寸为 0，跳过等待下次激活 */
+const resizeToHost = () => {
+  const canvas = canvasRef.value;
+  const host = hostRef.value;
+  if (!canvas || !host) return;
+  const rect = host.getBoundingClientRect();
+  if (rect.width < 2 || rect.height < 2) return;
+  // 极光为低频模糊内容，DPR 1.5 完全无法感知差异，却省去约 44% 的片元开销
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  canvas.width = Math.floor(rect.width * dpr);
+  canvas.height = Math.floor(rect.height * dpr);
+  if (gl) {
+    gl.viewport(0, 0, canvas.width, canvas.height);
+  }
 };
 
 // Input event tracking helpers
@@ -270,62 +342,113 @@ const releaseInteraction = () => {
 
 let boundParent: HTMLElement | null = null;
 
+// 交互监听挂在宿主父元素上（宿主自身 pointer-events:none，事件从 About 内容层冒泡上来）。
+// 仅激活期间持有监听，避免常驻监听整个设置页。
+const bindInteraction = () => {
+  const parent = hostRef.value?.parentElement;
+  if (!parent || boundParent === parent) return;
+  boundParent = parent;
+  parent.addEventListener('mousemove', trackInteraction);
+  parent.addEventListener('mouseleave', releaseInteraction);
+  parent.addEventListener('touchmove', trackInteraction, { passive: false });
+  parent.addEventListener('touchend', releaseInteraction);
+  parent.addEventListener('mousedown', trackInteraction);
+  parent.addEventListener('touchstart', trackInteraction, { passive: true });
+};
+
+const unbindInteraction = () => {
+  if (!boundParent) return;
+  boundParent.removeEventListener('mousemove', trackInteraction);
+  boundParent.removeEventListener('mouseleave', releaseInteraction);
+  boundParent.removeEventListener('touchmove', trackInteraction);
+  boundParent.removeEventListener('touchend', releaseInteraction);
+  boundParent.removeEventListener('mousedown', trackInteraction);
+  boundParent.removeEventListener('touchstart', trackInteraction);
+  boundParent = null;
+};
+
+// Android WebView 在内存压力下可能销毁 GPU 上下文：拦截丢失事件并标记未就绪，恢复后重新预热
+const handleContextLost = (e: Event) => {
+  e.preventDefault();
+  stopLoop();
+  ready.value = false;
+  firstFrame.value = false;
+  warmStarted = false;
+  gl = null;
+  program = null;
+};
+
+const handleContextRestored = () => {
+  warm();
+};
+
+/**
+ * 激活/停用渲染循环。激活时若尚未预热（冷路径）立即触发预热——
+ * 并行编译扩展保证这不会阻塞主线程，兜底渐变遮住编译窗口。
+ */
+const setActive = (value: boolean) => {
+  if (value === active) return;
+  active = value;
+  if (value) {
+    if (!ready.value) warm();
+    bindInteraction();
+    // v-show 刚切为可见时宿主尺寸尚未布局，顺延一帧再测量
+    requestAnimationFrame(() => {
+      resizeToHost();
+      if (ready.value) startLoop();
+    });
+  } else {
+    stopLoop();
+    unbindInteraction();
+  }
+};
+
+defineExpose({ setActive, warm });
+
 onMounted(() => {
-  // Let the browser settle before compiling shader
-  setTimeout(() => {
-    initWebGL();
+  const canvas = canvasRef.value;
+  const host = hostRef.value;
+  if (!canvas || !host) return;
 
-    const canvas = canvasRef.value;
-    if (canvas) {
-      // 坚如磐石的 ResizeObserver，完美解决 SlidePage 缓动滑入期间宽度/高度动态变更导致的尺寸锁定问题
-      resizeObserver = new ResizeObserver((entries) => {
-        for (const entry of entries) {
-          const { width, height } = entry.contentRect;
-          const dpr = Math.min(window.devicePixelRatio || 1, 2);
-          canvas.width = Math.floor(width * dpr);
-          canvas.height = Math.floor(height * dpr);
-          if (gl) {
-            gl.viewport(0, 0, canvas.width, canvas.height);
-          }
-        }
-      });
-      resizeObserver.observe(canvas.parentElement || canvas);
+  canvas.addEventListener('webglcontextlost', handleContextLost);
+  canvas.addEventListener('webglcontextrestored', handleContextRestored);
 
-      // Zero-intrusive Parent Interaction Listener
-      if (canvas.parentElement) {
-        boundParent = canvas.parentElement;
-        boundParent.addEventListener('mousemove', trackInteraction);
-        boundParent.addEventListener('mouseleave', releaseInteraction);
-        boundParent.addEventListener('touchmove', trackInteraction, { passive: false });
-        boundParent.addEventListener('touchend', releaseInteraction);
-        boundParent.addEventListener('mousedown', trackInteraction);
-        boundParent.addEventListener('touchstart', trackInteraction, { passive: true });
-      }
-    }
-  }, 100);
+  resizeObserver = new ResizeObserver(() => {
+    if (active) resizeToHost();
+  });
+  resizeObserver.observe(host);
+
+  // 空闲预热：着色器编译产物常驻内存，About 页打开即热（空间换时间）。
+  // 与 theme.ts initTheme 的空闲加载模式同构。
+  const idle: (cb: () => void) => void =
+    (window as any).requestIdleCallback?.bind(window) || ((cb) => setTimeout(cb, 800));
+  idle(() => warm());
 });
 
 onUnmounted(() => {
-  if (animationFrameId) {
-    cancelAnimationFrame(animationFrameId);
-  }
-  
+  stopLoop();
+  unbindInteraction();
+
   if (resizeObserver) {
     resizeObserver.disconnect();
   }
 
-  // Clean up event listeners on parent
-  if (boundParent) {
-    boundParent.removeEventListener('mousemove', trackInteraction);
-    boundParent.removeEventListener('mouseleave', releaseInteraction);
-    boundParent.removeEventListener('touchmove', trackInteraction);
-    boundParent.removeEventListener('touchend', releaseInteraction);
-    boundParent.removeEventListener('mousedown', trackInteraction);
-    boundParent.removeEventListener('touchstart', trackInteraction);
+  const canvas = canvasRef.value;
+  if (canvas) {
+    canvas.removeEventListener('webglcontextlost', handleContextLost);
+    canvas.removeEventListener('webglcontextrestored', handleContextRestored);
   }
 
   gl = null;
   program = null;
+});
+
+// 编译完成时若已处于激活态（冷路径），立即开始渲染
+watch(ready, (isReady) => {
+  if (isReady && active) {
+    resizeToHost();
+    startLoop();
+  }
 });
 
 // Proactively update dark mode value inside running loop when theme changes
@@ -338,8 +461,56 @@ watch(() => themeStore.isDarkResolved, (isDark) => {
 </script>
 
 <template>
-  <canvas 
-    ref="canvasRef" 
-    class="w-full h-full block bg-transparent pointer-events-none"
-  />
+  <div ref="hostRef" class="fluid-host absolute inset-0 overflow-hidden pointer-events-none">
+    <!-- 冷路径兜底：主题化 CSS 极光渐变（轨道坐标与着色器一致），首帧就绪后被画布覆盖 -->
+    <div
+      class="fluid-fallback absolute inset-0"
+      :class="themeStore.isDarkResolved ? '' : 'fluid-fallback-light'"
+    />
+    <canvas
+      ref="canvasRef"
+      class="absolute inset-0 w-full h-full block transition-opacity duration-500"
+      :style="{ opacity: firstFrame ? 1 : 0 }"
+    />
+    <!-- 电影级胶片噪点层：与画布同处一个合成上下文，mix-blend 直接作用于流体画面 -->
+    <div
+      class="noise-overlay absolute inset-0 pointer-events-none overflow-hidden"
+      :class="themeStore.isDarkResolved ? '' : 'light-mode-noise'"
+    />
+  </div>
 </template>
+
+<style scoped>
+/* 兜底渐变：近似着色器中四个高斯光团的静态快照，仅在预热未完成的冷路径短暂可见 */
+.fluid-fallback {
+  background-color: #0f172a;
+  background-image:
+    radial-gradient(65% 45% at 18% 80%, rgba(0, 224, 255, 0.32), transparent 72%),
+    radial-gradient(60% 45% at 82% 76%, rgba(255, 51, 109, 0.28), transparent 72%),
+    radial-gradient(55% 40% at 38% 72%, rgba(168, 85, 247, 0.3), transparent 72%),
+    radial-gradient(60% 42% at 64% 82%, rgba(29, 78, 216, 0.34), transparent 72%);
+}
+
+.fluid-fallback-light {
+  background-color: #f8fafc;
+  background-image:
+    radial-gradient(65% 45% at 18% 80%, rgba(0, 224, 255, 0.22), transparent 72%),
+    radial-gradient(60% 45% at 82% 76%, rgba(255, 51, 109, 0.18), transparent 72%),
+    radial-gradient(55% 40% at 38% 72%, rgba(168, 85, 247, 0.2), transparent 72%),
+    radial-gradient(60% 42% at 64% 82%, rgba(29, 78, 216, 0.2), transparent 72%);
+}
+
+/* 胶片颗粒噪点层，使用 0KB 纯 SVG 分形噪声物理抹除大渐变色带 */
+.noise-overlay {
+  opacity: 0.06; /* 从 0.045 提升至 0.06，增强像素打散强度以抵抗物理干涉，颗粒质感更细腻高级 */
+  mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+  transition: opacity 0.5s ease;
+}
+
+/* 亮色模式下的胶片颗粒 - 呈 multiply 模式，不透明度略降，提供 pure white 磨砂玻璃颗粒触感 */
+.noise-overlay.light-mode-noise {
+  mix-blend-mode: multiply;
+  opacity: 0.038;
+}
+</style>
