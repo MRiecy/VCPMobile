@@ -24,7 +24,7 @@
 
 **平台边界（强约束）**：不支持 Windows/macOS/Linux 桌面端、iOS、Android TV 或其他 ABI；桌面用户使用 VCPChat。Vite 预览、host Rust 编译、非 Android fallback 和 Tauri desktop scaffold 仅用于开发/测试，不是产品入口。不得为“桌面兼容”增加业务分支，也不得删除 Android 子命令仍依赖的通用 `pnpm tauri` 脚本。完整 UI 契约见 `docs/ANDROID_UI_COMPATIBILITY.md`。
 
-- 版本：`1.1.4`
+- 版本：`1.1.5`
 - 包名：`com.vcp.avatar`
 
 ---
@@ -489,4 +489,4 @@ VCPMobile/
 
 ---
 
-*最后更新：2026-08-13 | VCP Mobile v1.1.4。若项目结构发生重大变化，请同步更新本文件。*
+*最后更新：2026-08-20 | VCP Mobile v1.1.5。若项目结构发生重大变化，请同步更新本文件。*

@@ -65,9 +65,9 @@ describe('release and Android governance contracts', () => {
 
     const packageJson = JSON.parse(packageManifest);
     const tauriJson = JSON.parse(tauriConfig);
-    expect(packageJson.version).toBe('1.1.4');
-    expect(tauriJson.version).toBe('1.1.4');
-    expect(tauriJson.bundle.android.versionCode).toBe(1001004);
+    expect(packageJson.version).toBe('1.1.5');
+    expect(tauriJson.version).toBe('1.1.5');
+    expect(tauriJson.bundle.android.versionCode).toBe(1001005);
 
     expect(releaseWorkflow).toContain('APK_ENTRIES=$(unzip -Z1 "$SOURCE_APK" 2>&1)');
     expect(releaseWorkflow).not.toMatch(/unzip -Z1[^\n]*\|[^\n]*grep -q/);

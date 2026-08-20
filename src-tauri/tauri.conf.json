@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "vcp-mobile",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "identifier": "com.vcp.avatar",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -31,7 +31,7 @@
     "targets": "all",
     "android": {
       "minSdkVersion": 26,
-      "versionCode": 1001004,
+      "versionCode": 1001005,
       "debugApplicationIdSuffix": ".debug"
     },
     "resources": [],
