@@ -62,7 +62,8 @@ VCPMobile/
 ├── src-tauri/                  # Tauri v2 + Rust 后端
 │   ├── src/
 │   │   ├── main.rs             # host 开发/测试 scaffold（非产品入口）
-│   │   ├── lib.rs              # 命令注册与启动流程
+│   │   ├── lib.rs              # 启动流程与生命周期编排
+│   │   ├── commands.rs         # IPC 命令注册表 + 防爆栈总闸（macro_rules!，在 lib.rs 展开）
 │   │   ├── vcp_modules/        # 业务逻辑（按领域组织）
 │   │   │   ├── agent/          # 智能体领域
 │   │   │   ├── chat/           # 对话领域
@@ -216,11 +217,11 @@ pnpm android:debug:dev
 
 ### 4.2 后端（Rust）
 
-- **模块边界**: 业务逻辑必须位于 `src-tauri/src/vcp_modules/`。`lib.rs` 仅作为命令路由与启动钩子挂载点。
+- **模块边界**: 业务逻辑必须位于 `src-tauri/src/vcp_modules/`。`lib.rs` 仅作为启动钩子挂载点；命令注册表独立位于 `src-tauri/src/commands.rs`（macro_rules! 形式，在 lib.rs 调用点展开——伴生宏解析约束见文件头注释）。
 - **错误处理**: Tauri command handler 中**严禁使用 `unwrap()` 或 `expect()`**。必须转换为 `Result<T, String>`（`map_err(|e| e.to_string())?`）。
 - **异步 IO**: 所有网络、文件、数据库操作必须异步，基于 `tokio`。
 - **状态共享**: 使用 Tauri `app.manage(...)` 注入单例状态。并发结构偏好 `DashMap`/`DashSet`、`tokio::sync::RwLock`、`AtomicU32`。
-- **IPC 防爆栈总闸**: 所有 app 命令经 `lib.rs` 中央 `invoke_handler` 统一 offload 到 tokio worker 线程分发（JavaBridge 线程栈仅 ~1MB，禁止在其上构造业务 future——1.1.4 Release 附件闪退的血训）；新增命令直接注册即可，**无需**评估/壳化 future 尺寸。
+- **IPC 防爆栈总闸**: 所有 app 命令经 `commands.rs` 中央 `invoke_handler` 统一 offload 到 tokio worker 线程分发（JavaBridge 线程栈仅 ~1MB，禁止在其上构造业务 future——1.1.4 Release 附件闪退的血训）；新增命令在 `commands.rs` 对应领域分组注册即可，**无需**评估/壳化 future 尺寸。
 
 ### 4.3 跨层与工程纪律
 

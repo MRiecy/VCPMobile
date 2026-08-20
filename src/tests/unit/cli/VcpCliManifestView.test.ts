@@ -6,7 +6,7 @@ import rightSidebarSource from "@/components/layout/RightSidebar.vue?raw";
 import overlaySource from "@/core/stores/overlay.ts?raw";
 import manifestViewSource from "@/features/cli/components/VcpCliManifestView.vue?raw";
 import cliManifestGoldenSource from "../../../../src-tauri/src/vcp_modules/cli/fixtures/vcp_mobile_cli_manifest.golden.json?raw";
-import tauriLibSource from "../../../../src-tauri/src/lib.rs?raw";
+import commandsSource from "../../../../src-tauri/src/commands.rs?raw";
 import {
   VCP_CLI_MANIFEST_COMMAND,
   parseCanonicalVcpCliManifest,
@@ -110,7 +110,7 @@ describe("VCP CLI canonical manifest boundary", () => {
     expect(() => parseCanonicalVcpCliManifest(manifestFixture)).toThrow(
       "无法保证复制与注册内容逐字一致",
     );
-    expect(tauriLibSource).toContain(VCP_CLI_MANIFEST_COMMAND);
+    expect(commandsSource).toContain(VCP_CLI_MANIFEST_COMMAND);
   });
 
   it("shows the manifest help on Jobs and Skills tabs instead of the tab panels", async () => {

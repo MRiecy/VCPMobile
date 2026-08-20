@@ -16,7 +16,7 @@ import featureOverlaysSource from "@/components/FeatureOverlays.vue?raw";
 import rightSidebarSource from "@/components/layout/RightSidebar.vue?raw";
 import overlaySource from "@/core/stores/overlay.ts?raw";
 import diaryStoreSource from "@/features/diary/diaryStore.ts?raw";
-import tauriLibSource from "../../../../src-tauri/src/lib.rs?raw";
+import commandsSource from "../../../../src-tauri/src/commands.rs?raw";
 import diaryRustTypesSource from "../../../../src-tauri/src/vcp_modules/diary/diary_types.rs?raw";
 import pluginPermissionsSource from "../../../../src-tauri/plugins/vcp-mobile/permissions/all.toml?raw";
 
@@ -59,7 +59,7 @@ const ERROR_CODES = [
 describe("diary cross-layer contracts", () => {
   it("keeps all regular Tauri command names aligned without Android plugin permissions", () => {
     for (const command of COMMANDS) {
-      expect(tauriLibSource).toContain(command);
+      expect(commandsSource).toContain(command);
       expect(diaryStoreSource).toContain(`"${command}"`);
       expect(pluginPermissionsSource).not.toContain(command);
     }

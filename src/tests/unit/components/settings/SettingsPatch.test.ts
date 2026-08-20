@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import backendCommands from "../../../../../src-tauri/src/lib.rs?raw";
+import backendCommands from "../../../../../src-tauri/src/commands.rs?raw";
 import settingsStoreSource from "../../../../core/stores/settings.ts?raw";
 import {
   diffSettingsPatch,

@@ -10,6 +10,7 @@ import resultSource from "../../../../src-tauri/src/vcp_modules/cli/result.rs?ra
 import runtimeSource from "../../../../src-tauri/src/vcp_modules/cli/runtime.rs?raw";
 import terminalBackendSource from "../../../../src-tauri/src/vcp_modules/cli/terminal.rs?raw";
 import tauriLibSource from "../../../../src-tauri/src/lib.rs?raw";
+import commandsSource from "../../../../src-tauri/src/commands.rs?raw";
 import settingsManagerSource from "../../../../src-tauri/src/vcp_modules/infra/settings_manager.rs?raw";
 import vcpClientSource from "../../../../src-tauri/src/vcp_modules/infra/vcp_client.rs?raw";
 import settingsStoreSource from "@/core/stores/settings.ts?raw";
@@ -44,7 +45,7 @@ describe("VCP CLI P1 cross-layer governance", () => {
       "close_vcp_mobile_cli_terminal",
     ]) {
       expect(terminalBackendSource).toContain(`pub async fn ${command}`);
-      expect(tauriLibSource).toContain(`${command},`);
+      expect(commandsSource).toContain(`${command},`);
     }
   });
 
@@ -96,8 +97,8 @@ describe("VCP CLI P1 cross-layer governance", () => {
       "pub async fn execute_vcp_mobile_cli_action",
     );
     expect(tauriLibSource).toContain("MobileCliRuntimeState::new()");
-    expect(tauriLibSource).toContain("get_vcp_mobile_cli_status,");
-    expect(tauriLibSource).toContain("execute_vcp_mobile_cli_action,");
+    expect(commandsSource).toContain("get_vcp_mobile_cli_status,");
+    expect(commandsSource).toContain("execute_vcp_mobile_cli_action,");
     for (const command of [
       "get_vcp_mobile_cli_skill_catalog",
       "inspect_vcp_mobile_cli_skill_import",
@@ -106,7 +107,7 @@ describe("VCP CLI P1 cross-layer governance", () => {
     ]) {
       expect(cliStoreSource).toContain(command);
       expect(runtimeSource).toContain(`pub async fn ${command}`);
-      expect(tauriLibSource).toContain(`${command},`);
+      expect(commandsSource).toContain(`${command},`);
     }
   });
 

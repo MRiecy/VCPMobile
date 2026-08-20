@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import updateManagerSource from '../../../../src-tauri/src/vcp_modules/updater/update_manager.rs?raw';
 import downloadSource from '../../../../src-tauri/src/vcp_modules/updater/download.rs?raw';
 import appLibSource from '../../../../src-tauri/src/lib.rs?raw';
+import commandsSource from '../../../../src-tauri/src/commands.rs?raw';
 import updateStoreSource from '../../../core/stores/update.ts?raw';
 import updateTypesSource from '../../../core/types/update.ts?raw';
 import updateDownloaderSource from '../../../core/composables/useUpdateDownloader.ts?raw';
@@ -27,7 +28,7 @@ describe('OTA update governance contracts', () => {
       'get_update_status',
       'install_update',
     ]) {
-      expect(appLibSource).toContain(command);
+      expect(commandsSource).toContain(command);
     }
     expect(appLibSource).toContain('app.manage(UpdateSession::new())');
 

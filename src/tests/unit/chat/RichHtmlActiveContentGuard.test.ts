@@ -10,7 +10,7 @@ import appSource from '@/App.vue?raw';
 import appLifecycleSource from '@/core/composables/useAppLifecycle.ts?raw';
 import viteConfigSource from '../../../../vite.config.ts?raw';
 import defaultCapability from '../../../../src-tauri/capabilities/default.json';
-import tauriLibSource from '../../../../src-tauri/src/lib.rs?raw';
+import commandsSource from '../../../../src-tauri/src/commands.rs?raw';
 import lifecycleManagerSource from '../../../../src-tauri/src/vcp_modules/infra/lifecycle_manager.rs?raw';
 import {
   clearHtmlCache,
@@ -250,7 +250,7 @@ describe('trusted-circle rich HTML active-content guard', () => {
     expect(appLifecycleSource).not.toContain('mode=floating');
     expect(viteConfigSource).not.toMatch(/floating\s*:\s*["']floating\.html["']/);
     expect(defaultCapability.windows).not.toContain('assistant');
-    expect(tauriLibSource).not.toContain('reconcile_local_server_cmd');
+    expect(commandsSource).not.toContain('reconcile_local_server_cmd');
     expect(lifecycleManagerSource).not.toContain('reconcile_local_server(&handle');
   });
 

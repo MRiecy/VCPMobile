@@ -1,3 +1,6 @@
+// 命令注册表模块：以 macro_rules! 形式提供（原因见 commands.rs 顶部文档），
+// 宏在下方 invoke_handler 调用点展开，与 mod 声明顺序无关。
+mod commands;
 mod distributed;
 mod vcp_modules;
 
@@ -5,108 +8,14 @@ const DISTRIBUTED_NETWORK_EVENT: &str = "vcp-mobile://vcp-network-status-changed
 
 use tauri::{Listener, Manager};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind};
-use vcp_modules::agent_chat_application_service::handle_agent_chat_message;
-use vcp_modules::agent_service::{
-    create_agent, delete_agent, get_agents, get_assistants_snapshot, read_agent_config,
-    save_agent_config, update_agent_config,
-};
-use vcp_modules::avatar_service::{
-    batch_get_avatars, get_avatar, save_avatar_data, store_dominant_color,
-};
-use vcp_modules::chat_manager::{
-    append_single_message, delete_messages, load_chat_history, load_chat_history_around,
-    load_chat_history_streamed, patch_single_message, truncate_history_after_timestamp,
-};
-use vcp_modules::cli::{
-    close_vcp_mobile_cli_terminal, commit_vcp_mobile_cli_skill_import,
-    discard_vcp_mobile_cli_skill_import, execute_vcp_mobile_cli_action,
-    get_vcp_mobile_cli_manifest, get_vcp_mobile_cli_skill_catalog, get_vcp_mobile_cli_status,
-    inspect_vcp_mobile_cli_skill_import, open_vcp_mobile_cli_terminal,
-    read_vcp_mobile_cli_terminal, resize_vcp_mobile_cli_terminal, write_vcp_mobile_cli_terminal,
-    MobileCliRuntimeState,
-};
-use vcp_modules::context_injection::{
-    delete_tarven_rule, get_tarven_rules, preview_tarven_injection, reorder_rules,
-    save_tarven_rule, toggle_rule_enabled,
-};
+// 命令 handler 的导入全部位于 commands.rs；此处仅保留启动编排所需的状态与函数。
+use vcp_modules::cli::MobileCliRuntimeState;
 use vcp_modules::context_sanitizer::ContextSanitizer;
-use vcp_modules::db_manager::{get_fts_index_status, rebuild_messages_fts, search_messages_fts};
-use vcp_modules::diary::{
-    diary_cancel_search, diary_cancel_semantic_search, diary_create_note,
-    diary_delete_empty_folder, diary_delete_notes, diary_get_note, diary_list_folders,
-    diary_list_notes, diary_move_notes, diary_rename_note, diary_save_note, diary_search,
-    diary_semantic_search, DiaryServiceState,
-};
-use vcp_modules::emoticon_manager::{
-    fix_emoticon_url, get_emoticon_library, regenerate_emoticon_library,
-};
-use vcp_modules::file_manager::{
-    check_attachment_support, get_attachment_real_path, open_file, register_local_file, store_file,
-};
-use vcp_modules::group_chat_application_service::{
-    handle_group_chat_message, invite_group_member_to_speak,
-};
-use vcp_modules::group_service::{
-    create_group, delete_group, get_groups, read_group_config, save_group_config,
-    update_group_config,
-};
-use vcp_modules::high_speed_channel::prepare_vcp_upload;
-use vcp_modules::lifecycle_manager::{
-    bootstrap, get_core_status, get_last_error, get_system_snapshot,
-    reconcile_distributed_node_cmd, restart_or_exit_app, set_app_foreground_state, LifecycleState,
-};
-use vcp_modules::maintenance_manager::{
-    cleanup_orphaned_attachments, cleanup_single_orphaned_attachment, clear_webview_cache,
-    init_automatic_maintenance, reconstruct_system_cache,
-};
-use vcp_modules::message_repository::{process_message_content, rebuild_all_pre_renders};
-use vcp_modules::message_service::delete_message_attachment;
-use vcp_modules::message_service::{fetch_raw_message_content, re_render_message};
-use vcp_modules::model_manager::{
-    get_cached_models, get_favorite_models, get_hot_models, record_model_usage, refresh_models,
-    start_batch_model_test, stop_all_model_tests, test_model_connectivity, toggle_favorite_model,
-};
-use vcp_modules::settings_manager::{
-    get_settings_recovery_status, read_settings, set_theme, update_settings,
-};
-
-use vcp_modules::agentmgr::{agentmgr_get_config, agentmgr_list_models, agentmgr_save_config};
-use vcp_modules::forum::{
-    forum_create_post, forum_delete, forum_get_post, forum_list_posts, forum_reply,
-};
-use vcp_modules::logcenter::{logcenter_clear_server, logcenter_fetch};
-use vcp_modules::mail::{
-    mail_attachment, mail_folders, mail_list, mail_mark, mail_move, mail_read, mail_reply,
-    mail_search, mail_send, mail_state, mail_trash,
-};
-use vcp_modules::sync_service::{
-    clear_old_sync_logs, get_sync_session_log_path, get_sync_status, list_sync_log_files,
-    read_sync_log_file, start_manual_sync, stop_sync,
-};
-use vcp_modules::taskcenter::{
-    delegation_cancel, delegation_list, task_agent_list, task_create, task_delete, task_get_config,
-    task_get_status, task_set_enabled, task_set_global_enabled, task_trigger, task_update,
-};
-use vcp_modules::topic_service::{
-    create_topic, delete_topic, get_topics, get_topics_streamed, get_unread_counts,
-    regenerate_topic_response, set_topic_unread, summarize_topic, toggle_topic_lock,
-    update_topic_title,
-};
-use vcp_modules::update_manager::{
-    cancel_update_download, check_for_update, get_update_status, install_update,
-    start_update_download, UpdateSession,
-};
-use vcp_modules::vcp_client::{
-    get_active_generations, interruptGroupTurn, interruptRequest, recover_active_generation,
-    sendToVCP, test_vcp_connection, ActiveRequests, CancelledGroupTurns,
-};
-use vcp_modules::vcp_info_service::{
-    clear_vcp_info, get_vcp_info_connection_status, get_vcp_info_metadata_list,
-    get_vcp_info_payload, init_vcp_info_connection,
-};
-use vcp_modules::vcp_log_service::{
-    init_vcp_log_connection, send_vcp_log_message, set_vcp_log_heartbeat,
-};
+use vcp_modules::diary::DiaryServiceState;
+use vcp_modules::lifecycle_manager::{bootstrap, LifecycleState};
+use vcp_modules::maintenance_manager::init_automatic_maintenance;
+use vcp_modules::update_manager::UpdateSession;
+use vcp_modules::vcp_client::{ActiveRequests, CancelledGroupTurns};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -245,227 +154,9 @@ pub fn run() {
         )
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_vcp_mobile::init())
-        // ──────────────────────────────────────────────────────────────────
-        // IPC 防爆栈总闸（治理 1.1.4 Release「输入附件必闪退」的同类隐患）
-        //
-        // 机制背景：Android 上 Tauri 的 IPC 在 WebView 的 JavaBridge 线程
-        // （ART HandlerThread，栈仅 ~1MB）上【同步】完成命令分发——匹配命令名、
-        // 反序列化参数、【按值构造】命令 future、再把 future【按值】移交
-        // tokio::spawn。而 async 命令的 future 类型尺寸 = 各 await 点存活变量
-        // 总和的最大值（编译期固定），业务一复杂就会胖到几十~几百 KB；Release
-        // 的 LTO + codegen-units=1 又会把按值搬运链摊平成巨型单栈帧（实测
-        // 266KB 的 future 放大出 ~1.15MB 一帧）。栈探测踩穿 guard page →
-        // SIGSEGV。这不是 panic，Result/catch_unwind 都拦不住，进程直接被
-        // 内核杀死；且 Debug 构建因布局不同往往不发作，极具隐蔽性。
-        //
-        // 治理方式：JavaBridge 线程上从此只做一件事——把 Invoke【整体】spawn
-        // 到 tokio worker 线程（栈 2MB）；命令分发、参数反序列化、future 构造
-        // 全部在 worker 上发生。单条命令的 future 尺寸从此与栈安全彻底解耦，
-        // 新增命令无需再人肉评估「这条命令的 future 会不会太胖」。
-        //
-        // 不受影响的路径（tauri 在 webview on_message 里前置分流，不经本闭包）：
-        //   - `plugin:*` 命令（插件命令 future 实测 ≤15.5KB，本就安全）；
-        //   - Channel 流式通道（聊天 SSE 等）、ACL 检查、invoke key 校验。
-        //
-        // 语义说明：
-        //   - 命令体原本就在 worker 上执行（respond_async 内部即 spawn），此处
-        //     仅把「构造 future」这半步一并挪走，行为与响应通道完全不变；
-        //   - 每次 invoke 多一次 spawn 调度（微秒级），无热路径影响；
-        //   - 未知命令在 worker 上补发 not found 拒绝，与原生行为一致。
-        // ──────────────────────────────────────────────────────────────────
-        .invoke_handler({
-            // 显式钉住 Wry 运行时类型：generate_handler! 脱离 invoke_handler 的
-            // 直接上下文后无法自行推断 R。
-            let app_commands: std::sync::Arc<tauri::ipc::InvokeHandler<tauri::Wry>> =
-                std::sync::Arc::new(tauri::generate_handler![
-            sendToVCP,
-            get_active_generations,
-            recover_active_generation,
-            get_tarven_rules,
-            save_tarven_rule,
-            delete_tarven_rule,
-            toggle_rule_enabled,
-            reorder_rules,
-            preview_tarven_injection,
-            interruptRequest,
-            interruptGroupTurn,
-            test_vcp_connection,
-            handle_agent_chat_message,
-            load_chat_history,
-            load_chat_history_around,
-            load_chat_history_streamed,
-            append_single_message,
-            patch_single_message,
-            delete_messages,
-            delete_message_attachment,
-            search_messages_fts,
-            get_fts_index_status,
-            rebuild_messages_fts,
-            truncate_history_after_timestamp,
-            process_message_content,
-            rebuild_all_pre_renders,
-            get_topics,
-            get_topics_streamed,
-            get_unread_counts,
-            get_groups,
-            read_group_config,
-            create_topic,
-            delete_topic,
-            update_topic_title,
-            toggle_topic_lock,
-            set_topic_unread,
-            regenerate_topic_response,
-            get_agents,
-            get_assistants_snapshot,
-            read_agent_config,
-            save_agent_config,
-            update_agent_config,
-            save_avatar_data,
-            get_avatar,
-            batch_get_avatars,
-            store_dominant_color,
-            read_settings,
-            get_vcp_mobile_cli_manifest,
-            get_vcp_mobile_cli_status,
-            execute_vcp_mobile_cli_action,
-            get_vcp_mobile_cli_skill_catalog,
-            inspect_vcp_mobile_cli_skill_import,
-            commit_vcp_mobile_cli_skill_import,
-            discard_vcp_mobile_cli_skill_import,
-            open_vcp_mobile_cli_terminal,
-            read_vcp_mobile_cli_terminal,
-            write_vcp_mobile_cli_terminal,
-            resize_vcp_mobile_cli_terminal,
-            close_vcp_mobile_cli_terminal,
-            get_settings_recovery_status,
-            update_settings,
-            diary_list_folders,
-            diary_list_notes,
-            diary_get_note,
-            diary_search,
-            diary_cancel_search,
-            diary_semantic_search,
-            diary_cancel_semantic_search,
-            diary_save_note,
-            diary_rename_note,
-            diary_create_note,
-            diary_move_notes,
-            diary_delete_notes,
-            diary_delete_empty_folder,
-            logcenter_fetch,
-            logcenter_clear_server,
-            task_get_config,
-            task_get_status,
-            task_trigger,
-            task_set_enabled,
-            task_set_global_enabled,
-            task_create,
-            task_update,
-            task_delete,
-            task_agent_list,
-            delegation_list,
-            delegation_cancel,
-            agentmgr_get_config,
-            agentmgr_save_config,
-            agentmgr_list_models,
-            forum_list_posts,
-            forum_get_post,
-            forum_reply,
-            forum_create_post,
-            forum_delete,
-            mail_state,
-            mail_list,
-            mail_read,
-            mail_trash,
-            mail_send,
-            mail_reply,
-            mail_folders,
-            mail_mark,
-            mail_move,
-            mail_search,
-            mail_attachment,
-            handle_group_chat_message,
-            invite_group_member_to_speak,
-            create_agent,
-            create_group,
-            save_group_config,
-            update_group_config,
-            delete_group,
-            delete_agent,
-            set_theme,
-            store_file,
-            check_attachment_support,
-            register_local_file,
-            prepare_vcp_upload,
-            fetch_raw_message_content,
-            re_render_message,
-            get_attachment_real_path,
-            open_file,
-            clear_webview_cache,
-            reconstruct_system_cache,
-            cleanup_orphaned_attachments,
-            cleanup_single_orphaned_attachment,
-            get_cached_models,
-            refresh_models,
-            get_hot_models,
-            get_favorite_models,
-            toggle_favorite_model,
-            record_model_usage,
-            test_model_connectivity,
-            start_batch_model_test,
-            stop_all_model_tests,
-            summarize_topic,
-            init_vcp_log_connection,
-            send_vcp_log_message,
-            set_vcp_log_heartbeat,
-            set_app_foreground_state,
-            init_vcp_info_connection,
-            get_vcp_info_connection_status,
-            get_vcp_info_metadata_list,
-            get_vcp_info_payload,
-            clear_vcp_info,
-            get_system_snapshot,
-            get_emoticon_library,
-            regenerate_emoticon_library,
-            fix_emoticon_url,
-            get_core_status,
-            get_last_error,
-            get_sync_status,
-            start_manual_sync,
-            stop_sync,
-            get_sync_session_log_path,
-            list_sync_log_files,
-            read_sync_log_file,
-            clear_old_sync_logs,
-            reconcile_distributed_node_cmd,
-            distributed::get_distributed_status,
-            distributed::get_registered_tools_metadata,
-            distributed::get_distributed_tool_config_status,
-            distributed::update_enabled_tools,
-            distributed::reset_distributed_tools_disabled,
-            distributed::execute_distributed_tool,
-            distributed::reconnect_distributed_client,
-            check_for_update,
-            start_update_download,
-            cancel_update_download,
-            get_update_status,
-            install_update,
-            tauri_plugin_vcp_mobile::stream::set_keepalive_mode,
-            restart_or_exit_app,
-            ]);
-            // 壳闭包本体：极薄，任何命令的胖瘦都不再经过 JavaBridge 的栈。
-            move |invoke| {
-                let commands = std::sync::Arc::clone(&app_commands);
-                tauri::async_runtime::spawn(async move {
-                    let cmd = invoke.message.command().to_string();
-                    let resolver = invoke.resolver.clone();
-                    if !commands(invoke) {
-                        resolver.reject(format!("Command {cmd} not found"));
-                    }
-                });
-                true
-            }
-        })
+        // 命令注册表与「IPC 防爆栈总闸」均已收口至 commands.rs（含完整机制注释）；
+        // 此处仅挂载。新增命令请直接编辑 commands.rs 的注册清单。
+        .invoke_handler(commands::app_command_handler!())
         .build(context)
         .expect("error while building tauri application");
 
@@ -510,15 +201,12 @@ mod contract_tests {
 
     #[test]
     fn distributed_tool_authorization_command_uses_enabled_allowlist() {
-        let lib_source = include_str!("lib.rs");
+        // 命令注册表位于 commands.rs（lib.rs 仅保留启动编排）。
+        let commands_source = include_str!("commands.rs");
         let distributed_source = include_str!("distributed/mod.rs");
-        let production_lib_source = lib_source
-            .split("#[cfg(test)]")
-            .next()
-            .expect("production lib source");
 
-        assert!(production_lib_source.contains("distributed::update_enabled_tools,"));
-        assert!(!production_lib_source.contains("distributed::update_disabled_tools,"));
+        assert!(commands_source.contains("distributed::update_enabled_tools,"));
+        assert!(!commands_source.contains("distributed::update_disabled_tools,"));
         assert!(distributed_source.contains("enabled_names: Vec<String>"));
         assert!(!distributed_source.contains("disabled_names: Vec<String>"));
     }
