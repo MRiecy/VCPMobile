@@ -230,14 +230,6 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             "电脑端未在规定时间内返回话题校验结果",
             "确认电脑端数据服务正常，然后重新同步。",
         ),
-        "PHASE3_RESPONSE_TIMEOUT" => definition(
-            Category::Connection,
-            Origin::MobileSync,
-            Stage::Messages,
-            Retry::Manual,
-            "电脑端未在规定时间内返回消息同步结果",
-            "确认电脑端数据服务正常，然后重新同步。",
-        ),
         "FINAL_ACK_TIMEOUT" => definition(
             Category::Connection,
             Origin::MobileSync,
@@ -246,16 +238,19 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             "电脑端未确认同步收尾，系统未将本次任务标记为成功",
             "确认电脑端服务正常，然后重新同步。",
         ),
-        "NETWORK_TIMEOUT"
-        | "NETWORK_UNREACHABLE"
-        | "CONNECTION_REFUSED"
-        | "WS_CLOSED"
+        "CONNECTION_REFUSED" => definition(
+            Category::Connection,
+            Origin::MobileSync,
+            Stage::Connect,
+            Retry::Manual,
+            "端口未开放：可能是没启动服务插件或正在构建索引",
+            "请稍后重新同步。",
+        ),
+        "WS_CLOSED"
         | "WS_DISCONNECTED"
         | "WS_RECEIVE_FAILED"
         | "WS_SEND_FAILED"
-        | "WS_UPGRADE_FAILED"
-        | "HTTP_HANDSHAKE_REJECTED"
-        | "HTTP_PROBE_ERROR" => definition(
+        | "HTTP_HANDSHAKE_REJECTED" => definition(
             Category::Connection,
             Origin::MobileSync,
             Stage::Connect,
@@ -852,7 +847,7 @@ mod tests {
         let bytes = include_bytes!("fixtures/error_contract_1_2_golden.json");
         assert_eq!(
             format!("{:x}", sha2::Sha256::digest(bytes)),
-            "434279b33a86a2206c1e4f47caccb4e72f05b2f9d48e093af95d5ebae6947adb"
+            "b97f753848da12cf4b44016bd2defe8eacc317ee3c2cbdb6b0db656c37d9c766"
         );
         let fixture: Value = serde_json::from_slice(bytes).expect("golden error fixture");
         assert_eq!(fixture["wireProtocol"], "1.2");
@@ -963,7 +958,6 @@ mod tests {
                 "TOPIC_HASH_RESPONSE_TIMEOUT",
                 SyncErrorStage::TopicValidation,
             ),
-            ("PHASE3_RESPONSE_TIMEOUT", SyncErrorStage::Messages),
             ("FINAL_ACK_TIMEOUT", SyncErrorStage::Finalize),
         ];
 
@@ -972,6 +966,16 @@ mod tests {
             assert_eq!(payload.category, SyncErrorCategory::Connection);
             assert_eq!(payload.stage, stage, "stage for {code}");
         }
+    }
+
+    #[test]
+    fn unavailable_sync_port_has_one_exact_user_message() {
+        let payload = build_local_error_payload("CONNECTION_REFUSED", Vec::new(), None);
+        assert_eq!(
+            payload.message,
+            "端口未开放：可能是没启动服务插件或正在构建索引"
+        );
+        assert_eq!(payload.guidance, "请稍后重新同步。");
     }
 
     #[test]
