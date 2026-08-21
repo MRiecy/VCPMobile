@@ -107,7 +107,7 @@ impl HashAggregator {
         agent_id: &str,
     ) -> Result<String, String> {
         let topic_rows = sqlx::query(
-            "SELECT config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'agent' AND deleted_at IS NULL ORDER BY topic_id ASC",
+            "SELECT config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'agent' AND topic_id <> 'default' AND deleted_at IS NULL ORDER BY topic_id ASC",
         )
         .bind(agent_id)
         .fetch_all(&mut **tx)
@@ -133,7 +133,7 @@ impl HashAggregator {
         group_id: &str,
     ) -> Result<String, String> {
         let topic_rows = sqlx::query(
-            "SELECT config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'group' AND deleted_at IS NULL ORDER BY topic_id ASC",
+            "SELECT config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'group' AND topic_id <> 'default' AND deleted_at IS NULL ORDER BY topic_id ASC",
         )
         .bind(group_id)
         .fetch_all(&mut **tx)
@@ -748,6 +748,75 @@ mod tests {
             HashAggregator::compute_group_topic_metadata_hash(&group_topic),
             HashAggregator::compute_group_topic_metadata_hash(&same_metadata_other_owner)
         );
+    }
+
+    async fn compute_owner_root(tx: &mut Transaction<'_, Sqlite>, owner_type: &str) -> String {
+        if owner_type == "agent" {
+            HashAggregator::compute_agent_root_hash(tx, "owner")
+                .await
+                .expect("compute agent root")
+        } else {
+            HashAggregator::compute_group_root_hash(tx, "owner")
+                .await
+                .expect("compute group root")
+        }
+    }
+
+    async fn assert_owner_root_excludes_default(owner_type: &str) {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open owner root database");
+        sqlx::query(
+            "CREATE TABLE topics (
+                topic_id TEXT PRIMARY KEY, owner_id TEXT, owner_type TEXT,
+                config_hash TEXT, content_hash TEXT, deleted_at INTEGER
+             );
+             INSERT INTO topics VALUES
+                ('default', 'owner', ?, 'default-config', 'default-content', NULL);",
+        )
+        .bind(owner_type)
+        .execute(&pool)
+        .await
+        .expect("create owner root fixture");
+        let mut tx = pool.begin().await.expect("begin owner root transaction");
+
+        let root_with_only_default = compute_owner_root(&mut tx, owner_type).await;
+        assert_eq!(root_with_only_default, "");
+
+        sqlx::query(
+            "INSERT INTO topics VALUES ('topic-a', 'owner', ?, 'config-a', 'content-a', NULL)",
+        )
+        .bind(owner_type)
+        .execute(&mut *tx)
+        .await
+        .expect("insert ordinary topic");
+        let ordinary_root = compute_owner_root(&mut tx, owner_type).await;
+        assert_eq!(
+            ordinary_root,
+            compute_merkle_root(vec!["config-a".into(), "content-a".into()])
+        );
+
+        sqlx::query("UPDATE topics SET config_hash = 'changed-default' WHERE topic_id = 'default'")
+            .execute(&mut *tx)
+            .await
+            .expect("change default topic");
+        let root_after_default_change = compute_owner_root(&mut tx, owner_type).await;
+        assert_eq!(root_after_default_change, ordinary_root);
+
+        sqlx::query("UPDATE topics SET content_hash = 'content-b' WHERE topic_id = 'topic-a'")
+            .execute(&mut *tx)
+            .await
+            .expect("change ordinary topic");
+        let root_after_ordinary_change = compute_owner_root(&mut tx, owner_type).await;
+        assert_ne!(root_after_ordinary_change, ordinary_root);
+    }
+
+    #[tokio::test]
+    async fn owner_root_hashes_exclude_default_topics() {
+        assert_owner_root_excludes_default("agent").await;
+        assert_owner_root_excludes_default("group").await;
     }
 
     #[tokio::test]
