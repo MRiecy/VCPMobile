@@ -795,7 +795,7 @@ mod tests {
         let ordinary_root = compute_owner_root(&mut tx, owner_type).await;
         assert_eq!(
             ordinary_root,
-            compute_merkle_root(vec!["config-a".into(), "content-a".into()])
+            "1e33dc5103370a9970e5c719697e29dcc8bff3a3196de13fcbaaf1029c0436c4"
         );
 
         sqlx::query("UPDATE topics SET config_hash = 'changed-default' WHERE topic_id = 'default'")

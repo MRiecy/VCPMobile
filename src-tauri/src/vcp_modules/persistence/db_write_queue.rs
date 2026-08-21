@@ -61,7 +61,6 @@ mod tests {
     use crate::vcp_modules::sync_dto::{
         AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
     };
-    use crate::vcp_modules::sync_types::compute_merkle_root;
 
     #[test]
     fn flush_error_summary_is_reported_once() {
@@ -134,7 +133,7 @@ mod tests {
         let ordinary_root = read_root(&tx).expect("read ordinary root");
         assert_eq!(
             ordinary_root,
-            compute_merkle_root(vec!["config-a".into(), "content-a".into()])
+            "1e33dc5103370a9970e5c719697e29dcc8bff3a3196de13fcbaaf1029c0436c4"
         );
 
         tx.execute(
