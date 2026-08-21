@@ -590,6 +590,8 @@ pub enum SyncCommand {
         data_type: SyncDataType,
         id: String,
         deleted_at: i64,
+        owner_type: Option<String>,
+        owner_id: Option<String>,
     },
     NotifyMessageDelete {
         topic_id: String,
@@ -2157,13 +2159,25 @@ async fn run_sync_session(
                                         }
                                     }
                                 },
-                                SyncCommand::NotifyDelete { data_type, id, deleted_at } => {
-                                    let msg = json!({
+                                SyncCommand::NotifyDelete {
+                                    data_type,
+                                    id,
+                                    deleted_at,
+                                    owner_type,
+                                    owner_id,
+                                } => {
+                                    let mut msg = json!({
                                         "type": "SYNC_ENTITY_DELETE",
                                         "id": id,
                                         "dataType": data_type,
                                         "deletedAt": deleted_at,
                                     });
+                                    if let Some(owner_type) = owner_type {
+                                        msg["ownerType"] = Value::String(owner_type);
+                                    }
+                                    if let Some(owner_id) = owner_id {
+                                        msg["ownerId"] = Value::String(owner_id);
+                                    }
                                     if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(msg.to_string().into())).await {
                                         terminate_after_protocol_send_failure(
                                             &handle_clone,

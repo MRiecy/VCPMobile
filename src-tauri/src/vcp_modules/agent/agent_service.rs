@@ -490,6 +490,8 @@ pub async fn delete_agent(
             data_type: SyncDataType::Agent,
             id: agent_id,
             deleted_at,
+            owner_type: None,
+            owner_id: None,
         });
     }
 

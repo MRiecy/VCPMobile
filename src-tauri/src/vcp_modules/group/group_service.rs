@@ -597,6 +597,8 @@ pub async fn delete_group(
             data_type: SyncDataType::Group,
             id: group_id,
             deleted_at,
+            owner_type: None,
+            owner_id: None,
         });
     }
 

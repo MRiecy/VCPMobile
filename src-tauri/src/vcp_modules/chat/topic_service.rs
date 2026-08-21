@@ -291,6 +291,8 @@ pub async fn delete_topic(
             data_type: SyncDataType::Topic,
             id: topic_id.clone(),
             deleted_at: now,
+            owner_type: Some(stored_owner_type),
+            owner_id: Some(stored_owner_id),
         });
     }
 

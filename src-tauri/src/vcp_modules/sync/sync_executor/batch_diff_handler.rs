@@ -3,7 +3,7 @@ use crate::vcp_modules::sync_error::{
     encode_wire_sync_error, parse_wire_sync_error, WireSyncError,
 };
 use crate::vcp_modules::sync_executor::{
-    BatchPullResult, PullExecutor, PullProgressContext, PushExecutor,
+    BatchPullResult, DeleteExecutor, PullExecutor, PullProgressContext, PushExecutor,
 };
 use crate::vcp_modules::sync_logger::SyncLogger;
 use crate::vcp_modules::sync_service::{Phase3Tracker, SyncCommand};
@@ -20,7 +20,9 @@ use tokio::sync::mpsc;
 pub struct BatchDiffHandler;
 
 const MAX_PHASE3_TOPICS: usize = 10_000;
+const MAX_PHASE3_MESSAGES_PER_TOPIC: usize = 10_000;
 const MAX_PHASE3_MESSAGES: usize = 100_000;
+const MAX_SAFE_JSON_INTEGER: i64 = (1_i64 << 53) - 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Phase3ProtocolError {
@@ -149,6 +151,13 @@ struct TopicBatchOutcome {
 struct TopicDecision {
     to_pull: Vec<String>,
     to_push: bool,
+    to_delete: Vec<MessageDeleteDecision>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct MessageDeleteDecision {
+    message_id: String,
+    deleted_at: i64,
 }
 
 fn parse_topic_decision(
@@ -170,10 +179,13 @@ fn parse_topic_decision(
         )
     })?;
     if !ok {
-        if object.contains_key("toPull") || object.contains_key("toPush") {
+        if object.contains_key("toPull")
+            || object.contains_key("toPush")
+            || object.contains_key("toDelete")
+        {
             return Err(Phase3ProtocolError::for_topic(
                 "PHASE3_DECISION_INVALID",
-                format!("Phase 3 rejection for {topic_id} must not contain toPull/toPush"),
+                format!("Phase 3 rejection for {topic_id} must not contain toPull/toPush/toDelete"),
                 topic_id,
             ));
         }
@@ -212,10 +224,12 @@ fn parse_topic_decision(
                 topic_id,
             )
         })?;
-    if to_pull_values.len() > MAX_PHASE3_TOPICS {
+    if to_pull_values.len() > MAX_PHASE3_MESSAGES_PER_TOPIC {
         return Err(Phase3ProtocolError::for_topic(
             "PHASE3_DECISION_BUDGET_EXCEEDED",
-            format!("Phase 3 toPull for {topic_id} exceeds {MAX_PHASE3_TOPICS} message budget"),
+            format!(
+                "Phase 3 toPull for {topic_id} exceeds {MAX_PHASE3_MESSAGES_PER_TOPIC} message budget"
+            ),
             topic_id,
         ));
     }
@@ -248,7 +262,86 @@ fn parse_topic_decision(
                 topic_id,
             )
         })?;
-    Ok(TopicDecision { to_pull, to_push })
+    let to_delete_values = object
+        .get("toDelete")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            Phase3ProtocolError::for_topic(
+                "PHASE3_DECISION_INVALID",
+                format!("Phase 3 decision for {topic_id} requires array toDelete"),
+                topic_id,
+            )
+        })
+        .map(Vec::as_slice)?;
+    if to_delete_values.len() > MAX_PHASE3_MESSAGES_PER_TOPIC {
+        return Err(Phase3ProtocolError::for_topic(
+            "PHASE3_DECISION_BUDGET_EXCEEDED",
+            format!(
+                "Phase 3 toDelete for {topic_id} exceeds {MAX_PHASE3_MESSAGES_PER_TOPIC} message budget"
+            ),
+            topic_id,
+        ));
+    }
+    let mut seen_deleted = HashSet::new();
+    let mut to_delete = Vec::with_capacity(to_delete_values.len());
+    for value in to_delete_values {
+        let item = value.as_object().ok_or_else(|| {
+            Phase3ProtocolError::for_topic(
+                "PHASE3_DECISION_INVALID",
+                format!("Phase 3 toDelete for {topic_id} contains a non-object item"),
+                topic_id,
+            )
+        })?;
+        let message_id = item
+            .get("msgId")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                Phase3ProtocolError::for_topic(
+                    "PHASE3_DECISION_INVALID",
+                    format!("Phase 3 toDelete for {topic_id} requires non-empty msgId"),
+                    topic_id,
+                )
+            })?;
+        let deleted_at = item
+            .get("deletedAt")
+            .and_then(Value::as_i64)
+            .filter(|timestamp| (0..=MAX_SAFE_JSON_INTEGER).contains(timestamp))
+            .ok_or_else(|| {
+                Phase3ProtocolError::for_topic(
+                    "PHASE3_DECISION_INVALID",
+                    format!(
+                        "Phase 3 toDelete for {topic_id} requires a non-negative safe-integer deletedAt"
+                    ),
+                    topic_id,
+                )
+            })?;
+        if seen.contains(message_id) {
+            return Err(Phase3ProtocolError::for_topic(
+                "PHASE3_DECISION_INVALID",
+                format!(
+                    "Phase 3 decision for {topic_id} contains {message_id} in both toPull and toDelete"
+                ),
+                topic_id,
+            ));
+        }
+        if !seen_deleted.insert(message_id) {
+            return Err(Phase3ProtocolError::for_topic(
+                "PHASE3_DECISION_INVALID",
+                format!("Phase 3 toDelete for {topic_id} contains duplicate id {message_id}"),
+                topic_id,
+            ));
+        }
+        to_delete.push(MessageDeleteDecision {
+            message_id: message_id.to_string(),
+            deleted_at,
+        });
+    }
+    Ok(TopicDecision {
+        to_pull,
+        to_push,
+        to_delete,
+    })
 }
 
 fn validate_topic_batch_outcomes(
@@ -377,29 +470,32 @@ impl BatchDiffHandler {
         }
 
         {
-            // 分类 topics: push_only, push_pull, pull_only
+            // 分类 topics: push、pull、delete 可以在同一个 topic 上组合出现。
             let mut push_topic_ids: Vec<String> = Vec::new();
             let mut pull_batch: Vec<(String, Vec<String>)> = Vec::new();
-            let mut total_pull_messages = 0usize;
+            let mut delete_batch: Vec<(String, Vec<MessageDeleteDecision>)> = Vec::new();
+            let mut total_message_operations = 0usize;
 
             for (topic_id, result) in results {
                 let decision = parse_topic_decision(topic_id, result)?;
                 let to_pull_ids = decision.to_pull;
                 let to_push = decision.to_push;
-                total_pull_messages = total_pull_messages
+                let to_delete = decision.to_delete;
+                total_message_operations = total_message_operations
                     .checked_add(to_pull_ids.len())
+                    .and_then(|total| total.checked_add(to_delete.len()))
                     .ok_or_else(|| {
                         Phase3ProtocolError::for_topic(
                             "PHASE3_DECISION_BUDGET_EXCEEDED",
-                            "Phase 3 toPull message count overflow",
+                            "Phase 3 message operation count overflow",
                             topic_id,
                         )
                     })?;
-                if total_pull_messages > MAX_PHASE3_MESSAGES {
+                if total_message_operations > MAX_PHASE3_MESSAGES {
                     return Err(Phase3ProtocolError::for_topic(
                         "PHASE3_DECISION_BUDGET_EXCEEDED",
                         format!(
-                            "Phase 3 response exceeds {MAX_PHASE3_MESSAGES} toPull message budget"
+                            "Phase 3 response exceeds {MAX_PHASE3_MESSAGES} message operation budget"
                         ),
                         topic_id,
                     ));
@@ -409,7 +505,7 @@ impl BatchDiffHandler {
                 // no-op，也必须进入 finalizer 的 hash-repair 集。
                 tracker.mark_modified(topic_id).await;
 
-                if !to_push && to_pull_ids.is_empty() {
+                if !to_push && to_pull_ids.is_empty() && to_delete.is_empty() {
                     // 无需操作，直接标记完成
                     tracker
                         .mark_completed(topic_id, logger, tx_internal, app_handle, true)
@@ -423,12 +519,16 @@ impl BatchDiffHandler {
                 if !to_pull_ids.is_empty() {
                     pull_batch.push((topic_id.clone(), to_pull_ids));
                 }
+                if !to_delete.is_empty() {
+                    delete_batch.push((topic_id.clone(), to_delete));
+                }
             }
 
             let has_push = !push_topic_ids.is_empty();
             let has_pull = !pull_batch.is_empty();
+            let has_delete = !delete_batch.is_empty();
 
-            if has_push || has_pull {
+            if has_push || has_pull || has_delete {
                 // 收集所有涉及的 topic ID（去重）
                 let mut all_topic_ids: HashSet<String> = HashSet::new();
                 for tid in &push_topic_ids {
@@ -436,6 +536,34 @@ impl BatchDiffHandler {
                 }
                 for (tid, _) in &pull_batch {
                     all_topic_ids.insert(tid.clone());
+                }
+                for (tid, _) in &delete_batch {
+                    all_topic_ids.insert(tid.clone());
+                }
+
+                // 桌面墓碑先落到本地，避免同批次 push 把已经删除的 live 消息复活。
+                for (topic_id, tombstones) in &delete_batch {
+                    for tombstone in tombstones {
+                        if let Err(error) = DeleteExecutor::soft_delete_message(
+                            app_handle,
+                            topic_id,
+                            &tombstone.message_id,
+                            tombstone.deleted_at,
+                        )
+                        .await
+                        {
+                            tracker.mark_failed(topic_id).await;
+                            return Err(Phase3ProtocolError::for_topic(
+                                "SYNC_DELETE_FAILED",
+                                format!(
+                                    "Failed to apply desktop message tombstone {} for {topic_id}: {error}",
+                                    tombstone.message_id
+                                ),
+                                topic_id,
+                            ));
+                        }
+                    }
+                    tracker.mark_modified(topic_id).await;
                 }
 
                 // At most one Phase 3 HTTP batch may be in flight. The WebSocket owner awaits
@@ -553,9 +681,13 @@ impl BatchDiffHandler {
                         .await;
                 }
                 log::info!(
-                    "[SyncService] Phase 3 batch done: push={} pull={}",
+                    "[SyncService] Phase 3 batch done: push={} pull={} delete={}",
                     push_topic_ids.len(),
-                    pull_batch.len()
+                    pull_batch.len(),
+                    delete_batch
+                        .iter()
+                        .map(|(_, tombstones)| tombstones.len())
+                        .sum::<usize>()
                 );
             }
 
@@ -619,23 +751,54 @@ mod tests {
         assert_eq!(
             parse_topic_decision(
                 "topic-a",
-                &json!({ "ok": true, "toPull": ["message-a"], "toPush": false })
+                &json!({
+                    "ok": true,
+                    "toPull": ["message-a"],
+                    "toPush": false,
+                    "toDelete": []
+                })
             )
             .expect("valid decision"),
             TopicDecision {
                 to_pull: vec!["message-a".to_string()],
                 to_push: false,
+                to_delete: Vec::new(),
             }
+        );
+        assert_eq!(
+            parse_topic_decision(
+                "topic-a",
+                &json!({
+                    "ok": true,
+                    "toPull": [],
+                    "toPush": false,
+                    "toDelete": [{ "msgId": "message-b", "deletedAt": 1234 }]
+                })
+            )
+            .expect("valid delete decision")
+            .to_delete,
+            vec![MessageDeleteDecision {
+                message_id: "message-b".to_string(),
+                deleted_at: 1234,
+            }]
         );
 
         for invalid in [
             json!({ "toPull": [], "toPush": false }),
             json!({ "ok": true, "toPull": "message-a", "toPush": false }),
             json!({ "ok": true, "toPull": [], "toPush": "false" }),
+            json!({ "ok": true, "toPull": [], "toPush": false }),
             json!({ "ok": true, "toPull": ["message-a", "message-a"], "toPush": false }),
+            json!({ "ok": true, "toPull": [], "toPush": false, "toDelete": "message-a" }),
+            json!({ "ok": true, "toPull": [], "toPush": false, "toDelete": [{ "msgId": "", "deletedAt": 1 }] }),
+            json!({ "ok": true, "toPull": [], "toPush": false, "toDelete": [{ "msgId": "message-a", "deletedAt": -1 }] }),
+            json!({ "ok": true, "toPull": [], "toPush": false, "toDelete": [{ "msgId": "message-a", "deletedAt": MAX_SAFE_JSON_INTEGER + 1 }] }),
+            json!({ "ok": true, "toPull": [], "toPush": false, "toDelete": [{ "msgId": "message-a", "deletedAt": 1 }, { "msgId": "message-a", "deletedAt": 2 }] }),
+            json!({ "ok": true, "toPull": ["message-a"], "toPush": false, "toDelete": [{ "msgId": "message-a", "deletedAt": 1 }] }),
             json!({ "ok": true, "toPull": [], "toPush": false, "error": { "code": "X", "message": "bad" } }),
             json!({ "ok": false, "error": { "code": "DESKTOP_DB", "message": "failed" } }),
             json!({ "ok": false, "toPull": [], "toPush": false, "error": { "code": "DESKTOP_DB", "message": "failed" } }),
+            json!({ "ok": false, "toDelete": [], "error": { "code": "DESKTOP_DB", "message": "failed" } }),
         ] {
             assert!(parse_topic_decision("topic-a", &invalid).is_err());
         }
@@ -664,6 +827,24 @@ mod tests {
                 .origin,
             crate::vcp_modules::sync_error::SyncErrorOrigin::DesktopCds
         );
+    }
+
+    #[test]
+    fn phase3_delete_decision_enforces_the_per_topic_message_limit() {
+        let to_delete = (0..=MAX_PHASE3_MESSAGES_PER_TOPIC)
+            .map(|index| json!({ "msgId": format!("message-{index}"), "deletedAt": index }))
+            .collect::<Vec<_>>();
+        let error = parse_topic_decision(
+            "topic-a",
+            &json!({
+                "ok": true,
+                "toPull": [],
+                "toPush": false,
+                "toDelete": to_delete,
+            }),
+        )
+        .expect_err("a topic cannot carry more than 10000 delete decisions");
+        assert_eq!(error.code, "PHASE3_DECISION_BUDGET_EXCEEDED");
     }
 
     #[test]

@@ -117,7 +117,7 @@ fn validate_and_filter_diff_items(
                 "SYNC_DIFF_RESULTS item {id} mismatchedContent must be boolean"
             ));
         }
-        if *data_type == SyncDataType::Topic && matches!(action, "PULL" | "PUSH") {
+        if *data_type == SyncDataType::Topic && matches!(action, "PULL" | "PUSH" | "PUSH_DELETE") {
             let _owner_type = item
                 .get("ownerType")
                 .and_then(Value::as_str)
@@ -125,7 +125,7 @@ fn validate_and_filter_diff_items(
                 .ok_or_else(|| {
                     format!("SYNC_DIFF_RESULTS topic {id} requires agent/group ownerType")
                 })?;
-            if action == "PUSH"
+            if matches!(action, "PUSH" | "PUSH_DELETE")
                 && item
                     .get("ownerId")
                     .and_then(Value::as_str)
@@ -133,7 +133,7 @@ fn validate_and_filter_diff_items(
                     .is_none()
             {
                 return Err(format!(
-                    "SYNC_DIFF_RESULTS topic {id} push requires ownerId"
+                    "SYNC_DIFF_RESULTS topic {id} {action} requires ownerId"
                 ));
             }
         }
@@ -805,6 +805,20 @@ impl DiffHandler {
                                                     data_type: data_type_task.clone(),
                                                     id: id.clone(),
                                                     deleted_at,
+                                                    owner_type: if data_type_task == SyncDataType::Topic {
+                                                        item.get("ownerType")
+                                                            .and_then(Value::as_str)
+                                                            .map(str::to_string)
+                                                    } else {
+                                                        None
+                                                    },
+                                                    owner_id: if data_type_task == SyncDataType::Topic {
+                                                        item.get("ownerId")
+                                                            .and_then(Value::as_str)
+                                                            .map(str::to_string)
+                                                    } else {
+                                                        None
+                                                    },
                                                 })
                                                 .map_err(|error| error.to_string()),
                                             None => Err(format!(
