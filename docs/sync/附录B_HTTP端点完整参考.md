@@ -18,7 +18,7 @@ last_updated: 2026-05-13
 | 路径 | 方法 | 认证 | 请求格式 | 响应格式 | Body限制 | 移动端调用函数 | 桌面端处理函数 | 对应代码文件 |
 |-----|------|-----|---------|---------|---------|-------------|-------------|------------|
 | `/download-entity` | `GET` | `x-sync-token` | Query: `?id=<uuid>&type=agent\|group\|agent_topic\|group_topic` | `JSON` — 对应 DTO 对象 | — | `PullExecutor::pull_agent`<br>`PullExecutor::pull_group`<br>`PullExecutor::pull_agent_topic`<br>`PullExecutor::pull_group_topic` | `downloadEntity` | `routes.js`<br>`pull_executor.rs` |
-| `/download-entities` | `POST` | `x-sync-token` | `JSON` — `{ requests: [{id, type}, ...] }` | `JSON` — `[{id, type, data}, ...]` | 无显式限制<br>（Express json 默认） | `PullExecutor::pull_entities_batch` | `downloadEntities` | `routes.js`<br>`pull_executor.rs` |
+| `/download-entities` | `POST` | `x-sync-token` | `JSON` — `{ requests: [{id, type}, ...] }` | `JSON` — `[{id, type, data}, ...]` | 1000 项 / 10 MiB | `PullExecutor::pull_entities_batch` | `downloadEntities` | `routes.js`<br>`pull_executor.rs` |
 | `/upload-entity` | `POST` | `x-sync-token`<br>`x-idempotency-key` | `JSON` — `{ id, type, data }` | `JSON` — `{ success, id, hash? }` | 5 MB | `PushExecutor::push_agent`<br>`PushExecutor::push_group` | `uploadEntity` | `routes.js`<br>`push_executor.rs` |
 | `/upload-entities-batch` | `POST` | `x-sync-token` | `JSON` — `{ items: [{id, type, data}, ...] }` | `JSON` — `{ success: true, results: [...] }` | 10 MB | `PushExecutor::push_entities_batch` | `uploadEntitiesBatch` | `routes.js`<br>`push_executor.rs` |
 

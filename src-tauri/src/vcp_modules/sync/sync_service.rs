@@ -1038,7 +1038,8 @@ async fn run_sync_session(
                     }
                     let ws_addr = match url::Url::parse(&s.sync_server_url) {
                         Ok(mut u) => {
-                            u.set_query(Some(&format!("token={}", s.sync_token)));
+                            u.set_query(None);
+                            u.query_pairs_mut().append_pair("token", &s.sync_token);
                             u.to_string()
                         }
                         Err(e) => {

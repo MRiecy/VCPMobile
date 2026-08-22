@@ -28,7 +28,8 @@ const NDJSON_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 const PULL_WORKER_BUDGET_UNIT_BYTES: usize = 1024 * 1024;
 const PULL_WORKER_BUDGET_UNITS: usize = MAX_NDJSON_LINE_BYTES / PULL_WORKER_BUDGET_UNIT_BYTES;
 const MAX_DIRECT_ENTITY_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
-const MAX_ENTITY_BATCH_ITEMS: usize = 10_000;
+const MAX_ENTITY_BATCH_ITEMS: usize = 1_000;
+const MAX_MESSAGE_IDS_PER_TOPIC: usize = 10_000;
 const MAX_MESSAGE_PULL_TOPICS: usize = 10_000;
 const SQLITE_BIND_CHUNK: usize = 400;
 const MAX_AVATAR_RESPONSE_BYTES: usize = 20 * 1024 * 1024;
@@ -1167,9 +1168,9 @@ impl PullExecutor {
             if topic_id.is_empty() || expected_message_ids.contains_key(topic_id) {
                 return Err("Pull request contains empty or duplicate topicId".to_string());
             }
-            if message_ids.len() > MAX_ENTITY_BATCH_ITEMS {
+            if message_ids.len() > MAX_MESSAGE_IDS_PER_TOPIC {
                 return Err(format!(
-                    "Pull request for {topic_id} exceeds {MAX_ENTITY_BATCH_ITEMS} message budget"
+                    "Pull request for {topic_id} exceeds {MAX_MESSAGE_IDS_PER_TOPIC} message budget"
                 ));
             }
             total_message_ids = total_message_ids
