@@ -826,13 +826,13 @@ impl DbWriteQueue {
 
         let member_tags = dto.member_tags.as_ref().and_then(|v| v.as_object());
 
-        for member in &dto.members {
+        for (sort_order, member) in dto.members.iter().enumerate() {
             let tag = member_tags
                 .and_then(|m| m.get(member))
                 .and_then(|v| v.as_str());
             tx.execute(
-                "INSERT INTO group_members (group_id, agent_id, member_tag, sort_order, updated_at) VALUES (?, ?, ?, 0, ?)",
-                rusqlite::params![id, member, tag, now]
+                "INSERT INTO group_members (group_id, agent_id, member_tag, sort_order, updated_at) VALUES (?, ?, ?, ?, ?)",
+                rusqlite::params![id, member, tag, sort_order as i64, now]
             )?;
         }
 
@@ -945,7 +945,8 @@ impl DbWriteQueue {
             SELECT ?, ?, ?, 'agent', ?, ?, ?, ?, ?
             WHERE EXISTS (SELECT 1 FROM agents WHERE agent_id = ? AND deleted_at IS NULL)
             ON CONFLICT(topic_id) DO UPDATE SET
-            title=excluded.title, locked=excluded.locked, unread=excluded.unread,
+            title=excluded.title, created_at=excluded.created_at,
+            locked=excluded.locked, unread=excluded.unread,
             updated_at=CASE
                 WHEN topics.config_hash IS NOT excluded.config_hash THEN excluded.updated_at
                 ELSE topics.updated_at
@@ -1022,7 +1023,7 @@ impl DbWriteQueue {
             SELECT ?, ?, ?, 'group', ?, 1, 0, ?, ?
             WHERE EXISTS (SELECT 1 FROM groups WHERE group_id = ? AND deleted_at IS NULL)
             ON CONFLICT(topic_id) DO UPDATE SET
-            title=excluded.title,
+            title=excluded.title, created_at=excluded.created_at,
             updated_at=CASE
                 WHEN topics.config_hash IS NOT excluded.config_hash THEN excluded.updated_at
                 ELSE topics.updated_at
@@ -1179,6 +1180,7 @@ impl DbWriteQueue {
                     group_id = excluded.group_id,
                     finish_reason = excluded.finish_reason,
                     content_hash = excluded.content_hash,
+                    timestamp = excluded.timestamp,
                     updated_at = excluded.updated_at
                  WHERE messages.deleted_at IS NULL",
             );
