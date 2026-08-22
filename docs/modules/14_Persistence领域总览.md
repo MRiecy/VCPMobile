@@ -331,9 +331,7 @@ pub enum DbWriteTask {
     Agent { id: String, dto: AgentSyncDTO },
     Group { id: String, dto: GroupSyncDTO },
     Avatar { owner_type: String, owner_id: String, bytes: Vec<u8> },
-    AgentTopic { topic_id: String, dto: AgentTopicSyncDTO },
     AgentTopicBatch { topics: Vec<(String, AgentTopicSyncDTO)> },
-    GroupTopic { topic_id: String, dto: GroupTopicSyncDTO },
     GroupTopicBatch { topics: Vec<(String, GroupTopicSyncDTO)> },
     TopicMessages {
         topic_id: String,

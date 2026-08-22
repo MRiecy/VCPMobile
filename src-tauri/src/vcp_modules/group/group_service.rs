@@ -196,7 +196,7 @@ pub async fn save_group_config(
     let mutex = state.acquire_lock(&group_id).await;
     let _lock = mutex.lock().await;
 
-    internal_write_group_config(&app_handle, &state, &group_id, &group, false, false).await
+    internal_write_group_config(&app_handle, &state, &group_id, &group, false).await
 }
 
 #[tauri::command]
@@ -332,7 +332,7 @@ pub async fn update_group_config(
 
     let new_config: GroupConfig = serde_json::from_value(config_val).map_err(|e| e.to_string())?;
 
-    internal_write_group_config(&app_handle, &state, &group_id, &new_config, false, false).await?;
+    internal_write_group_config(&app_handle, &state, &group_id, &new_config, false).await?;
 
     Ok(new_config)
 }
@@ -435,7 +435,6 @@ async fn internal_write_group_config<R: Runtime>(
     group_id: &str,
     config: &GroupConfig,
     skip_bubble: bool,
-    from_sync: bool,
 ) -> Result<bool, String> {
     let cache_generation = state.current_cache_generation();
     let db_state = app_handle.state::<DbState>();
@@ -457,31 +456,6 @@ async fn internal_write_group_config<R: Runtime>(
 
     let dto = GroupSyncDTO::from(config);
     let config_hash = HashAggregator::compute_group_config_hash(&dto);
-
-    // 只有非同步来源且哈希发生变化时，才通知同步中心
-    if !from_sync {
-        if let Some(sync_state) = app_handle.try_state::<SyncState>() {
-            let rows = sqlx::query("SELECT config_hash FROM groups WHERE group_id = ?")
-                .bind(group_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| e.to_string())?;
-
-            let old_hash = rows.and_then(|r| {
-                use sqlx::Row;
-                r.get::<Option<String>, _>("config_hash")
-            });
-
-            if old_hash.as_ref() != Some(&config_hash) {
-                let _ = sync_state.ws_sender.send(SyncCommand::NotifyLocalChange {
-                    id: group_id.to_string(),
-                    data_type: SyncDataType::Group,
-                    hash: config_hash.clone(),
-                    ts: now,
-                });
-            }
-        }
-    }
 
     sqlx::query(
         "INSERT INTO groups (
@@ -576,8 +550,6 @@ async fn internal_write_group_config<R: Runtime>(
         HashAggregator::bubble_group_hash(&mut tx, group_id).await?;
     }
     tx.commit().await.map_err(|e| e.to_string())?;
-
-    // 通知同步中心：本地数据已变动 (已由上面的 config_hash 比对逻辑处理)
 
     state.insert_cache_if_current(group_id.to_string(), config.clone(), cache_generation);
 

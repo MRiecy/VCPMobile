@@ -26,16 +26,8 @@ pub enum DbWriteTask {
         owner_id: String,
         bytes: Vec<u8>,
     },
-    AgentTopic {
-        topic_id: String,
-        dto: AgentTopicSyncDTO,
-    },
     AgentTopicBatch {
         topics: Vec<(String, AgentTopicSyncDTO)>,
-    },
-    GroupTopic {
-        topic_id: String,
-        dto: GroupTopicSyncDTO,
     },
     GroupTopicBatch {
         topics: Vec<(String, GroupTopicSyncDTO)>,
@@ -550,19 +542,11 @@ impl DbWriteQueue {
                             DbWriteTask::Avatar { owner_type, owner_id, bytes } => {
                                 Self::rusqlite_upsert_avatar(&tx, &owner_type, &owner_id, &bytes)?;
                             }
-                            DbWriteTask::AgentTopic { topic_id, dto } => {
-                                Self::rusqlite_upsert_agent_topic(&tx, &topic_id, &dto)?;
-                                affected_owners.insert((dto.owner_id, "agent".to_string()));
-                            }
                             DbWriteTask::AgentTopicBatch { topics } => {
                                 for (tid, dto) in topics {
                                     affected_owners.insert((dto.owner_id.clone(), "agent".to_string()));
                                     Self::rusqlite_upsert_agent_topic(&tx, &tid, &dto)?;
                                 }
-                            }
-                            DbWriteTask::GroupTopic { topic_id, dto } => {
-                                Self::rusqlite_upsert_group_topic(&tx, &topic_id, &dto)?;
-                                affected_owners.insert((dto.owner_id, "group".to_string()));
                             }
                             DbWriteTask::GroupTopicBatch { topics } => {
                                 for (tid, dto) in topics {

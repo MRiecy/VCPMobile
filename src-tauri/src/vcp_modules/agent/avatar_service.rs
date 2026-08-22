@@ -1,6 +1,5 @@
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
-use crate::vcp_modules::sync_types::{is_valid_avatar_owner, SyncDataType};
+use crate::vcp_modules::sync_types::is_valid_avatar_owner;
 
 use tauri::{AppHandle, Manager, Runtime};
 
@@ -120,16 +119,6 @@ pub async fn save_avatar_data<R: Runtime>(
         avatar_hash,
         dominant_color
     );
-
-    // 4. 通知同步中心：本地数据已变动
-    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
-        let _ = sync_state.ws_sender.send(SyncCommand::NotifyLocalChange {
-            id: format!("{}:{}", owner_type, owner_id),
-            data_type: SyncDataType::Avatar,
-            hash: avatar_hash.clone(),
-            ts: now,
-        });
-    }
 
     Ok(avatar_hash)
 }

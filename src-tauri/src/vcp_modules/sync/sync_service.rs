@@ -4,7 +4,6 @@ use crate::vcp_modules::sync_error::{
     build_local_error_payload, build_wire_error_payload, decode_wire_sync_error,
     encode_wire_sync_error, parse_wire_sync_error, SyncErrorPayload,
 };
-use crate::vcp_modules::sync_executor::PullExecutor;
 use crate::vcp_modules::sync_hash::HashInitializer;
 use crate::vcp_modules::sync_logger::{redact_sync_diagnostic, LogLevel, SyncLogger};
 use crate::vcp_modules::sync_pipeline::{Phase1Metadata, Phase3Message, SyncPipeline};
@@ -20,7 +19,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
-use tokio::sync::{mpsc, Mutex as AsyncMutex, RwLock, Semaphore};
+use tokio::sync::{mpsc, Mutex as AsyncMutex, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio_tungstenite::{
     connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream,
@@ -535,42 +534,7 @@ impl Phase3Tracker {
     }
 }
 
-pub struct NetworkAwareSemaphore {
-    semaphore: Arc<Semaphore>,
-}
-
-impl NetworkAwareSemaphore {
-    pub fn new() -> Self {
-        // [Evolution] 动态并发控制：根据核心数动态调整
-        // 核心数 * 1.5 是 IO 密集型任务的平衡点，但在移动端需严格限制上限以保护 UI 响应
-        let cores = std::thread::available_parallelism()
-            .map(|p| p.get())
-            .unwrap_or(4);
-
-        let concurrency = ((cores as f32) * 1.5).clamp(6.0, 12.0) as usize;
-        log::info!(
-            "[Sync] Auto-optimized concurrency set to {} (cores: {})",
-            concurrency,
-            cores
-        );
-
-        Self {
-            semaphore: Arc::new(Semaphore::new(concurrency)),
-        }
-    }
-
-    pub async fn acquire(&self) -> tokio::sync::SemaphorePermit<'_> {
-        self.semaphore.acquire().await.unwrap()
-    }
-}
-
 pub enum SyncCommand {
-    NotifyLocalChange {
-        id: String,
-        data_type: SyncDataType,
-        hash: String,
-        ts: i64,
-    },
     StartAvatarMetadata {
         attempt_id: u64,
     }, // Internal owner-metadata durability barrier
@@ -1004,8 +968,6 @@ async fn run_sync_session(
         "[数据同步] VCP Mobile",
     );
 
-    let network_semaphore = Arc::new(NetworkAwareSemaphore::new());
-    let semaphore_task = network_semaphore.clone();
     let write_queue_task = write_queue.clone();
     let sync_logger_task = sync_logger.clone();
 
@@ -1868,20 +1830,6 @@ async fn run_sync_session(
                                     let _ = close_ws_with_deadline(&mut ws_stream).await;
                                     break;
                                 },
-                                SyncCommand::NotifyLocalChange { id, data_type, hash, ts } => {
-                                    let msg = json!({ "type": "SYNC_ENTITY_UPDATE", "id": id, "dataType": data_type, "hash": hash, "ts": ts });
-                                    if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(msg.to_string().into())).await {
-                                        terminate_after_protocol_send_failure(
-                                            &handle_clone,
-                                            session_id,
-                                            &connection_status_for_task,
-                                            &mut ws_stream,
-                                            "local entity update",
-                                            &error,
-                                        ).await;
-                                        break 'attempt;
-                                    }
-                                },
                                 SyncCommand::StartAvatarMetadata { attempt_id: command_attempt } => {
                                     if command_attempt != attempt_id { continue; }
                                     let should_start = {
@@ -2461,7 +2409,6 @@ async fn run_sync_session(
                                 let h = handle_clone.clone();
                                 let c = http_client.clone();
                                 let base = http_url.clone();
-                                let sem = semaphore_task.clone();
                                 let wq = write_queue_task.clone();
                                 let settings = match crate::vcp_modules::settings_manager::read_settings(h.clone(), h.state()).await {
                                     Ok(settings) => settings,
@@ -2476,115 +2423,6 @@ async fn run_sync_session(
                                 };
 
                                 match payload["type"].as_str() {
-                                    Some("SYNC_ENTITY_UPDATE") => {
-                                        let id = match payload.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
-                                            Some(id) => id.to_string(),
-                                            None => {
-                                                fatal_error = true;
-                                                publish_sync_error(
-                                                    &handle_clone,
-                                                    session_id,
-                                                    &connection_status_for_task,
-                                                    "PROTOCOL_FRAME_INVALID",
-                                                    "SYNC_ENTITY_UPDATE.id must be a non-empty string",
-                                                    Vec::new(),
-                                                ).await;
-                                                let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                                break;
-                                            }
-                                        };
-                                        let data_type = match parse_sync_data_type(&payload["dataType"]) {
-                                            Some(data_type @ (SyncDataType::Agent | SyncDataType::Group | SyncDataType::Topic)) => data_type,
-                                            _ => {
-                                                fatal_error = true;
-                                                publish_sync_error(
-                                                    &handle_clone,
-                                                    session_id,
-                                                    &connection_status_for_task,
-                                                    "PROTOCOL_FRAME_INVALID",
-                                                    "SYNC_ENTITY_UPDATE.dataType must be agent, group, or topic",
-                                                    vec![id.clone()],
-                                                ).await;
-                                                let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                                break;
-                                            }
-                                        };
-                                        let owner_type = if data_type == SyncDataType::Topic {
-                                            match payload.get("ownerType").and_then(Value::as_str).filter(|owner_type| matches!(*owner_type, "agent" | "group")) {
-                                                Some(owner_type) => owner_type,
-                                                None => {
-                                                    fatal_error = true;
-                                                    publish_sync_error(
-                                                        &handle_clone,
-                                                        session_id,
-                                                        &connection_status_for_task,
-                                                        "PROTOCOL_FRAME_INVALID",
-                                                        "SYNC_ENTITY_UPDATE topic requires ownerType agent or group",
-                                                        vec![id.clone()],
-                                                    ).await;
-                                                    let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                                    break;
-                                                }
-                                            }
-                                        } else {
-                                            ""
-                                        };
-                                        let operation = tokio::time::timeout(ENTITY_OPERATION_TIMEOUT, async {
-                                            let _permit = sem.acquire().await;
-                                            let pull_result = match data_type {
-                                                SyncDataType::Agent => PullExecutor::pull_agent(&h, &c, &base, &settings.sync_token, &id, &wq).await,
-                                                SyncDataType::Group => PullExecutor::pull_group(&h, &c, &base, &settings.sync_token, &id, &wq).await,
-                                                SyncDataType::Topic if owner_type == "group" => PullExecutor::pull_group_topic(&h, &c, &base, &settings.sync_token, &id, &wq).await,
-                                                SyncDataType::Topic => PullExecutor::pull_agent_topic(&h, &c, &base, &settings.sync_token, &id, &wq).await,
-                                                other => Err(format!("unsupported entity update type: {other:?}")),
-                                            };
-                                            pull_result?;
-                                            wq.flush().await.map_err(|error| {
-                                                format!("entity update write drain failed: {error}")
-                                            })
-                                        });
-                                        tokio::pin!(operation);
-                                        let result = loop {
-                                            tokio::select! {
-                                                biased;
-                                                _ = cancel_token.cancelled() => {
-                                                    let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                                    break 'attempt;
-                                                }
-                                                _ = heartbeat_interval.tick() => {
-                                                    if let Err(error) = send_ws_with_deadline(
-                                                        &mut ws_stream,
-                                                        Message::Ping(Vec::new().into()),
-                                                    ).await {
-                                                        emit_sync_log(
-                                                            &handle_clone,
-                                                            "warning",
-                                                            &format!("Entity update heartbeat failed: {error}"),
-                                                        );
-                                                        let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                                        break 'attempt;
-                                                    }
-                                                }
-                                                result = &mut operation => break result,
-                                            }
-                                        }
-                                            .map_err(|_| format!("operation timed out after {} seconds", ENTITY_OPERATION_TIMEOUT.as_secs()))
-                                            .and_then(|result| result);
-                                        if let Err(error) = result {
-                                            fatal_error = true;
-                                            let message = format!("SYNC_ENTITY_UPDATE failed for {id}: {error}");
-                                            publish_sync_error(
-                                                &handle_clone,
-                                                session_id,
-                                                &connection_status_for_task,
-                                                "ENTITY_UPDATE_FAILED",
-                                                &message,
-                                                vec![id.clone()],
-                                            ).await;
-                                            let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                            break;
-                                        }
-                                    },
                                     Some("SYNC_DELETE_NOTIFY") => {
                                         use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
                                         let id = match payload.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) {

@@ -15,7 +15,7 @@ scope: 双端
 
 | 路径 | 方法 | 认证 | 请求格式 | 响应格式 | Body限制 | 移动端调用函数 | 桌面端处理函数 | 对应代码文件 |
 |-----|------|-----|---------|---------|---------|-------------|-------------|------------|
-| `/download-entity` | `GET` | `x-sync-token` | Query: `?id=<uuid>&type=agent\|group\|agent_topic\|group_topic` | `JSON` — 对应 DTO 对象 | — | `PullExecutor::pull_agent`<br>`PullExecutor::pull_group`<br>`PullExecutor::pull_agent_topic`<br>`PullExecutor::pull_group_topic` | `downloadEntity` | `routes.js`<br>`pull_executor.rs` |
+| `/download-entity` | `GET` | `x-sync-token` | Query: `?id=<uuid>&type=agent\|group\|agent_topic\|group_topic` | `JSON` — 对应 DTO 对象 | — | `PullExecutor::pull_agent`<br>`PullExecutor::pull_group` | `downloadEntity` | `routes.js`<br>`pull_executor.rs` |
 | `/download-entities` | `POST` | `x-sync-token` | `JSON` — `{ requests: [{id, type}, ...] }` | `JSON` — `[{id, type, data}, ...]` | 1000 项 / 10 MiB | `PullExecutor::pull_entities_batch` | `downloadEntities` | `routes.js`<br>`pull_executor.rs` |
 | `/upload-entity` | `POST` | `x-sync-token`<br>`x-idempotency-key` | `JSON` — `{ id, type, data }` | `JSON` — `{ success, id, hash? }` | 5 MB | `PushExecutor::push_agent`<br>`PushExecutor::push_group` | `uploadEntity` | `routes.js`<br>`push_executor.rs` |
 | `/upload-entities-batch` | `POST` | `x-sync-token` | `JSON` — `{ items: [{id, type, data}, ...] }` | `JSON` — `{ success: true, results: [...] }` | 10 MB | `PushExecutor::push_entities_batch` | `uploadEntitiesBatch` | `routes.js`<br>`push_executor.rs` |
@@ -140,7 +140,7 @@ let dto: AgentSyncDTO = res.json().await?;
 **移动端消费流程**
 1. `pull_executor.rs` 建立 HTTP POST 连接后，通过 `res.bytes_stream()` 流式读取 chunk。
 2. 使用缓冲区逐行解析 NDJSON，支持 chunk 边界跨越。
-3. 每解析出一行 topic 数据，先从 `NetworkAwareSemaphore(6–12)` 取得 permit，再 spawn 异步任务调用 `process_topic_messages()`。
+3. 每解析出一行 topic 数据，按原始帧大小取得在途预算，再 spawn 异步任务调用 `process_topic_messages()`。
 4. 单 topic 处理失败不中断流读取，错误通过 `_error: SyncError` 返回；Mobile 会保留根因并令当前 attempt 失败。
 
 **字段规范化**
@@ -319,7 +319,7 @@ match client.get(&url).header("x-sync-token", &settings.sync_token).send().await
 | `200 OK` | 请求成功 | 正常解析响应体 |
 | `400 Bad Request` | 参数缺失或格式错误（如 `items` 非数组、`requests` 为空） | 记录日志，通常视为协议错误 |
 | `401 Unauthorized` | `x-sync-token` 或 `Authorization` 不匹配 | 触发连接重置，建议用户检查同步令牌 |
-| `404 Not Found` | 实体/附件/头像不存在 | `pull_agent_topic` / `pull_group_topic` 对 404 静默跳过；附件 404 则 UI 显示裂图 |
+| `404 Not Found` | 实体/附件/头像不存在 | 返回错误，当前操作失败 |
 | `500 Internal Server Error` | 桌面端处理异常 | 打印错误日志，当前任务失败，不影响其他并发任务 |
 
 所有非 2xx 响应统一返回 `{"error": SyncError}`，所有普通 JSON 的失败结果统一使用 `{"success":false,"error":SyncError}`。`SyncError` 必须包含 Wire 1.2 的 `code/origin/stage/kind/retry/message/failedTopicIds` 全部字段；旧字符串错误拒绝。
@@ -335,8 +335,7 @@ match client.get(&url).header("x-sync-token", &settings.sync_token).send().await
 
 | 层级 | 并发控制 |
 |------|---------|
-| 移动端总并发 | `NetworkAwareSemaphore`，默认上限 `clamp(cores * 1.5, 6, 12)` |
-| 消息 Pull 并发 | `NetworkAwareSemaphore(6–12)`，按 CPU 核数限制同时处理的 topic 数 |
+| 消息 Pull 并发 | 32 MiB 在途帧预算，每帧按 1 MiB 单位向上取整占用 |
 | 附件上传并发 | 硬编码 `MAX_CONCURRENT_UPLOADS = 3` |
 | 实体分块大小 | Agent/Group: 50/批；Topic: 1000/批 |
 | 消息分块大小 | `MAX_MESSAGES_PER_BATCH = 10000`（控制 WS payload，非 HTTP） |

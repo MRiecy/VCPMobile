@@ -301,7 +301,7 @@ pub async fn delete_topic(
 
 #[tauri::command]
 pub async fn update_topic_title(
-    app_handle: AppHandle,
+    _app_handle: AppHandle,
     db_state: State<'_, DbState>,
     _owner_id: String,
     _owner_type: String,
@@ -319,26 +319,9 @@ pub async fn update_topic_title(
         .await
         .map_err(|e| e.to_string())?;
 
-    // 1. 触发聚合哈希冒泡 (重算当前 topic 的哈希，并向上累加到 Agent/Group)
+    // 触发聚合哈希冒泡 (重算当前 topic 的哈希，并向上累加到 Agent/Group)
     HashAggregator::bubble_from_topic(&mut tx, &topic_id).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
-
-    // 2. 发送同步通知给局域网同步网络
-    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
-        let row = sqlx::query("SELECT config_hash FROM topics WHERE topic_id = ?")
-            .bind(&topic_id)
-            .fetch_one(&db_state.pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let hash: String = row.get("config_hash");
-        let _ = sync_state.ws_sender.send(SyncCommand::NotifyLocalChange {
-            data_type: SyncDataType::Topic,
-            id: topic_id,
-            hash,
-            ts: now,
-        });
-    }
 
     Ok(())
 }
@@ -365,7 +348,7 @@ pub async fn summarize_topic(
 
 #[tauri::command]
 pub async fn toggle_topic_lock(
-    app_handle: AppHandle,
+    _app_handle: AppHandle,
     db_state: State<'_, DbState>,
     _owner_id: String,
     _owner_type: String,
@@ -383,26 +366,9 @@ pub async fn toggle_topic_lock(
         .await
         .map_err(|e| e.to_string())?;
 
-    // 1. 触发聚合哈希冒泡
+    // 触发聚合哈希冒泡
     HashAggregator::bubble_from_topic(&mut tx, &topic_id).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
-
-    // 2. 发送同步通知
-    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
-        let row = sqlx::query("SELECT config_hash FROM topics WHERE topic_id = ?")
-            .bind(&topic_id)
-            .fetch_one(&db_state.pool)
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let hash: String = row.get("config_hash");
-        let _ = sync_state.ws_sender.send(SyncCommand::NotifyLocalChange {
-            data_type: SyncDataType::Topic,
-            id: topic_id,
-            hash,
-            ts: now,
-        });
-    }
 
     Ok(())
 }

@@ -42,11 +42,10 @@ scope: 双端
 
 | 序号 | 消息名称 | 方向 | 触发时机 | Payload 关键字段 | 移动端处理函数/位置 | 桌面端处理函数/位置 | 对应代码文件 |
 |-----|---------|------|---------|-----------------|-------------------|-------------------|------------|
-| 16 | `SYNC_ENTITY_UPDATE` | M→D | 移动端检测到本地实体变更时实时通知（如用户修改 Agent 配置、新建 Topic） | `id: string`（实体 ID），`dataType: string`（实体类型），`hash: string`（新哈希），`ts: i64`（更新时间戳） | `SyncCommand::NotifyLocalChange` 触发发送；由前端业务逻辑或数据库触发器调用 | `index.js` 中调用 `upsertEntityIndex` 更新桌面端索引数据库；若实体不存在则插入新记录 | `sync_service.rs`, `index.js` |
-| 17 | `SYNC_DELETE_NOTIFY` | D→M | 桌面端通知 Mobile 执行远端墓碑 | `id: string`，`dataType: string`，`deletedAt: non-negative i64`；Message 另需 `topicId` | WS owner 在 60 秒可取消边界内调用 `DeleteExecutor::soft_delete_*`；缺字段/错型立即终止 attempt | 桌面端实体或消息删除后发送 | `sync_service.rs`, `index.js` |
-| 18 | `SYNC_ENTITY_DELETE` | M→D | Mobile 本地删除或处理 `PUSH_DELETE` 后通知桌面端 | `id: string`，`dataType: string`，`deletedAt: non-negative i64`；Message 另需 `topicId` | `SyncCommand::NotifyDelete` / `NotifyMessageDelete` 发送；传输失败进入共享重试预算 | 桌面端按原时间戳幂等软删除；Message 离线遗漏另由 HTTP 墓碑重放补齐 | `sync_service.rs`, `index.js` |
-| 19 | `SYNC_ERROR` | 双向 | 任一端遇到不可恢复错误 | `error: {code, origin, stage, kind, retry, message, failedTopicIds}` | 严格解析完整对象并保留根因；诊断 message 不进入 WebView 主文案 | `error-contract.js` 构造统一外壳 | `sync_error.rs`, `transport/websocket.js` |
-| 20 | `SYNC_ACK` | D→M | 桌面端确认收到 `SYNC_ENTITY_UPDATE` 或 `SYNC_ENTITY_DELETE` | `id: string`（对应实体 ID） | 移动端不处理，可选输出调试日志 | `index.js` 中统一返回确认帧 | `sync_service.rs`, `index.js` |
+| 16 | `SYNC_DELETE_NOTIFY` | D→M | 桌面端通知 Mobile 执行远端墓碑 | `id: string`，`dataType: string`，`deletedAt: non-negative i64`；Message 另需 `topicId` | WS owner 在 60 秒可取消边界内调用 `DeleteExecutor::soft_delete_*`；缺字段/错型立即终止 attempt | 桌面端实体或消息删除后发送 | `sync_service.rs`, `index.js` |
+| 17 | `SYNC_ENTITY_DELETE` | M→D | Mobile 本地删除或处理 `PUSH_DELETE` 后通知桌面端 | `id: string`，`dataType: string`，`deletedAt: non-negative i64`；Message 另需 `topicId` | `SyncCommand::NotifyDelete` / `NotifyMessageDelete` 发送；传输失败进入共享重试预算 | 桌面端按原时间戳幂等软删除；Message 离线遗漏另由 HTTP 墓碑重放补齐 | `sync_service.rs`, `index.js` |
+| 18 | `SYNC_ERROR` | 双向 | 任一端遇到不可恢复错误 | `error: {code, origin, stage, kind, retry, message, failedTopicIds}` | 严格解析完整对象并保留根因；诊断 message 不进入 WebView 主文案 | `error-contract.js` 构造统一外壳 | `sync_error.rs`, `transport/websocket.js` |
+| 19 | `SYNC_ACK` | D→M | 桌面端确认收到 `SYNC_ENTITY_DELETE` | `id: string`（对应实体 ID） | 移动端不处理 | `index.js` 返回确认帧 | `sync_service.rs`, `index.js` |
 
 ---
 
@@ -76,10 +75,8 @@ scope: 双端
 | `error` | `SyncError` | `SYNC_ERROR`, `ok:false` | 是 | — | 完整 Wire 1.2 对象；失败分支严禁携带 `toPull/toPush` |
 | `level` | `string` | `SYNC_LOG_EVENT` | 是 | — | 日志级别：`info`（白色）、`success`（绿色）、`warning`（黄色）、`error`（红色） |
 | `message` | `string` | `SYNC_LOG_EVENT`, `SyncError` | 是 | — | 诊断文本；Mobile 持久化时脱敏，前端不直接展示 |
-| `id` | `string` | `SYNC_ENTITY_UPDATE`, `SYNC_DELETE_NOTIFY`, `SYNC_ACK` | 是 | — | 实体唯一标识符；对 Avatar 类型格式为 `owner_type:owner_id` |
+| `id` | `string` | `SYNC_DELETE_NOTIFY`, `SYNC_ENTITY_DELETE`, `SYNC_ACK` | 是 | — | 实体唯一标识符；对 Avatar 类型格式为 `owner_type:owner_id` |
 | `deletedAt` | `number` | `SYNC_DELETE_NOTIFY` | 是 | — | 软删除时间戳，毫秒级 Unix Epoch；非空即视为已删除 |
-| `hash` | `string` | `SYNC_ENTITY_UPDATE` | 是 | — | 实体当前内容指纹，64 字符十六进制 SHA-256；用于快速判断内容是否变更 |
-| `ts` | `i64` / `number` | `SYNC_ENTITY_UPDATE` | 是 | — | 实体最后更新时间戳，毫秒级 Unix Epoch；LWW 仲裁依据 |
 | `code` | `string` | `SyncError` | 是 | — | 稳定大写机器码；已登记码映射固定中文文案，未知合法码保留但不展示原始 message |
 | `origin` | 闭合集合字符串 | `SyncError` | 是 | — | `mobile_ui/mobile_native/mobile_sync/desktop_plugin/desktop_cds` |
 | `stage` | 闭合集合字符串 | `SyncError` | 是 | — | 失败被确认时的精确阶段，不能统一降级为 `connect` |
@@ -146,7 +143,6 @@ scope: 双端
 | `SYNC_TOPIC_HASH_RESULTS` | —（接收） | `run_sync_session` 设置 `changed_topics` | 无 | Phase 2.5 | 必须为已发 Topic 的无重复子集，最多 10,000；空数组时跳过 Phase 3 |
 | `SYNC_MESSAGE_DIFF_BATCH` | Phase 3 分批发送 | `handleSyncMessageDiffBatch` | `SYNC_DIFF_RESULTS_BATCH` | Phase 3 | 单批/单 Topic 最多 10,000 消息，attempt 最多 100,000 |
 | `SYNC_DIFF_RESULTS_BATCH` | —（接收） | `run_sync_session` 按墓碑、Pull、落库、整 Topic Push 执行 | 无 | Phase 3 | `Phase3Tracker` 按 Topic 去重完成 |
-| `SYNC_ENTITY_UPDATE` | 本地实体变更时实时发送 | `index.js` `upsertEntityIndex` | `SYNC_ACK` | 实时通知 | 无批次限制 |
 | `SYNC_ENTITY_DELETE` | 本地软删除提交后实时发送 | `index.js` `deleteEntity`/`deleteMessage` | `SYNC_ACK` | 实时通知 | Message 离线遗漏由 Phase 3 HTTP 重放 |
 | `SYNC_DELETE_NOTIFY` | —（接收） | `DeleteExecutor::soft_delete_*` | 无 | 实时通知 | 严格要求 `deletedAt`；Message 另需 `topicId` |
 | `SYNC_LOG_EVENT` | —（接收） | `emit_sync_log` 转发前端 | 无 | 全阶段 | WS 广播给所有已连接客户端 |
@@ -221,7 +217,6 @@ scope: 双端
 | `StartTopicValidation` | `SYNC_TOPIC_HASH_BATCH_V2` | Phase 2 完成 | 桌面端 |
 | `StartMessages` | `PHASE_START` (messages), `SYNC_MESSAGE_DIFF_BATCH` | Phase 2.5 完成且 `changedTopics` 非空 | 桌面端 |
 | `Finalize` | `PHASE_COMPLETED` (messages + 四元身份) | Phase 3 所有 Topic 完成 | 桌面端 |
-| `NotifyLocalChange` | `SYNC_ENTITY_UPDATE` | 本地实体变更监听器触发 | 桌面端 |
 | `NotifyDelete` | `SYNC_ENTITY_DELETE` | 本地实体软删除提交后 | 桌面端 |
 | `NotifyMessageDelete` | `SYNC_ENTITY_DELETE` | 本地消息软删除提交后 | 桌面端 |
 
@@ -237,7 +232,6 @@ scope: 双端
 | `SYNC_MESSAGE_DIFF_BATCH` | `handleSyncMessageDiffBatch(payload)` | `sync/diff.js` | `SYNC_DIFF_RESULTS_BATCH` |
 | `PHASE_START` | 记录日志，返回 `PHASE_ACK` | `index.js` | `PHASE_ACK` |
 | `PHASE_COMPLETED` | 记录日志；最终帧原样回显四元身份 | `index.js` | `PHASE_ACK` |
-| `SYNC_ENTITY_UPDATE` | `upsertEntityIndex(...)` | `index.js` | `SYNC_ACK` |
 | `SYNC_ENTITY_DELETE` | `deleteEntity` / `deleteMessage` | `index.js` | `SYNC_ACK` |
 | `VERSION_ACK` | —（桌面端仅发送，不作为桌面端入站帧） | — | — |
 | `PHASE_ACK` | —（桌面端发送） | 普通阶段仅记录；最终阶段精确匹配 pending key | — |
@@ -266,7 +260,7 @@ scope: 双端
 | `DESKTOP_*` | 桌面端主动上报的进度消息 | `DESKTOP_PHASE_START` | 前缀标识来源端，避免命名冲突 |
 | `VERSION_*` | 握手协议 | `VERSION_CHECK`, `VERSION_ACK` | 仅握手阶段使用 |
 | `*_BATCH` / `*_BATCH_V2` | 批量请求 | `SYNC_TOPIC_HASH_BATCH_V2` | V2 后缀表示协议升级版本 |
-| `*_NOTIFY` / `*_UPDATE` / `*_DELETE` | 实时通知 | `SYNC_ENTITY_UPDATE`, `SYNC_ENTITY_DELETE`, `SYNC_DELETE_NOTIFY` | 无会话阶段限制，但仍属于当前 session/attempt |
+| `*_NOTIFY` / `*_DELETE` | 实时通知 | `SYNC_ENTITY_DELETE`, `SYNC_DELETE_NOTIFY` | 无会话阶段限制，但仍属于当前 session/attempt |
 
 ---
 
@@ -277,7 +271,6 @@ scope: 双端
 | 同步卡住，进度条不动 | `PHASE_START` / `PHASE_COMPLETED` / `PHASE_ACK` | 检查 `phase_gate`、差异任务错误；Finalize 时确认 peer 原样回显 `sessionId/attemptId/phase/nonce` | `sync_service.rs` phase_gate / final ACK 逻辑 |
 | Phase 3 执行但无消息传输 | `SYNC_TOPIC_HASH_BATCH_V2` → `SYNC_TOPIC_HASH_RESULTS` | 检查 `changedTopics` 是否为空数组（所有 Topic 双哈希一致，正确跳过 Phase 3） | `sync/diff.js` `handleSyncTopicHashBatchV2` |
 | 消息重复同步 | `SYNC_DIFF_RESULTS_BATCH` | 检查 `Phase3Tracker` HashSet 去重是否失效；检查 `toPull` 列表是否包含已存在消息 | `sync_service.rs` `Phase3Tracker` |
-| 实体变更未实时同步 | `SYNC_ENTITY_UPDATE` | 检查前端是否调用 `notifyEntityUpdate`；检查桌面端 `upsertEntityIndex` 是否成功 | `index.js` `upsertEntityIndex` |
 | 删除后另一端仍有数据 | `SYNC_DELETE_NOTIFY` / `SYNC_ENTITY_DELETE` | 检查 `deletedAt` 是否正确设置；检查桌面端 `deleteEntity` 是否执行物理删除 | `sync_service.rs` `DeleteExecutor` |
 | 版本不匹配导致连接断开 | `VERSION_CHECK` / `VERSION_ACK` | 核对桌面端 `plugin-manifest.json.version` 是否精确等于 `EXPECTED_PLUGIN_VERSION` 1.2.0；1.1.0 不兼容 | `sync_service.rs` 版本校验逻辑 |
 | WS 连接频繁断开 | `SYNC_LOG_EVENT` / `SYNC_ERROR` | 检查网络稳定性、服务端状态与连接错误日志 | `sync_service.rs` 连接管理逻辑 |

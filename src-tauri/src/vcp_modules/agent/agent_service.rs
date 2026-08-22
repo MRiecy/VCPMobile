@@ -224,7 +224,7 @@ pub async fn save_agent_config(
         }
     }
 
-    internal_write_agent_config(&app_handle, &state, &agent_id, &agent, false, false).await
+    internal_write_agent_config(&app_handle, &state, &agent_id, &agent, false).await
 }
 
 #[tauri::command]
@@ -321,7 +321,7 @@ pub async fn update_agent_config<R: Runtime>(
     let new_config: AgentConfig = serde_json::from_value(config_val).map_err(|e| e.to_string())?;
 
     // 3. 写入数据库 (原子化更新)
-    internal_write_agent_config(&app_handle, &state, &agent_id, &new_config, false, false).await?;
+    internal_write_agent_config(&app_handle, &state, &agent_id, &new_config, false).await?;
 
     Ok(new_config)
 }
@@ -331,7 +331,6 @@ async fn internal_write_agent_config<R: Runtime>(
     agent_id: &str,
     new_config: &AgentConfig,
     skip_bubble: bool,
-    from_sync: bool,
 ) -> Result<bool, String> {
     let cache_generation = state.current_cache_generation();
     let db_state = app_handle.state::<DbState>();
@@ -373,31 +372,6 @@ async fn internal_write_agent_config<R: Runtime>(
     // 计算基于 DTO 的决定性哈希
     let dto = AgentSyncDTO::from(&final_config);
     let config_hash = HashAggregator::compute_agent_config_hash(&dto);
-
-    // 只有非同步来源且哈希发生变化时，才通知同步中心
-    if !from_sync {
-        if let Some(sync_state) = app_handle.try_state::<SyncState>() {
-            let rows = sqlx::query("SELECT config_hash FROM agents WHERE agent_id = ?")
-                .bind(agent_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| e.to_string())?;
-
-            let old_hash = rows.and_then(|r| {
-                use sqlx::Row;
-                r.get::<Option<String>, _>("config_hash")
-            });
-
-            if old_hash.as_ref() != Some(&config_hash) {
-                let _ = sync_state.ws_sender.send(SyncCommand::NotifyLocalChange {
-                    id: agent_id.to_string(),
-                    data_type: SyncDataType::Agent,
-                    hash: config_hash.clone(),
-                    ts: now,
-                });
-            }
-        }
-    }
 
     sqlx::query(
         "INSERT INTO agents (

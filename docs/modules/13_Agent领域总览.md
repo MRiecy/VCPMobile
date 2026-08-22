@@ -288,7 +288,7 @@ pub struct AgentConfigState {
 
 这是 Agent 持久化的**唯一收敛点**，所有写入路径（`save_agent_config`、`update_agent_config`、同步导入）最终都调用此函数。
 
-#### 3.6.1 同步哈希计算与变更检测
+#### 3.6.1 同步哈希计算
 
 ```rust
 let dto = AgentSyncDTO::from(new_config);
@@ -297,9 +297,7 @@ let config_hash = HashAggregator::compute_agent_config_hash(&dto);
 
 - 将 `AgentConfig` 转换为 `AgentSyncDTO`（同步领域定义的传输对象）
 - 通过 `HashAggregator` 计算确定性 SHA-256 哈希
-- 若 `from_sync = false`（即本地发起），查询旧哈希并对比：
-  - 旧哈希不存在或不相等 → 向 `sync_service` 发送 `SyncCommand::NotifyLocalChange`
-  - 哈希相等 → 跳过同步通知，避免无效网络流量
+- 哈希随配置一同落库，下次三阶段同步通过 Manifest 比对判断变更
 
 #### 3.6.2 SQLite UPSERT（agents 表）
 
@@ -475,11 +473,6 @@ pub struct AvatarResult {
 ┌─────────────────────┐
 │ 3. SQLite UPSERT     │──> avatars 表
 │    (avatars)         │    (owner_type, owner_id) 联合唯一键
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│ 4. 同步通知          │──> SyncCommand::NotifyLocalChange
-│    (若启用同步)      │    data_type = SyncDataType::Avatar
 └─────────────────────┘
 ```
 
