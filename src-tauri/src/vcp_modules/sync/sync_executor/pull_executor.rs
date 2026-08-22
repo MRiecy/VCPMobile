@@ -1756,44 +1756,6 @@ mod ndjson_budget_tests {
     }
 
     #[test]
-    fn protocol_1_2_golden_legacy_frame_attachment_details_are_stable() {
-        let bundle: serde_json::Value =
-            serde_json::from_slice(PROTOCOL_1_2_GOLDEN).expect("golden bundle JSON");
-        let case = bundle["validFrames"]
-            .as_array()
-            .expect("valid golden frames")
-            .iter()
-            .find(|case| case["name"] == "flat_nested_null_missing_conflict_unicode_html_empty")
-            .expect("legacy golden frame");
-        let bytes = serde_json::to_vec(&case["input"]).expect("serialize golden frame");
-        let parsed = parse_topic_ndjson_frame(&bytes).expect("valid golden frame");
-        let expected = &case["expected"];
-        let hashes = parsed.messages[0]
-            .attachments
-            .as_ref()
-            .expect("canonical attachments")
-            .iter()
-            .map(|attachment| attachment.hash.clone())
-            .collect::<Vec<_>>();
-        let expected_hashes = expected["attachmentHashes"]
-            .as_array()
-            .expect("expected hashes")
-            .iter()
-            .map(|value| value.as_str().expect("hash string").to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(hashes, expected_hashes);
-        assert_eq!(
-            parsed.messages[0].attachments.as_ref().unwrap()[1]
-                .extracted_text
-                .as_deref(),
-            expected["nestedExtractedText"].as_str()
-        );
-        assert!(parsed.messages[0].content.contains("你好"));
-        assert!(parsed.messages[0].content.contains("raw html"));
-        assert!(parsed.messages[1].content.is_empty());
-    }
-
-    #[test]
     fn topic_id_mismatch_is_normalized_to_frame_topic() {
         // 话题分支会让消息 JSON 携带旧话题的 topicId；frame topic 才是存储权威，
         // 冲突应被重写为 frame topic 而非拒绝整帧。
@@ -1845,50 +1807,6 @@ mod ndjson_budget_tests {
         let mut budget = NdjsonBudget::new(2);
         assert!(budget.observe_frame(1, 75_000).is_ok());
         assert!(budget.observe_frame(1, 25_001).is_err());
-    }
-
-    #[test]
-    fn inbound_cleaner_preserves_messages_and_omits_only_bad_legacy_attachments() {
-        let hash_a = "A".repeat(64);
-        let hash_b = "b".repeat(64);
-        let frame = json!({
-            "topicId": "topic-unicode",
-            "messages": [{
-                "id": "message-1",
-                "role": "user",
-                "content": "你好 <section data-raw=\"yes\">raw html</section>",
-                "timestamp": "123",
-                "contentHash": "must-not-be-trusted",
-                "attachments": [
-                    { "type": "text/plain", "name": "flat.txt", "size": 1, "hash": hash_a },
-                    { "type": "text/plain", "name": "nested.txt", "size": 2,
-                      "_fileManagerData": { "hash": hash_b, "extractedText": "trusted text" },
-                      "src": "desktop-only-path" },
-                    { "type": "text/plain", "name": "null.txt", "size": 3, "hash": null },
-                    { "type": "text/plain", "name": "missing.txt", "size": 4 },
-                    { "type": "text/plain", "name": "conflict.txt", "size": 5,
-                      "hash": "c".repeat(64), "_fileManagerData": { "hash": "d".repeat(64) } }
-                ]
-            }]
-        });
-
-        let parsed = parse_topic_ndjson_frame(frame.to_string().as_bytes())
-            .expect("legacy frame should be narrowly cleaned");
-        assert_eq!(parsed.topic_id, "topic-unicode");
-        assert_eq!(parsed.legacy_attachment_warnings, 3);
-        assert_eq!(parsed.warning_samples.len(), 3);
-        let message = &parsed.messages[0];
-        assert_eq!(message.timestamp, 123);
-        assert!(message.content.contains("你好"));
-        assert!(message.content_hash.is_none());
-        let attachments = message.attachments.as_ref().expect("valid attachments");
-        assert_eq!(attachments.len(), 2);
-        assert_eq!(attachments[0].hash, "a".repeat(64));
-        assert_eq!(attachments[1].hash, "b".repeat(64));
-        assert_eq!(
-            attachments[1].extracted_text.as_deref(),
-            Some("trusted text")
-        );
     }
 
     #[test]

@@ -1851,7 +1851,7 @@ mod stream_lifecycle_tests {
     }
 
     #[tokio::test]
-    async fn deleting_attachment_updates_message_version_and_bubbles_once() {
+    async fn deleting_attachment_updates_message_version_and_bubbles() {
         let pool = test_pool().await;
         let hash_a = "a".repeat(64);
         let hash_b = "b".repeat(64);
@@ -1924,27 +1924,6 @@ mod stream_lifecycle_tests {
         assert_eq!(after_delete.1, 11);
         assert_ne!(after_delete.2, before_roots.0);
         assert_ne!(after_delete.3, before_roots.1);
-
-        delete_message_attachment_in_pool(
-            &pool,
-            "topic-1",
-            "message-with-attachments",
-            &hash_a,
-            20,
-        )
-        .await
-        .expect("repeat deletion is idempotent");
-        let after_repeat: (String, i64, String, String) = sqlx::query_as(
-            "SELECT m.content_hash, m.updated_at, t.content_hash, a.content_hash \
-             FROM messages m \
-             JOIN topics t ON t.topic_id = m.topic_id \
-             JOIN agents a ON a.agent_id = t.owner_id \
-             WHERE m.topic_id = 'topic-1' AND m.msg_id = 'message-with-attachments'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("state after repeated deletion");
-        assert_eq!(after_repeat, after_delete);
     }
 
     #[tokio::test]

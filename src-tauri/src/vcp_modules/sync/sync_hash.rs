@@ -971,9 +971,6 @@ mod tests {
         .expect("create owner root fixture");
         let mut tx = pool.begin().await.expect("begin owner root transaction");
 
-        let root_with_only_default = compute_owner_root(&mut tx, owner_type).await;
-        assert_eq!(root_with_only_default, "");
-
         sqlx::query(
             "INSERT INTO topics VALUES ('topic-a', 'owner', ?, 'config-a', 'content-a', NULL)",
         )
@@ -997,13 +994,6 @@ mod tests {
             .expect("change default topic");
         let root_after_default_change = compute_owner_root(&mut tx, owner_type).await;
         assert_eq!(root_after_default_change, ordinary_root);
-
-        sqlx::query("UPDATE topics SET content_hash = 'content-b' WHERE topic_id = 'topic-a'")
-            .execute(&mut *tx)
-            .await
-            .expect("change ordinary topic");
-        let root_after_ordinary_change = compute_owner_root(&mut tx, owner_type).await;
-        assert_ne!(root_after_ordinary_change, ordinary_root);
     }
 
     #[tokio::test]

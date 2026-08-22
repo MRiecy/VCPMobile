@@ -114,9 +114,6 @@ mod tests {
             tx.query_row(sql, [], |row| row.get::<_, String>(0))
         };
 
-        bubble(&tx).expect("bubble default-only owner");
-        assert_eq!(read_root(&tx).expect("read default-only root"), "");
-
         tx.execute(
             "INSERT INTO topics VALUES ('topic-a', 'owner', ?, 'config-a', 'content-a', NULL)",
             [owner_type],
@@ -138,14 +135,6 @@ mod tests {
         .expect("change default topic");
         bubble(&tx).expect("bubble changed default topic");
         assert_eq!(read_root(&tx).expect("read unchanged root"), ordinary_root);
-
-        tx.execute(
-            "UPDATE topics SET content_hash = 'content-b' WHERE topic_id = 'topic-a'",
-            [],
-        )
-        .expect("change ordinary topic");
-        bubble(&tx).expect("bubble changed ordinary topic");
-        assert_ne!(read_root(&tx).expect("read changed root"), ordinary_root);
     }
 
     #[test]

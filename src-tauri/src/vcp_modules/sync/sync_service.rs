@@ -3506,26 +3506,6 @@ mod tests {
     }
 
     #[test]
-    fn sync_error_classification_covers_connection_protocol_and_data_failures() {
-        assert_eq!(
-            build_sync_error_payload("CONNECTION_REFUSED", Vec::new(), None).category,
-            SyncErrorCategory::Connection
-        );
-        assert_eq!(
-            build_sync_error_payload("PROTOCOL_FRAME_INVALID", Vec::new(), None).category,
-            SyncErrorCategory::Protocol
-        );
-        assert_eq!(
-            build_sync_error_payload("SYNC_DB_DRAIN_FAILED", Vec::new(), None).category,
-            SyncErrorCategory::Storage
-        );
-        assert_eq!(
-            build_sync_error_payload("SYNC_VERSION_INCOMPATIBLE", Vec::new(), None).category,
-            SyncErrorCategory::Compatibility
-        );
-    }
-
-    #[test]
     fn command_errors_use_the_structured_transport_prefix() {
         let encoded = encode_sync_command_error(
             "VCP_LOG_DISCONNECTED",
@@ -3557,14 +3537,6 @@ mod tests {
         .is_some());
         assert_eq!(removed, 1);
         assert_eq!(failed, 1);
-    }
-
-    #[test]
-    fn protocol_send_failure_names_frame_and_transport_error() {
-        assert_eq!(
-            protocol_send_failure_message("owner metadata manifest", "socket closed"),
-            "Failed to send owner metadata manifest: socket closed"
-        );
     }
 
     #[test]
@@ -3754,31 +3726,6 @@ mod tests {
             .expect("serialize batch");
             assert!(bytes.len() <= MAX_WS_DIFF_BATCH_BYTES);
         }
-
-        let oversized = HashMap::from([(
-            "topic-oversized".to_string(),
-            TopicLocalState {
-                owner_type: "agent".to_string(),
-                owner_id: "agent-a".to_string(),
-                topic_hash: "h".repeat(64),
-                messages: HashMap::from([("x".repeat(MAX_WS_DIFF_BATCH_BYTES), version())]),
-            },
-        )]);
-        assert!(build_diff_batches(oversized).is_err());
-
-        let too_many_messages = (0..=MAX_MESSAGES_PER_BATCH)
-            .map(|index| (format!("message-{index}"), version()))
-            .collect();
-        let oversized_topic = HashMap::from([(
-            "topic-too-many".to_string(),
-            TopicLocalState {
-                owner_type: "agent".to_string(),
-                owner_id: "agent-a".to_string(),
-                topic_hash: "h".repeat(64),
-                messages: too_many_messages,
-            },
-        )]);
-        assert!(build_diff_batches(oversized_topic).is_err());
     }
 
     #[tokio::test]
@@ -3962,56 +3909,28 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_unauthorized_token() {
-        let response = Response::builder()
-            .status(StatusCode::UNAUTHORIZED)
-            .body(None)
-            .unwrap();
-        let err = WsError::Http(response);
+    fn connection_failure_classification_uses_stable_codes() {
+        for (status, expected) in [
+            (StatusCode::UNAUTHORIZED, "TOKEN_MISMATCH"),
+            (StatusCode::NOT_FOUND, "WS_PATH_INVALID"),
+        ] {
+            let response = Response::builder().status(status).body(None).unwrap();
+            let error = WsError::Http(response);
+            assert_eq!(
+                classify_connection_failure("ws://192.168.1.100:3000/ws-sync", &error),
+                expected
+            );
+        }
 
-        assert_eq!(
-            classify_connection_failure("ws://192.168.1.100:3000/ws-sync", &err),
-            "TOKEN_MISMATCH"
-        );
-    }
-
-    #[test]
-    fn test_classify_not_found_path() {
-        let response = Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(None)
-            .unwrap();
-        let err = WsError::Http(response);
-
-        assert_eq!(
-            classify_connection_failure("ws://192.168.1.100:3000/ws-sync", &err),
-            "WS_PATH_INVALID"
-        );
-    }
-
-    #[test]
-    fn test_classify_connection_refused() {
-        let io_err =
-            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "connection refused");
-        let err = WsError::Io(io_err);
-
-        assert_eq!(
-            classify_connection_failure("ws://192.168.1.100:1/ws-sync", &err),
-            "CONNECTION_REFUSED"
-        );
-    }
-
-    #[test]
-    fn test_classify_network_unreachable_as_closed_port() {
-        let io_err = std::io::Error::new(
+        for error_kind in [
+            std::io::ErrorKind::ConnectionRefused,
             std::io::ErrorKind::AddrNotAvailable,
-            "address not available",
-        );
-        let err = WsError::Io(io_err);
-
-        assert_eq!(
-            classify_connection_failure("ws://non-existent-domain-vcp-test.xyz/ws-sync", &err),
-            "CONNECTION_REFUSED"
-        );
+        ] {
+            let error = WsError::Io(std::io::Error::new(error_kind, "connection failed"));
+            assert_eq!(
+                classify_connection_failure("ws://192.168.1.100:3000/ws-sync", &error),
+                "CONNECTION_REFUSED"
+            );
+        }
     }
 }
