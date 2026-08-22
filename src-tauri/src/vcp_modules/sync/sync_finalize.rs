@@ -105,7 +105,6 @@ async fn finalize_modified_topics(
         return Err(format!("同步收尾缺少 live 话题元数据: {missing:?}"));
     }
 
-    let updated_at = chrono::Utc::now().timestamp_millis();
     for topic_chunk in topic_ids.chunks(SQLITE_BIND_CHUNK) {
         let placeholders = topic_chunk
             .iter()
@@ -115,11 +114,10 @@ async fn finalize_modified_topics(
         let update_sql = format!(
             "UPDATE topics SET
                 msg_count = (SELECT COUNT(*) FROM messages
-                             WHERE messages.topic_id = topics.topic_id AND deleted_at IS NULL),
-                updated_at = ?
+                             WHERE messages.topic_id = topics.topic_id AND deleted_at IS NULL)
              WHERE deleted_at IS NULL AND topic_id IN ({placeholders})"
         );
-        let mut update = sqlx::query(&update_sql).bind(updated_at);
+        let mut update = sqlx::query(&update_sql);
         for topic_id in topic_chunk {
             update = update.bind(*topic_id);
         }
@@ -264,6 +262,56 @@ impl SyncFinalizer {
 mod tests {
     use super::finalize_modified_topics;
     use std::collections::HashSet;
+
+    #[tokio::test]
+    async fn finalizer_updates_content_without_advancing_topic_config_time() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database");
+        sqlx::query(
+            "CREATE TABLE agents (
+                agent_id TEXT PRIMARY KEY, content_hash TEXT, deleted_at INTEGER
+             );
+             CREATE TABLE groups (
+                group_id TEXT PRIMARY KEY, content_hash TEXT, deleted_at INTEGER
+             );
+             CREATE TABLE topics (
+                topic_id TEXT PRIMARY KEY, owner_id TEXT, owner_type TEXT, title TEXT,
+                created_at INTEGER, locked INTEGER, unread INTEGER, msg_count INTEGER,
+                updated_at INTEGER, config_hash TEXT, content_hash TEXT, deleted_at INTEGER
+             );
+             CREATE TABLE messages (
+                topic_id TEXT, msg_id TEXT, timestamp INTEGER,
+                content_hash TEXT, deleted_at INTEGER
+             );
+             INSERT INTO agents VALUES ('agent', 'owner-before', NULL);
+             INSERT INTO topics VALUES
+                ('topic', 'agent', 'agent', 'Topic', 1, 1, 0, 0, 77,
+                 'config-before', 'content-before', NULL);
+             INSERT INTO messages VALUES ('topic', 'message', 1, 'message-hash', NULL);",
+        )
+        .execute(&pool)
+        .await
+        .expect("create finalizer fixture");
+
+        finalize_modified_topics(&pool, &HashSet::from(["topic".to_string()]))
+            .await
+            .expect("finalize topic");
+        let state: (i64, i64, String, String) = sqlx::query_as(
+            "SELECT t.updated_at, t.msg_count, t.content_hash, a.content_hash
+             FROM topics t JOIN agents a ON a.agent_id = t.owner_id
+             WHERE t.topic_id = 'topic'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read finalized state");
+        assert_eq!(state.0, 77);
+        assert_eq!(state.1, 1);
+        assert_ne!(state.2, "content-before");
+        assert_ne!(state.3, "owner-before");
+    }
 
     #[tokio::test]
     async fn late_owner_hash_failure_rolls_back_all_finalizer_updates() {

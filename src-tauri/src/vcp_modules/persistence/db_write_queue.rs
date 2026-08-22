@@ -181,8 +181,8 @@ mod tests {
              );
              CREATE TABLE topics (
                 topic_id TEXT PRIMARY KEY, title TEXT, owner_id TEXT, owner_type TEXT,
-                created_at INTEGER, locked INTEGER, unread INTEGER, updated_at INTEGER,
-                deleted_at INTEGER
+                created_at INTEGER, locked INTEGER, unread INTEGER, config_hash TEXT,
+                updated_at INTEGER, deleted_at INTEGER
              );
              INSERT INTO agents VALUES
                 ('agent-live', 'live', '', '', 0, 0, 0, 0, '', '', 1, NULL),
@@ -194,7 +194,7 @@ mod tests {
              INSERT INTO avatars VALUES
                 ('agent', 'agent-deleted', 'old-hash', 'image/png', x'09', NULL, 1, 9);
              INSERT INTO topics VALUES
-                ('topic-deleted', 'deleted-topic', 'agent-live', 'agent', 1, 1, 0, 1, 9);",
+                ('topic-deleted', 'deleted-topic', 'agent-live', 'agent', 1, 1, 0, '', 1, 9);",
         )
         .expect("create tombstone fixture");
 
@@ -736,8 +736,11 @@ impl DbWriteQueue {
                 context_token_limit = excluded.context_token_limit, 
                 max_output_tokens = excluded.max_output_tokens, 
                 stream_output = excluded.stream_output, 
-                config_hash = excluded.config_hash,
-                updated_at = excluded.updated_at
+                updated_at = CASE
+                    WHEN agents.config_hash IS NOT excluded.config_hash THEN excluded.updated_at
+                    ELSE agents.updated_at
+                END,
+                config_hash = excluded.config_hash
              WHERE agents.deleted_at IS NULL",
             rusqlite::params![
                 id,
@@ -790,8 +793,11 @@ impl DbWriteQueue {
                 unified_model = excluded.unified_model,
                 tag_match_mode = excluded.tag_match_mode,
                 created_at = excluded.created_at,
-                config_hash = excluded.config_hash,
-                updated_at = excluded.updated_at
+                updated_at = CASE
+                    WHEN groups.config_hash IS NOT excluded.config_hash THEN excluded.updated_at
+                    ELSE groups.updated_at
+                END,
+                config_hash = excluded.config_hash
              WHERE groups.deleted_at IS NULL",
             rusqlite::params![
                 id,
@@ -932,19 +938,25 @@ impl DbWriteQueue {
             }
         }
         let now = chrono::Utc::now().timestamp_millis();
+        let config_hash = HashAggregator::compute_agent_topic_metadata_hash(dto);
 
         let changed = tx.execute(
-            "INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, updated_at)
-            SELECT ?, ?, ?, 'agent', ?, ?, ?, ?
+            "INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, config_hash, updated_at)
+            SELECT ?, ?, ?, 'agent', ?, ?, ?, ?, ?
             WHERE EXISTS (SELECT 1 FROM agents WHERE agent_id = ? AND deleted_at IS NULL)
             ON CONFLICT(topic_id) DO UPDATE SET
-            title=excluded.title, locked=excluded.locked, unread=excluded.unread, updated_at=excluded.updated_at
+            title=excluded.title, locked=excluded.locked, unread=excluded.unread,
+            updated_at=CASE
+                WHEN topics.config_hash IS NOT excluded.config_hash THEN excluded.updated_at
+                ELSE topics.updated_at
+            END,
+            config_hash=excluded.config_hash
             WHERE topics.deleted_at IS NULL",
             rusqlite::params![
                 topic_id, &dto.name, &dto.owner_id, dto.created_at,
                 if dto.locked { 1 } else { 0 },
                 if dto.unread { 1 } else { 0 },
-                now, &dto.owner_id
+                &config_hash, now, &dto.owner_id
             ]
         )?;
         if changed != 1 {
@@ -1003,15 +1015,24 @@ impl DbWriteQueue {
             }
         }
         let now = chrono::Utc::now().timestamp_millis();
+        let config_hash = HashAggregator::compute_group_topic_metadata_hash(dto);
 
         let changed = tx.execute(
-            "INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, updated_at)
-            SELECT ?, ?, ?, 'group', ?, 1, 0, ?
+            "INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, config_hash, updated_at)
+            SELECT ?, ?, ?, 'group', ?, 1, 0, ?, ?
             WHERE EXISTS (SELECT 1 FROM groups WHERE group_id = ? AND deleted_at IS NULL)
             ON CONFLICT(topic_id) DO UPDATE SET
-            title=excluded.title, updated_at=excluded.updated_at
+            title=excluded.title,
+            updated_at=CASE
+                WHEN topics.config_hash IS NOT excluded.config_hash THEN excluded.updated_at
+                ELSE topics.updated_at
+            END,
+            config_hash=excluded.config_hash
             WHERE topics.deleted_at IS NULL",
-            rusqlite::params![topic_id, &dto.name, &dto.owner_id, dto.created_at, now, &dto.owner_id]
+            rusqlite::params![
+                topic_id, &dto.name, &dto.owner_id, dto.created_at,
+                &config_hash, now, &dto.owner_id
+            ]
         )?;
         if changed != 1 {
             return Err(Self::sync_contract_error(format!(

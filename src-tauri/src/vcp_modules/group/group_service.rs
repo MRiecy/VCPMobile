@@ -471,8 +471,11 @@ async fn internal_write_group_config<R: Runtime>(
             use_unified_model = excluded.use_unified_model,
             unified_model = excluded.unified_model,
             tag_match_mode = excluded.tag_match_mode,
-            config_hash = excluded.config_hash,
-            updated_at = excluded.updated_at",
+            updated_at = CASE
+                WHEN groups.config_hash IS NOT excluded.config_hash THEN excluded.updated_at
+                ELSE groups.updated_at
+            END,
+            config_hash = excluded.config_hash",
     )
     .bind(group_id)
     .bind(&config.name)
@@ -518,16 +521,28 @@ async fn internal_write_group_config<R: Runtime>(
 
     if !config.topics.is_empty() {
         for topic in &config.topics {
+            let topic_hash = HashAggregator::compute_group_topic_metadata_hash(
+                &crate::vcp_modules::sync_dto::GroupTopicSyncDTO {
+                    id: topic.id.clone(),
+                    name: topic.name.clone(),
+                    created_at: topic.created_at,
+                    owner_id: group_id.to_string(),
+                },
+            );
             sqlx::query(
                 "INSERT INTO topics (
                     topic_id, owner_type, owner_id, title,
-                    created_at, updated_at, locked, unread
-                ) VALUES (?, 'group', ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, locked, unread, config_hash
+                ) VALUES (?, 'group', ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(topic_id) DO UPDATE SET
                     title = excluded.title,
                     locked = excluded.locked,
                     unread = excluded.unread,
-                    updated_at = excluded.updated_at",
+                    updated_at = CASE
+                        WHEN topics.config_hash IS NOT excluded.config_hash THEN excluded.updated_at
+                        ELSE topics.updated_at
+                    END,
+                    config_hash = excluded.config_hash",
             )
             .bind(&topic.id)
             .bind(group_id)
@@ -536,6 +551,7 @@ async fn internal_write_group_config<R: Runtime>(
             .bind(now)
             .bind(topic.locked)
             .bind(topic.unread)
+            .bind(&topic_hash)
             .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;

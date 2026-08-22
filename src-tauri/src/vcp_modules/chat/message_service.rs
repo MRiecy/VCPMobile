@@ -1006,10 +1006,9 @@ pub async fn begin_stream_message(
         .map_err(|e| e.to_string())?;
 
     sqlx::query(
-        "UPDATE topics SET updated_at = ?, msg_count = (SELECT COUNT(*) FROM messages \
+        "UPDATE topics SET msg_count = (SELECT COUNT(*) FROM messages \
          WHERE topic_id = ? AND deleted_at IS NULL) WHERE topic_id = ?",
     )
-    .bind(now)
     .bind(topic_id)
     .bind(topic_id)
     .execute(&mut *tx)
@@ -1075,8 +1074,7 @@ pub async fn append_single_message<R: tauri::Runtime>(
     .map_err(|e| e.to_string())?
     .unwrap_or(0);
 
-    sqlx::query("UPDATE topics SET updated_at = ?, msg_count = ? WHERE topic_id = ?")
-        .bind(message.timestamp as i64)
+    sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ?")
         .bind(msg_count)
         .bind(&topic_id)
         .execute(&mut *tx)
@@ -1178,14 +1176,6 @@ pub async fn patch_single_message<R: tauri::Runtime>(
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
     MessageRepository::upsert_message(&mut tx, &message, &topic_id, &render_bytes, skip_bubble)
         .await?;
-
-    let now = chrono::Utc::now().timestamp_millis();
-    sqlx::query("UPDATE topics SET updated_at = ? WHERE topic_id = ?")
-        .bind(now)
-        .bind(&topic_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(blocks)
@@ -1326,15 +1316,13 @@ pub async fn delete_messages(
     .map_err(|e| e.to_string())?
     .unwrap_or(0);
 
-    let topic_update = sqlx::query(
-        "UPDATE topics SET msg_count = ?, updated_at = ? WHERE topic_id = ? AND deleted_at IS NULL",
-    )
-    .bind(msg_count)
-    .bind(now)
-    .bind(topic_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
+    let topic_update =
+        sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ? AND deleted_at IS NULL")
+            .bind(msg_count)
+            .bind(topic_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
     if topic_update.rows_affected() != 1 {
         return Err(format!("Topic {topic_id} is missing or deleted"));
     }
@@ -1423,11 +1411,10 @@ pub async fn truncate_history_after_timestamp(
     .map_err(|e| e.to_string())?
     .unwrap_or(0);
     let topic_update = sqlx::query(
-        "UPDATE topics SET msg_count = ?, updated_at = ?
+        "UPDATE topics SET msg_count = ?
          WHERE topic_id = ? AND deleted_at IS NULL",
     )
     .bind(msg_count)
-    .bind(now)
     .bind(topic_id)
     .execute(&mut *tx)
     .await
@@ -1723,12 +1710,6 @@ async fn commit_stream_message(
         ));
     }
 
-    sqlx::query("UPDATE topics SET updated_at = ? WHERE topic_id = ?")
-        .bind(final_ts as i64)
-        .bind(topic_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
     HashAggregator::bubble_from_topic(&mut tx, topic_id).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok((blocks, start_timestamp as u64))
@@ -1980,6 +1961,12 @@ mod stream_lifecycle_tests {
         )
         .await
         .expect("begin generation");
+        let topic_updated_after_begin: i64 =
+            sqlx::query_scalar("SELECT updated_at FROM topics WHERE topic_id = 'topic-1'")
+                .fetch_one(&pool)
+                .await
+                .expect("topic time after begin");
+        assert_eq!(topic_updated_after_begin, 1);
 
         assert!(begin_stream_message(
             &pool,
@@ -2015,6 +2002,12 @@ mod stream_lifecycle_tests {
         .await
         .expect("finalize generation");
         assert_eq!(terminal_timestamp, skeleton.0 as u64);
+        let topic_updated_after_finalize: i64 =
+            sqlx::query_scalar("SELECT updated_at FROM topics WHERE topic_id = 'topic-1'")
+                .fetch_one(&pool)
+                .await
+                .expect("topic time after finalize");
+        assert_eq!(topic_updated_after_finalize, 1);
 
         let row: (String, Option<String>, i64, Option<String>, Option<String>) = sqlx::query_as(
             "SELECT content, finish_reason, timestamp, name, agent_id \

@@ -118,7 +118,21 @@ impl HashAggregator {
     }
 
     pub fn compute_group_config_hash(dto: &GroupSyncDTO) -> String {
-        compute_deterministic_hash(dto)
+        let meta = serde_json::json!({
+            "name": &dto.name,
+            "members": &dto.members,
+            "mode": &dto.mode,
+            "memberTags": dto.member_tags.clone().unwrap_or_else(|| serde_json::json!({})),
+            "groupPrompt": dto.group_prompt.as_deref().unwrap_or(""),
+            "invitePrompt": dto.invite_prompt.as_deref().unwrap_or(
+                "现在轮到你{{VCPChatAgentName}}发言了。系统已经为大家添加[xxx的发言：]这样的标记头，以用于区分不同发言来自谁。大家不用自己再输出自己的发言标记头，也不需要讨论发言标记系统，正常聊天即可。",
+            ),
+            "useUnifiedModel": dto.use_unified_model,
+            "unifiedModel": dto.unified_model.as_deref().unwrap_or(""),
+            "tagMatchMode": dto.tag_match_mode.as_deref().unwrap_or("strict"),
+            "createdAt": dto.created_at,
+        });
+        compute_deterministic_hash(&meta)
     }
 
     pub fn compute_avatar_hash(bytes: &[u8]) -> String {
@@ -850,9 +864,42 @@ mod tests {
             HashAggregator::compute_agent_config_hash(&base),
             HashAggregator::compute_agent_config_hash(&rounded_same)
         );
+        assert_eq!(
+            HashAggregator::compute_agent_config_hash(&base),
+            "a0d2b840400413446fb02e237d21747e735ee35af2684c25667a83ac5e066c4a"
+        );
         assert_ne!(
             HashAggregator::compute_agent_config_hash(&base),
             HashAggregator::compute_agent_config_hash(&rounded_diff)
+        );
+    }
+
+    #[test]
+    fn test_group_config_hash_normalizes_optional_defaults() {
+        let missing = GroupSyncDTO {
+            name: "Group".to_string(),
+            members: Vec::new(),
+            mode: "sequential".to_string(),
+            member_tags: None,
+            group_prompt: None,
+            invite_prompt: None,
+            use_unified_model: false,
+            unified_model: None,
+            tag_match_mode: None,
+            created_at: 0,
+        };
+        let explicit = GroupSyncDTO {
+            member_tags: Some(serde_json::json!({})),
+            group_prompt: Some(String::new()),
+            invite_prompt: Some("现在轮到你{{VCPChatAgentName}}发言了。系统已经为大家添加[xxx的发言：]这样的标记头，以用于区分不同发言来自谁。大家不用自己再输出自己的发言标记头，也不需要讨论发言标记系统，正常聊天即可。".to_string()),
+            unified_model: Some(String::new()),
+            tag_match_mode: Some("strict".to_string()),
+            ..missing.clone()
+        };
+
+        assert_eq!(
+            HashAggregator::compute_group_config_hash(&missing),
+            HashAggregator::compute_group_config_hash(&explicit)
         );
     }
 

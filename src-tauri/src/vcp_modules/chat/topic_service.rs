@@ -311,16 +311,21 @@ pub async fn update_topic_title(
     let now = crate::vcp_modules::infra::utils::now_millis();
 
     let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
-    sqlx::query("UPDATE topics SET title = ?, updated_at = ? WHERE topic_id = ?")
-        .bind(&title)
-        .bind(now)
-        .bind(&topic_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let changed = sqlx::query(
+        "UPDATE topics SET title = ?, updated_at = ?
+         WHERE topic_id = ? AND deleted_at IS NULL AND title IS NOT ?",
+    )
+    .bind(&title)
+    .bind(now)
+    .bind(&topic_id)
+    .bind(&title)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
 
-    // 触发聚合哈希冒泡 (重算当前 topic 的哈希，并向上累加到 Agent/Group)
-    HashAggregator::bubble_from_topic(&mut tx, &topic_id).await?;
+    if changed.rows_affected() == 1 {
+        HashAggregator::bubble_from_topic(&mut tx, &topic_id).await?;
+    }
     tx.commit().await.map_err(|e| e.to_string())?;
 
     Ok(())
@@ -358,16 +363,21 @@ pub async fn toggle_topic_lock(
     let now = crate::vcp_modules::infra::utils::now_millis();
 
     let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
-    sqlx::query("UPDATE topics SET locked = ?, updated_at = ? WHERE topic_id = ?")
-        .bind(locked)
-        .bind(now)
-        .bind(&topic_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let changed = sqlx::query(
+        "UPDATE topics SET locked = ?, updated_at = ?
+         WHERE topic_id = ? AND owner_type = 'agent' AND deleted_at IS NULL AND locked IS NOT ?",
+    )
+    .bind(locked)
+    .bind(now)
+    .bind(&topic_id)
+    .bind(locked)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
 
-    // 触发聚合哈希冒泡
-    HashAggregator::bubble_from_topic(&mut tx, &topic_id).await?;
+    if changed.rows_affected() == 1 {
+        HashAggregator::bubble_from_topic(&mut tx, &topic_id).await?;
+    }
     tx.commit().await.map_err(|e| e.to_string())?;
 
     Ok(())
@@ -382,14 +392,32 @@ pub async fn set_topic_unread(
     topic_id: String,
     unread: bool,
 ) -> Result<(), String> {
+    set_topic_unread_in_pool(&db_state.pool, &topic_id, unread).await
+}
+
+async fn set_topic_unread_in_pool(
+    pool: &sqlx::SqlitePool,
+    topic_id: &str,
+    unread: bool,
+) -> Result<(), String> {
     let unread_int = if unread { 1 } else { 0 };
-    sqlx::query("UPDATE topics SET unread = ?, updated_at = ? WHERE topic_id = ?")
-        .bind(unread_int)
-        .bind(crate::vcp_modules::infra::utils::now_millis())
-        .bind(&topic_id)
-        .execute(&db_state.pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let changed = sqlx::query(
+        "UPDATE topics SET unread = ?, updated_at = ?
+         WHERE topic_id = ? AND owner_type = 'agent' AND deleted_at IS NULL AND unread IS NOT ?",
+    )
+    .bind(unread_int)
+    .bind(crate::vcp_modules::infra::utils::now_millis())
+    .bind(topic_id)
+    .bind(unread_int)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    if changed.rows_affected() == 1 {
+        HashAggregator::bubble_from_topic(&mut tx, topic_id).await?;
+    }
+    tx.commit().await.map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -671,5 +699,77 @@ pub async fn regenerate_topic_response(
             false, // skip append_user_msg
         )
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn agent_topic_unread_change_advances_config_and_bubbles_owner() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+        sqlx::query(
+            "INSERT INTO agents (agent_id, name, model, updated_at)
+             VALUES ('agent', 'Agent', 'model', 1);
+             INSERT INTO topics (
+                topic_id, owner_type, owner_id, title, created_at, updated_at, unread
+             ) VALUES ('topic', 'agent', 'agent', 'Topic', 1, 1, 0);",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed owner and topic");
+        let mut tx = pool.begin().await.expect("begin hash initialization");
+        HashAggregator::bubble_from_topic(&mut tx, "topic")
+            .await
+            .expect("initialize hashes");
+        tx.commit().await.expect("commit hash initialization");
+
+        let before: (String, String, String, i64) = sqlx::query_as(
+            "SELECT t.config_hash, t.content_hash, a.content_hash, t.updated_at
+             FROM topics t JOIN agents a ON a.agent_id = t.owner_id
+             WHERE t.topic_id = 'topic'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read initial state");
+
+        set_topic_unread_in_pool(&pool, "topic", true)
+            .await
+            .expect("mark topic unread");
+        let changed: (String, String, String, i64) = sqlx::query_as(
+            "SELECT t.config_hash, t.content_hash, a.content_hash, t.updated_at
+             FROM topics t JOIN agents a ON a.agent_id = t.owner_id
+             WHERE t.topic_id = 'topic'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read changed state");
+        assert_ne!(changed.0, before.0);
+        assert_eq!(changed.1, before.1);
+        assert_ne!(changed.2, before.2);
+        assert!(changed.3 > before.3);
+
+        set_topic_unread_in_pool(&pool, "topic", true)
+            .await
+            .expect("repeat unread state");
+        let repeated: (String, String, String, i64) = sqlx::query_as(
+            "SELECT t.config_hash, t.content_hash, a.content_hash, t.updated_at
+             FROM topics t JOIN agents a ON a.agent_id = t.owner_id
+             WHERE t.topic_id = 'topic'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read repeated state");
+        assert_eq!(repeated, changed);
     }
 }
