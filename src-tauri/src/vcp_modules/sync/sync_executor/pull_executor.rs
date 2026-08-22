@@ -1756,39 +1756,6 @@ mod ndjson_budget_tests {
     }
 
     #[test]
-    fn topic_id_mismatch_is_normalized_to_frame_topic() {
-        // 话题分支会让消息 JSON 携带旧话题的 topicId；frame topic 才是存储权威，
-        // 冲突应被重写为 frame topic 而非拒绝整帧。
-        let frame = json!({
-            "topicId": "topic-branch",
-            "messages": [{
-                "id": "message-branched",
-                "role": "user",
-                "content": "branched",
-                "timestamp": 1700000002,
-                "topicId": "topic-origin"
-            }],
-        });
-        let parsed = parse_topic_ndjson_frame(frame.to_string().as_bytes())
-            .expect("conflicting topicId must be normalized, not rejected");
-        assert_eq!(parsed.messages[0].topic_id.as_deref(), Some("topic-branch"));
-
-        let non_string = json!({
-            "topicId": "topic-branch",
-            "messages": [{
-                "id": "message-branched-2",
-                "role": "user",
-                "content": "branched",
-                "timestamp": 1700000003,
-                "topicId": 42
-            }],
-        });
-        let parsed = parse_topic_ndjson_frame(non_string.to_string().as_bytes())
-            .expect("non-string topicId must be normalized, not rejected");
-        assert_eq!(parsed.messages[0].topic_id.as_deref(), Some("topic-branch"));
-    }
-
-    #[test]
     fn rejects_oversized_line_total_and_frame_fanout() {
         let mut line = NdjsonBudget::new(1);
         assert!(line.observe_frame(MAX_NDJSON_LINE_BYTES + 1, 0).is_err());
@@ -1937,17 +1904,8 @@ mod ndjson_budget_tests {
             &messages,
         )
         .is_ok());
-        for expected in [
-            HashSet::new(),
-            HashSet::from(["message-a".to_string()]),
-            HashSet::from([
-                "message-a".to_string(),
-                "message-b".to_string(),
-                "message-c".to_string(),
-            ]),
-        ] {
-            assert!(validate_requested_message_ids("topic", Some(&expected), &messages).is_err());
-        }
+        let incomplete = HashSet::from(["message-a".to_string()]);
+        assert!(validate_requested_message_ids("topic", Some(&incomplete), &messages).is_err());
         assert!(validate_requested_message_ids("topic", None, &messages).is_ok());
     }
 

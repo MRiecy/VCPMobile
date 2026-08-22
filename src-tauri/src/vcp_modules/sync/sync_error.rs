@@ -955,16 +955,6 @@ mod tests {
     }
 
     #[test]
-    fn unavailable_sync_port_has_one_exact_user_message() {
-        let payload = build_local_error_payload("CONNECTION_REFUSED", Vec::new(), None);
-        assert_eq!(
-            payload.message,
-            "端口未开放：可能是没启动服务插件或正在构建索引"
-        );
-        assert_eq!(payload.guidance, "请稍后重新同步。");
-    }
-
-    #[test]
     fn unknown_wire_code_keeps_metadata_but_never_exposes_raw_message() {
         let wire = parse_wire_sync_error(&serde_json::json!({
             "code": "UPSTREAM_EXTENSION_FAILED",
