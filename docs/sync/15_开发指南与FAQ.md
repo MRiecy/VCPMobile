@@ -154,7 +154,7 @@ function extractPresetDTO(config) {
     |
     └─ Message 层级
         ▼
-        检查 content + attachmentHashes
+        检查消息身份/持久同步字段 + attachmentHashes
         ▼
         确认附件哈希列表排序一致
         ▼

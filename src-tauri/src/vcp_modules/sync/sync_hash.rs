@@ -8,15 +8,48 @@ use sqlx::{Row, Sqlite, Transaction};
 pub struct HashAggregator;
 
 impl HashAggregator {
-    pub fn compute_message_fingerprint(content: &str, attachment_hashes: &[String]) -> String {
+    #[allow(clippy::too_many_arguments)]
+    pub fn compute_message_fingerprint(
+        message_id: &str,
+        role: &str,
+        name: Option<&str>,
+        content: &str,
+        timestamp: u64,
+        agent_id: Option<&str>,
+        attachment_hashes: &[String],
+    ) -> String {
         let mut sorted_hashes = attachment_hashes.to_vec();
         sorted_hashes.sort();
 
         let mut fingerprint_map = serde_json::Map::new();
         fingerprint_map.insert(
+            "id".to_string(),
+            serde_json::Value::String(message_id.to_string()),
+        );
+        fingerprint_map.insert(
+            "role".to_string(),
+            serde_json::Value::String(role.to_string()),
+        );
+        if let Some(name) = name {
+            fingerprint_map.insert(
+                "name".to_string(),
+                serde_json::Value::String(name.to_string()),
+            );
+        }
+        fingerprint_map.insert(
             "content".to_string(),
             serde_json::Value::String(content.to_string()),
         );
+        fingerprint_map.insert(
+            "timestamp".to_string(),
+            serde_json::Value::Number(timestamp.into()),
+        );
+        if let Some(agent_id) = agent_id {
+            fingerprint_map.insert(
+                "agentId".to_string(),
+                serde_json::Value::String(agent_id.to_string()),
+            );
+        }
         if !sorted_hashes.is_empty() {
             fingerprint_map.insert(
                 "attachmentHashes".to_string(),
@@ -25,6 +58,25 @@ impl HashAggregator {
         }
 
         compute_deterministic_hash(&serde_json::Value::Object(fingerprint_map))
+    }
+
+    pub fn compute_message_leaf_hash(message_id: &str, message_hash: &str) -> String {
+        compute_deterministic_hash(&serde_json::json!({
+            "id": message_id,
+            "hash": message_hash,
+        }))
+    }
+
+    pub fn compute_topic_leaf_hash(
+        topic_id: &str,
+        config_hash: &str,
+        content_hash: &str,
+    ) -> String {
+        compute_deterministic_hash(&serde_json::json!({
+            "topicId": topic_id,
+            "configHash": config_hash,
+            "contentHash": content_hash,
+        }))
     }
 
     pub fn compute_agent_topic_metadata_hash(dto: &AgentTopicSyncDTO) -> String {
@@ -86,7 +138,7 @@ impl HashAggregator {
         topic_id: &str,
     ) -> Result<String, String> {
         let rows = sqlx::query(
-            "SELECT content_hash FROM messages WHERE topic_id = ? AND deleted_at IS NULL ORDER BY timestamp ASC, msg_id ASC",
+            "SELECT msg_id, content_hash FROM messages WHERE topic_id = ? AND deleted_at IS NULL ORDER BY timestamp ASC, msg_id ASC",
         )
         .bind(topic_id)
         .fetch_all(&mut **tx)
@@ -95,9 +147,13 @@ impl HashAggregator {
 
         let mut hashes = Vec::with_capacity(rows.len());
         for row in rows {
-            hashes.push(row.try_get("content_hash").map_err(|error| {
-                format!("Topic {topic_id} message hash decode failed: {error}")
-            })?);
+            let message_id: String = row
+                .try_get("msg_id")
+                .map_err(|error| format!("Topic {topic_id} message id decode failed: {error}"))?;
+            let message_hash: String = row
+                .try_get("content_hash")
+                .map_err(|error| format!("Topic {topic_id} message hash decode failed: {error}"))?;
+            hashes.push(Self::compute_message_leaf_hash(&message_id, &message_hash));
         }
         Ok(compute_merkle_root(hashes))
     }
@@ -107,22 +163,29 @@ impl HashAggregator {
         agent_id: &str,
     ) -> Result<String, String> {
         let topic_rows = sqlx::query(
-            "SELECT config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'agent' AND topic_id <> 'default' AND deleted_at IS NULL ORDER BY topic_id ASC",
+            "SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'agent' AND topic_id <> 'default' AND deleted_at IS NULL ORDER BY topic_id ASC",
         )
         .bind(agent_id)
         .fetch_all(&mut **tx)
         .await
         .map_err(|e| e.to_string())?;
 
-        let mut hashes = Vec::new();
+        let mut hashes = Vec::with_capacity(topic_rows.len());
         for r in topic_rows {
-            // 将 topic 的元数据 hash 和内容 hash 同时作为叶子节点，确保任何一方变动都会向上冒泡
-            hashes.push(r.try_get("config_hash").map_err(|error| {
+            let topic_id: String = r
+                .try_get("topic_id")
+                .map_err(|error| format!("Agent {agent_id} topic id decode failed: {error}"))?;
+            let config_hash: String = r.try_get("config_hash").map_err(|error| {
                 format!("Agent {agent_id} topic config hash decode failed: {error}")
-            })?);
-            hashes.push(r.try_get("content_hash").map_err(|error| {
+            })?;
+            let content_hash: String = r.try_get("content_hash").map_err(|error| {
                 format!("Agent {agent_id} topic content hash decode failed: {error}")
-            })?);
+            })?;
+            hashes.push(Self::compute_topic_leaf_hash(
+                &topic_id,
+                &config_hash,
+                &content_hash,
+            ));
         }
 
         Ok(compute_merkle_root(hashes))
@@ -133,21 +196,29 @@ impl HashAggregator {
         group_id: &str,
     ) -> Result<String, String> {
         let topic_rows = sqlx::query(
-            "SELECT config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'group' AND topic_id <> 'default' AND deleted_at IS NULL ORDER BY topic_id ASC",
+            "SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'group' AND topic_id <> 'default' AND deleted_at IS NULL ORDER BY topic_id ASC",
         )
         .bind(group_id)
         .fetch_all(&mut **tx)
         .await
         .map_err(|e| e.to_string())?;
 
-        let mut hashes = Vec::new();
+        let mut hashes = Vec::with_capacity(topic_rows.len());
         for r in topic_rows {
-            hashes.push(r.try_get("config_hash").map_err(|error| {
+            let topic_id: String = r
+                .try_get("topic_id")
+                .map_err(|error| format!("Group {group_id} topic id decode failed: {error}"))?;
+            let config_hash: String = r.try_get("config_hash").map_err(|error| {
                 format!("Group {group_id} topic config hash decode failed: {error}")
-            })?);
-            hashes.push(r.try_get("content_hash").map_err(|error| {
+            })?;
+            let content_hash: String = r.try_get("content_hash").map_err(|error| {
                 format!("Group {group_id} topic content hash decode failed: {error}")
-            })?);
+            })?;
+            hashes.push(Self::compute_topic_leaf_hash(
+                &topic_id,
+                &config_hash,
+                &content_hash,
+            ));
         }
 
         Ok(compute_merkle_root(hashes))
@@ -671,21 +742,92 @@ mod tests {
     use crate::vcp_modules::sync_dto::{AgentSyncDTO, AgentTopicSyncDTO, GroupTopicSyncDTO};
 
     #[test]
-    fn test_message_fingerprint_ignores_attachment_order() {
+    fn message_fingerprint_binds_identity_and_state_but_ignores_attachment_order() {
         let a = HashAggregator::compute_message_fingerprint(
+            "message-a",
+            "assistant",
+            Some("Nova"),
             "hello",
+            123,
+            Some("agent-a"),
             &["hash-b".to_string(), "hash-a".to_string()],
         );
         let b = HashAggregator::compute_message_fingerprint(
+            "message-a",
+            "assistant",
+            Some("Nova"),
             "hello",
+            123,
+            Some("agent-a"),
             &["hash-a".to_string(), "hash-b".to_string()],
         );
 
         assert_eq!(a, b);
+        for changed in [
+            HashAggregator::compute_message_fingerprint(
+                "message-b",
+                "assistant",
+                Some("Nova"),
+                "hello",
+                123,
+                Some("agent-a"),
+                &["hash-a".to_string(), "hash-b".to_string()],
+            ),
+            HashAggregator::compute_message_fingerprint(
+                "message-a",
+                "user",
+                Some("Nova"),
+                "hello",
+                123,
+                Some("agent-a"),
+                &["hash-a".to_string(), "hash-b".to_string()],
+            ),
+            HashAggregator::compute_message_fingerprint(
+                "message-a",
+                "assistant",
+                Some("Other"),
+                "hello",
+                123,
+                Some("agent-a"),
+                &["hash-a".to_string(), "hash-b".to_string()],
+            ),
+            HashAggregator::compute_message_fingerprint(
+                "message-a",
+                "assistant",
+                Some("Nova"),
+                "hello",
+                124,
+                Some("agent-a"),
+                &["hash-a".to_string(), "hash-b".to_string()],
+            ),
+        ] {
+            assert_ne!(a, changed);
+        }
+    }
+
+    #[test]
+    fn keyed_leaves_preserve_message_identity_and_topic_pairing() {
+        let message_hash = "same-message-state";
         assert_ne!(
-            a,
-            HashAggregator::compute_message_fingerprint("hello!", &["hash-a".to_string()])
+            compute_merkle_root(vec![HashAggregator::compute_message_leaf_hash(
+                "message-a",
+                message_hash,
+            )]),
+            compute_merkle_root(vec![HashAggregator::compute_message_leaf_hash(
+                "message-b",
+                message_hash,
+            )]),
         );
+
+        let original = compute_merkle_root(vec![
+            HashAggregator::compute_topic_leaf_hash("topic-a", "config-a", "content-a"),
+            HashAggregator::compute_topic_leaf_hash("topic-b", "config-b", "content-b"),
+        ]);
+        let swapped = compute_merkle_root(vec![
+            HashAggregator::compute_topic_leaf_hash("topic-a", "config-a", "content-b"),
+            HashAggregator::compute_topic_leaf_hash("topic-b", "config-b", "content-a"),
+        ]);
+        assert_ne!(original, swapped);
     }
 
     #[test]
@@ -795,7 +937,11 @@ mod tests {
         let ordinary_root = compute_owner_root(&mut tx, owner_type).await;
         assert_eq!(
             ordinary_root,
-            "1e33dc5103370a9970e5c719697e29dcc8bff3a3196de13fcbaaf1029c0436c4"
+            compute_merkle_root(vec![HashAggregator::compute_topic_leaf_hash(
+                "topic-a",
+                "config-a",
+                "content-a",
+            )])
         );
 
         sqlx::query("UPDATE topics SET config_hash = 'changed-default' WHERE topic_id = 'default'")

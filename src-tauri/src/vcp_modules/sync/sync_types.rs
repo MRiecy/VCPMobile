@@ -16,7 +16,7 @@ pub fn compute_deterministic_hash<T: Serialize>(data: &T) -> String {
 }
 
 /// 计算一组哈希的聚合哈希 (Merkle Root)
-/// 规则：将所有哈希按 ID 字典序排列后，连接并计算总 Hash
+/// 规则：调用方先将实体身份绑定进叶子，再排序叶子哈希并计算总 Hash
 pub fn compute_merkle_root(mut hashes: Vec<String>) -> String {
     if hashes.is_empty() {
         return "".to_string();

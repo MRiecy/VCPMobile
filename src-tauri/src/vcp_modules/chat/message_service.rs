@@ -933,7 +933,17 @@ pub async fn begin_stream_message(
 ) -> Result<(), String> {
     let now = crate::vcp_modules::infra::utils::now_millis();
     let (_, render_bytes) = compile_and_serialize_render_async(String::new()).await?;
-    let content_hash = HashAggregator::compute_message_fingerprint("", &[]);
+    let fingerprint_timestamp = u64::try_from(now)
+        .map_err(|_| "Current timestamp cannot be represented as u64".to_string())?;
+    let content_hash = HashAggregator::compute_message_fingerprint(
+        message_id,
+        "assistant",
+        agent_name,
+        "",
+        fingerprint_timestamp,
+        agent_id,
+        &[],
+    );
     let is_group = owner_type == "group";
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
 
@@ -1588,12 +1598,11 @@ async fn commit_stream_message(
     final_content: &str,
     final_ts: u64,
     finish_reason: &str,
-    _agent_id: Option<&str>,
-    _agent_name: Option<&str>,
+    agent_id: Option<&str>,
+    agent_name: Option<&str>,
 ) -> Result<(Vec<ContentBlock>, u64), String> {
     let (blocks, render_bytes) =
         compile_and_serialize_render_async(final_content.to_string()).await?;
-    let content_hash = HashAggregator::compute_message_fingerprint(final_content, &[]);
     let is_group = owner_type == "group";
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
@@ -1616,6 +1625,17 @@ async fn commit_stream_message(
             message_id, owner_type, owner_id, topic_id
         )
     })?;
+    let fingerprint_timestamp = u64::try_from(start_timestamp)
+        .map_err(|_| format!("Message {message_id} has a negative timestamp"))?;
+    let content_hash = HashAggregator::compute_message_fingerprint(
+        message_id,
+        "assistant",
+        agent_name,
+        final_content,
+        fingerprint_timestamp,
+        agent_id,
+        &[],
+    );
 
     let updated = sqlx::query(
         "UPDATE messages SET role = 'assistant', content = ?, \

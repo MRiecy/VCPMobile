@@ -598,7 +598,12 @@ async fn process_topic_messages<R: Runtime>(
                     // contentHash 只依据最终规范化消息计算，禁止复用桌面端在内部字段
                     // 尚未剥离时生成的旧指纹。
                     let content_hash = HashAggregator::compute_message_fingerprint(
+                        &msg.id,
+                        &msg.role,
+                        msg.name.as_deref(),
                         &msg.content,
+                        msg.timestamp,
+                        msg.agent_id.as_deref(),
                         &attachment_hashes,
                     );
 
@@ -1723,7 +1728,7 @@ mod ndjson_budget_tests {
 
     const PROTOCOL_1_2_GOLDEN: &[u8] = include_bytes!("../fixtures/protocol_1_2_golden.json");
     const PROTOCOL_1_2_GOLDEN_SHA256: &str =
-        "62d4eecb639feb1a6e46302dc4046c622a5477d6a53463320c891757be629a9b";
+        "187d599d33ef660de299aae77a68eb92313af3d603efe72f7f06ecb6ac1e0c1f";
 
     #[test]
     fn pull_frame_owner_identity_must_match_the_local_topic() {
@@ -1793,7 +1798,12 @@ mod ndjson_budget_tests {
                         })
                         .unwrap_or_default();
                     crate::vcp_modules::sync_hash::HashAggregator::compute_message_fingerprint(
+                        &message.id,
+                        &message.role,
+                        message.name.as_deref(),
                         &message.content,
+                        message.timestamp,
+                        message.agent_id.as_deref(),
                         &hashes,
                     )
                 })

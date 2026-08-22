@@ -553,8 +553,15 @@ impl MessageRepository {
             })
             .unwrap_or_default();
 
-        let content_hash =
-            HashAggregator::compute_message_fingerprint(&message.content, &attachment_hashes);
+        let content_hash = HashAggregator::compute_message_fingerprint(
+            &message.id,
+            &message.role,
+            message.name.as_deref(),
+            &message.content,
+            message.timestamp,
+            message.agent_id.as_deref(),
+            &attachment_hashes,
+        );
 
         // 2. 插入或更新消息 (不含 render_content)
         sqlx::query(

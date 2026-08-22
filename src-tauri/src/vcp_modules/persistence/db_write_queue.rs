@@ -61,6 +61,7 @@ mod tests {
     use crate::vcp_modules::sync_dto::{
         AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
     };
+    use crate::vcp_modules::sync_hash::HashAggregator;
 
     #[test]
     fn flush_error_summary_is_reported_once() {
@@ -133,7 +134,9 @@ mod tests {
         let ordinary_root = read_root(&tx).expect("read ordinary root");
         assert_eq!(
             ordinary_root,
-            "1e33dc5103370a9970e5c719697e29dcc8bff3a3196de13fcbaaf1029c0436c4"
+            crate::vcp_modules::sync_types::compute_merkle_root(vec![
+                HashAggregator::compute_topic_leaf_hash("topic-a", "config-a", "content-a",),
+            ])
         );
 
         tx.execute(
@@ -1452,9 +1455,16 @@ impl DbWriteQueue {
         topic_id: &str,
     ) -> rusqlite::Result<()> {
         // 1. 计算 content_hash (消息聚合)
-        let mut stmt = tx.prepare("SELECT content_hash FROM messages WHERE topic_id = ? AND deleted_at IS NULL ORDER BY timestamp ASC, msg_id ASC")?;
+        let mut stmt = tx.prepare("SELECT msg_id, content_hash FROM messages WHERE topic_id = ? AND deleted_at IS NULL ORDER BY timestamp ASC, msg_id ASC")?;
         let hashes: Vec<String> = stmt
-            .query_map([topic_id], |r| r.get(0))?
+            .query_map([topic_id], |row| {
+                let message_id = row.get::<_, String>(0)?;
+                let message_hash = row.get::<_, String>(1)?;
+                Ok(HashAggregator::compute_message_leaf_hash(
+                    &message_id,
+                    &message_hash,
+                ))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let root_hash = crate::vcp_modules::sync_types::compute_merkle_root(hashes);
 
@@ -1493,12 +1503,15 @@ impl DbWriteQueue {
         tx: &rusqlite::Transaction,
         agent_id: &str,
     ) -> rusqlite::Result<()> {
-        let mut stmt = tx.prepare("SELECT config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'agent' AND topic_id <> 'default' AND deleted_at IS NULL ORDER BY topic_id ASC")?;
+        let mut stmt = tx.prepare("SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'agent' AND topic_id <> 'default' AND deleted_at IS NULL ORDER BY topic_id ASC")?;
         let mut rows = stmt.query([agent_id])?;
         let mut hashes = Vec::new();
         while let Some(row) = rows.next()? {
-            hashes.push(row.get::<_, String>(0)?);
-            hashes.push(row.get::<_, String>(1)?);
+            hashes.push(HashAggregator::compute_topic_leaf_hash(
+                &row.get::<_, String>(0)?,
+                &row.get::<_, String>(1)?,
+                &row.get::<_, String>(2)?,
+            ));
         }
         let root_hash = crate::vcp_modules::sync_types::compute_merkle_root(hashes);
         let changed = tx.execute(
@@ -1517,12 +1530,15 @@ impl DbWriteQueue {
         tx: &rusqlite::Transaction,
         group_id: &str,
     ) -> rusqlite::Result<()> {
-        let mut stmt = tx.prepare("SELECT config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'group' AND topic_id <> 'default' AND deleted_at IS NULL ORDER BY topic_id ASC")?;
+        let mut stmt = tx.prepare("SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'group' AND topic_id <> 'default' AND deleted_at IS NULL ORDER BY topic_id ASC")?;
         let mut rows = stmt.query([group_id])?;
         let mut hashes = Vec::new();
         while let Some(row) = rows.next()? {
-            hashes.push(row.get::<_, String>(0)?);
-            hashes.push(row.get::<_, String>(1)?);
+            hashes.push(HashAggregator::compute_topic_leaf_hash(
+                &row.get::<_, String>(0)?,
+                &row.get::<_, String>(1)?,
+                &row.get::<_, String>(2)?,
+            ));
         }
         let root_hash = crate::vcp_modules::sync_types::compute_merkle_root(hashes);
         let changed = tx.execute(
