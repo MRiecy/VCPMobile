@@ -2,8 +2,8 @@ use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::file_manager::get_attachments_root_dir;
 use crate::vcp_modules::message_repository::{
-    compile_and_serialize_render_async, deserialize_render_async, serialize_render_async,
-    write_render_cache_cas, MessageRepository, RENDERER_SCHEMA_VERSION,
+    compile_and_serialize_render_async, deserialize_render_async, resolve_message_updated_at,
+    serialize_render_async, write_render_cache_cas, MessageRepository, RENDERER_SCHEMA_VERSION,
 };
 use crate::vcp_modules::settings_manager;
 use crate::vcp_modules::sync_hash::HashAggregator;
@@ -1746,21 +1746,94 @@ pub async fn delete_message_attachment(
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
     let now = crate::vcp_modules::infra::utils::now_millis();
+    delete_message_attachment_in_pool(pool, &topic_id, &message_id, &hash, now).await
+}
+
+async fn delete_message_attachment_in_pool(
+    pool: &sqlx::SqlitePool,
+    topic_id: &str,
+    message_id: &str,
+    hash: &str,
+    now: i64,
+) -> Result<(), String> {
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-    sqlx::query(
+    let deleted = sqlx::query(
         "UPDATE message_attachments SET deleted_at = ? \
-         WHERE topic_id = ? AND msg_id = ? AND hash = ?",
+         WHERE topic_id = ? AND msg_id = ? AND hash = ? AND deleted_at IS NULL",
     )
     .bind(now)
-    .bind(&topic_id)
-    .bind(&message_id)
-    .bind(&hash)
+    .bind(topic_id)
+    .bind(message_id)
+    .bind(hash)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
+    if deleted.rows_affected() == 0 {
+        tx.commit().await.map_err(|e| e.to_string())?;
+        return Ok(());
+    }
 
-    // ⚡ 冒泡更新主题内容哈希，使该删除动作能够在局域网同步端识别并广播
-    crate::vcp_modules::sync_hash::HashAggregator::bubble_from_topic(&mut tx, &topic_id).await?;
+    let (role, name, content, timestamp, agent_id, old_hash, old_updated_at): (
+        String,
+        Option<String>,
+        String,
+        i64,
+        Option<String>,
+        String,
+        i64,
+    ) = sqlx::query_as(
+        "SELECT role, name, content, timestamp, agent_id, content_hash, updated_at \
+         FROM messages WHERE topic_id = ? AND msg_id = ? AND deleted_at IS NULL",
+    )
+    .bind(topic_id)
+    .bind(message_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    let timestamp = u64::try_from(timestamp)
+        .map_err(|_| format!("Message {message_id} has a negative timestamp"))?;
+    let attachment_hashes: Vec<String> = sqlx::query_scalar(
+        "SELECT hash FROM message_attachments \
+         WHERE topic_id = ? AND msg_id = ? AND deleted_at IS NULL",
+    )
+    .bind(topic_id)
+    .bind(message_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    let new_hash = HashAggregator::compute_message_fingerprint(
+        message_id,
+        &role,
+        name.as_deref(),
+        &content,
+        timestamp,
+        agent_id.as_deref(),
+        &attachment_hashes,
+    );
+    let updated_at = resolve_message_updated_at(
+        None,
+        timestamp,
+        &new_hash,
+        Some((&old_hash, old_updated_at)),
+        now,
+    )
+    .map_err(|error| format!("message {message_id} {error}"))?;
+    let updated = sqlx::query(
+        "UPDATE messages SET content_hash = ?, updated_at = ? \
+         WHERE topic_id = ? AND msg_id = ? AND deleted_at IS NULL",
+    )
+    .bind(&new_hash)
+    .bind(updated_at)
+    .bind(topic_id)
+    .bind(message_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if updated.rows_affected() != 1 {
+        return Err(format!("Message {message_id} is missing or deleted"));
+    }
+
+    HashAggregator::bubble_from_topic(&mut tx, topic_id).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -1794,6 +1867,103 @@ mod stream_lifecycle_tests {
         .await
         .expect("topic fixture");
         pool
+    }
+
+    #[tokio::test]
+    async fn deleting_attachment_updates_message_version_and_bubbles_once() {
+        let pool = test_pool().await;
+        let hash_a = "a".repeat(64);
+        let hash_b = "b".repeat(64);
+        let old_hash = HashAggregator::compute_message_fingerprint(
+            "message-with-attachments",
+            "user",
+            None,
+            "hello",
+            1,
+            None,
+            &[hash_a.clone(), hash_b.clone()],
+        );
+        sqlx::query(
+            "INSERT INTO messages (
+                msg_id, topic_id, role, content, timestamp, content_hash, created_at, updated_at
+             ) VALUES ('message-with-attachments', 'topic-1', 'user', 'hello', 1, ?, 1, 10)",
+        )
+        .bind(&old_hash)
+        .execute(&pool)
+        .await
+        .expect("message fixture");
+        sqlx::query(
+            "INSERT INTO message_attachments (
+                topic_id, msg_id, hash, attachment_order, display_name, created_at
+             ) VALUES
+                ('topic-1', 'message-with-attachments', ?, 0, 'a', 1),
+                ('topic-1', 'message-with-attachments', ?, 1, 'b', 1)",
+        )
+        .bind(&hash_a)
+        .bind(&hash_b)
+        .execute(&pool)
+        .await
+        .expect("attachment relation fixtures");
+        let mut tx = pool.begin().await.expect("begin initial hash transaction");
+        HashAggregator::bubble_from_topic(&mut tx, "topic-1")
+            .await
+            .expect("initialize aggregate hashes");
+        tx.commit().await.expect("commit initial hashes");
+        let before_roots: (String, String) = sqlx::query_as(
+            "SELECT t.content_hash, a.content_hash FROM topics t \
+             JOIN agents a ON a.agent_id = t.owner_id WHERE t.topic_id = 'topic-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("initial aggregate hashes");
+
+        delete_message_attachment_in_pool(&pool, "topic-1", "message-with-attachments", &hash_a, 5)
+            .await
+            .expect("delete attachment relation");
+
+        let expected_hash = HashAggregator::compute_message_fingerprint(
+            "message-with-attachments",
+            "user",
+            None,
+            "hello",
+            1,
+            None,
+            std::slice::from_ref(&hash_b),
+        );
+        let after_delete: (String, i64, String, String) = sqlx::query_as(
+            "SELECT m.content_hash, m.updated_at, t.content_hash, a.content_hash \
+             FROM messages m JOIN topics t ON t.topic_id = m.topic_id \
+             JOIN agents a ON a.agent_id = t.owner_id \
+             WHERE m.topic_id = 'topic-1' AND m.msg_id = 'message-with-attachments'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("state after attachment deletion");
+        assert_eq!(after_delete.0, expected_hash);
+        assert_eq!(after_delete.1, 11);
+        assert_ne!(after_delete.2, before_roots.0);
+        assert_ne!(after_delete.3, before_roots.1);
+
+        delete_message_attachment_in_pool(
+            &pool,
+            "topic-1",
+            "message-with-attachments",
+            &hash_a,
+            20,
+        )
+        .await
+        .expect("repeat deletion is idempotent");
+        let after_repeat: (String, i64, String, String) = sqlx::query_as(
+            "SELECT m.content_hash, m.updated_at, t.content_hash, a.content_hash \
+             FROM messages m \
+             JOIN topics t ON t.topic_id = m.topic_id \
+             JOIN agents a ON a.agent_id = t.owner_id \
+             WHERE m.topic_id = 'topic-1' AND m.msg_id = 'message-with-attachments'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("state after repeated deletion");
+        assert_eq!(after_repeat, after_delete);
     }
 
     #[tokio::test]

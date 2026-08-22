@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 pub const RENDERER_SCHEMA_VERSION: i64 = 1;
 const MAX_SAFE_JSON_INTEGER: u64 = (1_u64 << 53) - 1;
 
-fn resolve_message_updated_at(
+pub(crate) fn resolve_message_updated_at(
     explicit_updated_at: Option<u64>,
     message_timestamp: u64,
     content_hash: &str,
