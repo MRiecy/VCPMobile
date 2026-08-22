@@ -115,6 +115,7 @@ export interface ChatMessage {
   blocks?: ContentBlock[]; // 预编译的 AST 数据块，前端直接渲染
   shell?: MessageShell; // 预计算的外壳属性
   timestamp: number;
+  updatedAt?: number;
 
   isThinking?: boolean;
   agentId?: string;

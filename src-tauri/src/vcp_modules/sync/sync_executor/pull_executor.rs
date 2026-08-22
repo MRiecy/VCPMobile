@@ -1728,7 +1728,7 @@ mod ndjson_budget_tests {
 
     const PROTOCOL_1_2_GOLDEN: &[u8] = include_bytes!("../fixtures/protocol_1_2_golden.json");
     const PROTOCOL_1_2_GOLDEN_SHA256: &str =
-        "187d599d33ef660de299aae77a68eb92313af3d603efe72f7f06ecb6ac1e0c1f";
+        "0aae238ea2699b4246cf78ecd4ee044b820a0586d3821224ad59b925e531f6c0";
 
     #[test]
     fn pull_frame_owner_identity_must_match_the_local_topic() {
@@ -2057,6 +2057,7 @@ mod ndjson_budget_tests {
                 name: None,
                 content: String::new(),
                 timestamp: 1,
+                updated_at: 1,
                 is_thinking: None,
                 agent_id: None,
                 group_id: None,
@@ -2073,6 +2074,7 @@ mod ndjson_budget_tests {
                 name: None,
                 content: String::new(),
                 timestamp: 2,
+                updated_at: 2,
                 is_thinking: None,
                 agent_id: None,
                 group_id: None,

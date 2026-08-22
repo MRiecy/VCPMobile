@@ -566,51 +566,6 @@ impl BatchDiffHandler {
                     tracker.mark_modified(topic_id).await;
                 }
 
-                // At most one Phase 3 HTTP batch may be in flight. The WebSocket owner awaits
-                // this work before requesting the next diff batch, so final ACK cannot overtake
-                // DB/HTTP failures and multiple 256 MiB responses cannot stack in memory.
-                if has_push {
-                    let push_result = PushExecutor::push_messages_batch(
-                        app_handle,
-                        http_client,
-                        base_url,
-                        token,
-                        &push_topic_ids,
-                        uploaded_hashes.clone(),
-                    )
-                    .await
-                    .map(|results| {
-                        results
-                            .into_iter()
-                            .map(|result| TopicBatchOutcome {
-                                topic_id: result.topic_id,
-                                success: result.success,
-                                error: result.error,
-                            })
-                            .collect()
-                    });
-                    match validate_topic_batch_outcomes("push", &push_topic_ids, push_result) {
-                        Ok(successful) => {
-                            for topic_id in successful {
-                                tracker.mark_modified(&topic_id).await;
-                            }
-                        }
-                        Err(message) => {
-                            for topic_id in &push_topic_ids {
-                                tracker.mark_failed(topic_id).await;
-                            }
-                            let mut failed_topic_ids = push_topic_ids.clone();
-                            failed_topic_ids.sort();
-                            failed_topic_ids.truncate(8);
-                            return Err(Phase3ProtocolError {
-                                code: "PHASE3_PUSH_FAILED".to_string(),
-                                message,
-                                failed_topic_ids,
-                            });
-                        }
-                    }
-                }
-
                 if has_pull {
                     let pull_topic_ids = pull_batch
                         .iter()
@@ -668,6 +623,65 @@ impl BatchDiffHandler {
                             failed_topic_ids.truncate(8);
                             return Err(Phase3ProtocolError {
                                 code: "PHASE3_PULL_FAILED".to_string(),
+                                message,
+                                failed_topic_ids,
+                            });
+                        }
+                    }
+                    if let Err(message) = write_queue.flush().await {
+                        for topic_id in &pull_topic_ids {
+                            tracker.mark_failed(topic_id).await;
+                        }
+                        let mut failed_topic_ids = pull_topic_ids;
+                        failed_topic_ids.sort();
+                        failed_topic_ids.truncate(8);
+                        return Err(Phase3ProtocolError {
+                            code: "PHASE3_PULL_FAILED".to_string(),
+                            message: format!(
+                                "Phase 3 pull write drain failed before merged push: {message}"
+                            ),
+                            failed_topic_ids,
+                        });
+                    }
+                }
+
+                // At most one Phase 3 HTTP batch may be in flight. Pull winners are durable
+                // before this whole-topic push reads the merged Mobile view.
+                if has_push {
+                    let push_result = PushExecutor::push_messages_batch(
+                        app_handle,
+                        http_client,
+                        base_url,
+                        token,
+                        &push_topic_ids,
+                        uploaded_hashes.clone(),
+                    )
+                    .await
+                    .map(|results| {
+                        results
+                            .into_iter()
+                            .map(|result| TopicBatchOutcome {
+                                topic_id: result.topic_id,
+                                success: result.success,
+                                error: result.error,
+                            })
+                            .collect()
+                    });
+                    match validate_topic_batch_outcomes("push", &push_topic_ids, push_result) {
+                        Ok(successful) => {
+                            for topic_id in successful {
+                                tracker.mark_modified(&topic_id).await;
+                            }
+                        }
+                        Err(message) => {
+                            for topic_id in &push_topic_ids {
+                                tracker.mark_failed(topic_id).await;
+                            }
+                            let mut failed_topic_ids = push_topic_ids.clone();
+                            failed_topic_ids.sort();
+                            failed_topic_ids.truncate(8);
+                            return Err(Phase3ProtocolError {
+                                code: "PHASE3_PUSH_FAILED".to_string(),
                                 message,
                                 failed_topic_ids,
                             });

@@ -23,7 +23,13 @@ pub struct TopicLocalState {
     pub owner_type: String,
     pub owner_id: String,
     pub topic_hash: String,
-    pub messages: HashMap<String, String>,
+    pub messages: HashMap<String, MessageVersionState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageVersionState {
+    pub hash: String,
+    pub updated_at: i64,
 }
 
 #[derive(Default)]
@@ -225,7 +231,7 @@ impl Phase3Message {
                 "SELECT topic_id, COUNT(*) AS message_count,
                         COALESCE(SUM(
                             LENGTH(CAST(msg_id AS BLOB)) +
-                            LENGTH(CAST(content_hash AS BLOB)) + 16
+                            LENGTH(CAST(content_hash AS BLOB)) + 48
                         ), 0) AS state_bytes
                  FROM messages
                  WHERE topic_id IN ({placeholders})
@@ -265,7 +271,7 @@ impl Phase3Message {
                 .collect::<Vec<_>>()
                 .join(", ");
             let msg_query = format!(
-                "SELECT topic_id, msg_id, content_hash, deleted_at FROM messages WHERE topic_id IN ({})",
+                "SELECT topic_id, msg_id, content_hash, updated_at, deleted_at FROM messages WHERE topic_id IN ({})",
                 placeholders
             );
             let mut query = sqlx::query(&msg_query);
@@ -290,17 +296,31 @@ impl Phase3Message {
                 let deleted_at: Option<i64> = row.try_get("deleted_at").map_err(|error| {
                     format!("Message tombstone decode failed for {topic_id}/{msg_id}: {error}")
                 })?;
+                let updated_at: i64 = row.try_get("updated_at").map_err(|error| {
+                    format!("Message update time decode failed for {topic_id}/{msg_id}: {error}")
+                })?;
                 let state = result.get_mut(&topic_id).ok_or_else(|| {
                     format!("Message hash query returned an unknown topic {topic_id}")
                 })?;
-                let effective_hash = if deleted_at.is_some() {
-                    "DELETED".to_string()
+                let (effective_hash, effective_updated_at) = if let Some(deleted_at) = deleted_at {
+                    ("DELETED".to_string(), deleted_at)
                 } else {
-                    hash
+                    (hash, updated_at)
                 };
+                if !(0..=(1_i64 << 53) - 1).contains(&effective_updated_at) {
+                    return Err(format!(
+                        "Message update time is invalid for {topic_id}/{msg_id}"
+                    ));
+                }
                 if state
                     .messages
-                    .insert(msg_id.clone(), effective_hash)
+                    .insert(
+                        msg_id.clone(),
+                        MessageVersionState {
+                            hash: effective_hash,
+                            updated_at: effective_updated_at,
+                        },
+                    )
                     .is_some()
                 {
                     return Err(format!(
@@ -316,7 +336,9 @@ impl Phase3Message {
 
 #[cfg(test)]
 mod tests {
-    use super::{Phase3Message, Phase3StateBudget, MAX_PHASE3_MESSAGES_PER_TOPIC};
+    use super::{
+        MessageVersionState, Phase3Message, Phase3StateBudget, MAX_PHASE3_MESSAGES_PER_TOPIC,
+    };
 
     #[test]
     fn phase3_state_budget_rejects_an_oversized_single_topic_before_loading_rows() {
@@ -341,7 +363,7 @@ mod tests {
                 content_hash TEXT, deleted_at INTEGER
              );
              CREATE TABLE messages (
-                topic_id TEXT, msg_id TEXT, content_hash TEXT, deleted_at INTEGER,
+                topic_id TEXT, msg_id TEXT, content_hash TEXT, updated_at INTEGER, deleted_at INTEGER,
                 PRIMARY KEY(topic_id, msg_id)
              );
              INSERT INTO topics VALUES
@@ -361,5 +383,49 @@ mod tests {
             .expect_err("missing or tombstoned topic must fail closed");
             assert!(error.contains(missing));
         }
+    }
+
+    #[tokio::test]
+    async fn message_states_use_live_update_time_and_tombstone_time() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open database");
+        sqlx::query(
+            "CREATE TABLE topics (
+                topic_id TEXT PRIMARY KEY, owner_type TEXT, owner_id TEXT,
+                content_hash TEXT, deleted_at INTEGER
+             );
+             CREATE TABLE messages (
+                topic_id TEXT, msg_id TEXT, content_hash TEXT, updated_at INTEGER, deleted_at INTEGER,
+                PRIMARY KEY(topic_id, msg_id)
+             );
+             INSERT INTO topics VALUES ('topic', 'agent', 'agent-a', 'topic-hash', NULL);
+             INSERT INTO messages VALUES
+                ('topic', 'live', 'live-hash', 123, NULL),
+                ('topic', 'deleted', 'old-hash', 50, 456);",
+        )
+        .execute(&pool)
+        .await
+        .expect("create fixture");
+
+        let states = Phase3Message::get_topic_message_hashes(&pool, &["topic".to_string()])
+            .await
+            .expect("load message states");
+        assert_eq!(
+            states["topic"].messages["live"],
+            MessageVersionState {
+                hash: "live-hash".to_string(),
+                updated_at: 123,
+            }
+        );
+        assert_eq!(
+            states["topic"].messages["deleted"],
+            MessageVersionState {
+                hash: "DELETED".to_string(),
+                updated_at: 456,
+            }
+        );
     }
 }

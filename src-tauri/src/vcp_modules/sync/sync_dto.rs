@@ -183,6 +183,8 @@ pub struct UserMessageSyncDTO {
     pub name: Option<String>,
     pub content: String,
     pub timestamp: u64,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<AttachmentSyncDTO>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -202,6 +204,7 @@ impl TryFrom<&ChatMessage> for UserMessageSyncDTO {
             name: msg.name.clone(),
             content: msg.content.clone(),
             timestamp: msg.timestamp,
+            updated_at: msg.updated_at.unwrap_or(msg.timestamp),
             attachments: msg
                 .attachments
                 .as_ref()
@@ -227,6 +230,8 @@ pub struct AgentMessageSyncDTO {
     pub name: Option<String>,
     pub content: String,
     pub timestamp: u64,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: u64,
     #[serde(rename = "agentId")]
     pub agent_id: String,
     #[serde(rename = "isThinking", default)]
@@ -248,6 +253,7 @@ impl AgentMessageSyncDTO {
             name: msg.name.clone(),
             content: msg.content.clone(),
             timestamp: msg.timestamp,
+            updated_at: msg.updated_at.unwrap_or(msg.timestamp),
             agent_id: msg.agent_id.clone().unwrap_or_default(),
             is_thinking: msg.is_thinking,
             finish_reason: msg.finish_reason.clone(),
@@ -267,6 +273,8 @@ pub struct GroupMessageSyncDTO {
     pub name: Option<String>,
     pub content: String,
     pub timestamp: u64,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: u64,
     #[serde(rename = "agentId")]
     pub agent_id: String,
     #[serde(rename = "groupId")]
@@ -290,6 +298,7 @@ impl GroupMessageSyncDTO {
             name: msg.name.clone(),
             content: msg.content.clone(),
             timestamp: msg.timestamp,
+            updated_at: msg.updated_at.unwrap_or(msg.timestamp),
             agent_id: msg.agent_id.clone().unwrap_or_default(),
             group_id: msg.group_id.clone().unwrap_or_default(),
             topic_id: msg.topic_id.clone().unwrap_or_default(),
@@ -311,6 +320,8 @@ pub struct MessagePullSyncDTO {
     #[serde(default)]
     pub content: String,
     pub timestamp: u64,
+    #[serde(rename = "updatedAt")]
+    pub updated_at: u64,
     #[serde(default)]
     pub is_thinking: Option<bool>,
     #[serde(rename = "agentId", default)]
@@ -339,6 +350,7 @@ impl From<MessagePullSyncDTO> for crate::vcp_modules::chat_manager::ChatMessage 
             name: dto.name,
             content: dto.content,
             timestamp: dto.timestamp,
+            updated_at: Some(dto.updated_at),
             is_thinking: dto.is_thinking,
             agent_id: dto.agent_id,
             group_id: dto.group_id,
@@ -480,6 +492,7 @@ mod tests {
             name: Some("User".to_string()),
             content: "hello".to_string(),
             timestamp: 123,
+            updated_at: 124,
             is_thinking: Some(false),
             agent_id: Some("agent-1".to_string()),
             group_id: Some("group-1".to_string()),
@@ -501,6 +514,7 @@ mod tests {
         };
 
         let msg = ChatMessage::from(dto);
+        assert_eq!(msg.updated_at, Some(124));
         assert_eq!(msg.id, "msg-1");
         assert_eq!(msg.role, "user");
         assert_eq!(msg.name.as_deref(), Some("User"));

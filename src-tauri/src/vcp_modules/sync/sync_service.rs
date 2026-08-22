@@ -3213,8 +3213,14 @@ fn build_diff_batches(
         let mut msg_map = serde_json::Map::new();
         let mut messages = state.messages.into_iter().collect::<Vec<_>>();
         messages.sort_by(|left, right| left.0.cmp(&right.0));
-        for (msg_id, hash) in messages {
-            msg_map.insert(msg_id, serde_json::Value::String(hash));
+        for (msg_id, version) in messages {
+            msg_map.insert(
+                msg_id,
+                serde_json::json!({
+                    "hash": version.hash,
+                    "updatedAt": version.updated_at,
+                }),
+            );
         }
         let topic_obj = serde_json::json!({
             "ownerType": state.owner_type,
@@ -3876,8 +3882,14 @@ mod tests {
 
     #[test]
     fn phase3_diff_batches_enforce_serialized_byte_budget() {
-        use crate::vcp_modules::sync_pipeline::phase3_message::TopicLocalState;
+        use crate::vcp_modules::sync_pipeline::phase3_message::{
+            MessageVersionState, TopicLocalState,
+        };
         use std::collections::HashMap;
+        let version = || MessageVersionState {
+            hash: "m".repeat(64),
+            updated_at: 1,
+        };
 
         let mut states = HashMap::new();
         for index in 0..3 {
@@ -3889,7 +3901,7 @@ mod tests {
                     topic_hash: "h".repeat(64),
                     messages: HashMap::from([(
                         format!("message-{index}-{}", "x".repeat(3 * 1024 * 1024)),
-                        "m".repeat(64),
+                        version(),
                     )]),
                 },
             );
@@ -3911,13 +3923,13 @@ mod tests {
                 owner_type: "agent".to_string(),
                 owner_id: "agent-a".to_string(),
                 topic_hash: "h".repeat(64),
-                messages: HashMap::from([("x".repeat(MAX_WS_DIFF_BATCH_BYTES), "m".repeat(64))]),
+                messages: HashMap::from([("x".repeat(MAX_WS_DIFF_BATCH_BYTES), version())]),
             },
         )]);
         assert!(build_diff_batches(oversized).is_err());
 
         let too_many_messages = (0..=MAX_MESSAGES_PER_BATCH)
-            .map(|index| (format!("message-{index}"), "m".repeat(64)))
+            .map(|index| (format!("message-{index}"), version()))
             .collect();
         let oversized_topic = HashMap::from([(
             "topic-too-many".to_string(),

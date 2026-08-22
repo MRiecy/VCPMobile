@@ -47,6 +47,8 @@ pub struct ChatMessage {
     pub content: String,
     #[serde(default)]
     pub timestamp: u64,
+    #[serde(rename = "updatedAt", skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "isThinking")]
     #[serde(default)]

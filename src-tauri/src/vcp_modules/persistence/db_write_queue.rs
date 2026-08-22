@@ -1182,6 +1182,13 @@ impl DbWriteQueue {
             let mut params_msgs: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
             for (idx, msg) in chunk_indices {
+                let updated_at = msg.updated_at.unwrap_or(msg.timestamp);
+                if updated_at > (1_u64 << 53) - 1 {
+                    return Err(Self::sync_contract_error(format!(
+                        "Message {topic_id}/{} updatedAt exceeds the safe integer range",
+                        msg.id
+                    )));
+                }
                 params_msgs.push(Box::new(msg.id.clone()));
                 params_msgs.push(Box::new(topic_id.to_string()));
                 params_msgs.push(Box::new(msg.role.clone()));
@@ -1194,7 +1201,7 @@ impl DbWriteQueue {
                 params_msgs.push(Box::new(msg.finish_reason.clone()));
                 params_msgs.push(Box::new(content_hashes[*idx].clone()));
                 params_msgs.push(Box::new(msg.timestamp as i64));
-                params_msgs.push(Box::new(msg.timestamp as i64));
+                params_msgs.push(Box::new(updated_at as i64));
             }
 
             let refs_msgs: Vec<&dyn rusqlite::ToSql> =

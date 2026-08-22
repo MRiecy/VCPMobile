@@ -8,6 +8,37 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 
 pub const RENDERER_SCHEMA_VERSION: i64 = 1;
+const MAX_SAFE_JSON_INTEGER: u64 = (1_u64 << 53) - 1;
+
+fn resolve_message_updated_at(
+    explicit_updated_at: Option<u64>,
+    message_timestamp: u64,
+    content_hash: &str,
+    existing: Option<(&str, i64)>,
+    now: i64,
+) -> Result<i64, String> {
+    if let Some((previous_hash, previous_updated_at)) = existing {
+        let resolved = if previous_hash == content_hash {
+            previous_updated_at
+        } else {
+            now.max(previous_updated_at.saturating_add(1))
+        };
+        if resolved < 0 || resolved as u64 > MAX_SAFE_JSON_INTEGER {
+            return Err("message updatedAt exceeds the safe integer range".to_string());
+        }
+        return Ok(resolved);
+    }
+    if let Some(updated_at) = explicit_updated_at {
+        if updated_at > MAX_SAFE_JSON_INTEGER {
+            return Err("message updatedAt exceeds the safe integer range".to_string());
+        }
+        return i64::try_from(updated_at).map_err(|_| "message updatedAt is too large".to_string());
+    }
+    if message_timestamp > MAX_SAFE_JSON_INTEGER {
+        return Err("message timestamp exceeds the safe integer range".to_string());
+    }
+    i64::try_from(message_timestamp).map_err(|_| "message timestamp is too large".to_string())
+}
 
 fn render_work_semaphore() -> std::sync::Arc<tokio::sync::Semaphore> {
     static SEMAPHORE: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
@@ -315,7 +346,35 @@ fn run_render_cache_update_writer(
 
 #[cfg(test)]
 mod rebuild_cache_tests {
-    use super::update_render_cache_if_current;
+    use super::{resolve_message_updated_at, update_render_cache_if_current};
+
+    #[test]
+    fn message_update_time_preserves_remote_and_advances_local_edits() {
+        assert_eq!(
+            resolve_message_updated_at(Some(200), 100, "new", Some(("old", 200)), 400)
+                .expect("local edit with stale explicit time"),
+            400
+        );
+        assert_eq!(
+            resolve_message_updated_at(Some(500), 100, "new", None, 400)
+                .expect("new message explicit time"),
+            500
+        );
+        assert_eq!(
+            resolve_message_updated_at(None, 100, "same", Some(("same", 200)), 400)
+                .expect("unchanged message time"),
+            200
+        );
+        assert_eq!(
+            resolve_message_updated_at(None, 100, "new", Some(("old", 500)), 400)
+                .expect("edited message time"),
+            501
+        );
+        assert_eq!(
+            resolve_message_updated_at(None, 100, "new", None, 400).expect("new message timestamp"),
+            100
+        );
+    }
 
     #[test]
     fn rebuild_writer_never_overwrites_cache_for_a_newer_message_hash() {
@@ -562,6 +621,24 @@ impl MessageRepository {
             message.agent_id.as_deref(),
             &attachment_hashes,
         );
+        let existing: Option<(String, i64)> = sqlx::query_as(
+            "SELECT content_hash, updated_at FROM messages WHERE topic_id = ? AND msg_id = ?",
+        )
+        .bind(topic_id)
+        .bind(&message.id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| error.to_string())?;
+        let effective_updated_at = resolve_message_updated_at(
+            message.updated_at,
+            message.timestamp,
+            &content_hash,
+            existing
+                .as_ref()
+                .map(|(hash, updated_at)| (hash.as_str(), *updated_at)),
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .map_err(|error| format!("message {} {error}", message.id))?;
 
         // 2. 插入或更新消息 (不含 render_content)
         sqlx::query(
@@ -596,7 +673,7 @@ impl MessageRepository {
         .bind(&message.finish_reason)
         .bind(&content_hash)
         .bind(message.timestamp as i64) // created_at
-        .bind(message.timestamp as i64) // updated_at
+        .bind(effective_updated_at)
         .execute(&mut **tx)
         .await
         .map_err(|e| e.to_string())?;

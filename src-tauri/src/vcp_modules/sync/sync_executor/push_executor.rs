@@ -662,7 +662,7 @@ async fn load_outbound_message_page(
     let mut query = if cursor.is_some() {
         sqlx::query(
             "SELECT msg_id, role, name, agent_id, content, timestamp, is_group_message,
-                    group_id, finish_reason, content_hash
+                    group_id, finish_reason, content_hash, updated_at
              FROM messages
              WHERE topic_id = ? AND deleted_at IS NULL
                AND (timestamp > ? OR (timestamp = ? AND msg_id > ?))
@@ -672,7 +672,7 @@ async fn load_outbound_message_page(
     } else {
         sqlx::query(
             "SELECT msg_id, role, name, agent_id, content, timestamp, is_group_message,
-                    group_id, finish_reason, content_hash
+                    group_id, finish_reason, content_hash, updated_at
              FROM messages
              WHERE topic_id = ? AND deleted_at IS NULL
              ORDER BY timestamp ASC, msg_id ASC
@@ -702,6 +702,11 @@ async fn load_outbound_message_page(
         let content_hash: String = row.try_get("content_hash").map_err(|error| {
             format!("Message hash decode failed for {topic_id}/{message_id}: {error}")
         })?;
+        let updated_at: i64 = row.try_get("updated_at").map_err(|error| {
+            format!("Message update time decode failed for {topic_id}/{message_id}: {error}")
+        })?;
+        let updated_at = u64::try_from(updated_at)
+            .map_err(|_| format!("Message {topic_id}/{message_id} has a negative update time"))?;
         let is_group_message: i64 = row.try_get("is_group_message").map_err(|error| {
             format!("Message group flag decode failed for {topic_id}/{message_id}: {error}")
         })?;
@@ -717,6 +722,7 @@ async fn load_outbound_message_page(
                 format!("Message content decode failed for {topic_id}: {error}")
             })?,
             timestamp,
+            updated_at: Some(updated_at),
             is_thinking: Some(false),
             agent_id: row
                 .try_get("agent_id")
@@ -902,6 +908,7 @@ async fn build_message_dto<R: Runtime>(
             name: message.name,
             content: message.content,
             timestamp: message.timestamp,
+            updated_at: message.updated_at.unwrap_or(message.timestamp),
             attachments,
             content_hash: message.content_hash,
         }));
@@ -929,6 +936,7 @@ async fn build_message_dto<R: Runtime>(
             name: message.name,
             content: message.content,
             timestamp: message.timestamp,
+            updated_at: message.updated_at.unwrap_or(message.timestamp),
             agent_id,
             group_id: message.group_id.unwrap_or_default(),
             topic_id: message.topic_id.unwrap_or_default(),
@@ -943,6 +951,7 @@ async fn build_message_dto<R: Runtime>(
             name: message.name,
             content: message.content,
             timestamp: message.timestamp,
+            updated_at: message.updated_at.unwrap_or(message.timestamp),
             agent_id,
             is_thinking: message.is_thinking,
             finish_reason: message.finish_reason,

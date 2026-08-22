@@ -215,6 +215,7 @@ async fn run_group_speaker_turn(
                 name: Some(agent_name),
                 content: full_content.to_string(),
                 timestamp: final_ts,
+                updated_at: None,
                 is_thinking: Some(false),
                 agent_id: Some(agent_id.clone()),
                 group_id: Some(group_id.to_string()),

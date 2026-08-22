@@ -489,6 +489,7 @@ pub async fn archive_assistant_chat(
             name: temp_msg.name.clone(),
             content: temp_msg.content.clone(),
             timestamp: temp_msg.timestamp,
+            updated_at: None,
             is_thinking: Some(false),
             agent_id: if owner_type == "agent" {
                 Some(owner_id.clone())
@@ -650,6 +651,7 @@ pub async fn regenerate_topic_response(
         name: row.get("name"),
         content: user_msg,
         timestamp: timestamp as u64,
+        updated_at: None,
         is_thinking: Some(false),
         agent_id: row.get("agent_id"),
         group_id: row.get("group_id"),
