@@ -94,7 +94,7 @@ Wire 1.2 将同步错误从不可判定的字符串升级为双端共用的结�
 | `protocol` | 帧结构、字段类型、集合完整性是否满足契约 | `VERSION_ACK_INVALID`, `PHASE3_FRAME_INVALID` |
 | `data` | 业务身份、归属、存在性或预算是否有效 | `SYNC_OWNER_CONFLICT`, `TOPIC_NOT_FOUND` |
 | `storage` | DB、文件或写队列是否完成读写 | `SYNC_DB_QUERY_FAILED`, `SYNC_DB_DRAIN_FAILED` |
-| `internal` | owner/epoch、任务生命周期或组件状态是否正常 | `SYNC_PHASE_STALLED`, `SYNC_PREVIOUS_SESSION_EXIT_FAILED` |
+| `internal` | owner/epoch、任务生命周期或组件状态是否正常 | `SYNC_PREVIOUS_SESSION_EXIT_FAILED` |
 
 类别与阶段必须独立。省电错误始终是 `device/preflight`；版本字段合法但版本不匹配是 `compatibility/handshake`；版本帧畸形是 `protocol/handshake`；旧同步任务无法退出是 `internal/shutdown`。任何实现都不得因文本中同时出现“version”“power”或“timeout”而改变类别。
 

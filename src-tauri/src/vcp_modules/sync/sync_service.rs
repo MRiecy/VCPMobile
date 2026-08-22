@@ -2870,7 +2870,7 @@ async fn run_sync_session(
                                         }).await;
                                     },
                                     Some("SYNC_TOPIC_HASH_RESULTS") => {
-                                        manifest_phase.store(4, Ordering::SeqCst); // 进入 Phase 2.5+，旧 manifest 看门狗失效
+                                        manifest_phase.store(4, Ordering::SeqCst); // 进入 Phase 2.5+，结束 manifest 阶段
                                         let expected = expected_topic_hash_results.lock().await.take();
                                         let parsed = match expected {
                                             Some(expected) => parse_unique_nonempty_strings(
@@ -2921,7 +2921,7 @@ async fn run_sync_session(
                                             log::debug!("[SyncService] Ignoring mismatched, stale, or replayed final acknowledgement");
                                             continue;
                                         }
-                                        manifest_phase.store(0, Ordering::SeqCst); // 同步完成，所有看门狗失效
+                                        manifest_phase.store(0, Ordering::SeqCst); // 同步完成，重置 manifest 阶段
                                         if let Err(error) = write_queue_task.flush().await {
                                             let message = format!("Final sync write drain failed: {}", error);
                                             fatal_error = true;

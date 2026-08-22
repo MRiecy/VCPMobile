@@ -272,7 +272,6 @@ pub async fn on_attachment_phase_ready(&self) -> Result<(), String> {
 | 状态机分支爆炸 | 每新增一个 Phase，前端需同步更新进度条组件 | 保持 Phase 数量 ≤ 6，复杂逻辑用子阶段（如 Phase 2.5）实现 |
 | 前端兼容性问题 | 旧版前端不认识新 Phase 枚举值 | 使用 `#[serde(rename_all = "camelCase")]` 确保命名稳定；前端对未知 Phase 显示"同步中..." |
 | 阶段间数据传递 | 新 Phase 可能需要前一阶段的上下文 | 通过 `Arc<Mutex<T>>` 共享状态容器传递，避免全局变量 |
-| Watchdog 超时 | 新 Phase 执行时间超过 60 秒 | 在长时间任务中定期更新 `pending_tasks` 或调整看门狗阈值 |
 
 ---
 
@@ -337,8 +336,6 @@ pub async fn on_attachment_phase_ready(&self) -> Result<(), String> {
 | Phase 2.5 卡住 | `SYNC_TOPIC_HASH_RESULTS` 未返回 | 检查桌面端 `diff.js` 是否崩溃 |
 | Phase 3 卡住 | `Phase3Tracker` 计数未达标 | 检查是否有 Topic 的 `mark_completed` 未被调用 |
 | Finalize 卡住 | `DbWriteQueue` flush 阻塞 | 检查 SQLite WAL 锁竞争 |
-
-**看门狗（Watchdog）机制**：当 `pending_tasks` 连续 60 秒无变化时，系统会强制推进相位。若日志中出现 `"Watchdog: forcing phase advance"`，说明此前存在任务死锁。
 
 ### 4.3 数据不一致的排查
 

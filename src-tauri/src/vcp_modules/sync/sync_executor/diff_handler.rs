@@ -11,7 +11,6 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 
@@ -251,66 +250,6 @@ impl DiffHandler {
                     if let Some(command) = next_manifest_command(current_phase, attempt_id) {
                         let _ = tx_internal.send(command);
                     }
-                } else {
-                    let tx_internal_wd = tx_internal.clone();
-                    let current_phase_wd = current_phase;
-                    let manifest_phase_wd = manifest_phase.clone();
-                    let pending_wd = pending_tasks.clone();
-                    let handle_clone_wd = app_handle.clone();
-                    let attempt_id_wd = attempt_id;
-
-                    task_tracker.spawn(async move {
-                        let mut last_pending = pending_wd.load(Ordering::SeqCst);
-                        let mut stuck_count = 0;
-                        loop {
-                            tokio::time::sleep(Duration::from_secs(10)).await;
-                            if manifest_phase_wd.load(Ordering::SeqCst) != current_phase_wd {
-                                break;
-                            }
-                            let current_pending = pending_wd.load(Ordering::SeqCst);
-                            if current_pending == 0 {
-                                break;
-                            }
-
-                            if current_pending == last_pending {
-                                stuck_count += 1;
-                                log::warn!(
-                                    "[SyncService] WATCHDOG: Phase {} pending count stuck at {} ({} ticks)",
-                                    current_phase_wd, current_pending, stuck_count
-                                );
-                            } else {
-                                stuck_count = 0;
-                                last_pending = current_pending;
-                            }
-
-                            if stuck_count >= 6 {
-                                log::error!("[SyncService] WATCHDOG FATAL: Phase {} DEADLOCK detected. Failing current attempt.", current_phase_wd);
-                                emit_sync_log(
-                                    &handle_clone_wd,
-                                    "error",
-                                    &format!("同步流程停滞超过 60 秒 (Phase {})；当前 attempt 已失败，不会把未完成数据报告为成功。", current_phase_wd)
-                                );
-                                let _ = tx_internal_wd.send(SyncCommand::FailAttempt {
-                                    attempt_id: attempt_id_wd,
-                                    code: "SYNC_PHASE_STALLED",
-                                    message: format!(
-                                        "Sync phase {} timed out with {} unfinished operations",
-                                        current_phase_wd, current_pending
-                                    ),
-                                });
-                                break;
-                            } else if stuck_count >= 1 {
-                                emit_sync_log(
-                                    &handle_clone_wd,
-                                    "warn",
-                                    &format!(
-                                        "同步进度缓慢 (Phase {})，剩余任务: {}...",
-                                        current_phase_wd, current_pending
-                                    ),
-                                );
-                            }
-                        }
-                    }).await;
                 }
             }
 

@@ -152,7 +152,7 @@ last_updated: 2026-08-13
 |---------|-------------|-------------|-----------|------------|-------------|
 | `VERSION_CHECK` | WS 连接建立后 0ms | `index.js` switch-case | `VERSION_ACK` | 握手 | `VERSION_CHECK_TIMEOUT = 5s` |
 | `VERSION_ACK` | —（接收） | `run_sync_session` 版本校验 | 无 | 握手 | `EXPECTED_PLUGIN_VERSION = "1.2.0"`；旧 1.1.0 拒绝、不降级 |
-| `PHASE_START` | 各 Phase 开始时 | `index.js` 记录日志 | `PHASE_ACK` | 全阶段 | 看门狗检查周期 `10s × 6 = 60s` |
+| `PHASE_START` | 各 Phase 开始时 | `index.js` 记录日志 | `PHASE_ACK` | 全阶段 | `PHASE_RESPONSE_TIMEOUT = 60s` |
 | `PHASE_COMPLETED` | 各 Phase 完成时 | `index.js` 记录日志 | `PHASE_ACK` | 全阶段 | `phase_gate` 去重；最终 ACK 严格匹配四元身份且只消费一次 |
 | `SYNC_MANIFEST` | Phase 1（Owner 两条，drain 后 Avatar 一条）；Phase 2（Topic 一条） | `handleSyncManifest` | `SYNC_DIFF_RESULTS` | Phase 1/2 | 波次缺任一整帧响应 60 秒后失败 |
 | `SYNC_DIFF_RESULTS` | —（接收） | `run_sync_session` 差异任务派发 | 无 | Phase 1/2 | `pending_tasks` + `total_tasks` 原子计数 |
@@ -314,7 +314,7 @@ last_updated: 2026-08-13
 | 实体变更未实时同步 | `SYNC_ENTITY_UPDATE` | 检查前端是否调用 `notifyEntityUpdate`；检查桌面端 `upsertEntityIndex` 是否成功 | `index.js` `upsertEntityIndex` |
 | 删除后另一端仍有数据 | `SYNC_DELETE_NOTIFY` / `SYNC_ENTITY_DELETE` | 检查 `deletedAt` 是否正确设置；检查桌面端 `deleteEntity` 是否执行物理删除 | `sync_service.rs` `DeleteExecutor` |
 | 版本不匹配导致连接断开 | `VERSION_CHECK` / `VERSION_ACK` | 核对桌面端 `plugin-manifest.json.version` 是否精确等于 `EXPECTED_PLUGIN_VERSION` 1.2.0；1.1.0 不兼容 | `sync_service.rs` 版本校验逻辑 |
-| WS 连接频繁断开 | `SYNC_LOG_EVENT` / `SYNC_ERROR` | 检查看门狗超时（60s 无 Phase 进展）；检查网络稳定性 | `sync_service.rs` 看门狗逻辑 |
+| WS 连接频繁断开 | `SYNC_LOG_EVENT` / `SYNC_ERROR` | 检查网络稳定性、服务端状态与连接错误日志 | `sync_service.rs` 连接管理逻辑 |
 | Phase 2 数据传输量过大 | `SYNC_MANIFEST` (topic, phase=2) | 检查 `targetedOwners` 是否正确填充；确认 `changed_owners` 是否包含未变更 Owner | `manifest_builder.rs` `build_targeted_topic_manifest` |
 | 消息级差异比对过慢 | `SYNC_MESSAGE_DIFF_BATCH` | 检查是否已启用 Fast Path（话题级哈希匹配直接跳过）；检查分片策略 | `sync/diff.js` `handleSyncMessageDiffBatch` |
 | 日志终端无桌面端输出 | `DESKTOP_PHASE_*` / `SYNC_LOG_EVENT` | 检查桌面端 `SyncLogger` 是否启用 WS 通道；检查 WebSocket 连接是否建立 | `core/logger.js` WS 广播逻辑 |

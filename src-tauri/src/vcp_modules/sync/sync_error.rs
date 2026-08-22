@@ -575,14 +575,6 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             "本次同步请求已取消",
             "无需重试；需要同步时重新开始新任务。",
         ),
-        "SYNC_PHASE_STALLED" => definition(
-            Category::Internal,
-            Origin::MobileSync,
-            Stage::TopicMetadata,
-            Retry::Manual,
-            "同步流程停滞，系统已终止本次任务",
-            "重新同步；若再次出现，请保留最新日志。",
-        ),
         "SYNC_STOP_FAILED" | "SYNC_PREVIOUS_SESSION_EXIT_FAILED" => definition(
             Category::Internal,
             Origin::MobileSync,
@@ -903,12 +895,6 @@ mod tests {
                 SyncErrorCategory::Data,
                 SyncErrorOrigin::MobileSync,
                 SyncErrorStage::OwnerMetadata,
-            ),
-            (
-                "SYNC_PHASE_STALLED",
-                SyncErrorCategory::Internal,
-                SyncErrorOrigin::MobileSync,
-                SyncErrorStage::TopicMetadata,
             ),
             (
                 "SYNC_DB_DRAIN_FAILED",

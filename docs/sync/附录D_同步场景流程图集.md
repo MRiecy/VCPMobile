@@ -589,20 +589,7 @@ idempotency_key = SHA256(action + entity_type + id + minute_timestamp)
 
 桌面端在 5 分钟 TTL 内缓存该键，重复请求直接返回上次结果，避免网络重试导致的数据重复。
 
-### F. 看门狗死锁恢复
-
-`sync_service.rs` 每 10 秒检查 `pending_tasks`：
-
-```rust
-if stuck_count >= 6 {  // 约 60 秒无进展
-    // 强制触发阶段过渡
-    tx.send(SyncCommand::StartTopicMetadata);
-}
-```
-
-副作用：可能跳过未完成任务，但下一轮同步的幂等性与双哈希校验会自动补齐差异。
-
-### G. 分批传输机制
+### F. 分批传输机制
 
 Phase 3 消息 diff 按消息数量分批，防止单条 WebSocket 消息超过 2 MB：
 
@@ -615,7 +602,7 @@ const MAX_MESSAGES_PER_BATCH: usize = 10000;
 
 分批队列在断线重连时自动清空，防止发送过时数据。
 
-### H. 双哈希 V2 协议说明
+### G. 双哈希 V2 协议说明
 
 V2 协议将配置哈希与内容哈希分离，避免配置变更与消息变更互相干扰：
 

@@ -56,7 +56,6 @@
     "SYNC_MESSAGE_READ_FAILED": ["storage", "manual"],
     "SYNC_MESSAGE_WRITE_FAILED": ["storage", "manual"],
     "SYNC_OWNER_CONFLICT": ["data", "manual"],
-    "SYNC_PHASE_STALLED": ["internal", "manual"],
     "SYNC_PREVIOUS_SESSION_EXIT_FAILED": ["internal", "manual"],
     "SYNC_PROTOCOL_INVALID": ["protocol", "after_user_action"],
     "SYNC_REQUEST_INVALID": ["protocol", "after_user_action"],
