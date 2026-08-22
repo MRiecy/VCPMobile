@@ -8,10 +8,10 @@ VCP Mobile 技术文档按架构层级分为 5 个知识库：
 
 | 知识库 | 路径 | 文档数 | 覆盖范围 | 入口 |
 |--------|------|--------|----------|------|
-| 顶层架构规范 | `docs/` | 9 份 | 跨层架构约定、Android UI 兼容、测试、依赖管理、UI 层级、Android 存储与归档说明 | [Android UI 兼容](ANDROID_UI_COMPATIBILITY.md) |
+| 顶层架构规范 | `docs/` | 8 份 | 跨层架构约定、Android UI 兼容、测试、依赖管理、UI 层级与 Android 存储 | [Android UI 兼容](ANDROID_UI_COMPATIBILITY.md) |
 | Rust 后端模块 | `docs/modules/` | 31 份 | 25 个导航条目；其中 AST Diff 专栏含 6 份 Markdown | [总览](modules/00_总览与导航.md) |
 | Android 插件 | `docs/plugins/` | 13 份 | `tauri-plugin-vcp-mobile` 原生 Android 子系统（含 ForegroundGuardian） | [总览](plugins/00_总览与导航.md) |
-| 同步子系统 | `docs/sync/` | 20 份 | Sync V2 全链路协议（Rust + Node.js 双端） | [总览](sync/00_总览与导航.md) |
+| 同步子系统 | `docs/sync/` | 17 份 | Sync V2 全链路协议（Rust + Node.js 双端） | [总览](sync/00_总览与导航.md) |
 | Vue 前端 | `docs/vue_docs/` | 27 份 | Vue 3 + TypeScript 前端完整源码覆盖 | [总览](vue_docs/00_总览与导航.md) |
 
 ## 快速导航（按角色）

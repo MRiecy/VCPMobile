@@ -1,8 +1,6 @@
 ---
 title: 附录B - HTTP端点完整参考
 scope: 双端
-version: 0.9.13
-last_updated: 2026-05-13
 ---
 
 # 附录B - HTTP 端点完整参考

@@ -7,8 +7,6 @@ related_files:
   - src/core/stores/syncSession.ts
   - src/features/sync/SyncSessionView.vue
   - VCPChat/VCPDistributedServer/Plugin/VCPMobileSync/error-contract.js
-version: 1.2.0
-last_updated: 2026-08-13
 ---
 
 # Wire 1.2 错误契约与排障规范

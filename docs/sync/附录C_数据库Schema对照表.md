@@ -1,8 +1,6 @@
 ---
 title: 附录C - 数据库Schema对照表
 scope: 双端
-version: 1.1.4
-last_updated: 2026-08-11
 ---
 
 # 附录C - 数据库 Schema 对照表
@@ -400,8 +398,8 @@ last_updated: 2026-08-11
 - `groups.use_unified_model`
 - `topics.locked`
 - `topics.unread`
-- ~~`messages.is_thinking`~~（v0.9.14 已从 bulk INSERT 和 SELECT 中移除）
-- `render_cache` 条件写入：v0.9.14 起仅当 `render_bytes` 非空时才执行 INSERT
+- `messages.is_thinking` 不参与当前批量消息读写。
+- `render_cache` 仅在 `render_bytes` 非空时写入。
 - `messages.is_group_message`
 
 Rust 端通过 `serde` 的自定义序列化将这些字段映射为 `bool`，但在 SQL 层面保持数值型以确保 SQLite 兼容性。

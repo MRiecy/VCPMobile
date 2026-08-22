@@ -363,7 +363,7 @@ VCPMobile/
 ├── docs/                         # 四层技术文档体系
 │   ├── vue_docs/                 # 前端文档（27 份）
 │   ├── modules/                  # Rust 模块文档（31 份）
-│   ├── sync/                     # 同步协议文档（20 份）
+│   ├── sync/                     # 同步协议文档（17 份）
 │   ├── plugins/                  # 原生插件文档（13 份）
 │   └── *.md                      # 顶层规范（架构、UI 层级、依赖管理）
 ├── .github/workflows/            # CI/CD（类型检查 + Release APK）
@@ -387,7 +387,6 @@ VCPMobile/
 | `src-tauri/src/vcp_modules/sync/sync_service.rs` | 三阶段增量同步主控（WebSocket + HTTP） |
 | `src-tauri/src/distributed/tools/device_info.rs` | 设备信息工具（14 设备能力之一） |
 | `src-tauri/plugins/vcp-mobile/android/.../ForegroundGuardian.kt` | v1.1.3 进程级 WakeLock/WifiLock 调度单例 |
-| `docs/ARCHIVED_SYNC_ARCHITECTURE.md` | 增量同步协议历史规范 |
 | `docs/sync/00_总览与导航.md` | 同步 V2 子文档导航 |
 | `docs/ANDROID_UI_COMPATIBILITY.md` | Android arm64 平台边界、窗口宽度响应式与设备证据规范 |
 | `docs/UI_LAYER_ARCHITECTURE.md` | 全局 UI 层级与 Z-Index 语义化规范 |
@@ -444,7 +443,7 @@ Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0
 |----------------|------|:----------:|-------|----------|
 | Frontend Docs | `docs/vue_docs/` | 27 | 全部 Vue/TS 源码 | 前端开发者 |
 | Rust Modules | `docs/modules/` | 31 | `vcp_modules/` + `distributed/` | 后端开发者 |
-| Sync Protocol | `docs/sync/` | 20 | Delta Sync V2 全链路 | 同步功能开发者 |
+| Sync Protocol | `docs/sync/` | 17 | Delta Sync V2 全链路 | 同步功能开发者 |
 | Plugin Docs | `docs/plugins/` | 13 | `tauri-plugin-vcp-mobile` | 原生插件开发者 |
 
 ### 6.2 快速决策树
@@ -462,7 +461,7 @@ Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0
 - **"Android 权限管理与前台服务规范？"** → `docs/ANDROID_PLUGIN_MANAGEMENT.md`
 - **"Backend-Driven Streaming 的消息生命周期？"** → `docs/vue_docs/features/chat/...`
 - **"Release 构建优化配置详解？"** → `docs/modules/...`
-- **"同步协议历史规范？"** → `docs/ARCHIVED_SYNC_ARCHITECTURE.md` / `docs/sync/00_总览与导航.md`
+- **"同步协议如何工作？"** → `docs/sync/00_总览与导航.md`
 
 ### 6.3 前后端交叉引用
 
@@ -624,7 +623,7 @@ A: 进入 Settings → ThemePicker，选择主题即可实时切换。壁纸从 
 
 **Q: 同步失败如何排查？**
 
-A: 检查 1) 手机与电脑是否同一局域网；2) 桌面端 VCPChat 是否启用同步插件；3) 查看 `docs/sync/15_开发指南与FAQ.md`。
+A: 检查 1) 手机与电脑是否同一局域网；2) 桌面端 VCPChat 是否启用同步插件；3) 查看 `docs/sync/13_日志系统与可观测性.md` 和 `docs/sync/16_Wire_1.2错误契约与排障规范.md`。
 
 **Q: 上下文注入规则在哪里设置？**
 
