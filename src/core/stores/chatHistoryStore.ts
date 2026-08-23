@@ -145,9 +145,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     if (isDefaultName && messageCount >= 4) {
       console.log(`[ChatHistoryStore] Triggering AI summary for topic: ${topicId}`);
       try {
-        const agentName =
-          assistantStore.agents.find((a: any) => a.id === ownerId)?.name ||
-          "AI";
+        const agentName = ownerType === "agent"
+          ? assistantStore.agents.find((a: any) => a.id === ownerId)?.name || "AI"
+          : assistantStore.groups.find((g) => g.id === ownerId)?.name || "AI";
         const newTitle = await invoke<string>("summarize_topic", {
           ownerId,
           ownerType,

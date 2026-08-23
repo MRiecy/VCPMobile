@@ -5,7 +5,7 @@
  * 1. 纯本地 FTS 检索（search_messages_fts），无远程依赖、离线可用；
  * 2. generation 竞态防护：每次新搜索递增 generation，迟到响应直接丢弃
  *    （本地 SQLite 毫秒级返回，无需日记那套远程 cancel command）；
- * 3. keyset 分页：时间倒序模式下以末条 (timestamp, msgId) 为游标加载更多；
+ * 3. keyset 分页：时间倒序模式下以末条完整消息身份为游标加载更多；
  * 4. 索引构建：首开搜索页时检测覆盖率（决策 G），不足则触发 rebuild_messages_fts
  *    并监听 vcp-system-event / vcp-fts-rebuild 进度事件驱动进度 UI；
  * 5. 进度事件监听为模块级单例注册，避免重复 listen。
@@ -138,19 +138,23 @@ export const useGlobalSearchStore = defineStore('globalSearch', () => {
     }
   };
 
-  const buildFilter = (cursor?: { beforeTimestamp: number; beforeMessageId: string }) => {
+  const buildFilter = (cursor?: FtsSearchResultItem) => {
     const bounds = timeBounds();
+    const scopedOwner = scope.value === 'topic' || scope.value === 'owner';
     return {
       query: query.value.trim(),
       topicId: scope.value === 'topic' ? scopeTopicId.value : null,
-      ownerId: scope.value === 'owner' ? scopeOwnerId.value : null,
-      ownerType: scope.value === 'owner' ? scopeOwnerType.value : null,
+      ownerId: scopedOwner ? scopeOwnerId.value : null,
+      ownerType: scopedOwner ? scopeOwnerType.value : null,
       role: role.value === 'all' ? null : role.value,
       startTime: bounds.startTime,
       endTime: bounds.endTime,
       limit: SEARCH_PAGE_SIZE,
-      beforeTimestamp: cursor?.beforeTimestamp ?? null,
-      beforeMessageId: cursor?.beforeMessageId ?? null,
+      beforeTimestamp: cursor?.timestamp ?? null,
+      beforeOwnerType: cursor?.ownerType ?? null,
+      beforeOwnerId: cursor?.ownerId ?? null,
+      beforeTopicId: cursor?.topicId ?? null,
+      beforeMessageId: cursor?.msgId ?? null,
       sort: sort.value,
     };
   };
@@ -194,10 +198,20 @@ export const useGlobalSearchStore = defineStore('globalSearch', () => {
     loadingMore.value = true;
     try {
       const items = await invoke<FtsSearchResultItem[]>('search_messages_fts', {
-        filter: buildFilter({ beforeTimestamp: last.timestamp, beforeMessageId: last.msgId }),
+        filter: buildFilter(last),
       });
       if (g !== generation) return;
-      results.value = [...results.value, ...items];
+      const additions = items.filter(
+        (item) =>
+          !results.value.some(
+            (existing) =>
+              existing.ownerType === item.ownerType &&
+              existing.ownerId === item.ownerId &&
+              existing.topicId === item.topicId &&
+              existing.msgId === item.msgId,
+          ),
+      );
+      results.value = [...results.value, ...additions];
       limited.value = items.length >= SEARCH_PAGE_SIZE;
     } catch (e) {
       if (g !== generation) return;
@@ -228,14 +242,17 @@ export const useGlobalSearchStore = defineStore('globalSearch', () => {
     ownerLabel?: string;
   } | null) => {
     if (!target) return;
-    if (target.topicId) {
+    if (target.topicId && target.ownerId && target.ownerType) {
       scope.value = 'topic';
       scopeTopicId.value = target.topicId;
       scopeTopicTitle.value = target.topicTitle ?? '';
-    } else if (target.ownerId) {
+      scopeOwnerId.value = target.ownerId;
+      scopeOwnerType.value = target.ownerType;
+      scopeOwnerLabel.value = target.ownerLabel ?? '';
+    } else if (target.ownerId && target.ownerType) {
       scope.value = 'owner';
       scopeOwnerId.value = target.ownerId;
-      scopeOwnerType.value = target.ownerType ?? 'agent';
+      scopeOwnerType.value = target.ownerType;
       scopeOwnerLabel.value = target.ownerLabel ?? '';
     }
   };

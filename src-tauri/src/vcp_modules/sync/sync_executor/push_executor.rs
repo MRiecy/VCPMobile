@@ -6,6 +6,7 @@ use crate::vcp_modules::sync_dto::{
     UserMessageSyncDTO,
 };
 use crate::vcp_modules::sync_error::{encode_http_sync_error_body, encode_wire_sync_error_value};
+use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use futures_util::StreamExt;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -67,10 +68,10 @@ async fn parse_success_response(
         return match encode_http_sync_error_body(&bytes) {
             Ok(Some(encoded)) => Err(encoded),
             Ok(None) => Err(format!(
-                "{operation} failed with HTTP {status} without a Wire 1.2 error object"
+                "{operation} failed with HTTP {status} without a Wire 1.3 error object"
             )),
             Err(error) => Err(format!(
-                "{operation} returned an invalid Wire 1.2 error: {error}"
+                "{operation} returned an invalid Wire 1.3 error: {error}"
             )),
         };
     }
@@ -125,15 +126,14 @@ async fn query_avatar_color(
 
 /// 批量 Push 单 topic 处理结果
 pub struct PushBatchResult {
-    pub topic_id: String,
+    pub topic: TopicKey,
     pub success: bool,
     pub error: Option<String>,
 }
 
 #[derive(Debug)]
 struct MessageTombstone {
-    topic_id: String,
-    message_id: String,
+    key: MessageKey,
     deleted_at: i64,
 }
 
@@ -169,6 +169,8 @@ impl Write for CountingWriter {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct MessageTombstoneRequest<'a> {
+    owner_type: &'a str,
+    owner_id: &'a str,
     topic_id: &'a str,
     msg_id: &'a str,
     deleted_at: i64,
@@ -221,11 +223,11 @@ impl Write for BoundedJsonLine {
 
 fn parse_message_push_frames(
     bytes: &[u8],
-    expected_topic_ids: &[String],
+    expected_topics: &[TopicKey],
 ) -> Result<Vec<MessagePushFrame>, String> {
     let response_text = std::str::from_utf8(bytes)
         .map_err(|error| format!("Batch push response is not UTF-8: {error}"))?;
-    let expected = expected_topic_ids.iter().cloned().collect::<HashSet<_>>();
+    let expected = expected_topics.iter().cloned().collect::<HashSet<_>>();
     let mut seen = HashSet::new();
     let mut frames = Vec::with_capacity(expected.len());
     for raw_line in response_text.lines() {
@@ -246,12 +248,21 @@ fn parse_message_push_frames(
             .and_then(serde_json::Value::as_str)
             .filter(|id| !id.is_empty())
             .ok_or_else(|| "Batch push response requires a non-empty topicId".to_string())?;
-        if !expected.contains(topic_id) {
+        let topic = TopicKey::new(
+            data.get("ownerType")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+            data.get("ownerId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+            topic_id,
+        );
+        if !expected.contains(&topic) {
             return Err(format!(
                 "Batch push response contains unexpected topic {topic_id}"
             ));
         }
-        if !seen.insert(topic_id.to_string()) {
+        if !seen.insert(topic.clone()) {
             return Err(format!(
                 "Batch push response contains duplicate topic {topic_id}"
             ));
@@ -306,7 +317,7 @@ fn parse_message_push_frames(
         }
         frames.push(MessagePushFrame {
             outcome: PushBatchResult {
-                topic_id: topic_id.to_string(),
+                topic,
                 success,
                 error,
             },
@@ -327,7 +338,7 @@ async fn send_message_chunk(
     http_url: &str,
     sync_token: &str,
     body: Vec<u8>,
-    expected_topic_ids: &[String],
+    expected_topics: &[TopicKey],
 ) -> Result<Vec<MessagePushFrame>, String> {
     let url = format!("{}/api/mobile-sync/upload-messages-batch", http_url);
     let response = client
@@ -345,21 +356,21 @@ async fn send_message_chunk(
         return match encode_http_sync_error_body(&bytes) {
             Ok(Some(encoded)) => Err(encoded),
             Ok(None) => Err(format!(
-                "Batch push messages failed with HTTP {status} without a Wire 1.2 error object"
+                "Batch push messages failed with HTTP {status} without a Wire 1.3 error object"
             )),
             Err(error) => Err(format!(
-                "Batch push messages returned an invalid Wire 1.2 error: {error}"
+                "Batch push messages returned an invalid Wire 1.3 error: {error}"
             )),
         };
     }
 
-    parse_message_push_frames(&bytes, expected_topic_ids)
+    parse_message_push_frames(&bytes, expected_topics)
 }
 
 fn record_message_frames(
     frames: Vec<MessagePushFrame>,
     results: &mut Vec<PushBatchResult>,
-    attachment_topics: &mut HashMap<String, HashSet<String>>,
+    attachment_topics: &mut HashMap<String, HashSet<TopicKey>>,
 ) {
     for frame in frames {
         if frame.outcome.success {
@@ -367,7 +378,7 @@ fn record_message_frames(
                 attachment_topics
                     .entry(hash)
                     .or_default()
-                    .insert(frame.outcome.topic_id.clone());
+                    .insert(frame.outcome.topic.clone());
             }
         }
         results.push(frame.outcome);
@@ -376,8 +387,9 @@ fn record_message_frames(
 
 async fn preflight_topic_messages(
     tx: &mut Transaction<'_, Sqlite>,
-    topic_id: &str,
+    key: &TopicKey,
 ) -> Result<TopicMessagePreflight, String> {
+    let topic_id = &key.topic_id;
     let row = sqlx::query(
         "SELECT COUNT(*) AS message_count,
                 COALESCE(SUM(
@@ -390,8 +402,10 @@ async fn preflight_topic_messages(
                     LENGTH(CAST(content_hash AS BLOB))
                 ), 0) AS raw_bytes
          FROM messages
-         WHERE topic_id = ? AND deleted_at IS NULL",
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
     )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
     .bind(topic_id)
     .fetch_one(&mut **tx)
     .await
@@ -417,9 +431,13 @@ async fn preflight_topic_messages(
                 ), 0)
          FROM message_attachments ma
          LEFT JOIN attachments a ON a.hash = ma.hash
-         JOIN messages m ON m.topic_id = ma.topic_id AND m.msg_id = ma.msg_id
-         WHERE ma.topic_id = ? AND ma.deleted_at IS NULL AND m.deleted_at IS NULL",
+         JOIN messages m ON m.owner_type = ma.owner_type AND m.owner_id = ma.owner_id
+            AND m.topic_id = ma.topic_id AND m.msg_id = ma.msg_id
+         WHERE ma.owner_type = ? AND ma.owner_id = ? AND ma.topic_id = ?
+           AND ma.deleted_at IS NULL AND m.deleted_at IS NULL",
     )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
     .bind(topic_id)
     .fetch_one(&mut **tx)
     .await
@@ -430,8 +448,10 @@ async fn preflight_topic_messages(
         "SELECT COUNT(*) AS tombstone_count,
                 COALESCE(SUM(LENGTH(CAST(msg_id AS BLOB)) + 64), 0) AS raw_bytes
          FROM messages
-         WHERE topic_id = ? AND deleted_at IS NOT NULL",
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NOT NULL",
     )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
     .bind(topic_id)
     .fetch_one(&mut **tx)
     .await
@@ -472,14 +492,17 @@ async fn preflight_topic_messages(
 
 async fn load_message_tombstones(
     tx: &mut Transaction<'_, Sqlite>,
-    topic_id: &str,
+    key: &TopicKey,
     expected_count: usize,
 ) -> Result<Vec<MessageTombstone>, String> {
+    let topic_id = &key.topic_id;
     let rows = sqlx::query(
         "SELECT msg_id, deleted_at FROM messages
-         WHERE topic_id = ? AND deleted_at IS NOT NULL
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NOT NULL
          ORDER BY deleted_at ASC, msg_id ASC",
     )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
     .bind(topic_id)
     .fetch_all(&mut **tx)
     .await
@@ -507,8 +530,7 @@ async fn load_message_tombstones(
                 ));
             }
             Ok(MessageTombstone {
-                topic_id: topic_id.to_string(),
-                message_id,
+                key: MessageKey::new(key.clone(), message_id),
                 deleted_at,
             })
         })
@@ -517,8 +539,10 @@ async fn load_message_tombstones(
 
 fn message_tombstone_body_len(tombstone: &MessageTombstone) -> Result<usize, String> {
     let request = MessageTombstoneRequest {
-        topic_id: &tombstone.topic_id,
-        msg_id: &tombstone.message_id,
+        owner_type: &tombstone.key.topic.owner_type,
+        owner_id: &tombstone.key.topic.owner_id,
+        topic_id: &tombstone.key.topic.topic_id,
+        msg_id: &tombstone.key.msg_id,
         deleted_at: tombstone.deleted_at,
     };
     let mut writer = CountingWriter {
@@ -528,7 +552,7 @@ fn message_tombstone_body_len(tombstone: &MessageTombstone) -> Result<usize, Str
     serde_json::to_writer(&mut writer, &request).map_err(|error| {
         format!(
             "Message tombstone {}/{} exceeds its serialized byte budget: {error}",
-            tombstone.topic_id, tombstone.message_id
+            tombstone.key.topic.topic_id, tombstone.key.msg_id
         )
     })?;
     Ok(writer.bytes)
@@ -539,13 +563,17 @@ fn validate_message_tombstone_response(
     tombstone: &MessageTombstone,
 ) -> Result<(), String> {
     let topic_matches = value.get("topicId").and_then(serde_json::Value::as_str)
-        == Some(tombstone.topic_id.as_str());
+        == Some(tombstone.key.topic.topic_id.as_str());
+    let owner_type_matches = value.get("ownerType").and_then(serde_json::Value::as_str)
+        == Some(tombstone.key.topic.owner_type.as_str());
+    let owner_id_matches = value.get("ownerId").and_then(serde_json::Value::as_str)
+        == Some(tombstone.key.topic.owner_id.as_str());
     let message_matches = value.get("msgId").and_then(serde_json::Value::as_str)
-        == Some(tombstone.message_id.as_str());
-    if !topic_matches || !message_matches {
+        == Some(tombstone.key.msg_id.as_str());
+    if !topic_matches || !owner_type_matches || !owner_id_matches || !message_matches {
         return Err(format!(
-            "Delete message response requires matching topicId and msgId for {}/{}",
-            tombstone.topic_id, tombstone.message_id
+            "Delete message response requires matching owner, topicId and msgId for {}/{}",
+            tombstone.key.topic.topic_id, tombstone.key.msg_id
         ));
     }
     Ok(())
@@ -558,26 +586,30 @@ async fn push_message_tombstone(
     tombstone: &MessageTombstone,
 ) -> Result<(), String> {
     let request = MessageTombstoneRequest {
-        topic_id: &tombstone.topic_id,
-        msg_id: &tombstone.message_id,
+        owner_type: &tombstone.key.topic.owner_type,
+        owner_id: &tombstone.key.topic.owner_id,
+        topic_id: &tombstone.key.topic.topic_id,
+        msg_id: &tombstone.key.msg_id,
         deleted_at: tombstone.deleted_at,
     };
     let body = serde_json::to_vec(&request).map_err(|error| {
         format!(
             "Message tombstone {}/{} serialization failed: {error}",
-            tombstone.topic_id, tombstone.message_id
+            tombstone.key.topic.topic_id, tombstone.key.msg_id
         )
     })?;
     if body.len() > MAX_CONTROL_RESPONSE_BYTES {
         return Err(format!(
             "Message tombstone {}/{} exceeds the request byte limit",
-            tombstone.topic_id, tombstone.message_id
+            tombstone.key.topic.topic_id, tombstone.key.msg_id
         ));
     }
     let idempotency_key = crate::vcp_modules::infra::utils::calculate_sha256_slices(&[
         b"delete-message",
-        tombstone.topic_id.as_bytes(),
-        tombstone.message_id.as_bytes(),
+        tombstone.key.topic.owner_type.as_bytes(),
+        tombstone.key.topic.owner_id.as_bytes(),
+        tombstone.key.topic.topic_id.as_bytes(),
+        tombstone.key.msg_id.as_bytes(),
         tombstone.deleted_at.to_string().as_bytes(),
     ]);
     let response = client
@@ -592,7 +624,7 @@ async fn push_message_tombstone(
         .map_err(|error| {
             format!(
                 "Delete message {}/{} request failed: {error}",
-                tombstone.topic_id, tombstone.message_id
+                tombstone.key.topic.topic_id, tombstone.key.msg_id
             )
         })?;
     let value = parse_success_response(response, "Delete message").await?;
@@ -623,7 +655,7 @@ async fn push_message_tombstone_chunk(
     let result_indexes = results
         .iter()
         .enumerate()
-        .map(|(index, result)| (result.topic_id.clone(), index))
+        .map(|(index, result)| (result.topic.clone(), index))
         .collect::<HashMap<_, _>>();
     const MAX_CONCURRENT_MESSAGE_DELETES: usize = 3;
     for chunk in tombstones.chunks(MAX_CONCURRENT_MESSAGE_DELETES) {
@@ -636,17 +668,17 @@ async fn push_message_tombstone_chunk(
         {
             if let Err(error) = outcome {
                 let index = result_indexes
-                    .get(&tombstone.topic_id)
+                    .get(&tombstone.key.topic)
                     .copied()
                     .ok_or_else(|| {
                         format!(
                             "Message tombstone result references missing topic {}",
-                            tombstone.topic_id
+                            tombstone.key.topic.topic_id
                         )
                     })?;
                 append_topic_failure(
                     &mut results[index],
-                    format!("Message tombstone {} failed: {error}", tombstone.message_id),
+                    format!("Message tombstone {} failed: {error}", tombstone.key.msg_id),
                 );
             }
         }
@@ -656,15 +688,16 @@ async fn push_message_tombstone_chunk(
 
 async fn load_outbound_message_page(
     tx: &mut Transaction<'_, Sqlite>,
-    topic_id: &str,
+    key: &TopicKey,
     cursor: Option<(i64, &str)>,
 ) -> Result<Vec<crate::vcp_modules::chat_manager::ChatMessage>, String> {
+    let topic_id = &key.topic_id;
     let mut query = if cursor.is_some() {
         sqlx::query(
             "SELECT msg_id, role, name, agent_id, content, timestamp, is_group_message,
                     group_id, finish_reason, content_hash, updated_at
              FROM messages
-             WHERE topic_id = ? AND deleted_at IS NULL
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
                AND (timestamp > ? OR (timestamp = ? AND msg_id > ?))
              ORDER BY timestamp ASC, msg_id ASC
              LIMIT ?",
@@ -674,12 +707,15 @@ async fn load_outbound_message_page(
             "SELECT msg_id, role, name, agent_id, content, timestamp, is_group_message,
                     group_id, finish_reason, content_hash, updated_at
              FROM messages
-             WHERE topic_id = ? AND deleted_at IS NULL
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
              ORDER BY timestamp ASC, msg_id ASC
              LIMIT ?",
         )
     };
-    query = query.bind(topic_id);
+    query = query
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(topic_id);
     if let Some((timestamp, message_id)) = cursor {
         query = query.bind(timestamp).bind(timestamp).bind(message_id);
     }
@@ -756,10 +792,14 @@ async fn load_outbound_message_page(
                 a.image_frames, a.thumbnail_path, a.created_at
          FROM message_attachments ma
          LEFT JOIN attachments a ON a.hash = ma.hash
-         WHERE ma.topic_id = ? AND ma.msg_id IN ({placeholders}) AND ma.deleted_at IS NULL
+         WHERE ma.owner_type = ? AND ma.owner_id = ? AND ma.topic_id = ?
+           AND ma.msg_id IN ({placeholders}) AND ma.deleted_at IS NULL
          ORDER BY ma.msg_id, ma.attachment_order ASC"
     );
-    let mut attachment_query = sqlx::query(&attachment_query).bind(topic_id);
+    let mut attachment_query = sqlx::query(&attachment_query)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(topic_id);
     for message in &messages {
         attachment_query = attachment_query.bind(&message.id);
     }
@@ -964,11 +1004,12 @@ async fn build_message_dto<R: Runtime>(
 async fn serialize_topic_messages<R: Runtime>(
     app: &AppHandle<R>,
     tx: &mut Transaction<'_, Sqlite>,
-    topic_id: &str,
-    owner_type: &str,
-    owner_id: &str,
+    key: &TopicKey,
     expected_message_count: usize,
 ) -> Result<Vec<u8>, String> {
+    let topic_id = &key.topic_id;
+    let owner_type = &key.owner_type;
+    let owner_id = &key.owner_id;
     let mut line = BoundedJsonLine::new(MAX_NDJSON_LINE_BYTES);
     line.write_all(br#"{"topicId":"#)
         .map_err(|error| format!("Message push prefix failed for {topic_id}: {error}"))?;
@@ -991,7 +1032,7 @@ async fn serialize_topic_messages<R: Runtime>(
     loop {
         let page = load_outbound_message_page(
             tx,
-            topic_id,
+            key,
             cursor
                 .as_ref()
                 .map(|(timestamp, message_id)| (*timestamp, message_id.as_str())),
@@ -1117,16 +1158,25 @@ impl PushExecutor {
             return Ok(());
         }
 
-        let mut expected_ids = HashSet::new();
+        let mut expected_topics = HashSet::new();
         for item in &items {
             let id = item
                 .get("id")
                 .and_then(serde_json::Value::as_str)
                 .filter(|id| !id.is_empty())
                 .ok_or_else(|| "Batch push entity item requires a non-empty id".to_string())?;
-            if !expected_ids.insert(id.to_string()) {
+            let owner_type = item
+                .get("ownerType")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let owner_id = item
+                .get("ownerId")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let key = TopicKey::new(owner_type, owner_id, id);
+            if !key.is_valid() || !expected_topics.insert(key) {
                 return Err(format!(
-                    "Batch push entity request contains duplicate id {id}"
+                    "Batch push entity request contains an invalid or duplicate topic identity for {id}"
                 ));
             }
         }
@@ -1153,18 +1203,31 @@ impl PushExecutor {
             .get("results")
             .and_then(serde_json::Value::as_array)
             .ok_or_else(|| "Batch push entities response is missing results".to_string())?;
-        let mut seen_ids = HashSet::new();
+        let mut seen_topics = HashSet::new();
         for result in results {
             let id = result
                 .get("id")
                 .and_then(serde_json::Value::as_str)
                 .filter(|id| !id.is_empty())
                 .ok_or_else(|| "Batch push entity result requires a non-empty id".to_string())?;
-            if !expected_ids.contains(id) {
-                return Err(format!("Batch push entities returned unexpected id {id}"));
+            let key = TopicKey::new(
+                result
+                    .get("ownerType")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+                result
+                    .get("ownerId")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+                id,
+            );
+            if !expected_topics.contains(&key) {
+                return Err(format!(
+                    "Batch push entities returned unexpected topic {id}"
+                ));
             }
-            if !seen_ids.insert(id.to_string()) {
-                return Err(format!("Batch push entities returned duplicate id {id}"));
+            if !seen_topics.insert(key) {
+                return Err(format!("Batch push entities returned duplicate topic {id}"));
             }
             if result.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
                 let error = result
@@ -1179,9 +1242,9 @@ impl PushExecutor {
                 ));
             }
         }
-        if seen_ids != expected_ids {
-            let mut missing = expected_ids
-                .difference(&seen_ids)
+        if seen_topics != expected_topics {
+            let mut missing = expected_topics
+                .difference(&seen_topics)
                 .cloned()
                 .collect::<Vec<_>>();
             missing.sort();
@@ -1208,14 +1271,14 @@ impl PushExecutor {
 
         let parent_is_live = match owner_type {
             "agent" => sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM agents WHERE agent_id = ? AND deleted_at IS NULL)",
+                "SELECT EXISTS(SELECT 1 FROM agents WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL)",
             )
             .bind(owner_id)
             .fetch_one(&db.pool)
             .await
             .map_err(|error| format!("Push avatar owner lookup failed: {error}"))?,
             "group" => sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS(SELECT 1 FROM groups WHERE group_id = ? AND deleted_at IS NULL)",
+                "SELECT EXISTS(SELECT 1 FROM groups WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL)",
             )
             .bind(owner_id)
             .fetch_one(&db.pool)
@@ -1307,29 +1370,29 @@ impl PushExecutor {
         client: &reqwest::Client,
         http_url: &str,
         sync_token: &str,
-        topic_ids: &[String],
+        topic_keys: &[TopicKey],
         uploaded_hashes: Arc<RwLock<HashSet<String>>>,
     ) -> Result<Vec<PushBatchResult>, String> {
-        if topic_ids.is_empty() {
+        if topic_keys.is_empty() {
             return Ok(Vec::new());
         }
-        if topic_ids.len() > MAX_SYNC_TOPICS {
+        if topic_keys.len() > MAX_SYNC_TOPICS {
             return Err(format!(
                 "Message push contains {} topics, limit is {}",
-                topic_ids.len(),
+                topic_keys.len(),
                 MAX_SYNC_TOPICS
             ));
         }
-        let requested_topics = topic_ids.iter().cloned().collect::<HashSet<_>>();
-        if requested_topics.len() != topic_ids.len()
-            || requested_topics.iter().any(|topic_id| topic_id.is_empty())
+        let requested_topics = topic_keys.iter().cloned().collect::<HashSet<_>>();
+        if requested_topics.len() != topic_keys.len()
+            || requested_topics.iter().any(|topic| !topic.is_valid())
         {
-            return Err("Message push topic ids must be unique and non-empty".to_string());
+            return Err("Message push topics must have unique valid identities".to_string());
         }
 
         let db = app.state::<DbState>();
         let mut results = Vec::new();
-        let mut attachment_topics: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut attachment_topics: HashMap<String, HashSet<TopicKey>> = HashMap::new();
         let mut total_request_bytes = 0usize;
         let mut total_messages = 0usize;
         let mut request_body = Vec::new();
@@ -1338,33 +1401,26 @@ impl PushExecutor {
 
         // Each topic is preflighted, paged, and serialized directly into a bounded writer. This
         // avoids retaining a full history, a cloned DTO tree, and a JSON String simultaneously.
-        for topic_id in topic_ids {
+        for key in topic_keys {
+            let topic_id = &key.topic_id;
             let mut read_tx =
                 db.pool.begin().await.map_err(|error| {
                     format!("Message push snapshot failed for {topic_id}: {error}")
                 })?;
-            let topic_row = sqlx::query(
-                "SELECT owner_type, owner_id FROM topics
-                 WHERE topic_id = ? AND deleted_at IS NULL",
+            let topic_exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM topics
+                 WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL)",
             )
-            .bind(topic_id)
-            .fetch_optional(&mut *read_tx)
+            .bind(&key.owner_type)
+            .bind(&key.owner_id)
+            .bind(&key.topic_id)
+            .fetch_one(&mut *read_tx)
             .await
             .map_err(|error| format!("Message push topic query failed: {error}"))?;
-            let topic_row = topic_row
-                .ok_or_else(|| format!("Message push topic {topic_id} is missing locally"))?;
-            let owner_type: String = topic_row.try_get("owner_type").map_err(|error| {
-                format!("Message push owner type decode failed for {topic_id}: {error}")
-            })?;
-            let owner_id: String = topic_row.try_get("owner_id").map_err(|error| {
-                format!("Message push owner id decode failed for {topic_id}: {error}")
-            })?;
-            if !matches!(owner_type.as_str(), "agent" | "group") || owner_id.is_empty() {
-                return Err(format!(
-                    "Message push topic {topic_id} has invalid owner identity"
-                ));
+            if !topic_exists {
+                return Err(format!("Message push topic {topic_id} is missing locally"));
             }
-            let preflight = preflight_topic_messages(&mut read_tx, topic_id).await?;
+            let preflight = preflight_topic_messages(&mut read_tx, key).await?;
             let topic_message_count = preflight
                 .live_count
                 .checked_add(preflight.tombstone_count)
@@ -1379,7 +1435,7 @@ impl PushExecutor {
             }
 
             let topic_tombstones =
-                load_message_tombstones(&mut read_tx, topic_id, preflight.tombstone_count).await?;
+                load_message_tombstones(&mut read_tx, key, preflight.tombstone_count).await?;
             for tombstone in &topic_tombstones {
                 total_request_bytes = total_request_bytes
                     .checked_add(message_tombstone_body_len(tombstone)?)
@@ -1389,15 +1445,8 @@ impl PushExecutor {
                 }
             }
 
-            let line = serialize_topic_messages(
-                app,
-                &mut read_tx,
-                topic_id,
-                &owner_type,
-                &owner_id,
-                preflight.live_count,
-            )
-            .await?;
+            let line =
+                serialize_topic_messages(app, &mut read_tx, key, preflight.live_count).await?;
             read_tx.commit().await.map_err(|error| {
                 format!("Message push snapshot close failed for {topic_id}: {error}")
             })?;
@@ -1435,7 +1484,7 @@ impl PushExecutor {
             } else {
                 request_body.extend_from_slice(&line);
             }
-            request_topics.push(topic_id.clone());
+            request_topics.push(key.clone());
             if request_body.len() >= MESSAGE_REQUEST_CHUNK_BYTES {
                 let frames = send_message_chunk(
                     client,
@@ -1480,7 +1529,7 @@ impl PushExecutor {
         let result_indexes = results
             .iter()
             .enumerate()
-            .map(|(index, result)| (result.topic_id.clone(), index))
+            .map(|(index, result)| (result.topic.clone(), index))
             .collect::<HashMap<_, _>>();
 
         let hashes_to_upload = {
@@ -1515,12 +1564,13 @@ impl PushExecutor {
         if !attachment_failures.is_empty() {
             for (hash, error) in attachment_failures {
                 if let Some(topics) = attachment_topics.get(&hash) {
-                    for topic_id in topics {
-                        if let Some(index) = result_indexes.get(topic_id).copied() {
+                    for topic in topics {
+                        if let Some(index) = result_indexes.get(topic).copied() {
                             append_topic_failure(
                                 &mut results[index],
                                 format!(
-                                    "Attachment {hash} required by topic {topic_id} failed: {error}"
+                                    "Attachment {hash} required by topic {} failed: {error}",
+                                    topic.topic_id
                                 ),
                             );
                         }
@@ -1533,7 +1583,7 @@ impl PushExecutor {
         log::info!(
             "[PushExecutor] Batch push completed: {}/{} topics",
             ok_count,
-            topic_ids.len()
+            topic_keys.len()
         );
         Ok(results)
     }

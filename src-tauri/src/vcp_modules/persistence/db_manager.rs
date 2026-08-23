@@ -739,6 +739,9 @@ pub struct FtsSearchFilter {
     pub limit: Option<i64>,
     /// keyset 分页游标（仅时间倒序模式有效，须成对出现）
     pub before_timestamp: Option<i64>,
+    pub before_owner_type: Option<String>,
+    pub before_owner_id: Option<String>,
+    pub before_topic_id: Option<String>,
     pub before_message_id: Option<String>,
     /// 排序："time"（默认，时间倒序）| "rank"（bm25 相关度，游标分页不可用）
     pub sort: Option<String>,
@@ -753,8 +756,26 @@ pub async fn search_messages_fts(
     if trimmed.chars().count() < 2 {
         return Ok(Vec::new());
     }
-    if filter.before_timestamp.is_some() != filter.before_message_id.is_some() {
-        return Err("search cursor requires both beforeTimestamp and beforeMessageId".to_string());
+    if filter.owner_id.is_some() != filter.owner_type.is_some() {
+        return Err("search owner filter requires both ownerId and ownerType".to_string());
+    }
+    if filter.topic_id.is_some() && filter.owner_id.is_none() {
+        return Err("search topic filter requires ownerId and ownerType".to_string());
+    }
+    let cursor_present = [
+        filter.before_timestamp.is_some(),
+        filter.before_owner_type.is_some(),
+        filter.before_owner_id.is_some(),
+        filter.before_topic_id.is_some(),
+        filter.before_message_id.is_some(),
+    ];
+    if cursor_present.iter().any(|present| *present)
+        && cursor_present.iter().any(|present| !*present)
+    {
+        return Err(
+            "search cursor requires timestamp, ownerType, ownerId, topicId and messageId"
+                .to_string(),
+        );
     }
     let limit_val = filter.limit.unwrap_or(50).clamp(1, 200);
 
@@ -782,8 +803,13 @@ pub async fn search_messages_fts(
                 snippet(messages_fts, 2, '<mark>', '</mark>', '…', 48) AS snippet,
                 NULL AS full_content
              FROM messages_fts
-             INNER JOIN messages m ON messages_fts.msg_id = m.msg_id AND messages_fts.topic_id = m.topic_id
-             INNER JOIN topics t ON m.topic_id = t.topic_id
+             INNER JOIN messages m ON messages_fts.owner_type = m.owner_type
+                AND messages_fts.owner_id = m.owner_id
+                AND messages_fts.topic_id = m.topic_id
+                AND messages_fts.msg_id = m.msg_id
+             INNER JOIN topics t ON m.owner_type = t.owner_type
+                AND m.owner_id = t.owner_id
+                AND m.topic_id = t.topic_id
              WHERE messages_fts.content MATCH ? AND m.deleted_at IS NULL AND t.deleted_at IS NULL",
         )
     } else {
@@ -799,7 +825,9 @@ pub async fn search_messages_fts(
                 '' AS snippet,
                 substr(m.content, 1, 262144) AS full_content
              FROM messages m
-             INNER JOIN topics t ON m.topic_id = t.topic_id
+             INNER JOIN topics t ON m.owner_type = t.owner_type
+                AND m.owner_id = t.owner_id
+                AND m.topic_id = t.topic_id
              WHERE m.deleted_at IS NULL AND t.deleted_at IS NULL",
         )
     };
@@ -814,10 +842,10 @@ pub async fn search_messages_fts(
         sql.push_str(" AND m.topic_id = ?");
     }
     if filter.owner_id.is_some() {
-        sql.push_str(" AND t.owner_id = ?");
+        sql.push_str(" AND m.owner_id = ?");
     }
     if filter.owner_type.is_some() {
-        sql.push_str(" AND t.owner_type = ?");
+        sql.push_str(" AND m.owner_type = ?");
     }
     if filter.role.is_some() {
         sql.push_str(" AND m.role = ?");
@@ -829,13 +857,19 @@ pub async fn search_messages_fts(
         sql.push_str(" AND m.timestamp <= ?");
     }
     if filter.before_timestamp.is_some() {
-        sql.push_str(" AND (m.timestamp < ? OR (m.timestamp = ? AND m.msg_id < ?))");
+        sql.push_str(
+            " AND (m.timestamp, m.owner_type, m.owner_id, m.topic_id, m.msg_id) < (?, ?, ?, ?, ?)",
+        );
     }
 
     if sort_by_rank {
-        sql.push_str(" ORDER BY bm25(messages_fts), m.timestamp DESC, m.msg_id DESC");
+        sql.push_str(
+            " ORDER BY bm25(messages_fts), m.timestamp DESC, m.owner_type DESC, m.owner_id DESC, m.topic_id DESC, m.msg_id DESC",
+        );
     } else {
-        sql.push_str(" ORDER BY m.timestamp DESC, m.msg_id DESC");
+        sql.push_str(
+            " ORDER BY m.timestamp DESC, m.owner_type DESC, m.owner_id DESC, m.topic_id DESC, m.msg_id DESC",
+        );
     }
     sql.push_str(" LIMIT ?");
 
@@ -866,8 +900,19 @@ pub async fn search_messages_fts(
     if let Some(et) = filter.end_time {
         final_query = final_query.bind(et);
     }
-    if let (Some(bts), Some(ref bid)) = (filter.before_timestamp, &filter.before_message_id) {
-        final_query = final_query.bind(bts).bind(bts).bind(bid);
+    if let (Some(bts), Some(ref bot), Some(ref boi), Some(ref bti), Some(ref bmi)) = (
+        filter.before_timestamp,
+        &filter.before_owner_type,
+        &filter.before_owner_id,
+        &filter.before_topic_id,
+        &filter.before_message_id,
+    ) {
+        final_query = final_query
+            .bind(bts)
+            .bind(bot)
+            .bind(boi)
+            .bind(bti)
+            .bind(bmi);
     }
     final_query = final_query.bind(limit_val);
 

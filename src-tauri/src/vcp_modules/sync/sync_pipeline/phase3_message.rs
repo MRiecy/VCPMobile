@@ -1,3 +1,4 @@
+use crate::vcp_modules::topic_types::{OwnerKey, TopicKey};
 use futures_util::TryStreamExt;
 use sqlx::Row;
 use sqlx::SqlitePool;
@@ -12,16 +13,12 @@ pub struct Phase3Message;
 
 #[derive(Debug)]
 pub struct TargetedTopicHashState {
-    pub owner_type: String,
-    pub owner_id: String,
     pub config_hash: String,
     pub content_hash: String,
 }
 
 #[derive(Debug)]
 pub struct TopicLocalState {
-    pub owner_type: String,
-    pub owner_id: String,
     pub topic_hash: String,
     pub messages: HashMap<String, MessageVersionState>,
 }
@@ -74,27 +71,26 @@ impl Phase3Message {
     /// V2: 获取指定 owner 下所有 topic 的 config_hash 和 content_hash
     pub async fn get_targeted_topic_hashes(
         pool: &SqlitePool,
-        owners: &[String],
-    ) -> Result<HashMap<String, TargetedTopicHashState>, String> {
+        owners: &[OwnerKey],
+    ) -> Result<HashMap<TopicKey, TargetedTopicHashState>, String> {
         if owners.is_empty() {
             return Ok(HashMap::new());
         }
 
         let mut result = HashMap::new();
         for owner_chunk in owners.chunks(SQLITE_BIND_CHUNK) {
-            let placeholders = owner_chunk
+            let predicates = owner_chunk
                 .iter()
-                .map(|_| "?")
+                .map(|_| "(owner_type = ? AND owner_id = ?)")
                 .collect::<Vec<_>>()
-                .join(", ");
+                .join(" OR ");
             let query_str = format!(
                 "SELECT topic_id, owner_type, owner_id, config_hash, content_hash
-                 FROM topics WHERE owner_id IN ({}) AND deleted_at IS NULL",
-                placeholders
+                 FROM topics WHERE ({predicates}) AND deleted_at IS NULL"
             );
             let mut query = sqlx::query(&query_str);
-            for owner_id in owner_chunk {
-                query = query.bind(owner_id);
+            for owner in owner_chunk {
+                query = query.bind(&owner.owner_type).bind(&owner.owner_id);
             }
             let rows = query.fetch_all(pool).await.map_err(|e| e.to_string())?;
             for row in rows {
@@ -118,18 +114,17 @@ impl Phase3Message {
                 })?;
                 if !matches!(owner_type.as_str(), "agent" | "group")
                     || owner_id.is_empty()
-                    || !owners.contains(&owner_id)
+                    || !owners.contains(&OwnerKey::new(&owner_type, &owner_id))
                 {
                     return Err(format!(
                         "Targeted topic {topic_id} has invalid owner identity"
                     ));
                 }
+                let key = TopicKey::new(owner_type, owner_id, &topic_id);
                 if result
                     .insert(
-                        topic_id.clone(),
+                        key,
                         TargetedTopicHashState {
-                            owner_type,
-                            owner_id,
                             config_hash,
                             content_hash,
                         },
@@ -137,7 +132,7 @@ impl Phase3Message {
                     .is_some()
                 {
                     return Err(format!(
-                        "Targeted topic hash query returned duplicate topic {topic_id}"
+                        "Targeted topic hash query returned duplicate topic identity for {topic_id}"
                     ));
                 }
             }
@@ -148,32 +143,41 @@ impl Phase3Message {
     /// 批量获取指定 topic 的本地消息哈希，用于发送给桌面端计算 diff
     pub async fn get_topic_message_hashes(
         pool: &SqlitePool,
-        topic_ids: &[String],
-    ) -> Result<HashMap<String, TopicLocalState>, String> {
-        if topic_ids.is_empty() {
+        topic_keys: &[TopicKey],
+    ) -> Result<HashMap<TopicKey, TopicLocalState>, String> {
+        if topic_keys.is_empty() {
             return Ok(HashMap::new());
         }
 
-        let expected = topic_ids.iter().cloned().collect::<HashSet<_>>();
-        if expected.len() != topic_ids.len() || expected.iter().any(|id| id.is_empty()) {
-            return Err("Topic message hash request contains empty or duplicate topic ids".into());
+        let expected = topic_keys.iter().cloned().collect::<HashSet<_>>();
+        if expected.len() != topic_keys.len()
+            || expected.iter().any(|key| {
+                !matches!(key.owner_type.as_str(), "agent" | "group")
+                    || key.owner_id.is_empty()
+                    || key.topic_id.is_empty()
+            })
+        {
+            return Err("Topic message hash request contains invalid or duplicate topics".into());
         }
 
-        let mut result: HashMap<String, TopicLocalState> = HashMap::new();
-        for topic_chunk in topic_ids.chunks(SQLITE_BIND_CHUNK) {
+        let mut result: HashMap<TopicKey, TopicLocalState> = HashMap::new();
+        for topic_chunk in topic_keys.chunks(SQLITE_BIND_CHUNK / 3) {
             let placeholders = topic_chunk
                 .iter()
-                .map(|_| "?")
+                .map(|_| "(?, ?, ?)")
                 .collect::<Vec<_>>()
                 .join(", ");
             let topic_query = format!(
                 "SELECT topic_id, owner_type, owner_id, content_hash
-                 FROM topics WHERE topic_id IN ({}) AND deleted_at IS NULL",
+                 FROM topics WHERE (owner_type, owner_id, topic_id) IN ({}) AND deleted_at IS NULL",
                 placeholders
             );
             let mut query = sqlx::query(&topic_query);
-            for id in topic_chunk {
-                query = query.bind(id);
+            for key in topic_chunk {
+                query = query
+                    .bind(&key.owner_type)
+                    .bind(&key.owner_id)
+                    .bind(&key.topic_id);
             }
             for row in query.fetch_all(pool).await.map_err(|e| e.to_string())? {
                 let topic_id: String = row
@@ -191,12 +195,11 @@ impl Phase3Message {
                 if !matches!(owner_type.as_str(), "agent" | "group") || owner_id.is_empty() {
                     return Err(format!("Topic {topic_id} has invalid owner identity"));
                 }
+                let key = TopicKey::new(owner_type, owner_id, &topic_id);
                 if result
                     .insert(
-                        topic_id.clone(),
+                        key,
                         TopicLocalState {
-                            owner_type,
-                            owner_id,
                             topic_hash,
                             messages: HashMap::new(),
                         },
@@ -204,7 +207,7 @@ impl Phase3Message {
                     .is_some()
                 {
                     return Err(format!(
-                        "Topic message hash query returned duplicate topic {topic_id}"
+                        "Topic message hash query returned duplicate topic identity for {topic_id}"
                     ));
                 }
             }
@@ -221,25 +224,28 @@ impl Phase3Message {
         // Bound the state before loading message IDs/hashes into memory. SQLite LENGTH over BLOB
         // values counts UTF-8 bytes rather than characters, matching the wire budget.
         let mut budget = Phase3StateBudget::default();
-        for topic_chunk in topic_ids.chunks(SQLITE_BIND_CHUNK) {
+        for topic_chunk in topic_keys.chunks(SQLITE_BIND_CHUNK / 3) {
             let placeholders = topic_chunk
                 .iter()
-                .map(|_| "?")
+                .map(|_| "(?, ?, ?)")
                 .collect::<Vec<_>>()
                 .join(", ");
             let count_query = format!(
-                "SELECT topic_id, COUNT(*) AS message_count,
+                "SELECT owner_type, owner_id, topic_id, COUNT(*) AS message_count,
                         COALESCE(SUM(
                             LENGTH(CAST(msg_id AS BLOB)) +
                             LENGTH(CAST(content_hash AS BLOB)) + 48
                         ), 0) AS state_bytes
                  FROM messages
-                 WHERE topic_id IN ({placeholders})
-                 GROUP BY topic_id"
+                 WHERE (owner_type, owner_id, topic_id) IN ({placeholders})
+                 GROUP BY owner_type, owner_id, topic_id"
             );
             let mut query = sqlx::query(&count_query);
-            for id in topic_chunk {
-                query = query.bind(id);
+            for key in topic_chunk {
+                query = query
+                    .bind(&key.owner_type)
+                    .bind(&key.owner_id)
+                    .bind(&key.topic_id);
             }
             for row in query
                 .fetch_all(pool)
@@ -264,19 +270,23 @@ impl Phase3Message {
         }
 
         // 2. 批量查询所有消息 hash (包含已软删除的消息)
-        for topic_chunk in topic_ids.chunks(SQLITE_BIND_CHUNK) {
+        for topic_chunk in topic_keys.chunks(SQLITE_BIND_CHUNK / 3) {
             let placeholders = topic_chunk
                 .iter()
-                .map(|_| "?")
+                .map(|_| "(?, ?, ?)")
                 .collect::<Vec<_>>()
                 .join(", ");
             let msg_query = format!(
-                "SELECT topic_id, msg_id, content_hash, updated_at, deleted_at FROM messages WHERE topic_id IN ({})",
+                "SELECT owner_type, owner_id, topic_id, msg_id, content_hash, updated_at, deleted_at
+                 FROM messages WHERE (owner_type, owner_id, topic_id) IN ({})",
                 placeholders
             );
             let mut query = sqlx::query(&msg_query);
-            for id in topic_chunk {
-                query = query.bind(id);
+            for key in topic_chunk {
+                query = query
+                    .bind(&key.owner_type)
+                    .bind(&key.owner_id)
+                    .bind(&key.topic_id);
             }
             let mut rows = query.fetch(pool);
             while let Some(row) = rows
@@ -299,7 +309,14 @@ impl Phase3Message {
                 let updated_at: i64 = row.try_get("updated_at").map_err(|error| {
                     format!("Message update time decode failed for {topic_id}/{msg_id}: {error}")
                 })?;
-                let state = result.get_mut(&topic_id).ok_or_else(|| {
+                let owner_type: String = row.try_get("owner_type").map_err(|error| {
+                    format!("Message hash owner type decode failed for {topic_id}: {error}")
+                })?;
+                let owner_id: String = row.try_get("owner_id").map_err(|error| {
+                    format!("Message hash owner id decode failed for {topic_id}: {error}")
+                })?;
+                let key = TopicKey::new(owner_type, owner_id, &topic_id);
+                let state = result.get_mut(&key).ok_or_else(|| {
                     format!("Message hash query returned an unknown topic {topic_id}")
                 })?;
                 let (effective_hash, effective_updated_at) = if let Some(deleted_at) = deleted_at {

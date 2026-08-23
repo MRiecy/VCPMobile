@@ -4,6 +4,7 @@ use crate::vcp_modules::sync_executor::{PullExecutor, PushExecutor};
 use crate::vcp_modules::sync_logger::SyncLogger;
 use crate::vcp_modules::sync_service::{emit_sync_log, SyncCommand, SyncTaskTracker};
 use crate::vcp_modules::sync_types::SyncDataType;
+use crate::vcp_modules::topic_types::{OwnerKey, TopicKey};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use sqlx::Row;
@@ -80,6 +81,7 @@ fn validate_and_filter_diff_items(
     data_type: &SyncDataType,
 ) -> Result<(Vec<Value>, u32), String> {
     let mut seen_ids = HashSet::new();
+    let mut seen_topics = HashSet::new();
     let mut filtered = Vec::with_capacity(items.len());
     let mut exempt_default_topics = 0u32;
     for item in items {
@@ -97,9 +99,6 @@ fn validate_and_filter_diff_items(
             exempt_default_topics += 1;
             continue;
         }
-        if !seen_ids.insert(id) {
-            return Err(format!("SYNC_DIFF_RESULTS contains duplicate id {id}"));
-        }
         let action = item
             .get("action")
             .and_then(Value::as_str)
@@ -116,25 +115,26 @@ fn validate_and_filter_diff_items(
                 "SYNC_DIFF_RESULTS item {id} mismatchedContent must be boolean"
             ));
         }
-        if *data_type == SyncDataType::Topic && matches!(action, "PULL" | "PUSH" | "PUSH_DELETE") {
-            let _owner_type = item
+        if *data_type == SyncDataType::Topic {
+            let owner_type = item
                 .get("ownerType")
                 .and_then(Value::as_str)
                 .filter(|owner_type| matches!(*owner_type, "agent" | "group"))
                 .ok_or_else(|| {
                     format!("SYNC_DIFF_RESULTS topic {id} requires agent/group ownerType")
                 })?;
-            if matches!(action, "PULL" | "PUSH" | "PUSH_DELETE")
-                && item
-                    .get("ownerId")
-                    .and_then(Value::as_str)
-                    .filter(|owner_id| !owner_id.is_empty())
-                    .is_none()
-            {
+            let owner_id = item
+                .get("ownerId")
+                .and_then(Value::as_str)
+                .filter(|owner_id| !owner_id.is_empty())
+                .ok_or_else(|| format!("SYNC_DIFF_RESULTS topic {id} {action} requires ownerId"))?;
+            if !seen_topics.insert(TopicKey::new(owner_type, owner_id, id)) {
                 return Err(format!(
-                    "SYNC_DIFF_RESULTS topic {id} {action} requires ownerId"
+                    "SYNC_DIFF_RESULTS contains duplicate topic identity {owner_type}/{owner_id}/{id}"
                 ));
             }
+        } else if !seen_ids.insert(id) {
+            return Err(format!("SYNC_DIFF_RESULTS contains duplicate id {id}"));
         }
         filtered.push(item.clone());
     }
@@ -158,7 +158,7 @@ impl DiffHandler {
         expected_manifest_types: &Arc<Mutex<HashSet<String>>>,
         manifest_phase: &Arc<AtomicU8>,
         tx_internal: &mpsc::UnboundedSender<SyncCommand>,
-        changed_owners: &Arc<tokio::sync::Mutex<HashSet<String>>>,
+        changed_owners: &Arc<tokio::sync::Mutex<HashSet<OwnerKey>>>,
         logger: &Arc<Mutex<SyncLogger>>,
         task_tracker: &Arc<SyncTaskTracker>,
         session_id: u64,
@@ -267,7 +267,12 @@ impl DiffHandler {
                     let is_mismatched = item["mismatchedContent"].as_bool().unwrap_or(false);
                     if action == "PUSH" || action == "PULL" || is_mismatched {
                         let mut owners = changed_owners.lock().await;
-                        owners.insert(id.clone());
+                        let owner_type = if data_type == SyncDataType::Group {
+                            "group"
+                        } else {
+                            "agent"
+                        };
+                        owners.insert(OwnerKey::new(owner_type, &id));
                     }
                 }
 
@@ -304,8 +309,8 @@ impl DiffHandler {
                     }
                 } else if action == "PUSH" && data_type == SyncDataType::Topic {
                     let owner_id = item["ownerId"].as_str().unwrap_or_default().to_string();
-                    let owner_type = item["ownerType"].as_str().unwrap_or("agent").to_string();
-                    push_topics_to_fetch.push((id, owner_id, owner_type));
+                    let owner_type = item["ownerType"].as_str().unwrap_or_default().to_string();
+                    push_topics_to_fetch.push(TopicKey::new(owner_type, owner_id, id));
                 } else {
                     other_items.push(item);
                 }
@@ -412,12 +417,17 @@ impl DiffHandler {
                     let mut batch_push_requests = Vec::new();
 
                     // 异步批量查询 Topic 元数据
-                    for (id, diff_owner_id, owner_type) in push_topics_to_fetch {
+                    for key in push_topics_to_fetch {
+                        let id = key.topic_id.clone();
                         log::debug!("[SyncDebug] Fetching metadata for topic: {}", id);
                         let row_res = sqlx::query(
                             "SELECT topic_id, title, created_at, locked, unread, owner_id, owner_type
-                             FROM topics WHERE topic_id = ? AND deleted_at IS NULL",
+                             FROM topics
+                             WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+                               AND deleted_at IS NULL",
                         )
+                            .bind(&key.owner_type)
+                            .bind(&key.owner_id)
                             .bind(&id)
                             .fetch_optional(&db.pool)
                             .await;
@@ -466,7 +476,7 @@ impl DiffHandler {
                                         return;
                                     }
                                 };
-                                if db_owner_id != diff_owner_id || db_owner_type != owner_type {
+                                if db_owner_id != key.owner_id || db_owner_type != key.owner_type {
                                     let _ = tx_internal_in.send(
                                         SyncCommand::FailAttemptDetailed {
                                             attempt_id: attempt_id_inner,
@@ -485,18 +495,24 @@ impl DiffHandler {
                                     db_owner_id
                                 );
 
-                                let type_str = if owner_type == "group" {
+                                let type_str = if key.owner_type == "group" {
                                     "group_topic"
                                 } else {
                                     "agent_topic"
                                 };
-                                let dto = if owner_type == "group" {
+                                let dto = if key.owner_type == "group" {
                                     json!({ "id": tid, "name": title, "createdAt": created_at, "ownerId": db_owner_id })
                                 } else {
                                     json!({ "id": tid, "name": title, "createdAt": created_at, "locked": locked != 0, "unread": unread != 0, "ownerId": db_owner_id })
                                 };
                                 batch_push_requests
-                                    .push(json!({ "id": id, "type": type_str, "data": dto }));
+                                    .push(json!({
+                                        "id": id,
+                                        "type": type_str,
+                                        "ownerType": key.owner_type,
+                                        "ownerId": key.owner_id,
+                                        "data": dto,
+                                    }));
                             }
                             Ok(None) => {
                                 log::warn!("[SyncDebug] Topic NOT FOUND in database: {}", id);
@@ -730,12 +746,22 @@ impl DiffHandler {
                                                 }
                                             }
                                             SyncDataType::Topic => {
-                                                DeleteExecutor::soft_delete_topic(
-                                                    &h_task,
-                                                    &id,
-                                                    deleted_at,
-                                                )
-                                                .await
+                                                match (
+                                                    item.get("ownerType").and_then(Value::as_str),
+                                                    item.get("ownerId").and_then(Value::as_str),
+                                                ) {
+                                                    (Some(owner_type), Some(owner_id)) => {
+                                                        let topic_key = TopicKey::new(owner_type, owner_id, &id);
+                                                        DeleteExecutor::soft_delete_topic(
+                                                            &h_task,
+                                                            &topic_key,
+                                                            deleted_at,
+                                                        ).await
+                                                    }
+                                                    _ => Err(format!(
+                                                        "Topic delete {id} is missing owner identity"
+                                                    )),
+                                                }
                                             }
                                             _ => Err(format!(
                                                 "unsupported DELETE data type: {:?}",

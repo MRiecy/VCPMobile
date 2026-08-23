@@ -32,7 +32,6 @@ const MAX_DIRECT_ENTITY_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_ENTITY_BATCH_ITEMS: usize = 1_000;
 const MAX_MESSAGE_IDS_PER_TOPIC: usize = 10_000;
 const MAX_MESSAGE_PULL_TOPICS: usize = 10_000;
-const SQLITE_BIND_CHUNK: usize = 400;
 const MAX_AVATAR_RESPONSE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES: usize = 1024 * 1024;
 
@@ -106,9 +105,9 @@ fn http_status_error(operation: &str, status: reqwest::StatusCode, bytes: &[u8])
     match encode_http_sync_error_body(bytes) {
         Ok(Some(encoded)) => encoded,
         Ok(None) => {
-            format!("{operation} failed with HTTP {status} without a Wire 1.2 error object")
+            format!("{operation} failed with HTTP {status} without a Wire 1.3 error object")
         }
-        Err(error) => format!("{operation} returned an invalid Wire 1.2 error: {error}"),
+        Err(error) => format!("{operation} returned an invalid Wire 1.3 error: {error}"),
     }
 }
 
@@ -465,23 +464,20 @@ fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
 
 fn validate_returned_topic_identity(
     frame: &TopicNDJSONFrame,
-    expected: &HashMap<String, (String, String)>,
-) -> Result<(), String> {
-    let Some((expected_owner_type, expected_owner_id)) = expected.get(&frame.topic_id) else {
+    expected: &HashSet<TopicKey>,
+) -> Result<TopicKey, String> {
+    let key = TopicKey::new(
+        frame.owner_type.clone().unwrap_or_default(),
+        frame.owner_id.clone().unwrap_or_default(),
+        &frame.topic_id,
+    );
+    if !expected.contains(&key) {
         return Err(format!(
-            "NDJSON returned unexpected topicId {}",
-            frame.topic_id
-        ));
-    };
-    if frame.owner_type.as_deref() != Some(expected_owner_type.as_str())
-        || frame.owner_id.as_deref() != Some(expected_owner_id.as_str())
-    {
-        return Err(format!(
-            "NDJSON topic {} owner identity conflicts with the local database",
-            frame.topic_id
+            "NDJSON returned unexpected topic identity for {}",
+            key.topic_id
         ));
     }
-    Ok(())
+    Ok(key)
 }
 
 fn validate_requested_message_ids(
@@ -729,7 +725,7 @@ async fn process_topic_messages<R: Runtime>(
 /// 批量 Pull 单 topic 处理结果
 #[allow(dead_code)]
 pub struct BatchPullResult {
-    pub topic_id: String,
+    pub topic: TopicKey,
     pub success: bool,
     pub parsed_count: usize,
     pub failed_count: usize,
@@ -961,7 +957,7 @@ impl PullExecutor {
                             "Agent topic {id} data does not match the requested owner"
                         ));
                     }
-                    agent_topics.push((id.to_string(), dto));
+                    agent_topics.push((TopicKey::new("agent", &key.3, id), dto));
                 }
                 "group_topic" => {
                     if id == "default" {
@@ -974,7 +970,7 @@ impl PullExecutor {
                             "Group topic {id} data does not match the requested owner"
                         ));
                     }
-                    group_topics.push((id.to_string(), dto));
+                    group_topics.push((TopicKey::new("group", &key.3, id), dto));
                 }
                 _ => return Err(format!("Entity pull returned unsupported type {}", r#type)),
             }
@@ -1117,7 +1113,7 @@ impl PullExecutor {
         client: &reqwest::Client,
         http_url: &str,
         sync_token: &str,
-        requests: &[(String, Vec<String>)], // (topic_id, msg_ids), 空 vec = 拉全部消息
+        requests: &[(TopicKey, Vec<String>)], // (topic identity, msg_ids)，空 vec = 拉全部消息
         write_queue: &DbWriteQueue,
         prerender_enabled: bool,
         progress: Option<PullProgressContext>,
@@ -1132,13 +1128,16 @@ impl PullExecutor {
         }
         let mut expected_message_ids = HashMap::new();
         let mut total_message_ids = 0usize;
-        for (topic_id, message_ids) in requests {
-            if topic_id.is_empty() || expected_message_ids.contains_key(topic_id) {
-                return Err("Pull request contains empty or duplicate topicId".to_string());
+        for (key, message_ids) in requests {
+            if !key.is_valid() || expected_message_ids.contains_key(key) {
+                return Err(
+                    "Pull request contains an invalid or duplicate topic identity".to_string(),
+                );
             }
             if message_ids.len() > MAX_MESSAGE_IDS_PER_TOPIC {
                 return Err(format!(
-                    "Pull request for {topic_id} exceeds {MAX_MESSAGE_IDS_PER_TOPIC} message budget"
+                    "Pull request for {} exceeds {MAX_MESSAGE_IDS_PER_TOPIC} message budget",
+                    key.topic_id
                 ));
             }
             total_message_ids = total_message_ids
@@ -1155,88 +1154,28 @@ impl PullExecutor {
                 let ids = message_ids.iter().cloned().collect::<HashSet<_>>();
                 if ids.len() != message_ids.len() || ids.iter().any(|id| id.is_empty()) {
                     return Err(format!(
-                        "Pull request for {topic_id} contains empty or duplicate message id"
+                        "Pull request for {} contains empty or duplicate message id",
+                        key.topic_id
                     ));
                 }
                 Some(ids)
             };
-            expected_message_ids.insert(topic_id.clone(), exact_messages);
+            expected_message_ids.insert(key.clone(), exact_messages);
         }
         let expected_topics = expected_message_ids.keys().cloned().collect::<HashSet<_>>();
         let mut seen_topics = HashSet::new();
 
-        let db = app.state::<DbState>();
-        let mut expected_topic_identities = HashMap::new();
-        for request_chunk in requests.chunks(SQLITE_BIND_CHUNK) {
-            let placeholders = request_chunk
-                .iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(", ");
-            let query_text = format!(
-                "SELECT topic_id, owner_type, owner_id FROM topics
-                 WHERE topic_id IN ({placeholders}) AND deleted_at IS NULL"
-            );
-            let mut query = sqlx::query(&query_text);
-            for (topic_id, _) in request_chunk {
-                query = query.bind(topic_id);
-            }
-            let rows = query
-                .fetch_all(&db.pool)
-                .await
-                .map_err(|error| format!("Pull topic identity lookup failed: {error}"))?;
-            for row in rows {
-                let topic_id = row
-                    .try_get::<String, _>("topic_id")
-                    .map_err(|error| format!("Pull topic id decode failed: {error}"))?;
-                let owner_type = row.try_get::<String, _>("owner_type").map_err(|error| {
-                    format!("Pull topic {topic_id} owner type decode failed: {error}")
-                })?;
-                let owner_id = row.try_get::<String, _>("owner_id").map_err(|error| {
-                    format!("Pull topic {topic_id} owner id decode failed: {error}")
-                })?;
-                if !matches!(owner_type.as_str(), "agent" | "group") || owner_id.is_empty() {
-                    return Err(format!("Pull topic {topic_id} has invalid owner identity"));
-                }
-                if expected_topic_identities
-                    .insert(topic_id.clone(), (owner_type, owner_id))
-                    .is_some()
-                {
-                    return Err(format!(
-                        "Pull topic identity query returned duplicate topic {topic_id}"
-                    ));
-                }
-            }
-        }
-        if expected_topic_identities.len() != expected_topics.len() {
-            let mut missing = expected_topics
-                .iter()
-                .filter(|topic_id| !expected_topic_identities.contains_key(*topic_id))
-                .cloned()
-                .collect::<Vec<_>>();
-            missing.sort();
-            return Err(format!(
-                "Pull topic identity lookup omitted topics: {:?}",
-                missing.into_iter().take(8).collect::<Vec<_>>()
-            ));
-        }
-
         let url = format!("{}/api/mobile-sync/download-messages-stream", http_url);
         let req_body: Vec<serde_json::Value> = requests
             .iter()
-            .map(
-                |(topic_id, message_ids)| -> Result<serde_json::Value, String> {
-                    let (owner_type, owner_id) = expected_topic_identities
-                        .get(topic_id)
-                        .ok_or_else(|| format!("Pull topic {topic_id} identity disappeared"))?;
-                    Ok(serde_json::json!({
-                        "topicId": topic_id,
-                        "ownerType": owner_type,
-                        "ownerId": owner_id,
-                        "msgIds": message_ids,
-                    }))
-                },
-            )
+            .map(|(key, message_ids)| -> Result<serde_json::Value, String> {
+                Ok(serde_json::json!({
+                    "topicId": key.topic_id,
+                    "ownerType": key.owner_type,
+                    "ownerId": key.owner_id,
+                    "msgIds": message_ids,
+                }))
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         let res = client
@@ -1273,7 +1212,7 @@ impl PullExecutor {
                     succeeded += 1;
                     let msg = format!(
                         "[PullExecutor] Batch pull: topic {} completed ({}/{})",
-                        result.topic_id, completed, total
+                        result.topic.topic_id, completed, total
                     );
                     crate::vcp_modules::sync::sync_service::emit_sync_log(
                         &app_receiver,
@@ -1302,7 +1241,7 @@ impl PullExecutor {
                     let err = result.error.as_deref().unwrap_or("unknown");
                     let msg = format!(
                         "[PullExecutor] Batch pull: topic {} FAILED ({}/{}): {}",
-                        result.topic_id, completed, total, err
+                        result.topic.topic_id, completed, total, err
                     );
                     crate::vcp_modules::sync::sync_service::emit_sync_log(
                         &app_receiver,
@@ -1335,7 +1274,7 @@ impl PullExecutor {
                 return Err("NDJSON transport chunk exceeds 32MB budget".to_string());
             }
 
-            // 检测流级错误帧；Wire 1.2 要求错误对象完整保留。
+            // 检测流级错误帧；Wire 1.3 要求错误对象完整保留。
             if chunk.starts_with(b"{\"_stream_error\"") || chunk.starts_with(br#"{"_stream_error""#)
             {
                 if let Some(error) = parse_stream_error_frame(&chunk)? {
@@ -1418,19 +1357,12 @@ impl PullExecutor {
                 let frame = parse_topic_ndjson_frame(&line)?;
                 drop(line);
                 ndjson_budget.observe_frame(line_bytes, frame.messages.len())?;
-                validate_returned_topic_identity(&frame, &expected_topic_identities)?;
-                let key = TopicKey::new(
-                    frame.owner_type.clone().ok_or_else(|| {
-                        format!("NDJSON topic {} omitted ownerType", frame.topic_id)
-                    })?,
-                    frame.owner_id.clone().ok_or_else(|| {
-                        format!("NDJSON topic {} omitted ownerId", frame.topic_id)
-                    })?,
-                    &frame.topic_id,
-                );
-                let topic_id = frame.topic_id;
-                if !seen_topics.insert(topic_id.clone()) {
-                    return Err(format!("NDJSON returned duplicate topicId {topic_id}"));
+                let key = validate_returned_topic_identity(&frame, &expected_topics)?;
+                let topic_id = key.topic_id.clone();
+                if !seen_topics.insert(key.clone()) {
+                    return Err(format!(
+                        "NDJSON returned duplicate topic identity for {topic_id}"
+                    ));
                 }
                 for warning in &frame.warning_samples {
                     crate::vcp_modules::sync::sync_service::emit_sync_log(
@@ -1442,7 +1374,7 @@ impl PullExecutor {
                 if let Some(topic_err) = frame.error {
                     let encoded = encode_wire_sync_error(&topic_err)?;
                     tx.send(BatchPullResult {
-                        topic_id,
+                        topic: key,
                         success: false,
                         parsed_count: 0,
                         failed_count: 0,
@@ -1455,12 +1387,12 @@ impl PullExecutor {
                 }
                 validate_requested_message_ids(
                     &topic_id,
-                    expected_message_ids.get(&topic_id).and_then(Option::as_ref),
+                    expected_message_ids.get(&key).and_then(Option::as_ref),
                     &frame.messages,
                 )?;
                 if frame.messages.is_empty() {
                     tx.send(BatchPullResult {
-                        topic_id,
+                        topic: key,
                         success: true,
                         parsed_count: 0,
                         failed_count: 0,
@@ -1506,7 +1438,7 @@ impl PullExecutor {
                                         topic_id, parsed, decode_t, std::time::Duration::ZERO, proc_t, total_t
                                     );
                                     let _ = tx_clone.send(BatchPullResult {
-                                        topic_id,
+                                        topic: key,
                                         success: true,
                                         parsed_count: parsed,
                                         failed_count: failed,
@@ -1516,7 +1448,7 @@ impl PullExecutor {
                                 }
                                 Err(e) => {
                                     let _ = tx_clone.send(BatchPullResult {
-                                        topic_id,
+                                        topic: key,
                                         success: false,
                                         parsed_count: 0,
                                         failed_count: 0,
@@ -1558,20 +1490,12 @@ impl PullExecutor {
             let frame = parse_topic_ndjson_frame(&trailing)?;
             drop(trailing);
             ndjson_budget.observe_frame(trailing_bytes, frame.messages.len())?;
-            validate_returned_topic_identity(&frame, &expected_topic_identities)?;
-            let key =
-                TopicKey::new(
-                    frame.owner_type.clone().ok_or_else(|| {
-                        format!("NDJSON topic {} omitted ownerType", frame.topic_id)
-                    })?,
-                    frame.owner_id.clone().ok_or_else(|| {
-                        format!("NDJSON topic {} omitted ownerId", frame.topic_id)
-                    })?,
-                    &frame.topic_id,
-                );
-            let topic_id = frame.topic_id;
-            if !seen_topics.insert(topic_id.clone()) {
-                return Err(format!("NDJSON returned duplicate topicId {topic_id}"));
+            let key = validate_returned_topic_identity(&frame, &expected_topics)?;
+            let topic_id = key.topic_id.clone();
+            if !seen_topics.insert(key.clone()) {
+                return Err(format!(
+                    "NDJSON returned duplicate topic identity for {topic_id}"
+                ));
             }
             for warning in &frame.warning_samples {
                 crate::vcp_modules::sync::sync_service::emit_sync_log(
@@ -1583,7 +1507,7 @@ impl PullExecutor {
             if let Some(topic_err) = frame.error {
                 let encoded = encode_wire_sync_error(&topic_err)?;
                 tx.send(BatchPullResult {
-                    topic_id,
+                    topic: key,
                     success: false,
                     parsed_count: 0,
                     failed_count: 0,
@@ -1595,7 +1519,7 @@ impl PullExecutor {
             } else {
                 validate_requested_message_ids(
                     &topic_id,
-                    expected_message_ids.get(&topic_id).and_then(Option::as_ref),
+                    expected_message_ids.get(&key).and_then(Option::as_ref),
                     &frame.messages,
                 )?;
                 let pull_dtos = frame.messages;
@@ -1623,7 +1547,7 @@ impl PullExecutor {
                             Ok((parsed, failed)) => {
                                 let _ = tx_clone
                                     .send(BatchPullResult {
-                                        topic_id,
+                                        topic: key,
                                         success: true,
                                         parsed_count: parsed,
                                         failed_count: failed,
@@ -1635,7 +1559,7 @@ impl PullExecutor {
                             Err(e) => {
                                 let _ = tx_clone
                                     .send(BatchPullResult {
-                                        topic_id,
+                                        topic: key,
                                         success: false,
                                         parsed_count: 0,
                                         failed_count: 0,
@@ -1648,7 +1572,7 @@ impl PullExecutor {
                     });
                 } else {
                     tx.send(BatchPullResult {
-                        topic_id,
+                        topic: key,
                         success: true,
                         parsed_count: 0,
                         failed_count: 0,

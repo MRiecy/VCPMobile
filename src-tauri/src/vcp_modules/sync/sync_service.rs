@@ -7,7 +7,8 @@ use crate::vcp_modules::sync_error::{
 use crate::vcp_modules::sync_hash::HashInitializer;
 use crate::vcp_modules::sync_logger::{redact_sync_diagnostic, LogLevel, SyncLogger};
 use crate::vcp_modules::sync_pipeline::{Phase1Metadata, Phase3Message, SyncPipeline};
-use crate::vcp_modules::sync_types::SyncDataType;
+use crate::vcp_modules::sync_types::{parse_topic_key, SyncDataType};
+use crate::vcp_modules::topic_types::{MessageKey, OwnerKey, TopicKey};
 use crate::vcp_modules::vcp_log_service::get_vcp_log_status_internal;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
@@ -26,8 +27,8 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 
-const EXPECTED_PLUGIN_VERSION: &str = "1.2.0";
-const WIRE_PROTOCOL_VERSION: &str = "1.2";
+const EXPECTED_PLUGIN_VERSION: &str = "1.3.0";
+const WIRE_PROTOCOL_VERSION: &str = "1.3";
 const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const WS_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SYNC_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(270);
@@ -310,7 +311,7 @@ async fn enforce_manifest_response_deadline(
 }
 
 async fn enforce_topic_hash_response_deadline(
-    expected_results: Arc<AsyncMutex<Option<HashSet<String>>>>,
+    expected_results: Arc<AsyncMutex<Option<HashSet<TopicKey>>>>,
     manifest_phase: Arc<AtomicU8>,
     expected_phase: u8,
     tx: mpsc::UnboundedSender<SyncCommand>,
@@ -443,22 +444,22 @@ impl SyncTaskTracker {
 pub struct Phase3Tracker {
     pub session_id: u64,
     pub attempt_id: u64,
-    pub completed: tokio::sync::Mutex<HashSet<String>>,
-    pub modified: tokio::sync::Mutex<HashSet<String>>,
-    pub failed: tokio::sync::Mutex<HashSet<String>>,
+    pub completed: tokio::sync::Mutex<HashSet<TopicKey>>,
+    pub modified: tokio::sync::Mutex<HashSet<TopicKey>>,
+    pub failed: tokio::sync::Mutex<HashSet<TopicKey>>,
     pub legacy_attachment_warnings: std::sync::atomic::AtomicUsize,
     pub total: std::sync::atomic::AtomicUsize,
 }
 
 impl Phase3Tracker {
     /// 标记某个 topic 为数据已修改（实际发生了 pull/push）
-    pub async fn mark_modified(&self, topic_id: &str) {
+    pub async fn mark_modified(&self, topic: &TopicKey) {
         let mut modified = self.modified.lock().await;
-        modified.insert(topic_id.to_string());
+        modified.insert(topic.clone());
     }
 
-    pub async fn mark_failed(&self, topic_id: &str) {
-        self.failed.lock().await.insert(topic_id.to_string());
+    pub async fn mark_failed(&self, topic: &TopicKey) {
+        self.failed.lock().await.insert(topic.clone());
     }
 
     pub fn add_legacy_attachment_warnings(&self, count: usize) {
@@ -469,7 +470,10 @@ impl Phase3Tracker {
     async fn completion_summary(&self) -> SyncCompletionSummary {
         let successful_topics = self.completed.lock().await.len();
         let failed = self.failed.lock().await;
-        let mut failed_topic_ids = failed.iter().cloned().collect::<Vec<_>>();
+        let mut failed_topic_ids = failed
+            .iter()
+            .map(|topic| topic.topic_id.clone())
+            .collect::<Vec<_>>();
         failed_topic_ids.sort();
         failed_topic_ids.truncate(8);
         SyncCompletionSummary {
@@ -485,21 +489,21 @@ impl Phase3Tracker {
     /// 当所有 topic 都完成时，触发 complete_phase 和 Phase3 命令。
     pub async fn mark_completed(
         &self,
-        topic_id: &str,
+        topic: &TopicKey,
         logger: &Arc<Mutex<SyncLogger>>,
         tx: &mpsc::UnboundedSender<SyncCommand>,
         app_handle: &AppHandle,
         quiet: bool,
     ) -> bool {
         let mut completed = self.completed.lock().await;
-        let is_new = completed.insert(topic_id.to_string());
+        let is_new = completed.insert(topic.clone());
         if is_new {
             let done = completed.len();
             let total = self.total.load(Ordering::SeqCst);
 
             if !quiet {
                 if let Ok(mut logger) = logger.lock() {
-                    logger.log_operation("messages", "topic", topic_id, true, None);
+                    logger.log_operation("messages", "topic", &topic.topic_id, true, None);
                 }
             }
 
@@ -558,8 +562,7 @@ pub enum SyncCommand {
         owner_id: Option<String>,
     },
     NotifyMessageDelete {
-        topic_id: String,
-        message_id: String,
+        key: MessageKey,
         deleted_at: i64,
     },
     StartManualSync,
@@ -590,11 +593,11 @@ pub fn parse_sync_data_type(value: &Value) -> Option<SyncDataType> {
     serde_json::from_value::<SyncDataType>(value.clone()).ok()
 }
 
-fn parse_unique_nonempty_strings(
+fn parse_unique_topic_keys(
     value: &Value,
     field: &str,
     max_items: usize,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<TopicKey>, String> {
     let values = value
         .as_array()
         .ok_or_else(|| format!("{field} must be an array"))?;
@@ -603,15 +606,12 @@ fn parse_unique_nonempty_strings(
     }
     let mut seen = HashSet::new();
     let mut result = Vec::with_capacity(values.len());
-    for value in values {
-        let item = value
-            .as_str()
-            .filter(|item| !item.is_empty())
-            .ok_or_else(|| format!("{field} must contain only non-empty strings"))?;
-        if !seen.insert(item) {
-            return Err(format!("{field} contains duplicate value {item}"));
+    for (index, value) in values.iter().enumerate() {
+        let key = parse_topic_key(value, &format!("{field}[{index}]"))?;
+        if !seen.insert(key.clone()) {
+            return Err(format!("{field} contains a duplicate topic identity"));
         }
-        result.push(item.to_string());
+        result.push(key);
     }
     Ok(result)
 }
@@ -1436,25 +1436,23 @@ async fn run_sync_session(
                     total: std::sync::atomic::AtomicUsize::new(0),
                 });
                 let expected_phase3_batch =
-                    Arc::new(tokio::sync::Mutex::new(HashSet::<String>::new()));
+                    Arc::new(tokio::sync::Mutex::new(HashSet::<TopicKey>::new()));
                 let expected_topic_hash_results =
-                    Arc::new(tokio::sync::Mutex::new(None::<HashSet<String>>));
+                    Arc::new(tokio::sync::Mutex::new(None::<HashSet<TopicKey>>));
                 let phase3_batch_inflight = Arc::new(AtomicBool::new(false));
                 let awaiting_final_ack: PendingFinalAck = Arc::new(Mutex::new(None));
 
                 // Phase3 分批 diff 的待发送批次队列
                 let pending_diff_batches: Arc<
-                    tokio::sync::Mutex<
-                        std::collections::VecDeque<serde_json::Map<String, serde_json::Value>>,
-                    >,
+                    tokio::sync::Mutex<std::collections::VecDeque<Phase3DiffBatch>>,
                 > = Arc::new(tokio::sync::Mutex::new(std::collections::VecDeque::new()));
 
                 // Phase 2 筛选出的需要消息同步的 topic 列表
-                let changed_topics: Arc<tokio::sync::Mutex<Vec<String>>> =
+                let changed_topics: Arc<tokio::sync::Mutex<Vec<TopicKey>>> =
                     Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
                 // V2: Phase 1 筛选出的内容有变动的 owner (Agent/Group) 列表
-                let changed_owners: Arc<tokio::sync::Mutex<HashSet<String>>> =
+                let changed_owners: Arc<tokio::sync::Mutex<HashSet<OwnerKey>>> =
                     Arc::new(tokio::sync::Mutex::new(HashSet::new()));
 
                 // 用于跟踪 manifest diff 结果是否全部收到，防止 total_ops=0 时 Phase 1 卡住
@@ -1494,7 +1492,7 @@ async fn run_sync_session(
                                     let db = handle_clone.state::<DbState>();
                                     let owners = {
                                         let guard = changed_owners.lock().await;
-                                        guard.iter().cloned().collect::<Vec<String>>()
+                                        guard.iter().cloned().collect::<Vec<OwnerKey>>()
                                     };
 
                                     if owners.is_empty() {
@@ -1601,7 +1599,7 @@ async fn run_sync_session(
                                     let db = handle_clone.state::<DbState>();
                                     let owners = {
                                         let guard = changed_owners.lock().await;
-                                        guard.iter().cloned().collect::<Vec<String>>()
+                                        guard.iter().cloned().collect::<Vec<OwnerKey>>()
                                     };
 
                                     match Phase3Message::get_targeted_topic_hashes(&db.pool, &owners).await {
@@ -1615,17 +1613,14 @@ async fn run_sync_session(
                                                 });
                                                 continue 'attempt;
                                             }
-                                            let mut hash_map = serde_json::Map::new();
                                             let mut topic_states = Vec::new();
-                                            for (topic_id, state) in topic_hashes {
-                                                hash_map.insert(topic_id.clone(), json!({
-                                                    "configHash": state.config_hash.clone(),
-                                                    "contentHash": state.content_hash.clone()
-                                                }));
+                                            let mut expected_topics = HashSet::new();
+                                            for (key, state) in topic_hashes {
+                                                expected_topics.insert(key.clone());
                                                 topic_states.push(json!({
-                                                    "topicId": topic_id,
-                                                    "ownerType": state.owner_type,
-                                                    "ownerId": state.owner_id,
+                                                    "topicId": key.topic_id,
+                                                    "ownerType": key.owner_type,
+                                                    "ownerId": key.owner_id,
                                                     "configHash": state.config_hash,
                                                     "contentHash": state.content_hash,
                                                 }));
@@ -1641,11 +1636,10 @@ async fn run_sync_session(
                                                     });
                                                     continue 'attempt;
                                                 }
-                                                *expected = Some(hash_map.keys().cloned().collect());
+                                                *expected = Some(expected_topics);
                                             }
                                             let msg = json!({
                                                 "type": "SYNC_TOPIC_HASH_BATCH_V2",
-                                                "hashes": hash_map,
                                                 "topics": topic_states,
                                             });
                                             if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(msg.to_string().into())).await {
@@ -1758,7 +1752,7 @@ async fn run_sync_session(
                                                             attempt_id,
                                                             code: "PHASE3_DIFF_BUDGET_EXCEEDED".to_string(),
                                                             message: error,
-                                                            failed_topic_ids: changed_ids.iter().take(8).cloned().collect(),
+                                                            failed_topic_ids: changed_ids.iter().take(8).map(|key| key.topic_id.clone()).collect(),
                                                         });
                                                         continue 'attempt;
                                                     }
@@ -1778,11 +1772,11 @@ async fn run_sync_session(
                                                 if let Some(batch) = first_batch {
                                                     {
                                                         let mut expected = expected_phase3_batch.lock().await;
-                                                        *expected = batch.keys().cloned().collect();
+                                                        *expected = batch.keys.clone();
                                                     }
                                                     let msg = json!({
                                                         "type": "SYNC_MESSAGE_DIFF_BATCH",
-                                                        "topics": batch,
+                                                        "topics": batch.topics,
                                                     });
                                                     if let Err(error) = send_ws_with_deadline(
                                                         &mut ws_stream,
@@ -2139,11 +2133,13 @@ async fn run_sync_session(
                                         break 'attempt;
                                     }
                                 },
-                                SyncCommand::NotifyMessageDelete { topic_id, message_id, deleted_at } => {
+                                SyncCommand::NotifyMessageDelete { key, deleted_at } => {
                                     let msg = json!({
                                         "type": "SYNC_ENTITY_DELETE",
-                                        "id": message_id,
-                                        "topicId": topic_id,
+                                        "id": key.msg_id,
+                                        "topicId": key.topic.topic_id,
+                                        "ownerType": key.topic.owner_type,
+                                        "ownerId": key.topic.owner_id,
                                         "dataType": SyncDataType::Message,
                                         "deletedAt": deleted_at,
                                     });
@@ -2477,28 +2473,54 @@ async fn run_sync_session(
                                                 break;
                                             }
                                         };
-                                        let message_topic_id = if data_type == SyncDataType::Message {
-                                            let topic_id = match payload
-                                                .get("topicId")
-                                                .and_then(Value::as_str)
-                                                .filter(|topic_id| !topic_id.is_empty())
-                                            {
-                                                Some(topic_id) => topic_id.to_string(),
-                                                None => {
+                                        let deleted_topic_key = if matches!(data_type, SyncDataType::Topic | SyncDataType::Message) {
+                                            let topic_id = if data_type == SyncDataType::Topic {
+                                                id.clone()
+                                            } else {
+                                                match payload
+                                                    .get("topicId")
+                                                    .and_then(Value::as_str)
+                                                    .filter(|topic_id| !topic_id.is_empty())
+                                                {
+                                                    Some(topic_id) => topic_id.to_string(),
+                                                    None => {
+                                                        fatal_error = true;
+                                                        publish_sync_error(
+                                                            &handle_clone,
+                                                            session_id,
+                                                            &connection_status_for_task,
+                                                            "PROTOCOL_FRAME_INVALID",
+                                                            "Message delete requires a non-empty topicId",
+                                                            vec![id.clone()],
+                                                        ).await;
+                                                        let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                                        break;
+                                                    }
+                                                }
+                                            };
+                                            match parse_topic_key(
+                                                &json!({
+                                                    "topicId": topic_id,
+                                                    "ownerType": payload.get("ownerType"),
+                                                    "ownerId": payload.get("ownerId"),
+                                                }),
+                                                "SYNC_DELETE_NOTIFY topic",
+                                            ) {
+                                                Ok(key) => Some(key),
+                                                Err(message) => {
                                                     fatal_error = true;
                                                     publish_sync_error(
                                                         &handle_clone,
                                                         session_id,
                                                         &connection_status_for_task,
                                                         "PROTOCOL_FRAME_INVALID",
-                                                        "Message delete requires a non-empty topicId",
+                                                        &message,
                                                         vec![id.clone()],
                                                     ).await;
                                                     let _ = close_ws_with_deadline(&mut ws_stream).await;
                                                     break;
                                                 }
-                                            };
-                                            Some(topic_id)
+                                            }
                                         } else {
                                             None
                                         };
@@ -2506,7 +2528,12 @@ async fn run_sync_session(
                                             match data_type {
                                                 SyncDataType::Agent => DeleteExecutor::soft_delete_agent(&h, &id, deleted_at).await,
                                                 SyncDataType::Group => DeleteExecutor::soft_delete_group(&h, &id, deleted_at).await,
-                                                SyncDataType::Topic => DeleteExecutor::soft_delete_topic(&h, &id, deleted_at).await,
+                                                SyncDataType::Topic => {
+                                                    let key = deleted_topic_key
+                                                        .as_ref()
+                                                        .ok_or_else(|| "topic delete metadata is missing".to_string())?;
+                                                    DeleteExecutor::soft_delete_topic(&h, key, deleted_at).await
+                                                },
                                                 SyncDataType::Avatar => match id.split_once(':') {
                                                     Some((owner_type, owner_id))
                                                         if crate::vcp_modules::sync_types::is_valid_avatar_owner(owner_type, owner_id) =>
@@ -2516,12 +2543,12 @@ async fn run_sync_session(
                                                     _ => Err(format!("invalid avatar id: {id}")),
                                                 },
                                                 SyncDataType::Message => {
-                                                    let topic_id = message_topic_id
+                                                    let key = deleted_topic_key
                                                         .as_ref()
                                                         .ok_or_else(|| "message delete metadata is missing".to_string())?;
                                                     DeleteExecutor::soft_delete_message(
                                                         &h,
-                                                        topic_id,
+                                                        key,
                                                         &id,
                                                         deleted_at,
                                                     ).await
@@ -2712,21 +2739,24 @@ async fn run_sync_session(
                                         manifest_phase.store(4, Ordering::SeqCst); // 进入 Phase 2.5+，结束 manifest 阶段
                                         let expected = expected_topic_hash_results.lock().await.take();
                                         let parsed = match expected {
-                                            Some(expected) => parse_unique_nonempty_strings(
+                                            Some(expected) => parse_unique_topic_keys(
                                                 &payload["changedTopics"],
                                                 "SYNC_TOPIC_HASH_RESULTS.changedTopics",
                                                 MAX_SYNC_TOPICS,
                                             )
-                                            .and_then(|changed_ids| {
-                                                if let Some(unexpected) = changed_ids
+                                            .and_then(|changed_topics| {
+                                                if let Some(unexpected) = changed_topics
                                                     .iter()
-                                                    .find(|topic_id| !expected.contains(*topic_id))
+                                                    .find(|topic| !expected.contains(*topic))
                                                 {
                                                     return Err(format!(
-                                                        "SYNC_TOPIC_HASH_RESULTS.changedTopics contains unexpected topic {unexpected}"
+                                                        "SYNC_TOPIC_HASH_RESULTS.changedTopics contains unexpected topic {}/{}/{}",
+                                                        unexpected.owner_type,
+                                                        unexpected.owner_id,
+                                                        unexpected.topic_id,
                                                     ));
                                                 }
-                                                Ok(changed_ids)
+                                                Ok(changed_topics)
                                             }),
                                             None => Err(
                                                 "Received an unexpected or duplicate SYNC_TOPIC_HASH_RESULTS frame"
@@ -2734,11 +2764,11 @@ async fn run_sync_session(
                                             ),
                                         };
                                         match parsed {
-                                            Ok(changed_ids) => {
-                                                log::info!("[SyncService] Phase 2.5 results: {} topics need message sync", changed_ids.len());
+                                            Ok(changed_topic_keys) => {
+                                                log::info!("[SyncService] Phase 2.5 results: {} topics need message sync", changed_topic_keys.len());
                                                 {
                                                     let mut guard = changed_topics.lock().await;
-                                                    *guard = changed_ids;
+                                                    *guard = changed_topic_keys;
                                                 }
                                                 let _ = tx_internal.send(SyncCommand::StartMessages { attempt_id });
                                             }
@@ -3027,25 +3057,33 @@ impl Write for JsonSizeCounter {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct Phase3DiffBatch {
+    pub topics: Vec<Value>,
+    pub keys: HashSet<TopicKey>,
+}
+
 fn build_diff_batches(
     topic_states: std::collections::HashMap<
-        String,
+        TopicKey,
         crate::vcp_modules::sync_pipeline::phase3_message::TopicLocalState,
     >,
-) -> Result<std::collections::VecDeque<serde_json::Map<String, serde_json::Value>>, String> {
+) -> Result<std::collections::VecDeque<Phase3DiffBatch>, String> {
     let mut batches = std::collections::VecDeque::new();
-    let mut current_batch = serde_json::Map::new();
+    let mut current_topics = Vec::new();
+    let mut current_keys = HashSet::new();
     let mut current_msg_count = 0usize;
-    let envelope_bytes = br#"{"type":"SYNC_MESSAGE_DIFF_BATCH","topics":{}}"#.len();
+    let envelope_bytes = br#"{"type":"SYNC_MESSAGE_DIFF_BATCH","topics":[]}"#.len();
     let mut current_bytes = envelope_bytes;
     let mut topic_states = topic_states.into_iter().collect::<Vec<_>>();
     topic_states.sort_by(|left, right| left.0.cmp(&right.0));
 
-    for (topic_id, state) in topic_states {
+    for (key, state) in topic_states {
         let msg_count = state.messages.len();
         if msg_count > MAX_MESSAGES_PER_BATCH {
             return Err(format!(
-                "Phase 3 diff topic {topic_id} exceeds the {MAX_MESSAGES_PER_BATCH}-message batch limit"
+                "Phase 3 diff topic {} exceeds the {MAX_MESSAGES_PER_BATCH}-message batch limit",
+                key.topic_id
             ));
         }
         let mut msg_map = serde_json::Map::new();
@@ -3061,46 +3099,54 @@ fn build_diff_batches(
             );
         }
         let topic_obj = serde_json::json!({
-            "ownerType": state.owner_type,
-            "ownerId": state.owner_id,
+            "topicId": key.topic_id,
+            "ownerType": key.owner_type,
+            "ownerId": key.owner_id,
             "topicHash": state.topic_hash,
             "messages": msg_map,
         });
         let mut counter = JsonSizeCounter::new(MAX_WS_DIFF_BATCH_BYTES);
-        serde_json::to_writer(&mut counter, &topic_id)
-            .and_then(|_| counter.write_all(b":").map_err(serde_json::Error::io))
-            .and_then(|_| serde_json::to_writer(&mut counter, &topic_obj))
-            .map_err(|error| format!("Failed to size Phase 3 topic {topic_id}: {error}"))?;
+        serde_json::to_writer(&mut counter, &topic_obj)
+            .map_err(|error| format!("Failed to size Phase 3 topic {}: {error}", key.topic_id))?;
         let entry_bytes = counter.bytes;
         if envelope_bytes.saturating_add(entry_bytes) > MAX_WS_DIFF_BATCH_BYTES {
             return Err(format!(
-                "Phase 3 diff topic {topic_id} exceeds the 8 MiB WebSocket frame limit"
+                "Phase 3 diff topic {} exceeds the 8 MiB WebSocket frame limit",
+                key.topic_id
             ));
         }
 
-        let separator_bytes = usize::from(!current_batch.is_empty());
-        if !current_batch.is_empty()
+        let separator_bytes = usize::from(!current_topics.is_empty());
+        if !current_topics.is_empty()
             && (current_msg_count.saturating_add(msg_count) > MAX_MESSAGES_PER_BATCH
                 || current_bytes
                     .saturating_add(separator_bytes)
                     .saturating_add(entry_bytes)
                     > MAX_WS_DIFF_BATCH_BYTES)
         {
-            batches.push_back(current_batch);
-            current_batch = serde_json::Map::new();
+            batches.push_back(Phase3DiffBatch {
+                topics: current_topics,
+                keys: current_keys,
+            });
+            current_topics = Vec::new();
+            current_keys = HashSet::new();
             current_msg_count = 0;
             current_bytes = envelope_bytes;
         }
 
         current_bytes = current_bytes
-            .saturating_add(usize::from(!current_batch.is_empty()))
+            .saturating_add(usize::from(!current_topics.is_empty()))
             .saturating_add(entry_bytes);
-        current_batch.insert(topic_id, topic_obj);
+        current_keys.insert(key);
+        current_topics.push(topic_obj);
         current_msg_count = current_msg_count.saturating_add(msg_count);
     }
 
-    if !current_batch.is_empty() {
-        batches.push_back(current_batch);
+    if !current_topics.is_empty() {
+        batches.push_back(Phase3DiffBatch {
+            topics: current_topics,
+            keys: current_keys,
+        });
     }
 
     Ok(batches)

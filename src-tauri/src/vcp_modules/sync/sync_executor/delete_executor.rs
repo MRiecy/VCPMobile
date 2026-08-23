@@ -8,40 +8,37 @@ pub struct DeleteExecutor;
 
 async fn soft_delete_topic_data(
     pool: &sqlx::SqlitePool,
-    topic_id: &str,
+    key: &TopicKey,
     now: i64,
 ) -> Result<Vec<MessageKey>, String> {
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    let Some(parent_row) =
-        sqlx::query("SELECT owner_id, owner_type, deleted_at FROM topics WHERE topic_id = ?")
-            .bind(topic_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?
+    let Some(parent_row) = sqlx::query(
+        "SELECT deleted_at FROM topics
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
+    )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?
     else {
         return Ok(Vec::new());
     };
     let deleted_at: Option<i64> = parent_row
         .try_get("deleted_at")
-        .map_err(|error| format!("Topic {topic_id} tombstone decode failed: {error}"))?;
+        .map_err(|error| format!("Topic {} tombstone decode failed: {error}", key.topic_id))?;
     if deleted_at.is_some() {
         return Ok(Vec::new());
     }
-    let owner_id: String = parent_row
-        .try_get("owner_id")
-        .map_err(|error| format!("Topic {topic_id} owner id decode failed: {error}"))?;
-    let owner_type: String = parent_row
-        .try_get("owner_type")
-        .map_err(|error| format!("Topic {topic_id} owner type decode failed: {error}"))?;
-    let key = TopicKey::new(&owner_type, &owner_id, topic_id);
     let active_ids: Vec<String> = sqlx::query_scalar(
         "SELECT msg_id FROM active_generations
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
     )
-    .bind(&owner_type)
-    .bind(&owner_id)
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .fetch_all(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -51,15 +48,16 @@ async fn soft_delete_topic_data(
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
     )
     .bind(now)
-    .bind(&owner_type)
-    .bind(&owner_id)
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
     if deleted.rows_affected() != 1 {
         return Err(format!(
-            "Topic {topic_id} does not exist or is already deleted"
+            "Topic {} does not exist or is already deleted",
+            key.topic_id
         ));
     }
     sqlx::query(
@@ -67,9 +65,9 @@ async fn soft_delete_topic_data(
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
     )
     .bind(now)
-    .bind(&owner_type)
-    .bind(&owner_id)
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -77,19 +75,20 @@ async fn soft_delete_topic_data(
         "DELETE FROM active_generations
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
     )
-    .bind(&owner_type)
-    .bind(&owner_id)
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
 
-    match owner_type.as_str() {
-        "agent" => HashAggregator::bubble_agent_hash(&mut tx, &owner_id).await?,
-        "group" => HashAggregator::bubble_group_hash(&mut tx, &owner_id).await?,
+    match key.owner_type.as_str() {
+        "agent" => HashAggregator::bubble_agent_hash(&mut tx, &key.owner_id).await?,
+        "group" => HashAggregator::bubble_group_hash(&mut tx, &key.owner_id).await?,
         other => {
             return Err(format!(
-                "topic {topic_id} has unsupported owner_type {other}"
+                "topic {} has unsupported owner_type {other}",
+                key.topic_id
             ));
         }
     }
@@ -163,7 +162,7 @@ impl DeleteExecutor {
 
     pub async fn soft_delete_topic<R: Runtime>(
         app: &AppHandle<R>,
-        topic_id: &str,
+        key: &TopicKey,
         deleted_at: i64,
     ) -> Result<(), String> {
         if deleted_at < 0 {
@@ -171,7 +170,7 @@ impl DeleteExecutor {
         }
         let db = app.state::<DbState>();
 
-        let active_ids = soft_delete_topic_data(&db.pool, topic_id, deleted_at).await?;
+        let active_ids = soft_delete_topic_data(&db.pool, key, deleted_at).await?;
 
         // Cancellation is intentionally post-commit: late finalizers already require the
         // active row, so the durable tombstone remains the authority if cancellation races.
@@ -194,31 +193,37 @@ impl DeleteExecutor {
 
     pub async fn soft_delete_message<R: Runtime>(
         app: &AppHandle<R>,
-        topic_id: &str,
+        key: &TopicKey,
         message_id: &str,
         deleted_at: i64,
     ) -> Result<(), String> {
-        if topic_id.is_empty() || message_id.is_empty() || deleted_at < 0 {
+        if key.topic_id.is_empty()
+            || key.owner_id.is_empty()
+            || !matches!(key.owner_type.as_str(), "agent" | "group")
+            || message_id.is_empty()
+            || deleted_at < 0
+        {
             return Err(
                 "Message delete requires topicId, id, and non-negative deletedAt".to_string(),
             );
         }
         let db = app.state::<DbState>();
-        let topic_owner: Option<(String, String)> = sqlx::query_as(
-            "SELECT owner_type, owner_id FROM topics
-             WHERE topic_id = ? AND deleted_at IS NULL",
+        let topic_is_live = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM topics
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL)",
         )
-        .bind(topic_id)
-        .fetch_optional(&db.pool)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
+        .fetch_one(&db.pool)
         .await
         .map_err(|e| e.to_string())?;
-        let Some((owner_type, owner_id)) = topic_owner else {
+        if !topic_is_live {
             return Ok(());
-        };
-        let key = TopicKey::new(owner_type, owner_id, topic_id);
+        }
         let result = crate::vcp_modules::message_service::delete_messages(
             &db.pool,
-            &key,
+            key,
             vec![message_id.to_string()],
             Some(deleted_at),
         )

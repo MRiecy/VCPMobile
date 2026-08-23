@@ -746,7 +746,7 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
         "SELECT g.group_id, g.name, COALESCE(g.mode, 'sequential') AS mode, av.dominant_color
          FROM groups g
          LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group' AND av.deleted_at IS NULL
-         WHERE g.deleted_at IS NULL",
+         WHERE g.owner_type = 'group' AND g.deleted_at IS NULL",
     )
     .fetch_all(pool)
     .await

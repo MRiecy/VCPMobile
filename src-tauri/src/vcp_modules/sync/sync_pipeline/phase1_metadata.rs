@@ -1,6 +1,7 @@
 use crate::vcp_modules::sync_types::{
     is_valid_avatar_owner, EntityState, SyncDataType, SyncManifest,
 };
+use crate::vcp_modules::topic_types::{OwnerKey, TopicKey};
 use sqlx::Row;
 use sqlx::SqlitePool;
 use std::collections::HashSet;
@@ -13,7 +14,7 @@ impl Phase1Metadata {
     pub async fn build_agent_manifest(pool: &SqlitePool) -> Result<SyncManifest, String> {
         let rows = sqlx::query(
             "SELECT agent_id, config_hash, content_hash, updated_at, deleted_at 
-             FROM agents",
+             FROM agents WHERE owner_type = 'agent'",
         )
         .fetch_all(pool)
         .await
@@ -55,7 +56,7 @@ impl Phase1Metadata {
     pub async fn build_group_manifest(pool: &SqlitePool) -> Result<SyncManifest, String> {
         let rows = sqlx::query(
             "SELECT group_id, config_hash, content_hash, updated_at, deleted_at 
-             FROM groups",
+             FROM groups WHERE owner_type = 'group'",
         )
         .fetch_all(pool)
         .await
@@ -96,7 +97,7 @@ impl Phase1Metadata {
 
     pub async fn build_targeted_topic_manifest(
         pool: &SqlitePool,
-        owners: &[String],
+        owners: &[OwnerKey],
     ) -> Result<SyncManifest, String> {
         if owners.is_empty() {
             return Ok(SyncManifest {
@@ -106,26 +107,29 @@ impl Phase1Metadata {
         }
 
         let expected_owners = owners.iter().cloned().collect::<HashSet<_>>();
-        if expected_owners.len() != owners.len() || expected_owners.iter().any(|id| id.is_empty()) {
-            return Err("Targeted topic manifest contains empty or duplicate owner ids".into());
+        if expected_owners.len() != owners.len()
+            || expected_owners.iter().any(|owner| {
+                !matches!(owner.owner_type.as_str(), "agent" | "group") || owner.owner_id.is_empty()
+            })
+        {
+            return Err("Targeted topic manifest contains invalid or duplicate owners".into());
         }
 
         let mut items = Vec::new();
         let mut seen_topics = HashSet::new();
         for owner_chunk in owners.chunks(SQLITE_BIND_CHUNK) {
-            let placeholders = owner_chunk
+            let predicates = owner_chunk
                 .iter()
-                .map(|_| "?")
+                .map(|_| "(owner_type = ? AND owner_id = ?)")
                 .collect::<Vec<_>>()
-                .join(", ");
+                .join(" OR ");
             let query_str = format!(
                 "SELECT topic_id, config_hash, content_hash, updated_at, owner_type, owner_id, deleted_at
-                 FROM topics WHERE owner_id IN ({})",
-                placeholders
+                 FROM topics WHERE {predicates}"
             );
             let mut query = sqlx::query(&query_str);
-            for owner_id in owner_chunk {
-                query = query.bind(owner_id);
+            for owner in owner_chunk {
+                query = query.bind(&owner.owner_type).bind(&owner.owner_id);
             }
             for row in query.fetch_all(pool).await.map_err(|e| e.to_string())? {
                 let id: String = row
@@ -133,11 +137,6 @@ impl Phase1Metadata {
                     .map_err(|error| format!("Topic manifest id decode failed: {error}"))?;
                 if id == "default" {
                     continue;
-                }
-                if !seen_topics.insert(id.clone()) {
-                    return Err(format!(
-                        "Targeted topic manifest returned duplicate topic {id}"
-                    ));
                 }
                 let config_hash: String = row.try_get("config_hash").map_err(|error| {
                     format!("Topic manifest config hash decode failed for {id}: {error}")
@@ -156,9 +155,17 @@ impl Phase1Metadata {
                 let owner_id: String = row.try_get("owner_id").map_err(|error| {
                     format!("Topic manifest owner id decode failed for {id}: {error}")
                 })?;
-                if owner_id.is_empty() || !expected_owners.contains(&owner_id) {
+                let topic_key = TopicKey::new(&owner_type, &owner_id, &id);
+                if owner_id.is_empty()
+                    || !expected_owners.contains(&OwnerKey::new(&owner_type, &owner_id))
+                {
                     return Err(format!(
-                        "Topic manifest {id} returned unexpected owner {owner_id}"
+                        "Topic manifest {id} returned unexpected owner {owner_type}/{owner_id}"
+                    ));
+                }
+                if !seen_topics.insert(topic_key) {
+                    return Err(format!(
+                        "Targeted topic manifest returned duplicate topic {owner_type}/{owner_id}/{id}"
                     ));
                 }
                 let updated_at = row.try_get("updated_at").map_err(|error| {
@@ -213,7 +220,7 @@ impl Phase1Metadata {
                 .map_err(|error| format!("Avatar manifest tombstone decode failed: {error}"))?;
             let parent_is_live = deleted_at.is_some() || match owner_type.as_str() {
                 "agent" => sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS(SELECT 1 FROM agents WHERE agent_id = ? AND deleted_at IS NULL)",
+                    "SELECT EXISTS(SELECT 1 FROM agents WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL)",
                 )
                 .bind(&owner_id)
                 .fetch_one(pool)
@@ -222,7 +229,7 @@ impl Phase1Metadata {
                     format!("Avatar manifest agent owner lookup failed for {owner_id}: {error}")
                 })?,
                 "group" => sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS(SELECT 1 FROM groups WHERE group_id = ? AND deleted_at IS NULL)",
+                    "SELECT EXISTS(SELECT 1 FROM groups WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL)",
                 )
                 .bind(&owner_id)
                 .fetch_one(pool)

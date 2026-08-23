@@ -85,6 +85,7 @@ watch(
     () => store.scope,
     () => store.scopeTopicId,
     () => store.scopeOwnerId,
+    () => store.scopeOwnerType,
     () => store.role,
     () => store.timeRange,
     () => store.sort,
@@ -112,12 +113,17 @@ const setScopeCurrentTopic = () => {
   store.scope = 'topic';
   store.scopeTopicId = key.topicId;
   store.scopeTopicTitle = topic?.name ?? '当前话题';
+  store.scopeOwnerId = key.ownerId;
+  store.scopeOwnerType = key.ownerType;
 };
 
 const openOwnerPicker = () => {
   const actions = assistantStore.combinedItems.map((item) => ({
     label: item.name,
-    selected: store.scope === 'owner' && store.scopeOwnerId === item.id,
+    selected:
+      store.scope === 'owner' &&
+      store.scopeOwnerId === item.id &&
+      store.scopeOwnerType === item.type,
     handler: () => {
       store.scope = 'owner';
       store.scopeOwnerId = item.id;
@@ -241,7 +247,7 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
     // 切换会话（ChatView 的 watcher 会触发常规首屏加载，随后的锚点加载以 loadId 竞态胜出）
     await sessionStore.selectTopicById(
       item.ownerId,
-      item.ownerType as "agent" | "group",
+      item.ownerType,
       item.topicId,
     );
     await nextTick();
@@ -418,7 +424,7 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
           </p>
           <button
             v-for="item in store.results"
-            :key="`${item.topicId}:${item.msgId}`"
+            :key="`${item.ownerType}:${item.ownerId}:${item.topicId}:${item.msgId}`"
             type="button"
             class="gs-item"
             @click="jumpToResult(item)"

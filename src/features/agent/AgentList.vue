@@ -135,6 +135,7 @@ let isVerticalScroll = false;
 let hasDeterminedDirection = false;
 let isStartedAsSwiped = false;
 const SWIPE_THRESHOLD = 50;
+const ownerSwipeKey = (type: "agent" | "group", id: string) => `${type}:${id}`;
 
 const onTouchStart = (e: TouchEvent, id: string) => {
   if (isSorting.value) return;
@@ -264,14 +265,14 @@ const goToSettings = (id: string, type: 'agent' | 'group' = 'agent') => {
 const selectAgent = async (agentId: string) => {
   const agent = assistantStore.agents.find((a: any) => a.id === agentId);
   if (agent) {
-    emit("select-agent", agent);
+    emit("select-agent", { ...agent, type: "agent" });
   }
 };
 
 const selectGroup = async (groupId: string) => {
   const group = assistantStore.groups.find((g) => g.id === groupId);
   if (group) {
-    emit("select-group", group);
+    emit("select-group", { ...group, type: "group" });
   }
 };
 
@@ -329,16 +330,16 @@ const filteredCombinedItems = computed(() => {
           </div>
 
           <!-- 滑动与玻璃层 -->
-          <div @click="selectGroup(group.id)" @touchstart="onTouchStart($event, group.id)"
-            @touchmove="onTouchMove($event, group.id)" @touchend="onTouchEnd($event, group.id)"
+          <div @click="selectGroup(group.id)" @touchstart="onTouchStart($event, ownerSwipeKey('group', group.id))"
+            @touchmove="onTouchMove($event, ownerSwipeKey('group', group.id))" @touchend="onTouchEnd($event, ownerSwipeKey('group', group.id))"
             class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer z-10 w-full active:opacity-75 origin-center transition-all duration-300"
             :class="[
-                sessionStore.currentSelectedItem?.id === group.id
+                sessionStore.currentSelectedItem?.type === 'group' && sessionStore.currentSelectedItem?.id === group.id
                   ? 'glass-panel-active'
                   : 'border-transparent hover:bg-black/5 dark:hover:bg-white/5',
-                (activeSwipeId === group.id && isDragging) ? 'transition-none' : '',
+                (activeSwipeId === ownerSwipeKey('group', group.id) && isDragging) ? 'transition-none' : '',
               ]" :style="{
-                transform: `translateX(${activeSwipeId === group.id ? currentSwipeX : 0}px)`,
+                transform: `translateX(${activeSwipeId === ownerSwipeKey('group', group.id) ? currentSwipeX : 0}px)`,
               }">
             <VcpAvatar owner-type="group" :owner-id="group.id" :fallback-name="group.name" size="w-10 h-10"
               rounded="rounded-full" dominant-color="var(--highlight-text)" />
@@ -387,16 +388,16 @@ const filteredCombinedItems = computed(() => {
           </div>
 
           <!-- 滑动与玻璃层 -->
-          <div @click="selectAgent(agent.id)" @touchstart="onTouchStart($event, agent.id)"
-            @touchmove="onTouchMove($event, agent.id)" @touchend="onTouchEnd($event, agent.id)"
+          <div @click="selectAgent(agent.id)" @touchstart="onTouchStart($event, ownerSwipeKey('agent', agent.id))"
+            @touchmove="onTouchMove($event, ownerSwipeKey('agent', agent.id))" @touchend="onTouchEnd($event, ownerSwipeKey('agent', agent.id))"
             class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer z-10 w-full active:opacity-75 origin-center transition-all duration-300"
             :class="[
-              sessionStore.currentSelectedItem?.id === agent.id
+              sessionStore.currentSelectedItem?.type === 'agent' && sessionStore.currentSelectedItem?.id === agent.id
                 ? 'glass-panel-active'
                 : 'border-transparent hover:bg-black/5 dark:hover:bg-white/5',
-              (activeSwipeId === agent.id && isDragging) ? 'transition-none' : '',
+              (activeSwipeId === ownerSwipeKey('agent', agent.id) && isDragging) ? 'transition-none' : '',
             ]" :style="{
-            transform: `translateX(${activeSwipeId === agent.id ? currentSwipeX : 0}px)`,
+            transform: `translateX(${activeSwipeId === ownerSwipeKey('agent', agent.id) ? currentSwipeX : 0}px)`,
           }">
             <div v-if="
               assistantStore.unreadCounts[`agent:${agent.id}`] === -1 ||

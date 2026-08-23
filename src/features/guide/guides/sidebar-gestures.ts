@@ -87,7 +87,7 @@ defineGuide({
       // 用户点「下一步」时执行：真实行滑开（swipeController 即手势同源状态）。
       perform: () => {
         const id = firstAgentId();
-        if (id) swipeOpen(id);
+        if (id) swipeOpen(`agent:${id}`);
       },
       undo: swipeClose,
     },

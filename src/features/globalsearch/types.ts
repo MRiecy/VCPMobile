@@ -11,7 +11,7 @@ export interface FtsSearchResultItem {
   timestamp: number;
   topicTitle: string;
   ownerId: string;
-  ownerType: string;
+  ownerType: 'agent' | 'group';
   /** FTS5 snippet() 命中摘要，含 <mark> 高亮标记（渲染时必须按标记切分，禁止直接 v-html） */
   snippet: string;
 }

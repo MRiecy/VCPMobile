@@ -6,10 +6,11 @@ use crate::vcp_modules::sync_executor::{
     BatchPullResult, DeleteExecutor, PullExecutor, PullProgressContext, PushExecutor,
 };
 use crate::vcp_modules::sync_logger::SyncLogger;
-use crate::vcp_modules::sync_service::{Phase3Tracker, SyncCommand};
-use serde::de::{self, MapAccess, Visitor};
-use serde::{Deserialize, Deserializer};
-use serde_json::{json, Map, Value};
+use crate::vcp_modules::sync_service::{Phase3DiffBatch, Phase3Tracker, SyncCommand};
+use crate::vcp_modules::sync_types::parse_topic_key;
+use crate::vcp_modules::topic_types::TopicKey;
+use serde::Deserialize;
+use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -78,47 +79,11 @@ impl fmt::Display for Phase3ProtocolError {
 
 impl std::error::Error for Phase3ProtocolError {}
 
-struct UniqueResults(Map<String, Value>);
-
-impl<'de> Deserialize<'de> for UniqueResults {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        struct UniqueResultsVisitor;
-
-        impl<'de> Visitor<'de> for UniqueResultsVisitor {
-            type Value = UniqueResults;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("an object with unique topic ids")
-            }
-
-            fn visit_map<A>(self, mut access: A) -> Result<Self::Value, A::Error>
-            where
-                A: MapAccess<'de>,
-            {
-                let mut results = Map::new();
-                while let Some((topic_id, value)) = access.next_entry::<String, Value>()? {
-                    if results.insert(topic_id.clone(), value).is_some() {
-                        return Err(de::Error::custom(format!(
-                            "duplicate Phase 3 topic id {topic_id}"
-                        )));
-                    }
-                }
-                Ok(UniqueResults(results))
-            }
-        }
-
-        deserializer.deserialize_map(UniqueResultsVisitor)
-    }
-}
-
 #[derive(Deserialize)]
 struct Phase3BatchWire {
     #[serde(rename = "type")]
     message_type: String,
-    results: UniqueResults,
+    results: Vec<Value>,
 }
 
 pub fn parse_phase3_batch_frame(text: &str) -> Result<Value, Phase3ProtocolError> {
@@ -136,13 +101,13 @@ pub fn parse_phase3_batch_frame(text: &str) -> Result<Value, Phase3ProtocolError
     }
     Ok(json!({
         "type": wire.message_type,
-        "results": wire.results.0,
+        "results": wire.results,
     }))
 }
 
 #[derive(Debug)]
 struct TopicBatchOutcome {
-    topic_id: String,
+    topic: TopicKey,
     success: bool,
     error: Option<String>,
 }
@@ -161,9 +126,10 @@ struct MessageDeleteDecision {
 }
 
 fn parse_topic_decision(
-    topic_id: &str,
+    topic: &TopicKey,
     value: &Value,
 ) -> Result<TopicDecision, Phase3ProtocolError> {
+    let topic_id = &topic.topic_id;
     let object = value.as_object().ok_or_else(|| {
         Phase3ProtocolError::for_topic(
             "PHASE3_DECISION_INVALID",
@@ -346,9 +312,9 @@ fn parse_topic_decision(
 
 fn validate_topic_batch_outcomes(
     operation: &str,
-    expected: &[String],
+    expected: &[TopicKey],
     batch_result: Result<Vec<TopicBatchOutcome>, String>,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<TopicKey>, String> {
     let outcomes = batch_result.map_err(|error| {
         let mut topics = expected.to_vec();
         topics.sort();
@@ -360,14 +326,14 @@ fn validate_topic_batch_outcomes(
     let expected_set = expected.iter().cloned().collect::<HashSet<_>>();
     let mut outcomes_by_topic = HashMap::new();
     for outcome in outcomes {
-        if !expected_set.contains(&outcome.topic_id) {
+        if !expected_set.contains(&outcome.topic) {
             return Err(format!(
                 "Phase 3 {operation} response contains unexpected topic {}",
-                outcome.topic_id
+                outcome.topic.topic_id
             ));
         }
         if outcomes_by_topic
-            .insert(outcome.topic_id.clone(), outcome)
+            .insert(outcome.topic.clone(), outcome)
             .is_some()
         {
             return Err(format!(
@@ -378,15 +344,15 @@ fn validate_topic_batch_outcomes(
 
     let mut successful = Vec::new();
     let mut failed = Vec::new();
-    for topic_id in expected {
-        match outcomes_by_topic.get(topic_id) {
-            Some(outcome) if outcome.success => successful.push(topic_id.clone()),
+    for topic in expected {
+        match outcomes_by_topic.get(topic) {
+            Some(outcome) if outcome.success => successful.push(topic.clone()),
             Some(outcome) => failed.push(format!(
                 "{}: {}",
-                topic_id,
+                topic.topic_id,
                 outcome.error.as_deref().unwrap_or("unknown error")
             )),
-            None => failed.push(format!("{}: missing from batch response", topic_id)),
+            None => failed.push(format!("{}: missing from batch response", topic.topic_id)),
         }
     }
 
@@ -402,13 +368,21 @@ fn validate_topic_batch_outcomes(
     }
 }
 
-fn validate_phase3_result_topics(
-    expected: &HashSet<String>,
-    results: &serde_json::Map<String, Value>,
-) -> Result<(), String> {
-    let actual: HashSet<String> = results.keys().cloned().collect();
+fn validate_phase3_result_topics<'a>(
+    expected: &HashSet<TopicKey>,
+    results: &'a [Value],
+) -> Result<Vec<(TopicKey, &'a Value)>, String> {
+    let mut keyed_results = Vec::with_capacity(results.len());
+    let mut actual = HashSet::new();
+    for (index, result) in results.iter().enumerate() {
+        let key = parse_topic_key(result, &format!("SYNC_DIFF_RESULTS_BATCH.results[{index}]"))?;
+        if !actual.insert(key.clone()) {
+            return Err("Phase 3 response contains a duplicate topic identity".to_string());
+        }
+        keyed_results.push((key, result));
+    }
     if actual == *expected {
-        return Ok(());
+        return Ok(keyed_results);
     }
 
     let mut missing = expected.difference(&actual).cloned().collect::<Vec<_>>();
@@ -433,17 +407,13 @@ impl BatchDiffHandler {
         tx_internal: &mpsc::UnboundedSender<SyncCommand>,
         logger: &Arc<Mutex<SyncLogger>>,
         write_queue: &Arc<DbWriteQueue>,
-        pending_diff_batches: &Arc<
-            tokio::sync::Mutex<
-                std::collections::VecDeque<serde_json::Map<String, serde_json::Value>>,
-            >,
-        >,
+        pending_diff_batches: &Arc<tokio::sync::Mutex<std::collections::VecDeque<Phase3DiffBatch>>>,
         prerender_enabled: bool,
         uploaded_hashes: &Arc<tokio::sync::RwLock<HashSet<String>>>,
-        expected_batch_topics: &Arc<tokio::sync::Mutex<HashSet<String>>>,
+        expected_batch_topics: &Arc<tokio::sync::Mutex<HashSet<TopicKey>>>,
         attempt_id: u64,
     ) -> Result<(), Phase3ProtocolError> {
-        let results = payload["results"].as_object().ok_or_else(|| {
+        let results = payload["results"].as_array().ok_or_else(|| {
             Phase3ProtocolError::new(
                 "PHASE3_FRAME_INVALID",
                 "Phase 3 response is missing results",
@@ -455,10 +425,13 @@ impl BatchDiffHandler {
                 format!("Phase 3 response exceeds {MAX_PHASE3_TOPICS} topic budget"),
             ));
         }
-        {
+        let keyed_results = {
             let expected = expected_batch_topics.lock().await;
             validate_phase3_result_topics(&expected, results).map_err(|message| {
-                let mut failed_topic_ids = expected.iter().cloned().collect::<Vec<_>>();
+                let mut failed_topic_ids = expected
+                    .iter()
+                    .map(|topic| topic.topic_id.clone())
+                    .collect::<Vec<_>>();
                 failed_topic_ids.sort();
                 failed_topic_ids.truncate(8);
                 Phase3ProtocolError {
@@ -466,18 +439,19 @@ impl BatchDiffHandler {
                     message,
                     failed_topic_ids,
                 }
-            })?;
-        }
+            })?
+        };
 
         {
             // 分类 topics: push、pull、delete 可以在同一个 topic 上组合出现。
-            let mut push_topic_ids: Vec<String> = Vec::new();
-            let mut pull_batch: Vec<(String, Vec<String>)> = Vec::new();
-            let mut delete_batch: Vec<(String, Vec<MessageDeleteDecision>)> = Vec::new();
+            let mut push_topics: Vec<TopicKey> = Vec::new();
+            let mut pull_batch: Vec<(TopicKey, Vec<String>)> = Vec::new();
+            let mut delete_batch: Vec<(TopicKey, Vec<MessageDeleteDecision>)> = Vec::new();
             let mut total_message_operations = 0usize;
 
-            for (topic_id, result) in results {
-                let decision = parse_topic_decision(topic_id, result)?;
+            for (topic, result) in keyed_results {
+                let topic_id = &topic.topic_id;
+                let decision = parse_topic_decision(&topic, result)?;
                 let to_pull_ids = decision.to_pull;
                 let to_push = decision.to_push;
                 let to_delete = decision.to_delete;
@@ -503,73 +477,73 @@ impl BatchDiffHandler {
 
                 // Phase 2.5 已判定该 topic 聚合哈希有变化；即使消息 diff 是合法
                 // no-op，也必须进入 finalizer 的 hash-repair 集。
-                tracker.mark_modified(topic_id).await;
+                tracker.mark_modified(&topic).await;
 
                 if !to_push && to_pull_ids.is_empty() && to_delete.is_empty() {
                     // 无需操作，直接标记完成
                     tracker
-                        .mark_completed(topic_id, logger, tx_internal, app_handle, true)
+                        .mark_completed(&topic, logger, tx_internal, app_handle, true)
                         .await;
                     continue;
                 }
 
                 if to_push {
-                    push_topic_ids.push(topic_id.clone());
+                    push_topics.push(topic.clone());
                 }
                 if !to_pull_ids.is_empty() {
-                    pull_batch.push((topic_id.clone(), to_pull_ids));
+                    pull_batch.push((topic.clone(), to_pull_ids));
                 }
                 if !to_delete.is_empty() {
-                    delete_batch.push((topic_id.clone(), to_delete));
+                    delete_batch.push((topic, to_delete));
                 }
             }
 
-            let has_push = !push_topic_ids.is_empty();
+            let has_push = !push_topics.is_empty();
             let has_pull = !pull_batch.is_empty();
             let has_delete = !delete_batch.is_empty();
 
             if has_push || has_pull || has_delete {
                 // 收集所有涉及的 topic ID（去重）
-                let mut all_topic_ids: HashSet<String> = HashSet::new();
-                for tid in &push_topic_ids {
-                    all_topic_ids.insert(tid.clone());
+                let mut all_topics: HashSet<TopicKey> = HashSet::new();
+                for topic in &push_topics {
+                    all_topics.insert(topic.clone());
                 }
-                for (tid, _) in &pull_batch {
-                    all_topic_ids.insert(tid.clone());
+                for (topic, _) in &pull_batch {
+                    all_topics.insert(topic.clone());
                 }
-                for (tid, _) in &delete_batch {
-                    all_topic_ids.insert(tid.clone());
+                for (topic, _) in &delete_batch {
+                    all_topics.insert(topic.clone());
                 }
 
                 // 桌面墓碑先落到本地，避免同批次 push 把已经删除的 live 消息复活。
-                for (topic_id, tombstones) in &delete_batch {
+                for (topic, tombstones) in &delete_batch {
                     for tombstone in tombstones {
                         if let Err(error) = DeleteExecutor::soft_delete_message(
                             app_handle,
-                            topic_id,
+                            topic,
                             &tombstone.message_id,
                             tombstone.deleted_at,
                         )
                         .await
                         {
-                            tracker.mark_failed(topic_id).await;
+                            tracker.mark_failed(topic).await;
                             return Err(Phase3ProtocolError::for_topic(
                                 "SYNC_DELETE_FAILED",
                                 format!(
-                                    "Failed to apply desktop message tombstone {} for {topic_id}: {error}",
-                                    tombstone.message_id
+                                    "Failed to apply desktop message tombstone {} for {}: {error}",
+                                    tombstone.message_id, topic.topic_id,
                                 ),
-                                topic_id,
+                                &topic.topic_id,
                             ));
                         }
                     }
-                    tracker.mark_modified(topic_id).await;
+                    tracker.mark_modified(topic).await;
                 }
 
                 if has_pull {
-                    let pull_topic_ids = pull_batch
+                    let pull_topics = pull_batch
                         .iter()
-                        .map(|(topic_id, _)| topic_id.clone())
+                        .map(|(topic, _)| topic.clone())
                         .collect::<Vec<_>>();
                     // 展示型进度基数：批次开始前快照 tracker，使 NDJSON 流内
                     // 逐 topic 上报的 completed = 基数 + 本批次已成功数
@@ -602,23 +576,26 @@ impl BatchDiffHandler {
                         results
                             .into_iter()
                             .map(|result: BatchPullResult| TopicBatchOutcome {
-                                topic_id: result.topic_id,
+                                topic: result.topic,
                                 success: result.success,
                                 error: result.error,
                             })
                             .collect()
                     });
-                    match validate_topic_batch_outcomes("pull", &pull_topic_ids, pull_result) {
+                    match validate_topic_batch_outcomes("pull", &pull_topics, pull_result) {
                         Ok(successful) => {
-                            for topic_id in successful {
-                                tracker.mark_modified(&topic_id).await;
+                            for topic in successful {
+                                tracker.mark_modified(&topic).await;
                             }
                         }
                         Err(message) => {
-                            for topic_id in &pull_topic_ids {
-                                tracker.mark_failed(topic_id).await;
+                            for topic in &pull_topics {
+                                tracker.mark_failed(topic).await;
                             }
-                            let mut failed_topic_ids = pull_topic_ids;
+                            let mut failed_topic_ids = pull_topics
+                                .iter()
+                                .map(|topic| topic.topic_id.clone())
+                                .collect::<Vec<_>>();
                             failed_topic_ids.sort();
                             failed_topic_ids.truncate(8);
                             return Err(Phase3ProtocolError {
@@ -629,10 +606,13 @@ impl BatchDiffHandler {
                         }
                     }
                     if let Err(message) = write_queue.flush().await {
-                        for topic_id in &pull_topic_ids {
-                            tracker.mark_failed(topic_id).await;
+                        for topic in &pull_topics {
+                            tracker.mark_failed(topic).await;
                         }
-                        let mut failed_topic_ids = pull_topic_ids;
+                        let mut failed_topic_ids = pull_topics
+                            .iter()
+                            .map(|topic| topic.topic_id.clone())
+                            .collect::<Vec<_>>();
                         failed_topic_ids.sort();
                         failed_topic_ids.truncate(8);
                         return Err(Phase3ProtocolError {
@@ -653,7 +633,7 @@ impl BatchDiffHandler {
                         http_client,
                         base_url,
                         token,
-                        &push_topic_ids,
+                        &push_topics,
                         uploaded_hashes.clone(),
                     )
                     .await
@@ -661,23 +641,26 @@ impl BatchDiffHandler {
                         results
                             .into_iter()
                             .map(|result| TopicBatchOutcome {
-                                topic_id: result.topic_id,
+                                topic: result.topic,
                                 success: result.success,
                                 error: result.error,
                             })
                             .collect()
                     });
-                    match validate_topic_batch_outcomes("push", &push_topic_ids, push_result) {
+                    match validate_topic_batch_outcomes("push", &push_topics, push_result) {
                         Ok(successful) => {
-                            for topic_id in successful {
-                                tracker.mark_modified(&topic_id).await;
+                            for topic in successful {
+                                tracker.mark_modified(&topic).await;
                             }
                         }
                         Err(message) => {
-                            for topic_id in &push_topic_ids {
-                                tracker.mark_failed(topic_id).await;
+                            for topic in &push_topics {
+                                tracker.mark_failed(topic).await;
                             }
-                            let mut failed_topic_ids = push_topic_ids.clone();
+                            let mut failed_topic_ids = push_topics
+                                .iter()
+                                .map(|topic| topic.topic_id.clone())
+                                .collect::<Vec<_>>();
                             failed_topic_ids.sort();
                             failed_topic_ids.truncate(8);
                             return Err(Phase3ProtocolError {
@@ -689,14 +672,14 @@ impl BatchDiffHandler {
                     }
                 }
 
-                for topic_id in &all_topic_ids {
+                for topic in &all_topics {
                     tracker
-                        .mark_completed(topic_id, logger, tx_internal, app_handle, false)
+                        .mark_completed(topic, logger, tx_internal, app_handle, false)
                         .await;
                 }
                 log::info!(
                     "[SyncService] Phase 3 batch done: push={} pull={} delete={}",
-                    push_topic_ids.len(),
+                    push_topics.len(),
                     pull_batch.len(),
                     delete_batch
                         .iter()
@@ -714,13 +697,10 @@ impl BatchDiffHandler {
                 );
                 let msg = json!({
                     "type": "SYNC_MESSAGE_DIFF_BATCH",
-                    "topics": next_batch,
+                    "topics": next_batch.topics,
                 });
                 let mut expected = expected_batch_topics.lock().await;
-                *expected = msg["topics"]
-                    .as_object()
-                    .map(|topics| topics.keys().cloned().collect())
-                    .unwrap_or_default();
+                *expected = next_batch.keys;
                 drop(expected);
                 let _ = tx_internal.send(SyncCommand::SendWsMessage {
                     attempt_id,

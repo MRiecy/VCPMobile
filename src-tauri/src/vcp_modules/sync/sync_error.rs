@@ -300,7 +300,7 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::MobileSync,
             Stage::Handshake,
             Retry::AfterUserAction,
-            "同步响应不符合 Wire 1.2 规范，已安全停止",
+            "同步响应不符合 Wire 1.3 规范，已安全停止",
             "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留最新日志。",
         ),
         "INVALID_RESPONSE" | "INVALID_REQUEST" => definition(
@@ -316,7 +316,7 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::MobileSync,
             Stage::OwnerMetadata,
             Retry::AfterUserAction,
-            "所有者同步响应不符合 Wire 1.2 规范，已安全停止",
+            "所有者同步响应不符合 Wire 1.3 规范，已安全停止",
             "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留最新日志。",
         ),
         "SYNC_REQUEST_INVALID" => definition(
@@ -324,7 +324,7 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::MobileSync,
             Stage::Connect,
             Retry::AfterUserAction,
-            "同步请求不符合 Wire 1.2 规范，已安全停止",
+            "同步请求不符合 Wire 1.3 规范，已安全停止",
             "确认两端版本一致并重新同步；若仍出现，请保留最新日志。",
         ),
         "PROTOCOL_FRAME_INVALID" => definition(
@@ -332,7 +332,7 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::MobileSync,
             Stage::Messages,
             Retry::AfterUserAction,
-            "运行中的同步消息不符合 Wire 1.2 规范，已安全停止",
+            "运行中的同步消息不符合 Wire 1.3 规范，已安全停止",
             "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留最新日志。",
         ),
         "TOPIC_HASH_RESPONSE_OVERLAP" | "TOPIC_HASH_RESULTS_INVALID" => definition(
@@ -340,7 +340,7 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::MobileSync,
             Stage::TopicValidation,
             Retry::AfterUserAction,
-            "话题校验响应不符合 Wire 1.2 规范，已安全停止",
+            "话题校验响应不符合 Wire 1.3 规范，已安全停止",
             "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留最新日志。",
         ),
         "PHASE3_BATCH_OVERLAP"
@@ -352,7 +352,7 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::MobileSync,
             Stage::Messages,
             Retry::AfterUserAction,
-            "消息同步响应不符合 Wire 1.2 规范，已安全停止",
+            "消息同步响应不符合 Wire 1.3 规范，已安全停止",
             "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留最新日志。",
         ),
         "SYNC_LOG_PATH_INVALID" => definition(
@@ -631,7 +631,7 @@ fn fallback_copy(category: SyncErrorCategory) -> (&'static str, &'static str) {
             "将两端更新到同一兼容版本后再试。",
         ),
         SyncErrorCategory::Protocol => (
-            "同步响应不符合 Wire 1.2 规范，已安全停止",
+            "同步响应不符合 Wire 1.3 规范，已安全停止",
             "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留日志。",
         ),
         SyncErrorCategory::Data => (
@@ -746,7 +746,7 @@ fn validate_wire_error(error: WireSyncError) -> Result<WireSyncError, String> {
 
 pub fn parse_wire_sync_error(value: &Value) -> Result<WireSyncError, String> {
     let error = serde_json::from_value::<WireSyncError>(value.clone())
-        .map_err(|parse_error| format!("invalid Wire 1.2 error object: {parse_error}"))?;
+        .map_err(|parse_error| format!("invalid Wire 1.3 error object: {parse_error}"))?;
     validate_wire_error(error)
 }
 
@@ -754,7 +754,7 @@ pub fn encode_wire_sync_error(error: &WireSyncError) -> Result<String, String> {
     let validated = validate_wire_error(error.clone())?;
     serde_json::to_string(&validated)
         .map(|json| format!("{WIRE_ERROR_MARKER}{json}"))
-        .map_err(|serialize_error| format!("failed to encode Wire 1.2 error: {serialize_error}"))
+        .map_err(|serialize_error| format!("failed to encode Wire 1.3 error: {serialize_error}"))
 }
 
 pub fn encode_wire_sync_error_value(value: &Value) -> Result<String, String> {

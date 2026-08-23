@@ -202,7 +202,10 @@ const handleDelete = async () => {
   if (confirmed) {
     try {
       await assistantStore.deleteAgent(agentConfig.value.id);
-      if (sessionStore.currentSelectedItem?.id === agentConfig.value.id) {
+      if (
+        sessionStore.currentSelectedItem?.type === "agent" &&
+        sessionStore.currentSelectedItem?.id === agentConfig.value.id
+      ) {
         sessionStore.clearConversation();
       }
       emit("close");

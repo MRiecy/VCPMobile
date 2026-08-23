@@ -1,6 +1,23 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnerKey {
+    pub owner_type: String,
+    pub owner_id: String,
+}
+
+impl OwnerKey {
+    pub fn new(owner_type: impl Into<String>, owner_id: impl Into<String>) -> Self {
+        Self {
+            owner_type: owner_type.into(),
+            owner_id: owner_id.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TopicKey {
     pub owner_type: String,
     pub owner_id: String,
@@ -18,6 +35,12 @@ impl TopicKey {
             owner_id: owner_id.into(),
             topic_id: topic_id.into(),
         }
+    }
+
+    pub fn is_valid(&self) -> bool {
+        matches!(self.owner_type.as_str(), "agent" | "group")
+            && !self.owner_id.is_empty()
+            && !self.topic_id.is_empty()
     }
 }
 

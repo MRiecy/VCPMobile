@@ -1,3 +1,4 @@
+use crate::vcp_modules::topic_types::TopicKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -37,6 +38,15 @@ pub fn is_valid_avatar_owner(owner_type: &str, owner_id: &str) -> bool {
         "user" => owner_id == "user_avatar",
         _ => false,
     }
+}
+
+pub fn parse_topic_key(value: &serde_json::Value, field: &str) -> Result<TopicKey, String> {
+    let key: TopicKey = serde_json::from_value(value.clone())
+        .map_err(|error| format!("{field} requires ownerType, ownerId and topicId: {error}"))?;
+    if !key.is_valid() {
+        return Err(format!("{field} contains an invalid topic identity"));
+    }
+    Ok(key)
 }
 
 pub fn stable_stringify(value: &serde_json::Value) -> String {

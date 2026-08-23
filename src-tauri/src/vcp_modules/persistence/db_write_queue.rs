@@ -5,7 +5,7 @@ use crate::vcp_modules::sync_dto::{
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_logger::SyncLogger;
 use crate::vcp_modules::sync_types::is_valid_avatar_owner;
-use crate::vcp_modules::topic_types::TopicKey;
+use crate::vcp_modules::topic_types::{OwnerKey, TopicKey};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
@@ -26,10 +26,10 @@ pub enum DbWriteTask {
         bytes: Vec<u8>,
     },
     AgentTopicBatch {
-        topics: Vec<(String, AgentTopicSyncDTO)>,
+        topics: Vec<(TopicKey, AgentTopicSyncDTO)>,
     },
     GroupTopicBatch {
-        topics: Vec<(String, GroupTopicSyncDTO)>,
+        topics: Vec<(TopicKey, GroupTopicSyncDTO)>,
     },
     TopicMessages {
         key: TopicKey,
@@ -521,25 +521,25 @@ impl DbWriteQueue {
                         match task {
                             DbWriteTask::Agent { id, dto } => {
                                 Self::rusqlite_upsert_agent(&tx, &id, &dto)?;
-                                affected_owners.insert((id, "agent".to_string()));
+                                affected_owners.insert(OwnerKey::new("agent", id));
                             }
                             DbWriteTask::Group { id, dto } => {
                                 Self::rusqlite_upsert_group(&tx, &id, &dto)?;
-                                affected_owners.insert((id, "group".to_string()));
+                                affected_owners.insert(OwnerKey::new("group", id));
                             }
                             DbWriteTask::Avatar { owner_type, owner_id, bytes } => {
                                 Self::rusqlite_upsert_avatar(&tx, &owner_type, &owner_id, &bytes)?;
                             }
                             DbWriteTask::AgentTopicBatch { topics } => {
-                                for (tid, dto) in topics {
-                                    affected_owners.insert((dto.owner_id.clone(), "agent".to_string()));
-                                    Self::rusqlite_upsert_agent_topic(&tx, &tid, &dto)?;
+                                for (key, dto) in topics {
+                                    affected_owners.insert(OwnerKey::new("agent", &key.owner_id));
+                                    Self::rusqlite_upsert_agent_topic(&tx, &key, &dto)?;
                                 }
                             }
                             DbWriteTask::GroupTopicBatch { topics } => {
-                                for (tid, dto) in topics {
-                                    affected_owners.insert((dto.owner_id.clone(), "group".to_string()));
-                                    Self::rusqlite_upsert_group_topic(&tx, &tid, &dto)?;
+                                for (key, dto) in topics {
+                                    affected_owners.insert(OwnerKey::new("group", &key.owner_id));
+                                    Self::rusqlite_upsert_group_topic(&tx, &key, &dto)?;
                                 }
                             }
                             DbWriteTask::TopicMessages { key, messages, contents, render_bytes, content_hashes, skip_bubble } => {
@@ -560,11 +560,11 @@ impl DbWriteQueue {
                     // 批量提取 Owner 并去重校验
                     let mut unique_agents = HashSet::new();
                     let mut unique_groups = HashSet::new();
-                    for (id, owner_type) in affected_owners {
-                        if owner_type == "agent" {
-                            unique_agents.insert(id);
-                        } else if owner_type == "group" {
-                            unique_groups.insert(id);
+                    for owner in affected_owners {
+                        if owner.owner_type == "agent" {
+                            unique_agents.insert(owner.owner_id);
+                        } else if owner.owner_type == "group" {
+                            unique_groups.insert(owner.owner_id);
                         }
                     }
 
@@ -889,14 +889,19 @@ impl DbWriteQueue {
 
     fn rusqlite_upsert_agent_topic(
         tx: &rusqlite::Transaction,
-        topic_id: &str,
+        key: &TopicKey,
         dto: &AgentTopicSyncDTO,
     ) -> rusqlite::Result<()> {
-        if topic_id.is_empty() || dto.id != topic_id || dto.owner_id.is_empty() {
+        if key.owner_type != "agent"
+            || !key.is_valid()
+            || dto.id != key.topic_id
+            || dto.owner_id != key.owner_id
+        {
             return Err(Self::sync_contract_error(
-                "Agent topic requires matching non-empty topic and owner ids",
+                "Agent topic requires an exact agent topic identity",
             ));
         }
+        let topic_id = &key.topic_id;
         let owner_exists: bool = tx.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM agents
@@ -948,14 +953,19 @@ impl DbWriteQueue {
 
     fn rusqlite_upsert_group_topic(
         tx: &rusqlite::Transaction,
-        topic_id: &str,
+        key: &TopicKey,
         dto: &GroupTopicSyncDTO,
     ) -> rusqlite::Result<()> {
-        if topic_id.is_empty() || dto.id != topic_id || dto.owner_id.is_empty() {
+        if key.owner_type != "group"
+            || !key.is_valid()
+            || dto.id != key.topic_id
+            || dto.owner_id != key.owner_id
+        {
             return Err(Self::sync_contract_error(
-                "Group topic requires matching non-empty topic and owner ids",
+                "Group topic requires an exact group topic identity",
             ));
         }
+        let topic_id = &key.topic_id;
         let owner_exists: bool = tx.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM groups

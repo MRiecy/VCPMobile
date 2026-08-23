@@ -500,7 +500,7 @@ impl HashInitializer {
         let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
         let rows = sqlx::query(
             "SELECT agent_id FROM agents
-             WHERE deleted_at IS NULL
+             WHERE owner_type = 'agent' AND deleted_at IS NULL
                AND (config_hash = '' OR config_hash IS NULL OR config_hash = 'PENDING')",
         )
         .fetch_all(&mut *tx)
@@ -527,7 +527,7 @@ impl HashInitializer {
         let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
         let rows = sqlx::query(
             "SELECT group_id FROM groups
-             WHERE deleted_at IS NULL
+             WHERE owner_type = 'group' AND deleted_at IS NULL
                AND (config_hash = '' OR config_hash IS NULL OR config_hash = 'PENDING')",
         )
         .fetch_all(&mut *tx)
@@ -628,7 +628,7 @@ impl HashInitializer {
     ) -> Result<AgentSyncDTO, String> {
         let row = sqlx::query(
             "SELECT name, system_prompt, model, temperature, context_token_limit, max_output_tokens, stream_output
-             FROM agents WHERE agent_id = ? AND deleted_at IS NULL",
+             FROM agents WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL",
         )
         .bind(agent_id)
         .fetch_one(&mut **tx)
@@ -666,7 +666,7 @@ impl HashInitializer {
     ) -> Result<GroupSyncDTO, String> {
         let row = sqlx::query(
             "SELECT name, mode, group_prompt, invite_prompt, use_unified_model, unified_model, tag_match_mode, created_at
-             FROM groups WHERE group_id = ? AND deleted_at IS NULL",
+             FROM groups WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL",
         )
         .bind(group_id)
         .fetch_one(&mut **tx)

@@ -237,20 +237,19 @@ pub async fn delete_messages(
             log::warn!("Failed to cancel deleted generation {}: {}", msg_id, error);
         }
     }
-    notify_message_deletions(&app_handle, &topic_id, &result);
+    notify_message_deletions(&app_handle, &key, &result);
     Ok(())
 }
 
 pub fn notify_message_deletions<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
-    topic_id: &str,
+    topic: &TopicKey,
     result: &message_service::MessageDeletionResult,
 ) {
     if let Some(sync_state) = app_handle.try_state::<SyncState>() {
         for message_id in &result.deleted_ids {
             let _ = sync_state.ws_sender.send(SyncCommand::NotifyMessageDelete {
-                topic_id: topic_id.to_string(),
-                message_id: message_id.clone(),
+                key: MessageKey::new(topic.clone(), message_id),
                 deleted_at: result.deleted_at,
             });
         }
@@ -284,7 +283,7 @@ pub async fn truncate_history_after_timestamp(
             );
         }
     }
-    notify_message_deletions(&app_handle, &topic_id, &deletion);
+    notify_message_deletions(&app_handle, &key, &deletion);
     Ok(())
 }
 

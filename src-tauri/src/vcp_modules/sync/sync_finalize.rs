@@ -14,8 +14,6 @@ use tauri::{AppHandle, Manager};
 pub struct SyncFinalizer;
 
 struct TopicBubbleMeta {
-    owner_id: String,
-    owner_type: String,
     title: String,
     created_at: i64,
     locked: bool,
@@ -29,31 +27,35 @@ struct FinalizationStats {
     affected_groups: usize,
 }
 
-const SQLITE_BIND_CHUNK: usize = 400;
+const SQLITE_TOPIC_CHUNK: usize = 300;
 
 async fn finalize_modified_topics(
     pool: &sqlx::SqlitePool,
-    modified_topics: &HashSet<String>,
+    modified_topics: &HashSet<TopicKey>,
 ) -> Result<FinalizationStats, String> {
     let mut tx = pool
         .begin()
         .await
         .map_err(|error| format!("开启同步收尾事务失败: {error}"))?;
     let mut meta_map = std::collections::HashMap::new();
-    let topic_ids = modified_topics.iter().collect::<Vec<_>>();
-    for topic_chunk in topic_ids.chunks(SQLITE_BIND_CHUNK) {
+    let topic_keys = modified_topics.iter().collect::<Vec<_>>();
+    for topic_chunk in topic_keys.chunks(SQLITE_TOPIC_CHUNK) {
         let placeholders = topic_chunk
             .iter()
-            .map(|_| "?")
+            .map(|_| "(?, ?, ?)")
             .collect::<Vec<_>>()
             .join(",");
         let query_sql = format!(
             "SELECT topic_id, owner_id, owner_type, title, created_at, locked, unread
-             FROM topics WHERE deleted_at IS NULL AND topic_id IN ({placeholders})"
+             FROM topics WHERE deleted_at IS NULL
+               AND (owner_type, owner_id, topic_id) IN ({placeholders})"
         );
         let mut query = sqlx::query(&query_sql);
-        for topic_id in topic_chunk {
-            query = query.bind(*topic_id);
+        for key in topic_chunk {
+            query = query
+                .bind(&key.owner_type)
+                .bind(&key.owner_id)
+                .bind(&key.topic_id);
         }
         let rows = query
             .fetch_all(&mut *tx)
@@ -63,16 +65,17 @@ async fn finalize_modified_topics(
             let topic_id: String = row
                 .try_get("topic_id")
                 .map_err(|error| format!("解码同步收尾 topic_id 失败: {error}"))?;
+            let owner_id: String = row
+                .try_get("owner_id")
+                .map_err(|error| format!("解码同步收尾 owner_id 失败: {error}"))?;
+            let owner_type: String = row
+                .try_get("owner_type")
+                .map_err(|error| format!("解码同步收尾 owner_type 失败: {error}"))?;
+            let key = TopicKey::new(owner_type, owner_id, &topic_id);
             if meta_map
                 .insert(
-                    topic_id.clone(),
+                    key,
                     TopicBubbleMeta {
-                        owner_id: row
-                            .try_get("owner_id")
-                            .map_err(|error| format!("解码同步收尾 owner_id 失败: {error}"))?,
-                        owner_type: row
-                            .try_get("owner_type")
-                            .map_err(|error| format!("解码同步收尾 owner_type 失败: {error}"))?,
                         title: row
                             .try_get("title")
                             .map_err(|error| format!("解码同步收尾 title 失败: {error}"))?,
@@ -106,8 +109,7 @@ async fn finalize_modified_topics(
         return Err(format!("同步收尾缺少 live 话题元数据: {missing:?}"));
     }
 
-    for (topic_id, meta) in &meta_map {
-        let key = TopicKey::new(&meta.owner_type, &meta.owner_id, topic_id);
+    for (key, _meta) in &meta_map {
         let result = sqlx::query(
             "UPDATE topics SET msg_count = (
                 SELECT COUNT(*) FROM messages
@@ -124,15 +126,14 @@ async fn finalize_modified_topics(
         .await
         .map_err(|error| format!("更新同步收尾消息计数失败: {error}"))?;
         if result.rows_affected() != 1 {
-            return Err(format!("同步收尾消息计数未更新话题 {topic_id}"));
+            return Err(format!("同步收尾消息计数未更新话题 {}", key.topic_id));
         }
     }
 
     let mut affected_agents = HashSet::new();
     let mut affected_groups = HashSet::new();
     let mut bubbled_topics = 0usize;
-    for (topic_id, meta) in &meta_map {
-        let key = TopicKey::new(&meta.owner_type, &meta.owner_id, topic_id);
+    for (key, meta) in &meta_map {
         HashAggregator::bubble_topic_hash_with_meta(
             &mut tx,
             &key,
@@ -142,16 +143,21 @@ async fn finalize_modified_topics(
             meta.unread,
         )
         .await
-        .map_err(|error| format!("冒泡同步话题哈希失败 ({topic_id}): {error}"))?;
+        .map_err(|error| format!("冒泡同步话题哈希失败 ({}): {error}", key.topic_id))?;
         bubbled_topics += 1;
-        match meta.owner_type.as_str() {
+        match key.owner_type.as_str() {
             "agent" => {
-                affected_agents.insert(meta.owner_id.clone());
+                affected_agents.insert(key.owner_id.clone());
             }
             "group" => {
-                affected_groups.insert(meta.owner_id.clone());
+                affected_groups.insert(key.owner_id.clone());
             }
-            other => return Err(format!("同步话题 {topic_id} 的 owner_type 非法: {other}")),
+            other => {
+                return Err(format!(
+                    "同步话题 {} 的 owner_type 非法: {other}",
+                    key.topic_id
+                ))
+            }
         }
     }
 
@@ -196,7 +202,7 @@ impl SyncFinalizer {
         write_queue: &DbWriteQueue,
         pipeline: &SyncPipeline,
         logger: &Arc<Mutex<SyncLogger>>,
-        modified_topics: HashSet<String>,
+        modified_topics: HashSet<TopicKey>,
     ) -> Result<(), String> {
         // 1. 强制落盘数据库写队列
         write_queue
