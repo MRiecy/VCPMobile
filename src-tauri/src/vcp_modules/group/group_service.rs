@@ -7,7 +7,7 @@ use crate::vcp_modules::sync_dto::GroupSyncDTO;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::SyncDataType;
-use crate::vcp_modules::topic_types::{Topic, TopicKey};
+use crate::vcp_modules::topic_types::{MessageKey, Topic, TopicKey};
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as CacheCommitMutex};
@@ -681,6 +681,18 @@ pub async fn delete_group_internal<R: Runtime>(
     .await
     .map_err(|e| e.to_string())?;
 
+    let active_keys: Vec<MessageKey> = sqlx::query_as::<_, (String, String)>(
+        "SELECT topic_id, msg_id FROM active_generations
+         WHERE owner_type = 'group' AND owner_id = ?",
+    )
+    .bind(group_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?
+    .into_iter()
+    .map(|(topic_id, msg_id)| MessageKey::new(TopicKey::new("group", group_id, topic_id), msg_id))
+    .collect();
+
     // 级联清除该 Group 下的所有活跃生成，杜绝已删除消息复活
     sqlx::query("DELETE FROM active_generations WHERE owner_id = ? AND owner_type = 'group'")
         .bind(group_id)
@@ -689,6 +701,21 @@ pub async fn delete_group_internal<R: Runtime>(
         .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
+
+    if let Some(active_requests) =
+        app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveRequests>()
+    {
+        for key in active_keys {
+            if let Err(error) = active_requests.cancel(&key) {
+                log::warn!(
+                    "Failed to cancel generation {} after deleting Group {}: {}",
+                    key.msg_id,
+                    group_id,
+                    error
+                );
+            }
+        }
+    }
 
     state.caches.remove(group_id);
     Ok(now)
