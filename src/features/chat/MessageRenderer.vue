@@ -611,6 +611,8 @@ watch(
 
 // === Context Menu ===
 const showMessageContextMenu = async () => {
+  const messageKey = historyStore.captureMessageActionKey(props.message.id);
+  if (!messageKey) return;
   const actions: any[] = [];
 
   if (isStreaming.value && !shell.value?.isUser) {
@@ -619,8 +621,8 @@ const showMessageContextMenu = async () => {
       icon: StopCircle,
       danger: true,
       handler: () => {
-        const key = sessionStore.currentConversationKey;
-        if (key) {
+        if (historyStore.isMessageActionCurrent(messageKey)) {
+          const key = messageKey.conversation;
           streamStore.stopMessage(
             key.ownerId,
             key.ownerType,
@@ -634,7 +636,7 @@ const showMessageContextMenu = async () => {
 
   const getFullText = async () => {
     if (props.message.content) return props.message.content;
-    return await historyStore.fetchRawContent(props.message.id);
+    return await historyStore.fetchRawContent(messageKey);
   };
 
   // 1. 如果不是流式，编辑消息移动到首位
@@ -644,9 +646,10 @@ const showMessageContextMenu = async () => {
       icon: Edit2,
       handler: async () => {
         const fullText = await getFullText();
+        if (!historyStore.isMessageActionCurrent(messageKey)) return;
         overlayStore.openEditor({
           initialValue: fullText || "",
-          onSave: (newContent: string) => historyStore.updateMessageContent(props.message.id, newContent),
+          onSave: (newContent: string) => historyStore.updateMessageContent(messageKey, newContent),
         });
       },
     });
@@ -675,10 +678,7 @@ const showMessageContextMenu = async () => {
       icon: RotateCcw,
       handler: async () => {
         try {
-          await historyStore.reRenderMessage(
-            props.message.id,
-            props.message.topicId || props.message.topic_id || sessionStore.currentTopicId || ""
-          );
+          await historyStore.reRenderMessage(messageKey);
           notificationStore.addNotification({
             type: "success",
             title: "重构完成",
@@ -700,16 +700,13 @@ const showMessageContextMenu = async () => {
       actions.push({
         label: "重新生成",
         icon: RotateCcw,
-        handler: () => historyStore.regenerateResponse(props.message.id),
+        handler: () => historyStore.regenerateResponse(messageKey),
       });
     } else {
       actions.push({
         label: "编辑重发",
         icon: Edit2,
-        handler: async () => {
-          historyStore.editMessageContent = (await getFullText()) || "";
-          historyStore.editingOriginalMessageId = props.message.id;
-        },
+        handler: () => historyStore.beginEditResend(messageKey),
       });
     }
   }
@@ -725,7 +722,7 @@ const showMessageContextMenu = async () => {
         isDanger: true
       });
       if (confirmed) {
-        historyStore.deleteMessage(props.message.id);
+        historyStore.deleteMessage(messageKey);
       }
     },
   });

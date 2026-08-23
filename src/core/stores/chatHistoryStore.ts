@@ -20,6 +20,16 @@ export interface HistoryPageResult {
   aborted?: boolean;
 }
 
+export interface MessageActionKey {
+  conversation: ConversationKey;
+  messageId: string;
+}
+
+interface EditingMessageIntent {
+  key: MessageActionKey;
+  initialContent: string;
+}
+
 export const MAX_HISTORY_MESSAGES = 500;
 
 const compareMessages = (a: ChatMessage, b: ChatMessage) => {
@@ -67,10 +77,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   const preloadedHistory = ref<{ key: ConversationKey; messages: ChatMessage[] } | null>(null);
   let preloadConsumed = false;
 
-  // 用于拦截重新生成时的输入框补全
-  const editMessageContent = ref("");
-  // 用于标记当前是否正在“编辑重发”某条历史消息
-  const editingOriginalMessageId = ref<string | null>(null);
+  // “编辑重发”意图必须绑定完整会话身份，避免异步读取后误落到其他话题。
+  const editingMessage = ref<EditingMessageIntent | null>(null);
 
   // 用于防止并发加载与话题切换导致竞态的消息拉取中止控制器 (AbortController)
   let currentLoadAbortController: AbortController | null = null;
@@ -91,6 +99,14 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
 
   const canCommitConversation = (key: ConversationKey) =>
     sessionStore.isConversationCurrent(key) && sameConversation(loadedConversationKey.value, key);
+
+  const captureMessageActionKey = (messageId: string): MessageActionKey | null => {
+    const conversation = captureLoadedConversation();
+    return conversation ? { conversation, messageId } : null;
+  };
+
+  const isMessageActionCurrent = (key: MessageActionKey) =>
+    canCommitConversation(key.conversation);
 
   /**
    * 启动预加载：在 PRELOADING 阶段提前拉取首屏聊天历史
@@ -292,6 +308,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     hasEvictedNewer.value = false;
     loading.value = false;
     isLoadingHistory.value = false;
+    editingMessage.value = null;
   };
 
   const loadHistoryPaginated = async (
@@ -432,8 +449,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   /**
    * 邀请群成员单人发言（invite_only 模式入口）
    */
-  const inviteGroupMember = async (agentId: string) => {
-    const key = captureLoadedConversation();
+  const inviteGroupMember = async (agentId: string, frozenKey?: ConversationKey) => {
+    const key = frozenKey || captureLoadedConversation();
     if (!key || key.ownerType !== "group") return;
     try {
       const settings = settingsStore.settings;
@@ -522,7 +539,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
               : [];
             if (mentionedIds.length > 0) {
               for (const agentId of mentionedIds) {
-                await inviteGroupMember(agentId);
+                await inviteGroupMember(agentId, key);
               }
             } else {
               notificationStore.addNotification({
@@ -575,7 +592,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
    * 发送消息
    */
   const sendMessage = async (content: string) => {
-    if (hasEvictedNewer.value && !editingOriginalMessageId.value) {
+    if (hasEvictedNewer.value && !editingMessage.value) {
       const latest = await returnToLatest();
       if (latest.error || latest.aborted || hasEvictedNewer.value) return;
     }
@@ -587,32 +604,33 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       navigator.vibrate(25);
     }
 
-    if (editingOriginalMessageId.value) {
-      const originalId = editingOriginalMessageId.value;
-      editingOriginalMessageId.value = null;
+    if (editingMessage.value) {
+      const intent = editingMessage.value;
+      editingMessage.value = null;
+      if (!sameConversation(intent.key.conversation, key)) return;
+      const originalId = intent.key.messageId;
       const targetIndex = currentChatHistory.value.findIndex(m => m.id === originalId);
-      if (targetIndex !== -1) {
-        const targetMsg = {
-          ...currentChatHistory.value[targetIndex],
-          content,
-          blocks: [{ type: "markdown" as const, content }],
-        };
-        await invoke("truncate_history_after_timestamp", {
-          ownerId: key.ownerId,
-          ownerType: key.ownerType,
-          topicId: key.topicId,
-          timestamp: targetMsg.timestamp,
-        });
-        if (canCommitConversation(key)) {
-          const currentIndex = currentChatHistory.value.findIndex(message => message.id === originalId);
-          if (currentIndex !== -1) {
-            currentChatHistory.value[currentIndex] = targetMsg;
-            currentChatHistory.value = currentChatHistory.value.slice(0, currentIndex + 1);
-          }
+      if (targetIndex === -1) return;
+      const targetMsg = {
+        ...currentChatHistory.value[targetIndex],
+        content,
+        blocks: [{ type: "markdown" as const, content }],
+      };
+      await invoke("truncate_history_after_timestamp", {
+        ownerId: key.ownerId,
+        ownerType: key.ownerType,
+        topicId: key.topicId,
+        timestamp: targetMsg.timestamp,
+      });
+      if (canCommitConversation(key)) {
+        const currentIndex = currentChatHistory.value.findIndex(message => message.id === originalId);
+        if (currentIndex !== -1) {
+          currentChatHistory.value[currentIndex] = targetMsg;
+          currentChatHistory.value = currentChatHistory.value.slice(0, currentIndex + 1);
         }
-        await triggerGeneration(targetMsg, key);
-        return;
       }
+      await triggerGeneration(targetMsg, key);
+      return;
     }
 
     const currentStaged = [...attachmentStore.stagedAttachments];
@@ -648,9 +666,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   /**
    * 删除消息
    */
-  const deleteMessage = async (messageId: string, deleteAfter: boolean = false) => {
-    const key = captureLoadedConversation();
-    if (!key) return;
+  const deleteMessage = async (messageKey: MessageActionKey, deleteAfter: boolean = false) => {
+    const key = messageKey.conversation;
+    const messageId = messageKey.messageId;
+    if (!isMessageActionCurrent(messageKey)) return;
 
     const targetIndex = currentChatHistory.value.findIndex(m => m.id === messageId);
     if (targetIndex === -1) return;
@@ -684,14 +703,15 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     }
   };
 
-  const deleteAttachment = async (topicId: string, messageId: string, hash: string) => {
-    const key = captureLoadedConversation();
-    if (!key || key.topicId !== topicId) return;
+  const deleteAttachment = async (messageKey: MessageActionKey, hash: string) => {
+    const key = messageKey.conversation;
+    const messageId = messageKey.messageId;
+    if (!isMessageActionCurrent(messageKey)) return;
     // 1. 调用后端逻辑删除命令
     await invoke("delete_message_attachment", {
       ownerId: key.ownerId,
       ownerType: key.ownerType,
-      topicId,
+      topicId: key.topicId,
       messageId,
       hash,
     });
@@ -707,9 +727,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     }
   };
 
-  const updateMessageContent = async (messageId: string, newContent: string) => {
-    const key = captureLoadedConversation();
-    if (!key) return;
+  const updateMessageContent = async (messageKey: MessageActionKey, newContent: string) => {
+    const key = messageKey.conversation;
+    const messageId = messageKey.messageId;
+    if (!isMessageActionCurrent(messageKey)) return;
     clearMessageCache(messageId);
     const targetIndex = currentChatHistory.value.findIndex(m => m.id === messageId);
     if (targetIndex === -1) return;
@@ -757,9 +778,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     }
   };
 
-  const regenerateResponse = async (targetMessageId: string) => {
-    const key = captureLoadedConversation();
-    if (!key) return;
+  const regenerateResponse = async (messageKey: MessageActionKey) => {
+    const key = messageKey.conversation;
+    const targetMessageId = messageKey.messageId;
+    if (!isMessageActionCurrent(messageKey)) return;
     const targetIndex = currentChatHistory.value.findIndex(m => m.id === targetMessageId);
     if (targetIndex === -1) return;
 
@@ -824,9 +846,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   };
 
 
-  const fetchRawContent = async (messageId: string): Promise<string> => {
-    const key = captureLoadedConversation();
-    if (!key) return "";
+  const fetchRawContent = async (messageKey: MessageActionKey): Promise<string> => {
+    const key = messageKey.conversation;
+    const messageId = messageKey.messageId;
+    if (!isMessageActionCurrent(messageKey)) return "";
     const existingMsg = currentChatHistory.value.find(m => m.id === messageId);
     if (existingMsg && existingMsg.content) return existingMsg.content;
     try {
@@ -847,9 +870,19 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     }
   };
 
-  const persistMessageBlocks = async (messageId: string, blocks: ContentBlock[]) => {
-    const key = captureLoadedConversation();
-    if (!key) return;
+  const beginEditResend = async (messageKey: MessageActionKey) => {
+    const initialContent = await fetchRawContent(messageKey);
+    if (!isMessageActionCurrent(messageKey)) return;
+    editingMessage.value = {
+      key: messageKey,
+      initialContent,
+    };
+  };
+
+  const persistMessageBlocks = async (messageKey: MessageActionKey, blocks: ContentBlock[]) => {
+    const key = messageKey.conversation;
+    const messageId = messageKey.messageId;
+    if (!isMessageActionCurrent(messageKey)) return;
     const msg = currentChatHistory.value.find(m => m.id === messageId);
     if (!msg) return;
     msg.blocks = blocks;
@@ -865,11 +898,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     }
   };
 
-  const reRenderMessage = async (messageId: string, topicId: string) => {
-    const key = captureLoadedConversation();
-    if (!key || key.topicId !== topicId) {
-      throw new Error("消息不属于当前会话");
-    }
+  const reRenderMessage = async (messageKey: MessageActionKey) => {
+    const key = messageKey.conversation;
+    const messageId = messageKey.messageId;
+    if (!isMessageActionCurrent(messageKey)) throw new Error("消息不属于当前会话");
     const targetIndex = currentChatHistory.value.findIndex(m => m.id === messageId);
     if (targetIndex === -1) {
       throw new Error("消息未在当前历史记录中找到");
@@ -882,7 +914,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         ownerId: key.ownerId,
         ownerType: key.ownerType,
         messageId,
-        topicId,
+        topicId: key.topicId,
       });
       if (!canCommitConversation(key)) return;
       clearMessageCache(messageId);
@@ -907,8 +939,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     isLoadingHistory,
     hasEvictedNewer,
     loadedConversationKey,
-    editMessageContent,
-    editingOriginalMessageId,
+    editingMessage,
     preloadedHistory,
     preloadHistory,
     loadHistory,
@@ -923,7 +954,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     triggerGeneration,
     inviteGroupMember,
     summarizeTopic,
+    captureMessageActionKey,
+    isMessageActionCurrent,
     updateMessageContent,
+    beginEditResend,
     regenerateResponse,
     fetchRawContent,
     persistMessageBlocks,

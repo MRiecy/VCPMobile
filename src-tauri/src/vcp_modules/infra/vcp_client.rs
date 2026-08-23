@@ -104,13 +104,14 @@ impl VcpRequestPayload {
 }
 
 pub fn message_transport_request_id(key: &MessageKey) -> String {
-    crate::vcp_modules::infra::utils::calculate_sha256(
-        format!(
-            "{}\n{}\n{}\n{}",
-            key.topic.owner_type, key.topic.owner_id, key.topic.topic_id, key.msg_id
-        )
-        .as_bytes(),
-    )
+    let identity = serde_json::json!([
+        &key.topic.owner_type,
+        &key.topic.owner_id,
+        &key.topic.topic_id,
+        &key.msg_id,
+    ])
+    .to_string();
+    crate::vcp_modules::infra::utils::calculate_sha256(identity.as_bytes())
 }
 
 fn resolve_vcp_endpoint(raw_url: &str) -> String {
@@ -375,10 +376,7 @@ pub async fn sendToVCP<R: Runtime>(
         crate::vcp_modules::chat::message_service::finalize_stream_message(
             app.clone(),
             &pool,
-            &request_key.topic.owner_id,
-            &request_key.topic.owner_type,
-            request_key.topic.topic_id.clone(),
-            message_id,
+            &request_key,
             res["fullContent"].as_str().unwrap_or("").to_string(),
             is_aborted,
             finish_reason,
@@ -1956,10 +1954,7 @@ async fn mark_message_as_error<R: Runtime>(
         crate::vcp_modules::chat::message_service::finalize_stream_message(
             app_handle.clone(),
             pool,
-            &key.topic.owner_id,
-            &key.topic.owner_type,
-            key.topic.topic_id.clone(),
-            key.msg_id.clone(),
+            key,
             final_content,
             false,
             Some("error".to_string()),
@@ -2125,10 +2120,7 @@ pub async fn recover_active_generation<R: Runtime>(
                     crate::vcp_modules::chat::message_service::finalize_stream_message(
                         app.clone(),
                         &db.pool,
-                        &owner_id,
-                        &owner_type,
-                        topic_id.clone(),
-                        msg_id.clone(),
+                        &key,
                         content.clone(),
                         false,
                         finish_reason.or(Some("completed".to_string())),
@@ -2202,10 +2194,7 @@ pub async fn recover_active_generation<R: Runtime>(
                     crate::vcp_modules::chat::message_service::finalize_stream_message(
                         app.clone(),
                         &db.pool,
-                        &owner_id,
-                        &owner_type,
-                        topic_id.clone(),
-                        msg_id.clone(),
+                        &key,
                         content.clone(),
                         false,
                         last_finish_reason.or(Some("completed".to_string())),
@@ -2239,10 +2228,7 @@ pub async fn recover_active_generation<R: Runtime>(
                     };
                     let resumed = resume_claimed_generation(
                         &app,
-                        msg_id.clone(),
-                        topic_id.clone(),
-                        owner_id.clone(),
-                        owner_type.clone(),
+                        &key,
                         agent_id.clone(),
                         stream_channel.clone(),
                         initial_content,
@@ -2296,16 +2282,17 @@ pub async fn recover_active_generation<R: Runtime>(
 #[cfg(target_os = "android")]
 async fn resume_claimed_generation<R: Runtime>(
     app: &AppHandle<R>,
-    msg_id: String,
-    topic_id: String,
-    owner_id: String,
-    owner_type: String,
+    key: &MessageKey,
     agent_id: Option<String>,
     stream_channel: Channel<StreamEvent>,
     initial_content: Option<String>,
     last_event_index: Option<i64>,
     cancellation_token: CancellationToken,
 ) -> Result<Value, String> {
+    let msg_id = key.msg_id.clone();
+    let topic_id = key.topic.topic_id.clone();
+    let owner_id = key.topic.owner_id.clone();
+    let owner_type = key.topic.owner_type.clone();
     log::info!(
         "[VCPClient] resume_claimed_generation called for messageId: {}, topicId: {}, lastEventIndex: {:?}",
         msg_id,
@@ -2317,8 +2304,7 @@ async fn resume_claimed_generation<R: Runtime>(
     let client = super::http_clients::client(super::http_clients::HttpProfile::ChatStream).clone();
 
     let pool = app.state::<DbState>().pool.clone();
-    let key = MessageKey::new(TopicKey::new(&owner_type, &owner_id, &topic_id), &msg_id);
-    let transport_request_id = message_transport_request_id(&key);
+    let transport_request_id = message_transport_request_id(key);
 
     if let Some(ref content) = initial_content {
         let _ = sqlx::query(
@@ -2374,8 +2360,7 @@ async fn resume_claimed_generation<R: Runtime>(
                 "[VCPClient] Claimed recovery failed during handle_streaming_request: {}",
                 e
             );
-            let _ =
-                mark_message_as_error(app, &pool, &msg_id, Some(format!("接续失败: {}", e))).await;
+            let _ = mark_message_as_error(app, &pool, key, Some(format!("接续失败: {}", e))).await;
             return Err(e);
         }
     };
@@ -2390,10 +2375,7 @@ async fn resume_claimed_generation<R: Runtime>(
     crate::vcp_modules::chat::message_service::finalize_stream_message(
         app.clone(),
         &pool,
-        &owner_id,
-        &owner_type,
-        topic_id,
-        msg_id.clone(),
+        key,
         res["fullContent"].as_str().unwrap_or("").to_string(),
         is_aborted,
         finish_reason,

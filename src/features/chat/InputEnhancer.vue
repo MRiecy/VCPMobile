@@ -353,17 +353,18 @@ const attachmentsReady = computed(() =>
 );
 const canSend = computed(() => hasContent.value && attachmentsReady.value && !props.disabled);
 
-// 监听并接收外部注入的”编辑消息”内容
-watch(() => historyStore.editMessageContent, async (newContent) => {
-  if (newContent) {
-    input.value = newContent;
-    historyStore.editMessageContent = ''; // 消费掉
+// 编辑重发意图与原会话绑定；切换会话取消意图时同时清理注入内容。
+watch(() => historyStore.editingMessage, async (intent, previousIntent) => {
+  if (intent) {
+    input.value = intent.initialContent;
     isAudioMode.value = false; // 强行切回键盘输入态
     await nextTick();
     if (textareaRef.value) {
       textareaRef.value.focus();
       textareaRef.value.dispatchEvent(new Event('input', { bubbles: true }));
     }
+  } else if (previousIntent) {
+    input.value = '';
   }
 });
 

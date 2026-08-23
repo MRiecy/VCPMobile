@@ -7,7 +7,7 @@ use crate::vcp_modules::message_repository::{
 };
 use crate::vcp_modules::settings_manager;
 use crate::vcp_modules::sync_hash::HashAggregator;
-use crate::vcp_modules::topic_types::TopicKey;
+use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
@@ -805,17 +805,14 @@ async fn ensure_attachments_locally<R: tauri::Runtime>(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn begin_stream_message(
     db_pool: &sqlx::Pool<sqlx::Sqlite>,
-    owner_id: &str,
-    owner_type: &str,
-    topic_id: &str,
-    message_id: &str,
+    message_key: &MessageKey,
     agent_id: Option<&str>,
     agent_name: Option<&str>,
 ) -> Result<(), String> {
-    let key = TopicKey::new(owner_type, owner_id, topic_id);
+    let key = &message_key.topic;
+    let message_id = &message_key.msg_id;
     let now = crate::vcp_modules::infra::utils::now_millis();
     let (_, render_bytes) = compile_and_serialize_render_async(String::new()).await?;
     let fingerprint_timestamp = u64::try_from(now)
@@ -829,7 +826,7 @@ pub async fn begin_stream_message(
         agent_id,
         &[],
     );
-    let is_group = owner_type == "group";
+    let is_group = key.owner_type == "group";
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
 
     let inserted = sqlx::query(
@@ -850,7 +847,11 @@ pub async fn begin_stream_message(
     .bind(agent_id)
     .bind(now)
     .bind(is_group)
-    .bind(if is_group { Some(owner_id) } else { None })
+    .bind(if is_group {
+        Some(key.owner_id.as_str())
+    } else {
+        None
+    })
     .bind(&content_hash)
     .bind(now)
     .bind(now)
@@ -863,7 +864,7 @@ pub async fn begin_stream_message(
     if inserted.rows_affected() != 1 {
         return Err(format!(
             "Topic {} does not belong to live {} {}",
-            topic_id, owner_type, owner_id
+            key.topic_id, key.owner_type, key.owner_id
         ));
     }
 
@@ -912,7 +913,7 @@ pub async fn begin_stream_message(
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
-    HashAggregator::bubble_from_topic(&mut tx, &key).await?;
+    HashAggregator::bubble_from_topic(&mut tx, key).await?;
 
     sqlx::query(
         "INSERT INTO active_generations (owner_type, owner_id, topic_id, msg_id, created_at)
@@ -993,15 +994,16 @@ pub async fn fetch_raw_message_content(
 ) -> Result<String, String> {
     let db_state = app_handle.state::<crate::vcp_modules::db_manager::DbState>();
     let pool = &db_state.pool;
+    let key = MessageKey::new(TopicKey::new(owner_type, owner_id, topic_id), message_id);
 
     let row = sqlx::query(
         "SELECT content FROM messages
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
     )
-    .bind(&owner_type)
-    .bind(&owner_id)
-    .bind(&topic_id)
-    .bind(&message_id)
+    .bind(&key.topic.owner_type)
+    .bind(&key.topic.owner_id)
+    .bind(&key.topic.topic_id)
+    .bind(&key.msg_id)
     .fetch_optional(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -1011,7 +1013,7 @@ pub async fn fetch_raw_message_content(
             let content: String = r.get(0);
             Ok(content)
         }
-        None => Err(format!("Message {} not found", message_id)),
+        None => Err(format!("Message {} not found", key.msg_id)),
     }
 }
 
@@ -1025,16 +1027,17 @@ pub async fn re_render_message(
 ) -> Result<serde_json::Value, String> {
     let db_state = app_handle.state::<crate::vcp_modules::db_manager::DbState>();
     let pool = &db_state.pool;
+    let key = MessageKey::new(TopicKey::new(owner_type, owner_id, topic_id), message_id);
 
     let row = sqlx::query(
         "SELECT content, content_hash FROM messages \
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
            AND deleted_at IS NULL",
     )
-    .bind(&owner_type)
-    .bind(&owner_id)
-    .bind(&topic_id)
-    .bind(&message_id)
+    .bind(&key.topic.owner_type)
+    .bind(&key.topic.owner_id)
+    .bind(&key.topic.topic_id)
+    .bind(&key.msg_id)
     .fetch_optional(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -1045,12 +1048,12 @@ pub async fn re_render_message(
 
             let observed_hash: String = r.get("content_hash");
             let (compiled, serialized) = compile_and_serialize_render_async(decompressed).await?;
-            let key = TopicKey::new(owner_type, owner_id, &topic_id);
-            if !write_render_cache_cas(pool, &key, &message_id, &observed_hash, &serialized).await?
+            if !write_render_cache_cas(pool, &key.topic, &key.msg_id, &observed_hash, &serialized)
+                .await?
             {
                 return Err(format!(
                     "Message {} changed while re-rendering; stale cache discarded",
-                    message_id
+                    key.msg_id
                 ));
             }
 
@@ -1058,7 +1061,7 @@ pub async fn re_render_message(
         }
         None => Err(format!(
             "Message {} with topic {} not found",
-            message_id, topic_id
+            key.msg_id, key.topic.topic_id
         )),
     }
 }
@@ -1468,14 +1471,10 @@ async fn decode_valid_render_cache(
     serde_json::to_value(blocks).ok()
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn finalize_stream_message<R: tauri::Runtime>(
     app_handle: AppHandle<R>,
     pool: &sqlx::Pool<sqlx::Sqlite>,
-    owner_id: &str,
-    owner_type: &str,
-    topic_id: String,
-    message_id: String,
+    message_key: &MessageKey,
     full_content: String,
     is_aborted: bool,
     finish_reason: Option<String>,
@@ -1485,10 +1484,7 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
     finalize_stream_message_inner(
         app_handle,
         pool,
-        owner_id,
-        owner_type,
-        topic_id,
-        message_id,
+        message_key,
         full_content,
         is_aborted,
         finish_reason,
@@ -1502,16 +1498,17 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
 async fn finalize_stream_message_inner<R: tauri::Runtime>(
     _app_handle: AppHandle<R>,
     pool: &sqlx::Pool<sqlx::Sqlite>,
-    owner_id: &str,
-    owner_type: &str, // "agent" | "group"
-    topic_id: String,
-    message_id: String,
+    message_key: &MessageKey,
     full_content: String,
     is_aborted: bool,
     finish_reason: Option<String>,
     stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
     agent_id: Option<String>,
 ) -> Result<(), String> {
+    let owner_id = message_key.topic.owner_id.as_str();
+    let owner_type = message_key.topic.owner_type.as_str();
+    let topic_id = message_key.topic.topic_id.as_str();
+    let message_id = message_key.msg_id.as_str();
     let final_ts = crate::vcp_modules::infra::utils::now_millis() as u64;
 
     let mut final_content = full_content;
@@ -1545,12 +1542,16 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
         None
     } else if is_group {
         Some(serde_json::json!({
+            "ownerId": owner_id,
+            "ownerType": owner_type,
             "groupId": owner_id,
             "topicId": topic_id,
             "isGroupMessage": true,
         }))
     } else {
         Some(serde_json::json!({
+            "ownerId": owner_id,
+            "ownerType": owner_type,
             "agentId": owner_id,
             "topicId": topic_id,
         }))
@@ -1560,10 +1561,7 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
     } else {
         match commit_stream_message(
             pool,
-            owner_id,
-            owner_type,
-            &topic_id,
-            &message_id,
+            message_key,
             &final_content,
             final_ts,
             &terminal_reason,
@@ -1576,7 +1574,7 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
             Err(error) => {
                 if let Some(chan) = &stream_channel {
                     let event = crate::vcp_modules::vcp_client::StreamEvent::error(
-                        message_id.clone(),
+                        message_id.to_string(),
                         context.clone(),
                         format!("终态保存失败: {}", error),
                     );
@@ -1589,7 +1587,7 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
 
     if let Some(chan) = stream_channel {
         let event = crate::vcp_modules::vcp_client::StreamEvent::end(
-            message_id,
+            message_id.to_string(),
             context,
             Some(terminal_reason),
             end_blocks,
@@ -1604,17 +1602,18 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
 #[allow(clippy::too_many_arguments)]
 async fn commit_stream_message(
     pool: &sqlx::Pool<sqlx::Sqlite>,
-    owner_id: &str,
-    owner_type: &str,
-    topic_id: &str,
-    message_id: &str,
+    message_key: &MessageKey,
     final_content: &str,
     final_ts: u64,
     finish_reason: &str,
     agent_id: Option<&str>,
     agent_name: Option<&str>,
 ) -> Result<(Vec<ContentBlock>, u64), String> {
-    let key = TopicKey::new(owner_type, owner_id, topic_id);
+    let key = &message_key.topic;
+    let owner_id = key.owner_id.as_str();
+    let owner_type = key.owner_type.as_str();
+    let topic_id = key.topic_id.as_str();
+    let message_id = message_key.msg_id.as_str();
     let (blocks, render_bytes) =
         compile_and_serialize_render_async(final_content.to_string()).await?;
     let is_group = owner_type == "group";
@@ -1751,7 +1750,7 @@ async fn commit_stream_message(
         ));
     }
 
-    HashAggregator::bubble_from_topic(&mut tx, &key).await?;
+    HashAggregator::bubble_from_topic(&mut tx, key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok((blocks, start_timestamp as u64))
 }
@@ -1770,8 +1769,8 @@ pub async fn delete_message_attachment(
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
     let now = crate::vcp_modules::infra::utils::now_millis();
-    let key = TopicKey::new(owner_type, owner_id, topic_id);
-    delete_message_attachment_in_pool(pool, &key, &message_id, &hash, now).await
+    let key = MessageKey::new(TopicKey::new(owner_type, owner_id, topic_id), message_id);
+    delete_message_attachment_in_pool(pool, &key.topic, &key.msg_id, &hash, now).await
 }
 
 async fn delete_message_attachment_in_pool(

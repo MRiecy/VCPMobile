@@ -68,7 +68,7 @@ async fn run_group_speaker_turn(
     let active_member_configs_inner = params.active_member_configs;
     let group_id = params.group_id;
     let topic_id = params.topic_id;
-    let topic_key = TopicKey::new("group", &group_id, &topic_id);
+    let topic_key = TopicKey::new("group", group_id, topic_id);
     let vcp_url = params.vcp_url;
     let vcp_api_key = params.vcp_api_key;
     let stream_channel = params.stream_channel;
@@ -116,7 +116,7 @@ async fn run_group_speaker_turn(
     let messages = crate::vcp_modules::context_assembler::orchestrate_chat_context(
         db_pool,
         full_history_for_context,
-        &TopicKey::new("group", group_id, topic_id),
+        &topic_key,
         &agent_name,
         "group",
         base_system_prompt,
@@ -134,10 +134,7 @@ async fn run_group_speaker_turn(
         "agentName": agent_name
     }));
 
-    let request_key = MessageKey::new(
-        TopicKey::new("group", group_id, topic_id),
-        message_id.clone(),
-    );
+    let request_key = MessageKey::new(topic_key, message_id.clone());
     let request_payload = VcpRequestPayload {
         vcp_url: vcp_url.to_string(),
         vcp_api_key: vcp_api_key.to_string(),
@@ -149,13 +146,10 @@ async fn run_group_speaker_turn(
     };
 
     let (_request_lease, cancellation_token) =
-        ActiveRequestLease::try_acquire(params.active_requests.0.clone(), request_key)?;
+        ActiveRequestLease::try_acquire(params.active_requests.0.clone(), request_key.clone())?;
     message_service::begin_stream_message(
         db_pool,
-        group_id,
-        "group",
-        topic_id,
-        &message_id,
+        &request_key,
         Some(&agent_id),
         Some(&agent_name),
     )
@@ -202,10 +196,7 @@ async fn run_group_speaker_turn(
             message_service::finalize_stream_message(
                 app_handle.clone(),
                 db_pool,
-                group_id,
-                "group",
-                topic_id.to_string(),
-                message_id.clone(),
+                &request_key,
                 full_content.to_string(),
                 is_aborted,
                 finish_reason.clone(),

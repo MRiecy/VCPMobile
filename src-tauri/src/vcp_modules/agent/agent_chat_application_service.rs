@@ -127,10 +127,7 @@ pub async fn internal_process_agent_chat_message(
         ActiveRequestLease::try_acquire(active_requests.0.clone(), request_key.clone())?;
     message_service::begin_stream_message(
         &db_state.pool,
-        &agent_id,
-        "agent",
-        &topic_id,
-        &thinking_id,
+        &request_key,
         Some(&agent_id),
         Some(&agent_config.name),
     )
@@ -189,10 +186,7 @@ pub async fn internal_process_agent_chat_message(
                 message_service::finalize_stream_message(
                     app_handle.clone(),
                     &db_state.pool,
-                    &agent_id,
-                    "agent",
-                    topic_id.clone(),
-                    thinking_id.clone(),
+                    &request_key,
                     full_content.to_string(),
                     is_aborted,
                     finish_reason,

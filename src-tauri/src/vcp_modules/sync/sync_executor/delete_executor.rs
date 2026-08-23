@@ -193,10 +193,11 @@ impl DeleteExecutor {
 
     pub async fn soft_delete_message<R: Runtime>(
         app: &AppHandle<R>,
-        key: &TopicKey,
-        message_id: &str,
+        message_key: &MessageKey,
         deleted_at: i64,
     ) -> Result<(), String> {
+        let key = &message_key.topic;
+        let message_id = message_key.msg_id.as_str();
         if key.topic_id.is_empty()
             || key.owner_id.is_empty()
             || !matches!(key.owner_type.as_str(), "agent" | "group")

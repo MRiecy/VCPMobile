@@ -95,7 +95,7 @@ watch(
 );
 
 const scrollToLatest = async (smooth = true) => {
-  if (historyStore.hasEvictedNewer && !historyStore.editingOriginalMessageId) {
+  if (historyStore.hasEvictedNewer && !historyStore.editingMessage) {
     await historyStore.returnToLatest();
     await nextTick();
   }

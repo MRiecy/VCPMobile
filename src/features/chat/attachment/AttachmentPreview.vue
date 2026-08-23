@@ -83,6 +83,10 @@ const removeAttachment = async (index: number) => {
     !props.topicId
   ) return;
 
+  const historyStore = useChatHistoryStore();
+  const messageKey = historyStore.captureMessageActionKey(props.messageId);
+  if (!messageKey || messageKey.conversation.topicId !== props.topicId) return;
+
   const confirmed = await overlayStore.showConfirm({
     title: "移除附件",
     message: "是否确定要移除该附件？该操作仅会隐藏历史消息中的附件，您仍能继续使用此模型进行对话。",
@@ -91,8 +95,7 @@ const removeAttachment = async (index: number) => {
   if (!confirmed) return;
 
   try {
-    const historyStore = useChatHistoryStore();
-    await historyStore.deleteAttachment(props.topicId, props.messageId, att.hash);
+    await historyStore.deleteAttachment(messageKey, att.hash);
   } catch (err) {
     console.error("[AttachmentPreview] Failed to delete attachment:", err);
     notificationStore.addNotification({

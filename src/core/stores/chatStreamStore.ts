@@ -45,14 +45,22 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     ownerId: string,
     ownerType: ConversationOwnerType,
     topicId: string,
-  ) => `${ownerType}:${ownerId}:${topicId}`;
+  ) => JSON.stringify([ownerType, ownerId, topicId]);
+
+  const streamMessageMapKeyFromConversation = (
+    conversationKey: string,
+    messageId: string,
+  ) => JSON.stringify([conversationKey, messageId]);
 
   const streamMessageMapKey = (
     ownerId: string,
     ownerType: ConversationOwnerType,
     topicId: string,
     messageId: string,
-  ) => `${conversationMapKey(ownerId, ownerType, topicId)}:${messageId}`;
+  ) => streamMessageMapKeyFromConversation(
+    conversationMapKey(ownerId, ownerType, topicId),
+    messageId,
+  );
 
   // 核心：记录每个完整会话是否处于活动流状态。
   const sessionActiveStreams = ref<Record<string, string[]>>({});
@@ -318,7 +326,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     for (const [conversationKey, streams] of Object.entries(
       sessionActiveStreams.value,
     )) {
-      for (const id of streams) keys.add(`${conversationKey}:${id}`);
+      for (const id of streams) {
+        keys.add(streamMessageMapKeyFromConversation(conversationKey, id));
+      }
     }
     return keys;
   });

@@ -2546,10 +2546,10 @@ async fn run_sync_session(
                                                     let key = deleted_topic_key
                                                         .as_ref()
                                                         .ok_or_else(|| "message delete metadata is missing".to_string())?;
+                                                    let message_key = MessageKey::new(key.clone(), &id);
                                                     DeleteExecutor::soft_delete_message(
                                                         &h,
-                                                        key,
-                                                        &id,
+                                                        &message_key,
                                                         deleted_at,
                                                     ).await
                                                 },

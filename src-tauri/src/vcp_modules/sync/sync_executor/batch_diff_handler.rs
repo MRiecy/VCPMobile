@@ -8,7 +8,7 @@ use crate::vcp_modules::sync_executor::{
 use crate::vcp_modules::sync_logger::SyncLogger;
 use crate::vcp_modules::sync_service::{Phase3DiffBatch, Phase3Tracker, SyncCommand};
 use crate::vcp_modules::sync_types::parse_topic_key;
-use crate::vcp_modules::topic_types::TopicKey;
+use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -518,10 +518,10 @@ impl BatchDiffHandler {
                 // 桌面墓碑先落到本地，避免同批次 push 把已经删除的 live 消息复活。
                 for (topic, tombstones) in &delete_batch {
                     for tombstone in tombstones {
+                        let message_key = MessageKey::new(topic.clone(), &tombstone.message_id);
                         if let Err(error) = DeleteExecutor::soft_delete_message(
                             app_handle,
-                            topic,
-                            &tombstone.message_id,
+                            &message_key,
                             tombstone.deleted_at,
                         )
                         .await
