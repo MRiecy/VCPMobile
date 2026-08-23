@@ -456,8 +456,7 @@ async fn run_migrations(pool: &Pool<Sqlite>) -> Result<(), String> {
         // 跳过 0001→0008 增量链（永不经过 unicode61 FTS 中间态）
         bootstrap_fresh_install(pool, &migrator).await?;
     } else {
-        // 存量安装（含 1.1.2 无追踪记录的老库）：桥接迁移状态
-        bootstrap_legacy_if_needed(pool, &migrator).await?;
+        ensure_current_baseline(pool).await?;
     }
     // sqlx 内置迁移引擎：底层用 sqlite3_exec()，原生支持触发器等多语句 DDL
     migrator
@@ -493,6 +492,32 @@ async fn is_fresh_install(pool: &Pool<Sqlite>) -> Result<bool, String> {
         .await
         .map_err(|e| format!("Fresh check: failed to count applied migrations: {e}"))?;
     Ok(applied == 0)
+}
+
+/// 0100 已进行不兼容改写。非空数据库必须已经记录 baseline，随后由 sqlx
+/// checksum 判断其是否属于当前 schema；不再为无追踪记录的旧库伪造迁移状态。
+async fn ensure_current_baseline(pool: &Pool<Sqlite>) -> Result<(), String> {
+    let has_tracking: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations')",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Baseline check: failed to inspect tracking table: {e}"))?;
+    if !has_tracking {
+        return Err("数据库版本不兼容：本版本不迁移旧数据库，请清除应用数据或重装".to_string());
+    }
+
+    let has_baseline: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations WHERE version = ? AND success = 1)",
+    )
+    .bind(BASELINE_VERSION)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| format!("Baseline check: failed to inspect migration record: {e}"))?;
+    if !has_baseline {
+        return Err("数据库版本不兼容：本版本不迁移旧数据库，请清除应用数据或重装".to_string());
+    }
+    Ok(())
 }
 
 /// 全新安装快速路径：直接执行 baseline 文件，并将「baseline 创建时已存在」的
@@ -587,148 +612,6 @@ async fn bootstrap_fresh_install(
             .filter(|m| m.version <= BASELINE_INCREMENTAL_MAX || m.version == BASELINE_VERSION)
             .count()
     );
-    Ok(())
-}
-
-/// 为 1.1.2 原始用户（有业务表但无迁移追踪表）构建初始迁移状态。
-///
-/// sqlx::migrate!() 使用 _sqlx_migrations 表追踪版本，并通过 SHA-384
-/// checksum 校验每个已执行迁移的文件内容。此函数通过检查 Schema 状态推断
-/// 哪些迁移已在历史上执行过，并向 _sqlx_migrations 写入带真实 checksum
-/// 的虚拟记录，告知 sqlx「这些迁移已执行，跳过它们」。
-///
-/// Checksum 直接取自 migrator.migrations[i].checksum，这是编译期由
-/// sqlx::migrate!() 宏对 .sql 文件内容计算的 SHA-384，与 sqlx 运行期
-/// 校验使用的值完全一致，无需手动计算。
-async fn bootstrap_legacy_if_needed(
-    pool: &Pool<Sqlite>,
-    migrator: &sqlx::migrate::Migrator,
-) -> Result<(), String> {
-    // 检测是否为 1.1.2 用户：有业务表但没有 sqlx 迁移追踪表
-    let has_messages: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages')",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|e| format!("Bootstrap: failed to inspect messages table: {e}"))?;
-
-    // 全新安装由 sqlx migrator 正常建表。已有 tracking 表不代表桥接完整；
-    // 旧版本可能在逐条 seed 中途崩溃，因此仍需在事务内补齐可证明已应用的记录。
-    if !has_messages {
-        return Ok(());
-    }
-
-    log::info!("[DBManager] Legacy 1.1.2 database detected. Bootstrapping migration state...");
-
-    // 检测各迁移在历史上是否已执行（通过当前 Schema 状态推断）
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| format!("Bootstrap: failed to begin transaction: {e}"))?;
-    let columns = sqlx::query("PRAGMA table_info(message_attachments)")
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|e| format!("Bootstrap: failed to inspect attachment columns: {e}"))?;
-    let mut has_deleted_at = false;
-    for row in columns {
-        let name: String = row
-            .try_get("name")
-            .map_err(|e| format!("Bootstrap: failed to decode attachment column: {e}"))?;
-        has_deleted_at |= name == "deleted_at";
-    }
-
-    let has_fts: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages_fts')",
-    )
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| format!("Bootstrap: failed to inspect FTS table: {e}"))?;
-
-    // v8 探针：messages_fts 的建表 SQL 含 'trigram' 说明 0008 已执行。
-    // 必须与 v3 的 has_fts 区分——unicode61 版 FTS 存在不代表 trigram 重建完成。
-    let fts_ddl: Option<String> = sqlx::query_scalar(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='messages_fts'",
-    )
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| format!("Bootstrap: failed to inspect FTS DDL: {e}"))?;
-    let has_trigram_fts = fts_ddl.is_some_and(|ddl| ddl.contains("trigram"));
-
-    let avatar_columns = sqlx::query("PRAGMA table_info(avatars)")
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|e| format!("Bootstrap: failed to inspect avatar columns: {e}"))?;
-    let mut has_avatar_deleted_at = false;
-    for row in avatar_columns {
-        let name: String = row
-            .try_get("name")
-            .map_err(|e| format!("Bootstrap: failed to decode avatar column: {e}"))?;
-        has_avatar_deleted_at |= name == "deleted_at";
-    }
-
-    // 向 _sqlx_migrations 写入虚拟记录（migrator.run() 会自动建表后再读取）
-    // 此处借用 pool 直接执行，因为 _sqlx_migrations 尚不存在，
-    // 所以先让 migrator 自己建表，再插入记录。
-    // 实际顺序：run() → 建表 → 读记录（发现已有记录）→ 跳过对应版本
-    //
-    // 由于 _sqlx_migrations 在此时不存在，我们需要手动创建它，
-    // 或者利用 sqlx 提供的 ensure_migrations_table() 方法。
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS _sqlx_migrations (
-            version        BIGINT PRIMARY KEY,
-            description    TEXT NOT NULL,
-            installed_on   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            success        BOOLEAN NOT NULL,
-            checksum       BLOB NOT NULL,
-            execution_time BIGINT NOT NULL
-        )",
-    )
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| format!("Bootstrap: failed to create _sqlx_migrations: {}", e))?;
-
-    for migration in migrator.migrations.iter() {
-        let already_applied = match migration.version {
-            1 => true,           // 初始表必然存在（用户能运行说明 Migration 1 已执行）
-            2 => has_deleted_at, // deleted_at 列存在则 Migration 2 已执行
-            3 => has_fts,        // messages_fts 表存在则 Migration 3 已执行
-            6 => has_avatar_deleted_at,
-            8 => has_trigram_fts, // trigram 版 FTS 存在则 Migration 8 已执行
-            BASELINE_VERSION => true, // baseline 仅对全新安装执行；有业务表的库一律跳过
-            _ => false,
-        };
-
-        if already_applied {
-            sqlx::query(
-                "INSERT OR IGNORE INTO _sqlx_migrations
-                 (version, description, installed_on, success, checksum, execution_time)
-                 VALUES (?, ?, datetime('now'), 1, ?, 0)",
-            )
-            .bind(migration.version)
-            .bind(migration.description.as_ref())
-            .bind(migration.checksum.as_ref())
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| {
-                format!(
-                    "Bootstrap: failed to seed migration v{}: {}",
-                    migration.version, e
-                )
-            })?;
-
-            log::info!(
-                "[DBManager] Bootstrap: seeded migration v{} ({}).",
-                migration.version,
-                migration.description
-            );
-        }
-    }
-
-    tx.commit()
-        .await
-        .map_err(|e| format!("Bootstrap: failed to commit migration bridge: {e}"))?;
-
-    log::info!("[DBManager] Legacy bootstrap complete. Handing over to sqlx migrator.");
     Ok(())
 }
 
@@ -1406,61 +1289,6 @@ mod tests {
         assert!(!is_confirmed_sqlite_corruption_code(10)); // SQLITE_IOERR
     }
 
-    #[tokio::test]
-    async fn legacy_migration_seed_is_atomic_and_retryable() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("open test database");
-        sqlx::query(
-            "CREATE TABLE messages (msg_id TEXT);
-             CREATE TABLE message_attachments (hash TEXT, deleted_at INTEGER);
-             CREATE TABLE messages_fts (msg_id TEXT);
-             CREATE TABLE _sqlx_migrations (
-                version BIGINT PRIMARY KEY,
-                description TEXT NOT NULL,
-                installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                success BOOLEAN NOT NULL,
-                checksum BLOB NOT NULL,
-                execution_time BIGINT NOT NULL
-             );
-             CREATE TRIGGER fail_second_seed
-             BEFORE INSERT ON _sqlx_migrations
-             WHEN NEW.version = 2
-             BEGIN SELECT RAISE(ABORT, 'seed failure'); END;",
-        )
-        .execute(&pool)
-        .await
-        .expect("create legacy fixture");
-        let migrator = sqlx::migrate!("./migrations");
-
-        let error = bootstrap_legacy_if_needed(&pool, &migrator)
-            .await
-            .expect_err("injected seed failure must abort bridge");
-        assert!(error.contains("seed migration v2"));
-        let partial_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
-            .fetch_one(&pool)
-            .await
-            .expect("count partial rows");
-        assert_eq!(partial_count, 0);
-
-        sqlx::query("DROP TRIGGER fail_second_seed")
-            .execute(&pool)
-            .await
-            .expect("remove failure trigger");
-        bootstrap_legacy_if_needed(&pool, &migrator)
-            .await
-            .expect("retry migration bridge");
-        let versions: Vec<i64> =
-            sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
-                .fetch_all(&pool)
-                .await
-                .expect("read seeded versions");
-        // v1/v2/v3 由 schema 探针判定已应用；baseline(v100) 对一切有业务表的库直接 seed
-        assert_eq!(versions, vec![1, 2, 3, BASELINE_VERSION]);
-    }
-
     /// 铁律守护：(BASELINE_INCREMENTAL_MAX, BASELINE_VERSION) 版本号区间内严禁出现迁移，
     /// 否则全新安装快速路径会将其 seed 跳过，造成永久 schema 缺失。
     #[test]
@@ -1536,82 +1364,70 @@ mod tests {
         .await
         .expect("inspect index");
         assert!(has_agent_idx, "baseline must include idx_messages_agent_id");
-    }
 
-    /// 漂移防护：baseline 快速路径建库 与 全增量链建库 的 schema 必须等价。
-    /// 逐表比对列集合（name/type/notnull/default）+ 索引/触发器/虚表清单。
-    /// 注意不按文本比对 sqlite_master.sql：ALTER ADD COLUMN 的列序与内联定义天然不同。
-    #[tokio::test]
-    async fn baseline_schema_matches_incremental_chain() {
-        // 路径 A：全新安装快速路径（只跑 baseline）
-        let pool_a = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("open baseline db");
-        run_migrations(&pool_a).await.expect("baseline path");
-
-        // 路径 B：全增量链（空库直接跑 migrator，0001→0008→0100 全执行）
-        let pool_b = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("open incremental db");
-        sqlx::migrate!("./migrations")
-            .run(&pool_b)
-            .await
-            .expect("incremental path");
-
-        let snap_a = schema_snapshot(&pool_a).await;
-        let snap_b = schema_snapshot(&pool_b).await;
-        assert_eq!(
-            snap_a, snap_b,
-            "baseline schema drifted from incremental chain"
-        );
-    }
-
-    /// schema 快照：表 → 排序后的列定义集合；外加索引/触发器/虚表名清单。
-    async fn schema_snapshot(pool: &sqlx::SqlitePool) -> String {
-        let mut out = String::new();
-        let objects: Vec<(String, String, String)> = sqlx::query_as(
-            "SELECT type, name, COALESCE(sql,'') FROM sqlite_master \
-             WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_sqlx%' ESCAPE '\\' \
-             ORDER BY type, name",
+        let agent_pk: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM pragma_table_info('agents') WHERE pk > 0 ORDER BY pk",
         )
-        .fetch_all(pool)
+        .fetch_all(&pool)
         .await
-        .expect("read sqlite_master");
+        .expect("read agent primary key");
+        assert_eq!(agent_pk, ["owner_type", "agent_id"]);
 
-        for (obj_type, name, sql) in objects {
-            if obj_type == "table" && !sql.contains("fts5") {
-                // 普通表：比对列集合（列序无关）
-                let cols: Vec<(String, String, i64, Option<String>, i64)> = sqlx::query_as(
-                    &format!(
-                        "SELECT name, type, \"notnull\", dflt_value, pk FROM pragma_table_info('{}')",
-                        name
-                    ),
-                )
-                .fetch_all(pool)
-                .await
-                .expect("read table info");
-                let mut col_sigs: Vec<String> = cols
-                    .iter()
-                    .map(|(n, t, nn, d, pk)| format!("{}:{}:{}:{:?}:{}", n, t, nn, d, pk))
-                    .collect();
-                col_sigs.sort();
-                out.push_str(&format!("TABLE {}\n  {}\n", name, col_sigs.join("\n  ")));
-            } else {
-                // 虚表/索引/触发器：比对规范化 DDL 文本（空白压缩）
-                let normalized: String = sql.split_whitespace().collect::<Vec<_>>().join(" ");
-                out.push_str(&format!(
-                    "{} {} = {}\n",
-                    obj_type.to_uppercase(),
-                    name,
-                    normalized
-                ));
-            }
-        }
-        out
+        let group_pk: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM pragma_table_info('groups') WHERE pk > 0 ORDER BY pk",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read group primary key");
+        assert_eq!(group_pk, ["owner_type", "group_id"]);
+
+        let topic_pk: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM pragma_table_info('topics') WHERE pk > 0 ORDER BY pk",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read topic primary key");
+        assert_eq!(topic_pk, ["owner_type", "owner_id", "topic_id"]);
+
+        let message_pk: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM pragma_table_info('messages') WHERE pk > 0 ORDER BY pk",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read message primary key");
+        assert_eq!(message_pk, ["owner_type", "owner_id", "topic_id", "msg_id"]);
+
+        assert!(fts_ddl.contains("owner_type UNINDEXED"));
+        assert!(fts_ddl.contains("owner_id UNINDEXED"));
+    }
+
+    #[tokio::test]
+    async fn legacy_database_is_rejected_without_mutation() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database");
+        sqlx::query("CREATE TABLE messages (topic_id TEXT, msg_id TEXT)")
+            .execute(&pool)
+            .await
+            .expect("create legacy fixture");
+
+        let error = run_migrations(&pool)
+            .await
+            .expect_err("legacy database must be rejected");
+        assert!(error.contains("数据库版本不兼容"));
+
+        let has_tracking: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='_sqlx_migrations')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("inspect tracking table");
+        assert!(
+            !has_tracking,
+            "rejection must not mutate the legacy database"
+        );
     }
 
     /// trigram FTS 端到端验证：保序子串命中、乱序不命中、逻辑删除触发器清索引。
@@ -1625,22 +1441,24 @@ mod tests {
         run_migrations(&pool).await.expect("run migrations");
 
         sqlx::query(
-            "INSERT INTO topics (topic_id, owner_type, owner_id, title, created_at, updated_at)
-             VALUES ('t1', 'agent', 'a1', '测试话题', 0, 0)",
+            "INSERT INTO topics (owner_type, owner_id, topic_id, title, created_at, updated_at)
+             VALUES ('agent', 'a1', 't1', '测试话题', 0, 0)",
         )
         .execute(&pool)
         .await
         .expect("insert topic");
         sqlx::query(
-            "INSERT INTO messages (topic_id, msg_id, role, content, timestamp, created_at, updated_at)
-             VALUES ('t1', 'm1', 'assistant', '我想讨论机器学习模型的部署问题', 1000, 1000, 1000)",
+            "INSERT INTO messages
+             (owner_type, owner_id, topic_id, msg_id, role, content, timestamp, created_at, updated_at)
+             VALUES ('agent', 'a1', 't1', 'm1', 'assistant',
+                     '我想讨论机器学习模型的部署问题', 1000, 1000, 1000)",
         )
         .execute(&pool)
         .await
         .expect("insert message");
         sqlx::query(
-            "INSERT INTO messages_fts (msg_id, topic_id, content)
-             SELECT msg_id, topic_id, content FROM messages",
+            "INSERT INTO messages_fts (msg_id, topic_id, content, owner_type, owner_id)
+             SELECT msg_id, topic_id, content, owner_type, owner_id FROM messages",
         )
         .execute(&pool)
         .await
@@ -1682,10 +1500,13 @@ mod tests {
         assert_eq!(instr_hit, 1, "instr() fallback must hit short term");
 
         // 逻辑删除触发器清索引
-        sqlx::query("UPDATE messages SET deleted_at = 2000 WHERE topic_id='t1' AND msg_id='m1'")
-            .execute(&pool)
-            .await
-            .expect("soft delete");
+        sqlx::query(
+            "UPDATE messages SET deleted_at = 2000
+             WHERE owner_type='agent' AND owner_id='a1' AND topic_id='t1' AND msg_id='m1'",
+        )
+        .execute(&pool)
+        .await
+        .expect("soft delete");
         let after_delete: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE content MATCH ?")
                 .bind(build_fts_match_query(&["机器学习".to_string()]).unwrap())
@@ -1693,181 +1514,6 @@ mod tests {
                 .await
                 .expect("fts match");
         assert_eq!(after_delete, 0, "logical delete must purge fts entry");
-    }
-
-    #[tokio::test]
-    async fn fresh_migrations_create_avatar_tombstone_column() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("open test database");
-        sqlx::migrate!("./migrations")
-            .run(&pool)
-            .await
-            .expect("run migrations");
-
-        let columns = sqlx::query("PRAGMA table_info(avatars)")
-            .fetch_all(&pool)
-            .await
-            .expect("read avatar columns");
-        assert!(columns.iter().any(|row| {
-            row.try_get::<String, _>("name")
-                .is_ok_and(|name| name == "deleted_at")
-        }));
-    }
-
-    #[tokio::test]
-    async fn tracked_legacy_schema_without_avatar_tombstone_runs_migration_six() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("open test database");
-        sqlx::query(
-            "CREATE TABLE avatars (
-                owner_type TEXT, owner_id TEXT, image_data BLOB,
-                PRIMARY KEY(owner_type, owner_id)
-             );
-             CREATE TABLE topics (
-                topic_id TEXT PRIMARY KEY, owner_type TEXT, owner_id TEXT, deleted_at BIGINT
-             );
-             CREATE TABLE messages (
-                topic_id TEXT NOT NULL, msg_id TEXT NOT NULL, role TEXT NOT NULL DEFAULT '',
-                agent_id TEXT, content TEXT NOT NULL DEFAULT '',
-                finish_reason TEXT, deleted_at BIGINT, PRIMARY KEY(topic_id, msg_id)
-             );
-             CREATE TABLE _sqlx_migrations (
-                version BIGINT PRIMARY KEY,
-                description TEXT NOT NULL,
-                installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                success BOOLEAN NOT NULL,
-                checksum BLOB NOT NULL,
-                execution_time BIGINT NOT NULL
-             );",
-        )
-        .execute(&pool)
-        .await
-        .expect("create tracked legacy fixture");
-        let migrator = sqlx::migrate!("./migrations");
-        for migration in migrator
-            .migrations
-            .iter()
-            // 模拟生产行为：baseline(v100) 由 legacy 桥接对一切有业务表的库 seed 跳过
-            .filter(|migration| migration.version <= 5 || migration.version == BASELINE_VERSION)
-        {
-            sqlx::query(
-                "INSERT INTO _sqlx_migrations
-                 (version, description, success, checksum, execution_time)
-                 VALUES (?, ?, 1, ?, 0)",
-            )
-            .bind(migration.version)
-            .bind(migration.description.as_ref())
-            .bind(migration.checksum.as_ref())
-            .execute(&pool)
-            .await
-            .expect("seed prior migration");
-        }
-
-        migrator.run(&pool).await.expect("apply migration six");
-        let columns = sqlx::query("PRAGMA table_info(avatars)")
-            .fetch_all(&pool)
-            .await
-            .expect("read avatar columns");
-        assert!(columns.iter().any(|row| {
-            row.try_get::<String, _>("name")
-                .is_ok_and(|name| name == "deleted_at")
-        }));
-        let version_six: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 6")
-                .fetch_one(&pool)
-                .await
-                .expect("read migration six record");
-        assert_eq!(version_six, 1);
-    }
-
-    #[tokio::test]
-    async fn untracked_legacy_schema_with_avatar_tombstone_seeds_migration_six() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("open test database");
-        sqlx::query(
-            "CREATE TABLE messages (msg_id TEXT);
-             CREATE TABLE message_attachments (hash TEXT, deleted_at INTEGER);
-             CREATE TABLE messages_fts (msg_id TEXT);
-             CREATE TABLE avatars (
-                owner_type TEXT, owner_id TEXT, image_data BLOB, deleted_at BIGINT,
-                PRIMARY KEY(owner_type, owner_id)
-             );",
-        )
-        .execute(&pool)
-        .await
-        .expect("create untracked legacy fixture");
-        let migrator = sqlx::migrate!("./migrations");
-        bootstrap_legacy_if_needed(&pool, &migrator)
-            .await
-            .expect("bridge legacy migration state");
-        let version_six: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 6")
-                .fetch_one(&pool)
-                .await
-                .expect("read seeded migration six");
-        assert_eq!(version_six, 1);
-    }
-
-    /// 1.1.2 血统老库（无迁移追踪表、0001 被 legacy bootstrap 整体跳过）必须仍能
-    /// 通过后续迁移获得 active_generations 表 —— 1.1.4 的 begin_stream_message 依赖它。
-    /// 回归守护：修复前该表对老库永远不存在，导致发消息后 Agent 完全无反应。
-    #[tokio::test]
-    async fn untracked_legacy_schema_gains_active_generations_via_migration_seven() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("open test database");
-        // 1.1.2 时代 schema 的最小特征：messages 带 deleted_at/topic_id（FTS 触发器需要）、
-        // message_attachments 已热迁移 deleted_at（v2 将被 seed 跳过）、无 messages_fts
-        //（v3/v4 将真正执行）、avatars 无 deleted_at（v6 将执行）、有 render_cache
-        //（v5 需要 ALTER 它）、且没有 active_generations（v7 的职责）。
-        sqlx::query(
-            "CREATE TABLE messages (
-                topic_id TEXT NOT NULL, msg_id TEXT NOT NULL, deleted_at BIGINT,
-                role TEXT NOT NULL DEFAULT '', agent_id TEXT,
-                PRIMARY KEY(topic_id, msg_id)
-             );
-             CREATE TABLE message_attachments (hash TEXT, deleted_at BIGINT);
-             CREATE TABLE avatars (
-                owner_type TEXT, owner_id TEXT, image_data BLOB,
-                PRIMARY KEY(owner_type, owner_id)
-             );
-             CREATE TABLE render_cache (topic_id TEXT, msg_id TEXT);",
-        )
-        .execute(&pool)
-        .await
-        .expect("create 1.1.2-era legacy fixture");
-
-        let migrator = sqlx::migrate!("./migrations");
-        bootstrap_legacy_if_needed(&pool, &migrator)
-            .await
-            .expect("bridge legacy migration state");
-        migrator.run(&pool).await.expect("apply pending migrations");
-
-        let has_active_generations: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='active_generations')",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("inspect active_generations table");
-        assert!(has_active_generations);
-
-        let version_seven: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE version = 7")
-                .fetch_one(&pool)
-                .await
-                .expect("read migration seven record");
-        assert_eq!(version_seven, 1);
     }
 
     #[tokio::test]
