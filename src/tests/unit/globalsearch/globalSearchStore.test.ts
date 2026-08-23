@@ -62,13 +62,14 @@ describe("globalSearchStore", () => {
     expect(store.results.map((r) => r.msgId)).toEqual(["new"]);
   });
 
-  it("maps scope/role/time filters to the backend contract (owner = 会话归属)", async () => {
+  it("maps owner/message type/speaker/time filters to the backend contract", async () => {
     mockInvoke("search_messages_fts", () => []);
     const store = useGlobalSearchStore();
     store.query = "部署";
     store.scope = "owner";
     store.scopeOwnerId = "agent-42";
     store.scopeOwnerType = "agent";
+    store.speakerAgentId = "speaker-7";
     store.role = "user";
     store.timeRange = "week";
     store.sort = "rank";
@@ -78,6 +79,7 @@ describe("globalSearchStore", () => {
     const args = invokeMock.mock.calls[0][1] as { filter: Record<string, unknown> };
     expect(args.filter.ownerId).toBe("agent-42");
     expect(args.filter.ownerType).toBe("agent");
+    expect(args.filter.agentId).toBe("speaker-7");
     expect(args.filter.role).toBe("user");
     expect(args.filter.sort).toBe("rank");
     expect(typeof args.filter.startTime).toBe("number");

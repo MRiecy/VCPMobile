@@ -86,6 +86,7 @@ watch(
     () => store.scopeTopicId,
     () => store.scopeOwnerId,
     () => store.scopeOwnerType,
+    () => store.speakerAgentId,
     () => store.role,
     () => store.timeRange,
     () => store.sort,
@@ -135,8 +136,33 @@ const openOwnerPicker = () => {
   overlayStore.openContextMenu(actions, '选择助手 / 群组');
 };
 
+const speakerLabel = computed(() => {
+  if (!store.speakerAgentId) return '全部 Agent';
+  return assistantStore.agents.find((agent) => agent.id === store.speakerAgentId)?.name ?? '指定 Agent';
+});
+
+const setAllSpeakers = () => {
+  store.speakerAgentId = null;
+};
+
+const openSpeakerPicker = () => {
+  const actions = assistantStore.agents.map((agent) => ({
+    label: agent.name,
+    selected: store.speakerAgentId === agent.id,
+    handler: () => {
+      store.speakerAgentId = agent.id;
+      store.role = 'assistant';
+    },
+  }));
+  if (actions.length === 0) return;
+  overlayStore.openContextMenu(actions, '选择发言 Agent');
+};
+
 const setRole = (r: RoleFilter) => {
   store.role = r;
+  if (r === 'user' || r === 'system') {
+    store.speakerAgentId = null;
+  }
 };
 
 const setTimeRange = (t: TimeFilter) => {
@@ -185,13 +211,18 @@ const scopeSummary = computed(() =>
   store.scope === 'all' ? '全部范围' : scopeLabel.value,
 );
 const filterSummary = computed(
-  () =>
-    `${scopeSummary.value} · ${ROLE_LABELS[store.role]} · ${TIME_LABELS[store.timeRange]}`,
+  () => [
+    scopeSummary.value,
+    ROLE_LABELS[store.role],
+    ...(store.speakerAgentId ? [`发言者：${speakerLabel.value}`] : []),
+    TIME_LABELS[store.timeRange],
+  ].join(' · '),
 );
 const activeFilterCount = computed(
   () =>
     (store.scope !== 'all' ? 1 : 0) +
     (store.role !== 'all' ? 1 : 0) +
+    (store.speakerAgentId ? 1 : 0) +
     (store.timeRange !== 'all' ? 1 : 0),
 );
 
@@ -362,13 +393,28 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
           </div>
 
           <div class="gs-filter-group">
-            <span class="gs-filter-label">角色</span>
-            <div class="gs-filter-row" role="group" aria-label="消息角色">
+            <span class="gs-filter-label">消息类型</span>
+            <div class="gs-filter-row" role="group" aria-label="消息类型">
               <button
                 v-for="r in roleFilters" :key="r"
                 type="button" class="gs-chip" :class="{ active: store.role === r }"
                 @click="setRole(r)"
               >{{ ROLE_LABELS[r] }}</button>
+            </div>
+          </div>
+
+          <div class="gs-filter-group">
+            <span class="gs-filter-label">发言 Agent</span>
+            <div class="gs-filter-row" role="group" aria-label="发言 Agent">
+              <button
+                type="button" class="gs-chip" :class="{ active: !store.speakerAgentId }"
+                @click="setAllSpeakers"
+              >全部</button>
+              <button
+                type="button" class="gs-chip gs-chip-ellipsis" :class="{ active: !!store.speakerAgentId }"
+                :disabled="assistantStore.agents.length === 0"
+                @click="openSpeakerPicker"
+              >{{ store.speakerAgentId ? speakerLabel : '指定 Agent' }}</button>
             </div>
           </div>
 
@@ -408,7 +454,7 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
         </div>
         <div v-else-if="!store.canSearch" class="gs-state">
           <p>输入至少 {{ SEARCH_MIN_CHARS }} 个字符开始搜索全部消息</p>
-          <p class="gs-state-hint">支持多关键词（空格分隔）、范围 / 角色 / 时间组合过滤</p>
+          <p class="gs-state-hint">支持多关键词（空格分隔）、范围 / 消息类型 / 发言 Agent / 时间组合过滤</p>
         </div>
         <div v-else-if="store.searching && store.results.length === 0" class="gs-state">
           <p>正在搜索…</p>

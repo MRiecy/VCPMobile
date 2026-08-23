@@ -222,15 +222,14 @@ scope: 双端
 
 | 索引名 | 所在表 | 字段 | 用途 |
 |-------|-------|------|------|
-| `idx_topics_owner` | topics | `(owner_id, owner_type, created_at DESC)` | 按所有者快速查询 Topic 列表 |
-| `idx_messages_topic_time` | messages | `(topic_id, timestamp DESC)` | 按 Topic 加载消息历史（时间倒序） |
-| `idx_messages_updated_at` | messages | `(updated_at)` | 同步阶段快速筛选增量消息 |
+| `idx_topics_owner` | topics | `(owner_type, owner_id, created_at DESC)` | 按所有者快速查询 Topic 列表 |
+| `idx_messages_topic_time` | messages | `(owner_type, owner_id, topic_id, timestamp DESC, msg_id DESC)` | 按完整 Topic 身份加载稳定消息时间线 |
 | `idx_group_members_agent` | group_members | `(agent_id)` | 反向查询 Agent 所属群组 |
 | `idx_message_attachments_hash` | message_attachments | `(hash)` | 按哈希查找关联消息 |
-| `idx_message_attachments_msg` | message_attachments | `(topic_id, msg_id)` | 加载单条消息的附件列表 |
-| `idx_render_cache_msg` | render_cache | `(topic_id, msg_id)` | 快速命中渲染缓存 |
 | `idx_emoticon_category` | emoticon_library | `(category)` | 表情包分类浏览 |
 | `idx_tarven_rules_active` | tarven_rules | `(rule_type, is_enabled, sort_order ASC)` | 按类型与启用状态加载 Tarven 规则 |
+| `idx_messages_agent_id` | messages | `(agent_id)` | 全局搜索按具体发言 Agent 过滤 |
+| `idx_messages_role` | messages | `(role)` | 全局搜索按消息协议类型过滤 |
 
 ---
 

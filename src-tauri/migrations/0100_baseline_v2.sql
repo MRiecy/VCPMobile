@@ -246,8 +246,7 @@ END;
 
 CREATE INDEX IF NOT EXISTS idx_topics_owner ON topics(owner_type, owner_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_emoticon_category ON emoticon_library(category);
-CREATE INDEX IF NOT EXISTS idx_messages_topic_time ON messages(owner_type, owner_id, topic_id, timestamp DESC);
-CREATE INDEX IF NOT EXISTS idx_messages_updated_at ON messages(updated_at);
+CREATE INDEX IF NOT EXISTS idx_messages_topic_time ON messages(owner_type, owner_id, topic_id, timestamp DESC, msg_id DESC);
 CREATE INDEX IF NOT EXISTS idx_group_members_agent ON group_members(agent_id);
 CREATE INDEX IF NOT EXISTS idx_message_attachments_hash ON message_attachments(hash);
 CREATE INDEX IF NOT EXISTS idx_tarven_rules_active ON tarven_rules(rule_type, is_enabled, sort_order ASC);

@@ -273,21 +273,20 @@ CREATE TABLE IF NOT EXISTS active_generations (
 
 ### 2.9 索引策略
 
-迁移 `0001_create_initial_tables.sql` 创建 9 个索引，覆盖高频查询路径：
+终态 baseline 只保留有实际查询入口的索引：
 
 | 索引名 | 字段 | 服务场景 |
 |--------|------|---------|
-| `idx_topics_owner` | `(owner_id, owner_type, created_at DESC)` | 加载某个 Agent/Group 的话题列表 |
-| `idx_messages_topic_time` | `(topic_id, timestamp DESC)` | 按话题加载消息时间线 |
-| `idx_messages_updated_at` | `(updated_at)` | 同步增量扫描（按更新时间筛选） |
+| `idx_topics_owner` | `(owner_type, owner_id, created_at DESC)` | 加载某个 Agent/Group 的话题列表 |
+| `idx_messages_topic_time` | `(owner_type, owner_id, topic_id, timestamp DESC, msg_id DESC)` | 按完整话题身份加载稳定消息时间线 |
 | `idx_group_members_agent` | `(agent_id)` | 查询某 Agent 所属的所有群组 |
 | `idx_message_attachments_hash` | `(hash)` | 根据 hash 反查关联消息 |
-| `idx_message_attachments_msg` | `(topic_id, msg_id)` | 加载单条消息的附件列表 |
-| `idx_render_cache_msg` | `(topic_id, msg_id)` | 快速命中渲染缓存 |
 | `idx_emoticon_category` | `(category)` | 表情包按分类检索 |
 | `idx_tarven_rules_active` | `(rule_type, is_enabled, sort_order ASC)` | 按规则类型与启用状态加载 Tarven 规则 |
+| `idx_messages_agent_id` | `(agent_id)` | 全局搜索按具体发言 Agent 过滤 |
+| `idx_messages_role` | `(role)` | 全局搜索按消息协议类型过滤 |
 
-**索引设计原则**：所有索引均围绕**实体归属**（owner_id）、**时间线排序**（timestamp DESC）、**同步扫描**（updated_at）三大查询模式构建，避免过度索引带来的写入开销。
+**索引设计原则**：索引围绕实体归属、稳定时间线和现有搜索过滤入口构建；消息 `updated_at` 仅参与 LWW 仲裁，不作为全局增量扫描入口。
 
 ---
 

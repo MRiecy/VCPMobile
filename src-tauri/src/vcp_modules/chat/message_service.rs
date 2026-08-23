@@ -594,14 +594,14 @@ pub async fn load_chat_text_history_for_context(
          FROM messages m
          LEFT JOIN agents a ON a.owner_type = 'agent' AND m.agent_id = a.agent_id
          WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
-         ORDER BY m.timestamp DESC, m.rowid DESC 
+         ORDER BY m.timestamp DESC, m.msg_id DESC
          LIMIT ? OFFSET ?"
     } else {
         "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, m.content_hash 
          FROM messages m
          LEFT JOIN agents a ON a.owner_type = 'agent' AND m.agent_id = a.agent_id
          WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
-         ORDER BY m.timestamp DESC, m.rowid DESC"
+         ORDER BY m.timestamp DESC, m.msg_id DESC"
     };
 
     let mut q = sqlx::query(query_str)

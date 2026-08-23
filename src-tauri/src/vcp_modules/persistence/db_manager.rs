@@ -733,6 +733,8 @@ pub struct FtsSearchFilter {
     /// 会话归属过滤（决策 B）：topics.owner_id / owner_type，而非消息发送者
     pub owner_id: Option<String>,
     pub owner_type: Option<String>,
+    /// 具体发言 Agent；与 owner 归属和 user/assistant/system 消息类型相互独立
+    pub agent_id: Option<String>,
     pub role: Option<String>,
     pub start_time: Option<i64>,
     pub end_time: Option<i64>,
@@ -847,6 +849,9 @@ pub async fn search_messages_fts(
     if filter.owner_type.is_some() {
         sql.push_str(" AND m.owner_type = ?");
     }
+    if filter.agent_id.is_some() {
+        sql.push_str(" AND m.agent_id = ?");
+    }
     if filter.role.is_some() {
         sql.push_str(" AND m.role = ?");
     }
@@ -890,6 +895,9 @@ pub async fn search_messages_fts(
     }
     if let Some(ref ot) = filter.owner_type {
         final_query = final_query.bind(ot);
+    }
+    if let Some(ref aid) = filter.agent_id {
+        final_query = final_query.bind(aid);
     }
     if let Some(ref r) = filter.role {
         final_query = final_query.bind(r);

@@ -26,7 +26,7 @@ export interface FtsIndexStatus {
 /** 搜索范围：全部 / 当前话题 / 指定助手或群组 */
 export type SearchScope = 'all' | 'topic' | 'owner';
 
-/** 角色过滤 */
+/** 消息协议类型过滤，不表示具体 Agent 身份 */
 export type RoleFilter = 'all' | 'user' | 'assistant' | 'system';
 
 /** 时间范围过滤 */
@@ -41,10 +41,10 @@ export const SEARCH_PAGE_SIZE = 50;
 export const SEARCH_MIN_CHARS = 2;
 
 export const ROLE_LABELS: Record<RoleFilter, string> = {
-  all: '全部角色',
-  user: '用户',
-  assistant: '助手',
-  system: '系统',
+  all: '全部类型',
+  user: '用户消息',
+  assistant: 'AI 回复',
+  system: '系统消息',
 };
 
 export const TIME_LABELS: Record<TimeFilter, string> = {

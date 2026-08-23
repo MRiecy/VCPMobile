@@ -36,6 +36,8 @@ export const useGlobalSearchStore = defineStore('globalSearch', () => {
   const scopeOwnerId = ref<string | null>(null);
   const scopeOwnerType = ref<'agent' | 'group' | null>(null);
   const scopeOwnerLabel = ref<string>('');
+  /** 具体发言 Agent；区别于会话归属 owner 和消息协议 role */
+  const speakerAgentId = ref<string | null>(null);
   const role = ref<RoleFilter>('all');
   const timeRange = ref<TimeFilter>('all');
   const sort = ref<SortMode>('time');
@@ -146,6 +148,7 @@ export const useGlobalSearchStore = defineStore('globalSearch', () => {
       topicId: scope.value === 'topic' ? scopeTopicId.value : null,
       ownerId: scopedOwner ? scopeOwnerId.value : null,
       ownerType: scopedOwner ? scopeOwnerType.value : null,
+      agentId: speakerAgentId.value,
       role: role.value === 'all' ? null : role.value,
       startTime: bounds.startTime,
       endTime: bounds.endTime,
@@ -261,7 +264,7 @@ export const useGlobalSearchStore = defineStore('globalSearch', () => {
     // state
     query, scope, scopeTopicId, scopeTopicTitle,
     scopeOwnerId, scopeOwnerType, scopeOwnerLabel,
-    role, timeRange, sort,
+    speakerAgentId, role, timeRange, sort,
     results, searching, loadingMore, error, limited, hasSearched,
     indexStatus, indexReady, indexProgressPct, canSearch,
     // actions
