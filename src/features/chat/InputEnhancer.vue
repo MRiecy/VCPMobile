@@ -392,7 +392,11 @@ const handleSend = () => {
 const handleAction = () => {
   if (isGenerating.value) {
     const activeIds = Array.from(streamStore.activeStreamingIds);
-    activeIds.forEach(id => streamStore.stopMessage(id as string));
+    const key = sessionStore.currentConversationKey;
+    if (!key) return;
+    activeIds.forEach(id =>
+      streamStore.stopMessage(key.ownerId, key.ownerType, key.topicId, id as string),
+    );
   } else {
     handleSend();
   }
@@ -417,7 +421,7 @@ const isComposing = ref(false);
 
 const isGroupChat = computed(() => {
   const item = sessionStore.currentSelectedItem;
-  return !!item && (item.type === 'group' || !!item.members);
+  return item?.type === 'group';
 });
 
 const inputPlaceholder = computed(() => {

@@ -2,6 +2,7 @@ use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
 use crate::vcp_modules::sync_types::{compute_deterministic_hash, compute_merkle_root};
+use crate::vcp_modules::topic_types::TopicKey;
 
 use sqlx::{Row, Sqlite, Transaction};
 
@@ -149,24 +150,28 @@ impl HashAggregator {
 
     pub async fn compute_topic_root_hash(
         tx: &mut Transaction<'_, Sqlite>,
-        topic_id: &str,
+        key: &TopicKey,
     ) -> Result<String, String> {
         let rows = sqlx::query(
-            "SELECT msg_id, content_hash FROM messages WHERE topic_id = ? AND deleted_at IS NULL ORDER BY timestamp ASC, msg_id ASC",
+            "SELECT msg_id, content_hash FROM messages
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
+             ORDER BY timestamp ASC, msg_id ASC",
         )
-        .bind(topic_id)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
         .fetch_all(&mut **tx)
         .await
         .map_err(|e| e.to_string())?;
 
         let mut hashes = Vec::with_capacity(rows.len());
         for row in rows {
-            let message_id: String = row
-                .try_get("msg_id")
-                .map_err(|error| format!("Topic {topic_id} message id decode failed: {error}"))?;
-            let message_hash: String = row
-                .try_get("content_hash")
-                .map_err(|error| format!("Topic {topic_id} message hash decode failed: {error}"))?;
+            let message_id: String = row.try_get("msg_id").map_err(|error| {
+                format!("Topic {} message id decode failed: {error}", key.topic_id)
+            })?;
+            let message_hash: String = row.try_get("content_hash").map_err(|error| {
+                format!("Topic {} message hash decode failed: {error}", key.topic_id)
+            })?;
             hashes.push(Self::compute_message_leaf_hash(&message_id, &message_hash));
         }
         Ok(compute_merkle_root(hashes))
@@ -240,64 +245,58 @@ impl HashAggregator {
 
     pub async fn bubble_topic_hash(
         tx: &mut Transaction<'_, Sqlite>,
-        topic_id: &str,
+        key: &TopicKey,
     ) -> Result<(), String> {
-        // 1. 计算并更新 content_hash (消息聚合)
-        let root_hash = Self::compute_topic_root_hash(tx, topic_id).await?;
-
-        // 2. 计算并更新 config_hash (元数据)
-        let row =
-            sqlx::query("SELECT owner_type FROM topics WHERE topic_id = ? AND deleted_at IS NULL")
-                .bind(topic_id)
-                .fetch_one(&mut **tx)
-                .await
-                .map_err(|e| e.to_string())?;
-
-        let owner_type: String = row
-            .try_get("owner_type")
-            .map_err(|error| format!("Topic {topic_id} owner type decode failed: {error}"))?;
-        let config_hash = if owner_type == "agent" {
-            let dto = HashInitializer::load_agent_topic_dto(tx, topic_id).await?;
+        let root_hash = Self::compute_topic_root_hash(tx, key).await?;
+        let config_hash = if key.owner_type == "agent" {
+            let dto = HashInitializer::load_agent_topic_dto(tx, key).await?;
             Self::compute_agent_topic_metadata_hash(&dto)
-        } else if owner_type == "group" {
-            let dto = HashInitializer::load_group_topic_dto(tx, topic_id).await?;
+        } else if key.owner_type == "group" {
+            let dto = HashInitializer::load_group_topic_dto(tx, key).await?;
             Self::compute_group_topic_metadata_hash(&dto)
         } else {
             return Err(format!(
-                "Topic {topic_id} has unsupported owner type {owner_type}"
+                "Topic {} has unsupported owner type {}",
+                key.topic_id, key.owner_type
             ));
         };
 
-        let updated =
-            sqlx::query("UPDATE topics SET content_hash = ?, config_hash = ? WHERE topic_id = ? AND deleted_at IS NULL")
-                .bind(root_hash)
-                .bind(config_hash)
-                .bind(topic_id)
-                .execute(&mut **tx)
-                .await
-                .map_err(|e| e.to_string())?;
+        let updated = sqlx::query(
+            "UPDATE topics SET content_hash = ?, config_hash = ?
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
+        )
+        .bind(root_hash)
+        .bind(config_hash)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
         if updated.rows_affected() != 1 {
-            return Err(format!("Topic {topic_id} disappeared during hash update"));
+            return Err(format!(
+                "Topic {} disappeared during hash update",
+                key.topic_id
+            ));
         }
         Ok(())
     }
 
     pub async fn bubble_topic_hash_with_meta(
         tx: &mut Transaction<'_, Sqlite>,
-        topic_id: &str,
-        owner_type: &str,
+        key: &TopicKey,
         title: &str,
         created_at: i64,
         locked: bool,
         unread: bool,
     ) -> Result<(), String> {
         // 1. 计算并更新 content_hash (消息聚合)
-        let root_hash = Self::compute_topic_root_hash(tx, topic_id).await?;
+        let root_hash = Self::compute_topic_root_hash(tx, key).await?;
 
         // 2. 直接根据外部传入的元数据参数计算 config_hash (省去 2 次 SELECT)
-        let config_hash = if owner_type == "agent" {
+        let config_hash = if key.owner_type == "agent" {
             let dto = AgentTopicSyncDTO {
-                id: topic_id.to_string(),
+                id: key.topic_id.clone(),
                 name: title.to_string(),
                 created_at,
                 locked,
@@ -305,9 +304,9 @@ impl HashAggregator {
                 owner_id: String::new(),
             };
             Self::compute_agent_topic_metadata_hash(&dto)
-        } else if owner_type == "group" {
+        } else if key.owner_type == "group" {
             let dto = GroupTopicSyncDTO {
-                id: topic_id.to_string(),
+                id: key.topic_id.clone(),
                 name: title.to_string(),
                 created_at,
                 owner_id: String::new(),
@@ -315,20 +314,28 @@ impl HashAggregator {
             Self::compute_group_topic_metadata_hash(&dto)
         } else {
             return Err(format!(
-                "Topic {topic_id} has unsupported owner type {owner_type}"
+                "Topic {} has unsupported owner type {}",
+                key.topic_id, key.owner_type
             ));
         };
 
-        let updated =
-            sqlx::query("UPDATE topics SET content_hash = ?, config_hash = ? WHERE topic_id = ? AND deleted_at IS NULL")
-                .bind(root_hash)
-                .bind(config_hash)
-                .bind(topic_id)
-                .execute(&mut **tx)
-                .await
-                .map_err(|e| e.to_string())?;
+        let updated = sqlx::query(
+            "UPDATE topics SET content_hash = ?, config_hash = ?
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
+        )
+        .bind(root_hash)
+        .bind(config_hash)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
         if updated.rows_affected() != 1 {
-            return Err(format!("Topic {topic_id} disappeared during hash update"));
+            return Err(format!(
+                "Topic {} disappeared during hash update",
+                key.topic_id
+            ));
         }
         Ok(())
     }
@@ -339,7 +346,8 @@ impl HashAggregator {
     ) -> Result<(), String> {
         let root_hash = Self::compute_agent_root_hash(tx, agent_id).await?;
         let updated = sqlx::query(
-            "UPDATE agents SET content_hash = ? WHERE agent_id = ? AND deleted_at IS NULL",
+            "UPDATE agents SET content_hash = ?
+             WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL",
         )
         .bind(root_hash)
         .bind(agent_id)
@@ -358,7 +366,8 @@ impl HashAggregator {
     ) -> Result<(), String> {
         let root_hash = Self::compute_group_root_hash(tx, group_id).await?;
         let updated = sqlx::query(
-            "UPDATE groups SET content_hash = ? WHERE group_id = ? AND deleted_at IS NULL",
+            "UPDATE groups SET content_hash = ?
+             WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL",
         )
         .bind(root_hash)
         .bind(group_id)
@@ -373,32 +382,18 @@ impl HashAggregator {
 
     pub async fn bubble_from_topic(
         tx: &mut Transaction<'_, Sqlite>,
-        topic_id: &str,
+        key: &TopicKey,
     ) -> Result<(), String> {
-        Self::bubble_topic_hash(tx, topic_id).await?;
+        Self::bubble_topic_hash(tx, key).await?;
 
-        let topic_row = sqlx::query(
-            "SELECT owner_id, owner_type FROM topics WHERE topic_id = ? AND deleted_at IS NULL",
-        )
-        .bind(topic_id)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| e.to_string())?;
-
-        let owner_id: String = topic_row
-            .try_get("owner_id")
-            .map_err(|error| format!("Topic {topic_id} owner id decode failed: {error}"))?;
-        let owner_type: String = topic_row
-            .try_get("owner_type")
-            .map_err(|error| format!("Topic {topic_id} owner type decode failed: {error}"))?;
-
-        if owner_type == "agent" {
-            Self::bubble_agent_hash(tx, &owner_id).await?;
-        } else if owner_type == "group" {
-            Self::bubble_group_hash(tx, &owner_id).await?;
+        if key.owner_type == "agent" {
+            Self::bubble_agent_hash(tx, &key.owner_id).await?;
+        } else if key.owner_type == "group" {
+            Self::bubble_group_hash(tx, &key.owner_id).await?;
         } else {
             return Err(format!(
-                "Topic {topic_id} has unsupported owner type {owner_type}"
+                "Topic {} has unsupported owner type {}",
+                key.topic_id, key.owner_type
             ));
         }
 
@@ -413,12 +408,14 @@ impl HashInitializer {
         tx: &mut Transaction<'_, Sqlite>,
         agent_id: &str,
     ) -> Result<(), String> {
-        let row =
-            sqlx::query("SELECT config_hash FROM agents WHERE agent_id = ? AND deleted_at IS NULL")
-                .bind(agent_id)
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(|e| e.to_string())?;
+        let row = sqlx::query(
+            "SELECT config_hash FROM agents
+             WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL",
+        )
+        .bind(agent_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
 
         let r = row.ok_or_else(|| format!("Agent {agent_id} is missing or deleted"))?;
         let config_hash: Option<String> = r
@@ -431,7 +428,8 @@ impl HashInitializer {
             let dto = Self::load_agent_dto(tx, agent_id).await?;
             let new_hash = HashAggregator::compute_agent_config_hash(&dto);
             let updated = sqlx::query(
-                "UPDATE agents SET config_hash = ? WHERE agent_id = ? AND deleted_at IS NULL",
+                "UPDATE agents SET config_hash = ?
+                 WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL",
             )
             .bind(&new_hash)
             .bind(agent_id)
@@ -456,12 +454,14 @@ impl HashInitializer {
         tx: &mut Transaction<'_, Sqlite>,
         group_id: &str,
     ) -> Result<(), String> {
-        let row =
-            sqlx::query("SELECT config_hash FROM groups WHERE group_id = ? AND deleted_at IS NULL")
-                .bind(group_id)
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(|e| e.to_string())?;
+        let row = sqlx::query(
+            "SELECT config_hash FROM groups
+             WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL",
+        )
+        .bind(group_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
 
         let r = row.ok_or_else(|| format!("Group {group_id} is missing or deleted"))?;
         let config_hash: Option<String> = r
@@ -474,7 +474,8 @@ impl HashInitializer {
             let dto = Self::load_group_dto(tx, group_id).await?;
             let new_hash = HashAggregator::compute_group_config_hash(&dto);
             let updated = sqlx::query(
-                "UPDATE groups SET config_hash = ? WHERE group_id = ? AND deleted_at IS NULL",
+                "UPDATE groups SET config_hash = ?
+                 WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL",
             )
             .bind(&new_hash)
             .bind(group_id)
@@ -551,67 +552,73 @@ impl HashInitializer {
 
     pub async fn load_agent_topic_dto(
         tx: &mut Transaction<'_, Sqlite>,
-        topic_id: &str,
+        key: &TopicKey,
     ) -> Result<AgentTopicSyncDTO, String> {
         let row = sqlx::query(
             "SELECT topic_id, title, created_at, locked, unread, owner_id FROM topics
-             WHERE topic_id = ? AND owner_type = 'agent' AND deleted_at IS NULL",
+             WHERE owner_type = 'agent' AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
         )
-        .bind(topic_id)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
         .fetch_one(&mut **tx)
         .await
         .map_err(|e| e.to_string())?;
 
         Ok(AgentTopicSyncDTO {
-            id: row
-                .try_get("topic_id")
-                .map_err(|error| format!("Agent topic {topic_id} id decode failed: {error}"))?,
-            name: row
-                .try_get("title")
-                .map_err(|error| format!("Agent topic {topic_id} title decode failed: {error}"))?,
-            created_at: row.try_get("created_at").map_err(|error| {
-                format!("Agent topic {topic_id} created_at decode failed: {error}")
+            id: row.try_get("topic_id").map_err(|error| {
+                format!("Agent topic {} id decode failed: {error}", key.topic_id)
             })?,
-            locked: row
-                .try_get::<i64, _>("locked")
-                .map_err(|error| format!("Agent topic {topic_id} locked decode failed: {error}"))?
-                != 0,
-            unread: row
-                .try_get::<i64, _>("unread")
-                .map_err(|error| format!("Agent topic {topic_id} unread decode failed: {error}"))?
-                != 0,
-            owner_id: row
-                .try_get("owner_id")
-                .map_err(|error| format!("Agent topic {topic_id} owner decode failed: {error}"))?,
+            name: row.try_get("title").map_err(|error| {
+                format!("Agent topic {} title decode failed: {error}", key.topic_id)
+            })?,
+            created_at: row.try_get("created_at").map_err(|error| {
+                format!(
+                    "Agent topic {} created_at decode failed: {error}",
+                    key.topic_id
+                )
+            })?,
+            locked: row.try_get::<i64, _>("locked").map_err(|error| {
+                format!("Agent topic {} locked decode failed: {error}", key.topic_id)
+            })? != 0,
+            unread: row.try_get::<i64, _>("unread").map_err(|error| {
+                format!("Agent topic {} unread decode failed: {error}", key.topic_id)
+            })? != 0,
+            owner_id: row.try_get("owner_id").map_err(|error| {
+                format!("Agent topic {} owner decode failed: {error}", key.topic_id)
+            })?,
         })
     }
 
     pub async fn load_group_topic_dto(
         tx: &mut Transaction<'_, Sqlite>,
-        topic_id: &str,
+        key: &TopicKey,
     ) -> Result<GroupTopicSyncDTO, String> {
         let row = sqlx::query(
             "SELECT topic_id, title, created_at, owner_id FROM topics
-             WHERE topic_id = ? AND owner_type = 'group' AND deleted_at IS NULL",
+             WHERE owner_type = 'group' AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
         )
-        .bind(topic_id)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
         .fetch_one(&mut **tx)
         .await
         .map_err(|e| e.to_string())?;
 
         Ok(GroupTopicSyncDTO {
-            id: row
-                .try_get("topic_id")
-                .map_err(|error| format!("Group topic {topic_id} id decode failed: {error}"))?,
-            name: row
-                .try_get("title")
-                .map_err(|error| format!("Group topic {topic_id} title decode failed: {error}"))?,
-            created_at: row.try_get("created_at").map_err(|error| {
-                format!("Group topic {topic_id} created_at decode failed: {error}")
+            id: row.try_get("topic_id").map_err(|error| {
+                format!("Group topic {} id decode failed: {error}", key.topic_id)
             })?,
-            owner_id: row
-                .try_get("owner_id")
-                .map_err(|error| format!("Group topic {topic_id} owner decode failed: {error}"))?,
+            name: row.try_get("title").map_err(|error| {
+                format!("Group topic {} title decode failed: {error}", key.topic_id)
+            })?,
+            created_at: row.try_get("created_at").map_err(|error| {
+                format!(
+                    "Group topic {} created_at decode failed: {error}",
+                    key.topic_id
+                )
+            })?,
+            owner_id: row.try_get("owner_id").map_err(|error| {
+                format!("Group topic {} owner decode failed: {error}", key.topic_id)
+            })?,
         })
     }
 

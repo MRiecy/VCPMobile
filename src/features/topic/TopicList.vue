@@ -181,13 +181,14 @@ watch(
 
 const selectTopic = async (
   itemId: string,
+  ownerType: "agent" | "group",
   topicId: string,
 ) => {
   if (router.currentRoute.value.path !== "/chat") {
     await router.push("/chat");
   }
 
-  await sessionStore.selectTopicById(itemId, topicId);
+  await sessionStore.selectTopicById(itemId, ownerType, topicId);
 
   // 在移动端，选择话题后自动关闭侧边栏
   layoutStore.setLeftDrawer(false);
@@ -227,6 +228,7 @@ onUnmounted(() => {
       <div v-for="item in list" :key="item.data.id" class="pb-2" @click="
         selectTopic(
           item.data.ownerId || sessionStore.currentSelectedItem?.id || 'default_agent',
+          item.data.ownerType === 'group' ? 'group' : 'agent',
           item.data.id,
         )
         " v-longpress="() => showTopicContextMenu(item.data.id)">

@@ -964,12 +964,13 @@ async fn rebuild_messages_fts_inner(
             .await
             .map_err(|e| format!("回填事务开启失败: {}", e))?;
         let inserted = sqlx::query(
-            "INSERT INTO messages_fts (msg_id, topic_id, content)
-             SELECT m.msg_id, m.topic_id, m.content FROM messages m
+            "INSERT INTO messages_fts (msg_id, topic_id, content, owner_type, owner_id)
+             SELECT m.msg_id, m.topic_id, m.content, m.owner_type, m.owner_id FROM messages m
              WHERE m.deleted_at IS NULL
                AND NOT EXISTS (
                    SELECT 1 FROM messages_fts f
-                   WHERE f.msg_id = m.msg_id AND f.topic_id = m.topic_id
+                   WHERE f.owner_type = m.owner_type AND f.owner_id = m.owner_id
+                     AND f.topic_id = m.topic_id AND f.msg_id = m.msg_id
                )
              LIMIT ?",
         )
@@ -1059,7 +1060,8 @@ pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<boo
     loop {
         // 读取未解压的批次，获取 deleted_at 以避免 FTS 索引污染
         let rows = sqlx::query(
-            "SELECT msg_id, topic_id, content, deleted_at FROM messages WHERE typeof(content) = 'blob' ORDER BY rowid LIMIT ?"
+            "SELECT owner_type, owner_id, topic_id, msg_id, content, deleted_at
+             FROM messages WHERE typeof(content) = 'blob' ORDER BY rowid LIMIT ?",
         )
         .bind(batch_size)
         .fetch_all(pool)
@@ -1077,6 +1079,8 @@ pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<boo
             .map_err(|e| format!("Failed to start batch transaction: {}", e))?;
 
         for row in &rows {
+            let owner_type: String = row.get("owner_type");
+            let owner_id: String = row.get("owner_id");
             let msg_id: String = row.get("msg_id");
             let topic_id: String = row.get("topic_id");
             let content_bytes: Vec<u8> = row.get("content");
@@ -1105,30 +1109,43 @@ pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<boo
             };
 
             // 1. 更新写回为明文 String (SQLite 动态类型会自动将 typeof 转为 'text')
-            sqlx::query("UPDATE messages SET content = ? WHERE msg_id = ? AND topic_id = ?")
-                .bind(&content)
-                .bind(&msg_id)
-                .bind(&topic_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| format!("Failed to update decompressed message: {}", e))?;
+            sqlx::query(
+                "UPDATE messages SET content = ?
+                 WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+            )
+            .bind(&content)
+            .bind(&owner_type)
+            .bind(&owner_id)
+            .bind(&topic_id)
+            .bind(&msg_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to update decompressed message: {}", e))?;
 
             // 2. 同步写入 FTS5 虚拟索引表，删除陈旧的索引项，仅在消息未逻辑删除时插入，防止软删除索引泄漏
-            sqlx::query("DELETE FROM messages_fts WHERE topic_id = ? AND msg_id = ?")
-                .bind(&topic_id)
-                .bind(&msg_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| format!("Failed to delete stale FTS entry: {}", e))?;
+            sqlx::query(
+                "DELETE FROM messages_fts
+                 WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+            )
+            .bind(&owner_type)
+            .bind(&owner_id)
+            .bind(&topic_id)
+            .bind(&msg_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to delete stale FTS entry: {}", e))?;
 
             if deleted_at.is_none() {
                 // trigram 分词器（migration 0008 起）直接索引原文，无需 CJK 预处理
                 sqlx::query(
-                    "INSERT INTO messages_fts (msg_id, topic_id, content) VALUES (?, ?, ?)",
+                    "INSERT INTO messages_fts (msg_id, topic_id, content, owner_type, owner_id)
+                     VALUES (?, ?, ?, ?, ?)",
                 )
                 .bind(&msg_id)
                 .bind(&topic_id)
                 .bind(&content)
+                .bind(&owner_type)
+                .bind(&owner_id)
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| format!("Failed to insert FTS entry: {}", e))?;

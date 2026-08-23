@@ -4,6 +4,7 @@ use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_logger::{LogLevel, SyncLogger};
 use crate::vcp_modules::sync_pipeline::SyncPipeline;
 use crate::vcp_modules::sync_service::emit_sync_log;
+use crate::vcp_modules::topic_types::TopicKey;
 use sqlx::Row;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -105,32 +106,25 @@ async fn finalize_modified_topics(
         return Err(format!("同步收尾缺少 live 话题元数据: {missing:?}"));
     }
 
-    for topic_chunk in topic_ids.chunks(SQLITE_BIND_CHUNK) {
-        let placeholders = topic_chunk
-            .iter()
-            .map(|_| "?")
-            .collect::<Vec<_>>()
-            .join(",");
-        let update_sql = format!(
-            "UPDATE topics SET
-                msg_count = (SELECT COUNT(*) FROM messages
-                             WHERE messages.topic_id = topics.topic_id AND deleted_at IS NULL)
-             WHERE deleted_at IS NULL AND topic_id IN ({placeholders})"
-        );
-        let mut update = sqlx::query(&update_sql);
-        for topic_id in topic_chunk {
-            update = update.bind(*topic_id);
-        }
-        let result = update
-            .execute(&mut *tx)
-            .await
-            .map_err(|error| format!("更新同步收尾消息计数失败: {error}"))?;
-        if result.rows_affected() != topic_chunk.len() as u64 {
-            return Err(format!(
-                "同步收尾消息计数仅更新 {}/{} 个话题",
-                result.rows_affected(),
-                topic_chunk.len()
-            ));
+    for (topic_id, meta) in &meta_map {
+        let key = TopicKey::new(&meta.owner_type, &meta.owner_id, topic_id);
+        let result = sqlx::query(
+            "UPDATE topics SET msg_count = (
+                SELECT COUNT(*) FROM messages
+                WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
+             ) WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
+        )
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("更新同步收尾消息计数失败: {error}"))?;
+        if result.rows_affected() != 1 {
+            return Err(format!("同步收尾消息计数未更新话题 {topic_id}"));
         }
     }
 
@@ -138,10 +132,10 @@ async fn finalize_modified_topics(
     let mut affected_groups = HashSet::new();
     let mut bubbled_topics = 0usize;
     for (topic_id, meta) in &meta_map {
+        let key = TopicKey::new(&meta.owner_type, &meta.owner_id, topic_id);
         HashAggregator::bubble_topic_hash_with_meta(
             &mut tx,
-            topic_id,
-            &meta.owner_type,
+            &key,
             &meta.title,
             meta.created_at,
             meta.locked,

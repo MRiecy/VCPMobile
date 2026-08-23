@@ -9,7 +9,7 @@ use crate::vcp_modules::sync_dto::AgentSyncDTO;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::SyncDataType;
-use crate::vcp_modules::topic_types::Topic;
+use crate::vcp_modules::topic_types::{Topic, TopicKey};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -137,7 +137,7 @@ async fn read_agent_config_locked<R: Runtime>(
         "SELECT a.name, a.system_prompt, a.mobile_system_prompt, a.model, a.temperature, a.context_token_limit, a.max_output_tokens, a.stream_output, a.use_temperature, av.dominant_color 
          FROM agents a
          LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent' AND av.deleted_at IS NULL
-         WHERE a.agent_id = ? AND a.deleted_at IS NULL"
+         WHERE a.owner_type = 'agent' AND a.agent_id = ? AND a.deleted_at IS NULL"
     )
     .bind(agent_id)
     .fetch_optional(pool)
@@ -242,7 +242,7 @@ pub async fn get_agents(
         "SELECT a.agent_id, a.name, a.system_prompt, a.mobile_system_prompt, a.model, a.temperature, a.context_token_limit, a.max_output_tokens, a.stream_output, a.use_temperature, av.dominant_color 
          FROM agents a
          LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent' AND av.deleted_at IS NULL
-         WHERE a.deleted_at IS NULL"
+         WHERE a.owner_type = 'agent' AND a.deleted_at IS NULL"
     )
     .fetch_all(pool)
     .await
@@ -344,7 +344,8 @@ async fn internal_write_agent_config<R: Runtime>(
             final_config.system_prompt = cached.value().system_prompt.clone();
         } else {
             let row = sqlx::query(
-                "SELECT system_prompt FROM agents WHERE agent_id = ? AND deleted_at IS NULL",
+                "SELECT system_prompt FROM agents
+                 WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL",
             )
             .bind(agent_id)
             .fetch_optional(pool)
@@ -359,12 +360,13 @@ async fn internal_write_agent_config<R: Runtime>(
 
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    let deleted_at =
-        sqlx::query_scalar::<_, Option<i64>>("SELECT deleted_at FROM agents WHERE agent_id = ?")
-            .bind(agent_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
+    let deleted_at = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT deleted_at FROM agents WHERE owner_type = 'agent' AND agent_id = ?",
+    )
+    .bind(agent_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
     if matches!(deleted_at, Some(Some(_))) {
         return Err(format!("Agent {agent_id} has been deleted"));
     }
@@ -375,11 +377,11 @@ async fn internal_write_agent_config<R: Runtime>(
 
     sqlx::query(
         "INSERT INTO agents (
-            agent_id, name, system_prompt, mobile_system_prompt, model, temperature, 
+            owner_type, agent_id, name, system_prompt, mobile_system_prompt, model, temperature,
             context_token_limit, max_output_tokens, 
             stream_output, use_temperature, config_hash, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(agent_id) DO UPDATE SET
+        ) VALUES ('agent', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(owner_type, agent_id) DO UPDATE SET
             name = excluded.name, 
             system_prompt = excluded.system_prompt,
             mobile_system_prompt = excluded.mobile_system_prompt,
@@ -429,7 +431,7 @@ async fn internal_write_agent_config<R: Runtime>(
                     topic_id, owner_type, owner_id, title,
                     created_at, updated_at, locked, unread, config_hash
                 ) VALUES (?, 'agent', ?, ?, ?, ?, ?, ?, ?)
-                 ON CONFLICT(topic_id) DO UPDATE SET
+                 ON CONFLICT(owner_type, owner_id, topic_id) DO UPDATE SET
                     title = excluded.title,
                     locked = excluded.locked,
                     unread = excluded.unread,
@@ -452,7 +454,8 @@ async fn internal_write_agent_config<R: Runtime>(
             .map_err(|e| e.to_string())?;
 
             // 初始化/更新 Topic 自身哈希 (config_hash, content_hash)
-            HashAggregator::bubble_topic_hash(&mut tx, &topic.id).await?;
+            let key = TopicKey::new("agent", agent_id, &topic.id);
+            HashAggregator::bubble_topic_hash(&mut tx, &key).await?;
         }
     }
 
@@ -509,12 +512,13 @@ pub async fn delete_agent_internal<R: Runtime>(
     }
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    let existing_deleted_at: Option<Option<i64>> =
-        sqlx::query_scalar("SELECT deleted_at FROM agents WHERE agent_id = ?")
-            .bind(agent_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
+    let existing_deleted_at: Option<Option<i64>> = sqlx::query_scalar(
+        "SELECT deleted_at FROM agents WHERE owner_type = 'agent' AND agent_id = ?",
+    )
+    .bind(agent_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
     match existing_deleted_at {
         None => return Err(format!("Agent {agent_id} does not exist")),
         Some(Some(existing)) => {
@@ -525,13 +529,15 @@ pub async fn delete_agent_internal<R: Runtime>(
         Some(None) => {}
     }
 
-    let agent_delete =
-        sqlx::query("UPDATE agents SET deleted_at = ? WHERE agent_id = ? AND deleted_at IS NULL")
-            .bind(now)
-            .bind(agent_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
+    let agent_delete = sqlx::query(
+        "UPDATE agents SET deleted_at = ?
+             WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL",
+    )
+    .bind(now)
+    .bind(agent_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
     if agent_delete.rows_affected() != 1 {
         return Err(format!("Agent {agent_id} disappeared during delete"));
     }
@@ -545,12 +551,15 @@ pub async fn delete_agent_internal<R: Runtime>(
         .map_err(|e| e.to_string())?;
 
     // 级联将该 Agent 下所有话题的所有消息标记为逻辑删除
-    sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id IN (SELECT topic_id FROM topics WHERE owner_id = ? AND owner_type = 'agent') AND deleted_at IS NULL")
-        .bind(now)
-        .bind(agent_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    sqlx::query(
+        "UPDATE messages SET deleted_at = ?
+         WHERE owner_type = 'agent' AND owner_id = ? AND deleted_at IS NULL",
+    )
+    .bind(now)
+    .bind(agent_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
 
     sqlx::query(
         "UPDATE avatars SET deleted_at = ?
@@ -636,8 +645,8 @@ pub async fn create_agent(
     let dto = AgentSyncDTO::from(&config);
     let config_hash = HashAggregator::compute_agent_config_hash(&dto);
     sqlx::query(
-        "INSERT INTO agents (agent_id, name, system_prompt, mobile_system_prompt, model, temperature, context_token_limit, max_output_tokens, stream_output, use_temperature, config_hash, updated_at) 
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO agents (owner_type, agent_id, name, system_prompt, mobile_system_prompt, model, temperature, context_token_limit, max_output_tokens, stream_output, use_temperature, config_hash, updated_at)
+         VALUES ('agent', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
     )
     .bind(&agent_id)
     .bind(&config.name)
@@ -670,7 +679,8 @@ pub async fn create_agent(
         .map_err(|e| e.to_string())?;
 
         // 初始化 Topic 自身哈希 (config_hash, content_hash)
-        HashAggregator::bubble_topic_hash(&mut tx, &topic.id).await?;
+        let key = TopicKey::new("agent", &agent_id, &topic.id);
+        HashAggregator::bubble_topic_hash(&mut tx, &key).await?;
     }
 
     // 触发聚合哈希冒泡 (更新 agents.content_hash)
@@ -708,7 +718,7 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
         "SELECT a.agent_id, a.name, a.model, av.dominant_color
          FROM agents a
          LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent' AND av.deleted_at IS NULL
-         WHERE a.deleted_at IS NULL",
+         WHERE a.owner_type = 'agent' AND a.deleted_at IS NULL",
     )
     .fetch_all(pool)
     .await
@@ -783,12 +793,12 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
 
     // 3. 获取 unread_counts
     let unread_rows = sqlx::query(
-        "SELECT owner_id, 
+        "SELECT owner_type, owner_id,
                 CAST(COALESCE(SUM(unread_count), 0) AS INTEGER) as total_count,
                 MAX(CASE WHEN unread = 1 THEN 1 ELSE 0 END) as has_unread
          FROM topics 
          WHERE deleted_at IS NULL
-         GROUP BY owner_id",
+         GROUP BY owner_type, owner_id",
     )
     .fetch_all(pool)
     .await
@@ -797,6 +807,7 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
     let mut unread_counts = HashMap::new();
     for row in unread_rows {
         use sqlx::Row;
+        let owner_type: String = row.get("owner_type");
         let owner_id: String = row.get("owner_id");
         let total_count: i64 = row.get("total_count");
         let has_unread: i32 = row.get("has_unread");
@@ -810,7 +821,7 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
         };
 
         if value != 0 {
-            unread_counts.insert(owner_id, value);
+            unread_counts.insert(format!("{owner_type}:{owner_id}"), value);
         }
     }
 

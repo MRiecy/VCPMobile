@@ -24,10 +24,12 @@ async fn load_attachment_gc_snapshot(
 ) -> Result<AttachmentGcSnapshot, String> {
     let live_hashes = sqlx::query_as::<_, (String,)>(
         "SELECT DISTINCT ma.hash FROM message_attachments ma \
-             INNER JOIN messages m ON ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
-             INNER JOIN topics t ON m.topic_id = t.topic_id \
-             LEFT JOIN agents a ON t.owner_id = a.agent_id AND t.owner_type = 'agent' \
-             LEFT JOIN groups g ON t.owner_id = g.group_id AND t.owner_type = 'group' \
+             INNER JOIN messages m ON ma.owner_type = m.owner_type AND ma.owner_id = m.owner_id \
+                AND ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
+             INNER JOIN topics t ON m.owner_type = t.owner_type AND m.owner_id = t.owner_id \
+                AND m.topic_id = t.topic_id \
+             LEFT JOIN agents a ON a.owner_type = 'agent' AND t.owner_id = a.agent_id AND t.owner_type = 'agent' \
+             LEFT JOIN groups g ON g.owner_type = 'group' AND t.owner_id = g.group_id AND t.owner_type = 'group' \
              WHERE m.deleted_at IS NULL \
                AND ma.deleted_at IS NULL \
                AND t.deleted_at IS NULL \
@@ -61,13 +63,19 @@ async fn apply_attachment_gc_index_mutations(
         "UPDATE message_attachments \
          SET display_name = '[附件已删除]', src = NULL, status = 'removed' \
          WHERE deleted_at IS NOT NULL \
-            OR (topic_id, msg_id) IN (\
-                SELECT topic_id, msg_id FROM messages WHERE deleted_at IS NOT NULL\
+            OR (owner_type, owner_id, topic_id, msg_id) IN (\
+                SELECT owner_type, owner_id, topic_id, msg_id \
+                FROM messages WHERE deleted_at IS NOT NULL\
             ) \
-            OR topic_id IN (\
-                SELECT topic_id FROM topics WHERE deleted_at IS NOT NULL \
-                   OR owner_id IN (SELECT agent_id FROM agents WHERE deleted_at IS NOT NULL) AND owner_type = 'agent' \
-                   OR owner_id IN (SELECT group_id FROM groups WHERE deleted_at IS NOT NULL) AND owner_type = 'group' \
+            OR (owner_type, owner_id, topic_id) IN (\
+                SELECT owner_type, owner_id, topic_id FROM topics \
+                WHERE deleted_at IS NOT NULL \
+                   OR owner_type = 'agent' AND owner_id IN (\
+                       SELECT agent_id FROM agents WHERE owner_type = 'agent' AND deleted_at IS NOT NULL\
+                   ) \
+                   OR owner_type = 'group' AND owner_id IN (\
+                       SELECT group_id FROM groups WHERE owner_type = 'group' AND deleted_at IS NOT NULL\
+                   ) \
             )",
     )
     .execute(&mut **tx)
@@ -236,7 +244,8 @@ pub async fn cleanup_single_orphaned_attachment(
     let is_used: bool = sqlx::query_scalar::<_, i32>(
         "SELECT EXISTS(\
          SELECT 1 FROM message_attachments ma \
-         INNER JOIN messages m ON ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
+         INNER JOIN messages m ON ma.owner_type = m.owner_type AND ma.owner_id = m.owner_id \
+            AND ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
          WHERE ma.hash = ? AND m.deleted_at IS NULL)",
     )
     .bind(&hash)
@@ -326,9 +335,10 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
 
         // 3. 自动清除已删除消息的多余附件关联 (防线二：自动维护自愈)
         let _ = sqlx::query(
-            "DELETE FROM message_attachments WHERE (topic_id, msg_id) IN (\
-             SELECT ma.topic_id, ma.msg_id FROM message_attachments ma \
-             INNER JOIN messages m ON ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
+            "DELETE FROM message_attachments WHERE (owner_type, owner_id, topic_id, msg_id) IN (\
+             SELECT ma.owner_type, ma.owner_id, ma.topic_id, ma.msg_id FROM message_attachments ma \
+             INNER JOIN messages m ON ma.owner_type = m.owner_type AND ma.owner_id = m.owner_id \
+                AND ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
              WHERE m.deleted_at IS NOT NULL)",
         )
         .execute(&db_state.pool)

@@ -8,9 +8,10 @@ use crate::vcp_modules::group_context_assembler::assemble_group_context;
 use crate::vcp_modules::group_service::{read_group_config, GroupManagerState};
 use crate::vcp_modules::group_speaking_policy::determine_naturerandom_speakers;
 use crate::vcp_modules::message_service;
+use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use crate::vcp_modules::vcp_client::{
-    perform_vcp_request_registered, ActiveRequestLease, ActiveRequests, CancelledGroupTurns,
-    StreamEvent, VcpRequestPayload,
+    message_transport_request_id, perform_vcp_request_registered, ActiveRequestLease,
+    ActiveRequests, CancelledGroupTurns, StreamEvent, VcpRequestPayload,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -67,6 +68,7 @@ async fn run_group_speaker_turn(
     let active_member_configs_inner = params.active_member_configs;
     let group_id = params.group_id;
     let topic_id = params.topic_id;
+    let topic_key = TopicKey::new("group", &group_id, &topic_id);
     let vcp_url = params.vcp_url;
     let vcp_api_key = params.vcp_api_key;
     let stream_channel = params.stream_channel;
@@ -114,7 +116,7 @@ async fn run_group_speaker_turn(
     let messages = crate::vcp_modules::context_assembler::orchestrate_chat_context(
         db_pool,
         full_history_for_context,
-        topic_id,
+        &TopicKey::new("group", group_id, topic_id),
         &agent_name,
         "group",
         base_system_prompt,
@@ -124,12 +126,18 @@ async fn run_group_speaker_turn(
 
     let context = Some(json!({
         "groupId": group_id,
+        "ownerId": group_id,
+        "ownerType": "group",
         "topicId": topic_id,
         "agentId": agent_id,
         "isGroupMessage": true,
         "agentName": agent_name
     }));
 
+    let request_key = MessageKey::new(
+        TopicKey::new("group", group_id, topic_id),
+        message_id.clone(),
+    );
     let request_payload = VcpRequestPayload {
         vcp_url: vcp_url.to_string(),
         vcp_api_key: vcp_api_key.to_string(),
@@ -137,11 +145,11 @@ async fn run_group_speaker_turn(
         model_config: model_config.clone(),
         message_id: message_id.clone(),
         context: context.clone(),
-        transport_request_id: None,
+        transport_request_id: Some(message_transport_request_id(&request_key)),
     };
 
     let (_request_lease, cancellation_token) =
-        ActiveRequestLease::try_acquire(params.active_requests.0.clone(), message_id.clone())?;
+        ActiveRequestLease::try_acquire(params.active_requests.0.clone(), request_key)?;
     message_service::begin_stream_message(
         db_pool,
         group_id,
@@ -269,6 +277,7 @@ pub async fn internal_process_group_chat_message(
     let user_message = params.user_message;
     let vcp_url = params.vcp_url;
     let vcp_api_key = params.vcp_api_key;
+    let topic_key = TopicKey::new("group", &group_id, &topic_id);
 
     log::info!(
         "[GroupChatAppService] process_group_chat_message invoked for group: {}",
@@ -276,7 +285,7 @@ pub async fn internal_process_group_chat_message(
     );
 
     // 0. 重置该话题的中断标记 (确保开启新回合)
-    cancelled_turns.0.remove(&topic_id);
+    cancelled_turns.0.remove(&topic_key);
 
     // 1. 加载群组配置
     let group_config =
@@ -308,7 +317,7 @@ pub async fn internal_process_group_chat_message(
     // 为了给 AI 决策提供上下文，我们只轻量读取最新的 8 条纯文本和附件（不加载任何 UI 渲染数据）
     let recent_history_for_decision = message_service::load_chat_text_history_for_context(
         &app_handle,
-        &topic_id,
+        &topic_key,
         Some(8), // 限制上下文长度
         None,
         false, // include_extracted_text: 决策发言者不需要大体积的提取文本内容
@@ -353,7 +362,7 @@ pub async fn internal_process_group_chat_message(
     // 提前加载轻量级全量纯文本和附件历史记录作为接力上下文的基础 (从底层隔离 UI 渲染反序列化和 Shell 计算)
     let mut full_history_for_context = message_service::load_chat_text_history_for_context(
         &app_handle,
-        &topic_id,
+        &topic_key,
         None, // 加载全部用于 VCP 上下文
         None,
         true, // include_extracted_text: 组装群聊上下文发送给 VCP 时需要包含附件提取文本内容
@@ -365,7 +374,7 @@ pub async fn internal_process_group_chat_message(
 
     for speaker in speakers {
         // 检查全局中断令牌：如果话题已被标记为取消，立即停止接力赛
-        if cancelled_turns.0.contains(&topic_id) {
+        if cancelled_turns.0.contains(&topic_key) {
             log::info!(
                 "[GroupChatAppService] Group turn for topic {} was cancelled. Breaking loop.",
                 topic_id
@@ -410,7 +419,7 @@ pub async fn internal_process_group_chat_message(
     );
 
     // 回合结束，清理中断标记
-    cancelled_turns.0.remove(&topic_id);
+    cancelled_turns.0.remove(&topic_key);
 
     Ok(json!({"status": "completed"}))
 }
@@ -489,9 +498,10 @@ pub async fn invite_group_member_to_speak(
         payload.topic_id,
         payload.agent_id
     );
+    let topic_key = TopicKey::new("group", &payload.group_id, &payload.topic_id);
 
     // 开启新回合前清理中断标记
-    cancelled_turns.0.remove(&payload.topic_id);
+    cancelled_turns.0.remove(&topic_key);
 
     let group_config = read_group_config(
         app_handle.clone(),
@@ -527,7 +537,7 @@ pub async fn invite_group_member_to_speak(
     // 轻量全量历史（含附件提取文本），与接力链路一致
     let mut full_history_for_context = message_service::load_chat_text_history_for_context(
         &app_handle,
-        &payload.topic_id,
+        &topic_key,
         None,
         None,
         true,
@@ -561,6 +571,6 @@ pub async fn invite_group_member_to_speak(
         }),
     );
 
-    cancelled_turns.0.remove(&payload.topic_id);
+    cancelled_turns.0.remove(&topic_key);
     Ok(json!({"status": "completed"}))
 }

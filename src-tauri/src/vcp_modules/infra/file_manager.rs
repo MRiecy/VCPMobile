@@ -521,23 +521,27 @@ async fn commit_registered_attachment(
          WHERE hash = ? AND status = 'desktop_only' AND deleted_at IS NULL
            AND EXISTS (
              SELECT 1 FROM messages m
-             WHERE m.topic_id = message_attachments.topic_id
+             WHERE m.owner_type = message_attachments.owner_type
+               AND m.owner_id = message_attachments.owner_id
+               AND m.topic_id = message_attachments.topic_id
                AND m.msg_id = message_attachments.msg_id
                AND m.deleted_at IS NULL
            )
            AND EXISTS (
              SELECT 1 FROM topics t
-             WHERE t.topic_id = message_attachments.topic_id
+             WHERE t.owner_type = message_attachments.owner_type
+               AND t.owner_id = message_attachments.owner_id
+               AND t.topic_id = message_attachments.topic_id
                AND t.deleted_at IS NULL
                AND (
                  (t.owner_type = 'agent' AND EXISTS (
                    SELECT 1 FROM agents a
-                   WHERE a.agent_id = t.owner_id AND a.deleted_at IS NULL
+                   WHERE a.owner_type = 'agent' AND a.agent_id = t.owner_id AND a.deleted_at IS NULL
                  ))
                  OR
                  (t.owner_type = 'group' AND EXISTS (
                    SELECT 1 FROM groups g
-                   WHERE g.group_id = t.owner_id AND g.deleted_at IS NULL
+                   WHERE g.owner_type = 'group' AND g.group_id = t.owner_id AND g.deleted_at IS NULL
                  ))
                )
            )",

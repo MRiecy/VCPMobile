@@ -239,7 +239,11 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
     }
 
     // 切换会话（ChatView 的 watcher 会触发常规首屏加载，随后的锚点加载以 loadId 竞态胜出）
-    await sessionStore.selectTopicById(item.ownerId, item.topicId);
+    await sessionStore.selectTopicById(
+      item.ownerId,
+      item.ownerType as "agent" | "group",
+      item.topicId,
+    );
     await nextTick();
     const result = await historyStore.loadHistoryAround(
       item.ownerId,

@@ -1,4 +1,5 @@
 use crate::vcp_modules::chat_manager::ChatMessage;
+use crate::vcp_modules::topic_types::TopicKey;
 use serde_json::{json, Value};
 use sqlx::{Pool, Sqlite};
 
@@ -16,7 +17,7 @@ use sqlx::{Pool, Sqlite};
 pub async fn orchestrate_chat_context(
     pool: &Pool<Sqlite>,
     history: &[ChatMessage],
-    topic_id: &str,
+    topic: &TopicKey,
     agent_name: &str,
     scope: &str, // "agent" | "group"
     base_system_prompt: String,
@@ -61,7 +62,7 @@ pub async fn orchestrate_chat_context(
     // 5. 第二阶段：宏观拦截。调用 Tavern 拦截器流水线进行环境真理及 System/User 规则的终极拼装
     crate::vcp_modules::chat::context_injection::apply_tarven_pipeline(
         pool,
-        topic_id,
+        topic,
         agent_name,
         scope,
         &mut messages,

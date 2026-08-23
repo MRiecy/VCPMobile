@@ -1,6 +1,7 @@
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::content_parser::{parse_content, ContentBlock};
 use crate::vcp_modules::sync_hash::HashAggregator;
+use crate::vcp_modules::topic_types::TopicKey;
 use serde::Serialize;
 
 use sqlx::Row;
@@ -98,7 +99,7 @@ pub async fn deserialize_render_async(bytes: Vec<u8>) -> Result<Vec<ContentBlock
 /// This prevents a slow cache miss/re-render from overwriting a newer edit.
 pub async fn write_render_cache_cas(
     pool: &sqlx::SqlitePool,
-    topic_id: &str,
+    key: &TopicKey,
     msg_id: &str,
     observed_content_hash: &str,
     render_content: &[u8],
@@ -106,30 +107,37 @@ pub async fn write_render_cache_cas(
     let now = chrono::Utc::now().timestamp_millis();
     let result = sqlx::query(
         "INSERT INTO render_cache (
-            topic_id, msg_id, render_content, content_hash, renderer_schema_version, updated_at
-         ) SELECT ?, ?, ?, ?, ?, ?
+            owner_type, owner_id, topic_id, msg_id, render_content, content_hash,
+            renderer_schema_version, updated_at
+         ) SELECT ?, ?, ?, ?, ?, ?, ?, ?
          WHERE EXISTS (
             SELECT 1 FROM messages
-            WHERE topic_id = ? AND msg_id = ? AND content_hash = ? AND deleted_at IS NULL
+            WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
+              AND content_hash = ? AND deleted_at IS NULL
          )
-         ON CONFLICT(topic_id, msg_id) DO UPDATE SET
+         ON CONFLICT(owner_type, owner_id, topic_id, msg_id) DO UPDATE SET
             render_content = excluded.render_content,
             content_hash = excluded.content_hash,
             renderer_schema_version = excluded.renderer_schema_version,
             updated_at = excluded.updated_at
          WHERE EXISTS (
             SELECT 1 FROM messages
-            WHERE topic_id = excluded.topic_id AND msg_id = excluded.msg_id
+            WHERE owner_type = excluded.owner_type AND owner_id = excluded.owner_id
+              AND topic_id = excluded.topic_id AND msg_id = excluded.msg_id
               AND content_hash = excluded.content_hash AND deleted_at IS NULL
          )",
     )
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(msg_id)
     .bind(render_content)
     .bind(observed_content_hash)
     .bind(RENDERER_SCHEMA_VERSION)
     .bind(now)
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(msg_id)
     .bind(observed_content_hash)
     .execute(pool)
@@ -204,8 +212,8 @@ pub struct RebuildProgress {
 // 通用三段流水线基础设施（Reader → Processor → Writer）
 // =================================================================
 
-type CachedMessageSource = (String, String, String, String);
-type RenderCacheWrite = (String, String, String, Vec<u8>);
+type CachedMessageSource = (String, String, String, String, String, String);
+type RenderCacheWrite = (String, String, String, String, String, Vec<u8>);
 
 fn open_maintenance_rusqlite(db_path: &std::path::Path) -> Result<rusqlite::Connection, String> {
     let conn = rusqlite::Connection::open(db_path).map_err(|e| e.to_string())?;
@@ -215,7 +223,7 @@ fn open_maintenance_rusqlite(db_path: &std::path::Path) -> Result<rusqlite::Conn
     Ok(conn)
 }
 
-/// 分页流式读取已有渲染缓存的消息的 (topic_id, msg_id, content)，content 为明文字符串
+/// 分页流式读取已有渲染缓存的消息完整身份与明文内容。
 async fn stream_cached_message_contents(
     pool: &sqlx::SqlitePool,
     tx: mpsc::Sender<CachedMessageSource>,
@@ -225,9 +233,11 @@ async fn stream_cached_message_contents(
 
     loop {
         let rows = sqlx::query(
-            "SELECT m.rowid, m.topic_id, m.msg_id, m.content, m.content_hash \
+            "SELECT m.rowid, m.owner_type, m.owner_id, m.topic_id, m.msg_id, m.content, m.content_hash \
              FROM messages m \
-             INNER JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id \
+             INNER JOIN render_cache r
+               ON m.owner_type = r.owner_type AND m.owner_id = r.owner_id
+              AND m.topic_id = r.topic_id AND m.msg_id = r.msg_id \
              WHERE m.rowid > ? \
              ORDER BY m.rowid \
              LIMIT ?",
@@ -243,12 +253,21 @@ async fn stream_cached_message_contents(
                     last_rowid = last.get::<i64, _>(0);
                 }
                 for row in rows {
+                    let owner_type: String = row.get("owner_type");
+                    let owner_id: String = row.get("owner_id");
                     let topic_id: String = row.get("topic_id");
                     let msg_id: String = row.get("msg_id");
                     let content: String = row.get("content");
                     let content_hash: String = row.get("content_hash");
                     if tx
-                        .send((topic_id, msg_id, content, content_hash))
+                        .send((
+                            owner_type,
+                            owner_id,
+                            topic_id,
+                            msg_id,
+                            content,
+                            content_hash,
+                        ))
                         .await
                         .is_err()
                     {
@@ -264,7 +283,7 @@ async fn stream_cached_message_contents(
 
 fn update_render_cache_if_current(
     conn: &rusqlite::Connection,
-    topic_id: &str,
+    key: &TopicKey,
     msg_id: &str,
     content_hash: &str,
     bytes: &[u8],
@@ -276,10 +295,10 @@ fn update_render_cache_if_current(
             content_hash = ?2,
             renderer_schema_version = ?3,
             updated_at = ?4
-         WHERE topic_id = ?5 AND msg_id = ?6
+         WHERE owner_type = ?5 AND owner_id = ?6 AND topic_id = ?7 AND msg_id = ?8
            AND EXISTS (
              SELECT 1 FROM messages
-             WHERE topic_id = ?5 AND msg_id = ?6
+             WHERE owner_type = ?5 AND owner_id = ?6 AND topic_id = ?7 AND msg_id = ?8
                AND content_hash = ?2 AND deleted_at IS NULL
            )",
         rusqlite::params![
@@ -287,7 +306,9 @@ fn update_render_cache_if_current(
             content_hash,
             RENDERER_SCHEMA_VERSION,
             now,
-            topic_id,
+            &key.owner_type,
+            &key.owner_id,
+            &key.topic_id,
             msg_id,
         ],
     )
@@ -314,16 +335,10 @@ fn run_render_cache_update_writer(
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             {
                 let now = chrono::Utc::now().timestamp_millis();
-                for (topic_id, msg_id, content_hash, bytes) in batch {
-                    update_render_cache_if_current(
-                        &tx,
-                        &topic_id,
-                        &msg_id,
-                        &content_hash,
-                        &bytes,
-                        now,
-                    )
-                    .map_err(|e| e.to_string())?;
+                for (owner_type, owner_id, topic_id, msg_id, content_hash, bytes) in batch {
+                    let key = TopicKey::new(owner_type, owner_id, topic_id);
+                    update_render_cache_if_current(&tx, &key, &msg_id, &content_hash, &bytes, now)
+                        .map_err(|e| e.to_string())?;
                     processed += 1;
                 }
             }
@@ -483,10 +498,17 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
                 };
 
                 match item {
-                    Some((topic_id, msg_id, content, content_hash)) => {
+                    Some((owner_type, owner_id, topic_id, msg_id, content, content_hash)) => {
                         let blocks = MessageRenderCompiler::compile(&content);
                         if let Ok(bytes) = MessageRenderCompiler::serialize(&blocks) {
-                            batch.push((topic_id, msg_id, content_hash, bytes));
+                            batch.push((
+                                owner_type,
+                                owner_id,
+                                topic_id,
+                                msg_id,
+                                content_hash,
+                                bytes,
+                            ));
                         }
 
                         if batch.len() >= 50
@@ -517,9 +539,18 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
             let _ = stream_cached_message_contents(&pool, tx_inner).await;
         });
 
-        while let Some((topic_id, msg_id, content, content_hash)) = rx_inner.recv().await {
+        while let Some((owner_type, owner_id, topic_id, msg_id, content, content_hash)) =
+            rx_inner.recv().await
+        {
             if tx_compiler
-                .send((topic_id, msg_id, content, content_hash))
+                .send((
+                    owner_type,
+                    owner_id,
+                    topic_id,
+                    msg_id,
+                    content,
+                    content_hash,
+                ))
                 .await
                 .is_err()
             {
@@ -562,27 +593,36 @@ pub struct MessageRepository;
 impl MessageRepository {
     async fn ensure_upsert_target_live(
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        topic_id: &str,
+        key: &TopicKey,
         msg_id: &str,
     ) -> Result<(), String> {
         let topic_is_live: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM topics WHERE topic_id = ? AND deleted_at IS NULL)",
+            "SELECT EXISTS(
+                SELECT 1 FROM topics
+                WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
+             )",
         )
-        .bind(topic_id)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
         .fetch_one(&mut **tx)
         .await
         .map_err(|error| error.to_string())?;
         if !topic_is_live {
-            return Err(format!("topic {topic_id} is deleted or missing"));
+            return Err(format!("topic {} is deleted or missing", key.topic_id));
         }
 
-        let deleted_at: Option<Option<i64>> =
-            sqlx::query_scalar("SELECT deleted_at FROM messages WHERE topic_id = ? AND msg_id = ?")
-                .bind(topic_id)
-                .bind(msg_id)
-                .fetch_optional(&mut **tx)
-                .await
-                .map_err(|error| error.to_string())?;
+        let deleted_at: Option<Option<i64>> = sqlx::query_scalar(
+            "SELECT deleted_at FROM messages
+                 WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+        )
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
+        .bind(msg_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|error| error.to_string())?;
         if matches!(deleted_at, Some(Some(_))) {
             return Err(format!(
                 "message {msg_id} is tombstoned and cannot be restored by upsert"
@@ -594,11 +634,11 @@ impl MessageRepository {
     pub async fn upsert_message(
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         message: &ChatMessage,
-        topic_id: &str,
+        key: &TopicKey,
         render_content: &[u8],
         skip_bubble: bool,
     ) -> Result<(), String> {
-        Self::ensure_upsert_target_live(tx, topic_id, &message.id).await?;
+        Self::ensure_upsert_target_live(tx, key, &message.id).await?;
 
         // 1. 计算核心内容指纹 (通过 HashAggregator)
         let attachment_hashes: Vec<String> = message
@@ -622,9 +662,12 @@ impl MessageRepository {
             &attachment_hashes,
         );
         let existing: Option<(String, i64)> = sqlx::query_as(
-            "SELECT content_hash, updated_at FROM messages WHERE topic_id = ? AND msg_id = ?",
+            "SELECT content_hash, updated_at FROM messages
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
         )
-        .bind(topic_id)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
         .bind(&message.id)
         .fetch_optional(&mut **tx)
         .await
@@ -643,12 +686,12 @@ impl MessageRepository {
         // 2. 插入或更新消息 (不含 render_content)
         sqlx::query(
             "INSERT INTO messages (
-                msg_id, topic_id, role, name, agent_id, content, timestamp,
+                owner_type, owner_id, topic_id, msg_id, role, name, agent_id, content, timestamp,
                 is_group_message, group_id, finish_reason,
                 content_hash,
                 created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(topic_id, msg_id) DO UPDATE SET
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(owner_type, owner_id, topic_id, msg_id) DO UPDATE SET
                 content = excluded.content,
                 role = excluded.role,
                 name = excluded.name,
@@ -661,8 +704,10 @@ impl MessageRepository {
                 updated_at = excluded.updated_at
              WHERE messages.deleted_at IS NULL",
         )
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
         .bind(&message.id)
-        .bind(topic_id)
         .bind(&message.role)
         .bind(&message.name)
         .bind(&message.agent_id)
@@ -681,15 +726,18 @@ impl MessageRepository {
         // 2.1 插入或更新渲染缓存 (独立表)
         sqlx::query(
             "INSERT INTO render_cache (
-                topic_id, msg_id, render_content, content_hash, renderer_schema_version, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?)
-             ON CONFLICT(topic_id, msg_id) DO UPDATE SET
+                owner_type, owner_id, topic_id, msg_id, render_content, content_hash,
+                renderer_schema_version, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(owner_type, owner_id, topic_id, msg_id) DO UPDATE SET
                 render_content = excluded.render_content,
                 content_hash = excluded.content_hash,
                 renderer_schema_version = excluded.renderer_schema_version,
                 updated_at = excluded.updated_at",
         )
-        .bind(topic_id)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
         .bind(&message.id)
         .bind(render_content)
         .bind(&content_hash)
@@ -701,43 +749,58 @@ impl MessageRepository {
 
         // 2.2 同步写入全文检索 FTS5 虚拟表 (仅在消息未删除时同步明文，FTS5 不支持 ON CONFLICT)
         // trigram 分词器（migration 0008 起）直接索引原文，无需 CJK 预处理
-        sqlx::query("DELETE FROM messages_fts WHERE topic_id = ? AND msg_id = ?")
-            .bind(topic_id)
-            .bind(&message.id)
-            .execute(&mut **tx)
-            .await
-            .map_err(|e| e.to_string())?;
+        sqlx::query(
+            "DELETE FROM messages_fts
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+        )
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
+        .bind(&message.id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
 
-        sqlx::query("INSERT INTO messages_fts (msg_id, topic_id, content) VALUES (?, ?, ?)")
-            .bind(&message.id)
-            .bind(topic_id)
-            .bind(&message.content)
-            .execute(&mut **tx)
-            .await
-            .map_err(|e| e.to_string())?;
+        sqlx::query(
+            "INSERT INTO messages_fts (msg_id, topic_id, content, owner_type, owner_id)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&message.id)
+        .bind(&key.topic_id)
+        .bind(&message.content)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
 
         // Handle attachments
         if let Some(ref attachments) = message.attachments {
             Self::upsert_attachments_for_message(
                 tx,
-                topic_id,
+                key,
                 &message.id,
                 message.timestamp as i64,
                 attachments,
             )
             .await?;
         } else {
-            sqlx::query("DELETE FROM message_attachments WHERE topic_id = ? AND msg_id = ?")
-                .bind(topic_id)
-                .bind(&message.id)
-                .execute(&mut **tx)
-                .await
-                .map_err(|e| e.to_string())?;
+            sqlx::query(
+                "DELETE FROM message_attachments
+                 WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+            )
+            .bind(&key.owner_type)
+            .bind(&key.owner_id)
+            .bind(&key.topic_id)
+            .bind(&message.id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| e.to_string())?;
         }
 
         // 3. 触发聚合哈希冒泡 (通过 HashAggregator 统一处理)
         if !skip_bubble {
-            HashAggregator::bubble_from_topic(tx, topic_id).await?;
+            HashAggregator::bubble_from_topic(tx, key).await?;
         }
 
         Ok(())
@@ -745,17 +808,22 @@ impl MessageRepository {
 
     async fn upsert_attachments_for_message(
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        topic_id: &str,
+        key: &TopicKey,
         msg_id: &str,
         timestamp: i64,
         attachments: &[crate::vcp_modules::chat_manager::Attachment],
     ) -> Result<(), String> {
-        sqlx::query("DELETE FROM message_attachments WHERE topic_id = ? AND msg_id = ?")
-            .bind(topic_id)
-            .bind(msg_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(|e| e.to_string())?;
+        sqlx::query(
+            "DELETE FROM message_attachments
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+        )
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
+        .bind(msg_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
 
         for (i, att) in attachments.iter().enumerate() {
             let hash = att.hash.clone().unwrap_or_else(|| {
@@ -799,10 +867,13 @@ impl MessageRepository {
 
             sqlx::query(
                 "INSERT INTO message_attachments (
-                    topic_id, msg_id, hash, attachment_order, display_name, src, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    owner_type, owner_id, topic_id, msg_id, hash, attachment_order,
+                    display_name, src, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             )
-            .bind(topic_id)
+            .bind(&key.owner_type)
+            .bind(&key.owner_id)
+            .bind(&key.topic_id)
             .bind(msg_id)
             .bind(&hash)
             .bind(i as i32)

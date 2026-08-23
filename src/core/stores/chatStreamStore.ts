@@ -8,7 +8,10 @@ import { useAvatarStore } from "./avatar";
 import { useTopicStore } from "./topicListManager";
 import { useChatHistoryStore } from "./chatHistoryStore";
 import type { ChatMessage, MessageShell, TailFrame } from "../types/chat";
-import type { ConversationKey } from "./chatSessionStore";
+import type {
+  ConversationKey,
+  ConversationOwnerType,
+} from "./chatSessionStore";
 
 export interface ChatStreamEvent {
   type: string;
@@ -20,6 +23,7 @@ export interface ChatStreamEvent {
     groupId?: string;
     agentId?: string;
     ownerId?: string;
+    ownerType?: ConversationOwnerType;
     agentName?: string;
     [key: string]: unknown;
   };
@@ -35,13 +39,25 @@ interface StreamTerminalTombstone {
 }
 
 export const useChatStreamStore = defineStore("chatStream", () => {
-  const streamingMessageId = ref<string | null>(null);
+  const streamingMessageKey = ref<string | null>(null);
 
-  // 核心：记录每个会话（itemId + topicId）是否处于活动流状态
-  // 格式: "itemId:topicId" -> [messageId1, messageId2, ...]
+  const conversationMapKey = (
+    ownerId: string,
+    ownerType: ConversationOwnerType,
+    topicId: string,
+  ) => `${ownerType}:${ownerId}:${topicId}`;
+
+  const streamMessageMapKey = (
+    ownerId: string,
+    ownerType: ConversationOwnerType,
+    topicId: string,
+    messageId: string,
+  ) => `${conversationMapKey(ownerId, ownerType, topicId)}:${messageId}`;
+
+  // 核心：记录每个完整会话是否处于活动流状态。
   const sessionActiveStreams = ref<Record<string, string[]>>({});
 
-  // 全局活跃流消息池：存储所有正在生成的响应对象 (messageId -> Reactive<ChatMessage>)
+  // 全局活跃流消息池：按完整消息身份存储正在生成的响应对象。
   // 无论是在前台还是后台，流式消息都从此池中获取，保证响应式链路不断裂
   const activeStreamMessages = reactive<Map<string, ChatMessage>>(new Map());
   const streamTerminalTombstones = new Map<
@@ -133,11 +149,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   const MAX_STREAM_TERMINAL_TOMBSTONES = 1000;
 
   const pruneStreamTerminalTombstones = (now = Date.now()) => {
-    for (const [messageId, tombstone] of streamTerminalTombstones) {
+    for (const [messageKey, tombstone] of streamTerminalTombstones) {
       if (now - tombstone.terminalAt <= STREAM_TERMINAL_TOMBSTONE_TTL_MS) {
         continue;
       }
-      streamTerminalTombstones.delete(messageId);
+      streamTerminalTombstones.delete(messageKey);
     }
 
     while (streamTerminalTombstones.size > MAX_STREAM_TERMINAL_TOMBSTONES) {
@@ -147,19 +163,19 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     }
   };
 
-  const hasStreamTerminalTombstone = (messageId: string): boolean => {
-    const tombstone = streamTerminalTombstones.get(messageId);
+  const hasStreamTerminalTombstone = (messageKey: string): boolean => {
+    const tombstone = streamTerminalTombstones.get(messageKey);
     if (!tombstone) return false;
     if (Date.now() - tombstone.terminalAt > STREAM_TERMINAL_TOMBSTONE_TTL_MS) {
-      streamTerminalTombstones.delete(messageId);
+      streamTerminalTombstones.delete(messageKey);
       return false;
     }
     return true;
   };
 
-  const recordStreamTerminalTombstone = (messageId: string) => {
-    streamTerminalTombstones.delete(messageId);
-    streamTerminalTombstones.set(messageId, {
+  const recordStreamTerminalTombstone = (messageKey: string) => {
+    streamTerminalTombstones.delete(messageKey);
+    streamTerminalTombstones.set(messageKey, {
       terminalAt: Date.now(),
     });
     pruneStreamTerminalTombstones();
@@ -185,15 +201,15 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   /**
    * 物理防线：强行中止、强制同步刷新并安全清理指定消息的 rAF 帧状态，杜绝任何泄漏与闪烁
    */
-  const clearRAFUpdate = (messageId: string, forceFlush = false) => {
-    const up = rAFPendingUpdates.get(messageId);
+  const clearRAFUpdate = (messageKey: string, forceFlush = false) => {
+    const up = rAFPendingUpdates.get(messageKey);
     if (up) {
       if (up.animationFrameId !== null) {
         cancelAnimationFrame(up.animationFrameId);
         up.animationFrameId = null;
       }
       if (forceFlush) {
-        const msg = activeStreamMessages.get(messageId);
+        const msg = activeStreamMessages.get(messageKey);
         if (msg) {
           if (up.content !== null) msg.content = up.content;
           if (up.blocks !== null) msg.blocks = up.blocks;
@@ -205,19 +221,19 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           if (up.tailFrame !== null) msg.tailFrame = up.tailFrame;
         }
       }
-      rAFPendingUpdates.delete(messageId);
+      rAFPendingUpdates.delete(messageKey);
     }
   };
 
   /**
    * 调度并申请 rAF 渲染，合并 data 和 aurora 的高频更新，在同一渲染帧内原子写入
    */
-  const scheduleRAFUpdate = (messageId: string) => {
-    const update = rAFPendingUpdates.get(messageId);
+  const scheduleRAFUpdate = (messageKey: string) => {
+    const update = rAFPendingUpdates.get(messageKey);
     if (!update || update.animationFrameId !== null) return;
 
     const runRenderLoop = () => {
-      const up = rAFPendingUpdates.get(messageId);
+      const up = rAFPendingUpdates.get(messageKey);
       if (!up) return;
 
       const now = performance.now();
@@ -225,7 +241,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
 
       if (elapsed >= MIN_RENDER_INTERVAL_MS) {
         // 满足 30Hz 时间间隔，以原子事务方式刷入 Vue 响应式数据
-        const m = activeStreamMessages.get(messageId);
+        const m = activeStreamMessages.get(messageKey);
         if (m) {
           if (up.content !== null) m.content = up.content;
           if (up.blocks !== null) m.blocks = up.blocks;
@@ -297,25 +313,48 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     return sets;
   });
 
-  const activeStreamIdSet = computed(() => {
-    const ids = new Set<string>();
-    for (const streams of Object.values(sessionActiveStreams.value)) {
-      for (const id of streams) ids.add(id);
+  const activeStreamKeySet = computed(() => {
+    const keys = new Set<string>();
+    for (const [conversationKey, streams] of Object.entries(
+      sessionActiveStreams.value,
+    )) {
+      for (const id of streams) keys.add(`${conversationKey}:${id}`);
     }
-    return ids;
+    return keys;
   });
 
-  function isMessageActive(messageId: string): boolean {
-    return activeStreamIdSet.value.has(messageId);
+  function isMessageActive(
+    ownerId: string,
+    ownerType: ConversationOwnerType,
+    topicId: string,
+    messageId: string,
+  ): boolean {
+    return activeStreamKeySet.value.has(
+      streamMessageMapKey(ownerId, ownerType, topicId, messageId),
+    );
   }
 
   function isMessageActiveInSession(
     ownerId: string,
+    ownerType: ConversationOwnerType,
     topicId: string,
     messageId: string,
   ): boolean {
     return (
-      activeStreamSets.value[`${ownerId}:${topicId}`]?.has(messageId) ?? false
+      activeStreamSets.value[conversationMapKey(ownerId, ownerType, topicId)]?.has(
+        messageId,
+      ) ?? false
+    );
+  }
+
+  function getActiveStreamMessage(
+    ownerId: string,
+    ownerType: ConversationOwnerType,
+    topicId: string,
+    messageId: string,
+  ): ChatMessage | undefined {
+    return activeStreamMessages.get(
+      streamMessageMapKey(ownerId, ownerType, topicId, messageId),
     );
   }
 
@@ -323,7 +362,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   const activeStreamingIds = computed(() => {
     if (!sessionStore.currentSelectedItem?.id || !sessionStore.currentTopicId)
       return new Set<string>();
-    const key = `${sessionStore.currentSelectedItem.id}:${sessionStore.currentTopicId}`;
+    const key = conversationMapKey(
+      sessionStore.currentSelectedItem.id,
+      sessionStore.currentSelectedItem.type,
+      sessionStore.currentTopicId,
+    );
     return activeStreamSets.value[key] || new Set<string>();
   });
 
@@ -334,7 +377,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       sessionStore.currentSelectedItem.type !== "group"
     )
       return false;
-    const key = `${sessionStore.currentSelectedItem.id}:${sessionStore.currentTopicId}`;
+    const key = conversationMapKey(
+      sessionStore.currentSelectedItem.id,
+      "group",
+      sessionStore.currentTopicId,
+    );
     const streams = sessionActiveStreams.value[key];
     return streams ? streams.length > 0 : false;
   });
@@ -346,11 +393,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     if (activeStreamMessages.size <= MAX_STREAM_MESSAGES) return;
     let remaining = activeStreamMessages.size - MAX_STREAM_MESSAGES;
     // 按插入顺序（Map 保持插入顺序）清理最旧的非活跃消息
-    for (const [id] of activeStreamMessages) {
+    for (const [messageKey] of activeStreamMessages) {
       if (remaining <= 0) break;
       // 只删除已完成的流（不在当前活跃会话中）
-      if (!isMessageActive(id)) {
-        activeStreamMessages.delete(id);
+      if (!activeStreamKeySet.value.has(messageKey)) {
+        activeStreamMessages.delete(messageKey);
         remaining -= 1;
       }
     }
@@ -359,10 +406,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   // 辅助方法：管理会话流状态
   const addSessionStream = (
     ownerId: string,
+    ownerType: ConversationOwnerType,
     topicId: string,
     messageId: string,
   ) => {
-    const key = `${ownerId}:${topicId}`;
+    const key = conversationMapKey(ownerId, ownerType, topicId);
     if (!sessionActiveStreams.value[key]) {
       sessionActiveStreams.value[key] = [];
     }
@@ -375,10 +423,17 @@ export const useChatStreamStore = defineStore("chatStream", () => {
 
   const removeSessionStream = (
     ownerId: string,
+    ownerType: ConversationOwnerType,
     topicId: string,
     messageId: string,
   ) => {
-    const key = `${ownerId}:${topicId}`;
+    const key = conversationMapKey(ownerId, ownerType, topicId);
+    const messageKey = streamMessageMapKey(
+      ownerId,
+      ownerType,
+      topicId,
+      messageId,
+    );
     const streams = sessionActiveStreams.value[key];
     if (streams) {
       const index = streams.indexOf(messageId);
@@ -392,30 +447,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     // 同时从全局池中移除 (延迟移除，确保 finalizeStream 能拿到对象)
     const cleanupTimer = setTimeout(() => {
       cleanupTimers.delete(cleanupTimer);
-      if (!activeStreamingIds.value.has(messageId)) {
-        activeStreamMessages.delete(messageId);
-        clearRAFUpdate(messageId, false); // 漏洞 2 修复：延迟清理时，强制安全注销 rAF 帧，杜绝句柄泄露
-      }
-    }, 1000);
-    cleanupTimers.add(cleanupTimer);
-  };
-
-  const removeMessageFromAllSessions = (messageId: string) => {
-    for (const [key, streams] of Object.entries(sessionActiveStreams.value)) {
-      const remaining = streams.filter((id) => id !== messageId);
-      if (remaining.length === streams.length) continue;
-      if (remaining.length === 0) {
-        delete sessionActiveStreams.value[key];
-      } else {
-        sessionActiveStreams.value[key] = remaining;
-      }
-    }
-
-    const cleanupTimer = setTimeout(() => {
-      cleanupTimers.delete(cleanupTimer);
-      if (!isMessageActive(messageId)) {
-        activeStreamMessages.delete(messageId);
-        clearRAFUpdate(messageId, false);
+      if (!activeStreamKeySet.value.has(messageKey)) {
+        activeStreamMessages.delete(messageKey);
+        clearRAFUpdate(messageKey, false); // 漏洞 2 修复：延迟清理时，强制安全注销 rAF 帧，杜绝句柄泄露
       }
     }, 1000);
     cleanupTimers.add(cleanupTimer);
@@ -435,17 +469,28 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     const { type, context } = event;
     const ctx = context || {};
     const topicId = ctx.topicId;
-    const isGroup = !!ctx.isGroupMessage || !!ctx.groupId;
-    const itemId = isGroup ? ctx.groupId : ctx.agentId || ctx.ownerId;
+    const ownerType = ctx.ownerType;
+    const ownerId = ctx.ownerId;
 
-    if (!actualMessageId || !topicId || !itemId) return;
+    if (
+      !actualMessageId ||
+      !topicId ||
+      !ownerId ||
+      (ownerType !== "agent" && ownerType !== "group")
+    ) return;
+    const messageKey = streamMessageMapKey(
+      ownerId,
+      ownerType,
+      topicId,
+      actualMessageId,
+    );
 
-    if (hasStreamTerminalTombstone(actualMessageId)) return;
+    if (hasStreamTerminalTombstone(messageKey)) return;
     if (type === "end" || type === "error") {
-      recordStreamTerminalTombstone(actualMessageId);
+      recordStreamTerminalTombstone(messageKey);
     }
 
-    let msg = activeStreamMessages.get(actualMessageId);
+    let msg = activeStreamMessages.get(messageKey);
     const isNewStream = !msg;
 
     if (isNewStream) {
@@ -457,21 +502,27 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         timestamp: Date.now(),
         isThinking: type === "thinking",
         agentId: ctx.agentId,
-        groupId: ctx.groupId,
-        isGroupMessage: !!ctx.isGroupMessage,
+        groupId: ownerType === "group" ? ownerId : undefined,
+        isGroupMessage: ownerType === "group",
         shell: computeShell({
           role: "assistant",
           agentId: ctx.agentId,
           name: ctx.agentName,
         }),
       });
-      activeStreamMessages.set(actualMessageId, msg!);
+      activeStreamMessages.set(messageKey, msg!);
     }
 
     if (isNewStream) {
-      topicStore.incrementTopicMsgCount(topicId);
-      if (topicId !== sessionStore.currentTopicId) {
-        topicStore.incrementTopicUnreadCount(topicId);
+      topicStore.incrementTopicMsgCount(ownerId, ownerType, topicId);
+      const currentKey = sessionStore.currentConversationKey;
+      if (
+        !currentKey ||
+        currentKey.ownerId !== ownerId ||
+        currentKey.ownerType !== ownerType ||
+        currentKey.topicId !== topicId
+      ) {
+        topicStore.incrementTopicUnreadCount(ownerId, ownerType, topicId);
       }
 
       // 回调：通知 UI 列表插入新消息
@@ -483,13 +534,13 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     // 维护流状态
     if (type === "thinking") {
       msg!.isThinking = true;
-      addSessionStream(itemId, topicId, actualMessageId);
-      if (!streamingMessageId.value) {
-        streamingMessageId.value = actualMessageId;
+      addSessionStream(ownerId, ownerType, topicId, actualMessageId);
+      if (!streamingMessageKey.value) {
+        streamingMessageKey.value = messageKey;
       }
     } else if (type === "aurora") {
       msg!.isThinking = false;
-      addSessionStream(itemId, topicId, actualMessageId);
+      addSessionStream(ownerId, ownerType, topicId, actualMessageId);
 
       const aurora = event.aurora;
       if (aurora) {
@@ -526,7 +577,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         }
 
         // 1. 初始化或获取该 messageId 的帧合并状态
-        let update = rAFPendingUpdates.get(actualMessageId);
+        let update = rAFPendingUpdates.get(messageKey);
         if (!update) {
           update = {
             content: null,
@@ -538,7 +589,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             animationFrameId: null,
             lastRenderTime: 0,
           };
-          rAFPendingUpdates.set(actualMessageId, update);
+          rAFPendingUpdates.set(messageKey, update);
         }
 
         // 2. 覆盖写入暂存数据（稀疏合并）
@@ -581,19 +632,19 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         }
 
         // 3. 申请硬件级 rAF 渲染调度（合并原子提交）
-        scheduleRAFUpdate(actualMessageId);
+        scheduleRAFUpdate(messageKey);
       }
     } else if (type === "end" || type === "error") {
       const errorMsg = event.error;
       const finishReason = event.finishReason;
 
       // 漏洞 1 & 2 & 3 修复：同步强制秒结，防止 tailContent 闪烁回滚丢失
-      clearRAFUpdate(actualMessageId, true);
+      clearRAFUpdate(messageKey, true);
 
       if (finishReason) msg!.finishReason = finishReason;
 
-      if (streamingMessageId.value === actualMessageId)
-        streamingMessageId.value = null;
+      if (streamingMessageKey.value === messageKey)
+        streamingMessageKey.value = null;
 
       if (type === "error" && errorMsg) {
         const errorText = `\n\n> VCP流式错误: ${errorMsg}`;
@@ -616,7 +667,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         const finalizeStream = () => {
           msg!.tailContent = "";
           msg!.tailBlock = undefined;
-          removeSessionStream(itemId, topicId, actualMessageId);
+          removeSessionStream(ownerId, ownerType, topicId, actualMessageId);
           if (callbacks?.onStreamFinished) {
             callbacks.onStreamFinished(actualMessageId, topicId);
           }
@@ -651,7 +702,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           finalizeStream();
         }
       } else {
-        removeSessionStream(itemId, topicId, actualMessageId);
+        removeSessionStream(ownerId, ownerType, topicId, actualMessageId);
       }
     }
   };
@@ -660,17 +711,31 @@ export const useChatStreamStore = defineStore("chatStream", () => {
    * 中止指定消息的生成
    */
   const stopMessage = async (
+    ownerId: string,
+    ownerType: ConversationOwnerType,
+    topicId: string,
     messageId: string,
     onUpdateMessage?: (msgId: string) => Promise<void>,
   ) => {
+    const messageKey = streamMessageMapKey(
+      ownerId,
+      ownerType,
+      topicId,
+      messageId,
+    );
     console.log(
       `[ChatStreamStore] Sending interrupt signal for message: ${messageId}`,
     );
     try {
-      await invoke("interruptRequest", { messageId: messageId });
+      await invoke("interruptRequest", {
+        ownerId,
+        ownerType,
+        topicId,
+        messageId,
+      });
 
       // 本地模拟一个结束状态
-      const msg = activeStreamMessages.get(messageId);
+      const msg = activeStreamMessages.get(messageKey);
       if (msg) {
         msg.isThinking = false;
         msg.finishReason = "interrupted";
@@ -682,14 +747,13 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       }
 
       // 漏洞 2 修复：手动点击中止流时，瞬间强行注销 rAF 帧，防止后台句柄悬空空转泄漏
-      clearRAFUpdate(messageId, false);
+      clearRAFUpdate(messageKey, false);
 
-      if (streamingMessageId.value === messageId) {
-        streamingMessageId.value = null;
+      if (streamingMessageKey.value === messageKey) {
+        streamingMessageKey.value = null;
       }
 
-      // messageId 全局唯一；不要在 await 后读取可能已切换的当前会话。
-      removeMessageFromAllSessions(messageId);
+      removeSessionStream(ownerId, ownerType, topicId, messageId);
 
       if (onUpdateMessage) {
         await onUpdateMessage(messageId);
@@ -705,16 +769,22 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   /**
    * 强行中止整个群组的接力赛回合
    */
-  const stopGroupTurn = async (topicId: string) => {
+  const stopGroupTurn = async (ownerId: string, topicId: string) => {
     console.log(
       `[ChatStreamStore] Global Group Interruption for topic: ${topicId}`,
     );
     // 在首个 await 前冻结目标集合，避免切换会话后误停新话题的流。
     const activeIds = Array.from(activeStreamingIds.value);
     try {
-      await invoke("interruptGroupTurn", { topicId: topicId });
+      await invoke("interruptGroupTurn", {
+        ownerId,
+        ownerType: "group",
+        topicId,
+      });
       if (activeIds.length > 0) {
-        await Promise.all(activeIds.map((id) => stopMessage(id)));
+        await Promise.all(
+          activeIds.map((id) => stopMessage(ownerId, "group", topicId, id)),
+        );
       }
     } catch (e) {
       console.error("[ChatStreamStore] Failed to stop group turn:", e);
@@ -769,13 +839,27 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       // 2. UI 预处理：在内存中将消息标记为 reconnecting，让用户在界面上看到“重连中”
       for (const gen of activeGens) {
         const { msgId, topicId, ownerId, ownerType, agentId, agentName } = gen;
+        if (ownerType !== "agent" && ownerType !== "group") continue;
+        const messageKey = streamMessageMapKey(
+          ownerId,
+          ownerType,
+          topicId,
+          msgId,
+        );
 
-        let msg = activeStreamMessages.get(msgId);
+        let msg = activeStreamMessages.get(messageKey);
         if (!msg) {
           const historyStore = useChatHistoryStore();
-          const existingMsg = historyStore.currentChatHistory.find(
-            (x) => x.id === msgId,
+          const currentKey = sessionStore.currentConversationKey;
+          const isCurrentConversation = Boolean(
+            currentKey &&
+              currentKey.topicId === topicId &&
+              currentKey.ownerId === ownerId &&
+              currentKey.ownerType === ownerType,
           );
+          const existingMsg = isCurrentConversation
+            ? historyStore.currentChatHistory.find((x) => x.id === msgId)
+            : undefined;
 
           if (existingMsg) {
             msg = existingMsg;
@@ -799,28 +883,29 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             });
 
             // 如果是当前展示的话题，且历史中没有，立即推入历史中展示
-            const currentKey = sessionStore.currentConversationKey;
-            if (
-              currentKey &&
-              currentKey.topicId === topicId &&
-              currentKey.ownerId === ownerId &&
-              currentKey.ownerType === ownerType
-            ) {
+            if (isCurrentConversation) {
               historyStore.currentChatHistory.push(msg);
               historyStore.currentChatHistory.sort(
                 (a, b) => a.timestamp - b.timestamp,
               );
             }
           }
-          activeStreamMessages.set(msgId, msg);
+          activeStreamMessages.set(messageKey, msg);
         } else {
           msg.isReconnecting = true;
         }
-        addSessionStream(ownerId, topicId, msgId);
+        addSessionStream(ownerId, ownerType, topicId, msgId);
       }
 
       for (const gen of activeGens) {
         const { msgId, topicId, ownerId, ownerType } = gen;
+        if (ownerType !== "agent" && ownerType !== "group") continue;
+        const messageKey = streamMessageMapKey(
+          ownerId,
+          ownerType,
+          topicId,
+          msgId,
+        );
         const currentKey = sessionStore.currentConversationKey;
         const recoveryKey: ConversationKey | null =
           currentKey &&
@@ -835,23 +920,23 @@ export const useChatStreamStore = defineStore("chatStream", () => {
               }
             : null;
 
-        if (recoveryMessageIds.has(msgId)) continue;
-        recoveryMessageIds.add(msgId);
+        if (recoveryMessageIds.has(messageKey)) continue;
+        recoveryMessageIds.add(messageKey);
 
-        const isWarm = warmMessageIds.has(msgId);
-        let msg = activeStreamMessages.get(msgId);
+        const isWarm = warmMessageIds.has(messageKey);
+        let msg = activeStreamMessages.get(messageKey);
         const originalContent = msg?.content || "";
         const originalBlocks = msg?.blocks ? [...msg.blocks] : [];
 
         if (!msg) {
           // 说明是冷启动后第一次加载或者流不在活跃池中
           const historyStore = useChatHistoryStore();
-          const existing = historyStore.currentChatHistory.find(
-            (x) => x.id === msgId,
-          );
+          const existing = recoveryKey
+            ? historyStore.currentChatHistory.find((x) => x.id === msgId)
+            : undefined;
           if (existing) {
             msg = existing;
-            activeStreamMessages.set(msgId, msg);
+            activeStreamMessages.set(messageKey, msg);
           }
         }
 
@@ -898,6 +983,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         // navigator.onLine 不能前置否决：Finalizing/Interrupted 等状态必须可离线收口。
         // 扫描门闩可以释放，但 recoveryMessageIds 会覆盖整个长连接生命周期。
         void invoke<any>("recover_active_generation", {
+          ownerId,
+          ownerType,
+          topicId,
           msgId,
           streamChannel,
           isWarm,
@@ -933,7 +1021,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
                 recoveryMessage.finishReason = "error";
               }
             }
-            removeSessionStream(ownerId, topicId, msgId);
+            removeSessionStream(ownerId, ownerType, topicId, msgId);
 
             if (
               recoveryKey &&
@@ -959,10 +1047,10 @@ export const useChatStreamStore = defineStore("chatStream", () => {
                 originalContent + "\n\n> VCP流式错误: 接续失败";
               recoveryMessage.blocks = originalBlocks;
             }
-            removeSessionStream(ownerId, topicId, msgId);
+            removeSessionStream(ownerId, ownerType, topicId, msgId);
           })
           .finally(() => {
-            recoveryMessageIds.delete(msgId);
+            recoveryMessageIds.delete(messageKey);
           });
       }
     } catch (e) {
@@ -973,13 +1061,14 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   };
 
   return {
-    streamingMessageId,
+    streamingMessageKey,
     sessionActiveStreams,
     activeStreamMessages,
     activeStreamingIds,
-    activeStreamIdSet,
+    activeStreamKeySet,
     isMessageActive,
     isMessageActiveInSession,
+    getActiveStreamMessage,
     isGroupGenerating,
     computeShell,
     addSessionStream,

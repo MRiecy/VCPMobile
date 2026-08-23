@@ -110,7 +110,7 @@ watch(
     resetChatScroll();
     if (key) {
       console.log(`[ChatView] Topic changed to ${key.topicId}, loading history...`);
-      topicStore.markTopicAsRead(key.topicId);
+      topicStore.markTopicAsRead(key.ownerId, key.ownerType, key.topicId);
       historyStore.loadHistoryPaginated(
         key.ownerId,
         key.ownerType,

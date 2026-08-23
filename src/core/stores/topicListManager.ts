@@ -258,7 +258,11 @@ export const useTopicStore = defineStore("topic", () => {
       ) {
         const nextTopic = topics.value[0];
         if (nextTopic) {
-          await sessionStore.selectTopicById(ownerId, nextTopic.id);
+          await sessionStore.selectTopicById(
+            ownerId,
+            ownerType as "agent" | "group",
+            nextTopic.id,
+          );
         } else {
           sessionStore.setConversation(sessionStore.currentSelectedItem, null);
           // chatHistoryStore 监听 currentTopicId 变化，会自动清空历史
@@ -376,7 +380,8 @@ export const useTopicStore = defineStore("topic", () => {
   /**
    * 增加话题的消息计数 (UI 乐观更新)
    */
-  const incrementTopicMsgCount = (topicId: string) => {
+  const incrementTopicMsgCount = (ownerId: string, ownerType: string, topicId: string) => {
+    if (!isCurrentOwner(ownerId, ownerType)) return;
     const index = topics.value.findIndex((t) => t.id === topicId);
     if (index !== -1) {
       topics.value[index] = { 
@@ -390,7 +395,8 @@ export const useTopicStore = defineStore("topic", () => {
   /**
    * 增加话题的未读计数 (UI 乐观更新)
    */
-  const incrementTopicUnreadCount = (topicId: string) => {
+  const incrementTopicUnreadCount = (ownerId: string, ownerType: string, topicId: string) => {
+    if (!isCurrentOwner(ownerId, ownerType)) return;
     const index = topics.value.findIndex((t) => t.id === topicId);
     if (index !== -1) {
       const topic = topics.value[index];
@@ -409,7 +415,13 @@ export const useTopicStore = defineStore("topic", () => {
   /**
    * 减少话题的消息计数 (UI 乐观更新)
    */
-  const decrementTopicMsgCount = (topicId: string, count: number = 1) => {
+  const decrementTopicMsgCount = (
+    ownerId: string,
+    ownerType: string,
+    topicId: string,
+    count: number = 1,
+  ) => {
+    if (!isCurrentOwner(ownerId, ownerType)) return;
     const index = topics.value.findIndex((t) => t.id === topicId);
     if (index !== -1) {
       topics.value[index] = { 
@@ -423,7 +435,8 @@ export const useTopicStore = defineStore("topic", () => {
   /**
    * 标记话题为已读 (清空未读数并取消未读标记)
    */
-  const markTopicAsRead = (topicId: string) => {
+  const markTopicAsRead = (ownerId: string, ownerType: string, topicId: string) => {
+    if (!isCurrentOwner(ownerId, ownerType)) return;
     const index = topics.value.findIndex((t) => t.id === topicId);
     if (index !== -1) {
       const topic = topics.value[index];

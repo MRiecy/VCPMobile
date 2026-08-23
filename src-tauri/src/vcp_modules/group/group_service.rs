@@ -7,7 +7,7 @@ use crate::vcp_modules::sync_dto::GroupSyncDTO;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::SyncDataType;
-use crate::vcp_modules::topic_types::Topic;
+use crate::vcp_modules::topic_types::{Topic, TopicKey};
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as CacheCommitMutex};
@@ -104,7 +104,7 @@ async fn read_group_config_locked<R: Runtime>(
         "SELECT g.name, g.mode, g.group_prompt, g.invite_prompt, g.use_unified_model, g.unified_model, g.tag_match_mode, g.created_at, av.dominant_color 
          FROM groups g
          LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group' AND av.deleted_at IS NULL
-         WHERE g.group_id = ? AND g.deleted_at IS NULL"
+         WHERE g.owner_type = 'group' AND g.group_id = ? AND g.deleted_at IS NULL"
     )
     .bind(group_id)
     .fetch_optional(pool)
@@ -214,7 +214,7 @@ pub async fn get_groups(
         "SELECT g.group_id, g.name, g.mode, g.group_prompt, g.invite_prompt, g.use_unified_model, g.unified_model, g.tag_match_mode, g.created_at, av.dominant_color 
          FROM groups g
          LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group' AND av.deleted_at IS NULL
-         WHERE g.deleted_at IS NULL"
+         WHERE g.owner_type = 'group' AND g.deleted_at IS NULL"
     )
     .fetch_all(pool)
     .await
@@ -392,7 +392,8 @@ pub async fn create_group(
     let config_hash = HashAggregator::compute_group_config_hash(&dto);
 
     sqlx::query(
-        "INSERT INTO groups (group_id, name, created_at, updated_at, mode, use_unified_model, config_hash) VALUES (?, ?, ?, ?, 'sequential', 0, ?)"
+        "INSERT INTO groups (owner_type, group_id, name, created_at, updated_at, mode, use_unified_model, config_hash)
+         VALUES ('group', ?, ?, ?, ?, 'sequential', 0, ?)"
     )
     .bind(&group_id)
     .bind(&name)
@@ -418,7 +419,8 @@ pub async fn create_group(
         .map_err(|e| e.to_string())?;
 
         // 初始化 Topic 自身哈希
-        HashAggregator::bubble_topic_hash(&mut tx, &topic.id).await?;
+        let key = TopicKey::new("group", &group_id, &topic.id);
+        HashAggregator::bubble_topic_hash(&mut tx, &key).await?;
     }
 
     // 触发聚合哈希冒泡
@@ -444,12 +446,13 @@ async fn internal_write_group_config<R: Runtime>(
 
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    let deleted_at =
-        sqlx::query_scalar::<_, Option<i64>>("SELECT deleted_at FROM groups WHERE group_id = ?")
-            .bind(group_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
+    let deleted_at = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT deleted_at FROM groups WHERE owner_type = 'group' AND group_id = ?",
+    )
+    .bind(group_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
     if matches!(deleted_at, Some(Some(_))) {
         return Err(format!("Group {group_id} has been deleted"));
     }
@@ -459,11 +462,11 @@ async fn internal_write_group_config<R: Runtime>(
 
     sqlx::query(
         "INSERT INTO groups (
-            group_id, name, mode, 
+            owner_type, group_id, name, mode,
             group_prompt, invite_prompt, use_unified_model, unified_model, 
             tag_match_mode, created_at, config_hash, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(group_id) DO UPDATE SET
+        ) VALUES ('group', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(owner_type, group_id) DO UPDATE SET
             name = excluded.name,
             mode = excluded.mode,
             group_prompt = excluded.group_prompt,
@@ -534,7 +537,7 @@ async fn internal_write_group_config<R: Runtime>(
                     topic_id, owner_type, owner_id, title,
                     created_at, updated_at, locked, unread, config_hash
                 ) VALUES (?, 'group', ?, ?, ?, ?, ?, ?, ?)
-                 ON CONFLICT(topic_id) DO UPDATE SET
+                 ON CONFLICT(owner_type, owner_id, topic_id) DO UPDATE SET
                     title = excluded.title,
                     locked = excluded.locked,
                     unread = excluded.unread,
@@ -557,7 +560,8 @@ async fn internal_write_group_config<R: Runtime>(
             .map_err(|e| e.to_string())?;
 
             // 初始化/更新 Topic 自身哈希
-            HashAggregator::bubble_topic_hash(&mut tx, &topic.id).await?;
+            let key = TopicKey::new("group", group_id, &topic.id);
+            HashAggregator::bubble_topic_hash(&mut tx, &key).await?;
         }
     }
 
@@ -612,12 +616,13 @@ pub async fn delete_group_internal<R: Runtime>(
     }
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    let existing_deleted_at: Option<Option<i64>> =
-        sqlx::query_scalar("SELECT deleted_at FROM groups WHERE group_id = ?")
-            .bind(group_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
+    let existing_deleted_at: Option<Option<i64>> = sqlx::query_scalar(
+        "SELECT deleted_at FROM groups WHERE owner_type = 'group' AND group_id = ?",
+    )
+    .bind(group_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
     match existing_deleted_at {
         None => return Err(format!("Group {group_id} does not exist")),
         Some(Some(existing)) => {
@@ -628,13 +633,15 @@ pub async fn delete_group_internal<R: Runtime>(
         Some(None) => {}
     }
 
-    let group_delete =
-        sqlx::query("UPDATE groups SET deleted_at = ? WHERE group_id = ? AND deleted_at IS NULL")
-            .bind(now)
-            .bind(group_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
+    let group_delete = sqlx::query(
+        "UPDATE groups SET deleted_at = ?
+             WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL",
+    )
+    .bind(now)
+    .bind(group_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
     if group_delete.rows_affected() != 1 {
         return Err(format!("Group {group_id} disappeared during delete"));
     }
@@ -648,12 +655,15 @@ pub async fn delete_group_internal<R: Runtime>(
         .map_err(|e| e.to_string())?;
 
     // 级联将该 Group 下所有话题的所有消息标记为逻辑删除
-    sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id IN (SELECT topic_id FROM topics WHERE owner_id = ? AND owner_type = 'group') AND deleted_at IS NULL")
-        .bind(now)
-        .bind(group_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    sqlx::query(
+        "UPDATE messages SET deleted_at = ?
+         WHERE owner_type = 'group' AND owner_id = ? AND deleted_at IS NULL",
+    )
+    .bind(now)
+    .bind(group_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
 
     sqlx::query(
         "UPDATE avatars SET deleted_at = ?

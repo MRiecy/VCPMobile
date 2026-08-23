@@ -240,7 +240,12 @@ const handleNotificationClick = (e: Event) => {
 const processNotificationClick = async (detail: any) => {
   console.log("[App] Notification click received:", detail);
   const isCliJob = detail?.kind === "cli_job";
-  if (!isCliJob && (!detail?.ownerId || !detail?.topicId)) return;
+  if (
+    !isCliJob &&
+    (!detail?.ownerId ||
+      !detail?.topicId ||
+      (detail?.ownerType !== "agent" && detail?.ownerType !== "group"))
+  ) return;
 
   if (lifecycleStore.state !== "READY") {
     console.log("[App] Core not ready yet, deferring notification click routing...");
@@ -317,7 +322,7 @@ const processNotificationClick = async (detail: any) => {
   }
 
   // 3. 切换话题
-  sessionStore.selectTopicById(detail.ownerId, detail.topicId);
+  sessionStore.selectTopicById(detail.ownerId, detail.ownerType, detail.topicId);
 };
 
 // --- Global Swipe Logic for Sidebar ---

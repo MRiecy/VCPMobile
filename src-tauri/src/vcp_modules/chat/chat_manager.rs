@@ -1,6 +1,7 @@
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
+use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
@@ -224,12 +225,15 @@ pub async fn delete_messages(
     app_handle: tauri::AppHandle,
     db_state: tauri::State<'_, crate::vcp_modules::db_manager::DbState>,
     active_requests: tauri::State<'_, crate::vcp_modules::vcp_client::ActiveRequests>,
+    owner_id: String,
+    owner_type: String,
     topic_id: String,
     msg_ids: Vec<String>,
 ) -> Result<(), String> {
-    let result = message_service::delete_messages(&db_state.pool, &topic_id, msg_ids, None).await?;
+    let key = TopicKey::new(owner_type, owner_id, &topic_id);
+    let result = message_service::delete_messages(&db_state.pool, &key, msg_ids, None).await?;
     for msg_id in &result.active_ids {
-        if let Err(error) = active_requests.cancel(msg_id) {
+        if let Err(error) = active_requests.cancel(&MessageKey::new(key.clone(), msg_id)) {
             log::warn!("Failed to cancel deleted generation {}: {}", msg_id, error);
         }
     }
@@ -263,17 +267,16 @@ pub async fn truncate_history_after_timestamp(
     topic_id: String,
     timestamp: i64,
 ) -> Result<(), String> {
+    let key = TopicKey::new(owner_type, owner_id, &topic_id);
     let deletion = message_service::truncate_history_after_timestamp(
         app_handle.clone(),
         &db_state.pool,
-        &owner_id,
-        &owner_type,
-        &topic_id,
+        &key,
         timestamp,
     )
     .await?;
     for msg_id in &deletion.active_ids {
-        if let Err(error) = active_requests.cancel(msg_id) {
+        if let Err(error) = active_requests.cancel(&MessageKey::new(key.clone(), msg_id)) {
             log::warn!(
                 "Failed to cancel truncated generation {}: {}",
                 msg_id,

@@ -136,22 +136,32 @@ const shell = computed(() => props.message.shell);
 
 // === Streaming State ===
 
-// 数据层面：消息是否处于任意活跃流中（不依赖当前话题）
-const isMessageInActiveStream = computed(() => streamStore.isMessageActive(props.message.id));
+// 数据层面：消息是否处于当前完整会话的活跃流中。
+const isMessageInActiveStream = computed(() => {
+  const key = sessionStore.currentConversationKey;
+  return key
+    ? streamStore.isMessageActive(
+        key.ownerId,
+        key.ownerType,
+        key.topicId,
+        props.message.id,
+      )
+    : false;
+});
 
 // UI 层面：消息是否在当前视口中显示流式状态
 const isStreaming = computed(() => {
   if (shell.value?.isUser) return false;
 
-  const isGroup = !!props.message.isGroupMessage || !!props.message.groupId || sessionStore.currentSelectedItem?.type === "group";
-  const itemId = isGroup
-    ? (props.message.groupId || sessionStore.currentSelectedItem?.id)
-    : (props.message.agentId || props.agentId);
+  const key = sessionStore.currentConversationKey;
+  if (!key) return false;
 
-  const topicId = sessionStore.currentTopicId;
-  if (!itemId || !topicId) return false;
-
-  return streamStore.isMessageActiveInSession(itemId, topicId, props.message.id);
+  return streamStore.isMessageActiveInSession(
+    key.ownerId,
+    key.ownerType,
+    key.topicId,
+    props.message.id,
+  );
 });
 
 function isBrkNode(node: any): boolean {
@@ -608,7 +618,17 @@ const showMessageContextMenu = async () => {
       label: "中止回复",
       icon: StopCircle,
       danger: true,
-      handler: () => streamStore.stopMessage(props.message.id),
+      handler: () => {
+        const key = sessionStore.currentConversationKey;
+        if (key) {
+          streamStore.stopMessage(
+            key.ownerId,
+            key.ownerType,
+            key.topicId,
+            props.message.id,
+          );
+        }
+      },
     });
   }
 

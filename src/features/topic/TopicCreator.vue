@@ -47,7 +47,11 @@ const selectTopic = async (
   }
 
   // 使用统一的 sessionStore 选择话题，历史加载由 ChatView 的 watcher 响应
-  await sessionStore.selectTopicById(itemId, topicId);
+  await sessionStore.selectTopicById(
+    itemId,
+    ownerType as "agent" | "group",
+    topicId,
+  );
 
   const createdTopic = topicStore.topics.find((topic) => topic.id === topicId);
   if (createdTopic) {

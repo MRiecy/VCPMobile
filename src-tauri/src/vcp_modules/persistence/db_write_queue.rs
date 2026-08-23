@@ -5,8 +5,7 @@ use crate::vcp_modules::sync_dto::{
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_logger::SyncLogger;
 use crate::vcp_modules::sync_types::is_valid_avatar_owner;
-use rusqlite::OptionalExtension;
-
+use crate::vcp_modules::topic_types::TopicKey;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
@@ -33,7 +32,7 @@ pub enum DbWriteTask {
         topics: Vec<(String, GroupTopicSyncDTO)>,
     },
     TopicMessages {
-        topic_id: String,
+        key: TopicKey,
         messages: Vec<crate::vcp_modules::chat_manager::ChatMessage>,
         contents: Vec<String>,
         render_bytes: Vec<Vec<u8>>,
@@ -543,19 +542,19 @@ impl DbWriteQueue {
                                     Self::rusqlite_upsert_group_topic(&tx, &tid, &dto)?;
                                 }
                             }
-                            DbWriteTask::TopicMessages { topic_id, messages, contents, render_bytes, content_hashes, skip_bubble } => {
+                            DbWriteTask::TopicMessages { key, messages, contents, render_bytes, content_hashes, skip_bubble } => {
                                 if !skip_bubble {
-                                    affected_topics.insert(topic_id.clone());
+                                    affected_topics.insert(key.clone());
                                 }
-                                Self::rusqlite_upsert_messages_batch(&tx, &topic_id, messages, contents, render_bytes, content_hashes)?;
+                                Self::rusqlite_upsert_messages_batch(&tx, &key, messages, contents, render_bytes, content_hashes)?;
                             }
                             DbWriteTask::Flush { .. } => unreachable!(),
                         }
                     }
 
                     // [Phase 5] 统一冒泡：分层去重，批量校验存在，确保最小化开销
-                    for topic_id in affected_topics {
-                        Self::rusqlite_bubble_topic_hash(&tx, &topic_id)?;
+                    for key in affected_topics {
+                        Self::rusqlite_bubble_topic_hash(&tx, &key)?;
                     }
 
                     // 批量提取 Owner 并去重校验
@@ -576,7 +575,8 @@ impl DbWriteQueue {
                         for chunk in requested.chunks(400) {
                             let placeholders = vec!["?"; chunk.len()].join(",");
                             let sql = format!(
-                                "SELECT agent_id FROM agents WHERE agent_id IN ({}) AND deleted_at IS NULL",
+                                "SELECT agent_id FROM agents
+                                 WHERE owner_type = 'agent' AND agent_id IN ({}) AND deleted_at IS NULL",
                                 placeholders
                             );
                             let mut stmt = tx.prepare(&sql)?;
@@ -605,7 +605,8 @@ impl DbWriteQueue {
                         for chunk in requested.chunks(400) {
                             let placeholders = vec!["?"; chunk.len()].join(",");
                             let sql = format!(
-                                "SELECT group_id FROM groups WHERE group_id IN ({}) AND deleted_at IS NULL",
+                                "SELECT group_id FROM groups
+                                 WHERE owner_type = 'group' AND group_id IN ({}) AND deleted_at IS NULL",
                                 placeholders
                             );
                             let mut stmt = tx.prepare(&sql)?;
@@ -713,11 +714,11 @@ impl DbWriteQueue {
 
         let changed = tx.execute(
             "INSERT INTO agents (
-                agent_id, name, system_prompt, model, temperature, 
+                owner_type, agent_id, name, system_prompt, model, temperature,
                 context_token_limit, max_output_tokens, 
                 stream_output, config_hash, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(agent_id) DO UPDATE SET
+            ) VALUES ('agent', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(owner_type, agent_id) DO UPDATE SET
                 name = excluded.name, 
                 system_prompt = excluded.system_prompt, 
                 model = excluded.model, 
@@ -769,11 +770,11 @@ impl DbWriteQueue {
 
         let changed = tx.execute(
             "INSERT INTO groups (
-                group_id, name, mode,
+                owner_type, group_id, name, mode,
                 group_prompt, invite_prompt, use_unified_model, unified_model,
                 tag_match_mode, created_at, config_hash, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(group_id) DO UPDATE SET
+            ) VALUES ('group', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(owner_type, group_id) DO UPDATE SET
                 name = excluded.name,
                 mode = excluded.mode,
                 group_prompt = excluded.group_prompt,
@@ -845,12 +846,18 @@ impl DbWriteQueue {
         }
         let parent_is_live = match owner_type {
             "agent" => tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM agents WHERE agent_id = ? AND deleted_at IS NULL)",
+                "SELECT EXISTS(
+                    SELECT 1 FROM agents
+                    WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL
+                 )",
                 [owner_id],
                 |row| row.get::<_, bool>(0),
             )?,
             "group" => tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM groups WHERE group_id = ? AND deleted_at IS NULL)",
+                "SELECT EXISTS(
+                    SELECT 1 FROM groups
+                    WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL
+                 )",
                 [owner_id],
                 |row| row.get::<_, bool>(0),
             )?,
@@ -891,7 +898,10 @@ impl DbWriteQueue {
             ));
         }
         let owner_exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM agents WHERE agent_id = ? AND deleted_at IS NULL)",
+            "SELECT EXISTS(
+                SELECT 1 FROM agents
+                WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL
+             )",
             [&dto.owner_id],
             |row| row.get(0),
         )?;
@@ -901,39 +911,17 @@ impl DbWriteQueue {
                 dto.owner_id
             )));
         }
-        let existing = tx
-            .query_row(
-                "SELECT owner_id, owner_type, deleted_at FROM topics WHERE topic_id = ?",
-                [topic_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        if let Some((owner_id, owner_type, deleted_at)) = existing {
-            if deleted_at.is_some() {
-                return Err(Self::sync_contract_error(format!(
-                    "Agent topic {topic_id} is tombstoned"
-                )));
-            }
-            if owner_id != dto.owner_id || owner_type != "agent" {
-                return Err(Self::sync_contract_error(format!(
-                    "Agent topic {topic_id} owner conflicts with the existing live topic"
-                )));
-            }
-        }
         let now = chrono::Utc::now().timestamp_millis();
         let config_hash = HashAggregator::compute_agent_topic_metadata_hash(dto);
 
         let changed = tx.execute(
             "INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, config_hash, updated_at)
             SELECT ?, ?, ?, 'agent', ?, ?, ?, ?, ?
-            WHERE EXISTS (SELECT 1 FROM agents WHERE agent_id = ? AND deleted_at IS NULL)
-            ON CONFLICT(topic_id) DO UPDATE SET
+            WHERE EXISTS (
+                SELECT 1 FROM agents
+                WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL
+            )
+            ON CONFLICT(owner_type, owner_id, topic_id) DO UPDATE SET
             title=excluded.title, created_at=excluded.created_at,
             locked=excluded.locked, unread=excluded.unread,
             updated_at=CASE
@@ -969,7 +957,10 @@ impl DbWriteQueue {
             ));
         }
         let owner_exists: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM groups WHERE group_id = ? AND deleted_at IS NULL)",
+            "SELECT EXISTS(
+                SELECT 1 FROM groups
+                WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL
+             )",
             [&dto.owner_id],
             |row| row.get(0),
         )?;
@@ -979,39 +970,17 @@ impl DbWriteQueue {
                 dto.owner_id
             )));
         }
-        let existing = tx
-            .query_row(
-                "SELECT owner_id, owner_type, deleted_at FROM topics WHERE topic_id = ?",
-                [topic_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        if let Some((owner_id, owner_type, deleted_at)) = existing {
-            if deleted_at.is_some() {
-                return Err(Self::sync_contract_error(format!(
-                    "Group topic {topic_id} is tombstoned"
-                )));
-            }
-            if owner_id != dto.owner_id || owner_type != "group" {
-                return Err(Self::sync_contract_error(format!(
-                    "Group topic {topic_id} owner conflicts with the existing live topic"
-                )));
-            }
-        }
         let now = chrono::Utc::now().timestamp_millis();
         let config_hash = HashAggregator::compute_group_topic_metadata_hash(dto);
 
         let changed = tx.execute(
             "INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, config_hash, updated_at)
             SELECT ?, ?, ?, 'group', ?, 1, 0, ?, ?
-            WHERE EXISTS (SELECT 1 FROM groups WHERE group_id = ? AND deleted_at IS NULL)
-            ON CONFLICT(topic_id) DO UPDATE SET
+            WHERE EXISTS (
+                SELECT 1 FROM groups
+                WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL
+            )
+            ON CONFLICT(owner_type, owner_id, topic_id) DO UPDATE SET
             title=excluded.title, created_at=excluded.created_at,
             updated_at=CASE
                 WHEN topics.config_hash IS NOT excluded.config_hash THEN excluded.updated_at
@@ -1035,7 +1004,7 @@ impl DbWriteQueue {
 
     fn rusqlite_upsert_messages_batch(
         tx: &rusqlite::Transaction,
-        topic_id: &str,
+        key: &TopicKey,
         messages: Vec<ChatMessage>,
         contents: Vec<String>,
         render_bytes: Vec<Vec<u8>>,
@@ -1046,18 +1015,23 @@ impl DbWriteQueue {
             || messages.len() != content_hashes.len()
         {
             return Err(Self::sync_contract_error(format!(
-                "Topic {topic_id} message batch vectors have inconsistent lengths"
+                "Topic {} message batch vectors have inconsistent lengths",
+                key.topic_id
             )));
         }
 
         let topic_is_live: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM topics WHERE topic_id = ? AND deleted_at IS NULL)",
-            [topic_id],
+            "SELECT EXISTS(
+                SELECT 1 FROM topics
+                WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
+             )",
+            rusqlite::params![&key.owner_type, &key.owner_id, &key.topic_id],
             |row| row.get(0),
         )?;
         if !topic_is_live {
             return Err(Self::sync_contract_error(format!(
-                "Message batch parent topic {topic_id} is missing or deleted"
+                "Message batch parent topic {} is missing or deleted",
+                key.topic_id
             )));
         }
         if messages.is_empty() {
@@ -1067,10 +1041,11 @@ impl DbWriteQueue {
             message
                 .topic_id
                 .as_deref()
-                .is_some_and(|message_topic| message_topic != topic_id)
+                .is_some_and(|message_topic| message_topic != key.topic_id)
         }) {
             return Err(Self::sync_contract_error(format!(
-                "Message batch contains a topic id conflicting with {topic_id}"
+                "Message batch contains a topic id conflicting with {}",
+                key.topic_id
             )));
         }
 
@@ -1081,11 +1056,15 @@ impl DbWriteQueue {
         for chunk in messages.chunks(998) {
             let placeholders = vec!["?"; chunk.len()].join(", ");
             let sql = format!(
-                "SELECT msg_id FROM messages WHERE topic_id = ? AND deleted_at IS NOT NULL AND msg_id IN ({})",
+                "SELECT msg_id FROM messages
+                 WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+                   AND deleted_at IS NOT NULL AND msg_id IN ({})",
                 placeholders
             );
-            let mut params = Vec::with_capacity(chunk.len() + 1);
-            params.push(topic_id.to_string());
+            let mut params = Vec::with_capacity(chunk.len() + 3);
+            params.push(key.owner_type.clone());
+            params.push(key.owner_id.clone());
+            params.push(key.topic_id.clone());
             params.extend(chunk.iter().map(|message| message.id.clone()));
             let mut statement = tx.prepare_cached(&sql)?;
             let rows = statement.query_map(rusqlite::params_from_iter(params), |row| row.get(0))?;
@@ -1122,7 +1101,7 @@ impl DbWriteQueue {
                 .collect();
             return Self::rusqlite_upsert_messages_batch(
                 tx,
-                topic_id,
+                key,
                 filtered_messages,
                 filtered_contents,
                 filtered_render_bytes,
@@ -1134,7 +1113,7 @@ impl DbWriteQueue {
 
         // Phase 3: Turbo Mode - Chunked Bulk Insert
         const MAX_PARAMS: usize = 999;
-        const PARAMS_PER_MSG: usize = 13;
+        const PARAMS_PER_MSG: usize = 15;
         let chunk_size = MAX_PARAMS / PARAMS_PER_MSG;
 
         for chunk_indices in messages
@@ -1146,7 +1125,7 @@ impl DbWriteQueue {
             // 1. 批量插入 messages 表 (不含 render_content)
             let mut sql_msgs = String::from(
                 "INSERT INTO messages (
-                    msg_id, topic_id, role, name, agent_id, content, timestamp,
+                    owner_type, owner_id, topic_id, msg_id, role, name, agent_id, content, timestamp,
                     is_group_message, group_id, finish_reason,
                     content_hash, created_at, updated_at
                 ) VALUES ",
@@ -1156,11 +1135,11 @@ impl DbWriteQueue {
                 if i > 0 {
                     sql_msgs.push_str(", ");
                 }
-                sql_msgs.push_str("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                sql_msgs.push_str("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
             }
 
             sql_msgs.push_str(
-                " ON CONFLICT(topic_id, msg_id) DO UPDATE SET
+                " ON CONFLICT(owner_type, owner_id, topic_id, msg_id) DO UPDATE SET
                     content = excluded.content,
                     role = excluded.role,
                     name = excluded.name,
@@ -1181,12 +1160,14 @@ impl DbWriteQueue {
                 let updated_at = msg.updated_at.unwrap_or(msg.timestamp);
                 if updated_at > (1_u64 << 53) - 1 {
                     return Err(Self::sync_contract_error(format!(
-                        "Message {topic_id}/{} updatedAt exceeds the safe integer range",
-                        msg.id
+                        "Message {}/{} updatedAt exceeds the safe integer range",
+                        key.topic_id, msg.id
                     )));
                 }
+                params_msgs.push(Box::new(key.owner_type.clone()));
+                params_msgs.push(Box::new(key.owner_id.clone()));
+                params_msgs.push(Box::new(key.topic_id.clone()));
                 params_msgs.push(Box::new(msg.id.clone()));
-                params_msgs.push(Box::new(topic_id.to_string()));
                 params_msgs.push(Box::new(msg.role.clone()));
                 params_msgs.push(Box::new(msg.name.clone()));
                 params_msgs.push(Box::new(msg.agent_id.clone()));
@@ -1208,12 +1189,15 @@ impl DbWriteQueue {
             // 先失效本批全部旧缓存；预渲染关闭或编译失败时不能继续沿用旧内容。
             let cache_placeholders = vec!["?"; chunk_indices.len()].join(", ");
             let delete_cache_sql = format!(
-                "DELETE FROM render_cache WHERE topic_id = ? AND msg_id IN ({})",
+                "DELETE FROM render_cache
+                 WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id IN ({})",
                 cache_placeholders
             );
             let mut delete_cache = tx.prepare_cached(&delete_cache_sql)?;
-            let mut delete_params: Vec<String> = Vec::with_capacity(chunk_indices.len() + 1);
-            delete_params.push(topic_id.to_string());
+            let mut delete_params: Vec<String> = Vec::with_capacity(chunk_indices.len() + 3);
+            delete_params.push(key.owner_type.clone());
+            delete_params.push(key.owner_id.clone());
+            delete_params.push(key.topic_id.clone());
             delete_params.extend(chunk_indices.iter().map(|(_, msg)| msg.id.clone()));
             let delete_refs: Vec<&dyn rusqlite::ToSql> = delete_params
                 .iter()
@@ -1231,7 +1215,7 @@ impl DbWriteQueue {
             if !render_chunk.is_empty() {
                 let mut sql_render = String::from(
                     "INSERT INTO render_cache (
-                        topic_id, msg_id, render_content, content_hash,
+                        owner_type, owner_id, topic_id, msg_id, render_content, content_hash,
                         renderer_schema_version, updated_at
                      ) VALUES ",
                 );
@@ -1240,11 +1224,11 @@ impl DbWriteQueue {
                     if i > 0 {
                         sql_render.push_str(", ");
                     }
-                    sql_render.push_str("(?, ?, ?, ?, ?, ?)");
+                    sql_render.push_str("(?, ?, ?, ?, ?, ?, ?, ?)");
                 }
 
                 sql_render.push_str(
-                    " ON CONFLICT(topic_id, msg_id) DO UPDATE SET
+                    " ON CONFLICT(owner_type, owner_id, topic_id, msg_id) DO UPDATE SET
                         render_content = excluded.render_content,
                         content_hash = excluded.content_hash,
                         renderer_schema_version = excluded.renderer_schema_version,
@@ -1255,7 +1239,9 @@ impl DbWriteQueue {
                 let mut params_render: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
                 for (idx, msg) in render_chunk {
-                    params_render.push(Box::new(topic_id.to_string()));
+                    params_render.push(Box::new(key.owner_type.clone()));
+                    params_render.push(Box::new(key.owner_id.clone()));
+                    params_render.push(Box::new(key.topic_id.clone()));
                     params_render.push(Box::new(msg.id.clone()));
                     params_render.push(Box::new(render_bytes[idx].clone()));
                     params_render.push(Box::new(content_hashes[idx].clone()));
@@ -1277,37 +1263,44 @@ impl DbWriteQueue {
             // SQLite 参数上限，预留 1 个给 topic_id
             let placeholders = vec!["?"; chunk.len()].join(", ");
             let sql_del_fts = format!(
-                "DELETE FROM messages_fts WHERE topic_id = ? AND msg_id IN ({})",
+                "DELETE FROM messages_fts
+                 WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id IN ({})",
                 placeholders
             );
             let mut stmt_del_fts = tx.prepare_cached(&sql_del_fts)?;
 
-            let mut params: Vec<String> = Vec::with_capacity(chunk.len() + 1);
-            params.push(topic_id.to_string());
+            let mut params: Vec<String> = Vec::with_capacity(chunk.len() + 3);
+            params.push(key.owner_type.clone());
+            params.push(key.owner_id.clone());
+            params.push(key.topic_id.clone());
             for id in chunk {
                 params.push(id.clone());
             }
             stmt_del_fts.execute(rusqlite::params_from_iter(params))?;
         }
 
-        const PARAMS_PER_FTS: usize = 3;
+        const PARAMS_PER_FTS: usize = 5;
         let fts_chunk_size = MAX_PARAMS / PARAMS_PER_FTS;
         for chunk in messages.chunks(fts_chunk_size) {
             let mut sql_ins_fts =
-                String::from("INSERT INTO messages_fts (msg_id, topic_id, content) VALUES ");
+                String::from(
+                    "INSERT INTO messages_fts (msg_id, topic_id, content, owner_type, owner_id) VALUES ",
+                );
             for i in 0..chunk.len() {
                 if i > 0 {
                     sql_ins_fts.push_str(", ");
                 }
-                sql_ins_fts.push_str("(?, ?, ?)");
+                sql_ins_fts.push_str("(?, ?, ?, ?, ?)");
             }
             let mut stmt_ins_fts = tx.prepare_cached(&sql_ins_fts)?;
             let mut params_fts: Vec<String> = Vec::new();
             for msg in chunk {
                 // trigram 分词器（migration 0008 起）直接索引原文，无需 CJK 预处理
                 params_fts.push(msg.id.clone());
-                params_fts.push(topic_id.to_string());
+                params_fts.push(key.topic_id.clone());
                 params_fts.push(msg.content.clone());
+                params_fts.push(key.owner_type.clone());
+                params_fts.push(key.owner_id.clone());
             }
             stmt_ins_fts.execute(rusqlite::params_from_iter(params_fts))?;
         }
@@ -1402,12 +1395,16 @@ impl DbWriteQueue {
         for chunk in msg_ids.chunks(999) {
             let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
             let sql = format!(
-                "DELETE FROM message_attachments WHERE deleted_at IS NULL AND topic_id = ? AND msg_id IN ({})",
+                "DELETE FROM message_attachments
+                 WHERE deleted_at IS NULL AND owner_type = ? AND owner_id = ? AND topic_id = ?
+                   AND msg_id IN ({})",
                 placeholders
             );
             let mut stmt = tx.prepare_cached(&sql)?;
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
-            params.push(Box::new(topic_id.to_string()));
+            params.push(Box::new(key.owner_type.clone()));
+            params.push(Box::new(key.owner_id.clone()));
+            params.push(Box::new(key.topic_id.clone()));
             for id in chunk {
                 params.push(Box::new(id.clone()));
             }
@@ -1418,24 +1415,27 @@ impl DbWriteQueue {
 
         // Chunked Relation Insert
         if !all_relations.is_empty() {
-            const PARAMS_PER_REL: usize = 8;
+            const PARAMS_PER_REL: usize = 10;
             let rel_chunk_size = MAX_PARAMS / PARAMS_PER_REL;
             for chunk in all_relations.chunks(rel_chunk_size) {
                 let mut sql = String::from(
                     "INSERT INTO message_attachments (
-                    topic_id, msg_id, hash, attachment_order, display_name, src, status, created_at
+                    owner_type, owner_id, topic_id, msg_id, hash, attachment_order,
+                    display_name, src, status, created_at
                 ) VALUES ",
                 );
                 for i in 0..chunk.len() {
                     if i > 0 {
                         sql.push_str(", ");
                     }
-                    sql.push_str("(?, ?, ?, ?, ?, ?, ?, ?)");
+                    sql.push_str("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
                 }
                 let mut stmt = tx.prepare_cached(&sql)?;
                 let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
                 for rel in chunk {
-                    params.push(Box::new(topic_id.to_string()));
+                    params.push(Box::new(key.owner_type.clone()));
+                    params.push(Box::new(key.owner_id.clone()));
+                    params.push(Box::new(key.topic_id.clone()));
                     params.push(Box::new(rel.0.clone()));
                     params.push(Box::new(rel.1.clone()));
                     params.push(Box::new(rel.2));
@@ -1455,48 +1455,57 @@ impl DbWriteQueue {
 
     fn rusqlite_bubble_topic_hash(
         tx: &rusqlite::Transaction,
-        topic_id: &str,
+        key: &TopicKey,
     ) -> rusqlite::Result<()> {
         // 1. 计算 content_hash (消息聚合)
-        let mut stmt = tx.prepare("SELECT msg_id, content_hash FROM messages WHERE topic_id = ? AND deleted_at IS NULL ORDER BY timestamp ASC, msg_id ASC")?;
+        let mut stmt = tx.prepare(
+            "SELECT msg_id, content_hash FROM messages
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
+             ORDER BY timestamp ASC, msg_id ASC",
+        )?;
         let hashes: Vec<String> = stmt
-            .query_map([topic_id], |row| {
-                let message_id = row.get::<_, String>(0)?;
-                let message_hash = row.get::<_, String>(1)?;
-                Ok(HashAggregator::compute_message_leaf_hash(
-                    &message_id,
-                    &message_hash,
-                ))
-            })?
+            .query_map(
+                rusqlite::params![&key.owner_type, &key.owner_id, &key.topic_id],
+                |row| {
+                    let message_id = row.get::<_, String>(0)?;
+                    let message_hash = row.get::<_, String>(1)?;
+                    Ok(HashAggregator::compute_message_leaf_hash(
+                        &message_id,
+                        &message_hash,
+                    ))
+                },
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let root_hash = crate::vcp_modules::sync_types::compute_merkle_root(hashes);
 
-        // 2. 计算 config_hash (元数据)
-        let owner_type: String = tx.query_row(
-            "SELECT owner_type FROM topics WHERE topic_id = ? AND deleted_at IS NULL",
-            [topic_id],
-            |r| r.get(0),
-        )?;
-
-        let config_hash = if owner_type == "agent" {
-            let dto = Self::rusqlite_load_agent_topic_dto(tx, topic_id)?;
+        let config_hash = if key.owner_type == "agent" {
+            let dto = Self::rusqlite_load_agent_topic_dto(tx, key)?;
             HashAggregator::compute_agent_topic_metadata_hash(&dto)
-        } else if owner_type == "group" {
-            let dto = Self::rusqlite_load_group_topic_dto(tx, topic_id)?;
+        } else if key.owner_type == "group" {
+            let dto = Self::rusqlite_load_group_topic_dto(tx, key)?;
             HashAggregator::compute_group_topic_metadata_hash(&dto)
         } else {
             return Err(Self::sync_contract_error(format!(
-                "Topic {topic_id} has unsupported owner type {owner_type}"
+                "Topic {} has unsupported owner type {}",
+                key.topic_id, key.owner_type
             )));
         };
 
         let changed = tx.execute(
-            "UPDATE topics SET content_hash = ?, config_hash = ? WHERE topic_id = ? AND deleted_at IS NULL",
-            rusqlite::params![root_hash, config_hash, topic_id],
+            "UPDATE topics SET content_hash = ?, config_hash = ?
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
+            rusqlite::params![
+                root_hash,
+                config_hash,
+                &key.owner_type,
+                &key.owner_id,
+                &key.topic_id
+            ],
         )?;
         if changed != 1 {
             return Err(Self::sync_contract_error(format!(
-                "Topic {topic_id} disappeared during hash update"
+                "Topic {} disappeared during hash update",
+                key.topic_id
             )));
         }
         Ok(())
@@ -1518,7 +1527,8 @@ impl DbWriteQueue {
         }
         let root_hash = crate::vcp_modules::sync_types::compute_merkle_root(hashes);
         let changed = tx.execute(
-            "UPDATE agents SET content_hash = ? WHERE agent_id = ? AND deleted_at IS NULL",
+            "UPDATE agents SET content_hash = ?
+             WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL",
             [root_hash, agent_id.to_string()],
         )?;
         if changed != 1 {
@@ -1545,7 +1555,8 @@ impl DbWriteQueue {
         }
         let root_hash = crate::vcp_modules::sync_types::compute_merkle_root(hashes);
         let changed = tx.execute(
-            "UPDATE groups SET content_hash = ? WHERE group_id = ? AND deleted_at IS NULL",
+            "UPDATE groups SET content_hash = ?
+             WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL",
             [root_hash, group_id.to_string()],
         )?;
         if changed != 1 {
@@ -1558,29 +1569,33 @@ impl DbWriteQueue {
 
     fn rusqlite_load_agent_topic_dto(
         tx: &rusqlite::Transaction,
-        topic_id: &str,
+        key: &TopicKey,
     ) -> rusqlite::Result<AgentTopicSyncDTO> {
         tx.query_row(
-            "SELECT topic_id, title, created_at, locked, unread, owner_id FROM topics WHERE topic_id = ?",
-            [topic_id],
-            |row| Ok(AgentTopicSyncDTO {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                created_at: row.get(2)?,
-                locked: row.get::<_, i64>(3)? != 0,
-                unread: row.get::<_, i64>(4)? != 0,
-                owner_id: row.get(5)?,
-            })
+            "SELECT topic_id, title, created_at, locked, unread, owner_id FROM topics
+             WHERE owner_type = 'agent' AND owner_id = ? AND topic_id = ?",
+            rusqlite::params![&key.owner_id, &key.topic_id],
+            |row| {
+                Ok(AgentTopicSyncDTO {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    created_at: row.get(2)?,
+                    locked: row.get::<_, i64>(3)? != 0,
+                    unread: row.get::<_, i64>(4)? != 0,
+                    owner_id: row.get(5)?,
+                })
+            },
         )
     }
 
     fn rusqlite_load_group_topic_dto(
         tx: &rusqlite::Transaction,
-        topic_id: &str,
+        key: &TopicKey,
     ) -> rusqlite::Result<GroupTopicSyncDTO> {
         tx.query_row(
-            "SELECT topic_id, title, created_at, owner_id FROM topics WHERE topic_id = ?",
-            [topic_id],
+            "SELECT topic_id, title, created_at, owner_id FROM topics
+             WHERE owner_type = 'group' AND owner_id = ? AND topic_id = ?",
+            rusqlite::params![&key.owner_id, &key.topic_id],
             |row| {
                 Ok(GroupTopicSyncDTO {
                     id: row.get(0)?,

@@ -20,18 +20,18 @@ const GET_AVATAR_SQL: &str = "SELECT mime_type, image_data, dominant_color, upda
      WHERE owner_type = ? AND owner_id = ? AND deleted_at IS NULL
        AND ((owner_type = 'user' AND owner_id = 'user_avatar')
          OR (owner_type = 'agent' AND EXISTS (
-              SELECT 1 FROM agents WHERE agent_id = avatars.owner_id AND deleted_at IS NULL))
+              SELECT 1 FROM agents WHERE owner_type = 'agent' AND agent_id = avatars.owner_id AND deleted_at IS NULL))
          OR (owner_type = 'group' AND EXISTS (
-              SELECT 1 FROM groups WHERE group_id = avatars.owner_id AND deleted_at IS NULL)))";
+              SELECT 1 FROM groups WHERE owner_type = 'group' AND group_id = avatars.owner_id AND deleted_at IS NULL)))";
 const BATCH_AVATARS_SQL: &str =
     "SELECT owner_type, owner_id, mime_type, image_data, dominant_color, updated_at
      FROM avatars
      WHERE deleted_at IS NULL
        AND ((owner_type = 'user' AND owner_id = 'user_avatar')
          OR (owner_type = 'agent' AND EXISTS (
-              SELECT 1 FROM agents WHERE agent_id = avatars.owner_id AND deleted_at IS NULL))
+              SELECT 1 FROM agents WHERE owner_type = 'agent' AND agent_id = avatars.owner_id AND deleted_at IS NULL))
          OR (owner_type = 'group' AND EXISTS (
-              SELECT 1 FROM groups WHERE group_id = avatars.owner_id AND deleted_at IS NULL)))";
+              SELECT 1 FROM groups WHERE owner_type = 'group' AND group_id = avatars.owner_id AND deleted_at IS NULL)))";
 const STORE_AVATAR_COLOR_SQL: &str = "UPDATE avatars SET dominant_color = ?
      WHERE owner_type = ? AND owner_id = ? AND deleted_at IS NULL";
 
@@ -69,14 +69,14 @@ pub async fn save_avatar_data<R: Runtime>(
     let mut transaction = pool.begin().await.map_err(|error| error.to_string())?;
     let parent_is_live = match owner_type.as_str() {
         "agent" => sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM agents WHERE agent_id = ? AND deleted_at IS NULL)",
+            "SELECT EXISTS(SELECT 1 FROM agents WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL)",
         )
         .bind(&owner_id)
         .fetch_one(&mut *transaction)
         .await
         .map_err(|error| error.to_string())?,
         "group" => sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM groups WHERE group_id = ? AND deleted_at IS NULL)",
+            "SELECT EXISTS(SELECT 1 FROM groups WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL)",
         )
         .bind(&owner_id)
         .fetch_one(&mut *transaction)
@@ -149,9 +149,9 @@ pub async fn get_avatar<R: Runtime>(
          WHERE owner_type = ? AND owner_id = ? AND deleted_at IS NULL
            AND ((owner_type = 'user' AND owner_id = 'user_avatar')
              OR (owner_type = 'agent' AND EXISTS (
-                  SELECT 1 FROM agents WHERE agent_id = avatars.owner_id AND deleted_at IS NULL))
+                  SELECT 1 FROM agents WHERE owner_type = 'agent' AND agent_id = avatars.owner_id AND deleted_at IS NULL))
              OR (owner_type = 'group' AND EXISTS (
-                  SELECT 1 FROM groups WHERE group_id = avatars.owner_id AND deleted_at IS NULL)))",
+                  SELECT 1 FROM groups WHERE owner_type = 'group' AND group_id = avatars.owner_id AND deleted_at IS NULL)))",
     )
     .bind(&owner_type)
     .bind(&owner_id)
@@ -223,9 +223,9 @@ pub async fn batch_get_avatars<R: Runtime>(
          WHERE deleted_at IS NULL
            AND ((owner_type = 'user' AND owner_id = 'user_avatar')
              OR (owner_type = 'agent' AND EXISTS (
-                  SELECT 1 FROM agents WHERE agent_id = avatars.owner_id AND deleted_at IS NULL))
+                  SELECT 1 FROM agents WHERE owner_type = 'agent' AND agent_id = avatars.owner_id AND deleted_at IS NULL))
              OR (owner_type = 'group' AND EXISTS (
-                  SELECT 1 FROM groups WHERE group_id = avatars.owner_id AND deleted_at IS NULL)))",
+                  SELECT 1 FROM groups WHERE owner_type = 'group' AND group_id = avatars.owner_id AND deleted_at IS NULL)))",
     )
     .fetch_one(pool)
     .await

@@ -2,9 +2,10 @@ use crate::vcp_modules::agent_service::{read_agent_config_internal, AgentConfigS
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::message_service;
+use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use crate::vcp_modules::vcp_client::{
-    perform_vcp_request, perform_vcp_request_registered, ActiveRequestLease, ActiveRequests,
-    StreamEvent, VcpRequestPayload,
+    message_transport_request_id, perform_vcp_request, perform_vcp_request_registered,
+    ActiveRequestLease, ActiveRequests, StreamEvent, VcpRequestPayload,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -52,6 +53,7 @@ pub async fn internal_process_agent_chat_message(
 ) -> Result<Value, String> {
     let agent_id = payload.agent_id;
     let topic_id = payload.topic_id;
+    let topic_key = TopicKey::new("agent", &agent_id, &topic_id);
     let user_message = payload.user_message;
 
     let thinking_id = format!("msg_{}", uuid::Uuid::new_v4());
@@ -76,7 +78,7 @@ pub async fn internal_process_agent_chat_message(
     // 3. 加载轻量级纯文本和附件历史记录用于大模型上下文组装 (从底层隔离 UI 渲染反序列化和 Shell 计算)
     let history = message_service::load_chat_text_history_for_context(
         &app_handle,
-        &topic_id,
+        &topic_key,
         None,
         None,
         true, // include_extracted_text: 组装上下文发送给 VCP 时需要包含附件提取文本内容
@@ -93,7 +95,7 @@ pub async fn internal_process_agent_chat_message(
     let messages = crate::vcp_modules::context_assembler::orchestrate_chat_context(
         &db_state.pool,
         &history,
-        &topic_id,
+        &topic_key,
         &agent_config.name,
         "agent",
         effective_prompt,
@@ -114,12 +116,15 @@ pub async fn internal_process_agent_chat_message(
 
     let context = Some(json!({
         "agentId": agent_id,
+        "ownerId": agent_id,
+        "ownerType": "agent",
         "topicId": topic_id,
         "agentName": agent_config.name
     }));
 
+    let request_key = MessageKey::new(topic_key.clone(), thinking_id.clone());
     let (_request_lease, cancellation_token) =
-        ActiveRequestLease::try_acquire(active_requests.0.clone(), thinking_id.clone())?;
+        ActiveRequestLease::try_acquire(active_requests.0.clone(), request_key.clone())?;
     message_service::begin_stream_message(
         &db_state.pool,
         &agent_id,
@@ -149,7 +154,7 @@ pub async fn internal_process_agent_chat_message(
         model_config,
         message_id: thinking_id.clone(),
         context: context.clone(),
-        transport_request_id: None,
+        transport_request_id: Some(message_transport_request_id(&request_key)),
     };
 
     // 8. 发起请求
@@ -281,10 +286,16 @@ pub async fn handle_assistant_chat_stream(
 
     let context = Some(json!({
         "agentId": agent_id,
+        "ownerId": agent_id,
+        "ownerType": "agent",
         "topicId": "assistant_chat",
         "agentName": agent_config.name
     }));
 
+    let request_key = MessageKey::new(
+        TopicKey::new("agent", &agent_id, "assistant_chat"),
+        thinking_id.clone(),
+    );
     let request_payload = VcpRequestPayload {
         vcp_url: payload.vcp_url,
         vcp_api_key: payload.vcp_api_key,
@@ -292,7 +303,7 @@ pub async fn handle_assistant_chat_stream(
         model_config,
         message_id: thinking_id.clone(),
         context: context.clone(),
-        transport_request_id: None,
+        transport_request_id: Some(message_transport_request_id(&request_key)),
     };
 
     // 发送 thinking 事件通知前端初始化气泡
@@ -302,6 +313,7 @@ pub async fn handle_assistant_chat_stream(
     let result = perform_vcp_request(
         &app_handle,
         active_requests.0.clone(),
+        request_key,
         request_payload,
         Some(stream_channel.clone()),
     )

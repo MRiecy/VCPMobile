@@ -1,5 +1,41 @@
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TopicKey {
+    pub owner_type: String,
+    pub owner_id: String,
+    pub topic_id: String,
+}
+
+impl TopicKey {
+    pub fn new(
+        owner_type: impl Into<String>,
+        owner_id: impl Into<String>,
+        topic_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            owner_type: owner_type.into(),
+            owner_id: owner_id.into(),
+            topic_id: topic_id.into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MessageKey {
+    pub topic: TopicKey,
+    pub msg_id: String,
+}
+
+impl MessageKey {
+    pub fn new(topic: TopicKey, msg_id: impl Into<String>) -> Self {
+        Self {
+            topic,
+            msg_id: msg_id.into(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Topic {
     pub id: String,

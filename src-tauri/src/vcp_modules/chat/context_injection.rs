@@ -1,4 +1,5 @@
 use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::topic_types::TopicKey;
 use chrono::{Local, TimeZone};
 use log::warn;
 use serde::{Deserialize, Serialize};
@@ -95,14 +96,23 @@ fn format_system_metadata(now_str: &str, created_at_str: Option<&str>, system_pr
     *system_prompt = format!("{}{}", metadata, original_prompt);
 }
 
-async fn inject_base_environment(pool: &Pool<Sqlite>, topic_id: &str, system_prompt: &mut String) {
+async fn inject_base_environment(
+    pool: &Pool<Sqlite>,
+    topic: &TopicKey,
+    system_prompt: &mut String,
+) {
     let now = Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
     let mut created_at_str = None;
 
-    match sqlx::query("SELECT created_at FROM topics WHERE topic_id = ?")
-        .bind(topic_id)
-        .fetch_optional(pool)
-        .await
+    match sqlx::query(
+        "SELECT created_at FROM topics
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
+    )
+    .bind(&topic.owner_type)
+    .bind(&topic.owner_id)
+    .bind(&topic.topic_id)
+    .fetch_optional(pool)
+    .await
     {
         Ok(Some(row)) => {
             use sqlx::Row;
@@ -115,7 +125,7 @@ async fn inject_base_environment(pool: &Pool<Sqlite>, topic_id: &str, system_pro
         Err(e) => {
             warn!(
                 "Failed to fetch topic created_at for topic_id {}: {:?}",
-                topic_id, e
+                topic.topic_id, e
             );
         }
     }
@@ -126,7 +136,7 @@ async fn inject_base_environment(pool: &Pool<Sqlite>, topic_id: &str, system_pro
 // 核心流水线：将 VCP 待发送消息列表进行就地拦截与多方位注入
 pub async fn apply_tarven_pipeline(
     pool: &Pool<Sqlite>,
-    topic_id: &str,
+    topic: &TopicKey,
     agent_name: &str,
     scope: &str, // 'agent' | 'group'
     messages: &mut Vec<serde_json::Value>,
@@ -148,7 +158,7 @@ pub async fn apply_tarven_pipeline(
     // 检查是否启用了系统环境元数据注入
     if rules.iter().any(|r| r.id == "system_meta_injection") {
         // 注入基础环境真理
-        inject_base_environment(pool, topic_id, &mut system_content).await;
+        inject_base_environment(pool, topic, &mut system_content).await;
     }
 
     // 过滤 system_suffix 规则并按位置拼接

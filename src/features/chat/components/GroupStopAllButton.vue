@@ -15,7 +15,10 @@ const activeCount = computed(() => streamStore.activeStreamingIds.size);
 
 const handleStopAll = () => {
   if (sessionStore.currentTopicId) {
-    streamStore.stopGroupTurn(sessionStore.currentTopicId);
+    const key = sessionStore.currentConversationKey;
+    if (key?.ownerType === "group") {
+      streamStore.stopGroupTurn(key.ownerId, key.topicId);
+    }
   }
 };
 </script>

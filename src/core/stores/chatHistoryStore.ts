@@ -234,7 +234,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         return { addedCount: 0, aborted: true };
       }
 
-      const hydrated = messages.map(msg => streamStore.activeStreamMessages.get(msg.id) || msg);
+      const hydrated = messages.map(
+        msg => streamStore.getActiveStreamMessage(ownerId, ownerType, topicId, msg.id) || msg,
+      );
       let addedCount = hydrated.length;
       if (offset === 0) {
         currentChatHistory.value = mergeHistoryWindow([], hydrated, false);
@@ -379,7 +381,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         return { ok: false, anchorMissing: true };
       }
 
-      const hydrated = messages.map(msg => streamStore.activeStreamMessages.get(msg.id) || msg);
+      const hydrated = messages.map(
+        msg => streamStore.getActiveStreamMessage(ownerId, ownerType, topicId, msg.id) || msg,
+      );
       currentChatHistory.value = mergeHistoryWindow([], hydrated, false);
       loadedConversationKey.value = key;
       historyOffset.value = currentChatHistory.value.length;
@@ -637,7 +641,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         false,
       );
     }
-    topicStore.incrementTopicMsgCount(key.topicId);
+    topicStore.incrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId);
     await triggerGeneration(userMsg, key);
   };
 
@@ -664,7 +668,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         const currentIndex = currentChatHistory.value.findIndex(message => message.id === messageId);
         if (currentIndex !== -1) currentChatHistory.value.splice(currentIndex);
       }
-      topicStore.decrementTopicMsgCount(key.topicId, countToDelete);
+      topicStore.decrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId, countToDelete);
     } else {
       await invoke("delete_messages", {
         ownerId: key.ownerId,
@@ -676,7 +680,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         const currentIndex = currentChatHistory.value.findIndex(message => message.id === messageId);
         if (currentIndex !== -1) currentChatHistory.value.splice(currentIndex, 1);
       }
-      topicStore.decrementTopicMsgCount(key.topicId, 1);
+      topicStore.decrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId, 1);
     }
   };
 
@@ -685,6 +689,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     if (!key || key.topicId !== topicId) return;
     // 1. 调用后端逻辑删除命令
     await invoke("delete_message_attachment", {
+      ownerId: key.ownerId,
+      ownerType: key.ownerType,
       topicId,
       messageId,
       hash,
@@ -773,7 +779,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     // 2. 乐观更新 UI：截断历史
     const countToDelete = currentChatHistory.value.length - (lastUserMsgIndex + 1);
     currentChatHistory.value = currentChatHistory.value.slice(0, lastUserMsgIndex + 1);
-    topicStore.decrementTopicMsgCount(key.topicId, countToDelete);
+    topicStore.decrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId, countToDelete);
 
 
 
@@ -824,7 +830,12 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     const existingMsg = currentChatHistory.value.find(m => m.id === messageId);
     if (existingMsg && existingMsg.content) return existingMsg.content;
     try {
-      const content = await invoke<string>('fetch_raw_message_content', { messageId });
+      const content = await invoke<string>('fetch_raw_message_content', {
+        ownerId: key.ownerId,
+        ownerType: key.ownerType,
+        topicId: key.topicId,
+        messageId,
+      });
       if (canCommitConversation(key)) {
         const current = currentChatHistory.value.find(message => message.id === messageId);
         if (current) current.content = content;
@@ -868,6 +879,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
 
     try {
       const compiledBlocks = await invoke<ContentBlock[]>("re_render_message", {
+        ownerId: key.ownerId,
+        ownerType: key.ownerType,
         messageId,
         topicId,
       });

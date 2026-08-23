@@ -1,5 +1,6 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::sync_hash::HashAggregator;
+use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use sqlx::Row;
 use tauri::{AppHandle, Manager, Runtime};
 
@@ -9,7 +10,7 @@ async fn soft_delete_topic_data(
     pool: &sqlx::SqlitePool,
     topic_id: &str,
     now: i64,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<MessageKey>, String> {
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
     let Some(parent_row) =
@@ -27,43 +28,62 @@ async fn soft_delete_topic_data(
     if deleted_at.is_some() {
         return Ok(Vec::new());
     }
-    let active_ids: Vec<String> =
-        sqlx::query_scalar("SELECT msg_id FROM active_generations WHERE topic_id = ?")
-            .bind(topic_id)
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
-
-    let deleted =
-        sqlx::query("UPDATE topics SET deleted_at = ? WHERE topic_id = ? AND deleted_at IS NULL")
-            .bind(now)
-            .bind(topic_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
-    if deleted.rows_affected() != 1 {
-        return Err(format!(
-            "Topic {topic_id} does not exist or is already deleted"
-        ));
-    }
-    sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id = ? AND deleted_at IS NULL")
-        .bind(now)
-        .bind(topic_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
-    sqlx::query("DELETE FROM active_generations WHERE topic_id = ?")
-        .bind(topic_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
-
     let owner_id: String = parent_row
         .try_get("owner_id")
         .map_err(|error| format!("Topic {topic_id} owner id decode failed: {error}"))?;
     let owner_type: String = parent_row
         .try_get("owner_type")
         .map_err(|error| format!("Topic {topic_id} owner type decode failed: {error}"))?;
+    let key = TopicKey::new(&owner_type, &owner_id, topic_id);
+    let active_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT msg_id FROM active_generations
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
+    )
+    .bind(&owner_type)
+    .bind(&owner_id)
+    .bind(topic_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let deleted = sqlx::query(
+        "UPDATE topics SET deleted_at = ?
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
+    )
+    .bind(now)
+    .bind(&owner_type)
+    .bind(&owner_id)
+    .bind(topic_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if deleted.rows_affected() != 1 {
+        return Err(format!(
+            "Topic {topic_id} does not exist or is already deleted"
+        ));
+    }
+    sqlx::query(
+        "UPDATE messages SET deleted_at = ?
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
+    )
+    .bind(now)
+    .bind(&owner_type)
+    .bind(&owner_id)
+    .bind(topic_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    sqlx::query(
+        "DELETE FROM active_generations
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
+    )
+    .bind(&owner_type)
+    .bind(&owner_id)
+    .bind(topic_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
     match owner_type.as_str() {
         "agent" => HashAggregator::bubble_agent_hash(&mut tx, &owner_id).await?,
         "group" => HashAggregator::bubble_group_hash(&mut tx, &owner_id).await?,
@@ -74,7 +94,10 @@ async fn soft_delete_topic_data(
         }
     }
     tx.commit().await.map_err(|e| e.to_string())?;
-    Ok(active_ids)
+    Ok(active_ids
+        .into_iter()
+        .map(|msg_id| MessageKey::new(key.clone(), msg_id))
+        .collect())
 }
 
 impl DeleteExecutor {
@@ -87,12 +110,13 @@ impl DeleteExecutor {
             return Err("Agent delete requires a non-negative deletedAt".to_string());
         }
         let db = app.state::<DbState>();
-        let exists =
-            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM agents WHERE agent_id = ?)")
-                .bind(agent_id)
-                .fetch_one(&db.pool)
-                .await
-                .map_err(|e| e.to_string())?;
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM agents WHERE owner_type = 'agent' AND agent_id = ?)",
+        )
+        .bind(agent_id)
+        .fetch_one(&db.pool)
+        .await
+        .map_err(|e| e.to_string())?;
         if !exists {
             return Ok(());
         }
@@ -116,12 +140,13 @@ impl DeleteExecutor {
             return Err("Group delete requires a non-negative deletedAt".to_string());
         }
         let db = app.state::<DbState>();
-        let exists =
-            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM groups WHERE group_id = ?)")
-                .bind(group_id)
-                .fetch_one(&db.pool)
-                .await
-                .map_err(|e| e.to_string())?;
+        let exists = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM groups WHERE owner_type = 'group' AND group_id = ?)",
+        )
+        .bind(group_id)
+        .fetch_one(&db.pool)
+        .await
+        .map_err(|e| e.to_string())?;
         if !exists {
             return Ok(());
         }
@@ -153,11 +178,11 @@ impl DeleteExecutor {
         if let Some(active_requests) =
             app.try_state::<crate::vcp_modules::vcp_client::ActiveRequests>()
         {
-            for msg_id in active_ids {
-                if let Err(error) = active_requests.cancel(&msg_id) {
+            for key in active_ids {
+                if let Err(error) = active_requests.cancel(&key) {
                     log::warn!(
                         "[DeleteExecutor] Failed to cancel generation {} after topic delete: {}",
-                        msg_id,
+                        key.msg_id,
                         error
                     );
                 }
@@ -179,19 +204,21 @@ impl DeleteExecutor {
             );
         }
         let db = app.state::<DbState>();
-        let topic_is_live = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM topics WHERE topic_id = ? AND deleted_at IS NULL)",
+        let topic_owner: Option<(String, String)> = sqlx::query_as(
+            "SELECT owner_type, owner_id FROM topics
+             WHERE topic_id = ? AND deleted_at IS NULL",
         )
         .bind(topic_id)
-        .fetch_one(&db.pool)
+        .fetch_optional(&db.pool)
         .await
         .map_err(|e| e.to_string())?;
-        if !topic_is_live {
+        let Some((owner_type, owner_id)) = topic_owner else {
             return Ok(());
-        }
+        };
+        let key = TopicKey::new(owner_type, owner_id, topic_id);
         let result = crate::vcp_modules::message_service::delete_messages(
             &db.pool,
-            topic_id,
+            &key,
             vec![message_id.to_string()],
             Some(deleted_at),
         )
@@ -200,7 +227,9 @@ impl DeleteExecutor {
             app.try_state::<crate::vcp_modules::vcp_client::ActiveRequests>()
         {
             for active_id in result.active_ids {
-                if let Err(error) = active_requests.cancel(&active_id) {
+                if let Err(error) =
+                    active_requests.cancel(&MessageKey::new(key.clone(), &active_id))
+                {
                     log::warn!(
                         "[DeleteExecutor] Failed to cancel generation {active_id} after message delete: {error}"
                     );
@@ -264,12 +293,17 @@ impl DeleteExecutor {
         let threshold = chrono::Utc::now().timestamp_millis() - days * 24 * 60 * 60 * 1000;
 
         // 1. 物理强清除已删除超过安全期（30天）的消息的预渲染缓存
-        let render_cache =
-            sqlx::query("DELETE FROM render_cache WHERE (topic_id, msg_id) IN (SELECT topic_id, msg_id FROM messages WHERE deleted_at IS NOT NULL AND deleted_at < ?)")
-                .bind(threshold)
-                .execute(&db.pool)
-                .await
-                .map_err(|e| e.to_string())?;
+        let render_cache = sqlx::query(
+            "DELETE FROM render_cache
+                WHERE (owner_type, owner_id, topic_id, msg_id) IN (
+                    SELECT owner_type, owner_id, topic_id, msg_id FROM messages
+                    WHERE deleted_at IS NOT NULL AND deleted_at < ?
+                )",
+        )
+        .bind(threshold)
+        .execute(&db.pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
         // 2. 仅清空已删除超过安全期（30天）的消息的正文内容，保留消息的主键、角色与墓碑时间戳（防止多端同步幽灵复活，并释放大文本空间）
         let messages =

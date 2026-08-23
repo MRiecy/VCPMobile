@@ -7,6 +7,7 @@ use crate::vcp_modules::message_repository::{
 };
 use crate::vcp_modules::settings_manager;
 use crate::vcp_modules::sync_hash::HashAggregator;
+use crate::vcp_modules::topic_types::TopicKey;
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use sqlx::Row;
@@ -127,158 +128,6 @@ async fn download_attachment(
 // vcp_modules/message_service.rs - 消息业务逻辑中心 (含附件对齐)
 // =================================================================
 
-/// 批量加载多个 topic 的全量消息 — 一次性 SQL 查询，按 topic_id 分组
-/// 避免 push_messages_batch 场景下的 N+1 查询
-#[allow(dead_code)] // Retained for non-sync callers; MobileSync now uses bounded keyset pages.
-pub async fn load_multi_topic_messages(
-    pool: &sqlx::SqlitePool,
-    topic_ids: &[String],
-) -> Result<
-    std::collections::HashMap<String, Vec<crate::vcp_modules::chat_manager::ChatMessage>>,
-    String,
-> {
-    use sqlx::Row;
-    let mut result: std::collections::HashMap<
-        String,
-        Vec<crate::vcp_modules::chat_manager::ChatMessage>,
-    > = topic_ids
-        .iter()
-        .map(|id| (id.clone(), Vec::new()))
-        .collect();
-
-    if topic_ids.is_empty() {
-        return Ok(result);
-    }
-
-    let placeholders = topic_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-    let query_str = format!(
-        "SELECT m.msg_id, m.role, m.name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, r.content_hash AS cache_content_hash, r.renderer_schema_version, m.topic_id, m.content_hash
-         FROM messages m
-         LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
-         WHERE m.topic_id IN ({}) AND m.deleted_at IS NULL
-         ORDER BY m.topic_id, m.timestamp ASC, m.msg_id ASC",
-        placeholders
-    );
-
-    let mut q = sqlx::query(&query_str);
-    for id in topic_ids {
-        q = q.bind(id);
-    }
-    let rows = q.fetch_all(pool).await.map_err(|e| e.to_string())?;
-
-    for row in rows {
-        let msg_id: String = row.get("msg_id");
-        let role: String = row.get("role");
-        let topic_id: String = row.get("topic_id");
-        let timestamp: i64 = row.get("timestamp");
-        let content: String = row.get("content");
-        let content_hash_raw: String = row.get("content_hash");
-        let blocks = decode_valid_render_cache(
-            row.get("render_content"),
-            row.get("cache_content_hash"),
-            row.get("renderer_schema_version"),
-            &content_hash_raw,
-        )
-        .await;
-        let content_hash = if content_hash_raw.is_empty() {
-            None
-        } else {
-            Some(content_hash_raw)
-        };
-
-        let message = crate::vcp_modules::chat_manager::ChatMessage {
-            id: msg_id,
-            role,
-            name: row.get("name"),
-            content,
-            timestamp: timestamp as u64,
-            updated_at: None,
-            is_thinking: Some(false),
-            agent_id: row.get("agent_id"),
-            group_id: row.get("group_id"),
-            topic_id: Some(topic_id.clone()),
-            is_group_message: Some(row.get::<i64, _>("is_group_message") != 0),
-            finish_reason: row.get("finish_reason"),
-            attachments: None, // 批量 push 场景不需要附件回填
-            blocks,
-            shell: None, // 批量 push 场景不需要外壳预计算
-            content_hash,
-        };
-
-        result.entry(topic_id).or_default().push(message);
-    }
-
-    // 批量加载附件。每条记录占两个 bind 参数，分块避免触发 SQLite 参数上限。
-    let mut all_msg_refs: Vec<(String, String)> = Vec::new();
-    for (tid, msgs) in result.iter() {
-        for m in msgs {
-            all_msg_refs.push((tid.clone(), m.id.clone()));
-        }
-    }
-
-    if !all_msg_refs.is_empty() {
-        let mut att_map: std::collections::HashMap<(String, String), Vec<Attachment>> =
-            std::collections::HashMap::new();
-        for refs_chunk in all_msg_refs.chunks(400) {
-            let att_placeholders =
-                std::iter::repeat_n("(?, ?)", refs_chunk.len()).collect::<Vec<_>>();
-            let att_query = format!(
-                "SELECT a.hash, a.mime_type, a.size, a.internal_path, NULL as extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
-                        ma.topic_id, ma.msg_id, ma.display_name, ma.src, ma.status
-                 FROM message_attachments ma
-                 JOIN attachments a ON ma.hash = a.hash
-                 WHERE (ma.topic_id, ma.msg_id) IN ({}) AND ma.deleted_at IS NULL
-                 ORDER BY ma.topic_id, ma.msg_id, ma.attachment_order ASC",
-                att_placeholders.join(",")
-            );
-            let mut query = sqlx::query(&att_query);
-            for (topic_id, message_id) in refs_chunk {
-                query = query.bind(topic_id).bind(message_id);
-            }
-            let att_rows = query
-                .fetch_all(pool)
-                .await
-                .map_err(|error| format!("Batch attachment query failed: {error}"))?;
-            for ar in att_rows {
-                let tid: String = ar.get("topic_id");
-                let mid: String = ar.get("msg_id");
-                let hash: String = ar.get("hash");
-                let mime_type: String = ar.get("mime_type");
-                let internal_path: String = ar.get("internal_path");
-                let display_name: String = ar.get("display_name");
-                let size_i64: i64 = ar.get("size");
-                let created_at_i64: i64 = ar.get("created_at");
-
-                att_map.entry((tid, mid)).or_default().push(Attachment {
-                    r#type: mime_type,
-                    src: ar.get("src"),
-                    name: display_name,
-                    size: size_i64 as u64,
-                    hash: Some(hash),
-                    status: Some(ar.get("status")),
-                    internal_path,
-                    extracted_text: ar.get("extracted_text"),
-                    image_frames: ar
-                        .get::<Option<String>, _>("image_frames")
-                        .and_then(|s| serde_json::from_str(&s).ok()),
-                    thumbnail_path: ar.get("thumbnail_path"),
-                    created_at: Some(created_at_i64 as u64),
-                });
-            }
-        }
-        // 回填附件到消息
-        for (tid, msgs) in result.iter_mut() {
-            for msg in msgs.iter_mut() {
-                if let Some(atts) = att_map.remove(&(tid.clone(), msg.id.clone())) {
-                    msg.attachments = Some(atts);
-                }
-            }
-        }
-    }
-
-    Ok(result)
-}
-
 #[allow(clippy::too_many_arguments)]
 pub async fn load_chat_history_internal(
     _app_handle: &AppHandle,
@@ -294,16 +143,17 @@ pub async fn load_chat_history_internal(
 ) -> Result<Vec<ChatMessage>, String> {
     let db_state = _app_handle.state::<crate::vcp_modules::db_manager::DbState>();
     let pool = &db_state.pool;
+    let key = TopicKey::new(owner_type, owner_id, topic_id);
 
     let owner_matches: i64 = sqlx::query_scalar(
         "SELECT EXISTS(
             SELECT 1 FROM topics
-            WHERE topic_id = ? AND owner_id = ? AND owner_type = ? AND deleted_at IS NULL
+            WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
          )",
     )
-    .bind(topic_id)
-    .bind(owner_id)
-    .bind(owner_type)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -324,30 +174,39 @@ pub async fn load_chat_history_internal(
     let query_str = if limit.is_some() && before_timestamp.is_some() {
         "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, r.content_hash AS cache_content_hash, r.renderer_schema_version, m.content_hash
          FROM messages m
-         LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
-         LEFT JOIN agents a ON m.agent_id = a.agent_id
-         WHERE m.topic_id = ? AND m.deleted_at IS NULL
+         LEFT JOIN render_cache r
+           ON m.owner_type = r.owner_type AND m.owner_id = r.owner_id
+          AND m.topic_id = r.topic_id AND m.msg_id = r.msg_id
+         LEFT JOIN agents a ON a.owner_type = 'agent' AND m.agent_id = a.agent_id
+         WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
            AND (m.timestamp < ? OR (m.timestamp = ? AND m.msg_id < ?))
          ORDER BY m.timestamp DESC, m.msg_id DESC
          LIMIT ?"
     } else if limit.is_some() {
         "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, r.content_hash AS cache_content_hash, r.renderer_schema_version, m.content_hash
          FROM messages m
-         LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
-         LEFT JOIN agents a ON m.agent_id = a.agent_id
-         WHERE m.topic_id = ? AND m.deleted_at IS NULL 
+         LEFT JOIN render_cache r
+           ON m.owner_type = r.owner_type AND m.owner_id = r.owner_id
+          AND m.topic_id = r.topic_id AND m.msg_id = r.msg_id
+         LEFT JOIN agents a ON a.owner_type = 'agent' AND m.agent_id = a.agent_id
+         WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
          ORDER BY m.timestamp DESC, m.msg_id DESC
          LIMIT ?"
     } else {
         "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, r.content_hash AS cache_content_hash, r.renderer_schema_version, m.content_hash
          FROM messages m
-         LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
-         LEFT JOIN agents a ON m.agent_id = a.agent_id
-         WHERE m.topic_id = ? AND m.deleted_at IS NULL 
+         LEFT JOIN render_cache r
+           ON m.owner_type = r.owner_type AND m.owner_id = r.owner_id
+          AND m.topic_id = r.topic_id AND m.msg_id = r.msg_id
+         LEFT JOIN agents a ON a.owner_type = 'agent' AND m.agent_id = a.agent_id
+         WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
          ORDER BY m.timestamp DESC, m.msg_id DESC"
     };
 
-    let mut q = sqlx::query(query_str).bind(topic_id);
+    let mut q = sqlx::query(query_str)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id);
     if let Some(l) = limit {
         if let (Some(before_ts), Some(before_id)) = (before_timestamp, before_message_id) {
             q = q
@@ -364,7 +223,7 @@ pub async fn load_chat_history_internal(
     let mut history = convert_history_rows(
         _app_handle,
         pool,
-        topic_id,
+        &key,
         rows,
         include_content,
         include_extracted_text,
@@ -380,7 +239,7 @@ pub async fn load_chat_history_internal(
 async fn convert_history_rows(
     app_handle: &AppHandle,
     pool: &sqlx::Pool<sqlx::Sqlite>,
-    topic_id: &str,
+    key: &TopicKey,
     rows: Vec<sqlx::sqlite::SqliteRow>,
     include_content: bool,
     include_extracted_text: bool,
@@ -408,11 +267,15 @@ async fn convert_history_rows(
                     ma.msg_id, ma.display_name, ma.src, ma.status
              FROM message_attachments ma
              JOIN attachments a ON ma.hash = a.hash
-             WHERE ma.topic_id = ? AND ma.msg_id IN ({}) AND ma.deleted_at IS NULL
+             WHERE ma.owner_type = ? AND ma.owner_id = ? AND ma.topic_id = ?
+               AND ma.msg_id IN ({}) AND ma.deleted_at IS NULL
              ORDER BY ma.msg_id, ma.attachment_order ASC",
             extracted_text_column, placeholders
         );
-        let mut q = sqlx::query(&att_query).bind(topic_id);
+        let mut q = sqlx::query(&att_query)
+            .bind(&key.owner_type)
+            .bind(&key.owner_id)
+            .bind(&key.topic_id);
         for id in &msg_ids {
             q = q.bind(id);
         }
@@ -462,7 +325,7 @@ async fn convert_history_rows(
         "SELECT a.agent_id, a.name, av.dominant_color
          FROM agents a
          LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent' AND av.deleted_at IS NULL
-         WHERE a.deleted_at IS NULL",
+         WHERE a.owner_type = 'agent' AND a.deleted_at IS NULL",
     )
     .fetch_all(pool)
     .await
@@ -543,12 +406,12 @@ async fn convert_history_rows(
                 let blocks_json = serde_json::to_value(&compiled).ok();
 
                 let pool_c = pool.clone();
-                let tid = topic_id.to_string();
+                let key = key.clone();
                 let mid = msg_id.clone();
                 let observed_hash = content_hash_raw.clone();
                 tokio::spawn(async move {
                     let _ =
-                        write_render_cache_cas(&pool_c, &tid, &mid, &observed_hash, &serialized)
+                        write_render_cache_cas(&pool_c, &key, &mid, &observed_hash, &serialized)
                             .await;
                 });
 
@@ -582,7 +445,7 @@ async fn convert_history_rows(
             is_thinking,
             agent_id: row.get("agent_id"),
             group_id: row.get("group_id"),
-            topic_id: Some(topic_id.to_string()),
+            topic_id: Some(key.topic_id.clone()),
             is_group_message: Some(row.get::<i64, _>("is_group_message") != 0),
             finish_reason: row.get("finish_reason"),
             attachments,
@@ -616,16 +479,17 @@ pub async fn load_chat_history_around_internal(
 ) -> Result<Vec<ChatMessage>, String> {
     let db_state = app_handle.state::<crate::vcp_modules::db_manager::DbState>();
     let pool = &db_state.pool;
+    let key = TopicKey::new(owner_type, owner_id, topic_id);
 
     let owner_matches: i64 = sqlx::query_scalar(
         "SELECT EXISTS(
             SELECT 1 FROM topics
-            WHERE topic_id = ? AND owner_id = ? AND owner_type = ? AND deleted_at IS NULL
+            WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
          )",
     )
-    .bind(topic_id)
-    .bind(owner_id)
-    .bind(owner_type)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -634,9 +498,13 @@ pub async fn load_chat_history_around_internal(
     }
 
     let anchor_ts: i64 = sqlx::query_scalar(
-        "SELECT timestamp FROM messages WHERE topic_id = ? AND msg_id = ? AND deleted_at IS NULL",
+        "SELECT timestamp FROM messages
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
+           AND deleted_at IS NULL",
     )
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(anchor_msg_id)
     .fetch_optional(pool)
     .await
@@ -646,19 +514,23 @@ pub async fn load_chat_history_around_internal(
     const ROW_SELECT: &str =
         "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, r.content_hash AS cache_content_hash, r.renderer_schema_version, m.content_hash
          FROM messages m
-         LEFT JOIN render_cache r ON m.topic_id = r.topic_id AND m.msg_id = r.msg_id
-         LEFT JOIN agents a ON m.agent_id = a.agent_id";
+         LEFT JOIN render_cache r
+           ON m.owner_type = r.owner_type AND m.owner_id = r.owner_id
+          AND m.topic_id = r.topic_id AND m.msg_id = r.msg_id
+         LEFT JOIN agents a ON a.owner_type = 'agent' AND m.agent_id = a.agent_id";
 
     let mut rows: Vec<sqlx::sqlite::SqliteRow> = Vec::new();
 
     // 前向窗口（早于锚点，含锚点本身）
     let before_rows = sqlx::query(&format!(
-        "{} WHERE m.topic_id = ? AND m.deleted_at IS NULL
+        "{} WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
            AND (m.timestamp < ? OR (m.timestamp = ? AND m.msg_id <= ?))
          ORDER BY m.timestamp DESC, m.msg_id DESC LIMIT ?",
         ROW_SELECT
     ))
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(anchor_ts)
     .bind(anchor_ts)
     .bind(anchor_msg_id)
@@ -671,12 +543,14 @@ pub async fn load_chat_history_around_internal(
     // 后向窗口（晚于锚点）
     if after_n > 0 {
         let after_rows = sqlx::query(&format!(
-            "{} WHERE m.topic_id = ? AND m.deleted_at IS NULL
+            "{} WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
                AND (m.timestamp > ? OR (m.timestamp = ? AND m.msg_id > ?))
              ORDER BY m.timestamp ASC, m.msg_id ASC LIMIT ?",
             ROW_SELECT
         ))
-        .bind(topic_id)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
         .bind(anchor_ts)
         .bind(anchor_ts)
         .bind(anchor_msg_id)
@@ -697,14 +571,14 @@ pub async fn load_chat_history_around_internal(
         (ta, ia).cmp(&(tb, ib))
     });
 
-    convert_history_rows(app_handle, pool, topic_id, rows, false, false).await
+    convert_history_rows(app_handle, pool, &key, rows, false, false).await
 }
 
 /// 为 Agent 和 Group 组装大模型上下文提供专用的轻量历史查询。
 /// 只查询消息纯文本和附件（在需要时提取文本），完全跳过 render_content 反序列化和 UI shell 预计算。
 pub async fn load_chat_text_history_for_context(
     app_handle: &AppHandle,
-    topic_id: &str,
+    key: &TopicKey,
     limit: Option<usize>,
     offset: Option<usize>,
     include_extracted_text: bool,
@@ -718,19 +592,22 @@ pub async fn load_chat_text_history_for_context(
     let query_str = if limit.is_some() {
         "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, m.content_hash 
          FROM messages m
-         LEFT JOIN agents a ON m.agent_id = a.agent_id
-         WHERE m.topic_id = ? AND m.deleted_at IS NULL 
+         LEFT JOIN agents a ON a.owner_type = 'agent' AND m.agent_id = a.agent_id
+         WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
          ORDER BY m.timestamp DESC, m.rowid DESC 
          LIMIT ? OFFSET ?"
     } else {
         "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, m.content_hash 
          FROM messages m
-         LEFT JOIN agents a ON m.agent_id = a.agent_id
-         WHERE m.topic_id = ? AND m.deleted_at IS NULL 
+         LEFT JOIN agents a ON a.owner_type = 'agent' AND m.agent_id = a.agent_id
+         WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
          ORDER BY m.timestamp DESC, m.rowid DESC"
     };
 
-    let mut q = sqlx::query(query_str).bind(topic_id);
+    let mut q = sqlx::query(query_str)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id);
     if let Some(l) = limit {
         q = q.bind(l as i64);
         q = q.bind(offset as i64);
@@ -758,11 +635,15 @@ pub async fn load_chat_text_history_for_context(
                     ma.msg_id, ma.display_name, ma.src, ma.status
              FROM message_attachments ma
              JOIN attachments a ON ma.hash = a.hash
-             WHERE ma.topic_id = ? AND ma.msg_id IN ({}) AND ma.deleted_at IS NULL
+             WHERE ma.owner_type = ? AND ma.owner_id = ? AND ma.topic_id = ?
+               AND ma.msg_id IN ({}) AND ma.deleted_at IS NULL
              ORDER BY ma.msg_id, ma.attachment_order ASC",
             extracted_text_column, placeholders
         );
-        let mut q = sqlx::query(&att_query).bind(topic_id);
+        let mut q = sqlx::query(&att_query)
+            .bind(&key.owner_type)
+            .bind(&key.owner_id)
+            .bind(&key.topic_id);
         for id in &msg_ids {
             q = q.bind(id);
         }
@@ -834,7 +715,7 @@ pub async fn load_chat_text_history_for_context(
             is_thinking: Some(false),
             agent_id: row.get("agent_id"),
             group_id: row.get("group_id"),
-            topic_id: Some(topic_id.to_string()),
+            topic_id: Some(key.topic_id.clone()),
             is_group_message: Some(row.get::<i64, _>("is_group_message") != 0),
             finish_reason: row.get("finish_reason"),
             attachments,
@@ -934,6 +815,7 @@ pub async fn begin_stream_message(
     agent_id: Option<&str>,
     agent_name: Option<&str>,
 ) -> Result<(), String> {
+    let key = TopicKey::new(owner_type, owner_id, topic_id);
     let now = crate::vcp_modules::infra::utils::now_millis();
     let (_, render_bytes) = compile_and_serialize_render_async(String::new()).await?;
     let fingerprint_timestamp = u64::try_from(now)
@@ -952,16 +834,18 @@ pub async fn begin_stream_message(
 
     let inserted = sqlx::query(
         "INSERT INTO messages (
-            msg_id, topic_id, role, name, agent_id, content, timestamp,
+            owner_type, owner_id, topic_id, msg_id, role, name, agent_id, content, timestamp,
             is_group_message, group_id, finish_reason, content_hash, created_at, updated_at
-         ) SELECT ?, ?, 'assistant', ?, ?, '', ?, ?, ?, NULL, ?, ?, ?
+         ) SELECT ?, ?, ?, ?, 'assistant', ?, ?, '', ?, ?, ?, NULL, ?, ?, ?
            WHERE EXISTS (
              SELECT 1 FROM topics
-             WHERE topic_id = ? AND owner_id = ? AND owner_type = ? AND deleted_at IS NULL
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
            )",
     )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(message_id)
-    .bind(topic_id)
     .bind(agent_name)
     .bind(agent_id)
     .bind(now)
@@ -970,9 +854,9 @@ pub async fn begin_stream_message(
     .bind(&content_hash)
     .bind(now)
     .bind(now)
-    .bind(topic_id)
-    .bind(owner_id)
-    .bind(owner_type)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -985,10 +869,13 @@ pub async fn begin_stream_message(
 
     sqlx::query(
         "INSERT INTO render_cache (
-            topic_id, msg_id, render_content, content_hash, renderer_schema_version, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?)",
+            owner_type, owner_id, topic_id, msg_id, render_content, content_hash,
+            renderer_schema_version, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(message_id)
     .bind(render_bytes)
     .bind(&content_hash)
@@ -998,55 +885,57 @@ pub async fn begin_stream_message(
     .await
     .map_err(|e| e.to_string())?;
 
-    sqlx::query("INSERT INTO messages_fts (msg_id, topic_id, content) VALUES (?, ?, '')")
-        .bind(message_id)
-        .bind(topic_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
-
     sqlx::query(
-        "UPDATE topics SET msg_count = (SELECT COUNT(*) FROM messages \
-         WHERE topic_id = ? AND deleted_at IS NULL) WHERE topic_id = ?",
+        "INSERT INTO messages_fts (msg_id, topic_id, content, owner_type, owner_id)
+         VALUES (?, ?, '', ?, ?)",
     )
-    .bind(topic_id)
-    .bind(topic_id)
+    .bind(message_id)
+    .bind(&key.topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
-    HashAggregator::bubble_from_topic(&mut tx, topic_id).await?;
 
-    tx.commit().await.map_err(|e| e.to_string())?;
+    sqlx::query(
+        "UPDATE topics SET msg_count = (
+            SELECT COUNT(*) FROM messages
+            WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
+         ) WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
+    )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    HashAggregator::bubble_from_topic(&mut tx, &key).await?;
 
-    // 活跃生成注册（断点恢复事务日志）属于锦上添花能力，绝不允许绑架发消息热路径：
-    // 1.1.2 血统的老库可能缺失 active_generations 表（0001 被 legacy bootstrap 整体跳过，
-    // 由迁移 0007 兜底补建），此处失败只降级恢复能力，不影响本次生成。
-    if let Err(e) = sqlx::query(
-        "INSERT INTO active_generations (msg_id, topic_id, owner_id, owner_type, created_at) \
+    sqlx::query(
+        "INSERT INTO active_generations (owner_type, owner_id, topic_id, msg_id, created_at)
          VALUES (?, ?, ?, ?, ?)",
     )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(message_id)
-    .bind(topic_id)
-    .bind(owner_id)
-    .bind(owner_type)
     .bind(now)
-    .execute(db_pool)
+    .execute(&mut *tx)
     .await
-    {
-        log::warn!(
-            "[MessageService] best-effort active_generations registration skipped for {}: {}",
-            message_id,
-            e
-        );
-    }
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
 pub async fn append_single_message<R: tauri::Runtime>(
     app_handle: AppHandle<R>,
     db_pool: &sqlx::Pool<sqlx::Sqlite>,
-    _owner_id: &str,
-    _owner_type: &str,
+    owner_id: &str,
+    owner_type: &str,
     topic_id: String,
     mut message: ChatMessage,
 ) -> Result<Vec<ContentBlock>, String> {
@@ -1062,24 +951,33 @@ pub async fn append_single_message<R: tauri::Runtime>(
             compile_and_serialize_render_async(message.content.clone()).await?
         };
 
+    let key = TopicKey::new(owner_type, owner_id, &topic_id);
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
-    MessageRepository::upsert_message(&mut tx, &message, &topic_id, &render_bytes, false).await?;
+    MessageRepository::upsert_message(&mut tx, &message, &key, &render_bytes, false).await?;
 
     let msg_count: i32 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
+        "SELECT COUNT(*) FROM messages
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
     )
-    .bind(&topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| e.to_string())?
     .unwrap_or(0);
 
-    sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ?")
-        .bind(msg_count)
-        .bind(&topic_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    sqlx::query(
+        "UPDATE topics SET msg_count = ?
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
+    )
+    .bind(msg_count)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(blocks)
@@ -1088,16 +986,25 @@ pub async fn append_single_message<R: tauri::Runtime>(
 #[tauri::command]
 pub async fn fetch_raw_message_content(
     app_handle: tauri::AppHandle,
+    owner_id: String,
+    owner_type: String,
+    topic_id: String,
     message_id: String,
 ) -> Result<String, String> {
     let db_state = app_handle.state::<crate::vcp_modules::db_manager::DbState>();
     let pool = &db_state.pool;
 
-    let row = sqlx::query("SELECT content FROM messages WHERE msg_id = ?")
-        .bind(&message_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    let row = sqlx::query(
+        "SELECT content FROM messages
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+    )
+    .bind(&owner_type)
+    .bind(&owner_id)
+    .bind(&topic_id)
+    .bind(&message_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
 
     match row {
         Some(r) => {
@@ -1111,6 +1018,8 @@ pub async fn fetch_raw_message_content(
 #[tauri::command]
 pub async fn re_render_message(
     app_handle: tauri::AppHandle,
+    owner_id: String,
+    owner_type: String,
     message_id: String,
     topic_id: String,
 ) -> Result<serde_json::Value, String> {
@@ -1119,10 +1028,13 @@ pub async fn re_render_message(
 
     let row = sqlx::query(
         "SELECT content, content_hash FROM messages \
-         WHERE msg_id = ? AND topic_id = ? AND deleted_at IS NULL",
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
+           AND deleted_at IS NULL",
     )
-    .bind(&message_id)
+    .bind(&owner_type)
+    .bind(&owner_id)
     .bind(&topic_id)
+    .bind(&message_id)
     .fetch_optional(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -1133,8 +1045,8 @@ pub async fn re_render_message(
 
             let observed_hash: String = r.get("content_hash");
             let (compiled, serialized) = compile_and_serialize_render_async(decompressed).await?;
-            if !write_render_cache_cas(pool, &topic_id, &message_id, &observed_hash, &serialized)
-                .await?
+            let key = TopicKey::new(owner_type, owner_id, &topic_id);
+            if !write_render_cache_cas(pool, &key, &message_id, &observed_hash, &serialized).await?
             {
                 return Err(format!(
                     "Message {} changed while re-rendering; stale cache discarded",
@@ -1154,8 +1066,8 @@ pub async fn re_render_message(
 pub async fn patch_single_message<R: tauri::Runtime>(
     app_handle: AppHandle<R>,
     db_pool: &sqlx::Pool<sqlx::Sqlite>,
-    _owner_id: &str,
-    _owner_type: &str,
+    owner_id: &str,
+    owner_type: &str,
     topic_id: String,
     mut message: ChatMessage,
     skip_bubble: bool,
@@ -1173,9 +1085,9 @@ pub async fn patch_single_message<R: tauri::Runtime>(
             compile_and_serialize_render_async(message.content.clone()).await?
         };
 
+    let key = TopicKey::new(owner_type, owner_id, &topic_id);
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
-    MessageRepository::upsert_message(&mut tx, &message, &topic_id, &render_bytes, skip_bubble)
-        .await?;
+    MessageRepository::upsert_message(&mut tx, &message, &key, &render_bytes, skip_bubble).await?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(blocks)
@@ -1189,7 +1101,7 @@ pub struct MessageDeletionResult {
 
 pub async fn delete_messages(
     db_pool: &sqlx::Pool<sqlx::Sqlite>,
-    topic_id: &str,
+    key: &TopicKey,
     msg_ids: Vec<String>,
     deleted_at: Option<i64>,
 ) -> Result<MessageDeletionResult, String> {
@@ -1200,7 +1112,7 @@ pub async fn delete_messages(
             deleted_at: deleted_at.unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
         });
     }
-    if topic_id.is_empty()
+    if key.topic_id.is_empty()
         || msg_ids.len() > 10_000
         || msg_ids.iter().any(|id| id.is_empty())
         || msg_ids
@@ -1215,9 +1127,13 @@ pub async fn delete_messages(
     let placeholders = msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
     let select_deleted_ids = format!(
         "SELECT msg_id FROM messages
-         WHERE topic_id = ? AND deleted_at IS NULL AND msg_id IN ({placeholders})"
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+           AND deleted_at IS NULL AND msg_id IN ({placeholders})"
     );
-    let mut deleted_query = sqlx::query_scalar(&select_deleted_ids).bind(topic_id);
+    let mut deleted_query = sqlx::query_scalar(&select_deleted_ids)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id);
     for id in &msg_ids {
         deleted_query = deleted_query.bind(id);
     }
@@ -1228,9 +1144,13 @@ pub async fn delete_messages(
 
     let select_active_ids = format!(
         "SELECT msg_id FROM active_generations
-         WHERE topic_id = ? AND msg_id IN ({placeholders})"
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+           AND msg_id IN ({placeholders})"
     );
-    let mut active_query = sqlx::query_scalar(&select_active_ids).bind(topic_id);
+    let mut active_query = sqlx::query_scalar(&select_active_ids)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id);
     for id in &msg_ids {
         active_query = active_query.bind(id);
     }
@@ -1240,29 +1160,39 @@ pub async fn delete_messages(
         .map_err(|e| e.to_string())?;
     let delete_query = format!(
         "UPDATE messages SET deleted_at = ?
-         WHERE topic_id = ? AND deleted_at IS NULL AND msg_id IN ({})",
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+           AND deleted_at IS NULL AND msg_id IN ({})",
         msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
     );
     let now = deleted_at.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-    let mut q = sqlx::query(&delete_query).bind(now).bind(topic_id);
+    let mut q = sqlx::query(&delete_query)
+        .bind(now)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id);
     for id in &msg_ids {
         q = q.bind(id);
     }
     let deleted = q.execute(&mut *tx).await.map_err(|e| e.to_string())?;
     if deleted.rows_affected() != deleted_ids.len() as u64 {
         return Err(format!(
-            "Message delete changed {} rows, expected {} for topic {topic_id}",
+            "Message delete changed {} rows, expected {} for topic {}",
             deleted.rows_affected(),
-            deleted_ids.len()
+            deleted_ids.len(),
+            key.topic_id
         ));
     }
 
     // 物理强清除 render_cache 缓存，杜绝幽灵缓存残留
     let delete_cache_query = format!(
-        "DELETE FROM render_cache WHERE topic_id = ? AND msg_id IN ({})",
+        "DELETE FROM render_cache
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id IN ({})",
         msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
     );
-    let mut q_cache = sqlx::query(&delete_cache_query).bind(topic_id);
+    let mut q_cache = sqlx::query(&delete_cache_query)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id);
     for id in &msg_ids {
         q_cache = q_cache.bind(id);
     }
@@ -1270,10 +1200,14 @@ pub async fn delete_messages(
 
     // 物理强清除 message_attachments 关联，防止孤立关联残留
     let delete_attachments_query = format!(
-        "DELETE FROM message_attachments WHERE topic_id = ? AND msg_id IN ({})",
+        "DELETE FROM message_attachments
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id IN ({})",
         msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
     );
-    let mut q_attachments = sqlx::query(&delete_attachments_query).bind(topic_id);
+    let mut q_attachments = sqlx::query(&delete_attachments_query)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id);
     for id in &msg_ids {
         q_attachments = q_attachments.bind(id);
     }
@@ -1284,10 +1218,14 @@ pub async fn delete_messages(
 
     // 级联清除活跃生成注册表，杜绝已删除消息复活
     let delete_active_gen_query = format!(
-        "DELETE FROM active_generations WHERE topic_id = ? AND msg_id IN ({})",
+        "DELETE FROM active_generations
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id IN ({})",
         msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
     );
-    let mut q_active = sqlx::query(&delete_active_gen_query).bind(topic_id);
+    let mut q_active = sqlx::query(&delete_active_gen_query)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id);
     for id in &msg_ids {
         q_active = q_active.bind(id);
     }
@@ -1298,35 +1236,46 @@ pub async fn delete_messages(
 
     // 同步清理 FTS5 全文检索索引，防止已删除消息残留在搜索结果中
     let delete_fts_query = format!(
-        "DELETE FROM messages_fts WHERE topic_id = ? AND msg_id IN ({})",
+        "DELETE FROM messages_fts
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id IN ({})",
         msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
     );
-    let mut q_fts = sqlx::query(&delete_fts_query).bind(topic_id);
+    let mut q_fts = sqlx::query(&delete_fts_query)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id);
     for id in &msg_ids {
         q_fts = q_fts.bind(id);
     }
     q_fts.execute(&mut *tx).await.map_err(|e| e.to_string())?;
 
     let msg_count: i32 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
+        "SELECT COUNT(*) FROM messages
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
     )
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| e.to_string())?
     .unwrap_or(0);
 
-    let topic_update =
-        sqlx::query("UPDATE topics SET msg_count = ? WHERE topic_id = ? AND deleted_at IS NULL")
-            .bind(msg_count)
-            .bind(topic_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
+    let topic_update = sqlx::query(
+        "UPDATE topics SET msg_count = ?
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
+    )
+    .bind(msg_count)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
     if topic_update.rows_affected() != 1 {
-        return Err(format!("Topic {topic_id} is missing or deleted"));
+        return Err(format!("Topic {} is missing or deleted", key.topic_id));
     }
-    HashAggregator::bubble_from_topic(&mut tx, topic_id).await?;
+    HashAggregator::bubble_from_topic(&mut tx, key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(MessageDeletionResult {
         deleted_ids,
@@ -1338,91 +1287,164 @@ pub async fn delete_messages(
 pub async fn truncate_history_after_timestamp(
     _app_handle: AppHandle,
     db_pool: &sqlx::Pool<sqlx::Sqlite>,
-    _owner_id: &str,
-    _owner_type: &str,
-    topic_id: &str,
+    key: &TopicKey,
     timestamp: i64,
 ) -> Result<MessageDeletionResult, String> {
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
 
     let active_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT ag.msg_id FROM active_generations ag \
-         JOIN messages m ON m.topic_id = ag.topic_id AND m.msg_id = ag.msg_id \
-         WHERE ag.topic_id = ? AND m.timestamp > ?",
+        "SELECT ag.msg_id FROM active_generations ag
+         JOIN messages m
+           ON m.owner_type = ag.owner_type AND m.owner_id = ag.owner_id
+          AND m.topic_id = ag.topic_id AND m.msg_id = ag.msg_id
+         WHERE ag.owner_type = ? AND ag.owner_id = ? AND ag.topic_id = ? AND m.timestamp > ?",
     )
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(timestamp)
     .fetch_all(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
     let deleted_ids: Vec<String> = sqlx::query_scalar(
         "SELECT msg_id FROM messages
-         WHERE topic_id = ? AND timestamp > ? AND deleted_at IS NULL",
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+           AND timestamp > ? AND deleted_at IS NULL",
     )
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(timestamp)
     .fetch_all(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
 
     // 物理强清除 render_cache，消灭幽灵缓存
-    sqlx::query("DELETE FROM render_cache WHERE topic_id = ? AND msg_id IN (SELECT msg_id FROM messages WHERE topic_id = ? AND timestamp > ?)")
-        .bind(topic_id).bind(topic_id).bind(timestamp).execute(&mut *tx).await.map_err(|e| e.to_string())?;
-
-    sqlx::query("DELETE FROM message_attachments WHERE topic_id = ? AND msg_id IN (SELECT msg_id FROM messages WHERE topic_id = ? AND timestamp > ?)")
-        .bind(topic_id).bind(topic_id).bind(timestamp).execute(&mut *tx).await.map_err(|e| e.to_string())?;
-
-    // 同步清理 FTS5 全文检索索引，防止已删除消息残留在搜索结果中
-    sqlx::query("DELETE FROM messages_fts WHERE topic_id = ? AND msg_id IN (SELECT msg_id FROM messages WHERE topic_id = ? AND timestamp > ?)")
-        .bind(topic_id).bind(topic_id).bind(timestamp).execute(&mut *tx).await.map_err(|e| e.to_string())?;
+    sqlx::query(
+        "DELETE FROM render_cache
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+           AND msg_id IN (
+             SELECT msg_id FROM messages
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND timestamp > ?
+           )",
+    )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .bind(timestamp)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
 
     sqlx::query(
-        "DELETE FROM active_generations WHERE topic_id = ? AND msg_id IN (\
-         SELECT msg_id FROM messages WHERE topic_id = ? AND timestamp > ?)",
+        "DELETE FROM message_attachments
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+           AND msg_id IN (
+             SELECT msg_id FROM messages
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND timestamp > ?
+           )",
     )
-    .bind(topic_id)
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .bind(timestamp)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    // 同步清理 FTS5 全文检索索引，防止已删除消息残留在搜索结果中
+    sqlx::query(
+        "DELETE FROM messages_fts
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+           AND msg_id IN (
+             SELECT msg_id FROM messages
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND timestamp > ?
+           )",
+    )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .bind(timestamp)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    sqlx::query(
+        "DELETE FROM active_generations
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+           AND msg_id IN (
+             SELECT msg_id FROM messages
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND timestamp > ?
+           )",
+    )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(timestamp)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
 
     let now = chrono::Utc::now().timestamp_millis();
-    let deleted = sqlx::query("UPDATE messages SET deleted_at = ? WHERE topic_id = ? AND timestamp > ? AND deleted_at IS NULL")
-        .bind(now)
-        .bind(topic_id)
-        .bind(timestamp)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    let deleted = sqlx::query(
+        "UPDATE messages SET deleted_at = ?
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+           AND timestamp > ? AND deleted_at IS NULL",
+    )
+    .bind(now)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .bind(timestamp)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
     if deleted.rows_affected() != deleted_ids.len() as u64 {
         return Err(format!(
-            "History truncation changed {} rows, expected {} for topic {topic_id}",
+            "History truncation changed {} rows, expected {} for topic {}",
             deleted.rows_affected(),
-            deleted_ids.len()
+            deleted_ids.len(),
+            key.topic_id
         ));
     }
     let msg_count: i32 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM messages WHERE topic_id = ? AND deleted_at IS NULL",
+        "SELECT COUNT(*) FROM messages
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
     )
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| e.to_string())?
     .unwrap_or(0);
     let topic_update = sqlx::query(
         "UPDATE topics SET msg_count = ?
-         WHERE topic_id = ? AND deleted_at IS NULL",
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
     )
     .bind(msg_count)
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
     if topic_update.rows_affected() != 1 {
-        return Err(format!("Topic {topic_id} is missing or deleted"));
+        return Err(format!("Topic {} is missing or deleted", key.topic_id));
     }
-    HashAggregator::bubble_from_topic(&mut tx, topic_id).await?;
+    HashAggregator::bubble_from_topic(&mut tx, key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(MessageDeletionResult {
         deleted_ids,
@@ -1507,10 +1529,11 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
 
     let mut agent_name = None;
     if let Some(ref aid) = final_agent_id {
-        if let Ok(Some(row)) = sqlx::query("SELECT name FROM agents WHERE agent_id = ?")
-            .bind(aid)
-            .fetch_optional(pool)
-            .await
+        if let Ok(Some(row)) =
+            sqlx::query("SELECT name FROM agents WHERE owner_type = 'agent' AND agent_id = ?")
+                .bind(aid)
+                .fetch_optional(pool)
+                .await
         {
             use sqlx::Row;
             agent_name = Some(row.get::<String, _>("name"));
@@ -1591,21 +1614,24 @@ async fn commit_stream_message(
     agent_id: Option<&str>,
     agent_name: Option<&str>,
 ) -> Result<(Vec<ContentBlock>, u64), String> {
+    let key = TopicKey::new(owner_type, owner_id, topic_id);
     let (blocks, render_bytes) =
         compile_and_serialize_render_async(final_content.to_string()).await?;
     let is_group = owner_type == "group";
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
     let start_timestamp: i64 = sqlx::query_scalar(
-        "SELECT m.timestamp FROM messages m \
-         JOIN active_generations ag ON ag.msg_id = m.msg_id AND ag.topic_id = m.topic_id \
-         WHERE m.topic_id = ? AND m.msg_id = ? AND m.finish_reason IS NULL \
-           AND m.deleted_at IS NULL AND ag.owner_id = ? AND ag.owner_type = ?",
+        "SELECT m.timestamp FROM messages m
+         JOIN active_generations ag
+           ON ag.owner_type = m.owner_type AND ag.owner_id = m.owner_id
+          AND ag.topic_id = m.topic_id AND ag.msg_id = m.msg_id
+         WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.msg_id = ?
+           AND m.finish_reason IS NULL AND m.deleted_at IS NULL",
     )
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(message_id)
-    .bind(owner_id)
-    .bind(owner_type)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| e.to_string())?
@@ -1631,9 +1657,10 @@ async fn commit_stream_message(
         "UPDATE messages SET role = 'assistant', content = ?, \
          is_group_message = ?, group_id = ?, finish_reason = ?, \
          content_hash = ?, updated_at = ? \
-         WHERE topic_id = ? AND msg_id = ? AND finish_reason IS NULL AND deleted_at IS NULL \
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
+           AND finish_reason IS NULL AND deleted_at IS NULL \
          AND EXISTS(SELECT 1 FROM active_generations \
-                    WHERE msg_id = ? AND topic_id = ? AND owner_id = ? AND owner_type = ?)",
+                    WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?)",
     )
     .bind(final_content)
     .bind(is_group)
@@ -1641,12 +1668,14 @@ async fn commit_stream_message(
     .bind(finish_reason)
     .bind(&content_hash)
     .bind(final_ts as i64)
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(message_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(message_id)
-    .bind(topic_id)
-    .bind(owner_id)
-    .bind(owner_type)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -1660,13 +1689,15 @@ async fn commit_stream_message(
     let cache_updated = sqlx::query(
         "UPDATE render_cache SET render_content = ?, content_hash = ?, \
          renderer_schema_version = ?, updated_at = ? \
-         WHERE topic_id = ? AND msg_id = ?",
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
     )
     .bind(render_bytes)
     .bind(&content_hash)
     .bind(RENDERER_SCHEMA_VERSION)
     .bind(final_ts as i64)
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(message_id)
     .execute(&mut *tx)
     .await
@@ -1678,28 +1709,38 @@ async fn commit_stream_message(
         ));
     }
 
-    sqlx::query("DELETE FROM messages_fts WHERE topic_id = ? AND msg_id = ?")
-        .bind(topic_id)
-        .bind(message_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
-    sqlx::query("INSERT INTO messages_fts (msg_id, topic_id, content) VALUES (?, ?, ?)")
-        .bind(message_id)
-        .bind(topic_id)
-        .bind(final_content)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
+    sqlx::query(
+        "DELETE FROM messages_fts
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+    )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .bind(message_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    sqlx::query(
+        "INSERT INTO messages_fts (msg_id, topic_id, content, owner_type, owner_id)
+         VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(message_id)
+    .bind(&key.topic_id)
+    .bind(final_content)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
 
     let deleted = sqlx::query(
         "DELETE FROM active_generations \
-         WHERE msg_id = ? AND topic_id = ? AND owner_id = ? AND owner_type = ?",
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
     )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(message_id)
-    .bind(topic_id)
-    .bind(owner_id)
-    .bind(owner_type)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -1710,7 +1751,7 @@ async fn commit_stream_message(
         ));
     }
 
-    HashAggregator::bubble_from_topic(&mut tx, topic_id).await?;
+    HashAggregator::bubble_from_topic(&mut tx, &key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok((blocks, start_timestamp as u64))
 }
@@ -1718,6 +1759,8 @@ async fn commit_stream_message(
 #[tauri::command]
 pub async fn delete_message_attachment(
     app_handle: tauri::AppHandle,
+    owner_id: String,
+    owner_type: String,
     topic_id: String,
     message_id: String,
     hash: String,
@@ -1727,12 +1770,13 @@ pub async fn delete_message_attachment(
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
     let now = crate::vcp_modules::infra::utils::now_millis();
-    delete_message_attachment_in_pool(pool, &topic_id, &message_id, &hash, now).await
+    let key = TopicKey::new(owner_type, owner_id, topic_id);
+    delete_message_attachment_in_pool(pool, &key, &message_id, &hash, now).await
 }
 
 async fn delete_message_attachment_in_pool(
     pool: &sqlx::SqlitePool,
-    topic_id: &str,
+    key: &TopicKey,
     message_id: &str,
     hash: &str,
     now: i64,
@@ -1740,10 +1784,13 @@ async fn delete_message_attachment_in_pool(
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     let deleted = sqlx::query(
         "UPDATE message_attachments SET deleted_at = ? \
-         WHERE topic_id = ? AND msg_id = ? AND hash = ? AND deleted_at IS NULL",
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
+           AND hash = ? AND deleted_at IS NULL",
     )
     .bind(now)
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(message_id)
     .bind(hash)
     .execute(&mut *tx)
@@ -1764,9 +1811,13 @@ async fn delete_message_attachment_in_pool(
         i64,
     ) = sqlx::query_as(
         "SELECT role, name, content, timestamp, agent_id, content_hash, updated_at \
-         FROM messages WHERE topic_id = ? AND msg_id = ? AND deleted_at IS NULL",
+         FROM messages
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
+           AND deleted_at IS NULL",
     )
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(message_id)
     .fetch_one(&mut *tx)
     .await
@@ -1775,9 +1826,12 @@ async fn delete_message_attachment_in_pool(
         .map_err(|_| format!("Message {message_id} has a negative timestamp"))?;
     let attachment_hashes: Vec<String> = sqlx::query_scalar(
         "SELECT hash FROM message_attachments \
-         WHERE topic_id = ? AND msg_id = ? AND deleted_at IS NULL",
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
+           AND deleted_at IS NULL",
     )
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(message_id)
     .fetch_all(&mut *tx)
     .await
@@ -1801,11 +1855,14 @@ async fn delete_message_attachment_in_pool(
     .map_err(|error| format!("message {message_id} {error}"))?;
     let updated = sqlx::query(
         "UPDATE messages SET content_hash = ?, updated_at = ? \
-         WHERE topic_id = ? AND msg_id = ? AND deleted_at IS NULL",
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
+           AND deleted_at IS NULL",
     )
     .bind(&new_hash)
     .bind(updated_at)
-    .bind(topic_id)
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
     .bind(message_id)
     .execute(&mut *tx)
     .await
@@ -1814,7 +1871,7 @@ async fn delete_message_attachment_in_pool(
         return Err(format!("Message {message_id} is missing or deleted"));
     }
 
-    HashAggregator::bubble_from_topic(&mut tx, topic_id).await?;
+    HashAggregator::bubble_from_topic(&mut tx, key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(())
 }

@@ -9,6 +9,7 @@ use crate::vcp_modules::sync_error::{
     parse_wire_sync_error, WireSyncError,
 };
 use crate::vcp_modules::sync_hash::HashAggregator;
+use crate::vcp_modules::topic_types::TopicKey;
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use serde_json::Value;
@@ -518,7 +519,7 @@ fn pull_worker_permits(frame_bytes: usize) -> Result<u32, String> {
 /// 返回 `(parsed_count, failed_count)`。
 async fn process_topic_messages<R: Runtime>(
     app: &AppHandle<R>,
-    topic_id: &str,
+    key: &TopicKey,
     mut parsed_messages: Vec<crate::vcp_modules::chat_manager::ChatMessage>,
     write_queue: &DbWriteQueue,
     prerender_enabled: bool,
@@ -616,7 +617,7 @@ async fn process_topic_messages<R: Runtime>(
     if !parsed_messages.is_empty() {
         // 3. 将预渲染和 Zstd 压缩等 CPU 密集型任务完美剥离至 spawn_blocking 线程池，解除 Tokio Worker 线程阻塞
         let t_block_start = std::time::Instant::now();
-        let topic_id_clone = topic_id.to_string();
+        let topic_id_clone = key.topic_id.clone();
         let (parsed_messages_back, content_hashes, render_bytes_list, contents) =
             tokio::task::spawn_blocking(move || {
                 let count = parsed_messages.len();
@@ -702,7 +703,7 @@ async fn process_topic_messages<R: Runtime>(
             let chunk_len = message_chunk.len();
             write_queue
                 .submit(DbWriteTask::TopicMessages {
-                    topic_id: topic_id.to_string(),
+                    key: key.clone(),
                     messages: message_chunk,
                     contents: contents.by_ref().take(chunk_len).collect(),
                     render_bytes: render_bytes.by_ref().take(chunk_len).collect(),
@@ -718,7 +719,7 @@ async fn process_topic_messages<R: Runtime>(
     if parsed_count > 0 {
         log::debug!(
             "[PullExecutor] [ProfileDetail] topic={} msgs={} | sql_att={:?} spawn_blocking={:?} submit_queue={:?} | total_proc={:?}",
-            topic_id, parsed_count, t_att, t_block, t_submit, t_total
+            key.topic_id, parsed_count, t_att, t_block, t_submit, t_total
         );
     }
 
@@ -1418,6 +1419,15 @@ impl PullExecutor {
                 drop(line);
                 ndjson_budget.observe_frame(line_bytes, frame.messages.len())?;
                 validate_returned_topic_identity(&frame, &expected_topic_identities)?;
+                let key = TopicKey::new(
+                    frame.owner_type.clone().ok_or_else(|| {
+                        format!("NDJSON topic {} omitted ownerType", frame.topic_id)
+                    })?,
+                    frame.owner_id.clone().ok_or_else(|| {
+                        format!("NDJSON topic {} omitted ownerId", frame.topic_id)
+                    })?,
+                    &frame.topic_id,
+                );
                 let topic_id = frame.topic_id;
                 if !seen_topics.insert(topic_id.clone()) {
                     return Err(format!("NDJSON returned duplicate topicId {topic_id}"));
@@ -1481,7 +1491,7 @@ impl PullExecutor {
                             let proc_start = std::time::Instant::now();
                             match process_topic_messages(
                                 &app_clone,
-                                &topic_id,
+                                &key,
                                 messages,
                                 &wq_clone,
                                 prerender_enabled,
@@ -1549,6 +1559,16 @@ impl PullExecutor {
             drop(trailing);
             ndjson_budget.observe_frame(trailing_bytes, frame.messages.len())?;
             validate_returned_topic_identity(&frame, &expected_topic_identities)?;
+            let key =
+                TopicKey::new(
+                    frame.owner_type.clone().ok_or_else(|| {
+                        format!("NDJSON topic {} omitted ownerType", frame.topic_id)
+                    })?,
+                    frame.owner_id.clone().ok_or_else(|| {
+                        format!("NDJSON topic {} omitted ownerId", frame.topic_id)
+                    })?,
+                    &frame.topic_id,
+                );
             let topic_id = frame.topic_id;
             if !seen_topics.insert(topic_id.clone()) {
                 return Err(format!("NDJSON returned duplicate topicId {topic_id}"));
@@ -1593,7 +1613,7 @@ impl PullExecutor {
                                 .collect();
                         match process_topic_messages(
                             &app_clone,
-                            &topic_id,
+                            &key,
                             messages,
                             &wq_clone,
                             prerender_enabled,

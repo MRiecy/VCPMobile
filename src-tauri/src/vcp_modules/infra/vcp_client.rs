@@ -21,6 +21,7 @@ use url::Url;
 use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, AuroraUpdate};
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 
 #[cfg(target_os = "android")]
 const HELPER_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -100,6 +101,16 @@ impl VcpRequestPayload {
             .filter(|request_id| !request_id.trim().is_empty())
             .unwrap_or(&self.message_id)
     }
+}
+
+pub fn message_transport_request_id(key: &MessageKey) -> String {
+    crate::vcp_modules::infra::utils::calculate_sha256(
+        format!(
+            "{}\n{}\n{}\n{}",
+            key.topic.owner_type, key.topic.owner_id, key.topic.topic_id, key.msg_id
+        )
+        .as_bytes(),
+    )
 }
 
 fn resolve_vcp_endpoint(raw_url: &str) -> String {
@@ -182,7 +193,7 @@ pub struct ActiveRequestEntry {
     cancellation_token: CancellationToken,
 }
 
-pub type ActiveRequestMap = Arc<DashMap<String, Arc<ActiveRequestEntry>>>;
+pub type ActiveRequestMap = Arc<DashMap<MessageKey, Arc<ActiveRequestEntry>>>;
 
 /// 全局活跃请求管理器。相同 message id 只允许一个 live attempt。
 pub struct ActiveRequests(pub ActiveRequestMap);
@@ -195,8 +206,8 @@ impl Default for ActiveRequests {
 }
 
 impl ActiveRequests {
-    pub(crate) fn cancel(&self, message_id: &str) -> Result<bool, String> {
-        let Some(entry) = self.0.get(message_id) else {
+    pub(crate) fn cancel(&self, key: &MessageKey) -> Result<bool, String> {
+        let Some(entry) = self.0.get(key) else {
             return Ok(false);
         };
         entry.cancellation_token.cancel();
@@ -208,14 +219,14 @@ impl ActiveRequests {
 /// RAII lease：仅当 map 中仍是本 attempt 时才移除，避免 ABA。
 pub struct ActiveRequestLease {
     requests: ActiveRequestMap,
-    message_id: String,
+    key: MessageKey,
     attempt_id: uuid::Uuid,
 }
 
 impl ActiveRequestLease {
     pub fn try_acquire(
         requests: ActiveRequestMap,
-        message_id: String,
+        key: MessageKey,
     ) -> Result<(Self, CancellationToken), String> {
         let attempt_id = uuid::Uuid::new_v4();
         let cancellation_token = CancellationToken::new();
@@ -224,21 +235,21 @@ impl ActiveRequestLease {
             cancellation_token: cancellation_token.clone(),
         });
 
-        match requests.entry(message_id.clone()) {
+        match requests.entry(key.clone()) {
             Entry::Vacant(slot) => {
                 slot.insert(entry);
                 Ok((
                     Self {
                         requests: requests.clone(),
-                        message_id,
+                        key,
                         attempt_id,
                     },
                     cancellation_token,
                 ))
             }
             Entry::Occupied(_) => Err(format!(
-                "Request {} is already active; duplicate attempt rejected",
-                message_id
+                "Request {} is already active for {}/{}/{}; duplicate attempt rejected",
+                key.msg_id, key.topic.owner_type, key.topic.owner_id, key.topic.topic_id
             )),
         }
     }
@@ -246,7 +257,7 @@ impl ActiveRequestLease {
 
 impl Drop for ActiveRequestLease {
     fn drop(&mut self) {
-        if let Entry::Occupied(entry) = self.requests.entry(self.message_id.clone()) {
+        if let Entry::Occupied(entry) = self.requests.entry(self.key.clone()) {
             if entry.get().attempt_id == self.attempt_id {
                 entry.remove();
             }
@@ -255,8 +266,7 @@ impl Drop for ActiveRequestLease {
 }
 
 /// 群组回合取消令牌，用于标记需要中断接力赛的话题
-/// topicId -> true (存在即代表已取消)
-pub struct CancelledGroupTurns(pub Arc<DashSet<String>>);
+pub struct CancelledGroupTurns(pub Arc<DashSet<TopicKey>>);
 
 impl Default for CancelledGroupTurns {
     fn default() -> Self {
@@ -270,13 +280,17 @@ impl Default for CancelledGroupTurns {
 #[allow(non_snake_case)]
 pub fn interruptGroupTurn(
     state: tauri::State<'_, CancelledGroupTurns>,
+    owner_id: String,
+    owner_type: String,
     topic_id: String,
 ) -> Result<Value, String> {
     log::info!(
         "[VCPClient] interruptGroupTurn called for topicId: {}",
         topic_id
     );
-    state.0.insert(topic_id);
+    state
+        .0
+        .insert(TopicKey::new(owner_type, owner_id, topic_id));
     Ok(json!({"status": "cancelled"}))
 }
 
@@ -287,20 +301,49 @@ pub fn interruptGroupTurn(
 /// 3. 上下文注入 (音乐信息、UI 规范要求)
 /// 4. 发起 HTTP 请求 (支持流式和非流式)
 /// 5. 注册 AbortController 实现中止机制
+fn message_key_from_context(
+    context: &Option<Value>,
+    message_id: &str,
+) -> Result<MessageKey, String> {
+    let context = context
+        .as_ref()
+        .ok_or_else(|| "VCP request context is required".to_string())?;
+    let topic_id = context["topicId"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "VCP request topicId is required".to_string())?;
+    let owner_id = context["ownerId"]
+        .as_str()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "VCP request ownerId is required".to_string())?;
+    let owner_type = context["ownerType"]
+        .as_str()
+        .filter(|value| *value == "agent" || *value == "group")
+        .ok_or_else(|| "VCP request ownerType is invalid".to_string())?;
+    Ok(MessageKey::new(
+        TopicKey::new(owner_type, owner_id, topic_id),
+        message_id,
+    ))
+}
+
 #[tauri::command]
 #[allow(non_snake_case)]
 pub async fn sendToVCP<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, ActiveRequests>,
-    payload: VcpRequestPayload,
+    mut payload: VcpRequestPayload,
     stream_channel: Channel<StreamEvent>,
 ) -> Result<Value, String> {
     let message_id = payload.message_id.clone();
     let context = payload.context.clone();
     let is_stream = payload.model_config["stream"].as_bool().unwrap_or(false);
+    let request_key = message_key_from_context(&context, &message_id)?;
+    if payload.transport_request_id.is_none() {
+        payload.transport_request_id = Some(message_transport_request_id(&request_key));
+    }
 
     let (lease, cancellation_token) =
-        ActiveRequestLease::try_acquire(state.0.clone(), message_id.clone())?;
+        ActiveRequestLease::try_acquire(state.0.clone(), request_key.clone())?;
     let (res, is_aborted) = match perform_vcp_request_registered(
         &app,
         payload,
@@ -322,22 +365,7 @@ pub async fn sendToVCP<R: Runtime>(
             res["finishReason"].as_str().map(|s| s.to_string())
         };
 
-        // 从 context 解出 owner_id, owner_type, topic_id 并委派统一终结器
-        let ctx = context.as_ref();
-        let group_id = ctx.and_then(|c| c["groupId"].as_str());
-        let agent_id = ctx.and_then(|c| c["agentId"].as_str());
-        let topic_id = ctx
-            .and_then(|c| c["topicId"].as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let (owner_id, owner_type) = if let Some(gid) = group_id {
-            (gid, "group")
-        } else if let Some(aid) = agent_id {
-            (aid, "agent")
-        } else {
-            ("", "agent")
-        };
+        let agent_id = context.as_ref().and_then(|value| value["agentId"].as_str());
 
         let pool = app
             .state::<crate::vcp_modules::db_manager::DbState>()
@@ -347,9 +375,9 @@ pub async fn sendToVCP<R: Runtime>(
         crate::vcp_modules::chat::message_service::finalize_stream_message(
             app.clone(),
             &pool,
-            owner_id,
-            owner_type,
-            topic_id,
+            &request_key.topic.owner_id,
+            &request_key.topic.owner_type,
+            request_key.topic.topic_id.clone(),
             message_id,
             res["fullContent"].as_str().unwrap_or("").to_string(),
             is_aborted,
@@ -399,11 +427,12 @@ fn get_or_calculate_message_hash(content: &Value) -> String {
 pub async fn perform_vcp_request<R: Runtime>(
     app: &AppHandle<R>,
     active_requests: ActiveRequestMap,
+    request_key: MessageKey,
     payload: VcpRequestPayload,
     stream_channel: Option<Channel<StreamEvent>>,
 ) -> Result<(Value, bool), String> {
     let (lease, cancellation_token) =
-        ActiveRequestLease::try_acquire(active_requests, payload.message_id.clone())?;
+        ActiveRequestLease::try_acquire(active_requests, request_key)?;
     let result =
         perform_vcp_request_registered(app, payload, stream_channel, cancellation_token).await;
     drop(lease);
@@ -1147,12 +1176,11 @@ async fn handle_streaming_request<R: Runtime>(
                         if let Some(topic_id) = ctx.get("topicId").and_then(|v| v.as_str()) {
                             sse_context["topicId"] = json!(topic_id);
                         }
-                        let owner_id = ctx
-                            .get("groupId")
-                            .and_then(|v| v.as_str())
-                            .or_else(|| ctx.get("agentId").and_then(|v| v.as_str()));
-                        if let Some(oid) = owner_id {
-                            sse_context["ownerId"] = json!(oid);
+                        if let Some(owner_id) = ctx.get("ownerId").and_then(|v| v.as_str()) {
+                            sse_context["ownerId"] = json!(owner_id);
+                        }
+                        if let Some(owner_type) = ctx.get("ownerType").and_then(|v| v.as_str()) {
+                            sse_context["ownerType"] = json!(owner_type);
                         }
                     }
 
@@ -1691,19 +1719,26 @@ async fn handle_non_streaming_request(
 }
 
 /// 中止请求 Command: interruptRequest
-/// 通过 messageId 立即取消对应 outer request 的共享取消域
+/// 通过完整消息身份立即取消对应 outer request 的共享取消域
 #[tauri::command]
 #[allow(non_snake_case)]
 pub fn interruptRequest(
     state: tauri::State<'_, ActiveRequests>,
+    owner_id: String,
+    owner_type: String,
+    topic_id: String,
     message_id: String,
 ) -> Result<Value, String> {
+    let key = MessageKey::new(
+        TopicKey::new(owner_type, owner_id, topic_id),
+        message_id.clone(),
+    );
     log::info!(
         "[VCPClient] interruptRequest called for messageId: {}. Active requests: {}",
         message_id,
         state.0.len()
     );
-    if state.cancel(&message_id)? {
+    if state.cancel(&key)? {
         log::info!(
             "[VCPClient] Found AbortController for messageId: {}, aborting...",
             message_id
@@ -1822,8 +1857,9 @@ pub async fn get_active_generations(
         "SELECT ag.msg_id, ag.topic_id, ag.owner_id, ag.owner_type, ag.created_at, \
                 m.agent_id, COALESCE(m.name, a.name) AS agent_name \
          FROM active_generations ag \
-         LEFT JOIN messages m ON m.topic_id = ag.topic_id AND m.msg_id = ag.msg_id \
-         LEFT JOIN agents a ON a.agent_id = m.agent_id \
+         LEFT JOIN messages m ON m.owner_type = ag.owner_type \
+            AND m.owner_id = ag.owner_id AND m.topic_id = ag.topic_id AND m.msg_id = ag.msg_id \
+         LEFT JOIN agents a ON a.owner_type = 'agent' AND a.agent_id = m.agent_id \
          ORDER BY ag.created_at ASC",
     )
     .fetch_all(&db.pool)
@@ -1834,15 +1870,19 @@ pub async fn get_active_generations(
     for row in rows {
         use sqlx::Row;
         let msg_id: String = row.get("msg_id");
+        let topic_id: String = row.get("topic_id");
+        let owner_id: String = row.get("owner_id");
+        let owner_type: String = row.get("owner_type");
+        let key = MessageKey::new(TopicKey::new(&owner_type, &owner_id, &topic_id), &msg_id);
         // 过滤掉当前正在活跃运行的后台流式任务，它们由 sse helper 代理，并不是“被异常打断”的
-        if active_requests.0.contains_key(&msg_id) {
+        if active_requests.0.contains_key(&key) {
             continue;
         }
         list.push(ActiveGeneration {
             msg_id,
-            topic_id: row.get("topic_id"),
-            owner_id: row.get("owner_id"),
-            owner_type: row.get("owner_type"),
+            topic_id,
+            owner_id,
+            owner_type,
             created_at: row.get("created_at"),
             agent_id: row.get("agent_id"),
             agent_name: row.get("agent_name"),
@@ -1854,39 +1894,53 @@ pub async fn get_active_generations(
 async fn mark_message_as_error<R: Runtime>(
     app_handle: &AppHandle<R>,
     pool: &sqlx::Pool<sqlx::Sqlite>,
-    msg_id: &str,
+    key: &MessageKey,
     custom_error: Option<String>,
 ) -> Result<(), String> {
     use sqlx::Row;
 
     // 先获取已有的正文内容进行挽留保留
-    let existing_content_row = sqlx::query("SELECT content FROM messages WHERE msg_id = ?")
-        .bind(msg_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    let existing_content_row = sqlx::query(
+        "SELECT content FROM messages
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+    )
+    .bind(&key.topic.owner_type)
+    .bind(&key.topic.owner_id)
+    .bind(&key.topic.topic_id)
+    .bind(&key.msg_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
     let existing_content = existing_content_row
         .and_then(|r| r.get::<Option<String>, _>("content"))
         .unwrap_or_default();
 
-    let row = sqlx::query(
-        "SELECT topic_id, owner_id, owner_type FROM active_generations WHERE msg_id = ?",
+    let pending = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+            SELECT 1 FROM active_generations
+            WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
+         )",
     )
-    .bind(msg_id)
-    .fetch_optional(pool)
+    .bind(&key.topic.owner_type)
+    .bind(&key.topic.owner_id)
+    .bind(&key.topic.topic_id)
+    .bind(&key.msg_id)
+    .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())?;
 
-    if let Some(r) = row {
-        let topic_id: String = r.get("topic_id");
-        let owner_id: String = r.get("owner_id");
-        let owner_type: String = r.get("owner_type");
-
-        let agent_id_row = sqlx::query("SELECT agent_id FROM messages WHERE msg_id = ?")
-            .bind(msg_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(|e| e.to_string())?;
+    if pending {
+        let agent_id_row = sqlx::query(
+            "SELECT agent_id FROM messages
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+        )
+        .bind(&key.topic.owner_type)
+        .bind(&key.topic.owner_id)
+        .bind(&key.topic.topic_id)
+        .bind(&key.msg_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())?;
         let agent_id = agent_id_row.and_then(|r| r.get::<Option<String>, _>("agent_id"));
 
         let error_suffix = match custom_error {
@@ -1902,10 +1956,10 @@ async fn mark_message_as_error<R: Runtime>(
         crate::vcp_modules::chat::message_service::finalize_stream_message(
             app_handle.clone(),
             pool,
-            &owner_id,
-            &owner_type,
-            topic_id,
-            msg_id.to_string(),
+            &key.topic.owner_id,
+            &key.topic.owner_type,
+            key.topic.topic_id.clone(),
+            key.msg_id.clone(),
             final_content,
             false,
             Some("error".to_string()),
@@ -1918,7 +1972,7 @@ async fn mark_message_as_error<R: Runtime>(
         // Terminal rows are immutable: a late recovery must be an idempotent no-op.
         log::info!(
             "[VCPClient] Generation {} is no longer pending; skipping late error finalization.",
-            msg_id
+            key.msg_id
         );
     }
     Ok(())
@@ -1961,19 +2015,27 @@ fn clean_old_cache_files(cache_dir: &std::path::Path) {
 pub async fn recover_active_generation<R: Runtime>(
     app: AppHandle<R>,
     active_requests: tauri::State<'_, ActiveRequests>,
+    owner_id: String,
+    owner_type: String,
+    topic_id: String,
     msg_id: String,
     stream_channel: Channel<StreamEvent>,
     is_warm: bool,
 ) -> Result<Value, String> {
     log::info!(
-        "[VCPClient] recover_active_generation called for msg_id: {}",
-        msg_id
+        "[VCPClient] recover_active_generation called for {}/{}/{}/{}",
+        owner_type,
+        owner_id,
+        topic_id,
+        msg_id,
     );
+    let key = MessageKey::new(TopicKey::new(&owner_type, &owner_id, &topic_id), &msg_id);
+    let transport_request_id = message_transport_request_id(&key);
 
     // Recovery owns one atomic attempt from inspection through terminal commit.
     // This removes the old recover -> resume two-IPC claim gap.
     let (_recovery_lease, _recovery_cancellation_token) =
-        match ActiveRequestLease::try_acquire(active_requests.0.clone(), msg_id.clone()) {
+        match ActiveRequestLease::try_acquire(active_requests.0.clone(), key.clone()) {
             Ok(claim) => claim,
             Err(_) => {
                 log::info!(
@@ -1985,24 +2047,33 @@ pub async fn recover_active_generation<R: Runtime>(
         };
 
     let db = app.state::<DbState>();
-    let pending: Option<(String, String, String, Option<String>)> = sqlx::query_as(
-        "SELECT ag.topic_id, ag.owner_id, ag.owner_type, m.agent_id \
+    let pending: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT m.agent_id \
          FROM active_generations ag \
-         LEFT JOIN messages m ON m.msg_id = ag.msg_id AND m.topic_id = ag.topic_id \
-         WHERE ag.msg_id = ?",
+         LEFT JOIN messages m ON m.owner_type = ag.owner_type AND m.owner_id = ag.owner_id \
+            AND m.topic_id = ag.topic_id AND m.msg_id = ag.msg_id \
+         WHERE ag.owner_type = ? AND ag.owner_id = ? AND ag.topic_id = ? AND ag.msg_id = ?",
     )
+    .bind(&owner_type)
+    .bind(&owner_id)
+    .bind(&topic_id)
     .bind(&msg_id)
     .fetch_optional(&db.pool)
     .await
     .map_err(|e| e.to_string())?;
 
-    let Some((topic_id, owner_id, owner_type, agent_id)) = pending else {
-        let terminal: Option<(String, Option<String>)> =
-            sqlx::query_as("SELECT content, finish_reason FROM messages WHERE msg_id = ?")
-                .bind(&msg_id)
-                .fetch_optional(&db.pool)
-                .await
-                .map_err(|e| e.to_string())?;
+    let Some((agent_id,)) = pending else {
+        let terminal: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT content, finish_reason FROM messages
+                 WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+        )
+        .bind(&owner_type)
+        .bind(&owner_id)
+        .bind(&topic_id)
+        .bind(&msg_id)
+        .fetch_optional(&db.pool)
+        .await
+        .map_err(|e| e.to_string())?;
         return Ok(match terminal {
             Some((content, Some(finish_reason))) => json!({
                 "status": "completed",
@@ -2026,7 +2097,8 @@ pub async fn recover_active_generation<R: Runtime>(
     });
 
     // 2. 检查是否存在 5 分钟超时后由助手转存的本地 JSON 恢复文件 (24小时内认领有效)
-    let safe_msg_id = crate::vcp_modules::infra::utils::calculate_sha256(msg_id.as_bytes());
+    let safe_msg_id =
+        crate::vcp_modules::infra::utils::calculate_sha256(transport_request_id.as_bytes());
     let recovered_file = cache_dir
         .join("sse_cache")
         .join(format!("sse_recovered_{}.json", safe_msg_id));
@@ -2087,7 +2159,8 @@ pub async fn recover_active_generation<R: Runtime>(
             log::info!("[VCPClient] Helper port discovered: {}", port);
             let stream = connect_helper_port(port).await?;
 
-            let stream = send_command_to_stream(stream, "query", &msg_id, None).await?;
+            let stream =
+                send_command_to_stream(stream, "query", &transport_request_id, None).await?;
 
             log::info!("[VCPClient] Query command sent, waiting for response frame...");
             let mut reader = FramedRead::new(stream, helper_frame_codec());
@@ -2097,7 +2170,8 @@ pub async fn recover_active_generation<R: Runtime>(
                 .ok_or_else(|| "No query response received (EOF)".to_string())?
                 .map_err(|e| format!("Helper query frame error: {}", e))?;
             let resp = serde_json::from_slice::<Value>(&line).map_err(|e| e.to_string())?;
-            if resp.get("requestId").and_then(Value::as_str) != Some(msg_id.as_str()) {
+            if resp.get("requestId").and_then(Value::as_str) != Some(transport_request_id.as_str())
+            {
                 return Err("Helper query response identity mismatch".to_string());
             }
             Ok::<Value, String>(resp)
@@ -2142,7 +2216,8 @@ pub async fn recover_active_generation<R: Runtime>(
 
                     log::info!("[VCPClient] Finalization complete. Sending stop command to helper to release memory.");
                     if let Err(stop_error) =
-                        send_stop_to_helper(&app, &msg_id, Some(helper_generation)).await
+                        send_stop_to_helper(&app, &transport_request_id, Some(helper_generation))
+                            .await
                     {
                         log::warn!(
                             "[VCPClient] Best-effort helper cleanup after durable finalization failed: {}",
@@ -2198,17 +2273,22 @@ pub async fn recover_active_generation<R: Runtime>(
     mark_message_as_error(
         &app,
         &db.pool,
-        &msg_id,
+        &key,
         Some("后台进程已被系统销毁，流式对话中断".to_string()),
     )
     .await?;
 
-    let content: Option<String> =
-        sqlx::query_scalar("SELECT content FROM messages WHERE msg_id = ?")
-            .bind(&msg_id)
-            .fetch_optional(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+    let content: Option<String> = sqlx::query_scalar(
+        "SELECT content FROM messages
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+    )
+    .bind(&owner_type)
+    .bind(&owner_id)
+    .bind(&topic_id)
+    .bind(&msg_id)
+    .fetch_optional(&db.pool)
+    .await
+    .map_err(|e| e.to_string())?;
     Ok(json!({ "status": "failed", "content": content.unwrap_or_default() }))
 }
 
@@ -2237,16 +2317,26 @@ async fn resume_claimed_generation<R: Runtime>(
     let client = super::http_clients::client(super::http_clients::HttpProfile::ChatStream).clone();
 
     let pool = app.state::<DbState>().pool.clone();
+    let key = MessageKey::new(TopicKey::new(&owner_type, &owner_id, &topic_id), &msg_id);
+    let transport_request_id = message_transport_request_id(&key);
 
     if let Some(ref content) = initial_content {
         let _ = sqlx::query(
             "UPDATE messages SET content = ?, updated_at = ? \
-             WHERE msg_id = ? AND topic_id = ? AND finish_reason IS NULL \
-             AND EXISTS(SELECT 1 FROM active_generations WHERE msg_id = ?)",
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ? \
+             AND finish_reason IS NULL AND EXISTS( \
+                SELECT 1 FROM active_generations \
+                WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ? \
+             )",
         )
         .bind(content)
         .bind(crate::vcp_modules::infra::utils::now_millis())
+        .bind(&owner_type)
+        .bind(&owner_id)
+        .bind(&topic_id)
         .bind(&msg_id)
+        .bind(&owner_type)
+        .bind(&owner_id)
         .bind(&topic_id)
         .bind(&msg_id)
         .execute(&pool)
@@ -2255,6 +2345,8 @@ async fn resume_claimed_generation<R: Runtime>(
 
     let context = json!({
         "topicId": topic_id,
+        "ownerId": owner_id,
+        "ownerType": owner_type,
         "groupId": if owner_type == "group" { Some(&owner_id) } else { None },
         "agentId": if owner_type == "agent" { Some(&owner_id) } else { None },
     });
@@ -2266,7 +2358,7 @@ async fn resume_claimed_generation<R: Runtime>(
         "",
         Value::Null,
         msg_id.clone(),
-        msg_id.clone(),
+        transport_request_id,
         Some(context.clone()),
         cancellation_token,
         Some(stream_channel.clone()),

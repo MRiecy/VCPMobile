@@ -156,10 +156,12 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
       if (sessionStore.currentSelectedItem?.id && sessionStore.currentTopicId) {
         const historyStore = useChatHistoryStore();
         const ownerId = sessionStore.currentSelectedItem.id;
-        const ownerType = sessionStore.currentSelectedItem.type || 'agent';
+        const ownerType = sessionStore.currentSelectedItem.type;
         const topicId = sessionStore.currentTopicId;
-        console.log(`[Lifecycle] Preloading chat history for ${ownerType} ${ownerId}, topic: ${topicId}`);
-        promises.push(historyStore.preloadHistory(ownerId, ownerType, topicId, 5));
+        if (ownerType === 'agent' || ownerType === 'group') {
+          console.log(`[Lifecycle] Preloading chat history for ${ownerType} ${ownerId}, topic: ${topicId}`);
+          promises.push(historyStore.preloadHistory(ownerId, ownerType, topicId, 5));
+        }
       }
 
       await Promise.all(promises);
@@ -176,11 +178,13 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
       // 首屏只需 currentTopicId（Pinia persist 已恢复），话题列表仅侧边栏需要
       if (sessionStore.currentSelectedItem?.id) {
         const ownerId = sessionStore.currentSelectedItem.id;
-        const ownerType = sessionStore.currentSelectedItem.type || 'agent';
-        console.log(`[Lifecycle] Restored session detected, deferring topic list load for ${ownerType} ${ownerId}...`);
-        topicStore.loadTopicList(ownerId, ownerType).catch(err => {
-          console.error(`[Lifecycle] Deferred topic list load failed:`, err);
-        });
+        const ownerType = sessionStore.currentSelectedItem.type;
+        if (ownerType === 'agent' || ownerType === 'group') {
+          console.log(`[Lifecycle] Restored session detected, deferring topic list load for ${ownerType} ${ownerId}...`);
+          topicStore.loadTopicList(ownerId, ownerType).catch(err => {
+            console.error(`[Lifecycle] Deferred topic list load failed:`, err);
+          });
+        }
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

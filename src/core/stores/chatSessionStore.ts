@@ -27,6 +27,8 @@ export const useChatSessionStore = defineStore("chatSession", () => {
   const currentTopicId = ref<string | null>(null);
   const sessionEpoch = ref(0);
   const lastActiveTopicMap = ref<Record<string, string>>({});
+  const ownerMapKey = (ownerType: ConversationOwnerType, ownerId: string) =>
+    `${ownerType}:${ownerId}`;
 
   const currentConversationKey = computed<ConversationKey | null>(() => {
     const ownerId = currentSelectedItem.value?.id;
@@ -40,9 +42,9 @@ export const useChatSessionStore = defineStore("chatSession", () => {
 
   const setConversation = (item: any, topicId: string | null) => {
     const ownerType: ConversationOwnerType | null = item
-      ? item.type === "group" || item.members
-        ? "group"
-        : "agent"
+      ? item.type === "agent" || item.type === "group"
+        ? item.type
+        : null
       : null;
     const nextItem = item && ownerType ? { ...item, type: ownerType } : null;
     const changed =
@@ -119,7 +121,7 @@ export const useChatSessionStore = defineStore("chatSession", () => {
     }
 
     // 3. 选择 topic（设置 currentSelectedItem 和 currentTopicId）
-    await selectTopicById(agentId, newTopic.id);
+    await selectTopicById(agentId, "agent", newTopic.id);
 
     // 4. 存储预填数据（由 ChatView/InputEnhancer 消费后清空）
     sharePrefillText.value = sharedText;
@@ -144,23 +146,23 @@ export const useChatSessionStore = defineStore("chatSession", () => {
    * @param loadHistoryCallback 回调函数，用于触发历史加载 (解耦 HistoryStore)
    */
   const selectTopicById = async (
-    itemId: string, 
-    topicId: string, 
+    itemId: string,
+    ownerType: ConversationOwnerType,
+    topicId: string,
     loadHistoryCallback?: (itemId: string, ownerType: string, topicId: string) => Promise<void>
   ) => {
-    // 记录在该 itemId 下最后一次选中的活跃话题 ID
-    lastActiveTopicMap.value[itemId] = topicId;
-
-    const ownerType = assistantStore.agents.some((a) => a.id === itemId)
-      ? "agent"
-      : "group";
+    lastActiveTopicMap.value[ownerMapKey(ownerType, itemId)] = topicId;
 
     // 设置当前选中的项目详情 (确保头像和色调同步)
-    const agent = assistantStore.agents.find((a: any) => a.id === itemId);
-    const group = assistantStore.groups.find((g) => g.id === itemId);
-    if (agent) {
+    const agent = ownerType === "agent"
+      ? assistantStore.agents.find((a: any) => a.id === itemId)
+      : undefined;
+    const group = ownerType === "group"
+      ? assistantStore.groups.find((g) => g.id === itemId)
+      : undefined;
+    if (ownerType === "agent" && agent) {
       setConversation({ ...agent, type: "agent" }, topicId);
-    } else if (group) {
+    } else if (ownerType === "group" && group) {
       setConversation({ ...group, type: "group" }, topicId);
     } else {
       throw new Error(`Conversation owner ${itemId} not found`);
@@ -181,15 +183,22 @@ export const useChatSessionStore = defineStore("chatSession", () => {
     if (!item) return;
     
     const ownerId = item.id;
-    const ownerType = item.members ? 'group' : 'agent';
+    if (item.type !== "agent" && item.type !== "group") {
+      throw new Error(`Conversation owner ${ownerId} has no valid type`);
+    }
+    const ownerType: ConversationOwnerType = item.type;
     
     // 如果已经选中了该项，且当前已有话题，则不重复加载
-    if (currentSelectedItem.value?.id === ownerId && currentTopicId.value) {
+    if (
+      currentSelectedItem.value?.id === ownerId &&
+      currentSelectedItem.value?.type === ownerType &&
+      currentTopicId.value
+    ) {
       return;
     }
 
     // 1. 优先从 Pinia 持久化的 lastActiveTopicMap 中获取最后一次打开的话题 ID
-    let targetTopicId = lastActiveTopicMap.value[ownerId];
+    let targetTopicId = lastActiveTopicMap.value[ownerMapKey(ownerType, ownerId)];
 
     // 2. 如果 Pinia 中没有记录，则尝试获取该 Owner 下最新的话题
     if (!targetTopicId) {
@@ -211,6 +220,7 @@ export const useChatSessionStore = defineStore("chatSession", () => {
       if (
         sessionEpoch.value !== selectionEpoch ||
         currentSelectedItem.value?.id !== ownerId ||
+        currentSelectedItem.value?.type !== ownerType ||
         currentTopicId.value !== null
       ) {
         console.log(`[ChatSessionStore] Discarding stale owner selection for ${ownerId}.`);
@@ -219,7 +229,7 @@ export const useChatSessionStore = defineStore("chatSession", () => {
     }
 
     if (targetTopicId) {
-      await selectTopicById(ownerId, targetTopicId, loadHistoryCallback);
+      await selectTopicById(ownerId, ownerType, targetTopicId, loadHistoryCallback);
     } else {
       // 没有任何话题的极端情况
       console.warn(`[ChatSessionStore] No topics found for ${ownerId}`);
