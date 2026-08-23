@@ -72,6 +72,16 @@ async fn soft_delete_topic_data(
     .await
     .map_err(|e| e.to_string())?;
     sqlx::query(
+        "DELETE FROM render_cache
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
+    )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    sqlx::query(
         "DELETE FROM active_generations
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
     )

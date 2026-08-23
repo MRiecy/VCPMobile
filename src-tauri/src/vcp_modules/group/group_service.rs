@@ -665,6 +665,12 @@ pub async fn delete_group_internal<R: Runtime>(
     .await
     .map_err(|e| e.to_string())?;
 
+    sqlx::query("DELETE FROM render_cache WHERE owner_type = 'group' AND owner_id = ?")
+        .bind(group_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
     sqlx::query(
         "UPDATE avatars SET deleted_at = ?
          WHERE owner_type = 'group' AND owner_id = ? AND deleted_at IS NULL",

@@ -242,7 +242,7 @@ BEGIN
       AND topic_id = new.topic_id AND msg_id = new.msg_id;
 END;
 
--- ============ 索引（0001 的 9 个 + 0008 的 2 个） ============
+-- ============ 索引 ============
 
 CREATE INDEX IF NOT EXISTS idx_topics_owner ON topics(owner_type, owner_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_emoticon_category ON emoticon_library(category);
@@ -251,7 +251,6 @@ CREATE INDEX IF NOT EXISTS idx_messages_updated_at ON messages(updated_at);
 CREATE INDEX IF NOT EXISTS idx_group_members_agent ON group_members(agent_id);
 CREATE INDEX IF NOT EXISTS idx_message_attachments_hash ON message_attachments(hash);
 CREATE INDEX IF NOT EXISTS idx_message_attachments_msg ON message_attachments(owner_type, owner_id, topic_id, msg_id);
-CREATE INDEX IF NOT EXISTS idx_render_cache_msg ON render_cache(owner_type, owner_id, topic_id, msg_id);
 CREATE INDEX IF NOT EXISTS idx_tarven_rules_active ON tarven_rules(rule_type, is_enabled, sort_order ASC);
 CREATE INDEX IF NOT EXISTS idx_messages_agent_id ON messages(agent_id);
 CREATE INDEX IF NOT EXISTS idx_messages_role ON messages(role);

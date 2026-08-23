@@ -406,12 +406,11 @@ async fn convert_history_rows(
                 let blocks_json = serde_json::to_value(&compiled).ok();
 
                 let pool_c = pool.clone();
-                let key = key.clone();
-                let mid = msg_id.clone();
+                let cache_key = MessageKey::new(key.clone(), msg_id.clone());
                 let observed_hash = content_hash_raw.clone();
                 tokio::spawn(async move {
                     let _ =
-                        write_render_cache_cas(&pool_c, &key, &mid, &observed_hash, &serialized)
+                        write_render_cache_cas(&pool_c, &cache_key, &observed_hash, &serialized)
                             .await;
                 });
 
@@ -1048,9 +1047,7 @@ pub async fn re_render_message(
 
             let observed_hash: String = r.get("content_hash");
             let (compiled, serialized) = compile_and_serialize_render_async(decompressed).await?;
-            if !write_render_cache_cas(pool, &key.topic, &key.msg_id, &observed_hash, &serialized)
-                .await?
-            {
+            if !write_render_cache_cas(pool, &key, &observed_hash, &serialized).await? {
                 return Err(format!(
                     "Message {} changed while re-rendering; stale cache discarded",
                     key.msg_id

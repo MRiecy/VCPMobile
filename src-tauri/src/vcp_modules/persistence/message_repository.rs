@@ -1,7 +1,7 @@
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::content_parser::{parse_content, ContentBlock};
 use crate::vcp_modules::sync_hash::HashAggregator;
-use crate::vcp_modules::topic_types::TopicKey;
+use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use serde::Serialize;
 
 use sqlx::Row;
@@ -99,8 +99,7 @@ pub async fn deserialize_render_async(bytes: Vec<u8>) -> Result<Vec<ContentBlock
 /// This prevents a slow cache miss/re-render from overwriting a newer edit.
 pub async fn write_render_cache_cas(
     pool: &sqlx::SqlitePool,
-    key: &TopicKey,
-    msg_id: &str,
+    key: &MessageKey,
     observed_content_hash: &str,
     render_content: &[u8],
 ) -> Result<bool, String> {
@@ -127,18 +126,18 @@ pub async fn write_render_cache_cas(
               AND content_hash = excluded.content_hash AND deleted_at IS NULL
          )",
     )
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .bind(msg_id)
+    .bind(&key.topic.owner_type)
+    .bind(&key.topic.owner_id)
+    .bind(&key.topic.topic_id)
+    .bind(&key.msg_id)
     .bind(render_content)
     .bind(observed_content_hash)
     .bind(RENDERER_SCHEMA_VERSION)
     .bind(now)
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .bind(msg_id)
+    .bind(&key.topic.owner_type)
+    .bind(&key.topic.owner_id)
+    .bind(&key.topic.topic_id)
+    .bind(&key.msg_id)
     .bind(observed_content_hash)
     .execute(pool)
     .await
@@ -212,8 +211,8 @@ pub struct RebuildProgress {
 // 通用三段流水线基础设施（Reader → Processor → Writer）
 // =================================================================
 
-type CachedMessageSource = (String, String, String, String, String, String);
-type RenderCacheWrite = (String, String, String, String, String, Vec<u8>);
+type CachedMessageSource = (MessageKey, String, String);
+type RenderCacheWrite = (MessageKey, String, Vec<u8>);
 
 fn open_maintenance_rusqlite(db_path: &std::path::Path) -> Result<rusqlite::Connection, String> {
     let conn = rusqlite::Connection::open(db_path).map_err(|e| e.to_string())?;
@@ -259,18 +258,9 @@ async fn stream_cached_message_contents(
                     let msg_id: String = row.get("msg_id");
                     let content: String = row.get("content");
                     let content_hash: String = row.get("content_hash");
-                    if tx
-                        .send((
-                            owner_type,
-                            owner_id,
-                            topic_id,
-                            msg_id,
-                            content,
-                            content_hash,
-                        ))
-                        .await
-                        .is_err()
-                    {
+                    let key =
+                        MessageKey::new(TopicKey::new(owner_type, owner_id, topic_id), msg_id);
+                    if tx.send((key, content, content_hash)).await.is_err() {
                         return Ok(());
                     }
                 }
@@ -283,8 +273,7 @@ async fn stream_cached_message_contents(
 
 fn update_render_cache_if_current(
     conn: &rusqlite::Connection,
-    key: &TopicKey,
-    msg_id: &str,
+    key: &MessageKey,
     content_hash: &str,
     bytes: &[u8],
     now: i64,
@@ -306,10 +295,10 @@ fn update_render_cache_if_current(
             content_hash,
             RENDERER_SCHEMA_VERSION,
             now,
-            &key.owner_type,
-            &key.owner_id,
-            &key.topic_id,
-            msg_id,
+            &key.topic.owner_type,
+            &key.topic.owner_id,
+            &key.topic.topic_id,
+            &key.msg_id,
         ],
     )
 }
@@ -335,9 +324,8 @@ fn run_render_cache_update_writer(
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             {
                 let now = chrono::Utc::now().timestamp_millis();
-                for (owner_type, owner_id, topic_id, msg_id, content_hash, bytes) in batch {
-                    let key = TopicKey::new(owner_type, owner_id, topic_id);
-                    update_render_cache_if_current(&tx, &key, &msg_id, &content_hash, &bytes, now)
+                for (key, content_hash, bytes) in batch {
+                    update_render_cache_if_current(&tx, &key, &content_hash, &bytes, now)
                         .map_err(|e| e.to_string())?;
                     processed += 1;
                 }
@@ -498,17 +486,10 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
                 };
 
                 match item {
-                    Some((owner_type, owner_id, topic_id, msg_id, content, content_hash)) => {
+                    Some((key, content, content_hash)) => {
                         let blocks = MessageRenderCompiler::compile(&content);
                         if let Ok(bytes) = MessageRenderCompiler::serialize(&blocks) {
-                            batch.push((
-                                owner_type,
-                                owner_id,
-                                topic_id,
-                                msg_id,
-                                content_hash,
-                                bytes,
-                            ));
+                            batch.push((key, content_hash, bytes));
                         }
 
                         if batch.len() >= 50
@@ -539,21 +520,8 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
             let _ = stream_cached_message_contents(&pool, tx_inner).await;
         });
 
-        while let Some((owner_type, owner_id, topic_id, msg_id, content, content_hash)) =
-            rx_inner.recv().await
-        {
-            if tx_compiler
-                .send((
-                    owner_type,
-                    owner_id,
-                    topic_id,
-                    msg_id,
-                    content,
-                    content_hash,
-                ))
-                .await
-                .is_err()
-            {
+        while let Some(item) = rx_inner.recv().await {
+            if tx_compiler.send(item).await.is_err() {
                 break;
             }
         }
