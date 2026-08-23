@@ -497,7 +497,7 @@ pub async fn load_chat_history_around_internal(
         return Err("topic does not belong to the selected owner".to_string());
     }
 
-    let anchor_ts: i64 = sqlx::query_scalar(
+    let anchor_ts: Option<i64> = sqlx::query_scalar(
         "SELECT timestamp FROM messages
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
            AND deleted_at IS NULL",
@@ -508,8 +508,10 @@ pub async fn load_chat_history_around_internal(
     .bind(anchor_msg_id)
     .fetch_optional(pool)
     .await
-    .map_err(|e| e.to_string())?
-    .ok_or_else(|| "anchor message not found".to_string())?;
+    .map_err(|e| e.to_string())?;
+    let Some(anchor_ts) = anchor_ts else {
+        return Ok(Vec::new());
+    };
 
     const ROW_SELECT: &str =
         "SELECT m.msg_id, m.role, COALESCE(m.name, a.name) as name, m.agent_id, m.content, m.timestamp, m.is_group_message, m.group_id, m.finish_reason, r.render_content, r.content_hash AS cache_content_hash, r.renderer_schema_version, m.content_hash
@@ -594,6 +596,11 @@ pub async fn load_chat_text_history_for_context(
          FROM messages m
          LEFT JOIN agents a ON a.owner_type = 'agent' AND m.agent_id = a.agent_id
          WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM active_generations ag
+             WHERE ag.owner_type = m.owner_type AND ag.owner_id = m.owner_id
+               AND ag.topic_id = m.topic_id AND ag.msg_id = m.msg_id
+           )
          ORDER BY m.timestamp DESC, m.msg_id DESC
          LIMIT ? OFFSET ?"
     } else {
@@ -601,6 +608,11 @@ pub async fn load_chat_text_history_for_context(
          FROM messages m
          LEFT JOIN agents a ON a.owner_type = 'agent' AND m.agent_id = a.agent_id
          WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM active_generations ag
+             WHERE ag.owner_type = m.owner_type AND ag.owner_id = m.owner_id
+               AND ag.topic_id = m.topic_id AND ag.msg_id = m.msg_id
+           )
          ORDER BY m.timestamp DESC, m.msg_id DESC"
     };
 

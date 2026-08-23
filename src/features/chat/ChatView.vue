@@ -96,7 +96,8 @@ watch(
 
 const scrollToLatest = async (smooth = true) => {
   if (historyStore.hasEvictedNewer && !historyStore.editingMessage) {
-    await historyStore.returnToLatest();
+    const result = await historyStore.returnToLatest();
+    if (result.error || result.aborted || historyStore.hasEvictedNewer) return;
     await nextTick();
   }
   scrollToBottom(smooth);

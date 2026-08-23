@@ -42,6 +42,69 @@ fn render_rule_content(rule: &TarvenRule) -> String {
     }
 }
 
+fn message_text_content_mut(message: &mut serde_json::Value) -> Option<&mut String> {
+    match message.get_mut("content")? {
+        serde_json::Value::String(text) => Some(text),
+        serde_json::Value::Array(parts) => parts.iter_mut().find_map(|part| {
+            if part.get("type").and_then(serde_json::Value::as_str) != Some("text") {
+                return None;
+            }
+            match part.get_mut("text") {
+                Some(serde_json::Value::String(text)) => Some(text),
+                _ => None,
+            }
+        }),
+        serde_json::Value::Object(content) => match content.get_mut("text") {
+            Some(serde_json::Value::String(text)) => Some(text),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn apply_user_suffix_rules(messages: &mut [serde_json::Value], rules: &[&TarvenRule]) {
+    if rules.is_empty() {
+        return;
+    }
+    let Some(user_idx) = messages
+        .iter()
+        .rposition(|message| message["role"].as_str() == Some("user"))
+    else {
+        return;
+    };
+
+    let mut prepend_parts = Vec::new();
+    let mut append_parts = Vec::new();
+    for rule in rules {
+        let rendered = render_rule_content(rule);
+        if rule.position.as_deref() == Some("prepend") {
+            prepend_parts.push(rendered);
+        } else {
+            append_parts.push(rendered);
+        }
+    }
+
+    let Some(user_content) = message_text_content_mut(&mut messages[user_idx]) else {
+        return;
+    };
+    if !prepend_parts.is_empty() {
+        let prepend = prepend_parts.join("\n\n");
+        *user_content = if user_content.is_empty() {
+            prepend
+        } else {
+            format!("{}\n\n{}", prepend, user_content)
+        };
+    }
+    if !append_parts.is_empty() {
+        let append = append_parts.join("\n\n");
+        *user_content = if user_content.is_empty() {
+            append
+        } else {
+            format!("{}\n\n{}", user_content, append)
+        };
+    }
+}
+
 pub async fn fetch_active_rules(
     pool: &Pool<Sqlite>,
     scope: &str,
@@ -221,49 +284,7 @@ pub async fn apply_tarven_pipeline(
         .filter(|r| r.rule_type == "user_suffix")
         .collect();
 
-    if !user_rules.is_empty() {
-        if let Some(user_idx) = messages
-            .iter()
-            .rposition(|m| m["role"].as_str() == Some("user"))
-        {
-            let mut user_content = messages[user_idx]["content"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-
-            let mut user_prepend_parts = Vec::new();
-            let mut user_append_parts = Vec::new();
-
-            for rule in user_rules {
-                let rendered = render_rule_content(rule);
-                if rule.position.as_deref() == Some("prepend") {
-                    user_prepend_parts.push(rendered);
-                } else {
-                    user_append_parts.push(rendered);
-                }
-            }
-
-            if !user_prepend_parts.is_empty() {
-                let prepend_str = user_prepend_parts.join("\n\n");
-                if !user_content.is_empty() {
-                    user_content = format!("{}\n\n{}", prepend_str, user_content);
-                } else {
-                    user_content = prepend_str;
-                }
-            }
-
-            if !user_append_parts.is_empty() {
-                let append_str = user_append_parts.join("\n\n");
-                if !user_content.is_empty() {
-                    user_content = format!("{}\n\n{}", user_content, append_str);
-                } else {
-                    user_content = append_str;
-                }
-            }
-
-            messages[user_idx]["content"] = serde_json::Value::String(user_content);
-        }
-    }
+    apply_user_suffix_rules(messages, &user_rules);
 
     // 4. 处理 Context Inject 上下文独立节点插入
     let context_rules: Vec<&TarvenRule> = rules
@@ -541,49 +562,7 @@ pub async fn preview_tarven_injection(
         .filter(|r| r.rule_type == "user_suffix" && r.is_enabled)
         .collect();
 
-    if !user_rules.is_empty() {
-        if let Some(user_idx) = messages
-            .iter()
-            .rposition(|m| m["role"].as_str() == Some("user"))
-        {
-            let mut user_content = messages[user_idx]["content"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-
-            let mut user_prepend_parts = Vec::new();
-            let mut user_append_parts = Vec::new();
-
-            for rule in user_rules {
-                let rendered = render_rule_content(rule);
-                if rule.position.as_deref() == Some("prepend") {
-                    user_prepend_parts.push(rendered);
-                } else {
-                    user_append_parts.push(rendered);
-                }
-            }
-
-            if !user_prepend_parts.is_empty() {
-                let prepend_str = user_prepend_parts.join("\n\n");
-                if !user_content.is_empty() {
-                    user_content = format!("{}\n\n{}", prepend_str, user_content);
-                } else {
-                    user_content = prepend_str;
-                }
-            }
-
-            if !user_append_parts.is_empty() {
-                let append_str = user_append_parts.join("\n\n");
-                if !user_content.is_empty() {
-                    user_content = format!("{}\n\n{}", user_content, append_str);
-                } else {
-                    user_content = append_str;
-                }
-            }
-
-            messages[user_idx]["content"] = serde_json::Value::String(user_content);
-        }
-    }
+    apply_user_suffix_rules(&mut messages, &user_rules);
 
     // 3. 处理 Context Inject
     let context_rules: Vec<&TarvenRule> = rules

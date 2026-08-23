@@ -62,6 +62,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     messageId,
   );
 
+  const compareMessageOrder = (a: ChatMessage, b: ChatMessage) => {
+    if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  };
+
   // 核心：记录每个完整会话是否处于活动流状态。
   const sessionActiveStreams = ref<Record<string, string[]>>({});
 
@@ -895,9 +900,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             // 如果是当前展示的话题，且历史中没有，立即推入历史中展示
             if (isCurrentConversation) {
               historyStore.currentChatHistory.push(msg);
-              historyStore.currentChatHistory.sort(
-                (a, b) => a.timestamp - b.timestamp,
-              );
+              historyStore.currentChatHistory.sort(compareMessageOrder);
             }
           }
           activeStreamMessages.set(messageKey, msg);
@@ -972,9 +975,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
                 !historyStore.currentChatHistory.some((x) => x.id === m.id)
               ) {
                 historyStore.currentChatHistory.push(m);
-                historyStore.currentChatHistory.sort(
-                  (a, b) => a.timestamp - b.timestamp,
-                );
+                historyStore.currentChatHistory.sort(compareMessageOrder);
               }
             },
             onStreamFinished: (_mid, tid) => {

@@ -295,8 +295,9 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
     );
     await nextTick();
 
-    if (result.ok || !result.anchorMissing) {
+    if (result.ok) {
       scrollToMessageById(item.msgId);
+      return;
     }
     if (result.anchorMissing) {
       notificationStore.addNotification({
@@ -305,6 +306,7 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
         message: '目标消息已不存在或无法定位',
         toastOnly: true,
       });
+      return;
     }
   } catch (e) {
     console.error('[GlobalSearch] Jump failed:', e);

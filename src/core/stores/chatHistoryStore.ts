@@ -12,7 +12,10 @@ import { clearMessageCache } from "../utils/astRenderer";
 import { extractMentionedMemberIds } from "../utils/mention";
 
 import type { ChatMessage, ContentBlock } from "../types/chat";
-import type { ConversationKey } from "./chatSessionStore";
+import type {
+  ConversationKey,
+  ConversationOwnerType,
+} from "./chatSessionStore";
 
 export interface HistoryPageResult {
   addedCount: number;
@@ -67,7 +70,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   const loading = ref(false);
 
   // 分页加载状态
-  const historyOffset = ref(0);        // 当前已加载的消息总数（= 下次请求的 offset 起点）
+  const loadedWindowCount = ref(0);   // 当前内存历史窗口中的消息数
   const hasMoreHistory = ref(true);    // 是否还有更多旧消息
   const isLoadingHistory = ref(false); // 防止并发重复触发
   const hasEvictedNewer = ref(false);  // 深翻历史触发窗口裁剪后，最新端需要显式重载
@@ -92,6 +95,19 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   const topicStore = useTopicStore();
   const notificationStore = useNotificationStore();
 
+  const errorMessage = (error: unknown) =>
+    error instanceof Error ? error.message : String(error);
+  const isMissingTopicError = (error: unknown) =>
+    errorMessage(error) === "topic does not belong to the selected owner";
+  const notifyHistoryLoadFailure = () => {
+    notificationStore.addNotification({
+      type: "error",
+      title: "历史加载失败",
+      message: "暂时无法读取聊天记录，请稍后重试",
+      toastOnly: true,
+    });
+  };
+
   const captureLoadedConversation = (): ConversationKey | null => {
     const key = sessionStore.currentConversationKey;
     return sameConversation(loadedConversationKey.value, key) && key ? { ...key } : null;
@@ -114,7 +130,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
    */
   const preloadHistory = async (
     ownerId: string,
-    ownerType: string,
+    ownerType: ConversationOwnerType,
     topicId: string,
     limit: number = 5,
   ) => {
@@ -199,10 +215,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
    */
   const loadHistory = async (
     ownerId: string,
-    ownerType: string,
+    ownerType: ConversationOwnerType,
     topicId: string,
     limit: number = 15,
-    offset: number = 0
+    loadedCount: number = 0
   ): Promise<HistoryPageResult> => {
     const key = sessionStore.currentConversationKey;
     if (
@@ -214,10 +230,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       return { addedCount: 0, aborted: true };
     }
     const loadId = ++currentLoadId;
-    const oldest = offset > 0 ? currentChatHistory.value[0] : undefined;
-    if (offset > 0 && !oldest) return { addedCount: 0, aborted: true };
+    const oldest = loadedCount > 0 ? currentChatHistory.value[0] : undefined;
+    if (loadedCount > 0 && !oldest) return { addedCount: 0, aborted: true };
     console.log(
-      `[ChatHistoryStore] Loading history for ${ownerId}, topic: ${topicId}, limit: ${limit}, offset: ${offset}`,
+      `[ChatHistoryStore] Loading history for ${ownerId}, topic: ${topicId}, limit: ${limit}, loaded: ${loadedCount}`,
     );
     if (currentLoadAbortController) {
       currentLoadAbortController.abort();
@@ -227,11 +243,12 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     const { signal } = controller;
     loading.value = true;
     isLoadingHistory.value = true;
+    let initialLoadCommitted = false;
 
     try {
       let messages: ChatMessage[];
       if (
-        offset === 0 &&
+        loadedCount === 0 &&
         !preloadConsumed &&
         preloadedHistory.value &&
         sameConversation(preloadedHistory.value.key, key)
@@ -243,8 +260,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         preloadConsumed = true;
         messages = await invoke<ChatMessage[]>('load_chat_history', {
           ownerId, ownerType, topicId, limit,
-          // `offset` remains local bookkeeping only; the backend page boundary is stable.
-          offset: offset === 0 ? 0 : null,
+          // 后端分页使用稳定游标；offset=0 只标识最新窗口读取。
+          offset: loadedCount === 0 ? 0 : null,
           beforeTimestamp: oldest?.timestamp ?? null,
           beforeMessageId: oldest?.id ?? null,
         });
@@ -262,7 +279,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         msg => streamStore.getActiveStreamMessage(ownerId, ownerType, topicId, msg.id) || msg,
       );
       let addedCount = hydrated.length;
-      if (offset === 0) {
+      if (loadedCount === 0) {
         currentChatHistory.value = mergeHistoryWindow([], hydrated, false);
         hasEvictedNewer.value = false;
       } else {
@@ -279,12 +296,32 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         addedCount = unique.length;
       }
       loadedConversationKey.value = key;
-      historyOffset.value = currentChatHistory.value.length;
+      loadedWindowCount.value = currentChatHistory.value.length;
       hasMoreHistory.value = messages.length >= limit;
+      initialLoadCommitted = loadedCount === 0;
       hydrated.forEach(msg => attachmentStore.resolveMessageAssets(msg));
       return { addedCount };
     } catch (e) {
       console.error("[ChatHistoryStore] Failed to load history:", e);
+      if (
+        signal.aborted ||
+        loadId !== currentLoadId ||
+        !sessionStore.isConversationCurrent(key)
+      ) {
+        return { addedCount: 0, aborted: true };
+      }
+      if (isMissingTopicError(e)) {
+        try {
+          await topicStore.loadTopicList(ownerId, ownerType);
+        } catch {
+          // TopicStore 已负责显示列表读取错误，避免重复 Toast。
+          return { addedCount: 0, error: e };
+        }
+        if (loadId !== currentLoadId || !sessionStore.isConversationCurrent(key)) {
+          return { addedCount: 0, aborted: true };
+        }
+      }
+      notifyHistoryLoadFailure();
       return { addedCount: 0, error: e };
     } finally {
       if (
@@ -296,7 +333,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         loading.value = false;
         isLoadingHistory.value = false;
 
-        if (offset === 0 && !signal.aborted) {
+        if (initialLoadCommitted && !signal.aborted) {
           streamStore.checkAndRecoverInterruptedStreams().catch((err) => {
             console.error("[ChatHistoryStore] Failed to trigger stream recovery after loading history:", err);
           });
@@ -311,7 +348,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     currentLoadAbortController = null;
     currentChatHistory.value = [];
     loadedConversationKey.value = null;
-    historyOffset.value = 0;
+    loadedWindowCount.value = 0;
     hasMoreHistory.value = true;
     hasEvictedNewer.value = false;
     loading.value = false;
@@ -321,7 +358,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
 
   const loadHistoryPaginated = async (
     ownerId: string,
-    ownerType: string,
+    ownerType: ConversationOwnerType,
     topicId: string,
   ) => {
     resetHistoryForConversation();
@@ -343,7 +380,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       key.ownerType,
       key.topicId,
       10,
-      historyOffset.value,
+      loadedWindowCount.value,
     );
   };
 
@@ -363,12 +400,12 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
    */
   const loadHistoryAround = async (
     ownerId: string,
-    ownerType: string,
+    ownerType: ConversationOwnerType,
     topicId: string,
     anchorMessageId: string,
     beforeN = 12,
     afterN = 8,
-  ): Promise<{ ok: boolean; anchorMissing?: boolean; error?: unknown }> => {
+  ): Promise<{ ok: boolean; anchorMissing?: boolean }> => {
     const key = sessionStore.currentConversationKey;
     if (
       !key ||
@@ -403,6 +440,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
 
       const anchorIndex = messages.findIndex((m) => m.id === anchorMessageId);
       if (anchorIndex === -1) {
+        const latest = await loadHistory(ownerId, ownerType, topicId, 15, 0);
+        if (latest.error || latest.aborted) {
+          return { ok: false };
+        }
         return { ok: false, anchorMissing: true };
       }
 
@@ -411,7 +452,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       );
       currentChatHistory.value = mergeHistoryWindow([], hydrated, false);
       loadedConversationKey.value = key;
-      historyOffset.value = currentChatHistory.value.length;
+      loadedWindowCount.value = currentChatHistory.value.length;
       // 锚点上方未取满 beforeN 说明已触顶；下方未取满 afterN 说明已在最新端
       hasMoreHistory.value = anchorIndex >= beforeN;
       hasEvictedNewer.value = messages.length - anchorIndex - 1 >= afterN;
@@ -419,7 +460,27 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       return { ok: true };
     } catch (e) {
       console.error("[ChatHistoryStore] Failed to load history around anchor:", e);
-      return { ok: false, error: e };
+      if (
+        controller.signal.aborted ||
+        loadId !== currentLoadId ||
+        !sessionStore.isConversationCurrent(key)
+      ) {
+        return { ok: false };
+      }
+      if (isMissingTopicError(e)) {
+        try {
+          await topicStore.loadTopicList(ownerId, ownerType);
+          return { ok: false, anchorMissing: true };
+        } catch {
+          // TopicStore 已负责显示列表读取错误，避免重复 Toast。
+          return { ok: false };
+        }
+      }
+      const latest = await loadHistory(ownerId, ownerType, topicId, 15, 0);
+      if (latest.error || latest.aborted) {
+        return { ok: false };
+      }
+      return { ok: false, anchorMissing: true };
     } finally {
       if (currentLoadAbortController === controller && loadId === currentLoadId) {
         currentLoadAbortController = null;
@@ -952,7 +1013,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   return {
     currentChatHistory,
     loading,
-    historyOffset,
+    loadedWindowCount,
     hasMoreHistory,
     isLoadingHistory,
     hasEvictedNewer,
