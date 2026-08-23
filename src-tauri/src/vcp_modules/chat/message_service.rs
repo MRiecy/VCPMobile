@@ -1,128 +1,15 @@
 use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
 use crate::vcp_modules::content_parser::ContentBlock;
-use crate::vcp_modules::file_manager::get_attachments_root_dir;
+use crate::vcp_modules::file_manager::resolve_attachment_cas_file;
 use crate::vcp_modules::message_repository::{
     compile_and_serialize_render_async, deserialize_render_async, resolve_message_updated_at,
     serialize_render_async, write_render_cache_cas, MessageRepository, RENDERER_SCHEMA_VERSION,
 };
-use crate::vcp_modules::settings_manager;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
-use futures_util::StreamExt;
-use sha2::{Digest, Sha256};
 use sqlx::Row;
-use std::path::Path;
-use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager};
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
-
-const MAX_ATTACHMENT_DOWNLOAD_BYTES: u64 = 50 * 1024 * 1024;
-
-fn attachment_http_client() -> Result<&'static reqwest::Client, String> {
-    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
-        std::sync::OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(60))
-                .build()
-                .map_err(|error| error.to_string())
-        })
-        .as_ref()
-        .map_err(Clone::clone)
-}
-
-async fn download_attachment(
-    base_url: &str,
-    sync_token: &str,
-    expected_hash: &str,
-    expected_size: u64,
-    destination: &Path,
-) -> Result<(), String> {
-    if expected_hash.len() != 64 || !expected_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err("attachment hash must be 64 hexadecimal characters".to_string());
-    }
-    let mut url = reqwest::Url::parse(&format!(
-        "{}/api/mobile-sync/download-attachment",
-        base_url.trim_end_matches('/')
-    ))
-    .map_err(|error| format!("invalid sync URL: {}", error))?;
-    url.query_pairs_mut().append_pair("hash", expected_hash);
-
-    let response = attachment_http_client()?
-        .get(url)
-        .header("x-sync-token", sync_token)
-        .header("Authorization", format!("Bearer {}", sync_token))
-        .send()
-        .await
-        .map_err(|error| format!("attachment download failed: {}", error))?
-        .error_for_status()
-        .map_err(|error| format!("attachment server rejected download: {}", error))?;
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_ATTACHMENT_DOWNLOAD_BYTES)
-    {
-        return Err("attachment exceeds 50 MiB download limit".to_string());
-    }
-
-    let temp_path = destination.with_file_name(format!(
-        ".{}.{}.part",
-        destination
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("attachment"),
-        uuid::Uuid::new_v4()
-    ));
-    let result = async {
-        let mut file = fs::File::create(&temp_path)
-            .await
-            .map_err(|error| error.to_string())?;
-        let mut stream = response.bytes_stream();
-        let mut total = 0u64;
-        let mut hasher = Sha256::new();
-        while let Some(chunk) = tokio::time::timeout(Duration::from_secs(15), stream.next())
-            .await
-            .map_err(|_| "attachment download stalled".to_string())?
-        {
-            let chunk = chunk.map_err(|error| error.to_string())?;
-            total = total
-                .checked_add(chunk.len() as u64)
-                .ok_or_else(|| "attachment size overflow".to_string())?;
-            if total > MAX_ATTACHMENT_DOWNLOAD_BYTES {
-                return Err("attachment exceeds 50 MiB download limit".to_string());
-            }
-            hasher.update(&chunk);
-            file.write_all(&chunk)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
-        if expected_size > 0 && total != expected_size {
-            return Err(format!(
-                "attachment size mismatch: expected {}, received {}",
-                expected_size, total
-            ));
-        }
-        let actual_hash = format!("{:x}", hasher.finalize());
-        if !actual_hash.eq_ignore_ascii_case(expected_hash) {
-            return Err("attachment SHA-256 mismatch".to_string());
-        }
-        file.flush().await.map_err(|error| error.to_string())?;
-        file.sync_all().await.map_err(|error| error.to_string())?;
-        drop(file);
-        fs::rename(&temp_path, destination)
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok(())
-    }
-    .await;
-    if result.is_err() {
-        let _ = fs::remove_file(&temp_path).await;
-    }
-    result
-}
 
 // =================================================================
 // vcp_modules/message_service.rs - 消息业务逻辑中心 (含附件对齐)
@@ -268,7 +155,7 @@ async fn convert_history_rows(
              FROM message_attachments ma
              JOIN attachments a ON ma.hash = a.hash
              WHERE ma.owner_type = ? AND ma.owner_id = ? AND ma.topic_id = ?
-               AND ma.msg_id IN ({}) AND ma.deleted_at IS NULL
+               AND ma.msg_id IN ({})
              ORDER BY ma.msg_id, ma.attachment_order ASC",
             extracted_text_column, placeholders
         );
@@ -648,7 +535,7 @@ pub async fn load_chat_text_history_for_context(
              FROM message_attachments ma
              JOIN attachments a ON ma.hash = a.hash
              WHERE ma.owner_type = ? AND ma.owner_id = ? AND ma.topic_id = ?
-               AND ma.msg_id IN ({}) AND ma.deleted_at IS NULL
+               AND ma.msg_id IN ({})
              ORDER BY ma.msg_id, ma.attachment_order ASC",
             extracted_text_column, placeholders
         );
@@ -743,9 +630,10 @@ pub async fn load_chat_text_history_for_context(
     Ok(history)
 }
 
-/// 核心：确保消息中的附件在手机本地物理存在，否则从电脑同步下载
-async fn ensure_attachments_locally<R: tauri::Runtime>(
+/// 以 Mobile 本地 CAS 为唯一文件真理源，禁止消息写入隐式下载桌面附件。
+async fn normalize_attachments_from_local_cas<R: tauri::Runtime>(
     app: &AppHandle<R>,
+    pool: &sqlx::SqlitePool,
     message: &mut ChatMessage,
 ) -> Result<(), String> {
     let attachments = match &mut message.attachments {
@@ -753,67 +641,35 @@ async fn ensure_attachments_locally<R: tauri::Runtime>(
         None => return Ok(()),
     };
 
-    let att_dir = get_attachments_root_dir(app)?;
-    if !att_dir.exists() {
-        fs::create_dir_all(&att_dir)
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-
     for att in attachments {
-        // 协议 1.1 的 desktop_only 是明确的能力边界：保留关系与可用文本，
-        // 但编辑/重放历史消息不得隐式触发桌面二进制下载。
-        if att.status.as_deref() == Some("desktop_only") {
-            att.src.clear();
-            att.internal_path.clear();
-            continue;
-        }
-        let hash = match &att.hash {
-            Some(h) => h.clone(),
-            None => continue,
-        };
+        let hash = att
+            .hash
+            .as_deref()
+            .filter(|hash| crate::vcp_modules::infra::utils::is_valid_cas_hash(hash))
+            .ok_or_else(|| format!("Attachment {} requires a valid SHA-256 hash", att.name))?
+            .to_ascii_lowercase();
+        att.hash = Some(hash.clone());
 
-        // 判定后缀 (对齐 file_manager.rs 逻辑)
-        let ext = Path::new(&att.name)
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-
-        let local_file_name = if ext.is_empty() {
-            hash.clone()
-        } else {
-            format!("{}.{}", hash, ext)
-        };
-
-        let local_path = att_dir.join(&local_file_name);
-        let local_path_str = local_path.to_string_lossy().into_owned();
-
-        if !local_path.exists() {
-            let settings = settings_manager::read_settings(app.clone(), app.state()).await?;
-            if settings.sync_http_url.is_empty() {
+        match resolve_attachment_cas_file(app, pool, &hash).await {
+            Ok(local) => {
+                let local_path = local.path.to_string_lossy().into_owned();
+                att.r#type = local.mime_type;
+                att.size = local.size_bytes;
+                att.src = format!("file://{local_path}");
+                att.internal_path = local_path;
+                att.status = Some("ready".to_string());
+            }
+            Err(_) if att.status.as_deref() == Some("desktop_only") => {
+                att.src.clear();
+                att.internal_path.clear();
+            }
+            Err(error) => {
                 return Err(format!(
-                    "attachment {} is missing locally and sync is disabled",
-                    hash
+                    "Attachment {} is not available in the Mobile CAS: {error}",
+                    att.name
                 ));
             }
-            download_attachment(
-                &settings.sync_http_url,
-                &settings.sync_token,
-                &hash,
-                att.size,
-                &local_path,
-            )
-            .await?;
         }
-
-        // 核心对齐：
-        // 1. src 保持物理路径（用于超栈追踪），如果来自电脑端，它已经包含 file:// 路径
-        // 2. internal_path 专门作为手机本地可访问路径，前端可通过 convertFileSrc 转换为 asset://
-        if att.src.is_empty() {
-            att.src = format!("file://{}", local_path_str);
-        }
-        att.internal_path = local_path_str;
-        att.status = Some("done".to_string());
     }
     Ok(())
 }
@@ -953,7 +809,7 @@ pub async fn append_single_message<R: tauri::Runtime>(
     topic_id: String,
     mut message: ChatMessage,
 ) -> Result<Vec<ContentBlock>, String> {
-    ensure_attachments_locally(&app_handle, &mut message).await?;
+    normalize_attachments_from_local_cas(&app_handle, db_pool, &mut message).await?;
 
     let (blocks, render_bytes): (Vec<ContentBlock>, Vec<u8>) =
         if let Some(blocks_val) = &message.blocks {
@@ -1086,7 +942,7 @@ pub async fn patch_single_message<R: tauri::Runtime>(
     mut message: ChatMessage,
     skip_bubble: bool,
 ) -> Result<Vec<ContentBlock>, String> {
-    ensure_attachments_locally(&app_handle, &mut message).await?;
+    normalize_attachments_from_local_cas(&app_handle, db_pool, &mut message).await?;
 
     // 优先使用传入的 blocks，如果缺失则实时编译
     let (blocks, render_bytes): (Vec<ContentBlock>, Vec<u8>) =
@@ -1843,11 +1699,10 @@ async fn delete_message_attachment_in_pool(
 ) -> Result<(), String> {
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
     let deleted = sqlx::query(
-        "UPDATE message_attachments SET deleted_at = ? \
+        "DELETE FROM message_attachments \
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
-           AND attachment_order = ? AND hash = ? AND deleted_at IS NULL",
+           AND attachment_order = ? AND hash = ?",
     )
-    .bind(now)
     .bind(&key.owner_type)
     .bind(&key.owner_id)
     .bind(&key.topic_id)
@@ -1887,8 +1742,7 @@ async fn delete_message_attachment_in_pool(
         .map_err(|_| format!("Message {message_id} has a negative timestamp"))?;
     let attachment_hashes: Vec<String> = sqlx::query_scalar(
         "SELECT hash FROM message_attachments \
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
-           AND deleted_at IS NULL",
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
     )
     .bind(&key.owner_type)
     .bind(&key.owner_id)
@@ -2016,9 +1870,17 @@ mod stream_lifecycle_tests {
         .await
         .expect("initial aggregate hashes");
 
-        delete_message_attachment_in_pool(&pool, "topic-1", "message-with-attachments", &hash_a, 5)
-            .await
-            .expect("delete attachment relation");
+        let topic_key = TopicKey::new("agent", "agent-1", "topic-1");
+        delete_message_attachment_in_pool(
+            &pool,
+            &topic_key,
+            "message-with-attachments",
+            0,
+            &hash_a,
+            5,
+        )
+        .await
+        .expect("delete attachment relation");
 
         let expected_hash = HashAggregator::compute_message_fingerprint(
             "message-with-attachments",
@@ -2042,6 +1904,15 @@ mod stream_lifecycle_tests {
         assert_eq!(after_delete.1, 11);
         assert_ne!(after_delete.2, before_roots.0);
         assert_ne!(after_delete.3, before_roots.1);
+        let remaining_hashes: Vec<String> = sqlx::query_scalar(
+            "SELECT hash FROM message_attachments
+             WHERE owner_type = 'agent' AND owner_id = 'agent-1'
+               AND topic_id = 'topic-1' AND msg_id = 'message-with-attachments'",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("remaining attachment relations");
+        assert_eq!(remaining_hashes, vec![hash_b]);
     }
 
     #[tokio::test]
@@ -2351,47 +2222,5 @@ mod stream_lifecycle_tests {
         )
         .await
         .is_none());
-    }
-
-    #[tokio::test]
-    async fn attachment_download_never_publishes_unverified_bytes() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test server");
-        let address = listener.local_addr().expect("test server address");
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept request");
-            let mut request = vec![0u8; 2048];
-            let _ = socket.read(&mut request).await;
-            socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
-                )
-                .await
-                .expect("write response");
-        });
-        let directory = tempfile::tempdir().expect("temporary attachment dir");
-        let destination = directory.path().join("attachment.bin");
-
-        let result = download_attachment(
-            &format!("http://{}", address),
-            "token",
-            &"0".repeat(64),
-            5,
-            &destination,
-        )
-        .await;
-        server.await.expect("test server");
-
-        assert!(result.is_err());
-        assert!(!destination.exists());
-        assert_eq!(
-            std::fs::read_dir(directory.path())
-                .expect("read temporary dir")
-                .count(),
-            0
-        );
     }
 }

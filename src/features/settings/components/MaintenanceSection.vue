@@ -7,21 +7,7 @@ import { useOverlayStore } from '../../../core/stores/overlay';
 
 const overlayStore = useOverlayStore();
 
-const gcStatus = ref<{ type: 'success' | 'error' | 'loading' | null; message: string }>({ type: null, message: '' });
 const cacheStatus = ref<{ type: 'success' | 'error' | 'loading' | null; message: string }>({ type: null, message: '' });
-
-const cleanupAttachments = async () => {
-  gcStatus.value = { type: 'loading', message: '正在深度扫描孤儿附件...' };
-  try {
-    const result = await invoke<string>('cleanup_orphaned_attachments');
-    gcStatus.value = { type: 'success', message: result };
-    setTimeout(() => { gcStatus.value = { type: null, message: '' }; }, 5000);
-  } catch (e: any) {
-    console.error('[Maintenance] cleanup_orphaned_attachments failed:', e);
-    const msg = typeof e === 'string' ? e : (e?.message ?? String(e));
-    gcStatus.value = { type: 'error', message: `清理失败: ${msg}` };
-  }
-};
 
 const clearSystemCache = async () => {
   cacheStatus.value = { type: 'loading', message: '正在清理系统与 WebView 缓存...' };
@@ -43,21 +29,7 @@ const openRebuildSession = () => {
 
 <template>
   <div class="space-y-6">
-    <SettingsActionWithStatus
-      title="附件库垃圾回收 (GC)"
-      description="深度扫描并删除未被引用的孤立附件与缩略图"
-      button-variant="danger"
-      button-size="sm"
-      button-label="立即清理"
-      :button-loading="gcStatus.type === 'loading'"
-      :status-type="gcStatus.type"
-      :status-message="gcStatus.message"
-      status-mono
-      status-multiline
-      @action-click="cleanupAttachments"
-    />
-
-    <div class="pt-4 border-t border-black/5 dark:border-white/5">
+    <div>
       <SettingsActionWithStatus
         title="清理系统缓存 (System Cache)"
         description="清除 WebView 内部 HTTP/图片缓存（解决磁盘空间异常占用）"

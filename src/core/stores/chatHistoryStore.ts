@@ -532,9 +532,12 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   /**
    * 触发 AI 生成逻辑
    */
-  const triggerGeneration = async (userMsg: ChatMessage, frozenKey?: ConversationKey) => {
+  const triggerGeneration = async (
+    userMsg: ChatMessage,
+    frozenKey?: ConversationKey,
+  ): Promise<boolean> => {
     const key = frozenKey || captureLoadedConversation();
-    if (!key) return;
+    if (!key) return false;
     try {
       const compiledBlocks = await invoke<ContentBlock[]>("append_single_message", {
         ownerId: key.ownerId,
@@ -553,7 +556,19 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
           blocks: compiledBlocks as any,
         };
       }
+    } catch (e) {
+      console.error("[ChatHistoryStore] Message persistence failed:", e);
+      notificationStore.addNotification({
+        type: "error",
+        title: "消息保存失败",
+        message: e instanceof Error ? e.message : String(e),
+        toastOnly: true,
+        duration: 6000,
+      });
+      return false;
+    }
 
+    try {
       const settings = settingsStore.settings;
       if (!settings) throw new Error("应用尚未完成初始化");
 
@@ -635,6 +650,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         duration: 6000,
       });
     }
+    return true;
   };
 
   /**
@@ -699,9 +715,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       attachmentOrder,
     }));
     attachmentStore.clearStaged();
-    if (currentStaged.length > 0) {
-      await attachmentStore.preProcessDocuments(currentStaged);
-    }
 
     const now = Date.now();
     const userName = settingsStore.settings?.userName || "User";
@@ -724,7 +737,15 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       );
     }
     topicStore.incrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId);
-    await triggerGeneration(userMsg, key);
+    const persisted = await triggerGeneration(userMsg, key);
+    if (!persisted) {
+      if (canCommitConversation(key)) {
+        currentChatHistory.value = currentChatHistory.value.filter(
+          message => message.id !== userMsg.id,
+        );
+      }
+      topicStore.decrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId);
+    }
   };
 
   /**

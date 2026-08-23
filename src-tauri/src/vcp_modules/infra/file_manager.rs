@@ -518,7 +518,7 @@ async fn commit_registered_attachment(
     sqlx::query(
         "UPDATE message_attachments
          SET status = 'ready', src = ?
-         WHERE hash = ? AND status = 'desktop_only' AND deleted_at IS NULL
+         WHERE hash = ? AND status = 'desktop_only'
            AND EXISTS (
              SELECT 1 FROM messages m
              WHERE m.owner_type = message_attachments.owner_type
@@ -566,6 +566,63 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
     internal_path: String,
 ) -> Result<AttachmentData, String> {
     let now = crate::vcp_modules::infra::utils::now_secs() as u64;
+
+    if let Ok(existing) = resolve_attachment_cas_file(app_handle, pool, &hash).await {
+        if existing.size_bytes != size {
+            return Err(format!("附件 {hash} 的现有 CAS 大小与本次注册不一致"));
+        }
+        let existing_metadata: (Option<String>, Option<String>, i64) = sqlx::query_as(
+            "SELECT extracted_text, thumbnail_path, created_at FROM attachments WHERE hash = ?",
+        )
+        .bind(&hash)
+        .fetch_one(pool)
+        .await
+        .map_err(|error| format!("读取现有附件元数据失败: {error}"))?;
+        let existing_path = existing.path.to_string_lossy().into_owned();
+        commit_registered_attachment(
+            pool,
+            &hash,
+            &existing.mime_type,
+            existing.size_bytes,
+            &existing_path,
+            now as i64,
+        )
+        .await?;
+
+        let candidate = std::path::Path::new(&internal_path);
+        if candidate != existing.path && candidate.exists() {
+            let attachments_root = get_attachments_root_dir(app_handle)?;
+            if let Some(redundant) = validated_attachment_file(&attachments_root, &hash, candidate)
+                .map_err(|error| error.to_string())?
+            {
+                if redundant != existing.path {
+                    if let Err(error) = tokio::fs::remove_file(redundant).await {
+                        log::warn!("清理重复附件副本失败: {error}");
+                    }
+                }
+            }
+        }
+
+        let internal_file_name = existing
+            .path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| "现有附件文件名不是有效 UTF-8".to_string())?
+            .to_string();
+        return Ok(AttachmentData {
+            id: format!("attachment_{hash}"),
+            name: original_name,
+            internal_file_name,
+            internal_path: existing_path,
+            mime_type: existing.mime_type,
+            size: existing.size_bytes,
+            hash,
+            created_at: u64::try_from(existing_metadata.2)
+                .map_err(|_| "现有附件创建时间无效".to_string())?,
+            extracted_text: None,
+            thumbnail_path: existing_metadata.1,
+        });
+    }
 
     // 1. 原子更新 CAS 索引，并把仍然存活的 desktop_only 关系提升为 ready。
     commit_registered_attachment(pool, &hash, &mime_type, size, &internal_path, now as i64).await?;
@@ -1253,14 +1310,10 @@ pub async fn ensure_extracted_text(
     }
 }
 
-// Online attachment GC is disabled. Keep this hardened sink dormant until a
-// future owner + quarantine/grace workflow can safely reuse it.
-#[allow(dead_code)]
 fn invalid_delete_target(message: impl Into<String>) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidInput, message.into())
 }
 
-#[allow(dead_code)]
 fn validated_direct_file(
     root: &std::path::Path,
     candidate: &std::path::Path,
@@ -1285,7 +1338,6 @@ fn validated_direct_file(
     Ok(Some(canonical_candidate))
 }
 
-#[allow(dead_code)]
 fn validated_attachment_file(
     attachments_root: &std::path::Path,
     hash: &str,
@@ -1307,17 +1359,21 @@ fn validated_attachment_file(
     validated_direct_file(attachments_root, internal_path, file_name)
 }
 
-/// 强力物理删除指定的附件文件及其可能关联的原生硬解缩略图。
-/// 当前在线维护不会调用此 sink；边界仍在这里收紧，防止未来复用越界删除。
-#[allow(dead_code)]
+/// 删除无引用 CAS 的主文件与派生缓存。空路径表示 metadata-only，无需主文件。
 pub async fn delete_attachment_physical<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     hash: &str,
     internal_path: &str,
 ) -> std::io::Result<()> {
-    let path = std::path::Path::new(internal_path);
+    if !crate::vcp_modules::infra::utils::is_valid_cas_hash(hash) {
+        return Err(invalid_delete_target("附件哈希格式无效"));
+    }
     let attachments_root = get_attachments_root_dir(app_handle).map_err(invalid_delete_target)?;
-    let attachment_path = validated_attachment_file(&attachments_root, hash, path)?;
+    let attachment_path = if internal_path.is_empty() {
+        None
+    } else {
+        validated_attachment_file(&attachments_root, hash, std::path::Path::new(internal_path))?
+    };
 
     // 统一处理缩略图定位与删除
     let thumbnails_root = get_thumbnails_root_dir(app_handle).map_err(invalid_delete_target)?;
@@ -1542,34 +1598,35 @@ mod security_boundary_tests {
                 created_at INTEGER, updated_at INTEGER
              );
              CREATE TABLE messages (
-                topic_id TEXT, msg_id TEXT, deleted_at INTEGER,
-                PRIMARY KEY(topic_id, msg_id)
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, owner_id, topic_id, msg_id)
              );
-             CREATE TABLE agents (agent_id TEXT PRIMARY KEY, deleted_at INTEGER);
-             CREATE TABLE groups (group_id TEXT PRIMARY KEY, deleted_at INTEGER);
+             CREATE TABLE agents (owner_type TEXT, agent_id TEXT PRIMARY KEY, deleted_at INTEGER);
+             CREATE TABLE groups (owner_type TEXT, group_id TEXT PRIMARY KEY, deleted_at INTEGER);
              CREATE TABLE topics (
-                topic_id TEXT PRIMARY KEY, owner_id TEXT, owner_type TEXT, deleted_at INTEGER
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, owner_id, topic_id)
              );
              CREATE TABLE message_attachments (
-                topic_id TEXT, msg_id TEXT, hash TEXT, status TEXT, src TEXT, deleted_at INTEGER
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT,
+                hash TEXT, status TEXT, src TEXT
              );
-             INSERT INTO agents VALUES ('agent', NULL), ('deleted-agent', 9);
+             INSERT INTO agents VALUES
+                ('agent', 'agent', NULL), ('agent', 'deleted-agent', 9);
              INSERT INTO topics VALUES
-                ('topic', 'agent', 'agent', NULL),
-                ('deleted-topic', 'agent', 'agent', 9),
-                ('deleted-owner-topic', 'deleted-agent', 'agent', NULL);
+                ('agent', 'agent', 'topic', NULL),
+                ('agent', 'agent', 'deleted-topic', 9),
+                ('agent', 'deleted-agent', 'deleted-owner-topic', NULL);
              INSERT INTO messages VALUES
-                ('topic', 'live', NULL),
-                ('topic', 'deleted-message', 9),
-                ('topic', 'tombstoned-relation', NULL),
-                ('deleted-topic', 'deleted-topic-message', NULL),
-                ('deleted-owner-topic', 'deleted-owner-message', NULL);
+                ('agent', 'agent', 'topic', 'live', NULL),
+                ('agent', 'agent', 'topic', 'deleted-message', 9),
+                ('agent', 'agent', 'deleted-topic', 'deleted-topic-message', NULL),
+                ('agent', 'deleted-agent', 'deleted-owner-topic', 'deleted-owner-message', NULL);
              INSERT INTO message_attachments VALUES
-                ('topic', 'live', 'hash', 'desktop_only', NULL, NULL),
-                ('topic', 'deleted-message', 'hash', 'desktop_only', NULL, NULL),
-                ('topic', 'tombstoned-relation', 'hash', 'removed', NULL, 9),
-                ('deleted-topic', 'deleted-topic-message', 'hash', 'desktop_only', NULL, NULL),
-                ('deleted-owner-topic', 'deleted-owner-message', 'hash', 'desktop_only', NULL, NULL);",
+                ('agent', 'agent', 'topic', 'live', 'hash', 'desktop_only', NULL),
+                ('agent', 'agent', 'topic', 'deleted-message', 'hash', 'desktop_only', NULL),
+                ('agent', 'agent', 'deleted-topic', 'deleted-topic-message', 'hash', 'desktop_only', NULL),
+                ('agent', 'deleted-agent', 'deleted-owner-topic', 'deleted-owner-message', 'hash', 'desktop_only', NULL);",
         )
         .execute(&pool)
         .await
@@ -1595,7 +1652,6 @@ mod security_boundary_tests {
                     "ready".into(),
                     Some("file:///cas/hash".into())
                 ),
-                ("tombstoned-relation".into(), "removed".into(), None),
             ]
         );
     }

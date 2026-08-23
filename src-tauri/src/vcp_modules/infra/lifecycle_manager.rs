@@ -42,7 +42,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     );
 
     // 1. 数据库初始化 (P0 - 绝对基础)
-    let _pool = match init_db(&handle).await {
+    let pool = match init_db(&handle).await {
         Ok((p, path)) => {
             handle.manage(DbState {
                 pool: p.clone(),
@@ -95,6 +95,21 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             return Err(err_msg);
         }
     };
+
+    match crate::vcp_modules::maintenance_manager::reclaim_orphaned_attachments(&handle, &pool)
+        .await
+    {
+        Ok(report) if report.reclaimed > 0 || report.ghost_files > 0 => {
+            info!(
+                "[Lifecycle] Attachment GC reclaimed {} indexed CAS entries and {} ghost files; retained {} live hashes.",
+                report.reclaimed, report.ghost_files, report.retained
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            log::warn!("[Lifecycle] Attachment GC skipped after error: {error}");
+        }
+    }
 
     // 2. 基础状态管理注册已在 lib.rs 中的 setup 阶段提前同步完成，此处无需重复注册以避免覆盖已有缓存。
 

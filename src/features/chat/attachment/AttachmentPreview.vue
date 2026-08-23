@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { X } from "lucide-vue-next";
 import AttachmentViewer from "./AttachmentViewer.vue";
 import AttachmentRenderer from './AttachmentRenderer.vue';
 
@@ -65,11 +66,23 @@ const openViewer = (att: Attachment) => {
 };
 
 const openExternal = async (path: string) => {
-  if (!path) return;
+  if (!path) {
+    notificationStore.addNotification({
+      type: "error",
+      title: "无法打开附件",
+      message: "附件没有可用的本地文件路径",
+    });
+    return;
+  }
   try {
     await invoke("open_file", { path });
   } catch (e) {
     console.error("[AttachmentPreview] Open failed:", e);
+    notificationStore.addNotification({
+      type: "error",
+      title: "无法打开附件",
+      message: e instanceof Error ? e.message : String(e),
+    });
   }
 };
 
@@ -77,7 +90,6 @@ const removeAttachment = async (index: number) => {
   const att = props.attachments[index];
   if (
     !att ||
-    att.status === "desktop_only" ||
     !att.hash ||
     !props.messageId ||
     !props.topicId
@@ -118,8 +130,7 @@ const removeAttachment = async (index: number) => {
     >
       <div
         v-if="att.status === 'desktop_only'"
-        class="min-w-48 max-w-full border-l-2 border-gray-400/60 bg-black/5 dark:bg-white/5 px-3 py-2"
-        aria-disabled="true"
+        class="relative min-w-48 max-w-full border-l-2 border-gray-400/60 bg-black/5 dark:bg-white/5 pl-3 pr-9 py-2"
       >
         <div class="truncate text-xs font-medium text-gray-700 dark:text-gray-300">
           {{ att.name }}
@@ -127,6 +138,15 @@ const removeAttachment = async (index: number) => {
         <div class="mt-0.5 text-[10px] font-mono text-gray-500">
           桌面专用附件 · 未同步文件内容
         </div>
+        <button
+          v-if="props.messageId"
+          type="button"
+          class="absolute right-1.5 top-1.5 p-1 text-gray-400 hover:text-red-500 active:text-red-600"
+          aria-label="移除附件"
+          @click.stop="removeAttachment(index)"
+        >
+          <X :size="14" />
+        </button>
       </div>
       <AttachmentRenderer
         v-else

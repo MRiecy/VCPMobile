@@ -2,7 +2,6 @@ import { defineStore } from "pinia";
 import { ref, nextTick } from "vue";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useDocumentProcessor } from "../composables/useDocumentProcessor";
 import { useNotificationStore } from "./notification";
 import type { Attachment } from "../types/chat";
 
@@ -533,70 +532,25 @@ export const useAttachmentStore = defineStore("attachment", () => {
   };
 
   /**
-   * 消息发送前的文档预处理 (JIT)
-   */
-  const preProcessDocuments = async (customList?: Attachment[]) => {
-    const targetList = customList || stagedAttachments.value;
-    if (targetList.length === 0) return;
-    
-    const docProcessor = useDocumentProcessor();
-    for (const att of targetList) {
-      const ext = att.name.split(".").pop()?.toLowerCase();
-      // Only process documents and PDFs as requested
-      if (["txt", "md", "csv", "json", "docx", "pdf"].includes(ext || "")) {
-        try {
-          const result = await docProcessor.processAttachment(att);
-          if (result) {
-            if (result.extractedText)
-              att.extractedText = result.extractedText;
-            if (result.imageFrames) att.imageFrames = result.imageFrames;
-          }
-        } catch (e) {
-          console.error(
-            `[AttachmentStore] JIT document processing failed for ${att.name}:`,
-            e,
-          );
-        }
-      }
-    }
-  };
-
-  /**
    * 移除特定位置的暂存附件
    */
   const removeStaged = (index: number) => {
     if (index >= 0 && index < stagedAttachments.value.length) {
-      const removed = stagedAttachments.value.splice(index, 1)[0];
-      if (removed.hash) {
-        invoke("cleanup_single_orphaned_attachment", { hash: removed.hash }).catch((err) => {
-          console.warn(`[AttachmentStore] Targeted GC failed for ${removed.name}:`, err);
-        });
-      }
+      stagedAttachments.value.splice(index, 1);
     }
   };
 
   /**
    * 清空暂存附件
    */
-  const clearStaged = (performGc = false) => {
-    const toClear = [...stagedAttachments.value];
+  const clearStaged = () => {
     stagedAttachments.value = [];
-    if (performGc) {
-      toClear.forEach(att => {
-        if (att.hash) {
-          invoke("cleanup_single_orphaned_attachment", { hash: att.hash }).catch((err) => {
-            console.warn(`[AttachmentStore] Targeted GC failed for ${att.name}:`, err);
-          });
-        }
-      });
-    }
   };
 
   return {
     stagedAttachments,
     handleAttachment,
     resolveMessageAssets,
-    preProcessDocuments,
     removeStaged,
     clearStaged,
   };

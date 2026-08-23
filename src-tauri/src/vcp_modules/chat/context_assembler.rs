@@ -252,7 +252,9 @@ pub fn assemble_history_for_vcp(
             );
         }
 
-        let final_content = if content_parts.len() == 1 && content_parts[0]["type"] == "text" {
+        let final_content = if content_parts.is_empty() {
+            Value::String(String::new())
+        } else if content_parts.len() == 1 && content_parts[0]["type"] == "text" {
             content_parts[0]["text"].clone()
         } else {
             json!(content_parts)
@@ -357,5 +359,19 @@ mod desktop_only_tests {
         assert!(ready_json.contains(&"b".repeat(64)));
         assert!(!ready_json.contains("/private/attachments"));
         assert!(!ready_json.contains("file://"));
+    }
+
+    #[test]
+    fn empty_message_remains_string_content() {
+        let message = ChatMessage {
+            id: "empty-message".into(),
+            role: "user".into(),
+            content: String::new(),
+            timestamp: 1,
+            ..Default::default()
+        };
+
+        let assembled = assemble_history_for_vcp(&[message], false, false);
+        assert_eq!(assembled[0]["content"], "");
     }
 }

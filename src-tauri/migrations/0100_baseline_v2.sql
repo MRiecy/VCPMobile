@@ -127,7 +127,7 @@ CREATE TABLE IF NOT EXISTS render_cache (
         REFERENCES messages(owner_type, owner_id, topic_id, msg_id) ON DELETE CASCADE
 );
 
--- 8. message_attachments 表（含 0002 deleted_at）
+-- 8. message_attachments 表
 CREATE TABLE IF NOT EXISTS message_attachments (
     owner_type TEXT NOT NULL,
     owner_id TEXT NOT NULL,
@@ -139,7 +139,6 @@ CREATE TABLE IF NOT EXISTS message_attachments (
     src TEXT,
     status TEXT,
     created_at BIGINT NOT NULL,
-    deleted_at BIGINT,
     PRIMARY KEY (owner_type, owner_id, topic_id, msg_id, attachment_order),
     FOREIGN KEY (owner_type, owner_id, topic_id, msg_id)
         REFERENCES messages(owner_type, owner_id, topic_id, msg_id) ON DELETE CASCADE

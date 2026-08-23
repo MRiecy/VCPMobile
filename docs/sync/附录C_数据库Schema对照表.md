@@ -154,9 +154,8 @@ scope: 双端
 | message_attachments | attachment_order | INTEGER | NOT NULL, PK(3) | 附件在消息内的展示排序 | `message_attachments.attachment_order` |
 | message_attachments | display_name | TEXT | NOT NULL | 原始文件名（保留用户上传时的名称） | `message_attachments.display_name` |
 | message_attachments | src | TEXT | — | 来源 URL（网络资源时有效） | — |
-| message_attachments | status | TEXT | — | 附件状态，如 `removed` | — |
+| message_attachments | status | TEXT | — | `ready` 或 `desktop_only` | — |
 | message_attachments | created_at | BIGINT | NOT NULL | 关联创建时间戳，毫秒 | `message_attachments.created_at` |
-| message_attachments | deleted_at | BIGINT | — | 软删除时间戳（v1.1.3 Migration 0002 新增） | `message_attachments.deleted_at` |
 
 > **逻辑引用设计**：`attachments` 表存储物理文件（真理之源），`message_attachments` 表存储逻辑引用上下文。同一附件可被多条消息引用，实现去重与空间节省。
 
@@ -270,7 +269,6 @@ scope: 双端
 | attachment_index | hash | TEXT | PRIMARY KEY | 内容 SHA-256 摘要 | `attachments.hash` |
 | attachment_index | file_path | TEXT | NOT NULL | 附件物理文件绝对路径 | `attachments.internal_path` |
 | attachment_index | updated_at | INTEGER | NOT NULL | 更新时间戳，毫秒 | `attachments.updated_at` |
-| attachment_index | deleted_at | INTEGER | DEFAULT NULL | 软删除时间戳 | — |
 
 > **路径约定**：桌面端附件存储于 `UserData/attachments/{hash}.{ext}`，索引库仅记录该路径，文件正文不在 SQLite 中。
 
@@ -297,7 +295,7 @@ scope: 双端
 | message_attachments | display_name | TEXT | NOT NULL | 原始文件名 | `message_attachments.display_name` |
 | message_attachments | created_at | INTEGER | NOT NULL | 关联创建时间戳 | `message_attachments.created_at` |
 
-> **字段差异**：桌面端 `message_attachments` 不含 `src` 与 `status` 字段，因为桌面端附件引用机制不依赖外部 URL，且删除策略通过 `attachment_index.deleted_at` 软删除实现。
+> **字段差异**：桌面端 `message_attachments` 不含 `src` 与 `status` 字段。双端都以父消息的完整附件数组替换当前关系，不建立附件墓碑。
 
 ---
 

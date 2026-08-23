@@ -142,9 +142,9 @@ if let Ok(mut path) = app_handle.path().document_dir() {
 * **Tauri 接口标准清理**：调用 Tauri 原生 `clear_all_browsing_data()`，释放 WebView 当前运行占用的页面缓存与图片缓存。
 * **物理 HTTP 缓存一剪梅**：由于 Android 底层 Chromium 机制限制，原生 API 无法立即释放磁盘上的 HTTP Cache。Level 1 管道通过强行物理定位并删除 `/cache/WebView/Default/HTTP Cache` 目录，一举粉碎顽固积压的网页静态数据，彻底治愈存储死结。
 
-### 6.2 Level 2：数据库-磁盘双向“幽灵附件”GC 与 CPU 时间片挂起机制
-* **第一阶段（基于数据库引用的孤儿清理）**：扫描 `attachments` 索引表，对比 `message_attachments` 被删除或无效的哈希，将失去所有消息引用的附件与缩略图从磁盘上物理抹除，并从库中移除。
-* **第二阶段（双向磁盘“幽灵文件”扫盲清扫）**：针对历史老版本残留、闪退或时序冲突留下的在库无记录的“物理幽灵文件”及缩略图，逆向遍历 `/attachments/` 与 `/thumbnails/`。
+### 6.2 Level 2：冷启动附件 GC
+* **索引回收**：Core Ready 前扫描 `attachments`，完整删除没有存活消息关系的 CAS、缩略图、多模态缓存和索引。
+* **幽灵文件清理**：删除数据库无记录且文件名通过严格 Hash 校验的附件与派生文件。
   * **64位十六进制哈希强校验**：基于指纹长度与 ASCII 字符强校验，保障删除安全性，绝不误杀。
 * **核心亮点：CPU 协作时间片挂起机制 (Yield-Now Control)**
   > [!IMPORTANT]
@@ -191,10 +191,9 @@ if let Ok(mut path) = app_handle.path().document_dir() {
 
 | 触发场景 | 作用级别 | 核心执行内容 | 执行时机与防时序冲突策略 |
 | :--- | :--- | :--- | :--- |
-| **应用冷启动** | 极速首航自愈 | 物理一铲子抹除 `/cache/uploads` 目录；<br>针对性扫描并剔除老版本遗留在 `/cache` 根目录下的历史垃圾。 | **开机静默执行**，瞬间完成，不增加首屏编译阻塞。 |
-| **暂存文件发送** | 5分钟安全锁 | 校验 hash 后，如果创建时间在 300 秒内，即使未在消息中引用也跳过 targeted GC。 | **防时序冲突**。避免因网络握手稍慢，导致前台刚生成的暂存附件被后台 GC 线程误杀。 |
+| **应用冷启动** | 上传暂存与附件 CAS | 清空 `/cache/uploads`；数据库初始化后、Core Ready 前回收无存活消息引用的 CAS 与幽灵文件。 | 暂存状态尚未开放，不与附件注册并发。 |
 | **静默自动维护** | 3天周期自动 | 调用 Webview 标准清理；<br>SQLite `PRAGMA incremental_vacuum(100)` 分批页回收；<br>自愈清理 `message_attachments` 已删消息的关联；<br>运行 `PRAGMA optimize` 优化查询规划器。 | **距离上次清理超 3 天**在启动时自动挂载，静默无感。 |
-| **前端手动维护** | Level 1 & Level 2 | Level 1：物理抹除 HTTP 缓存；<br>Level 2：进行超大规模孤儿/幽灵双向大清扫，开启 **CPU 200限额出让挂起** 机制。 | **用户手动触发**，保障前台 WebView 满帧率（60FPS）渲染，绝不卡死掉帧。 |
+| **前端手动维护** | Level 1 | 物理清理 WebView HTTP/图片缓存。 | 用户显式触发。 |
 
 ---
 

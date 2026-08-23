@@ -559,6 +559,26 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
 pub struct MessageRepository;
 
 impl MessageRepository {
+    fn attachment_hash(
+        attachment: &crate::vcp_modules::chat_manager::Attachment,
+    ) -> Result<&str, String> {
+        let hash = attachment.hash.as_deref().ok_or_else(|| {
+            format!(
+                "Attachment {} requires a SHA-256 content hash",
+                attachment.name
+            )
+        })?;
+        if hash != hash.to_ascii_lowercase()
+            || !crate::vcp_modules::infra::utils::is_valid_cas_hash(hash)
+        {
+            return Err(format!(
+                "Attachment {} has an invalid SHA-256 content hash",
+                attachment.name
+            ));
+        }
+        Ok(hash)
+    }
+
     async fn ensure_upsert_target_live(
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         key: &TopicKey,
@@ -614,10 +634,10 @@ impl MessageRepository {
             .as_ref()
             .map(|atts| {
                 atts.iter()
-                    .map(|a| a.hash.clone().unwrap_or_default())
-                    .filter(|h| !h.is_empty())
-                    .collect()
+                    .map(|attachment| Self::attachment_hash(attachment).map(str::to_owned))
+                    .collect::<Result<Vec<_>, String>>()
             })
+            .transpose()?
             .unwrap_or_default();
 
         let content_hash = HashAggregator::compute_message_fingerprint(
@@ -794,9 +814,7 @@ impl MessageRepository {
         .map_err(|e| e.to_string())?;
 
         for (i, att) in attachments.iter().enumerate() {
-            let hash = att.hash.clone().unwrap_or_else(|| {
-                crate::vcp_modules::infra::utils::calculate_sha256(att.src.as_bytes())
-            });
+            let hash = Self::attachment_hash(att)?;
 
             let image_frames = att
                 .image_frames
@@ -820,7 +838,7 @@ impl MessageRepository {
                     thumbnail_path = COALESCE(attachments.thumbnail_path, excluded.thumbnail_path),
                     updated_at = excluded.updated_at"
             )
-            .bind(&hash)
+            .bind(hash)
             .bind(&att.r#type)
             .bind(att.size as i64)
             .bind(&att.internal_path)
@@ -843,7 +861,7 @@ impl MessageRepository {
             .bind(&key.owner_id)
             .bind(&key.topic_id)
             .bind(msg_id)
-            .bind(&hash)
+            .bind(hash)
             .bind(i as i32)
             .bind(&att.name)
             .bind(&att.src)

@@ -84,10 +84,7 @@ macro_rules! app_command_handler {
             mail_attachment, mail_folders, mail_list, mail_mark, mail_move, mail_read, mail_reply,
             mail_search, mail_send, mail_state, mail_trash,
         };
-        use crate::vcp_modules::maintenance_manager::{
-            cleanup_orphaned_attachments, cleanup_single_orphaned_attachment, clear_webview_cache,
-            reconstruct_system_cache,
-        };
+        use crate::vcp_modules::maintenance_manager::{clear_webview_cache, reconstruct_system_cache};
         use crate::vcp_modules::message_repository::{
             process_message_content, rebuild_all_pre_renders,
         };
@@ -305,8 +302,6 @@ macro_rules! app_command_handler {
                 register_local_file,
                 store_file,
                 // ── 系统维护（maintenance_manager）──
-                cleanup_orphaned_attachments,
-                cleanup_single_orphaned_attachment,
                 clear_webview_cache,
                 reconstruct_system_cache,
                 // ── 模型管理（model_manager）──

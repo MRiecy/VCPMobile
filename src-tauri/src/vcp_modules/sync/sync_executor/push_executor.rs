@@ -434,7 +434,7 @@ async fn preflight_topic_messages(
          JOIN messages m ON m.owner_type = ma.owner_type AND m.owner_id = ma.owner_id
             AND m.topic_id = ma.topic_id AND m.msg_id = ma.msg_id
          WHERE ma.owner_type = ? AND ma.owner_id = ? AND ma.topic_id = ?
-           AND ma.deleted_at IS NULL AND m.deleted_at IS NULL",
+           AND m.deleted_at IS NULL",
     )
     .bind(&key.owner_type)
     .bind(&key.owner_id)
@@ -793,7 +793,7 @@ async fn load_outbound_message_page(
          FROM message_attachments ma
          LEFT JOIN attachments a ON a.hash = ma.hash
          WHERE ma.owner_type = ? AND ma.owner_id = ? AND ma.topic_id = ?
-           AND ma.msg_id IN ({placeholders}) AND ma.deleted_at IS NULL
+           AND ma.msg_id IN ({placeholders})
          ORDER BY ma.msg_id, ma.attachment_order ASC"
     );
     let mut attachment_query = sqlx::query(&attachment_query)
@@ -1630,11 +1630,12 @@ async fn upload_attachment<R: Runtime>(
         return Err(format!("Attachment {hash} has no local file path"));
     }
 
-    let name_row = sqlx::query("SELECT display_name FROM message_attachments WHERE hash = ? AND deleted_at IS NULL LIMIT 1")
-        .bind(&hash)
-        .fetch_optional(&db.pool)
-        .await
-        .map_err(|error| format!("Attachment {hash} display name query failed: {error}"))?;
+    let name_row =
+        sqlx::query("SELECT display_name FROM message_attachments WHERE hash = ? LIMIT 1")
+            .bind(&hash)
+            .fetch_optional(&db.pool)
+            .await
+            .map_err(|error| format!("Attachment {hash} display name query failed: {error}"))?;
     let display_name = match name_row {
         Some(row) => {
             let name: String = row.try_get("display_name").map_err(|error| {
