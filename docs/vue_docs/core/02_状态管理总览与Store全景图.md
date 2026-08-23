@@ -131,12 +131,11 @@ date: 2026-08-12
 
 `useChatHistoryStore` 是聊天内容的核心持有者，管理当前话题下的消息列表及其生命周期。
 
-**核心状态**（5 个）：
+**核心状态**：
 
 | 状态 | 类型 | 说明 |
 |------|------|------|
 | `currentChatHistory` | `ChatMessage[]` | 当前话题的全部已加载消息 |
-| `loadedWindowCount` | `number` | 当前内存历史窗口中的消息数 |
 | `hasMoreHistory` | `boolean` | 是否还有更多旧消息可加载 |
 | `editMessageContent` | `string` | 重新生成时用于回填输入框的内容 |
 | `editingOriginalMessageId` | `string \| null` | 标记当前是否处于"编辑重发"模式 |

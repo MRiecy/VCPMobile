@@ -289,20 +289,18 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
     );
     await nextTick();
 
-    if (result.ok) {
+    if (result === 'loaded') {
       scrollToMessageById(item.msgId);
       return;
     }
-    if (result.anchorMissing) {
+    if (result === 'missing') {
       notificationStore.addNotification({
         type: 'warning',
         title: '全局搜索',
         message: '目标消息已不存在或无法定位',
         toastOnly: true,
       });
-      return;
     }
-    if (result.error) throw result.error;
   } catch (e) {
     console.error('[GlobalSearch] Jump failed:', e);
     notificationStore.addNotification({

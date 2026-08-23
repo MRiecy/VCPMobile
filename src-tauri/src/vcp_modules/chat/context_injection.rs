@@ -54,10 +54,6 @@ fn message_text_content_mut(message: &mut serde_json::Value) -> Option<&mut Stri
                 _ => None,
             }
         }),
-        serde_json::Value::Object(content) => match content.get_mut("text") {
-            Some(serde_json::Value::String(text)) => Some(text),
-            _ => None,
-        },
         _ => None,
     }
 }
