@@ -631,7 +631,7 @@ pub async fn regenerate_topic_response(
     group_state: State<'_, crate::vcp_modules::group_service::GroupManagerState>,
     db_state: State<'_, DbState>,
     active_requests: State<'_, crate::vcp_modules::vcp_client::ActiveRequests>,
-    cancelled_turns: State<'_, crate::vcp_modules::vcp_client::CancelledGroupTurns>,
+    active_group_turns: State<'_, crate::vcp_modules::vcp_client::ActiveGroupTurns>,
     settings_state: State<'_, SettingsState>,
     owner_id: String,
     owner_type: String,
@@ -742,7 +742,7 @@ pub async fn regenerate_topic_response(
             agent_state,
             db_state,
             active_requests,
-            cancelled_turns,
+            active_group_turns,
             crate::vcp_modules::group_chat_application_service::GroupChatParams {
                 group_id: owner_id,
                 topic_id: topic_id.clone(),

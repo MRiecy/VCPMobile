@@ -15,7 +15,7 @@ use vcp_modules::diary::DiaryServiceState;
 use vcp_modules::lifecycle_manager::{bootstrap, LifecycleState};
 use vcp_modules::maintenance_manager::init_automatic_maintenance;
 use vcp_modules::update_manager::UpdateSession;
-use vcp_modules::vcp_client::{ActiveRequests, CancelledGroupTurns};
+use vcp_modules::vcp_client::{ActiveGroupTurns, ActiveRequests};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -27,7 +27,7 @@ pub fn run() {
             app.manage(app.handle().clone());
             app.manage(LifecycleState::new());
             app.manage(ActiveRequests::default());
-            app.manage(CancelledGroupTurns::default());
+            app.manage(ActiveGroupTurns::default());
             app.manage(ContextSanitizer::default());
             app.manage(distributed::DistributedState::new());
 

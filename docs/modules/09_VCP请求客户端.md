@@ -156,15 +156,15 @@ impl Drop for ActiveRequestLease {
 - Drop 同时校验 `message_id + attempt_id`，旧任务不能删除后来同 ID 的新 attempt；
 - Agent/Group 请求的 lease 覆盖网络请求和 `finalize_stream_message` 提交窗口。网络结束但 terminal 事务未提交时，该 generation 仍被识别为 live。
 
-### 2.5 CancelledGroupTurns
+### 2.5 ActiveGroupTurns
 
 ```rust
-pub struct CancelledGroupTurns(pub Arc<DashSet<String>>);
+pub struct ActiveGroupTurns(Arc<DashMap<TopicKey, CancellationToken>>);
 ```
 
-- 键：`topic_id`（String）
-- 使用 `DashSet`：存在即代表该话题的群聊接力赛回合已被取消
-- 由 `interruptGroupTurn` Command 写入，由 `group_chat_application_service.rs` 在编排循环中读取
+- 键：完整 `TopicKey(owner_type, owner_id, topic_id)`
+- 回合入口通过 lease 原子取得所有权；同一 Topic 的重复回合会被拒绝
+- `interruptGroupTurn` 只取消当前所有者，lease 退出时释放条目
 
 ---
 
@@ -397,13 +397,15 @@ pub fn interruptRequest(
 
 ```rust
 pub fn interruptGroupTurn(
-    state: tauri::State<'_, CancelledGroupTurns>,
+    state: tauri::State<'_, ActiveGroupTurns>,
+    owner_id: String,
+    owner_type: String,
     topic_id: String,
 ) -> Result<Value, String>
 ```
 
-- 将 `topic_id` 插入 `DashSet`，标记该话题的群聊接力赛应被取消
-- 实际取消检查由 `group_chat_application_service.rs` 在编排循环中执行
+- 取消完整 Topic 身份下的当前群聊回合；没有活动回合时返回 `not_running`
+- 编排循环在每位成员开始前检查该回合自己的取消令牌
 
 ### 4.4 test_vcp_connection
 
@@ -559,6 +561,7 @@ Helper 向主进程回传的事件帧：
 | 场景 | 行为 | 代码位置 |
 |------|------|---------|
 | 正常生成 | request lease 一直覆盖到 `finalize_stream_message` 原子提交 | Agent/Group application service |
+| 请求明确失败 | 写入简短错误原因并提交 `finish_reason=error`，同时删除 active row | Agent/Group application service, `mark_message_as_error` |
 | `recover_active_generation` | 先 claim attempt，再依次检查 DB pending、`sse_cache`、Helper，并在同一 lease 内完成续接/终态提交 | `vcp_client.rs` |
 | terminal 已存在 | 返回已有 content/finishReason，迟到恢复不得反向改写 error | `recover_active_generation`, `mark_message_as_error` |
 

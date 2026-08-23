@@ -751,7 +751,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
 
       // 本地模拟一个结束状态
       const msg = activeStreamMessages.get(messageKey);
-      if (msg) {
+      if (msg && !hasStreamTerminalTombstone(messageKey)) {
         msg.isThinking = false;
         msg.finishReason = "interrupted";
         const errorText = `\n\n> VCP流式错误: 请求已中止`;

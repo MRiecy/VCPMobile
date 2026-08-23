@@ -10,8 +10,8 @@ use crate::vcp_modules::group_speaking_policy::determine_naturerandom_speakers;
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use crate::vcp_modules::vcp_client::{
-    message_transport_request_id, perform_vcp_request_registered, ActiveRequestLease,
-    ActiveRequests, CancelledGroupTurns, StreamEvent, VcpRequestPayload,
+    message_transport_request_id, perform_vcp_request_registered, ActiveGroupTurns,
+    ActiveRequestLease, ActiveRequests, StreamEvent, VcpRequestPayload,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -245,6 +245,13 @@ async fn run_group_speaker_turn(
                 e.clone(),
             ));
         }
+        crate::vcp_modules::vcp_client::mark_message_as_error(
+            app_handle,
+            db_pool,
+            &request_key,
+            Some(e),
+        )
+        .await?;
         Ok(None)
     } else {
         Ok(None)
@@ -258,7 +265,7 @@ pub async fn internal_process_group_chat_message(
     agent_state: State<'_, AgentConfigState>,
     db_state: State<'_, DbState>,
     active_requests: State<'_, ActiveRequests>,
-    cancelled_turns: State<'_, CancelledGroupTurns>,
+    active_group_turns: State<'_, ActiveGroupTurns>,
     params: GroupChatParams,
     append_user_msg: bool,
 ) -> Result<Value, String> {
@@ -269,14 +276,12 @@ pub async fn internal_process_group_chat_message(
     let vcp_url = params.vcp_url;
     let vcp_api_key = params.vcp_api_key;
     let topic_key = TopicKey::new("group", &group_id, &topic_id);
+    let group_turn = active_group_turns.try_acquire(topic_key.clone())?;
 
     log::info!(
         "[GroupChatAppService] process_group_chat_message invoked for group: {}",
         group_id
     );
-
-    // 0. 重置该话题的中断标记 (确保开启新回合)
-    cancelled_turns.0.remove(&topic_key);
 
     // 1. 加载群组配置
     let group_config =
@@ -364,8 +369,8 @@ pub async fn internal_process_group_chat_message(
     let mut final_new_msgs = Vec::new();
 
     for speaker in speakers {
-        // 检查全局中断令牌：如果话题已被标记为取消，立即停止接力赛
-        if cancelled_turns.0.contains(&topic_key) {
+        // 检查本回合取消令牌：被停止后不再启动下一位成员
+        if group_turn.is_cancelled() {
             log::info!(
                 "[GroupChatAppService] Group turn for topic {} was cancelled. Breaking loop.",
                 topic_id
@@ -409,9 +414,6 @@ pub async fn internal_process_group_chat_message(
         }),
     );
 
-    // 回合结束，清理中断标记
-    cancelled_turns.0.remove(&topic_key);
-
     Ok(json!({"status": "completed"}))
 }
 
@@ -423,7 +425,7 @@ pub async fn handle_group_chat_message(
     agent_state: State<'_, AgentConfigState>,
     db_state: State<'_, DbState>,
     active_requests: State<'_, ActiveRequests>,
-    cancelled_turns: State<'_, CancelledGroupTurns>,
+    active_group_turns: State<'_, ActiveGroupTurns>,
     payload: GroupChatPayload,
     stream_channel: Channel<crate::vcp_modules::vcp_client::StreamEvent>,
 ) -> Result<Value, String> {
@@ -438,7 +440,7 @@ pub async fn handle_group_chat_message(
         agent_state,
         db_state,
         active_requests,
-        cancelled_turns,
+        active_group_turns,
         GroupChatParams {
             group_id: payload.group_id,
             topic_id: payload.topic_id,
@@ -479,7 +481,7 @@ pub async fn invite_group_member_to_speak(
     agent_state: State<'_, AgentConfigState>,
     db_state: State<'_, DbState>,
     active_requests: State<'_, ActiveRequests>,
-    cancelled_turns: State<'_, CancelledGroupTurns>,
+    active_group_turns: State<'_, ActiveGroupTurns>,
     payload: GroupInvitePayload,
     stream_channel: Channel<crate::vcp_modules::vcp_client::StreamEvent>,
 ) -> Result<Value, String> {
@@ -490,9 +492,7 @@ pub async fn invite_group_member_to_speak(
         payload.agent_id
     );
     let topic_key = TopicKey::new("group", &payload.group_id, &payload.topic_id);
-
-    // 开启新回合前清理中断标记
-    cancelled_turns.0.remove(&topic_key);
+    let _group_turn = active_group_turns.try_acquire(topic_key.clone())?;
 
     let group_config = read_group_config(
         app_handle.clone(),
@@ -562,6 +562,5 @@ pub async fn invite_group_member_to_speak(
         }),
     );
 
-    cancelled_turns.0.remove(&topic_key);
     Ok(json!({"status": "completed"}))
 }

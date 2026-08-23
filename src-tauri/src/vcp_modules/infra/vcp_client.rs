@@ -1,6 +1,6 @@
 use crate::vcp_modules::media_processor::convert_local_image_for_multimodal;
 use dashmap::mapref::entry::Entry;
-use dashmap::{DashMap, DashSet};
+use dashmap::DashMap;
 use futures_util::StreamExt;
 use futures_util::TryStreamExt;
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
@@ -266,13 +266,63 @@ impl Drop for ActiveRequestLease {
     }
 }
 
-/// 群组回合取消令牌，用于标记需要中断接力赛的话题
-pub struct CancelledGroupTurns(pub Arc<DashSet<TopicKey>>);
+type ActiveGroupTurnMap = Arc<DashMap<TopicKey, CancellationToken>>;
 
-impl Default for CancelledGroupTurns {
+/// 每个 Topic 同时只允许一个群组回合，并由同一所有者承载回合取消状态。
+pub struct ActiveGroupTurns(ActiveGroupTurnMap);
+
+impl Default for ActiveGroupTurns {
     fn default() -> Self {
-        log::info!("[VCPClient] Initialized CancelledGroupTurns successfully.");
-        Self(Arc::new(DashSet::new()))
+        log::info!("[VCPClient] Initialized ActiveGroupTurns successfully.");
+        Self(Arc::new(DashMap::new()))
+    }
+}
+
+impl ActiveGroupTurns {
+    pub(crate) fn try_acquire(&self, key: TopicKey) -> Result<ActiveGroupTurnLease, String> {
+        let cancellation_token = CancellationToken::new();
+
+        match self.0.entry(key.clone()) {
+            Entry::Vacant(slot) => {
+                slot.insert(cancellation_token.clone());
+                Ok(ActiveGroupTurnLease {
+                    turns: self.0.clone(),
+                    key,
+                    cancellation_token,
+                })
+            }
+            Entry::Occupied(_) => Err(format!(
+                "Group turn is already active for {}/{}/{}",
+                key.owner_type, key.owner_id, key.topic_id
+            )),
+        }
+    }
+
+    fn cancel(&self, key: &TopicKey) -> bool {
+        let Some(entry) = self.0.get(key) else {
+            return false;
+        };
+        entry.cancel();
+        drop(entry);
+        true
+    }
+}
+
+pub(crate) struct ActiveGroupTurnLease {
+    turns: ActiveGroupTurnMap,
+    key: TopicKey,
+    cancellation_token: CancellationToken,
+}
+
+impl ActiveGroupTurnLease {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.cancellation_token.is_cancelled()
+    }
+}
+
+impl Drop for ActiveGroupTurnLease {
+    fn drop(&mut self) {
+        self.turns.remove(&self.key);
     }
 }
 
@@ -280,7 +330,7 @@ impl Default for CancelledGroupTurns {
 #[tauri::command]
 #[allow(non_snake_case)]
 pub fn interruptGroupTurn(
-    state: tauri::State<'_, CancelledGroupTurns>,
+    state: tauri::State<'_, ActiveGroupTurns>,
     owner_id: String,
     owner_type: String,
     topic_id: String,
@@ -289,10 +339,9 @@ pub fn interruptGroupTurn(
         "[VCPClient] interruptGroupTurn called for topicId: {}",
         topic_id
     );
-    state
-        .0
-        .insert(TopicKey::new(owner_type, owner_id, topic_id));
-    Ok(json!({"status": "cancelled"}))
+    let key = TopicKey::new(owner_type, owner_id, topic_id);
+    let cancelled = state.cancel(&key);
+    Ok(json!({"status": if cancelled { "cancelled" } else { "not_running" }}))
 }
 
 /// 核心请求函数：sendToVCP
@@ -1622,11 +1671,7 @@ async fn handle_non_streaming_request(
     let response = tokio::select! {
         _ = cancellation_token.cancelled() => {
             log::warn!("[VCPClient] Non-streaming request aborted before response for message: {}", message_id);
-            send_stream_event(StreamEvent::error(
-                message_id.clone(),
-                context.clone(),
-                "请求已中止".to_string(),
-            ));
+            // 用户取消由上层统一 Finalizer 持久化并发送唯一终态事件。
             return Ok((
                 json!({
                     "response": serde_json::Value::Null,
@@ -1889,7 +1934,7 @@ pub async fn get_active_generations(
     Ok(list)
 }
 
-async fn mark_message_as_error<R: Runtime>(
+pub(crate) async fn mark_message_as_error<R: Runtime>(
     app_handle: &AppHandle<R>,
     pool: &sqlx::Pool<sqlx::Sqlite>,
     key: &MessageKey,
