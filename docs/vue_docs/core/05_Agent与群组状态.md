@@ -432,7 +432,7 @@ Rust 后端通过 Tauri `Channel` 分批次推送话题块。每次加载拥有�
 |------|--------|------|
 | 切换 Agent/Group | `chatSessionStore.selectItem()` → 触发外部 watcher | `topicStore.loadTopicList(ownerId, ownerType)` |
 | 创建话题 | 话题列表 UI | `topicStore.createTopic(ownerId, ownerType, name)`，本地 `unshift` 乐观更新 |
-| 删除话题 | 话题列表 UI | `topicStore.deleteTopic(...)`，若删除的是当前话题则自动切换至下一个 |
+| 删除话题 | 话题列表 UI | `topicStore.deleteTopic(...)`，若删除的是当前话题则回到无话题状态 |
 | 同步完成后 | `useDataReload.performFullReload()` | 先 `invalidateAllTopicCaches()` 使在途 Channel 失效，再显式按当前复合 owner 重新 `loadTopicList`；不依赖 selection watcher 再次触发 |
 
 `TopicList.vue` 监听 `[currentSelectedItem.id, currentSelectedItem.type]`，而不是只监听 ID 或从列表反推类型；即使 Agent 与 Group 的 ID 文本相同，owner type 变化也会启动新 generation。相同 owner 的并发调用则复用同一个 `activeLoadPromise`，避免重复 Channel。

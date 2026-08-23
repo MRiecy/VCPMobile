@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { nextTick, ref } from "vue";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { useChatSessionStore } from "./chatSessionStore";
 import { useChatStreamStore } from "./chatStreamStore";
@@ -86,6 +86,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   // 用于防止并发加载与话题切换导致竞态的消息拉取中止控制器 (AbortController)
   let currentLoadAbortController: AbortController | null = null;
   let currentLoadId = 0;
+  let currentAnchorLoadId = 0;
 
   const sessionStore = useChatSessionStore();
   const streamStore = useChatStreamStore();
@@ -311,15 +312,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         return { addedCount: 0, aborted: true };
       }
       if (isMissingTopicError(e)) {
-        try {
-          await topicStore.loadTopicList(ownerId, ownerType);
-        } catch {
-          // TopicStore 已负责显示列表读取错误，避免重复 Toast。
-          return { addedCount: 0, error: e };
-        }
-        if (loadId !== currentLoadId || !sessionStore.isConversationCurrent(key)) {
-          return { addedCount: 0, aborted: true };
-        }
+        sessionStore.clearCurrentTopic();
+        return { addedCount: 0, aborted: true };
       }
       notifyHistoryLoadFailure();
       return { addedCount: 0, error: e };
@@ -405,25 +399,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     anchorMessageId: string,
     beforeN = 12,
     afterN = 8,
-  ): Promise<{ ok: boolean; anchorMissing?: boolean }> => {
-    const key = sessionStore.currentConversationKey;
-    if (
-      !key ||
-      key.ownerId !== ownerId ||
-      key.ownerType !== ownerType ||
-      key.topicId !== topicId
-    ) {
-      return { ok: false };
-    }
-    const loadId = ++currentLoadId;
-    if (currentLoadAbortController) {
-      currentLoadAbortController.abort();
-    }
-    const controller = new AbortController();
-    currentLoadAbortController = controller;
-    loading.value = true;
-    isLoadingHistory.value = true;
-
+  ): Promise<{ ok: boolean; anchorMissing?: boolean; error?: unknown }> => {
+    const sourceEpoch = sessionStore.sessionEpoch;
+    const anchorLoadId = ++currentAnchorLoadId;
     try {
       const messages = await invoke<ChatMessage[]>('load_chat_history_around', {
         ownerId,
@@ -434,59 +412,69 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         afterN,
       });
 
-      if (controller.signal.aborted || loadId !== currentLoadId || !sessionStore.isConversationCurrent(key)) {
+      if (
+        anchorLoadId !== currentAnchorLoadId ||
+        sessionStore.sessionEpoch !== sourceEpoch
+      ) {
         return { ok: false };
       }
 
       const anchorIndex = messages.findIndex((m) => m.id === anchorMessageId);
       if (anchorIndex === -1) {
-        const latest = await loadHistory(ownerId, ownerType, topicId, 15, 0);
-        if (latest.error || latest.aborted) {
-          return { ok: false };
-        }
         return { ok: false, anchorMissing: true };
       }
 
       const hydrated = messages.map(
         msg => streamStore.getActiveStreamMessage(ownerId, ownerType, topicId, msg.id) || msg,
       );
+      const current = sessionStore.currentConversationKey;
+      const targetIsCurrent = Boolean(
+        current &&
+        current.ownerId === ownerId &&
+        current.ownerType === ownerType &&
+        current.topicId === topicId,
+      );
+      if (!targetIsCurrent) {
+        await sessionStore.selectTopicById(ownerId, ownerType, topicId);
+        await nextTick();
+      }
+      if (anchorLoadId !== currentAnchorLoadId) {
+        return { ok: false };
+      }
+      const targetKey = sessionStore.currentConversationKey;
+      if (
+        !targetKey ||
+        targetKey.ownerId !== ownerId ||
+        targetKey.ownerType !== ownerType ||
+        targetKey.topicId !== topicId
+      ) {
+        return { ok: false };
+      }
+
+      resetHistoryForConversation();
       currentChatHistory.value = mergeHistoryWindow([], hydrated, false);
-      loadedConversationKey.value = key;
+      loadedConversationKey.value = targetKey;
       loadedWindowCount.value = currentChatHistory.value.length;
       // 锚点上方未取满 beforeN 说明已触顶；下方未取满 afterN 说明已在最新端
       hasMoreHistory.value = anchorIndex >= beforeN;
       hasEvictedNewer.value = messages.length - anchorIndex - 1 >= afterN;
       hydrated.forEach(msg => attachmentStore.resolveMessageAssets(msg));
+      streamStore.checkAndRecoverInterruptedStreams().catch((error) => {
+        console.error("[ChatHistoryStore] Failed to recover streams after anchor load:", error);
+      });
       return { ok: true };
     } catch (e) {
       console.error("[ChatHistoryStore] Failed to load history around anchor:", e);
       if (
-        controller.signal.aborted ||
-        loadId !== currentLoadId ||
-        !sessionStore.isConversationCurrent(key)
+        anchorLoadId !== currentAnchorLoadId ||
+        sessionStore.sessionEpoch !== sourceEpoch
       ) {
         return { ok: false };
       }
       if (isMissingTopicError(e)) {
-        try {
-          await topicStore.loadTopicList(ownerId, ownerType);
-          return { ok: false, anchorMissing: true };
-        } catch {
-          // TopicStore 已负责显示列表读取错误，避免重复 Toast。
-          return { ok: false };
-        }
+        return { ok: false, anchorMissing: true };
       }
-      const latest = await loadHistory(ownerId, ownerType, topicId, 15, 0);
-      if (latest.error || latest.aborted) {
-        return { ok: false };
-      }
-      return { ok: false, anchorMissing: true };
-    } finally {
-      if (currentLoadAbortController === controller && loadId === currentLoadId) {
-        currentLoadAbortController = null;
-        loading.value = false;
-        isLoadingHistory.value = false;
-      }
+      return { ok: false, error: e };
     }
   };
 

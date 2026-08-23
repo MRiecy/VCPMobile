@@ -57,6 +57,19 @@ export const useChatSessionStore = defineStore("chatSession", () => {
 
   const clearConversation = () => setConversation(null, null);
 
+  const clearCurrentTopic = () => {
+    const selected = currentSelectedItem.value;
+    if (!selected || (selected.type !== "agent" && selected.type !== "group")) {
+      clearConversation();
+      return;
+    }
+    const mapKey = ownerMapKey(selected.type, selected.id);
+    if (lastActiveTopicMap.value[mapKey] === currentTopicId.value) {
+      delete lastActiveTopicMap.value[mapKey];
+    }
+    setConversation({ ...selected, type: selected.type }, null);
+  };
+
   const isConversationCurrent = (key: ConversationKey | null | undefined) => {
     const current = currentConversationKey.value;
     return Boolean(
@@ -282,8 +295,7 @@ export const useChatSessionStore = defineStore("chatSession", () => {
         if (lastActiveTopicMap.value[mapKey] === topicId) {
           delete lastActiveTopicMap.value[mapKey];
         }
-        topicId = ownerTopics[0]?.id || null;
-        if (topicId) lastActiveTopicMap.value[mapKey] = topicId;
+        topicId = null;
       } else {
         lastActiveTopicMap.value[ownerMapKey(ownerType, selected.id)] = topicId;
       }
@@ -306,6 +318,7 @@ export const useChatSessionStore = defineStore("chatSession", () => {
     consumeSharePrefill,
     setConversation,
     clearConversation,
+    clearCurrentTopic,
     isConversationCurrent,
     reconcileCurrentConversation,
     selectTopicById,

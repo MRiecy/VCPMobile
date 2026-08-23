@@ -435,7 +435,7 @@ export interface AgentConfig {
 | 操作 | Store Action | Rust Command | 说明 |
 |------|-------------|--------------|------|
 | 新建 | `createTopic(ownerId, ownerType, name)` | `create_topic` | 新话题默认 `locked = true` |
-| 删除 | `deleteTopic(ownerId, ownerType, topicId)` | `delete_topic` | 删除当前话题后自动切换到最新话题 |
+| 删除 | `deleteTopic(ownerId, ownerType, topicId)` | `delete_topic` | 删除当前话题后回到无话题状态 |
 | 重命名 | `updateTopicTitle(ownerId, ownerType, topicId, title)` | `update_topic_title` | 即时更新本地列表 |
 
 创建入口通常位于聊天界面的标题栏下拉菜单中，不在设置面板内。

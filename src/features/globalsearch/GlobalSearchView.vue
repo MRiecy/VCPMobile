@@ -6,7 +6,7 @@
  * 检索层走本地 SQLite FTS5（trigram），离线可用。
  *
  * 首开时检测 FTS 索引覆盖率（决策 G），不足则触发后台分批回填并展示进度。
- * 结果项点击 → 关闭搜索页 → 切换会话 → 锚点窗口加载 → scrollIntoView + 高亮闪烁。
+ * 结果项点击 → 关闭搜索页 → 验证锚点 → 成功后切换会话并定位。
  */
 import { computed, nextTick, ref, watch } from 'vue';
 import { ArrowLeft, ArrowUpDown, ChevronDown, Clock, Search, SlidersHorizontal, X } from 'lucide-vue-next';
@@ -280,13 +280,7 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
       return;
     }
 
-    // 切换会话（ChatView 的 watcher 会触发常规首屏加载，随后的锚点加载以 loadId 竞态胜出）
-    await sessionStore.selectTopicById(
-      item.ownerId,
-      item.ownerType,
-      item.topicId,
-    );
-    await nextTick();
+    // 先读取并验证锚点；只有成功后 HistoryStore 才切换会话并提交窗口。
     const result = await historyStore.loadHistoryAround(
       item.ownerId,
       item.ownerType,
@@ -308,6 +302,7 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
       });
       return;
     }
+    if (result.error) throw result.error;
   } catch (e) {
     console.error('[GlobalSearch] Jump failed:', e);
     notificationStore.addNotification({

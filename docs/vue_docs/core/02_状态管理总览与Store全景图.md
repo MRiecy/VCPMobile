@@ -393,7 +393,7 @@ const msgToUse = activeMsg || chunk.message;
 
 **流式加载**：通过 `get_topics_streamed` + `Channel<Topic[]>` 实现话题列表的增量加载，每收到一个 chunk 即 `push` 到数组并强制触发重绘（`topics.value = [...topics.value]`），配合虚拟列表实现平滑的渐进式渲染。
 
-**删除话题后的自动导航**：若删除的是当前选中话题，自动选择列表中的下一个话题；若列表为空，则清空 `sessionStore.currentTopicId`，由 `chatHistoryStore` 的 watch 监听自动清空历史。
+**删除当前话题后的导航**：清空 `sessionStore.currentTopicId` 与陈旧记忆，不自动进入其他话题；由 `chatHistoryStore` 的 watch 同步清空历史。
 
 ---
 
