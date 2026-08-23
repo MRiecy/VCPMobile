@@ -1,6 +1,5 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
-import { invoke } from "@tauri-apps/api/core";
 import { useAssistantStore } from "./assistant";
 import { useTopicStore } from "./topicListManager";
 
@@ -121,11 +120,8 @@ export const useChatSessionStore = defineStore("chatSession", () => {
       second: "2-digit",
     })}`;
 
-    const newTopic = await invoke<any>("create_topic", {
-      ownerId: agentId,
-      ownerType: "agent",
-      name: newTopicName,
-    });
+    const topicStore = useTopicStore();
+    const newTopic = await topicStore.createTopic(agentId, "agent", newTopicName);
 
     if (!newTopic?.id) {
       throw new Error("Failed to create topic");
@@ -133,6 +129,16 @@ export const useChatSessionStore = defineStore("chatSession", () => {
 
     // 3. 选择 topic（设置 currentSelectedItem 和 currentTopicId）
     await selectTopicById(agentId, "agent", newTopic.id);
+    if (
+      !topicStore.topics.some(
+        (topic) =>
+          topic.ownerType === "agent" &&
+          topic.ownerId === agentId &&
+          topic.id === newTopic.id,
+      )
+    ) {
+      void topicStore.loadTopicList(agentId, "agent").catch(() => {});
+    }
 
     // 4. 存储预填数据（由 ChatView/InputEnhancer 消费后清空）
     sharePrefillText.value = sharedText;

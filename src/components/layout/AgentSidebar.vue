@@ -39,9 +39,12 @@ useSidebarSwipe(sidebarRef, {
 const handleSelectItem = async (item: any) => {
   activeTab.value = 'topics';
   if (item) {
-    // 自动加载并渲染上次活跃话题（保留便利性）
-    // 话题列表的加载由 TopicList.vue 中的 watch 响应式驱动，此处无需重复调用
-    await sessionStore.selectItem(item);
+    // selectItem 负责加载列表并恢复该 Owner 的上次活跃话题。
+    try {
+      await sessionStore.selectItem(item);
+    } catch {
+      // Topic Store 已统一显示加载失败提示。
+    }
   }
 };
 

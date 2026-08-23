@@ -158,7 +158,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         candidate.ownerId === ownerId &&
         candidate.ownerType === ownerType,
     );
-    const isDefaultName = topic && /^(新话题|新会话) \d{2}:\d{2}:\d{2}$/.test(topic.name);
+    const defaultTitle = topic?.name;
+    const isDefaultName =
+      defaultTitle && /^(新话题|新会话) \d{2}:\d{2}:\d{2}$/.test(defaultTitle);
     const messageCount = currentChatHistory.value.filter(
       (m) => m.role !== "system",
     ).length;
@@ -183,6 +185,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
             ownerType,
             topicId,
             newTitle,
+            defaultTitle,
           );
         }
       } catch (e) {

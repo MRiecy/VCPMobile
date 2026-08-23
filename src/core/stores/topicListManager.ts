@@ -163,7 +163,14 @@ export const useTopicStore = defineStore("topic", () => {
       } catch (e) {
         if (generation === loadGeneration) {
           console.error("[TopicStore] Failed to load topics:", e);
+          notificationStore.addNotification({
+            type: "error",
+            title: "话题加载失败",
+            message: "暂时无法读取话题列表，请稍后重试",
+            toastOnly: true,
+          });
         }
+        throw e;
       } finally {
         if (generation === loadGeneration) {
           loading.value = false;
@@ -284,19 +291,22 @@ export const useTopicStore = defineStore("topic", () => {
     ownerType: string,
     topicId: string,
     newTitle: string,
+    expectedTitle?: string,
   ) => {
     try {
       console.log(
         `[TopicStore] Updating title for topic ${topicId} to "${newTitle}"`,
       );
       // 注意：确保 Rust 端已实现 update_topic_title 命令
-      await invoke("update_topic_title", {
+      const updated = await invoke<boolean>("update_topic_title", {
         ownerId,
         ownerType,
         topicId,
         title: newTitle,
+        expectedTitle: expectedTitle ?? null,
       });
 
+      if (!updated) return false;
       if (!isCurrentOwner(ownerId, ownerType)) return;
       const index = topics.value.findIndex((t) => t.id === topicId);
       if (index !== -1) {
@@ -304,6 +314,7 @@ export const useTopicStore = defineStore("topic", () => {
         // 强制触发虚拟列表重绘
         topics.value = [...topics.value];
       }
+      return true;
     } catch (e) {
       console.error("[TopicStore] Failed to update topic title:", e);
       throw e;

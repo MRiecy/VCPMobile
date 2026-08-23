@@ -34,7 +34,11 @@ const handleCreateAgent = async () => {
             type: 'agent'
           }, null);
           // 加载话题列表
-          await topicListStore.loadTopicList(newAgent.id, 'agent');
+          try {
+            await topicListStore.loadTopicList(newAgent.id, 'agent');
+          } catch {
+            // Topic Store 已统一显示加载失败提示；Agent 创建本身仍然成功。
+          }
           // 关闭侧边栏
           layoutStore.setLeftDrawer(false);
           // 开启配置 Overlay
@@ -73,7 +77,11 @@ const handleCreateGroup = async () => {
             type: 'group'
           }, null);
           // 加载话题列表
-          await topicListStore.loadTopicList(newGroup.id, 'group');
+          try {
+            await topicListStore.loadTopicList(newGroup.id, 'group');
+          } catch {
+            // Topic Store 已统一显示加载失败提示；Group 创建本身仍然成功。
+          }
           // 关闭侧边栏
           layoutStore.setLeftDrawer(false);
           // 开启配置 Overlay

@@ -165,7 +165,7 @@ watch(
   ] as const,
   ([ownerId, ownerType]) => {
     if (ownerId && (ownerType === "agent" || ownerType === "group")) {
-      topicListStore.loadTopicList(ownerId, ownerType);
+      void topicListStore.loadTopicList(ownerId, ownerType).catch(() => {});
     }
   },
   { immediate: true },

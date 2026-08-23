@@ -332,14 +332,16 @@ pub async fn update_topic_title(
     owner_type: String,
     topic_id: String,
     title: String,
-) -> Result<(), String> {
+    expected_title: Option<String>,
+) -> Result<bool, String> {
     let now = crate::vcp_modules::infra::utils::now_millis();
 
     let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
     let changed = sqlx::query(
         "UPDATE topics SET title = ?, updated_at = ?
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
-           AND deleted_at IS NULL AND title IS NOT ?",
+           AND deleted_at IS NULL AND title IS NOT ?
+           AND (? IS NULL OR title = ?)",
     )
     .bind(&title)
     .bind(now)
@@ -347,6 +349,8 @@ pub async fn update_topic_title(
     .bind(&owner_id)
     .bind(&topic_id)
     .bind(&title)
+    .bind(&expected_title)
+    .bind(&expected_title)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -357,7 +361,7 @@ pub async fn update_topic_title(
     }
     tx.commit().await.map_err(|e| e.to_string())?;
 
-    Ok(())
+    Ok(changed.rows_affected() == 1)
 }
 
 #[tauri::command]
@@ -490,7 +494,7 @@ pub async fn archive_assistant_chat(
         db_state.clone(),
         owner_id.clone(),
         owner_type.clone(),
-        default_title,
+        default_title.clone(),
     )
     .await?;
 
@@ -610,6 +614,7 @@ pub async fn archive_assistant_chat(
                 owner_type_clone,
                 new_topic_id_clone,
                 title,
+                Some(default_title),
             )
             .await;
         }
