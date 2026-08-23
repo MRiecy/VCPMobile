@@ -20,6 +20,12 @@ pub struct Attachment {
     pub hash: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    #[serde(
+        rename = "attachmentOrder",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub attachment_order: Option<i32>,
 
     // 平铺数据库中的核心附件字段
     #[serde(rename = "internalPath", default)]

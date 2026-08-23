@@ -97,6 +97,7 @@ export interface Attachment {
   resolvedSrc?: string; // Webview 可用的 asset:// 路径 (运行时动态生成，不进行持久化)
   hash?: string;
   status?: "loading" | "processing" | "done" | "ready" | "desktop_only" | "removed";
+  attachmentOrder?: number; // 消息内附件关系的稳定顺序键，不进入同步 DTO
   internalPath?: string; // 手机本地物理路径，仅供前端通过 convertFileSrc 转换为安全 URL
   extractedText?: string;
   imageFrames?: string[];

@@ -1406,7 +1406,7 @@ impl DbWriteQueue {
             let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
             let sql = format!(
                 "DELETE FROM message_attachments
-                 WHERE deleted_at IS NULL AND owner_type = ? AND owner_id = ? AND topic_id = ?
+                 WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
                    AND msg_id IN ({})",
                 placeholders
             );

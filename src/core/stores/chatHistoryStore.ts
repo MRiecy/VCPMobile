@@ -633,7 +633,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       return;
     }
 
-    const currentStaged = [...attachmentStore.stagedAttachments];
+    const currentStaged = attachmentStore.stagedAttachments.map((attachment, attachmentOrder) => ({
+      ...attachment,
+      attachmentOrder,
+    }));
     attachmentStore.clearStaged();
     if (currentStaged.length > 0) {
       await attachmentStore.preProcessDocuments(currentStaged);
@@ -703,7 +706,11 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     }
   };
 
-  const deleteAttachment = async (messageKey: MessageActionKey, hash: string) => {
+  const deleteAttachment = async (
+    messageKey: MessageActionKey,
+    attachmentOrder: number,
+    hash: string,
+  ) => {
     const key = messageKey.conversation;
     const messageId = messageKey.messageId;
     if (!isMessageActionCurrent(messageKey)) return;
@@ -713,6 +720,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       ownerType: key.ownerType,
       topicId: key.topicId,
       messageId,
+      attachmentOrder,
       hash,
     });
 
@@ -722,7 +730,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     if (targetIndex !== -1) {
       const msg = currentChatHistory.value[targetIndex];
       if (msg.attachments) {
-        msg.attachments = msg.attachments.filter(att => att.hash !== hash);
+        msg.attachments = msg.attachments.filter((att, index) =>
+          (att.attachmentOrder ?? index) !== attachmentOrder || att.hash !== hash
+        );
       }
     }
   };

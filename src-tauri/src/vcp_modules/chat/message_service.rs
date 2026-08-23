@@ -264,7 +264,7 @@ async fn convert_history_rows(
         };
         let att_query = format!(
             "SELECT a.hash, a.mime_type, a.size, a.internal_path, {} as extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
-                    ma.msg_id, ma.display_name, ma.src, ma.status
+                    ma.msg_id, ma.attachment_order, ma.display_name, ma.src, ma.status
              FROM message_attachments ma
              JOIN attachments a ON ma.hash = a.hash
              WHERE ma.owner_type = ? AND ma.owner_id = ? AND ma.topic_id = ?
@@ -309,6 +309,7 @@ async fn convert_history_rows(
                 size: size_i64 as u64,
                 hash: Some(hash),
                 status: Some(ar.get("status")),
+                attachment_order: Some(ar.get("attachment_order")),
                 internal_path,
                 extracted_text,
                 image_frames: ar
@@ -631,7 +632,7 @@ pub async fn load_chat_text_history_for_context(
         };
         let att_query = format!(
             "SELECT a.hash, a.mime_type, a.size, a.internal_path, {} as extracted_text, a.image_frames, a.thumbnail_path, a.created_at,
-                    ma.msg_id, ma.display_name, ma.src, ma.status
+                    ma.msg_id, ma.attachment_order, ma.display_name, ma.src, ma.status
              FROM message_attachments ma
              JOIN attachments a ON ma.hash = a.hash
              WHERE ma.owner_type = ? AND ma.owner_id = ? AND ma.topic_id = ?
@@ -675,6 +676,7 @@ pub async fn load_chat_text_history_for_context(
                 size: size_i64 as u64,
                 hash: Some(hash),
                 status: Some(ar.get("status")),
+                attachment_order: Some(ar.get("attachment_order")),
                 internal_path,
                 extracted_text,
                 image_frames: ar
@@ -1759,6 +1761,7 @@ pub async fn delete_message_attachment(
     owner_type: String,
     topic_id: String,
     message_id: String,
+    attachment_order: i32,
     hash: String,
 ) -> Result<(), String> {
     use crate::vcp_modules::db_manager::DbState;
@@ -1767,13 +1770,15 @@ pub async fn delete_message_attachment(
     let pool = &db_state.pool;
     let now = crate::vcp_modules::infra::utils::now_millis();
     let key = MessageKey::new(TopicKey::new(owner_type, owner_id, topic_id), message_id);
-    delete_message_attachment_in_pool(pool, &key.topic, &key.msg_id, &hash, now).await
+    delete_message_attachment_in_pool(pool, &key.topic, &key.msg_id, attachment_order, &hash, now)
+        .await
 }
 
 async fn delete_message_attachment_in_pool(
     pool: &sqlx::SqlitePool,
     key: &TopicKey,
     message_id: &str,
+    attachment_order: i32,
     hash: &str,
     now: i64,
 ) -> Result<(), String> {
@@ -1781,13 +1786,14 @@ async fn delete_message_attachment_in_pool(
     let deleted = sqlx::query(
         "UPDATE message_attachments SET deleted_at = ? \
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
-           AND hash = ? AND deleted_at IS NULL",
+           AND attachment_order = ? AND hash = ? AND deleted_at IS NULL",
     )
     .bind(now)
     .bind(&key.owner_type)
     .bind(&key.owner_id)
     .bind(&key.topic_id)
     .bind(message_id)
+    .bind(attachment_order)
     .bind(hash)
     .execute(&mut *tx)
     .await

@@ -882,6 +882,7 @@ async fn load_outbound_message_page(
                 status: row
                     .try_get("status")
                     .map_err(|error| format!("Attachment status decode failed: {error}"))?,
+                attachment_order: None,
                 internal_path: row
                     .try_get::<Option<String>, _>("internal_path")
                     .map_err(|error| format!("Attachment path decode failed: {error}"))?

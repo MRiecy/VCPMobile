@@ -95,7 +95,7 @@ const removeAttachment = async (index: number) => {
   if (!confirmed) return;
 
   try {
-    await historyStore.deleteAttachment(messageKey, att.hash);
+    await historyStore.deleteAttachment(messageKey, att.attachmentOrder ?? index, att.hash);
   } catch (err) {
     console.error("[AttachmentPreview] Failed to delete attachment:", err);
     notificationStore.addNotification({
@@ -113,7 +113,7 @@ const removeAttachment = async (index: number) => {
   >
     <div
       v-for="(att, index) in (attachments || []).filter(Boolean)"
-      :key="att?.hash || index"
+      :key="`${att?.hash || 'attachment'}:${att?.attachmentOrder ?? index}`"
       class="attachment-item relative group"
     >
       <div
