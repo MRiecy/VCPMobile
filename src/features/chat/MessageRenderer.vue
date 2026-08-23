@@ -614,6 +614,7 @@ const showMessageContextMenu = async () => {
   const messageKey = historyStore.captureMessageActionKey(props.message.id);
   if (!messageKey) return;
   const actions: any[] = [];
+  const generationActive = streamStore.activeStreamingIds.size > 0;
 
   if (isStreaming.value && !shell.value?.isUser) {
     actions.push({
@@ -700,13 +701,23 @@ const showMessageContextMenu = async () => {
       actions.push({
         label: "重新生成",
         icon: RotateCcw,
-        handler: () => historyStore.regenerateResponse(messageKey),
+        disabled: generationActive,
+        handler: () => {
+          if (streamStore.activeStreamingIds.size === 0) {
+            historyStore.regenerateResponse(messageKey);
+          }
+        },
       });
     } else {
       actions.push({
         label: "编辑重发",
         icon: Edit2,
-        handler: () => historyStore.beginEditResend(messageKey),
+        disabled: generationActive,
+        handler: () => {
+          if (streamStore.activeStreamingIds.size === 0) {
+            historyStore.beginEditResend(messageKey);
+          }
+        },
       });
     }
   }
@@ -722,7 +733,7 @@ const showMessageContextMenu = async () => {
         isDanger: true
       });
       if (confirmed) {
-        historyStore.deleteMessage(messageKey);
+        await historyStore.deleteMessage(messageKey);
       }
     },
   });

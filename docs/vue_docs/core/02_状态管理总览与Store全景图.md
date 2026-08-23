@@ -967,7 +967,7 @@ appLifecycle.bootstrap()
 | 前端操作 | Tauri Command | 后端负责模块 |
 |----------|---------------|-------------|
 | 发送消息 | `handle_agent_chat_message` / `handle_group_chat_message` | `agent_chat_application_service` |
-| 删除消息 | `delete_messages` / `truncate_history_after_timestamp` | `message_service` |
+| 删除消息 / 编辑重发截断 | `delete_messages` / `truncate_history_after_message` | `message_service` |
 | 保存 Agent 配置 | `save_agent_config` | `agent_service` |
 | 保存 Group 配置 | `save_group_config` | `group_service` |
 | 更新设置 | `update_settings` | `settings_manager` |

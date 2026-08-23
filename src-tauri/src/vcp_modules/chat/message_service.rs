@@ -1111,6 +1111,7 @@ pub struct MessageDeletionResult {
     pub deleted_ids: Vec<String>,
     pub active_ids: Vec<String>,
     pub deleted_at: i64,
+    pub msg_count: i32,
 }
 
 pub async fn delete_messages(
@@ -1120,10 +1121,21 @@ pub async fn delete_messages(
     deleted_at: Option<i64>,
 ) -> Result<MessageDeletionResult, String> {
     if msg_ids.is_empty() {
+        let msg_count: i32 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM messages
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
+        )
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
+        .fetch_one(db_pool)
+        .await
+        .map_err(|e| e.to_string())?;
         return Ok(MessageDeletionResult {
             deleted_ids: Vec::new(),
             active_ids: Vec::new(),
             deleted_at: deleted_at.unwrap_or_else(|| chrono::Utc::now().timestamp_millis()),
+            msg_count,
         });
     }
     if key.topic_id.is_empty()
@@ -1295,40 +1307,59 @@ pub async fn delete_messages(
         deleted_ids,
         active_ids,
         deleted_at: now,
+        msg_count,
     })
 }
 
-pub async fn truncate_history_after_timestamp(
-    _app_handle: AppHandle,
+pub async fn truncate_history_after_message(
     db_pool: &sqlx::Pool<sqlx::Sqlite>,
     key: &TopicKey,
-    timestamp: i64,
+    anchor_message_id: &str,
 ) -> Result<MessageDeletionResult, String> {
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
+    let anchor_timestamp: i64 = sqlx::query_scalar(
+        "SELECT timestamp FROM messages
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
+           AND deleted_at IS NULL",
+    )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .bind(anchor_message_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| format!("Anchor message {anchor_message_id} is missing or deleted"))?;
 
     let active_ids: Vec<String> = sqlx::query_scalar(
         "SELECT ag.msg_id FROM active_generations ag
          JOIN messages m
            ON m.owner_type = ag.owner_type AND m.owner_id = ag.owner_id
           AND m.topic_id = ag.topic_id AND m.msg_id = ag.msg_id
-         WHERE ag.owner_type = ? AND ag.owner_id = ? AND ag.topic_id = ? AND m.timestamp > ?",
+         WHERE ag.owner_type = ? AND ag.owner_id = ? AND ag.topic_id = ?
+           AND (m.timestamp > ? OR (m.timestamp = ? AND m.msg_id > ?))",
     )
     .bind(&key.owner_type)
     .bind(&key.owner_id)
     .bind(&key.topic_id)
-    .bind(timestamp)
+    .bind(anchor_timestamp)
+    .bind(anchor_timestamp)
+    .bind(anchor_message_id)
     .fetch_all(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
     let deleted_ids: Vec<String> = sqlx::query_scalar(
         "SELECT msg_id FROM messages
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
-           AND timestamp > ? AND deleted_at IS NULL",
+           AND (timestamp > ? OR (timestamp = ? AND msg_id > ?))
+           AND deleted_at IS NULL",
     )
     .bind(&key.owner_type)
     .bind(&key.owner_id)
     .bind(&key.topic_id)
-    .bind(timestamp)
+    .bind(anchor_timestamp)
+    .bind(anchor_timestamp)
+    .bind(anchor_message_id)
     .fetch_all(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -1339,7 +1370,8 @@ pub async fn truncate_history_after_timestamp(
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
            AND msg_id IN (
              SELECT msg_id FROM messages
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND timestamp > ?
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+               AND (timestamp > ? OR (timestamp = ? AND msg_id > ?))
            )",
     )
     .bind(&key.owner_type)
@@ -1348,7 +1380,9 @@ pub async fn truncate_history_after_timestamp(
     .bind(&key.owner_type)
     .bind(&key.owner_id)
     .bind(&key.topic_id)
-    .bind(timestamp)
+    .bind(anchor_timestamp)
+    .bind(anchor_timestamp)
+    .bind(anchor_message_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -1358,7 +1392,8 @@ pub async fn truncate_history_after_timestamp(
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
            AND msg_id IN (
              SELECT msg_id FROM messages
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND timestamp > ?
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+               AND (timestamp > ? OR (timestamp = ? AND msg_id > ?))
            )",
     )
     .bind(&key.owner_type)
@@ -1367,7 +1402,9 @@ pub async fn truncate_history_after_timestamp(
     .bind(&key.owner_type)
     .bind(&key.owner_id)
     .bind(&key.topic_id)
-    .bind(timestamp)
+    .bind(anchor_timestamp)
+    .bind(anchor_timestamp)
+    .bind(anchor_message_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -1378,7 +1415,8 @@ pub async fn truncate_history_after_timestamp(
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
            AND msg_id IN (
              SELECT msg_id FROM messages
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND timestamp > ?
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+               AND (timestamp > ? OR (timestamp = ? AND msg_id > ?))
            )",
     )
     .bind(&key.owner_type)
@@ -1387,7 +1425,9 @@ pub async fn truncate_history_after_timestamp(
     .bind(&key.owner_type)
     .bind(&key.owner_id)
     .bind(&key.topic_id)
-    .bind(timestamp)
+    .bind(anchor_timestamp)
+    .bind(anchor_timestamp)
+    .bind(anchor_message_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -1397,7 +1437,8 @@ pub async fn truncate_history_after_timestamp(
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
            AND msg_id IN (
              SELECT msg_id FROM messages
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND timestamp > ?
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+               AND (timestamp > ? OR (timestamp = ? AND msg_id > ?))
            )",
     )
     .bind(&key.owner_type)
@@ -1406,7 +1447,9 @@ pub async fn truncate_history_after_timestamp(
     .bind(&key.owner_type)
     .bind(&key.owner_id)
     .bind(&key.topic_id)
-    .bind(timestamp)
+    .bind(anchor_timestamp)
+    .bind(anchor_timestamp)
+    .bind(anchor_message_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -1415,13 +1458,16 @@ pub async fn truncate_history_after_timestamp(
     let deleted = sqlx::query(
         "UPDATE messages SET deleted_at = ?
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
-           AND timestamp > ? AND deleted_at IS NULL",
+           AND (timestamp > ? OR (timestamp = ? AND msg_id > ?))
+           AND deleted_at IS NULL",
     )
     .bind(now)
     .bind(&key.owner_type)
     .bind(&key.owner_id)
     .bind(&key.topic_id)
-    .bind(timestamp)
+    .bind(anchor_timestamp)
+    .bind(anchor_timestamp)
+    .bind(anchor_message_id)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -1464,6 +1510,7 @@ pub async fn truncate_history_after_timestamp(
         deleted_ids,
         active_ids,
         deleted_at: now,
+        msg_count,
     })
 }
 

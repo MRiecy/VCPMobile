@@ -7,7 +7,7 @@ use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::SyncDataType;
 use crate::vcp_modules::topic_types::{MessageKey, Topic, TopicKey};
-use serde_json::Value;
+use serde_json::{json, Value};
 use sqlx::Row;
 use std::collections::HashMap;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
@@ -636,50 +636,62 @@ pub async fn regenerate_topic_response(
     owner_id: String,
     owner_type: String,
     topic_id: String,
-    target_user_msg_id: String,
+    target_response_msg_id: String,
     stream_channel: Channel<crate::vcp_modules::vcp_client::StreamEvent>,
 ) -> Result<Value, String> {
     let key = TopicKey::new(&owner_type, &owner_id, &topic_id);
     log::info!(
         "[TopicService] Regenerating response for topic: {}, target msg: {}",
         topic_id,
-        target_user_msg_id
+        target_response_msg_id
     );
 
-    // 1. 获取目标用户消息，确保内容完整
-    let user_msg = crate::vcp_modules::message_service::fetch_raw_message_content(
-        app_handle.clone(),
-        owner_id.clone(),
-        owner_type.clone(),
-        topic_id.clone(),
-        target_user_msg_id.clone(),
-    )
-    .await?;
-
-    // 2. 加载消息元数据（为了获取 timestamp 以后续截断）
+    // 1. 以后端完整历史为准，找到目标回复之前最后一条用户消息。
     let pool = &db_state.pool;
-    let row = sqlx::query(
-        "SELECT timestamp, role, name, agent_id, group_id, is_group_message
-         FROM messages
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+    let target_order: (i64, String) = sqlx::query_as(
+        "SELECT timestamp, msg_id FROM messages
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
+           AND role = 'assistant' AND deleted_at IS NULL",
     )
     .bind(&key.owner_type)
     .bind(&key.owner_id)
     .bind(&key.topic_id)
-    .bind(&target_user_msg_id)
-    .fetch_one(pool)
+    .bind(&target_response_msg_id)
+    .fetch_optional(pool)
     .await
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| format!("Response message {target_response_msg_id} is missing or deleted"))?;
+
+    let row = sqlx::query(
+        "SELECT msg_id, content, timestamp, role, name, agent_id, group_id, is_group_message
+         FROM messages
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+           AND role = 'user' AND deleted_at IS NULL
+           AND (timestamp < ? OR (timestamp = ? AND msg_id < ?))
+         ORDER BY timestamp DESC, msg_id DESC
+         LIMIT 1",
+    )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .bind(target_order.0)
+    .bind(target_order.0)
+    .bind(&target_order.1)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?
+    .ok_or_else(|| format!("No user message precedes response {target_response_msg_id}"))?;
 
     use sqlx::Row;
+    let target_user_msg_id: String = row.get("msg_id");
+    let user_msg: String = row.get("content");
     let timestamp: i64 = row.get("timestamp");
 
-    // 3. 截断该消息之后的所有历史
-    let deletion = crate::vcp_modules::message_service::truncate_history_after_timestamp(
-        app_handle.clone(),
+    // 2. 按 timestamp + msg_id 的稳定顺序截断该用户消息之后的历史。
+    let deletion = crate::vcp_modules::message_service::truncate_history_after_message(
         &db_state.pool,
         &key,
-        timestamp,
+        &target_user_msg_id,
     )
     .await?;
     for msg_id in &deletion.active_ids {
@@ -693,7 +705,7 @@ pub async fn regenerate_topic_response(
     }
     crate::vcp_modules::chat_manager::notify_message_deletions(&app_handle, &key, &deletion);
 
-    // 4. 构造逻辑上的 ChatMessage 对象 (用于传给内部生成函数)
+    // 3. 构造逻辑上的 ChatMessage 对象 (用于传给内部生成函数)
     let chat_msg = crate::vcp_modules::chat_manager::ChatMessage {
         id: target_user_msg_id,
         role: row.get("role"),
@@ -713,16 +725,16 @@ pub async fn regenerate_topic_response(
         content_hash: None,
     };
 
-    // 5. 获取配置并发起生成
+    // 4. 获取配置并发起生成
     let settings =
         crate::vcp_modules::settings_manager::read_settings(app_handle.clone(), settings_state)
             .await?;
 
-    if owner_type == "agent" {
+    let generation_result = if owner_type == "agent" {
         crate::vcp_modules::agent_chat_application_service::internal_process_agent_chat_message(
             app_handle,
             agent_state,
-            db_state,
+            db_state.clone(),
             active_requests,
             crate::vcp_modules::agent_chat_application_service::AgentChatPayload {
                 agent_id: owner_id,
@@ -734,13 +746,13 @@ pub async fn regenerate_topic_response(
             stream_channel,
             false, // skip append_user_msg
         )
-        .await
+        .await?
     } else {
         crate::vcp_modules::group_chat_application_service::internal_process_group_chat_message(
             app_handle,
             group_state,
             agent_state,
-            db_state,
+            db_state.clone(),
             active_requests,
             active_group_turns,
             crate::vcp_modules::group_chat_application_service::GroupChatParams {
@@ -753,8 +765,24 @@ pub async fn regenerate_topic_response(
             },
             false, // skip append_user_msg
         )
-        .await
-    }
+        .await?
+    };
+
+    let msg_count: i32 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
+    )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(json!({
+        "generation": generation_result,
+        "msgCount": msg_count,
+    }))
 }
 
 #[cfg(test)]

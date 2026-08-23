@@ -665,20 +665,32 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         content,
         blocks: [{ type: "markdown" as const, content }],
       };
-      await invoke("truncate_history_after_timestamp", {
-        ownerId: key.ownerId,
-        ownerType: key.ownerType,
-        topicId: key.topicId,
-        timestamp: targetMsg.timestamp,
-      });
-      if (canCommitConversation(key)) {
-        const currentIndex = currentChatHistory.value.findIndex(message => message.id === originalId);
-        if (currentIndex !== -1) {
-          currentChatHistory.value[currentIndex] = targetMsg;
-          currentChatHistory.value = currentChatHistory.value.slice(0, currentIndex + 1);
+      try {
+        const msgCount = await invoke<number>("truncate_history_after_message", {
+          ownerId: key.ownerId,
+          ownerType: key.ownerType,
+          topicId: key.topicId,
+          anchorMessageId: originalId,
+        });
+        topicStore.setTopicMsgCount(key.ownerId, key.ownerType, key.topicId, msgCount);
+        if (canCommitConversation(key)) {
+          const currentIndex = currentChatHistory.value.findIndex(message => message.id === originalId);
+          if (currentIndex !== -1) {
+            currentChatHistory.value[currentIndex] = targetMsg;
+            currentChatHistory.value = currentChatHistory.value.slice(0, currentIndex + 1);
+          }
         }
+        await triggerGeneration(targetMsg, key);
+      } catch (e) {
+        if (canCommitConversation(key)) editingMessage.value = intent;
+        notificationStore.addNotification({
+          type: "error",
+          title: "编辑重发失败",
+          message: errorMessage(e),
+          toastOnly: true,
+          duration: 6000,
+        });
       }
-      await triggerGeneration(targetMsg, key);
       return;
     }
 
@@ -718,7 +730,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   /**
    * 删除消息
    */
-  const deleteMessage = async (messageKey: MessageActionKey, deleteAfter: boolean = false) => {
+  const deleteMessage = async (messageKey: MessageActionKey) => {
     const key = messageKey.conversation;
     const messageId = messageKey.messageId;
     if (!isMessageActionCurrent(messageKey)) return;
@@ -726,22 +738,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     const targetIndex = currentChatHistory.value.findIndex(m => m.id === messageId);
     if (targetIndex === -1) return;
 
-    const targetMsg = { ...currentChatHistory.value[targetIndex] };
-    if (deleteAfter) {
-      const countToDelete = currentChatHistory.value.length - targetIndex;
-      await invoke("truncate_history_after_timestamp", {
-        ownerId: key.ownerId,
-        ownerType: key.ownerType,
-        topicId: key.topicId,
-        timestamp: targetMsg.timestamp - 1,
-      });
-      if (canCommitConversation(key)) {
-        const currentIndex = currentChatHistory.value.findIndex(message => message.id === messageId);
-        if (currentIndex !== -1) currentChatHistory.value.splice(currentIndex);
-      }
-      topicStore.decrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId, countToDelete);
-    } else {
-      await invoke("delete_messages", {
+    try {
+      const msgCount = await invoke<number>("delete_messages", {
         ownerId: key.ownerId,
         ownerType: key.ownerType,
         topicId: key.topicId,
@@ -751,7 +749,15 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         const currentIndex = currentChatHistory.value.findIndex(message => message.id === messageId);
         if (currentIndex !== -1) currentChatHistory.value.splice(currentIndex, 1);
       }
-      topicStore.decrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId, 1);
+      topicStore.setTopicMsgCount(key.ownerId, key.ownerType, key.topicId, msgCount);
+    } catch (e) {
+      notificationStore.addNotification({
+        type: "error",
+        title: "删除消息失败",
+        message: errorMessage(e),
+        toastOnly: true,
+        duration: 6000,
+      });
     }
   };
 
@@ -790,16 +796,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     const key = messageKey.conversation;
     const messageId = messageKey.messageId;
     if (!isMessageActionCurrent(messageKey)) return;
-    clearMessageCache(messageId);
     const targetIndex = currentChatHistory.value.findIndex(m => m.id === messageId);
     if (targetIndex === -1) return;
 
     const msg = { ...currentChatHistory.value[targetIndex] };
-    currentChatHistory.value[targetIndex] = {
-      ...msg,
-      content: newContent,
-      blocks: [{ type: "markdown" as const, content: newContent }],
-    };
 
     try {
       const compiledBlocks = await invoke("patch_single_message", {
@@ -825,15 +825,14 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       }
     } catch (e) {
       console.error("[updateMessageContent] patch_single_message failed:", e);
-      if (canCommitConversation(key)) {
-        const currentIndex = currentChatHistory.value.findIndex(message => message.id === messageId);
-        if (currentIndex !== -1) {
-          currentChatHistory.value[currentIndex] = {
-            ...currentChatHistory.value[currentIndex],
-            blocks: [{ type: "markdown" as const, content: newContent }],
-          };
-        }
-      }
+      notificationStore.addNotification({
+        type: "error",
+        title: "保存消息失败",
+        message: errorMessage(e),
+        toastOnly: true,
+        duration: 6000,
+      });
+      throw e;
     }
   };
 
@@ -844,27 +843,18 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     const targetIndex = currentChatHistory.value.findIndex(m => m.id === targetMessageId);
     if (targetIndex === -1) return;
 
-    // 1. 寻找该 AI 消息之前的最后一条用户消息
+    // 当前窗口仅负责乐观更新；权威用户锚点由后端从完整历史中寻找。
     let lastUserMsgIndex = targetIndex - 1;
     while (lastUserMsgIndex >= 0 && currentChatHistory.value[lastUserMsgIndex].role !== "user") {
       lastUserMsgIndex--;
     }
-    
-    if (lastUserMsgIndex === -1) {
-      console.warn("[ChatHistoryStore] No user message found to regenerate from.");
-      return;
+    const didOptimisticTruncate = lastUserMsgIndex >= 0;
+    if (didOptimisticTruncate) {
+      const countToDelete = currentChatHistory.value.length - (lastUserMsgIndex + 1);
+      currentChatHistory.value = currentChatHistory.value.slice(0, lastUserMsgIndex + 1);
+      topicStore.decrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId, countToDelete);
     }
 
-    const lastUserMsg = { ...currentChatHistory.value[lastUserMsgIndex] };
-
-    // 2. 乐观更新 UI：截断历史
-    const countToDelete = currentChatHistory.value.length - (lastUserMsgIndex + 1);
-    currentChatHistory.value = currentChatHistory.value.slice(0, lastUserMsgIndex + 1);
-    topicStore.decrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId, countToDelete);
-
-
-
-    // 3. 调用后端重构后的重生接口
     try {
       const streamChannel = new Channel<any>();
       streamChannel.onmessage = (event) => streamStore.processStreamEvent(event, {
@@ -884,13 +874,17 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         }
       });
 
-      await invoke("regenerate_topic_response", {
+      const result = await invoke<{ msgCount: number }>("regenerate_topic_response", {
         ownerId: key.ownerId,
         ownerType: key.ownerType,
         topicId: key.topicId,
-        targetUserMsgId: lastUserMsg.id,
+        targetResponseMsgId: targetMessageId,
         streamChannel
       });
+      if (!didOptimisticTruncate && canCommitConversation(key)) {
+        await loadHistory(key.ownerId, key.ownerType, key.topicId, 15);
+      }
+      topicStore.setTopicMsgCount(key.ownerId, key.ownerType, key.topicId, result.msgCount);
     } catch (e) {
       console.error("[ChatHistoryStore] Regeneration failed:", e);
       // 与 triggerGeneration 一致：重新生成失败同样需要用户可见反馈
@@ -901,6 +895,14 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         toastOnly: true,
         duration: 6000,
       });
+      if (canCommitConversation(key)) {
+        await loadHistory(key.ownerId, key.ownerType, key.topicId, 15);
+        if (canCommitConversation(key)) {
+          await topicStore.loadTopicList(key.ownerId, key.ownerType).catch((reloadError) => {
+            console.error("[ChatHistoryStore] Failed to reconcile topic count:", reloadError);
+          });
+        }
+      }
     }
   };
 
@@ -936,25 +938,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       key: messageKey,
       initialContent,
     };
-  };
-
-  const persistMessageBlocks = async (messageKey: MessageActionKey, blocks: ContentBlock[]) => {
-    const key = messageKey.conversation;
-    const messageId = messageKey.messageId;
-    if (!isMessageActionCurrent(messageKey)) return;
-    const msg = currentChatHistory.value.find(m => m.id === messageId);
-    if (!msg) return;
-    msg.blocks = blocks;
-    try {
-      await invoke("patch_single_message", {
-        ownerId: key.ownerId,
-        ownerType: key.ownerType,
-        topicId: key.topicId,
-        message: { ...msg },
-      });
-    } catch (e) {
-      console.error(`[ChatHistoryStore] Failed to persist message blocks for message ${messageId}:`, e);
-    }
   };
 
   const reRenderMessage = async (messageKey: MessageActionKey) => {
@@ -1018,7 +1001,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     beginEditResend,
     regenerateResponse,
     fetchRawContent,
-    persistMessageBlocks,
     reRenderMessage,
   };
 });

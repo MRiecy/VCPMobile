@@ -235,7 +235,7 @@ pub async fn delete_messages(
     owner_type: String,
     topic_id: String,
     msg_ids: Vec<String>,
-) -> Result<(), String> {
+) -> Result<i32, String> {
     let key = TopicKey::new(owner_type, owner_id, &topic_id);
     let result = message_service::delete_messages(&db_state.pool, &key, msg_ids, None).await?;
     for msg_id in &result.active_ids {
@@ -244,7 +244,7 @@ pub async fn delete_messages(
         }
     }
     notify_message_deletions(&app_handle, &key, &result);
-    Ok(())
+    Ok(result.msg_count)
 }
 
 pub fn notify_message_deletions<R: tauri::Runtime>(
@@ -263,23 +263,19 @@ pub fn notify_message_deletions<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-pub async fn truncate_history_after_timestamp(
+pub async fn truncate_history_after_message(
     app_handle: tauri::AppHandle,
     db_state: tauri::State<'_, crate::vcp_modules::db_manager::DbState>,
     active_requests: tauri::State<'_, crate::vcp_modules::vcp_client::ActiveRequests>,
     owner_id: String,
     owner_type: String,
     topic_id: String,
-    timestamp: i64,
-) -> Result<(), String> {
+    anchor_message_id: String,
+) -> Result<i32, String> {
     let key = TopicKey::new(owner_type, owner_id, &topic_id);
-    let deletion = message_service::truncate_history_after_timestamp(
-        app_handle.clone(),
-        &db_state.pool,
-        &key,
-        timestamp,
-    )
-    .await?;
+    let deletion =
+        message_service::truncate_history_after_message(&db_state.pool, &key, &anchor_message_id)
+            .await?;
     for msg_id in &deletion.active_ids {
         if let Err(error) = active_requests.cancel(&MessageKey::new(key.clone(), msg_id)) {
             log::warn!(
@@ -290,7 +286,7 @@ pub async fn truncate_history_after_timestamp(
         }
     }
     notify_message_deletions(&app_handle, &key, &deletion);
-    Ok(())
+    Ok(deletion.msg_count)
 }
 
 // --- 增量同步逻辑 (Delta Sync) (Moved to sync_manager.rs) ---

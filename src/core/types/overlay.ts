@@ -21,7 +21,7 @@ export interface PromptConfig {
 
 export interface EditorConfig {
   initialValue: string;
-  onSave: (newContent: string) => void;
+  onSave: (newContent: string) => void | Promise<void>;
 }
 
 export interface ConfirmConfig {

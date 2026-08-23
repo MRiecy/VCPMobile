@@ -3,12 +3,13 @@ defineOptions({
   inheritAttrs: false
 });
 import { ref, watch, nextTick } from 'vue';
-import { X, Check } from 'lucide-vue-next';
+import { X, Check, Loader2 } from 'lucide-vue-next';
 import { useKeyboardInsets } from '../../core/composables/useKeyboardInsets';
 
 const props = defineProps<{
   isOpen: boolean;
   initialValue: string;
+  saving: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -100,22 +101,26 @@ const handleTouchMove = (e: TouchEvent) => {
         <!-- 顶部导航栏 -->
         <div
           class="flex items-center justify-between px-4 pt-[calc(var(--vcp-safe-top,0px)+8px)] pb-3 bg-white/80 dark:bg-gray-900/80 border-b border-black/5 dark:border-white/5 shrink-0 shadow-sm z-10">
-          <button @click="handleCancel"
-            class="p-2 -ml-2 rounded-full active:bg-black/5 dark:active:bg-white/5 text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-colors">
+          <button @click="handleCancel" :disabled="saving"
+            class="p-2 -ml-2 rounded-full active:bg-black/5 dark:active:bg-white/5 text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 transition-colors disabled:opacity-40">
             <X :size="24" />
           </button>
 
           <h2 class="text-sm font-bold text-gray-800 dark:text-gray-200 tracking-wider">编辑消息</h2>
 
-          <button @click="handleSave"
-            class="p-2 -mr-2 rounded-full active:bg-black/5 dark:active:bg-white/5 text-blue-500 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-300 transition-colors">
-            <Check :size="24" />
+          <button @click="handleSave" :disabled="saving"
+            class="min-w-10 p-2 -mr-2 rounded-full flex items-center justify-end gap-1.5 active:bg-black/5 dark:active:bg-white/5 text-blue-500 hover:text-blue-600 dark:text-blue-400 dark:hover:text-blue-300 transition-colors disabled:opacity-70">
+            <template v-if="saving">
+              <Loader2 :size="18" class="animate-spin" />
+              <span class="text-xs font-semibold whitespace-nowrap">保存中…</span>
+            </template>
+            <Check v-else :size="24" />
           </button>
         </div>
 
         <!-- 编辑器主体 -->
         <div class="flex-1 relative flex flex-col p-4 overflow-hidden">
-          <textarea ref="textareaRef" v-model="editorContent" @touchstart="handleTouchStart" @touchmove="handleTouchMove"
+          <textarea ref="textareaRef" v-model="editorContent" :disabled="saving" @touchstart="handleTouchStart" @touchmove="handleTouchMove"
             class="vcp-fullscreen-textarea flex-1 w-full bg-transparent resize-none outline-none text-[15px] leading-relaxed text-gray-800 dark:text-gray-200 placeholder-gray-400 font-sans"
             placeholder="输入消息内容..." spellcheck="false"></textarea>
         </div>

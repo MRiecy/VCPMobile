@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref } from 'vue';
 import { useOverlayStore } from '../core/stores/overlay';
 import VcpPrompt from './ui/VcpPrompt.vue';
 import VcpConfirm from './ui/VcpConfirm.vue';
@@ -8,6 +9,7 @@ import FullScreenEditor from './ui/FullScreenEditor.vue';
 import RenderedImageViewer from './ui/RenderedImageViewer.vue';
 
 const overlayStore = useOverlayStore();
+const editorSaving = ref(false);
 
 const handlePromptConfirm = (val: string) => {
   if (overlayStore.promptConfig?.onConfirm) {
@@ -17,10 +19,16 @@ const handlePromptConfirm = (val: string) => {
 };
 
 const handleEditorSave = async (newContent: string) => {
-  if (overlayStore.editorConfig?.onSave) {
+  if (editorSaving.value || !overlayStore.editorConfig?.onSave) return;
+  editorSaving.value = true;
+  try {
     await overlayStore.editorConfig.onSave(newContent);
+    overlayStore.closeEditor();
+  } catch (error) {
+    console.error('[GlobalOverlayManager] Editor save failed:', error);
+  } finally {
+    editorSaving.value = false;
   }
-  overlayStore.closeEditor();
 };
 </script>
 
@@ -47,6 +55,7 @@ const handleEditorSave = async (newContent: string) => {
     <!-- 全局 FullScreenEditor -->
     <FullScreenEditor v-if="overlayStore.editorConfig" class="pointer-events-auto"
       :is-open="!!overlayStore.editorConfig" :initial-value="overlayStore.editorConfig.initialValue"
+      :saving="editorSaving"
       @save="handleEditorSave" @cancel="overlayStore.closeEditor()"
       @update:isOpen="!$event && overlayStore.closeEditor()" />
 

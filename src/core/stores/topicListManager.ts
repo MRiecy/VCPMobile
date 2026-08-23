@@ -454,6 +454,22 @@ export const useTopicStore = defineStore("topic", () => {
     }
   };
 
+  const setTopicMsgCount = (
+    ownerId: string,
+    ownerType: string,
+    topicId: string,
+    count: number,
+  ) => {
+    if (!isCurrentOwner(ownerId, ownerType)) return;
+    const index = topics.value.findIndex((topic) => topic.id === topicId);
+    if (index === -1) return;
+    topics.value[index] = {
+      ...topics.value[index],
+      msgCount: Math.max(0, count),
+    };
+    topics.value = [...topics.value];
+  };
+
   /**
    * 标记话题为已读 (清空未读数并取消未读标记)
    */
@@ -478,6 +494,7 @@ export const useTopicStore = defineStore("topic", () => {
     incrementTopicMsgCount,
     incrementTopicUnreadCount,
     decrementTopicMsgCount,
+    setTopicMsgCount,
     markTopicAsRead,
   };
 });

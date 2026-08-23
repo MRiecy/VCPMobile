@@ -34,7 +34,7 @@ macro_rules! app_command_handler {
         };
         use crate::vcp_modules::chat_manager::{
             append_single_message, delete_messages, load_chat_history, load_chat_history_around,
-            load_chat_history_streamed, patch_single_message, truncate_history_after_timestamp,
+            load_chat_history_streamed, patch_single_message, truncate_history_after_message,
         };
         use crate::vcp_modules::cli::{
             close_vcp_mobile_cli_terminal, commit_vcp_mobile_cli_skill_import,
@@ -181,7 +181,7 @@ macro_rules! app_command_handler {
                 rebuild_all_pre_renders,
                 rebuild_messages_fts,
                 search_messages_fts,
-                truncate_history_after_timestamp,
+                truncate_history_after_message,
                 // ── VCP 连接与生成控制（vcp_client）──
                 get_active_generations,
                 interruptGroupTurn,
