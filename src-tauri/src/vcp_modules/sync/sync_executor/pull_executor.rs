@@ -35,6 +35,48 @@ const SQLITE_BIND_CHUNK: usize = 400;
 const MAX_AVATAR_RESPONSE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES: usize = 1024 * 1024;
 
+type EntityPullIdentity = (String, String, String, String);
+
+fn entity_pull_identity(value: &Value, label: &str) -> Result<EntityPullIdentity, String> {
+    let id = value
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| format!("{label} requires a non-empty id"))?;
+    let entity_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|value| matches!(*value, "agent" | "group" | "agent_topic" | "group_topic"))
+        .ok_or_else(|| format!("{label} {id} has an invalid type"))?;
+    let (owner_type, owner_id) = match entity_type {
+        "agent_topic" | "group_topic" => {
+            let expected_owner_type = if entity_type == "agent_topic" {
+                "agent"
+            } else {
+                "group"
+            };
+            let owner_type = value
+                .get("ownerType")
+                .and_then(Value::as_str)
+                .filter(|owner_type| *owner_type == expected_owner_type)
+                .ok_or_else(|| format!("{label} {entity_type}/{id} has a mismatched ownerType"))?;
+            let owner_id = value
+                .get("ownerId")
+                .and_then(Value::as_str)
+                .filter(|owner_id| !owner_id.is_empty())
+                .ok_or_else(|| format!("{label} {entity_type}/{id} requires ownerId"))?;
+            (owner_type.to_string(), owner_id.to_string())
+        }
+        _ => (String::new(), String::new()),
+    };
+    Ok((
+        entity_type.to_string(),
+        id.to_string(),
+        owner_type,
+        owner_id,
+    ))
+}
+
 async fn read_response_limited(
     response: reqwest::Response,
     max_bytes: usize,
@@ -801,19 +843,12 @@ impl PullExecutor {
         }
         let mut expected = HashSet::new();
         for request in &requests {
-            let id = request
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-                .ok_or_else(|| "Entity pull request requires a non-empty id".to_string())?;
-            let entity_type = request
-                .get("type")
-                .and_then(Value::as_str)
-                .filter(|value| matches!(*value, "agent" | "group" | "agent_topic" | "group_topic"))
-                .ok_or_else(|| format!("Entity pull request {id} has an invalid type"))?;
-            if !expected.insert((id.to_string(), entity_type.to_string())) {
+            let key = entity_pull_identity(request, "Entity pull request")?;
+            if !expected.insert(key.clone()) {
                 return Err(format!(
-                    "Entity pull request contains duplicate {entity_type}/{id}"
+                    "Entity pull request contains duplicate {entity_type}/{id}",
+                    entity_type = key.0,
+                    id = key.1,
                 ));
             }
         }
@@ -850,23 +885,16 @@ impl PullExecutor {
         let mut seen = HashSet::new();
 
         for item in results {
-            let id = item
-                .get("id")
-                .and_then(Value::as_str)
-                .filter(|id| !id.is_empty())
-                .ok_or_else(|| "Entity pull result requires a non-empty id".to_string())?;
-            let r#type = item
-                .get("type")
-                .and_then(Value::as_str)
-                .ok_or_else(|| format!("Entity pull result {id} requires type"))?;
-            let key = (id.to_string(), r#type.to_string());
+            let key = entity_pull_identity(&item, "Entity pull result")?;
+            let r#type = key.0.as_str();
+            let id = key.1.as_str();
             if !expected.contains(&key) {
                 return Err(format!(
                     "Entity pull returned unexpected result {type_name}/{id}",
                     type_name = r#type
                 ));
             }
-            if !seen.insert(key) {
+            if !seen.insert(key.clone()) {
                 return Err(format!(
                     "Entity pull returned duplicate result {type_name}/{id}",
                     type_name = r#type
@@ -927,6 +955,11 @@ impl PullExecutor {
                     }
                     let dto = serde_json::from_value::<AgentTopicSyncDTO>(data)
                         .map_err(|error| format!("Invalid agent topic {id}: {error}"))?;
+                    if dto.id != id || dto.owner_id != key.3 {
+                        return Err(format!(
+                            "Agent topic {id} data does not match the requested owner"
+                        ));
+                    }
                     agent_topics.push((id.to_string(), dto));
                 }
                 "group_topic" => {
@@ -935,6 +968,11 @@ impl PullExecutor {
                     }
                     let dto = serde_json::from_value::<GroupTopicSyncDTO>(data)
                         .map_err(|error| format!("Invalid group topic {id}: {error}"))?;
+                    if dto.id != id || dto.owner_id != key.3 {
+                        return Err(format!(
+                            "Group topic {id} data does not match the requested owner"
+                        ));
+                    }
                     group_topics.push((id.to_string(), dto));
                 }
                 _ => return Err(format!("Entity pull returned unsupported type {}", r#type)),
@@ -1640,9 +1678,9 @@ impl PullExecutor {
 #[cfg(test)]
 mod ndjson_budget_tests {
     use super::{
-        parse_topic_ndjson_frame, pull_worker_permits, validate_requested_message_ids,
-        validate_returned_topic_identity, NdjsonBudget, MAX_NDJSON_LINE_BYTES,
-        MAX_NDJSON_TOTAL_BYTES, PULL_WORKER_BUDGET_UNITS,
+        entity_pull_identity, parse_topic_ndjson_frame, pull_worker_permits,
+        validate_requested_message_ids, validate_returned_topic_identity, NdjsonBudget,
+        MAX_NDJSON_LINE_BYTES, MAX_NDJSON_TOTAL_BYTES, PULL_WORKER_BUDGET_UNITS,
     };
     use serde_json::json;
     use std::collections::{HashMap, HashSet};
@@ -1678,6 +1716,28 @@ mod ndjson_budget_tests {
             ("group".to_string(), "group-a".to_string()),
         )]);
         assert!(validate_returned_topic_identity(&frame, &conflicting).is_err());
+    }
+
+    #[test]
+    fn entity_pull_identity_includes_the_topic_owner() {
+        let agent_topic = json!({
+            "id": "topic-a",
+            "type": "agent_topic",
+            "ownerType": "agent",
+            "ownerId": "agent-a",
+        });
+        assert_eq!(
+            entity_pull_identity(&agent_topic, "request").expect("compound identity"),
+            (
+                "agent_topic".to_string(),
+                "topic-a".to_string(),
+                "agent".to_string(),
+                "agent-a".to_string(),
+            )
+        );
+        assert!(
+            entity_pull_identity(&json!({"id":"topic-a","type":"agent_topic"}), "request").is_err()
+        );
     }
 
     #[test]

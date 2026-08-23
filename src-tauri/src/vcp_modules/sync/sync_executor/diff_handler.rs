@@ -124,7 +124,7 @@ fn validate_and_filter_diff_items(
                 .ok_or_else(|| {
                     format!("SYNC_DIFF_RESULTS topic {id} requires agent/group ownerType")
                 })?;
-            if matches!(action, "PUSH" | "PUSH_DELETE")
+            if matches!(action, "PULL" | "PUSH" | "PUSH_DELETE")
                 && item
                     .get("ownerId")
                     .and_then(Value::as_str)
@@ -292,7 +292,16 @@ impl DiffHandler {
                         SyncDataType::Group => "group",
                         _ => unreachable!(),
                     };
-                    batch_pull_requests.push(json!({ "id": id, "type": type_str }));
+                    if data_type == SyncDataType::Topic {
+                        batch_pull_requests.push(json!({
+                            "id": id,
+                            "type": type_str,
+                            "ownerType": item["ownerType"],
+                            "ownerId": item["ownerId"],
+                        }));
+                    } else {
+                        batch_pull_requests.push(json!({ "id": id, "type": type_str }));
+                    }
                 } else if action == "PUSH" && data_type == SyncDataType::Topic {
                     let owner_id = item["ownerId"].as_str().unwrap_or_default().to_string();
                     let owner_type = item["ownerType"].as_str().unwrap_or("agent").to_string();
@@ -866,6 +875,16 @@ mod tests {
         let err = validate_and_filter_diff_items(items.as_array().unwrap(), &SyncDataType::Topic)
             .expect_err("duplicate non-default ids must fail");
         assert!(err.contains("duplicate id"));
+    }
+
+    #[test]
+    fn topic_pull_requires_exact_owner_identity() {
+        let items = json!([
+            {"id": "topic-1", "action": "PULL", "ownerType": "agent"},
+        ]);
+        let error = validate_and_filter_diff_items(items.as_array().unwrap(), &SyncDataType::Topic)
+            .expect_err("topic pull without ownerId must fail");
+        assert!(error.contains("requires ownerId"));
     }
 
     #[test]
