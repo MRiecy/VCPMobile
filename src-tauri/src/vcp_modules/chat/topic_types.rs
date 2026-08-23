@@ -59,7 +59,7 @@ impl MessageKey {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Topic {
     pub id: String,
     pub name: String,
@@ -73,9 +73,9 @@ pub struct Topic {
     pub unread_count: i32,
     #[serde(rename = "msgCount", default)]
     pub msg_count: i32,
-    #[serde(rename = "ownerId", default)]
+    #[serde(rename = "ownerId")]
     pub owner_id: String,
-    #[serde(rename = "ownerType", default)]
+    #[serde(rename = "ownerType")]
     pub owner_type: String,
 }
 

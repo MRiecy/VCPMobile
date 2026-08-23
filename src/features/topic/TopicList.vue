@@ -56,16 +56,8 @@ const showTopicContextMenu = (topicId: string) => {
   const topic = topicListStore.topics.find((t) => t.id === topicId);
   if (!topic) return;
 
-  const itemId =
-    topic.ownerId ||
-    topicListStore.currentAgentId ||
-    sessionStore.currentSelectedItem?.id ||
-    "default_agent";
-  const ownerType = topic.ownerType === "agent" || topic.ownerType === "group"
-    ? topic.ownerType
-    : sessionStore.currentSelectedItem?.type === "group"
-      ? "group"
-      : "agent";
+  const itemId = topic.ownerId;
+  const ownerType = topic.ownerType;
 
   const menuItems: any[] = [
     {
@@ -227,8 +219,8 @@ onUnmounted(() => {
     <div v-bind="wrapperProps" class="flex flex-col">
       <div v-for="item in list" :key="item.data.id" class="pb-2" @click="
         selectTopic(
-          item.data.ownerId || sessionStore.currentSelectedItem?.id || 'default_agent',
-          item.data.ownerType === 'group' ? 'group' : 'agent',
+          item.data.ownerId,
+          item.data.ownerType,
           item.data.id,
         )
         " v-longpress="() => showTopicContextMenu(item.data.id)">

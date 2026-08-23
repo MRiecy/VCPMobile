@@ -12,7 +12,7 @@ export interface Topic {
   unreadCount: number;
   msgCount: number;
   ownerId: string;
-  ownerType: string;
+  ownerType: "agent" | "group";
 }
 
 export interface AgentConfig {

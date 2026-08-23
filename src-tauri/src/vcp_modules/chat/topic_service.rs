@@ -675,7 +675,7 @@ pub async fn regenerate_topic_response(
             );
         }
     }
-    crate::vcp_modules::chat_manager::notify_message_deletions(&app_handle, &topic_id, &deletion);
+    crate::vcp_modules::chat_manager::notify_message_deletions(&app_handle, &key, &deletion);
 
     // 4. 构造逻辑上的 ChatMessage 对象 (用于传给内部生成函数)
     let chat_msg = crate::vcp_modules::chat_manager::ChatMessage {

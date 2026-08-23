@@ -1,7 +1,10 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { invoke, Channel } from "@tauri-apps/api/core";
-import { useChatSessionStore } from "./chatSessionStore";
+import {
+  useChatSessionStore,
+  type ConversationOwnerType,
+} from "./chatSessionStore";
 
 import { useNotificationStore } from "./notification";
 
@@ -10,8 +13,8 @@ import { useNotificationStore } from "./notification";
  */
 export interface Topic {
   id: string;
-  ownerId?: string; // 所属实体的 ID
-  ownerType?: string; // 实体类型: agent | group
+  ownerId: string; // 所属实体的 ID
+  ownerType: ConversationOwnerType; // 实体类型
   name: string;
   createdAt: number;
   locked?: boolean;
@@ -97,7 +100,10 @@ export const useTopicStore = defineStore("topic", () => {
    * @param ownerId Agent ID or Group ID
    * @param ownerType "agent" or "group"
    */
-  const loadTopicList = (ownerId: string, owner_type: string): Promise<void> => {
+  const loadTopicList = (
+    ownerId: string,
+    owner_type: ConversationOwnerType,
+  ): Promise<void> => {
     if (!ownerId) return Promise.resolve();
 
     const key = ownerKey(ownerId, owner_type);
@@ -173,7 +179,7 @@ export const useTopicStore = defineStore("topic", () => {
    */
   const createTopic = async (
     ownerId: string,
-    ownerType: string,
+    ownerType: ConversationOwnerType,
     name: string,
   ) => {
     try {
@@ -450,8 +456,8 @@ export const useTopicStore = defineStore("topic", () => {
         
         // 同步到后端
         invoke("set_topic_unread", { 
-          ownerId: topic.ownerId, 
-          ownerType: topic.ownerType, 
+          ownerId,
+          ownerType,
           topicId, 
           unread: false 
         }).catch(() => {});
