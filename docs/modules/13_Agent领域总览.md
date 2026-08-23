@@ -303,11 +303,11 @@ let config_hash = HashAggregator::compute_agent_config_hash(&dto);
 
 ```sql
 INSERT INTO agents (
-    agent_id, name, system_prompt, mobile_system_prompt, model, temperature,
+    owner_type, agent_id, name, system_prompt, mobile_system_prompt, model, temperature,
     context_token_limit, max_output_tokens,
-    stream_output, config_hash, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(agent_id) DO UPDATE SET
+    stream_output, use_temperature, config_hash, updated_at
+) VALUES ('agent', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(owner_type, agent_id) DO UPDATE SET
     name = excluded.name,
     system_prompt = excluded.system_prompt,
     mobile_system_prompt = excluded.mobile_system_prompt,
@@ -316,43 +316,22 @@ ON CONFLICT(agent_id) DO UPDATE SET
     context_token_limit = excluded.context_token_limit,
     max_output_tokens = excluded.max_output_tokens,
     stream_output = excluded.stream_output,
-    config_hash = excluded.config_hash,
-    updated_at = excluded.updated_at
+    use_temperature = excluded.use_temperature,
+    updated_at = CASE
+        WHEN agents.config_hash IS NOT excluded.config_hash THEN excluded.updated_at
+        ELSE agents.updated_at
+    END,
+    config_hash = excluded.config_hash
 ```
 
-- `ON CONFLICT(agent_id)` 保证"插入或更新"的原子语义
-- `updated_at` 使用毫秒级 Unix 时间戳
+- `ON CONFLICT(owner_type, agent_id)` 保证 Agent 命名空间内"插入或更新"的原子语义
+- `updated_at` 仅在同步 DTO Hash 变化时推进
 
-#### 3.6.3 话题 Upsert
+#### 3.6.3 业务边界
 
-遍历 `new_config.topics`，对每个话题执行：
+保存已有 Agent 配置只更新 `agents` 表。Topic 由话题服务独立管理，Agent 设置保存不会重写 Topic 配置，也不会改变 Agent 的内容 Hash。
 
-```sql
-INSERT INTO topics (
-    topic_id, owner_type, owner_id, title,
-    created_at, updated_at, locked, unread
-) VALUES (?, 'agent', ?, ?, ?, ?, ?, ?)
-ON CONFLICT(topic_id) DO UPDATE SET
-    title = excluded.title,
-    locked = excluded.locked,
-    unread = excluded.unread,
-    updated_at = excluded.updated_at
-```
-
-- `owner_type` 硬编码为 `'agent'`，与 `group` 类型的话题区分
-- 仅更新 `title`、`locked`、`unread`，不覆盖 `created_at`（保持首次创建时间）
-
-#### 3.6.4 聚合哈希冒泡
-
-事务提交后，若 `skip_bubble = false`，开启新事务调用：
-
-```rust
-HashAggregator::bubble_agent_hash(&mut bubble_tx, agent_id).await?;
-```
-
-此操作将 Agent 配置哈希向上汇总到 `agents.content_hash` 字段，供同步协议快速判断整棵 Agent-Topic-Message 树是否需要同步。
-
-#### 3.6.5 缓存刷新
+#### 3.6.4 缓存刷新
 
 ```rust
 state.caches.insert(agent_id.to_string(), new_config.clone());
@@ -417,10 +396,7 @@ let agent_id = format!("{}_{}", base_id, timestamp);
 | `locked` | `true`（默认锁定，不可删除） |
 | `unread` | `false` |
 
-**初始配置分支**：
-
-- 若前端传入 `initial_config`（如从模板克隆），则反序列化后注入新生成的 `agent_id` 与用户指定的 `name`
-- 若未传入，使用硬编码默认值构造（`temperature = 0.7`，`max_output_tokens = 60000`，系统提示词为 `"你是 {name}。"`）
+新 Agent 统一使用默认配置构造：`temperature = 0.7`、`max_output_tokens = 60000`，系统提示词为 `"你是 {name}。"`。
 
 **事务边界**：整个创建过程（agents 表插入 + topics 表插入）包裹在单一事务中，失败时自动回滚。
 
@@ -787,7 +763,7 @@ agent_chat_application_service → agent_service / message_service / vcp_client 
 | `get_agents(app_handle, state) -> Result<Vec<AgentConfig>, String>` | `agent_service` | `AppHandle`, `AgentConfigState` | 全部 Agent 列表 | Agent 侧边栏初始化 |
 | `update_agent_config(app_handle, state, agent_id, updates) -> Result<AgentConfig, String>` | `agent_service` | `AppHandle`, `AgentConfigState`, `String`, `serde_json::Value` | 更新后的配置对象 | 快速修改单个字段（如切换模型） |
 | `delete_agent(app_handle, state, agent_id) -> Result<bool, String>` | `agent_service` | `AppHandle`, `AgentConfigState`, `String` | `true` | 删除 Agent |
-| `create_agent(app_handle, state, name, initial_config) -> Result<AgentConfig, String>` | `agent_service` | `AppHandle`, `AgentConfigState`, `String`, `Option<Value>` | 新 Agent 配置 | 新建 Agent |
+| `create_agent(app_handle, state, name) -> Result<AgentConfig, String>` | `agent_service` | `AppHandle`, `AgentConfigState`, `String` | 新 Agent 配置 | 新建 Agent |
 | `save_avatar_data(app_handle, owner_type, owner_id, mime_type, image_data) -> Result<String, String>` | `avatar_service` | `AppHandle`, `String`×3, `Vec<u8>` | SHA-256 哈希 | 头像裁剪后上传；v1.1.3 起不再后端提取主色调 |
 | `get_avatar(app_handle, owner_type, owner_id) -> Result<Option<AvatarResult>, String>` | `avatar_service` | `AppHandle`, `String`, `String` | 头像二进制 + 元数据 | 加载头像展示 |
 | `batch_get_avatars(app_handle) -> Result<Vec<BatchAvatarItem>, String>` | `avatar_service` | `AppHandle` | 全部头像二进制列表 | 启动/同步场景一次性拉取 |
@@ -800,7 +776,7 @@ agent_chat_application_service → agent_service / message_service / vcp_client 
 |----------|----------|--------|--------|
 | `read_agent_config_internal(...)` | `agent_service` | `pub (crate)` | `read_agent_config`, `update_agent_config`, `agent_chat_application_service` |
 | `create_default_config(agent_id)` | `agent_service` | `pub` | `read_agent_config_internal` |
-| `internal_write_agent_config(...)` | `agent_service` | private | `save_agent_config`, `update_agent_config`, 同步导入 |
+| `internal_write_agent_config(...)` | `agent_service` | private | `save_agent_config`, `update_agent_config` |
 | `acquire_lock(&self, agent_id)` | `agent_service` | `pub` | `save_agent_config`, `update_agent_config` |
 | `internal_process_agent_chat_message(...)` | `agent_chat_application_service` | `pub` | `handle_agent_chat_message`, 同步/重放场景 |
 | `extract_dominant_color_from_bytes(data)` | `avatar_service` | `pub` | 协议层兜底，固定返回 `#808080` |

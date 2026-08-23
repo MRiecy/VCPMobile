@@ -224,7 +224,7 @@ pub async fn save_agent_config(
         }
     }
 
-    internal_write_agent_config(&app_handle, &state, &agent_id, &agent, false).await
+    internal_write_agent_config(&app_handle, &state, &agent_id, &agent).await
 }
 
 #[tauri::command]
@@ -321,7 +321,7 @@ pub async fn update_agent_config<R: Runtime>(
     let new_config: AgentConfig = serde_json::from_value(config_val).map_err(|e| e.to_string())?;
 
     // 3. 写入数据库 (原子化更新)
-    internal_write_agent_config(&app_handle, &state, &agent_id, &new_config, false).await?;
+    internal_write_agent_config(&app_handle, &state, &agent_id, &new_config).await?;
 
     Ok(new_config)
 }
@@ -330,7 +330,6 @@ async fn internal_write_agent_config<R: Runtime>(
     state: &AgentConfigState,
     agent_id: &str,
     new_config: &AgentConfig,
-    skip_bubble: bool,
 ) -> Result<bool, String> {
     let cache_generation = state.current_cache_generation();
     let db_state = app_handle.state::<DbState>();
@@ -413,57 +412,6 @@ async fn internal_write_agent_config<R: Runtime>(
     .await
     .map_err(|e| e.to_string())?;
 
-    // 更新话题 (Upsert)
-    if !new_config.topics.is_empty() {
-        for topic in &new_config.topics {
-            let topic_hash = HashAggregator::compute_agent_topic_metadata_hash(
-                &crate::vcp_modules::sync_dto::AgentTopicSyncDTO {
-                    id: topic.id.clone(),
-                    name: topic.name.clone(),
-                    created_at: topic.created_at,
-                    locked: topic.locked,
-                    unread: topic.unread,
-                    owner_id: agent_id.to_string(),
-                },
-            );
-            sqlx::query(
-                "INSERT INTO topics (
-                    topic_id, owner_type, owner_id, title,
-                    created_at, updated_at, locked, unread, config_hash
-                ) VALUES (?, 'agent', ?, ?, ?, ?, ?, ?, ?)
-                 ON CONFLICT(owner_type, owner_id, topic_id) DO UPDATE SET
-                    title = excluded.title,
-                    locked = excluded.locked,
-                    unread = excluded.unread,
-                    updated_at = CASE
-                        WHEN topics.config_hash IS NOT excluded.config_hash THEN excluded.updated_at
-                        ELSE topics.updated_at
-                    END,
-                    config_hash = excluded.config_hash",
-            )
-            .bind(&topic.id)
-            .bind(agent_id)
-            .bind(&topic.name)
-            .bind(topic.created_at)
-            .bind(now)
-            .bind(topic.locked)
-            .bind(topic.unread)
-            .bind(&topic_hash)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
-
-            // 初始化/更新 Topic 自身哈希 (config_hash, content_hash)
-            let key = TopicKey::new("agent", agent_id, &topic.id);
-            HashAggregator::bubble_topic_hash(&mut tx, &key).await?;
-        }
-    }
-
-    // 触发聚合哈希冒泡 (更新 agents.content_hash)
-    // 只有在明确要求冒泡且话题列表不为空（即话题可能有变动）时才执行
-    if !skip_bubble && !new_config.topics.is_empty() {
-        HashAggregator::bubble_agent_hash(&mut tx, agent_id).await?;
-    }
     tx.commit().await.map_err(|e| e.to_string())?;
 
     state.insert_cache_if_current(agent_id.to_string(), final_config.clone(), cache_generation);
@@ -623,7 +571,6 @@ pub async fn create_agent(
     app_handle: AppHandle,
     state: State<'_, AgentConfigState>,
     name: String,
-    initial_config: Option<serde_json::Value>,
 ) -> Result<AgentConfig, String> {
     let cache_generation = state.current_cache_generation();
     let timestamp = crate::vcp_modules::infra::utils::now_millis();
@@ -638,36 +585,29 @@ pub async fn create_agent(
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
 
-    let config = if let Some(init) = initial_config {
-        let mut c: AgentConfig = serde_json::from_value(init).map_err(|e| e.to_string())?;
-        c.id = agent_id.clone();
-        c.name = name;
-        c
-    } else {
-        AgentConfig {
-            id: agent_id.clone(),
-            name: name.clone(),
-            system_prompt: format!("你是 {}。", name),
-            mobile_system_prompt: format!("你是 {}。", name),
-            model: "gemini-2.5-flash".to_string(),
-            temperature: 0.7,
-            context_token_limit: 1000000,
-            max_output_tokens: 60000,
-            stream_output: true,
-            use_temperature: false,
-            avatar_calculated_color: None,
-            topics: vec![Topic {
-                id: default_topic_id.clone(),
-                name: "主要对话".to_string(),
-                created_at: timestamp,
-                locked: true,
-                unread: false,
-                unread_count: 0,
-                msg_count: 0,
-                owner_id: agent_id.clone(),
-                owner_type: "agent".to_string(),
-            }],
-        }
+    let config = AgentConfig {
+        id: agent_id.clone(),
+        name: name.clone(),
+        system_prompt: format!("你是 {}。", name),
+        mobile_system_prompt: format!("你是 {}。", name),
+        model: "gemini-2.5-flash".to_string(),
+        temperature: 0.7,
+        context_token_limit: 1000000,
+        max_output_tokens: 60000,
+        stream_output: true,
+        use_temperature: false,
+        avatar_calculated_color: None,
+        topics: vec![Topic {
+            id: default_topic_id.clone(),
+            name: "主要对话".to_string(),
+            created_at: timestamp,
+            locked: true,
+            unread: false,
+            unread_count: 0,
+            msg_count: 0,
+            owner_id: agent_id.clone(),
+            owner_type: "agent".to_string(),
+        }],
     };
 
     log::info!("[AgentService] Creating agent '{}' atomically.", agent_id);
