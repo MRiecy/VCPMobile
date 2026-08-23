@@ -5,6 +5,7 @@ import {
   useChatSessionStore,
   type ConversationOwnerType,
 } from "./chatSessionStore";
+import { useAssistantStore } from "./assistant";
 
 import { useNotificationStore } from "./notification";
 
@@ -28,6 +29,7 @@ export interface Topic {
  */
 export const useTopicStore = defineStore("topic", () => {
   const sessionStore = useChatSessionStore();
+  const assistantStore = useAssistantStore();
   const notificationStore = useNotificationStore();
 
   // --- 状态 (State) ---
@@ -151,6 +153,10 @@ export const useTopicStore = defineStore("topic", () => {
         onChunk: channel 
       });
 
+      if (generation === loadGeneration && isCurrentOwner(ownerId, owner_type)) {
+        sessionStore.reconcileCurrentConversation(topics.value);
+      }
+
       console.log(
         `[TopicStore] Topic list streaming completed for ${ownerId}`,
       );
@@ -256,23 +262,13 @@ export const useTopicStore = defineStore("topic", () => {
         toastOnly: true,
       });
 
-      // 如果删除的是当前选中的话题，自动载入最新的一个
+      // 如果删除的是当前选中的话题，按剩余列表恢复或清空当前 Topic。
       if (
         sessionStore.currentSelectedItem?.id === ownerId &&
         sessionStore.currentSelectedItem?.type === ownerType &&
         sessionStore.currentTopicId === topicId
       ) {
-        const nextTopic = topics.value[0];
-        if (nextTopic) {
-          await sessionStore.selectTopicById(
-            ownerId,
-            ownerType as "agent" | "group",
-            nextTopic.id,
-          );
-        } else {
-          sessionStore.setConversation(sessionStore.currentSelectedItem, null);
-          // chatHistoryStore 监听 currentTopicId 变化，会自动清空历史
-        }
+        sessionStore.reconcileCurrentConversation(topics.value);
       }
     } catch (e) {
       console.error("[TopicStore] Failed to delete topic:", e);
@@ -370,13 +366,19 @@ export const useTopicStore = defineStore("topic", () => {
       // 调用 Rust 命令更新状态
       await invoke("set_topic_unread", { ownerId, ownerType, topicId, unread });
 
-      if (!isCurrentOwner(ownerId, ownerType)) return;
-      const index = topics.value.findIndex((t) => t.id === topicId);
-      if (index !== -1) {
-        topics.value[index] = { ...topics.value[index], unread: unread };
-        // 强制触发虚拟列表重绘
-        topics.value = [...topics.value];
+      if (isCurrentOwner(ownerId, ownerType)) {
+        const index = topics.value.findIndex((t) => t.id === topicId);
+        if (index !== -1) {
+          topics.value[index] = {
+            ...topics.value[index],
+            unread,
+            unreadCount: unread ? topics.value[index].unreadCount : 0,
+          };
+          // 强制触发虚拟列表重绘
+          topics.value = [...topics.value];
+        }
       }
+      await assistantStore.refreshUnreadCounts();
     } catch (e) {
       console.error("[TopicStore] Failed to set topic unread:", e);
       throw e;
@@ -402,20 +404,23 @@ export const useTopicStore = defineStore("topic", () => {
    * 增加话题的未读计数 (UI 乐观更新)
    */
   const incrementTopicUnreadCount = (ownerId: string, ownerType: string, topicId: string) => {
-    if (!isCurrentOwner(ownerId, ownerType)) return;
-    const index = topics.value.findIndex((t) => t.id === topicId);
-    if (index !== -1) {
-      const topic = topics.value[index];
-      // 如果不是当前选中的话题，才增加未读数
-      if (sessionStore.currentTopicId !== topicId) {
-        topics.value[index] = { 
-          ...topic, 
-          unreadCount: (topic.unreadCount || 0) + 1,
-          unread: true
-        };
-        topics.value = [...topics.value];
+    if (ownerType !== "agent") return;
+    if (isCurrentOwner(ownerId, ownerType)) {
+      const index = topics.value.findIndex((t) => t.id === topicId);
+      if (index !== -1) {
+        const topic = topics.value[index];
+        // 如果不是当前选中的话题，才增加未读数
+        if (sessionStore.currentTopicId !== topicId) {
+          topics.value[index] = {
+            ...topic,
+            unreadCount: (topic.unreadCount || 0) + 1,
+            unread: true,
+          };
+          topics.value = [...topics.value];
+        }
       }
     }
+    void setTopicUnread(ownerId, ownerType, topicId, true).catch(() => {});
   };
 
   /**
@@ -442,27 +447,8 @@ export const useTopicStore = defineStore("topic", () => {
    * 标记话题为已读 (清空未读数并取消未读标记)
    */
   const markTopicAsRead = (ownerId: string, ownerType: string, topicId: string) => {
-    if (!isCurrentOwner(ownerId, ownerType)) return;
-    const index = topics.value.findIndex((t) => t.id === topicId);
-    if (index !== -1) {
-      const topic = topics.value[index];
-      if (topic.unread || (topic.unreadCount && topic.unreadCount > 0)) {
-        topics.value[index] = { 
-          ...topic, 
-          unread: false, 
-          unreadCount: 0 
-        };
-        topics.value = [...topics.value];
-        
-        // 同步到后端
-        invoke("set_topic_unread", { 
-          ownerId,
-          ownerType,
-          topicId, 
-          unread: false 
-        }).catch(() => {});
-      }
-    }
+    if (ownerType !== "agent") return;
+    void setTopicUnread(ownerId, ownerType, topicId, false).catch(() => {});
   };
 
   return {

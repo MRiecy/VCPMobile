@@ -110,7 +110,12 @@ const setScopeAll = () => {
 const setScopeCurrentTopic = () => {
   const key = sessionStore.currentConversationKey;
   if (!key) return;
-  const topic = topicStore.topics.find((t) => t.id === key.topicId);
+  const topic = topicStore.topics.find(
+    (candidate) =>
+      candidate.id === key.topicId &&
+      candidate.ownerId === key.ownerId &&
+      candidate.ownerType === key.ownerType,
+  );
   store.scope = 'topic';
   store.scopeTopicId = key.topicId;
   store.scopeTopicTitle = topic?.name ?? '当前话题';

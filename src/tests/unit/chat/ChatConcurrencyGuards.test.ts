@@ -57,12 +57,12 @@ describe("chat conversation concurrency guards", () => {
       { id: "agent-b", name: "B", model: "test" },
       { id: "agent-c", name: "C", model: "test" },
     ];
-    const topics = deferred<any[]>();
-    mockInvoke("get_topics", () => topics.promise);
+    const topics = deferred<void>();
+    mockInvoke("get_topics_streamed", () => topics.promise);
 
-    const selectingB = session.selectItem({ id: "agent-b", name: "B" });
+    const selectingB = session.selectItem({ id: "agent-b", name: "B", type: "agent" });
     session.setConversation({ id: "agent-c", name: "C", type: "agent" }, "topic-c");
-    topics.resolve([{ id: "topic-b" }]);
+    topics.resolve();
     await selectingB;
 
     expect(session.currentConversationKey).toMatchObject({
@@ -226,7 +226,12 @@ describe("chat conversation concurrency guards", () => {
     await stream.processStreamEvent({
       type: "thinking",
       messageId: "assistant-1",
-      context: { topicId: "topic-a", agentId: "agent-a" },
+      context: {
+        ownerId: "agent-a",
+        ownerType: "agent",
+        topicId: "topic-a",
+        agentId: "agent-a",
+      },
     });
 
     expect(
@@ -243,24 +248,48 @@ describe("chat conversation concurrency guards", () => {
     await stream.processStreamEvent({
       type: "thinking",
       messageId: "assistant-a",
-      context: { topicId: "topic-a", agentId: "agent-a" },
+      context: {
+        ownerId: "agent-a",
+        ownerType: "agent",
+        topicId: "topic-a",
+        agentId: "agent-a",
+      },
     });
 
     const interrupt = deferred<unknown>();
     mockInvoke("interruptRequest", () => interrupt.promise);
-    const stoppingA = stream.stopMessage("assistant-a");
+    const stoppingA = stream.stopMessage(
+      "agent-a",
+      "agent",
+      "topic-a",
+      "assistant-a",
+    );
 
     session.setConversation({ id: "agent-b", type: "agent" }, "topic-b");
     await stream.processStreamEvent({
       type: "thinking",
       messageId: "assistant-b",
-      context: { topicId: "topic-b", agentId: "agent-b" },
+      context: {
+        ownerId: "agent-b",
+        ownerType: "agent",
+        topicId: "topic-b",
+        agentId: "agent-b",
+      },
     });
     interrupt.resolve(undefined);
     await stoppingA;
 
-    expect(stream.isMessageActive("assistant-a")).toBe(false);
-    expect(stream.isMessageActiveInSession("agent-b", "topic-b", "assistant-b")).toBe(true);
+    expect(
+      stream.isMessageActive("agent-a", "agent", "topic-a", "assistant-a"),
+    ).toBe(false);
+    expect(
+      stream.isMessageActiveInSession(
+        "agent-b",
+        "agent",
+        "topic-b",
+        "assistant-b",
+      ),
+    ).toBe(true);
   });
 
   it("claims a cold recovery once and never starts the removed two-step resume path", async () => {
@@ -328,7 +357,12 @@ describe("chat conversation concurrency guards", () => {
           projectionReset: false,
           finishReason: "completed",
           blocks: [],
-          context: { topicId: "topic-a", agentId: "agent-a" },
+          context: {
+            ownerId: "agent-a",
+            ownerType: "agent",
+            topicId: "topic-a",
+            agentId: "agent-a",
+          },
         });
         return { status: "completed", content: "durable offline result" };
       });
@@ -342,12 +376,22 @@ describe("chat conversation concurrency guards", () => {
           ([command]) => command === "recover_active_generation",
         ),
       ).toHaveLength(1);
-      const recovered = stream.activeStreamMessages.get(
+      const recovered = stream.getActiveStreamMessage(
+        "agent-a",
+        "agent",
+        "topic-a",
         "assistant-offline-finalizing",
       );
       expect(recovered?.content).toBe("durable offline result");
       expect(recovered?.finishReason).toBe("completed");
-      expect(stream.isMessageActive("assistant-offline-finalizing")).toBe(false);
+      expect(
+        stream.isMessageActive(
+          "agent-a",
+          "agent",
+          "topic-a",
+          "assistant-offline-finalizing",
+        ),
+      ).toBe(false);
 
       recoveryChannel?.emit({
         type: "thinking",
@@ -355,12 +399,24 @@ describe("chat conversation concurrency guards", () => {
         turnAttempt: "attempt-offline",
         stepIndex: 2,
         projectionReset: false,
-        context: { topicId: "topic-a", agentId: "agent-a" },
+        context: {
+          ownerId: "agent-a",
+          ownerType: "agent",
+          topicId: "topic-a",
+          agentId: "agent-a",
+        },
       });
       await flushPromises();
 
       expect(recovered?.isThinking).toBe(false);
-      expect(stream.isMessageActive("assistant-offline-finalizing")).toBe(false);
+      expect(
+        stream.isMessageActive(
+          "agent-a",
+          "agent",
+          "topic-a",
+          "assistant-offline-finalizing",
+        ),
+      ).toBe(false);
       expect(recovered?.content).toBe("durable offline result");
     } finally {
       if (onlineDescriptor) {

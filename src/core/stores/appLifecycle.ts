@@ -165,6 +165,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
       }
 
       await Promise.all(promises);
+      sessionStore.reconcileCurrentConversation();
 
       console.log(`[Lifecycle] [Concurrent] DONE Preloading in ${Date.now() - startTime}ms`);
       updatePhaseLabel('核心数据预加载完成');

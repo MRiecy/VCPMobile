@@ -72,9 +72,20 @@ export const useChatSessionStore = defineStore("chatSession", () => {
 
   // 动态检索当前活跃的话题对象
   const currentTopic = computed(() => {
-    if (!currentTopicId.value) return null;
+    const ownerId = currentSelectedItem.value?.id;
+    const ownerType = currentSelectedItem.value?.type;
+    if (
+      !ownerId ||
+      !currentTopicId.value ||
+      (ownerType !== "agent" && ownerType !== "group")
+    ) return null;
     const topicStore = useTopicStore();
-    return topicStore.topics.find((t) => t.id === currentTopicId.value) || null;
+    return topicStore.topics.find(
+      (topic) =>
+        topic.id === currentTopicId.value &&
+        topic.ownerId === ownerId &&
+        topic.ownerType === ownerType,
+    ) || null;
   });
 
   // 顶部显示标题（话题名，无话题则回退到智能体/群组名字）
@@ -151,8 +162,6 @@ export const useChatSessionStore = defineStore("chatSession", () => {
     topicId: string,
     loadHistoryCallback?: (itemId: string, ownerType: string, topicId: string) => Promise<void>
   ) => {
-    lastActiveTopicMap.value[ownerMapKey(ownerType, itemId)] = topicId;
-
     // 设置当前选中的项目详情 (确保头像和色调同步)
     const agent = ownerType === "agent"
       ? assistantStore.agents.find((a: any) => a.id === itemId)
@@ -167,6 +176,7 @@ export const useChatSessionStore = defineStore("chatSession", () => {
     } else {
       throw new Error(`Conversation owner ${itemId} not found`);
     }
+    lastActiveTopicMap.value[ownerMapKey(ownerType, itemId)] = topicId;
 
     if (loadHistoryCallback) {
       await loadHistoryCallback(itemId, ownerType, topicId);
@@ -197,36 +207,33 @@ export const useChatSessionStore = defineStore("chatSession", () => {
       return;
     }
 
-    // 1. 优先从 Pinia 持久化的 lastActiveTopicMap 中获取最后一次打开的话题 ID
-    let targetTopicId = lastActiveTopicMap.value[ownerMapKey(ownerType, ownerId)];
-
-    // 2. 如果 Pinia 中没有记录，则尝试获取该 Owner 下最新的话题
-    if (!targetTopicId) {
-      // 选择意图已发生：先关闭旧会话，避免等待 IPC 时旧列表仍可操作。
-      setConversation({ ...item, type: ownerType }, null);
-      const selectionEpoch = sessionEpoch.value;
-      try {
-        const topics = await invoke<any[]>("get_topics", {
-          ownerId,
-          ownerType,
-        });
-        if (topics && topics.length > 0) {
-          // 列表通常按 updated_at 倒序，取第一个
-          targetTopicId = topics[0].id || topics[0].topic_id;
-        }
-      } catch (e) {
-        console.error("[ChatSessionStore] Failed to fetch fallback topics:", e);
-      }
-      if (
-        sessionEpoch.value !== selectionEpoch ||
-        currentSelectedItem.value?.id !== ownerId ||
-        currentSelectedItem.value?.type !== ownerType ||
-        currentTopicId.value !== null
-      ) {
-        console.log(`[ChatSessionStore] Discarding stale owner selection for ${ownerId}.`);
-        return;
-      }
+    // 选择意图已发生：先关闭旧会话，再用当前数据库列表校验持久化的 Topic。
+    setConversation({ ...item, type: ownerType }, null);
+    const selectionEpoch = sessionEpoch.value;
+    const topicStore = useTopicStore();
+    await topicStore.loadTopicList(ownerId, ownerType);
+    if (
+      sessionEpoch.value !== selectionEpoch ||
+      currentSelectedItem.value?.id !== ownerId ||
+      currentSelectedItem.value?.type !== ownerType ||
+      currentTopicId.value !== null
+    ) {
+      console.log(`[ChatSessionStore] Discarding stale owner selection for ${ownerId}.`);
+      return;
     }
+
+    const mapKey = ownerMapKey(ownerType, ownerId);
+    const ownerTopics = topicStore.topics.filter(
+      (topic) => topic.ownerId === ownerId && topic.ownerType === ownerType,
+    );
+    const rememberedTopicId = lastActiveTopicMap.value[mapKey];
+    const rememberedTopic = rememberedTopicId
+      ? ownerTopics.find((topic) => topic.id === rememberedTopicId)
+      : undefined;
+    if (rememberedTopicId && !rememberedTopic) {
+      delete lastActiveTopicMap.value[mapKey];
+    }
+    const targetTopicId = rememberedTopic?.id || ownerTopics[0]?.id;
 
     if (targetTopicId) {
       await selectTopicById(ownerId, ownerType, targetTopicId, loadHistoryCallback);
@@ -235,6 +242,48 @@ export const useChatSessionStore = defineStore("chatSession", () => {
       console.warn(`[ChatSessionStore] No topics found for ${ownerId}`);
       setConversation({ ...item, type: ownerType }, null);
     }
+  };
+
+  const reconcileCurrentConversation = (loadedTopics?: Array<{
+    id: string;
+    ownerId: string;
+    ownerType: ConversationOwnerType;
+  }>) => {
+    const selected = currentSelectedItem.value;
+    if (!selected) return;
+    if (selected.type !== "agent" && selected.type !== "group") {
+      clearConversation();
+      return;
+    }
+
+    const ownerType: ConversationOwnerType = selected.type;
+    const freshOwner = ownerType === "agent"
+      ? assistantStore.agents.find((agent: any) => agent.id === selected.id)
+      : assistantStore.groups.find((group) => group.id === selected.id);
+    if (!freshOwner) {
+      clearConversation();
+      return;
+    }
+
+    let topicId = currentTopicId.value;
+    if (topicId && loadedTopics) {
+      const ownerTopics = loadedTopics.filter(
+        (topic) =>
+          topic.ownerId === selected.id && topic.ownerType === ownerType,
+      );
+      if (!ownerTopics.some((topic) => topic.id === topicId)) {
+        const mapKey = ownerMapKey(ownerType, selected.id);
+        if (lastActiveTopicMap.value[mapKey] === topicId) {
+          delete lastActiveTopicMap.value[mapKey];
+        }
+        topicId = ownerTopics[0]?.id || null;
+        if (topicId) lastActiveTopicMap.value[mapKey] = topicId;
+      } else {
+        lastActiveTopicMap.value[ownerMapKey(ownerType, selected.id)] = topicId;
+      }
+    }
+
+    setConversation({ ...freshOwner, type: ownerType }, topicId);
   };
 
   return {
@@ -252,6 +301,7 @@ export const useChatSessionStore = defineStore("chatSession", () => {
     setConversation,
     clearConversation,
     isConversationCurrent,
+    reconcileCurrentConversation,
     selectTopicById,
     selectItem,
   };

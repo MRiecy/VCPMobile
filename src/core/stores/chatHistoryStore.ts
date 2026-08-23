@@ -152,7 +152,12 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     const ownerId = sessionStore.currentSelectedItem.id;
     const ownerType = sessionStore.currentSelectedItem.type;
 
-    const topic = topicStore.topics.find((t) => t.id === topicId);
+    const topic = topicStore.topics.find(
+      (candidate) =>
+        candidate.id === topicId &&
+        candidate.ownerId === ownerId &&
+        candidate.ownerType === ownerType,
+    );
     const isDefaultName = topic && /^(新话题|新会话) \d{2}:\d{2}:\d{2}$/.test(topic.name);
     const messageCount = currentChatHistory.value.filter(
       (m) => m.role !== "system",

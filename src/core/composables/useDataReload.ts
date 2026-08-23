@@ -23,6 +23,7 @@ export function useDataReload() {
       assistantStore.fetchAgents(),
       assistantStore.fetchGroups(),
     ]);
+    sessionStore.reconcileCurrentConversation();
 
     // 3. 清理话题列表缓存
     topicStore.invalidateAllTopicCaches();
