@@ -155,12 +155,11 @@ mod tests {
              CREATE TABLE groups (
                 group_id TEXT PRIMARY KEY, name TEXT, mode TEXT, group_prompt TEXT,
                 invite_prompt TEXT, use_unified_model INTEGER, unified_model TEXT,
-                tag_match_mode TEXT, created_at INTEGER, config_hash TEXT,
+                tag_match_mode TEXT, member_tags TEXT, created_at INTEGER, config_hash TEXT,
                 content_hash TEXT, updated_at INTEGER, deleted_at INTEGER
              );
              CREATE TABLE group_members (
-                group_id TEXT, agent_id TEXT, member_tag TEXT, sort_order INTEGER,
-                updated_at INTEGER
+                group_id TEXT, agent_id TEXT, sort_order INTEGER, updated_at INTEGER
              );
              CREATE TABLE avatars (
                 owner_type TEXT, owner_id TEXT, avatar_hash TEXT, mime_type TEXT,
@@ -176,9 +175,9 @@ mod tests {
                 ('agent-live', 'live', '', '', 0, 0, 0, 0, '', '', 1, NULL),
                 ('agent-deleted', 'deleted', '', '', 0, 0, 0, 0, '', '', 1, 9);
              INSERT INTO groups VALUES
-                ('group-deleted', 'deleted-group', 'fixed', NULL, NULL, 0, NULL, NULL, 1, '', '', 1, 9),
-                ('group-live', 'live-group', 'fixed', NULL, NULL, 0, NULL, NULL, 1, '', '', 1, NULL);
-             INSERT INTO group_members VALUES ('group-deleted', 'old-member', NULL, 0, 1);
+                ('group-deleted', 'deleted-group', 'fixed', NULL, NULL, 0, NULL, NULL, '{}', 1, '', '', 1, 9),
+                ('group-live', 'live-group', 'fixed', NULL, NULL, 0, NULL, NULL, '{}', 1, '', '', 1, NULL);
+             INSERT INTO group_members VALUES ('group-deleted', 'old-member', 0, 1);
              INSERT INTO avatars VALUES
                 ('agent', 'agent-deleted', 'old-hash', 'image/png', x'09', NULL, 1, 9);
              INSERT INTO topics VALUES
@@ -767,13 +766,18 @@ impl DbWriteQueue {
         }
         let now = chrono::Utc::now().timestamp_millis();
         let config_hash = HashAggregator::compute_group_config_hash(dto);
+        let member_tags = dto
+            .member_tags
+            .clone()
+            .unwrap_or_else(|| serde_json::json!({}))
+            .to_string();
 
         let changed = tx.execute(
             "INSERT INTO groups (
                 owner_type, group_id, name, mode,
                 group_prompt, invite_prompt, use_unified_model, unified_model,
-                tag_match_mode, created_at, config_hash, updated_at
-            ) VALUES ('group', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                tag_match_mode, member_tags, created_at, config_hash, updated_at
+            ) VALUES ('group', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(owner_type, group_id) DO UPDATE SET
                 name = excluded.name,
                 mode = excluded.mode,
@@ -782,6 +786,7 @@ impl DbWriteQueue {
                 use_unified_model = excluded.use_unified_model,
                 unified_model = excluded.unified_model,
                 tag_match_mode = excluded.tag_match_mode,
+                member_tags = excluded.member_tags,
                 created_at = excluded.created_at,
                 updated_at = CASE
                     WHEN groups.config_hash IS NOT excluded.config_hash THEN excluded.updated_at
@@ -798,6 +803,7 @@ impl DbWriteQueue {
                 if dto.use_unified_model { 1 } else { 0 },
                 &dto.unified_model,
                 &dto.tag_match_mode,
+                &member_tags,
                 dto.created_at,
                 &config_hash,
                 now
@@ -814,15 +820,10 @@ impl DbWriteQueue {
 
         tx.execute("DELETE FROM group_members WHERE group_id = ?", [id])?;
 
-        let member_tags = dto.member_tags.as_ref().and_then(|v| v.as_object());
-
         for (sort_order, member) in dto.members.iter().enumerate() {
-            let tag = member_tags
-                .and_then(|m| m.get(member))
-                .and_then(|v| v.as_str());
             tx.execute(
-                "INSERT INTO group_members (group_id, agent_id, member_tag, sort_order, updated_at) VALUES (?, ?, ?, ?, ?)",
-                rusqlite::params![id, member, tag, sort_order as i64, now]
+                "INSERT INTO group_members (group_id, agent_id, sort_order, updated_at) VALUES (?, ?, ?, ?)",
+                rusqlite::params![id, member, sort_order as i64, now]
             )?;
         }
 

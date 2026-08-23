@@ -101,7 +101,7 @@ async fn read_group_config_locked<R: Runtime>(
     let pool = &db_state.pool;
 
     let group_row: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
-        "SELECT g.name, g.mode, g.group_prompt, g.invite_prompt, g.use_unified_model, g.unified_model, g.tag_match_mode, g.created_at, av.dominant_color 
+        "SELECT g.name, g.mode, g.group_prompt, g.invite_prompt, g.use_unified_model, g.unified_model, g.tag_match_mode, g.member_tags, g.created_at, av.dominant_color
          FROM groups g
          LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group' AND av.deleted_at IS NULL
          WHERE g.owner_type = 'group' AND g.group_id = ? AND g.deleted_at IS NULL"
@@ -116,7 +116,7 @@ async fn read_group_config_locked<R: Runtime>(
         let avatar_calculated_color: Option<String> = row.get("dominant_color");
 
         let member_rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(
-            "SELECT agent_id, member_tag FROM group_members WHERE group_id = ? ORDER BY sort_order ASC"
+            "SELECT agent_id FROM group_members WHERE group_id = ? ORDER BY sort_order ASC",
         )
         .bind(group_id)
         .fetch_all(pool)
@@ -124,15 +124,13 @@ async fn read_group_config_locked<R: Runtime>(
         .map_err(|e| e.to_string())?;
 
         let mut members = Vec::new();
-        let mut member_tags = serde_json::Map::new();
         for mr in member_rows {
             let aid: String = mr.get("agent_id");
-            let tag: Option<String> = mr.get("member_tag");
-            members.push(aid.clone());
-            if let Some(t) = tag {
-                member_tags.insert(aid, serde_json::Value::String(t));
-            }
+            members.push(aid);
         }
+        let member_tags_raw: String = row.get("member_tags");
+        let member_tags = serde_json::from_str(&member_tags_raw)
+            .map_err(|error| format!("Group {group_id} memberTags decode failed: {error}"))?;
 
         let topic_rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(
             "SELECT topic_id, title, created_at, locked, unread, unread_count, msg_count 
@@ -164,7 +162,7 @@ async fn read_group_config_locked<R: Runtime>(
             avatar_calculated_color,
             members,
             mode: row.get("mode"),
-            member_tags: Some(serde_json::Value::Object(member_tags)),
+            member_tags: Some(member_tags),
             group_prompt: row.get("group_prompt"),
             invite_prompt: row.get("invite_prompt"),
             use_unified_model: row.get::<i32, _>("use_unified_model") != 0,
@@ -196,7 +194,7 @@ pub async fn save_group_config(
     let mutex = state.acquire_lock(&group_id).await;
     let _lock = mutex.lock().await;
 
-    internal_write_group_config(&app_handle, &state, &group_id, &group, false).await
+    internal_write_group_config(&app_handle, &state, &group_id, &group).await
 }
 
 #[tauri::command]
@@ -211,7 +209,7 @@ pub async fn get_groups(
     let start_groups = std::time::Instant::now();
     // 1. 查询所有未删除群组的基础配置及 avatars 主色
     let group_rows = sqlx::query(
-        "SELECT g.group_id, g.name, g.mode, g.group_prompt, g.invite_prompt, g.use_unified_model, g.unified_model, g.tag_match_mode, g.created_at, av.dominant_color 
+        "SELECT g.group_id, g.name, g.mode, g.group_prompt, g.invite_prompt, g.use_unified_model, g.unified_model, g.tag_match_mode, g.member_tags, g.created_at, av.dominant_color
          FROM groups g
          LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group' AND av.deleted_at IS NULL
          WHERE g.owner_type = 'group' AND g.deleted_at IS NULL"
@@ -232,7 +230,7 @@ pub async fn get_groups(
     let start_members = std::time::Instant::now();
     // 2. 一次性查询所有群组成员
     let member_rows = sqlx::query(
-        "SELECT group_id, agent_id, member_tag 
+        "SELECT group_id, agent_id
          FROM group_members 
          ORDER BY group_id, sort_order ASC",
     )
@@ -244,27 +242,15 @@ pub async fn get_groups(
     let start_mapping = std::time::Instant::now();
     use std::collections::HashMap;
 
-    // 分组整理 members 与 member_tags
+    // 分组整理 members；完整 memberTags 由 groups 表直接保存。
     let mut group_members: HashMap<String, Vec<String>> = HashMap::new();
-    let mut group_member_tags: HashMap<String, serde_json::Map<String, serde_json::Value>> =
-        HashMap::new();
 
     for mr in member_rows {
         use sqlx::Row;
         let gid: String = mr.get("group_id");
         let aid: String = mr.get("agent_id");
-        let tag: Option<String> = mr.get("member_tag");
 
-        group_members
-            .entry(gid.clone())
-            .or_default()
-            .push(aid.clone());
-        if let Some(t) = tag {
-            group_member_tags
-                .entry(gid)
-                .or_default()
-                .insert(aid, serde_json::Value::String(t));
-        }
+        group_members.entry(gid).or_default().push(aid);
     }
 
     // 组装列表；实体缓存只允许在 per-ID 锁内填充。
@@ -275,7 +261,9 @@ pub async fn get_groups(
         let avatar_calculated_color: Option<String> = row.get("dominant_color");
 
         let members = group_members.remove(&group_id).unwrap_or_default();
-        let member_tags_map = group_member_tags.remove(&group_id).unwrap_or_default();
+        let member_tags_raw: String = row.get("member_tags");
+        let member_tags = serde_json::from_str(&member_tags_raw)
+            .map_err(|error| format!("Group {group_id} memberTags decode failed: {error}"))?;
 
         let config = GroupConfig {
             id: group_id.clone(),
@@ -283,7 +271,7 @@ pub async fn get_groups(
             avatar_calculated_color,
             members,
             mode: row.get("mode"),
-            member_tags: Some(serde_json::Value::Object(member_tags_map)),
+            member_tags: Some(member_tags),
             group_prompt: row.get("group_prompt"),
             invite_prompt: row.get("invite_prompt"),
             use_unified_model: row.get::<i32, _>("use_unified_model") != 0,
@@ -332,7 +320,7 @@ pub async fn update_group_config(
 
     let new_config: GroupConfig = serde_json::from_value(config_val).map_err(|e| e.to_string())?;
 
-    internal_write_group_config(&app_handle, &state, &group_id, &new_config, false).await?;
+    internal_write_group_config(&app_handle, &state, &group_id, &new_config).await?;
 
     Ok(new_config)
 }
@@ -390,16 +378,31 @@ pub async fn create_group(
 
     let dto = GroupSyncDTO::from(&config);
     let config_hash = HashAggregator::compute_group_config_hash(&dto);
+    let member_tags = config
+        .member_tags
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}))
+        .to_string();
 
     sqlx::query(
-        "INSERT INTO groups (owner_type, group_id, name, created_at, updated_at, mode, use_unified_model, config_hash)
-         VALUES ('group', ?, ?, ?, ?, 'sequential', 0, ?)"
+        "INSERT INTO groups (
+            owner_type, group_id, name, mode,
+            group_prompt, invite_prompt, use_unified_model, unified_model,
+            tag_match_mode, member_tags, created_at, config_hash, updated_at
+         ) VALUES ('group', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&group_id)
     .bind(&name)
-    .bind(timestamp)
+    .bind(&config.mode)
+    .bind(&config.group_prompt)
+    .bind(&config.invite_prompt)
+    .bind(if config.use_unified_model { 1 } else { 0 })
+    .bind(&config.unified_model)
+    .bind(&config.tag_match_mode)
+    .bind(member_tags)
     .bind(timestamp)
     .bind(&config_hash)
+    .bind(timestamp)
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
@@ -436,7 +439,6 @@ async fn internal_write_group_config<R: Runtime>(
     state: &GroupManagerState,
     group_id: &str,
     config: &GroupConfig,
-    skip_bubble: bool,
 ) -> Result<bool, String> {
     let cache_generation = state.current_cache_generation();
     let db_state = app_handle.state::<DbState>();
@@ -459,13 +461,18 @@ async fn internal_write_group_config<R: Runtime>(
 
     let dto = GroupSyncDTO::from(config);
     let config_hash = HashAggregator::compute_group_config_hash(&dto);
+    let member_tags = config
+        .member_tags
+        .clone()
+        .unwrap_or_else(|| serde_json::json!({}))
+        .to_string();
 
     sqlx::query(
         "INSERT INTO groups (
             owner_type, group_id, name, mode,
             group_prompt, invite_prompt, use_unified_model, unified_model, 
-            tag_match_mode, created_at, config_hash, updated_at
-        ) VALUES ('group', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            tag_match_mode, member_tags, created_at, config_hash, updated_at
+        ) VALUES ('group', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(owner_type, group_id) DO UPDATE SET
             name = excluded.name,
             mode = excluded.mode,
@@ -474,6 +481,7 @@ async fn internal_write_group_config<R: Runtime>(
             use_unified_model = excluded.use_unified_model,
             unified_model = excluded.unified_model,
             tag_match_mode = excluded.tag_match_mode,
+            member_tags = excluded.member_tags,
             updated_at = CASE
                 WHEN groups.config_hash IS NOT excluded.config_hash THEN excluded.updated_at
                 ELSE groups.updated_at
@@ -488,6 +496,7 @@ async fn internal_write_group_config<R: Runtime>(
     .bind(if config.use_unified_model { 1 } else { 0 })
     .bind(&config.unified_model)
     .bind(&config.tag_match_mode)
+    .bind(member_tags)
     .bind(config.created_at)
     .bind(&config_hash)
     .bind(now)
@@ -501,20 +510,14 @@ async fn internal_write_group_config<R: Runtime>(
         .await
         .map_err(|e| e.to_string())?;
 
-    let member_tags = config.member_tags.as_ref().and_then(|v| v.as_object());
-
     for (idx, agent_id) in config.members.iter().enumerate() {
-        let tag = member_tags
-            .and_then(|m| m.get(agent_id))
-            .and_then(|v| v.as_str());
         sqlx::query(
             "INSERT INTO group_members (
-                group_id, agent_id, member_tag, sort_order, updated_at
-            ) VALUES (?, ?, ?, ?, ?)",
+                group_id, agent_id, sort_order, updated_at
+            ) VALUES (?, ?, ?, ?)",
         )
         .bind(group_id)
         .bind(agent_id)
-        .bind(tag)
         .bind(idx as i32)
         .bind(now)
         .execute(&mut *tx)
@@ -522,53 +525,6 @@ async fn internal_write_group_config<R: Runtime>(
         .map_err(|e| e.to_string())?;
     }
 
-    if !config.topics.is_empty() {
-        for topic in &config.topics {
-            let topic_hash = HashAggregator::compute_group_topic_metadata_hash(
-                &crate::vcp_modules::sync_dto::GroupTopicSyncDTO {
-                    id: topic.id.clone(),
-                    name: topic.name.clone(),
-                    created_at: topic.created_at,
-                    owner_id: group_id.to_string(),
-                },
-            );
-            sqlx::query(
-                "INSERT INTO topics (
-                    topic_id, owner_type, owner_id, title,
-                    created_at, updated_at, locked, unread, config_hash
-                ) VALUES (?, 'group', ?, ?, ?, ?, ?, ?, ?)
-                 ON CONFLICT(owner_type, owner_id, topic_id) DO UPDATE SET
-                    title = excluded.title,
-                    locked = excluded.locked,
-                    unread = excluded.unread,
-                    updated_at = CASE
-                        WHEN topics.config_hash IS NOT excluded.config_hash THEN excluded.updated_at
-                        ELSE topics.updated_at
-                    END,
-                    config_hash = excluded.config_hash",
-            )
-            .bind(&topic.id)
-            .bind(group_id)
-            .bind(&topic.name)
-            .bind(topic.created_at)
-            .bind(now)
-            .bind(topic.locked)
-            .bind(topic.unread)
-            .bind(&topic_hash)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
-
-            // 初始化/更新 Topic 自身哈希
-            let key = TopicKey::new("group", group_id, &topic.id);
-            HashAggregator::bubble_topic_hash(&mut tx, &key).await?;
-        }
-    }
-
-    // 触发聚合哈希冒泡
-    if !skip_bubble && !config.topics.is_empty() {
-        HashAggregator::bubble_group_hash(&mut tx, group_id).await?;
-    }
     tx.commit().await.map_err(|e| e.to_string())?;
 
     state.insert_cache_if_current(group_id.to_string(), config.clone(), cache_generation);

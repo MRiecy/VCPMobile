@@ -69,6 +69,7 @@ scope: 双端
 | groups | use_unified_model | INTEGER | NOT NULL DEFAULT 0 | 是否强制使用统一模型（0/1） | `config.json` → `useUnifiedModel` |
 | groups | unified_model | TEXT | — | 统一模型名称 | `config.json` → `unifiedModel` |
 | groups | tag_match_mode | TEXT | — | 标签匹配模式：`strict`、`fuzzy` | `config.json` → `tagMatchMode` |
+| groups | member_tags | TEXT | NOT NULL DEFAULT '{}' | 完整成员标签 JSON，包含已移除成员的 Tag 记忆 | `config.json` → `memberTags` |
 | groups | config_hash | TEXT | NOT NULL DEFAULT '' | V2 配置内容指纹 | `entity_index.hash` |
 | groups | content_hash | TEXT | NOT NULL DEFAULT '' | V2 聚合指纹（Config + Topics） | `entity_index.aggregated_hash` |
 | groups | created_at | BIGINT | NOT NULL DEFAULT 0 | 创建时间戳，毫秒 | `config.json` → `createdAt` |
@@ -81,11 +82,10 @@ scope: 双端
 |-----|-------|-----|-----|-----|----------|
 | group_members | group_id | TEXT | NOT NULL, PK(1) | 所属群组 ID | `config.json` → `members[]` |
 | group_members | agent_id | TEXT | NOT NULL, PK(2) | 成员 Agent ID | `config.json` → `members[]` 元素 |
-| group_members | member_tag | TEXT | — | 成员标签，用于路由与过滤 | `config.json` → `memberTags[agentId]` |
 | group_members | sort_order | INTEGER | NOT NULL DEFAULT 0 | 成员在群组内的展示排序 | `members[]` 数组顺序 |
 | group_members | updated_at | BIGINT | NOT NULL | 关联更新时间戳 | `entity_index.updated_at`（父级 Group） |
 
-> **归一化策略**：桌面端 `GroupConfig.members` 为扁平字符串数组；移动端拆分为独立关联表，支持 `member_tag` 与 `sort_order` 等扩展元数据。同步时由 `GroupSyncDTO.members` 双向反规范化转换。
+> `group_members` 只保存当前成员与顺序。完整 `memberTags` 独立保存在 `groups.member_tags`，不会因成员暂时移除而丢失。
 
 ### 1.5 `topics` — 话题元数据表
 
@@ -322,7 +322,7 @@ scope: 双端
 | Group ID | `groups.group_id` | `entity_index.id`（type=`group`） | 桌面端 `config.json` 内显式存储 `id` |
 | Group 名称 | `groups.name` | `config.json` → `name` | 直接映射 |
 | Group 成员列表 | `group_members.agent_id` | `config.json` → `members[]` | 移动端反规范化存储，同步时数组↔关联表转换 |
-| Group 成员标签 | `group_members.member_tag` | `config.json` → `memberTags[agentId]` | JSON 对象映射到关联表行 |
+| Group 成员标签 | `groups.member_tags` | `config.json` → `memberTags` | 完整 JSON 对象直接存储 |
 | Group 发言模式 | `groups.mode` | `config.json` → `mode` | 直接映射 |
 | Group 统一模型开关 | `groups.use_unified_model` | `config.json` → `useUnifiedModel` | 直接映射 |
 | Topic ID | `topics.topic_id` | `config.json` → `topics[].id` | 主键 |

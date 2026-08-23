@@ -210,6 +210,7 @@ const toggleMember = (agentId: string) => {
     }
   } else {
     groupConfig.value.members.splice(index, 1);
+    // 对齐 VChat：保留 memberTags，便于该 Agent 重新加入时恢复。
   }
 };
 

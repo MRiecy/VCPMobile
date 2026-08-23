@@ -665,7 +665,7 @@ impl HashInitializer {
         group_id: &str,
     ) -> Result<GroupSyncDTO, String> {
         let row = sqlx::query(
-            "SELECT name, mode, group_prompt, invite_prompt, use_unified_model, unified_model, tag_match_mode, created_at
+            "SELECT name, mode, group_prompt, invite_prompt, use_unified_model, unified_model, tag_match_mode, member_tags, created_at
              FROM groups WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL",
         )
         .bind(group_id)
@@ -674,7 +674,11 @@ impl HashInitializer {
         .map_err(|e| e.to_string())?;
 
         let members = Self::load_group_members(tx, group_id).await?;
-        let member_tags = Self::load_member_tags(tx, group_id).await?;
+        let member_tags_raw: String = row
+            .try_get("member_tags")
+            .map_err(|error| format!("Group {group_id} memberTags decode failed: {error}"))?;
+        let member_tags = serde_json::from_str(&member_tags_raw)
+            .map_err(|error| format!("Group {group_id} memberTags JSON is invalid: {error}"))?;
 
         Ok(GroupSyncDTO {
             name: row
@@ -728,32 +732,6 @@ impl HashInitializer {
                 })
             })
             .collect()
-    }
-
-    async fn load_member_tags(
-        tx: &mut Transaction<'_, Sqlite>,
-        group_id: &str,
-    ) -> Result<serde_json::Value, String> {
-        let rows = sqlx::query(
-            "SELECT agent_id, member_tag FROM group_members WHERE group_id = ? AND member_tag IS NOT NULL",
-        )
-        .bind(group_id)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(|error| error.to_string())?;
-
-        let mut tags = serde_json::Map::new();
-        for row in rows {
-            let agent_id: String = row.try_get("agent_id").map_err(|error| {
-                format!("Group {group_id} member tag agent id decode failed: {error}")
-            })?;
-            let tag: String = row
-                .try_get("member_tag")
-                .map_err(|error| format!("Group {group_id} member tag decode failed: {error}"))?;
-            tags.insert(agent_id, serde_json::Value::String(tag));
-        }
-
-        Ok(serde_json::Value::Object(tags))
     }
 }
 
@@ -1039,14 +1017,14 @@ mod tests {
             "CREATE TABLE groups (
                 group_id TEXT PRIMARY KEY, config_hash TEXT, name TEXT, mode TEXT,
                 group_prompt TEXT, invite_prompt TEXT, use_unified_model INTEGER,
-                unified_model TEXT, tag_match_mode TEXT, created_at INTEGER,
+                unified_model TEXT, tag_match_mode TEXT, member_tags TEXT, created_at INTEGER,
                 deleted_at INTEGER
              );
              CREATE TABLE group_members (
                 group_id TEXT, agent_id TEXT, sort_order INTEGER
              );
              INSERT INTO groups VALUES
-                ('broken-group', 'PENDING', 'Group', 'fixed', NULL, NULL, 0, NULL, NULL, 1, NULL);
+                ('broken-group', 'PENDING', 'Group', 'fixed', NULL, NULL, 0, NULL, NULL, '{}', 1, NULL);
              INSERT INTO group_members VALUES ('broken-group', 'agent', 0);",
         )
         .execute(&group_pool)
@@ -1074,15 +1052,15 @@ mod tests {
              CREATE TABLE groups (
                 group_id TEXT PRIMARY KEY, name TEXT, mode TEXT, group_prompt TEXT,
                 invite_prompt TEXT, use_unified_model INTEGER, unified_model TEXT,
-                tag_match_mode TEXT, created_at INTEGER, config_hash TEXT, deleted_at INTEGER
+                tag_match_mode TEXT, member_tags TEXT, created_at INTEGER, config_hash TEXT, deleted_at INTEGER
              );
              CREATE TABLE group_members (
-                group_id TEXT, agent_id TEXT, member_tag TEXT, sort_order INTEGER
+                group_id TEXT, agent_id TEXT, sort_order INTEGER
              );
              INSERT INTO agents VALUES
                 ('legacy-agent', 'Agent', '', 'model', 1, 100, 20, 1, NULL, NULL);
              INSERT INTO groups VALUES
-                ('legacy-group', 'Group', 'fixed', NULL, NULL, 0, NULL, NULL, 1, NULL, NULL);",
+                ('legacy-group', 'Group', 'fixed', NULL, NULL, 0, NULL, NULL, '{}', 1, NULL, NULL);",
         )
         .execute(&pool)
         .await

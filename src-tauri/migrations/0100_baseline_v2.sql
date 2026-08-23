@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS groups (
     use_unified_model INTEGER NOT NULL DEFAULT 0,
     unified_model TEXT,
     tag_match_mode TEXT,
+    member_tags TEXT NOT NULL DEFAULT '{}',
     config_hash TEXT NOT NULL DEFAULT '',
     content_hash TEXT NOT NULL DEFAULT '',
     created_at BIGINT NOT NULL DEFAULT 0,
@@ -67,7 +68,6 @@ CREATE TABLE IF NOT EXISTS groups (
 CREATE TABLE IF NOT EXISTS group_members (
     group_id TEXT NOT NULL,
     agent_id TEXT NOT NULL,
-    member_tag TEXT,
     sort_order INTEGER NOT NULL DEFAULT 0,
     updated_at BIGINT NOT NULL,
     PRIMARY KEY (group_id, agent_id)
