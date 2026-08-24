@@ -537,7 +537,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         currentKey.ownerType !== ownerType ||
         currentKey.topicId !== topicId
       ) {
-        topicStore.incrementTopicUnreadCount(ownerId, ownerType, topicId);
+        void topicStore
+          .incrementTopicUnreadCount(ownerId, ownerType, topicId)
+          .catch(() => {});
       }
 
       // 回调：通知 UI 列表插入新消息
@@ -850,6 +852,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       );
       // 必须在注入恢复占位对象前冻结；否则冷启动消息会被恒定误判为 warm。
       const warmMessageIds = new Set(activeStreamMessages.keys());
+      const recoveryUnreadUpdates: Promise<void>[] = [];
 
       // 2. UI 预处理：在内存中将消息标记为 reconnecting，让用户在界面上看到“重连中”
       for (const gen of activeGens) {
@@ -937,6 +940,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         recoveryMessageIds.add(messageKey);
 
         const isWarm = warmMessageIds.has(messageKey);
+        if (!isWarm && ownerType === "agent" && !recoveryKey) {
+          recoveryUnreadUpdates.push(
+            topicStore.setTopicUnread(ownerId, ownerType, topicId, true),
+          );
+        }
         let msg = activeStreamMessages.get(messageKey);
         const originalContent = msg?.content || "";
         const originalBlocks = msg?.blocks ? [...msg.blocks] : [];
@@ -1062,6 +1070,30 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           })
           .finally(() => {
             recoveryMessageIds.delete(messageKey);
+          });
+      }
+
+      if (recoveryUnreadUpdates.length > 0) {
+        await Promise.allSettled(recoveryUnreadUpdates);
+      }
+
+      const selectedOwner = sessionStore.currentSelectedItem;
+      if (
+        selectedOwner &&
+        (selectedOwner.type === "agent" || selectedOwner.type === "group") &&
+        activeGens.some(
+          (generation) =>
+            generation.ownerId === selectedOwner.id &&
+            generation.ownerType === selectedOwner.type,
+        )
+      ) {
+        await topicStore
+          .loadTopicList(selectedOwner.id, selectedOwner.type)
+          .catch((error) => {
+            console.error(
+              "[ChatStreamStore] Failed to reconcile topic list after recovery:",
+              error,
+            );
           });
       }
     } catch (e) {

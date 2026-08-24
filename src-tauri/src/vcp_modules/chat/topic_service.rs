@@ -443,20 +443,44 @@ pub async fn set_topic_unread(
     set_topic_unread_in_pool(&db_state.pool, &key, unread).await
 }
 
+fn validate_agent_topic_key(key: &TopicKey) -> Result<(), String> {
+    if key.owner_type != "agent" || !key.is_valid() {
+        return Err("Unread state requires an exact Agent Topic identity".to_string());
+    }
+    Ok(())
+}
+
 async fn set_topic_unread_in_pool(
     pool: &sqlx::SqlitePool,
     key: &TopicKey,
     unread: bool,
 ) -> Result<(), String> {
+    validate_agent_topic_key(key)?;
     let unread_int = if unread { 1 } else { 0 };
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
+    if !unread {
+        sqlx::query(
+            "UPDATE topics SET unread_count = 0
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+               AND deleted_at IS NULL AND unread_count != 0",
+        )
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+
     let changed = sqlx::query(
         "UPDATE topics SET unread = ?, updated_at = ?
-         WHERE owner_type = 'agent' AND owner_id = ? AND topic_id = ?
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
            AND deleted_at IS NULL AND unread IS NOT ?",
     )
     .bind(unread_int)
     .bind(crate::vcp_modules::infra::utils::now_millis())
+    .bind(&key.owner_type)
     .bind(&key.owner_id)
     .bind(&key.topic_id)
     .bind(unread_int)
@@ -470,6 +494,65 @@ async fn set_topic_unread_in_pool(
     tx.commit().await.map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+#[tauri::command]
+pub async fn increment_topic_unread_count(
+    db_state: State<'_, DbState>,
+    owner_id: String,
+    owner_type: String,
+    topic_id: String,
+) -> Result<i32, String> {
+    let key = TopicKey::new(owner_type, owner_id, topic_id);
+    validate_agent_topic_key(&key)?;
+
+    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
+    let incremented = sqlx::query(
+        "UPDATE topics SET unread_count = unread_count + 1
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
+    )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if incremented.rows_affected() != 1 {
+        return Err(format!(
+            "Agent Topic {}/{}/{} is missing or deleted",
+            key.owner_type, key.owner_id, key.topic_id
+        ));
+    }
+
+    let promoted = sqlx::query(
+        "UPDATE topics SET unread = 1, updated_at = ?
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+           AND deleted_at IS NULL AND unread IS NOT 1",
+    )
+    .bind(crate::vcp_modules::infra::utils::now_millis())
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    if promoted.rows_affected() == 1 {
+        HashAggregator::bubble_from_topic(&mut tx, &key).await?;
+    }
+
+    let unread_count = sqlx::query_scalar::<_, i32>(
+        "SELECT unread_count FROM topics
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
+    )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(unread_count)
 }
 
 #[derive(serde::Deserialize, Clone, Debug)]
@@ -823,7 +906,8 @@ mod tests {
         .await
         .expect("seed owner and topic");
         let mut tx = pool.begin().await.expect("begin hash initialization");
-        HashAggregator::bubble_from_topic(&mut tx, "topic")
+        let key = TopicKey::new("agent", "agent", "topic");
+        HashAggregator::bubble_from_topic(&mut tx, &key)
             .await
             .expect("initialize hashes");
         tx.commit().await.expect("commit hash initialization");
@@ -837,7 +921,7 @@ mod tests {
         .await
         .expect("read initial state");
 
-        set_topic_unread_in_pool(&pool, "topic", true)
+        set_topic_unread_in_pool(&pool, &key, true)
             .await
             .expect("mark topic unread");
         let changed: (String, String, String, i64) = sqlx::query_as(
@@ -853,7 +937,7 @@ mod tests {
         assert_ne!(changed.2, before.2);
         assert!(changed.3 > before.3);
 
-        set_topic_unread_in_pool(&pool, "topic", true)
+        set_topic_unread_in_pool(&pool, &key, true)
             .await
             .expect("repeat unread state");
         let repeated: (String, String, String, i64) = sqlx::query_as(

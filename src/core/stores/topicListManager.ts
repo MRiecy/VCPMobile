@@ -41,11 +41,20 @@ export const useTopicStore = defineStore("topic", () => {
   let loadGeneration = 0;
   let activeLoadKey: string | null = null;
   let activeLoadPromise: Promise<void> | null = null;
+  let unreadMutationTail: Promise<void> = Promise.resolve();
 
   const ownerKey = (ownerId: string, ownerType: string) =>
     `${ownerType}:${ownerId}`;
   const isCurrentOwner = (ownerId: string, ownerType: string) =>
     currentAgentId.value === ownerId && currentOwnerType.value === ownerType;
+  const enqueueUnreadMutation = <T>(operation: () => Promise<T>): Promise<T> => {
+    const queued = unreadMutationTail.catch(() => undefined).then(operation);
+    unreadMutationTail = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued;
+  };
 
   // --- 事件监听 (Event Listeners) ---
   // 注意：topic-index-updated 事件当前在 Rust 侧未被 emit，已移除死代码
@@ -261,6 +270,9 @@ export const useTopicStore = defineStore("topic", () => {
       if (isCurrentOwner(ownerId, ownerType)) {
         topics.value = topics.value.filter((t) => t.id !== topicId);
       }
+      if (ownerType === "agent") {
+        await enqueueUnreadMutation(() => assistantStore.refreshUnreadCounts());
+      }
 
       notificationStore.addNotification({
         type: "success",
@@ -369,32 +381,31 @@ export const useTopicStore = defineStore("topic", () => {
     ownerType: string,
     topicId: string,
     unread: boolean,
-  ) => {
-    try {
-      console.log(
-        `[TopicStore] Setting unread state for ${topicId} to ${unread}`,
-      );
-      // 调用 Rust 命令更新状态
-      await invoke("set_topic_unread", { ownerId, ownerType, topicId, unread });
+  ) =>
+    enqueueUnreadMutation(async () => {
+      try {
+        console.log(
+          `[TopicStore] Setting unread state for ${topicId} to ${unread}`,
+        );
+        await invoke("set_topic_unread", { ownerId, ownerType, topicId, unread });
 
-      if (isCurrentOwner(ownerId, ownerType)) {
-        const index = topics.value.findIndex((t) => t.id === topicId);
-        if (index !== -1) {
-          topics.value[index] = {
-            ...topics.value[index],
-            unread,
-            unreadCount: unread ? topics.value[index].unreadCount : 0,
-          };
-          // 强制触发虚拟列表重绘
-          topics.value = [...topics.value];
+        if (isCurrentOwner(ownerId, ownerType)) {
+          const index = topics.value.findIndex((t) => t.id === topicId);
+          if (index !== -1) {
+            topics.value[index] = {
+              ...topics.value[index],
+              unread,
+              unreadCount: unread ? topics.value[index].unreadCount : 0,
+            };
+            topics.value = [...topics.value];
+          }
         }
+        await assistantStore.refreshUnreadCounts();
+      } catch (e) {
+        console.error("[TopicStore] Failed to set topic unread:", e);
+        throw e;
       }
-      await assistantStore.refreshUnreadCounts();
-    } catch (e) {
-      console.error("[TopicStore] Failed to set topic unread:", e);
-      throw e;
-    }
-  };
+    });
 
   /**
    * 增加话题的消息计数 (UI 乐观更新)
@@ -412,26 +423,45 @@ export const useTopicStore = defineStore("topic", () => {
   };
 
   /**
-   * 增加话题的未读计数 (UI 乐观更新)
+   * 记录后台 Agent 回复并采用数据库返回的最终未读计数
    */
-  const incrementTopicUnreadCount = (ownerId: string, ownerType: string, topicId: string) => {
-    if (ownerType !== "agent") return;
-    if (isCurrentOwner(ownerId, ownerType)) {
-      const index = topics.value.findIndex((t) => t.id === topicId);
-      if (index !== -1) {
-        const topic = topics.value[index];
-        // 如果不是当前选中的话题，才增加未读数
-        if (sessionStore.currentTopicId !== topicId) {
-          topics.value[index] = {
-            ...topic,
-            unreadCount: (topic.unreadCount || 0) + 1,
-            unread: true,
-          };
-          topics.value = [...topics.value];
+  const incrementTopicUnreadCount = (
+    ownerId: string,
+    ownerType: string,
+    topicId: string,
+  ): Promise<void> => {
+    if (ownerType !== "agent") return Promise.resolve();
+    return enqueueUnreadMutation(async () => {
+      try {
+        const unreadCount = await invoke<number>("increment_topic_unread_count", {
+          ownerId,
+          ownerType,
+          topicId,
+        });
+        const currentKey = sessionStore.currentConversationKey;
+        const isCurrentConversation = Boolean(
+          currentKey &&
+            currentKey.ownerId === ownerId &&
+            currentKey.ownerType === ownerType &&
+            currentKey.topicId === topicId,
+        );
+        if (isCurrentOwner(ownerId, ownerType) && !isCurrentConversation) {
+          const index = topics.value.findIndex((topic) => topic.id === topicId);
+          if (index !== -1) {
+            topics.value[index] = {
+              ...topics.value[index],
+              unreadCount,
+              unread: true,
+            };
+            topics.value = [...topics.value];
+          }
         }
+        await assistantStore.refreshUnreadCounts();
+      } catch (e) {
+        console.error("[TopicStore] Failed to increment topic unread count:", e);
+        throw e;
       }
-    }
-    void setTopicUnread(ownerId, ownerType, topicId, true).catch(() => {});
+    });
   };
 
   /**

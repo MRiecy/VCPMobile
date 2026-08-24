@@ -231,14 +231,14 @@ onUnmounted(() => {
               : 'border-transparent hover:bg-black/5 dark:hover:bg-white/5'
           ]">
           <!-- 未读小红点 / 计数角标 (基于桌面端主题同步) -->
-          <div v-if="item.data.unreadCount === -1 || item.data.unread"
-            class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm shrink-0"
-            style="background: #ff6b6b"></div>
-          <div v-else-if="item.data.unreadCount && item.data.unreadCount > 0"
+          <div v-if="item.data.unreadCount && item.data.unreadCount > 0"
             class="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full border-2 border-white dark:border-gray-900 text-[9px] font-bold text-white flex items-center justify-center z-10 shadow-sm"
             style="background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%)">
             {{ item.data.unreadCount > 99 ? "99+" : item.data.unreadCount }}
           </div>
+          <div v-else-if="item.data.unreadCount === -1 || item.data.unread"
+            class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm shrink-0"
+            style="background: #ff6b6b"></div>
 
           <div
             class="relative w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border border-black/5 dark:border-white/10"

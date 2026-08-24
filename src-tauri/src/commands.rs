@@ -110,8 +110,8 @@ macro_rules! app_command_handler {
         };
         use crate::vcp_modules::topic_service::{
             create_topic, delete_topic, get_topics, get_topics_streamed, get_unread_counts,
-            regenerate_topic_response, set_topic_unread, summarize_topic, toggle_topic_lock,
-            update_topic_title,
+            increment_topic_unread_count, regenerate_topic_response, set_topic_unread,
+            summarize_topic, toggle_topic_lock, update_topic_title,
         };
         use crate::vcp_modules::update_manager::{
             cancel_update_download, check_for_update, get_update_status, install_update,
@@ -192,6 +192,7 @@ macro_rules! app_command_handler {
                 get_topics,
                 get_topics_streamed,
                 get_unread_counts,
+                increment_topic_unread_count,
                 regenerate_topic_response,
                 set_topic_unread,
                 summarize_topic,

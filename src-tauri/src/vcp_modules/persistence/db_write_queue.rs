@@ -930,6 +930,10 @@ impl DbWriteQueue {
             ON CONFLICT(owner_type, owner_id, topic_id) DO UPDATE SET
             title=excluded.title, created_at=excluded.created_at,
             locked=excluded.locked, unread=excluded.unread,
+            unread_count=CASE
+                WHEN excluded.unread = 0 THEN 0
+                ELSE topics.unread_count
+            END,
             updated_at=CASE
                 WHEN topics.config_hash IS NOT excluded.config_hash THEN excluded.updated_at
                 ELSE topics.updated_at
