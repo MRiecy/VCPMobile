@@ -1729,6 +1729,10 @@ async fn upload_attachment<R: Runtime>(
 mod tests {
     use super::*;
 
+    fn topic(topic_id: &str) -> TopicKey {
+        TopicKey::new("agent", "agent-a", topic_id)
+    }
+
     #[test]
     fn canonical_hash_is_lowercase_and_rejects_non_sha256_values() {
         assert_eq!(canonical_sha256(&"A".repeat(64)), Some("a".repeat(64)));
@@ -1743,7 +1747,7 @@ mod tests {
         let frames = vec![
             MessagePushFrame {
                 outcome: PushBatchResult {
-                    topic_id: "topic-a".to_string(),
+                    topic: topic("topic-a"),
                     success: true,
                     error: None,
                 },
@@ -1751,7 +1755,7 @@ mod tests {
             },
             MessagePushFrame {
                 outcome: PushBatchResult {
-                    topic_id: "topic-b".to_string(),
+                    topic: topic("topic-b"),
                     success: false,
                     error: Some("rejected".to_string()),
                 },
@@ -1765,21 +1769,22 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(
             dependencies.get(&hash),
-            Some(&HashSet::from(["topic-a".to_string()]))
+            Some(&HashSet::from([topic("topic-a")]))
         );
     }
 
     #[test]
     fn message_push_result_requires_explicit_attachment_hash_array() {
-        let expected = vec!["topic".to_string()];
-        let missing = br#"{"topicId":"topic","success":true}"#;
+        let expected = vec![topic("topic")];
+        let missing =
+            br#"{"topicId":"topic","ownerType":"agent","ownerId":"agent-a","success":true}"#;
         let error = match parse_message_push_frames(missing, &expected) {
             Err(error) => error,
             Ok(_) => panic!("legacy result without neededAttachmentHashes must be rejected"),
         };
         assert!(error.contains("explicit array"));
 
-        let valid = br#"{"topicId":"topic","success":true,"neededAttachmentHashes":[]}"#;
+        let valid = br#"{"topicId":"topic","ownerType":"agent","ownerId":"agent-a","success":true,"neededAttachmentHashes":[]}"#;
         let frames = parse_message_push_frames(valid, &expected).expect("hard-cut result");
         assert_eq!(frames.len(), 1);
         assert!(frames[0].needed_attachment_hashes.is_empty());
@@ -1787,9 +1792,11 @@ mod tests {
 
     #[test]
     fn failed_message_push_preserves_wire_error_and_rejects_legacy_strings() {
-        let expected = vec!["topic".to_string()];
+        let expected = vec![topic("topic")];
         let valid = serde_json::to_vec(&serde_json::json!({
             "topicId":"topic",
+            "ownerType":"agent",
+            "ownerId":"agent-a",
             "success":false,
             "neededAttachmentHashes":[],
             "error":{
@@ -1803,7 +1810,7 @@ mod tests {
             }
         }))
         .expect("serialize result");
-        let frames = parse_message_push_frames(&valid, &expected).expect("Wire 1.2 result");
+        let frames = parse_message_push_frames(&valid, &expected).expect("structured result");
         assert_eq!(
             crate::vcp_modules::sync_error::decode_wire_sync_error(
                 frames[0].outcome.error.as_deref().expect("encoded error")
@@ -1815,6 +1822,8 @@ mod tests {
 
         let legacy = serde_json::to_vec(&serde_json::json!({
             "topicId":"topic",
+            "ownerType":"agent",
+            "ownerId":"agent-a",
             "success":false,
             "neededAttachmentHashes":[],
             "error":"legacy"
@@ -1824,6 +1833,8 @@ mod tests {
 
         let contradictory = serde_json::to_vec(&serde_json::json!({
             "topicId":"topic",
+            "ownerType":"agent",
+            "ownerId":"agent-a",
             "success":true,
             "neededAttachmentHashes":[],
             "error":{
@@ -1864,15 +1875,18 @@ mod tests {
             .expect("open database");
         sqlx::query(
             "CREATE TABLE messages (
-                msg_id TEXT NOT NULL, topic_id TEXT NOT NULL, role TEXT NOT NULL,
+                owner_type TEXT NOT NULL, owner_id TEXT NOT NULL,
+                topic_id TEXT NOT NULL, msg_id TEXT NOT NULL, role TEXT NOT NULL,
                 name TEXT, agent_id TEXT, content TEXT NOT NULL, timestamp BIGINT NOT NULL,
                 is_group_message INTEGER NOT NULL, group_id TEXT, finish_reason TEXT,
-                content_hash TEXT NOT NULL, deleted_at BIGINT,
-                PRIMARY KEY(topic_id, msg_id)
+                content_hash TEXT NOT NULL, created_at BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL, deleted_at BIGINT,
+                PRIMARY KEY(owner_type, owner_id, topic_id, msg_id)
              );
              CREATE TABLE message_attachments (
-                topic_id TEXT, msg_id TEXT, hash TEXT, attachment_order INTEGER,
-                display_name TEXT, src TEXT, status TEXT, deleted_at BIGINT
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT,
+                hash TEXT, attachment_order INTEGER, display_name TEXT,
+                src TEXT, status TEXT, created_at BIGINT
              );
              CREATE TABLE attachments (
                 hash TEXT PRIMARY KEY, mime_type TEXT, size BIGINT, internal_path TEXT,
@@ -1885,10 +1899,13 @@ mod tests {
         for index in 0..=MESSAGE_PAGE_SIZE {
             sqlx::query(
                 "INSERT INTO messages (
-                    msg_id, topic_id, role, content, timestamp, is_group_message, content_hash
-                 ) VALUES (?, 'topic', 'user', 'body', ?, 0, 'hash')",
+                    owner_type, owner_id, topic_id, msg_id, role, content, timestamp,
+                    is_group_message, content_hash, created_at, updated_at
+                 ) VALUES ('agent', 'agent-a', 'topic', ?, 'user', 'body', ?, 0, 'hash', ?, ?)",
             )
             .bind(format!("message-{index:03}"))
+            .bind(index as i64)
+            .bind(index as i64)
             .bind(index as i64)
             .execute(&pool)
             .await
@@ -1896,32 +1913,34 @@ mod tests {
         }
         sqlx::query(
             "INSERT INTO messages (
-                msg_id, topic_id, role, content, timestamp, is_group_message,
-                content_hash, deleted_at
-             ) VALUES ('message-deleted', 'topic', 'user', 'gone', 200, 0, 'DELETED', 1234)",
+                owner_type, owner_id, topic_id, msg_id, role, content, timestamp,
+                is_group_message, content_hash, created_at, updated_at, deleted_at
+             ) VALUES ('agent', 'agent-a', 'topic', 'message-deleted', 'user',
+                       'gone', 200, 0, 'DELETED', 200, 200, 1234)",
         )
         .execute(&pool)
         .await
         .expect("insert tombstone");
 
         let mut read_tx = pool.begin().await.expect("begin snapshot");
-        let preflight = preflight_topic_messages(&mut read_tx, "topic")
+        let key = topic("topic");
+        let preflight = preflight_topic_messages(&mut read_tx, &key)
             .await
             .expect("preflight");
         assert_eq!(preflight.live_count, MESSAGE_PAGE_SIZE + 1);
         assert_eq!(preflight.tombstone_count, 1);
-        let tombstones = load_message_tombstones(&mut read_tx, "topic", 1)
+        let tombstones = load_message_tombstones(&mut read_tx, &key, 1)
             .await
             .expect("load tombstone");
-        assert_eq!(tombstones[0].message_id, "message-deleted");
+        assert_eq!(tombstones[0].key.msg_id, "message-deleted");
         assert_eq!(tombstones[0].deleted_at, 1234);
-        let first = load_outbound_message_page(&mut read_tx, "topic", None)
+        let first = load_outbound_message_page(&mut read_tx, &key, None)
             .await
             .expect("first page");
         assert_eq!(first.len(), MESSAGE_PAGE_SIZE);
         assert_eq!(first.first().unwrap().id, "message-000");
         assert_eq!(first.last().unwrap().id, "message-099");
-        let second = load_outbound_message_page(&mut read_tx, "topic", Some((99, "message-099")))
+        let second = load_outbound_message_page(&mut read_tx, &key, Some((99, "message-099")))
             .await
             .expect("second page");
         assert_eq!(second.len(), 1);
@@ -1931,13 +1950,14 @@ mod tests {
     #[test]
     fn tombstone_request_is_exactly_budgeted_and_response_identity_is_checked() {
         let tombstone = MessageTombstone {
-            topic_id: "topic-a".to_string(),
-            message_id: "message-a".to_string(),
+            key: MessageKey::new(topic("topic-a"), "message-a"),
             deleted_at: 1234,
         };
         let request = MessageTombstoneRequest {
-            topic_id: &tombstone.topic_id,
-            msg_id: &tombstone.message_id,
+            owner_type: &tombstone.key.topic.owner_type,
+            owner_id: &tombstone.key.topic.owner_id,
+            topic_id: &tombstone.key.topic.topic_id,
+            msg_id: &tombstone.key.msg_id,
             deleted_at: tombstone.deleted_at,
         };
         assert_eq!(
@@ -1947,6 +1967,8 @@ mod tests {
         validate_message_tombstone_response(
             &serde_json::json!({
                 "success": true,
+                "ownerType": "agent",
+                "ownerId": "agent-a",
                 "topicId": "topic-a",
                 "msgId": "message-a"
             }),
@@ -1956,6 +1978,8 @@ mod tests {
         assert!(validate_message_tombstone_response(
             &serde_json::json!({
                 "success": true,
+                "ownerType": "agent",
+                "ownerId": "agent-a",
                 "topicId": "topic-b",
                 "msgId": "message-a"
             }),

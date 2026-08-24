@@ -53,6 +53,7 @@ mod tests {
         AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
     };
     use crate::vcp_modules::sync_hash::HashAggregator;
+    use crate::vcp_modules::topic_types::TopicKey;
 
     #[test]
     fn flush_error_summary_is_reported_once() {
@@ -72,27 +73,30 @@ mod tests {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open owner root database");
         conn.execute_batch(
             "CREATE TABLE agents (
-                agent_id TEXT PRIMARY KEY, content_hash TEXT, deleted_at INTEGER
+                owner_type TEXT, agent_id TEXT, content_hash TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, agent_id)
              );
              CREATE TABLE groups (
-                group_id TEXT PRIMARY KEY, content_hash TEXT, deleted_at INTEGER
+                owner_type TEXT, group_id TEXT, content_hash TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, group_id)
              );
              CREATE TABLE topics (
-                topic_id TEXT PRIMARY KEY, owner_id TEXT, owner_type TEXT,
-                config_hash TEXT, content_hash TEXT, deleted_at INTEGER
+                owner_type TEXT, owner_id TEXT, topic_id TEXT,
+                config_hash TEXT, content_hash TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, owner_id, topic_id)
              );",
         )
         .expect("create owner root schema");
         let tx = conn.transaction().expect("begin owner root transaction");
         if owner_type == "agent" {
-            tx.execute("INSERT INTO agents VALUES ('owner', '', NULL)", [])
+            tx.execute("INSERT INTO agents VALUES ('agent', 'owner', '', NULL)", [])
                 .expect("insert agent");
         } else {
-            tx.execute("INSERT INTO groups VALUES ('owner', '', NULL)", [])
+            tx.execute("INSERT INTO groups VALUES ('group', 'owner', '', NULL)", [])
                 .expect("insert group");
         }
         tx.execute(
-            "INSERT INTO topics VALUES ('default', 'owner', ?, 'default-config', 'default-content', NULL)",
+            "INSERT INTO topics VALUES (?, 'owner', 'default', 'default-config', 'default-content', NULL)",
             [owner_type],
         )
         .expect("insert default topic");
@@ -114,7 +118,7 @@ mod tests {
         };
 
         tx.execute(
-            "INSERT INTO topics VALUES ('topic-a', 'owner', ?, 'config-a', 'content-a', NULL)",
+            "INSERT INTO topics VALUES (?, 'owner', 'topic-a', 'config-a', 'content-a', NULL)",
             [owner_type],
         )
         .expect("insert ordinary topic");
@@ -145,43 +149,21 @@ mod tests {
     #[test]
     fn sync_entity_upserts_never_rewrite_tombstones_or_children() {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open test database");
+        conn.execute_batch(include_str!("../../../migrations/0100_baseline_v2.sql"))
+            .expect("create baseline schema");
         conn.execute_batch(
-            "CREATE TABLE agents (
-                agent_id TEXT PRIMARY KEY, name TEXT, system_prompt TEXT, model TEXT,
-                temperature REAL, context_token_limit INTEGER, max_output_tokens INTEGER,
-                stream_output INTEGER, config_hash TEXT, content_hash TEXT,
-                updated_at INTEGER, deleted_at INTEGER
-             );
-             CREATE TABLE groups (
-                group_id TEXT PRIMARY KEY, name TEXT, mode TEXT, group_prompt TEXT,
-                invite_prompt TEXT, use_unified_model INTEGER, unified_model TEXT,
-                tag_match_mode TEXT, member_tags TEXT, created_at INTEGER, config_hash TEXT,
-                content_hash TEXT, updated_at INTEGER, deleted_at INTEGER
-             );
-             CREATE TABLE group_members (
-                group_id TEXT, agent_id TEXT, sort_order INTEGER, updated_at INTEGER
-             );
-             CREATE TABLE avatars (
-                owner_type TEXT, owner_id TEXT, avatar_hash TEXT, mime_type TEXT,
-                image_data BLOB, dominant_color TEXT, updated_at INTEGER,
-                deleted_at INTEGER, PRIMARY KEY(owner_type, owner_id)
-             );
-             CREATE TABLE topics (
-                topic_id TEXT PRIMARY KEY, title TEXT, owner_id TEXT, owner_type TEXT,
-                created_at INTEGER, locked INTEGER, unread INTEGER, config_hash TEXT,
-                updated_at INTEGER, deleted_at INTEGER
-             );
-             INSERT INTO agents VALUES
-                ('agent-live', 'live', '', '', 0, 0, 0, 0, '', '', 1, NULL),
-                ('agent-deleted', 'deleted', '', '', 0, 0, 0, 0, '', '', 1, 9);
-             INSERT INTO groups VALUES
-                ('group-deleted', 'deleted-group', 'fixed', NULL, NULL, 0, NULL, NULL, '{}', 1, '', '', 1, 9),
-                ('group-live', 'live-group', 'fixed', NULL, NULL, 0, NULL, NULL, '{}', 1, '', '', 1, NULL);
+            "INSERT INTO agents (owner_type, agent_id, name, model, updated_at, deleted_at) VALUES
+                ('agent', 'agent-live', 'live', '', 1, NULL),
+                ('agent', 'agent-deleted', 'deleted', '', 1, 9);
+             INSERT INTO groups (owner_type, group_id, name, updated_at, deleted_at) VALUES
+                ('group', 'group-deleted', 'deleted-group', 1, 9),
+                ('group', 'group-live', 'live-group', 1, NULL);
              INSERT INTO group_members VALUES ('group-deleted', 'old-member', 0, 1);
              INSERT INTO avatars VALUES
                 ('agent', 'agent-deleted', 'old-hash', 'image/png', x'09', NULL, 1, 9);
-             INSERT INTO topics VALUES
-                ('topic-deleted', 'deleted-topic', 'agent-live', 'agent', 1, 1, 0, '', 1, 9);",
+             INSERT INTO topics (
+                owner_type, owner_id, topic_id, title, created_at, updated_at, deleted_at
+             ) VALUES ('agent', 'agent-live', 'topic-deleted', 'deleted-topic', 1, 1, 9);",
         )
         .expect("create tombstone fixture");
 
@@ -229,7 +211,7 @@ mod tests {
             .expect("fixed user avatar owner must remain supported");
         DbWriteQueue::rusqlite_upsert_agent_topic(
             &tx,
-            "topic-deleted",
+            &TopicKey::new("agent", "agent-live", "topic-deleted"),
             &AgentTopicSyncDTO {
                 id: "topic-deleted".into(),
                 name: "stale-topic".into(),
@@ -242,7 +224,7 @@ mod tests {
         .expect_err("tombstoned topic upsert must fail closed");
         DbWriteQueue::rusqlite_upsert_group_topic(
             &tx,
-            "topic-under-deleted-owner",
+            &TopicKey::new("group", "group-deleted", "topic-under-deleted-owner"),
             &GroupTopicSyncDTO {
                 id: "topic-under-deleted-owner".into(),
                 name: "stale-child".into(),
@@ -310,23 +292,34 @@ mod tests {
     #[test]
     fn sync_message_batch_does_not_repopulate_tombstoned_side_tables() {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open test database");
+        conn.execute_batch(include_str!("../../../migrations/0100_baseline_v2.sql"))
+            .expect("create baseline schema");
         conn.execute_batch(
-            "CREATE TABLE topics (topic_id TEXT PRIMARY KEY, deleted_at INTEGER);
-             CREATE TABLE messages (
-                topic_id TEXT, msg_id TEXT, content TEXT, deleted_at INTEGER,
-                PRIMARY KEY(topic_id, msg_id)
+            "INSERT INTO agents (owner_type, agent_id, name, model, updated_at)
+                VALUES ('agent', 'agent', 'Agent', '', 1);
+             INSERT INTO topics (
+                owner_type, owner_id, topic_id, title, created_at, updated_at
+             ) VALUES ('agent', 'agent', 'topic', 'Topic', 1, 1);
+             INSERT INTO messages (
+                owner_type, owner_id, topic_id, msg_id, role, content, timestamp,
+                content_hash, created_at, updated_at, deleted_at
+             ) VALUES (
+                'agent', 'agent', 'topic', 'message', 'assistant', '[deleted]', 1,
+                'DELETED', 1, 1, 9
              );
-             CREATE TABLE render_cache (
-                topic_id TEXT, msg_id TEXT, render_content BLOB,
-                PRIMARY KEY(topic_id, msg_id)
-             );
-             CREATE TABLE messages_fts (msg_id TEXT, topic_id TEXT, content TEXT);
-             CREATE TABLE message_attachments (topic_id TEXT, msg_id TEXT, hash TEXT);
-             INSERT INTO topics VALUES ('topic', NULL);
-             INSERT INTO messages VALUES ('topic', 'message', '[deleted]', 9);
-             INSERT INTO render_cache VALUES ('topic', 'message', x'09');
-             INSERT INTO messages_fts VALUES ('message', 'topic', 'deleted-index');
-             INSERT INTO message_attachments VALUES ('topic', 'message', 'deleted-hash');",
+             INSERT INTO render_cache (
+                owner_type, owner_id, topic_id, msg_id, render_content, updated_at
+             ) VALUES ('agent', 'agent', 'topic', 'message', x'09', 1);
+             INSERT INTO messages_fts
+                (msg_id, topic_id, content, owner_type, owner_id)
+             VALUES ('message', 'topic', 'deleted-index', 'agent', 'agent');
+             INSERT INTO message_attachments (
+                owner_type, owner_id, topic_id, msg_id, hash, attachment_order,
+                display_name, created_at
+             ) VALUES (
+                'agent', 'agent', 'topic', 'message', 'deleted-hash', 0,
+                'deleted', 1
+             );",
         )
         .expect("create message tombstone fixture");
 
@@ -340,7 +333,7 @@ mod tests {
         };
         DbWriteQueue::rusqlite_upsert_messages_batch(
             &tx,
-            "topic",
+            &TopicKey::new("agent", "agent", "topic"),
             vec![stale],
             vec!["stale remote body".into()],
             vec![vec![1, 2, 3]],
@@ -376,24 +369,22 @@ mod tests {
     #[test]
     fn sync_topic_and_message_writes_require_live_matching_parents() {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open test database");
+        conn.execute_batch(include_str!("../../../migrations/0100_baseline_v2.sql"))
+            .expect("create baseline schema");
         conn.execute_batch(
-            "CREATE TABLE agents (agent_id TEXT PRIMARY KEY, deleted_at INTEGER);
-             CREATE TABLE groups (group_id TEXT PRIMARY KEY, deleted_at INTEGER);
-             CREATE TABLE topics (
-                topic_id TEXT PRIMARY KEY, title TEXT, owner_id TEXT, owner_type TEXT,
-                created_at INTEGER, locked INTEGER, unread INTEGER, updated_at INTEGER,
-                deleted_at INTEGER
-             );
-             INSERT INTO agents VALUES ('agent-a', NULL), ('agent-b', NULL);
-             INSERT INTO topics VALUES
-                ('topic', 'Topic', 'agent-a', 'agent', 1, 1, 0, 1, NULL);",
+            "INSERT INTO agents (owner_type, agent_id, name, model, updated_at) VALUES
+                ('agent', 'agent-a', 'Agent A', '', 1),
+                ('agent', 'agent-b', 'Agent B', '', 1);
+             INSERT INTO topics (
+                owner_type, owner_id, topic_id, title, created_at, updated_at
+             ) VALUES ('agent', 'agent-a', 'topic', 'Topic', 1, 1);",
         )
         .expect("create parent fixture");
         let tx = conn.transaction().expect("begin transaction");
 
-        let owner_conflict = DbWriteQueue::rusqlite_upsert_agent_topic(
+        let identity_mismatch = DbWriteQueue::rusqlite_upsert_agent_topic(
             &tx,
-            "topic",
+            &TopicKey::new("agent", "agent-a", "topic"),
             &AgentTopicSyncDTO {
                 id: "topic".into(),
                 name: "Conflict".into(),
@@ -403,12 +394,14 @@ mod tests {
                 owner_id: "agent-b".into(),
             },
         )
-        .expect_err("live topic owner must be immutable during sync pull");
-        assert!(owner_conflict.to_string().contains("owner conflicts"));
+        .expect_err("topic DTO must match its compound identity");
+        assert!(identity_mismatch
+            .to_string()
+            .contains("exact agent topic identity"));
 
         let missing_parent = DbWriteQueue::rusqlite_upsert_messages_batch(
             &tx,
-            "missing-topic",
+            &TopicKey::new("agent", "agent-a", "missing-topic"),
             Vec::new(),
             Vec::new(),
             Vec::new(),

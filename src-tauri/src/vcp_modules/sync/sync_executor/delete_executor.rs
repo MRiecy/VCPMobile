@@ -251,6 +251,11 @@ impl DeleteExecutor {
 #[cfg(test)]
 mod tests {
     use super::soft_delete_topic_data;
+    use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
+
+    fn topic(topic_id: &str) -> TopicKey {
+        TopicKey::new("agent", "agent", topic_id)
+    }
 
     async fn test_pool() -> sqlx::SqlitePool {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -259,20 +264,35 @@ mod tests {
             .await
             .expect("open test database");
         sqlx::query(
-            "CREATE TABLE agents (agent_id TEXT PRIMARY KEY, content_hash TEXT, deleted_at INTEGER);
-             CREATE TABLE groups (group_id TEXT PRIMARY KEY, content_hash TEXT, deleted_at INTEGER);
+            "CREATE TABLE agents (
+                owner_type TEXT, agent_id TEXT, content_hash TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, agent_id)
+             );
+             CREATE TABLE groups (
+                owner_type TEXT, group_id TEXT, content_hash TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, group_id)
+             );
              CREATE TABLE topics (
-                topic_id TEXT PRIMARY KEY, owner_id TEXT, owner_type TEXT,
-                config_hash TEXT, content_hash TEXT, deleted_at INTEGER
+                owner_type TEXT, owner_id TEXT, topic_id TEXT,
+                config_hash TEXT, content_hash TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, owner_id, topic_id)
              );
              CREATE TABLE messages (
-                topic_id TEXT, msg_id TEXT, deleted_at INTEGER
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT, deleted_at INTEGER
              );
-             CREATE TABLE active_generations (topic_id TEXT, msg_id TEXT);
-             INSERT INTO agents VALUES ('agent', 'owner-before', NULL);
-             INSERT INTO topics VALUES ('topic', 'agent', 'agent', 'config', 'content', NULL);
-             INSERT INTO messages VALUES ('topic', 'message', NULL);
-             INSERT INTO active_generations VALUES ('topic', 'message');",
+             CREATE TABLE message_attachments (
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT
+             );
+             CREATE TABLE render_cache (
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT
+             );
+             CREATE TABLE active_generations (
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT
+             );
+             INSERT INTO agents VALUES ('agent', 'agent', 'owner-before', NULL);
+             INSERT INTO topics VALUES ('agent', 'agent', 'topic', 'config', 'content', NULL);
+             INSERT INTO messages VALUES ('agent', 'agent', 'topic', 'message', NULL);
+             INSERT INTO active_generations VALUES ('agent', 'agent', 'topic', 'message');",
         )
         .execute(&pool)
         .await
@@ -292,7 +312,7 @@ mod tests {
         .await
         .expect("install failure trigger");
 
-        let error = soft_delete_topic_data(&pool, "topic", 42)
+        let error = soft_delete_topic_data(&pool, &topic("topic"), 42)
             .await
             .expect_err("late owner hash failure must abort delete");
         assert!(error.contains("owner hash failure"));
@@ -319,10 +339,10 @@ mod tests {
     #[tokio::test]
     async fn topic_delete_commits_tombstones_before_returning_active_ids() {
         let pool = test_pool().await;
-        let active_ids = soft_delete_topic_data(&pool, "topic", 42)
+        let active_ids = soft_delete_topic_data(&pool, &topic("topic"), 42)
             .await
             .expect("atomic delete");
-        assert_eq!(active_ids, vec!["message"]);
+        assert_eq!(active_ids, vec![MessageKey::new(topic("topic"), "message")]);
         let topic_deleted_at: Option<i64> =
             sqlx::query_scalar("SELECT deleted_at FROM topics WHERE topic_id = 'topic'")
                 .fetch_one(&pool)
@@ -345,7 +365,8 @@ mod tests {
             .await
             .expect("corrupt owner type");
 
-        let error = soft_delete_topic_data(&pool, "topic", 42)
+        let invalid = TopicKey::new("unknown", "agent", "topic");
+        let error = soft_delete_topic_data(&pool, &invalid, 42)
             .await
             .expect_err("unknown owner type must not commit a partial tombstone");
         assert!(error.contains("unsupported owner_type"));
@@ -366,15 +387,15 @@ mod tests {
     #[tokio::test]
     async fn missing_and_repeated_topic_delete_are_idempotent() {
         let pool = test_pool().await;
-        let missing = soft_delete_topic_data(&pool, "missing", 42)
+        let missing = soft_delete_topic_data(&pool, &topic("missing"), 42)
             .await
             .expect("missing remote tombstone is a no-op");
         assert!(missing.is_empty());
 
-        soft_delete_topic_data(&pool, "topic", 42)
+        soft_delete_topic_data(&pool, &topic("topic"), 42)
             .await
             .expect("first delete");
-        let repeated = soft_delete_topic_data(&pool, "topic", 99)
+        let repeated = soft_delete_topic_data(&pool, &topic("topic"), 99)
             .await
             .expect("repeated delete");
         assert!(repeated.is_empty());

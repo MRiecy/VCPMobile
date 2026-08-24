@@ -279,7 +279,12 @@ impl SyncFinalizer {
 #[cfg(test)]
 mod tests {
     use super::finalize_modified_topics;
+    use crate::vcp_modules::topic_types::TopicKey;
     use std::collections::HashSet;
+
+    fn topic(topic_id: &str) -> TopicKey {
+        TopicKey::new("agent", "agent", topic_id)
+    }
 
     #[tokio::test]
     async fn finalizer_updates_content_without_advancing_topic_config_time() {
@@ -290,31 +295,35 @@ mod tests {
             .expect("open test database");
         sqlx::query(
             "CREATE TABLE agents (
-                agent_id TEXT PRIMARY KEY, content_hash TEXT, deleted_at INTEGER
+                owner_type TEXT, agent_id TEXT, content_hash TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, agent_id)
              );
              CREATE TABLE groups (
-                group_id TEXT PRIMARY KEY, content_hash TEXT, deleted_at INTEGER
+                owner_type TEXT, group_id TEXT, content_hash TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, group_id)
              );
              CREATE TABLE topics (
-                topic_id TEXT PRIMARY KEY, owner_id TEXT, owner_type TEXT, title TEXT,
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, title TEXT,
                 created_at INTEGER, locked INTEGER, unread INTEGER, msg_count INTEGER,
-                updated_at INTEGER, config_hash TEXT, content_hash TEXT, deleted_at INTEGER
+                updated_at INTEGER, config_hash TEXT, content_hash TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, owner_id, topic_id)
              );
              CREATE TABLE messages (
-                topic_id TEXT, msg_id TEXT, timestamp INTEGER,
-                content_hash TEXT, deleted_at INTEGER
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT,
+                timestamp INTEGER, content_hash TEXT, deleted_at INTEGER
              );
-             INSERT INTO agents VALUES ('agent', 'owner-before', NULL);
+             INSERT INTO agents VALUES ('agent', 'agent', 'owner-before', NULL);
              INSERT INTO topics VALUES
-                ('topic', 'agent', 'agent', 'Topic', 1, 1, 0, 0, 77,
+                ('agent', 'agent', 'topic', 'Topic', 1, 1, 0, 0, 77,
                  'config-before', 'content-before', NULL);
-             INSERT INTO messages VALUES ('topic', 'message', 1, 'message-hash', NULL);",
+             INSERT INTO messages VALUES
+                ('agent', 'agent', 'topic', 'message', 1, 'message-hash', NULL);",
         )
         .execute(&pool)
         .await
         .expect("create finalizer fixture");
 
-        finalize_modified_topics(&pool, &HashSet::from(["topic".to_string()]))
+        finalize_modified_topics(&pool, &HashSet::from([topic("topic")]))
             .await
             .expect("finalize topic");
         let state: (i64, i64, String, String) = sqlx::query_as(
@@ -340,25 +349,29 @@ mod tests {
             .expect("open test database");
         sqlx::query(
             "CREATE TABLE agents (
-                agent_id TEXT PRIMARY KEY, content_hash TEXT, deleted_at INTEGER
+                owner_type TEXT, agent_id TEXT, content_hash TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, agent_id)
              );
              CREATE TABLE groups (
-                group_id TEXT PRIMARY KEY, content_hash TEXT, deleted_at INTEGER
+                owner_type TEXT, group_id TEXT, content_hash TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, group_id)
              );
              CREATE TABLE topics (
-                topic_id TEXT PRIMARY KEY, owner_id TEXT, owner_type TEXT, title TEXT,
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, title TEXT,
                 created_at INTEGER, locked INTEGER, unread INTEGER, msg_count INTEGER,
-                updated_at INTEGER, config_hash TEXT, content_hash TEXT, deleted_at INTEGER
+                updated_at INTEGER, config_hash TEXT, content_hash TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, owner_id, topic_id)
              );
              CREATE TABLE messages (
-                topic_id TEXT, msg_id TEXT, timestamp INTEGER,
-                content_hash TEXT, deleted_at INTEGER
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT,
+                timestamp INTEGER, content_hash TEXT, deleted_at INTEGER
              );
-             INSERT INTO agents VALUES ('agent', 'owner-before', NULL);
+             INSERT INTO agents VALUES ('agent', 'agent', 'owner-before', NULL);
              INSERT INTO topics VALUES
-                ('topic', 'agent', 'agent', 'Topic', 1, 1, 0, 0, 1,
+                ('agent', 'agent', 'topic', 'Topic', 1, 1, 0, 0, 1,
                  'config-before', 'content-before', NULL);
-             INSERT INTO messages VALUES ('topic', 'message', 1, 'message-hash', NULL);
+             INSERT INTO messages VALUES
+                ('agent', 'agent', 'topic', 'message', 1, 'message-hash', NULL);
              CREATE TRIGGER fail_owner_hash
              BEFORE UPDATE OF content_hash ON agents
              BEGIN SELECT RAISE(ABORT, 'owner hash failure'); END;",
@@ -367,7 +380,7 @@ mod tests {
         .await
         .expect("create finalizer fixture");
 
-        let error = finalize_modified_topics(&pool, &HashSet::from(["topic".to_string()]))
+        let error = finalize_modified_topics(&pool, &HashSet::from([topic("topic")]))
             .await
             .expect_err("owner hash failure must fail finalization");
         assert!(error.contains("owner hash failure"));
@@ -394,7 +407,7 @@ mod tests {
             .await
             .expect("create malformed topics table");
 
-        let error = finalize_modified_topics(&pool, &HashSet::from(["topic".to_string()]))
+        let error = finalize_modified_topics(&pool, &HashSet::from([topic("topic")]))
             .await
             .expect_err("malformed metadata query must fail closed");
         assert!(error.contains("话题元数据"));
@@ -409,29 +422,28 @@ mod tests {
             .expect("open test database");
         sqlx::query(
             "CREATE TABLE topics (
-                topic_id TEXT PRIMARY KEY, owner_id TEXT, owner_type TEXT, title TEXT,
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, title TEXT,
                 created_at INTEGER, locked INTEGER, unread INTEGER, msg_count INTEGER,
-                updated_at INTEGER, config_hash TEXT, content_hash TEXT, deleted_at INTEGER
+                updated_at INTEGER, config_hash TEXT, content_hash TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, owner_id, topic_id)
              );
              CREATE TABLE messages (
-                topic_id TEXT, msg_id TEXT, timestamp INTEGER,
-                content_hash TEXT, deleted_at INTEGER
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT,
+                timestamp INTEGER, content_hash TEXT, deleted_at INTEGER
              );
              INSERT INTO topics VALUES
-                ('live', 'agent', 'agent', 'Live', 1, 1, 0, 7, 1, '', '', NULL),
-                ('deleted', 'agent', 'agent', 'Deleted', 1, 1, 0, 9, 1, '', '', 8);",
+                ('agent', 'agent', 'live', 'Live', 1, 1, 0, 7, 1, '', '', NULL),
+                ('agent', 'agent', 'deleted', 'Deleted', 1, 1, 0, 9, 1, '', '', 8);",
         )
         .execute(&pool)
         .await
         .expect("create finalizer fixture");
 
         for missing in ["missing", "deleted"] {
-            let error = finalize_modified_topics(
-                &pool,
-                &HashSet::from(["live".to_string(), missing.to_string()]),
-            )
-            .await
-            .expect_err("repair set must have exact live metadata coverage");
+            let error =
+                finalize_modified_topics(&pool, &HashSet::from([topic("live"), topic(missing)]))
+                    .await
+                    .expect_err("repair set must have exact live metadata coverage");
             assert!(error.contains(missing));
             let msg_count: i64 =
                 sqlx::query_scalar("SELECT msg_count FROM topics WHERE topic_id = 'live'")

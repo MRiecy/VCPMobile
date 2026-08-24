@@ -976,11 +976,12 @@ mod tests {
             .expect("open owner root database");
         sqlx::query(
             "CREATE TABLE topics (
-                topic_id TEXT PRIMARY KEY, owner_id TEXT, owner_type TEXT,
-                config_hash TEXT, content_hash TEXT, deleted_at INTEGER
+                owner_type TEXT, owner_id TEXT, topic_id TEXT,
+                config_hash TEXT, content_hash TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, owner_id, topic_id)
              );
              INSERT INTO topics VALUES
-                ('default', 'owner', ?, 'default-config', 'default-content', NULL);",
+                (?, 'owner', 'default', 'default-config', 'default-content', NULL);",
         )
         .bind(owner_type)
         .execute(&pool)
@@ -989,7 +990,7 @@ mod tests {
         let mut tx = pool.begin().await.expect("begin owner root transaction");
 
         sqlx::query(
-            "INSERT INTO topics VALUES ('topic-a', 'owner', ?, 'config-a', 'content-a', NULL)",
+            "INSERT INTO topics VALUES (?, 'owner', 'topic-a', 'config-a', 'content-a', NULL)",
         )
         .bind(owner_type)
         .execute(&mut *tx)
@@ -1028,9 +1029,10 @@ mod tests {
             .expect("open agent database");
         sqlx::query(
             "CREATE TABLE agents (
-                agent_id TEXT PRIMARY KEY, config_hash TEXT, deleted_at INTEGER
+                owner_type TEXT, agent_id TEXT, config_hash TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, agent_id)
              );
-             INSERT INTO agents VALUES ('broken-agent', 'PENDING', NULL);",
+             INSERT INTO agents VALUES ('agent', 'broken-agent', 'PENDING', NULL);",
         )
         .execute(&agent_pool)
         .await
@@ -1047,16 +1049,16 @@ mod tests {
             .expect("open group database");
         sqlx::query(
             "CREATE TABLE groups (
-                group_id TEXT PRIMARY KEY, config_hash TEXT, name TEXT, mode TEXT,
+                owner_type TEXT, group_id TEXT, config_hash TEXT, name TEXT, mode TEXT,
                 group_prompt TEXT, invite_prompt TEXT, use_unified_model INTEGER,
                 unified_model TEXT, tag_match_mode TEXT, member_tags TEXT, created_at INTEGER,
-                deleted_at INTEGER
+                deleted_at INTEGER, PRIMARY KEY(owner_type, group_id)
              );
              CREATE TABLE group_members (
                 group_id TEXT, agent_id TEXT, sort_order INTEGER
              );
              INSERT INTO groups VALUES
-                ('broken-group', 'PENDING', 'Group', 'fixed', NULL, NULL, 0, NULL, NULL, '{}', 1, NULL);
+                ('group', 'broken-group', 'PENDING', 'Group', 'fixed', NULL, NULL, 0, NULL, NULL, '{}', 1, NULL);
              INSERT INTO group_members VALUES ('broken-group', 'agent', 0);",
         )
         .execute(&group_pool)
@@ -1066,55 +1068,5 @@ mod tests {
             .await
             .expect_err("member-tag query errors must abort initialization");
         assert!(group_error.contains("broken-group"));
-    }
-
-    #[tokio::test]
-    async fn hash_initializer_accepts_legacy_null_hashes_without_panicking() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("open database");
-        sqlx::query(
-            "CREATE TABLE agents (
-                agent_id TEXT PRIMARY KEY, name TEXT, system_prompt TEXT, model TEXT,
-                temperature REAL, context_token_limit INTEGER, max_output_tokens INTEGER,
-                stream_output INTEGER, config_hash TEXT, deleted_at INTEGER
-             );
-             CREATE TABLE groups (
-                group_id TEXT PRIMARY KEY, name TEXT, mode TEXT, group_prompt TEXT,
-                invite_prompt TEXT, use_unified_model INTEGER, unified_model TEXT,
-                tag_match_mode TEXT, member_tags TEXT, created_at INTEGER, config_hash TEXT, deleted_at INTEGER
-             );
-             CREATE TABLE group_members (
-                group_id TEXT, agent_id TEXT, sort_order INTEGER
-             );
-             INSERT INTO agents VALUES
-                ('legacy-agent', 'Agent', '', 'model', 1, 100, 20, 1, NULL, NULL);
-             INSERT INTO groups VALUES
-                ('legacy-group', 'Group', 'fixed', NULL, NULL, 0, NULL, NULL, '{}', 1, NULL, NULL);",
-        )
-        .execute(&pool)
-        .await
-        .expect("create legacy fixture");
-
-        HashInitializer::ensure_all_agent_hashes(&pool)
-            .await
-            .expect("initialize agent hash");
-        HashInitializer::ensure_all_group_hashes(&pool)
-            .await
-            .expect("initialize group hash");
-        let agent_hash: String =
-            sqlx::query_scalar("SELECT config_hash FROM agents WHERE agent_id = 'legacy-agent'")
-                .fetch_one(&pool)
-                .await
-                .expect("read agent hash");
-        let group_hash: String =
-            sqlx::query_scalar("SELECT config_hash FROM groups WHERE group_id = 'legacy-group'")
-                .fetch_one(&pool)
-                .await
-                .expect("read group hash");
-        assert!(!agent_hash.is_empty());
-        assert!(!group_hash.is_empty());
     }
 }

@@ -356,6 +356,11 @@ mod tests {
     use super::{
         MessageVersionState, Phase3Message, Phase3StateBudget, MAX_PHASE3_MESSAGES_PER_TOPIC,
     };
+    use crate::vcp_modules::topic_types::TopicKey;
+
+    fn topic(topic_id: &str) -> TopicKey {
+        TopicKey::new("agent", "agent-a", topic_id)
+    }
 
     #[test]
     fn phase3_state_budget_rejects_an_oversized_single_topic_before_loading_rows() {
@@ -376,28 +381,28 @@ mod tests {
             .expect("open database");
         sqlx::query(
             "CREATE TABLE topics (
-                topic_id TEXT PRIMARY KEY, owner_type TEXT, owner_id TEXT,
-                content_hash TEXT, deleted_at INTEGER
+                owner_type TEXT, owner_id TEXT, topic_id TEXT,
+                content_hash TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, owner_id, topic_id)
              );
              CREATE TABLE messages (
-                topic_id TEXT, msg_id TEXT, content_hash TEXT, updated_at INTEGER, deleted_at INTEGER,
-                PRIMARY KEY(topic_id, msg_id)
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT,
+                content_hash TEXT, updated_at INTEGER, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, owner_id, topic_id, msg_id)
              );
              INSERT INTO topics VALUES
-                ('live', 'agent', 'agent-a', 'topic-hash', NULL),
-                ('deleted', 'agent', 'agent-a', 'deleted-hash', 9);",
+                ('agent', 'agent-a', 'live', 'topic-hash', NULL),
+                ('agent', 'agent-a', 'deleted', 'deleted-hash', 9);",
         )
         .execute(&pool)
         .await
         .expect("create fixture");
 
         for missing in ["missing", "deleted"] {
-            let error = Phase3Message::get_topic_message_hashes(
-                &pool,
-                &["live".to_string(), missing.to_string()],
-            )
-            .await
-            .expect_err("missing or tombstoned topic must fail closed");
+            let error =
+                Phase3Message::get_topic_message_hashes(&pool, &[topic("live"), topic(missing)])
+                    .await
+                    .expect_err("missing or tombstoned topic must fail closed");
             assert!(error.contains(missing));
         }
     }
@@ -411,34 +416,37 @@ mod tests {
             .expect("open database");
         sqlx::query(
             "CREATE TABLE topics (
-                topic_id TEXT PRIMARY KEY, owner_type TEXT, owner_id TEXT,
-                content_hash TEXT, deleted_at INTEGER
+                owner_type TEXT, owner_id TEXT, topic_id TEXT,
+                content_hash TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, owner_id, topic_id)
              );
              CREATE TABLE messages (
-                topic_id TEXT, msg_id TEXT, content_hash TEXT, updated_at INTEGER, deleted_at INTEGER,
-                PRIMARY KEY(topic_id, msg_id)
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT,
+                content_hash TEXT, updated_at INTEGER, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, owner_id, topic_id, msg_id)
              );
-             INSERT INTO topics VALUES ('topic', 'agent', 'agent-a', 'topic-hash', NULL);
+             INSERT INTO topics VALUES ('agent', 'agent-a', 'topic', 'topic-hash', NULL);
              INSERT INTO messages VALUES
-                ('topic', 'live', 'live-hash', 123, NULL),
-                ('topic', 'deleted', 'old-hash', 50, 456);",
+                ('agent', 'agent-a', 'topic', 'live', 'live-hash', 123, NULL),
+                ('agent', 'agent-a', 'topic', 'deleted', 'old-hash', 50, 456);",
         )
         .execute(&pool)
         .await
         .expect("create fixture");
 
-        let states = Phase3Message::get_topic_message_hashes(&pool, &["topic".to_string()])
+        let key = topic("topic");
+        let states = Phase3Message::get_topic_message_hashes(&pool, &[key.clone()])
             .await
             .expect("load message states");
         assert_eq!(
-            states["topic"].messages["live"],
+            states[&key].messages["live"],
             MessageVersionState {
                 hash: "live-hash".to_string(),
                 updated_at: 123,
             }
         );
         assert_eq!(
-            states["topic"].messages["deleted"],
+            states[&key].messages["deleted"],
             MessageVersionState {
                 hash: "DELETED".to_string(),
                 updated_at: 456,

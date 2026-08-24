@@ -2436,6 +2436,10 @@ async fn resume_claimed_generation<R: Runtime>(
 mod active_request_tests {
     use super::*;
 
+    fn message_key(message_id: &str) -> MessageKey {
+        MessageKey::new(TopicKey::new("agent", "agent-a", "topic-a"), message_id)
+    }
+
     #[test]
     fn local_attachment_metadata_is_internal_and_labels_never_reveal_parent_paths() {
         let mut message = json!({
@@ -2463,37 +2467,36 @@ mod active_request_tests {
     #[tokio::test]
     async fn duplicate_attempt_is_rejected_and_cancel_reaches_every_step_clone() {
         let requests = ActiveRequests::default();
-        let (lease, first_step) =
-            ActiveRequestLease::try_acquire(requests.0.clone(), "message-1".to_string())
-                .expect("first attempt should register");
+        let key = message_key("message-1");
+        let (lease, first_step) = ActiveRequestLease::try_acquire(requests.0.clone(), key.clone())
+            .expect("first attempt should register");
         let second_step = first_step.clone();
 
-        assert!(
-            ActiveRequestLease::try_acquire(requests.0.clone(), "message-1".to_string()).is_err()
-        );
-        assert!(requests.cancel("message-1").expect("cancel should succeed"));
-        assert!(requests.0.contains_key("message-1"));
+        assert!(ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).is_err());
+        assert!(requests.cancel(&key).expect("cancel should succeed"));
+        assert!(requests.0.contains_key(&key));
         first_step.cancelled().await;
         second_step.cancelled().await;
         assert!(first_step.is_cancelled());
         assert!(requests
-            .cancel("message-1")
+            .cancel(&key)
             .expect("repeated cancel remains idempotent"));
 
         drop(lease);
-        assert!(!requests.0.contains_key("message-1"));
+        assert!(!requests.0.contains_key(&key));
     }
 
     #[test]
     fn stale_lease_cannot_remove_a_new_attempt() {
         let requests = ActiveRequests::default();
+        let key = message_key("message-2");
         let (old_lease, _old_token) =
-            ActiveRequestLease::try_acquire(requests.0.clone(), "message-2".to_string())
+            ActiveRequestLease::try_acquire(requests.0.clone(), key.clone())
                 .expect("old attempt should register");
 
         let new_attempt_id = uuid::Uuid::new_v4();
         requests.0.insert(
-            "message-2".to_string(),
+            key.clone(),
             Arc::new(ActiveRequestEntry {
                 attempt_id: new_attempt_id,
                 cancellation_token: CancellationToken::new(),
@@ -2504,7 +2507,7 @@ mod active_request_tests {
         assert_eq!(
             requests
                 .0
-                .get("message-2")
+                .get(&key)
                 .expect("new attempt must remain")
                 .attempt_id,
             new_attempt_id

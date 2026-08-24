@@ -329,6 +329,7 @@ fn run_render_cache_update_writer(
 #[cfg(test)]
 mod rebuild_cache_tests {
     use super::{resolve_message_updated_at, update_render_cache_if_current};
+    use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 
     #[test]
     fn message_update_time_preserves_remote_and_advances_local_edits() {
@@ -363,29 +364,35 @@ mod rebuild_cache_tests {
         let conn = rusqlite::Connection::open_in_memory().expect("open test database");
         conn.execute_batch(
             "CREATE TABLE messages (
+                owner_type TEXT NOT NULL,
+                owner_id TEXT NOT NULL,
                 topic_id TEXT NOT NULL,
                 msg_id TEXT NOT NULL,
                 content_hash TEXT NOT NULL,
                 deleted_at INTEGER,
-                PRIMARY KEY(topic_id, msg_id)
+                PRIMARY KEY(owner_type, owner_id, topic_id, msg_id)
              );
              CREATE TABLE render_cache (
+                owner_type TEXT NOT NULL,
+                owner_id TEXT NOT NULL,
                 topic_id TEXT NOT NULL,
                 msg_id TEXT NOT NULL,
                 render_content BLOB NOT NULL,
                 content_hash TEXT NOT NULL,
                 renderer_schema_version INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL,
-                PRIMARY KEY(topic_id, msg_id)
+                PRIMARY KEY(owner_type, owner_id, topic_id, msg_id)
              );
-             INSERT INTO messages VALUES ('topic', 'message', 'new-hash', NULL);
-             INSERT INTO render_cache VALUES ('topic', 'message', x'09', 'new-hash', 1, 2);",
+             INSERT INTO messages VALUES
+                ('agent', 'agent-a', 'topic', 'message', 'new-hash', NULL);
+             INSERT INTO render_cache VALUES
+                ('agent', 'agent-a', 'topic', 'message', x'09', 'new-hash', 1, 2);",
         )
         .expect("create cache fixture");
+        let key = MessageKey::new(TopicKey::new("agent", "agent-a", "topic"), "message");
 
-        let stale =
-            update_render_cache_if_current(&conn, "topic", "message", "old-hash", &[1, 2, 3], 3)
-                .expect("stale CAS update");
+        let stale = update_render_cache_if_current(&conn, &key, "old-hash", &[1, 2, 3], 3)
+            .expect("stale CAS update");
         assert_eq!(stale, 0);
 
         let (bytes, hash): (Vec<u8>, String) = conn
@@ -398,9 +405,8 @@ mod rebuild_cache_tests {
         assert_eq!(bytes, vec![9]);
         assert_eq!(hash, "new-hash");
 
-        let current =
-            update_render_cache_if_current(&conn, "topic", "message", "new-hash", &[4, 5, 6], 4)
-                .expect("current CAS update");
+        let current = update_render_cache_if_current(&conn, &key, "new-hash", &[4, 5, 6], 4)
+            .expect("current CAS update");
         assert_eq!(current, 1);
     }
 }
@@ -862,6 +868,7 @@ impl MessageRepository {
 #[cfg(test)]
 mod tombstone_tests {
     use super::MessageRepository;
+    use crate::vcp_modules::topic_types::TopicKey;
 
     async fn test_pool() -> sqlx::SqlitePool {
         sqlx::sqlite::SqlitePoolOptions::new()
@@ -875,36 +882,46 @@ mod tombstone_tests {
     async fn generic_upsert_rejects_deleted_topic_and_message_targets() {
         let pool = test_pool().await;
         sqlx::query(
-            "CREATE TABLE topics (topic_id TEXT PRIMARY KEY, deleted_at INTEGER);
+            "CREATE TABLE topics (
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, deleted_at INTEGER,
+                PRIMARY KEY(owner_type, owner_id, topic_id)
+             );
              CREATE TABLE messages (
+                owner_type TEXT NOT NULL,
+                owner_id TEXT NOT NULL,
                 topic_id TEXT NOT NULL,
                 msg_id TEXT NOT NULL,
                 deleted_at INTEGER,
-                PRIMARY KEY(topic_id, msg_id)
+                PRIMARY KEY(owner_type, owner_id, topic_id, msg_id)
              );",
         )
         .execute(&pool)
         .await
         .expect("create tombstone tables");
         sqlx::query(
-            "INSERT INTO topics VALUES ('live-topic', NULL), ('deleted-topic', 7);
-             INSERT INTO messages VALUES ('live-topic', 'deleted-message', 8);",
+            "INSERT INTO topics VALUES
+                ('agent', 'agent-a', 'live-topic', NULL),
+                ('agent', 'agent-a', 'deleted-topic', 7);
+             INSERT INTO messages VALUES
+                ('agent', 'agent-a', 'live-topic', 'deleted-message', 8);",
         )
         .execute(&pool)
         .await
         .expect("insert tombstones");
 
         let mut tx = pool.begin().await.expect("begin transaction");
-        MessageRepository::ensure_upsert_target_live(&mut tx, "live-topic", "new-message")
+        let live = TopicKey::new("agent", "agent-a", "live-topic");
+        let deleted = TopicKey::new("agent", "agent-a", "deleted-topic");
+        MessageRepository::ensure_upsert_target_live(&mut tx, &live, "new-message")
             .await
             .expect("new message in a live topic is allowed");
         let message_error =
-            MessageRepository::ensure_upsert_target_live(&mut tx, "live-topic", "deleted-message")
+            MessageRepository::ensure_upsert_target_live(&mut tx, &live, "deleted-message")
                 .await
                 .expect_err("message tombstone is monotonic");
         assert!(message_error.contains("tombstoned"));
         let topic_error =
-            MessageRepository::ensure_upsert_target_live(&mut tx, "deleted-topic", "new-message")
+            MessageRepository::ensure_upsert_target_live(&mut tx, &deleted, "new-message")
                 .await
                 .expect_err("topic tombstone blocks child writes");
         assert!(topic_error.contains("deleted or missing"));

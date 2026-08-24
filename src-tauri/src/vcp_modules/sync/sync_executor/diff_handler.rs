@@ -893,14 +893,27 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_non_default_topic_ids_are_still_rejected() {
+    fn topic_diff_uses_the_full_owner_identity_for_duplicates() {
         let items = json!([
             {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-a"},
             {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-b"},
         ]);
-        let err = validate_and_filter_diff_items(items.as_array().unwrap(), &SyncDataType::Topic)
-            .expect_err("duplicate non-default ids must fail");
-        assert!(err.contains("duplicate id"));
+        assert_eq!(
+            validate_and_filter_diff_items(items.as_array().unwrap(), &SyncDataType::Topic)
+                .expect("same topic id under different owners is valid")
+                .0
+                .len(),
+            2
+        );
+
+        let duplicate = json!([
+            {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-a"},
+            {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-a"},
+        ]);
+        let error =
+            validate_and_filter_diff_items(duplicate.as_array().unwrap(), &SyncDataType::Topic)
+                .expect_err("duplicate compound identity must fail");
+        assert!(error.contains("duplicate topic identity"));
     }
 
     #[test]

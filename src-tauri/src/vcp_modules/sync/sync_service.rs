@@ -3677,9 +3677,9 @@ mod tests {
 
     #[tokio::test]
     async fn missing_topic_hash_frame_fails_the_current_attempt() {
-        let expected = Arc::new(AsyncMutex::new(Some(HashSet::from(
-            ["topic-a".to_string()],
-        ))));
+        let expected = Arc::new(AsyncMutex::new(Some(HashSet::from([TopicKey::new(
+            "agent", "agent-a", "topic-a",
+        )]))));
         let phase = Arc::new(AtomicU8::new(3));
         let (tx, mut rx) = mpsc::unbounded_channel();
         enforce_topic_hash_response_deadline(expected, phase, 3, tx, 8, Duration::from_millis(1))
@@ -3696,25 +3696,25 @@ mod tests {
     }
 
     #[test]
-    fn protocol_1_2_version_ack_is_strict_and_uses_public_field_names() {
+    fn protocol_1_3_version_ack_is_strict_and_uses_public_field_names() {
         let ack = parse_version_ack(&json!({
             "type": "VERSION_ACK",
-            "pluginVersion": "1.2.0",
-            "protocolVersion": "1.2",
+            "pluginVersion": "1.3.0",
+            "protocolVersion": "1.3",
         }))
-        .expect("strict 1.2 acknowledgement");
-        assert_eq!(ack.plugin_version, "1.2.0");
-        assert_eq!(ack.protocol_version, "1.2");
+        .expect("strict 1.3 acknowledgement");
+        assert_eq!(ack.plugin_version, "1.3.0");
+        assert_eq!(ack.protocol_version, "1.3");
 
         assert!(parse_version_ack(&json!({
             "type": "VERSION_ACK",
-            "version": "1.2.0",
+            "version": "1.3.0",
         }))
         .is_err());
         assert!(parse_version_ack(&json!({
             "type": "VERSION_ACK",
-            "pluginVersion": "1.2.0",
-            "protocolVersion": 1.2,
+            "pluginVersion": "1.3.0",
+            "protocolVersion": 1.3,
         }))
         .is_err());
     }
@@ -3751,33 +3751,51 @@ mod tests {
     }
 
     #[test]
-    fn changed_topic_list_rejects_wrong_types_empty_ids_and_duplicates() {
+    fn changed_topic_list_requires_unique_compound_identities() {
+        let topic_a = json!({
+            "topicId": "topic-a",
+            "ownerType": "agent",
+            "ownerId": "agent-a",
+        });
+        let topic_b = json!({
+            "topicId": "topic-b",
+            "ownerType": "group",
+            "ownerId": "group-a",
+        });
         assert_eq!(
-            parse_unique_nonempty_strings(
-                &json!(["topic-a", "topic-b"]),
-                "changedTopics",
-                MAX_SYNC_TOPICS,
-            )
-            .expect("valid topic list"),
-            vec!["topic-a".to_string(), "topic-b".to_string()]
+            parse_unique_topic_keys(&json!([topic_a, topic_b]), "changedTopics", MAX_SYNC_TOPICS)
+                .expect("valid topic list"),
+            vec![
+                TopicKey::new("agent", "agent-a", "topic-a"),
+                TopicKey::new("group", "group-a", "topic-b"),
+            ]
         );
         assert!(
-            parse_unique_nonempty_strings(&json!("topic-a"), "changedTopics", MAX_SYNC_TOPICS,)
-                .is_err()
+            parse_unique_topic_keys(&json!("topic-a"), "changedTopics", MAX_SYNC_TOPICS).is_err()
         );
-        assert!(
-            parse_unique_nonempty_strings(&json!([""]), "changedTopics", MAX_SYNC_TOPICS,).is_err()
-        );
-        assert!(parse_unique_nonempty_strings(
-            &json!(["topic-a", "topic-a"]),
+        assert!(parse_unique_topic_keys(
+            &json!([{"topicId":"","ownerType":"agent","ownerId":"agent-a"}]),
             "changedTopics",
             MAX_SYNC_TOPICS,
         )
         .is_err());
-        assert!(
-            parse_unique_nonempty_strings(&json!(["topic-a", "topic-b"]), "changedTopics", 1,)
-                .is_err()
-        );
+        assert!(parse_unique_topic_keys(
+            &json!([topic_a.clone(), topic_a]),
+            "changedTopics",
+            MAX_SYNC_TOPICS,
+        )
+        .is_err());
+        assert!(parse_unique_topic_keys(
+            &json!([
+                topic_b,
+                json!({
+                    "topicId":"topic-c","ownerType":"agent","ownerId":"agent-c"
+                })
+            ]),
+            "changedTopics",
+            1
+        )
+        .is_err());
     }
 
     #[test]
@@ -3793,11 +3811,10 @@ mod tests {
 
         let mut states = HashMap::new();
         for index in 0..3 {
+            let key = TopicKey::new("agent", "agent-a", format!("topic-{index}"));
             states.insert(
-                format!("topic-{index}"),
+                key,
                 TopicLocalState {
-                    owner_type: "agent".to_string(),
-                    owner_id: "agent-a".to_string(),
                     topic_hash: "h".repeat(64),
                     messages: HashMap::from([(
                         format!("message-{index}-{}", "x".repeat(3 * 1024 * 1024)),
@@ -3811,7 +3828,7 @@ mod tests {
         for batch in batches {
             let bytes = serde_json::to_vec(&json!({
                 "type": "SYNC_MESSAGE_DIFF_BATCH",
-                "topics": batch,
+                "topics": batch.topics,
             }))
             .expect("serialize batch");
             assert!(bytes.len() <= MAX_WS_DIFF_BATCH_BYTES);

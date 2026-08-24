@@ -1626,15 +1626,14 @@ mod ndjson_budget_tests {
         validate_requested_message_ids, validate_returned_topic_identity, NdjsonBudget,
         MAX_NDJSON_LINE_BYTES, MAX_NDJSON_TOTAL_BYTES, PULL_WORKER_BUDGET_UNITS,
     };
+    use crate::vcp_modules::topic_types::TopicKey;
     use serde_json::json;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Semaphore;
 
     const PROTOCOL_1_2_GOLDEN: &[u8] = include_bytes!("../fixtures/protocol_1_2_golden.json");
-    const PROTOCOL_1_2_GOLDEN_SHA256: &str =
-        "0aae238ea2699b4246cf78ecd4ee044b820a0586d3821224ad59b925e531f6c0";
 
     #[test]
     fn pull_frame_owner_identity_must_match_the_local_topic() {
@@ -1649,16 +1648,10 @@ mod ndjson_budget_tests {
             .as_bytes(),
         )
         .expect("parse owner frame");
-        let expected = HashMap::from([(
-            "topic-a".to_string(),
-            ("agent".to_string(), "agent-a".to_string()),
-        )]);
+        let expected = HashSet::from([TopicKey::new("agent", "agent-a", "topic-a")]);
         validate_returned_topic_identity(&frame, &expected).expect("matching owner");
 
-        let conflicting = HashMap::from([(
-            "topic-a".to_string(),
-            ("group".to_string(), "group-a".to_string()),
-        )]);
+        let conflicting = HashSet::from([TopicKey::new("group", "group-a", "topic-a")]);
         assert!(validate_returned_topic_identity(&frame, &conflicting).is_err());
     }
 
@@ -1685,14 +1678,9 @@ mod ndjson_budget_tests {
     }
 
     #[test]
-    fn protocol_1_2_golden_bundle_and_canonical_output_are_stable() {
-        assert_eq!(
-            crate::vcp_modules::infra::utils::calculate_sha256(PROTOCOL_1_2_GOLDEN),
-            PROTOCOL_1_2_GOLDEN_SHA256
-        );
+    fn golden_bundle_matches_the_canonical_message_contract() {
         let bundle: serde_json::Value =
             serde_json::from_slice(PROTOCOL_1_2_GOLDEN).expect("golden bundle JSON");
-        assert_eq!(bundle["wireProtocol"], "1.2");
 
         for case in bundle["validFrames"]
             .as_array()

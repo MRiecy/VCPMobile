@@ -716,35 +716,35 @@ impl BatchDiffHandler {
 mod tests {
     use super::*;
 
+    fn topic(topic_id: &str) -> TopicKey {
+        TopicKey::new("agent", "agent-a", topic_id)
+    }
+
     #[test]
     fn phase3_results_must_cover_the_exact_requested_topic_set() {
-        let expected = HashSet::from(["topic-a".to_string(), "topic-b".to_string()]);
-        let complete = serde_json::json!({
-            "topic-a": { "ok": true, "toPush": false, "toPull": [] },
-            "topic-b": { "ok": true, "toPush": false, "toPull": [] }
-        });
-        assert!(validate_phase3_result_topics(
-            &expected,
-            complete.as_object().expect("complete result map")
-        )
-        .is_ok());
+        let expected = HashSet::from([topic("topic-a"), topic("topic-b")]);
+        let complete = vec![
+            json!({"topicId":"topic-a","ownerType":"agent","ownerId":"agent-a"}),
+            json!({"topicId":"topic-b","ownerType":"agent","ownerId":"agent-a"}),
+        ];
+        assert!(validate_phase3_result_topics(&expected, &complete).is_ok());
 
-        let incomplete = serde_json::json!({
-            "topic-a": { "ok": true, "toPush": false, "toPull": [] }
-        });
-        let error = validate_phase3_result_topics(
-            &expected,
-            incomplete.as_object().expect("incomplete result map"),
-        )
-        .expect_err("missing topic must fail phase 3");
+        let incomplete = vec![json!({"topicId":"topic-a","ownerType":"agent","ownerId":"agent-a"})];
+        let error = validate_phase3_result_topics(&expected, &incomplete)
+            .expect_err("missing topic must fail phase 3");
         assert!(error.contains("topic-b"));
+
+        let duplicate = vec![complete[0].clone(), complete[0].clone()];
+        assert!(validate_phase3_result_topics(&expected, &duplicate)
+            .expect_err("duplicate compound identity must fail phase 3")
+            .contains("duplicate topic identity"));
     }
 
     #[test]
     fn phase3_decision_is_a_strict_discriminated_union() {
         assert_eq!(
             parse_topic_decision(
-                "topic-a",
+                &topic("topic-a"),
                 &json!({
                     "ok": true,
                     "toPull": ["message-a"],
@@ -761,7 +761,7 @@ mod tests {
         );
         assert_eq!(
             parse_topic_decision(
-                "topic-a",
+                &topic("topic-a"),
                 &json!({
                     "ok": true,
                     "toPull": [],
@@ -785,11 +785,11 @@ mod tests {
             json!({ "ok": true, "toPull": [], "toPush": false, "toDelete": [{ "msgId": "message-a", "deletedAt": 1 }, { "msgId": "message-a", "deletedAt": 2 }] }),
             json!({ "ok": true, "toPull": ["message-a"], "toPush": false, "toDelete": [{ "msgId": "message-a", "deletedAt": 1 }] }),
         ] {
-            assert!(parse_topic_decision("topic-a", &invalid).is_err());
+            assert!(parse_topic_decision(&topic("topic-a"), &invalid).is_err());
         }
 
         let rejection = parse_topic_decision(
-            "topic-a",
+            &topic("topic-a"),
             &json!({
                 "ok": false,
                 "error": {
@@ -815,28 +815,26 @@ mod tests {
     }
 
     #[test]
-    fn raw_phase3_parser_rejects_duplicate_topic_keys() {
-        let duplicate = r#"{
+    fn raw_phase3_parser_rejects_legacy_result_maps() {
+        let legacy = r#"{
             "type":"SYNC_DIFF_RESULTS_BATCH",
             "results":{
-                "topic-a":{"ok":true,"toPull":[],"toPush":false},
                 "topic-a":{"ok":true,"toPull":[],"toPush":false}
             }
         }"#;
-        let error = parse_phase3_batch_frame(duplicate)
-            .expect_err("duplicate raw JSON topic keys must not be overwritten");
+        let error =
+            parse_phase3_batch_frame(legacy).expect_err("legacy result maps must not be accepted");
         assert_eq!(error.code, "PHASE3_FRAME_INVALID");
-        assert!(error.message.contains("duplicate Phase 3 topic id topic-a"));
     }
 
     #[test]
     fn push_topic_failure_rejects_the_batch() {
-        let expected = vec!["topic-a".to_string()];
+        let expected = vec![topic("topic-a")];
         let error = validate_topic_batch_outcomes(
             "push",
             &expected,
             Ok(vec![TopicBatchOutcome {
-                topic_id: "topic-a".to_string(),
+                topic: topic("topic-a"),
                 success: false,
                 error: Some("desktop rejected upload".to_string()),
             }]),
@@ -849,12 +847,12 @@ mod tests {
 
     #[test]
     fn missing_pull_topic_rejects_the_batch() {
-        let expected = vec!["topic-a".to_string(), "topic-b".to_string()];
+        let expected = vec![topic("topic-a"), topic("topic-b")];
         let error = validate_topic_batch_outcomes(
             "pull",
             &expected,
             Ok(vec![TopicBatchOutcome {
-                topic_id: "topic-a".to_string(),
+                topic: topic("topic-a"),
                 success: true,
                 error: None,
             }]),
@@ -867,18 +865,18 @@ mod tests {
 
     #[test]
     fn duplicate_or_unexpected_batch_outcomes_are_rejected() {
-        let expected = vec!["topic-a".to_string()];
+        let expected = vec![topic("topic-a")];
         let duplicate = validate_topic_batch_outcomes(
             "push",
             &expected,
             Ok(vec![
                 TopicBatchOutcome {
-                    topic_id: "topic-a".to_string(),
+                    topic: topic("topic-a"),
                     success: true,
                     error: None,
                 },
                 TopicBatchOutcome {
-                    topic_id: "topic-a".to_string(),
+                    topic: topic("topic-a"),
                     success: true,
                     error: None,
                 },
@@ -891,7 +889,7 @@ mod tests {
             "push",
             &expected,
             Ok(vec![TopicBatchOutcome {
-                topic_id: "topic-b".to_string(),
+                topic: topic("topic-b"),
                 success: true,
                 error: None,
             }]),
@@ -902,7 +900,7 @@ mod tests {
 
     #[test]
     fn batch_error_rejects_all_expected_topics() {
-        let expected = vec!["topic-b".to_string(), "topic-a".to_string()];
+        let expected = vec![topic("topic-b"), topic("topic-a")];
         let error =
             validate_topic_batch_outcomes("push", &expected, Err("transport closed".to_string()))
                 .expect_err("a batch-level error must fail phase 3");

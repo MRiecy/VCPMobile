@@ -273,6 +273,7 @@ impl Phase1Metadata {
 #[cfg(test)]
 mod tests {
     use super::Phase1Metadata;
+    use crate::vcp_modules::topic_types::OwnerKey;
 
     #[tokio::test]
     async fn avatar_manifest_preserves_tombstones() {
@@ -313,22 +314,24 @@ mod tests {
             .expect("open database");
         sqlx::query(
             "CREATE TABLE topics (
-                topic_id TEXT, config_hash TEXT, content_hash TEXT,
-                updated_at INTEGER, owner_type TEXT, owner_id TEXT,
-                deleted_at INTEGER
+                owner_type TEXT, owner_id TEXT, topic_id TEXT,
+                config_hash TEXT, content_hash TEXT, updated_at INTEGER,
+                deleted_at INTEGER, PRIMARY KEY(owner_type, owner_id, topic_id)
              );
              INSERT INTO topics VALUES
-                ('topic-a', 'config-hash', 'content-hash', 10,
-                 'agent', 'agent-a', NULL);",
+                ('agent', 'agent-a', 'topic-a', 'config-hash',
+                 'content-hash', 10, NULL);",
         )
         .execute(&pool)
         .await
         .expect("create topic fixture");
 
-        let manifest =
-            Phase1Metadata::build_targeted_topic_manifest(&pool, &["agent-a".to_string()])
-                .await
-                .expect("build topic manifest");
+        let manifest = Phase1Metadata::build_targeted_topic_manifest(
+            &pool,
+            &[OwnerKey::new("agent", "agent-a")],
+        )
+        .await
+        .expect("build topic manifest");
         assert_eq!(manifest.items.len(), 1);
         assert_eq!(manifest.items[0].owner_type.as_deref(), Some("agent"));
         assert_eq!(manifest.items[0].owner_id.as_deref(), Some("agent-a"));

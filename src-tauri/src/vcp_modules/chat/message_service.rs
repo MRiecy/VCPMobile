@@ -1796,18 +1796,27 @@ mod stream_lifecycle_tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
 
+    fn topic_key() -> TopicKey {
+        TopicKey::new("agent", "agent-1", "topic-1")
+    }
+
+    fn message_key(message_id: &str) -> MessageKey {
+        MessageKey::new(topic_key(), message_id)
+    }
+
     async fn test_pool() -> sqlx::SqlitePool {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
             .expect("in-memory sqlite");
-        sqlx::migrate!("./migrations")
-            .run(&pool)
+        sqlx::raw_sql(include_str!("../../../migrations/0100_baseline_v2.sql"))
+            .execute(&pool)
             .await
-            .expect("migrations");
+            .expect("baseline schema");
         sqlx::query(
-            "INSERT INTO agents (agent_id, name, model, updated_at) VALUES ('agent-1', 'Agent', 'test', 1)",
+            "INSERT INTO agents (owner_type, agent_id, name, model, updated_at)
+             VALUES ('agent', 'agent-1', 'Agent', 'test', 1)",
         )
         .execute(&pool)
         .await
@@ -1838,8 +1847,10 @@ mod stream_lifecycle_tests {
         );
         sqlx::query(
             "INSERT INTO messages (
-                msg_id, topic_id, role, content, timestamp, content_hash, created_at, updated_at
-             ) VALUES ('message-with-attachments', 'topic-1', 'user', 'hello', 1, ?, 1, 10)",
+                owner_type, owner_id, topic_id, msg_id, role, content, timestamp,
+                content_hash, created_at, updated_at
+             ) VALUES ('agent', 'agent-1', 'topic-1', 'message-with-attachments',
+                       'user', 'hello', 1, ?, 1, 10)",
         )
         .bind(&old_hash)
         .execute(&pool)
@@ -1847,10 +1858,11 @@ mod stream_lifecycle_tests {
         .expect("message fixture");
         sqlx::query(
             "INSERT INTO message_attachments (
-                topic_id, msg_id, hash, attachment_order, display_name, created_at
+                owner_type, owner_id, topic_id, msg_id, hash, attachment_order,
+                display_name, created_at
              ) VALUES
-                ('topic-1', 'message-with-attachments', ?, 0, 'a', 1),
-                ('topic-1', 'message-with-attachments', ?, 1, 'b', 1)",
+                ('agent', 'agent-1', 'topic-1', 'message-with-attachments', ?, 0, 'a', 1),
+                ('agent', 'agent-1', 'topic-1', 'message-with-attachments', ?, 1, 'b', 1)",
         )
         .bind(&hash_a)
         .bind(&hash_b)
@@ -1858,7 +1870,7 @@ mod stream_lifecycle_tests {
         .await
         .expect("attachment relation fixtures");
         let mut tx = pool.begin().await.expect("begin initial hash transaction");
-        HashAggregator::bubble_from_topic(&mut tx, "topic-1")
+        HashAggregator::bubble_from_topic(&mut tx, &topic_key())
             .await
             .expect("initialize aggregate hashes");
         tx.commit().await.expect("commit initial hashes");
@@ -1918,17 +1930,10 @@ mod stream_lifecycle_tests {
     #[tokio::test]
     async fn pending_generation_can_only_finalize_once() {
         let pool = test_pool().await;
-        begin_stream_message(
-            &pool,
-            "agent-1",
-            "agent",
-            "topic-1",
-            "message-1",
-            Some("agent-1"),
-            Some("Agent"),
-        )
-        .await
-        .expect("begin generation");
+        let key = message_key("message-1");
+        begin_stream_message(&pool, &key, Some("agent-1"), Some("Agent"))
+            .await
+            .expect("begin generation");
         let topic_updated_after_begin: i64 =
             sqlx::query_scalar("SELECT updated_at FROM topics WHERE topic_id = 'topic-1'")
                 .fetch_one(&pool)
@@ -1936,17 +1941,11 @@ mod stream_lifecycle_tests {
                 .expect("topic time after begin");
         assert_eq!(topic_updated_after_begin, 1);
 
-        assert!(begin_stream_message(
-            &pool,
-            "agent-1",
-            "agent",
-            "topic-1",
-            "message-1",
-            Some("agent-1"),
-            Some("Agent"),
-        )
-        .await
-        .is_err());
+        assert!(
+            begin_stream_message(&pool, &key, Some("agent-1"), Some("Agent"),)
+                .await
+                .is_err()
+        );
 
         let skeleton: (i64, Option<String>, Option<String>) = sqlx::query_as(
             "SELECT timestamp, name, agent_id FROM messages WHERE msg_id = 'message-1'",
@@ -1957,10 +1956,7 @@ mod stream_lifecycle_tests {
 
         let (_, terminal_timestamp) = commit_stream_message(
             &pool,
-            "agent-1",
-            "agent",
-            "topic-1",
-            "message-1",
+            &key,
             "terminal body",
             2,
             "completed",
@@ -1998,10 +1994,7 @@ mod stream_lifecycle_tests {
         assert_eq!(active, 0);
         assert!(commit_stream_message(
             &pool,
-            "agent-1",
-            "agent",
-            "topic-1",
-            "message-1",
+            &key,
             "late body",
             3,
             "completed",
@@ -2022,10 +2015,7 @@ mod stream_lifecycle_tests {
 
         let error = begin_stream_message(
             &pool,
-            "agent-1",
-            "agent",
-            "topic-1",
-            "message-after-delete",
+            &message_key("message-after-delete"),
             Some("agent-1"),
             Some("Agent"),
         )
@@ -2051,17 +2041,10 @@ mod stream_lifecycle_tests {
     #[tokio::test]
     async fn finalization_failure_rolls_back_and_keeps_recovery_record() {
         let pool = test_pool().await;
-        begin_stream_message(
-            &pool,
-            "agent-1",
-            "agent",
-            "topic-1",
-            "message-2",
-            Some("agent-1"),
-            Some("Agent"),
-        )
-        .await
-        .expect("begin generation");
+        let key = message_key("message-2");
+        begin_stream_message(&pool, &key, Some("agent-1"), Some("Agent"))
+            .await
+            .expect("begin generation");
         sqlx::query("DELETE FROM render_cache WHERE msg_id = 'message-2'")
             .execute(&pool)
             .await
@@ -2069,10 +2052,7 @@ mod stream_lifecycle_tests {
 
         assert!(commit_stream_message(
             &pool,
-            "agent-1",
-            "agent",
-            "topic-1",
-            "message-2",
+            &key,
             "must roll back",
             2,
             "completed",
@@ -2100,27 +2080,22 @@ mod stream_lifecycle_tests {
     #[tokio::test]
     async fn tombstoned_generation_rejects_late_finalization() {
         let pool = test_pool().await;
-        begin_stream_message(
+        let key = message_key("message-deleted");
+        begin_stream_message(&pool, &key, Some("agent-1"), Some("Agent"))
+            .await
+            .expect("begin generation");
+
+        delete_messages(
             &pool,
-            "agent-1",
-            "agent",
-            "topic-1",
-            "message-deleted",
-            Some("agent-1"),
-            Some("Agent"),
+            &topic_key(),
+            vec!["message-deleted".to_string()],
+            None,
         )
         .await
-        .expect("begin generation");
-
-        delete_messages(&pool, "topic-1", vec!["message-deleted".to_string()], None)
-            .await
-            .expect("delete generation");
+        .expect("delete generation");
         assert!(commit_stream_message(
             &pool,
-            "agent-1",
-            "agent",
-            "topic-1",
-            "message-deleted",
+            &key,
             "late terminal body",
             999,
             "completed",
@@ -2148,17 +2123,10 @@ mod stream_lifecycle_tests {
     #[tokio::test]
     async fn render_cache_rejects_stale_hash_and_invalid_identity() {
         let pool = test_pool().await;
-        begin_stream_message(
-            &pool,
-            "agent-1",
-            "agent",
-            "topic-1",
-            "message-cache",
-            Some("agent-1"),
-            Some("Agent"),
-        )
-        .await
-        .expect("begin generation");
+        let key = message_key("message-cache");
+        begin_stream_message(&pool, &key, Some("agent-1"), Some("Agent"))
+            .await
+            .expect("begin generation");
         let old_hash: String =
             sqlx::query_scalar("SELECT content_hash FROM messages WHERE msg_id = 'message-cache'")
                 .fetch_one(&pool)
@@ -2181,15 +2149,11 @@ mod stream_lifecycle_tests {
         let (_, stale_bytes) = compile_and_serialize_render_async("stale".to_string())
             .await
             .expect("compile stale");
-        assert!(!write_render_cache_cas(
-            &pool,
-            "topic-1",
-            "message-cache",
-            &old_hash,
-            &stale_bytes,
-        )
-        .await
-        .expect("cache CAS"));
+        assert!(
+            !write_render_cache_cas(&pool, &key, &old_hash, &stale_bytes,)
+                .await
+                .expect("cache CAS")
+        );
         let after_bytes: Vec<u8> = sqlx::query_scalar(
             "SELECT render_content FROM render_cache WHERE msg_id = 'message-cache'",
         )
