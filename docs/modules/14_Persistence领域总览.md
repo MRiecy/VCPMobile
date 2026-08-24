@@ -26,7 +26,7 @@ related: [db_manager.rs, db_write_queue.rs, message_repository.rs, sync_service.
 |------|------|---------|-------------|
 | 数据库管理器 | `db_manager.rs` | 连接池生命周期、Schema 初始化与迁移、PRAGMA 调优 | sqlx 异步连接池 (`max_connections=5`) + WAL 模式 |
 | 写入队列 | `db_write_queue.rs` | 单工作线程批量写入、消除 SQLite 并发锁竞争、同步哈希冒泡 | mpsc 队列 + `spawn_blocking` + rusqlite 直连 |
-| 消息仓储 | `message_repository.rs` | 消息读写、渲染编译、内容压缩、全量重建/压缩维护任务 | `MessageRenderCompiler` + `ContentCompressor` + 三段流水线 |
+| 消息仓储 | `message_repository.rs` | 消息读写、渲染编译、现有缓存刷新 | `MessageRenderCompiler` + 三段流水线 |
 
 ### 1.3 整体数据流
 
@@ -536,7 +536,7 @@ match result {
 
 ## 4. 消息仓储（`message_repository.rs`）
 
-`message_repository.rs`（~580 行）负责消息的**渲染编译**、**仓储操作**以及**全量维护任务**（预渲染重建）。内容压缩（`compress_all_contents`）已在 v0.9.14 移除。
+`message_repository.rs` 负责消息的**渲染编译**、**仓储操作**以及已有预渲染缓存刷新。
 
 ### 4.1 MessageRenderCompiler
 
@@ -562,7 +562,7 @@ impl MessageRenderCompiler {
 - 移动端解析长文本的 Markdown/代码块/HTML 是 CPU 密集型操作。
 - 首次渲染时由 Rust 编译为 AST 二进制并入库；后续加载直接从 `render_cache` 反序列化，前端无需重复解析。
 - 尤其利好长对话回溯场景：切换话题时消息列表秒开。
-- `render_cache` 作为独立表，允许全量重建而不影响 `messages` 表的主数据。
+- `render_cache` 作为独立表，允许单独刷新已有缓存而不影响 `messages` 表的主数据。
 
 ### 4.2 process_message_content
 
@@ -607,7 +607,7 @@ impl MessageRepository {
 
 2. **写入 messages 表**（L430–L466）：
    - `INSERT ... ON CONFLICT(topic_id, msg_id) DO UPDATE SET ...`。
-   - `content` 字段通过 `ContentCompressor::compress(&message.content)?` 存储为 zstd 二进制。
+   - `content` 字段直接存储明文 TEXT。
    - `deleted_at = NULL`：若消息曾被软删除，本次 UPSERT 恢复。
    - `created_at` 和 `updated_at` 均使用 `message.timestamp`（保证同一条消息在不同场景下时间戳一致）。
 
@@ -638,7 +638,7 @@ v0.9.14 对消息加载流程进行了重大重构，引入**懒渲染缓存策�
 │   ├─Yes 且 hash/schema 匹配─→ deserialize_render_async(rb) → blocks
 │   │        跳过编译，直接返回
 │   │
-│   └─No──→ ContentCompressor::decompress(content)
+│   └─No──→ 使用明文 content
 │            有界 spawn_blocking 编译/序列化
 │            serde_json::to_value(&compiled) → blocks
 │            │
@@ -727,14 +727,14 @@ fn run_render_cache_update_writer(
 - 由 `rebuild_all_pre_renders` 创建多个 `spawn_blocking` 并行 Worker。
 - 并发度：`std::thread::available_parallelism().clamp(2, 12)`，根据设备核心数自适应，最低 2 线程保证基础并行，最高 12 线程防止线程爆炸。
 
-### 4.5 全量预渲染重建
+### 4.5 现有预渲染缓存刷新
 
 ```rust
 #[tauri::command]
 pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String>
 ```
 
-**触发场景**：内容解析器升级后，旧消息的 `render_cache` 可能与新前端渲染逻辑不兼容，需要全量重建。
+**触发场景**：内容解析器升级后，刷新已经存在的 `render_cache` 项。
 
 **三段流水线执行**（L181–L293）：
 
@@ -758,7 +758,7 @@ Stage 3: Writer (spawn_blocking)
         └─→ 发射事件 "render_rebuild_progress"
 ```
 
-Reader 将读取时的 `content_hash` 随编译结果传到 Writer。Writer 通过 `update_render_cache_if_current` 做 hash-CAS；若正文在编译期间被编辑或删除，该旧结果更新 0 行，不能覆盖新缓存。普通懒渲染与全量重建因此遵守同一缓存提交条件。
+Reader 将读取时的 `content_hash` 随编译结果传到 Writer。Writer 通过 `update_render_cache_if_current` 做 hash-CAS；若正文在编译期间被编辑或删除，该旧结果更新 0 行，不能覆盖新缓存。普通懒渲染与缓存刷新因此遵守同一缓存提交条件。
 
 **优雅停机机制**：
 - Reader 完成后 `drop(tx_compiler)`，Compiler Workers 的 `blocking_recv()` 收到 `None` 后发送残余 batch 并退出。
@@ -794,7 +794,6 @@ persistence/
 │   └─→ 被 message_repository.rs 引用：DbState.pool 用于普通查询
 │
 ├── db_write_queue.rs
-│   ├─→ 引用 message_repository.rs：ContentCompressor::compress（消息内容压缩）
 │   ├─→ 引用 sync_dto.rs：AgentSyncDTO, GroupSyncDTO, AgentTopicSyncDTO, GroupTopicSyncDTO
 │   ├─→ 引用 sync_hash.rs：HashAggregator（配置/元数据哈希计算）
 │   ├─→ 引用 sync_types.rs：compute_merkle_root（Merkle Root 计算）
@@ -805,8 +804,7 @@ persistence/
 └── message_repository.rs
     ├─→ 引用 chat_manager.rs：ChatMessage
     ├─→ 引用 content_parser.rs：parse_content, ContentBlock（渲染编译）
-    ├─→ 引用 sync_hash.rs：HashAggregator（消息指纹与冒泡）
-    └─→ 被 db_write_queue.rs 引用：ContentCompressor::compress
+    └─→ 引用 sync_hash.rs：HashAggregator（消息指纹与冒泡）
 ```
 
 ### 5.2 跨领域依赖
@@ -869,12 +867,11 @@ Agent/Group 同步写绕过业务 Facade，因此 session 成功或失败退出�
 | **哈希冒泡** | 自底向上重新计算并更新 content_hash / config_hash | `db_write_queue.rs` L637 |
 | **Merkle Root** | 对有序哈希列表计算出的聚合根哈希 | `sync_types.rs` |
 | **MessageRenderCompiler** | 消息渲染编译器，将文本转为 AST 二进制缓存 | `message_repository.rs` L10 |
-| **ContentCompressor** | zstd 文本压缩/解压器，用于 messages.content 存储与读取 | `message_service.rs` |
 | **render_cache** | 独立表，存储预编译的 AST zstd 二进制；v0.9.14 起条件写入（仅非空时插入） | `db_manager.rs` L242 |
-| **三段流水线** | Reader → Processor → Writer 的通用全量维护架构；仅保留预渲染重建 | `message_repository.rs` L74 |
+| **三段流水线** | Reader → Processor → Writer 的现有预渲染缓存刷新管线 | `message_repository.rs` L74 |
 | **复合主键** | messages 表主键为 `(topic_id, msg_id)`，支持按话题分片 | `db_manager.rs` L219 |
 | **内容寻址** | attachments 表以 SHA-256 hash 为主键，物理文件同名存储 | `db_manager.rs` L401 |
-| **增量迁移** | 通过检测列/主键存在性，对存量数据库执行渐进式升级 | `db_manager.rs` L188 |
+| **0100 baseline** | 全新安装的终态 Schema；不兼容旧库在启动时被拒绝 | `db_manager.rs` |
 | **懒渲染缓存** | render_cache 命中直接反序列化 blocks；未命中编译后异步回写 | `message_service.rs` |
 | **re_render_message** | 手动强制重新编译单条消息并更新 render_cache 的 Tauri 命令 | `message_service.rs` |
 | **快照读** | WAL 模式下读操作基于事务开始时的数据库快照 | `db_manager.rs` L44 |
@@ -887,8 +884,8 @@ Agent/Group 同步写绕过业务 Facade，因此 session 成功或失败退出�
 >
 > 1. **双通道数据库访问**：查询走 sqlx 异步连接池，写入走 DbWriteQueue + rusqlite 同步直连。两者共享同一物理数据库文件，通过 WAL 模式协调并发。
 > 2. **批量事务合并**：DbWriteQueue Worker 以 10ms 窗口 + 32 任务/500 消息上限合并事务，在吞吐与交互写延迟之间取平衡。
-> 3. **render_cache 独立表**：将预渲染 AST 二进制从 messages 表剥离，避免消息表膨胀，同时使全量重建可独立进行而不影响消息正文。
-> 4. **zstd 压缩全链路**：messages.content 和 render_cache.render_content 均以 zstd level=3 压缩存储，纯文本压缩比通常 3–10 倍。
+> 3. **render_cache 独立表**：将预渲染 AST 二进制从 messages 表剥离，避免消息表膨胀，同时允许独立刷新已有缓存。
+> 4. **存储格式分工**：`messages.content` 保存明文 TEXT，`render_cache.render_content` 保存 zstd 压缩 AST。
 > 5. **哈希冒泡分层去重**：事务提交后先批量校验 Owner 存在性，再执行 Topic → Owner 的两层冒泡，避免对幽灵数据做无意义计算。
 > 6. **懒渲染缓存闭环**：加载时 render_cache 命中即走；未命中实时编译并异步回写，确保首次访问后的后续加载均为 O(1) 反序列化。
-> 7. **渐进式 Schema 迁移**：通过检测 `pragma_table_info` 和 `ALTER TABLE ... ADD COLUMN` 的幂等执行，实现无版本号数据库升级。
+> 7. **Schema 基线**：全新安装执行 0100 baseline；不兼容旧数据库由启动检查明确拒绝。

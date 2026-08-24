@@ -134,13 +134,12 @@ if let Ok(mut path) = app_handle.path().document_dir() {
 └───────┬───────┘       └───────┬───────┘       └───────┬───────┘
         │                       │                       │
  物理抹除HTTP Cache     双向"幽灵"磁盘校验       物理清除V8字节码
- 释放WebView页面内存    CPU协作式时间片挂起     SQLite PRAGMA碎片整理
+                        CPU协作式时间片挂起     SQLite PRAGMA碎片整理
                         保障WebView满帧渲染     (绝对不伤sync_logs)
 ```
 
-### 6.1 Level 1：网页状态与物理 HTTP 缓存清扫
-* **Tauri 接口标准清理**：调用 Tauri 原生 `clear_all_browsing_data()`，释放 WebView 当前运行占用的页面缓存与图片缓存。
-* **物理 HTTP 缓存一剪梅**：由于 Android 底层 Chromium 机制限制，原生 API 无法立即释放磁盘上的 HTTP Cache。Level 1 管道通过强行物理定位并删除 `/cache/WebView/Default/HTTP Cache` 目录，一举粉碎顽固积压的网页静态数据，彻底治愈存储死结。
+### 6.1 Level 1：物理 HTTP 缓存清扫
+* 删除 `/cache/WebView/Default/HTTP Cache` 目录，只回收 HTTP 缓存；LocalStorage、Cookie 和应用会话状态保持不变。
 
 ### 6.2 Level 2：冷启动附件 GC
 * **索引回收**：Core Ready 前扫描 `attachments`，完整删除没有存活消息关系的 CAS、缩略图、多模态缓存和索引。

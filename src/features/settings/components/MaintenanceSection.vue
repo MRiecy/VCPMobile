@@ -47,11 +47,11 @@ const openRebuildSession = () => {
 
     <div class="pt-4 border-t border-black/5 dark:border-white/5">
       <SettingsActionWithStatus
-        title="全量预渲染重建"
-        description="对数据库中所有历史消息进行高性能 AST 重新解析与代码高亮固化"
+        title="刷新现有预渲染缓存"
+        description="重新解析已有缓存项的 AST 与代码高亮"
         button-variant="primary"
         button-size="sm"
-        button-label="一键重建"
+        button-label="开始刷新"
         status-mono
         @action-click="openRebuildSession"
       />

@@ -406,7 +406,7 @@ mod rebuild_cache_tests {
 }
 
 // =================================================================
-// 任务 1：全量预渲染重建
+// 任务 1：刷新现有预渲染缓存
 // =================================================================
 
 #[tauri::command]
@@ -427,7 +427,7 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
     #[cfg(target_os = "android")]
     let _ = tauri_plugin_vcp_mobile::stream::start_stream_service_inner(
         &app_handle,
-        "[预渲染重建] VCP Mobile",
+        "[预渲染缓存刷新] VCP Mobile",
     );
 
     let (tx_compiler, rx_compiler) = mpsc::channel::<CachedMessageSource>(1000);
@@ -520,7 +520,7 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
     #[cfg(target_os = "android")]
     let _ = tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(
         &app_handle,
-        "[预渲染重建] VCP Mobile",
+        "[预渲染缓存刷新] VCP Mobile",
     );
 
     reader_result?;

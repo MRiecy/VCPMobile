@@ -526,6 +526,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
   const close = async () => {
     if (!isOpen.value || !canDismiss.value) return;
     const shouldReload = needsReload.value;
+    needsReload.value = false;
     viewGeneration += 1;
     startAttempt += 1;
     isOpen.value = false;
@@ -547,8 +548,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         await useDataReload().performFullReload();
       } catch (error) {
         console.error("[SyncSession] Failed to reload synchronized data:", error);
-      } finally {
-        needsReload.value = false;
       }
     }
   };
