@@ -148,6 +148,9 @@ const prepareShareFiles = async (content: SharedContentData, operationId: string
   if (files.length > 0) {
     try {
       console.log(`[App] Registering ${files.length} shared file(s)...`);
+      for (const file of files) {
+        await invoke("check_attachment_support", { originalName: file.fileName });
+      }
       const stagedResults = await invoke<PickedFileInfo[]>("plugin:vcp-mobile|register_shared_files", {
         ownerId: content.intentId,
         files: files.map((f) => ({
@@ -182,10 +185,16 @@ const prepareShareFiles = async (content: SharedContentData, operationId: string
       if (!shareIntentOwner.isCurrent(operationId)) return;
       pendingSharedFiles.value = results;
       console.log(`[App] Shared files registered: ${results.length}`);
-    } catch {
+    } catch (error) {
       if (!shareIntentOwner.isCurrent(operationId)) return;
-      console.error("[App] Failed to register shared files");
+      console.error("[App] Failed to register shared files", error);
       pendingSharedFiles.value = [];
+      notificationStore.addNotification({
+        type: "error",
+        title: "分享附件处理失败",
+        message: error instanceof Error ? error.message : String(error),
+        toastOnly: false,
+      });
     }
   } else {
     pendingSharedFiles.value = [];

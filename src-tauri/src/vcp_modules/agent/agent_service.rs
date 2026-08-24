@@ -509,6 +509,15 @@ pub async fn delete_agent_internal<R: Runtime>(
     .await
     .map_err(|e| e.to_string())?;
 
+    sqlx::query(
+        "DELETE FROM message_attachments
+         WHERE owner_type = 'agent' AND owner_id = ?",
+    )
+    .bind(agent_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
     sqlx::query("DELETE FROM render_cache WHERE owner_type = 'agent' AND owner_id = ?")
         .bind(agent_id)
         .execute(&mut *tx)

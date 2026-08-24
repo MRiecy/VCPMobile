@@ -257,6 +257,7 @@ const handleIconTouchEnd = async (e: TouchEvent) => {
         toastOnly: true,
       });
     } else {
+      const voiceConversation = sessionStore.currentConversationKey;
       const result = await stopRecording();
       if (result) {
         try {
@@ -269,20 +270,29 @@ const handleIconTouchEnd = async (e: TouchEvent) => {
           });
 
           if (finalData) {
-            // 塞入 stagedAttachments
-            attachmentStore.stagedAttachments.unshift({
-              id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-              type: finalData.type,
-              src: finalData.internalPath,
-              name: finalData.name,
-              size: finalData.size,
-              hash: finalData.hash,
-              status: 'done',
-            });
-            
-            // 松手直接以附件形式发送
-            await nextTick();
-            handleSend();
+            if (!sessionStore.isConversationCurrent(voiceConversation)) {
+              notificationStore.addNotification({
+                type: 'warning',
+                title: '语音未发送',
+                message: '录音处理期间会话已切换，请在目标会话重新录制。',
+                toastOnly: true,
+              });
+            } else {
+              // 塞入 stagedAttachments
+              attachmentStore.stagedAttachments.unshift({
+                id: `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                type: finalData.type,
+                src: finalData.internalPath,
+                name: finalData.name,
+                size: finalData.size,
+                hash: finalData.hash,
+                status: 'done',
+              });
+
+              // 松手直接以附件形式发送
+              await nextTick();
+              handleSend();
+            }
           }
         } catch (err: any) {
           console.error('[InputEnhancer] Direct send voice failed:', err);

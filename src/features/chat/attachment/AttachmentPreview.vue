@@ -101,7 +101,7 @@ const removeAttachment = async (index: number) => {
 
   const confirmed = await overlayStore.showConfirm({
     title: "移除附件",
-    message: "是否确定要移除该附件？该操作仅会隐藏历史消息中的附件，您仍能继续使用此模型进行对话。",
+    message: "是否确定要从这条消息中移除该附件？其他消息对同一文件的引用不会受到影响。",
     isDanger: true
   });
   if (!confirmed) return;
