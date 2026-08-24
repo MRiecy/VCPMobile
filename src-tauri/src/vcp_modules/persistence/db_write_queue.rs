@@ -69,7 +69,7 @@ mod tests {
         assert!(DbWriteQueue::take_pending_errors(&mut errors).is_ok());
     }
 
-    fn assert_queued_owner_root_excludes_default(owner_type: &str) {
+    fn assert_queued_owner_root_includes_default(owner_type: &str) {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open owner root database");
         conn.execute_batch(
             "CREATE TABLE agents (
@@ -123,11 +123,16 @@ mod tests {
         )
         .expect("insert ordinary topic");
         bubble(&tx).expect("bubble ordinary topic");
-        let ordinary_root = read_root(&tx).expect("read ordinary root");
+        let initial_root = read_root(&tx).expect("read initial root");
         assert_eq!(
-            ordinary_root,
+            initial_root,
             crate::vcp_modules::sync_types::compute_merkle_root(vec![
-                HashAggregator::compute_topic_leaf_hash("topic-a", "config-a", "content-a",),
+                HashAggregator::compute_topic_leaf_hash(
+                    "default",
+                    "default-config",
+                    "default-content",
+                ),
+                HashAggregator::compute_topic_leaf_hash("topic-a", "config-a", "content-a"),
             ])
         );
 
@@ -137,13 +142,12 @@ mod tests {
         )
         .expect("change default topic");
         bubble(&tx).expect("bubble changed default topic");
-        assert_eq!(read_root(&tx).expect("read unchanged root"), ordinary_root);
+        assert_ne!(read_root(&tx).expect("read changed root"), initial_root);
     }
 
     #[test]
-    fn queued_owner_root_hashes_exclude_default_topics() {
-        assert_queued_owner_root_excludes_default("agent");
-        assert_queued_owner_root_excludes_default("group");
+    fn queued_owner_root_hashes_include_default_topics() {
+        assert_queued_owner_root_includes_default("agent");
     }
 
     #[test]
@@ -1547,7 +1551,7 @@ impl DbWriteQueue {
         tx: &rusqlite::Transaction,
         agent_id: &str,
     ) -> rusqlite::Result<()> {
-        let mut stmt = tx.prepare("SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'agent' AND topic_id <> 'default' AND deleted_at IS NULL ORDER BY topic_id ASC")?;
+        let mut stmt = tx.prepare("SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'agent' AND deleted_at IS NULL ORDER BY topic_id ASC")?;
         let mut rows = stmt.query([agent_id])?;
         let mut hashes = Vec::new();
         while let Some(row) = rows.next()? {
@@ -1575,7 +1579,7 @@ impl DbWriteQueue {
         tx: &rusqlite::Transaction,
         group_id: &str,
     ) -> rusqlite::Result<()> {
-        let mut stmt = tx.prepare("SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'group' AND topic_id <> 'default' AND deleted_at IS NULL ORDER BY topic_id ASC")?;
+        let mut stmt = tx.prepare("SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'group' AND deleted_at IS NULL ORDER BY topic_id ASC")?;
         let mut rows = stmt.query([group_id])?;
         let mut hashes = Vec::new();
         while let Some(row) = rows.next()? {

@@ -135,9 +135,6 @@ impl Phase1Metadata {
                 let id: String = row
                     .try_get("topic_id")
                     .map_err(|error| format!("Topic manifest id decode failed: {error}"))?;
-                if id == "default" {
-                    continue;
-                }
                 let config_hash: String = row.try_get("config_hash").map_err(|error| {
                     format!("Topic manifest config hash decode failed for {id}: {error}")
                 })?;

@@ -97,9 +97,6 @@ impl Phase3Message {
                 let topic_id: String = row
                     .try_get("topic_id")
                     .map_err(|error| format!("Targeted topic id decode failed: {error}"))?;
-                if topic_id == "default" {
-                    continue;
-                }
                 let config_hash: String = row.try_get("config_hash").map_err(|error| {
                     format!("Targeted topic {topic_id} config hash decode failed: {error}")
                 })?;

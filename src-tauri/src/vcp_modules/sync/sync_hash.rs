@@ -182,7 +182,7 @@ impl HashAggregator {
         agent_id: &str,
     ) -> Result<String, String> {
         let topic_rows = sqlx::query(
-            "SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'agent' AND topic_id <> 'default' AND deleted_at IS NULL ORDER BY topic_id ASC",
+            "SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'agent' AND deleted_at IS NULL ORDER BY topic_id ASC",
         )
         .bind(agent_id)
         .fetch_all(&mut **tx)
@@ -215,7 +215,7 @@ impl HashAggregator {
         group_id: &str,
     ) -> Result<String, String> {
         let topic_rows = sqlx::query(
-            "SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'group' AND topic_id <> 'default' AND deleted_at IS NULL ORDER BY topic_id ASC",
+            "SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'group' AND deleted_at IS NULL ORDER BY topic_id ASC",
         )
         .bind(group_id)
         .fetch_all(&mut **tx)
@@ -968,7 +968,7 @@ mod tests {
         }
     }
 
-    async fn assert_owner_root_excludes_default(owner_type: &str) {
+    async fn assert_owner_root_includes_default(owner_type: &str) {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -996,14 +996,21 @@ mod tests {
         .execute(&mut *tx)
         .await
         .expect("insert ordinary topic");
-        let ordinary_root = compute_owner_root(&mut tx, owner_type).await;
+        let initial_root = compute_owner_root(&mut tx, owner_type).await;
         assert_eq!(
-            ordinary_root,
-            compute_merkle_root(vec![HashAggregator::compute_topic_leaf_hash(
-                "topic-a",
-                "config-a",
-                "content-a",
-            )])
+            initial_root,
+            compute_merkle_root(vec![
+                HashAggregator::compute_topic_leaf_hash(
+                    "default",
+                    "default-config",
+                    "default-content",
+                ),
+                HashAggregator::compute_topic_leaf_hash(
+                    "topic-a",
+                    "config-a",
+                    "content-a",
+                ),
+            ])
         );
 
         sqlx::query("UPDATE topics SET config_hash = 'changed-default' WHERE topic_id = 'default'")
@@ -1011,13 +1018,12 @@ mod tests {
             .await
             .expect("change default topic");
         let root_after_default_change = compute_owner_root(&mut tx, owner_type).await;
-        assert_eq!(root_after_default_change, ordinary_root);
+        assert_ne!(root_after_default_change, initial_root);
     }
 
     #[tokio::test]
-    async fn owner_root_hashes_exclude_default_topics() {
-        assert_owner_root_excludes_default("agent").await;
-        assert_owner_root_excludes_default("group").await;
+    async fn owner_root_hashes_include_default_topics() {
+        assert_owner_root_includes_default("agent").await;
     }
 
     #[tokio::test]

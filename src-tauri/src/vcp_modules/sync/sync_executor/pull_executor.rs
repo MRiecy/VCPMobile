@@ -947,9 +947,6 @@ impl PullExecutor {
                         .await?;
                 }
                 "agent_topic" => {
-                    if id == "default" {
-                        continue;
-                    }
                     let dto = serde_json::from_value::<AgentTopicSyncDTO>(data)
                         .map_err(|error| format!("Invalid agent topic {id}: {error}"))?;
                     if dto.id != id || dto.owner_id != key.3 {
@@ -960,9 +957,6 @@ impl PullExecutor {
                     agent_topics.push((TopicKey::new("agent", &key.3, id), dto));
                 }
                 "group_topic" => {
-                    if id == "default" {
-                        continue;
-                    }
                     let dto = serde_json::from_value::<GroupTopicSyncDTO>(data)
                         .map_err(|error| format!("Invalid group topic {id}: {error}"))?;
                     if dto.id != id || dto.owner_id != key.3 {

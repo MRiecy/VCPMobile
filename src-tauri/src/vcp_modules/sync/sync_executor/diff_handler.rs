@@ -74,31 +74,20 @@ fn parse_delete_timestamp(item: &Value, id: &str, action: &str) -> Result<Option
         })
 }
 
-/// 校验 SYNC_DIFF_RESULTS 条目并过滤契约豁免的 default 话题动作。
-/// 返回（参与计数与派发的有效条目，被豁免的 default 话题动作条数）。
-fn validate_and_filter_diff_items(
+/// 校验 SYNC_DIFF_RESULTS 条目。
+fn validate_diff_items(
     items: &[Value],
     data_type: &SyncDataType,
-) -> Result<(Vec<Value>, u32), String> {
+) -> Result<Vec<Value>, String> {
     let mut seen_ids = HashSet::new();
     let mut seen_topics = HashSet::new();
-    let mut filtered = Vec::with_capacity(items.len());
-    let mut exempt_default_topics = 0u32;
+    let mut validated = Vec::with_capacity(items.len());
     for item in items {
         let id = item
             .get("id")
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
             .ok_or_else(|| "SYNC_DIFF_RESULTS item requires a non-empty id".to_string())?;
-        // 契约豁免：default 话题不参与同步（与 phase1_metadata / phase3_message /
-        // pull_executor 三处既有排除点对齐）。CDS 会为每个 owner 的 default 话题
-        // 忠实产出动作——topic id 仅在单个 owner 内唯一，default 跨 owner 合法
-        // 重复——在此统一豁免：不参与查重、计数与派发，任何 action
-        // （含 PUSH_DELETE）一律跳过。
-        if *data_type == SyncDataType::Topic && id == "default" {
-            exempt_default_topics += 1;
-            continue;
-        }
         let action = item
             .get("action")
             .and_then(Value::as_str)
@@ -136,9 +125,9 @@ fn validate_and_filter_diff_items(
         } else if !seen_ids.insert(id) {
             return Err(format!("SYNC_DIFF_RESULTS contains duplicate id {id}"));
         }
-        filtered.push(item.clone());
+        validated.push(item.clone());
     }
-    Ok((filtered, exempt_default_topics))
+    Ok(validated)
 }
 
 impl DiffHandler {
@@ -168,13 +157,7 @@ impl DiffHandler {
             .get("data")
             .and_then(Value::as_array)
             .ok_or_else(|| "SYNC_DIFF_RESULTS.data must be an array".to_string())?;
-        let (items_clone, exempt_default_topics) =
-            validate_and_filter_diff_items(items, &data_type)?;
-        if exempt_default_topics > 0 {
-            log::info!(
-                "[Sync] Exempted {exempt_default_topics} default-topic action(s) from {data_type} diff results (contract: default topics are not synced)"
-            );
-        }
+        let items_clone = validate_diff_items(items, &data_type)?;
 
         let current_phase = manifest_phase.load(Ordering::SeqCst);
         let all_manifest_types_received = consume_manifest_response_type(
@@ -868,7 +851,7 @@ impl DiffHandler {
 mod tests {
     use super::{
         consume_manifest_response_type, next_manifest_command, parse_delete_timestamp,
-        validate_and_filter_diff_items,
+        validate_diff_items,
     };
     use crate::vcp_modules::sync_service::SyncCommand;
     use crate::vcp_modules::sync_types::SyncDataType;
@@ -877,19 +860,15 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
-    fn default_topic_actions_are_exempt_from_diff_validation_and_dispatch() {
+    fn default_topics_use_the_full_owner_identity() {
         let items = json!([
             {"id": "default", "action": "PULL", "ownerType": "agent", "ownerId": "agent-a"},
             {"id": "default", "action": "PULL", "ownerType": "agent", "ownerId": "agent-b"},
-            {"id": "default", "action": "PUSH_DELETE", "deletedAt": 7, "ownerType": "group", "ownerId": "group-a"},
             {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-a"},
         ]);
-        let (filtered, exempt) =
-            validate_and_filter_diff_items(items.as_array().unwrap(), &SyncDataType::Topic)
-                .expect("cross-owner default topics must be exempt, not duplicate-rejected");
-        assert_eq!(exempt, 3);
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0]["id"], "topic-1");
+        let validated = validate_diff_items(items.as_array().unwrap(), &SyncDataType::Topic)
+            .expect("cross-owner default topics must be dispatched independently");
+        assert_eq!(validated.len(), 3);
     }
 
     #[test]
@@ -899,9 +878,8 @@ mod tests {
             {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-b"},
         ]);
         assert_eq!(
-            validate_and_filter_diff_items(items.as_array().unwrap(), &SyncDataType::Topic)
+            validate_diff_items(items.as_array().unwrap(), &SyncDataType::Topic)
                 .expect("same topic id under different owners is valid")
-                .0
                 .len(),
             2
         );
@@ -911,7 +889,7 @@ mod tests {
             {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-a"},
         ]);
         let error =
-            validate_and_filter_diff_items(duplicate.as_array().unwrap(), &SyncDataType::Topic)
+            validate_diff_items(duplicate.as_array().unwrap(), &SyncDataType::Topic)
                 .expect_err("duplicate compound identity must fail");
         assert!(error.contains("duplicate topic identity"));
     }
@@ -921,21 +899,9 @@ mod tests {
         let items = json!([
             {"id": "topic-1", "action": "PULL", "ownerType": "agent"},
         ]);
-        let error = validate_and_filter_diff_items(items.as_array().unwrap(), &SyncDataType::Topic)
+        let error = validate_diff_items(items.as_array().unwrap(), &SyncDataType::Topic)
             .expect_err("topic pull without ownerId must fail");
         assert!(error.contains("requires ownerId"));
-    }
-
-    #[test]
-    fn default_id_is_not_exempt_for_non_topic_types() {
-        let items = json!([
-            {"id": "default", "action": "PULL"},
-            {"id": "default", "action": "PULL"},
-        ]);
-        assert!(
-            validate_and_filter_diff_items(items.as_array().unwrap(), &SyncDataType::Agent)
-                .is_err()
-        );
     }
 
     #[test]
