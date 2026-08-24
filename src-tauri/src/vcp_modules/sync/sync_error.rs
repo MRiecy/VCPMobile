@@ -454,18 +454,16 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             "电脑端附件路径无效，无法读取文件",
             "在电脑端重新选择或移除对应附件后再同步。",
         ),
-        "TOPIC_NOT_FOUND"
-        | "SYNC_ATTACHMENT_NOT_FOUND"
-        | "PHASE3_DIFF_MISSING"
-        | "NOT_FOUND"
-        | "AMBIGUOUS_IDENTITY" => definition(
-            Category::Data,
-            Origin::DesktopPlugin,
-            Stage::Messages,
-            Retry::Manual,
-            "部分同步数据缺失或已损坏，系统未将其标记为成功",
-            "先在电脑端检查对应会话或附件，处理后重新同步。",
-        ),
+        "TOPIC_NOT_FOUND" | "PHASE3_DIFF_MISSING" | "NOT_FOUND" | "AMBIGUOUS_IDENTITY" => {
+            definition(
+                Category::Data,
+                Origin::DesktopPlugin,
+                Stage::Messages,
+                Retry::Manual,
+                "部分同步数据缺失或已损坏，系统未将其标记为成功",
+                "先在电脑端检查对应会话或附件，处理后重新同步。",
+            )
+        }
         "SYNC_DB_UNAVAILABLE" => definition(
             Category::Storage,
             Origin::MobileSync,
@@ -520,8 +518,6 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
         | "MESSAGE_MANIFEST_FAILED"
         | "SYNC_MESSAGE_READ_FAILED"
         | "SYNC_MESSAGE_WRITE_FAILED"
-        | "SYNC_ATTACHMENT_READ_FAILED"
-        | "SYNC_ATTACHMENT_WRITE_FAILED"
         | "SYNC_DELETE_FAILED"
         | "ENTITY_UPDATE_FAILED"
         | "ENTITY_DELETE_FAILED"

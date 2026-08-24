@@ -112,7 +112,7 @@ let dto: AgentSyncDTO = res.json().await?;
 | 路径 | 方法 | 认证 | 请求格式 | 响应格式 | Body限制 | 移动端调用函数 | 桌面端处理函数 | 对应代码文件 |
 |-----|------|-----|---------|---------|---------|-------------|-------------|------------|
 | `/download-messages-stream` | `POST` | `x-sync-token` | `JSON` — `{ requests: [{topicId, msgIds: []\|null}, ...] }` | `NDJSON` 流 — 逐 topic 分帧 | 5 MB<br>（请求体） | `PullExecutor::pull_messages_batch` | `downloadMessagesStreamRaw` | `routes.js`<br>`pull_executor.rs` |
-| `/upload-messages-batch` | `POST` | `x-sync-token` | `NDJSON` 流 — 逐 topic 分帧 | `NDJSON` 流 — `{topicId, success, neededAttachmentHashes?, error?}` | 无显式限制 | `PushExecutor::push_messages_batch` | `uploadMessagesBatchRaw` | `routes.js`<br>`push_executor.rs` |
+| `/upload-messages-batch` | `POST` | `x-sync-token` | `NDJSON` 流 — 逐 topic 分帧 | `NDJSON` 流 — `{topicId, success, error?}` | 无显式限制 | `PushExecutor::push_messages_batch` | `uploadMessagesBatchRaw` | `routes.js`<br>`push_executor.rs` |
 
 ### 2.1 POST /download-messages-stream
 
@@ -164,15 +164,11 @@ Content-Type 设置为 `application/x-ndjson`。
 
 **响应格式：NDJSON**
 ```ndjson
-{"topicId":"topic-uuid-1","success":true,"neededAttachmentHashes":["hash1","hash2"]}
+{"topicId":"topic-uuid-1","success":true}
 {"topicId":"topic-uuid-2","success":false,"error":"Topic not found on desktop"}
 ```
 
-**附件后置上传策略**
-1. 移动端解析响应中所有 `neededAttachmentHashes`。
-2. 与本地 `uploaded_hashes`（`Arc<RwLock<HashSet<String>>>`）去重。
-3. 按每批 3 个并发调用 `upload_attachment()`（POST `/upload-attachment`）。
-4. 上传成功后写入 `uploaded_hashes`，避免同一会话重复上传。
+附件关系元数据与内容 Hash 位于消息 DTO；附件二进制不通过同步 HTTP 端点传输。
 
 **DTO 构建逻辑**
 移动端根据 `owner_type` 将 `ChatMessage` 转为不同 DTO：
@@ -182,62 +178,14 @@ Content-Type 设置为 `application/x-ndjson`。
 
 ---
 
-## 表3：附件与头像端点
+## 表3：头像端点
 
 | 路径 | 方法 | 认证 | 请求格式 | 响应格式 | Body限制 | 移动端调用函数 | 桌面端处理函数 | 对应代码文件 |
 |-----|------|-----|---------|---------|---------|-------------|-------------|------------|
-| `/upload-attachment` | `POST` | `x-sync-token` | `Raw Binary` — 文件字节流<br>Query: `?hash=<sha256>&type=<mime>&name=<filename>` | `JSON` — `{ success, hash }` | 100 MB | `upload_attachment`<br>（`push_executor.rs` 内部） | `uploadAttachment` | `routes.js`<br>`push_executor.rs` |
-| `/download-attachment` | `GET` | `x-sync-token` | Query: `?hash=<sha256>` | `Binary` — `sendFile` | — | `message_service.rs`<br>`ensure_attachments_locally` | `downloadAttachment` | `routes.js`<br>`message_service.rs` |
 | `/upload-avatar` | `POST` | `x-sync-token` | `Raw Binary` — 图片字节流<br>Query: `?id=<owner_id>&type=agent\|group` | `JSON` — `{ success, id }` | 10 MB | `PushExecutor::push_avatar` | `uploadAvatar` | `routes.js`<br>`push_executor.rs` |
 | `/download-avatar` | `GET` | `x-sync-token` | Query: `?id=<owner_id>&type=agent\|group` | `Binary` — `sendFile` | — | `PullExecutor::pull_avatar` | `downloadAvatar` | `routes.js`<br>`pull_executor.rs` |
 
-### 3.1 POST /upload-attachment
-
-**请求结构**
-- Header: `Content-Type: application/octet-stream`
-- Query 参数:
-  - `hash` — 附件的 SHA-256 哈希（唯一标识）
-  - `type` — MIME 类型，需 URL 编码（如 `image%2Fpng`）
-  - `name` — 原始文件名，需 URL 编码
-- Body: 文件原始二进制字节
-
-**移动端上传流程**
-```rust
-let file_data = tokio::fs::read(file_path).await?;
-let url = format!(
-    "{}/api/mobile-sync/upload-attachment?hash={}&type={}&name={}",
-    http_url, hash, urlencoding::encode(&mime_type), urlencoding::encode(&display_name)
-);
-client.post(&url)
-    .header("Content-Type", "application/octet-stream")
-    .body(file_data)
-    .send().await?;
-```
-
-**桌面端处理**
-桌面端 `uploadAttachment` 将原始字节写入 `appDataPath/attachments/<hash>`，并在数据库建立映射记录。
-
-### 3.2 GET /download-attachment
-
-**移动端调用场景**
-附件下载不在 `PullExecutor` 中直接触发，而是在消息渲染时由 `message_service.rs` 的 `ensure_attachments_locally` 按需懒加载：
-
-```rust
-let url = format!("{}/api/mobile-sync/download-attachment?hash={}", settings.sync_http_url, hash);
-match client.get(&url).header("x-sync-token", &settings.sync_token).send().await {
-    Ok(resp) if resp.status().is_success() => {
-        if let Ok(bytes) = resp.bytes().await {
-            let _ = fs::write(&local_path, bytes).await;
-        }
-    }
-    _ => {} // 下载失败则跳过，UI 显示裂图
-}
-```
-
-**桌面端处理**
-桌面端通过 `downloadAttachment(hash)` 查询本地附件路径，使用 Express 的 `res.sendFile()` 直接传输文件。
-
-### 3.3 POST /upload-avatar
+### 3.1 POST /upload-avatar
 
 **请求结构**
 - Header: `Content-Type: <mime_type>`（如 `image/png`）
@@ -248,7 +196,7 @@ match client.get(&url).header("x-sync-token", &settings.sync_token).send().await
 1. 从数据库 `avatars` 表读取 `image_data` 与 `mime_type`。
 2. 若记录存在，直接以原始字节作为 Body POST 到桌面端。
 
-### 3.4 GET /download-avatar
+### 3.2 GET /download-avatar
 
 **请求结构**
 - Query: `?id=<owner_id>&type=agent|group`
@@ -358,10 +306,6 @@ Phase 2 (Topic Metadata)
 Phase 3 (Messages)
   PULL Messages     →  POST /download-messages-stream  (NDJSON)
   PUSH Messages     →  POST /upload-messages-batch     (NDJSON)
-  PUSH Attachments  →  POST /upload-attachment         (Raw Binary)
-
-Runtime (Lazy Load)
-  Download Attachment → GET /download-attachment
 ```
 
 ---

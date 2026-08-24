@@ -1419,7 +1419,6 @@ async fn run_sync_session(
                 let attempt_id = next_attempt_id;
                 let attempt_cancel = cancel_token.child_token();
                 let task_tracker = Arc::new(SyncTaskTracker::new(attempt_cancel.clone()));
-                let uploaded_hashes = Arc::new(RwLock::new(HashSet::new()));
                 let (pipeline_tx, mut pipeline_rx) = mpsc::unbounded_channel::<
                     crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand,
                 >();
@@ -2708,7 +2707,6 @@ async fn run_sync_session(
                                         let logger = sync_logger_task.clone();
                                         let write_queue = wq.clone();
                                         let pending_batches = pending_diff_batches.clone();
-                                        let upload_tracker = uploaded_hashes.clone();
                                         let expected_topics = expected_phase3_batch.clone();
                                         let token = settings.sync_token.clone();
                                         let prerender_enabled = settings.sync_prerender_enabled;
@@ -2725,7 +2723,6 @@ async fn run_sync_session(
                                                 &write_queue,
                                                 &pending_batches,
                                                 prerender_enabled,
-                                                &upload_tracker,
                                                 &expected_topics,
                                                 attempt_id,
                                             ).await;

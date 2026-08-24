@@ -277,7 +277,7 @@ scope: 双端
 | Phase 2 数据传输量过大 | `SYNC_MANIFEST` (topic, phase=2) | 检查 `targetedOwners` 是否正确填充；确认 `changed_owners` 是否包含未变更 Owner | `manifest_builder.rs` `build_targeted_topic_manifest` |
 | 消息级差异比对过慢 | `SYNC_MESSAGE_DIFF_BATCH` | 检查是否已启用 Fast Path（话题级哈希匹配直接跳过）；检查分片策略 | `sync/diff.js` `handleSyncMessageDiffBatch` |
 | 日志终端无桌面端输出 | `DESKTOP_PHASE_*` / `SYNC_LOG_EVENT` | 检查桌面端 `SyncLogger` 是否启用 WS 通道；检查 WebSocket 连接是否建立 | `core/logger.js` WS 广播逻辑 |
-| 附件未随消息同步 | `SYNC_DIFF_RESULTS_BATCH` (toPull) | 检查 `neededAttachmentHashes` 是否计算正确；检查附件文件是否在桌面端物理存在 | `sync/message.js` `neededAttachmentHashes` |
+| 附件元数据存在但文件无法打开 | `SYNC_DIFF_RESULTS_BATCH` (toPull) | 检查本机是否已有相同 Hash 的 CAS；同步不传输附件二进制 | 本机附件存储 |
 
 ---
 

@@ -9,15 +9,10 @@ use crate::vcp_modules::sync_error::{encode_http_sync_error_body, encode_wire_sy
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use futures_util::StreamExt;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use sqlx::{Row, Sqlite, Transaction};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
-use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::sync::RwLock;
-use tokio_util::io::ReaderStream;
 
 const MAX_NDJSON_LINE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_SYNC_BODY_BYTES: usize = 256 * 1024 * 1024;
@@ -27,7 +22,6 @@ const MAX_SYNC_MESSAGES: usize = 100_000;
 const MAX_MESSAGES_PER_TOPIC: usize = 10_000;
 const MESSAGE_PAGE_SIZE: usize = 100;
 const MAX_CONTROL_RESPONSE_BYTES: usize = 1024 * 1024;
-const MAX_ATTACHMENT_UPLOAD_BYTES: u64 = 512 * 1024 * 1024;
 
 async fn read_response_limited(
     response: reqwest::Response,
@@ -176,11 +170,6 @@ struct MessageTombstoneRequest<'a> {
     deleted_at: i64,
 }
 
-struct MessagePushFrame {
-    outcome: PushBatchResult,
-    needed_attachment_hashes: Vec<String>,
-}
-
 #[derive(Serialize)]
 #[serde(untagged)]
 enum OutboundMessageSyncDTO {
@@ -221,15 +210,15 @@ impl Write for BoundedJsonLine {
     }
 }
 
-fn parse_message_push_frames(
+fn parse_message_push_results(
     bytes: &[u8],
     expected_topics: &[TopicKey],
-) -> Result<Vec<MessagePushFrame>, String> {
+) -> Result<Vec<PushBatchResult>, String> {
     let response_text = std::str::from_utf8(bytes)
         .map_err(|error| format!("Batch push response is not UTF-8: {error}"))?;
     let expected = expected_topics.iter().cloned().collect::<HashSet<_>>();
     let mut seen = HashSet::new();
-    let mut frames = Vec::with_capacity(expected.len());
+    let mut results = Vec::with_capacity(expected.len());
     for raw_line in response_text.lines() {
         let line = raw_line.trim();
         if line.is_empty() {
@@ -288,40 +277,10 @@ fn parse_message_push_frames(
             ));
         }
 
-        let values = data
-            .get("neededAttachmentHashes")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| {
-                format!("neededAttachmentHashes for {topic_id} must be an explicit array")
-            })?;
-        let mut needed_attachment_hashes = Vec::with_capacity(values.len());
-        let mut unique_hashes = HashSet::new();
-        for value in values {
-            let raw_hash = value.as_str().ok_or_else(|| {
-                format!("neededAttachmentHashes for {topic_id} must contain strings")
-            })?;
-            let hash = canonical_sha256(raw_hash).ok_or_else(|| {
-                format!("neededAttachmentHashes for {topic_id} contains an invalid hash")
-            })?;
-            if !unique_hashes.insert(hash.clone()) {
-                return Err(format!(
-                    "neededAttachmentHashes for {topic_id} contains duplicate hash {hash}"
-                ));
-            }
-            needed_attachment_hashes.push(hash);
-        }
-        if !success && !needed_attachment_hashes.is_empty() {
-            return Err(format!(
-                "Failed batch push result for {topic_id} must not request attachments"
-            ));
-        }
-        frames.push(MessagePushFrame {
-            outcome: PushBatchResult {
-                topic,
-                success,
-                error,
-            },
-            needed_attachment_hashes,
+        results.push(PushBatchResult {
+            topic,
+            success,
+            error,
         });
     }
 
@@ -330,7 +289,7 @@ fn parse_message_push_frames(
         missing.sort();
         return Err(format!("Batch push response is missing topics {missing:?}"));
     }
-    Ok(frames)
+    Ok(results)
 }
 
 async fn send_message_chunk(
@@ -339,7 +298,7 @@ async fn send_message_chunk(
     sync_token: &str,
     body: Vec<u8>,
     expected_topics: &[TopicKey],
-) -> Result<Vec<MessagePushFrame>, String> {
+) -> Result<Vec<PushBatchResult>, String> {
     let url = format!("{}/api/mobile-sync/upload-messages-batch", http_url);
     let response = client
         .post(&url)
@@ -364,25 +323,7 @@ async fn send_message_chunk(
         };
     }
 
-    parse_message_push_frames(&bytes, expected_topics)
-}
-
-fn record_message_frames(
-    frames: Vec<MessagePushFrame>,
-    results: &mut Vec<PushBatchResult>,
-    attachment_topics: &mut HashMap<String, HashSet<TopicKey>>,
-) {
-    for frame in frames {
-        if frame.outcome.success {
-            for hash in frame.needed_attachment_hashes {
-                attachment_topics
-                    .entry(hash)
-                    .or_default()
-                    .insert(frame.outcome.topic.clone());
-            }
-        }
-        results.push(frame.outcome);
-    }
+    parse_message_push_results(&bytes, expected_topics)
 }
 
 async fn preflight_topic_messages(
@@ -1362,8 +1303,8 @@ impl PushExecutor {
 
     /// 批量 Push — 一次 HTTP 请求推送多个 topic 的消息
     ///
-    /// 手机端批量加载消息 → POST /upload-messages-batch (NDJSON)
-    /// → 解析响应收集 neededAttachmentHashes → 去重上传附件
+    /// 手机端批量加载消息 → POST /upload-messages-batch (NDJSON)。附件仅随消息
+    /// 传输元数据与内容 Hash，二进制 CAS 始终保留在本机。
     ///
     /// 返回每个 topic 的处理结果。
     pub async fn push_messages_batch<R: Runtime>(
@@ -1372,7 +1313,6 @@ impl PushExecutor {
         http_url: &str,
         sync_token: &str,
         topic_keys: &[TopicKey],
-        uploaded_hashes: Arc<RwLock<HashSet<String>>>,
     ) -> Result<Vec<PushBatchResult>, String> {
         if topic_keys.is_empty() {
             return Ok(Vec::new());
@@ -1393,7 +1333,6 @@ impl PushExecutor {
 
         let db = app.state::<DbState>();
         let mut results = Vec::new();
-        let mut attachment_topics: HashMap<String, HashSet<TopicKey>> = HashMap::new();
         let mut total_request_bytes = 0usize;
         let mut total_messages = 0usize;
         let mut request_body = Vec::new();
@@ -1460,7 +1399,7 @@ impl PushExecutor {
             if !request_body.is_empty()
                 && request_body.len().saturating_add(line.len()) > MESSAGE_REQUEST_CHUNK_BYTES
             {
-                let frames = send_message_chunk(
+                let chunk_results = send_message_chunk(
                     client,
                     http_url,
                     sync_token,
@@ -1468,7 +1407,7 @@ impl PushExecutor {
                     &request_topics,
                 )
                 .await?;
-                record_message_frames(frames, &mut results, &mut attachment_topics);
+                results.extend(chunk_results);
                 push_message_tombstone_chunk(
                     client,
                     http_url,
@@ -1487,7 +1426,7 @@ impl PushExecutor {
             }
             request_topics.push(key.clone());
             if request_body.len() >= MESSAGE_REQUEST_CHUNK_BYTES {
-                let frames = send_message_chunk(
+                let chunk_results = send_message_chunk(
                     client,
                     http_url,
                     sync_token,
@@ -1495,7 +1434,7 @@ impl PushExecutor {
                     &request_topics,
                 )
                 .await?;
-                record_message_frames(frames, &mut results, &mut attachment_topics);
+                results.extend(chunk_results);
                 push_message_tombstone_chunk(
                     client,
                     http_url,
@@ -1509,10 +1448,10 @@ impl PushExecutor {
         }
 
         if !request_body.is_empty() {
-            let frames =
+            let chunk_results =
                 send_message_chunk(client, http_url, sync_token, request_body, &request_topics)
                     .await?;
-            record_message_frames(frames, &mut results, &mut attachment_topics);
+            results.extend(chunk_results);
             push_message_tombstone_chunk(
                 client,
                 http_url,
@@ -1527,59 +1466,6 @@ impl PushExecutor {
         // replayed through the acknowledged HTTP endpoint so deletions made while disconnected
         // converge on the next Phase 3 push. Tombstones are released with each 8 MiB request
         // chunk rather than accumulating up to the 256 MiB attempt budget in resident memory.
-        let result_indexes = results
-            .iter()
-            .enumerate()
-            .map(|(index, result)| (result.topic.clone(), index))
-            .collect::<HashMap<_, _>>();
-
-        let hashes_to_upload = {
-            let tracker = uploaded_hashes.read().await;
-            attachment_topics
-                .keys()
-                .filter(|hash| !tracker.contains(*hash))
-                .cloned()
-                .collect::<Vec<_>>()
-        };
-        let mut attachment_failures = HashMap::new();
-        const MAX_CONCURRENT_UPLOADS: usize = 3;
-        for chunk in hashes_to_upload.chunks(MAX_CONCURRENT_UPLOADS) {
-            let futures = chunk
-                .iter()
-                .map(|hash| upload_attachment(app, client, http_url, sync_token, hash));
-            for (hash, result) in chunk
-                .iter()
-                .zip(futures_util::future::join_all(futures).await)
-            {
-                match result {
-                    Ok(()) => {
-                        uploaded_hashes.write().await.insert(hash.clone());
-                    }
-                    Err(error) => {
-                        attachment_failures.insert(hash.clone(), error);
-                    }
-                }
-            }
-        }
-
-        if !attachment_failures.is_empty() {
-            for (hash, error) in attachment_failures {
-                if let Some(topics) = attachment_topics.get(&hash) {
-                    for topic in topics {
-                        if let Some(index) = result_indexes.get(topic).copied() {
-                            append_topic_failure(
-                                &mut results[index],
-                                format!(
-                                    "Attachment {hash} required by topic {} failed: {error}",
-                                    topic.topic_id
-                                ),
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
         let ok_count = results.iter().filter(|r| r.success).count();
         log::info!(
             "[PushExecutor] Batch push completed: {}/{} topics",
@@ -1601,130 +1487,6 @@ fn generate_idempotency_key(action: &str, entity_type: &str, id: &str) -> String
     ])
 }
 
-async fn upload_attachment<R: Runtime>(
-    app: &AppHandle<R>,
-    client: &reqwest::Client,
-    http_url: &str,
-    sync_token: &str,
-    hash: &str,
-) -> Result<(), String> {
-    let hash = canonical_sha256(hash)
-        .ok_or_else(|| "Attachment upload requires a valid SHA-256 hash".to_string())?;
-    let db = app.state::<DbState>();
-
-    let row = sqlx::query("SELECT mime_type, internal_path FROM attachments WHERE hash = ?")
-        .bind(&hash)
-        .fetch_optional(&db.pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let att_row =
-        row.ok_or_else(|| format!("Attachment {hash} is missing from the local index"))?;
-    let mime_type: String = att_row
-        .try_get("mime_type")
-        .map_err(|error| format!("Attachment {hash} MIME decode failed: {error}"))?;
-    let internal_path: String = att_row
-        .try_get("internal_path")
-        .map_err(|error| format!("Attachment {hash} path decode failed: {error}"))?;
-    if internal_path.trim().is_empty() {
-        return Err(format!("Attachment {hash} has no local file path"));
-    }
-
-    let name_row =
-        sqlx::query("SELECT display_name FROM message_attachments WHERE hash = ? LIMIT 1")
-            .bind(&hash)
-            .fetch_optional(&db.pool)
-            .await
-            .map_err(|error| format!("Attachment {hash} display name query failed: {error}"))?;
-    let display_name = match name_row {
-        Some(row) => {
-            let name: String = row.try_get("display_name").map_err(|error| {
-                format!("Attachment {hash} display name decode failed: {error}")
-            })?;
-            if name.is_empty() {
-                return Err(format!("Attachment {hash} has an empty display name"));
-            }
-            name
-        }
-        None => return Err(format!("Attachment {hash} has no live message relation")),
-    };
-
-    let file_path = internal_path.trim_start_matches("file://");
-    let mut file = tokio::fs::File::open(file_path)
-        .await
-        .map_err(|error| format!("Attachment {hash} read failed: {error}"))?;
-    let metadata = file
-        .metadata()
-        .await
-        .map_err(|error| format!("Attachment {hash} metadata read failed: {error}"))?;
-    if !metadata.is_file() {
-        return Err(format!("Attachment {hash} path is not a regular file"));
-    }
-    if metadata.len() > MAX_ATTACHMENT_UPLOAD_BYTES {
-        return Err(format!(
-            "Attachment {hash} exceeds the 512 MiB upload limit"
-        ));
-    }
-    let mut hasher = Sha256::new();
-    let mut hash_buffer = vec![0u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut hash_buffer)
-            .await
-            .map_err(|error| format!("Attachment {hash} hash read failed: {error}"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&hash_buffer[..read]);
-    }
-    let actual_hash = format!("{:x}", hasher.finalize());
-    if actual_hash != hash {
-        return Err(format!(
-            "Attachment {hash} content hash mismatch (actual {actual_hash})"
-        ));
-    }
-    file.seek(std::io::SeekFrom::Start(0))
-        .await
-        .map_err(|error| format!("Attachment {hash} rewind failed: {error}"))?;
-
-    let url = format!(
-        "{}/api/mobile-sync/upload-attachment?hash={}&type={}&name={}",
-        http_url,
-        hash,
-        urlencoding::encode(&mime_type),
-        urlencoding::encode(&display_name)
-    );
-
-    let response = client
-        .post(&url)
-        .header("x-sync-token", sync_token)
-        .header("Authorization", format!("Bearer {}", sync_token))
-        .header("Content-Type", "application/octet-stream")
-        .header(reqwest::header::CONTENT_LENGTH, metadata.len())
-        .body(reqwest::Body::wrap_stream(ReaderStream::with_capacity(
-            file,
-            64 * 1024,
-        )))
-        .send()
-        .await
-        .map_err(|error| format!("Attachment {hash} upload failed: {error}"))?;
-    let body = parse_success_response(response, "Attachment upload").await?;
-    let response_hash = body
-        .get("hash")
-        .and_then(serde_json::Value::as_str)
-        .and_then(canonical_sha256)
-        .ok_or_else(|| "Attachment upload response requires a valid hash".to_string())?;
-    if response_hash != hash {
-        return Err(format!(
-            "Attachment upload response hash mismatch: expected {hash}, got {response_hash}"
-        ));
-    }
-
-    log::debug!("[PushExecutor] Attachment uploaded: {}", hash);
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1742,52 +1504,13 @@ mod tests {
     }
 
     #[test]
-    fn attachment_dependencies_are_recorded_per_successful_topic() {
-        let hash = "a".repeat(64);
-        let frames = vec![
-            MessagePushFrame {
-                outcome: PushBatchResult {
-                    topic: topic("topic-a"),
-                    success: true,
-                    error: None,
-                },
-                needed_attachment_hashes: vec![hash.clone()],
-            },
-            MessagePushFrame {
-                outcome: PushBatchResult {
-                    topic: topic("topic-b"),
-                    success: false,
-                    error: Some("rejected".to_string()),
-                },
-                needed_attachment_hashes: Vec::new(),
-            },
-        ];
-        let mut results = Vec::new();
-        let mut dependencies = HashMap::new();
-        record_message_frames(frames, &mut results, &mut dependencies);
-
-        assert_eq!(results.len(), 2);
-        assert_eq!(
-            dependencies.get(&hash),
-            Some(&HashSet::from([topic("topic-a")]))
-        );
-    }
-
-    #[test]
-    fn message_push_result_requires_explicit_attachment_hash_array() {
+    fn message_push_result_is_independent_of_local_attachment_binaries() {
         let expected = vec![topic("topic")];
-        let missing =
+        let valid =
             br#"{"topicId":"topic","ownerType":"agent","ownerId":"agent-a","success":true}"#;
-        let error = match parse_message_push_frames(missing, &expected) {
-            Err(error) => error,
-            Ok(_) => panic!("legacy result without neededAttachmentHashes must be rejected"),
-        };
-        assert!(error.contains("explicit array"));
-
-        let valid = br#"{"topicId":"topic","ownerType":"agent","ownerId":"agent-a","success":true,"neededAttachmentHashes":[]}"#;
-        let frames = parse_message_push_frames(valid, &expected).expect("hard-cut result");
-        assert_eq!(frames.len(), 1);
-        assert!(frames[0].needed_attachment_hashes.is_empty());
+        let results = parse_message_push_results(valid, &expected).expect("metadata-only result");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].success);
     }
 
     #[test]
@@ -1798,7 +1521,6 @@ mod tests {
             "ownerType":"agent",
             "ownerId":"agent-a",
             "success":false,
-            "neededAttachmentHashes":[],
             "error":{
                 "code":"SYNC_OWNER_CONFLICT",
                 "origin":"desktop_cds",
@@ -1810,10 +1532,10 @@ mod tests {
             }
         }))
         .expect("serialize result");
-        let frames = parse_message_push_frames(&valid, &expected).expect("structured result");
+        let results = parse_message_push_results(&valid, &expected).expect("structured result");
         assert_eq!(
             crate::vcp_modules::sync_error::decode_wire_sync_error(
-                frames[0].outcome.error.as_deref().expect("encoded error")
+                results[0].error.as_deref().expect("encoded error")
             )
             .expect("wire error")
             .code,
@@ -1825,18 +1547,16 @@ mod tests {
             "ownerType":"agent",
             "ownerId":"agent-a",
             "success":false,
-            "neededAttachmentHashes":[],
             "error":"legacy"
         }))
         .expect("serialize legacy result");
-        assert!(parse_message_push_frames(&legacy, &expected).is_err());
+        assert!(parse_message_push_results(&legacy, &expected).is_err());
 
         let contradictory = serde_json::to_vec(&serde_json::json!({
             "topicId":"topic",
             "ownerType":"agent",
             "ownerId":"agent-a",
             "success":true,
-            "neededAttachmentHashes":[],
             "error":{
                 "code":"SYNC_OWNER_CONFLICT",
                 "origin":"desktop_cds",
@@ -1848,7 +1568,7 @@ mod tests {
             }
         }))
         .expect("serialize contradictory result");
-        assert!(parse_message_push_frames(&contradictory, &expected).is_err());
+        assert!(parse_message_push_results(&contradictory, &expected).is_err());
     }
 
     #[test]

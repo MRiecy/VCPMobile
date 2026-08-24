@@ -409,7 +409,6 @@ impl BatchDiffHandler {
         write_queue: &Arc<DbWriteQueue>,
         pending_diff_batches: &Arc<tokio::sync::Mutex<std::collections::VecDeque<Phase3DiffBatch>>>,
         prerender_enabled: bool,
-        uploaded_hashes: &Arc<tokio::sync::RwLock<HashSet<String>>>,
         expected_batch_topics: &Arc<tokio::sync::Mutex<HashSet<TopicKey>>>,
         attempt_id: u64,
     ) -> Result<(), Phase3ProtocolError> {
@@ -634,7 +633,6 @@ impl BatchDiffHandler {
                         base_url,
                         token,
                         &push_topics,
-                        uploaded_hashes.clone(),
                     )
                     .await
                     .map(|results| {
