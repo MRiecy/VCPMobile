@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { ref, onMounted, watch, computed } from 'vue';
-import { useTarvenStore, type TarvenRule } from '../../../core/stores/tarvenStore';
+import {
+  useTarvenStore,
+  type TarvenPreviewMessage,
+  type TarvenRule,
+} from '../../../core/stores/tarvenStore';
 import { useModalHistory } from '../../../core/composables/useModalHistory';
 import SlidePage from '../../../components/ui/SlidePage.vue';
 import SettingsSwitch from '../../../components/settings/SettingsSwitch.vue';
@@ -56,7 +60,7 @@ const contextRules = computed(() =>
 // ---------------------------------------------------------
 // 注入实时预览机制 (WYSIWYG)
 // ---------------------------------------------------------
-const previewMessages = ref<any[]>([]);
+const previewMessages = ref<TarvenPreviewMessage[]>([]);
 const isPreviewLoading = ref(false);
 const showPreview = ref(true);
 

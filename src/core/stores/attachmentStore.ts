@@ -4,7 +4,16 @@ import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useNotificationStore } from "./notification";
 import type { PickedFile } from "tauri-plugin-vcp-mobile";
-import type { Attachment, RegisteredAttachmentData } from "../types/chat";
+import type {
+  NativeFileProgressDetail,
+  NativeFileStartDetail,
+} from "../types/native";
+import type {
+  Attachment,
+  AttachmentData,
+  AttachmentRegisterProgressDto,
+  ChatMessage,
+} from "../types/chat";
 
 
 
@@ -33,7 +42,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
   const stagedAttachments = ref<Attachment[]>([]);
 
   // 全局监听 Rust 端发出的注册进度，用于大文件哈希/移动等Phase 2流程
-  listen<any>("vcp-file-register-progress", (event) => {
+  listen<AttachmentRegisterProgressDto>("vcp-file-register-progress", (event) => {
     const { progress, stableId } = event.payload;
     if (stableId) {
       const idx = stagedAttachments.value.findIndex((a) => a.id === stableId);
@@ -56,7 +65,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
   /**
    * 处理消息中的本地资源路径 (仅附件)，使用 Tauri 原生 asset:// 协议绕过 WebView 限制
    */
-  const resolveMessageAssets = (msg: any) => {
+  const resolveMessageAssets = (msg: ChatMessage) => {
     // 处理附件 (仅处理图片类型)
     if (msg.attachments && msg.attachments.length > 0) {
       msg.attachments.forEach((att: Attachment) => {
@@ -106,9 +115,9 @@ export const useAttachmentStore = defineStore("attachment", () => {
         const picked = await new Promise<PickedFile>((resolve, reject) => {
           let resolved = false;
 
-          const handleStart = (e: any) => {
+          const handleStart = (event: Event) => {
             if (resolved) return;
-            const { name, size, mime } = e.detail;
+            const { name, size, mime } = (event as CustomEvent<NativeFileStartDetail>).detail;
             stagedAttachments.value.unshift({
               id: stableId,
               type: mime || "application/octet-stream",
@@ -120,9 +129,9 @@ export const useAttachmentStore = defineStore("attachment", () => {
             });
           };
 
-          const handleProgress = (e: any) => {
+          const handleProgress = (event: Event) => {
             if (resolved) return;
-            const { progress, name, mime, total } = e.detail;
+            const { progress, name, mime, total } = (event as CustomEvent<NativeFileProgressDetail>).detail;
             const idx = stagedAttachments.value.findIndex(a => a.id === stableId);
             const scaledProgress = Math.round(progress * 0.9); // Kotlin 沙盒拷贝与哈希阶段占 90%
             if (idx !== -1) {
@@ -141,12 +150,13 @@ export const useAttachmentStore = defineStore("attachment", () => {
             }
           };
 
-          const handlePicked = (e: any) => {
+          const handlePicked = (event: Event) => {
             if (resolved) return;
             resolved = true;
             cleanup();
-            console.log("[AttachmentStore] Native picker returned via EventBus:", e.detail);
-            resolve(e.detail as PickedFile);
+            const picked = (event as CustomEvent<PickedFile>).detail;
+            console.log("[AttachmentStore] Native picker returned via EventBus:", picked);
+            resolve(picked);
           };
 
           const cleanup = () => {
@@ -248,7 +258,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
         window.dispatchEvent(new Event("resize"));
 
         // 3. 后端零拷贝直传与注册 (会触发 rename 移动，缩略图生成，文本提取)
-        const finalData = await invoke<RegisteredAttachmentData>("register_local_file", {
+        const finalData = await invoke<AttachmentData>("register_local_file", {
           localPath: picked.path,
           originalName: picked.name,
           mimeType: picked.mime || "application/octet-stream",
@@ -399,7 +409,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
           window.dispatchEvent(new Event("resize"));
 
           try {
-            let finalData: RegisteredAttachmentData | null = null;
+            let finalData: AttachmentData | null = null;
 
             // --- 分流策略：小文件 ( < 2MB ) 走 IPC，大文件走高速 TCP 链路 ---
             if (file.size < 2 * 1024 * 1024) {
@@ -418,7 +428,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
                 stagedAttachments.value[attIndex].status = "processing";
               }
 
-              finalData = await invoke<RegisteredAttachmentData>("store_file", {
+              finalData = await invoke<AttachmentData>("store_file", {
                 originalName: file.name,
                 fileBytes: bytes, 
                 mimeType: file.type || "application/octet-stream",
@@ -439,7 +449,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
 
               // 2. 内核级搬运 (利用流式上传)
               const xhr = new XMLHttpRequest();
-              const uploadPromise = new Promise((res, rej) => {
+              const uploadPromise = new Promise<AttachmentData>((res, rej) => {
                 xhr.open("POST", endpoint.url, true);
                 xhr.setRequestHeader(
                   "Content-Type",
@@ -474,7 +484,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
 
                 xhr.onload = () => {
                   if (xhr.status >= 200 && xhr.status < 300) {
-                    res(JSON.parse(xhr.responseText));
+                    res(JSON.parse(xhr.responseText) as AttachmentData);
                   } else {
                     rej(new Error(`Upload failed with status ${xhr.status}`));
                   }
@@ -484,7 +494,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
                 xhr.send(file);
               });
 
-              finalData = await uploadPromise as RegisteredAttachmentData;
+              finalData = await uploadPromise;
             }
 
             if (finalData) {

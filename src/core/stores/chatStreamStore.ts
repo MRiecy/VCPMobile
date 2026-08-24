@@ -7,46 +7,21 @@ import { useAssistantStore } from "./assistant";
 import { useAvatarStore } from "./avatar";
 import { useTopicStore } from "./topicListManager";
 import { useChatHistoryStore } from "./chatHistoryStore";
-import type { ChatMessage, ContentBlock, MessageShell, TailFrame } from "../types/chat";
+import type {
+  ActiveGenerationDto,
+  ChatMessage,
+  ContentBlock,
+  MarkdownNode,
+  MessageShell,
+  RecoveryResultDto,
+  StreamBlock,
+  StreamEventDto,
+  TailFrame,
+} from "../types/chat";
 import type {
   ConversationKey,
   ConversationOwnerType,
 } from "./chatSessionStore";
-
-export interface ChatStreamEvent {
-  type: string;
-  messageId?: string;
-  context?: {
-    topicId?: string;
-    isGroupMessage?: boolean;
-    groupId?: string;
-    agentId?: string;
-    ownerId?: string;
-    ownerType?: ConversationOwnerType;
-    agentName?: string;
-    [key: string]: unknown;
-  };
-  aurora?: any;
-  blocks?: ContentBlock[];
-  error?: string;
-  finishReason?: string;
-  timestamp?: number;
-}
-
-interface ActiveGenerationData {
-  msgId: string;
-  topicId: string;
-  ownerId: string;
-  ownerType: ConversationOwnerType;
-  createdAt: number;
-  agentId?: string;
-  agentName?: string;
-}
-
-interface RecoveryResult {
-  status: string;
-  content?: string;
-}
 
 interface StreamTerminalTombstone {
   terminalAt: number;
@@ -120,7 +95,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   function mergeTailFrame(
     existing: TailFrame | null,
     incoming: TailFrame,
-    latestSnapshot?: any[],
+    latestSnapshot?: MarkdownNode[],
     forceSnapshot = false,
   ): TailFrame {
     const incomingMutations = incoming.mutations || [];
@@ -214,11 +189,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     string,
     {
       content: string | null;
-      blocks: any[] | null;
+      blocks: ContentBlock[] | null;
       tailContent: string | null;
-      tailBlock: any | null;
+      tailBlock: StreamBlock | null;
       tailFrame: TailFrame | null;
-      tailSnapshot: any[] | null;
+      tailSnapshot: MarkdownNode[] | null;
       animationFrameId: number | null;
       lastRenderTime: number;
     }
@@ -242,9 +217,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           if (up.blocks !== null) msg.blocks = up.blocks;
           // 漏洞 1 修复：同步强刷收尾时，必须将暂存池中的 tail 字段强刷，绝不允许丢字闪烁
           if (up.tailContent !== null) msg.tailContent = up.tailContent;
-          if (up.tailBlock !== undefined) msg.tailBlock = up.tailBlock;
+          msg.tailBlock = up.tailBlock ?? undefined;
           if (up.tailSnapshot !== null)
-            msg.tailSnapshot = up.tailSnapshot as any;
+            msg.tailSnapshot = up.tailSnapshot;
           if (up.tailFrame !== null) msg.tailFrame = up.tailFrame;
         }
       }
@@ -272,10 +247,10 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         if (m) {
           if (up.content !== null) m.content = up.content;
           if (up.blocks !== null) m.blocks = up.blocks;
-          if (up.tailSnapshot !== null) m.tailSnapshot = up.tailSnapshot as any;
+          if (up.tailSnapshot !== null) m.tailSnapshot = up.tailSnapshot;
           if (up.tailFrame !== null) m.tailFrame = up.tailFrame;
           if (up.tailContent !== null) m.tailContent = up.tailContent;
-          if (up.tailBlock !== undefined) m.tailBlock = up.tailBlock;
+          m.tailBlock = up.tailBlock ?? undefined;
         }
         up.lastRenderTime = now;
         // 重置当前帧内的合并暂存状态
@@ -308,14 +283,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     agentId?: string;
     name?: string;
   }): MessageShell {
-    const empty = "";
     if (msg.role === "user") {
       const userColor =
         avatarStore.getDominantColor("user", "user_avatar") || "rgb(226,54,56)";
       return {
         avatarColor: userColor,
-        bubbleBorderColor: empty,
-        bubbleBoxShadow: empty,
         displayName: msg.name || "User",
         isUser: true,
       };
@@ -325,8 +297,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       : undefined;
     return {
       avatarColor: agent?.avatarCalculatedColor || "",
-      bubbleBorderColor: empty,
-      bubbleBoxShadow: empty,
       displayName: msg.name || agent?.name || "AI",
       isUser: false,
     };
@@ -493,7 +463,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
    * 处理流式事件的核心逻辑 (会话隔离调度器)
    */
   const processStreamEvent = async (
-    event: ChatStreamEvent,
+    event: StreamEventDto,
     callbacks?: {
       onMessageCreated?: (msg: ChatMessage, topicId: string) => void;
       onStreamFinished?: (messageId: string, topicId: string) => void;
@@ -587,7 +557,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
               stableChanged: aurora.stableChanged,
               stableBlocksCount: aurora.stableBlocks?.length || 0,
               stableBlocksHashes:
-                aurora.stableBlocks?.map((b: any) => b.hash) || [],
+                aurora.stableBlocks?.map((b) => b.hash) || [],
               tailChanged: aurora.tailChanged,
               tailContent: aurora.tail || "",
               tailBlockType: aurora.tailBlock?.type || null,
@@ -656,15 +626,15 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             typeof document !== "undefined" && document.hidden,
           );
           if (aurora.tailFrame.snapshot) {
-            update.tailSnapshot = aurora.tailFrame.snapshot as any[];
+            update.tailSnapshot = aurora.tailFrame.snapshot;
           }
         }
         if (aurora.tailSnapshot) {
-          update.tailSnapshot = aurora.tailSnapshot as any[];
+          update.tailSnapshot = aurora.tailSnapshot;
         }
         if (aurora.tailChanged) {
           update.tailContent = aurora.tail || "";
-          update.tailBlock = (aurora.tailBlock as any) || null;
+          update.tailBlock = aurora.tailBlock || null;
         }
 
         // 3. 申请硬件级 rAF 渲染调度（合并原子提交）
@@ -715,14 +685,14 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         try {
           // 如果后端已经带回了预渲染好的 blocks，直接使用，跳过冗余解析
           if (event.blocks) {
-            msg.blocks = event.blocks as any;
+            msg.blocks = event.blocks;
             finalizeStream();
           } else {
             invoke<ContentBlock[]>("process_message_content", {
               content: msg!.content || "",
             })
               .then((compiledBlocks) => {
-                msg.blocks = compiledBlocks as any;
+                msg.blocks = compiledBlocks;
                 finalizeStream();
               })
               .catch((e) => {
@@ -850,9 +820,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     isRecovering.value = true;
 
     // 1. 本地扫表：无网状态下也能运行
-    let activeGens: ActiveGenerationData[] = [];
+    let activeGens: ActiveGenerationDto[] = [];
     try {
-      activeGens = await invoke<ActiveGenerationData[]>("get_active_generations");
+      activeGens = await invoke<ActiveGenerationDto[]>("get_active_generations");
     } catch (e) {
       console.error("[ChatStreamStore] Failed to get active generations:", e);
       isRecovering.value = false;
@@ -905,7 +875,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             msg = reactive<ChatMessage>({
               id: msgId,
               role: "assistant",
-              name: agentName,
+              name: agentName ?? undefined,
               content: "",
               timestamp: gen.createdAt || Date.now(),
               isThinking: false,
@@ -990,7 +960,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           }
         }
 
-        const streamChannel = new Channel<any>();
+        const streamChannel = new Channel<StreamEventDto>();
         streamChannel.onmessage = (event) =>
           processStreamEvent(event, {
             onMessageCreated: (m, tid) => {
@@ -1020,7 +990,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         // 后端在一个 owner lease 内先判定 durable 状态，再决定是否需要网络接续。
         // navigator.onLine 不能前置否决：Finalizing/Interrupted 等状态必须可离线收口。
         // 扫描门闩可以释放，但 recoveryMessageIds 会覆盖整个长连接生命周期。
-        void invoke<RecoveryResult>("recover_active_generation", {
+        void invoke<RecoveryResultDto>("recover_active_generation", {
           ownerId,
           ownerType,
           topicId,

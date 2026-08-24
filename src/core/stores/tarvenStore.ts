@@ -22,6 +22,13 @@ export interface TarvenRule {
   sortOrder: number;
 }
 
+export interface TarvenPreviewMessage {
+  role: string;
+  content: string;
+  __tavernInjected?: boolean;
+  [key: string]: unknown;
+}
+
 export const useTarvenStore = defineStore('tarven', () => {
   const rules = ref<TarvenRule[]>([]);
   const isSelectorOpen = ref(false);
@@ -84,9 +91,12 @@ export const useTarvenStore = defineStore('tarven', () => {
   };
 
   // 6. 调用后端进行 WYSIWYG 规则注入效果预览
-  const previewInjection = async (previewRules: TarvenRule[], mockMessages?: any[]) => {
+  const previewInjection = async (
+    previewRules: TarvenRule[],
+    mockMessages?: TarvenPreviewMessage[],
+  ) => {
     try {
-      return await invoke<any[]>('preview_tarven_injection', {
+      return await invoke<TarvenPreviewMessage[]>('preview_tarven_injection', {
         rules: previewRules,
         mockMessages
       });

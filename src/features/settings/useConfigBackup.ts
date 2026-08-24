@@ -4,6 +4,7 @@
 // 评估与决策记录见 plan/Settings_Import_Export_Evaluation_2026-08-18.md
 import { invoke } from "@tauri-apps/api/core";
 import type { AppSettings } from "../../core/stores/settings";
+import type { DownloadsSaveResultDto } from "../../core/types/native";
 
 export const CONFIG_BACKUP_KIND = "vcp-mobile-settings-backup";
 export const CONFIG_BACKUP_VERSION = 1;
@@ -164,18 +165,11 @@ export function bytesToBase64(bytes: Uint8Array): string {
 // IO（依赖 Tauri IPC，组件内调用）
 // ------------------------------------------------------------------
 
-interface DownloadsSaveResult {
-  uri: string;
-  displayName: string;
-  mimeType: string;
-  size: number;
-}
-
 async function invokeSaveToDownloads(
   fileName: string,
   contentBase64: string,
-): Promise<DownloadsSaveResult> {
-  return await invoke<DownloadsSaveResult>("plugin:vcp-mobile|save_to_downloads", {
+): Promise<DownloadsSaveResultDto> {
+  return await invoke<DownloadsSaveResultDto>("plugin:vcp-mobile|save_to_downloads", {
     fileName,
     contentBase64,
     mimeType: "application/json",
@@ -189,7 +183,7 @@ async function invokeSaveToDownloads(
  */
 export async function exportConfigBackup(
   settings: AppSettings,
-): Promise<DownloadsSaveResult> {
+): Promise<DownloadsSaveResultDto> {
   const payload = buildBackupPayload(settings);
   const contentBase64 = bytesToBase64(new TextEncoder().encode(JSON.stringify(payload, null, 2)));
   const fileName = buildBackupFileName();

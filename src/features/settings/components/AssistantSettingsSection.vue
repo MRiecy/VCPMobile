@@ -22,17 +22,11 @@ const assistantStore = useAssistantStore();
 const hasOverlayPermission = ref(false);
 
 const checkPermission = async () => {
-  try {
-    const status = await invoke<{ overlay: boolean }>("plugin:vcp-mobile|check_all_permissions");
-    hasOverlayPermission.value = status.overlay;
-    
-    // 如果没有系统权限，但设置里是开启的，则重置设置状态并隐藏悬浮球
-    if (!status.overlay && props.settings.enableAssistant) {
-      props.settings.enableAssistant = false;
-      await invoke("plugin:vcp-mobile|toggle_floating_ball", { show: false });
-    }
-  } catch (e) {
-    console.error("[AssistantSettings] Failed to check overlay permission:", e);
+  // 暂停功能没有已注册的 overlay 查询命令；不得从通用权限 DTO 读取不存在的字段。
+  hasOverlayPermission.value = false;
+  if (props.settings.enableAssistant) {
+    props.settings.enableAssistant = false;
+    await invoke("plugin:vcp-mobile|toggle_floating_ball", { show: false }).catch(() => {});
   }
 };
 

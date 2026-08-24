@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { computed, ref, watch, nextTick, onUnmounted } from "vue";
-import type { ChatMessage, ContentBlock } from "../../core/types/chat";
+import type {
+  ChatMessage,
+  ContentBlock,
+  InlineNode,
+  MarkdownNode,
+} from "../../core/types/chat";
 import { useOverlayStore } from "../../core/stores/overlay";
 import { useChatHistoryStore } from "../../core/stores/chatHistoryStore";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
@@ -164,7 +169,7 @@ const isStreaming = computed(() => {
   );
 });
 
-function isBrkNode(node: any): boolean {
+function isBrkNode(node: MarkdownNode): boolean {
   if (node.type === "raw_html" && node.content) {
     const trimmed = node.content.trim().replace(/\s+/g, "");
     return trimmed === "<!--brk-->";
@@ -188,7 +193,9 @@ function isBrkBlock(block: ContentBlock): boolean {
   return false;
 }
 
-function isWhitespaceNode(node: any): boolean {
+function isWhitespaceNode(
+  node: MarkdownNode | InlineNode | { type: "softbreak" | "hardbreak" },
+): boolean {
   if (!node) return true;
   if (node.type === "text") {
     return !node.value || node.value.trim() === "";
@@ -202,7 +209,7 @@ function isWhitespaceNode(node: any): boolean {
   return false;
 }
 
-function trimWhitespaceNodes(nodes: any[]): any[] {
+function trimWhitespaceNodes(nodes: MarkdownNode[]): MarkdownNode[] {
   let start = 0;
   while (start < nodes.length && isWhitespaceNode(nodes[start])) {
     start++;
@@ -214,9 +221,9 @@ function trimWhitespaceNodes(nodes: any[]): any[] {
   return nodes.slice(start, end);
 }
 
-function splitMarkdownNodes(nodes: any[]): any[][] {
-  const result: any[][] = [];
-  let currentGroup: any[] = [];
+function splitMarkdownNodes(nodes: MarkdownNode[]): MarkdownNode[][] {
+  const result: MarkdownNode[][] = [];
+  let currentGroup: MarkdownNode[] = [];
   let htmlDepth = 0;
   
   for (const node of nodes) {

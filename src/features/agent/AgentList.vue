@@ -9,14 +9,19 @@ import { useOverlayStore } from "../../core/stores/overlay";
 import VcpAvatar from "../../components/ui/VcpAvatar.vue";
 import { sortByOrder } from "./agentOrder";
 import { activeSwipeId, currentSwipeX, MAX_SWIPE } from "./swipeController";
+import type {
+  AgentListItemDto,
+  AssistantListItem,
+  GroupListItemDto,
+} from "../../core/types/assistant";
 
 const props = defineProps<{
   searchQuery: string;
 }>();
 
 const emit = defineEmits<{
-  (e: "select-agent", item: any): void;
-  (e: "select-group", item: any): void;
+  (e: "select-agent", item: AgentListItemDto & { type: "agent" }): void;
+  (e: "select-group", item: GroupListItemDto & { type: "group" }): void;
 }>();
 
 const assistantStore = useAssistantStore();
@@ -263,7 +268,7 @@ const goToSettings = (id: string, type: 'agent' | 'group' = 'agent') => {
 };
 
 const selectAgent = async (agentId: string) => {
-  const agent = assistantStore.agents.find((a: any) => a.id === agentId);
+  const agent = assistantStore.agents.find((a) => a.id === agentId);
   if (agent) {
     emit("select-agent", { ...agent, type: "agent" });
   }
@@ -276,7 +281,7 @@ const selectGroup = async (groupId: string) => {
   }
 };
 
-const filteredCombinedItems = computed(() => {
+const filteredCombinedItems = computed<AssistantListItem[]>(() => {
   const query = props.searchQuery.toLowerCase().trim();
   if (!query) return assistantStore.combinedItems;
   return assistantStore.combinedItems.filter((item) =>

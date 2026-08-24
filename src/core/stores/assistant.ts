@@ -2,58 +2,18 @@ import { defineStore } from "pinia";
 import { computed, ref, shallowRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useNotificationStore } from "./notification";
-
-export interface Topic {
-  id: string;
-  name: string;
-  createdAt: number;
-  locked: boolean;
-  unread: boolean;
-  unreadCount: number;
-  msgCount: number;
-  ownerId: string;
-  ownerType: "agent" | "group";
-}
-
-export interface AgentConfig {
-  id: string;
-  name: string;
-  model: string;
-  mobileSystemPrompt?: string;
-  temperature?: number;
-  contextTokenLimit?: number;
-  maxOutputTokens?: number;
-  streamOutput?: boolean;
-  useTemperature?: boolean;
-  avatarCalculatedColor?: string;
-  topics?: Topic[];
-}
-
-export interface GroupConfig {
-  id: string;
-  name: string;
-  avatarCalculatedColor?: string;
-  members: string[];
-  mode?: string;
-  memberTags?: Record<string, any>;
-  groupPrompt?: string;
-  invitePrompt?: string;
-  useUnifiedModel?: boolean;
-  unifiedModel?: string;
-  tagMatchMode?: string;
-  topics?: Topic[];
-  createdAt?: number;
-}
-
-interface AssistantsSnapshot {
-  agents: AgentConfig[];
-  groups: GroupConfig[];
-  unreadCounts: Record<string, number>;
-}
+import type {
+  AgentConfigDto,
+  AgentListItemDto,
+  AssistantListItem,
+  AssistantsSnapshotDto,
+  GroupConfigDto,
+  GroupListItemDto,
+} from "../types/assistant";
 
 export const useAssistantStore = defineStore("assistant", () => {
-  const agents = shallowRef<AgentConfig[]>([]);
-  const groups = shallowRef<GroupConfig[]>([]);
+  const agents = shallowRef<AgentListItemDto[]>([]);
+  const groups = shallowRef<GroupListItemDto[]>([]);
   const loading = ref(false);
   const error = ref<string | null>(null);
   const notificationStore = useNotificationStore();
@@ -91,7 +51,7 @@ export const useAssistantStore = defineStore("assistant", () => {
 
 
 
-  const combinedItems = computed(() => [
+  const combinedItems = computed<AssistantListItem[]>(() => [
     ...agents.value.map((agent) => ({ ...agent, type: "agent" as const })),
     ...groups.value.map((group) => ({ ...group, type: "group" as const })),
   ]);
@@ -103,7 +63,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     const startTime = Date.now();
     try {
       console.log("[Profile] invoke('get_assistants_snapshot') starting...");
-      const snapshot = await invoke<AssistantsSnapshot>("get_assistants_snapshot");
+      const snapshot = await invoke<AssistantsSnapshotDto>("get_assistants_snapshot");
       console.log(`[Profile] invoke('get_assistants_snapshot') resolved in ${Date.now() - startTime}ms`);
       if (loadId !== snapshotLoadId) return;
 
@@ -125,7 +85,7 @@ export const useAssistantStore = defineStore("assistant", () => {
   const createAgent = async (name: string) => {
     beginLoading();
     try {
-      const newAgent = await invoke<AgentConfig>("create_agent", { name });
+      const newAgent = await invoke<AgentConfigDto>("create_agent", { name });
       invalidateSnapshotLoads();
       notificationStore.addNotification({
         type: "success",
@@ -167,7 +127,7 @@ export const useAssistantStore = defineStore("assistant", () => {
   const createGroup = async (name: string) => {
     beginLoading();
     try {
-      const newGroup = await invoke<GroupConfig>("create_group", { name });
+      const newGroup = await invoke<GroupConfigDto>("create_group", { name });
       invalidateSnapshotLoads();
       notificationStore.addNotification({
         type: "success",
@@ -202,7 +162,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     }
   };
 
-  const saveAgent = async (agent: AgentConfig) => {
+  const saveAgent = async (agent: AgentConfigDto) => {
     try {
       await invoke("save_agent_config", { agent });
       invalidateSnapshotLoads();
@@ -232,9 +192,9 @@ export const useAssistantStore = defineStore("assistant", () => {
     }
   };
 
-  const saveGroup = async (group: GroupConfig) => {
+  const saveGroup = async (group: GroupConfigDto) => {
     try {
-      const canonical = await invoke<GroupConfig>("save_group_config", { group });
+      const canonical = await invoke<GroupConfigDto>("save_group_config", { group });
       invalidateSnapshotLoads();
 
       // 点对点局部更新（仅更新轻量列表渲染字段）

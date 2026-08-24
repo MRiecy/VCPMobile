@@ -17,7 +17,7 @@ import GroupInviteBar from './components/GroupInviteBar.vue';
 import VcpAvatar from '../../components/ui/VcpAvatar.vue';
 import { useMentionSelector, MENTION_ALL_ID, type MentionMember } from './composables/useMentionSelector';
 import { splitMentionSegments } from '../../core/utils/mention';
-import type { RegisteredAttachmentData } from '../../core/types/chat';
+import type { AttachmentData } from '../../core/types/chat';
 
 const tarvenStore = useTarvenStore();
 
@@ -264,7 +264,7 @@ const handleIconTouchEnd = async (e: TouchEvent) => {
         try {
           const originalName = `Voice_${Date.now()}.webm`;
           // 保存音频至后端物理沙盒
-          const finalData = await invoke<RegisteredAttachmentData>('store_file', {
+          const finalData = await invoke<AttachmentData>('store_file', {
             originalName,
             fileBytes: result.bytes,
             mimeType: result.blob.type || 'audio/webm',

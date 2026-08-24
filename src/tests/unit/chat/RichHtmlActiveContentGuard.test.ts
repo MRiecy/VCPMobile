@@ -119,8 +119,8 @@ describe('trusted-circle rich HTML active-content guard', () => {
         type: 'paragraph',
         children: [
           { type: 'raw_html_inline', content: `<svg onload="fetch('/leak')"></svg>` },
-          { type: 'link', href: 'javascript:alert(1)', children: [{ type: 'text', value: 'bad' }] },
-          { type: 'link', href: 'https://example.com', children: [{ type: 'text', value: 'good' }] },
+          { type: 'link', href: 'javascript:alert(1)', title: null, needs_asset_conversion: false, children: [{ type: 'text', value: 'bad' }] },
+          { type: 'link', href: 'https://example.com', title: null, needs_asset_conversion: false, children: [{ type: 'text', value: 'good' }] },
         ],
       },
     ];
@@ -143,7 +143,7 @@ describe('trusted-circle rich HTML active-content guard', () => {
         type: 'paragraph',
         children: [
           { type: 'raw_html_inline', content: `<svg onload="fetch('/leak')"></svg>` },
-          { type: 'link', href: 'javascript:alert(1)', children: [{ type: 'text', value: 'bad' }] },
+          { type: 'link', href: 'javascript:alert(1)', title: null, needs_asset_conversion: false, children: [{ type: 'text', value: 'bad' }] },
         ],
       },
     ], 'stream-message', sandbox);

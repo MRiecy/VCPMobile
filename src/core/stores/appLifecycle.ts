@@ -4,12 +4,19 @@ import { invoke } from '@tauri-apps/api/core';
 import { useAssistantStore } from './assistant';
 import { useSettingsStore } from './settings';
 import { useThemeStore } from './theme';
-import { useNotificationStore } from './notification';
+import { useNotificationStore, type VcpStatus } from './notification';
 import { useChatSessionStore } from './chatSessionStore';
 import { useChatHistoryStore } from './chatHistoryStore';
 import { useTopicStore } from './topicListManager';
-import { updateDistributedState } from '../../features/distributed/composables/useDistributed';
+import {
+  updateDistributedState,
+  type DistributedStatus,
+} from '../../features/distributed/composables/useDistributed';
 import { useAvatarStore } from './avatar';
+import type {
+  ListenerPermissionDto,
+  PermissionStatusDto,
+} from '../types/native';
 
 export type AppState = 'PERMISSIONS' | 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'READY' | 'ERROR' | 'OPTIMIZING';
 
@@ -22,6 +29,15 @@ interface DatabaseRecoveryNotice {
   message: string;
   archivePath: string;
   recoveredAt: number;
+}
+
+interface SystemSnapshotDto {
+  core: 'initializing' | 'optimizing' | 'ready' | 'error';
+  message: string;
+  log: Extract<VcpStatus['status'], 'closed' | 'connecting' | 'connected' | 'error'>;
+  sync: string;
+  distributed: DistributedStatus['state'];
+  databaseRecovery: DatabaseRecoveryNotice | null;
 }
 
 
@@ -142,7 +158,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
       const sessionStore = useChatSessionStore();
       const topicStore = useTopicStore();
 
-      const promises: Promise<any>[] = [
+      const promises: Promise<unknown>[] = [
         settingsStore.fetchSettings(),
         assistantStore.fetchAgentsAndGroups(),
         avatarStore.preloadAll()
@@ -264,18 +280,11 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
   const hydrateSystemStatus = async () => {
     try {
       console.log('[Lifecycle] Fetching system status snapshot...');
-      const snapshot = await invoke<{
-        core: string;
-        message: string;
-        log: string;
-        sync: string;
-        distributed: string;
-        databaseRecovery?: DatabaseRecoveryNotice | null;
-      }>('get_system_snapshot');
+      const snapshot = await invoke<SystemSnapshotDto>('get_system_snapshot');
       
       // 同步到 Notification Store (唯一真相源)
       notificationStore.updateCoreStatus({
-        status: snapshot.core as any,
+        status: snapshot.core,
         message: snapshot.message || (snapshot.core === 'ready' ? '核心引擎已就绪' : '核心引擎初始化中...'),
         source: 'Core'
       });
@@ -295,13 +304,13 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
       }
 
       notificationStore.updateStatus({
-        status: snapshot.log as any,
+        status: snapshot.log,
         message: snapshot.log === 'connected' ? '已连接' : '正在连接...',
         source: 'VCPLog'
       });
 
       // 同步分布式连接状态到专有的 Distributed Composable
-      updateDistributedState(snapshot.distributed as any);
+      updateDistributedState(snapshot.distributed);
 
       console.log('[Lifecycle] Snapshot hydrated:', JSON.stringify(snapshot));
     } catch (e) {
@@ -329,8 +338,8 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         // --- 权限门禁：通知、电池优化豁免与通知监听是本产品（常驻中继节点）的保活核心能力，
         // 缺失时先进入引导页；存储等非核心权限保持按需（feature-triggered）申请 ---
         try {
-          const pStatus = await invoke<{ notification: boolean; battery: boolean }>('plugin:vcp-mobile|check_all_permissions');
-          const listenerRes = await invoke<{ enabled: boolean }>('plugin:vcp-mobile|check_notification_listener_permission');
+          const pStatus = await invoke<PermissionStatusDto>('plugin:vcp-mobile|check_all_permissions');
+          const listenerRes = await invoke<ListenerPermissionDto>('plugin:vcp-mobile|check_notification_listener_permission');
           if (!pStatus.notification || !pStatus.battery || !listenerRes.enabled) {
             console.log('[Lifecycle] Missing keep-alive critical permissions, entering permission gate');
             // 仅在确认缺失权限时才将状态设为 PERMISSIONS，避免权限完整时引导页一闪而过

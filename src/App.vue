@@ -24,7 +24,8 @@ import {
   useVcpCliStore,
   type VcpCliNotificationTarget,
 } from "./features/cli/vcpCliStore";
-import type { RegisteredAttachmentData } from "./core/types/chat";
+import type { AttachmentData } from "./core/types/chat";
+import type { AgentListItemDto, TopicDto } from "./core/types/assistant";
 
 // 初始化应用生命周期监听
 useAppLifecycle();
@@ -89,20 +90,30 @@ const shareIntentOwner = new LatestIntentOwner();
 let stopShareReadyWatch: WatchStopHandle | null = null;
 
 const handleShareIntent = (e: Event) => {
-  processSharedIntent((e as CustomEvent).detail);
+  processSharedIntent((e as CustomEvent<unknown>).detail);
 };
 
-const processSharedIntent = async (detail: any) => {
+const isSharedFileEntry = (value: unknown): value is SharedFileEntry => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const file = value as Record<string, unknown>;
+  return typeof file.cachePath === "string" &&
+    typeof file.mimeType === "string" &&
+    typeof file.fileName === "string" &&
+    typeof file.size === "number" &&
+    Number.isSafeInteger(file.size) &&
+    file.size >= 0 &&
+    typeof file.stagingTicket === "string";
+};
+
+const processSharedIntent = async (detail: unknown) => {
   const operationId = shareIntentOwner.begin();
-  const intentId = typeof detail?.intentId === "string" ? detail.intentId : "";
-  const text = typeof detail?.text === "string" ? detail.text : "";
-  const files: SharedFileEntry[] = Array.isArray(detail?.files)
-    ? detail.files.filter(
-        (file: any) =>
-          typeof file?.cachePath === "string" &&
-          typeof file?.fileName === "string" &&
-          typeof file?.stagingTicket === "string",
-      )
+  const source = detail && typeof detail === "object" && !Array.isArray(detail)
+    ? detail as Record<string, unknown>
+    : {};
+  const intentId = typeof source.intentId === "string" ? source.intentId : "";
+  const text = typeof source.text === "string" ? source.text : "";
+  const files = Array.isArray(source.files)
+    ? source.files.filter(isSharedFileEntry)
     : [];
   console.log("[App] Share intent received", {
     intentId,
@@ -158,7 +169,7 @@ const prepareShareFiles = async (content: SharedContentData, operationId: string
       const results: PickedFile[] = [];
       for (const staged of stagedResults) {
         if (!shareIntentOwner.isCurrent(operationId)) return;
-        const registered = await invoke<RegisteredAttachmentData>("register_local_file", {
+        const registered = await invoke<AttachmentData>("register_local_file", {
           localPath: staged.path,
           originalName: staged.name,
           mimeType: staged.mime || "application/octet-stream",
@@ -207,7 +218,7 @@ const prepareShareFiles = async (content: SharedContentData, operationId: string
   }
 };
 
-const handleShareAgentSelected = async (agent: any) => {
+const handleShareAgentSelected = async (agent: AgentListItemDto) => {
   const operationId = sharedContent.value.operationId;
   showShareSelector.value = false;
 
@@ -240,49 +251,88 @@ const handleShareSelectorClose = () => {
 };
 
 // --- Notification Click Routing State & Logic ---
-interface NotificationClickDetail {
-  kind?: string;
-  action?: string;
-  jobId?: string;
-  attemptId?: string;
-  runtimeGeneration?: number;
-  ownerId?: string;
-  ownerType?: "agent" | "group";
-  topicId?: string;
-  requestId?: string;
-}
+type NotificationClickTarget =
+  | {
+      kind: "cli_job";
+      action: "open" | "confirm_stop";
+      jobId: string;
+      attemptId: string;
+      runtimeGeneration: number;
+    }
+  | {
+      kind: "chat";
+      ownerId: string;
+      ownerType: "agent" | "group";
+      topicId: string;
+      requestId: string;
+    };
+
+const parseNotificationClickTarget = (value: unknown): NotificationClickTarget | null => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  if (source.kind === "cli_job") {
+    if (
+      (source.action !== "open" && source.action !== "confirm_stop") ||
+      typeof source.jobId !== "string" ||
+      source.jobId.length === 0 ||
+      source.jobId.length > 256 ||
+      typeof source.attemptId !== "string" ||
+      source.attemptId.length === 0 ||
+      source.attemptId.length > 256 ||
+      typeof source.runtimeGeneration !== "number" ||
+      !Number.isSafeInteger(source.runtimeGeneration) ||
+      source.runtimeGeneration <= 0
+    ) {
+      return null;
+    }
+    return {
+      kind: "cli_job",
+      action: source.action,
+      jobId: source.jobId,
+      attemptId: source.attemptId,
+      runtimeGeneration: source.runtimeGeneration,
+    };
+  }
+  if (
+    typeof source.ownerId !== "string" ||
+    source.ownerId.length === 0 ||
+    (source.ownerType !== "agent" && source.ownerType !== "group") ||
+    typeof source.topicId !== "string" ||
+    source.topicId.length === 0
+  ) {
+    return null;
+  }
+  return {
+    kind: "chat",
+    ownerId: source.ownerId,
+    ownerType: source.ownerType,
+    topicId: source.topicId,
+    requestId: typeof source.requestId === "string" ? source.requestId : "",
+  };
+};
 
 let notificationNavigationGeneration = 0;
 let stopNotificationReadyWatch: WatchStopHandle | null = null;
 
 const routeNotificationClick = (rawDetail: unknown) => {
-  if (!rawDetail || typeof rawDetail !== "object") return;
+  const detail = parseNotificationClickTarget(rawDetail);
+  if (!detail) return;
   const generation = ++notificationNavigationGeneration;
   stopNotificationReadyWatch?.();
   stopNotificationReadyWatch = null;
-  void processNotificationClick(rawDetail as NotificationClickDetail, generation);
+  void processNotificationClick(detail, generation);
 };
 
 const handleNotificationClick = (e: Event) => {
-  routeNotificationClick((e as CustomEvent).detail);
+  routeNotificationClick((e as CustomEvent<unknown>).detail);
 };
 
 const processNotificationClick = async (
-  detail: NotificationClickDetail,
+  detail: NotificationClickTarget,
   generation: number,
 ) => {
   if (generation !== notificationNavigationGeneration) return;
   console.log("[App] Notification click received:", detail);
-  const isCliJob = detail?.kind === "cli_job";
-  const chatTarget = !isCliJob && detail.ownerId && detail.topicId &&
-    (detail.ownerType === "agent" || detail.ownerType === "group")
-    ? {
-        ownerId: detail.ownerId,
-        ownerType: detail.ownerType,
-        topicId: detail.topicId,
-      }
-    : null;
-  if (!isCliJob && !chatTarget) return;
 
   if (lifecycleStore.state !== "READY") {
     console.log("[App] Core not ready yet, deferring notification click routing...");
@@ -312,15 +362,12 @@ const processNotificationClick = async (
     return modalStackLength() === 0;
   };
 
-  if (isCliJob) {
+  if (detail.kind === "cli_job") {
     const target: VcpCliNotificationTarget = {
-      jobId: String(detail.jobId ?? ""),
-      attemptId: String(detail.attemptId ?? ""),
-      runtimeGeneration: Number(detail.runtimeGeneration ?? 0),
+      jobId: detail.jobId,
+      attemptId: detail.attemptId,
+      runtimeGeneration: detail.runtimeGeneration,
     };
-    if (!target.jobId || !target.attemptId || target.runtimeGeneration <= 0) {
-      return;
-    }
     if (!closeNavigationSurfaces()) return;
     overlayStore.openCliManifest();
     await nextTick();
@@ -363,15 +410,14 @@ const processNotificationClick = async (
     return;
   }
 
-  if (!chatTarget) return;
   // 聊天通知先只读验证目标；过期通知不得关闭当前界面或清空当前 Topic。
   try {
-    const topics = await invoke<Array<{ id: string }>>("get_topics", {
-      ownerId: chatTarget.ownerId,
-      ownerType: chatTarget.ownerType,
+    const topics = await invoke<TopicDto[]>("get_topics", {
+      ownerId: detail.ownerId,
+      ownerType: detail.ownerType,
     });
     if (generation !== notificationNavigationGeneration) return;
-    const targetExists = topics.some((topic) => topic.id === chatTarget.topicId);
+    const targetExists = topics.some((topic) => topic.id === detail.topicId);
     if (!targetExists) {
       notificationStore.addNotification({
         type: "warning",
@@ -385,9 +431,9 @@ const processNotificationClick = async (
     if (!closeNavigationSurfaces()) return;
     if (generation !== notificationNavigationGeneration) return;
     await sessionStore.selectTopicById(
-      chatTarget.ownerId,
-      chatTarget.ownerType,
-      chatTarget.topicId,
+      detail.ownerId,
+      detail.ownerType,
+      detail.topicId,
     );
   } catch (error) {
     console.error("[App] Failed to open notification target:", error);
@@ -520,7 +566,7 @@ onMounted(async () => {
   initGlobalFixer();
 
   // 1.5. 启动 VCP Log IPC 监听 (必须在 bootstrapApp 前挂载，防止 bootstrap 期间的 ready 事件丢失)
-  unlistenLog = await listen("vcp-system-event", (event: any) => {
+  unlistenLog = await listen<unknown>("vcp-system-event", (event) => {
     const payload = event.payload;
     const processed = processPayload(payload);
 
@@ -543,10 +589,8 @@ onMounted(async () => {
 
   // 3. 处理冷启动的通知栏点击
   try {
-    const pending = await invoke<NotificationClickDetail>("plugin:vcp-mobile|get_pending_notification");
-    if (pending && (pending.topicId || pending.kind === "cli_job")) {
-      routeNotificationClick(pending);
-    }
+    const pending = await invoke<unknown>("plugin:vcp-mobile|get_pending_notification");
+    routeNotificationClick(pending);
   } catch (err) {
     console.warn("[App] Failed to fetch pending notification click:", err);
   }

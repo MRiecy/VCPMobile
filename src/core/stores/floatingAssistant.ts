@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import type { ChatMessage } from "../types/chat";
+import type { ChatMessage, StreamEventDto } from "../types/chat";
+import type { AppSettings } from "./settings";
 
 interface Toast {
   id: string;
@@ -8,14 +9,6 @@ interface Toast {
   message: string;
   type: "info" | "success" | "warning" | "error";
   timestamp: number;
-}
-
-interface AppSettings {
-  userName?: string;
-  vcpServerUrl?: string;
-  vcpApiKey?: string;
-  assistantAgentId?: string;
-  [key: string]: any;
 }
 
 // [SUSPENDED BETA] 浮动助手（floating assistant）功能当前已暂停使用。
@@ -88,7 +81,9 @@ export const useFloatingAssistantStore = defineStore("floatingAssistant", () => 
     ws.value = socket;
   };
 
-  const handleWsMessage = (data: any) => {
+  const handleWsMessage = (rawData: unknown) => {
+    if (!rawData || typeof rawData !== "object" || Array.isArray(rawData)) return;
+    const data = rawData as Record<string, any>;
     if (data.type === "initial_config") {
       if (data.settings && typeof data.settings === "object") {
         internalSettings.value = data.settings;
@@ -331,8 +326,8 @@ export const useFloatingAssistantStore = defineStore("floatingAssistant", () => 
 
     try {
       const { invoke, Channel } = await import("@tauri-apps/api/core");
-      const channel = new Channel<any>();
-      channel.onmessage = (event: any) => {
+      const channel = new Channel<StreamEventDto>();
+      channel.onmessage = (event) => {
         handleWsMessage(event);
       };
 

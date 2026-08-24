@@ -16,6 +16,13 @@ export interface TestResult {
   error?: string;
 }
 
+interface ModelTestProgressDto {
+  modelId: string;
+  status: 'testing' | 'success' | 'failed' | 'completed';
+  latency: number | null;
+  error: string | null;
+}
+
 export const useModelStore = defineStore('model', () => {
   // --- State ---
   const models = ref<ModelInfo[]>([]);
@@ -240,13 +247,8 @@ export const useModelStore = defineStore('model', () => {
 
     try {
       // 1. 创建流式推送 Channel
-      const progressChannel = new Channel<any>();
-      progressChannel.onmessage = (progress: {
-        modelId: string;
-        status: 'testing' | 'success' | 'failed' | 'completed';
-        latency?: number;
-        error?: string;
-      }) => {
+      const progressChannel = new Channel<ModelTestProgressDto>();
+      progressChannel.onmessage = (progress) => {
         const { modelId, status, latency, error } = progress;
 
         if (status === 'completed') {
@@ -259,7 +261,7 @@ export const useModelStore = defineStore('model', () => {
         } else if (status === 'success') {
           testResults.value[modelId] = {
             status: 'success',
-            latency,
+            latency: latency ?? undefined,
           };
         } else if (status === 'failed') {
           testResults.value[modelId] = {

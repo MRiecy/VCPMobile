@@ -2,6 +2,20 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useChatStreamStore } from "@/core/stores/chatStreamStore";
 import { mockInvoke } from "@/tests/mocks/tauri";
+import type { MarkdownNode, StreamEventDto } from "@/core/types/chat";
+
+const streamEvent = (
+  event: Pick<StreamEventDto, "type" | "messageId"> & Partial<StreamEventDto>,
+): StreamEventDto => ({
+  chunk: null,
+  context: null,
+  finishReason: null,
+  error: null,
+  aurora: null,
+  blocks: null,
+  timestamp: null,
+  ...event,
+});
 
 describe("stream render backpressure", () => {
   beforeEach(() => {
@@ -20,23 +34,41 @@ describe("stream render backpressure", () => {
 
     try {
       const store = useChatStreamStore();
-      await store.processStreamEvent({
+      await store.processStreamEvent(streamEvent({
         type: "thinking",
         messageId: "assistant-1",
-        context: { topicId: "topic-a", agentId: "agent-a" },
-      });
+        context: {
+          ownerId: "agent-a",
+          ownerType: "agent",
+          topicId: "topic-a",
+          agentId: "agent-a",
+        },
+      }));
 
       for (let index = 1; index <= 700; index += 1) {
-        const snapshot = [{ type: "paragraph", id: `node-${index}` }];
-        await store.processStreamEvent({
+        const snapshot: MarkdownNode[] = [{
+          type: "paragraph",
+          children: [{ type: "text", value: `node-${index}` }],
+        }];
+        await store.processStreamEvent(streamEvent({
           type: "aurora",
           messageId: "assistant-1",
-          context: { topicId: "topic-a", agentId: "agent-a" },
+          context: {
+            ownerId: "agent-a",
+            ownerType: "agent",
+            topicId: "topic-a",
+            agentId: "agent-a",
+          },
           aurora: {
             chunk: "x",
             tailChanged: true,
             tail: `tail-${index}`,
-            tailBlock: { type: "text", nodes: snapshot },
+            tailBlock: {
+              type: "markdown",
+              content: `tail-${index}`,
+              nodes: snapshot,
+              hash: String(index),
+            },
             tailFrame: {
               epoch: 1,
               revision: index,
@@ -46,14 +78,19 @@ describe("stream render backpressure", () => {
               ],
             },
           },
-        });
+        }));
       }
 
-      await store.processStreamEvent({
+      await store.processStreamEvent(streamEvent({
         type: "end",
         messageId: "assistant-1",
-        context: { topicId: "topic-a", agentId: "agent-a" },
-      });
+        context: {
+          ownerId: "agent-a",
+          ownerType: "agent",
+          topicId: "topic-a",
+          agentId: "agent-a",
+        },
+      }));
 
       const frame = store.activeStreamMessages.get("assistant-1")?.tailFrame;
       expect(frame?.reset).toBe(true);

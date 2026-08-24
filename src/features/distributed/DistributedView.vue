@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import type { PermissionStatusDto } from "../../core/types/native";
 import { useSettingsStore } from "../../core/stores/settings";
 import { useNotificationStore } from "../../core/stores/notification";
 import { useDistributed } from "./composables/useDistributed";
@@ -279,7 +280,7 @@ const ensureToolSystemPermission = async (plugin: PluginItem): Promise<boolean> 
   if (!requiredAlias) return true;
 
   try {
-    const permissions = await invoke<Record<string, boolean>>(
+    const permissions = await invoke<PermissionStatusDto>(
       "plugin:vcp-mobile|check_all_permissions",
     );
     if (!permissions || permissions[requiredAlias] === undefined) {
@@ -296,7 +297,7 @@ const ensureToolSystemPermission = async (plugin: PluginItem): Promise<boolean> 
     await invoke("plugin:vcp-mobile|request_android_permission", {
       pType: requiredAlias,
     });
-    const verified = await invoke<Record<string, boolean>>(
+    const verified = await invoke<PermissionStatusDto>(
       "plugin:vcp-mobile|check_all_permissions",
     );
     if (!verified || verified[requiredAlias] !== true) {

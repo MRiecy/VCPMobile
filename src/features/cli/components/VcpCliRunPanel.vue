@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { invoke } from "@tauri-apps/api/core";
+import type { PermissionStatusDto } from "../../../core/types/native";
 import { computed, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import {
@@ -192,7 +193,7 @@ function updateDraft(event: Event): void {
 
 async function refreshNotificationPermission(): Promise<void> {
   try {
-    const permissions = await invoke<{ notification: boolean }>(
+    const permissions = await invoke<PermissionStatusDto>(
       "plugin:vcp-mobile|check_all_permissions",
     );
     notificationPermission.value = permissions.notification;

@@ -11,6 +11,7 @@ import TopicList from '../../features/topic/TopicList.vue';
 import AgentsCreator from '../../features/agent/AgentsCreator.vue';
 import TopicCreator from '../../features/topic/TopicCreator.vue';
 import { sidebarTab } from '../../features/agent/sidebarTab';
+import type { AssistantListItem } from '../../core/types/assistant';
 
 const layoutStore = useLayoutStore();
 const overlayStore = useOverlayStore();
@@ -36,7 +37,7 @@ useSidebarSwipe(sidebarRef, {
   }
 });
 
-const handleSelectItem = async (item: any) => {
+const handleSelectItem = async (item: AssistantListItem) => {
   activeTab.value = 'topics';
   if (item) {
     // selectItem 负责加载列表并恢复该 Owner 的上次活跃话题。

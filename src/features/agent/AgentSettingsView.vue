@@ -9,22 +9,7 @@ import SlidePage from "../../components/ui/SlidePage.vue";
 import ModelSelector from "../../components/ModelSelector.vue";
 import AvatarCropper from "../../components/ui/AvatarCropper.vue";
 import VcpAvatar from "../../components/ui/VcpAvatar.vue";
-
-interface AgentConfig {
-  id: string;
-  name: string;
-  avatar?: string;
-  avatarCalculatedColor?: string;
-  // Prompt settings
-  mobileSystemPrompt?: string;
-  // Model settings
-  model: string;
-  temperature: number;
-  contextTokenLimit: number;
-  maxOutputTokens: number;
-  streamOutput: boolean;
-  useTemperature: boolean;
-}
+import type { AgentConfigDto } from "../../core/types/assistant";
 
 const props = withDefaults(defineProps<{
   id?: string;
@@ -42,10 +27,10 @@ const sessionStore = useChatSessionStore();
 const notificationStore = useNotificationStore();
 const overlayStore = useOverlayStore();
 
-const createEmptyConfig = (id = ""): AgentConfig => ({
+const createEmptyConfig = (id = ""): AgentConfigDto => ({
   id,
   name: "",
-  avatar: "",
+  systemPrompt: "",
   mobileSystemPrompt: "",
   model: "gemini-3-flash-preview",
   temperature: 1.0,
@@ -53,8 +38,10 @@ const createEmptyConfig = (id = ""): AgentConfig => ({
   maxOutputTokens: 32000,
   streamOutput: true,
   useTemperature: false,
+  avatarCalculatedColor: null,
+  topics: [],
 });
-const agentConfig = ref<AgentConfig>(createEmptyConfig(props.id));
+const agentConfig = ref<AgentConfigDto>(createEmptyConfig(props.id));
 let editorEpoch = 0;
 const pendingSaves = new Map<string, Promise<void>>();
 const isEpochCurrent = (epoch: number) => editorEpoch === epoch;
@@ -130,7 +117,7 @@ const saveSuccess = ref(false);
 let saveSuccessTimer: ReturnType<typeof setTimeout> | null = null;
 
 // 原始配置快照，用于判断用户是否真正修改了内容
-const originalConfig = ref<AgentConfig | null>(null);
+const originalConfig = ref<AgentConfigDto | null>(null);
 
 onUnmounted(() => {
   if (saveSuccessTimer) {
@@ -149,7 +136,7 @@ const loadConfig = async (epoch: number, agentId: string) => {
         await pendingSave;
         if (!isOpenEditorCurrent(epoch, agentId)) return;
       }
-      const config = await invoke<AgentConfig>("read_agent_config", {
+      const config = await invoke<AgentConfigDto>("read_agent_config", {
         agentId,
         allowDefault: true,
       });
@@ -173,9 +160,9 @@ const startSaveOnClose = (epoch: number): Promise<void> => {
 };
 
 const saveOnClose = async (epoch: number) => {
-  const draft = JSON.parse(JSON.stringify(agentConfig.value)) as AgentConfig;
+  const draft = JSON.parse(JSON.stringify(agentConfig.value)) as AgentConfigDto;
   const baseline = originalConfig.value
-    ? JSON.parse(JSON.stringify(originalConfig.value)) as AgentConfig
+    ? JSON.parse(JSON.stringify(originalConfig.value)) as AgentConfigDto
     : null;
   if (!draft.id) return;
 

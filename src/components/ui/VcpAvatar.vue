@@ -5,7 +5,7 @@ import { useAvatarStore } from "../../core/stores/avatar";
 export interface AvatarTarget {
   id: string;
   type: "user" | "agent" | "group";
-  name: string;
+  name?: string;
   avatarCalculatedColor?: string | null;
 }
 

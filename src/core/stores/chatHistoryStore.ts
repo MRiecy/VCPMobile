@@ -11,7 +11,13 @@ import { useNotificationStore } from "./notification";
 import { clearMessageCache } from "../utils/astRenderer";
 import { extractMentionedMemberIds } from "../utils/mention";
 
-import type { ChatMessage, ContentBlock } from "../types/chat";
+import type {
+  ChatMessage,
+  ContentBlock,
+  GroupChatResultDto,
+  RegenerateTopicResultDto,
+  StreamEventDto,
+} from "../types/chat";
 import type {
   ConversationKey,
   ConversationOwnerType,
@@ -187,7 +193,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       console.log(`[ChatHistoryStore] Triggering AI summary for topic: ${topicId}`);
       try {
         const agentName = ownerType === "agent"
-          ? assistantStore.agents.find((a: any) => a.id === ownerId)?.name || "AI"
+          ? assistantStore.agents.find((a) => a.id === ownerId)?.name || "AI"
           : assistantStore.groups.find((g) => g.id === ownerId)?.name || "AI";
         const newTitle = await invoke<string>("summarize_topic", {
           ownerId,
@@ -466,7 +472,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
    * 构造群聊/单聊共用的流式事件 Channel 接线
    */
   const makeStreamChannel = (key: ConversationKey) => {
-    const streamChannel = new Channel<any>();
+    const streamChannel = new Channel<StreamEventDto>();
     streamChannel.onmessage = (event) => streamStore.processStreamEvent(event, {
       onMessageCreated: (msg, tid) => {
         if (tid === key.topicId && canCommitConversation(key) && !currentChatHistory.value.some(m => m.id === msg.id)) {
@@ -545,7 +551,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       if (canCommitConversation(key) && targetIndex !== -1) {
         currentChatHistory.value[targetIndex] = {
           ...currentChatHistory.value[targetIndex],
-          blocks: compiledBlocks as any,
+          blocks: compiledBlocks,
         };
       }
     } catch (e) {
@@ -567,7 +573,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       const streamChannel = makeStreamChannel(key);
 
       if (key.ownerType === "group") {
-        const result = await invoke<{ status?: string; reason?: string }>("handle_group_chat_message", {
+        const result = await invoke<GroupChatResultDto>("handle_group_chat_message", {
           payload: {
             groupId: key.ownerId,
             topicId: key.topicId,
@@ -589,7 +595,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
                   userMsg.content ?? "",
                   group.members.map((id) => ({
                     id,
-                    name: assistantStore.agents.find((a: any) => a.id === id)?.name ?? "",
+                    name: assistantStore.agents.find((a) => a.id === id)?.name ?? "",
                   })),
                 )
               : [];
@@ -815,7 +821,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     const msg = { ...currentChatHistory.value[targetIndex] };
 
     try {
-      const compiledBlocks = await invoke("patch_single_message", {
+      const compiledBlocks = await invoke<ContentBlock[]>("patch_single_message", {
         ownerId: key.ownerId,
         ownerType: key.ownerType,
         topicId: key.topicId,
@@ -832,7 +838,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
           currentChatHistory.value[currentIndex] = {
             ...currentChatHistory.value[currentIndex],
             content: newContent,
-            blocks: compiledBlocks as any,
+            blocks: compiledBlocks,
           };
         }
       }
@@ -869,7 +875,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     }
 
     try {
-      const streamChannel = new Channel<any>();
+      const streamChannel = new Channel<StreamEventDto>();
       streamChannel.onmessage = (event) => streamStore.processStreamEvent(event, {
         onMessageCreated: (msg, tid) => {
           if (tid === key.topicId && canCommitConversation(key) && !currentChatHistory.value.some(m => m.id === msg.id)) {
@@ -887,7 +893,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         }
       });
 
-      const result = await invoke<{ msgCount: number }>("regenerate_topic_response", {
+      const result = await invoke<RegenerateTopicResultDto>("regenerate_topic_response", {
         ownerId: key.ownerId,
         ownerType: key.ownerType,
         topicId: key.topicId,

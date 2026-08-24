@@ -6,10 +6,11 @@ import { useAssistantStore } from '../../../core/stores/assistant';
 import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
 import { useChatStreamStore } from '../../../core/stores/chatStreamStore';
 import { mountWithPinia } from '../../utils/mount';
+import type { ConversationOwnerItem } from '../../../core/types/assistant';
 
 // 注意：mountWithPinia 内部自建 pinia 实例，store 数据必须在挂载后写入
 const mountBar = async (
-  item: { id: string; type: string; name: string } | null,
+  item: ConversationOwnerItem | null,
   options?: { generating?: boolean },
 ) => {
   const wrapper = mountWithPinia(GroupInviteBar);

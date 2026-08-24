@@ -7,13 +7,39 @@ export interface VcpInfoMetadata {
   id: string;
   type: string;
   title: string;
-  subtitle?: string;
+  subtitle: string | null;
   summary: string;
   timestamp: string;
   hasDetails: boolean;
 }
 
 export type ConnectionStatus = 'closed' | 'connecting' | 'connected' | 'error';
+
+const CONNECTION_STATUSES = new Set<ConnectionStatus>([
+  'closed',
+  'connecting',
+  'connected',
+  'error',
+]);
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value && typeof value === 'object' && !Array.isArray(value));
+
+const readMetadata = (value: unknown): VcpInfoMetadata | null => {
+  if (!isRecord(value)) return null;
+  if (
+    typeof value.id !== 'string' ||
+    typeof value.type !== 'string' ||
+    typeof value.title !== 'string' ||
+    (value.subtitle !== null && typeof value.subtitle !== 'string') ||
+    typeof value.summary !== 'string' ||
+    typeof value.timestamp !== 'string' ||
+    typeof value.hasDetails !== 'boolean'
+  ) {
+    return null;
+  }
+  return value as unknown as VcpInfoMetadata;
+};
 
 export const useRagObserverStore = defineStore('ragObserver', () => {
   const connectionStatus = ref<ConnectionStatus>('closed');
@@ -26,8 +52,8 @@ export const useRagObserverStore = defineStore('ragObserver', () => {
   // 从后端初始化拉取历史 metadata
   const fetchMetadataList = async () => {
     try {
-      const list = await invoke<VcpInfoMetadata[]>('get_vcp_info_metadata_list');
-      metadataList.value = list;
+      const list = await invoke<unknown[]>('get_vcp_info_metadata_list');
+      metadataList.value = list.map(readMetadata).filter((item): item is VcpInfoMetadata => item !== null);
     } catch (err) {
       console.error('[RagObserverStore] Failed to fetch metadata list:', err);
     }
@@ -44,10 +70,10 @@ export const useRagObserverStore = defineStore('ragObserver', () => {
   };
 
   // 根据 id 按需拉取 Payload 详情
-  const fetchPayload = async (id: string): Promise<any> => {
+  const fetchPayload = async (id: string): Promise<unknown> => {
     try {
       const rawJson = await invoke<string>('get_vcp_info_payload', { id });
-      return JSON.parse(rawJson);
+      return JSON.parse(rawJson) as unknown;
     } catch (err) {
       console.error(`[RagObserverStore] Failed to fetch payload for ${id}:`, err);
       throw err;
@@ -89,19 +115,23 @@ export const useRagObserverStore = defineStore('ragObserver', () => {
       return;
     }
 
-    unlistenFn = await listen<any>('vcp-info-event', (event) => {
+    unlistenFn = await listen<unknown>('vcp-info-event', (event) => {
       const payload = event.payload;
-      if (!payload || typeof payload !== 'object') return;
+      if (!isRecord(payload)) return;
 
       const type = payload.type;
       
       if (type === 'vcp-info-status') {
-        if (payload.source === 'VCPInfo' && payload.status) {
+        if (
+          payload.source === 'VCPInfo' &&
+          typeof payload.status === 'string' &&
+          CONNECTION_STATUSES.has(payload.status as ConnectionStatus)
+        ) {
           connectionStatus.value = payload.status as ConnectionStatus;
         }
       } else if (type === 'vcp-info-message') {
-        const metadata = payload.data as VcpInfoMetadata;
-        if (metadata && metadata.id) {
+        const metadata = readMetadata(payload.data);
+        if (metadata) {
           metadataList.value.unshift(metadata);
           if (metadataList.value.length > 500) {
             metadataList.value.pop();

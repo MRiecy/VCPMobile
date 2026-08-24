@@ -54,8 +54,8 @@ describe("chat conversation concurrency guards", () => {
     const session = useChatSessionStore();
     const assistant = useAssistantStore();
     assistant.agents = [
-      { id: "agent-b", name: "B", model: "test" },
-      { id: "agent-c", name: "C", model: "test" },
+      { id: "agent-b", name: "B", model: "test", avatarCalculatedColor: null },
+      { id: "agent-c", name: "C", model: "test", avatarCalculatedColor: null },
     ];
     const topics = deferred<void>();
     mockInvoke("get_topics_streamed", () => topics.promise);
@@ -225,6 +225,7 @@ describe("chat conversation concurrency guards", () => {
     const stream = useChatStreamStore();
     await stream.processStreamEvent({
       type: "thinking",
+      chunk: null,
       messageId: "assistant-1",
       context: {
         ownerId: "agent-a",
@@ -232,6 +233,11 @@ describe("chat conversation concurrency guards", () => {
         topicId: "topic-a",
         agentId: "agent-a",
       },
+      finishReason: null,
+      error: null,
+      aurora: null,
+      blocks: null,
+      timestamp: null,
     });
 
     expect(
@@ -247,6 +253,7 @@ describe("chat conversation concurrency guards", () => {
     session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
     await stream.processStreamEvent({
       type: "thinking",
+      chunk: null,
       messageId: "assistant-a",
       context: {
         ownerId: "agent-a",
@@ -254,6 +261,11 @@ describe("chat conversation concurrency guards", () => {
         topicId: "topic-a",
         agentId: "agent-a",
       },
+      finishReason: null,
+      error: null,
+      aurora: null,
+      blocks: null,
+      timestamp: null,
     });
 
     const interrupt = deferred<unknown>();
@@ -268,6 +280,7 @@ describe("chat conversation concurrency guards", () => {
     session.setConversation({ id: "agent-b", type: "agent" }, "topic-b");
     await stream.processStreamEvent({
       type: "thinking",
+      chunk: null,
       messageId: "assistant-b",
       context: {
         ownerId: "agent-b",
@@ -275,6 +288,11 @@ describe("chat conversation concurrency guards", () => {
         topicId: "topic-b",
         agentId: "agent-b",
       },
+      finishReason: null,
+      error: null,
+      aurora: null,
+      blocks: null,
+      timestamp: null,
     });
     interrupt.resolve(undefined);
     await stoppingA;

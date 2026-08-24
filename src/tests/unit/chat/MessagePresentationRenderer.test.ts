@@ -22,8 +22,6 @@ describe('MessageRenderer presentation shell', () => {
       agentId: 'agent-fixture',
       shell: {
         avatarColor: '#64748b',
-        bubbleBorderColor: '#64748b',
-        bubbleBoxShadow: 'none',
         displayName: 'Fixture Agent',
         isUser: false,
       },

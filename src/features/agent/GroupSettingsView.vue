@@ -13,27 +13,21 @@ import SettingsSection from "../../components/settings/SettingsSection.vue";
 import SettingsRow from "../../components/settings/SettingsRow.vue";
 import SettingsSwitch from "../../components/settings/SettingsSwitch.vue";
 import GroupModeHelpDialog from "./GroupModeHelpDialog.vue";
+import type {
+  AgentListItemDto,
+  GroupConfigDto,
+} from "../../core/types/assistant";
 
-interface GroupConfig {
-  id: string;
-  name: string;
-  avatar?: string;
-  avatarCalculatedColor?: string;
-  members: string[];
-  mode: string;
+type EditableGroupConfig = Omit<
+  GroupConfigDto,
+  "memberTags" | "groupPrompt" | "invitePrompt" | "unifiedModel" | "tagMatchMode"
+> & {
   memberTags: Record<string, string>;
   groupPrompt: string;
   invitePrompt: string;
-  useUnifiedModel: boolean;
-  unifiedModel?: string;
+  unifiedModel: string;
   tagMatchMode: string;
-}
-
-interface Agent {
-  id: string;
-  name: string;
-  avatar?: string;
-}
+};
 
 const props = withDefaults(defineProps<{
   id: string;
@@ -51,10 +45,10 @@ const sessionStore = useChatSessionStore();
 const notificationStore = useNotificationStore();
 const overlayStore = useOverlayStore();
 
-const createEmptyConfig = (id = ""): GroupConfig => ({
+const createEmptyConfig = (id = ""): EditableGroupConfig => ({
   id,
   name: "",
-  avatar: "",
+  avatarCalculatedColor: null,
   members: [],
   mode: "sequential",
   memberTags: {},
@@ -63,31 +57,33 @@ const createEmptyConfig = (id = ""): GroupConfig => ({
   useUnifiedModel: false,
   unifiedModel: "",
   tagMatchMode: "strict",
+  topics: [],
+  createdAt: 0,
 });
-const normalizeGroupConfig = (config: Partial<GroupConfig> & Pick<GroupConfig, "id" | "name" | "members">): GroupConfig => ({
+const normalizeGroupConfig = (config: GroupConfigDto): EditableGroupConfig => ({
   ...createEmptyConfig(config.id),
   ...config,
   mode: config.mode || "sequential",
-  memberTags: config.memberTags && typeof config.memberTags === "object" ? config.memberTags : {},
+  memberTags: config.memberTags ?? {},
   groupPrompt: config.groupPrompt || "",
   invitePrompt: config.invitePrompt || "",
   unifiedModel: config.unifiedModel || "",
   tagMatchMode: config.tagMatchMode || "strict",
 });
-const groupConfig = ref<GroupConfig>(createEmptyConfig(props.id));
+const groupConfig = ref<EditableGroupConfig>(createEmptyConfig(props.id));
 let editorEpoch = 0;
 const pendingSaves = new Map<string, Promise<void>>();
 const isEpochCurrent = (epoch: number) => editorEpoch === epoch;
 const isOpenEditorCurrent = (epoch: number, id: string) =>
   isEpochCurrent(epoch) && props.isOpen && props.id === id;
 
-const allAgents = ref<Agent[]>([]);
+const allAgents = ref<Pick<AgentListItemDto, "id" | "name">[]>([]);
 const isSaving = ref(false);
 const saveSuccess = ref(false);
 let saveSuccessTimer: ReturnType<typeof setTimeout> | null = null;
 
 // 原始配置快照，用于判断用户是否真正修改了内容
-const originalConfig = ref<GroupConfig | null>(null);
+const originalConfig = ref<EditableGroupConfig | null>(null);
 
 onUnmounted(() => {
   if (saveSuccessTimer) {
@@ -164,7 +160,7 @@ const fetchGroupConfig = async (epoch: number, groupId: string) => {
       await pendingSave;
       if (!isOpenEditorCurrent(epoch, groupId)) return;
     }
-    const config = await invoke<GroupConfig>("read_group_config", { groupId });
+    const config = await invoke<GroupConfigDto>("read_group_config", { groupId });
     if (!isOpenEditorCurrent(epoch, groupId)) return;
     groupConfig.value = normalizeGroupConfig(config);
     originalConfig.value = JSON.parse(JSON.stringify(groupConfig.value));
@@ -184,9 +180,9 @@ const startSaveOnClose = (epoch: number): Promise<void> => {
 };
 
 const saveOnClose = async (epoch: number) => {
-  const draft = JSON.parse(JSON.stringify(groupConfig.value)) as GroupConfig;
+  const draft = JSON.parse(JSON.stringify(groupConfig.value)) as EditableGroupConfig;
   const baseline = originalConfig.value
-    ? JSON.parse(JSON.stringify(originalConfig.value)) as GroupConfig
+    ? JSON.parse(JSON.stringify(originalConfig.value)) as EditableGroupConfig
     : null;
   if (!draft.id) return;
 

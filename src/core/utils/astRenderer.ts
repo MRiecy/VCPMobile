@@ -220,15 +220,15 @@ export function renderMarkdownNodes(
 function renderNode(node: MarkdownNode, messageId: string): string {
   switch (node.type) {
     case 'paragraph':
-      return `<p>${(node.children || []).map(renderInline).join('')}</p>`;
+      return `<p>${node.children.map(renderInline).join('')}</p>`;
     
     case 'heading':
       const level = node.level || 1;
-      return `<h${level}>${(node.children || []).map(renderInline).join('')}</h${level}>`;
+      return `<h${level}>${node.children.map(renderInline).join('')}</h${level}>`;
     
     case 'code_block': {
       if (node.lang === 'mermaid') {
-        return `<div class="mermaid-placeholder">${escapeHtml(node.code || '')}</div>`;
+        return `<div class="mermaid-placeholder">${escapeHtml(node.code)}</div>`;
       }
       let html = node.highlighted_html;
       if (html) {
@@ -242,23 +242,23 @@ function renderNode(node: MarkdownNode, messageId: string): string {
         }
         return html;
       }
-      return `<pre class="vcp-code-block vcp-scrollable"><code>${escapeHtml(node.code || '')}</code></pre>`;
+      return `<pre class="vcp-code-block vcp-scrollable"><code>${escapeHtml(node.code)}</code></pre>`;
     }
     
     case 'blockquote':
-      return `<blockquote>${(node.children || []).map((n: any) => renderNode(n, messageId)).join('')}</blockquote>`;
+      return `<blockquote>${node.children.map((n) => renderNode(n, messageId)).join('')}</blockquote>`;
     
     case 'list':
       const tag = node.ordered ? 'ol' : 'ul';
-      const itemsHtml = (node.items || []).map(itemNodes => 
+      const itemsHtml = node.items.map(itemNodes =>
         `<li>${itemNodes.map(n => renderNode(n, messageId)).join('')}</li>`
       ).join('');
       return `<${tag}>${itemsHtml}</${tag}>`;
     
     case 'table':
-      const headerHtml = `<tr>${(node.header || []).map(cell => `<th>${(cell as any).map(renderInline).join('')}</th>`).join('')}</tr>`;
-      const bodyHtml = (node.rows || []).map(row =>
-        `<tr>${row.map(cell => `<td>${(cell as any).map(renderInline).join('')}</td>`).join('')}</tr>`
+      const headerHtml = `<tr>${node.header.map(cell => `<th>${cell.map(renderInline).join('')}</th>`).join('')}</tr>`;
+      const bodyHtml = node.rows.map(row =>
+        `<tr>${row.map(cell => `<td>${cell.map(renderInline).join('')}</td>`).join('')}</tr>`
       ).join('');
       const wrapper = node.wrapper_class || 'vcp-table-wrapper';
       return `<div class="${wrapper}"><table><thead>${headerHtml}</thead><tbody>${bodyHtml}</tbody></table></div>`;
@@ -269,7 +269,7 @@ function renderNode(node: MarkdownNode, messageId: string): string {
 
     
     case 'raw_html':
-      return node.content || '';
+      return node.content;
     
     default:
       return '';
@@ -279,33 +279,33 @@ function renderNode(node: MarkdownNode, messageId: string): string {
 function renderInline(node: InlineNode): string {
   switch (node.type) {
     case 'text':
-      return escapeHtml(node.value || '');
+      return escapeHtml(node.value);
     
     case 'strong':
-      return `<strong>${(node.children || []).map(renderInline).join('')}</strong>`;
+      return `<strong>${node.children.map(renderInline).join('')}</strong>`;
     
     case 'emphasis':
-      return `<em>${(node.children || []).map(renderInline).join('')}</em>`;
+      return `<em>${node.children.map(renderInline).join('')}</em>`;
     
     case 'strikethrough':
-      return `<del>${(node.children || []).map(renderInline).join('')}</del>`;
+      return `<del>${node.children.map(renderInline).join('')}</del>`;
     
     case 'code':
-      return `<code>${escapeHtml(node.value || '')}</code>`;
+      return `<code>${escapeHtml(node.value)}</code>`;
     
     case 'link': {
-      const rawHref = node.needs_asset_conversion && node.href
+      const rawHref = node.needs_asset_conversion
         ? convertFileSrc(node.href)
-        : (node.href || '');
+        : node.href;
       const href = filterTrustedRichHtmlUrl(rawHref, 'a', 'href');
       const hrefAttribute = href === null ? '' : ` href="${escapeHtml(href)}"`;
-      return `<a${hrefAttribute} title="${escapeHtml(node.title || '')}" target="_blank" rel="noopener noreferrer">${(node.children || []).map(renderInline).join('')}</a>`;
+      return `<a${hrefAttribute} title="${escapeHtml(node.title || '')}" target="_blank" rel="noopener noreferrer">${node.children.map(renderInline).join('')}</a>`;
     }
     
     case 'image': {
-      const rawSrc = node.needs_asset_conversion && node.src
+      const rawSrc = node.needs_asset_conversion
         ? convertFileSrc(node.src)
-        : (node.src || '');
+        : node.src;
       const src = filterTrustedRichHtmlUrl(rawSrc, 'img', 'src');
       const srcAttribute = src === null ? '' : ` src="${escapeHtml(src)}"`;
       return `<img${srcAttribute} alt="${escapeHtml(node.alt || '')}" title="${escapeHtml(node.title || '')}" loading="lazy" class="vcp-markdown-image" />`;

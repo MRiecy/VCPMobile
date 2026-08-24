@@ -2,18 +2,21 @@
 import { ref, onMounted, onUnmounted, computed } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useAppLifecycleStore } from '../../core/stores/appLifecycle';
+import type {
+  DiskSpaceDto,
+  ListenerPermissionDto,
+  PermissionStatusDto,
+} from '../../core/types/native';
 
 const lifecycleStore = useAppLifecycleStore();
 
-// 仅保活核心权限进入门禁；存储（全媒体读取）等非核心权限由对应功能按需申请
-interface PermissionStatus {
-  notification: boolean;
-  battery: boolean;
-}
-
-const status = ref<PermissionStatus>({
+const status = ref<PermissionStatusDto>({
   notification: false,
-  battery: false
+  storage: false,
+  battery: false,
+  microphone: false,
+  camera: false,
+  location: false,
 });
 
 const currentStep = ref(1);
@@ -53,11 +56,11 @@ const isStorageSpaceOk = computed(() => freeDiskSpaceGB.value >= 5.0);
 
 const check = async () => {
   try {
-    const res = await invoke<PermissionStatus>('plugin:vcp-mobile|check_all_permissions');
+    const res = await invoke<PermissionStatusDto>('plugin:vcp-mobile|check_all_permissions');
     status.value = res;
     
     // 检测通知栏监听服务
-    const listenerRes = await invoke<{ enabled: boolean }>('plugin:vcp-mobile|check_notification_listener_permission');
+    const listenerRes = await invoke<ListenerPermissionDto>('plugin:vcp-mobile|check_notification_listener_permission');
     isNotificationListenerReady.value = listenerRes.enabled;
     
     // 检测内部存储空间
@@ -69,7 +72,7 @@ const check = async () => {
 
 const checkDiskSpace = async () => {
   try {
-    const res = await invoke<{ freeBytes: number, freeGb: number, totalBytes: number, totalGb: number }>('plugin:vcp-mobile|get_free_disk_space');
+    const res = await invoke<DiskSpaceDto>('plugin:vcp-mobile|get_free_disk_space');
     freeDiskSpaceGB.value = res.freeGb;
     totalDiskSpaceGB.value = res.totalGb;
     isDiskCheckError.value = false;
@@ -119,10 +122,10 @@ const goNext = () => {
   }
 };
 
-let checkTimer: any = null;
+let checkTimer: ReturnType<typeof setInterval> | null = null;
 
 const onPermissionChange = (e: Event) => {
-  status.value = (e as CustomEvent).detail;
+  status.value = (e as CustomEvent<PermissionStatusDto>).detail;
 };
 
 const onVisibilityChange = () => {
@@ -214,18 +217,18 @@ onUnmounted(() => {
                 class="group flex items-center gap-4 px-4 py-3 rounded-2xl bg-gray-100/50 active:bg-gray-200/60 transition-all"
               >
                 <div class="w-10 h-10 rounded-xl bg-blue-50 flex items-center justify-center shrink-0">
-                  <div :class="[item.icon, status[item.id as keyof PermissionStatus] ? 'text-green-500' : 'text-blue-500']" class="text-xl transition-colors duration-500"></div>
+                  <div :class="[item.icon, status[item.id as keyof PermissionStatusDto] ? 'text-green-500' : 'text-blue-500']" class="text-xl transition-colors duration-500"></div>
                 </div>
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-2">
                     <span class="font-semibold text-gray-900">{{ item.name }}</span>
                     <Transition name="fade">
-                      <span v-if="status[item.id as keyof PermissionStatus]" class="text-[9px] px-1.5 py-0.5 bg-green-500/10 text-green-600 rounded-md font-black uppercase tracking-wider">OK</span>
+                      <span v-if="status[item.id as keyof PermissionStatusDto]" class="text-[9px] px-1.5 py-0.5 bg-green-500/10 text-green-600 rounded-md font-black uppercase tracking-wider">OK</span>
                     </Transition>
                   </div>
                   <p class="text-xs text-gray-500 opacity-70 leading-relaxed">{{ item.desc }}</p>
                 </div>
-                <button v-if="!status[item.id as keyof PermissionStatus]"
+                <button v-if="!status[item.id as keyof PermissionStatusDto]"
                   @click="request(item.id as any)"
                   class="px-3 py-1.5 bg-gray-900 text-white text-[13px] font-bold rounded-lg active:scale-95 transition-all shrink-0"
                 >

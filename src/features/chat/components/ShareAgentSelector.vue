@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, watch, onUnmounted } from "vue";
-import { useAssistantStore, type AgentConfig } from "../../../core/stores/assistant";
+import { useAssistantStore } from "../../../core/stores/assistant";
 import { useModalHistory } from "../../../core/composables/useModalHistory";
 import VcpAvatar from "../../../components/ui/VcpAvatar.vue";
+import type { AgentListItemDto } from "../../../core/types/assistant";
 
 const props = defineProps<{
   isOpen: boolean;
@@ -12,7 +13,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: "close"): void;
-  (e: "selected", agent: AgentConfig): void;
+  (e: "selected", agent: AgentListItemDto): void;
 }>();
 
 const assistantStore = useAssistantStore();
@@ -28,7 +29,7 @@ const previewText = computed(() => {
     : props.sharedText;
 });
 
-const handleSelect = (agent: AgentConfig) => {
+const handleSelect = (agent: AgentListItemDto) => {
   emit("selected", agent);
 };
 

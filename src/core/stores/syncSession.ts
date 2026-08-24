@@ -3,6 +3,7 @@ import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useDataReload } from "../composables/useDataReload";
+import type { BatteryStatusDto } from "../types/native";
 
 type SyncStatus =
   | "idle"
@@ -417,7 +418,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
 
     // 原生设备电量与省电检测保障
     try {
-      const battery = await invoke<{ level: number; isPowerSaveMode: boolean }>(
+      const battery = await invoke<BatteryStatusDto>(
         "plugin:vcp-mobile|get_battery_status",
       );
       if (!isCurrentAttempt(generation, attempt)) return;
@@ -878,10 +879,10 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
   const registerListener = async (
     generation: number,
     eventName: string,
-    callback: (event: any) => void,
+    callback: (payload: unknown) => void,
   ) => {
-    const fn = await listen(eventName, (event: any) => {
-      if (isCurrentView(generation)) callback(event);
+    const fn = await listen<unknown>(eventName, (event) => {
+      if (isCurrentView(generation)) callback(event.payload);
     });
     if (!isCurrentView(generation)) {
       fn();
@@ -892,23 +893,25 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
 
   const registerListeners = async (generation: number) => {
     await Promise.all([
-      registerListener(generation, "vcp-log", (event: any) => {
-        const { audience, category } = event.payload ?? {};
+      registerListener(generation, "vcp-log", (rawPayload) => {
+        if (!rawPayload || typeof rawPayload !== "object") return;
+        const payload = rawPayload as Record<string, unknown>;
+        const { audience, category } = payload;
         if (category === "sync" && audience === "operator") {
-          routeSessionEvent("log", event.payload);
+          routeSessionEvent("log", payload);
         }
       }),
 
-      registerListener(generation, "vcp-sync-progress", (event: any) =>
-        routeSessionEvent("progress", event.payload),
+      registerListener(generation, "vcp-sync-progress", (payload) =>
+        routeSessionEvent("progress", payload),
       ),
 
-      registerListener(generation, "vcp-sync-status", (event: any) =>
-        routeSessionEvent("status", event.payload),
+      registerListener(generation, "vcp-sync-status", (payload) =>
+        routeSessionEvent("status", payload),
       ),
 
-      registerListener(generation, "vcp-sync-completed", (event: any) =>
-        routeSessionEvent("completed", event.payload),
+      registerListener(generation, "vcp-sync-completed", (payload) =>
+        routeSessionEvent("completed", payload),
       ),
     ]);
   };

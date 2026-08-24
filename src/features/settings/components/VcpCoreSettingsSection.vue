@@ -15,6 +15,13 @@ const emit = defineEmits<{
 
 const vcpPingStatus = ref<{ type: 'success' | 'error' | 'loading' | null; message: string }>({ type: null, message: '' });
 
+interface VcpConnectionTestResult {
+  success: boolean;
+  status: number;
+  modelCount: number;
+  models: unknown;
+}
+
 const testVcpConnection = async () => {
   emit('save-request');
 
@@ -25,7 +32,7 @@ const testVcpConnection = async () => {
 
   vcpPingStatus.value = { type: 'loading', message: '正在验证模型列表...' };
   try {
-    const res = await invoke<{ success: boolean, status: number, modelCount: number, models: any }>('test_vcp_connection', {
+    const res = await invoke<VcpConnectionTestResult>('test_vcp_connection', {
       vcpUrl: props.settings.vcpServerUrl,
       vcpApiKey: props.settings.vcpApiKey
     });

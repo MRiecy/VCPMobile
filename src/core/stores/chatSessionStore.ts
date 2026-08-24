@@ -3,10 +3,14 @@ import { ref, computed } from "vue";
 import type { PickedFile } from "tauri-plugin-vcp-mobile";
 import { useAssistantStore } from "./assistant";
 import { useTopicStore } from "./topicListManager";
+import type {
+  ConversationOwnerItem,
+  OwnerType,
+} from "../types/assistant";
 
 export type PickedFileInfo = PickedFile;
 
-export type ConversationOwnerType = "agent" | "group";
+export type ConversationOwnerType = OwnerType;
 
 export interface ConversationKey {
   ownerId: string;
@@ -16,7 +20,7 @@ export interface ConversationKey {
 }
 
 export const useChatSessionStore = defineStore("chatSession", () => {
-  const currentSelectedItem = ref<any>(null);
+  const currentSelectedItem = ref<ConversationOwnerItem | null>(null);
   const currentTopicId = ref<string | null>(null);
   const sessionEpoch = ref(0);
   const lastActiveTopicMap = ref<Record<string, string>>({});
@@ -33,7 +37,10 @@ export const useChatSessionStore = defineStore("chatSession", () => {
     return { ownerId, ownerType, topicId, epoch: sessionEpoch.value };
   });
 
-  const setConversation = (item: any, topicId: string | null) => {
+  const setConversation = (
+    item: ConversationOwnerItem | null,
+    topicId: string | null,
+  ) => {
     const ownerType: ConversationOwnerType | null = item
       ? item.type === "agent" || item.type === "group"
         ? item.type
@@ -166,7 +173,7 @@ export const useChatSessionStore = defineStore("chatSession", () => {
   ) => {
     // 设置当前选中的项目详情 (确保头像和色调同步)
     const agent = ownerType === "agent"
-      ? assistantStore.agents.find((a: any) => a.id === itemId)
+      ? assistantStore.agents.find((a) => a.id === itemId)
       : undefined;
     const group = ownerType === "group"
       ? assistantStore.groups.find((g) => g.id === itemId)
@@ -189,7 +196,7 @@ export const useChatSessionStore = defineStore("chatSession", () => {
    * 选择一个项目 (Agent/Group)，自动加载其记录的或最新的话题
    */
   const selectItem = async (
-    item: any,
+    item: ConversationOwnerItem,
     loadHistoryCallback?: (itemId: string, ownerType: string, topicId: string) => Promise<void>
   ) => {
     if (!item) return;
@@ -260,7 +267,7 @@ export const useChatSessionStore = defineStore("chatSession", () => {
 
     const ownerType: ConversationOwnerType = selected.type;
     const freshOwner = ownerType === "agent"
-      ? assistantStore.agents.find((agent: any) => agent.id === selected.id)
+      ? assistantStore.agents.find((agent) => agent.id === selected.id)
       : assistantStore.groups.find((group) => group.id === selected.id);
     if (!freshOwner) {
       clearConversation();

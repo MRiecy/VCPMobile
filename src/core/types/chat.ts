@@ -1,43 +1,66 @@
 export interface MessageShell {
   avatarColor: string;
-  bubbleBorderColor: string;
-  bubbleBoxShadow: string;
   displayName: string;
   isUser: boolean;
 }
 
-export type MarkdownNode = {
-  type: "paragraph" | "heading" | "code_block" | "blockquote" | "list" | "table" | "thematic_break" | "raw_html";
-  children?: InlineNode[];
-  level?: number;
-  lang?: string;
-  code?: string;
-  highlighted_html?: string;
-  theme?: string;
-  ordered?: boolean;
-  items?: MarkdownNode[][];
-  header?: InlineNode[][];
-  rows?: InlineNode[][][];
-  wrapper_class?: string;
-  content?: string;
-  encoded?: string;
-  hash?: string | number;
-};
+type AstHash = number;
 
-export type InlineNode = {
-  type: "text" | "strong" | "emphasis" | "strikethrough" | "code" | "link" | "image" | "break" | "inline_math" | "vcp_custom" | "raw_html_inline";
-  kind?: string;
-  value?: string;
-  children?: InlineNode[];
-  href?: string;
-  src?: string;
-  alt?: string;
-  title?: string;
-  needs_asset_conversion?: boolean;
-  content?: string;
-  display_mode?: boolean;
-  hash?: string | number;
-};
+export type MarkdownNode =
+  | { type: "paragraph"; children: InlineNode[]; hash?: AstHash }
+  | { type: "heading"; level: number; children: InlineNode[]; hash?: AstHash }
+  | {
+      type: "code_block";
+      lang: string | null;
+      code: string;
+      highlighted_html: string | null;
+      theme: string | null;
+      hash?: AstHash;
+    }
+  | { type: "blockquote"; children: MarkdownNode[]; hash?: AstHash }
+  | { type: "list"; ordered: boolean; items: MarkdownNode[][]; hash?: AstHash }
+  | {
+      type: "table";
+      header: InlineNode[][];
+      rows: InlineNode[][][];
+      wrapper_class: string | null;
+      hash?: AstHash;
+    }
+  | { type: "thematic_break" }
+  | { type: "raw_html"; content: string; hash?: AstHash };
+
+export type InlineNode =
+  | { type: "text"; value: string }
+  | { type: "strong"; children: InlineNode[]; hash?: AstHash }
+  | { type: "emphasis"; children: InlineNode[]; hash?: AstHash }
+  | { type: "strikethrough"; children: InlineNode[]; hash?: AstHash }
+  | { type: "code"; value: string }
+  | {
+      type: "link";
+      href: string;
+      title: string | null;
+      children: InlineNode[];
+      needs_asset_conversion: boolean;
+      hash?: AstHash;
+    }
+  | {
+      type: "image";
+      src: string;
+      alt: string;
+      title: string | null;
+      needs_asset_conversion: boolean;
+      hash?: AstHash;
+    }
+  | { type: "break" }
+  | { type: "inline_math"; content: string; display_mode: boolean; hash?: AstHash }
+  | {
+      type: "vcp_custom";
+      kind: string;
+      value?: string;
+      children?: InlineNode[];
+      hash?: AstHash;
+    }
+  | { type: "raw_html_inline"; content: string; hash?: AstHash };
 
 export interface ToolCallSummaryItem {
   tool_name: string;
@@ -56,7 +79,6 @@ export interface ContentBlock {
   | "html-preview"
   | "role-divider"
   | "style"
-  | "math"
   | "tool-call-summary";
   content?: string;
   nodes?: MarkdownNode[]; // For type: "markdown", "diary", "thought"
@@ -105,14 +127,23 @@ export interface Attachment {
   createdAt?: number;
 }
 
-/** register_local_file / store_file 返回的本地 CAS 注册结果。 */
-export interface RegisteredAttachmentData {
-  type: string;
+/** register_local_file / store_file 返回的完整本地 CAS 注册结果。 */
+export interface AttachmentData {
+  id: string;
   name: string;
+  internalFileName: string;
+  internalPath: string;
+  type: string;
   size: number;
   hash: string;
-  internalPath: string;
+  createdAt: number;
+  extractedText: string | null;
   thumbnailPath: string | null;
+}
+
+export interface AttachmentRegisterProgressDto {
+  progress: number;
+  stableId: string;
 }
 
 /**
@@ -161,36 +192,7 @@ export interface TailFrame {
   frameSeq: number;
   reset?: boolean;
   snapshot?: MarkdownNode[];
-  mutations: AstMutation[];
-}
-
-/**
- * HistoryChunk 接口定义，用于 Channel 流式加载
- */
-export interface HistoryChunk {
-  message: ChatMessage;
-  index: number;
-  is_last: boolean;
-}
-
-/**
- * TopicDelta 接口定义
- */
-export interface TopicDelta {
-  added: ChatMessage[];
-  updated: ChatMessage[];
-  deleted_ids: string[];
-  sync_skipped?: boolean;
-}
-
-/**
- * TopicFingerprint 接口定义
- */
-export interface TopicFingerprint {
-  topic_id: string;
-  mtime: number;
-  size: number;
-  msg_count: number;
+  mutations?: AstMutation[];
 }
 
 /**
@@ -198,7 +200,7 @@ export interface TopicFingerprint {
  * 与 ContentBlock 类似但精简，用于流式期间的增量渲染
  */
 export interface StreamBlock {
-  type: "markdown" | "thought" | "tool-use" | "tool-result" | "diary" | "diary-update" | "html-preview" | "role-divider" | "style" | "button-click";
+  type: "markdown" | "thought" | "tool-use" | "tool-result" | "diary" | "diary-update" | "html-preview" | "role-divider" | "style" | "button-click" | "tool-call-summary";
   content?: string;
   nodes?: MarkdownNode[];
   theme?: string;
@@ -219,6 +221,8 @@ export interface StreamBlock {
   role?: string;
   is_end?: boolean;
   highlighted_content?: string;
+  items?: ToolCallSummaryItem[];
+  raw_content?: string;
   hash?: string;
 }
 
@@ -237,16 +241,54 @@ export interface AuroraUpdate {
   chunk?: string;
 }
 
-/**
- * StreamEvent 接口定义，用于 Rust Channel 事件分发
- */
-export interface StreamEvent {
-  type: string;
-  chunk?: any;
-  messageId?: string;
-  context?: any;
-  finishReason?: string;
-  error?: string;
-  aurora?: AuroraUpdate;
-  blocks?: ContentBlock[];
+export interface StreamContextDto {
+  topicId?: string;
+  isGroupMessage?: boolean;
+  groupId?: string;
+  agentId?: string;
+  ownerId?: string;
+  ownerType?: "agent" | "group";
+  agentName?: string;
+  [key: string]: unknown;
+}
+
+/** Rust `StreamEvent` 的完整 Channel 载荷；Option 字段会被序列化为 null。 */
+export interface StreamEventDto {
+  type: "thinking" | "aurora" | "end" | "error" | "reconnecting" | "data";
+  chunk: unknown | null;
+  messageId: string;
+  context: StreamContextDto | null;
+  finishReason: string | null;
+  error: string | null;
+  aurora: AuroraUpdate | null;
+  blocks: ContentBlock[] | null;
+  timestamp: number | null;
+}
+
+export interface ActiveGenerationDto {
+  msgId: string;
+  topicId: string;
+  ownerId: string;
+  ownerType: string;
+  createdAt: number;
+  agentId: string | null;
+  agentName: string | null;
+}
+
+export type RecoveryResultDto =
+  | { status: "already_running" }
+  | { status: "completed"; content: string; finishReason?: string | null }
+  | { status: "failed" | "not_found"; content: string };
+
+export type GroupChatResultDto =
+  | { status: "completed" }
+  | {
+      status: "no_ai_response";
+      reason: "invite_only" | "mode_not_implemented" | "no_speakers";
+      mode?: string;
+    };
+
+export interface RegenerateTopicResultDto {
+  generation: unknown;
+  msgCount: number;
 }

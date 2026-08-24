@@ -6,23 +6,11 @@ import {
   type ConversationOwnerType,
 } from "./chatSessionStore";
 import { useAssistantStore } from "./assistant";
+import type { TopicDto } from "../types/assistant";
 
 import { useNotificationStore } from "./notification";
 
-/**
- * 话题接口定义
- */
-export interface Topic {
-  id: string;
-  ownerId: string; // 所属实体的 ID
-  ownerType: ConversationOwnerType; // 实体类型
-  name: string;
-  createdAt: number;
-  locked?: boolean;
-  unread?: boolean;
-  unreadCount?: number;
-  msgCount?: number;
-}
+export type Topic = TopicDto;
 
 /**
  * 话题列表管理 Store

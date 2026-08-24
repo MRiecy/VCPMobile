@@ -14,6 +14,15 @@ interface AvatarResult {
   updated_at: number;
 }
 
+interface BatchAvatarItemDto {
+  ownerType: string;
+  ownerId: string;
+  mimeType: string;
+  imageData: number[];
+  dominantColor: string | null;
+  updatedAt: number;
+}
+
 /**
  * 采用 Canvas 提取图片的主色调 (在前端 WebView 高效执行，100% 避免后台体积和 ffmpeg 权限问题)
  */
@@ -245,7 +254,7 @@ export const useAvatarStore = defineStore("avatar", () => {
     const startTime = Date.now();
     try {
       console.log(`[AvatarStore] Starting ${replaceCache ? "refreshAll" : "preloadAll"}...`);
-      const results = (await invoke<any[]>("batch_get_avatars")) ?? [];
+      const results = (await invoke<BatchAvatarItemDto[]>("batch_get_avatars")) ?? [];
       if (replaceCache) {
         for (const entry of cache.values()) {
           URL.revokeObjectURL(entry.blobUrl);

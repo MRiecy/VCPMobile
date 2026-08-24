@@ -28,7 +28,7 @@ export interface AppSettings {
   distributedWsUrl?: string;
   distributedVcpKey?: string;
   distributedDeviceName?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export function diffSettingsPatch(
@@ -94,7 +94,7 @@ export const useSettingsStore = defineStore("settings", () => {
     }
   });
 
-  const updateSettings = (updates: Record<string, any>) => enqueueOperation(async () => {
+  const updateSettings = (updates: Partial<AppSettings>) => enqueueOperation(async () => {
     error.value = null;
     try {
       const updated = await invoke<AppSettings>("update_settings", { updates });

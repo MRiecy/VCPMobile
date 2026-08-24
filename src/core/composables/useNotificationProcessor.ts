@@ -1,5 +1,23 @@
 import { VcpNotification, useNotificationStore, VcpStatus } from '../stores/notification';
 
+const VCP_STATUSES = new Set<VcpStatus['status']>([
+  'open',
+  'closed',
+  'error',
+  'connecting',
+  'connected',
+  'disconnected',
+  'ready',
+  'initializing',
+  'optimizing',
+]);
+
+function readVcpStatus(value: unknown, fallback: VcpStatus['status']): VcpStatus['status'] {
+  return typeof value === 'string' && VCP_STATUSES.has(value as VcpStatus['status'])
+    ? value as VcpStatus['status']
+    : fallback;
+}
+
 function parseObjectLike(value: unknown): Record<string, any> | null {
   if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
     return value as Record<string, any>;
@@ -110,7 +128,9 @@ export function useNotificationProcessor() {
    * 对标桌面端 notificationRenderer.js 的解析逻辑
    * 负责将后端原始 JSON 转化为前端 UI 可用的结构
    */
-  const processPayload = (payload: any): Partial<VcpNotification> => {
+  const processPayload = (rawPayload: unknown): Partial<VcpNotification> => {
+    const payload = parseObjectLike(rawPayload);
+    if (!payload) return { silent: true };
     const syncNotificationData = payload?.data || payload;
     if (
       payload?.type === 'vcp-sync-status' ||
@@ -125,7 +145,7 @@ export function useNotificationProcessor() {
     // 同步状态不再渲染到全局状态栏（同步已改为完全手动触发，避免状态栏干扰）
     if (payload.type === 'vcp-log-status') {
       const statusData = payload.data || payload;
-      const status = (statusData.status || 'connecting') as VcpStatus['status'];
+      const status = readVcpStatus(statusData.status, 'connecting');
       const source = statusData.source || 'VCPLog';
       const message = statusData.message || '状态未知';
 
@@ -141,10 +161,11 @@ export function useNotificationProcessor() {
 
     // --- 核心引擎状态处理 (P0 级别) ---
     if (payload.type === 'vcp-core-status') {
-      const { status, message } = payload;
+      const status = readVcpStatus(payload.status, 'initializing');
+      const message = typeof payload.message === 'string' ? payload.message : '';
       
       store.updateCoreStatus({ 
-        status: status as any, 
+        status,
         message: message || '核心状态变更',
         source: 'Core'
       });
