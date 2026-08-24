@@ -172,25 +172,6 @@ impl MessageRenderCompiler {
     }
 }
 
-/// Simple zstd compressor for raw text content.
-/// Text compresses very well (often 3-10x) with low overhead.
-pub struct ContentCompressor;
-
-impl ContentCompressor {
-    #[allow(dead_code)]
-    pub fn compress(text: &str) -> Result<Vec<u8>, String> {
-        zstd::bulk::compress(text.as_bytes(), 3)
-            .map_err(|e| format!("zstd compress content failed: {}", e))
-    }
-
-    pub fn decompress(bytes: &[u8]) -> Result<String, String> {
-        let decompressed = zstd::bulk::decompress(bytes, 16 * 1024 * 1024)
-            .map_err(|e| format!("zstd decompress content failed: {}", e))?;
-        String::from_utf8(decompressed)
-            .map_err(|e| format!("content decompression not valid utf-8: {}", e))
-    }
-}
-
 #[tauri::command]
 pub async fn process_message_content(
     _app_handle: AppHandle,
@@ -244,28 +225,26 @@ async fn stream_cached_message_contents(
         .bind(last_rowid)
         .bind(FETCH_SIZE)
         .fetch_all(pool)
-        .await;
+        .await
+        .map_err(|error| format!("读取预渲染缓存来源失败: {error}"))?;
 
-        match rows {
-            Ok(rows) if !rows.is_empty() => {
-                if let Some(last) = rows.last() {
-                    last_rowid = last.get::<i64, _>(0);
-                }
-                for row in rows {
-                    let owner_type: String = row.get("owner_type");
-                    let owner_id: String = row.get("owner_id");
-                    let topic_id: String = row.get("topic_id");
-                    let msg_id: String = row.get("msg_id");
-                    let content: String = row.get("content");
-                    let content_hash: String = row.get("content_hash");
-                    let key =
-                        MessageKey::new(TopicKey::new(owner_type, owner_id, topic_id), msg_id);
-                    if tx.send((key, content, content_hash)).await.is_err() {
-                        return Ok(());
-                    }
-                }
+        if rows.is_empty() {
+            break;
+        }
+        if let Some(last) = rows.last() {
+            last_rowid = last.get::<i64, _>(0);
+        }
+        for row in rows {
+            let owner_type: String = row.get("owner_type");
+            let owner_id: String = row.get("owner_id");
+            let topic_id: String = row.get("topic_id");
+            let msg_id: String = row.get("msg_id");
+            let content: String = row.get("content");
+            let content_hash: String = row.get("content_hash");
+            let key = MessageKey::new(TopicKey::new(owner_type, owner_id, topic_id), msg_id);
+            if tx.send((key, content, content_hash)).await.is_err() {
+                return Ok(());
             }
-            _ => break,
         }
     }
     Ok(())
@@ -477,7 +456,7 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
         let rx_clone = rx_compiler.clone();
         let tx_writer_clone = tx_writer.clone();
 
-        let handle = tokio::task::spawn_blocking(move || {
+        let handle = tokio::task::spawn_blocking(move || -> Result<(), String> {
             let mut batch = Vec::with_capacity(50);
             loop {
                 let item = {
@@ -488,53 +467,55 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
                 match item {
                     Some((key, content, content_hash)) => {
                         let blocks = MessageRenderCompiler::compile(&content);
-                        if let Ok(bytes) = MessageRenderCompiler::serialize(&blocks) {
-                            batch.push((key, content_hash, bytes));
-                        }
+                        let bytes = MessageRenderCompiler::serialize(&blocks)?;
+                        batch.push((key, content_hash, bytes));
 
                         if batch.len() >= 50
                             && tx_writer_clone
                                 .blocking_send(std::mem::take(&mut batch))
                                 .is_err()
                         {
-                            break;
+                            return Err("预渲染缓存写入任务已提前结束".to_string());
                         }
                     }
                     None => {
                         if !batch.is_empty() {
-                            let _ = tx_writer_clone.blocking_send(batch);
+                            tx_writer_clone
+                                .blocking_send(batch)
+                                .map_err(|_| "预渲染缓存写入任务已提前结束".to_string())?;
                         }
                         break;
                     }
                 }
             }
+            Ok(())
         });
         compiler_handles.push(handle);
     }
+    drop(rx_compiler);
 
     // --- Stage 1: Reader ---
-    let reader_handle = tokio::spawn(async move {
-        let (tx_inner, mut rx_inner) = mpsc::channel::<CachedMessageSource>(1000);
-
-        let stream_handle = tokio::spawn(async move {
-            let _ = stream_cached_message_contents(&pool, tx_inner).await;
-        });
-
-        while let Some(item) = rx_inner.recv().await {
-            if tx_compiler.send(item).await.is_err() {
-                break;
-            }
-        }
-        drop(tx_compiler);
-        let _ = stream_handle.await;
-    });
+    let reader_handle =
+        tokio::spawn(async move { stream_cached_message_contents(&pool, tx_compiler).await });
 
     // 等待流水线排空
-    let _ = reader_handle.await;
-    let _ = futures_util::future::join_all(compiler_handles).await;
+    let reader_result = match reader_handle.await {
+        Ok(result) => result,
+        Err(error) => Err(format!("预渲染缓存读取任务失败: {error}")),
+    };
+    let compiler_result = futures_util::future::join_all(compiler_handles)
+        .await
+        .into_iter()
+        .try_for_each(|result| match result {
+            Ok(result) => result,
+            Err(error) => Err(format!("预渲染编译任务失败: {error}")),
+        });
     drop(tx_writer);
 
-    let write_res = writer_handle.await.map_err(|e| e.to_string());
+    let writer_result = match writer_handle.await {
+        Ok(result) => result,
+        Err(error) => Err(format!("预渲染缓存写入任务失败: {error}")),
+    };
 
     #[cfg(target_os = "android")]
     let _ = tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(
@@ -542,7 +523,9 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
         "[预渲染重建] VCP Mobile",
     );
 
-    write_res??;
+    reader_result?;
+    compiler_result?;
+    writer_result?;
 
     // 补偿 100% 进度
     let _ = app_handle.emit(

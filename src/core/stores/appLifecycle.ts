@@ -11,7 +11,7 @@ import { useTopicStore } from './topicListManager';
 import { updateDistributedState } from '../../features/distributed/composables/useDistributed';
 import { useAvatarStore } from './avatar';
 
-export type AppState = 'PERMISSIONS' | 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'READY' | 'ERROR' | 'MIGRATING' | 'MIGRATED';
+export type AppState = 'PERMISSIONS' | 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'READY' | 'ERROR' | 'OPTIMIZING';
 
 export interface CoreStatus {
   status: 'initializing' | 'ready' | 'error' | 'none';
@@ -59,10 +59,8 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         return '正在连接核心服务...';
       case 'PRELOADING':
         return currentPhaseLabel.value || '正在预加载核心数据...';
-      case 'MIGRATING':
-        return '正在升级数据库...';
-      case 'MIGRATED':
-        return '数据库升级完成';
+      case 'OPTIMIZING':
+        return '正在优化数据库...';
       case 'ERROR':
         return errorMsg.value || '启动失败';
       case 'READY':
@@ -239,8 +237,10 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         (newStatus) => {
           if (settled) return;
 
-          // ⚡ 若进入解压或优化迁移状态，立即取消 15s 的就绪超时定时器，防止大体积数据库迁移被误判为启动超时
-          if (newStatus === 'decompressing' || newStatus === 'optimizing') {
+          // 数据库物理优化可能超过 15 秒，期间暂停核心就绪超时。
+          if (newStatus === 'optimizing') {
+            state.value = 'OPTIMIZING';
+            currentPhaseLabel.value = notificationStore.vcpCoreStatus.message;
             if (timeoutId) {
               clearTimeout(timeoutId);
               timeoutId = undefined;
@@ -251,10 +251,6 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
             settled = true;
             cleanup();
             resolve();
-          } else if (newStatus === 'decompression-complete') {
-            settled = true;
-            cleanup();
-            reject(new Error('DATABASE_MIGRATION_COMPLETED'));
           } else if (newStatus === 'error') {
             settled = true;
             cleanup();
@@ -364,33 +360,11 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         console.log('[Lifecycle] Theme init + core ready complete');
         await startPreloading();
       } catch (error) {
-        if (error instanceof Error && error.message === 'DATABASE_MIGRATION_COMPLETED') {
-          console.log('[Lifecycle] Database migration completed, halting boot for restart.');
-          return;
-        }
         const message = error instanceof Error ? error.message : String(error);
         fail(message);
         throw error;
       }
     })();
-
-    let stopMigrationWatch: (() => void) | null = null;
-    stopMigrationWatch = watch(
-      () => notificationStore.vcpCoreStatus,
-      (coreStatus) => {
-        if (coreStatus.status === 'decompressing' || coreStatus.status === 'optimizing') {
-          state.value = 'MIGRATING';
-          currentPhaseLabel.value = coreStatus.message;
-        } else if (coreStatus.status === 'decompression-complete') {
-          state.value = 'MIGRATED';
-          currentPhaseLabel.value = coreStatus.message;
-          // 迁移最终态已捕获，销毁 watcher，避免多次 bootstrap() 时累积
-          stopMigrationWatch?.();
-          stopMigrationWatch = null;
-        }
-      },
-      { deep: true }
-    );
 
     return bootstrapPromise;
   };

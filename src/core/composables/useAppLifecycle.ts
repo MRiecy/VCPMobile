@@ -7,20 +7,31 @@ export function useAppLifecycle() {
   const lifecycleStore = useAppLifecycleStore();
   const streamStore = useChatStreamStore();
   let unlisten: UnlistenFn | null = null;
-  let foregroundRecoveryPromise: Promise<void> | null = null;
+  let recoveryPromise: Promise<void> | null = null;
 
-  const scheduleForegroundRecovery = (source: string) => {
-    if (foregroundRecoveryPromise) return foregroundRecoveryPromise;
+  const reconcileInterruptedStreams = (source: string) => {
+    if (lifecycleStore.state !== 'READY' || lifecycleStore.isBackground) return;
+    if (recoveryPromise) return recoveryPromise;
     console.log(`[useAppLifecycle] ${source}. Triggering stream recovery.`);
-    foregroundRecoveryPromise = streamStore.checkAndRecoverInterruptedStreams()
+    recoveryPromise = streamStore.checkAndRecoverInterruptedStreams()
       .catch(err => {
         console.error(`[useAppLifecycle] Failed to recover streams (${source}):`, err);
       })
       .finally(() => {
-        foregroundRecoveryPromise = null;
+        recoveryPromise = null;
       });
-    return foregroundRecoveryPromise;
+    return recoveryPromise;
   };
+
+  // 中断流恢复属于应用生命周期调和：冷启动、WebView 重载均由 READY 转换覆盖。
+  watch(
+    () => lifecycleStore.state,
+    (state, previous) => {
+      if (state === 'READY' && previous !== 'READY') {
+        void reconcileInterruptedStreams('Core ready');
+      }
+    },
+  );
 
   // 监听后台状态，控制全局动画挂起，替代 App.vue 中的 watch
   watch(() => lifecycleStore.isBackground, (newVal) => {
@@ -33,6 +44,7 @@ export function useAppLifecycle() {
       lifecycleStore.hydrateSystemStatus().catch((err) => {
         console.error("[useAppLifecycle] Failed to hydrate system status:", err);
       });
+      void reconcileInterruptedStreams('App foreground');
     }
   }, { immediate: true });
 
@@ -41,14 +53,11 @@ export function useAppLifecycle() {
       const isHidden = document.hidden;
       lifecycleStore.isBackground = isHidden;
       console.log(`[useAppLifecycle] Visibility changed: hidden=${isHidden}`);
-      if (!isHidden) {
-        void scheduleForegroundRecovery("Document visible");
-      }
     }
   };
 
   const handleOnline = () => {
-    void scheduleForegroundRecovery("Device online");
+    void reconcileInterruptedStreams("Device online");
   };
 
   onMounted(async () => {
@@ -66,7 +75,8 @@ export function useAppLifecycle() {
           lifecycleStore.isBackground = true;
         } else if (state === 'resume') {
           lifecycleStore.isBackground = false;
-          void scheduleForegroundRecovery("Native resume");
+          // 原生 resume 可能先于 document.visibilityState 变化，显式调和一次。
+          void reconcileInterruptedStreams("Native resume");
         }
       });
     } catch (err) {

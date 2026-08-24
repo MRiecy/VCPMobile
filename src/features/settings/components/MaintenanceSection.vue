@@ -10,7 +10,7 @@ const overlayStore = useOverlayStore();
 const cacheStatus = ref<{ type: 'success' | 'error' | 'loading' | null; message: string }>({ type: null, message: '' });
 
 const clearSystemCache = async () => {
-  cacheStatus.value = { type: 'loading', message: '正在清理系统与 WebView 缓存...' };
+  cacheStatus.value = { type: 'loading', message: '正在清理 WebView HTTP 缓存...' };
   try {
     const result = await invoke<string>('clear_webview_cache');
     cacheStatus.value = { type: 'success', message: result };
@@ -31,8 +31,8 @@ const openRebuildSession = () => {
   <div class="space-y-6">
     <div>
       <SettingsActionWithStatus
-        title="清理系统缓存 (System Cache)"
-        description="清除 WebView 内部 HTTP/图片缓存（解决磁盘空间异常占用）"
+        title="清理 WebView 缓存"
+        description="清除 WebView HTTP 缓存（解决磁盘空间异常占用）"
         button-variant="primary"
         button-size="sm"
         button-label="立即清理"

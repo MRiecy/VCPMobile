@@ -299,11 +299,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       loadedConversationKey.value = key;
       hasMoreHistory.value = messages.length >= limit;
       hydrated.forEach(msg => attachmentStore.resolveMessageAssets(msg));
-      if (!loadingOlder) {
-        streamStore.checkAndRecoverInterruptedStreams().catch((error) => {
-          console.error("[ChatHistoryStore] Failed to recover streams after loading history:", error);
-        });
-      }
       return { addedCount };
     } catch (e) {
       console.error("[ChatHistoryStore] Failed to load history:", e);
@@ -464,9 +459,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     hasMoreHistory.value = anchorIndex >= beforeN;
     hasEvictedNewer.value = messages.length - anchorIndex - 1 >= afterN;
     hydrated.forEach(message => attachmentStore.resolveMessageAssets(message));
-    streamStore.checkAndRecoverInterruptedStreams().catch((error) => {
-      console.error("[ChatHistoryStore] Failed to recover streams after anchor load:", error);
-    });
     return "loaded";
   };
 

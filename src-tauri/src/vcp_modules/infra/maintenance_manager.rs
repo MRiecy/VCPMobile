@@ -253,43 +253,33 @@ async fn calculate_dir_size(path: &std::path::Path) -> u64 {
     total_size
 }
 
-/// 1. 清理 WebView 缓存 (Level 1)
-/// 调用 Tauri v2 原生接口清除浏览数据 (HTTP Cache, Images, etc.)，并物理抹除磁盘 HTTP Cache。
-/// 提示：此操作仅处理网络与媒体层静态资源，V8 code_cache 字节码由 Level 3 重建管理。
+/// 清理 WebView HTTP 缓存，不触碰 LocalStorage 等应用持久状态。
 #[tauri::command]
 pub async fn clear_webview_cache(app: AppHandle) -> Result<String, String> {
     let mut cleared_details = String::new();
     let mut freed_size = 0u64;
 
-    // 1. 调用内置接口清除 WebView 的内存和浏览状态数据
-    if let Some(webview) = app.get_webview_window("main") {
-        webview
-            .clear_all_browsing_data()
-            .map_err(|e| format!("WebView 缓存清理失败: {}", e))?;
-        cleared_details.push_str("标准浏览数据已清除；");
-    } else {
-        cleared_details.push_str("未找到主窗口，跳过标准清理；");
-    }
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|error| format!("WebView 缓存目录不可用: {error}"))?;
+    let http_cache_dir = cache_dir.join("WebView").join("Default").join("HTTP Cache");
+    if http_cache_dir.exists() {
+        freed_size = calculate_dir_size(&http_cache_dir).await;
 
-    // 2. 物理清除 HTTP 缓存
-    if let Ok(cache_dir) = app.path().app_cache_dir() {
-        let http_cache_dir = cache_dir.join("WebView").join("Default").join("HTTP Cache");
-        if http_cache_dir.exists() {
-            // 在物理删除前先统计大小
-            freed_size = calculate_dir_size(&http_cache_dir).await;
-
-            if tokio::fs::remove_dir_all(&http_cache_dir).await.is_ok() {
-                cleared_details.push_str("物理 HTTP Cache 已抹除；");
-            } else {
-                freed_size = 0;
-                cleared_details.push_str("部分 HTTP 物理缓存被占用，已标记失效；");
-            }
+        if tokio::fs::remove_dir_all(&http_cache_dir).await.is_ok() {
+            cleared_details.push_str("HTTP Cache 已清除；");
+        } else {
+            freed_size = 0;
+            cleared_details.push_str("部分 HTTP Cache 正在使用，暂未清除；");
         }
+    } else {
+        cleared_details.push_str("HTTP Cache 无残余文件；");
     }
 
     let freed_size_mb = (freed_size as f64) / 1024.0 / 1024.0;
     Ok(format!(
-        "WebView 缓存清理成功 ({})，释放空间: {:.2} MB",
+        "WebView HTTP 缓存清理完成 ({})，释放空间: {:.2} MB",
         cleared_details.trim_end_matches('；'),
         freed_size_mb
     ))
@@ -329,8 +319,7 @@ pub async fn reconstruct_system_cache(
     ))
 }
 
-/// 3. 初始化自动维护逻辑 (在 App 启动时调用)
-///    如果距离上次清理超过 3 天，则自动触发一次 WebView 缓存清理
+/// 初始化自动维护逻辑（在 App 启动时调用）。
 pub async fn init_automatic_maintenance(app: AppHandle) {
     // 异步清理超过 24 小时的孤立 SSE 缓存文件，防止磁盘文件泄露
     let app_clone = app.clone();
@@ -378,10 +367,9 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
         Err(_) => return,
     };
 
-    // 从 extra 中提取上次清理时间
-    let last_clear = settings
+    let last_maintenance = settings
         .extra
-        .get("lastWebviewCacheClear")
+        .get("lastAutomaticMaintenance")
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
 
@@ -389,19 +377,14 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
 
     let three_days_secs = 3 * 24 * 60 * 60;
 
-    if now - last_clear > three_days_secs {
-        log::info!("[Maintenance] Triggering scheduled maintenance (WebView & SQLite)...");
+    if now - last_maintenance > three_days_secs {
+        log::info!("[Maintenance] Triggering scheduled SQLite maintenance...");
 
-        // 1. WebView 清理
-        if let Some(webview) = app.get_webview_window("main") {
-            let _ = webview.clear_all_browsing_data();
-        }
-
-        // 2. SQLite 物理空间回收与查询规划器优化
+        // 1. SQLite 物理空间回收与查询规划器优化
         let db_state = app.state::<DbState>();
         let _ = db_state.run_incremental_vacuum_optimize(100).await;
 
-        // 3. 自动清除已删除消息的多余附件关联 (防线二：自动维护自愈)
+        // 2. 自动清除已删除消息的多余附件关联
         let _ = sqlx::query(
             "DELETE FROM message_attachments WHERE (owner_type, owner_id, topic_id, msg_id) IN (\
              SELECT ma.owner_type, ma.owner_id, ma.topic_id, ma.msg_id FROM message_attachments ma \
@@ -412,9 +395,9 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
         .execute(&db_state.pool)
         .await;
 
-        // 更新时间戳
+        // 3. 更新时间戳
         let updates = serde_json::json!({
-            "lastWebviewCacheClear": now
+            "lastAutomaticMaintenance": now
         });
         let _ = update_settings(app.clone(), settings_state, updates).await;
         log::info!("[Maintenance] Scheduled maintenance complete.");

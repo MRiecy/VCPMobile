@@ -10,9 +10,6 @@ use crate::vcp_modules::infra::local_server::ServerHandle;
 #[serde(rename_all = "lowercase")]
 pub enum CoreStatus {
     Initializing,
-    Decompressing,
-    #[serde(rename = "decompression-complete")]
-    DecompressionComplete,
     Optimizing,
     Ready,
     Error,
