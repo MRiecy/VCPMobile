@@ -196,6 +196,24 @@ pub fn invalidate_sync_entity_caches(app_handle: &AppHandle) {
 }
 
 impl SyncFinalizer {
+    pub(crate) async fn reconcile_after_interruption(
+        db: &DbState,
+        modified_topics: &HashSet<TopicKey>,
+    ) -> Result<(), String> {
+        if modified_topics.is_empty() {
+            return Ok(());
+        }
+
+        let stats = finalize_modified_topics(&db.pool, modified_topics).await?;
+        log::info!(
+            "[SyncFinalizer] Reconciled interrupted attempt: topics={}, agents={}, groups={}",
+            stats.bubbled_topics,
+            stats.affected_agents,
+            stats.affected_groups
+        );
+        Ok(())
+    }
+
     pub async fn execute(
         app_handle: &AppHandle,
         db: &DbState,

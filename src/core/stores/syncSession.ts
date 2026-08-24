@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useDataReload } from "../composables/useDataReload";
 
 type SyncStatus =
   | "idle"
@@ -303,7 +304,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
   // --- 面板视图 ---
   const activeTab = ref<"live" | "history">("live");
 
-  // --- 同步完成后需刷新标志（once-set，不受断连等异常状态影响） ---
+  // --- 同步进入写入阶段后需刷新标志（once-set，失败也可能已有部分提交） ---
   const needsReload = ref(false);
 
   // --- 日志与进度 ---
@@ -352,6 +353,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     summary.value = emptySummary();
     terminalError.value = null;
     retryInFlight.value = false;
+    needsReload.value = false;
     awaitingSessionId = false;
     bufferedSessionEvents = [];
     lastLoggedPhase = "";
@@ -523,6 +525,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
 
   const close = async () => {
     if (!isOpen.value || !canDismiss.value) return;
+    const shouldReload = needsReload.value;
     viewGeneration += 1;
     startAttempt += 1;
     isOpen.value = false;
@@ -538,6 +541,15 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       await invoke("stop_sync");
     } catch (e) {
       console.warn("[SyncSession] Failed to stop backend sync session:", e);
+    }
+    if (shouldReload) {
+      try {
+        await useDataReload().performFullReload();
+      } catch (error) {
+        console.error("[SyncSession] Failed to reload synchronized data:", error);
+      } finally {
+        needsReload.value = false;
+      }
     }
   };
 
@@ -779,6 +791,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       }
       if (isTerminal()) return;
       if (nextStatus === "open") {
+        needsReload.value = true;
         status.value = "connected";
         canDismiss.value = false;
         if (lastConnectionStatus !== "open") {
@@ -811,14 +824,12 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     ) {
       pushLog("error", "完成事件协议错误: status 非法");
       setLocalError("INVALID_COMPLETION_EVENT");
-      needsReload.value = false;
       return;
     }
     const completedSummary = readSummary(payload.summary);
     if (!completedSummary) {
       pushLog("error", "完成事件协议错误: summary 非法");
       setLocalError("INVALID_COMPLETION_EVENT");
-      needsReload.value = false;
       return;
     }
     if (
@@ -831,7 +842,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     ) {
       pushLog("error", "完成事件协议错误: status 与 summary 不一致");
       setLocalError("INVALID_COMPLETION_EVENT");
-      needsReload.value = false;
       return;
     }
     summary.value = completedSummary;
@@ -920,10 +930,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     if (logs.value.length > 200) logs.value.shift();
   };
 
-  const markReloaded = () => {
-    needsReload.value = false;
-  };
-
   const switchTab = (tab: "live" | "history") => {
     if (status.value === "connecting" || status.value === "connected") return;
     activeTab.value = tab;
@@ -946,7 +952,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     startSync,
     retrySync,
     copyDiagnostics,
-    markReloaded,
     switchTab,
   };
 });

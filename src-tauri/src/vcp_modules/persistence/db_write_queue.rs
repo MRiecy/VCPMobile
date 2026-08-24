@@ -532,12 +532,14 @@ impl DbWriteQueue {
                             DbWriteTask::AgentTopicBatch { topics } => {
                                 for (key, dto) in topics {
                                     affected_owners.insert(OwnerKey::new("agent", &key.owner_id));
+                                    affected_topics.insert(key.clone());
                                     Self::rusqlite_upsert_agent_topic(&tx, &key, &dto)?;
                                 }
                             }
                             DbWriteTask::GroupTopicBatch { topics } => {
                                 for (key, dto) in topics {
                                     affected_owners.insert(OwnerKey::new("group", &key.owner_id));
+                                    affected_topics.insert(key.clone());
                                     Self::rusqlite_upsert_group_topic(&tx, &key, &dto)?;
                                 }
                             }

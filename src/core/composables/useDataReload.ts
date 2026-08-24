@@ -2,6 +2,7 @@ import { clearHtmlCache } from '../utils/astRenderer';
 import { useChatHistoryStore } from '../stores/chatHistoryStore';
 import { useChatSessionStore } from '../stores/chatSessionStore';
 import { useAssistantStore } from '../stores/assistant';
+import { useAvatarStore } from '../stores/avatar';
 import { useTopicStore } from '../stores/topicListManager';
 
 /**
@@ -12,16 +13,18 @@ export function useDataReload() {
   const chatHistoryStore = useChatHistoryStore();
   const sessionStore = useChatSessionStore();
   const assistantStore = useAssistantStore();
+  const avatarStore = useAvatarStore();
   const topicStore = useTopicStore();
 
   const performFullReload = async () => {
     // 1. 清理 AST HTML 缓存（重建/同步后 AST 结构可能已变）
     clearHtmlCache();
 
-    // 2. 刷新 agents/groups 元数据
+    // 2. 刷新 agents/groups 元数据与同步后可能变化的头像缓存
     await Promise.all([
       assistantStore.fetchAgents(),
       assistantStore.fetchGroups(),
+      avatarStore.refreshAll(),
     ]);
     sessionStore.reconcileCurrentConversation();
 

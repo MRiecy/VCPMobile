@@ -241,12 +241,19 @@ export const useAvatarStore = defineStore("avatar", () => {
   /**
    * 批量预热获取所有头像到本地 Map 缓存中
    */
-  const preloadAll = async (): Promise<void> => {
+  const loadAll = async (replaceCache: boolean): Promise<void> => {
     const startTime = Date.now();
     try {
-      console.log("[AvatarStore] Starting preloadAll...");
-      const results = await invoke<any[]>("batch_get_avatars");
-      if (results && results.length > 0) {
+      console.log(`[AvatarStore] Starting ${replaceCache ? "refreshAll" : "preloadAll"}...`);
+      const results = (await invoke<any[]>("batch_get_avatars")) ?? [];
+      if (replaceCache) {
+        for (const entry of cache.values()) {
+          URL.revokeObjectURL(entry.blobUrl);
+        }
+        cache.clear();
+        dominantColors.clear();
+      }
+      if (results.length > 0) {
         for (const item of results) {
           const key = `${item.ownerType}:${item.ownerId}`;
           
@@ -271,11 +278,14 @@ export const useAvatarStore = defineStore("avatar", () => {
           }
         }
       }
-      console.log(`[AvatarStore] preloadAll complete in ${Date.now() - startTime}ms. Cached ${results?.length || 0} avatars.`);
+      console.log(`[AvatarStore] Avatar cache load complete in ${Date.now() - startTime}ms. Cached ${results.length} avatars.`);
     } catch (err) {
-      console.error("[AvatarStore] Failed to preload all avatars:", err);
+      console.error("[AvatarStore] Failed to load all avatars:", err);
     }
   };
+
+  const preloadAll = (): Promise<void> => loadAll(false);
+  const refreshAll = (): Promise<void> => loadAll(true);
 
   return {
     cache, // 暴露 cache 以供同步检查
@@ -283,6 +293,6 @@ export const useAvatarStore = defineStore("avatar", () => {
     clearCache,
     getDominantColor,
     preloadAll,
+    refreshAll,
   };
 });
-

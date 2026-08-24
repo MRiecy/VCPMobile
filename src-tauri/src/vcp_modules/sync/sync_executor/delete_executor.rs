@@ -1,7 +1,5 @@
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
-use sqlx::Row;
 use tauri::{AppHandle, Manager, Runtime};
 
 pub struct DeleteExecutor;
@@ -11,102 +9,12 @@ async fn soft_delete_topic_data(
     key: &TopicKey,
     now: i64,
 ) -> Result<Vec<MessageKey>, String> {
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-
-    let Some(parent_row) = sqlx::query(
-        "SELECT deleted_at FROM topics
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
+    Ok(
+        crate::vcp_modules::topic_service::delete_topic_data(pool, key, now)
+            .await?
+            .map(|result| result.active_messages)
+            .unwrap_or_default(),
     )
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?
-    else {
-        return Ok(Vec::new());
-    };
-    let deleted_at: Option<i64> = parent_row
-        .try_get("deleted_at")
-        .map_err(|error| format!("Topic {} tombstone decode failed: {error}", key.topic_id))?;
-    if deleted_at.is_some() {
-        return Ok(Vec::new());
-    }
-    let active_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT msg_id FROM active_generations
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
-    )
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    let deleted = sqlx::query(
-        "UPDATE topics SET deleted_at = ?
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
-    )
-    .bind(now)
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
-    if deleted.rows_affected() != 1 {
-        return Err(format!(
-            "Topic {} does not exist or is already deleted",
-            key.topic_id
-        ));
-    }
-    sqlx::query(
-        "UPDATE messages SET deleted_at = ?
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
-    )
-    .bind(now)
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
-    sqlx::query(
-        "DELETE FROM render_cache
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
-    )
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
-    sqlx::query(
-        "DELETE FROM active_generations
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
-    )
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    match key.owner_type.as_str() {
-        "agent" => HashAggregator::bubble_agent_hash(&mut tx, &key.owner_id).await?,
-        "group" => HashAggregator::bubble_group_hash(&mut tx, &key.owner_id).await?,
-        other => {
-            return Err(format!(
-                "topic {} has unsupported owner_type {other}",
-                key.topic_id
-            ));
-        }
-    }
-    tx.commit().await.map_err(|e| e.to_string())?;
-    Ok(active_ids
-        .into_iter()
-        .map(|msg_id| MessageKey::new(key.clone(), msg_id))
-        .collect())
 }
 
 impl DeleteExecutor {

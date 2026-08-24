@@ -2913,6 +2913,32 @@ async fn run_sync_session(
                         )
                         .await;
                     }
+                    let modified_topics = {
+                        let guard = pending_msg_topics_task.modified.lock().await;
+                        guard.clone()
+                    };
+                    let db = handle_clone.state::<DbState>();
+                    if let Err(error) = crate::vcp_modules::sync::sync_finalize::SyncFinalizer::reconcile_after_interruption(
+                        &db,
+                        &modified_topics,
+                    )
+                    .await
+                    {
+                        let message = format!(
+                            "Failed to reconcile database state after interrupted sync: {error}"
+                        );
+                        fatal_error = true;
+                        emit_sync_log(&handle_clone, "error", &message);
+                        publish_sync_error(
+                            &handle_clone,
+                            session_id,
+                            &connection_status_for_task,
+                            "SYNC_FINALIZATION_FAILED",
+                            &message,
+                            Vec::new(),
+                        )
+                        .await;
+                    }
                     crate::vcp_modules::sync::sync_finalize::invalidate_sync_entity_caches(
                         &handle_clone,
                     );
@@ -3302,6 +3328,24 @@ pub async fn start_manual_sync(
                 ));
             }
         }
+    }
+
+    let db = handle.state::<DbState>();
+    let has_active_generation =
+        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM active_generations)")
+            .fetch_one(&db.pool)
+            .await
+            .map_err(|error| {
+                encode_sync_command_error(
+                    "SYNC_ATTEMPT_FAILED",
+                    &format!("Active generation preflight failed: {error}"),
+                )
+            })?;
+    if has_active_generation {
+        return Err(encode_sync_command_error(
+            "SYNC_ACTIVE_GENERATION",
+            "A message generation is still active",
+        ));
     }
 
     // VCPLog 是全局重要通道，未连接时直接拦截同步，避免进入同步主循环后长时间挂起

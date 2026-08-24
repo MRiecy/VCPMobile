@@ -5,7 +5,6 @@ import SlidePage from '../../components/ui/SlidePage.vue';
 import SyncLogBrowserCore from '../../features/settings/components/SyncLogBrowserCore.vue';
 import { useSyncSessionStore } from '../../core/stores/syncSession';
 import { useOverlayStore } from '../../core/stores/overlay';
-import { useDataReload } from '../../core/composables/useDataReload';
 
 interface Props {
   zIndex?: number;
@@ -15,7 +14,6 @@ const props = defineProps<Props>();
 
 const store = useSyncSessionStore();
 const overlayStore = useOverlayStore();
-const { performFullReload } = useDataReload();
 
 const logContainer = ref<HTMLElement | null>(null);
 
@@ -133,14 +131,15 @@ const logColor = (level: string) => {
 
 const handleClose = async () => {
   if (store.needsReload) {
+    const completed = store.status === 'completed' || store.status === 'completed_with_warnings';
     await overlayStore.showConfirm({
-      title: '同步已完成',
-      message: '同步已完成，数据已更新。点击确认立即刷新以生效。',
+      title: completed ? '同步已完成' : '刷新同步数据',
+      message: completed
+        ? '同步已完成，数据已更新。点击确认立即刷新以生效。'
+        : '本次同步未完整完成，点击确认刷新已经写入的数据。',
       onlyConfirm: true
     });
-    store.markReloaded();
     await overlayStore.closeSyncSession();
-    await performFullReload();
     return;
   }
   await overlayStore.closeSyncSession();

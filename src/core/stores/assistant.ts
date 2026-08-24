@@ -52,7 +52,7 @@ export const useAssistantStore = defineStore("assistant", () => {
   const error = ref<string | null>(null);
   const notificationStore = useNotificationStore();
 
-  // 同步完成刷新已集中到 main.ts（window.location.reload），此处无需重复监听
+  // 同步关闭时由 syncSession 的统一数据重载刷新列表，此处无需重复监听。
 
   // 记录每个 item (agent 或 group) 的未读数量
   const unreadCounts = ref<Record<string, number>>({});

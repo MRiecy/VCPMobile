@@ -132,6 +132,14 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             "当前电量不足，已暂停同步",
             "电量达到 30% 后再试。",
         ),
+        "SYNC_ACTIVE_GENERATION" => definition(
+            Category::Data,
+            Origin::MobileSync,
+            Stage::Preflight,
+            Retry::AfterUserAction,
+            "仍有消息正在生成，暂不能开始同步",
+            "等待生成结束或手动停止生成后再试。",
+        ),
         "CONFIG_LOOPBACK_ON_MOBILE" => definition(
             Category::Configuration,
             Origin::MobileSync,

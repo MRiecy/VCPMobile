@@ -207,10 +207,57 @@ pub async fn delete_topic(
     topic_id: String,
 ) -> Result<(), String> {
     let now = chrono::Utc::now().timestamp_millis();
-    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
-
     let key = TopicKey::new(&owner_type, &owner_id, &topic_id);
-    let stored_owner = sqlx::query(
+    let deletion = delete_topic_data(&db_state.pool, &key, now)
+        .await?
+        .ok_or_else(|| format!("Topic {topic_id} does not exist"))?;
+    if !deletion.deleted {
+        return Ok(());
+    }
+
+    for message_key in deletion.active_messages {
+        if let Err(error) = active_requests.cancel(&message_key) {
+            log::warn!(
+                "Failed to cancel generation from deleted topic {}: {}",
+                message_key.msg_id,
+                error
+            );
+        }
+    }
+
+    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
+        let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
+            data_type: SyncDataType::Topic,
+            id: topic_id,
+            deleted_at: now,
+            owner_type: Some(owner_type),
+            owner_id: Some(owner_id),
+        });
+    }
+
+    Ok(())
+}
+
+pub(crate) struct TopicDeletionResult {
+    pub active_messages: Vec<MessageKey>,
+    pub deleted: bool,
+}
+
+pub(crate) async fn delete_topic_data(
+    pool: &sqlx::SqlitePool,
+    key: &TopicKey,
+    deleted_at: i64,
+) -> Result<Option<TopicDeletionResult>, String> {
+    if key.owner_type.is_empty()
+        || key.owner_id.is_empty()
+        || key.topic_id.is_empty()
+        || deleted_at < 0
+    {
+        return Err("Topic delete requires an exact identity and non-negative deletedAt".into());
+    }
+
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let Some(stored_topic) = sqlx::query(
         "SELECT deleted_at FROM topics
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
     )
@@ -220,13 +267,18 @@ pub async fn delete_topic(
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| e.to_string())?
-    .ok_or_else(|| format!("Topic {topic_id} does not exist"))?;
-    let stored_deleted_at: Option<i64> = stored_owner
+    else {
+        return Ok(None);
+    };
+    let stored_deleted_at: Option<i64> = stored_topic
         .try_get("deleted_at")
-        .map_err(|error| format!("Topic {topic_id} tombstone decode failed: {error}"))?;
+        .map_err(|error| format!("Topic {} tombstone decode failed: {error}", key.topic_id))?;
     if stored_deleted_at.is_some() {
         tx.commit().await.map_err(|e| e.to_string())?;
-        return Ok(());
+        return Ok(Some(TopicDeletionResult {
+            active_messages: Vec::new(),
+            deleted: false,
+        }));
     }
 
     let active_ids: Vec<String> = sqlx::query_scalar(
@@ -244,7 +296,7 @@ pub async fn delete_topic(
         "UPDATE topics SET deleted_at = ?
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
     )
-    .bind(now)
+    .bind(deleted_at)
     .bind(&key.owner_type)
     .bind(&key.owner_id)
     .bind(&key.topic_id)
@@ -252,7 +304,7 @@ pub async fn delete_topic(
     .await
     .map_err(|e| e.to_string())?;
     if deleted.rows_affected() != 1 {
-        return Err(format!("Topic {topic_id} disappeared during delete"));
+        return Err(format!("Topic {} disappeared during delete", key.topic_id));
     }
 
     // 级联将该话题下的所有消息标记为逻辑删除
@@ -260,7 +312,7 @@ pub async fn delete_topic(
         "UPDATE messages SET deleted_at = ?
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
     )
-    .bind(now)
+    .bind(deleted_at)
     .bind(&key.owner_type)
     .bind(&key.owner_id)
     .bind(&key.topic_id)
@@ -301,38 +353,24 @@ pub async fn delete_topic(
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
-    if owner_type == "agent" {
-        HashAggregator::bubble_agent_hash(&mut tx, &owner_id).await?;
-    } else if owner_type == "group" {
-        HashAggregator::bubble_group_hash(&mut tx, &owner_id).await?;
-    } else {
-        return Err(format!(
-            "Topic {topic_id} has unsupported owner type {owner_type}"
-        ));
-    }
-    tx.commit().await.map_err(|e| e.to_string())?;
-
-    for msg_id in active_ids {
-        if let Err(error) = active_requests.cancel(&MessageKey::new(key.clone(), &msg_id)) {
-            log::warn!(
-                "Failed to cancel generation from deleted topic {}: {}",
-                msg_id,
-                error
-            );
+    match key.owner_type.as_str() {
+        "agent" => HashAggregator::bubble_agent_hash(&mut tx, &key.owner_id).await?,
+        "group" => HashAggregator::bubble_group_hash(&mut tx, &key.owner_id).await?,
+        other => {
+            return Err(format!(
+                "Topic {} has unsupported owner_type {other}",
+                key.topic_id
+            ));
         }
     }
-
-    if let Some(sync_state) = app_handle.try_state::<SyncState>() {
-        let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
-            data_type: SyncDataType::Topic,
-            id: topic_id.clone(),
-            deleted_at: now,
-            owner_type: Some(owner_type),
-            owner_id: Some(owner_id),
-        });
-    }
-
-    Ok(())
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(Some(TopicDeletionResult {
+        active_messages: active_ids
+            .into_iter()
+            .map(|msg_id| MessageKey::new(key.clone(), msg_id))
+            .collect(),
+        deleted: true,
+    }))
 }
 
 #[tauri::command]
