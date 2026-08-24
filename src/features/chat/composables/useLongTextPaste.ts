@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
 import { useAttachmentStore } from '../../../core/stores/attachmentStore';
 import { useNotificationStore } from '../../../core/stores/notification';
+import type { RegisteredAttachmentData } from '../../../core/types/chat';
 
 const LONG_TEXT_THRESHOLD = 1000;
 
@@ -50,7 +51,7 @@ export function useLongTextPaste(input: Ref<string>) {
 
     try {
       // 2. IPC 保存到附件目录
-      const finalData = await invoke<any>('store_file', {
+      const finalData = await invoke<RegisteredAttachmentData>('store_file', {
         originalName: name,
         fileBytes: bytes,
         mimeType: 'text/plain',

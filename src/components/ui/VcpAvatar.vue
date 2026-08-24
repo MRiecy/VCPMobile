@@ -66,7 +66,11 @@ const fallbackBg = computed(() => {
   return colors[Math.abs(hash) % colors.length];
 });
 
-watchEffect(async () => {
+watchEffect(async (onCleanup) => {
+  let cancelled = false;
+  onCleanup(() => {
+    cancelled = true;
+  });
   const ownerIdVal = resolvedId.value;
   const ownerTypeVal = resolvedType.value;
   if (!ownerIdVal) {
@@ -88,6 +92,11 @@ watchEffect(async () => {
 
   // 缓存未命中或版本过旧，再进入异步获取逻辑
   const url = await avatarStore.getAvatarUrl(ownerTypeVal, ownerIdVal, reqVersion);
+  if (
+    cancelled ||
+    resolvedId.value !== ownerIdVal ||
+    resolvedType.value !== ownerTypeVal
+  ) return;
   if (url) {
     avatarUrl.value = url;
     imgExists.value = true;

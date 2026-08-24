@@ -1096,6 +1096,8 @@ class SseProxyService : Service() {
         val agentName = session.contextJson?.optString("agentName") ?: "智能体"
         val topicId = session.contextJson?.optString("topicId")
         val ownerId = session.contextJson?.optString("ownerId")
+        val ownerType = session.contextJson?.optString("ownerType")
+            ?.takeIf { it == "agent" || it == "group" }
         
         val title: String
         val contentText: String
@@ -1148,6 +1150,7 @@ class SseProxyService : Service() {
                 putExtra("requestId", session.requestId)
                 if (topicId != null) putExtra("topicId", topicId)
                 if (ownerId != null) putExtra("ownerId", ownerId)
+                if (ownerType != null) putExtra("ownerType", ownerType)
             }
         } catch (_: ClassNotFoundException) {
             Intent(Intent.ACTION_MAIN).apply {

@@ -307,20 +307,27 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
         val topicId = intent.getStringExtra("topicId")
         val ownerId = intent.getStringExtra("ownerId")
+        val ownerType = intent.getStringExtra("ownerType")
         val requestId = intent.getStringExtra("requestId")
         if (topicId != null && ownerId != null) {
-            Log.i(TAG, "[handleNotificationIntent] Found notification click: topicId=$topicId, ownerId=$ownerId, requestId=$requestId")
-            val data = JSObject().apply {
-                put("topicId", topicId)
-                put("ownerId", ownerId)
-                put("requestId", requestId ?: "")
+            if (ownerType == "agent" || ownerType == "group") {
+                Log.i(TAG, "[handleNotificationIntent] Found notification click: topicId=$topicId, ownerType=$ownerType, ownerId=$ownerId, requestId=$requestId")
+                val data = JSObject().apply {
+                    put("topicId", topicId)
+                    put("ownerId", ownerId)
+                    put("ownerType", ownerType)
+                    put("requestId", requestId ?: "")
+                }
+                pendingNotificationData = data
+                dispatchNotificationData(data)
+            } else {
+                Log.w(TAG, "[handleNotificationIntent] Dropping chat notification without ownerType")
             }
-            pendingNotificationData = data
-            dispatchNotificationData(data)
-            
+
             // Consume the intent extras so they don't fire again
             intent.removeExtra("topicId")
             intent.removeExtra("ownerId")
+            intent.removeExtra("ownerType")
             intent.removeExtra("requestId")
         }
     }

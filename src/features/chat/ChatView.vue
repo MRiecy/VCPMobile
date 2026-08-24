@@ -18,7 +18,6 @@ import { ArrowDown } from "lucide-vue-next";
 import { useAttachmentStore } from "../../core/stores/attachmentStore";
 import { useKeyboardInsets } from "../../core/composables/useKeyboardInsets";
 import { useChatScroll } from "../../core/composables/useChatScroll";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import { openPresentationMenu } from "./presentationMenu";
 
 const sessionStore = useChatSessionStore();
@@ -157,17 +156,12 @@ watch(
 
     for (const file of files) {
       const stableId = `share_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      let displaySrc = "";
-      if (file.thumbnailPath) {
-        displaySrc = convertFileSrc(file.thumbnailPath);
-      } else if (file.mime?.startsWith("image/")) {
-        displaySrc = convertFileSrc(file.path);
-      }
-
       attachmentStore.stagedAttachments.unshift({
         id: stableId,
         type: file.mime || "application/octet-stream",
-        src: displaySrc,
+        src: file.path,
+        internalPath: file.path,
+        thumbnailPath: file.thumbnailPath ?? undefined,
         name: file.name,
         size: file.size,
         hash: file.hash,

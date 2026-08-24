@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from "vue";
+import { ref, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
@@ -51,8 +51,8 @@ const sessionStore = useChatSessionStore();
 const notificationStore = useNotificationStore();
 const overlayStore = useOverlayStore();
 
-const groupConfig = ref<GroupConfig>({
-  id: props.id,
+const createEmptyConfig = (id = ""): GroupConfig => ({
+  id,
   name: "",
   avatar: "",
   members: [],
@@ -64,26 +64,38 @@ const groupConfig = ref<GroupConfig>({
   unifiedModel: "",
   tagMatchMode: "strict",
 });
+const normalizeGroupConfig = (config: Partial<GroupConfig> & Pick<GroupConfig, "id" | "name" | "members">): GroupConfig => ({
+  ...createEmptyConfig(config.id),
+  ...config,
+  mode: config.mode || "sequential",
+  memberTags: config.memberTags && typeof config.memberTags === "object" ? config.memberTags : {},
+  groupPrompt: config.groupPrompt || "",
+  invitePrompt: config.invitePrompt || "",
+  unifiedModel: config.unifiedModel || "",
+  tagMatchMode: config.tagMatchMode || "strict",
+});
+const groupConfig = ref<GroupConfig>(createEmptyConfig(props.id));
+let editorEpoch = 0;
+const pendingSaves = new Map<string, Promise<void>>();
+const isEpochCurrent = (epoch: number) => editorEpoch === epoch;
+const isOpenEditorCurrent = (epoch: number, id: string) =>
+  isEpochCurrent(epoch) && props.isOpen && props.id === id;
 
 const allAgents = ref<Agent[]>([]);
 const isSaving = ref(false);
 const saveSuccess = ref(false);
-let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 let saveSuccessTimer: ReturnType<typeof setTimeout> | null = null;
 
 // 原始配置快照，用于判断用户是否真正修改了内容
 const originalConfig = ref<GroupConfig | null>(null);
 
 onUnmounted(() => {
-  if (saveTimeout) {
-    clearTimeout(saveTimeout);
-    saveTimeout = null;
-  }
   if (saveSuccessTimer) {
     clearTimeout(saveSuccessTimer);
     saveSuccessTimer = null;
   }
-  saveOnClose();
+  const epoch = ++editorEpoch;
+  void startSaveOnClose(epoch);
 });
 
 // Avatar Upload Logic
@@ -100,8 +112,11 @@ const handleFileChange = (e: Event) => {
   const file = (e.target as HTMLInputElement).files?.[0];
   if (!file) return;
 
+  const epoch = editorEpoch;
+  const groupId = props.id;
   const reader = new FileReader();
   reader.onload = (event) => {
+    if (!isOpenEditorCurrent(epoch, groupId)) return;
     cropImg.value = event.target?.result as string;
     isCropping.value = true;
   };
@@ -109,24 +124,27 @@ const handleFileChange = (e: Event) => {
 };
 
 const onCropConfirm = async (blob: Blob) => {
-  if (!groupConfig.value.id) return;
+  const epoch = editorEpoch;
+  const groupId = groupConfig.value.id;
+  if (!groupId || !isOpenEditorCurrent(epoch, groupId)) return;
 
   isCropping.value = false;
   isSaving.value = true;
 
   try {
     const arrayBuffer = await blob.arrayBuffer();
+    if (!isOpenEditorCurrent(epoch, groupId)) return;
     const bytes = new Uint8Array(arrayBuffer);
 
     // Use assistantStore to save avatar and get notification
-    await assistantStore.saveAvatar("group", groupConfig.value.id, blob.type, Array.from(bytes));
+    await assistantStore.saveAvatar("group", groupId, blob.type, Array.from(bytes));
 
     // Update UI local state via version
-    avatarVersion.value = Date.now();
+    if (isOpenEditorCurrent(epoch, groupId)) avatarVersion.value = Date.now();
   } catch (err) {
     console.error("Failed to save avatar:", err);
   } finally {
-    isSaving.value = false;
+    if (isEpochCurrent(epoch)) isSaving.value = false;
   }
 };
 
@@ -138,36 +156,55 @@ const fetchAgents = () => {
   }));
 };
 
-const fetchGroupConfig = async () => {
-  if (!props.id) return;
+const fetchGroupConfig = async (epoch: number, groupId: string) => {
+  if (!groupId) return;
   try {
-    const config = await invoke<any>("read_group_config", { groupId: props.id });
-    const memberTags = config.memberTags || {};
-
-    groupConfig.value = {
-      ...config,
-      memberTags: typeof memberTags === 'object' ? memberTags : {}
-    };
+    const pendingSave = pendingSaves.get(groupId);
+    if (pendingSave) {
+      await pendingSave;
+      if (!isOpenEditorCurrent(epoch, groupId)) return;
+    }
+    const config = await invoke<GroupConfig>("read_group_config", { groupId });
+    if (!isOpenEditorCurrent(epoch, groupId)) return;
+    groupConfig.value = normalizeGroupConfig(config);
     originalConfig.value = JSON.parse(JSON.stringify(groupConfig.value));
   } catch (err) {
     console.error("Failed to load group config:", err);
   }
 };
 
-const saveOnClose = async () => {
-  if (!groupConfig.value.id) return;
+const startSaveOnClose = (epoch: number): Promise<void> => {
+  const groupId = groupConfig.value.id;
+  const task = saveOnClose(epoch);
+  if (groupId) pendingSaves.set(groupId, task);
+  void task.finally(() => {
+    if (pendingSaves.get(groupId) === task) pendingSaves.delete(groupId);
+  });
+  return task;
+};
+
+const saveOnClose = async (epoch: number) => {
+  const draft = JSON.parse(JSON.stringify(groupConfig.value)) as GroupConfig;
+  const baseline = originalConfig.value
+    ? JSON.parse(JSON.stringify(originalConfig.value)) as GroupConfig
+    : null;
+  if (!draft.id) return;
 
   // 仅在配置真正被修改时才触发保存，避免无意义的后端调用
-  if (originalConfig.value && JSON.stringify(groupConfig.value) !== JSON.stringify(originalConfig.value)) {
-    isSaving.value = true;
-    saveSuccess.value = false;
+  if (baseline && JSON.stringify(draft) !== JSON.stringify(baseline)) {
+    if (isEpochCurrent(epoch)) {
+      isSaving.value = true;
+      saveSuccess.value = false;
+    }
 
     // 加固防重入：在 await 之前同步更新快照，拦截后续瞬时触发的并发保存调用
-    const previousSnapshot = originalConfig.value;
-    originalConfig.value = JSON.parse(JSON.stringify(groupConfig.value));
+    if (isEpochCurrent(epoch)) originalConfig.value = draft;
 
     try {
-      await assistantStore.saveGroup(groupConfig.value);
+      const canonical = normalizeGroupConfig(await assistantStore.saveGroup(draft));
+      if (!isEpochCurrent(epoch)) return;
+      groupConfig.value = canonical;
+      originalConfig.value = JSON.parse(JSON.stringify(canonical));
       saveSuccess.value = true;
       if (saveSuccessTimer) clearTimeout(saveSuccessTimer);
       saveSuccessTimer = setTimeout(() => {
@@ -175,30 +212,35 @@ const saveOnClose = async () => {
       }, 2000);
     } catch (err: any) {
       // 失败时回滚快照，以便后续有机会重新触发保存
-      originalConfig.value = previousSnapshot;
+      if (isEpochCurrent(epoch)) originalConfig.value = baseline;
       console.error("Save group config on close failed:", err);
       
       // 加固异常感知：通过 Toast 提示用户保存失败
       notificationStore.addNotification({
         type: "error",
-        title: "群组设置保存失败",
-        message: err.toString() || "请检查连接并重试",
+        title: `${draft.name || draft.id} 群组设置保存失败`,
+        message: err.toString() || "请重新打开设置后重试",
         toastOnly: true,
       });
     } finally {
-      isSaving.value = false;
+      if (isEpochCurrent(epoch)) isSaving.value = false;
     }
   }
 };
 
-watch(() => props.isOpen, (val) => {
-  if (val) {
+watch([() => props.isOpen, () => props.id], ([isOpen, id]) => {
+  const epoch = ++editorEpoch;
+  if (isOpen && id) {
+    groupConfig.value = createEmptyConfig(id);
+    originalConfig.value = null;
+    isSaving.value = false;
+    saveSuccess.value = false;
     fetchAgents();
-    fetchGroupConfig();
+    void fetchGroupConfig(epoch, id);
   } else {
-    saveOnClose();
+    void startSaveOnClose(epoch);
   }
-});
+}, { immediate: true });
 
 const toggleMember = (agentId: string) => {
   const index = groupConfig.value.members.indexOf(agentId);
@@ -222,17 +264,20 @@ const onModelSelect = (modelId: string) => {
 };
 
 const handleDelete = async () => {
+  const epoch = editorEpoch;
+  const groupId = groupConfig.value.id;
   const confirmed = await overlayStore.showConfirm({
     title: "删除群组",
     message: "确定要删除这个群组吗？所有聊天记录将被标记为删除。",
     isDanger: true
   });
-  if (confirmed) {
+  if (confirmed && groupId && isOpenEditorCurrent(epoch, groupId)) {
     try {
-      await assistantStore.deleteGroup(props.id);
+      await assistantStore.deleteGroup(groupId);
+      if (!isOpenEditorCurrent(epoch, groupId)) return;
       if (
         sessionStore.currentSelectedItem?.type === "group" &&
-        sessionStore.currentSelectedItem?.id === props.id
+        sessionStore.currentSelectedItem?.id === groupId
       ) {
         sessionStore.clearConversation();
       }
@@ -248,13 +293,6 @@ const handleDelete = async () => {
     }
   }
 };
-
-onMounted(async () => {
-  if (props.isOpen) {
-    fetchAgents();
-    await fetchGroupConfig();
-  }
-});
 
 const modeOptions = [
   { value: "sequential", label: "顺序发言", desc: "成员按预定顺序轮流发言" },

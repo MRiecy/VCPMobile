@@ -45,12 +45,31 @@ export interface GroupConfig {
   createdAt?: number;
 }
 
+interface AssistantsSnapshot {
+  agents: AgentConfig[];
+  groups: GroupConfig[];
+  unreadCounts: Record<string, number>;
+}
+
 export const useAssistantStore = defineStore("assistant", () => {
   const agents = shallowRef<AgentConfig[]>([]);
   const groups = shallowRef<GroupConfig[]>([]);
   const loading = ref(false);
   const error = ref<string | null>(null);
   const notificationStore = useNotificationStore();
+  let activeLoadingOperations = 0;
+  let snapshotLoadId = 0;
+  const beginLoading = () => {
+    activeLoadingOperations += 1;
+    loading.value = true;
+  };
+  const endLoading = () => {
+    activeLoadingOperations = Math.max(0, activeLoadingOperations - 1);
+    loading.value = activeLoadingOperations > 0;
+  };
+  const invalidateSnapshotLoads = () => {
+    snapshotLoadId += 1;
+  };
 
   // 同步关闭时由 syncSession 的统一数据重载刷新列表，此处无需重复监听。
 
@@ -77,65 +96,17 @@ export const useAssistantStore = defineStore("assistant", () => {
     ...groups.value.map((group) => ({ ...group, type: "group" as const })),
   ]);
 
-  const fetchAgents = async () => {
-    loading.value = true;
-    error.value = null;
-    const startTime = Date.now();
-    try {
-      console.log("[Profile] fetchAgents invoking get_assistants_snapshot...");
-      const snapshot = await invoke<{
-        agents: AgentConfig[];
-        groups: GroupConfig[];
-        unreadCounts: Record<string, number>;
-      }>("get_assistants_snapshot");
-      agents.value = snapshot.agents;
-      unreadCounts.value = snapshot.unreadCounts;
-      console.log(`[Profile] fetchAgents finished in ${Date.now() - startTime}ms`);
-    } catch (e: any) {
-      error.value = e.toString();
-      console.error("[AssistantStore] fetchAgents failed:", e);
-      throw e;
-    } finally {
-      loading.value = false;
-    }
-  };
-
-  const fetchGroups = async () => {
-    loading.value = true;
-    error.value = null;
-    const startTime = Date.now();
-    try {
-      console.log("[Profile] fetchGroups invoking get_assistants_snapshot...");
-      const snapshot = await invoke<{
-        agents: AgentConfig[];
-        groups: GroupConfig[];
-        unreadCounts: Record<string, number>;
-      }>("get_assistants_snapshot");
-      groups.value = snapshot.groups;
-      unreadCounts.value = snapshot.unreadCounts;
-      console.log(`[Profile] fetchGroups finished in ${Date.now() - startTime}ms`);
-    } catch (e: any) {
-      error.value = e.toString();
-      console.error("[AssistantStore] fetchGroups failed:", e);
-      throw e;
-    } finally {
-      loading.value = false;
-    }
-  };
-
   const fetchAgentsAndGroups = async () => {
-    loading.value = true;
+    const loadId = ++snapshotLoadId;
+    beginLoading();
     error.value = null;
     const startTime = Date.now();
     try {
       console.log("[Profile] invoke('get_assistants_snapshot') starting...");
-      const snapshot = await invoke<{
-        agents: AgentConfig[];
-        groups: GroupConfig[];
-        unreadCounts: Record<string, number>;
-      }>("get_assistants_snapshot");
+      const snapshot = await invoke<AssistantsSnapshot>("get_assistants_snapshot");
       console.log(`[Profile] invoke('get_assistants_snapshot') resolved in ${Date.now() - startTime}ms`);
-      
+      if (loadId !== snapshotLoadId) return;
+
       // 在同一次 tick 中合并赋值，触发 Vue 3 渲染的批处理更新
       agents.value = snapshot.agents;
       groups.value = snapshot.groups;
@@ -143,18 +114,19 @@ export const useAssistantStore = defineStore("assistant", () => {
       
       console.log(`[Profile] fetchAgentsAndGroups finished in ${Date.now() - startTime}ms`);
     } catch (e: any) {
-      error.value = e.toString();
+      if (loadId === snapshotLoadId) error.value = e.toString();
       console.error("[AssistantStore] fetchAgentsAndGroups failed:", e);
       throw e;
     } finally {
-      loading.value = false;
+      endLoading();
     }
   };
 
   const createAgent = async (name: string) => {
-    loading.value = true;
+    beginLoading();
     try {
       const newAgent = await invoke<AgentConfig>("create_agent", { name });
+      invalidateSnapshotLoads();
       notificationStore.addNotification({
         type: "success",
         title: "Agent 创建成功",
@@ -167,13 +139,14 @@ export const useAssistantStore = defineStore("assistant", () => {
       error.value = e.toString();
       throw e;
     } finally {
-      loading.value = false;
+      endLoading();
     }
   };
 
   const deleteAgent = async (id: string) => {
     try {
       await invoke("delete_agent", { agentId: id });
+      invalidateSnapshotLoads();
       agents.value = agents.value.filter((a) => a.id !== id);
       groups.value = groups.value.map((group) => ({
         ...group,
@@ -192,9 +165,10 @@ export const useAssistantStore = defineStore("assistant", () => {
   };
 
   const createGroup = async (name: string) => {
-    loading.value = true;
+    beginLoading();
     try {
       const newGroup = await invoke<GroupConfig>("create_group", { name });
+      invalidateSnapshotLoads();
       notificationStore.addNotification({
         type: "success",
         title: "Group 创建成功",
@@ -207,13 +181,14 @@ export const useAssistantStore = defineStore("assistant", () => {
       error.value = e.toString();
       throw e;
     } finally {
-      loading.value = false;
+      endLoading();
     }
   };
 
   const deleteGroup = async (id: string) => {
     try {
       await invoke("delete_group", { groupId: id });
+      invalidateSnapshotLoads();
       groups.value = groups.value.filter((g) => g.id !== id);
       notificationStore.addNotification({
         type: "success",
@@ -230,6 +205,7 @@ export const useAssistantStore = defineStore("assistant", () => {
   const saveAgent = async (agent: AgentConfig) => {
     try {
       await invoke("save_agent_config", { agent });
+      invalidateSnapshotLoads();
       
       // 点对点局部更新（仅更新轻量列表渲染字段，防止大提示词等字段污染全局列表轻量缓存）
       const index = agents.value.findIndex((a) => a.id === agent.id);
@@ -258,7 +234,8 @@ export const useAssistantStore = defineStore("assistant", () => {
 
   const saveGroup = async (group: GroupConfig) => {
     try {
-      await invoke("save_group_config", { group });
+      const canonical = await invoke<GroupConfig>("save_group_config", { group });
+      invalidateSnapshotLoads();
 
       // 点对点局部更新（仅更新轻量列表渲染字段）
       const index = groups.value.findIndex((g) => g.id === group.id);
@@ -266,11 +243,11 @@ export const useAssistantStore = defineStore("assistant", () => {
         const updated = [...groups.value];
         updated[index] = {
           ...updated[index],
-          name: group.name,
-          members: group.members,
+          name: canonical.name,
+          members: canonical.members,
           // mode 被邀请横条与 @提及 选择器消费，必须随保存同步
-          mode: group.mode,
-          avatarCalculatedColor: group.avatarCalculatedColor || updated[index].avatarCalculatedColor,
+          mode: canonical.mode,
+          avatarCalculatedColor: canonical.avatarCalculatedColor || updated[index].avatarCalculatedColor,
         };
         groups.value = updated;
       }
@@ -281,6 +258,7 @@ export const useAssistantStore = defineStore("assistant", () => {
         message: "群组设置已更新",
         toastOnly: true,
       });
+      return canonical;
     } catch (e: any) {
       error.value = e.toString();
       throw e;
@@ -318,8 +296,6 @@ export const useAssistantStore = defineStore("assistant", () => {
     loading,
     error,
     unreadCounts,
-    fetchAgents,
-    fetchGroups,
     fetchAgentsAndGroups,
     createAgent,
     deleteAgent,

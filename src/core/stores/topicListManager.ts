@@ -89,7 +89,7 @@ export const useTopicStore = defineStore("topic", () => {
 
       // 日期匹配 (格式化后搜索)
       let dateMatch = false;
-      const createdAt = (topic as any).createdAt || (topic as any).created_at;
+      const createdAt = topic.createdAt;
       if (createdAt) {
         // Rust 返回的是毫秒级时间戳 (i64) 或秒级
         const date = new Date(createdAt > 1e11 ? createdAt : createdAt * 1000);
@@ -144,9 +144,9 @@ export const useTopicStore = defineStore("topic", () => {
           ...t,
           ownerId: ownerId,
           ownerType: owner_type,
-          name: t.name || (t as any).title || t.id,
-          unreadCount: (t as any).unreadCount || 0,
-          msgCount: (t as any).msgCount || 0,
+          name: t.name || t.id,
+          unreadCount: t.unreadCount ?? 0,
+          msgCount: t.msgCount ?? 0,
         }));
 
         for (const topic of mappedChunk) {

@@ -105,6 +105,16 @@ export interface Attachment {
   createdAt?: number;
 }
 
+/** register_local_file / store_file 返回的本地 CAS 注册结果。 */
+export interface RegisteredAttachmentData {
+  type: string;
+  name: string;
+  size: number;
+  hash: string;
+  internalPath: string;
+  thumbnailPath: string | null;
+}
+
 /**
  * ChatMessage 接口定义，严格对齐 Rust 端的 MessageSyncDTO / ChatMessage
  */
@@ -125,7 +135,6 @@ export interface ChatMessage {
   finishReason?: string;
   attachments?: Attachment[];
   topicId?: string;
-  topic_id?: string; // 兼容两种写法
 
   // 以下为纯前端运行时 UI 状态 (Ephemeral)，绝不进行持久化
   tailContent?: string;      // Aurora: 尾随区 Markdown (高频变动)
@@ -235,7 +244,6 @@ export interface StreamEvent {
   type: string;
   chunk?: any;
   messageId?: string;
-  message_id?: string;
   context?: any;
   finishReason?: string;
   error?: string;

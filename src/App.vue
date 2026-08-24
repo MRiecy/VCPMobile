@@ -3,6 +3,7 @@ import { onMounted, onUnmounted, computed, nextTick, ref, watch, type WatchStopH
 import { useRouter } from "vue-router";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import type { PickedFile } from "tauri-plugin-vcp-mobile";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useSidebarSwipe } from "./core/composables/useSidebarSwipe";
 import { useThemeStore } from "./core/stores/theme";
@@ -23,6 +24,7 @@ import {
   useVcpCliStore,
   type VcpCliNotificationTarget,
 } from "./features/cli/vcpCliStore";
+import type { RegisteredAttachmentData } from "./core/types/chat";
 
 // 初始化应用生命周期监听
 useAppLifecycle();
@@ -56,15 +58,6 @@ interface SharedContentData {
   files: SharedFileEntry[];
 }
 
-interface PickedFileInfo {
-  path: string;
-  name: string;
-  mime: string;
-  size: number;
-  hash: string;
-  thumbnailPath?: string;
-}
-
 const themeStore = useThemeStore();
 const lifecycleStore = useAppLifecycleStore();
 const notificationStore = useNotificationStore();
@@ -91,7 +84,7 @@ const { initRootHistory } = useModalHistory();
 // --- Share Intent State ---
 const sharedContent = ref<SharedContentData>({ intentId: "", operationId: "", text: "", files: [] });
 const showShareSelector = ref(false);
-const pendingSharedFiles = ref<PickedFileInfo[]>([]);
+const pendingSharedFiles = ref<PickedFile[]>([]);
 const shareIntentOwner = new LatestIntentOwner();
 let stopShareReadyWatch: WatchStopHandle | null = null;
 
@@ -151,7 +144,7 @@ const prepareShareFiles = async (content: SharedContentData, operationId: string
       for (const file of files) {
         await invoke("check_attachment_support", { originalName: file.fileName });
       }
-      const stagedResults = await invoke<PickedFileInfo[]>("plugin:vcp-mobile|register_shared_files", {
+      const stagedResults = await invoke<PickedFile[]>("plugin:vcp-mobile|register_shared_files", {
         ownerId: content.intentId,
         files: files.map((f) => ({
           cachePath: f.cachePath,
@@ -162,10 +155,10 @@ const prepareShareFiles = async (content: SharedContentData, operationId: string
       });
       if (!shareIntentOwner.isCurrent(operationId)) return;
 
-      const results: PickedFileInfo[] = [];
+      const results: PickedFile[] = [];
       for (const staged of stagedResults) {
         if (!shareIntentOwner.isCurrent(operationId)) return;
-        const registered = await invoke<any>("register_local_file", {
+        const registered = await invoke<RegisteredAttachmentData>("register_local_file", {
           localPath: staged.path,
           originalName: staged.name,
           mimeType: staged.mime || "application/octet-stream",
@@ -179,7 +172,7 @@ const prepareShareFiles = async (content: SharedContentData, operationId: string
           mime: registered.type,
           size: registered.size,
           hash: registered.hash,
-          thumbnailPath: registered.thumbnailPath,
+          thumbnailPath: registered.thumbnailPath ?? undefined,
         });
       }
       if (!shareIntentOwner.isCurrent(operationId)) return;
@@ -203,7 +196,7 @@ const prepareShareFiles = async (content: SharedContentData, operationId: string
   // Ensure agents are loaded
   if (assistantStore.agents.length === 0) {
     try {
-      await assistantStore.fetchAgents();
+      await assistantStore.fetchAgentsAndGroups();
     } catch (e) {
       console.error("[App] Failed to fetch agents for share selector:", e);
     }
@@ -247,29 +240,59 @@ const handleShareSelectorClose = () => {
 };
 
 // --- Notification Click Routing State & Logic ---
-const handleNotificationClick = (e: Event) => {
-  const detail = (e as CustomEvent).detail;
-  void processNotificationClick(detail);
+interface NotificationClickDetail {
+  kind?: string;
+  action?: string;
+  jobId?: string;
+  attemptId?: string;
+  runtimeGeneration?: number;
+  ownerId?: string;
+  ownerType?: "agent" | "group";
+  topicId?: string;
+  requestId?: string;
+}
+
+let notificationNavigationGeneration = 0;
+let stopNotificationReadyWatch: WatchStopHandle | null = null;
+
+const routeNotificationClick = (rawDetail: unknown) => {
+  if (!rawDetail || typeof rawDetail !== "object") return;
+  const generation = ++notificationNavigationGeneration;
+  stopNotificationReadyWatch?.();
+  stopNotificationReadyWatch = null;
+  void processNotificationClick(rawDetail as NotificationClickDetail, generation);
 };
 
-const processNotificationClick = async (detail: any) => {
+const handleNotificationClick = (e: Event) => {
+  routeNotificationClick((e as CustomEvent).detail);
+};
+
+const processNotificationClick = async (
+  detail: NotificationClickDetail,
+  generation: number,
+) => {
+  if (generation !== notificationNavigationGeneration) return;
   console.log("[App] Notification click received:", detail);
   const isCliJob = detail?.kind === "cli_job";
-  if (
-    !isCliJob &&
-    (!detail?.ownerId ||
-      !detail?.topicId ||
-      (detail?.ownerType !== "agent" && detail?.ownerType !== "group"))
-  ) return;
+  const chatTarget = !isCliJob && detail.ownerId && detail.topicId &&
+    (detail.ownerType === "agent" || detail.ownerType === "group")
+    ? {
+        ownerId: detail.ownerId,
+        ownerType: detail.ownerType,
+        topicId: detail.topicId,
+      }
+    : null;
+  if (!isCliJob && !chatTarget) return;
 
   if (lifecycleStore.state !== "READY") {
     console.log("[App] Core not ready yet, deferring notification click routing...");
-    const unwatch = watch(
+    stopNotificationReadyWatch = watch(
       () => lifecycleStore.state,
       (state) => {
-        if (state === "READY") {
-          unwatch();
-          void processNotificationClick(detail);
+        if (state === "READY" && generation === notificationNavigationGeneration) {
+          stopNotificationReadyWatch?.();
+          stopNotificationReadyWatch = null;
+          void processNotificationClick(detail, generation);
         }
       }
     );
@@ -301,8 +324,10 @@ const processNotificationClick = async (detail: any) => {
     if (!closeNavigationSurfaces()) return;
     overlayStore.openCliManifest();
     await nextTick();
+    if (generation !== notificationNavigationGeneration) return;
     const cliStore = useVcpCliStore();
     const opened = await cliStore.openJobFromNotification(target);
+    if (generation !== notificationNavigationGeneration) return;
     if (opened !== "opened") {
       notificationStore.addNotification({
         id: `vcp-cli-notification-stale-${Date.now()}`,
@@ -320,8 +345,9 @@ const processNotificationClick = async (detail: any) => {
       message: `将终止该 Job 的整个进程树，已产生的输出会保留。\nJob ${target.jobId.slice(0, 12)}`,
       isDanger: true,
     });
-    if (!confirmed) return;
+    if (!confirmed || generation !== notificationNavigationGeneration) return;
     const revalidated = await cliStore.openJobFromNotification(target);
+    if (generation !== notificationNavigationGeneration) return;
     if (revalidated === "opened") {
       await cliStore.cancelSelectedJob();
     } else {
@@ -337,15 +363,15 @@ const processNotificationClick = async (detail: any) => {
     return;
   }
 
+  if (!chatTarget) return;
   // 聊天通知先只读验证目标；过期通知不得关闭当前界面或清空当前 Topic。
   try {
-    const topics = await invoke<Array<{ id?: string; topic_id?: string }>>("get_topics", {
-      ownerId: detail.ownerId,
-      ownerType: detail.ownerType,
+    const topics = await invoke<Array<{ id: string }>>("get_topics", {
+      ownerId: chatTarget.ownerId,
+      ownerType: chatTarget.ownerType,
     });
-    const targetExists = topics.some(
-      (topic) => (topic.id ?? topic.topic_id) === detail.topicId,
-    );
+    if (generation !== notificationNavigationGeneration) return;
+    const targetExists = topics.some((topic) => topic.id === chatTarget.topicId);
     if (!targetExists) {
       notificationStore.addNotification({
         type: "warning",
@@ -357,10 +383,11 @@ const processNotificationClick = async (detail: any) => {
     }
 
     if (!closeNavigationSurfaces()) return;
+    if (generation !== notificationNavigationGeneration) return;
     await sessionStore.selectTopicById(
-      detail.ownerId,
-      detail.ownerType,
-      detail.topicId,
+      chatTarget.ownerId,
+      chatTarget.ownerType,
+      chatTarget.topicId,
     );
   } catch (error) {
     console.error("[App] Failed to open notification target:", error);
@@ -516,9 +543,9 @@ onMounted(async () => {
 
   // 3. 处理冷启动的通知栏点击
   try {
-    const pending = await invoke<any>("plugin:vcp-mobile|get_pending_notification");
+    const pending = await invoke<NotificationClickDetail>("plugin:vcp-mobile|get_pending_notification");
     if (pending && (pending.topicId || pending.kind === "cli_job")) {
-      void processNotificationClick(pending);
+      routeNotificationClick(pending);
     }
   } catch (err) {
     console.warn("[App] Failed to fetch pending notification click:", err);
@@ -528,6 +555,8 @@ onMounted(async () => {
 onUnmounted(() => {
   stopShareReadyWatch?.();
   stopShareReadyWatch = null;
+  stopNotificationReadyWatch?.();
+  stopNotificationReadyWatch = null;
   if (unlistenLog) unlistenLog();
   window.removeEventListener("vcp-exit-requested", handleExitRequest);
   window.removeEventListener("vcp-hardware-back", handleExitRequest);

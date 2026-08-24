@@ -1,16 +1,10 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
+import type { PickedFile } from "tauri-plugin-vcp-mobile";
 import { useAssistantStore } from "./assistant";
 import { useTopicStore } from "./topicListManager";
 
-export interface PickedFileInfo {
-  path: string;
-  name: string;
-  mime: string;
-  size: number;
-  hash: string;
-  thumbnailPath?: string;
-}
+export type PickedFileInfo = PickedFile;
 
 export type ConversationOwnerType = "agent" | "group";
 
@@ -161,17 +155,6 @@ export const useChatSessionStore = defineStore("chatSession", () => {
   };
 
   /**
-   * 消费分享预填数据（调用后清空）
-   */
-  const consumeSharePrefill = () => {
-    const text = sharePrefillText.value;
-    const files = sharePrefillFiles.value;
-    sharePrefillText.value = "";
-    sharePrefillFiles.value = [];
-    return { text, files };
-  };
-
-  /**
    * 选择一个助手或群组，并自动跳转到最近的话题
    * @param loadHistoryCallback 回调函数，用于触发历史加载 (解耦 HistoryStore)
    */
@@ -315,7 +298,6 @@ export const useChatSessionStore = defineStore("chatSession", () => {
     sharePrefillText,
     sharePrefillFiles,
     startShareSession,
-    consumeSharePrefill,
     setConversation,
     clearConversation,
     clearCurrentTopic,

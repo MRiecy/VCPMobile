@@ -184,7 +184,7 @@ pub async fn save_group_config(
     app_handle: AppHandle,
     state: State<'_, GroupManagerState>,
     group: GroupConfig,
-) -> Result<bool, String> {
+) -> Result<GroupConfig, String> {
     let group_id = if group.id.is_empty() {
         return Err("Group ID cannot be empty".to_string());
     } else {
@@ -320,9 +320,7 @@ pub async fn update_group_config(
 
     let new_config: GroupConfig = serde_json::from_value(config_val).map_err(|e| e.to_string())?;
 
-    internal_write_group_config(&app_handle, &state, &group_id, &new_config).await?;
-
-    Ok(new_config)
+    internal_write_group_config(&app_handle, &state, &group_id, &new_config).await
 }
 
 #[tauri::command]
@@ -439,7 +437,7 @@ async fn internal_write_group_config<R: Runtime>(
     state: &GroupManagerState,
     group_id: &str,
     config: &GroupConfig,
-) -> Result<bool, String> {
+) -> Result<GroupConfig, String> {
     let cache_generation = state.current_cache_generation();
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
@@ -459,9 +457,27 @@ async fn internal_write_group_config<R: Runtime>(
         return Err(format!("Group {group_id} has been deleted"));
     }
 
-    let dto = GroupSyncDTO::from(config);
+    // 同步阶段允许 Group 比新 Agent 更早落库，因此只排除“明确已有墓碑”的成员；
+    // 完全缺失的 Agent 仍作为前向引用保留，避免依赖 Phase 1 到达顺序。
+    let mut canonical_config = config.clone();
+    let mut live_members = Vec::with_capacity(config.members.len());
+    for agent_id in &config.members {
+        let deleted_at = sqlx::query_scalar::<_, Option<i64>>(
+            "SELECT deleted_at FROM agents WHERE agent_id = ?",
+        )
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        if !matches!(deleted_at, Some(Some(_))) {
+            live_members.push(agent_id.clone());
+        }
+    }
+    canonical_config.members = live_members;
+
+    let dto = GroupSyncDTO::from(&canonical_config);
     let config_hash = HashAggregator::compute_group_config_hash(&dto);
-    let member_tags = config
+    let member_tags = canonical_config
         .member_tags
         .clone()
         .unwrap_or_else(|| serde_json::json!({}))
@@ -489,15 +505,19 @@ async fn internal_write_group_config<R: Runtime>(
             config_hash = excluded.config_hash",
     )
     .bind(group_id)
-    .bind(&config.name)
-    .bind(&config.mode)
-    .bind(&config.group_prompt)
-    .bind(&config.invite_prompt)
-    .bind(if config.use_unified_model { 1 } else { 0 })
-    .bind(&config.unified_model)
-    .bind(&config.tag_match_mode)
+    .bind(&canonical_config.name)
+    .bind(&canonical_config.mode)
+    .bind(&canonical_config.group_prompt)
+    .bind(&canonical_config.invite_prompt)
+    .bind(if canonical_config.use_unified_model {
+        1
+    } else {
+        0
+    })
+    .bind(&canonical_config.unified_model)
+    .bind(&canonical_config.tag_match_mode)
     .bind(member_tags)
-    .bind(config.created_at)
+    .bind(canonical_config.created_at)
     .bind(&config_hash)
     .bind(now)
     .execute(&mut *tx)
@@ -510,7 +530,7 @@ async fn internal_write_group_config<R: Runtime>(
         .await
         .map_err(|e| e.to_string())?;
 
-    for (idx, agent_id) in config.members.iter().enumerate() {
+    for (idx, agent_id) in canonical_config.members.iter().enumerate() {
         sqlx::query(
             "INSERT INTO group_members (
                 group_id, agent_id, sort_order, updated_at
@@ -527,9 +547,13 @@ async fn internal_write_group_config<R: Runtime>(
 
     tx.commit().await.map_err(|e| e.to_string())?;
 
-    state.insert_cache_if_current(group_id.to_string(), config.clone(), cache_generation);
+    state.insert_cache_if_current(
+        group_id.to_string(),
+        canonical_config.clone(),
+        cache_generation,
+    );
 
-    Ok(true)
+    Ok(canonical_config)
 }
 
 #[tauri::command]
@@ -620,6 +644,13 @@ pub async fn delete_group_internal<R: Runtime>(
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
+
+    // group_members 不是墓碑实体；父 Group 删除后不再保留无消费者的成员关系。
+    sqlx::query("DELETE FROM group_members WHERE group_id = ?")
+        .bind(group_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
 
     sqlx::query(
         "DELETE FROM message_attachments

@@ -120,10 +120,7 @@ const handleCreateTopic = async () => {
     console.error("[TopicCreator] create-topic failed", error);
     // 错误通知已在 store 层处理
   } finally {
-    // 1秒防抖/锁定，防止快速连击
-    setTimeout(() => {
-      isCreating.value = false;
-    }, 1000);
+    isCreating.value = false;
   }
 };
 </script>

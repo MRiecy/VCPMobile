@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref } from 'vue';
 import { useAssistantStore } from '../../core/stores/assistant';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { useChatSessionStore } from '../../core/stores/chatSessionStore';
@@ -12,8 +13,10 @@ const topicListStore = useTopicStore();
 const layoutStore = useLayoutStore();
 const overlayStore = useOverlayStore();
 const notificationStore = useNotificationStore();
+const isCreating = ref(false);
 
 const handleCreateAgent = async () => {
+  if (isCreating.value) return;
   console.info('[AgentsCreator] create-agent clicked');
   overlayStore.openPrompt({
     title: '创建 Agent',
@@ -23,9 +26,10 @@ const handleCreateAgent = async () => {
       const name = value.trim();
       if (!name) return;
 
+      isCreating.value = true;
       try {
         const newAgent = await assistantStore.createAgent(name);
-        await assistantStore.fetchAgents();
+        await assistantStore.fetchAgentsAndGroups();
         if (newAgent?.id) {
           // 选中新创建的 Agent
           sessionStore.setConversation({
@@ -51,12 +55,15 @@ const handleCreateAgent = async () => {
           message: '创建 Agent 失败',
           toastOnly: true
         });
+      } finally {
+        isCreating.value = false;
       }
     }
   });
 };
 
 const handleCreateGroup = async () => {
+  if (isCreating.value) return;
   console.info('[AgentsCreator] create-group clicked');
   overlayStore.openPrompt({
     title: '创建 Group',
@@ -66,9 +73,10 @@ const handleCreateGroup = async () => {
       const name = value.trim();
       if (!name) return;
 
+      isCreating.value = true;
       try {
         const newGroup = await assistantStore.createGroup(name);
-        await assistantStore.fetchGroups();
+        await assistantStore.fetchAgentsAndGroups();
         if (newGroup?.id) {
           // 选中新创建 of Group
           sessionStore.setConversation({
@@ -94,6 +102,8 @@ const handleCreateGroup = async () => {
           message: '创建群组失败',
           toastOnly: true
         });
+      } finally {
+        isCreating.value = false;
       }
     }
   });
@@ -103,6 +113,7 @@ const handleCreateGroup = async () => {
 <template>
   <div class="flex gap-2">
     <button
+      :disabled="isCreating"
       class="flex-1 py-2.5 bg-blue-500/10 dark:bg-blue-500/20 hover:bg-blue-500/20 dark:hover:bg-blue-500/30 text-blue-600 dark:text-blue-400 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2"
       @click="handleCreateAgent">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -113,6 +124,7 @@ const handleCreateGroup = async () => {
     </button>
 
     <button
+      :disabled="isCreating"
       class="flex-1 py-2.5 bg-purple-500/10 dark:bg-purple-500/20 hover:bg-purple-500/20 dark:hover:bg-purple-500/30 text-purple-600 dark:text-purple-400 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2"
       @click="handleCreateGroup">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">

@@ -51,7 +51,7 @@ const handleToggle = async (val: boolean) => {
     }
     // 开启时懒加载 Agent 列表
     try {
-      await assistantStore.fetchAgents();
+      await assistantStore.fetchAgentsAndGroups();
     } catch (_) {}
   }
 
@@ -83,7 +83,7 @@ watch(() => lifecycleStore.isBackground, async (newVal) => {
     await checkPermission();
     if (props.settings.enableAssistant && hasOverlayPermission.value) {
       try {
-        await assistantStore.fetchAgents();
+        await assistantStore.fetchAgentsAndGroups();
       } catch (_) {}
       try {
         await invoke("plugin:vcp-mobile|toggle_floating_ball", { show: true });
@@ -99,7 +99,7 @@ onMounted(async () => {
   // 若用户手动设置了开启且有权限，则在 mounted 时确保拉起悬浮球并懒加载 Agent 列表
   if (props.settings.enableAssistant && hasOverlayPermission.value) {
     try {
-      await assistantStore.fetchAgents();
+      await assistantStore.fetchAgentsAndGroups();
     } catch (_) {}
     try {
       await invoke("plugin:vcp-mobile|toggle_floating_ball", { show: true });

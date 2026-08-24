@@ -767,8 +767,26 @@ impl DbWriteQueue {
             ));
         }
         let now = chrono::Utc::now().timestamp_millis();
-        let config_hash = HashAggregator::compute_group_config_hash(dto);
-        let member_tags = dto
+        let mut canonical_dto = dto.clone();
+        let mut canonical_members = Vec::with_capacity(dto.members.len());
+        for member in &dto.members {
+            let tombstoned = match tx.query_row(
+                "SELECT deleted_at FROM agents WHERE agent_id = ?",
+                [member],
+                |row| row.get::<_, Option<i64>>(0),
+            ) {
+                Ok(Some(_)) => true,
+                Ok(None) | Err(rusqlite::Error::QueryReturnedNoRows) => false,
+                Err(error) => return Err(error),
+            };
+            if !tombstoned {
+                canonical_members.push(member.clone());
+            }
+        }
+        canonical_dto.members = canonical_members;
+
+        let config_hash = HashAggregator::compute_group_config_hash(&canonical_dto);
+        let member_tags = canonical_dto
             .member_tags
             .clone()
             .unwrap_or_else(|| serde_json::json!({}))
@@ -798,15 +816,19 @@ impl DbWriteQueue {
              WHERE groups.deleted_at IS NULL",
             rusqlite::params![
                 id,
-                &dto.name,
-                &dto.mode,
-                &dto.group_prompt,
-                &dto.invite_prompt,
-                if dto.use_unified_model { 1 } else { 0 },
-                &dto.unified_model,
-                &dto.tag_match_mode,
+                &canonical_dto.name,
+                &canonical_dto.mode,
+                &canonical_dto.group_prompt,
+                &canonical_dto.invite_prompt,
+                if canonical_dto.use_unified_model {
+                    1
+                } else {
+                    0
+                },
+                &canonical_dto.unified_model,
+                &canonical_dto.tag_match_mode,
                 &member_tags,
-                dto.created_at,
+                canonical_dto.created_at,
                 &config_hash,
                 now
             ],
@@ -822,7 +844,7 @@ impl DbWriteQueue {
 
         tx.execute("DELETE FROM group_members WHERE group_id = ?", [id])?;
 
-        for (sort_order, member) in dto.members.iter().enumerate() {
+        for (sort_order, member) in canonical_dto.members.iter().enumerate() {
             tx.execute(
                 "INSERT INTO group_members (group_id, agent_id, sort_order, updated_at) VALUES (?, ?, ?, ?)",
                 rusqlite::params![id, member, sort_order as i64, now]

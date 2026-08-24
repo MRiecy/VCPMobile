@@ -7,7 +7,7 @@ import { useAssistantStore } from "./assistant";
 import { useAvatarStore } from "./avatar";
 import { useTopicStore } from "./topicListManager";
 import { useChatHistoryStore } from "./chatHistoryStore";
-import type { ChatMessage, MessageShell, TailFrame } from "../types/chat";
+import type { ChatMessage, ContentBlock, MessageShell, TailFrame } from "../types/chat";
 import type {
   ConversationKey,
   ConversationOwnerType,
@@ -16,7 +16,6 @@ import type {
 export interface ChatStreamEvent {
   type: string;
   messageId?: string;
-  message_id?: string;
   context?: {
     topicId?: string;
     isGroupMessage?: boolean;
@@ -28,10 +27,25 @@ export interface ChatStreamEvent {
     [key: string]: unknown;
   };
   aurora?: any;
-  blocks?: any[];
+  blocks?: ContentBlock[];
   error?: string;
   finishReason?: string;
   timestamp?: number;
+}
+
+interface ActiveGenerationData {
+  msgId: string;
+  topicId: string;
+  ownerId: string;
+  ownerType: ConversationOwnerType;
+  createdAt: number;
+  agentId?: string;
+  agentName?: string;
+}
+
+interface RecoveryResult {
+  status: string;
+  content?: string;
 }
 
 interface StreamTerminalTombstone {
@@ -485,7 +499,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       onStreamFinished?: (messageId: string, topicId: string) => void;
     },
   ) => {
-    const actualMessageId = event.messageId || event.message_id || "";
+    const actualMessageId = event.messageId || "";
     const { type, context } = event;
     const ctx = context || {};
     const topicId = ctx.topicId;
@@ -704,7 +718,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             msg.blocks = event.blocks as any;
             finalizeStream();
           } else {
-            invoke<any>("process_message_content", {
+            invoke<ContentBlock[]>("process_message_content", {
               content: msg!.content || "",
             })
               .then((compiledBlocks) => {
@@ -836,9 +850,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     isRecovering.value = true;
 
     // 1. 本地扫表：无网状态下也能运行
-    let activeGens: any[] = [];
+    let activeGens: ActiveGenerationData[] = [];
     try {
-      activeGens = await invoke<any[]>("get_active_generations");
+      activeGens = await invoke<ActiveGenerationData[]>("get_active_generations");
     } catch (e) {
       console.error("[ChatStreamStore] Failed to get active generations:", e);
       isRecovering.value = false;
@@ -1006,7 +1020,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         // 后端在一个 owner lease 内先判定 durable 状态，再决定是否需要网络接续。
         // navigator.onLine 不能前置否决：Finalizing/Interrupted 等状态必须可离线收口。
         // 扫描门闩可以释放，但 recoveryMessageIds 会覆盖整个长连接生命周期。
-        void invoke<any>("recover_active_generation", {
+        void invoke<RecoveryResult>("recover_active_generation", {
           ownerId,
           ownerType,
           topicId,
@@ -1028,7 +1042,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
               recoveryMessage.isThinking = false;
               if (typeof res.content === "string") {
                 recoveryMessage.content = res.content;
-                invoke<any>("process_message_content", {
+                invoke<ContentBlock[]>("process_message_content", {
                   content: recoveryMessage.content,
                 })
                   .then((compiledBlocks) => {

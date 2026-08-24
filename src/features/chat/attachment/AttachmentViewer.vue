@@ -62,8 +62,14 @@ const isText = computed(() => {
   );
 });
 
-watch(() => props.isOpen, async (newVal) => {
+watch(() => props.isOpen, async (newVal, _oldVal, onCleanup) => {
   if (newVal) {
+    const controller = new AbortController();
+    let active = true;
+    onCleanup(() => {
+      active = false;
+      controller.abort();
+    });
     if (!hasLocalCapability.value) {
       close();
       return;
@@ -87,7 +93,7 @@ watch(() => props.isOpen, async (newVal) => {
             fetchUrl = convertFileSrc(sourcePath.replace("file://", ""));
           }
           
-          const response = await fetch(fetchUrl);
+          const response = await fetch(fetchUrl, { signal: controller.signal });
           const reader = response.body?.getReader();
           if (reader) {
             const chunks: Uint8Array[] = [];
@@ -109,6 +115,7 @@ watch(() => props.isOpen, async (newVal) => {
               position += chunk.length;
             }
             
+            if (!active) return;
             previewText.value = new TextDecoder("utf-8").decode(allChunks);
             if (receivedLength >= LIMIT) {
               isTextTruncated.value = true;
@@ -116,16 +123,18 @@ watch(() => props.isOpen, async (newVal) => {
           }
         }
       } catch (e) {
+        if (!active || (e instanceof DOMException && e.name === "AbortError")) return;
         console.error('[AttachmentViewer] Failed to load text preview:', e);
         previewText.value = "⚠️ 本地文件预览失败，请使用外部应用打开。";
       } finally {
-        isLoading.value = false;
+        if (active) isLoading.value = false;
       }
     }
   } else {
     unregisterModal(modalId);
     previewText.value = "";
     isTextTruncated.value = false;
+    isLoading.value = false;
   }
 });
 

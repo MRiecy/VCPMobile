@@ -34,7 +34,7 @@ export interface PickedFile {
   mime: string;
   size: number;
   hash: string;
-  thumbnailPath?: string;
+  thumbnailPath?: string | null;
 }
 
 export function pickFile(): Promise<PickedFile> {
@@ -127,4 +127,3 @@ export interface LaunchRootManagerResult {
 export function launchRootManager(): Promise<LaunchRootManagerResult> {
   return invoke<LaunchRootManagerResult>('plugin:vcp-mobile|launch_root_manager');
 }
-

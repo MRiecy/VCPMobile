@@ -724,6 +724,7 @@ pub async fn get_assistants_snapshot(
 /// 快照查询主体（与 Tauri State 解耦，便于内存库单测）。
 async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<AssistantsSnapshot, String> {
     let start_total = std::time::Instant::now();
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
     // 1. 获取 agents。批量快照不写实体缓存，避免并发删除后迟到回填 ghost。
     let agent_rows = sqlx::query(
@@ -732,7 +733,7 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
          LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent' AND av.deleted_at IS NULL
          WHERE a.owner_type = 'agent' AND a.deleted_at IS NULL",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
 
@@ -760,7 +761,7 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
          LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group' AND av.deleted_at IS NULL
          WHERE g.owner_type = 'group' AND g.deleted_at IS NULL",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
 
@@ -769,7 +770,7 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
          FROM group_members 
          ORDER BY group_id, sort_order ASC",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
 
@@ -812,7 +813,7 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
          WHERE deleted_at IS NULL
          GROUP BY owner_type, owner_id",
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
 
@@ -836,6 +837,8 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
             unread_counts.insert(format!("{owner_type}:{owner_id}"), value);
         }
     }
+
+    tx.commit().await.map_err(|e| e.to_string())?;
 
     log::info!(
         "[Profile] get_assistants_snapshot total: {}ms | Agents: {} | Groups: {}",

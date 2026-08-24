@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch } from "vue";
+import { ref, onUnmounted, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
@@ -42,8 +42,8 @@ const sessionStore = useChatSessionStore();
 const notificationStore = useNotificationStore();
 const overlayStore = useOverlayStore();
 
-const agentConfig = ref<AgentConfig>({
-  id: props.id || "",
+const createEmptyConfig = (id = ""): AgentConfig => ({
+  id,
   name: "",
   avatar: "",
   mobileSystemPrompt: "",
@@ -54,6 +54,12 @@ const agentConfig = ref<AgentConfig>({
   streamOutput: true,
   useTemperature: false,
 });
+const agentConfig = ref<AgentConfig>(createEmptyConfig(props.id));
+let editorEpoch = 0;
+const pendingSaves = new Map<string, Promise<void>>();
+const isEpochCurrent = (epoch: number) => editorEpoch === epoch;
+const isOpenEditorCurrent = (epoch: number, id: string) =>
+  isEpochCurrent(epoch) && props.isOpen && props.id === id;
 
 // UI State
 const sections = ref({
@@ -78,8 +84,11 @@ const handleFileChange = (e: Event) => {
   const file = (e.target as HTMLInputElement).files?.[0];
   if (!file) return;
 
+  const epoch = editorEpoch;
+  const agentId = props.id || "";
   const reader = new FileReader();
   reader.onload = (event) => {
+    if (!isOpenEditorCurrent(epoch, agentId)) return;
     cropImg.value = event.target?.result as string;
     isCropping.value = true;
   };
@@ -87,24 +96,27 @@ const handleFileChange = (e: Event) => {
 };
 
 const onCropConfirm = async (blob: Blob) => {
-  if (!agentConfig.value.id) return;
+  const epoch = editorEpoch;
+  const agentId = agentConfig.value.id;
+  if (!agentId || !isOpenEditorCurrent(epoch, agentId)) return;
 
   isCropping.value = false;
   isSaving.value = true;
 
   try {
     const arrayBuffer = await blob.arrayBuffer();
+    if (!isOpenEditorCurrent(epoch, agentId)) return;
     const bytes = new Uint8Array(arrayBuffer);
 
     // Use assistantStore to save avatar and get notification
-    await assistantStore.saveAvatar("agent", agentConfig.value.id, blob.type, Array.from(bytes));
+    await assistantStore.saveAvatar("agent", agentId, blob.type, Array.from(bytes));
 
     // Update UI local state via version
-    avatarVersion.value = Date.now();
+    if (isOpenEditorCurrent(epoch, agentId)) avatarVersion.value = Date.now();
   } catch (err) {
     console.error("Failed to save avatar:", err);
   } finally {
-    isSaving.value = false;
+    if (isEpochCurrent(epoch)) isSaving.value = false;
   }
 };
 
@@ -115,31 +127,33 @@ const onModelSelect = (modelId: string) => {
 
 const isSaving = ref(false);
 const saveSuccess = ref(false);
-let saveTimeout: ReturnType<typeof setTimeout> | null = null;
 let saveSuccessTimer: ReturnType<typeof setTimeout> | null = null;
 
 // 原始配置快照，用于判断用户是否真正修改了内容
 const originalConfig = ref<AgentConfig | null>(null);
 
 onUnmounted(() => {
-  if (saveTimeout) {
-    clearTimeout(saveTimeout);
-    saveTimeout = null;
-  }
   if (saveSuccessTimer) {
     clearTimeout(saveSuccessTimer);
     saveSuccessTimer = null;
   }
-  saveOnClose();
+  const epoch = ++editorEpoch;
+  void startSaveOnClose(epoch);
 });
 
-const loadConfig = async () => {
-  if (props.id) {
+const loadConfig = async (epoch: number, agentId: string) => {
+  if (agentId) {
     try {
+      const pendingSave = pendingSaves.get(agentId);
+      if (pendingSave) {
+        await pendingSave;
+        if (!isOpenEditorCurrent(epoch, agentId)) return;
+      }
       const config = await invoke<AgentConfig>("read_agent_config", {
-        agentId: props.id,
+        agentId,
         allowDefault: true,
       });
+      if (!isOpenEditorCurrent(epoch, agentId)) return;
       agentConfig.value = config;
       originalConfig.value = JSON.parse(JSON.stringify(config));
     } catch (err) {
@@ -148,20 +162,36 @@ const loadConfig = async () => {
   }
 };
 
-const saveOnClose = async () => {
-  if (!agentConfig.value.id) return;
+const startSaveOnClose = (epoch: number): Promise<void> => {
+  const agentId = agentConfig.value.id;
+  const task = saveOnClose(epoch);
+  if (agentId) pendingSaves.set(agentId, task);
+  void task.finally(() => {
+    if (pendingSaves.get(agentId) === task) pendingSaves.delete(agentId);
+  });
+  return task;
+};
+
+const saveOnClose = async (epoch: number) => {
+  const draft = JSON.parse(JSON.stringify(agentConfig.value)) as AgentConfig;
+  const baseline = originalConfig.value
+    ? JSON.parse(JSON.stringify(originalConfig.value)) as AgentConfig
+    : null;
+  if (!draft.id) return;
 
   // 仅在配置真正被修改时才触发保存，避免无意义的后端调用
-  if (originalConfig.value && JSON.stringify(agentConfig.value) !== JSON.stringify(originalConfig.value)) {
-    isSaving.value = true;
-    saveSuccess.value = false;
+  if (baseline && JSON.stringify(draft) !== JSON.stringify(baseline)) {
+    if (isEpochCurrent(epoch)) {
+      isSaving.value = true;
+      saveSuccess.value = false;
+    }
 
     // 加固防重入：在 await 之前同步更新快照，拦截后续瞬时触发的并发保存调用
-    const previousSnapshot = originalConfig.value;
-    originalConfig.value = JSON.parse(JSON.stringify(agentConfig.value));
+    if (isEpochCurrent(epoch)) originalConfig.value = draft;
 
     try {
-      await assistantStore.saveAgent(agentConfig.value);
+      await assistantStore.saveAgent(draft);
+      if (!isEpochCurrent(epoch)) return;
       saveSuccess.value = true;
       if (saveSuccessTimer) clearTimeout(saveSuccessTimer);
       saveSuccessTimer = setTimeout(() => {
@@ -169,42 +199,50 @@ const saveOnClose = async () => {
       }, 2000);
     } catch (err: any) {
       // 保存失败时回滚快照，以便后续有机会重新触发保存
-      originalConfig.value = previousSnapshot;
+      if (isEpochCurrent(epoch)) originalConfig.value = baseline;
       console.error("Save config on close failed:", err);
       
       // 加固异常感知：通过 Toast 提示用户保存失败
       notificationStore.addNotification({
         type: "error",
-        title: "设置保存失败",
-        message: err.toString() || "请检查连接并重试",
+        title: `${draft.name || draft.id} 设置保存失败`,
+        message: err.toString() || "请重新打开设置后重试",
         toastOnly: true,
       });
     } finally {
-      isSaving.value = false;
+      if (isEpochCurrent(epoch)) isSaving.value = false;
     }
   }
 };
 
-watch(() => props.isOpen, (val) => {
-  if (val) {
-    loadConfig();
+watch([() => props.isOpen, () => props.id], ([isOpen, id]) => {
+  const epoch = ++editorEpoch;
+  if (isOpen && id) {
+    agentConfig.value = createEmptyConfig(id);
+    originalConfig.value = null;
+    isSaving.value = false;
+    saveSuccess.value = false;
+    void loadConfig(epoch, id);
   } else {
-    saveOnClose();
+    void startSaveOnClose(epoch);
   }
-});
+}, { immediate: true });
 
 const handleDelete = async () => {
+  const epoch = editorEpoch;
+  const agentId = agentConfig.value.id;
   const confirmed = await overlayStore.showConfirm({
     title: "删除 Agent",
     message: "确定要删除这个 Agent 吗？此操作不可撤销。",
     isDanger: true
   });
-  if (confirmed) {
+  if (confirmed && agentId && isOpenEditorCurrent(epoch, agentId)) {
     try {
-      await assistantStore.deleteAgent(agentConfig.value.id);
+      await assistantStore.deleteAgent(agentId);
+      if (!isOpenEditorCurrent(epoch, agentId)) return;
       if (
         sessionStore.currentSelectedItem?.type === "agent" &&
-        sessionStore.currentSelectedItem?.id === agentConfig.value.id
+        sessionStore.currentSelectedItem?.id === agentId
       ) {
         sessionStore.clearConversation();
       }
@@ -216,10 +254,6 @@ const handleDelete = async () => {
     }
   }
 };
-
-onMounted(async () => {
-  if (props.isOpen) loadConfig();
-});
 </script>
 
 <template>

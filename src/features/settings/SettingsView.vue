@@ -146,14 +146,12 @@ const saveSettings = async (): Promise<boolean> => {
   try {
     const baseline = settingsBaseline.value;
     if (!baseline) return false;
-    const patch = diffSettingsPatch(baseline, settings.value);
+    const draftAtStart = cloneSettings(settings.value);
+    const patch = diffSettingsPatch(baseline, draftAtStart);
     if (Object.keys(patch).length === 0) return true;
-    await settingsStore.updateSettings(patch);
-    if (settingsStore.settings) {
-      const persisted = cloneSettings(settingsStore.settings);
-      settings.value = persisted;
-      settingsBaseline.value = cloneSettings(persisted);
-    }
+    const persisted = await settingsStore.updateSettings(patch);
+    // 保存期间用户可能继续编辑；只推进持久化基线，不用旧响应覆盖活草稿。
+    settingsBaseline.value = cloneSettings(persisted);
     console.log("Settings saved!");
     return true;
   } catch (e) {

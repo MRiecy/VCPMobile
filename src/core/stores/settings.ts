@@ -56,9 +56,23 @@ export const useSettingsStore = defineStore("settings", () => {
   const error = ref<string | null>(null);
   const recoveryNotified = ref(false);
   const notificationStore = useNotificationStore();
-
-  const fetchSettings = async () => {
+  let activeOperations = 0;
+  let operationTail: Promise<void> = Promise.resolve();
+  const enqueueOperation = <T>(operation: () => Promise<T>): Promise<T> => {
+    activeOperations += 1;
     loading.value = true;
+    const queued = operationTail.catch(() => undefined).then(operation);
+    operationTail = queued.then(
+      () => undefined,
+      () => undefined,
+    );
+    return queued.finally(() => {
+      activeOperations = Math.max(0, activeOperations - 1);
+      loading.value = activeOperations > 0;
+    });
+  };
+
+  const fetchSettings = () => enqueueOperation(async () => {
     error.value = null;
     try {
       const fetchedSettings = await invoke<AppSettings>("read_settings");
@@ -77,13 +91,10 @@ export const useSettingsStore = defineStore("settings", () => {
       error.value = e.toString();
       console.error("[SettingsStore] Failed to fetch settings:", e);
       throw e;
-    } finally {
-      loading.value = false;
     }
-  };
+  });
 
-  const updateSettings = async (updates: Record<string, any>) => {
-    loading.value = true;
+  const updateSettings = (updates: Record<string, any>) => enqueueOperation(async () => {
     error.value = null;
     try {
       const updated = await invoke<AppSettings>("update_settings", { updates });
@@ -95,14 +106,13 @@ export const useSettingsStore = defineStore("settings", () => {
         message: "变更已生效",
         toastOnly: true,
       });
+      return updated;
     } catch (e: any) {
       error.value = e.toString();
       console.error("[SettingsStore] Failed to update settings:", e);
       throw e;
-    } finally {
-      loading.value = false;
     }
-  };
+  });
 
   return {
     settings,

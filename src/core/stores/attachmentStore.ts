@@ -3,7 +3,8 @@ import { ref, nextTick } from "vue";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useNotificationStore } from "./notification";
-import type { Attachment } from "../types/chat";
+import type { PickedFile } from "tauri-plugin-vcp-mobile";
+import type { Attachment, RegisteredAttachmentData } from "../types/chat";
 
 
 
@@ -102,7 +103,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
       try {
         // 1. 调用物理端原生 File Picker (双轨事件监听 + 5分钟熔断)
         
-        const picked = await new Promise<any>((resolve, reject) => {
+        const picked = await new Promise<PickedFile>((resolve, reject) => {
           let resolved = false;
 
           const handleStart = (e: any) => {
@@ -145,7 +146,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
             resolved = true;
             cleanup();
             console.log("[AttachmentStore] Native picker returned via EventBus:", e.detail);
-            resolve(e.detail);
+            resolve(e.detail as PickedFile);
           };
 
           const cleanup = () => {
@@ -167,7 +168,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
             }
           }, 300000);
 
-          invoke<any>("plugin:vcp-mobile|pick_file", { mode }).then((res) => {
+          invoke<PickedFile>("plugin:vcp-mobile|pick_file", { mode }).then((res) => {
             if (!resolved) {
               resolved = true;
               cleanup();
@@ -247,7 +248,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
         window.dispatchEvent(new Event("resize"));
 
         // 3. 后端零拷贝直传与注册 (会触发 rename 移动，缩略图生成，文本提取)
-        const finalData = await invoke<any>("register_local_file", {
+        const finalData = await invoke<RegisteredAttachmentData>("register_local_file", {
           localPath: picked.path,
           originalName: picked.name,
           mimeType: picked.mime || "application/octet-stream",
@@ -266,7 +267,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
               name: finalData.name,
               size: finalData.size,
               hash: finalData.hash,
-              thumbnailPath: finalData.thumbnailPath,
+              thumbnailPath: finalData.thumbnailPath ?? undefined,
               status: "done",
               progress: undefined,
             };
@@ -398,7 +399,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
           window.dispatchEvent(new Event("resize"));
 
           try {
-            let finalData: any = null;
+            let finalData: RegisteredAttachmentData | null = null;
 
             // --- 分流策略：小文件 ( < 2MB ) 走 IPC，大文件走高速 TCP 链路 ---
             if (file.size < 2 * 1024 * 1024) {
@@ -417,7 +418,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
                 stagedAttachments.value[attIndex].status = "processing";
               }
 
-              finalData = await invoke<any>("store_file", {
+              finalData = await invoke<RegisteredAttachmentData>("store_file", {
                 originalName: file.name,
                 fileBytes: bytes, 
                 mimeType: file.type || "application/octet-stream",
@@ -428,7 +429,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
               );
 
               // 1. 准备链路 (Rust 开启临时本地 TCP 接收器)
-              const endpoint = await invoke<any>("prepare_vcp_upload", {
+              const endpoint = await invoke<{ url: string; token: string }>("prepare_vcp_upload", {
                 metadata: {
                   name: file.name,
                   mime: file.type || "application/octet-stream",
@@ -483,7 +484,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
                 xhr.send(file);
               });
 
-              finalData = await uploadPromise;
+              finalData = await uploadPromise as RegisteredAttachmentData;
             }
 
             if (finalData) {
