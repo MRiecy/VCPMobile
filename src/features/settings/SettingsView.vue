@@ -67,9 +67,15 @@ const settings = ref<AppSettings>({
   groupOrder: [],
   topicSummaryModel: "gemini-3.1-flash-lite",
   syncLogLevel: "INFO",
+  currentThemeMode: null,
+  syncPrerenderEnabled: false,
   // [SUSPENDED BETA] 浮动助手（划词悬浮球）功能当前已暂停使用，默认值保留供后续重启
   enableAssistant: false,
   assistantAgentId: "",
+  distributedEnabled: false,
+  distributedWsUrl: "",
+  distributedVcpKey: "",
+  distributedDeviceName: "",
 });
 const settingsBaseline = ref<AppSettings | null>(null);
 const cloneSettings = (value: AppSettings): AppSettings =>

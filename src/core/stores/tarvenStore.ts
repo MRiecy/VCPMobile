@@ -13,11 +13,11 @@ export interface TarvenRule {
   wrap: boolean;
   
   // context_inject 专用
-  role?: 'user' | 'assistant';
-  depth?: number;
+  role: 'user' | 'assistant' | null;
+  depth: number | null;
   
   // system_suffix / user_suffix 专用
-  position?: 'prepend' | 'append';
+  position: 'prepend' | 'append' | null;
   
   sortOrder: number;
 }

@@ -52,6 +52,7 @@ describe('DiaryBlock', () => {
       type: 'diary',
       maid: '',
       valet: 'Sebastian',
+      date: '',
       content: 'finished',
       hash: 12,
     };

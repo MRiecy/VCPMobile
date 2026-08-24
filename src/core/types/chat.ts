@@ -67,25 +67,18 @@ export interface ToolCallSummaryItem {
   status: string;
 }
 
-export interface ContentBlock {
-  type:
-  | "markdown"
-  | "tool-use"
-  | "tool-result"
-  | "diary"
-  | "diary-update"
-  | "thought"
-  | "button-click"
-  | "html-preview"
-  | "role-divider"
-  | "style"
-  | "tool-call-summary";
+export interface ToolResultDetail {
+  key: string;
+  value: string;
+}
+
+interface RenderBlockFields {
   content?: string;
-  nodes?: MarkdownNode[]; // For type: "markdown", "diary", "thought"
+  nodes?: MarkdownNode[];
   tool_name?: string;
   is_complete?: boolean;
   status?: string;
-  details?: Array<{ key: string; value: string }>;
+  details?: ToolResultDetail[];
   footer?: string;
   maid?: string;
   valet?: string;
@@ -99,12 +92,60 @@ export interface ContentBlock {
   theme?: string;
   role?: string;
   is_end?: boolean;
-  display_mode?: boolean;
   highlighted_content?: string;
-  items?: ToolCallSummaryItem[]; // For type: "tool-call-summary"
-  raw_content?: string;          // For type: "tool-call-summary"
+  items?: ToolCallSummaryItem[];
+  raw_content?: string;
   hash?: string | number;
 }
+
+/** 持久化块与流式稳定块的统一渲染形态。每个变体保留其真实必填字段。 */
+export type ContentBlock =
+  | (RenderBlockFields & { type: "markdown" })
+  | (RenderBlockFields & {
+      type: "tool-use";
+      tool_name: string;
+      content: string;
+      // StreamBlock 的 tool-use 没有此字段，持久化终态会补齐。
+      is_complete?: boolean;
+    })
+  | (RenderBlockFields & {
+      type: "tool-result";
+      tool_name: string;
+      status: string;
+      details: ToolResultDetail[];
+      footer: string;
+    })
+  | (RenderBlockFields & {
+      type: "diary";
+      maid: string;
+      date: string;
+      content: string;
+    })
+  | (RenderBlockFields & {
+      type: "diary-update";
+      maid: string;
+      target: string;
+      replace: string;
+    })
+  | (RenderBlockFields & {
+      type: "thought";
+      theme: string;
+      content: string;
+      is_complete: boolean;
+    })
+  | (RenderBlockFields & { type: "button-click"; content: string })
+  | (RenderBlockFields & { type: "html-preview"; content: string })
+  | (RenderBlockFields & {
+      type: "role-divider";
+      role: string;
+      is_end: boolean;
+    })
+  | (RenderBlockFields & { type: "style"; content: string })
+  | (RenderBlockFields & {
+      type: "tool-call-summary";
+      items: ToolCallSummaryItem[];
+      raw_content: string;
+    });
 
 /**
  * Attachment 接口定义，严格对齐 Rust 端的 AttachmentSyncDTO / Attachment (仅保留核心字段)
@@ -152,7 +193,7 @@ export interface AttachmentRegisterProgressDto {
 export interface ChatMessage {
   id: string;
   role: string;
-  name?: string;
+  name?: string | null;
   content?: string; // 原文，现在变为按需懒加载的可选字段
   blocks?: ContentBlock[]; // 预编译的 AST 数据块，前端直接渲染
   shell?: MessageShell; // 预计算的外壳属性
@@ -166,10 +207,11 @@ export interface ChatMessage {
   finishReason?: string;
   attachments?: Attachment[];
   topicId?: string;
+  content_hash?: string;
 
   // 以下为纯前端运行时 UI 状态 (Ephemeral)，绝不进行持久化
   tailContent?: string;      // Aurora: 尾随区 Markdown (高频变动)
-  tailBlock?: ContentBlock;
+  tailBlock?: StreamBlock;
   tailFrame?: TailFrame;
   tailSnapshot?: MarkdownNode[];
   isReconnecting?: boolean;  // 🆕 流接续重连中状态
@@ -199,15 +241,14 @@ export interface TailFrame {
  * 流式增量块定义，由 Rust 流式块解析器推送
  * 与 ContentBlock 类似但精简，用于流式期间的增量渲染
  */
-export interface StreamBlock {
-  type: "markdown" | "thought" | "tool-use" | "tool-result" | "diary" | "diary-update" | "html-preview" | "role-divider" | "style" | "button-click" | "tool-call-summary";
+interface StreamBlockFields {
   content?: string;
   nodes?: MarkdownNode[];
   theme?: string;
   is_complete?: boolean;
   tool_name?: string;
   status?: string;
-  details?: Array<{ key: string; value: string }>;
+  details?: ToolResultDetail[];
   footer?: string;
   maid?: string;
   valet?: string;
@@ -223,8 +264,54 @@ export interface StreamBlock {
   highlighted_content?: string;
   items?: ToolCallSummaryItem[];
   raw_content?: string;
-  hash?: string;
+  hash: string;
 }
+
+export type StreamBlock =
+  | (StreamBlockFields & { type: "markdown"; content: string })
+  | (StreamBlockFields & {
+      type: "thought";
+      theme: string;
+      content: string;
+      is_complete: boolean;
+    })
+  | (StreamBlockFields & {
+      type: "tool-use";
+      tool_name: string;
+      content: string;
+    })
+  | (StreamBlockFields & {
+      type: "tool-result";
+      tool_name: string;
+      status: string;
+      details: ToolResultDetail[];
+      footer: string;
+    })
+  | (StreamBlockFields & {
+      type: "diary";
+      maid: string;
+      date: string;
+      content: string;
+    })
+  | (StreamBlockFields & {
+      type: "diary-update";
+      maid: string;
+      target: string;
+      replace: string;
+    })
+  | (StreamBlockFields & { type: "html-preview"; content: string })
+  | (StreamBlockFields & {
+      type: "role-divider";
+      role: string;
+      is_end: boolean;
+    })
+  | (StreamBlockFields & { type: "style"; content: string })
+  | (StreamBlockFields & { type: "button-click"; content: string })
+  | (StreamBlockFields & {
+      type: "tool-call-summary";
+      items: ToolCallSummaryItem[];
+      raw_content: string;
+    });
 
 /**
  * Aurora 语义沉淀更新，由 Rust 流式管道推送
@@ -282,10 +369,11 @@ export type RecoveryResultDto =
 
 export type GroupChatResultDto =
   | { status: "completed" }
+  | { status: "no_ai_response"; reason: "invite_only" | "no_speakers" }
   | {
       status: "no_ai_response";
-      reason: "invite_only" | "mode_not_implemented" | "no_speakers";
-      mode?: string;
+      reason: "mode_not_implemented";
+      mode: string;
     };
 
 export interface RegenerateTopicResultDto {

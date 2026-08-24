@@ -12,7 +12,7 @@ import {
 } from "../../../features/settings/useConfigBackup";
 import type { AppSettings } from "../../../core/stores/settings";
 
-function makeSettings(overrides: Partial<AppSettings> = {}): AppSettings {
+function makeSettings(): AppSettings {
   return {
     userName: "测试用户",
     vcpServerUrl: "https://vcp.example.com",
@@ -33,7 +33,10 @@ function makeSettings(overrides: Partial<AppSettings> = {}): AppSettings {
     syncLogLevel: "INFO",
     agentOrder: ["agent-1"],
     groupOrder: [],
-    ...overrides,
+    currentThemeMode: null,
+    syncPrerenderEnabled: false,
+    enableAssistant: false,
+    assistantAgentId: "",
   };
 }
 
@@ -58,9 +61,12 @@ describe("useConfigBackup 白名单提取", () => {
   });
 
   it("distributedEnabled 非布尔时归一为 false，缺失字符串字段归一为空串", () => {
-    const picked = pickBackupSettings(
-      makeSettings({ distributedEnabled: "yes" as any, adminPassword: undefined }),
-    );
+    const malformed = {
+      ...makeSettings(),
+      distributedEnabled: "yes",
+      adminPassword: undefined,
+    } as unknown as AppSettings;
+    const picked = pickBackupSettings(malformed);
     expect(picked.distributedEnabled).toBe(false);
     expect(picked.adminPassword).toBe("");
   });

@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
 export interface EmoticonItem {
+  id: number | null;
   url: string;
   category: string;
   filename: string;

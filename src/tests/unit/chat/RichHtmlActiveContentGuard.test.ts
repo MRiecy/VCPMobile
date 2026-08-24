@@ -195,6 +195,7 @@ describe('trusted-circle rich HTML active-content guard', () => {
         key: 'result',
         value: `## Result\n\n<table><tr><td onclick="this.classList.toggle('selected')">kept</td></tr></table><img src="x" onerror="${HOST_HANDLER}"><script>${HOST_HANDLER}</script>`,
       }],
+      footer: '',
     };
     const wrapper = mount(ToolBlock, {
       props: {

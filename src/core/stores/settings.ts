@@ -12,22 +12,22 @@ export interface AppSettings {
   syncServerUrl: string;
   syncHttpUrl: string;
   syncToken: string;
-  adminUsername?: string;
-  adminPassword?: string;
-  fileKey?: string;
+  adminUsername: string;
+  adminPassword: string;
+  fileKey: string;
   topicSummaryModel: string;
   syncLogLevel: string;
   agentOrder: string[];
   groupOrder: string[];
-  currentThemeMode?: string;
-  syncPrerenderEnabled?: boolean;
+  currentThemeMode: string | null;
+  syncPrerenderEnabled: boolean;
   // [SUSPENDED BETA] 浮动助手（划词悬浮球）功能当前已暂停使用，保留字段供后续重启
-  enableAssistant?: boolean;
-  assistantAgentId?: string;
-  distributedEnabled?: boolean;
-  distributedWsUrl?: string;
-  distributedVcpKey?: string;
-  distributedDeviceName?: string;
+  enableAssistant: boolean;
+  assistantAgentId: string;
+  distributedEnabled: boolean;
+  distributedWsUrl: string;
+  distributedVcpKey: string;
+  distributedDeviceName: string;
   [key: string]: unknown;
 }
 
@@ -46,8 +46,8 @@ export function diffSettingsPatch(
 
 interface SettingsRecoveryStatus {
   recoveredCorrupt: boolean;
-  backupKey?: string | null;
-  message?: string | null;
+  backupKey: string | null;
+  message: string | null;
 }
 
 export const useSettingsStore = defineStore("settings", () => {

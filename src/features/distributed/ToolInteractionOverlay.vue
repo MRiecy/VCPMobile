@@ -9,7 +9,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 interface ToolUiRequest {
   tool: string;
   id: string;
-  args?: Record<string, any>;
+  args?: Record<string, unknown>;
 }
 
 const activeRequest = ref<ToolUiRequest | null>(null);
@@ -24,50 +24,6 @@ onMounted(async () => {
 
 onUnmounted(() => {
   unlisten?.();
-});
-
-// Notification handler — listens for distributed-notification events
-let unlistenNotification: UnlistenFn | null = null;
-
-onMounted(async () => {
-  unlistenNotification = await listen<{ title: string; body: string }>(
-    "distributed-notification",
-    (event) => {
-      // Use browser Notification API or fallback
-      if ("Notification" in window && Notification.permission === "granted") {
-        new Notification(event.payload.title, { body: event.payload.body });
-      } else {
-        console.log(
-          `[Distributed Notification] ${event.payload.title}: ${event.payload.body}`,
-        );
-      }
-    },
-  );
-});
-
-onUnmounted(() => {
-  unlistenNotification?.();
-});
-
-// Clipboard write handler
-let unlistenClipboard: UnlistenFn | null = null;
-
-onMounted(async () => {
-  unlistenClipboard = await listen<{ content: string }>(
-    "distributed-clipboard-write",
-    async (event) => {
-      try {
-        await navigator.clipboard.writeText(event.payload.content);
-        console.log("[Distributed Clipboard] Content written.");
-      } catch (e) {
-        console.error("[Distributed Clipboard] Write failed:", e);
-      }
-    },
-  );
-});
-
-onUnmounted(() => {
-  unlistenClipboard?.();
 });
 </script>
 

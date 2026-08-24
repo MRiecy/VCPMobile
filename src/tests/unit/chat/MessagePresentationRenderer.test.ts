@@ -35,10 +35,19 @@ describe('MessageRenderer presentation shell', () => {
           ],
         },
         { type: 'tool-use', content: '{"query":"fixture"}', tool_name: 'Search' },
-        { type: 'thought', content: 'reasoning fixture' },
+        {
+          type: 'thought',
+          theme: 'default',
+          content: 'reasoning fixture',
+          is_complete: true,
+        },
         { type: 'html-preview', content: '<main>preview fixture</main>' },
-        { type: 'tool-call-summary', items: [{ tool_name: 'Search', status: 'success' }] },
-        { type: 'diary', content: 'diary fixture' },
+        {
+          type: 'tool-call-summary',
+          items: [{ tool_name: 'Search', status: 'success' }],
+          raw_content: 'Search: success',
+        },
+        { type: 'diary', maid: 'Fixture Agent', date: '', content: 'diary fixture' },
       ],
       attachments: [{
         id: 'attachment-fixture',

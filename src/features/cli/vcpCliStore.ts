@@ -157,12 +157,21 @@ export interface VcpCliContentPart {
   text: string;
 }
 
+export interface VcpCliRuntimeInfo {
+  platform: string;
+  shell?: string;
+  distribution?: string;
+  libc?: string;
+  source: "vcp_plugin";
+}
+
 export interface VcpCliResultBody {
   content: VcpCliContentPart[];
   job?: VcpCliJobResult | null;
   jobs?: VcpCliJobSummary[] | null;
   skill?: VcpCliSkillResult | null;
   skills?: VcpCliSkillSummary[] | null;
+  runtime?: VcpCliRuntimeInfo;
 }
 
 export type VcpCliResultEnvelope =

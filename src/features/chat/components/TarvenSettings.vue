@@ -152,7 +152,7 @@ const handleSave = async () => {
   const ruleData: TarvenRule = {
     id: id || `rule_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
     name,
-    ruleType: ruleType as any,
+    ruleType,
     content,
     isEnabled: isEnabled !== false,
     scope: scope || 'global',

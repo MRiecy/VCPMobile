@@ -16,10 +16,21 @@ const baseSettings = (): AppSettings => ({
   syncServerUrl: "",
   syncHttpUrl: "",
   syncToken: "",
+  adminUsername: "",
+  adminPassword: "",
+  fileKey: "",
   topicSummaryModel: "model-a",
   syncLogLevel: "INFO",
   agentOrder: ["agent-a"],
   groupOrder: [],
+  currentThemeMode: null,
+  syncPrerenderEnabled: false,
+  enableAssistant: false,
+  assistantAgentId: "",
+  distributedEnabled: false,
+  distributedWsUrl: "",
+  distributedVcpKey: "",
+  distributedDeviceName: "",
 });
 
 describe("settings patch ownership", () => {

@@ -31,7 +31,9 @@ export interface NativeFileStartDetail {
   mime: string;
 }
 
-export interface NativeFileProgressDetail extends NativeFileStartDetail {
+export interface NativeFileProgressDetail {
+  name: string;
+  mime: string;
   loaded: number;
   total: number;
   progress: number;
