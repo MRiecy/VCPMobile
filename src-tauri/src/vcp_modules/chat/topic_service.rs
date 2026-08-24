@@ -819,27 +819,9 @@ pub async fn regenerate_topic_response(
     let user_msg: String = row.get("content");
     let timestamp: i64 = row.get("timestamp");
 
-    // 2. 按 timestamp + msg_id 的稳定顺序截断该用户消息之后的历史。
-    let deletion = crate::vcp_modules::message_service::truncate_history_after_message(
-        &db_state.pool,
-        &key,
-        &target_user_msg_id,
-    )
-    .await?;
-    for msg_id in &deletion.active_ids {
-        if let Err(error) = active_requests.cancel(&MessageKey::new(key.clone(), msg_id)) {
-            log::warn!(
-                "Failed to cancel regenerated generation {}: {}",
-                msg_id,
-                error
-            );
-        }
-    }
-    crate::vcp_modules::chat_manager::notify_message_deletions(&app_handle, &key, &deletion);
-
-    // 3. 构造逻辑上的 ChatMessage 对象 (用于传给内部生成函数)
+    // 2. 构造逻辑上的 ChatMessage 对象 (用于传给内部生成函数)
     let chat_msg = crate::vcp_modules::chat_manager::ChatMessage {
-        id: target_user_msg_id,
+        id: target_user_msg_id.clone(),
         role: row.get("role"),
         name: row.get("name"),
         content: user_msg,
@@ -857,11 +839,76 @@ pub async fn regenerate_topic_response(
         content_hash: None,
     };
 
-    // 4. 获取配置并发起生成
+    // 3. 在写入任何墓碑前完成可确定的生成前检查。检查失败时前端重新加载
+    // 历史即可恢复乐观隐藏的旧消息，无需设计墓碑撤销机制。
     let settings =
         crate::vcp_modules::settings_manager::read_settings(app_handle.clone(), settings_state)
             .await?;
 
+    match owner_type.as_str() {
+        "agent" => {
+            crate::vcp_modules::agent_service::read_agent_config_internal(
+                &app_handle,
+                &agent_state,
+                &owner_id,
+                Some(false),
+            )
+            .await?;
+        }
+        "group" => {
+            let group_config = crate::vcp_modules::group_service::read_group_config(
+                app_handle.clone(),
+                group_state.clone(),
+                owner_id.clone(),
+            )
+            .await?;
+            match group_config.mode.as_str() {
+                "sequential" | "naturerandom" => {}
+                "invite_only" => {
+                    return Err("邀请发言群组不能使用自动重新生成，请直接邀请成员发言".to_string())
+                }
+                mode => return Err(format!("群组发言模式 {mode} 暂不支持重新生成")),
+            }
+
+            let has_live_member: bool = sqlx::query_scalar(
+                "SELECT EXISTS(
+                    SELECT 1 FROM group_members gm
+                    JOIN agents a
+                      ON a.owner_type = 'agent' AND a.agent_id = gm.agent_id
+                     AND a.deleted_at IS NULL
+                    WHERE gm.group_id = ?
+                 )",
+            )
+            .bind(&owner_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+            if !has_live_member {
+                return Err("群组没有可发言的有效成员".to_string());
+            }
+        }
+        other => return Err(format!("Unsupported conversation owner type: {other}")),
+    }
+
+    // 4. 生成前检查通过后，才按稳定顺序截断旧回复。
+    let deletion = crate::vcp_modules::message_service::truncate_history_after_message(
+        &db_state.pool,
+        &key,
+        &target_user_msg_id,
+    )
+    .await?;
+    for msg_id in &deletion.active_ids {
+        if let Err(error) = active_requests.cancel(&MessageKey::new(key.clone(), msg_id)) {
+            log::warn!(
+                "Failed to cancel regenerated generation {}: {}",
+                msg_id,
+                error
+            );
+        }
+    }
+    crate::vcp_modules::chat_manager::notify_message_deletions(&app_handle, &key, &deletion);
+
+    // 5. 发起生成。网络失败由既有 Finalizer 落成一条带错误原因的终态消息。
     let generation_result = if owner_type == "agent" {
         crate::vcp_modules::agent_chat_application_service::internal_process_agent_chat_message(
             app_handle,
@@ -899,6 +946,11 @@ pub async fn regenerate_topic_response(
         )
         .await?
     };
+
+    if generation_result["status"].as_str() == Some("no_ai_response") {
+        let reason = generation_result["reason"].as_str().unwrap_or("unknown");
+        return Err(format!("重新生成未能启动回复: {reason}"));
+    }
 
     let msg_count: i32 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM messages

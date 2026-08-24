@@ -116,8 +116,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
     async (newStatus, oldStatus) => {
       if (newStatus === 'connected' && oldStatus !== 'connected' && state.value === 'READY') {
         // 仅在连接成功时重新拉取数据快照，但不触发耗时的 Manifest 全量同步
-        await assistantStore.fetchAgents();
-        await assistantStore.fetchGroups();
+        await assistantStore.fetchAgentsAndGroups();
       }
     }
   );

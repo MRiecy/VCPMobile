@@ -226,6 +226,12 @@ const handleShareAgentSelected = async (agent: any) => {
     );
   } catch (err) {
     console.error("[App] Failed to start share session:", err);
+    notificationStore.addNotification({
+      type: "error",
+      title: "打开分享会话失败",
+      message: err instanceof Error ? err.message : String(err),
+      toastOnly: false,
+    });
   }
 
   // Clear share state
@@ -270,18 +276,18 @@ const processNotificationClick = async (detail: any) => {
     return;
   }
 
-  // 1. 关闭所有弹出的 Modals
-  const { closeTopModal, modalStackLength } = useModalHistory();
-  while (modalStackLength() > 0) {
-    const before = modalStackLength();
-    closeTopModal();
-    // 不可 dismiss 的长任务页持有导航权，通知点击不得强制卸载。
-    if (modalStackLength() >= before) break;
-  }
-  
-  // 2. 关闭侧边栏
-  layoutStore.setLeftDrawer(false);
-  layoutStore.setRightDrawer(false);
+  const closeNavigationSurfaces = () => {
+    const { closeTopModal, modalStackLength } = useModalHistory();
+    while (modalStackLength() > 0) {
+      const before = modalStackLength();
+      closeTopModal();
+      // 不可 dismiss 的长任务页持有导航权，通知点击不得强制卸载。
+      if (modalStackLength() >= before) break;
+    }
+    layoutStore.setLeftDrawer(false);
+    layoutStore.setRightDrawer(false);
+    return modalStackLength() === 0;
+  };
 
   if (isCliJob) {
     const target: VcpCliNotificationTarget = {
@@ -292,6 +298,7 @@ const processNotificationClick = async (detail: any) => {
     if (!target.jobId || !target.attemptId || target.runtimeGeneration <= 0) {
       return;
     }
+    if (!closeNavigationSurfaces()) return;
     overlayStore.openCliManifest();
     await nextTick();
     const cliStore = useVcpCliStore();
@@ -330,8 +337,40 @@ const processNotificationClick = async (detail: any) => {
     return;
   }
 
-  // 3. 切换话题
-  sessionStore.selectTopicById(detail.ownerId, detail.ownerType, detail.topicId);
+  // 聊天通知先只读验证目标；过期通知不得关闭当前界面或清空当前 Topic。
+  try {
+    const topics = await invoke<Array<{ id?: string; topic_id?: string }>>("get_topics", {
+      ownerId: detail.ownerId,
+      ownerType: detail.ownerType,
+    });
+    const targetExists = topics.some(
+      (topic) => (topic.id ?? topic.topic_id) === detail.topicId,
+    );
+    if (!targetExists) {
+      notificationStore.addNotification({
+        type: "warning",
+        title: "通知已过期",
+        message: "目标话题已不存在，当前会话未受影响",
+        toastOnly: true,
+      });
+      return;
+    }
+
+    if (!closeNavigationSurfaces()) return;
+    await sessionStore.selectTopicById(
+      detail.ownerId,
+      detail.ownerType,
+      detail.topicId,
+    );
+  } catch (error) {
+    console.error("[App] Failed to open notification target:", error);
+    notificationStore.addNotification({
+      type: "error",
+      title: "无法打开通知",
+      message: error instanceof Error ? error.message : String(error),
+      toastOnly: true,
+    });
+  }
 };
 
 // --- Global Swipe Logic for Sidebar ---

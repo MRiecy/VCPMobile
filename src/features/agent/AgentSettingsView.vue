@@ -208,6 +208,8 @@ const handleDelete = async () => {
       ) {
         sessionStore.clearConversation();
       }
+      // 删除成功后关闭页面不再把当前草稿自动保存到墓碑实体。
+      originalConfig.value = JSON.parse(JSON.stringify(agentConfig.value));
       emit("close");
     } catch (err) {
       console.error("Failed to delete agent:", err);

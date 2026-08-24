@@ -441,6 +441,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     ownerType: ConversationOwnerType,
     topicId: string,
     messageId: string,
+    retainMessageUntilTerminal = false,
   ) => {
     const key = conversationMapKey(ownerId, ownerType, topicId);
     const messageKey = streamMessageMapKey(
@@ -459,6 +460,10 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         delete sessionActiveStreams.value[key];
       }
     }
+    // 手动停止只撤销活跃 UI，原消息对象必须等权威 end/error 复用并收口。
+    // 若终态永久缺失，既有流消息池上限会回收这个非活跃对象。
+    if (retainMessageUntilTerminal) return;
+
     // 同时从全局池中移除 (延迟移除，确保 finalizeStream 能拿到对象)
     const cleanupTimer = setTimeout(() => {
       cleanupTimers.delete(cleanupTimer);
@@ -770,7 +775,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         streamingMessageKey.value = null;
       }
 
-      removeSessionStream(ownerId, ownerType, topicId, messageId);
+      removeSessionStream(ownerId, ownerType, topicId, messageId, true);
 
       if (onUpdateMessage) {
         await onUpdateMessage(messageId);

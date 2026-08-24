@@ -380,6 +380,38 @@ impl HashAggregator {
         Ok(())
     }
 
+    /// Group 成员等 DTO 字段在业务事务中变化后，按统一 DTO 合同重算配置哈希与时钟。
+    pub async fn recompute_group_config_hash(
+        tx: &mut Transaction<'_, Sqlite>,
+        group_id: &str,
+        updated_at: i64,
+    ) -> Result<(), String> {
+        let dto = HashInitializer::load_group_dto(tx, group_id).await?;
+        let config_hash = Self::compute_group_config_hash(&dto);
+        let updated = sqlx::query(
+            "UPDATE groups SET
+                updated_at = CASE
+                    WHEN config_hash IS NOT ? THEN MAX(updated_at + 1, ?)
+                    ELSE updated_at
+                END,
+                config_hash = ?
+             WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL",
+        )
+        .bind(&config_hash)
+        .bind(updated_at)
+        .bind(&config_hash)
+        .bind(group_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        if updated.rows_affected() != 1 {
+            return Err(format!(
+                "Group {group_id} disappeared during config hash update"
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn bubble_from_topic(
         tx: &mut Transaction<'_, Sqlite>,
         key: &TopicKey,

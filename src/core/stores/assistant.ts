@@ -175,6 +175,10 @@ export const useAssistantStore = defineStore("assistant", () => {
     try {
       await invoke("delete_agent", { agentId: id });
       agents.value = agents.value.filter((a) => a.id !== id);
+      groups.value = groups.value.map((group) => ({
+        ...group,
+        members: group.members.filter((memberId) => memberId !== id),
+      }));
       notificationStore.addNotification({
         type: "success",
         title: "Agent 删除成功",

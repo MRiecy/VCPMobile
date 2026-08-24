@@ -477,6 +477,18 @@ pub async fn delete_agent_internal<R: Runtime>(
         Some(None) => {}
     }
 
+    let affected_group_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT gm.group_id
+         FROM group_members gm
+         JOIN groups g ON g.owner_type = 'group' AND g.group_id = gm.group_id
+         WHERE gm.agent_id = ? AND g.deleted_at IS NULL
+         ORDER BY gm.group_id",
+    )
+    .bind(agent_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
     let agent_delete = sqlx::query(
         "UPDATE agents SET deleted_at = ?
              WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL",
@@ -553,6 +565,19 @@ pub async fn delete_agent_internal<R: Runtime>(
         .await
         .map_err(|e| e.to_string())?;
 
+    // Agent 实体删除会改变所有引用它的 Group DTO；保留历史发言与 memberTags，
+    // 只移除活跃成员关系并推进对应 Group 的配置哈希/时钟。
+    sqlx::query("DELETE FROM group_members WHERE agent_id = ?")
+        .bind(agent_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    let group_config_updated_at = now.max(crate::vcp_modules::infra::utils::now_millis());
+    for group_id in &affected_group_ids {
+        HashAggregator::recompute_group_config_hash(&mut tx, group_id, group_config_updated_at)
+            .await?;
+    }
+
     tx.commit().await.map_err(|e| e.to_string())?;
 
     if let Some(active_requests) =
@@ -571,6 +596,11 @@ pub async fn delete_agent_internal<R: Runtime>(
     }
 
     state.caches.remove(agent_id);
+    if !affected_group_ids.is_empty() {
+        if let Some(group_state) = app_handle.try_state::<GroupManagerState>() {
+            group_state.invalidate_cache();
+        }
+    }
     Ok(now)
 }
 
