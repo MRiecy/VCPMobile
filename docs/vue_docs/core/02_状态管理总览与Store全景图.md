@@ -175,7 +175,7 @@ const msgToUse = activeMsg || chunk.message;
 
 > 文件位置：`src/core/stores/attachmentStore.ts`
 
-`useAttachmentStore` 管理消息发送前的附件暂存、上传与 JIT 文档预处理。
+`useAttachmentStore` 管理消息发送前的附件暂存、上传与本地资源解析。
 
 **核心状态**（1 个）：
 
@@ -186,8 +186,6 @@ const msgToUse = activeMsg || chunk.message;
 **双轨上传策略**：
 - **Android 端**：通过 `plugin:vcp-mobile|pick_file` 调用原生 Kotlin File Picker，配合 `vcp-mobile-file-*` 自定义事件完成沙盒拷贝与哈希计算
 - **非 Android 端**：标准 HTML `<input type="file">`，小文件（< 2MB）走 IPC `store_file`，大文件走高速 TCP 链路 `prepare_vcp_upload` + XHR
-
-**JIT 文档预处理**：`preProcessDocuments` 调用 `useDocumentProcessor` 组合式函数，对 `txt`/`md`/`csv`/`json`/`docx`/`pdf` 附件提取文本内容，在发送前完成。
 
 #### 会话与消息类 Store 协作流程
 
@@ -687,7 +685,7 @@ sendMessage(content)
         │
         │    ┌──────────────────────────────────┐
         │    │  topicStore / attachmentStore    │
-        │    │  (msgCount / preProcessDocuments)│
+        │    │  (msgCount / stagedAttachments) │
         │    └──────────────────────────────────┘
         │
         └──►  settings (vcpUrl / vcpApiKey)

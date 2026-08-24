@@ -266,7 +266,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
               name: finalData.name,
               size: finalData.size,
               hash: finalData.hash,
-              thumbnailPath: finalData.thumbnail_path,
+              thumbnailPath: finalData.thumbnailPath,
               status: "done",
               progress: undefined,
             };

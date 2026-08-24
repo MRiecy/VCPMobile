@@ -65,7 +65,60 @@ async fn load_attachment_gc_snapshot(
     })
 }
 
-async fn sweep_unindexed_files(
+fn is_hash_uuid_temp(value: &str) -> bool {
+    let Some(hash) = value.get(..64) else {
+        return false;
+    };
+    is_valid_cas_hash(hash)
+        && value.as_bytes().get(64) == Some(&b'-')
+        && value
+            .get(65..)
+            .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+}
+
+fn is_managed_attachment_temp(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".tmp") else {
+        return false;
+    };
+    if let Some(value) = stem.strip_prefix(".ingest-") {
+        return uuid::Uuid::parse_str(value).is_ok() || is_hash_uuid_temp(value);
+    }
+    stem.strip_prefix(".thumb-").is_some_and(is_hash_uuid_temp)
+}
+
+async fn sweep_attachment_files(
+    root: &std::path::Path,
+    indexed_paths: &HashSet<std::path::PathBuf>,
+) -> usize {
+    let Ok(mut entries) = tokio::fs::read_dir(root).await else {
+        return 0;
+    };
+    let mut removed = 0;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let Ok(metadata) = tokio::fs::symlink_metadata(&path).await else {
+            continue;
+        };
+        if !metadata.file_type().is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let is_managed_temp = is_managed_attachment_temp(name);
+        let is_unindexed_cas = std::path::Path::new(name)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .is_some_and(is_valid_cas_hash)
+            && !indexed_paths.contains(&path);
+        if (is_managed_temp || is_unindexed_cas) && tokio::fs::remove_file(&path).await.is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+async fn sweep_unindexed_derived_files(
     root: &std::path::Path,
     indexed_hashes: &HashSet<String>,
     hash_from_name: fn(&str) -> Option<&str>,
@@ -85,6 +138,12 @@ async fn sweep_unindexed_files(
         let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
             continue;
         };
+        if is_managed_attachment_temp(name) {
+            if tokio::fs::remove_file(&path).await.is_ok() {
+                removed += 1;
+            }
+            continue;
+        }
         let Some(hash) = hash_from_name(name).filter(|hash| is_valid_cas_hash(hash)) else {
             continue;
         };
@@ -130,29 +189,43 @@ pub async fn reclaim_orphaned_attachments<R: tauri::Runtime>(
         report.reclaimed += 1;
     }
 
-    let indexed_hashes: HashSet<String> =
-        sqlx::query_as::<_, (String,)>("SELECT hash FROM attachments")
+    let indexed_attachments =
+        sqlx::query_as::<_, (String, String)>("SELECT hash, internal_path FROM attachments")
             .fetch_all(pool)
             .await
-            .map_err(|error| format!("读取附件 GC 最终索引失败: {error}"))?
-            .into_iter()
-            .map(|(hash,)| hash)
-            .collect();
+            .map_err(|error| format!("读取附件 GC 最终索引失败: {error}"))?;
+    let indexed_hashes: HashSet<String> = indexed_attachments
+        .iter()
+        .map(|(hash, _)| hash.clone())
+        .collect();
+    let indexed_paths: HashSet<std::path::PathBuf> = indexed_attachments
+        .iter()
+        .filter_map(|(hash, internal_path)| {
+            let clean_path = internal_path
+                .strip_prefix("file://")
+                .unwrap_or(internal_path);
+            let path = std::path::PathBuf::from(clean_path);
+            let matches_hash = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value == hash && is_valid_cas_hash(value));
+            matches_hash.then_some(path)
+        })
+        .collect();
     let attachments_root = get_attachments_root_dir(app_handle)?;
     let thumbnails_root = get_thumbnails_root_dir(app_handle)?;
     let multimodal_root = get_multimodal_cache_dir(app_handle)?;
-    report.ghost_files += sweep_unindexed_files(&attachments_root, &indexed_hashes, |name| {
-        std::path::Path::new(name).file_stem()?.to_str()
-    })
-    .await;
-    report.ghost_files += sweep_unindexed_files(&thumbnails_root, &indexed_hashes, |name| {
-        name.strip_suffix("_thumb.webp")
-    })
-    .await;
-    report.ghost_files += sweep_unindexed_files(&multimodal_root, &indexed_hashes, |name| {
-        name.strip_suffix(".json")
-    })
-    .await;
+    report.ghost_files += sweep_attachment_files(&attachments_root, &indexed_paths).await;
+    report.ghost_files +=
+        sweep_unindexed_derived_files(&thumbnails_root, &indexed_hashes, |name| {
+            name.strip_suffix("_thumb.webp")
+        })
+        .await;
+    report.ghost_files +=
+        sweep_unindexed_derived_files(&multimodal_root, &indexed_hashes, |name| {
+            name.strip_suffix(".json")
+        })
+        .await;
 
     Ok(report)
 }
