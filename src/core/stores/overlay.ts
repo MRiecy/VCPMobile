@@ -29,15 +29,6 @@ interface DiaryOpenTarget {
   file: string;
 }
 
-/** 全局搜索打开时的初始过滤条件（如从话题菜单"搜索此话题"进入） */
-export interface GlobalSearchOpenTarget {
-  topicId?: string;
-  topicTitle?: string;
-  ownerId?: string;
-  ownerType?: 'agent' | 'group';
-  ownerLabel?: string;
-}
-
 interface PageStackItem {
   type: OverlayPageType;
   id?: string;
@@ -52,7 +43,6 @@ export const useOverlayStore = defineStore('overlay', () => {
   const contextMenuConfig = shallowRef<ContextMenuConfig | null>(null);
   const editorConfig = ref<EditorConfig | null>(null);
   const diaryOpenTarget = ref<DiaryOpenTarget | null>(null);
-  const globalSearchOpenTarget = ref<GlobalSearchOpenTarget | null>(null);
 
   // --- Page Stack (Virtual Navigation Stack) ---
   const pageStack = ref<PageStackItem[]>([]);
@@ -300,19 +290,13 @@ export const useOverlayStore = defineStore('overlay', () => {
     popPage();
   };
 
-  const openGlobalSearch = (target?: GlobalSearchOpenTarget) => {
-    if (target) globalSearchOpenTarget.value = { ...target };
+  const openGlobalSearch = () => {
     if (isGlobalSearchOpen.value) return;
     pushPage('globalSearch');
   };
 
-  const clearGlobalSearchOpenTarget = () => {
-    globalSearchOpenTarget.value = null;
-  };
-
   const closeGlobalSearch = () => {
     if (pageStackTop.value?.type !== 'globalSearch') return;
-    globalSearchOpenTarget.value = null;
     popPage();
   };
 
@@ -416,7 +400,6 @@ export const useOverlayStore = defineStore('overlay', () => {
     isMailOpen,
     isGlobalSearchOpen,
     diaryOpenTarget,
-    globalSearchOpenTarget,
     // Legacy open/close (now backed by page stack)
     openSettings,
     closeSettings,
@@ -451,7 +434,6 @@ export const useOverlayStore = defineStore('overlay', () => {
     closeMail,
     openGlobalSearch,
     closeGlobalSearch,
-    clearGlobalSearchOpenTarget,
     // Modals
     promptConfig,
     confirmConfig,

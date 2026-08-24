@@ -5,13 +5,12 @@
  * 分层定位：SlidePage 页面栈成员（overlay 类型 'globalSearch'），
  * 检索层走本地 SQLite FTS5（trigram），离线可用。
  *
- * 首开时检测 FTS 索引覆盖率（决策 G），不足则触发后台分批回填并展示进度。
  * 结果项点击 → 关闭搜索页 → 验证锚点 → 成功后切换会话并定位。
  */
 import { computed, nextTick, ref, watch } from 'vue';
 import { ArrowLeft, ArrowUpDown, ChevronDown, Clock, Search, SlidersHorizontal, X } from 'lucide-vue-next';
 import SlidePage from '../../components/ui/SlidePage.vue';
-import { useOverlayStore, type GlobalSearchOpenTarget } from '../../core/stores/overlay';
+import { useOverlayStore } from '../../core/stores/overlay';
 import { useChatSessionStore } from '../../core/stores/chatSessionStore';
 import { useChatHistoryStore } from '../../core/stores/chatHistoryStore';
 import { useAssistantStore } from '../../core/stores/assistant';
@@ -31,12 +30,10 @@ import {
 const props = defineProps<{
   isOpen: boolean;
   zIndex: number;
-  openTarget?: GlobalSearchOpenTarget | null;
 }>();
 
 const emit = defineEmits<{
   (e: 'close'): void;
-  (e: 'target-consumed'): void;
 }>();
 
 const store = useGlobalSearchStore();
@@ -48,6 +45,7 @@ const topicStore = useTopicStore();
 const notificationStore = useNotificationStore();
 
 const searchInput = ref<HTMLInputElement | null>(null);
+const filterOpen = ref(false);
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 // ---------- 生命周期 ----------
@@ -55,14 +53,14 @@ watch(
   () => props.isOpen,
   async (open) => {
     if (!open) {
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+        debounceTimer = null;
+      }
+      filterOpen.value = false;
       store.reset();
       return;
     }
-    if (props.openTarget) {
-      store.applyOpenTarget(props.openTarget);
-      emit('target-consumed');
-    }
-    void store.ensureIndex();
     await nextTick();
     searchInput.value?.focus();
   },
@@ -74,6 +72,7 @@ watch(
 watch(
   () => store.query,
   () => {
+    if (!props.isOpen) return;
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => void store.search(), 275);
   },
@@ -89,15 +88,20 @@ watch(
     () => store.speakerAgentId,
     () => store.role,
     () => store.timeRange,
+    () => store.customStartDate,
+    () => store.customEndDate,
     () => store.sort,
   ],
-  () => void store.search(),
+  () => {
+    if (!props.isOpen) return;
+    void store.search();
+  },
 );
 
 // ---------- 过滤器交互 ----------
 const scopeLabel = computed(() => {
   if (store.scope === 'topic') return store.scopeTopicTitle || '当前话题';
-  if (store.scope === 'owner') return store.scopeOwnerLabel || '指定助手';
+  if (store.scope === 'owner') return store.scopeOwnerLabel || '指定 Agent / 群组';
   return '全部';
 });
 
@@ -138,7 +142,7 @@ const openOwnerPicker = () => {
     },
   }));
   if (actions.length === 0) return;
-  overlayStore.openContextMenu(actions, '选择助手 / 群组');
+  overlayStore.openContextMenu(actions, '选择 Agent / 群组');
 };
 
 const speakerLabel = computed(() => {
@@ -207,20 +211,27 @@ const rankIneffective = computed(
 );
 
 const roleFilters: RoleFilter[] = ['all', 'user', 'assistant', 'system'];
-const timeFilters: TimeFilter[] = ['all', 'today', 'week', 'month'];
+const timeFilters: TimeFilter[] = ['all', 'today', 'week', 'month', 'custom'];
 
 // ---------- 筛选面板（摘要条 + 展开分组） ----------
-const filterOpen = ref(false);
-
 const scopeSummary = computed(() =>
   store.scope === 'all' ? '全部范围' : scopeLabel.value,
 );
+const timeSummary = computed(() => {
+  if (store.timeRange !== 'custom') return TIME_LABELS[store.timeRange];
+  if (store.customStartDate && store.customEndDate) {
+    return `${store.customStartDate} 至 ${store.customEndDate}`;
+  }
+  if (store.customStartDate) return `${store.customStartDate} 起`;
+  if (store.customEndDate) return `截至 ${store.customEndDate}`;
+  return TIME_LABELS.custom;
+});
 const filterSummary = computed(
   () => [
     scopeSummary.value,
     ROLE_LABELS[store.role],
     ...(store.speakerAgentId ? [`发言者：${speakerLabel.value}`] : []),
-    TIME_LABELS[store.timeRange],
+    timeSummary.value,
   ].join(' · '),
 );
 const activeFilterCount = computed(
@@ -254,6 +265,11 @@ const ownerName = (item: FtsSearchResultItem): string => {
 
 const roleLabel = (role: string): string =>
   (ROLE_LABELS as Record<string, string>)[role] ?? role;
+
+const resultSpeakerName = (item: FtsSearchResultItem): string => {
+  if (item.ownerType !== 'group' || item.role !== 'assistant') return '';
+  return item.speakerName?.trim() ?? '';
+};
 
 const fmtTime = (ts: number): string => {
   const d = new Date(ts);
@@ -388,7 +404,7 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
               <button
                 type="button" class="gs-chip gs-chip-ellipsis" :class="{ active: store.scope === 'owner' }"
                 @click="openOwnerPicker"
-              >{{ store.scope === 'owner' ? scopeLabel : '指定助手' }}</button>
+              >{{ store.scope === 'owner' ? scopeLabel : '指定 Agent / 群组' }}</button>
             </div>
           </div>
 
@@ -420,30 +436,39 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
 
           <div class="gs-filter-group">
             <span class="gs-filter-label">时间</span>
-            <div class="gs-filter-row" role="group" aria-label="时间范围">
-              <button
-                v-for="t in timeFilters" :key="t"
-                type="button" class="gs-chip" :class="{ active: store.timeRange === t }"
-                @click="setTimeRange(t)"
-              >{{ TIME_LABELS[t] }}</button>
+            <div class="gs-filter-content">
+              <div class="gs-filter-row" role="group" aria-label="时间范围">
+                <button
+                  v-for="t in timeFilters" :key="t"
+                  type="button" class="gs-chip" :class="{ active: store.timeRange === t }"
+                  @click="setTimeRange(t)"
+                >{{ TIME_LABELS[t] }}</button>
+              </div>
+              <div v-if="store.timeRange === 'custom'" class="gs-date-range">
+                <label class="gs-date-field">
+                  <span>从</span>
+                  <input
+                    v-model="store.customStartDate"
+                    type="date"
+                    class="gs-date-input"
+                    :max="store.customEndDate || undefined"
+                    aria-label="开始日期"
+                  />
+                </label>
+                <label class="gs-date-field">
+                  <span>至</span>
+                  <input
+                    v-model="store.customEndDate"
+                    type="date"
+                    class="gs-date-input"
+                    :min="store.customStartDate || undefined"
+                    aria-label="结束日期"
+                  />
+                </label>
+              </div>
             </div>
           </div>
         </div>
-      </div>
-
-      <!-- 索引构建中提示条 -->
-      <div
-        v-if="store.indexStatus && !store.indexReady"
-        class="gs-index-banner"
-        role="status"
-      >
-        <template v-if="store.indexStatus.rebuilding">
-          正在构建搜索索引… {{ store.indexStatus.indexedMessages }} / {{ store.indexStatus.totalMessages }}
-          （{{ store.indexProgressPct }}%），当前结果可能不全
-        </template>
-        <template v-else>
-          搜索索引尚未完成（{{ store.indexStatus.indexedMessages }} / {{ store.indexStatus.totalMessages }}），结果可能不全
-        </template>
       </div>
 
       <!-- 结果主体 -->
@@ -478,6 +503,9 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
             <div class="gs-item-top">
               <span class="gs-item-topic">{{ item.topicTitle }}</span>
               <span v-if="ownerName(item)" class="gs-item-owner">{{ ownerName(item) }}</span>
+              <span v-if="resultSpeakerName(item)" class="gs-item-speaker">
+                {{ resultSpeakerName(item) }}
+              </span>
               <span class="gs-item-role">{{ roleLabel(item.role) }}</span>
               <time class="gs-item-time">{{ fmtTime(item.timestamp) }}</time>
             </div>
@@ -724,6 +752,39 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
   min-width: 0;
 }
 
+.gs-filter-content {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.gs-date-range {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+.gs-date-field {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--secondary-text);
+}
+
+.gs-date-input {
+  min-width: 124px;
+  padding: 4px 6px;
+  border: 1px solid rgba(128, 128, 128, 0.2);
+  border-radius: 4px;
+  background: var(--primary-bg);
+  color: var(--primary-text);
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+}
+
 .gs-chip {
   flex-shrink: 0;
   font-size: 12px;
@@ -750,17 +811,6 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
   max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.gs-index-banner {
-  margin: 0 12px 8px;
-  padding: 6px 10px;
-  font-size: 12px;
-  border-radius: 6px;
-  background: var(--secondary-bg);
-  color: var(--secondary-text);
-  border-left: 2px solid var(--accent-bg, #3b82f6);
-  flex-shrink: 0;
 }
 
 .gs-body {
@@ -836,6 +886,16 @@ const jumpToResult = async (item: FtsSearchResultItem) => {
 .gs-item-owner {
   font-size: 11px;
   color: var(--secondary-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex-shrink: 2;
+  min-width: 0;
+}
+
+.gs-item-speaker {
+  font-size: 11px;
+  color: var(--accent-bg, #3b82f6);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

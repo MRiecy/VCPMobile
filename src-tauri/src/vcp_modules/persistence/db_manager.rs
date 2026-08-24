@@ -621,6 +621,7 @@ pub struct FtsSearchResult {
     pub msg_id: String,
     pub topic_id: String,
     pub role: String,
+    pub speaker_name: Option<String>,
     pub timestamp: i64,
     pub topic_title: String,
     pub owner_id: String,
@@ -798,6 +799,7 @@ pub async fn search_messages_fts(
                 m.msg_id,
                 m.topic_id,
                 m.role,
+                m.name AS speaker_name,
                 m.timestamp,
                 t.title AS topic_title,
                 t.owner_id,
@@ -820,6 +822,7 @@ pub async fn search_messages_fts(
                 m.msg_id,
                 m.topic_id,
                 m.role,
+                m.name AS speaker_name,
                 m.timestamp,
                 t.title AS topic_title,
                 t.owner_id,
@@ -942,6 +945,7 @@ pub async fn search_messages_fts(
             msg_id: row.get("msg_id"),
             topic_id: row.get("topic_id"),
             role: row.get("role"),
+            speaker_name: row.get("speaker_name"),
             timestamp: row.get("timestamp"),
             topic_title: row.get("topic_title"),
             owner_id: row.get("owner_id"),
@@ -951,106 +955,6 @@ pub async fn search_messages_fts(
     }
 
     Ok(results)
-}
-
-#[derive(serde::Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct FtsIndexStatus {
-    pub total_messages: i64,
-    pub indexed_messages: i64,
-    pub rebuilding: bool,
-}
-
-static FTS_REBUILD_RUNNING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-async fn fts_index_status(pool: &Pool<Sqlite>) -> Result<FtsIndexStatus, String> {
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE deleted_at IS NULL")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| format!("统计消息总数失败: {}", e))?;
-    let indexed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| format!("统计索引条目失败: {}", e))?;
-    Ok(FtsIndexStatus {
-        total_messages: total,
-        indexed_messages: indexed,
-        rebuilding: FTS_REBUILD_RUNNING.load(std::sync::atomic::Ordering::SeqCst),
-    })
-}
-
-/// 查询 FTS 索引覆盖率状态（前端搜索页首开时调用，决定是否展示"索引构建中"）
-#[tauri::command]
-pub async fn get_fts_index_status(
-    db_state: tauri::State<'_, DbState>,
-) -> Result<FtsIndexStatus, String> {
-    fts_index_status(&db_state.pool).await
-}
-
-/// 回填 FTS 索引（决策 G：首次打开搜索页时由前端触发，不在启动路径执行）。
-/// 幂等断点续跑：NOT EXISTS 跳过已索引条目，任意时刻中断后重入安全。
-#[tauri::command]
-pub async fn rebuild_messages_fts(
-    app_handle: AppHandle,
-    db_state: tauri::State<'_, DbState>,
-) -> Result<FtsIndexStatus, String> {
-    use std::sync::atomic::Ordering;
-    // 并发护栏：同一时刻只允许一个回填任务，重入直接返回当前状态
-    if FTS_REBUILD_RUNNING.swap(true, Ordering::SeqCst) {
-        return fts_index_status(&db_state.pool).await;
-    }
-    let result = rebuild_messages_fts_inner(&app_handle, &db_state.pool).await;
-    FTS_REBUILD_RUNNING.store(false, Ordering::SeqCst);
-    result
-}
-
-async fn rebuild_messages_fts_inner(
-    app_handle: &AppHandle,
-    pool: &Pool<Sqlite>,
-) -> Result<FtsIndexStatus, String> {
-    const BATCH_SIZE: i64 = 500;
-    loop {
-        // 单事务内 SELECT+INSERT：WAL 快照一致；中断后已提交批次不回滚（断点续跑）
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| format!("回填事务开启失败: {}", e))?;
-        let inserted = sqlx::query(
-            "INSERT INTO messages_fts (msg_id, topic_id, content, owner_type, owner_id)
-             SELECT m.msg_id, m.topic_id, m.content, m.owner_type, m.owner_id FROM messages m
-             WHERE m.deleted_at IS NULL
-               AND NOT EXISTS (
-                   SELECT 1 FROM messages_fts f
-                   WHERE f.owner_type = m.owner_type AND f.owner_id = m.owner_id
-                     AND f.topic_id = m.topic_id AND f.msg_id = m.msg_id
-               )
-             LIMIT ?",
-        )
-        .bind(BATCH_SIZE)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("回填批次执行失败: {}", e))?;
-        let batch_count = inserted.rows_affected();
-        tx.commit()
-            .await
-            .map_err(|e| format!("回填事务提交失败: {}", e))?;
-        if batch_count == 0 {
-            break;
-        }
-        // 批次间发射进度事件，驱动搜索页"索引构建中"进度 UI
-        let status = fts_index_status(pool).await?;
-        let _ = app_handle.emit(
-            "vcp-system-event",
-            serde_json::json!({
-                "type": "vcp-fts-rebuild",
-                "indexedMessages": status.indexed_messages,
-                "totalMessages": status.total_messages,
-                "source": "GlobalSearch"
-            }),
-        );
-    }
-    fts_index_status(pool).await
 }
 
 pub async fn decompress_database_migration(app_handle: &AppHandle) -> Result<bool, String> {

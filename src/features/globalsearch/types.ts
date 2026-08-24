@@ -8,19 +8,14 @@ export interface FtsSearchResultItem {
   msgId: string;
   topicId: string;
   role: string;
+  /** 消息写入时记录的发言者名称；群组 AI 回复用于区分具体 Agent。 */
+  speakerName: string | null;
   timestamp: number;
   topicTitle: string;
   ownerId: string;
   ownerType: 'agent' | 'group';
   /** FTS5 snippet() 命中摘要，含 <mark> 高亮标记（渲染时必须按标记切分，禁止直接 v-html） */
   snippet: string;
-}
-
-/** FTS 索引覆盖率状态（对应 Rust FtsIndexStatus） */
-export interface FtsIndexStatus {
-  totalMessages: number;
-  indexedMessages: number;
-  rebuilding: boolean;
 }
 
 /** 搜索范围：全部 / 当前话题 / 指定助手或群组 */
@@ -30,7 +25,7 @@ export type SearchScope = 'all' | 'topic' | 'owner';
 export type RoleFilter = 'all' | 'user' | 'assistant' | 'system';
 
 /** 时间范围过滤 */
-export type TimeFilter = 'all' | 'today' | 'week' | 'month';
+export type TimeFilter = 'all' | 'today' | 'week' | 'month' | 'custom';
 
 /** 排序：时间倒序（默认）/ bm25 相关度 */
 export type SortMode = 'time' | 'rank';
@@ -52,4 +47,5 @@ export const TIME_LABELS: Record<TimeFilter, string> = {
   today: '今天',
   week: '近 7 天',
   month: '近 30 天',
+  custom: '自定义',
 };

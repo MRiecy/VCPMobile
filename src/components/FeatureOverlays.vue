@@ -167,8 +167,6 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
       v-if="globalSearchMounted"
       :is-open="overlayStore.isGlobalSearchOpen"
       :z-index="overlayStore.getPageZIndex('globalSearch')"
-      :open-target="overlayStore.globalSearchOpenTarget"
-      @target-consumed="overlayStore.clearGlobalSearchOpenTarget()"
       @close="overlayStore.closeGlobalSearch()"
     />
 

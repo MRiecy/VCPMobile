@@ -48,9 +48,7 @@ macro_rules! app_command_handler {
             delete_tarven_rule, get_tarven_rules, preview_tarven_injection, reorder_rules,
             save_tarven_rule, toggle_rule_enabled,
         };
-        use crate::vcp_modules::db_manager::{
-            get_fts_index_status, rebuild_messages_fts, search_messages_fts,
-        };
+        use crate::vcp_modules::db_manager::search_messages_fts;
         use crate::vcp_modules::diary::{
             diary_cancel_search, diary_cancel_semantic_search, diary_create_note,
             diary_delete_empty_folder, diary_delete_notes, diary_get_note, diary_list_folders,
@@ -167,7 +165,6 @@ macro_rules! app_command_handler {
                 delete_message_attachment,
                 delete_messages,
                 fetch_raw_message_content,
-                get_fts_index_status,
                 handle_agent_chat_message,
                 load_chat_history,
                 load_chat_history_around,
@@ -176,7 +173,6 @@ macro_rules! app_command_handler {
                 process_message_content,
                 re_render_message,
                 rebuild_all_pre_renders,
-                rebuild_messages_fts,
                 search_messages_fts,
                 truncate_history_after_message,
                 // ── VCP 连接与生成控制（vcp_client）──

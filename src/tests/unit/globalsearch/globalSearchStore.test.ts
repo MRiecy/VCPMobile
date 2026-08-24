@@ -19,6 +19,7 @@ function item(msgId: string, timestamp: number, topicId = "t1"): FtsSearchResult
     msgId,
     topicId,
     role: "assistant",
+    speakerName: "Agent",
     timestamp,
     topicTitle: "话题",
     ownerId: "a1",
@@ -70,8 +71,10 @@ describe("globalSearchStore", () => {
     store.scopeOwnerId = "agent-42";
     store.scopeOwnerType = "agent";
     store.speakerAgentId = "speaker-7";
-    store.role = "user";
-    store.timeRange = "week";
+    store.role = "assistant";
+    store.timeRange = "custom";
+    store.customStartDate = "2026-08-01";
+    store.customEndDate = "2026-08-24";
     store.sort = "rank";
 
     await store.search();
@@ -80,9 +83,11 @@ describe("globalSearchStore", () => {
     expect(args.filter.ownerId).toBe("agent-42");
     expect(args.filter.ownerType).toBe("agent");
     expect(args.filter.agentId).toBe("speaker-7");
-    expect(args.filter.role).toBe("user");
+    expect(args.filter.role).toBe("assistant");
     expect(args.filter.sort).toBe("rank");
     expect(typeof args.filter.startTime).toBe("number");
+    expect(typeof args.filter.endTime).toBe("number");
+    expect(Number(args.filter.endTime)).toBeGreaterThan(Number(args.filter.startTime));
     expect(args.filter.topicId).toBeNull();
   });
 
@@ -117,6 +122,33 @@ describe("globalSearchStore", () => {
     expect(invokeMock).toHaveBeenCalledTimes(1);
   });
 
+  it("releases a stale load-more request when a new search starts", async () => {
+    const stalePage = deferred<FtsSearchResultItem[]>();
+    const freshSearch = deferred<FtsSearchResultItem[]>();
+    const responses = [Promise.resolve(makePage(1000, 50)), stalePage.promise, freshSearch.promise];
+    let index = 0;
+    mockInvoke("search_messages_fts", () => responses[index++]);
+
+    const store = useGlobalSearchStore();
+    store.query = "旧关键词";
+    await store.search();
+
+    const staleRequest = store.loadMore();
+    expect(store.loadingMore).toBe(true);
+
+    store.query = "新关键词";
+    const freshRequest = store.search();
+    expect(store.loadingMore).toBe(false);
+
+    freshSearch.resolve([item("fresh", 2000)]);
+    await freshRequest;
+    stalePage.resolve([]);
+    await staleRequest;
+
+    expect(store.results.map((result) => result.msgId)).toEqual(["fresh"]);
+    expect(store.loadingMore).toBe(false);
+  });
+
   it("ignores queries shorter than the minimum without invoking backend", async () => {
     mockInvoke("search_messages_fts", () => makePage(1, 10));
     const store = useGlobalSearchStore();
@@ -127,36 +159,4 @@ describe("globalSearchStore", () => {
     expect(store.hasSearched).toBe(false);
   });
 
-  it("triggers rebuild when index coverage is incomplete", async () => {
-    mockInvoke("get_fts_index_status", () => ({
-      totalMessages: 1000,
-      indexedMessages: 320,
-      rebuilding: false,
-    }));
-    mockInvoke("rebuild_messages_fts", () => ({
-      totalMessages: 1000,
-      indexedMessages: 1000,
-      rebuilding: false,
-    }));
-
-    const store = useGlobalSearchStore();
-    await store.ensureIndex();
-
-    expect(invokeMock).toHaveBeenCalledWith("rebuild_messages_fts");
-    expect(store.indexReady).toBe(true);
-  });
-
-  it("skips rebuild when index is already complete", async () => {
-    mockInvoke("get_fts_index_status", () => ({
-      totalMessages: 500,
-      indexedMessages: 500,
-      rebuilding: false,
-    }));
-
-    const store = useGlobalSearchStore();
-    await store.ensureIndex();
-
-    expect(invokeMock).toHaveBeenCalledTimes(1);
-    expect(invokeMock).not.toHaveBeenCalledWith("rebuild_messages_fts");
-  });
 });
