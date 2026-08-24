@@ -245,10 +245,11 @@ async fn run_group_speaker_turn(
                 e.clone(),
             ));
         }
-        crate::vcp_modules::vcp_client::mark_message_as_error(
+        crate::vcp_modules::vcp_client::finalize_stream_error(
             app_handle,
             db_pool,
             &request_key,
+            None,
             Some(e),
         )
         .await?;

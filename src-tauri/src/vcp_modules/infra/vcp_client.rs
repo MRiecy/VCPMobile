@@ -1934,29 +1934,34 @@ pub async fn get_active_generations(
     Ok(list)
 }
 
-pub(crate) async fn mark_message_as_error<R: Runtime>(
+pub(crate) async fn finalize_stream_error<R: Runtime>(
     app_handle: &AppHandle<R>,
     pool: &sqlx::Pool<sqlx::Sqlite>,
     key: &MessageKey,
+    helper_content: Option<String>,
     custom_error: Option<String>,
 ) -> Result<(), String> {
     use sqlx::Row;
 
-    // 先获取已有的正文内容进行挽留保留
-    let existing_content_row = sqlx::query(
-        "SELECT content FROM messages
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
-    )
-    .bind(&key.topic.owner_type)
-    .bind(&key.topic.owner_id)
-    .bind(&key.topic.topic_id)
-    .bind(&key.msg_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-    let existing_content = existing_content_row
-        .and_then(|r| r.get::<Option<String>, _>("content"))
-        .unwrap_or_default();
+    // Streaming content remains helper-owned until this terminal commit.
+    let existing_content = match helper_content {
+        Some(content) => content,
+        None => {
+            let row = sqlx::query(
+                "SELECT content FROM messages
+                 WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+            )
+            .bind(&key.topic.owner_type)
+            .bind(&key.topic.owner_id)
+            .bind(&key.topic.topic_id)
+            .bind(&key.msg_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| e.to_string())?;
+            row.and_then(|row| row.get::<Option<String>, _>("content"))
+                .unwrap_or_default()
+        }
+    };
 
     let pending = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(
@@ -2265,7 +2270,7 @@ pub async fn recover_active_generation<R: Runtime>(
                     }));
                 } else if status == "streaming" {
                     log::info!("[VCPClient] Session is still streaming in helper. Claiming and resuming it atomically.");
-                    let initial_content = is_warm.then_some(content);
+                    let initial_content = is_warm.then(|| content.clone());
                     let last_event_index = if is_warm {
                         resp["lastEventIndex"].as_i64()
                     } else {
@@ -2277,6 +2282,7 @@ pub async fn recover_active_generation<R: Runtime>(
                         agent_id.clone(),
                         stream_channel.clone(),
                         initial_content,
+                        content,
                         last_event_index,
                         _recovery_cancellation_token,
                     )
@@ -2301,10 +2307,11 @@ pub async fn recover_active_generation<R: Runtime>(
         msg_id
     );
 
-    mark_message_as_error(
+    finalize_stream_error(
         &app,
         &db.pool,
         &key,
+        None,
         Some("后台进程已被系统销毁，流式对话中断".to_string()),
     )
     .await?;
@@ -2331,6 +2338,7 @@ async fn resume_claimed_generation<R: Runtime>(
     agent_id: Option<String>,
     stream_channel: Channel<StreamEvent>,
     initial_content: Option<String>,
+    helper_content: String,
     last_event_index: Option<i64>,
     cancellation_token: CancellationToken,
 ) -> Result<Value, String> {
@@ -2350,29 +2358,6 @@ async fn resume_claimed_generation<R: Runtime>(
 
     let pool = app.state::<DbState>().pool.clone();
     let transport_request_id = message_transport_request_id(key);
-
-    if let Some(ref content) = initial_content {
-        let _ = sqlx::query(
-            "UPDATE messages SET content = ?, updated_at = ? \
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ? \
-             AND finish_reason IS NULL AND EXISTS( \
-                SELECT 1 FROM active_generations \
-                WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ? \
-             )",
-        )
-        .bind(content)
-        .bind(crate::vcp_modules::infra::utils::now_millis())
-        .bind(&owner_type)
-        .bind(&owner_id)
-        .bind(&topic_id)
-        .bind(&msg_id)
-        .bind(&owner_type)
-        .bind(&owner_id)
-        .bind(&topic_id)
-        .bind(&msg_id)
-        .execute(&pool)
-        .await;
-    }
 
     let context = json!({
         "topicId": topic_id,
@@ -2405,7 +2390,14 @@ async fn resume_claimed_generation<R: Runtime>(
                 "[VCPClient] Claimed recovery failed during handle_streaming_request: {}",
                 e
             );
-            let _ = mark_message_as_error(app, &pool, key, Some(format!("接续失败: {}", e))).await;
+            finalize_stream_error(
+                app,
+                &pool,
+                key,
+                Some(helper_content),
+                Some(format!("接续失败: {}", e)),
+            )
+            .await?;
             return Err(e);
         }
     };

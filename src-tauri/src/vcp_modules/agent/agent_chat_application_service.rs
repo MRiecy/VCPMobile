@@ -202,10 +202,11 @@ pub async fn internal_process_agent_chat_message(
             // 否则 thinking 气泡永远悬挂，用户看到的是"Agent 完全无反应"
             let _ =
                 stream_channel.send(StreamEvent::error(thinking_id.clone(), context, e.clone()));
-            crate::vcp_modules::vcp_client::mark_message_as_error(
+            crate::vcp_modules::vcp_client::finalize_stream_error(
                 &app_handle,
                 &db_state.pool,
                 &request_key,
+                None,
                 Some(e),
             )
             .await?;
