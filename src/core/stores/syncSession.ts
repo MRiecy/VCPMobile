@@ -1,8 +1,10 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
+import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useDataReload } from "../composables/useDataReload";
+import { useNotificationStore } from "./notification";
 import type { BatteryStatusDto } from "../types/native";
 
 type SyncStatus =
@@ -62,7 +64,6 @@ type BufferedSessionEvent = {
   payload: Record<string, unknown>;
 };
 
-const MOBILE_VERSION = "1.1.4";
 const DESKTOP_PLUGIN_VERSION = "1.3.0";
 const WIRE_PROTOCOL_VERSION = "1.3";
 const MAX_BUFFERED_SESSION_EVENTS = 32;
@@ -144,7 +145,7 @@ const LOCAL_ERROR_COPY: Record<
     origin: "mobile_ui",
     stage: "finalize",
     retryAction: "after_user_action",
-    message: "同步响应不符合 Wire 1.2 规范，已安全停止",
+    message: "同步响应不符合 Wire 1.3 规范，已安全停止",
     guidance: "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留最新日志。",
   },
   START_SYNC_FAILED: {
@@ -265,6 +266,12 @@ const PHASE_LABELS: Record<string, string> = {
   messages: "历史消息同步",
   finalize: "数据收尾",
 };
+const INDETERMINATE_PHASES = new Set([
+  "initialization",
+  "owner_metadata",
+  "topic_validation",
+  "finalize",
+]);
 
 const emptySummary = (): SyncSummary => ({
   successfulTopics: 0,
@@ -327,7 +334,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
   let awaitingSessionId = false;
   let bufferedSessionEvents: BufferedSessionEvent[] = [];
   let lastLoggedPhase = "";
-  let lastCompletedPhase = "";
   let lastConnectionStatus = "";
   // 活进度行：阶段内原地刷新的单条日志，避免刷屏又保留进度感知
   let progressLineId: string | null = null;
@@ -358,7 +364,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     awaitingSessionId = false;
     bufferedSessionEvents = [];
     lastLoggedPhase = "";
-    lastCompletedPhase = "";
     lastConnectionStatus = "";
     progressLineId = null;
     activeTab.value = "live";
@@ -395,7 +400,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       message: "",
     };
     lastLoggedPhase = "";
-    lastCompletedPhase = "";
     progressLineId = null;
 
     // 启动命令一旦进入异步链路，后端就可能在任意 await 后建立会话。
@@ -503,7 +507,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       terminalError.value = null;
       summary.value = emptySummary();
       lastLoggedPhase = "";
-      lastCompletedPhase = "";
       lastConnectionStatus = "";
       progressLineId = null;
       progressData.value = {
@@ -549,12 +552,20 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         await useDataReload().performFullReload();
       } catch (error) {
         console.error("[SyncSession] Failed to reload synchronized data:", error);
+        useNotificationStore().addNotification({
+          id: "sync_data_reload_failed",
+          type: "error",
+          title: "同步数据刷新失败",
+          message: "界面未能重新加载同步后的数据。请重新打开应用以加载最新数据。",
+          toastOnly: false,
+        });
       }
     }
   };
 
   const copyDiagnostics = async () => {
     try {
+      const mobileVersion = await getVersion().catch(() => "unavailable");
       const failedTopicIds = [
         ...summary.value.failedTopicIds,
         ...(terminalError.value?.failedTopicIds ?? []),
@@ -564,7 +575,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         .map(sanitizeDiagnosticText)
         .join(", ");
       const diagnostic = [
-        `VCP Mobile: ${MOBILE_VERSION}`,
+        `VCP Mobile: ${mobileVersion}`,
         `VCPMobileSync: ${DESKTOP_PLUGIN_VERSION}`,
         `Wire protocol: ${WIRE_PROTOCOL_VERSION}`,
         `Session: ${activeSessionId.value ?? "none"}`,
@@ -718,16 +729,19 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         return;
       }
       const nextPhase = reportedPhase;
-      const nextTotal =
-        typeof payload.total === "number" &&
-        Number.isSafeInteger(payload.total) &&
-        payload.total >= 0
+      const indeterminate = INDETERMINATE_PHASES.has(nextPhase);
+      const nextTotal = indeterminate
+        ? 0
+        : typeof payload.total === "number" &&
+            Number.isSafeInteger(payload.total) &&
+            payload.total >= 0
           ? payload.total
           : progressData.value.total;
-      const nextCompleted =
-        typeof payload.completed === "number" &&
-        Number.isSafeInteger(payload.completed) &&
-        payload.completed >= 0
+      const nextCompleted = indeterminate
+        ? 0
+        : typeof payload.completed === "number" &&
+            Number.isSafeInteger(payload.completed) &&
+            payload.completed >= 0
           ? payload.completed
           : progressData.value.completed;
       progressData.value = {
@@ -744,15 +758,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       }
       if (nextTotal > 0) {
         updateLiveProgressLine(nextPhase, nextCompleted, nextTotal);
-      }
-      if (
-        nextTotal > 0 &&
-        nextCompleted >= nextTotal &&
-        nextPhase !== lastCompletedPhase
-      ) {
-        progressLineId = null; // 定格在 n/n，随后输出阶段完成行
-        pushLog("success", `${PHASE_LABELS[nextPhase] ?? "当前阶段"}完成`);
-        lastCompletedPhase = nextPhase;
       }
       const nextSummary = readProgressSummary(payload);
       if (nextSummary) {
@@ -851,7 +856,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     pushLog(
       status.value === "completed_with_warnings" ? "warning" : "success",
       status.value === "completed_with_warnings"
-        ? "同步已完成，但有部分旧版附件未能解析"
+        ? `消息已同步，${completedSummary.legacyAttachmentWarnings} 项旧附件信息无法安全识别，已跳过`
         : "同步已全部完成，点击关闭以刷新数据",
     );
   };

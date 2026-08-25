@@ -16,7 +16,7 @@ use serde_json::Value;
 use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Manager, Runtime};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 
@@ -750,21 +750,6 @@ pub struct BatchPullResult {
 
 pub struct PullExecutor;
 
-/// Phase 3 拉取阶段的展示型进度上下文：仅用于在 NDJSON 流处理期间实时发射
-/// vcp-sync-progress 事件，不参与完成状态机。
-/// （权威进度仍由 Phase3Tracker::mark_completed 在批次校验后发布。）
-/// 背景：全新安装等场景下数百个 topic 会落入单个 diff 批次，批次级进度
-/// 会让 UI 长时间停在 0/N 再跳变；流内逐 topic 上报使进度平滑递增。
-pub struct PullProgressContext {
-    pub session_id: u64,
-    /// 本批次开始前已完成的话题数（跨批次累计基数）
-    pub base_completed: usize,
-    /// 整个 messages 阶段的话题总数
-    pub total: usize,
-    pub failed: usize,
-    pub legacy_attachment_warnings: usize,
-}
-
 impl PullExecutor {
     pub async fn pull_agent<R: Runtime>(
         _app: &AppHandle<R>,
@@ -1124,7 +1109,6 @@ impl PullExecutor {
     /// 在途原始帧预算为 32 MiB；有界 mpsc channel 实时推送进度日志并施加背压。
     ///
     /// 返回每个 topic 的处理结果。
-    #[allow(clippy::too_many_arguments)]
     pub async fn pull_messages_batch<R: Runtime>(
         app: &AppHandle<R>,
         client: &reqwest::Client,
@@ -1133,7 +1117,6 @@ impl PullExecutor {
         requests: &[(TopicKey, Vec<String>)], // (topic identity, msg_ids)，空 vec = 拉全部消息
         write_queue: &DbWriteQueue,
         prerender_enabled: bool,
-        progress: Option<PullProgressContext>,
     ) -> Result<Vec<BatchPullResult>, String> {
         if requests.is_empty() {
             return Ok(Vec::new());
@@ -1222,11 +1205,9 @@ impl PullExecutor {
         let receiver = async move {
             let mut results = Vec::new();
             let mut completed = 0usize;
-            let mut succeeded = 0usize;
             while let Some(result) = rx.recv().await {
                 completed += 1;
                 if result.success {
-                    succeeded += 1;
                     let msg = format!(
                         "[PullExecutor] Batch pull: topic {} completed ({}/{})",
                         result.topic.topic_id, completed, total
@@ -1236,24 +1217,6 @@ impl PullExecutor {
                         "info",
                         &msg,
                     );
-                    // 展示型实时进度：仅发射事件，不触碰完成状态机
-                    if let Some(ref ctx) = progress {
-                        let done_all = ctx.base_completed + succeeded;
-                        let _ = app_receiver.emit(
-                            "vcp-sync-progress",
-                            serde_json::json!({
-                                "sessionId": ctx.session_id,
-                                "phase": "messages",
-                                "total": ctx.total,
-                                "completed": done_all,
-                                "message": format!("Syncing Messages: {done_all}/{}", ctx.total),
-                                "successfulTopics": done_all,
-                                "totalTopics": ctx.total,
-                                "failedTopics": ctx.failed,
-                                "legacyAttachmentWarnings": ctx.legacy_attachment_warnings,
-                            }),
-                        );
-                    }
                 } else {
                     let err = result.error.as_deref().unwrap_or("unknown");
                     let msg = format!(

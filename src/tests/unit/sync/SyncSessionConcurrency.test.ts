@@ -13,6 +13,10 @@ import {
   mockInvoke,
 } from "@/tests/mocks/tauri";
 
+vi.mock("@tauri-apps/api/app", () => ({
+  getVersion: vi.fn(() => Promise.resolve("1.1.5")),
+}));
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
@@ -490,7 +494,7 @@ describe("sync session ownership", () => {
     );
   });
 
-  it("shows only owned operator notices and deduplicated phase milestones", async () => {
+  it("shows only owned operator notices and keeps numeric progress nonterminal", async () => {
     const store = useSyncSessionStore();
     store.open();
     await store.startSync();
@@ -546,7 +550,7 @@ describe("sync session ownership", () => {
     ).toHaveLength(1);
     expect(
       store.logs.filter((log) => log.message === "会话主题同步完成"),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
     expect(store.progressData.phase).toBe("topic_metadata");
     expect(store.progressData.message).toBe("");
     expect(store.logs.some((log) => log.message.includes("phase-secret"))).toBe(
@@ -620,7 +624,7 @@ describe("sync session ownership", () => {
     });
     const wrapper = mount(SyncSessionView);
     await Promise.resolve();
-    expect(wrapper.text()).toContain("处理后重试");
+    expect(wrapper.text()).toContain("已处理，重新同步");
 
     store.activeSessionId = 53;
     store.status = "connecting";
@@ -639,7 +643,7 @@ describe("sync session ownership", () => {
       },
     });
     await Promise.resolve();
-    expect(wrapper.text()).not.toContain("处理后重试");
+    expect(wrapper.text()).not.toContain("已处理，重新同步");
     expect(wrapper.text()).not.toContain("重新同步");
   });
 
@@ -772,8 +776,8 @@ describe("sync session ownership", () => {
     const diagnostic = String(
       writeText.mock.calls[writeText.mock.calls.length - 1]?.[0],
     );
-    expect(diagnostic).toContain("VCP Mobile: 1.1.4");
-    expect(diagnostic).toContain("Wire protocol: 1.2");
+    expect(diagnostic).toContain("VCP Mobile: 1.1.5");
+    expect(diagnostic).toContain("Wire protocol: 1.3");
     expect(diagnostic).toContain("Session: 51");
     expect(diagnostic).not.toContain("secret-token");
     expect(diagnostic).not.toContain("also-secret");

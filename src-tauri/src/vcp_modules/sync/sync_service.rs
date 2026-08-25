@@ -1373,6 +1373,7 @@ async fn run_sync_session(
                     "同步服务已连接",
                 )
                 .await;
+                emit_sync_phase_activity(&handle_clone, session_id, "owner_metadata");
 
                 let db = handle_clone.state::<DbState>();
                 if let Err(e) = HashInitializer::ensure_all_agent_hashes(&db.pool).await {
@@ -1491,6 +1492,7 @@ async fn run_sync_session(
                             match cmd {
                                 crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::StartTopicMetadata => {
                                     // Phase 2: 拉取缺失的 Topic Configs
+                                    emit_sync_phase_activity(&handle_clone, session_id, "topic_metadata");
                                     let db = handle_clone.state::<DbState>();
                                     let owners = {
                                         let guard = changed_owners.lock().await;
@@ -1594,6 +1596,7 @@ async fn run_sync_session(
                                 },
                                 crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::StartTopicValidation => {
                                     // Phase 2.5: 双哈希批量比对
+                                    emit_sync_phase_activity(&handle_clone, session_id, "topic_validation");
                                     if let Ok(mut logger) = sync_logger_task.lock() {
                                         logger.log(LogLevel::Info, "topic_metadata", "=== Phase 2.5: Validating Topic Hashes ===");
                                     }
@@ -1678,6 +1681,7 @@ async fn run_sync_session(
                                     }
                                 },
                                 crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::StartMessages => {
+                                    emit_sync_phase_activity(&handle_clone, session_id, "messages");
                                     if let Ok(mut logger) = sync_logger_task.lock() {
                                         logger.start_phase("messages", 0);
                                         logger.log(LogLevel::Info, "messages", "=== Phase 3: Messages ===");
@@ -2042,6 +2046,7 @@ async fn run_sync_session(
                                         }
                                     };
                                     if should_flush {
+                                        emit_sync_phase_activity(&handle_clone, session_id, "finalize");
                                         // 先完成落盘与哈希收尾，成功后才能对桌面端确认相位完成。
                                         let db = handle_clone.state::<DbState>();
                                         let modified_topics = {
@@ -3216,6 +3221,23 @@ pub(crate) fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, 
         };
         log::log!(rust_log_level, "[Sync] [{}] {}", level, safe_message);
     }
+}
+
+fn emit_sync_phase_activity<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    session_id: u64,
+    phase: &str,
+) {
+    let _ = app_handle.emit(
+        "vcp-sync-progress",
+        json!({
+            "sessionId": session_id,
+            "phase": phase,
+            "total": 0,
+            "completed": 0,
+            "message": "",
+        }),
+    );
 }
 
 fn emit_operator_sync_log<R: Runtime>(

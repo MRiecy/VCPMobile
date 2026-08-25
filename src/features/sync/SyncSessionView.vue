@@ -32,6 +32,7 @@ const visibleLogs = computed(() => {
 });
 
 const progressPercent = computed(() => {
+  if (store.status === 'completed' || store.status === 'completed_with_warnings') return 100;
   if (store.progressData.total <= 0) return 0;
   return Math.min(100, Math.round((store.progressData.completed / store.progressData.total) * 100));
 });
@@ -83,9 +84,12 @@ const canRetry = computed(() => {
   );
 });
 
-const retryLabel = computed(() =>
-  store.terminalError?.retryAction === 'after_user_action' ? '处理后重试' : '重新同步',
-);
+const retryLabel = computed(() => {
+  if (store.status === 'completed_with_warnings') return '处理后重新同步';
+  return store.terminalError?.retryAction === 'after_user_action'
+    ? '已处理，重新同步'
+    : '重新同步';
+});
 
 const statusLabel = computed(() => {
   switch (store.status) {
@@ -119,6 +123,9 @@ const progressBarClass = computed(() => {
 });
 
 const isSyncing = computed(() => store.status === 'connecting' || store.status === 'connected');
+const isProgressIndeterminate = computed(() =>
+  isSyncing.value && store.progressData.total <= 0
+);
 
 const logColor = (level: string) => {
   switch (level) {
@@ -130,18 +137,6 @@ const logColor = (level: string) => {
 };
 
 const handleClose = async () => {
-  if (store.needsReload) {
-    const completed = store.status === 'completed' || store.status === 'completed_with_warnings';
-    await overlayStore.showConfirm({
-      title: completed ? '同步已完成' : '刷新同步数据',
-      message: completed
-        ? '同步已完成，数据已更新。点击确认立即刷新以生效。'
-        : '本次同步未完整完成，点击确认刷新已经写入的数据。',
-      onlyConfirm: true
-    });
-    await overlayStore.closeSyncSession();
-    return;
-  }
   await overlayStore.closeSyncSession();
 };
 
@@ -255,8 +250,8 @@ const handlePrerenderToggle = async (val: boolean) => {
             </div>
             <div class="text-sm font-bold tracking-wider mb-2">全量神经同步</div>
             <div class="text-[11px] text-white/30 text-center mb-8 leading-relaxed">
-              与桌面端进行数据全量比对与同步<br>
-              包括会话主题、历史消息及附件
+              双向比对并合并智能体、群组、话题、头像与历史消息<br>
+              较新的修改和删除会同步；附件仅同步信息，不传输文件
             </div>
             <button
               @click="store.startSync()"
@@ -297,9 +292,17 @@ const handlePrerenderToggle = async (val: boolean) => {
             <!-- 进度条 -->
             <div class="px-4 mb-4">
               <div class="h-1 bg-white/10 rounded-full overflow-hidden">
-                <div class="h-full transition-all duration-500 rounded-full"
-                     :class="progressBarClass"
-                     :style="{ width: progressPercent + '%' }"></div>
+                <div
+                  v-if="isProgressIndeterminate"
+                  class="sync-progress-indeterminate h-full rounded-full"
+                  :class="progressBarClass"
+                ></div>
+                <div
+                  v-else
+                  class="h-full transition-all duration-500 rounded-full"
+                  :class="progressBarClass"
+                  :style="{ width: progressPercent + '%' }"
+                ></div>
               </div>
               <div class="flex justify-between text-[10px] mt-1 opacity-50">
                 <span>{{ phaseLabel }}</span>
@@ -358,10 +361,10 @@ const handlePrerenderToggle = async (val: boolean) => {
                 class="mt-3 border-l-2 border-yellow-500 bg-yellow-500/6 px-3 py-2 text-left"
               >
                 <div class="text-[11px] font-semibold leading-relaxed text-yellow-300">
-                  同步已完成，但有部分旧版附件未能解析
+                  消息已同步，{{ store.summary.legacyAttachmentWarnings }} 项旧附件信息无法安全识别，已跳过
                 </div>
                 <div class="mt-1 text-[10px] leading-relaxed text-white/55">
-                  请在电脑端重新发送这些附件后再同步。
+                  请在电脑端重新发送这些附件后，再重新同步。
                 </div>
               </div>
             </div>
@@ -400,7 +403,7 @@ const handlePrerenderToggle = async (val: boolean) => {
           <span v-else-if="store.status === 'connecting'">正在建立神经同步通道...</span>
           <span v-else-if="store.status === 'connected'">同步进行中</span>
           <span v-else-if="store.status === 'completed'">同步已完成</span>
-          <span v-else-if="store.status === 'completed_with_warnings'">同步完成，部分旧版附件需处理</span>
+          <span v-else-if="store.status === 'completed_with_warnings'">同步完成，部分附件信息需处理</span>
           <span v-else-if="store.status === 'error'">同步未完成</span>
         </div>
         <div v-if="store.activeTab === 'live'" class="flex items-center gap-2">
@@ -438,3 +441,15 @@ const handlePrerenderToggle = async (val: boolean) => {
     </div>
   </SlidePage>
 </template>
+
+<style scoped>
+.sync-progress-indeterminate {
+  width: 36%;
+  animation: sync-progress-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes sync-progress-slide {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(290%); }
+}
+</style>
