@@ -167,8 +167,25 @@ impl Phase1Metadata {
 
     pub async fn build_avatar_manifest(pool: &SqlitePool) -> Result<SyncManifest, String> {
         let rows = sqlx::query(
-            "SELECT owner_id, owner_type, avatar_hash, updated_at, deleted_at
-             FROM avatars",
+            "SELECT av.owner_id, av.owner_type, av.avatar_hash, av.updated_at, av.deleted_at,
+                    CASE
+                        WHEN av.deleted_at IS NOT NULL THEN 1
+                        WHEN av.owner_type = 'user' THEN 1
+                        WHEN av.owner_type = 'agent' AND agent.agent_id IS NOT NULL THEN 1
+                        WHEN av.owner_type = 'group' AND owner_group.group_id IS NOT NULL THEN 1
+                        ELSE 0
+                    END AS parent_is_live
+             FROM avatars av
+             LEFT JOIN agents agent
+               ON av.owner_type = 'agent'
+              AND agent.owner_type = 'agent'
+              AND agent.agent_id = av.owner_id
+              AND agent.deleted_at IS NULL
+             LEFT JOIN groups owner_group
+               ON av.owner_type = 'group'
+              AND owner_group.owner_type = 'group'
+              AND owner_group.group_id = av.owner_id
+              AND owner_group.deleted_at IS NULL",
         )
         .fetch_all(pool)
         .await
@@ -190,28 +207,11 @@ impl Phase1Metadata {
             let deleted_at: Option<i64> = r
                 .try_get("deleted_at")
                 .map_err(|error| format!("Avatar manifest tombstone decode failed: {error}"))?;
-            let parent_is_live = deleted_at.is_some() || match owner_type.as_str() {
-                "agent" => sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS(SELECT 1 FROM agents WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL)",
+            let parent_is_live: bool = r.try_get("parent_is_live").map_err(|error| {
+                format!(
+                    "Avatar manifest parent state decode failed for {owner_type}/{owner_id}: {error}"
                 )
-                .bind(&owner_id)
-                .fetch_one(pool)
-                .await
-                .map_err(|error| {
-                    format!("Avatar manifest agent owner lookup failed for {owner_id}: {error}")
-                })?,
-                "group" => sqlx::query_scalar::<_, bool>(
-                    "SELECT EXISTS(SELECT 1 FROM groups WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL)",
-                )
-                .bind(&owner_id)
-                .fetch_one(pool)
-                .await
-                .map_err(|error| {
-                    format!("Avatar manifest group owner lookup failed for {owner_id}: {error}")
-                })?,
-                "user" => true,
-                _ => false,
-            };
+            })?;
             if !parent_is_live {
                 return Err(format!(
                     "Avatar manifest owner {owner_type}/{owner_id} is missing or deleted"
@@ -297,6 +297,12 @@ mod tests {
             "CREATE TABLE avatars (
                 owner_id TEXT, owner_type TEXT, avatar_hash TEXT,
                 updated_at INTEGER, deleted_at INTEGER
+             );
+             CREATE TABLE agents (
+                owner_type TEXT, agent_id TEXT, deleted_at INTEGER
+             );
+             CREATE TABLE groups (
+                owner_type TEXT, group_id TEXT, deleted_at INTEGER
              );
              INSERT INTO avatars VALUES
                 ('agent-a', 'agent', 'hash', 10, 9),
