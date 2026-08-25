@@ -391,7 +391,7 @@ impl HashAggregator {
         let updated = sqlx::query(
             "UPDATE groups SET
                 updated_at = CASE
-                    WHEN config_hash IS NOT ? THEN MAX(updated_at + 1, ?)
+                    WHEN config_hash IS NOT ? THEN ?
                     ELSE updated_at
                 END,
                 config_hash = ?

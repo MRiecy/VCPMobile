@@ -154,6 +154,9 @@ async fn schedule_sync_retry<R: Runtime>(
     error_code: &str,
     message: &str,
 ) -> bool {
+    if cancel_token.is_cancelled() {
+        return false;
+    }
     let Some(backoff) = take_retry_slot(retry_count, retry_delay) else {
         let final_message =
             format!("{message}; retry budget exhausted after {MAX_SYNC_RETRIES} attempts");
@@ -186,7 +189,7 @@ async fn schedule_sync_retry<R: Runtime>(
             *retry_count, MAX_SYNC_RETRIES
         ),
     );
-    !cancel_token.is_cancelled() && !cancelled_during(cancel_token, backoff).await
+    !cancelled_during(cancel_token, backoff).await
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

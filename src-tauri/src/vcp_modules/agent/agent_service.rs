@@ -8,7 +8,7 @@ use crate::vcp_modules::group::group_types::GroupListItem;
 use crate::vcp_modules::sync_dto::AgentSyncDTO;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
-use crate::vcp_modules::sync_types::SyncDataType;
+use crate::vcp_modules::sync_types::{SyncDataType, SYNC_TOMBSTONE_HASH};
 use crate::vcp_modules::topic_types::{MessageKey, Topic, TopicKey};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -467,15 +467,30 @@ pub async fn delete_agent_internal<R: Runtime>(
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
-    match existing_deleted_at {
+    let tombstone_only = match existing_deleted_at {
+        None if requested_deleted_at.is_some() => {
+            sqlx::query(
+                "INSERT INTO agents (
+                    owner_type, agent_id, name, model, config_hash, updated_at, deleted_at
+                 ) VALUES ('agent', ?, '', '', ?, ?, ?)",
+            )
+            .bind(agent_id)
+            .bind(SYNC_TOMBSTONE_HASH)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+            true
+        }
         None => return Err(format!("Agent {agent_id} does not exist")),
         Some(Some(existing)) => {
             tx.commit().await.map_err(|e| e.to_string())?;
             state.caches.remove(agent_id);
             return Ok(existing);
         }
-        Some(None) => {}
-    }
+        Some(None) => false,
+    };
 
     let affected_group_ids: Vec<String> = sqlx::query_scalar(
         "SELECT DISTINCT gm.group_id
@@ -489,17 +504,19 @@ pub async fn delete_agent_internal<R: Runtime>(
     .await
     .map_err(|e| e.to_string())?;
 
-    let agent_delete = sqlx::query(
-        "UPDATE agents SET deleted_at = ?
-             WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL",
-    )
-    .bind(now)
-    .bind(agent_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
-    if agent_delete.rows_affected() != 1 {
-        return Err(format!("Agent {agent_id} disappeared during delete"));
+    if !tombstone_only {
+        let agent_delete = sqlx::query(
+            "UPDATE agents SET deleted_at = ?
+                 WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL",
+        )
+        .bind(now)
+        .bind(agent_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        if agent_delete.rows_affected() != 1 {
+            return Err(format!("Agent {agent_id} disappeared during delete"));
+        }
     }
 
     // 级联将该 Agent 下的所有话题标记为逻辑删除
@@ -572,7 +589,7 @@ pub async fn delete_agent_internal<R: Runtime>(
         .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
-    let group_config_updated_at = now.max(crate::vcp_modules::infra::utils::now_millis());
+    let group_config_updated_at = crate::vcp_modules::infra::utils::now_millis();
     for group_id in &affected_group_ids {
         HashAggregator::recompute_group_config_hash(&mut tx, group_id, group_config_updated_at)
             .await?;

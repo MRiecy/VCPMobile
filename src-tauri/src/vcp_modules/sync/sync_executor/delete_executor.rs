@@ -1,4 +1,5 @@
 use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::sync_types::SYNC_TOMBSTONE_HASH;
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use tauri::{AppHandle, Manager, Runtime};
 
@@ -26,17 +27,6 @@ impl DeleteExecutor {
         if deleted_at < 0 {
             return Err("Agent delete requires a non-negative deletedAt".to_string());
         }
-        let db = app.state::<DbState>();
-        let exists = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM agents WHERE owner_type = 'agent' AND agent_id = ?)",
-        )
-        .bind(agent_id)
-        .fetch_one(&db.pool)
-        .await
-        .map_err(|e| e.to_string())?;
-        if !exists {
-            return Ok(());
-        }
         let state = app.state::<crate::vcp_modules::agent_service::AgentConfigState>();
         crate::vcp_modules::agent_service::delete_agent_internal(
             app,
@@ -55,17 +45,6 @@ impl DeleteExecutor {
     ) -> Result<(), String> {
         if deleted_at < 0 {
             return Err("Group delete requires a non-negative deletedAt".to_string());
-        }
-        let db = app.state::<DbState>();
-        let exists = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM groups WHERE owner_type = 'group' AND group_id = ?)",
-        )
-        .bind(group_id)
-        .fetch_one(&db.pool)
-        .await
-        .map_err(|e| e.to_string())?;
-        if !exists {
-            return Ok(());
         }
         let state = app.state::<crate::vcp_modules::group_service::GroupManagerState>();
         crate::vcp_modules::group_service::delete_group_internal(
@@ -89,6 +68,22 @@ impl DeleteExecutor {
         let db = app.state::<DbState>();
 
         let active_ids = soft_delete_topic_data(&db.pool, key, deleted_at).await?;
+        sqlx::query(
+            "INSERT INTO topics (
+                owner_type, owner_id, topic_id, title, created_at, updated_at,
+                config_hash, deleted_at
+             ) VALUES (?, ?, ?, '', 0, ?, ?, ?)
+             ON CONFLICT(owner_type, owner_id, topic_id) DO NOTHING",
+        )
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
+        .bind(deleted_at)
+        .bind(SYNC_TOMBSTONE_HASH)
+        .bind(deleted_at)
+        .execute(&db.pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
         // Cancellation is intentionally post-commit: late finalizers already require the
         // active row, so the durable tombstone remains the authority if cancellation races.
@@ -185,7 +180,24 @@ impl DeleteExecutor {
         .await
         .map_err(|e| e.to_string())?;
         match existing_deleted_at {
-            None => return Ok(()),
+            None => {
+                sqlx::query(
+                    "INSERT INTO avatars (
+                        owner_type, owner_id, avatar_hash, mime_type, image_data,
+                        updated_at, deleted_at
+                     ) VALUES (?, ?, ?, 'application/octet-stream', ?, ?, ?)",
+                )
+                .bind(owner_type)
+                .bind(owner_id)
+                .bind(SYNC_TOMBSTONE_HASH)
+                .bind(Vec::<u8>::new())
+                .bind(deleted_at)
+                .bind(deleted_at)
+                .execute(&db.pool)
+                .await
+                .map_err(|e| e.to_string())?;
+                return Ok(());
+            }
             Some(Some(_)) => return Ok(()),
             Some(None) => {}
         }

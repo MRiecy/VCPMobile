@@ -6,7 +6,7 @@ use crate::vcp_modules::group_types::GroupConfig;
 use crate::vcp_modules::sync_dto::GroupSyncDTO;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
-use crate::vcp_modules::sync_types::SyncDataType;
+use crate::vcp_modules::sync_types::{SyncDataType, SYNC_TOMBSTONE_HASH};
 use crate::vcp_modules::topic_types::{MessageKey, Topic, TopicKey};
 use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -604,27 +604,44 @@ pub async fn delete_group_internal<R: Runtime>(
     .fetch_optional(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
-    match existing_deleted_at {
+    let tombstone_only = match existing_deleted_at {
+        None if requested_deleted_at.is_some() => {
+            sqlx::query(
+                "INSERT INTO groups (
+                    owner_type, group_id, name, config_hash, updated_at, deleted_at
+                 ) VALUES ('group', ?, '', ?, ?, ?)",
+            )
+            .bind(group_id)
+            .bind(SYNC_TOMBSTONE_HASH)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+            true
+        }
         None => return Err(format!("Group {group_id} does not exist")),
         Some(Some(existing)) => {
             tx.commit().await.map_err(|e| e.to_string())?;
             state.caches.remove(group_id);
             return Ok(existing);
         }
-        Some(None) => {}
-    }
+        Some(None) => false,
+    };
 
-    let group_delete = sqlx::query(
-        "UPDATE groups SET deleted_at = ?
-             WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL",
-    )
-    .bind(now)
-    .bind(group_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
-    if group_delete.rows_affected() != 1 {
-        return Err(format!("Group {group_id} disappeared during delete"));
+    if !tombstone_only {
+        let group_delete = sqlx::query(
+            "UPDATE groups SET deleted_at = ?
+                 WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL",
+        )
+        .bind(now)
+        .bind(group_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        if group_delete.rows_affected() != 1 {
+            return Err(format!("Group {group_id} disappeared during delete"));
+        }
     }
 
     // 级联将该 Group 下的所有话题标记为逻辑删除
