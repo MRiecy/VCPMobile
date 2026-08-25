@@ -1,5 +1,5 @@
 use crate::vcp_modules::agent_types::AgentConfig;
-use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
+use crate::vcp_modules::chat_manager::Attachment;
 use crate::vcp_modules::group_types::GroupConfig;
 use crate::vcp_modules::topic_types::Topic;
 use serde::{Deserialize, Serialize};
@@ -173,146 +173,10 @@ impl TryFrom<&Attachment> for AttachmentSyncDTO {
     }
 }
 
-/// User 消息同步 DTO (包含 attachments)
+/// 消息持久同步 DTO：Push/Pull 共用同一份 canonical 契约。
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct UserMessageSyncDTO {
-    pub id: String,
-    pub role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    pub content: String,
-    pub timestamp: u64,
-    #[serde(rename = "updatedAt")]
-    pub updated_at: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub attachments: Option<Vec<AttachmentSyncDTO>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content_hash: Option<String>,
-}
-
-impl TryFrom<&ChatMessage> for UserMessageSyncDTO {
-    type Error = String;
-
-    fn try_from(msg: &ChatMessage) -> Result<Self, Self::Error> {
-        if msg.id.is_empty() || msg.role.is_empty() {
-            return Err("User message requires non-empty id and role".to_string());
-        }
-        Ok(Self {
-            id: msg.id.clone(),
-            role: msg.role.clone(),
-            name: msg.name.clone(),
-            content: msg.content.clone(),
-            timestamp: msg.timestamp,
-            updated_at: msg.updated_at.unwrap_or(msg.timestamp),
-            attachments: msg
-                .attachments
-                .as_ref()
-                .map(|attachments| {
-                    attachments
-                        .iter()
-                        .map(AttachmentSyncDTO::try_from)
-                        .collect::<Result<Vec<_>, String>>()
-                })
-                .transpose()?,
-            content_hash: msg.content_hash.clone(),
-        })
-    }
-}
-
-/// Agent 消息同步 DTO (包含 agentId, avatarColor)
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentMessageSyncDTO {
-    pub id: String,
-    pub role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    pub content: String,
-    pub timestamp: u64,
-    #[serde(rename = "updatedAt")]
-    pub updated_at: u64,
-    #[serde(rename = "agentId")]
-    pub agent_id: String,
-    #[serde(rename = "isThinking", default)]
-    pub is_thinking: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub finish_reason: Option<String>,
-    #[serde(rename = "avatarColor")]
-    pub avatar_color: String,
-    #[serde(rename = "contentHash", skip_serializing_if = "Option::is_none")]
-    pub content_hash: Option<String>,
-}
-
-impl AgentMessageSyncDTO {
-    #[allow(dead_code)] // The bounded push path builds this DTO by moving owned fields.
-    pub fn from_message(msg: &ChatMessage, avatar_color: String) -> Self {
-        Self {
-            id: msg.id.clone(),
-            role: msg.role.clone(),
-            name: msg.name.clone(),
-            content: msg.content.clone(),
-            timestamp: msg.timestamp,
-            updated_at: msg.updated_at.unwrap_or(msg.timestamp),
-            agent_id: msg.agent_id.clone().unwrap_or_default(),
-            is_thinking: msg.is_thinking,
-            finish_reason: msg.finish_reason.clone(),
-            avatar_color,
-            content_hash: msg.content_hash.clone(),
-        }
-    }
-}
-
-/// Group 消息同步 DTO (包含 agentId, groupId, topicId, avatarColor)
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct GroupMessageSyncDTO {
-    pub id: String,
-    pub role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    pub content: String,
-    pub timestamp: u64,
-    #[serde(rename = "updatedAt")]
-    pub updated_at: u64,
-    #[serde(rename = "agentId")]
-    pub agent_id: String,
-    #[serde(rename = "groupId")]
-    pub group_id: String,
-    #[serde(rename = "topicId")]
-    pub topic_id: String,
-    #[serde(rename = "isGroupMessage")]
-    pub is_group_message: bool,
-    #[serde(rename = "avatarColor")]
-    pub avatar_color: String,
-    #[serde(rename = "contentHash", skip_serializing_if = "Option::is_none")]
-    pub content_hash: Option<String>,
-}
-
-impl GroupMessageSyncDTO {
-    #[allow(dead_code)] // The bounded push path builds this DTO by moving owned fields.
-    pub fn from_message(msg: &ChatMessage, avatar_color: String) -> Self {
-        Self {
-            id: msg.id.clone(),
-            role: msg.role.clone(),
-            name: msg.name.clone(),
-            content: msg.content.clone(),
-            timestamp: msg.timestamp,
-            updated_at: msg.updated_at.unwrap_or(msg.timestamp),
-            agent_id: msg.agent_id.clone().unwrap_or_default(),
-            group_id: msg.group_id.clone().unwrap_or_default(),
-            topic_id: msg.topic_id.clone().unwrap_or_default(),
-            is_group_message: true,
-            avatar_color,
-            content_hash: msg.content_hash.clone(),
-        }
-    }
-}
-
-/// ⚡ 捍卫 sync_dto.rs 的至高威严：专门用于同步下载消息的平铺标准网络契约
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct MessagePullSyncDTO {
+pub struct MessageSyncDTO {
     pub id: String,
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -322,15 +186,23 @@ pub struct MessagePullSyncDTO {
     pub timestamp: u64,
     #[serde(rename = "updatedAt")]
     pub updated_at: u64,
-    #[serde(default)]
+    #[serde(
+        rename = "isThinking",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub is_thinking: Option<bool>,
-    #[serde(rename = "agentId", default)]
+    #[serde(rename = "agentId", default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
-    #[serde(rename = "groupId", default)]
+    #[serde(rename = "groupId", default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
-    #[serde(rename = "topicId", default)]
+    #[serde(rename = "topicId", default, skip_serializing_if = "Option::is_none")]
     pub topic_id: Option<String>,
-    #[serde(rename = "isGroupMessage", default)]
+    #[serde(
+        rename = "isGroupMessage",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub is_group_message: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
@@ -338,12 +210,16 @@ pub struct MessagePullSyncDTO {
     pub attachments: Option<Vec<AttachmentSyncDTO>>,
     #[serde(rename = "contentHash", skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
-    #[serde(rename = "avatarColor", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "avatarColor",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub avatar_color: Option<String>,
 }
 
-impl From<MessagePullSyncDTO> for crate::vcp_modules::chat_manager::ChatMessage {
-    fn from(dto: MessagePullSyncDTO) -> Self {
+impl From<MessageSyncDTO> for crate::vcp_modules::chat_manager::ChatMessage {
+    fn from(dto: MessageSyncDTO) -> Self {
         Self {
             id: dto.id,
             role: dto.role,
@@ -488,8 +364,8 @@ mod tests {
     }
 
     #[test]
-    fn test_message_pull_sync_dto_into_chat_message_maps_attachments_and_defaults_local_paths() {
-        let dto = MessagePullSyncDTO {
+    fn test_message_sync_dto_into_chat_message_maps_attachments_and_defaults_local_paths() {
+        let dto = MessageSyncDTO {
             id: "msg-1".to_string(),
             role: "user".to_string(),
             name: Some("User".to_string()),

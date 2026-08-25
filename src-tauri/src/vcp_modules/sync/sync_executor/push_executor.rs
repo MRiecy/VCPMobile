@@ -1,11 +1,9 @@
 use crate::vcp_modules::agent_service;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_service;
-use crate::vcp_modules::sync_dto::{
-    AgentMessageSyncDTO, AgentSyncDTO, AttachmentSyncDTO, GroupMessageSyncDTO, GroupSyncDTO,
-    UserMessageSyncDTO,
-};
+use crate::vcp_modules::sync_dto::{AgentSyncDTO, AttachmentSyncDTO, GroupSyncDTO, MessageSyncDTO};
 use crate::vcp_modules::sync_error::{encode_http_sync_error_body, encode_wire_sync_error_value};
+use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use futures_util::StreamExt;
 use serde::Serialize;
@@ -99,25 +97,6 @@ async fn parse_success_response(
     Ok(value)
 }
 
-async fn query_avatar_color(
-    pool: &sqlx::SqlitePool,
-    agent_id: &str,
-) -> Result<Option<String>, String> {
-    if agent_id.is_empty() {
-        return Ok(None);
-    }
-
-    let color = sqlx::query_scalar::<sqlx::Sqlite, Option<String>>(
-        "SELECT dominant_color FROM avatars WHERE owner_id = ? AND owner_type = 'agent' AND deleted_at IS NULL",
-    )
-    .bind(agent_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|error| format!("Avatar color query failed for {agent_id}: {error}"))?
-    .flatten();
-    Ok(color)
-}
-
 /// 批量 Push 单 topic 处理结果
 pub struct PushBatchResult {
     pub topic: TopicKey,
@@ -168,14 +147,6 @@ struct MessageTombstoneRequest<'a> {
     topic_id: &'a str,
     msg_id: &'a str,
     deleted_at: i64,
-}
-
-#[derive(Serialize)]
-#[serde(untagged)]
-enum OutboundMessageSyncDTO {
-    User(UserMessageSyncDTO),
-    Agent(AgentMessageSyncDTO),
-    Group(GroupMessageSyncDTO),
 }
 
 struct BoundedJsonLine {
@@ -368,6 +339,7 @@ async fn preflight_topic_messages(
                     COALESCE(LENGTH(CAST(ma.src AS BLOB)), 0) +
                     COALESCE(LENGTH(CAST(ma.status AS BLOB)), 0) +
                     COALESCE(LENGTH(CAST(a.mime_type AS BLOB)), 0) +
+                    COALESCE(LENGTH(CAST(a.extracted_text AS BLOB)), 0) +
                     COALESCE(LENGTH(CAST(a.image_frames AS BLOB)), 0)
                 ), 0)
          FROM message_attachments ma
@@ -730,7 +702,7 @@ async fn load_outbound_message_page(
     let attachment_query = format!(
         "SELECT ma.msg_id, ma.hash AS relation_hash, ma.display_name, ma.src, ma.status,
                 a.hash AS stored_hash, a.mime_type, a.size, a.internal_path,
-                a.image_frames, a.thumbnail_path, a.created_at
+                a.extracted_text, a.image_frames, a.thumbnail_path, a.created_at
          FROM message_attachments ma
          LEFT JOIN attachments a ON a.hash = ma.hash
          WHERE ma.owner_type = ? AND ma.owner_id = ? AND ma.topic_id = ?
@@ -799,6 +771,9 @@ async fn load_outbound_message_page(
                 })
             })
             .transpose()?;
+        let extracted_text: Option<String> = row.try_get("extracted_text").map_err(|error| {
+            format!("Attachment extracted text decode failed for {relation_hash}: {error}")
+        })?;
         attachments_by_message
             .entry(message_id)
             .or_insert_with(Vec::new)
@@ -828,7 +803,7 @@ async fn load_outbound_message_page(
                     .try_get::<Option<String>, _>("internal_path")
                     .map_err(|error| format!("Attachment path decode failed: {error}"))?
                     .ok_or_else(|| "Attachment has no local path metadata".to_string())?,
-                extracted_text: None,
+                extracted_text,
                 image_frames,
                 thumbnail_path: row
                     .try_get("thumbnail_path")
@@ -844,107 +819,63 @@ async fn load_outbound_message_page(
     Ok(messages)
 }
 
-async fn build_message_dto<R: Runtime>(
-    app: &AppHandle<R>,
+fn build_message_dto(
     message: crate::vcp_modules::chat_manager::ChatMessage,
-    owner_type: &str,
-    avatar_colors: &mut HashMap<String, String>,
-) -> Result<OutboundMessageSyncDTO, String> {
+) -> Result<MessageSyncDTO, String> {
     if message.id.is_empty() || message.role.is_empty() {
         return Err("Outbound messages require non-empty id and role".to_string());
     }
-    if message.role == "user" {
-        let attachments = message
-            .attachments
-            .map(|attachments| {
-                attachments
-                    .into_iter()
-                    .map(|attachment| {
-                        let hash = attachment
-                            .hash
-                            .as_deref()
-                            .and_then(canonical_sha256)
-                            .ok_or_else(|| {
-                                format!(
-                                    "Outbound message {} attachment {} has no valid SHA-256 hash",
-                                    message.id, attachment.name
-                                )
-                            })?;
-                        Ok(AttachmentSyncDTO {
-                            r#type: attachment.r#type,
-                            name: attachment.name,
-                            size: attachment.size,
-                            hash,
-                            status: attachment.status,
-                            extracted_text: attachment.extracted_text,
-                            image_frames: attachment.image_frames,
-                            created_at: attachment.created_at,
-                        })
+    let attachments = message
+        .attachments
+        .map(|attachments| {
+            attachments
+                .into_iter()
+                .map(|attachment| {
+                    let hash = attachment
+                        .hash
+                        .as_deref()
+                        .and_then(canonical_sha256)
+                        .ok_or_else(|| {
+                            format!(
+                                "Outbound message {} attachment {} has no valid SHA-256 hash",
+                                message.id, attachment.name
+                            )
+                        })?;
+                    Ok(AttachmentSyncDTO {
+                        r#type: attachment.r#type,
+                        name: attachment.name,
+                        size: attachment.size,
+                        hash,
+                        status: attachment.status,
+                        extracted_text: attachment.extracted_text,
+                        image_frames: attachment.image_frames,
+                        created_at: attachment.created_at,
                     })
-                    .collect::<Result<Vec<_>, String>>()
-            })
-            .transpose()?;
-        return Ok(OutboundMessageSyncDTO::User(UserMessageSyncDTO {
-            id: message.id,
-            role: message.role,
-            name: message.name,
-            content: message.content,
-            timestamp: message.timestamp,
-            updated_at: message.updated_at.unwrap_or(message.timestamp),
-            attachments,
-            content_hash: message.content_hash,
-        }));
-    }
+                })
+                .collect::<Result<Vec<_>, String>>()
+        })
+        .transpose()?;
 
-    if !matches!(owner_type, "agent" | "group") {
-        return Err(format!(
-            "Outbound message owner type {owner_type} is unsupported"
-        ));
-    }
-    let agent_id = message.agent_id.unwrap_or_default();
-    let avatar_color = if let Some(color) = avatar_colors.get(&agent_id) {
-        color.clone()
-    } else {
-        let color = query_avatar_color(&app.state::<DbState>().pool, &agent_id)
-            .await?
-            .unwrap_or_else(|| "#6B7280".to_string());
-        avatar_colors.insert(agent_id.clone(), color.clone());
-        color
-    };
-    if owner_type == "group" {
-        Ok(OutboundMessageSyncDTO::Group(GroupMessageSyncDTO {
-            id: message.id,
-            role: message.role,
-            name: message.name,
-            content: message.content,
-            timestamp: message.timestamp,
-            updated_at: message.updated_at.unwrap_or(message.timestamp),
-            agent_id,
-            group_id: message.group_id.unwrap_or_default(),
-            topic_id: message.topic_id.unwrap_or_default(),
-            is_group_message: true,
-            avatar_color,
-            content_hash: message.content_hash,
-        }))
-    } else {
-        Ok(OutboundMessageSyncDTO::Agent(AgentMessageSyncDTO {
-            id: message.id,
-            role: message.role,
-            name: message.name,
-            content: message.content,
-            timestamp: message.timestamp,
-            updated_at: message.updated_at.unwrap_or(message.timestamp),
-            agent_id,
-            is_thinking: message.is_thinking,
-            finish_reason: message.finish_reason,
-            avatar_color,
-            content_hash: message.content_hash,
-        }))
-    }
+    Ok(MessageSyncDTO {
+        id: message.id,
+        role: message.role,
+        name: message.name,
+        content: message.content,
+        timestamp: message.timestamp,
+        updated_at: message.updated_at.unwrap_or(message.timestamp),
+        is_thinking: None,
+        agent_id: message.agent_id,
+        group_id: message.group_id,
+        topic_id: message.topic_id,
+        is_group_message: message.is_group_message.filter(|value| *value),
+        finish_reason: message.finish_reason,
+        attachments,
+        content_hash: message.content_hash,
+        avatar_color: None,
+    })
 }
 
-async fn serialize_topic_messages<R: Runtime>(
-    app: &AppHandle<R>,
+async fn serialize_topic_messages(
     tx: &mut Transaction<'_, Sqlite>,
     key: &TopicKey,
     expected_message_count: usize,
@@ -970,7 +901,6 @@ async fn serialize_topic_messages<R: Runtime>(
 
     let mut cursor: Option<(i64, String)> = None;
     let mut serialized_count = 0usize;
-    let mut avatar_colors = HashMap::new();
     loop {
         let page = load_outbound_message_page(
             tx,
@@ -992,7 +922,7 @@ async fn serialize_topic_messages<R: Runtime>(
                 )
             })?;
             let next_cursor = (timestamp, message.id.clone());
-            let dto = build_message_dto(app, message, owner_type, &mut avatar_colors).await?;
+            let dto = build_message_dto(message)?;
             if serialized_count > 0 {
                 line.write_all(b",").map_err(|error| {
                     format!("Message push separator failed for {topic_id}: {error}")
@@ -1035,8 +965,9 @@ impl PushExecutor {
         let config =
             agent_service::read_agent_config_internal(app, &app.state(), agent_id, None).await?;
         let dto = AgentSyncDTO::from(&config);
+        let config_hash = HashAggregator::compute_agent_config_hash(&dto);
 
-        let idempotency_key = generate_idempotency_key("push", "agent", agent_id);
+        let idempotency_key = generate_idempotency_key("push", "agent", agent_id, &config_hash);
         let url = format!("{}/api/mobile-sync/upload-entity", http_url);
 
         let response = client
@@ -1067,8 +998,9 @@ impl PushExecutor {
             group_service::read_group_config(app.clone(), app.state(), group_id.to_string())
                 .await?;
         let dto = GroupSyncDTO::from(&config);
+        let config_hash = HashAggregator::compute_group_config_hash(&dto);
 
-        let idempotency_key = generate_idempotency_key("push", "group", group_id);
+        let idempotency_key = generate_idempotency_key("push", "group", group_id, &config_hash);
         let url = format!("{}/api/mobile-sync/upload-entity", http_url);
 
         let response = client
@@ -1385,8 +1317,7 @@ impl PushExecutor {
                 }
             }
 
-            let line =
-                serialize_topic_messages(app, &mut read_tx, key, preflight.live_count).await?;
+            let line = serialize_topic_messages(&mut read_tx, key, preflight.live_count).await?;
             read_tx.commit().await.map_err(|error| {
                 format!("Message push snapshot close failed for {topic_id}: {error}")
             })?;
@@ -1476,13 +1407,19 @@ impl PushExecutor {
     }
 }
 
-fn generate_idempotency_key(action: &str, entity_type: &str, id: &str) -> String {
+fn generate_idempotency_key(
+    action: &str,
+    entity_type: &str,
+    id: &str,
+    config_hash: &str,
+) -> String {
     let now = chrono::Utc::now().timestamp() / 60;
     let now_str = now.to_string();
     crate::vcp_modules::infra::utils::calculate_sha256_slices(&[
         action.as_bytes(),
         entity_type.as_bytes(),
         id.as_bytes(),
+        config_hash.as_bytes(),
         now_str.as_bytes(),
     ])
 }

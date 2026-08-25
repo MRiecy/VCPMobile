@@ -186,7 +186,7 @@ struct TopicNDJSONFrame {
     topic_id: String,
     owner_type: Option<String>,
     owner_id: Option<String>,
-    messages: Vec<crate::vcp_modules::sync_dto::MessagePullSyncDTO>,
+    messages: Vec<crate::vcp_modules::sync_dto::MessageSyncDTO>,
     error: Option<WireSyncError>,
     legacy_attachment_warnings: usize,
     warning_samples: Vec<String>,
@@ -498,7 +498,7 @@ fn validate_returned_topic_identity(
 fn validate_requested_message_ids(
     topic_id: &str,
     expected: Option<&HashSet<String>>,
-    messages: &[crate::vcp_modules::sync_dto::MessagePullSyncDTO],
+    messages: &[crate::vcp_modules::sync_dto::MessageSyncDTO],
 ) -> Result<(), String> {
     let Some(expected) = expected else {
         return Ok(());
@@ -1869,7 +1869,7 @@ mod ndjson_budget_tests {
     #[test]
     fn requested_message_ids_require_exact_response_coverage() {
         let messages = vec![
-            crate::vcp_modules::sync_dto::MessagePullSyncDTO {
+            crate::vcp_modules::sync_dto::MessageSyncDTO {
                 id: "message-a".into(),
                 role: "user".into(),
                 name: None,
@@ -1886,7 +1886,7 @@ mod ndjson_budget_tests {
                 content_hash: None,
                 avatar_color: None,
             },
-            crate::vcp_modules::sync_dto::MessagePullSyncDTO {
+            crate::vcp_modules::sync_dto::MessageSyncDTO {
                 id: "message-b".into(),
                 role: "assistant".into(),
                 name: None,
