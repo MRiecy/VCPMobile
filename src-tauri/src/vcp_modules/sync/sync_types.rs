@@ -95,6 +95,7 @@ pub fn stable_stringify(value: &serde_json::Value) -> String {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SyncDataType {
+    Owner,
     Agent,
     Group,
     Avatar,
@@ -105,6 +106,7 @@ pub enum SyncDataType {
 impl fmt::Display for SyncDataType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            SyncDataType::Owner => write!(f, "owner"),
             SyncDataType::Agent => write!(f, "agent"),
             SyncDataType::Group => write!(f, "group"),
             SyncDataType::Avatar => write!(f, "avatar"),
@@ -134,10 +136,10 @@ pub struct EntityState {
     /// 软删除时间戳 (可选，用于双向删除同步)
     #[serde(rename = "deletedAt", skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<i64>,
-    /// 所有者类型 (仅用于 topic 类型，区分 agent_topic 和 group_topic)
+    /// 所有者类型（Owner 与 Topic 必填）
     #[serde(rename = "ownerType", skip_serializing_if = "Option::is_none")]
     pub owner_type: Option<String>,
-    /// 所有者 ID（仅用于 topic，和 ownerType 共同构成无歧义身份）
+    /// 所有者 ID（仅用于 Topic；Owner 自身使用 id）
     #[serde(rename = "ownerId", skip_serializing_if = "Option::is_none")]
     pub owner_id: Option<String>,
 }
@@ -204,6 +206,7 @@ mod tests {
 
     #[test]
     fn test_sync_data_type_display_and_serde_are_lowercase() {
+        assert_eq!(SyncDataType::Owner.to_string(), "owner");
         assert_eq!(SyncDataType::Agent.to_string(), "agent");
         assert_eq!(SyncDataType::Group.to_string(), "group");
         assert_eq!(SyncDataType::Avatar.to_string(), "avatar");

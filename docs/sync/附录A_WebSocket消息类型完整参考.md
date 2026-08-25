@@ -28,7 +28,7 @@ scope: 双端
 
 | 序号 | 消息名称 | 方向 | 触发时机 | Payload 关键字段 | 移动端处理函数/位置 | 桌面端处理函数/位置 | 对应代码文件 |
 |-----|---------|------|---------|-----------------|-------------------|-------------------|------------|
-| 10 | `SYNC_MANIFEST` | M→D | Phase 1 先发 Agent/Group，drain 后再发 Avatar；Phase 2 发送 Topic 清单（附带 `targetedOwners`） | `data: EntityState[]`（实体状态数组），`dataType: string`（`agent`/`group`/`avatar`/`topic`），`phase: number`（1 或 2），`targetedOwners: string[]`（V2 Phase 2 优化） | `SyncCommand::StartManualSync` 触发 Owner 波次；Owner 完成门触发 Avatar 波次；`PipelineCommand::StartTopicMetadata` 触发 Phase 2 靶向 Topic Manifest | `handleSyncManifest`（`sync/manifest.js`）：加载本地清单、两轮遍历比对、输出 Action 列表 | `sync_service.rs`, `phase1_metadata.rs`, `sync/manifest.js` |
+| 10 | `SYNC_MANIFEST` | M→D | Phase 1 先发统一 Owner，drain 后再发 Avatar；Phase 2 发送 Topic 清单（附带 `targetedOwners`） | `data: EntityState[]`（实体状态数组），`dataType: string`（`owner`/`avatar`/`topic`），`phase: number`（1 或 2） | `SyncCommand::StartManualSync` 触发 Owner 波次；Owner 完成门触发 Avatar 波次；`PipelineCommand::StartTopicMetadata` 触发 Phase 2 靶向 Topic Manifest | `handleSyncManifest`（`sync/manifest.js`）：加载本地清单、两轮遍历比对、输出 Action 列表 | `sync_service.rs`, `phase1_metadata.rs`, `sync/manifest.js` |
 | 11 | `SYNC_DIFF_RESULTS` | D→M | 桌面端完成 `SYNC_MANIFEST` 比对后返回差异动作列表 | `data: DiffResult[]`（差异结果数组），`dataType: string`，`phase: number` | `run_sync_session` WS 处理器中解析 JSON，按 `action` 字段分类为 `batch_pull_requests`、`push_topics_to_fetch`、`other_items` 三类并行执行 | `handleSyncManifest` 返回：`getLocalManifest` → 两轮遍历算法 → 组装 `SYNC_DIFF_RESULTS` | `sync_service.rs`, `sync/manifest.js` |
 | 12 | `SYNC_TOPIC_HASH_BATCH_V2` | M→D | Phase 2.5 发送 Topic 双哈希批量比对请求；仅针对 Phase 1 筛选出的 `changed_owners` 下的话题 | `hashes: Record<topicId, {configHash: string, contentHash: string}>` | `PipelineCommand::StartTopicValidation` 触发；调用 `Phase3Message::get_targeted_topic_hashes` 批量查询 SQLite，组装为 JSON Map | `handleSyncTopicHashBatchV2`（`sync/diff.js`）：逐 Topic 查询 `hash`（对应 `config_hash`）与 `aggregated_hash`（对应 `content_hash`），双字段均一致才判定为未变更 | `sync_service.rs`, `phase3_message.rs`, `sync/diff.js` |
 | 13 | `SYNC_TOPIC_HASH_RESULTS` | D→M | 桌面端完成双哈希比对后返回变更话题列表 | `changedTopics: string[]`（变更话题 ID 数组） | 接收后写入 `changed_topics` 共享状态（`Arc<Mutex<Vec<String>>>`），触发 `SyncCommand::StartMessages` 进入 Phase 3 | `handleSyncTopicHashBatchV2` 返回：遍历比对结果，收集不一致或不存在的话题 ID | `sync_service.rs`, `sync/diff.js` |
@@ -60,7 +60,7 @@ scope: 双端
 | `attemptId` | `u64` / `number` | 最终 `PHASE_COMPLETED`, `PHASE_ACK` | 最终帧必填 | — | 当前会话内的 reconnect attempt；桌面端必须原样回显 |
 | `nonce` | `string` | 最终 `PHASE_COMPLETED`, `PHASE_ACK` | 最终帧必填 | — | 每次 Finalize 新生成的 UUID v4；用于拒绝过期和重放 ACK |
 | `data` | `EntityState[]` | `SYNC_MANIFEST` | 是 | `[]` | 实体状态向量数组，每个元素为一条实体的指纹与元数据 |
-| `dataType` | `string` | `SYNC_MANIFEST`, `SYNC_DIFF_RESULTS` | 是 | — | 实体类型枚举值：`agent`、`group`、`avatar`、`topic`；序列化为小写 |
+| `dataType` | `string` | `SYNC_MANIFEST`, `SYNC_DIFF_RESULTS` | 是 | — | 清单类型枚举值：`owner`、`avatar`、`topic`；序列化为小写 |
 | `phase` (number) | `number` | `SYNC_MANIFEST`, `SYNC_DIFF_RESULTS` | 是 | — | 阶段编号：`1`=Owner Metadata, `2`=Topic Metadata；用于桌面端日志分类 |
 | `targetedOwners` | `string[]` | `SYNC_MANIFEST` (phase=2) | 否 | `[]` | V2 优化字段：仅针对特定 Owner ID 列表的话题构建清单；为空数组时视为全量 |
 | `hashes` | `object` | `SYNC_TOPIC_HASH_BATCH_V2` | 是 | — | 兼容哈希 Map；中央路径收到严格 `topics` 列表时不得单独依赖该 Map 推断 Owner |
@@ -81,7 +81,7 @@ scope: 双端
 | `kind` | 闭合集合字符串 | `SyncError` | 是 | — | `device/configuration/connection/compatibility/protocol/data/storage/internal` |
 | `retry` | 闭合集合字符串 | `SyncError` | 是 | — | `automatic/after_user_action/manual/never`，直接控制 UI 行为 |
 | `failedTopicIds` | `string[]` | `SyncError` | 是 | `[]` | 去重且最多 8 项；仅用于诊断定位 |
-| `ownerType` | `string` | `SYNC_DIFF_RESULTS` 中 DiffResult | 否 | — | 仅 Topic 类型使用，区分 `agent` 与 `group`，指导路由到正确的 Pull/Push Executor |
+| `ownerType` | `string` | Owner/Topic `EntityState` 与 DiffResult | 条件 | — | Owner 必填并与 `id` 组成身份；Topic 必填并与 `ownerId + id` 组成身份 |
 | `mismatchedContent` | `boolean` | `SYNC_DIFF_RESULTS` 中 DiffResult | 否 | `false` | V2 标记；`true` 表示 `content_hash` 不一致，用于填充 `changed_owners` 触发 targeted topic sync |
 | `action` | `string` | `SYNC_DIFF_RESULTS` 中 DiffResult | 是 | — | 差异动作：`PULL`（移动端拉取）、`PUSH`（移动端推送）、`DELETE`（移动端软删除）、`PUSH_DELETE`（移动端删除并通知桌面端）、`SKIP`（无需操作） |
 
@@ -97,7 +97,7 @@ scope: 双端
 | `content_hash` | `Option<String>` | `contentHash` | 是 | Agent/Group/Topic | `None` | 内容聚合指纹；代表子实体集合的 Merkle Root，如 Topic 下消息的聚合哈希 |
 | `ts` | `i64` | `ts` | 否 | 是 | — | 绝对时间戳 / 逻辑时钟，毫秒级 Unix Epoch；LWW（Last-Write-Wins，最后写入胜出）裁决标准 |
 | `deleted_at` | `Option<i64>` | `deletedAt` | 是 | 否 | `None` | 软删除时间戳；非空表示该实体已被逻辑删除，用于双向删除同步 |
-| `owner_type` | `Option<String>` | `ownerType` | 是 | 否 | `None` | 仅用于 `topic` 类型，区分 `"agent"` 和 `"group"`，指导路由到 `AgentTopicSyncDTO` 或 `GroupTopicSyncDTO` |
+| `owner_type` | `Option<String>` | `ownerType` | 是 | Owner/Topic | `None` | Owner 与 `id` 组成身份；Topic 与 `ownerId + id` 组成身份 |
 | `owner_id` | `Option<String>` | `ownerId` | 是 | 否 | `None` | 仅用于 `topic` 类型；与 `ownerType`、Topic ID 共同构成复合身份，协议 1.3 的 Topic manifest 中必须出现 |
 
 ---
@@ -108,10 +108,10 @@ scope: 双端
 |--------|------|---------|------|------|
 | `id` | `string` | 始终 | 是 | 实体唯一标识符 |
 | `action` | `string` | 始终 | 是 | 操作类型：`PULL`、`PUSH`、`DELETE`、`PUSH_DELETE`、`SKIP` |
-| `ownerType` | `string` | Topic / Agent / Group 类型 Diff 结果 | 否 | 所有者类型，用于路由到正确的 Pull/Push Executor；`agent_topic` 或 `group_topic` |
+| `ownerType` | `string` | Owner / Topic 类型 Diff 结果 | 条件 | Owner 中与 `id` 组成身份；Topic 中确定父实体类型 |
 | `ownerId` | `string` | Topic 的 `PUSH`/`PULL` 结果 | 条件 | 精确父实体 ID；不得由 Topic ID 或路径模糊推导 |
 | `deletedAt` | `number` | `action` 为 `DELETE` 或 `PUSH_DELETE` 时 | 条件 | 软删除时间戳，毫秒级 Unix Epoch |
-| `mismatchedContent` | `boolean` | 仅 Agent/Group 类型的 Diff 结果 | 否 | V2 标记；`true` 表示 `content_hash` 不匹配，用于引导后续 targeted topic sync |
+| `mismatchedContent` | `boolean` | 仅 Owner 类型的 Diff 结果 | 否 | V2 标记；`true` 表示 `content_hash` 不匹配，用于引导后续 targeted topic sync |
 
 ---
 

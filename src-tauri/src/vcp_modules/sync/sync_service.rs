@@ -1797,7 +1797,7 @@ async fn run_sync_session(
                                     if should_start {
                                         if let Err(error) = write_queue_task.flush().await {
                                             let message = format!(
-                                                "Agent/group metadata write drain before avatars failed: {error}"
+                                                "Owner metadata write drain before avatars failed: {error}"
                                             );
                                             fatal_error = true;
                                             publish_sync_error(
@@ -2119,64 +2119,30 @@ async fn run_sync_session(
                                 SyncCommand::StartManualSync => {
                                     let db = handle_clone.state::<DbState>();
                                     manifest_phase.store(1, Ordering::SeqCst);
-                                    let manifests = async {
-                                        Ok::<_, String>(vec![
-                                            Phase1Metadata::build_agent_manifest(&db.pool).await?,
-                                            Phase1Metadata::build_group_manifest(&db.pool).await?,
-                                        ])
-                                    }.await;
-                                    match manifests {
-                                        Ok(manifests) => {
-                                        let manifest_types = manifests
-                                            .iter()
-                                            .map(|manifest| manifest.data_type.to_string())
-                                            .collect::<HashSet<_>>();
-                                        if manifest_types.len() != manifests.len() {
-                                            let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
-                                                attempt_id,
-                                                code: "OWNER_MANIFEST_INVALID".to_string(),
-                                                message: "Phase 1 manifests contain duplicate data types".to_string(),
-                                                failed_topic_ids: Vec::new(),
-                                            });
-                                            continue 'attempt;
-                                        }
-                                        let count = match u32::try_from(manifests.len()) {
-                                            Ok(count) => count,
-                                            Err(_) => {
-                                                let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
-                                                    attempt_id,
-                                                    code: "OWNER_MANIFEST_INVALID".to_string(),
-                                                    message: "Phase 1 manifest count exceeds the supported range".to_string(),
-                                                    failed_topic_ids: Vec::new(),
-                                                });
-                                                continue 'attempt;
+                                    match Phase1Metadata::build_owner_manifest(&db.pool).await {
+                                        Ok(manifest) => {
+                                            expected_manifest_count.store(1, Ordering::SeqCst);
+                                            manifest_responses_received.store(0, Ordering::SeqCst);
+                                            match expected_manifest_types.lock() {
+                                                Ok(mut expected) => {
+                                                    *expected = HashSet::from(["owner".to_string()]);
+                                                }
+                                                Err(_) => {
+                                                    let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
+                                                        attempt_id,
+                                                        code: "SYNC_STATE_POISONED".to_string(),
+                                                        message: "Expected manifest type state is poisoned".to_string(),
+                                                        failed_topic_ids: Vec::new(),
+                                                    });
+                                                    continue 'attempt;
+                                                }
                                             }
-                                        };
-                                        expected_manifest_count.store(count, Ordering::SeqCst);
-                                        manifest_responses_received.store(0, Ordering::SeqCst);
-                                        match expected_manifest_types.lock() {
-                                            Ok(mut expected) => *expected = manifest_types,
-                                            Err(_) => {
-                                                let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
-                                                    attempt_id,
-                                                    code: "SYNC_STATE_POISONED".to_string(),
-                                                    message: "Expected manifest type state is poisoned".to_string(),
-                                                    failed_topic_ids: Vec::new(),
-                                                });
-                                                continue 'attempt;
-                                            }
-                                        }
 
-                                        if manifests.is_empty() {
-                                            let _ = tx_internal.send(SyncCommand::StartTopicMetadata { attempt_id });
-                                            continue 'attempt;
-                                        }
-                                        for manifest in manifests {
                                             let msg = json!({
                                                 "type": "SYNC_MANIFEST",
                                                 "data": manifest.items,
                                                 "dataType": manifest.data_type,
-                                                "phase": 1 // Explicit Phase ID
+                                                "phase": 1
                                             });
                                             if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(msg.to_string().into())).await {
                                                 terminate_after_protocol_send_failure(
@@ -2187,23 +2153,22 @@ async fn run_sync_session(
                                                 ).await;
                                                 break 'attempt;
                                             }
-                                        }
-                                        task_tracker
-                                            .spawn(enforce_manifest_response_deadline(
-                                                expected_manifest_types.clone(),
-                                                manifest_phase.clone(),
-                                                1,
-                                                tx_internal.clone(),
-                                                attempt_id,
-                                                PHASE_RESPONSE_TIMEOUT,
-                                            ))
-                                            .await;
+                                            task_tracker
+                                                .spawn(enforce_manifest_response_deadline(
+                                                    expected_manifest_types.clone(),
+                                                    manifest_phase.clone(),
+                                                    1,
+                                                    tx_internal.clone(),
+                                                    attempt_id,
+                                                    PHASE_RESPONSE_TIMEOUT,
+                                                ))
+                                                .await;
                                         }
                                         Err(error) => {
                                             let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
                                                 attempt_id,
                                                 code: "OWNER_MANIFEST_DB_FAILED".to_string(),
-                                                message: format!("Failed to build Phase 1 manifests: {error}"),
+                                                message: format!("Failed to build Owner manifest: {error}"),
                                                 failed_topic_ids: Vec::new(),
                                             });
                                         }

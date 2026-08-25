@@ -76,6 +76,7 @@ fn parse_delete_timestamp(item: &Value, id: &str, action: &str) -> Result<Option
 /// 校验 SYNC_DIFF_RESULTS 条目。
 fn validate_diff_items(items: &[Value], data_type: &SyncDataType) -> Result<Vec<Value>, String> {
     let mut seen_ids = HashSet::new();
+    let mut seen_owners = HashSet::new();
     let mut seen_topics = HashSet::new();
     let mut validated = Vec::with_capacity(items.len());
     for item in items {
@@ -100,7 +101,20 @@ fn validate_diff_items(items: &[Value], data_type: &SyncDataType) -> Result<Vec<
                 "SYNC_DIFF_RESULTS item {id} mismatchedContent must be boolean"
             ));
         }
-        if *data_type == SyncDataType::Topic {
+        if *data_type == SyncDataType::Owner {
+            let owner_type = item
+                .get("ownerType")
+                .and_then(Value::as_str)
+                .filter(|owner_type| matches!(*owner_type, "agent" | "group"))
+                .ok_or_else(|| {
+                    format!("SYNC_DIFF_RESULTS owner {id} requires agent/group ownerType")
+                })?;
+            if !seen_owners.insert(OwnerKey::new(owner_type, id)) {
+                return Err(format!(
+                    "SYNC_DIFF_RESULTS contains duplicate owner identity {owner_type}/{id}"
+                ));
+            }
+        } else if *data_type == SyncDataType::Topic {
             let owner_type = item
                 .get("ownerType")
                 .and_then(Value::as_str)
@@ -220,15 +234,11 @@ impl DiffHandler {
                 let action = item["action"].as_str().unwrap_or_default().to_string();
 
                 // V2: Populate changed_owners for Phase 2 Topic Sync
-                if data_type == SyncDataType::Agent || data_type == SyncDataType::Group {
+                if data_type == SyncDataType::Owner {
                     let is_mismatched = item["mismatchedContent"].as_bool().unwrap_or(false);
                     if action == "PUSH" || action == "PULL" || is_mismatched {
                         let mut owners = changed_owners.lock().await;
-                        let owner_type = if data_type == SyncDataType::Group {
-                            "group"
-                        } else {
-                            "agent"
-                        };
+                        let owner_type = item["ownerType"].as_str().unwrap_or_default();
                         owners.insert(OwnerKey::new(owner_type, &id));
                     }
                 }
@@ -238,9 +248,7 @@ impl DiffHandler {
                 }
 
                 if action == "PULL"
-                    && (data_type == SyncDataType::Topic
-                        || data_type == SyncDataType::Agent
-                        || data_type == SyncDataType::Group)
+                    && (data_type == SyncDataType::Topic || data_type == SyncDataType::Owner)
                 {
                     let type_str = match data_type {
                         SyncDataType::Topic => {
@@ -250,8 +258,7 @@ impl DiffHandler {
                                 "agent_topic"
                             }
                         }
-                        SyncDataType::Agent => "agent",
-                        SyncDataType::Group => "group",
+                        SyncDataType::Owner => item["ownerType"].as_str().unwrap_or_default(),
                         _ => unreachable!(),
                     };
                     if data_type == SyncDataType::Topic {
@@ -292,7 +299,7 @@ impl DiffHandler {
                 task_tracker
                     .spawn(async move {
                         let chunk_size = match data_type_inner {
-                            SyncDataType::Agent | SyncDataType::Group => 50,
+                            SyncDataType::Owner => 50,
                             SyncDataType::Topic => 1000,
                             _ => 100,
                         };
@@ -594,8 +601,17 @@ impl DiffHandler {
                             let attempt_id_task = attempt_id_inner;
 
                             async move {
+                                let concrete_data_type = if data_type_task == SyncDataType::Owner {
+                                    match item.get("ownerType").and_then(Value::as_str) {
+                                        Some("agent") => SyncDataType::Agent,
+                                        Some("group") => SyncDataType::Group,
+                                        _ => SyncDataType::Owner,
+                                    }
+                                } else {
+                                    data_type_task.clone()
+                                };
                                 let operation_result: Result<(), String> = if action == "PULL" {
-                                    match &data_type_task {
+                                    match &concrete_data_type {
                                         SyncDataType::Avatar => {
                                             let parts: Vec<&str> = id.split(':').collect();
                                             if parts.len() != 2 {
@@ -619,7 +635,7 @@ impl DiffHandler {
                                         )),
                                     }
                                 } else if action == "PUSH" {
-                                    match &data_type_task {
+                                    match &concrete_data_type {
                                         SyncDataType::Agent => {
                                             PushExecutor::push_agent(
                                                 &h_task, &c_task, &b_task, &token_task, &id,
@@ -656,7 +672,7 @@ impl DiffHandler {
                                 } else if action == "DELETE" || action == "PUSH_DELETE" {
                                     use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
                                     let delete_result = match deleted_at {
-                                        Some(deleted_at) if deleted_at >= 0 => match &data_type_task {
+                                        Some(deleted_at) if deleted_at >= 0 => match &concrete_data_type {
                                             SyncDataType::Agent => {
                                                 DeleteExecutor::soft_delete_agent(
                                                     &h_task,
@@ -718,17 +734,17 @@ impl DiffHandler {
                                         match deleted_at {
                                             Some(deleted_at) => tx_internal_task
                                                 .send(SyncCommand::NotifyDelete {
-                                                    data_type: data_type_task.clone(),
+                                                    data_type: concrete_data_type.clone(),
                                                     id: id.clone(),
                                                     deleted_at,
-                                                    owner_type: if data_type_task == SyncDataType::Topic {
+                                                    owner_type: if concrete_data_type == SyncDataType::Topic {
                                                         item.get("ownerType")
                                                             .and_then(Value::as_str)
                                                             .map(str::to_string)
                                                     } else {
                                                         None
                                                     },
-                                                    owner_id: if data_type_task == SyncDataType::Topic {
+                                                    owner_id: if concrete_data_type == SyncDataType::Topic {
                                                         item.get("ownerId")
                                                             .and_then(Value::as_str)
                                                             .map(str::to_string)
@@ -862,40 +878,52 @@ mod tests {
     }
 
     #[test]
+    fn owner_diff_requires_explicit_owner_type() {
+        let items = json!([
+            {"id": "agent-a", "action": "PULL", "ownerType": "agent"},
+            {"id": "group-a", "action": "PUSH", "ownerType": "group"},
+        ]);
+        assert_eq!(
+            validate_diff_items(items.as_array().unwrap(), &SyncDataType::Owner)
+                .expect("mixed owner actions")
+                .len(),
+            2
+        );
+
+        let missing_type = json!([{"id": "owner-a", "action": "PULL"}]);
+        let error = validate_diff_items(missing_type.as_array().unwrap(), &SyncDataType::Owner)
+            .expect_err("owner action without ownerType must fail");
+        assert!(error.contains("requires agent/group ownerType"));
+    }
+
+    #[test]
     fn manifest_responses_consume_exact_type_once_for_the_current_phase() {
-        let expected = Mutex::new(HashSet::from(["agent".to_string(), "group".to_string()]));
-        assert!(!consume_manifest_response_type(
+        let expected = Mutex::new(HashSet::from(["owner".to_string()]));
+        assert!(consume_manifest_response_type(
             &json!({"phase": 1}),
-            &SyncDataType::Agent,
+            &SyncDataType::Owner,
             1,
             &expected,
         )
-        .expect("first expected type"));
+        .expect("owner response"));
         assert!(consume_manifest_response_type(
             &json!({"phase": 1}),
-            &SyncDataType::Agent,
+            &SyncDataType::Owner,
             1,
             &expected,
         )
         .is_err());
         assert!(
-            consume_manifest_response_type(&json!({}), &SyncDataType::Group, 1, &expected,)
+            consume_manifest_response_type(&json!({}), &SyncDataType::Owner, 1, &expected,)
                 .is_err()
         );
         assert!(consume_manifest_response_type(
             &json!({"phase": 2}),
-            &SyncDataType::Group,
+            &SyncDataType::Owner,
             1,
             &expected,
         )
         .is_err());
-        assert!(consume_manifest_response_type(
-            &json!({"phase": 1}),
-            &SyncDataType::Group,
-            1,
-            &expected,
-        )
-        .expect("last expected type"));
     }
 
     #[test]

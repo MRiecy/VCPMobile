@@ -11,10 +11,16 @@ const SQLITE_BIND_CHUNK: usize = 400;
 pub struct Phase1Metadata;
 
 impl Phase1Metadata {
-    pub async fn build_agent_manifest(pool: &SqlitePool) -> Result<SyncManifest, String> {
+    pub async fn build_owner_manifest(pool: &SqlitePool) -> Result<SyncManifest, String> {
         let rows = sqlx::query(
-            "SELECT agent_id, config_hash, content_hash, updated_at, deleted_at 
-             FROM agents WHERE owner_type = 'agent'",
+            "SELECT owner_type, agent_id AS owner_id, config_hash, content_hash,
+                    updated_at, deleted_at
+             FROM agents WHERE owner_type = 'agent'
+             UNION ALL
+             SELECT owner_type, group_id AS owner_id, config_hash, content_hash,
+                    updated_at, deleted_at
+             FROM groups WHERE owner_type = 'group'
+             ORDER BY owner_type, owner_id",
         )
         .fetch_all(pool)
         .await
@@ -22,14 +28,25 @@ impl Phase1Metadata {
 
         let mut items = Vec::new();
         for r in rows {
+            let owner_type: String = r
+                .try_get("owner_type")
+                .map_err(|error| format!("Owner manifest type decode failed: {error}"))?;
+            if !matches!(owner_type.as_str(), "agent" | "group") {
+                return Err(format!(
+                    "Owner manifest has unsupported owner type {owner_type}"
+                ));
+            }
             let id: String = r
-                .try_get("agent_id")
-                .map_err(|error| format!("Agent manifest id decode failed: {error}"))?;
+                .try_get("owner_id")
+                .map_err(|error| format!("Owner manifest id decode failed: {error}"))?;
+            if id.is_empty() {
+                return Err("Owner manifest has an empty owner id".to_string());
+            }
             let conf_h: String = r.try_get("config_hash").map_err(|error| {
-                format!("Agent manifest config hash decode failed for {id}: {error}")
+                format!("Owner manifest config hash decode failed for {owner_type}/{id}: {error}")
             })?;
             let cont_h: String = r.try_get("content_hash").map_err(|error| {
-                format!("Agent manifest content hash decode failed for {id}: {error}")
+                format!("Owner manifest content hash decode failed for {owner_type}/{id}: {error}")
             })?;
             items.push(EntityState {
                 id,
@@ -38,59 +55,17 @@ impl Phase1Metadata {
                 content_hash: Some(cont_h),
                 ts: r
                     .try_get("updated_at")
-                    .map_err(|error| format!("Agent manifest timestamp decode failed: {error}"))?,
+                    .map_err(|error| format!("Owner manifest timestamp decode failed: {error}"))?,
                 deleted_at: r
                     .try_get("deleted_at")
-                    .map_err(|error| format!("Agent manifest tombstone decode failed: {error}"))?,
-                owner_type: None,
+                    .map_err(|error| format!("Owner manifest tombstone decode failed: {error}"))?,
+                owner_type: Some(owner_type),
                 owner_id: None,
             });
         }
 
         Ok(SyncManifest {
-            data_type: SyncDataType::Agent,
-            items,
-        })
-    }
-
-    pub async fn build_group_manifest(pool: &SqlitePool) -> Result<SyncManifest, String> {
-        let rows = sqlx::query(
-            "SELECT group_id, config_hash, content_hash, updated_at, deleted_at 
-             FROM groups WHERE owner_type = 'group'",
-        )
-        .fetch_all(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-        let mut items = Vec::new();
-        for r in rows {
-            let id: String = r
-                .try_get("group_id")
-                .map_err(|error| format!("Group manifest id decode failed: {error}"))?;
-            let conf_h: String = r.try_get("config_hash").map_err(|error| {
-                format!("Group manifest config hash decode failed for {id}: {error}")
-            })?;
-            let cont_h: String = r.try_get("content_hash").map_err(|error| {
-                format!("Group manifest content hash decode failed for {id}: {error}")
-            })?;
-            items.push(EntityState {
-                id,
-                hash: None,
-                config_hash: Some(conf_h),
-                content_hash: Some(cont_h),
-                ts: r
-                    .try_get("updated_at")
-                    .map_err(|error| format!("Group manifest timestamp decode failed: {error}"))?,
-                deleted_at: r
-                    .try_get("deleted_at")
-                    .map_err(|error| format!("Group manifest tombstone decode failed: {error}"))?,
-                owner_type: None,
-                owner_id: None,
-            });
-        }
-
-        Ok(SyncManifest {
-            data_type: SyncDataType::Group,
+            data_type: SyncDataType::Owner,
             items,
         })
     }
@@ -270,7 +245,46 @@ impl Phase1Metadata {
 #[cfg(test)]
 mod tests {
     use super::Phase1Metadata;
+    use crate::vcp_modules::sync_types::SyncDataType;
     use crate::vcp_modules::topic_types::OwnerKey;
+
+    #[tokio::test]
+    async fn owner_manifest_combines_agent_and_group_states() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open database");
+        sqlx::query(
+            "CREATE TABLE agents (
+                owner_type TEXT, agent_id TEXT, config_hash TEXT,
+                content_hash TEXT, updated_at INTEGER, deleted_at INTEGER
+             );
+             CREATE TABLE groups (
+                owner_type TEXT, group_id TEXT, config_hash TEXT,
+                content_hash TEXT, updated_at INTEGER, deleted_at INTEGER
+             );
+             INSERT INTO agents VALUES
+                ('agent', 'agent-a', 'agent-config', 'agent-content', 10, NULL);
+             INSERT INTO groups VALUES
+                ('group', 'group-a', 'group-config', 'group-content', 11, 9);",
+        )
+        .execute(&pool)
+        .await
+        .expect("create owner fixture");
+
+        let manifest = Phase1Metadata::build_owner_manifest(&pool)
+            .await
+            .expect("build owner manifest");
+        assert_eq!(manifest.data_type, SyncDataType::Owner);
+        assert_eq!(manifest.items.len(), 2);
+        assert_eq!(manifest.items[0].id, "agent-a");
+        assert_eq!(manifest.items[0].owner_type.as_deref(), Some("agent"));
+        assert_eq!(manifest.items[0].owner_id, None);
+        assert_eq!(manifest.items[1].id, "group-a");
+        assert_eq!(manifest.items[1].owner_type.as_deref(), Some("group"));
+        assert_eq!(manifest.items[1].deleted_at, Some(9));
+    }
 
     #[tokio::test]
     async fn avatar_manifest_preserves_tombstones() {
