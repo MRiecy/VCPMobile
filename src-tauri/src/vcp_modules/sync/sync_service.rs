@@ -1,5 +1,6 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
+use crate::vcp_modules::settings_manager::{read_settings, Settings, SettingsState};
 use crate::vcp_modules::sync_error::{
     build_local_error_payload, build_wire_error_payload, decode_wire_sync_error,
     encode_wire_sync_error, parse_wire_sync_error, SyncErrorPayload,
@@ -8,7 +9,6 @@ use crate::vcp_modules::sync_logger::{redact_sync_diagnostic, LogLevel, SyncLogg
 use crate::vcp_modules::sync_pipeline::{Phase1Metadata, Phase3Message, SyncPipeline};
 use crate::vcp_modules::sync_types::{parse_topic_key, SyncDataType};
 use crate::vcp_modules::topic_types::{MessageKey, OwnerKey, TopicKey};
-use crate::vcp_modules::vcp_log_service::get_vcp_log_status_internal;
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -29,12 +29,15 @@ use tokio_util::sync::CancellationToken;
 const EXPECTED_PLUGIN_VERSION: &str = "1.3.0";
 const WIRE_PROTOCOL_VERSION: &str = "1.3";
 const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SYNC_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(270);
 const PHASE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 const FINAL_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SYNC_RETRIES: u32 = 3;
 const MAX_SYNC_TOPICS: usize = 10_000;
+#[cfg(target_os = "android")]
+const SYNC_GUARDIAN_LABEL: &str = "[数据同步] VCP Mobile";
 type RoutedSyncCommand = (u64, mpsc::UnboundedSender<SyncCommand>);
 type SyncWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -153,7 +156,7 @@ async fn schedule_sync_retry<R: Runtime>(
     }
     let Some(backoff) = take_retry_slot(retry_count, retry_delay) else {
         let final_message =
-            format!("{message}; retry budget exhausted after {MAX_SYNC_RETRIES} attempts");
+            format!("{message}; retry budget exhausted after {MAX_SYNC_RETRIES} automatic retries");
         emit_sync_log(app_handle, "error", &final_message);
         publish_sync_error(
             app_handle,
@@ -387,6 +390,29 @@ struct SyncSessionHandle {
     cancel_token: CancellationToken,
     command_tx: mpsc::UnboundedSender<SyncCommand>,
     join_handle: JoinHandle<Result<(), String>>,
+}
+
+struct SyncSessionConfig {
+    ws_url: String,
+    http_url: String,
+    sync_token: String,
+    sync_prerender_enabled: bool,
+    sync_log_level: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct SyncConfigValidationError {
+    code: &'static str,
+    detail: String,
+}
+
+impl SyncConfigValidationError {
+    fn new(code: &'static str, detail: impl Into<String>) -> Self {
+        Self {
+            code,
+            detail: detail.into(),
+        }
+    }
 }
 
 pub(crate) struct SyncTaskTracker {
@@ -802,28 +828,92 @@ async fn cancelled_during(token: &CancellationToken, duration: Duration) -> bool
     }
 }
 
-fn check_loopback_on_mobile(ws_url: &str, is_android: bool) -> bool {
-    if is_android {
-        if let Ok(u) = url::Url::parse(ws_url) {
-            if let Some(host) = u.host_str() {
-                if host == "127.0.0.1" || host == "localhost" {
-                    return true;
-                }
-            }
-        }
+fn parse_sync_endpoint(
+    raw: &str,
+    label: &str,
+    allowed_schemes: &[&str],
+) -> Result<url::Url, SyncConfigValidationError> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(SyncConfigValidationError::new(
+            "SYNC_CONFIG_MISSING",
+            format!("{label} is empty"),
+        ));
     }
-    false
+    let endpoint = url::Url::parse(raw).map_err(|error| {
+        SyncConfigValidationError::new(
+            "SYNC_CONFIG_INVALID",
+            format!("{label} is not a valid URL: {error}"),
+        )
+    })?;
+    if !allowed_schemes.contains(&endpoint.scheme()) || endpoint.host().is_none() {
+        return Err(SyncConfigValidationError::new(
+            "SYNC_CONFIG_INVALID",
+            format!(
+                "{label} must use {} and include a host",
+                allowed_schemes.join(" or ")
+            ),
+        ));
+    }
+    Ok(endpoint)
 }
 
-fn classify_connection_failure(
-    ws_url: &str,
-    err: &tokio_tungstenite::tungstenite::error::Error,
-) -> &'static str {
-    let is_android = cfg!(target_os = "android");
-    if check_loopback_on_mobile(ws_url, is_android) {
-        return "CONFIG_LOOPBACK_ON_MOBILE";
+fn endpoint_has_loopback_host(endpoint: &url::Url) -> bool {
+    match endpoint.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
+}
+
+fn build_sync_session_config(
+    settings: &Settings,
+    is_android: bool,
+) -> Result<SyncSessionConfig, SyncConfigValidationError> {
+    let mut ws_endpoint =
+        parse_sync_endpoint(&settings.sync_server_url, "WebSocket URL", &["ws", "wss"])?;
+    let http_endpoint =
+        parse_sync_endpoint(&settings.sync_http_url, "HTTP URL", &["http", "https"])?;
+    if settings.sync_token.trim().is_empty() {
+        return Err(SyncConfigValidationError::new(
+            "SYNC_TOKEN_MISSING",
+            "sync token is empty",
+        ));
+    }
+    if ws_endpoint.fragment().is_some()
+        || http_endpoint.query().is_some()
+        || http_endpoint.fragment().is_some()
+    {
+        return Err(SyncConfigValidationError::new(
+            "SYNC_CONFIG_INVALID",
+            "sync endpoint contains an unsupported query or fragment",
+        ));
+    }
+    if is_android
+        && (endpoint_has_loopback_host(&ws_endpoint) || endpoint_has_loopback_host(&http_endpoint))
+    {
+        return Err(SyncConfigValidationError::new(
+            "CONFIG_LOOPBACK_ON_MOBILE",
+            "sync endpoint resolves to the Android device loopback interface",
+        ));
     }
 
+    ws_endpoint.set_query(None);
+    ws_endpoint
+        .query_pairs_mut()
+        .append_pair("token", &settings.sync_token);
+
+    Ok(SyncSessionConfig {
+        ws_url: ws_endpoint.to_string(),
+        http_url: http_endpoint.as_str().trim_end_matches('/').to_string(),
+        sync_token: settings.sync_token.clone(),
+        sync_prerender_enabled: settings.sync_prerender_enabled,
+        sync_log_level: settings.sync_log_level.clone(),
+    })
+}
+
+fn classify_connection_failure(err: &tokio_tungstenite::tungstenite::error::Error) -> &'static str {
     if let tokio_tungstenite::tungstenite::error::Error::Http(response) = err {
         let status = response.status();
         if status == 401 || status == 403 {
@@ -841,6 +931,7 @@ fn classify_connection_failure(
 async fn run_sync_session(
     app_handle: AppHandle,
     session_id: u64,
+    session_config: SyncSessionConfig,
     cancel_token: CancellationToken,
     tx: mpsc::UnboundedSender<SyncCommand>,
     mut rx: mpsc::UnboundedReceiver<SyncCommand>,
@@ -849,6 +940,13 @@ async fn run_sync_session(
     let handle_clone = app_handle.clone();
     let tx_internal = tx.clone();
     let connection_status_for_task = connection_status.clone();
+    let SyncSessionConfig {
+        ws_url,
+        http_url,
+        sync_token,
+        sync_prerender_enabled,
+        sync_log_level: configured_log_level,
+    } = session_config;
 
     let http_client = match reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -876,15 +974,6 @@ async fn run_sync_session(
 
     let db = app_handle.state::<DbState>();
     let mut write_queue = DbWriteQueue::new(db.pool.clone(), db.path.clone());
-    let configured_log_level = {
-        let settings_state =
-            app_handle.state::<crate::vcp_modules::settings_manager::SettingsState>();
-        crate::vcp_modules::settings_manager::read_settings(app_handle.clone(), settings_state)
-            .await
-            .ok()
-            .map(|settings| settings.sync_log_level)
-            .unwrap_or_else(|| "INFO".to_string())
-    };
     let sync_log_level = LogLevel::parse(&configured_log_level).unwrap_or(LogLevel::Info);
     let invalid_log_level = LogLevel::parse(&configured_log_level).is_none();
     let log_dir = app_handle
@@ -946,88 +1035,41 @@ async fn run_sync_session(
     let write_queue = Arc::new(write_queue);
 
     #[cfg(target_os = "android")]
-    let _ = tauri_plugin_vcp_mobile::stream::start_stream_service_inner(
+    let sync_guardian_acquired = match tauri_plugin_vcp_mobile::stream::start_stream_service_inner(
         &app_handle,
-        "[数据同步] VCP Mobile",
-    );
+        SYNC_GUARDIAN_LABEL,
+    ) {
+        Ok(()) => true,
+        Err(error) => {
+            let message = format!(
+                "Failed to acquire Android sync foreground lease: {}",
+                redact_sync_diagnostic(&error)
+            );
+            publish_sync_error(
+                &app_handle,
+                session_id,
+                &connection_status,
+                "SYNC_FOREGROUND_ACQUIRE_FAILED",
+                &message,
+                Vec::new(),
+            )
+            .await;
+            false
+        }
+    };
+    #[cfg(not(target_os = "android"))]
+    let sync_guardian_acquired = true;
 
     let write_queue_task = write_queue.clone();
     let sync_logger_task = sync_logger.clone();
 
     'session: loop {
+        if !sync_guardian_acquired {
+            break;
+        }
         if cancel_token.is_cancelled() {
             break;
         }
-        let (ws_url, http_url, sync_token, sync_prerender_enabled) = {
-            let settings_state =
-                handle_clone.state::<crate::vcp_modules::settings_manager::SettingsState>();
-            match crate::vcp_modules::settings_manager::read_settings(
-                handle_clone.clone(),
-                settings_state,
-            )
-            .await
-            {
-                Ok(s) => {
-                    if s.sync_server_url.is_empty() || s.sync_http_url.is_empty() {
-                        emit_sync_log(&handle_clone, "error", "同步服务 URL 未配置，请检查设置");
-                        publish_sync_error(
-                            &handle_clone,
-                            session_id,
-                            &connection_status_for_task,
-                            "SYNC_CONFIG_MISSING",
-                            "同步服务 URL 未配置",
-                            Vec::new(),
-                        )
-                        .await;
-                        break;
-                    }
-                    let ws_addr = match url::Url::parse(&s.sync_server_url) {
-                        Ok(mut u) => {
-                            u.set_query(None);
-                            u.query_pairs_mut().append_pair("token", &s.sync_token);
-                            u.to_string()
-                        }
-                        Err(e) => {
-                            emit_sync_log(
-                                &handle_clone,
-                                "error",
-                                &format!("同步服务 URL 格式非法: {}", e),
-                            );
-                            publish_sync_error(
-                                &handle_clone,
-                                session_id,
-                                &connection_status_for_task,
-                                "SYNC_CONFIG_INVALID",
-                                "同步服务 URL 格式非法",
-                                Vec::new(),
-                            )
-                            .await;
-                            break;
-                        }
-                    };
-                    (
-                        ws_addr,
-                        s.sync_http_url.clone(),
-                        s.sync_token.clone(),
-                        s.sync_prerender_enabled,
-                    )
-                }
-                Err(error) => {
-                    let message = format!("无法读取同步配置: {error}");
-                    emit_sync_log(&handle_clone, "error", &message);
-                    publish_sync_error(
-                        &handle_clone,
-                        session_id,
-                        &connection_status_for_task,
-                        "SYNC_SETTINGS_READ_FAILED",
-                        &message,
-                        Vec::new(),
-                    )
-                    .await;
-                    break;
-                }
-            }
-        };
 
         publish_sync_nonterminal_status(
             &handle_clone,
@@ -1042,11 +1084,11 @@ async fn run_sync_session(
         let connect_result = tokio::select! {
             biased;
             _ = cancel_token.cancelled() => break,
-            result = connect_async(&ws_url) => result,
+            result = tokio::time::timeout(WS_CONNECT_TIMEOUT, connect_async(&ws_url)) => result,
         };
 
         match connect_result {
-            Ok((mut ws_stream, _)) => {
+            Ok(Ok((mut ws_stream, _))) => {
                 // ── 版本验证握手 ──
                 {
                     let version_req = json!({
@@ -2674,12 +2716,30 @@ async fn run_sync_session(
                     break;
                 }
             }
-            Err(e) => {
-                let error_code = classify_connection_failure(&ws_url, &e);
+            Err(_) => {
+                let retry_message = format!(
+                    "WebSocket connection timed out after {} seconds",
+                    WS_CONNECT_TIMEOUT.as_secs()
+                );
+                if !schedule_sync_retry(
+                    &handle_clone,
+                    session_id,
+                    &connection_status_for_task,
+                    &cancel_token,
+                    &mut retry_count,
+                    &mut retry_delay,
+                    "WS_CONNECT_TIMEOUT",
+                    &retry_message,
+                )
+                .await
+                {
+                    break;
+                }
+            }
+            Ok(Err(e)) => {
+                let error_code = classify_connection_failure(&e);
                 let error_detail = e.to_string();
-                let is_fatal = error_code == "CONFIG_LOOPBACK_ON_MOBILE"
-                    || error_code == "TOKEN_MISMATCH"
-                    || error_code == "WS_PATH_INVALID";
+                let is_fatal = error_code == "TOKEN_MISMATCH" || error_code == "WS_PATH_INVALID";
 
                 if is_fatal {
                     emit_sync_log(
@@ -2745,17 +2805,15 @@ async fn run_sync_session(
     let _owner_commit = sync_state.owner_commit.lock().await;
     if sync_state.current_session_id.load(Ordering::SeqCst) == session_id {
         sync_state.ws_sender.clear_if_owner(session_id);
+        #[cfg(target_os = "android")]
+        if sync_guardian_acquired {
+            release_sync_guardian_with_diagnostics(&app_handle);
+        }
         {
             let mut logger_guard = sync_state.current_logger.write().unwrap();
             *logger_guard = None;
         }
         *sync_state.current_log_path.write().await = None;
-
-        #[cfg(target_os = "android")]
-        let _ = tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(
-            &app_handle,
-            "[数据同步] VCP Mobile",
-        );
     }
     shutdown_result
 }
@@ -2947,6 +3005,22 @@ fn emit_operator_sync_log<R: Runtime>(
     );
 }
 
+#[cfg(target_os = "android")]
+fn release_sync_guardian_with_diagnostics(app_handle: &AppHandle) {
+    if let Err(error) =
+        tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(app_handle, SYNC_GUARDIAN_LABEL)
+    {
+        emit_sync_log(
+            app_handle,
+            "warning",
+            &format!(
+                "Failed to release Android sync foreground lease: {}",
+                redact_sync_diagnostic(&error)
+            ),
+        );
+    }
+}
+
 #[tauri::command]
 pub async fn stop_sync(
     #[allow(unused_variables)] handle: AppHandle,
@@ -2974,6 +3048,8 @@ pub async fn stop_sync(
         let mut guard = state.connection_status.write().await;
         *guard = "disconnected".to_string();
     }
+    #[cfg(target_os = "android")]
+    release_sync_guardian_with_diagnostics(&handle);
     let logger_clear_result = state
         .current_logger
         .write()
@@ -2985,12 +3061,6 @@ pub async fn stop_sync(
             )
         });
     *state.current_log_path.write().await = None;
-
-    #[cfg(target_os = "android")]
-    let _ = tauri_plugin_vcp_mobile::stream::stop_stream_service_inner(
-        &handle,
-        "[数据同步] VCP Mobile",
-    );
 
     join_result.map_err(|detail| encode_sync_command_error("SYNC_STOP_FAILED", &detail))?;
     logger_clear_result?;
@@ -3067,14 +3137,17 @@ pub async fn start_manual_sync(
         ));
     }
 
-    // VCPLog 是全局重要通道，未连接时直接拦截同步，避免进入同步主循环后长时间挂起
-    let log_status = get_vcp_log_status_internal().await;
-    if log_status != "connected" {
-        return Err(encode_sync_command_error(
-            "VCP_LOG_DISCONNECTED",
-            &format!("VCPLog status is {log_status}"),
-        ));
-    }
+    let settings_state = handle.state::<SettingsState>();
+    let settings = read_settings(handle.clone(), settings_state)
+        .await
+        .map_err(|error| {
+            encode_sync_command_error(
+                "SYNC_SETTINGS_READ_FAILED",
+                &format!("Failed to read sync settings: {error}"),
+            )
+        })?;
+    let session_config = build_sync_session_config(&settings, cfg!(target_os = "android"))
+        .map_err(|error| encode_sync_command_error(error.code, &error.detail))?;
 
     let (tx, rx) = mpsc::unbounded_channel::<SyncCommand>();
     tx.send(SyncCommand::StartManualSync).map_err(|error| {
@@ -3098,6 +3171,7 @@ pub async fn start_manual_sync(
         run_sync_session(
             app_handle,
             session_id,
+            session_config,
             run_cancel_token,
             tx,
             rx,
@@ -3317,7 +3391,7 @@ mod tests {
     #[test]
     fn command_errors_use_the_structured_transport_prefix() {
         let encoded = encode_sync_command_error(
-            "VCP_LOG_DISCONNECTED",
+            "SYNC_ACTIVE_GENERATION",
             "Bearer raw-secret should stay in native logs only",
         );
         let json = encoded
@@ -3325,8 +3399,8 @@ mod tests {
             .expect("structured sync command prefix");
         let payload: Value = serde_json::from_str(json).expect("structured sync error JSON");
 
-        assert_eq!(payload["code"], "VCP_LOG_DISCONNECTED");
-        assert_eq!(payload["category"], "connection");
+        assert_eq!(payload["code"], "SYNC_ACTIVE_GENERATION");
+        assert_eq!(payload["category"], "data");
         assert!(!encoded.contains("raw-secret"));
     }
 
@@ -3366,6 +3440,162 @@ mod tests {
         );
         assert_eq!(take_retry_slot(&mut retry_count, &mut retry_delay), None);
         assert_eq!(retry_count, MAX_SYNC_RETRIES);
+    }
+
+    fn valid_sync_settings() -> Settings {
+        Settings {
+            sync_server_url: "wss://192.168.1.10:5975/ws-sync".to_string(),
+            sync_http_url: "https://192.168.1.10:5974".to_string(),
+            sync_token: "sync-token".to_string(),
+            sync_log_level: "DEBUG".to_string(),
+            sync_prerender_enabled: true,
+            ..Settings::default()
+        }
+    }
+
+    fn sync_config_error(settings: &Settings, is_android: bool) -> SyncConfigValidationError {
+        match build_sync_session_config(settings, is_android) {
+            Ok(_) => panic!("expected invalid sync configuration"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn session_config_snapshot_is_validated_normalized_and_frozen() {
+        let mut settings = valid_sync_settings();
+        settings.sync_server_url =
+            "wss://192.168.1.10:5975/ws-sync?token=stale&mode=legacy".to_string();
+        settings.sync_http_url = "https://192.168.1.10:5974/base/".to_string();
+        settings.sync_token = "token +/?".to_string();
+
+        let config = build_sync_session_config(&settings, true)
+            .unwrap_or_else(|error| panic!("valid sync configuration rejected: {}", error.detail));
+        settings.sync_server_url = "ws://changed.invalid".to_string();
+        settings.sync_token = "changed".to_string();
+
+        let ws_url = url::Url::parse(&config.ws_url).expect("validated WebSocket URL");
+        let query = ws_url.query_pairs().collect::<Vec<_>>();
+        assert_eq!(query.len(), 1);
+        assert_eq!(query[0].0, "token");
+        assert_eq!(query[0].1, "token +/?");
+        assert_eq!(config.http_url, "https://192.168.1.10:5974/base");
+        assert_eq!(config.sync_token, "token +/?");
+        assert_eq!(config.sync_log_level, "DEBUG");
+        assert!(config.sync_prerender_enabled);
+    }
+
+    #[test]
+    fn session_config_rejects_missing_urls_and_token_before_session_creation() {
+        for (field, settings, expected_code) in [
+            (
+                "WebSocket URL",
+                Settings {
+                    sync_server_url: "   ".to_string(),
+                    ..valid_sync_settings()
+                },
+                "SYNC_CONFIG_MISSING",
+            ),
+            (
+                "HTTP URL",
+                Settings {
+                    sync_http_url: String::new(),
+                    ..valid_sync_settings()
+                },
+                "SYNC_CONFIG_MISSING",
+            ),
+            (
+                "token",
+                Settings {
+                    sync_token: " \t ".to_string(),
+                    ..valid_sync_settings()
+                },
+                "SYNC_TOKEN_MISSING",
+            ),
+        ] {
+            let error = sync_config_error(&settings, true);
+            assert_eq!(error.code, expected_code, "code for {field}");
+        }
+    }
+
+    #[test]
+    fn session_config_rejects_invalid_endpoint_shapes() {
+        for (field, settings) in [
+            (
+                "WebSocket scheme",
+                Settings {
+                    sync_server_url: "https://192.168.1.10:5975/ws-sync".to_string(),
+                    ..valid_sync_settings()
+                },
+            ),
+            (
+                "HTTP scheme",
+                Settings {
+                    sync_http_url: "ftp://192.168.1.10:5974".to_string(),
+                    ..valid_sync_settings()
+                },
+            ),
+            (
+                "WebSocket host",
+                Settings {
+                    sync_server_url: "ws://".to_string(),
+                    ..valid_sync_settings()
+                },
+            ),
+            (
+                "HTTP query",
+                Settings {
+                    sync_http_url: "https://192.168.1.10:5974?mode=legacy".to_string(),
+                    ..valid_sync_settings()
+                },
+            ),
+            (
+                "WebSocket fragment",
+                Settings {
+                    sync_server_url: "wss://192.168.1.10:5975/ws-sync#fragment".to_string(),
+                    ..valid_sync_settings()
+                },
+            ),
+        ] {
+            let error = sync_config_error(&settings, true);
+            assert_eq!(error.code, "SYNC_CONFIG_INVALID", "code for {field}");
+        }
+    }
+
+    #[test]
+    fn android_session_config_rejects_both_endpoint_loopbacks() {
+        for (field, settings) in [
+            (
+                "WebSocket localhost",
+                Settings {
+                    sync_server_url: "ws://localhost:5975".to_string(),
+                    ..valid_sync_settings()
+                },
+            ),
+            (
+                "WebSocket IPv4 loopback range",
+                Settings {
+                    sync_server_url: "ws://127.0.0.2:5975".to_string(),
+                    ..valid_sync_settings()
+                },
+            ),
+            (
+                "HTTP IPv6 loopback",
+                Settings {
+                    sync_http_url: "http://[::1]:5974".to_string(),
+                    ..valid_sync_settings()
+                },
+            ),
+        ] {
+            let error = sync_config_error(&settings, true);
+            assert_eq!(error.code, "CONFIG_LOOPBACK_ON_MOBILE", "code for {field}");
+        }
+
+        let settings = Settings {
+            sync_server_url: "ws://localhost:5975".to_string(),
+            sync_http_url: "http://127.0.0.2:5974".to_string(),
+            ..valid_sync_settings()
+        };
+        assert!(build_sync_session_config(&settings, false).is_ok());
     }
 
     #[tokio::test]
@@ -3716,25 +3946,6 @@ mod tests {
     }
 
     #[test]
-    fn test_check_loopback_on_mobile() {
-        // Test Android mode (is_android = true)
-        assert!(check_loopback_on_mobile("ws://127.0.0.1:3000", true));
-        assert!(check_loopback_on_mobile(
-            "ws://localhost:8080/ws-sync",
-            true
-        ));
-        assert!(!check_loopback_on_mobile("ws://192.168.1.100:3000", true));
-        assert!(!check_loopback_on_mobile("ws://my-pc.local:3000", true));
-
-        // Test non-Android mode (is_android = false)
-        assert!(!check_loopback_on_mobile("ws://127.0.0.1:3000", false));
-        assert!(!check_loopback_on_mobile(
-            "ws://localhost:8080/ws-sync",
-            false
-        ));
-    }
-
-    #[test]
     fn connection_failure_classification_uses_stable_codes() {
         for (status, expected) in [
             (StatusCode::UNAUTHORIZED, "TOKEN_MISMATCH"),
@@ -3742,10 +3953,7 @@ mod tests {
         ] {
             let response = Response::builder().status(status).body(None).unwrap();
             let error = WsError::Http(response);
-            assert_eq!(
-                classify_connection_failure("ws://192.168.1.100:3000/ws-sync", &error),
-                expected
-            );
+            assert_eq!(classify_connection_failure(&error), expected);
         }
 
         for error_kind in [
@@ -3753,10 +3961,7 @@ mod tests {
             std::io::ErrorKind::AddrNotAvailable,
         ] {
             let error = WsError::Io(std::io::Error::new(error_kind, "connection failed"));
-            assert_eq!(
-                classify_connection_failure("ws://192.168.1.100:3000/ws-sync", &error),
-                "CONNECTION_REFUSED"
-            );
+            assert_eq!(classify_connection_failure(&error), "CONNECTION_REFUSED");
         }
     }
 }

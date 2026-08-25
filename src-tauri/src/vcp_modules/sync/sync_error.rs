@@ -132,6 +132,14 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             "当前电量不足，已暂停同步",
             "电量达到 30% 后再试。",
         ),
+        "SYNC_FOREGROUND_ACQUIRE_FAILED" => definition(
+            Category::Device,
+            Origin::MobileNative,
+            Stage::Startup,
+            Retry::Manual,
+            "手机无法建立同步保活服务",
+            "重新同步；若再次失败，请重启应用并保留最新日志。",
+        ),
         "SYNC_ACTIVE_GENERATION" => definition(
             Category::Data,
             Origin::MobileSync,
@@ -143,10 +151,18 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
         "CONFIG_LOOPBACK_ON_MOBILE" => definition(
             Category::Configuration,
             Origin::MobileSync,
-            Stage::Preflight,
+            Stage::Startup,
             Retry::AfterUserAction,
-            "服务器地址仍指向本机，手机无法连接电脑",
-            "在同步设置中填写电脑的局域网 IP 和端口。",
+            "同步地址仍指向手机本机，无法连接电脑",
+            "将 WebSocket 和 HTTP 地址改为电脑的局域网 IP 与端口。",
+        ),
+        "SYNC_TOKEN_MISSING" => definition(
+            Category::Configuration,
+            Origin::MobileSync,
+            Stage::Startup,
+            Retry::AfterUserAction,
+            "同步令牌尚未配置",
+            "在同步设置中填写电脑端 Mobile Sync Token 后再试。",
         ),
         "TOKEN_MISMATCH" | "SYNC_AUTH_FAILED" => definition(
             Category::Configuration,
@@ -156,13 +172,21 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             "手机端与电脑端的同步令牌不一致",
             "重新核对两端令牌后再试。",
         ),
-        "SYNC_CONFIG_MISSING" | "SYNC_SETTINGS_READ_FAILED" => definition(
+        "SYNC_CONFIG_MISSING" => definition(
             Category::Configuration,
             Origin::MobileSync,
             Stage::Startup,
             Retry::AfterUserAction,
             "同步服务器地址尚未配置完整",
             "在同步设置中填写电脑端 WebSocket 和 HTTP 地址后再试。",
+        ),
+        "SYNC_SETTINGS_READ_FAILED" => definition(
+            Category::Storage,
+            Origin::MobileSync,
+            Stage::Startup,
+            Retry::Manual,
+            "手机未能读取同步设置",
+            "重启应用后重新同步；若仍失败，请保留最新日志。",
         ),
         "INVALID_CONFIGURATION" => definition(
             Category::Configuration,
@@ -180,13 +204,21 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             "电脑端数据服务认证失败",
             "重启电脑端应用并检查其数据服务配置后再试。",
         ),
-        "SYNC_CONFIG_INVALID" | "WS_PATH_INVALID" => definition(
+        "SYNC_CONFIG_INVALID" => definition(
+            Category::Configuration,
+            Origin::MobileSync,
+            Stage::Startup,
+            Retry::AfterUserAction,
+            "同步服务器地址格式或协议不正确",
+            "检查 WebSocket 与 HTTP 地址的协议、IP 和端口后再试。",
+        ),
+        "WS_PATH_INVALID" => definition(
             Category::Configuration,
             Origin::MobileSync,
             Stage::Connect,
             Retry::AfterUserAction,
-            "同步服务器地址格式或路径不正确",
-            "检查同步设置中的协议、IP、端口和服务路径后再试。",
+            "WebSocket 同步服务路径不正确",
+            "检查 WebSocket 地址中的服务路径后再试。",
         ),
         "SYNC_CHANGE_FEED_UNAVAILABLE" => definition(
             Category::Configuration,
@@ -221,6 +253,14 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Retry::Manual,
             "电脑端未在规定时间内完成版本握手",
             "确认电脑端同步插件已启动且两端网络正常，然后重新同步。",
+        ),
+        "WS_CONNECT_TIMEOUT" => definition(
+            Category::Connection,
+            Origin::MobileSync,
+            Stage::Connect,
+            Retry::Manual,
+            "连接电脑端同步服务超时",
+            "确认两端处于同一网络且电脑端同步服务已启动，然后重新同步。",
         ),
         "MANIFEST_RESPONSE_TIMEOUT" => definition(
             Category::Connection,
@@ -289,14 +329,6 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Retry::Manual,
             "电脑端数据服务持续繁忙",
             "等待电脑端当前任务结束后重新同步。",
-        ),
-        "VCP_LOG_DISCONNECTED" => definition(
-            Category::Connection,
-            Origin::MobileSync,
-            Stage::Preflight,
-            Retry::Manual,
-            "尚未连接电脑端服务通道",
-            "确认电脑端服务已启动，并等待连接成功后再试。",
         ),
         "PROTOCOL_INVALID"
         | "PROTOCOL_DUPLICATE_KEY"
@@ -930,8 +962,67 @@ mod tests {
     }
 
     #[test]
+    fn startup_admission_errors_keep_precise_semantics() {
+        let cases = [
+            (
+                "SYNC_CONFIG_MISSING",
+                SyncErrorCategory::Configuration,
+                SyncErrorOrigin::MobileSync,
+                SyncErrorStage::Startup,
+                SyncRetryAction::AfterUserAction,
+            ),
+            (
+                "SYNC_TOKEN_MISSING",
+                SyncErrorCategory::Configuration,
+                SyncErrorOrigin::MobileSync,
+                SyncErrorStage::Startup,
+                SyncRetryAction::AfterUserAction,
+            ),
+            (
+                "SYNC_CONFIG_INVALID",
+                SyncErrorCategory::Configuration,
+                SyncErrorOrigin::MobileSync,
+                SyncErrorStage::Startup,
+                SyncRetryAction::AfterUserAction,
+            ),
+            (
+                "CONFIG_LOOPBACK_ON_MOBILE",
+                SyncErrorCategory::Configuration,
+                SyncErrorOrigin::MobileSync,
+                SyncErrorStage::Startup,
+                SyncRetryAction::AfterUserAction,
+            ),
+            (
+                "SYNC_SETTINGS_READ_FAILED",
+                SyncErrorCategory::Storage,
+                SyncErrorOrigin::MobileSync,
+                SyncErrorStage::Startup,
+                SyncRetryAction::Manual,
+            ),
+            (
+                "SYNC_FOREGROUND_ACQUIRE_FAILED",
+                SyncErrorCategory::Device,
+                SyncErrorOrigin::MobileNative,
+                SyncErrorStage::Startup,
+                SyncRetryAction::Manual,
+            ),
+        ];
+
+        for (code, category, origin, stage, retry) in cases {
+            let payload = build_local_error_payload(code, Vec::new(), None);
+            assert_eq!(payload.category, category, "category for {code}");
+            assert_eq!(payload.origin, origin, "origin for {code}");
+            assert_eq!(payload.stage, stage, "stage for {code}");
+            assert_eq!(payload.retry_action, retry, "retry for {code}");
+        }
+
+        assert!(error_definition("VCP_LOG_DISCONNECTED").is_none());
+    }
+
+    #[test]
     fn timeout_codes_keep_the_phase_that_timed_out() {
         let cases = [
+            ("WS_CONNECT_TIMEOUT", SyncErrorStage::Connect),
             ("VERSION_CHECK_TIMEOUT", SyncErrorStage::Handshake),
             ("MANIFEST_RESPONSE_TIMEOUT", SyncErrorStage::OwnerMetadata),
             (
