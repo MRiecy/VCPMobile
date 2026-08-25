@@ -498,6 +498,7 @@ async fn internal_write_group_config<R: Runtime>(
             unified_model = excluded.unified_model,
             tag_match_mode = excluded.tag_match_mode,
             member_tags = excluded.member_tags,
+            created_at = excluded.created_at,
             updated_at = CASE
                 WHEN groups.config_hash IS NOT excluded.config_hash THEN excluded.updated_at
                 ELSE groups.updated_at

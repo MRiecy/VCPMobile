@@ -101,6 +101,21 @@ async fn read_response_limited(
     Ok((status, body))
 }
 
+fn normalize_avatar_content_type(value: Option<&str>) -> Result<String, String> {
+    let mime_type = value
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .ok_or_else(|| "Pull avatar response is missing Content-Type".to_string())?;
+    match mime_type.as_str() {
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" => Ok(mime_type),
+        "image/jpg" => Ok("image/jpeg".to_string()),
+        _ => Err(format!(
+            "Pull avatar returned unsupported Content-Type {mime_type}"
+        )),
+    }
+}
+
 fn http_status_error(operation: &str, status: reqwest::StatusCode, bytes: &[u8]) -> String {
     match encode_http_sync_error_body(bytes) {
         Ok(Some(encoded)) => encoded,
@@ -1039,16 +1054,24 @@ impl PullExecutor {
                 .await
             {
                 Ok(res) => {
+                    let avatar_mime_type = res
+                        .headers()
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
                     match read_response_limited(res, MAX_AVATAR_RESPONSE_BYTES, "Pull avatar").await
                     {
                         Ok((status, bytes)) if !status.is_success() => {
                             return Err(http_status_error("Pull avatar", status, &bytes));
                         }
                         Ok((_, bytes)) => {
+                            let mime_type =
+                                normalize_avatar_content_type(avatar_mime_type.as_deref())?;
                             write_queue
                                 .submit(DbWriteTask::Avatar {
                                     owner_type: owner_type.to_string(),
                                     owner_id: owner_id.to_string(),
+                                    mime_type,
                                     bytes,
                                 })
                                 .await?;

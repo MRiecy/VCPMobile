@@ -23,6 +23,7 @@ pub enum DbWriteTask {
     Avatar {
         owner_type: String,
         owner_id: String,
+        mime_type: String,
         bytes: Vec<u8>,
     },
     AgentTopicBatch {
@@ -203,15 +204,21 @@ mod tests {
             },
         )
         .expect_err("tombstoned group upsert must fail closed");
-        DbWriteQueue::rusqlite_upsert_avatar(&tx, "agent", "agent-deleted", &[1, 2, 3])
-            .expect_err("tombstoned avatar upsert must fail closed");
-        DbWriteQueue::rusqlite_upsert_avatar(&tx, "agent", "missing-agent", &[1])
+        DbWriteQueue::rusqlite_upsert_avatar(
+            &tx,
+            "agent",
+            "agent-deleted",
+            "image/png",
+            &[1, 2, 3],
+        )
+        .expect_err("tombstoned avatar upsert must fail closed");
+        DbWriteQueue::rusqlite_upsert_avatar(&tx, "agent", "missing-agent", "image/png", &[1])
             .expect_err("orphan agent avatar must fail closed");
-        DbWriteQueue::rusqlite_upsert_avatar(&tx, "group", "agent-live", &[1])
+        DbWriteQueue::rusqlite_upsert_avatar(&tx, "group", "agent-live", "image/png", &[1])
             .expect_err("wrong-type avatar owner must fail closed");
-        DbWriteQueue::rusqlite_upsert_avatar(&tx, "system", "system", &[1])
+        DbWriteQueue::rusqlite_upsert_avatar(&tx, "system", "system", "image/png", &[1])
             .expect_err("unsupported avatar owner must fail closed");
-        DbWriteQueue::rusqlite_upsert_avatar(&tx, "user", "user_avatar", &[1])
+        DbWriteQueue::rusqlite_upsert_avatar(&tx, "user", "user_avatar", "image/png", &[1])
             .expect("fixed user avatar owner must remain supported");
         DbWriteQueue::rusqlite_upsert_agent_topic(
             &tx,
@@ -523,8 +530,14 @@ impl DbWriteQueue {
                                 Self::rusqlite_upsert_group(&tx, &id, &dto)?;
                                 affected_owners.insert(OwnerKey::new("group", id));
                             }
-                            DbWriteTask::Avatar { owner_type, owner_id, bytes } => {
-                                Self::rusqlite_upsert_avatar(&tx, &owner_type, &owner_id, &bytes)?;
+                            DbWriteTask::Avatar { owner_type, owner_id, mime_type, bytes } => {
+                                Self::rusqlite_upsert_avatar(
+                                    &tx,
+                                    &owner_type,
+                                    &owner_id,
+                                    &mime_type,
+                                    &bytes,
+                                )?;
                             }
                             DbWriteTask::AgentTopicBatch { topics } => {
                                 for (key, dto) in topics {
@@ -855,6 +868,7 @@ impl DbWriteQueue {
         tx: &rusqlite::Transaction,
         owner_type: &str,
         owner_id: &str,
+        mime_type: &str,
         bytes: &[u8],
     ) -> rusqlite::Result<()> {
         let hash = HashAggregator::compute_avatar_hash(bytes);
@@ -864,6 +878,14 @@ impl DbWriteQueue {
         if !is_valid_avatar_owner(owner_type, owner_id) {
             return Err(Self::sync_contract_error(
                 "Avatar requires a non-empty owner id and a supported owner type",
+            ));
+        }
+        if !matches!(
+            mime_type,
+            "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+        ) {
+            return Err(Self::sync_contract_error(
+                "Avatar requires a supported image MIME type",
             ));
         }
         let parent_is_live = match owner_type {
@@ -892,12 +914,12 @@ impl DbWriteQueue {
             )));
         }
         let changed = tx.execute(
-            "INSERT INTO avatars (owner_type, owner_id, avatar_hash, mime_type, image_data, dominant_color, updated_at) 
-             VALUES (?, ?, ?, 'image/png', ?, ?, ?) 
-             ON CONFLICT(owner_type, owner_id) DO UPDATE SET 
-             avatar_hash=excluded.avatar_hash, image_data=excluded.image_data, dominant_color=excluded.dominant_color, updated_at=excluded.updated_at
+            "INSERT INTO avatars (owner_type, owner_id, avatar_hash, mime_type, image_data, dominant_color, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(owner_type, owner_id) DO UPDATE SET
+             avatar_hash=excluded.avatar_hash, mime_type=excluded.mime_type, image_data=excluded.image_data, dominant_color=excluded.dominant_color, updated_at=excluded.updated_at
              WHERE avatars.deleted_at IS NULL",
-            rusqlite::params![owner_type, owner_id, &hash, bytes, &dominant_color, now]
+            rusqlite::params![owner_type, owner_id, &hash, mime_type, bytes, &dominant_color, now]
         )?;
 
         if changed != 1 {

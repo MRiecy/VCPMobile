@@ -1849,6 +1849,9 @@ async fn run_sync_session(
                                             let _ = close_ws_with_deadline(&mut ws_stream).await;
                                             break;
                                         }
+                                        crate::vcp_modules::sync::sync_finalize::invalidate_sync_entity_caches(
+                                            &handle_clone,
+                                        );
 
                                         let db = handle_clone.state::<DbState>();
                                         let manifest = match Phase1Metadata::build_avatar_manifest(&db.pool).await {
@@ -1939,6 +1942,9 @@ async fn run_sync_session(
                                             let _ = close_ws_with_deadline(&mut ws_stream).await;
                                             break;
                                         }
+                                        crate::vcp_modules::sync::sync_finalize::invalidate_sync_entity_caches(
+                                            &handle_clone,
+                                        );
                                         if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(json!({ "type": "PHASE_COMPLETED", "phase": "owner_metadata" }).to_string().into())).await {
                                             terminate_after_protocol_send_failure(
                                                 &handle_clone,
@@ -1978,6 +1984,9 @@ async fn run_sync_session(
                                             let _ = close_ws_with_deadline(&mut ws_stream).await;
                                             break;
                                         }
+                                        crate::vcp_modules::sync::sync_finalize::invalidate_sync_entity_caches(
+                                            &handle_clone,
+                                        );
                                         if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(json!({ "type": "PHASE_COMPLETED", "phase": "topic_metadata" }).to_string().into())).await {
                                             terminate_after_protocol_send_failure(
                                                 &handle_clone,
