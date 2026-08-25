@@ -408,10 +408,8 @@ fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
             .and_then(Value::as_str)
             .filter(|role| !role.is_empty())
             .ok_or_else(|| format!("Message {message_id} has missing or empty role"))?;
-        // topicId 是来源元数据而非消息身份：frame topic 才是存储权威（消息按
-        // frame topic 落盘），消息指纹也不含 topicId。话题分支会合法地让消息
-        // 携带旧话题的 topicId，因此 Wire 1.1 的"必须等于 frame topic"硬校验
-        // 降级为 frame 权威归一化：不一致（或非字符串）时重写并记日志。
+        // topicId 是来源元数据而非消息身份：frame topic 才是存储权威，消息
+        // 指纹也不含 topicId。不一致（或非字符串）时统一重写为 frame topic。
         match message.get("topicId") {
             None | Some(Value::Null) => {}
             Some(Value::String(message_topic)) if message_topic == &topic_id => {}
@@ -461,8 +459,9 @@ fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
             }
         }
 
-        let dto = serde_json::from_value(Value::Object(message))
-            .map_err(|error| format!("Message {message_id} violates protocol 1.1: {error}"))?;
+        let dto = serde_json::from_value(Value::Object(message)).map_err(|error| {
+            format!("Message {message_id} violates the canonical message contract: {error}")
+        })?;
         messages.push(dto);
     }
 
@@ -525,16 +524,16 @@ fn pull_worker_permits(frame_bytes: usize) -> Result<u32, String> {
     u32::try_from(units.max(1)).map_err(|_| "Pull worker permit count overflow".to_string())
 }
 
-/// 共享消息处理管线：附件路径批量查询 → 填充 → 预渲染并文本压缩(通过Rayon并行化) → 写入队列
+/// 共享消息处理管线：附件路径批量查询 → 本地状态投影 → 指纹/可选预渲染 → 写入队列
 /// 被 `pull_messages_batch` 内各并发任务复用。
-/// 返回 `(parsed_count, failed_count)`。
+/// 返回已提交的消息数量。
 async fn process_topic_messages<R: Runtime>(
     app: &AppHandle<R>,
     key: &TopicKey,
     mut parsed_messages: Vec<crate::vcp_modules::chat_manager::ChatMessage>,
     write_queue: &DbWriteQueue,
     prerender_enabled: bool,
-) -> Result<(usize, usize), String> {
+) -> Result<usize, String> {
     let t_start = std::time::Instant::now();
     let db = app.state::<DbState>();
 
@@ -734,16 +733,13 @@ async fn process_topic_messages<R: Runtime>(
         );
     }
 
-    Ok((parsed_count, 0))
+    Ok(parsed_count)
 }
 
 /// 批量 Pull 单 topic 处理结果
-#[allow(dead_code)]
 pub struct BatchPullResult {
     pub topic: TopicKey,
     pub success: bool,
-    pub parsed_count: usize,
-    pub failed_count: usize,
     pub legacy_attachment_warnings: usize,
     pub error: Option<String>,
 }
@@ -751,80 +747,6 @@ pub struct BatchPullResult {
 pub struct PullExecutor;
 
 impl PullExecutor {
-    pub async fn pull_agent<R: Runtime>(
-        _app: &AppHandle<R>,
-        client: &reqwest::Client,
-        http_url: &str,
-        sync_token: &str,
-        agent_id: &str,
-        write_queue: &DbWriteQueue,
-    ) -> Result<(), String> {
-        let url = format!(
-            "{}/api/mobile-sync/download-entity?id={}&type=agent",
-            http_url, agent_id
-        );
-        let res = client
-            .get(&url)
-            .header("x-sync-token", sync_token)
-            .header("Authorization", format!("Bearer {}", sync_token))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let (status, bytes) =
-            read_response_limited(res, MAX_DIRECT_ENTITY_RESPONSE_BYTES, "Pull agent").await?;
-        if !status.is_success() {
-            return Err(http_status_error("Pull agent", status, &bytes));
-        }
-        let dto: AgentSyncDTO = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("Pull agent returned invalid JSON: {error}"))?;
-        write_queue
-            .submit(DbWriteTask::Agent {
-                id: agent_id.to_string(),
-                dto,
-            })
-            .await?;
-
-        Ok(())
-    }
-
-    pub async fn pull_group<R: Runtime>(
-        _app: &AppHandle<R>,
-        client: &reqwest::Client,
-        http_url: &str,
-        sync_token: &str,
-        group_id: &str,
-        write_queue: &DbWriteQueue,
-    ) -> Result<(), String> {
-        let url = format!(
-            "{}/api/mobile-sync/download-entity?id={}&type=group",
-            http_url, group_id
-        );
-        let res = client
-            .get(&url)
-            .header("x-sync-token", sync_token)
-            .header("Authorization", format!("Bearer {}", sync_token))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?;
-
-        let (status, bytes) =
-            read_response_limited(res, MAX_DIRECT_ENTITY_RESPONSE_BYTES, "Pull group").await?;
-        if !status.is_success() {
-            return Err(http_status_error("Pull group", status, &bytes));
-        }
-        let dto: GroupSyncDTO = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("Pull group returned invalid JSON: {error}"))?;
-        write_queue
-            .submit(DbWriteTask::Group {
-                id: group_id.to_string(),
-                dto,
-            })
-            .await?;
-
-        Ok(())
-    }
-
     pub async fn pull_entities_batch<R: Runtime>(
         app: &AppHandle<R>,
         client: &reqwest::Client,
@@ -1356,8 +1278,6 @@ impl PullExecutor {
                     tx.send(BatchPullResult {
                         topic: key,
                         success: false,
-                        parsed_count: 0,
-                        failed_count: 0,
                         legacy_attachment_warnings: frame.legacy_attachment_warnings,
                         error: Some(encoded),
                     })
@@ -1374,8 +1294,6 @@ impl PullExecutor {
                     tx.send(BatchPullResult {
                         topic: key,
                         success: true,
-                        parsed_count: 0,
-                        failed_count: 0,
                         legacy_attachment_warnings: frame.legacy_attachment_warnings,
                         error: None,
                     })
@@ -1410,7 +1328,7 @@ impl PullExecutor {
                             )
                             .await
                             {
-                                Ok((parsed, failed)) => {
+                                Ok(parsed) => {
                                     let proc_t = proc_start.elapsed();
                                     let total_t = start_t.elapsed();
                                     log::debug!(
@@ -1420,8 +1338,6 @@ impl PullExecutor {
                                     let _ = tx_clone.send(BatchPullResult {
                                         topic: key,
                                         success: true,
-                                        parsed_count: parsed,
-                                        failed_count: failed,
                                         legacy_attachment_warnings,
                                         error: None,
                                     }).await;
@@ -1430,8 +1346,6 @@ impl PullExecutor {
                                     let _ = tx_clone.send(BatchPullResult {
                                         topic: key,
                                         success: false,
-                                        parsed_count: 0,
-                                        failed_count: 0,
                                         legacy_attachment_warnings,
                                         error: Some(e),
                                     }).await;
@@ -1489,8 +1403,6 @@ impl PullExecutor {
                 tx.send(BatchPullResult {
                     topic: key,
                     success: false,
-                    parsed_count: 0,
-                    failed_count: 0,
                     legacy_attachment_warnings: frame.legacy_attachment_warnings,
                     error: Some(encoded),
                 })
@@ -1524,13 +1436,11 @@ impl PullExecutor {
                         )
                         .await
                         {
-                            Ok((parsed, failed)) => {
+                            Ok(_) => {
                                 let _ = tx_clone
                                     .send(BatchPullResult {
                                         topic: key,
                                         success: true,
-                                        parsed_count: parsed,
-                                        failed_count: failed,
                                         legacy_attachment_warnings,
                                         error: None,
                                     })
@@ -1541,8 +1451,6 @@ impl PullExecutor {
                                     .send(BatchPullResult {
                                         topic: key,
                                         success: false,
-                                        parsed_count: 0,
-                                        failed_count: 0,
                                         legacy_attachment_warnings,
                                         error: Some(e),
                                     })
@@ -1554,8 +1462,6 @@ impl PullExecutor {
                     tx.send(BatchPullResult {
                         topic: key,
                         success: true,
-                        parsed_count: 0,
-                        failed_count: 0,
                         legacy_attachment_warnings,
                         error: None,
                     })

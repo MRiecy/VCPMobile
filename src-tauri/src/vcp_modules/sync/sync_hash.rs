@@ -249,10 +249,10 @@ impl HashAggregator {
     ) -> Result<(), String> {
         let root_hash = Self::compute_topic_root_hash(tx, key).await?;
         let config_hash = if key.owner_type == "agent" {
-            let dto = HashInitializer::load_agent_topic_dto(tx, key).await?;
+            let dto = SyncDtoLoader::load_agent_topic_dto(tx, key).await?;
             Self::compute_agent_topic_metadata_hash(&dto)
         } else if key.owner_type == "group" {
-            let dto = HashInitializer::load_group_topic_dto(tx, key).await?;
+            let dto = SyncDtoLoader::load_group_topic_dto(tx, key).await?;
             Self::compute_group_topic_metadata_hash(&dto)
         } else {
             return Err(format!(
@@ -386,7 +386,7 @@ impl HashAggregator {
         group_id: &str,
         updated_at: i64,
     ) -> Result<(), String> {
-        let dto = HashInitializer::load_group_dto(tx, group_id).await?;
+        let dto = SyncDtoLoader::load_group_dto(tx, group_id).await?;
         let config_hash = Self::compute_group_config_hash(&dto);
         let updated = sqlx::query(
             "UPDATE groups SET
@@ -433,156 +433,10 @@ impl HashAggregator {
     }
 }
 
-pub struct HashInitializer;
+struct SyncDtoLoader;
 
-impl HashInitializer {
-    pub async fn ensure_agent_hashes(
-        tx: &mut Transaction<'_, Sqlite>,
-        agent_id: &str,
-    ) -> Result<(), String> {
-        let row = sqlx::query(
-            "SELECT config_hash FROM agents
-             WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL",
-        )
-        .bind(agent_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|e| e.to_string())?;
-
-        let r = row.ok_or_else(|| format!("Agent {agent_id} is missing or deleted"))?;
-        let config_hash: Option<String> = r
-            .try_get("config_hash")
-            .map_err(|error| format!("Agent {agent_id} hash decode failed: {error}"))?;
-        if config_hash
-            .as_deref()
-            .is_none_or(|hash| hash.is_empty() || hash == "PENDING")
-        {
-            let dto = Self::load_agent_dto(tx, agent_id).await?;
-            let new_hash = HashAggregator::compute_agent_config_hash(&dto);
-            let updated = sqlx::query(
-                "UPDATE agents SET config_hash = ?
-                 WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL",
-            )
-            .bind(&new_hash)
-            .bind(agent_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(|e| e.to_string())?;
-            if updated.rows_affected() != 1 {
-                return Err(format!(
-                    "Agent {agent_id} disappeared during hash initialization"
-                ));
-            }
-            log::debug!(
-                "[HashInitializer] Initialized config_hash for Agent {}",
-                agent_id
-            );
-        }
-
-        Ok(())
-    }
-
-    pub async fn ensure_group_hashes(
-        tx: &mut Transaction<'_, Sqlite>,
-        group_id: &str,
-    ) -> Result<(), String> {
-        let row = sqlx::query(
-            "SELECT config_hash FROM groups
-             WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL",
-        )
-        .bind(group_id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|e| e.to_string())?;
-
-        let r = row.ok_or_else(|| format!("Group {group_id} is missing or deleted"))?;
-        let config_hash: Option<String> = r
-            .try_get("config_hash")
-            .map_err(|error| format!("Group {group_id} hash decode failed: {error}"))?;
-        if config_hash
-            .as_deref()
-            .is_none_or(|hash| hash.is_empty() || hash == "PENDING")
-        {
-            let dto = Self::load_group_dto(tx, group_id).await?;
-            let new_hash = HashAggregator::compute_group_config_hash(&dto);
-            let updated = sqlx::query(
-                "UPDATE groups SET config_hash = ?
-                 WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL",
-            )
-            .bind(&new_hash)
-            .bind(group_id)
-            .execute(&mut **tx)
-            .await
-            .map_err(|e| e.to_string())?;
-            if updated.rows_affected() != 1 {
-                return Err(format!(
-                    "Group {group_id} disappeared during hash initialization"
-                ));
-            }
-            log::debug!(
-                "[HashInitializer] Initialized config_hash for Group {}",
-                group_id
-            );
-        }
-
-        Ok(())
-    }
-
-    pub async fn ensure_all_agent_hashes(pool: &sqlx::SqlitePool) -> Result<(), String> {
-        let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-        let rows = sqlx::query(
-            "SELECT agent_id FROM agents
-             WHERE owner_type = 'agent' AND deleted_at IS NULL
-               AND (config_hash = '' OR config_hash IS NULL OR config_hash = 'PENDING')",
-        )
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
-
-        for row in rows {
-            let agent_id: String = row
-                .try_get("agent_id")
-                .map_err(|error| format!("Agent hash id decode failed: {error}"))?;
-            Self::ensure_agent_hashes(&mut tx, &agent_id)
-                .await
-                .map_err(|error| {
-                    format!("Failed to initialize hash for Agent {agent_id}: {error}")
-                })?;
-        }
-        tx.commit().await.map_err(|e| e.to_string())?;
-
-        log::info!("[HashInitializer] Ensured all Agent hashes");
-        Ok(())
-    }
-
-    pub async fn ensure_all_group_hashes(pool: &sqlx::SqlitePool) -> Result<(), String> {
-        let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
-        let rows = sqlx::query(
-            "SELECT group_id FROM groups
-             WHERE owner_type = 'group' AND deleted_at IS NULL
-               AND (config_hash = '' OR config_hash IS NULL OR config_hash = 'PENDING')",
-        )
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|e| e.to_string())?;
-
-        for row in rows {
-            let group_id: String = row
-                .try_get("group_id")
-                .map_err(|error| format!("Group hash id decode failed: {error}"))?;
-            Self::ensure_group_hashes(&mut tx, &group_id)
-                .await
-                .map_err(|error| {
-                    format!("Failed to initialize hash for Group {group_id}: {error}")
-                })?;
-        }
-        tx.commit().await.map_err(|e| e.to_string())?;
-
-        log::info!("[HashInitializer] Ensured all Group hashes");
-        Ok(())
-    }
-
-    pub async fn load_agent_topic_dto(
+impl SyncDtoLoader {
+    async fn load_agent_topic_dto(
         tx: &mut Transaction<'_, Sqlite>,
         key: &TopicKey,
     ) -> Result<AgentTopicSyncDTO, String> {
@@ -621,7 +475,7 @@ impl HashInitializer {
         })
     }
 
-    pub async fn load_group_topic_dto(
+    async fn load_group_topic_dto(
         tx: &mut Transaction<'_, Sqlite>,
         key: &TopicKey,
     ) -> Result<GroupTopicSyncDTO, String> {
@@ -651,44 +505,6 @@ impl HashInitializer {
             owner_id: row.try_get("owner_id").map_err(|error| {
                 format!("Group topic {} owner decode failed: {error}", key.topic_id)
             })?,
-        })
-    }
-
-    async fn load_agent_dto(
-        tx: &mut Transaction<'_, Sqlite>,
-        agent_id: &str,
-    ) -> Result<AgentSyncDTO, String> {
-        let row = sqlx::query(
-            "SELECT name, system_prompt, model, temperature, context_token_limit, max_output_tokens, stream_output
-             FROM agents WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL",
-        )
-        .bind(agent_id)
-        .fetch_one(&mut **tx)
-        .await
-        .map_err(|e| e.to_string())?;
-
-        Ok(AgentSyncDTO {
-            name: row
-                .try_get("name")
-                .map_err(|error| format!("Agent {agent_id} name decode failed: {error}"))?,
-            system_prompt: row.try_get("system_prompt").map_err(|error| {
-                format!("Agent {agent_id} system prompt decode failed: {error}")
-            })?,
-            model: row
-                .try_get("model")
-                .map_err(|error| format!("Agent {agent_id} model decode failed: {error}"))?,
-            temperature: row
-                .try_get("temperature")
-                .map_err(|error| format!("Agent {agent_id} temperature decode failed: {error}"))?,
-            context_token_limit: row.try_get("context_token_limit").map_err(|error| {
-                format!("Agent {agent_id} context token limit decode failed: {error}")
-            })?,
-            max_output_tokens: row.try_get("max_output_tokens").map_err(|error| {
-                format!("Agent {agent_id} max output tokens decode failed: {error}")
-            })?,
-            stream_output: row.try_get::<i64, _>("stream_output").map_err(|error| {
-                format!("Agent {agent_id} stream output decode failed: {error}")
-            })? != 0,
         })
     }
 
@@ -1005,11 +821,7 @@ mod tests {
                     "default-config",
                     "default-content",
                 ),
-                HashAggregator::compute_topic_leaf_hash(
-                    "topic-a",
-                    "config-a",
-                    "content-a",
-                ),
+                HashAggregator::compute_topic_leaf_hash("topic-a", "config-a", "content-a",),
             ])
         );
 
@@ -1024,55 +836,5 @@ mod tests {
     #[tokio::test]
     async fn owner_root_hashes_include_default_topics() {
         assert_owner_root_includes_default("agent").await;
-    }
-
-    #[tokio::test]
-    async fn hash_initializer_rolls_back_and_surfaces_row_errors() {
-        let agent_pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("open agent database");
-        sqlx::query(
-            "CREATE TABLE agents (
-                owner_type TEXT, agent_id TEXT, config_hash TEXT, deleted_at INTEGER,
-                PRIMARY KEY(owner_type, agent_id)
-             );
-             INSERT INTO agents VALUES ('agent', 'broken-agent', 'PENDING', NULL);",
-        )
-        .execute(&agent_pool)
-        .await
-        .expect("create broken agent fixture");
-        let agent_error = HashInitializer::ensure_all_agent_hashes(&agent_pool)
-            .await
-            .expect_err("per-agent query errors must abort initialization");
-        assert!(agent_error.contains("broken-agent"));
-
-        let group_pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("open group database");
-        sqlx::query(
-            "CREATE TABLE groups (
-                owner_type TEXT, group_id TEXT, config_hash TEXT, name TEXT, mode TEXT,
-                group_prompt TEXT, invite_prompt TEXT, use_unified_model INTEGER,
-                unified_model TEXT, tag_match_mode TEXT, member_tags TEXT, created_at INTEGER,
-                deleted_at INTEGER, PRIMARY KEY(owner_type, group_id)
-             );
-             CREATE TABLE group_members (
-                group_id TEXT, agent_id TEXT, sort_order INTEGER
-             );
-             INSERT INTO groups VALUES
-                ('group', 'broken-group', 'PENDING', 'Group', 'fixed', NULL, NULL, 0, NULL, NULL, '{}', 1, NULL);
-             INSERT INTO group_members VALUES ('broken-group', 'agent', 0);",
-        )
-        .execute(&group_pool)
-        .await
-        .expect("create broken group fixture");
-        let group_error = HashInitializer::ensure_all_group_hashes(&group_pool)
-            .await
-            .expect_err("member-tag query errors must abort initialization");
-        assert!(group_error.contains("broken-group"));
     }
 }

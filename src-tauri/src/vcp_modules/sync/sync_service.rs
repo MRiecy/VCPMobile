@@ -4,7 +4,6 @@ use crate::vcp_modules::sync_error::{
     build_local_error_payload, build_wire_error_payload, decode_wire_sync_error,
     encode_wire_sync_error, parse_wire_sync_error, SyncErrorPayload,
 };
-use crate::vcp_modules::sync_hash::HashInitializer;
 use crate::vcp_modules::sync_logger::{redact_sync_diagnostic, LogLevel, SyncLogger};
 use crate::vcp_modules::sync_pipeline::{Phase1Metadata, Phase3Message, SyncPipeline};
 use crate::vcp_modules::sync_types::{parse_topic_key, SyncDataType};
@@ -34,7 +33,6 @@ const WS_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 const SYNC_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(270);
 const PHASE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 const FINAL_ACK_TIMEOUT: Duration = Duration::from_secs(30);
-const ENTITY_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_SYNC_RETRIES: u32 = 3;
 const MAX_SYNC_TOPICS: usize = 10_000;
 type RoutedSyncCommand = (u64, mpsc::UnboundedSender<SyncCommand>);
@@ -489,7 +487,7 @@ impl Phase3Tracker {
     }
 
     /// 标记某个 topic 已完成。如果是首次标记，返回 true；否则返回 false。
-    /// 当所有 topic 都完成时，触发 complete_phase 和 Phase3 命令。
+    /// 当所有 topic 都完成时，触发同步收尾命令。
     pub async fn mark_completed(
         &self,
         topic: &TopicKey,
@@ -506,7 +504,11 @@ impl Phase3Tracker {
 
             if !quiet {
                 if let Ok(mut logger) = logger.lock() {
-                    logger.log_operation("messages", "topic", &topic.topic_id, true, None);
+                    logger.log(
+                        LogLevel::Debug,
+                        "messages",
+                        &format!("topic:{} -> success", topic.topic_id),
+                    );
                 }
             }
 
@@ -518,7 +520,6 @@ impl Phase3Tracker {
                     "phase": "messages",
                     "total": total,
                     "completed": done,
-                    "message": format!("Syncing Messages: {}/{}", done, total),
                     "successfulTopics": done,
                     "totalTopics": total,
                     "failedTopics": self.failed.lock().await.len(),
@@ -528,7 +529,7 @@ impl Phase3Tracker {
 
             if done == total {
                 if let Ok(mut logger) = logger.lock() {
-                    logger.complete_phase("messages");
+                    logger.log(LogLevel::Info, "messages", "Phase 3 completed");
                 }
                 let _ = tx.send(SyncCommand::Finalize {
                     attempt_id: self.attempt_id,
@@ -645,14 +646,13 @@ async fn publish_sync_nonterminal_status<R: Runtime>(
     session_id: u64,
     status: &Arc<RwLock<String>>,
     next_status: &str,
-    message: &str,
 ) {
     let sync_state = app_handle.state::<SyncState>();
     let _owner_commit = sync_state.owner_commit.lock().await;
     if sync_state.current_session_id.load(Ordering::SeqCst) != session_id {
         return;
     }
-    publish_sync_status_inner(app_handle, session_id, status, next_status, message, None).await;
+    publish_sync_status_inner(app_handle, session_id, status, next_status, None).await;
 }
 
 async fn publish_sync_error<R: Runtime>(
@@ -686,16 +686,7 @@ async fn publish_sync_error<R: Runtime>(
         Some(wire) => build_wire_error_payload(&wire, failed_topic_ids, log_file),
         None => build_sync_error_payload(code, failed_topic_ids, log_file),
     };
-    let user_message = error.message.clone();
-    publish_sync_status_inner(
-        app_handle,
-        session_id,
-        status,
-        "error",
-        &user_message,
-        Some(error),
-    )
-    .await;
+    publish_sync_status_inner(app_handle, session_id, status, "error", Some(error)).await;
 }
 
 async fn publish_sync_status_inner<R: Runtime>(
@@ -703,7 +694,6 @@ async fn publish_sync_status_inner<R: Runtime>(
     session_id: u64,
     status: &Arc<RwLock<String>>,
     next_status: &str,
-    message: &str,
     error: Option<SyncErrorPayload>,
 ) {
     {
@@ -722,7 +712,6 @@ async fn publish_sync_status_inner<R: Runtime>(
 
     let mut payload = json!({
         "status": next_status,
-        "message": message,
         "source": "Sync",
         "sessionId": session_id,
     });
@@ -772,17 +761,12 @@ async fn publish_sync_completed(
             "sessionId": session_id,
             "status": terminal_status,
             "summary": summary,
-            "agentsChanged": true,
-            "groupsChanged": true,
-            "topicsChanged": true,
-            "messagesChanged": true,
         }),
     );
     let _ = app_handle.emit(
         "vcp-sync-status",
         json!({
             "status": terminal_status,
-            "message": if terminal_status == "completed" { "同步完成" } else { "同步完成，但存在旧附件警告" },
             "source": "Sync",
             "sessionId": session_id,
         }),
@@ -978,7 +962,7 @@ async fn run_sync_session(
         if cancel_token.is_cancelled() {
             break;
         }
-        let (ws_url, http_url) = {
+        let (ws_url, http_url, sync_token, sync_prerender_enabled) = {
             let settings_state =
                 handle_clone.state::<crate::vcp_modules::settings_manager::SettingsState>();
             match crate::vcp_modules::settings_manager::read_settings(
@@ -1025,7 +1009,12 @@ async fn run_sync_session(
                             break;
                         }
                     };
-                    (ws_addr, s.sync_http_url.clone())
+                    (
+                        ws_addr,
+                        s.sync_http_url.clone(),
+                        s.sync_token.clone(),
+                        s.sync_prerender_enabled,
+                    )
                 }
                 Err(error) => {
                     let message = format!("无法读取同步配置: {error}");
@@ -1049,7 +1038,6 @@ async fn run_sync_session(
             session_id,
             &connection_status_for_task,
             "connecting",
-            "同步服务连接中...",
         )
         .await;
 
@@ -1325,7 +1313,6 @@ async fn run_sync_session(
                 }
 
                 if let Ok(mut logger) = sync_logger_task.lock() {
-                    logger.start_phase("owner_metadata", 0);
                     logger.log(LogLevel::Info, "sync", "=== Phase 1: Owner Metadata ===");
                 }
                 if let Err(error) = send_ws_with_deadline(
@@ -1370,52 +1357,9 @@ async fn run_sync_session(
                     session_id,
                     &connection_status_for_task,
                     "open",
-                    "同步服务已连接",
                 )
                 .await;
                 emit_sync_phase_activity(&handle_clone, session_id, "owner_metadata");
-
-                let db = handle_clone.state::<DbState>();
-                if let Err(e) = HashInitializer::ensure_all_agent_hashes(&db.pool).await {
-                    if let Ok(mut logger) = sync_logger_task.lock() {
-                        logger.log(
-                            LogLevel::Error,
-                            "owner_metadata",
-                            &format!("Failed to initialize agent hashes: {}", e),
-                        );
-                    }
-                    publish_sync_error(
-                        &handle_clone,
-                        session_id,
-                        &connection_status_for_task,
-                        "AGENT_HASH_INIT_DB_FAILED",
-                        &format!("Failed to initialize agent hashes: {e}"),
-                        Vec::new(),
-                    )
-                    .await;
-                    let _ = close_ws_with_deadline(&mut ws_stream).await;
-                    break 'session;
-                }
-                if let Err(e) = HashInitializer::ensure_all_group_hashes(&db.pool).await {
-                    if let Ok(mut logger) = sync_logger_task.lock() {
-                        logger.log(
-                            LogLevel::Error,
-                            "owner_metadata",
-                            &format!("Hash init error: {}", e),
-                        );
-                    }
-                    publish_sync_error(
-                        &handle_clone,
-                        session_id,
-                        &connection_status_for_task,
-                        "GROUP_HASH_INIT_DB_FAILED",
-                        &format!("Failed to initialize group hashes: {e}"),
-                        Vec::new(),
-                    )
-                    .await;
-                    let _ = close_ws_with_deadline(&mut ws_stream).await;
-                    break 'session;
-                }
 
                 // Every reconnect gets a fresh owner set. Cancelling and joining this tracker
                 // before retry prevents late phase commands and writes from crossing attempts.
@@ -1539,7 +1483,6 @@ async fn run_sync_session(
                                             total_tasks_task.store(0, Ordering::SeqCst);
 
                                             if let Ok(mut logger) = sync_logger_task.lock() {
-                                                logger.start_phase("topic_metadata", 1);
                                                 logger.log(LogLevel::Info, "topic_metadata", "=== Phase 2: Pulling Topic Metadata ===");
                                             }
                                             if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(json!({ "type": "PHASE_START", "phase": "topic_metadata" }).to_string().into())).await {
@@ -1683,7 +1626,6 @@ async fn run_sync_session(
                                 crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::StartMessages => {
                                     emit_sync_phase_activity(&handle_clone, session_id, "messages");
                                     if let Ok(mut logger) = sync_logger_task.lock() {
-                                        logger.start_phase("messages", 0);
                                         logger.log(LogLevel::Info, "messages", "=== Phase 3: Messages ===");
                                     }
                                     if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(json!({ "type": "PHASE_START", "phase": "messages" }).to_string().into())).await {
@@ -1706,7 +1648,7 @@ async fn run_sync_session(
 
                                     if changed_ids.is_empty() {
                                         if let Ok(mut logger) = sync_logger_task.lock() {
-                                            logger.complete_phase("messages");
+                                            logger.log(LogLevel::Info, "messages", "Phase 3 skipped: no changed topics");
                                         }
                                         emit_sync_log(&handle_clone, "success", "Message phase skipped (no changed topics), proceeding to hash alignment");
                                         let _ = tx_internal.send(SyncCommand::Finalize { attempt_id });
@@ -1737,7 +1679,6 @@ async fn run_sync_session(
                                                         "phase": "messages",
                                                         "total": topic_count,
                                                         "completed": 0,
-                                                        "message": format!("Syncing Messages: 0/{topic_count}"),
                                                         "successfulTopics": 0,
                                                         "totalTopics": topic_count,
                                                         "failedTopics": 0,
@@ -1817,10 +1758,6 @@ async fn run_sync_session(
                                             }
                                         }
                                     }
-                                },
-                                crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::Finalize => {
-                                    // 本地 pipeline 已落盘，但不能越过桌面端最终 ACK 发布完成态。
-                                    emit_sync_log(&handle_clone, "info", "Local finalization complete; waiting for desktop acknowledgement");
                                 },
                             }
                         },
@@ -1963,7 +1900,7 @@ async fn run_sync_session(
                                             ).await;
                                             break 'attempt;
                                         }
-                                        let _ = pipeline_task.on_owner_metadata_done().await;
+                                        let _ = pipeline_task.on_owner_metadata_done();
                                     }
                                 },
                                 SyncCommand::StartTopicValidation { attempt_id: command_attempt } => {
@@ -2005,7 +1942,7 @@ async fn run_sync_session(
                                             ).await;
                                             break 'attempt;
                                         }
-                                        let _ = pipeline_task.on_topic_metadata_pull_done().await;
+                                        let _ = pipeline_task.on_topic_metadata_pull_done();
                                     }
                                 },
                                 SyncCommand::StartMessages { attempt_id: command_attempt } => {
@@ -2033,7 +1970,7 @@ async fn run_sync_session(
                                             let _ = close_ws_with_deadline(&mut ws_stream).await;
                                             break;
                                         }
-                                        let _ = pipeline_task.on_topic_validation_done().await;
+                                        let _ = pipeline_task.on_topic_validation_done();
                                     }
                                 },
                                 SyncCommand::Finalize { attempt_id: command_attempt } => {
@@ -2057,7 +1994,6 @@ async fn run_sync_session(
                                             &handle_clone,
                                             &db,
                                             &write_queue_task,
-                                            &pipeline_task,
                                             &sync_logger_task,
                                             modified_topics,
                                         ).await {
@@ -2225,9 +2161,6 @@ async fn run_sync_session(
                                             }
                                         }
 
-                                        if let Ok(mut logger) = sync_logger_task.lock() {
-                                            logger.set_phase_expected("owner_metadata", count);
-                                        }
                                         if manifests.is_empty() {
                                             let _ = tx_internal.send(SyncCommand::StartTopicMetadata { attempt_id });
                                             continue 'attempt;
@@ -2305,7 +2238,6 @@ async fn run_sync_session(
                                                 "phase": "messages",
                                                 "total": failure_summary.total_topics,
                                                 "completed": failure_summary.successful_topics,
-                                                "message": "Message synchronization failed",
                                                 "successfulTopics": failure_summary.successful_topics,
                                                 "totalTopics": failure_summary.total_topics,
                                                 "failedTopics": failure_summary.failed_topics,
@@ -2422,197 +2354,8 @@ async fn run_sync_session(
                                 let c = http_client.clone();
                                 let base = http_url.clone();
                                 let wq = write_queue_task.clone();
-                                let settings = match crate::vcp_modules::settings_manager::read_settings(h.clone(), h.state()).await {
-                                    Ok(settings) => settings,
-                                    Err(error) => {
-                                        let _ = tx_internal.send(SyncCommand::FailAttempt {
-                                            attempt_id,
-                                            code: "SYNC_SETTINGS_READ_FAILED",
-                                            message: format!("Failed to read sync settings: {error}"),
-                                        });
-                                        continue;
-                                    }
-                                };
 
                                 match payload["type"].as_str() {
-                                    Some("SYNC_DELETE_NOTIFY") => {
-                                        use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
-                                        let id = match payload.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
-                                            Some(id) => id.to_string(),
-                                            None => {
-                                                fatal_error = true;
-                                                publish_sync_error(
-                                                    &handle_clone,
-                                                    session_id,
-                                                    &connection_status_for_task,
-                                                    "PROTOCOL_FRAME_INVALID",
-                                                    "SYNC_DELETE_NOTIFY.id must be a non-empty string",
-                                                    Vec::new(),
-                                                ).await;
-                                                let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                                break;
-                                            }
-                                        };
-                                        let data_type = match parse_sync_data_type(&payload["dataType"]) {
-                                            Some(data_type @ (SyncDataType::Agent | SyncDataType::Group | SyncDataType::Topic | SyncDataType::Avatar | SyncDataType::Message)) => data_type,
-                                            _ => {
-                                                fatal_error = true;
-                                                publish_sync_error(
-                                                    &handle_clone,
-                                                    session_id,
-                                                    &connection_status_for_task,
-                                                    "PROTOCOL_FRAME_INVALID",
-                                                    "SYNC_DELETE_NOTIFY.dataType is missing or invalid",
-                                                    vec![id.clone()],
-                                                ).await;
-                                                let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                                break;
-                                            }
-                                        };
-                                        let deleted_at = match payload
-                                            .get("deletedAt")
-                                            .and_then(Value::as_i64)
-                                            .filter(|deleted_at| *deleted_at >= 0)
-                                        {
-                                            Some(deleted_at) => deleted_at,
-                                            None => {
-                                                fatal_error = true;
-                                                publish_sync_error(
-                                                    &handle_clone,
-                                                    session_id,
-                                                    &connection_status_for_task,
-                                                    "PROTOCOL_FRAME_INVALID",
-                                                    "SYNC_DELETE_NOTIFY requires a non-negative integer deletedAt",
-                                                    vec![id.clone()],
-                                                ).await;
-                                                let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                                break;
-                                            }
-                                        };
-                                        let deleted_topic_key = if matches!(data_type, SyncDataType::Topic | SyncDataType::Message) {
-                                            let topic_id = if data_type == SyncDataType::Topic {
-                                                id.clone()
-                                            } else {
-                                                match payload
-                                                    .get("topicId")
-                                                    .and_then(Value::as_str)
-                                                    .filter(|topic_id| !topic_id.is_empty())
-                                                {
-                                                    Some(topic_id) => topic_id.to_string(),
-                                                    None => {
-                                                        fatal_error = true;
-                                                        publish_sync_error(
-                                                            &handle_clone,
-                                                            session_id,
-                                                            &connection_status_for_task,
-                                                            "PROTOCOL_FRAME_INVALID",
-                                                            "Message delete requires a non-empty topicId",
-                                                            vec![id.clone()],
-                                                        ).await;
-                                                        let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                                        break;
-                                                    }
-                                                }
-                                            };
-                                            match parse_topic_key(
-                                                &json!({
-                                                    "topicId": topic_id,
-                                                    "ownerType": payload.get("ownerType"),
-                                                    "ownerId": payload.get("ownerId"),
-                                                }),
-                                                "SYNC_DELETE_NOTIFY topic",
-                                            ) {
-                                                Ok(key) => Some(key),
-                                                Err(message) => {
-                                                    fatal_error = true;
-                                                    publish_sync_error(
-                                                        &handle_clone,
-                                                        session_id,
-                                                        &connection_status_for_task,
-                                                        "PROTOCOL_FRAME_INVALID",
-                                                        &message,
-                                                        vec![id.clone()],
-                                                    ).await;
-                                                    let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                                    break;
-                                                }
-                                            }
-                                        } else {
-                                            None
-                                        };
-                                        let operation = tokio::time::timeout(ENTITY_OPERATION_TIMEOUT, async {
-                                            match data_type {
-                                                SyncDataType::Agent => DeleteExecutor::soft_delete_agent(&h, &id, deleted_at).await,
-                                                SyncDataType::Group => DeleteExecutor::soft_delete_group(&h, &id, deleted_at).await,
-                                                SyncDataType::Topic => {
-                                                    let key = deleted_topic_key
-                                                        .as_ref()
-                                                        .ok_or_else(|| "topic delete metadata is missing".to_string())?;
-                                                    DeleteExecutor::soft_delete_topic(&h, key, deleted_at).await
-                                                },
-                                                SyncDataType::Avatar => match id.split_once(':') {
-                                                    Some((owner_type, owner_id))
-                                                        if crate::vcp_modules::sync_types::is_valid_avatar_owner(owner_type, owner_id) =>
-                                                    {
-                                                        DeleteExecutor::soft_delete_avatar(&h, owner_type, owner_id, deleted_at).await
-                                                    }
-                                                    _ => Err(format!("invalid avatar id: {id}")),
-                                                },
-                                                SyncDataType::Message => {
-                                                    let key = deleted_topic_key
-                                                        .as_ref()
-                                                        .ok_or_else(|| "message delete metadata is missing".to_string())?;
-                                                    let message_key = MessageKey::new(key.clone(), &id);
-                                                    DeleteExecutor::soft_delete_message(
-                                                        &h,
-                                                        &message_key,
-                                                        deleted_at,
-                                                    ).await
-                                                },
-                                            }
-                                        });
-                                        tokio::pin!(operation);
-                                        let result = loop {
-                                            tokio::select! {
-                                                biased;
-                                                _ = cancel_token.cancelled() => {
-                                                    let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                                    break 'attempt;
-                                                }
-                                                _ = heartbeat_interval.tick() => {
-                                                    if let Err(error) = send_ws_with_deadline(
-                                                        &mut ws_stream,
-                                                        Message::Ping(Vec::new().into()),
-                                                    ).await {
-                                                        emit_sync_log(
-                                                            &handle_clone,
-                                                            "warning",
-                                                            &format!("Entity delete heartbeat failed: {error}"),
-                                                        );
-                                                        let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                                        break 'attempt;
-                                                    }
-                                                }
-                                                result = &mut operation => break result,
-                                            }
-                                        }
-                                            .map_err(|_| format!("operation timed out after {} seconds", ENTITY_OPERATION_TIMEOUT.as_secs()))
-                                            .and_then(|result| result);
-                                        if let Err(error) = result {
-                                            fatal_error = true;
-                                            let message = format!("SYNC_DELETE_NOTIFY failed for {id}: {error}");
-                                            publish_sync_error(
-                                                &handle_clone,
-                                                session_id,
-                                                &connection_status_for_task,
-                                                "ENTITY_DELETE_FAILED",
-                                                &message,
-                                                vec![id.clone()],
-                                            ).await;
-                                            let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                            break;
-                                        }
-                                    },
                                     Some("SYNC_ERROR") => {
                                         let encoded = payload
                                             .get("error")
@@ -2662,7 +2405,7 @@ async fn run_sync_session(
                                             data_type,
                                             &c,
                                             &base,
-                                            &settings.sync_token,
+                                            &sync_token,
                                             &wq,
                                             &pending_tasks_task,
                                             &total_tasks_task,
@@ -2672,7 +2415,6 @@ async fn run_sync_session(
                                             &manifest_phase,
                                             &tx_internal,
                                             &changed_owners,
-                                            &sync_logger_task,
                                             &task_tracker,
                                             session_id,
                                             attempt_id,
@@ -2725,8 +2467,8 @@ async fn run_sync_session(
                                         let write_queue = wq.clone();
                                         let pending_batches = pending_diff_batches.clone();
                                         let expected_topics = expected_phase3_batch.clone();
-                                        let token = settings.sync_token.clone();
-                                        let prerender_enabled = settings.sync_prerender_enabled;
+                                        let token = sync_token.clone();
+                                        let prerender_enabled = sync_prerender_enabled;
                                         task_tracker.spawn(async move {
                                             let result = crate::vcp_modules::sync_executor::batch_diff_handler::BatchDiffHandler::handle_diff_batch(
                                                 &h,
@@ -2795,10 +2537,6 @@ async fn run_sync_session(
                                             }
                                         }
                                     },
-                                    Some("PHASE_MANIFESTS") => {
-                                        // Topic 元数据已在 Phase 1 的 SYNC_DIFF_RESULTS 中处理完毕。
-                                        // 桌面端在 PHASE_START metadata/topic 时仍可能返回 PHASE_MANIFESTS，此处安全忽略。
-                                    },
                                     Some("PHASE_ACK") => {
                                         if !consume_final_ack(&awaiting_final_ack, &payload) {
                                             log::debug!("[SyncService] Ignoring mismatched, stale, or replayed final acknowledgement");
@@ -2829,7 +2567,6 @@ async fn run_sync_session(
                                         ).await;
                                         if sync_success {
                                             if let Ok(mut logger) = sync_logger_task.lock() {
-                                                logger.complete_phase("sync");
                                                 (*logger).end_session();
                                             }
                                             emit_sync_log(&handle_clone, "success", "同步已完成，所有数据已对齐");
@@ -2843,12 +2580,11 @@ async fn run_sync_session(
                                         let message = payload["message"].as_str().unwrap_or("");
                                         emit_sync_log(&handle_clone, level, &format!("[Desktop] {}", message));
                                     },
-                                    Some("DESKTOP_PHASE_START") | Some("DESKTOP_PHASE_PROGRESS") | Some("DESKTOP_PHASE_COMPLETE") => {
+                                    Some("DESKTOP_PHASE_START") | Some("DESKTOP_PHASE_COMPLETE") => {
                                         let phase = payload["phase"].as_str().unwrap_or("unknown");
                                         let msg = match payload["type"].as_str() {
                                             Some("DESKTOP_PHASE_START") => format!("[Desktop] Phase {} started", phase),
-                                            Some("DESKTOP_PHASE_COMPLETE") => format!("[Desktop] Phase {} completed", phase),
-                                            _ => format!("[Desktop] Phase {} in progress", phase),
+                                            _ => format!("[Desktop] Phase {} completed", phase),
                                         };
                                         emit_sync_log(&handle_clone, "info", &msg);
                                     },
@@ -3223,11 +2959,7 @@ pub(crate) fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, 
     }
 }
 
-fn emit_sync_phase_activity<R: Runtime>(
-    app_handle: &AppHandle<R>,
-    session_id: u64,
-    phase: &str,
-) {
+fn emit_sync_phase_activity<R: Runtime>(app_handle: &AppHandle<R>, session_id: u64, phase: &str) {
     let _ = app_handle.emit(
         "vcp-sync-progress",
         json!({
@@ -3235,7 +2967,6 @@ fn emit_sync_phase_activity<R: Runtime>(
             "phase": phase,
             "total": 0,
             "completed": 0,
-            "message": "",
         }),
     );
 }

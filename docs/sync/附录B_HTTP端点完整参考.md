@@ -15,37 +15,11 @@ scope: 双端
 
 | 路径 | 方法 | 认证 | 请求格式 | 响应格式 | Body限制 | 移动端调用函数 | 桌面端处理函数 | 对应代码文件 |
 |-----|------|-----|---------|---------|---------|-------------|-------------|------------|
-| `/download-entity` | `GET` | `x-sync-token` | Query: `?id=<uuid>&type=agent\|group\|agent_topic\|group_topic` | `JSON` — 对应 DTO 对象 | — | `PullExecutor::pull_agent`<br>`PullExecutor::pull_group` | `downloadEntity` | `routes.js`<br>`pull_executor.rs` |
 | `/download-entities` | `POST` | `x-sync-token` | `JSON` — `{ requests: [{id, type}, ...] }` | `JSON` — `[{id, type, data}, ...]` | 1000 项 / 10 MiB | `PullExecutor::pull_entities_batch` | `downloadEntities` | `routes.js`<br>`pull_executor.rs` |
 | `/upload-entity` | `POST` | `x-sync-token`<br>`x-idempotency-key` | `JSON` — `{ id, type, data }` | `JSON` — `{ success, id, hash? }` | 5 MB | `PushExecutor::push_agent`<br>`PushExecutor::push_group` | `uploadEntity` | `routes.js`<br>`push_executor.rs` |
 | `/upload-entities-batch` | `POST` | `x-sync-token` | `JSON` — `{ items: [{id, type, data}, ...] }` | `JSON` — `{ success: true, results: [...] }` | 10 MB | `PushExecutor::push_entities_batch` | `uploadEntitiesBatch` | `routes.js`<br>`push_executor.rs` |
 
-### 1.1 GET /download-entity
-
-**桌面端处理流程**
-1. 从 Query 解析 `id` 与 `type`（`agent` / `group` / `agent_topic` / `group_topic`）。
-2. 调用 `downloadEntity({ id, type })` 查询数据库并序列化为 DTO。
-3. 若记录不存在，返回 `404`；成功返回对应 JSON DTO。
-
-**DTO 类型映射**
-| type | 移动端反序列化类型 | 关键字段 |
-|------|------------------|---------|
-| `agent` | `AgentSyncDTO` | `id`, `name`, `model`, `systemPrompt`, `temperature`, `tools`, `createdAt`, `updatedAt` |
-| `group` | `GroupSyncDTO` | `id`, `name`, `description`, `agentIds`, `createdAt`, `updatedAt` |
-| `agent_topic` | `AgentTopicSyncDTO` | `id`, `name`, `createdAt`, `locked`, `unread`, `ownerId` |
-| `group_topic` | `GroupTopicSyncDTO` | `id`, `name`, `createdAt`, `ownerId` |
-
-**移动端调用示例**
-```rust
-let url = format!("{}/api/mobile-sync/download-entity?id={}&type=agent", http_url, agent_id);
-let res = client.get(&url)
-    .header("x-sync-token", sync_token)
-    .header("Authorization", format!("Bearer {}", sync_token))
-    .send().await?;
-let dto: AgentSyncDTO = res.json().await?;
-```
-
-### 1.2 POST /download-entities
+### 1.1 POST /download-entities
 
 **请求体结构**
 ```json
@@ -69,7 +43,7 @@ let dto: AgentSyncDTO = res.json().await?;
 **批量分块策略**
 移动端在 `sync_service.rs` 中按实体类型分块发送：Agent/Group 每块 50 个，Topic 每块 1000 个。桌面端 `downloadEntities` 并行查询后按原顺序（或聚合顺序）返回结果数组。
 
-### 1.3 POST /upload-entity
+### 1.2 POST /upload-entity
 
 **请求体结构**
 ```json
@@ -90,7 +64,7 @@ let dto: AgentSyncDTO = res.json().await?;
 { "success": true, "id": "uuid", "hash": "sha256-hex" }
 ```
 
-### 1.4 POST /upload-entities-batch
+### 1.3 POST /upload-entities-batch
 
 **请求体结构**
 ```json
@@ -234,7 +208,7 @@ Content-Type 设置为 `application/x-ndjson`。
 - `deletedAt`: 必填，Unix 时间戳（毫秒），用于软删除标记
 
 **移动端触发方式**
-移动端不直接通过 HTTP 调用此端点。删除操作通过 WebSocket 通知桌面端（`SYNC_ENTITY_DELETE` 消息），由桌面端自行处理本地软删除。若桌面端需要向移动端反向通知删除，则通过 `SYNC_DELETE_NOTIFY` WebSocket 消息触发移动端 `DeleteExecutor` 执行本地软删除。
+移动端在线删除通过 WebSocket `SYNC_ENTITY_DELETE` 通知桌面端；离线墓碑在后续 Manifest 或 Phase 3 Push 中重放。桌面墓碑通过 Diff 返回给 Mobile。
 
 **桌面端处理**
 `deleteEntity` 根据 `type` 在数据库对应表中设置 `deleted_at = deletedAt` 时间戳，实现软删除。实际物理清理由桌面端后台任务处理。
@@ -270,7 +244,7 @@ Content-Type 设置为 `application/x-ndjson`。
 | `404 Not Found` | 实体/附件/头像不存在 | 返回错误，当前操作失败 |
 | `500 Internal Server Error` | 桌面端处理异常 | 打印错误日志，当前任务失败，不影响其他并发任务 |
 
-所有非 2xx 响应统一返回 `{"error": SyncError}`，所有普通 JSON 的失败结果统一使用 `{"success":false,"error":SyncError}`。`SyncError` 必须包含 Wire 1.2 的 `code/origin/stage/kind/retry/message/failedTopicIds` 全部字段；旧字符串错误拒绝。
+所有非 2xx 响应统一返回 `{"error": SyncError}`，所有普通 JSON 的失败结果统一使用 `{"success":false,"error":SyncError}`。`SyncError` 必须包含 Wire 1.3 的 `code/origin/stage/kind/retry/message/failedTopicIds` 全部字段；旧字符串错误拒绝。
 
 ### 流式端点特殊错误帧
 
@@ -284,7 +258,6 @@ Content-Type 设置为 `application/x-ndjson`。
 | 层级 | 并发控制 |
 |------|---------|
 | 消息 Pull 并发 | 32 MiB 在途帧预算，每帧按 1 MiB 单位向上取整占用 |
-| 附件上传并发 | 硬编码 `MAX_CONCURRENT_UPLOADS = 3` |
 | 实体分块大小 | Agent/Group: 50/批；Topic: 1000/批 |
 | 消息分块大小 | `MAX_MESSAGES_PER_BATCH = 10000`（控制 WS payload，非 HTTP） |
 
@@ -294,7 +267,7 @@ Content-Type 设置为 `application/x-ndjson`。
 
 ```
 Phase 1 (Owner Metadata)
-  PULL Agent/Group  →  GET  /download-entity
+  PULL Agent/Group  →  POST /download-entities
   PULL Avatar       →  GET  /download-avatar
   PUSH Agent/Group  →  POST /upload-entity
   PUSH Avatar       →  POST /upload-avatar

@@ -1,7 +1,6 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
 use crate::vcp_modules::sync_executor::{PullExecutor, PushExecutor};
-use crate::vcp_modules::sync_logger::SyncLogger;
 use crate::vcp_modules::sync_service::{emit_sync_log, SyncCommand, SyncTaskTracker};
 use crate::vcp_modules::sync_types::SyncDataType;
 use crate::vcp_modules::topic_types::{OwnerKey, TopicKey};
@@ -75,10 +74,7 @@ fn parse_delete_timestamp(item: &Value, id: &str, action: &str) -> Result<Option
 }
 
 /// 校验 SYNC_DIFF_RESULTS 条目。
-fn validate_diff_items(
-    items: &[Value],
-    data_type: &SyncDataType,
-) -> Result<Vec<Value>, String> {
+fn validate_diff_items(items: &[Value], data_type: &SyncDataType) -> Result<Vec<Value>, String> {
     let mut seen_ids = HashSet::new();
     let mut seen_topics = HashSet::new();
     let mut validated = Vec::with_capacity(items.len());
@@ -148,7 +144,6 @@ impl DiffHandler {
         manifest_phase: &Arc<AtomicU8>,
         tx_internal: &mpsc::UnboundedSender<SyncCommand>,
         changed_owners: &Arc<tokio::sync::Mutex<HashSet<OwnerKey>>>,
-        logger: &Arc<Mutex<SyncLogger>>,
         task_tracker: &Arc<SyncTaskTracker>,
         session_id: u64,
         attempt_id: u64,
@@ -195,19 +190,6 @@ impl DiffHandler {
                 );
                 log::info!("[Sync] [{}] {}", phase_tag, msg);
                 emit_sync_log(app_handle, "info", &msg);
-
-                if let Ok(mut l) = logger.lock() {
-                    l.log_operation(
-                        phase_tag,
-                        &data_type.to_string(),
-                        "manifest",
-                        true,
-                        Some(&format!(
-                            "pull={} push={} delete={} push_delete={}",
-                            pull_count, push_count, delete_count, push_delete_count
-                        )),
-                    );
-                }
             }
             pending_tasks.fetch_add(total_ops, Ordering::SeqCst);
             total_tasks.fetch_add(total_ops, Ordering::SeqCst);
@@ -363,7 +345,6 @@ impl DiffHandler {
                                     },
                                     "total": total,
                                     "completed": done,
-                                    "message": format!("Syncing: {}/{}", done, total)
                                 }),
                             );
                             if current_pending == 0
@@ -567,7 +548,7 @@ impl DiffHandler {
                         let done = total.saturating_sub(current_pending);
                         let _ = h_in.emit(
                             "vcp-sync-progress",
-                            json!({ "sessionId": session_id, "phase": "topic_metadata", "total": total, "completed": done, "message": format!("Syncing: {}/{}", done, total) }),
+                            json!({ "sessionId": session_id, "phase": "topic_metadata", "total": total, "completed": done }),
                         );
                     }
 
@@ -639,20 +620,6 @@ impl DiffHandler {
                                                 )
                                                 .await
                                             }
-                                        }
-                                        SyncDataType::Agent => {
-                                            PullExecutor::pull_agent(
-                                                &h_task, &c_task, &b_task, &token_task, &id,
-                                                &wq_task,
-                                            )
-                                            .await
-                                        }
-                                        SyncDataType::Group => {
-                                            PullExecutor::pull_group(
-                                                &h_task, &c_task, &b_task, &token_task, &id,
-                                                &wq_task,
-                                            )
-                                            .await
                                         }
                                         _ => Err(format!(
                                             "unsupported PULL data type: {:?}",
@@ -806,7 +773,6 @@ impl DiffHandler {
                                             },
                                             "total": total,
                                             "completed": done,
-                                            "message": format!("Syncing: {}/{}", done, total)
                                         }),
                                     );
                                     if current_pending == 0
@@ -888,9 +854,8 @@ mod tests {
             {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-a"},
             {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-a"},
         ]);
-        let error =
-            validate_diff_items(duplicate.as_array().unwrap(), &SyncDataType::Topic)
-                .expect_err("duplicate compound identity must fail");
+        let error = validate_diff_items(duplicate.as_array().unwrap(), &SyncDataType::Topic)
+            .expect_err("duplicate compound identity must fail");
         assert!(error.contains("duplicate topic identity"));
     }
 

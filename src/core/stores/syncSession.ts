@@ -323,7 +323,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     phase: "initialization",
     total: 0,
     completed: 0,
-    message: "",
   });
 
   // --- 监听器引用 ---
@@ -372,7 +371,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       phase: "initialization",
       total: 0,
       completed: 0,
-      message: "",
     };
     listenerSetup = registerListeners(generation);
   };
@@ -397,7 +395,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       phase: "initialization",
       total: 0,
       completed: 0,
-      message: "",
     };
     lastLoggedPhase = "";
     progressLineId = null;
@@ -513,7 +510,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         phase: "initialization",
         total: 0,
         completed: 0,
-        message: "",
       };
       await beginSync(true);
     } catch (error: unknown) {
@@ -748,8 +744,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         phase: nextPhase,
         total: nextTotal,
         completed: nextCompleted,
-        // 后端阶段消息用于诊断，不进入用户界面；前端只展示稳定阶段文案。
-        message: "",
       };
       if (nextPhase !== lastLoggedPhase) {
         progressLineId = null; // 定格上一阶段的进度行

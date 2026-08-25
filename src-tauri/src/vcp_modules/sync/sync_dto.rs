@@ -1,5 +1,4 @@
 use crate::vcp_modules::agent_types::AgentConfig;
-use crate::vcp_modules::chat_manager::Attachment;
 use crate::vcp_modules::group_types::GroupConfig;
 use crate::vcp_modules::topic_types::Topic;
 use serde::{Deserialize, Serialize};
@@ -136,41 +135,11 @@ pub struct AttachmentSyncDTO {
     pub size: u64,
     pub hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub extracted_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_frames: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<u64>,
-}
-
-impl TryFrom<&Attachment> for AttachmentSyncDTO {
-    type Error = String;
-
-    fn try_from(att: &Attachment) -> Result<Self, Self::Error> {
-        let hash = att
-            .hash
-            .as_deref()
-            .map(str::to_ascii_lowercase)
-            .filter(|hash| crate::vcp_modules::infra::utils::is_valid_cas_hash(hash))
-            .ok_or_else(|| {
-                format!(
-                    "Attachment {} requires a valid SHA-256 content hash",
-                    att.name
-                )
-            })?;
-        Ok(Self {
-            r#type: att.r#type.clone(),
-            name: att.name.clone(),
-            size: att.size,
-            hash,
-            status: att.status.clone(),
-            extracted_text: att.extracted_text.clone(),
-            image_frames: att.image_frames.clone(),
-            created_at: att.created_at,
-        })
-    }
 }
 
 /// 消息持久同步 DTO：Push/Pull 共用同一份 canonical 契约。
@@ -241,7 +210,7 @@ impl From<MessageSyncDTO> for crate::vcp_modules::chat_manager::ChatMessage {
                         name: a.name,
                         size: a.size,
                         hash: Some(a.hash),
-                        status: a.status,
+                        status: None,
                         attachment_order: None,
                         internal_path: "".to_string(),
                         extracted_text: a.extracted_text,
@@ -309,61 +278,6 @@ mod tests {
     }
 
     #[test]
-    fn test_attachment_sync_dto_from_attachment_preserves_sync_fields_only() {
-        let attachment = Attachment {
-            r#type: "image".to_string(),
-            src: "/local/path.png".to_string(),
-            name: "path.png".to_string(),
-            size: 42,
-            hash: Some("A".repeat(64)),
-            status: Some("ready".to_string()),
-            attachment_order: Some(7),
-            internal_path: "internal/path.png".to_string(),
-            extracted_text: Some("text".to_string()),
-            image_frames: Some(vec!["frame-1".to_string()]),
-            thumbnail_path: Some("thumb.png".to_string()),
-            created_at: Some(100),
-        };
-
-        let dto = AttachmentSyncDTO::try_from(&attachment).expect("valid attachment DTO");
-        assert_eq!(dto.r#type, "image");
-        assert_eq!(dto.name, "path.png");
-        assert_eq!(dto.size, 42);
-        assert_eq!(dto.hash, "a".repeat(64));
-        assert_eq!(dto.status.as_deref(), Some("ready"));
-        assert_eq!(dto.extracted_text.as_deref(), Some("text"));
-        assert_eq!(dto.image_frames.as_ref().unwrap()[0], "frame-1");
-        assert_eq!(dto.created_at, Some(100));
-
-        let json = serde_json::to_value(&dto).unwrap();
-        let obj = json.as_object().unwrap();
-        assert!(!obj.contains_key("src"));
-        assert!(!obj.contains_key("internalPath"));
-        assert!(!obj.contains_key("thumbnailPath"));
-    }
-
-    #[test]
-    fn attachment_sync_dto_rejects_missing_or_invalid_hash() {
-        let mut attachment = Attachment {
-            r#type: "file".to_string(),
-            src: String::new(),
-            name: "missing.bin".to_string(),
-            size: 1,
-            hash: None,
-            status: None,
-            attachment_order: None,
-            internal_path: String::new(),
-            extracted_text: None,
-            image_frames: None,
-            thumbnail_path: None,
-            created_at: None,
-        };
-        assert!(AttachmentSyncDTO::try_from(&attachment).is_err());
-        attachment.hash = Some("not-a-sha256".to_string());
-        assert!(AttachmentSyncDTO::try_from(&attachment).is_err());
-    }
-
-    #[test]
     fn test_message_sync_dto_into_chat_message_maps_attachments_and_defaults_local_paths() {
         let dto = MessageSyncDTO {
             id: "msg-1".to_string(),
@@ -383,7 +297,6 @@ mod tests {
                 name: "a.txt".to_string(),
                 size: 10,
                 hash: "hash-a".to_string(),
-                status: Some("ready".to_string()),
                 extracted_text: Some("extracted".to_string()),
                 image_frames: None,
                 created_at: Some(200),

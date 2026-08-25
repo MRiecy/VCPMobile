@@ -2,7 +2,6 @@ use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_logger::{LogLevel, SyncLogger};
-use crate::vcp_modules::sync_pipeline::SyncPipeline;
 use crate::vcp_modules::sync_service::emit_sync_log;
 use crate::vcp_modules::topic_types::TopicKey;
 use sqlx::Row;
@@ -218,7 +217,6 @@ impl SyncFinalizer {
         app_handle: &AppHandle,
         db: &DbState,
         write_queue: &DbWriteQueue,
-        pipeline: &SyncPipeline,
         logger: &Arc<Mutex<SyncLogger>>,
         modified_topics: HashSet<TopicKey>,
     ) -> Result<(), String> {
@@ -265,12 +263,6 @@ impl SyncFinalizer {
 
         // 同步写队列绕过业务 Facade；完成后统一失效配置缓存，避免继续命中同步前快照。
         invalidate_sync_entity_caches(app_handle);
-
-        // 3. 推进 Pipeline 状态
-        pipeline
-            .on_messages_done()
-            .await
-            .map_err(|error| format!("推进同步收尾状态失败: {error}"))?;
 
         Ok(())
     }

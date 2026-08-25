@@ -552,7 +552,6 @@ describe("sync session ownership", () => {
       store.logs.filter((log) => log.message === "会话主题同步完成"),
     ).toHaveLength(0);
     expect(store.progressData.phase).toBe("topic_metadata");
-    expect(store.progressData.message).toBe("");
     expect(store.logs.some((log) => log.message.includes("phase-secret"))).toBe(
       false,
     );

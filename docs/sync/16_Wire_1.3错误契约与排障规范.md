@@ -1,5 +1,5 @@
 ---
-title: Wire 1.2 错误契约与排障规范
+title: Wire 1.3 错误契约与排障规范
 scope: 双端
 related_files:
   - src-tauri/src/vcp_modules/sync/sync_error.rs
@@ -9,17 +9,17 @@ related_files:
   - VCPChat/VCPDistributedServer/Plugin/VCPMobileSync/error-contract.js
 ---
 
-# Wire 1.2 错误契约与排障规范
+# Wire 1.3 错误契约与排障规范
 
 ## 1. 目标与兼容边界
 
-Wire 1.2 将同步错误从不可判定的字符串升级为双端共用的结构化对象，解决三个问题：
+Wire 1.3 将同步错误从不可判定的字符串升级为双端共用的结构化对象，解决三个问题：
 
 1. 设备预检、版本兼容、连接、数据、存储和生命周期错误不再依赖关键词猜测；
 2. WebSocket、HTTP、NDJSON 与 Phase 3 逐 Topic 结果使用同一字段集合；
 3. VCPChat 返回的稳定根因码可穿过 Mobile Rust 层，到达前端安全错误卡，同时原始诊断文本只进入脱敏日志。
 
-当前唯一兼容组合是 VCPMobile `1.1.4`、VCPMobileSync `1.2.0`、wire protocol `1.2`。这是硬切协议：1.1 及字符串错误格式均拒绝，不做双格式兼容。
+当前唯一兼容组合是 VCPMobile `1.1.5`、VCPMobileSync `1.3.0`、wire protocol `1.3`。这是硬切协议：1.1 及字符串错误格式均拒绝，不做双格式兼容。
 
 ## 2. 唯一错误对象
 
@@ -145,7 +145,7 @@ VCPChat 拥有诊断事实，Mobile 拥有用户文案：
 
 ### 5.1 VCP-CDS 上游适配
 
-VCP-CDS internal protocol 2 不是 Mobile Wire 1.2。它当前有四种较窄的失败形态：HTTP `ErrorDetail {code,message,retryable}`、Phase 3 `SyncDecisionError {code,message}`、流式 Pull Topic 帧中的诊断字符串 `_error`，以及逐 Topic Push 结果中的字符串 `error`。`VCPMobileSync/sync/central.js` 是唯一翻译边界：
+VCP-CDS internal protocol 2 不是 Mobile Wire 1.3。它当前有四种较窄的失败形态：HTTP `ErrorDetail {code,message,retryable}`、Phase 3 `SyncDecisionError {code,message}`、流式 Pull Topic 帧中的诊断字符串 `_error`，以及逐 Topic Push 结果中的字符串 `error`。`VCPMobileSync/sync/central.js` 是唯一翻译边界：
 
 - HTTP 异常保留 CDS code，补 `origin=desktop_cds`、当前 `stage`、精确 `kind/retry` 与失败 Topic；
 - Phase 3 二字段错误在返回 Mobile 前扩展为七字段 `SyncError`；
@@ -195,7 +195,7 @@ VCP-CDS internal protocol 2 不是 Mobile Wire 1.2。它当前有四种较窄的
 用户提供诊断信息后，按 `stage → origin → code → failedTopicIds → logFile` 定位：
 
 1. `preflight/mobile_native`：先检查电量和省电策略，不检查桌面版本；
-2. `handshake/desktop_plugin`：先核对 `1.2.0 / 1.2`，不归因于电源状态；
+2. `handshake/desktop_plugin`：先核对 `1.3.0 / 1.3`，不归因于电源状态；
 3. `topic_metadata|messages/desktop_cds`：检查 CDS 返回对象和对应 Topic；
 4. `finalize/mobile_sync`：检查写队列 drain 与最终 ACK，不将其误报为普通网络建连失败；
 5. `shutdown/mobile_sync`：检查 session generation、owner、cancel 和 join，禁止重启一个仍在退出的旧 attempt。

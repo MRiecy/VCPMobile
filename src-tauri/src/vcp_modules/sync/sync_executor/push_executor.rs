@@ -336,8 +336,6 @@ async fn preflight_topic_messages(
     let attachment_bytes: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(
                     LENGTH(CAST(ma.hash AS BLOB)) + LENGTH(CAST(ma.display_name AS BLOB)) +
-                    COALESCE(LENGTH(CAST(ma.src AS BLOB)), 0) +
-                    COALESCE(LENGTH(CAST(ma.status AS BLOB)), 0) +
                     COALESCE(LENGTH(CAST(a.mime_type AS BLOB)), 0) +
                     COALESCE(LENGTH(CAST(a.extracted_text AS BLOB)), 0) +
                     COALESCE(LENGTH(CAST(a.image_frames AS BLOB)), 0)
@@ -603,7 +601,7 @@ async fn load_outbound_message_page(
     tx: &mut Transaction<'_, Sqlite>,
     key: &TopicKey,
     cursor: Option<(i64, &str)>,
-) -> Result<Vec<crate::vcp_modules::chat_manager::ChatMessage>, String> {
+) -> Result<Vec<MessageSyncDTO>, String> {
     let topic_id = &key.topic_id;
     let mut query = if cursor.is_some() {
         sqlx::query(
@@ -659,7 +657,7 @@ async fn load_outbound_message_page(
         let is_group_message: i64 = row.try_get("is_group_message").map_err(|error| {
             format!("Message group flag decode failed for {topic_id}/{message_id}: {error}")
         })?;
-        messages.push(crate::vcp_modules::chat_manager::ChatMessage {
+        messages.push(MessageSyncDTO {
             id: message_id,
             role: row
                 .try_get("role")
@@ -671,8 +669,8 @@ async fn load_outbound_message_page(
                 format!("Message content decode failed for {topic_id}: {error}")
             })?,
             timestamp,
-            updated_at: Some(updated_at),
-            is_thinking: Some(false),
+            updated_at,
+            is_thinking: None,
             agent_id: row
                 .try_get("agent_id")
                 .map_err(|error| format!("Message agent decode failed for {topic_id}: {error}"))?,
@@ -680,14 +678,13 @@ async fn load_outbound_message_page(
                 .try_get("group_id")
                 .map_err(|error| format!("Message group decode failed for {topic_id}: {error}"))?,
             topic_id: Some(topic_id.to_string()),
-            is_group_message: Some(is_group_message != 0),
+            is_group_message: (is_group_message != 0).then_some(true),
             finish_reason: row.try_get("finish_reason").map_err(|error| {
                 format!("Message finish reason decode failed for {topic_id}: {error}")
             })?,
             attachments: None,
-            blocks: None,
-            shell: None,
             content_hash: (!content_hash.is_empty()).then_some(content_hash),
+            avatar_color: None,
         });
     }
 
@@ -700,9 +697,9 @@ async fn load_outbound_message_page(
         .collect::<Vec<_>>()
         .join(", ");
     let attachment_query = format!(
-        "SELECT ma.msg_id, ma.hash AS relation_hash, ma.display_name, ma.src, ma.status,
-                a.hash AS stored_hash, a.mime_type, a.size, a.internal_path,
-                a.extracted_text, a.image_frames, a.thumbnail_path, a.created_at
+        "SELECT ma.msg_id, ma.hash AS relation_hash, ma.display_name,
+                a.hash AS stored_hash, a.mime_type, a.size,
+                a.extracted_text, a.image_frames, a.created_at
          FROM message_attachments ma
          LEFT JOIN attachments a ON a.hash = ma.hash
          WHERE ma.owner_type = ? AND ma.owner_id = ? AND ma.topic_id = ?
@@ -734,8 +731,11 @@ async fn load_outbound_message_page(
                 "Attachment query returned unexpected message {topic_id}/{message_id}"
             ));
         }
-        let relation_hash: String = row.try_get("relation_hash").map_err(|error| {
+        let relation_hash_raw: String = row.try_get("relation_hash").map_err(|error| {
             format!("Attachment hash decode failed for {topic_id}/{message_id}: {error}")
+        })?;
+        let relation_hash = canonical_sha256(&relation_hash_raw).ok_or_else(|| {
+            format!("Attachment {relation_hash_raw} referenced by {topic_id}/{message_id} has an invalid hash")
         })?;
         let stored_hash: Option<String> = row.try_get("stored_hash").map_err(|error| {
             format!("Stored attachment hash decode failed for {relation_hash}: {error}")
@@ -777,37 +777,20 @@ async fn load_outbound_message_page(
         attachments_by_message
             .entry(message_id)
             .or_insert_with(Vec::new)
-            .push(crate::vcp_modules::chat_manager::Attachment {
+            .push(AttachmentSyncDTO {
                 r#type: row
                     .try_get::<Option<String>, _>("mime_type")
                     .map_err(|error| {
                         format!("Attachment MIME decode failed for {relation_hash}: {error}")
                     })?
                     .ok_or_else(|| format!("Attachment {relation_hash} has no MIME metadata"))?,
-                src: row
-                    .try_get::<Option<String>, _>("src")
-                    .map_err(|error| {
-                        format!("Attachment source decode failed for {relation_hash}: {error}")
-                    })?
-                    .unwrap_or_default(),
                 name: row.try_get("display_name").map_err(|error| {
                     format!("Attachment name decode failed for {relation_hash}: {error}")
                 })?,
                 size,
-                hash: Some(relation_hash),
-                status: row
-                    .try_get("status")
-                    .map_err(|error| format!("Attachment status decode failed: {error}"))?,
-                attachment_order: None,
-                internal_path: row
-                    .try_get::<Option<String>, _>("internal_path")
-                    .map_err(|error| format!("Attachment path decode failed: {error}"))?
-                    .ok_or_else(|| "Attachment has no local path metadata".to_string())?,
+                hash: relation_hash,
                 extracted_text,
                 image_frames,
-                thumbnail_path: row
-                    .try_get("thumbnail_path")
-                    .map_err(|error| format!("Attachment thumbnail decode failed: {error}"))?,
                 created_at,
             });
     }
@@ -817,62 +800,6 @@ async fn load_outbound_message_page(
         }
     }
     Ok(messages)
-}
-
-fn build_message_dto(
-    message: crate::vcp_modules::chat_manager::ChatMessage,
-) -> Result<MessageSyncDTO, String> {
-    if message.id.is_empty() || message.role.is_empty() {
-        return Err("Outbound messages require non-empty id and role".to_string());
-    }
-    let attachments = message
-        .attachments
-        .map(|attachments| {
-            attachments
-                .into_iter()
-                .map(|attachment| {
-                    let hash = attachment
-                        .hash
-                        .as_deref()
-                        .and_then(canonical_sha256)
-                        .ok_or_else(|| {
-                            format!(
-                                "Outbound message {} attachment {} has no valid SHA-256 hash",
-                                message.id, attachment.name
-                            )
-                        })?;
-                    Ok(AttachmentSyncDTO {
-                        r#type: attachment.r#type,
-                        name: attachment.name,
-                        size: attachment.size,
-                        hash,
-                        status: attachment.status,
-                        extracted_text: attachment.extracted_text,
-                        image_frames: attachment.image_frames,
-                        created_at: attachment.created_at,
-                    })
-                })
-                .collect::<Result<Vec<_>, String>>()
-        })
-        .transpose()?;
-
-    Ok(MessageSyncDTO {
-        id: message.id,
-        role: message.role,
-        name: message.name,
-        content: message.content,
-        timestamp: message.timestamp,
-        updated_at: message.updated_at.unwrap_or(message.timestamp),
-        is_thinking: None,
-        agent_id: message.agent_id,
-        group_id: message.group_id,
-        topic_id: message.topic_id,
-        is_group_message: message.is_group_message.filter(|value| *value),
-        finish_reason: message.finish_reason,
-        attachments,
-        content_hash: message.content_hash,
-        avatar_color: None,
-    })
 }
 
 async fn serialize_topic_messages(
@@ -922,13 +849,12 @@ async fn serialize_topic_messages(
                 )
             })?;
             let next_cursor = (timestamp, message.id.clone());
-            let dto = build_message_dto(message)?;
             if serialized_count > 0 {
                 line.write_all(b",").map_err(|error| {
                     format!("Message push separator failed for {topic_id}: {error}")
                 })?;
             }
-            serde_json::to_writer(&mut line, &dto).map_err(|error| {
+            serde_json::to_writer(&mut line, &message).map_err(|error| {
                 format!(
                     "Message push topic {topic_id} exceeds the 32 MiB line limit or contains invalid data: {error}"
                 )
