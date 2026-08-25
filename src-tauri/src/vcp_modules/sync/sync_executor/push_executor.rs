@@ -641,6 +641,14 @@ async fn load_outbound_message_page(
         let message_id: String = row
             .try_get("msg_id")
             .map_err(|error| format!("Message id decode failed for {topic_id}: {error}"))?;
+        let role: String = row.try_get("role").map_err(|error| {
+            format!("Message role decode failed for {topic_id}/{message_id}: {error}")
+        })?;
+        if message_id.is_empty() || role.is_empty() {
+            return Err(format!(
+                "Outbound message {topic_id}/{message_id} requires non-empty id and role"
+            ));
+        }
         let timestamp: i64 = row.try_get("timestamp").map_err(|error| {
             format!("Message timestamp decode failed for {topic_id}/{message_id}: {error}")
         })?;
@@ -659,9 +667,7 @@ async fn load_outbound_message_page(
         })?;
         messages.push(MessageSyncDTO {
             id: message_id,
-            role: row
-                .try_get("role")
-                .map_err(|error| format!("Message role decode failed for {topic_id}: {error}"))?,
+            role,
             name: row
                 .try_get("name")
                 .map_err(|error| format!("Message name decode failed for {topic_id}: {error}"))?,

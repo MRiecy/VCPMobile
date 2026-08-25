@@ -478,8 +478,6 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
         | "SYNC_AVATAR_WRITE_FAILED"
         | "OWNER_MANIFEST_DB_FAILED"
         | "AVATAR_MANIFEST_DB_FAILED"
-        | "AGENT_HASH_INIT_DB_FAILED"
-        | "GROUP_HASH_INIT_DB_FAILED"
         | "OWNER_METADATA_DRAIN_FAILED"
         | "ENTITY_PULL_FAILED" => definition(
             Category::Storage,
@@ -519,8 +517,6 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
         | "SYNC_MESSAGE_READ_FAILED"
         | "SYNC_MESSAGE_WRITE_FAILED"
         | "SYNC_DELETE_FAILED"
-        | "ENTITY_UPDATE_FAILED"
-        | "ENTITY_DELETE_FAILED"
         | "ENTITY_OPERATION_FAILED"
         | "PHASE3_HASH_PREP_FAILED"
         | "PHASE3_PUSH_FAILED"

@@ -1,13 +1,10 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
 use crate::vcp_modules::sync_hash::HashAggregator;
-use crate::vcp_modules::sync_logger::{LogLevel, SyncLogger};
 use crate::vcp_modules::sync_service::emit_sync_log;
 use crate::vcp_modules::topic_types::TopicKey;
 use sqlx::Row;
 use std::collections::HashSet;
-use std::sync::Arc;
-use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 pub struct SyncFinalizer;
@@ -217,7 +214,6 @@ impl SyncFinalizer {
         app_handle: &AppHandle,
         db: &DbState,
         write_queue: &DbWriteQueue,
-        logger: &Arc<Mutex<SyncLogger>>,
         modified_topics: HashSet<TopicKey>,
     ) -> Result<(), String> {
         // 1. 强制落盘数据库写队列
@@ -242,9 +238,6 @@ impl SyncFinalizer {
             let stats = match finalize_modified_topics(&db.pool, &modified_topics).await {
                 Ok(stats) => stats,
                 Err(error) => {
-                    if let Ok(mut sync_logger) = logger.lock() {
-                        sync_logger.log(LogLevel::Error, "finalize", &error);
-                    }
                     emit_sync_log(app_handle, "error", &error);
                     return Err(error);
                 }
@@ -257,7 +250,6 @@ impl SyncFinalizer {
                 stats.affected_agents,
                 stats.affected_groups
             );
-            log::info!("{}", success_msg);
             emit_sync_log(app_handle, "success", &success_msg);
         }
 

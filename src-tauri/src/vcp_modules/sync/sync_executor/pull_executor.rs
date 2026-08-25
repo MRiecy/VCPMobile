@@ -28,7 +28,7 @@ const MAX_WARNING_SAMPLES: usize = 8;
 const NDJSON_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const PULL_WORKER_BUDGET_UNIT_BYTES: usize = 1024 * 1024;
 const PULL_WORKER_BUDGET_UNITS: usize = MAX_NDJSON_LINE_BYTES / PULL_WORKER_BUDGET_UNIT_BYTES;
-const MAX_DIRECT_ENTITY_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_ENTITY_BATCH_BYTES: usize = 10 * 1024 * 1024;
 const MAX_ENTITY_BATCH_ITEMS: usize = 1_000;
 const MAX_MESSAGE_IDS_PER_TOPIC: usize = 10_000;
 const MAX_MESSAGE_PULL_TOPICS: usize = 10_000;
@@ -773,7 +773,7 @@ impl PullExecutor {
         }
         let request_body = serde_json::to_vec(&serde_json::json!({ "requests": requests }))
             .map_err(|error| format!("Entity pull request serialization failed: {error}"))?;
-        if request_body.len() > MAX_DIRECT_ENTITY_RESPONSE_BYTES {
+        if request_body.len() > MAX_ENTITY_BATCH_BYTES {
             return Err("Entity pull request exceeds 10 MiB".to_string());
         }
         let url = format!("{}/api/mobile-sync/download-entities", http_url);
@@ -788,7 +788,7 @@ impl PullExecutor {
             .map_err(|e| e.to_string())?;
 
         let (status, bytes) =
-            read_response_limited(res, MAX_DIRECT_ENTITY_RESPONSE_BYTES, "Entity pull").await?;
+            read_response_limited(res, MAX_ENTITY_BATCH_BYTES, "Entity pull").await?;
         if !status.is_success() {
             return Err(http_status_error("Pull entities batch", status, &bytes));
         }

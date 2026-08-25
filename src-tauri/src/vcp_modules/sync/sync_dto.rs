@@ -220,7 +220,8 @@ impl From<MessageSyncDTO> for crate::vcp_modules::chat_manager::ChatMessage {
                     })
                     .collect()
             }),
-            blocks: None, // ⚡ 同步下载阶段不再执行耗时预渲染，直接设为 None，由 Lazy Render 闭环接管！
+            // blocks/render_cache 是本地状态；下游依设置可选预渲染，否则由加载路径懒生成。
+            blocks: None,
             content_hash: dto.content_hash,
             shell: None,
         }

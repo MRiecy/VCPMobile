@@ -56,7 +56,7 @@ scope: 双端
 
 **幂等性机制**
 - 移动端在 Header 中附加 `x-idempotency-key`，桌面端通过 `checkIdempotency(opId)` 检查是否重复。
-- 键值生成算法（`push_executor.rs`）：`SHA256(action + entity_type + id + minute_timestamp)`。
+- 键值生成算法（`push_executor.rs`）：`SHA256(action + entity_type + id + configHash + minute_timestamp)`。
 - 若重复，桌面端直接返回缓存结果，不做数据库写入。
 
 **响应体结构**
@@ -94,8 +94,8 @@ scope: 双端
 ```json
 {
   "requests": [
-    { "topicId": "topic-uuid-1", "msgIds": ["msg-1", "msg-2"] },
-    { "topicId": "topic-uuid-2", "msgIds": [] }
+    { "topicId": "topic-uuid-1", "ownerType": "agent", "ownerId": "agent-1", "msgIds": ["msg-1", "msg-2"] },
+    { "topicId": "topic-uuid-2", "ownerType": "group", "ownerId": "group-1", "msgIds": [] }
   ]
 }
 ```
@@ -107,8 +107,8 @@ scope: 双端
 桌面端以换行符分隔的 JSON（NDJSON）逐 topic 返回，每行一个对象：
 
 ```ndjson
-{"topicId":"topic-uuid-1","messages":[/* ChatMessage 数组 */]}
-{"topicId":"topic-uuid-2","messages":[/* ... */]}
+{"topicId":"topic-uuid-1","ownerType":"agent","ownerId":"agent-1","messages":[/* MessageSyncDTO 数组 */]}
+{"topicId":"topic-uuid-2","ownerType":"group","ownerId":"group-1","messages":[/* ... */]}
 ```
 
 **移动端消费流程**
@@ -130,25 +130,23 @@ scope: 双端
 移动端直接上传换行分隔的 JSON，无需先序列化为 JSON 数组：
 
 ```ndjson
-{"topicId":"topic-uuid-1","messages":[{"id":"msg-1","role":"user",...},{...}]}
-{"topicId":"topic-uuid-2","messages":[...]}
+{"topicId":"topic-uuid-1","ownerType":"agent","ownerId":"agent-1","messages":[{"id":"msg-1","role":"user",...},{...}]}
+{"topicId":"topic-uuid-2","ownerType":"group","ownerId":"group-1","messages":[...]}
 ```
 
 Content-Type 设置为 `application/x-ndjson`。
 
 **响应格式：NDJSON**
 ```ndjson
-{"topicId":"topic-uuid-1","success":true}
-{"topicId":"topic-uuid-2","success":false,"error":"Topic not found on desktop"}
+{"topicId":"topic-uuid-1","ownerType":"agent","ownerId":"agent-1","success":true}
+{"topicId":"topic-uuid-2","ownerType":"group","ownerId":"group-1","success":false,"error":{"code":"SYNC_MESSAGE_WRITE_FAILED","origin":"desktop_plugin","stage":"messages","kind":"storage","retry":"manual","message":"Topic write failed","failedTopicIds":["topic-uuid-2"]}}
 ```
 
 附件关系元数据与内容 Hash 位于消息 DTO；附件二进制不通过同步 HTTP 端点传输。
 
 **DTO 构建逻辑**
-移动端根据 `owner_type` 将 `ChatMessage` 转为不同 DTO：
-- `role == "user"` → `UserMessageSyncDTO`
-- `owner_type == "group"` → `GroupMessageSyncDTO`（需查询 `avatar_color`）
-- 否则 → `AgentMessageSyncDTO`（需查询 `avatar_color`）
+
+消息 Wire 合同统一为 canonical `MessageSyncDTO`。移动端直接从 SQLite 投影基础字段，并按消息实际状态携带 `agentId`、`groupId`、`topicId`、`isGroupMessage`、`finishReason` 与附件元数据；角色和 Owner 差异由这些字段表达，不再维护三种 Push 专用序列化壳。`avatarColor` 属于兼容输入和本机展示状态，不参与 Mobile 出站投影。
 
 ---
 

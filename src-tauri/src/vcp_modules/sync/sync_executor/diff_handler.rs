@@ -177,18 +177,10 @@ impl DiffHandler {
             let total_ops = pull_count + push_count + delete_count + push_delete_count;
 
             if total_ops > 0 {
-                let phase_tag = match data_type {
-                    SyncDataType::Agent | SyncDataType::Group | SyncDataType::Avatar => {
-                        "owner_metadata"
-                    }
-                    SyncDataType::Topic => "topic_metadata",
-                    SyncDataType::Message => "messages",
-                };
                 let msg = format!(
                     "[{}] Diff: pull={} push={} delete={} push_delete={}",
                     data_type, pull_count, push_count, delete_count, push_delete_count
                 );
-                log::info!("[Sync] [{}] {}", phase_tag, msg);
                 emit_sync_log(app_handle, "info", &msg);
             }
             pending_tasks.fetch_add(total_ops, Ordering::SeqCst);

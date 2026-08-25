@@ -339,11 +339,11 @@ Legacy 模式使用插件目录下的 `sync_state_v2.db`。中央模式的同结
 | 消息 ID | `messages.msg_id` | `history.json` → `id` | 主键 |
 | 消息所属 Topic | `messages.topic_id` | 父级目录 `{topicId}` | 桌面端按目录隔离消息历史 |
 | 消息角色 | `messages.role` | `history.json` → `role` | `user` / `assistant` / `system` |
-| 消息发送者 | `messages.agent_id` | `history.json` → `agentId` | Agent/Group 消息必填 |
+| 消息发送者 | `messages.agent_id` | `history.json` → `agentId` | Agent 回复与 Group 成员回复携带；用户消息可为空 |
 | 消息内容 | `messages.content` | `history.json` → `content` | Markdown 或纯文本 |
 | 消息时间戳 | `messages.timestamp` | `history.json` → `timestamp` | 毫秒级绝对时间 |
 | 消息指纹 | `messages.content_hash` | `message_index.hash` | 稳定 JSON 的 SHA-256 |
-| 消息软删除 | `messages.deleted_at` | `message_index.deleted_at` | 30 天后清理 |
+| 消息软删除 | `messages.deleted_at` | `message_index.deleted_at` | 墓碑身份长期保留；Mobile 仅在 30 天后清空正文与渲染缓存 |
 | 附件内容哈希 | `attachments.hash` | `attachment_index.hash` | 全局去重键 |
 | 附件 MIME 类型 | `attachments.mime_type` | 由文件扩展名推导 | 桌面端不单独存储 |
 | 附件物理路径 | `attachments.internal_path` | `attachment_index.file_path` | 移动端在 `app_config_dir` 内；桌面端在 `UserData/attachments/` |
@@ -391,7 +391,7 @@ Legacy 模式使用插件目录下的 `sync_state_v2.db`。中央模式的同结
 - 移动端：`deleted_at` 字段由 `BIGINT` 标记，非空即视为已删除。
 - 桌面端：`deleted_at` 字段由 `INTEGER DEFAULT NULL` 标记。
 
-桌面端插件提供 `cleanupOldDeletedRecords()` 函数，自动清理 `deleted_at` 超过 30 天的记录。移动端由 `DeleteExecutor::cleanup_old_deleted_records` 执行相同清理，并在软删除 Agent/Group/Topic 时级联清理 `active_generations` 注册表，杜绝已删除消息复活。
+桌面端同步插件不执行定时墓碑硬删除。移动端生命周期任务每日调用 `DeleteExecutor::cleanup_old_deleted_records`：超过 30 天的已删消息只删除 `render_cache` 并将正文替换为 `[已清空]`，完整消息键和 `deleted_at` 继续保留。Agent/Group/Topic 删除时对 `active_generations` 的清理属于领域级联，不改变墓碑保留规则。
 
 ### 布尔值的 SQLite 表达
 

@@ -118,16 +118,12 @@ fn protocol_send_failure_message(context: &str, error: &str) -> String {
 
 async fn terminate_after_protocol_send_failure<R: Runtime>(
     app_handle: &AppHandle<R>,
-    session_id: u64,
-    status: &Arc<RwLock<String>>,
     ws_stream: &mut SyncWebSocket,
     context: &str,
     error: &str,
 ) {
     let message = protocol_send_failure_message(context, error);
-    log::warn!("[SyncService] {message}");
     emit_sync_log(app_handle, "warning", &message);
-    let _ = (session_id, status);
     let _ = close_ws_with_deadline(ws_stream).await;
 }
 
@@ -1066,8 +1062,6 @@ async fn run_sync_session(
                     {
                         terminate_after_protocol_send_failure(
                             &handle_clone,
-                            session_id,
-                            &connection_status_for_task,
                             &mut ws_stream,
                             "version check",
                             &error,
@@ -1327,8 +1321,6 @@ async fn run_sync_session(
                 {
                     terminate_after_protocol_send_failure(
                         &handle_clone,
-                        session_id,
-                        &connection_status_for_task,
                         &mut ws_stream,
                         "owner metadata phase start",
                         &error,
@@ -1423,8 +1415,6 @@ async fn run_sync_session(
                             if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Ping(vec![].into())).await {
                                 terminate_after_protocol_send_failure(
                                     &handle_clone,
-                                    session_id,
-                                    &connection_status_for_task,
                                     &mut ws_stream,
                                     "WebSocket heartbeat",
                                     &error,
@@ -1488,8 +1478,6 @@ async fn run_sync_session(
                                             if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(json!({ "type": "PHASE_START", "phase": "topic_metadata" }).to_string().into())).await {
                                                 terminate_after_protocol_send_failure(
                                                     &handle_clone,
-                                                    session_id,
-                                                    &connection_status_for_task,
                                                     &mut ws_stream,
                                                     "topic metadata phase start",
                                                     &error,
@@ -1507,8 +1495,6 @@ async fn run_sync_session(
                                             if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(msg.to_string().into())).await {
                                                 terminate_after_protocol_send_failure(
                                                     &handle_clone,
-                                                    session_id,
-                                                    &connection_status_for_task,
                                                     &mut ws_stream,
                                                     "topic metadata manifest",
                                                     &error,
@@ -1593,8 +1579,6 @@ async fn run_sync_session(
                                             if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(msg.to_string().into())).await {
                                                 terminate_after_protocol_send_failure(
                                                     &handle_clone,
-                                                    session_id,
-                                                    &connection_status_for_task,
                                                     &mut ws_stream,
                                                     "topic hash batch",
                                                     &error,
@@ -1631,8 +1615,6 @@ async fn run_sync_session(
                                     if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(json!({ "type": "PHASE_START", "phase": "messages" }).to_string().into())).await {
                                         terminate_after_protocol_send_failure(
                                             &handle_clone,
-                                            session_id,
-                                            &connection_status_for_task,
                                             &mut ws_stream,
                                             "messages phase start",
                                             &error,
@@ -1731,8 +1713,6 @@ async fn run_sync_session(
                                                     ).await {
                                                         terminate_after_protocol_send_failure(
                                                             &handle_clone,
-                                                            session_id,
-                                                            &connection_status_for_task,
                                                             &mut ws_stream,
                                                             "message diff batch",
                                                             &error,
@@ -1841,8 +1821,6 @@ async fn run_sync_session(
                                         ).await {
                                             terminate_after_protocol_send_failure(
                                                 &handle_clone,
-                                                session_id,
-                                                &connection_status_for_task,
                                                 &mut ws_stream,
                                                 "avatar metadata manifest",
                                                 &error,
@@ -1892,8 +1870,6 @@ async fn run_sync_session(
                                         if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(json!({ "type": "PHASE_COMPLETED", "phase": "owner_metadata" }).to_string().into())).await {
                                             terminate_after_protocol_send_failure(
                                                 &handle_clone,
-                                                session_id,
-                                                &connection_status_for_task,
                                                 &mut ws_stream,
                                                 "owner metadata phase completion",
                                                 &error,
@@ -1934,8 +1910,6 @@ async fn run_sync_session(
                                         if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(json!({ "type": "PHASE_COMPLETED", "phase": "topic_metadata" }).to_string().into())).await {
                                             terminate_after_protocol_send_failure(
                                                 &handle_clone,
-                                                session_id,
-                                                &connection_status_for_task,
                                                 &mut ws_stream,
                                                 "topic metadata phase completion",
                                                 &error,
@@ -1994,12 +1968,10 @@ async fn run_sync_session(
                                             &handle_clone,
                                             &db,
                                             &write_queue_task,
-                                            &sync_logger_task,
                                             modified_topics,
                                         ).await {
                                             let message = format!("Sync finalization failed: {}", e);
                                             fatal_error = true;
-                                            log::error!("[SyncService] {}", message);
                                             emit_sync_log(&handle_clone, "error", &message);
                                             publish_sync_error(
                                                 &handle_clone,
@@ -2076,8 +2048,6 @@ async fn run_sync_session(
                                     if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(msg.to_string().into())).await {
                                         terminate_after_protocol_send_failure(
                                             &handle_clone,
-                                            session_id,
-                                            &connection_status_for_task,
                                             &mut ws_stream,
                                             "local entity deletion",
                                             &error,
@@ -2101,8 +2071,6 @@ async fn run_sync_session(
                                     ).await {
                                         terminate_after_protocol_send_failure(
                                             &handle_clone,
-                                            session_id,
-                                            &connection_status_for_task,
                                             &mut ws_stream,
                                             "local message deletion",
                                             &error,
@@ -2175,8 +2143,6 @@ async fn run_sync_session(
                                             if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(msg.to_string().into())).await {
                                                 terminate_after_protocol_send_failure(
                                                     &handle_clone,
-                                                    session_id,
-                                                    &connection_status_for_task,
                                                     &mut ws_stream,
                                                     "owner metadata manifest",
                                                     &error,
@@ -2210,8 +2176,6 @@ async fn run_sync_session(
                                     if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(value.to_string().into())).await {
                                         terminate_after_protocol_send_failure(
                                             &handle_clone,
-                                            session_id,
-                                            &connection_status_for_task,
                                             &mut ws_stream,
                                             "queued sync protocol message",
                                             &error,
@@ -2626,17 +2590,11 @@ async fn run_sync_session(
                         }
                                 Some(Err(e)) => {
                                     let err_msg = format!("WebSocket 接收发生错误: {}", e);
-                                    if let Ok(mut logger) = sync_logger_task.lock() {
-                                        logger.log(LogLevel::Error, "network", &err_msg);
-                                    }
                                     emit_sync_log(&handle_clone, "error", &err_msg);
                                     break;
                                 }
                                 None => {
                                     let err_msg = "WebSocket 连接意外断开 (服务器关闭连接)";
-                                    if let Ok(mut logger) = sync_logger_task.lock() {
-                                        logger.log(LogLevel::Error, "network", err_msg);
-                                    }
                                     emit_sync_log(&handle_clone, "error", err_msg);
                                     break;
                                 }
@@ -2767,7 +2725,6 @@ async fn run_sync_session(
         Ok(()) => Ok(()),
         Err(error) => {
             let message = format!("Sync session shutdown write drain failed: {error}");
-            log::error!("[SyncService] {message}");
             emit_sync_log(&app_handle, "error", &message);
             publish_sync_error(
                 &app_handle,
