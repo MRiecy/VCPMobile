@@ -85,7 +85,7 @@ Wire 1.3 将同步错误从不可判定的字符串升级为双端共用的结�
 
 | 值 | 判定问题 | 典型错误 |
 |---|---|---|
-| `device` | 手机当前物理/系统状态是否允许同步 | `POWER_SAVE_MODE`, `SYNC_FOREGROUND_ACQUIRE_FAILED` |
+| `device` | 手机当前物理/系统状态是否允许同步 | `POWER_SAVE_MODE` |
 | `configuration` | 地址、路径、令牌或能力开关是否正确 | `SYNC_TOKEN_MISSING`, `SYNC_CONFIG_INVALID` |
 | `connection` | 已配置的通道是否可达或按时响应 | `CONNECTION_REFUSED`, `WS_CONNECT_TIMEOUT` |
 | `compatibility` | 双端声明的包/wire 版本是否兼容 | `PLUGIN_VERSION_MISMATCH` |

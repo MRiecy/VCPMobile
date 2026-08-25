@@ -1042,18 +1042,17 @@ async fn run_sync_session(
         Ok(()) => true,
         Err(error) => {
             let message = format!(
-                "Failed to acquire Android sync foreground lease: {}",
+                "Failed to acquire Android sync foreground lease; continuing without keepalive: {}",
                 redact_sync_diagnostic(&error)
             );
-            publish_sync_error(
+            log::warn!("[SyncService] Session {session_id}: {message}");
+            emit_sync_log(&app_handle, "warning", &message);
+            emit_operator_sync_log(
                 &app_handle,
                 session_id,
-                &connection_status,
-                "SYNC_FOREGROUND_ACQUIRE_FAILED",
-                &message,
-                Vec::new(),
-            )
-            .await;
+                "warning",
+                "后台保活申请失败，本次同步仍将继续",
+            );
             false
         }
     };
@@ -1064,9 +1063,6 @@ async fn run_sync_session(
     let sync_logger_task = sync_logger.clone();
 
     'session: loop {
-        if !sync_guardian_acquired {
-            break;
-        }
         if cancel_token.is_cancelled() {
             break;
         }

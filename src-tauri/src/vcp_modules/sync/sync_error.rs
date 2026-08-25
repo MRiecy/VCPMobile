@@ -132,14 +132,6 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             "当前电量不足，已暂停同步",
             "电量达到 30% 后再试。",
         ),
-        "SYNC_FOREGROUND_ACQUIRE_FAILED" => definition(
-            Category::Device,
-            Origin::MobileNative,
-            Stage::Startup,
-            Retry::Manual,
-            "手机无法建立同步保活服务",
-            "重新同步；若再次失败，请重启应用并保留最新日志。",
-        ),
         "SYNC_ACTIVE_GENERATION" => definition(
             Category::Data,
             Origin::MobileSync,
@@ -996,13 +988,6 @@ mod tests {
                 "SYNC_SETTINGS_READ_FAILED",
                 SyncErrorCategory::Storage,
                 SyncErrorOrigin::MobileSync,
-                SyncErrorStage::Startup,
-                SyncRetryAction::Manual,
-            ),
-            (
-                "SYNC_FOREGROUND_ACQUIRE_FAILED",
-                SyncErrorCategory::Device,
-                SyncErrorOrigin::MobileNative,
                 SyncErrorStage::Startup,
                 SyncRetryAction::Manual,
             ),
