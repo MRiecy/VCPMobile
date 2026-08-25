@@ -92,9 +92,9 @@ scope: 双端
 | 字段名 | Rust 类型 | JSON 序列化键 | Option | 必填 | 默认值 | 说明 |
 |--------|----------|--------------|--------|------|--------|------|
 | `id` | `String` | `id` | 否 | 是 | — | 实体唯一标识；Agent/Group 为自身 ID；Topic 为 topic ID；Avatar 为 `owner_type:owner_id` |
-| `hash` | `String` | `hash` | 否 | 是 | — | 向后兼容的单一哈希；V2 中对于 Agent/Group/Topic 等价于 `config_hash` |
-| `config_hash` | `Option<String>` | `configHash` | 是 | 否 | `None` | 配置内容指纹（V2 引入）；代表实体静态配置的 SHA-256，如名称、模型参数等 |
-| `content_hash` | `Option<String>` | `contentHash` | 是 | 否 | `None` | 内容聚合指纹（V2 引入）；代表子实体集合的 Merkle Root，如 Topic 下消息的聚合哈希 |
+| `hash` | `Option<String>` | `hash` | 是 | 仅 Avatar | `None` | Avatar 二进制内容的 SHA-256 指纹 |
+| `config_hash` | `Option<String>` | `configHash` | 是 | Agent/Group/Topic | `None` | 配置内容指纹；代表实体同步 DTO 的 SHA-256 |
+| `content_hash` | `Option<String>` | `contentHash` | 是 | Agent/Group/Topic | `None` | 内容聚合指纹；代表子实体集合的 Merkle Root，如 Topic 下消息的聚合哈希 |
 | `ts` | `i64` | `ts` | 否 | 是 | — | 绝对时间戳 / 逻辑时钟，毫秒级 Unix Epoch；LWW（Last-Write-Wins，最后写入胜出）裁决标准 |
 | `deleted_at` | `Option<i64>` | `deletedAt` | 是 | 否 | `None` | 软删除时间戳；非空表示该实体已被逻辑删除，用于双向删除同步 |
 | `owner_type` | `Option<String>` | `ownerType` | 是 | 否 | `None` | 仅用于 `topic` 类型，区分 `"agent"` 和 `"group"`，指导路由到 `AgentTopicSyncDTO` 或 `GroupTopicSyncDTO` |

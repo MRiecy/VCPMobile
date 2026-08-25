@@ -33,7 +33,7 @@ impl Phase1Metadata {
             })?;
             items.push(EntityState {
                 id,
-                hash: conf_h.clone(), // 兼容旧版，默认使用 config_hash
+                hash: None,
                 config_hash: Some(conf_h),
                 content_hash: Some(cont_h),
                 ts: r
@@ -75,7 +75,7 @@ impl Phase1Metadata {
             })?;
             items.push(EntityState {
                 id,
-                hash: conf_h.clone(),
+                hash: None,
                 config_hash: Some(conf_h),
                 content_hash: Some(cont_h),
                 ts: r
@@ -173,7 +173,7 @@ impl Phase1Metadata {
                 })?;
                 items.push(EntityState {
                     id,
-                    hash: config_hash.clone(),
+                    hash: None,
                     config_hash: Some(config_hash),
                     content_hash: Some(content_hash),
                     ts: updated_at,
@@ -244,11 +244,11 @@ impl Phase1Metadata {
             }
             items.push(EntityState {
                 id: format!("{}:{}", owner_type, owner_id),
-                hash: r.try_get("avatar_hash").map_err(|error| {
+                hash: Some(r.try_get("avatar_hash").map_err(|error| {
                     format!(
                         "Avatar manifest hash decode failed for {owner_type}/{owner_id}: {error}"
                     )
-                })?,
+                })?),
                 config_hash: None,
                 content_hash: None,
                 ts: r
@@ -297,6 +297,13 @@ mod tests {
             .expect("build avatar manifest");
         assert_eq!(manifest.items.len(), 2);
         assert_eq!(manifest.items[0].id, "agent:agent-a");
+        assert_eq!(manifest.items[0].hash.as_deref(), Some("hash"));
+        assert_eq!(manifest.items[0].config_hash, None);
+        assert_eq!(manifest.items[0].content_hash, None);
+        assert_eq!(
+            serde_json::to_value(&manifest.items[0]).expect("serialize avatar manifest")["hash"],
+            "hash"
+        );
         assert_eq!(manifest.items[0].deleted_at, Some(9));
         assert_eq!(manifest.items[1].id, "user:user_avatar");
         assert_eq!(manifest.items[1].deleted_at, None);
@@ -330,6 +337,19 @@ mod tests {
         .await
         .expect("build topic manifest");
         assert_eq!(manifest.items.len(), 1);
+        assert_eq!(manifest.items[0].hash, None);
+        assert_eq!(
+            manifest.items[0].config_hash.as_deref(),
+            Some("config-hash")
+        );
+        assert_eq!(
+            manifest.items[0].content_hash.as_deref(),
+            Some("content-hash")
+        );
+        assert!(serde_json::to_value(&manifest.items[0])
+            .expect("serialize topic manifest")
+            .get("hash")
+            .is_none());
         assert_eq!(manifest.items[0].owner_type.as_deref(), Some("agent"));
         assert_eq!(manifest.items[0].owner_id.as_deref(), Some("agent-a"));
     }
