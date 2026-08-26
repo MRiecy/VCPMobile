@@ -64,8 +64,7 @@ type BufferedSessionEvent = {
   payload: Record<string, unknown>;
 };
 
-const DESKTOP_PLUGIN_VERSION = "1.3.0";
-const WIRE_PROTOCOL_VERSION = "1.3";
+const WIRE_PROTOCOL_VERSION = "1.4";
 const MAX_BUFFERED_SESSION_EVENTS = 32;
 const ERROR_CATEGORIES = new Set<SyncTerminalError["category"]>([
   "device",
@@ -145,7 +144,7 @@ const LOCAL_ERROR_COPY: Record<
     origin: "mobile_ui",
     stage: "finalize",
     retryAction: "after_user_action",
-    message: "同步响应不符合 Wire 1.3 规范，已安全停止",
+    message: "同步响应不符合 Wire 1.4 规范，已安全停止",
     guidance: "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留最新日志。",
   },
   START_SYNC_FAILED: {
@@ -572,7 +571,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         .join(", ");
       const diagnostic = [
         `VCP Mobile: ${mobileVersion}`,
-        `VCPMobileSync: ${DESKTOP_PLUGIN_VERSION}`,
         `Wire protocol: ${WIRE_PROTOCOL_VERSION}`,
         `Session: ${activeSessionId.value ?? "none"}`,
         `Status: ${status.value}`,

@@ -1,6 +1,12 @@
-use crate::vcp_modules::topic_types::TopicKey;
+use crate::vcp_modules::sync_dto::{
+    AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
+};
+use crate::vcp_modules::sync_error::WireSyncError;
+use crate::vcp_modules::topic_types::{MessageKey, OwnerKey, TopicKey};
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fmt;
 
 pub const SYNC_TOMBSTONE_HASH: &str =
@@ -36,20 +42,11 @@ pub fn compute_merkle_root(mut hashes: Vec<String>) -> String {
 /// Protocol-level avatar identity contract. Agent and group avatars use a
 /// non-empty entity id; the only user avatar identity is the fixed singleton.
 pub fn is_valid_avatar_owner(owner_type: &str, owner_id: &str) -> bool {
-    match owner_type {
-        "agent" | "group" => !owner_id.is_empty(),
-        "user" => owner_id == "user_avatar",
-        _ => false,
+    match AvatarOwnerType::try_from(owner_type) {
+        Ok(AvatarOwnerType::Agent | AvatarOwnerType::Group) => !owner_id.is_empty(),
+        Ok(AvatarOwnerType::User) => owner_id == "user_avatar",
+        Err(()) => false,
     }
-}
-
-pub fn parse_topic_key(value: &serde_json::Value, field: &str) -> Result<TopicKey, String> {
-    let key: TopicKey = serde_json::from_value(value.clone())
-        .map_err(|error| format!("{field} requires ownerType, ownerId and topicId: {error}"))?;
-    if !key.is_valid() {
-        return Err(format!("{field} contains an invalid topic identity"));
-    }
-    Ok(key)
 }
 
 pub fn stable_stringify(value: &serde_json::Value) -> String {
@@ -91,65 +88,889 @@ pub fn stable_stringify(value: &serde_json::Value) -> String {
     }
 }
 
-/// 同步数据的实体类型
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+/// Manifest 状态集合类别。
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
-pub enum SyncDataType {
+pub enum ManifestType {
     Owner,
-    Agent,
-    Group,
-    Avatar,
     Topic,
-    Message,
+    Avatar,
 }
 
-impl fmt::Display for SyncDataType {
+impl fmt::Display for ManifestType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            SyncDataType::Owner => write!(f, "owner"),
-            SyncDataType::Agent => write!(f, "agent"),
-            SyncDataType::Group => write!(f, "group"),
-            SyncDataType::Avatar => write!(f, "avatar"),
-            SyncDataType::Topic => write!(f, "topic"),
-            SyncDataType::Message => write!(f, "message"),
+            ManifestType::Owner => write!(f, "owner"),
+            ManifestType::Topic => write!(f, "topic"),
+            ManifestType::Avatar => write!(f, "avatar"),
         }
     }
 }
 
-/// 核心状态向量 (State Vector / Fingerprint)
-/// 极简设计，只包含标识、内容指纹和绝对时间戳，用于阶段一的指纹广播
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct EntityState {
-    /// 实体的唯一标识 (agent_id, group_id, 或 avatar 对应的 owner_id)
-    pub id: String,
-    /// 二进制内容指纹（仅 Avatar 使用）
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hash: Option<String>,
-    /// 配置内容指纹 (V2 优化)
-    #[serde(rename = "configHash", skip_serializing_if = "Option::is_none")]
-    pub config_hash: Option<String>,
-    /// 内容聚合指纹 (V2 优化，代表旗下话题/消息是否有变动)
-    #[serde(rename = "contentHash", skip_serializing_if = "Option::is_none")]
-    pub content_hash: Option<String>,
-    /// 绝对时间戳 / 逻辑时钟 (LWW 裁决标准)
-    pub ts: i64,
-    /// 软删除时间戳 (可选，用于双向删除同步)
-    #[serde(rename = "deletedAt", skip_serializing_if = "Option::is_none")]
-    pub deleted_at: Option<i64>,
-    /// 所有者类型（Owner 与 Topic 必填）
-    #[serde(rename = "ownerType", skip_serializing_if = "Option::is_none")]
-    pub owner_type: Option<String>,
-    /// 所有者 ID（仅用于 Topic；Owner 自身使用 id）
-    #[serde(rename = "ownerId", skip_serializing_if = "Option::is_none")]
-    pub owner_id: Option<String>,
+/// Agent 与 Group 的业务命名空间。
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum OwnerType {
+    Agent,
+    Group,
 }
 
-/// 阶段一：同步清单 (Manifest)
-/// 手机端发送给电脑端，或者电脑端发送给手机端的全量/增量清单
+impl OwnerType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OwnerType::Agent => "agent",
+            OwnerType::Group => "group",
+        }
+    }
+}
+
+impl fmt::Display for OwnerType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for OwnerType {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "agent" => Ok(OwnerType::Agent),
+            "group" => Ok(OwnerType::Group),
+            _ => Err(()),
+        }
+    }
+}
+
+/// 公共 HTTP Entity 选择器。Owner 与 Topic 始终携带完整身份。
+#[derive(Debug, Serialize, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(tag = "entityType", rename_all = "lowercase")]
+pub enum EntitySelector {
+    Owner {
+        #[serde(rename = "ownerType")]
+        owner_type: OwnerType,
+        #[serde(rename = "ownerId")]
+        owner_id: String,
+    },
+    Topic {
+        #[serde(rename = "ownerType")]
+        owner_type: OwnerType,
+        #[serde(rename = "ownerId")]
+        owner_id: String,
+        #[serde(rename = "topicId")]
+        topic_id: String,
+    },
+}
+
+impl EntitySelector {
+    pub fn owner(owner_type: OwnerType, owner_id: impl Into<String>) -> Self {
+        Self::Owner {
+            owner_type,
+            owner_id: owner_id.into(),
+        }
+    }
+
+    pub fn topic(key: &TopicKey) -> Result<Self, String> {
+        let owner_type = OwnerType::try_from(key.owner_type.as_str())
+            .map_err(|_| "Entity topic selector requires agent/group ownerType".to_string())?;
+        if key.owner_id.is_empty() || key.topic_id.is_empty() {
+            return Err("Entity topic selector requires complete identity".to_string());
+        }
+        Ok(Self::Topic {
+            owner_type,
+            owner_id: key.owner_id.clone(),
+            topic_id: key.topic_id.clone(),
+        })
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Self::Owner {
+                owner_type,
+                owner_id,
+            } => format!("owner/{owner_type}/{owner_id}"),
+            Self::Topic {
+                owner_type,
+                owner_id,
+                topic_id,
+            } => format!("topic/{owner_type}/{owner_id}/{topic_id}"),
+        }
+    }
+
+    pub fn topic_id(&self) -> Option<&str> {
+        match self {
+            Self::Owner { .. } => None,
+            Self::Topic { topic_id, .. } => Some(topic_id),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct EntityPullRequest {
+    pub items: Vec<EntitySelector>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(untagged)]
+pub enum EntityPushData {
+    Agent(AgentSyncDTO),
+    Group(GroupSyncDTO),
+    AgentTopic(AgentTopicSyncDTO),
+    GroupTopic(GroupTopicSyncDTO),
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+pub enum EntityPullData {
+    Agent(AgentSyncDTO),
+    Group(GroupSyncDTO),
+    GroupTopic(GroupTopicSyncDTO),
+    AgentTopic(AgentTopicSyncDTO),
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "entityType", rename_all = "lowercase")]
+pub enum EntityPushItem {
+    Owner {
+        #[serde(rename = "ownerType")]
+        owner_type: OwnerType,
+        #[serde(rename = "ownerId")]
+        owner_id: String,
+        data: EntityPushData,
+    },
+    Topic {
+        #[serde(rename = "ownerType")]
+        owner_type: OwnerType,
+        #[serde(rename = "ownerId")]
+        owner_id: String,
+        #[serde(rename = "topicId")]
+        topic_id: String,
+        data: EntityPushData,
+    },
+}
+
+impl EntityPushItem {
+    pub fn selector(&self) -> EntitySelector {
+        match self {
+            Self::Owner {
+                owner_type,
+                owner_id,
+                ..
+            } => EntitySelector::owner(*owner_type, owner_id),
+            Self::Topic {
+                owner_type,
+                owner_id,
+                topic_id,
+                ..
+            } => EntitySelector::Topic {
+                owner_type: *owner_type,
+                owner_id: owner_id.clone(),
+                topic_id: topic_id.clone(),
+            },
+        }
+    }
+
+    pub fn is_consistent(&self) -> bool {
+        match self {
+            Self::Owner {
+                owner_type: OwnerType::Agent,
+                owner_id,
+                data: EntityPushData::Agent(_),
+            }
+            | Self::Owner {
+                owner_type: OwnerType::Group,
+                owner_id,
+                data: EntityPushData::Group(_),
+            } => !owner_id.is_empty(),
+            Self::Topic {
+                owner_type: OwnerType::Agent,
+                owner_id,
+                topic_id,
+                data: EntityPushData::AgentTopic(_),
+            }
+            | Self::Topic {
+                owner_type: OwnerType::Group,
+                owner_id,
+                topic_id,
+                data: EntityPushData::GroupTopic(_),
+            } => !owner_id.is_empty() && !topic_id.is_empty(),
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct EntityPushRequest {
+    pub items: Vec<EntityPushItem>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "entityType", rename_all = "lowercase", deny_unknown_fields)]
+pub enum EntityPullResult {
+    Owner {
+        #[serde(rename = "ownerType")]
+        owner_type: OwnerType,
+        #[serde(rename = "ownerId")]
+        owner_id: String,
+        ok: bool,
+        #[serde(default)]
+        data: Option<EntityPullData>,
+        #[serde(default)]
+        error: Option<WireSyncError>,
+    },
+    Topic {
+        #[serde(rename = "ownerType")]
+        owner_type: OwnerType,
+        #[serde(rename = "ownerId")]
+        owner_id: String,
+        #[serde(rename = "topicId")]
+        topic_id: String,
+        ok: bool,
+        #[serde(default)]
+        data: Option<EntityPullData>,
+        #[serde(default)]
+        error: Option<WireSyncError>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EntityPullResponse {
+    pub results: Vec<EntityPullResult>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "entityType", rename_all = "lowercase", deny_unknown_fields)]
+pub enum EntityPushResult {
+    Owner {
+        #[serde(rename = "ownerType")]
+        owner_type: OwnerType,
+        #[serde(rename = "ownerId")]
+        owner_id: String,
+        ok: bool,
+        #[serde(default)]
+        error: Option<WireSyncError>,
+    },
+    Topic {
+        #[serde(rename = "ownerType")]
+        owner_type: OwnerType,
+        #[serde(rename = "ownerId")]
+        owner_id: String,
+        #[serde(rename = "topicId")]
+        topic_id: String,
+        ok: bool,
+        #[serde(default)]
+        error: Option<WireSyncError>,
+    },
+}
+
+impl EntityPushResult {
+    pub fn into_parts(self) -> (EntitySelector, bool, Option<WireSyncError>) {
+        match self {
+            Self::Owner {
+                owner_type,
+                owner_id,
+                ok,
+                error,
+            } => (EntitySelector::owner(owner_type, owner_id), ok, error),
+            Self::Topic {
+                owner_type,
+                owner_id,
+                topic_id,
+                ok,
+                error,
+            } => (
+                EntitySelector::Topic {
+                    owner_type,
+                    owner_id,
+                    topic_id,
+                },
+                ok,
+                error,
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EntityPushResponse {
+    pub results: Vec<EntityPushResult>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AvatarPushResponse {
+    pub owner_type: AvatarOwnerType,
+    pub owner_id: String,
+    pub ok: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub enum MessagePushResponseFrame {
+    Topic {
+        #[serde(rename = "ownerType")]
+        owner_type: OwnerType,
+        #[serde(rename = "ownerId")]
+        owner_id: String,
+        #[serde(rename = "topicId")]
+        topic_id: String,
+        ok: bool,
+        #[serde(default)]
+        error: Option<WireSyncError>,
+    },
+    StreamError {
+        error: WireSyncError,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessagePullTopicSelector {
+    pub owner_type: OwnerType,
+    pub owner_id: String,
+    pub topic_id: String,
+    pub message_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MessagePullRequest {
+    pub topics: Vec<MessagePullTopicSelector>,
+}
+
+/// Avatar 允许的命名空间；`user` 只允许固定的 `user_avatar` 身份。
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum AvatarOwnerType {
+    Agent,
+    Group,
+    User,
+}
+
+impl AvatarOwnerType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AvatarOwnerType::Agent => "agent",
+            AvatarOwnerType::Group => "group",
+            AvatarOwnerType::User => "user",
+        }
+    }
+}
+
+impl fmt::Display for AvatarOwnerType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for AvatarOwnerType {
+    type Error = ();
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "agent" => Ok(AvatarOwnerType::Agent),
+            "group" => Ok(AvatarOwnerType::Group),
+            "user" => Ok(AvatarOwnerType::User),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Mobile 内部使用完整身份承载删除目标，避免可选字段组合。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeleteTarget {
+    Owner {
+        owner_type: OwnerType,
+        owner_id: String,
+    },
+    Topic(TopicKey),
+    Avatar {
+        owner_type: AvatarOwnerType,
+        owner_id: String,
+    },
+    Message(MessageKey),
+}
+
+/// Manifest 仲裁动作。
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ManifestAction {
+    Pull,
+    Push,
+    PullDelete,
+    PushDelete,
+    Skip,
+}
+
+impl ManifestAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ManifestAction::Pull => "PULL",
+            ManifestAction::Push => "PUSH",
+            ManifestAction::PullDelete => "PULL_DELETE",
+            ManifestAction::PushDelete => "PUSH_DELETE",
+            ManifestAction::Skip => "SKIP",
+        }
+    }
+
+    pub fn is_delete(self) -> bool {
+        matches!(
+            self,
+            ManifestAction::PullDelete | ManifestAction::PushDelete
+        )
+    }
+}
+
+impl fmt::Display for ManifestAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SyncPhase {
+    OwnerMetadata,
+    TopicMetadata,
+    Messages,
+}
+
+impl SyncPhase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SyncPhase::OwnerMetadata => "owner_metadata",
+            SyncPhase::TopicMetadata => "topic_metadata",
+            SyncPhase::Messages => "messages",
+        }
+    }
+}
+
+impl fmt::Display for SyncPhase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct SyncManifest {
-    pub data_type: SyncDataType,
-    pub items: Vec<EntityState>,
+#[serde(untagged)]
+pub enum OwnerManifestState {
+    Live(OwnerManifestLive),
+    Deleted(OwnerManifestDeleted),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnerManifestLive {
+    pub owner_type: OwnerType,
+    pub owner_id: String,
+    pub config_hash: String,
+    pub content_hash: String,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnerManifestDeleted {
+    pub owner_type: OwnerType,
+    pub owner_id: String,
+    pub deleted_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum TopicManifestState {
+    Live(TopicManifestLive),
+    Deleted(TopicManifestDeleted),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TopicManifestLive {
+    pub owner_type: OwnerType,
+    pub owner_id: String,
+    pub topic_id: String,
+    pub config_hash: String,
+    pub content_hash: String,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TopicManifestDeleted {
+    pub owner_type: OwnerType,
+    pub owner_id: String,
+    pub topic_id: String,
+    pub deleted_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum AvatarManifestState {
+    Live(AvatarManifestLive),
+    Deleted(AvatarManifestDeleted),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AvatarManifestLive {
+    pub owner_type: AvatarOwnerType,
+    pub owner_id: String,
+    pub binary_hash: String,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AvatarManifestDeleted {
+    pub owner_type: AvatarOwnerType,
+    pub owner_id: String,
+    pub deleted_at: i64,
+}
+
+/// Manifest 的三种条目在类型层分离，墓碑不再携带伪造的 live Hash。
+#[derive(Debug, Serialize, Clone)]
+#[serde(tag = "manifestType", rename_all = "lowercase")]
+pub enum ManifestRequest {
+    Owner {
+        items: Vec<OwnerManifestState>,
+    },
+    Topic {
+        items: Vec<TopicManifestState>,
+        #[serde(rename = "targetedOwners")]
+        targeted_owners: Vec<OwnerKey>,
+    },
+    Avatar {
+        items: Vec<AvatarManifestState>,
+    },
+}
+
+impl ManifestRequest {
+    pub fn manifest_type(&self) -> ManifestType {
+        match self {
+            ManifestRequest::Owner { .. } => ManifestType::Owner,
+            ManifestRequest::Topic { .. } => ManifestType::Topic,
+            ManifestRequest::Avatar { .. } => ManifestType::Avatar,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnerManifestDecision {
+    pub owner_type: OwnerType,
+    pub owner_id: String,
+    pub action: ManifestAction,
+    #[serde(default)]
+    pub deleted_at: Option<i64>,
+    #[serde(default)]
+    pub content_hash_mismatch: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TopicManifestDecision {
+    pub owner_type: OwnerType,
+    pub owner_id: String,
+    pub topic_id: String,
+    pub action: ManifestAction,
+    #[serde(default)]
+    pub deleted_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AvatarManifestDecision {
+    pub owner_type: AvatarOwnerType,
+    pub owner_id: String,
+    pub action: ManifestAction,
+    #[serde(default)]
+    pub deleted_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(tag = "manifestType", rename_all = "lowercase", deny_unknown_fields)]
+pub enum ManifestResultFrame {
+    Owner {
+        #[serde(rename = "type", deserialize_with = "deserialize_manifest_result_type")]
+        _frame_type: (),
+        results: Vec<OwnerManifestDecision>,
+    },
+    Topic {
+        #[serde(rename = "type", deserialize_with = "deserialize_manifest_result_type")]
+        _frame_type: (),
+        results: Vec<TopicManifestDecision>,
+    },
+    Avatar {
+        #[serde(rename = "type", deserialize_with = "deserialize_manifest_result_type")]
+        _frame_type: (),
+        results: Vec<AvatarManifestDecision>,
+    },
+}
+
+impl ManifestResultFrame {
+    pub fn manifest_type(&self) -> ManifestType {
+        match self {
+            ManifestResultFrame::Owner { .. } => ManifestType::Owner,
+            ManifestResultFrame::Topic { .. } => ManifestType::Topic,
+            ManifestResultFrame::Avatar { .. } => ManifestType::Avatar,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ManifestRequestFrame {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    #[serde(flatten)]
+    pub manifest: ManifestRequest,
+}
+
+impl ManifestRequestFrame {
+    pub fn new(manifest: ManifestRequest) -> Self {
+        Self {
+            frame_type: "SYNC_MANIFEST_REQUEST",
+            manifest,
+        }
+    }
+}
+
+fn deserialize_manifest_result_type<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value == "SYNC_MANIFEST_RESULT" {
+        Ok(())
+    } else {
+        Err(D::Error::custom("expected SYNC_MANIFEST_RESULT"))
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TopicDiffState {
+    pub owner_type: OwnerType,
+    pub owner_id: String,
+    pub topic_id: String,
+    pub config_hash: String,
+    pub content_hash: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicDiffRequestFrame {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    pub topics: Vec<TopicDiffState>,
+}
+
+impl TopicDiffRequestFrame {
+    pub fn new(topics: Vec<TopicDiffState>) -> Self {
+        Self {
+            frame_type: "SYNC_TOPIC_DIFF_REQUEST",
+            topics,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TopicDiffResultFrame {
+    #[serde(
+        rename = "type",
+        deserialize_with = "deserialize_topic_diff_result_type"
+    )]
+    _frame_type: (),
+    pub changed_topics: Vec<TopicKey>,
+}
+
+fn deserialize_topic_diff_result_type<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value == "SYNC_TOPIC_DIFF_RESULT" {
+        Ok(())
+    } else {
+        Err(D::Error::custom("expected SYNC_TOPIC_DIFF_RESULT"))
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum MessageVersionState {
+    Live(MessageLiveState),
+    Deleted(MessageDeletedState),
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MessageLiveState {
+    pub message_hash: String,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MessageDeletedState {
+    pub deleted_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MessageDiffTopicState {
+    pub owner_type: OwnerType,
+    pub owner_id: String,
+    pub topic_id: String,
+    pub content_hash: String,
+    pub messages: BTreeMap<String, MessageVersionState>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageDiffRequestFrame {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    pub topics: Vec<MessageDiffTopicState>,
+}
+
+impl MessageDiffRequestFrame {
+    pub fn new(topics: Vec<MessageDiffTopicState>) -> Self {
+        Self {
+            frame_type: "SYNC_MESSAGE_DIFF_REQUEST",
+            topics,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MessageDeleteDecision {
+    pub msg_id: String,
+    pub deleted_at: i64,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MessageDiffDecision {
+    pub owner_type: OwnerType,
+    pub owner_id: String,
+    pub topic_id: String,
+    pub ok: bool,
+    #[serde(default)]
+    pub pull_message_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub push_topic: Option<bool>,
+    #[serde(default)]
+    pub delete_messages: Option<Vec<MessageDeleteDecision>>,
+    #[serde(default)]
+    pub error: Option<WireSyncError>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MessageDiffResultFrame {
+    #[serde(
+        rename = "type",
+        deserialize_with = "deserialize_message_diff_result_type"
+    )]
+    _frame_type: (),
+    pub results: Vec<MessageDiffDecision>,
+}
+
+fn deserialize_message_diff_result_type<'de, D>(deserializer: D) -> Result<(), D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value == "SYNC_MESSAGE_DIFF_RESULT" {
+        Ok(())
+    } else {
+        Err(D::Error::custom("expected SYNC_MESSAGE_DIFF_RESULT"))
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "targetType", rename_all = "lowercase")]
+enum DeleteNotificationTarget {
+    Owner {
+        #[serde(rename = "ownerType")]
+        owner_type: OwnerType,
+        #[serde(rename = "ownerId")]
+        owner_id: String,
+    },
+    Topic {
+        #[serde(rename = "ownerType")]
+        owner_type: String,
+        #[serde(rename = "ownerId")]
+        owner_id: String,
+        #[serde(rename = "topicId")]
+        topic_id: String,
+    },
+    Avatar {
+        #[serde(rename = "ownerType")]
+        owner_type: AvatarOwnerType,
+        #[serde(rename = "ownerId")]
+        owner_id: String,
+    },
+    Message {
+        #[serde(rename = "ownerType")]
+        owner_type: String,
+        #[serde(rename = "ownerId")]
+        owner_id: String,
+        #[serde(rename = "topicId")]
+        topic_id: String,
+        #[serde(rename = "msgId")]
+        msg_id: String,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteNotificationFrame {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    #[serde(flatten)]
+    target: DeleteNotificationTarget,
+    deleted_at: i64,
+}
+
+impl DeleteNotificationFrame {
+    pub fn new(target: DeleteTarget, deleted_at: i64) -> Self {
+        let target = match target {
+            DeleteTarget::Owner {
+                owner_type,
+                owner_id,
+            } => DeleteNotificationTarget::Owner {
+                owner_type,
+                owner_id,
+            },
+            DeleteTarget::Topic(key) => DeleteNotificationTarget::Topic {
+                owner_type: key.owner_type,
+                owner_id: key.owner_id,
+                topic_id: key.topic_id,
+            },
+            DeleteTarget::Avatar {
+                owner_type,
+                owner_id,
+            } => DeleteNotificationTarget::Avatar {
+                owner_type,
+                owner_id,
+            },
+            DeleteTarget::Message(key) => DeleteNotificationTarget::Message {
+                owner_type: key.topic.owner_type,
+                owner_id: key.topic.owner_id,
+                topic_id: key.topic.topic_id,
+                msg_id: key.msg_id,
+            },
+        };
+        Self {
+            frame_type: "SYNC_ENTITY_DELETE",
+            target,
+            deleted_at,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -205,17 +1026,13 @@ mod tests {
     }
 
     #[test]
-    fn test_sync_data_type_display_and_serde_are_lowercase() {
-        assert_eq!(SyncDataType::Owner.to_string(), "owner");
-        assert_eq!(SyncDataType::Agent.to_string(), "agent");
-        assert_eq!(SyncDataType::Group.to_string(), "group");
-        assert_eq!(SyncDataType::Avatar.to_string(), "avatar");
-        assert_eq!(SyncDataType::Topic.to_string(), "topic");
-        assert_eq!(SyncDataType::Message.to_string(), "message");
+    fn sync_discriminators_have_one_vocabulary_each() {
+        assert_eq!(ManifestType::Owner.to_string(), "owner");
+        assert_eq!(OwnerType::Agent.to_string(), "agent");
+        assert_eq!(AvatarOwnerType::User.to_string(), "user");
+        assert_eq!(ManifestAction::PullDelete.to_string(), "PULL_DELETE");
 
-        let encoded = serde_json::to_string(&SyncDataType::Message).unwrap();
-        assert_eq!(encoded, r#""message""#);
-        let decoded: SyncDataType = serde_json::from_str(r#""topic""#).unwrap();
-        assert_eq!(decoded, SyncDataType::Topic);
+        let manifest: ManifestType = serde_json::from_str(r#""topic""#).unwrap();
+        assert_eq!(manifest, ManifestType::Topic);
     }
 }

@@ -3,14 +3,19 @@ use crate::vcp_modules::db_write_queue::DbWriteQueue;
 use crate::vcp_modules::settings_manager::{read_settings, Settings, SettingsState};
 use crate::vcp_modules::sync_error::{
     build_local_error_payload, build_wire_error_payload, decode_wire_sync_error,
-    encode_wire_sync_error, parse_wire_sync_error, SyncErrorPayload,
+    encode_wire_sync_error, SyncErrorPayload, WireSyncError,
 };
 use crate::vcp_modules::sync_logger::{redact_sync_diagnostic, LogLevel, SyncLogger};
 use crate::vcp_modules::sync_pipeline::{Phase1Metadata, Phase3Message, SyncPipeline};
-use crate::vcp_modules::sync_types::{parse_topic_key, SyncDataType};
-use crate::vcp_modules::topic_types::{MessageKey, OwnerKey, TopicKey};
+use crate::vcp_modules::sync_types::{
+    DeleteNotificationFrame, DeleteTarget, ManifestRequestFrame, ManifestResultFrame, ManifestType,
+    MessageDiffRequestFrame, MessageDiffTopicState, OwnerType, SyncPhase, TopicDiffRequestFrame,
+    TopicDiffResultFrame, TopicDiffState,
+};
+use crate::vcp_modules::topic_types::{OwnerKey, TopicKey};
 use futures_util::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::HashSet;
 use std::future::Future;
 use std::io::Write;
@@ -26,8 +31,7 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 
-const EXPECTED_PLUGIN_VERSION: &str = "1.3.0";
-const WIRE_PROTOCOL_VERSION: &str = "1.3";
+const WIRE_PROTOCOL_VERSION: &str = "1.4";
 const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -41,10 +45,81 @@ const SYNC_GUARDIAN_LABEL: &str = "[数据同步] VCP Mobile";
 type RoutedSyncCommand = (u64, mpsc::UnboundedSender<SyncCommand>);
 type SyncWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VersionCheckFrame {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    mobile_version: &'static str,
+    protocol_version: &'static str,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VersionAck {
+    #[serde(rename = "type")]
+    frame_type: String,
     plugin_version: String,
     protocol_version: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FrameHeader {
+    #[serde(rename = "type")]
+    frame_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteSyncErrorFrame {
+    #[serde(rename = "type")]
+    _frame_type: String,
+    error: WireSyncError,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PhaseFrame {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    phase: SyncPhase,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PhaseAckFrame {
+    #[serde(rename = "type")]
+    frame_type: String,
+    phase: SyncPhase,
+    #[serde(default)]
+    session_id: Option<u64>,
+    #[serde(default)]
+    attempt_id: Option<u64>,
+    #[serde(default)]
+    nonce: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SyncLogEventFrame {
+    #[serde(rename = "type")]
+    _frame_type: String,
+    level: String,
+    #[serde(rename = "phase")]
+    _phase: String,
+    message: String,
+    #[serde(rename = "ts")]
+    _ts: i64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DesktopPhaseEventFrame {
+    #[serde(rename = "type")]
+    frame_type: String,
+    phase: String,
+    #[serde(rename = "ts")]
+    _ts: i64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -55,47 +130,48 @@ enum VersionHandshakeError {
     Transport(String),
 }
 
-fn parse_version_ack(payload: &Value) -> Result<VersionAck, String> {
-    if payload.get("type").and_then(Value::as_str) != Some("VERSION_ACK") {
+fn parse_version_ack(text: &str) -> Result<VersionAck, String> {
+    let ack = serde_json::from_str::<VersionAck>(text)
+        .map_err(|error| format!("Invalid VERSION_ACK: {error}"))?;
+    if ack.frame_type != "VERSION_ACK" {
         return Err("expected VERSION_ACK".to_string());
     }
-    let plugin_version = payload
-        .get("pluginVersion")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "VERSION_ACK.pluginVersion must be a non-empty string".to_string())?;
-    let protocol_version = payload
-        .get("protocolVersion")
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| "VERSION_ACK.protocolVersion must be a non-empty string".to_string())?;
-    Ok(VersionAck {
-        plugin_version: plugin_version.to_string(),
-        protocol_version: protocol_version.to_string(),
-    })
+    if ack.plugin_version.is_empty() {
+        return Err("VERSION_ACK.pluginVersion must be a non-empty string".to_string());
+    }
+    if ack.protocol_version.is_empty() {
+        return Err("VERSION_ACK.protocolVersion must be a non-empty string".to_string());
+    }
+    Ok(ack)
 }
 
-fn parse_version_handshake_payload(
-    payload: &Value,
-) -> Result<Option<VersionAck>, VersionHandshakeError> {
-    match payload.get("type").and_then(Value::as_str) {
-        Some("SYNC_ERROR") => {
-            let wire = payload
-                .get("error")
-                .ok_or_else(|| {
-                    VersionHandshakeError::Protocol("SYNC_ERROR.error is missing".to_string())
-                })
-                .and_then(|value| {
-                    parse_wire_sync_error(value).map_err(VersionHandshakeError::Protocol)
-                })?;
-            let encoded = encode_wire_sync_error(&wire).map_err(VersionHandshakeError::Protocol)?;
+fn parse_version_handshake_text(text: &str) -> Result<Option<VersionAck>, VersionHandshakeError> {
+    let header = serde_json::from_str::<FrameHeader>(text).map_err(|error| {
+        VersionHandshakeError::Protocol(format!("Malformed handshake frame: {error}"))
+    })?;
+    match header.frame_type.as_str() {
+        "SYNC_ERROR" => {
+            let frame = serde_json::from_str::<RemoteSyncErrorFrame>(text).map_err(|error| {
+                VersionHandshakeError::Protocol(format!("Invalid SYNC_ERROR: {error}"))
+            })?;
+            let encoded =
+                encode_wire_sync_error(&frame.error).map_err(VersionHandshakeError::Protocol)?;
             Err(VersionHandshakeError::Remote(encoded))
         }
-        Some("SYNC_LOG_EVENT") => Ok(None),
-        _ => parse_version_ack(payload)
+        "SYNC_LOG_EVENT" => {
+            serde_json::from_str::<SyncLogEventFrame>(text).map_err(|error| {
+                VersionHandshakeError::Protocol(format!("Invalid SYNC_LOG_EVENT: {error}"))
+            })?;
+            Ok(None)
+        }
+        _ => parse_version_ack(text)
             .map(Some)
             .map_err(VersionHandshakeError::Protocol),
     }
+}
+
+fn is_wire_compatible(version_ack: &VersionAck) -> bool {
+    version_ack.protocol_version == WIRE_PROTOCOL_VERSION
 }
 
 async fn send_ws_with_deadline(
@@ -106,6 +182,15 @@ async fn send_ws_with_deadline(
         .await
         .map_err(|_| "WebSocket send timed out".to_string())?
         .map_err(|error| error.to_string())
+}
+
+async fn send_ws_frame<T: Serialize>(
+    ws_stream: &mut SyncWebSocket,
+    frame: &T,
+) -> Result<(), String> {
+    let text = serde_json::to_string(frame)
+        .map_err(|error| format!("Failed to serialize sync protocol frame: {error}"))?;
+    send_ws_with_deadline(ws_stream, Message::Text(text.into())).await
 }
 
 async fn close_ws_with_deadline(ws_stream: &mut SyncWebSocket) -> Result<(), String> {
@@ -197,38 +282,49 @@ struct FinalAckKey {
     nonce: String,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FinalPhaseCompletedFrame<'a> {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    phase: SyncPhase,
+    session_id: u64,
+    attempt_id: u64,
+    nonce: &'a str,
+}
+
 impl FinalAckKey {
     fn new(session_id: u64, attempt_id: u64) -> Self {
         Self {
             session_id,
             attempt_id,
-            phase: "messages".to_string(),
+            phase: SyncPhase::Messages.to_string(),
             nonce: uuid::Uuid::new_v4().to_string(),
         }
     }
 
-    fn message(&self) -> Value {
-        json!({
-            "type": "PHASE_COMPLETED",
-            "phase": self.phase,
-            "sessionId": self.session_id,
-            "attemptId": self.attempt_id,
-            "nonce": self.nonce,
-        })
+    fn message(&self) -> FinalPhaseCompletedFrame<'_> {
+        FinalPhaseCompletedFrame {
+            frame_type: "PHASE_COMPLETED",
+            phase: SyncPhase::Messages,
+            session_id: self.session_id,
+            attempt_id: self.attempt_id,
+            nonce: &self.nonce,
+        }
     }
 
-    fn matches_payload(&self, payload: &Value) -> bool {
-        payload.get("type").and_then(Value::as_str) == Some("PHASE_ACK")
-            && payload.get("phase").and_then(Value::as_str) == Some(self.phase.as_str())
-            && payload.get("sessionId").and_then(Value::as_u64) == Some(self.session_id)
-            && payload.get("attemptId").and_then(Value::as_u64) == Some(self.attempt_id)
-            && payload.get("nonce").and_then(Value::as_str) == Some(self.nonce.as_str())
+    fn matches_payload(&self, payload: &PhaseAckFrame) -> bool {
+        payload.frame_type == "PHASE_ACK"
+            && payload.phase == SyncPhase::Messages
+            && payload.session_id == Some(self.session_id)
+            && payload.attempt_id == Some(self.attempt_id)
+            && payload.nonce.as_deref() == Some(self.nonce.as_str())
     }
 }
 
 type PendingFinalAck = Arc<Mutex<Option<FinalAckKey>>>;
 
-fn consume_final_ack(pending: &PendingFinalAck, payload: &Value) -> bool {
+fn consume_final_ack(pending: &PendingFinalAck, payload: &PhaseAckFrame) -> bool {
     let Ok(mut guard) = pending.lock() else {
         return false;
     };
@@ -274,7 +370,7 @@ async fn enforce_final_ack_deadline(
 }
 
 async fn enforce_manifest_response_deadline(
-    expected_types: Arc<Mutex<HashSet<String>>>,
+    expected_types: Arc<Mutex<HashSet<ManifestType>>>,
     manifest_phase: Arc<AtomicU8>,
     expected_phase: u8,
     tx: mpsc::UnboundedSender<SyncCommand>,
@@ -288,7 +384,7 @@ async fn enforce_manifest_response_deadline(
     let missing = match expected_types.lock() {
         Ok(expected) if expected.is_empty() => return,
         Ok(expected) => {
-            let mut missing = expected.iter().cloned().collect::<Vec<_>>();
+            let mut missing = expected.iter().map(ToString::to_string).collect::<Vec<_>>();
             missing.sort();
             missing
         }
@@ -581,20 +677,13 @@ pub enum SyncCommand {
         attempt_id: u64,
     }, // Current attempt only
     NotifyDelete {
-        data_type: SyncDataType,
-        id: String,
-        deleted_at: i64,
-        owner_type: Option<String>,
-        owner_id: Option<String>,
-    },
-    NotifyMessageDelete {
-        key: MessageKey,
+        target: DeleteTarget,
         deleted_at: i64,
     },
     StartManualSync,
-    SendWsMessage {
+    SendMessageDiff {
         attempt_id: u64,
-        value: serde_json::Value,
+        topics: Vec<MessageDiffTopicState>,
     },
     Phase3BatchFinished {
         attempt_id: u64,
@@ -615,25 +704,20 @@ pub enum SyncCommand {
     Cancel,
 }
 
-pub fn parse_sync_data_type(value: &Value) -> Option<SyncDataType> {
-    serde_json::from_value::<SyncDataType>(value.clone()).ok()
-}
-
-fn parse_unique_topic_keys(
-    value: &Value,
+fn validate_unique_topic_keys(
+    values: Vec<TopicKey>,
     field: &str,
     max_items: usize,
 ) -> Result<Vec<TopicKey>, String> {
-    let values = value
-        .as_array()
-        .ok_or_else(|| format!("{field} must be an array"))?;
     if values.len() > max_items {
         return Err(format!("{field} exceeds {max_items} item budget"));
     }
     let mut seen = HashSet::new();
     let mut result = Vec::with_capacity(values.len());
-    for (index, value) in values.iter().enumerate() {
-        let key = parse_topic_key(value, &format!("{field}[{index}]"))?;
+    for key in values {
+        if !key.is_valid() {
+            return Err(format!("{field} contains an invalid topic identity"));
+        }
         if !seen.insert(key.clone()) {
             return Err(format!("{field} contains a duplicate topic identity"));
         }
@@ -1087,17 +1171,12 @@ async fn run_sync_session(
             Ok(Ok((mut ws_stream, _))) => {
                 // ── 版本验证握手 ──
                 {
-                    let version_req = json!({
-                        "type": "VERSION_CHECK",
-                        "mobileVersion": env!("CARGO_PKG_VERSION"),
-                        "protocolVersion": WIRE_PROTOCOL_VERSION,
-                    });
-                    if let Err(error) = send_ws_with_deadline(
-                        &mut ws_stream,
-                        Message::Text(version_req.to_string().into()),
-                    )
-                    .await
-                    {
+                    let version_req = VersionCheckFrame {
+                        frame_type: "VERSION_CHECK",
+                        mobile_version: env!("CARGO_PKG_VERSION"),
+                        protocol_version: WIRE_PROTOCOL_VERSION,
+                    };
+                    if let Err(error) = send_ws_frame(&mut ws_stream, &version_req).await {
                         terminate_after_protocol_send_failure(
                             &handle_clone,
                             &mut ws_stream,
@@ -1134,11 +1213,7 @@ async fn run_sync_session(
                             while let Some(res) = ws_stream.next().await {
                                 match res {
                                     Ok(Message::Text(text)) => {
-                                        let payload = serde_json::from_str::<Value>(&text)
-                                            .map_err(|error| VersionHandshakeError::Protocol(
-                                                format!("Malformed VERSION_ACK JSON: {error}")
-                                            ))?;
-                                        match parse_version_handshake_payload(&payload)? {
+                                        match parse_version_handshake_text(&text)? {
                                             Some(ack) => return Ok(ack),
                                             None => continue,
                                         }
@@ -1172,9 +1247,7 @@ async fn run_sync_session(
 
                     match version_result {
                         Ok(Ok(version_ack)) => {
-                            if version_ack.plugin_version == EXPECTED_PLUGIN_VERSION
-                                && version_ack.protocol_version == WIRE_PROTOCOL_VERSION
-                            {
+                            if is_wire_compatible(&version_ack) {
                                 emit_sync_log(
                                     &handle_clone,
                                     "success",
@@ -1190,10 +1263,9 @@ async fn run_sync_session(
                                     &connection_status_for_task,
                                     "SYNC_VERSION_INCOMPATIBLE",
                                     &format!(
-                                        "桌面端插件 v{} / 协议 {} 与期望 v{} / 协议 {} 不兼容",
+                                        "桌面端插件 v{} 声明的同步协议 {} 与 Mobile 要求的协议 {} 不兼容",
                                         version_ack.plugin_version,
                                         version_ack.protocol_version,
-                                        EXPECTED_PLUGIN_VERSION,
                                         WIRE_PROTOCOL_VERSION,
                                     ),
                                     Vec::new(),
@@ -1203,10 +1275,9 @@ async fn run_sync_session(
                                     &handle_clone,
                                     "error",
                                     &format!(
-                                        "❌ 同步协议不匹配: 桌面端插件 v{} / 协议 {}，期望 v{} / 协议 {}",
+                                        "❌ 同步协议不匹配: 桌面端插件 v{} / 协议 {}，Mobile 要求协议 {}",
                                         version_ack.plugin_version,
                                         version_ack.protocol_version,
-                                        EXPECTED_PLUGIN_VERSION,
                                         WIRE_PROTOCOL_VERSION,
                                     ),
                                 );
@@ -1347,13 +1418,12 @@ async fn run_sync_session(
                 if let Ok(mut logger) = sync_logger_task.lock() {
                     logger.log(LogLevel::Info, "sync", "=== Phase 1: Owner Metadata ===");
                 }
-                if let Err(error) = send_ws_with_deadline(
+                if let Err(error) = send_ws_frame(
                     &mut ws_stream,
-                    Message::Text(
-                        json!({ "type": "PHASE_START", "phase": "owner_metadata" })
-                            .to_string()
-                            .into(),
-                    ),
+                    &PhaseFrame {
+                        frame_type: "PHASE_START",
+                        phase: SyncPhase::OwnerMetadata,
+                    },
                 )
                 .await
                 {
@@ -1435,7 +1505,7 @@ async fn run_sync_session(
                 // 用于跟踪 manifest diff 结果是否全部收到，防止 total_ops=0 时 Phase 1 卡住
                 let expected_manifest_count = Arc::new(AtomicU32::new(0));
                 let manifest_responses_received = Arc::new(AtomicU32::new(0));
-                let expected_manifest_types = Arc::new(Mutex::new(HashSet::<String>::new()));
+                let expected_manifest_types = Arc::new(Mutex::new(HashSet::<ManifestType>::new()));
                 // 1: 基础 Metadata (agent, group, avatar), 2: Topic Metadata
                 let manifest_phase = Arc::new(AtomicU8::new(1));
                 let mut fatal_error = false;
@@ -1481,7 +1551,7 @@ async fn run_sync_session(
                                     } else {
                                         match Phase1Metadata::build_targeted_topic_manifest(&db.pool, &owners).await {
                                             Ok(manifest) => {
-                                            if manifest.data_type != SyncDataType::Topic {
+                                            if manifest.manifest_type() != ManifestType::Topic {
                                                 let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
                                                     attempt_id,
                                                     code: "TOPIC_MANIFEST_INVALID".to_string(),
@@ -1495,7 +1565,7 @@ async fn run_sync_session(
                                             manifest_responses_received.store(0, Ordering::SeqCst);
                                             match expected_manifest_types.lock() {
                                                 Ok(mut expected) => {
-                                                    *expected = HashSet::from(["topic".to_string()]);
+                                                    *expected = HashSet::from([ManifestType::Topic]);
                                                 }
                                                 Err(_) => {
                                                     let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
@@ -1513,7 +1583,13 @@ async fn run_sync_session(
                                             if let Ok(mut logger) = sync_logger_task.lock() {
                                                 logger.log(LogLevel::Info, "topic_metadata", "=== Phase 2: Pulling Topic Metadata ===");
                                             }
-                                            if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(json!({ "type": "PHASE_START", "phase": "topic_metadata" }).to_string().into())).await {
+                                            if let Err(error) = send_ws_frame(
+                                                &mut ws_stream,
+                                                &PhaseFrame {
+                                                    frame_type: "PHASE_START",
+                                                    phase: SyncPhase::TopicMetadata,
+                                                },
+                                            ).await {
                                                 terminate_after_protocol_send_failure(
                                                     &handle_clone,
                                                     &mut ws_stream,
@@ -1523,14 +1599,8 @@ async fn run_sync_session(
                                                 break 'attempt;
                                             }
 
-                                            let msg = json!({
-                                                "type": "SYNC_MANIFEST",
-                                                "data": manifest.items,
-                                                "dataType": manifest.data_type,
-                                                "phase": 2, // Use explicit Phase ID 2
-                                                "targetedOwners": owners
-                                            });
-                                            if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(msg.to_string().into())).await {
+                                            let frame = ManifestRequestFrame::new(manifest);
+                                            if let Err(error) = send_ws_frame(&mut ws_stream, &frame).await {
                                                 terminate_after_protocol_send_failure(
                                                     &handle_clone,
                                                     &mut ws_stream,
@@ -1589,13 +1659,25 @@ async fn run_sync_session(
                                             let mut expected_topics = HashSet::new();
                                             for (key, state) in topic_hashes {
                                                 expected_topics.insert(key.clone());
-                                                topic_states.push(json!({
-                                                    "topicId": key.topic_id,
-                                                    "ownerType": key.owner_type,
-                                                    "ownerId": key.owner_id,
-                                                    "configHash": state.config_hash,
-                                                    "contentHash": state.content_hash,
-                                                }));
+                                                let owner_type = match OwnerType::try_from(key.owner_type.as_str()) {
+                                                    Ok(owner_type) => owner_type,
+                                                    Err(_) => {
+                                                        let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
+                                                            attempt_id,
+                                                            code: "TOPIC_HASH_STATE_INVALID".to_string(),
+                                                            message: format!("Topic {} has invalid ownerType", key.topic_id),
+                                                            failed_topic_ids: vec![key.topic_id],
+                                                        });
+                                                        continue 'attempt;
+                                                    }
+                                                };
+                                                topic_states.push(TopicDiffState {
+                                                    owner_type,
+                                                    owner_id: key.owner_id,
+                                                    topic_id: key.topic_id,
+                                                    config_hash: state.config_hash,
+                                                    content_hash: state.content_hash,
+                                                });
                                             }
                                             {
                                                 let mut expected = expected_topic_hash_results.lock().await;
@@ -1610,11 +1692,8 @@ async fn run_sync_session(
                                                 }
                                                 *expected = Some(expected_topics);
                                             }
-                                            let msg = json!({
-                                                "type": "SYNC_TOPIC_HASH_BATCH_V2",
-                                                "topics": topic_states,
-                                            });
-                                            if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(msg.to_string().into())).await {
+                                            let frame = TopicDiffRequestFrame::new(topic_states);
+                                            if let Err(error) = send_ws_frame(&mut ws_stream, &frame).await {
                                                 terminate_after_protocol_send_failure(
                                                     &handle_clone,
                                                     &mut ws_stream,
@@ -1650,7 +1729,13 @@ async fn run_sync_session(
                                     if let Ok(mut logger) = sync_logger_task.lock() {
                                         logger.log(LogLevel::Info, "messages", "=== Phase 3: Messages ===");
                                     }
-                                    if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(json!({ "type": "PHASE_START", "phase": "messages" }).to_string().into())).await {
+                                    if let Err(error) = send_ws_frame(
+                                        &mut ws_stream,
+                                        &PhaseFrame {
+                                            frame_type: "PHASE_START",
+                                            phase: SyncPhase::Messages,
+                                        },
+                                    ).await {
                                         terminate_after_protocol_send_failure(
                                             &handle_clone,
                                             &mut ws_stream,
@@ -1741,13 +1826,10 @@ async fn run_sync_session(
                                                         let mut expected = expected_phase3_batch.lock().await;
                                                         *expected = batch.keys.clone();
                                                     }
-                                                    let msg = json!({
-                                                        "type": "SYNC_MESSAGE_DIFF_BATCH",
-                                                        "topics": batch.topics,
-                                                    });
-                                                    if let Err(error) = send_ws_with_deadline(
+                                                    let frame = MessageDiffRequestFrame::new(batch.topics);
+                                                    if let Err(error) = send_ws_frame(
                                                         &mut ws_stream,
-                                                        Message::Text(msg.to_string().into()),
+                                                        &frame,
                                                     ).await {
                                                         terminate_after_protocol_send_failure(
                                                             &handle_clone,
@@ -1833,7 +1915,7 @@ async fn run_sync_session(
                                         manifest_responses_received.store(0, Ordering::SeqCst);
                                         match expected_manifest_types.lock() {
                                             Ok(mut expected) => {
-                                                *expected = HashSet::from(["avatar".to_string()]);
+                                                *expected = HashSet::from([ManifestType::Avatar]);
                                             }
                                             Err(_) => {
                                                 let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
@@ -1847,15 +1929,10 @@ async fn run_sync_session(
                                         }
                                         pending_tasks_task.store(0, Ordering::SeqCst);
                                         total_tasks_task.store(0, Ordering::SeqCst);
-                                        let msg = json!({
-                                            "type": "SYNC_MANIFEST",
-                                            "data": manifest.items,
-                                            "dataType": manifest.data_type,
-                                            "phase": 1
-                                        });
-                                        if let Err(error) = send_ws_with_deadline(
+                                        let frame = ManifestRequestFrame::new(manifest);
+                                        if let Err(error) = send_ws_frame(
                                             &mut ws_stream,
-                                            Message::Text(msg.to_string().into()),
+                                            &frame,
                                         ).await {
                                             terminate_after_protocol_send_failure(
                                                 &handle_clone,
@@ -1905,7 +1982,13 @@ async fn run_sync_session(
                                         crate::vcp_modules::sync::sync_finalize::invalidate_sync_entity_caches(
                                             &handle_clone,
                                         );
-                                        if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(json!({ "type": "PHASE_COMPLETED", "phase": "owner_metadata" }).to_string().into())).await {
+                                        if let Err(error) = send_ws_frame(
+                                            &mut ws_stream,
+                                            &PhaseFrame {
+                                                frame_type: "PHASE_COMPLETED",
+                                                phase: SyncPhase::OwnerMetadata,
+                                            },
+                                        ).await {
                                             terminate_after_protocol_send_failure(
                                                 &handle_clone,
                                                 &mut ws_stream,
@@ -1945,7 +2028,13 @@ async fn run_sync_session(
                                         crate::vcp_modules::sync::sync_finalize::invalidate_sync_entity_caches(
                                             &handle_clone,
                                         );
-                                        if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(json!({ "type": "PHASE_COMPLETED", "phase": "topic_metadata" }).to_string().into())).await {
+                                        if let Err(error) = send_ws_frame(
+                                            &mut ws_stream,
+                                            &PhaseFrame {
+                                                frame_type: "PHASE_COMPLETED",
+                                                phase: SyncPhase::TopicMetadata,
+                                            },
+                                        ).await {
                                             terminate_after_protocol_send_failure(
                                                 &handle_clone,
                                                 &mut ws_stream,
@@ -2023,11 +2112,7 @@ async fn run_sync_session(
                                             break;
                                         }
                                         let final_ack = FinalAckKey::new(session_id, attempt_id);
-                                        match send_ws_with_deadline(
-                                            &mut ws_stream,
-                                            Message::Text(final_ack.message().to_string().into()),
-                                        )
-                                        .await
+                                        match send_ws_frame(&mut ws_stream, &final_ack.message()).await
                                         {
                                             Ok(()) => {
                                                 if let Ok(mut pending) = awaiting_final_ack.lock() {
@@ -2064,49 +2149,9 @@ async fn run_sync_session(
                                         }
                                     }
                                 },
-                                SyncCommand::NotifyDelete {
-                                    data_type,
-                                    id,
-                                    deleted_at,
-                                    owner_type,
-                                    owner_id,
-                                } => {
-                                    let mut msg = json!({
-                                        "type": "SYNC_ENTITY_DELETE",
-                                        "id": id,
-                                        "dataType": data_type,
-                                        "deletedAt": deleted_at,
-                                    });
-                                    if let Some(owner_type) = owner_type {
-                                        msg["ownerType"] = Value::String(owner_type);
-                                    }
-                                    if let Some(owner_id) = owner_id {
-                                        msg["ownerId"] = Value::String(owner_id);
-                                    }
-                                    if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(msg.to_string().into())).await {
-                                        terminate_after_protocol_send_failure(
-                                            &handle_clone,
-                                            &mut ws_stream,
-                                            "local entity deletion",
-                                            &error,
-                                        ).await;
-                                        break 'attempt;
-                                    }
-                                },
-                                SyncCommand::NotifyMessageDelete { key, deleted_at } => {
-                                    let msg = json!({
-                                        "type": "SYNC_ENTITY_DELETE",
-                                        "id": key.msg_id,
-                                        "topicId": key.topic.topic_id,
-                                        "ownerType": key.topic.owner_type,
-                                        "ownerId": key.topic.owner_id,
-                                        "dataType": SyncDataType::Message,
-                                        "deletedAt": deleted_at,
-                                    });
-                                    if let Err(error) = send_ws_with_deadline(
-                                        &mut ws_stream,
-                                        Message::Text(msg.to_string().into()),
-                                    ).await {
+                                SyncCommand::NotifyDelete { target, deleted_at } => {
+                                    let frame = DeleteNotificationFrame::new(target, deleted_at);
+                                    if let Err(error) = send_ws_frame(&mut ws_stream, &frame).await {
                                         terminate_after_protocol_send_failure(
                                             &handle_clone,
                                             &mut ws_stream,
@@ -2125,7 +2170,7 @@ async fn run_sync_session(
                                             manifest_responses_received.store(0, Ordering::SeqCst);
                                             match expected_manifest_types.lock() {
                                                 Ok(mut expected) => {
-                                                    *expected = HashSet::from(["owner".to_string()]);
+                                                    *expected = HashSet::from([ManifestType::Owner]);
                                                 }
                                                 Err(_) => {
                                                     let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
@@ -2138,13 +2183,8 @@ async fn run_sync_session(
                                                 }
                                             }
 
-                                            let msg = json!({
-                                                "type": "SYNC_MANIFEST",
-                                                "data": manifest.items,
-                                                "dataType": manifest.data_type,
-                                                "phase": 1
-                                            });
-                                            if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(msg.to_string().into())).await {
+                                            let frame = ManifestRequestFrame::new(manifest);
+                                            if let Err(error) = send_ws_frame(&mut ws_stream, &frame).await {
                                                 terminate_after_protocol_send_failure(
                                                     &handle_clone,
                                                     &mut ws_stream,
@@ -2174,9 +2214,10 @@ async fn run_sync_session(
                                         }
                                     }
                                 },
-                                SyncCommand::SendWsMessage { attempt_id: command_attempt, value } => {
+                                SyncCommand::SendMessageDiff { attempt_id: command_attempt, topics } => {
                                     if command_attempt != attempt_id { continue; }
-                                    if let Err(error) = send_ws_with_deadline(&mut ws_stream, Message::Text(value.to_string().into())).await {
+                                    let frame = MessageDiffRequestFrame::new(topics);
+                                    if let Err(error) = send_ws_frame(&mut ws_stream, &frame).await {
                                         terminate_after_protocol_send_failure(
                                             &handle_clone,
                                             &mut ws_stream,
@@ -2266,10 +2307,10 @@ async fn run_sync_session(
                                 Some(Ok(msg)) => {
                                     match msg {
                                         Message::Text(text) => {
-                                let payload: Value = match serde_json::from_str::<Value>(&text) {
-                                    Ok(payload) if payload.is_object() => payload,
+                                let header = match serde_json::from_str::<FrameHeader>(&text) {
+                                    Ok(header) if !header.frame_type.is_empty() => header,
                                     Ok(_) => {
-                                        let message = "Sync protocol frame must be a JSON object";
+                                        let message = "Sync protocol frame requires a non-empty string type";
                                         fatal_error = true;
                                         publish_sync_error(
                                             &handle_clone,
@@ -2297,38 +2338,16 @@ async fn run_sync_session(
                                         break;
                                     }
                                 };
-                                if payload
-                                    .get("type")
-                                    .and_then(Value::as_str)
-                                    .filter(|value| !value.is_empty())
-                                    .is_none()
-                                {
-                                    let message = "Sync protocol frame requires a non-empty string type";
-                                    fatal_error = true;
-                                    publish_sync_error(
-                                        &handle_clone,
-                                        session_id,
-                                        &connection_status_for_task,
-                                        "PROTOCOL_FRAME_INVALID",
-                                        message,
-                                        Vec::new(),
-                                    ).await;
-                                    let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                    break;
-                                }
-
                                 let h = handle_clone.clone();
                                 let c = http_client.clone();
                                 let base = http_url.clone();
                                 let wq = write_queue_task.clone();
 
-                                match payload["type"].as_str() {
-                                    Some("SYNC_ERROR") => {
-                                        let encoded = payload
-                                            .get("error")
-                                            .ok_or_else(|| "SYNC_ERROR.error is missing".to_string())
-                                            .and_then(parse_wire_sync_error)
-                                            .and_then(|wire| encode_wire_sync_error(&wire));
+                                match header.frame_type.as_str() {
+                                    "SYNC_ERROR" => {
+                                        let encoded = serde_json::from_str::<RemoteSyncErrorFrame>(&text)
+                                            .map_err(|error| format!("Invalid SYNC_ERROR: {error}"))
+                                            .and_then(|frame| encode_wire_sync_error(&frame.error));
                                         let encoded = match encoded {
                                             Ok(encoded) => encoded,
                                             Err(message) => {
@@ -2357,19 +2376,21 @@ async fn run_sync_session(
                                         let _ = close_ws_with_deadline(&mut ws_stream).await;
                                         break;
                                     },
-                                    Some("SYNC_DIFF_RESULTS") => {
-                                        let Some(data_type) = parse_sync_data_type(&payload["dataType"]) else {
-                                            let _ = tx_internal.send(SyncCommand::FailAttempt {
-                                                attempt_id,
-                                                code: "PROTOCOL_FRAME_INVALID",
-                                                message: "SYNC_DIFF_RESULTS.dataType is missing or invalid".to_string(),
-                                            });
-                                            continue;
+                                    "SYNC_MANIFEST_RESULT" => {
+                                        let frame = match serde_json::from_str::<ManifestResultFrame>(&text) {
+                                            Ok(frame) => frame,
+                                            Err(error) => {
+                                                let _ = tx_internal.send(SyncCommand::FailAttempt {
+                                                    attempt_id,
+                                                    code: "PROTOCOL_FRAME_INVALID",
+                                                    message: format!("Invalid SYNC_MANIFEST_RESULT: {error}"),
+                                                });
+                                                continue;
+                                            }
                                         };
                                         if let Err(e) = crate::vcp_modules::sync_executor::diff_handler::DiffHandler::handle_diff(
                                             &h,
-                                            &payload,
-                                            data_type,
+                                            frame,
                                             &c,
                                             &base,
                                             &sync_token,
@@ -2394,9 +2415,9 @@ async fn run_sync_session(
                                             });
                                         }
                                     },
-                                    Some("SYNC_DIFF_RESULTS_BATCH") => {
-                                        let payload = match crate::vcp_modules::sync_executor::batch_diff_handler::parse_phase3_batch_frame(&text) {
-                                            Ok(payload) => payload,
+                                    "SYNC_MESSAGE_DIFF_RESULT" => {
+                                        let frame = match crate::vcp_modules::sync_executor::batch_diff_handler::parse_message_diff_result_frame(&text) {
+                                            Ok(frame) => frame,
                                             Err(error) => {
                                                 fatal_error = true;
                                                 emit_sync_log(&handle_clone, "error", &error.message);
@@ -2439,7 +2460,7 @@ async fn run_sync_session(
                                         task_tracker.spawn(async move {
                                             let result = crate::vcp_modules::sync_executor::batch_diff_handler::BatchDiffHandler::handle_diff_batch(
                                                 &h,
-                                                &payload,
+                                                frame,
                                                 &c,
                                                 &base,
                                                 &token,
@@ -2458,22 +2479,24 @@ async fn run_sync_session(
                                             });
                                         }).await;
                                     },
-                                    Some("SYNC_TOPIC_HASH_RESULTS") => {
+                                    "SYNC_TOPIC_DIFF_RESULT" => {
                                         manifest_phase.store(4, Ordering::SeqCst); // 进入 Phase 2.5+，结束 manifest 阶段
                                         let expected = expected_topic_hash_results.lock().await.take();
                                         let parsed = match expected {
-                                            Some(expected) => parse_unique_topic_keys(
-                                                &payload["changedTopics"],
-                                                "SYNC_TOPIC_HASH_RESULTS.changedTopics",
+                                            Some(expected) => serde_json::from_str::<TopicDiffResultFrame>(&text)
+                                            .map_err(|error| format!("Invalid SYNC_TOPIC_DIFF_RESULT: {error}"))
+                                            .and_then(|frame| validate_unique_topic_keys(
+                                                frame.changed_topics,
+                                                "SYNC_TOPIC_DIFF_RESULT.changedTopics",
                                                 MAX_SYNC_TOPICS,
-                                            )
+                                            ))
                                             .and_then(|changed_topics| {
                                                 if let Some(unexpected) = changed_topics
                                                     .iter()
                                                     .find(|topic| !expected.contains(*topic))
                                                 {
                                                     return Err(format!(
-                                                        "SYNC_TOPIC_HASH_RESULTS.changedTopics contains unexpected topic {}/{}/{}",
+                                                        "SYNC_TOPIC_DIFF_RESULT.changedTopics contains unexpected topic {}/{}/{}",
                                                         unexpected.owner_type,
                                                         unexpected.owner_id,
                                                         unexpected.topic_id,
@@ -2482,7 +2505,7 @@ async fn run_sync_session(
                                                 Ok(changed_topics)
                                             }),
                                             None => Err(
-                                                "Received an unexpected or duplicate SYNC_TOPIC_HASH_RESULTS frame"
+                                                "Received an unexpected or duplicate SYNC_TOPIC_DIFF_RESULT frame"
                                                     .to_string(),
                                             ),
                                         };
@@ -2504,8 +2527,20 @@ async fn run_sync_session(
                                             }
                                         }
                                     },
-                                    Some("PHASE_ACK") => {
-                                        if !consume_final_ack(&awaiting_final_ack, &payload) {
+                                    "PHASE_ACK" => {
+                                        let ack = match serde_json::from_str::<PhaseAckFrame>(&text) {
+                                            Ok(ack) if ack.frame_type == "PHASE_ACK" => ack,
+                                            Ok(_) => unreachable!("frame header already matched PHASE_ACK"),
+                                            Err(error) => {
+                                                let _ = tx_internal.send(SyncCommand::FailAttempt {
+                                                    attempt_id,
+                                                    code: "PROTOCOL_FRAME_INVALID",
+                                                    message: format!("Invalid PHASE_ACK: {error}"),
+                                                });
+                                                continue;
+                                            }
+                                        };
+                                        if !consume_final_ack(&awaiting_final_ack, &ack) {
                                             log::debug!("[SyncService] Ignoring mismatched, stale, or replayed final acknowledgement");
                                             continue;
                                         }
@@ -2542,20 +2577,45 @@ async fn run_sync_session(
                                         let _ = close_ws_with_deadline(&mut ws_stream).await;
                                         break;
                                     },
-                                    Some("SYNC_LOG_EVENT") => {
-                                        let level = payload["level"].as_str().unwrap_or("info");
-                                        let message = payload["message"].as_str().unwrap_or("");
-                                        emit_sync_log(&handle_clone, level, &format!("[Desktop] {}", message));
+                                    "SYNC_LOG_EVENT" => {
+                                        let event = match serde_json::from_str::<SyncLogEventFrame>(&text) {
+                                            Ok(event) => event,
+                                            Err(error) => {
+                                                let _ = tx_internal.send(SyncCommand::FailAttempt {
+                                                    attempt_id,
+                                                    code: "PROTOCOL_FRAME_INVALID",
+                                                    message: format!("Invalid SYNC_LOG_EVENT: {error}"),
+                                                });
+                                                continue;
+                                            }
+                                        };
+                                        emit_sync_log(&handle_clone, &event.level, &format!("[Desktop] {}", event.message));
                                     },
-                                    Some("DESKTOP_PHASE_START") | Some("DESKTOP_PHASE_COMPLETE") => {
-                                        let phase = payload["phase"].as_str().unwrap_or("unknown");
-                                        let msg = match payload["type"].as_str() {
-                                            Some("DESKTOP_PHASE_START") => format!("[Desktop] Phase {} started", phase),
-                                            _ => format!("[Desktop] Phase {} completed", phase),
+                                    "DESKTOP_PHASE_START" | "DESKTOP_PHASE_COMPLETE" => {
+                                        let event = match serde_json::from_str::<DesktopPhaseEventFrame>(&text) {
+                                            Ok(event) => event,
+                                            Err(error) => {
+                                                let _ = tx_internal.send(SyncCommand::FailAttempt {
+                                                    attempt_id,
+                                                    code: "PROTOCOL_FRAME_INVALID",
+                                                    message: format!("Invalid desktop phase event: {error}"),
+                                                });
+                                                continue;
+                                            }
+                                        };
+                                        let msg = match event.frame_type.as_str() {
+                                            "DESKTOP_PHASE_START" => format!("[Desktop] Phase {} started", event.phase),
+                                            _ => format!("[Desktop] Phase {} completed", event.phase),
                                         };
                                         emit_sync_log(&handle_clone, "info", &msg);
                                     },
-                                        _ => {}
+                                    _ => {
+                                        let _ = tx_internal.send(SyncCommand::FailAttempt {
+                                            attempt_id,
+                                            code: "PROTOCOL_FRAME_INVALID",
+                                            message: format!("Unsupported sync response frame {}", header.frame_type),
+                                        });
+                                    }
                                     }
                                 }
                                 Message::Close(close_frame) => {
@@ -2811,7 +2871,7 @@ impl Write for JsonSizeCounter {
 
 #[derive(Clone)]
 pub(crate) struct Phase3DiffBatch {
-    pub topics: Vec<Value>,
+    pub topics: Vec<MessageDiffTopicState>,
     pub keys: HashSet<TopicKey>,
 }
 
@@ -2825,7 +2885,7 @@ fn build_diff_batches(
     let mut current_topics = Vec::new();
     let mut current_keys = HashSet::new();
     let mut current_msg_count = 0usize;
-    let envelope_bytes = br#"{"type":"SYNC_MESSAGE_DIFF_BATCH","topics":[]}"#.len();
+    let envelope_bytes = br#"{"type":"SYNC_MESSAGE_DIFF_REQUEST","topics":[]}"#.len();
     let mut current_bytes = envelope_bytes;
     let mut topic_states = topic_states.into_iter().collect::<Vec<_>>();
     topic_states.sort_by(|left, right| left.0.cmp(&right.0));
@@ -2838,25 +2898,15 @@ fn build_diff_batches(
                 key.topic_id
             ));
         }
-        let mut msg_map = serde_json::Map::new();
-        let mut messages = state.messages.into_iter().collect::<Vec<_>>();
-        messages.sort_by(|left, right| left.0.cmp(&right.0));
-        for (msg_id, version) in messages {
-            msg_map.insert(
-                msg_id,
-                serde_json::json!({
-                    "hash": version.hash,
-                    "updatedAt": version.updated_at,
-                }),
-            );
-        }
-        let topic_obj = serde_json::json!({
-            "topicId": key.topic_id,
-            "ownerType": key.owner_type,
-            "ownerId": key.owner_id,
-            "topicHash": state.topic_hash,
-            "messages": msg_map,
-        });
+        let owner_type = OwnerType::try_from(key.owner_type.as_str())
+            .map_err(|_| format!("Phase 3 topic {} has invalid ownerType", key.topic_id))?;
+        let topic_obj = MessageDiffTopicState {
+            owner_type,
+            owner_id: key.owner_id.clone(),
+            topic_id: key.topic_id.clone(),
+            content_hash: state.content_hash,
+            messages: state.messages.into_iter().collect(),
+        };
         let mut counter = JsonSizeCounter::new(MAX_WS_DIFF_BATCH_BYTES);
         serde_json::to_writer(&mut counter, &topic_obj)
             .map_err(|error| format!("Failed to size Phase 3 topic {}: {error}", key.topic_id))?;
@@ -3322,6 +3372,7 @@ pub async fn clear_old_sync_logs(
 mod tests {
     use super::*;
     use crate::vcp_modules::sync_error::SyncErrorCategory;
+    use serde_json::Value;
     use std::sync::atomic::AtomicBool;
     use tokio_tungstenite::tungstenite::error::Error as WsError;
     use tokio_tungstenite::tungstenite::http::{Response, StatusCode};
@@ -3562,8 +3613,8 @@ mod tests {
     #[tokio::test]
     async fn missing_manifest_frame_fails_the_current_attempt() {
         let expected = Arc::new(Mutex::new(HashSet::from([
-            "agent".to_string(),
-            "group".to_string(),
+            ManifestType::Owner,
+            ManifestType::Avatar,
         ])));
         let phase = Arc::new(AtomicU8::new(1));
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -3578,8 +3629,8 @@ mod tests {
             } => {
                 assert_eq!(attempt_id, 7);
                 assert_eq!(code, "MANIFEST_RESPONSE_TIMEOUT");
-                assert!(message.contains("agent"));
-                assert!(message.contains("group"));
+                assert!(message.contains("owner"));
+                assert!(message.contains("avatar"));
             }
             _ => panic!("unexpected deadline command"),
         }
@@ -3606,43 +3657,66 @@ mod tests {
     }
 
     #[test]
-    fn protocol_1_3_version_ack_is_strict_and_uses_public_field_names() {
-        let ack = parse_version_ack(&json!({
-            "type": "VERSION_ACK",
-            "pluginVersion": "1.3.0",
-            "protocolVersion": "1.3",
-        }))
-        .expect("strict 1.3 acknowledgement");
-        assert_eq!(ack.plugin_version, "1.3.0");
-        assert_eq!(ack.protocol_version, "1.3");
+    fn version_ack_is_strict_but_compatibility_is_owned_by_the_wire_version() {
+        let ack = parse_version_ack(
+            &json!({
+                "type": "VERSION_ACK",
+                "pluginVersion": "1.4.0",
+                "protocolVersion": "1.4",
+            })
+            .to_string(),
+        )
+        .expect("strict 1.4 acknowledgement");
+        assert_eq!(ack.plugin_version, "1.4.0");
+        assert_eq!(ack.protocol_version, "1.4");
+        assert!(is_wire_compatible(&ack));
+        assert!(is_wire_compatible(&VersionAck {
+            frame_type: "VERSION_ACK".to_string(),
+            plugin_version: "1.4.9".to_string(),
+            protocol_version: "1.4".to_string(),
+        }));
+        assert!(!is_wire_compatible(&VersionAck {
+            frame_type: "VERSION_ACK".to_string(),
+            plugin_version: "1.4.0".to_string(),
+            protocol_version: "1.3".to_string(),
+        }));
 
-        assert!(parse_version_ack(&json!({
-            "type": "VERSION_ACK",
-            "version": "1.3.0",
-        }))
+        assert!(parse_version_ack(
+            &json!({
+                "type": "VERSION_ACK",
+                "version": "1.4.0",
+            })
+            .to_string()
+        )
         .is_err());
-        assert!(parse_version_ack(&json!({
-            "type": "VERSION_ACK",
-            "pluginVersion": "1.3.0",
-            "protocolVersion": 1.3,
-        }))
+        assert!(parse_version_ack(
+            &json!({
+                "type": "VERSION_ACK",
+                "pluginVersion": "1.4.0",
+                "protocolVersion": 1.4,
+            })
+            .to_string()
+        )
         .is_err());
     }
 
     #[test]
     fn handshake_preserves_a_structured_desktop_error_before_version_ack() {
-        let result = parse_version_handshake_payload(&json!({
-            "type": "SYNC_ERROR",
-            "error": {
-                "code": "PLUGIN_VERSION_MISMATCH",
-                "origin": "desktop_plugin",
-                "stage": "handshake",
-                "kind": "compatibility",
-                "retry": "after_user_action",
-                "message": "plugin package mismatch",
-                "failedTopicIds": []
-            }
-        }));
+        let result = parse_version_handshake_text(
+            &json!({
+                "type": "SYNC_ERROR",
+                "error": {
+                    "code": "PLUGIN_VERSION_MISMATCH",
+                    "origin": "desktop_plugin",
+                    "stage": "handshake",
+                    "kind": "compatibility",
+                    "retry": "after_user_action",
+                    "message": "plugin package mismatch",
+                    "failedTopicIds": []
+                }
+            })
+            .to_string(),
+        );
         let VersionHandshakeError::Remote(encoded) = result.expect_err("remote error") else {
             panic!("expected structured remote error");
         };
@@ -3652,56 +3726,47 @@ mod tests {
                 .code,
             "PLUGIN_VERSION_MISMATCH"
         );
-        assert!(parse_version_handshake_payload(&json!({
-            "type": "SYNC_LOG_EVENT",
-            "level": "info"
-        }))
+        assert!(parse_version_handshake_text(
+            &json!({
+                "type": "SYNC_LOG_EVENT",
+                "level": "info",
+                "phase": "startup",
+                "message": "ready",
+                "ts": 1
+            })
+            .to_string()
+        )
         .expect("log frame")
         .is_none());
     }
 
     #[test]
     fn changed_topic_list_requires_unique_compound_identities() {
-        let topic_a = json!({
-            "topicId": "topic-a",
-            "ownerType": "agent",
-            "ownerId": "agent-a",
-        });
-        let topic_b = json!({
-            "topicId": "topic-b",
-            "ownerType": "group",
-            "ownerId": "group-a",
-        });
+        let topic_a = TopicKey::new("agent", "agent-a", "topic-a");
+        let topic_b = TopicKey::new("group", "group-a", "topic-b");
         assert_eq!(
-            parse_unique_topic_keys(&json!([topic_a, topic_b]), "changedTopics", MAX_SYNC_TOPICS)
-                .expect("valid topic list"),
-            vec![
-                TopicKey::new("agent", "agent-a", "topic-a"),
-                TopicKey::new("group", "group-a", "topic-b"),
-            ]
+            validate_unique_topic_keys(
+                vec![topic_a.clone(), topic_b.clone()],
+                "changedTopics",
+                MAX_SYNC_TOPICS,
+            )
+            .expect("valid topic list"),
+            vec![topic_a.clone(), topic_b.clone()]
         );
-        assert!(
-            parse_unique_topic_keys(&json!("topic-a"), "changedTopics", MAX_SYNC_TOPICS).is_err()
-        );
-        assert!(parse_unique_topic_keys(
-            &json!([{"topicId":"","ownerType":"agent","ownerId":"agent-a"}]),
+        assert!(validate_unique_topic_keys(
+            vec![TopicKey::new("agent", "agent-a", "")],
             "changedTopics",
             MAX_SYNC_TOPICS,
         )
         .is_err());
-        assert!(parse_unique_topic_keys(
-            &json!([topic_a.clone(), topic_a]),
+        assert!(validate_unique_topic_keys(
+            vec![topic_a.clone(), topic_a],
             "changedTopics",
             MAX_SYNC_TOPICS,
         )
         .is_err());
-        assert!(parse_unique_topic_keys(
-            &json!([
-                topic_b,
-                json!({
-                    "topicId":"topic-c","ownerType":"agent","ownerId":"agent-c"
-                })
-            ]),
+        assert!(validate_unique_topic_keys(
+            vec![topic_b, TopicKey::new("agent", "agent-c", "topic-c")],
             "changedTopics",
             1
         )
@@ -3710,13 +3775,14 @@ mod tests {
 
     #[test]
     fn phase3_diff_batches_enforce_serialized_byte_budget() {
-        use crate::vcp_modules::sync_pipeline::phase3_message::{
-            MessageVersionState, TopicLocalState,
-        };
+        use crate::vcp_modules::sync_pipeline::phase3_message::TopicLocalState;
+        use crate::vcp_modules::sync_types::{MessageLiveState, MessageVersionState};
         use std::collections::HashMap;
-        let version = || MessageVersionState {
-            hash: "m".repeat(64),
-            updated_at: 1,
+        let version = || {
+            MessageVersionState::Live(MessageLiveState {
+                message_hash: "m".repeat(64),
+                updated_at: 1,
+            })
         };
 
         let mut states = HashMap::new();
@@ -3725,7 +3791,7 @@ mod tests {
             states.insert(
                 key,
                 TopicLocalState {
-                    topic_hash: "h".repeat(64),
+                    content_hash: "h".repeat(64),
                     messages: HashMap::from([(
                         format!("message-{index}-{}", "x".repeat(3 * 1024 * 1024)),
                         version(),
@@ -3737,7 +3803,7 @@ mod tests {
         assert!(batches.len() >= 2);
         for batch in batches {
             let bytes = serde_json::to_vec(&json!({
-                "type": "SYNC_MESSAGE_DIFF_BATCH",
+                "type": "SYNC_MESSAGE_DIFF_REQUEST",
                 "topics": batch.topics,
             }))
             .expect("serialize batch");
@@ -3859,12 +3925,48 @@ mod tests {
         };
         let pending = Arc::new(Mutex::new(Some(expected.clone())));
         let mismatches = [
-            json!({"type":"PHASE_COMPLETED","phase":"messages","sessionId":11,"attemptId":4,"nonce":"exact-nonce"}),
-            json!({"type":"PHASE_ACK","phase":"owner_metadata","sessionId":11,"attemptId":4,"nonce":"exact-nonce"}),
-            json!({"type":"PHASE_ACK","phase":"messages","sessionId":10,"attemptId":4,"nonce":"exact-nonce"}),
-            json!({"type":"PHASE_ACK","phase":"messages","sessionId":11,"attemptId":3,"nonce":"exact-nonce"}),
-            json!({"type":"PHASE_ACK","phase":"messages","sessionId":11,"attemptId":4,"nonce":"stale-nonce"}),
-            json!({"type":"PHASE_ACK","phase":"messages","sessionId":11,"attemptId":4}),
+            PhaseAckFrame {
+                frame_type: "PHASE_COMPLETED".into(),
+                phase: SyncPhase::Messages,
+                session_id: Some(11),
+                attempt_id: Some(4),
+                nonce: Some("exact-nonce".into()),
+            },
+            PhaseAckFrame {
+                frame_type: "PHASE_ACK".into(),
+                phase: SyncPhase::OwnerMetadata,
+                session_id: Some(11),
+                attempt_id: Some(4),
+                nonce: Some("exact-nonce".into()),
+            },
+            PhaseAckFrame {
+                frame_type: "PHASE_ACK".into(),
+                phase: SyncPhase::Messages,
+                session_id: Some(10),
+                attempt_id: Some(4),
+                nonce: Some("exact-nonce".into()),
+            },
+            PhaseAckFrame {
+                frame_type: "PHASE_ACK".into(),
+                phase: SyncPhase::Messages,
+                session_id: Some(11),
+                attempt_id: Some(3),
+                nonce: Some("exact-nonce".into()),
+            },
+            PhaseAckFrame {
+                frame_type: "PHASE_ACK".into(),
+                phase: SyncPhase::Messages,
+                session_id: Some(11),
+                attempt_id: Some(4),
+                nonce: Some("stale-nonce".into()),
+            },
+            PhaseAckFrame {
+                frame_type: "PHASE_ACK".into(),
+                phase: SyncPhase::Messages,
+                session_id: Some(11),
+                attempt_id: Some(4),
+                nonce: None,
+            },
         ];
         for payload in mismatches {
             assert!(!consume_final_ack(&pending, &payload));
@@ -3874,13 +3976,13 @@ mod tests {
             );
         }
 
-        let exact = json!({
-            "type": "PHASE_ACK",
-            "phase": "messages",
-            "sessionId": 11,
-            "attemptId": 4,
-            "nonce": "exact-nonce"
-        });
+        let exact = PhaseAckFrame {
+            frame_type: "PHASE_ACK".into(),
+            phase: SyncPhase::Messages,
+            session_id: Some(11),
+            attempt_id: Some(4),
+            nonce: Some("exact-nonce".into()),
+        };
         assert!(consume_final_ack(&pending, &exact));
         assert!(!consume_final_ack(&pending, &exact));
         assert!(pending.lock().expect("pending lock").is_none());

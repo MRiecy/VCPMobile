@@ -1,6 +1,7 @@
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
+use crate::vcp_modules::sync_types::DeleteTarget;
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
@@ -254,8 +255,8 @@ pub fn notify_message_deletions<R: tauri::Runtime>(
 ) {
     if let Some(sync_state) = app_handle.try_state::<SyncState>() {
         for message_id in &result.deleted_ids {
-            let _ = sync_state.ws_sender.send(SyncCommand::NotifyMessageDelete {
-                key: MessageKey::new(topic.clone(), message_id),
+            let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
+                target: DeleteTarget::Message(MessageKey::new(topic.clone(), message_id)),
                 deleted_at: result.deleted_at,
             });
         }

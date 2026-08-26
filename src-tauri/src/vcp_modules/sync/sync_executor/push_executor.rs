@@ -2,11 +2,15 @@ use crate::vcp_modules::agent_service;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_service;
 use crate::vcp_modules::sync_dto::{AgentSyncDTO, AttachmentSyncDTO, GroupSyncDTO, MessageSyncDTO};
-use crate::vcp_modules::sync_error::{encode_http_sync_error_body, encode_wire_sync_error_value};
+use crate::vcp_modules::sync_error::{encode_http_sync_error_body, encode_wire_sync_error};
 use crate::vcp_modules::sync_hash::HashAggregator;
-use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
+use crate::vcp_modules::sync_types::{
+    AvatarOwnerType, AvatarPushResponse, EntityPushData, EntityPushItem, EntityPushRequest,
+    EntityPushResponse, MessagePushResponseFrame, OwnerType,
+};
+use crate::vcp_modules::topic_types::TopicKey;
 use futures_util::StreamExt;
-use serde::Serialize;
+use serde::de::DeserializeOwned;
 use sqlx::{Row, Sqlite, Transaction};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -50,51 +54,25 @@ fn canonical_sha256(value: &str) -> Option<String> {
     crate::vcp_modules::infra::utils::is_valid_cas_hash(&normalized).then_some(normalized)
 }
 
-async fn parse_success_response(
+async fn parse_json_response<T: DeserializeOwned>(
     response: reqwest::Response,
     operation: &str,
-) -> Result<serde_json::Value, String> {
+) -> Result<T, String> {
     let (status, bytes) =
         read_response_limited(response, MAX_CONTROL_RESPONSE_BYTES, operation).await?;
     if !status.is_success() {
         return match encode_http_sync_error_body(&bytes) {
             Ok(Some(encoded)) => Err(encoded),
             Ok(None) => Err(format!(
-                "{operation} failed with HTTP {status} without a Wire 1.3 error object"
+                "{operation} failed with HTTP {status} without a Wire 1.4 error object"
             )),
             Err(error) => Err(format!(
-                "{operation} returned an invalid Wire 1.3 error: {error}"
+                "{operation} returned an invalid Wire 1.4 error: {error}"
             )),
         };
     }
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("{operation} returned invalid JSON: {error}"))?;
-    if value.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
-        let error = value.get("error").or_else(|| {
-            value
-                .get("results")
-                .and_then(serde_json::Value::as_array)
-                .and_then(|results| {
-                    results
-                        .iter()
-                        .find(|result| {
-                            result.get("success").and_then(serde_json::Value::as_bool)
-                                == Some(false)
-                        })
-                        .and_then(|result| result.get("error"))
-                })
-        });
-        let encoded = error
-            .ok_or_else(|| format!("{operation} returned success=false without error"))
-            .and_then(encode_wire_sync_error_value)?;
-        return Err(encoded);
-    }
-    if value.get("error").is_some() {
-        return Err(format!(
-            "{operation} returned success=true together with error"
-        ));
-    }
-    Ok(value)
+    serde_json::from_slice(&bytes)
+        .map_err(|error| format!("{operation} returned invalid JSON: {error}"))
 }
 
 /// 批量 Push 单 topic 处理结果
@@ -106,47 +84,13 @@ pub struct PushBatchResult {
 
 #[derive(Debug)]
 struct MessageTombstone {
-    key: MessageKey,
+    msg_id: String,
     deleted_at: i64,
 }
 
 struct TopicMessagePreflight {
     live_count: usize,
     tombstone_count: usize,
-}
-
-struct CountingWriter {
-    bytes: usize,
-    limit: usize,
-}
-
-impl Write for CountingWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.bytes = self
-            .bytes
-            .checked_add(bytes.len())
-            .ok_or_else(|| std::io::Error::other("serialized byte count overflow"))?;
-        if self.bytes > self.limit {
-            return Err(std::io::Error::other(
-                "serialized value exceeds byte budget",
-            ));
-        }
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MessageTombstoneRequest<'a> {
-    owner_type: &'a str,
-    owner_id: &'a str,
-    topic_id: &'a str,
-    msg_id: &'a str,
-    deleted_at: i64,
 }
 
 struct BoundedJsonLine {
@@ -198,25 +142,24 @@ fn parse_message_push_results(
         if line.len() > MAX_NDJSON_LINE_BYTES {
             return Err("Batch push response contains a line over 32 MiB".to_string());
         }
-        let data: serde_json::Value = serde_json::from_str(line)
+        let frame: MessagePushResponseFrame = serde_json::from_str(line)
             .map_err(|error| format!("Batch push response contains malformed NDJSON: {error}"))?;
-        if let Some(error) = data.get("_stream_error") {
-            return Err(encode_wire_sync_error_value(error)?);
+        let (owner_type, owner_id, topic_id, success, wire_error) = match frame {
+            MessagePushResponseFrame::StreamError { error } => {
+                return Err(encode_wire_sync_error(&error)?);
+            }
+            MessagePushResponseFrame::Topic {
+                owner_type,
+                owner_id,
+                topic_id,
+                ok,
+                error,
+            } => (owner_type, owner_id, topic_id, ok, error),
+        };
+        if owner_id.is_empty() || topic_id.is_empty() {
+            return Err("Batch push response requires complete topic identity".to_string());
         }
-        let topic_id = data
-            .get("topicId")
-            .and_then(serde_json::Value::as_str)
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| "Batch push response requires a non-empty topicId".to_string())?;
-        let topic = TopicKey::new(
-            data.get("ownerType")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default(),
-            data.get("ownerId")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default(),
-            topic_id,
-        );
+        let topic = TopicKey::new(owner_type.as_str(), &owner_id, &topic_id);
         if !expected.contains(&topic) {
             return Err(format!(
                 "Batch push response contains unexpected topic {topic_id}"
@@ -227,16 +170,13 @@ fn parse_message_push_results(
                 "Batch push response contains duplicate topic {topic_id}"
             ));
         }
-        let success = data
-            .get("success")
-            .and_then(serde_json::Value::as_bool)
-            .ok_or_else(|| format!("Batch push result for {topic_id} requires boolean success"))?;
-        let error = match data.get("error") {
-            Some(value) => Some(encode_wire_sync_error_value(value).map_err(|parse_error| {
+        let error = wire_error
+            .as_ref()
+            .map(encode_wire_sync_error)
+            .transpose()
+            .map_err(|parse_error| {
                 format!("Batch push result for {topic_id} has invalid error: {parse_error}")
-            })?),
-            None => None,
-        };
+            })?;
         if !success && error.is_none() {
             return Err(format!(
                 "Failed batch push result for {topic_id} requires an error message"
@@ -247,7 +187,6 @@ fn parse_message_push_results(
                 "Successful batch push result for {topic_id} must not contain an error"
             ));
         }
-
         results.push(PushBatchResult {
             topic,
             success,
@@ -270,10 +209,9 @@ async fn send_message_chunk(
     body: Vec<u8>,
     expected_topics: &[TopicKey],
 ) -> Result<Vec<PushBatchResult>, String> {
-    let url = format!("{}/api/mobile-sync/upload-messages-batch", http_url);
+    let url = format!("{}/api/mobile-sync/messages/push", http_url);
     let response = client
         .post(&url)
-        .header("x-sync-token", sync_token)
         .header("Authorization", format!("Bearer {}", sync_token))
         .header("Content-Type", "application/x-ndjson")
         .body(body)
@@ -286,15 +224,118 @@ async fn send_message_chunk(
         return match encode_http_sync_error_body(&bytes) {
             Ok(Some(encoded)) => Err(encoded),
             Ok(None) => Err(format!(
-                "Batch push messages failed with HTTP {status} without a Wire 1.3 error object"
+                "Batch push messages failed with HTTP {status} without a Wire 1.4 error object"
             )),
             Err(error) => Err(format!(
-                "Batch push messages returned an invalid Wire 1.3 error: {error}"
+                "Batch push messages returned an invalid Wire 1.4 error: {error}"
             )),
         };
     }
 
     parse_message_push_results(&bytes, expected_topics)
+}
+
+async fn send_entity_items(
+    client: &reqwest::Client,
+    http_url: &str,
+    sync_token: &str,
+    items: Vec<EntityPushItem>,
+    idempotency_key: Option<String>,
+) -> Result<(), String> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    if items.len() > MAX_SYNC_TOPICS {
+        return Err(format!(
+            "Entity push contains {} items, limit is {MAX_SYNC_TOPICS}",
+            items.len()
+        ));
+    }
+    let mut expected = HashSet::new();
+    for item in &items {
+        if !item.is_consistent() {
+            return Err("Entity push item has mismatched identity and DTO type".to_string());
+        }
+        let identity = item.selector();
+        if !expected.insert(identity.clone()) {
+            return Err(format!(
+                "Entity push contains duplicate {}",
+                identity.label()
+            ));
+        }
+    }
+
+    let body = serde_json::to_vec(&EntityPushRequest { items })
+        .map_err(|error| format!("Entity push serialization failed: {error}"))?;
+    if body.len() > 10 * 1024 * 1024 {
+        return Err("Entity push request exceeds 10 MiB".to_string());
+    }
+    let mut request = client
+        .post(format!("{http_url}/api/mobile-sync/entities/push"))
+        .header("Authorization", format!("Bearer {sync_token}"))
+        .header("Content-Type", "application/json");
+    if let Some(key) = idempotency_key {
+        request = request.header("x-idempotency-key", key);
+    }
+    let response = request
+        .body(body)
+        .send()
+        .await
+        .map_err(|error| format!("Entity push request failed: {error}"))?;
+    let (status, bytes) = read_response_limited(response, 10 * 1024 * 1024, "Entity push").await?;
+    if !status.is_success() {
+        return match encode_http_sync_error_body(&bytes) {
+            Ok(Some(encoded)) => Err(encoded),
+            Ok(None) => Err(format!(
+                "Entity push failed with HTTP {status} without a Wire 1.4 error object"
+            )),
+            Err(error) => Err(format!(
+                "Entity push returned an invalid Wire 1.4 error: {error}"
+            )),
+        };
+    }
+    let response: EntityPushResponse = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("Entity push returned invalid JSON: {error}"))?;
+    let mut seen = HashSet::new();
+    for result in response.results {
+        let (identity, ok, error) = result.into_parts();
+        if !expected.contains(&identity) {
+            return Err(format!(
+                "Entity push returned unexpected {}",
+                identity.label()
+            ));
+        }
+        if !seen.insert(identity.clone()) {
+            return Err(format!(
+                "Entity push returned duplicate {}",
+                identity.label()
+            ));
+        }
+        match ok {
+            true if error.is_none() => {}
+            false => {
+                let error = error
+                    .as_ref()
+                    .ok_or_else(|| {
+                        format!("Entity push {} failure requires error", identity.label())
+                    })
+                    .and_then(encode_wire_sync_error)?;
+                return Err(format!("Entity push {} failed: {error}", identity.label()));
+            }
+            true => {
+                return Err(format!(
+                    "Successful entity push {} must not contain error",
+                    identity.label()
+                ));
+            }
+        }
+    }
+    if seen != expected {
+        let mut missing = expected.difference(&seen).cloned().collect::<Vec<_>>();
+        missing.sort();
+        return Err(format!("Entity push response is missing {missing:?}"));
+    }
+    Ok(())
 }
 
 async fn preflight_topic_messages(
@@ -441,160 +482,11 @@ async fn load_message_tombstones(
                 ));
             }
             Ok(MessageTombstone {
-                key: MessageKey::new(key.clone(), message_id),
+                msg_id: message_id,
                 deleted_at,
             })
         })
         .collect()
-}
-
-fn message_tombstone_body_len(tombstone: &MessageTombstone) -> Result<usize, String> {
-    let request = MessageTombstoneRequest {
-        owner_type: &tombstone.key.topic.owner_type,
-        owner_id: &tombstone.key.topic.owner_id,
-        topic_id: &tombstone.key.topic.topic_id,
-        msg_id: &tombstone.key.msg_id,
-        deleted_at: tombstone.deleted_at,
-    };
-    let mut writer = CountingWriter {
-        bytes: 0,
-        limit: MAX_CONTROL_RESPONSE_BYTES,
-    };
-    serde_json::to_writer(&mut writer, &request).map_err(|error| {
-        format!(
-            "Message tombstone {}/{} exceeds its serialized byte budget: {error}",
-            tombstone.key.topic.topic_id, tombstone.key.msg_id
-        )
-    })?;
-    Ok(writer.bytes)
-}
-
-fn validate_message_tombstone_response(
-    value: &serde_json::Value,
-    tombstone: &MessageTombstone,
-) -> Result<(), String> {
-    let topic_matches = value.get("topicId").and_then(serde_json::Value::as_str)
-        == Some(tombstone.key.topic.topic_id.as_str());
-    let owner_type_matches = value.get("ownerType").and_then(serde_json::Value::as_str)
-        == Some(tombstone.key.topic.owner_type.as_str());
-    let owner_id_matches = value.get("ownerId").and_then(serde_json::Value::as_str)
-        == Some(tombstone.key.topic.owner_id.as_str());
-    let message_matches = value.get("msgId").and_then(serde_json::Value::as_str)
-        == Some(tombstone.key.msg_id.as_str());
-    if !topic_matches || !owner_type_matches || !owner_id_matches || !message_matches {
-        return Err(format!(
-            "Delete message response requires matching owner, topicId and msgId for {}/{}",
-            tombstone.key.topic.topic_id, tombstone.key.msg_id
-        ));
-    }
-    Ok(())
-}
-
-async fn push_message_tombstone(
-    client: &reqwest::Client,
-    http_url: &str,
-    sync_token: &str,
-    tombstone: &MessageTombstone,
-) -> Result<(), String> {
-    let request = MessageTombstoneRequest {
-        owner_type: &tombstone.key.topic.owner_type,
-        owner_id: &tombstone.key.topic.owner_id,
-        topic_id: &tombstone.key.topic.topic_id,
-        msg_id: &tombstone.key.msg_id,
-        deleted_at: tombstone.deleted_at,
-    };
-    let body = serde_json::to_vec(&request).map_err(|error| {
-        format!(
-            "Message tombstone {}/{} serialization failed: {error}",
-            tombstone.key.topic.topic_id, tombstone.key.msg_id
-        )
-    })?;
-    if body.len() > MAX_CONTROL_RESPONSE_BYTES {
-        return Err(format!(
-            "Message tombstone {}/{} exceeds the request byte limit",
-            tombstone.key.topic.topic_id, tombstone.key.msg_id
-        ));
-    }
-    let idempotency_key = crate::vcp_modules::infra::utils::calculate_sha256_slices(&[
-        b"delete-message",
-        tombstone.key.topic.owner_type.as_bytes(),
-        tombstone.key.topic.owner_id.as_bytes(),
-        tombstone.key.topic.topic_id.as_bytes(),
-        tombstone.key.msg_id.as_bytes(),
-        tombstone.deleted_at.to_string().as_bytes(),
-    ]);
-    let response = client
-        .post(format!("{http_url}/api/mobile-sync/delete-message"))
-        .header("x-sync-token", sync_token)
-        .header("Authorization", format!("Bearer {sync_token}"))
-        .header("x-idempotency-key", idempotency_key)
-        .header("Content-Type", "application/json")
-        .body(body)
-        .send()
-        .await
-        .map_err(|error| {
-            format!(
-                "Delete message {}/{} request failed: {error}",
-                tombstone.key.topic.topic_id, tombstone.key.msg_id
-            )
-        })?;
-    let value = parse_success_response(response, "Delete message").await?;
-    validate_message_tombstone_response(&value, tombstone)
-}
-
-fn append_topic_failure(result: &mut PushBatchResult, message: String) {
-    result.success = false;
-    match &mut result.error {
-        Some(existing) if !existing.is_empty() => {
-            existing.push_str("; ");
-            existing.push_str(&message);
-        }
-        _ => result.error = Some(message),
-    }
-}
-
-async fn push_message_tombstone_chunk(
-    client: &reqwest::Client,
-    http_url: &str,
-    sync_token: &str,
-    tombstones: Vec<MessageTombstone>,
-    results: &mut [PushBatchResult],
-) -> Result<(), String> {
-    if tombstones.is_empty() {
-        return Ok(());
-    }
-    let result_indexes = results
-        .iter()
-        .enumerate()
-        .map(|(index, result)| (result.topic.clone(), index))
-        .collect::<HashMap<_, _>>();
-    const MAX_CONCURRENT_MESSAGE_DELETES: usize = 3;
-    for chunk in tombstones.chunks(MAX_CONCURRENT_MESSAGE_DELETES) {
-        let futures = chunk
-            .iter()
-            .map(|tombstone| push_message_tombstone(client, http_url, sync_token, tombstone));
-        for (tombstone, outcome) in chunk
-            .iter()
-            .zip(futures_util::future::join_all(futures).await)
-        {
-            if let Err(error) = outcome {
-                let index = result_indexes
-                    .get(&tombstone.key.topic)
-                    .copied()
-                    .ok_or_else(|| {
-                        format!(
-                            "Message tombstone result references missing topic {}",
-                            tombstone.key.topic.topic_id
-                        )
-                    })?;
-                append_topic_failure(
-                    &mut results[index],
-                    format!("Message tombstone {} failed: {error}", tombstone.key.msg_id),
-                );
-            }
-        }
-    }
-    Ok(())
 }
 
 async fn load_outbound_message_page(
@@ -812,12 +704,13 @@ async fn serialize_topic_messages(
     tx: &mut Transaction<'_, Sqlite>,
     key: &TopicKey,
     expected_message_count: usize,
+    tombstones: &[MessageTombstone],
 ) -> Result<Vec<u8>, String> {
     let topic_id = &key.topic_id;
     let owner_type = &key.owner_type;
     let owner_id = &key.owner_id;
     let mut line = BoundedJsonLine::new(MAX_NDJSON_LINE_BYTES);
-    line.write_all(br#"{"topicId":"#)
+    line.write_all(br#"{"kind":"topic","topicId":"#)
         .map_err(|error| format!("Message push prefix failed for {topic_id}: {error}"))?;
     serde_json::to_writer(&mut line, topic_id)
         .map_err(|error| format!("Message push topic id serialization failed: {error}"))?;
@@ -879,6 +772,28 @@ async fn serialize_topic_messages(
             "Message push topic {topic_id} changed during serialization: expected {expected_message_count}, got {serialized_count}"
         ));
     }
+    line.write_all(b"],\"deletedMessages\":[")
+        .map_err(|error| format!("Message tombstone prefix failed for {topic_id}: {error}"))?;
+    for (index, tombstone) in tombstones.iter().enumerate() {
+        if index > 0 {
+            line.write_all(b",").map_err(|error| {
+                format!("Message tombstone separator failed for {topic_id}: {error}")
+            })?;
+        }
+        serde_json::to_writer(
+            &mut line,
+            &serde_json::json!({
+                "msgId": &tombstone.msg_id,
+                "deletedAt": tombstone.deleted_at,
+            }),
+        )
+        .map_err(|error| {
+            format!(
+                "Message push topic {topic_id} tombstone {} is invalid: {error}",
+                tombstone.msg_id
+            )
+        })?;
+    }
     line.write_all(b"]}\n")
         .map_err(|error| format!("Message push suffix failed for {topic_id}: {error}"))?;
     Ok(line.into_bytes())
@@ -900,23 +815,18 @@ impl PushExecutor {
         let config_hash = HashAggregator::compute_agent_config_hash(&dto);
 
         let idempotency_key = generate_idempotency_key("push", "agent", agent_id, &config_hash);
-        let url = format!("{}/api/mobile-sync/upload-entity", http_url);
-
-        let response = client
-            .post(&url)
-            .header("x-sync-token", sync_token)
-            .header("Authorization", format!("Bearer {}", sync_token))
-            .header("x-idempotency-key", idempotency_key)
-            .json(&serde_json::json!({ "id": agent_id, "type": "agent", "data": dto }))
-            .send()
-            .await
-            .map_err(|error| format!("Push agent {agent_id} request failed: {error}"))?;
-        let body = parse_success_response(response, "Push agent").await?;
-        if body.get("id").and_then(serde_json::Value::as_str) != Some(agent_id) {
-            return Err(format!("Push agent response id mismatch for {agent_id}"));
-        }
-
-        Ok(())
+        send_entity_items(
+            client,
+            http_url,
+            sync_token,
+            vec![EntityPushItem::Owner {
+                owner_type: OwnerType::Agent,
+                owner_id: agent_id.to_string(),
+                data: EntityPushData::Agent(dto),
+            }],
+            Some(idempotency_key),
+        )
+        .await
     }
 
     pub async fn push_group<R: Runtime>(
@@ -933,23 +843,18 @@ impl PushExecutor {
         let config_hash = HashAggregator::compute_group_config_hash(&dto);
 
         let idempotency_key = generate_idempotency_key("push", "group", group_id, &config_hash);
-        let url = format!("{}/api/mobile-sync/upload-entity", http_url);
-
-        let response = client
-            .post(&url)
-            .header("x-sync-token", sync_token)
-            .header("Authorization", format!("Bearer {}", sync_token))
-            .header("x-idempotency-key", idempotency_key)
-            .json(&serde_json::json!({ "id": group_id, "type": "group", "data": dto }))
-            .send()
-            .await
-            .map_err(|error| format!("Push group {group_id} request failed: {error}"))?;
-        let body = parse_success_response(response, "Push group").await?;
-        if body.get("id").and_then(serde_json::Value::as_str) != Some(group_id) {
-            return Err(format!("Push group response id mismatch for {group_id}"));
-        }
-
-        Ok(())
+        send_entity_items(
+            client,
+            http_url,
+            sync_token,
+            vec![EntityPushItem::Owner {
+                owner_type: OwnerType::Group,
+                owner_id: group_id.to_string(),
+                data: EntityPushData::Group(dto),
+            }],
+            Some(idempotency_key),
+        )
+        .await
     }
 
     /// 批量 Push 实体 (Agent/Group/Topic)
@@ -958,108 +863,9 @@ impl PushExecutor {
         client: &reqwest::Client,
         http_url: &str,
         sync_token: &str,
-        items: Vec<serde_json::Value>, // 预先构建好的 [{id, type, data}]
+        items: Vec<EntityPushItem>,
     ) -> Result<(), String> {
-        if items.is_empty() {
-            return Ok(());
-        }
-
-        let mut expected_topics = HashSet::new();
-        for item in &items {
-            let id = item
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .filter(|id| !id.is_empty())
-                .ok_or_else(|| "Batch push entity item requires a non-empty id".to_string())?;
-            let owner_type = item
-                .get("ownerType")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let owner_id = item
-                .get("ownerId")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let key = TopicKey::new(owner_type, owner_id, id);
-            if !key.is_valid() || !expected_topics.insert(key) {
-                return Err(format!(
-                    "Batch push entity request contains an invalid or duplicate topic identity for {id}"
-                ));
-            }
-        }
-        let request_body = serde_json::json!({ "items": items });
-        let request_size = serde_json::to_vec(&request_body)
-            .map_err(|error| format!("Batch push entity serialization failed: {error}"))?
-            .len();
-        if request_size > 10 * 1024 * 1024 {
-            return Err("Batch push entity request exceeds 10 MiB".to_string());
-        }
-
-        let url = format!("{}/api/mobile-sync/upload-entities-batch", http_url);
-        let response = client
-            .post(&url)
-            .header("x-sync-token", sync_token)
-            .header("Authorization", format!("Bearer {}", sync_token))
-            .json(&request_body)
-            .send()
-            .await
-            .map_err(|e| format!("Batch push request failed: {}", e))?;
-
-        let response_body = parse_success_response(response, "Batch push entities").await?;
-        let results = response_body
-            .get("results")
-            .and_then(serde_json::Value::as_array)
-            .ok_or_else(|| "Batch push entities response is missing results".to_string())?;
-        let mut seen_topics = HashSet::new();
-        for result in results {
-            let id = result
-                .get("id")
-                .and_then(serde_json::Value::as_str)
-                .filter(|id| !id.is_empty())
-                .ok_or_else(|| "Batch push entity result requires a non-empty id".to_string())?;
-            let key = TopicKey::new(
-                result
-                    .get("ownerType")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default(),
-                result
-                    .get("ownerId")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default(),
-                id,
-            );
-            if !expected_topics.contains(&key) {
-                return Err(format!(
-                    "Batch push entities returned unexpected topic {id}"
-                ));
-            }
-            if !seen_topics.insert(key) {
-                return Err(format!("Batch push entities returned duplicate topic {id}"));
-            }
-            if result.get("success").and_then(serde_json::Value::as_bool) != Some(true) {
-                let error = result
-                    .get("error")
-                    .ok_or_else(|| format!("Batch push entity {id} failure is missing error"))
-                    .and_then(encode_wire_sync_error_value)?;
-                return Err(format!("Batch push entity {id} failed: {error}"));
-            }
-            if result.get("error").is_some() {
-                return Err(format!(
-                    "Successful batch push entity {id} must not contain an error"
-                ));
-            }
-        }
-        if seen_topics != expected_topics {
-            let mut missing = expected_topics
-                .difference(&seen_topics)
-                .cloned()
-                .collect::<Vec<_>>();
-            missing.sort();
-            return Err(format!(
-                "Batch push entities missing results for {missing:?}"
-            ));
-        }
-
-        Ok(())
+        send_entity_items(client, http_url, sync_token, items, None).await
     }
 
     pub async fn push_avatar<R: Runtime>(
@@ -1143,22 +949,23 @@ impl PushExecutor {
         })?;
 
         let url = format!(
-            "{}/api/mobile-sync/upload-avatar?id={}&type={}",
-            http_url, owner_id, owner_type
+            "{}/api/mobile-sync/avatars/push?ownerType={}&ownerId={}",
+            http_url, owner_type, owner_id
         );
         let response = client
             .post(&url)
-            .header("x-sync-token", sync_token)
             .header("Authorization", format!("Bearer {}", sync_token))
             .header("Content-Type", mime_type)
             .body(image_data)
             .send()
             .await
             .map_err(|error| format!("Push avatar {owner_type}/{owner_id} failed: {error}"))?;
-        let body = parse_success_response(response, "Push avatar").await?;
-        if body.get("id").and_then(serde_json::Value::as_str) != Some(owner_id) {
+        let body: AvatarPushResponse = parse_json_response(response, "Push avatar").await?;
+        let expected_owner_type = AvatarOwnerType::try_from(owner_type)
+            .map_err(|_| format!("Invalid avatar owner type {owner_type}"))?;
+        if !body.ok || body.owner_type != expected_owner_type || body.owner_id != owner_id {
             return Err(format!(
-                "Push avatar response id mismatch for {owner_type}/{owner_id}"
+                "Push avatar response identity mismatch for {owner_type}/{owner_id}"
             ));
         }
 
@@ -1167,7 +974,7 @@ impl PushExecutor {
 
     /// 批量 Push — 一次 HTTP 请求推送多个 topic 的消息
     ///
-    /// 手机端批量加载消息 → POST /upload-messages-batch (NDJSON)。附件仅随消息
+    /// 手机端批量加载消息 → POST /messages/push (NDJSON)。附件仅随消息
     /// 传输元数据与内容 Hash，二进制 CAS 始终保留在本机。
     ///
     /// 返回每个 topic 的处理结果。
@@ -1201,7 +1008,6 @@ impl PushExecutor {
         let mut total_messages = 0usize;
         let mut request_body = Vec::new();
         let mut request_topics = Vec::new();
-        let mut request_tombstones = Vec::new();
 
         // Each topic is preflighted, paged, and serialized directly into a bounded writer. This
         // avoids retaining a full history, a cloned DTO tree, and a JSON String simultaneously.
@@ -1240,16 +1046,13 @@ impl PushExecutor {
 
             let topic_tombstones =
                 load_message_tombstones(&mut read_tx, key, preflight.tombstone_count).await?;
-            for tombstone in &topic_tombstones {
-                total_request_bytes = total_request_bytes
-                    .checked_add(message_tombstone_body_len(tombstone)?)
-                    .ok_or_else(|| "Message push byte count overflow".to_string())?;
-                if total_request_bytes > MAX_SYNC_BODY_BYTES {
-                    return Err("Message push exceeds the 256 MiB total limit".to_string());
-                }
-            }
-
-            let line = serialize_topic_messages(&mut read_tx, key, preflight.live_count).await?;
+            let line = serialize_topic_messages(
+                &mut read_tx,
+                key,
+                preflight.live_count,
+                &topic_tombstones,
+            )
+            .await?;
             read_tx.commit().await.map_err(|error| {
                 format!("Message push snapshot close failed for {topic_id}: {error}")
             })?;
@@ -1271,17 +1074,8 @@ impl PushExecutor {
                 )
                 .await?;
                 results.extend(chunk_results);
-                push_message_tombstone_chunk(
-                    client,
-                    http_url,
-                    sync_token,
-                    std::mem::take(&mut request_tombstones),
-                    &mut results,
-                )
-                .await?;
                 request_topics.clear();
             }
-            request_tombstones.extend(topic_tombstones);
             if request_body.is_empty() {
                 request_body = line;
             } else {
@@ -1298,14 +1092,6 @@ impl PushExecutor {
                 )
                 .await?;
                 results.extend(chunk_results);
-                push_message_tombstone_chunk(
-                    client,
-                    http_url,
-                    sync_token,
-                    std::mem::take(&mut request_tombstones),
-                    &mut results,
-                )
-                .await?;
                 request_topics.clear();
             }
         }
@@ -1315,20 +1101,10 @@ impl PushExecutor {
                 send_message_chunk(client, http_url, sync_token, request_body, &request_topics)
                     .await?;
             results.extend(chunk_results);
-            push_message_tombstone_chunk(
-                client,
-                http_url,
-                sync_token,
-                request_tombstones,
-                &mut results,
-            )
-            .await?;
         }
 
-        // Online WebSocket notifications are only a latency optimization. Tombstones are also
-        // replayed through the acknowledged HTTP endpoint so deletions made while disconnected
-        // converge on the next Phase 3 push. Tombstones are released with each 8 MiB request
-        // chunk rather than accumulating up to the 256 MiB attempt budget in resident memory.
+        // Online WebSocket notifications remain a latency optimization. The acknowledged Topic
+        // push carries the same tombstones, so deletions made while disconnected still converge.
         let ok_count = results.iter().filter(|r| r.success).count();
         log::info!(
             "[PushExecutor] Batch push completed: {}/{} topics",
@@ -1375,8 +1151,7 @@ mod tests {
     #[test]
     fn message_push_result_is_independent_of_local_attachment_binaries() {
         let expected = vec![topic("topic")];
-        let valid =
-            br#"{"topicId":"topic","ownerType":"agent","ownerId":"agent-a","success":true}"#;
+        let valid = br#"{"kind":"topic","topicId":"topic","ownerType":"agent","ownerId":"agent-a","ok":true}"#;
         let results = parse_message_push_results(valid, &expected).expect("metadata-only result");
         assert_eq!(results.len(), 1);
         assert!(results[0].success);
@@ -1386,10 +1161,11 @@ mod tests {
     fn failed_message_push_preserves_wire_error_and_rejects_legacy_strings() {
         let expected = vec![topic("topic")];
         let valid = serde_json::to_vec(&serde_json::json!({
+            "kind":"topic",
             "topicId":"topic",
             "ownerType":"agent",
             "ownerId":"agent-a",
-            "success":false,
+            "ok":false,
             "error":{
                 "code":"SYNC_OWNER_CONFLICT",
                 "origin":"desktop_cds",
@@ -1412,20 +1188,22 @@ mod tests {
         );
 
         let legacy = serde_json::to_vec(&serde_json::json!({
+            "kind":"topic",
             "topicId":"topic",
             "ownerType":"agent",
             "ownerId":"agent-a",
-            "success":false,
+            "ok":false,
             "error":"legacy"
         }))
         .expect("serialize legacy result");
         assert!(parse_message_push_results(&legacy, &expected).is_err());
 
         let contradictory = serde_json::to_vec(&serde_json::json!({
+            "kind":"topic",
             "topicId":"topic",
             "ownerType":"agent",
             "ownerId":"agent-a",
-            "success":true,
+            "ok":true,
             "error":{
                 "code":"SYNC_OWNER_CONFLICT",
                 "origin":"desktop_cds",
@@ -1521,7 +1299,7 @@ mod tests {
         let tombstones = load_message_tombstones(&mut read_tx, &key, 1)
             .await
             .expect("load tombstone");
-        assert_eq!(tombstones[0].key.msg_id, "message-deleted");
+        assert_eq!(tombstones[0].msg_id, "message-deleted");
         assert_eq!(tombstones[0].deleted_at, 1234);
         let first = load_outbound_message_page(&mut read_tx, &key, None)
             .await
@@ -1534,62 +1312,5 @@ mod tests {
             .expect("second page");
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].id, "message-100");
-    }
-
-    #[test]
-    fn tombstone_request_is_exactly_budgeted_and_response_identity_is_checked() {
-        let tombstone = MessageTombstone {
-            key: MessageKey::new(topic("topic-a"), "message-a"),
-            deleted_at: 1234,
-        };
-        let request = MessageTombstoneRequest {
-            owner_type: &tombstone.key.topic.owner_type,
-            owner_id: &tombstone.key.topic.owner_id,
-            topic_id: &tombstone.key.topic.topic_id,
-            msg_id: &tombstone.key.msg_id,
-            deleted_at: tombstone.deleted_at,
-        };
-        assert_eq!(
-            message_tombstone_body_len(&tombstone).expect("count body"),
-            serde_json::to_vec(&request).expect("serialize body").len()
-        );
-        validate_message_tombstone_response(
-            &serde_json::json!({
-                "success": true,
-                "ownerType": "agent",
-                "ownerId": "agent-a",
-                "topicId": "topic-a",
-                "msgId": "message-a"
-            }),
-            &tombstone,
-        )
-        .expect("matching identity");
-        assert!(validate_message_tombstone_response(
-            &serde_json::json!({
-                "success": true,
-                "ownerType": "agent",
-                "ownerId": "agent-a",
-                "topicId": "topic-b",
-                "msgId": "message-a"
-            }),
-            &tombstone,
-        )
-        .is_err());
-        for malformed in [
-            serde_json::json!({ "success": true, "msgId": "message-a" }),
-            serde_json::json!({ "success": true, "topicId": "topic-a" }),
-            serde_json::json!({
-                "success": true,
-                "topicId": 1,
-                "msgId": "message-a"
-            }),
-            serde_json::json!({
-                "success": true,
-                "topicId": "topic-a",
-                "msgId": 1
-            }),
-        ] {
-            assert!(validate_message_tombstone_response(&malformed, &tombstone).is_err());
-        }
     }
 }

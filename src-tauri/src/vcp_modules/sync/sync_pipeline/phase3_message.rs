@@ -1,3 +1,6 @@
+use crate::vcp_modules::sync_types::{
+    MessageDeletedState, MessageLiveState, MessageVersionState, OwnerType,
+};
 use crate::vcp_modules::topic_types::{OwnerKey, TopicKey};
 use futures_util::TryStreamExt;
 use sqlx::Row;
@@ -19,14 +22,8 @@ pub struct TargetedTopicHashState {
 
 #[derive(Debug)]
 pub struct TopicLocalState {
-    pub topic_hash: String,
+    pub content_hash: String,
     pub messages: HashMap<String, MessageVersionState>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MessageVersionState {
-    pub hash: String,
-    pub updated_at: i64,
 }
 
 #[derive(Default)]
@@ -103,21 +100,22 @@ impl Phase3Message {
                 let content_hash: String = row.try_get("content_hash").map_err(|error| {
                     format!("Targeted topic {topic_id} content hash decode failed: {error}")
                 })?;
-                let owner_type: String = row.try_get("owner_type").map_err(|error| {
+                let raw_owner_type: String = row.try_get("owner_type").map_err(|error| {
                     format!("Targeted topic {topic_id} owner type decode failed: {error}")
                 })?;
+                let owner_type = OwnerType::try_from(raw_owner_type.as_str())
+                    .map_err(|_| format!("Targeted topic {topic_id} has invalid owner identity"))?;
                 let owner_id: String = row.try_get("owner_id").map_err(|error| {
                     format!("Targeted topic {topic_id} owner id decode failed: {error}")
                 })?;
-                if !matches!(owner_type.as_str(), "agent" | "group")
-                    || owner_id.is_empty()
-                    || !owners.contains(&OwnerKey::new(&owner_type, &owner_id))
+                if owner_id.is_empty()
+                    || !owners.contains(&OwnerKey::new(owner_type.as_str(), &owner_id))
                 {
                     return Err(format!(
                         "Targeted topic {topic_id} has invalid owner identity"
                     ));
                 }
-                let key = TopicKey::new(owner_type, owner_id, &topic_id);
+                let key = TopicKey::new(owner_type.as_str(), owner_id, &topic_id);
                 if result
                     .insert(
                         key,
@@ -180,24 +178,26 @@ impl Phase3Message {
                 let topic_id: String = row
                     .try_get("topic_id")
                     .map_err(|error| format!("Topic hash id decode failed: {error}"))?;
-                let topic_hash: String = row.try_get("content_hash").map_err(|error| {
+                let content_hash: String = row.try_get("content_hash").map_err(|error| {
                     format!("Topic {topic_id} content hash decode failed: {error}")
                 })?;
-                let owner_type: String = row.try_get("owner_type").map_err(|error| {
+                let raw_owner_type: String = row.try_get("owner_type").map_err(|error| {
                     format!("Topic {topic_id} owner type decode failed: {error}")
                 })?;
+                let owner_type = OwnerType::try_from(raw_owner_type.as_str())
+                    .map_err(|_| format!("Topic {topic_id} has invalid owner identity"))?;
                 let owner_id: String = row
                     .try_get("owner_id")
                     .map_err(|error| format!("Topic {topic_id} owner id decode failed: {error}"))?;
-                if !matches!(owner_type.as_str(), "agent" | "group") || owner_id.is_empty() {
+                if owner_id.is_empty() {
                     return Err(format!("Topic {topic_id} has invalid owner identity"));
                 }
-                let key = TopicKey::new(owner_type, owner_id, &topic_id);
+                let key = TopicKey::new(owner_type.as_str(), owner_id, &topic_id);
                 if result
                     .insert(
                         key,
                         TopicLocalState {
-                            topic_hash,
+                            content_hash,
                             messages: HashMap::new(),
                         },
                     )
@@ -316,27 +316,26 @@ impl Phase3Message {
                 let state = result.get_mut(&key).ok_or_else(|| {
                     format!("Message hash query returned an unknown topic {topic_id}")
                 })?;
-                let (effective_hash, effective_updated_at) = if let Some(deleted_at) = deleted_at {
-                    ("DELETED".to_string(), deleted_at)
+                let (version, effective_updated_at) = if let Some(deleted_at) = deleted_at {
+                    (
+                        MessageVersionState::Deleted(MessageDeletedState { deleted_at }),
+                        deleted_at,
+                    )
                 } else {
-                    (hash, updated_at)
+                    (
+                        MessageVersionState::Live(MessageLiveState {
+                            message_hash: hash,
+                            updated_at,
+                        }),
+                        updated_at,
+                    )
                 };
                 if !(0..=(1_i64 << 53) - 1).contains(&effective_updated_at) {
                     return Err(format!(
                         "Message update time is invalid for {topic_id}/{msg_id}"
                     ));
                 }
-                if state
-                    .messages
-                    .insert(
-                        msg_id.clone(),
-                        MessageVersionState {
-                            hash: effective_hash,
-                            updated_at: effective_updated_at,
-                        },
-                    )
-                    .is_some()
-                {
+                if state.messages.insert(msg_id.clone(), version).is_some() {
                     return Err(format!(
                         "Message hash query returned duplicate message {msg_id} for {topic_id}"
                     ));
@@ -351,7 +350,8 @@ impl Phase3Message {
 #[cfg(test)]
 mod tests {
     use super::{
-        MessageVersionState, Phase3Message, Phase3StateBudget, MAX_PHASE3_MESSAGES_PER_TOPIC,
+        MessageDeletedState, MessageLiveState, MessageVersionState, Phase3Message,
+        Phase3StateBudget, MAX_PHASE3_MESSAGES_PER_TOPIC,
     };
     use crate::vcp_modules::topic_types::TopicKey;
 
@@ -437,17 +437,14 @@ mod tests {
             .expect("load message states");
         assert_eq!(
             states[&key].messages["live"],
-            MessageVersionState {
-                hash: "live-hash".to_string(),
+            MessageVersionState::Live(MessageLiveState {
+                message_hash: "live-hash".to_string(),
                 updated_at: 123,
-            }
+            })
         );
         assert_eq!(
             states[&key].messages["deleted"],
-            MessageVersionState {
-                hash: "DELETED".to_string(),
-                updated_at: 456,
-            }
+            MessageVersionState::Deleted(MessageDeletedState { deleted_at: 456 })
         );
     }
 }

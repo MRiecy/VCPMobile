@@ -5,7 +5,7 @@ use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::settings_manager::SettingsState;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
-use crate::vcp_modules::sync_types::SyncDataType;
+use crate::vcp_modules::sync_types::DeleteTarget;
 use crate::vcp_modules::topic_types::{MessageKey, Topic, TopicKey};
 use serde_json::{json, Value};
 use sqlx::Row;
@@ -227,11 +227,8 @@ pub async fn delete_topic(
 
     if let Some(sync_state) = app_handle.try_state::<SyncState>() {
         let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
-            data_type: SyncDataType::Topic,
-            id: topic_id,
+            target: DeleteTarget::Topic(key),
             deleted_at: now,
-            owner_type: Some(owner_type),
-            owner_id: Some(owner_id),
         });
     }
 

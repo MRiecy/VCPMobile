@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// =================================================================
 /// 智能体同步数据传输对象
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSyncDTO {
     pub name: String,
     pub system_prompt: String,
@@ -35,7 +35,7 @@ impl From<&AgentConfig> for AgentSyncDTO {
 
 /// 群组同步数据传输对象
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GroupSyncDTO {
     pub name: String,
     pub members: Vec<String>,
@@ -73,7 +73,7 @@ impl From<&GroupConfig> for GroupSyncDTO {
 
 /// Agent Topic 同步 DTO (包含 locked/unread)
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentTopicSyncDTO {
     pub id: String,
     pub name: String,
@@ -107,7 +107,7 @@ impl From<&Topic> for AgentTopicSyncDTO {
 
 /// Group Topic 同步 DTO (无 locked/unread)
 #[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GroupTopicSyncDTO {
     pub id: String,
     pub name: String,

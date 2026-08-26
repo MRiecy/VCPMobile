@@ -1,11 +1,16 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
+use crate::vcp_modules::sync_dto::{AgentTopicSyncDTO, GroupTopicSyncDTO};
 use crate::vcp_modules::sync_executor::{PullExecutor, PushExecutor};
 use crate::vcp_modules::sync_service::{emit_sync_log, SyncCommand, SyncTaskTracker};
-use crate::vcp_modules::sync_types::SyncDataType;
+use crate::vcp_modules::sync_types::{
+    is_valid_avatar_owner, AvatarManifestDecision, DeleteTarget, EntityPushData, EntityPushItem,
+    EntitySelector, ManifestAction, ManifestResultFrame, ManifestType, OwnerManifestDecision,
+    OwnerType, TopicManifestDecision,
+};
 use crate::vcp_modules::topic_types::{OwnerKey, TopicKey};
 use futures_util::StreamExt;
-use serde_json::{json, Value};
+use serde_json::json;
 use sqlx::Row;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
@@ -17,33 +22,16 @@ use tokio::sync::mpsc;
 pub struct DiffHandler;
 
 fn consume_manifest_response_type(
-    payload: &Value,
-    data_type: &SyncDataType,
-    current_phase: u8,
-    expected_manifest_types: &Mutex<HashSet<String>>,
+    manifest_type: ManifestType,
+    current_wave: u8,
+    expected_manifest_types: &Mutex<HashSet<ManifestType>>,
 ) -> Result<bool, String> {
-    let msg_phase = payload
-        .get("phase")
-        .and_then(Value::as_u64)
-        .and_then(|phase| u8::try_from(phase).ok())
-        .ok_or_else(|| "SYNC_DIFF_RESULTS.phase must be an integer".to_string())?;
-    let expected_wire_phase = match current_phase {
-        1 | 2 => 1,
-        3 => 2,
-        _ => current_phase,
-    };
-    if msg_phase != expected_wire_phase {
-        return Err(format!(
-            "SYNC_DIFF_RESULTS phase mismatch: expected {expected_wire_phase}, got {msg_phase}"
-        ));
-    }
-    let data_type_name = data_type.to_string();
     let mut remaining = expected_manifest_types
         .lock()
         .map_err(|_| "Expected manifest type set is poisoned".to_string())?;
-    if !remaining.remove(&data_type_name) {
+    if !remaining.remove(&manifest_type) {
         return Err(format!(
-            "SYNC_DIFF_RESULTS contains duplicate or unexpected dataType {data_type_name} for phase {current_phase}"
+            "SYNC_MANIFEST_RESULT contains duplicate or unexpected manifestType {manifest_type} for wave {current_wave}"
         ));
     }
     Ok(remaining.is_empty())
@@ -58,94 +46,140 @@ fn next_manifest_command(current_phase: u8, attempt_id: u64) -> Option<SyncComma
     }
 }
 
-fn parse_delete_timestamp(item: &Value, id: &str, action: &str) -> Result<Option<i64>, String> {
-    if !matches!(action, "DELETE" | "PUSH_DELETE") {
-        return Ok(None);
-    }
-    item.get("deletedAt")
-        .and_then(Value::as_i64)
-        .filter(|deleted_at| *deleted_at >= 0)
-        .map(Some)
-        .ok_or_else(|| {
-            format!(
-                "SYNC_DIFF_RESULTS item {id} delete action requires a non-negative integer deletedAt"
-            )
-        })
+#[derive(Debug, Clone)]
+enum ManifestDecision {
+    Owner(OwnerManifestDecision),
+    Topic(TopicManifestDecision),
+    Avatar(AvatarManifestDecision),
 }
 
-/// 校验 SYNC_DIFF_RESULTS 条目。
-fn validate_diff_items(items: &[Value], data_type: &SyncDataType) -> Result<Vec<Value>, String> {
-    let mut seen_ids = HashSet::new();
-    let mut seen_owners = HashSet::new();
-    let mut seen_topics = HashSet::new();
-    let mut validated = Vec::with_capacity(items.len());
-    for item in items {
-        let id = item
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| "SYNC_DIFF_RESULTS item requires a non-empty id".to_string())?;
-        let action = item
-            .get("action")
-            .and_then(Value::as_str)
-            .filter(|action| matches!(*action, "PULL" | "PUSH" | "DELETE" | "PUSH_DELETE" | "SKIP"))
-            .ok_or_else(|| format!("SYNC_DIFF_RESULTS item {id} has an invalid action"))?;
-        parse_delete_timestamp(item, id, action)?;
-        if item.get("mismatchedContent").is_some()
-            && item
-                .get("mismatchedContent")
-                .and_then(Value::as_bool)
-                .is_none()
-        {
+impl ManifestDecision {
+    fn action(&self) -> ManifestAction {
+        match self {
+            ManifestDecision::Owner(item) => item.action,
+            ManifestDecision::Topic(item) => item.action,
+            ManifestDecision::Avatar(item) => item.action,
+        }
+    }
+
+    fn id(&self) -> &str {
+        match self {
+            ManifestDecision::Owner(item) => &item.owner_id,
+            ManifestDecision::Topic(item) => &item.topic_id,
+            ManifestDecision::Avatar(item) => &item.owner_id,
+        }
+    }
+
+    fn deleted_at(&self) -> Option<i64> {
+        match self {
+            ManifestDecision::Owner(item) => item.deleted_at,
+            ManifestDecision::Topic(item) => item.deleted_at,
+            ManifestDecision::Avatar(item) => item.deleted_at,
+        }
+    }
+
+    fn delete_target(&self) -> DeleteTarget {
+        match self {
+            ManifestDecision::Owner(item) => DeleteTarget::Owner {
+                owner_type: item.owner_type,
+                owner_id: item.owner_id.clone(),
+            },
+            ManifestDecision::Topic(item) => DeleteTarget::Topic(TopicKey::new(
+                item.owner_type.as_str(),
+                &item.owner_id,
+                &item.topic_id,
+            )),
+            ManifestDecision::Avatar(item) => DeleteTarget::Avatar {
+                owner_type: item.owner_type,
+                owner_id: item.owner_id.clone(),
+            },
+        }
+    }
+}
+
+fn validate_decision_timestamp(item: &ManifestDecision) -> Result<(), String> {
+    let action = item.action();
+    let deleted_at = item.deleted_at();
+    if action.is_delete() {
+        if deleted_at.is_none_or(|value| value < 0) {
             return Err(format!(
-                "SYNC_DIFF_RESULTS item {id} mismatchedContent must be boolean"
+                "SYNC_MANIFEST_RESULT {} {} requires a non-negative deletedAt",
+                action,
+                item.id()
             ));
         }
-        if *data_type == SyncDataType::Owner {
-            let owner_type = item
-                .get("ownerType")
-                .and_then(Value::as_str)
-                .filter(|owner_type| matches!(*owner_type, "agent" | "group"))
-                .ok_or_else(|| {
-                    format!("SYNC_DIFF_RESULTS owner {id} requires agent/group ownerType")
-                })?;
-            if !seen_owners.insert(OwnerKey::new(owner_type, id)) {
-                return Err(format!(
-                    "SYNC_DIFF_RESULTS contains duplicate owner identity {owner_type}/{id}"
-                ));
-            }
-        } else if *data_type == SyncDataType::Topic {
-            let owner_type = item
-                .get("ownerType")
-                .and_then(Value::as_str)
-                .filter(|owner_type| matches!(*owner_type, "agent" | "group"))
-                .ok_or_else(|| {
-                    format!("SYNC_DIFF_RESULTS topic {id} requires agent/group ownerType")
-                })?;
-            let owner_id = item
-                .get("ownerId")
-                .and_then(Value::as_str)
-                .filter(|owner_id| !owner_id.is_empty())
-                .ok_or_else(|| format!("SYNC_DIFF_RESULTS topic {id} {action} requires ownerId"))?;
-            if !seen_topics.insert(TopicKey::new(owner_type, owner_id, id)) {
-                return Err(format!(
-                    "SYNC_DIFF_RESULTS contains duplicate topic identity {owner_type}/{owner_id}/{id}"
-                ));
-            }
-        } else if !seen_ids.insert(id) {
-            return Err(format!("SYNC_DIFF_RESULTS contains duplicate id {id}"));
-        }
-        validated.push(item.clone());
+    } else if deleted_at.is_some() {
+        return Err(format!(
+            "SYNC_MANIFEST_RESULT {} {} must not carry deletedAt",
+            action,
+            item.id()
+        ));
     }
-    Ok(validated)
+    Ok(())
+}
+
+fn validate_manifest_result(
+    result: ManifestResultFrame,
+) -> Result<(ManifestType, Vec<ManifestDecision>), String> {
+    let manifest_type = result.manifest_type();
+    let decisions = match result {
+        ManifestResultFrame::Owner { results, .. } => results
+            .into_iter()
+            .map(ManifestDecision::Owner)
+            .collect::<Vec<_>>(),
+        ManifestResultFrame::Topic { results, .. } => results
+            .into_iter()
+            .map(ManifestDecision::Topic)
+            .collect::<Vec<_>>(),
+        ManifestResultFrame::Avatar { results, .. } => results
+            .into_iter()
+            .map(ManifestDecision::Avatar)
+            .collect::<Vec<_>>(),
+    };
+
+    let mut seen = HashSet::new();
+    for decision in &decisions {
+        if decision.id().is_empty() {
+            return Err("SYNC_MANIFEST_RESULT contains an empty identity".to_string());
+        }
+        validate_decision_timestamp(decision)?;
+        let identity = match decision {
+            ManifestDecision::Owner(item) => {
+                if item.content_hash_mismatch && item.action.is_delete() {
+                    return Err(format!(
+                        "Owner {} delete decision must not report contentHashMismatch",
+                        item.owner_id
+                    ));
+                }
+                format!("{}\0{}", item.owner_type, item.owner_id)
+            }
+            ManifestDecision::Topic(item) => {
+                if item.owner_id.is_empty() || item.topic_id.is_empty() {
+                    return Err("SYNC_MANIFEST_RESULT contains an invalid topic identity".into());
+                }
+                format!("{}\0{}\0{}", item.owner_type, item.owner_id, item.topic_id)
+            }
+            ManifestDecision::Avatar(item) => {
+                if !is_valid_avatar_owner(item.owner_type.as_str(), &item.owner_id) {
+                    return Err("SYNC_MANIFEST_RESULT contains an invalid avatar identity".into());
+                }
+                format!("{}\0{}", item.owner_type, item.owner_id)
+            }
+        };
+        if !seen.insert(identity) {
+            return Err(format!(
+                "SYNC_MANIFEST_RESULT contains a duplicate {manifest_type} identity"
+            ));
+        }
+    }
+    Ok((manifest_type, decisions))
 }
 
 impl DiffHandler {
     #[allow(clippy::too_many_arguments)]
     pub async fn handle_diff(
         app_handle: &AppHandle,
-        payload: &Value,
-        data_type: SyncDataType,
+        result: ManifestResultFrame,
         http_client: &reqwest::Client,
         base_url: &str,
         token: &str,
@@ -154,7 +188,7 @@ impl DiffHandler {
         total_tasks: &Arc<AtomicU32>,
         manifest_responses_received: &Arc<AtomicU32>,
         expected_manifest_count: &Arc<AtomicU32>,
-        expected_manifest_types: &Arc<Mutex<HashSet<String>>>,
+        expected_manifest_types: &Arc<Mutex<HashSet<ManifestType>>>,
         manifest_phase: &Arc<AtomicU8>,
         tx_internal: &mpsc::UnboundedSender<SyncCommand>,
         changed_owners: &Arc<tokio::sync::Mutex<HashSet<OwnerKey>>>,
@@ -162,38 +196,30 @@ impl DiffHandler {
         session_id: u64,
         attempt_id: u64,
     ) -> Result<(), String> {
-        let items = payload
-            .get("data")
-            .and_then(Value::as_array)
-            .ok_or_else(|| "SYNC_DIFF_RESULTS.data must be an array".to_string())?;
-        let items_clone = validate_diff_items(items, &data_type)?;
+        let (manifest_type, decisions) = validate_manifest_result(result)?;
 
         let current_phase = manifest_phase.load(Ordering::SeqCst);
-        let all_manifest_types_received = consume_manifest_response_type(
-            payload,
-            &data_type,
-            current_phase,
-            expected_manifest_types,
-        )?;
+        let all_manifest_types_received =
+            consume_manifest_response_type(manifest_type, current_phase, expected_manifest_types)?;
 
         {
             // 统计有效操作数（排除 SKIP）
-            let pull_count = items_clone.iter().filter(|i| i["action"] == "PULL").count() as u32;
-            let push_count = items_clone.iter().filter(|i| i["action"] == "PUSH").count() as u32;
-            let delete_count = items_clone
-                .iter()
-                .filter(|i| i["action"] == "DELETE")
-                .count() as u32;
-            let push_delete_count = items_clone
-                .iter()
-                .filter(|i| i["action"] == "PUSH_DELETE")
-                .count() as u32;
-            let total_ops = pull_count + push_count + delete_count + push_delete_count;
+            let count_action = |expected| {
+                decisions
+                    .iter()
+                    .filter(|item| item.action() == expected)
+                    .count() as u32
+            };
+            let pull_count = count_action(ManifestAction::Pull);
+            let push_count = count_action(ManifestAction::Push);
+            let pull_delete_count = count_action(ManifestAction::PullDelete);
+            let push_delete_count = count_action(ManifestAction::PushDelete);
+            let total_ops = pull_count + push_count + pull_delete_count + push_delete_count;
 
             if total_ops > 0 {
                 let msg = format!(
-                    "[{}] Diff: pull={} push={} delete={} push_delete={}",
-                    data_type, pull_count, push_count, delete_count, push_delete_count
+                    "[{}] Diff: pull={} push={} pull_delete={} push_delete={}",
+                    manifest_type, pull_count, push_count, pull_delete_count, push_delete_count
                 );
                 emit_sync_log(app_handle, "info", &msg);
             }
@@ -204,16 +230,16 @@ impl DiffHandler {
             let expected = expected_manifest_count.load(Ordering::SeqCst);
             if received > expected {
                 return Err(format!(
-                    "SYNC_DIFF_RESULTS response count exceeds phase {current_phase} expectation"
+                    "SYNC_MANIFEST_RESULT response count exceeds wave {current_phase} expectation"
                 ));
             }
 
             if all_manifest_types_received && received == expected {
                 let current_pending = pending_tasks.load(Ordering::SeqCst);
                 log::info!(
-                    "[SyncService] All manifests received for Phase {}: dataType={}, pending={}",
+                    "[SyncService] All manifests received for wave {}: manifestType={}, pending={}",
                     current_phase,
-                    data_type,
+                    manifest_type,
                     current_pending
                 );
 
@@ -229,55 +255,53 @@ impl DiffHandler {
             let mut push_topics_to_fetch = Vec::new();
             let mut other_items = Vec::new();
 
-            for item in items_clone {
-                let id = item["id"].as_str().unwrap_or_default().to_string();
-                let action = item["action"].as_str().unwrap_or_default().to_string();
+            for item in decisions {
+                let action = item.action();
 
-                // V2: Populate changed_owners for Phase 2 Topic Sync
-                if data_type == SyncDataType::Owner {
-                    let is_mismatched = item["mismatchedContent"].as_bool().unwrap_or(false);
-                    if action == "PUSH" || action == "PULL" || is_mismatched {
+                if let ManifestDecision::Owner(owner) = &item {
+                    let is_mismatched = owner.content_hash_mismatch;
+                    if matches!(action, ManifestAction::Push | ManifestAction::Pull)
+                        || is_mismatched
+                    {
                         let mut owners = changed_owners.lock().await;
-                        let owner_type = item["ownerType"].as_str().unwrap_or_default();
-                        owners.insert(OwnerKey::new(owner_type, &id));
+                        owners.insert(OwnerKey::new(owner.owner_type.as_str(), &owner.owner_id));
                     }
                 }
 
-                if action == "SKIP" {
+                if action == ManifestAction::Skip {
                     continue;
                 }
 
-                if action == "PULL"
-                    && (data_type == SyncDataType::Topic || data_type == SyncDataType::Owner)
-                {
-                    let type_str = match data_type {
-                        SyncDataType::Topic => {
-                            if item["ownerType"] == "group" {
-                                "group_topic"
-                            } else {
-                                "agent_topic"
-                            }
+                if action == ManifestAction::Pull {
+                    match &item {
+                        ManifestDecision::Topic(topic) => {
+                            let key = TopicKey::new(
+                                topic.owner_type.as_str(),
+                                &topic.owner_id,
+                                &topic.topic_id,
+                            );
+                            batch_pull_requests.push(EntitySelector::topic(&key)?);
+                            continue;
                         }
-                        SyncDataType::Owner => item["ownerType"].as_str().unwrap_or_default(),
-                        _ => unreachable!(),
-                    };
-                    if data_type == SyncDataType::Topic {
-                        batch_pull_requests.push(json!({
-                            "id": id,
-                            "type": type_str,
-                            "ownerType": item["ownerType"],
-                            "ownerId": item["ownerId"],
-                        }));
-                    } else {
-                        batch_pull_requests.push(json!({ "id": id, "type": type_str }));
+                        ManifestDecision::Owner(owner) => {
+                            batch_pull_requests
+                                .push(EntitySelector::owner(owner.owner_type, &owner.owner_id));
+                            continue;
+                        }
+                        ManifestDecision::Avatar(_) => {}
                     }
-                } else if action == "PUSH" && data_type == SyncDataType::Topic {
-                    let owner_id = item["ownerId"].as_str().unwrap_or_default().to_string();
-                    let owner_type = item["ownerType"].as_str().unwrap_or_default().to_string();
-                    push_topics_to_fetch.push(TopicKey::new(owner_type, owner_id, id));
-                } else {
-                    other_items.push(item);
                 }
+                if action == ManifestAction::Push {
+                    if let ManifestDecision::Topic(topic) = &item {
+                        push_topics_to_fetch.push(TopicKey::new(
+                            topic.owner_type.as_str(),
+                            &topic.owner_id,
+                            &topic.topic_id,
+                        ));
+                        continue;
+                    }
+                }
+                other_items.push(item);
             }
 
             // 派发任务
@@ -293,24 +317,24 @@ impl DiffHandler {
                 let manifest_received_in = manifest_responses_received.clone();
                 let manifest_expected_in = expected_manifest_count.clone();
                 let manifest_phase_in = manifest_phase.clone();
-                let data_type_inner = data_type.clone();
+                let manifest_type_inner = manifest_type;
                 let attempt_id_inner = attempt_id;
 
                 task_tracker
                     .spawn(async move {
-                        let chunk_size = match data_type_inner {
-                            SyncDataType::Owner => 50,
-                            SyncDataType::Topic => 1000,
+                        let chunk_size = match manifest_type_inner {
+                            ManifestType::Owner => 50,
+                            ManifestType::Topic => 1000,
                             _ => 100,
                         };
                         for chunk in batch_pull_requests.chunks(chunk_size) {
                             let sub_batch = chunk.to_vec();
                             let sub_count = sub_batch.len() as u32;
-                            let failed_topic_ids = if data_type_inner == SyncDataType::Topic {
+                            let failed_topic_ids = if manifest_type_inner == ManifestType::Topic {
                                 sub_batch
                                     .iter()
-                                    .filter_map(|item| item.get("id").and_then(Value::as_str))
-                                    .map(str::to_string)
+                                    .filter_map(EntitySelector::topic_id)
+                                    .map(str::to_owned)
                                     .take(8)
                                     .collect()
                             } else {
@@ -458,24 +482,34 @@ impl DiffHandler {
                                     db_owner_id
                                 );
 
-                                let type_str = if key.owner_type == "group" {
-                                    "group_topic"
+                                let item = if key.owner_type == "group" {
+                                    EntityPushItem::Topic {
+                                        owner_type: OwnerType::Group,
+                                        owner_id: key.owner_id.clone(),
+                                        topic_id: id.clone(),
+                                        data: EntityPushData::GroupTopic(GroupTopicSyncDTO {
+                                            id: tid,
+                                            name: title,
+                                            created_at,
+                                            owner_id: db_owner_id,
+                                        }),
+                                    }
                                 } else {
-                                    "agent_topic"
+                                    EntityPushItem::Topic {
+                                        owner_type: OwnerType::Agent,
+                                        owner_id: key.owner_id.clone(),
+                                        topic_id: id.clone(),
+                                        data: EntityPushData::AgentTopic(AgentTopicSyncDTO {
+                                            id: tid,
+                                            name: title,
+                                            created_at,
+                                            locked: locked != 0,
+                                            unread: unread != 0,
+                                            owner_id: db_owner_id,
+                                        }),
+                                    }
                                 };
-                                let dto = if key.owner_type == "group" {
-                                    json!({ "id": tid, "name": title, "createdAt": created_at, "ownerId": db_owner_id })
-                                } else {
-                                    json!({ "id": tid, "name": title, "createdAt": created_at, "locked": locked != 0, "unread": unread != 0, "ownerId": db_owner_id })
-                                };
-                                batch_push_requests
-                                    .push(json!({
-                                        "id": id,
-                                        "type": type_str,
-                                        "ownerType": key.owner_type,
-                                        "ownerId": key.owner_id,
-                                        "data": dto,
-                                    }));
+                                batch_push_requests.push(item);
                             }
                             Ok(None) => {
                                 log::warn!("[SyncDebug] Topic NOT FOUND in database: {}", id);
@@ -511,8 +545,7 @@ impl DiffHandler {
                         let sub_count = sub_batch.len() as u32;
                         let failed_topic_ids = sub_batch
                             .iter()
-                            .filter_map(|item| item.get("id").and_then(Value::as_str))
-                            .map(str::to_string)
+                            .filter_map(|item| item.selector().topic_id().map(str::to_owned))
                             .take(8)
                             .collect::<Vec<_>>();
                         log::debug!(
@@ -577,20 +610,20 @@ impl DiffHandler {
                 let manifest_received_in = manifest_responses_received.clone();
                 let manifest_expected_in = expected_manifest_count.clone();
                 let manifest_phase_in = manifest_phase.clone();
-                let data_type_base = data_type.clone();
+                let manifest_type_base = manifest_type;
                 let attempt_id_inner = attempt_id;
 
                 task_tracker.spawn(async move {
                     futures_util::stream::iter(other_items)
                         .for_each_concurrent(15, |item| {
-                            let action = item["action"].as_str().unwrap_or_default().to_string();
-                            let id = item["id"].as_str().unwrap_or_default().to_string();
-                            let deleted_at = item.get("deletedAt").and_then(Value::as_i64);
+                            let id = item.id().to_string();
+                            let action = item.action();
+                            let deleted_at = item.deleted_at();
                             let h_task = h_in.clone();
                             let c_task = c_in.clone();
                             let b_task = b_in.clone();
                             let token_task = token.clone();
-                            let data_type_task = data_type_base.clone();
+                            let manifest_type_task = manifest_type_base;
                             let wq_task = wq_in.clone();
                             let pending_task = pending.clone();
                             let total_tasks_task = total_tasks_in.clone();
@@ -601,206 +634,182 @@ impl DiffHandler {
                             let attempt_id_task = attempt_id_inner;
 
                             async move {
-                                let concrete_data_type = if data_type_task == SyncDataType::Owner {
-                                    match item.get("ownerType").and_then(Value::as_str) {
-                                        Some("agent") => SyncDataType::Agent,
-                                        Some("group") => SyncDataType::Group,
-                                        _ => SyncDataType::Owner,
-                                    }
-                                } else {
-                                    data_type_task.clone()
-                                };
-                                let operation_result: Result<(), String> = if action == "PULL" {
-                                    match &concrete_data_type {
-                                        SyncDataType::Avatar => {
-                                            let parts: Vec<&str> = id.split(':').collect();
-                                            if parts.len() != 2 {
-                                                Err(format!("invalid avatar id: {id}"))
-                                            } else {
-                                                PullExecutor::pull_avatar(
-                                                    &h_task,
-                                                    &c_task,
-                                                    &b_task,
-                                                    &token_task,
-                                                    parts[0],
-                                                    parts[1],
-                                                    &wq_task,
-                                                )
-                                                .await
-                                            }
-                                        }
-                                        _ => Err(format!(
-                                            "unsupported PULL data type: {:?}",
-                                            data_type_task
-                                        )),
-                                    }
-                                } else if action == "PUSH" {
-                                    match &concrete_data_type {
-                                        SyncDataType::Agent => {
-                                            PushExecutor::push_agent(
-                                                &h_task, &c_task, &b_task, &token_task, &id,
+                                let operation_result: Result<(), String> = async {
+                                    match (action, &item) {
+                                        (
+                                            ManifestAction::Pull,
+                                            ManifestDecision::Avatar(avatar),
+                                        ) => {
+                                            PullExecutor::pull_avatar(
+                                                &h_task,
+                                                &c_task,
+                                                &b_task,
+                                                &token_task,
+                                                avatar.owner_type.as_str(),
+                                                &avatar.owner_id,
+                                                &wq_task,
                                             )
                                             .await
                                         }
-                                        SyncDataType::Group => {
-                                            PushExecutor::push_group(
-                                                &h_task, &c_task, &b_task, &token_task, &id,
-                                            )
-                                            .await
-                                        }
-                                        SyncDataType::Avatar => {
-                                            let parts: Vec<&str> = id.split(':').collect();
-                                            if parts.len() != 2 {
-                                                Err(format!("invalid avatar id: {id}"))
-                                            } else {
-                                                PushExecutor::push_avatar(
-                                                    &h_task,
-                                                    &c_task,
-                                                    &b_task,
-                                                    &token_task,
-                                                    parts[0],
-                                                    parts[1],
-                                                )
-                                                .await
-                                            }
-                                        }
-                                        _ => Err(format!(
-                                            "unsupported PUSH data type: {:?}",
-                                            data_type_task
-                                        )),
-                                    }
-                                } else if action == "DELETE" || action == "PUSH_DELETE" {
-                                    use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
-                                    let delete_result = match deleted_at {
-                                        Some(deleted_at) if deleted_at >= 0 => match &concrete_data_type {
-                                            SyncDataType::Agent => {
-                                                DeleteExecutor::soft_delete_agent(
-                                                    &h_task,
-                                                    &id,
-                                                    deleted_at,
-                                                )
-                                                .await
-                                            }
-                                            SyncDataType::Group => {
-                                                DeleteExecutor::soft_delete_group(
-                                                    &h_task,
-                                                    &id,
-                                                    deleted_at,
-                                                )
-                                                .await
-                                            }
-                                            SyncDataType::Avatar => {
-                                                let parts: Vec<&str> = id.split(':').collect();
-                                                if parts.len() != 2 {
-                                                    Err(format!("invalid avatar id: {id}"))
-                                                } else {
-                                                    DeleteExecutor::soft_delete_avatar(
+                                        (
+                                            ManifestAction::Push,
+                                            ManifestDecision::Owner(owner),
+                                        ) => {
+                                            match owner.owner_type {
+                                                OwnerType::Agent => {
+                                                    PushExecutor::push_agent(
                                                         &h_task,
-                                                        parts[0],
-                                                        parts[1],
-                                                        deleted_at,
+                                                        &c_task,
+                                                        &b_task,
+                                                        &token_task,
+                                                        &owner.owner_id,
+                                                    )
+                                                    .await
+                                                }
+                                                OwnerType::Group => {
+                                                    PushExecutor::push_group(
+                                                        &h_task,
+                                                        &c_task,
+                                                        &b_task,
+                                                        &token_task,
+                                                        &owner.owner_id,
                                                     )
                                                     .await
                                                 }
                                             }
-                                            SyncDataType::Topic => {
-                                                match (
-                                                    item.get("ownerType").and_then(Value::as_str),
-                                                    item.get("ownerId").and_then(Value::as_str),
-                                                ) {
-                                                    (Some(owner_type), Some(owner_id)) => {
-                                                        let topic_key = TopicKey::new(owner_type, owner_id, &id);
-                                                        DeleteExecutor::soft_delete_topic(
-                                                            &h_task,
-                                                            &topic_key,
-                                                            deleted_at,
-                                                        ).await
-                                                    }
-                                                    _ => Err(format!(
-                                                        "Topic delete {id} is missing owner identity"
-                                                    )),
+                                        }
+                                        (
+                                            ManifestAction::Push,
+                                            ManifestDecision::Avatar(avatar),
+                                        ) => {
+                                            PushExecutor::push_avatar(
+                                                &h_task,
+                                                &c_task,
+                                                &b_task,
+                                                &token_task,
+                                                avatar.owner_type.as_str(),
+                                                &avatar.owner_id,
+                                            )
+                                            .await
+                                        }
+                                        (
+                                            ManifestAction::PullDelete
+                                            | ManifestAction::PushDelete,
+                                            _,
+                                        ) => {
+                                            use crate::vcp_modules::sync_executor::delete_executor::DeleteExecutor;
+
+                                            let deleted_at = deleted_at.ok_or_else(|| {
+                                                format!(
+                                                    "{action} action for {id} is missing a valid deletedAt"
+                                                )
+                                            })?;
+                                            let target = item.delete_target();
+                                            match &target {
+                                                DeleteTarget::Owner {
+                                                    owner_type: OwnerType::Agent,
+                                                    owner_id,
+                                                } => {
+                                                    DeleteExecutor::soft_delete_agent(
+                                                        &h_task,
+                                                        owner_id,
+                                                        deleted_at,
+                                                    )
+                                                    .await?;
+                                                }
+                                                DeleteTarget::Owner {
+                                                    owner_type: OwnerType::Group,
+                                                    owner_id,
+                                                } => {
+                                                    DeleteExecutor::soft_delete_group(
+                                                        &h_task,
+                                                        owner_id,
+                                                        deleted_at,
+                                                    )
+                                                    .await?;
+                                                }
+                                                DeleteTarget::Topic(key) => {
+                                                    DeleteExecutor::soft_delete_topic(
+                                                        &h_task,
+                                                        key,
+                                                        deleted_at,
+                                                    )
+                                                    .await?;
+                                                }
+                                                DeleteTarget::Avatar {
+                                                    owner_type,
+                                                    owner_id,
+                                                } => {
+                                                    DeleteExecutor::soft_delete_avatar(
+                                                        &h_task,
+                                                        owner_type.as_str(),
+                                                        owner_id,
+                                                        deleted_at,
+                                                    )
+                                                    .await?;
+                                                }
+                                                DeleteTarget::Message(_) => {
+                                                    return Err(
+                                                        "Manifest cannot contain message deletion"
+                                                            .to_string(),
+                                                    );
                                                 }
                                             }
-                                            _ => Err(format!(
-                                                "unsupported DELETE data type: {:?}",
-                                                data_type_task
-                                            )),
-                                        },
-                                        _ => Err(format!(
-                                            "DELETE action for {id} is missing a valid deletedAt"
-                                        )),
-                                    };
-                                    if delete_result.is_ok() && action == "PUSH_DELETE" {
-                                        match deleted_at {
-                                            Some(deleted_at) => tx_internal_task
-                                                .send(SyncCommand::NotifyDelete {
-                                                    data_type: concrete_data_type.clone(),
-                                                    id: id.clone(),
-                                                    deleted_at,
-                                                    owner_type: if concrete_data_type == SyncDataType::Topic {
-                                                        item.get("ownerType")
-                                                            .and_then(Value::as_str)
-                                                            .map(str::to_string)
-                                                    } else {
-                                                        None
-                                                    },
-                                                    owner_id: if concrete_data_type == SyncDataType::Topic {
-                                                        item.get("ownerId")
-                                                            .and_then(Value::as_str)
-                                                            .map(str::to_string)
-                                                    } else {
-                                                        None
-                                                    },
-                                                })
-                                                .map_err(|error| error.to_string()),
-                                            None => Err(format!(
-                                                "PUSH_DELETE action for {id} is missing deletedAt"
-                                            )),
+                                            if action == ManifestAction::PushDelete {
+                                                tx_internal_task
+                                                    .send(SyncCommand::NotifyDelete {
+                                                        target,
+                                                        deleted_at,
+                                                    })
+                                                    .map_err(|error| error.to_string())?;
+                                            }
+                                            Ok(())
                                         }
-                                    } else {
-                                        delete_result
+                                        _ => Err(format!(
+                                            "unsupported {action} action for {manifest_type_task}"
+                                        )),
                                     }
-                                } else {
-                                    Err(format!("unsupported sync action: {action}"))
-                                };
+                                }
+                                .await;
 
                                 match operation_result {
                                     Ok(()) => {
-                                    pending_task.fetch_sub(1, Ordering::SeqCst);
-                                    let current_pending = pending_task.load(Ordering::SeqCst);
-                                    let total = total_tasks_task.load(Ordering::SeqCst);
-                                    let done = total.saturating_sub(current_pending);
-                                    let _ = h_task.emit(
-                                        "vcp-sync-progress",
-                                        json!({
-                                            "sessionId": session_id,
-                                            "phase": if manifest_phase_task.load(Ordering::SeqCst) <= 2 {
-                                                "owner_metadata"
-                                            } else {
-                                                "topic_metadata"
-                                            },
-                                            "total": total,
-                                            "completed": done,
-                                        }),
-                                    );
-                                    if current_pending == 0
-                                        && manifest_received_task.load(Ordering::SeqCst)
-                                            == manifest_expected_task.load(Ordering::SeqCst)
-                                    {
-                                        let phase = manifest_phase_task.load(Ordering::SeqCst);
-                                        if let Some(command) =
-                                            next_manifest_command(phase, attempt_id_task)
+                                        pending_task.fetch_sub(1, Ordering::SeqCst);
+                                        let current_pending = pending_task.load(Ordering::SeqCst);
+                                        let total = total_tasks_task.load(Ordering::SeqCst);
+                                        let done = total.saturating_sub(current_pending);
+                                        let _ = h_task.emit(
+                                            "vcp-sync-progress",
+                                            json!({
+                                                "sessionId": session_id,
+                                                "phase": if manifest_phase_task.load(Ordering::SeqCst) <= 2 {
+                                                    "owner_metadata"
+                                                } else {
+                                                    "topic_metadata"
+                                                },
+                                                "total": total,
+                                                "completed": done,
+                                            }),
+                                        );
+                                        if current_pending == 0
+                                            && manifest_received_task.load(Ordering::SeqCst)
+                                                == manifest_expected_task.load(Ordering::SeqCst)
                                         {
-                                            let _ = tx_internal_task.send(command);
+                                            let phase = manifest_phase_task.load(Ordering::SeqCst);
+                                            if let Some(command) =
+                                                next_manifest_command(phase, attempt_id_task)
+                                            {
+                                                let _ = tx_internal_task.send(command);
+                                            }
                                         }
                                     }
-                                    }
                                     Err(error) => {
-                                        let failed_topic_ids = if data_type_task == SyncDataType::Topic {
-                                            vec![id.clone()]
-                                        } else {
-                                            Vec::new()
-                                        };
+                                        let failed_topic_ids =
+                                            if manifest_type_task == ManifestType::Topic {
+                                                vec![id.clone()]
+                                            } else {
+                                                Vec::new()
+                                            };
                                         let _ = tx_internal_task.send(SyncCommand::FailAttemptDetailed {
                                             attempt_id: attempt_id_task,
                                             code: "ENTITY_OPERATION_FAILED".to_string(),
@@ -823,119 +832,43 @@ impl DiffHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        consume_manifest_response_type, next_manifest_command, parse_delete_timestamp,
-        validate_diff_items,
-    };
+    use super::{consume_manifest_response_type, next_manifest_command, validate_manifest_result};
     use crate::vcp_modules::sync_service::SyncCommand;
-    use crate::vcp_modules::sync_types::SyncDataType;
+    use crate::vcp_modules::sync_types::{ManifestResultFrame, ManifestType};
     use serde_json::json;
     use std::collections::HashSet;
     use std::sync::Mutex;
 
     #[test]
-    fn default_topics_use_the_full_owner_identity() {
-        let items = json!([
-            {"id": "default", "action": "PULL", "ownerType": "agent", "ownerId": "agent-a"},
-            {"id": "default", "action": "PULL", "ownerType": "agent", "ownerId": "agent-b"},
-            {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-a"},
-        ]);
-        let validated = validate_diff_items(items.as_array().unwrap(), &SyncDataType::Topic)
-            .expect("cross-owner default topics must be dispatched independently");
-        assert_eq!(validated.len(), 3);
+    fn typed_topic_results_use_the_full_identity_and_reject_duplicates() {
+        let result = |owners: &[&str]| {
+            serde_json::from_value::<ManifestResultFrame>(json!({
+                "type": "SYNC_MANIFEST_RESULT",
+                "manifestType": "topic",
+                "results": owners.iter().map(|owner_id| json!({
+                    "ownerType": "agent",
+                    "ownerId": owner_id,
+                    "topicId": "default",
+                    "action": "PULL"
+                })).collect::<Vec<_>>()
+            }))
+            .expect("valid topic result frame")
+        };
+        let (_, items) = validate_manifest_result(result(&["agent-a", "agent-b"]))
+            .expect("same topic id under different owners is valid");
+        assert_eq!(items.len(), 2);
+
+        assert!(validate_manifest_result(result(&["agent-a", "agent-a"])).is_err());
     }
 
     #[test]
-    fn topic_diff_uses_the_full_owner_identity_for_duplicates() {
-        let items = json!([
-            {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-a"},
-            {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-b"},
-        ]);
-        assert_eq!(
-            validate_diff_items(items.as_array().unwrap(), &SyncDataType::Topic)
-                .expect("same topic id under different owners is valid")
-                .len(),
-            2
-        );
-
-        let duplicate = json!([
-            {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-a"},
-            {"id": "topic-1", "action": "PULL", "ownerType": "agent", "ownerId": "agent-a"},
-        ]);
-        let error = validate_diff_items(duplicate.as_array().unwrap(), &SyncDataType::Topic)
-            .expect_err("duplicate compound identity must fail");
-        assert!(error.contains("duplicate topic identity"));
-    }
-
-    #[test]
-    fn topic_pull_requires_exact_owner_identity() {
-        let items = json!([
-            {"id": "topic-1", "action": "PULL", "ownerType": "agent"},
-        ]);
-        let error = validate_diff_items(items.as_array().unwrap(), &SyncDataType::Topic)
-            .expect_err("topic pull without ownerId must fail");
-        assert!(error.contains("requires ownerId"));
-    }
-
-    #[test]
-    fn owner_diff_requires_explicit_owner_type() {
-        let items = json!([
-            {"id": "agent-a", "action": "PULL", "ownerType": "agent"},
-            {"id": "group-a", "action": "PUSH", "ownerType": "group"},
-        ]);
-        assert_eq!(
-            validate_diff_items(items.as_array().unwrap(), &SyncDataType::Owner)
-                .expect("mixed owner actions")
-                .len(),
-            2
-        );
-
-        let missing_type = json!([{"id": "owner-a", "action": "PULL"}]);
-        let error = validate_diff_items(missing_type.as_array().unwrap(), &SyncDataType::Owner)
-            .expect_err("owner action without ownerType must fail");
-        assert!(error.contains("requires agent/group ownerType"));
-    }
-
-    #[test]
-    fn manifest_responses_consume_exact_type_once_for_the_current_phase() {
-        let expected = Mutex::new(HashSet::from(["owner".to_string()]));
-        assert!(consume_manifest_response_type(
-            &json!({"phase": 1}),
-            &SyncDataType::Owner,
-            1,
-            &expected,
-        )
-        .expect("owner response"));
-        assert!(consume_manifest_response_type(
-            &json!({"phase": 1}),
-            &SyncDataType::Owner,
-            1,
-            &expected,
-        )
-        .is_err());
+    fn manifest_types_are_consumed_once_and_waves_keep_their_order() {
+        let expected = Mutex::new(HashSet::from([ManifestType::Owner]));
         assert!(
-            consume_manifest_response_type(&json!({}), &SyncDataType::Owner, 1, &expected,)
-                .is_err()
+            consume_manifest_response_type(ManifestType::Owner, 1, &expected,)
+                .expect("owner response")
         );
-        assert!(consume_manifest_response_type(
-            &json!({"phase": 2}),
-            &SyncDataType::Owner,
-            1,
-            &expected,
-        )
-        .is_err());
-    }
-
-    #[test]
-    fn avatar_wave_uses_owner_wire_phase_and_precedes_topics() {
-        let expected = Mutex::new(HashSet::from(["avatar".to_string()]));
-        assert!(consume_manifest_response_type(
-            &json!({"phase": 1}),
-            &SyncDataType::Avatar,
-            2,
-            &expected,
-        )
-        .expect("avatar response"));
+        assert!(consume_manifest_response_type(ManifestType::Owner, 1, &expected,).is_err());
         assert!(matches!(
             next_manifest_command(1, 7),
             Some(SyncCommand::StartAvatarMetadata { attempt_id: 7 })
@@ -951,28 +884,23 @@ mod tests {
     }
 
     #[test]
-    fn delete_actions_require_a_stable_non_negative_timestamp() {
-        assert_eq!(
-            parse_delete_timestamp(
-                &json!({"action": "DELETE", "deletedAt": 42}),
-                "entity",
-                "DELETE",
-            )
-            .expect("valid timestamp"),
-            Some(42)
-        );
-        for value in [
-            json!({"action": "DELETE"}),
-            json!({"action": "DELETE", "deletedAt": null}),
-            json!({"action": "DELETE", "deletedAt": "42"}),
-            json!({"action": "DELETE", "deletedAt": -1}),
-        ] {
-            assert!(parse_delete_timestamp(&value, "entity", "DELETE").is_err());
-        }
-        assert_eq!(
-            parse_delete_timestamp(&json!({"action": "SKIP"}), "entity", "SKIP")
-                .expect("non-delete action"),
-            None
-        );
+    fn delete_decisions_require_a_non_negative_deleted_at() {
+        let result = |deleted_at: Option<i64>| {
+            serde_json::from_value::<ManifestResultFrame>(json!({
+                "type": "SYNC_MANIFEST_RESULT",
+                "manifestType": "topic",
+                "results": [{
+                    "ownerType": "agent",
+                    "ownerId": "agent-a",
+                    "topicId": "topic-a",
+                    "action": "PULL_DELETE",
+                    "deletedAt": deleted_at
+                }]
+            }))
+            .expect("valid topic result frame")
+        };
+        assert!(validate_manifest_result(result(Some(42))).is_ok());
+        assert!(validate_manifest_result(result(None)).is_err());
+        assert!(validate_manifest_result(result(Some(-1))).is_err());
     }
 }

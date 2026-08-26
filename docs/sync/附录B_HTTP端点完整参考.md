@@ -5,230 +5,69 @@ scope: 双端
 
 # 附录B - HTTP 端点完整参考
 
-> 本附录以纯参考表格式列出同步协议中全部 HTTP REST 端点。所有路径均挂载于桌面端插件的 `/api/mobile-sync` 前缀之下。移动端通过 `settings.sync_http_url` 拼接完整 URL。
-> 
-> **认证方式**：统一使用 `x-sync-token` Header 或 `Authorization: Bearer <token>`。桌面端中间件（`routes.js`）同时兼容 Query 参数 `?token=`，但移动端仅发送 Header。
+> 所有路径均挂载于 `/api/mobile-sync`。HTTP 只接受 `Authorization: Bearer <token>`；WebSocket 的 query token 是另一条连接边界。
 
 ---
 
 ## 表1：实体端点
 
-| 路径 | 方法 | 认证 | 请求格式 | 响应格式 | Body限制 | 移动端调用函数 | 桌面端处理函数 | 对应代码文件 |
-|-----|------|-----|---------|---------|---------|-------------|-------------|------------|
-| `/download-entities` | `POST` | `x-sync-token` | `JSON` — `{ requests: [{id, type}, ...] }` | `JSON` — `[{id, type, data}, ...]` | 1000 项 / 10 MiB | `PullExecutor::pull_entities_batch` | `downloadEntities` | `routes.js`<br>`pull_executor.rs` |
-| `/upload-entity` | `POST` | `x-sync-token`<br>`x-idempotency-key` | `JSON` — `{ id, type, data }` | `JSON` — `{ success, id, hash? }` | 5 MB | `PushExecutor::push_agent`<br>`PushExecutor::push_group` | `uploadEntity` | `routes.js`<br>`push_executor.rs` |
-| `/upload-entities-batch` | `POST` | `x-sync-token` | `JSON` — `{ items: [{id, type, data}, ...] }` | `JSON` — `{ success: true, results: [...] }` | 10 MB | `PushExecutor::push_entities_batch` | `uploadEntitiesBatch` | `routes.js`<br>`push_executor.rs` |
+| 路径 | 方法 | 请求 | 响应 | 限制 |
+|---|---|---|---|---|
+| `/entities/pull` | POST | `{items: EntitySelector[]}` | `{results: EntityPullResult[]}` | 1000 项 / 10 MiB |
+| `/entities/push` | POST | `{items: EntityPushItem[]}` | `{results: EntityPushResult[]}` | 10000 项 / 10 MiB |
 
-### 1.1 POST /download-entities
+Owner 与 Topic 共用外壳，但 DTO 本身不合并：
 
-**请求体结构**
 ```json
-{
-  "requests": [
-    { "id": "uuid-1", "type": "agent" },
-    { "id": "uuid-2", "type": "group_topic" },
-    { "id": "uuid-3", "type": "agent_topic" }
-  ]
-}
+{"entityType":"owner","ownerType":"agent","ownerId":"agent-a"}
+{"entityType":"topic","ownerType":"group","ownerId":"group-a","topicId":"topic-a"}
 ```
 
-**响应体结构**
-```json
-[
-  { "id": "uuid-1", "type": "agent", "data": { /* AgentSyncDTO */ } },
-  { "id": "uuid-2", "type": "group_topic", "data": { /* GroupTopicSyncDTO */ } }
-]
-```
-
-**批量分块策略**
-移动端在 `sync_service.rs` 中按实体类型分块发送：Agent/Group 每块 50 个，Topic 每块 1000 个。桌面端 `downloadEntities` 并行查询后按原顺序（或聚合顺序）返回结果数组。
-
-### 1.2 POST /upload-entity
-
-**请求体结构**
-```json
-{
-  "id": "uuid",
-  "type": "agent",
-  "data": { /* 对应 SyncDTO 的 JSON 表示 */ }
-}
-```
-
-**幂等性机制**
-- 移动端在 Header 中附加 `x-idempotency-key`，桌面端通过 `checkIdempotency(opId)` 检查是否重复。
-- 键值生成算法（`push_executor.rs`）：`SHA256(action + entity_type + id + configHash + minute_timestamp)`。
-- 若重复，桌面端直接返回缓存结果，不做数据库写入。
-
-**响应体结构**
-```json
-{ "success": true, "id": "uuid", "hash": "sha256-hex" }
-```
-
-### 1.3 POST /upload-entities-batch
-
-**请求体结构**
-```json
-{
-  "items": [
-    { "id": "uuid-1", "type": "agent_topic", "data": { ... } },
-    { "id": "uuid-2", "type": "group_topic", "data": { ... } }
-  ]
-}
-```
-
-**用途说明**
-该端点主要用于 Phase 2 的 Topic 元数据批量推送（归口优化）。桌面端 `uploadEntitiesBatch` 接收数组后逐个写入数据库，返回聚合结果。若 `items` 非数组，返回 `400`。
+Push 项在身份字段外增加 `data`。逐项结果回显完整身份；成功为 `ok:true,data?`，失败为 `ok:false,error`。桌面内部仍让 Owner 走单配置写入，让 Topic 按父 `config.json` 分组提交。`x-idempotency-key` 只用于已有的 Owner 幂等提交，不承担认证。
 
 ---
 
 ## 表2：消息端点
 
-| 路径 | 方法 | 认证 | 请求格式 | 响应格式 | Body限制 | 移动端调用函数 | 桌面端处理函数 | 对应代码文件 |
-|-----|------|-----|---------|---------|---------|-------------|-------------|------------|
-| `/download-messages-stream` | `POST` | `x-sync-token` | `JSON` — `{ requests: [{topicId, msgIds: []\|null}, ...] }` | `NDJSON` 流 — 逐 topic 分帧 | 5 MB<br>（请求体） | `PullExecutor::pull_messages_batch` | `downloadMessagesStreamRaw` | `routes.js`<br>`pull_executor.rs` |
-| `/upload-messages-batch` | `POST` | `x-sync-token` | `NDJSON` 流 — 逐 topic 分帧 | `NDJSON` 流 — `{topicId, success, error?}` | 无显式限制 | `PushExecutor::push_messages_batch` | `uploadMessagesBatchRaw` | `routes.js`<br>`push_executor.rs` |
+| 路径 | 方法 | 请求 | 响应 | 限制 |
+|---|---|---|---|---|
+| `/messages/pull` | POST | `{topics:[{ownerType,ownerId,topicId,messageIds}]}` | Topic NDJSON | 10000 Topic / 100000 Message ID / 256 MiB |
+| `/messages/push` | POST | Topic NDJSON | Topic NDJSON | 每 Topic 10000 状态 / 单行 32 MiB / 总量 256 MiB |
 
-### 2.1 POST /download-messages-stream
-
-**请求体结构**
-```json
-{
-  "requests": [
-    { "topicId": "topic-uuid-1", "ownerType": "agent", "ownerId": "agent-1", "msgIds": ["msg-1", "msg-2"] },
-    { "topicId": "topic-uuid-2", "ownerType": "group", "ownerId": "group-1", "msgIds": [] }
-  ]
-}
-```
-
-- `msgIds` 为空数组时，桌面端返回该 topic 的全部消息。
-- `msgIds` 为具体 ID 列表时，仅返回指定消息（增量拉取场景）。
-
-**响应格式：NDJSON**
-桌面端以换行符分隔的 JSON（NDJSON）逐 topic 返回，每行一个对象：
+`messageIds: []` 表示拉取该 Topic 的全部 live 消息。Pull 成功行：
 
 ```ndjson
-{"topicId":"topic-uuid-1","ownerType":"agent","ownerId":"agent-1","messages":[/* MessageSyncDTO 数组 */]}
-{"topicId":"topic-uuid-2","ownerType":"group","ownerId":"group-1","messages":[/* ... */]}
+{"kind":"topic","ownerType":"agent","ownerId":"agent-a","topicId":"topic-a","ok":true,"messages":[]}
 ```
 
-**移动端消费流程**
-1. `pull_executor.rs` 建立 HTTP POST 连接后，通过 `res.bytes_stream()` 流式读取 chunk。
-2. 使用缓冲区逐行解析 NDJSON，支持 chunk 边界跨越。
-3. 每解析出一行 topic 数据，按原始帧大小取得在途预算，再 spawn 异步任务调用 `process_topic_messages()`。
-4. 单 topic 处理失败不中断流读取，错误通过 `_error: SyncError` 返回；Mobile 会保留根因并令当前 attempt 失败。
-
-**字段规范化**
-在 `process_topic_messages` 中，桌面端原始消息会经过以下规范化：
-- `isThinking`: `0/1` → `bool`
-- `isGroupMessage`: `0/1` → `bool`
-- `timestamp`: 字符串数字 → `u64`
-- 附件 `size`: `i64` → `u64`
-
-### 2.2 POST /upload-messages-batch
-
-**请求格式：NDJSON**
-移动端直接上传换行分隔的 JSON，无需先序列化为 JSON 数组：
+Push 行同时提交 live 最终视图和离线墓碑：
 
 ```ndjson
-{"topicId":"topic-uuid-1","ownerType":"agent","ownerId":"agent-1","messages":[{"id":"msg-1","role":"user",...},{...}]}
-{"topicId":"topic-uuid-2","ownerType":"group","ownerId":"group-1","messages":[...]}
+{"kind":"topic","ownerType":"agent","ownerId":"agent-a","topicId":"topic-a","messages":[],"deletedMessages":[{"msgId":"msg-a","deletedAt":1700000000000}]}
 ```
 
-Content-Type 设置为 `application/x-ndjson`。
-
-**响应格式：NDJSON**
-```ndjson
-{"topicId":"topic-uuid-1","ownerType":"agent","ownerId":"agent-1","success":true}
-{"topicId":"topic-uuid-2","ownerType":"group","ownerId":"group-1","success":false,"error":{"code":"SYNC_MESSAGE_WRITE_FAILED","origin":"desktop_plugin","stage":"messages","kind":"storage","retry":"manual","message":"Topic write failed","failedTopicIds":["topic-uuid-2"]}}
-```
-
-附件关系元数据与内容 Hash 位于消息 DTO；附件二进制不通过同步 HTTP 端点传输。
-
-**DTO 构建逻辑**
-
-消息 Wire 合同统一为 canonical `MessageSyncDTO`。移动端直接从 SQLite 投影基础字段，并按消息实际状态携带 `agentId`、`groupId`、`topicId`、`isGroupMessage`、`finishReason` 与附件元数据；角色和 Owner 差异由这些字段表达，不再维护三种 Push 专用序列化壳。`avatarColor` 属于兼容输入和本机展示状态，不参与 Mobile 出站投影。
+Push 成功响应只回显 Topic 身份和 `ok:true`。Topic 失败使用 `ok:false,error`；流级失败使用 `kind:"streamError",error`。附件只随 Message DTO 同步元数据与内容 Hash，二进制 CAS 始终留在各端本机。
 
 ---
 
 ## 表3：头像端点
 
-| 路径 | 方法 | 认证 | 请求格式 | 响应格式 | Body限制 | 移动端调用函数 | 桌面端处理函数 | 对应代码文件 |
-|-----|------|-----|---------|---------|---------|-------------|-------------|------------|
-| `/upload-avatar` | `POST` | `x-sync-token` | `Raw Binary` — 图片字节流<br>Query: `?id=<owner_id>&type=agent\|group` | `JSON` — `{ success, id }` | 10 MB | `PushExecutor::push_avatar` | `uploadAvatar` | `routes.js`<br>`push_executor.rs` |
-| `/download-avatar` | `GET` | `x-sync-token` | Query: `?id=<owner_id>&type=agent\|group` | `Binary` — `sendFile` | — | `PullExecutor::pull_avatar` | `downloadAvatar` | `routes.js`<br>`pull_executor.rs` |
+| 路径 | 方法 | 身份 | Body / 响应 |
+|---|---|---|---|
+| `/avatars/pull` | GET | `?ownerType=&ownerId=` | 返回原始图片字节与真实 MIME |
+| `/avatars/push` | POST | `?ownerType=&ownerId=` | 原始图片字节；返回 `{ownerType,ownerId,ok:true}` |
 
-### 3.1 POST /upload-avatar
-
-**请求结构**
-- Header: `Content-Type: <mime_type>`（如 `image/png`）
-- Query: `?id=<owner_id>&type=agent|group`
-- Body: 图片原始二进制字节
-
-**移动端流程**
-1. 从数据库 `avatars` 表读取 `image_data` 与 `mime_type`。
-2. 若记录存在，直接以原始字节作为 Body POST 到桌面端。
-
-### 3.2 GET /download-avatar
-
-**请求结构**
-- Query: `?id=<owner_id>&type=agent|group`
-- `id` 为空时，桌面端可能返回默认头像（取决于具体实现）。
-
-**移动端重试机制**
-`PullExecutor::pull_avatar` 实现了指数退避重试：
-- 最大重试次数：3 次
-- 初始延迟：200ms，每次翻倍（200ms → 400ms → 800ms）
-- 重试触发条件：网络请求失败 或 响应体解码失败
+`ownerType` 为 `agent/group`，或唯一的 `user/user_avatar`。Avatar 使用独立二进制 Hash 和更新时间，不并入 Owner 双 Hash。Pull 保留最多三次指数退避；请求身份不提供默认值。
 
 ---
 
 ## 表4：删除端点
 
-| 路径 | 方法 | 认证 | 请求格式 | 响应格式 | Body限制 | 移动端调用函数 | 桌面端处理函数 | 对应代码文件 |
-|-----|------|-----|---------|---------|---------|-------------|-------------|------------|
-| `/delete-entity` | `POST` | `x-sync-token` | `JSON` — `{ id, type, deletedAt }` | `JSON` — `{ success }` | 无 | *通过 WebSocket 触发*<br>`SYNC_ENTITY_DELETE` | `deleteEntity` | `routes.js`<br>`sync_service.rs` |
-| `/delete-message` | `POST` | `x-sync-token` | `JSON` — `{ topicId, msgId, deletedAt }` | `JSON` — `{ success:true, topicId, msgId }` | 1 MiB（Mobile 侧） | `PushExecutor::push_messages_batch` 离线墓碑补传；在线另发 WS | `deleteMessage` | `routes.js`<br>`push_executor.rs` |
+公共 HTTP 不再提供独立删除端点：
 
-### 4.1 POST /delete-entity
-
-**请求体结构**
-```json
-{
-  "id": "entity-uuid",
-  "type": "agent",
-  "deletedAt": 1715000000000
-}
-```
-
-**字段约束**
-- `id`: 必填，实体 UUID
-- `type`: 必填，枚举值 `agent` / `group` / `topic` / `avatar`
-- `deletedAt`: 必填，Unix 时间戳（毫秒），用于软删除标记
-
-**移动端触发方式**
-移动端在线删除通过 WebSocket `SYNC_ENTITY_DELETE` 通知桌面端；离线墓碑在后续 Manifest 或 Phase 3 Push 中重放。桌面墓碑通过 Diff 返回给 Mobile。
-
-**桌面端处理**
-`deleteEntity` 根据 `type` 在数据库对应表中设置 `deleted_at = deletedAt` 时间戳，实现软删除。实际物理清理由桌面端后台任务处理。
-
-### 4.2 POST /delete-message
-
-**请求体结构**
-```json
-{
-  "topicId": "topic-uuid",
-  "msgId": "message-uuid",
-  "deletedAt": 1715000000000
-}
-```
-
-**字段约束**
-- `topicId`: 必填，消息所属 Topic ID，用于消除跨 Topic 同名 `msgId` 歧义
-- `msgId`: 必填，消息 UUID
-- `deletedAt`: 必填，Unix 时间戳（毫秒）
-
-**移动端触发方式**
-在线删除提交后会发送带 `topicId`、`msgId`、`deletedAt` 的 `SYNC_ENTITY_DELETE`。若删除发生时没有会话，Phase 3 在下一次 `toPush` 时从同一 Topic 快照重放 `/delete-message`；桌面端必须返回匹配请求身份的 `{success:true,topicId,msgId}`。旧 `{success:true}` 响应不再兼容。
+- Owner、Topic、Avatar、Message 的在线删除使用 `SYNC_ENTITY_DELETE`，携带 `targetType` 与完整身份。
+- 离线 Owner/Topic/Avatar 墓碑由后续 Manifest 重放。
+- 离线 Message 墓碑随 `/messages/push` 的 `deletedMessages` 重放，并与该 Topic 的 live 最终视图共用一次确认。
 
 ---
 
@@ -237,19 +76,20 @@ Content-Type 设置为 `application/x-ndjson`。
 | 状态码 | 场景 | 移动端行为 |
 |-------|------|----------|
 | `200 OK` | 请求成功 | 正常解析响应体 |
-| `400 Bad Request` | 参数缺失或格式错误（如 `items` 非数组、`requests` 为空） | 记录日志，通常视为协议错误 |
-| `401 Unauthorized` | `x-sync-token` 或 `Authorization` 不匹配 | 触发连接重置，建议用户检查同步令牌 |
-| `404 Not Found` | 实体/附件/头像不存在 | 返回错误，当前操作失败 |
-| `500 Internal Server Error` | 桌面端处理异常 | 打印错误日志，当前任务失败，不影响其他并发任务 |
+| `400 Bad Request` | 身份、字段或预算不合法 | 协议错误，终止 attempt |
+| `401 Unauthorized` | Bearer token 不匹配 | 提示用户核对同步令牌 |
+| `404 Not Found` | 实体或头像不存在 | 当前操作失败 |
+| `409 Conflict` | 已提交状态与请求冲突 | 当前操作失败 |
+| `500 Internal Server Error` | 桌面存储或 CDS 故障 | 保留结构化根因并终止 attempt |
 
-所有非 2xx 响应统一返回 `{"error": SyncError}`，所有普通 JSON 的失败结果统一使用 `{"success":false,"error":SyncError}`。`SyncError` 必须包含 Wire 1.3 的 `code/origin/stage/kind/retry/message/failedTopicIds` 全部字段；旧字符串错误拒绝。
+所有非 2xx 响应使用 `{"error": WireSyncError}`。逐项失败使用 `ok:false,error`；成功禁止携带 `error`。Wire 1.4 的错误对象固定包含 `code/origin/stage/kind/retry/message/failedTopicIds`。
 
 ### 流式端点特殊错误帧
 
-对于 `/download-messages-stream` 和 `/upload-messages-batch` 这两个 NDJSON 流式端点：
+对于 `/messages/pull` 和 `/messages/push`：
 
-- **流级错误**（桌面端在开始传输后发生异常）：桌面端写入 `{"_stream_error": SyncError}\n` 后结束响应。
-- **Topic 级错误**：单 topic 处理失败时，桌面端写入 `{"topicId":"tid","_error":SyncError}\n`。移动端可继续消费以安全释放流，但该 Topic 和当前 attempt 不得标记成功。
+- 流级错误：`{"kind":"streamError","error":WireSyncError}`。
+- Topic 级错误：`{"kind":"topic",完整身份,"ok":false,"error":WireSyncError}`。
 
 ### 并发与限流
 
@@ -265,20 +105,16 @@ Content-Type 设置为 `application/x-ndjson`。
 
 ```
 Phase 1 (Owner Metadata)
-  PULL Agent/Group  →  POST /download-entities
-  PULL Avatar       →  GET  /download-avatar
-  PUSH Agent/Group  →  POST /upload-entity
-  PUSH Avatar       →  POST /upload-avatar
+  PULL/PUSH Owner → /entities/pull|push
+  PULL/PUSH Avatar → /avatars/pull|push
 
 Phase 2 (Topic Metadata)
-  PULL Topics       →  POST /download-entities
-  PUSH Topics       →  POST /upload-entities-batch
+  PULL/PUSH Topic → /entities/pull|push
 
 Phase 3 (Messages)
-  PULL Messages     →  POST /download-messages-stream  (NDJSON)
-  PUSH Messages     →  POST /upload-messages-batch     (NDJSON)
+  PULL/PUSH Message → /messages/pull|push
 ```
 
 ---
 
-*本文档由源码自动生成基准，覆盖 `routes.js`、`sync_service.rs`、`pull_executor.rs`、`push_executor.rs` 及 `message_service.rs` 中的全部 HTTP 交互路径。*
+*权威实现：Mobile `pull_executor.rs` / `push_executor.rs`，Desktop `transport/routes.js`。*

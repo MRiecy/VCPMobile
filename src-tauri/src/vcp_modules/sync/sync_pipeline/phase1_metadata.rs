@@ -1,5 +1,7 @@
 use crate::vcp_modules::sync_types::{
-    is_valid_avatar_owner, EntityState, SyncDataType, SyncManifest,
+    is_valid_avatar_owner, AvatarManifestDeleted, AvatarManifestLive, AvatarManifestState,
+    AvatarOwnerType, ManifestRequest, OwnerManifestDeleted, OwnerManifestLive, OwnerManifestState,
+    OwnerType, TopicManifestDeleted, TopicManifestLive, TopicManifestState,
 };
 use crate::vcp_modules::topic_types::{OwnerKey, TopicKey};
 use sqlx::Row;
@@ -11,7 +13,7 @@ const SQLITE_BIND_CHUNK: usize = 400;
 pub struct Phase1Metadata;
 
 impl Phase1Metadata {
-    pub async fn build_owner_manifest(pool: &SqlitePool) -> Result<SyncManifest, String> {
+    pub async fn build_owner_manifest(pool: &SqlitePool) -> Result<ManifestRequest, String> {
         let rows = sqlx::query(
             "SELECT owner_type, agent_id AS owner_id, config_hash, content_hash,
                     updated_at, deleted_at
@@ -28,56 +30,61 @@ impl Phase1Metadata {
 
         let mut items = Vec::new();
         for r in rows {
-            let owner_type: String = r
+            let raw_owner_type: String = r
                 .try_get("owner_type")
                 .map_err(|error| format!("Owner manifest type decode failed: {error}"))?;
-            if !matches!(owner_type.as_str(), "agent" | "group") {
-                return Err(format!(
-                    "Owner manifest has unsupported owner type {owner_type}"
-                ));
-            }
-            let id: String = r
+            let owner_type = OwnerType::try_from(raw_owner_type.as_str()).map_err(|_| {
+                format!("Owner manifest has unsupported owner type {raw_owner_type}")
+            })?;
+            let owner_id: String = r
                 .try_get("owner_id")
                 .map_err(|error| format!("Owner manifest id decode failed: {error}"))?;
-            if id.is_empty() {
+            if owner_id.is_empty() {
                 return Err("Owner manifest has an empty owner id".to_string());
             }
-            let conf_h: String = r.try_get("config_hash").map_err(|error| {
-                format!("Owner manifest config hash decode failed for {owner_type}/{id}: {error}")
+            let deleted_at: Option<i64> = r
+                .try_get("deleted_at")
+                .map_err(|error| format!("Owner manifest tombstone decode failed: {error}"))?;
+            if let Some(deleted_at) = deleted_at {
+                items.push(OwnerManifestState::Deleted(OwnerManifestDeleted {
+                    owner_type,
+                    owner_id,
+                    deleted_at,
+                }));
+                continue;
+            }
+            let config_hash: String = r.try_get("config_hash").map_err(|error| {
+                format!(
+                    "Owner manifest config hash decode failed for {owner_type}/{owner_id}: {error}"
+                )
             })?;
-            let cont_h: String = r.try_get("content_hash").map_err(|error| {
-                format!("Owner manifest content hash decode failed for {owner_type}/{id}: {error}")
+            let content_hash: String = r.try_get("content_hash").map_err(|error| {
+                format!(
+                    "Owner manifest content hash decode failed for {owner_type}/{owner_id}: {error}"
+                )
             })?;
-            items.push(EntityState {
-                id,
-                hash: None,
-                config_hash: Some(conf_h),
-                content_hash: Some(cont_h),
-                ts: r
+            items.push(OwnerManifestState::Live(OwnerManifestLive {
+                owner_type,
+                owner_id,
+                config_hash,
+                content_hash,
+                updated_at: r
                     .try_get("updated_at")
                     .map_err(|error| format!("Owner manifest timestamp decode failed: {error}"))?,
-                deleted_at: r
-                    .try_get("deleted_at")
-                    .map_err(|error| format!("Owner manifest tombstone decode failed: {error}"))?,
-                owner_type: Some(owner_type),
-                owner_id: None,
-            });
+            }));
         }
 
-        Ok(SyncManifest {
-            data_type: SyncDataType::Owner,
-            items,
-        })
+        Ok(ManifestRequest::Owner { items })
     }
 
     pub async fn build_targeted_topic_manifest(
         pool: &SqlitePool,
         owners: &[OwnerKey],
-    ) -> Result<SyncManifest, String> {
+    ) -> Result<ManifestRequest, String> {
         if owners.is_empty() {
-            return Ok(SyncManifest {
-                data_type: SyncDataType::Topic,
+            return Ok(ManifestRequest::Topic {
                 items: Vec::new(),
+                targeted_owners: Vec::new(),
             });
         }
 
@@ -107,65 +114,70 @@ impl Phase1Metadata {
                 query = query.bind(&owner.owner_type).bind(&owner.owner_id);
             }
             for row in query.fetch_all(pool).await.map_err(|e| e.to_string())? {
-                let id: String = row
+                let topic_id: String = row
                     .try_get("topic_id")
                     .map_err(|error| format!("Topic manifest id decode failed: {error}"))?;
-                let config_hash: String = row.try_get("config_hash").map_err(|error| {
-                    format!("Topic manifest config hash decode failed for {id}: {error}")
+                let raw_owner_type: String = row.try_get("owner_type").map_err(|error| {
+                    format!("Topic manifest owner type decode failed for {topic_id}: {error}")
                 })?;
-                let content_hash: String = row.try_get("content_hash").map_err(|error| {
-                    format!("Topic manifest content hash decode failed for {id}: {error}")
+                let owner_type = OwnerType::try_from(raw_owner_type.as_str()).map_err(|_| {
+                    format!("Topic manifest {topic_id} has unsupported owner type {raw_owner_type}")
                 })?;
-                let owner_type: String = row.try_get("owner_type").map_err(|error| {
-                    format!("Topic manifest owner type decode failed for {id}: {error}")
-                })?;
-                if !matches!(owner_type.as_str(), "agent" | "group") {
-                    return Err(format!(
-                        "Topic manifest {id} has unsupported owner type {owner_type}"
-                    ));
-                }
                 let owner_id: String = row.try_get("owner_id").map_err(|error| {
-                    format!("Topic manifest owner id decode failed for {id}: {error}")
+                    format!("Topic manifest owner id decode failed for {topic_id}: {error}")
                 })?;
-                let topic_key = TopicKey::new(&owner_type, &owner_id, &id);
+                let topic_key = TopicKey::new(owner_type.as_str(), &owner_id, &topic_id);
                 if owner_id.is_empty()
-                    || !expected_owners.contains(&OwnerKey::new(&owner_type, &owner_id))
+                    || !expected_owners.contains(&OwnerKey::new(owner_type.as_str(), &owner_id))
                 {
                     return Err(format!(
-                        "Topic manifest {id} returned unexpected owner {owner_type}/{owner_id}"
+                        "Topic manifest {topic_id} returned unexpected owner {owner_type}/{owner_id}"
                     ));
                 }
                 if !seen_topics.insert(topic_key) {
                     return Err(format!(
-                        "Targeted topic manifest returned duplicate topic {owner_type}/{owner_id}/{id}"
+                        "Targeted topic manifest returned duplicate topic {owner_type}/{owner_id}/{topic_id}"
                     ));
                 }
+                let deleted_at: Option<i64> = row.try_get("deleted_at").map_err(|error| {
+                    format!("Topic manifest tombstone decode failed for {topic_id}: {error}")
+                })?;
+                if let Some(deleted_at) = deleted_at {
+                    items.push(TopicManifestState::Deleted(TopicManifestDeleted {
+                        owner_type,
+                        owner_id,
+                        topic_id,
+                        deleted_at,
+                    }));
+                    continue;
+                }
+                let config_hash: String = row.try_get("config_hash").map_err(|error| {
+                    format!("Topic manifest config hash decode failed for {topic_id}: {error}")
+                })?;
+                let content_hash: String = row.try_get("content_hash").map_err(|error| {
+                    format!("Topic manifest content hash decode failed for {topic_id}: {error}")
+                })?;
                 let updated_at = row.try_get("updated_at").map_err(|error| {
-                    format!("Topic manifest timestamp decode failed for {id}: {error}")
+                    format!("Topic manifest timestamp decode failed for {topic_id}: {error}")
                 })?;
-                let deleted_at = row.try_get("deleted_at").map_err(|error| {
-                    format!("Topic manifest tombstone decode failed for {id}: {error}")
-                })?;
-                items.push(EntityState {
-                    id,
-                    hash: None,
-                    config_hash: Some(config_hash),
-                    content_hash: Some(content_hash),
-                    ts: updated_at,
-                    deleted_at,
-                    owner_type: Some(owner_type),
-                    owner_id: Some(owner_id),
-                });
+                items.push(TopicManifestState::Live(TopicManifestLive {
+                    owner_type,
+                    owner_id,
+                    topic_id,
+                    config_hash,
+                    content_hash,
+                    updated_at,
+                }));
             }
         }
 
-        Ok(SyncManifest {
-            data_type: SyncDataType::Topic,
+        Ok(ManifestRequest::Topic {
             items,
+            targeted_owners: owners.to_vec(),
         })
     }
 
-    pub async fn build_avatar_manifest(pool: &SqlitePool) -> Result<SyncManifest, String> {
+    pub async fn build_avatar_manifest(pool: &SqlitePool) -> Result<ManifestRequest, String> {
         let rows = sqlx::query(
             "SELECT av.owner_id, av.owner_type, av.avatar_hash, av.updated_at, av.deleted_at,
                     CASE
@@ -193,17 +205,20 @@ impl Phase1Metadata {
 
         let mut items = Vec::new();
         for r in rows {
-            let owner_type: String = r
+            let raw_owner_type: String = r
                 .try_get("owner_type")
                 .map_err(|error| format!("Avatar manifest owner type decode failed: {error}"))?;
             let owner_id: String = r
                 .try_get("owner_id")
                 .map_err(|error| format!("Avatar manifest owner id decode failed: {error}"))?;
-            if !is_valid_avatar_owner(&owner_type, &owner_id) {
+            if !is_valid_avatar_owner(&raw_owner_type, &owner_id) {
                 return Err(format!(
-                    "Avatar manifest has invalid owner {owner_type}/{owner_id}"
+                    "Avatar manifest has invalid owner {raw_owner_type}/{owner_id}"
                 ));
             }
+            let owner_type = AvatarOwnerType::try_from(raw_owner_type.as_str()).map_err(|_| {
+                format!("Avatar manifest has invalid owner {raw_owner_type}/{owner_id}")
+            })?;
             let deleted_at: Option<i64> = r
                 .try_get("deleted_at")
                 .map_err(|error| format!("Avatar manifest tombstone decode failed: {error}"))?;
@@ -217,35 +232,37 @@ impl Phase1Metadata {
                     "Avatar manifest owner {owner_type}/{owner_id} is missing or deleted"
                 ));
             }
-            items.push(EntityState {
-                id: format!("{}:{}", owner_type, owner_id),
-                hash: Some(r.try_get("avatar_hash").map_err(|error| {
-                    format!(
-                        "Avatar manifest hash decode failed for {owner_type}/{owner_id}: {error}"
-                    )
-                })?),
-                config_hash: None,
-                content_hash: None,
-                ts: r
+            if let Some(deleted_at) = deleted_at {
+                items.push(AvatarManifestState::Deleted(AvatarManifestDeleted {
+                    owner_type,
+                    owner_id,
+                    deleted_at,
+                }));
+                continue;
+            }
+            let binary_hash = r.try_get("avatar_hash").map_err(|error| {
+                format!("Avatar manifest hash decode failed for {owner_type}/{owner_id}: {error}")
+            })?;
+            items.push(AvatarManifestState::Live(AvatarManifestLive {
+                owner_type,
+                owner_id,
+                binary_hash,
+                updated_at: r
                     .try_get("updated_at")
                     .map_err(|error| format!("Avatar manifest timestamp decode failed: {error}"))?,
-                deleted_at,
-                owner_type: None,
-                owner_id: None,
-            });
+            }));
         }
 
-        Ok(SyncManifest {
-            data_type: SyncDataType::Avatar,
-            items,
-        })
+        Ok(ManifestRequest::Avatar { items })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::Phase1Metadata;
-    use crate::vcp_modules::sync_types::SyncDataType;
+    use crate::vcp_modules::sync_types::{
+        AvatarManifestState, ManifestRequest, OwnerManifestState, TopicManifestState,
+    };
     use crate::vcp_modules::topic_types::OwnerKey;
 
     #[tokio::test]
@@ -276,14 +293,19 @@ mod tests {
         let manifest = Phase1Metadata::build_owner_manifest(&pool)
             .await
             .expect("build owner manifest");
-        assert_eq!(manifest.data_type, SyncDataType::Owner);
-        assert_eq!(manifest.items.len(), 2);
-        assert_eq!(manifest.items[0].id, "agent-a");
-        assert_eq!(manifest.items[0].owner_type.as_deref(), Some("agent"));
-        assert_eq!(manifest.items[0].owner_id, None);
-        assert_eq!(manifest.items[1].id, "group-a");
-        assert_eq!(manifest.items[1].owner_type.as_deref(), Some("group"));
-        assert_eq!(manifest.items[1].deleted_at, Some(9));
+        let ManifestRequest::Owner { items } = manifest else {
+            panic!("owner builder returned another manifest type");
+        };
+        assert_eq!(items.len(), 2);
+        let OwnerManifestState::Live(agent) = &items[0] else {
+            panic!("agent should be live");
+        };
+        assert_eq!(agent.owner_id, "agent-a");
+        let OwnerManifestState::Deleted(group) = &items[1] else {
+            panic!("group should be deleted");
+        };
+        assert_eq!(group.owner_id, "group-a");
+        assert_eq!(group.deleted_at, 9);
     }
 
     #[tokio::test]
@@ -315,18 +337,20 @@ mod tests {
         let manifest = Phase1Metadata::build_avatar_manifest(&pool)
             .await
             .expect("build avatar manifest");
-        assert_eq!(manifest.items.len(), 2);
-        assert_eq!(manifest.items[0].id, "agent:agent-a");
-        assert_eq!(manifest.items[0].hash.as_deref(), Some("hash"));
-        assert_eq!(manifest.items[0].config_hash, None);
-        assert_eq!(manifest.items[0].content_hash, None);
-        assert_eq!(
-            serde_json::to_value(&manifest.items[0]).expect("serialize avatar manifest")["hash"],
-            "hash"
-        );
-        assert_eq!(manifest.items[0].deleted_at, Some(9));
-        assert_eq!(manifest.items[1].id, "user:user_avatar");
-        assert_eq!(manifest.items[1].deleted_at, None);
+        let ManifestRequest::Avatar { items } = manifest else {
+            panic!("avatar builder returned another manifest type");
+        };
+        assert_eq!(items.len(), 2);
+        let AvatarManifestState::Deleted(agent) = &items[0] else {
+            panic!("agent avatar should be deleted");
+        };
+        assert_eq!(agent.owner_id, "agent-a");
+        assert_eq!(agent.deleted_at, 9);
+        let AvatarManifestState::Live(user) = &items[1] else {
+            panic!("user avatar should be live");
+        };
+        assert_eq!(user.owner_id, "user_avatar");
+        assert_eq!(user.binary_hash, "user-hash");
     }
 
     #[tokio::test]
@@ -356,21 +380,21 @@ mod tests {
         )
         .await
         .expect("build topic manifest");
-        assert_eq!(manifest.items.len(), 1);
-        assert_eq!(manifest.items[0].hash, None);
-        assert_eq!(
-            manifest.items[0].config_hash.as_deref(),
-            Some("config-hash")
-        );
-        assert_eq!(
-            manifest.items[0].content_hash.as_deref(),
-            Some("content-hash")
-        );
-        assert!(serde_json::to_value(&manifest.items[0])
-            .expect("serialize topic manifest")
-            .get("hash")
-            .is_none());
-        assert_eq!(manifest.items[0].owner_type.as_deref(), Some("agent"));
-        assert_eq!(manifest.items[0].owner_id.as_deref(), Some("agent-a"));
+        let ManifestRequest::Topic {
+            items,
+            targeted_owners,
+        } = manifest
+        else {
+            panic!("topic builder returned another manifest type");
+        };
+        assert_eq!(targeted_owners, vec![OwnerKey::new("agent", "agent-a")]);
+        assert_eq!(items.len(), 1);
+        let TopicManifestState::Live(topic) = &items[0] else {
+            panic!("topic should be live");
+        };
+        assert_eq!(topic.topic_id, "topic-a");
+        assert_eq!(topic.owner_id, "agent-a");
+        assert_eq!(topic.config_hash, "config-hash");
+        assert_eq!(topic.content_hash, "content-hash");
     }
 }

@@ -8,7 +8,7 @@ use crate::vcp_modules::group::group_types::GroupListItem;
 use crate::vcp_modules::sync_dto::AgentSyncDTO;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
-use crate::vcp_modules::sync_types::{SyncDataType, SYNC_TOMBSTONE_HASH};
+use crate::vcp_modules::sync_types::{DeleteTarget, OwnerType, SYNC_TOMBSTONE_HASH};
 use crate::vcp_modules::topic_types::{MessageKey, Topic, TopicKey};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -430,11 +430,11 @@ pub async fn delete_agent(
 
     if let Some(sync_state) = app_handle.try_state::<SyncState>() {
         let _ = sync_state.ws_sender.send(SyncCommand::NotifyDelete {
-            data_type: SyncDataType::Agent,
-            id: agent_id,
+            target: DeleteTarget::Owner {
+                owner_type: OwnerType::Agent,
+                owner_id: agent_id,
+            },
             deleted_at,
-            owner_type: None,
-            owner_id: None,
         });
     }
 

@@ -13,8 +13,8 @@ scope: 双端
 
 | 序号 | 消息名称 | 方向 | 触发时机 | Payload 关键字段 | 移动端处理函数/位置 | 桌面端处理函数/位置 | 对应代码文件 |
 |-----|---------|------|---------|-----------------|-------------------|-------------------|------------|
-| 1 | `VERSION_CHECK` | M→D | WS 连接建立后的第一条业务消息 | `mobileVersion: string`, `protocolVersion: "1.3"` | `run_sync_session` 发送并启动 `VERSION_CHECK_TIMEOUT` | 严格校验后构造 `VERSION_ACK` | `sync_service.rs`, `index.js` |
-| 2 | `VERSION_ACK` | D→M | 桌面端收到 `VERSION_CHECK` 后立即回复 | `pluginVersion: "1.3.0"`, `protocolVersion: "1.3"` | 两字段精确匹配；缺失、错类型、旧 `version` 字段或不匹配均终止 attempt | 返回插件包版本与固定 wire 版本 | `sync_service.rs`, `index.js` |
+| 1 | `VERSION_CHECK` | M→D | WS 连接建立后的第一条业务消息 | `mobileVersion`, `protocolVersion: "1.4"` | 发送并启动握手 deadline | 严格校验后构造 `VERSION_ACK` | `sync_service.rs`, `protocol.js` |
+| 2 | `VERSION_ACK` | D→M | 收到 `VERSION_CHECK` 后 | `pluginVersion`, `protocolVersion: "1.4"` | 兼容性只由 Wire 版本决定；插件版本用于诊断 | 回显插件包版本与固定 Wire 版本 | `sync_service.rs`, `protocol.js` |
 | 3 | `PHASE_START` | M→D | 各同步阶段（Phase）开始时由移动端发送，通知桌面端进入新阶段 | `phase: string`，取值：`owner_metadata`、`topic_metadata`、`messages` | `run_sync_session` 中在每个 Phase 入口通过 `ws_stream.send` 发送；同时更新前端 `vcp-sync-progress` 事件 | `index.js` 中记录日志 `logger.logInfo`，返回 `PHASE_ACK` 确认帧 | `sync_service.rs`, `index.js` |
 | 4 | `PHASE_COMPLETED` | M→D | 各阶段完成后由移动端发送；最终 `messages` 帧是完成态提交边界 | 普通帧：`phase`；最终帧：`phase`, `sessionId`, `attemptId`, `nonce` | Finalize 落盘与哈希事务成功后发送，安装当前 pending key 和 30 秒 watchdog | `index.js` 记录并对最终帧原样回显身份字段 | `sync_service.rs`, `index.js` |
 | 5 | `PHASE_ACK` | D→M | 桌面端确认收到 `PHASE_START` 或 `PHASE_COMPLETED` | 普通 ACK：`phase`；最终 ACK：`phase`, `sessionId`, `attemptId`, `nonce` | 普通 ACK 仅记录；最终 ACK 必须精确匹配当前 pending key 并原子消费一次 | `index.js` 对最终 `messages` 帧必须原样回显四个身份字段 | `sync_service.rs`, `index.js` |
@@ -28,12 +28,12 @@ scope: 双端
 
 | 序号 | 消息名称 | 方向 | 触发时机 | Payload 关键字段 | 移动端处理函数/位置 | 桌面端处理函数/位置 | 对应代码文件 |
 |-----|---------|------|---------|-----------------|-------------------|-------------------|------------|
-| 10 | `SYNC_MANIFEST` | M→D | Phase 1 先发统一 Owner，drain 后再发 Avatar；Phase 2 发送 Topic 清单（附带 `targetedOwners`） | `data: EntityState[]`（实体状态数组），`dataType: string`（`owner`/`avatar`/`topic`），`phase: number`（1 或 2） | `SyncCommand::StartManualSync` 触发 Owner 波次；Owner 完成门触发 Avatar 波次；`PipelineCommand::StartTopicMetadata` 触发 Phase 2 靶向 Topic Manifest | `handleSyncManifest`（`sync/manifest.js`）：加载本地清单、两轮遍历比对、输出 Action 列表 | `sync_service.rs`, `phase1_metadata.rs`, `sync/manifest.js` |
-| 11 | `SYNC_DIFF_RESULTS` | D→M | 桌面端完成 `SYNC_MANIFEST` 比对后返回差异动作列表 | `data: DiffResult[]`（差异结果数组），`dataType: string`，`phase: number` | `run_sync_session` WS 处理器中解析 JSON，按 `action` 字段分类为 `batch_pull_requests`、`push_topics_to_fetch`、`other_items` 三类并行执行 | `handleSyncManifest` 返回：`getLocalManifest` → 两轮遍历算法 → 组装 `SYNC_DIFF_RESULTS` | `sync_service.rs`, `sync/manifest.js` |
-| 12 | `SYNC_TOPIC_HASH_BATCH_V2` | M→D | Phase 2.5 发送 Topic 双哈希批量比对请求；仅针对 Phase 1 筛选出的 `changed_owners` 下的话题 | `hashes: Record<topicId, {configHash: string, contentHash: string}>` | `PipelineCommand::StartTopicValidation` 触发；调用 `Phase3Message::get_targeted_topic_hashes` 批量查询 SQLite，组装为 JSON Map | `handleSyncTopicHashBatchV2`（`sync/diff.js`）：逐 Topic 查询 `hash`（对应 `config_hash`）与 `aggregated_hash`（对应 `content_hash`），双字段均一致才判定为未变更 | `sync_service.rs`, `phase3_message.rs`, `sync/diff.js` |
-| 13 | `SYNC_TOPIC_HASH_RESULTS` | D→M | 桌面端完成双哈希比对后返回变更话题列表 | `changedTopics: string[]`（变更话题 ID 数组） | 接收后写入 `changed_topics` 共享状态（`Arc<Mutex<Vec<String>>>`），触发 `SyncCommand::StartMessages` 进入 Phase 3 | `handleSyncTopicHashBatchV2` 返回：遍历比对结果，收集不一致或不存在的话题 ID | `sync_service.rs`, `sync/diff.js` |
-| 14 | `SYNC_MESSAGE_DIFF_BATCH` | M→D | Phase 3 分批发送消息级版本状态；按 `MAX_MESSAGES_PER_BATCH`（10000 条）拆分为多个批次 | `topics: Record<topicId, {topicHash: string, messages: Record<msgId, {hash,updatedAt}>}>` | `PipelineCommand::StartMessages` 触发；调用 `Phase3Message::get_topic_message_hashes` 批量查询话题哈希、消息哈希与最终更新时间；`build_diff_batches` 按消息数分片 | `handleSyncMessageDiffBatch`（`sync/diff.js`）：Fast Path → 时间优胜、同时间 Hash 仲裁的 Detailed Path | `sync_service.rs`, `phase3_message.rs`, `sync/diff.js` |
-| 15 | `SYNC_DIFF_RESULTS_BATCH` | D→M | 桌面端完成消息级差异计算后返回逐 Topic 决策 | `results: Record<topicId, Phase3Decision>`，值为 `{ok:true,toPull,toPush,toDelete}` 或 `{ok:false,error}` | 严格校验后按桌面墓碑 → Pull → 落库 → 整 Topic Push 执行；当前批完全收尾前不发送下一批 | 每个请求 Topic 必须精确返回一项，查询失败必须返回 `ok:false` | `sync_service.rs`, `sync/diff.js` |
+| 10 | `SYNC_MANIFEST_REQUEST` | M→D | Phase 1 的 Owner/Avatar 波次或 Phase 2 Topic 波次 | `manifestType`, `items`; Topic 另含 `targetedOwners` | 构造强类型 Manifest | Legacy/CDS 使用同一动作矩阵 | `sync_types.rs`, `sync/manifest.js` |
+| 11 | `SYNC_MANIFEST_RESULT` | D→M | Manifest 仲裁完成 | `manifestType`, `results[{完整身份,action,...}]` | 分类 Pull/Push/Delete | 返回强类型决策 | `diff_handler.rs`, `sync/manifest.js` |
+| 12 | `SYNC_TOPIC_DIFF_REQUEST` | M→D | Phase 2.5 | `topics[{ownerType,ownerId,topicId,configHash,contentHash}]` | 发送完整 TopicKey | 比对双 Hash | `sync_service.rs`, `sync/diff.js` |
+| 13 | `SYNC_TOPIC_DIFF_RESULT` | D→M | Topic 双 Hash 比对完成 | `changedTopics: TopicKey[]` | 进入 Phase 3 或直接跳过 | 返回变更 Topic 完整身份 | `sync_service.rs`, `sync/diff.js` |
+| 14 | `SYNC_MESSAGE_DIFF_REQUEST` | M→D | Phase 3 分批比对 | `topics[{完整 TopicKey,contentHash,messages}]` | 显式 live/deleted 消息状态 | Fast Path 后执行 LWW | `sync_service.rs`, `sync/diff.js` |
+| 15 | `SYNC_MESSAGE_DIFF_RESULT` | D→M | 消息仲裁完成 | `results[{完整 TopicKey,ok,pullMessageIds,pushTopic,deleteMessages}]` | 删除→Pull→flush→整 Topic Push | 每个请求 Topic 精确返回一项 | `batch_diff_handler.rs`, `sync/diff.js` |
 
 ---
 
@@ -41,9 +41,8 @@ scope: 双端
 
 | 序号 | 消息名称 | 方向 | 触发时机 | Payload 关键字段 | 移动端处理函数/位置 | 桌面端处理函数/位置 | 对应代码文件 |
 |-----|---------|------|---------|-----------------|-------------------|-------------------|------------|
-| 17 | `SYNC_ENTITY_DELETE` | M→D | Mobile 本地删除或处理 `PUSH_DELETE` 后通知桌面端 | `id: string`，`dataType: string`，`deletedAt: non-negative i64`；Message 另需 `topicId` | `SyncCommand::NotifyDelete` / `NotifyMessageDelete` 发送；传输失败进入共享重试预算 | 桌面端按原时间戳幂等软删除；Message 离线遗漏另由 HTTP 墓碑重放补齐 | `sync_service.rs`, `index.js` |
+| 17 | `SYNC_ENTITY_DELETE` | M→D | Mobile 本地删除或处理 `PUSH_DELETE` 后通知桌面端 | `targetType`, 完整对象身份, `deletedAt` | 作为在线低延迟通知发送 | 桌面按原时间幂等提交；离线事实由 Manifest/Message Push 重放 | `sync_types.rs`, `index.js` |
 | 18 | `SYNC_ERROR` | 双向 | 任一端遇到不可恢复错误 | `error: {code, origin, stage, kind, retry, message, failedTopicIds}` | 严格解析完整对象并保留根因；诊断 message 不进入 WebView 主文案 | `error-contract.js` 构造统一外壳 | `sync_error.rs`, `transport/websocket.js` |
-| 19 | `SYNC_ACK` | D→M | 桌面端确认收到 `SYNC_ENTITY_DELETE` | `id: string`（对应实体 ID） | 移动端不处理 | `index.js` 返回确认帧 | `sync_service.rs`, `index.js` |
 
 ---
 
@@ -53,27 +52,24 @@ scope: 双端
 |--------|---------|---------|------|--------|------|
 | `type` | `string` | 所有消息 | 是 | — | 消息类型标识符，区分大小写，必须为首层字段 |
 | `mobileVersion` | `string` | `VERSION_CHECK` | 是 | — | 移动端应用版本号，编译期通过 `env!("CARGO_PKG_VERSION")` 嵌入 |
-| `pluginVersion` | `string` | `VERSION_ACK` | 是 | — | 当前必须精确为 `1.3.0` |
-| `protocolVersion` | `string` | `VERSION_CHECK`, `VERSION_ACK` | 是 | — | 当前必须精确为 `1.3` |
+| `pluginVersion` | `string` | `VERSION_ACK` | 是 | — | 插件包诊断版本；当前为 `1.4.0` |
+| `protocolVersion` | `string` | `VERSION_CHECK`, `VERSION_ACK` | 是 | — | 当前 Wire 固定为 `1.4` |
 | `phase` | `string` | `PHASE_START`, `PHASE_COMPLETED`, `PHASE_ACK` | 是 | — | 阶段名称，取值：`owner_metadata`、`topic_metadata`、`messages` |
 | `sessionId` | `u64` / `number` | 最终 `PHASE_COMPLETED`, `PHASE_ACK` | 最终帧必填 | — | 移动端同步会话 owner generation；桌面端必须原样回显 |
 | `attemptId` | `u64` / `number` | 最终 `PHASE_COMPLETED`, `PHASE_ACK` | 最终帧必填 | — | 当前会话内的 reconnect attempt；桌面端必须原样回显 |
 | `nonce` | `string` | 最终 `PHASE_COMPLETED`, `PHASE_ACK` | 最终帧必填 | — | 每次 Finalize 新生成的 UUID v4；用于拒绝过期和重放 ACK |
-| `data` | `EntityState[]` | `SYNC_MANIFEST` | 是 | `[]` | 实体状态向量数组，每个元素为一条实体的指纹与元数据 |
-| `dataType` | `string` | `SYNC_MANIFEST`, `SYNC_DIFF_RESULTS` | 是 | — | 清单类型枚举值：`owner`、`avatar`、`topic`；序列化为小写 |
-| `phase` (number) | `number` | `SYNC_MANIFEST`, `SYNC_DIFF_RESULTS` | 是 | — | 阶段编号：`1`=Owner Metadata, `2`=Topic Metadata；用于桌面端日志分类 |
-| `targetedOwners` | `string[]` | `SYNC_MANIFEST` (phase=2) | 否 | `[]` | V2 优化字段：仅针对特定 Owner ID 列表的话题构建清单；为空数组时视为全量 |
-| `hashes` | `object` | `SYNC_TOPIC_HASH_BATCH_V2` | 是 | — | 兼容哈希 Map；中央路径收到严格 `topics` 列表时不得单独依赖该 Map 推断 Owner |
-| `topics` (array) | `object[]` | `SYNC_TOPIC_HASH_BATCH_V2` | 是 | — | 每项为 `{topicId, ownerType, ownerId, configHash, contentHash}`，提供无歧义 Topic 身份 |
-| `changedTopics` | `string[]` | `SYNC_TOPIC_HASH_RESULTS` | 是 | `[]` | 双哈希比对后判定为变更的话题 ID 列表；空数组表示所有话题一致，可跳过 Phase 3 |
-| `topics` (map) | `object` | `SYNC_MESSAGE_DIFF_BATCH` | 是 | — | Key 为 `topicId`，Value 含必填 `ownerType + ownerId + topicHash + messages` |
-| `results` | `object` | `SYNC_DIFF_RESULTS_BATCH` | 是 | — | Key 为 `topicId`，Value 为严格判别联合；必须精确覆盖当前请求 topic |
-| `ok` | `boolean` | `SYNC_DIFF_RESULTS_BATCH` | 是 | — | `true` 使用 `toPull/toPush`；`false` 使用 `error` 并立即终止 attempt |
-| `toPull` / `toPush` | `string[]` / `boolean` | `ok:true` | 是 | — | 成功分支严禁携带 `error` |
-| `error` | `SyncError` | `SYNC_ERROR`, `ok:false` | 是 | — | 完整 Wire 1.3 对象；失败分支严禁携带 `toPull/toPush` |
+| `manifestType` | `owner/topic/avatar` | Manifest 请求/结果 | 是 | — | 决定清单的唯一状态形态 |
+| `items` | 强类型状态数组 | `SYNC_MANIFEST_REQUEST` | 是 | `[]` | live 状态携带专用 Hash+`updatedAt`；墓碑只携带 `deletedAt` |
+| `targetedOwners` | `OwnerKey[]` | Topic Manifest | 是 | `[]` | 即使 Owner 当前为零 Topic，也明确进入比较范围 |
+| `topics` | `TopicKey` 扩展数组 | Topic/Message Diff | 是 | — | 每项都携带 `ownerType+ownerId+topicId` |
+| `changedTopics` | `TopicKey[]` | `SYNC_TOPIC_DIFF_RESULT` | 是 | `[]` | 双 Hash 不一致的话题 |
+| `results` | 强类型结果数组 | 三类 Result | 是 | `[]` | 结果必须唯一并覆盖当前请求集合 |
+| `ok` | `boolean` | Message Diff 逐 Topic 结果 | 是 | — | `true` 使用决策字段；`false` 只使用 `error` |
+| `pullMessageIds` / `pushTopic` / `deleteMessages` | 数组 / 布尔 / 数组 | Message Diff 成功结果 | 是 | — | `pushTopic` 表示回写整 Topic 最终视图 |
+| `error` | `WireSyncError` | `SYNC_ERROR`, `ok:false` | 是 | — | 完整 Wire 1.4 对象 |
 | `level` | `string` | `SYNC_LOG_EVENT` | 是 | — | 日志级别：`info`（白色）、`success`（绿色）、`warning`（黄色）、`error`（红色） |
 | `message` | `string` | `SYNC_LOG_EVENT`, `SyncError` | 是 | — | 诊断文本；Mobile 持久化时脱敏，前端不直接展示 |
-| `id` | `string` | `SYNC_ENTITY_DELETE`, `SYNC_ACK` | 是 | — | 实体 ID；Avatar 使用 `owner_type:owner_id` |
+| `targetType` | `owner/topic/avatar/message` | `SYNC_ENTITY_DELETE` | 是 | — | 决定随后的完整身份字段 |
 | `deletedAt` | `number` | Diff 删除动作、`SYNC_ENTITY_DELETE` | 是 | — | 非负毫秒时间戳 |
 | `code` | `string` | `SyncError` | 是 | — | 稳定大写机器码；已登记码映射固定中文文案，未知合法码保留但不展示原始 message |
 | `origin` | 闭合集合字符串 | `SyncError` | 是 | — | `mobile_ui/mobile_native/mobile_sync/desktop_plugin/desktop_cds` |
@@ -81,37 +77,35 @@ scope: 双端
 | `kind` | 闭合集合字符串 | `SyncError` | 是 | — | `device/configuration/connection/compatibility/protocol/data/storage/internal` |
 | `retry` | 闭合集合字符串 | `SyncError` | 是 | — | `automatic/after_user_action/manual/never`，直接控制 UI 行为 |
 | `failedTopicIds` | `string[]` | `SyncError` | 是 | `[]` | 去重且最多 8 项；仅用于诊断定位 |
-| `ownerType` | `string` | Owner/Topic `EntityState` 与 DiffResult | 条件 | — | Owner 必填并与 `id` 组成身份；Topic 必填并与 `ownerId + id` 组成身份 |
-| `mismatchedContent` | `boolean` | `SYNC_DIFF_RESULTS` 中 DiffResult | 否 | `false` | V2 标记；`true` 表示 `content_hash` 不一致，用于填充 `changed_owners` 触发 targeted topic sync |
-| `action` | `string` | `SYNC_DIFF_RESULTS` 中 DiffResult | 是 | — | 差异动作：`PULL`（移动端拉取）、`PUSH`（移动端推送）、`DELETE`（移动端软删除）、`PUSH_DELETE`（移动端删除并通知桌面端）、`SKIP`（无需操作） |
+| `ownerType/ownerId/topicId/msgId` | `string` | 对应对象身份 | 条件 | — | 不使用裸 `id` 或 Avatar 拼接 ID |
+| `contentHashMismatch` | `boolean` | Owner Manifest 结果 | 否 | `false` | Owner 下级内容根不一致，触发靶向 Topic 比对 |
+| `action` | `string` | Manifest Result | 是 | — | `PULL/PUSH/PULL_DELETE/PUSH_DELETE/SKIP` |
 
 ---
 
-## 表5：`EntityState` 结构完整字段
+## 表5：Manifest 状态字段
 
 | 字段名 | Rust 类型 | JSON 序列化键 | Option | 必填 | 默认值 | 说明 |
 |--------|----------|--------------|--------|------|--------|------|
-| `id` | `String` | `id` | 否 | 是 | — | 实体唯一标识；Agent/Group 为自身 ID；Topic 为 topic ID；Avatar 为 `owner_type:owner_id` |
-| `hash` | `Option<String>` | `hash` | 是 | 仅 Avatar | `None` | Avatar 二进制内容的 SHA-256 指纹 |
-| `config_hash` | `Option<String>` | `configHash` | 是 | Agent/Group/Topic | `None` | 配置内容指纹；代表实体同步 DTO 的 SHA-256 |
-| `content_hash` | `Option<String>` | `contentHash` | 是 | Agent/Group/Topic | `None` | 内容聚合指纹；代表子实体集合的 Merkle Root，如 Topic 下消息的聚合哈希 |
-| `ts` | `i64` | `ts` | 否 | 是 | — | 绝对时间戳 / 逻辑时钟，毫秒级 Unix Epoch；LWW（Last-Write-Wins，最后写入胜出）裁决标准 |
-| `deleted_at` | `Option<i64>` | `deletedAt` | 是 | 否 | `None` | 软删除时间戳；非空表示该实体已被逻辑删除，用于双向删除同步 |
-| `owner_type` | `Option<String>` | `ownerType` | 是 | Owner/Topic | `None` | Owner 与 `id` 组成身份；Topic 与 `ownerId + id` 组成身份 |
-| `owner_id` | `Option<String>` | `ownerId` | 是 | 否 | `None` | 仅用于 `topic` 类型；与 `ownerType`、Topic ID 共同构成复合身份，协议 1.3 的 Topic manifest 中必须出现 |
+| `owner_type` | `OwnerType` | `ownerType` | 否 | 是 | — | Agent/Group 命名空间；Avatar 另允许 User |
+| `owner_id` | `String` | `ownerId` | 否 | 是 | — | Owner/Avatar 身份；Topic 在此基础上增加 `topicId` |
+| `topic_id` | `String` | `topicId` | 否 | Topic | — | Topic 身份字段 |
+| `config_hash` | `String` | `configHash` | 否 | live Owner/Topic | — | 同步 DTO Hash |
+| `content_hash` | `String` | `contentHash` | 否 | live Owner/Topic | — | 下级内容聚合 Hash |
+| `binary_hash` | `String` | `binaryHash` | 否 | live Avatar | — | 原始头像 bytes Hash |
+| `updated_at` | `i64` | `updatedAt` | 否 | live | — | LWW 时间 |
+| `deleted_at` | `i64` | `deletedAt` | 否 | deleted | — | 墓碑时间；删除状态不伪造 live Hash |
 
 ---
 
-## 表6：`DiffResult` 结构完整字段
+## 表6：Manifest Result 字段
 
 | 字段名 | 类型 | 出现条件 | 必填 | 说明 |
 |--------|------|---------|------|------|
-| `id` | `string` | 始终 | 是 | 实体唯一标识符 |
-| `action` | `string` | 始终 | 是 | 操作类型：`PULL`、`PUSH`、`DELETE`、`PUSH_DELETE`、`SKIP` |
-| `ownerType` | `string` | Owner / Topic 类型 Diff 结果 | 条件 | Owner 中与 `id` 组成身份；Topic 中确定父实体类型 |
-| `ownerId` | `string` | Topic 的 `PUSH`/`PULL` 结果 | 条件 | 精确父实体 ID；不得由 Topic ID 或路径模糊推导 |
-| `deletedAt` | `number` | `action` 为 `DELETE` 或 `PUSH_DELETE` 时 | 条件 | 软删除时间戳，毫秒级 Unix Epoch |
-| `mismatchedContent` | `boolean` | 仅 Owner 类型的 Diff 结果 | 否 | V2 标记；`true` 表示 `content_hash` 不匹配，用于引导后续 targeted topic sync |
+| 完整身份 | `OwnerKey/TopicKey/AvatarKey` | 始终 | 是 | 不使用裸 `id` |
+| `action` | `string` | 始终 | 是 | `PULL`、`PUSH`、`PULL_DELETE`、`PUSH_DELETE`、`SKIP` |
+| `deletedAt` | `number` | `PULL_DELETE/PUSH_DELETE` | 条件 | 非负安全整数 |
+| `contentHashMismatch` | `boolean` | Owner 结果 | 否 | 配置相同但下级内容根不同 |
 
 ---
 
@@ -120,10 +114,10 @@ scope: 双端
 | 动作 | 全称 | 语义 | 移动端行为 | 桌面端行为 | 触发条件 |
 |------|------|------|-----------|-----------|---------|
 | `SKIP` | Skip | 数据一致，无需操作 | 无操作 | 无操作 | 双端 `config_hash` 与 `content_hash` 均一致，且均未删除 |
-| `PULL` | Pull | 桌面端数据较新，移动端需拉取 | 调用 `PullExecutor` 通过 HTTP GET/POST 下载实体或消息 | 返回实体 DTO 或消息流 | 桌面端 `updated_at` 更新，或移动端无此记录，或 `remote.ts ≤ local.ts` 时默认走 PULL |
-| `PUSH` | Push | 移动端数据较新，需推送到桌面端 | 调用 `PushExecutor` 通过 HTTP POST 上传实体或消息 | 接收 DTO，执行 `applyAgentDTO` / `handleTopicUpload` 等合并逻辑 | 移动端 `updated_at` 更新（`remote.ts > local.ts`），或桌面端无此记录 |
-| `DELETE` | Delete | 移动端已标记删除，桌面端需同步删除 | 执行本地软删除（幂等，若已删除则跳过） | 执行软删除索引更新；Agent/Group 类型同时删除物理目录 | 移动端 `deletedAt` 存在，桌面端未删除 |
-| `PUSH_DELETE` | Push Delete | 桌面端已删除，需通知移动端同步删除 | 执行本地软删除，并发送 `SYNC_ENTITY_DELETE` WS 通知桌面端 | 无额外操作（已删除） | 桌面端 `deletedAt` 存在，移动端未删除 |
+| `PULL` | Pull | 桌面端数据较新，移动端需拉取 | 调用 `PullExecutor` 通过 HTTP GET/POST 拉取实体或消息 | 返回实体 DTO 或消息流 | 自身 Hash 不同且 Desktop `updatedAt` 不早于 Mobile，或 Mobile 无此记录 |
+| `PUSH` | Push | 移动端数据较新，需推送到桌面端 | 调用 `PushExecutor` 通过 HTTP POST 推送实体或消息 | 接收 DTO，执行 `applyAgentDTO` / `handleTopicUpload` 等合并逻辑 | 自身 Hash 不同且 Mobile `updatedAt` 更晚，或 Desktop 无此记录 |
+| `PULL_DELETE` | Pull Delete | Desktop 墓碑获胜 | Mobile 幂等删除 | 已删除 | Desktop 墓碑存在且 Mobile 未删除 |
+| `PUSH_DELETE` | Push Delete | Mobile 墓碑获胜 | 发送 `SYNC_ENTITY_DELETE`；后续清单继续重放 | 按原 `deletedAt` 删除 | Mobile 墓碑存在且 Desktop 未删除 |
 
 ---
 
@@ -132,16 +126,16 @@ scope: 双端
 | 消息类型 | 移动端发送时机 | 桌面端处理函数 | 桌面端响应 | 所属协议阶段 | 关键常量/阈值 |
 |---------|-------------|-------------|-----------|------------|-------------|
 | `VERSION_CHECK` | WS 连接建立后 0ms | `index.js` switch-case | `VERSION_ACK` | 握手 | `VERSION_CHECK_TIMEOUT = 5s` |
-| `VERSION_ACK` | —（接收） | `run_sync_session` 版本校验 | 无 | 握手 | `EXPECTED_PLUGIN_VERSION = "1.3.0"`；旧 1.1.0 拒绝、不降级 |
+| `VERSION_ACK` | —（接收） | `run_sync_session` 版本校验 | 无 | 握手 | Wire 必须为 `1.4`；插件版本仅诊断 |
 | `PHASE_START` | 各 Phase 开始时 | `index.js` 记录日志 | `PHASE_ACK` | 全阶段 | `PHASE_RESPONSE_TIMEOUT = 60s` |
 | `PHASE_COMPLETED` | 各 Phase 完成时 | `index.js` 记录日志 | `PHASE_ACK` | 全阶段 | `phase_gate` 去重；最终 ACK 严格匹配四元身份且只消费一次 |
-| `SYNC_MANIFEST` | Phase 1（Owner 两条，drain 后 Avatar 一条）；Phase 2（Topic 一条） | `handleSyncManifest` | `SYNC_DIFF_RESULTS` | Phase 1/2 | 波次缺任一整帧响应 60 秒后失败 |
-| `SYNC_DIFF_RESULTS` | —（接收） | `run_sync_session` 差异任务派发 | 无 | Phase 1/2 | `pending_tasks` + `total_tasks` 原子计数 |
-| `SYNC_TOPIC_HASH_BATCH_V2` | Phase 2.5 开始时 | `handleSyncTopicHashBatchV2` | `SYNC_TOPIC_HASH_RESULTS` | Phase 2.5 | 当前 attempt 最多 10,000 Topic，超限在网络前失败 |
-| `SYNC_TOPIC_HASH_RESULTS` | —（接收） | `run_sync_session` 设置 `changed_topics` | 无 | Phase 2.5 | 必须为已发 Topic 的无重复子集，最多 10,000；空数组时跳过 Phase 3 |
-| `SYNC_MESSAGE_DIFF_BATCH` | Phase 3 分批发送 | `handleSyncMessageDiffBatch` | `SYNC_DIFF_RESULTS_BATCH` | Phase 3 | 单批/单 Topic 最多 10,000 消息，attempt 最多 100,000 |
-| `SYNC_DIFF_RESULTS_BATCH` | —（接收） | `run_sync_session` 按墓碑、Pull、落库、整 Topic Push 执行 | 无 | Phase 3 | `Phase3Tracker` 按 Topic 去重完成 |
-| `SYNC_ENTITY_DELETE` | 本地软删除提交后实时发送 | `index.js` `deleteEntity`/`deleteMessage` | `SYNC_ACK` | 实时通知 | Message 离线遗漏由 Phase 3 HTTP 重放 |
+| `SYNC_MANIFEST_REQUEST` | Phase 1 Owner/Avatar；Phase 2 Topic | `handleSyncManifest` | `SYNC_MANIFEST_RESULT` | Phase 1/2 | 每个内部波次只能消费一次结果 |
+| `SYNC_MANIFEST_RESULT` | —（接收） | 强类型任务派发 | 无 | Phase 1/2 | `pending_tasks` + `total_tasks` 计数 |
+| `SYNC_TOPIC_DIFF_REQUEST` | Phase 2.5 | `handleTopicDiff` | `SYNC_TOPIC_DIFF_RESULT` | Phase 2.5 | 最多 10000 Topic |
+| `SYNC_TOPIC_DIFF_RESULT` | —（接收） | 设置 `changed_topics` | 无 | Phase 2.5 | 完整 TopicKey 的无重复子集 |
+| `SYNC_MESSAGE_DIFF_REQUEST` | Phase 3 分批发送 | `handleMessageDiff` | `SYNC_MESSAGE_DIFF_RESULT` | Phase 3 | 单 Topic/单批 10000，attempt 100000 |
+| `SYNC_MESSAGE_DIFF_RESULT` | —（接收） | 删除→Pull→flush→Push | 无 | Phase 3 | `Phase3Tracker` 按完整 TopicKey 去重 |
+| `SYNC_ENTITY_DELETE` | 本地软删除提交后实时发送 | `index.js` 删除处理 | 无 | 实时通知 | 离线墓碑由 Manifest/Message Push 重放 |
 | `SYNC_LOG_EVENT` | —（接收） | `emit_sync_log` 转发前端 | 无 | 全阶段 | WS 广播给所有已连接客户端 |
 
 ---
@@ -153,24 +147,22 @@ scope: 双端
 | 1 | 移动端 | `VERSION_CHECK` | 连接后第一条消息 |
 | 2 | 桌面端 | `VERSION_ACK` | 立即响应 |
 | 3 | 移动端 | `PHASE_START` (owner_metadata) | Phase 1 开始 |
-| 4 | 移动端 | `SYNC_MANIFEST` (agent) | 第 1 条清单 |
-| 5 | 移动端 | `SYNC_MANIFEST` (group) | 第 2 条清单 |
-| 6 | 移动端 | `SYNC_MANIFEST` (avatar) | 第 3 条清单 |
-| 7 | 桌面端 | `SYNC_DIFF_RESULTS` (agent) | 第 1 条差异结果 |
-| 8 | 桌面端 | `SYNC_DIFF_RESULTS` (group) | 第 2 条差异结果 |
-| 9 | 桌面端 | `SYNC_DIFF_RESULTS` (avatar) | 第 3 条差异结果 |
+| 4 | 移动端 | `SYNC_MANIFEST_REQUEST` (owner) | Owner 清单 |
+| 5 | 桌面端 | `SYNC_MANIFEST_RESULT` (owner) | Owner 决策 |
+| 6 | 移动端 | `SYNC_MANIFEST_REQUEST` (avatar) | Avatar 清单 |
+| 7 | 桌面端 | `SYNC_MANIFEST_RESULT` (avatar) | Avatar 决策 |
 | 10 | 移动端 | `PHASE_COMPLETED` (owner_metadata) | Phase 1 结束 |
 | 11 | 移动端 | `PHASE_START` (topic_metadata) | Phase 2 开始 |
-| 12 | 移动端 | `SYNC_MANIFEST` (topic, phase=2) | 靶向 Topic 清单 |
-| 13 | 桌面端 | `SYNC_DIFF_RESULTS` (topic) | Topic 差异结果 |
+| 12 | 移动端 | `SYNC_MANIFEST_REQUEST` (topic) | 靶向 Topic 清单 |
+| 13 | 桌面端 | `SYNC_MANIFEST_RESULT` (topic) | Topic 决策 |
 | 14 | 移动端 | `PHASE_COMPLETED` (topic_metadata) | Phase 2 结束（逻辑上包含 Phase 2.5） |
-| 15 | 移动端 | `SYNC_TOPIC_HASH_BATCH_V2` | Phase 2.5 开始 |
-| 16 | 桌面端 | `SYNC_TOPIC_HASH_RESULTS` | 变更话题列表 |
+| 15 | 移动端 | `SYNC_TOPIC_DIFF_REQUEST` | Phase 2.5 开始 |
+| 16 | 桌面端 | `SYNC_TOPIC_DIFF_RESULT` | 变更话题列表 |
 | 17 | 移动端 | `PHASE_START` (messages) | Phase 3 开始 |
-| 18 | 移动端 | `SYNC_MESSAGE_DIFF_BATCH` (batch 1) | 第 1 批消息哈希 |
-| 19 | 桌面端 | `SYNC_DIFF_RESULTS_BATCH` | 第 1 批差异结果 |
-| 20 | 移动端 | `SYNC_MESSAGE_DIFF_BATCH` (batch N, 如有) | 后续批次 |
-| 21 | 桌面端 | `SYNC_DIFF_RESULTS_BATCH` | 后续批次结果 |
+| 18 | 移动端 | `SYNC_MESSAGE_DIFF_REQUEST` (batch 1) | 第 1 批消息状态 |
+| 19 | 桌面端 | `SYNC_MESSAGE_DIFF_RESULT` | 第 1 批决策 |
+| 20 | 移动端 | `SYNC_MESSAGE_DIFF_REQUEST` (batch N) | 后续批次 |
+| 21 | 桌面端 | `SYNC_MESSAGE_DIFF_RESULT` | 后续批次决策 |
 | 22 | 移动端 | `PHASE_COMPLETED` (messages, `sessionId/attemptId/nonce`) | Finalize 本地提交后启动最终 ACK 等待 |
 | 23 | 桌面端 | `PHASE_ACK` (exact echo) | 原样回显 `phase/sessionId/attemptId/nonce` |
 | 24 | 移动端 | WS Close | 精确 ACK 消费且最终 drain 成功后主动断开 |
@@ -194,13 +186,10 @@ scope: 双端
 |---------|---------|-------------|---------|---------|
 | `VERSION_CHECK` / `VERSION_ACK` | < 100 B | 1 KB | 无 | — |
 | `PHASE_START` / `PHASE_COMPLETED` / `PHASE_ACK` | < 200 B | 1 KB | 无 | — |
-| `SYNC_MANIFEST` (agent/group) | 1-50 KB | 无硬性限制 | Express JSON 解析 | 过大时内存峰值上升 |
-| `SYNC_MANIFEST` (topic) | 10-500 KB | 无硬性限制 | Express JSON 解析 | 靶向同步（targetedOwners）已大幅降低体积 |
-| `SYNC_DIFF_RESULTS` | 1-100 KB | 无硬性限制 | Express JSON 解析 | — |
-| `SYNC_TOPIC_HASH_BATCH_V2` | 10-200 KB | 无硬性限制 | WS 帧大小 | 哈希字符串固定 64 字节，体积与 Topic 数量线性相关 |
-| `SYNC_TOPIC_HASH_RESULTS` | < 10 KB | 无硬性限制 | WS 帧大小 | — |
-| `SYNC_MESSAGE_DIFF_BATCH` | 500 KB - 8 MiB | 8 MiB | 实际 JSON 序列化字节预算 + 10000 条消息上限 | 单 topic 超限直接失败，不发送超大帧 |
-| `SYNC_DIFF_RESULTS_BATCH` | < 500 KB | 与当前请求批次绑定 | 一批在途门禁 | 当前批 HTTP/DB 收尾前不发送下一批 |
+| `SYNC_MANIFEST_REQUEST/RESULT` | 与实体数线性相关 | 每类固定状态形态 | 强类型解析 | Topic 使用靶向 Owner 范围 |
+| `SYNC_TOPIC_DIFF_REQUEST/RESULT` | 与 Topic 数线性相关 | 最多 10000 Topic | 完整 TopicKey | Hash 固定 64 字节或空根 |
+| `SYNC_MESSAGE_DIFF_REQUEST` | 最多 8 MiB | 10000 状态/批 | 序列化前预算 | 单 Topic 超限直接失败 |
+| `SYNC_MESSAGE_DIFF_RESULT` | 与请求批次绑定 | 一批在途 | 精确覆盖请求 Topic | HTTP/DB 收尾前不发下一批 |
 | `SYNC_LOG_EVENT` | < 1 KB | 无硬性限制 | 无 | 高频日志可能占用带宽 |
 
 ---
@@ -209,10 +198,10 @@ scope: 双端
 
 | `SyncCommand` 变体 | 触发 WS 消息 | 触发时机 | 发送目标 |
 |-------------------|------------|---------|---------|
-| `StartManualSync` | `VERSION_CHECK`, `PHASE_START`, `SYNC_MANIFEST` | 用户点击"同步"按钮 | 桌面端 |
-| `StartTopicMetadata` | `PHASE_START` (topic_metadata), `SYNC_MANIFEST` (topic) | Phase 1 完成且 `changed_owners` 非空 | 桌面端 |
-| `StartTopicValidation` | `SYNC_TOPIC_HASH_BATCH_V2` | Phase 2 完成 | 桌面端 |
-| `StartMessages` | `PHASE_START` (messages), `SYNC_MESSAGE_DIFF_BATCH` | Phase 2.5 完成且 `changedTopics` 非空 | 桌面端 |
+| `StartManualSync` | `VERSION_CHECK`, `PHASE_START`, `SYNC_MANIFEST_REQUEST` | 用户点击同步 | 桌面端 |
+| `StartTopicMetadata` | `PHASE_START`, Topic Manifest | Phase 1 完成且存在变更 Owner | 桌面端 |
+| `StartTopicValidation` | `SYNC_TOPIC_DIFF_REQUEST` | Phase 2 完成 | 桌面端 |
+| `StartMessages` | `PHASE_START`, `SYNC_MESSAGE_DIFF_REQUEST` | Phase 2.5 有变更 Topic | 桌面端 |
 | `Finalize` | `PHASE_COMPLETED` (messages + 四元身份) | Phase 3 所有 Topic 完成 | 桌面端 |
 | `NotifyDelete` | `SYNC_ENTITY_DELETE` | 本地实体软删除提交后 | 桌面端 |
 | `NotifyMessageDelete` | `SYNC_ENTITY_DELETE` | 本地消息软删除提交后 | 桌面端 |
@@ -224,17 +213,16 @@ scope: 双端
 | 接收消息类型 | 处理函数 | 文件位置 | 返回值类型 |
 |-------------|---------|---------|-----------|
 | `VERSION_CHECK` | 直接构造 `VERSION_ACK` | `index.js` | `VERSION_ACK` |
-| `SYNC_MANIFEST` | `handleSyncManifest(payload)` | `sync/manifest.js` | `SYNC_DIFF_RESULTS` |
-| `SYNC_TOPIC_HASH_BATCH_V2` | `handleSyncTopicHashBatchV2(payload)` | `sync/diff.js` | `SYNC_TOPIC_HASH_RESULTS` |
-| `SYNC_MESSAGE_DIFF_BATCH` | `handleSyncMessageDiffBatch(payload)` | `sync/diff.js` | `SYNC_DIFF_RESULTS_BATCH` |
+| `SYNC_MANIFEST_REQUEST` | `handleSyncManifest(payload)` | `sync/manifest.js` | `SYNC_MANIFEST_RESULT` |
+| `SYNC_TOPIC_DIFF_REQUEST` | `handleSyncTopicDiff(payload)` | `sync/diff.js` | `SYNC_TOPIC_DIFF_RESULT` |
+| `SYNC_MESSAGE_DIFF_REQUEST` | `handleSyncMessageDiff(payload)` | `sync/diff.js` | `SYNC_MESSAGE_DIFF_RESULT` |
 | `PHASE_START` | 记录日志，返回 `PHASE_ACK` | `index.js` | `PHASE_ACK` |
 | `PHASE_COMPLETED` | 记录日志；最终帧原样回显四元身份 | `index.js` | `PHASE_ACK` |
-| `SYNC_ENTITY_DELETE` | `deleteEntity` / `deleteMessage` | `index.js` | `SYNC_ACK` |
+| `SYNC_ENTITY_DELETE` | `deleteEntity` / `deleteMessage` | `index.js` | 无业务 ACK |
 | `VERSION_ACK` | —（桌面端仅发送，不作为桌面端入站帧） | — | — |
 | `PHASE_ACK` | —（桌面端发送） | 普通阶段仅记录；最终阶段精确匹配 pending key | — |
 | `SYNC_LOG_EVENT` | —（桌面端仅发送，不作为桌面端入站帧） | — | — |
 | `SYNC_ERROR` | —（桌面端仅发送，不作为桌面端入站帧） | — | — |
-| `SYNC_ACK` | —（桌面端仅发送，不作为桌面端入站帧） | — | — |
 ## 表14：消息与前端事件映射
 
 | WS 消息 | 前端事件 | Payload 字段映射 | 触发 UI 更新 |
@@ -252,11 +240,11 @@ scope: 双端
 
 | 命名模式 | 使用场景 | 示例 | 说明 |
 |---------|---------|------|------|
-| `SYNC_*` | 同步核心业务消息 | `SYNC_MANIFEST`, `SYNC_DIFF_RESULTS` | 大驼峰式，描述同步操作语义 |
+| `SYNC_*` | 同步核心业务消息 | `SYNC_MANIFEST_REQUEST/RESULT` | 请求/结果成对命名 |
 | `PHASE_*` | 阶段控制与确认 | `PHASE_START`, `PHASE_COMPLETED`, `PHASE_ACK` | 小写阶段名作为参数 |
 | `DESKTOP_*` | 桌面端主动上报的进度消息 | `DESKTOP_PHASE_START` | 前缀标识来源端，避免命名冲突 |
 | `VERSION_*` | 握手协议 | `VERSION_CHECK`, `VERSION_ACK` | 仅握手阶段使用 |
-| `*_BATCH` / `*_BATCH_V2` | 批量请求 | `SYNC_TOPIC_HASH_BATCH_V2` | V2 后缀表示协议升级版本 |
+| 协议版本 | 只在握手表达 | `protocolVersion: 1.4` | 业务帧名不带 `V2/BATCH` 历史后缀 |
 | `*_DELETE` | Mobile 在线删除通知 | `SYNC_ENTITY_DELETE` | 属于当前 session/attempt；离线删除仍由 Manifest/Phase 3 墓碑重放 |
 
 ---
@@ -266,16 +254,16 @@ scope: 双端
 | 现象 / 问题 | 检查消息类型 | 排查方向 | 关键代码位置 |
 |------------|------------|---------|------------|
 | 同步卡住，进度条不动 | `PHASE_START` / `PHASE_COMPLETED` / `PHASE_ACK` | 检查 `phase_gate`、差异任务错误；Finalize 时确认 peer 原样回显 `sessionId/attemptId/phase/nonce` | `sync_service.rs` phase_gate / final ACK 逻辑 |
-| Phase 3 执行但无消息传输 | `SYNC_TOPIC_HASH_BATCH_V2` → `SYNC_TOPIC_HASH_RESULTS` | 检查 `changedTopics` 是否为空数组（所有 Topic 双哈希一致，正确跳过 Phase 3） | `sync/diff.js` `handleSyncTopicHashBatchV2` |
-| 消息重复同步 | `SYNC_DIFF_RESULTS_BATCH` | 检查 `Phase3Tracker` HashSet 去重是否失效；检查 `toPull` 列表是否包含已存在消息 | `sync_service.rs` `Phase3Tracker` |
+| Phase 3 未传消息 | `SYNC_TOPIC_DIFF_REQUEST/RESULT` | `changedTopics` 为空时正确跳过 | `sync/diff.js` |
+| 消息重复同步 | `SYNC_MESSAGE_DIFF_RESULT` | 检查完整 TopicKey 覆盖与 `pullMessageIds` | `Phase3Tracker` |
 | 删除后另一端仍有数据 | Diff 删除动作 / `SYNC_ENTITY_DELETE` | 检查完整身份与 `deletedAt`，再检查下一次 Manifest 是否仍携带墓碑 | `sync_service.rs`, `DeleteExecutor` |
-| 版本不匹配导致连接断开 | `VERSION_CHECK` / `VERSION_ACK` | 核对桌面端 `plugin-manifest.json.version` 是否精确等于 `EXPECTED_PLUGIN_VERSION` 1.3.0；1.1.0 不兼容 | `sync_service.rs` 版本校验逻辑 |
+| 版本不匹配导致连接断开 | `VERSION_CHECK` / `VERSION_ACK` | 核对双方 Wire 是否为 1.4；插件包版本只用于诊断 | `sync_service.rs` |
 | WS 连接频繁断开 | `SYNC_LOG_EVENT` / `SYNC_ERROR` | 检查网络稳定性、服务端状态与连接错误日志 | `sync_service.rs` 连接管理逻辑 |
-| Phase 2 数据传输量过大 | `SYNC_MANIFEST` (topic, phase=2) | 检查 `targetedOwners` 是否正确填充；确认 `changed_owners` 是否包含未变更 Owner | `manifest_builder.rs` `build_targeted_topic_manifest` |
-| 消息级差异比对过慢 | `SYNC_MESSAGE_DIFF_BATCH` | 检查是否已启用 Fast Path（话题级哈希匹配直接跳过）；检查分片策略 | `sync/diff.js` `handleSyncMessageDiffBatch` |
+| Phase 2 数据传输量过大 | Topic Manifest | 检查 `targetedOwners` 与 `changed_owners` | `phase1_metadata.rs` |
+| 消息级差异比对过慢 | `SYNC_MESSAGE_DIFF_REQUEST` | 检查 `contentHash` Fast Path 与分片 | `sync/diff.js` |
 | 日志终端无桌面端输出 | `DESKTOP_PHASE_*` / `SYNC_LOG_EVENT` | 检查桌面端 `SyncLogger` 是否启用 WS 通道；检查 WebSocket 连接是否建立 | `core/logger.js` WS 广播逻辑 |
-| 附件元数据存在但文件无法打开 | `SYNC_DIFF_RESULTS_BATCH` (toPull) | 检查本机是否已有相同 Hash 的 CAS；同步不传输附件二进制 | 本机附件存储 |
+| 附件元数据存在但文件无法打开 | `SYNC_MESSAGE_DIFF_RESULT` | 检查本机 CAS；同步不传附件二进制 | 本机附件存储 |
 
 ---
 
-*当前硬切兼容基线：VCPMobile `1.1.5` + VCPMobileSync 包 `1.3.0` + wire protocol `1.3`；旧字段、字符串错误与 1.1 peer 不兼容。*
+*当前硬切基线：VCPMobileSync 包 `1.4.0`、Wire `1.4`；不保留旧字段或旧帧别名。*

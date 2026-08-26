@@ -1,14 +1,15 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::{DbWriteQueue, DbWriteTask};
 use crate::vcp_modules::message_repository::MessageRenderCompiler;
-use crate::vcp_modules::sync_dto::{
-    AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
-};
 use crate::vcp_modules::sync_error::{
     encode_http_sync_error_body, encode_wire_sync_error, encode_wire_sync_error_value,
     parse_wire_sync_error, WireSyncError,
 };
 use crate::vcp_modules::sync_hash::HashAggregator;
+use crate::vcp_modules::sync_types::{
+    EntityPullData, EntityPullRequest, EntityPullResponse, EntityPullResult, EntitySelector,
+    MessagePullRequest, MessagePullTopicSelector, OwnerType,
+};
 use crate::vcp_modules::topic_types::TopicKey;
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
@@ -34,48 +35,6 @@ const MAX_MESSAGE_IDS_PER_TOPIC: usize = 10_000;
 const MAX_MESSAGE_PULL_TOPICS: usize = 10_000;
 const MAX_AVATAR_RESPONSE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES: usize = 1024 * 1024;
-
-type EntityPullIdentity = (String, String, String, String);
-
-fn entity_pull_identity(value: &Value, label: &str) -> Result<EntityPullIdentity, String> {
-    let id = value
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty())
-        .ok_or_else(|| format!("{label} requires a non-empty id"))?;
-    let entity_type = value
-        .get("type")
-        .and_then(Value::as_str)
-        .filter(|value| matches!(*value, "agent" | "group" | "agent_topic" | "group_topic"))
-        .ok_or_else(|| format!("{label} {id} has an invalid type"))?;
-    let (owner_type, owner_id) = match entity_type {
-        "agent_topic" | "group_topic" => {
-            let expected_owner_type = if entity_type == "agent_topic" {
-                "agent"
-            } else {
-                "group"
-            };
-            let owner_type = value
-                .get("ownerType")
-                .and_then(Value::as_str)
-                .filter(|owner_type| *owner_type == expected_owner_type)
-                .ok_or_else(|| format!("{label} {entity_type}/{id} has a mismatched ownerType"))?;
-            let owner_id = value
-                .get("ownerId")
-                .and_then(Value::as_str)
-                .filter(|owner_id| !owner_id.is_empty())
-                .ok_or_else(|| format!("{label} {entity_type}/{id} requires ownerId"))?;
-            (owner_type.to_string(), owner_id.to_string())
-        }
-        _ => (String::new(), String::new()),
-    };
-    Ok((
-        entity_type.to_string(),
-        id.to_string(),
-        owner_type,
-        owner_id,
-    ))
-}
 
 async fn read_response_limited(
     response: reqwest::Response,
@@ -120,18 +79,26 @@ fn http_status_error(operation: &str, status: reqwest::StatusCode, bytes: &[u8])
     match encode_http_sync_error_body(bytes) {
         Ok(Some(encoded)) => encoded,
         Ok(None) => {
-            format!("{operation} failed with HTTP {status} without a Wire 1.3 error object")
+            format!("{operation} failed with HTTP {status} without a Wire 1.4 error object")
         }
-        Err(error) => format!("{operation} returned an invalid Wire 1.3 error: {error}"),
+        Err(error) => format!("{operation} returned an invalid Wire 1.4 error: {error}"),
     }
 }
 
 fn parse_stream_error_frame(bytes: &[u8]) -> Result<Option<String>, String> {
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|error| format!("Malformed NDJSON frame: {error}"))?;
-    match value.get("_stream_error") {
-        Some(error) => encode_wire_sync_error_value(error).map(Some),
-        None => Ok(None),
+    match value.get("kind").and_then(Value::as_str) {
+        Some("streamError") => {
+            let object = value
+                .as_object()
+                .ok_or_else(|| "streamError frame must be an object".to_string())?;
+            if object.len() != 2 || !object.contains_key("error") {
+                return Err("streamError frame requires exactly kind and error".to_string());
+            }
+            encode_wire_sync_error_value(&object["error"]).map(Some)
+        }
+        _ => Ok(None),
     }
 }
 
@@ -184,8 +151,8 @@ impl NdjsonBudget {
 
 struct TopicNDJSONFrame {
     topic_id: String,
-    owner_type: Option<String>,
-    owner_id: Option<String>,
+    owner_type: String,
+    owner_id: String,
     messages: Vec<crate::vcp_modules::sync_dto::MessageSyncDTO>,
     error: Option<WireSyncError>,
     legacy_attachment_warnings: usize,
@@ -326,49 +293,102 @@ fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
         Value::Object(object) => object,
         _ => return Err("NDJSON frame must be an object".to_string()),
     };
+    if object.get("kind").and_then(Value::as_str) != Some("topic") {
+        return Err("NDJSON topic frame requires kind=topic".to_string());
+    }
     let topic_id = object
         .get("topicId")
         .and_then(Value::as_str)
         .filter(|topic_id| !topic_id.is_empty())
         .ok_or_else(|| "NDJSON frame contains missing or empty topicId".to_string())?
         .to_string();
-    let owner_identity = match (object.get("ownerType"), object.get("ownerId")) {
-        (None | Some(Value::Null), None | Some(Value::Null)) => None,
-        (Some(Value::String(owner_type)), Some(Value::String(owner_id)))
-            if matches!(owner_type.as_str(), "agent" | "group") && !owner_id.is_empty() =>
-        {
-            Some((owner_type.clone(), owner_id.clone()))
-        }
-        _ => {
+    let owner_type = object
+        .get("ownerType")
+        .and_then(Value::as_str)
+        .filter(|owner_type| matches!(*owner_type, "agent" | "group"))
+        .ok_or_else(|| format!("NDJSON frame for {topic_id} requires valid ownerType"))?
+        .to_string();
+    let owner_id = object
+        .get("ownerId")
+        .and_then(Value::as_str)
+        .filter(|owner_id| !owner_id.is_empty())
+        .ok_or_else(|| format!("NDJSON frame for {topic_id} requires ownerId"))?
+        .to_string();
+    let ok = object
+        .get("ok")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| format!("NDJSON frame for {topic_id} requires boolean ok"))?;
+    if !ok {
+        let error = object
+            .get("error")
+            .ok_or_else(|| format!("NDJSON error frame for {topic_id} requires error"))
+            .and_then(|error| {
+                parse_wire_sync_error(error).map_err(|parse_error| {
+                    format!("NDJSON error frame for {topic_id} is invalid: {parse_error}")
+                })
+            })?;
+        if object.len() != 6 {
             return Err(format!(
-                "NDJSON frame for {topic_id} requires valid ownerType and ownerId together"
-            ))
-        }
-    };
-    let error = match object.get("_error") {
-        None | Some(Value::Null) => None,
-        Some(error) => Some(parse_wire_sync_error(error).map_err(|parse_error| {
-            format!("NDJSON error frame for {topic_id} is invalid: {parse_error}")
-        })?),
-    };
-    if error.is_some() {
-        if object
-            .get("messages")
-            .is_some_and(|messages| !matches!(messages, Value::Array(values) if values.is_empty()))
-        {
-            return Err(format!(
-                "NDJSON error frame for {topic_id} must not contain live messages"
+                "NDJSON error frame for {topic_id} has unexpected fields"
             ));
         }
         return Ok(TopicNDJSONFrame {
             topic_id,
-            owner_type: owner_identity.as_ref().map(|identity| identity.0.clone()),
-            owner_id: owner_identity.map(|identity| identity.1),
+            owner_type,
+            owner_id,
             messages: Vec::new(),
-            error,
+            error: Some(error),
             legacy_attachment_warnings: 0,
             warning_samples: Vec::new(),
         });
+    }
+    if object.contains_key("error") {
+        return Err(format!(
+            "Successful NDJSON frame for {topic_id} must not contain error"
+        ));
+    }
+    let has_warning_count = object.contains_key("legacyAttachmentWarnings");
+    let has_warning_samples = object.contains_key("warningSamples");
+    if has_warning_count != has_warning_samples {
+        return Err(format!(
+            "NDJSON frame for {topic_id} requires warning count and samples together"
+        ));
+    }
+    let mut expected_keys = vec!["kind", "topicId", "ownerType", "ownerId", "ok", "messages"];
+    if has_warning_count {
+        expected_keys.extend(["legacyAttachmentWarnings", "warningSamples"]);
+    }
+    if object.len() != expected_keys.len()
+        || expected_keys.iter().any(|key| !object.contains_key(*key))
+    {
+        return Err(format!(
+            "Successful NDJSON frame for {topic_id} has unexpected fields"
+        ));
+    }
+
+    let mut warnings = BoundedWarnings::default();
+    if has_warning_count {
+        let count = object
+            .get("legacyAttachmentWarnings")
+            .and_then(Value::as_u64)
+            .and_then(|count| usize::try_from(count).ok())
+            .ok_or_else(|| format!("NDJSON frame for {topic_id} has invalid warning count"))?;
+        let samples = object
+            .get("warningSamples")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("NDJSON frame for {topic_id} has invalid warning samples"))?;
+        if samples.iter().any(|sample| !sample.is_string()) {
+            return Err(format!(
+                "NDJSON frame for {topic_id} warning samples must be strings"
+            ));
+        }
+        warnings.count = count;
+        warnings.samples = samples
+            .iter()
+            .filter_map(Value::as_str)
+            .take(MAX_WARNING_SAMPLES)
+            .map(str::to_string)
+            .collect();
     }
 
     let raw_messages = match object.remove("messages") {
@@ -384,7 +404,6 @@ fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
             "NDJSON frame for {topic_id} exceeds {MAX_NDJSON_ENTITIES} message budget"
         ));
     }
-    let mut warnings = BoundedWarnings::default();
     let mut seen_message_ids = HashSet::new();
     let mut messages = Vec::with_capacity(raw_messages.len());
     for raw_message in raw_messages {
@@ -467,8 +486,8 @@ fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
 
     Ok(TopicNDJSONFrame {
         topic_id,
-        owner_type: owner_identity.as_ref().map(|identity| identity.0.clone()),
-        owner_id: owner_identity.map(|identity| identity.1),
+        owner_type,
+        owner_id,
         messages,
         error: None,
         legacy_attachment_warnings: warnings.count,
@@ -480,11 +499,7 @@ fn validate_returned_topic_identity(
     frame: &TopicNDJSONFrame,
     expected: &HashSet<TopicKey>,
 ) -> Result<TopicKey, String> {
-    let key = TopicKey::new(
-        frame.owner_type.clone().unwrap_or_default(),
-        frame.owner_id.clone().unwrap_or_default(),
-        &frame.topic_id,
-    );
+    let key = TopicKey::new(&frame.owner_type, &frame.owner_id, &frame.topic_id);
     if !expected.contains(&key) {
         return Err(format!(
             "NDJSON returned unexpected topic identity for {}",
@@ -752,7 +767,7 @@ impl PullExecutor {
         client: &reqwest::Client,
         http_url: &str,
         sync_token: &str,
-        requests: Vec<serde_json::Value>,
+        requests: Vec<EntitySelector>,
         write_queue: &DbWriteQueue,
     ) -> Result<(), String> {
         if requests.len() > MAX_ENTITY_BATCH_ITEMS {
@@ -762,24 +777,21 @@ impl PullExecutor {
         }
         let mut expected = HashSet::new();
         for request in &requests {
-            let key = entity_pull_identity(request, "Entity pull request")?;
-            if !expected.insert(key.clone()) {
+            if !expected.insert(request.clone()) {
                 return Err(format!(
-                    "Entity pull request contains duplicate {entity_type}/{id}",
-                    entity_type = key.0,
-                    id = key.1,
+                    "Entity pull request contains duplicate {}",
+                    request.label()
                 ));
             }
         }
-        let request_body = serde_json::to_vec(&serde_json::json!({ "requests": requests }))
+        let request_body = serde_json::to_vec(&EntityPullRequest { items: requests })
             .map_err(|error| format!("Entity pull request serialization failed: {error}"))?;
         if request_body.len() > MAX_ENTITY_BATCH_BYTES {
             return Err("Entity pull request exceeds 10 MiB".to_string());
         }
-        let url = format!("{}/api/mobile-sync/download-entities", http_url);
+        let url = format!("{}/api/mobile-sync/entities/pull", http_url);
         let res = client
             .post(&url)
-            .header("x-sync-token", sync_token)
             .header("Authorization", format!("Bearer {}", sync_token))
             .header("Content-Type", "application/json")
             .body(request_body)
@@ -792,8 +804,9 @@ impl PullExecutor {
         if !status.is_success() {
             return Err(http_status_error("Pull entities batch", status, &bytes));
         }
-        let results: Vec<serde_json::Value> =
-            serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+        let response: EntityPullResponse = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("Entity pull returned invalid JSON: {error}"))?;
+        let results = response.results;
         log::info!(
             "[PullExecutor] Received {} entities from server",
             results.len()
@@ -804,91 +817,127 @@ impl PullExecutor {
         let mut seen = HashSet::new();
 
         for item in results {
-            let key = entity_pull_identity(&item, "Entity pull result")?;
-            let r#type = key.0.as_str();
-            let id = key.1.as_str();
+            let (key, ok, data, error) = match item {
+                EntityPullResult::Owner {
+                    owner_type,
+                    owner_id,
+                    ok,
+                    data,
+                    error,
+                } => (EntitySelector::owner(owner_type, owner_id), ok, data, error),
+                EntityPullResult::Topic {
+                    owner_type,
+                    owner_id,
+                    topic_id,
+                    ok,
+                    data,
+                    error,
+                } => (
+                    EntitySelector::Topic {
+                        owner_type,
+                        owner_id,
+                        topic_id,
+                    },
+                    ok,
+                    data,
+                    error,
+                ),
+            };
             if !expected.contains(&key) {
-                return Err(format!(
-                    "Entity pull returned unexpected result {type_name}/{id}",
-                    type_name = r#type
-                ));
+                return Err(format!("Entity pull returned unexpected {}", key.label()));
             }
             if !seen.insert(key.clone()) {
+                return Err(format!("Entity pull returned duplicate {}", key.label()));
+            }
+            if !ok {
+                let error = error
+                    .as_ref()
+                    .ok_or_else(|| format!("Entity pull {} failure is missing error", key.label()))
+                    .and_then(encode_wire_sync_error)?;
+                return Err(format!("Entity pull {} failed: {error}", key.label()));
+            }
+            if error.is_some() {
                 return Err(format!(
-                    "Entity pull returned duplicate result {type_name}/{id}",
-                    type_name = r#type
+                    "Successful entity pull {} must not contain an error",
+                    key.label()
                 ));
             }
-            if item.get("success").and_then(Value::as_bool) != Some(true) {
-                let error = item
-                    .get("error")
-                    .ok_or_else(|| {
-                        format!(
-                            "Entity pull {type_name}/{id} failure is missing error",
-                            type_name = r#type
-                        )
-                    })
-                    .and_then(encode_wire_sync_error_value)?;
-                return Err(format!(
-                    "Entity pull {type_name}/{id} failed: {error}",
-                    type_name = r#type
-                ));
-            }
-            if item.get("error").is_some() {
-                return Err(format!(
-                    "Successful entity pull {type_name}/{id} must not contain an error",
-                    type_name = r#type
-                ));
-            }
-            let data = item.get("data").cloned().ok_or_else(|| {
-                format!(
-                    "Entity pull result {type_name}/{id} requires data",
-                    type_name = r#type
-                )
-            })?;
+            let data =
+                data.ok_or_else(|| format!("Entity pull result {} requires data", key.label()))?;
 
-            match r#type {
-                "agent" => {
-                    let dto = serde_json::from_value::<AgentSyncDTO>(data)
-                        .map_err(|error| format!("Invalid agent {id}: {error}"))?;
+            match (&key, data) {
+                (
+                    EntitySelector::Owner {
+                        owner_type: OwnerType::Agent,
+                        owner_id,
+                    },
+                    EntityPullData::Agent(dto),
+                ) => {
                     write_queue
                         .submit(DbWriteTask::Agent {
-                            id: id.to_string(),
+                            id: owner_id.clone(),
                             dto,
                         })
                         .await?;
                 }
-                "group" => {
-                    let dto = serde_json::from_value::<GroupSyncDTO>(data)
-                        .map_err(|error| format!("Invalid group {id}: {error}"))?;
+                (
+                    EntitySelector::Owner {
+                        owner_type: OwnerType::Group,
+                        owner_id,
+                    },
+                    EntityPullData::Group(dto),
+                ) => {
                     write_queue
                         .submit(DbWriteTask::Group {
-                            id: id.to_string(),
+                            id: owner_id.clone(),
                             dto,
                         })
                         .await?;
                 }
-                "agent_topic" => {
-                    let dto = serde_json::from_value::<AgentTopicSyncDTO>(data)
-                        .map_err(|error| format!("Invalid agent topic {id}: {error}"))?;
-                    if dto.id != id || dto.owner_id != key.3 {
+                (
+                    EntitySelector::Topic {
+                        owner_type: OwnerType::Agent,
+                        owner_id,
+                        topic_id,
+                    },
+                    EntityPullData::AgentTopic(dto),
+                ) => {
+                    if dto.id != *topic_id || dto.owner_id != *owner_id {
                         return Err(format!(
-                            "Agent topic {id} data does not match the requested owner"
+                            "Agent topic {} data does not match the requested owner",
+                            topic_id
                         ));
                     }
-                    agent_topics.push((TopicKey::new("agent", &key.3, id), dto));
+                    agent_topics.push((
+                        TopicKey::new(OwnerType::Agent.as_str(), owner_id, topic_id),
+                        dto,
+                    ));
                 }
-                "group_topic" => {
-                    let dto = serde_json::from_value::<GroupTopicSyncDTO>(data)
-                        .map_err(|error| format!("Invalid group topic {id}: {error}"))?;
-                    if dto.id != id || dto.owner_id != key.3 {
+                (
+                    EntitySelector::Topic {
+                        owner_type: OwnerType::Group,
+                        owner_id,
+                        topic_id,
+                    },
+                    EntityPullData::GroupTopic(dto),
+                ) => {
+                    if dto.id != *topic_id || dto.owner_id != *owner_id {
                         return Err(format!(
-                            "Group topic {id} data does not match the requested owner"
+                            "Group topic {} data does not match the requested owner",
+                            topic_id
                         ));
                     }
-                    group_topics.push((TopicKey::new("group", &key.3, id), dto));
+                    group_topics.push((
+                        TopicKey::new(OwnerType::Group.as_str(), owner_id, topic_id),
+                        dto,
+                    ));
                 }
-                _ => return Err(format!("Entity pull returned unsupported type {}", r#type)),
+                _ => {
+                    return Err(format!(
+                        "Entity pull {} returned the wrong DTO type",
+                        key.label()
+                    ));
+                }
             }
         }
 
@@ -944,8 +993,8 @@ impl PullExecutor {
             return Err(format!("Invalid avatar owner {owner_type}/{owner_id}"));
         }
         let url = format!(
-            "{}/api/mobile-sync/download-avatar?id={}&type={}",
-            http_url, owner_id, owner_type
+            "{}/api/mobile-sync/avatars/pull?ownerType={}&ownerId={}",
+            http_url, owner_type, owner_id
         );
 
         // 指数退避重试：avatar 下载受网络波动影响较大
@@ -955,7 +1004,6 @@ impl PullExecutor {
         loop {
             match client
                 .get(&url)
-                .header("x-sync-token", sync_token)
                 .header("Authorization", format!("Bearer {}", sync_token))
                 .send()
                 .await
@@ -1087,24 +1135,25 @@ impl PullExecutor {
         let expected_topics = expected_message_ids.keys().cloned().collect::<HashSet<_>>();
         let mut seen_topics = HashSet::new();
 
-        let url = format!("{}/api/mobile-sync/download-messages-stream", http_url);
-        let req_body: Vec<serde_json::Value> = requests
+        let url = format!("{}/api/mobile-sync/messages/pull", http_url);
+        let req_body = requests
             .iter()
-            .map(|(key, message_ids)| -> Result<serde_json::Value, String> {
-                Ok(serde_json::json!({
-                    "topicId": key.topic_id,
-                    "ownerType": key.owner_type,
-                    "ownerId": key.owner_id,
-                    "msgIds": message_ids,
-                }))
+            .map(|(key, message_ids)| {
+                let owner_type = OwnerType::try_from(key.owner_type.as_str())
+                    .map_err(|_| format!("Pull request {} has invalid ownerType", key.topic_id))?;
+                Ok(MessagePullTopicSelector {
+                    owner_type,
+                    owner_id: key.owner_id.clone(),
+                    topic_id: key.topic_id.clone(),
+                    message_ids: message_ids.clone(),
+                })
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, String>>()?;
 
         let res = client
             .post(&url)
-            .header("x-sync-token", sync_token)
             .header("Authorization", format!("Bearer {}", sync_token))
-            .json(&serde_json::json!({ "requests": req_body }))
+            .json(&MessagePullRequest { topics: req_body })
             .send()
             .await
             .map_err(|e| e.to_string())?;
@@ -1174,14 +1223,6 @@ impl PullExecutor {
             ndjson_budget.observe_chunk(chunk.len())?;
             if chunk.len() > MAX_NDJSON_TRANSPORT_CHUNK_BYTES {
                 return Err("NDJSON transport chunk exceeds 32MB budget".to_string());
-            }
-
-            // 检测流级错误帧；Wire 1.3 要求错误对象完整保留。
-            if chunk.starts_with(b"{\"_stream_error\"") || chunk.starts_with(br#"{"_stream_error""#)
-            {
-                if let Some(error) = parse_stream_error_frame(&chunk)? {
-                    return Err(error);
-                }
             }
 
             // Preserve the transport allocation whenever possible. If a partial line exists,
@@ -1508,10 +1549,11 @@ impl PullExecutor {
 #[cfg(test)]
 mod ndjson_budget_tests {
     use super::{
-        entity_pull_identity, parse_topic_ndjson_frame, pull_worker_permits,
-        validate_requested_message_ids, validate_returned_topic_identity, NdjsonBudget,
-        MAX_NDJSON_LINE_BYTES, MAX_NDJSON_TOTAL_BYTES, PULL_WORKER_BUDGET_UNITS,
+        parse_topic_ndjson_frame, pull_worker_permits, validate_requested_message_ids,
+        validate_returned_topic_identity, NdjsonBudget, MAX_NDJSON_LINE_BYTES,
+        MAX_NDJSON_TOTAL_BYTES, PULL_WORKER_BUDGET_UNITS,
     };
+    use crate::vcp_modules::sync_types::EntitySelector;
     use crate::vcp_modules::topic_types::TopicKey;
     use serde_json::json;
     use std::collections::HashSet;
@@ -1521,15 +1563,23 @@ mod ndjson_budget_tests {
 
     const PROTOCOL_1_2_GOLDEN: &[u8] = include_bytes!("../fixtures/protocol_1_2_golden.json");
 
+    fn success_frame(mut value: serde_json::Value) -> serde_json::Value {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("kind".to_string(), json!("topic"));
+            object.insert("ownerType".to_string(), json!("agent"));
+            object.insert("ownerId".to_string(), json!("agent-a"));
+            object.insert("ok".to_string(), json!(true));
+        }
+        value
+    }
+
     #[test]
     fn pull_frame_owner_identity_must_match_the_local_topic() {
         let frame = parse_topic_ndjson_frame(
-            json!({
+            success_frame(json!({
                 "topicId": "topic-a",
-                "ownerType": "agent",
-                "ownerId": "agent-a",
                 "messages": [],
-            })
+            }))
             .to_string()
             .as_bytes(),
         )
@@ -1543,24 +1593,18 @@ mod ndjson_budget_tests {
 
     #[test]
     fn entity_pull_identity_includes_the_topic_owner() {
-        let agent_topic = json!({
-            "id": "topic-a",
-            "type": "agent_topic",
-            "ownerType": "agent",
-            "ownerId": "agent-a",
-        });
+        let agent_topic = EntitySelector::topic(&TopicKey::new("agent", "agent-a", "topic-a"))
+            .expect("compound identity");
         assert_eq!(
-            entity_pull_identity(&agent_topic, "request").expect("compound identity"),
-            (
-                "agent_topic".to_string(),
-                "topic-a".to_string(),
-                "agent".to_string(),
-                "agent-a".to_string(),
-            )
+            serde_json::to_value(agent_topic).expect("serialize selector"),
+            json!({
+                "entityType": "topic",
+                "ownerType": "agent",
+                "ownerId": "agent-a",
+                "topicId": "topic-a",
+            })
         );
-        assert!(
-            entity_pull_identity(&json!({"id":"topic-a","type":"agent_topic"}), "request").is_err()
-        );
+        assert!(EntitySelector::topic(&TopicKey::new("unknown", "owner", "topic-a")).is_err());
     }
 
     #[test]
@@ -1572,7 +1616,8 @@ mod ndjson_budget_tests {
             .as_array()
             .expect("valid golden frames")
         {
-            let bytes = serde_json::to_vec(&case["input"]).expect("serialize golden frame");
+            let bytes = serde_json::to_vec(&success_frame(case["input"].clone()))
+                .expect("serialize golden frame");
             let parsed = parse_topic_ndjson_frame(&bytes).expect("valid golden frame");
             let expected = &case["expected"];
             assert_eq!(parsed.topic_id, expected["topicId"]);
@@ -1620,7 +1665,8 @@ mod ndjson_budget_tests {
             .as_array()
             .expect("invalid golden frames")
         {
-            let bytes = serde_json::to_vec(&case["input"]).expect("serialize invalid frame");
+            let bytes = serde_json::to_vec(&success_frame(case["input"].clone()))
+                .expect("serialize invalid frame");
             let error = match parse_topic_ndjson_frame(&bytes) {
                 Err(error) => error,
                 Ok(_) => panic!("invalid golden frame was accepted"),
@@ -1678,7 +1724,7 @@ mod ndjson_budget_tests {
             }]
         });
 
-        let parsed = parse_topic_ndjson_frame(frame.to_string().as_bytes())
+        let parsed = parse_topic_ndjson_frame(success_frame(frame).to_string().as_bytes())
             .expect("the sole valid hash must be used");
         assert_eq!(parsed.legacy_attachment_warnings, 0);
         let attachments = parsed.messages[0].attachments.as_ref().unwrap();
@@ -1687,14 +1733,15 @@ mod ndjson_budget_tests {
     }
 
     #[test]
-    fn ndjson_error_frames_require_the_wire_1_2_object() {
+    fn ndjson_error_frames_require_the_wire_1_4_object() {
         let parsed = parse_topic_ndjson_frame(
             json!({
+                "kind": "topic",
                 "topicId": "topic-a",
                 "ownerType": "agent",
                 "ownerId": "agent-a",
-                "messages": [],
-                "_error": {
+                "ok": false,
+                "error": {
                     "code": "TOPIC_NOT_FOUND",
                     "origin": "desktop_plugin",
                     "stage": "messages",
@@ -1707,19 +1754,26 @@ mod ndjson_budget_tests {
             .to_string()
             .as_bytes(),
         )
-        .expect("Wire 1.2 error frame");
+        .expect("Wire 1.4 error frame");
         assert_eq!(parsed.error.expect("error").code, "TOPIC_NOT_FOUND");
         assert!(parse_topic_ndjson_frame(
-            json!({ "topicId": "topic-a", "messages": [], "_error": "legacy" })
-                .to_string()
-                .as_bytes(),
+            json!({
+                "kind":"topic", "topicId":"topic-a", "ownerType":"agent",
+                "ownerId":"agent-a", "ok":false, "error":"legacy"
+            })
+            .to_string()
+            .as_bytes(),
         )
         .is_err());
         assert!(parse_topic_ndjson_frame(
             json!({
+                "kind": "topic",
                 "topicId": "topic-a",
+                "ownerType": "agent",
+                "ownerId": "agent-a",
+                "ok": false,
                 "messages": [{"id":"message-a"}],
-                "_error": {
+                "error": {
                     "code": "TOPIC_NOT_FOUND",
                     "origin": "desktop_plugin",
                     "stage": "messages",

@@ -36,8 +36,8 @@ VCPMobile 使用 SQLite + WAL 持久化业务与同步状态。桌面默认由 C
 
 | 表名 | 字段名 | 类型 | 约束 | 说明 | 对应桌面端 |
 |-----|-------|-----|-----|-----|----------|
-| agents | owner_type | TEXT | NOT NULL, PK(1) | 固定为 `agent` | `entity_index.owner_type` |
-| agents | agent_id | TEXT | NOT NULL, PK(2) | Agent ID | `entity_index.id`（type=`agent`） |
+| agents | owner_type | TEXT | NOT NULL, PK(1) | 固定为 `agent` | Legacy/CDS `owners.owner_type` |
+| agents | agent_id | TEXT | NOT NULL, PK(2) | Agent ID | Legacy/CDS `owners.owner_id` |
 | agents | name | TEXT | NOT NULL | 智能体显示名称 | `config.json` → `name` |
 | agents | system_prompt | TEXT | NOT NULL DEFAULT '' | 系统提示词（System Prompt） | `config.json` → `systemPrompt` |
 | agents | mobile_system_prompt | TEXT | NOT NULL DEFAULT '' | 移动端专用系统提示词（不同步，仅本机生效） | — |
@@ -47,10 +47,10 @@ VCPMobile 使用 SQLite + WAL 持久化业务与同步状态。桌面默认由 C
 | agents | max_output_tokens | INTEGER | NOT NULL DEFAULT 0 | 单次输出 Token 上限 | `config.json` → `maxOutputTokens` |
 | agents | stream_output | INTEGER | NOT NULL DEFAULT 1 | 是否启用流式输出（SQLite 无原生 bool，0/1） | `config.json` → `streamOutput` |
 | agents | use_temperature | INTEGER | NOT NULL DEFAULT 0 | 是否发送 `temperature` 参数（0/1） | — |
-| agents | config_hash | TEXT | NOT NULL DEFAULT '' | V2 配置内容指纹（SHA-256），用于 Diff 阶段 | `entity_index.hash` |
-| agents | content_hash | TEXT | NOT NULL DEFAULT '' | Topic 子树聚合指纹 | `entity_index.aggregated_hash` |
-| agents | updated_at | BIGINT | NOT NULL | 更新时间戳，毫秒 | `entity_index.updated_at` |
-| agents | deleted_at | BIGINT | — | 软删除时间戳，非空即视为已删除 | `entity_index.deleted_at` |
+| agents | config_hash | TEXT | NOT NULL DEFAULT '' | V2 配置内容指纹（SHA-256），用于 Diff 阶段 | `owners.config_hash` |
+| agents | content_hash | TEXT | NOT NULL DEFAULT '' | Topic 子树聚合指纹 | Desktop 从 live `topics` 动态聚合 |
+| agents | updated_at | BIGINT | NOT NULL | 更新时间戳，毫秒 | `owners.updated_at` |
+| agents | deleted_at | BIGINT | — | 软删除时间戳，非空即视为已删除 | `owners.deleted_at` |
 
 > **归一化说明**：`config_hash` 与 `content_hash` 的分离是 V2 协议的核心优化。修改系统提示词仅变更 `config_hash`，不会触发旗下所有 Topic 的消息重新比对。
 
@@ -58,8 +58,8 @@ VCPMobile 使用 SQLite + WAL 持久化业务与同步状态。桌面默认由 C
 
 | 表名 | 字段名 | 类型 | 约束 | 说明 | 对应桌面端 |
 |-----|-------|-----|-----|-----|----------|
-| groups | owner_type | TEXT | NOT NULL, PK(1) | 固定为 `group` | `entity_index.owner_type` |
-| groups | group_id | TEXT | NOT NULL, PK(2) | Group ID | `entity_index.id`（type=`group`） |
+| groups | owner_type | TEXT | NOT NULL, PK(1) | 固定为 `group` | Legacy/CDS `owners.owner_type` |
+| groups | group_id | TEXT | NOT NULL, PK(2) | Group ID | Legacy/CDS `owners.owner_id` |
 | groups | name | TEXT | NOT NULL | 群组显示名称 | `config.json` → `name` |
 | groups | mode | TEXT | NOT NULL DEFAULT 'sequential' | 发言模式：`sequential`、`naturerandom`、`invite_only` | `config.json` → `mode` |
 | groups | group_prompt | TEXT | — | 群组全局提示词 | `config.json` → `groupPrompt` |
@@ -68,11 +68,11 @@ VCPMobile 使用 SQLite + WAL 持久化业务与同步状态。桌面默认由 C
 | groups | unified_model | TEXT | — | 统一模型名称 | `config.json` → `unifiedModel` |
 | groups | tag_match_mode | TEXT | — | 标签匹配模式：`strict`、`fuzzy` | `config.json` → `tagMatchMode` |
 | groups | member_tags | TEXT | NOT NULL DEFAULT '{}' | 完整成员标签 JSON，包含已移除成员的 Tag 记忆 | `config.json` → `memberTags` |
-| groups | config_hash | TEXT | NOT NULL DEFAULT '' | V2 配置内容指纹 | `entity_index.hash` |
-| groups | content_hash | TEXT | NOT NULL DEFAULT '' | Topic 子树聚合指纹 | `entity_index.aggregated_hash` |
+| groups | config_hash | TEXT | NOT NULL DEFAULT '' | V2 配置内容指纹 | `owners.config_hash` |
+| groups | content_hash | TEXT | NOT NULL DEFAULT '' | Topic 子树聚合指纹 | Desktop 从 live `topics` 动态聚合 |
 | groups | created_at | BIGINT | NOT NULL DEFAULT 0 | 创建时间戳，毫秒 | `config.json` → `createdAt` |
-| groups | updated_at | BIGINT | NOT NULL | 更新时间戳，毫秒 | `entity_index.updated_at` |
-| groups | deleted_at | BIGINT | — | 软删除时间戳 | `entity_index.deleted_at` |
+| groups | updated_at | BIGINT | NOT NULL | 更新时间戳，毫秒 | `owners.updated_at` |
+| groups | deleted_at | BIGINT | — | 软删除时间戳 | `owners.deleted_at` |
 
 ### 1.4 `group_members` — 群组成员关联表
 
@@ -81,7 +81,7 @@ VCPMobile 使用 SQLite + WAL 持久化业务与同步状态。桌面默认由 C
 | group_members | group_id | TEXT | NOT NULL, PK(1) | 所属群组 ID | `config.json` → `members[]` |
 | group_members | agent_id | TEXT | NOT NULL, PK(2) | 成员 Agent ID | `config.json` → `members[]` 元素 |
 | group_members | sort_order | INTEGER | NOT NULL DEFAULT 0 | 成员在群组内的展示排序 | `members[]` 数组顺序 |
-| group_members | updated_at | BIGINT | NOT NULL | 关联更新时间戳 | `entity_index.updated_at`（父级 Group） |
+| group_members | updated_at | BIGINT | NOT NULL | 关联更新时间戳 | Owner DTO 变化时推进 `owners.updated_at` |
 
 > `group_members` 只保存当前成员与顺序。完整 `memberTags` 独立保存在 `groups.member_tags`，不会因成员暂时移除而丢失。
 
@@ -94,14 +94,14 @@ VCPMobile 使用 SQLite + WAL 持久化业务与同步状态。桌面默认由 C
 | topics | topic_id | TEXT | NOT NULL, PK(3) | Topic ID | `config.json` → `topics[].id` |
 | topics | title | TEXT | NOT NULL | Topic 显示名称 | `config.json` → `topics[].name` |
 | topics | created_at | BIGINT | NOT NULL | 创建时间戳，毫秒 | `config.json` → `topics[].createdAt` |
-| topics | updated_at | BIGINT | NOT NULL | 更新时间戳，毫秒 | `entity_index.updated_at` |
+| topics | updated_at | BIGINT | NOT NULL | 更新时间戳，毫秒 | `topics.updated_at` |
 | topics | locked | INTEGER | NOT NULL DEFAULT 1 | 是否锁定（Agent Topic 有效，0/1） | `config.json` → `topics[].locked` |
 | topics | unread | INTEGER | NOT NULL DEFAULT 0 | 是否未读（Agent Topic 有效，0/1） | `config.json` → `topics[].unread` |
 | topics | unread_count | INTEGER | NOT NULL DEFAULT 0 | 未读消息计数，纯本地统计 | — |
 | topics | msg_count | INTEGER | NOT NULL DEFAULT 0 | 消息总数，纯本地统计 | — |
 | topics | config_hash | TEXT | NOT NULL DEFAULT '' | 话题元数据指纹（V2） | — |
 | topics | content_hash | TEXT | NOT NULL DEFAULT '' | 消息聚合指纹（V2，Messages Merkle Root） | — |
-| topics | deleted_at | BIGINT | — | 软删除时间戳 | `entity_index.deleted_at` |
+| topics | deleted_at | BIGINT | — | 软删除时间戳 | `topics.deleted_at` |
 
 > **字段名差异**：移动端 `title` 对应桌面端 `config.json` 内的 `topics[].name`，对应 DTO 字段为 `name`。此差异源于历史设计：移动端数据库在 Topic 表中使用 `title`，而桌面端配置文件中 Topic 数组项使用 `name`。
 
@@ -121,10 +121,10 @@ VCPMobile 使用 SQLite + WAL 持久化业务与同步状态。桌面默认由 C
 | messages | is_group_message | INTEGER | NOT NULL DEFAULT 0 | 是否为群组消息（0/1） | `history.json` → `isGroupMessage` |
 | messages | group_id | TEXT | — | 所属 Group ID（群组消息有效） | `history.json` → `groupId` |
 | messages | finish_reason | TEXT | — | 模型结束原因，如 `stop`、`length` | `history.json` → `finishReason` |
-| messages | content_hash | TEXT | NOT NULL DEFAULT '' | 消息内容指纹（SHA-256） | `message_index.hash` |
+| messages | content_hash | TEXT | NOT NULL DEFAULT '' | 消息内容指纹（SHA-256） | Legacy/CDS `messages.message_hash` |
 | messages | created_at | BIGINT | NOT NULL | 创建时间戳 | `history.json` → `createdAt` |
-| messages | updated_at | BIGINT | NOT NULL | 更新时间戳 | `message_index.updated_at` |
-| messages | deleted_at | BIGINT | — | 软删除时间戳 | `message_index.deleted_at` |
+| messages | updated_at | BIGINT | NOT NULL | 更新时间戳 | Legacy/CDS `messages.updated_at` |
+| messages | deleted_at | BIGINT | — | 软删除时间戳 | Legacy/CDS `messages.deleted_at` |
 
 > **已移除字段**：历史版本中 `messages` 表曾包含 `avatar_url` 与 `avatar_color`，现已被移除。头像信息通过 `avatars` 表按 `agent_id` 动态查询，避免数据冗余。
 
@@ -236,71 +236,18 @@ VCPMobile 使用 SQLite + WAL 持久化业务与同步状态。桌面默认由 C
 
 ## 表2：桌面端 Legacy/兼容索引
 
-Legacy 模式使用插件目录下的 `sync_state_v2.db`。中央模式的同结构兼容索引位于内存，只服务配置定位与本机附件路径；Avatar 墓碑仍写入持久文件。CDS 正式提交视图位于 `AppData/databases/chat_data.sqlite3`。
+Legacy 模式使用插件目录下的 `sync_state_v2.db`。中央模式不持久化该文件，只在内存中建立配置/附件兼容视图；正式状态由 CDS `chat_data.sqlite3` 提供。
 
-### 2.1 `entity_index` — 实体索引表
-
-| 表名 | 字段名 | 类型 | 约束 | 说明 | 对应移动端 |
-|-----|-------|-----|-----|-----|----------|
-| entity_index | type | TEXT | NOT NULL, PK(1) | 实体类型 | DTO 类型 |
-| entity_index | owner_type | TEXT | NOT NULL, PK(2) | Owner 类型 | Mobile `owner_type` |
-| entity_index | owner_id | TEXT | NOT NULL, PK(3) | Owner ID | Mobile `owner_id` |
-| entity_index | id | TEXT | NOT NULL, PK(4) | 实体 ID | Owner/Topic ID |
-| entity_index | file_path | TEXT | NOT NULL | 实体配置文件绝对路径 | — |
-| entity_index | hash | TEXT | NOT NULL | 内容指纹（DTO 稳定 JSON 的 SHA-256） | `agents.config_hash` / `groups.config_hash` / `topics.config_hash` |
-| entity_index | aggregated_hash | TEXT | — | 聚合指纹（含下属 Topic/Message 的 Merkle Root） | `agents.content_hash` / `groups.content_hash` / `topics.content_hash` |
-| entity_index | updated_at | INTEGER | NOT NULL | 更新时间戳，毫秒 | `agents.updated_at` / `groups.updated_at` / `topics.updated_at` |
-| entity_index | deleted_at | INTEGER | DEFAULT NULL | 软删除时间戳，非空即已删除 | `agents.deleted_at` / `groups.deleted_at` / `topics.deleted_at` |
-
-> **类型扩展**：桌面端 `entity_index` 将 `topic` 细分为 `agent_topic` 与 `group_topic`，以便在 Diff 阶段精确路由到对应的 DTO 提取器。
-
-### 2.2 `message_index` — 消息索引表
-
-| 表名 | 字段名 | 类型 | 约束 | 说明 | 对应移动端 |
-|-----|-------|-----|-----|-----|----------|
-| message_index | owner_type | TEXT | NOT NULL, PK(1) | Owner 类型 | `messages.owner_type` |
-| message_index | owner_id | TEXT | NOT NULL, PK(2) | Owner ID | `messages.owner_id` |
-| message_index | topic_id | TEXT | NOT NULL, PK(3) | Topic ID | `messages.topic_id` |
-| message_index | msg_id | TEXT | NOT NULL, PK(4) | 消息 ID | `messages.msg_id` |
-| message_index | hash | TEXT | NOT NULL | 消息内容指纹 | `messages.content_hash` |
-| message_index | updated_at | INTEGER | NOT NULL | 更新时间戳，毫秒 | `messages.updated_at` |
-| message_index | deleted_at | INTEGER | DEFAULT NULL | 软删除时间戳 | `messages.deleted_at` |
-
-> 消息索引查询始终携带完整 Topic 身份。
-
-### 2.3 `attachment_index` — 附件索引表
-
-| 表名 | 字段名 | 类型 | 约束 | 说明 | 对应移动端 |
-|-----|-------|-----|-----|-----|----------|
-| attachment_index | hash | TEXT | PRIMARY KEY | 内容 SHA-256 摘要 | `attachments.hash` |
-| attachment_index | file_path | TEXT | NOT NULL | 附件物理文件绝对路径 | `attachments.internal_path` |
-| attachment_index | updated_at | INTEGER | NOT NULL | 更新时间戳，毫秒 | `attachments.updated_at` |
-
-> **路径约定**：桌面端附件存储于 `UserData/attachments/{hash}.{ext}`，索引库仅记录该路径，文件正文不在 SQLite 中。
-
-### 2.4 `avatar_index` — 头像索引表
-
-| 表名 | 字段名 | 类型 | 约束 | 说明 | 对应移动端 |
-|-----|-------|-----|-----|-----|----------|
-| avatar_index | owner_id | TEXT | NOT NULL, PK(1) | 头像所有者 ID | `avatars.owner_id` |
-| avatar_index | owner_type | TEXT | NOT NULL, PK(2) | 头像所有者类型 | `avatars.owner_type` |
-| avatar_index | file_path | TEXT | NOT NULL | 头像文件绝对路径 | `avatars.image_data`（BLOB 转文件） |
-| avatar_index | hash | TEXT | NOT NULL | 头像二进制 SHA-256 | `avatars.avatar_hash` |
-| avatar_index | updated_at | INTEGER | NOT NULL | 更新时间戳，毫秒 | `avatars.updated_at` |
-| avatar_index | deleted_at | INTEGER | DEFAULT NULL | 软删除时间戳 | — |
-
-> **路径约定**：Agent 头像位于 `Agents/{id}/avatar.{ext}`；Group 头像位于 `AgentGroups/{id}/avatar.{ext}`；用户头像位于 `UserData/user_avatar.png`。
-
-### 2.5 `history_source_state` — 物理历史快路径
-
-| 字段 | 约束 | 说明 |
+| 表 | 主键 | 主要字段与职责 |
 |---|---|---|
-| `owner_type, owner_id, topic_id` | 复合主键 | 完整 Topic 身份 |
-| `file_path` | NOT NULL | `history.json` 路径 |
-| `file_size, mtime_ms` | NOT NULL | 物理来源快速变化检测 |
-| `indexed_at, index_version` | NOT NULL | 最近摄取时间与索引算法版本 |
+| `owners` | `(owner_type, owner_id)` | `config_path, config_hash, updated_at, deleted_at` |
+| `topics` | `(owner_type, owner_id, topic_id)` | `config_hash, content_hash, updated_at, deleted_at`；外键指向 Owner |
+| `messages` | `(owner_type, owner_id, topic_id, msg_id)` | `message_hash, updated_at, deleted_at`；外键指向 Topic |
+| `history_source_state` | 完整 TopicKey | `file_path, file_size, mtime_ms, index_version`；仅用于物理来源快路径 |
+| `avatar_index` | `(owner_id, owner_type)` | `file_path, hash, updated_at, deleted_at`；中央模式只存在于内存 |
+| `attachment_index` | `hash` | Desktop 本机附件路径；不代表跨端附件正文 |
 
-该表不参与 Wire Hash 或 LWW。CDS 的附件关系保存在自己的 `message_attachments` 表中；插件兼容索引不重复保存关系。
+CDS 使用对应的 `owners/topics/messages/avatars` 提交表，并额外保存消息元数据、附件关系和 history source 健康状态。两种 Desktop 后端输出相同 Wire 合同，不要求物理列完全相同。
 
 ---
 
@@ -310,7 +257,7 @@ Legacy 模式使用插件目录下的 `sync_state_v2.db`。中央模式的同结
 
 | 概念 | 移动端表/字段 | 桌面端表/字段 | 说明 |
 |-----|-------------|-------------|-----|
-| Agent ID | `agents.agent_id` | `entity_index.id`（type=`agent`） | 桌面端 Agent ID 由目录名推导，不在 `config.json` 内存储 |
+| Agent ID | `agents.agent_id` | `owners.owner_id`（`owner_type=agent`） | 桌面端 Agent ID 由目录名推导，不在 `config.json` 内存储 |
 | Agent 名称 | `agents.name` | `config.json` → `name` | 直接映射，白名单字段 |
 | Agent 系统提示词 | `agents.system_prompt` | `config.json` → `systemPrompt` | 移动端 `snake_case`，桌面端 `camelCase` |
 | Agent 模型 | `agents.model` | `config.json` → `model` | 直接映射 |
@@ -318,11 +265,11 @@ Legacy 模式使用插件目录下的 `sync_state_v2.db`。中央模式的同结
 | Agent Token 上限 | `agents.context_token_limit` | `config.json` → `contextTokenLimit` | 桌面端 `parseInt` 归一化 |
 | Agent 输出上限 | `agents.max_output_tokens` | `config.json` → `maxOutputTokens` | 桌面端 `parseInt` 归一化 |
 | Agent 流式开关 | `agents.stream_output` | `config.json` → `streamOutput` | SQLite 以 0/1 存储，Rust DTO 以 bool 序列化 |
-| Agent 配置指纹 | `agents.config_hash` | `entity_index.hash` | V2 协议核心，Diff 阶段直接比对 |
-| Agent 聚合指纹 | `agents.content_hash` | `entity_index.aggregated_hash` | 含下属 Topic 的 Merkle Root |
-| Agent 更新时间 | `agents.updated_at` | `entity_index.updated_at` | LWW 裁决标准 |
-| Agent 软删除 | `agents.deleted_at` | `entity_index.deleted_at` | 非空即视为已删除，同步时双向传播 |
-| Group ID | `groups.group_id` | `entity_index.id`（type=`group`） | 桌面端 `config.json` 内显式存储 `id` |
+| Agent 配置指纹 | `agents.config_hash` | `owners.config_hash` | Diff 阶段直接比对 |
+| Agent 聚合指纹 | `agents.content_hash` | 从该 Owner 的 live `topics` 动态聚合 | 含下属 Topic 的 keyed Merkle Root |
+| Agent 更新时间 | `agents.updated_at` | `owners.updated_at` | LWW 裁决标准 |
+| Agent 软删除 | `agents.deleted_at` | `owners.deleted_at` | 非空即视为已删除，同步时双向传播 |
+| Group ID | `groups.group_id` | `owners.owner_id`（`owner_type=group`） | 桌面端 `config.json` 内显式存储 `id` |
 | Group 名称 | `groups.name` | `config.json` → `name` | 直接映射 |
 | Group 成员列表 | `group_members.agent_id` | `config.json` → `members[]` | 移动端反规范化存储，同步时数组↔关联表转换 |
 | Group 成员标签 | `groups.member_tags` | `config.json` → `memberTags` | 完整 JSON 对象直接存储 |
@@ -334,16 +281,16 @@ Legacy 模式使用插件目录下的 `sync_state_v2.db`。中央模式的同结
 | Topic 所有者 ID | `topics.owner_id` | 父级目录名 | 桌面端 Topic 项不存储 `ownerId`，同步时注入 |
 | Topic 锁定状态 | `topics.locked` | `config.json` → `topics[].locked` | 仅 Agent Topic 有效 |
 | Topic 未读状态 | `topics.unread` | `config.json` → `topics[].unread` | 仅 Agent Topic 有效 |
-| Topic 配置指纹 | `topics.config_hash` | — | 移动端本地计算，Diff 阶段用于 Topic 级增量 |
-| Topic 聚合指纹 | `topics.content_hash` | — | 消息 Merkle Root，用于避免全量消息比对 |
+| Topic 配置指纹 | `topics.config_hash` | `topics.config_hash` | DTO Hash，Diff 阶段用于 Topic 级增量 |
+| Topic 聚合指纹 | `topics.content_hash` | `topics.content_hash` 或 CDS 动态消息根 | keyed Message Merkle Root |
 | 消息 ID | `messages.msg_id` | `history.json` → `id` | 主键 |
 | 消息所属 Topic | `messages.topic_id` | 父级目录 `{topicId}` | 桌面端按目录隔离消息历史 |
 | 消息角色 | `messages.role` | `history.json` → `role` | `user` / `assistant` / `system` |
 | 消息发送者 | `messages.agent_id` | `history.json` → `agentId` | Agent 回复与 Group 成员回复携带；用户消息可为空 |
 | 消息内容 | `messages.content` | `history.json` → `content` | Markdown 或纯文本 |
 | 消息时间戳 | `messages.timestamp` | `history.json` → `timestamp` | 毫秒级绝对时间 |
-| 消息指纹 | `messages.content_hash` | `message_index.hash` | 稳定 JSON 的 SHA-256 |
-| 消息软删除 | `messages.deleted_at` | `message_index.deleted_at` | 墓碑身份长期保留；Mobile 仅在 30 天后清空正文与渲染缓存 |
+| 消息指纹 | `messages.content_hash` | `messages.message_hash` | 规范消息字段的 SHA-256 |
+| 消息软删除 | `messages.deleted_at` | `messages.deleted_at` | 墓碑身份长期保留；Mobile 仅在 30 天后清空正文与渲染缓存 |
 | 附件内容哈希 | `attachments.hash` | `attachment_index.hash` | 全局去重键 |
 | 附件 MIME 类型 | `attachments.mime_type` | 由文件扩展名推导 | 桌面端不单独存储 |
 | 附件物理路径 | `attachments.internal_path` | `attachment_index.file_path` | 移动端在 `app_config_dir` 内；桌面端在 `UserData/attachments/` |
@@ -413,8 +360,9 @@ Rust 端通过 `serde` 的自定义序列化将这些字段映射为 `bool`，�
 | 移动端 Topic | `(owner_type, owner_id, topic_id)` | `topics` |
 | 移动端 Message | `(owner_type, owner_id, topic_id, msg_id)` | `messages/render_cache/active_generations` |
 | 移动端附件关系 | 完整消息键 + `attachment_order` | `message_attachments` |
-| Legacy 实体 | `(type, owner_type, owner_id, id)` | `entity_index` |
-| Legacy 消息 | `(owner_type, owner_id, topic_id, msg_id)` | `message_index` |
+| Legacy Owner | `(owner_type, owner_id)` | `owners` |
+| Legacy Topic | `(owner_type, owner_id, topic_id)` | `topics` |
+| Legacy 消息 | `(owner_type, owner_id, topic_id, msg_id)` | `messages` |
 
 ---
 
