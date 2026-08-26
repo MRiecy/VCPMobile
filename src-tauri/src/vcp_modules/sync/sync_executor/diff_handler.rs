@@ -151,17 +151,29 @@ fn validate_manifest_result(
                         item.owner_id
                     ));
                 }
+                if item.action == ManifestAction::Skip && !item.content_hash_mismatch {
+                    return Err(format!(
+                        "Owner {} SKIP decision requires contentHashMismatch",
+                        item.owner_id
+                    ));
+                }
                 format!("{}\0{}", item.owner_type, item.owner_id)
             }
             ManifestDecision::Topic(item) => {
                 if item.owner_id.is_empty() || item.topic_id.is_empty() {
                     return Err("SYNC_MANIFEST_RESULT contains an invalid topic identity".into());
                 }
+                if item.action == ManifestAction::Skip {
+                    return Err("Topic manifest must not contain SKIP decisions".into());
+                }
                 format!("{}\0{}\0{}", item.owner_type, item.owner_id, item.topic_id)
             }
             ManifestDecision::Avatar(item) => {
                 if !is_valid_avatar_owner(item.owner_type.as_str(), &item.owner_id) {
                     return Err("SYNC_MANIFEST_RESULT contains an invalid avatar identity".into());
+                }
+                if item.action == ManifestAction::Skip {
+                    return Err("Avatar manifest must not contain SKIP decisions".into());
                 }
                 format!("{}\0{}", item.owner_type, item.owner_id)
             }
