@@ -538,17 +538,14 @@ impl DbWriteQueue {
                     let tx = conn.transaction()?;
 
                     let mut affected_owners = HashSet::new();
-                    let mut affected_topics = HashSet::new();
 
                     for task in tasks_in_this_tx {
                         match task {
                             DbWriteTask::Agent { id, dto } => {
                                 Self::rusqlite_upsert_agent(&tx, &id, &dto)?;
-                                affected_owners.insert(OwnerKey::new("agent", id));
                             }
                             DbWriteTask::Group { id, dto } => {
                                 Self::rusqlite_upsert_group(&tx, &id, &dto)?;
-                                affected_owners.insert(OwnerKey::new("group", id));
                             }
                             DbWriteTask::Avatar { owner_type, owner_id, mime_type, bytes } => {
                                 Self::rusqlite_upsert_avatar(
@@ -562,14 +559,12 @@ impl DbWriteQueue {
                             DbWriteTask::AgentTopicBatch { topics } => {
                                 for (key, dto) in topics {
                                     affected_owners.insert(OwnerKey::new("agent", &key.owner_id));
-                                    affected_topics.insert(key.clone());
                                     Self::rusqlite_upsert_agent_topic(&tx, &key, &dto)?;
                                 }
                             }
                             DbWriteTask::GroupTopicBatch { topics } => {
                                 for (key, dto) in topics {
                                     affected_owners.insert(OwnerKey::new("group", &key.owner_id));
-                                    affected_topics.insert(key.clone());
                                     Self::rusqlite_upsert_group_topic(&tx, &key, &dto)?;
                                 }
                             }
@@ -580,12 +575,9 @@ impl DbWriteQueue {
                         }
                     }
 
-                    // [Phase 5] 统一冒泡：分层去重，批量校验存在，确保最小化开销
-                    for key in affected_topics {
-                        Self::rusqlite_bubble_topic_hash(&tx, &key)?;
-                    }
-
-                    // 批量提取 Owner 并去重校验
+                    // Topic DTO upsert has already committed its config hash. Message content,
+                    // count, and content root are unchanged, so only the affected Owner roots
+                    // need to be refreshed once.
                     let mut unique_agents = HashSet::new();
                     let mut unique_groups = HashSet::new();
                     for owner in affected_owners {
@@ -1558,67 +1550,6 @@ impl DbWriteQueue {
         Ok(())
     }
 
-    fn rusqlite_bubble_topic_hash(
-        tx: &rusqlite::Transaction,
-        key: &TopicKey,
-    ) -> rusqlite::Result<()> {
-        // 1. 计算 content_hash (消息聚合)
-        let mut stmt = tx.prepare(
-            "SELECT msg_id, content_hash FROM messages
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
-        )?;
-        let hashes: Vec<String> = stmt
-            .query_map(
-                rusqlite::params![&key.owner_type, &key.owner_id, &key.topic_id],
-                |row| {
-                    let message_id = row.get::<_, String>(0)?;
-                    let message_hash = row.get::<_, String>(1)?;
-                    Ok(HashAggregator::compute_message_leaf_hash(
-                        &message_id,
-                        &message_hash,
-                    ))
-                },
-            )?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let msg_count = i64::try_from(hashes.len()).map_err(|_| {
-            Self::sync_contract_error(format!("Topic {} message count exceeds i64", key.topic_id))
-        })?;
-        let root_hash = crate::vcp_modules::sync_types::compute_merkle_root(hashes);
-
-        let config_hash = if key.owner_type == "agent" {
-            let dto = Self::rusqlite_load_agent_topic_dto(tx, key)?;
-            HashAggregator::compute_agent_topic_metadata_hash(&dto)
-        } else if key.owner_type == "group" {
-            let dto = Self::rusqlite_load_group_topic_dto(tx, key)?;
-            HashAggregator::compute_group_topic_metadata_hash(&dto)
-        } else {
-            return Err(Self::sync_contract_error(format!(
-                "Topic {} has unsupported owner type {}",
-                key.topic_id, key.owner_type
-            )));
-        };
-
-        let changed = tx.execute(
-            "UPDATE topics SET content_hash = ?, config_hash = ?, msg_count = ?
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
-            rusqlite::params![
-                root_hash,
-                config_hash,
-                msg_count,
-                &key.owner_type,
-                &key.owner_id,
-                &key.topic_id
-            ],
-        )?;
-        if changed != 1 {
-            return Err(Self::sync_contract_error(format!(
-                "Topic {} disappeared during hash update",
-                key.topic_id
-            )));
-        }
-        Ok(())
-    }
-
     fn rusqlite_bubble_agent_hash(
         tx: &rusqlite::Transaction,
         agent_id: &str,
@@ -1673,46 +1604,6 @@ impl DbWriteQueue {
             )));
         }
         Ok(())
-    }
-
-    fn rusqlite_load_agent_topic_dto(
-        tx: &rusqlite::Transaction,
-        key: &TopicKey,
-    ) -> rusqlite::Result<AgentTopicSyncDTO> {
-        tx.query_row(
-            "SELECT topic_id, title, created_at, locked, unread, owner_id FROM topics
-             WHERE owner_type = 'agent' AND owner_id = ? AND topic_id = ?",
-            rusqlite::params![&key.owner_id, &key.topic_id],
-            |row| {
-                Ok(AgentTopicSyncDTO {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    created_at: row.get(2)?,
-                    locked: row.get::<_, i64>(3)? != 0,
-                    unread: row.get::<_, i64>(4)? != 0,
-                    owner_id: row.get(5)?,
-                })
-            },
-        )
-    }
-
-    fn rusqlite_load_group_topic_dto(
-        tx: &rusqlite::Transaction,
-        key: &TopicKey,
-    ) -> rusqlite::Result<GroupTopicSyncDTO> {
-        tx.query_row(
-            "SELECT topic_id, title, created_at, owner_id FROM topics
-             WHERE owner_type = 'group' AND owner_id = ? AND topic_id = ?",
-            rusqlite::params![&key.owner_id, &key.topic_id],
-            |row| {
-                Ok(GroupTopicSyncDTO {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    created_at: row.get(2)?,
-                    owner_id: row.get(3)?,
-                })
-            },
-        )
     }
 
     fn rusqlite_upsert_attachment_core(

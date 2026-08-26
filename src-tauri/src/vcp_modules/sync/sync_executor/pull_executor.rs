@@ -943,6 +943,14 @@ impl PullExecutor {
                                     bytes,
                                 })
                                 .await?;
+                            // Avatar tasks carry up to 20 MiB each. Waiting for the existing
+                            // queue barrier keeps the entity-operation concurrency limit as a
+                            // real byte backpressure boundary instead of merely limiting downloads.
+                            write_queue.flush().await.map_err(|error| {
+                                format!(
+                                    "Pull avatar {owner_type}/{owner_id} write drain failed: {error}"
+                                )
+                            })?;
                             if retries > 0 {
                                 log::info!(
                                     "[PullExecutor] Avatar {} {} succeeded after {} retries",

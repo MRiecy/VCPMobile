@@ -12,7 +12,7 @@ use crate::vcp_modules::topic_types::{OwnerKey, TopicKey};
 use futures_util::StreamExt;
 use serde_json::json;
 use sqlx::Row;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -20,6 +20,10 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 
 pub struct DiffHandler;
+
+const ENTITY_OPERATION_CONCURRENCY: usize =
+    crate::vcp_modules::avatar_service::MAX_AVATAR_BATCH_BYTES
+        / crate::vcp_modules::avatar_service::MAX_AVATAR_BYTES;
 
 fn consume_manifest_response_type(
     manifest_type: ManifestType,
@@ -413,137 +417,154 @@ impl DiffHandler {
 
                 task_tracker.spawn(async move {
                     let db = h_in.state::<DbState>();
-                    let mut batch_push_requests = Vec::new();
+                    const TOPIC_QUERY_CHUNK: usize = 300;
+                    let requested_topics = push_topics_to_fetch;
+                    let mut items_by_topic = HashMap::with_capacity(requested_topics.len());
 
-                    // 异步批量查询 Topic 元数据
-                    for key in push_topics_to_fetch {
-                        let id = key.topic_id.clone();
-                        log::debug!("[SyncDebug] Fetching metadata for topic: {}", id);
-                        let row_res = sqlx::query(
+                    for chunk in requested_topics.chunks(TOPIC_QUERY_CHUNK) {
+                        let placeholders = vec!["(?, ?, ?)"; chunk.len()].join(", ");
+                        let query_sql = format!(
                             "SELECT topic_id, title, created_at, locked, unread, owner_id, owner_type
                              FROM topics
-                             WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
-                               AND deleted_at IS NULL",
-                        )
-                            .bind(&key.owner_type)
-                            .bind(&key.owner_id)
-                            .bind(&id)
-                            .fetch_optional(&db.pool)
-                            .await;
+                             WHERE (owner_type, owner_id, topic_id) IN ({placeholders})
+                               AND deleted_at IS NULL"
+                        );
+                        let mut query = sqlx::query(&query_sql);
+                        for key in chunk {
+                            query = query
+                                .bind(&key.owner_type)
+                                .bind(&key.owner_id)
+                                .bind(&key.topic_id);
+                        }
+                        let rows = match query.fetch_all(&db.pool).await {
+                            Ok(rows) => rows,
+                            Err(error) => {
+                                let _ = tx_internal_in.send(SyncCommand::FailAttemptDetailed {
+                                    attempt_id: attempt_id_inner,
+                                    code: "TOPIC_PUSH_DB_FAILED".to_string(),
+                                    message: format!("Failed to load topics for push: {error}"),
+                                    failed_topic_ids: chunk
+                                        .iter()
+                                        .take(8)
+                                        .map(|key| key.topic_id.clone())
+                                        .collect(),
+                                });
+                                return;
+                            }
+                        };
 
-                        match row_res {
-                            Ok(Some(r)) => {
-                                let decoded = (|| -> Result<_, String> {
-                                    Ok((
-                                        r.try_get::<String, _>("topic_id")
-                                            .map_err(|error| format!("topic id: {error}"))?,
-                                        r.try_get::<String, _>("title")
-                                            .map_err(|error| format!("title: {error}"))?,
-                                        r.try_get::<i64, _>("created_at")
-                                            .map_err(|error| format!("created_at: {error}"))?,
-                                        r.try_get::<i64, _>("locked")
-                                            .map_err(|error| format!("locked: {error}"))?,
-                                        r.try_get::<i64, _>("unread")
-                                            .map_err(|error| format!("unread: {error}"))?,
-                                        r.try_get::<String, _>("owner_id")
-                                            .map_err(|error| format!("owner_id: {error}"))?,
-                                        r.try_get::<String, _>("owner_type")
-                                            .map_err(|error| format!("owner_type: {error}"))?,
-                                    ))
-                                })();
-                                let (
-                                    tid,
-                                    title,
-                                    created_at,
-                                    locked,
-                                    unread,
-                                    db_owner_id,
-                                    db_owner_type,
-                                ) = match decoded {
-                                    Ok(decoded) => decoded,
-                                    Err(error) => {
-                                        let _ = tx_internal_in.send(
-                                            SyncCommand::FailAttemptDetailed {
-                                                attempt_id: attempt_id_inner,
-                                                code: "TOPIC_PUSH_DB_DECODE_FAILED".to_string(),
-                                                message: format!(
-                                                    "Failed to decode topic {id} for push: {error}"
-                                                ),
-                                                failed_topic_ids: vec![id],
-                                            },
-                                        );
-                                        return;
-                                    }
-                                };
-                                if db_owner_id != key.owner_id || db_owner_type != key.owner_type {
+                        for row in rows {
+                            let decoded = (|| -> Result<_, String> {
+                                Ok((
+                                    row.try_get::<String, _>("topic_id")
+                                        .map_err(|error| format!("topic id: {error}"))?,
+                                    row.try_get::<String, _>("title")
+                                        .map_err(|error| format!("title: {error}"))?,
+                                    row.try_get::<i64, _>("created_at")
+                                        .map_err(|error| format!("created_at: {error}"))?,
+                                    row.try_get::<i64, _>("locked")
+                                        .map_err(|error| format!("locked: {error}"))?,
+                                    row.try_get::<i64, _>("unread")
+                                        .map_err(|error| format!("unread: {error}"))?,
+                                    row.try_get::<String, _>("owner_id")
+                                        .map_err(|error| format!("owner_id: {error}"))?,
+                                    row.try_get::<String, _>("owner_type")
+                                        .map_err(|error| format!("owner_type: {error}"))?,
+                                ))
+                            })();
+                            let (
+                                topic_id,
+                                title,
+                                created_at,
+                                locked,
+                                unread,
+                                owner_id,
+                                owner_type,
+                            ) = match decoded {
+                                Ok(decoded) => decoded,
+                                Err(error) => {
                                     let _ = tx_internal_in.send(
                                         SyncCommand::FailAttemptDetailed {
                                             attempt_id: attempt_id_inner,
-                                            code: "TOPIC_PUSH_OWNER_CONFLICT".to_string(),
+                                            code: "TOPIC_PUSH_DB_DECODE_FAILED".to_string(),
                                             message: format!(
-                                                "Topic {id} owner does not match the Phase 1 decision"
+                                                "Failed to decode a topic for push: {error}"
                                             ),
-                                            failed_topic_ids: vec![id],
+                                            failed_topic_ids: Vec::new(),
                                         },
                                     );
                                     return;
                                 }
-                                log::debug!(
-                                    "[SyncDebug] Found topic {} (owner: {})",
-                                    tid,
-                                    db_owner_id
-                                );
-
-                                let item = if key.owner_type == "group" {
-                                    EntityPushItem::Topic {
-                                        owner_type: OwnerType::Group,
-                                        owner_id: key.owner_id.clone(),
-                                        topic_id: id.clone(),
-                                        data: EntityPushData::GroupTopic(GroupTopicSyncDTO {
-                                            id: tid,
-                                            name: title,
-                                            created_at,
-                                            owner_id: db_owner_id,
-                                        }),
-                                    }
-                                } else {
-                                    EntityPushItem::Topic {
-                                        owner_type: OwnerType::Agent,
-                                        owner_id: key.owner_id.clone(),
-                                        topic_id: id.clone(),
-                                        data: EntityPushData::AgentTopic(AgentTopicSyncDTO {
-                                            id: tid,
-                                            name: title,
-                                            created_at,
-                                            locked: locked != 0,
-                                            unread: unread != 0,
-                                            owner_id: db_owner_id,
-                                        }),
-                                    }
-                                };
-                                batch_push_requests.push(item);
-                            }
-                            Ok(None) => {
-                                log::warn!("[SyncDebug] Topic NOT FOUND in database: {}", id);
-                                let _ = tx_internal_in.send(SyncCommand::FailAttemptDetailed {
-                                    attempt_id: attempt_id_inner,
-                                    code: "TOPIC_PUSH_SOURCE_MISSING".to_string(),
-                                    message: format!("Topic selected for push is missing: {id}"),
-                                    failed_topic_ids: vec![id],
-                                });
-                                return;
-                            }
-                            Err(e) => {
-                                log::error!("[SyncDebug] SQL ERROR fetching topic {}: {}", id, e);
+                            };
+                            let key = TopicKey::new(&owner_type, &owner_id, &topic_id);
+                            let item = match owner_type.as_str() {
+                                "agent" => EntityPushItem::Topic {
+                                    owner_type: OwnerType::Agent,
+                                    owner_id: owner_id.clone(),
+                                    topic_id: topic_id.clone(),
+                                    data: EntityPushData::AgentTopic(AgentTopicSyncDTO {
+                                        id: topic_id,
+                                        name: title,
+                                        created_at,
+                                        locked: locked != 0,
+                                        unread: unread != 0,
+                                        owner_id,
+                                    }),
+                                },
+                                "group" => EntityPushItem::Topic {
+                                    owner_type: OwnerType::Group,
+                                    owner_id: owner_id.clone(),
+                                    topic_id: topic_id.clone(),
+                                    data: EntityPushData::GroupTopic(GroupTopicSyncDTO {
+                                        id: topic_id,
+                                        name: title,
+                                        created_at,
+                                        owner_id,
+                                    }),
+                                },
+                                _ => {
+                                    let _ = tx_internal_in.send(
+                                        SyncCommand::FailAttemptDetailed {
+                                            attempt_id: attempt_id_inner,
+                                            code: "TOPIC_PUSH_OWNER_CONFLICT".to_string(),
+                                            message: "Topic selected for push has an invalid owner type"
+                                                .to_string(),
+                                            failed_topic_ids: vec![key.topic_id],
+                                        },
+                                    );
+                                    return;
+                                }
+                            };
+                            if items_by_topic.insert(key.clone(), item).is_some() {
                                 let _ = tx_internal_in.send(SyncCommand::FailAttemptDetailed {
                                     attempt_id: attempt_id_inner,
                                     code: "TOPIC_PUSH_DB_FAILED".to_string(),
-                                    message: format!("Failed to load topic {id} for push: {e}"),
-                                    failed_topic_ids: vec![id],
+                                    message: format!(
+                                        "Topic query returned duplicate identity {}",
+                                        key.topic_id
+                                    ),
+                                    failed_topic_ids: vec![key.topic_id],
                                 });
                                 return;
                             }
                         }
+                    }
+
+                    let mut batch_push_requests = Vec::with_capacity(requested_topics.len());
+                    for key in requested_topics {
+                        let Some(item) = items_by_topic.remove(&key) else {
+                            let _ = tx_internal_in.send(SyncCommand::FailAttemptDetailed {
+                                attempt_id: attempt_id_inner,
+                                code: "TOPIC_PUSH_SOURCE_MISSING".to_string(),
+                                message: format!(
+                                    "Topic selected for push is missing: {}",
+                                    key.topic_id
+                                ),
+                                failed_topic_ids: vec![key.topic_id],
+                            });
+                            return;
+                        };
+                        batch_push_requests.push(item);
                     }
 
                     log::debug!(
@@ -627,7 +648,7 @@ impl DiffHandler {
 
                 task_tracker.spawn(async move {
                     futures_util::stream::iter(other_items)
-                        .for_each_concurrent(15, |item| {
+                        .for_each_concurrent(ENTITY_OPERATION_CONCURRENCY, |item| {
                             let id = item.id().to_string();
                             let action = item.action();
                             let deleted_at = item.deleted_at();

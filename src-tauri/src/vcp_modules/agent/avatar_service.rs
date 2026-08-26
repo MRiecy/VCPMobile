@@ -4,7 +4,7 @@ use crate::vcp_modules::sync_types::is_valid_avatar_owner;
 use tauri::{AppHandle, Manager, Runtime};
 
 pub(crate) const MAX_AVATAR_BYTES: usize = 20 * 1024 * 1024;
-const MAX_AVATAR_BATCH_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_AVATAR_BATCH_BYTES: usize = 64 * 1024 * 1024;
 
 const SAVE_AVATAR_SQL: &str =
     "INSERT INTO avatars (owner_type, owner_id, avatar_hash, mime_type, image_data, dominant_color, updated_at)
