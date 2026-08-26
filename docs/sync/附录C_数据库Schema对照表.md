@@ -7,7 +7,7 @@ scope: 双端
 
 ## 引言
 
-VCPMobile 使用 SQLite + WAL 持久化业务与同步状态。桌面默认由 CDS 的 `chat_data.sqlite3` 提供 Owner、Topic、Message 和附件关系的已提交视图；Legacy 模式才使用插件 `sync_state_v2.db`。桌面业务正文始终位于物理配置和 `history.json`。
+VCPMobile 使用 SQLite + WAL 持久化业务与同步状态。桌面默认由 CDS 的 `chat_data.sqlite3` 提供 Owner、Topic、Message 和 Avatar 的已提交视图；附件元数据保留在 Message JSON 中。Legacy 模式才使用插件 `sync_state_v2.db`。桌面业务正文始终位于物理配置和 `history.json`。
 
 阅读本文档时，建议配合 `02_数据模型与类型系统.md` 理解字段默认值、DTO 映射与哈希计算规则。
 
@@ -266,7 +266,7 @@ CDS 使用对应的 `owners/topics/messages/avatars` 提交表，并额外保存
 | Agent 输出上限 | `agents.max_output_tokens` | `config.json` → `maxOutputTokens` | 桌面端 `parseInt` 归一化 |
 | Agent 流式开关 | `agents.stream_output` | `config.json` → `streamOutput` | SQLite 以 0/1 存储，Rust DTO 以 bool 序列化 |
 | Agent 配置指纹 | `agents.config_hash` | `owners.config_hash` | Diff 阶段直接比对 |
-| Agent 聚合指纹 | `agents.content_hash` | 从该 Owner 的 live `topics` 动态聚合 | 含下属 Topic 的 keyed Merkle Root |
+| Agent 聚合指纹 | `agents.content_hash` | CDS `owners.content_hash`；Legacy 从 live `topics` 聚合 | 含下属 Topic 的 keyed Merkle Root |
 | Agent 更新时间 | `agents.updated_at` | `owners.updated_at` | LWW 裁决标准 |
 | Agent 软删除 | `agents.deleted_at` | `owners.deleted_at` | 非空即视为已删除，同步时双向传播 |
 | Group ID | `groups.group_id` | `owners.owner_id`（`owner_type=group`） | 桌面端 `config.json` 内显式存储 `id` |
@@ -282,7 +282,7 @@ CDS 使用对应的 `owners/topics/messages/avatars` 提交表，并额外保存
 | Topic 锁定状态 | `topics.locked` | `config.json` → `topics[].locked` | 仅 Agent Topic 有效 |
 | Topic 未读状态 | `topics.unread` | `config.json` → `topics[].unread` | 仅 Agent Topic 有效 |
 | Topic 配置指纹 | `topics.config_hash` | `topics.config_hash` | DTO Hash，Diff 阶段用于 Topic 级增量 |
-| Topic 聚合指纹 | `topics.content_hash` | `topics.content_hash` 或 CDS 动态消息根 | keyed Message Merkle Root |
+| Topic 聚合指纹 | `topics.content_hash` | `topics.content_hash` | keyed Message Merkle Root |
 | 消息 ID | `messages.msg_id` | `history.json` → `id` | 主键 |
 | 消息所属 Topic | `messages.topic_id` | 父级目录 `{topicId}` | 桌面端按目录隔离消息历史 |
 | 消息角色 | `messages.role` | `history.json` → `role` | `user` / `assistant` / `system` |
@@ -300,8 +300,8 @@ CDS 使用对应的 `owners/topics/messages/avatars` 提交表，并额外保存
 | 头像哈希 | `avatars.avatar_hash` | `avatar_index.hash` | WebSocket Diff 快速比对 |
 | 头像二进制 | `avatars.image_data` | `Agents/{id}/avatar.{ext}` 等 | 移动端 BLOB；桌面端独立文件 |
 | 头像更新时间 | `avatars.updated_at` | `avatar_index.updated_at` | 直接映射 |
-| 消息附件关联 | 完整 Message 键 + `attachment_order` | CDS `message_attachments`；Legacy `history.json.attachments[]` | 附件关系随获胜消息 DTO 整体替换 |
-| 消息附件文件名 | `message_attachments.display_name` | `message_attachments.display_name` | 直接映射 |
+| 消息附件关联 | 完整 Message 键 + `attachment_order` | CDS/Legacy `history.json.attachments[]` | 附件关系随获胜消息 DTO 整体替换 |
+| 消息附件文件名 | `message_attachments.display_name` | `history.json.attachments[].name` | 随规范消息元数据传输 |
 
 ---
 
