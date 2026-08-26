@@ -240,7 +240,7 @@ Legacy 模式使用插件目录下的 `sync_state_v2.db`。中央模式不持久
 
 | 表 | 主键 | 主要字段与职责 |
 |---|---|---|
-| `owners` | `(owner_type, owner_id)` | `config_path, config_hash, updated_at, deleted_at` |
+| `owners` | `(owner_type, owner_id)` | `config_path, config_hash, content_hash, updated_at, deleted_at` |
 | `topics` | `(owner_type, owner_id, topic_id)` | `config_hash, content_hash, updated_at, deleted_at`；外键指向 Owner |
 | `messages` | `(owner_type, owner_id, topic_id, msg_id)` | `message_hash, updated_at, deleted_at`；外键指向 Topic |
 | `history_source_state` | 完整 TopicKey | `file_path, file_size, mtime_ms, index_version`；仅用于物理来源快路径 |
@@ -266,7 +266,7 @@ CDS 使用对应的 `owners/topics/messages/avatars` 提交表，并额外保存
 | Agent 输出上限 | `agents.max_output_tokens` | `config.json` → `maxOutputTokens` | 桌面端 `parseInt` 归一化 |
 | Agent 流式开关 | `agents.stream_output` | `config.json` → `streamOutput` | SQLite 以 0/1 存储，Rust DTO 以 bool 序列化 |
 | Agent 配置指纹 | `agents.config_hash` | `owners.config_hash` | Diff 阶段直接比对 |
-| Agent 聚合指纹 | `agents.content_hash` | CDS `owners.content_hash`；Legacy 从 live `topics` 聚合 | 含下属 Topic 的 keyed Merkle Root |
+| Agent 聚合指纹 | `agents.content_hash` | Legacy/CDS `owners.content_hash` | 含下属 Topic 的 keyed Merkle Root |
 | Agent 更新时间 | `agents.updated_at` | `owners.updated_at` | LWW 裁决标准 |
 | Agent 软删除 | `agents.deleted_at` | `owners.deleted_at` | 非空即视为已删除，同步时双向传播 |
 | Group ID | `groups.group_id` | `owners.owner_id`（`owner_type=group`） | 桌面端 `config.json` 内显式存储 `id` |

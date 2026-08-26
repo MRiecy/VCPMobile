@@ -154,8 +154,7 @@ impl HashAggregator {
     ) -> Result<String, String> {
         let rows = sqlx::query(
             "SELECT msg_id, content_hash FROM messages
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
-             ORDER BY timestamp ASC, msg_id ASC",
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
         )
         .bind(&key.owner_type)
         .bind(&key.owner_id)
@@ -182,7 +181,7 @@ impl HashAggregator {
         agent_id: &str,
     ) -> Result<String, String> {
         let topic_rows = sqlx::query(
-            "SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'agent' AND deleted_at IS NULL ORDER BY topic_id ASC",
+            "SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'agent' AND deleted_at IS NULL",
         )
         .bind(agent_id)
         .fetch_all(&mut **tx)
@@ -215,7 +214,7 @@ impl HashAggregator {
         group_id: &str,
     ) -> Result<String, String> {
         let topic_rows = sqlx::query(
-            "SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'group' AND deleted_at IS NULL ORDER BY topic_id ASC",
+            "SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'group' AND deleted_at IS NULL",
         )
         .bind(group_id)
         .fetch_all(&mut **tx)

@@ -344,18 +344,13 @@ async fn preflight_topic_messages(
 ) -> Result<TopicMessagePreflight, String> {
     let topic_id = &key.topic_id;
     let row = sqlx::query(
-        "SELECT COUNT(*) AS message_count,
-                COALESCE(SUM(
-                    LENGTH(CAST(msg_id AS BLOB)) + LENGTH(CAST(role AS BLOB)) +
-                    COALESCE(LENGTH(CAST(name AS BLOB)), 0) +
-                    COALESCE(LENGTH(CAST(agent_id AS BLOB)), 0) +
-                    LENGTH(CAST(content AS BLOB)) +
-                    COALESCE(LENGTH(CAST(group_id AS BLOB)), 0) +
-                    COALESCE(LENGTH(CAST(finish_reason AS BLOB)), 0) +
-                    LENGTH(CAST(content_hash AS BLOB))
-                ), 0) AS raw_bytes
+        "SELECT
+                COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END), 0)
+                    AS message_count,
+                COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END), 0)
+                    AS tombstone_count
          FROM messages
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
     )
     .bind(&key.owner_type)
     .bind(&key.owner_id)
@@ -368,56 +363,11 @@ async fn preflight_topic_messages(
         .map_err(|error| format!("Message push count decode failed for {topic_id}: {error}"))?;
     let message_count = usize::try_from(message_count)
         .map_err(|_| format!("Message push count is invalid for {topic_id}"))?;
-    let message_bytes: i64 = row
-        .try_get("raw_bytes")
-        .map_err(|error| format!("Message push size decode failed for {topic_id}: {error}"))?;
-    let message_bytes = usize::try_from(message_bytes)
-        .map_err(|_| format!("Message push size is invalid for {topic_id}"))?;
-
-    let attachment_bytes: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(
-                    LENGTH(CAST(ma.hash AS BLOB)) + LENGTH(CAST(ma.display_name AS BLOB)) +
-                    COALESCE(LENGTH(CAST(a.mime_type AS BLOB)), 0) +
-                    COALESCE(LENGTH(CAST(a.extracted_text AS BLOB)), 0) +
-                    COALESCE(LENGTH(CAST(a.image_frames AS BLOB)), 0)
-                ), 0)
-         FROM message_attachments ma
-         LEFT JOIN attachments a ON a.hash = ma.hash
-         JOIN messages m ON m.owner_type = ma.owner_type AND m.owner_id = ma.owner_id
-            AND m.topic_id = ma.topic_id AND m.msg_id = ma.msg_id
-         WHERE ma.owner_type = ? AND ma.owner_id = ? AND ma.topic_id = ?
-           AND m.deleted_at IS NULL",
-    )
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(topic_id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| format!("Message attachment preflight failed for {topic_id}: {error}"))?;
-    let attachment_bytes = usize::try_from(attachment_bytes)
-        .map_err(|_| format!("Message attachment size is invalid for {topic_id}"))?;
-    let tombstone_row = sqlx::query(
-        "SELECT COUNT(*) AS tombstone_count,
-                COALESCE(SUM(LENGTH(CAST(msg_id AS BLOB)) + 64), 0) AS raw_bytes
-         FROM messages
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NOT NULL",
-    )
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(topic_id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| format!("Message tombstone preflight failed for {topic_id}: {error}"))?;
-    let tombstone_count: i64 = tombstone_row.try_get("tombstone_count").map_err(|error| {
+    let tombstone_count: i64 = row.try_get("tombstone_count").map_err(|error| {
         format!("Message tombstone count decode failed for {topic_id}: {error}")
     })?;
     let tombstone_count = usize::try_from(tombstone_count)
         .map_err(|_| format!("Message tombstone count is invalid for {topic_id}"))?;
-    let tombstone_bytes: i64 = tombstone_row
-        .try_get("raw_bytes")
-        .map_err(|error| format!("Message tombstone size decode failed for {topic_id}: {error}"))?;
-    let tombstone_bytes = usize::try_from(tombstone_bytes)
-        .map_err(|_| format!("Message tombstone size is invalid for {topic_id}"))?;
     let total_count = message_count
         .checked_add(tombstone_count)
         .ok_or_else(|| format!("Message count overflow for {topic_id}"))?;
@@ -427,15 +377,6 @@ async fn preflight_topic_messages(
         ));
     }
 
-    let raw_bytes = message_bytes
-        .checked_add(attachment_bytes)
-        .and_then(|bytes| bytes.checked_add(tombstone_bytes))
-        .ok_or_else(|| format!("Message push size overflow for {topic_id}"))?;
-    if raw_bytes > MAX_NDJSON_LINE_BYTES {
-        return Err(format!(
-            "Message push topic {topic_id} exceeds the 32 MiB line limit before serialization"
-        ));
-    }
     Ok(TopicMessagePreflight {
         live_count: message_count,
         tombstone_count,
@@ -498,7 +439,7 @@ async fn load_outbound_message_page(
     let mut query = if cursor.is_some() {
         sqlx::query(
             "SELECT msg_id, role, name, agent_id, content, timestamp, is_group_message,
-                    group_id, finish_reason, content_hash, updated_at
+                    group_id, finish_reason, updated_at
              FROM messages
              WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
                AND (timestamp > ? OR (timestamp = ? AND msg_id > ?))
@@ -508,7 +449,7 @@ async fn load_outbound_message_page(
     } else {
         sqlx::query(
             "SELECT msg_id, role, name, agent_id, content, timestamp, is_group_message,
-                    group_id, finish_reason, content_hash, updated_at
+                    group_id, finish_reason, updated_at
              FROM messages
              WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
              ORDER BY timestamp ASC, msg_id ASC
@@ -546,9 +487,6 @@ async fn load_outbound_message_page(
         })?;
         let timestamp = u64::try_from(timestamp)
             .map_err(|_| format!("Message {topic_id}/{message_id} has a negative timestamp"))?;
-        let content_hash: String = row.try_get("content_hash").map_err(|error| {
-            format!("Message hash decode failed for {topic_id}/{message_id}: {error}")
-        })?;
         let updated_at: i64 = row.try_get("updated_at").map_err(|error| {
             format!("Message update time decode failed for {topic_id}/{message_id}: {error}")
         })?;
@@ -581,7 +519,7 @@ async fn load_outbound_message_page(
                 format!("Message finish reason decode failed for {topic_id}: {error}")
             })?,
             attachments: None,
-            content_hash: (!content_hash.is_empty()).then_some(content_hash),
+            content_hash: None,
             avatar_color: None,
         });
     }

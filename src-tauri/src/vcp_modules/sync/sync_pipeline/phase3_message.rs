@@ -74,6 +74,7 @@ impl Phase3Message {
             return Ok(HashMap::new());
         }
 
+        let expected_owners = owners.iter().cloned().collect::<HashSet<_>>();
         let mut result = HashMap::new();
         for owner_chunk in owners.chunks(SQLITE_BIND_CHUNK) {
             let predicates = owner_chunk
@@ -109,7 +110,7 @@ impl Phase3Message {
                     format!("Targeted topic {topic_id} owner id decode failed: {error}")
                 })?;
                 if owner_id.is_empty()
-                    || !owners.contains(&OwnerKey::new(owner_type.as_str(), &owner_id))
+                    || !expected_owners.contains(&OwnerKey::new(owner_type.as_str(), &owner_id))
                 {
                     return Err(format!(
                         "Targeted topic {topic_id} has invalid owner identity"

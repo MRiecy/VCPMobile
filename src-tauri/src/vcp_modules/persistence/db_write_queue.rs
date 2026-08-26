@@ -1518,8 +1518,7 @@ impl DbWriteQueue {
         // 1. 计算 content_hash (消息聚合)
         let mut stmt = tx.prepare(
             "SELECT msg_id, content_hash FROM messages
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
-             ORDER BY timestamp ASC, msg_id ASC",
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
         )?;
         let hashes: Vec<String> = stmt
             .query_map(
@@ -1573,7 +1572,7 @@ impl DbWriteQueue {
         tx: &rusqlite::Transaction,
         agent_id: &str,
     ) -> rusqlite::Result<()> {
-        let mut stmt = tx.prepare("SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'agent' AND deleted_at IS NULL ORDER BY topic_id ASC")?;
+        let mut stmt = tx.prepare("SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'agent' AND deleted_at IS NULL")?;
         let mut rows = stmt.query([agent_id])?;
         let mut hashes = Vec::new();
         while let Some(row) = rows.next()? {
@@ -1601,7 +1600,7 @@ impl DbWriteQueue {
         tx: &rusqlite::Transaction,
         group_id: &str,
     ) -> rusqlite::Result<()> {
-        let mut stmt = tx.prepare("SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'group' AND deleted_at IS NULL ORDER BY topic_id ASC")?;
+        let mut stmt = tx.prepare("SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'group' AND deleted_at IS NULL")?;
         let mut rows = stmt.query([group_id])?;
         let mut hashes = Vec::new();
         while let Some(row) = rows.next()? {
