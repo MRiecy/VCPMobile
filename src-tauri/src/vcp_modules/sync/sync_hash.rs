@@ -9,6 +9,36 @@ use sqlx::{Row, Sqlite, Transaction};
 pub struct HashAggregator;
 
 impl HashAggregator {
+    async fn compute_topic_content_aggregate(
+        tx: &mut Transaction<'_, Sqlite>,
+        key: &TopicKey,
+    ) -> Result<(String, i32), String> {
+        let rows = sqlx::query(
+            "SELECT msg_id, content_hash FROM messages
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
+        )
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let msg_count = i32::try_from(rows.len())
+            .map_err(|_| format!("Topic {} message count exceeds i32", key.topic_id))?;
+        let mut hashes = Vec::with_capacity(rows.len());
+        for row in rows {
+            let message_id: String = row.try_get("msg_id").map_err(|error| {
+                format!("Topic {} message id decode failed: {error}", key.topic_id)
+            })?;
+            let message_hash: String = row.try_get("content_hash").map_err(|error| {
+                format!("Topic {} message hash decode failed: {error}", key.topic_id)
+            })?;
+            hashes.push(Self::compute_message_leaf_hash(&message_id, &message_hash));
+        }
+        Ok((compute_merkle_root(hashes), msg_count))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn compute_message_fingerprint(
         message_id: &str,
@@ -148,34 +178,6 @@ impl HashAggregator {
         format!("{:x}", hasher.finish())
     }
 
-    pub async fn compute_topic_root_hash(
-        tx: &mut Transaction<'_, Sqlite>,
-        key: &TopicKey,
-    ) -> Result<String, String> {
-        let rows = sqlx::query(
-            "SELECT msg_id, content_hash FROM messages
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
-        )
-        .bind(&key.owner_type)
-        .bind(&key.owner_id)
-        .bind(&key.topic_id)
-        .fetch_all(&mut **tx)
-        .await
-        .map_err(|e| e.to_string())?;
-
-        let mut hashes = Vec::with_capacity(rows.len());
-        for row in rows {
-            let message_id: String = row.try_get("msg_id").map_err(|error| {
-                format!("Topic {} message id decode failed: {error}", key.topic_id)
-            })?;
-            let message_hash: String = row.try_get("content_hash").map_err(|error| {
-                format!("Topic {} message hash decode failed: {error}", key.topic_id)
-            })?;
-            hashes.push(Self::compute_message_leaf_hash(&message_id, &message_hash));
-        }
-        Ok(compute_merkle_root(hashes))
-    }
-
     pub async fn compute_agent_root_hash(
         tx: &mut Transaction<'_, Sqlite>,
         agent_id: &str,
@@ -245,8 +247,8 @@ impl HashAggregator {
     pub async fn bubble_topic_hash(
         tx: &mut Transaction<'_, Sqlite>,
         key: &TopicKey,
-    ) -> Result<(), String> {
-        let root_hash = Self::compute_topic_root_hash(tx, key).await?;
+    ) -> Result<i32, String> {
+        let (root_hash, msg_count) = Self::compute_topic_content_aggregate(tx, key).await?;
         let config_hash = if key.owner_type == "agent" {
             let dto = SyncDtoLoader::load_agent_topic_dto(tx, key).await?;
             Self::compute_agent_topic_metadata_hash(&dto)
@@ -261,11 +263,12 @@ impl HashAggregator {
         };
 
         let updated = sqlx::query(
-            "UPDATE topics SET content_hash = ?, config_hash = ?
+            "UPDATE topics SET content_hash = ?, config_hash = ?, msg_count = ?
              WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
         )
         .bind(root_hash)
         .bind(config_hash)
+        .bind(msg_count)
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(&key.topic_id)
@@ -278,7 +281,7 @@ impl HashAggregator {
                 key.topic_id
             ));
         }
-        Ok(())
+        Ok(msg_count)
     }
 
     pub async fn bubble_topic_hash_with_meta(
@@ -288,9 +291,9 @@ impl HashAggregator {
         created_at: i64,
         locked: bool,
         unread: bool,
-    ) -> Result<(), String> {
-        // 1. 计算并更新 content_hash (消息聚合)
-        let root_hash = Self::compute_topic_root_hash(tx, key).await?;
+    ) -> Result<i32, String> {
+        // 1. 一次消息扫描同时计算 content_hash 与 msg_count
+        let (root_hash, msg_count) = Self::compute_topic_content_aggregate(tx, key).await?;
 
         // 2. 直接根据外部传入的元数据参数计算 config_hash (省去 2 次 SELECT)
         let config_hash = if key.owner_type == "agent" {
@@ -319,11 +322,12 @@ impl HashAggregator {
         };
 
         let updated = sqlx::query(
-            "UPDATE topics SET content_hash = ?, config_hash = ?
+            "UPDATE topics SET content_hash = ?, config_hash = ?, msg_count = ?
              WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
         )
         .bind(root_hash)
         .bind(config_hash)
+        .bind(msg_count)
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(&key.topic_id)
@@ -336,7 +340,7 @@ impl HashAggregator {
                 key.topic_id
             ));
         }
-        Ok(())
+        Ok(msg_count)
     }
 
     pub async fn bubble_agent_hash(
@@ -414,8 +418,8 @@ impl HashAggregator {
     pub async fn bubble_from_topic(
         tx: &mut Transaction<'_, Sqlite>,
         key: &TopicKey,
-    ) -> Result<(), String> {
-        Self::bubble_topic_hash(tx, key).await?;
+    ) -> Result<i32, String> {
+        let msg_count = Self::bubble_topic_hash(tx, key).await?;
 
         if key.owner_type == "agent" {
             Self::bubble_agent_hash(tx, &key.owner_id).await?;
@@ -428,7 +432,7 @@ impl HashAggregator {
             ));
         }
 
-        Ok(())
+        Ok(msg_count)
     }
 }
 

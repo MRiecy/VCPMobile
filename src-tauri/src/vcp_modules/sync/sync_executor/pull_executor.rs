@@ -1,5 +1,4 @@
-use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::db_write_queue::{DbWriteQueue, DbWriteTask};
+use crate::vcp_modules::db_write_queue::{DbWriteQueue, DbWriteTask, PreparedMessageWrite};
 use crate::vcp_modules::message_repository::MessageRenderCompiler;
 use crate::vcp_modules::sync_error::{
     encode_http_sync_error_body, encode_wire_sync_error, encode_wire_sync_error_value,
@@ -14,10 +13,9 @@ use crate::vcp_modules::topic_types::TopicKey;
 use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use serde_json::Value;
-use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, Runtime};
+use tauri::{AppHandle, Runtime};
 use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinSet;
 
@@ -85,23 +83,6 @@ fn http_status_error(operation: &str, status: reqwest::StatusCode, bytes: &[u8])
     }
 }
 
-fn parse_stream_error_frame(bytes: &[u8]) -> Result<Option<String>, String> {
-    let value: Value = serde_json::from_slice(bytes)
-        .map_err(|error| format!("Malformed NDJSON frame: {error}"))?;
-    match value.get("kind").and_then(Value::as_str) {
-        Some("streamError") => {
-            let object = value
-                .as_object()
-                .ok_or_else(|| "streamError frame must be an object".to_string())?;
-            if object.len() != 2 || !object.contains_key("error") {
-                return Err("streamError frame requires exactly kind and error".to_string());
-            }
-            encode_wire_sync_error_value(&object["error"]).map(Some)
-        }
-        _ => Ok(None),
-    }
-}
-
 struct NdjsonBudget {
     max_frames: usize,
     total_bytes: usize,
@@ -157,6 +138,11 @@ struct TopicNDJSONFrame {
     error: Option<WireSyncError>,
     legacy_attachment_warnings: usize,
     warning_samples: Vec<String>,
+}
+
+enum ParsedNdjsonFrame {
+    StreamError(String),
+    Topic(TopicNDJSONFrame),
 }
 
 #[derive(Default)]
@@ -286,9 +272,32 @@ fn canonicalize_attachment(
     Ok(Some(Value::Object(object)))
 }
 
-fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
+fn parse_ndjson_frame(bytes: &[u8]) -> Result<ParsedNdjsonFrame, String> {
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|error| format!("Malformed NDJSON frame: {error}"))?;
+    if value.get("kind").and_then(Value::as_str) == Some("streamError") {
+        let object = value
+            .as_object()
+            .ok_or_else(|| "streamError frame must be an object".to_string())?;
+        if object.len() != 2 || !object.contains_key("error") {
+            return Err("streamError frame requires exactly kind and error".to_string());
+        }
+        return encode_wire_sync_error_value(&object["error"]).map(ParsedNdjsonFrame::StreamError);
+    }
+    parse_topic_ndjson_value(value).map(ParsedNdjsonFrame::Topic)
+}
+
+#[cfg(test)]
+fn parse_topic_ndjson_frame(bytes: &[u8]) -> Result<TopicNDJSONFrame, String> {
+    match parse_ndjson_frame(bytes)? {
+        ParsedNdjsonFrame::Topic(frame) => Ok(frame),
+        ParsedNdjsonFrame::StreamError(_) => {
+            Err("NDJSON topic frame requires kind=topic".to_string())
+        }
+    }
+}
+
+fn parse_topic_ndjson_value(value: Value) -> Result<TopicNDJSONFrame, String> {
     let mut object = match value {
         Value::Object(object) => object,
         _ => return Err("NDJSON frame must be an object".to_string()),
@@ -539,201 +548,105 @@ fn pull_worker_permits(frame_bytes: usize) -> Result<u32, String> {
     u32::try_from(units.max(1)).map_err(|_| "Pull worker permit count overflow".to_string())
 }
 
-/// 共享消息处理管线：附件路径批量查询 → 本地状态投影 → 指纹/可选预渲染 → 写入队列
+/// 共享消息处理管线：规范消息 → 指纹/可选预渲染 → 写入队列。
 /// 被 `pull_messages_batch` 内各并发任务复用。
-/// 返回已提交的消息数量。
-async fn process_topic_messages<R: Runtime>(
-    app: &AppHandle<R>,
+/// 返回本 Topic 已接收并排队的消息数量；数据库成功由后续 flush 屏障确认。
+async fn process_topic_messages(
     key: &TopicKey,
-    mut parsed_messages: Vec<crate::vcp_modules::chat_manager::ChatMessage>,
+    parsed_messages: Vec<crate::vcp_modules::chat_manager::ChatMessage>,
     write_queue: &DbWriteQueue,
     prerender_enabled: bool,
 ) -> Result<usize, String> {
     let t_start = std::time::Instant::now();
-    let db = app.state::<DbState>();
-
-    // 1. 批量收集所有附件 hash，一次性查询本地路径（替代 N+1 查询）
-    let t_att_start = std::time::Instant::now();
-    let mut all_hashes = HashSet::new();
-    for msg in &parsed_messages {
-        if let Some(ref atts) = msg.attachments {
-            for att in atts {
-                if let Some(ref hash) = att.hash {
-                    if !hash.is_empty() {
-                        all_hashes.insert(hash.to_string());
-                    }
-                }
-            }
-        }
-    }
-
-    let mut path_map = std::collections::HashMap::new();
-    if !all_hashes.is_empty() {
-        let all_hashes = all_hashes.into_iter().collect::<Vec<_>>();
-        for hash_chunk in all_hashes.chunks(500) {
-            let placeholders = hash_chunk
-                .iter()
-                .map(|_| "?")
-                .collect::<Vec<_>>()
-                .join(", ");
-            let query = format!(
-                "SELECT hash, internal_path FROM attachments WHERE hash IN ({})",
-                placeholders
-            );
-            let mut query = sqlx::query(&query);
-            for hash in hash_chunk {
-                query = query.bind(hash);
-            }
-            let rows = query.fetch_all(&db.pool).await.map_err(|error| {
-                format!("Failed to resolve local attachment CAS paths: {error}")
-            })?;
-            for row in rows {
-                let hash = row
-                    .try_get::<String, _>("hash")
-                    .map_err(|error| format!("Failed to decode attachment hash: {error}"))?;
-                let path = row
-                    .try_get::<String, _>("internal_path")
-                    .map_err(|error| format!("Failed to decode attachment path: {error}"))?;
-                let clean_path = path.trim_start_matches("file://");
-                if !clean_path.is_empty() {
-                    match tokio::fs::metadata(clean_path).await {
-                        Ok(metadata) if metadata.is_file() => {
-                            path_map.insert(hash, clean_path.to_string());
-                        }
-                        Ok(_) => {}
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                        Err(error) => {
-                            return Err(format!(
-                                "Failed to inspect local attachment {hash}: {error}"
-                            ));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    let t_att = t_att_start.elapsed();
-
-    // 2. 用缓存的 path_map 填充附件路径与状态
-    for msg in &mut parsed_messages {
-        if let Some(ref mut atts) = msg.attachments {
-            for att in atts {
-                if let Some(ref hash) = att.hash {
-                    if !hash.is_empty() {
-                        if let Some(path) = path_map.get(hash) {
-                            att.internal_path = path.clone();
-                            att.src = format!("file://{}", path);
-                            att.status = Some("ready".to_string());
-                        } else {
-                            att.internal_path.clear();
-                            att.src.clear();
-                            att.status = Some("desktop_only".to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
 
     let parsed_count = parsed_messages.len();
     let mut t_block = std::time::Duration::from_secs(0);
     let mut t_submit = std::time::Duration::from_secs(0);
 
     if !parsed_messages.is_empty() {
-        // 3. 将预渲染和 Zstd 压缩等 CPU 密集型任务完美剥离至 spawn_blocking 线程池，解除 Tokio Worker 线程阻塞
+        // 1. 将指纹、预渲染和 Zstd 压缩移至 blocking 线程池。
         let t_block_start = std::time::Instant::now();
         let topic_id_clone = key.topic_id.clone();
-        let (parsed_messages_back, content_hashes, render_bytes_list, contents) =
-            tokio::task::spawn_blocking(move || {
-                let count = parsed_messages.len();
-                let mut content_hashes = Vec::with_capacity(count);
-                let mut render_bytes_list = Vec::with_capacity(count);
-                let mut contents = Vec::with_capacity(count);
+        let prepared_writes = tokio::task::spawn_blocking(move || {
+            let mut writes = Vec::with_capacity(parsed_messages.len());
 
-                for msg in &parsed_messages {
-                    // A. 计算/直读指纹
-                    let attachment_hashes: Vec<String> = msg
-                        .attachments
-                        .as_ref()
-                        .map(|atts| {
-                            atts.iter()
-                                .map(|a| a.hash.clone().unwrap_or_default())
-                                .filter(|h| !h.is_empty())
-                                .collect()
-                        })
-                        .unwrap_or_default();
+            for msg in parsed_messages {
+                // A. 计算/直读指纹
+                let attachment_hashes: Vec<String> = msg
+                    .attachments
+                    .as_ref()
+                    .map(|atts| {
+                        atts.iter()
+                            .map(|a| a.hash.clone().unwrap_or_default())
+                            .filter(|h| !h.is_empty())
+                            .collect()
+                    })
+                    .unwrap_or_default();
 
-                    // contentHash 只依据最终规范化消息计算，禁止复用桌面端在内部字段
-                    // 尚未剥离时生成的旧指纹。
-                    let content_hash = HashAggregator::compute_message_fingerprint(
-                        &msg.id,
-                        &msg.role,
-                        msg.name.as_deref(),
-                        &msg.content,
-                        msg.timestamp,
-                        msg.agent_id.as_deref(),
-                        &attachment_hashes,
-                    );
+                // contentHash 只依据最终规范化消息计算，禁止复用桌面端在内部字段
+                // 尚未剥离时生成的旧指纹。
+                let content_hash = HashAggregator::compute_message_fingerprint(
+                    &msg.id,
+                    &msg.role,
+                    msg.name.as_deref(),
+                    &msg.content,
+                    msg.timestamp,
+                    msg.agent_id.as_deref(),
+                    &attachment_hashes,
+                );
 
-                    // B. 预渲染（按开关控制）
-                    let content = &msg.content;
-                    let topic_id_log = topic_id_clone.clone();
-                    let msg_id_log = msg.id.clone();
+                // B. 预渲染（按开关控制）
+                let content = &msg.content;
+                let topic_id_log = topic_id_clone.clone();
+                let msg_id_log = msg.id.clone();
 
-                    let rb = if prerender_enabled {
-                        let comp_res =
-                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                let blocks = MessageRenderCompiler::compile(content);
-                                MessageRenderCompiler::serialize(&blocks).unwrap_or_default()
-                            }));
-                        match comp_res {
-                            Ok(val) => val,
-                            Err(_) => {
-                                log::warn!(
-                                    "[PullExecutor] Compile panicked for msg {} (topic {})",
-                                    msg_id_log,
-                                    topic_id_log
-                                );
-                                Vec::new()
-                            }
+                let rb = if prerender_enabled {
+                    let comp_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let blocks = MessageRenderCompiler::compile(content);
+                        MessageRenderCompiler::serialize(&blocks).unwrap_or_default()
+                    }));
+                    match comp_res {
+                        Ok(val) => val,
+                        Err(_) => {
+                            log::warn!(
+                                "[PullExecutor] Compile panicked for msg {} (topic {})",
+                                msg_id_log,
+                                topic_id_log
+                            );
+                            Vec::new()
                         }
-                    } else {
-                        Vec::new()
-                    };
+                    }
+                } else {
+                    Vec::new()
+                };
 
-                    content_hashes.push(content_hash);
-                    render_bytes_list.push(rb);
-                    contents.push(content.clone());
-                }
+                writes.push(PreparedMessageWrite {
+                    message: msg,
+                    render_bytes: rb,
+                    content_hash,
+                });
+            }
 
-                (parsed_messages, content_hashes, render_bytes_list, contents)
-            })
-            .await
-            .map_err(|e| format!("Spawn blocking failed: {}", e))?;
+            writes
+        })
+        .await
+        .map_err(|e| format!("Spawn blocking failed: {}", e))?;
         t_block = t_block_start.elapsed();
 
-        // 4. 提交落盘
+        // 2. 提交落盘
         let t_submit_start = std::time::Instant::now();
         // 限制单个事务的消息规模；队列仍会合并相邻小任务，但总量上限为 500。
         const WRITE_CHUNK_MESSAGES: usize = 250;
-        let mut messages = parsed_messages_back.into_iter();
-        let mut contents = contents.into_iter();
-        let mut render_bytes = render_bytes_list.into_iter();
-        let mut hashes = content_hashes.into_iter();
+        let mut writes = prepared_writes.into_iter();
         loop {
-            let message_chunk: Vec<_> = messages.by_ref().take(WRITE_CHUNK_MESSAGES).collect();
-            if message_chunk.is_empty() {
+            let write_chunk: Vec<_> = writes.by_ref().take(WRITE_CHUNK_MESSAGES).collect();
+            if write_chunk.is_empty() {
                 break;
             }
-            let chunk_len = message_chunk.len();
             write_queue
                 .submit(DbWriteTask::TopicMessages {
                     key: key.clone(),
-                    messages: message_chunk,
-                    contents: contents.by_ref().take(chunk_len).collect(),
-                    render_bytes: render_bytes.by_ref().take(chunk_len).collect(),
-                    content_hashes: hashes.by_ref().take(chunk_len).collect(),
-                    skip_bubble: true,
+                    writes: write_chunk,
                 })
                 .await?;
         }
@@ -743,8 +656,8 @@ async fn process_topic_messages<R: Runtime>(
     let t_total = t_start.elapsed();
     if parsed_count > 0 {
         log::debug!(
-            "[PullExecutor] [ProfileDetail] topic={} msgs={} | sql_att={:?} spawn_blocking={:?} submit_queue={:?} | total_proc={:?}",
-            key.topic_id, parsed_count, t_att, t_block, t_submit, t_total
+            "[PullExecutor] [ProfileDetail] topic={} msgs={} | prepare={:?} submit_queue={:?} | total_proc={:?}",
+            key.topic_id, parsed_count, t_block, t_submit, t_total
         );
     }
 
@@ -1294,10 +1207,10 @@ impl PullExecutor {
                     .acquire_many_owned(pull_worker_permits(line_bytes)?)
                     .await
                     .map_err(|e| format!("Pull worker semaphore closed: {}", e))?;
-                if let Some(error) = parse_stream_error_frame(&line)? {
-                    return Err(error);
-                }
-                let frame = parse_topic_ndjson_frame(&line)?;
+                let frame = match parse_ndjson_frame(&line)? {
+                    ParsedNdjsonFrame::StreamError(error) => return Err(error),
+                    ParsedNdjsonFrame::Topic(frame) => frame,
+                };
                 drop(line);
                 ndjson_budget.observe_frame(line_bytes, frame.messages.len())?;
                 let key = validate_returned_topic_identity(&frame, &expected_topics)?;
@@ -1343,7 +1256,6 @@ impl PullExecutor {
                     continue;
                 }
 
-                let app_clone = app.clone();
                 let wq_clone = write_queue.clone();
                 let tx_clone = tx.clone();
                 let pull_dtos = frame.messages;
@@ -1359,39 +1271,35 @@ impl PullExecutor {
 
                     let decode_t = start_t.elapsed();
                     let _permit = permit;
-                            let proc_start = std::time::Instant::now();
-                            match process_topic_messages(
-                                &app_clone,
-                                &key,
-                                messages,
-                                &wq_clone,
-                                prerender_enabled,
-                            )
-                            .await
-                            {
-                                Ok(parsed) => {
-                                    let proc_t = proc_start.elapsed();
-                                    let total_t = start_t.elapsed();
-                                    log::debug!(
-                                        "[PullExecutor] [ProfileSummary] topic={} msgs={} | decode={:?} sem_wait={:?} process={:?} | total={:?}",
-                                        topic_id, parsed, decode_t, std::time::Duration::ZERO, proc_t, total_t
-                                    );
-                                    let _ = tx_clone.send(BatchPullResult {
-                                        topic: key,
-                                        success: true,
-                                        legacy_attachment_warnings,
-                                        error: None,
-                                    }).await;
-                                }
-                                Err(e) => {
-                                    let _ = tx_clone.send(BatchPullResult {
-                                        topic: key,
-                                        success: false,
-                                        legacy_attachment_warnings,
-                                        error: Some(e),
-                                    }).await;
-                                }
-                            }
+                    let proc_start = std::time::Instant::now();
+                    match process_topic_messages(&key, messages, &wq_clone, prerender_enabled).await {
+                        Ok(parsed) => {
+                            let proc_t = proc_start.elapsed();
+                            let total_t = start_t.elapsed();
+                            log::debug!(
+                                "[PullExecutor] [ProfileSummary] topic={} msgs={} | decode={:?} sem_wait={:?} process={:?} | total={:?}",
+                                topic_id, parsed, decode_t, std::time::Duration::ZERO, proc_t, total_t
+                            );
+                            let _ = tx_clone
+                                .send(BatchPullResult {
+                                    topic: key,
+                                    success: true,
+                                    legacy_attachment_warnings,
+                                    error: None,
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = tx_clone
+                                .send(BatchPullResult {
+                                    topic: key,
+                                    success: false,
+                                    legacy_attachment_warnings,
+                                    error: Some(e),
+                                })
+                                .await;
+                        }
+                    }
                 });
             }
 
@@ -1419,10 +1327,10 @@ impl PullExecutor {
                 .acquire_many_owned(pull_worker_permits(trailing_bytes)?)
                 .await
                 .map_err(|e| format!("Pull worker semaphore closed: {}", e))?;
-            if let Some(error) = parse_stream_error_frame(&trailing)? {
-                return Err(error);
-            }
-            let frame = parse_topic_ndjson_frame(&trailing)?;
+            let frame = match parse_ndjson_frame(&trailing)? {
+                ParsedNdjsonFrame::StreamError(error) => return Err(error),
+                ParsedNdjsonFrame::Topic(frame) => frame,
+            };
             drop(trailing);
             ndjson_budget.observe_frame(trailing_bytes, frame.messages.len())?;
             let key = validate_returned_topic_identity(&frame, &expected_topics)?;
@@ -1458,7 +1366,6 @@ impl PullExecutor {
                 let pull_dtos = frame.messages;
                 let legacy_attachment_warnings = frame.legacy_attachment_warnings;
                 if !pull_dtos.is_empty() {
-                    let app_clone = app.clone();
                     let wq_clone = write_queue.clone();
                     let tx_clone = tx.clone();
                     spawn_handles.spawn(async move {
@@ -1468,14 +1375,8 @@ impl PullExecutor {
                                 .into_iter()
                                 .map(crate::vcp_modules::chat_manager::ChatMessage::from)
                                 .collect();
-                        match process_topic_messages(
-                            &app_clone,
-                            &key,
-                            messages,
-                            &wq_clone,
-                            prerender_enabled,
-                        )
-                        .await
+                        match process_topic_messages(&key, messages, &wq_clone, prerender_enabled)
+                            .await
                         {
                             Ok(_) => {
                                 let _ = tx_clone

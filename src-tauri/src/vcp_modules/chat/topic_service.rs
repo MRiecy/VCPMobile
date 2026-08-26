@@ -683,24 +683,11 @@ pub async fn archive_assistant_chat(
         .await?;
     }
 
-    // 3. 提交事务前冒泡重算当前 Topic 聚合哈希
+    // 3. 提交事务前一次性重算当前 Topic 消息计数与聚合哈希
     crate::vcp_modules::sync_hash::HashAggregator::bubble_from_topic(&mut tx, &key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
 
-    // 4. 更新数据库中话题的消息计数
-    sqlx::query(
-        "UPDATE topics SET msg_count = ?
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
-    )
-    .bind(temp_messages.len() as i32)
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .execute(&db_state.pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    // 5. 异步调用总结标题服务并更新标题
+    // 4. 异步调用总结标题服务并更新标题
     let app_handle_clone = app_handle.clone();
     let owner_id_clone = owner_id.clone();
     let owner_type_clone = owner_type.clone();

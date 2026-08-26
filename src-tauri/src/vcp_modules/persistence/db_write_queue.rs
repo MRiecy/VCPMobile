@@ -6,7 +6,7 @@ use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_logger::SyncLogger;
 use crate::vcp_modules::sync_types::is_valid_avatar_owner;
 use crate::vcp_modules::topic_types::{OwnerKey, TopicKey};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
@@ -34,21 +34,24 @@ pub enum DbWriteTask {
     },
     TopicMessages {
         key: TopicKey,
-        messages: Vec<crate::vcp_modules::chat_manager::ChatMessage>,
-        contents: Vec<String>,
-        render_bytes: Vec<Vec<u8>>,
-        content_hashes: Vec<String>,
-        skip_bubble: bool,
+        writes: Vec<PreparedMessageWrite>,
     },
     Flush {
         tx: oneshot::Sender<Result<(), String>>,
     },
 }
 
+#[derive(Debug)]
+pub(crate) struct PreparedMessageWrite {
+    pub message: ChatMessage,
+    pub render_bytes: Vec<u8>,
+    pub content_hash: String,
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)] // Existing test module intentionally sits beside the task enum.
 mod tests {
-    use super::DbWriteQueue;
+    use super::{DbWriteQueue, PreparedMessageWrite};
     use crate::vcp_modules::chat_manager::ChatMessage;
     use crate::vcp_modules::sync_dto::{
         AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
@@ -345,10 +348,11 @@ mod tests {
         DbWriteQueue::rusqlite_upsert_messages_batch(
             &tx,
             &TopicKey::new("agent", "agent", "topic"),
-            vec![stale],
-            vec!["stale remote body".into()],
-            vec![vec![1, 2, 3]],
-            vec!["stale-hash".into()],
+            vec![PreparedMessageWrite {
+                message: stale,
+                render_bytes: vec![1, 2, 3],
+                content_hash: "stale-hash".into(),
+            }],
         )
         .expect("guarded message batch");
 
@@ -414,9 +418,6 @@ mod tests {
             &tx,
             &TopicKey::new("agent", "agent-a", "missing-topic"),
             Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
         )
         .expect_err("even an empty message batch requires its live topic");
         assert!(missing_parent.to_string().contains("parent topic"));
@@ -450,7 +451,9 @@ impl DbWriteQueue {
     }
 
     pub fn new(_pool: sqlx::SqlitePool, db_path: std::path::PathBuf) -> Self {
-        let (tx, mut rx) = mpsc::channel(256);
+        // One queued transaction worth of tasks is enough to keep the single writer busy while
+        // preserving Pull's upstream byte-weighted backpressure.
+        let (tx, mut rx) = mpsc::channel(32);
         let db_path_for_worker = db_path.clone();
 
         // 核心优化：利用 Mutex 持有持久连接，确保 spawn_blocking 之间 prepare_cached 缓存不失效
@@ -463,7 +466,15 @@ impl DbWriteQueue {
             let mut error_count = 0u32;
             let mut pending_errors: Vec<String> = Vec::new();
 
-            while let Some(first_task) = rx.recv().await {
+            let mut carried_task = None;
+            loop {
+                let first_task = match carried_task.take() {
+                    Some(task) => task,
+                    None => match rx.recv().await {
+                        Some(task) => task,
+                        None => break,
+                    },
+                };
                 // 如果第一个任务就是 Flush，直接确认
                 if let DbWriteTask::Flush { tx } = first_task {
                     let _ = tx.send(Self::take_pending_errors(&mut pending_errors));
@@ -473,8 +484,8 @@ impl DbWriteQueue {
                 let mut tasks_in_this_tx = vec![first_task];
                 let mut total_msg_count = 0u32;
 
-                if let DbWriteTask::TopicMessages { messages, .. } = &tasks_in_this_tx[0] {
-                    total_msg_count += messages.len() as u32;
+                if let DbWriteTask::TopicMessages { writes, .. } = &tasks_in_this_tx[0] {
+                    total_msg_count += writes.len() as u32;
                 }
 
                 let mut flush_tx_opt: Option<oneshot::Sender<Result<(), String>>> = None;
@@ -489,9 +500,18 @@ impl DbWriteQueue {
                             break;
                         }
                         Ok(Some(task)) => {
-                            if let DbWriteTask::TopicMessages { messages, .. } = &task {
-                                total_msg_count += messages.len() as u32;
+                            let next_msg_count = match &task {
+                                DbWriteTask::TopicMessages { writes, .. } => writes.len() as u32,
+                                _ => 0,
+                            };
+                            if next_msg_count > 0
+                                && total_msg_count > 0
+                                && total_msg_count.saturating_add(next_msg_count) > 500
+                            {
+                                carried_task = Some(task);
+                                break;
                             }
+                            total_msg_count = total_msg_count.saturating_add(next_msg_count);
                             tasks_in_this_tx.push(task);
                         }
                         _ => break,
@@ -553,11 +573,8 @@ impl DbWriteQueue {
                                     Self::rusqlite_upsert_group_topic(&tx, &key, &dto)?;
                                 }
                             }
-                            DbWriteTask::TopicMessages { key, messages, contents, render_bytes, content_hashes, skip_bubble } => {
-                                if !skip_bubble {
-                                    affected_topics.insert(key.clone());
-                                }
-                                Self::rusqlite_upsert_messages_batch(&tx, &key, messages, contents, render_bytes, content_hashes)?;
+                            DbWriteTask::TopicMessages { key, writes } => {
+                                Self::rusqlite_upsert_messages_batch(&tx, &key, writes)?;
                             }
                             DbWriteTask::Flush { .. } => unreachable!(),
                         }
@@ -1063,21 +1080,8 @@ impl DbWriteQueue {
     fn rusqlite_upsert_messages_batch(
         tx: &rusqlite::Transaction,
         key: &TopicKey,
-        messages: Vec<ChatMessage>,
-        contents: Vec<String>,
-        render_bytes: Vec<Vec<u8>>,
-        content_hashes: Vec<String>,
+        mut writes: Vec<PreparedMessageWrite>,
     ) -> rusqlite::Result<()> {
-        if messages.len() != contents.len()
-            || messages.len() != render_bytes.len()
-            || messages.len() != content_hashes.len()
-        {
-            return Err(Self::sync_contract_error(format!(
-                "Topic {} message batch vectors have inconsistent lengths",
-                key.topic_id
-            )));
-        }
-
         let topic_is_live: bool = tx.query_row(
             "SELECT EXISTS(
                 SELECT 1 FROM topics
@@ -1092,11 +1096,12 @@ impl DbWriteQueue {
                 key.topic_id
             )));
         }
-        if messages.is_empty() {
+        if writes.is_empty() {
             return Ok(());
         }
-        if messages.iter().any(|message| {
-            message
+        if writes.iter().any(|write| {
+            write
+                .message
                 .topic_id
                 .as_deref()
                 .is_some_and(|message_topic| message_topic != key.topic_id)
@@ -1107,64 +1112,61 @@ impl DbWriteQueue {
             )));
         }
 
-        // Pull batches do not carry a causally newer restore marker. Filter local
-        // tombstones once up front so no message, FTS, render, or attachment side table
-        // can be repopulated by a stale remote snapshot.
-        let mut tombstoned_ids: HashSet<String> = HashSet::new();
-        for chunk in messages.chunks(998) {
+        for write in &writes {
+            let updated_at = write.message.updated_at.unwrap_or(write.message.timestamp);
+            if updated_at > (1_u64 << 53) - 1 {
+                return Err(Self::sync_contract_error(format!(
+                    "Message {}/{} updatedAt exceeds the safe integer range",
+                    key.topic_id, write.message.id
+                )));
+            }
+        }
+
+        // One lookup serves both anti-resurrection and retry no-op filtering. Pull batches do not
+        // carry a causally newer restore marker, and an exact committed version already has all
+        // of its side tables from the same SQLite transaction.
+        let mut existing_states: HashMap<String, (String, i64, Option<i64>, String)> =
+            HashMap::new();
+        for chunk in writes.chunks(998) {
             let placeholders = vec!["?"; chunk.len()].join(", ");
             let sql = format!(
-                "SELECT msg_id FROM messages
+                "SELECT msg_id, content_hash, updated_at, deleted_at, content FROM messages
                  WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
-                   AND deleted_at IS NOT NULL AND msg_id IN ({})",
+                   AND msg_id IN ({})",
                 placeholders
             );
             let mut params = Vec::with_capacity(chunk.len() + 3);
             params.push(key.owner_type.clone());
             params.push(key.owner_id.clone());
             params.push(key.topic_id.clone());
-            params.extend(chunk.iter().map(|message| message.id.clone()));
+            params.extend(chunk.iter().map(|write| write.message.id.clone()));
             let mut statement = tx.prepare_cached(&sql)?;
-            let rows = statement.query_map(rusqlite::params_from_iter(params), |row| row.get(0))?;
+            let rows = statement.query_map(rusqlite::params_from_iter(params), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })?;
             for row in rows {
-                tombstoned_ids.insert(row?);
+                let (message_id, hash, updated_at, deleted_at, content) = row?;
+                existing_states.insert(message_id, (hash, updated_at, deleted_at, content));
             }
         }
-        if !tombstoned_ids.is_empty() {
-            let kept_indices: Vec<usize> = messages
-                .iter()
-                .enumerate()
-                .filter_map(|(index, message)| {
-                    (!tombstoned_ids.contains(&message.id)).then_some(index)
-                })
-                .collect();
-            if kept_indices.is_empty() {
-                return Ok(());
+        writes.retain(|write| {
+            let updated_at = write.message.updated_at.unwrap_or(write.message.timestamp) as i64;
+            match existing_states.get(&write.message.id) {
+                Some((_, _, Some(_), _)) => false,
+                Some((hash, existing_updated_at, None, _)) => {
+                    hash != &write.content_hash || *existing_updated_at != updated_at
+                }
+                None => true,
             }
-            let filtered_messages = kept_indices
-                .iter()
-                .map(|index| messages[*index].clone())
-                .collect();
-            let filtered_contents = kept_indices
-                .iter()
-                .map(|index| contents[*index].clone())
-                .collect();
-            let filtered_render_bytes = kept_indices
-                .iter()
-                .map(|index| render_bytes[*index].clone())
-                .collect();
-            let filtered_content_hashes = kept_indices
-                .iter()
-                .map(|index| content_hashes[*index].clone())
-                .collect();
-            return Self::rusqlite_upsert_messages_batch(
-                tx,
-                key,
-                filtered_messages,
-                filtered_contents,
-                filtered_render_bytes,
-                filtered_content_hashes,
-            );
+        });
+        if writes.is_empty() {
+            return Ok(());
         }
 
         let now = chrono::Utc::now().timestamp_millis();
@@ -1174,7 +1176,7 @@ impl DbWriteQueue {
         const PARAMS_PER_MSG: usize = 15;
         let chunk_size = MAX_PARAMS / PARAMS_PER_MSG;
 
-        for chunk_indices in messages
+        for chunk_indices in writes
             .iter()
             .enumerate()
             .collect::<Vec<_>>()
@@ -1214,14 +1216,9 @@ impl DbWriteQueue {
             let mut stmt_msgs = tx.prepare_cached(&sql_msgs)?;
             let mut params_msgs: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-            for (idx, msg) in chunk_indices {
+            for (_, write) in chunk_indices {
+                let msg = &write.message;
                 let updated_at = msg.updated_at.unwrap_or(msg.timestamp);
-                if updated_at > (1_u64 << 53) - 1 {
-                    return Err(Self::sync_contract_error(format!(
-                        "Message {}/{} updatedAt exceeds the safe integer range",
-                        key.topic_id, msg.id
-                    )));
-                }
                 params_msgs.push(Box::new(key.owner_type.clone()));
                 params_msgs.push(Box::new(key.owner_id.clone()));
                 params_msgs.push(Box::new(key.topic_id.clone()));
@@ -1229,12 +1226,12 @@ impl DbWriteQueue {
                 params_msgs.push(Box::new(msg.role.clone()));
                 params_msgs.push(Box::new(msg.name.clone()));
                 params_msgs.push(Box::new(msg.agent_id.clone()));
-                params_msgs.push(Box::new(contents[*idx].clone()));
+                params_msgs.push(Box::new(msg.content.clone()));
                 params_msgs.push(Box::new(msg.timestamp as i64));
                 params_msgs.push(Box::new(msg.is_group_message.unwrap_or(false)));
                 params_msgs.push(Box::new(msg.group_id.clone()));
                 params_msgs.push(Box::new(msg.finish_reason.clone()));
-                params_msgs.push(Box::new(content_hashes[*idx].clone()));
+                params_msgs.push(Box::new(write.content_hash.clone()));
                 params_msgs.push(Box::new(msg.timestamp as i64));
                 params_msgs.push(Box::new(updated_at as i64));
             }
@@ -1243,31 +1240,43 @@ impl DbWriteQueue {
                 params_msgs.iter().map(|p| p.as_ref()).collect();
             stmt_msgs.execute(&*refs_msgs)?;
 
-            // 2. 批量插入 render_cache 表
-            // 先失效本批全部旧缓存；预渲染关闭或编译失败时不能继续沿用旧内容。
-            let cache_placeholders = vec!["?"; chunk_indices.len()].join(", ");
-            let delete_cache_sql = format!(
-                "DELETE FROM render_cache
-                 WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id IN ({})",
-                cache_placeholders
-            );
-            let mut delete_cache = tx.prepare_cached(&delete_cache_sql)?;
-            let mut delete_params: Vec<String> = Vec::with_capacity(chunk_indices.len() + 3);
-            delete_params.push(key.owner_type.clone());
-            delete_params.push(key.owner_id.clone());
-            delete_params.push(key.topic_id.clone());
-            delete_params.extend(chunk_indices.iter().map(|(_, msg)| msg.id.clone()));
-            let delete_refs: Vec<&dyn rusqlite::ToSql> = delete_params
+            // 2. 仅在消息指纹变化且没有新预渲染时失效旧缓存。
+            let cache_delete_ids = chunk_indices
                 .iter()
-                .map(|value| value as &dyn rusqlite::ToSql)
-                .collect();
-            delete_cache.execute(&*delete_refs)?;
+                .filter_map(|(_, write)| {
+                    if !write.render_bytes.is_empty() {
+                        return None;
+                    }
+                    existing_states
+                        .get(&write.message.id)
+                        .is_some_and(|(hash, _, deleted_at, _)| {
+                            deleted_at.is_none() && hash != &write.content_hash
+                        })
+                        .then(|| write.message.id.clone())
+                })
+                .collect::<Vec<_>>();
+            if !cache_delete_ids.is_empty() {
+                let placeholders = vec!["?"; cache_delete_ids.len()].join(", ");
+                let sql = format!(
+                    "DELETE FROM render_cache
+                     WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+                       AND msg_id IN ({placeholders})"
+                );
+                let mut params = vec![
+                    key.owner_type.clone(),
+                    key.owner_id.clone(),
+                    key.topic_id.clone(),
+                ];
+                params.extend(cache_delete_ids);
+                tx.prepare_cached(&sql)?
+                    .execute(rusqlite::params_from_iter(params))?;
+            }
 
-            // 过滤出有实际预渲染内容的消息（当预渲染关闭时，所有 render_bytes 均为空）
+            // 过滤出有实际预渲染内容的消息（当预渲染关闭时均为空）
             let render_chunk: Vec<_> = chunk_indices
                 .iter()
-                .map(|&(idx, msg)| (idx, msg))
-                .filter(|(idx, _)| !render_bytes[*idx].is_empty())
+                .map(|&(idx, write)| (idx, write))
+                .filter(|(_, write)| !write.render_bytes.is_empty())
                 .collect();
 
             if !render_chunk.is_empty() {
@@ -1290,19 +1299,23 @@ impl DbWriteQueue {
                         render_content = excluded.render_content,
                         content_hash = excluded.content_hash,
                         renderer_schema_version = excluded.renderer_schema_version,
-                        updated_at = excluded.updated_at",
+                        updated_at = excluded.updated_at
+                      WHERE render_cache.render_content IS NOT excluded.render_content
+                         OR render_cache.content_hash IS NOT excluded.content_hash
+                         OR render_cache.renderer_schema_version IS NOT excluded.renderer_schema_version",
                 );
 
                 let mut stmt_render = tx.prepare_cached(&sql_render)?;
                 let mut params_render: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
-                for (idx, msg) in render_chunk {
+                for (_, write) in render_chunk {
+                    let msg = &write.message;
                     params_render.push(Box::new(key.owner_type.clone()));
                     params_render.push(Box::new(key.owner_id.clone()));
                     params_render.push(Box::new(key.topic_id.clone()));
                     params_render.push(Box::new(msg.id.clone()));
-                    params_render.push(Box::new(render_bytes[idx].clone()));
-                    params_render.push(Box::new(content_hashes[idx].clone()));
+                    params_render.push(Box::new(write.render_bytes.clone()));
+                    params_render.push(Box::new(write.content_hash.clone()));
                     params_render.push(Box::new(
                         crate::vcp_modules::message_repository::RENDERER_SCHEMA_VERSION,
                     ));
@@ -1316,7 +1329,18 @@ impl DbWriteQueue {
         }
 
         // Phase 3.5: 全文检索 FTS5 批量同步
-        let msg_ids_for_fts: Vec<String> = messages.iter().map(|msg| msg.id.clone()).collect();
+        let fts_writes = writes
+            .iter()
+            .filter(|write| {
+                existing_states
+                    .get(&write.message.id)
+                    .is_none_or(|(_, _, _, content)| content != &write.message.content)
+            })
+            .collect::<Vec<_>>();
+        let msg_ids_for_fts: Vec<String> = fts_writes
+            .iter()
+            .map(|write| write.message.id.clone())
+            .collect();
         for chunk in msg_ids_for_fts.chunks(998) {
             // SQLite 参数上限，预留 1 个给 topic_id
             let placeholders = vec!["?"; chunk.len()].join(", ");
@@ -1339,7 +1363,7 @@ impl DbWriteQueue {
 
         const PARAMS_PER_FTS: usize = 5;
         let fts_chunk_size = MAX_PARAMS / PARAMS_PER_FTS;
-        for chunk in messages.chunks(fts_chunk_size) {
+        for chunk in fts_writes.chunks(fts_chunk_size) {
             let mut sql_ins_fts =
                 String::from(
                     "INSERT INTO messages_fts (msg_id, topic_id, content, owner_type, owner_id) VALUES ",
@@ -1352,7 +1376,8 @@ impl DbWriteQueue {
             }
             let mut stmt_ins_fts = tx.prepare_cached(&sql_ins_fts)?;
             let mut params_fts: Vec<String> = Vec::new();
-            for msg in chunk {
+            for write in chunk {
+                let msg = &write.message;
                 // trigram 分词器（migration 0008 起）直接索引原文，无需 CJK 预处理
                 params_fts.push(msg.id.clone());
                 params_fts.push(key.topic_id.clone());
@@ -1364,11 +1389,18 @@ impl DbWriteQueue {
         }
 
         // Phase 4: Attachment Optimization
-        let mut msg_ids = Vec::new();
+        let mut desired_attachment_counts = Vec::new();
         let mut all_relations = Vec::new();
+        let mut readiness_by_hash: HashMap<String, (String, String)> = HashMap::new();
 
-        for msg in messages.iter() {
-            msg_ids.push(msg.id.clone());
+        for write in writes.iter().filter(|write| {
+            existing_states
+                .get(&write.message.id)
+                .is_none_or(|(hash, _, _, _)| hash != &write.content_hash)
+        }) {
+            let msg = &write.message;
+            let attachment_count = msg.attachments.as_ref().map_or(0, Vec::len);
+            desired_attachment_counts.push((msg.id.clone(), attachment_count as i64));
             if let Some(ref attachments) = msg.attachments {
                 for (i, att) in attachments.iter().enumerate() {
                     let hash = att.hash.clone().ok_or_else(|| {
@@ -1385,55 +1417,50 @@ impl DbWriteQueue {
                             att.name, msg.id
                         )));
                     }
-                    let status = att.status.as_deref().ok_or_else(|| {
-                        Self::sync_contract_error(format!(
-                            "Attachment {hash} on message {} is missing status",
-                            msg.id
-                        ))
-                    })?;
-                    if !matches!(status, "ready" | "desktop_only") {
-                        return Err(Self::sync_contract_error(format!(
-                            "Attachment {hash} on message {} has invalid status {status}",
-                            msg.id
-                        )));
-                    }
-
                     Self::rusqlite_upsert_attachment_core(tx, &hash, att, msg.timestamp as i64)?;
 
                     // Resolve readiness inside the same write transaction as the relation.
                     // If CAS registration committed before us, the preserved core path wins;
                     // if it commits after us, its promotion UPDATE observes this relation.
-                    let current_path: String = tx.query_row(
-                        "SELECT internal_path FROM attachments WHERE hash = ?",
-                        [&hash],
-                        |row| row.get(0),
-                    )?;
-                    let clean_path = current_path.trim_start_matches("file://");
-                    let verified_path = if clean_path.is_empty() {
-                        None
+                    let (relation_src, relation_status) = if let Some(readiness) =
+                        readiness_by_hash.get(&hash)
+                    {
+                        readiness.clone()
                     } else {
-                        match std::fs::metadata(clean_path) {
-                            Ok(metadata) if metadata.is_file() => Some(clean_path),
-                            Ok(_) => None,
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                            Err(error) => {
-                                return Err(Self::sync_contract_error(format!(
-                                    "Failed to inspect local attachment {hash}: {error}"
-                                )));
+                        let current_path: String = tx.query_row(
+                            "SELECT internal_path FROM attachments WHERE hash = ?",
+                            [&hash],
+                            |row| row.get(0),
+                        )?;
+                        let clean_path = current_path.trim_start_matches("file://");
+                        let verified_path = if clean_path.is_empty() {
+                            None
+                        } else {
+                            match std::fs::metadata(clean_path) {
+                                Ok(metadata) if metadata.is_file() => Some(clean_path),
+                                Ok(_) => None,
+                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                                Err(error) => {
+                                    return Err(Self::sync_contract_error(format!(
+                                        "Failed to inspect local attachment {hash}: {error}"
+                                    )));
+                                }
                             }
-                        }
-                    };
-                    let (relation_src, relation_status) = match verified_path {
-                        Some(path) => (format!("file://{path}"), "ready".to_string()),
-                        None => {
-                            if !current_path.trim().is_empty() {
-                                tx.execute(
-                                    "UPDATE attachments SET internal_path = '' WHERE hash = ?",
-                                    [&hash],
-                                )?;
+                        };
+                        let readiness = match verified_path {
+                            Some(path) => (format!("file://{path}"), "ready".to_string()),
+                            None => {
+                                if !current_path.trim().is_empty() {
+                                    tx.execute(
+                                        "UPDATE attachments SET internal_path = '' WHERE hash = ?",
+                                        [&hash],
+                                    )?;
+                                }
+                                (String::new(), "desktop_only".to_string())
                             }
-                            (String::new(), "desktop_only".to_string())
-                        }
+                        };
+                        readiness_by_hash.insert(hash.clone(), readiness.clone());
+                        readiness
                     };
 
                     all_relations.push((
@@ -1449,26 +1476,32 @@ impl DbWriteQueue {
             }
         }
 
-        // Chunked Delete
-        for chunk in msg_ids.chunks(999) {
-            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        // Delete only relations beyond the new list length; matching positions remain intact.
+        for chunk in desired_attachment_counts.chunks(400) {
+            let values = vec!["(?, ?)"; chunk.len()].join(", ");
             let sql = format!(
-                "DELETE FROM message_attachments
+                "WITH desired(msg_id, attachment_count) AS (VALUES {values})
+                 DELETE FROM message_attachments
                  WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
-                   AND msg_id IN ({})",
-                placeholders
+                   AND EXISTS (
+                     SELECT 1 FROM desired
+                     WHERE desired.msg_id = message_attachments.msg_id
+                       AND message_attachments.attachment_order >= desired.attachment_count
+                   )"
             );
-            let mut stmt = tx.prepare_cached(&sql)?;
             let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+            for (message_id, count) in chunk {
+                params.push(Box::new(message_id.clone()));
+                params.push(Box::new(*count));
+            }
             params.push(Box::new(key.owner_type.clone()));
             params.push(Box::new(key.owner_id.clone()));
             params.push(Box::new(key.topic_id.clone()));
-            for id in chunk {
-                params.push(Box::new(id.clone()));
-            }
-            let params_refs: Vec<&dyn rusqlite::ToSql> =
-                params.iter().map(|p| p.as_ref()).collect();
-            stmt.execute(&*params_refs)?;
+            let params_refs = params
+                .iter()
+                .map(|value| value.as_ref())
+                .collect::<Vec<&dyn rusqlite::ToSql>>();
+            tx.prepare_cached(&sql)?.execute(&*params_refs)?;
         }
 
         // Chunked Relation Insert
@@ -1488,6 +1521,20 @@ impl DbWriteQueue {
                     }
                     sql.push_str("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
                 }
+                sql.push_str(
+                    " ON CONFLICT(owner_type, owner_id, topic_id, msg_id, attachment_order)
+                      DO UPDATE SET
+                        hash = excluded.hash,
+                        display_name = excluded.display_name,
+                        src = excluded.src,
+                        status = excluded.status,
+                        created_at = excluded.created_at
+                      WHERE message_attachments.hash IS NOT excluded.hash
+                         OR message_attachments.display_name IS NOT excluded.display_name
+                         OR message_attachments.src IS NOT excluded.src
+                         OR message_attachments.status IS NOT excluded.status
+                         OR message_attachments.created_at IS NOT excluded.created_at",
+                );
                 let mut stmt = tx.prepare_cached(&sql)?;
                 let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
                 for rel in chunk {
@@ -1533,6 +1580,9 @@ impl DbWriteQueue {
                 },
             )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        let msg_count = i64::try_from(hashes.len()).map_err(|_| {
+            Self::sync_contract_error(format!("Topic {} message count exceeds i64", key.topic_id))
+        })?;
         let root_hash = crate::vcp_modules::sync_types::compute_merkle_root(hashes);
 
         let config_hash = if key.owner_type == "agent" {
@@ -1549,11 +1599,12 @@ impl DbWriteQueue {
         };
 
         let changed = tx.execute(
-            "UPDATE topics SET content_hash = ?, config_hash = ?
+            "UPDATE topics SET content_hash = ?, config_hash = ?, msg_count = ?
              WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
             rusqlite::params![
                 root_hash,
                 config_hash,
+                msg_count,
                 &key.owner_type,
                 &key.owner_id,
                 &key.topic_id
@@ -1690,7 +1741,13 @@ impl DbWriteQueue {
                 extracted_text = COALESCE(attachments.extracted_text, excluded.extracted_text),
                 image_frames = COALESCE(attachments.image_frames, excluded.image_frames),
                 thumbnail_path = COALESCE(attachments.thumbnail_path, excluded.thumbnail_path),
-                updated_at = excluded.updated_at",
+                updated_at = excluded.updated_at
+             WHERE attachments.mime_type IS NOT excluded.mime_type
+                OR attachments.size IS NOT excluded.size
+                OR (excluded.internal_path <> '' AND attachments.internal_path IS NOT excluded.internal_path)
+                OR (attachments.extracted_text IS NULL AND excluded.extracted_text IS NOT NULL)
+                OR (attachments.image_frames IS NULL AND excluded.image_frames IS NOT NULL)
+                OR (attachments.thumbnail_path IS NULL AND excluded.thumbnail_path IS NOT NULL)",
             rusqlite::params![
                 hash,
                 &att.r#type,

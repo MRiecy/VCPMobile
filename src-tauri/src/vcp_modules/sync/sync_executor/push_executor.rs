@@ -82,13 +82,8 @@ pub struct PushBatchResult {
     pub error: Option<String>,
 }
 
-#[derive(Debug)]
-struct MessageTombstone {
-    msg_id: String,
-    deleted_at: i64,
-}
-
-struct TopicMessagePreflight {
+struct SerializedTopicMessages {
+    line: Vec<u8>,
     live_count: usize,
     tombstone_count: usize,
 }
@@ -338,98 +333,6 @@ async fn send_entity_items(
     Ok(())
 }
 
-async fn preflight_topic_messages(
-    tx: &mut Transaction<'_, Sqlite>,
-    key: &TopicKey,
-) -> Result<TopicMessagePreflight, String> {
-    let topic_id = &key.topic_id;
-    let row = sqlx::query(
-        "SELECT
-                COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END), 0)
-                    AS message_count,
-                COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END), 0)
-                    AS tombstone_count
-         FROM messages
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
-    )
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(topic_id)
-    .fetch_one(&mut **tx)
-    .await
-    .map_err(|error| format!("Message push preflight failed for {topic_id}: {error}"))?;
-    let message_count: i64 = row
-        .try_get("message_count")
-        .map_err(|error| format!("Message push count decode failed for {topic_id}: {error}"))?;
-    let message_count = usize::try_from(message_count)
-        .map_err(|_| format!("Message push count is invalid for {topic_id}"))?;
-    let tombstone_count: i64 = row.try_get("tombstone_count").map_err(|error| {
-        format!("Message tombstone count decode failed for {topic_id}: {error}")
-    })?;
-    let tombstone_count = usize::try_from(tombstone_count)
-        .map_err(|_| format!("Message tombstone count is invalid for {topic_id}"))?;
-    let total_count = message_count
-        .checked_add(tombstone_count)
-        .ok_or_else(|| format!("Message count overflow for {topic_id}"))?;
-    if total_count > MAX_MESSAGES_PER_TOPIC {
-        return Err(format!(
-            "Message push topic {topic_id} contains {total_count} live messages and tombstones, limit is {MAX_MESSAGES_PER_TOPIC}"
-        ));
-    }
-
-    Ok(TopicMessagePreflight {
-        live_count: message_count,
-        tombstone_count,
-    })
-}
-
-async fn load_message_tombstones(
-    tx: &mut Transaction<'_, Sqlite>,
-    key: &TopicKey,
-    expected_count: usize,
-) -> Result<Vec<MessageTombstone>, String> {
-    let topic_id = &key.topic_id;
-    let rows = sqlx::query(
-        "SELECT msg_id, deleted_at FROM messages
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NOT NULL
-         ORDER BY deleted_at ASC, msg_id ASC",
-    )
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(topic_id)
-    .fetch_all(&mut **tx)
-    .await
-    .map_err(|error| format!("Message tombstone query failed for {topic_id}: {error}"))?;
-    if rows.len() != expected_count {
-        return Err(format!(
-            "Message tombstones for {topic_id} changed during serialization: expected {expected_count}, got {}",
-            rows.len()
-        ));
-    }
-
-    rows.into_iter()
-        .map(|row| {
-            let message_id: String = row.try_get("msg_id").map_err(|error| {
-                format!("Message tombstone id decode failed for {topic_id}: {error}")
-            })?;
-            let deleted_at: i64 = row.try_get("deleted_at").map_err(|error| {
-                format!(
-                    "Message tombstone timestamp decode failed for {topic_id}/{message_id}: {error}"
-                )
-            })?;
-            if message_id.is_empty() || deleted_at < 0 {
-                return Err(format!(
-                    "Message tombstone {topic_id}/{message_id} has an invalid identity or timestamp"
-                ));
-            }
-            Ok(MessageTombstone {
-                msg_id: message_id,
-                deleted_at,
-            })
-        })
-        .collect()
-}
-
 async fn load_outbound_message_page(
     tx: &mut Transaction<'_, Sqlite>,
     key: &TopicKey,
@@ -641,9 +544,7 @@ async fn load_outbound_message_page(
 async fn serialize_topic_messages(
     tx: &mut Transaction<'_, Sqlite>,
     key: &TopicKey,
-    expected_message_count: usize,
-    tombstones: &[MessageTombstone],
-) -> Result<Vec<u8>, String> {
+) -> Result<SerializedTopicMessages, String> {
     let topic_id = &key.topic_id;
     let owner_type = &key.owner_type;
     let owner_id = &key.owner_id;
@@ -699,21 +600,46 @@ async fn serialize_topic_messages(
             serialized_count = serialized_count
                 .checked_add(1)
                 .ok_or_else(|| "Message push count overflow".to_string())?;
+            if serialized_count > MAX_MESSAGES_PER_TOPIC {
+                return Err(format!(
+                    "Message push topic {topic_id} exceeds the {MAX_MESSAGES_PER_TOPIC}-message limit"
+                ));
+            }
             cursor = Some(next_cursor);
         }
         if page_len < MESSAGE_PAGE_SIZE {
             break;
         }
     }
-    if serialized_count != expected_message_count {
-        return Err(format!(
-            "Message push topic {topic_id} changed during serialization: expected {expected_message_count}, got {serialized_count}"
-        ));
-    }
     line.write_all(b"],\"deletedMessages\":[")
         .map_err(|error| format!("Message tombstone prefix failed for {topic_id}: {error}"))?;
-    for (index, tombstone) in tombstones.iter().enumerate() {
-        if index > 0 {
+    let mut tombstone_count = 0usize;
+    let mut tombstones = sqlx::query(
+        "SELECT msg_id, deleted_at FROM messages
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NOT NULL
+         ORDER BY deleted_at ASC, msg_id ASC",
+    )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(topic_id)
+    .fetch(&mut **tx);
+    while let Some(row) = tombstones.next().await {
+        let row =
+            row.map_err(|error| format!("Message tombstone query failed for {topic_id}: {error}"))?;
+        let message_id: String = row.try_get("msg_id").map_err(|error| {
+            format!("Message tombstone id decode failed for {topic_id}: {error}")
+        })?;
+        let deleted_at: i64 = row.try_get("deleted_at").map_err(|error| {
+            format!(
+                "Message tombstone timestamp decode failed for {topic_id}/{message_id}: {error}"
+            )
+        })?;
+        if message_id.is_empty() || deleted_at < 0 {
+            return Err(format!(
+                "Message tombstone {topic_id}/{message_id} has an invalid identity or timestamp"
+            ));
+        }
+        if tombstone_count > 0 {
             line.write_all(b",").map_err(|error| {
                 format!("Message tombstone separator failed for {topic_id}: {error}")
             })?;
@@ -721,20 +647,33 @@ async fn serialize_topic_messages(
         serde_json::to_writer(
             &mut line,
             &serde_json::json!({
-                "msgId": &tombstone.msg_id,
-                "deletedAt": tombstone.deleted_at,
+                "msgId": &message_id,
+                "deletedAt": deleted_at,
             }),
         )
         .map_err(|error| {
             format!(
                 "Message push topic {topic_id} tombstone {} is invalid: {error}",
-                tombstone.msg_id
+                message_id
             )
         })?;
+        tombstone_count = tombstone_count
+            .checked_add(1)
+            .ok_or_else(|| "Message tombstone count overflow".to_string())?;
+        if serialized_count.saturating_add(tombstone_count) > MAX_MESSAGES_PER_TOPIC {
+            return Err(format!(
+                "Message push topic {topic_id} exceeds the {MAX_MESSAGES_PER_TOPIC}-message limit"
+            ));
+        }
     }
+    drop(tombstones);
     line.write_all(b"]}\n")
         .map_err(|error| format!("Message push suffix failed for {topic_id}: {error}"))?;
-    Ok(line.into_bytes())
+    Ok(SerializedTopicMessages {
+        line: line.into_bytes(),
+        live_count: serialized_count,
+        tombstone_count,
+    })
 }
 
 pub struct PushExecutor;
@@ -968,10 +907,10 @@ impl PushExecutor {
             if !topic_exists {
                 return Err(format!("Message push topic {topic_id} is missing locally"));
             }
-            let preflight = preflight_topic_messages(&mut read_tx, key).await?;
-            let topic_message_count = preflight
+            let serialized = serialize_topic_messages(&mut read_tx, key).await?;
+            let topic_message_count = serialized
                 .live_count
-                .checked_add(preflight.tombstone_count)
+                .checked_add(serialized.tombstone_count)
                 .ok_or_else(|| format!("Message push count overflow for {topic_id}"))?;
             total_messages = total_messages
                 .checked_add(topic_message_count)
@@ -981,19 +920,10 @@ impl PushExecutor {
                     "Message push contains more than {MAX_SYNC_MESSAGES} messages"
                 ));
             }
-
-            let topic_tombstones =
-                load_message_tombstones(&mut read_tx, key, preflight.tombstone_count).await?;
-            let line = serialize_topic_messages(
-                &mut read_tx,
-                key,
-                preflight.live_count,
-                &topic_tombstones,
-            )
-            .await?;
             read_tx.commit().await.map_err(|error| {
                 format!("Message push snapshot close failed for {topic_id}: {error}")
             })?;
+            let line = serialized.line;
             total_request_bytes = total_request_bytes
                 .checked_add(line.len())
                 .ok_or_else(|| "Message push byte count overflow".to_string())?;
@@ -1195,7 +1125,7 @@ mod tests {
              );
              CREATE TABLE attachments (
                 hash TEXT PRIMARY KEY, mime_type TEXT, size BIGINT, internal_path TEXT,
-                image_frames TEXT, thumbnail_path TEXT, created_at BIGINT
+                extracted_text TEXT, image_frames TEXT, thumbnail_path TEXT, created_at BIGINT
              );",
         )
         .execute(&pool)
@@ -1229,16 +1159,15 @@ mod tests {
 
         let mut read_tx = pool.begin().await.expect("begin snapshot");
         let key = topic("topic");
-        let preflight = preflight_topic_messages(&mut read_tx, &key)
+        let serialized = serialize_topic_messages(&mut read_tx, &key)
             .await
-            .expect("preflight");
-        assert_eq!(preflight.live_count, MESSAGE_PAGE_SIZE + 1);
-        assert_eq!(preflight.tombstone_count, 1);
-        let tombstones = load_message_tombstones(&mut read_tx, &key, 1)
-            .await
-            .expect("load tombstone");
-        assert_eq!(tombstones[0].msg_id, "message-deleted");
-        assert_eq!(tombstones[0].deleted_at, 1234);
+            .expect("serialize topic snapshot");
+        assert_eq!(serialized.live_count, MESSAGE_PAGE_SIZE + 1);
+        assert_eq!(serialized.tombstone_count, 1);
+        let frame: serde_json::Value =
+            serde_json::from_slice(&serialized.line).expect("serialized topic frame");
+        assert_eq!(frame["deletedMessages"][0]["msgId"], "message-deleted");
+        assert_eq!(frame["deletedMessages"][0]["deletedAt"], 1234);
         let first = load_outbound_message_page(&mut read_tx, &key, None)
             .await
             .expect("first page");

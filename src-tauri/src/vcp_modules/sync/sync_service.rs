@@ -1797,7 +1797,7 @@ async fn run_sync_session(
                                                     pending.clear();
                                                 }
                                                 // 按消息数量分批，每批最多 10000 条消息，避免超大 WS payload
-                                                let batches = match build_diff_batches(topic_states) {
+                                                let mut batches = match build_diff_batches(topic_states) {
                                                     Ok(batches) => batches,
                                                     Err(error) => {
                                                         let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
@@ -1812,13 +1812,10 @@ async fn run_sync_session(
                                                 let batch_count = batches.len();
                                                 log::info!("[SyncService] Phase3 diff split into {} batches (max {} msgs/batch)", batch_count, MAX_MESSAGES_PER_BATCH);
 
-                                                let mut first_batch = None;
+                                                let first_batch = batches.pop_front();
                                                 {
                                                     let mut pending = pending_diff_batches.lock().await;
-                                                    if !batches.is_empty() {
-                                                        first_batch = Some(batches[0].clone());
-                                                        *pending = batches.into_iter().skip(1).collect();
-                                                    }
+                                                    *pending = batches;
                                                 }
 
                                                 if let Some(batch) = first_batch {
@@ -2869,7 +2866,6 @@ impl Write for JsonSizeCounter {
     }
 }
 
-#[derive(Clone)]
 pub(crate) struct Phase3DiffBatch {
     pub topics: Vec<MessageDiffTopicState>,
     pub keys: HashSet<TopicKey>,
@@ -2905,7 +2901,7 @@ fn build_diff_batches(
             owner_id: key.owner_id.clone(),
             topic_id: key.topic_id.clone(),
             content_hash: state.content_hash,
-            messages: state.messages.into_iter().collect(),
+            messages: state.messages,
         };
         let mut counter = JsonSizeCounter::new(MAX_WS_DIFF_BATCH_BYTES);
         serde_json::to_writer(&mut counter, &topic_obj)

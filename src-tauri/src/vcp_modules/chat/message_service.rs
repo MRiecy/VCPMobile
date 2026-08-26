@@ -755,33 +755,6 @@ pub async fn begin_stream_message(
     .await
     .map_err(|e| e.to_string())?;
 
-    sqlx::query(
-        "INSERT INTO messages_fts (msg_id, topic_id, content, owner_type, owner_id)
-         VALUES (?, ?, '', ?, ?)",
-    )
-    .bind(message_id)
-    .bind(&key.topic_id)
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    sqlx::query(
-        "UPDATE topics SET msg_count = (
-            SELECT COUNT(*) FROM messages
-            WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
-         ) WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
-    )
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
     HashAggregator::bubble_from_topic(&mut tx, key).await?;
 
     sqlx::query(
@@ -824,30 +797,6 @@ pub async fn append_single_message<R: tauri::Runtime>(
     let key = TopicKey::new(owner_type, owner_id, &topic_id);
     let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
     MessageRepository::upsert_message(&mut tx, &message, &key, &render_bytes, false).await?;
-
-    let msg_count: i32 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM messages
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
-    )
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?
-    .unwrap_or(0);
-
-    sqlx::query(
-        "UPDATE topics SET msg_count = ?
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
-    )
-    .bind(msg_count)
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(blocks)
@@ -978,7 +927,7 @@ pub async fn delete_messages(
 ) -> Result<MessageDeletionResult, String> {
     if msg_ids.is_empty() {
         let msg_count: i32 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM messages
+            "SELECT msg_count FROM topics
              WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
         )
         .bind(&key.owner_type)
@@ -1116,48 +1065,8 @@ pub async fn delete_messages(
         .await
         .map_err(|e| e.to_string())?;
 
-    // 同步清理 FTS5 全文检索索引，防止已删除消息残留在搜索结果中
-    let delete_fts_query = format!(
-        "DELETE FROM messages_fts
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id IN ({})",
-        msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
-    );
-    let mut q_fts = sqlx::query(&delete_fts_query)
-        .bind(&key.owner_type)
-        .bind(&key.owner_id)
-        .bind(&key.topic_id);
-    for id in &msg_ids {
-        q_fts = q_fts.bind(id);
-    }
-    q_fts.execute(&mut *tx).await.map_err(|e| e.to_string())?;
-
-    let msg_count: i32 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM messages
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
-    )
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?
-    .unwrap_or(0);
-
-    let topic_update = sqlx::query(
-        "UPDATE topics SET msg_count = ?
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
-    )
-    .bind(msg_count)
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
-    if topic_update.rows_affected() != 1 {
-        return Err(format!("Topic {} is missing or deleted", key.topic_id));
-    }
-    HashAggregator::bubble_from_topic(&mut tx, key).await?;
+    // FTS 由 after_messages_logical_delete 触发器在同一事务中清理。
+    let msg_count = HashAggregator::bubble_from_topic(&mut tx, key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(MessageDeletionResult {
         deleted_ids,
@@ -1165,6 +1074,144 @@ pub async fn delete_messages(
         deleted_at: now,
         msg_count,
     })
+}
+
+/// Applies Desktop message tombstones as one Topic-local durable mutation. Aggregate count/root
+/// repair is intentionally owned by SyncFinalizer so a batch of tombstones does not rescan the
+/// same Topic once per message.
+pub(crate) async fn apply_sync_message_tombstones(
+    db_pool: &sqlx::Pool<sqlx::Sqlite>,
+    key: &TopicKey,
+    tombstones: &[(String, i64)],
+) -> Result<Vec<String>, String> {
+    const MAX_SAFE_JSON_INTEGER: i64 = (1_i64 << 53) - 1;
+    if tombstones.is_empty() {
+        return Ok(Vec::new());
+    }
+    if tombstones.len() > 10_000
+        || tombstones.iter().any(|(id, deleted_at)| {
+            id.is_empty() || !(0..=MAX_SAFE_JSON_INTEGER).contains(deleted_at)
+        })
+        || tombstones
+            .iter()
+            .map(|(id, _)| id)
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            != tombstones.len()
+    {
+        return Err(
+            "Sync message tombstones require 1..=10000 unique ids and safe deletedAt values"
+                .to_string(),
+        );
+    }
+
+    let mut tx = db_pool.begin().await.map_err(|error| error.to_string())?;
+    let placeholders = vec!["?"; tombstones.len()].join(", ");
+    let live_sql = format!(
+        "SELECT msg_id FROM messages
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+           AND deleted_at IS NULL AND msg_id IN ({placeholders})"
+    );
+    let mut live_query = sqlx::query_scalar(&live_sql)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id);
+    for (id, _) in tombstones {
+        live_query = live_query.bind(id);
+    }
+    let deleted_ids: Vec<String> = live_query
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    if deleted_ids.is_empty() {
+        tx.commit().await.map_err(|error| error.to_string())?;
+        return Ok(Vec::new());
+    }
+
+    let active_sql = format!(
+        "SELECT msg_id FROM active_generations
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+           AND msg_id IN ({})",
+        vec!["?"; deleted_ids.len()].join(", ")
+    );
+    let mut active_query = sqlx::query_scalar(&active_sql)
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id);
+    for id in &deleted_ids {
+        active_query = active_query.bind(id);
+    }
+    let active_ids = active_query
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let tombstone_times = tombstones
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashMap<_, _>>();
+    let values = deleted_ids
+        .iter()
+        .map(|_| "(?, ?)")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let update_sql = format!(
+        "WITH incoming(msg_id, deleted_at) AS (VALUES {values})
+         UPDATE messages
+         SET deleted_at = (
+             SELECT incoming.deleted_at FROM incoming WHERE incoming.msg_id = messages.msg_id
+         )
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
+           AND msg_id IN (SELECT msg_id FROM incoming)"
+    );
+    let mut update = sqlx::query(&update_sql);
+    for id in &deleted_ids {
+        update = update.bind(id).bind(
+            tombstone_times
+                .get(id)
+                .copied()
+                .ok_or_else(|| format!("Missing Desktop tombstone time for message {id}"))?,
+        );
+    }
+    let updated = update
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    if updated.rows_affected() != deleted_ids.len() as u64 {
+        return Err(format!(
+            "Sync message tombstones changed {} rows, expected {} for topic {}",
+            updated.rows_affected(),
+            deleted_ids.len(),
+            key.topic_id
+        ));
+    }
+
+    for table in ["render_cache", "message_attachments", "active_generations"] {
+        let delete_sql = format!(
+            "DELETE FROM {table}
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+               AND msg_id IN ({})",
+            vec!["?"; deleted_ids.len()].join(", ")
+        );
+        let mut delete = sqlx::query(&delete_sql)
+            .bind(&key.owner_type)
+            .bind(&key.owner_id)
+            .bind(&key.topic_id);
+        for id in &deleted_ids {
+            delete = delete.bind(id);
+        }
+        delete
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+
+    // FTS is removed by after_messages_logical_delete in this same transaction.
+    tx.commit().await.map_err(|error| error.to_string())?;
+    Ok(active_ids)
 }
 
 pub async fn truncate_history_after_message(
@@ -1265,29 +1312,6 @@ pub async fn truncate_history_after_message(
     .await
     .map_err(|e| e.to_string())?;
 
-    // 同步清理 FTS5 全文检索索引，防止已删除消息残留在搜索结果中
-    sqlx::query(
-        "DELETE FROM messages_fts
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
-           AND msg_id IN (
-             SELECT msg_id FROM messages
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
-               AND (timestamp > ? OR (timestamp = ? AND msg_id > ?))
-           )",
-    )
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .bind(anchor_timestamp)
-    .bind(anchor_timestamp)
-    .bind(anchor_message_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
-
     sqlx::query(
         "DELETE FROM active_generations
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
@@ -1335,32 +1359,8 @@ pub async fn truncate_history_after_message(
             key.topic_id
         ));
     }
-    let msg_count: i32 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM messages
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
-    )
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?
-    .unwrap_or(0);
-    let topic_update = sqlx::query(
-        "UPDATE topics SET msg_count = ?
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
-    )
-    .bind(msg_count)
-    .bind(&key.owner_type)
-    .bind(&key.owner_id)
-    .bind(&key.topic_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
-    if topic_update.rows_affected() != 1 {
-        return Err(format!("Topic {} is missing or deleted", key.topic_id));
-    }
-    HashAggregator::bubble_from_topic(&mut tx, key).await?;
+    // FTS 由 after_messages_logical_delete 触发器在同一事务中清理。
+    let msg_count = HashAggregator::bubble_from_topic(&mut tx, key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     Ok(MessageDeletionResult {
         deleted_ids,

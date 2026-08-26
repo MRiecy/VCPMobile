@@ -8,7 +8,7 @@ use crate::vcp_modules::sync_service::{Phase3DiffBatch, Phase3Tracker, SyncComma
 use crate::vcp_modules::sync_types::{
     MessageDeleteDecision, MessageDiffDecision, MessageDiffResultFrame,
 };
-use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
+use crate::vcp_modules::topic_types::TopicKey;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -446,25 +446,19 @@ impl BatchDiffHandler {
 
                 // 桌面墓碑先落到本地，避免同批次 push 把已经删除的 live 消息复活。
                 for (topic, tombstones) in &delete_batch {
-                    for tombstone in tombstones {
-                        let message_key = MessageKey::new(topic.clone(), &tombstone.msg_id);
-                        if let Err(error) = DeleteExecutor::soft_delete_message(
-                            app_handle,
-                            &message_key,
-                            tombstone.deleted_at,
-                        )
-                        .await
-                        {
-                            tracker.mark_failed(topic).await;
-                            return Err(Phase3ProtocolError::for_topic(
-                                "SYNC_DELETE_FAILED",
-                                format!(
-                                    "Failed to apply desktop message tombstone {} for {}: {error}",
-                                    tombstone.msg_id, topic.topic_id,
-                                ),
-                                &topic.topic_id,
-                            ));
-                        }
+                    if let Err(error) =
+                        DeleteExecutor::soft_delete_messages(app_handle, topic, tombstones).await
+                    {
+                        tracker.mark_failed(topic).await;
+                        return Err(Phase3ProtocolError::for_topic(
+                            "SYNC_DELETE_FAILED",
+                            format!(
+                                "Failed to apply {} Desktop message tombstones for {}: {error}",
+                                tombstones.len(),
+                                topic.topic_id,
+                            ),
+                            &topic.topic_id,
+                        ));
                     }
                     tracker.mark_modified(topic).await;
                 }

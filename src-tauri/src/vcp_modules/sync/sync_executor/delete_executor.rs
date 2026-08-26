@@ -1,5 +1,5 @@
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::sync_types::SYNC_TOMBSTONE_HASH;
+use crate::vcp_modules::sync_types::{MessageDeleteDecision, SYNC_TOMBSTONE_HASH};
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use tauri::{AppHandle, Manager, Runtime};
 
@@ -104,21 +104,22 @@ impl DeleteExecutor {
         Ok(())
     }
 
-    pub async fn soft_delete_message<R: Runtime>(
+    pub async fn soft_delete_messages<R: Runtime>(
         app: &AppHandle<R>,
-        message_key: &MessageKey,
-        deleted_at: i64,
+        key: &TopicKey,
+        tombstones: &[MessageDeleteDecision],
     ) -> Result<(), String> {
-        let key = &message_key.topic;
-        let message_id = message_key.msg_id.as_str();
         if key.topic_id.is_empty()
             || key.owner_id.is_empty()
             || !matches!(key.owner_type.as_str(), "agent" | "group")
-            || message_id.is_empty()
-            || deleted_at < 0
+            || tombstones.is_empty()
+            || tombstones
+                .iter()
+                .any(|tombstone| tombstone.msg_id.is_empty() || tombstone.deleted_at < 0)
         {
             return Err(
-                "Message delete requires topicId, id, and non-negative deletedAt".to_string(),
+                "Message delete requires topic identity, ids, and non-negative deletedAt"
+                    .to_string(),
             );
         }
         let db = app.state::<DbState>();
@@ -135,17 +136,18 @@ impl DeleteExecutor {
         if !topic_is_live {
             return Ok(());
         }
-        let result = crate::vcp_modules::message_service::delete_messages(
-            &db.pool,
-            key,
-            vec![message_id.to_string()],
-            Some(deleted_at),
+        let writes = tombstones
+            .iter()
+            .map(|tombstone| (tombstone.msg_id.clone(), tombstone.deleted_at))
+            .collect::<Vec<_>>();
+        let active_ids = crate::vcp_modules::message_service::apply_sync_message_tombstones(
+            &db.pool, key, &writes,
         )
         .await?;
         if let Some(active_requests) =
             app.try_state::<crate::vcp_modules::vcp_client::ActiveRequests>()
         {
-            for active_id in result.active_ids {
+            for active_id in active_ids {
                 if let Err(error) =
                     active_requests.cancel(&MessageKey::new(key.clone(), &active_id))
                 {

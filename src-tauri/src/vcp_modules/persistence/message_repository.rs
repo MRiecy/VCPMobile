@@ -547,6 +547,20 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
 /// Internal message repository for DB operations
 pub struct MessageRepository;
 
+struct ExistingMessageState {
+    role: String,
+    name: Option<String>,
+    agent_id: Option<String>,
+    content: String,
+    timestamp: i64,
+    is_group_message: bool,
+    group_id: Option<String>,
+    finish_reason: Option<String>,
+    content_hash: String,
+    updated_at: i64,
+    deleted_at: Option<i64>,
+}
+
 impl MessageRepository {
     fn attachment_hash(
         attachment: &crate::vcp_modules::chat_manager::Attachment,
@@ -568,11 +582,11 @@ impl MessageRepository {
         Ok(hash)
     }
 
-    async fn ensure_upsert_target_live(
+    async fn load_upsert_target_state(
         tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
         key: &TopicKey,
         msg_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<Option<ExistingMessageState>, String> {
         let topic_is_live: bool = sqlx::query_scalar(
             "SELECT EXISTS(
                 SELECT 1 FROM topics
@@ -589,9 +603,11 @@ impl MessageRepository {
             return Err(format!("topic {} is deleted or missing", key.topic_id));
         }
 
-        let deleted_at: Option<Option<i64>> = sqlx::query_scalar(
-            "SELECT deleted_at FROM messages
-                 WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+        let existing_row = sqlx::query(
+            "SELECT role, name, agent_id, content, timestamp, is_group_message,
+                    group_id, finish_reason, content_hash, updated_at, deleted_at
+             FROM messages
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
         )
         .bind(&key.owner_type)
         .bind(&key.owner_id)
@@ -600,12 +616,45 @@ impl MessageRepository {
         .fetch_optional(&mut **tx)
         .await
         .map_err(|error| error.to_string())?;
-        if matches!(deleted_at, Some(Some(_))) {
+        let existing = existing_row
+            .map(|row| {
+                Ok::<_, String>(ExistingMessageState {
+                    role: row.try_get("role").map_err(|error| error.to_string())?,
+                    name: row.try_get("name").map_err(|error| error.to_string())?,
+                    agent_id: row.try_get("agent_id").map_err(|error| error.to_string())?,
+                    content: row.try_get("content").map_err(|error| error.to_string())?,
+                    timestamp: row
+                        .try_get("timestamp")
+                        .map_err(|error| error.to_string())?,
+                    is_group_message: row
+                        .try_get::<i64, _>("is_group_message")
+                        .map_err(|error| error.to_string())?
+                        != 0,
+                    group_id: row.try_get("group_id").map_err(|error| error.to_string())?,
+                    finish_reason: row
+                        .try_get("finish_reason")
+                        .map_err(|error| error.to_string())?,
+                    content_hash: row
+                        .try_get("content_hash")
+                        .map_err(|error| error.to_string())?,
+                    updated_at: row
+                        .try_get("updated_at")
+                        .map_err(|error| error.to_string())?,
+                    deleted_at: row
+                        .try_get("deleted_at")
+                        .map_err(|error| error.to_string())?,
+                })
+            })
+            .transpose()?;
+        if existing
+            .as_ref()
+            .is_some_and(|state| state.deleted_at.is_some())
+        {
             return Err(format!(
                 "message {msg_id} is tombstoned and cannot be restored by upsert"
             ));
         }
-        Ok(())
+        Ok(existing)
     }
 
     pub async fn upsert_message(
@@ -615,8 +664,6 @@ impl MessageRepository {
         render_content: &[u8],
         skip_bubble: bool,
     ) -> Result<(), String> {
-        Self::ensure_upsert_target_live(tx, key, &message.id).await?;
-
         // 1. 计算核心内容指纹 (通过 HashAggregator)
         let attachment_hashes: Vec<String> = message
             .attachments
@@ -638,31 +685,42 @@ impl MessageRepository {
             message.agent_id.as_deref(),
             &attachment_hashes,
         );
-        let existing: Option<(String, i64)> = sqlx::query_as(
-            "SELECT content_hash, updated_at FROM messages
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
-        )
-        .bind(&key.owner_type)
-        .bind(&key.owner_id)
-        .bind(&key.topic_id)
-        .bind(&message.id)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(|error| error.to_string())?;
+        let existing = Self::load_upsert_target_state(tx, key, &message.id).await?;
         let effective_updated_at = resolve_message_updated_at(
             message.updated_at,
             message.timestamp,
             &content_hash,
             existing
                 .as_ref()
-                .map(|(hash, updated_at)| (hash.as_str(), *updated_at)),
+                .map(|state| (state.content_hash.as_str(), state.updated_at)),
             chrono::Utc::now().timestamp_millis(),
         )
         .map_err(|error| format!("message {} {error}", message.id))?;
+        let is_group_message = message.is_group_message.unwrap_or(false);
+        let message_timestamp = message.timestamp as i64;
+        let fingerprint_changed = existing
+            .as_ref()
+            .is_none_or(|state| state.content_hash != content_hash);
+        let content_changed = existing
+            .as_ref()
+            .is_none_or(|state| state.content != message.content);
+        let core_changed = existing.as_ref().is_none_or(|state| {
+            state.role != message.role
+                || state.name != message.name
+                || state.agent_id != message.agent_id
+                || state.content != message.content
+                || state.timestamp != message_timestamp
+                || state.is_group_message != is_group_message
+                || state.group_id != message.group_id
+                || state.finish_reason != message.finish_reason
+                || state.content_hash != content_hash
+                || state.updated_at != effective_updated_at
+        });
 
         // 2. 插入或更新消息 (不含 render_content)
-        sqlx::query(
-            "INSERT INTO messages (
+        if core_changed {
+            let changed = sqlx::query(
+                "INSERT INTO messages (
                 owner_type, owner_id, topic_id, msg_id, role, name, agent_id, content, timestamp,
                 is_group_message, group_id, finish_reason,
                 content_hash,
@@ -680,25 +738,29 @@ impl MessageRepository {
                 content_hash = excluded.content_hash,
                 updated_at = excluded.updated_at
              WHERE messages.deleted_at IS NULL",
-        )
-        .bind(&key.owner_type)
-        .bind(&key.owner_id)
-        .bind(&key.topic_id)
-        .bind(&message.id)
-        .bind(&message.role)
-        .bind(&message.name)
-        .bind(&message.agent_id)
-        .bind(&message.content)
-        .bind(message.timestamp as i64)
-        .bind(message.is_group_message.unwrap_or(false))
-        .bind(&message.group_id)
-        .bind(&message.finish_reason)
-        .bind(&content_hash)
-        .bind(message.timestamp as i64) // created_at
-        .bind(effective_updated_at)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| e.to_string())?;
+            )
+            .bind(&key.owner_type)
+            .bind(&key.owner_id)
+            .bind(&key.topic_id)
+            .bind(&message.id)
+            .bind(&message.role)
+            .bind(&message.name)
+            .bind(&message.agent_id)
+            .bind(&message.content)
+            .bind(message_timestamp)
+            .bind(is_group_message)
+            .bind(&message.group_id)
+            .bind(&message.finish_reason)
+            .bind(&content_hash)
+            .bind(message_timestamp) // created_at
+            .bind(effective_updated_at)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| e.to_string())?;
+            if changed.rows_affected() != 1 {
+                return Err(format!("Message {} disappeared during upsert", message.id));
+            }
+        }
 
         // 2.1 插入或更新渲染缓存 (独立表)
         sqlx::query(
@@ -710,7 +772,11 @@ impl MessageRepository {
                 render_content = excluded.render_content,
                 content_hash = excluded.content_hash,
                 renderer_schema_version = excluded.renderer_schema_version,
-                updated_at = excluded.updated_at",
+                updated_at = excluded.updated_at
+             WHERE render_cache.render_content IS NOT excluded.render_content
+                OR render_cache.content_hash IS NOT excluded.content_hash
+                OR render_cache.renderer_schema_version IS NOT excluded.renderer_schema_version
+                OR render_cache.updated_at IS NOT excluded.updated_at",
         )
         .bind(&key.owner_type)
         .bind(&key.owner_id)
@@ -724,32 +790,33 @@ impl MessageRepository {
         .await
         .map_err(|e| e.to_string())?;
 
-        // 2.2 同步写入全文检索 FTS5 虚拟表 (仅在消息未删除时同步明文，FTS5 不支持 ON CONFLICT)
-        // trigram 分词器（migration 0008 起）直接索引原文，无需 CJK 预处理
-        sqlx::query(
-            "DELETE FROM messages_fts
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
-        )
-        .bind(&key.owner_type)
-        .bind(&key.owner_id)
-        .bind(&key.topic_id)
-        .bind(&message.id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| e.to_string())?;
+        // 2.2 FTS 只消费正文变化；角色、附件或本地状态变化不重写索引。
+        if content_changed {
+            sqlx::query(
+                "DELETE FROM messages_fts
+                 WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+            )
+            .bind(&key.owner_type)
+            .bind(&key.owner_id)
+            .bind(&key.topic_id)
+            .bind(&message.id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| e.to_string())?;
 
-        sqlx::query(
-            "INSERT INTO messages_fts (msg_id, topic_id, content, owner_type, owner_id)
-             VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(&message.id)
-        .bind(&key.topic_id)
-        .bind(&message.content)
-        .bind(&key.owner_type)
-        .bind(&key.owner_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| e.to_string())?;
+            sqlx::query(
+                "INSERT INTO messages_fts (msg_id, topic_id, content, owner_type, owner_id)
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&message.id)
+            .bind(&key.topic_id)
+            .bind(&message.content)
+            .bind(&key.owner_type)
+            .bind(&key.owner_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        }
 
         // Handle attachments
         if let Some(ref attachments) = message.attachments {
@@ -776,7 +843,7 @@ impl MessageRepository {
         }
 
         // 3. 触发聚合哈希冒泡 (通过 HashAggregator 统一处理)
-        if !skip_bubble {
+        if !skip_bubble && fingerprint_changed {
             HashAggregator::bubble_from_topic(tx, key).await?;
         }
 
@@ -790,18 +857,6 @@ impl MessageRepository {
         timestamp: i64,
         attachments: &[crate::vcp_modules::chat_manager::Attachment],
     ) -> Result<(), String> {
-        sqlx::query(
-            "DELETE FROM message_attachments
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
-        )
-        .bind(&key.owner_type)
-        .bind(&key.owner_id)
-        .bind(&key.topic_id)
-        .bind(msg_id)
-        .execute(&mut **tx)
-        .await
-        .map_err(|e| e.to_string())?;
-
         for (i, att) in attachments.iter().enumerate() {
             let hash = Self::attachment_hash(att)?;
 
@@ -825,7 +880,13 @@ impl MessageRepository {
                     extracted_text = COALESCE(attachments.extracted_text, excluded.extracted_text),
                     image_frames = COALESCE(attachments.image_frames, excluded.image_frames),
                     thumbnail_path = COALESCE(attachments.thumbnail_path, excluded.thumbnail_path),
-                    updated_at = excluded.updated_at"
+                    updated_at = excluded.updated_at
+                 WHERE attachments.mime_type IS NOT excluded.mime_type
+                    OR attachments.size IS NOT excluded.size
+                    OR (excluded.internal_path <> '' AND attachments.internal_path IS NOT excluded.internal_path)
+                    OR (attachments.extracted_text IS NULL AND excluded.extracted_text IS NOT NULL)
+                    OR (attachments.image_frames IS NULL AND excluded.image_frames IS NOT NULL)
+                    OR (attachments.thumbnail_path IS NULL AND excluded.thumbnail_path IS NOT NULL)"
             )
             .bind(hash)
             .bind(&att.r#type)
@@ -844,7 +905,19 @@ impl MessageRepository {
                 "INSERT INTO message_attachments (
                     owner_type, owner_id, topic_id, msg_id, hash, attachment_order,
                     display_name, src, status, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(owner_type, owner_id, topic_id, msg_id, attachment_order)
+                 DO UPDATE SET
+                    hash = excluded.hash,
+                    display_name = excluded.display_name,
+                    src = excluded.src,
+                    status = excluded.status,
+                    created_at = excluded.created_at
+                 WHERE message_attachments.hash IS NOT excluded.hash
+                    OR message_attachments.display_name IS NOT excluded.display_name
+                    OR message_attachments.src IS NOT excluded.src
+                    OR message_attachments.status IS NOT excluded.status
+                    OR message_attachments.created_at IS NOT excluded.created_at",
             )
             .bind(&key.owner_type)
             .bind(&key.owner_id)
@@ -860,6 +933,20 @@ impl MessageRepository {
             .await
             .map_err(|e| e.to_string())?;
         }
+
+        sqlx::query(
+            "DELETE FROM message_attachments
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
+               AND attachment_order >= ?",
+        )
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
+        .bind(msg_id)
+        .bind(i32::try_from(attachments.len()).map_err(|_| "Too many attachments".to_string())?)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
 
         Ok(())
     }
@@ -891,6 +978,16 @@ mod tombstone_tests {
                 owner_id TEXT NOT NULL,
                 topic_id TEXT NOT NULL,
                 msg_id TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT '',
+                name TEXT,
+                agent_id TEXT,
+                content TEXT NOT NULL DEFAULT '',
+                timestamp INTEGER NOT NULL DEFAULT 0,
+                is_group_message INTEGER NOT NULL DEFAULT 0,
+                group_id TEXT,
+                finish_reason TEXT,
+                content_hash TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL DEFAULT 0,
                 deleted_at INTEGER,
                 PRIMARY KEY(owner_type, owner_id, topic_id, msg_id)
              );",
@@ -903,7 +1000,8 @@ mod tombstone_tests {
                 ('agent', 'agent-a', 'live-topic', NULL),
                 ('agent', 'agent-a', 'deleted-topic', 7);
              INSERT INTO messages VALUES
-                ('agent', 'agent-a', 'live-topic', 'deleted-message', 8);",
+                ('agent', 'agent-a', 'live-topic', 'deleted-message', '', NULL, NULL, '', 0, 0,
+                 NULL, NULL, '', 0, 8);",
         )
         .execute(&pool)
         .await
@@ -912,16 +1010,16 @@ mod tombstone_tests {
         let mut tx = pool.begin().await.expect("begin transaction");
         let live = TopicKey::new("agent", "agent-a", "live-topic");
         let deleted = TopicKey::new("agent", "agent-a", "deleted-topic");
-        MessageRepository::ensure_upsert_target_live(&mut tx, &live, "new-message")
+        MessageRepository::load_upsert_target_state(&mut tx, &live, "new-message")
             .await
             .expect("new message in a live topic is allowed");
         let message_error =
-            MessageRepository::ensure_upsert_target_live(&mut tx, &live, "deleted-message")
+            MessageRepository::load_upsert_target_state(&mut tx, &live, "deleted-message")
                 .await
                 .expect_err("message tombstone is monotonic");
         assert!(message_error.contains("tombstoned"));
         let topic_error =
-            MessageRepository::ensure_upsert_target_live(&mut tx, &deleted, "new-message")
+            MessageRepository::load_upsert_target_state(&mut tx, &deleted, "new-message")
                 .await
                 .expect_err("topic tombstone blocks child writes");
         assert!(topic_error.contains("deleted or missing"));

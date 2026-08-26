@@ -105,27 +105,6 @@ async fn finalize_modified_topics(
         return Err(format!("同步收尾缺少 live 话题元数据: {missing:?}"));
     }
 
-    for (key, _meta) in &meta_map {
-        let result = sqlx::query(
-            "UPDATE topics SET msg_count = (
-                SELECT COUNT(*) FROM messages
-                WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
-             ) WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
-        )
-        .bind(&key.owner_type)
-        .bind(&key.owner_id)
-        .bind(&key.topic_id)
-        .bind(&key.owner_type)
-        .bind(&key.owner_id)
-        .bind(&key.topic_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| format!("更新同步收尾消息计数失败: {error}"))?;
-        if result.rows_affected() != 1 {
-            return Err(format!("同步收尾消息计数未更新话题 {}", key.topic_id));
-        }
-    }
-
     let mut affected_agents = HashSet::new();
     let mut affected_groups = HashSet::new();
     let mut bubbled_topics = 0usize;
