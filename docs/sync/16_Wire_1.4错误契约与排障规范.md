@@ -145,13 +145,13 @@ VCPChat 拥有诊断事实，Mobile 拥有用户文案：
 
 ### 5.1 VCP-CDS 上游适配
 
-VCP-CDS internal protocol 2 不是 Mobile Wire 1.4。CDS 的 HTTP 与逐项失败统一为 `{code,message,retryable}`；Central Adapter 是唯一翻译边界：
+VCP-CDS internal protocol 3 不是 Mobile Wire 1.4。CDS 的 HTTP 与逐项失败统一为 `{code,message,retryable}`；Central Adapter 是唯一翻译边界：
 
 - HTTP 异常保留 CDS code，补 `origin=desktop_cds`、当前 `stage`、精确 `kind/retry` 与失败 Topic；
-- Phase 3 二字段错误在返回 Mobile 前扩展为七字段 `SyncError`；
-- Pull 字符串错误不做文案分类，统一映射为 `SYNC_MESSAGE_READ_FAILED / desktop_cds / messages / storage / manual`，原字符串仅保留为诊断 `message`；
-- Push 字符串错误同样不做文案分类，统一映射为 `SYNC_MESSAGE_WRITE_FAILED / desktop_cds / messages / storage / manual`；
-- Manifest、消息 Manifest、Topic hash 与 Phase 3 的返回形状和请求集合覆盖均在该边界校验；畸形 CDS 成功帧归为 `SYNC_PROTOCOL_INVALID / desktop_cds`，不得等到 Mobile 后再误报为本地协议错误；
+- CDS 逐项错误在返回 Mobile 前扩展为七字段 `SyncError`；
+- 消息 Pull/Push 的 CDS 私有 code 分别映射为 `SYNC_MESSAGE_READ_FAILED` 与 `SYNC_MESSAGE_WRITE_FAILED`，原始 `message` 仅用于诊断；
+- Entity Pull 将 `ENTITY_NOT_FOUND` 映射为 `SYNC_ENTITY_NOT_FOUND`，其他读取错误映射为 `SYNC_ENTITY_READ_FAILED`；
+- Central 校验 CDS 响应外壳、完整身份和 Message Diff 请求集合覆盖；Mobile 的强类型解析继续作为公共 Wire 最终门禁；
 - 已登记的 CDS code（如 `INVALID_REQUEST`、`NOT_FOUND`、`AMBIGUOUS_IDENTITY`、`SERVICE_BUSY`、`INTERNAL_ERROR`）按精确表分类；
 - CDS internal protocol 的 `PROTOCOL_MISMATCH` 在适配边界重命名为 `CDS_PROTOCOL_MISMATCH`，不得与 Mobile wire 的 `PROTOCOL_MISMATCH` 共用用户文案；
 - ChatDataService 客户端产生的 `TIMEOUT`、`UNAVAILABLE`、`INVALID_RESPONSE`、`RESPONSE_TOO_LARGE` 等本地 code 也按精确表分类；

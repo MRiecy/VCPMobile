@@ -204,7 +204,6 @@ scope: 双端
 | `StartMessages` | `PHASE_START`, `SYNC_MESSAGE_DIFF_REQUEST` | Phase 2.5 有变更 Topic | 桌面端 |
 | `Finalize` | `PHASE_COMPLETED` (messages + 四元身份) | Phase 3 所有 Topic 完成 | 桌面端 |
 | `NotifyDelete` | `SYNC_ENTITY_DELETE` | 本地实体软删除提交后 | 桌面端 |
-| `NotifyMessageDelete` | `SYNC_ENTITY_DELETE` | 本地消息软删除提交后 | 桌面端 |
 
 ---
 
