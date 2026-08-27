@@ -24,6 +24,7 @@ pub struct DiffHandler;
 const ENTITY_OPERATION_CONCURRENCY: usize =
     crate::vcp_modules::avatar_service::MAX_AVATAR_BATCH_BYTES
         / crate::vcp_modules::avatar_service::MAX_AVATAR_BYTES;
+const MAX_SAFE_JSON_INTEGER: i64 = (1_i64 << 53) - 1;
 
 fn consume_manifest_response_type(
     manifest_type: ManifestType,
@@ -105,9 +106,9 @@ fn validate_decision_timestamp(item: &ManifestDecision) -> Result<(), String> {
     let action = item.action();
     let deleted_at = item.deleted_at();
     if action.is_delete() {
-        if deleted_at.is_none_or(|value| value < 0) {
+        if deleted_at.is_none_or(|value| !(0..=MAX_SAFE_JSON_INTEGER).contains(&value)) {
             return Err(format!(
-                "SYNC_MANIFEST_RESULT {} {} requires a non-negative deletedAt",
+                "SYNC_MANIFEST_RESULT {} {} requires a non-negative safe-integer deletedAt",
                 action,
                 item.id()
             ));
@@ -865,7 +866,10 @@ impl DiffHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::{consume_manifest_response_type, next_manifest_command, validate_manifest_result};
+    use super::{
+        consume_manifest_response_type, next_manifest_command, validate_manifest_result,
+        MAX_SAFE_JSON_INTEGER,
+    };
     use crate::vcp_modules::sync_service::SyncCommand;
     use crate::vcp_modules::sync_types::{ManifestResultFrame, ManifestType};
     use serde_json::json;
@@ -917,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_decisions_require_a_non_negative_deleted_at() {
+    fn delete_decisions_require_a_safe_integer_deleted_at() {
         let result = |deleted_at: Option<i64>| {
             serde_json::from_value::<ManifestResultFrame>(json!({
                 "type": "SYNC_MANIFEST_RESULT",
@@ -935,5 +939,6 @@ mod tests {
         assert!(validate_manifest_result(result(Some(42))).is_ok());
         assert!(validate_manifest_result(result(None)).is_err());
         assert!(validate_manifest_result(result(Some(-1))).is_err());
+        assert!(validate_manifest_result(result(Some(MAX_SAFE_JSON_INTEGER + 1))).is_err());
     }
 }
