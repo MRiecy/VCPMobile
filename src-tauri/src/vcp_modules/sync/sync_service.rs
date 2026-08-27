@@ -2172,14 +2172,13 @@ async fn run_sync_session(
                                                     .await;
                                             }
                                             Err(error) => {
-                                                let _ = tx_internal.send(SyncCommand::FailAttempt {
-                                                    attempt_id,
-                                                    code: "WS_SEND_FAILED",
-                                                    message: format!(
-                                                        "Failed to send final messages phase completion: {}",
-                                                        error
-                                                    ),
-                                                });
+                                                terminate_after_protocol_send_failure(
+                                                    &handle_clone,
+                                                    &mut ws_stream,
+                                                    "final messages phase completion",
+                                                    &error,
+                                                ).await;
+                                                break 'attempt;
                                             }
                                         }
                                     }
