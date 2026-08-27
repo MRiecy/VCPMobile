@@ -1188,10 +1188,7 @@ mod tests {
 
         let checksum = select_checksum_asset(&assets, "VCPMobile_v1.1.4_arm64-v8a.apk")
             .expect("checksum asset");
-        assert_eq!(
-            checksum.name,
-            format!("VCPMobile_v1.1.4_arm64-v8a.apk.sha256")
-        );
+        assert_eq!(checksum.name, "VCPMobile_v1.1.4_arm64-v8a.apk.sha256");
         assert!(select_checksum_asset(&assets, "other.apk").is_none());
         assert_eq!(APK_ASSET_SUFFIX, "arm64-v8a.apk");
     }

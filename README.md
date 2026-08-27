@@ -400,7 +400,7 @@ VCPMobile/
 | CI | `.github/workflows/ci.yml` | push / PR 到 main/master | 前端类型、Vitest 与生产 build；Rust fmt/test/integration/clippy；Android 生成树与插件 JVM 测试；benchmark 编译与依赖审计 |
 | Release | `.github/workflows/release.yml` | GitHub Release published | 构建 `aarch64` Release APK 并上传 |
 
-Release 工作流环境：Node 22, pnpm 10, Java 17 (temurin), Android NDK `29.0.13846066`。APK 自动重命名为 `VCPMobile_v{VERSION}_arm64-v8a.apk`。
+Release 工作流环境：Ubuntu 22.04、Node 22.23.2、pnpm 10.15.0、Rust 1.97.1、Java 17.0.20+8 (Temurin)、Android command-line tools 12266719、Android NDK `29.0.13846066`。APK 自动重命名为 `VCPMobile_v{VERSION}_arm64-v8a.apk`。
 
 ---
 

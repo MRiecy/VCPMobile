@@ -156,10 +156,11 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 
 | 工具 | 当前版本 | 更新频率建议 | 来源 | 备注 |
 |------|---------|-------------|------|------|
-| Node.js | `22.x` (LTS) | 每年 major / 每季度 minor | nodejs.org | Actions 固定 Node 22 主线 |
-| pnpm | `10.x` | 每季度检查 | pnpm.io | Actions 固定 pnpm 10 主线，解析由 lockfile 冻结 |
-| Rust Toolchain | `stable` | 每季度检查 | rustup | Actions toolchain 本身固定 commit，MSRV 以依赖图为准 |
-| Java (Temurin) | `17` | 每年 LTS | adoptium.net | Android 构建必需 |
+| Node.js | `22.23.2` (LTS) | 每年 major / 每季度 minor | nodejs.org | CI/Release 固定完整版本 |
+| pnpm | `10.15.0` | 每季度检查 | pnpm.io | CI/Release 固定完整版本，解析由 lockfile 冻结 |
+| Rust Toolchain | `1.97.1` | 每季度检查 | rustup | CI/Release 固定完整版本并与本地验证环境一致 |
+| Java (Temurin) | `17.0.20+8` | 每年 LTS | adoptium.net | CI/Release 固定完整版本，Android 构建必需 |
+| Android command-line tools | `12266719` | 跟随 Android SDK 升级 | Android SDK | CI/Release 固定下载版本 |
 | Gradle (Wrapper) | `8.14.3` | 跟随 AGP | Gradle 官方 | 官方分发 URL + `distributionSha256Sum` |
 
 ---
@@ -313,7 +314,7 @@ pnpm tauri android build --apk --target aarch64
 
 | 项目 | 当前值 | 约束来源 |
 |------|--------|---------|
-| Rust Toolchain | `stable`（本次本地验证 `1.97.1`） | CI 与本地开发环境 |
+| Rust Toolchain | `1.97.1` | CI、Release 与本地开发环境 |
 | Tauri MSRV | 见 `tauri` crate 文档 | `tauri` `Cargo.toml` 中 `rust-version` |
 | 当前依赖图最高 MSRV | `1.88` | `pdf_oxide 0.3.77` / `plist 1.10.0` |
 | Cargo Edition | `2021` | `src-tauri/Cargo.toml` |
@@ -370,8 +371,8 @@ pnpm tauri android build --apk --target aarch64
 
 | 环境 | 当前 NDK 版本 | 配置位置 |
 |------|--------------|---------|
-| CI (`release.yml`) | `29.0.13846066` | `.github/workflows/release.yml` |
-| 本地开发 | 由开发者通过 Android Studio / `sdkmanager` 安装 | `$ANDROID_SDK_ROOT/ndk/` |
+| Release (`release.yml`) | `29.0.13846066` | `.github/workflows/release.yml` |
+| 本地开发 | `29.0.13846066` | `toolchain.env.local` / `$ANDROID_SDK_ROOT/ndk/` |
 
 **规则**：
 
