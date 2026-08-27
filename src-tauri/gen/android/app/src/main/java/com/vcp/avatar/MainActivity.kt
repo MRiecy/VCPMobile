@@ -3,17 +3,19 @@ package com.vcp.avatar
 import android.os.Bundle
 import android.webkit.WebView
 import androidx.activity.enableEdgeToEdge
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 
 /**
  * VCP Mobile Android 主 Activity
  *
  * 所有自定义原生能力已迁移到 tauri-plugin-vcp-mobile 插件。
- * MainActivity 仅保留骨架：enableEdgeToEdge + 流式广播接收器兼容注册。
+ * MainActivity 仅保留骨架：系统 SplashScreen + enableEdgeToEdge + 流式广播接收器兼容注册。
  * 返回键拦截由插件 VcpMobilePlugin 内部处理。
  */
 class MainActivity : TauriActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        installSplashScreen()
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
     }

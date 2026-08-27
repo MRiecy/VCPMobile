@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import ciWorkflow from '../../../../.github/workflows/ci.yml?raw';
+import indexHtml from '../../../../index.html?raw';
 import releaseWorkflow from '../../../../.github/workflows/release.yml?raw';
 import androidSettingsGenerator from '../../../../.github/generate-tauri-android-settings.mjs?raw';
 import packageManifest from '../../../../package.json?raw';
@@ -8,6 +9,9 @@ import tauriConfig from '../../../../src-tauri/tauri.conf.json?raw';
 import rootGradle from '../../../../src-tauri/gen/android/build.gradle.kts?raw';
 import appGradle from '../../../../src-tauri/gen/android/app/build.gradle.kts?raw';
 import androidManifest from '../../../../src-tauri/gen/android/app/src/main/AndroidManifest.xml?raw';
+import mainActivitySource from '../../../../src-tauri/gen/android/app/src/main/java/com/vcp/avatar/MainActivity.kt?raw';
+import dayThemes from '../../../../src-tauri/gen/android/app/src/main/res/values/themes.xml?raw';
+import nightThemes from '../../../../src-tauri/gen/android/app/src/main/res/values-night/themes.xml?raw';
 import backupRules from '../../../../src-tauri/gen/android/app/src/main/res/xml/backup_rules.xml?raw';
 import dataExtractionRules from '../../../../src-tauri/gen/android/app/src/main/res/xml/data_extraction_rules.xml?raw';
 import wrapperProperties from '../../../../src-tauri/gen/android/gradle/wrapper/gradle-wrapper.properties?raw';
@@ -102,6 +106,35 @@ describe('release and Android governance contracts', () => {
     expect(appGradle).toContain('trustedLanMode == "enabled"');
     expect(androidManifest).toContain('android:usesCleartextTraffic="${usesCleartextTraffic}"');
     expect(releaseWorkflow).toContain('VCP_TRUSTED_LAN_MODE: enabled');
+  });
+
+  it('hands the Android system splash directly to the branded HTML preloader', () => {
+    expect(appGradle).toContain('androidx.core:core-splashscreen:1.2.0');
+    expect(androidManifest).toContain('android:theme="@style/Theme.vcp_mobile.Starting"');
+
+    for (const themes of [dayThemes, nightThemes]) {
+      expect(themes).toContain('name="Theme.vcp_mobile.Starting"');
+      expect(themes).toContain(
+        '<item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>',
+      );
+      expect(themes).toContain(
+        '<item name="postSplashScreenTheme">@style/Theme.vcp_mobile</item>',
+      );
+    }
+    expect(dayThemes).toContain(
+      '<item name="windowSplashScreenBackground">#F4F6F8</item>',
+    );
+    expect(nightThemes).toContain(
+      '<item name="windowSplashScreenBackground">#101014</item>',
+    );
+    expect(indexHtml).toContain('body { background-color: #f4f6f8; }');
+    expect(indexHtml).toContain('html.boot-dark body { background-color: #101014; }');
+    expect(indexHtml).toContain('<img src="/vcpmobile.svg"');
+
+    const installIndex = mainActivitySource.indexOf('installSplashScreen()');
+    const superIndex = mainActivitySource.indexOf('super.onCreate(savedInstanceState)');
+    expect(installIndex).toBeGreaterThan(-1);
+    expect(superIndex).toBeGreaterThan(installIndex);
   });
 
   it('opts sensitive application data out of Android backup and device transfer', () => {

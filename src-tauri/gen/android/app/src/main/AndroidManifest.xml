@@ -29,6 +29,7 @@
             android:launchMode="singleTask"
             android:taskAffinity="${applicationId}.task"
             android:label="${appName}"
+            android:theme="@style/Theme.vcp_mobile.Starting"
             android:windowSoftInputMode="adjustNothing"
             android:name=".MainActivity"
             android:exported="true">

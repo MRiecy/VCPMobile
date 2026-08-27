@@ -3,4 +3,10 @@
     <style name="Theme.vcp_mobile" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <!-- Customize your theme here. -->
     </style>
+
+    <style name="Theme.vcp_mobile.Starting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">#101014</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
+        <item name="postSplashScreenTheme">@style/Theme.vcp_mobile</item>
+    </style>
 </resources>
