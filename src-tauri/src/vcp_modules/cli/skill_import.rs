@@ -809,7 +809,9 @@ fn copy_verified_candidate(
                 SkillError::integrity(format!("cannot copy picked Skill file: {error}"))
             })?;
     }
-    if total != picked.size || format!("{:x}", digest.finalize()) != picked.hash {
+    if total != picked.size
+        || crate::vcp_modules::infra::utils::finalize_sha256_hex(digest) != picked.hash
+    {
         return Err(SkillError::integrity(
             "picked Skill size or SHA-256 does not match the native picker receipt",
         ));
@@ -839,7 +841,9 @@ fn verify_regular_file_hash(
         total += read as u64;
         digest.update(&buffer[..read]);
     }
-    if total != expected_bytes || format!("{:x}", digest.finalize()) != expected_sha256 {
+    if total != expected_bytes
+        || crate::vcp_modules::infra::utils::finalize_sha256_hex(digest) != expected_sha256
+    {
         return Err(SkillError::integrity(
             "owned Skill candidate integrity failed",
         ));
@@ -1128,7 +1132,7 @@ fn commit_request_sha256(request: &CommitSkillImportRequest) -> String {
         digest.update((value.len() as u64).to_le_bytes());
         digest.update(value);
     }
-    format!("{:x}", digest.finalize())
+    crate::vcp_modules::infra::utils::finalize_sha256_hex(digest)
 }
 
 fn import_count(imports_root: &Path) -> Result<usize, SkillError> {

@@ -1,6 +1,8 @@
 // utils.rs - 基础设施层共享的无状态通用原语工具包
 // 职责：沉淀纯算法级、无状态的高复用底层工具，面向全后端模块提供跨领域共享。
 
+use sha2::{Digest, Sha256};
+
 /// 协作式 CPU 挂起出让计数器 (YieldCounter)
 /// 在重 I/O 或超大循环遍历中，用于每隔特定阈值自动挂起并出让当前 CPU 时间片，保障前台 WebView 帧率。
 pub struct YieldCounter {
@@ -54,18 +56,25 @@ pub fn now_millis() -> i64 {
 
 /// 计算多个字节切片（不连续数据段）的标准 SHA-256 十六进制摘要字串（统一小写输出）
 pub fn calculate_sha256_slices(slices: &[&[u8]]) -> String {
-    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     for slice in slices {
         hasher.update(slice);
     }
-    hex::encode(hasher.finalize())
+    finalize_sha256_hex(hasher)
 }
 
 /// 计算单字节切片的标准 SHA-256 十六进制摘要字串（统一小写输出）
 #[inline]
 pub fn calculate_sha256(bytes: &[u8]) -> String {
     calculate_sha256_slices(&[bytes])
+}
+
+/// 将已完成输入的 SHA-256 状态编码为固定 64 位小写十六进制字串。
+///
+/// 业务层继续负责输入顺序、分隔符和长度前缀；这里只统一摘要的最终文本编码。
+#[inline]
+pub fn finalize_sha256_hex(hasher: Sha256) -> String {
+    hex::encode(hasher.finalize())
 }
 
 /// 后台延迟任务计时器工具
@@ -124,6 +133,26 @@ pub fn normalize_vcp_url(url_str: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sha256_helpers_preserve_standard_lowercase_hex_contract() {
+        assert_eq!(
+            calculate_sha256(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            calculate_sha256(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            calculate_sha256_slices(&[b"a", b"b", b"c"]),
+            calculate_sha256(b"abc")
+        );
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"abc");
+        assert_eq!(finalize_sha256_hex(hasher), calculate_sha256(b"abc"));
+    }
 
     #[test]
     fn test_normalize_vcp_url() {

@@ -8,8 +8,6 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
 pub(super) const MAX_SKILL_BYTES: usize = 64 * 1024;
 pub(super) const BUILTIN_SKILL_ID: &str = "vcp-mobile-cli-basics";
 pub(super) const BUILTIN_SKILL: &str = r#"# VCP Mobile CLI Basics
@@ -255,5 +253,5 @@ pub(super) fn parse_skill_version(text: &str) -> Option<String> {
 }
 
 pub(super) fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::vcp_modules::infra::utils::calculate_sha256(bytes)
 }

@@ -2386,7 +2386,7 @@ fn admit_run_job(
 fn action_digest(action: &VcpCliAction, session_id: Option<&str>) -> Result<String, String> {
     let bytes = serde_json::to_vec(&(action, session_id))
         .map_err(|error| format!("cannot serialize CLI action: {error}"))?;
-    Ok(format!("{:x}", Sha256::digest(bytes)))
+    Ok(crate::vcp_modules::infra::utils::calculate_sha256(&bytes))
 }
 
 fn output_artifact_id(job: &JobRecord) -> String {

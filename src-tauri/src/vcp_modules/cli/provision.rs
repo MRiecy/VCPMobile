@@ -641,7 +641,10 @@ impl<R> HashingReader<R> {
     }
 
     fn finish(self) -> (String, u64) {
-        (format!("{:x}", self.hasher.finalize()), self.bytes)
+        (
+            crate::vcp_modules::infra::utils::finalize_sha256_hex(self.hasher),
+            self.bytes,
+        )
     }
 }
 
@@ -701,7 +704,9 @@ fn hash_reader(reader: &mut impl Read) -> Result<String, ProvisionError> {
         }
         hasher.update(&buffer[..read]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(crate::vcp_modules::infra::utils::finalize_sha256_hex(
+        hasher,
+    ))
 }
 
 fn verify_tar_content_hash<R>(

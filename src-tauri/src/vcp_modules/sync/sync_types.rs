@@ -36,7 +36,7 @@ pub fn compute_merkle_root(mut hashes: Vec<String>) -> String {
     for h in hashes {
         hasher.update(h.as_bytes());
     }
-    format!("{:x}", hasher.finalize())
+    crate::vcp_modules::infra::utils::finalize_sha256_hex(hasher)
 }
 
 /// Protocol-level avatar identity contract. Agent and group avatars use a

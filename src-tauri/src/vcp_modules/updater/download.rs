@@ -170,6 +170,6 @@ pub async fn verify_file_sha256(path: &Path, expected_hex: &str) -> Result<bool,
         }
         hasher.update(&buf[..n]);
     }
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = crate::vcp_modules::infra::utils::finalize_sha256_hex(hasher);
     Ok(actual == expected_hex.to_ascii_lowercase())
 }

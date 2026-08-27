@@ -4,8 +4,6 @@ use std::fs::{self, File};
 use std::io;
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
-
 const FILE_NAME: &str = "river-context.json";
 const MAX_ROOT_ENTRIES: usize = 512;
 
@@ -49,9 +47,8 @@ pub(super) fn gc_stale_river_projections(root: &Path) -> Result<(), String> {
 }
 
 pub(super) fn projection_stem(generation: u64, job_id: &str, attempt_id: &str) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest(format!("{generation}\0{job_id}\0{attempt_id}").as_bytes())
+    crate::vcp_modules::infra::utils::calculate_sha256(
+        format!("{generation}\0{job_id}\0{attempt_id}").as_bytes(),
     )
 }
 

@@ -1,2 +1,2 @@
-[target.aarch64-linux-android]
-rustflags = ["-C", "target-feature=+sha2"]
+# Android arm64 必须保持 Rust 的可移植 ABI 基线。
+# SHA2 等可选 CPU 扩展只能由具体实现通过运行时能力检测后启用。

@@ -459,7 +459,9 @@ pub(super) fn tree_sha256(resources: &[SkillResourceRecord]) -> Result<String, S
         }
         digest.update(hash);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(crate::vcp_modules::infra::utils::finalize_sha256_hex(
+        digest,
+    ))
 }
 
 pub(super) fn record_import_operation(

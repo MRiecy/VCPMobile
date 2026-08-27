@@ -6,7 +6,6 @@ use reqwest::{redirect::Policy, Client, Method, RequestBuilder, StatusCode, Url}
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1219,9 +1218,7 @@ fn normalize_rename_target(source: &str, requested: &str) -> Result<String, Diar
 }
 
 fn content_hash(content: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(content.as_bytes());
-    format!("{:x}", hasher.finalize())
+    crate::vcp_modules::infra::utils::calculate_sha256(content.as_bytes())
 }
 
 fn cancelled_error() -> DiaryError {
