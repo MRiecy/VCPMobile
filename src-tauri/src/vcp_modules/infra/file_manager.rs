@@ -56,6 +56,13 @@ fn verify_expected_hash(expected_hash: Option<&str>, actual_hash: &str) -> Resul
     Ok(())
 }
 
+fn verify_streamed_size(expected_size: u64, actual_size: u64) -> Result<(), String> {
+    if actual_size != expected_size {
+        return Err("staging 文件在哈希期间发生大小变化".to_string());
+    }
+    Ok(())
+}
+
 /// CAS 命中复用校验（瘦身版，只做元数据闸门）。
 ///
 /// 为什么可以不做全量重哈希：正式路径的文件名即内容哈希（写入端先对新内容全量
@@ -787,9 +794,7 @@ pub async fn register_local_file(
     stable_id: Option<String>,
     expected_hash: Option<String>,
 ) -> Result<AttachmentData, String> {
-    // 注：本命令的 future 体积较大（CAS 校验 + sqlx 事务），栈安全由 lib.rs 的
-    // 「IPC 防爆栈总闸」统一保障（命令分发整体在 tokio worker 线程上进行），
-    // 此处无需再做壳化或其他特殊处理。
+    // 命令仍由中央 IPC 总闸 offload；哈希缓冲必须保持堆分配，避免再次内联进 future。
     let uploads_root = app_handle
         .path()
         .app_cache_dir()
@@ -831,21 +836,26 @@ pub async fn register_local_file(
         }
     }
 
-    // 2. 异步读取元数据 (获取文件物理大小)
-    let meta = tokio::fs::metadata(&source_path)
+    // 2. 先打开受控 staging 文件，再从同一句柄读取元数据与内容。
+    let mut file = tokio::fs::File::open(&source_path)
+        .await
+        .map_err(|e| format!("无法打开源文件: {}", e))?;
+    let meta = file
+        .metadata()
         .await
         .map_err(|e| format!("无法读取源文件元数据: {}", e))?;
+    if !meta.is_file() {
+        return Err("staging 路径不是普通文件".to_string());
+    }
     let size = meta.len();
     if size > STAGED_FILE_MAX_BYTES {
         return Err("staging 文件过大 (Limit: 512MB)".to_string());
     }
 
     // 3. Native 端给出的 hash 仅作一致性提示；特权边界始终流式重算。
-    let mut file = tokio::fs::File::open(&source_path)
-        .await
-        .map_err(|e| format!("无法打开源文件: {}", e))?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0u8; 65536];
+    // 缓冲区跨越 read().await；使用 Vec 让 64 KiB 数据驻留堆上，避免内联进 command future。
+    let mut buffer = vec![0u8; 64 * 1024];
     let mut hashed_bytes = 0u64;
     let mut last_emit_time = std::time::Instant::now();
     loop {
@@ -857,7 +867,12 @@ pub async fn register_local_file(
             break;
         }
         hasher.update(&buffer[..n]);
-        hashed_bytes += n as u64;
+        hashed_bytes = hashed_bytes
+            .checked_add(n as u64)
+            .ok_or_else(|| "staging 文件哈希字节数溢出".to_string())?;
+        if hashed_bytes > size {
+            return Err("staging 文件在哈希期间发生大小变化".to_string());
+        }
         if let Some(ref sid) = stable_id {
             let now = std::time::Instant::now();
             if now.duration_since(last_emit_time).as_millis() > 200 {
@@ -880,7 +895,8 @@ pub async fn register_local_file(
             }
         }
     }
-    let hash = hex::encode(hasher.finalize());
+    verify_streamed_size(size, hashed_bytes)?;
+    let hash = crate::vcp_modules::infra::utils::finalize_sha256_hex(hasher);
     verify_expected_hash(expected_hash.as_deref(), &hash)?;
 
     // 4. 计算目标路径
@@ -1425,7 +1441,7 @@ mod security_boundary_tests {
     use super::{
         canonical_file_within_root, commit_registered_attachment, normalize_attachment_mime,
         safe_storage_extension, validate_attachment_cas_path, validated_attachment_file,
-        validated_direct_file, verify_expected_hash,
+        validated_direct_file, verify_expected_hash, verify_streamed_size,
     };
     use super::{check_existing_cas_size, check_existing_cas_size_async};
     use std::fs;
@@ -1504,6 +1520,14 @@ mod security_boundary_tests {
         assert!(verify_expected_hash(Some(&actual), &actual).is_ok());
         assert!(verify_expected_hash(Some(&forged), &actual).is_err());
         assert!(verify_expected_hash(None, &actual).is_ok());
+    }
+
+    #[test]
+    fn streamed_attachment_size_must_match_opening_metadata() {
+        assert!(verify_streamed_size(0, 0).is_ok());
+        assert!(verify_streamed_size(64 * 1024, 64 * 1024).is_ok());
+        assert!(verify_streamed_size(64 * 1024, 64 * 1024 - 1).is_err());
+        assert!(verify_streamed_size(64 * 1024, 64 * 1024 + 1).is_err());
     }
 
     #[test]
