@@ -1,8 +1,8 @@
 use crate::vcp_modules::db_write_queue::{DbWriteQueue, DbWriteTask, PreparedMessageWrite};
 use crate::vcp_modules::message_repository::MessageRenderCompiler;
 use crate::vcp_modules::sync_error::{
-    encode_http_sync_error_body, encode_wire_sync_error, encode_wire_sync_error_value,
-    parse_wire_sync_error, WireSyncError,
+    encode_http_sync_error_body, encode_local_sync_error, encode_wire_sync_error,
+    encode_wire_sync_error_value, parse_wire_sync_error, SyncErrorStage, WireSyncError,
 };
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_types::{
@@ -38,20 +38,38 @@ async fn read_response_limited(
     response: reqwest::Response,
     max_bytes: usize,
     operation: &str,
+    stage: SyncErrorStage,
 ) -> Result<(reqwest::StatusCode, Vec<u8>), String> {
     if response
         .content_length()
         .is_some_and(|length| length > max_bytes as u64)
     {
-        return Err(format!("{operation} response exceeds {max_bytes} bytes"));
+        return Err(encode_local_sync_error(
+            "RESPONSE_TOO_LARGE",
+            stage,
+            &format!("{operation} response exceeds {max_bytes} bytes"),
+            Vec::new(),
+        ));
     }
     let status = response.status();
     let mut stream = response.bytes_stream();
     let mut body = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| format!("{operation} response read failed: {error}"))?;
+        let chunk = chunk.map_err(|error| {
+            encode_local_sync_error(
+                "HTTP_TRANSPORT_FAILED",
+                stage,
+                &format!("{operation} response read failed: {error}"),
+                Vec::new(),
+            )
+        })?;
         if body.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(format!("{operation} response exceeds {max_bytes} bytes"));
+            return Err(encode_local_sync_error(
+                "RESPONSE_TOO_LARGE",
+                stage,
+                &format!("{operation} response exceeds {max_bytes} bytes"),
+                Vec::new(),
+            ));
         }
         body.extend_from_slice(&chunk);
     }
@@ -73,14 +91,49 @@ fn normalize_avatar_content_type(value: Option<&str>) -> Result<String, String> 
     }
 }
 
-fn http_status_error(operation: &str, status: reqwest::StatusCode, bytes: &[u8]) -> String {
+fn http_status_error(
+    operation: &str,
+    status: reqwest::StatusCode,
+    bytes: &[u8],
+    stage: SyncErrorStage,
+) -> String {
     match encode_http_sync_error_body(bytes) {
         Ok(Some(encoded)) => encoded,
-        Ok(None) => {
-            format!("{operation} failed with HTTP {status} without a Wire 1.4 error object")
-        }
-        Err(error) => format!("{operation} returned an invalid Wire 1.4 error: {error}"),
+        Ok(None) => encode_local_sync_error(
+            "SYNC_PROTOCOL_INVALID",
+            stage,
+            &format!("{operation} failed with HTTP {status} without a Wire 1.4 error object"),
+            Vec::new(),
+        ),
+        Err(error) => encode_local_sync_error(
+            "SYNC_PROTOCOL_INVALID",
+            stage,
+            &format!("{operation} returned an invalid Wire 1.4 error: {error}"),
+            Vec::new(),
+        ),
     }
+}
+
+fn http_transport_error(operation: &str, stage: SyncErrorStage, error: &reqwest::Error) -> String {
+    encode_local_sync_error(
+        "HTTP_TRANSPORT_FAILED",
+        stage,
+        &format!("{operation} failed: {error}"),
+        Vec::new(),
+    )
+}
+
+fn protocol_error(stage: SyncErrorStage, message: impl AsRef<str>) -> String {
+    encode_local_sync_error("SYNC_PROTOCOL_INVALID", stage, message.as_ref(), Vec::new())
+}
+
+fn response_too_large(message: &str) -> String {
+    encode_local_sync_error(
+        "RESPONSE_TOO_LARGE",
+        SyncErrorStage::Messages,
+        message,
+        Vec::new(),
+    )
 }
 
 struct NdjsonBudget {
@@ -104,27 +157,32 @@ impl NdjsonBudget {
         self.total_bytes = self
             .total_bytes
             .checked_add(bytes)
-            .ok_or_else(|| "NDJSON response size overflow".to_string())?;
+            .ok_or_else(|| response_too_large("NDJSON response size overflow"))?;
         if self.total_bytes > MAX_NDJSON_TOTAL_BYTES {
-            return Err("NDJSON response exceeds 256MB budget".to_string());
+            return Err(response_too_large("NDJSON response exceeds 256MB budget"));
         }
         Ok(())
     }
 
     fn observe_frame(&mut self, line_bytes: usize, entities: usize) -> Result<(), String> {
         if line_bytes > MAX_NDJSON_LINE_BYTES {
-            return Err("NDJSON frame exceeds 32MB budget".to_string());
+            return Err(response_too_large("NDJSON frame exceeds 32MB budget"));
         }
         self.frames += 1;
         if self.frames > self.max_frames {
-            return Err("NDJSON response contains more frames than requested topics".to_string());
+            return Err(protocol_error(
+                SyncErrorStage::Messages,
+                "NDJSON response contains more frames than requested topics",
+            ));
         }
         self.entities = self
             .entities
             .checked_add(entities)
-            .ok_or_else(|| "NDJSON entity count overflow".to_string())?;
+            .ok_or_else(|| response_too_large("NDJSON entity count overflow"))?;
         if self.entities > MAX_NDJSON_ENTITIES {
-            return Err("NDJSON response exceeds 100000 message budget".to_string());
+            return Err(response_too_large(
+                "NDJSON response exceeds 100000 message budget",
+            ));
         }
         Ok(())
     }
@@ -273,6 +331,10 @@ fn canonicalize_attachment(
 }
 
 fn parse_ndjson_frame(bytes: &[u8]) -> Result<ParsedNdjsonFrame, String> {
+    parse_ndjson_frame_inner(bytes).map_err(|error| protocol_error(SyncErrorStage::Messages, error))
+}
+
+fn parse_ndjson_frame_inner(bytes: &[u8]) -> Result<ParsedNdjsonFrame, String> {
     let value: Value = serde_json::from_slice(bytes)
         .map_err(|error| format!("Malformed NDJSON frame: {error}"))?;
     if value.get("kind").and_then(Value::as_str) == Some("streamError") {
@@ -510,9 +572,12 @@ fn validate_returned_topic_identity(
 ) -> Result<TopicKey, String> {
     let key = TopicKey::new(&frame.owner_type, &frame.owner_id, &frame.topic_id);
     if !expected.contains(&key) {
-        return Err(format!(
-            "NDJSON returned unexpected topic identity for {}",
-            key.topic_id
+        return Err(protocol_error(
+            SyncErrorStage::Messages,
+            format!(
+                "NDJSON returned unexpected topic identity for {}",
+                key.topic_id
+            ),
         ));
     }
     Ok(key)
@@ -537,8 +602,11 @@ fn validate_requested_message_ids(
     let mut unexpected = actual.difference(expected).cloned().collect::<Vec<_>>();
     missing.sort();
     unexpected.sort();
-    Err(format!(
-        "NDJSON message set mismatch for {topic_id}: missing={missing:?}, unexpected={unexpected:?}"
+    Err(protocol_error(
+        SyncErrorStage::Messages,
+        format!(
+            "NDJSON message set mismatch for {topic_id}: missing={missing:?}, unexpected={unexpected:?}"
+        ),
     ))
 }
 
@@ -697,6 +765,14 @@ impl PullExecutor {
                 ));
             }
         }
+        let response_stage = if expected
+            .iter()
+            .any(|item| matches!(item, EntitySelector::Topic { .. }))
+        {
+            SyncErrorStage::TopicMetadata
+        } else {
+            SyncErrorStage::OwnerMetadata
+        };
         let request_body = serde_json::to_vec(&EntityPullRequest { items: requests })
             .map_err(|error| format!("Entity pull request serialization failed: {error}"))?;
         if request_body.len() > MAX_ENTITY_BATCH_BYTES {
@@ -710,15 +786,25 @@ impl PullExecutor {
             .body(request_body)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| http_transport_error("Entity pull request", response_stage, &error))?;
 
         let (status, bytes) =
-            read_response_limited(res, MAX_ENTITY_BATCH_BYTES, "Entity pull").await?;
+            read_response_limited(res, MAX_ENTITY_BATCH_BYTES, "Entity pull", response_stage)
+                .await?;
         if !status.is_success() {
-            return Err(http_status_error("Pull entities batch", status, &bytes));
+            return Err(http_status_error(
+                "Pull entities batch",
+                status,
+                &bytes,
+                response_stage,
+            ));
         }
-        let response: EntityPullResponse = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("Entity pull returned invalid JSON: {error}"))?;
+        let response: EntityPullResponse = serde_json::from_slice(&bytes).map_err(|error| {
+            protocol_error(
+                response_stage,
+                format!("Entity pull returned invalid JSON: {error}"),
+            )
+        })?;
         let results = response.results;
         log::info!(
             "[PullExecutor] Received {} entities from server",
@@ -910,85 +996,54 @@ impl PullExecutor {
             http_url, owner_type, owner_id
         );
 
-        // 指数退避重试：avatar 下载受网络波动影响较大
-        let mut retries = 0;
-        let max_retries = 3;
-        let mut delay_ms = 200u64;
-        loop {
-            match client
-                .get(&url)
-                .header("Authorization", format!("Bearer {}", sync_token))
-                .send()
-                .await
-            {
-                Ok(res) => {
-                    let avatar_mime_type = res
-                        .headers()
-                        .get(reqwest::header::CONTENT_TYPE)
-                        .and_then(|value| value.to_str().ok())
-                        .map(str::to_string);
-                    match read_response_limited(res, MAX_AVATAR_RESPONSE_BYTES, "Pull avatar").await
-                    {
-                        Ok((status, bytes)) if !status.is_success() => {
-                            return Err(http_status_error("Pull avatar", status, &bytes));
-                        }
-                        Ok((_, bytes)) => {
-                            let mime_type =
-                                normalize_avatar_content_type(avatar_mime_type.as_deref())?;
-                            write_queue
-                                .submit(DbWriteTask::Avatar {
-                                    owner_type: owner_type.to_string(),
-                                    owner_id: owner_id.to_string(),
-                                    mime_type,
-                                    bytes,
-                                })
-                                .await?;
-                            // Avatar tasks carry up to 20 MiB each. Waiting for the existing
-                            // queue barrier keeps the entity-operation concurrency limit as a
-                            // real byte backpressure boundary instead of merely limiting downloads.
-                            write_queue.flush().await.map_err(|error| {
-                                format!(
-                                    "Pull avatar {owner_type}/{owner_id} write drain failed: {error}"
-                                )
-                            })?;
-                            if retries > 0 {
-                                log::info!(
-                                    "[PullExecutor] Avatar {} {} succeeded after {} retries",
-                                    owner_type,
-                                    owner_id,
-                                    retries
-                                );
-                            }
-                            return Ok(());
-                        }
-                        Err(e) if retries < max_retries => {
-                            retries += 1;
-                            log::warn!("[PullExecutor] Avatar {} {} decode failed (retry {}/{}): {}. Waiting {}ms", owner_type, owner_id, retries, max_retries, e, delay_ms);
-                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                            delay_ms *= 2;
-                        }
-                        Err(e) => {
-                            return Err(format!(
-                                "Pull avatar decode failed after {} retries: {}",
-                                max_retries, e
-                            ));
-                        }
-                    }
-                }
-                Err(e) if retries < max_retries => {
-                    retries += 1;
-                    log::warn!("[PullExecutor] Avatar {} {} request failed (retry {}/{}): {}. Waiting {}ms", owner_type, owner_id, retries, max_retries, e, delay_ms);
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                    delay_ms *= 2;
-                }
-                Err(e) => {
-                    return Err(format!(
-                        "Pull avatar request failed after {} retries: {}",
-                        max_retries, e
-                    ));
-                }
-            }
+        let response = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", sync_token))
+            .send()
+            .await
+            .map_err(|error| {
+                http_transport_error(
+                    &format!("Pull avatar {owner_type}/{owner_id}"),
+                    SyncErrorStage::OwnerMetadata,
+                    &error,
+                )
+            })?;
+        let avatar_mime_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let (status, bytes) = read_response_limited(
+            response,
+            MAX_AVATAR_RESPONSE_BYTES,
+            "Pull avatar",
+            SyncErrorStage::OwnerMetadata,
+        )
+        .await?;
+        if !status.is_success() {
+            return Err(http_status_error(
+                "Pull avatar",
+                status,
+                &bytes,
+                SyncErrorStage::OwnerMetadata,
+            ));
         }
+        let mime_type = normalize_avatar_content_type(avatar_mime_type.as_deref())?;
+        write_queue
+            .submit(DbWriteTask::Avatar {
+                owner_type: owner_type.to_string(),
+                owner_id: owner_id.to_string(),
+                mime_type,
+                bytes,
+            })
+            .await?;
+        // Avatar tasks carry up to 20 MiB each. Waiting for the existing queue barrier keeps
+        // entity-operation concurrency as real byte backpressure. Transport retry is owned by
+        // the session-wide full-attempt policy, so Avatar does not maintain another retry loop.
+        write_queue.flush().await.map_err(|error| {
+            format!("Pull avatar {owner_type}/{owner_id} write drain failed: {error}")
+        })?;
+        Ok(())
     }
 
     /// 流式批量 Pull — 一次 HTTP 请求拉取多个 topic 的消息
@@ -1077,13 +1132,25 @@ impl PullExecutor {
             .json(&MessagePullRequest { topics: req_body })
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|error| {
+                http_transport_error("Batch pull request", SyncErrorStage::Messages, &error)
+            })?;
 
         if !res.status().is_success() {
             let status = res.status();
-            let (_, err_body) =
-                read_response_limited(res, MAX_ERROR_RESPONSE_BYTES, "Batch pull error").await?;
-            return Err(http_status_error("Batch pull messages", status, &err_body));
+            let (_, err_body) = read_response_limited(
+                res,
+                MAX_ERROR_RESPONSE_BYTES,
+                "Batch pull error",
+                SyncErrorStage::Messages,
+            )
+            .await?;
+            return Err(http_status_error(
+                "Batch pull messages",
+                status,
+                &err_body,
+                SyncErrorStage::Messages,
+            ));
         }
 
         // ── 并发基础设施 ──
@@ -1136,14 +1203,25 @@ impl PullExecutor {
         loop {
             let next_chunk = tokio::time::timeout(NDJSON_IDLE_TIMEOUT, stream.next())
                 .await
-                .map_err(|_| "NDJSON stream idle timeout after 30 seconds".to_string())?;
+                .map_err(|_| {
+                    encode_local_sync_error(
+                        "HTTP_TRANSPORT_FAILED",
+                        SyncErrorStage::Messages,
+                        "NDJSON stream idle timeout after 30 seconds",
+                        Vec::new(),
+                    )
+                })?;
             let Some(chunk_result) = next_chunk else {
                 break;
             };
-            let chunk = chunk_result.map_err(|e| format!("Stream read error: {}", e))?;
+            let chunk = chunk_result.map_err(|error| {
+                http_transport_error("Batch pull stream read", SyncErrorStage::Messages, &error)
+            })?;
             ndjson_budget.observe_chunk(chunk.len())?;
             if chunk.len() > MAX_NDJSON_TRANSPORT_CHUNK_BYTES {
-                return Err("NDJSON transport chunk exceeds 32MB budget".to_string());
+                return Err(response_too_large(
+                    "NDJSON transport chunk exceeds 32MB budget",
+                ));
             }
 
             // Preserve the transport allocation whenever possible. If a partial line exists,
@@ -1159,9 +1237,9 @@ impl PullExecutor {
                 let completed_len = buffer
                     .len()
                     .checked_add(pos + 1)
-                    .ok_or_else(|| "NDJSON frame size overflow".to_string())?;
+                    .ok_or_else(|| response_too_large("NDJSON frame size overflow"))?;
                 if completed_len > MAX_NDJSON_LINE_BYTES {
-                    return Err("NDJSON frame exceeds 32MB budget".to_string());
+                    return Err(response_too_large("NDJSON frame exceeds 32MB budget"));
                 }
                 buffer.extend_from_slice(&chunk[..=pos]);
                 if pos + 1 < chunk.len() {
@@ -1171,9 +1249,9 @@ impl PullExecutor {
                 let next_len = buffer
                     .len()
                     .checked_add(chunk.len())
-                    .ok_or_else(|| "NDJSON frame size overflow".to_string())?;
+                    .ok_or_else(|| response_too_large("NDJSON frame size overflow"))?;
                 if next_len > MAX_NDJSON_LINE_BYTES {
-                    return Err("NDJSON frame exceeds 32MB budget".to_string());
+                    return Err(response_too_large("NDJSON frame exceeds 32MB budget"));
                 }
                 buffer.extend_from_slice(&chunk);
                 search_start = buffer.len();
@@ -1184,7 +1262,7 @@ impl PullExecutor {
             while let Some(pos) = buffer[search_start..].iter().position(|&b| b == b'\n') {
                 let line_end = search_start + pos;
                 if line_end + 1 > MAX_NDJSON_LINE_BYTES {
-                    return Err("NDJSON frame exceeds 32MB budget".to_string());
+                    return Err(response_too_large("NDJSON frame exceeds 32MB budget"));
                 }
                 let line = buffer.split_to(line_end + 1);
                 search_start = 0; // 成功切分一行后，后续扫描从头开始（因为 buffer 已被 drain）
@@ -1224,8 +1302,9 @@ impl PullExecutor {
                 let key = validate_returned_topic_identity(&frame, &expected_topics)?;
                 let topic_id = key.topic_id.clone();
                 if !seen_topics.insert(key.clone()) {
-                    return Err(format!(
-                        "NDJSON returned duplicate topic identity for {topic_id}"
+                    return Err(protocol_error(
+                        SyncErrorStage::Messages,
+                        format!("NDJSON returned duplicate topic identity for {topic_id}"),
                     ));
                 }
                 for warning in &frame.warning_samples {
@@ -1313,7 +1392,7 @@ impl PullExecutor {
 
             // 循环结束后，游标指向 buffer 末尾，下一轮 chunk 进来时只需扫描新增部分
             if buffer.len() > MAX_NDJSON_LINE_BYTES {
-                return Err("NDJSON frame exceeds 32MB budget".to_string());
+                return Err(response_too_large("NDJSON frame exceeds 32MB budget"));
             }
             search_start = buffer.len();
         }
@@ -1321,7 +1400,9 @@ impl PullExecutor {
         // 处理流结束后 buffer 中残留的非换行数据（兜底）
         if !buffer.is_empty() {
             if buffer.len() > MAX_NDJSON_LINE_BYTES {
-                return Err("NDJSON trailing frame exceeds 32MB budget".to_string());
+                return Err(response_too_large(
+                    "NDJSON trailing frame exceeds 32MB budget",
+                ));
             }
             let trailing = std::mem::take(&mut buffer);
             let trailing_bytes = trailing.len();
@@ -1344,8 +1425,9 @@ impl PullExecutor {
             let key = validate_returned_topic_identity(&frame, &expected_topics)?;
             let topic_id = key.topic_id.clone();
             if !seen_topics.insert(key.clone()) {
-                return Err(format!(
-                    "NDJSON returned duplicate topic identity for {topic_id}"
+                return Err(protocol_error(
+                    SyncErrorStage::Messages,
+                    format!("NDJSON returned duplicate topic identity for {topic_id}"),
                 ));
             }
             for warning in &frame.warning_samples {
@@ -1427,7 +1509,10 @@ impl PullExecutor {
                 .cloned()
                 .collect::<Vec<_>>();
             missing.sort();
-            return Err(format!("NDJSON response is missing topics {missing:?}"));
+            return Err(protocol_error(
+                SyncErrorStage::Messages,
+                format!("NDJSON response is missing topics {missing:?}"),
+            ));
         }
 
         // ── 等待所有任务完成 ──

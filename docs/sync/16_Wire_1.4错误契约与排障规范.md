@@ -111,6 +111,8 @@ Wire 1.4 保持双端共用的结构化错误对象，并统一逐项结果与 N
 
 `SERVICE_BUSY` 在 VCPChat 内部会先进行有界自动退避；只有退避耗尽才跨端成为终态，因此 wire 上标记为 `manual`，避免 Mobile 错误地隐藏“重新同步”按钮。
 
+`HTTP_TRANSPORT_FAILED` 与 `SYNC_SNAPSHOT_STALE` 同样在 Mobile 内部先消耗既有整 attempt 重试槽；重试耗尽后才成为 `manual` 终态。前者表示尚未得到可验证 HTTP 结果或响应流中断，后者表示 Manifest/Diff 之后物理来源或墓碑状态已经变化。二者都不引入阶段续传。
+
 ## 4. 传输映射
 
 同一对象在不同通道只允许增加固定外壳：

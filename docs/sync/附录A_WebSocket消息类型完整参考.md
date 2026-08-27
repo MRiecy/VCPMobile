@@ -173,7 +173,7 @@ scope: 双端
 
 | 错误码 | 名称 | 触发场景 | 发送方 | 处理方式 |
 |--------|------|---------|--------|---------|
-| `1008` | Policy Violation | 连接路径不是 `/` 或 `/ws-sync` | 桌面端 | 桌面端主动关闭连接 |
+| `4002` | Unsupported Path | 连接路径不是 `/` 或 `/ws-sync` | 桌面端 | Mobile 以 `WS_PATH_INVALID` 终止，不做无效重连 |
 | `4001` | Unauthorized | Query Param 中的 `token` 与 `syncToken` 不匹配 | 桌面端 | 桌面端主动关闭连接，移动端需检查同步令牌配置 |
 | `1000` | Normal Closure | 同步正常完成，移动端主动关闭 | 移动端 | 会话结束，无异常 |
 | `1006` | Abnormal Closure | 网络中断、进程崩溃等非正常关闭 | 双方 | 移动端触发指数退避重试机制 |

@@ -298,6 +298,14 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             "同步通道中断或响应超时",
             "确认两端处于同一网络且电脑端服务正常，然后重新同步。",
         ),
+        "HTTP_TRANSPORT_FAILED" => definition(
+            Category::Connection,
+            Origin::MobileSync,
+            Stage::Connect,
+            Retry::Manual,
+            "同步数据传输中断",
+            "确认两端网络与电脑端服务正常后重新同步。",
+        ),
         "TIMEOUT" | "UNAVAILABLE" | "HTTP_ERROR" | "HEALTH_CHECK_FAILED" => definition(
             Category::Connection,
             Origin::DesktopCds,
@@ -348,7 +356,7 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::MobileSync,
             Stage::OwnerMetadata,
             Retry::AfterUserAction,
-            "所有者同步响应不符合 Wire 1.4 规范，已安全停止",
+            "同步响应不符合 Wire 1.4 规范，已安全停止",
             "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留最新日志。",
         ),
         "SYNC_REQUEST_INVALID" => definition(
@@ -419,8 +427,8 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::MobileSync,
             Stage::Messages,
             Retry::AfterUserAction,
-            "本次消息同步数据量超过安全上限",
-            "拆分或清理异常大的会话后再试。",
+            "本次同步数据量超过安全上限",
+            "缩减异常大的同步实体或会话后再试。",
         ),
         "TOPIC_HASH_BUDGET_EXCEEDED" => definition(
             Category::Data,
@@ -429,6 +437,22 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Retry::AfterUserAction,
             "本次同步数据量超过安全上限",
             "拆分或清理异常大的会话后再试。",
+        ),
+        "TOPIC_HASH_STATE_INVALID" => definition(
+            Category::Data,
+            Origin::MobileSync,
+            Stage::TopicValidation,
+            Retry::Manual,
+            "手机端话题校验状态不完整",
+            "检查对应话题数据后重新同步；若仍失败，请保留日志。",
+        ),
+        "SYNC_SNAPSHOT_STALE" => definition(
+            Category::Data,
+            Origin::DesktopPlugin,
+            Stage::Messages,
+            Retry::Manual,
+            "同步期间数据持续发生变化，本次未能完成",
+            "暂停电脑端相关编辑后重新同步。",
         ),
         "SYNC_OWNER_CONFLICT" => definition(
             Category::Data,
@@ -779,6 +803,53 @@ pub fn encode_wire_sync_error(error: &WireSyncError) -> Result<String, String> {
     serde_json::to_string(&validated)
         .map(|json| format!("{WIRE_ERROR_MARKER}{json}"))
         .map_err(|serialize_error| format!("failed to encode Wire 1.4 error: {serialize_error}"))
+}
+
+/// 将 Mobile 内部边界错误编码进既有私有标记，避免执行器退化为依赖文本猜测的
+/// `String`。该对象不会直接作为公开 Wire 帧发送。
+pub fn encode_local_sync_error(
+    code: &str,
+    stage: SyncErrorStage,
+    message: &str,
+    failed_topic_ids: Vec<String>,
+) -> String {
+    let stable_code = if is_valid_wire_code(code) {
+        code
+    } else {
+        "SYNC_ATTEMPT_FAILED"
+    };
+    let fallback = error_definition("SYNC_ATTEMPT_FAILED").expect("fallback definition");
+    let selected = error_definition(stable_code).unwrap_or(fallback);
+    let bounded_message = message
+        .trim()
+        .chars()
+        .take(MAX_ERROR_MESSAGE_CHARS)
+        .collect::<String>();
+    let wire = WireSyncError {
+        code: stable_code.to_string(),
+        origin: SyncErrorOrigin::MobileSync,
+        stage,
+        kind: selected.category,
+        retry: selected.retry,
+        message: if bounded_message.is_empty() {
+            selected.message.to_string()
+        } else {
+            bounded_message
+        },
+        failed_topic_ids: sanitize_topic_ids(failed_topic_ids),
+    };
+    encode_wire_sync_error(&wire).unwrap_or_else(|_| {
+        format!(
+            "{WIRE_ERROR_MARKER}{}",
+            r#"{"code":"SYNC_ATTEMPT_FAILED","origin":"mobile_sync","stage":"startup","kind":"internal","retry":"manual","message":"failed to encode local sync error","failedTopicIds":[]}"#
+        )
+    })
+}
+
+/// 只有无需用户介入且重新执行完整 Diff 即可收敛的失败，才允许消耗 session 的
+/// 既有自动重试槽。重试耗尽后仍按注册表向用户提供手动重试。
+pub fn is_attempt_restart_code(code: &str) -> bool {
+    matches!(code, "HTTP_TRANSPORT_FAILED" | "SYNC_SNAPSHOT_STALE")
 }
 
 pub fn encode_wire_sync_error_value(value: &Value) -> Result<String, String> {

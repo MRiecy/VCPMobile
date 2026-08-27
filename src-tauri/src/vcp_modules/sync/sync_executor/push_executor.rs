@@ -2,11 +2,14 @@ use crate::vcp_modules::agent_service;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_service;
 use crate::vcp_modules::sync_dto::{AgentSyncDTO, AttachmentSyncDTO, GroupSyncDTO, MessageSyncDTO};
-use crate::vcp_modules::sync_error::{encode_http_sync_error_body, encode_wire_sync_error};
+use crate::vcp_modules::sync_error::{
+    decode_wire_sync_error, encode_http_sync_error_body, encode_local_sync_error,
+    encode_wire_sync_error, SyncErrorStage,
+};
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_types::{
     AvatarOwnerType, AvatarPushResponse, EntityPushData, EntityPushItem, EntityPushRequest,
-    EntityPushResponse, MessagePushResponseFrame, OwnerType,
+    EntityPushResponse, EntitySelector, MessagePushResponseFrame, OwnerType,
 };
 use crate::vcp_modules::topic_types::TopicKey;
 use futures_util::StreamExt;
@@ -29,20 +32,38 @@ async fn read_response_limited(
     response: reqwest::Response,
     max_bytes: usize,
     operation: &str,
+    stage: SyncErrorStage,
 ) -> Result<(reqwest::StatusCode, Vec<u8>), String> {
     if response
         .content_length()
         .is_some_and(|length| length > max_bytes as u64)
     {
-        return Err(format!("{operation} response exceeds {max_bytes} bytes"));
+        return Err(encode_local_sync_error(
+            "RESPONSE_TOO_LARGE",
+            stage,
+            &format!("{operation} response exceeds {max_bytes} bytes"),
+            Vec::new(),
+        ));
     }
     let status = response.status();
     let mut stream = response.bytes_stream();
     let mut body = Vec::new();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|error| format!("{operation} response read failed: {error}"))?;
+        let chunk = chunk.map_err(|error| {
+            encode_local_sync_error(
+                "HTTP_TRANSPORT_FAILED",
+                stage,
+                &format!("{operation} response read failed: {error}"),
+                Vec::new(),
+            )
+        })?;
         if body.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(format!("{operation} response exceeds {max_bytes} bytes"));
+            return Err(encode_local_sync_error(
+                "RESPONSE_TOO_LARGE",
+                stage,
+                &format!("{operation} response exceeds {max_bytes} bytes"),
+                Vec::new(),
+            ));
         }
         body.extend_from_slice(&chunk);
     }
@@ -57,22 +78,47 @@ fn canonical_sha256(value: &str) -> Option<String> {
 async fn parse_json_response<T: DeserializeOwned>(
     response: reqwest::Response,
     operation: &str,
+    stage: SyncErrorStage,
 ) -> Result<T, String> {
     let (status, bytes) =
-        read_response_limited(response, MAX_CONTROL_RESPONSE_BYTES, operation).await?;
+        read_response_limited(response, MAX_CONTROL_RESPONSE_BYTES, operation, stage).await?;
     if !status.is_success() {
         return match encode_http_sync_error_body(&bytes) {
             Ok(Some(encoded)) => Err(encoded),
-            Ok(None) => Err(format!(
-                "{operation} failed with HTTP {status} without a Wire 1.4 error object"
+            Ok(None) => Err(protocol_error(
+                stage,
+                format!("{operation} failed with HTTP {status} without a Wire 1.4 error object"),
             )),
-            Err(error) => Err(format!(
-                "{operation} returned an invalid Wire 1.4 error: {error}"
+            Err(error) => Err(protocol_error(
+                stage,
+                format!("{operation} returned an invalid Wire 1.4 error: {error}"),
             )),
         };
     }
-    serde_json::from_slice(&bytes)
-        .map_err(|error| format!("{operation} returned invalid JSON: {error}"))
+    serde_json::from_slice(&bytes).map_err(|error| {
+        protocol_error(stage, format!("{operation} returned invalid JSON: {error}"))
+    })
+}
+
+fn http_transport_error(operation: &str, stage: SyncErrorStage, error: &reqwest::Error) -> String {
+    encode_local_sync_error(
+        "HTTP_TRANSPORT_FAILED",
+        stage,
+        &format!("{operation} failed: {error}"),
+        Vec::new(),
+    )
+}
+
+fn protocol_error(stage: SyncErrorStage, message: impl AsRef<str>) -> String {
+    encode_local_sync_error("SYNC_PROTOCOL_INVALID", stage, message.as_ref(), Vec::new())
+}
+
+fn ensure_protocol_error(error: String, stage: SyncErrorStage) -> String {
+    if decode_wire_sync_error(&error).is_some() {
+        error
+    } else {
+        protocol_error(stage, error)
+    }
 }
 
 /// 批量 Push 单 topic 处理结果
@@ -212,22 +258,34 @@ async fn send_message_chunk(
         .body(body)
         .send()
         .await
-        .map_err(|error| format!("Batch push request failed: {error}"))?;
-    let (status, bytes) =
-        read_response_limited(response, MAX_NDJSON_LINE_BYTES, "Batch push").await?;
+        .map_err(|error| {
+            http_transport_error("Batch push request", SyncErrorStage::Messages, &error)
+        })?;
+    let (status, bytes) = read_response_limited(
+        response,
+        MAX_NDJSON_LINE_BYTES,
+        "Batch push",
+        SyncErrorStage::Messages,
+    )
+    .await?;
     if !status.is_success() {
         return match encode_http_sync_error_body(&bytes) {
             Ok(Some(encoded)) => Err(encoded),
-            Ok(None) => Err(format!(
-                "Batch push messages failed with HTTP {status} without a Wire 1.4 error object"
+            Ok(None) => Err(protocol_error(
+                SyncErrorStage::Messages,
+                format!(
+                    "Batch push messages failed with HTTP {status} without a Wire 1.4 error object"
+                ),
             )),
-            Err(error) => Err(format!(
-                "Batch push messages returned an invalid Wire 1.4 error: {error}"
+            Err(error) => Err(protocol_error(
+                SyncErrorStage::Messages,
+                format!("Batch push messages returned an invalid Wire 1.4 error: {error}"),
             )),
         };
     }
 
     parse_message_push_results(&bytes, expected_topics)
+        .map_err(|error| ensure_protocol_error(error, SyncErrorStage::Messages))
 }
 
 async fn send_entity_items(
@@ -259,6 +317,14 @@ async fn send_entity_items(
             ));
         }
     }
+    let response_stage = if expected
+        .iter()
+        .any(|item| matches!(item, EntitySelector::Topic { .. }))
+    {
+        SyncErrorStage::TopicMetadata
+    } else {
+        SyncErrorStage::OwnerMetadata
+    };
 
     let body = serde_json::to_vec(&EntityPushRequest { items })
         .map_err(|error| format!("Entity push serialization failed: {error}"))?;
@@ -276,21 +342,28 @@ async fn send_entity_items(
         .body(body)
         .send()
         .await
-        .map_err(|error| format!("Entity push request failed: {error}"))?;
-    let (status, bytes) = read_response_limited(response, 10 * 1024 * 1024, "Entity push").await?;
+        .map_err(|error| http_transport_error("Entity push request", response_stage, &error))?;
+    let (status, bytes) =
+        read_response_limited(response, 10 * 1024 * 1024, "Entity push", response_stage).await?;
     if !status.is_success() {
         return match encode_http_sync_error_body(&bytes) {
             Ok(Some(encoded)) => Err(encoded),
-            Ok(None) => Err(format!(
-                "Entity push failed with HTTP {status} without a Wire 1.4 error object"
+            Ok(None) => Err(protocol_error(
+                response_stage,
+                format!("Entity push failed with HTTP {status} without a Wire 1.4 error object"),
             )),
-            Err(error) => Err(format!(
-                "Entity push returned an invalid Wire 1.4 error: {error}"
+            Err(error) => Err(protocol_error(
+                response_stage,
+                format!("Entity push returned an invalid Wire 1.4 error: {error}"),
             )),
         };
     }
-    let response: EntityPushResponse = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("Entity push returned invalid JSON: {error}"))?;
+    let response: EntityPushResponse = serde_json::from_slice(&bytes).map_err(|error| {
+        protocol_error(
+            response_stage,
+            format!("Entity push returned invalid JSON: {error}"),
+        )
+    })?;
     let mut seen = HashSet::new();
     for result in response.results {
         let (identity, ok, error) = result.into_parts();
@@ -836,13 +909,21 @@ impl PushExecutor {
             .body(image_data)
             .send()
             .await
-            .map_err(|error| format!("Push avatar {owner_type}/{owner_id} failed: {error}"))?;
-        let body: AvatarPushResponse = parse_json_response(response, "Push avatar").await?;
+            .map_err(|error| {
+                http_transport_error(
+                    &format!("Push avatar {owner_type}/{owner_id}"),
+                    SyncErrorStage::OwnerMetadata,
+                    &error,
+                )
+            })?;
+        let body: AvatarPushResponse =
+            parse_json_response(response, "Push avatar", SyncErrorStage::OwnerMetadata).await?;
         let expected_owner_type = AvatarOwnerType::try_from(owner_type)
             .map_err(|_| format!("Invalid avatar owner type {owner_type}"))?;
         if !body.ok || body.owner_type != expected_owner_type || body.owner_id != owner_id {
-            return Err(format!(
-                "Push avatar response identity mismatch for {owner_type}/{owner_id}"
+            return Err(protocol_error(
+                SyncErrorStage::OwnerMetadata,
+                format!("Push avatar response identity mismatch for {owner_type}/{owner_id}"),
             ));
         }
 

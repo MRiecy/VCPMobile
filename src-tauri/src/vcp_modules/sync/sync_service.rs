@@ -3,7 +3,7 @@ use crate::vcp_modules::db_write_queue::DbWriteQueue;
 use crate::vcp_modules::settings_manager::{read_settings, Settings, SettingsState};
 use crate::vcp_modules::sync_error::{
     build_local_error_payload, build_wire_error_payload, decode_wire_sync_error,
-    encode_wire_sync_error, SyncErrorPayload, WireSyncError,
+    encode_wire_sync_error, is_attempt_restart_code, SyncErrorPayload, WireSyncError,
 };
 use crate::vcp_modules::sync_logger::{redact_sync_diagnostic, LogLevel, SyncLogger};
 use crate::vcp_modules::sync_pipeline::{Phase1Metadata, Phase3Message, SyncPipeline};
@@ -225,6 +225,26 @@ fn take_retry_slot(retry_count: &mut u32, retry_delay: &mut Duration) -> Option<
     Some(backoff)
 }
 
+#[derive(Debug)]
+struct AttemptRestartFailure {
+    code: String,
+    message: String,
+}
+
+fn attempt_restart_failure(fallback_code: &str, message: &str) -> Option<AttemptRestartFailure> {
+    let wire = decode_wire_sync_error(message);
+    let code = wire
+        .as_ref()
+        .map_or(fallback_code, |error| error.code.as_str());
+    if !is_attempt_restart_code(code) {
+        return None;
+    }
+    Some(AttemptRestartFailure {
+        code: code.to_string(),
+        message: message.to_string(),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn schedule_sync_retry<R: Runtime>(
     app_handle: &AppHandle<R>,
@@ -262,15 +282,18 @@ async fn schedule_sync_retry<R: Runtime>(
             *retry_count
         ),
     );
-    emit_operator_sync_log(
-        app_handle,
-        session_id,
-        "warning",
-        &format!(
+    let operator_message = if error_code == "SYNC_SNAPSHOT_STALE" {
+        format!(
+            "检测到同步期间数据变化，正在重新比对（{}/{MAX_SYNC_RETRIES}）",
+            *retry_count
+        )
+    } else {
+        format!(
             "连接中断，正在进行第 {}/{} 次自动重试",
             *retry_count, MAX_SYNC_RETRIES
-        ),
-    );
+        )
+    };
+    emit_operator_sync_log(app_handle, session_id, "warning", &operator_message);
     !cancelled_during(cancel_token, backoff).await
 }
 
@@ -1334,6 +1357,23 @@ async fn run_sync_session(
                                 )
                                 .await;
                                 break 'session;
+                            } else if code == Some(4002) {
+                                let message = "WebSocket 同步服务路径不正确";
+                                emit_sync_log(
+                                    &handle_clone,
+                                    "error",
+                                    &format!("❌ 同步连接失败 [WS_PATH_INVALID]: {message}"),
+                                );
+                                publish_sync_error(
+                                    &handle_clone,
+                                    session_id,
+                                    &connection_status_for_task,
+                                    "WS_PATH_INVALID",
+                                    message,
+                                    Vec::new(),
+                                )
+                                .await;
+                                break 'session;
                             } else {
                                 let err_msg = format!(
                                     "连接被服务器关闭 (code: {}, reason: {})",
@@ -1510,6 +1550,7 @@ async fn run_sync_session(
                 let manifest_phase = Arc::new(AtomicU8::new(1));
                 let mut fatal_error = false;
                 let mut sync_success = false;
+                let mut restart_failure: Option<AttemptRestartFailure> = None;
                 let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(15));
 
                 'attempt: loop {
@@ -2231,6 +2272,23 @@ async fn run_sync_session(
                                     if command_attempt != attempt_id { continue; }
                                     phase3_batch_inflight.store(false, Ordering::SeqCst);
                                     if let Err(error) = result {
+                                        if let Some(restart) = attempt_restart_failure(
+                                            &error.code,
+                                            &error.message,
+                                        ) {
+                                            log::warn!(
+                                                "[SyncService] Phase 3 snapshot/transport changed; restarting attempt: {}",
+                                                error
+                                            );
+                                            restart_failure = Some(restart);
+                                            emit_sync_log(
+                                                &handle_clone,
+                                                "warning",
+                                                "Transient Phase 3 failure will restart the full sync attempt",
+                                            );
+                                            let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                            break 'attempt;
+                                        }
                                         log::error!("[SyncService] BatchDiffHandler failed: {}", error);
                                         fatal_error = true;
                                         let failure_summary = pending_msg_topics_task
@@ -2264,6 +2322,16 @@ async fn run_sync_session(
                                 },
                                 SyncCommand::FailAttempt { attempt_id: command_attempt, code, message } => {
                                     if command_attempt != attempt_id { continue; }
+                                    if let Some(restart) = attempt_restart_failure(code, &message) {
+                                        restart_failure = Some(restart);
+                                        emit_sync_log(
+                                            &handle_clone,
+                                            "warning",
+                                            "Transient sync failure will restart the full attempt",
+                                        );
+                                        let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                        break;
+                                    }
                                     fatal_error = true;
                                     emit_sync_log(&handle_clone, "error", &message);
                                     publish_sync_error(
@@ -2284,6 +2352,19 @@ async fn run_sync_session(
                                     failed_topic_ids,
                                 } => {
                                     if command_attempt != attempt_id { continue; }
+                                    if let Some(restart) = attempt_restart_failure(
+                                        &code,
+                                        &message,
+                                    ) {
+                                        restart_failure = Some(restart);
+                                        emit_sync_log(
+                                            &handle_clone,
+                                            "warning",
+                                            "Transient sync failure will restart the full attempt",
+                                        );
+                                        let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                        break;
+                                    }
                                     fatal_error = true;
                                     emit_sync_log(&handle_clone, "error", &message);
                                     publish_sync_error(
@@ -2361,6 +2442,19 @@ async fn run_sync_session(
                                                 break;
                                             }
                                         };
+                                        if let Some(restart) = attempt_restart_failure(
+                                            "REMOTE_SYNC_FAILED",
+                                            &encoded,
+                                        ) {
+                                            restart_failure = Some(restart);
+                                            emit_sync_log(
+                                                &handle_clone,
+                                                "warning",
+                                                "Desktop reported a stale sync snapshot; restarting the full attempt",
+                                            );
+                                            let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                            break;
+                                        }
                                         publish_sync_error(
                                             &handle_clone,
                                             session_id,
@@ -2717,6 +2811,10 @@ async fn run_sync_session(
                     if fatal_error {
                         break;
                     }
+                    let retry = restart_failure.unwrap_or_else(|| AttemptRestartFailure {
+                        code: "WS_DISCONNECTED".to_string(),
+                        message: "同步中途异常断开".to_string(),
+                    });
                     if schedule_sync_retry(
                         &handle_clone,
                         session_id,
@@ -2724,8 +2822,8 @@ async fn run_sync_session(
                         &cancel_token,
                         &mut retry_count,
                         &mut retry_delay,
-                        "WS_DISCONNECTED",
-                        "同步中途异常断开",
+                        &retry.code,
+                        &retry.message,
                     )
                     .await
                     {
@@ -3367,7 +3465,9 @@ pub async fn clear_old_sync_logs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vcp_modules::sync_error::SyncErrorCategory;
+    use crate::vcp_modules::sync_error::{
+        encode_local_sync_error, SyncErrorCategory, SyncErrorStage,
+    };
     use serde_json::Value;
     use std::sync::atomic::AtomicBool;
 
@@ -3392,6 +3492,27 @@ mod tests {
         let fallback = build_sync_error_payload("desktop raw code", Vec::new(), None);
         assert_eq!(fallback.code, "SYNC_ATTEMPT_FAILED");
         assert_eq!(fallback.category, SyncErrorCategory::Internal);
+    }
+
+    #[test]
+    fn only_transport_and_snapshot_failures_restart_the_full_attempt() {
+        let transport = encode_local_sync_error(
+            "HTTP_TRANSPORT_FAILED",
+            SyncErrorStage::Messages,
+            "connection reset",
+            vec!["topic-a".to_string()],
+        );
+        let restart = attempt_restart_failure("PHASE3_PULL_FAILED", &transport)
+            .expect("transport failure should restart");
+        assert_eq!(restart.code, "HTTP_TRANSPORT_FAILED");
+
+        let protocol = encode_local_sync_error(
+            "SYNC_PROTOCOL_INVALID",
+            SyncErrorStage::Messages,
+            "malformed response",
+            Vec::new(),
+        );
+        assert!(attempt_restart_failure("PHASE3_PULL_FAILED", &protocol).is_none());
     }
 
     #[test]
