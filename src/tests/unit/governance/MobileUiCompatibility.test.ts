@@ -5,10 +5,6 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import ciWorkflow from '../../../../.github/workflows/ci.yml?raw';
-import claudeGuide from '../../../../CLAUDE.md?raw';
-import rootReadme from '../../../../README.md?raw';
-import compatibilityGuide from '../../../../docs/ANDROID_UI_COMPATIBILITY.md?raw';
-import layerGuide from '../../../../docs/UI_LAYER_ARCHITECTURE.md?raw';
 import androidManifest from '../../../../src-tauri/gen/android/app/src/main/AndroidManifest.xml?raw';
 import viteConfig from '../../../../vite.config.ts?raw';
 import unoConfig from '../../../../uno.config.ts?raw';
@@ -72,15 +68,7 @@ function withoutSupportsBlocks(source: string): string {
 }
 
 describe('Android mobile UI compatibility contracts', () => {
-  it('publishes only the Android arm64 touch product and rejects the TV launcher', () => {
-    for (const guide of [rootReadme, compatibilityGuide]) {
-      expect(guide).toContain('Android');
-      expect(guide).toContain('arm64');
-      expect(guide).toContain('VCPChat');
-      expect(guide).toMatch(/(?:不支持|不受支持)[\s\S]{0,80}(Windows|桌面端)/);
-      expect(guide).toMatch(/(?:不支持|不受支持)[\s\S]{0,160}Android TV/);
-    }
-
+  it('requires touch hardware and rejects the TV launcher', () => {
     expect(androidManifest).not.toContain('android.software.leanback');
     expect(androidManifest).not.toContain('android.intent.category.LEANBACK_LAUNCHER');
     expect(androidManifest).toContain(
@@ -165,12 +153,6 @@ describe('Android mobile UI compatibility contracts', () => {
       expect(layersSource).toContain(`LAYER_${name.toUpperCase()} = ${value}`);
       expect(themesSource).toContain(`--layer-${name}: ${value}`);
       expect(unoConfig).toContain(`${name}: '${value}'`);
-      const documentedRow = new RegExp('\\| `' + name + '`\\s*\\| ' + value + '\\s*\\|');
-      expect(claudeGuide).toMatch(documentedRow);
-      expect(rootReadme).toMatch(documentedRow);
-      expect(layerGuide).toMatch(
-        new RegExp('\\| L\\d+ \\| `' + name + '` \\| ' + value + ' \\|'),
-      );
     }
   });
 

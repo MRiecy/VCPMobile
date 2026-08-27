@@ -31,7 +31,7 @@ const mountBar = async (
   if (options?.generating && item) {
     sessionStore.currentTopicId = 't1';
     const streamStore = useChatStreamStore();
-    (streamStore as any).sessionActiveStreams = { [`${item.id}:t1`]: ['msg-1'] };
+    streamStore.addSessionStream(item.id, 'group', 't1', 'msg-1');
   }
 
   await nextTick();
@@ -68,7 +68,7 @@ describe('GroupInviteBar', () => {
   it('saveGroup syncs mode into the groups snapshot (invite bar data source)', async () => {
     // 回归契约：群设置保存后 mode 必须进入 assistantStore.groups 快照，
     // 否则邀约横条/@选择器永远读到旧模式（本 bug 的血训）
-    mockInvoke('save_group_config', () => undefined);
+    mockInvoke('save_group_config', (args) => args?.group);
     const wrapper = await mountBar({ id: 'g2', type: 'group', name: '顺序群' });
     expect(wrapper.findAll('button')).toHaveLength(0);
 

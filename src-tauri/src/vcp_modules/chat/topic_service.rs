@@ -965,13 +965,13 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .expect("open test database");
-        sqlx::migrate!("./migrations")
-            .run(&pool)
+        sqlx::raw_sql(include_str!("../../../migrations/0100_baseline_v2.sql"))
+            .execute(&pool)
             .await
-            .expect("run migrations");
+            .expect("create current baseline schema");
         sqlx::query(
-            "INSERT INTO agents (agent_id, name, model, updated_at)
-             VALUES ('agent', 'Agent', 'model', 1);
+            "INSERT INTO agents (owner_type, agent_id, name, model, updated_at)
+             VALUES ('agent', 'agent', 'Agent', 'model', 1);
              INSERT INTO topics (
                 topic_id, owner_type, owner_id, title, created_at, updated_at, unread
              ) VALUES ('topic', 'agent', 'agent', 'Topic', 1, 1, 0);",

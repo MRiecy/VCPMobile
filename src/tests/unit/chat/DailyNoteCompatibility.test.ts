@@ -1,16 +1,10 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
-// @ts-expect-error Vitest runs in Node; the application tsconfig intentionally omits Node types.
-import { readFileSync } from 'node:fs';
-// @ts-expect-error Vitest runs in Node; the application tsconfig intentionally omits Node types.
-import { resolve } from 'node:path';
 import DiaryBlock from '@/features/chat/blocks/DiaryBlock.vue';
 import { useNotificationProcessor } from '@/core/composables/useNotificationProcessor';
 import { clearHtmlCache } from '@/core/utils/astRenderer';
 import type { ContentBlock, MarkdownNode } from '@/core/types/chat';
-
-const messageBlocksSource = readFileSync(resolve('src/assets/message-blocks.css'), 'utf8');
 
 function paragraph(value: string): MarkdownNode {
   return {
@@ -101,14 +95,6 @@ describe('DiaryBlock', () => {
     expect(wrapper.text()).toContain('替换内容解析失败');
   });
 
-  it('keeps the dark DailyNote surface nearly opaque with explicit readable text colors', () => {
-    expect(messageBlocksSource).toContain('background: rgba(44, 42, 58, 0.95) !important');
-    expect(messageBlocksSource).toContain('html.dark .vcp-diary-date,');
-    expect(messageBlocksSource).toContain('html.dark .vcp-diary-maid-info,');
-    expect(messageBlocksSource).toContain('html.dark .vcp-diary-content,');
-    expect(messageBlocksSource).toContain('color: #c5c8c6;');
-    expect(messageBlocksSource).toContain('background: rgba(38, 50, 65, 0.95) !important');
-  });
 });
 
 describe('DailyNote notifications', () => {

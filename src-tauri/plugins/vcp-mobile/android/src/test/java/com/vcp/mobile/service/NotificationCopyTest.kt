@@ -13,39 +13,22 @@ import org.junit.Test
 class NotificationCopyTest {
 
     @Test
-    fun distributedLabelFallsBackToAppName() {
-        val copy = resolveNotificationCopy("distributed", hasCliJobs = false)
-        assertEquals("VCP Mobile", copy.title)
-        assertEquals("分布式后台连接维系中...", copy.contentText)
-    }
+    fun internalDomainLabelsNeverLeakIntoTheNotificationTitle() {
+        val cases = listOf(
+            Triple("distributed", "VCP Mobile", "分布式后台连接维系中..."),
+            Triple("[分布式连接]", "VCP Mobile", "分布式后台连接维系中..."),
+            Triple("VCP Log Linger", "VCP Mobile", "正在保持后台连接..."),
+            Triple("[数据同步] 增量", "增量", "正在与云端服务器进行高精度同步..."),
+            Triple("[预渲染重建]", "VCP Mobile", "正在优化与加速本地响应缓存..."),
+            Triple("[后台保活]", "VCP Mobile", "正在保持后台连接..."),
+            Triple("", "VCP Mobile", "已连接"),
+        )
 
-    @Test
-    fun legacyBracketedDistributedLabelFallsBackToAppName() {
-        // 历史版本 Rust 侧传入的内部标签，不得泄漏为标题
-        val copy = resolveNotificationCopy("[分布式连接]", hasCliJobs = false)
-        assertEquals("VCP Mobile", copy.title)
-        assertEquals("分布式后台连接维系中...", copy.contentText)
-    }
-
-    @Test
-    fun vcpLogLingerLabelFallsBackToAppName() {
-        val copy = resolveNotificationCopy("VCP Log Linger", hasCliJobs = false)
-        assertEquals("VCP Mobile", copy.title)
-        assertEquals("正在保持后台连接...", copy.contentText)
-    }
-
-    @Test
-    fun syncLabelStripsDomainTagFromTitle() {
-        val copy = resolveNotificationCopy("[数据同步] 增量", hasCliJobs = false)
-        assertEquals("增量", copy.title)
-        assertEquals("正在与云端服务器进行高精度同步...", copy.contentText)
-    }
-
-    @Test
-    fun prerenderLabelStripsDomainTagAndFallsBackWhenEmpty() {
-        val copy = resolveNotificationCopy("[预渲染重建]", hasCliJobs = false)
-        assertEquals("VCP Mobile", copy.title)
-        assertEquals("正在优化与加速本地响应缓存...", copy.contentText)
+        cases.forEach { (label, expectedTitle, expectedContent) ->
+            val copy = resolveNotificationCopy(label, hasCliJobs = false)
+            assertEquals(label, expectedTitle, copy.title)
+            assertEquals(label, expectedContent, copy.contentText)
+        }
     }
 
     @Test
@@ -53,21 +36,6 @@ class NotificationCopyTest {
         val copy = resolveNotificationCopy("Nova", hasCliJobs = false)
         assertEquals("Nova", copy.title)
         assertEquals("思考中……", copy.contentText)
-    }
-
-    @Test
-    fun emptyLabelFallsBackToAppNameAndConnectedText() {
-        val copy = resolveNotificationCopy("", hasCliJobs = false)
-        assertEquals("VCP Mobile", copy.title)
-        assertEquals("已连接", copy.contentText)
-    }
-
-    @Test
-    fun manualKeepaliveBracketTagFallsBackToAppName() {
-        // manual_keepalive（旧 acquireWakeLock 兼容 API）的内部域标签同样不得泄漏
-        val copy = resolveNotificationCopy("[后台保活]", hasCliJobs = false)
-        assertEquals("VCP Mobile", copy.title)
-        assertEquals("正在保持后台连接...", copy.contentText)
     }
 
     @Test

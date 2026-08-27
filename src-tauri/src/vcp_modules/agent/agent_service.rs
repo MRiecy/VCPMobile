@@ -908,22 +908,22 @@ mod cache_generation_tests {
             .await
             .expect("in-memory pool");
 
-        // 快照查询涉及的最小 schema（agents/avatars/groups/group_members/topics）
+        // 快照查询涉及的最小 v2 schema（agents/avatars/groups/group_members/topics）
         sqlx::query(
-            "CREATE TABLE agents (agent_id TEXT PRIMARY KEY, name TEXT, model TEXT, deleted_at INTEGER);
+            "CREATE TABLE agents (owner_type TEXT, agent_id TEXT, name TEXT, model TEXT, deleted_at INTEGER, PRIMARY KEY (owner_type, agent_id));
              CREATE TABLE avatars (owner_id TEXT, owner_type TEXT, dominant_color TEXT, deleted_at INTEGER);
-             CREATE TABLE groups (group_id TEXT PRIMARY KEY, name TEXT, mode TEXT, deleted_at INTEGER);
+             CREATE TABLE groups (owner_type TEXT, group_id TEXT, name TEXT, mode TEXT, deleted_at INTEGER, PRIMARY KEY (owner_type, group_id));
              CREATE TABLE group_members (group_id TEXT, agent_id TEXT, sort_order INTEGER);
-             CREATE TABLE topics (owner_id TEXT, unread_count INTEGER, unread INTEGER, deleted_at INTEGER);",
+             CREATE TABLE topics (owner_type TEXT, owner_id TEXT, unread_count INTEGER, unread INTEGER, deleted_at INTEGER);",
         )
         .execute(&pool)
         .await
         .expect("create schema");
 
         sqlx::query(
-            "INSERT INTO agents (agent_id, name, model) VALUES ('a1', 'Nova', 'm');
-             INSERT INTO groups (group_id, name, mode) VALUES ('g1', '邀约群', 'invite_only');
-             INSERT INTO groups (group_id, name, mode) VALUES ('g2', '老群', NULL);
+            "INSERT INTO agents (owner_type, agent_id, name, model) VALUES ('agent', 'a1', 'Nova', 'm');
+             INSERT INTO groups (owner_type, group_id, name, mode) VALUES ('group', 'g1', '邀约群', 'invite_only');
+             INSERT INTO groups (owner_type, group_id, name, mode) VALUES ('group', 'g2', '老群', NULL);
              INSERT INTO group_members (group_id, agent_id, sort_order) VALUES ('g1', 'a1', 0);",
         )
         .execute(&pool)

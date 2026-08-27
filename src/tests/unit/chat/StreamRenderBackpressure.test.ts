@@ -92,10 +92,18 @@ describe("stream render backpressure", () => {
         },
       }));
 
-      const frame = store.activeStreamMessages.get("assistant-1")?.tailFrame;
+      const frame = store.getActiveStreamMessage(
+        "agent-a",
+        "agent",
+        "topic-a",
+        "assistant-1",
+      )?.tailFrame;
       expect(frame?.reset).toBe(true);
       expect(frame?.mutations).toEqual([]);
-      expect((frame?.snapshot?.[0] as any)?.id).toBe("node-700");
+      expect(frame?.snapshot).toEqual([{
+        type: "paragraph",
+        children: [{ type: "text", value: "node-700" }],
+      }]);
     } finally {
       window.requestAnimationFrame = originalRaf;
       if (hiddenDescriptor) {

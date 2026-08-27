@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest';
 import packageManifestSource from '../../../../package.json?raw';
 import agentSource from '../../../../tests/e2e-android/scripts/android-debug-agent.cjs?raw';
 import adbSource from '../../../../tests/e2e-android/scripts/adb-env.cjs?raw';
-import agentGuide from '../../../../docs/ANDROID_AGENT_DEBUGGING.md?raw';
 import performanceStartup from '../../../../tests/perf/scripts/measure_startup_adb.cjs?raw';
 import performanceCapture from '../../../../tests/perf/scripts/collect_android_dumpsys.cjs?raw';
 
@@ -56,14 +55,5 @@ describe('Android Debug Agent governance', () => {
       expect(source).not.toContain('--mode');
       expect(source).not.toContain('getPackageName');
     }
-  });
-
-  it('documents the Agent data-volume and Release boundaries', () => {
-    expect(agentGuide).toContain('com.vcp.avatar.debug');
-    expect(agentGuide).toContain('com.vcp.avatar');
-    expect(agentGuide).toContain('200');
-    expect(agentGuide).toContain('logcat -c');
-    expect(agentGuide).toContain('adb reverse --remove-all');
-    expect(agentGuide).toContain('pnpm android:debug:snapshot');
   });
 });

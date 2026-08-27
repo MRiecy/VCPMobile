@@ -9,7 +9,11 @@ import { useChatStreamStore } from "@/core/stores/chatStreamStore";
 import { useSettingsStore } from "@/core/stores/settings";
 import { useAssistantStore } from "@/core/stores/assistant";
 import { useAttachmentStore } from "@/core/stores/attachmentStore";
-import { invokeMock, mockInvoke } from "@/tests/mocks/tauri";
+import {
+  channelInstances,
+  invokeMock,
+  mockInvoke,
+} from "@/tests/mocks/tauri";
 import { flushPromises } from "@/tests/utils/flush";
 
 function deferred<T>() {
@@ -50,19 +54,32 @@ describe("chat conversation concurrency guards", () => {
     expect(session.isConversationCurrent(firstA)).toBe(false);
   });
 
-  it("does not let a slow owner lookup overwrite a newer selection", async () => {
+  it("does not let a slow owner selection overwrite a newer selection", async () => {
     const session = useChatSessionStore();
     const assistant = useAssistantStore();
     assistant.agents = [
       { id: "agent-b", name: "B", model: "test", avatarCalculatedColor: null },
       { id: "agent-c", name: "C", model: "test", avatarCalculatedColor: null },
     ];
-    const topics = deferred<void>();
-    mockInvoke("get_topics_streamed", () => topics.promise);
+    const topicsB = deferred<void>();
+    const topicsC = deferred<void>();
+    mockInvoke("get_topics_streamed", (args) =>
+      args?.ownerId === "agent-b" ? topicsB.promise : topicsC.promise,
+    );
 
     const selectingB = session.selectItem({ id: "agent-b", name: "B", type: "agent" });
-    session.setConversation({ id: "agent-c", name: "C", type: "agent" }, "topic-c");
-    topics.resolve();
+    const selectingC = session.selectItem({ id: "agent-c", name: "C", type: "agent" });
+    channelInstances[1]?.emit([{
+      id: "topic-c",
+      name: "Topic C",
+    }]);
+    topicsC.resolve();
+    await selectingC;
+    channelInstances[0]?.emit([{
+      id: "topic-b",
+      name: "Topic B",
+    }]);
+    topicsB.resolve();
     await selectingB;
 
     expect(session.currentConversationKey).toMatchObject({

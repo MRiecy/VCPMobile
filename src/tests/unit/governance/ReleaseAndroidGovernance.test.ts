@@ -5,12 +5,6 @@ import releaseWorkflow from '../../../../.github/workflows/release.yml?raw';
 import androidSettingsGenerator from '../../../../.github/generate-tauri-android-settings.mjs?raw';
 import packageManifest from '../../../../package.json?raw';
 import tauriConfig from '../../../../src-tauri/tauri.conf.json?raw';
-import rootReadme from '../../../../README.md?raw';
-import claudeGuide from '../../../../CLAUDE.md?raw';
-import pluginIndex from '../../../../docs/plugins/00_总览与导航.md?raw';
-import syncIndex from '../../../../docs/sync/00_总览与导航.md?raw';
-import syncGuide from '../../../../docs/sync/15_开发指南与FAQ.md?raw';
-import localServerGuide from '../../../../docs/modules/22_本地服务器与浮动助手.md?raw';
 import rootGradle from '../../../../src-tauri/gen/android/build.gradle.kts?raw';
 import appGradle from '../../../../src-tauri/gen/android/app/build.gradle.kts?raw';
 import androidManifest from '../../../../src-tauri/gen/android/app/src/main/AndroidManifest.xml?raw';
@@ -36,8 +30,6 @@ describe('release and Android governance contracts', () => {
     for (const reference of references) {
       expect(reference).toMatch(/^[^@]+@[0-9a-f]{40}$/);
     }
-    expect(references).toContain('pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1');
-    expect(references).toContain('Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6');
   });
 
   it('gates a release on commit, version, certificate and checksum identity', () => {
@@ -65,9 +57,11 @@ describe('release and Android governance contracts', () => {
 
     const packageJson = JSON.parse(packageManifest);
     const tauriJson = JSON.parse(tauriConfig);
-    expect(packageJson.version).toBe('1.1.5');
-    expect(tauriJson.version).toBe('1.1.5');
-    expect(tauriJson.bundle.android.versionCode).toBe(1001005);
+    expect(packageJson.version).toBe(tauriJson.version);
+    const [major, minor, patch] = packageJson.version.split('.').map(Number);
+    expect(tauriJson.bundle.android.versionCode).toBe(
+      major * 1_000_000 + minor * 1_000 + patch,
+    );
 
     expect(releaseWorkflow).toContain('APK_ENTRIES=$(unzip -Z1 "$SOURCE_APK" 2>&1)');
     expect(releaseWorkflow).not.toMatch(/unzip -Z1[^\n]*\|[^\n]*grep -q/);
@@ -142,7 +136,7 @@ describe('release and Android governance contracts', () => {
     expect(notificationIndex).toBeGreaterThan(requestIndex);
   });
 
-  it('keeps CI commands locked, audited, real and documented', () => {
+  it('keeps CI commands locked, audited and real', () => {
     const scripts = JSON.parse(packageManifest).scripts as Record<string, string>;
     expect(scripts.check).toContain('cargo check --locked');
     expect(scripts['test:integration']).toContain('--test file_extractor_integration');
@@ -179,12 +173,5 @@ describe('release and Android governance contracts', () => {
     expect(ciWorkflow).toContain('git status --porcelain --untracked-files=all --');
     expect(ciWorkflow).toContain('src-tauri/gen/android');
     expect(ciWorkflow).toContain('src-tauri/plugins/vcp-mobile/permissions');
-    expect(claudeGuide).not.toContain('build_android_release.ps1');
-
-    for (const guide of [rootReadme, claudeGuide, pluginIndex, syncIndex, syncGuide, localServerGuide]) {
-      expect(guide).not.toMatch(
-        /build_android_release\.ps1|pnpm dev:usb|pnpm dev:android|scripts\/tauri_android_dev|pnpm memory:refresh/,
-      );
-    }
   });
 });

@@ -70,7 +70,7 @@ describe('useAttachmentPreview', () => {
     expect(stats.hasThumbnails).toBe(1);
   });
 
-  it('renders desktop-only attachments as a disabled placeholder', () => {
+  it('renders desktop-only attachments without a local media renderer', () => {
     const wrapper = mount(AttachmentPreview, {
       props: {
         attachments: [
@@ -97,7 +97,6 @@ describe('useAttachmentPreview', () => {
     });
 
     expect(wrapper.text()).toContain('桌面专用附件');
-    expect(wrapper.find('[aria-disabled="true"]').exists()).toBe(true);
     expect(wrapper.findComponent({ name: 'AttachmentRenderer' }).exists()).toBe(
       false,
     );

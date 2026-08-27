@@ -572,6 +572,7 @@ mod tests {
             .await
             .expect("desktop-only attachment is a logical live reference");
         assert!(snapshot.live_hashes.contains("desktop-hash"));
+        tx.commit().await.expect("finish read snapshot");
         let relation: (String, Option<String>) = sqlx::query_as(
             "SELECT status, src FROM message_attachments WHERE hash = 'desktop-hash'",
         )
@@ -610,6 +611,7 @@ mod tests {
             .expect("read GC snapshot");
         assert!(!snapshot.live_hashes.contains("orphan-hash"));
         assert_eq!(snapshot.indexed_attachments.len(), 1);
+        tx.commit().await.expect("finish read snapshot");
         let index_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE hash = 'orphan-hash'")
                 .fetch_one(&pool)

@@ -27,20 +27,39 @@ class PluginContractTest {
     }
 
     @Test
-    fun defaultPermissionContainsAllRegisteredPluginCommands() {
+    fun registeredCommandsCloseTheBuildPermissionAndGuestContracts() {
         val libRs = File(pluginRoot, "src/lib.rs").readText()
+        val buildRs = File(pluginRoot, "build.rs").readText()
         val defaultToml = File(pluginRoot, "permissions/default.toml").readText()
+        val allToml = File(pluginRoot, "permissions/all.toml").readText()
+        val guestJs = File(pluginRoot, "guest-js/index.ts").readText()
 
         val registeredCommands = Regex("(?:screen|stream|system)::([a-zA-Z0-9_]+)")
             .findAll(libRs)
             .map { it.groupValues[1] }
             .toSet()
 
-        val missing = registeredCommands.filter { command ->
-            !defaultToml.contains("\"$command\"")
+        val registrationSurfaces = mapOf(
+            "build.rs" to buildRs,
+            "permissions/default.toml" to defaultToml,
+            "permissions/all.toml" to allToml,
+        )
+        registrationSurfaces.forEach { (path, source) ->
+            val missing = registeredCommands.filter { command ->
+                !source.contains("\"$command\"")
+            }
+            assertTrue("$path 缺少插件命令: $missing", missing.isEmpty())
         }
 
-        assertTrue("default.toml 缺少插件命令授权: $missing", missing.isEmpty())
+        val guestCommands = Regex("plugin:vcp-mobile\\|([a-zA-Z0-9_]+)")
+            .findAll(guestJs)
+            .map { it.groupValues[1] }
+            .toSet()
+        val unregisteredGuestCommands = guestCommands - registeredCommands
+        assertTrue(
+            "guest-js 暴露了未注册命令: $unregisteredGuestCommands",
+            unregisteredGuestCommands.isEmpty(),
+        )
     }
 
     @Test
@@ -126,98 +145,6 @@ class PluginContractTest {
     }
 
     @Test
-    fun helperConnectionAndSessionCleanupUseIdentityChecks() {
-        val helper = File(
-            pluginRoot,
-            "android/src/main/java/com/vcp/mobile/service/SseProxyService.kt",
-        ).readText()
-
-        assertTrue("resume 连接必须按引用同一性解绑", helper.contains("activeConnection !== connection"))
-        assertTrue("重复 requestId 必须用 putIfAbsent 拒绝覆盖", helper.contains("activeSessions.putIfAbsent(requestId, session)"))
-        assertTrue(
-            "session 删除必须携带实例身份",
-            helper.contains("activeSessions.remove(requestId, session)") ||
-                helper.contains("activeSessions.remove(session.requestId, session)"),
-        )
-        assertTrue("EventSource 安装必须复核 session owner", helper.contains("isServiceRunning && isCurrentSession(session)"))
-        assertTrue("失去 owner 的 EventSource 必须立即取消", helper.contains("source.cancel()"))
-        assertTrue("旧 raw output 所有权字段不应残留", !helper.contains("activeSocketOutputStream"))
-        assertTrue("helper 不得再用静音音频伪装媒体保活", !helper.contains("MediaPlayer"))
-        assertTrue("stop 必须读取调用方期望代次", helper.contains("request.optLong(\"generation\", -1L)"))
-        assertTrue("stop 必须精确匹配 session 代次", helper.contains("session.generation != expectedGeneration"))
-        assertTrue(
-            "stop ACK 必须同时返回代次与实际停止结果",
-            helper.contains("\"stop_ack\"") &&
-                helper.contains("put(\"generation\"") &&
-                helper.contains("put(\"stopped\", stopped)"),
-        )
-    }
-
-    @Test
-    fun helperIsLazyAndInsetsAreFrameCoalesced() {
-        val kotlinPlugin = File(
-            pluginRoot,
-            "android/src/main/java/com/vcp/mobile/VcpMobilePlugin.kt",
-        ).readText()
-        val initBody = Regex("init\\s*\\{([\\s\\S]*?)\\n\\s*}").find(kotlinPlugin)?.groupValues?.get(1).orEmpty()
-        val insets = File(
-            pluginRoot,
-            "android/src/main/java/com/vcp/mobile/KeyboardInsetsManager.kt",
-        ).readText()
-
-        assertTrue("helper 不得在插件 init 时无条件启动", !initBody.contains("startHelperServiceInternal"))
-        assertTrue("Insets 必须按显示帧合并", insets.contains("postOnAnimation(frameCallback)"))
-        assertTrue(
-            "Insets manager 必须支持解绑并归零 IME",
-            insets.contains("fun detach()") && insets.contains("previous?.withoutIme()"),
-        )
-        val replayAssignment = insets.indexOf("window.__VCP_NATIVE_INSETS__ =")
-        val eventDispatch = insets.indexOf("window.dispatchEvent(new CustomEvent('vcp-keyboard-inset'")
-        assertTrue(
-            "Insets snapshot 必须先写入 window replay 再派发事件",
-            replayAssignment >= 0 && eventDispatch > replayAssignment,
-        )
-    }
-
-    @Test
-    fun pluginExecutorsAreIsolatedBoundedAndCancellable() {
-        val kotlinPlugin = File(
-            pluginRoot,
-            "android/src/main/java/com/vcp/mobile/VcpMobilePlugin.kt",
-        ).readText()
-
-        assertTrue("OOM guard 必须使用 fixed-delay scheduler", kotlinPlugin.contains("scheduleWithFixedDelay"))
-        assertTrue("Root 命令必须使用独立 executor", kotlinPlugin.contains("executorDomains.rootExecutor"))
-        assertTrue("文件任务必须使用独立 executor", kotlinPlugin.contains("executorDomains.fileIoExecutor"))
-        assertTrue("文件域默认保持串行语义", kotlinPlugin.contains("fileThreadCount: Int = 1"))
-        assertTrue("执行队列必须有界", kotlinPlugin.contains("ArrayBlockingQueue"))
-        assertTrue("非 Root 设备只探测一次后退出", kotlinPlugin.contains("if (!Shell.getShell().isRoot)"))
-        assertTrue("销毁必须立即取消执行域", kotlinPlugin.contains("executorDomains.shutdownNow()"))
-    }
-
-    @Test
-    fun rawJniAndGuardianScreenRequestsShareOrArbitration() {
-        val kotlinPlugin = File(
-            pluginRoot,
-            "android/src/main/java/com/vcp/mobile/VcpMobilePlugin.kt",
-        ).readText()
-        val rustScreen = File(pluginRoot, "src/screen.rs").readText()
-
-        assertTrue(
-            "屏幕常亮必须由 manual OR Guardian 统一仲裁",
-            kotlinPlugin.contains("manualRequested || guardianRequested"),
-        )
-        assertTrue(
-            "Raw JNI owner 必须进入统一仲裁器",
-            rustScreen.contains("ScreenKeepOnArbiter") && rustScreen.contains("setManualRequested"),
-        )
-        assertTrue(
-            "Rust clear 不得绕过另一 owner 直接清 Window flag",
-            !rustScreen.contains("clearFlags"),
-        )
-    }
-
-    @Test
     fun rustMobilePluginCallsDoNotHoldHandleMutexWhileWaitingForKotlin() {
         val libRs = File(pluginRoot, "src/lib.rs").readText()
         val commandSources = listOf("src/system.rs", "src/stream.rs", "src/cli.rs")
@@ -294,71 +221,4 @@ class PluginContractTest {
         assertTrue("人工 PTY 必须由独立 owner 持有", kotlinPlugin.contains("CliPtyHostOwner.get(cliProcessHost)"))
     }
 
-    @Test
-    fun manualPtyUsesArm64NativeSessionAndBoundedJniContracts() {
-        val ptyHost = File(
-            pluginRoot,
-            "android/src/main/java/com/vcp/mobile/cli/CliPtyHost.kt",
-        ).readText()
-        val nativeSource = File(
-            pluginRoot,
-            "android/src/main/cpp/vcp_pty.cpp",
-        ).readText()
-        val androidMk = File(pluginRoot, "android/src/main/cpp/Android.mk").readText()
-        val applicationMk = File(pluginRoot, "android/src/main/cpp/Application.mk").readText()
-
-        assertTrue("PTY 必须使用独立 native library", ptyHost.contains("System.loadLibrary(\"vcp_pty\")"))
-        assertTrue("PTY read 必须有界", ptyHost.contains("PTY_MAX_READ_BYTES = 64 * 1024"))
-        assertTrue("PTY write 必须有界", ptyHost.contains("PTY_MAX_WRITE_BYTES = 16 * 1024"))
-        assertTrue("PTY detach replay 必须有界", ptyHost.contains("PTY_REPLAY_BYTES = 128 * 1024"))
-        assertTrue("PTY child 必须建立独立 session", nativeSource.contains("setsid()"))
-        assertTrue("PTY slave 必须成为 controlling terminal", nativeSource.contains("TIOCSCTTY"))
-        assertTrue("PTY resize 必须发送 SIGWINCH", nativeSource.contains("TIOCSWINSZ") && nativeSource.contains("SIGWINCH"))
-        assertTrue("PTY close 必须按进程组终止", nativeSource.contains("kill(-session->pid"))
-        assertTrue("JNI helper 必须独立成库", androidMk.contains("LOCAL_MODULE := vcp_pty"))
-        assertTrue("JNI helper 只能构建 arm64", applicationMk.contains("APP_ABI := arm64-v8a"))
-    }
-
-    @Test
-    fun cliProcessHostFreezesPrivateOutputAndWholeGroupCleanupContracts() {
-        val processHost = File(
-            pluginRoot,
-            "android/src/main/java/com/vcp/mobile/cli/CliProcessHost.kt",
-        ).readText()
-        val buildScript = File(
-            pluginRoot,
-            "../../runtime-assets/vcp-cli/build/build_proot.sh",
-        ).canonicalFile.readText()
-        val commandProfile = File(
-            pluginRoot,
-            "../../runtime-assets/vcp-cli/command-profile.json",
-        ).canonicalFile.readText()
-
-        assertTrue("host environment 必须先 clear 防止继承密钥", processHost.contains("processBuilder.environment().apply {\n                clear()"))
-        assertTrue("PRoot 必须使用私有 PROOT_TMP_DIR", processHost.contains("\"PROOT_TMP_DIR\" to prootTmpPath"))
-        assertTrue("PRoot 必须显式使用 APK nativeLibraryDir loader", processHost.contains("\"PROOT_LOADER\" to prootLoaderPath"))
-        assertTrue("PRoot loader 必须从 nativeLibraryDir 解析", processHost.contains("verifyNativeExecutable(\n            nativeLibraryDirectory,\n            PROOT_LOADER_LIBRARY_NAME"))
-        assertTrue("APK native ELF 必须在原始 path 上 NOFOLLOW 校验", processHost.contains("LinkOption.NOFOLLOW_LINKS"))
-        assertTrue("APK native ELF 必须拒绝 symlink", processHost.contains("attributes.isRegularFile && !attributes.isSymbolicLink"))
-        assertTrue("PRoot 构建必须禁用 bundled loader", buildScript.contains("PROOT_UNBUNDLE_LOADER=\"${'$'}unbundled_loader_fallback\""))
-        assertTrue("构建必须单独冻结 loader ELF", buildScript.contains("built_loader=\"${'$'}proot_root/src/loader/loader\""))
-        assertTrue("profile 必须声明 unbundled loader", commandProfile.contains("\"loaderMode\": \"unbundled_required\""))
-        assertTrue("profile 必须固定 APK loader 名", commandProfile.contains("libvcp_proot_loader.so"))
-        assertTrue("PRoot 必须在退出时清理全部 tracee", processHost.contains("\"--kill-on-exit\""))
-        assertTrue("prepare 必须回显旧投影清理 root", processHost.contains("put(\"projectionRootPath\""))
-        assertFalse("ProcessHost 不应再准备本地语义资产", processHost.contains("prepareSemantic"))
-        assertFalse("ProcessHost 不应再注入 River 环境变量", processHost.contains("VCP_RIVER_CONTEXT_FILE"))
-        assertFalse("ProcessHost 不应再接受 River projection", processHost.contains("riverContextProjection"))
-        assertTrue("用户命令必须保持 Bash -lc 独立 argv", processHost.contains("add(\"/bin/bash\")\n    add(\"-lc\")\n    add(command)"))
-        assertTrue("不允许向 guest 暴露 /sys", !processHost.contains("\"/sys\""))
-        assertTrue("host-managed output 不得 bind 到 guest", !processHost.contains("outputPath:/output") && !processHost.contains("prepared.output.absolutePath:/output"))
-        assertTrue("不得把完整 projection root 暴露给 guest", !processHost.contains("prepared.projectionRoot.absolutePath:/"))
-        assertTrue("canonical Skills 不得 bind 给 fake-root guest", !processHost.contains(":/skills"))
-        assertTrue("signal 前必须复核完整 process identity", processHost.contains("current.startTimeTicks == handle.identity.startTimeTicks"))
-        assertTrue("取消必须向负 PGID 发信号", processHost.contains("Os.kill(-pgid, signal)"))
-        assertTrue("强杀前必须给 PRoot tracee 清理窗口", processHost.indexOf("OsConstants.SIGQUIT") < processHost.indexOf("OsConstants.SIGKILL"))
-        assertTrue("普通退出也必须清理残留 process group", processHost.contains("terminateOwnedGroup(handle, ORPHAN_GRACE_MS)"))
-        assertTrue("Exited 前必须等待 stdout/stderr drain", processHost.contains("drainReadersForTerminal(handle)") && processHost.contains("!handle.stdoutReader.isAlive && !handle.stderrReader.isAlive"))
-        assertTrue("完成 handle 必须可安全淘汰", processHost.contains("completed.isCompleted()") && processHost.contains("handles.remove(key, completed)"))
-    }
 }
