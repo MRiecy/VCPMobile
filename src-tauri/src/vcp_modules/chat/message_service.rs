@@ -1385,6 +1385,7 @@ async fn decode_valid_render_cache(
     serde_json::to_value(blocks).ok()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn finalize_stream_message<R: tauri::Runtime>(
     app_handle: AppHandle<R>,
     pool: &sqlx::Pool<sqlx::Sqlite>,

@@ -111,7 +111,7 @@ async fn finalize_modified_topics(
     for (key, meta) in &meta_map {
         HashAggregator::bubble_topic_hash_with_meta(
             &mut tx,
-            &key,
+            key,
             &meta.title,
             meta.created_at,
             meta.locked,

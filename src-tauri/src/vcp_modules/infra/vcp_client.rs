@@ -2057,6 +2057,7 @@ fn clean_old_cache_files(cache_dir: &std::path::Path) {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn recover_active_generation<R: Runtime>(
     app: AppHandle<R>,
     active_requests: tauri::State<'_, ActiveRequests>,

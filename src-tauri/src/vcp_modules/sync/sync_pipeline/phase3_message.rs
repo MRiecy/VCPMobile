@@ -400,7 +400,7 @@ mod tests {
         .expect("create fixture");
 
         let key = topic("topic");
-        let states = Phase3Message::get_topic_message_hashes(&pool, &[key.clone()])
+        let states = Phase3Message::get_topic_message_hashes(&pool, std::slice::from_ref(&key))
             .await
             .expect("load message states");
         assert_eq!(

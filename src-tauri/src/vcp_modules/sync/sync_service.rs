@@ -1163,9 +1163,6 @@ async fn run_sync_session(
             false
         }
     };
-    #[cfg(not(target_os = "android"))]
-    let sync_guardian_acquired = true;
-
     let write_queue_task = write_queue.clone();
     let sync_logger_task = sync_logger.clone();
 

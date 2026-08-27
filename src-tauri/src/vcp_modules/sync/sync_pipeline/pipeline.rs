@@ -1,5 +1,6 @@
 use tokio::sync::mpsc;
 
+#[allow(clippy::enum_variant_names)]
 pub enum PipelineCommand {
     StartTopicMetadata,   // Phase 2: Pull missing configs
     StartTopicValidation, // Phase 2.5: Dual-hash check
