@@ -205,14 +205,33 @@ pub async fn delete_topic(
     owner_id: String,
     owner_type: String,
     topic_id: String,
-) -> Result<(), String> {
+) -> Result<Option<Topic>, String> {
     let now = chrono::Utc::now().timestamp_millis();
     let key = TopicKey::new(&owner_type, &owner_id, &topic_id);
-    let deletion = delete_topic_data(&db_state.pool, &key, now)
+    let replacement = Topic {
+        id: if owner_type == "group" {
+            format!("group_topic_{now}")
+        } else {
+            format!("topic_{now}")
+        },
+        name: if owner_type == "group" {
+            "主要群聊".to_string()
+        } else {
+            "主要对话".to_string()
+        },
+        created_at: now,
+        locked: true,
+        unread: false,
+        unread_count: 0,
+        msg_count: 0,
+        owner_id: owner_id.clone(),
+        owner_type: owner_type.clone(),
+    };
+    let deletion = delete_topic_data_inner(&db_state.pool, &key, now, Some(replacement))
         .await?
         .ok_or_else(|| format!("Topic {topic_id} does not exist"))?;
     if !deletion.deleted {
-        return Ok(());
+        return Ok(None);
     }
 
     for message_key in deletion.active_messages {
@@ -232,18 +251,28 @@ pub async fn delete_topic(
         });
     }
 
-    Ok(())
+    Ok(deletion.replacement)
 }
 
 pub(crate) struct TopicDeletionResult {
     pub active_messages: Vec<MessageKey>,
     pub deleted: bool,
+    pub replacement: Option<Topic>,
 }
 
 pub(crate) async fn delete_topic_data(
     pool: &sqlx::SqlitePool,
     key: &TopicKey,
     deleted_at: i64,
+) -> Result<Option<TopicDeletionResult>, String> {
+    delete_topic_data_inner(pool, key, deleted_at, None).await
+}
+
+async fn delete_topic_data_inner(
+    pool: &sqlx::SqlitePool,
+    key: &TopicKey,
+    deleted_at: i64,
+    replacement_if_last: Option<Topic>,
 ) -> Result<Option<TopicDeletionResult>, String> {
     if key.owner_type.is_empty()
         || key.owner_id.is_empty()
@@ -275,8 +304,26 @@ pub(crate) async fn delete_topic_data(
         return Ok(Some(TopicDeletionResult {
             active_messages: Vec::new(),
             deleted: false,
+            replacement: None,
         }));
     }
+
+    let replacement = if let Some(candidate) = replacement_if_last {
+        let live_siblings: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM topics
+             WHERE owner_type = ? AND owner_id = ? AND topic_id <> ?
+               AND deleted_at IS NULL",
+        )
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        (live_siblings == 0).then_some(candidate)
+    } else {
+        None
+    };
 
     let active_ids: Vec<String> = sqlx::query_scalar(
         "SELECT msg_id FROM active_generations
@@ -350,6 +397,30 @@ pub(crate) async fn delete_topic_data(
     .execute(&mut *tx)
     .await
     .map_err(|e| e.to_string())?;
+
+    if let Some(topic) = &replacement {
+        sqlx::query(
+            "INSERT INTO topics (
+                topic_id, owner_id, owner_type, title, created_at, updated_at,
+                msg_count, locked, unread, unread_count
+             ) VALUES (?, ?, ?, ?, ?, ?, 0, 1, 0, 0)",
+        )
+        .bind(&topic.id)
+        .bind(&topic.owner_id)
+        .bind(&topic.owner_type)
+        .bind(&topic.name)
+        .bind(topic.created_at)
+        .bind(topic.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        HashAggregator::bubble_topic_hash(
+            &mut tx,
+            &TopicKey::new(&topic.owner_type, &topic.owner_id, &topic.id),
+        )
+        .await?;
+    }
+
     match key.owner_type.as_str() {
         "agent" => HashAggregator::bubble_agent_hash(&mut tx, &key.owner_id).await?,
         "group" => HashAggregator::bubble_group_hash(&mut tx, &key.owner_id).await?,
@@ -367,6 +438,7 @@ pub(crate) async fn delete_topic_data(
             .map(|msg_id| MessageKey::new(key.clone(), msg_id))
             .collect(),
         deleted: true,
+        replacement,
     }))
 }
 
@@ -1023,5 +1095,81 @@ mod tests {
         .await
         .expect("read repeated state");
         assert_eq!(repeated, changed);
+    }
+
+    #[tokio::test]
+    async fn local_last_topic_delete_replaces_identity_but_sync_delete_stays_exact() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database");
+        sqlx::raw_sql(include_str!("../../../migrations/0100_baseline_v2.sql"))
+            .execute(&pool)
+            .await
+            .expect("create current baseline schema");
+        sqlx::query(
+            "INSERT INTO agents (owner_type, agent_id, name, model, updated_at)
+             VALUES ('agent', 'agent', 'Agent', 'model', 1);
+             INSERT INTO topics (
+                topic_id, owner_type, owner_id, title, created_at, updated_at
+             ) VALUES ('default', 'agent', 'agent', 'Default', 1, 1);",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed owner and last topic");
+
+        let deleted_key = TopicKey::new("agent", "agent", "default");
+        let replacement = Topic {
+            id: "topic_10".to_string(),
+            name: "主要对话".to_string(),
+            created_at: 10,
+            locked: true,
+            unread: false,
+            unread_count: 0,
+            msg_count: 0,
+            owner_id: "agent".to_string(),
+            owner_type: "agent".to_string(),
+        };
+        let local_delete =
+            delete_topic_data_inner(&pool, &deleted_key, 10, Some(replacement.clone()))
+                .await
+                .expect("delete local last topic")
+                .expect("existing topic deletion");
+        let actual_replacement = local_delete.replacement.expect("replacement topic");
+        assert_eq!(actual_replacement.id, replacement.id);
+        assert_eq!(actual_replacement.owner_id, replacement.owner_id);
+        assert_eq!(actual_replacement.owner_type, replacement.owner_type);
+
+        let states: Vec<(String, Option<i64>)> = sqlx::query_as(
+            "SELECT topic_id, deleted_at FROM topics
+             WHERE owner_type = 'agent' AND owner_id = 'agent'
+             ORDER BY topic_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read topic states");
+        assert_eq!(
+            states,
+            vec![
+                ("default".to_string(), Some(10)),
+                ("topic_10".to_string(), None),
+            ]
+        );
+
+        let exact_delete =
+            delete_topic_data(&pool, &TopicKey::new("agent", "agent", "topic_10"), 20)
+                .await
+                .expect("apply exact synchronized deletion")
+                .expect("replacement topic exists");
+        assert!(exact_delete.replacement.is_none());
+        let live_topics: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM topics
+             WHERE owner_type = 'agent' AND owner_id = 'agent' AND deleted_at IS NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count live topics");
+        assert_eq!(live_topics, 0);
     }
 }

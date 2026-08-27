@@ -247,16 +247,20 @@ export const useTopicStore = defineStore("topic", () => {
    */
   const deleteTopic = async (
     ownerId: string,
-    ownerType: string,
+    ownerType: ConversationOwnerType,
     topicId: string,
   ) => {
     try {
       console.log(`[TopicStore] Deleting topic ${topicId}`);
-      // 注意：确保 Rust 端已实现 delete_topic 命令
-      await invoke("delete_topic", { ownerId, ownerType, topicId });
+      const replacement = await invoke<Topic | null>("delete_topic", {
+        ownerId,
+        ownerType,
+        topicId,
+      });
 
       if (isCurrentOwner(ownerId, ownerType)) {
-        topics.value = topics.value.filter((t) => t.id !== topicId);
+        const remaining = topics.value.filter((t) => t.id !== topicId);
+        topics.value = replacement ? [replacement, ...remaining] : remaining;
       }
       if (ownerType === "agent") {
         await enqueueUnreadMutation(() => assistantStore.refreshUnreadCounts());
@@ -275,7 +279,11 @@ export const useTopicStore = defineStore("topic", () => {
         sessionStore.currentSelectedItem?.type === ownerType &&
         sessionStore.currentTopicId === topicId
       ) {
-        sessionStore.reconcileCurrentConversation(topics.value);
+        if (replacement) {
+          await sessionStore.selectTopicById(ownerId, ownerType, replacement.id);
+        } else {
+          sessionStore.reconcileCurrentConversation(topics.value);
+        }
       }
     } catch (e) {
       console.error("[TopicStore] Failed to delete topic:", e);
