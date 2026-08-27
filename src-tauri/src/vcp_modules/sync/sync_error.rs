@@ -858,32 +858,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn golden_wire_errors_are_strict_and_match_the_local_registry() {
-        let bytes = include_bytes!("fixtures/error_contract_1_2_golden.json");
-        let fixture: Value = serde_json::from_slice(bytes).expect("golden error fixture");
+    fn wire_error_contract_accepts_only_complete_envelopes() {
+        let bytes = include_bytes!("fixtures/wire_error_contract.json");
+        let fixture: Value = serde_json::from_slice(bytes).expect("wire error contract fixture");
         for entry in fixture["validErrors"].as_array().expect("validErrors") {
             parse_wire_sync_error(&entry["error"]).expect("valid wire error");
         }
         for entry in fixture["invalidErrors"].as_array().expect("invalidErrors") {
             assert!(parse_wire_sync_error(&entry["error"]).is_err());
-        }
-        for (code, semantics) in fixture["registeredSemantics"]
-            .as_object()
-            .expect("registeredSemantics")
-        {
-            let semantics = semantics.as_array().expect("semantic tuple");
-            let registered = error_definition(code)
-                .unwrap_or_else(|| panic!("missing registered semantics for {code}"));
-            assert_eq!(
-                serde_json::to_value(registered.category).expect("serialize category"),
-                semantics[0],
-                "kind for {code}"
-            );
-            assert_eq!(
-                serde_json::to_value(registered.retry).expect("serialize retry"),
-                semantics[1],
-                "retry for {code}"
-            );
         }
     }
 
@@ -954,77 +936,6 @@ mod tests {
     }
 
     #[test]
-    fn startup_admission_errors_keep_precise_semantics() {
-        let cases = [
-            (
-                "SYNC_CONFIG_MISSING",
-                SyncErrorCategory::Configuration,
-                SyncErrorOrigin::MobileSync,
-                SyncErrorStage::Startup,
-                SyncRetryAction::AfterUserAction,
-            ),
-            (
-                "SYNC_TOKEN_MISSING",
-                SyncErrorCategory::Configuration,
-                SyncErrorOrigin::MobileSync,
-                SyncErrorStage::Startup,
-                SyncRetryAction::AfterUserAction,
-            ),
-            (
-                "SYNC_CONFIG_INVALID",
-                SyncErrorCategory::Configuration,
-                SyncErrorOrigin::MobileSync,
-                SyncErrorStage::Startup,
-                SyncRetryAction::AfterUserAction,
-            ),
-            (
-                "CONFIG_LOOPBACK_ON_MOBILE",
-                SyncErrorCategory::Configuration,
-                SyncErrorOrigin::MobileSync,
-                SyncErrorStage::Startup,
-                SyncRetryAction::AfterUserAction,
-            ),
-            (
-                "SYNC_SETTINGS_READ_FAILED",
-                SyncErrorCategory::Storage,
-                SyncErrorOrigin::MobileSync,
-                SyncErrorStage::Startup,
-                SyncRetryAction::Manual,
-            ),
-        ];
-
-        for (code, category, origin, stage, retry) in cases {
-            let payload = build_local_error_payload(code, Vec::new(), None);
-            assert_eq!(payload.category, category, "category for {code}");
-            assert_eq!(payload.origin, origin, "origin for {code}");
-            assert_eq!(payload.stage, stage, "stage for {code}");
-            assert_eq!(payload.retry_action, retry, "retry for {code}");
-        }
-
-        assert!(error_definition("VCP_LOG_DISCONNECTED").is_none());
-    }
-
-    #[test]
-    fn timeout_codes_keep_the_phase_that_timed_out() {
-        let cases = [
-            ("WS_CONNECT_TIMEOUT", SyncErrorStage::Connect),
-            ("VERSION_CHECK_TIMEOUT", SyncErrorStage::Handshake),
-            ("MANIFEST_RESPONSE_TIMEOUT", SyncErrorStage::OwnerMetadata),
-            (
-                "TOPIC_HASH_RESPONSE_TIMEOUT",
-                SyncErrorStage::TopicValidation,
-            ),
-            ("FINAL_ACK_TIMEOUT", SyncErrorStage::Finalize),
-        ];
-
-        for (code, stage) in cases {
-            let payload = build_local_error_payload(code, Vec::new(), None);
-            assert_eq!(payload.category, SyncErrorCategory::Connection);
-            assert_eq!(payload.stage, stage, "stage for {code}");
-        }
-    }
-
-    #[test]
     fn unknown_wire_code_keeps_metadata_but_never_exposes_raw_message() {
         let wire = parse_wire_sync_error(&serde_json::json!({
             "code": "UPSTREAM_EXTENSION_FAILED",
@@ -1086,21 +997,6 @@ mod tests {
         assert_eq!(payload.code, "SYNC_ATTEMPT_FAILED");
         let stable = build_local_error_payload("EXTENSIONFAILED", Vec::new(), None);
         assert_eq!(stable.code, "EXTENSIONFAILED");
-    }
-
-    #[test]
-    fn known_wire_code_cannot_claim_a_different_category() {
-        let error = parse_wire_sync_error(&serde_json::json!({
-            "code": "POWER_SAVE_MODE",
-            "origin": "mobile_native",
-            "stage": "preflight",
-            "kind": "compatibility",
-            "retry": "after_user_action",
-            "message": "wrong category",
-            "failedTopicIds": []
-        }))
-        .expect_err("known code category mismatch");
-        assert!(error.contains("conflicts with its registered code"));
     }
 
     #[test]

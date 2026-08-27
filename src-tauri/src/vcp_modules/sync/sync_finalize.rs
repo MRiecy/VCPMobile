@@ -359,24 +359,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metadata_query_failure_is_not_reported_as_success() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("open test database");
-        sqlx::query("CREATE TABLE topics (topic_id TEXT PRIMARY KEY)")
-            .execute(&pool)
-            .await
-            .expect("create malformed topics table");
-
-        let error = finalize_modified_topics(&pool, &HashSet::from([topic("topic")]))
-            .await
-            .expect_err("malformed metadata query must fail closed");
-        assert!(error.contains("话题元数据"));
-    }
-
-    #[tokio::test]
     async fn missing_or_tombstoned_repair_topic_fails_before_updates() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)

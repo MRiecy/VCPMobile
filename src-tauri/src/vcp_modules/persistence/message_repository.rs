@@ -1016,12 +1016,14 @@ mod tombstone_tests {
         let message_error =
             MessageRepository::load_upsert_target_state(&mut tx, &live, "deleted-message")
                 .await
-                .expect_err("message tombstone is monotonic");
+                .err()
+                .expect("message tombstone is monotonic");
         assert!(message_error.contains("tombstoned"));
         let topic_error =
             MessageRepository::load_upsert_target_state(&mut tx, &deleted, "new-message")
                 .await
-                .expect_err("topic tombstone blocks child writes");
+                .err()
+                .expect("topic tombstone blocks child writes");
         assert!(topic_error.contains("deleted or missing"));
     }
 }

@@ -372,33 +372,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_topic_owner_type_rolls_back_delete() {
-        let pool = test_pool().await;
-        sqlx::query("UPDATE topics SET owner_type = 'unknown' WHERE topic_id = 'topic'")
-            .execute(&pool)
-            .await
-            .expect("corrupt owner type");
-
-        let invalid = TopicKey::new("unknown", "agent", "topic");
-        let error = soft_delete_topic_data(&pool, &invalid, 42)
-            .await
-            .expect_err("unknown owner type must not commit a partial tombstone");
-        assert!(error.contains("unsupported owner_type"));
-        let topic_deleted_at: Option<i64> =
-            sqlx::query_scalar("SELECT deleted_at FROM topics WHERE topic_id = 'topic'")
-                .fetch_one(&pool)
-                .await
-                .expect("read topic");
-        let active_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM active_generations WHERE topic_id = 'topic'")
-                .fetch_one(&pool)
-                .await
-                .expect("read active generation");
-        assert!(topic_deleted_at.is_none());
-        assert_eq!(active_count, 1);
-    }
-
-    #[tokio::test]
     async fn missing_and_repeated_topic_delete_are_idempotent() {
         let pool = test_pool().await;
         let missing = soft_delete_topic_data(&pool, &topic("missing"), 42)

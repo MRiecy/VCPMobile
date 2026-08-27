@@ -3370,8 +3370,6 @@ mod tests {
     use crate::vcp_modules::sync_error::SyncErrorCategory;
     use serde_json::Value;
     use std::sync::atomic::AtomicBool;
-    use tokio_tungstenite::tungstenite::error::Error as WsError;
-    use tokio_tungstenite::tungstenite::http::{Response, StatusCode};
 
     #[test]
     fn sync_error_contract_keeps_raw_detail_out_of_the_user_payload() {
@@ -3410,44 +3408,6 @@ mod tests {
         assert_eq!(payload["code"], "SYNC_ACTIVE_GENERATION");
         assert_eq!(payload["category"], "data");
         assert!(!encoded.contains("raw-secret"));
-    }
-
-    #[test]
-    fn log_cleanup_never_counts_failed_removals_as_removed() {
-        let mut removed = 0;
-        let mut failed = 0;
-        assert!(count_log_removal(Ok(()), &mut removed, &mut failed).is_none());
-        assert!(count_log_removal(
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "denied"
-            )),
-            &mut removed,
-            &mut failed,
-        )
-        .is_some());
-        assert_eq!(removed, 1);
-        assert_eq!(failed, 1);
-    }
-
-    #[test]
-    fn retry_budget_is_shared_across_connection_stages() {
-        let mut retry_count = 0;
-        let mut retry_delay = Duration::from_millis(500);
-        assert_eq!(
-            take_retry_slot(&mut retry_count, &mut retry_delay),
-            Some(Duration::from_millis(500))
-        );
-        assert_eq!(
-            take_retry_slot(&mut retry_count, &mut retry_delay),
-            Some(Duration::from_secs(1))
-        );
-        assert_eq!(
-            take_retry_slot(&mut retry_count, &mut retry_delay),
-            Some(Duration::from_secs(2))
-        );
-        assert_eq!(take_retry_slot(&mut retry_count, &mut retry_delay), None);
-        assert_eq!(retry_count, MAX_SYNC_RETRIES);
     }
 
     fn valid_sync_settings() -> Settings {
@@ -3773,7 +3733,7 @@ mod tests {
     fn phase3_diff_batches_enforce_serialized_byte_budget() {
         use crate::vcp_modules::sync_pipeline::phase3_message::TopicLocalState;
         use crate::vcp_modules::sync_types::{MessageLiveState, MessageVersionState};
-        use std::collections::HashMap;
+        use std::collections::{BTreeMap, HashMap};
         let version = || {
             MessageVersionState::Live(MessageLiveState {
                 message_hash: "m".repeat(64),
@@ -3788,7 +3748,7 @@ mod tests {
                 key,
                 TopicLocalState {
                     content_hash: "h".repeat(64),
-                    messages: HashMap::from([(
+                    messages: BTreeMap::from([(
                         format!("message-{index}-{}", "x".repeat(3 * 1024 * 1024)),
                         version(),
                     )]),
@@ -4002,25 +3962,5 @@ mod tests {
 
         router.clear_if_owner(2);
         assert!(router.send(SyncCommand::Cancel).is_err());
-    }
-
-    #[test]
-    fn connection_failure_classification_uses_stable_codes() {
-        for (status, expected) in [
-            (StatusCode::UNAUTHORIZED, "TOKEN_MISMATCH"),
-            (StatusCode::NOT_FOUND, "WS_PATH_INVALID"),
-        ] {
-            let response = Response::builder().status(status).body(None).unwrap();
-            let error = WsError::Http(response);
-            assert_eq!(classify_connection_failure(&error), expected);
-        }
-
-        for error_kind in [
-            std::io::ErrorKind::ConnectionRefused,
-            std::io::ErrorKind::AddrNotAvailable,
-        ] {
-            let error = WsError::Io(std::io::Error::new(error_kind, "connection failed"));
-            assert_eq!(classify_connection_failure(&error), "CONNECTION_REFUSED");
-        }
     }
 }

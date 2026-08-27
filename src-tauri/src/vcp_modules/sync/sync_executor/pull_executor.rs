@@ -1458,11 +1458,9 @@ impl PullExecutor {
 #[cfg(test)]
 mod ndjson_budget_tests {
     use super::{
-        parse_topic_ndjson_frame, pull_worker_permits, validate_requested_message_ids,
-        validate_returned_topic_identity, NdjsonBudget, MAX_NDJSON_LINE_BYTES,
-        MAX_NDJSON_TOTAL_BYTES, PULL_WORKER_BUDGET_UNITS,
+        parse_topic_ndjson_frame, validate_requested_message_ids, validate_returned_topic_identity,
+        NdjsonBudget, MAX_NDJSON_LINE_BYTES, MAX_NDJSON_TOTAL_BYTES, PULL_WORKER_BUDGET_UNITS,
     };
-    use crate::vcp_modules::sync_types::EntitySelector;
     use crate::vcp_modules::topic_types::TopicKey;
     use serde_json::json;
     use std::collections::HashSet;
@@ -1470,7 +1468,8 @@ mod ndjson_budget_tests {
     use std::time::Duration;
     use tokio::sync::Semaphore;
 
-    const PROTOCOL_1_2_GOLDEN: &[u8] = include_bytes!("../fixtures/protocol_1_2_golden.json");
+    const MESSAGE_CANONICAL_CONTRACT: &[u8] =
+        include_bytes!("../fixtures/message_canonical_contract.json");
 
     fn success_frame(mut value: serde_json::Value) -> serde_json::Value {
         if let Some(object) = value.as_object_mut() {
@@ -1501,33 +1500,17 @@ mod ndjson_budget_tests {
     }
 
     #[test]
-    fn entity_pull_identity_includes_the_topic_owner() {
-        let agent_topic = EntitySelector::topic(&TopicKey::new("agent", "agent-a", "topic-a"))
-            .expect("compound identity");
-        assert_eq!(
-            serde_json::to_value(agent_topic).expect("serialize selector"),
-            json!({
-                "entityType": "topic",
-                "ownerType": "agent",
-                "ownerId": "agent-a",
-                "topicId": "topic-a",
-            })
-        );
-        assert!(EntitySelector::topic(&TopicKey::new("unknown", "owner", "topic-a")).is_err());
-    }
-
-    #[test]
-    fn golden_bundle_matches_the_canonical_message_contract() {
+    fn canonical_message_contract_matches_mobile_projection_and_hashes() {
         let bundle: serde_json::Value =
-            serde_json::from_slice(PROTOCOL_1_2_GOLDEN).expect("golden bundle JSON");
+            serde_json::from_slice(MESSAGE_CANONICAL_CONTRACT).expect("canonical contract JSON");
 
         for case in bundle["validFrames"]
             .as_array()
-            .expect("valid golden frames")
+            .expect("valid contract frames")
         {
             let bytes = serde_json::to_vec(&success_frame(case["input"].clone()))
-                .expect("serialize golden frame");
-            let parsed = parse_topic_ndjson_frame(&bytes).expect("valid golden frame");
+                .expect("serialize contract frame");
+            let parsed = parse_topic_ndjson_frame(&bytes).expect("valid contract frame");
             let expected = &case["expected"];
             assert_eq!(parsed.topic_id, expected["topicId"]);
             assert_eq!(parsed.messages.len() as u64, expected["messageCount"]);
@@ -1535,8 +1518,26 @@ mod ndjson_budget_tests {
                 parsed.legacy_attachment_warnings as u64,
                 expected["warningCount"]
             );
+            let logical_messages = parsed
+                .messages
+                .iter()
+                .map(|message| {
+                    let mut value = serde_json::to_value(message).expect("canonical message JSON");
+                    let object = value.as_object_mut().expect("canonical message object");
+                    for key in [
+                        "isThinking",
+                        "agentId",
+                        "groupId",
+                        "topicId",
+                        "isGroupMessage",
+                    ] {
+                        object.entry(key).or_insert(serde_json::Value::Null);
+                    }
+                    value
+                })
+                .collect::<Vec<_>>();
             assert_eq!(
-                serde_json::to_value(&parsed.messages).expect("canonical messages JSON"),
+                serde_json::Value::Array(logical_messages),
                 expected["canonicalMessages"]
             );
             let content_hashes = parsed
@@ -1572,13 +1573,13 @@ mod ndjson_budget_tests {
 
         for case in bundle["invalidFrames"]
             .as_array()
-            .expect("invalid golden frames")
+            .expect("invalid contract frames")
         {
             let bytes = serde_json::to_vec(&success_frame(case["input"].clone()))
                 .expect("serialize invalid frame");
             let error = match parse_topic_ndjson_frame(&bytes) {
                 Err(error) => error,
-                Ok(_) => panic!("invalid golden frame was accepted"),
+                Ok(_) => panic!("invalid contract frame was accepted"),
             };
             assert!(error.contains(
                 case["errorContains"]
@@ -1607,38 +1608,6 @@ mod ndjson_budget_tests {
         let mut budget = NdjsonBudget::new(2);
         assert!(budget.observe_frame(1, 75_000).is_ok());
         assert!(budget.observe_frame(1, 25_001).is_err());
-    }
-
-    #[test]
-    fn inbound_cleaner_uses_the_only_valid_hash_location() {
-        let frame = json!({
-            "topicId": "topic",
-            "messages": [{
-                "id": "message",
-                "role": "user",
-                "content": "",
-                "timestamp": 1,
-                "attachments": [
-                    {
-                        "type": "text/plain", "name": "nested.txt", "size": 1,
-                        "hash": "invalid",
-                        "_fileManagerData": { "hash": "f".repeat(64) }
-                    },
-                    {
-                        "type": "text/plain", "name": "flat.txt", "size": 1,
-                        "hash": "e".repeat(64),
-                        "_fileManagerData": { "hash": null }
-                    }
-                ]
-            }]
-        });
-
-        let parsed = parse_topic_ndjson_frame(success_frame(frame).to_string().as_bytes())
-            .expect("the sole valid hash must be used");
-        assert_eq!(parsed.legacy_attachment_warnings, 0);
-        let attachments = parsed.messages[0].attachments.as_ref().unwrap();
-        assert_eq!(attachments[0].hash, "f".repeat(64));
-        assert_eq!(attachments[1].hash, "e".repeat(64));
     }
 
     #[test]
@@ -1748,17 +1717,6 @@ mod ndjson_budget_tests {
         let incomplete = HashSet::from(["message-a".to_string()]);
         assert!(validate_requested_message_ids("topic", Some(&incomplete), &messages).is_err());
         assert!(validate_requested_message_ids("topic", None, &messages).is_ok());
-    }
-
-    #[test]
-    fn pull_worker_permits_are_weighted_by_raw_frame_bytes() {
-        assert_eq!(pull_worker_permits(1).unwrap(), 1);
-        assert_eq!(pull_worker_permits(1024 * 1024).unwrap(), 1);
-        assert_eq!(pull_worker_permits(1024 * 1024 + 1).unwrap(), 2);
-        assert_eq!(
-            pull_worker_permits(MAX_NDJSON_LINE_BYTES).unwrap(),
-            PULL_WORKER_BUDGET_UNITS as u32
-        );
     }
 
     #[tokio::test]

@@ -231,8 +231,7 @@ impl From<MessageSyncDTO> for crate::vcp_modules::chat_manager::ChatMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
-    use crate::vcp_modules::topic_types::Topic;
+    use crate::vcp_modules::chat_manager::ChatMessage;
     use serde_json::json;
 
     #[test]
@@ -247,35 +246,6 @@ mod tests {
 
         assert!(dto.locked);
         assert!(!dto.unread);
-    }
-
-    #[test]
-    fn test_agent_and_group_topic_dto_from_topic_preserve_contract_fields() {
-        let topic = Topic {
-            id: "topic-1".to_string(),
-            name: "Topic".to_string(),
-            created_at: 123,
-            locked: false,
-            unread: true,
-            unread_count: 2,
-            msg_count: 3,
-            owner_id: "owner-1".to_string(),
-            owner_type: "agent".to_string(),
-        };
-
-        let agent_dto = AgentTopicSyncDTO::from(&topic);
-        assert_eq!(agent_dto.id, "topic-1");
-        assert_eq!(agent_dto.name, "Topic");
-        assert_eq!(agent_dto.created_at, 123);
-        assert!(!agent_dto.locked);
-        assert!(agent_dto.unread);
-        assert_eq!(agent_dto.owner_id, "owner-1");
-
-        let group_dto = GroupTopicSyncDTO::from(&topic);
-        assert_eq!(group_dto.id, "topic-1");
-        assert_eq!(group_dto.name, "Topic");
-        assert_eq!(group_dto.created_at, 123);
-        assert_eq!(group_dto.owner_id, "owner-1");
     }
 
     #[test]

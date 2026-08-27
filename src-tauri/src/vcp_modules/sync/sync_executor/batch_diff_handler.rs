@@ -704,85 +704,60 @@ mod tests {
     }
 
     #[test]
-    fn push_topic_failure_rejects_the_batch() {
-        let expected = vec![topic("topic-a")];
-        let error = validate_topic_batch_outcomes(
-            "push",
-            &expected,
-            Ok(vec![TopicBatchOutcome {
-                topic: topic("topic-a"),
-                success: false,
-                error: Some("desktop rejected upload".to_string()),
-            }]),
-        )
-        .expect_err("a false push result must fail phase 3");
-
-        assert!(error.contains("topic-a"));
-        assert!(error.contains("desktop rejected upload"));
-    }
-
-    #[test]
-    fn missing_pull_topic_rejects_the_batch() {
-        let expected = vec![topic("topic-a"), topic("topic-b")];
-        let error = validate_topic_batch_outcomes(
-            "pull",
-            &expected,
-            Ok(vec![TopicBatchOutcome {
-                topic: topic("topic-a"),
-                success: true,
-                error: None,
-            }]),
-        )
-        .expect_err("a missing pull response must fail phase 3");
-
-        assert!(error.contains("topic-b"));
-        assert!(error.contains("missing from batch response"));
-    }
-
-    #[test]
-    fn duplicate_or_unexpected_batch_outcomes_are_rejected() {
-        let expected = vec![topic("topic-a")];
-        let duplicate = validate_topic_batch_outcomes(
-            "push",
-            &expected,
-            Ok(vec![
-                TopicBatchOutcome {
+    fn batch_outcomes_fail_closed_as_one_coverage_matrix() {
+        let success = |topic_id: &str| TopicBatchOutcome {
+            topic: topic(topic_id),
+            success: true,
+            error: None,
+        };
+        let cases = vec![
+            (
+                "reported failure",
+                "push",
+                vec![topic("topic-a")],
+                Ok(vec![TopicBatchOutcome {
                     topic: topic("topic-a"),
-                    success: true,
-                    error: None,
-                },
-                TopicBatchOutcome {
-                    topic: topic("topic-a"),
-                    success: true,
-                    error: None,
-                },
-            ]),
-        )
-        .expect_err("duplicate response topic must fail");
-        assert!(duplicate.contains("duplicate topic"));
+                    success: false,
+                    error: Some("desktop rejected upload".to_string()),
+                }]),
+                vec!["topic-a", "desktop rejected upload"],
+            ),
+            (
+                "missing topic",
+                "pull",
+                vec![topic("topic-a"), topic("topic-b")],
+                Ok(vec![success("topic-a")]),
+                vec!["topic-b", "missing from batch response"],
+            ),
+            (
+                "duplicate topic",
+                "push",
+                vec![topic("topic-a")],
+                Ok(vec![success("topic-a"), success("topic-a")]),
+                vec!["duplicate topic"],
+            ),
+            (
+                "unexpected topic",
+                "push",
+                vec![topic("topic-a")],
+                Ok(vec![success("topic-b")]),
+                vec!["unexpected topic topic-b"],
+            ),
+            (
+                "transport failure",
+                "push",
+                vec![topic("topic-b"), topic("topic-a")],
+                Err("transport closed".to_string()),
+                vec!["topic-a", "topic-b", "transport closed"],
+            ),
+        ];
 
-        let unexpected = validate_topic_batch_outcomes(
-            "push",
-            &expected,
-            Ok(vec![TopicBatchOutcome {
-                topic: topic("topic-b"),
-                success: true,
-                error: None,
-            }]),
-        )
-        .expect_err("unexpected response topic must fail");
-        assert!(unexpected.contains("unexpected topic topic-b"));
-    }
-
-    #[test]
-    fn batch_error_rejects_all_expected_topics() {
-        let expected = vec![topic("topic-b"), topic("topic-a")];
-        let error =
-            validate_topic_batch_outcomes("push", &expected, Err("transport closed".to_string()))
-                .expect_err("a batch-level error must fail phase 3");
-
-        assert!(error.contains("topic-a"));
-        assert!(error.contains("topic-b"));
-        assert!(error.contains("transport closed"));
+        for (name, action, expected, result, fragments) in cases {
+            let error = validate_topic_batch_outcomes(action, &expected, result)
+                .expect_err("matrix case must fail closed");
+            for fragment in fragments {
+                assert!(error.contains(fragment), "{name}: missing {fragment}");
+            }
+        }
     }
 }

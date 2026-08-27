@@ -740,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    fn test_topic_metadata_hash_excludes_owner_id() {
+    fn topic_metadata_hashes_exclude_parent_identity() {
         let topic_a = AgentTopicSyncDTO {
             id: "topic-1".to_string(),
             name: "Topic".to_string(),
@@ -756,10 +756,7 @@ mod tests {
             HashAggregator::compute_agent_topic_metadata_hash(&topic_a),
             HashAggregator::compute_agent_topic_metadata_hash(&topic_b)
         );
-    }
 
-    #[test]
-    fn test_group_topic_metadata_hash_excludes_locked_unread_conceptually() {
         let group_topic = GroupTopicSyncDTO {
             id: "topic-1".to_string(),
             name: "Topic".to_string(),

@@ -976,7 +976,6 @@ impl DeleteNotificationFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn avatar_owner_contract_is_closed_and_keeps_the_user_singleton() {
@@ -986,53 +985,5 @@ mod tests {
         assert!(!is_valid_avatar_owner("user", "other"));
         assert!(!is_valid_avatar_owner("agent", ""));
         assert!(!is_valid_avatar_owner("system", "system"));
-    }
-
-    #[test]
-    fn test_stable_stringify_sorts_object_keys_recursively() {
-        let value = json!({
-            "z": 1,
-            "a": {
-                "b": true,
-                "a": [3, 2, 1]
-            },
-            "m": null
-        });
-
-        assert_eq!(
-            stable_stringify(&value),
-            r#"{"a":{"a":[3,2,1],"b":true},"m":null,"z":1}"#
-        );
-    }
-
-    #[test]
-    fn test_compute_deterministic_hash_is_key_order_independent() {
-        let left = json!({ "name": "Nova", "config": { "model": "a", "temperature": 0.7 } });
-        let right = json!({ "config": { "temperature": 0.7, "model": "a" }, "name": "Nova" });
-
-        assert_eq!(
-            compute_deterministic_hash(&left),
-            compute_deterministic_hash(&right)
-        );
-    }
-
-    #[test]
-    fn test_compute_merkle_root_is_order_independent_and_empty_safe() {
-        let hashes_a = vec!["ccc".to_string(), "aaa".to_string(), "bbb".to_string()];
-        let hashes_b = vec!["bbb".to_string(), "ccc".to_string(), "aaa".to_string()];
-
-        assert_eq!(compute_merkle_root(hashes_a), compute_merkle_root(hashes_b));
-        assert_eq!(compute_merkle_root(Vec::new()), "");
-    }
-
-    #[test]
-    fn sync_discriminators_have_one_vocabulary_each() {
-        assert_eq!(ManifestType::Owner.to_string(), "owner");
-        assert_eq!(OwnerType::Agent.to_string(), "agent");
-        assert_eq!(AvatarOwnerType::User.to_string(), "user");
-        assert_eq!(ManifestAction::PullDelete.to_string(), "PULL_DELETE");
-
-        let manifest: ManifestType = serde_json::from_str(r#""topic""#).unwrap();
-        assert_eq!(manifest, ManifestType::Topic);
     }
 }

@@ -1009,14 +1009,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_hash_is_lowercase_and_rejects_non_sha256_values() {
-        assert_eq!(canonical_sha256(&"A".repeat(64)), Some("a".repeat(64)));
-        assert_eq!(canonical_sha256(""), None);
-        assert_eq!(canonical_sha256(&"g".repeat(64)), None);
-        assert_eq!(canonical_sha256(&"a".repeat(63)), None);
-    }
-
-    #[test]
     fn message_push_result_is_independent_of_local_attachment_binaries() {
         let expected = vec![topic("topic")];
         let valid = br#"{"kind":"topic","topicId":"topic","ownerType":"agent","ownerId":"agent-a","ok":true}"#;

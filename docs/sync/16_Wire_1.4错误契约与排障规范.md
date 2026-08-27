@@ -174,12 +174,12 @@ VCP-CDS internal protocol 3 不是 Mobile Wire 1.4。CDS 的 HTTP 与逐项失�
 
 ## 7. 共享验收证据
 
-双端各自保存字节完全相同的 fixture：
+双端各自保存同名、版本无关的契约样本：
 
-- `error_contract_1_2_golden.json`，SHA-256 `434279b33a86a2206c1e4f47caccb4e72f05b2f9d48e093af95d5ebae6947adb`；
-- `protocol_1_2_golden.json`，SHA-256 `0aae238ea2699b4246cf78ecd4ee044b820a0586d3821224ad59b925e531f6c0`。
+- `wire_error_contract.json`：覆盖完整错误外壳与代表性非法输入；
+- `message_canonical_contract.json`：覆盖消息逻辑投影与指纹。可选字段省略与 `null` 视为同一逻辑状态。
 
-错误 fixture 的 `registeredSemantics` 固定所有跨端 code 的 `kind/retry` 二元组；任一端遗漏 code 或改变其类别、重试策略，契约测试必须立即失败。`origin/stage` 仍由实际捕获边界收窄，不作为 code 的静态属性。
+fixture 只记录真正跨端的结构与语义，不复制各端本地错误码注册表，也不绑定某次 Wire 版本或文件 SHA。仅当对应契约本身变化时才修改样本。
 
 最低验收覆盖：
 
