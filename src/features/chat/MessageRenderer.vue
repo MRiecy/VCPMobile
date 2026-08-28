@@ -94,6 +94,7 @@ const useAstForCurrentTail = computed(() => {
   );
 });
 let lastAppliedFrameSeq = 0;
+let localTailStreamId = -1;
 let localTailEpoch = -1;
 let localTailRevision = -1;
 let astFailureCount = 0;
@@ -108,6 +109,7 @@ function getTailSnapshotNodes() {
 
 function rebuildTailSnapshot(sandbox: HTMLElement): void {
   rebuildSnapshot(getTailSnapshotNodes(), props.message.id, sandbox);
+  localTailStreamId = props.message.tailFrame?.streamId ?? localTailStreamId;
   localTailEpoch = props.message.tailFrame?.epoch ?? localTailEpoch;
   localTailRevision = props.message.tailFrame?.revision ?? localTailRevision;
 }
@@ -880,7 +882,7 @@ watch(
   ([frame, _snapshot, sandbox]) => {
     const debugEnabled = import.meta.env.DEV && isAstDebugEnabled();
     if (debugEnabled) {
-      astDebugLog(`[AST Diff Watch] Msg ${props.message.id} frame=${frame ? frame.frameSeq : 'none'}, mutations=${frame?.mutations?.length || 0}, sandbox=${sandbox ? 'Ready' : 'Null'}, epoch=${frame?.epoch}, revision=${frame?.revision}`);
+      astDebugLog(`[AST Diff Watch] Msg ${props.message.id} stream=${frame?.streamId ?? 'none'}, frame=${frame ? frame.frameSeq : 'none'}, mutations=${frame?.mutations?.length || 0}, sandbox=${sandbox ? 'Ready' : 'Null'}, epoch=${frame?.epoch}, revision=${frame?.revision}`);
     }
 
     if (!useAstForCurrentTail.value || !sandbox) {
@@ -896,6 +898,7 @@ watch(
       cleanupRegistry(props.message.id);
       sandbox.innerHTML = '';
       lastAppliedFrameSeq = 0;
+      localTailStreamId = -1;
       localTailEpoch = -1;
       localTailRevision = -1;
       lastSandbox = sandbox;
@@ -914,24 +917,29 @@ watch(
       return;
     }
 
-    if (frame.frameSeq <= lastAppliedFrameSeq) {
-      return;
-    }
-
+    const incomingStreamId = frame.streamId ?? 0;
     const incomingEpoch = frame.epoch ?? 0;
     const incomingRevision = frame.revision ?? -1;
+    const streamChanged = incomingStreamId !== localTailStreamId;
     const epochChanged = incomingEpoch !== localTailEpoch;
-    const explicitReset = frame.reset === true || epochChanged;
+    const explicitReset = frame.reset === true || streamChanged || epochChanged;
+
+    // frameSeq 只在同一 stream/epoch 内有可比性；暖接续的新流必须先接管身份，
+    // 不能被上一条流遗留的高序号提前拦截。
+    if (!explicitReset && frame.frameSeq <= lastAppliedFrameSeq) {
+      return;
+    }
 
     if (explicitReset) {
       sandbox.innerHTML = '';
       cleanupRegistry(props.message.id);
+      localTailStreamId = incomingStreamId;
       localTailEpoch = incomingEpoch;
       localTailRevision = incomingRevision;
       lastAppliedFrameSeq = frame.frameSeq;
       astFailureCount = 0;
 
-      const snapshot = frame.snapshot || getTailSnapshotNodes();
+      const snapshot = frame.snapshot ?? props.message.tailBlock?.nodes ?? [];
       if (snapshot.length > 0) {
         rebuildSnapshot(snapshot, props.message.id, sandbox);
         return;
@@ -941,6 +949,7 @@ watch(
     const mutations = frame.mutations || [];
     if (mutations.length === 0) {
       lastAppliedFrameSeq = frame.frameSeq;
+      localTailStreamId = incomingStreamId;
       localTailRevision = incomingRevision;
       return;
     }
@@ -951,6 +960,7 @@ watch(
     const result = applyFrame(mutations, props.message.id, sandbox);
     if (result.ok) {
       lastAppliedFrameSeq = frame.frameSeq;
+      localTailStreamId = incomingStreamId;
       localTailRevision = incomingRevision;
       astFailureCount = 0;
     } else {

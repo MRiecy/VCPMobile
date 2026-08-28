@@ -92,41 +92,88 @@ export const useChatStreamStore = defineStore("chatStream", () => {
 
   const MAX_PENDING_TAIL_MUTATIONS = 512;
 
+  interface TailFrameCursor {
+    streamId: number;
+    epoch: number;
+    frameSeq: number;
+  }
+
+  interface TailFrameMergeResult {
+    accepted: boolean;
+    frame?: TailFrame;
+    cursor?: TailFrameCursor;
+  }
+
   function mergeTailFrame(
     existing: TailFrame | null,
+    cursor: TailFrameCursor | null,
     incoming: TailFrame,
     latestSnapshot?: MarkdownNode[],
     forceSnapshot = false,
-  ): TailFrame {
+  ): TailFrameMergeResult {
     const incomingMutations = incoming.mutations || [];
+    const incomingCursor: TailFrameCursor = {
+      streamId: incoming.streamId,
+      epoch: incoming.epoch,
+      frameSeq: incoming.frameSeq,
+    };
     const snapshotFrame = (): TailFrame => ({
       ...incoming,
       reset: true,
-      snapshot: latestSnapshot
-        ? [...latestSnapshot]
-        : incoming.snapshot
-          ? [...incoming.snapshot]
-          : undefined,
+      snapshot: [...(latestSnapshot ?? incoming.snapshot ?? [])],
       mutations: [],
     });
 
+    let requiresSnapshot = forceSnapshot || incoming.reset === true;
+    if (cursor) {
+      if (incoming.streamId < cursor.streamId) {
+        return { accepted: false };
+      }
+      if (incoming.streamId > cursor.streamId) {
+        requiresSnapshot = true;
+      } else if (incoming.epoch < cursor.epoch) {
+        return { accepted: false };
+      } else if (incoming.epoch > cursor.epoch) {
+        requiresSnapshot = true;
+      } else if (incoming.frameSeq <= cursor.frameSeq) {
+        return { accepted: false };
+      } else if (incoming.frameSeq > cursor.frameSeq + 1) {
+        requiresSnapshot = true;
+      }
+    } else if (incoming.frameSeq > 1) {
+      // 首次观察到的帧若不是 seq=1，说明早期帧未进入当前接收器，必须以完整快照接管。
+      requiresSnapshot = true;
+    }
+
     // 后台 WebView 的 rAF 可能长期停摆。此时只保留最新完整 AST 基线，
     // 不累计期间的每一条 diff；回到前台后单帧重建即可追上当前状态。
-    if (forceSnapshot) {
-      return snapshotFrame();
+    if (requiresSnapshot) {
+      return {
+        accepted: true,
+        frame: snapshotFrame(),
+        cursor: incomingCursor,
+      };
     }
 
     // 一个尚未刷入 DOM 的 reset 后续再收到增量时，直接把基线推进到最新完整节点。
     // 这样合并结果始终自洽，不需要保存 reset 之后的全部中间 diff。
     if (existing?.reset) {
-      return snapshotFrame();
+      return {
+        accepted: true,
+        frame: snapshotFrame(),
+        cursor: incomingCursor,
+      };
     }
 
-    if (!existing || incoming.reset || incoming.epoch !== existing.epoch) {
+    if (!existing) {
       return {
-        ...incoming,
-        mutations: incoming.reset ? [] : [...incomingMutations],
-        snapshot: incoming.snapshot ? [...incoming.snapshot] : undefined,
+        accepted: true,
+        frame: {
+          ...incoming,
+          mutations: [...incomingMutations],
+          snapshot: incoming.snapshot ? [...incoming.snapshot] : undefined,
+        },
+        cursor: incomingCursor,
       };
     }
 
@@ -135,14 +182,22 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       ...incomingMutations,
     ];
     if (mutations.length > MAX_PENDING_TAIL_MUTATIONS) {
-      return snapshotFrame();
+      return {
+        accepted: true,
+        frame: snapshotFrame(),
+        cursor: incomingCursor,
+      };
     }
 
     return {
-      ...incoming,
-      reset: existing.reset || incoming.reset,
-      snapshot: incoming.snapshot || existing.snapshot,
-      mutations,
+      accepted: true,
+      frame: {
+        ...incoming,
+        reset: false,
+        snapshot: incoming.snapshot || existing.snapshot,
+        mutations,
+      },
+      cursor: incomingCursor,
     };
   }
 
@@ -194,6 +249,8 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       tailBlock: StreamBlock | null;
       tailFrame: TailFrame | null;
       tailSnapshot: MarkdownNode[] | null;
+      streamId: number | null;
+      tailCursor: TailFrameCursor | null;
       animationFrameId: number | null;
       lastRenderTime: number;
     }
@@ -554,6 +611,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           recordStreamTrace({
             messageId: actualMessageId,
             auroraPayload: {
+              streamId: aurora.streamId,
               stableChanged: aurora.stableChanged,
               stableBlocksCount: aurora.stableBlocks?.length || 0,
               stableBlocksHashes:
@@ -563,6 +621,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
               tailBlockType: aurora.tailBlock?.type || null,
               tailFrame: aurora.tailFrame
                 ? {
+                    streamId: aurora.tailFrame.streamId,
                     epoch: aurora.tailFrame.epoch,
                     revision: aurora.tailFrame.revision,
                     frameSeq: aurora.tailFrame.frameSeq,
@@ -592,13 +651,63 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             tailBlock: null,
             tailFrame: null,
             tailSnapshot: null,
+            streamId: null,
+            tailCursor: null,
             animationFrameId: null,
             lastRenderTime: 0,
           };
           rAFPendingUpdates.set(messageKey, update);
         }
 
-        // 2. 覆盖写入暂存数据（稀疏合并）
+        // 2. 先认领 Aurora 流身份与帧序列，再合并同一事件的 chunk/blocks/tail。
+        // 重复或迟到事件必须整体丢弃，否则即使忽略 AST frame，chunk 仍会被重复追加。
+        const eventStreamId = aurora.streamId ?? aurora.tailFrame?.streamId;
+        let streamChanged = false;
+        if (eventStreamId !== undefined) {
+          if (!Number.isSafeInteger(eventStreamId) || eventStreamId <= 0) return;
+          if (
+            aurora.tailFrame &&
+            aurora.tailFrame.streamId !== eventStreamId
+          ) return;
+          if (update.streamId !== null && eventStreamId < update.streamId) return;
+          if (update.streamId === null || eventStreamId > update.streamId) {
+            streamChanged = update.streamId !== null;
+            update.content = null;
+            update.blocks = null;
+            update.tailContent = null;
+            update.tailBlock = null;
+            update.tailFrame = null;
+            update.tailSnapshot = null;
+            update.streamId = eventStreamId;
+            update.tailCursor = null;
+          }
+        }
+
+        let mergedTailFrame: TailFrame | null = null;
+        if (aurora.tailFrame) {
+          if (eventStreamId === undefined) return;
+          if (import.meta.env.DEV && isStreamDebugEnabled()) {
+            streamDebugLog(
+              `[chatStreamStore] Received tailFrame stream=${aurora.tailFrame.streamId} seq=${aurora.tailFrame.frameSeq} mutations=${aurora.tailFrame.mutations?.length || 0} for ${actualMessageId}`,
+            );
+          }
+          const latestSnapshot =
+            aurora.tailFrame.snapshot ??
+            aurora.tailSnapshot ??
+            aurora.tailBlock?.nodes;
+          const merged = mergeTailFrame(
+            update.tailFrame,
+            update.tailCursor,
+            aurora.tailFrame,
+            latestSnapshot,
+            streamChanged || (typeof document !== "undefined" && document.hidden),
+          );
+          if (!merged.accepted || !merged.frame || !merged.cursor) return;
+          mergedTailFrame = merged.frame;
+          update.tailCursor = merged.cursor;
+        }
+
+        // 3. 覆盖写入已通过序列校验的稀疏数据。
         if (typeof aurora.content === "string") {
           update.content = aurora.content;
         } else if (aurora.chunk) {
@@ -609,27 +718,13 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         if (aurora.stableChanged && aurora.stableBlocks) {
           update.blocks = aurora.stableBlocks;
         }
-        if (aurora.tailFrame) {
-          if (import.meta.env.DEV && isStreamDebugEnabled()) {
-            streamDebugLog(
-              `[chatStreamStore] Received tailFrame seq=${aurora.tailFrame.frameSeq} mutations=${aurora.tailFrame.mutations?.length || 0} for ${actualMessageId}`,
-            );
-          }
-          const latestSnapshot =
-            aurora.tailFrame.snapshot ||
-            aurora.tailSnapshot ||
-            aurora.tailBlock?.nodes;
-          update.tailFrame = mergeTailFrame(
-            update.tailFrame,
-            aurora.tailFrame,
-            latestSnapshot,
-            typeof document !== "undefined" && document.hidden,
-          );
-          if (aurora.tailFrame.snapshot) {
-            update.tailSnapshot = aurora.tailFrame.snapshot;
+        if (mergedTailFrame) {
+          update.tailFrame = mergedTailFrame;
+          if (mergedTailFrame.snapshot !== undefined) {
+            update.tailSnapshot = mergedTailFrame.snapshot;
           }
         }
-        if (aurora.tailSnapshot) {
+        if (aurora.tailSnapshot !== undefined) {
           update.tailSnapshot = aurora.tailSnapshot;
         }
         if (aurora.tailChanged) {
@@ -637,7 +732,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           update.tailBlock = aurora.tailBlock || null;
         }
 
-        // 3. 申请硬件级 rAF 渲染调度（合并原子提交）
+        // 4. 申请硬件级 rAF 渲染调度（合并原子提交）
         scheduleRAFUpdate(messageKey);
       }
     } else if (type === "end" || type === "error") {

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::vcp_modules::chat::ast_diff::{diff_ast, AstMutation};
 use crate::vcp_modules::pre_renderer::markdown_ast::MarkdownNode;
@@ -15,9 +16,14 @@ use crate::vcp_modules::stream_block_parser::{StreamBlock, StreamBlockParser};
 ///   仅在 tail 超过 64KB 这种极端体量时才降级为纯文本，避免单帧 JSON 过大拖垮 webview。
 const MAX_SPECULATIVE_TAIL_AST_BYTES: usize = 65536;
 
+/// 单进程内单调递增的 Aurora 流身份。一个 `AuroraBuffer` 对应一条独立序列域；
+/// 暖接续会创建新 buffer，因此不能继续沿用上一条流的 frameSeq 比较基线。
+static NEXT_AURORA_STREAM_ID: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Debug, Serialize, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TailFrame {
+    pub stream_id: u64,
     pub epoch: u64,
     pub revision: u64,
     pub frame_seq: u64,
@@ -34,6 +40,9 @@ pub struct TailFrame {
 #[derive(Debug, Serialize, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuroraUpdate {
+    /// 整条 Aurora 更新所属的流身份；非流式单次响应没有该字段。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_id: Option<u64>,
     /// 流式增量块：已确认闭合的语义块（仅 stable_changed 时发送）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stable_blocks: Option<Vec<StreamBlock>>,
@@ -67,6 +76,7 @@ fn is_false(value: &bool) -> bool {
 /// Aurora 语义沉淀缓冲区
 /// 职责：用轻量块解析器识别已闭合/未闭合块，前端增量接收
 pub struct AuroraBuffer {
+    pub stream_id: u64,
     pub full_text: String,
     pub stable_blocks: Vec<StreamBlock>,
     pub tail_content: String,
@@ -89,6 +99,7 @@ pub struct AuroraBuffer {
 impl AuroraBuffer {
     pub fn new() -> Self {
         Self {
+            stream_id: NEXT_AURORA_STREAM_ID.fetch_add(1, Ordering::Relaxed),
             full_text: String::new(),
             stable_blocks: Vec::new(),
             tail_content: String::new(),
@@ -135,6 +146,7 @@ impl AuroraBuffer {
 
         self.tail_frame_seq = self.tail_frame_seq.saturating_add(1);
         Some(TailFrame {
+            stream_id: self.stream_id,
             epoch: self.tail_epoch,
             revision: self.tail_revision,
             frame_seq: self.tail_frame_seq,
@@ -142,6 +154,25 @@ impl AuroraBuffer {
             snapshot,
             mutations: if reset { Vec::new() } else { mutations },
         })
+    }
+
+    /// 暖接续的权威数据基线：完整覆盖 content/stable/tail，但不携带旧 buffer 的 AST frame。
+    /// 后续首个真实 frame 继续使用本 buffer 的 streamId，前端据此接管新的序列域。
+    pub fn take_recovery_baseline(&mut self) -> AuroraUpdate {
+        self.pushed_len = self.full_text.len();
+        let _ = self.take_tail_frame();
+        AuroraUpdate {
+            stream_id: Some(self.stream_id),
+            stable_blocks: Some(self.stable_blocks.clone()),
+            stable_changed: true,
+            tail_block: self.tail_block.clone(),
+            tail: Some(self.tail_content.clone()),
+            tail_changed: true,
+            tail_frame: None,
+            tail_snapshot: None,
+            content: Some(self.full_text.clone()),
+            chunk: None,
+        }
     }
 
     /// 运行块解析器，识别已闭合块和未闭合尾部
@@ -324,5 +355,51 @@ mod tests {
         } else {
             panic!("expected markdown tail block");
         }
+    }
+
+    #[test]
+    fn tail_frame_sequence_is_namespaced_by_buffer_stream_id() {
+        let mut first = AuroraBuffer::new();
+        first.append_chunk("a");
+        first.process_queue();
+        let first_frame = first.take_tail_frame().expect("first tail frame");
+        assert_eq!(first_frame.stream_id, first.stream_id);
+        assert_eq!(first_frame.frame_seq, 1);
+        let wire = serde_json::to_value(&first_frame).expect("serialize tail frame");
+        assert_eq!(wire["streamId"], first.stream_id);
+
+        first.append_chunk("b");
+        first.process_queue();
+        let second_frame = first.take_tail_frame().expect("second tail frame");
+        assert_eq!(second_frame.stream_id, first_frame.stream_id);
+        assert_eq!(second_frame.frame_seq, 2);
+
+        let second = AuroraBuffer::new();
+        assert_ne!(second.stream_id, first.stream_id);
+    }
+
+    #[test]
+    fn recovery_baseline_covers_full_content_without_replaying_it_as_a_chunk() {
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk("authoritative");
+        buffer.process_queue();
+
+        let baseline = buffer.take_recovery_baseline();
+        assert_eq!(baseline.stream_id, Some(buffer.stream_id));
+        assert_eq!(baseline.content.as_deref(), Some("authoritative"));
+        assert_eq!(baseline.tail.as_deref(), Some("authoritative"));
+        assert!(baseline.stable_changed);
+        assert!(baseline.tail_changed);
+        assert!(baseline.tail_block.is_some());
+        assert!(baseline.tail_frame.is_none());
+        assert!(baseline.chunk.is_none());
+        assert!(buffer.take_chunk().is_none());
+
+        buffer.append_chunk("!");
+        buffer.process_queue();
+        let next = buffer.take_tail_frame().expect("post-baseline tail frame");
+        assert_eq!(next.stream_id, buffer.stream_id);
+        assert_eq!(next.frame_seq, 2);
+        assert_eq!(buffer.take_chunk().as_deref(), Some("!"));
     }
 }

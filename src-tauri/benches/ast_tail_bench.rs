@@ -70,6 +70,7 @@ fn bench_single_frame_pipeline(c: &mut Criterion) {
                 let prev_ast = parse_markdown_to_ast_streaming(&prev_fenced);
                 let mutations = diff_ast(&prev_ast, &parsed, "t");
                 let frame = TailFrame {
+                    stream_id: 1,
                     epoch: 1,
                     revision: 1,
                     frame_seq: 1,
@@ -136,6 +137,7 @@ fn bench_cumulative_stream(c: &mut Criterion) {
                     let new_ast = parse_markdown_to_ast_streaming(&fenced);
                     let mutations = diff_ast(&prev_ast, &new_ast, "t");
                     let frame = TailFrame {
+                        stream_id: 1,
                         epoch: 1,
                         revision: 1,
                         frame_seq: 1,

@@ -1107,6 +1107,7 @@ async fn handle_streaming_request<R: Runtime>(
         let tail_frame = buffer.take_tail_frame();
         let tail_snapshot = tail_frame.as_ref().and_then(|frame| frame.snapshot.clone());
         let update = AuroraUpdate {
+            stream_id: Some(buffer.stream_id),
             stable_blocks: if stable_changed {
                 Some(buffer.stable_blocks.clone())
             } else {
@@ -1198,9 +1199,15 @@ async fn handle_streaming_request<R: Runtime>(
                 if let Some(ref content) = initial_content {
                     aurora_buffer.append_chunk(content);
                     let _ = aurora_buffer.process_queue();
-                    aurora_buffer.pushed_len = content.len();
-                    let _ = aurora_buffer.take_chunk();
-                    let _ = aurora_buffer.take_tail_frame();
+
+                    // 暖接续先用 helper 权威全文覆盖 content/stable/tail 数据，但不立即重建 DOM。
+                    // 首个真实新 frame 会携带新的 streamId，由前端以当前 tailBlock.nodes 原子接管。
+                    let baseline = aurora_buffer.take_recovery_baseline();
+                    send_stream_event(StreamEvent::aurora(
+                        message_id_inner.clone(),
+                        baseline,
+                        context_inner.clone(),
+                    ));
                 }
                 if is_resume {
                     state = State::Resuming;
@@ -1734,6 +1741,7 @@ async fn handle_non_streaming_request(
 
     // 发送单次 aurora 事件以将文本呈现在 UI 中
     let update = AuroraUpdate {
+        stream_id: None,
         stable_blocks: None,
         stable_changed: false,
         tail_block: None,

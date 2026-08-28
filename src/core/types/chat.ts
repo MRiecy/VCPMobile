@@ -229,6 +229,7 @@ export type AstMutation =
   | { op: "remove"; id: string };
 
 export interface TailFrame {
+  streamId: number;
   epoch: number;
   revision: number;
   frameSeq: number;
@@ -317,6 +318,7 @@ export type StreamBlock =
  * Aurora 语义沉淀更新，由 Rust 流式管道推送
  */
 export interface AuroraUpdate {
+  streamId?: number;
   stableBlocks?: StreamBlock[];
   stableChanged?: boolean;
   tailBlock?: StreamBlock;
