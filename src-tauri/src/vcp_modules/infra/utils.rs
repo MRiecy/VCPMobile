@@ -54,19 +54,12 @@ pub fn now_millis() -> i64 {
         .as_millis() as i64
 }
 
-/// 计算多个字节切片（不连续数据段）的标准 SHA-256 十六进制摘要字串（统一小写输出）
-pub fn calculate_sha256_slices(slices: &[&[u8]]) -> String {
-    let mut hasher = Sha256::new();
-    for slice in slices {
-        hasher.update(slice);
-    }
-    finalize_sha256_hex(hasher)
-}
-
 /// 计算单字节切片的标准 SHA-256 十六进制摘要字串（统一小写输出）
 #[inline]
 pub fn calculate_sha256(bytes: &[u8]) -> String {
-    calculate_sha256_slices(&[bytes])
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    finalize_sha256_hex(hasher)
 }
 
 /// 将已完成输入的 SHA-256 状态编码为固定 64 位小写十六进制字串。
@@ -144,11 +137,6 @@ mod tests {
             calculate_sha256(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-        assert_eq!(
-            calculate_sha256_slices(&[b"a", b"b", b"c"]),
-            calculate_sha256(b"abc")
-        );
-
         let mut hasher = Sha256::new();
         hasher.update(b"abc");
         assert_eq!(finalize_sha256_hex(hasher), calculate_sha256(b"abc"));

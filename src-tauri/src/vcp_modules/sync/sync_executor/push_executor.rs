@@ -14,6 +14,7 @@ use crate::vcp_modules::sync_types::{
 use crate::vcp_modules::topic_types::TopicKey;
 use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
+use sha2::{Digest, Sha256};
 use sqlx::{Row, Sqlite, Transaction};
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -27,6 +28,7 @@ const MAX_SYNC_MESSAGES: usize = 100_000;
 const MAX_MESSAGES_PER_TOPIC: usize = 10_000;
 const MESSAGE_PAGE_SIZE: usize = 100;
 const MAX_CONTROL_RESPONSE_BYTES: usize = 1024 * 1024;
+const OWNER_PUSH_IDEMPOTENCY_DOMAIN: &[u8] = b"VCPMobileSync.OwnerPush.Idempotency.v1";
 
 async fn read_response_limited(
     response: reqwest::Response,
@@ -751,6 +753,43 @@ async fn serialize_topic_messages(
 
 pub struct PushExecutor;
 
+async fn load_owner_push_version(
+    pool: &sqlx::SqlitePool,
+    owner_type: OwnerType,
+    owner_id: &str,
+    expected_config_hash: &str,
+) -> Result<i64, String> {
+    let query = match owner_type {
+        OwnerType::Agent => {
+            "SELECT config_hash, updated_at FROM agents
+             WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL"
+        }
+        OwnerType::Group => {
+            "SELECT config_hash, updated_at FROM groups
+             WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL"
+        }
+    };
+    let (stored_config_hash, updated_at): (String, i64) = sqlx::query_as(query)
+        .bind(owner_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| {
+            format!("Owner push version query failed for {owner_type}/{owner_id}: {error}")
+        })?
+        .ok_or_else(|| format!("Owner {owner_type}/{owner_id} is unavailable for push"))?;
+    if stored_config_hash != expected_config_hash {
+        return Err(format!(
+            "Owner {owner_type}/{owner_id} changed while preparing its push snapshot"
+        ));
+    }
+    if updated_at < 0 {
+        return Err(format!(
+            "Owner {owner_type}/{owner_id} has an invalid negative update version"
+        ));
+    }
+    Ok(updated_at)
+}
+
 impl PushExecutor {
     pub async fn push_agent<R: Runtime>(
         app: &AppHandle<R>,
@@ -763,8 +802,16 @@ impl PushExecutor {
             agent_service::read_agent_config_internal(app, &app.state(), agent_id, None).await?;
         let dto = AgentSyncDTO::from(&config);
         let config_hash = HashAggregator::compute_agent_config_hash(&dto);
+        let db = app.state::<DbState>();
+        let config_updated_at =
+            load_owner_push_version(&db.pool, OwnerType::Agent, agent_id, &config_hash).await?;
 
-        let idempotency_key = generate_idempotency_key("push", "agent", agent_id, &config_hash);
+        let idempotency_key = generate_owner_push_idempotency_key(
+            OwnerType::Agent,
+            agent_id,
+            &config_hash,
+            config_updated_at,
+        );
         send_entity_items(
             client,
             http_url,
@@ -791,8 +838,16 @@ impl PushExecutor {
                 .await?;
         let dto = GroupSyncDTO::from(&config);
         let config_hash = HashAggregator::compute_group_config_hash(&dto);
+        let db = app.state::<DbState>();
+        let config_updated_at =
+            load_owner_push_version(&db.pool, OwnerType::Group, group_id, &config_hash).await?;
 
-        let idempotency_key = generate_idempotency_key("push", "group", group_id, &config_hash);
+        let idempotency_key = generate_owner_push_idempotency_key(
+            OwnerType::Group,
+            group_id,
+            &config_hash,
+            config_updated_at,
+        );
         send_entity_items(
             client,
             http_url,
@@ -1064,21 +1119,26 @@ impl PushExecutor {
     }
 }
 
-fn generate_idempotency_key(
-    action: &str,
-    entity_type: &str,
-    id: &str,
+fn generate_owner_push_idempotency_key(
+    owner_type: OwnerType,
+    owner_id: &str,
     config_hash: &str,
+    config_updated_at: i64,
 ) -> String {
-    let now = chrono::Utc::now().timestamp() / 60;
-    let now_str = now.to_string();
-    crate::vcp_modules::infra::utils::calculate_sha256_slices(&[
-        action.as_bytes(),
-        entity_type.as_bytes(),
-        id.as_bytes(),
+    let owner_type = owner_type.as_str();
+    let version = config_updated_at.to_be_bytes();
+    let mut hasher = Sha256::new();
+    hasher.update(OWNER_PUSH_IDEMPOTENCY_DOMAIN);
+    for field in [
+        owner_type.as_bytes(),
+        owner_id.as_bytes(),
         config_hash.as_bytes(),
-        now_str.as_bytes(),
-    ])
+        version.as_slice(),
+    ] {
+        hasher.update((field.len() as u64).to_be_bytes());
+        hasher.update(field);
+    }
+    crate::vcp_modules::infra::utils::finalize_sha256_hex(hasher)
 }
 
 #[cfg(test)]
@@ -1087,6 +1147,106 @@ mod tests {
 
     fn topic(topic_id: &str) -> TopicKey {
         TopicKey::new("agent", "agent-a", topic_id)
+    }
+
+    #[test]
+    fn owner_push_idempotency_key_has_stable_framed_contract() {
+        let config_hash = "0123456789abcdef".repeat(4);
+        let key = generate_owner_push_idempotency_key(
+            OwnerType::Agent,
+            "owner\0雪😀",
+            &config_hash,
+            1_725_000_123_456,
+        );
+
+        assert_eq!(
+            key,
+            "5e9b7ce802ae02e30bd28e7e745b82a895581eb9afdd7b1858f67dd87db0e7d7"
+        );
+        assert_eq!(key.len(), 64);
+        assert!(key
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
+        assert_eq!(
+            key,
+            generate_owner_push_idempotency_key(
+                OwnerType::Agent,
+                "owner\0雪😀",
+                &config_hash,
+                1_725_000_123_456,
+            )
+        );
+    }
+
+    #[test]
+    fn owner_push_idempotency_key_binds_identity_content_and_version() {
+        let config_hash = "a".repeat(64);
+        let baseline =
+            generate_owner_push_idempotency_key(OwnerType::Agent, "owner-a", &config_hash, 100);
+
+        assert_ne!(
+            baseline,
+            generate_owner_push_idempotency_key(OwnerType::Group, "owner-a", &config_hash, 100,)
+        );
+        assert_ne!(
+            baseline,
+            generate_owner_push_idempotency_key(OwnerType::Agent, "owner-b", &config_hash, 100,)
+        );
+        assert_ne!(
+            baseline,
+            generate_owner_push_idempotency_key(OwnerType::Agent, "owner-a", &"b".repeat(64), 100,)
+        );
+        assert_ne!(
+            baseline,
+            generate_owner_push_idempotency_key(OwnerType::Agent, "owner-a", &config_hash, 101,)
+        );
+        assert_ne!(
+            generate_owner_push_idempotency_key(OwnerType::Agent, "a", "bc", 100),
+            generate_owner_push_idempotency_key(OwnerType::Agent, "ab", "c", 100)
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_push_version_requires_the_same_live_config_snapshot() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open database");
+        sqlx::query(
+            "CREATE TABLE agents (
+                owner_type TEXT NOT NULL, agent_id TEXT NOT NULL, config_hash TEXT NOT NULL,
+                updated_at BIGINT NOT NULL, deleted_at BIGINT
+             );
+             CREATE TABLE groups (
+                owner_type TEXT NOT NULL, group_id TEXT NOT NULL, config_hash TEXT NOT NULL,
+                updated_at BIGINT NOT NULL, deleted_at BIGINT
+             );
+             INSERT INTO agents VALUES ('agent', 'agent-a', 'agent-hash', 101, NULL);
+             INSERT INTO groups VALUES ('group', 'group-a', 'group-hash', 202, NULL);",
+        )
+        .execute(&pool)
+        .await
+        .expect("create owner fixtures");
+
+        assert_eq!(
+            load_owner_push_version(&pool, OwnerType::Agent, "agent-a", "agent-hash")
+                .await
+                .expect("matching agent snapshot"),
+            101
+        );
+        assert_eq!(
+            load_owner_push_version(&pool, OwnerType::Group, "group-a", "group-hash")
+                .await
+                .expect("matching group snapshot"),
+            202
+        );
+        assert!(
+            load_owner_push_version(&pool, OwnerType::Agent, "agent-a", "stale-hash")
+                .await
+                .expect_err("stale snapshot must fail")
+                .contains("changed while preparing")
+        );
     }
 
     #[test]
