@@ -78,15 +78,17 @@ function astDebugLog(...args: unknown[]): void {
 // === AST Diff Feature Flags & Refs ===
 const tailSandboxRef = ref<HTMLElement | null>(null);
 const enableAstDiff = ref(true); // Feature Flag, 默认开启
+const isPlainTailFallback = computed(() => {
+  const block = props.message.tailBlock;
+  return !!block
+    && isInlineHtmlBlock(block.type)
+    && (!block.nodes || block.nodes.length === 0);
+});
 const useAstForCurrentTail = computed(() => {
   if (!enableAstDiff.value) return false;
   // 超长 tail 降级保护：当后端因 tail 超过推测渲染上限（64KB）而停止产出 AST 节点时，
-  // tailBlock 会是一个 plain 类型但 nodes 为空的纯文本块。此时必须走原始 tailContent 路径，
-  // 否则 AST 沙箱会因无快照/无指令而留白。判定依据：有 plain tailBlock 却无 nodes。
-  const tb = props.message.tailBlock;
-  if (tb && isInlineHtmlBlock(tb.type) && (!tb.nodes || tb.nodes.length === 0)) {
-    return false;
-  }
+  // tailBlock 会保留完整 content，但 nodes 为空。此时必须走纯文本路径，否则 AST 沙箱会留白。
+  if (isPlainTailFallback.value) return false;
   return (
     !!props.message.tailFrame ||
     !!props.message.tailBlock?.nodes ||
@@ -798,6 +800,7 @@ watch(
   () => {
     const newTailBlock = props.message.tailBlock;
     if (useAstForCurrentTail.value) return; // 🆕 启用 AST Diff 且有节点时跳过 Morphdom
+    if (isPlainTailFallback.value) return; // 超限 tail 直接由 Vue 文本节点渲染，不做 HTML parse/morphdom
     if (!newTailBlock || !isInlineHtmlBlock(newTailBlock.type)) return;
     nextTick(() => {
       if (!tailRootRef.value) return;
@@ -1063,7 +1066,12 @@ onUnmounted(() => {
 
             <!-- 尾部流式推测渲染（只对最后一个活跃气泡生效，且正在流式、有 tailBlock 时渲染，完美拼合在气泡正文末尾） -->
             <div v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && message.tailBlock" class="streaming-tail opacity-90">
-              <div v-if="useAstForCurrentTail && isInlineHtmlBlock(message.tailBlock.type)">
+              <div
+                v-if="isPlainTailFallback"
+                data-tail-render-mode="plaintext"
+                class="vcp-markdown-block whitespace-pre-wrap break-words"
+              >{{ message.tailBlock.content || '' }}</div>
+              <div v-else-if="useAstForCurrentTail && isInlineHtmlBlock(message.tailBlock.type)">
                 <div
                   :ref="(el) => { tailSandboxRef = el as HTMLElement | null }"
                   class="vcp-markdown-block vcp-ast-sandbox"

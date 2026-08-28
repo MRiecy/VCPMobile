@@ -209,4 +209,64 @@ describe('MessageRenderer presentation shell', () => {
     expect(wrapper.get('.vcp-ast-sandbox').text()).toContain('new tail');
     wrapper.unmount();
   });
+
+  it('renders an AST-less streaming tail as literal plaintext', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const sessionStore = useChatSessionStore();
+    const streamStore = useChatStreamStore();
+    sessionStore.setConversation({
+      id: 'agent-a',
+      type: 'agent',
+      name: 'Agent A',
+    } as any, 'topic-a');
+    streamStore.addSessionStream('agent-a', 'agent', 'topic-a', 'plain-tail-message');
+
+    const literalTail = '<div>unfinished\n<script>alert("x")</script>';
+    const message = reactive<ChatMessage>({
+      id: 'plain-tail-message',
+      role: 'assistant',
+      timestamp: 1,
+      agentId: 'agent-a',
+      shell: {
+        avatarColor: '#64748b',
+        displayName: 'Agent A',
+        isUser: false,
+      },
+      blocks: [],
+      tailContent: literalTail,
+      tailBlock: {
+        type: 'markdown',
+        content: literalTail,
+        hash: 'plain-tail',
+      },
+    });
+
+    const wrapper = mount(MessageRenderer, {
+      props: { message },
+      global: {
+        plugins: [pinia],
+        directives: { longpress: {} },
+        stubs: {
+          VcpAvatar: markerStub('avatar'),
+          ToolBlock: markerStub('tool'),
+          ThoughtBlock: markerStub('thought'),
+          HtmlPreviewBlock: markerStub('html-preview'),
+          ToolSummaryBlock: markerStub('tool-summary'),
+          DiaryBlock: markerStub('diary'),
+          AttachmentPreview: markerStub('attachment'),
+          MermaidFullScreenViewer: markerStub('mermaid-viewer'),
+          ThinkingIndicator: markerStub('thinking'),
+          StreamingTag: markerStub('streaming'),
+        },
+      },
+    });
+    await nextTick();
+
+    const plaintext = wrapper.get('[data-tail-render-mode="plaintext"]');
+    expect(plaintext.text()).toBe(literalTail);
+    expect(plaintext.find('script').exists()).toBe(false);
+    expect(wrapper.find('.vcp-ast-sandbox').exists()).toBe(false);
+    wrapper.unmount();
+  });
 });

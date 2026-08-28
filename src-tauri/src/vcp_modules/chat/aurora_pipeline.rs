@@ -204,29 +204,30 @@ impl AuroraBuffer {
         //    当 tail 超过 MAX_SPECULATIVE_TAIL_AST_BYTES 时跳过 AST 解析，
         //    避免在流式热路径上产生性能悬崖
         if !self.tail_content.is_empty() {
-            let (nodes, nodes_need_hashing) =
-                if crate::vcp_modules::content_parser::is_html_tag_block(&self.tail_content) {
-                    // 如果是以 HTML 容器/样式标签开头，直接将其作为 RawHtml 块，防止 pulldown_cmark 将内部 CSS 规则或内联样式解析为缩进代码块
-                    (
-                        Some(vec![
-                            crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(
-                                self.tail_content.clone(),
-                            ),
-                        ]),
-                        true,
-                    )
-                } else if self.tail_content.len() <= MAX_SPECULATIVE_TAIL_AST_BYTES {
-                    (
-                        Some(
-                            crate::vcp_modules::pre_renderer::parse_markdown_to_ast_streaming(
-                                &self.tail_content,
-                            ),
+            let (nodes, nodes_need_hashing) = if self.tail_content.len()
+                > MAX_SPECULATIVE_TAIL_AST_BYTES
+            {
+                (None, false)
+            } else if crate::vcp_modules::content_parser::is_html_tag_block(&self.tail_content) {
+                // 如果是以 HTML 容器/样式标签开头，直接将其作为 RawHtml 块，防止 pulldown_cmark 将内部 CSS 规则或内联样式解析为缩进代码块
+                (
+                    Some(vec![
+                        crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(
+                            self.tail_content.clone(),
                         ),
-                        false,
-                    )
-                } else {
-                    (None, false)
-                };
+                    ]),
+                    true,
+                )
+            } else {
+                (
+                    Some(
+                        crate::vcp_modules::pre_renderer::parse_markdown_to_ast_streaming(
+                            &self.tail_content,
+                        ),
+                    ),
+                    false,
+                )
+            };
             let hash = crate::vcp_modules::sync_hash::HashAggregator::compute_content_hash(
                 &self.tail_content,
             );
@@ -410,6 +411,44 @@ mod tests {
             .mutations
             .iter()
             .any(|mutation| matches!(mutation, AstMutation::Replace { .. })));
+    }
+
+    #[test]
+    fn raw_html_obeys_the_speculative_ast_limit() {
+        let raw_html_at_limit = format!(
+            "<div>{}",
+            "X".repeat(MAX_SPECULATIVE_TAIL_AST_BYTES - "<div>".len())
+        );
+        let mut at_limit = AuroraBuffer::new();
+        at_limit.append_chunk(&raw_html_at_limit);
+        assert_eq!(at_limit.process_queue(), (false, true));
+        match at_limit.tail_block.as_ref().expect("raw tail at limit") {
+            StreamBlock::Markdown {
+                content,
+                nodes: Some(_),
+                ..
+            } => assert_eq!(content, &raw_html_at_limit),
+            other => panic!("expected rich raw html at limit, got {other:?}"),
+        }
+
+        let raw_html_over_limit = format!("{raw_html_at_limit}X");
+        let mut over_limit = AuroraBuffer::new();
+        over_limit.append_chunk(&raw_html_over_limit);
+        assert_eq!(over_limit.process_queue(), (false, true));
+        match over_limit.tail_block.as_ref().expect("raw tail over limit") {
+            StreamBlock::Markdown {
+                content,
+                nodes: None,
+                ..
+            } => assert_eq!(content, &raw_html_over_limit),
+            other => panic!("expected plaintext raw html over limit, got {other:?}"),
+        }
+        assert!(over_limit.prev_tail_ast.is_empty());
+        assert!(over_limit.take_tail_frame().is_none());
+
+        over_limit.append_chunk("Y");
+        assert_eq!(over_limit.process_queue(), (false, true));
+        assert!(over_limit.take_tail_frame().is_none());
     }
 
     #[test]
