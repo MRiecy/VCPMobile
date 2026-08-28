@@ -9,7 +9,14 @@ use crate::vcp_modules::sync_types::is_valid_avatar_owner;
 use crate::vcp_modules::topic_types::{OwnerKey, TopicKey};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
+
+const DB_WRITE_QUEUE_CAPACITY: usize = 32;
+const MAX_TASKS_PER_TRANSACTION: usize = 32;
+const MAX_MESSAGES_PER_TRANSACTION: usize = 500;
+const BATCH_QUIET_WINDOW: Duration = Duration::from_millis(2);
+const BATCH_HARD_WINDOW: Duration = Duration::from_millis(10);
 
 #[derive(Debug)]
 pub enum DbWriteTask {
@@ -49,16 +56,60 @@ pub(crate) struct PreparedMessageWrite {
     pub content_hash: String,
 }
 
+struct CollectedWriteBatch {
+    tasks: Vec<DbWriteTask>,
+    flush_tx: Option<oneshot::Sender<Result<(), String>>>,
+}
+
+fn task_message_count(task: &DbWriteTask) -> usize {
+    match task {
+        DbWriteTask::TopicMessages { writes, .. } => writes.len(),
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::items_after_test_module)] // Existing test module intentionally sits beside the task enum.
 mod tests {
-    use super::{DbWriteQueue, PreparedMessageWrite};
+    use super::{
+        task_message_count, DbWriteQueue, DbWriteTask, PreparedMessageWrite, BATCH_HARD_WINDOW,
+        BATCH_QUIET_WINDOW,
+    };
     use crate::vcp_modules::chat_manager::ChatMessage;
     use crate::vcp_modules::sync_dto::{
         AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
     };
     use crate::vcp_modules::sync_hash::HashAggregator;
     use crate::vcp_modules::topic_types::TopicKey;
+    use std::time::Duration;
+    use tokio::sync::{mpsc, oneshot};
+
+    fn avatar_task(owner_id: impl Into<String>) -> DbWriteTask {
+        DbWriteTask::Avatar {
+            owner_type: "agent".into(),
+            owner_id: owner_id.into(),
+            mime_type: "image/png".into(),
+            bytes: Vec::new(),
+        }
+    }
+
+    fn message_task(topic_id: &str, first_id: usize, count: usize) -> DbWriteTask {
+        let writes = (first_id..first_id + count)
+            .map(|message_id| PreparedMessageWrite {
+                message: ChatMessage {
+                    id: format!("message-{message_id}"),
+                    topic_id: Some(topic_id.into()),
+                    ..Default::default()
+                },
+                render_bytes: Vec::new(),
+                content_hash: format!("hash-{message_id}"),
+            })
+            .collect();
+        DbWriteTask::TopicMessages {
+            key: TopicKey::new("agent", "owner", topic_id),
+            writes,
+        }
+    }
 
     #[test]
     fn flush_error_summary_is_reported_once() {
@@ -72,6 +123,130 @@ mod tests {
         assert!(first.contains("batch two failed"));
         assert!(errors.is_empty());
         assert!(DbWriteQueue::take_pending_errors(&mut errors).is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn single_task_uses_the_quiet_window_not_the_hard_window() {
+        let (_keep_open, mut rx) = mpsc::channel(1);
+        let mut carried_task = None;
+        let started = tokio::time::Instant::now();
+
+        let batch =
+            DbWriteQueue::collect_batch(avatar_task("first"), &mut rx, &mut carried_task).await;
+
+        assert_eq!(started.elapsed(), BATCH_QUIET_WINDOW);
+        assert_eq!(batch.tasks.len(), 1);
+        assert!(batch.flush_tx.is_none());
+        assert!(carried_task.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn continuous_small_tasks_cannot_extend_the_hard_window() {
+        let (tx, mut rx) = mpsc::channel(32);
+        let producer = tokio::spawn(async move {
+            for index in 1..20 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                if tx.send(avatar_task(format!("task-{index}"))).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let mut carried_task = None;
+        let started = tokio::time::Instant::now();
+
+        let batch =
+            DbWriteQueue::collect_batch(avatar_task("task-0"), &mut rx, &mut carried_task).await;
+
+        assert_eq!(started.elapsed(), BATCH_HARD_WINDOW);
+        assert!(batch.tasks.len() > 1);
+        assert!(batch.tasks.len() < 20);
+        assert!(batch.flush_tx.is_none());
+        assert!(carried_task.is_none());
+        producer.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flush_immediately_closes_the_current_batch() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let (flush_tx, flush_rx) = oneshot::channel();
+        tx.send(DbWriteTask::Flush { tx: flush_tx })
+            .await
+            .expect("queue flush");
+        tx.send(avatar_task("after-flush"))
+            .await
+            .expect("queue trailing task");
+        let mut carried_task = None;
+        let started = tokio::time::Instant::now();
+
+        let batch =
+            DbWriteQueue::collect_batch(avatar_task("before-flush"), &mut rx, &mut carried_task)
+                .await;
+
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        assert_eq!(batch.tasks.len(), 1);
+        batch
+            .flush_tx
+            .expect("flush boundary")
+            .send(Ok(()))
+            .expect("acknowledge flush");
+        assert_eq!(flush_rx.await.expect("receive flush result"), Ok(()));
+        match rx.recv().await.expect("task after flush remains queued") {
+            DbWriteTask::Avatar { owner_id, .. } => assert_eq!(owner_id, "after-flush"),
+            task => panic!("unexpected trailing task: {task:?}"),
+        }
+        assert!(carried_task.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn over_budget_message_task_is_carried_without_reordering() {
+        let (tx, mut rx) = mpsc::channel(3);
+        tx.send(message_task("topic", 250, 200))
+            .await
+            .expect("queue fitting task");
+        tx.send(message_task("topic", 450, 100))
+            .await
+            .expect("queue over-budget task");
+        tx.send(avatar_task("after-carried"))
+            .await
+            .expect("queue trailing task");
+        let mut carried_task = None;
+
+        let batch =
+            DbWriteQueue::collect_batch(message_task("topic", 0, 250), &mut rx, &mut carried_task)
+                .await;
+
+        assert_eq!(
+            batch.tasks.iter().map(task_message_count).sum::<usize>(),
+            450
+        );
+        assert_eq!(batch.tasks.len(), 2);
+        assert_eq!(
+            carried_task.as_ref().map(task_message_count),
+            Some(100),
+            "the first task that does not fit must become the next batch head"
+        );
+        match rx.recv().await.expect("task after carried remains queued") {
+            DbWriteTask::Avatar { owner_id, .. } => assert_eq!(owner_id, "after-carried"),
+            task => panic!("unexpected trailing task: {task:?}"),
+        }
+        assert!(batch.flush_tx.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn channel_close_drains_every_buffered_task() {
+        let (tx, mut rx) = mpsc::channel(3);
+        tx.send(avatar_task("second")).await.expect("queue second");
+        tx.send(avatar_task("third")).await.expect("queue third");
+        drop(tx);
+        let mut carried_task = None;
+
+        let batch =
+            DbWriteQueue::collect_batch(avatar_task("first"), &mut rx, &mut carried_task).await;
+
+        assert_eq!(batch.tasks.len(), 3);
+        assert!(batch.flush_tx.is_none());
+        assert!(carried_task.is_none());
+        assert!(rx.recv().await.is_none());
     }
 
     fn assert_queued_owner_root_includes_default(owner_type: &str) {
@@ -451,10 +626,60 @@ impl DbWriteQueue {
         )))
     }
 
+    async fn collect_batch(
+        first_task: DbWriteTask,
+        rx: &mut mpsc::Receiver<DbWriteTask>,
+        carried_task: &mut Option<DbWriteTask>,
+    ) -> CollectedWriteBatch {
+        debug_assert!(!matches!(&first_task, DbWriteTask::Flush { .. }));
+
+        let mut tasks = vec![first_task];
+        let mut total_msg_count = tasks.first().map(task_message_count).unwrap_or_default();
+        let hard_deadline = tokio::time::Instant::now() + BATCH_HARD_WINDOW;
+        let mut quiet_deadline = tokio::time::Instant::now() + BATCH_QUIET_WINDOW;
+        let mut flush_tx = None;
+
+        while tasks.len() < MAX_TASKS_PER_TRANSACTION
+            && total_msg_count < MAX_MESSAGES_PER_TRANSACTION
+        {
+            let deadline = quiet_deadline.min(hard_deadline);
+            let next_task = tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(deadline) => break,
+                task = rx.recv() => task,
+            };
+
+            match next_task {
+                Some(DbWriteTask::Flush { tx }) => {
+                    flush_tx = Some(tx);
+                    break;
+                }
+                Some(task) => {
+                    let next_msg_count = task_message_count(&task);
+                    if next_msg_count > 0
+                        && total_msg_count > 0
+                        && total_msg_count.saturating_add(next_msg_count)
+                            > MAX_MESSAGES_PER_TRANSACTION
+                    {
+                        *carried_task = Some(task);
+                        break;
+                    }
+                    total_msg_count = total_msg_count.saturating_add(next_msg_count);
+                    tasks.push(task);
+                    quiet_deadline =
+                        (tokio::time::Instant::now() + BATCH_QUIET_WINDOW).min(hard_deadline);
+                }
+                None => break,
+            }
+        }
+
+        CollectedWriteBatch { tasks, flush_tx }
+    }
+
     pub fn new(_pool: sqlx::SqlitePool, db_path: std::path::PathBuf) -> Self {
         // One queued transaction worth of tasks is enough to keep the single writer busy while
         // preserving Pull's upstream byte-weighted backpressure.
-        let (tx, mut rx) = mpsc::channel(32);
+        let (tx, mut rx) = mpsc::channel(DB_WRITE_QUEUE_CAPACITY);
         let db_path_for_worker = db_path.clone();
 
         // 核心优化：利用 Mutex 持有持久连接，确保 spawn_blocking 之间 prepare_cached 缓存不失效
@@ -482,42 +707,9 @@ impl DbWriteQueue {
                     continue;
                 }
 
-                let mut tasks_in_this_tx = vec![first_task];
-                let mut total_msg_count = 0u32;
-
-                if let DbWriteTask::TopicMessages { writes, .. } = &tasks_in_this_tx[0] {
-                    total_msg_count += writes.len() as u32;
-                }
-
-                let mut flush_tx_opt: Option<oneshot::Sender<Result<(), String>>> = None;
-
-                while tasks_in_this_tx.len() < 32 && total_msg_count < 500 {
-                    let next_res =
-                        tokio::time::timeout(std::time::Duration::from_millis(10), rx.recv()).await;
-
-                    match next_res {
-                        Ok(Some(DbWriteTask::Flush { tx })) => {
-                            flush_tx_opt = Some(tx);
-                            break;
-                        }
-                        Ok(Some(task)) => {
-                            let next_msg_count = match &task {
-                                DbWriteTask::TopicMessages { writes, .. } => writes.len() as u32,
-                                _ => 0,
-                            };
-                            if next_msg_count > 0
-                                && total_msg_count > 0
-                                && total_msg_count.saturating_add(next_msg_count) > 500
-                            {
-                                carried_task = Some(task);
-                                break;
-                            }
-                            total_msg_count = total_msg_count.saturating_add(next_msg_count);
-                            tasks_in_this_tx.push(task);
-                        }
-                        _ => break,
-                    }
-                }
+                let batch = Self::collect_batch(first_task, &mut rx, &mut carried_task).await;
+                let tasks_in_this_tx = batch.tasks;
+                let flush_tx_opt = batch.flush_tx;
 
                 let db_path = db_path_for_worker.clone();
                 let ch = conn_holder.clone();

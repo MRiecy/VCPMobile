@@ -292,7 +292,7 @@ CREATE TABLE IF NOT EXISTS active_generations (
 
 ## 3. SQLite 写队列当前算法（`db_write_queue.rs`）
 
-> **状态边界（2026-08-28）**：本节描述阶段 1 提交 `b677529` 之后、阶段 2 尚未实现时的真实代码。这里的“当前”是 **FIFO 贪婪前缀 + 滑动空闲超时**；双截止时间只是 §3.9 的后续方案，不能当成现状。
+> **状态边界（2026-08-28）**：本节描述阶段 1 提交 `b677529` 与阶段 2 有界微批处理落地后的真实代码。这里的“当前”是 **FIFO 贪婪前缀 + 2ms quiet / 10ms hard 双截止时间**；相邻同 Topic 合并和运行时 bind 预算仍分别属于阶段 3、4。
 >
 > 一句话概括：多个同步 Pull 生产者把任务送入容量 32 的有界通道；唯一 Worker 按 FIFO 取“当前预算内最长连续前缀”，用一个持久 rusqlite 连接在单个事务中执行；`Flush` 是排在队列中的提交屏障。
 
@@ -355,7 +355,7 @@ flowchart LR
 | 单事务任务数 | 最多 32 个数据任务 | 每个非 Flush 变体都算 1 |
 | 单事务消息数 | 正常路径最多 500 条 | 只累计 `TopicMessages.writes.len()` |
 | 上游消息分块 | 每个任务最多 250 条 | `PullExecutor::process_topic_messages` 主动切块 |
-| 收集等待 | 每次 `recv` 最多等待 10ms | 是可重置的空闲间隔，不是总批次时限 |
+| 收集等待 | quiet 2ms / hard 10ms | quiet 随每个已接收任务重置；hard 从首任务固定且不可延长 |
 | SQLite 忙等待 | 最多 2000ms | 与队列外的数据库写连接冲突时由 SQLite 退避 |
 
 消息预算不计算 Avatar 字节、Topic 数量或 DTO 序列化大小；这些任务只占“任务数”预算。Pull 的 NDJSON 解析层另有 32 MiB 字节加权预算，二者不是同一个控制器。
@@ -380,21 +380,21 @@ flowchart TD
 
     E -- "是" --> F["返回并清空 pending_errors<br/>不创建空事务"]
     F --> A
-    E -- "否" --> G["batch = [first]<br/>统计 task_count / msg_count"]
+    E -- "否" --> G["batch = [first]<br/>固定 hard = now + 10ms<br/>quiet = now + 2ms"]
 
     G --> H{"任务数未满 32<br/>且消息数未满 500？"}
     H -- "否" --> N["停止收集"]
-    H -- "是" --> I["timeout(10ms, rx.recv())"]
+    H -- "是" --> I["同时等待 rx.recv()<br/>与 min(quiet, hard)"]
 
     I --> J{"接收结果"}
-    J -- "超时 / channel 关闭" --> N
+    J -- "任一 deadline / channel 关闭" --> N
     J -- "Flush" --> K["保存 Flush ACK<br/>停止读取其后任务"]
     K --> N
     J -- "数据任务" --> L{"已有消息，且加入后<br/>消息数会超过 500？"}
 
     L -- "是" --> M["任务已被 recv 取出<br/>放入 carried_task"]
     M --> N
-    L -- "否" --> O["追加到 batch<br/>更新两个计数"]
+    L -- "否" --> O["追加到 batch<br/>更新计数并重置 quiet<br/>但不得越过 hard"]
     O --> H
 
     N --> P["spawn_blocking<br/>FIFO 执行一个事务"]
@@ -471,15 +471,15 @@ sequenceDiagram
 
 注意：M1 和 M2 虽然共享一个 SQLite 事务，但当前不会合并成一个 `TopicMessages { writes: 500 }`。Worker 仍会调用两次完整的消息批处理函数，因此父 Topic 校验、existing-state 查询和各副表阶段也执行两轮。这是阶段 3 才考虑的“相邻同 Topic 合并”，不属于阶段 2。
 
-### 3.6 “10ms 窗口”其实是滑动空闲超时
+### 3.6 2ms quiet + 10ms hard 双截止时间
 
-现代码在每一次循环里重新创建：
+旧代码每接收一个任务都会重新创建完整的 10ms `timeout`。若任务总是在超时前到达，首任务可能因 31 次额外等待而接近 310ms 后才进入事务。
 
-```rust
-timeout(Duration::from_millis(10), rx.recv()).await
-```
+当前收集器在首任务到达时同时建立两个 deadline：
 
-所以 10ms 的含义是“距上一个被接收任务多久没有新任务”，而不是“首任务到提交最多 10ms”。
+- `hard_deadline = first_seen + 10ms`：本批固定上界，后续任务不得延长。
+- `quiet_deadline = last_seen + 2ms`：吸收背靠背突发；每接收一个数据任务后重置，但始终截断在 hard deadline。
+- Worker 用带偏向的 `select!` 同时等待 receiver 和较早的 deadline；若任务与 deadline 同时就绪，deadline 优先，避免边界时刻继续扩批。
 
 ```mermaid
 sequenceDiagram
@@ -487,19 +487,18 @@ sequenceDiagram
     participant W as Worker
 
     Q-->>W: t=0ms：T1
-    Note over W: 开始第 1 个 10ms recv 等待
-    Q-->>W: t=9ms：T2
-    Note over W: 接受 T2；重新开始 10ms
-    Q-->>W: t=18ms：T3
-    Note over W: 接受 T3；再次重新开始 10ms
+    Note over W: hard 固定为 10ms<br/>quiet 为 2ms
+    Q-->>W: t=1ms：T2
+    Note over W: 接受 T2；quiet 延至 3ms
+    Q-->>W: t=2ms：T3
+    Note over W: 接受 T3；quiet 延至 4ms
     Q-->>W: ...
-    Q-->>W: t≈279ms：T32
-    Note over W: 达到 32 个任务，才进入事务
+    Q-->>W: t=9ms：T10
+    Note over W: quiet 只能截断到 hard=10ms
+    Note over W: t=10ms：hard 触发，进入事务
 ```
 
-如果非消息小任务始终在超时前一点到达，31 次额外等待可让“收集阶段”理论上接近 310ms；之后还要加事务执行时间。反过来，突发任务已经在队列中时，`recv` 会立即返回，批次可以几乎无等待地装满。
-
-这就是阶段 2 要处理的核心：当前算法有“安静 10ms 就提交”的能力，却没有从首任务开始计算的硬截止时间。
+因此单个任务在队列保持打开时通常只等 2ms；已在队列中的突发任务仍被立即取走；1ms 间隔的连续任务可以继续凑批，但整个收集期不会突破首任务后的 10ms。这里的上界只覆盖异步收集，不包含后续 SQLite 事务执行时间。
 
 ### 3.7 一个批次进入 SQLite 后发生什么
 
@@ -583,35 +582,35 @@ sequenceDiagram
 
 这里“落盘完成”的工程含义是：排在 marker 前的队列任务已经被处理，相关 SQLite 事务的 `commit` 已返回。它不改变 `synchronous=NORMAL` 自身的断电持久性语义。
 
-### 3.9 当前算法的评价与阶段 2 边界
+### 3.9 当前算法的评价与后续边界
 
 | 维度 | 当前实现 | 结论 |
 |------|----------|------|
 | 写入并发 | 单消费者、单持久连接 | 与 SQLite 单写者模型匹配，继续保留 |
 | 顺序 | 严格 FIFO、只取连续前缀 | 保证实体依赖与 Flush 屏障，继续保留 |
 | 批量选择 | 32 任务 / 正常 500 消息内的最大前缀 | 对“最少事务数”已足够高效，不换 knapsack |
-| 时间 | 每次接收后重置 10ms | 有空闲截止，无总时长上界 |
+| 时间 | 2ms quiet + 首任务固定 10ms hard | 同时捕获突发并限制收集尾延迟 |
 | 相邻同 Topic | 可共享事务，但不合并 writes | 重复执行消息子管线；阶段 3 再处理 |
 | SQL 参数 | 固定 999 | 没利用 SQLite 3.51.3 的 32766；阶段 4 先基准 |
 | 字节公平性 | 队列只按任务数/消息数计权 | Avatar/DTO 大小不入队列预算；目前由上游边界兜底 |
 | 优先级 | 无优先队列；Flush 也是 FIFO marker | 正确性优先，不做跨 Topic 重排 |
 
-阶段 2 只修时间算法，不改变事务内容：
+阶段 2 已只修时间算法，没有改变事务内容：
 
 ```mermaid
 flowchart LR
-    A["当前<br/>首任务"] --> B["每收一个任务<br/>quiet 计时重新开始"]
+    A["旧实现<br/>首任务"] --> B["每收一个任务<br/>完整 10ms 重新开始"]
     B --> C{"安静 10ms<br/>或计数满？"}
     C -- "否" --> B
     C -- "是" --> D["提交"]
 
-    E["阶段 2（尚未实现）<br/>首任务"] --> F["固定 hard deadline<br/>同时维护 quiet deadline"]
+    E["当前实现<br/>首任务"] --> F["固定 10ms hard<br/>维护 2ms quiet"]
     F --> G{"quiet / hard / 计数 / Flush<br/>任一先到？"}
     G -- "否" --> F
     G -- "是" --> H["提交"]
 ```
 
-因此阶段 2 的设计原则是：**保留 FIFO 最大前缀贪婪，只给收集期增加不可被后续任务延长的硬上界。** 这比引入优先队列、多 writer 或动态规划更直接，也不会扩大一致性风险。
+阶段 2 的设计原则是：**保留 FIFO 最大前缀贪婪，只给收集期增加不可被后续任务延长的硬上界。** 阶段 3、4 将继续处理相邻任务重复工作和 SQL bind 分块，不引入优先队列、多 writer 或跨 Topic 重排。
 
 ---
 
