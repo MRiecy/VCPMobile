@@ -35,24 +35,68 @@ pub struct TailFrame {
     pub mutations: Vec<AstMutation>,
 }
 
+#[derive(Debug, Serialize, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AuroraUpdateKind {
+    Delta,
+    Snapshot,
+}
+
+#[derive(Debug, Serialize, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TailRenderMode {
+    Ast,
+    Plain,
+}
+
+#[derive(Debug, Serialize, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StableAppend {
+    pub base_count: usize,
+    pub blocks: Vec<StreamBlock>,
+}
+
+#[derive(Debug, Serialize, Clone, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum TailTextOp {
+    Append {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        base_hash: Option<String>,
+        content: String,
+        hash: String,
+        mode: TailRenderMode,
+    },
+    Replace {
+        content: String,
+        hash: String,
+        mode: TailRenderMode,
+    },
+    Clear,
+}
+
 /// Aurora 语义沉淀更新，由 Rust 流式管道推送到前端
 /// 采用稀疏序列化：只在字段有变化时才包含在 JSON 中，减少 IPC payload
 #[derive(Debug, Serialize, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuroraUpdate {
+    pub kind: AuroraUpdateKind,
     /// 整条 Aurora 更新所属的流身份；非流式单次响应没有该字段。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_id: Option<u64>,
-    /// 流式增量块：已确认闭合的语义块（仅 stable_changed 时发送）
+    /// Snapshot 中完整覆盖的已沉淀语义块。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stable_blocks: Option<Vec<StreamBlock>>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub stable_changed: bool,
-    /// 推测块：当前正在增长的尾部，按 Markdown 预渲染（仅 tail_changed 时发送）
+    /// Delta 中从 `base_count` 开始追加的新稳定块。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stable_append: Option<StableAppend>,
+    /// Snapshot 中完整覆盖的推测 tail；AST 节点统一由 `tail_frame.snapshot` 承载。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tail_block: Option<StreamBlock>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub tail_changed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail_mode: Option<TailRenderMode>,
+    /// Delta 中对 tail 原文的追加、替换或清空操作。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail_op: Option<TailTextOp>,
     /// 流式 AST 单帧补丁。每个 frame 是独立发送批次，前端不得累计全历史 mutations。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tail_frame: Option<TailFrame>,
@@ -62,6 +106,27 @@ pub struct AuroraUpdate {
     /// 🆕 推送周期中新增的、尚未推送给前端的纯文本片段
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuroraRecoverySnapshot {
+    pub stable_blocks: Vec<StreamBlock>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail_block: Option<StreamBlock>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tail_mode: Option<TailRenderMode>,
+    pub tail_snapshot: Vec<MarkdownNode>,
+}
+
+pub struct AuroraDeliveryCommit {
+    pushed_len: usize,
+    pushed_stable_count: usize,
+    pushed_tail_len: usize,
+    pushed_tail_epoch: u64,
+    pushed_tail_hash: Option<String>,
+    pushed_tail_mode: Option<TailRenderMode>,
+    consumes_tail_frame: bool,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -87,14 +152,23 @@ pub struct AuroraBuffer {
     pub tail_frame_seq: u64,
     /// 🆕 记录已被消费并发送的 full_text 长度，用于计算增量 chunk
     pub pushed_len: usize,
+    pushed_stable_count: usize,
+    pushed_tail_len: usize,
+    pushed_tail_epoch: u64,
+    pushed_tail_hash: Option<String>,
+    pushed_tail_mode: Option<TailRenderMode>,
     parser: StreamBlockParser,
     is_finishing: bool,
 }
 
 impl AuroraBuffer {
     pub fn new() -> Self {
+        Self::with_stream_id(NEXT_AURORA_STREAM_ID.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn with_stream_id(stream_id: u64) -> Self {
         Self {
-            stream_id: NEXT_AURORA_STREAM_ID.fetch_add(1, Ordering::Relaxed),
+            stream_id,
             full_text: String::new(),
             stable_blocks: Vec::new(),
             tail_content: String::new(),
@@ -107,6 +181,11 @@ impl AuroraBuffer {
             tail_snapshot_pending: None,
             tail_frame_seq: 0,
             pushed_len: 0,
+            pushed_stable_count: 0,
+            pushed_tail_len: 0,
+            pushed_tail_epoch: 0,
+            pushed_tail_hash: None,
+            pushed_tail_mode: None,
             parser: StreamBlockParser::new(),
             is_finishing: false,
         }
@@ -118,6 +197,7 @@ impl AuroraBuffer {
     }
 
     /// 🆕 提取自上次推送以来累积消费的新增字符
+    #[allow(dead_code)]
     pub fn take_chunk(&mut self) -> Option<String> {
         let current_len = self.full_text.len();
         if current_len > self.pushed_len {
@@ -129,42 +209,208 @@ impl AuroraBuffer {
         }
     }
 
-    pub fn take_tail_frame(&mut self) -> Option<TailFrame> {
-        let reset = self.tail_reset_pending;
-        self.tail_reset_pending = false;
-        let snapshot = self.tail_snapshot_pending.take();
-        let mutations = std::mem::take(&mut self.pending_mutations);
+    fn current_tail_metadata(&self) -> (Option<String>, Option<TailRenderMode>) {
+        match &self.tail_block {
+            Some(StreamBlock::Markdown { nodes, hash, .. }) => (
+                Some(hash.clone()),
+                Some(if nodes.is_some() {
+                    TailRenderMode::Ast
+                } else {
+                    TailRenderMode::Plain
+                }),
+            ),
+            Some(_) | None => (None, None),
+        }
+    }
+
+    fn current_tail_wire_block(&self) -> Option<StreamBlock> {
+        match &self.tail_block {
+            Some(StreamBlock::Markdown { content, hash, .. }) => {
+                Some(StreamBlock::markdown(content.clone(), None, hash.clone()))
+            }
+            Some(other) => Some(other.clone()),
+            None => None,
+        }
+    }
+
+    fn peek_tail_frame(&self, force_snapshot: bool) -> Option<TailFrame> {
+        let reset = force_snapshot || self.tail_reset_pending;
+        let snapshot = if force_snapshot {
+            Some(self.prev_tail_ast.clone())
+        } else if reset {
+            Some(
+                self.tail_snapshot_pending
+                    .clone()
+                    .unwrap_or_else(|| self.prev_tail_ast.clone()),
+            )
+        } else {
+            self.tail_snapshot_pending.clone()
+        };
+        let mutations = self.pending_mutations.clone();
 
         if !reset && snapshot.is_none() && mutations.is_empty() {
             return None;
         }
 
-        self.tail_frame_seq = self.tail_frame_seq.saturating_add(1);
         Some(TailFrame {
             stream_id: self.stream_id,
             epoch: self.tail_epoch,
             revision: self.tail_revision,
-            frame_seq: self.tail_frame_seq,
+            frame_seq: self.tail_frame_seq.saturating_add(1),
             reset,
             snapshot,
             mutations: if reset { Vec::new() } else { mutations },
         })
     }
 
-    /// 暖接续的权威数据基线：完整覆盖 content/stable/tailBlock，但不携带旧 buffer 的 AST frame。
-    /// 后续首个真实 frame 继续使用本 buffer 的 streamId，前端据此接管新的序列域。
-    pub fn take_recovery_baseline(&mut self) -> AuroraUpdate {
-        self.pushed_len = self.full_text.len();
-        let _ = self.take_tail_frame();
-        AuroraUpdate {
+    #[allow(dead_code)]
+    pub fn take_tail_frame(&mut self) -> Option<TailFrame> {
+        let frame = self.peek_tail_frame(false)?;
+        self.tail_reset_pending = false;
+        self.tail_snapshot_pending = None;
+        self.pending_mutations.clear();
+        self.tail_frame_seq = frame.frame_seq;
+        Some(frame)
+    }
+
+    pub fn prepare_delta_update(&self) -> Option<(AuroraUpdate, AuroraDeliveryCommit)> {
+        let chunk = (self.full_text.len() > self.pushed_len)
+            .then(|| self.full_text[self.pushed_len..].to_string());
+        let stable_append =
+            (self.stable_blocks.len() > self.pushed_stable_count).then(|| StableAppend {
+                base_count: self.pushed_stable_count,
+                blocks: self.stable_blocks[self.pushed_stable_count..].to_vec(),
+            });
+        let (current_tail_hash, current_tail_mode) = self.current_tail_metadata();
+        let tail_state_changed = self.tail_content.len() != self.pushed_tail_len
+            || self.tail_epoch != self.pushed_tail_epoch
+            || current_tail_hash != self.pushed_tail_hash
+            || current_tail_mode != self.pushed_tail_mode;
+        let tail_op = if !tail_state_changed {
+            None
+        } else if self.tail_content.is_empty() {
+            Some(TailTextOp::Clear)
+        } else {
+            let hash = current_tail_hash.clone().unwrap_or_default();
+            let mode = current_tail_mode.unwrap_or(TailRenderMode::Ast);
+            let can_append = self.tail_epoch == self.pushed_tail_epoch
+                && self.tail_content.len() > self.pushed_tail_len
+                && current_tail_mode == self.pushed_tail_mode;
+            if can_append {
+                if let Some(suffix) = self.tail_content.get(self.pushed_tail_len..) {
+                    Some(TailTextOp::Append {
+                        base_hash: self.pushed_tail_hash.clone(),
+                        content: suffix.to_string(),
+                        hash,
+                        mode,
+                    })
+                } else {
+                    Some(TailTextOp::Replace {
+                        content: self.tail_content.clone(),
+                        hash,
+                        mode,
+                    })
+                }
+            } else {
+                Some(TailTextOp::Replace {
+                    content: self.tail_content.clone(),
+                    hash,
+                    mode,
+                })
+            }
+        };
+        let tail_frame = self.peek_tail_frame(false);
+
+        if chunk.is_none() && stable_append.is_none() && tail_op.is_none() && tail_frame.is_none() {
+            return None;
+        }
+
+        let update = AuroraUpdate {
+            kind: AuroraUpdateKind::Delta,
+            stream_id: Some(self.stream_id),
+            stable_blocks: None,
+            stable_append,
+            tail_block: None,
+            tail_mode: None,
+            tail_op,
+            tail_frame,
+            content: None,
+            chunk,
+        };
+        let commit = AuroraDeliveryCommit {
+            pushed_len: self.full_text.len(),
+            pushed_stable_count: self.stable_blocks.len(),
+            pushed_tail_len: self.tail_content.len(),
+            pushed_tail_epoch: self.tail_epoch,
+            pushed_tail_hash: current_tail_hash,
+            pushed_tail_mode: current_tail_mode,
+            consumes_tail_frame: update.tail_frame.is_some(),
+        };
+        Some((update, commit))
+    }
+
+    pub fn prepare_snapshot_update(&self) -> (AuroraUpdate, AuroraDeliveryCommit) {
+        let tail_block = self.current_tail_wire_block();
+        let (current_tail_hash, current_tail_mode) = self.current_tail_metadata();
+        let update = AuroraUpdate {
+            kind: AuroraUpdateKind::Snapshot,
             stream_id: Some(self.stream_id),
             stable_blocks: Some(self.stable_blocks.clone()),
-            stable_changed: true,
-            tail_block: self.tail_block.clone(),
-            tail_changed: true,
-            tail_frame: None,
+            stable_append: None,
+            tail_block,
+            tail_mode: current_tail_mode,
+            tail_op: None,
+            tail_frame: self.peek_tail_frame(true),
             content: Some(self.full_text.clone()),
             chunk: None,
+        };
+        let commit = AuroraDeliveryCommit {
+            pushed_len: self.full_text.len(),
+            pushed_stable_count: self.stable_blocks.len(),
+            pushed_tail_len: self.tail_content.len(),
+            pushed_tail_epoch: self.tail_epoch,
+            pushed_tail_hash: current_tail_hash,
+            pushed_tail_mode: current_tail_mode,
+            consumes_tail_frame: true,
+        };
+        (update, commit)
+    }
+
+    pub fn commit_delivery(&mut self, commit: AuroraDeliveryCommit) {
+        self.pushed_len = commit.pushed_len;
+        self.pushed_stable_count = commit.pushed_stable_count;
+        self.pushed_tail_len = commit.pushed_tail_len;
+        self.pushed_tail_epoch = commit.pushed_tail_epoch;
+        self.pushed_tail_hash = commit.pushed_tail_hash;
+        self.pushed_tail_mode = commit.pushed_tail_mode;
+        if commit.consumes_tail_frame {
+            self.tail_reset_pending = false;
+            self.tail_snapshot_pending = None;
+            self.pending_mutations.clear();
+            self.tail_frame_seq = self.tail_frame_seq.saturating_add(1);
+        }
+    }
+
+    /// 暖接续的权威数据基线：一次性完整覆盖 content/stable/tail 与 reset AST。
+    #[allow(dead_code)]
+    pub fn take_recovery_baseline(&mut self) -> AuroraUpdate {
+        let (update, commit) = self.prepare_snapshot_update();
+        self.commit_delivery(commit);
+        update
+    }
+
+    pub fn compile_recovery_snapshot(content: String) -> AuroraRecoverySnapshot {
+        // 无状态重建不创建新的 live 序列域，避免一次 UI 自愈消耗 Aurora streamId。
+        let mut buffer = Self::with_stream_id(0);
+        buffer.append_chunk(&content);
+        let _ = buffer.process_queue();
+        let tail_block = buffer.current_tail_wire_block();
+        let (_, tail_mode) = buffer.current_tail_metadata();
+        AuroraRecoverySnapshot {
+            stable_blocks: buffer.stable_blocks,
+            tail_block,
+            tail_mode,
+            tail_snapshot: buffer.prev_tail_ast,
         }
     }
 
@@ -228,7 +474,7 @@ impl AuroraBuffer {
             // 🆕 如果解析出了 AST，对其计算 Diff，生成增量渲染指令集
             if let Some(mut new_nodes) = nodes.clone() {
                 // parser 返回的树已经递归 hash；只有绕过 parser 手工构造的 RawHtml clone
-                // 需要补一次。只处理 diff 基线副本，保持 tailBlock 的既有 wire 形态不变。
+                // 需要补一次。只处理 diff 基线副本，保持 tailBlock 内部投影形态不变。
                 if nodes_need_hashing {
                     for node in &mut new_nodes {
                         node.compute_hashes_recursively();
@@ -302,6 +548,11 @@ impl AuroraBuffer {
         self.tail_reset_pending = true;
         self.tail_snapshot_pending = Some(Vec::new());
     }
+}
+
+#[tauri::command]
+pub async fn rebuild_aurora_snapshot(content: String) -> Result<AuroraRecoverySnapshot, String> {
+    Ok(AuroraBuffer::compile_recovery_snapshot(content))
 }
 
 #[cfg(test)]
@@ -379,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_html_keeps_wire_shape_but_hashes_the_diff_baseline_once() {
+    fn raw_html_keeps_projection_shape_but_hashes_the_diff_baseline_once() {
         let mut buffer = AuroraBuffer::new();
         buffer.append_chunk("<div>one");
         assert_eq!(buffer.process_queue(), (false, true));
@@ -438,10 +689,33 @@ mod tests {
         }
         assert!(over_limit.prev_tail_ast.is_empty());
         assert!(over_limit.take_tail_frame().is_none());
+        let (initial_plain, initial_commit) = over_limit
+            .prepare_delta_update()
+            .expect("initial plaintext replace");
+        assert!(matches!(
+            initial_plain.tail_op,
+            Some(TailTextOp::Replace {
+                mode: TailRenderMode::Plain,
+                ..
+            })
+        ));
+        over_limit.commit_delivery(initial_commit);
 
         over_limit.append_chunk("Y");
         assert_eq!(over_limit.process_queue(), (false, true));
         assert!(over_limit.take_tail_frame().is_none());
+        let (plain_append, _) = over_limit
+            .prepare_delta_update()
+            .expect("plaintext append delta");
+        assert!(plain_append.tail_frame.is_none());
+        assert!(matches!(
+            plain_append.tail_op,
+            Some(TailTextOp::Append {
+                ref content,
+                mode: TailRenderMode::Plain,
+                ..
+            }) if content == "Y"
+        ));
     }
 
     #[test]
@@ -472,21 +746,35 @@ mod tests {
         buffer.process_queue();
 
         let baseline = buffer.take_recovery_baseline();
+        assert_eq!(baseline.kind, AuroraUpdateKind::Snapshot);
         assert_eq!(baseline.stream_id, Some(buffer.stream_id));
         assert_eq!(baseline.content.as_deref(), Some("authoritative"));
-        assert!(baseline.stable_changed);
-        assert!(baseline.tail_changed);
+        assert!(baseline.stable_blocks.as_ref().is_some_and(Vec::is_empty));
         match baseline
             .tail_block
             .as_ref()
             .expect("authoritative tail block")
         {
-            StreamBlock::Markdown { content, .. } => assert_eq!(content, "authoritative"),
+            StreamBlock::Markdown { content, nodes, .. } => {
+                assert_eq!(content, "authoritative");
+                assert!(
+                    nodes.is_none(),
+                    "Snapshot AST 只应由 tailFrame.snapshot 承载"
+                );
+            }
             other => panic!("expected markdown recovery tail, got {other:?}"),
         }
-        assert!(baseline.tail_frame.is_none());
+        assert_eq!(baseline.tail_mode, Some(TailRenderMode::Ast));
+        let baseline_frame = baseline.tail_frame.as_ref().expect("reset baseline frame");
+        assert!(baseline_frame.reset);
+        assert_eq!(baseline_frame.frame_seq, 1);
+        assert!(baseline_frame
+            .snapshot
+            .as_ref()
+            .is_some_and(|nodes| !nodes.is_empty()));
         assert!(baseline.chunk.is_none());
         let wire = serde_json::to_value(&baseline).expect("serialize recovery baseline");
+        assert_eq!(wire["kind"], "snapshot");
         assert!(wire.get("tail").is_none());
         assert!(wire.get("tailSnapshot").is_none());
         assert!(buffer.take_chunk().is_none());
@@ -497,5 +785,88 @@ mod tests {
         assert_eq!(next.stream_id, buffer.stream_id);
         assert_eq!(next.frame_seq, 2);
         assert_eq!(buffer.take_chunk().as_deref(), Some("!"));
+    }
+
+    #[test]
+    fn normal_delivery_contains_only_tail_delta_and_ast_mutations() {
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk("hello");
+        buffer.process_queue();
+
+        let (first, first_commit) = buffer.prepare_delta_update().expect("first delta update");
+        assert_eq!(first.kind, AuroraUpdateKind::Delta);
+        assert!(first.content.is_none());
+        assert!(first.stable_blocks.is_none());
+        assert!(first.tail_block.is_none());
+        assert!(matches!(
+            first.tail_op,
+            Some(TailTextOp::Replace { ref content, .. }) if content == "hello"
+        ));
+        assert!(first.tail_frame.is_some());
+        let wire = serde_json::to_value(&first).expect("serialize first delta");
+        assert!(wire.get("tailBlock").is_none());
+        assert!(wire.get("stableBlocks").is_none());
+        assert!(wire.get("content").is_none());
+
+        // prepare 本身不消费任何增量；只有发送成功后的 commit 才推进 wire cursor。
+        assert_eq!(buffer.pushed_len, 0);
+        assert!(!buffer.pending_mutations.is_empty());
+        let retry_wire = serde_json::to_value(
+            &buffer
+                .prepare_delta_update()
+                .expect("retry delta remains pending")
+                .0,
+        )
+        .expect("serialize retry delta");
+        assert_eq!(wire, retry_wire);
+        buffer.commit_delivery(first_commit);
+        assert_eq!(buffer.pushed_len, 5);
+        assert!(buffer.pending_mutations.is_empty());
+
+        buffer.append_chunk("!");
+        buffer.process_queue();
+        let (second, _) = buffer.prepare_delta_update().expect("second delta update");
+        assert_eq!(second.chunk.as_deref(), Some("!"));
+        assert!(matches!(
+            second.tail_op,
+            Some(TailTextOp::Append { ref content, .. }) if content == "!"
+        ));
+    }
+
+    #[test]
+    fn stable_delivery_appends_only_newly_precipitated_blocks() {
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk("first\n\nsecond");
+        let (stable_changed, _) = buffer.process_queue();
+        assert!(stable_changed);
+        let (first, first_commit) = buffer.prepare_delta_update().expect("first stable delta");
+        let first_append = first.stable_append.expect("first stable append");
+        assert_eq!(first_append.base_count, 0);
+        assert_eq!(first_append.blocks.len(), 1);
+        buffer.commit_delivery(first_commit);
+
+        buffer.append_chunk("\n\nthird");
+        let (stable_changed, _) = buffer.process_queue();
+        assert!(stable_changed);
+        let (second, _) = buffer.prepare_delta_update().expect("second stable delta");
+        let second_append = second.stable_append.expect("second stable append");
+        assert_eq!(second_append.base_count, 1);
+        assert_eq!(second_append.blocks.len(), 1);
+        assert!(second.stable_blocks.is_none());
+    }
+
+    #[test]
+    fn recovery_compiler_returns_one_canonical_tail_snapshot() {
+        let snapshot = AuroraBuffer::compile_recovery_snapshot("hello".to_string());
+        assert!(snapshot.stable_blocks.is_empty());
+        assert_eq!(snapshot.tail_mode, Some(TailRenderMode::Ast));
+        assert!(!snapshot.tail_snapshot.is_empty());
+        match snapshot.tail_block.expect("tail block") {
+            StreamBlock::Markdown { content, nodes, .. } => {
+                assert_eq!(content, "hello");
+                assert!(nodes.is_none());
+            }
+            other => panic!("expected markdown recovery tail, got {other:?}"),
+        }
     }
 }

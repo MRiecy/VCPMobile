@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useChatStreamStore } from "@/core/stores/chatStreamStore";
-import { mockInvoke } from "@/tests/mocks/tauri";
+import { invokeMock, mockInvoke } from "@/tests/mocks/tauri";
 import type { MarkdownNode, StreamEventDto } from "@/core/types/chat";
 
 const streamEvent = (
@@ -28,7 +28,12 @@ const tailEvent = (
   streamId: number,
   frameSeq: number,
   text: string,
-  options: { epoch?: number; reset?: boolean; chunk?: string } = {},
+  options: {
+    epoch?: number;
+    reset?: boolean;
+    chunk?: string;
+    mutationChunk?: string;
+  } = {},
 ): StreamEventDto => {
   const snapshot: MarkdownNode[] = [{
     type: "paragraph",
@@ -39,14 +44,14 @@ const tailEvent = (
     messageId: "assistant-1",
     context: streamContext,
     aurora: {
+      kind: "delta",
       streamId,
       chunk: options.chunk ?? text,
-      tailChanged: true,
-      tailBlock: {
-        type: "markdown",
+      tailOp: {
+        op: "replace",
         content: text,
-        nodes: snapshot,
         hash: `${streamId}:${frameSeq}`,
+        mode: "ast",
       },
       tailFrame: {
         streamId,
@@ -57,7 +62,11 @@ const tailEvent = (
         snapshot: options.reset ? snapshot : undefined,
         mutations: options.reset
           ? []
-          : [{ op: "append", id: "t0.i0", chunk: text }],
+          : [{
+              op: "append",
+              id: "t0.i0",
+              chunk: options.mutationChunk ?? text,
+            }],
       },
     },
   });
@@ -98,6 +107,23 @@ describe("stream render backpressure", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
     mockInvoke("process_message_content", () => []);
+    mockInvoke("rebuild_aurora_snapshot", (args) => {
+      const content = String(args?.content ?? "");
+      const tailSnapshot: MarkdownNode[] = content
+        ? [{
+            type: "paragraph",
+            children: [{ type: "text", value: content }],
+          }]
+        : [];
+      return {
+        stableBlocks: [],
+        tailBlock: content
+          ? { type: "markdown", content, hash: `tail:${content.length}` }
+          : undefined,
+        tailMode: "ast",
+        tailSnapshot,
+      };
+    });
   });
 
   it("accepts a warm baseline from a newer stream and rebases its lower frame sequence", async () => {
@@ -118,23 +144,34 @@ describe("stream render backpressure", () => {
         messageId: "assistant-1",
         context: streamContext,
         aurora: {
+          kind: "snapshot",
           streamId: 11,
           content: "authoritative",
-          stableChanged: true,
           stableBlocks: [],
-          tailChanged: true,
+          tailMode: "ast",
           tailBlock: {
             type: "markdown",
             content: "authoritative",
-            nodes: [{
+            hash: "baseline",
+          },
+          tailFrame: {
+            streamId: 11,
+            epoch: 1,
+            revision: 1,
+            frameSeq: 1,
+            reset: true,
+            snapshot: [{
               type: "paragraph",
               children: [{ type: "text", value: "authoritative" }],
             }],
-            hash: "baseline",
+            mutations: [],
           },
         },
       }));
-      await store.processStreamEvent(tailEvent(11, 2, "authoritative!", { chunk: "!" }));
+      await store.processStreamEvent(tailEvent(11, 2, "authoritative!", {
+        chunk: "!",
+        mutationChunk: "!",
+      }));
       await store.processStreamEvent(streamEvent({
         type: "end",
         messageId: "assistant-1",
@@ -152,11 +189,11 @@ describe("stream render backpressure", () => {
         streamId: 11,
         frameSeq: 2,
         reset: true,
-        mutations: [],
+        mutations: [{ op: "append", id: "t0.i0", chunk: "!" }],
       });
       expect(message?.tailFrame?.snapshot).toEqual([{
         type: "paragraph",
-        children: [{ type: "text", value: "authoritative!" }],
+        children: [{ type: "text", value: "authoritative" }],
       }]);
     } finally {
       manualRaf.restore();
@@ -176,6 +213,12 @@ describe("stream render backpressure", () => {
       await store.processStreamEvent(tailEvent(20, 1, "one", { reset: true }));
       manualRaf.flush();
       await store.processStreamEvent(tailEvent(20, 3, "three"));
+      await vi.waitFor(() => {
+        expect(invokeMock).toHaveBeenCalledWith(
+          "rebuild_aurora_snapshot",
+          { content: "onethree" },
+        );
+      });
       await store.processStreamEvent(streamEvent({
         type: "end",
         messageId: "assistant-1",
@@ -196,7 +239,7 @@ describe("stream render backpressure", () => {
       });
       expect(frame?.snapshot?.[0]).toMatchObject({
         type: "paragraph",
-        children: [{ type: "text", value: "three" }],
+        children: [{ type: "text", value: "onethree" }],
       });
     } finally {
       manualRaf.restore();
@@ -265,8 +308,9 @@ describe("stream render backpressure", () => {
         messageId: "assistant-1",
         context: streamContext,
         aurora: {
+          kind: "delta",
           streamId: 26,
-          tailChanged: true,
+          tailOp: { op: "clear" },
           tailFrame: {
             streamId: 26,
             epoch: 2,
@@ -289,6 +333,74 @@ describe("stream render backpressure", () => {
       expect(message?.tailContent).toBe("");
       expect(message?.tailBlock).toBeUndefined();
       expect(message?.tailSnapshot).toEqual([]);
+    } finally {
+      manualRaf.restore();
+    }
+  });
+
+  it("applies stable and tail appends without receiving cumulative full fields", async () => {
+    const manualRaf = installManualRaf();
+    try {
+      const store = useChatStreamStore();
+      await store.processStreamEvent(streamEvent({
+        type: "thinking",
+        messageId: "assistant-1",
+        context: streamContext,
+      }));
+
+      await store.processStreamEvent(tailEvent(28, 1, "hello", {
+        chunk: "hello",
+      }));
+      manualRaf.flush();
+      await store.processStreamEvent(streamEvent({
+        type: "aurora",
+        messageId: "assistant-1",
+        context: streamContext,
+        aurora: {
+          kind: "delta",
+          streamId: 28,
+          chunk: "!",
+          stableAppend: {
+            baseCount: 0,
+            blocks: [{
+              type: "markdown",
+              content: "stable",
+              hash: "stable-1",
+            }],
+          },
+          tailOp: {
+            op: "append",
+            baseHash: "28:1",
+            content: "!",
+            hash: "28:2",
+            mode: "ast",
+          },
+          tailFrame: {
+            streamId: 28,
+            epoch: 1,
+            revision: 2,
+            frameSeq: 2,
+            mutations: [{ op: "append", id: "t0.i0", chunk: "!" }],
+          },
+        },
+      }));
+      manualRaf.flush();
+
+      const message = store.getActiveStreamMessage(
+        "agent-a",
+        "agent",
+        "topic-a",
+        "assistant-1",
+      );
+      expect(message?.content).toBe("hello!");
+      expect(message?.blocks?.map((block) => block.hash)).toEqual(["stable-1"]);
+      expect(message?.tailContent).toBe("hello!");
+      expect(message?.tailBlock).toMatchObject({
+        content: "hello!",
+        hash: "28:2",
+        render_mode: "ast",
+      });
+      expect(message?.tailBlock?.nodes).toBeUndefined();
     } finally {
       manualRaf.restore();
     }
@@ -409,10 +521,6 @@ describe("stream render backpressure", () => {
       }));
 
       for (let index = 1; index <= 700; index += 1) {
-        const snapshot: MarkdownNode[] = [{
-          type: "paragraph",
-          children: [{ type: "text", value: `node-${index}` }],
-        }];
         await store.processStreamEvent(streamEvent({
           type: "aurora",
           messageId: "assistant-1",
@@ -423,14 +531,14 @@ describe("stream render backpressure", () => {
             agentId: "agent-a",
           },
           aurora: {
+            kind: "delta",
             streamId: 1,
             chunk: "x",
-            tailChanged: true,
-            tailBlock: {
-              type: "markdown",
+            tailOp: {
+              op: "replace",
               content: `tail-${index}`,
-              nodes: snapshot,
               hash: String(index),
+              mode: "ast",
             },
             tailFrame: {
               streamId: 1,
@@ -444,6 +552,18 @@ describe("stream render backpressure", () => {
           },
         }));
       }
+
+      Object.defineProperty(document, "hidden", {
+        configurable: true,
+        value: false,
+      });
+      document.dispatchEvent(new Event("visibilitychange"));
+      await vi.waitFor(() => {
+        expect(invokeMock).toHaveBeenCalledWith(
+          "rebuild_aurora_snapshot",
+          { content: "x".repeat(700) },
+        );
+      });
 
       await store.processStreamEvent(streamEvent({
         type: "end",
@@ -466,7 +586,7 @@ describe("stream render backpressure", () => {
       expect(frame?.mutations).toEqual([]);
       expect(frame?.snapshot).toEqual([{
         type: "paragraph",
-        children: [{ type: "text", value: "node-700" }],
+        children: [{ type: "text", value: "x".repeat(700) }],
       }]);
     } finally {
       window.requestAnimationFrame = originalRaf;

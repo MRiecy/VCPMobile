@@ -78,16 +78,22 @@ function astDebugLog(...args: unknown[]): void {
 // === AST Diff Feature Flags & Refs ===
 const tailSandboxRef = ref<HTMLElement | null>(null);
 const enableAstDiff = ref(true); // Feature Flag, 默认开启
+const isAstRecoveryPending = ref(false);
+let astRecoveryPromise: Promise<boolean> | null = null;
 const isPlainTailFallback = computed(() => {
   const block = props.message.tailBlock;
   return !!block
     && isInlineHtmlBlock(block.type)
-    && (!block.nodes || block.nodes.length === 0);
+    && (
+      block.render_mode === "plain"
+      || (
+        block.render_mode === undefined
+        && (!block.nodes || block.nodes.length === 0)
+      )
+    );
 });
 const useAstForCurrentTail = computed(() => {
-  if (!enableAstDiff.value) return false;
-  // 超长 tail 降级保护：当后端因 tail 超过推测渲染上限（64KB）而停止产出 AST 节点时，
-  // tailBlock 会保留完整 content，但 nodes 为空。此时必须走纯文本路径，否则 AST 沙箱会留白。
+  if (!enableAstDiff.value || isAstRecoveryPending.value) return false;
   if (isPlainTailFallback.value) return false;
   return (
     !!props.message.tailFrame ||
@@ -103,10 +109,10 @@ let astFailureCount = 0;
 let lastSandbox: HTMLElement | null = null;
 
 function getTailSnapshotNodes() {
-  // 恢复/重建优先用 tailBlock.nodes（当前帧的完整 tail AST，与后端 prev_tail_ast 的 diff 基线
-  // 完全一致），而非 tailSnapshot（仅在 epoch reset 时刷新，增量增长期间已过期）。
-  // 用过期快照重建会导致 registry 与后端基线错位，后续增量 mutation 接连失败甚至成环。
-  return props.message.tailBlock?.nodes || props.message.tailSnapshot || [];
+  const frameSnapshot = props.message.tailFrame?.reset
+    ? props.message.tailFrame.snapshot
+    : undefined;
+  return frameSnapshot || props.message.tailBlock?.nodes || [];
 }
 
 function rebuildTailSnapshot(sandbox: HTMLElement): void {
@@ -116,23 +122,36 @@ function rebuildTailSnapshot(sandbox: HTMLElement): void {
   localTailRevision = props.message.tailFrame?.revision ?? localTailRevision;
 }
 
-function handleAstFrameFailure(sandbox: HTMLElement, reason: string): void {
+function requestCurrentTailSnapshot(reason: string): Promise<boolean> {
+  if (astRecoveryPromise) return astRecoveryPromise;
+  const key = sessionStore.currentConversationKey;
+  if (!key) return Promise.resolve(false);
+
+  isAstRecoveryPending.value = true;
+  astRecoveryPromise = streamStore.requestAuroraSnapshot(
+    key.ownerId,
+    key.ownerType,
+    key.topicId,
+    props.message.id,
+    reason,
+  ).finally(() => {
+    isAstRecoveryPending.value = false;
+    astRecoveryPromise = null;
+  });
+  return astRecoveryPromise;
+}
+
+function handleAstFrameFailure(_sandbox: HTMLElement, reason: string): void {
   astFailureCount += 1;
   if (import.meta.env.DEV && isAstDebugEnabled()) {
     astDebugLog(`[AST Diff Recovery] ${props.message.id}: ${reason}. failureCount=${astFailureCount}`);
   }
-  if (getTailSnapshotNodes().length > 0) {
-    rebuildTailSnapshot(sandbox);
-    // 【意图性设计说明】：此处直接 return 退出，不执行下方的关闭降级逻辑，是有意为之的保活设计。
-    // 在流式输出过程中，哪怕某些中间帧的 AST 增量解析/渲染出现临时局部错乱报错，我们也优先依赖 
-    // rebuildTailSnapshot() 在微任务/渲染帧内进行全量快照重刷，而不是彻底降级退回到普通 HTML 
-    // 渲染（那会导致流式组件切换、DOM 物理销毁重建以及严重的布局物理抖动和输入框焦点丢失）。
-    return;
-  }
-  if (astFailureCount >= 2) {
-    enableAstDiff.value = false;
-    cleanupRegistry(props.message.id);
-  }
+  void requestCurrentTailSnapshot(reason).then((recovered) => {
+    if (!recovered && astFailureCount >= 2) {
+      enableAstDiff.value = false;
+      cleanupRegistry(props.message.id);
+    }
+  });
 }
 
 // === Mermaid FullScreen States ===
@@ -905,7 +924,7 @@ watch(
       localTailEpoch = -1;
       localTailRevision = -1;
       lastSandbox = sandbox;
-      if (getTailSnapshotNodes().length > 0) {
+      if (frame?.reset !== true && props.message.tailBlock?.nodes) {
         rebuildTailSnapshot(sandbox); // 内部已将 localTailEpoch/Revision 同步到当前 frame
         astFailureCount = 0;
         // 认领当前帧，避免下方 reset 分支对同一帧重复重建（新 sandbox 时 localTailEpoch 刚被重置，
@@ -913,6 +932,13 @@ watch(
         if (frame) {
           lastAppliedFrameSeq = frame.frameSeq;
         }
+      } else if (
+        frame
+        && frame.frameSeq > 1
+        && !(frame.reset === true && frame.snapshot !== undefined)
+      ) {
+        void requestCurrentTailSnapshot("sandbox_remount");
+        return;
       }
     }
 
@@ -934,18 +960,21 @@ watch(
     }
 
     if (explicitReset) {
+      const snapshot = frame.snapshot ?? props.message.tailBlock?.nodes;
+      const canStartFromEmpty = frame.reset !== true
+        && frame.frameSeq === 1
+        && lastAppliedFrameSeq === 0;
+      if (snapshot === undefined && !canStartFromEmpty) {
+        void requestCurrentTailSnapshot("reset_without_snapshot");
+        return;
+      }
       sandbox.innerHTML = '';
       cleanupRegistry(props.message.id);
       localTailStreamId = incomingStreamId;
       localTailEpoch = incomingEpoch;
       localTailRevision = incomingRevision;
-      lastAppliedFrameSeq = frame.frameSeq;
-      astFailureCount = 0;
-
-      const snapshot = frame.snapshot ?? props.message.tailBlock?.nodes ?? [];
-      if (snapshot.length > 0) {
+      if (snapshot !== undefined) {
         rebuildSnapshot(snapshot, props.message.id, sandbox);
-        return;
       }
     }
 
@@ -954,6 +983,7 @@ watch(
       lastAppliedFrameSeq = frame.frameSeq;
       localTailStreamId = incomingStreamId;
       localTailRevision = incomingRevision;
+      astFailureCount = 0;
       return;
     }
 
@@ -1067,8 +1097,8 @@ onUnmounted(() => {
             <!-- 尾部流式推测渲染（只对最后一个活跃气泡生效，且正在流式、有 tailBlock 时渲染，完美拼合在气泡正文末尾） -->
             <div v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && message.tailBlock" class="streaming-tail opacity-90">
               <div
-                v-if="isPlainTailFallback"
-                data-tail-render-mode="plaintext"
+                v-if="isPlainTailFallback || isAstRecoveryPending"
+                :data-tail-render-mode="isAstRecoveryPending ? 'recovery-text' : 'plaintext'"
                 class="vcp-markdown-block whitespace-pre-wrap break-words"
               >{{ message.tailBlock.content || '' }}</div>
               <div v-else-if="useAstForCurrentTail && isInlineHtmlBlock(message.tailBlock.type)">

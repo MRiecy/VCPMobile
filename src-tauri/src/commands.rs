@@ -32,6 +32,7 @@ macro_rules! app_command_handler {
         use crate::vcp_modules::avatar_service::{
             batch_get_avatars, get_avatar, save_avatar_data, store_dominant_color,
         };
+        use crate::vcp_modules::aurora_pipeline::rebuild_aurora_snapshot;
         use crate::vcp_modules::chat_manager::{
             append_single_message, delete_messages, load_chat_history, load_chat_history_around,
             load_chat_history_streamed, patch_single_message, truncate_history_after_message,
@@ -173,6 +174,7 @@ macro_rules! app_command_handler {
                 process_message_content,
                 re_render_message,
                 rebuild_all_pre_renders,
+                rebuild_aurora_snapshot,
                 search_messages_fts,
                 truncate_history_after_message,
                 // ── VCP 连接与生成控制（vcp_client）──

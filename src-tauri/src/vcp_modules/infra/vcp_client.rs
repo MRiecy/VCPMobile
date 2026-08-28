@@ -18,7 +18,7 @@ use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, AuroraUpdate};
+use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, AuroraUpdate, AuroraUpdateKind};
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
@@ -1162,10 +1162,18 @@ async fn handle_streaming_request<R: Runtime>(
     last_event_index: Option<i64>,
     initial_content: Option<String>,
 ) -> Result<(Value, bool), VcpRequestFailure> {
-    let send_stream_event = |event: StreamEvent| {
+    let send_stream_event = |event: StreamEvent| -> bool {
         if let Some(ref ch) = stream_channel {
-            let _ = ch.send(event);
+            if let Err(error) = ch.send(event) {
+                log::error!(
+                    "[VCPClient] Failed to send stream event for {}: {}",
+                    message_id,
+                    error
+                );
+                return false;
+            }
         }
+        true
     };
 
     let message_id_inner = message_id.clone();
@@ -1197,39 +1205,22 @@ async fn handle_streaming_request<R: Runtime>(
         }
     }
 
-    let send_aurora_update = |buffer: &mut AuroraBuffer,
-                              stable_changed: bool,
-                              tail_changed: bool,
-                              finish_reason: Option<String>| {
+    let send_aurora_update = |buffer: &mut AuroraBuffer, finish_reason: Option<String>| {
         let is_final = finish_reason.is_some();
-        let chunk = buffer.take_chunk();
-        let tail_frame = buffer.take_tail_frame();
-        let update = AuroraUpdate {
-            stream_id: Some(buffer.stream_id),
-            stable_blocks: if stable_changed {
-                Some(buffer.stable_blocks.clone())
-            } else {
-                None
-            },
-            stable_changed,
-            tail_block: if tail_changed {
-                buffer.tail_block.clone()
-            } else {
-                None
-            },
-            tail_changed,
-            tail_frame,
-            content: if is_final {
-                Some(buffer.full_text.clone())
-            } else {
-                None
-            },
-            chunk,
+        let prepared = if is_final {
+            Some(buffer.prepare_snapshot_update())
+        } else {
+            buffer.prepare_delta_update()
+        };
+        let Some((update, commit)) = prepared else {
+            return;
         };
         let mut event =
             StreamEvent::aurora(message_id_inner.clone(), update, context_inner.clone());
         event.finish_reason = finish_reason;
-        send_stream_event(event);
+        if send_stream_event(event) {
+            buffer.commit_delivery(commit);
+        }
     };
 
     let flush_aurora_parse = |buffer: &mut AuroraBuffer,
@@ -1291,14 +1282,15 @@ async fn handle_streaming_request<R: Runtime>(
                     aurora_buffer.append_chunk(content);
                     let _ = aurora_buffer.process_queue();
 
-                    // 暖接续先用 helper 权威全文覆盖 content/stable/tail 数据，但不立即重建 DOM。
-                    // 首个真实新 frame 会携带新的 streamId，由前端以当前 tailBlock.nodes 原子接管。
-                    let baseline = aurora_buffer.take_recovery_baseline();
-                    send_stream_event(StreamEvent::aurora(
+                    // 暖接续只发送一次 helper 权威 Snapshot，并以 reset frame 建立新序列基线。
+                    let (baseline, commit) = aurora_buffer.prepare_snapshot_update();
+                    if send_stream_event(StreamEvent::aurora(
                         message_id_inner.clone(),
                         baseline,
                         context_inner.clone(),
-                    ));
+                    )) {
+                        aurora_buffer.commit_delivery(commit);
+                    }
                 }
                 if is_resume {
                     state = State::Resuming;
@@ -1367,7 +1359,10 @@ async fn handle_streaming_request<R: Runtime>(
                             log::warn!("[VCPClient] Request aborted during connection: {}", message_id_inner);
                             flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
                             aurora_buffer.finalize();
-                            send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()));
+                            send_aurora_update(
+                                &mut aurora_buffer,
+                                Some("cancelled_by_user".to_string()),
+                            );
                             return Ok((json!({ "fullContent": aurora_buffer.full_text, "streamingStarted": false }), true));
                         }
                         response_res = res_future => {
@@ -1415,7 +1410,10 @@ async fn handle_streaming_request<R: Runtime>(
                             }
                             flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
                             aurora_buffer.finalize();
-                            send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()));
+                            send_aurora_update(
+                                &mut aurora_buffer,
+                                Some("cancelled_by_user".to_string()),
+                            );
                             return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
                         }
                         _ = tokio::time::sleep(Duration::from_secs(2)) => {}
@@ -1475,7 +1473,10 @@ async fn handle_streaming_request<R: Runtime>(
                                     }
                                     flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
                                     aurora_buffer.finalize();
-                                    send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()));
+                                    send_aurora_update(
+                                        &mut aurora_buffer,
+                                        Some("cancelled_by_user".to_string()),
+                                    );
                                     return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
                                 }
                                 next_line = reader.next() => {
@@ -1516,16 +1517,13 @@ async fn handle_streaming_request<R: Runtime>(
                                                         }
                                                         if let Some(delta) = data_val.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|o| o.get("delta")).and_then(|d| d.get("content")).and_then(|s| s.as_str()) {
                                                             pending_aurora_chunk.push_str(delta);
-                                                            let (stable_changed, tail_changed) = flush_aurora_parse(
+                                                            let _ = flush_aurora_parse(
                                                                 &mut aurora_buffer,
                                                                 &mut pending_aurora_chunk,
                                                                 &mut last_aurora_parse,
                                                                 false,
                                                             );
-                                                            let has_mutations = !aurora_buffer.pending_mutations.is_empty();
-                                                            if stable_changed || tail_changed || has_mutations {
-                                                                send_aurora_update(&mut aurora_buffer, stable_changed, tail_changed, None);
-                                                            }
+                                                            send_aurora_update(&mut aurora_buffer, None);
                                                         }
                                                     }
                                                 } else if event_type == "closed" {
@@ -1619,7 +1617,10 @@ async fn handle_streaming_request<R: Runtime>(
                                     log::warn!("[VCPClient] Request aborted during streaming: {}", message_id_inner);
                                     flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
                                     aurora_buffer.finalize();
-                                    send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()));
+                                    send_aurora_update(
+                                        &mut aurora_buffer,
+                                        Some("cancelled_by_user".to_string()),
+                                    );
                                     return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
                                 }
                                 next_line = line_stream.next() => {
@@ -1637,16 +1638,13 @@ async fn handle_streaming_request<R: Runtime>(
                                                     }
                                                     if let Some(delta) = val.get("choices").and_then(|c| c.as_array()).and_then(|a| a.first()).and_then(|o| o.get("delta")).and_then(|d| d.get("content")).and_then(|s| s.as_str()) {
                                                         pending_aurora_chunk.push_str(delta);
-                                                        let (stable_changed, tail_changed) = flush_aurora_parse(
+                                                        let _ = flush_aurora_parse(
                                                             &mut aurora_buffer,
                                                             &mut pending_aurora_chunk,
                                                             &mut last_aurora_parse,
                                                             false,
                                                         );
-                                                        let has_mutations = !aurora_buffer.pending_mutations.is_empty();
-                                                        if stable_changed || tail_changed || has_mutations {
-                                                            send_aurora_update(&mut aurora_buffer, stable_changed, tail_changed, None);
-                                                        }
+                                                        send_aurora_update(&mut aurora_buffer, None);
                                                     }
                                                 }
                                             }
@@ -1683,7 +1681,7 @@ async fn handle_streaming_request<R: Runtime>(
                         true,
                     );
                     aurora_buffer.finalize();
-                    send_aurora_update(&mut aurora_buffer, true, true, last_finish_reason.clone());
+                    send_aurora_update(&mut aurora_buffer, last_finish_reason.clone());
                     #[cfg(target_os = "android")]
                     {
                         if let Err(error) =
@@ -1757,7 +1755,10 @@ async fn handle_streaming_request<R: Runtime>(
                         }
                         flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
                         aurora_buffer.finalize();
-                        send_aurora_update(&mut aurora_buffer, true, true, Some("cancelled_by_user".to_string()));
+                        send_aurora_update(
+                            &mut aurora_buffer,
+                            Some("cancelled_by_user".to_string()),
+                        );
                         return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
                     }
                     _ = tokio::time::sleep(backoff) => {}
@@ -1850,11 +1851,13 @@ async fn handle_non_streaming_request(
 
     // 发送单次 aurora 事件以将文本呈现在 UI 中
     let update = AuroraUpdate {
+        kind: AuroraUpdateKind::Snapshot,
         stream_id: None,
         stable_blocks: None,
-        stable_changed: false,
+        stable_append: None,
         tail_block: None,
-        tail_changed: false,
+        tail_mode: None,
+        tail_op: None,
         tail_frame: None,
         content: Some(full_content.clone()),
         chunk: None,
