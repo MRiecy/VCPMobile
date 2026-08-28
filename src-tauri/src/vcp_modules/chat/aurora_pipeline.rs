@@ -183,10 +183,10 @@ impl AuroraBuffer {
         }
 
         let prev_stable_count = self.stable_blocks.len();
-        let prev_tail = self.tail_content.clone();
 
         // 1. 增量解析全文，产出本次新增的已闭合块 + 尾部纯文本
         let (new_blocks, new_tail) = self.parser.process(&self.full_text);
+        let tail_changed = self.tail_content != new_tail;
 
         if !new_blocks.is_empty() {
             self.stable_blocks.extend(new_blocks);
@@ -204,31 +204,41 @@ impl AuroraBuffer {
         //    当 tail 超过 MAX_SPECULATIVE_TAIL_AST_BYTES 时跳过 AST 解析，
         //    避免在流式热路径上产生性能悬崖
         if !self.tail_content.is_empty() {
-            let nodes = if crate::vcp_modules::content_parser::is_html_tag_block(&self.tail_content)
-            {
-                // 如果是以 HTML 容器/样式标签开头，直接将其作为 RawHtml 块，防止 pulldown_cmark 将内部 CSS 规则或内联样式解析为缩进代码块
-                Some(vec![
-                    crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(
-                        self.tail_content.clone(),
-                    ),
-                ])
-            } else if self.tail_content.len() <= MAX_SPECULATIVE_TAIL_AST_BYTES {
-                Some(
-                    crate::vcp_modules::pre_renderer::parse_markdown_to_ast_streaming(
-                        &self.tail_content,
-                    ),
-                )
-            } else {
-                None
-            };
+            let (nodes, nodes_need_hashing) =
+                if crate::vcp_modules::content_parser::is_html_tag_block(&self.tail_content) {
+                    // 如果是以 HTML 容器/样式标签开头，直接将其作为 RawHtml 块，防止 pulldown_cmark 将内部 CSS 规则或内联样式解析为缩进代码块
+                    (
+                        Some(vec![
+                            crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(
+                                self.tail_content.clone(),
+                            ),
+                        ]),
+                        true,
+                    )
+                } else if self.tail_content.len() <= MAX_SPECULATIVE_TAIL_AST_BYTES {
+                    (
+                        Some(
+                            crate::vcp_modules::pre_renderer::parse_markdown_to_ast_streaming(
+                                &self.tail_content,
+                            ),
+                        ),
+                        false,
+                    )
+                } else {
+                    (None, false)
+                };
             let hash = crate::vcp_modules::sync_hash::HashAggregator::compute_content_hash(
                 &self.tail_content,
             );
 
             // 🆕 如果解析出了 AST，对其计算 Diff，生成增量渲染指令集
             if let Some(mut new_nodes) = nodes.clone() {
-                for node in &mut new_nodes {
-                    node.compute_hashes_recursively();
+                // parser 返回的树已经递归 hash；只有绕过 parser 手工构造的 RawHtml clone
+                // 需要补一次。只处理 diff 基线副本，保持 tailBlock 的既有 wire 形态不变。
+                if nodes_need_hashing {
+                    for node in &mut new_nodes {
+                        node.compute_hashes_recursively();
+                    }
                 }
                 // reset 帧会被 take_tail_frame 强制清空 mutations 并改发 snapshot，
                 // 故此时跳过 diff_ast（其结果必被丢弃），直接记录 snapshot，省去一次全量 diff。
@@ -276,7 +286,6 @@ impl AuroraBuffer {
         }
 
         let stable_changed = self.stable_blocks.len() != prev_stable_count;
-        let tail_changed = self.tail_content != prev_tail;
 
         (stable_changed, tail_changed)
     }
@@ -348,13 +357,59 @@ mod tests {
     fn test_normal_tail_uses_ast() {
         let mut buffer = AuroraBuffer::new();
         buffer.append_chunk("正常一段流式文本，尚未闭合");
-        buffer.process_queue();
-        let tb = buffer.tail_block.as_ref().expect("tail_block 应存在");
-        if let StreamBlock::Markdown { nodes, .. } = tb {
-            assert!(nodes.is_some(), "小体量 tail 应解析出 AST 节点");
-        } else {
-            panic!("expected markdown tail block");
+        let (stable_changed, tail_changed) = buffer.process_queue();
+        assert!(!stable_changed);
+        assert!(tail_changed);
+        {
+            let tb = buffer.tail_block.as_ref().expect("tail_block 应存在");
+            if let StreamBlock::Markdown { nodes, .. } = tb {
+                let nodes = nodes.as_deref().expect("小体量 tail 应解析出 AST 节点");
+                assert!(nodes[0].get_hash().is_some());
+                assert_eq!(nodes, buffer.prev_tail_ast.as_slice());
+            } else {
+                panic!("expected markdown tail block");
+            }
         }
+        let _ = buffer.take_tail_frame();
+
+        assert_eq!(buffer.process_queue(), (false, false));
+        assert!(buffer.take_tail_frame().is_none());
+
+        buffer.append_chunk("，继续");
+        assert_eq!(buffer.process_queue(), (false, true));
+        let frame = buffer.take_tail_frame().expect("append tail frame");
+        assert!(frame
+            .mutations
+            .iter()
+            .any(|mutation| matches!(mutation, AstMutation::AppendText { .. })));
+    }
+
+    #[test]
+    fn raw_html_keeps_wire_shape_but_hashes_the_diff_baseline_once() {
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk("<div>one");
+        assert_eq!(buffer.process_queue(), (false, true));
+
+        let tail_nodes = match buffer.tail_block.as_ref().expect("raw tail block") {
+            StreamBlock::Markdown {
+                nodes: Some(nodes), ..
+            } => nodes,
+            other => panic!("expected raw markdown tail block, got {other:?}"),
+        };
+        assert!(tail_nodes[0].get_hash().is_none());
+        assert!(buffer.prev_tail_ast[0].get_hash().is_some());
+        let _ = buffer.take_tail_frame();
+
+        assert_eq!(buffer.process_queue(), (false, false));
+        assert!(buffer.take_tail_frame().is_none());
+
+        buffer.append_chunk("two");
+        assert_eq!(buffer.process_queue(), (false, true));
+        let frame = buffer.take_tail_frame().expect("raw replace frame");
+        assert!(frame
+            .mutations
+            .iter()
+            .any(|mutation| matches!(mutation, AstMutation::Replace { .. })));
     }
 
     #[test]
