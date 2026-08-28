@@ -786,7 +786,7 @@ fn copy_verified_candidate(
     set_mode(destination, 0o600)?;
     let mut digest = Sha256::new();
     let mut total = 0u64;
-    let mut buffer = [0u8; COPY_BUFFER_BYTES];
+    let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
     loop {
         let read = source.read(&mut buffer).map_err(|error| {
             SkillError::integrity(format!("cannot read picked Skill file: {error}"))
@@ -830,7 +830,7 @@ fn verify_regular_file_hash(
     let mut file = open_regular_nofollow(path, max_bytes)?;
     let mut digest = Sha256::new();
     let mut total = 0u64;
-    let mut buffer = [0u8; COPY_BUFFER_BYTES];
+    let mut buffer = vec![0u8; COPY_BUFFER_BYTES];
     loop {
         let read = file.read(&mut buffer).map_err(|error| {
             SkillError::integrity(format!("cannot read owned Skill candidate: {error}"))

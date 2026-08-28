@@ -17,6 +17,7 @@ use super::protocol::MAX_BOUNDED_READ_BYTES;
 
 const MAX_OUTPUT_GC_ENTRIES: usize = 2048;
 const MAX_WORKSPACE_ENTRIES: usize = 100_000;
+const ARTIFACT_HASH_BUFFER_BYTES: usize = 64 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -585,8 +586,21 @@ pub(super) fn hash_output_artifact_pair(
         .ok_or_else(|| "CLI output artifact size overflow".to_string())?;
     let mut hasher = Sha256::new();
     hasher.update(b"VCPMobileCLIOutputPair\0v1\0");
-    hash_artifact_stream(&mut hasher, b"stdout\0", &stdout_path, stdout_bytes)?;
-    hash_artifact_stream(&mut hasher, b"stderr\0", &stderr_path, stderr_bytes)?;
+    let mut buffer = vec![0_u8; ARTIFACT_HASH_BUFFER_BYTES];
+    hash_artifact_stream(
+        &mut hasher,
+        &mut buffer,
+        b"stdout\0",
+        &stdout_path,
+        stdout_bytes,
+    )?;
+    hash_artifact_stream(
+        &mut hasher,
+        &mut buffer,
+        b"stderr\0",
+        &stderr_path,
+        stderr_bytes,
+    )?;
     Ok(OutputArtifactDigest {
         sha256: hex::encode(hasher.finalize()),
         size_bytes,
@@ -595,6 +609,7 @@ pub(super) fn hash_output_artifact_pair(
 
 fn hash_artifact_stream(
     hasher: &mut Sha256,
+    buffer: &mut [u8],
     label: &[u8],
     path: &Path,
     expected_bytes: u64,
@@ -612,7 +627,6 @@ fn hash_artifact_stream(
     let mut file = std::fs::File::open(path)
         .map_err(|error| format!("cannot open CLI output artifact: {error}"))?;
     let mut remaining = expected_bytes;
-    let mut buffer = [0_u8; 64 * 1024];
     while remaining > 0 {
         let wanted = remaining.min(buffer.len() as u64) as usize;
         let read = file
@@ -1041,7 +1055,10 @@ mod tests {
         let first = hash_output_artifact_pair(directory.path(), &stdout, &stderr, 6, 6)
             .expect("hash artifact pair");
         assert_eq!(first.size_bytes, 12);
-        assert_eq!(first.sha256.len(), 64);
+        assert_eq!(
+            first.sha256,
+            "57df37a083f1cb73b61b67ce3cb9d864129f8759a1853fec80f240ac8580a204"
+        );
 
         std::fs::write(&stderr, b"stderX").expect("mutate stderr");
         let mutated = hash_output_artifact_pair(directory.path(), &stdout, &stderr, 6, 6)
