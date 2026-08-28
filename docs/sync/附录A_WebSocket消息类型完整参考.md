@@ -194,11 +194,12 @@ scope: 双端
 
 ---
 
-## 表12：移动端 `SyncCommand` 枚举与 WS 消息映射
+## 表12：移动端内部触发点与 WS 消息映射
 
-| `SyncCommand` 变体 | 触发 WS 消息 | 触发时机 | 发送目标 |
-|-------------------|------------|---------|---------|
-| `StartManualSync` | `VERSION_CHECK`, `PHASE_START`, `SYNC_MANIFEST_REQUEST` | 用户点击同步 | 桌面端 |
+| 内部触发点 | 触发 WS 消息 | 触发时机 | 发送目标 |
+|-----------|------------|---------|---------|
+| 版本握手 / attempt 建立 | `VERSION_CHECK`, `PHASE_START` | 每次连接成功后 | 桌面端 |
+| attempt-local Owner kickoff | `SYNC_MANIFEST_REQUEST` | 每个 attempt 进入主循环时 | 桌面端 |
 | `StartTopicMetadata` | `PHASE_START`, Topic Manifest | Phase 1 完成且存在变更 Owner | 桌面端 |
 | `StartTopicValidation` | `SYNC_TOPIC_DIFF_REQUEST` | Phase 2 完成 | 桌面端 |
 | `StartMessages` | `PHASE_START`, `SYNC_MESSAGE_DIFF_REQUEST` | Phase 2.5 有变更 Topic | 桌面端 |

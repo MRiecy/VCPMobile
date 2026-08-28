@@ -648,7 +648,6 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             "重启电脑端应用后重新同步；若仍失败，请保留最新日志。",
         ),
         "SYNC_STATE_POISONED"
-        | "SYNC_START_CHANNEL_FAILED"
         | "SYNC_DIFF_HANDLER_FAILED"
         | "SYNC_ATTEMPT_FAILED"
         | "HTTP_CLIENT_INIT_FAILED" => definition(

@@ -935,7 +935,6 @@ pub enum SyncCommand {
         target: DeleteTarget,
         deleted_at: i64,
     },
-    StartManualSync,
     SendMessageDiff {
         attempt_id: u64,
         topics: Vec<MessageDiffTopicState>,
@@ -1550,6 +1549,9 @@ async fn run_sync_session(
                 let mut sync_success = false;
                 let mut restart_failure: Option<AttemptRestartFailure> = None;
                 let mut heartbeat_interval = tokio::time::interval(Duration::from_secs(15));
+                // Keep kickoff in the biased attempt loop: cancellation and the initial heartbeat
+                // retain priority, while every reconnect starts Owner sync before shared commands.
+                let mut owner_manifest_pending = true;
 
                 'attempt: loop {
                     tokio::select! {
@@ -1567,6 +1569,60 @@ async fn run_sync_session(
                                     &error,
                                 ).await;
                                 break 'attempt;
+                            }
+                        }
+                        _ = std::future::ready(()), if owner_manifest_pending => {
+                            owner_manifest_pending = false;
+                            let db = handle_clone.state::<DbState>();
+                            manifest_phase.store(1, Ordering::SeqCst);
+                            match Phase1Metadata::build_owner_manifest(&db.pool).await {
+                                Ok(manifest) => {
+                                    expected_manifest_count.store(1, Ordering::SeqCst);
+                                    manifest_responses_received.store(0, Ordering::SeqCst);
+                                    match expected_manifest_types.lock() {
+                                        Ok(mut expected) => {
+                                            *expected = HashSet::from([ManifestType::Owner]);
+                                        }
+                                        Err(_) => {
+                                            let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
+                                                attempt_id,
+                                                code: "SYNC_STATE_POISONED".to_string(),
+                                                message: "Expected manifest type state is poisoned".to_string(),
+                                                failed_topic_ids: Vec::new(),
+                                            });
+                                            continue 'attempt;
+                                        }
+                                    }
+
+                                    let frame = ManifestRequestFrame::new(manifest);
+                                    if let Err(error) = send_ws_frame(&mut ws_stream, &frame).await {
+                                        terminate_after_protocol_send_failure(
+                                            &handle_clone,
+                                            &mut ws_stream,
+                                            "owner metadata manifest",
+                                            &error,
+                                        ).await;
+                                        break 'attempt;
+                                    }
+                                    task_tracker
+                                        .spawn(enforce_manifest_response_deadline(
+                                            expected_manifest_types.clone(),
+                                            manifest_phase.clone(),
+                                            1,
+                                            tx_internal.clone(),
+                                            attempt_id,
+                                            PHASE_RESPONSE_TIMEOUT,
+                                        ))
+                                        .await;
+                                }
+                                Err(error) => {
+                                    let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
+                                        attempt_id,
+                                        code: "OWNER_MANIFEST_DB_FAILED".to_string(),
+                                        message: format!("Failed to build Owner manifest: {error}"),
+                                        failed_topic_ids: Vec::new(),
+                                    });
+                                }
                             }
                         }
                         Some(cmd) = pipeline_rx.recv() => {
@@ -2194,59 +2250,6 @@ async fn run_sync_session(
                                             &error,
                                         ).await;
                                         break 'attempt;
-                                    }
-                                },
-                                SyncCommand::StartManualSync => {
-                                    let db = handle_clone.state::<DbState>();
-                                    manifest_phase.store(1, Ordering::SeqCst);
-                                    match Phase1Metadata::build_owner_manifest(&db.pool).await {
-                                        Ok(manifest) => {
-                                            expected_manifest_count.store(1, Ordering::SeqCst);
-                                            manifest_responses_received.store(0, Ordering::SeqCst);
-                                            match expected_manifest_types.lock() {
-                                                Ok(mut expected) => {
-                                                    *expected = HashSet::from([ManifestType::Owner]);
-                                                }
-                                                Err(_) => {
-                                                    let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
-                                                        attempt_id,
-                                                        code: "SYNC_STATE_POISONED".to_string(),
-                                                        message: "Expected manifest type state is poisoned".to_string(),
-                                                        failed_topic_ids: Vec::new(),
-                                                    });
-                                                    continue 'attempt;
-                                                }
-                                            }
-
-                                            let frame = ManifestRequestFrame::new(manifest);
-                                            if let Err(error) = send_ws_frame(&mut ws_stream, &frame).await {
-                                                terminate_after_protocol_send_failure(
-                                                    &handle_clone,
-                                                    &mut ws_stream,
-                                                    "owner metadata manifest",
-                                                    &error,
-                                                ).await;
-                                                break 'attempt;
-                                            }
-                                            task_tracker
-                                                .spawn(enforce_manifest_response_deadline(
-                                                    expected_manifest_types.clone(),
-                                                    manifest_phase.clone(),
-                                                    1,
-                                                    tx_internal.clone(),
-                                                    attempt_id,
-                                                    PHASE_RESPONSE_TIMEOUT,
-                                                ))
-                                                .await;
-                                        }
-                                        Err(error) => {
-                                            let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
-                                                attempt_id,
-                                                code: "OWNER_MANIFEST_DB_FAILED".to_string(),
-                                                message: format!("Failed to build Owner manifest: {error}"),
-                                                failed_topic_ids: Vec::new(),
-                                            });
-                                        }
                                     }
                                 },
                                 SyncCommand::SendMessageDiff { attempt_id: command_attempt, topics } => {
@@ -3252,9 +3255,6 @@ pub async fn start_manual_sync(
         .map_err(|error| encode_sync_command_error(error.code, &error.detail))?;
 
     let (tx, rx) = mpsc::unbounded_channel::<SyncCommand>();
-    tx.send(SyncCommand::StartManualSync).map_err(|error| {
-        encode_sync_command_error("SYNC_START_CHANNEL_FAILED", &error.to_string())
-    })?;
     let session_id = state.next_session_id.fetch_add(1, Ordering::SeqCst) + 1;
     let command_tx = tx.clone();
     {
