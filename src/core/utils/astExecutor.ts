@@ -608,7 +608,10 @@ function executeMutation(
         if (mutation.key === "level" && /^H[1-6]$/i.test(node.tagName)) {
           const level = Math.max(1, Math.min(6, Number(mutation.value) || 1));
           const replacement = document.createElement(`h${level}`);
-          replacement.innerHTML = node.innerHTML;
+          // 移动现有子节点而不是 innerHTML 重建，保证 registry 中的后代引用仍指向存活 DOM。
+          while (node.firstChild) {
+            replacement.appendChild(node.firstChild);
+          }
           replacement.className = node.className;
           for (const attr of Array.from(node.attributes)) {
             if (attr.name !== "class") replacement.setAttribute(attr.name, attr.value);
