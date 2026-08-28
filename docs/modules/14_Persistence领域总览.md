@@ -292,7 +292,7 @@ CREATE TABLE IF NOT EXISTS active_generations (
 
 ## 3. SQLite 写队列当前算法（`db_write_queue.rs`）
 
-> **状态边界（2026-08-28）**：本节描述阶段 1 提交 `b677529` 与阶段 2 有界微批处理落地后的真实代码。这里的“当前”是 **FIFO 贪婪前缀 + 2ms quiet / 10ms hard 双截止时间**；相邻同 Topic 合并和运行时 bind 预算仍分别属于阶段 3、4。
+> **状态边界（2026-08-28）**：本节描述阶段 1 提交 `b677529`、阶段 2 有界微批处理与阶段 3 相邻同 Topic 合并落地后的真实代码。这里的“当前”是 **FIFO 贪婪前缀 + 2ms quiet / 10ms hard 双截止时间 + 事务内保序合并**；运行时 bind 预算仍属于阶段 4。
 >
 > 一句话概括：多个同步 Pull 生产者把任务送入容量 32 的有界通道；唯一 Worker 按 FIFO 取“当前预算内最长连续前缀”，用一个持久 rusqlite 连接在单个事务中执行；`Flush` 是排在队列中的提交屏障。
 
@@ -397,7 +397,8 @@ flowchart TD
     L -- "否" --> O["追加到 batch<br/>更新计数并重置 quiet<br/>但不得越过 hard"]
     O --> H
 
-    N --> P["spawn_blocking<br/>FIFO 执行一个事务"]
+    N --> V["只合并相邻、同 Topic、ID 不交叠<br/>且合计不超过 500 的消息任务"]
+    V --> P["spawn_blocking<br/>FIFO 执行一个事务"]
     P --> Q{"事务结果"}
     Q -- "成功" --> R["success_count += 1"]
     Q -- "失败 / JoinError" --> S["记录 pending_errors<br/>Worker 继续运行"]
@@ -458,7 +459,8 @@ sequenceDiagram
     Q-->>W: M1
     Q-->>W: M2
     Note over W: 批次达到 500 条，停止收集
-    W->>DB: BEGIN；执行 M1；执行 M2；COMMIT
+    Note over W: M1 + M2 合并为一个 500 条任务
+    W->>DB: BEGIN；执行一次 500 条消息管线；COMMIT
     DB-->>W: commit OK
 
     Q-->>W: M3
@@ -469,7 +471,14 @@ sequenceDiagram
     W-->>P: Flush ACK = Ok
 ```
 
-注意：M1 和 M2 虽然共享一个 SQLite 事务，但当前不会合并成一个 `TopicMessages { writes: 500 }`。Worker 仍会调用两次完整的消息批处理函数，因此父 Topic 校验、existing-state 查询和各副表阶段也执行两轮。这是阶段 3 才考虑的“相邻同 Topic 合并”，不属于阶段 2。
+M1 和 M2 在收集阶段仍按两个任务计入 32 任务 / 500 消息预算；收集结束后才合并成一个 `TopicMessages { writes: 500 }`，不会因为任务数减少而继续读取更多队列项。这样只执行一次父 Topic 校验、existing-state 查询和消息原子子管线。
+
+合并器保持以下边界：
+
+- 只查看结果向量的最后一个任务，因此天然只合并相邻项，不会跨 Topic 重排。
+- Agent、Group、Avatar、Topic 元数据任务都会截断相邻关系；Flush 已在收集阶段截断整个事务。
+- 合并后消息总数仍不得超过 500。
+- 两个任务若存在相同 `msg_id`，保守地保持为两个任务，避免改变顺序 UPSERT 对 FTS/附件副表的语义。正常 Pull 帧更早已拒绝重复消息 ID，这一检查保护公开任务类型的非标准调用者。
 
 ### 3.6 2ms quiet + 10ms hard 双截止时间
 
@@ -590,7 +599,7 @@ sequenceDiagram
 | 顺序 | 严格 FIFO、只取连续前缀 | 保证实体依赖与 Flush 屏障，继续保留 |
 | 批量选择 | 32 任务 / 正常 500 消息内的最大前缀 | 对“最少事务数”已足够高效，不换 knapsack |
 | 时间 | 2ms quiet + 首任务固定 10ms hard | 同时捕获突发并限制收集尾延迟 |
-| 相邻同 Topic | 可共享事务，但不合并 writes | 重复执行消息子管线；阶段 3 再处理 |
+| 相邻同 Topic | 同 Key、ID 不交叠、合计不超过 500 时合并 | 减少父校验、existing-state 与副表管线的重复工作 |
 | SQL 参数 | 固定 999 | 没利用 SQLite 3.51.3 的 32766；阶段 4 先基准 |
 | 字节公平性 | 队列只按任务数/消息数计权 | Avatar/DTO 大小不入队列预算；目前由上游边界兜底 |
 | 优先级 | 无优先队列；Flush 也是 FIFO marker | 正确性优先，不做跨 Topic 重排 |
@@ -610,7 +619,7 @@ flowchart LR
     G -- "是" --> H["提交"]
 ```
 
-阶段 2 的设计原则是：**保留 FIFO 最大前缀贪婪，只给收集期增加不可被后续任务延长的硬上界。** 阶段 3、4 将继续处理相邻任务重复工作和 SQL bind 分块，不引入优先队列、多 writer 或跨 Topic 重排。
+阶段 2 的设计原则是：**保留 FIFO 最大前缀贪婪，只给收集期增加不可被后续任务延长的硬上界。** 阶段 3 随后在已确定的事务前缀内部做保序合并；阶段 4 继续处理 SQL bind 分块。三者都不引入优先队列、多 writer 或跨 Topic 重排。
 
 ---
 

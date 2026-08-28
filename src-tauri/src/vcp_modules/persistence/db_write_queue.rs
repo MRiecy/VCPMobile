@@ -75,7 +75,7 @@ mod tests {
         task_message_count, DbWriteQueue, DbWriteTask, PreparedMessageWrite, BATCH_HARD_WINDOW,
         BATCH_QUIET_WINDOW,
     };
-    use crate::vcp_modules::chat_manager::ChatMessage;
+    use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
     use crate::vcp_modules::sync_dto::{
         AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
     };
@@ -108,6 +108,51 @@ mod tests {
         DbWriteTask::TopicMessages {
             key: TopicKey::new("agent", "owner", topic_id),
             writes,
+        }
+    }
+
+    fn rich_message_task(topic_id: &str, first_id: usize, count: usize) -> DbWriteTask {
+        let writes = (first_id..first_id + count)
+            .map(|message_id| {
+                let timestamp = message_id as u64 + 1;
+                PreparedMessageWrite {
+                    message: ChatMessage {
+                        id: format!("message-{message_id}"),
+                        role: "assistant".into(),
+                        content: format!("content-{message_id}"),
+                        timestamp,
+                        updated_at: Some(timestamp),
+                        topic_id: Some(topic_id.into()),
+                        attachments: Some(vec![Attachment {
+                            r#type: "text/plain".into(),
+                            name: format!("attachment-{message_id}"),
+                            size: 1,
+                            hash: Some(format!("{message_id:064x}")),
+                            status: Some("ready".into()),
+                            attachment_order: Some(0),
+                            created_at: Some(timestamp),
+                            ..Default::default()
+                        }]),
+                        ..Default::default()
+                    },
+                    render_bytes: vec![message_id as u8, 1],
+                    content_hash: format!("content-hash-{message_id}"),
+                }
+            })
+            .collect();
+        DbWriteTask::TopicMessages {
+            key: TopicKey::new("agent", "owner", topic_id),
+            writes,
+        }
+    }
+
+    fn task_message_ids(task: &DbWriteTask) -> Vec<&str> {
+        match task {
+            DbWriteTask::TopicMessages { writes, .. } => writes
+                .iter()
+                .map(|write| write.message.id.as_str())
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -247,6 +292,107 @@ mod tests {
         assert!(batch.flush_tx.is_none());
         assert!(carried_task.is_none());
         assert!(rx.recv().await.is_none());
+    }
+
+    #[test]
+    fn adjacent_pull_chunks_for_the_same_topic_are_coalesced_in_order() {
+        let tasks = vec![
+            message_task("topic", 0, 250),
+            message_task("topic", 250, 250),
+        ];
+
+        let coalesced = DbWriteQueue::coalesce_adjacent_topic_message_tasks(tasks);
+
+        assert_eq!(coalesced.len(), 1);
+        assert_eq!(task_message_count(&coalesced[0]), 500);
+        let ids = task_message_ids(&coalesced[0]);
+        assert_eq!(ids.len(), 500);
+        assert_eq!(ids[0], "message-0");
+        assert_eq!(ids[249], "message-249");
+        assert_eq!(ids[250], "message-250");
+        assert_eq!(ids[499], "message-499");
+    }
+
+    #[test]
+    fn coalescing_never_crosses_topic_or_non_message_boundaries() {
+        let tasks = vec![
+            message_task("topic-a", 0, 100),
+            message_task("topic-a", 100, 100),
+            message_task("topic-b", 200, 100),
+            message_task("topic-a", 300, 100),
+            avatar_task("boundary"),
+            message_task("topic-a", 400, 50),
+            message_task("topic-a", 450, 50),
+        ];
+
+        let coalesced = DbWriteQueue::coalesce_adjacent_topic_message_tasks(tasks);
+
+        assert_eq!(coalesced.len(), 5);
+        assert_eq!(task_message_count(&coalesced[0]), 200);
+        assert_eq!(task_message_count(&coalesced[1]), 100);
+        assert_eq!(task_message_count(&coalesced[2]), 100);
+        assert!(matches!(&coalesced[3], DbWriteTask::Avatar { .. }));
+        assert_eq!(task_message_count(&coalesced[4]), 100);
+    }
+
+    #[test]
+    fn coalescing_refuses_over_budget_or_overlapping_message_ids() {
+        let over_budget = DbWriteQueue::coalesce_adjacent_topic_message_tasks(vec![
+            message_task("topic", 0, 300),
+            message_task("topic", 300, 201),
+        ]);
+        assert_eq!(over_budget.len(), 2);
+
+        let overlapping = DbWriteQueue::coalesce_adjacent_topic_message_tasks(vec![
+            message_task("topic", 0, 250),
+            message_task("topic", 249, 250),
+        ]);
+        assert_eq!(overlapping.len(), 2);
+    }
+
+    #[test]
+    fn coalesced_message_task_updates_every_atomic_side_table_once() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open test database");
+        conn.execute_batch(include_str!("../../../migrations/0100_baseline_v2.sql"))
+            .expect("create baseline schema");
+        conn.execute_batch(
+            "INSERT INTO agents (owner_type, agent_id, name, model, updated_at)
+                 VALUES ('agent', 'owner', 'Owner', '', 1);
+             INSERT INTO topics (
+                 owner_type, owner_id, topic_id, title, created_at, updated_at
+             ) VALUES ('agent', 'owner', 'topic', 'Topic', 1, 1);",
+        )
+        .expect("create live topic");
+        let mut tasks = DbWriteQueue::coalesce_adjacent_topic_message_tasks(vec![
+            rich_message_task("topic", 0, 2),
+            rich_message_task("topic", 2, 2),
+        ]);
+        assert_eq!(tasks.len(), 1);
+
+        let tx = conn.transaction().expect("begin message transaction");
+        match tasks.pop().expect("coalesced task") {
+            DbWriteTask::TopicMessages { key, writes } => {
+                DbWriteQueue::rusqlite_upsert_messages_batch(&tx, &key, writes)
+                    .expect("write coalesced messages");
+            }
+            task => panic!("unexpected coalesced task: {task:?}"),
+        }
+        tx.commit().expect("commit coalesced messages");
+
+        for table in [
+            "messages",
+            "render_cache",
+            "messages_fts",
+            "attachments",
+            "message_attachments",
+        ] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .expect("count side table rows");
+            assert_eq!(count, 4, "unexpected row count in {table}");
+        }
     }
 
     fn assert_queued_owner_root_includes_default(owner_type: &str) {
@@ -676,6 +822,43 @@ impl DbWriteQueue {
         CollectedWriteBatch { tasks, flush_tx }
     }
 
+    fn coalesce_adjacent_topic_message_tasks(tasks: Vec<DbWriteTask>) -> Vec<DbWriteTask> {
+        let mut coalesced = Vec::with_capacity(tasks.len());
+
+        for task in tasks {
+            match task {
+                DbWriteTask::TopicMessages { key, mut writes } => {
+                    if let Some(DbWriteTask::TopicMessages {
+                        key: previous_key,
+                        writes: previous_writes,
+                    }) = coalesced.last_mut()
+                    {
+                        let combined_count = previous_writes.len().saturating_add(writes.len());
+                        if *previous_key == key && combined_count <= MAX_MESSAGES_PER_TRANSACTION {
+                            let previous_ids = previous_writes
+                                .iter()
+                                .map(|write| write.message.id.as_str())
+                                .collect::<HashSet<_>>();
+                            let ids_are_disjoint = writes
+                                .iter()
+                                .all(|write| !previous_ids.contains(write.message.id.as_str()));
+
+                            if ids_are_disjoint {
+                                previous_writes.append(&mut writes);
+                                continue;
+                            }
+                        }
+                    }
+
+                    coalesced.push(DbWriteTask::TopicMessages { key, writes });
+                }
+                boundary => coalesced.push(boundary),
+            }
+        }
+
+        coalesced
+    }
+
     pub fn new(_pool: sqlx::SqlitePool, db_path: std::path::PathBuf) -> Self {
         // One queued transaction worth of tasks is enough to keep the single writer busy while
         // preserving Pull's upstream byte-weighted backpressure.
@@ -708,7 +891,7 @@ impl DbWriteQueue {
                 }
 
                 let batch = Self::collect_batch(first_task, &mut rx, &mut carried_task).await;
-                let tasks_in_this_tx = batch.tasks;
+                let tasks_in_this_tx = Self::coalesce_adjacent_topic_message_tasks(batch.tasks);
                 let flush_tx_opt = batch.flush_tx;
 
                 let db_path = db_path_for_worker.clone();
