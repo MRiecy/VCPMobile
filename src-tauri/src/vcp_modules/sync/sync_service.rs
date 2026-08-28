@@ -132,10 +132,7 @@ enum VersionHandshakeError {
 
 #[derive(Debug, PartialEq, Eq)]
 enum VersionHandshakeFailure {
-    Retry {
-        code: &'static str,
-        message: String,
-    },
+    Retry { code: &'static str, message: String },
     Stop,
     Cancelled,
 }
@@ -238,13 +235,8 @@ async fn perform_version_handshake<R: Runtime>(
         protocol_version: WIRE_PROTOCOL_VERSION,
     };
     if let Err(error) = send_ws_frame(&mut ws_stream, &version_req).await {
-        terminate_after_protocol_send_failure(
-            app_handle,
-            &mut ws_stream,
-            "version check",
-            &error,
-        )
-        .await;
+        terminate_after_protocol_send_failure(app_handle, &mut ws_stream, "version check", &error)
+            .await;
         return Err(VersionHandshakeFailure::Retry {
             code: "WS_SEND_FAILED",
             message: protocol_send_failure_message("version check", &error),
@@ -312,9 +304,7 @@ async fn perform_version_handshake<R: Runtime>(
                 "SYNC_VERSION_INCOMPATIBLE",
                 &format!(
                     "桌面端插件 v{} 声明的同步协议 {} 与 Mobile 要求的协议 {} 不兼容",
-                    version_ack.plugin_version,
-                    version_ack.protocol_version,
-                    WIRE_PROTOCOL_VERSION,
+                    version_ack.plugin_version, version_ack.protocol_version, WIRE_PROTOCOL_VERSION,
                 ),
                 Vec::new(),
             )
@@ -324,9 +314,7 @@ async fn perform_version_handshake<R: Runtime>(
                 "error",
                 &format!(
                     "❌ 同步协议不匹配: 桌面端插件 v{} / 协议 {}，Mobile 要求协议 {}",
-                    version_ack.plugin_version,
-                    version_ack.protocol_version,
-                    WIRE_PROTOCOL_VERSION,
+                    version_ack.plugin_version, version_ack.protocol_version, WIRE_PROTOCOL_VERSION,
                 ),
             );
             emit_sync_log(
@@ -367,7 +355,9 @@ async fn perform_version_handshake<R: Runtime>(
             let _ = close_ws_with_deadline(&mut ws_stream).await;
             Err(VersionHandshakeFailure::Stop)
         }
-        Ok(Err(VersionHandshakeError::Closed { code, .. })) if code == Some(4001) => {
+        Ok(Err(VersionHandshakeError::Closed {
+            code: Some(4001), ..
+        })) => {
             emit_sync_log(
                 app_handle,
                 "error",
@@ -385,7 +375,9 @@ async fn perform_version_handshake<R: Runtime>(
             .await;
             Err(VersionHandshakeFailure::Stop)
         }
-        Ok(Err(VersionHandshakeError::Closed { code, .. })) if code == Some(4002) => {
+        Ok(Err(VersionHandshakeError::Closed {
+            code: Some(4002), ..
+        })) => {
             let message = "WebSocket 同步服务路径不正确";
             emit_sync_log(
                 app_handle,
@@ -3467,6 +3459,242 @@ mod tests {
     };
     use serde_json::Value;
     use std::sync::atomic::AtomicBool;
+    use tokio::net::TcpListener;
+    use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
+
+    type TestServerWebSocket = WebSocketStream<tokio::net::TcpStream>;
+
+    fn test_sync_state(session_id: u64) -> SyncState {
+        SyncState {
+            ws_sender: SyncCommandRouter::default(),
+            connection_status: Arc::new(RwLock::new(String::from("disconnected"))),
+            current_log_path: Arc::new(RwLock::new(None)),
+            current_logger: Arc::new(std::sync::RwLock::new(None)),
+            lifecycle: AsyncMutex::new(()),
+            owner_commit: AsyncMutex::new(()),
+            session: AsyncMutex::new(None),
+            next_session_id: AtomicU64::new(session_id),
+            current_session_id: AtomicU64::new(session_id),
+        }
+    }
+
+    fn mock_sync_app(session_id: u64) -> tauri::App<tauri::test::MockRuntime> {
+        let app = tauri::test::mock_app();
+        assert!(app.manage(test_sync_state(session_id)));
+        app
+    }
+
+    async fn websocket_pair() -> (SyncWebSocket, TestServerWebSocket) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test WebSocket");
+        let address = listener.local_addr().expect("test WebSocket address");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept test WebSocket");
+            tokio_tungstenite::accept_async(stream)
+                .await
+                .expect("upgrade test WebSocket")
+        });
+        let (client, _) = connect_async(format!("ws://{address}"))
+            .await
+            .expect("connect test WebSocket");
+        (client, server.await.expect("join test WebSocket server"))
+    }
+
+    async fn expect_version_check(server: &mut TestServerWebSocket) {
+        let message = tokio::time::timeout(Duration::from_secs(2), server.next())
+            .await
+            .expect("VERSION_CHECK timeout")
+            .expect("VERSION_CHECK stream ended")
+            .expect("read VERSION_CHECK");
+        let Message::Text(text) = message else {
+            panic!("expected VERSION_CHECK text frame");
+        };
+        let payload: Value = serde_json::from_str(&text).expect("parse VERSION_CHECK");
+        assert_eq!(payload["type"], "VERSION_CHECK");
+        assert_eq!(payload["mobileVersion"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(payload["protocolVersion"], WIRE_PROTOCOL_VERSION);
+    }
+
+    async fn send_test_json(server: &mut TestServerWebSocket, payload: Value) {
+        server
+            .send(Message::Text(payload.to_string().into()))
+            .await
+            .expect("send test WebSocket JSON");
+    }
+
+    #[tokio::test]
+    async fn version_handshake_round_trips_over_real_websocket() {
+        let session_id = 41;
+        let app = mock_sync_app(session_id);
+        let status = app.state::<SyncState>().connection_status.clone();
+        let cancel_token = CancellationToken::new();
+        let (client, mut server) = websocket_pair().await;
+        let server_task = tokio::spawn(async move {
+            expect_version_check(&mut server).await;
+            send_test_json(
+                &mut server,
+                json!({
+                    "type": "SYNC_LOG_EVENT",
+                    "level": "info",
+                    "phase": "handshake",
+                    "message": "ready",
+                    "ts": 1,
+                }),
+            )
+            .await;
+            send_test_json(
+                &mut server,
+                json!({
+                    "type": "VERSION_ACK",
+                    "pluginVersion": "1.4.0",
+                    "protocolVersion": WIRE_PROTOCOL_VERSION,
+                }),
+            )
+            .await;
+            let message = tokio::time::timeout(Duration::from_secs(2), server.next())
+                .await
+                .expect("returned WebSocket ownership timeout")
+                .expect("returned WebSocket stream ended")
+                .expect("read returned WebSocket frame");
+            assert!(matches!(message, Message::Ping(_)));
+        });
+
+        let mut client =
+            perform_version_handshake(app.handle(), session_id, &status, &cancel_token, client)
+                .await
+                .unwrap_or_else(|error| panic!("handshake failed: {error:?}"));
+        client
+            .send(Message::Ping(vec![1].into()))
+            .await
+            .expect("use returned WebSocket");
+        server_task.await.expect("join handshake server");
+        assert_eq!(status.read().await.as_str(), "disconnected");
+    }
+
+    #[tokio::test]
+    async fn version_handshake_classifies_close_codes() {
+        for code in [4001_u16, 4002, 1000] {
+            let session_id = u64::from(code);
+            let app = mock_sync_app(session_id);
+            let status = app.state::<SyncState>().connection_status.clone();
+            let cancel_token = CancellationToken::new();
+            let (client, mut server) = websocket_pair().await;
+            let server_task = tokio::spawn(async move {
+                expect_version_check(&mut server).await;
+                server
+                    .send(Message::Close(Some(CloseFrame {
+                        code: CloseCode::from(code),
+                        reason: format!("close-{code}").into(),
+                    })))
+                    .await
+                    .expect("send test close frame");
+            });
+
+            let failure = match perform_version_handshake(
+                app.handle(),
+                session_id,
+                &status,
+                &cancel_token,
+                client,
+            )
+            .await
+            {
+                Ok(_) => panic!("close {code} unexpectedly completed the handshake"),
+                Err(failure) => failure,
+            };
+            server_task.await.expect("join close-code server");
+
+            if code == 1000 {
+                assert!(matches!(
+                    failure,
+                    VersionHandshakeFailure::Retry {
+                        code: "WS_CLOSED",
+                        ..
+                    }
+                ));
+                assert_eq!(status.read().await.as_str(), "disconnected");
+            } else {
+                assert_eq!(failure, VersionHandshakeFailure::Stop);
+                assert_eq!(status.read().await.as_str(), "error");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn version_handshake_cancellation_is_not_retryable() {
+        let session_id = 42;
+        let app = mock_sync_app(session_id);
+        let status = app.state::<SyncState>().connection_status.clone();
+        let cancel_token = CancellationToken::new();
+        cancel_token.cancel();
+        let (client, mut server) = websocket_pair().await;
+        let server_task = tokio::spawn(async move {
+            expect_version_check(&mut server).await;
+        });
+
+        let failure = match perform_version_handshake(
+            app.handle(),
+            session_id,
+            &status,
+            &cancel_token,
+            client,
+        )
+        .await
+        {
+            Ok(_) => panic!("cancelled handshake unexpectedly succeeded"),
+            Err(failure) => failure,
+        };
+        server_task.await.expect("join cancellation server");
+        assert_eq!(failure, VersionHandshakeFailure::Cancelled);
+        assert_eq!(status.read().await.as_str(), "disconnected");
+    }
+
+    #[tokio::test]
+    async fn version_handshake_logs_do_not_reset_the_total_deadline() {
+        let session_id = 43;
+        let app = mock_sync_app(session_id);
+        let status = app.state::<SyncState>().connection_status.clone();
+        let cancel_token = CancellationToken::new();
+        let (client, mut server) = websocket_pair().await;
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let server_task = tokio::spawn(async move {
+            expect_version_check(&mut server).await;
+            for ts in [1, 2] {
+                send_test_json(
+                    &mut server,
+                    json!({
+                        "type": "SYNC_LOG_EVENT",
+                        "level": "info",
+                        "phase": "handshake",
+                        "message": "still waiting",
+                        "ts": ts,
+                    }),
+                )
+                .await;
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+            let _ = release_rx.await;
+        });
+
+        let failure = tokio::time::timeout(
+            Duration::from_secs(7),
+            perform_version_handshake(app.handle(), session_id, &status, &cancel_token, client),
+        )
+        .await
+        .expect("handshake deadline was reset by log frames");
+        let _ = release_tx.send(());
+        server_task.await.expect("join deadline server");
+
+        assert!(matches!(
+            failure,
+            Err(VersionHandshakeFailure::Retry {
+                code: "VERSION_CHECK_TIMEOUT",
+                ..
+            })
+        ));
+        assert_eq!(status.read().await.as_str(), "disconnected");
+    }
 
     #[test]
     fn sync_error_contract_keeps_raw_detail_out_of_the_user_payload() {

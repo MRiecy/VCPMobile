@@ -87,6 +87,7 @@ jni = "0.21"
 tempfile = "3"
 criterion = { version = "0.5", features = ["html_reports"] }
 tokio = { version = "1", default-features = false, features = ["test-util"] }
+tauri = { workspace = true, features = ["test"] }
 
 [[bench]]
 name = "ast_tail_bench"
