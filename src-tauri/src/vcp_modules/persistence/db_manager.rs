@@ -15,9 +15,12 @@ impl DbState {
         pages_to_vacuum: i32,
     ) -> Result<(), sqlx::Error> {
         // 1. 分批页整理碎片，防堵大面积 I/O 阻塞
-        sqlx::query(&format!("PRAGMA incremental_vacuum({})", pages_to_vacuum))
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "PRAGMA incremental_vacuum({})",
+            pages_to_vacuum
+        )))
+        .execute(&self.pool)
+        .await?;
         // 2. 重构索引规划器
         sqlx::query("PRAGMA optimize").execute(&self.pool).await?;
         Ok(())
@@ -547,7 +550,7 @@ async fn bootstrap_fresh_install(
     );
 
     // 整份执行 baseline（sqlx::raw_sql 支持多语句 DDL）
-    sqlx::raw_sql(baseline.sql.as_ref())
+    sqlx::raw_sql(baseline.sql.clone())
         .execute(pool)
         .await
         .map_err(|e| {
@@ -882,7 +885,7 @@ pub async fn search_messages_fts(
     sql.push_str(" LIMIT ?");
 
     // 按 SQL 文本顺序绑定：MATCH 词 → 短词 instr → 过滤器 → 游标 → limit
-    let mut final_query = sqlx::query(&sql);
+    let mut final_query = sqlx::query(sqlx::AssertSqlSafe(sql));
     if let Some(ref fq) = fts_query {
         final_query = final_query.bind(fq);
     }
@@ -1095,13 +1098,12 @@ mod tests {
 
         // 代表性表与 0007/0008 产物齐全
         for name in ["messages", "topics", "active_generations", "render_cache"] {
-            let exists: bool = sqlx::query_scalar(&format!(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='{}')",
-                name
-            ))
-            .fetch_one(&pool)
-            .await
-            .expect("inspect table");
+            let exists: bool =
+                sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?)")
+                    .bind(name)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("inspect table");
             assert!(exists, "baseline must create {}", name);
         }
         let has_agent_idx: bool = sqlx::query_scalar(

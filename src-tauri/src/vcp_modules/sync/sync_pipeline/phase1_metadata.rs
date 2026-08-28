@@ -109,7 +109,7 @@ impl Phase1Metadata {
                 "SELECT topic_id, config_hash, content_hash, updated_at, owner_type, owner_id, deleted_at
                  FROM topics WHERE {predicates}"
             );
-            let mut query = sqlx::query(&query_str);
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(query_str));
             for owner in owner_chunk {
                 query = query.bind(&owner.owner_type).bind(&owner.owner_id);
             }

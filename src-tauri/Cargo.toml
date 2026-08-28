@@ -51,8 +51,8 @@ lazy_static = "1.4"
 uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.8"
 log = { version = "0.4", features = ["release_max_level_info"] }
-sqlx = { version = "0.8.6", default-features = false, features = ["sqlite", "runtime-tokio", "macros", "migrate"] }
-rusqlite = { version = "0.32.1", features = ["bundled"] }
+sqlx = { version = "=0.9.0", default-features = false, features = ["sqlite", "runtime-tokio", "macros", "migrate"] }
+rusqlite = { version = "=0.39.0", features = ["bundled", "limits"] }
 sha2 = "0.11"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }

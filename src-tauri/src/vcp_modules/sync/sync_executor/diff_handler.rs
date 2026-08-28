@@ -430,7 +430,7 @@ impl DiffHandler {
                              WHERE (owner_type, owner_id, topic_id) IN ({placeholders})
                                AND deleted_at IS NULL"
                         );
-                        let mut query = sqlx::query(&query_sql);
+                        let mut query = sqlx::query(sqlx::AssertSqlSafe(query_sql));
                         for key in chunk {
                             query = query
                                 .bind(&key.owner_type)

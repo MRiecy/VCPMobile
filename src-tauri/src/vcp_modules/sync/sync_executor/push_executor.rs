@@ -520,7 +520,7 @@ async fn load_outbound_message_page(
            AND ma.msg_id IN ({placeholders})
          ORDER BY ma.msg_id, ma.attachment_order ASC"
     );
-    let mut attachment_query = sqlx::query(&attachment_query)
+    let mut attachment_query = sqlx::query(sqlx::AssertSqlSafe(attachment_query))
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(topic_id);

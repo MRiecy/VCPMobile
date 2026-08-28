@@ -159,7 +159,7 @@ async fn convert_history_rows(
              ORDER BY ma.msg_id, ma.attachment_order ASC",
             extracted_text_column, placeholders
         );
-        let mut q = sqlx::query(&att_query)
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(att_query))
             .bind(&key.owner_type)
             .bind(&key.owner_id)
             .bind(&key.topic_id);
@@ -411,12 +411,12 @@ pub async fn load_chat_history_around_internal(
     let mut rows: Vec<sqlx::sqlite::SqliteRow> = Vec::new();
 
     // 前向窗口（早于锚点，含锚点本身）
-    let before_rows = sqlx::query(&format!(
+    let before_rows = sqlx::query(sqlx::AssertSqlSafe(format!(
         "{} WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
            AND (m.timestamp < ? OR (m.timestamp = ? AND m.msg_id <= ?))
          ORDER BY m.timestamp DESC, m.msg_id DESC LIMIT ?",
         ROW_SELECT
-    ))
+    )))
     .bind(&key.owner_type)
     .bind(&key.owner_id)
     .bind(&key.topic_id)
@@ -431,12 +431,12 @@ pub async fn load_chat_history_around_internal(
 
     // 后向窗口（晚于锚点）
     if after_n > 0 {
-        let after_rows = sqlx::query(&format!(
+        let after_rows = sqlx::query(sqlx::AssertSqlSafe(format!(
             "{} WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
                AND (m.timestamp > ? OR (m.timestamp = ? AND m.msg_id > ?))
              ORDER BY m.timestamp ASC, m.msg_id ASC LIMIT ?",
             ROW_SELECT
-        ))
+        )))
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(&key.topic_id)
@@ -539,7 +539,7 @@ pub async fn load_chat_text_history_for_context(
              ORDER BY ma.msg_id, ma.attachment_order ASC",
             extracted_text_column, placeholders
         );
-        let mut q = sqlx::query(&att_query)
+        let mut q = sqlx::query(sqlx::AssertSqlSafe(att_query))
             .bind(&key.owner_type)
             .bind(&key.owner_id)
             .bind(&key.topic_id);
@@ -961,7 +961,7 @@ pub async fn delete_messages(
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
            AND deleted_at IS NULL AND msg_id IN ({placeholders})"
     );
-    let mut deleted_query = sqlx::query_scalar(&select_deleted_ids)
+    let mut deleted_query = sqlx::query_scalar(sqlx::AssertSqlSafe(select_deleted_ids))
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(&key.topic_id);
@@ -978,7 +978,7 @@ pub async fn delete_messages(
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
            AND msg_id IN ({placeholders})"
     );
-    let mut active_query = sqlx::query_scalar(&select_active_ids)
+    let mut active_query = sqlx::query_scalar(sqlx::AssertSqlSafe(select_active_ids))
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(&key.topic_id);
@@ -996,7 +996,7 @@ pub async fn delete_messages(
         msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
     );
     let now = deleted_at.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
-    let mut q = sqlx::query(&delete_query)
+    let mut q = sqlx::query(sqlx::AssertSqlSafe(delete_query))
         .bind(now)
         .bind(&key.owner_type)
         .bind(&key.owner_id)
@@ -1020,7 +1020,7 @@ pub async fn delete_messages(
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id IN ({})",
         msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
     );
-    let mut q_cache = sqlx::query(&delete_cache_query)
+    let mut q_cache = sqlx::query(sqlx::AssertSqlSafe(delete_cache_query))
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(&key.topic_id);
@@ -1035,7 +1035,7 @@ pub async fn delete_messages(
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id IN ({})",
         msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
     );
-    let mut q_attachments = sqlx::query(&delete_attachments_query)
+    let mut q_attachments = sqlx::query(sqlx::AssertSqlSafe(delete_attachments_query))
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(&key.topic_id);
@@ -1053,7 +1053,7 @@ pub async fn delete_messages(
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id IN ({})",
         msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ")
     );
-    let mut q_active = sqlx::query(&delete_active_gen_query)
+    let mut q_active = sqlx::query(sqlx::AssertSqlSafe(delete_active_gen_query))
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(&key.topic_id);
@@ -1112,7 +1112,7 @@ pub(crate) async fn apply_sync_message_tombstones(
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
            AND deleted_at IS NULL AND msg_id IN ({placeholders})"
     );
-    let mut live_query = sqlx::query_scalar(&live_sql)
+    let mut live_query = sqlx::query_scalar(sqlx::AssertSqlSafe(live_sql))
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(&key.topic_id);
@@ -1134,7 +1134,7 @@ pub(crate) async fn apply_sync_message_tombstones(
            AND msg_id IN ({})",
         vec!["?"; deleted_ids.len()].join(", ")
     );
-    let mut active_query = sqlx::query_scalar(&active_sql)
+    let mut active_query = sqlx::query_scalar(sqlx::AssertSqlSafe(active_sql))
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(&key.topic_id);
@@ -1164,7 +1164,7 @@ pub(crate) async fn apply_sync_message_tombstones(
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
            AND msg_id IN (SELECT msg_id FROM incoming)"
     );
-    let mut update = sqlx::query(&update_sql);
+    let mut update = sqlx::query(sqlx::AssertSqlSafe(update_sql));
     for id in &deleted_ids {
         update = update.bind(id).bind(
             tombstone_times
@@ -1196,7 +1196,7 @@ pub(crate) async fn apply_sync_message_tombstones(
                AND msg_id IN ({})",
             vec!["?"; deleted_ids.len()].join(", ")
         );
-        let mut delete = sqlx::query(&delete_sql)
+        let mut delete = sqlx::query(sqlx::AssertSqlSafe(delete_sql))
             .bind(&key.owner_type)
             .bind(&key.owner_id)
             .bind(&key.topic_id);

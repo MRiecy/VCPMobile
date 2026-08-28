@@ -46,7 +46,7 @@ async fn finalize_modified_topics(
              FROM topics WHERE deleted_at IS NULL
                AND (owner_type, owner_id, topic_id) IN ({placeholders})"
         );
-        let mut query = sqlx::query(&query_sql);
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(query_sql));
         for key in topic_chunk {
             query = query
                 .bind(&key.owner_type)

@@ -86,7 +86,7 @@ impl Phase3Message {
                 "SELECT topic_id, owner_type, owner_id, config_hash, content_hash
                  FROM topics WHERE ({predicates}) AND deleted_at IS NULL"
             );
-            let mut query = sqlx::query(&query_str);
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(query_str));
             for owner in owner_chunk {
                 query = query.bind(&owner.owner_type).bind(&owner.owner_id);
             }
@@ -172,7 +172,7 @@ impl Phase3Message {
                  FROM topics WHERE (owner_type, owner_id, topic_id) IN ({}) AND deleted_at IS NULL",
                 placeholders
             );
-            let mut query = sqlx::query(&topic_query);
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(topic_query));
             for key in topic_chunk {
                 query = query
                     .bind(&key.owner_type)
@@ -237,7 +237,7 @@ impl Phase3Message {
                  FROM messages WHERE (owner_type, owner_id, topic_id) IN ({})",
                 placeholders
             );
-            let mut query = sqlx::query(&msg_query);
+            let mut query = sqlx::query(sqlx::AssertSqlSafe(msg_query));
             for key in topic_chunk {
                 query = query
                     .bind(&key.owner_type)
