@@ -272,6 +272,66 @@ describe("stream render backpressure", () => {
     }
   });
 
+  it("keeps a commit error recoverable and accepts the later durable end", async () => {
+    const store = useChatStreamStore();
+    await store.processStreamEvent(streamEvent({
+      type: "thinking",
+      messageId: "assistant-1",
+      context: streamContext,
+    }));
+
+    await store.processStreamEvent(streamEvent({
+      type: "error",
+      messageId: "assistant-1",
+      context: streamContext,
+      finishReason: "error",
+      error: "terminal commit failed",
+      content: "candidate partial",
+    }));
+
+    let message = store.getActiveStreamMessage(
+      "agent-a",
+      "agent",
+      "topic-a",
+      "assistant-1",
+    );
+    expect(message?.content).toBe("candidate partial");
+    expect(message?.isReconnecting).toBe(true);
+    expect(message?.finishReason).toBeUndefined();
+    expect(store.isMessageActive("agent-a", "agent", "topic-a", "assistant-1")).toBe(true);
+
+    await store.processStreamEvent(streamEvent({
+      type: "end",
+      messageId: "assistant-1",
+      context: streamContext,
+      finishReason: "error",
+      content: "committed partial\n\n> VCP流式错误: network failed",
+      blocks: [],
+      timestamp: 123,
+    }));
+
+    message = store.getActiveStreamMessage(
+      "agent-a",
+      "agent",
+      "topic-a",
+      "assistant-1",
+    );
+    expect(message?.content).toBe("committed partial\n\n> VCP流式错误: network failed");
+    expect(message?.finishReason).toBe("error");
+    expect(message?.timestamp).toBe(123);
+    expect(message?.isReconnecting).toBe(false);
+    expect(store.isMessageActive("agent-a", "agent", "topic-a", "assistant-1")).toBe(false);
+
+    await store.processStreamEvent(streamEvent({
+      type: "error",
+      messageId: "assistant-1",
+      context: streamContext,
+      error: "late error",
+      content: "must not replace committed content",
+    }));
+    expect(message?.content).toBe("committed partial\n\n> VCP流式错误: network failed");
+  });
+
   it("collapses a hidden WebView's pending AST diffs into the latest snapshot", async () => {
     const originalRaf = window.requestAnimationFrame;
     const hiddenDescriptor = Object.getOwnPropertyDescriptor(document, "hidden");

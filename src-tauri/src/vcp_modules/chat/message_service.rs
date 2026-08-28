@@ -1488,11 +1488,12 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
             Ok((blocks, start_timestamp)) => (Some(blocks), start_timestamp),
             Err(error) => {
                 if let Some(chan) = &stream_channel {
-                    let event = crate::vcp_modules::vcp_client::StreamEvent::error(
+                    let mut event = crate::vcp_modules::vcp_client::StreamEvent::error(
                         message_id.to_string(),
                         context.clone(),
                         format!("终态保存失败: {}", error),
                     );
+                    event.content = Some(final_content.clone());
                     let _ = chan.send(event);
                 }
                 return Err(error);
@@ -1505,6 +1506,7 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
             message_id.to_string(),
             context,
             Some(terminal_reason),
+            Some(final_content),
             end_blocks,
             Some(end_timestamp),
         );

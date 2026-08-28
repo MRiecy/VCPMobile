@@ -53,7 +53,7 @@ struct GroupSpeakerTurnParams<'a> {
 
 /// 执行群聊中单个发言者的完整回合：
 /// 组装上下文 → 模型路由 → 注册租约 → begin_stream_message → thinking 事件 →
-/// VCP 请求 → finalize 落盘与事件 / 失败时补发 error 终结事件。
+/// VCP 请求 → 由 durable finalizer 落盘并发送唯一终态事件。
 ///
 /// 返回生成的助手消息（`None` 表示该棒失败且已通知前端）。
 /// 结构化失败（`Err`）表示回合无法合法开始（DB/上下文装配错误等）。
@@ -230,27 +230,20 @@ async fn run_group_speaker_turn(
             return Ok(Some(ai_msg));
         }
         Ok(None)
-    } else if let Err(e) = res_result {
+    } else if let Err(failure) = res_result {
         log::error!(
             "[GroupChatAppService] Error during agent {} response: {}",
             agent_id,
-            e
+            failure
         );
-        // 与 agent/assistant 路径对齐：接力失败必须给前端终结事件，
-        // 否则该 Agent 的 thinking 气泡永久悬挂，用户看到"无反应"
-        if let Some(chan) = stream_channel {
-            let _ = chan.send(StreamEvent::error(
-                message_id.clone(),
-                context.clone(),
-                e.clone(),
-            ));
-        }
-        crate::vcp_modules::vcp_client::finalize_stream_error(
+        let (error, partial_content) = failure.into_parts();
+        let _ = crate::vcp_modules::vcp_client::finalize_stream_error(
             app_handle,
             db_pool,
             &request_key,
-            None,
-            Some(e),
+            partial_content.unwrap_or_default(),
+            error,
+            stream_channel.clone(),
         )
         .await?;
         Ok(None)

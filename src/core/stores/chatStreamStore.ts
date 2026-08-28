@@ -547,7 +547,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     );
 
     if (hasStreamTerminalTombstone(messageKey)) return;
-    if (type === "end" || type === "error") {
+    if (type === "end") {
       recordStreamTerminalTombstone(messageKey);
     }
 
@@ -735,31 +735,28 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         // 4. 申请硬件级 rAF 渲染调度（合并原子提交）
         scheduleRAFUpdate(messageKey);
       }
-    } else if (type === "end" || type === "error") {
-      const errorMsg = event.error;
+    } else if (type === "error") {
+      // error 只表示 durable finalizer 未能提交。保留当前 partial 和 active owner，
+      // 不写终态 tombstone；后续 recovery 的权威 end 仍必须能够进入。
+      clearRAFUpdate(messageKey, true);
+      if (typeof event.content === "string") msg!.content = event.content;
+      msg!.isThinking = false;
+      msg!.isReconnecting = true;
+    } else if (type === "end") {
       const finishReason = event.finishReason;
 
-      // 漏洞 1 & 2 & 3 修复：同步强制秒结，防止 tailContent 闪烁回滚丢失
+      // durable end 原子覆盖权威正文与渲染结果，再撤销活动流状态。
       clearRAFUpdate(messageKey, true);
+      if (typeof event.content === "string") msg!.content = event.content;
 
       if (finishReason) msg!.finishReason = finishReason;
 
       if (streamingMessageKey.value === messageKey)
         streamingMessageKey.value = null;
 
-      if (type === "error" && errorMsg) {
-        const errorText = `\n\n> VCP流式错误: ${errorMsg}`;
-        if (msg) {
-          const currentContent = msg.content || "";
-          if (!currentContent.endsWith(errorText)) {
-            msg.content = currentContent + errorText;
-          }
-          msg.finishReason = "error";
-        }
-      }
-
       if (msg) {
         msg!.isThinking = false;
+        msg!.isReconnecting = false;
         if (event.timestamp) {
           msg!.timestamp = event.timestamp;
         }
@@ -816,14 +813,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     ownerType: ConversationOwnerType,
     topicId: string,
     messageId: string,
-    onUpdateMessage?: (msgId: string) => Promise<void>,
   ) => {
-    const messageKey = streamMessageMapKey(
-      ownerId,
-      ownerType,
-      topicId,
-      messageId,
-    );
     console.log(
       `[ChatStreamStore] Sending interrupt signal for message: ${messageId}`,
     );
@@ -834,31 +824,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         topicId,
         messageId,
       });
-
-      // 本地模拟一个结束状态
-      const msg = activeStreamMessages.get(messageKey);
-      if (msg && !hasStreamTerminalTombstone(messageKey)) {
-        msg.isThinking = false;
-        msg.finishReason = "interrupted";
-        const errorText = `\n\n> VCP流式错误: 请求已中止`;
-        const currentContent = msg.content || "";
-        if (!currentContent.endsWith(errorText)) {
-          msg.content = currentContent + errorText;
-        }
-      }
-
-      // 漏洞 2 修复：手动点击中止流时，瞬间强行注销 rAF 帧，防止后台句柄悬空空转泄漏
-      clearRAFUpdate(messageKey, false);
-
-      if (streamingMessageKey.value === messageKey) {
-        streamingMessageKey.value = null;
-      }
-
-      removeSessionStream(ownerId, ownerType, topicId, messageId, true);
-
-      if (onUpdateMessage) {
-        await onUpdateMessage(messageId);
-      }
     } catch (e) {
       console.error(
         `[ChatStreamStore] Failed to interrupt stream for ${messageId}:`,

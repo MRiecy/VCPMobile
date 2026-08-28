@@ -196,18 +196,19 @@ pub async fn internal_process_agent_chat_message(
                 .await?;
             }
         }
-        Err(e) => {
-            log::error!("[AgentChatAppService] perform_vcp_request failed: {}", e);
-            // 与 assistant 路径对齐：失败必须向前端补发 error 终结事件，
-            // 否则 thinking 气泡永远悬挂，用户看到的是"Agent 完全无反应"
-            let _ =
-                stream_channel.send(StreamEvent::error(thinking_id.clone(), context, e.clone()));
-            crate::vcp_modules::vcp_client::finalize_stream_error(
+        Err(failure) => {
+            log::error!(
+                "[AgentChatAppService] perform_vcp_request failed: {}",
+                failure
+            );
+            let (error, partial_content) = failure.into_parts();
+            let _ = crate::vcp_modules::vcp_client::finalize_stream_error(
                 &app_handle,
                 &db_state.pool,
                 &request_key,
-                None,
-                Some(e),
+                partial_content.unwrap_or_default(),
+                error,
+                Some(stream_channel),
             )
             .await?;
         }
@@ -347,18 +348,30 @@ pub async fn handle_assistant_chat_stream(
                     thinking_id.clone(),
                     context,
                     finish_reason,
+                    res["fullContent"].as_str().map(str::to_string),
                     None,
                     Some(final_ts),
                 ));
             }
         }
-        Err(e) => {
+        Err(failure) => {
             log::error!(
                 "[AssistantChatAppService] perform_vcp_request failed: {}",
-                e
+                failure
             );
-            let _ =
-                stream_channel.send(StreamEvent::error(thinking_id.clone(), context, e.clone()));
+            let (error, partial_content) = failure.into_parts();
+            let final_content = crate::vcp_modules::vcp_client::stream_error_content(
+                partial_content.as_deref().unwrap_or_default(),
+                &error,
+            );
+            let _ = stream_channel.send(StreamEvent::end(
+                thinking_id.clone(),
+                context,
+                Some("error".to_string()),
+                Some(final_content),
+                None,
+                Some(final_ts),
+            ));
         }
     }
 

@@ -264,7 +264,7 @@ describe("chat conversation concurrency guards", () => {
     ).toBe(false);
   });
 
-  it("stops the original message even when the visible conversation changes", async () => {
+  it("submits stop to the original message and waits for its durable end", async () => {
     const session = useChatSessionStore();
     const stream = useChatStreamStore();
     session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
@@ -316,7 +316,7 @@ describe("chat conversation concurrency guards", () => {
 
     expect(
       stream.isMessageActive("agent-a", "agent", "topic-a", "assistant-a"),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       stream.isMessageActiveInSession(
         "agent-b",
@@ -325,6 +325,27 @@ describe("chat conversation concurrency guards", () => {
         "assistant-b",
       ),
     ).toBe(true);
+
+    await stream.processStreamEvent({
+      type: "end",
+      chunk: null,
+      messageId: "assistant-a",
+      context: {
+        ownerId: "agent-a",
+        ownerType: "agent",
+        topicId: "topic-a",
+        agentId: "agent-a",
+      },
+      finishReason: "cancelled_by_user",
+      error: null,
+      content: "partial\n\n> VCP流式错误: 请求已中止",
+      aurora: null,
+      blocks: [],
+      timestamp: 123,
+    });
+    expect(
+      stream.isMessageActive("agent-a", "agent", "topic-a", "assistant-a"),
+    ).toBe(false);
   });
 
   it("claims a cold recovery once and never starts the removed two-step resume path", async () => {

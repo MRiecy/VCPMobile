@@ -349,6 +349,7 @@ export interface StreamEventDto {
   context: StreamContextDto | null;
   finishReason: string | null;
   error: string | null;
+  content?: string | null;
   aurora: AuroraUpdate | null;
   blocks: ContentBlock[] | null;
   timestamp: number | null;
