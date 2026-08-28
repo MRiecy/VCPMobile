@@ -286,22 +286,19 @@ Text { value: String }
 
 ```rust
 fn diff_text_node(id: &str, old_value: &str, new_value: &str, mutations: &mut Vec<AstMutation>) {
-    if new_value == old_value {
-        return;  // 完全相同，无操作
-    }
-    if let Some(chunk) = new_value.strip_prefix(old_value) {
-        if !chunk.is_empty() {
-            // 🟢 热路径：新值以旧值为前缀 → 只需 AppendText
-            mutations.push(AstMutation::AppendText { id: id.to_string(), chunk: chunk.to_string() });
-        }
-    } else {
-        // 🟡 冷路径：文本发生非单调变化 → 全量 UpdateText
-        mutations.push(AstMutation::UpdateText { id: id.to_string(), value: new_value.to_string() });
+    match new_value.strip_prefix(old_value) {
+        Some("") => {}  // 完全相同，无操作
+        Some(chunk) => mutations.push(AstMutation::AppendText {
+            id: id.to_string(), chunk: chunk.to_string(),
+        }),
+        None => mutations.push(AstMutation::UpdateText {
+            id: id.to_string(), value: new_value.to_string(),
+        }),
     }
 }
 ```
 
-这个优化保证了流式逐字输出时，90%+ 的 Text 节点变更是廉价的 `AppendText`（前端只需 `textNode.appendData(chunk)`），而非昂贵的 `UpdateText`（`textNode.textContent = value`）。
+这个优化用一次前缀匹配同时区分相等、追加和改写，保留严格前缀证明，并避免“先完整相等比较、再重复比较前缀”。
 
 #### Link（超链接）
 

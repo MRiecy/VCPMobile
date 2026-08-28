@@ -120,7 +120,7 @@ pub struct AuroraBuffer {
     pub full_text: String,              // 累积的完整响应文本
     pub stable_blocks: Vec<StreamBlock>, // 已确认的语义块（对外只读镜像）
     pub tail_content: String,           // 当前未闭合的尾部纯文本
-    tail_projection: Option<TailProjection>, // 仅保存 hash 与 AST/plain mode
+    tail_projection: Option<TailProjection>, // 增量 SHA-256 fingerprint 与 AST/plain mode
     parser: StreamBlockParser,          // 增量块解析器（内部状态机）
     is_finishing: bool,                 // 是否已进入结束阶段（防重入锁）
     // ═══════ 🆕 v1.1.0 新增字段 ═══════
@@ -138,7 +138,7 @@ pub struct AuroraBuffer {
 | 字段 | 类型 | 作用 |
 |------|------|------|
 | `prev_tail_ast` | `Vec<MarkdownNode>` | 唯一 canonical tail AST，也是 `diff_ast()` 的"旧树"输入 |
-| `tail_projection` | `Option<TailProjection>` | 常数级 hash/mode 元数据；Snapshot 时才构造完整 wire block |
+| `tail_projection` | `Option<TailProjection>` | 增量 SHA-256 fingerprint/mode；Snapshot 时才构造完整 wire block |
 | `pending_mutations` | `Vec<AstMutation>` | 待发送的突变指令暂存池，防抖丢帧时防止差异丢失 |
 | `tail_epoch` | `u64` | 标识 tail 的不同"世代"——stable blocks 到达、tail 清空等时递增 |
 | `tail_revision` | `u64` | 同一 epoch 内的增量计数——每次 `process_queue` 产突变时递增 |
@@ -188,6 +188,9 @@ pub fn process_queue(&mut self) -> (bool, bool) {
 
     // 1. 增量解析全文，产出本次新增的已闭合块 + 尾部纯文本
     let (new_blocks, new_tail) = self.parser.process(&self.full_text);
+    let tail_start = self.parser.tail_start();
+    let next_fingerprint = (!new_tail.is_empty())
+        .then(|| self.next_tail_fingerprint(&new_tail, tail_start));
 
     // 🆕 1a. Epoch 重置：新稳定块到达时
     if !new_blocks.is_empty() {
@@ -210,8 +213,6 @@ pub fn process_queue(&mut self) -> (bool, bool) {
         } else {
             Some(parse_markdown_to_ast_streaming(&self.tail_content))
         };
-        let hash = HashAggregator::compute_content_hash(&self.tail_content);
-
         // 🆕 2a. AST Diff：对 tail AST 做增量差异计算
         let mode = if let Some(mut new_nodes) = nodes {
             for node in &mut new_nodes {
@@ -236,7 +237,12 @@ pub fn process_queue(&mut self) -> (bool, bool) {
             TailRenderMode::Plain
         };
 
-        self.tail_projection = Some(TailProjection { hash, mode });
+        self.tail_projection = Some(TailProjection {
+            fingerprint: next_fingerprint.unwrap_or_else(|| {
+                TailFingerprint::from_content(&self.tail_content, tail_start)
+            }),
+            mode,
+        });
     } else {
         self.tail_projection = None;
         if !self.prev_tail_ast.is_empty() || !self.tail_content.is_empty() {
@@ -393,7 +399,7 @@ pub fn balance_html_tags(html: &str) -> String {
 |------|----------|------|
 | 解析器复杂度 | `StreamBlockParser::process` 为 O(n)，n = 新增文本长度 | 基于 `processed_len` 游标的增量扫描 |
 | 推测渲染开销 | 每次 `process_queue` 调用 `parse_markdown_to_ast` | 尾部通常较短（数十到数百字符），开销可控 |
-| Hash 计算 | `compute_content_hash` 基于 Rust 默认 Hasher | 单次计算 O(n)，n = tail 长度 |
+| Tail fingerprint | 同一 tail 起点内增量 SHA-256；起点变化时重建 | 常态 O(新增 suffix)，rebase O(tail) |
 | 事件节流 | 50 ms | 避免前端在高频 chunk 场景下过度重渲染 |
 | 内存占用 | `full_text` 累积全文 + `stable_blocks` 累积块 | 与响应长度线性相关；长响应（>100KB）应考虑是否需要在 `finalize` 后释放 `full_text` |
 

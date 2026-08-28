@@ -196,6 +196,12 @@ impl StreamBlockParser {
         Self { processed_len: 0 }
     }
 
+    /// 当前未闭合 tail 在累积全文中的起始字节位置。
+    /// 起点不变即可证明新 tail 只是同一全文后缀的追加，无需再次扫描旧前缀。
+    pub(crate) fn tail_start(&self) -> usize {
+        self.processed_len
+    }
+
     /// 处理累积的全文，返回 (已完成的块列表, 尾部纯文本)
     /// 已闭合的块从 tail 中移除加入 stable blocks，未闭合部分保留为 tail
     pub fn process(&mut self, full_text: &str) -> (Vec<StreamBlock>, String) {

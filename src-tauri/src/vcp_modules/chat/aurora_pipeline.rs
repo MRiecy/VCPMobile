@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::vcp_modules::chat::ast_diff::{diff_ast, AstMutation};
@@ -126,6 +127,7 @@ pub struct AuroraDeliveryCommit {
     pushed_tail_epoch: u64,
     pushed_tail_hash: Option<String>,
     pushed_tail_mode: Option<TailRenderMode>,
+    pushed_tail_source_start: Option<usize>,
     consumes_tail_frame: bool,
 }
 
@@ -133,9 +135,38 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
+struct TailFingerprint {
+    state: Sha256,
+    content_len: usize,
+    source_start: usize,
+}
+
+impl TailFingerprint {
+    fn from_content(content: &str, source_start: usize) -> Self {
+        let mut state = Sha256::new();
+        state.update(content.as_bytes());
+        Self {
+            state,
+            content_len: content.len(),
+            source_start,
+        }
+    }
+
+    fn with_suffix(&self, suffix: &str) -> Self {
+        let mut next = self.clone();
+        next.state.update(suffix.as_bytes());
+        next.content_len = next.content_len.saturating_add(suffix.len());
+        next
+    }
+
+    fn wire_hash(&self) -> String {
+        crate::vcp_modules::infra::utils::finalize_sha256_hex(self.state.clone())
+    }
+}
+
 struct TailProjection {
-    hash: String,
+    fingerprint: TailFingerprint,
     mode: TailRenderMode,
 }
 
@@ -162,6 +193,7 @@ pub struct AuroraBuffer {
     pushed_tail_epoch: u64,
     pushed_tail_hash: Option<String>,
     pushed_tail_mode: Option<TailRenderMode>,
+    pushed_tail_source_start: Option<usize>,
     parser: StreamBlockParser,
     is_finishing: bool,
 }
@@ -190,6 +222,7 @@ impl AuroraBuffer {
             pushed_tail_epoch: 0,
             pushed_tail_hash: None,
             pushed_tail_mode: None,
+            pushed_tail_source_start: None,
             parser: StreamBlockParser::new(),
             is_finishing: false,
         }
@@ -217,7 +250,10 @@ impl AuroraBuffer {
         self.tail_projection
             .as_ref()
             .map_or((None, None), |projection| {
-                (Some(projection.hash.clone()), Some(projection.mode))
+                (
+                    Some(projection.fingerprint.wire_hash()),
+                    Some(projection.mode),
+                )
             })
     }
 
@@ -226,8 +262,37 @@ impl AuroraBuffer {
         Some(StreamBlock::markdown(
             self.tail_content.clone(),
             None,
-            projection.hash.clone(),
+            projection.fingerprint.wire_hash(),
         ))
+    }
+
+    fn current_tail_source_start(&self) -> Option<usize> {
+        self.tail_projection
+            .as_ref()
+            .map(|projection| projection.fingerprint.source_start)
+    }
+
+    fn next_tail_fingerprint(&self, new_tail: &str, source_start: usize) -> TailFingerprint {
+        let Some(projection) = self.tail_projection.as_ref() else {
+            return TailFingerprint::from_content(new_tail, source_start);
+        };
+        let previous = &projection.fingerprint;
+        if previous.source_start != source_start
+            || previous.content_len != self.tail_content.len()
+            || previous.content_len > new_tail.len()
+        {
+            return TailFingerprint::from_content(new_tail, source_start);
+        }
+
+        debug_assert_eq!(
+            new_tail.get(..previous.content_len),
+            Some(self.tail_content.as_str()),
+            "同一 StreamBlockParser tail 起点必须保持严格追加"
+        );
+        match new_tail.get(previous.content_len..) {
+            Some(suffix) => previous.with_suffix(suffix),
+            None => TailFingerprint::from_content(new_tail, source_start),
+        }
     }
 
     fn peek_tail_frame(&self, force_snapshot: bool) -> Option<TailFrame> {
@@ -268,6 +333,7 @@ impl AuroraBuffer {
                 blocks: self.stable_blocks[self.pushed_stable_count..].to_vec(),
             });
         let (current_tail_hash, current_tail_mode) = self.current_tail_metadata();
+        let current_tail_source_start = self.current_tail_source_start();
         let tail_state_changed = self.tail_content.len() != self.pushed_tail_len
             || self.tail_epoch != self.pushed_tail_epoch
             || current_tail_hash != self.pushed_tail_hash
@@ -281,7 +347,8 @@ impl AuroraBuffer {
             let mode = current_tail_mode.unwrap_or(TailRenderMode::Ast);
             let can_append = self.tail_epoch == self.pushed_tail_epoch
                 && self.tail_content.len() > self.pushed_tail_len
-                && current_tail_mode == self.pushed_tail_mode;
+                && current_tail_mode == self.pushed_tail_mode
+                && current_tail_source_start == self.pushed_tail_source_start;
             if can_append {
                 if let Some(suffix) = self.tail_content.get(self.pushed_tail_len..) {
                     Some(TailTextOp::Append {
@@ -330,6 +397,7 @@ impl AuroraBuffer {
             pushed_tail_epoch: self.tail_epoch,
             pushed_tail_hash: current_tail_hash,
             pushed_tail_mode: current_tail_mode,
+            pushed_tail_source_start: current_tail_source_start,
             consumes_tail_frame: update.tail_frame.is_some(),
         };
         Some((update, commit))
@@ -338,6 +406,7 @@ impl AuroraBuffer {
     pub fn prepare_snapshot_update(&self) -> (AuroraUpdate, AuroraDeliveryCommit) {
         let tail_block = self.current_tail_wire_block();
         let (current_tail_hash, current_tail_mode) = self.current_tail_metadata();
+        let current_tail_source_start = self.current_tail_source_start();
         let update = AuroraUpdate {
             kind: AuroraUpdateKind::Snapshot,
             stream_id: Some(self.stream_id),
@@ -357,6 +426,7 @@ impl AuroraBuffer {
             pushed_tail_epoch: self.tail_epoch,
             pushed_tail_hash: current_tail_hash,
             pushed_tail_mode: current_tail_mode,
+            pushed_tail_source_start: current_tail_source_start,
             consumes_tail_frame: true,
         };
         (update, commit)
@@ -369,6 +439,7 @@ impl AuroraBuffer {
         self.pushed_tail_epoch = commit.pushed_tail_epoch;
         self.pushed_tail_hash = commit.pushed_tail_hash;
         self.pushed_tail_mode = commit.pushed_tail_mode;
+        self.pushed_tail_source_start = commit.pushed_tail_source_start;
         if commit.consumes_tail_frame {
             self.tail_reset_pending = false;
             self.pending_mutations.clear();
@@ -410,7 +481,10 @@ impl AuroraBuffer {
 
         // 1. 增量解析全文，产出本次新增的已闭合块 + 尾部纯文本
         let (new_blocks, new_tail) = self.parser.process(&self.full_text);
+        let new_tail_start = self.parser.tail_start();
         let tail_changed = self.tail_content != new_tail;
+        let next_fingerprint =
+            (!new_tail.is_empty()).then(|| self.next_tail_fingerprint(&new_tail, new_tail_start));
 
         if !new_blocks.is_empty() {
             self.stable_blocks.extend(new_blocks);
@@ -451,10 +525,6 @@ impl AuroraBuffer {
                     false,
                 )
             };
-            let hash = crate::vcp_modules::sync_hash::HashAggregator::compute_content_hash(
-                &self.tail_content,
-            );
-
             let mode = if let Some(mut new_nodes) = nodes.take() {
                 // parser 返回的树已经递归 hash；只有绕过 parser 手工构造的 RawHtml
                 // 需要在成为唯一 canonical AST 前补一次。
@@ -489,7 +559,12 @@ impl AuroraBuffer {
                 TailRenderMode::Plain
             };
 
-            self.tail_projection = Some(TailProjection { hash, mode });
+            self.tail_projection = Some(TailProjection {
+                fingerprint: next_fingerprint.unwrap_or_else(|| {
+                    TailFingerprint::from_content(&self.tail_content, new_tail_start)
+                }),
+                mode,
+            });
         } else {
             self.tail_projection = None;
             if !self.prev_tail_ast.is_empty() || !self.tail_content.is_empty() {
@@ -791,6 +866,46 @@ mod tests {
         assert!(frame.reset);
         assert_eq!(frame.snapshot.as_deref(), Some(canonical.as_slice()));
         assert!(frame.mutations.is_empty());
+    }
+
+    #[test]
+    fn tail_fingerprint_matches_one_shot_sha256_across_utf8_appends() {
+        let mut buffer = AuroraBuffer::new();
+        for chunk in ["你", "好", "🙂", "，stream"] {
+            buffer.append_chunk(chunk);
+            buffer.process_queue();
+            let (hash, _) = buffer.current_tail_metadata();
+            let expected =
+                crate::vcp_modules::infra::utils::calculate_sha256(buffer.tail_content.as_bytes());
+            assert_eq!(hash.as_deref(), Some(expected.as_str()));
+        }
+    }
+
+    #[test]
+    fn tail_fingerprint_rebuilds_after_stable_prefix_precipitates() {
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk("stable\n\n尾");
+        assert_eq!(buffer.process_queue(), (true, true));
+        let (first_hash, _) = buffer.current_tail_metadata();
+        assert_eq!(
+            first_hash,
+            Some(crate::vcp_modules::infra::utils::calculate_sha256(
+                "尾".as_bytes()
+            ))
+        );
+
+        buffer.append_chunk("🙂");
+        assert_eq!(buffer.process_queue(), (false, true));
+        let live_tail = buffer
+            .current_tail_wire_block()
+            .expect("live tail snapshot block");
+        let recovery = AuroraBuffer::compile_recovery_snapshot(buffer.full_text.clone())
+            .tail_block
+            .expect("recovery tail snapshot block");
+        assert_eq!(
+            serde_json::to_value(live_tail).expect("serialize live tail")["hash"],
+            serde_json::to_value(recovery).expect("serialize recovery tail")["hash"]
+        );
     }
 
     #[test]

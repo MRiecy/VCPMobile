@@ -62,7 +62,7 @@ last_updated: 2026-06-14
 | `full_text` | `String` | ✅ | ✅ | SSE 累积全文 |
 | `stable_blocks` | `Vec<StreamBlock>` | ✅ | ✅ | 已确认闭合的语义块列表 |
 | `tail_content` | `String` | ✅ | ✅ | 当前尾部推测文本 |
-| `tail_projection` | `Option<TailProjection>` | — | ✅ | 仅保存 tail hash/mode；完整 wire block 在 Snapshot 时构造 |
+| `tail_projection` | `Option<TailProjection>` | — | ✅ | 保存增量 SHA-256 fingerprint/mode；完整 wire block 在 Snapshot 时构造 |
 | `parser` | `StreamBlockParser` | ✅ | ✅ | 有状态流式块解析器 |
 | `is_finishing` | `bool` | ✅ | ✅ | 是否已进入结束状态 |
 | **🆕 `prev_tail_ast`** | `Vec<MarkdownNode>` | — | ✅ | 当前唯一 canonical tail AST；也是下一帧 Diff 的旧基准 |
@@ -486,13 +486,14 @@ flowchart TD
 ```rust
 // ast_diff.rs:381-399
 fn diff_text_node(id: &str, old_value: &str, new_value: &str, mutations: &mut Vec<AstMutation>) {
-    if new_value == old_value { return; }
-    if let Some(chunk) = new_value.strip_prefix(old_value) {
-        if !chunk.is_empty() {
-            mutations.push(AstMutation::AppendText { id: id.to_string(), chunk: chunk.to_string() });
-        }
-    } else {
-        mutations.push(AstMutation::UpdateText { id: id.to_string(), value: new_value.to_string() });
+    match new_value.strip_prefix(old_value) {
+        Some("") => {}
+        Some(chunk) => mutations.push(AstMutation::AppendText {
+            id: id.to_string(), chunk: chunk.to_string(),
+        }),
+        None => mutations.push(AstMutation::UpdateText {
+            id: id.to_string(), value: new_value.to_string(),
+        }),
     }
 }
 ```
@@ -526,9 +527,9 @@ fn diff_text_node(id: &str, old_value: &str, new_value: &str, mutations: &mut Ve
 | 触发条件 | 代码位置 | 后续行为 |
 |---------|---------|---------|
 | 新的稳定块被解析 | `process_queue:136-141` | epoch++, rev=0, reset=true, 清空 prev_tail_ast 和 mutations |
-| Tail 超过 64KB（非 HTML 容器），切换到纯文本兜底 | `process_queue:186-193` | **仅切换帧** epoch++, rev=0, reset=true, 清空 mutations 和 snapshot；后续帧静默（不再每帧 bump） |
-| Tail 变为空字符串 | `process_queue:201-209` | epoch++, rev=0, reset=true, snapshot=Some(Vec::new()) |
-| 流结束 (finalize) | `finalize:232-235` | epoch++, rev=0, reset=true, snapshot=Some(Vec::new()) |
+| Tail 超过 64KB（包括 HTML），切换到纯文本兜底 | `process_queue` | **仅切换帧** epoch++, rev=0, reset=true，后续帧静默 |
+| Tail 变为空字符串 | `process_queue` | epoch++, rev=0, reset=true；发送时从空 `prev_tail_ast` 构造 snapshot |
+| 流结束 (finalize) | `finalize` | epoch++, rev=0, reset=true；发送时构造空 snapshot |
 
 ---
 
@@ -538,7 +539,8 @@ fn diff_text_node(id: &str, old_value: &str, new_value: &str, mutations: &mut Ve
 
 | 阶段 | 复杂度 | 说明 |
 |------|--------|------|
-| StreamBlockParser 增量解析 | O(n) | n = 新增文本长度 |
+| StreamBlockParser 块解析 | O(n) | n = 当前未闭合 tail 长度；已沉淀前缀不会重扫 |
+| Tail fingerprint | 常态 O(Δ)，rebase O(n) | 同一 tail 起点只吸收新增 suffix |
 | Tail AST 解析（pulldown-cmark） | O(n) | n = tail 文本长度（≤ 64KB） |
 | 递归 Hash 计算 | O(k) | k = AST 节点总数 |
 | diff_ast | O(min(m,n) + \|m-n\|) | m,n = 旧/新 AST 块级节点数 |
@@ -555,7 +557,7 @@ fn diff_text_node(id: &str, old_value: &str, new_value: &str, mutations: &mut Ve
 | `prev_tail_ast` | ~1-5KB | 上一帧 tail AST 的序列化大小 |
 | `pending_mutations` | ~200-800 bytes | 典型帧的突变指令集 |
 | `TailFrame` 序列化 JSON | ~300-1200 bytes | IPC 传输载荷 |
-| `tail_projection` | 常数级 | 仅保存 hash 与 AST/plain mode |
+| `tail_projection` | 常数级 | 保存可续算 SHA-256 状态与 AST/plain mode |
 
 ### 6.3 测试覆盖
 

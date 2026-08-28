@@ -423,22 +423,20 @@ fn diff_single_inline_node(
 }
 
 fn diff_text_node(id: &str, old_value: &str, new_value: &str, mutations: &mut Vec<AstMutation>) {
-    if new_value == old_value {
-        return;
-    }
-
-    if let Some(chunk) = new_value.strip_prefix(old_value) {
-        if !chunk.is_empty() {
+    match new_value.strip_prefix(old_value) {
+        Some("") => {}
+        Some(chunk) => {
             mutations.push(AstMutation::AppendText {
                 id: id.to_string(),
                 chunk: chunk.to_string(),
             });
         }
-    } else {
-        mutations.push(AstMutation::UpdateText {
-            id: id.to_string(),
-            value: new_value.to_string(),
-        });
+        None => {
+            mutations.push(AstMutation::UpdateText {
+                id: id.to_string(),
+                value: new_value.to_string(),
+            });
+        }
     }
 }
 
@@ -483,6 +481,38 @@ mod tests {
             }
             _ => panic!("Expected AppendText mutation"),
         }
+    }
+
+    #[test]
+    fn text_diff_scans_once_without_weakening_prefix_validation() {
+        let old = "你".repeat(20_000);
+
+        let mut mutations = Vec::new();
+        diff_text_node("t0.i0", &old, &old, &mut mutations);
+        assert!(mutations.is_empty());
+
+        let appended = format!("{old}🙂");
+        diff_text_node("t0.i0", &old, &appended, &mut mutations);
+        assert!(matches!(
+            mutations.as_slice(),
+            [AstMutation::AppendText { chunk, .. }] if chunk == "🙂"
+        ));
+
+        mutations.clear();
+        let mut changed = old.clone();
+        changed.replace_range(changed.len() - "你".len().., "他");
+        diff_text_node("t0.i0", &old, &changed, &mut mutations);
+        assert!(matches!(
+            mutations.as_slice(),
+            [AstMutation::UpdateText { value, .. }] if value == &changed
+        ));
+
+        mutations.clear();
+        diff_text_node("t0.i0", &old, "短", &mut mutations);
+        assert!(matches!(
+            mutations.as_slice(),
+            [AstMutation::UpdateText { value, .. }] if value == "短"
+        ));
     }
 
     #[test]
