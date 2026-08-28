@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{ipc::Channel, AppHandle, Manager, Runtime};
 #[cfg(target_os = "android")]
 use tokio_util::codec::LengthDelimitedCodec;
@@ -239,6 +239,26 @@ fn streaming_failure(
         pending_chunk.clear();
     }
     VcpRequestFailure::streaming(message, buffer.full_text.clone())
+}
+
+fn adaptive_aurora_parse_interval(tail_len: usize) -> Duration {
+    Duration::from_millis(match tail_len {
+        0..=8_191 => 33,
+        8_192..=24_575 => 100,
+        _ => 200,
+    })
+}
+
+fn adaptive_aurora_force_bytes(tail_len: usize) -> usize {
+    match tail_len {
+        0..=8_191 => 1024,
+        8_192..=24_575 => 4096,
+        _ => 8192,
+    }
+}
+
+fn remaining_aurora_parse_delay(elapsed: Duration, projected_tail_len: usize) -> Duration {
+    adaptive_aurora_parse_interval(projected_tail_len).saturating_sub(elapsed)
 }
 
 #[cfg(any(target_os = "android", test))]
@@ -1186,24 +1206,9 @@ async fn handle_streaming_request<R: Runtime>(
     let mut helper_generation: Option<u64> = None;
     let mut aurora_buffer = AuroraBuffer::new();
     let mut pending_aurora_chunk = String::new();
-    let mut last_aurora_parse = std::time::Instant::now() - Duration::from_millis(33);
+    let mut last_aurora_parse = Instant::now() - Duration::from_millis(33);
     let mut retry_count = 0;
     let mut backoff = Duration::from_millis(500);
-
-    fn adaptive_parse_interval_ms(tail_len: usize) -> u128 {
-        match tail_len {
-            0..=8_191 => 33,
-            8_192..=24_575 => 100,
-            _ => 200,
-        }
-    }
-    fn adaptive_force_bytes(tail_len: usize) -> usize {
-        match tail_len {
-            0..=8_191 => 1024,
-            8_192..=24_575 => 4096,
-            _ => 8192,
-        }
-    }
 
     let send_aurora_update = |buffer: &mut AuroraBuffer, finish_reason: Option<String>| {
         let is_final = finish_reason.is_some();
@@ -1225,23 +1230,26 @@ async fn handle_streaming_request<R: Runtime>(
 
     let flush_aurora_parse = |buffer: &mut AuroraBuffer,
                               pending_chunk: &mut String,
-                              last_parse: &mut std::time::Instant,
+                              last_parse: &mut Instant,
                               force: bool|
      -> (bool, bool) {
         if pending_chunk.is_empty() {
             return (false, false);
         }
-        let projected_tail_len = buffer.tail_content.len() + pending_chunk.len();
+        let projected_tail_len = buffer
+            .tail_content
+            .len()
+            .saturating_add(pending_chunk.len());
         if !force
-            && last_parse.elapsed().as_millis() < adaptive_parse_interval_ms(projected_tail_len)
-            && pending_chunk.len() < adaptive_force_bytes(projected_tail_len)
+            && last_parse.elapsed() < adaptive_aurora_parse_interval(projected_tail_len)
+            && pending_chunk.len() < adaptive_aurora_force_bytes(projected_tail_len)
         {
             return (false, false);
         }
 
         buffer.append_chunk(pending_chunk);
         pending_chunk.clear();
-        *last_parse = std::time::Instant::now();
+        *last_parse = Instant::now();
         buffer.process_queue()
     };
 
@@ -1461,7 +1469,16 @@ async fn handle_streaming_request<R: Runtime>(
                 {
                     if let Some(ref mut reader) = tcp_reader {
                         loop {
+                            let projected_tail_len = aurora_buffer
+                                .tail_content
+                                .len()
+                                .saturating_add(pending_aurora_chunk.len());
+                            let pending_flush_delay = remaining_aurora_parse_delay(
+                                last_aurora_parse.elapsed(),
+                                projected_tail_len,
+                            );
                             tokio::select! {
+                                biased;
                                 _ = cancellation_token.cancelled() => {
                                     log::warn!("[VCPClient] Request aborted during streaming: {}", message_id_inner);
                                     if let Err(error) = send_stop_to_helper(
@@ -1478,6 +1495,15 @@ async fn handle_streaming_request<R: Runtime>(
                                         Some("cancelled_by_user".to_string()),
                                     );
                                     return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
+                                }
+                                _ = tokio::time::sleep(pending_flush_delay), if !pending_aurora_chunk.is_empty() => {
+                                    flush_aurora_parse(
+                                        &mut aurora_buffer,
+                                        &mut pending_aurora_chunk,
+                                        &mut last_aurora_parse,
+                                        true,
+                                    );
+                                    send_aurora_update(&mut aurora_buffer, None);
                                 }
                                 next_line = reader.next() => {
                                     match next_line {
@@ -1590,11 +1616,25 @@ async fn handle_streaming_request<R: Runtime>(
                                         }
                                         Some(Err(e)) => {
                                             log::warn!("[VCPClient] TCP socket read error: {:?}, transitioning to Retrying", e);
+                                            flush_aurora_parse(
+                                                &mut aurora_buffer,
+                                                &mut pending_aurora_chunk,
+                                                &mut last_aurora_parse,
+                                                true,
+                                            );
+                                            send_aurora_update(&mut aurora_buffer, None);
                                             state = State::Retrying;
                                             break;
                                         }
                                         None => {
                                             log::warn!("[VCPClient] TCP socket closed by server. Transitioning to Retrying.");
+                                            flush_aurora_parse(
+                                                &mut aurora_buffer,
+                                                &mut pending_aurora_chunk,
+                                                &mut last_aurora_parse,
+                                                true,
+                                            );
+                                            send_aurora_update(&mut aurora_buffer, None);
                                             state = State::Retrying;
                                             break;
                                         }
@@ -1612,7 +1652,16 @@ async fn handle_streaming_request<R: Runtime>(
                 {
                     if let Some(ref mut line_stream) = lines {
                         loop {
+                            let projected_tail_len = aurora_buffer
+                                .tail_content
+                                .len()
+                                .saturating_add(pending_aurora_chunk.len());
+                            let pending_flush_delay = remaining_aurora_parse_delay(
+                                last_aurora_parse.elapsed(),
+                                projected_tail_len,
+                            );
                             tokio::select! {
+                                biased;
                                 _ = cancellation_token.cancelled() => {
                                     log::warn!("[VCPClient] Request aborted during streaming: {}", message_id_inner);
                                     flush_aurora_parse(&mut aurora_buffer, &mut pending_aurora_chunk, &mut last_aurora_parse, true);
@@ -1622,6 +1671,15 @@ async fn handle_streaming_request<R: Runtime>(
                                         Some("cancelled_by_user".to_string()),
                                     );
                                     return Ok((json!({ "fullContent": aurora_buffer.full_text, "finishReason": Some("cancelled_by_user") }), true));
+                                }
+                                _ = tokio::time::sleep(pending_flush_delay), if !pending_aurora_chunk.is_empty() => {
+                                    flush_aurora_parse(
+                                        &mut aurora_buffer,
+                                        &mut pending_aurora_chunk,
+                                        &mut last_aurora_parse,
+                                        true,
+                                    );
+                                    send_aurora_update(&mut aurora_buffer, None);
                                 }
                                 next_line = line_stream.next() => {
                                     match next_line {
@@ -1651,6 +1709,13 @@ async fn handle_streaming_request<R: Runtime>(
                                         }
                                         Some(Err(e)) => {
                                             log::warn!("[VCPClient] Stream read error: {:?}, transitioning to Retrying", e);
+                                            flush_aurora_parse(
+                                                &mut aurora_buffer,
+                                                &mut pending_aurora_chunk,
+                                                &mut last_aurora_parse,
+                                                true,
+                                            );
+                                            send_aurora_update(&mut aurora_buffer, None);
                                             state = State::Retrying;
                                             break;
                                         }
@@ -1659,6 +1724,13 @@ async fn handle_streaming_request<R: Runtime>(
                                                 stream_ended_normally = true;
                                             } else {
                                                 log::warn!("[VCPClient] Stream ended unexpectedly (None), transitioning to Retrying");
+                                                flush_aurora_parse(
+                                                    &mut aurora_buffer,
+                                                    &mut pending_aurora_chunk,
+                                                    &mut last_aurora_parse,
+                                                    true,
+                                                );
+                                                send_aurora_update(&mut aurora_buffer, None);
                                                 state = State::Retrying;
                                             }
                                             break;
@@ -2550,6 +2622,41 @@ mod active_request_tests {
         assert_eq!(message, "network failed");
         assert_eq!(partial_content.as_deref(), Some("abcdef"));
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn aurora_parse_deadline_uses_the_active_tail_tier() {
+        assert_eq!(
+            adaptive_aurora_parse_interval(8_191),
+            Duration::from_millis(33)
+        );
+        assert_eq!(
+            adaptive_aurora_parse_interval(8_192),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            adaptive_aurora_parse_interval(24_576),
+            Duration::from_millis(200)
+        );
+        assert_eq!(adaptive_aurora_force_bytes(8_191), 1024);
+        assert_eq!(adaptive_aurora_force_bytes(8_192), 4096);
+        assert_eq!(adaptive_aurora_force_bytes(24_576), 8192);
+    }
+
+    #[test]
+    fn aurora_parse_deadline_is_anchored_to_the_last_parse() {
+        assert_eq!(
+            remaining_aurora_parse_delay(Duration::from_millis(10), 1_000),
+            Duration::from_millis(23)
+        );
+        assert_eq!(
+            remaining_aurora_parse_delay(Duration::from_millis(99), 10_000),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            remaining_aurora_parse_delay(Duration::from_millis(250), 30_000),
+            Duration::ZERO
+        );
     }
 
     #[test]
