@@ -27,7 +27,7 @@ const currentTopics = computed<TopicViewModel[]>(() => {
 });
 
 // 虚拟列表实现
-const { list, containerProps, wrapperProps } = useVirtualList(currentTopics, {
+const { list, containerProps, wrapperProps, scrollTo } = useVirtualList(currentTopics, {
   itemHeight: 74, // 10(h-10) + padding/margins, 约 74px
   overscan: 10,
 });
@@ -195,8 +195,10 @@ const props = defineProps<{
 
 watch(
   () => props.searchQuery,
-  (newVal) => {
+  async (newVal) => {
     topicListStore.searchTerm = newVal || "";
+    await nextTick();
+    scrollTo(0);
   },
   { immediate: true }
 );

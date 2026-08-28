@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
+import { nextTick } from "vue";
 import { mount } from "@vue/test-utils";
 import { useAssistantStore } from "@/core/stores/assistant";
 import { useChatSessionStore } from "@/core/stores/chatSessionStore";
@@ -26,10 +27,16 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-const topic = (id: string) => ({
+const topic = (id: string, name = id) => ({
   id,
-  name: id,
+  name,
   createdAt: 1,
+  locked: true,
+  unread: false,
+  unreadCount: 0,
+  msgCount: 0,
+  ownerId: "agent-a",
+  ownerType: "agent" as const,
 });
 
 describe("topic list concurrency guards", () => {
@@ -99,6 +106,36 @@ describe("topic list concurrency guards", () => {
     wrapper.unmount();
     requests.forEach(({ resolve }) => resolve());
     await Promise.all(requests.map(({ promise }) => promise));
+  });
+
+  it("resets the virtual window when search narrows to an offscreen topic", async () => {
+    const store = useTopicStore();
+    store.topics = Array.from({ length: 60 }, (_, index) =>
+      topic(
+        `topic-${index}`,
+        index === 55 ? "Needle Topic" : `Topic ${index}`,
+      ),
+    );
+
+    const wrapper = mount(TopicList, {
+      props: { searchQuery: "" },
+      global: { directives: { longpress: {} } },
+    });
+    const scroller = wrapper.find<HTMLElement>(".vcp-scrollable");
+    await nextTick();
+    Object.defineProperty(scroller.element, "clientHeight", {
+      configurable: true,
+      value: 296,
+    });
+    scroller.element.scrollTop = 40 * 74;
+    await scroller.trigger("scroll");
+    expect(wrapper.text()).not.toContain("Needle Topic");
+
+    await wrapper.setProps({ searchQuery: "needle" });
+
+    await expect.poll(() => scroller.element.scrollTop).toBe(0);
+    await expect.poll(() => wrapper.text()).toContain("Needle Topic");
+    wrapper.unmount();
   });
 
   it("rejects stale chunks and stale finally across A to B to A", async () => {
