@@ -51,7 +51,17 @@ export const useChatSessionStore = defineStore("chatSession", () => {
       currentSelectedItem.value?.id !== nextItem?.id ||
       currentSelectedItem.value?.type !== nextItem?.type ||
       currentTopicId.value !== topicId;
-    if (changed) sessionEpoch.value += 1;
+
+    if (!changed) {
+      if (currentSelectedItem.value && nextItem) {
+        currentSelectedItem.value.name = nextItem.name;
+        currentSelectedItem.value.avatarCalculatedColor =
+          nextItem.avatarCalculatedColor;
+      }
+      return;
+    }
+
+    sessionEpoch.value += 1;
     currentSelectedItem.value = nextItem;
     currentTopicId.value = topicId;
   };

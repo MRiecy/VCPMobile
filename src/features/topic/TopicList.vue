@@ -159,9 +159,9 @@ const showTopicContextMenu = (topicId: string) => {
 
 // 兜底同步：当聊天上下文的选中项变化时，自动重新加载对应 Agent/Group 的话题列表
 watch(
-  () => [
-    sessionStore.currentSelectedItem?.id,
-    sessionStore.currentSelectedItem?.type,
+  [
+    () => sessionStore.currentSelectedItem?.id,
+    () => sessionStore.currentSelectedItem?.type,
   ] as const,
   ([ownerId, ownerType]) => {
     if (ownerId && (ownerType === "agent" || ownerType === "group")) {

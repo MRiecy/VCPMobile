@@ -54,6 +54,36 @@ describe("chat conversation concurrency guards", () => {
     expect(session.isConversationCurrent(firstA)).toBe(false);
   });
 
+  it("refreshes owner presentation without changing conversation identity", () => {
+    const session = useChatSessionStore();
+    session.setConversation(
+      {
+        id: "agent-a",
+        name: "Old name",
+        type: "agent",
+        avatarCalculatedColor: "#111111",
+      },
+      "topic-a",
+    );
+    const originalKey = session.currentConversationKey;
+
+    session.setConversation(
+      {
+        id: "agent-a",
+        name: "New name",
+        type: "agent",
+        avatarCalculatedColor: "#222222",
+      },
+      "topic-a",
+    );
+
+    expect(session.currentConversationKey).toBe(originalKey);
+    expect(session.currentSelectedItem).toMatchObject({
+      name: "New name",
+      avatarCalculatedColor: "#222222",
+    });
+  });
+
   it("does not let a slow owner selection overwrite a newer selection", async () => {
     const session = useChatSessionStore();
     const assistant = useAssistantStore();

@@ -1,11 +1,22 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
+import { mount } from "@vue/test-utils";
+import { useAssistantStore } from "@/core/stores/assistant";
+import { useChatSessionStore } from "@/core/stores/chatSessionStore";
 import { useTopicStore } from "@/core/stores/topicListManager";
+import TopicList from "@/features/topic/TopicList.vue";
 import {
   channelInstances,
   invokeMock,
   mockInvoke,
 } from "@/tests/mocks/tauri";
+
+vi.mock("vue-router", () => ({
+  useRouter: () => ({
+    currentRoute: { value: { path: "/chat" } },
+    push: vi.fn(),
+  }),
+}));
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -39,6 +50,55 @@ describe("topic list concurrency guards", () => {
     ).toHaveLength(1);
     pending.resolve();
     await Promise.all([first, second]);
+  });
+
+  it("watches semantic owner identity instead of owner object identity", async () => {
+    const requests = [deferred<void>(), deferred<void>()];
+    let callIndex = 0;
+    mockInvoke("get_topics_streamed", () => requests[callIndex++].promise);
+    const assistantStore = useAssistantStore();
+    assistantStore.agents = [
+      {
+        id: "agent-a",
+        name: "A",
+        model: "test",
+        avatarCalculatedColor: null,
+      },
+      {
+        id: "agent-b",
+        name: "B",
+        model: "test",
+        avatarCalculatedColor: null,
+      },
+    ];
+    const sessionStore = useChatSessionStore();
+    sessionStore.setConversation(
+      { id: "agent-a", name: "A", type: "agent" },
+      "topic-a",
+    );
+
+    const wrapper = mount(TopicList, {
+      global: { directives: { longpress: {} } },
+    });
+    await expect.poll(() => callIndex).toBe(1);
+
+    sessionStore.currentSelectedItem = {
+      id: "agent-a",
+      name: "A refreshed",
+      type: "agent",
+    };
+    await expect.poll(() => callIndex).toBe(1);
+
+    sessionStore.currentSelectedItem = {
+      id: "agent-b",
+      name: "B",
+      type: "agent",
+    };
+    await expect.poll(() => callIndex).toBe(2);
+
+    wrapper.unmount();
+    requests.forEach(({ resolve }) => resolve());
+    await Promise.all(requests.map(({ promise }) => promise));
   });
 
   it("rejects stale chunks and stale finally across A to B to A", async () => {
