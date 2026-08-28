@@ -1,7 +1,7 @@
 ---
 id: MOD-PERSISTENCE-014
-version: "1.1.3"
-date: 2026-08-11
+version: "1.1.5"
+date: 2026-08-28
 module: persistence/
 scope: src-tauri/src/vcp_modules/persistence/
 related: [db_manager.rs, db_write_queue.rs, message_repository.rs, sync_service.rs, chat_manager.rs, message_service.rs]
@@ -43,17 +43,17 @@ Vue 3 前端 / Rust 业务层
         ↓
         DbWriteQueue.submit(DbWriteTask::TopicMessages { ... })
         ↓
-        mpsc::channel(256) → 单 Worker 线程
+        mpsc::channel(32) → 单 Worker
         ↓
-        spawn_blocking → rusqlite::Connection::open(db_path)
+        spawn_blocking → 复用持久 rusqlite::Connection
         ↓
-        批量事务合并 → 统一哈希冒泡 → 提交
+        FIFO 批量事务 → 按任务更新哈希或留给 Finalizer → 提交
 ```
 
 **为什么查询与写入走不同通道？**
 - 查询需要高并发、低延迟、异步友好 → sqlx 连接池是最佳选择。
-- 写入在 SQLite 上天然串行（即使 WAL 模式，写操作仍需 `WAL_WRITE_LOCK`）。若所有业务层直接通过 sqlx 并发写入，会导致大量 `BUSY` 错误和重试。
-- 写入队列将并发写入请求收敛为单线程顺序批量事务，配合 rusqlite 的同步事务语义，实现吞吐量最大化与锁竞争最小化。
+- 写入在 SQLite 上天然串行（即使 WAL 模式，写操作仍需 `WAL_WRITE_LOCK`）。同步 Pull 若直接并发写入，会放大 `BUSY` 错误和重试。
+- 写入队列将同步 Pull 请求收敛为单消费者顺序批量事务；其他 sqlx 写路径仍共享数据库，并由 2 秒 busy timeout 有界协调。
 
 ---
 
@@ -290,247 +290,328 @@ CREATE TABLE IF NOT EXISTS active_generations (
 
 ---
 
-## 3. 写入队列（`db_write_queue.rs`）
+## 3. SQLite 写队列当前算法（`db_write_queue.rs`）
 
-`db_write_queue.rs`（784 行）是 persistence/ 领域的**写入咽喉**，负责将所有上层写入请求串行化、批量化、事务化。
+> **状态边界（2026-08-28）**：本节描述阶段 1 提交 `b677529` 之后、阶段 2 尚未实现时的真实代码。这里的“当前”是 **FIFO 贪婪前缀 + 滑动空闲超时**；双截止时间只是 §3.9 的后续方案，不能当成现状。
+>
+> 一句话概括：多个同步 Pull 生产者把任务送入容量 32 的有界通道；唯一 Worker 按 FIFO 取“当前预算内最长连续前缀”，用一个持久 rusqlite 连接在单个事务中执行；`Flush` 是排在队列中的提交屏障。
 
-### 3.1 单线程 Worker 模型
+### 3.1 它解决什么问题
 
-```rust
-pub struct DbWriteQueue {
-    sender: mpsc::Sender<DbWriteTask>,
-    logger: Option<Arc<Mutex<SyncLogger>>>,
-    db_path: std::path::PathBuf,
-    _worker: Option<tokio::task::JoinHandle<()>>,
-}
+SQLite 的 WAL 模式允许读写并发，但同一时刻仍只有一个写事务。同步 Pull 会并发解析多个 Topic；若这些解析任务各自直接抢写锁，会把锁竞争、重试和事务边界分散到每个生产者。
+
+`DbWriteQueue` 把同步写入收束成一个漏斗：
+
+```mermaid
+flowchart LR
+    subgraph P["并发生产者：PullExecutor"]
+        P1["Owner / Group"]
+        P2["Topic 元数据"]
+        P3["Topic 消息<br/>预处理后每块最多 250 条"]
+        P4["Avatar"]
+    end
+
+    P1 -->|"submit().await"| Q["有界 mpsc<br/>容量 32"]
+    P2 -->|"submit().await"| Q
+    P3 -->|"submit().await"| Q
+    P4 -->|"submit().await"| Q
+    F["flush().await"] -->|"插入 Flush 标记"| Q
+
+    Q --> W["唯一异步 Worker<br/>FIFO 收集批次"]
+    W --> G["贪婪选择<br/>最长可容纳连续前缀"]
+    G --> B["spawn_blocking"]
+    B --> C["持久 rusqlite 连接<br/>prepare_cached 可跨批次复用"]
+    C --> T["单个 SQLite 事务"]
+    T --> D[("同一数据库<br/>WAL + NORMAL")]
+    T -. "commit 后 ACK" .-> F
 ```
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `sender` | `mpsc::Sender<DbWriteTask>` | 外部提交写入任务的唯一入口，通道容量 256 |
-| `logger` | `Option<Arc<Mutex<SyncLogger>>>` | 可选的同步日志器，用于记录写入审计 |
-| `db_path` | `PathBuf` | 数据库物理路径，Worker 独立打开 rusqlite 连接 |
-| `_worker` | `Option<JoinHandle<()>>` | 后台 Worker 句柄，Drop 时自动清理 |
+这里的边界要说准确：
 
-**`Clone` 语义**（L61–L70）：
-- `DbWriteQueue` 实现了 `Clone`，但克隆体仅复制 `sender`、`logger`、`db_path`，`_worker` 置为 `None`。
-- 这意味着任意数量的业务模块可以持有 `DbWriteQueue` 的克隆体提交任务，但底层始终只有**一个** Worker 线程消费通道。
+- 队列消除了**队列内部**多个同步 Pull 写任务之间的竞争。
+- 项目里仍有 sqlx 事务等其他写路径；它们与该 rusqlite 连接共享同一数据库，所以连接设置了 2 秒 `busy_timeout`。
+- `submit().await` 只证明任务已经进入通道，不证明 SQLite 已提交；需要提交屏障时必须调用 `flush().await`。
+- 克隆 `DbWriteQueue` 只复制 sender 与只读元数据，`_worker` 置空；不会创建第二个 Worker 或第二条队列连接。
 
-**Worker 启动**（L73–L247）：
-1. 创建 `mpsc::channel(256)`。
-2. `tokio::spawn` 启动异步 Worker 协程。
-3. Worker 内部使用 `while let Some(first_task) = rx.recv().await` 循环等待任务。
-4. 每轮循环收集一批任务后，通过 `tokio::task::spawn_blocking` 将实际数据库操作转移到阻塞线程池，避免阻塞 Tokio 异步调度器。
+### 3.2 任务、背压与两种预算
 
-### 3.2 DbWriteTask 枚举
+当前 `DbWriteTask` 只有以下变体：
 
-```rust
-#[derive(Debug)]
-pub enum DbWriteTask {
-    Agent { id: String, dto: AgentSyncDTO },
-    Group { id: String, dto: GroupSyncDTO },
-    Avatar { owner_type: String, owner_id: String, bytes: Vec<u8> },
-    AgentTopicBatch { topics: Vec<(String, AgentTopicSyncDTO)> },
-    GroupTopicBatch { topics: Vec<(String, GroupTopicSyncDTO)> },
-    TopicMessages {
-        topic_id: String,
-        messages: Vec<ChatMessage>,
-        contents: Vec<String>,
-        render_bytes: Vec<Vec<u8>>,
-        content_hashes: Vec<String>,
-        skip_bubble: bool,
-    },
-    Flush { tx: oneshot::Sender<()> },
-}
+| 任务 | 主要负载 | 事务内动作 |
+|------|----------|------------|
+| `Agent` | 一个 `AgentSyncDTO` | 校验身份并 UPSERT `agents` |
+| `Group` | 一个 `GroupSyncDTO` | UPSERT `groups`，重建成员关系 |
+| `Avatar` | MIME + 图片字节 | 校验 owner，UPSERT `avatars` |
+| `AgentTopicBatch` | 多个 `(TopicKey, AgentTopicSyncDTO)` | 顺序 UPSERT Topic，记录受影响 Agent |
+| `GroupTopicBatch` | 多个 `(TopicKey, GroupTopicSyncDTO)` | 顺序 UPSERT Topic，记录受影响 Group |
+| `TopicMessages` | 一个 `TopicKey` + 多个 `PreparedMessageWrite` | 原子更新消息、渲染缓存、FTS、附件 |
+| `Flush` | oneshot sender | 不写数据；形成 FIFO 提交与错误屏障 |
+
+队列同时使用两个计数预算：
+
+| 预算 | 当前值 | 如何计数 |
+|------|-------:|----------|
+| 通道容量 | 32 个任务 | sender 满时，生产者的 `send().await` 自然背压 |
+| 单事务任务数 | 最多 32 个数据任务 | 每个非 Flush 变体都算 1 |
+| 单事务消息数 | 正常路径最多 500 条 | 只累计 `TopicMessages.writes.len()` |
+| 上游消息分块 | 每个任务最多 250 条 | `PullExecutor::process_topic_messages` 主动切块 |
+| 收集等待 | 每次 `recv` 最多等待 10ms | 是可重置的空闲间隔，不是总批次时限 |
+| SQLite 忙等待 | 最多 2000ms | 与队列外的数据库写连接冲突时由 SQLite 退避 |
+
+消息预算不计算 Avatar 字节、Topic 数量或 DTO 序列化大小；这些任务只占“任务数”预算。Pull 的 NDJSON 解析层另有 32 MiB 字节加权预算，二者不是同一个控制器。
+
+还有一个容易忽略的边界：500 是**合并器的正常路径预算**，不是对单个 `TopicMessages` 的输入校验。如果调用者直接提交 600 条的单任务，它仍可单独进入事务；当前安全性依赖 PullExecutor 先按 250 条切块。
+
+### 3.3 Worker 如何构造一个批次
+
+当前算法可以命名为：
+
+> **有界 FIFO 最大前缀贪婪（bounded FIFO maximal-prefix greedy），使用滑动 10ms 空闲窗口。**
+
+完整控制流如下：
+
+```mermaid
+flowchart TD
+    A["开始下一轮"] --> B{"carried_task<br/>是否存在？"}
+    B -- "是" --> C["先取 carried_task"]
+    B -- "否" --> D["rx.recv().await<br/>等待队首"]
+    C --> E{"首任务是 Flush？"}
+    D --> E
+
+    E -- "是" --> F["返回并清空 pending_errors<br/>不创建空事务"]
+    F --> A
+    E -- "否" --> G["batch = [first]<br/>统计 task_count / msg_count"]
+
+    G --> H{"任务数未满 32<br/>且消息数未满 500？"}
+    H -- "否" --> N["停止收集"]
+    H -- "是" --> I["timeout(10ms, rx.recv())"]
+
+    I --> J{"接收结果"}
+    J -- "超时 / channel 关闭" --> N
+    J -- "Flush" --> K["保存 Flush ACK<br/>停止读取其后任务"]
+    K --> N
+    J -- "数据任务" --> L{"已有消息，且加入后<br/>消息数会超过 500？"}
+
+    L -- "是" --> M["任务已被 recv 取出<br/>放入 carried_task"]
+    M --> N
+    L -- "否" --> O["追加到 batch<br/>更新两个计数"]
+    O --> H
+
+    N --> P["spawn_blocking<br/>FIFO 执行一个事务"]
+    P --> Q{"事务结果"}
+    Q -- "成功" --> R["success_count += 1"]
+    Q -- "失败 / JoinError" --> S["记录 pending_errors<br/>Worker 继续运行"]
+    R --> T{"本批遇到 Flush？"}
+    S --> T
+    T -- "是" --> U["ACK 当前累计 Result<br/>并清空错误"]
+    T -- "否" --> A
+    U --> A
 ```
 
-| 变体 | 数据来源 | 写入目标 |
-|------|---------|---------|
-| `Agent` / `Group` | 同步服务（Sync Service） | `agents` / `groups` 表 |
-| `Avatar` | 同步服务 / 头像上传 | `avatars` 表（BLOB） |
-| `AgentTopic` / `GroupTopic` | 同步服务 | `topics` 表 |
-| `AgentTopicBatch` / `GroupTopicBatch` | 同步服务批量同步 | `topics` 表（批量） |
-| `TopicMessages` | 同步服务 / 聊天发送 | `messages` + `render_cache` + `message_attachments` |
-| `Flush` | 同步服务（如 SyncPipeline 结束阶段） | 无实际写入，仅作为事务边界信号 |
+`carried_task` 是保持顺序的关键。Worker 为判断“下一个消息任务是否超出 500”必须先把它从 receiver 取出；若超预算，不能丢弃、插回队尾或越过它选择后面的轻任务，于是把它保存为下一事务的首任务。
 
-`TopicMessages` 是最复杂的变体，承载了消息正文、渲染缓存、附件关联的三重写入。其中 `render_bytes`、`contents`、`content_hashes` 均与 `messages` 一一对应：`contents` 为明文消息正文，供批量插入时直接绑定；`render_bytes` 由调用方预先通过 `MessageRenderCompiler::serialize` 生成；`content_hashes` 供消息指纹直接入库；`skip_bubble` 用于控制是否跳过该话题的哈希冒泡（如初始化填充历史数据时不需要实时冒泡）。
+两种“下一任务”处理方式不同，但都保持 FIFO：
 
-### 3.3 批量事务合并
+- 因 32 任务或已达 500 消息而停止时，下一任务尚未 `recv`，仍在通道队首。
+- 因预读到一个会使消息总数超过 500 的任务而停止时，该任务进入 `carried_task`，下一轮优先于通道继续执行。
 
-Worker 的核心设计是**将短时间窗口内的多个独立写入请求合并为单个 SQLite 事务**，大幅降低磁盘 fsync 次数。
+### 3.4 为什么说它是“贪婪”，以及它优化了什么
 
-**合并策略**（L83–L116）：
+设队列固定为 `T1, T2, ...`，并要求：
+
+1. 不允许重排；
+2. 不允许跳过队首；
+3. 一个事务只能包含连续任务；
+4. 不能越过 `Flush`；
+5. 正常任务满足 32 任务 / 500 消息预算。
+
+Worker 每轮都尽量把连续前缀向右扩展，直到再取一个任务就不合法。这个边界是当前事务能到达的最远位置；任何保持 FIFO 的其他合法方案都不可能在首事务里包含更靠后的任务。对剩余后缀重复同样论证，就得到：
+
+- 在既定顺序和计数预算下，最大前缀贪婪会使用最少的事务数；
+- 它不需要 knapsack、动态规划或优先队列；
+- 它优化的是事务固定开销与写锁获取次数，**不保证**最短尾延迟、最短持锁时间或最少 SQL 语句。
+
+因此，更复杂的“挑选最优组合”反而会要求跳过某个较重的队首任务，破坏 FIFO 与 `Flush` 屏障。当前真正有改进空间的不是替换贪婪前缀，而是时间边界、相邻任务合并和 SQL bind 预算。
+
+### 3.5 典型 250 + 250 + 250 示例
+
+PullExecutor 会把一个 Topic 的准备结果按 250 条切成任务。假设队列顺序为：
 
 ```text
-接收第一个任务 first_task
-│
-├─→ 若 first_task 是 Flush → 立即确认，本轮结束
-│
-└─→ 初始化 tasks_in_this_tx = [first_task]
-    初始化 total_msg_count = 该任务包含的消息数
-    初始化 flush_tx_opt = None
-    │
-    └─→ 循环尝试拉取更多任务（最多 10ms 超时）
-        ├─→ 收到 Flush → 记录 sender，中断拉取
-        ├─→ 收到普通任务 → 加入批次（限制：总任务数 < 32，总消息数 < 500）
-        └─→ 超时或通道空 → 中断拉取
+M1(topic-A, 250) → M2(topic-A, 250) → M3(topic-A, 250) → Flush
 ```
 
-| 限制项 | 阈值 | 设计理由 |
-|--------|------|---------|
-| 最大任务数 | 32 | 缩短同步事务占锁时间，给聊天终态写入留出调度窗口 |
-| 最大消息数 | 500 | 限制消息解析结果与 SQL 参数的单事务峰值 |
-| 合并窗口 | 10 ms | 保留批量吞吐，同时降低交互写等待 |
+处理结果：
 
-**事务执行**（L120–L216）：
-- 在 `spawn_blocking` 闭包内：`rusqlite::Connection::open(&db_path)` 打开独立连接。
-- 重复设置 WAL / NORMAL / busy_timeout（确保与 sqlx 侧一致）。
-- `conn.transaction()?` 开启事务。
-- 遍历 `tasks_in_this_tx`，按变体分发到对应的 `rusqlite_upsert_*` 私有方法。
-- 收集 `affected_owners`（Agent/Group ID）和 `affected_topics`（Topic ID）。
-- 统一冒泡哈希（见 §3.6）。
-- `tx.commit()?` 提交。
-- 根据执行结果累加 `success_count` 或 `error_count`，并在 Worker 停止时输出统计（L235–L238）。
+```mermaid
+sequenceDiagram
+    participant P as PullExecutor
+    participant Q as mpsc FIFO
+    participant W as DbWriteQueue Worker
+    participant DB as SQLite
 
-### 3.4 Flush 穿透语义
+    P->>Q: M1 (250)
+    P->>Q: M2 (250)
+    P->>Q: M3 (250)
+    P->>Q: Flush，并等待 oneshot
 
-`Flush` 是写入队列中唯一的**控制信号**而非数据负载，用于解决同步 pipeline 中的**时序确定性**问题。
+    Q-->>W: M1
+    Q-->>W: M2
+    Note over W: 批次达到 500 条，停止收集
+    W->>DB: BEGIN；执行 M1；执行 M2；COMMIT
+    DB-->>W: commit OK
+
+    Q-->>W: M3
+    Q-->>W: Flush
+    Note over W: Flush 截断本批后续收集
+    W->>DB: BEGIN；执行 M3；COMMIT
+    DB-->>W: commit OK
+    W-->>P: Flush ACK = Ok
+```
+
+注意：M1 和 M2 虽然共享一个 SQLite 事务，但当前不会合并成一个 `TopicMessages { writes: 500 }`。Worker 仍会调用两次完整的消息批处理函数，因此父 Topic 校验、existing-state 查询和各副表阶段也执行两轮。这是阶段 3 才考虑的“相邻同 Topic 合并”，不属于阶段 2。
+
+### 3.6 “10ms 窗口”其实是滑动空闲超时
+
+现代码在每一次循环里重新创建：
 
 ```rust
-pub async fn flush(&self) -> Result<(), String> {
-    let (tx, rx) = oneshot::channel();
-    if let Err(e) = self.sender.send(DbWriteTask::Flush { tx }).await { ... }
-    rx.await.map_err(...)??;
-    Ok(())
-}
+timeout(Duration::from_millis(10), rx.recv()).await
 ```
 
-**两种穿透场景**（L84–L88, L104–L106, L230–L232）：
+所以 10ms 的含义是“距上一个被接收任务多久没有新任务”，而不是“首任务到提交最多 10ms”。
 
-| 场景 | 行为 |
-|------|------|
-| **首任务即 Flush** | 事务队列为空，返回此前尚未结算的 batch 错误；无错误时返回 `Ok(())` |
-| **合并中收到 Flush** | 终止当前批次收集；事务提交后返回本批与此前积累错误的汇总 Result |
+```mermaid
+sequenceDiagram
+    participant Q as mpsc
+    participant W as Worker
 
-**设计意图**：同步服务在批量发送 TopicMessages 后调用 `flush().await?`，不仅确认此前任务已处理，还把后台事务失败显式传回阶段状态机。任一 flush/finalizer 失败都会阻止 `PHASE_COMPLETED`，避免 UI 显示完成但数据库缺项。
-
-### 3.5 Turbo rusqlite 模式
-
-`db_write_queue.rs` 被注释为 **"Turbo rusqlite Mode"**（L78），其核心是绕过 sqlx 连接池，直接使用 rusqlite 进行同步批量写入。
-
-**为什么不用 sqlx 执行批量写入？**
-
-| 维度 | sqlx Pool | rusqlite Direct |
-|------|-----------|-----------------|
-| 连接获取 | 异步竞争，可能等待 | 独占打开，立即可用 |
-| 参数绑定 | `sqlx::query` 动态绑定 | `prepare_cached` 复用语句句柄 |
-| 批量插入 | 逐条 `execute` | 单条多值 `INSERT ... VALUES (...), (...), ...` |
-| 事务控制 | 需 `pool.begin()` 获取连接 | `conn.transaction()` 原生支持 |
-| 编译时检查 | SQL 语法在编译期验证 | 运行时验证 |
-
-对于同步流水线中的批量写入场景，**运行时性能优先于编译时安全**，因此选用 rusqlite。
-
-**消息批量插入的极限优化**（`rusqlite_upsert_messages_batch`，L431–L635）：
-- `MAX_PARAMS = 999`：SQLite 单条 SQL 的参数上限。
-- `PARAMS_PER_MSG = 13`：messages 表每条记录需 13 个参数（msg_id, topic_id, role, name, agent_id, content, timestamp, is_group_message, group_id, finish_reason, content_hash, created_at, updated_at）。v0.9.14 移除 `is_thinking`。
-- 计算 `chunk_size = 999 / 13 = 76`，即单条 SQL 最多插入 76 条消息。
-- 使用 `String` 拼接动态 SQL，构造 `VALUES (?,?...), (?,?...), ...` 形式。
-- `prepare_cached` 缓存编译后语句，在同事务内的多个 chunk 间复用。
-- 消息正文以明文 `TEXT` 直接绑定（v1.1.3 起由压缩 BLOB 迁移为 TEXT，以支持 FTS5 全文搜索）。
-
-**附件批量处理**（L553–L632）：
-- 对同一批消息，先执行 `Chunked Delete`：按 `msg_id` IN 列表分块删除旧关系，上限 999 个 ID。
-- 再执行 `Chunked Relation Insert`：`message_attachments` 表单条记录 8 参数（topic_id, msg_id, hash, attachment_order, display_name, src, status, created_at），chunk_size = 124。
-- 附件本体（`attachments` 表）通过 `rusqlite_upsert_attachment_core` 逐条 UPSERT，冲突键为 `hash`。
-
-### 3.6 哈希冒泡与分层去重
-
-批量事务提交数据后，必须**自底向上重新计算并更新聚合哈希指纹**，以供同步子系统快速 Diff。
-
-**冒泡层次**（L176–L212）：
-
-```text
-事务内所有写入完成后
-│
-├─→ 1. Topic 层冒泡（affected_topics）
-│   └─→ rusqlite_bubble_topic_hash：
-│       ├─→ 读取该 topic 下所有现存消息的 content_hash，按 timestamp ASC, msg_id ASC 排序
-│       ├─→ 调用 compute_merkle_root(hashes) 计算消息根哈希
-│       ├─→ 读取 topic 元数据，按 owner_type 分别构造 AgentTopicSyncDTO / GroupTopicSyncDTO
-│       ├─→ 调用 HashAggregator::compute_agent_topic_metadata_hash 或 compute_group_topic_metadata_hash 计算 config_hash
-│       └─→ UPDATE topics SET content_hash = ?, config_hash = ? WHERE topic_id = ?
-│
-├─→ 2. Owner 层冒泡（affected_owners）
-│   └─→ 先批量去重校验存在性：
-│       ├─→ Agent: SELECT agent_id FROM agents WHERE agent_id IN (...) AND deleted_at IS NULL
-│       └─→ Group: SELECT group_id FROM groups WHERE group_id IN (...) AND deleted_at IS NULL
-│       仅对确实存在的 Owner 执行冒泡：
-│       ├─→ rusqlite_bubble_agent_hash：汇总该 Agent 下所有 topics 的 config_hash + content_hash，计算 Merkle Root → 更新 agents.content_hash
-│       └─→ rusqlite_bubble_group_hash：同理更新 groups.content_hash
+    Q-->>W: t=0ms：T1
+    Note over W: 开始第 1 个 10ms recv 等待
+    Q-->>W: t=9ms：T2
+    Note over W: 接受 T2；重新开始 10ms
+    Q-->>W: t=18ms：T3
+    Note over W: 接受 T3；再次重新开始 10ms
+    Q-->>W: ...
+    Q-->>W: t≈279ms：T32
+    Note over W: 达到 32 个任务，才进入事务
 ```
 
-**为什么需要批量存在性校验？**
-- 同步流可能包含已删除 Owner 的残余 Topic 数据（如 Topic 在远端被删除但消息仍下发）。
-- 若直接对不存在的 Agent/Group 执行 `UPDATE`，虽然 SQL 层面无影响，但会增加无意义计算。
-- 通过 `IN (...)` 批量查询一次性过滤有效 ID，将冒泡调用次数降至最少。
-- 使用 `deleted_at IS NULL` 条件进一步排除已软删除的实体。
+如果非消息小任务始终在超时前一点到达，31 次额外等待可让“收集阶段”理论上接近 310ms；之后还要加事务执行时间。反过来，突发任务已经在队列中时，`recv` 会立即返回，批次可以几乎无等待地装满。
 
-**哈希算法**：`crate::vcp_modules::sync_types::compute_merkle_root`，对有序哈希列表计算 Merkle Root（L647, L682, L701）。该算法确保子集的任何增删改都会改变根哈希，使同步 Diff 可以精确识别变更范围。
+这就是阶段 2 要处理的核心：当前算法有“安静 10ms 就提交”的能力，却没有从首任务开始计算的硬截止时间。
 
-### 3.7 各实体 UPSERT 方法详解
+### 3.7 一个批次进入 SQLite 后发生什么
 
-#### Agent 写入（`rusqlite_upsert_agent`，L271–L310）
+Worker 每批调用一次 `spawn_blocking`，但连接不是每次重开：
 
-```rust
-fn rusqlite_upsert_agent(
-    tx: &rusqlite::Transaction,
-    id: &str,
-    dto: &AgentSyncDTO,
-) -> rusqlite::Result<()>
+1. 首批懒加载 `rusqlite::Connection`。
+2. 仅初始化一次 `journal_mode=WAL`、`synchronous=NORMAL`、`busy_timeout=2000ms`。
+3. 连接保存在 `Arc<Mutex<Option<Connection>>>` 中，后续批次复用连接和 `prepare_cached` 缓存。
+4. 每批开启一个事务，严格按 `tasks_in_this_tx` 的 FIFO 顺序执行。
+5. 任一步失败会使事务回滚；成功才 `commit`。
+
+```mermaid
+flowchart TD
+    A["批次进入 spawn_blocking"] --> B["锁定并取得持久连接"]
+    B --> C["BEGIN TRANSACTION"]
+    C --> D["按 FIFO 遍历任务"]
+
+    D --> E{"任务类型"}
+    E -->|"Agent / Group / Avatar"| F["校验父身份并 UPSERT"]
+    E -->|"Topic Batch"| G["逐 Topic UPSERT<br/>记录 affected_owners"]
+    E -->|"TopicMessages"| H["执行消息原子管线"]
+
+    F --> I{"还有任务？"}
+    G --> I
+    H --> I
+    I -- "是" --> D
+    I -- "否" --> J["去重并排序 affected_owners"]
+    J --> K["校验 Owner 仍存活<br/>每个 Owner 冒泡一次 content_hash"]
+    K --> L["COMMIT"]
+    L --> M["返回事务 Result"]
 ```
 
-- 计算 `config_hash = HashAggregator::compute_agent_config_hash(dto)`。
-- `INSERT ... ON CONFLICT(agent_id) DO UPDATE SET ...`。
-- 更新字段：name, system_prompt, model, temperature, context_token_limit, max_output_tokens, stream_output, config_hash, updated_at。
-- 注意：不更新 `mobile_system_prompt` 和 `use_temperature`。这两个字段在 `agents` 表 Schema 中存在（默认值 `''` / `0`），但当前同步写入使用数据库默认值，不随 `AgentSyncDTO` 更新；`current_topic_id` 已不再是数据库字段，仅作为前端 `sessionStore` 运行时状态存在。
+`TopicMessages` 内部又是一条原子子管线：
 
-#### Group 写入（`rusqlite_upsert_group`，L312–L367）
-
-- 计算 `config_hash = HashAggregator::compute_group_config_hash(dto)`。
-- 先 `DELETE FROM group_members WHERE group_id = ?` 清理旧成员（L352）。
-- 再按 `dto.members` 列表重新插入成员关系（L356–L364）。
-- `member_tags` 为可选 JSON 对象，通过 `as_object()` 提取后按成员 ID 查找对应标签。
-
-#### Avatar 写入（`rusqlite_upsert_avatar`，L369–L388）
-
-- 计算 `avatar_hash = HashAggregator::compute_avatar_hash(bytes)`。
-- 提取主色调：`extract_dominant_color_from_bytes(bytes)`（来自 `avatar_service.rs`）。
-- 固定 MIME 类型为 `image/png`，所有头像统一转换为 PNG 后入库。
-- BLOB 数据直接写入 `image_data` 字段。
-
-#### Topic 写入（`rusqlite_upsert_agent_topic` / `rusqlite_upsert_group_topic`，L390–L429）
-
-- AgentTopic：写入 `owner_type = 'agent'`，保留 `locked` 和 `unread` 字段。
-- GroupTopic：写入 `owner_type = 'group'`，`locked` 固定为 1，`unread` 固定为 0（群组话题无未读概念）。
-
-### 3.8 错误传播与统计
-
-DbWriteQueue Worker 可以继续消费后续批次，但任何批次失败都会进入 `pending_errors`，并由下一次 `flush()` 汇总返回；继续运行不等于把失败当作成功：
-
-```rust
-match result {
-    Ok(Ok(_)) => success_count += 1,
-    Ok(Err(e)) => pending_errors.push(e.to_string()),
-    Err(e) => pending_errors.push(e.to_string()),
-}
+```mermaid
+flowchart LR
+    A["校验 Topic 存活<br/>身份与 updatedAt"] --> B["批量读取 existing state"]
+    B --> C["过滤 tombstone<br/>过滤精确重放 no-op"]
+    C --> D["messages 多值 UPSERT<br/>999 / 15 = 66 条每语句"]
+    D --> E["更新或失效 render_cache"]
+    E --> F["按正文变化刷新 FTS5"]
+    F --> G["校验并 UPSERT attachment core"]
+    G --> H["修剪并 UPSERT message_attachments"]
 ```
 
-| 错误类型 | 原因 | 处理策略 |
-|---------|------|---------|
-| rusqlite 执行错误 | SQL 语法错误、约束冲突、磁盘满 | 事务回滚、记录错误；下一次 Flush 返回 `Err`，同步阶段不得完成 |
-| spawn_blocking 错误 | 线程池 panic、OS 级资源耗尽 | 记录 JoinError；下一次 Flush 返回 `Err` |
+消息正文、渲染缓存、FTS 和附件关系处在同一个外层事务中，不会出现“消息提交了但副表只更新一半”的可见状态。消息任务本身不在这里重算 Topic/Owner 消息根；同步阶段先 `flush()`，再由 `SyncFinalizer` 统一重算，避免每个 250 条块都做一次昂贵冒泡。
 
-**统计输出**：Worker 停止时（通道关闭或应用退出）输出总成功数和错误数（L235–L238），便于诊断同步数据丢失问题。
+当前内部 SQL 仍保守使用 `MAX_PARAMS = 999`。阶段 1 虽已升级到 bundled SQLite 3.51.3（运行时上限 32766），但队列尚未消费这个新上限；是否提高要等阶段 4 基准验证。
+
+### 3.8 Flush 与错误传播：它是屏障，不是优先级
+
+`Flush` 不会越过之前的任务，所以“穿透优先级”不是准确描述。它是一个**有序 fence**：
+
+- Worker 若把 Flush 读作本轮首任务，说明其前面的批次已经处理完；此时不创建空事务，直接返回累计错误。
+- Worker 在收集数据批次时读到 Flush，会停止继续读取其后的任务；当前批次事务结束后才 ACK。
+- 当前批次失败时，错误先进入 `pending_errors`，随后本次 Flush ACK 返回 `Err`。
+- 没有 Flush 时，失败不会杀死 Worker；错误累积到下一次 Flush，并由 `take_pending_errors` 一次性取走，避免重复报告。
+
+```mermaid
+sequenceDiagram
+    participant C as 调用方
+    participant Q as FIFO Queue
+    participant W as Worker
+    participant DB as SQLite
+
+    C->>Q: submit(T1)
+    C->>Q: submit(T2)
+    C->>Q: Flush(marker)
+    C->>C: 等待 oneshot
+
+    Q-->>W: T1, T2, Flush
+    W->>DB: 执行 T1 + T2 的事务
+    alt commit 成功且无历史错误
+        DB-->>W: Ok
+        W-->>C: Ok(())
+    else 回滚、JoinError 或已有 pending_errors
+        DB-->>W: Err
+        W-->>C: Err(聚合摘要)
+    end
+```
+
+这里“落盘完成”的工程含义是：排在 marker 前的队列任务已经被处理，相关 SQLite 事务的 `commit` 已返回。它不改变 `synchronous=NORMAL` 自身的断电持久性语义。
+
+### 3.9 当前算法的评价与阶段 2 边界
+
+| 维度 | 当前实现 | 结论 |
+|------|----------|------|
+| 写入并发 | 单消费者、单持久连接 | 与 SQLite 单写者模型匹配，继续保留 |
+| 顺序 | 严格 FIFO、只取连续前缀 | 保证实体依赖与 Flush 屏障，继续保留 |
+| 批量选择 | 32 任务 / 正常 500 消息内的最大前缀 | 对“最少事务数”已足够高效，不换 knapsack |
+| 时间 | 每次接收后重置 10ms | 有空闲截止，无总时长上界 |
+| 相邻同 Topic | 可共享事务，但不合并 writes | 重复执行消息子管线；阶段 3 再处理 |
+| SQL 参数 | 固定 999 | 没利用 SQLite 3.51.3 的 32766；阶段 4 先基准 |
+| 字节公平性 | 队列只按任务数/消息数计权 | Avatar/DTO 大小不入队列预算；目前由上游边界兜底 |
+| 优先级 | 无优先队列；Flush 也是 FIFO marker | 正确性优先，不做跨 Topic 重排 |
+
+阶段 2 只修时间算法，不改变事务内容：
+
+```mermaid
+flowchart LR
+    A["当前<br/>首任务"] --> B["每收一个任务<br/>quiet 计时重新开始"]
+    B --> C{"安静 10ms<br/>或计数满？"}
+    C -- "否" --> B
+    C -- "是" --> D["提交"]
+
+    E["阶段 2（尚未实现）<br/>首任务"] --> F["固定 hard deadline<br/>同时维护 quiet deadline"]
+    F --> G{"quiet / hard / 计数 / Flush<br/>任一先到？"}
+    G -- "否" --> F
+    G -- "是" --> H["提交"]
+```
+
+因此阶段 2 的设计原则是：**保留 FIFO 最大前缀贪婪，只给收集期增加不可被后续任务延长的硬上界。** 这比引入优先队列、多 writer 或动态规划更直接，也不会扩大一致性风险。
 
 ---
 
@@ -860,16 +941,16 @@ Agent/Group 同步写绕过业务 Facade，因此 session 成功或失败退出�
 | **DbState** | 数据库状态单例，包含 sqlx 连接池与数据库路径 | `db_manager.rs` L6 |
 | **DbWriteQueue** | 单工作线程批量写入队列，消除并发锁竞争 | `db_write_queue.rs` L54 |
 | **DbWriteTask** | 写入任务枚举，涵盖 Agent/Group/Avatar/Topic/Messages/Flush | `db_write_queue.rs` L14 |
-| **Flush** | 穿透式屏障信号，确保此前所有写入已落盘 | `db_write_queue.rs` L49 |
-| **Turbo rusqlite 模式** | 绕过 sqlx，直接用 rusqlite 执行同步批量事务 | `db_write_queue.rs` L78 |
-| **批量事务合并** | 将 10ms 窗口内最多 32 个任务/500 条消息合并为 SQLite 事务 | `db_write_queue.rs` |
-| **Chunked Insert** | 受 SQLite 参数上限约束的分块批量插入 | `db_write_queue.rs` L445 |
-| **哈希冒泡** | 自底向上重新计算并更新 content_hash / config_hash | `db_write_queue.rs` L637 |
+| **Flush** | FIFO 提交与错误屏障，确保 marker 前的事务已处理 | `db_write_queue.rs` |
+| **Turbo rusqlite 模式** | 绕过 sqlx，复用持久 rusqlite 连接执行同步批量事务 | `db_write_queue.rs` |
+| **批量事务合并** | 在滑动 10ms 空闲间隔内收集最多 32 个任务/正常 500 条消息 | `db_write_queue.rs` |
+| **Chunked Insert** | 当前按保守 `MAX_PARAMS = 999` 分块的多值插入 | `db_write_queue.rs` |
+| **哈希冒泡** | Topic 元数据批次在事务内更新 Owner 根；消息根由 Flush 后 Finalizer 统一更新 | `db_write_queue.rs`, `sync_finalize.rs` |
 | **Merkle Root** | 对有序哈希列表计算出的聚合根哈希 | `sync_types.rs` |
 | **MessageRenderCompiler** | 消息渲染编译器，将文本转为 AST 二进制缓存 | `message_repository.rs` L10 |
 | **render_cache** | 独立表，存储预编译的 AST zstd 二进制；v0.9.14 起条件写入（仅非空时插入） | `db_manager.rs` L242 |
 | **三段流水线** | Reader → Processor → Writer 的现有预渲染缓存刷新管线 | `message_repository.rs` L74 |
-| **复合主键** | messages 表主键为 `(topic_id, msg_id)`，支持按话题分片 | `db_manager.rs` L219 |
+| **复合主键** | messages 表主键为 `(owner_type, owner_id, topic_id, msg_id)` | `0100_baseline_v2.sql` |
 | **内容寻址** | attachments 表以 SHA-256 hash 为主键，物理文件同名存储 | `db_manager.rs` L401 |
 | **0100 baseline** | 全新安装的终态 Schema；不兼容旧库在启动时被拒绝 | `db_manager.rs` |
 | **懒渲染缓存** | render_cache 命中直接反序列化 blocks；未命中编译后异步回写 | `message_service.rs` |
@@ -878,14 +959,14 @@ Agent/Group 同步写绕过业务 Facade，因此 session 成功或失败退出�
 
 ---
 
-*最后更新：2026-08-11 | VCP Mobile v1.1.3*
+*最后更新：2026-08-28 | VCP Mobile v1.1.5*
 
 > **关键设计决策备忘**
 >
 > 1. **双通道数据库访问**：查询走 sqlx 异步连接池，写入走 DbWriteQueue + rusqlite 同步直连。两者共享同一物理数据库文件，通过 WAL 模式协调并发。
-> 2. **批量事务合并**：DbWriteQueue Worker 以 10ms 窗口 + 32 任务/500 消息上限合并事务，在吞吐与交互写延迟之间取平衡。
+> 2. **批量事务合并**：DbWriteQueue Worker 使用滑动 10ms 空闲超时 + 32 任务/正常 500 消息预算；当前没有首任务起算的硬截止时间。
 > 3. **render_cache 独立表**：将预渲染 AST 二进制从 messages 表剥离，避免消息表膨胀，同时允许独立刷新已有缓存。
 > 4. **存储格式分工**：`messages.content` 保存明文 TEXT，`render_cache.render_content` 保存 zstd 压缩 AST。
-> 5. **哈希冒泡分层去重**：事务提交后先批量校验 Owner 存在性，再执行 Topic → Owner 的两层冒泡，避免对幽灵数据做无意义计算。
+> 5. **哈希更新分工**：Topic 元数据批次校验并去重更新受影响 Owner 根；TopicMessages 先 Flush，再由 SyncFinalizer 统一重算 Topic/Owner 消息根。
 > 6. **懒渲染缓存闭环**：加载时 render_cache 命中即走；未命中实时编译并异步回写，确保首次访问后的后续加载均为 O(1) 反序列化。
 > 7. **Schema 基线**：全新安装执行 0100 baseline；不兼容旧数据库由启动检查明确拒绝。
