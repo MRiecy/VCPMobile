@@ -1,5 +1,42 @@
 use crate::vcp_modules::topic_types::Topic;
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
+pub type MemberTags = BTreeMap<String, String>;
+
+pub(crate) fn validate_member_tags(member_tags: &MemberTags) -> Result<(), String> {
+    if member_tags.keys().any(String::is_empty) {
+        return Err("memberTags keys must be non-empty strings".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn parse_member_tags(raw: &str) -> Result<MemberTags, String> {
+    let member_tags = serde_json::from_str(raw).map_err(|error| error.to_string())?;
+    validate_member_tags(&member_tags)?;
+    Ok(member_tags)
+}
+
+pub(crate) fn serialize_member_tags(member_tags: Option<&MemberTags>) -> Result<String, String> {
+    match member_tags {
+        Some(member_tags) => serde_json::to_string(member_tags).map_err(|error| error.to_string()),
+        None => Ok("{}".to_string()),
+    }
+}
+
+pub(crate) fn deserialize_member_tags<'de, D>(
+    deserializer: D,
+) -> Result<Option<MemberTags>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let member_tags = Option::<MemberTags>::deserialize(deserializer)?;
+    if let Some(member_tags) = &member_tags {
+        validate_member_tags(member_tags).map_err(D::Error::custom)?;
+    }
+    Ok(member_tags)
+}
 
 fn default_group_name() -> String {
     "Unnamed Group".to_string()
@@ -32,8 +69,8 @@ pub struct GroupConfig {
     #[serde(default = "default_group_mode")]
     pub mode: String,
     /// 完整成员标签映射；已移除成员的 Tag 仍保留供重新加入时恢复。
-    #[serde(default)]
-    pub member_tags: Option<serde_json::Value>,
+    #[serde(default, deserialize_with = "deserialize_member_tags")]
+    pub member_tags: Option<MemberTags>,
     /// 群组全局提示词
     #[serde(default)]
     pub group_prompt: Option<String>,

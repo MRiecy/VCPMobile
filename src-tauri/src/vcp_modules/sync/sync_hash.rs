@@ -1,3 +1,4 @@
+use crate::vcp_modules::group_types::parse_member_tags;
 use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
@@ -49,8 +50,11 @@ impl HashAggregator {
         agent_id: Option<&str>,
         attachment_hashes: &[String],
     ) -> String {
-        let mut sorted_hashes = attachment_hashes.to_vec();
-        sorted_hashes.sort();
+        let mut sorted_hashes = attachment_hashes
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        sorted_hashes.sort_unstable();
 
         let mut fingerprint_map = serde_json::Map::new();
         fingerprint_map.insert(
@@ -84,7 +88,12 @@ impl HashAggregator {
         if !sorted_hashes.is_empty() {
             fingerprint_map.insert(
                 "attachmentHashes".to_string(),
-                serde_json::to_value(sorted_hashes).unwrap(),
+                serde_json::Value::Array(
+                    sorted_hashes
+                        .into_iter()
+                        .map(|hash| serde_json::Value::String(hash.to_string()))
+                        .collect(),
+                ),
             );
         }
 
@@ -153,7 +162,7 @@ impl HashAggregator {
             "name": &dto.name,
             "members": &dto.members,
             "mode": &dto.mode,
-            "memberTags": dto.member_tags.clone().unwrap_or_else(|| serde_json::json!({})),
+            "memberTags": dto.member_tags.clone().unwrap_or_default(),
             "groupPrompt": dto.group_prompt.as_deref().unwrap_or(""),
             "invitePrompt": dto.invite_prompt.as_deref().unwrap_or(
                 "现在轮到你{{VCPChatAgentName}}发言了。系统已经为大家添加[xxx的发言：]这样的标记头，以用于区分不同发言来自谁。大家不用自己再输出自己的发言标记头，也不需要讨论发言标记系统，正常聊天即可。",
@@ -528,7 +537,7 @@ impl SyncDtoLoader {
         let member_tags_raw: String = row
             .try_get("member_tags")
             .map_err(|error| format!("Group {group_id} memberTags decode failed: {error}"))?;
-        let member_tags = serde_json::from_str(&member_tags_raw)
+        let member_tags = parse_member_tags(&member_tags_raw)
             .map_err(|error| format!("Group {group_id} memberTags JSON is invalid: {error}"))?;
 
         Ok(GroupSyncDTO {
@@ -725,7 +734,7 @@ mod tests {
             created_at: 0,
         };
         let explicit = GroupSyncDTO {
-            member_tags: Some(serde_json::json!({})),
+            member_tags: Some(Default::default()),
             group_prompt: Some(String::new()),
             invite_prompt: Some("现在轮到你{{VCPChatAgentName}}发言了。系统已经为大家添加[xxx的发言：]这样的标记头，以用于区分不同发言来自谁。大家不用自己再输出自己的发言标记头，也不需要讨论发言标记系统，正常聊天即可。".to_string()),
             unified_model: Some(String::new()),

@@ -66,7 +66,7 @@ pub fn determine_naturerandom_speakers(
             .member_tags
             .as_ref()
             .and_then(|t| t.get(&member.id))
-            .and_then(|v| v.as_str())
+            .map(String::as_str)
             .unwrap_or("");
 
         if tags_val.is_empty() {
@@ -166,7 +166,7 @@ pub fn determine_naturerandom_speakers(
                 .member_tags
                 .as_ref()
                 .and_then(|t| t.get(&member.id))
-                .and_then(|v| v.as_str())
+                .map(String::as_str)
                 .unwrap_or("");
             if !tags_val.is_empty() {
                 let tags: Vec<&str> = tag_re.split(tags_val).map(|t| t.trim()).collect();
@@ -194,7 +194,7 @@ pub fn determine_naturerandom_speakers(
                     .member_tags
                     .as_ref()
                     .and_then(|t| t.get(&m.id))
-                    .and_then(|v| v.as_str())
+                    .map(String::as_str)
                     .unwrap_or("");
                 if tags_val.is_empty() {
                     return false;
@@ -219,7 +219,7 @@ pub fn determine_naturerandom_speakers(
             .member_tags
             .as_ref()
             .and_then(|t| t.get(&member.id))
-            .and_then(|v| v.as_str())
+            .map(String::as_str)
             .unwrap_or("");
         let tags: Vec<&str> = tag_re.split(tags_val).map(|t| t.trim()).collect();
 

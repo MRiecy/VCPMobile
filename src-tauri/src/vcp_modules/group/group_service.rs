@@ -2,7 +2,9 @@
 // 职责: 作为 Tauri 命令入口，处理群组业务逻辑，完全面向 SQLite 存储。
 
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::group_types::GroupConfig;
+use crate::vcp_modules::group_types::{
+    parse_member_tags, serialize_member_tags, GroupConfig, MemberTags,
+};
 use crate::vcp_modules::sync_dto::GroupSyncDTO;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
@@ -129,7 +131,7 @@ async fn read_group_config_locked<R: Runtime>(
             members.push(aid);
         }
         let member_tags_raw: String = row.get("member_tags");
-        let member_tags = serde_json::from_str(&member_tags_raw)
+        let member_tags = parse_member_tags(&member_tags_raw)
             .map_err(|error| format!("Group {group_id} memberTags decode failed: {error}"))?;
 
         let topic_rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(
@@ -262,7 +264,7 @@ pub async fn get_groups(
 
         let members = group_members.remove(&group_id).unwrap_or_default();
         let member_tags_raw: String = row.get("member_tags");
-        let member_tags = serde_json::from_str(&member_tags_raw)
+        let member_tags = parse_member_tags(&member_tags_raw)
             .map_err(|error| format!("Group {group_id} memberTags decode failed: {error}"))?;
 
         let config = GroupConfig {
@@ -364,7 +366,7 @@ pub async fn create_group(
         avatar_calculated_color: None,
         members: vec![],
         mode: "sequential".to_string(),
-        member_tags: Some(serde_json::json!({})),
+        member_tags: Some(MemberTags::new()),
         group_prompt: Some("".to_string()),
         invite_prompt: Some("现在轮到你{{VCPChatAgentName}}发言了。系统已经为大家添加[xxx的发言：]这样的标记头，以用于区分不同发言来自谁。大家不用自己再输出自己的发言标记头，也不需要讨论发言标记系统，正常聊天即可。".to_string()),
         use_unified_model: false,
@@ -376,11 +378,8 @@ pub async fn create_group(
 
     let dto = GroupSyncDTO::from(&config);
     let config_hash = HashAggregator::compute_group_config_hash(&dto);
-    let member_tags = config
-        .member_tags
-        .clone()
-        .unwrap_or_else(|| serde_json::json!({}))
-        .to_string();
+    let member_tags = serialize_member_tags(config.member_tags.as_ref())
+        .map_err(|error| format!("Group {group_id} memberTags encode failed: {error}"))?;
 
     sqlx::query(
         "INSERT INTO groups (
@@ -477,11 +476,8 @@ async fn internal_write_group_config<R: Runtime>(
 
     let dto = GroupSyncDTO::from(&canonical_config);
     let config_hash = HashAggregator::compute_group_config_hash(&dto);
-    let member_tags = canonical_config
-        .member_tags
-        .clone()
-        .unwrap_or_else(|| serde_json::json!({}))
-        .to_string();
+    let member_tags = serialize_member_tags(canonical_config.member_tags.as_ref())
+        .map_err(|error| format!("Group {group_id} memberTags encode failed: {error}"))?;
 
     sqlx::query(
         "INSERT INTO groups (

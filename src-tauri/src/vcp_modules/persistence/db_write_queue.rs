@@ -1,4 +1,5 @@
 use crate::vcp_modules::chat_manager::ChatMessage;
+use crate::vcp_modules::group_types::serialize_member_tags;
 use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
@@ -805,11 +806,8 @@ impl DbWriteQueue {
         canonical_dto.members = canonical_members;
 
         let config_hash = HashAggregator::compute_group_config_hash(&canonical_dto);
-        let member_tags = canonical_dto
-            .member_tags
-            .clone()
-            .unwrap_or_else(|| serde_json::json!({}))
-            .to_string();
+        let member_tags = serialize_member_tags(canonical_dto.member_tags.as_ref())
+            .map_err(Self::sync_contract_error)?;
 
         let changed = tx.execute(
             "INSERT INTO groups (

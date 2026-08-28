@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::{self, Write};
 
 pub const SYNC_TOMBSTONE_HASH: &str =
     "0000000000000000000000000000000000000000000000000000000000000000";
@@ -16,13 +17,16 @@ pub const SYNC_TOMBSTONE_HASH: &str =
 /// vcp_modules/sync_types.rs - 分布式 LWW+Hash 同步协议的核心数据结构
 /// =================================================================
 /// 计算 JSON 的确定性 SHA-256 Hash
-pub fn compute_deterministic_hash<T: Serialize>(data: &T) -> String {
-    if let Ok(val) = serde_json::to_value(data) {
-        let json_str = stable_stringify(&val);
-        crate::vcp_modules::infra::utils::calculate_sha256(json_str.as_bytes())
-    } else {
-        "".to_string()
+pub fn compute_deterministic_hash(data: &serde_json::Value) -> String {
+    let mut hasher = Sha256::new();
+    let result = {
+        let mut writer = Sha256Writer(&mut hasher);
+        write_stable_json(data, &mut writer)
+    };
+    if result.is_err() {
+        return String::new();
     }
+    crate::vcp_modules::infra::utils::finalize_sha256_hex(hasher)
 }
 
 /// 计算一组哈希的聚合哈希 (Merkle Root)
@@ -31,7 +35,7 @@ pub fn compute_merkle_root(mut hashes: Vec<String>) -> String {
     if hashes.is_empty() {
         return "".to_string();
     }
-    hashes.sort();
+    hashes.sort_unstable();
     let mut hasher = Sha256::new();
     for h in hashes {
         hasher.update(h.as_bytes());
@@ -49,43 +53,67 @@ pub fn is_valid_avatar_owner(owner_type: &str, owner_id: &str) -> bool {
     }
 }
 
-pub fn stable_stringify(value: &serde_json::Value) -> String {
+struct Sha256Writer<'a>(&'a mut Sha256);
+
+impl Write for Sha256Writer<'_> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn write_json_string<W: Write>(writer: &mut W, value: &str) -> io::Result<()> {
+    serde_json::to_writer(writer, value).map_err(io::Error::other)
+}
+
+fn write_stable_json<W: Write>(value: &serde_json::Value, writer: &mut W) -> io::Result<()> {
     match value {
         serde_json::Value::Object(map) => {
             let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
-            let mut res = String::new();
-            res.push('{');
-            for (i, k) in keys.iter().enumerate() {
+            keys.sort_unstable_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+            writer.write_all(b"{")?;
+            for (i, key) in keys.into_iter().enumerate() {
                 if i > 0 {
-                    res.push(',');
+                    writer.write_all(b",")?;
                 }
-                res.push_str(&format!(
-                    "\"{}\":{}",
-                    k,
-                    stable_stringify(map.get(*k).unwrap())
-                ));
+                write_json_string(writer, key)?;
+                writer.write_all(b":")?;
+                let child = map.get(key).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "canonical JSON key disappeared")
+                })?;
+                write_stable_json(child, writer)?;
             }
-            res.push('}');
-            res
+            writer.write_all(b"}")
         }
         serde_json::Value::Array(arr) => {
-            let mut res = String::new();
-            res.push('[');
+            writer.write_all(b"[")?;
             for (i, v) in arr.iter().enumerate() {
                 if i > 0 {
-                    res.push(',');
+                    writer.write_all(b",")?;
                 }
-                res.push_str(&stable_stringify(v));
+                write_stable_json(v, writer)?;
             }
-            res.push(']');
-            res
+            writer.write_all(b"]")
         }
-        serde_json::Value::String(s) => serde_json::to_string(s).unwrap_or_default(),
-        serde_json::Value::Number(n) => n.to_string(),
-        serde_json::Value::Bool(b) => b.to_string(),
-        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::String(value) => write_json_string(writer, value),
+        serde_json::Value::Number(value) => write!(writer, "{value}"),
+        serde_json::Value::Bool(true) => writer.write_all(b"true"),
+        serde_json::Value::Bool(false) => writer.write_all(b"false"),
+        serde_json::Value::Null => writer.write_all(b"null"),
     }
+}
+
+#[cfg(test)]
+fn stable_stringify(value: &serde_json::Value) -> String {
+    let mut bytes = Vec::new();
+    if write_stable_json(value, &mut bytes).is_err() {
+        return String::new();
+    }
+    String::from_utf8(bytes).unwrap_or_default()
 }
 
 /// Manifest 状态集合类别。
@@ -976,6 +1004,72 @@ impl DeleteNotificationFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_json_escapes_dynamic_keys_and_is_injective_for_member_tags() {
+        let injected = serde_json::json!({
+            "memberTags": { "a\":\"x\",\"b": "y" }
+        });
+        let ordinary = serde_json::json!({
+            "memberTags": { "a": "x", "b": "y" }
+        });
+
+        assert_eq!(
+            stable_stringify(&injected),
+            r#"{"memberTags":{"a\":\"x\",\"b":"y"}}"#
+        );
+        assert_ne!(stable_stringify(&injected), stable_stringify(&ordinary));
+        assert_ne!(
+            compute_deterministic_hash(&injected),
+            compute_deterministic_hash(&ordinary)
+        );
+    }
+
+    #[test]
+    fn canonical_json_sorts_keys_by_utf8_bytes_and_streams_the_same_digest() {
+        let value = serde_json::json!({
+            "memberTags": {
+                "😀": "astral",
+                "\u{e000}": "private-use",
+                "line\nkey": "control",
+                "slash\\key": "slash"
+            }
+        });
+        let canonical = stable_stringify(&value);
+
+        assert!(canonical.find('\u{e000}').unwrap() < canonical.find('😀').unwrap());
+        assert!(canonical.contains(r#""line\nkey""#));
+        assert!(canonical.contains(r#""slash\\key""#));
+        assert_eq!(
+            compute_deterministic_hash(&value),
+            crate::vcp_modules::infra::utils::calculate_sha256(canonical.as_bytes())
+        );
+    }
+
+    #[test]
+    fn canonical_hash_matches_the_shared_cross_language_vectors() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/message_canonical_contract.json"))
+                .expect("parse canonical hash fixture");
+        for case in fixture["canonicalHashCases"]
+            .as_array()
+            .expect("canonical hash cases")
+        {
+            let value = &case["value"];
+            assert_eq!(
+                stable_stringify(value),
+                case["expectedCanonical"].as_str().expect("canonical bytes"),
+                "case {}",
+                case["name"].as_str().unwrap_or("unnamed")
+            );
+            assert_eq!(
+                compute_deterministic_hash(value),
+                case["expectedHash"].as_str().expect("canonical hash"),
+                "case {}",
+                case["name"].as_str().unwrap_or("unnamed")
+            );
+        }
+    }
 
     #[test]
     fn avatar_owner_contract_is_closed_and_keeps_the_user_singleton() {

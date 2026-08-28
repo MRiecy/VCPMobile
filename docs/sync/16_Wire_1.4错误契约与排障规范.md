@@ -179,7 +179,7 @@ VCP-CDS internal protocol 3 不是 Mobile Wire 1.4。CDS 的 HTTP 与逐项失�
 双端各自保存同名、版本无关的契约样本：
 
 - `wire_error_contract.json`：覆盖完整错误外壳与代表性非法输入；
-- `message_canonical_contract.json`：覆盖消息逻辑投影与指纹。可选字段省略与 `null` 视为同一逻辑状态。
+- `message_canonical_contract.json`：覆盖消息逻辑投影、指纹，以及动态 key 的 JSON 转义与 UTF-8 排序。可选字段省略与 `null` 视为同一逻辑状态。
 
 fixture 只记录真正跨端的结构与语义，不复制各端本地错误码注册表，也不绑定某次 Wire 版本或文件 SHA。仅当对应契约本身变化时才修改样本。
 
