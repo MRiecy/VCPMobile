@@ -496,7 +496,7 @@ function splitMarkdownNodes(nodes: any[]): any[][] {
 Rust 侧使用标准 `log` crate 输出 AST 相关日志：
 
 ```
-[PreRender] parse_markdown_to_ast panicked: ...
+[PreRender] Markdown nesting exceeded 128; using literal fallback
 [AST Diff] diff_ast: old_len=3 new_len=4 mutations=2
 ```
 

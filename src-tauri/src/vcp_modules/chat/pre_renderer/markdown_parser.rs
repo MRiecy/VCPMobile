@@ -29,6 +29,17 @@ lazy_static! {
         Regex::new(r"(?m)^[ \t]{4,}(\$\$)").unwrap();
 }
 
+// pulldown-cmark 本身使用堆上的事件栈，但本模块随后会递归遍历生成的 AST。
+// 对畸形输入做结构深度降级，避免 panic=abort 的 Release 因栈耗尽直接退出。
+const MAX_MARKDOWN_NESTING_DEPTH: usize = 128;
+const MAX_HTML_CONTAINER_DEPTH: usize = 64;
+
+fn plaintext_fallback(text: &str) -> Vec<MarkdownNode> {
+    let mut fallback_node = MarkdownNode::paragraph(vec![InlineNode::text(text.to_string())]);
+    fallback_node.compute_hashes_recursively();
+    vec![fallback_node]
+}
+
 fn is_punctuation(c: char) -> bool {
     c.is_ascii_punctuation()
         || ('\u{2000}'..='\u{206F}').contains(&c)
@@ -48,8 +59,10 @@ fn get_fence_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
     let mut current_start: Option<(usize, usize)> = None;
 
     for cap in FENCE_RE.captures_iter(text) {
-        let m = cap.get(0).unwrap();
-        let backticks = cap.get(1).unwrap().as_str().len();
+        let (Some(m), Some(fence)) = (cap.get(0), cap.get(1)) else {
+            continue;
+        };
+        let backticks = fence.as_str().len();
 
         match current_start {
             None => {
@@ -453,7 +466,9 @@ fn preprocess_latex_math(text: &str) -> Cow<'_, str> {
 fn push_math_replaced(dest: &mut String, segment: &str) {
     let mut last_match_end = 0;
     for caps in MATH_RE.captures_iter(segment) {
-        let full_match = caps.get(0).unwrap();
+        let Some(full_match) = caps.get(0) else {
+            continue;
+        };
         // 推送匹配项之前的普通文本
         dest.push_str(&segment[last_match_end..full_match.start()]);
 
@@ -476,7 +491,11 @@ fn push_math_replaced(dest: &mut String, segment: &str) {
 
 /// 提取 HTML 容器块，将其替换为占位符，并递归解析内部 Markdown
 #[allow(clippy::type_complexity)]
-fn extract_html_containers(text: &str) -> (Cow<'_, str>, Vec<(String, Vec<MarkdownNode>, String)>) {
+fn extract_html_containers(
+    text: &str,
+    is_streaming: bool,
+    container_depth: usize,
+) -> (Cow<'_, str>, Vec<(String, Vec<MarkdownNode>, String)>) {
     if !text.contains('<') {
         return (Cow::Borrowed(text), Vec::new());
     }
@@ -495,8 +514,10 @@ fn extract_html_containers(text: &str) -> (Cow<'_, str>, Vec<(String, Vec<Markdo
         .collect();
 
     for cap in crate::vcp_modules::content_parser::HTML_CONTAINER_OPEN_RE.captures_iter(text) {
-        let m = cap.get(0).unwrap();
-        let tag = cap.get(1).unwrap().as_str().to_lowercase();
+        let (Some(m), Some(tag_match)) = (cap.get(0), cap.get(1)) else {
+            continue;
+        };
+        let tag = tag_match.as_str().to_lowercase();
 
         if m.start() < last_pos {
             continue;
@@ -530,7 +551,11 @@ fn extract_html_containers(text: &str) -> (Cow<'_, str>, Vec<(String, Vec<Markdo
 
             // 递归解析内部内容
             let deindented_inner = trim_common_leading_indent(&inner_text);
-            let inner_nodes = parse_markdown_to_ast(&deindented_inner);
+            let inner_nodes = if container_depth >= MAX_HTML_CONTAINER_DEPTH {
+                plaintext_fallback(&deindented_inner)
+            } else {
+                parse_markdown_to_ast_at_depth(&deindented_inner, is_streaming, container_depth + 1)
+            };
             containers.push((open_tag, inner_nodes, close_tag));
 
             last_pos = close_end;
@@ -633,7 +658,7 @@ pub(crate) fn find_matching_close_tag(
     tag: &str,
 ) -> Option<(usize, usize)> {
     let mut depth = 1;
-    let search_area = &text[start_pos..];
+    let search_area = text.get(start_pos..)?;
 
     // 预先收集 search_area 中所有标准代码围栏的物理范围（支持流式未闭合边界）
     let fence_ranges = get_fence_ranges(search_area);
@@ -651,7 +676,11 @@ pub(crate) fn find_matching_close_tag(
     }
 
     for cap in TAG_SCANNER.captures_iter(search_area) {
-        let full_match = cap.get(0).unwrap();
+        let (Some(full_match), Some(close_match), Some(tag_match)) =
+            (cap.get(0), cap.get(1), cap.get(2))
+        else {
+            continue;
+        };
         let cap_start = full_match.start();
 
         // 跨越围栏防御：如果在开始标签之后、当前扫描标签之前横跨了代码围栏的起点，
@@ -683,8 +712,8 @@ pub(crate) fn find_matching_close_tag(
             continue;
         }
 
-        let is_close_tag = cap.get(1).unwrap().as_str() == "</";
-        let tag_name = cap.get(2).unwrap().as_str();
+        let is_close_tag = close_match.as_str() == "</";
+        let tag_name = tag_match.as_str();
         let tag_text = full_match.as_str();
         let is_self_closing = tag_text.trim_end().ends_with("/>");
 
@@ -696,7 +725,6 @@ pub(crate) fn find_matching_close_tag(
             if is_close_tag {
                 depth -= 1;
                 if depth == 0 {
-                    let full_match = cap.get(0).unwrap();
                     return Some((start_pos + full_match.start(), start_pos + full_match.end()));
                 }
             } else {
@@ -745,26 +773,27 @@ pub fn parse_markdown_to_ast_streaming(text: &str) -> Vec<MarkdownNode> {
 }
 
 fn parse_markdown_to_ast_opt(text: &str, is_streaming: bool) -> Vec<MarkdownNode> {
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        parse_markdown_to_ast_impl(text, is_streaming)
-    }));
-    match result {
-        Ok(nodes) => nodes,
-        Err(e) => {
-            log::error!("[PreRender] parse_markdown_to_ast panicked: {:?}", e);
-            let mut fallback_node =
-                MarkdownNode::paragraph(vec![InlineNode::text(text.to_string())]);
-            fallback_node.compute_hashes_recursively();
-            vec![fallback_node]
-        }
-    }
+    parse_markdown_to_ast_at_depth(text, is_streaming, 0)
 }
 
-fn parse_markdown_to_ast_impl(text: &str, is_streaming: bool) -> Vec<MarkdownNode> {
+fn parse_markdown_to_ast_at_depth(
+    text: &str,
+    is_streaming: bool,
+    container_depth: usize,
+) -> Vec<MarkdownNode> {
+    parse_markdown_to_ast_impl(text, is_streaming, container_depth)
+}
+
+fn parse_markdown_to_ast_impl(
+    source_text: &str,
+    is_streaming: bool,
+    container_depth: usize,
+) -> Vec<MarkdownNode> {
+    let text = source_text;
     let text_fixed = fix_flanking_delimiters(text);
     let text = preprocess_latex_math(&text_fixed);
     let text = strip_display_math_indent(text.as_ref());
-    let (text, containers) = extract_html_containers(text.as_ref());
+    let (text, containers) = extract_html_containers(text.as_ref(), is_streaming, container_depth);
 
     let mut nodes = Vec::new();
     let parser = Parser::new_ext(
@@ -802,6 +831,13 @@ fn parse_markdown_to_ast_impl(text: &str, is_streaming: bool) -> Vec<MarkdownNod
 
         match event {
             Event::Start(tag) => {
+                if stack.len() >= MAX_MARKDOWN_NESTING_DEPTH {
+                    log::warn!(
+                        "[PreRender] Markdown nesting exceeded {}; using literal fallback",
+                        MAX_MARKDOWN_NESTING_DEPTH
+                    );
+                    return plaintext_fallback(source_text);
+                }
                 stack.push(PartialNode::from_tag(tag));
             }
             Event::Code(code) => {
@@ -1282,7 +1318,9 @@ fn process_text_magic(text: &str) -> Vec<InlineNode> {
     let mut last_end = 0;
 
     for cap in MAGIC_RE.captures_iter(text) {
-        let m = cap.get(0).unwrap();
+        let Some(m) = cap.get(0) else {
+            continue;
+        };
         if m.start() > last_end {
             nodes.push(InlineNode::text(text[last_end..m.start()].to_string()));
         }
@@ -1296,7 +1334,7 @@ fn process_text_magic(text: &str) -> Vec<InlineNode> {
                 None,
             )
         } else {
-            unreachable!()
+            InlineNode::text(m.as_str().to_string())
         };
 
         nodes.push(node);
@@ -1368,6 +1406,15 @@ fn split_text_by_quotes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
 
 #[allow(clippy::needless_range_loop)]
 fn merge_quote_nodes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
+    merge_quote_nodes_at_depth(inlines, 0)
+}
+
+#[allow(clippy::needless_range_loop)]
+fn merge_quote_nodes_at_depth(inlines: Vec<InlineNode>, depth: usize) -> Vec<InlineNode> {
+    if depth >= MAX_MARKDOWN_NESTING_DEPTH {
+        return inlines;
+    }
+
     let mut result = Vec::new();
     let mut i = 0;
     let len = inlines.len();
@@ -1392,7 +1439,8 @@ fn merge_quote_nodes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
             for j in s_idx..len {
                 if let InlineNode::Text { value } = &inlines[j] {
                     if j == s_idx {
-                        if value.len() >= 2 && value.ends_with(cl_c) {
+                        if value.len() >= op_c.len_utf8() + cl_c.len_utf8() && value.ends_with(cl_c)
+                        {
                             end_idx = Some(j);
                             break;
                         }
@@ -1410,31 +1458,38 @@ fn merge_quote_nodes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
 
                 if s_idx == e_idx {
                     if let InlineNode::Text { value } = &inlines[s_idx] {
-                        let inner_val = &value[op_c.len_utf8()..value.len() - cl_c.len_utf8()];
-                        if !inner_val.is_empty() {
-                            children.push(InlineNode::text(inner_val.to_string()));
+                        if let Some(inner_val) =
+                            value.get(op_c.len_utf8()..value.len().saturating_sub(cl_c.len_utf8()))
+                        {
+                            if !inner_val.is_empty() {
+                                children.push(InlineNode::text(inner_val.to_string()));
+                            }
                         }
                     }
                 } else {
                     if let InlineNode::Text { value } = &inlines[s_idx] {
-                        let inner_val = &value[op_c.len_utf8()..];
-                        if !inner_val.is_empty() {
-                            children.push(InlineNode::text(inner_val.to_string()));
+                        if let Some(inner_val) = value.get(op_c.len_utf8()..) {
+                            if !inner_val.is_empty() {
+                                children.push(InlineNode::text(inner_val.to_string()));
+                            }
                         }
                     }
 
                     children.extend(inlines[(s_idx + 1)..e_idx].iter().cloned());
 
                     if let InlineNode::Text { value } = &inlines[e_idx] {
-                        let inner_val = &value[..value.len() - cl_c.len_utf8()];
-                        if !inner_val.is_empty() {
-                            children.push(InlineNode::text(inner_val.to_string()));
+                        if let Some(inner_val) =
+                            value.get(..value.len().saturating_sub(cl_c.len_utf8()))
+                        {
+                            if !inner_val.is_empty() {
+                                children.push(InlineNode::text(inner_val.to_string()));
+                            }
                         }
                     }
                 }
 
                 // 递归合并内部子节点（绝对不含外层引号，安全防御无限递归）
-                let merged_children = merge_quote_nodes(children);
+                let merged_children = merge_quote_nodes_at_depth(children, depth + 1);
 
                 // 将外层引号和已合并的内部子节点组装起来
                 let mut final_children = Vec::new();
@@ -1455,22 +1510,22 @@ fn merge_quote_nodes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
         let mut node = inlines[i].clone();
         match &mut node {
             InlineNode::Strong { children, .. } => {
-                *children = merge_quote_nodes(children.clone());
+                *children = merge_quote_nodes_at_depth(children.clone(), depth + 1);
             }
             InlineNode::Emphasis { children, .. } => {
-                *children = merge_quote_nodes(children.clone());
+                *children = merge_quote_nodes_at_depth(children.clone(), depth + 1);
             }
             InlineNode::Link { children, .. } => {
-                *children = merge_quote_nodes(children.clone());
+                *children = merge_quote_nodes_at_depth(children.clone(), depth + 1);
             }
             InlineNode::Strikethrough { children, .. } => {
-                *children = merge_quote_nodes(children.clone());
+                *children = merge_quote_nodes_at_depth(children.clone(), depth + 1);
             }
             InlineNode::VcpCustom {
                 children: Some(children),
                 ..
             } => {
-                *children = merge_quote_nodes(children.clone());
+                *children = merge_quote_nodes_at_depth(children.clone(), depth + 1);
             }
             _ => {}
         }
@@ -1522,6 +1577,63 @@ fn apply_quote_merging(node: &mut MarkdownNode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn excessive_markdown_nesting_falls_back_to_literal_text() {
+        let input = format!("{}content", "> ".repeat(MAX_MARKDOWN_NESTING_DEPTH + 16));
+        let nodes = parse_markdown_to_ast(&input);
+
+        assert_eq!(nodes.len(), 1);
+        match &nodes[0] {
+            MarkdownNode::Paragraph { children, hash } => {
+                assert_eq!(children, &[InlineNode::text(input)]);
+                assert!(hash.is_some());
+            }
+            other => panic!("expected literal paragraph fallback, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deeply_nested_html_containers_stop_recursive_parsing_safely() {
+        let depth = MAX_HTML_CONTAINER_DEPTH + 8;
+        let input = format!(
+            "{}content{}",
+            "<div>\n".repeat(depth),
+            "\n</div>".repeat(depth)
+        );
+
+        let first = parse_markdown_to_ast(&input);
+        let second = parse_markdown_to_ast(&input);
+        assert!(!first.is_empty());
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn html_close_tag_search_rejects_invalid_byte_offsets() {
+        let input = "é</div>";
+        assert_eq!(find_matching_close_tag(input, 1, "div"), None);
+        assert_eq!(find_matching_close_tag(input, input.len() + 1, "div"), None);
+    }
+
+    #[test]
+    fn malformed_markdown_corpus_is_total_and_deterministic() {
+        let cases = [
+            "\0\u{2028}\u{2029}",
+            "***未闭合 [链接](<>) `code",
+            "\\[x + \\(y",
+            "<!-- 未闭合 <div><span>",
+            "| a | b |\n| --- |\n| 1 | 2 | 3 |",
+            "```rust\nfn main() { /*",
+            "“外层 \"内层 **强调**",
+        ];
+
+        for input in cases {
+            let first = parse_markdown_to_ast_streaming(input);
+            let second = parse_markdown_to_ast_streaming(input);
+            assert_eq!(first, second, "parser must be deterministic for {input:?}");
+            assert!(serde_json::to_value(&first).is_ok());
+        }
+    }
 
     #[test]
     fn test_is_punctuation() {

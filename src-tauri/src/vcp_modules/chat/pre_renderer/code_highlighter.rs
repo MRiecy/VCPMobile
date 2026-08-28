@@ -46,7 +46,10 @@ pub fn highlight_code_block(code: &str, lang: &str) -> Option<String> {
                 .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text())
         });
 
-    let theme = &THEME_SET.themes["base16-ocean.dark"];
+    let theme = THEME_SET
+        .themes
+        .get("base16-ocean.dark")
+        .or_else(|| THEME_SET.themes.values().next())?;
 
     let html = highlighted_html_for_string(code, &SYNTAX_SET, syntax, theme).ok()?;
 
