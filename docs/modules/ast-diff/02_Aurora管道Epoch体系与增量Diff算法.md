@@ -62,15 +62,14 @@ last_updated: 2026-06-14
 | `full_text` | `String` | ✅ | ✅ | SSE 累积全文 |
 | `stable_blocks` | `Vec<StreamBlock>` | ✅ | ✅ | 已确认闭合的语义块列表 |
 | `tail_content` | `String` | ✅ | ✅ | 当前尾部推测文本 |
-| `tail_block` | `Option<StreamBlock>` | ✅ | ✅ | tail 包装的流式块 |
+| `tail_projection` | `Option<TailProjection>` | — | ✅ | 仅保存 tail hash/mode；完整 wire block 在 Snapshot 时构造 |
 | `parser` | `StreamBlockParser` | ✅ | ✅ | 有状态流式块解析器 |
 | `is_finishing` | `bool` | ✅ | ✅ | 是否已进入结束状态 |
-| **🆕 `prev_tail_ast`** | `Vec<MarkdownNode>` | — | ✅ | 上一帧的 tail AST，Diff 的旧基准 |
+| **🆕 `prev_tail_ast`** | `Vec<MarkdownNode>` | — | ✅ | 当前唯一 canonical tail AST；也是下一帧 Diff 的旧基准 |
 | **🆕 `pending_mutations`** | `Vec<AstMutation>` | — | ✅ | 待发送的突变指令暂存池 |
 | **🆕 `tail_epoch`** | `u64` | — | ✅ | 纪元计数器 |
 | **🆕 `tail_revision`** | `u64` | — | ✅ | 纪元内修订计数器 |
 | **🆕 `tail_reset_pending`** | `bool` | — | ✅ | 是否需前端全量重建 |
-| **🆕 `tail_snapshot_pending`** | `Option<Vec<MarkdownNode>>` | — | ✅ | reset 时的全量快照 |
 | **🆕 `tail_frame_seq`** | `u64` | — | ✅ | 单调帧序号 |
 
 ### 2.2 Epoch / Revision 双级时序体系
@@ -114,7 +113,7 @@ stateDiagram-v2
 const MAX_SPECULATIVE_TAIL_AST_BYTES: usize = 65536;
 ```
 
-当 tail 文本超过 64KB 时，跳过 AST 解析，回退到**纯文本兜底模式**（`nodes=None`，但 `tail_block` 仍携带纯文本 `content`，前端经 `tailContent` 路径渲染，**绝不留白**）。这个阈值保护了流式热路径，防止超长文本的 AST 解析成为性能瓶颈。
+当 tail 文本超过 64KB 时（包括 RawHtml），跳过 AST 解析，回退到**纯文本兜底模式**。常态 Delta 通过 `tailOp` 追加文本；Snapshot 才按需构造不含 nodes 的 `tail_block`，前端使用字面文本路径，**绝不留白**。
 
 ---
 
@@ -177,7 +176,7 @@ sequenceDiagram
             AB->>AB: prev_tail_ast = new_nodes
 
             opt reset_pending
-                AB->>AB: tail_snapshot_pending = Some(new_nodes)
+                Note over AB: 发送时从最新 prev_tail_ast 按需 clone Snapshot
             end
         else nodes is None
             Note over AB: 超过 64KB → 纯文本兜底<br/>仅在 AST→纯文本「切换瞬间」bump 一次 epoch
@@ -185,7 +184,7 @@ sequenceDiagram
             AB->>AB: (仅切换帧) epoch++ / reset；后续帧静默
         end
 
-        AB->>AB: tail_block = Some(StreamBlock::markdown(...))<br/>纯文本兜底时仍携带 content
+        AB->>AB: tail_projection = Some(hash, mode)<br/>不常驻复制 content/nodes
     else tail_content is empty
         Note over AB: tail 清空 → epoch reset with empty snapshot
     end
@@ -221,14 +220,14 @@ if !new_blocks.is_empty() {
 
 ```rust
 if !self.tail_content.is_empty() {
-    let nodes = if is_html_tag_block(&self.tail_content) {
+    let nodes = if self.tail_content.len() > MAX_SPECULATIVE_TAIL_AST_BYTES {
+        None  // 包括 RawHtml 在内，统一回退纯文本兜底
+    } else if is_html_tag_block(&self.tail_content) {
         // HTML 标签块：直接包装为 RawHtml，不经过 markdown parser
         Some(vec![MarkdownNode::raw_html(self.tail_content.clone())])
-    } else if self.tail_content.len() <= MAX_SPECULATIVE_TAIL_AST_BYTES {
+    } else {
         // 正常路径：解析为 AST
         Some(parse_markdown_to_ast_streaming(&self.tail_content))
-    } else {
-        None  // 超长文本（> 64KB 且非 HTML 容器）：跳过 AST，回退纯文本兜底
     };
     // ...
 }
@@ -237,16 +236,16 @@ if !self.tail_content.is_empty() {
 三个分支的语义：
 | 条件 | 策略 | 理由 |
 |------|------|------|
-| 以 HTML 标签开头（HTML 容器块） | 包装为 `RawHtml`（**无论大小**） | 防止 pulldown-cmark 将 CSS/内联样式解析为代码块 |
+| > 64KB（包括 HTML） | `nodes=None` → **纯文本兜底** | 防止性能悬崖；常态走 `tailOp` 字面文本追加 |
+| ≤ 64KB 且以 HTML 标签开头 | 包装为 `RawHtml` | 防止 pulldown-cmark 将 CSS/内联样式解析为代码块 |
 | ≤ 64KB 且非 HTML | 正常 AST 解析 | 标准推测渲染路径 |
-| > 64KB 且非 HTML | `nodes=None` → **纯文本兜底** | 防止性能悬崖；`tail_block` 仍携带纯文本 `content`，前端走 `tailContent` 渲染（**不留白、不进空 AST sandbox**） |
 
 > **降级只 bump 一次 epoch**：当 tail 跨过 64KB 进入纯文本兜底时，**仅在 AST 模式 → 纯文本模式的「切换帧」**递增一次 epoch/reset；此后保持安静，不再每帧 bump。这与旧版「每帧 `nodes=None` 并 bump epoch/reset（降级到 innerHTML、反复留白）」的行为根本不同——旧版会在超阈值后每帧清空重建，造成可见闪烁。
 
 #### Step 3-4：Hash 计算 + AST Diff
 
 ```rust
-if let Some(mut new_nodes) = nodes.clone() {
+if let Some(mut new_nodes) = nodes {
     for node in &mut new_nodes {
         node.compute_hashes_recursively();  // Step 3
     }
@@ -265,28 +264,15 @@ if let Some(mut new_nodes) = nodes.clone() {
 
 ```rust
 pub fn take_tail_frame(&mut self) -> Option<TailFrame> {
-    let reset = self.tail_reset_pending;
+    let frame = self.peek_tail_frame(false)?;
     self.tail_reset_pending = false;
-    let snapshot = self.tail_snapshot_pending.take();
-    let mutations = std::mem::take(&mut self.pending_mutations);
-
-    if !reset && snapshot.is_none() && mutations.is_empty() {
-        return None;  // 无变更，不发送空帧
-    }
-
-    self.tail_frame_seq = self.tail_frame_seq.saturating_add(1);
-    Some(TailFrame {
-        epoch: self.tail_epoch,
-        revision: self.tail_revision,
-        frame_seq: self.tail_frame_seq,
-        reset,
-        snapshot,                       // reset 时携带全量快照
-        mutations: if reset { Vec::new() } else { mutations },  // reset 时不携带 mutations
-    })
+    self.pending_mutations.clear();
+    self.tail_frame_seq = frame.frame_seq;
+    Some(frame)
 }
 ```
 
-> **关键设计**：当 `reset=true` 时，`mutations` 强制清空为 `Vec::new()`。这是因为 epoch 变更意味着前端需要**全量重建**，增量突变在旧 DOM 上执行无意义。同时通过 `snapshot` 字段传递完整 AST 供前端重建。
+> **关键设计**：生产发送使用 prepare → send → commit；上面省略了成功后的 commit。`reset=true` 时直接从唯一的 `prev_tail_ast` 构造完整 Snapshot，不再常驻第二棵 `tail_snapshot_pending`。
 
 ### 3.4 finalize() —— 流结束时的收尾
 
@@ -299,13 +285,12 @@ pub fn finalize(&mut self) {
     let final_new_blocks = self.parser.finalize(&self.full_text);
     self.stable_blocks.extend(final_new_blocks);
     self.tail_content.clear();
-    self.tail_block = None;
+    self.tail_projection = None;
     self.prev_tail_ast.clear();
     self.pending_mutations.clear();
     self.tail_epoch = self.tail_epoch.saturating_add(1);
     self.tail_revision = 0;
     self.tail_reset_pending = true;
-    self.tail_snapshot_pending = Some(Vec::new());  // 空 snapshot = 清空前端 tail DOM
 }
 ```
 
@@ -570,7 +555,7 @@ fn diff_text_node(id: &str, old_value: &str, new_value: &str, mutations: &mut Ve
 | `prev_tail_ast` | ~1-5KB | 上一帧 tail AST 的序列化大小 |
 | `pending_mutations` | ~200-800 bytes | 典型帧的突变指令集 |
 | `TailFrame` 序列化 JSON | ~300-1200 bytes | IPC 传输载荷 |
-| `tail_snapshot_pending` | ~1-5KB | 仅在 reset 时携带 |
+| `tail_projection` | 常数级 | 仅保存 hash 与 AST/plain mode |
 
 ### 6.3 测试覆盖
 

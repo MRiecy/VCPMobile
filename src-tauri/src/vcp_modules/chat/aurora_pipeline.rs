@@ -133,6 +133,12 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+#[derive(Debug, Clone)]
+struct TailProjection {
+    hash: String,
+    mode: TailRenderMode,
+}
+
 /// Aurora 语义沉淀缓冲区
 /// 职责：用轻量块解析器识别已闭合/未闭合块，前端增量接收
 pub struct AuroraBuffer {
@@ -140,7 +146,7 @@ pub struct AuroraBuffer {
     pub full_text: String,
     pub stable_blocks: Vec<StreamBlock>,
     pub tail_content: String,
-    pub tail_block: Option<StreamBlock>,
+    tail_projection: Option<TailProjection>,
     /// 🆕 上一帧的 tail AST 缓存，用于做增量 Diff 对比
     pub prev_tail_ast: Vec<MarkdownNode>,
     /// 🆕 待发送的增量 AST 突变指令暂存池，防抖丢帧时防止中间差异丢失
@@ -148,7 +154,6 @@ pub struct AuroraBuffer {
     pub tail_epoch: u64,
     pub tail_revision: u64,
     pub tail_reset_pending: bool,
-    pub tail_snapshot_pending: Option<Vec<MarkdownNode>>,
     pub tail_frame_seq: u64,
     /// 🆕 记录已被消费并发送的 full_text 长度，用于计算增量 chunk
     pub pushed_len: usize,
@@ -172,13 +177,12 @@ impl AuroraBuffer {
             full_text: String::new(),
             stable_blocks: Vec::new(),
             tail_content: String::new(),
-            tail_block: None,
+            tail_projection: None,
             prev_tail_ast: Vec::new(),
             pending_mutations: Vec::new(),
             tail_epoch: 0,
             tail_revision: 0,
             tail_reset_pending: false,
-            tail_snapshot_pending: None,
             tail_frame_seq: 0,
             pushed_len: 0,
             pushed_stable_count: 0,
@@ -210,42 +214,25 @@ impl AuroraBuffer {
     }
 
     fn current_tail_metadata(&self) -> (Option<String>, Option<TailRenderMode>) {
-        match &self.tail_block {
-            Some(StreamBlock::Markdown { nodes, hash, .. }) => (
-                Some(hash.clone()),
-                Some(if nodes.is_some() {
-                    TailRenderMode::Ast
-                } else {
-                    TailRenderMode::Plain
-                }),
-            ),
-            Some(_) | None => (None, None),
-        }
+        self.tail_projection
+            .as_ref()
+            .map_or((None, None), |projection| {
+                (Some(projection.hash.clone()), Some(projection.mode))
+            })
     }
 
     fn current_tail_wire_block(&self) -> Option<StreamBlock> {
-        match &self.tail_block {
-            Some(StreamBlock::Markdown { content, hash, .. }) => {
-                Some(StreamBlock::markdown(content.clone(), None, hash.clone()))
-            }
-            Some(other) => Some(other.clone()),
-            None => None,
-        }
+        let projection = self.tail_projection.as_ref()?;
+        Some(StreamBlock::markdown(
+            self.tail_content.clone(),
+            None,
+            projection.hash.clone(),
+        ))
     }
 
     fn peek_tail_frame(&self, force_snapshot: bool) -> Option<TailFrame> {
         let reset = force_snapshot || self.tail_reset_pending;
-        let snapshot = if force_snapshot {
-            Some(self.prev_tail_ast.clone())
-        } else if reset {
-            Some(
-                self.tail_snapshot_pending
-                    .clone()
-                    .unwrap_or_else(|| self.prev_tail_ast.clone()),
-            )
-        } else {
-            self.tail_snapshot_pending.clone()
-        };
+        let snapshot = reset.then(|| self.prev_tail_ast.clone());
         let mutations = self.pending_mutations.clone();
 
         if !reset && snapshot.is_none() && mutations.is_empty() {
@@ -267,7 +254,6 @@ impl AuroraBuffer {
     pub fn take_tail_frame(&mut self) -> Option<TailFrame> {
         let frame = self.peek_tail_frame(false)?;
         self.tail_reset_pending = false;
-        self.tail_snapshot_pending = None;
         self.pending_mutations.clear();
         self.tail_frame_seq = frame.frame_seq;
         Some(frame)
@@ -385,7 +371,6 @@ impl AuroraBuffer {
         self.pushed_tail_mode = commit.pushed_tail_mode;
         if commit.consumes_tail_frame {
             self.tail_reset_pending = false;
-            self.tail_snapshot_pending = None;
             self.pending_mutations.clear();
             self.tail_frame_seq = self.tail_frame_seq.saturating_add(1);
         }
@@ -434,7 +419,6 @@ impl AuroraBuffer {
             self.tail_reset_pending = true;
             self.pending_mutations.clear();
             self.prev_tail_ast.clear();
-            self.tail_snapshot_pending = None;
         }
 
         self.tail_content = new_tail;
@@ -443,7 +427,7 @@ impl AuroraBuffer {
         //    当 tail 超过 MAX_SPECULATIVE_TAIL_AST_BYTES 时跳过 AST 解析，
         //    避免在流式热路径上产生性能悬崖
         if !self.tail_content.is_empty() {
-            let (nodes, nodes_need_hashing) = if self.tail_content.len()
+            let (mut nodes, nodes_need_hashing) = if self.tail_content.len()
                 > MAX_SPECULATIVE_TAIL_AST_BYTES
             {
                 (None, false)
@@ -471,20 +455,16 @@ impl AuroraBuffer {
                 &self.tail_content,
             );
 
-            // 🆕 如果解析出了 AST，对其计算 Diff，生成增量渲染指令集
-            if let Some(mut new_nodes) = nodes.clone() {
-                // parser 返回的树已经递归 hash；只有绕过 parser 手工构造的 RawHtml clone
-                // 需要补一次。只处理 diff 基线副本，保持 tailBlock 内部投影形态不变。
+            let mode = if let Some(mut new_nodes) = nodes.take() {
+                // parser 返回的树已经递归 hash；只有绕过 parser 手工构造的 RawHtml
+                // 需要在成为唯一 canonical AST 前补一次。
                 if nodes_need_hashing {
                     for node in &mut new_nodes {
                         node.compute_hashes_recursively();
                     }
                 }
-                // reset 帧会被 take_tail_frame 强制清空 mutations 并改发 snapshot，
-                // 故此时跳过 diff_ast（其结果必被丢弃），直接记录 snapshot，省去一次全量 diff。
-                if self.tail_reset_pending {
-                    self.tail_snapshot_pending = Some(new_nodes.clone());
-                } else {
+                // reset 帧直接从最新 prev_tail_ast 按需构造 snapshot，其间无需保留第二份树。
+                if !self.tail_reset_pending {
                     let mutations = diff_ast(&self.prev_tail_ast, &new_nodes, "t");
                     if !mutations.is_empty() {
                         self.pending_mutations.extend(mutations);
@@ -492,9 +472,10 @@ impl AuroraBuffer {
                 }
                 self.tail_revision = self.tail_revision.saturating_add(1);
                 self.prev_tail_ast = new_nodes;
+                TailRenderMode::Ast
             } else {
-                // 超长 tail（> MAX_SPECULATIVE_TAIL_AST_BYTES 且非 HTML 容器）：降级为纯文本尾部。
-                // 不再逐帧产出 AST 帧，改由 tail_block.content 走前端纯文本路径渲染（绝不留白）。
+                // 超长 tail（> MAX_SPECULATIVE_TAIL_AST_BYTES）降级为纯文本尾部。
+                // 不再逐帧产出 AST 帧，由 tail text op 走前端纯文本路径渲染（绝不留白）。
                 // 仅在「首次从 AST 模式跨入纯文本模式」时触发一次 epoch reset 清空旧 AST 沙箱，
                 // 之后保持安静，避免逐帧 epoch 自增与空转 reset 帧。
                 let was_ast_mode = !self.prev_tail_ast.is_empty();
@@ -504,23 +485,18 @@ impl AuroraBuffer {
                     self.tail_epoch = self.tail_epoch.saturating_add(1);
                     self.tail_revision = 0;
                     self.tail_reset_pending = true;
-                    self.tail_snapshot_pending = Some(Vec::new());
                 }
-            }
+                TailRenderMode::Plain
+            };
 
-            self.tail_block = Some(StreamBlock::markdown(
-                self.tail_content.clone(),
-                nodes,
-                hash,
-            ));
+            self.tail_projection = Some(TailProjection { hash, mode });
         } else {
-            self.tail_block = None;
+            self.tail_projection = None;
             if !self.prev_tail_ast.is_empty() || !self.tail_content.is_empty() {
                 self.tail_epoch = self.tail_epoch.saturating_add(1);
                 self.tail_revision = 0;
                 self.tail_reset_pending = true;
                 self.pending_mutations.clear();
-                self.tail_snapshot_pending = Some(Vec::new());
             }
             self.prev_tail_ast.clear();
         }
@@ -540,13 +516,12 @@ impl AuroraBuffer {
 
         self.stable_blocks.extend(final_new_blocks);
         self.tail_content.clear();
-        self.tail_block = None;
+        self.tail_projection = None;
         self.prev_tail_ast.clear();
         self.pending_mutations.clear();
         self.tail_epoch = self.tail_epoch.saturating_add(1);
         self.tail_revision = 0;
         self.tail_reset_pending = true;
-        self.tail_snapshot_pending = Some(Vec::new());
     }
 }
 
@@ -560,7 +535,7 @@ mod tests {
     use super::*;
 
     /// 构造一个超过 MAX_SPECULATIVE_TAIL_AST_BYTES 的、非 HTML 起始的纯文本代码块 tail，
-    /// 验证 #1c 降级行为：tail_block 仍带纯文本 content（绝不留白），且不再逐帧自增 epoch。
+    /// 验证 #1c 降级行为：Snapshot 仍可按需构造纯文本 tail，且不再逐帧自增 epoch。
     #[test]
     fn test_oversized_tail_falls_back_to_plaintext_not_blank() {
         let mut buffer = AuroraBuffer::new();
@@ -572,11 +547,13 @@ mod tests {
         buffer.append_chunk(&big);
         buffer.process_queue();
 
-        // 关键：tail_block 必须存在且携带纯文本 content，nodes 为 None（前端据此走纯文本路径）
+        assert_eq!(
+            buffer.tail_projection.as_ref().map(|state| state.mode),
+            Some(TailRenderMode::Plain)
+        );
         let tb = buffer
-            .tail_block
-            .as_ref()
-            .expect("tail_block 不应为空（绝不留白）");
+            .current_tail_wire_block()
+            .expect("Snapshot tail 不应为空（绝不留白）");
         match tb {
             StreamBlock::Markdown { content, nodes, .. } => {
                 assert!(!content.is_empty(), "降级后必须保留纯文本 content");
@@ -597,7 +574,7 @@ mod tests {
         );
     }
 
-    /// 小于上限的普通代码块仍走 AST 路径：tail_block.nodes 应为 Some。
+    /// 小于上限的普通 tail 仍走 AST 路径，并只保留唯一 canonical AST。
     #[test]
     fn test_normal_tail_uses_ast() {
         let mut buffer = AuroraBuffer::new();
@@ -605,15 +582,18 @@ mod tests {
         let (stable_changed, tail_changed) = buffer.process_queue();
         assert!(!stable_changed);
         assert!(tail_changed);
+        assert_eq!(
+            buffer.tail_projection.as_ref().map(|state| state.mode),
+            Some(TailRenderMode::Ast)
+        );
+        assert!(!buffer.prev_tail_ast.is_empty());
+        assert!(buffer.prev_tail_ast[0].get_hash().is_some());
+        match buffer
+            .current_tail_wire_block()
+            .expect("Snapshot tail 应可按需构造")
         {
-            let tb = buffer.tail_block.as_ref().expect("tail_block 应存在");
-            if let StreamBlock::Markdown { nodes, .. } = tb {
-                let nodes = nodes.as_deref().expect("小体量 tail 应解析出 AST 节点");
-                assert!(nodes[0].get_hash().is_some());
-                assert_eq!(nodes, buffer.prev_tail_ast.as_slice());
-            } else {
-                panic!("expected markdown tail block");
-            }
+            StreamBlock::Markdown { nodes, .. } => assert!(nodes.is_none()),
+            other => panic!("expected markdown tail block, got {other:?}"),
         }
         let _ = buffer.take_tail_frame();
 
@@ -630,18 +610,15 @@ mod tests {
     }
 
     #[test]
-    fn raw_html_keeps_projection_shape_but_hashes_the_diff_baseline_once() {
+    fn raw_html_hashes_the_single_canonical_diff_baseline() {
         let mut buffer = AuroraBuffer::new();
         buffer.append_chunk("<div>one");
         assert_eq!(buffer.process_queue(), (false, true));
 
-        let tail_nodes = match buffer.tail_block.as_ref().expect("raw tail block") {
-            StreamBlock::Markdown {
-                nodes: Some(nodes), ..
-            } => nodes,
-            other => panic!("expected raw markdown tail block, got {other:?}"),
-        };
-        assert!(tail_nodes[0].get_hash().is_none());
+        assert_eq!(
+            buffer.tail_projection.as_ref().map(|state| state.mode),
+            Some(TailRenderMode::Ast)
+        );
         assert!(buffer.prev_tail_ast[0].get_hash().is_some());
         let _ = buffer.take_tail_frame();
 
@@ -666,12 +643,18 @@ mod tests {
         let mut at_limit = AuroraBuffer::new();
         at_limit.append_chunk(&raw_html_at_limit);
         assert_eq!(at_limit.process_queue(), (false, true));
-        match at_limit.tail_block.as_ref().expect("raw tail at limit") {
-            StreamBlock::Markdown {
-                content,
-                nodes: Some(_),
-                ..
-            } => assert_eq!(content, &raw_html_at_limit),
+        assert_eq!(
+            at_limit.tail_projection.as_ref().map(|state| state.mode),
+            Some(TailRenderMode::Ast)
+        );
+        match at_limit
+            .current_tail_wire_block()
+            .expect("raw tail at limit")
+        {
+            StreamBlock::Markdown { content, nodes, .. } => {
+                assert_eq!(content, raw_html_at_limit);
+                assert!(nodes.is_none());
+            }
             other => panic!("expected rich raw html at limit, got {other:?}"),
         }
 
@@ -679,12 +662,18 @@ mod tests {
         let mut over_limit = AuroraBuffer::new();
         over_limit.append_chunk(&raw_html_over_limit);
         assert_eq!(over_limit.process_queue(), (false, true));
-        match over_limit.tail_block.as_ref().expect("raw tail over limit") {
-            StreamBlock::Markdown {
-                content,
-                nodes: None,
-                ..
-            } => assert_eq!(content, &raw_html_over_limit),
+        assert_eq!(
+            over_limit.tail_projection.as_ref().map(|state| state.mode),
+            Some(TailRenderMode::Plain)
+        );
+        match over_limit
+            .current_tail_wire_block()
+            .expect("raw tail over limit")
+        {
+            StreamBlock::Markdown { content, nodes, .. } => {
+                assert_eq!(content, raw_html_over_limit);
+                assert!(nodes.is_none());
+            }
             other => panic!("expected plaintext raw html over limit, got {other:?}"),
         }
         assert!(over_limit.prev_tail_ast.is_empty());
@@ -785,6 +774,23 @@ mod tests {
         assert_eq!(next.stream_id, buffer.stream_id);
         assert_eq!(next.frame_seq, 2);
         assert_eq!(buffer.take_chunk().as_deref(), Some("!"));
+    }
+
+    #[test]
+    fn reset_snapshot_uses_the_latest_canonical_ast_without_a_mirror() {
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk("stable\n\ntail");
+        assert_eq!(buffer.process_queue(), (true, true));
+        assert!(buffer.tail_reset_pending);
+
+        buffer.append_chunk(" grows");
+        assert_eq!(buffer.process_queue(), (false, true));
+        let canonical = buffer.prev_tail_ast.clone();
+        let frame = buffer.take_tail_frame().expect("pending reset frame");
+
+        assert!(frame.reset);
+        assert_eq!(frame.snapshot.as_deref(), Some(canonical.as_slice()));
+        assert!(frame.mutations.is_empty());
     }
 
     #[test]

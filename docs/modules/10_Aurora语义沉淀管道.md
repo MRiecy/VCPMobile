@@ -120,16 +120,15 @@ pub struct AuroraBuffer {
     pub full_text: String,              // 累积的完整响应文本
     pub stable_blocks: Vec<StreamBlock>, // 已确认的语义块（对外只读镜像）
     pub tail_content: String,           // 当前未闭合的尾部纯文本
-    pub tail_block: Option<StreamBlock>, // 推测渲染后的尾部块（对外只读镜像）
+    tail_projection: Option<TailProjection>, // 仅保存 hash 与 AST/plain mode
     parser: StreamBlockParser,          // 增量块解析器（内部状态机）
     is_finishing: bool,                 // 是否已进入结束阶段（防重入锁）
     // ═══════ 🆕 v1.1.0 新增字段 ═══════
-    pub prev_tail_ast: Vec<MarkdownNode>,            // 上一帧的 tail AST，Diff 的旧基准
+    pub prev_tail_ast: Vec<MarkdownNode>,            // 唯一 canonical tail AST，下一帧 Diff 的旧基准
     pub pending_mutations: Vec<AstMutation>,          // 待发送的增量 AST 突变指令暂存池
     pub tail_epoch: u64,                              // 纪元计数器（stable block 到达时递增）
     pub tail_revision: u64,                           // 纪元内修订计数器（每次 process_queue 产突变时递增）
     pub tail_reset_pending: bool,                     // 是否需前端全量重建 DOM
-    pub tail_snapshot_pending: Option<Vec<MarkdownNode>>,  // reset 时的全量 AST 快照
     pub tail_frame_seq: u64,                          // 单调全局帧序号（前端去重用）
 }
 ```
@@ -138,12 +137,12 @@ pub struct AuroraBuffer {
 
 | 字段 | 类型 | 作用 |
 |------|------|------|
-| `prev_tail_ast` | `Vec<MarkdownNode>` | 上一帧的 tail AST——`diff_ast()` 的"旧树"输入 |
+| `prev_tail_ast` | `Vec<MarkdownNode>` | 唯一 canonical tail AST，也是 `diff_ast()` 的"旧树"输入 |
+| `tail_projection` | `Option<TailProjection>` | 常数级 hash/mode 元数据；Snapshot 时才构造完整 wire block |
 | `pending_mutations` | `Vec<AstMutation>` | 待发送的突变指令暂存池，防抖丢帧时防止差异丢失 |
 | `tail_epoch` | `u64` | 标识 tail 的不同"世代"——stable blocks 到达、tail 清空等时递增 |
 | `tail_revision` | `u64` | 同一 epoch 内的增量计数——每次 `process_queue` 产突变时递增 |
 | `tail_reset_pending` | `bool` | 为 true 时前端需清空 sandbox 并全量重建 |
-| `tail_snapshot_pending` | `Option<Vec<MarkdownNode>>` | reset 时携带的完整 AST，供前端 rebuildSnapshot |
 | `tail_frame_seq` | `u64` | 单调递增的全局帧序号，前端用于去重乱序帧 |
 
 ---
@@ -198,24 +197,23 @@ pub fn process_queue(&mut self) -> (bool, bool) {
         self.tail_reset_pending = true;                       // 通知前端全量重建
         self.pending_mutations.clear();
         self.prev_tail_ast.clear();
-        self.tail_snapshot_pending = None;
     }
 
     self.tail_content = new_tail;
 
     // 2. 推测渲染（Speculative Rendering）
     if !self.tail_content.is_empty() {
-        let nodes = if is_html_tag_block(&self.tail_content) {
+        let nodes = if self.tail_content.len() > MAX_SPECULATIVE_TAIL_AST_BYTES {
+            None  // 超过 64KB → 跳过 AST，降级到纯文本
+        } else if is_html_tag_block(&self.tail_content) {
             Some(vec![MarkdownNode::raw_html(self.tail_content.clone())])
-        } else if self.tail_content.len() <= MAX_SPECULATIVE_TAIL_AST_BYTES {
-            Some(parse_markdown_to_ast_streaming(&self.tail_content))
         } else {
-            None  // 超过 8KB → 跳过 AST，降级到纯文本
+            Some(parse_markdown_to_ast_streaming(&self.tail_content))
         };
         let hash = HashAggregator::compute_content_hash(&self.tail_content);
 
         // 🆕 2a. AST Diff：对 tail AST 做增量差异计算
-        if let Some(mut new_nodes) = nodes.clone() {
+        let mode = if let Some(mut new_nodes) = nodes {
             for node in &mut new_nodes {
                 node.compute_hashes_recursively();
             }
@@ -224,10 +222,8 @@ pub fn process_queue(&mut self) -> (bool, bool) {
                 self.pending_mutations.extend(mutations);
             }
             self.tail_revision = self.tail_revision.saturating_add(1);
-            if self.tail_reset_pending {
-                self.tail_snapshot_pending = Some(new_nodes.clone());
-            }
             self.prev_tail_ast = new_nodes;
+            TailRenderMode::Ast
         } else {
             // 超长 tail → epoch reset
             self.prev_tail_ast.clear();
@@ -237,20 +233,17 @@ pub fn process_queue(&mut self) -> (bool, bool) {
                 self.tail_reset_pending = true;
             }
             self.pending_mutations.clear();
-            self.tail_snapshot_pending = None;
-        }
+            TailRenderMode::Plain
+        };
 
-        self.tail_block = Some(StreamBlock::markdown(
-            self.tail_content.clone(), nodes, hash,
-        ));
+        self.tail_projection = Some(TailProjection { hash, mode });
     } else {
-        self.tail_block = None;
+        self.tail_projection = None;
         if !self.prev_tail_ast.is_empty() || !self.tail_content.is_empty() {
             self.tail_epoch = self.tail_epoch.saturating_add(1);
             self.tail_revision = 0;
             self.tail_reset_pending = true;
             self.pending_mutations.clear();
-            self.tail_snapshot_pending = Some(Vec::new());  // 空 snapshot = 清空前端
         }
         self.prev_tail_ast.clear();
     }
@@ -265,28 +258,15 @@ pub fn process_queue(&mut self) -> (bool, bool) {
 
 ### 3.2 take_tail_frame（🆕 v1.1.0 新增）
 
-`take_tail_frame()` 是从 AuroraBuffer 取出当前待发送 TailFrame 的唯一入口。调用后消耗内部状态（清零 `tail_reset_pending`、take `pending_mutations` 和 `tail_snapshot_pending`），生成单调 `frame_seq`。
+`take_tail_frame()` 是兼容测试入口；生产发送采用 prepare → send → commit。reset Snapshot 在 prepare 时直接从最新 `prev_tail_ast` 按需构造，不再常驻第二棵 AST。
 
 ```rust
 pub fn take_tail_frame(&mut self) -> Option<TailFrame> {
-    let reset = self.tail_reset_pending;
+    let frame = self.peek_tail_frame(false)?;
     self.tail_reset_pending = false;
-    let snapshot = self.tail_snapshot_pending.take();
-    let mutations = std::mem::take(&mut self.pending_mutations);
-
-    if !reset && snapshot.is_none() && mutations.is_empty() {
-        return None;  // 无变更，不发送空帧
-    }
-
-    self.tail_frame_seq = self.tail_frame_seq.saturating_add(1);
-    Some(TailFrame {
-        epoch: self.tail_epoch,
-        revision: self.tail_revision,
-        frame_seq: self.tail_frame_seq,
-        reset,
-        snapshot,
-        mutations: if reset { Vec::new() } else { mutations },
-    })
+    self.pending_mutations.clear();
+    self.tail_frame_seq = frame.frame_seq;
+    Some(frame)
 }
 ```
 
@@ -304,14 +284,13 @@ pub fn finalize(&mut self) {
 
     self.stable_blocks.extend(final_new_blocks);
     self.tail_content.clear();
-    self.tail_block = None;
+    self.tail_projection = None;
     // 🆕 v1.1.0: 清空 AST Diff 状态，发送空 snapshot 以清空前端 tail DOM
     self.prev_tail_ast.clear();
     self.pending_mutations.clear();
     self.tail_epoch = self.tail_epoch.saturating_add(1);
     self.tail_revision = 0;
     self.tail_reset_pending = true;
-    self.tail_snapshot_pending = Some(Vec::new());  // 空 Vec → 前端清空 sandbox
 }
 ```
 
@@ -319,7 +298,7 @@ pub fn finalize(&mut self) {
 - `parser.finalize` 与 `process` 的区别：
   - `process` 只识别**已确认闭合**的块（遇到未闭合标记会保留在 tail）
   - `finalize` 将剩余内容**强制封装**为最后一个 Markdown 块，无论是否闭合
-- 调用后 `tail_content` 和 `tail_block` 被清空，意味着前端"正在输入"区域应消失
+- 调用后 `tail_content` 和 `tail_projection` 被清空，意味着前端"正在输入"区域应消失
 
 ### 3.3 balance_html_tags — HTML 标签补全
 
