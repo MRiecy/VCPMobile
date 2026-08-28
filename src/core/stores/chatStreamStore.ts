@@ -617,7 +617,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
               stableBlocksHashes:
                 aurora.stableBlocks?.map((b) => b.hash) || [],
               tailChanged: aurora.tailChanged,
-              tailContent: aurora.tail || "",
+              tailContent: aurora.tailBlock?.content || "",
               tailBlockType: aurora.tailBlock?.type || null,
               tailFrame: aurora.tailFrame
                 ? {
@@ -693,7 +693,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           }
           const latestSnapshot =
             aurora.tailFrame.snapshot ??
-            aurora.tailSnapshot ??
             aurora.tailBlock?.nodes;
           const merged = mergeTailFrame(
             update.tailFrame,
@@ -724,11 +723,8 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             update.tailSnapshot = mergedTailFrame.snapshot;
           }
         }
-        if (aurora.tailSnapshot !== undefined) {
-          update.tailSnapshot = aurora.tailSnapshot;
-        }
         if (aurora.tailChanged) {
-          update.tailContent = aurora.tail || "";
+          update.tailContent = aurora.tailBlock?.content || "";
           update.tailBlock = aurora.tailBlock || null;
         }
 

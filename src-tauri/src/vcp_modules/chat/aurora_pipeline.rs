@@ -51,16 +51,11 @@ pub struct AuroraUpdate {
     /// 推测块：当前正在增长的尾部，按 Markdown 预渲染（仅 tail_changed 时发送）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tail_block: Option<StreamBlock>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tail: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub tail_changed: bool,
     /// 流式 AST 单帧补丁。每个 frame 是独立发送批次，前端不得累计全历史 mutations。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tail_frame: Option<TailFrame>,
-    /// reset/recovery 使用的完整 tail AST 快照，保留为非 frame 恢复兜底字段
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tail_snapshot: Option<Vec<MarkdownNode>>,
     /// 全量内容（仅终结事件时发送，正常流式中省略）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
@@ -156,7 +151,7 @@ impl AuroraBuffer {
         })
     }
 
-    /// 暖接续的权威数据基线：完整覆盖 content/stable/tail，但不携带旧 buffer 的 AST frame。
+    /// 暖接续的权威数据基线：完整覆盖 content/stable/tailBlock，但不携带旧 buffer 的 AST frame。
     /// 后续首个真实 frame 继续使用本 buffer 的 streamId，前端据此接管新的序列域。
     pub fn take_recovery_baseline(&mut self) -> AuroraUpdate {
         self.pushed_len = self.full_text.len();
@@ -166,10 +161,8 @@ impl AuroraBuffer {
             stable_blocks: Some(self.stable_blocks.clone()),
             stable_changed: true,
             tail_block: self.tail_block.clone(),
-            tail: Some(self.tail_content.clone()),
             tail_changed: true,
             tail_frame: None,
-            tail_snapshot: None,
             content: Some(self.full_text.clone()),
             chunk: None,
         }
@@ -481,12 +474,21 @@ mod tests {
         let baseline = buffer.take_recovery_baseline();
         assert_eq!(baseline.stream_id, Some(buffer.stream_id));
         assert_eq!(baseline.content.as_deref(), Some("authoritative"));
-        assert_eq!(baseline.tail.as_deref(), Some("authoritative"));
         assert!(baseline.stable_changed);
         assert!(baseline.tail_changed);
-        assert!(baseline.tail_block.is_some());
+        match baseline
+            .tail_block
+            .as_ref()
+            .expect("authoritative tail block")
+        {
+            StreamBlock::Markdown { content, .. } => assert_eq!(content, "authoritative"),
+            other => panic!("expected markdown recovery tail, got {other:?}"),
+        }
         assert!(baseline.tail_frame.is_none());
         assert!(baseline.chunk.is_none());
+        let wire = serde_json::to_value(&baseline).expect("serialize recovery baseline");
+        assert!(wire.get("tail").is_none());
+        assert!(wire.get("tailSnapshot").is_none());
         assert!(buffer.take_chunk().is_none());
 
         buffer.append_chunk("!");

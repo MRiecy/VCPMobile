@@ -322,10 +322,8 @@ export interface AuroraUpdate {
   stableBlocks?: StreamBlock[];
   stableChanged?: boolean;
   tailBlock?: StreamBlock;
-  tail?: string;
   tailChanged?: boolean;
   tailFrame?: TailFrame;
-  tailSnapshot?: MarkdownNode[];
   content?: string;
   chunk?: string;
 }

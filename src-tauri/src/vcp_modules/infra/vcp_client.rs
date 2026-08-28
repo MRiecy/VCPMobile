@@ -1204,7 +1204,6 @@ async fn handle_streaming_request<R: Runtime>(
         let is_final = finish_reason.is_some();
         let chunk = buffer.take_chunk();
         let tail_frame = buffer.take_tail_frame();
-        let tail_snapshot = tail_frame.as_ref().and_then(|frame| frame.snapshot.clone());
         let update = AuroraUpdate {
             stream_id: Some(buffer.stream_id),
             stable_blocks: if stable_changed {
@@ -1218,14 +1217,8 @@ async fn handle_streaming_request<R: Runtime>(
             } else {
                 None
             },
-            tail: if tail_changed {
-                Some(buffer.tail_content.clone())
-            } else {
-                None
-            },
             tail_changed,
             tail_frame,
-            tail_snapshot,
             content: if is_final {
                 Some(buffer.full_text.clone())
             } else {
@@ -1861,10 +1854,8 @@ async fn handle_non_streaming_request(
         stable_blocks: None,
         stable_changed: false,
         tail_block: None,
-        tail: None,
         tail_changed: false,
         tail_frame: None,
-        tail_snapshot: None,
         content: Some(full_content.clone()),
         chunk: None,
     };

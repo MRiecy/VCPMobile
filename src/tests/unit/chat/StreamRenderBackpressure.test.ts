@@ -42,7 +42,6 @@ const tailEvent = (
       streamId,
       chunk: options.chunk ?? text,
       tailChanged: true,
-      tail: text,
       tailBlock: {
         type: "markdown",
         content: text,
@@ -124,7 +123,6 @@ describe("stream render backpressure", () => {
           stableChanged: true,
           stableBlocks: [],
           tailChanged: true,
-          tail: "authoritative",
           tailBlock: {
             type: "markdown",
             content: "authoritative",
@@ -235,6 +233,62 @@ describe("stream render backpressure", () => {
         { op: "append", id: "t0.i0", chunk: "one" },
         { op: "append", id: "t0.i0", chunk: "two" },
       ]);
+    } finally {
+      manualRaf.restore();
+    }
+  });
+
+  it("derives tail text from tailBlock content and clears it without a wire alias", async () => {
+    const manualRaf = installManualRaf();
+    try {
+      const store = useChatStreamStore();
+      await store.processStreamEvent(streamEvent({
+        type: "thinking",
+        messageId: "assistant-1",
+        context: streamContext,
+      }));
+
+      await store.processStreamEvent(tailEvent(26, 1, "visible tail", { reset: true }));
+      manualRaf.flush();
+
+      let message = store.getActiveStreamMessage(
+        "agent-a",
+        "agent",
+        "topic-a",
+        "assistant-1",
+      );
+      expect(message?.tailContent).toBe("visible tail");
+      expect(message?.tailBlock?.content).toBe("visible tail");
+
+      await store.processStreamEvent(streamEvent({
+        type: "aurora",
+        messageId: "assistant-1",
+        context: streamContext,
+        aurora: {
+          streamId: 26,
+          tailChanged: true,
+          tailFrame: {
+            streamId: 26,
+            epoch: 2,
+            revision: 0,
+            frameSeq: 2,
+            reset: true,
+            snapshot: [],
+            mutations: [],
+          },
+        },
+      }));
+      manualRaf.flush();
+
+      message = store.getActiveStreamMessage(
+        "agent-a",
+        "agent",
+        "topic-a",
+        "assistant-1",
+      );
+      expect(message?.tailContent).toBe("");
+      expect(message?.tailBlock).toBeUndefined();
+      expect(message?.tailSnapshot).toEqual([]);
     } finally {
       manualRaf.restore();
     }
@@ -372,7 +426,6 @@ describe("stream render backpressure", () => {
             streamId: 1,
             chunk: "x",
             tailChanged: true,
-            tail: `tail-${index}`,
             tailBlock: {
               type: "markdown",
               content: `tail-${index}`,
