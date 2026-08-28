@@ -130,6 +130,16 @@ enum VersionHandshakeError {
     Transport(String),
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum VersionHandshakeFailure {
+    Retry {
+        code: &'static str,
+        message: String,
+    },
+    Stop,
+    Cancelled,
+}
+
 fn parse_version_ack(text: &str) -> Result<VersionAck, String> {
     let ack = serde_json::from_str::<VersionAck>(text)
         .map_err(|error| format!("Invalid VERSION_ACK: {error}"))?;
@@ -213,6 +223,228 @@ async fn terminate_after_protocol_send_failure<R: Runtime>(
     let message = protocol_send_failure_message(context, error);
     emit_sync_log(app_handle, "warning", &message);
     let _ = close_ws_with_deadline(ws_stream).await;
+}
+
+async fn perform_version_handshake<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    session_id: u64,
+    connection_status: &Arc<RwLock<String>>,
+    cancel_token: &CancellationToken,
+    mut ws_stream: SyncWebSocket,
+) -> Result<SyncWebSocket, VersionHandshakeFailure> {
+    let version_req = VersionCheckFrame {
+        frame_type: "VERSION_CHECK",
+        mobile_version: env!("CARGO_PKG_VERSION"),
+        protocol_version: WIRE_PROTOCOL_VERSION,
+    };
+    if let Err(error) = send_ws_frame(&mut ws_stream, &version_req).await {
+        terminate_after_protocol_send_failure(
+            app_handle,
+            &mut ws_stream,
+            "version check",
+            &error,
+        )
+        .await;
+        return Err(VersionHandshakeFailure::Retry {
+            code: "WS_SEND_FAILED",
+            message: protocol_send_failure_message("version check", &error),
+        });
+    }
+    emit_sync_log(app_handle, "info", "正在验证桌面端插件版本...");
+
+    let version_result = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            let _ = close_ws_with_deadline(&mut ws_stream).await;
+            return Err(VersionHandshakeFailure::Cancelled);
+        }
+        result = tokio::time::timeout(VERSION_CHECK_TIMEOUT, async {
+            while let Some(result) = ws_stream.next().await {
+                match result {
+                    Ok(Message::Text(text)) => {
+                        match parse_version_handshake_text(&text)? {
+                            Some(ack) => return Ok(ack),
+                            None => continue,
+                        }
+                    }
+                    Ok(Message::Close(close_frame)) => {
+                        return Err(match close_frame {
+                            Some(frame) => VersionHandshakeError::Closed {
+                                code: Some(frame.code.into()),
+                                reason: frame.reason.to_string(),
+                            },
+                            None => VersionHandshakeError::Closed {
+                                code: None,
+                                reason: String::new(),
+                            },
+                        });
+                    }
+                    Err(error) => {
+                        return Err(VersionHandshakeError::Transport(error.to_string()));
+                    }
+                    _ => {}
+                }
+            }
+            Err(VersionHandshakeError::Closed {
+                code: None,
+                reason: String::new(),
+            })
+        }) => result,
+    };
+
+    match version_result {
+        Ok(Ok(version_ack)) if is_wire_compatible(&version_ack) => {
+            emit_sync_log(
+                app_handle,
+                "success",
+                &format!(
+                    "桌面端插件 v{} / 同步协议 {} 验证通过",
+                    version_ack.plugin_version, version_ack.protocol_version
+                ),
+            );
+            Ok(ws_stream)
+        }
+        Ok(Ok(version_ack)) => {
+            publish_sync_error(
+                app_handle,
+                session_id,
+                connection_status,
+                "SYNC_VERSION_INCOMPATIBLE",
+                &format!(
+                    "桌面端插件 v{} 声明的同步协议 {} 与 Mobile 要求的协议 {} 不兼容",
+                    version_ack.plugin_version,
+                    version_ack.protocol_version,
+                    WIRE_PROTOCOL_VERSION,
+                ),
+                Vec::new(),
+            )
+            .await;
+            emit_sync_log(
+                app_handle,
+                "error",
+                &format!(
+                    "❌ 同步协议不匹配: 桌面端插件 v{} / 协议 {}，Mobile 要求协议 {}",
+                    version_ack.plugin_version,
+                    version_ack.protocol_version,
+                    WIRE_PROTOCOL_VERSION,
+                ),
+            );
+            emit_sync_log(
+                app_handle,
+                "error",
+                "👉 排查建议: 请前往 https://github.com/MRiecy/VCPMobile/releases 下载最新同步插件",
+            );
+            Err(VersionHandshakeFailure::Stop)
+        }
+        Ok(Err(VersionHandshakeError::Protocol(message))) => {
+            emit_sync_log(
+                app_handle,
+                "error",
+                &format!("❌ 同步连接失败 [VERSION_ACK_INVALID]: {message}"),
+            );
+            publish_sync_error(
+                app_handle,
+                session_id,
+                connection_status,
+                "VERSION_ACK_INVALID",
+                &message,
+                Vec::new(),
+            )
+            .await;
+            let _ = close_ws_with_deadline(&mut ws_stream).await;
+            Err(VersionHandshakeFailure::Stop)
+        }
+        Ok(Err(VersionHandshakeError::Remote(encoded))) => {
+            publish_sync_error(
+                app_handle,
+                session_id,
+                connection_status,
+                "REMOTE_SYNC_FAILED",
+                &encoded,
+                Vec::new(),
+            )
+            .await;
+            let _ = close_ws_with_deadline(&mut ws_stream).await;
+            Err(VersionHandshakeFailure::Stop)
+        }
+        Ok(Err(VersionHandshakeError::Closed { code, .. })) if code == Some(4001) => {
+            emit_sync_log(
+                app_handle,
+                "error",
+                "❌ 同步连接失败 [TOKEN_MISMATCH]: 身份认证失败（Token 错误）",
+            );
+            emit_sync_log(app_handle, "error", "👉 排查建议: 移动端设置的同步令牌与桌面端不匹配。请检查移动端设置中的『同步令牌』是否与电脑端 VCPMobileSync 插件的 config.env 中的 SYNC_TOKEN 完全一致。");
+            publish_sync_error(
+                app_handle,
+                session_id,
+                connection_status,
+                "TOKEN_MISMATCH",
+                "身份认证失败（Token 错误）",
+                Vec::new(),
+            )
+            .await;
+            Err(VersionHandshakeFailure::Stop)
+        }
+        Ok(Err(VersionHandshakeError::Closed { code, .. })) if code == Some(4002) => {
+            let message = "WebSocket 同步服务路径不正确";
+            emit_sync_log(
+                app_handle,
+                "error",
+                &format!("❌ 同步连接失败 [WS_PATH_INVALID]: {message}"),
+            );
+            publish_sync_error(
+                app_handle,
+                session_id,
+                connection_status,
+                "WS_PATH_INVALID",
+                message,
+                Vec::new(),
+            )
+            .await;
+            Err(VersionHandshakeFailure::Stop)
+        }
+        Ok(Err(VersionHandshakeError::Closed { code, reason })) => {
+            let message = format!(
+                "连接被服务器关闭 (code: {}, reason: {})",
+                code.map_or_else(|| "none".to_string(), |value| value.to_string()),
+                reason
+            );
+            emit_sync_log(
+                app_handle,
+                "warning",
+                &format!("同步握手连接关闭 [WS_CLOSED]: {message}"),
+            );
+            let _ = close_ws_with_deadline(&mut ws_stream).await;
+            Err(VersionHandshakeFailure::Retry {
+                code: "WS_CLOSED",
+                message,
+            })
+        }
+        Ok(Err(VersionHandshakeError::Transport(message))) => {
+            emit_sync_log(
+                app_handle,
+                "warning",
+                &format!("同步握手接收失败 [WS_RECEIVE_FAILED]: {message}"),
+            );
+            let _ = close_ws_with_deadline(&mut ws_stream).await;
+            Err(VersionHandshakeFailure::Retry {
+                code: "WS_RECEIVE_FAILED",
+                message,
+            })
+        }
+        Err(_) => {
+            emit_sync_log(
+                app_handle,
+                "warning",
+                "同步握手超时 [VERSION_CHECK_TIMEOUT]",
+            );
+            let _ = close_ws_with_deadline(&mut ws_stream).await;
+            Err(VersionHandshakeFailure::Retry {
+                code: "VERSION_CHECK_TIMEOUT",
+                message: "版本验证超时".to_string(),
+            })
+        }
+    }
 }
 
 fn take_retry_slot(retry_count: &mut u32, retry_delay: &mut Duration) -> Option<Duration> {
@@ -1188,23 +1420,18 @@ async fn run_sync_session(
         };
 
         match connect_result {
-            Ok(Ok((mut ws_stream, _))) => {
-                // ── 版本验证握手 ──
+            Ok(Ok((ws_stream, _))) => {
+                let mut ws_stream = match perform_version_handshake(
+                    &handle_clone,
+                    session_id,
+                    &connection_status_for_task,
+                    &cancel_token,
+                    ws_stream,
+                )
+                .await
                 {
-                    let version_req = VersionCheckFrame {
-                        frame_type: "VERSION_CHECK",
-                        mobile_version: env!("CARGO_PKG_VERSION"),
-                        protocol_version: WIRE_PROTOCOL_VERSION,
-                    };
-                    if let Err(error) = send_ws_frame(&mut ws_stream, &version_req).await {
-                        terminate_after_protocol_send_failure(
-                            &handle_clone,
-                            &mut ws_stream,
-                            "version check",
-                            &error,
-                        )
-                        .await;
-                        let message = protocol_send_failure_message("version check", &error);
+                    Ok(ws_stream) => ws_stream,
+                    Err(VersionHandshakeFailure::Retry { code, message }) => {
                         if schedule_sync_retry(
                             &handle_clone,
                             session_id,
@@ -1212,7 +1439,7 @@ async fn run_sync_session(
                             &cancel_token,
                             &mut retry_count,
                             &mut retry_delay,
-                            "WS_SEND_FAILED",
+                            code,
                             &message,
                         )
                         .await
@@ -1221,236 +1448,10 @@ async fn run_sync_session(
                         }
                         break 'session;
                     }
-                    emit_sync_log(&handle_clone, "info", "正在验证桌面端插件版本...");
-
-                    let version_result = tokio::select! {
-                        biased;
-                        _ = cancel_token.cancelled() => {
-                            let _ = close_ws_with_deadline(&mut ws_stream).await;
-                            break;
-                        }
-                        result = tokio::time::timeout(VERSION_CHECK_TIMEOUT, async {
-                            while let Some(res) = ws_stream.next().await {
-                                match res {
-                                    Ok(Message::Text(text)) => {
-                                        match parse_version_handshake_text(&text)? {
-                                            Some(ack) => return Ok(ack),
-                                            None => continue,
-                                        }
-                                    }
-                                    Ok(Message::Close(close_frame)) => {
-                                        return Err(match close_frame {
-                                            Some(frame) => VersionHandshakeError::Closed {
-                                                code: Some(frame.code.into()),
-                                                reason: frame.reason.to_string(),
-                                            },
-                                            None => VersionHandshakeError::Closed {
-                                                code: None,
-                                                reason: String::new(),
-                                            },
-                                        });
-                                    }
-                                    Err(error) => {
-                                        return Err(VersionHandshakeError::Transport(
-                                            error.to_string(),
-                                        ));
-                                    }
-                                    _ => {}
-                                }
-                            }
-                            Err(VersionHandshakeError::Closed {
-                                code: None,
-                                reason: String::new(),
-                            })
-                        }) => result,
-                    };
-
-                    match version_result {
-                        Ok(Ok(version_ack)) => {
-                            if is_wire_compatible(&version_ack) {
-                                emit_sync_log(
-                                    &handle_clone,
-                                    "success",
-                                    &format!(
-                                        "桌面端插件 v{} / 同步协议 {} 验证通过",
-                                        version_ack.plugin_version, version_ack.protocol_version
-                                    ),
-                                );
-                            } else {
-                                publish_sync_error(
-                                    &handle_clone,
-                                    session_id,
-                                    &connection_status_for_task,
-                                    "SYNC_VERSION_INCOMPATIBLE",
-                                    &format!(
-                                        "桌面端插件 v{} 声明的同步协议 {} 与 Mobile 要求的协议 {} 不兼容",
-                                        version_ack.plugin_version,
-                                        version_ack.protocol_version,
-                                        WIRE_PROTOCOL_VERSION,
-                                    ),
-                                    Vec::new(),
-                                )
-                                .await;
-                                emit_sync_log(
-                                    &handle_clone,
-                                    "error",
-                                    &format!(
-                                        "❌ 同步协议不匹配: 桌面端插件 v{} / 协议 {}，Mobile 要求协议 {}",
-                                        version_ack.plugin_version,
-                                        version_ack.protocol_version,
-                                        WIRE_PROTOCOL_VERSION,
-                                    ),
-                                );
-                                emit_sync_log(&handle_clone, "error", "👉 排查建议: 请前往 https://github.com/MRiecy/VCPMobile/releases 下载最新同步插件");
-                                break;
-                            }
-                        }
-                        Ok(Err(VersionHandshakeError::Protocol(message))) => {
-                            emit_sync_log(
-                                &handle_clone,
-                                "error",
-                                &format!("❌ 同步连接失败 [VERSION_ACK_INVALID]: {message}"),
-                            );
-                            publish_sync_error(
-                                &handle_clone,
-                                session_id,
-                                &connection_status_for_task,
-                                "VERSION_ACK_INVALID",
-                                &message,
-                                Vec::new(),
-                            )
-                            .await;
-                            let _ = close_ws_with_deadline(&mut ws_stream).await;
-                            break;
-                        }
-                        Ok(Err(VersionHandshakeError::Remote(encoded))) => {
-                            publish_sync_error(
-                                &handle_clone,
-                                session_id,
-                                &connection_status_for_task,
-                                "REMOTE_SYNC_FAILED",
-                                &encoded,
-                                Vec::new(),
-                            )
-                            .await;
-                            let _ = close_ws_with_deadline(&mut ws_stream).await;
-                            break;
-                        }
-                        Ok(Err(VersionHandshakeError::Closed { code, reason })) => {
-                            if code == Some(4001) {
-                                emit_sync_log(
-                                    &handle_clone,
-                                    "error",
-                                    "❌ 同步连接失败 [TOKEN_MISMATCH]: 身份认证失败（Token 错误）",
-                                );
-                                emit_sync_log(&handle_clone, "error", "👉 排查建议: 移动端设置的同步令牌与桌面端不匹配。请检查移动端设置中的『同步令牌』是否与电脑端 VCPMobileSync 插件的 config.env 中的 SYNC_TOKEN 完全一致。");
-                                publish_sync_error(
-                                    &handle_clone,
-                                    session_id,
-                                    &connection_status_for_task,
-                                    "TOKEN_MISMATCH",
-                                    "身份认证失败（Token 错误）",
-                                    Vec::new(),
-                                )
-                                .await;
-                                break 'session;
-                            } else if code == Some(4002) {
-                                let message = "WebSocket 同步服务路径不正确";
-                                emit_sync_log(
-                                    &handle_clone,
-                                    "error",
-                                    &format!("❌ 同步连接失败 [WS_PATH_INVALID]: {message}"),
-                                );
-                                publish_sync_error(
-                                    &handle_clone,
-                                    session_id,
-                                    &connection_status_for_task,
-                                    "WS_PATH_INVALID",
-                                    message,
-                                    Vec::new(),
-                                )
-                                .await;
-                                break 'session;
-                            } else {
-                                let err_msg = format!(
-                                    "连接被服务器关闭 (code: {}, reason: {})",
-                                    code.map_or_else(
-                                        || "none".to_string(),
-                                        |value| value.to_string()
-                                    ),
-                                    reason
-                                );
-                                emit_sync_log(
-                                    &handle_clone,
-                                    "warning",
-                                    &format!("同步握手连接关闭 [WS_CLOSED]: {}", err_msg),
-                                );
-                                let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                if schedule_sync_retry(
-                                    &handle_clone,
-                                    session_id,
-                                    &connection_status_for_task,
-                                    &cancel_token,
-                                    &mut retry_count,
-                                    &mut retry_delay,
-                                    "WS_CLOSED",
-                                    &err_msg,
-                                )
-                                .await
-                                {
-                                    continue 'session;
-                                }
-                                break 'session;
-                            }
-                        }
-                        Ok(Err(VersionHandshakeError::Transport(message))) => {
-                            emit_sync_log(
-                                &handle_clone,
-                                "warning",
-                                &format!("同步握手接收失败 [WS_RECEIVE_FAILED]: {message}"),
-                            );
-                            let _ = close_ws_with_deadline(&mut ws_stream).await;
-                            if schedule_sync_retry(
-                                &handle_clone,
-                                session_id,
-                                &connection_status_for_task,
-                                &cancel_token,
-                                &mut retry_count,
-                                &mut retry_delay,
-                                "WS_RECEIVE_FAILED",
-                                &message,
-                            )
-                            .await
-                            {
-                                continue 'session;
-                            }
-                            break 'session;
-                        }
-                        Err(_) => {
-                            emit_sync_log(
-                                &handle_clone,
-                                "warning",
-                                "同步握手超时 [VERSION_CHECK_TIMEOUT]",
-                            );
-                            let _ = close_ws_with_deadline(&mut ws_stream).await;
-                            if schedule_sync_retry(
-                                &handle_clone,
-                                session_id,
-                                &connection_status_for_task,
-                                &cancel_token,
-                                &mut retry_count,
-                                &mut retry_delay,
-                                "VERSION_CHECK_TIMEOUT",
-                                "版本验证超时",
-                            )
-                            .await
-                            {
-                                continue 'session;
-                            }
-                            break 'session;
-                        }
+                    Err(VersionHandshakeFailure::Stop | VersionHandshakeFailure::Cancelled) => {
+                        break 'session;
                     }
-                }
+                };
 
                 if let Ok(mut logger) = sync_logger_task.lock() {
                     logger.log(LogLevel::Info, "sync", "=== Phase 1: Owner Metadata ===");
