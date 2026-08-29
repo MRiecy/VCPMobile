@@ -1770,7 +1770,6 @@ mod ndjson_budget_tests {
                 finish_reason: None,
                 attachments: None,
                 content_hash: None,
-                avatar_color: None,
             },
             crate::vcp_modules::sync_dto::MessageSyncDTO {
                 id: "message-b".into(),
@@ -1787,7 +1786,6 @@ mod ndjson_budget_tests {
                 finish_reason: None,
                 attachments: None,
                 content_hash: None,
-                avatar_color: None,
             },
         ];
         assert!(validate_requested_message_ids(

@@ -498,7 +498,6 @@ async fn load_outbound_message_page(
             })?,
             attachments: None,
             content_hash: None,
-            avatar_color: None,
         });
     }
 

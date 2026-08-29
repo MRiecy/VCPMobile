@@ -183,12 +183,6 @@ pub struct MessageSyncDTO {
     pub attachments: Option<Vec<AttachmentSyncDTO>>,
     #[serde(rename = "contentHash", skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
-    #[serde(
-        rename = "avatarColor",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub avatar_color: Option<String>,
 }
 
 impl From<MessageSyncDTO> for crate::vcp_modules::chat_manager::ChatMessage {
@@ -310,7 +304,6 @@ mod tests {
                 created_at: Some(200),
             }]),
             content_hash: Some("content-hash".to_string()),
-            avatar_color: Some("#fff".to_string()),
         };
 
         let msg = ChatMessage::from(dto);
