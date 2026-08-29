@@ -42,7 +42,11 @@ export function pickFile(): Promise<PickedFile> {
 }
 
 export function openFileNative(path: string): Promise<void> {
-  return invoke('plugin:vcp-mobile|open_file_native', { path });
+  return invoke('plugin:vcp-mobile|open_file_native', { path, action: 'view' });
+}
+
+export function shareFileNative(path: string): Promise<void> {
+  return invoke('plugin:vcp-mobile|open_file_native', { path, action: 'share' });
 }
 
 export interface ApkSignatureVerification {

@@ -123,6 +123,38 @@ class PluginContractTest {
     }
 
     @Test
+    fun nativeFileBridgeKeepsViewAndAddsReadOnlySystemShare() {
+        val rustSystem = File(pluginRoot, "src/system.rs").readText()
+        val guestJs = File(pluginRoot, "guest-js/index.ts").readText()
+        val kotlinPlugin = File(
+            pluginRoot,
+            "android/src/main/java/com/vcp/mobile/VcpMobilePlugin.kt",
+        ).readText()
+
+        assertTrue(
+            "guest-js 应暴露独立的 shareFileNative API",
+            guestJs.contains("function shareFileNative(path: string)") &&
+                guestJs.contains("{ path, action: 'share' }"),
+        )
+        assertTrue(
+            "Rust 桥接只允许 view/share 两种动作",
+            rustSystem.contains("action != \"view\" && action != \"share\"") &&
+                rustSystem.contains("\"action\": action"),
+        )
+        assertTrue(
+            "Android 分享必须使用 ACTION_SEND、EXTRA_STREAM 与临时读取授权",
+            kotlinPlugin.contains("Intent(Intent.ACTION_SEND)") &&
+                kotlinPlugin.contains("Intent.EXTRA_STREAM") &&
+                kotlinPlugin.contains("ClipData.newRawUri") &&
+                kotlinPlugin.contains("Intent.FLAG_GRANT_READ_URI_PERMISSION"),
+        )
+        assertTrue(
+            "既有 ACTION_VIEW 行为必须保留",
+            kotlinPlugin.contains("Intent(Intent.ACTION_VIEW)"),
+        )
+    }
+
+    @Test
     fun rustRunMobilePluginMethodNamesExistInKotlinPlugin() {
         val rustSources = listOf("src/system.rs", "src/stream.rs", "src/cli.rs")
             .map { File(pluginRoot, it).readText() }

@@ -3290,6 +3290,78 @@ pub struct SyncLogFileInfo {
     pub size_bytes: u64,
 }
 
+fn is_sync_log_leaf_name(filename: &str) -> bool {
+    !filename.is_empty()
+        && filename != "."
+        && filename != ".."
+        && !filename.contains('/')
+        && !filename.contains('\\')
+}
+
+async fn resolve_sync_log_file(
+    app: &AppHandle,
+    filename: &str,
+    error_code: &str,
+) -> Result<std::path::PathBuf, String> {
+    if !is_sync_log_leaf_name(filename) {
+        return Err(encode_sync_command_error(
+            "SYNC_LOG_PATH_INVALID",
+            "Sync log filename must be a single path segment",
+        ));
+    }
+
+    let log_dir = app
+        .path()
+        .app_log_dir()
+        .map_err(|error| encode_sync_command_error(error_code, &error.to_string()))?
+        .join("sync_logs");
+    let canonical_dir = tokio::fs::canonicalize(&log_dir)
+        .await
+        .map_err(|error| encode_sync_command_error(error_code, &error.to_string()))?;
+    let canonical_file = tokio::fs::canonicalize(log_dir.join(filename))
+        .await
+        .map_err(|error| encode_sync_command_error(error_code, &error.to_string()))?;
+    let metadata = tokio::fs::metadata(&canonical_file)
+        .await
+        .map_err(|error| encode_sync_command_error(error_code, &error.to_string()))?;
+    if !canonical_file.starts_with(&canonical_dir) || !metadata.is_file() {
+        return Err(encode_sync_command_error(
+            "SYNC_LOG_PATH_INVALID",
+            "Requested sync log is not a regular file in the sync log directory",
+        ));
+    }
+    Ok(canonical_file)
+}
+
+async fn prune_sync_log_share_cache(cache_root: &std::path::Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(cache_root).await else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(24 * 60 * 60))
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            _ => break,
+        };
+        let Ok(metadata) = entry.metadata().await else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        if modified >= cutoff {
+            continue;
+        }
+        if metadata.is_dir() {
+            let _ = tokio::fs::remove_dir_all(entry.path()).await;
+        } else {
+            let _ = tokio::fs::remove_file(entry.path()).await;
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn list_sync_log_files(app: AppHandle) -> Result<Vec<SyncLogFileInfo>, String> {
     let log_dir = app
@@ -3344,31 +3416,52 @@ pub async fn get_sync_session_log_path(
 
 #[tauri::command]
 pub async fn read_sync_log_file(app: AppHandle, filename: String) -> Result<String, String> {
-    let log_dir = app
-        .path()
-        .app_log_dir()
-        .map_err(|error| encode_sync_command_error("SYNC_LOG_READ_FAILED", &error.to_string()))?
-        .join("sync_logs");
-    let file_path = log_dir.join(&filename);
-
-    // 安全检查：确保文件在 sync_logs 目录内
-    let canonical_dir = log_dir
-        .canonicalize()
-        .map_err(|error| encode_sync_command_error("SYNC_LOG_READ_FAILED", &error.to_string()))?;
-    let canonical_file = file_path
-        .canonicalize()
-        .map_err(|error| encode_sync_command_error("SYNC_LOG_READ_FAILED", &error.to_string()))?;
-    if !canonical_file.starts_with(&canonical_dir) {
-        return Err(encode_sync_command_error(
-            "SYNC_LOG_PATH_INVALID",
-            "Requested sync log is outside the sync log directory",
-        ));
-    }
-
+    let canonical_file = resolve_sync_log_file(&app, &filename, "SYNC_LOG_READ_FAILED").await?;
     let content = tokio::fs::read_to_string(&canonical_file)
         .await
         .map_err(|error| encode_sync_command_error("SYNC_LOG_READ_FAILED", &error.to_string()))?;
     Ok(content)
+}
+
+#[tauri::command]
+pub async fn prepare_sync_log_share_file(
+    app: AppHandle,
+    filename: String,
+) -> Result<String, String> {
+    let source = resolve_sync_log_file(&app, &filename, "SYNC_LOG_SHARE_FAILED").await?;
+    let cache_root = app
+        .path()
+        .cache_dir()
+        .map_err(|error| encode_sync_command_error("SYNC_LOG_SHARE_FAILED", &error.to_string()))?
+        .join("sync_log_shares");
+    tokio::fs::create_dir_all(&cache_root)
+        .await
+        .map_err(|error| encode_sync_command_error("SYNC_LOG_SHARE_FAILED", &error.to_string()))?;
+    prune_sync_log_share_cache(&cache_root).await;
+
+    let unique = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| {
+                encode_sync_command_error("SYNC_LOG_SHARE_FAILED", &error.to_string())
+            })?
+            .as_nanos()
+    );
+    let staging_dir = cache_root.join(unique);
+    tokio::fs::create_dir(&staging_dir)
+        .await
+        .map_err(|error| encode_sync_command_error("SYNC_LOG_SHARE_FAILED", &error.to_string()))?;
+    let staged_file = staging_dir.join(&filename);
+    if let Err(error) = tokio::fs::copy(&source, &staged_file).await {
+        let _ = tokio::fs::remove_dir_all(&staging_dir).await;
+        return Err(encode_sync_command_error(
+            "SYNC_LOG_SHARE_FAILED",
+            &error.to_string(),
+        ));
+    }
+    Ok(staged_file.to_string_lossy().to_string())
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -3482,6 +3575,14 @@ mod tests {
         let app = tauri::test::mock_app();
         assert!(app.manage(test_sync_state(session_id)));
         app
+    }
+
+    #[test]
+    fn sync_log_share_accepts_only_leaf_filenames() {
+        assert!(is_sync_log_leaf_name("20260813_120000_000_1_sync.log"));
+        for invalid in ["", ".", "..", "../secret", "nested/log", "C:\\secret.log"] {
+            assert!(!is_sync_log_leaf_name(invalid), "accepted {invalid}");
+        }
     }
 
     async fn websocket_pair() -> (SyncWebSocket, TestServerWebSocket) {

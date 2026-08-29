@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { mount } from "@vue/test-utils";
+import { shareFileNative } from "tauri-plugin-vcp-mobile";
 import { useSyncSessionStore } from "@/core/stores/syncSession";
 import { useOverlayStore } from "@/core/stores/overlay";
 import { useNotificationStore } from "@/core/stores/notification";
@@ -47,6 +48,7 @@ function syncError(
 describe("sync session ownership", () => {
   beforeEach(() => {
     setActivePinia(createPinia());
+    vi.mocked(shareFileNative).mockClear();
     mockInvoke("stop_sync", () => undefined);
     mockInvoke("plugin:vcp-mobile|get_battery_status", () => ({
       level: 80,
@@ -586,6 +588,98 @@ describe("sync session ownership", () => {
     ).toBe(false);
   });
 
+  it("mounts only the selected sync panel and reloads history on each entry", async () => {
+    const store = useSyncSessionStore();
+    store.open();
+    const wrapper = mount(SyncSessionView);
+    const historyLoads = () =>
+      invokeMock.mock.calls.filter(
+        ([command]) => command === "list_sync_log_files",
+      ).length;
+
+    expect(wrapper.get("#sync-live-panel").attributes("role")).toBe(
+      "tabpanel",
+    );
+    expect(wrapper.find("#sync-history-panel").exists()).toBe(false);
+    expect(wrapper.findComponent(SyncLogBrowserCore).exists()).toBe(false);
+    expect(historyLoads()).toBe(0);
+    expect(wrapper.get("#sync-live-tab").attributes("aria-selected")).toBe(
+      "true",
+    );
+
+    await wrapper.get("#sync-history-tab").trigger("click");
+    await vi.waitFor(() => expect(historyLoads()).toBe(1));
+    expect(wrapper.find("#sync-live-panel").exists()).toBe(false);
+    expect(wrapper.get("#sync-history-panel").attributes("role")).toBe(
+      "tabpanel",
+    );
+    expect(wrapper.findComponent(SyncLogBrowserCore).exists()).toBe(true);
+    expect(wrapper.get("#sync-history-tab").attributes("aria-selected")).toBe(
+      "true",
+    );
+
+    await wrapper.get("#sync-live-tab").trigger("click");
+    expect(wrapper.find("#sync-history-panel").exists()).toBe(false);
+    expect(wrapper.findComponent(SyncLogBrowserCore).exists()).toBe(false);
+
+    await wrapper.get("#sync-history-tab").trigger("click");
+    await vi.waitFor(() => expect(historyLoads()).toBe(2));
+  });
+
+  it.each(["connecting", "connected"] as const)(
+    "keeps history unavailable while sync is %s",
+    async (status) => {
+      const store = useSyncSessionStore();
+      store.open();
+      store.status = status;
+      const wrapper = mount(SyncSessionView);
+
+      expect(wrapper.get("#sync-history-tab").attributes()).toHaveProperty(
+        "disabled",
+      );
+      store.switchTab("history");
+      expect(store.activeTab).toBe("live");
+      expect(wrapper.find("#sync-history-panel").exists()).toBe(false);
+    },
+  );
+
+  it("scrolls the live terminal to the latest log after remounting", async () => {
+    const scrollHeight = vi
+      .spyOn(HTMLElement.prototype, "scrollHeight", "get")
+      .mockReturnValue(640);
+    try {
+      const store = useSyncSessionStore();
+      store.open();
+      store.status = "completed";
+      store.logs.push({
+        id: "terminal",
+        level: "success",
+        message: "同步完成",
+        time: "12:00:00",
+      });
+      const wrapper = mount(SyncSessionView);
+
+      await vi.waitFor(() =>
+        expect(
+          (wrapper.get("#sync-live-panel .overflow-y-auto")
+            .element as HTMLElement).scrollTop,
+        ).toBe(640),
+      );
+
+      await wrapper.get("#sync-history-tab").trigger("click");
+      await wrapper.get("#sync-live-tab").trigger("click");
+      await vi.waitFor(() =>
+        expect(
+          (wrapper.get("#sync-live-panel .overflow-y-auto")
+            .element as HTMLElement).scrollTop,
+        ).toBe(640),
+      );
+      expect(wrapper.text()).toContain("同步完成");
+    } finally {
+      scrollHeight.mockRestore();
+    }
+  });
+
   it("renders fixed copy plus the safe stage, origin, and code tuple", async () => {
     const store = useSyncSessionStore();
     store.open();
@@ -703,6 +797,42 @@ describe("sync session ownership", () => {
 
     await wrapper.get('[class*="cursor-pointer"]').trigger("click");
     await vi.waitFor(() => expect(wrapper.text()).toContain("retry succeeded"));
+  });
+
+  it("shares the selected history log as a staged file through Android", async () => {
+    const filename = "20260813_120000_000_1_sync.log";
+    const stagedPath = `/cache/sync_log_shares/1/${filename}`;
+    mockInvoke("list_sync_log_files", () => [
+      {
+        filename,
+        created_at: 1_786_576_800,
+        size_bytes: 4_096,
+      },
+    ]);
+    mockInvoke("read_sync_log_file", () => "[INFO] sync completed");
+    mockInvoke("prepare_sync_log_share_file", (args) => {
+      expect(args).toEqual({ filename });
+      return stagedPath;
+    });
+    const notifications = useNotificationStore();
+    const wrapper = mount(SyncLogBrowserCore);
+
+    await vi.waitFor(() => expect(wrapper.text()).toContain(filename));
+    await wrapper.get('[class*="cursor-pointer"]').trigger("click");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("sync completed"));
+    const shareButton = wrapper
+      .findAll("button")
+      .find((button) => button.text() === "分享");
+    expect(shareButton).toBeTruthy();
+    await shareButton!.trigger("click");
+
+    await vi.waitFor(() =>
+      expect(shareFileNative).toHaveBeenCalledWith(stagedPath),
+    );
+    expect(
+      notifications.activeToasts[notifications.activeToasts.length - 1]
+        ?.message,
+    ).toBe("已打开系统分享面板");
   });
 
   it("copies bounded diagnostics without tokens or absolute paths", async () => {

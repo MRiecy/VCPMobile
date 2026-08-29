@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue';
+import { ref, onMounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { FileText, Trash2, Copy, ChevronLeft, ChevronRight } from 'lucide-vue-next';
+import { shareFileNative } from 'tauri-plugin-vcp-mobile';
+import { FileText, Trash2, Copy, Share2, ChevronLeft, ChevronRight } from 'lucide-vue-next';
 import { useOverlayStore } from '../../../core/stores/overlay';
 import { useNotificationStore } from '../../../core/stores/notification';
-import { useSyncSessionStore } from '../../../core/stores/syncSession';
 
 interface LogFile {
   filename: string;
@@ -23,9 +23,9 @@ const errorText = ref('');
 
 const overlayStore = useOverlayStore();
 const notificationStore = useNotificationStore();
-const syncSessionStore = useSyncSessionStore();
 const currentFile = ref<string | null>(null);
 const fileContent = ref<string>('');
+const shareBusy = ref(false);
 const currentPage = ref(0);
 const linesPerPage = 500;
 const totalPages = ref(0);
@@ -103,6 +103,31 @@ const copyCurrentFile = async () => {
   }
 };
 
+const shareCurrentFile = async () => {
+  if (!currentFile.value || shareBusy.value) return;
+  shareBusy.value = true;
+  try {
+    const path = await invoke<string>('prepare_sync_log_share_file', {
+      filename: currentFile.value
+    });
+    await shareFileNative(path);
+    notificationStore.addNotification({
+      type: 'success',
+      message: '已打开系统分享面板',
+      toastOnly: true
+    });
+  } catch (e) {
+    console.error('[SyncLogBrowser] Share failed:', e);
+    notificationStore.addNotification({
+      type: 'error',
+      message: '分享同步日志失败，请稍后再试',
+      toastOnly: true
+    });
+  } finally {
+    shareBusy.value = false;
+  }
+};
+
 const clearOldLogs = async () => {
   const confirmed = await overlayStore.showConfirm({
     title: '清理日志',
@@ -150,18 +175,6 @@ const lineClass = (line: string) => {
   if (line.includes('[INFO]') && /success|completed/i.test(line)) return 'text-green-400';
   return 'text-white/70';
 };
-
-// 本组件随同步页打开即挂载（与实时视图同处水平滚动容器），onMounted 只能拿到打开页时的快照。
-// 同步完成后新日志已落盘但列表不会自动更新，因此切到“历史”页签时重新拉取；
-// 正在查看某个文件内容时不打断当前阅读。
-watch(
-  () => syncSessionStore.activeTab,
-  (tab) => {
-    if (tab === 'history' && !currentFile.value) {
-      loadFiles();
-    }
-  },
-);
 
 onMounted(() => {
   loadFiles();
@@ -221,11 +234,21 @@ onMounted(() => {
           <ChevronLeft :size="14" />
           返回列表
         </button>
-        <button @click="copyCurrentFile"
-          class="flex items-center gap-1 px-2 py-1 rounded text-[10px] text-white/50 hover:text-white hover:bg-white/10 transition-colors">
-          <Copy :size="12" />
-          复制
-        </button>
+        <div class="flex items-center gap-1">
+          <button @click="copyCurrentFile"
+            class="flex min-h-9 items-center gap-1 px-3 text-[10px] text-white/50 transition-colors active:text-white">
+            <Copy :size="13" />
+            复制
+          </button>
+          <button
+            :disabled="shareBusy"
+            class="flex min-h-9 items-center gap-1 border-l border-white/10 px-3 text-[10px] text-blue-300 transition-colors active:text-white disabled:opacity-30"
+            @click="shareCurrentFile"
+          >
+            <Share2 :size="13" />
+            {{ shareBusy ? '分享中' : '分享' }}
+          </button>
+        </div>
       </div>
 
       <div class="flex-1 overflow-y-auto overflow-x-auto px-4 py-3 font-mono text-[10px] leading-relaxed min-w-0 no-rubber-band">

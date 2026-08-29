@@ -1090,8 +1090,11 @@ pub async fn install_update(
 
     #[cfg(target_os = "android")]
     {
-        let result =
-            tauri_plugin_vcp_mobile::system::open_file_native(app.clone(), staged_string.clone());
+        let result = tauri_plugin_vcp_mobile::system::open_file_native(
+            app.clone(),
+            staged_string.clone(),
+            None,
+        );
         if let Err(error) = result {
             remove_file_if_exists(&staged).await.ok();
             let status = transition_install_error(&app, &session, error, true).await;

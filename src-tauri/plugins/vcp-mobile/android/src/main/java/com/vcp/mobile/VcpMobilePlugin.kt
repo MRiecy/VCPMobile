@@ -1,6 +1,7 @@
 package com.vcp.mobile
 
 import android.app.Activity
+import android.content.ClipData
 import android.content.Context
 import android.content.IntentFilter
 import android.content.res.Configuration
@@ -2083,6 +2084,10 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             invoke.reject("Path is empty")
             return
         }
+        if (args.action != "view" && args.action != "share") {
+            invoke.reject("Unsupported native file action")
+            return
+        }
         
         executePluginTask(executorDomains.fileIoExecutor, invoke, "openFile", fileTask@{
             try {
@@ -2102,8 +2107,11 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
                 // 1. 自动提取并修正 MIME 类型
                 val ext = file.extension.lowercase()
-                val mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*"
-                Log.i(TAG, "[openFile] Opening file: ${file.absolutePath} (ext=$ext, mime=$mimeType)")
+                val mimeType = when (ext) {
+                    "log", "txt" -> "text/plain"
+                    else -> MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*"
+                }
+                Log.i(TAG, "[openFile] Dispatching file action=${args.action}: ${file.absolutePath} (ext=$ext, mime=$mimeType)")
 
                 // 2. 借助 FileProvider 生成临时读取授权的 content:// URI
                 val uri = try {
@@ -2121,22 +2129,43 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     )
                 }
 
-                // 3. 构建并分发默认的系统 ACTION_VIEW 意图
-                val intent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(uri, mimeType)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                // 3. 查看沿用 ACTION_VIEW；分享使用带临时 URI 权限的 ACTION_SEND。
+                val intent = if (args.action == "share") {
+                    val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                        type = mimeType
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        putExtra(Intent.EXTRA_TITLE, file.name)
+                        clipData = ClipData.newRawUri(file.name, uri)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    Intent.createChooser(sendIntent, "分享文件").apply {
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                } else {
+                    Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(uri, mimeType)
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
                 }
 
                 context.startActivity(intent)
                 invoke.resolve()
             } catch (e: android.content.ActivityNotFoundException) {
                 val ext = java.io.File(path).extension.lowercase()
-                Log.e(TAG, "[openFile] No activity found to handle file type: .$ext", e)
-                invoke.reject("您的手机上未安装能打开此类文件 (.$ext) 的应用，请先安装相关阅读器 (如 WPS Office)。")
+                Log.e(TAG, "[openFile] No activity found for action=${args.action}, type=.$ext", e)
+                invoke.reject(if (args.action == "share") {
+                    "您的手机上未安装可接收此文件的应用"
+                } else {
+                    "您的手机上未安装能打开此类文件 (.$ext) 的应用，请先安装相关阅读器 (如 WPS Office)。"
+                })
             } catch (e: Throwable) {
-                Log.e(TAG, "[openFile] Native file viewing failed", e)
-                invoke.reject("打开文件失败: ${e.message}")
+                Log.e(TAG, "[openFile] Native file action=${args.action} failed", e)
+                invoke.reject(if (args.action == "share") {
+                    "分享文件失败: ${e.message}"
+                } else {
+                    "打开文件失败: ${e.message}"
+                })
             }
         })
     }
@@ -2900,6 +2929,7 @@ class RequestPermissionArgs {
 @InvokeArg
 class OpenFileArgs {
     lateinit var path: String
+    var action: String = "view"
 }
 
 @InvokeArg

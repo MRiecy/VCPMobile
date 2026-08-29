@@ -182,6 +182,17 @@ if (!status.notification) {
 }
 ```
 
+### 5.4 原生文件打开与分享
+
+```typescript
+import { openFileNative, shareFileNative } from 'tauri-plugin-vcp-mobile';
+
+await openFileNative(localCachePath);  // ACTION_VIEW
+await shareFileNative(localCachePath); // ACTION_SEND + 系统分享面板
+```
+
+两个封装复用已注册的 `open_file_native` 命令，通过 `action: 'view' | 'share'` 区分行为。分享模式发送文件的 `content://` URI，不把文件正文塞进分享文本；调用方必须先将导出物放入应用沙箱内可由 `FileProvider` 授权的位置。
+
 ---
 
 ## 6. 未封装命令清单
@@ -194,7 +205,6 @@ if (!status.notification) {
 | `plugin:vcp-mobile\|request_android_permission` | `{ p_type: string }` | `void` | 请求指定权限（`notification` / `storage` / `microphone` 等） |
 | `plugin:vcp-mobile\|move_task_to_back` | 无 | `void` | 将应用移至后台 |
 | `plugin:vcp-mobile\|get_battery_status` | 无 | `{ level: number, isPowerSaveMode: boolean }` | 获取电池电量与省电模式状态 |
-| `plugin:vcp-mobile\|open_file_native` | `{ path: string }` | `void` | 调用系统原生应用打开指定路径文件 |
 
 > **建议**：后续应在 `guest-js/index.ts` 中补充这些函数的 TS 封装，以保持一致性。参数名 `p_type` 也应在前端枚举化，避免字符串硬编码。
 

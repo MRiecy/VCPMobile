@@ -17,7 +17,7 @@ const overlayStore = useOverlayStore();
 
 const logContainer = ref<HTMLElement | null>(null);
 
-watch(() => store.logs.length, () => {
+watch([() => store.logs.length, logContainer], () => {
   nextTick(() => {
     if (logContainer.value) {
       logContainer.value.scrollTop = logContainer.value.scrollHeight;
@@ -145,38 +145,6 @@ import { useSettingsStore } from '../../core/stores/settings';
 
 const settingsStore = useSettingsStore();
 
-const scrollContainer = ref<HTMLElement | null>(null);
-const isUserScrolling = ref(false);
-
-// 监听 Tab 变化，驱动滚动
-watch(() => store.activeTab, (newTab) => {
-  if (!scrollContainer.value || isUserScrolling.value) return;
-  const targetX = newTab === 'live' ? 0 : scrollContainer.value.clientWidth;
-  if (scrollContainer.value.scrollLeft !== targetX) {
-    scrollContainer.value.scrollTo({ left: targetX, behavior: 'smooth' });
-  }
-});
-
-// 监听滚动，驱动 Tab 切换
-const handleScroll = (e: Event) => {
-  const el = e.target as HTMLElement;
-  const width = el.clientWidth;
-  if (width <= 0) return;
-
-  isUserScrolling.value = true;
-  const scrollLeft = el.scrollLeft;
-  const activeTab = scrollLeft < width / 2 ? 'live' : 'history';
-
-  if (store.activeTab !== activeTab) {
-    store.switchTab(activeTab);
-  }
-
-  // 延时重置用户滚动标志，防止 watch 导致的循环滚动
-  setTimeout(() => {
-    isUserScrolling.value = false;
-  }, 100);
-};
-
 const prerenderEnabled = computed(() =>
   settingsStore.settings?.syncPrerenderEnabled ?? false
 );
@@ -199,50 +167,72 @@ const handlePrerenderToggle = async (val: boolean) => {
          :class="{ 'pointer-events-none': !store.isOpen }">
 
       <!-- 顶部栏 -->
-      <div class="flex items-center justify-between px-4 pt-[calc(var(--vcp-safe-top,0px)+8px)] pb-3">
-        <div class="flex items-center gap-3">
-          <div class="flex items-center gap-2">
-            <div class="w-2 h-2 rounded-full" :class="statusDotClass"></div>
-            <span class="text-xs font-bold uppercase tracking-widest">{{ statusLabel }}</span>
-          </div>
-          <!-- Tab 切换 -->
-          <div class="flex items-center gap-0.5 ml-2">
-            <button
-              @click="store.switchTab('live')"
-              :disabled="isSyncing && store.activeTab !== 'live'"
-              class="px-2 py-0.5 rounded text-[10px] font-bold tracking-wider transition-colors"
-              :class="store.activeTab === 'live'
-                ? 'bg-white/15 text-white'
-                : 'text-white/30 hover:text-white/60 disabled:opacity-20'"
+      <header class="shrink-0 border-b border-white/8">
+        <div class="flex items-center gap-2 px-4 pt-[calc(var(--vcp-safe-top,0px)+6px)] pb-2">
+          <div class="flex min-w-0 flex-1 items-center gap-3">
+            <div class="flex shrink-0 items-center gap-2">
+              <div class="w-2 h-2 rounded-full" :class="statusDotClass"></div>
+              <span class="text-xs font-bold uppercase tracking-widest">{{ statusLabel }}</span>
+            </div>
+            <nav
+              class="flex min-w-0 items-center gap-1"
+              role="tablist"
+              aria-label="同步视图"
             >
-              实时
-            </button>
-            <button
-              @click="store.switchTab('history')"
-              :disabled="isSyncing"
-              class="px-2 py-0.5 rounded text-[10px] font-bold tracking-wider transition-colors"
-              :class="store.activeTab === 'history'
-                ? 'bg-white/15 text-white'
-                : 'text-white/30 hover:text-white/60 disabled:opacity-20'"
-            >
-              历史
-            </button>
+              <button
+                id="sync-live-tab"
+                type="button"
+                role="tab"
+                aria-controls="sync-live-panel"
+                :aria-selected="store.activeTab === 'live'"
+                :disabled="isSyncing && store.activeTab !== 'live'"
+                class="min-h-11 min-w-16 border-b-2 px-2 text-xs font-bold tracking-wide transition-colors active:text-white disabled:opacity-25"
+                :class="store.activeTab === 'live'
+                  ? 'border-blue-400/60 text-white/90'
+                  : 'border-transparent text-white/40'"
+                @click="store.switchTab('live')"
+              >
+                实时同步
+              </button>
+              <button
+                id="sync-history-tab"
+                type="button"
+                role="tab"
+                aria-controls="sync-history-panel"
+                :aria-selected="store.activeTab === 'history'"
+                :disabled="isSyncing"
+                class="min-h-11 min-w-16 border-b-2 px-2 text-xs font-bold tracking-wide transition-colors active:text-white disabled:opacity-25"
+                :class="store.activeTab === 'history'
+                  ? 'border-blue-400/60 text-white/90'
+                  : 'border-transparent text-white/40'"
+                @click="store.switchTab('history')"
+              >
+                历史日志
+              </button>
+            </nav>
           </div>
+          <button
+            v-if="store.canDismiss"
+            type="button"
+            aria-label="关闭同步面板"
+            class="-mr-2 flex h-11 w-11 shrink-0 items-center justify-center text-gray-400 transition-colors active:text-white"
+            @click="handleClose()"
+          >
+            <X :size="20" />
+          </button>
         </div>
-        <button v-if="store.canDismiss" @click="handleClose()"
-          class="p-2 -mr-2 text-gray-400 hover:text-white transition-colors">
-          <X :size="20" />
-        </button>
-      </div>
+      </header>
 
-      <!-- 内容区域：水平滑动容器 -->
-      <div
-        ref="scrollContainer"
-        class="flex-1 flex overflow-x-auto snap-x snap-mandatory no-scrollbar no-rubber-band select-none"
-        @scroll="handleScroll"
-      >
+      <!-- 内容区域：同一时刻仅挂载当前视图 -->
+      <div class="flex-1 min-h-0 overflow-hidden">
         <!-- 实时视图 -->
-        <div class="w-full shrink-0 snap-center flex flex-col overflow-hidden">
+        <div
+          v-if="store.activeTab === 'live'"
+          id="sync-live-panel"
+          role="tabpanel"
+          aria-labelledby="sync-live-tab"
+          class="h-full flex flex-col overflow-hidden"
+        >
           <!-- idle 状态：同步启动占位 -->
           <div v-if="store.status === 'idle'" class="flex-1 flex flex-col items-center justify-center px-8">
             <div class="w-16 h-16 rounded-full bg-white/5 flex items-center justify-center mb-6">
@@ -391,7 +381,13 @@ const handlePrerenderToggle = async (val: boolean) => {
         </div>
 
         <!-- 历史视图 -->
-        <div class="w-full shrink-0 snap-center flex flex-col overflow-hidden">
+        <div
+          v-else
+          id="sync-history-panel"
+          role="tabpanel"
+          aria-labelledby="sync-history-tab"
+          class="h-full flex flex-col overflow-hidden"
+        >
           <SyncLogBrowserCore />
         </div>
       </div>

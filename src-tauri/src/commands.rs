@@ -100,7 +100,7 @@ macro_rules! app_command_handler {
         };
         use crate::vcp_modules::sync_service::{
             clear_old_sync_logs, get_sync_session_log_path, get_sync_status, list_sync_log_files,
-            read_sync_log_file, start_manual_sync, stop_sync,
+            prepare_sync_log_share_file, read_sync_log_file, start_manual_sync, stop_sync,
         };
         use crate::vcp_modules::taskcenter::{
             delegation_cancel, delegation_list, task_agent_list, task_create, task_delete,
@@ -334,6 +334,7 @@ macro_rules! app_command_handler {
                 get_sync_session_log_path,
                 get_sync_status,
                 list_sync_log_files,
+                prepare_sync_log_share_file,
                 read_sync_log_file,
                 start_manual_sync,
                 stop_sync,

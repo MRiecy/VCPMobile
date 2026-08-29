@@ -1116,7 +1116,7 @@ pub async fn open_file(app_handle: AppHandle, path: String) -> Result<(), String
 
     #[cfg(target_os = "android")]
     {
-        return tauri_plugin_vcp_mobile::system::open_file_native(app_handle, clean_path);
+        return tauri_plugin_vcp_mobile::system::open_file_native(app_handle, clean_path, None);
     }
 
     // 使用 tauri-plugin-opener 的原生能力

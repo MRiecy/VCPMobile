@@ -393,20 +393,33 @@ pub fn get_network_status<R: Runtime>(app: AppHandle<R>) -> Result<NetworkStatus
 }
 
 #[tauri::command]
-pub fn open_file_native<R: Runtime>(app: AppHandle<R>, path: String) -> Result<(), String> {
+pub fn open_file_native<R: Runtime>(
+    app: AppHandle<R>,
+    path: String,
+    action: Option<String>,
+) -> Result<(), String> {
+    let action = action.unwrap_or_else(|| "view".to_string());
+    if action != "view" && action != "share" {
+        return Err("Unsupported native file action".to_string());
+    }
+
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
         let plugin_handle = state.mobile_plugin_handle()?;
 
         plugin_handle
-            .run_mobile_plugin::<serde_json::Value>("openFile", serde_json::json!({ "path": path }))
+            .run_mobile_plugin::<serde_json::Value>(
+                "openFile",
+                serde_json::json!({ "path": path, "action": action }),
+            )
             .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
     }
     #[cfg(not(target_os = "android"))]
     {
         let _ = app;
         let _ = path;
+        let _ = action;
     }
     Ok(())
 }
