@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useSidebarSwipe } from '../../core/composables/useSidebarSwipe';
 import { useLayoutStore } from '../../core/stores/layout';
 import { useOverlayStore } from '../../core/stores/overlay';
@@ -21,6 +21,10 @@ const topicStore = useTopicStore();
 
 const activeTab = sidebarTab;
 const searchQuery = ref('');
+const topicSortMode = computed({
+  get: () => topicStore.effectiveSortMode,
+  set: (mode) => topicStore.setSortMode(mode),
+});
 
 // 切换 Tab 时清空搜索框
 watch(activeTab, () => {
@@ -96,8 +100,7 @@ const openGlobalSearch = () => {
       </div>
 
       <SidebarTabs v-model:activeTab="activeTab" />
-      <SidebarSearch v-model="searchQuery" :activeTab="activeTab"
-        :sort-mode="topicStore.effectiveSortMode" @update:sort-mode="topicStore.setSortMode" />
+      <SidebarSearch v-model="searchQuery" v-model:sort-mode="topicSortMode" :activeTab="activeTab" />
     </div>
 
     <!-- 内容区 -->

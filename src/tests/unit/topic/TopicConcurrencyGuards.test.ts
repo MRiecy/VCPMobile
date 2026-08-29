@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import piniaPluginPersistedstate from "pinia-plugin-persistedstate";
-import { nextTick } from "vue";
+import { defineComponent, h, nextTick } from "vue";
 import { mount } from "@vue/test-utils";
 import { useAssistantStore } from "@/core/stores/assistant";
 import { useChatSessionStore } from "@/core/stores/chatSessionStore";
@@ -130,11 +130,45 @@ describe("topic list concurrency guards", () => {
     const options = wrapper.findAll('[role="menuitemradio"]');
     expect(options).toHaveLength(2);
     expect(options[0].attributes("aria-checked")).toBe("true");
+    expect(options[0].find('[aria-hidden="true"]').exists()).toBe(true);
+    const menu = wrapper.get('[role="menu"]');
+    expect(menu.classes()).toContain("z-20");
+    expect(menu.attributes("style")).toContain(
+      "background-color: var(--secondary-bg)",
+    );
     await options[1].trigger("click");
     expect(wrapper.emitted("update:sortMode")?.[0]).toEqual(["updated"]);
 
     await wrapper.setProps({ activeTab: "agents" });
     expect(wrapper.find('[aria-label="选择话题排序方式"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("keeps the selected sort mode visible after closing and reopening the menu", async () => {
+    const harness = defineComponent({
+      setup() {
+        const store = useTopicStore();
+        return () =>
+          h(SidebarSearch, {
+            modelValue: "",
+            activeTab: "topics",
+            sortMode: store.effectiveSortMode,
+            "onUpdate:modelValue": () => undefined,
+            "onUpdate:sortMode": store.setSortMode,
+          });
+      },
+    });
+    const wrapper = mount(harness);
+
+    await wrapper.get('[aria-label="选择话题排序方式"]').trigger("click");
+    await wrapper.findAll('[role="menuitemradio"]')[1].trigger("click");
+    expect(useTopicStore().effectiveSortMode).toBe("updated");
+
+    await wrapper.get('[aria-label="选择话题排序方式"]').trigger("click");
+    const reopenedOptions = wrapper.findAll('[role="menuitemradio"]');
+    expect(reopenedOptions[0].attributes("aria-checked")).toBe("false");
+    expect(reopenedOptions[1].attributes("aria-checked")).toBe("true");
+    expect(reopenedOptions[1].find('[aria-hidden="true"]').exists()).toBe(true);
     wrapper.unmount();
   });
 

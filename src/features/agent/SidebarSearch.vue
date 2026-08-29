@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { onClickOutside } from '@vueuse/core';
-import { ArrowUpDown, CalendarDays, RefreshCw } from 'lucide-vue-next';
+import { ArrowUpDown, CalendarDays, Check, RefreshCw } from 'lucide-vue-next';
 import type { TopicSortMode } from '../../core/stores/topicListManager';
 
 const props = defineProps<{
@@ -74,31 +74,34 @@ watch(
     <Transition name="topic-sort-menu">
       <div
         v-if="activeTab === 'topics' && sortMenuOpen"
-        class="absolute right-0 top-[calc(100%+6px)] z-10 w-36 p-1.5 rounded-xl border border-black/10 dark:border-white/10 bg-[var(--secondary-bg)] shadow-lg"
+        class="topic-sort-menu-surface absolute right-0 top-[calc(100%+6px)] z-20 w-40 p-1.5 rounded-xl border border-black/10 dark:border-white/10"
+        style="background-color: var(--secondary-bg)"
         role="menu"
         aria-label="话题排序方式"
       >
         <button
           type="button"
-          class="w-full min-h-10 px-2.5 flex items-center gap-2 rounded-lg text-xs font-bold text-left transition-colors"
-          :class="sortMode === 'created' ? 'text-[var(--highlight-text)] bg-[var(--vcp-highlight-bg-10)]' : 'hover:bg-black/5 dark:hover:bg-white/5'"
+          class="w-full min-h-10 px-2.5 flex items-center gap-2 rounded-lg text-xs font-bold text-left text-primary-text transition-colors"
+          :class="sortMode === 'created' ? 'text-[var(--highlight-text)] bg-[var(--accent-bg)]' : 'hover:bg-black/5 dark:hover:bg-white/5'"
           role="menuitemradio"
           :aria-checked="sortMode === 'created'"
           @click="selectSortMode('created')"
         >
           <CalendarDays :size="14" />
           <span>创建时间</span>
+          <Check v-if="sortMode === 'created'" :size="14" class="ml-auto" aria-hidden="true" />
         </button>
         <button
           type="button"
-          class="w-full min-h-10 px-2.5 flex items-center gap-2 rounded-lg text-xs font-bold text-left transition-colors"
-          :class="sortMode === 'updated' ? 'text-[var(--highlight-text)] bg-[var(--vcp-highlight-bg-10)]' : 'hover:bg-black/5 dark:hover:bg-white/5'"
+          class="w-full min-h-10 px-2.5 flex items-center gap-2 rounded-lg text-xs font-bold text-left text-primary-text transition-colors"
+          :class="sortMode === 'updated' ? 'text-[var(--highlight-text)] bg-[var(--accent-bg)]' : 'hover:bg-black/5 dark:hover:bg-white/5'"
           role="menuitemradio"
           :aria-checked="sortMode === 'updated'"
           @click="selectSortMode('updated')"
         >
           <RefreshCw :size="14" />
           <span>更新时间</span>
+          <Check v-if="sortMode === 'updated'" :size="14" class="ml-auto" aria-hidden="true" />
         </button>
       </div>
     </Transition>
@@ -106,6 +109,10 @@ watch(
 </template>
 
 <style scoped>
+.topic-sort-menu-surface {
+  box-shadow: 0 10px 24px rgb(0 0 0 / 24%);
+}
+
 .topic-sort-menu-enter-active,
 .topic-sort-menu-leave-active {
   transition: opacity 0.14s ease, transform 0.14s ease;
