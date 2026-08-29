@@ -54,6 +54,21 @@ pub fn now_millis() -> i64 {
         .as_millis() as i64
 }
 
+/// 按 VCPChat 的实体 ID 规则，将显示名称映射为可移植的 ASCII 路径段。
+///
+/// 桌面端使用 JavaScript UTF-16 正则逐 code unit 将非 `[a-zA-Z0-9_-]`
+/// 字符替换为下划线；这里保留相同语义，避免 Android 创建出桌面端无法接收的 Owner ID。
+pub(crate) fn desktop_compatible_id_base(name: &str) -> String {
+    name.encode_utf16()
+        .map(|unit| match u8::try_from(unit) {
+            Ok(byte) if byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-') => {
+                char::from(byte)
+            }
+            _ => '_',
+        })
+        .collect()
+}
+
 /// 计算单字节切片的标准 SHA-256 十六进制摘要字串（统一小写输出）
 #[inline]
 pub fn calculate_sha256(bytes: &[u8]) -> String {
@@ -111,5 +126,12 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(b"abc");
         assert_eq!(finalize_sha256_hex(hasher), calculate_sha256(b"abc"));
+    }
+
+    #[test]
+    fn desktop_compatible_id_base_matches_vchat_ascii_replacement() {
+        assert_eq!(desktop_compatible_id_base("Agent-01_ok"), "Agent-01_ok");
+        assert_eq!(desktop_compatible_id_base("测试1"), "__1");
+        assert_eq!(desktop_compatible_id_base("A B/😀"), "A_B___");
     }
 }

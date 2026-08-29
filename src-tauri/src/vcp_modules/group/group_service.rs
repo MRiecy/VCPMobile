@@ -5,6 +5,7 @@ use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_types::{
     parse_member_tags, serialize_member_tags, GroupConfig, MemberTags,
 };
+use crate::vcp_modules::infra::utils::desktop_compatible_id_base;
 use crate::vcp_modules::sync_dto::GroupSyncDTO;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
@@ -334,11 +335,8 @@ pub async fn create_group(
     let cache_generation = state.current_cache_generation();
     let timestamp = crate::vcp_modules::infra::utils::now_millis();
 
-    let base_id = name
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-        .collect::<String>();
-    let group_id = format!("____{}_{}", base_id, timestamp);
+    let base_id = desktop_compatible_id_base(&name);
+    let group_id = format!("{}_{}", base_id, timestamp);
 
     let default_topic_id = format!("group_topic_{}", timestamp);
 

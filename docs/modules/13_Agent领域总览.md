@@ -377,14 +377,12 @@ UPDATE agents SET deleted_at = ? WHERE agent_id = ?
 **ID 生成策略**：
 
 ```rust
-let base_id = name
-    .chars()
-    .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-    .collect::<String>();
+let base_id = desktop_compatible_id_base(&name);
 let agent_id = format!("{}_{}", base_id, timestamp);
 ```
 
-- 从名称中提取合法字符（字母、数字、下划线、连字符）
+- 与 VCPChat 一致：仅保留 ASCII 字母、数字、下划线、连字符，其他 UTF-16 code unit 替换为下划线
+- 显示名称仍完整保留中文或其他 Unicode 内容，只有内部 ID 使用可移植 ASCII
 - 拼接毫秒级时间戳，确保全局唯一且人类可读
 
 **默认话题**：每个新 Agent 自动创建一个默认话题：

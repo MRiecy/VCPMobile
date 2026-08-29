@@ -5,6 +5,7 @@ use crate::vcp_modules::agent_types::{AgentConfig, AgentListItem};
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group::group_service::GroupManagerState;
 use crate::vcp_modules::group::group_types::GroupListItem;
+use crate::vcp_modules::infra::utils::desktop_compatible_id_base;
 use crate::vcp_modules::sync_dto::AgentSyncDTO;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
@@ -631,10 +632,7 @@ pub async fn create_agent(
     let cache_generation = state.current_cache_generation();
     let timestamp = crate::vcp_modules::infra::utils::now_millis();
 
-    let base_id = name
-        .chars()
-        .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
-        .collect::<String>();
+    let base_id = desktop_compatible_id_base(&name);
     let agent_id = format!("{}_{}", base_id, timestamp);
     let default_topic_id = format!("topic_{}", timestamp);
 
