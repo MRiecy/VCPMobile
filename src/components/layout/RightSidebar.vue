@@ -363,7 +363,7 @@ watch(
 .vcp-drawer-right {
   right: 0;
   padding-right: var(--vcp-workspace-safe-right, 0px);
-  transform: translateX(100%);
+  transform: translateX(calc(100% + var(--vcp-drawer-shadow-clearance, 64px)));
   border-left: 1px solid transparent;
 }
 

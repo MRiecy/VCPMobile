@@ -171,7 +171,7 @@ const openGlobalSearch = () => {
 .vcp-drawer-left {
   left: 0;
   padding-left: var(--vcp-workspace-safe-left, 0px);
-  transform: translateX(-100%);
+  transform: translateX(calc(-100% - var(--vcp-drawer-shadow-clearance, 64px)));
   border-right: 1px solid transparent;
 }
 

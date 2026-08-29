@@ -22,6 +22,8 @@
   --vcp-highlight-border-40: var(--highlight-text, var(--border-color));
   --vcp-border-subtle: var(--border-color);
   --vcp-highlight-shadow: rgba(0, 0, 0, 0.08);
+  /* 抽屉关闭时额外移出阴影的可见范围，避免 visibility 切换时残影跳变。 */
+  --vcp-drawer-shadow-clearance: 64px;
 
   /* === VCP 全局层级系统 ===
    * 用途：统一管理 z-index，消除魔法数字

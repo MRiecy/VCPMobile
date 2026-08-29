@@ -95,6 +95,16 @@ describe('Android mobile UI compatibility contracts', () => {
     expect(sidebarSwipeSource).toContain("matchMedia('(min-width: 1280px)')");
   });
 
+  it('moves both closed drawers beyond the shared shadow clearance', () => {
+    expect(themesSource).toContain('--vcp-drawer-shadow-clearance: 64px');
+    expect(leftSidebarSource).toContain(
+      'translateX(calc(-100% - var(--vcp-drawer-shadow-clearance, 64px)))',
+    );
+    expect(rightSidebarSource).toContain(
+      'translateX(calc(100% + var(--vcp-drawer-shadow-clearance, 64px)))',
+    );
+  });
+
   it('keeps color-mix enhancements behind @supports with stable base tokens', () => {
     expect(themesSource).toContain('--vcp-panel-bg-97: var(--secondary-bg)');
     expect(diaryCenterSource).toContain('--diary-surface: var(--secondary-bg)');

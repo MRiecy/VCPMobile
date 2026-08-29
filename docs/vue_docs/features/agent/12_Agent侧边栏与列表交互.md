@@ -157,7 +157,7 @@ date: 2026-08-13
 }
 
 .vcp-drawer-left {
-  transform: translateX(-100%);
+  transform: translateX(calc(-100% - var(--vcp-drawer-shadow-clearance, 64px)));
 }
 
 .vcp-drawer-left.is-open {
@@ -171,6 +171,7 @@ date: 2026-08-13
 - **时长**：400ms
 - **缓动**：`cubic-bezier(0.16, 1, 0.3, 1)` — 带轻微过冲的减速曲线，使滑入更具物理感
 - **属性**：仅 `transform`（GPU 合成层，避免重排）
+- **阴影净空**：关闭态额外移出 `64px`，确保外扩阴影在 `visibility` 隐藏前已离开视口
 - **层级**：语义化 `z-drawer`（`var(--layer-drawer)` = 20），位于 `content`（0）之上、`overlay`（30）之下
 
 **大宽度 Android 窗口常驻**（`@media (min-width: 1024px)`）：
@@ -828,7 +829,7 @@ layoutStore.setLeftDrawer(true)
 AgentSidebar.vue :class="{ 'is-open': true }"
     │
     ▼
-CSS transform: translateX(-100%) → translateX(0)
+CSS transform: translateX(calc(-100% - 64px)) → translateX(0)
     │
     ▼
 侧边栏完全展开 (400ms)
