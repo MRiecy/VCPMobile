@@ -237,7 +237,7 @@ pub async fn delete_messages(
     msg_ids: Vec<String>,
 ) -> Result<TopicActivityDto, String> {
     let key = TopicKey::new(owner_type, owner_id, &topic_id);
-    let result = message_service::delete_messages(&db_state.pool, &key, msg_ids, None).await?;
+    let result = message_service::delete_messages(&db_state, &key, msg_ids, None).await?;
     for msg_id in &result.active_ids {
         if let Err(error) = active_requests.cancel(&MessageKey::new(key.clone(), msg_id)) {
             log::warn!("Failed to cancel deleted generation {}: {}", msg_id, error);
@@ -277,7 +277,7 @@ pub async fn truncate_history_after_message(
 ) -> Result<TopicActivityDto, String> {
     let key = TopicKey::new(owner_type, owner_id, &topic_id);
     let deletion =
-        message_service::truncate_history_after_message(&db_state.pool, &key, &anchor_message_id)
+        message_service::truncate_history_after_message(&db_state, &key, &anchor_message_id)
             .await?;
     for msg_id in &deletion.active_ids {
         if let Err(error) = active_requests.cancel(&MessageKey::new(key.clone(), msg_id)) {

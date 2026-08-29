@@ -1,4 +1,4 @@
-use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::db_manager::{begin_immediate_write, DbState};
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::emit_sync_log;
@@ -26,11 +26,11 @@ struct FinalizationStats {
 const SQLITE_TOPIC_CHUNK: usize = 300;
 
 async fn finalize_modified_topics(
-    pool: &sqlx::SqlitePool,
+    db: &DbState,
     modified_topics: &HashSet<TopicKey>,
 ) -> Result<FinalizationStats, String> {
-    let mut tx = pool
-        .begin()
+    let write_permit = db.write_gate.acquire("sync.finalizer").await?;
+    let mut tx = begin_immediate_write(&db.pool)
         .await
         .map_err(|error| format!("开启同步收尾事务失败: {error}"))?;
     let mut meta_map = std::collections::HashMap::new();
@@ -150,6 +150,7 @@ async fn finalize_modified_topics(
     tx.commit()
         .await
         .map_err(|error| format!("提交同步收尾事务失败: {error}"))?;
+    drop(write_permit);
     Ok(FinalizationStats {
         bubbled_topics,
         affected_agents: affected_agents.len(),
@@ -179,7 +180,7 @@ impl SyncFinalizer {
             return Ok(());
         }
 
-        let stats = finalize_modified_topics(&db.pool, modified_topics).await?;
+        let stats = finalize_modified_topics(db, modified_topics).await?;
         log::info!(
             "[SyncFinalizer] Reconciled interrupted attempt: topics={}, agents={}, groups={}",
             stats.bubbled_topics,
@@ -214,7 +215,7 @@ impl SyncFinalizer {
                 &format!("正在校验 {} 个话题的一致性...", modified_topics.len()),
             );
 
-            let stats = match finalize_modified_topics(&db.pool, &modified_topics).await {
+            let stats = match finalize_modified_topics(db, &modified_topics).await {
                 Ok(stats) => stats,
                 Err(error) => {
                     emit_sync_log(app_handle, "error", &error);
@@ -242,6 +243,7 @@ impl SyncFinalizer {
 #[cfg(test)]
 mod tests {
     use super::finalize_modified_topics;
+    use crate::vcp_modules::db_manager::DbState;
     use crate::vcp_modules::topic_types::TopicKey;
     use std::collections::HashSet;
 
@@ -287,7 +289,8 @@ mod tests {
         .await
         .expect("create finalizer fixture");
 
-        finalize_modified_topics(&pool, &HashSet::from([topic("topic")]))
+        let db = DbState::new(pool.clone(), std::path::PathBuf::new());
+        finalize_modified_topics(&db, &HashSet::from([topic("topic")]))
             .await
             .expect("finalize topic");
         let state: (i64, i64, i64, String, String) = sqlx::query_as(
@@ -347,7 +350,8 @@ mod tests {
         .await
         .expect("create finalizer fixture");
 
-        let error = finalize_modified_topics(&pool, &HashSet::from([topic("topic")]))
+        let db = DbState::new(pool.clone(), std::path::PathBuf::new());
+        let error = finalize_modified_topics(&db, &HashSet::from([topic("topic")]))
             .await
             .expect_err("owner hash failure must fail finalization");
         assert!(error.contains("owner hash failure"));
@@ -391,9 +395,10 @@ mod tests {
         .await
         .expect("create finalizer fixture");
 
+        let db = DbState::new(pool.clone(), std::path::PathBuf::new());
         for missing in ["missing", "deleted"] {
             let error =
-                finalize_modified_topics(&pool, &HashSet::from([topic("live"), topic(missing)]))
+                finalize_modified_topics(&db, &HashSet::from([topic("live"), topic(missing)]))
                     .await
                     .expect_err("repair set must have exact live metadata coverage");
             assert!(error.contains(missing));

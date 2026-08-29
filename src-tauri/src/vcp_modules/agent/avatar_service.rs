@@ -47,7 +47,6 @@ pub async fn save_avatar_data<R: Runtime>(
     image_data: Vec<u8>,
 ) -> Result<String, String> {
     let db_state = app_handle.state::<DbState>();
-    let pool = &db_state.pool;
     if !is_valid_avatar_owner(&owner_type, &owner_id) {
         return Err(format!("Invalid avatar owner {owner_type}/{owner_id}"));
     }
@@ -73,7 +72,7 @@ pub async fn save_avatar_data<R: Runtime>(
     let now = crate::vcp_modules::infra::utils::now_millis();
 
     // 3. 在同一事务内验证 live parent 并写入，防止 orphan avatar。
-    let mut transaction = pool.begin().await.map_err(|error| error.to_string())?;
+    let (write_permit, mut transaction) = db_state.begin_write("identity.avatar.save").await?;
     let parent_is_live = match owner_type.as_str() {
         "agent" => sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM agents WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL)",
@@ -93,6 +92,11 @@ pub async fn save_avatar_data<R: Runtime>(
         _ => false,
     };
     if !parent_is_live {
+        transaction
+            .commit()
+            .await
+            .map_err(|error| error.to_string())?;
+        drop(write_permit);
         return Err(format!(
             "Avatar owner {owner_type}/{owner_id} is missing or deleted"
         ));
@@ -110,6 +114,11 @@ pub async fn save_avatar_data<R: Runtime>(
         .await
         .map_err(|e| e.to_string())?;
     if saved.rows_affected() != 1 {
+        transaction
+            .commit()
+            .await
+            .map_err(|error| error.to_string())?;
+        drop(write_permit);
         return Err(format!(
             "Avatar {owner_type}/{owner_id} is tombstoned and cannot be overwritten"
         ));
@@ -118,6 +127,7 @@ pub async fn save_avatar_data<R: Runtime>(
         .commit()
         .await
         .map_err(|error| error.to_string())?;
+    drop(write_permit);
 
     log::info!(
         "[AvatarService] Saved avatar for {} {}: hash={}, color={:?}",
@@ -265,19 +275,21 @@ pub async fn store_dominant_color(
     color: String,
     expected_avatar_hash: String,
 ) -> Result<bool, String> {
-    let pool = &db_state.pool;
     if !is_valid_avatar_owner(&owner_type, &owner_id) {
         return Err(format!("Invalid avatar owner {owner_type}/{owner_id}"));
     }
 
+    let (write_permit, mut tx) = db_state.begin_write("identity.avatar.color").await?;
     let updated = sqlx::query(STORE_AVATAR_COLOR_SQL)
         .bind(&color)
         .bind(&owner_type)
         .bind(&owner_id)
         .bind(&expected_avatar_hash)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
     if updated.rows_affected() == 0 {
         log::debug!(
             "[AvatarService] Ignored stale dominant_color for {} {} at hash {}",

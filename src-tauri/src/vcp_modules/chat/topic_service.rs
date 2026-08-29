@@ -1,11 +1,11 @@
 // TopicService: 处理会话话题生命周期的模块
 // 职责: 完全面向 SQLite 数据库的话题管理，不依赖本地文件系统
 
-use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::db_manager::{begin_immediate_write, DbState};
 use crate::vcp_modules::settings_manager::SettingsState;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
-use crate::vcp_modules::sync_types::DeleteTarget;
+use crate::vcp_modules::sync_types::{DeleteTarget, SYNC_TOMBSTONE_HASH};
 use crate::vcp_modules::topic_types::{MessageKey, Topic, TopicKey};
 use serde_json::{json, Value};
 use sqlx::{sqlite::SqliteRow, Row};
@@ -214,7 +214,7 @@ pub async fn create_topic(
         owner_type: owner_type.clone(),
     };
 
-    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
+    let (write_permit, mut tx) = db_state.begin_write("identity.topic.create").await?;
     sqlx::query(
         "INSERT INTO topics (topic_id, owner_id, owner_type, title, created_at, updated_at, msg_count, locked, unread, unread_count)
          VALUES (?, ?, ?, ?, ?, ?, 0, 1, 0, 0)",
@@ -233,6 +233,7 @@ pub async fn create_topic(
     let key = TopicKey::new(&owner_type, &owner_id, &id);
     HashAggregator::bubble_from_topic(&mut tx, &key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
 
     Ok(topic)
 }
@@ -267,7 +268,7 @@ pub async fn delete_topic(
         owner_id: owner_id.clone(),
         owner_type: owner_type.clone(),
     };
-    let deletion = delete_topic_data_inner(&db_state.pool, &key, now, Some(replacement))
+    let deletion = delete_topic_data_inner(&db_state, &key, now, Some(replacement))
         .await?
         .ok_or_else(|| format!("Topic {topic_id} does not exist"))?;
     if !deletion.deleted {
@@ -301,15 +302,15 @@ pub(crate) struct TopicDeletionResult {
 }
 
 pub(crate) async fn delete_topic_data(
-    pool: &sqlx::SqlitePool,
+    db_state: &DbState,
     key: &TopicKey,
     deleted_at: i64,
 ) -> Result<Option<TopicDeletionResult>, String> {
-    delete_topic_data_inner(pool, key, deleted_at, None).await
+    delete_topic_data_inner(db_state, key, deleted_at, None).await
 }
 
 async fn delete_topic_data_inner(
-    pool: &sqlx::SqlitePool,
+    db_state: &DbState,
     key: &TopicKey,
     deleted_at: i64,
     replacement_if_last: Option<Topic>,
@@ -322,7 +323,16 @@ async fn delete_topic_data_inner(
         return Err("Topic delete requires an exact identity and non-negative deletedAt".into());
     }
 
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let is_sync_delete = replacement_if_last.is_none();
+    let writer_kind = if is_sync_delete {
+        "sync.delete.topic"
+    } else {
+        "identity.topic.delete"
+    };
+    let write_permit = db_state.write_gate.acquire(writer_kind).await?;
+    let mut tx = begin_immediate_write(&db_state.pool)
+        .await
+        .map_err(|e| e.to_string())?;
     let Some(stored_topic) = sqlx::query(
         "SELECT deleted_at FROM topics
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
@@ -334,13 +344,59 @@ async fn delete_topic_data_inner(
     .await
     .map_err(|e| e.to_string())?
     else {
+        if is_sync_delete {
+            sqlx::query(
+                "INSERT INTO topics (
+                    owner_type, owner_id, topic_id, title, created_at, updated_at,
+                    config_hash, content_hash, deleted_at
+                 ) VALUES (?, ?, ?, '', 0, ?, ?, ?, ?)",
+            )
+            .bind(&key.owner_type)
+            .bind(&key.owner_id)
+            .bind(&key.topic_id)
+            .bind(deleted_at)
+            .bind(SYNC_TOMBSTONE_HASH)
+            .bind(SYNC_TOMBSTONE_HASH)
+            .bind(deleted_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+            tx.commit().await.map_err(|e| e.to_string())?;
+            drop(write_permit);
+            return Ok(Some(TopicDeletionResult {
+                active_messages: Vec::new(),
+                deleted: true,
+                replacement: None,
+            }));
+        }
+        tx.commit().await.map_err(|e| e.to_string())?;
+        drop(write_permit);
         return Ok(None);
     };
     let stored_deleted_at: Option<i64> = stored_topic
         .try_get("deleted_at")
         .map_err(|error| format!("Topic {} tombstone decode failed: {error}", key.topic_id))?;
-    if stored_deleted_at.is_some() {
+    if let Some(stored_deleted_at) = stored_deleted_at {
+        if is_sync_delete && deleted_at > stored_deleted_at {
+            sqlx::query(
+                "UPDATE topics
+                 SET deleted_at = ?, updated_at = MAX(updated_at, ?),
+                     config_hash = ?, content_hash = ?
+                 WHERE owner_type = ? AND owner_id = ? AND topic_id = ?",
+            )
+            .bind(deleted_at)
+            .bind(deleted_at)
+            .bind(SYNC_TOMBSTONE_HASH)
+            .bind(SYNC_TOMBSTONE_HASH)
+            .bind(&key.owner_type)
+            .bind(&key.owner_id)
+            .bind(&key.topic_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?;
+        }
         tx.commit().await.map_err(|e| e.to_string())?;
+        drop(write_permit);
         return Ok(Some(TopicDeletionResult {
             active_messages: Vec::new(),
             deleted: false,
@@ -472,6 +528,7 @@ async fn delete_topic_data_inner(
         }
     }
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
     Ok(Some(TopicDeletionResult {
         active_messages: active_ids
             .into_iter()
@@ -494,7 +551,7 @@ pub async fn update_topic_title(
 ) -> Result<Option<i64>, String> {
     let now = crate::vcp_modules::infra::utils::now_millis();
 
-    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
+    let (write_permit, mut tx) = db_state.begin_write("identity.topic.title").await?;
     let changed = sqlx::query(
         "UPDATE topics SET title = ?, updated_at = ?
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
@@ -518,6 +575,7 @@ pub async fn update_topic_title(
         HashAggregator::bubble_from_topic(&mut tx, &key).await?;
     }
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
 
     Ok((changed.rows_affected() == 1).then_some(now))
 }
@@ -553,7 +611,7 @@ pub async fn toggle_topic_lock(
 ) -> Result<Option<i64>, String> {
     let now = crate::vcp_modules::infra::utils::now_millis();
 
-    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
+    let (write_permit, mut tx) = db_state.begin_write("identity.topic.lock").await?;
     let changed = sqlx::query(
         "UPDATE topics SET locked = ?, updated_at = ?
          WHERE owner_type = 'agent' AND owner_id = ? AND topic_id = ?
@@ -573,6 +631,7 @@ pub async fn toggle_topic_lock(
         HashAggregator::bubble_from_topic(&mut tx, &key).await?;
     }
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
 
     Ok((changed.rows_affected() == 1).then_some(now))
 }
@@ -587,7 +646,7 @@ pub async fn set_topic_unread(
     unread: bool,
 ) -> Result<Option<i64>, String> {
     let key = TopicKey::new(owner_type, owner_id, topic_id);
-    set_topic_unread_in_pool(&db_state.pool, &key, unread).await
+    set_topic_unread_in_db(&db_state, &key, unread).await
 }
 
 fn validate_agent_topic_key(key: &TopicKey) -> Result<(), String> {
@@ -597,14 +656,14 @@ fn validate_agent_topic_key(key: &TopicKey) -> Result<(), String> {
     Ok(())
 }
 
-async fn set_topic_unread_in_pool(
-    pool: &sqlx::SqlitePool,
+async fn set_topic_unread_in_db(
+    db_state: &DbState,
     key: &TopicKey,
     unread: bool,
 ) -> Result<Option<i64>, String> {
     validate_agent_topic_key(key)?;
     let unread_int = if unread { 1 } else { 0 };
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let (write_permit, mut tx) = db_state.begin_write("identity.topic.unread").await?;
 
     if !unread {
         sqlx::query(
@@ -640,6 +699,7 @@ async fn set_topic_unread_in_pool(
         HashAggregator::bubble_from_topic(&mut tx, key).await?;
     }
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
 
     Ok((changed.rows_affected() == 1).then_some(now))
 }
@@ -654,7 +714,7 @@ pub async fn increment_topic_unread_count(
     let key = TopicKey::new(owner_type, owner_id, topic_id);
     validate_agent_topic_key(&key)?;
 
-    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
+    let (write_permit, mut tx) = db_state.begin_write("identity.topic.unread-count").await?;
     let incremented = sqlx::query(
         "UPDATE topics SET unread_count = unread_count + 1
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
@@ -666,6 +726,8 @@ pub async fn increment_topic_unread_count(
     .await
     .map_err(|e| e.to_string())?;
     if incremented.rows_affected() != 1 {
+        tx.commit().await.map_err(|e| e.to_string())?;
+        drop(write_permit);
         return Err(format!(
             "Agent Topic {}/{}/{} is missing or deleted",
             key.owner_type, key.owner_id, key.topic_id
@@ -701,6 +763,7 @@ pub async fn increment_topic_unread_count(
     .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
     Ok(TopicUnreadMutationDto {
         unread_count,
         updated_at: (promoted.rows_affected() == 1).then_some(now),
@@ -747,9 +810,8 @@ pub async fn archive_assistant_chat(
     let new_topic_id = topic.id;
     let key = TopicKey::new(&owner_type, &owner_id, &new_topic_id);
 
-    // 2. 在事务中批量写入消息
-    let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
-
+    // 2. Render compilation stays outside the write gate; only durable SQL is serialized.
+    let mut prepared_messages = Vec::with_capacity(temp_messages.len());
     for (index, temp_msg) in temp_messages.iter().enumerate() {
         let msg_id = format!("assistant_msg_{}_{}", now_millis, index);
 
@@ -790,6 +852,11 @@ pub async fn archive_assistant_chat(
             content_hash: None,
         };
 
+        prepared_messages.push((chat_msg, render_content));
+    }
+
+    let (write_permit, mut tx) = db_state.begin_write("message.archive").await?;
+    for (chat_msg, render_content) in prepared_messages {
         crate::vcp_modules::persistence::message_repository::MessageRepository::upsert_message(
             &mut tx,
             &chat_msg,
@@ -803,6 +870,7 @@ pub async fn archive_assistant_chat(
     // 3. 提交事务前一次性重算当前 Topic 消息计数与聚合哈希
     crate::vcp_modules::sync_hash::HashAggregator::bubble_from_topic(&mut tx, &key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
 
     // 4. 异步调用总结标题服务并更新标题
     let app_handle_clone = app_handle.clone();
@@ -997,7 +1065,7 @@ pub async fn regenerate_topic_response(
 
     // 4. 生成前检查通过后，才按稳定顺序截断旧回复。
     let deletion = crate::vcp_modules::message_service::truncate_history_after_message(
-        &db_state.pool,
+        &db_state,
         &key,
         &target_user_msg_id,
     )
@@ -1245,6 +1313,7 @@ mod tests {
             .await
             .expect("initialize hashes");
         tx.commit().await.expect("commit hash initialization");
+        let db_state = DbState::new(pool.clone(), std::path::PathBuf::new());
 
         let before: (String, String, String, i64) = sqlx::query_as(
             "SELECT t.config_hash, t.content_hash, a.content_hash, t.updated_at
@@ -1255,7 +1324,7 @@ mod tests {
         .await
         .expect("read initial state");
 
-        set_topic_unread_in_pool(&pool, &key, true)
+        set_topic_unread_in_db(&db_state, &key, true)
             .await
             .expect("mark topic unread");
         let changed: (String, String, String, i64) = sqlx::query_as(
@@ -1271,7 +1340,7 @@ mod tests {
         assert_ne!(changed.2, before.2);
         assert!(changed.3 > before.3);
 
-        set_topic_unread_in_pool(&pool, &key, true)
+        set_topic_unread_in_db(&db_state, &key, true)
             .await
             .expect("repeat unread state");
         let repeated: (String, String, String, i64) = sqlx::query_as(
@@ -1306,6 +1375,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("seed owner and last topic");
+        let db_state = DbState::new(pool.clone(), std::path::PathBuf::new());
 
         let deleted_key = TopicKey::new("agent", "agent", "default");
         let replacement = Topic {
@@ -1320,7 +1390,7 @@ mod tests {
             owner_type: "agent".to_string(),
         };
         let local_delete =
-            delete_topic_data_inner(&pool, &deleted_key, 10, Some(replacement.clone()))
+            delete_topic_data_inner(&db_state, &deleted_key, 10, Some(replacement.clone()))
                 .await
                 .expect("delete local last topic")
                 .expect("existing topic deletion");
@@ -1346,7 +1416,7 @@ mod tests {
         );
 
         let exact_delete =
-            delete_topic_data(&pool, &TopicKey::new("agent", "agent", "topic_10"), 20)
+            delete_topic_data(&db_state, &TopicKey::new("agent", "agent", "topic_10"), 20)
                 .await
                 .expect("apply exact synchronized deletion")
                 .expect("replacement topic exists");

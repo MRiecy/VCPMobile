@@ -1,11 +1,13 @@
 use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
 use crate::vcp_modules::content_parser::ContentBlock;
+use crate::vcp_modules::db_manager::{begin_immediate_write, DbState};
 use crate::vcp_modules::file_manager::resolve_attachment_cas_file;
 use crate::vcp_modules::message_repository::{
     compile_and_serialize_render_async, deserialize_render_async, resolve_message_updated_at,
     serialize_render_async, write_render_cache_cas, MessageRepository, RENDERER_SCHEMA_VERSION,
 };
 use crate::vcp_modules::sync_hash::HashAggregator;
+use crate::vcp_modules::sync_types::SYNC_TOMBSTONE_HASH;
 use crate::vcp_modules::topic_types::{MessageKey, TopicActivityDto, TopicKey};
 use serde::Serialize;
 use sqlx::Row;
@@ -139,6 +141,7 @@ async fn convert_history_rows(
     include_content: bool,
     include_extracted_text: bool,
 ) -> Result<Vec<ChatMessage>, String> {
+    let db_state = app_handle.state::<DbState>();
     // 收集所有 msg_id，用于批量查询附件
     let mut msg_ids = Vec::new();
     for row in &rows {
@@ -189,7 +192,7 @@ async fn convert_history_rows(
             // ⚡ 极度优雅的消息-附件解耦调用：将物理文件判定、异步持久化完全委托给 file_manager
             if include_extracted_text && extracted_text.is_none() {
                 extracted_text = crate::vcp_modules::infra::file_manager::ensure_extracted_text(
-                    pool,
+                    &db_state,
                     &hash,
                     &internal_path,
                     &mime_type,
@@ -301,13 +304,12 @@ async fn convert_history_rows(
                     compile_and_serialize_render_async(decompressed.clone()).await?;
                 let blocks_json = serde_json::to_value(&compiled).ok();
 
-                let pool_c = pool.clone();
+                let db_c = app_handle.state::<DbState>().inner().clone();
                 let cache_key = MessageKey::new(key.clone(), msg_id.clone());
                 let observed_hash = content_hash_raw.clone();
                 tokio::spawn(async move {
-                    let _ =
-                        write_render_cache_cas(&pool_c, &cache_key, &observed_hash, &serialized)
-                            .await;
+                    let _ = write_render_cache_cas(&db_c, &cache_key, &observed_hash, &serialized)
+                        .await;
                 });
 
                 let content = if include_content {
@@ -568,7 +570,7 @@ pub async fn load_chat_text_history_for_context(
 
             if include_extracted_text && extracted_text.is_none() {
                 extracted_text = crate::vcp_modules::infra::file_manager::ensure_extracted_text(
-                    pool,
+                    &db_state,
                     &hash,
                     &internal_path,
                     &mime_type,
@@ -683,7 +685,7 @@ async fn normalize_attachments_from_local_cas<R: tauri::Runtime>(
 }
 
 pub async fn begin_stream_message(
-    db_pool: &sqlx::Pool<sqlx::Sqlite>,
+    db_state: &DbState,
     message_key: &MessageKey,
     agent_id: Option<&str>,
     agent_name: Option<&str>,
@@ -704,7 +706,7 @@ pub async fn begin_stream_message(
         &[],
     );
     let is_group = key.owner_type == "group";
-    let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
+    let (write_permit, mut tx) = db_state.begin_write("message.stream.begin").await?;
 
     let inserted = sqlx::query(
         "INSERT INTO messages (
@@ -739,6 +741,8 @@ pub async fn begin_stream_message(
     .await
     .map_err(|e| e.to_string())?;
     if inserted.rows_affected() != 1 {
+        tx.commit().await.map_err(|e| e.to_string())?;
+        drop(write_permit);
         return Err(format!(
             "Topic {} does not belong to live {} {}",
             key.topic_id, key.owner_type, key.owner_id
@@ -779,6 +783,7 @@ pub async fn begin_stream_message(
     .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
     Ok(())
 }
 
@@ -803,7 +808,8 @@ pub async fn append_single_message<R: tauri::Runtime>(
         };
 
     let key = TopicKey::new(owner_type, owner_id, &topic_id);
-    let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
+    let db_state = app_handle.state::<DbState>();
+    let (write_permit, mut tx) = db_state.begin_write("message.append").await?;
     let activity =
         MessageRepository::upsert_message(&mut tx, &message, &key, &render_bytes, false).await?;
     let activity = match activity {
@@ -812,6 +818,7 @@ pub async fn append_single_message<R: tauri::Runtime>(
     };
 
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
     Ok(MessageWriteResultDto {
         blocks,
         topic_updated_at: activity.updated_at,
@@ -882,7 +889,7 @@ pub async fn re_render_message(
 
             let observed_hash: String = r.get("content_hash");
             let (compiled, serialized) = compile_and_serialize_render_async(decompressed).await?;
-            if !write_render_cache_cas(pool, &key, &observed_hash, &serialized).await? {
+            if !write_render_cache_cas(&db_state, &key, &observed_hash, &serialized).await? {
                 return Err(format!(
                     "Message {} changed while re-rendering; stale cache discarded",
                     key.msg_id
@@ -921,7 +928,8 @@ pub async fn patch_single_message<R: tauri::Runtime>(
         };
 
     let key = TopicKey::new(owner_type, owner_id, &topic_id);
-    let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
+    let db_state = app_handle.state::<DbState>();
+    let (write_permit, mut tx) = db_state.begin_write("message.patch").await?;
     let activity =
         MessageRepository::upsert_message(&mut tx, &message, &key, &render_bytes, skip_bubble)
             .await?;
@@ -931,6 +939,7 @@ pub async fn patch_single_message<R: tauri::Runtime>(
     };
 
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
     Ok(MessageWriteResultDto {
         blocks,
         topic_updated_at: activity.updated_at,
@@ -946,13 +955,13 @@ pub struct MessageDeletionResult {
 }
 
 pub async fn delete_messages(
-    db_pool: &sqlx::Pool<sqlx::Sqlite>,
+    db_state: &DbState,
     key: &TopicKey,
     msg_ids: Vec<String>,
     deleted_at: Option<i64>,
 ) -> Result<MessageDeletionResult, String> {
     if msg_ids.is_empty() {
-        let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
+        let mut tx = db_state.pool.begin().await.map_err(|e| e.to_string())?;
         let activity = HashAggregator::load_topic_activity(&mut tx, key).await?;
         tx.commit().await.map_err(|e| e.to_string())?;
         return Ok(MessageDeletionResult {
@@ -974,7 +983,7 @@ pub async fn delete_messages(
     {
         return Err("Message delete requires a topic and 1..=10000 unique message ids".to_string());
     }
-    let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
+    let (write_permit, mut tx) = db_state.begin_write("message.delete").await?;
     let placeholders = msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
     let select_deleted_ids = format!(
         "SELECT msg_id FROM messages
@@ -1088,6 +1097,7 @@ pub async fn delete_messages(
     // FTS 由 after_messages_logical_delete 触发器在同一事务中清理。
     let activity = HashAggregator::bubble_from_topic(&mut tx, key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
     Ok(MessageDeletionResult {
         deleted_ids,
         active_ids,
@@ -1101,7 +1111,7 @@ pub async fn delete_messages(
 /// repair is intentionally owned by SyncFinalizer so a batch of tombstones does not rescan the
 /// same Topic once per message.
 pub(crate) async fn apply_sync_message_tombstones(
-    db_pool: &sqlx::Pool<sqlx::Sqlite>,
+    db_state: &DbState,
     key: &TopicKey,
     tombstones: &[(String, i64)],
 ) -> Result<Vec<String>, String> {
@@ -1126,121 +1136,121 @@ pub(crate) async fn apply_sync_message_tombstones(
         );
     }
 
-    let mut tx = db_pool.begin().await.map_err(|error| error.to_string())?;
-    let placeholders = vec!["?"; tombstones.len()].join(", ");
-    let live_sql = format!(
-        "SELECT msg_id FROM messages
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
-           AND deleted_at IS NULL AND msg_id IN ({placeholders})"
-    );
-    let mut live_query = sqlx::query_scalar(sqlx::AssertSqlSafe(live_sql))
-        .bind(&key.owner_type)
-        .bind(&key.owner_id)
-        .bind(&key.topic_id);
-    for (id, _) in tombstones {
-        live_query = live_query.bind(id);
-    }
-    let deleted_ids: Vec<String> = live_query
-        .fetch_all(&mut *tx)
+    let write_permit = db_state.write_gate.acquire("sync.delete.message").await?;
+    let mut tx = begin_immediate_write(&db_state.pool)
         .await
         .map_err(|error| error.to_string())?;
-    if deleted_ids.is_empty() {
+    let topic_is_live = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM topics
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL)",
+    )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|error| error.to_string())?;
+    if !topic_is_live {
         tx.commit().await.map_err(|error| error.to_string())?;
+        drop(write_permit);
         return Ok(Vec::new());
     }
 
-    let active_sql = format!(
-        "SELECT msg_id FROM active_generations
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
-           AND msg_id IN ({})",
-        vec!["?"; deleted_ids.len()].join(", ")
-    );
-    let mut active_query = sqlx::query_scalar(sqlx::AssertSqlSafe(active_sql))
-        .bind(&key.owner_type)
-        .bind(&key.owner_id)
-        .bind(&key.topic_id);
-    for id in &deleted_ids {
-        active_query = active_query.bind(id);
-    }
-    let active_ids = active_query
-        .fetch_all(&mut *tx)
-        .await
-        .map_err(|error| error.to_string())?;
-
-    let tombstone_times = tombstones
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashMap<_, _>>();
-    let values = deleted_ids
-        .iter()
-        .map(|_| "(?, ?)")
-        .collect::<Vec<_>>()
-        .join(", ");
-    let update_sql = format!(
-        "WITH incoming(msg_id, deleted_at) AS (VALUES {values})
-         UPDATE messages
-         SET deleted_at = (
-             SELECT incoming.deleted_at FROM incoming WHERE incoming.msg_id = messages.msg_id
-         )
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
-           AND msg_id IN (SELECT msg_id FROM incoming)"
-    );
-    let mut update = sqlx::query(sqlx::AssertSqlSafe(update_sql));
-    for id in &deleted_ids {
-        update = update.bind(id).bind(
-            tombstone_times
-                .get(id)
-                .copied()
-                .ok_or_else(|| format!("Missing Desktop tombstone time for message {id}"))?,
-        );
-    }
-    let updated = update
-        .bind(&key.owner_type)
-        .bind(&key.owner_id)
-        .bind(&key.topic_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|error| error.to_string())?;
-    if updated.rows_affected() != deleted_ids.len() as u64 {
-        return Err(format!(
-            "Sync message tombstones changed {} rows, expected {} for topic {}",
-            updated.rows_affected(),
-            deleted_ids.len(),
-            key.topic_id
-        ));
-    }
-
-    for table in ["render_cache", "message_attachments", "active_generations"] {
-        let delete_sql = format!(
-            "DELETE FROM {table}
+    const TOMBSTONE_CHUNK: usize = 400;
+    let mut active_ids = Vec::new();
+    for chunk in tombstones.chunks(TOMBSTONE_CHUNK) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let active_sql = format!(
+            "SELECT msg_id FROM active_generations
              WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
-               AND msg_id IN ({})",
-            vec!["?"; deleted_ids.len()].join(", ")
+               AND msg_id IN ({placeholders})"
         );
-        let mut delete = sqlx::query(sqlx::AssertSqlSafe(delete_sql))
+        let mut active_query = sqlx::query_scalar(sqlx::AssertSqlSafe(active_sql))
             .bind(&key.owner_type)
             .bind(&key.owner_id)
             .bind(&key.topic_id);
-        for id in &deleted_ids {
-            delete = delete.bind(id);
+        for (id, _) in chunk {
+            active_query = active_query.bind(id);
         }
-        delete
+        active_ids.extend(
+            active_query
+                .fetch_all(&mut *tx)
+                .await
+                .map_err(|error| error.to_string())?,
+        );
+
+        let values = chunk
+            .iter()
+            .map(|_| "(?, ?, ?, ?, 'system', '', ?, ?, ?, ?, ?, ?, ?)")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let upsert_sql = format!(
+            "INSERT INTO messages (
+                owner_type, owner_id, topic_id, msg_id, role, content, timestamp,
+                is_group_message, group_id, content_hash, created_at, updated_at, deleted_at
+             ) VALUES {values}
+             ON CONFLICT(owner_type, owner_id, topic_id, msg_id) DO UPDATE SET
+                content_hash = excluded.content_hash,
+                updated_at = MAX(messages.updated_at, excluded.updated_at),
+                deleted_at = CASE
+                    WHEN messages.deleted_at IS NULL
+                      OR messages.deleted_at < excluded.deleted_at
+                    THEN excluded.deleted_at
+                    ELSE messages.deleted_at
+                END"
+        );
+        let mut upsert = sqlx::query(sqlx::AssertSqlSafe(upsert_sql));
+        for (id, deleted_at) in chunk {
+            upsert = upsert
+                .bind(&key.owner_type)
+                .bind(&key.owner_id)
+                .bind(&key.topic_id)
+                .bind(id)
+                .bind(*deleted_at)
+                .bind(i64::from(key.owner_type == "group"))
+                .bind((key.owner_type == "group").then_some(key.owner_id.as_str()))
+                .bind(SYNC_TOMBSTONE_HASH)
+                .bind(*deleted_at)
+                .bind(*deleted_at)
+                .bind(*deleted_at);
+        }
+        upsert
             .execute(&mut *tx)
             .await
             .map_err(|error| error.to_string())?;
+
+        for table in ["render_cache", "message_attachments", "active_generations"] {
+            let delete_sql = format!(
+                "DELETE FROM {table}
+                 WHERE owner_type = ? AND owner_id = ? AND topic_id = ?
+                   AND msg_id IN ({placeholders})"
+            );
+            let mut delete = sqlx::query(sqlx::AssertSqlSafe(delete_sql))
+                .bind(&key.owner_type)
+                .bind(&key.owner_id)
+                .bind(&key.topic_id);
+            for (id, _) in chunk {
+                delete = delete.bind(id);
+            }
+            delete
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
     }
 
     // FTS is removed by after_messages_logical_delete in this same transaction.
     tx.commit().await.map_err(|error| error.to_string())?;
+    drop(write_permit);
     Ok(active_ids)
 }
 
 pub async fn truncate_history_after_message(
-    db_pool: &sqlx::Pool<sqlx::Sqlite>,
+    db_state: &DbState,
     key: &TopicKey,
     anchor_message_id: &str,
 ) -> Result<MessageDeletionResult, String> {
-    let mut tx = db_pool.begin().await.map_err(|e| e.to_string())?;
+    let (write_permit, mut tx) = db_state.begin_write("message.truncate").await?;
     let anchor_timestamp: i64 = sqlx::query_scalar(
         "SELECT timestamp FROM messages
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
@@ -1383,6 +1393,7 @@ pub async fn truncate_history_after_message(
     // FTS 由 after_messages_logical_delete 触发器在同一事务中清理。
     let activity = HashAggregator::bubble_from_topic(&mut tx, key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
     Ok(MessageDeletionResult {
         deleted_ids,
         active_ids,
@@ -1433,7 +1444,7 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
 
 #[allow(clippy::too_many_arguments)]
 async fn finalize_stream_message_inner<R: tauri::Runtime>(
-    _app_handle: AppHandle<R>,
+    app_handle: AppHandle<R>,
     pool: &sqlx::Pool<sqlx::Sqlite>,
     message_key: &MessageKey,
     full_content: String,
@@ -1497,8 +1508,9 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
         if owner_id.is_empty() || topic_id.is_empty() {
             (None, final_ts, None)
         } else {
+            let db_state = app_handle.state::<DbState>();
             match commit_stream_message(
-                pool,
+                &db_state,
                 message_key,
                 &final_content,
                 final_ts,
@@ -1544,7 +1556,7 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
 
 #[allow(clippy::too_many_arguments)]
 async fn commit_stream_message(
-    pool: &sqlx::Pool<sqlx::Sqlite>,
+    db_state: &DbState,
     message_key: &MessageKey,
     final_content: &str,
     final_ts: u64,
@@ -1560,7 +1572,7 @@ async fn commit_stream_message(
     let (blocks, render_bytes) =
         compile_and_serialize_render_async(final_content.to_string()).await?;
     let is_group = owner_type == "group";
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let (write_permit, mut tx) = db_state.begin_write("message.stream.finalize").await?;
 
     let start_timestamp: i64 = sqlx::query_scalar(
         "SELECT m.timestamp FROM messages m
@@ -1695,6 +1707,7 @@ async fn commit_stream_message(
 
     let activity = HashAggregator::bubble_from_topic(&mut tx, key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
     Ok((blocks, start_timestamp as u64, activity.updated_at))
 }
 
@@ -1711,22 +1724,28 @@ pub async fn delete_message_attachment(
     use crate::vcp_modules::db_manager::DbState;
     use tauri::Manager;
     let db_state = app_handle.state::<DbState>();
-    let pool = &db_state.pool;
     let now = crate::vcp_modules::infra::utils::now_millis();
     let key = MessageKey::new(TopicKey::new(owner_type, owner_id, topic_id), message_id);
-    delete_message_attachment_in_pool(pool, &key.topic, &key.msg_id, attachment_order, &hash, now)
-        .await
+    delete_message_attachment_in_db(
+        &db_state,
+        &key.topic,
+        &key.msg_id,
+        attachment_order,
+        &hash,
+        now,
+    )
+    .await
 }
 
-async fn delete_message_attachment_in_pool(
-    pool: &sqlx::SqlitePool,
+async fn delete_message_attachment_in_db(
+    db_state: &DbState,
     key: &TopicKey,
     message_id: &str,
     attachment_order: i32,
     hash: &str,
     now: i64,
 ) -> Result<TopicActivityDto, String> {
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let (write_permit, mut tx) = db_state.begin_write("message.attachment.delete").await?;
     let deleted = sqlx::query(
         "DELETE FROM message_attachments \
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
@@ -1744,6 +1763,7 @@ async fn delete_message_attachment_in_pool(
     if deleted.rows_affected() == 0 {
         let activity = HashAggregator::load_topic_activity(&mut tx, key).await?;
         tx.commit().await.map_err(|e| e.to_string())?;
+        drop(write_permit);
         return Ok(activity);
     }
 
@@ -1818,6 +1838,7 @@ async fn delete_message_attachment_in_pool(
 
     let activity = HashAggregator::bubble_from_topic(&mut tx, key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
     Ok(activity)
 }
 
@@ -1862,8 +1883,103 @@ mod stream_lifecycle_tests {
     }
 
     #[tokio::test]
+    async fn sync_message_tombstones_persist_missing_rows_and_remain_monotonic() {
+        let pool = test_pool().await;
+        sqlx::query(
+            "INSERT INTO messages (
+                owner_type, owner_id, topic_id, msg_id, role, content, timestamp,
+                content_hash, created_at, updated_at
+             ) VALUES (
+                'agent', 'agent-1', 'topic-1', 'existing', 'assistant', 'body', 1,
+                'live-hash', 1, 1
+             );
+             INSERT INTO active_generations (owner_type, owner_id, topic_id, msg_id, created_at)
+             VALUES ('agent', 'agent-1', 'topic-1', 'existing', 1);
+             INSERT INTO messages_fts (msg_id, topic_id, content, owner_type, owner_id)
+             VALUES ('existing', 'topic-1', 'body', 'agent', 'agent-1');",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed live message");
+        let db = DbState::new(pool.clone(), std::path::PathBuf::new());
+
+        let active_ids = apply_sync_message_tombstones(
+            &db,
+            &topic_key(),
+            &[("existing".to_string(), 40), ("missing".to_string(), 50)],
+        )
+        .await
+        .expect("apply mixed tombstones");
+        assert_eq!(active_ids, vec!["existing".to_string()]);
+
+        let rows: Vec<(String, String, String, i64)> = sqlx::query_as(
+            "SELECT msg_id, content, content_hash, deleted_at FROM messages
+             WHERE topic_id = 'topic-1' ORDER BY msg_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read message tombstones");
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "existing".to_string(),
+                    "body".to_string(),
+                    SYNC_TOMBSTONE_HASH.to_string(),
+                    40,
+                ),
+                (
+                    "missing".to_string(),
+                    String::new(),
+                    SYNC_TOMBSTONE_HASH.to_string(),
+                    50,
+                ),
+            ]
+        );
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM active_generations WHERE topic_id = 'topic-1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read active generation count");
+        let fts_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE topic_id = 'topic-1'")
+                .fetch_one(&pool)
+                .await
+                .expect("read FTS count");
+        assert_eq!(active_count, 0);
+        assert_eq!(fts_count, 0);
+
+        apply_sync_message_tombstones(
+            &db,
+            &topic_key(),
+            &[("missing".to_string(), 45), ("existing".to_string(), 60)],
+        )
+        .await
+        .expect("repeat tombstones");
+        let repeated: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT msg_id, deleted_at FROM messages
+             WHERE topic_id = 'topic-1' ORDER BY msg_id",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("read monotonic tombstones");
+        assert_eq!(
+            repeated,
+            vec![("existing".to_string(), 60), ("missing".to_string(), 50)]
+        );
+
+        assert!(
+            begin_stream_message(&db, &message_key("missing"), Some("agent-1"), Some("Agent"),)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
     async fn deleting_attachment_updates_message_version_and_bubbles() {
         let pool = test_pool().await;
+        let db_state = DbState::new(pool.clone(), std::path::PathBuf::new());
         let hash_a = "a".repeat(64);
         let hash_b = "b".repeat(64);
         let old_hash = HashAggregator::compute_message_fingerprint(
@@ -1913,8 +2029,8 @@ mod stream_lifecycle_tests {
         .expect("initial aggregate hashes");
 
         let topic_key = TopicKey::new("agent", "agent-1", "topic-1");
-        delete_message_attachment_in_pool(
-            &pool,
+        delete_message_attachment_in_db(
+            &db_state,
             &topic_key,
             "message-with-attachments",
             0,
@@ -1960,8 +2076,9 @@ mod stream_lifecycle_tests {
     #[tokio::test]
     async fn pending_generation_can_only_finalize_once() {
         let pool = test_pool().await;
+        let db_state = DbState::new(pool.clone(), std::path::PathBuf::new());
         let key = message_key("message-1");
-        begin_stream_message(&pool, &key, Some("agent-1"), Some("Agent"))
+        begin_stream_message(&db_state, &key, Some("agent-1"), Some("Agent"))
             .await
             .expect("begin generation");
         let topic_updated_after_begin: i64 =
@@ -1972,7 +2089,7 @@ mod stream_lifecycle_tests {
         assert_eq!(topic_updated_after_begin, 1);
 
         assert!(
-            begin_stream_message(&pool, &key, Some("agent-1"), Some("Agent"),)
+            begin_stream_message(&db_state, &key, Some("agent-1"), Some("Agent"),)
                 .await
                 .is_err()
         );
@@ -1985,7 +2102,7 @@ mod stream_lifecycle_tests {
         .expect("skeleton identity");
 
         let (_, terminal_timestamp, terminal_topic_updated_at) = commit_stream_message(
-            &pool,
+            &db_state,
             &key,
             "terminal body",
             2,
@@ -2024,7 +2141,7 @@ mod stream_lifecycle_tests {
         .expect("active count");
         assert_eq!(active, 0);
         assert!(commit_stream_message(
-            &pool,
+            &db_state,
             &key,
             "late body",
             3,
@@ -2039,13 +2156,14 @@ mod stream_lifecycle_tests {
     #[tokio::test]
     async fn begin_generation_cannot_cross_a_topic_tombstone() {
         let pool = test_pool().await;
+        let db_state = DbState::new(pool.clone(), std::path::PathBuf::new());
         sqlx::query("UPDATE topics SET deleted_at = 7 WHERE topic_id = 'topic-1'")
             .execute(&pool)
             .await
             .expect("tombstone topic");
 
         let error = begin_stream_message(
-            &pool,
+            &db_state,
             &message_key("message-after-delete"),
             Some("agent-1"),
             Some("Agent"),
@@ -2072,8 +2190,9 @@ mod stream_lifecycle_tests {
     #[tokio::test]
     async fn finalization_failure_rolls_back_and_keeps_recovery_record() {
         let pool = test_pool().await;
+        let db_state = DbState::new(pool.clone(), std::path::PathBuf::new());
         let key = message_key("message-2");
-        begin_stream_message(&pool, &key, Some("agent-1"), Some("Agent"))
+        begin_stream_message(&db_state, &key, Some("agent-1"), Some("Agent"))
             .await
             .expect("begin generation");
         sqlx::query("DELETE FROM render_cache WHERE msg_id = 'message-2'")
@@ -2082,7 +2201,7 @@ mod stream_lifecycle_tests {
             .expect("remove cache fixture");
 
         assert!(commit_stream_message(
-            &pool,
+            &db_state,
             &key,
             "must roll back",
             2,
@@ -2111,13 +2230,14 @@ mod stream_lifecycle_tests {
     #[tokio::test]
     async fn tombstoned_generation_rejects_late_finalization() {
         let pool = test_pool().await;
+        let db_state = DbState::new(pool.clone(), std::path::PathBuf::new());
         let key = message_key("message-deleted");
-        begin_stream_message(&pool, &key, Some("agent-1"), Some("Agent"))
+        begin_stream_message(&db_state, &key, Some("agent-1"), Some("Agent"))
             .await
             .expect("begin generation");
 
         delete_messages(
-            &pool,
+            &db_state,
             &topic_key(),
             vec!["message-deleted".to_string()],
             None,
@@ -2125,7 +2245,7 @@ mod stream_lifecycle_tests {
         .await
         .expect("delete generation");
         assert!(commit_stream_message(
-            &pool,
+            &db_state,
             &key,
             "late terminal body",
             999,
@@ -2154,8 +2274,9 @@ mod stream_lifecycle_tests {
     #[tokio::test]
     async fn render_cache_rejects_stale_hash_and_invalid_identity() {
         let pool = test_pool().await;
+        let db_state = DbState::new(pool.clone(), std::path::PathBuf::new());
         let key = message_key("message-cache");
-        begin_stream_message(&pool, &key, Some("agent-1"), Some("Agent"))
+        begin_stream_message(&db_state, &key, Some("agent-1"), Some("Agent"))
             .await
             .expect("begin generation");
         let old_hash: String =
@@ -2181,7 +2302,7 @@ mod stream_lifecycle_tests {
             .await
             .expect("compile stale");
         assert!(
-            !write_render_cache_cas(&pool, &key, &old_hash, &stale_bytes,)
+            !write_render_cache_cas(&db_state, &key, &old_hash, &stale_bytes,)
                 .await
                 .expect("cache CAS")
         );

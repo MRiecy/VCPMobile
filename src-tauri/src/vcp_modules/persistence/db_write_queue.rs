@@ -1,4 +1,5 @@
 use crate::vcp_modules::chat_manager::ChatMessage;
+use crate::vcp_modules::db_manager::DbWriteGate;
 use crate::vcp_modules::group_types::serialize_member_tags;
 use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
@@ -17,6 +18,7 @@ const MAX_TASKS_PER_TRANSACTION: usize = 32;
 const MAX_MESSAGES_PER_TRANSACTION: usize = 500;
 const BATCH_QUIET_WINDOW: Duration = Duration::from_millis(2);
 const BATCH_HARD_WINDOW: Duration = Duration::from_millis(10);
+const SLOW_QUEUE_OBSERVATION: Duration = Duration::from_millis(500);
 
 #[derive(Debug)]
 pub enum DbWriteTask {
@@ -76,6 +78,7 @@ mod tests {
         BATCH_QUIET_WINDOW,
     };
     use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
+    use crate::vcp_modules::db_manager::{begin_immediate_write, DbWriteGate};
     use crate::vcp_modules::sync_dto::{
         AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
     };
@@ -83,6 +86,43 @@ mod tests {
     use crate::vcp_modules::topic_types::TopicKey;
     use std::time::Duration;
     use tokio::sync::{mpsc, oneshot};
+
+    async fn file_backed_queue() -> (
+        tempfile::TempDir,
+        sqlx::SqlitePool,
+        DbWriteGate,
+        DbWriteQueue,
+    ) {
+        let temp_dir = tempfile::tempdir().expect("create queue database directory");
+        let db_path = temp_dir.path().join("queue-gate.sqlite");
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .busy_timeout(Duration::from_secs(2));
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect_with(options)
+            .await
+            .expect("open queue SQLx pool");
+        sqlx::raw_sql(include_str!("../../../migrations/0100_baseline_v2.sql"))
+            .execute(&pool)
+            .await
+            .expect("create queue baseline");
+        sqlx::query(
+            "INSERT INTO agents (owner_type, agent_id, name, model, updated_at)
+             VALUES ('agent', 'owner', 'Owner', '', 1);
+             INSERT INTO topics (
+                owner_type, owner_id, topic_id, title, created_at, updated_at
+             ) VALUES ('agent', 'owner', 'topic', 'Topic', 1, 1);",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed queue parents");
+        let gate = DbWriteGate::new();
+        let queue = DbWriteQueue::new(pool.clone(), db_path, gate.clone(), 77);
+        (temp_dir, pool, gate, queue)
+    }
 
     fn avatar_task(owner_id: impl Into<String>) -> DbWriteTask {
         DbWriteTask::Avatar {
@@ -157,17 +197,231 @@ mod tests {
     }
 
     #[test]
-    fn flush_error_summary_is_reported_once() {
+    fn flush_error_summary_is_cleared_only_after_delivery() {
         let mut errors = vec![
             "batch one failed".to_string(),
             "batch two failed".to_string(),
         ];
-        let first = DbWriteQueue::take_pending_errors(&mut errors)
-            .expect_err("flush must surface all prior batch failures");
-        assert!(first.contains("batch one failed"));
-        assert!(first.contains("batch two failed"));
+
+        let (cancelled_tx, cancelled_rx) = oneshot::channel();
+        drop(cancelled_rx);
+        assert!(!DbWriteQueue::deliver_flush_ack(cancelled_tx, &mut errors));
+        assert_eq!(errors.len(), 2, "cancelled Flush must keep errors sticky");
+
+        let (live_tx, live_rx) = oneshot::channel();
+        assert!(DbWriteQueue::deliver_flush_ack(live_tx, &mut errors));
         assert!(errors.is_empty());
-        assert!(DbWriteQueue::take_pending_errors(&mut errors).is_ok());
+        let delivered = live_rx
+            .blocking_recv()
+            .expect("live Flush must receive an acknowledgement")
+            .expect_err("Flush must surface all prior batch failures");
+        assert!(delivered.contains("batch one failed"));
+        assert!(delivered.contains("batch two failed"));
+
+        let (empty_tx, empty_rx) = oneshot::channel();
+        assert!(DbWriteQueue::deliver_flush_ack(empty_tx, &mut errors));
+        assert!(empty_rx
+            .blocking_recv()
+            .expect("empty Flush must receive an acknowledgement")
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn sqlx_transaction_holds_gate_before_real_queue_writer() {
+        let (_temp_dir, pool, gate, queue) = file_backed_queue().await;
+        let sqlx_permit = gate
+            .acquire("test.sqlx-holder")
+            .await
+            .expect("acquire SQLx permit");
+        let mut sqlx_tx = begin_immediate_write(&pool)
+            .await
+            .expect("begin SQLx write transaction");
+        sqlx::query("INSERT INTO settings (key, value, updated_at) VALUES ('gate-holder', '1', 1)")
+            .execute(&mut *sqlx_tx)
+            .await
+            .expect("write SQLx marker");
+
+        queue
+            .submit(avatar_task("owner"))
+            .await
+            .expect("submit queue write");
+        let flush_queue = queue.clone();
+        let mut flush = tokio::spawn(async move { flush_queue.flush().await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut flush)
+                .await
+                .is_err(),
+            "Queue must wait while SQLx owns the shared gate"
+        );
+
+        sqlx_tx.commit().await.expect("commit SQLx holder");
+        drop(sqlx_permit);
+        tokio::time::timeout(Duration::from_secs(3), flush)
+            .await
+            .expect("Queue Flush timed out")
+            .expect("Queue Flush task failed")
+            .expect("Queue write failed after SQLx release");
+        let avatar_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM avatars WHERE owner_id = 'owner'")
+                .fetch_one(&pool)
+                .await
+                .expect("read queued avatar");
+        assert_eq!(avatar_count, 1);
+    }
+
+    #[tokio::test]
+    async fn real_queue_transaction_holds_gate_before_sqlx_writer() {
+        let (_temp_dir, pool, gate, queue) = file_backed_queue().await;
+        sqlx::query(
+            "CREATE TRIGGER slow_queue_messages AFTER INSERT ON messages
+             BEGIN SELECT length(randomblob(250000)); END;",
+        )
+        .execute(&pool)
+        .await
+        .expect("install slow queue trigger");
+        queue
+            .submit(rich_message_task("topic", 0, 500))
+            .await
+            .expect("submit large queue transaction");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !gate.is_locked() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Queue never acquired the shared gate");
+
+        let waiting_gate = gate.clone();
+        let waiting_pool = pool.clone();
+        let mut sqlx_writer = tokio::spawn(async move {
+            let permit = waiting_gate.acquire("test.sqlx-waiter").await?;
+            let mut tx = begin_immediate_write(&waiting_pool)
+                .await
+                .map_err(|error| error.to_string())?;
+            sqlx::query(
+                "INSERT INTO settings (key, value, updated_at) VALUES ('after-queue', '1', 1)",
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| error.to_string())?;
+            tx.commit().await.map_err(|error| error.to_string())?;
+            drop(permit);
+            Ok::<(), String>(())
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut sqlx_writer)
+                .await
+                .is_err(),
+            "SQLx writer must wait while the real Queue owns the gate"
+        );
+
+        tokio::time::timeout(Duration::from_secs(5), queue.flush())
+            .await
+            .expect("Queue Flush timed out")
+            .expect("Queue batch failed");
+        tokio::time::timeout(Duration::from_secs(3), sqlx_writer)
+            .await
+            .expect("SQLx waiter timed out")
+            .expect("SQLx waiter task failed")
+            .expect("SQLx waiter failed");
+        let counts: (i64, i64) = sqlx::query_as(
+            "SELECT
+                (SELECT COUNT(*) FROM messages WHERE topic_id = 'topic'),
+                (SELECT COUNT(*) FROM settings WHERE key = 'after-queue')",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read gated writer results");
+        assert_eq!(counts, (500, 1));
+    }
+
+    #[tokio::test]
+    async fn cancelled_real_flush_keeps_worker_failure_sticky() {
+        let (_temp_dir, pool, _gate, queue) = file_backed_queue().await;
+        sqlx::query(
+            "CREATE TRIGGER fail_queue_avatar BEFORE INSERT ON avatars
+             BEGIN SELECT RAISE(ABORT, 'forced avatar failure'); END;",
+        )
+        .execute(&pool)
+        .await
+        .expect("install queue failure trigger");
+        queue
+            .submit(avatar_task("owner"))
+            .await
+            .expect("submit failing queue write");
+
+        let (cancelled_tx, cancelled_rx) = oneshot::channel();
+        drop(cancelled_rx);
+        queue
+            .sender
+            .send(DbWriteTask::Flush { tx: cancelled_tx })
+            .await
+            .expect("submit cancelled Flush");
+
+        let error = queue
+            .flush()
+            .await
+            .expect_err("next live Flush must receive the sticky failure");
+        assert!(error.contains("forced avatar failure"));
+        queue
+            .flush()
+            .await
+            .expect("delivered sticky failure must clear exactly once");
+
+        sqlx::query("DROP TRIGGER fail_queue_avatar")
+            .execute(&pool)
+            .await
+            .expect("remove queue failure trigger");
+        queue
+            .submit(avatar_task("owner"))
+            .await
+            .expect("submit recovery write");
+        queue
+            .flush()
+            .await
+            .expect("trigger failure must not leak the Queue permit");
+    }
+
+    #[test]
+    fn write_transaction_waits_for_an_existing_writer_at_begin() {
+        let temp_dir = tempfile::tempdir().expect("create temp database directory");
+        let db_path = temp_dir.path().join("queue-write-contention.sqlite");
+        let mut holder = rusqlite::Connection::open(&db_path).expect("open writer connection");
+        holder
+            .pragma_update(None, "journal_mode", "WAL")
+            .expect("enable WAL");
+        holder
+            .busy_timeout(Duration::from_secs(1))
+            .expect("configure writer timeout");
+        let held = holder
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .expect("reserve writer");
+
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let result = (|| -> rusqlite::Result<()> {
+                let mut conn = rusqlite::Connection::open(db_path)?;
+                conn.busy_timeout(Duration::from_secs(1))?;
+                started_tx.send(()).expect("announce waiting writer");
+                let tx = DbWriteQueue::begin_write_transaction(&mut conn)?;
+                tx.commit()
+            })();
+            done_tx.send(result).expect("report waiting writer result");
+        });
+        started_rx.recv().expect("start waiting writer");
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        ));
+
+        held.commit().expect("release writer");
+        done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("waiting transaction timed out")
+            .expect("waiting transaction failed after writer release");
+        waiter.join().expect("waiting writer thread panicked");
     }
 
     #[tokio::test(start_paused = true)]
@@ -750,6 +1004,7 @@ pub struct DbWriteQueue {
     sender: mpsc::Sender<DbWriteTask>,
     logger: Option<Arc<Mutex<SyncLogger>>>,
     db_path: std::path::PathBuf,
+    session_id: u64,
     _worker: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -759,6 +1014,7 @@ impl Clone for DbWriteQueue {
             sender: self.sender.clone(),
             logger: self.logger.clone(),
             db_path: self.db_path.clone(),
+            session_id: self.session_id,
             _worker: None,
         }
     }
@@ -770,6 +1026,12 @@ impl DbWriteQueue {
             std::io::ErrorKind::InvalidData,
             message.into(),
         )))
+    }
+
+    fn begin_write_transaction(
+        conn: &mut rusqlite::Connection,
+    ) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+        conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
     }
 
     async fn collect_batch(
@@ -859,17 +1121,25 @@ impl DbWriteQueue {
         coalesced
     }
 
-    pub fn new(_pool: sqlx::SqlitePool, db_path: std::path::PathBuf) -> Self {
+    pub fn new(
+        _pool: sqlx::SqlitePool,
+        db_path: std::path::PathBuf,
+        write_gate: DbWriteGate,
+        session_id: u64,
+    ) -> Self {
         // One queued transaction worth of tasks is enough to keep the single writer busy while
         // preserving Pull's upstream byte-weighted backpressure.
         let (tx, mut rx) = mpsc::channel(DB_WRITE_QUEUE_CAPACITY);
         let db_path_for_worker = db_path.clone();
+        let write_gate_for_worker = write_gate;
 
         // 核心优化：利用 Mutex 持有持久连接，确保 spawn_blocking 之间 prepare_cached 缓存不失效
         let conn_holder: Arc<Mutex<Option<rusqlite::Connection>>> = Arc::new(Mutex::new(None));
 
         let worker = tokio::spawn(async move {
-            log::info!("[DbWriteQueue] Worker started (Turbo rusqlite Mode)");
+            log::info!(
+                "[DbWriteQueue] Worker started (Turbo rusqlite Mode), session_id={session_id}"
+            );
 
             let mut success_count = 0u32;
             let mut error_count = 0u32;
@@ -886,19 +1156,41 @@ impl DbWriteQueue {
                 };
                 // 如果第一个任务就是 Flush，直接确认
                 if let DbWriteTask::Flush { tx } = first_task {
-                    let _ = tx.send(Self::take_pending_errors(&mut pending_errors));
+                    Self::deliver_flush_ack(tx, &mut pending_errors);
                     continue;
                 }
 
                 let batch = Self::collect_batch(first_task, &mut rx, &mut carried_task).await;
                 let tasks_in_this_tx = Self::coalesce_adjacent_topic_message_tasks(batch.tasks);
                 let flush_tx_opt = batch.flush_tx;
+                let task_count = tasks_in_this_tx.len();
+                let message_count = tasks_in_this_tx
+                    .iter()
+                    .map(task_message_count)
+                    .sum::<usize>();
+
+                // Batch collection intentionally runs outside the gate. Only the physical SQLite
+                // transaction is admitted into the process-wide single-writer boundary.
+                let write_permit = match write_gate_for_worker.acquire("sync.queue").await {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        error_count += 1;
+                        log::error!("[DbWriteQueue] write admission failed: {error}");
+                        pending_errors.push(format!("write admission error: {error}"));
+                        if let Some(tx) = flush_tx_opt {
+                            Self::deliver_flush_ack(tx, &mut pending_errors);
+                        }
+                        continue;
+                    }
+                };
 
                 let db_path = db_path_for_worker.clone();
                 let ch = conn_holder.clone();
+                let transaction_started = std::time::Instant::now();
 
                 // [Turbo Phase 3] 使用 spawn_blocking + rusqlite 进行极致写入
                 let result = tokio::task::spawn_blocking(move || {
+                    let write_permit = write_permit;
                     let mut guard = ch.lock().unwrap();
                     if guard.is_none() {
                         let conn = rusqlite::Connection::open(&db_path)?;
@@ -911,7 +1203,7 @@ impl DbWriteQueue {
                         *guard = Some(conn);
                     }
                     let conn = guard.as_mut().unwrap();
-                    let tx = conn.transaction()?;
+                    let tx = Self::begin_write_transaction(conn)?;
 
                     let mut affected_owners = HashSet::new();
 
@@ -1025,8 +1317,17 @@ impl DbWriteQueue {
                     }
 
                     tx.commit()?;
+                    drop(write_permit);
                     Ok::<(), rusqlite::Error>(())
                 }).await;
+
+                log::debug!(
+                    "[DbWriteQueue] transaction session_id={} tasks={} messages={} elapsed_ms={:.3}",
+                    session_id,
+                    task_count,
+                    message_count,
+                    transaction_started.elapsed().as_secs_f64() * 1000.0
+                );
 
                 match result {
                     Ok(Ok(_)) => success_count += 1,
@@ -1043,7 +1344,7 @@ impl DbWriteQueue {
                 }
 
                 if let Some(tx) = flush_tx_opt {
-                    let _ = tx.send(Self::take_pending_errors(&mut pending_errors));
+                    Self::deliver_flush_ack(tx, &mut pending_errors);
                 }
             }
 
@@ -1058,6 +1359,7 @@ impl DbWriteQueue {
             sender: tx,
             logger: None,
             db_path,
+            session_id,
             _worker: Some(worker),
         }
     }
@@ -1074,6 +1376,7 @@ impl DbWriteQueue {
     }
 
     pub async fn flush(&self) -> Result<(), String> {
+        let started_at = std::time::Instant::now();
         let (tx, rx) = oneshot::channel();
         self.sender
             .send(DbWriteTask::Flush { tx })
@@ -1081,15 +1384,40 @@ impl DbWriteQueue {
             .map_err(|e| format!("DbWriteQueue flush submit failed: {e}"))?;
         rx.await
             .map_err(|e| format!("DbWriteQueue flush acknowledgement failed: {e}"))??;
-        log::debug!("[DbWriteQueue] Flush completed");
+        let elapsed = started_at.elapsed();
+        if elapsed >= SLOW_QUEUE_OBSERVATION {
+            log::warn!(
+                "[DbWriteQueue] slow Flush session_id={} latency_ms={:.3}",
+                self.session_id,
+                elapsed.as_secs_f64() * 1000.0
+            );
+        } else {
+            log::debug!(
+                "[DbWriteQueue] Flush completed session_id={} latency_ms={:.3}",
+                self.session_id,
+                elapsed.as_secs_f64() * 1000.0
+            );
+        }
         Ok(())
     }
 
-    fn take_pending_errors(errors: &mut Vec<String>) -> Result<(), String> {
+    fn pending_errors_result(errors: &[String]) -> Result<(), String> {
         if errors.is_empty() {
             Ok(())
         } else {
-            Err(std::mem::take(errors).join(" | "))
+            Err(errors.join(" | "))
+        }
+    }
+
+    fn deliver_flush_ack(
+        tx: oneshot::Sender<Result<(), String>>,
+        pending_errors: &mut Vec<String>,
+    ) -> bool {
+        if tx.send(Self::pending_errors_result(pending_errors)).is_ok() {
+            pending_errors.clear();
+            true
+        } else {
+            false
         }
     }
 

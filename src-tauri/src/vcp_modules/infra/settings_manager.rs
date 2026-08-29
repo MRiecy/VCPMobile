@@ -263,19 +263,30 @@ async fn read_settings_locked<R: Runtime>(
                 if migrated {
                     let migrated_content =
                         serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+                    let (write_permit, mut tx) = db_state.begin_write("settings.migration").await?;
                     sqlx::query(
                         "UPDATE settings SET value = ?, updated_at = ? WHERE key = 'global'",
                     )
                     .bind(migrated_content)
                     .bind(crate::vcp_modules::infra::utils::now_millis())
-                    .execute(pool)
+                    .execute(&mut *tx)
                     .await
                     .map_err(|e| format!("持久化设置迁移失败: {e}"))?;
+                    tx.commit()
+                        .await
+                        .map_err(|e| format!("提交设置迁移失败: {e}"))?;
+                    drop(write_permit);
                 }
                 settings
             }
             Err(parse_error) => {
-                recover_corrupt_settings(pool, state, &content, &parse_error.to_string()).await?
+                recover_corrupt_settings(
+                    db_state.inner(),
+                    state,
+                    &content,
+                    &parse_error.to_string(),
+                )
+                .await?
             }
         }
     } else {
@@ -287,7 +298,7 @@ async fn read_settings_locked<R: Runtime>(
 }
 
 async fn recover_corrupt_settings(
-    pool: &sqlx::SqlitePool,
+    db_state: &DbState,
     state: &SettingsState,
     original: &str,
     parse_error: &str,
@@ -298,7 +309,7 @@ async fn recover_corrupt_settings(
     let now = crate::vcp_modules::infra::utils::now_millis();
     let backup_key = format!("global_corrupt_backup_{}_{}", now, uuid::Uuid::new_v4());
 
-    let mut transaction = pool.begin().await.map_err(|error| error.to_string())?;
+    let (write_permit, mut transaction) = db_state.begin_write("settings.recovery").await?;
     sqlx::query("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)")
         .bind(&backup_key)
         .bind(original)
@@ -316,6 +327,7 @@ async fn recover_corrupt_settings(
         .commit()
         .await
         .map_err(|error| format!("提交设置恢复事务失败: {error}"))?;
+    drop(write_permit);
 
     *state.recovery_status.lock().await = SettingsRecoveryStatus {
         recovered_corrupt: true,
@@ -385,17 +397,19 @@ async fn internal_write_settings<R: Runtime>(
     settings: &Settings,
 ) -> Result<bool, String> {
     let db_state = app_handle.state::<DbState>();
-    let pool = &db_state.pool;
 
     let content = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
     let now = crate::vcp_modules::infra::utils::now_millis();
 
+    let (write_permit, mut tx) = db_state.begin_write("settings.save").await?;
     sqlx::query("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('global', ?, ?)")
         .bind(&content)
         .bind(now)
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
 
     let runtime_changes = {
         let old_cache = state.cache.lock().await;
@@ -573,7 +587,8 @@ mod tests {
             .unwrap();
 
         let state = SettingsState::new();
-        let recovered = recover_corrupt_settings(&pool, &state, "{broken-json", "syntax")
+        let db_state = DbState::new(pool.clone(), std::path::PathBuf::new());
+        let recovered = recover_corrupt_settings(&db_state, &state, "{broken-json", "syntax")
             .await
             .unwrap();
         assert_eq!(recovered.user_name, "用户");

@@ -18,7 +18,7 @@ use crate::vcp_modules::vcp_client::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use tauri::{ipc::Channel, AppHandle, Emitter, State};
+use tauri::{ipc::Channel, AppHandle, Emitter, Manager, State};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -144,8 +144,9 @@ async fn run_group_speaker_turn(
 
     let (_request_lease, cancellation_token) =
         ActiveRequestLease::try_acquire(params.active_requests.0.clone(), request_key.clone())?;
+    let db_state = app_handle.state::<DbState>();
     message_service::begin_stream_message(
-        db_pool,
+        &db_state,
         &request_key,
         Some(&agent_id),
         Some(&agent_name),

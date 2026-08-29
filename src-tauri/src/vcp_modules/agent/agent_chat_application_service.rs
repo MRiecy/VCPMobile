@@ -132,7 +132,7 @@ pub async fn internal_process_agent_chat_message(
     let (_request_lease, cancellation_token) =
         ActiveRequestLease::try_acquire(active_requests.0.clone(), request_key.clone())?;
     message_service::begin_stream_message(
-        &db_state.pool,
+        &db_state,
         &request_key,
         Some(&agent_id),
         Some(&agent_config.name),

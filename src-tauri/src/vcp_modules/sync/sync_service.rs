@@ -1303,7 +1303,12 @@ async fn run_sync_session(
     let mut next_attempt_id = 0u64;
 
     let db = app_handle.state::<DbState>();
-    let mut write_queue = DbWriteQueue::new(db.pool.clone(), db.path.clone());
+    let mut write_queue = DbWriteQueue::new(
+        db.pool.clone(),
+        db.path.clone(),
+        db.write_gate.clone(),
+        session_id,
+    );
     let sync_log_level = LogLevel::parse(&configured_log_level).unwrap_or(LogLevel::Info);
     let invalid_log_level = LogLevel::parse(&configured_log_level).is_none();
     let log_dir = app_handle

@@ -239,15 +239,7 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
         .await
         .map_err(|e| format!("Failed to parse emoji JSON: {}", e))?;
 
-    // 4. 处理并保存到数据库
-    let mut transaction = pool.begin().await.map_err(|e| e.to_string())?;
-
-    // 清空旧库
-    sqlx::query("DELETE FROM emoticon_library")
-        .execute(&mut *transaction)
-        .await
-        .map_err(|e| e.to_string())?;
-
+    // 4. Build the new library before entering the write gate.
     let mut library = Vec::new();
     for (category, filenames) in payload.data {
         for filename in filenames {
@@ -262,26 +254,33 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
 
             let search_key = format!("{}/{}", category.to_lowercase(), filename.to_lowercase());
 
-            // 插入数据库
-            sqlx::query(
-                "INSERT INTO emoticon_library (category, filename, url, search_key) VALUES (?, ?, ?, ?)"
-            )
-            .bind(&category)
-            .bind(&filename)
-            .bind(&full_url)
-            .bind(&search_key)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|e| e.to_string())?;
-
             library.push(EmoticonItem {
                 id: None,
                 category: category.clone(),
-                filename: filename.clone(),
+                filename,
                 url: full_url,
                 search_key,
             });
         }
+    }
+
+    let (write_permit, mut transaction) = db_state.begin_write("emoticon.refresh").await?;
+    sqlx::query("DELETE FROM emoticon_library")
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    for item in &library {
+        sqlx::query(
+                "INSERT INTO emoticon_library (category, filename, url, search_key) VALUES (?, ?, ?, ?)"
+            )
+            .bind(&item.category)
+            .bind(&item.filename)
+            .bind(&item.url)
+            .bind(&item.search_key)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|e| e.to_string())?;
     }
 
     // 保存最后同步时间戳
@@ -294,6 +293,7 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
         .map_err(|e| e.to_string())?;
 
     transaction.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
 
     let count = library.len();
     let emoticon_state = app_handle.state::<EmoticonManagerState>();

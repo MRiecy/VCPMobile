@@ -23,6 +23,19 @@ pub use crate::vcp_modules::infra::lifecycle_reconciler::{
 };
 pub use crate::vcp_modules::infra::lifecycle_state::{CoreStatus, LifecycleState};
 
+async fn persist_delete_cleanup_marker(db_state: &DbState, now: i64) -> Result<(), String> {
+    let (write_permit, mut tx) = db_state.begin_write("maintenance.cleanup-marker").await?;
+    sqlx::query("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('delete_executor_last_cleanup', ?, ?)")
+        .bind(now.to_string())
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| error.to_string())?;
+    tx.commit().await.map_err(|error| error.to_string())?;
+    drop(write_permit);
+    Ok(())
+}
+
 /// 核心启动逻辑：线性化管理所有服务的初始化顺序
 pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     let lifecycle = app.state::<LifecycleState>();
@@ -44,10 +57,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     // 1. 数据库初始化 (P0 - 绝对基础)
     let pool = match init_db(&handle).await {
         Ok((p, path)) => {
-            handle.manage(DbState {
-                pool: p.clone(),
-                path,
-            });
+            handle.manage(DbState::new(p.clone(), path));
             p
         }
         Err(e) => {
@@ -229,11 +239,9 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
                     .is_ok()
                 {
                     let now = crate::vcp_modules::infra::utils::now_millis();
-                    let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('delete_executor_last_cleanup', ?, ?)")
-                        .bind(now.to_string())
-                        .bind(now)
-                        .execute(pool)
-                        .await;
+                    if let Err(error) = persist_delete_cleanup_marker(&db_state, now).await {
+                        log::warn!("[Lifecycle] Failed to persist cleanup marker: {error}");
+                    }
                 }
             }
 
@@ -245,11 +253,9 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
                     .is_ok()
                 {
                     let now = crate::vcp_modules::infra::utils::now_millis();
-                    let _ = sqlx::query("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('delete_executor_last_cleanup', ?, ?)")
-                        .bind(now.to_string())
-                        .bind(now)
-                        .execute(pool)
-                        .await;
+                    if let Err(error) = persist_delete_cleanup_marker(&db_state, now).await {
+                        log::warn!("[Lifecycle] Failed to persist cleanup marker: {error}");
+                    }
                 }
             }
         });

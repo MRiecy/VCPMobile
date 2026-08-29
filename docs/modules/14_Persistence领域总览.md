@@ -67,6 +67,7 @@ Vue 3 前端 / Rust 业务层
 pub struct DbState {
     pub pool: Pool<Sqlite>,
     pub path: std::path::PathBuf,
+    pub write_gate: DbWriteGate,
 }
 ```
 
@@ -74,8 +75,9 @@ pub struct DbState {
 |------|------|------|
 | `pool` | `Pool<Sqlite>` | sqlx 异步连接池，供全应用普通查询使用 |
 | `path` | `PathBuf` | 数据库文件的绝对物理路径，供 `DbWriteQueue` 直接打开 rusqlite 连接 |
+| `write_gate` | `DbWriteGate` | 每个数据库唯一的公平写入准入；只在一个运行期写事务内持有 |
 
-`DbState` 以 Tauri `State` 形式挂载到 `AppHandle`，通过 `app_handle.state::<DbState>()` 在任意 Tauri Command 中获取（L6–L9）。
+`DbState` 以 Tauri `State` 形式挂载到 `AppHandle`。固定锁顺序是“领域锁 → `DbWriteGate` → `BEGIN IMMEDIATE`”；提交或回滚后先释放 Gate，再做缓存失效、请求取消、事件或网络操作。启动 migration/bootstrap 在并发服务启动前完成，是明确例外。
 
 ### 2.2 连接池初始化
 
@@ -292,7 +294,7 @@ CREATE TABLE IF NOT EXISTS active_generations (
 
 ## 3. SQLite 写队列当前算法（`db_write_queue.rs`）
 
-> **状态边界（2026-08-28）**：本节描述阶段 1 提交 `b677529`、阶段 2 有界微批处理与阶段 3 相邻同 Topic 合并落地后的真实代码。这里的“当前”是 **FIFO 贪婪前缀 + 2ms quiet / 10ms hard 双截止时间 + 事务内保序合并 + 固定 999 bind 预算**。阶段 4 已完成基准并拒绝运行时上限方案，详见 §3.7。
+> **状态边界（2026-08-30）**：当前算法是 **全局事务级 `DbWriteGate` + FIFO 贪婪前缀 + 2ms quiet / 10ms hard 双截止时间 + 事务内保序合并 + 固定 999 bind 预算**。Gate 不改变 Queue 的批次预算，只统一 Queue 与 SQLx/rusqlite 领域 writer 的准入。
 >
 > 一句话概括：多个同步 Pull 生产者把任务送入容量 32 的有界通道；唯一 Worker 按 FIFO 取“当前预算内最长连续前缀”，用一个持久 rusqlite 连接在单个事务中执行；`Flush` 是排在队列中的提交屏障。
 
@@ -319,7 +321,8 @@ flowchart LR
 
     Q --> W["唯一异步 Worker<br/>FIFO 收集批次"]
     W --> G["贪婪选择<br/>最长可容纳连续前缀"]
-    G --> B["spawn_blocking"]
+    G --> A["DbWriteGate<br/>公平事务级准入"]
+    A --> B["spawn_blocking"]
     B --> C["持久 rusqlite 连接<br/>prepare_cached 可跨批次复用"]
     C --> T["单个 SQLite 事务"]
     T --> D[("同一数据库<br/>WAL + NORMAL")]
@@ -328,8 +331,9 @@ flowchart LR
 
 这里的边界要说准确：
 
-- 队列消除了**队列内部**多个同步 Pull 写任务之间的竞争。
-- 项目里仍有 sqlx 事务等其他写路径；它们与该 rusqlite 连接共享同一数据库，所以连接设置了 2 秒 `busy_timeout`。
+- 队列负责合并同步 Pull；`DbWriteGate` 串行化整个进程内的物理写事务，普通业务写、同步删除、Finalizer 和维护 writer 使用同一实例。
+- Queue 在 2/10ms 收集窗口结束后才申请 Gate，等待期间不占用 SQLite；取得 permit 后使用 `BEGIN IMMEDIATE`，避免 DEFERRED 读快照升级为写锁时立即 `SQLITE_BUSY`。
+- Queue 的 2 秒和 SQLx 的 30 秒 busy timeout 仍保留，但只处理漏接路径或外部连接，不是正常进程内调度机制。
 - `submit().await` 只证明任务已经进入通道，不证明 SQLite 已提交；需要提交屏障时必须调用 `flush().await`。
 - 克隆 `DbWriteQueue` 只复制 sender 与只读元数据，`_worker` 置空；不会创建第二个 Worker 或第二条队列连接。
 
@@ -357,6 +361,7 @@ flowchart LR
 | 上游消息分块 | 每个任务最多 250 条 | `PullExecutor::process_topic_messages` 主动切块 |
 | 收集等待 | quiet 2ms / hard 10ms | quiet 随每个已接收任务重置；hard 从首任务固定且不可延长 |
 | SQLite 忙等待 | 最多 2000ms | 与队列外的数据库写连接冲突时由 SQLite 退避 |
+| Gate 持有范围 | 一个事务 | 批次收集、网络、渲染计算与事件发送均在 Gate 外 |
 
 消息预算不计算 Avatar 字节、Topic 数量或 DTO 序列化大小；这些任务只占“任务数”预算。Pull 的 NDJSON 解析层另有 32 MiB 字节加权预算，二者不是同一个控制器。
 
@@ -982,14 +987,15 @@ Agent/Group 同步写绕过业务 Facade，因此 session 成功或失败退出�
 
 ---
 
-*最后更新：2026-08-28 | VCP Mobile v1.1.5*
+*最后更新：2026-08-30 | VCP Mobile v1.1.6*
 
 > **关键设计决策备忘**
 >
-> 1. **双通道数据库访问**：查询走 sqlx 异步连接池，写入走 DbWriteQueue + rusqlite 同步直连。两者共享同一物理数据库文件，通过 WAL 模式协调并发。
-> 2. **批量事务合并**：DbWriteQueue Worker 使用滑动 10ms 空闲超时 + 32 任务/正常 500 消息预算；当前没有首任务起算的硬截止时间。
+> 1. **读写分工**：纯读取走 WAL 并发；所有运行期 SQLx/rusqlite writer 共享 `DbWriteGate`，Gate 后以 `BEGIN IMMEDIATE` 开始事务。
+> 2. **批量事务合并**：DbWriteQueue Worker 使用 2ms quiet / 首任务起算 10ms hard 双截止时间 + 32 任务/正常 500 消息预算；收集窗口不持有 Gate。
 > 3. **render_cache 独立表**：将预渲染 AST 二进制从 messages 表剥离，避免消息表膨胀，同时允许独立刷新已有缓存。
 > 4. **存储格式分工**：`messages.content` 保存明文 TEXT，`render_cache.render_content` 保存 zstd 压缩 AST。
 > 5. **哈希更新分工**：Topic 元数据批次校验并去重更新受影响 Owner 根；TopicMessages 先 Flush，再由 SyncFinalizer 统一重算 Topic/Owner 消息根。
 > 6. **懒渲染缓存闭环**：加载时 render_cache 命中即走；未命中实时编译并异步回写，确保首次访问后的后续加载均为 O(1) 反序列化。
 > 7. **Schema 基线**：全新安装执行 0100 baseline；不兼容旧数据库由启动检查明确拒绝。
+> 8. **Flush 错误交付**：历史写错误仅在 oneshot ACK 成功发送后清除；取消 waiter 不得吞掉错误或产生伪成功。

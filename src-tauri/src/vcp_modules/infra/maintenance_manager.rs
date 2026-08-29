@@ -385,15 +385,28 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
         let _ = db_state.run_incremental_vacuum_optimize(100).await;
 
         // 2. 自动清除已删除消息的多余附件关联
-        let _ = sqlx::query(
-            "DELETE FROM message_attachments WHERE (owner_type, owner_id, topic_id, msg_id) IN (\
-             SELECT ma.owner_type, ma.owner_id, ma.topic_id, ma.msg_id FROM message_attachments ma \
-             INNER JOIN messages m ON ma.owner_type = m.owner_type AND ma.owner_id = m.owner_id \
-                AND ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
-             WHERE m.deleted_at IS NOT NULL)",
-        )
-        .execute(&db_state.pool)
+        let cleanup_result = async {
+            let (write_permit, mut tx) = db_state
+                .begin_write("maintenance.attachment-relations")
+                .await?;
+            sqlx::query(
+                "DELETE FROM message_attachments WHERE (owner_type, owner_id, topic_id, msg_id) IN (\
+                 SELECT ma.owner_type, ma.owner_id, ma.topic_id, ma.msg_id FROM message_attachments ma \
+                 INNER JOIN messages m ON ma.owner_type = m.owner_type AND ma.owner_id = m.owner_id \
+                    AND ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
+                 WHERE m.deleted_at IS NOT NULL)",
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| error.to_string())?;
+            tx.commit().await.map_err(|error| error.to_string())?;
+            drop(write_permit);
+            Ok::<(), String>(())
+        }
         .await;
+        if let Err(error) = cleanup_result {
+            log::warn!("[Maintenance] Attachment relation cleanup failed: {error}");
+        }
 
         // 3. 更新时间戳
         let updates = serde_json::json!({

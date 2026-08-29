@@ -1,19 +1,146 @@
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
+const DB_WRITE_GATE_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
+const DB_WRITE_GATE_SLOW_LOG_THRESHOLD: Duration = Duration::from_millis(500);
+
+/// Process-local admission control for the database's single physical SQLite writer.
+///
+/// Tokio's mutex is FIFO, so concurrent SQLx services and the rusqlite sync queue wait in one
+/// fair application-level line instead of racing inside SQLite. A permit must cover only one
+/// write transaction and must be released before cache invalidation, events, HTTP, or file I/O.
+#[derive(Clone, Debug)]
+pub struct DbWriteGate {
+    inner: Arc<AsyncMutex<()>>,
+}
+
+impl Default for DbWriteGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DbWriteGate {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(AsyncMutex::new(())),
+        }
+    }
+
+    pub async fn acquire(&self, writer_kind: &'static str) -> Result<DbWritePermit, String> {
+        let wait_started = Instant::now();
+        let guard = tokio::time::timeout(
+            DB_WRITE_GATE_ADMISSION_TIMEOUT,
+            self.inner.clone().lock_owned(),
+        )
+        .await
+        .map_err(|_| {
+            format!(
+                "DbWriteGate admission timed out after {:?} for {writer_kind}",
+                DB_WRITE_GATE_ADMISSION_TIMEOUT
+            )
+        })?;
+        Ok(DbWritePermit::new(
+            writer_kind,
+            wait_started.elapsed(),
+            guard,
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_locked(&self) -> bool {
+        self.inner.try_lock().is_err()
+    }
+}
+
+pub struct DbWritePermit {
+    writer_kind: &'static str,
+    wait_duration: Duration,
+    acquired_at: Instant,
+    _guard: OwnedMutexGuard<()>,
+}
+
+impl DbWritePermit {
+    fn new(writer_kind: &'static str, wait_duration: Duration, guard: OwnedMutexGuard<()>) -> Self {
+        log::debug!(
+            "[DbWriteGate] acquired writer_kind={} wait_ms={:.3}",
+            writer_kind,
+            wait_duration.as_secs_f64() * 1000.0
+        );
+        Self {
+            writer_kind,
+            wait_duration,
+            acquired_at: Instant::now(),
+            _guard: guard,
+        }
+    }
+}
+
+impl Drop for DbWritePermit {
+    fn drop(&mut self) {
+        let hold_duration = self.acquired_at.elapsed();
+        if self.wait_duration >= DB_WRITE_GATE_SLOW_LOG_THRESHOLD
+            || hold_duration >= DB_WRITE_GATE_SLOW_LOG_THRESHOLD
+        {
+            log::warn!(
+                "[DbWriteGate] slow writer_kind={} wait_ms={:.3} hold_ms={:.3}",
+                self.writer_kind,
+                self.wait_duration.as_secs_f64() * 1000.0,
+                hold_duration.as_secs_f64() * 1000.0
+            );
+        } else {
+            log::debug!(
+                "[DbWriteGate] released writer_kind={} wait_ms={:.3} hold_ms={:.3}",
+                self.writer_kind,
+                self.wait_duration.as_secs_f64() * 1000.0,
+                hold_duration.as_secs_f64() * 1000.0
+            );
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct DbState {
     pub pool: Pool<Sqlite>,
     pub path: std::path::PathBuf,
+    pub write_gate: DbWriteGate,
 }
 
 impl DbState {
+    pub fn new(pool: Pool<Sqlite>, path: std::path::PathBuf) -> Self {
+        Self {
+            pool,
+            path,
+            write_gate: DbWriteGate::new(),
+        }
+    }
+
+    pub async fn begin_write(
+        &self,
+        writer_kind: &'static str,
+    ) -> Result<(DbWritePermit, sqlx::Transaction<'static, Sqlite>), String> {
+        let permit = self.write_gate.acquire(writer_kind).await?;
+        let transaction = begin_immediate_write(&self.pool)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok((permit, transaction))
+    }
+
     /// 执行 SQLite 物理页面碎片分批回收与查询规划器索引优化
     pub async fn run_incremental_vacuum_optimize(
         &self,
         pages_to_vacuum: i32,
     ) -> Result<(), sqlx::Error> {
+        let write_permit = self
+            .write_gate
+            .acquire("maintenance.sqlite")
+            .await
+            .map_err(sqlx::Error::Protocol)?;
         // 1. 分批页整理碎片，防堵大面积 I/O 阻塞
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "PRAGMA incremental_vacuum({})",
@@ -23,8 +150,20 @@ impl DbState {
         .await?;
         // 2. 重构索引规划器
         sqlx::query("PRAGMA optimize").execute(&self.pool).await?;
+        drop(write_permit);
         Ok(())
     }
+}
+
+/// Starts a SQLite write-intent transaction before any reads establish a snapshot.
+///
+/// A deferred transaction that reads before writing can fail immediately with SQLITE_BUSY while
+/// upgrading its snapshot, even when `busy_timeout` is configured. Sync deletion paths use this
+/// boundary because they intentionally run beside the DbWriteQueue writer.
+pub(crate) async fn begin_immediate_write(
+    pool: &Pool<Sqlite>,
+) -> Result<sqlx::Transaction<'static, Sqlite>, sqlx::Error> {
+    pool.begin_with("BEGIN IMMEDIATE").await
 }
 
 pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path::PathBuf), String> {
@@ -963,6 +1102,100 @@ pub async fn search_messages_fts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn write_gate_cancelled_waiter_and_panicking_owner_do_not_leak_permit() {
+        let gate = DbWriteGate::new();
+        let holder = gate
+            .acquire("test.holder")
+            .await
+            .expect("acquire initial permit");
+
+        let waiting_gate = gate.clone();
+        let waiter = tokio::spawn(async move { waiting_gate.acquire("test.cancelled").await });
+        tokio::task::yield_now().await;
+        waiter.abort();
+        assert!(matches!(waiter.await, Err(error) if error.is_cancelled()));
+        drop(holder);
+
+        let panic_gate = gate.clone();
+        let owner = tokio::spawn(async move {
+            let _permit = panic_gate
+                .acquire("test.panicking")
+                .await
+                .expect("acquire permit before panic");
+            panic!("intentional gate owner panic");
+        });
+        assert!(owner.await.expect_err("owner must panic").is_panic());
+
+        let blocking_permit = gate
+            .acquire("test.blocking-panic")
+            .await
+            .expect("acquire permit before blocking panic");
+        let blocking_owner = tokio::task::spawn_blocking(move || {
+            let _permit = blocking_permit;
+            panic!("intentional blocking gate owner panic");
+        });
+        assert!(blocking_owner
+            .await
+            .expect_err("blocking owner must panic")
+            .is_panic());
+
+        tokio::time::timeout(Duration::from_secs(1), gate.acquire("test.after-panic"))
+            .await
+            .expect("gate permit leaked")
+            .expect("gate acquisition failed after panic");
+    }
+
+    #[tokio::test]
+    async fn immediate_write_waits_for_an_existing_writer_at_begin() {
+        let temp_dir = tempfile::tempdir().expect("create temp database directory");
+        let db_path = temp_dir.path().join("write-contention.sqlite");
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .busy_timeout(std::time::Duration::from_secs(1));
+        let pool = SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect_with(options)
+            .await
+            .expect("open SQLx test pool");
+        sqlx::query("CREATE TABLE lock_probe (id INTEGER PRIMARY KEY)")
+            .execute(&pool)
+            .await
+            .expect("create lock probe table");
+
+        let mut holder = rusqlite::Connection::open(&db_path).expect("open writer connection");
+        holder
+            .busy_timeout(std::time::Duration::from_secs(1))
+            .expect("configure writer timeout");
+        let held = holder
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .expect("reserve writer");
+
+        let waiter_pool = pool.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let mut waiter = tokio::spawn(async move {
+            let _ = started_tx.send(());
+            let tx = begin_immediate_write(&waiter_pool).await?;
+            tx.commit().await
+        });
+        started_rx.await.expect("start waiting writer");
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), &mut waiter)
+                .await
+                .is_err(),
+            "the competing transaction must wait at BEGIN instead of taking a read snapshot"
+        );
+
+        held.commit().expect("release writer");
+        tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
+            .await
+            .expect("waiting transaction timed out")
+            .expect("waiting transaction task failed")
+            .expect("waiting transaction failed after writer release");
+    }
 
     #[test]
     fn test_build_fts_match_query() {

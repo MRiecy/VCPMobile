@@ -1,5 +1,6 @@
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::content_parser::{parse_content, ContentBlock};
+use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::topic_types::{MessageKey, TopicActivityDto, TopicKey};
 use serde::Serialize;
@@ -98,12 +99,13 @@ pub async fn deserialize_render_async(bytes: Vec<u8>) -> Result<Vec<ContentBlock
 /// Writes a render result only while the source message still has the hash that was compiled.
 /// This prevents a slow cache miss/re-render from overwriting a newer edit.
 pub async fn write_render_cache_cas(
-    pool: &sqlx::SqlitePool,
+    db_state: &DbState,
     key: &MessageKey,
     observed_content_hash: &str,
     render_content: &[u8],
 ) -> Result<bool, String> {
     let now = chrono::Utc::now().timestamp_millis();
+    let (write_permit, mut tx) = db_state.begin_write("message.render-cache").await?;
     let result = sqlx::query(
         "INSERT INTO render_cache (
             owner_type, owner_id, topic_id, msg_id, render_content, content_hash,
@@ -139,9 +141,11 @@ pub async fn write_render_cache_cas(
     .bind(&key.topic.topic_id)
     .bind(&key.msg_id)
     .bind(observed_content_hash)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(|error| error.to_string())?;
+    tx.commit().await.map_err(|error| error.to_string())?;
+    drop(write_permit);
     Ok(result.rows_affected() == 1)
 }
 
@@ -284,32 +288,54 @@ fn update_render_cache_if_current(
 
 /// 渲染缓存批量 CAS Writer，带进度发射。
 fn run_render_cache_update_writer(
-    db_path: &std::path::Path,
+    db_state: DbState,
     mut rx: mpsc::Receiver<Vec<RenderCacheWrite>>,
     progress_event: &str,
     app_handle: AppHandle,
     total: usize,
 ) -> tokio::task::JoinHandle<Result<(), String>> {
     let progress_event = progress_event.to_string();
-    let db_path = db_path.to_path_buf();
+    let connection = std::sync::Arc::new(std::sync::Mutex::new(None));
 
-    tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let mut conn = open_maintenance_rusqlite(&db_path)?;
+    tokio::spawn(async move {
         let mut processed = 0;
         let mut last_emit_time = std::time::Instant::now();
         let emit_interval = std::time::Duration::from_millis(32);
 
-        while let Some(batch) = rx.blocking_recv() {
-            let tx = conn.transaction().map_err(|e| e.to_string())?;
-            {
+        while let Some(batch) = rx.recv().await {
+            let batch_len = batch.len();
+            let write_permit = db_state
+                .write_gate
+                .acquire("maintenance.render-cache")
+                .await?;
+            let connection = connection.clone();
+            let db_path = db_state.path.clone();
+            tokio::task::spawn_blocking(move || -> Result<(), String> {
+                let write_permit = write_permit;
+                let mut connection = connection
+                    .lock()
+                    .map_err(|_| "预渲染缓存连接锁已损坏".to_string())?;
+                if connection.is_none() {
+                    *connection = Some(open_maintenance_rusqlite(&db_path)?);
+                }
+                let connection = connection
+                    .as_mut()
+                    .ok_or_else(|| "预渲染缓存连接初始化失败".to_string())?;
+                let tx = connection
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(|error| error.to_string())?;
                 let now = chrono::Utc::now().timestamp_millis();
                 for (key, content_hash, bytes) in batch {
                     update_render_cache_if_current(&tx, &key, &content_hash, &bytes, now)
                         .map_err(|e| e.to_string())?;
-                    processed += 1;
                 }
-            }
-            tx.commit().map_err(|e| e.to_string())?;
+                tx.commit().map_err(|e| e.to_string())?;
+                drop(write_permit);
+                Ok(())
+            })
+            .await
+            .map_err(|error| format!("预渲染缓存写线程失败: {error}"))??;
+            processed += batch_len;
 
             if last_emit_time.elapsed() >= emit_interval || processed == total {
                 let _ = app_handle.emit(
@@ -419,7 +445,6 @@ mod rebuild_cache_tests {
 pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String> {
     let db_state = app_handle.state::<crate::vcp_modules::db_manager::DbState>();
     let pool = db_state.pool.clone();
-    let db_path = db_state.path.clone();
 
     let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM render_cache")
         .fetch_one(&pool)
@@ -442,7 +467,7 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
 
     // --- Stage 3: Writer ---
     let writer_handle = run_render_cache_update_writer(
-        &db_path,
+        db_state.inner().clone(),
         rx_writer,
         "render_rebuild_progress",
         app_handle.clone(),

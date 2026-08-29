@@ -1,7 +1,7 @@
 // GroupService: 处理群组(Agent Group)配置与生命周期的核心模块 (IPC 层)
 // 职责: 作为 Tauri 命令入口，处理群组业务逻辑，完全面向 SQLite 存储。
 
-use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::db_manager::{begin_immediate_write, DbState};
 use crate::vcp_modules::group_types::{
     parse_member_tags, serialize_member_tags, GroupConfig, MemberTags,
 };
@@ -341,10 +341,8 @@ pub async fn create_group(
     let default_topic_id = format!("group_topic_{}", timestamp);
 
     let db_state = app_handle.state::<DbState>();
-    let pool = &db_state.pool;
 
-    let mut tx: sqlx::Transaction<'_, sqlx::Sqlite> =
-        pool.begin().await.map_err(|e| e.to_string())?;
+    let (write_permit, mut tx) = db_state.begin_write("identity.group.create").await?;
 
     let default_topic = Topic {
         id: default_topic_id.clone(),
@@ -424,6 +422,7 @@ pub async fn create_group(
     // 触发聚合哈希冒泡
     HashAggregator::bubble_group_hash(&mut tx, &group_id).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
 
     state.insert_cache_if_current(group_id, config.clone(), cache_generation);
     Ok(config)
@@ -437,11 +436,10 @@ async fn internal_write_group_config<R: Runtime>(
 ) -> Result<GroupConfig, String> {
     let cache_generation = state.current_cache_generation();
     let db_state = app_handle.state::<DbState>();
-    let pool = &db_state.pool;
 
     let now = crate::vcp_modules::infra::utils::now_millis();
 
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let (write_permit, mut tx) = db_state.begin_write("identity.group.save").await?;
 
     let deleted_at = sqlx::query_scalar::<_, Option<i64>>(
         "SELECT deleted_at FROM groups WHERE owner_type = 'group' AND group_id = ?",
@@ -451,6 +449,8 @@ async fn internal_write_group_config<R: Runtime>(
     .await
     .map_err(|e| e.to_string())?;
     if matches!(deleted_at, Some(Some(_))) {
+        tx.commit().await.map_err(|e| e.to_string())?;
+        drop(write_permit);
         return Err(format!("Group {group_id} has been deleted"));
     }
 
@@ -541,6 +541,7 @@ async fn internal_write_group_config<R: Runtime>(
     }
 
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
 
     state.insert_cache_if_current(
         group_id.to_string(),
@@ -589,7 +590,15 @@ pub async fn delete_group_internal<R: Runtime>(
     if now < 0 {
         return Err("Group delete requires a non-negative deletedAt".to_string());
     }
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let writer_kind = if requested_deleted_at.is_some() {
+        "sync.delete.group"
+    } else {
+        "identity.group.delete"
+    };
+    let write_permit = db_state.write_gate.acquire(writer_kind).await?;
+    let mut tx = begin_immediate_write(pool)
+        .await
+        .map_err(|e| e.to_string())?;
 
     let existing_deleted_at: Option<Option<i64>> = sqlx::query_scalar(
         "SELECT deleted_at FROM groups WHERE owner_type = 'group' AND group_id = ?",
@@ -614,9 +623,14 @@ pub async fn delete_group_internal<R: Runtime>(
             .map_err(|e| e.to_string())?;
             true
         }
-        None => return Err(format!("Group {group_id} does not exist")),
+        None => {
+            tx.commit().await.map_err(|e| e.to_string())?;
+            drop(write_permit);
+            return Err(format!("Group {group_id} does not exist"));
+        }
         Some(Some(existing)) => {
             tx.commit().await.map_err(|e| e.to_string())?;
+            drop(write_permit);
             state.caches.remove(group_id);
             return Ok(existing);
         }
@@ -709,6 +723,7 @@ pub async fn delete_group_internal<R: Runtime>(
         .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
 
     if let Some(active_requests) =
         app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveRequests>()

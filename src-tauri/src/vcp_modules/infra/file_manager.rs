@@ -495,14 +495,14 @@ pub fn resolve_attachment_path(
 use super::file_extractor::try_extract_text;
 
 async fn commit_registered_attachment(
-    pool: &sqlx::SqlitePool,
+    db_state: &DbState,
     hash: &str,
     mime_type: &str,
     size: u64,
     internal_path: &str,
     now: i64,
 ) -> Result<(), String> {
-    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let (write_permit, mut tx) = db_state.begin_write("file.attachment.register").await?;
     sqlx::query(
         "INSERT INTO attachments (hash, mime_type, size, internal_path, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?)
@@ -559,7 +559,9 @@ async fn commit_registered_attachment(
     .await
     .map_err(|e| e.to_string())?;
 
-    tx.commit().await.map_err(|e| e.to_string())
+    tx.commit().await.map_err(|e| e.to_string())?;
+    drop(write_permit);
+    Ok(())
 }
 
 /// 将文件元数据注册到数据库并触发后处理 (缩略图、文本提取)
@@ -573,6 +575,7 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
     internal_path: String,
 ) -> Result<AttachmentData, String> {
     let now = crate::vcp_modules::infra::utils::now_secs() as u64;
+    let db_state = app_handle.state::<DbState>();
 
     if let Ok(existing) = resolve_attachment_cas_file(app_handle, pool, &hash).await {
         if existing.size_bytes != size {
@@ -587,7 +590,7 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
         .map_err(|error| format!("读取现有附件元数据失败: {error}"))?;
         let existing_path = existing.path.to_string_lossy().into_owned();
         commit_registered_attachment(
-            pool,
+            &db_state,
             &hash,
             &existing.mime_type,
             existing.size_bytes,
@@ -632,7 +635,15 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
     }
 
     // 1. 原子更新 CAS 索引，并把仍然存活的 desktop_only 关系提升为 ready。
-    commit_registered_attachment(pool, &hash, &mime_type, size, &internal_path, now as i64).await?;
+    commit_registered_attachment(
+        &db_state,
+        &hash,
+        &mime_type,
+        size,
+        &internal_path,
+        now as i64,
+    )
+    .await?;
 
     let internal_file_path = std::path::PathBuf::from(&internal_path);
 
@@ -658,18 +669,26 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
     // 核心安全优化：在后端即时且闭环地将耗时提取出的重资产数据持久化写入数据库
     // 杜绝大文本数据在前端 WebView 绕一圈所导致的数据丢失或内存积压泄漏！
     if extracted_text.is_some() || thumbnail_path.is_some() {
-        if let Err(error) = sqlx::query(
-            "UPDATE attachments 
-             SET extracted_text = ?, thumbnail_path = ?, updated_at = ? 
-             WHERE hash = ?",
-        )
-        .bind(&extracted_text)
-        .bind(&thumbnail_path)
-        .bind(now as i64)
-        .bind(&hash)
-        .execute(pool)
-        .await
-        {
+        let derived_update = async {
+            let (write_permit, mut tx) = db_state.begin_write("file.attachment.derived").await?;
+            sqlx::query(
+                "UPDATE attachments
+                 SET extracted_text = ?, thumbnail_path = ?, updated_at = ?
+                 WHERE hash = ?",
+            )
+            .bind(&extracted_text)
+            .bind(&thumbnail_path)
+            .bind(now as i64)
+            .bind(&hash)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| error.to_string())?;
+            tx.commit().await.map_err(|error| error.to_string())?;
+            drop(write_permit);
+            Ok::<(), String>(())
+        }
+        .await;
+        if let Err(error) = derived_update {
             log::warn!(
                 "附件主记录已提交，但派生文本/缩略图元数据更新失败: {}",
                 error
@@ -1053,13 +1072,16 @@ pub async fn register_local_file(
             }
 
             // 更新 SQLite 中的 thumbnail_path，使其指向正式保存的缩略图
+            let (write_permit, mut tx) = db_state.begin_write("file.attachment.thumbnail").await?;
             sqlx::query("UPDATE attachments SET thumbnail_path = ?, updated_at = ? WHERE hash = ?")
                 .bind(&dest_thumb_path_str)
                 .bind(attachment_data.created_at as i64)
                 .bind(&hash)
-                .execute(&db_state.pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|error| format!("更新附件缩略图元数据失败: {}", error))?;
+            tx.commit().await.map_err(|error| error.to_string())?;
+            drop(write_permit);
             if let Err(error) = tokio::fs::remove_file(&source_thumb).await {
                 log::warn!("附件缩略图已注册，但清理 staging 文件失败: {}", error);
             }
@@ -1261,7 +1283,7 @@ pub fn evict_multimodal_cache_if_needed<R: tauri::Runtime>(
 /// ⚡ 确保附件大文本已被安全提取。
 /// 若数据库中缺失大文本，且手机本地物理文件真实存在，则在后台立即触发提取，并异步持久化自愈回库。
 pub async fn ensure_extracted_text(
-    pool: &sqlx::SqlitePool,
+    db_state: &DbState,
     hash: &str,
     internal_path: &str,
     mime_type: &str,
@@ -1304,20 +1326,31 @@ pub async fn ensure_extracted_text(
     .flatten();
 
     if let Some(text) = text_opt {
-        let pool_c = pool.clone();
+        let db_c = db_state.clone();
         let hash_c = hash.to_string();
         let text_c = text.clone();
 
         // 3. 异步持久化写入 SQLite，不阻塞当前的上下文加载请求
         tokio::spawn(async move {
-            let _ = sqlx::query(
-                "UPDATE attachments SET extracted_text = ?, updated_at = ? WHERE hash = ?",
-            )
-            .bind(&text_c)
-            .bind(chrono::Utc::now().timestamp_millis())
-            .bind(&hash_c)
-            .execute(&pool_c)
+            let result = async {
+                let (write_permit, mut tx) = db_c.begin_write("file.attachment.extract").await?;
+                sqlx::query(
+                    "UPDATE attachments SET extracted_text = ?, updated_at = ? WHERE hash = ?",
+                )
+                .bind(&text_c)
+                .bind(chrono::Utc::now().timestamp_millis())
+                .bind(&hash_c)
+                .execute(&mut *tx)
+                .await
+                .map_err(|error| error.to_string())?;
+                tx.commit().await.map_err(|error| error.to_string())?;
+                drop(write_permit);
+                Ok::<(), String>(())
+            }
             .await;
+            if let Err(error) = result {
+                log::warn!("Failed to persist extracted attachment text: {error}");
+            }
         });
 
         Some(text)
@@ -1444,6 +1477,7 @@ mod security_boundary_tests {
         validated_direct_file, verify_expected_hash, verify_streamed_size,
     };
     use super::{check_existing_cas_size, check_existing_cas_size_async};
+    use crate::vcp_modules::db_manager::DbState;
     use std::fs;
 
     #[test]
@@ -1656,7 +1690,8 @@ mod security_boundary_tests {
         .await
         .expect("create fixture");
 
-        commit_registered_attachment(&pool, "hash", "text/plain", 4, "/cas/hash", 10)
+        let db_state = DbState::new(pool.clone(), std::path::PathBuf::new());
+        commit_registered_attachment(&db_state, "hash", "text/plain", 4, "/cas/hash", 10)
             .await
             .expect("register attachment");
 
