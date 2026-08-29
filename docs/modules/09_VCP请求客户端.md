@@ -1,7 +1,7 @@
 ---
 id: MOD-VCP-CLI-009
-version: "1.1.3"
-date: 2026-08-10
+version: "1.1.5"
+date: 2026-08-28
 module: vcp_client.rs
 scope: src-tauri/src/vcp_modules/
 related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_application_service.rs, group_chat_application_service.rs, message_service.rs]
@@ -18,7 +18,7 @@ related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_ap
 > **2026-08-10 生命周期收口**：Android SSE Helper 仍负责缓存与按事件索引续接，但恢复入口已合并为单个 `recover_active_generation`。它从 claim、query/cache、resume 一直持有同一 attempt lease 到 terminal DB commit，不再暴露独立 `resume_stream` Tauri Command。
 
 其核心职责包括：
-- 将前端传入的 `VcpRequestPayload` 转换为标准化 HTTP 请求
+- 使用 Rust 设置快照冻结本次 turn 的最终 Chat 端点并组装 HTTP 请求
 - 在请求预处理阶段完成**多模态本地文件编码**（图片/视频/音频 → data URL）
 - 根据用户设置执行**动态路由切换**与**上下文注入**（音乐状态、UI 规范）
 - 支持**流式（SSE）**与**非流式**双模式响应处理
@@ -31,7 +31,7 @@ related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_ap
 |---------|---------|------------|
 | 请求参数序列化 | `VcpRequestPayload` 的 Rust 类型校验与 JSON 组装 | `VcpRequestPayload:30` |
 | 多模态预处理 | 识别 `local_file` 类型，按扩展名分发到图片/视频/音频处理器 | `perform_vcp_request:241` |
-| 动态路由切换 | 根据 `enableVcpToolInjection` 设置切换 `/v1/chat/completions` ↔ `/v1/chatvcp/completions` | `perform_vcp_request:393` |
+| Chat 端点解析 | `ChatEndpointMode` + 请求用途经唯一 resolver 派生标准、ChatVCP 或 Raw 端点 | `resolve_chat_endpoint` |
 | 上下文注入 | 读取 `music_state.json`、`songlist.json`，注入 System Message | `perform_vcp_request:403` |
 | 流式 SSE 解析 | 使用 `LinesCodec` + `tokio::select!` 逐行解析 `data:` 事件 | `perform_vcp_request:536` |
 | Aurora 语义沉淀驱动 | 每收到文本 chunk 追加到 `AuroraBuffer`，触发增量块解析与推测渲染 | `perform_vcp_request:591` |
@@ -45,13 +45,13 @@ related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_ap
 
 ```text
 Vue 3 前端（对话引擎）
-    ↓ Tauri IPC invoke: sendToVCP
-lib.rs（命令路由）
-    ↓ 调用
-vcp_client.rs
+    ↓ Tauri IPC: handle_agent_chat_message / handle_group_chat_message
+Rust application service
+    ↓ 读取一次 Settings，freeze_chat_connection
+vcp_client.rs（接收已冻结最终端点）
     ↓ perform_vcp_request
     ├─→ media_processor/ （多模态文件编码）
-    ├─→ db_manager/settings_manager （读取设置）
+    ├─→ Android SSE Helper（复用同一最终 URL）
     ├─→ aurora_pipeline.rs （流式语义沉淀）
     ↓ 返回 (Value, bool)
 lib.rs
@@ -63,7 +63,7 @@ Vue 3 前端（消息渲染层）
 ```text
 agent_chat_application_service.rs ──→ perform_vcp_request ──→ 单聊消息处理
 group_chat_application_service.rs ──→ perform_vcp_request ──→ 群聊接力赛编排
-topic_summary_service.rs ──→ sendToVCP / perform_vcp_request ──→ 话题总结
+topic_summary_service.rs ──→ resolve_chat_endpoint(Auxiliary) ──→ 标准/Raw 辅助请求
 ```
 
 ---
@@ -183,8 +183,8 @@ pub struct ActiveGroupTurns(Arc<DashMap<TopicKey, CancellationToken>>);
            │
            ▼
     ┌──────────────┐
-    │ 1. 读取设置   │ ← 加载 SQLite global 设置
-    │    与路由决策 │   enableVcpToolInjection / agentMusicControl / enableAgentBubbleTheme
+    │ 1. 冻结设置   │ ← ChatEndpointMode + 原始 URL + API Key
+    │    与最终端点 │   同一群聊 turn 的所有接力成员复用该快照
     └──────┬───────┘
            │
            ▼
@@ -239,11 +239,17 @@ pub struct ActiveGroupTurns(Arc<DashMap<TopicKey, CancellationToken>>);
 - 图片/视频/音频处理均在 `tokio::task::spawn_blocking` 中执行，避免阻塞 async 运行时
 - 视频抽帧有**硬上限 300 帧**，防止极端长视频导致 OOM 或 API 超时
 
-### 3.3 动态路由（阶段 1–2）
+### 3.3 Chat 端点路由（阶段 1–2）
 
-**动态路由**：
-- 若 `enableVcpToolInjection = true`，强制将路径替换为 `/v1/chatvcp/completions`（工具增强路由）
-- 否则调用 `normalize_vcp_url()`，确保 URL 以 `/v1/chat/completions` 结尾
+路由决策只由 `resolve_chat_endpoint` 持有：
+
+| 模式 | 交互请求（Agent / 群聊 / 助手 / 模型测试） | 辅助请求（话题总结） |
+|------|------------------------------------------------|----------------------|
+| `standard` | 补全或替换为 `/v1/chat/completions` | 标准 Chat |
+| `vcpTools` | 补全或替换为 `/v1/chatvcp/completions` | 标准 Chat |
+| `raw` | 完整 URL 原样使用 | 完整 URL 原样使用 |
+
+resolver 仅接受带 host 的 HTTP/HTTPS，拒绝用户信息、控制字符与 fragment；保留端口、query 和反向代理路径前缀。`/v1` 被视为 API 基址，已知 Chat 末尾只替换末尾段。正式请求、重试与 Android SSE Helper 均复用 turn 起点冻结的同一最终 URL。
 
 > **v1.1.3 变更说明**：历史版本中 `vcp_client.rs` 曾直接读取 `music_state.json` / `songlist.json` 并向 System Message 注入音乐状态与 UI 规范。当前代码中该逻辑已移除，所有上下文注入（System Prompt、Tavern 规则、历史消息压缩等）由 `context_assembler.rs` 在调用 `perform_vcp_request` 之前完成。`vcp_client.rs` 仅负责将已组装好的 `messages` 数组原样序列化并发送。
 
@@ -413,45 +419,44 @@ pub fn interruptGroupTurn(
 pub async fn test_vcp_connection(
     vcp_url: String,
     vcp_api_key: String,
+    chat_endpoint_mode: ChatEndpointMode,
 ) -> Result<Value, String>
 ```
 
-- **对齐桌面端逻辑**：解析 URL 提取 `protocol://host:port`，拼接 `/v1/models`
+- 通过中央 resolver 派生 `/v1/models`，保留反向代理前缀、端口与 query
+- `raw` 仅在完整 URL 以已知 Chat 端点结尾时安全派生；否则返回 `modelDiscoveryAvailable=false`，不把它误报为 Chat 连接失败
 - 使用 10 秒超时（与生产请求的"无 read_timeout"不同）
-- 返回 `{ success, status, modelCount, models }`
+- 返回 `{ success, status, modelCount, models, modelDiscoveryAvailable }`
 
 ---
 
 ## 5. 工具函数
 
-### 5.1 normalize_vcp_url
+### 5.1 resolve_chat_endpoint
 
 ```rust
-pub fn normalize_vcp_url(url_str: &str) -> String
+pub fn resolve_chat_endpoint(
+    raw_url: &str,
+    mode: ChatEndpointMode,
+    purpose: ChatRequestPurpose,
+) -> Result<String, String>
 ```
 
-- 若 URL 路径不以 `/chat/completions` 结尾，自动追加 `/v1/chat/completions`
-- 处理有/无尾部斜杠两种情况
-- 若解析失败，原样返回输入字符串（容错）
+- 是业务 Chat 路径改写的唯一 owner；`utils.rs` 与 `model_manager.rs` 不再各自拼路由
+- Raw 模式在通过安全校验后逐字返回原 URL
+- 标准模式和 VCP 增强模式保留代理前缀，并识别 `/v1` 与两个已知 Chat 末尾
 
-### 5.2 load_app_settings
+### 5.2 freeze_chat_connection
 
 ```rust
-async fn load_app_settings<R: Runtime>(app: &AppHandle<R>) -> Result<Settings, String>
+pub fn freeze_chat_connection(
+    settings: &Settings,
+    purpose: ChatRequestPurpose,
+) -> Result<ChatConnectionSnapshot, String>
 ```
 
-- 从 SQLite `settings` 表读取 `key = 'global'` 的记录
-- 若不存在，返回 `create_default_settings()`
-- 仅在 `perform_vcp_request` 内部使用，非公共接口
-
-### 5.3 get_app_data_path
-
-```rust
-async fn get_app_data_path<R: Runtime>(app: &AppHandle<R>) -> PathBuf
-```
-
-- 调用 `app.path().app_data_dir()`，失败时回退到 `"AppData"`
-- 用于定位 `music_state.json` 和 `songlist.json`
+- 将设置中的原始 URL、枚举模式与 API Key 固化为请求快照
+- Agent、群聊、邀约、悬浮助手和模型测试均在 Rust 命令起点调用；网络重试不再重读设置
 
 ---
 

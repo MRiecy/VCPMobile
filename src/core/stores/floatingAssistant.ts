@@ -271,9 +271,7 @@ export const useFloatingAssistantStore = defineStore("floatingAssistant", () => 
       return;
     }
 
-    const vcpUrl = settings.vcpServerUrl || "";
-    const vcpApiKey = settings.vcpApiKey || "";
-    if (!vcpUrl || !vcpApiKey) {
+    if (!settings.vcpServerUrl || !settings.vcpApiKey) {
       addToast("error", "VCP 连接未配置", "请在主应用设置中填写服务器地址和 API Key");
       return;
     }
@@ -311,10 +309,10 @@ export const useFloatingAssistantStore = defineStore("floatingAssistant", () => 
         timestamp: m.timestamp,
       }));
 
-    const payload = { agentId, tempMessages, vcpUrl, vcpApiKey };
+    const payload = { agentId, tempMessages };
 
     if (isFloatingMode.value && ws.value) {
-      console.log("[FloatingAssistantStore] Sending via WS:", { agentId, vcpUrl, msgCount: tempMessages.length });
+      console.log("[FloatingAssistantStore] Sending via WS:", { agentId, msgCount: tempMessages.length });
       ws.value.send(
         JSON.stringify({
           action: "handle_assistant_chat_stream",

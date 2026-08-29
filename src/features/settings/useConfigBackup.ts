@@ -20,6 +20,7 @@ export const BACKUP_SETTINGS_KEYS = [
   "adminPassword",
   // 核心连接
   "vcpServerUrl",
+  "chatEndpointMode",
   "vcpApiKey",
   "vcpLogUrl",
   "vcpLogKey",
@@ -39,6 +40,7 @@ export type BackupSettingsKey = (typeof BACKUP_SETTINGS_KEYS)[number];
 
 /** 布尔字段；白名单内其余字段均为字符串 */
 const BOOLEAN_BACKUP_KEYS: ReadonlySet<string> = new Set(["distributedEnabled"]);
+const CHAT_ENDPOINT_MODES = new Set(["standard", "vcpTools", "raw"]);
 
 export interface ConfigBackupFile {
   app: "vcp-mobile";
@@ -62,7 +64,11 @@ export function pickBackupSettings(settings: AppSettings): Partial<AppSettings> 
   const picked: Record<string, string | boolean> = {};
   for (const key of BACKUP_SETTINGS_KEYS) {
     const value = settings[key];
-    if (BOOLEAN_BACKUP_KEYS.has(key)) {
+    if (key === "chatEndpointMode") {
+      picked[key] = typeof value === "string" && CHAT_ENDPOINT_MODES.has(value)
+        ? value
+        : "standard";
+    } else if (BOOLEAN_BACKUP_KEYS.has(key)) {
       picked[key] = value === true;
     } else if (typeof value === "string") {
       picked[key] = value;
@@ -129,7 +135,12 @@ export function parseBackupFile(text: string): ParsedConfigBackup {
   for (const key of BACKUP_SETTINGS_KEYS) {
     const value = rawSettings[key];
     if (value === undefined || value === null) continue;
-    if (BOOLEAN_BACKUP_KEYS.has(key)) {
+    if (key === "chatEndpointMode") {
+      if (typeof value !== "string" || !CHAT_ENDPOINT_MODES.has(value)) {
+        throw new Error(`备份字段 ${key} 类型不正确`);
+      }
+      settings[key] = value;
+    } else if (BOOLEAN_BACKUP_KEYS.has(key)) {
       if (typeof value !== "boolean") {
         throw new Error(`备份字段 ${key} 类型不正确`);
       }
@@ -140,6 +151,14 @@ export function parseBackupFile(text: string): ParsedConfigBackup {
       }
       settings[key] = value;
     }
+  }
+
+  // 仅导入时识别旧布尔开关；新枚举优先，旧字段绝不进入输出 patch。
+  if (settings.chatEndpointMode === undefined && rawSettings.enableVcpToolInjection !== undefined) {
+    if (typeof rawSettings.enableVcpToolInjection !== "boolean") {
+      throw new Error("备份字段 enableVcpToolInjection 类型不正确");
+    }
+    settings.chatEndpointMode = rawSettings.enableVcpToolInjection ? "vcpTools" : "standard";
   }
 
   return {

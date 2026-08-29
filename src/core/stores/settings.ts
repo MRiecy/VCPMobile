@@ -3,9 +3,12 @@ import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useNotificationStore } from "./notification";
 
+export type ChatEndpointMode = "standard" | "vcpTools" | "raw";
+
 export interface AppSettings {
   userName: string;
   vcpServerUrl: string;
+  chatEndpointMode: ChatEndpointMode;
   vcpApiKey: string;
   vcpLogUrl: string;
   vcpLogKey: string;

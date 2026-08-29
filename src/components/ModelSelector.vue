@@ -358,7 +358,12 @@ onUnmounted(() => {
           <!-- 兜底屏 -->
           <div v-else-if="filteredModels.length === 0" class="py-20 text-center opacity-50">
             <Cpu :size="28" class="mx-auto mb-3 text-gray-400" />
-            <p class="text-sm font-medium text-gray-500">未找到匹配的模型</p>
+            <p class="text-sm font-medium text-gray-500">
+              {{ modelStore.modelDiscoveryUnavailable ? '当前原始 URL 不提供模型发现' : '未找到匹配的模型' }}
+            </p>
+            <p v-if="modelStore.modelDiscoveryUnavailable" class="mx-auto mt-2 max-w-64 text-[11px] leading-4 text-gray-400">
+              主聊天仍会使用原地址；模型需由该网关另行提供或从缓存选择
+            </p>
           </div>
 
           <!-- 实际渲染的模型列表 -->

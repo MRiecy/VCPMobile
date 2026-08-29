@@ -899,6 +899,10 @@ pub async fn regenerate_topic_response(
     let settings =
         crate::vcp_modules::settings_manager::read_settings(app_handle.clone(), settings_state)
             .await?;
+    let connection = crate::vcp_modules::vcp_client::freeze_chat_connection(
+        &settings,
+        crate::vcp_modules::vcp_client::ChatRequestPurpose::Interactive,
+    )?;
 
     match owner_type.as_str() {
         "agent" => {
@@ -974,9 +978,8 @@ pub async fn regenerate_topic_response(
                 agent_id: owner_id,
                 topic_id: topic_id.clone(),
                 user_message: chat_msg,
-                vcp_url: settings.vcp_server_url,
-                vcp_api_key: settings.vcp_api_key,
             },
+            connection,
             stream_channel,
             false, // skip append_user_msg
         )
@@ -993,8 +996,7 @@ pub async fn regenerate_topic_response(
                 group_id: owner_id,
                 topic_id: topic_id.clone(),
                 user_message: chat_msg,
-                vcp_url: settings.vcp_server_url,
-                vcp_api_key: settings.vcp_api_key,
+                connection,
                 stream_channel: Some(stream_channel),
             },
             false, // skip append_user_msg

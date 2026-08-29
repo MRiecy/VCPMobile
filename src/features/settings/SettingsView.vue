@@ -54,6 +54,7 @@ const SUBPAGE_MODAL_ID = "SettingsSubPage";
 const settings = ref<AppSettings>({
   userName: "User",
   vcpServerUrl: "",
+  chatEndpointMode: "standard",
   vcpApiKey: "",
   vcpLogUrl: "",
   vcpLogKey: "",

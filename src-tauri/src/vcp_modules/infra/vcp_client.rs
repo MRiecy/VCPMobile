@@ -21,6 +21,9 @@ use url::Url;
 use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, AuroraUpdate, AuroraUpdateKind};
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::settings_manager::{
+    read_settings, ChatEndpointMode, Settings, SettingsState,
+};
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 
 #[cfg(target_os = "android")]
@@ -63,8 +66,10 @@ async fn connect_helper_port_with_timeout(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VcpRequestPayload {
-    pub vcp_url: String,        // VCP服务器URL
-    pub vcp_api_key: String,    // API密钥
+    #[serde(default)]
+    pub vcp_url: String, // turn 起点已冻结的最终 Chat 端点
+    #[serde(default)]
+    pub vcp_api_key: String, // API密钥
     pub messages: Vec<Value>,   // 消息数组
     pub model_config: Value,    // 模型配置 (包含 model, stream, temperature 等)
     pub message_id: String,     // 消息ID (用于跟踪和中止)
@@ -72,6 +77,167 @@ pub struct VcpRequestPayload {
     /// 每个模型 step 的内部网络/helper 身份；不进入 StreamEvent 或 DB 可见身份。
     #[serde(default)]
     pub transport_request_id: Option<String>,
+}
+
+const STANDARD_CHAT_SUFFIX: &str = "/v1/chat/completions";
+const VCP_TOOLS_CHAT_SUFFIX: &str = "/v1/chatvcp/completions";
+const MODELS_SUFFIX: &str = "/v1/models";
+pub const MODEL_DISCOVERY_UNAVAILABLE: &str = "MODEL_DISCOVERY_UNAVAILABLE";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatRequestPurpose {
+    Interactive,
+    Auxiliary,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChatConnectionSnapshot {
+    pub endpoint_url: String,
+    pub api_key: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatEndpointPreview {
+    pub final_url: String,
+    pub model_discovery_url: Option<String>,
+}
+
+struct ValidatedHttpEndpoint {
+    url: Url,
+    explicit_default_port: Option<u16>,
+}
+
+fn explicit_port_from_raw(raw_url: &str) -> Option<u16> {
+    let (_, after_scheme) = raw_url.split_once("://")?;
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default();
+    let port = if authority.starts_with('[') {
+        let closing_bracket = authority.find(']')?;
+        authority.get(closing_bracket + 1..)?.strip_prefix(':')?
+    } else {
+        authority.rsplit_once(':')?.1
+    };
+    port.parse().ok()
+}
+
+fn validate_http_endpoint(raw_url: &str) -> Result<ValidatedHttpEndpoint, String> {
+    if raw_url.chars().any(char::is_control) {
+        return Err("URL 不能包含控制字符".to_string());
+    }
+
+    let url = Url::parse(raw_url).map_err(|error| format!("URL 解析失败: {error}"))?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err("URL 仅支持 HTTP 或 HTTPS".to_string());
+    }
+    if url.host_str().is_none() {
+        return Err("URL 必须包含主机名".to_string());
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("URL 不能包含用户名或密码".to_string());
+    }
+    if url.fragment().is_some() {
+        return Err("URL 不能包含 fragment".to_string());
+    }
+    let explicit_default_port = explicit_port_from_raw(raw_url)
+        .filter(|port| url.port().is_none() && url.port_or_known_default() == Some(*port));
+    Ok(ValidatedHttpEndpoint {
+        url,
+        explicit_default_port,
+    })
+}
+
+fn strip_known_chat_suffix(path: &str) -> Option<&str> {
+    let path = path.trim_end_matches('/');
+    [STANDARD_CHAT_SUFFIX, VCP_TOOLS_CHAT_SUFFIX]
+        .into_iter()
+        .find_map(|suffix| path.strip_suffix(suffix))
+}
+
+fn derive_known_api_endpoint(endpoint: ValidatedHttpEndpoint, suffix: &str) -> String {
+    let ValidatedHttpEndpoint {
+        mut url,
+        explicit_default_port,
+    } = endpoint;
+    let path = url.path().trim_end_matches('/');
+    let prefix = strip_known_chat_suffix(path)
+        .or_else(|| path.strip_suffix("/v1"))
+        .unwrap_or(path)
+        .trim_end_matches('/');
+    url.set_path(&format!("{prefix}{suffix}"));
+    let mut derived = url.to_string();
+    if let Some(port) = explicit_default_port {
+        if let Some(after_scheme) = derived.find("://").map(|index| index + 3) {
+            let authority_len = derived[after_scheme..]
+                .find(['/', '?', '#'])
+                .unwrap_or(derived.len() - after_scheme);
+            derived.insert_str(after_scheme + authority_len, &format!(":{port}"));
+        }
+    }
+    derived
+}
+
+pub fn resolve_chat_endpoint(
+    raw_url: &str,
+    mode: ChatEndpointMode,
+    purpose: ChatRequestPurpose,
+) -> Result<String, String> {
+    let endpoint = validate_http_endpoint(raw_url)?;
+    if mode == ChatEndpointMode::Raw {
+        // Raw 模式只做安全校验，正式请求必须逐字复用用户输入。
+        return Ok(raw_url.to_string());
+    }
+
+    let suffix = match (mode, purpose) {
+        (ChatEndpointMode::VcpTools, ChatRequestPurpose::Interactive) => VCP_TOOLS_CHAT_SUFFIX,
+        _ => STANDARD_CHAT_SUFFIX,
+    };
+    Ok(derive_known_api_endpoint(endpoint, suffix))
+}
+
+pub fn resolve_model_discovery_endpoint(
+    raw_url: &str,
+    mode: ChatEndpointMode,
+) -> Result<Option<String>, String> {
+    let endpoint = validate_http_endpoint(raw_url)?;
+    if mode == ChatEndpointMode::Raw && strip_known_chat_suffix(endpoint.url.path()).is_none() {
+        return Ok(None);
+    }
+    Ok(Some(derive_known_api_endpoint(endpoint, MODELS_SUFFIX)))
+}
+
+pub fn freeze_chat_connection(
+    settings: &Settings,
+    purpose: ChatRequestPurpose,
+) -> Result<ChatConnectionSnapshot, String> {
+    if settings.vcp_server_url.is_empty() {
+        return Err("VCP Server URL is not configured.".to_string());
+    }
+    Ok(ChatConnectionSnapshot {
+        endpoint_url: resolve_chat_endpoint(
+            &settings.vcp_server_url,
+            settings.chat_endpoint_mode,
+            purpose,
+        )?,
+        api_key: settings.vcp_api_key.clone(),
+    })
+}
+
+#[tauri::command]
+pub fn preview_chat_endpoint(
+    vcp_url: String,
+    chat_endpoint_mode: ChatEndpointMode,
+) -> Result<ChatEndpointPreview, String> {
+    Ok(ChatEndpointPreview {
+        final_url: resolve_chat_endpoint(
+            &vcp_url,
+            chat_endpoint_mode,
+            ChatRequestPurpose::Interactive,
+        )?,
+        model_discovery_url: resolve_model_discovery_endpoint(&vcp_url, chat_endpoint_mode)?,
+    })
 }
 
 #[cfg(any(target_os = "android", test))]
@@ -112,15 +278,6 @@ pub fn message_transport_request_id(key: &MessageKey) -> String {
     ])
     .to_string();
     crate::vcp_modules::infra::utils::calculate_sha256(identity.as_bytes())
-}
-
-fn resolve_vcp_endpoint(raw_url: &str) -> String {
-    let mut final_url = raw_url.to_string();
-    if let Ok(mut url) = Url::parse(raw_url) {
-        url.set_path("/v1/chatvcp/completions");
-        final_url = url.to_string();
-    }
-    final_url
 }
 
 /// 流式事件结构体，用于向前端发送数据
@@ -482,9 +639,15 @@ fn message_key_from_context(
 pub async fn sendToVCP<R: Runtime>(
     app: AppHandle<R>,
     state: tauri::State<'_, ActiveRequests>,
+    settings_state: tauri::State<'_, SettingsState>,
     mut payload: VcpRequestPayload,
     stream_channel: Channel<StreamEvent>,
 ) -> Result<Value, String> {
+    let settings = read_settings(app.clone(), settings_state).await?;
+    let connection = freeze_chat_connection(&settings, ChatRequestPurpose::Interactive)?;
+    payload.vcp_url = connection.endpoint_url;
+    payload.vcp_api_key = connection.api_key;
+
     let message_id = payload.message_id.clone();
     let context = payload.context.clone();
     let is_stream = payload.model_config["stream"].as_bool().unwrap_or(false);
@@ -625,8 +788,8 @@ pub async fn perform_vcp_request_registered<R: Runtime>(
         .await
         .map_err(VcpRequestFailure::from)?;
 
-    // === 2. 固定走 VCPToolBox 插件端点 ===
-    let final_url = resolve_vcp_endpoint(&payload.vcp_url);
+    // === 2. 使用 turn 起点冻结的最终端点；重试与 Android Helper 始终复用此值 ===
+    let final_url = payload.vcp_url.clone();
 
     // === 3. 补充 System 提示词首部 ===
     let has_system = messages.iter().any(|m| m["role"] == "system");
@@ -1991,42 +2154,26 @@ pub fn interruptRequest(
     }
 }
 
-/// 测试 VCP 后端连接状态并获取模型列表 (对齐桌面端 main.js fetchAndCacheModels 逻辑)
+/// 测试模型发现端点；Raw 无法安全推导 `/v1/models` 时返回显式不可用状态。
 #[tauri::command]
-pub async fn test_vcp_connection(vcp_url: String, vcp_api_key: String) -> Result<Value, String> {
-    log::info!(
-        "[VCPClient] test_vcp_connection called for URL: {}",
-        vcp_url
-    );
+pub async fn test_vcp_connection(
+    vcp_url: String,
+    vcp_api_key: String,
+    chat_endpoint_mode: ChatEndpointMode,
+) -> Result<Value, String> {
+    log::info!("[VCPClient] test_vcp_connection called");
 
-    // 对齐桌面端原汁原味的逻辑：
-    // const urlObject = new URL(vcpServerUrl);
-    // const baseUrl = `${urlObject.protocol}//${urlObject.host}`;
-    // const modelsUrl = new URL('/v1/models', baseUrl).toString();
-
-    let url_object = match Url::parse(&vcp_url) {
-        Ok(url) => url,
-        Err(e) => return Err(format!("URL 解析失败: {}", e)),
+    let Some(models_url) = resolve_model_discovery_endpoint(&vcp_url, chat_endpoint_mode)? else {
+        return Ok(json!({
+            "success": true,
+            "status": 0,
+            "modelCount": 0,
+            "models": Value::Null,
+            "modelDiscoveryAvailable": false
+        }));
     };
 
-    // 对齐 JS 的 urlObject.host (包含端口号)
-    let port_str = match url_object.port() {
-        Some(p) => format!(":{}", p),
-        None => "".to_string(),
-    };
-    let host_with_port = format!("{}{}", url_object.host_str().unwrap_or(""), port_str);
-    let base_url = format!("{}://{}", url_object.scheme(), host_with_port);
-
-    let models_url = if base_url.ends_with('/') {
-        format!("{}v1/models", base_url)
-    } else {
-        format!("{}/v1/models", base_url)
-    };
-
-    log::info!(
-        "[VCPClient] Testing connection to (Original Logic): {}",
-        models_url
-    );
+    log::info!("[VCPClient] Testing derived model discovery endpoint");
 
     // 一次性连接探测：按 http_clients.rs 规矩 4 的有据例外，瞬时 Client 用完即弃，
     // 避免探测结果受共享池内半死连接干扰。
@@ -2060,7 +2207,8 @@ pub async fn test_vcp_connection(vcp_url: String, vcp_api_key: String) -> Result
             "success": true,
             "status": status.as_u16(),
             "modelCount": model_count,
-            "models": json_res
+            "models": json_res,
+            "modelDiscoveryAvailable": true
         }))
     } else {
         let text = res.text().await.unwrap_or_default();
@@ -2609,6 +2757,164 @@ mod active_request_tests {
 
     fn message_key(message_id: &str) -> MessageKey {
         MessageKey::new(TopicKey::new("agent", "agent-a", "topic-a"), message_id)
+    }
+
+    #[test]
+    fn endpoint_modes_cover_base_full_prefix_port_and_query_urls() {
+        let cases = [
+            (
+                "https://example.invalid",
+                "https://example.invalid/v1/chat/completions",
+                "https://example.invalid/v1/chatvcp/completions",
+            ),
+            (
+                "https://example.invalid/v1/chat/completions",
+                "https://example.invalid/v1/chat/completions",
+                "https://example.invalid/v1/chatvcp/completions",
+            ),
+            (
+                "http://example.invalid:6005/proxy?tenant=mobile",
+                "http://example.invalid:6005/proxy/v1/chat/completions?tenant=mobile",
+                "http://example.invalid:6005/proxy/v1/chatvcp/completions?tenant=mobile",
+            ),
+            (
+                "https://example.invalid:443/proxy",
+                "https://example.invalid:443/proxy/v1/chat/completions",
+                "https://example.invalid:443/proxy/v1/chatvcp/completions",
+            ),
+            (
+                "https://example.invalid/proxy%20space?tenant=mobile",
+                "https://example.invalid/proxy%20space/v1/chat/completions?tenant=mobile",
+                "https://example.invalid/proxy%20space/v1/chatvcp/completions?tenant=mobile",
+            ),
+            (
+                "https://example.invalid/proxy/v1",
+                "https://example.invalid/proxy/v1/chat/completions",
+                "https://example.invalid/proxy/v1/chatvcp/completions",
+            ),
+            (
+                "https://example.invalid/proxy/v1/chatvcp/completions/?key=value",
+                "https://example.invalid/proxy/v1/chat/completions?key=value",
+                "https://example.invalid/proxy/v1/chatvcp/completions?key=value",
+            ),
+        ];
+
+        for (raw, standard, vcp_tools) in cases {
+            assert_eq!(
+                resolve_chat_endpoint(
+                    raw,
+                    ChatEndpointMode::Standard,
+                    ChatRequestPurpose::Interactive,
+                )
+                .expect("standard endpoint"),
+                standard
+            );
+            assert_eq!(
+                resolve_chat_endpoint(
+                    raw,
+                    ChatEndpointMode::VcpTools,
+                    ChatRequestPurpose::Interactive,
+                )
+                .expect("VCP tools endpoint"),
+                vcp_tools
+            );
+            assert_eq!(
+                resolve_chat_endpoint(raw, ChatEndpointMode::Raw, ChatRequestPurpose::Interactive,)
+                    .expect("raw endpoint"),
+                raw
+            );
+        }
+    }
+
+    #[test]
+    fn request_purpose_matrix_matches_vchat_semantics() {
+        let raw = "https://example.invalid/proxy";
+        let cases = [
+            (
+                ChatEndpointMode::Standard,
+                ChatRequestPurpose::Interactive,
+                "https://example.invalid/proxy/v1/chat/completions",
+            ),
+            (
+                ChatEndpointMode::Standard,
+                ChatRequestPurpose::Auxiliary,
+                "https://example.invalid/proxy/v1/chat/completions",
+            ),
+            (
+                ChatEndpointMode::VcpTools,
+                ChatRequestPurpose::Interactive,
+                "https://example.invalid/proxy/v1/chatvcp/completions",
+            ),
+            (
+                ChatEndpointMode::VcpTools,
+                ChatRequestPurpose::Auxiliary,
+                "https://example.invalid/proxy/v1/chat/completions",
+            ),
+            (ChatEndpointMode::Raw, ChatRequestPurpose::Interactive, raw),
+            (ChatEndpointMode::Raw, ChatRequestPurpose::Auxiliary, raw),
+        ];
+
+        for (mode, purpose, expected) in cases {
+            assert_eq!(
+                resolve_chat_endpoint(raw, mode, purpose).expect("purpose endpoint"),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn raw_mode_is_byte_for_byte_unchanged() {
+        let raw = "HTTP://Example.INVALID:8443/custom/%2f?signature=a%2Fb&x=1";
+        assert_eq!(
+            resolve_chat_endpoint(raw, ChatEndpointMode::Raw, ChatRequestPurpose::Interactive,)
+                .expect("raw endpoint"),
+            raw
+        );
+    }
+
+    #[test]
+    fn model_discovery_is_prefix_aware_and_conservative_in_raw_mode() {
+        assert_eq!(
+            resolve_model_discovery_endpoint(
+                "https://example.invalid/proxy?tenant=mobile",
+                ChatEndpointMode::VcpTools,
+            )
+            .expect("derived discovery"),
+            Some("https://example.invalid/proxy/v1/models?tenant=mobile".to_string())
+        );
+        assert_eq!(
+            resolve_model_discovery_endpoint(
+                "https://example.invalid/proxy/v1/chat/completions?tenant=mobile",
+                ChatEndpointMode::Raw,
+            )
+            .expect("safe raw discovery"),
+            Some("https://example.invalid/proxy/v1/models?tenant=mobile".to_string())
+        );
+        assert_eq!(
+            resolve_model_discovery_endpoint(
+                "https://example.invalid/custom/gateway",
+                ChatEndpointMode::Raw,
+            )
+            .expect("unsafe raw discovery"),
+            None
+        );
+    }
+
+    #[test]
+    fn endpoint_validation_rejects_unsafe_or_non_http_urls() {
+        for raw in [
+            "ftp://example.invalid/v1/chat/completions",
+            "https://user:secret@example.invalid/v1/chat/completions",
+            "https://example.invalid/v1/chat/completions#fragment",
+            "https://example.invalid/v1/chat/completions\n",
+            "https://",
+        ] {
+            assert!(
+                resolve_chat_endpoint(raw, ChatEndpointMode::Raw, ChatRequestPurpose::Interactive,)
+                    .is_err(),
+                "unexpectedly accepted {raw}"
+            );
+        }
     }
 
     #[test]

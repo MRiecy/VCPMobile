@@ -3,6 +3,8 @@ import { ref, computed } from 'vue';
 import { invoke, Channel } from '@tauri-apps/api/core';
 import { useNotificationStore } from './notification';
 
+const MODEL_DISCOVERY_UNAVAILABLE = 'MODEL_DISCOVERY_UNAVAILABLE';
+
 export interface ModelInfo {
   id: string;
   object: string;
@@ -29,6 +31,7 @@ export const useModelStore = defineStore('model', () => {
   const hotModels = ref<string[]>([]);
   const favorites = ref<string[]>([]);
   const isLoading = ref(false);
+  const modelDiscoveryUnavailable = ref(false);
   const lastRefreshed = ref(0);
   const testResults = ref<Record<string, TestResult>>({});
   
@@ -70,11 +73,13 @@ export const useModelStore = defineStore('model', () => {
     try {
       const freshModels = await invoke<ModelInfo[]>('refresh_models');
       models.value = freshModels;
+      modelDiscoveryUnavailable.value = false;
       lastRefreshed.value = Date.now();
       await Promise.all([fetchHotModels(), fetchFavorites()]);
       cleanupOldTestResults();
       console.log(`[SWR/Self-Healing] Silent sync completed. Total models: ${freshModels.length}`);
     } catch (error) {
+      modelDiscoveryUnavailable.value = String(error).includes(MODEL_DISCOVERY_UNAVAILABLE);
       console.warn('[SWR/Self-Healing] Silent sync failed:', error);
     }
   };
@@ -108,6 +113,7 @@ export const useModelStore = defineStore('model', () => {
       isLoading.value = true;
       try {
         models.value = await invoke<ModelInfo[]>('refresh_models');
+        modelDiscoveryUnavailable.value = false;
         lastRefreshed.value = Date.now();
         await Promise.all([fetchHotModels(), fetchFavorites()]);
         cleanupOldTestResults();
@@ -120,10 +126,14 @@ export const useModelStore = defineStore('model', () => {
         });
       } catch (error: any) {
         console.error('Failed to force sync models:', error);
+        const discoveryUnavailable = String(error).includes(MODEL_DISCOVERY_UNAVAILABLE);
+        modelDiscoveryUnavailable.value = discoveryUnavailable;
         notificationStore.addNotification({
-          type: 'error',
-          title: '模型同步失败',
-          message: error?.toString() || '请检查网络连接或 API 配置',
+          type: discoveryUnavailable ? 'info' : 'error',
+          title: discoveryUnavailable ? '模型发现不可用' : '模型同步失败',
+          message: discoveryUnavailable
+            ? '原始 URL 无法安全推导 /v1/models；主聊天仍会按原地址请求。'
+            : error?.toString() || '请检查网络连接或 API 配置',
           toastOnly: true,
         });
       } finally {
@@ -293,6 +303,7 @@ export const useModelStore = defineStore('model', () => {
     hotModels,
     favorites,
     isLoading,
+    modelDiscoveryUnavailable,
     lastRefreshed,
     testResults,
     isTestingAll,

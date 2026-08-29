@@ -509,8 +509,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
           groupId: key.ownerId,
           topicId: key.topicId,
           agentId,
-          vcpUrl: settings.vcpServerUrl || "",
-          vcpApiKey: settings.vcpApiKey || "",
         },
         streamChannel,
       });
@@ -578,8 +576,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
             groupId: key.ownerId,
             topicId: key.topicId,
             userMessage: userMsg,
-            vcpUrl: settings.vcpServerUrl || "",
-            vcpApiKey: settings.vcpApiKey || "",
           },
           streamChannel
         });
@@ -631,8 +627,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
             agentId: key.ownerId,
             topicId: key.topicId,
             userMessage: userMsg,
-            vcpUrl: settings.vcpServerUrl || "",
-            vcpApiKey: settings.vcpApiKey || "",
           }, 
           streamChannel 
         });

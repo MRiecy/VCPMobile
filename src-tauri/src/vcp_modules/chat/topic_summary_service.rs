@@ -1,6 +1,6 @@
-use crate::vcp_modules::infra::utils::normalize_vcp_url;
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
+use crate::vcp_modules::vcp_client::{resolve_chat_endpoint, ChatRequestPurpose};
 use serde_json::{json, Value};
 use std::time::Duration;
 use tauri::{AppHandle, State};
@@ -77,7 +77,11 @@ pub async fn summarize_topic(
         settings.topic_summary_model
     };
 
-    let vcp_url = normalize_vcp_url(&settings.vcp_server_url);
+    let vcp_url = resolve_chat_endpoint(
+        &settings.vcp_server_url,
+        settings.chat_endpoint_mode,
+        ChatRequestPurpose::Auxiliary,
+    )?;
     let response = client
         .post(&vcp_url)
         .header("Authorization", format!("Bearer {}", settings.vcp_api_key))

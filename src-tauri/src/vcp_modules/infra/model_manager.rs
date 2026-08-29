@@ -1,5 +1,9 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
+use crate::vcp_modules::vcp_client::{
+    freeze_chat_connection, resolve_model_discovery_endpoint, ChatRequestPurpose,
+    MODEL_DISCOVERY_UNAVAILABLE,
+};
 use futures_util::future::join_all;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -10,7 +14,6 @@ use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::{Mutex, RwLock};
-use url::Url;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ModelInfo {
@@ -101,30 +104,16 @@ pub async fn refresh_models<R: Runtime>(
 ) -> Result<Vec<ModelInfo>, String> {
     let _refresh_guard = state.refresh_lifecycle.lock().await;
     let settings = read_settings(app.clone(), settings_state).await?;
-    let vcp_url = settings.vcp_server_url;
+    let models_url = resolve_model_discovery_endpoint(
+        &settings.vcp_server_url,
+        settings.chat_endpoint_mode,
+    )?
+    .ok_or_else(|| {
+        format!(
+            "{MODEL_DISCOVERY_UNAVAILABLE}: 原始 URL 无法安全推导 /v1/models；主聊天仍可直接使用该地址"
+        )
+    })?;
     let vcp_api_key = settings.vcp_api_key;
-
-    if vcp_url.is_empty() {
-        return Err("VCP Server URL is not configured.".to_string());
-    }
-
-    let url_object = match Url::parse(&vcp_url) {
-        Ok(url) => url,
-        Err(e) => return Err(format!("URL 解析失败: {}", e)),
-    };
-
-    let port_str = match url_object.port() {
-        Some(p) => format!(":{}", p),
-        None => "".to_string(),
-    };
-    let host_with_port = format!("{}{}", url_object.host_str().unwrap_or(""), port_str);
-    let base_url = format!("{}://{}", url_object.scheme(), host_with_port);
-
-    let models_url = if base_url.ends_with('/') {
-        format!("{}v1/models", base_url)
-    } else {
-        format!("{}/v1/models", base_url)
-    };
 
     let client = state.http_client.clone();
 
@@ -289,16 +278,10 @@ pub async fn record_model_usage<R: Runtime>(
 
 pub async fn perform_single_test_internal(
     client: &Client,
-    vcp_url: &str,
+    endpoint_url: &str,
     vcp_api_key: &str,
     model_id: &str,
 ) -> Result<(), String> {
-    if vcp_url.is_empty() {
-        return Err("VCP Server URL is not configured.".to_string());
-    }
-
-    let final_url = model_test_endpoint(vcp_url)?;
-
     let payload = serde_json::json!({
         "model": model_id,
         "messages": [{"role": "user", "content": "ping"}],
@@ -306,7 +289,7 @@ pub async fn perform_single_test_internal(
     });
 
     let res = client
-        .post(&final_url)
+        .post(endpoint_url)
         .header("Authorization", format!("Bearer {}", vcp_api_key))
         .header("Content-Type", "application/json")
         .json(&payload)
@@ -333,12 +316,6 @@ pub async fn perform_single_test_internal(
     }
 }
 
-fn model_test_endpoint(vcp_url: &str) -> Result<String, String> {
-    let mut url = Url::parse(vcp_url).map_err(|e| format!("URL 解析失败: {}", e))?;
-    url.set_path("/v1/chatvcp/completions");
-    Ok(url.to_string())
-}
-
 #[tauri::command]
 pub async fn test_model_connectivity<R: Runtime>(
     app: AppHandle<R>,
@@ -347,11 +324,16 @@ pub async fn test_model_connectivity<R: Runtime>(
     model_id: String,
 ) -> Result<u64, String> {
     let settings = read_settings(app, settings_state).await?;
-    let vcp_url = settings.vcp_server_url;
-    let vcp_api_key = settings.vcp_api_key;
+    let connection = freeze_chat_connection(&settings, ChatRequestPurpose::Interactive)?;
 
     let start = std::time::Instant::now();
-    perform_single_test_internal(&state.http_client, &vcp_url, &vcp_api_key, &model_id).await?;
+    perform_single_test_internal(
+        &state.http_client,
+        &connection.endpoint_url,
+        &connection.api_key,
+        &model_id,
+    )
+    .await?;
     let duration = start.elapsed().as_millis() as u64;
     Ok(duration)
 }
@@ -380,8 +362,9 @@ pub async fn start_batch_model_test<R: Runtime>(
 
     // 1. 在主线程同步读取一次设置，规避生命周期逃逸问题，同时实现零冗余开销
     let settings = read_settings(app, settings_state).await?;
-    let vcp_url = settings.vcp_server_url;
-    let vcp_api_key = settings.vcp_api_key;
+    let connection = freeze_chat_connection(&settings, ChatRequestPurpose::Interactive)?;
+    let endpoint_url = connection.endpoint_url;
+    let vcp_api_key = connection.api_key;
 
     // 2. 物理级硬性中止上一次的批量测试任务，从源头防止网络泄漏
     {
@@ -430,14 +413,14 @@ pub async fn start_batch_model_test<R: Runtime>(
             let mut futures = Vec::new();
             for model_id in chunk {
                 let client_inner = http_client.clone();
-                let vcp_url_inner = vcp_url.clone();
+                let endpoint_url_inner = endpoint_url.clone();
                 let vcp_api_key_inner = vcp_api_key.clone();
                 let channel_inner = progress_channel.clone(); // 克隆通道克隆体，用于实时单任务回传
                 futures.push(async move {
                     let start = std::time::Instant::now();
                     let res = perform_single_test_internal(
                         &client_inner,
-                        &vcp_url_inner,
+                        &endpoint_url_inner,
                         &vcp_api_key_inner,
                         &model_id,
                     )
@@ -521,21 +504,12 @@ pub async fn init_model_manager<R: Runtime>(_app: &AppHandle<R>, _state: &ModelM
 
 #[cfg(test)]
 mod task_owner_tests {
-    use super::{is_current_batch_owner, model_test_endpoint};
+    use super::is_current_batch_owner;
 
     #[test]
     fn old_batch_finalizer_cannot_clear_new_owner() {
         assert!(is_current_batch_owner(Some(2), 2));
         assert!(!is_current_batch_owner(Some(2), 1));
         assert!(!is_current_batch_owner(None, 1));
-    }
-
-    #[test]
-    fn model_tests_use_vcp_plugin_endpoint() {
-        let base = "https://example.invalid/proxy";
-        assert_eq!(
-            model_test_endpoint(base).expect("plugin model endpoint"),
-            "https://example.invalid/v1/chatvcp/completions"
-        );
     }
 }

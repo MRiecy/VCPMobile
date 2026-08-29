@@ -16,6 +16,7 @@ function makeSettings(): AppSettings {
   return {
     userName: "测试用户",
     vcpServerUrl: "https://vcp.example.com",
+    chatEndpointMode: "vcpTools",
     vcpApiKey: "api-key-1",
     vcpLogUrl: "ws://192.168.1.10:6005",
     vcpLogKey: "log-key-1",
@@ -41,8 +42,8 @@ function makeSettings(): AppSettings {
 }
 
 describe("useConfigBackup 白名单提取", () => {
-  it("白名单恰好覆盖身份+连接+分布式 15 个字段", () => {
-    expect(BACKUP_SETTINGS_KEYS).toHaveLength(15);
+  it("白名单恰好覆盖身份+连接+分布式 16 个字段", () => {
+    expect(BACKUP_SETTINGS_KEYS).toHaveLength(16);
     expect(BACKUP_SETTINGS_KEYS).toContain("userName");
     expect(BACKUP_SETTINGS_KEYS).toContain("fileKey");
     expect(BACKUP_SETTINGS_KEYS).toContain("distributedDeviceName");
@@ -51,6 +52,7 @@ describe("useConfigBackup 白名单提取", () => {
   it("只提取白名单字段，排除本地偏好与排序数据", () => {
     const picked = pickBackupSettings(makeSettings());
     expect(picked.userName).toBe("测试用户");
+    expect(picked.chatEndpointMode).toBe("vcpTools");
     expect(picked.vcpApiKey).toBe("api-key-1");
     expect(picked.distributedEnabled).toBe(true);
     expect("agentOrder" in picked).toBe(false);
@@ -128,8 +130,30 @@ describe("useConfigBackup 导入解析", () => {
     const parsed = parseBackupFile(JSON.stringify(hacked));
     expect("agentOrder" in parsed.settings).toBe(false);
     expect("enableVcpToolInjection" in parsed.settings).toBe(false);
+    expect(parsed.settings.chatEndpointMode).toBe("vcpTools");
     expect("somethingNew" in parsed.settings).toBe(false);
     expect(parsed.settings.vcpApiKey).toBe("api-key-1");
+  });
+
+  it("旧工具注入布尔值迁移为闭合端点模式，且新枚举优先", () => {
+    const payload = buildBackupPayload(makeSettings());
+    const legacy = {
+      ...payload,
+      settings: {
+        vcpServerUrl: "https://legacy.example.com",
+        enableVcpToolInjection: false,
+      },
+    };
+    expect(parseBackupFile(JSON.stringify(legacy)).settings.chatEndpointMode).toBe("standard");
+
+    const mixed = {
+      ...payload,
+      settings: {
+        chatEndpointMode: "raw",
+        enableVcpToolInjection: true,
+      },
+    };
+    expect(parseBackupFile(JSON.stringify(mixed)).settings.chatEndpointMode).toBe("raw");
   });
 
   it("白名单字段类型错误时拒绝导入", () => {
@@ -139,6 +163,9 @@ describe("useConfigBackup 导入解析", () => {
 
     const badBool = { ...payload, settings: { ...payload.settings, distributedEnabled: "true" } };
     expect(() => parseBackupFile(JSON.stringify(badBool))).toThrow("distributedEnabled");
+
+    const badMode = { ...payload, settings: { ...payload.settings, chatEndpointMode: "invalid" } };
+    expect(() => parseBackupFile(JSON.stringify(badMode))).toThrow("chatEndpointMode");
   });
 
   it("旧版含头像的备份文件可导入，头像字段被忽略", () => {

@@ -117,8 +117,8 @@ macro_rules! app_command_handler {
             start_update_download,
         };
         use crate::vcp_modules::vcp_client::{
-            get_active_generations, interruptGroupTurn, interruptRequest, recover_active_generation,
-            sendToVCP, test_vcp_connection,
+            get_active_generations, interruptGroupTurn, interruptRequest, preview_chat_endpoint,
+            recover_active_generation, sendToVCP, test_vcp_connection,
         };
         use crate::vcp_modules::vcp_info_service::{
             clear_vcp_info, get_vcp_info_connection_status, get_vcp_info_metadata_list,
@@ -181,6 +181,7 @@ macro_rules! app_command_handler {
                 get_active_generations,
                 interruptGroupTurn,
                 interruptRequest,
+                preview_chat_endpoint,
                 recover_active_generation,
                 sendToVCP,
                 test_vcp_connection,
