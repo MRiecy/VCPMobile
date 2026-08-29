@@ -358,6 +358,7 @@ pub async fn handle_assistant_chat_stream(
                     res["fullContent"].as_str().map(str::to_string),
                     None,
                     Some(final_ts),
+                    None,
                 ));
             }
         }
@@ -378,6 +379,7 @@ pub async fn handle_assistant_chat_stream(
                 Some(final_content),
                 None,
                 Some(final_ts),
+                None,
             ));
         }
     }

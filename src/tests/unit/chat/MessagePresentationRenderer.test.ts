@@ -9,11 +9,70 @@ import { useChatStreamStore } from '@/core/stores/chatStreamStore';
 import type { ChatPresentationMode } from '@/core/stores/theme';
 import { invokeMock, mockInvoke } from '@/tests/mocks/tauri';
 
+const { mermaidRenderMock } = vi.hoisted(() => ({
+  mermaidRenderMock: vi.fn(async () => ({ svg: '<svg viewBox="0 0 10 10"></svg>' })),
+}));
+
+vi.mock('mermaid', () => ({
+  default: {
+    initialize: vi.fn(),
+    render: mermaidRenderMock,
+  },
+}));
+
 const markerStub = (marker: string) => defineComponent({
   template: `<div data-strong-block="${marker}">${marker}</div>`,
 });
 
 describe('MessageRenderer presentation shell', () => {
+  it('enhances an already-rendered first-pass Mermaid SVG immediately', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const message: ChatMessage = {
+      id: 'existing-mermaid-svg',
+      role: 'assistant',
+      timestamp: 1,
+      agentId: 'agent-a',
+      shell: {
+        avatarColor: '#64748b',
+        displayName: 'Agent A',
+        isUser: false,
+      },
+      blocks: [{
+        type: 'markdown',
+        hash: 'existing-mermaid-svg',
+        nodes: [{
+          type: 'raw_html',
+          content: '<div class="mermaid" data-mermaid-source="graph TD;A--&gt;B"><svg viewBox="0 0 10 10"><text>A</text></svg></div>',
+        }],
+      }],
+    };
+    const MermaidViewerStub = defineComponent({
+      props: { visible: Boolean },
+      template: '<div data-mermaid-viewer :data-visible="String(visible)" />',
+    });
+
+    const wrapper = mount(MessageRenderer, {
+      props: { message },
+      global: {
+        plugins: [pinia],
+        directives: { longpress: {} },
+        stubs: {
+          VcpAvatar: markerStub('avatar'),
+          MermaidFullScreenViewer: MermaidViewerStub,
+        },
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(wrapper.find('.vcp-mermaid-wrapper').exists()).toBe(true);
+    });
+    await wrapper.get('.vcp-mermaid-wrapper').trigger('click');
+    expect(wrapper.get('[data-mermaid-viewer]').attributes('data-visible')).toBe('true');
+    expect(mermaidRenderMock).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
   it('keeps the same multi-bubble and strong-content tree across all three modes', async () => {
     const pinia = createPinia();
     setActivePinia(pinia);
@@ -303,6 +362,7 @@ describe('MessageRenderer presentation shell', () => {
       error: null,
       blocks: null,
       timestamp: null,
+      topicUpdatedAt: null,
     };
     await streamStore.processStreamEvent({
       ...eventBase,

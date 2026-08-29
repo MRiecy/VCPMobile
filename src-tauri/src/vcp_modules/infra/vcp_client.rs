@@ -294,6 +294,7 @@ pub struct StreamEvent {
     pub aurora: Option<AuroraUpdate>, // Aurora 语义沉淀更新 (type="aurora" 时有效)
     pub blocks: Option<Vec<ContentBlock>>, // 持久化后的预渲染块 (仅 type="end" 时有效)
     pub timestamp: Option<u64>, // ⚡ 新增物理落笔时间戳
+    pub topic_updated_at: Option<i64>, // durable message bubble 后的话题列表权威时间
 }
 
 impl StreamEvent {
@@ -323,6 +324,7 @@ impl StreamEvent {
         content: Option<String>,
         blocks: Option<Vec<ContentBlock>>,
         timestamp: Option<u64>,
+        topic_updated_at: Option<i64>,
     ) -> Self {
         Self {
             r#type: "end".into(),
@@ -332,6 +334,7 @@ impl StreamEvent {
             content,
             blocks,
             timestamp,
+            topic_updated_at,
             ..Default::default()
         }
     }
@@ -3004,12 +3007,14 @@ mod active_request_tests {
             Some("committed".to_string()),
             Some(Vec::new()),
             Some(123),
+            Some(456),
         );
         let wire = serde_json::to_value(event).expect("serialize durable end");
         assert_eq!(wire["type"], "end");
         assert_eq!(wire["content"], "committed");
         assert_eq!(wire["finishReason"], "error");
         assert_eq!(wire["timestamp"], 123);
+        assert_eq!(wire["topicUpdatedAt"], 456);
     }
 
     #[test]

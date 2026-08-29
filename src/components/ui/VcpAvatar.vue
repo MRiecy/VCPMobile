@@ -31,6 +31,9 @@ const handleIntersect = () => {
 
 const handleUnintersect = () => {
   isNearViewport.value = false;
+  // 离开预加载区后卸载图片元素，释放 WebView 解码位图；压缩 Blob 仍由 Store LRU 管理。
+  avatarUrl.value = "";
+  imgExists.value = false;
 };
 
 // 解析属性值，优先从 target 中提取
@@ -102,6 +105,7 @@ watchEffect(async (onCleanup) => {
   const url = await avatarStore.getAvatarUrl(ownerTypeVal, ownerIdVal, reqVersion);
   if (
     cancelled ||
+    !isNearViewport.value ||
     resolvedId.value !== ownerIdVal ||
     resolvedType.value !== ownerTypeVal
   ) return;

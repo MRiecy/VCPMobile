@@ -168,13 +168,13 @@ describe("chat conversation concurrency guards", () => {
     session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");
     await history.loadHistoryPaginated("agent-a", "agent", "topic-a");
 
-    const append = deferred<any[]>();
+    const append = deferred<{ blocks: any[]; topicUpdatedAt: number }>();
     mockInvoke("append_single_message", () => append.promise);
     const pendingSend = history.sendMessage("hello");
 
     session.setConversation({ id: "agent-b", type: "agent" }, "topic-b");
     history.resetHistoryForConversation();
-    append.resolve([]);
+    append.resolve({ blocks: [], topicUpdatedAt: 100 });
     await pendingSend;
 
     const appendCall = invokeMock.mock.calls.find(
@@ -285,6 +285,7 @@ describe("chat conversation concurrency guards", () => {
       aurora: null,
       blocks: null,
       timestamp: null,
+      topicUpdatedAt: null,
     });
 
     expect(
@@ -313,6 +314,7 @@ describe("chat conversation concurrency guards", () => {
       aurora: null,
       blocks: null,
       timestamp: null,
+      topicUpdatedAt: null,
     });
 
     const interrupt = deferred<unknown>();
@@ -340,6 +342,7 @@ describe("chat conversation concurrency guards", () => {
       aurora: null,
       blocks: null,
       timestamp: null,
+      topicUpdatedAt: null,
     });
     interrupt.resolve(undefined);
     await stoppingA;
@@ -372,6 +375,7 @@ describe("chat conversation concurrency guards", () => {
       aurora: null,
       blocks: [],
       timestamp: 123,
+      topicUpdatedAt: 124,
     });
     expect(
       stream.isMessageActive("agent-a", "agent", "topic-a", "assistant-a"),

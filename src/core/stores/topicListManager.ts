@@ -19,7 +19,16 @@ const normalizeSortMode = (value: unknown): TopicSortMode =>
 const normalizeTopicTimestamp = (
   value: number | null | undefined,
   fallback: number,
-) => (typeof value === "number" && Number.isFinite(value) ? value : fallback);
+) => (
+  typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : fallback
+);
+
+interface TopicUnreadMutationDto {
+  unreadCount: number;
+  updatedAt: number | null;
+}
 
 const topicPreferenceKey = (
   ownerId: string,
@@ -224,11 +233,11 @@ export const useTopicStore = defineStore("topic", () => {
     });
   };
 
-  const touchTopicUpdatedAt = (
+  const setTopicUpdatedAt = (
     ownerId: string,
     ownerType: string,
     topicId: string,
-    updatedAt: number = Date.now(),
+    updatedAt: number,
   ) => {
     if (!isCurrentOwner(ownerId, ownerType)) return;
     const index = topics.value.findIndex((topic) => topic.id === topicId);
@@ -237,7 +246,7 @@ export const useTopicStore = defineStore("topic", () => {
       updatedAt,
       topics.value[index].updatedAt,
     );
-    if (nextUpdatedAt <= topics.value[index].updatedAt) return;
+    if (nextUpdatedAt === topics.value[index].updatedAt) return;
     topics.value[index] = {
       ...topics.value[index],
       updatedAt: nextUpdatedAt,
@@ -478,7 +487,7 @@ export const useTopicStore = defineStore("topic", () => {
         `[TopicStore] Updating title for topic ${topicId} to "${newTitle}"`,
       );
       // 注意：确保 Rust 端已实现 update_topic_title 命令
-      const updated = await invoke<boolean>("update_topic_title", {
+      const updatedAt = await invoke<number | null>("update_topic_title", {
         ownerId,
         ownerType,
         topicId,
@@ -486,14 +495,14 @@ export const useTopicStore = defineStore("topic", () => {
         expectedTitle: expectedTitle ?? null,
       });
 
-      if (!updated) return false;
+      if (updatedAt === null) return false;
       if (!isCurrentOwner(ownerId, ownerType)) return;
       const index = topics.value.findIndex((t) => t.id === topicId);
       if (index !== -1) {
         topics.value[index] = {
           ...topics.value[index],
           name: newTitle,
-          updatedAt: Math.max(topics.value[index].updatedAt, Date.now()),
+          updatedAt,
         };
         // 强制触发虚拟列表重绘
         topics.value = [...topics.value];
@@ -524,7 +533,7 @@ export const useTopicStore = defineStore("topic", () => {
       );
 
       // 调用 Rust 命令切换锁定
-      await invoke("toggle_topic_lock", {
+      const updatedAt = await invoke<number | null>("toggle_topic_lock", {
         ownerId,
         ownerType,
         topicId,
@@ -536,7 +545,7 @@ export const useTopicStore = defineStore("topic", () => {
       topics.value[currentIndex] = {
         ...topics.value[currentIndex],
         locked: targetLockState,
-        updatedAt: Math.max(topics.value[currentIndex].updatedAt, Date.now()),
+        updatedAt: updatedAt ?? topics.value[currentIndex].updatedAt,
       };
       // 强制触发虚拟列表重绘
       topics.value = [...topics.value];
@@ -560,7 +569,12 @@ export const useTopicStore = defineStore("topic", () => {
         console.log(
           `[TopicStore] Setting unread state for ${topicId} to ${unread}`,
         );
-        await invoke("set_topic_unread", { ownerId, ownerType, topicId, unread });
+        const updatedAt = await invoke<number | null>("set_topic_unread", {
+          ownerId,
+          ownerType,
+          topicId,
+          unread,
+        });
 
         if (isCurrentOwner(ownerId, ownerType)) {
           const index = topics.value.findIndex((t) => t.id === topicId);
@@ -569,7 +583,7 @@ export const useTopicStore = defineStore("topic", () => {
               ...topics.value[index],
               unread,
               unreadCount: unread ? topics.value[index].unreadCount : 0,
-              updatedAt: Math.max(topics.value[index].updatedAt, Date.now()),
+              updatedAt: updatedAt ?? topics.value[index].updatedAt,
             };
             topics.value = [...topics.value];
           }
@@ -607,7 +621,7 @@ export const useTopicStore = defineStore("topic", () => {
     if (ownerType !== "agent") return Promise.resolve();
     return enqueueUnreadMutation(async () => {
       try {
-        const unreadCount = await invoke<number>("increment_topic_unread_count", {
+        const result = await invoke<TopicUnreadMutationDto>("increment_topic_unread_count", {
           ownerId,
           ownerType,
           topicId,
@@ -622,14 +636,11 @@ export const useTopicStore = defineStore("topic", () => {
         if (isCurrentOwner(ownerId, ownerType) && !isCurrentConversation) {
           const index = topics.value.findIndex((topic) => topic.id === topicId);
           if (index !== -1) {
-            const wasUnread = topics.value[index].unread;
             topics.value[index] = {
               ...topics.value[index],
-              unreadCount,
+              unreadCount: result.unreadCount,
               unread: true,
-              updatedAt: wasUnread
-                ? topics.value[index].updatedAt
-                : Math.max(topics.value[index].updatedAt, Date.now()),
+              updatedAt: result.updatedAt ?? topics.value[index].updatedAt,
             };
             topics.value = [...topics.value];
           }
@@ -698,7 +709,7 @@ export const useTopicStore = defineStore("topic", () => {
     setSortMode,
     isTopicPinned,
     toggleTopicPinned,
-    touchTopicUpdatedAt,
+    setTopicUpdatedAt,
     loadTopicList,
     createTopic,
     deleteTopic,

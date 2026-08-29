@@ -27,11 +27,11 @@ date: 2026-07-04
 | `GroupSettingsView.vue` | 440 | 群组设置面板：成员管理、发言策略、统一模型、提示词 |
 | `AgentsCreator.vue` | 107 | Agent / Group 创建触发器，创建成功后自动打开对应设置面板 |
 | `assistant.ts` | 327 | Pinia Store：封装 IPC 调用，提供 `saveAgent` / `saveGroup` / `saveAvatar` 等 Action |
-| `avatar.ts` | 288 | 头像缓存、Blob URL 管理、Canvas 主色调提取 |
+| `avatar.ts` | — | 头像 metadata、LRU Blob URL、读取并发与 Canvas 主色调提取 |
 | `chatSessionStore.ts` | 188 | 会话切换，删除 Agent/Group 时清空当前选中项 |
-| `AvatarCropper.vue` | 144 | `vue-cropper` 封装：圆形裁剪、旋转、缩放、确认输出 Blob |
+| `AvatarCropper.vue` | — | `vue-cropper` 封装：圆形裁剪、旋转、缩放、确认输出 Blob |
 | `ModelSelector.vue` | 525 | BottomSheet 风格模型选择器：搜索、Tag 过滤、延迟测试 |
-| `VcpAvatar.vue` | 128 | 头像展示组件：缓存优先加载、Fallback 首字母、主色调边框 |
+| `VcpAvatar.vue` | — | 头像展示组件：可视区懒加载、Fallback 首字母、主色调边框 |
 
 ### 1.3 在整体架构中的位置
 
@@ -353,7 +353,7 @@ const extractDominantColorFromBlob = (blobUrl: string): Promise<string> => {
 };
 ```
 
-展示效果：`VcpAvatar.vue` 根据 `dominantColor` prop 动态生成 `borderColor`（80% 透明度混合）和 `boxShadow`（弱发光），使头像边缘与聊天界面的色调自然融合。
+展示效果：`VcpAvatar.vue` 根据 `dominantColor` prop 直接设置兼容旧 WebView 的 `borderColor`，并用低透明度 `boxShadow` 形成弱发光边界。
 
 ---
 

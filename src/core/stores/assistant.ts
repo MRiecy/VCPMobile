@@ -109,6 +109,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     try {
       await invoke("delete_agent", { agentId: id });
       invalidateSnapshotLoads();
+      avatarStore.clearCache("agent", id);
       agents.value = agents.value.filter((a) => a.id !== id);
       groups.value = groups.value.map((group) => ({
         ...group,
@@ -151,6 +152,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     try {
       await invoke("delete_group", { groupId: id });
       invalidateSnapshotLoads();
+      avatarStore.clearCache("group", id);
       groups.value = groups.value.filter((g) => g.id !== id);
       notificationStore.addNotification({
         type: "success",

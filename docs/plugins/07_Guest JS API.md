@@ -121,6 +121,8 @@ export function deleteTempFile(filePath: string): Promise<void> {
 
 > **平台限制**：该接口仅在 Android 物理端可用；桌面端调用将抛出错误。
 
+开发环境中 `tauri-plugin-vcp-mobile` 是本地 file dependency，`vite.config.ts` 将它排除在 `optimizeDeps` 预打包之外。否则 Guest JS 新增导出后，旧的 `node_modules/.vite` 快照可能仍被异步页面加载，表现为“源码已有导出但页面首次进入报 missing export”。
+
 ---
 
 ## 4. 命令命名映射规则

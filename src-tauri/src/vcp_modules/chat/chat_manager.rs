@@ -1,8 +1,7 @@
-use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::DeleteTarget;
-use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
+use crate::vcp_modules::topic_types::{MessageKey, TopicActivityDto, TopicKey};
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
@@ -194,7 +193,7 @@ pub async fn append_single_message(
     owner_type: String,
     topic_id: String,
     message: ChatMessage,
-) -> Result<Vec<ContentBlock>, String> {
+) -> Result<message_service::MessageWriteResultDto, String> {
     message_service::append_single_message(
         app_handle,
         &db_state.pool,
@@ -214,7 +213,7 @@ pub async fn patch_single_message(
     owner_type: String,
     topic_id: String,
     message: ChatMessage,
-) -> Result<Vec<ContentBlock>, String> {
+) -> Result<message_service::MessageWriteResultDto, String> {
     message_service::patch_single_message(
         app_handle,
         &db_state.pool,
@@ -236,7 +235,7 @@ pub async fn delete_messages(
     owner_type: String,
     topic_id: String,
     msg_ids: Vec<String>,
-) -> Result<i32, String> {
+) -> Result<TopicActivityDto, String> {
     let key = TopicKey::new(owner_type, owner_id, &topic_id);
     let result = message_service::delete_messages(&db_state.pool, &key, msg_ids, None).await?;
     for msg_id in &result.active_ids {
@@ -245,7 +244,10 @@ pub async fn delete_messages(
         }
     }
     notify_message_deletions(&app_handle, &key, &result);
-    Ok(result.msg_count)
+    Ok(TopicActivityDto {
+        msg_count: result.msg_count,
+        updated_at: result.topic_updated_at,
+    })
 }
 
 pub fn notify_message_deletions<R: tauri::Runtime>(
@@ -272,7 +274,7 @@ pub async fn truncate_history_after_message(
     owner_type: String,
     topic_id: String,
     anchor_message_id: String,
-) -> Result<i32, String> {
+) -> Result<TopicActivityDto, String> {
     let key = TopicKey::new(owner_type, owner_id, &topic_id);
     let deletion =
         message_service::truncate_history_after_message(&db_state.pool, &key, &anchor_message_id)
@@ -287,7 +289,10 @@ pub async fn truncate_history_after_message(
         }
     }
     notify_message_deletions(&app_handle, &key, &deletion);
-    Ok(deletion.msg_count)
+    Ok(TopicActivityDto {
+        msg_count: deletion.msg_count,
+        updated_at: deletion.topic_updated_at,
+    })
 }
 
 // --- 增量同步逻辑 (Delta Sync) (Moved to sync_manager.rs) ---

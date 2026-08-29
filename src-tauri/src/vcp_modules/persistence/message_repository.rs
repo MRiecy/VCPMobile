@@ -1,7 +1,7 @@
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::content_parser::{parse_content, ContentBlock};
 use crate::vcp_modules::sync_hash::HashAggregator;
-use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
+use crate::vcp_modules::topic_types::{MessageKey, TopicActivityDto, TopicKey};
 use serde::Serialize;
 
 use sqlx::Row;
@@ -663,7 +663,7 @@ impl MessageRepository {
         key: &TopicKey,
         render_content: &[u8],
         skip_bubble: bool,
-    ) -> Result<(), String> {
+    ) -> Result<Option<TopicActivityDto>, String> {
         // 1. 计算核心内容指纹 (通过 HashAggregator)
         let attachment_hashes: Vec<String> = message
             .attachments
@@ -844,10 +844,10 @@ impl MessageRepository {
 
         // 3. 触发聚合哈希冒泡 (通过 HashAggregator 统一处理)
         if !skip_bubble && fingerprint_changed {
-            HashAggregator::bubble_from_topic(tx, key).await?;
+            return HashAggregator::bubble_from_topic(tx, key).await.map(Some);
         }
 
-        Ok(())
+        Ok(None)
     }
 
     async fn upsert_attachments_for_message(

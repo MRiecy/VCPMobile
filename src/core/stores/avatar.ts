@@ -126,6 +126,7 @@ const extractDominantColorFromBlob = (blobUrl: string): Promise<string> => {
 
 export const useAvatarStore = defineStore("avatar", () => {
   const MAX_AVATAR_CACHE = 50;
+  const MAX_CONCURRENT_AVATAR_READS = 2;
 
   // 使用 reactive 包装 Map，配合同步访问
   const cache = reactive(new Map<string, AvatarCache>());
@@ -141,9 +142,30 @@ export const useAvatarStore = defineStore("avatar", () => {
   const generations = new Map<string, number>();
   // 用于追踪正在进行的 dominant_color 计算，防止重复触发
   const inFlightCompute = new Set<string>();
+  const avatarReadWaiters: Array<() => void> = [];
+  let activeAvatarReads = 0;
 
   // dominant_color 同步缓存，供 computeShell 等同步场景使用
   const dominantColors = reactive(new Map<string, string>());
+
+  const acquireAvatarReadSlot = (): Promise<void> => {
+    if (activeAvatarReads < MAX_CONCURRENT_AVATAR_READS) {
+      activeAvatarReads += 1;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      avatarReadWaiters.push(resolve);
+    });
+  };
+
+  const releaseAvatarReadSlot = () => {
+    const next = avatarReadWaiters.shift();
+    if (next) {
+      next();
+      return;
+    }
+    activeAvatarReads = Math.max(0, activeAvatarReads - 1);
+  };
 
   const touchCache = (key: string) => {
     cacheRecency.set(key, ++cacheAccessSequence);
@@ -279,7 +301,12 @@ export const useAvatarStore = defineStore("avatar", () => {
 
     const requestGeneration = generations.get(key) ?? 0;
     const fetchTask = (async () => {
+      await acquireAvatarReadSlot();
       try {
+        if ((generations.get(key) ?? 0) !== requestGeneration) {
+          return cache.get(key)?.blobUrl ?? "";
+        }
+
         const result = await invoke<AvatarResult | null>("get_avatar", {
           ownerType,
           ownerId,
@@ -332,6 +359,8 @@ export const useAvatarStore = defineStore("avatar", () => {
         invalidateAvatarKey(key, true);
       } catch (err) {
         console.error(`[AvatarStore] Failed to fetch avatar for ${key}:`, err);
+      } finally {
+        releaseAvatarReadSlot();
       }
       return "";
     })();
@@ -387,7 +416,13 @@ export const useAvatarStore = defineStore("avatar", () => {
           continue;
         }
         const existingCache = cache.get(key);
+        const pendingReadNeedsInvalidation = pending.has(key) && (
+          !existingMetadata ||
+          existingMetadata.avatarHash !== item.avatarHash ||
+          existingMetadata.updatedAt < item.updatedAt
+        );
         if (
+          pendingReadNeedsInvalidation ||
           (existingMetadata && existingMetadata.avatarHash !== item.avatarHash) ||
           (existingCache && existingCache.avatarHash !== item.avatarHash)
         ) {
@@ -405,7 +440,11 @@ export const useAvatarStore = defineStore("avatar", () => {
         }
       }
 
-      const knownKeys = new Set([...metadata.keys(), ...cache.keys()]);
+      const knownKeys = new Set([
+        ...metadata.keys(),
+        ...cache.keys(),
+        ...pending.keys(),
+      ]);
       for (const key of knownKeys) {
         if (incomingKeys.has(key)) continue;
         if ((generations.get(key) ?? 0) !== (generationSnapshot.get(key) ?? 0)) {

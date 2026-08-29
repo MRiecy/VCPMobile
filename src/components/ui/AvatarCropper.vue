@@ -186,8 +186,8 @@ const options = reactive({
   original: false,
   canMoveBox: false,
   autoCrop: true,
-  autoCropWidth: 360, // 桌面端标准宽度
-  autoCropHeight: 360, // 桌面端标准高度
+  autoCropWidth: 360, // 头像输出基准宽度
+  autoCropHeight: 360, // 头像输出基准高度
   centerBox: true,
   high: false,
   maxImgSize: 1120,

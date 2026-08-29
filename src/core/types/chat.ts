@@ -385,6 +385,17 @@ export interface StreamEventDto {
   aurora: AuroraUpdate | null;
   blocks: ContentBlock[] | null;
   timestamp: number | null;
+  topicUpdatedAt: number | null;
+}
+
+export interface MessageWriteResultDto {
+  blocks: ContentBlock[];
+  topicUpdatedAt: number;
+}
+
+export interface TopicActivityDto {
+  msgCount: number;
+  updatedAt: number;
 }
 
 export interface ActiveGenerationDto {

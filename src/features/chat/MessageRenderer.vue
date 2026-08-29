@@ -549,7 +549,7 @@ const renderHeavyContent = async () => {
 
   // 2. Mermaid diagrams
   const mermaidPlaceholders = Array.from(
-    messageContentRef.value.querySelectorAll('.mermaid-placeholder, pre.mermaid, code.language-mermaid')
+    messageContentRef.value.querySelectorAll('.mermaid-placeholder, .mermaid, code.language-mermaid')
   ).filter(el => !el.closest('.streaming-tail'));
 
   if (mermaidPlaceholders.length > 0) {
@@ -564,7 +564,16 @@ const renderHeavyContent = async () => {
         const placeholder = el as HTMLElement;
         const wrapper = placeholder.closest('.vcp-mermaid-wrapper');
         if (wrapper && wrapper.querySelector('svg')) continue; // already rendered & enhanced
-        if (placeholder.querySelector('svg')) continue; // already rendered
+
+        // 流式 AST 与异步 Mermaid 渲染可能先完成 SVG 注入、后触发本轮增强。
+        // 已有 SVG 只代表“可见”，不代表点击/全屏交互已经绑定。
+        if (placeholder.querySelector('svg')) {
+          enhanceMermaid(
+            placeholder,
+            placeholder.dataset.mermaidSource || placeholder.textContent || '',
+          );
+          continue;
+        }
         
         const sourceCode = placeholder.dataset.mermaidSource || placeholder.textContent || '';
         const codeKey = sourceCode;

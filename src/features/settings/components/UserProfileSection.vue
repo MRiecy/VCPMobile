@@ -20,6 +20,7 @@ const notificationStore = useNotificationStore();
 // Avatar Logic
 const isCropping = ref(false);
 const isPickingAvatar = ref(false);
+const isSavingAvatar = ref(false);
 const cropImg = ref("");
 const avatarWorkingPath = ref<string | null>(null);
 let disposed = false;
@@ -37,7 +38,7 @@ const releaseAvatarWorkingCopy = async () => {
 };
 
 const triggerFileInput = async () => {
-  if (isPickingAvatar.value || isCropping.value) return;
+  if (isPickingAvatar.value || isCropping.value || isSavingAvatar.value) return;
   isPickingAvatar.value = true;
   try {
     await releaseAvatarWorkingCopy();
@@ -73,9 +74,10 @@ const cancelAvatarCrop = () => {
 
 const onCropConfirm = async (blob: Blob) => {
   isCropping.value = false;
-  await releaseAvatarWorkingCopy();
+  isSavingAvatar.value = true;
   
   try {
+    await releaseAvatarWorkingCopy();
     const arrayBuffer = await blob.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);
     
@@ -84,6 +86,8 @@ const onCropConfirm = async (blob: Blob) => {
 
   } catch (err) {
     console.error("Failed to save user avatar:", err);
+  } finally {
+    if (!disposed) isSavingAvatar.value = false;
   }
 };
 

@@ -323,9 +323,16 @@ mod tests {
                 image_data BLOB, dominant_color TEXT, updated_at BIGINT, deleted_at BIGINT,
                 PRIMARY KEY(owner_type, owner_id)
              );
-             CREATE TABLE agents (agent_id TEXT PRIMARY KEY, deleted_at BIGINT);
-             CREATE TABLE groups (group_id TEXT PRIMARY KEY, deleted_at BIGINT);
-             INSERT INTO agents VALUES ('deleted', 2), ('live', NULL);
+             CREATE TABLE agents (
+                owner_type TEXT, agent_id TEXT, deleted_at BIGINT,
+                PRIMARY KEY(owner_type, agent_id)
+             );
+             CREATE TABLE groups (
+                owner_type TEXT, group_id TEXT, deleted_at BIGINT,
+                PRIMARY KEY(owner_type, group_id)
+             );
+             INSERT INTO agents VALUES
+                ('agent', 'deleted', 2), ('agent', 'live', NULL);
              INSERT INTO avatars VALUES
                 ('agent', 'deleted', 'old', 'image/png', X'01', '#111111', 1, 2),
                 ('agent', 'live', 'live', 'image/png', X'02', '#222222', 1, NULL),

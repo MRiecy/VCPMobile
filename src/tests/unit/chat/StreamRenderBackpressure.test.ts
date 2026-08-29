@@ -14,6 +14,7 @@ const streamEvent = (
   aurora: null,
   blocks: null,
   timestamp: null,
+  topicUpdatedAt: null,
   ...event,
 });
 

@@ -15,8 +15,10 @@ import type {
   ChatMessage,
   ContentBlock,
   GroupChatResultDto,
+  MessageWriteResultDto,
   RegenerateTopicResultDto,
   StreamEventDto,
+  TopicActivityDto,
 } from "../types/chat";
 import type {
   ConversationKey,
@@ -531,11 +533,12 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   const triggerGeneration = async (
     userMsg: ChatMessage,
     frozenKey?: ConversationKey,
-  ): Promise<boolean> => {
+  ): Promise<number | null> => {
     const key = frozenKey || captureLoadedConversation();
-    if (!key) return false;
+    if (!key) return null;
+    let topicUpdatedAt: number;
     try {
-      const compiledBlocks = await invoke<ContentBlock[]>("append_single_message", {
+      const persisted = await invoke<MessageWriteResultDto>("append_single_message", {
         ownerId: key.ownerId,
         ownerType: key.ownerType,
         topicId: key.topicId,
@@ -549,9 +552,16 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       if (canCommitConversation(key) && targetIndex !== -1) {
         currentChatHistory.value[targetIndex] = {
           ...currentChatHistory.value[targetIndex],
-          blocks: compiledBlocks,
+          blocks: persisted.blocks,
         };
       }
+      topicUpdatedAt = persisted.topicUpdatedAt;
+      topicStore.setTopicUpdatedAt(
+        key.ownerId,
+        key.ownerType,
+        key.topicId,
+        topicUpdatedAt,
+      );
     } catch (e) {
       console.error("[ChatHistoryStore] Message persistence failed:", e);
       notificationStore.addNotification({
@@ -561,7 +571,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         toastOnly: true,
         duration: 6000,
       });
-      return false;
+      return null;
     }
 
     try {
@@ -642,7 +652,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         duration: 6000,
       });
     }
-    return true;
+    return topicUpdatedAt;
   };
 
   /**
@@ -674,13 +684,24 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         blocks: [{ type: "markdown" as const, content }],
       };
       try {
-        const msgCount = await invoke<number>("truncate_history_after_message", {
+        const activity = await invoke<TopicActivityDto>("truncate_history_after_message", {
           ownerId: key.ownerId,
           ownerType: key.ownerType,
           topicId: key.topicId,
           anchorMessageId: originalId,
         });
-        topicStore.setTopicMsgCount(key.ownerId, key.ownerType, key.topicId, msgCount);
+        topicStore.setTopicMsgCount(
+          key.ownerId,
+          key.ownerType,
+          key.topicId,
+          activity.msgCount,
+        );
+        topicStore.setTopicUpdatedAt(
+          key.ownerId,
+          key.ownerType,
+          key.topicId,
+          activity.updatedAt,
+        );
         if (canCommitConversation(key)) {
           const currentIndex = currentChatHistory.value.findIndex(message => message.id === originalId);
           if (currentIndex !== -1) {
@@ -688,14 +709,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
             currentChatHistory.value = currentChatHistory.value.slice(0, currentIndex + 1);
           }
         }
-        const persisted = await triggerGeneration(targetMsg, key);
-        if (persisted) {
-          topicStore.touchTopicUpdatedAt(
-            key.ownerId,
-            key.ownerType,
-            key.topicId,
-          );
-        }
+        await triggerGeneration(targetMsg, key);
       } catch (e) {
         if (canCommitConversation(key)) editingMessage.value = intent;
         notificationStore.addNotification({
@@ -736,21 +750,14 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       );
     }
     topicStore.incrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId);
-    const persisted = await triggerGeneration(userMsg, key);
-    if (!persisted) {
+    const topicUpdatedAt = await triggerGeneration(userMsg, key);
+    if (topicUpdatedAt === null) {
       if (canCommitConversation(key)) {
         currentChatHistory.value = currentChatHistory.value.filter(
           message => message.id !== userMsg.id,
         );
       }
       topicStore.decrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId);
-    } else {
-      topicStore.touchTopicUpdatedAt(
-        key.ownerId,
-        key.ownerType,
-        key.topicId,
-        userMsg.timestamp,
-      );
     }
   };
 
@@ -766,7 +773,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     if (targetIndex === -1) return;
 
     try {
-      const msgCount = await invoke<number>("delete_messages", {
+      const activity = await invoke<TopicActivityDto>("delete_messages", {
         ownerId: key.ownerId,
         ownerType: key.ownerType,
         topicId: key.topicId,
@@ -776,7 +783,18 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         const currentIndex = currentChatHistory.value.findIndex(message => message.id === messageId);
         if (currentIndex !== -1) currentChatHistory.value.splice(currentIndex, 1);
       }
-      topicStore.setTopicMsgCount(key.ownerId, key.ownerType, key.topicId, msgCount);
+      topicStore.setTopicMsgCount(
+        key.ownerId,
+        key.ownerType,
+        key.topicId,
+        activity.msgCount,
+      );
+      topicStore.setTopicUpdatedAt(
+        key.ownerId,
+        key.ownerType,
+        key.topicId,
+        activity.updatedAt,
+      );
     } catch (e) {
       notificationStore.addNotification({
         type: "error",
@@ -797,7 +815,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     const messageId = messageKey.messageId;
     if (!isMessageActionCurrent(messageKey)) return;
     // 1. 调用后端逻辑删除命令
-    await invoke("delete_message_attachment", {
+    const activity = await invoke<TopicActivityDto>("delete_message_attachment", {
       ownerId: key.ownerId,
       ownerType: key.ownerType,
       topicId: key.topicId,
@@ -805,7 +823,12 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       attachmentOrder,
       hash,
     });
-    topicStore.touchTopicUpdatedAt(key.ownerId, key.ownerType, key.topicId);
+    topicStore.setTopicUpdatedAt(
+      key.ownerId,
+      key.ownerType,
+      key.topicId,
+      activity.updatedAt,
+    );
 
     // 2. 更新本地状态，以便在界面上实时隐藏该附件
     if (!canCommitConversation(key)) return;
@@ -830,7 +853,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     const msg = { ...currentChatHistory.value[targetIndex] };
 
     try {
-      const compiledBlocks = await invoke<ContentBlock[]>("patch_single_message", {
+      const persisted = await invoke<MessageWriteResultDto>("patch_single_message", {
         ownerId: key.ownerId,
         ownerType: key.ownerType,
         topicId: key.topicId,
@@ -840,7 +863,12 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
           blocks: undefined,
         },
       });
-      topicStore.touchTopicUpdatedAt(key.ownerId, key.ownerType, key.topicId);
+      topicStore.setTopicUpdatedAt(
+        key.ownerId,
+        key.ownerType,
+        key.topicId,
+        persisted.topicUpdatedAt,
+      );
       if (canCommitConversation(key)) {
         clearMessageCache(messageId);
         const currentIndex = currentChatHistory.value.findIndex(message => message.id === messageId);
@@ -848,7 +876,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
           currentChatHistory.value[currentIndex] = {
             ...currentChatHistory.value[currentIndex],
             content: newContent,
-            blocks: compiledBlocks,
+            blocks: persisted.blocks,
           };
         }
       }

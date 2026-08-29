@@ -59,6 +59,30 @@ impl MessageKey {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicActivityDto {
+    pub msg_count: i32,
+    pub updated_at: i64,
+}
+
+pub fn resolve_topic_activity_updated_at(
+    topic_updated_at: i64,
+    last_message_updated_at: i64,
+    created_at: i64,
+) -> i64 {
+    let topic_activity = if topic_updated_at > 0 {
+        topic_updated_at
+    } else {
+        created_at
+    };
+    if last_message_updated_at > 0 {
+        topic_activity.max(last_message_updated_at)
+    } else {
+        topic_activity
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Topic {
     pub id: String,
@@ -133,5 +157,13 @@ mod tests {
         assert!(!obj.contains_key("msg_count"));
         assert!(!obj.contains_key("owner_id"));
         assert!(!obj.contains_key("owner_type"));
+    }
+
+    #[test]
+    fn topic_activity_uses_live_message_then_topic_then_creation_fallback() {
+        assert_eq!(resolve_topic_activity_updated_at(200, 300, 100), 300);
+        assert_eq!(resolve_topic_activity_updated_at(400, 300, 100), 400);
+        assert_eq!(resolve_topic_activity_updated_at(200, 0, 100), 200);
+        assert_eq!(resolve_topic_activity_updated_at(0, 0, 100), 100);
     }
 }

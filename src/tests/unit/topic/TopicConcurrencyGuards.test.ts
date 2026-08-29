@@ -106,6 +106,23 @@ describe("topic list concurrency guards", () => {
     expect(store.isTopicPinned("agent-a", "group", "same-topic")).toBe(false);
   });
 
+  it("lets an authoritative message bubble replace activity with an older live maximum", async () => {
+    mockInvoke("get_topics_streamed", () => Promise.resolve());
+    const store = useTopicStore();
+    const loading = store.loadTopicList("agent-a", "agent");
+    channelInstances[channelInstances.length - 1]?.emit([
+      topic("topic-a", "Topic A", { updatedAt: 900 }),
+    ]);
+    await loading;
+
+    store.setTopicUpdatedAt("agent-a", "agent", "topic-a", 400);
+    expect(store.topics[0].updatedAt).toBe(400);
+
+    mockInvoke("set_topic_unread", () => null);
+    await store.setTopicUnread("agent-a", "agent", "topic-a", false);
+    expect(store.topics[0].updatedAt).toBe(400);
+  });
+
   it("persists the global sort mode and local pinned topic keys", async () => {
     const first = createPersistedTopicStore();
     first.setSortMode("updated");

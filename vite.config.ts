@@ -73,6 +73,12 @@ export default defineConfig(async () => ({
     pure: process.env.NODE_ENV === "production" ? ["console.log", "console.debug", "console.info"] : [],
   },
 
+  // 本地 Tauri 插件会随源码同步增加 Guest JS 导出。排除依赖预打包，避免
+  // node_modules/.vite 继续提供缺少新导出的旧快照，导致异步页面在首次加载时失败。
+  optimizeDeps: {
+    exclude: ["tauri-plugin-vcp-mobile"],
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

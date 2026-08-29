@@ -24,7 +24,7 @@ date: 2026-08-11
 | 文件 | 类型 | 行数 | 职责 |
 |------|------|------|------|
 | `src/core/stores/assistant.ts` | Pinia Store | 261 | Agent/Group 列表管理、CRUD、未读计数、头像上传封装 |
-| `src/core/stores/avatar.ts` | Pinia Store | 250 | 头像二进制缓存（Blob URL）、Dominant Color 计算与同步 |
+| `src/core/stores/avatar.ts` | Pinia Store | — | 头像 metadata、二进制读取闸门、LRU Blob URL 与 Dominant Color |
 | `src/core/stores/topicListManager.ts` | Pinia Store | 414 | 话题列表的流式加载、搜索筛选、乐观更新 |
 | `src/core/stores/chatSessionStore.ts` | Pinia Store | 103 | 当前选中项（Agent/Group）、当前话题 ID、最后活跃话题映射 |
 | `src/features/agent/AgentList.vue` | Vue 组件 | 439 | Agent/Group 侧边栏渲染、拖拽排序、右滑手势 |
@@ -32,7 +32,7 @@ date: 2026-08-11
 | `src/features/agent/GroupSettingsView.vue` | Vue 组件 | 445 | Group 配置全屏编辑页、成员管理、模型统一设置 |
 | `src/features/agent/SidebarTabs.vue` | Vue 组件 | 28 | 侧边栏「助手 / 话题」Tab 切换 |
 | `src/features/agent/SidebarSearch.vue` | Vue 组件 | 29 | 动态占位符搜索输入框 |
-| `src/components/ui/VcpAvatar.vue` | Vue 组件 | 111 | 头像展示组件（缓存感知、Fallback、Dominant Color 边框） |
+| `src/components/ui/VcpAvatar.vue` | Vue 组件 | — | 头像展示组件（可视区懒加载、Fallback、Dominant Color 边框） |
 
 ### 1.3 在整体架构中的位置
 
@@ -261,6 +261,8 @@ const metadata = reactive(new Map<string, AvatarMetadata>());
 const pending = new Map<string, Promise<string>>();
 const generations = new Map<string, number>();
 const inFlightCompute = new Set<string>();
+const MAX_CONCURRENT_AVATAR_READS = 2;
+const avatarReadWaiters: Array<() => void> = [];
 ```
 
 | 状态 | 类型 | 说明 |
@@ -268,8 +270,9 @@ const inFlightCompute = new Set<string>();
 | `cache` | `Reactive<Map<string, AvatarCache>>` | 头像 Blob URL 缓存，key = `${ownerType}:${ownerId}` |
 | `metadata` | `Reactive<Map<string, AvatarMetadata>>` | 启动/同步批量拉取的 hash 与更新时间，不含图片二进制 |
 | `pending` | `Map<string, Promise<string>>` | 防并发重复请求：同一 ID 正在加载时复用 Promise |
-| `generations` | `Map<string, number>` | 保存/失效时提升代际，拒绝旧读取回灌新缓存 |
+| `generations` | `Map<string, number>` | 保存、删除或 metadata 对账时提升代际，拒绝旧读取回灌新缓存 |
 | `inFlightCompute` | `Set<string>` | 防止 Dominant Color 重复计算 |
+| `avatarReadWaiters` | `Array<() => void>` | 全局二进制读取等待队列，同时最多放行 2 个 `get_avatar` |
 
 **`getAvatarUrl` 缓存策略**：
 
@@ -304,7 +307,7 @@ const inFlightCompute = new Set<string>();
                                         └─────────────────────────┘
 ```
 
-**可视区懒加载**：`VcpAvatar` 复用全局 `v-intersection-observer`，只在头像进入视口前后 300px 时调用 `getAvatarUrl()`。`batch_get_avatars` 只返回 owner、hash、颜色与更新时间；同步时 hash 未变的 Blob URL 保留，变化或删除的 owner 才定点失效。
+**可视区懒加载**：`VcpAvatar` 复用全局 `v-intersection-observer`，只在头像进入视口前后 300px 时调用 `getAvatarUrl()`，离开该区域即卸载 `<img>` 以释放解码位图。`batch_get_avatars` 只返回 owner、hash、颜色与更新时间；同步时 hash 未变的 Blob URL 保留，变化或删除的 owner 才定点失效。不同 owner 的二进制读取还受全局 2 路并发闸门约束。
 
 **LRU 淘汰**：Blob URL 缓存上限为 50。Store 以独立访问序号记录最近使用时间，超限时撤销最久未访问条目的 Object URL；元数据 Map 不受此二进制缓存上限影响：
 
@@ -322,7 +325,7 @@ while (cache.size > MAX_AVATAR_CACHE) {
 
 ### 3.2 Dominant Color 管理
 
-`dominantColors` 是一个独立的 reactive Map，提供**同步读取**能力，供 `VcpAvatar.vue` 的边框染色和 `computeShell` 等同步场景使用：
+`dominantColors` 是一个独立的 reactive Map，提供**同步读取**能力，当前主要供 `computeShell` 等同步场景使用；`VcpAvatar.vue` 的边框仍以调用方传入的 `dominantColor` 为准：
 
 > 文件位置：`src/core/stores/avatar.ts` 第 122 行
 
@@ -694,7 +697,7 @@ Rust 事务写入 SQLite
 头像缓存需要高频的「key 查找」和「精确删除」。`reactive(new Map())` 相比 `ref<Record<string, T>>({})` 的优势：
 
 - `Map.get()` / `Map.delete()` 在 Vue 响应式系统下仍保持 O(1)
-- `Map.keys().next().value` 可直接获取最早插入项，实现 LRU
+- 独立的 `cacheRecency` 访问序号可精确定位最久未使用项，不依赖 Map 插入顺序冒充 LRU
 - `reactive` 包裹后，外部组件（如 `VcpAvatar.vue`）可通过 `avatarStore.cache.get(key)` 做**同步缓存命中检查**，消除异步获取导致的闪烁
 
 ### 8.4 为何话题列表使用 Channel 流式加载？
@@ -762,7 +765,7 @@ watch(agentConfig, () => {
 | mobileSystemPrompt | — | 仅本机生效、不参与同步的系统提示词，实现移动端差异化行为 | `AgentSettingsView.vue` |
 | memberTags | — | Group 中每个成员对应的触发标签，用于自然随机发言模式 | `GroupSettingsView.vue` |
 | useUnifiedModel | — | Group 设置项，为 `true` 时所有成员强制使用同一模型 | `GroupSettingsView.vue` |
-| LRU 淘汰 | Least Recently Used | 头像缓存上限 50 条，超出时淘汰最早插入项并释放 Blob URL | `avatar.ts` |
+| LRU 淘汰 | Least Recently Used | 头像缓存上限 50 条，超出时按访问序号淘汰最久未使用项并释放 Blob URL | `avatar.ts` |
 | 流式加载 | Streaming Load | 通过 Channel 分块接收话题数据，前端渐进式渲染 | `topicListManager.ts` |
 
 ---

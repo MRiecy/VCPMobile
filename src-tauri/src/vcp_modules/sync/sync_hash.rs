@@ -3,13 +3,55 @@ use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
 use crate::vcp_modules::sync_types::{compute_deterministic_hash, compute_merkle_root};
-use crate::vcp_modules::topic_types::TopicKey;
+use crate::vcp_modules::topic_types::{
+    resolve_topic_activity_updated_at, TopicActivityDto, TopicKey,
+};
 
 use sqlx::{Row, Sqlite, Transaction};
 
 pub struct HashAggregator;
 
 impl HashAggregator {
+    pub async fn load_topic_activity(
+        tx: &mut Transaction<'_, Sqlite>,
+        key: &TopicKey,
+    ) -> Result<TopicActivityDto, String> {
+        let row = sqlx::query(
+            "SELECT msg_count, updated_at, last_message_updated_at, created_at
+             FROM topics
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
+        )
+        .bind(&key.owner_type)
+        .bind(&key.owner_id)
+        .bind(&key.topic_id)
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        let topic_updated_at: i64 = row
+            .try_get("updated_at")
+            .map_err(|error| format!("Topic {} updated_at decode failed: {error}", key.topic_id))?;
+        let last_message_updated_at: i64 =
+            row.try_get("last_message_updated_at").map_err(|error| {
+                format!(
+                    "Topic {} last_message_updated_at decode failed: {error}",
+                    key.topic_id
+                )
+            })?;
+        let created_at: i64 = row
+            .try_get("created_at")
+            .map_err(|error| format!("Topic {} created_at decode failed: {error}", key.topic_id))?;
+        Ok(TopicActivityDto {
+            msg_count: row.try_get("msg_count").map_err(|error| {
+                format!("Topic {} msg_count decode failed: {error}", key.topic_id)
+            })?,
+            updated_at: resolve_topic_activity_updated_at(
+                topic_updated_at,
+                last_message_updated_at,
+                created_at,
+            ),
+        })
+    }
+
     async fn compute_topic_content_aggregate(
         tx: &mut Transaction<'_, Sqlite>,
         key: &TopicKey,
@@ -268,7 +310,7 @@ impl HashAggregator {
     pub async fn bubble_topic_hash(
         tx: &mut Transaction<'_, Sqlite>,
         key: &TopicKey,
-    ) -> Result<i32, String> {
+    ) -> Result<TopicActivityDto, String> {
         let (root_hash, msg_count, last_message_updated_at) =
             Self::compute_topic_content_aggregate(tx, key).await?;
         let config_hash = if key.owner_type == "agent" {
@@ -305,7 +347,7 @@ impl HashAggregator {
                 key.topic_id
             ));
         }
-        Ok(msg_count)
+        Self::load_topic_activity(tx, key).await
     }
 
     pub async fn bubble_topic_hash_with_meta(
@@ -315,7 +357,7 @@ impl HashAggregator {
         created_at: i64,
         locked: bool,
         unread: bool,
-    ) -> Result<i32, String> {
+    ) -> Result<TopicActivityDto, String> {
         // 1. 一次消息扫描同时计算 content_hash、msg_count 与列表更新时间投影
         let (root_hash, msg_count, last_message_updated_at) =
             Self::compute_topic_content_aggregate(tx, key).await?;
@@ -367,7 +409,7 @@ impl HashAggregator {
                 key.topic_id
             ));
         }
-        Ok(msg_count)
+        Self::load_topic_activity(tx, key).await
     }
 
     pub async fn bubble_agent_hash(
@@ -445,8 +487,8 @@ impl HashAggregator {
     pub async fn bubble_from_topic(
         tx: &mut Transaction<'_, Sqlite>,
         key: &TopicKey,
-    ) -> Result<i32, String> {
-        let msg_count = Self::bubble_topic_hash(tx, key).await?;
+    ) -> Result<TopicActivityDto, String> {
+        let activity = Self::bubble_topic_hash(tx, key).await?;
 
         if key.owner_type == "agent" {
             Self::bubble_agent_hash(tx, &key.owner_id).await?;
@@ -459,7 +501,7 @@ impl HashAggregator {
             ));
         }
 
-        Ok(msg_count)
+        Ok(activity)
     }
 }
 

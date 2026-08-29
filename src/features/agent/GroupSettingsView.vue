@@ -115,7 +115,7 @@ const releaseAvatarWorkingCopy = async () => {
 };
 
 const triggerFileInput = async () => {
-  if (isPickingAvatar.value || isCropping.value) return;
+  if (isPickingAvatar.value || isCropping.value || isSaving.value) return;
   const epoch = editorEpoch;
   const groupId = props.id;
   if (!groupId || !isOpenEditorCurrent(epoch, groupId)) return;
@@ -161,10 +161,10 @@ const onCropConfirm = async (blob: Blob) => {
   }
 
   isCropping.value = false;
-  await releaseAvatarWorkingCopy();
   isSaving.value = true;
 
   try {
+    await releaseAvatarWorkingCopy();
     const arrayBuffer = await blob.arrayBuffer();
     if (!isOpenEditorCurrent(epoch, groupId)) return;
     const bytes = new Uint8Array(arrayBuffer);

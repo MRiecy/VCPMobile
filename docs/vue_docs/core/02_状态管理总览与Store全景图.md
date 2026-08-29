@@ -342,15 +342,17 @@ const msgToUse = activeMsg || chunk.message;
 
 `useAvatarStore` 负责头像二进制数据的内存级缓存管理，以及主色调（Dominant Color）的前端提取与回写。
 
-**核心状态**（3 个）：
+**核心状态**：
 
 | 状态 | 类型 | 说明 |
 |------|------|------|
 | `cache` | `Map<string, AvatarCache>` | 头像 Blob URL 缓存，键格式 `"ownerType:ownerId"`，上限 50 条 |
+| `metadata` | `Map<string, AvatarMetadata>` | 启动/同步预取的 hash 与更新时间，不包含图片二进制 |
 | `dominantColors` | `Map<string, string>` | 主色调同步缓存，供 `computeShell` 等同步场景读取 |
 | `pending` | `Map<string, Promise<string>>` | 进行中的头像请求去重映射 |
+| `generations` | `Map<string, number>` | 保存、删除和 metadata 对账时废弃旧单项读取的本地代际 |
 
-**版本号防死循环**：缓存条目含 `version` 字段（来自后端 `updated_at`）。`getAvatarUrl` 比较逻辑为 `version === 0 || existing.version >= version`，确保请求版本非强制刷新时，只要缓存存在即可直接返回，切断潜在的死循环。
+**并发与内存边界**：`batch_get_avatars` 只读取 metadata。组件进入视口前后 300px 才触发单项二进制读取，全局同时最多执行 2 个 `get_avatar`；同 owner 请求由 `pending` 合并。metadata 对账会提升受影响 key 的 generation 并废弃旧读取，缓存按 LRU 保留 50 项。组件离开预加载区后卸载 `<img>`，让 WebView 释放解码位图。
 
 **前端主色调兜底**：当后端返回的 `dominant_color` 为 `null` 时，前端通过 Canvas 16×16 降采样 + 512-bin 相似色归纳量化自主计算颜色，并异步调用 `store_dominant_color` 回写后端，实现前后端互补。
 
@@ -1090,7 +1092,7 @@ await invoke('get_topics_streamed', { ownerId, ownerType, onChunk: channel });
 - `chatStreamStore.activeStreamMessages` 上限 100 条，超出时清理最旧的非活跃消息
 - `notification.historyList` 上限 100 条，超出时从尾部弹出
 - `syncSession.logs` 上限 200 条，超出时从头部 shift（保留最新日志）
-- `avatar.cache` 上限 50 条，超出时按 FIFO 清理并 `URL.revokeObjectURL()` 释放物理内存
+- `avatar.cache` 上限 50 条，按独立访问序号执行 LRU 淘汰并 `URL.revokeObjectURL()`；离开预加载区的组件同时卸载 `<img>`
 - `floatingAssistant.toasts` 上限 5 条，超出时 `shift()` 移除最旧记录；每条 3 秒后自动过滤移除
 
 **shallowRef 的使用**：`overlayStore.contextMenuConfig` 使用 `shallowRef` 而非 `ref`。因为上下文菜单的配置对象（含 `actions` 数组）不会被深层修改，使用 `shallowRef` 可避免 Vue 对整个数组进行深层响应式代理，减少运行时开销。

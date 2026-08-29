@@ -50,7 +50,7 @@ describe("invite_only 提及即邀约", () => {
 
     mockInvoke("get_active_generations", () => []);
     mockInvoke("load_chat_history", () => []);
-    mockInvoke("append_single_message", () => []);
+    mockInvoke("append_single_message", () => ({ blocks: [], topicUpdatedAt: 1 }));
     mockInvoke("handle_group_chat_message", () => ({
       status: "no_ai_response",
       reason: "invite_only",
