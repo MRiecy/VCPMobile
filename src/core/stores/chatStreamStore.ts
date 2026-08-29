@@ -999,6 +999,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       msg!.isReconnecting = true;
     } else if (type === "end") {
       const finishReason = event.finishReason;
+      topicStore.touchTopicUpdatedAt(ownerId, ownerType, topicId);
 
       // durable end 原子覆盖权威正文与渲染结果，再撤销活动流状态。
       clearRAFUpdate(messageKey, true);

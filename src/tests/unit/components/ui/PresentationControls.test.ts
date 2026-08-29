@@ -128,7 +128,7 @@ describe('ContextMenuSheet selection semantics', () => {
           { label: '刊物', selected: false, handler: vi.fn() },
         ],
       },
-      global: { stubs: { Teleport: true } },
+      global: { stubs: { Teleport: true }, directives: { guide: {} } },
     });
 
     expect(wrapper.get('[role="radiogroup"]').attributes('aria-label')).toBe('消息呈现');
@@ -142,5 +142,28 @@ describe('ContextMenuSheet selection semantics', () => {
     await radios[0].trigger('click');
     expect(selectedHandler).toHaveBeenCalledTimes(1);
     expect(wrapper.emitted('action-click')).toHaveLength(1);
+  });
+
+  it('renders and dispatches an optional selected header action', async () => {
+    const headerHandler = vi.fn();
+    const wrapper = mount(ContextMenuSheet, {
+      props: {
+        isOpen: true,
+        title: 'Topic Options',
+        actions: [{ label: '修改标题', handler: vi.fn() }],
+        headerAction: {
+          label: '取消置顶',
+          selected: true,
+          handler: headerHandler,
+        },
+      },
+      global: { stubs: { Teleport: true }, directives: { guide: {} } },
+    });
+
+    const headerAction = wrapper.get('button[aria-pressed="true"]');
+    expect(headerAction.text()).toContain('取消置顶');
+    await headerAction.trigger('click');
+    expect(headerHandler).toHaveBeenCalledTimes(1);
+    expect(wrapper.emitted('header-action-click')).toHaveLength(1);
   });
 });

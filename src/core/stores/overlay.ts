@@ -345,10 +345,15 @@ export const useOverlayStore = defineStore('overlay', () => {
     }
   };
 
-  const openContextMenu = (actions: OverlayActionItem[], title?: string) => {
+  const openContextMenu = (
+    actions: OverlayActionItem[],
+    title?: string,
+    headerAction?: OverlayActionItem,
+  ) => {
     contextMenuConfig.value = {
       title: title || '',
-      actions
+      actions,
+      headerAction,
     };
     registerModal('ContextMenu', () => { contextMenuConfig.value = null; });
   };

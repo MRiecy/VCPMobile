@@ -10,7 +10,40 @@ import type { TopicDto } from "../types/assistant";
 
 import { useNotificationStore } from "./notification";
 
-export type Topic = TopicDto;
+export type TopicSortMode = "created" | "updated";
+export type Topic = TopicDto & { updatedAt: number };
+
+const normalizeSortMode = (value: unknown): TopicSortMode =>
+  value === "updated" ? "updated" : "created";
+
+const normalizeTopicTimestamp = (
+  value: number | null | undefined,
+  fallback: number,
+) => (typeof value === "number" && Number.isFinite(value) ? value : fallback);
+
+const topicPreferenceKey = (
+  ownerId: string,
+  ownerType: string,
+  topicId: string,
+) => JSON.stringify([ownerType, ownerId, topicId]);
+
+const parseTopicPreferenceKey = (
+  key: string,
+): [string, string, string] | null => {
+  try {
+    const parsed: unknown = JSON.parse(key);
+    if (
+      Array.isArray(parsed) &&
+      parsed.length === 3 &&
+      parsed.every((part) => typeof part === "string")
+    ) {
+      return parsed as [string, string, string];
+    }
+  } catch {
+    // 损坏的本地展示偏好由下一次成功列表加载清理。
+  }
+  return null;
+};
 
 /**
  * 话题列表管理 Store
@@ -24,6 +57,8 @@ export const useTopicStore = defineStore("topic", () => {
   const topics = ref<Topic[]>([]);
   const loading = ref(false);
   const searchTerm = ref("");
+  const sortMode = ref<TopicSortMode>("created");
+  const pinnedTopicKeys = ref<string[]>([]);
   const currentAgentId = ref<string | null>(null);
   const currentOwnerType = ref<string | null>(null);
   let loadGeneration = 0;
@@ -35,6 +70,21 @@ export const useTopicStore = defineStore("topic", () => {
     `${ownerType}:${ownerId}`;
   const isCurrentOwner = (ownerId: string, ownerType: string) =>
     currentAgentId.value === ownerId && currentOwnerType.value === ownerType;
+  const effectiveSortMode = computed<TopicSortMode>(() =>
+    normalizeSortMode(sortMode.value),
+  );
+  const validPinnedKeys = () =>
+    Array.isArray(pinnedTopicKeys.value)
+      ? pinnedTopicKeys.value.filter((key) => typeof key === "string")
+      : [];
+  const pinnedKeySet = computed(
+    () => new Set(validPinnedKeys()),
+  );
+  const isTopicPinned = (
+    ownerId: string,
+    ownerType: string,
+    topicId: string,
+  ) => pinnedKeySet.value.has(topicPreferenceKey(ownerId, ownerType, topicId));
   const enqueueUnreadMutation = <T>(operation: () => Promise<T>): Promise<T> => {
     const queued = unreadMutationTail.catch(() => undefined).then(operation);
     unreadMutationTail = queued.then(
@@ -92,6 +142,109 @@ export const useTopicStore = defineStore("topic", () => {
     });
   });
 
+  const compareDescending = (left: number, right: number) => {
+    if (left === right) return 0;
+    return left > right ? -1 : 1;
+  };
+
+  const compareTopics = (left: Topic, right: Topic) => {
+    if (effectiveSortMode.value === "updated") {
+      const updatedComparison = compareDescending(
+        left.updatedAt,
+        right.updatedAt,
+      );
+      if (updatedComparison !== 0) return updatedComparison;
+    }
+
+    const createdComparison = compareDescending(left.createdAt, right.createdAt);
+    if (createdComparison !== 0) return createdComparison;
+    if (left.id === right.id) return 0;
+    return left.id > right.id ? -1 : 1;
+  };
+
+  const topicSections = computed(() => {
+    const pinned: Topic[] = [];
+    const regular: Topic[] = [];
+    const orderedTopics = [...filteredTopics.value].sort(compareTopics);
+
+    for (const topic of orderedTopics) {
+      const target = isTopicPinned(topic.ownerId, topic.ownerType, topic.id)
+        ? pinned
+        : regular;
+      target.push(topic);
+    }
+
+    return { pinned, regular };
+  });
+
+  const setSortMode = (mode: TopicSortMode) => {
+    sortMode.value = normalizeSortMode(mode);
+  };
+
+  const toggleTopicPinned = (
+    ownerId: string,
+    ownerType: string,
+    topicId: string,
+  ) => {
+    const key = topicPreferenceKey(ownerId, ownerType, topicId);
+    if (pinnedKeySet.value.has(key)) {
+      pinnedTopicKeys.value = validPinnedKeys().filter(
+        (candidate) => candidate !== key,
+      );
+      return false;
+    }
+
+    pinnedTopicKeys.value = [...validPinnedKeys(), key];
+    return true;
+  };
+
+  const removePinnedTopic = (
+    ownerId: string,
+    ownerType: string,
+    topicId: string,
+  ) => {
+    const key = topicPreferenceKey(ownerId, ownerType, topicId);
+    if (!pinnedKeySet.value.has(key)) return;
+    pinnedTopicKeys.value = validPinnedKeys().filter(
+      (candidate) => candidate !== key,
+    );
+  };
+
+  const pruneMissingPinsForOwner = (
+    ownerId: string,
+    ownerType: string,
+    liveTopicIds: Set<string>,
+  ) => {
+    pinnedTopicKeys.value = validPinnedKeys().filter((key) => {
+      const identity = parseTopicPreferenceKey(key);
+      if (!identity) return false;
+      const [savedOwnerType, savedOwnerId, savedTopicId] = identity;
+      if (savedOwnerType !== ownerType || savedOwnerId !== ownerId) return true;
+      return liveTopicIds.has(savedTopicId);
+    });
+  };
+
+  const touchTopicUpdatedAt = (
+    ownerId: string,
+    ownerType: string,
+    topicId: string,
+    updatedAt: number = Date.now(),
+  ) => {
+    if (!isCurrentOwner(ownerId, ownerType)) return;
+    const index = topics.value.findIndex((topic) => topic.id === topicId);
+    if (index === -1) return;
+    const nextUpdatedAt = normalizeTopicTimestamp(
+      updatedAt,
+      topics.value[index].updatedAt,
+    );
+    if (nextUpdatedAt <= topics.value[index].updatedAt) return;
+    topics.value[index] = {
+      ...topics.value[index],
+      updatedAt: nextUpdatedAt,
+    };
+    topics.value = [...topics.value];
+  };
+
   // --- 核心 Action (Actions) ---
 
   /**
@@ -122,17 +275,18 @@ export const useTopicStore = defineStore("topic", () => {
     request = (async () => {
       try {
       // 1. 创建 Channel 用于接收流式数据
-      const channel = new Channel<Topic[]>();
+      const channel = new Channel<TopicDto[]>();
 
       channel.onmessage = (chunk) => {
         // owner + generation 双重校验覆盖同 owner 重入和 A -> B -> A。
         if (generation !== loadGeneration || !isCurrentOwner(ownerId, owner_type)) return;
 
-        const mappedChunk = chunk.map((t) => ({
+        const mappedChunk: Topic[] = chunk.map((t) => ({
           ...t,
           ownerId: ownerId,
           ownerType: owner_type,
           name: t.name || t.id,
+          updatedAt: normalizeTopicTimestamp(t.updatedAt, t.createdAt),
           unreadCount: t.unreadCount ?? 0,
           msgCount: t.msgCount ?? 0,
         }));
@@ -151,6 +305,11 @@ export const useTopicStore = defineStore("topic", () => {
       });
 
       if (generation === loadGeneration && isCurrentOwner(ownerId, owner_type)) {
+        pruneMissingPinsForOwner(
+          ownerId,
+          owner_type,
+          new Set(requestTopics.keys()),
+        );
         sessionStore.reconcileCurrentConversation(topics.value);
       }
 
@@ -196,7 +355,7 @@ export const useTopicStore = defineStore("topic", () => {
       console.log(
         `[TopicStore] Creating new topic "${name}" for ${ownerType} ${ownerId}`,
       );
-      const newTopic = await invoke<Topic>("create_topic", {
+      const newTopic = await invoke<TopicDto>("create_topic", {
         ownerId,
         ownerType,
         name,
@@ -207,6 +366,7 @@ export const useTopicStore = defineStore("topic", () => {
         ...newTopic,
         ownerId,
         ownerType,
+        updatedAt: normalizeTopicTimestamp(newTopic.updatedAt, newTopic.createdAt),
         unreadCount: 0,
         msgCount: 0,
         unread: false,
@@ -252,11 +412,23 @@ export const useTopicStore = defineStore("topic", () => {
   ) => {
     try {
       console.log(`[TopicStore] Deleting topic ${topicId}`);
-      const replacement = await invoke<Topic | null>("delete_topic", {
+      const replacementDto = await invoke<TopicDto | null>("delete_topic", {
         ownerId,
         ownerType,
         topicId,
       });
+      const replacement: Topic | null = replacementDto
+        ? {
+            ...replacementDto,
+            ownerId,
+            ownerType,
+            updatedAt: normalizeTopicTimestamp(
+              replacementDto.updatedAt,
+              replacementDto.createdAt,
+            ),
+          }
+        : null;
+      removePinnedTopic(ownerId, ownerType, topicId);
 
       if (isCurrentOwner(ownerId, ownerType)) {
         const remaining = topics.value.filter((t) => t.id !== topicId);
@@ -318,7 +490,11 @@ export const useTopicStore = defineStore("topic", () => {
       if (!isCurrentOwner(ownerId, ownerType)) return;
       const index = topics.value.findIndex((t) => t.id === topicId);
       if (index !== -1) {
-        topics.value[index] = { ...topics.value[index], name: newTitle };
+        topics.value[index] = {
+          ...topics.value[index],
+          name: newTitle,
+          updatedAt: Math.max(topics.value[index].updatedAt, Date.now()),
+        };
         // 强制触发虚拟列表重绘
         topics.value = [...topics.value];
       }
@@ -360,6 +536,7 @@ export const useTopicStore = defineStore("topic", () => {
       topics.value[currentIndex] = {
         ...topics.value[currentIndex],
         locked: targetLockState,
+        updatedAt: Math.max(topics.value[currentIndex].updatedAt, Date.now()),
       };
       // 强制触发虚拟列表重绘
       topics.value = [...topics.value];
@@ -392,6 +569,7 @@ export const useTopicStore = defineStore("topic", () => {
               ...topics.value[index],
               unread,
               unreadCount: unread ? topics.value[index].unreadCount : 0,
+              updatedAt: Math.max(topics.value[index].updatedAt, Date.now()),
             };
             topics.value = [...topics.value];
           }
@@ -444,10 +622,14 @@ export const useTopicStore = defineStore("topic", () => {
         if (isCurrentOwner(ownerId, ownerType) && !isCurrentConversation) {
           const index = topics.value.findIndex((topic) => topic.id === topicId);
           if (index !== -1) {
+            const wasUnread = topics.value[index].unread;
             topics.value[index] = {
               ...topics.value[index],
               unreadCount,
               unread: true,
+              updatedAt: wasUnread
+                ? topics.value[index].updatedAt
+                : Math.max(topics.value[index].updatedAt, Date.now()),
             };
             topics.value = [...topics.value];
           }
@@ -508,7 +690,15 @@ export const useTopicStore = defineStore("topic", () => {
     topics,
     loading,
     searchTerm,
+    sortMode,
+    effectiveSortMode,
+    pinnedTopicKeys,
     filteredTopics,
+    topicSections,
+    setSortMode,
+    isTopicPinned,
+    toggleTopicPinned,
+    touchTopicUpdatedAt,
     loadTopicList,
     createTopic,
     deleteTopic,
@@ -523,4 +713,8 @@ export const useTopicStore = defineStore("topic", () => {
     setTopicMsgCount,
     markTopicAsRead,
   };
+}, {
+  persist: {
+    pick: ["sortMode", "pinnedTopicKeys"],
+  },
 });

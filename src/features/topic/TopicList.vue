@@ -7,7 +7,7 @@ import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useLayoutStore } from "../../core/stores/layout";
 import { useOverlayStore } from "../../core/stores/overlay";
 import { useNotificationStore } from "../../core/stores/notification";
-import { Edit3, Lock, LockOpen, CheckCircle, Trash2, Copy } from "lucide-vue-next";
+import { Edit3, Lock, LockOpen, CheckCircle, Trash2, Copy, Pin, PinOff } from "lucide-vue-next";
 
 const emit = defineEmits<{
   (e: "select-topic"): void;
@@ -20,15 +20,40 @@ const overlayStore = useOverlayStore();
 const notificationStore = useNotificationStore();
 const router = useRouter();
 
-type TopicViewModel = Topic & { pinned?: boolean; updatedAt?: number };
+type TopicListRow =
+  | { kind: "section"; id: string; label: string; pinned: boolean }
+  | { kind: "topic"; id: string; topic: Topic };
 
-const currentTopics = computed<TopicViewModel[]>(() => {
-  return topicListStore.filteredTopics as TopicViewModel[];
+const topicRow = (topic: Topic): TopicListRow => ({
+  kind: "topic",
+  id: JSON.stringify([topic.ownerType, topic.ownerId, topic.id]),
+  topic,
+});
+
+const currentRows = computed<TopicListRow[]>(() => {
+  const { pinned, regular } = topicListStore.topicSections;
+  if (pinned.length === 0) return regular.map(topicRow);
+
+  return [
+    { kind: "section", id: "section:pinned", label: "置顶", pinned: true },
+    ...pinned.map(topicRow),
+    ...(regular.length > 0
+      ? [
+          {
+            kind: "section" as const,
+            id: "section:regular",
+            label: "其他话题",
+            pinned: false,
+          },
+          ...regular.map(topicRow),
+        ]
+      : []),
+  ];
 });
 
 // 虚拟列表实现
-const { list, containerProps, wrapperProps, scrollTo } = useVirtualList(currentTopics, {
-  itemHeight: 74, // 10(h-10) + padding/margins, 约 74px
+const { list, containerProps, wrapperProps, scrollTo } = useVirtualList(currentRows, {
+  itemHeight: (index) => currentRows.value[index]?.kind === "section" ? 32 : 74,
   overscan: 10,
 });
 
@@ -154,7 +179,19 @@ const showTopicContextMenu = (topicId: string) => {
     },
   });
 
-  overlayStore.openContextMenu(menuItems, "Topic Options");
+  const pinned = topicListStore.isTopicPinned(itemId, ownerType, topic.id);
+  overlayStore.openContextMenu(menuItems, "Topic Options", {
+    label: pinned ? "取消置顶" : "置顶",
+    icon: pinned ? PinOff : Pin,
+    selected: pinned,
+    handler: () => {
+      topicListStore.toggleTopicPinned(itemId, ownerType, topic.id);
+    },
+  });
+};
+
+const showTopicRowContextMenu = (row: TopicListRow) => {
+  if (row.kind === "topic") showTopicContextMenu(row.topic.id);
 };
 
 // 兜底同步：当聊天上下文的选中项变化时，自动重新加载对应 Agent/Group 的话题列表
@@ -219,60 +256,70 @@ onUnmounted(() => {
 
   <div v-else :ref="bindContainerRef" :style="containerProps.style" @scroll="containerProps.onScroll" class="h-full overflow-y-auto vcp-scrollable px-4 py-4 no-rubber-band">
     <div v-bind="wrapperProps" class="flex flex-col">
-      <div v-for="item in list" :key="item.data.id" class="pb-2" @click="
-        selectTopic(
-          item.data.ownerId,
-          item.data.ownerType,
-          item.data.id,
-        )
-        " v-longpress="() => showTopicContextMenu(item.data.id)">
-        <div class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer transition-[background-color,border-color,transform,box-shadow] duration-300 z-10 w-full active:scale-[0.98] origin-center"
-          :class="[
-            sessionStore.currentTopicId === item.data.id
-              ? 'glass-panel-active'
-              : 'border-transparent hover:bg-black/5 dark:hover:bg-white/5'
-          ]">
-          <!-- 未读小红点 / 计数角标 (基于桌面端主题同步) -->
-          <div v-if="item.data.unreadCount && item.data.unreadCount > 0"
-            class="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full border-2 border-white dark:border-gray-900 text-[9px] font-bold text-white flex items-center justify-center z-10 shadow-sm"
-            style="background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%)">
-            {{ item.data.unreadCount > 99 ? "99+" : item.data.unreadCount }}
-          </div>
-          <div v-else-if="item.data.unreadCount === -1 || item.data.unread"
-            class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm shrink-0"
-            style="background: #ff6b6b"></div>
+      <div v-for="item in list" :key="item.data.id" :class="item.data.kind === 'topic' ? 'pb-2' : ''">
+        <div v-if="item.data.kind === 'section'"
+          class="h-8 flex items-center gap-2 px-1 text-[10px] font-black tracking-[0.14em] uppercase text-secondary-text"
+          :aria-label="`${item.data.label}分区`">
+          <Pin v-if="item.data.pinned" :size="11" class="text-[var(--highlight-text)]" />
+          <span>{{ item.data.label }}</span>
+          <span class="h-px flex-1 bg-black/5 dark:bg-white/10" aria-hidden="true"></span>
+        </div>
 
-          <div
-            class="relative w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border border-black/5 dark:border-white/10"
-            style="background: var(--vcp-highlight-bg-10); color: var(--highlight-text)">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-            </svg>
-          </div>
-          <div class="flex flex-col overflow-hidden flex-1">
-            <div class="flex justify-between items-center w-full">
-              <span class="font-bold text-sm truncate text-primary-text">{{
-                item.data.name
-                }}</span>
-              <span v-if="item.data.msgCount !== undefined"
-                class="text-[11px] font-bold shrink-0 ml-2 px-[8px] py-[3px] rounded-[10px]" style="
-                  background-color: var(--accent-bg);
-                  color: var(--highlight-text);
-                  font-family: 'Arial Rounded MT Bold', 'Helvetica Rounded', Arial, sans-serif;
-                ">
-                {{ item.data.msgCount }}
-              </span>
+        <div v-else @click="
+          selectTopic(
+            item.data.topic.ownerId,
+            item.data.topic.ownerType,
+            item.data.topic.id,
+          )
+          " v-longpress="() => showTopicRowContextMenu(item.data)">
+          <div class="relative p-3 glass-panel rounded-xl flex items-center gap-3 border shadow-sm cursor-pointer transition-[background-color,border-color,transform,box-shadow] duration-300 z-10 w-full active:scale-[0.98] origin-center"
+            :class="[
+              sessionStore.currentTopicId === item.data.topic.id
+                ? 'glass-panel-active'
+                : 'border-transparent hover:bg-black/5 dark:hover:bg-white/5'
+            ]">
+            <!-- 未读小红点 / 计数角标 (基于桌面端主题同步) -->
+            <div v-if="item.data.topic.unreadCount && item.data.topic.unreadCount > 0"
+              class="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] px-1 rounded-full border-2 border-white dark:border-gray-900 text-[9px] font-bold text-white flex items-center justify-center z-10 shadow-sm"
+              style="background: linear-gradient(135deg, #ff6b6b 0%, #ee5a6f 100%)">
+              {{ item.data.topic.unreadCount > 99 ? "99+" : item.data.topic.unreadCount }}
             </div>
-            <span class="text-[9px] text-secondary-text opacity-70 truncate font-mono tracking-tighter">{{
-              item.data.id
-              }}</span>
-          </div>
+            <div v-else-if="item.data.topic.unreadCount === -1 || item.data.topic.unread"
+              class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm shrink-0"
+              style="background: #ff6b6b"></div>
 
-          <!-- 解锁状态标签 (桌面端还原) -->
-          <div v-if="!item.data.locked"
-            class="absolute bottom-1 right-2 flex items-center gap-[2px] bg-black/5 dark:bg-white/10 px-1 py-[1px] rounded text-[9px] text-yellow-600 dark:text-yellow-400 border border-yellow-600/20 dark:border-yellow-400/20">
-            <LockOpen :size="8" />
-            <span class="scale-90 font-bold uppercase tracking-tighter leading-none pt-[1px]">Unlock</span>
+            <div
+              class="relative w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border border-black/5 dark:border-white/10"
+              style="background: var(--vcp-highlight-bg-10); color: var(--highlight-text)">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+              </svg>
+            </div>
+            <div class="flex flex-col overflow-hidden flex-1">
+              <div class="flex justify-between items-center w-full">
+                <span class="font-bold text-sm truncate text-primary-text">{{
+                  item.data.topic.name
+                  }}</span>
+                <span v-if="item.data.topic.msgCount !== undefined"
+                  class="text-[11px] font-bold shrink-0 ml-2 px-[8px] py-[3px] rounded-[10px]" style="
+                    background-color: var(--accent-bg);
+                    color: var(--highlight-text);
+                    font-family: 'Arial Rounded MT Bold', 'Helvetica Rounded', Arial, sans-serif;
+                  ">
+                  {{ item.data.topic.msgCount }}
+                </span>
+              </div>
+              <span class="text-[9px] text-secondary-text opacity-70 truncate font-mono tracking-tighter">{{
+                item.data.topic.id
+                }}</span>
+            </div>
+
+            <!-- 解锁状态标签 (桌面端还原) -->
+            <div v-if="!item.data.topic.locked"
+              class="absolute bottom-1 right-2 flex items-center gap-[2px] bg-black/5 dark:bg-white/10 px-1 py-[1px] rounded text-[9px] text-yellow-600 dark:text-yellow-400 border border-yellow-600/20 dark:border-yellow-400/20">
+              <LockOpen :size="8" />
+              <span class="scale-90 font-bold uppercase tracking-tighter leading-none pt-[1px]">Unlock</span>
+            </div>
           </div>
         </div>
       </div>

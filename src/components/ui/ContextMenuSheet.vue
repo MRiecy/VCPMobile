@@ -6,11 +6,12 @@ const props = defineProps<{
   isOpen: boolean;
   title?: string;
   actions: OverlayActionItem[];
+  headerAction?: OverlayActionItem;
 }>();
 
 const isSelectionMenu = computed(() => props.actions.some((action) => action.selected !== undefined));
 
-const emit = defineEmits(['close', 'action-click']);
+const emit = defineEmits(['close', 'action-click', 'header-action-click']);
 
 const handleBackdropClick = () => {
   emit('close');
@@ -20,6 +21,13 @@ const handleAction = (action: OverlayActionItem) => {
   if (action.disabled) return;
   action.handler();
   emit('action-click', action);
+};
+
+const handleHeaderAction = () => {
+  const action = props.headerAction;
+  if (!action || action.disabled) return;
+  action.handler();
+  emit('header-action-click', action);
 };
 </script>
 
@@ -36,8 +44,25 @@ const handleAction = (action: OverlayActionItem) => {
           aria-modal="true"
           :aria-label="title || '操作菜单'"
           @click.stop>
-          <div v-if="title" class="px-5 pt-5 pb-3 border-b border-black/5 dark:border-white/10">
+          <div v-if="title" class="min-h-14 px-5 py-3 border-b border-black/5 dark:border-white/10 flex items-center justify-between gap-3">
             <h3 class="text-sm font-black tracking-wide">{{ title }}</h3>
+            <button
+              v-if="headerAction"
+              type="button"
+              class="min-h-9 px-3 flex items-center gap-1.5 rounded-lg border text-xs font-bold transition-colors"
+              :class="[
+                headerAction.selected
+                  ? 'border-[var(--highlight-text)] text-[var(--highlight-text)] bg-[var(--vcp-highlight-bg-10)]'
+                  : 'border-black/10 dark:border-white/10 hover:bg-black/5 dark:hover:bg-white/5',
+                headerAction.disabled ? 'opacity-40 cursor-not-allowed' : '',
+              ]"
+              :disabled="headerAction.disabled"
+              :aria-pressed="headerAction.selected === undefined ? undefined : headerAction.selected"
+              @click="handleHeaderAction"
+            >
+              <component v-if="headerAction.icon" :is="headerAction.icon" class="w-3.5 h-3.5 shrink-0" />
+              <span>{{ headerAction.label }}</span>
+            </button>
           </div>
           <div class="p-2" :role="isSelectionMenu ? 'radiogroup' : undefined" :aria-label="isSelectionMenu ? title : undefined">
             <button v-for="action in actions" :key="action.label" @click="handleAction(action)"

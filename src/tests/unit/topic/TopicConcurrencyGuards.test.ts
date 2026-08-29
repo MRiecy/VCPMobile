@@ -1,11 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
+import piniaPluginPersistedstate from "pinia-plugin-persistedstate";
 import { nextTick } from "vue";
 import { mount } from "@vue/test-utils";
 import { useAssistantStore } from "@/core/stores/assistant";
 import { useChatSessionStore } from "@/core/stores/chatSessionStore";
-import { useTopicStore } from "@/core/stores/topicListManager";
+import {
+  useTopicStore,
+  type Topic,
+} from "@/core/stores/topicListManager";
 import TopicList from "@/features/topic/TopicList.vue";
+import SidebarSearch from "@/features/agent/SidebarSearch.vue";
 import {
   channelInstances,
   invokeMock,
@@ -27,21 +32,131 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-const topic = (id: string, name = id) => ({
+const topic = (
+  id: string,
+  name = id,
+  overrides: Partial<Topic> = {},
+): Topic => ({
   id,
   name,
   createdAt: 1,
+  updatedAt: 1,
   locked: true,
   unread: false,
   unreadCount: 0,
   msgCount: 0,
   ownerId: "agent-a",
   ownerType: "agent" as const,
+  ...overrides,
 });
+
+function createPersistedTopicStore() {
+  const pinia = createPinia();
+  pinia.use(piniaPluginPersistedstate);
+  const app = {
+    provide: () => undefined,
+    config: { globalProperties: {} },
+  } as unknown as import("vue").App;
+  pinia.install(app);
+  setActivePinia(pinia);
+  return useTopicStore();
+}
 
 describe("topic list concurrency guards", () => {
   beforeEach(() => {
+    localStorage.clear();
     setActivePinia(createPinia());
+  });
+
+  it("sorts pinned and regular sections by the same selected rule", () => {
+    const store = useTopicStore();
+    store.topics = [
+      topic("older-active", "Older active", { createdAt: 100, updatedAt: 900 }),
+      topic("newer-created", "Newer created", { createdAt: 300, updatedAt: 400 }),
+      topic("middle", "Middle", { createdAt: 200, updatedAt: 800 }),
+    ];
+    store.toggleTopicPinned("agent-a", "agent", "older-active");
+    store.toggleTopicPinned("agent-a", "agent", "newer-created");
+
+    expect(store.topicSections.pinned.map((item) => item.id)).toEqual([
+      "newer-created",
+      "older-active",
+    ]);
+    expect(store.topicSections.regular.map((item) => item.id)).toEqual(["middle"]);
+
+    store.setSortMode("updated");
+    expect(store.topicSections.pinned.map((item) => item.id)).toEqual([
+      "older-active",
+      "newer-created",
+    ]);
+    expect(store.topicSections.regular.map((item) => item.id)).toEqual(["middle"]);
+  });
+
+  it("uses deterministic ties and isolates pinned identities by owner", () => {
+    const store = useTopicStore();
+    store.topics = [topic("tie-a"), topic("tie-b")];
+    expect(store.topicSections.regular.map((item) => item.id)).toEqual([
+      "tie-b",
+      "tie-a",
+    ]);
+
+    store.toggleTopicPinned("agent-a", "agent", "same-topic");
+    expect(store.isTopicPinned("agent-a", "agent", "same-topic")).toBe(true);
+    expect(store.isTopicPinned("agent-b", "agent", "same-topic")).toBe(false);
+    expect(store.isTopicPinned("agent-a", "group", "same-topic")).toBe(false);
+  });
+
+  it("persists the global sort mode and local pinned topic keys", async () => {
+    const first = createPersistedTopicStore();
+    first.setSortMode("updated");
+    first.toggleTopicPinned("agent-a", "agent", "topic-a");
+    await nextTick();
+
+    const restored = createPersistedTopicStore();
+    expect(restored.effectiveSortMode).toBe("updated");
+    expect(restored.isTopicPinned("agent-a", "agent", "topic-a")).toBe(true);
+  });
+
+  it("shows an accessible topic-only sort menu and emits the selection", async () => {
+    const wrapper = mount(SidebarSearch, {
+      props: {
+        modelValue: "",
+        activeTab: "topics",
+        sortMode: "created",
+      },
+    });
+
+    await wrapper.get('[aria-label="选择话题排序方式"]').trigger("click");
+    const options = wrapper.findAll('[role="menuitemradio"]');
+    expect(options).toHaveLength(2);
+    expect(options[0].attributes("aria-checked")).toBe("true");
+    await options[1].trigger("click");
+    expect(wrapper.emitted("update:sortMode")?.[0]).toEqual(["updated"]);
+
+    await wrapper.setProps({ activeTab: "agents" });
+    expect(wrapper.find('[aria-label="选择话题排序方式"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("renders compact pinned and regular sections only when a pin is visible", async () => {
+    const store = useTopicStore();
+    store.topics = [topic("pinned", "Pinned Topic"), topic("regular", "Regular Topic")];
+    store.toggleTopicPinned("agent-a", "agent", "pinned");
+
+    const wrapper = mount(TopicList, {
+      global: { directives: { longpress: {} } },
+    });
+    await nextTick();
+    expect(wrapper.text()).toContain("置顶");
+    expect(wrapper.text()).toContain("其他话题");
+    expect(wrapper.text()).toContain("Pinned Topic");
+    expect(wrapper.text()).toContain("Regular Topic");
+
+    store.searchTerm = "regular";
+    await nextTick();
+    expect(wrapper.text()).not.toContain("置顶");
+    expect(wrapper.text()).not.toContain("其他话题");
+    wrapper.unmount();
   });
 
   it("deduplicates concurrent loads for the same owner", async () => {

@@ -50,7 +50,9 @@ const handleEditorSave = async (newContent: string) => {
     <!-- 全局 Context Menu -->
     <ContextMenuSheet v-if="overlayStore.contextMenuConfig" :is-open="!!overlayStore.contextMenuConfig"
       :title="overlayStore.contextMenuConfig.title" :actions="overlayStore.contextMenuConfig.actions"
-      @close="overlayStore.closeContextMenu()" @action-click="overlayStore.closeContextMenu()" />
+      :header-action="overlayStore.contextMenuConfig.headerAction"
+      @close="overlayStore.closeContextMenu()" @action-click="overlayStore.closeContextMenu()"
+      @header-action-click="overlayStore.closeContextMenu()" />
 
     <!-- 全局 FullScreenEditor -->
     <FullScreenEditor v-if="overlayStore.editorConfig" class="pointer-events-auto"

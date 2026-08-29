@@ -10,6 +10,7 @@ export interface OverlayActionItem {
 export interface ContextMenuConfig {
   title: string;
   actions: OverlayActionItem[];
+  headerAction?: OverlayActionItem;
 }
 
 export interface PromptConfig {

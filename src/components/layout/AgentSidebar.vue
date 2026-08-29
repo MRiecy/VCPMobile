@@ -4,6 +4,7 @@ import { useSidebarSwipe } from '../../core/composables/useSidebarSwipe';
 import { useLayoutStore } from '../../core/stores/layout';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { useChatSessionStore } from '../../core/stores/chatSessionStore';
+import { useTopicStore } from '../../core/stores/topicListManager';
 import SidebarTabs from '../../features/agent/SidebarTabs.vue';
 import SidebarSearch from '../../features/agent/SidebarSearch.vue';
 import AgentList from '../../features/agent/AgentList.vue';
@@ -16,6 +17,7 @@ import type { AssistantListItem } from '../../core/types/assistant';
 const layoutStore = useLayoutStore();
 const overlayStore = useOverlayStore();
 const sessionStore = useChatSessionStore();
+const topicStore = useTopicStore();
 
 const activeTab = sidebarTab;
 const searchQuery = ref('');
@@ -94,7 +96,8 @@ const openGlobalSearch = () => {
       </div>
 
       <SidebarTabs v-model:activeTab="activeTab" />
-      <SidebarSearch v-model="searchQuery" :activeTab="activeTab" />
+      <SidebarSearch v-model="searchQuery" :activeTab="activeTab"
+        :sort-mode="topicStore.effectiveSortMode" @update:sort-mode="topicStore.setSortMode" />
     </div>
 
     <!-- 内容区 -->

@@ -268,19 +268,20 @@ mod tests {
              CREATE TABLE topics (
                 owner_type TEXT, owner_id TEXT, topic_id TEXT, title TEXT,
                 created_at INTEGER, locked INTEGER, unread INTEGER, msg_count INTEGER,
-                updated_at INTEGER, config_hash TEXT, content_hash TEXT, deleted_at INTEGER,
+                updated_at INTEGER, last_message_updated_at INTEGER,
+                config_hash TEXT, content_hash TEXT, deleted_at INTEGER,
                 PRIMARY KEY(owner_type, owner_id, topic_id)
              );
              CREATE TABLE messages (
                 owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT,
-                timestamp INTEGER, content_hash TEXT, deleted_at INTEGER
+                timestamp INTEGER, updated_at INTEGER, content_hash TEXT, deleted_at INTEGER
              );
              INSERT INTO agents VALUES ('agent', 'agent', 'owner-before', NULL);
              INSERT INTO topics VALUES
-                ('agent', 'agent', 'topic', 'Topic', 1, 1, 0, 0, 77,
+                ('agent', 'agent', 'topic', 'Topic', 1, 1, 0, 0, 77, 0,
                  'config-before', 'content-before', NULL);
              INSERT INTO messages VALUES
-                ('agent', 'agent', 'topic', 'message', 1, 'message-hash', NULL);",
+                ('agent', 'agent', 'topic', 'message', 1, 9, 'message-hash', NULL);",
         )
         .execute(&pool)
         .await
@@ -289,8 +290,9 @@ mod tests {
         finalize_modified_topics(&pool, &HashSet::from([topic("topic")]))
             .await
             .expect("finalize topic");
-        let state: (i64, i64, String, String) = sqlx::query_as(
-            "SELECT t.updated_at, t.msg_count, t.content_hash, a.content_hash
+        let state: (i64, i64, i64, String, String) = sqlx::query_as(
+            "SELECT t.updated_at, t.last_message_updated_at, t.msg_count,
+                    t.content_hash, a.content_hash
              FROM topics t JOIN agents a ON a.agent_id = t.owner_id
              WHERE t.topic_id = 'topic'",
         )
@@ -298,9 +300,10 @@ mod tests {
         .await
         .expect("read finalized state");
         assert_eq!(state.0, 77);
-        assert_eq!(state.1, 1);
-        assert_ne!(state.2, "content-before");
-        assert_ne!(state.3, "owner-before");
+        assert_eq!(state.1, 9);
+        assert_eq!(state.2, 1);
+        assert_ne!(state.3, "content-before");
+        assert_ne!(state.4, "owner-before");
     }
 
     #[tokio::test]
@@ -322,19 +325,20 @@ mod tests {
              CREATE TABLE topics (
                 owner_type TEXT, owner_id TEXT, topic_id TEXT, title TEXT,
                 created_at INTEGER, locked INTEGER, unread INTEGER, msg_count INTEGER,
-                updated_at INTEGER, config_hash TEXT, content_hash TEXT, deleted_at INTEGER,
+                updated_at INTEGER, last_message_updated_at INTEGER,
+                config_hash TEXT, content_hash TEXT, deleted_at INTEGER,
                 PRIMARY KEY(owner_type, owner_id, topic_id)
              );
              CREATE TABLE messages (
                 owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT,
-                timestamp INTEGER, content_hash TEXT, deleted_at INTEGER
+                timestamp INTEGER, updated_at INTEGER, content_hash TEXT, deleted_at INTEGER
              );
              INSERT INTO agents VALUES ('agent', 'agent', 'owner-before', NULL);
              INSERT INTO topics VALUES
-                ('agent', 'agent', 'topic', 'Topic', 1, 1, 0, 0, 1,
+                ('agent', 'agent', 'topic', 'Topic', 1, 1, 0, 0, 1, 0,
                  'config-before', 'content-before', NULL);
              INSERT INTO messages VALUES
-                ('agent', 'agent', 'topic', 'message', 1, 'message-hash', NULL);
+                ('agent', 'agent', 'topic', 'message', 1, 9, 'message-hash', NULL);
              CREATE TRIGGER fail_owner_hash
              BEFORE UPDATE OF content_hash ON agents
              BEGIN SELECT RAISE(ABORT, 'owner hash failure'); END;",
@@ -347,15 +351,17 @@ mod tests {
             .await
             .expect_err("owner hash failure must fail finalization");
         assert!(error.contains("owner hash failure"));
-        let row: (i64, String, String) = sqlx::query_as(
-            "SELECT msg_count, config_hash, content_hash FROM topics WHERE topic_id = 'topic'",
+        let row: (i64, i64, String, String) = sqlx::query_as(
+            "SELECT msg_count, last_message_updated_at, config_hash, content_hash
+             FROM topics WHERE topic_id = 'topic'",
         )
         .fetch_one(&pool)
         .await
         .expect("read rolled-back topic");
         assert_eq!(row.0, 0);
-        assert_eq!(row.1, "config-before");
-        assert_eq!(row.2, "content-before");
+        assert_eq!(row.1, 0);
+        assert_eq!(row.2, "config-before");
+        assert_eq!(row.3, "content-before");
     }
 
     #[tokio::test]
@@ -369,16 +375,17 @@ mod tests {
             "CREATE TABLE topics (
                 owner_type TEXT, owner_id TEXT, topic_id TEXT, title TEXT,
                 created_at INTEGER, locked INTEGER, unread INTEGER, msg_count INTEGER,
-                updated_at INTEGER, config_hash TEXT, content_hash TEXT, deleted_at INTEGER,
+                updated_at INTEGER, last_message_updated_at INTEGER,
+                config_hash TEXT, content_hash TEXT, deleted_at INTEGER,
                 PRIMARY KEY(owner_type, owner_id, topic_id)
              );
              CREATE TABLE messages (
                 owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT,
-                timestamp INTEGER, content_hash TEXT, deleted_at INTEGER
+                timestamp INTEGER, updated_at INTEGER, content_hash TEXT, deleted_at INTEGER
              );
              INSERT INTO topics VALUES
-                ('agent', 'agent', 'live', 'Live', 1, 1, 0, 7, 1, '', '', NULL),
-                ('agent', 'agent', 'deleted', 'Deleted', 1, 1, 0, 9, 1, '', '', 8);",
+                ('agent', 'agent', 'live', 'Live', 1, 1, 0, 7, 1, 0, '', '', NULL),
+                ('agent', 'agent', 'deleted', 'Deleted', 1, 1, 0, 9, 1, 0, '', '', 8);",
         )
         .execute(&pool)
         .await

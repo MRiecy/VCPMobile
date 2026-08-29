@@ -694,7 +694,14 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
             currentChatHistory.value = currentChatHistory.value.slice(0, currentIndex + 1);
           }
         }
-        await triggerGeneration(targetMsg, key);
+        const persisted = await triggerGeneration(targetMsg, key);
+        if (persisted) {
+          topicStore.touchTopicUpdatedAt(
+            key.ownerId,
+            key.ownerType,
+            key.topicId,
+          );
+        }
       } catch (e) {
         if (canCommitConversation(key)) editingMessage.value = intent;
         notificationStore.addNotification({
@@ -743,6 +750,13 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         );
       }
       topicStore.decrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId);
+    } else {
+      topicStore.touchTopicUpdatedAt(
+        key.ownerId,
+        key.ownerType,
+        key.topicId,
+        userMsg.timestamp,
+      );
     }
   };
 
@@ -797,6 +811,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       attachmentOrder,
       hash,
     });
+    topicStore.touchTopicUpdatedAt(key.ownerId, key.ownerType, key.topicId);
 
     // 2. 更新本地状态，以便在界面上实时隐藏该附件
     if (!canCommitConversation(key)) return;
@@ -831,6 +846,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
           blocks: undefined,
         },
       });
+      topicStore.touchTopicUpdatedAt(key.ownerId, key.ownerType, key.topicId);
       if (canCommitConversation(key)) {
         clearMessageCache(messageId);
         const currentIndex = currentChatHistory.value.findIndex(message => message.id === messageId);

@@ -81,6 +81,7 @@ CREATE TABLE IF NOT EXISTS topics (
     title TEXT NOT NULL,
     created_at BIGINT NOT NULL,
     updated_at BIGINT NOT NULL,
+    last_message_updated_at BIGINT NOT NULL DEFAULT 0,
     locked INTEGER NOT NULL DEFAULT 1,
     unread INTEGER NOT NULL DEFAULT 0,
     unread_count INTEGER NOT NULL DEFAULT 0,

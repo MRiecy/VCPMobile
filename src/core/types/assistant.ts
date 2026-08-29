@@ -4,6 +4,7 @@ export interface TopicDto {
   id: string;
   name: string;
   createdAt: number;
+  updatedAt?: number;
   locked: boolean;
   unread: boolean;
   unreadCount: number;
