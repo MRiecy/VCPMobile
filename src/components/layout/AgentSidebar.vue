@@ -74,10 +74,11 @@ const openGlobalSearch = () => {
   <aside
     id="agent-sidebar"
     ref="sidebarRef"
-    class="vcp-drawer vcp-drawer-left flex flex-col min-w-0 min-h-0 overflow-hidden"
+    class="vcp-drawer vcp-drawer-left flex flex-col min-w-0 min-h-0"
     :class="{ 'is-open': layoutStore.leftDrawerOpen }"
     aria-label="助手与话题侧栏"
   >
+    <div class="vcp-drawer-surface flex h-full w-full min-w-0 min-h-0 flex-col overflow-hidden">
 
     <!-- 顶部 Tabs -->
     <div class="vcp-drawer-header px-4 pb-2 shrink-0 border-b border-black/5 dark:border-white/5">
@@ -146,6 +147,7 @@ const openGlobalSearch = () => {
       </button>
     </div>
 
+    </div>
   </aside>
 </template>
 
@@ -171,7 +173,7 @@ const openGlobalSearch = () => {
 .vcp-drawer-left {
   left: 0;
   padding-left: var(--vcp-workspace-safe-left, 0px);
-  transform: translateX(calc(-100% - var(--vcp-drawer-shadow-clearance, 64px)));
+  transform: translateX(-100%);
   border-right: 1px solid transparent;
 }
 
@@ -199,6 +201,11 @@ const openGlobalSearch = () => {
     visibility: visible;
     pointer-events: auto;
     z-index: var(--layer-local);
+    transition: none;
+  }
+
+  .vcp-drawer::after {
+    opacity: 1;
     transition: none;
   }
 }

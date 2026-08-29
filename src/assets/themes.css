@@ -22,8 +22,9 @@
   --vcp-highlight-border-40: var(--highlight-text, var(--border-color));
   --vcp-border-subtle: var(--border-color);
   --vcp-highlight-shadow: rgba(0, 0, 0, 0.08);
-  /* 抽屉关闭时额外移出阴影的可见范围，避免 visibility 切换时残影跳变。 */
-  --vcp-drawer-shadow-clearance: 64px;
+  /* 抽屉边缘阴影由常驻渐变层绘制，只动画 opacity。 */
+  --vcp-drawer-shadow-width: 32px;
+  --vcp-drawer-shadow-color: rgba(0, 0, 0, 0.3);
 
   /* === VCP 全局层级系统 ===
    * 用途：统一管理 z-index，消除魔法数字
@@ -91,9 +92,30 @@ body {
   padding-right: var(--vcp-safe-right, 0px);
 }
 
-/* 抽屉层级修正 */
-.vcp-drawer {
-  box-shadow: 0 0 40px rgba(0,0,0,0.5);
+/* 抽屉投影使用固定渐变层，避免大面积 box-shadow 重绘和退场残影。 */
+.vcp-drawer::after {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: var(--vcp-drawer-shadow-width, 32px);
+  content: '';
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.28s ease-out;
+}
+
+.vcp-drawer.is-open::after {
+  opacity: 1;
+}
+
+.vcp-drawer-left::after {
+  left: 100%;
+  background: linear-gradient(to right, var(--vcp-drawer-shadow-color, rgba(0, 0, 0, 0.3)), transparent);
+}
+
+.vcp-drawer-right::after {
+  right: 100%;
+  background: linear-gradient(to left, var(--vcp-drawer-shadow-color, rgba(0, 0, 0, 0.3)), transparent);
 }
 
 /* 图标大小强控 */

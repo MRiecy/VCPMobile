@@ -222,10 +222,11 @@ watch(
   <aside
     id="notification-sidebar"
     ref="sidebarRef"
-    class="vcp-drawer vcp-drawer-right flex flex-col min-w-0 min-h-0 overflow-hidden"
+    class="vcp-drawer vcp-drawer-right flex flex-col min-w-0 min-h-0"
     :class="{ 'is-open': props.isOpen }"
     aria-label="通知与工具侧栏"
   >
+    <div class="vcp-drawer-surface flex h-full w-full min-w-0 min-h-0 flex-col overflow-hidden">
     <div class="vcp-drawer-header px-5 pb-4 border-b border-black/5 dark:border-white/5 flex justify-between items-center shrink-0">
       <div class="flex items-center gap-2">
         <h3 class="font-black text-[11px] uppercase tracking-[0.2em] opacity-70 text-primary-text">Notifications</h3>
@@ -338,6 +339,7 @@ watch(
         </button>
       </div>
     </div>
+    </div>
   </aside>
 </template>
 
@@ -363,7 +365,7 @@ watch(
 .vcp-drawer-right {
   right: 0;
   padding-right: var(--vcp-workspace-safe-right, 0px);
-  transform: translateX(calc(100% + var(--vcp-drawer-shadow-clearance, 64px)));
+  transform: translateX(100%);
   border-left: 1px solid transparent;
 }
 
@@ -440,6 +442,11 @@ watch(
     visibility: visible;
     pointer-events: auto;
     z-index: var(--layer-local);
+    transition: none;
+  }
+
+  .vcp-drawer::after {
+    opacity: 1;
     transition: none;
   }
 

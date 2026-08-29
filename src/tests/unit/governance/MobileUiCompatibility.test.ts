@@ -95,14 +95,17 @@ describe('Android mobile UI compatibility contracts', () => {
     expect(sidebarSwipeSource).toContain("matchMedia('(min-width: 1280px)')");
   });
 
-  it('moves both closed drawers beyond the shared shadow clearance', () => {
-    expect(themesSource).toContain('--vcp-drawer-shadow-clearance: 64px');
-    expect(leftSidebarSource).toContain(
-      'translateX(calc(-100% - var(--vcp-drawer-shadow-clearance, 64px)))',
-    );
-    expect(rightSidebarSource).toContain(
-      'translateX(calc(100% + var(--vcp-drawer-shadow-clearance, 64px)))',
-    );
+  it('uses persistent opacity-only edge shadows without extending drawer travel', () => {
+    expect(themesSource).not.toContain('box-shadow: 0 0 40px');
+    expect(themesSource).toContain('--vcp-drawer-shadow-width: 32px');
+    expect(themesSource).toContain('.vcp-drawer::after');
+    expect(themesSource).toContain('transition: opacity 0.28s ease-out');
+    expect(themesSource).toContain('linear-gradient(to right');
+    expect(themesSource).toContain('linear-gradient(to left');
+    expect(leftSidebarSource).toContain('vcp-drawer-surface');
+    expect(rightSidebarSource).toContain('vcp-drawer-surface');
+    expect(leftSidebarSource).toContain('transform: translateX(-100%)');
+    expect(rightSidebarSource).toContain('transform: translateX(100%)');
   });
 
   it('keeps color-mix enhancements behind @supports with stable base tokens', () => {
