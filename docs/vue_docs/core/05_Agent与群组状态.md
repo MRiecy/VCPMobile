@@ -154,11 +154,11 @@ const lastActiveTopicMap = ref<Record<string, string>>({}); // 每个 item 最�
 | 创建 Agent | `createAgent(name)` → 返回新对象，**不自动 fetch** | `create_agent` |
 | 删除 Agent | `deleteAgent(id)` → 成功后 `fetchAgents()` | `delete_agent` |
 | 保存配置 | `saveAgent(agent)` → 成功后 `fetchAgents()` | `save_agent_config` |
-| 保存头像 | `saveAvatar(...)` → 返回 hash，**不自动 fetch** | `save_avatar_data` |
+| 保存头像 | `saveAvatar(...)` → 返回 hash，并定点调用 `avatarStore.refreshAvatar(..., hash)` | `save_avatar_data` |
 
 > 文件位置：`src/core/stores/assistant.ts` 第 81–96 行、第 187–201 行
 
-**设计意图**：创建和头像保存后不自动全局 fetch，是因为调用方（如 `AgentSettingsView`）通常会在本地增量更新 UI，避免不必要的全量列表重刷。
+**设计意图**：创建实体不自动全局 fetch；头像保存只定点刷新对应 owner 的 Blob/颜色缓存，不全量重拉 Agent/Group 列表。
 
 ### 2.4 Agent 排序与拖拽
 
@@ -257,14 +257,18 @@ const orderedAgents = computed(() => {
 
 ```typescript
 const cache = reactive(new Map<string, AvatarCache>());
+const metadata = reactive(new Map<string, AvatarMetadata>());
 const pending = new Map<string, Promise<string>>();
+const generations = new Map<string, number>();
 const inFlightCompute = new Set<string>();
 ```
 
 | 状态 | 类型 | 说明 |
 |------|------|------|
 | `cache` | `Reactive<Map<string, AvatarCache>>` | 头像 Blob URL 缓存，key = `${ownerType}:${ownerId}` |
+| `metadata` | `Reactive<Map<string, AvatarMetadata>>` | 启动/同步批量拉取的 hash 与更新时间，不含图片二进制 |
 | `pending` | `Map<string, Promise<string>>` | 防并发重复请求：同一 ID 正在加载时复用 Promise |
+| `generations` | `Map<string, number>` | 保存/失效时提升代际，拒绝旧读取回灌新缓存 |
 | `inFlightCompute` | `Set<string>` | 防止 Dominant Color 重复计算 |
 
 **`getAvatarUrl` 缓存策略**：
@@ -300,23 +304,21 @@ const inFlightCompute = new Set<string>();
                                         └─────────────────────────┘
 ```
 
-**LRU 淘汰**：当缓存条目数达到 `MAX_AVATAR_CACHE = 50` 时，淘汰最早插入的条目并 `URL.revokeObjectURL` 释放物理内存：
+**可视区懒加载**：`VcpAvatar` 复用全局 `v-intersection-observer`，只在头像进入视口前后 300px 时调用 `getAvatarUrl()`。`batch_get_avatars` 只返回 owner、hash、颜色与更新时间；同步时 hash 未变的 Blob URL 保留，变化或删除的 owner 才定点失效。
+
+**LRU 淘汰**：Blob URL 缓存上限为 50。Store 以独立访问序号记录最近使用时间，超限时撤销最久未访问条目的 Object URL；元数据 Map 不受此二进制缓存上限影响：
 
 > 文件位置：`src/core/stores/avatar.ts` 第 197–205 行
 
 ```typescript
 const MAX_AVATAR_CACHE = 50;
-if (cache.size >= MAX_AVATAR_CACHE) {
-  const firstKey = cache.keys().next().value;
-  if (firstKey) {
-    const old = cache.get(firstKey);
-    if (old) URL.revokeObjectURL(old.blobUrl);
-    cache.delete(firstKey);
-  }
+while (cache.size > MAX_AVATAR_CACHE) {
+  // 遍历 cacheRecency 找到访问序号最小的 key
+  revokeCachedAvatar(oldestKey);
 }
 ```
 
-**版本号机制**：缓存条目的 `version` 取 `Math.max(result.updated_at, 请求传入的 version)`。当组件传入 `version = Date.now()`（如头像上传后）时，旧缓存会因 `existing.version < version` 而失效，强制重新获取。
+**保存后刷新机制**：`assistantStore.saveAvatar()` 在 Rust 写入成功后把返回的 SHA-256 交给 `avatarStore.refreshAvatar(ownerType, ownerId, hash)`。该方法清除指定 owner 的 Blob/颜色缓存、提升 generation、登记新 hash 并立即重读；旧单项读取和旧批量元数据响应都不能恢复旧头像。
 
 ### 3.2 Dominant Color 管理
 
@@ -341,7 +343,7 @@ const dominantColors = reactive(new Map<string, string>());
 | ③ 灰度过滤 | 排除纯黑（`max < 30`）、纯白（`min > 225`）、低饱和度（`chroma < 25`） |
 | ④ 512-bin 量化 | 每通道 32 为粒度，统计最多像素 bin |
 | ⑤ 回退链 | bin 平均 → 全局平均 → `#808080` |
-| ⑥ 回写后端 | `invoke("store_dominant_color", { ownerType, ownerId, color })` |
+| ⑥ CAS 回写 | 携带 `expectedAvatarHash`；Rust 仅在当前行 hash 仍匹配且颜色为空时更新 |
 
 ### 3.3 与 AgentStore 的联动
 
@@ -352,6 +354,7 @@ const dominantColors = reactive(new Map<string, string>());
 ```typescript
 const saveAvatar = async (ownerType, ownerId, mimeType, imageData) => {
   const hash = await invoke<string>("save_avatar_data", { ... });
+  await avatarStore.refreshAvatar(ownerType, ownerId, hash);
   return hash;
 };
 ```
@@ -365,16 +368,13 @@ AgentSettingsView / GroupSettingsView
 assistantStore.saveAvatar() ──invoke──> Rust save_avatar_data
        │
        ▼ 返回 hash
-avatarVersion = Date.now()  (props 传入 VcpAvatar)
+avatarStore.refreshAvatar(type, id, hash)
        │
        ▼
-VcpAvatar.vue
+清缓存 + generation++ + getAvatarUrl(type, id, Date.now())
        │
-       ▼ watchEffect 检测到 version 变化
-avatarStore.getAvatarUrl(type, id, version)
-       │
-       ▼ version > cache.version，强制刷新
-更新 cache + 返回新 Blob URL
+       ▼
+更新 reactive cache，所有 VcpAvatar 同步切换到新 Blob URL
 ```
 
 > 文件位置：`src/components/ui/VcpAvatar.vue` 第 54–80 行
@@ -647,7 +647,7 @@ Rust 事务写入 SQLite
 | `read_group_config` | `GroupSettingsView.fetchGroupConfig` | `{ groupId }` | `GroupConfig` | 读取单个 Group 配置 |
 | `save_avatar_data` | `assistantStore.saveAvatar` | `{ ownerType, ownerId, mimeType, imageData }` | `string` (hash) | 保存头像二进制 |
 | `get_avatar` | `avatarStore.getAvatarUrl` | `{ ownerType, ownerId }` | `AvatarResult \| null` | 获取头像数据 |
-| `store_dominant_color` | `avatarStore` (前端计算后) | `{ ownerType, ownerId, color }` | — | 回写主色调到后端 |
+| `store_dominant_color` | `avatarStore` (前端计算后) | `{ ownerType, ownerId, color, expectedAvatarHash }` | `boolean` | hash 仍匹配时回写主色调 |
 | `get_unread_counts` | `assistantStore.refreshUnreadCounts` | — | `Record<string, number>` | 批量获取未读计数 |
 | `get_topics_streamed` | `topicStore.loadTopicList` | `{ ownerId, ownerType, onChunk }` | — | 流式获取话题列表 |
 | `get_topics` | `chatSessionStore.selectItem` | `{ ownerId, ownerType }` | `any[]` | 获取话题列表（非流式 fallback） |
@@ -668,7 +668,7 @@ Rust 事务写入 SQLite
 | 同步完成 | `main.ts` 统一 `window.location.reload()` | 全量刷新，避免逐事件处理同步冲突 |
 | 话题列表变更 | 命令调用后本地乐观更新 | 不监听后端推送 |
 | Agent/Group 配置变更 | 命令调用后本地 `fetchAgents()` / `fetchGroups()` | 由调用方主动刷新 |
-| 头像变更 | `version` prop 驱动 `VcpAvatar` 强制刷新 | 无全局事件广播 |
+| 头像变更 | `avatarStore.refreshAvatar()` 定点失效并以 generation 拒绝旧读取回灌 | 无全局事件广播 |
 
 > 注：`topicListManager.ts` 中曾存在对 `topic-index-updated` 事件的监听代码，因 Rust 侧未实际 emit 已被移除。
 > 文件位置：`src/core/stores/topicListManager.ts` 第 37 行注释

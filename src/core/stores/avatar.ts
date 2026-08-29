@@ -5,21 +5,27 @@ import { reactive } from "vue";
 interface AvatarCache {
   blobUrl: string;
   version: number;
+  avatarHash: string;
 }
 
 interface AvatarResult {
+  avatar_hash: string;
   mime_type: string;
   image_data: number[];
   dominant_color: string | null;
   updated_at: number;
 }
 
-interface BatchAvatarItemDto {
+interface AvatarMetadataDto {
   ownerType: string;
   ownerId: string;
-  mimeType: string;
-  imageData: number[];
+  avatarHash: string;
   dominantColor: string | null;
+  updatedAt: number;
+}
+
+interface AvatarMetadata {
+  avatarHash: string;
   updatedAt: number;
 }
 
@@ -119,16 +125,138 @@ const extractDominantColorFromBlob = (blobUrl: string): Promise<string> => {
 };
 
 export const useAvatarStore = defineStore("avatar", () => {
+  const MAX_AVATAR_CACHE = 50;
+
   // 使用 reactive 包装 Map，配合同步访问
   const cache = reactive(new Map<string, AvatarCache>());
+  // 启动/同步只预取轻量元数据，头像二进制由可视区组件按需读取。
+  const metadata = reactive(new Map<string, AvatarMetadata>());
+  const cacheRecency = new Map<string, number>();
+  let cacheAccessSequence = 0;
+  let metadataLoadId = 0;
   
   // 用于追踪正在进行的请求，防止并发重复请求同一个 ID
   const pending = new Map<string, Promise<string>>();
+  // 每个头像的本地代际；保存/失效后，旧请求不得把旧 Blob 回灌缓存。
+  const generations = new Map<string, number>();
   // 用于追踪正在进行的 dominant_color 计算，防止重复触发
   const inFlightCompute = new Set<string>();
 
   // dominant_color 同步缓存，供 computeShell 等同步场景使用
   const dominantColors = reactive(new Map<string, string>());
+
+  const touchCache = (key: string) => {
+    cacheRecency.set(key, ++cacheAccessSequence);
+  };
+
+  const revokeCachedAvatar = (key: string) => {
+    const existing = cache.get(key);
+    if (existing) {
+      URL.revokeObjectURL(existing.blobUrl);
+      cache.delete(key);
+    }
+    cacheRecency.delete(key);
+  };
+
+  const advanceGeneration = (key: string) => {
+    generations.set(key, (generations.get(key) ?? 0) + 1);
+    pending.delete(key);
+  };
+
+  const invalidateAvatarKey = (key: string, clearMetadata: boolean) => {
+    advanceGeneration(key);
+    revokeCachedAvatar(key);
+    dominantColors.delete(key);
+    if (clearMetadata) metadata.delete(key);
+  };
+
+  const evictCacheOverflow = () => {
+    while (cache.size > MAX_AVATAR_CACHE) {
+      let oldestKey: string | undefined;
+      let oldestAccess = Number.POSITIVE_INFINITY;
+      for (const key of cache.keys()) {
+        const access = cacheRecency.get(key) ?? 0;
+        if (access < oldestAccess) {
+          oldestAccess = access;
+          oldestKey = key;
+        }
+      }
+      if (!oldestKey) break;
+      revokeCachedAvatar(oldestKey);
+    }
+  };
+
+  const setCachedAvatar = (
+    key: string,
+    blobUrl: string,
+    version: number,
+    avatarHash: string,
+  ) => {
+    revokeCachedAvatar(key);
+    cache.set(key, { blobUrl, version, avatarHash });
+    touchCache(key);
+    evictCacheOverflow();
+  };
+
+  const getCachedAvatar = (
+    ownerType: string,
+    ownerId: string,
+    version: number = 0,
+  ): AvatarCache | undefined => {
+    const key = `${ownerType}:${ownerId}`;
+    const existing = cache.get(key);
+    if (!existing) return undefined;
+
+    const knownMetadata = metadata.get(key);
+    if (knownMetadata && knownMetadata.avatarHash !== existing.avatarHash) {
+      revokeCachedAvatar(key);
+      return undefined;
+    }
+    if (version !== 0 && existing.version < version) return undefined;
+    touchCache(key);
+    return existing;
+  };
+
+  const scheduleDominantColor = (
+    key: string,
+    ownerType: string,
+    ownerId: string,
+    avatarHash: string,
+    requestGeneration: number,
+    blob: Blob,
+  ) => {
+    const computeKey = `${key}:${avatarHash}`;
+    if (inFlightCompute.has(computeKey)) return;
+    inFlightCompute.add(computeKey);
+
+    const tempBlobUrl = URL.createObjectURL(blob);
+    extractDominantColorFromBlob(tempBlobUrl)
+      .then(async (color) => {
+        if ((generations.get(key) ?? 0) !== requestGeneration) return false;
+        const stored = await invoke<boolean>("store_dominant_color", {
+          ownerType,
+          ownerId,
+          color,
+          expectedAvatarHash: avatarHash,
+        });
+        if (stored && (generations.get(key) ?? 0) === requestGeneration) {
+          dominantColors.set(key, color);
+        }
+        return stored;
+      })
+      .then((stored) => {
+        if (stored) {
+          console.log(`[AvatarStore] Computed and stored dominant_color for ${key}`);
+        }
+      })
+      .catch((err) => {
+        console.error(`[AvatarStore] Failed to handle dominant_color for ${key}:`, err);
+      })
+      .finally(() => {
+        inFlightCompute.delete(computeKey);
+        URL.revokeObjectURL(tempBlobUrl);
+      });
+  };
 
   /**
    * 获取头像 URL (带自动缓存和版本检查)
@@ -139,12 +267,8 @@ export const useAvatarStore = defineStore("avatar", () => {
     version: number = 0
   ): Promise<string> => {
     const key = `${ownerType}:${ownerId}`;
-    const existing = cache.get(key);
-
-    // 核心修复：如果缓存存在，且满足以下任一条件，则直接返回：
-    // 1. 请求的版本为 0 (不强制刷新，只要有就行)
-    // 2. 缓存的版本已经大于或等于请求的版本
-    if (existing && (version === 0 || existing.version >= version)) {
+    const existing = getCachedAvatar(ownerType, ownerId, version);
+    if (existing) {
       return existing.blobUrl;
     }
 
@@ -153,6 +277,7 @@ export const useAvatarStore = defineStore("avatar", () => {
       return pending.get(key)!;
     }
 
+    const requestGeneration = generations.get(key) ?? 0;
     const fetchTask = (async () => {
       try {
         const result = await invoke<AvatarResult | null>("get_avatar", {
@@ -160,73 +285,61 @@ export const useAvatarStore = defineStore("avatar", () => {
           ownerId,
         });
 
-        if (result && result.image_data) {
+        if ((generations.get(key) ?? 0) !== requestGeneration) {
+          return cache.get(key)?.blobUrl ?? "";
+        }
+
+        if (result && result.image_data.length > 0) {
+          const currentMetadata = metadata.get(key);
+          let resolvedGeneration = requestGeneration;
+          if (currentMetadata && currentMetadata.avatarHash !== result.avatar_hash) {
+            invalidateAvatarKey(key, false);
+            resolvedGeneration = generations.get(key) ?? requestGeneration;
+          }
+          metadata.set(key, {
+            avatarHash: result.avatar_hash,
+            updatedAt: result.updated_at,
+          });
+
           // Cache dominant_color for synchronous access (e.g. computeShell)
           if (result.dominant_color) {
             dominantColors.set(key, result.dominant_color);
-          }
-          // 如果 dominant_color 缺失，在前端通过 Canvas 计算并回写到后端数据库
-          if (result.dominant_color === null) {
-            if (!inFlightCompute.has(key)) {
-              inFlightCompute.add(key);
-              
-              const bytes = new Uint8Array(result.image_data);
-              const blob = new Blob([bytes], { type: result.mime_type });
-              const tempBlobUrl = URL.createObjectURL(blob);
-
-              extractDominantColorFromBlob(tempBlobUrl)
-                .then((color) => {
-                  dominantColors.set(key, color);
-                  return invoke("store_dominant_color", { ownerType, ownerId, color });
-                })
-                .then(() => {
-                  console.log(`[AvatarStore] Computed and stored dominant_color for ${key}`);
-                })
-                .catch((err) => {
-                  console.error(`[AvatarStore] Failed to handle dominant_color for ${key}:`, err);
-                })
-                .finally(() => {
-                  inFlightCompute.delete(key);
-                  URL.revokeObjectURL(tempBlobUrl);
-                });
-            }
-          }
-
-          // 清理旧缓存的物理内存
-          if (existing) {
-            URL.revokeObjectURL(existing.blobUrl);
           }
 
           const bytes = new Uint8Array(result.image_data);
           const blob = new Blob([bytes], { type: result.mime_type });
           const blobUrl = URL.createObjectURL(blob);
 
-          // 核心修复：缓存版本号取 (后端实际时间戳 和 请求时间戳) 的最大值
-          // 这样确保下次进入时 existing.version >= version 成立，切断死循环
-          const MAX_AVATAR_CACHE = 50;
-          if (cache.size >= MAX_AVATAR_CACHE) {
-            const firstKey = cache.keys().next().value;
-            if (firstKey) {
-              const old = cache.get(firstKey);
-              if (old) URL.revokeObjectURL(old.blobUrl);
-              cache.delete(firstKey);
-            }
+          setCachedAvatar(
+            key,
+            blobUrl,
+            Math.max(result.updated_at, version),
+            result.avatar_hash,
+          );
+          if (result.dominant_color === null) {
+            scheduleDominantColor(
+              key,
+              ownerType,
+              ownerId,
+              result.avatar_hash,
+              resolvedGeneration,
+              blob,
+            );
           }
-          cache.set(key, { 
-            blobUrl, 
-            version: Math.max(result.updated_at, version) 
-          });
           return blobUrl;
         }
+
+        invalidateAvatarKey(key, true);
       } catch (err) {
         console.error(`[AvatarStore] Failed to fetch avatar for ${key}:`, err);
-      } finally {
-        pending.delete(key);
       }
       return "";
     })();
 
     pending.set(key, fetchTask);
+    void fetchTask.finally(() => {
+      if (pending.get(key) === fetchTask) pending.delete(key);
+    });
     return fetchTask;
   };
 
@@ -235,73 +348,90 @@ export const useAvatarStore = defineStore("avatar", () => {
    */
   const clearCache = (ownerType: string, ownerId: string) => {
     const key = `${ownerType}:${ownerId}`;
-    const existing = cache.get(key);
-    if (existing) {
-      URL.revokeObjectURL(existing.blobUrl);
-      cache.delete(key);
-    }
-    dominantColors.delete(key);
+    invalidateAvatarKey(key, true);
+  };
+
+  const refreshAvatar = (
+    ownerType: string,
+    ownerId: string,
+    avatarHash: string,
+  ): Promise<string> => {
+    const key = `${ownerType}:${ownerId}`;
+    clearCache(ownerType, ownerId);
+    metadata.set(key, { avatarHash, updatedAt: Date.now() });
+    return getAvatarUrl(ownerType, ownerId, Date.now());
   };
 
   const getDominantColor = (ownerType: string, ownerId: string): string | undefined => {
     return dominantColors.get(`${ownerType}:${ownerId}`);
   };
 
-  /**
-   * 批量预热获取所有头像到本地 Map 缓存中
-   */
-  const loadAll = async (replaceCache: boolean): Promise<void> => {
+  const loadMetadata = async (): Promise<void> => {
+    const loadId = ++metadataLoadId;
+    const generationSnapshot = new Map(generations);
     const startTime = Date.now();
     try {
-      console.log(`[AvatarStore] Starting ${replaceCache ? "refreshAll" : "preloadAll"}...`);
-      const results = (await invoke<BatchAvatarItemDto[]>("batch_get_avatars")) ?? [];
-      if (replaceCache) {
-        for (const entry of cache.values()) {
-          URL.revokeObjectURL(entry.blobUrl);
+      const results = (await invoke<AvatarMetadataDto[]>("batch_get_avatars")) ?? [];
+      if (loadId !== metadataLoadId) return;
+
+      const incomingKeys = new Set<string>();
+      for (const item of results) {
+        const key = `${item.ownerType}:${item.ownerId}`;
+        incomingKeys.add(key);
+        if ((generations.get(key) ?? 0) !== (generationSnapshot.get(key) ?? 0)) {
+          continue;
         }
-        cache.clear();
-        dominantColors.clear();
-      }
-      if (results.length > 0) {
-        for (const item of results) {
-          const key = `${item.ownerType}:${item.ownerId}`;
-          
-          if (item.dominantColor) {
-            dominantColors.set(key, item.dominantColor);
-          }
 
-          if (item.imageData && item.imageData.length > 0) {
-            const bytes = new Uint8Array(item.imageData);
-            const blob = new Blob([bytes], { type: item.mimeType });
-            const blobUrl = URL.createObjectURL(blob);
+        const existingMetadata = metadata.get(key);
+        if (existingMetadata && existingMetadata.updatedAt > item.updatedAt) {
+          continue;
+        }
+        const existingCache = cache.get(key);
+        if (
+          (existingMetadata && existingMetadata.avatarHash !== item.avatarHash) ||
+          (existingCache && existingCache.avatarHash !== item.avatarHash)
+        ) {
+          invalidateAvatarKey(key, false);
+        }
 
-            const existing = cache.get(key);
-            if (existing) {
-              URL.revokeObjectURL(existing.blobUrl);
-            }
-
-            cache.set(key, {
-              blobUrl,
-              version: item.updatedAt,
-            });
-          }
+        metadata.set(key, {
+          avatarHash: item.avatarHash,
+          updatedAt: item.updatedAt,
+        });
+        if (item.dominantColor) {
+          dominantColors.set(key, item.dominantColor);
+        } else {
+          dominantColors.delete(key);
         }
       }
-      console.log(`[AvatarStore] Avatar cache load complete in ${Date.now() - startTime}ms. Cached ${results.length} avatars.`);
+
+      const knownKeys = new Set([...metadata.keys(), ...cache.keys()]);
+      for (const key of knownKeys) {
+        if (incomingKeys.has(key)) continue;
+        if ((generations.get(key) ?? 0) !== (generationSnapshot.get(key) ?? 0)) {
+          continue;
+        }
+        invalidateAvatarKey(key, true);
+      }
+
+      console.log(`[AvatarStore] Loaded ${results.length} avatar metadata rows in ${Date.now() - startTime}ms.`);
     } catch (err) {
-      console.error("[AvatarStore] Failed to load all avatars:", err);
+      console.error("[AvatarStore] Failed to load avatar metadata:", err);
     }
   };
 
-  const preloadAll = (): Promise<void> => loadAll(false);
-  const refreshAll = (): Promise<void> => loadAll(true);
+  const preloadMetadata = (): Promise<void> => loadMetadata();
+  const refreshMetadata = (): Promise<void> => loadMetadata();
 
   return {
     cache, // 暴露 cache 以供同步检查
+    metadata,
+    getCachedAvatar,
     getAvatarUrl,
     clearCache,
+    refreshAvatar,
     getDominantColor,
-    preloadAll,
-    refreshAll,
+    preloadMetadata,
+    refreshMetadata,
   };
 });

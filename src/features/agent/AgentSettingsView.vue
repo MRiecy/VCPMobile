@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, onUnmounted, watch } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { deleteTempFile, pickFile } from "tauri-plugin-vcp-mobile";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useNotificationStore } from "../../core/stores/notification";
@@ -58,36 +59,71 @@ const toggleSection = (section: keyof typeof sections.value) => {
 };
 
 // Avatar Upload Logic
-const fileInput = ref<HTMLInputElement | null>(null);
 const isCropping = ref(false);
+const isPickingAvatar = ref(false);
 const cropImg = ref("");
-const avatarVersion = ref(0);
+const avatarWorkingPath = ref<string | null>(null);
 
-const triggerFileInput = () => {
-  fileInput.value?.click();
+const releaseAvatarWorkingCopy = async () => {
+  const filePath = avatarWorkingPath.value;
+  avatarWorkingPath.value = null;
+  cropImg.value = "";
+  if (!filePath) return;
+  try {
+    await deleteTempFile(filePath);
+  } catch (error) {
+    console.warn("Failed to delete Agent avatar working copy:", error);
+  }
 };
 
-const handleFileChange = (e: Event) => {
-  const file = (e.target as HTMLInputElement).files?.[0];
-  if (!file) return;
-
+const triggerFileInput = async () => {
+  if (isPickingAvatar.value || isCropping.value) return;
   const epoch = editorEpoch;
   const agentId = props.id || "";
-  const reader = new FileReader();
-  reader.onload = (event) => {
-    if (!isOpenEditorCurrent(epoch, agentId)) return;
-    cropImg.value = event.target?.result as string;
+  if (!agentId || !isOpenEditorCurrent(epoch, agentId)) return;
+
+  isPickingAvatar.value = true;
+  try {
+    await releaseAvatarWorkingCopy();
+    const picked = await pickFile("avatar");
+    if (!isOpenEditorCurrent(epoch, agentId)) {
+      await deleteTempFile(picked.path);
+      return;
+    }
+    avatarWorkingPath.value = picked.path;
+    cropImg.value = convertFileSrc(picked.path);
     isCropping.value = true;
-  };
-  reader.readAsDataURL(file);
+  } catch (error) {
+    if (!String(error).toLowerCase().includes("cancel")) {
+      console.error("Failed to prepare Agent avatar image:", error);
+      notificationStore.addNotification({
+        type: "error",
+        title: "头像读取失败",
+        message: String(error) || "请选择其他图片后重试",
+        toastOnly: true,
+      });
+    }
+  } finally {
+    if (isEpochCurrent(epoch)) isPickingAvatar.value = false;
+  }
+};
+
+const cancelAvatarCrop = () => {
+  isCropping.value = false;
+  void releaseAvatarWorkingCopy();
 };
 
 const onCropConfirm = async (blob: Blob) => {
   const epoch = editorEpoch;
   const agentId = agentConfig.value.id;
-  if (!agentId || !isOpenEditorCurrent(epoch, agentId)) return;
+  if (!agentId || !isOpenEditorCurrent(epoch, agentId)) {
+    isCropping.value = false;
+    await releaseAvatarWorkingCopy();
+    return;
+  }
 
   isCropping.value = false;
+  await releaseAvatarWorkingCopy();
   isSaving.value = true;
 
   try {
@@ -96,10 +132,8 @@ const onCropConfirm = async (blob: Blob) => {
     const bytes = new Uint8Array(arrayBuffer);
 
     // Use assistantStore to save avatar and get notification
-    await assistantStore.saveAvatar("agent", agentId, blob.type, Array.from(bytes));
+    await assistantStore.saveAvatar("agent", agentId, blob.type, bytes);
 
-    // Update UI local state via version
-    if (isOpenEditorCurrent(epoch, agentId)) avatarVersion.value = Date.now();
   } catch (err) {
     console.error("Failed to save avatar:", err);
   } finally {
@@ -124,6 +158,7 @@ onUnmounted(() => {
     clearTimeout(saveSuccessTimer);
     saveSuccessTimer = null;
   }
+  void releaseAvatarWorkingCopy();
   const epoch = ++editorEpoch;
   void startSaveOnClose(epoch);
 });
@@ -204,6 +239,9 @@ const saveOnClose = async (epoch: number) => {
 
 watch([() => props.isOpen, () => props.id], ([isOpen, id]) => {
   const epoch = ++editorEpoch;
+  isPickingAvatar.value = false;
+  isCropping.value = false;
+  void releaseAvatarWorkingCopy();
   if (isOpen && id) {
     agentConfig.value = createEmptyConfig(id);
     originalConfig.value = null;
@@ -278,7 +316,6 @@ const handleDelete = async () => {
               <VcpAvatar
                 owner-type="agent"
                 :owner-id="props.id || ''"
-                :version="avatarVersion"
                 :fallback-name="agentConfig.name"
                 size="w-24 h-24"
                 rounded="rounded-full"
@@ -289,7 +326,6 @@ const handleDelete = async () => {
                 class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 rounded-full flex items-center justify-center transition-opacity cursor-pointer z-20">
                 <span class="text-[10px] text-white font-bold tracking-widest uppercase">更换头像</span>
               </div>
-              <input type="file" ref="fileInput" class="hidden" accept="image/*" @change="handleFileChange" />
             </div>
 
             <div class="w-full">
@@ -408,7 +444,7 @@ const handleDelete = async () => {
     </div>
   </SlidePage>
   <!-- 头像裁剪器 (移出主视图以防被 Transition/v-if 干扰) -->
-  <AvatarCropper v-if="isCropping" :img="cropImg" @cancel="isCropping = false" @confirm="onCropConfirm" />
+  <AvatarCropper v-if="isCropping" :img="cropImg" @cancel="cancelAvatarCrop" @confirm="onCropConfirm" />
 </template>
 
 <style scoped>

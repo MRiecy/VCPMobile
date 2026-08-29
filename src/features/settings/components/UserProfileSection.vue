@@ -1,6 +1,9 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { onUnmounted, ref } from "vue";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { deleteTempFile, pickFile } from "tauri-plugin-vcp-mobile";
 import { useAssistantStore } from "../../../core/stores/assistant";
+import { useNotificationStore } from "../../../core/stores/notification";
 import type { AppSettings } from "../../../core/stores/settings";
 import SettingsCard from "../../../components/settings/SettingsCard.vue";
 import SettingsTextField from "../../../components/settings/SettingsTextField.vue";
@@ -12,48 +15,82 @@ defineProps<{
 }>();
 
 const assistantStore = useAssistantStore();
+const notificationStore = useNotificationStore();
 
 // Avatar Logic
-const fileInput = ref<HTMLInputElement | null>(null);
 const isCropping = ref(false);
+const isPickingAvatar = ref(false);
 const cropImg = ref("");
-const avatarVersion = ref(0);
+const avatarWorkingPath = ref<string | null>(null);
+let disposed = false;
 
-const triggerFileInput = () => {
-  fileInput.value?.click();
+const releaseAvatarWorkingCopy = async () => {
+  const filePath = avatarWorkingPath.value;
+  avatarWorkingPath.value = null;
+  cropImg.value = "";
+  if (!filePath) return;
+  try {
+    await deleteTempFile(filePath);
+  } catch (error) {
+    console.warn("Failed to delete user avatar working copy:", error);
+  }
 };
 
-const handleFileChange = (e: Event) => {
-  const file = (e.target as HTMLInputElement).files?.[0];
-  if (!file) return;
-
-  const reader = new FileReader();
-  reader.onload = (event) => {
-    cropImg.value = event.target?.result as string;
+const triggerFileInput = async () => {
+  if (isPickingAvatar.value || isCropping.value) return;
+  isPickingAvatar.value = true;
+  try {
+    await releaseAvatarWorkingCopy();
+    const picked = await pickFile("avatar");
+    if (disposed) {
+      await deleteTempFile(picked.path);
+      return;
+    }
+    avatarWorkingPath.value = picked.path;
+    cropImg.value = convertFileSrc(picked.path);
     isCropping.value = true;
-  };
-  reader.readAsDataURL(file);
+  } catch (error) {
+    if (!String(error).toLowerCase().includes("cancel")) {
+      console.error("Failed to prepare user avatar image:", error);
+      notificationStore.addNotification({
+        type: "error",
+        title: "头像读取失败",
+        message: String(error) || "请选择其他图片后重试",
+        toastOnly: true,
+      });
+    }
+  } finally {
+    if (!disposed) isPickingAvatar.value = false;
+  }
+};
+
+const cancelAvatarCrop = () => {
+  isCropping.value = false;
+  void releaseAvatarWorkingCopy();
 };
 
 // Removed avatarUrl computed as we use avatarDisplayUrl via IPC
 
 const onCropConfirm = async (blob: Blob) => {
   isCropping.value = false;
+  await releaseAvatarWorkingCopy();
   
   try {
     const arrayBuffer = await blob.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);
     
     // Use assistantStore to save avatar and get notification
-    await assistantStore.saveAvatar("user", "user_avatar", blob.type, Array.from(bytes));
+    await assistantStore.saveAvatar("user", "user_avatar", blob.type, bytes);
 
-    // Refresh avatar by updating timestamp
-    avatarVersion.value = Date.now();
-    console.log("Avatar updated, triggering reload");
   } catch (err) {
     console.error("Failed to save user avatar:", err);
   }
 };
+
+onUnmounted(() => {
+  disposed = true;
+  void releaseAvatarWorkingCopy();
+});
 </script>
 
 <template>
@@ -63,7 +100,6 @@ const onCropConfirm = async (blob: Blob) => {
         <VcpAvatar 
           owner-type="user" 
           owner-id="user_avatar" 
-          :version="avatarVersion"
           :fallback-name="settings.userName"
           size="w-16 h-16"
           rounded="rounded-full"
@@ -103,9 +139,8 @@ const onCropConfirm = async (blob: Blob) => {
       </p>
     </div>
 
-    <input type="file" ref="fileInput" class="hidden" accept="image/*" @change="handleFileChange" />
   </SettingsCard>
 
   <!-- 头像裁剪器 -->
-  <AvatarCropper v-if="isCropping" :img="cropImg" @cancel="isCropping = false" @confirm="onCropConfirm" />
+  <AvatarCropper v-if="isCropping" :img="cropImg" @cancel="cancelAvatarCrop" @confirm="onCropConfirm" />
 </template>

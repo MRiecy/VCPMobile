@@ -161,7 +161,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
       const promises: Promise<unknown>[] = [
         settingsStore.fetchSettings(),
         assistantStore.fetchAgentsAndGroups(),
-        avatarStore.preloadAll()
+        avatarStore.preloadMetadata()
       ];
 
       // 启动预加载：若 Pinia 恢复了活跃会话，提前拉取首屏聊天历史

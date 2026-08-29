@@ -109,6 +109,7 @@ vi.mock('tauri-plugin-vcp-mobile', () => ({
   startStreamService: vi.fn(() => Promise.resolve()),
   stopStreamService: vi.fn(() => Promise.resolve()),
   pickFile: vi.fn(() => Promise.resolve(undefined)),
+  deleteTempFile: vi.fn(() => Promise.resolve()),
   openFileNative: vi.fn(() => Promise.resolve()),
   shareFileNative: vi.fn(() => Promise.resolve()),
   saveImageToGallery: vi.fn(() => Promise.resolve({ uri: '', displayName: '', mimeType: '', size: 0 })),

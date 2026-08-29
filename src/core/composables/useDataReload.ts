@@ -23,7 +23,7 @@ export function useDataReload() {
     // 2. 刷新 agents/groups 元数据与同步后可能变化的头像缓存
     await Promise.all([
       assistantStore.fetchAgentsAndGroups(),
-      avatarStore.refreshAll(),
+      avatarStore.refreshMetadata(),
     ]);
     sessionStore.reconcileCurrentConversation();
 

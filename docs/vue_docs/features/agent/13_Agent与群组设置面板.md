@@ -78,7 +78,7 @@ date: 2026-07-04
 | **全量保存，防抖触发** | 单个字段变更不调用 `update_agent_config`，而是触发防抖后的 `save_agent_config` 全量写入，简化前端逻辑 |
 | **快照比对** | 通过 `originalConfig` 深拷贝快照，仅当用户真正修改内容后才发起后端调用，避免无意义 IO |
 | **Store 化 IPC** | 所有 IPC 调用封装在 `assistant.ts` Pinia Store 中，视图层不直接 `invoke`，便于统一通知与错误处理 |
-| **头像版本戳** | 头像上传成功后通过 `avatarVersion = Date.now()` 强制 `VcpAvatar` 重新加载，绕过浏览器缓存 |
+| **头像缓存所有权** | 头像上传成功后由 `avatarStore.refreshAvatar()` 统一失效、提升 generation 并重读，视图不维护版本戳 |
 
 ---
 
@@ -260,7 +260,6 @@ interface AgentConfig {
 <VcpAvatar
   owner-type="agent"
   :owner-id="props.id || ''"
-  :version="avatarVersion"
   :fallback-name="agentConfig.name"
   size="w-24 h-24"
   rounded="rounded-full"
@@ -268,7 +267,7 @@ interface AgentConfig {
 />
 ```
 
-编辑触发：头像区域包裹在 `<div @click="triggerFileInput">` 中，点击后触发隐藏的 `<input type="file" accept="image/*">`，选择图片后进入裁剪流程。
+编辑触发：头像区域包裹在 `<div @click="triggerFileInput">` 中，点击后调用原生 `pickFile("avatar")`。原图在 Native 层以 64 KiB 缓冲流式落盘、修正 EXIF 并采样为最长边 1120px 的 WebP 工作副本；WebView 只加载该受控副本。
 
 ### 4.2 头像裁剪（vue-cropper）
 
@@ -277,27 +276,30 @@ interface AgentConfig {
 ```ts
 // AvatarCropper.vue 核心配置
 const options = reactive({
-  img: props.img,           // FileReader 读取的 DataURL
+  img: props.img,           // convertFileSrc(原生 1120px 工作副本)
   outputType: 'png',
-  fixedBox: true,           // 锁定裁剪框比例
+  fixed: true,
+  fixedNumber: [1, 1],      // 正圆裁剪所需的 1:1 取景框
+  fixedBox: true,           // 禁止拖动改变取景框尺寸
   autoCropWidth: 360,
   autoCropHeight: 360,
   canMoveBox: false,
   centerBox: true,
-  enlarge: 1,               // 禁止根据 DPR 放大输出
+  high: false,              // 不按 DPR 放大输出
+  maxImgSize: 1120,
   mode: 'contain'
 });
 ```
 
-UI 层级：`AvatarCropper` 通过 `<Teleport to="#vcp-feature-overlays">` 渲染到全局遮罩容器，使用 `z-viewer`（70）层级，独立于设置面板的 DOM 树之外，避免 `Transition` / `v-if` 干扰。
+UI 层级：`AvatarCropper` 通过 `<Teleport to="#vcp-feature-overlays">` 渲染到全局遮罩容器，使用 `z-viewer`（80）层级，独立于设置面板的 DOM 树之外，并注册为统一返回栈的栈顶；Android 返回键只取消本次裁剪，不关闭底层设置页。
 
 用户可执行的操作：
 - **移动图片**：调整裁剪区域（touch-action: none 禁用默认滚动）
 - **放大 / 缩小**：`changeScale(+1)` / `changeScale(-1)`
 - **旋转**：`rotateLeft()`
-- **确认**：调用 `getCropBlob((blob) => emit('confirm', blob))`
+- **确认**：先取得 1:1 PNG，再通过 Canvas 圆形 clip 生成圆外透明的最终 PNG；确认期间禁止重复提交
 
-样式覆盖：通过 `:deep(.cropper-view-box)` 将裁剪预览设为圆形，与最终展示效果一致。
+样式覆盖：通过 `:deep(.cropper-view-box)` 将裁剪预览设为圆形；最终文件使用最大直径 360px 的 PNG 方形透明画布承载圆形有效内容。
 
 ### 4.3 头像上传流程
 
@@ -305,22 +307,22 @@ UI 层级：`AvatarCropper` 通过 `<Teleport to="#vcp-feature-overlays">` 渲�
 用户点击头像
     │
     ▼
-触发 file input ──→ 选择图片文件
+pickFile("avatar") ──→ 系统图片选择器
     │
     ▼
-FileReader.readAsDataURL ──→ 得到 Base64 DataURL
+Native 流式 staging → EXIF 归一化 → 1120px WebP 工作副本
     │
     ▼
-isCropping = true ──→ AvatarCropper 显示
+convertFileSrc(path) ──→ AvatarCropper 显示
     │
     ▼
 用户调整裁剪区域 → 点击"完成"
     │
     ▼
-getCropBlob() ──→ Blob (image/png, ~360x360)
+getCropBlob() + Canvas 圆形 clip ──→ 圆外透明 PNG（最大 360×360）
     │
     ▼
-Blob.arrayBuffer() ──→ Uint8Array ──→ number[]
+Blob.arrayBuffer() ──→ Uint8Array（Tauri 嵌套参数内部仍转为 number[] JSON）
     │
     ▼
 assistantStore.saveAvatar("agent"|"group", id, blob.type, bytes)
@@ -332,21 +334,14 @@ invoke("save_avatar_data", { ownerType, ownerId, mimeType, imageData })
 Rust 端：SHA-256 哈希 → SQLite `avatars` 表 upsert
     │
     ▼
-avatarVersion = Date.now()  ──→ VcpAvatar 强制刷新
+assistantStore 调用 avatarStore.refreshAvatar(owner, hash) ──→ 全局缓存失效并重读
 ```
 
 > 源码位置：`src/features/agent/AgentSettingsView.vue:87-107`
 
 ### 4.4 Dominant Color 提取与展示
 
-Dominant Color（主色调）有两条计算路径：
-
-**路径 A：后端预计算（优先）**
-- Rust 侧 `avatar_service.rs` 在保存头像时通过颜色量化算法提取主色调，存入 `avatars` 表
-- 前端调用 `get_avatar` 时，若 `dominant_color` 字段非空，直接同步缓存到 `avatarStore.dominantColors`
-
-**路径 B：前端 Canvas 兜底（异步）**
-- 若后端返回的 `dominant_color` 为 `null`（历史头像或旧数据），`avatarStore.getAvatarUrl()` 会触发前端 Canvas 提取：
+Rust 保存头像时将 `dominant_color` 初始化为 `null`。`avatarStore.refreshAvatar()` 重读新头像后，前端通过 Canvas 异步提取主色调并携带 `expectedAvatarHash` 回写；头像已变化时 SQL CAS 影响 0 行，旧颜色被丢弃。已有非空值则直接进入同步缓存：
 
 ```ts
 // src/core/stores/avatar.ts
@@ -354,7 +349,7 @@ const extractDominantColorFromBlob = (blobUrl: string): Promise<string> => {
   // 1. 绘制到 16x16 Canvas
   // 2. 遍历像素，排除透明/黑白/低饱和度像素
   // 3. 512-bin 量化聚类，取最大桶的平均色
-  // 4. 回写后端：invoke("store_dominant_color", { ownerType, ownerId, color })
+  // 4. CAS 回写：invoke("store_dominant_color", { ..., expectedAvatarHash })
 };
 ```
 
@@ -552,10 +547,10 @@ saveSuccess = true（2s 后熄灭）
 用户点击头像区域
     │
     ▼
-fileInput.click() ──→ 选择图片
+pickFile("avatar") ──→ 选择图片
     │
     ▼
-FileReader.onload ──→ cropImg = dataURL; isCropping = true
+Native 采样至 1120px → cropImg = convertFileSrc(path); isCropping = true
     │
     ▼
 AvatarCropper 渲染（Teleport 到全局遮罩）
@@ -564,10 +559,10 @@ AvatarCropper 渲染（Teleport 到全局遮罩）
 用户调整 → 点击"完成"
     │
     ▼
-getCropBlob((blob) => onCropConfirm(blob))
+getCropBlob() → Canvas 圆形 clip → onCropConfirm(blob)
     │
     ▼
-blob.arrayBuffer() → Uint8Array → Array.from(bytes)
+blob.arrayBuffer() → Uint8Array
     │
     ▼
 assistantStore.saveAvatar("agent", id, blob.type, bytes)
@@ -579,10 +574,10 @@ invoke("save_avatar_data", { ownerType, ownerId, mimeType, imageData })
 Rust: 计算 SHA-256 → upsert avatars 表 → 返回 hash
     │
     ▼
-avatarVersion = Date.now()
+avatarStore.refreshAvatar(ownerType, ownerId, hash)
     │
     ▼
-VcpAvatar.watchEffect: cache miss → getAvatarUrl(version=new)
+清除该 owner 的 Blob/颜色缓存并提升 generation
     │
     ▼
 invoke("get_avatar", { ownerType, ownerId })
@@ -609,8 +604,8 @@ Rust: 读取 avatars 表 → 返回 { mime_type, image_data, dominant_color }
 | `save_group_config` | `assistant.saveGroup` | `{ group }` | `boolean` | 全量写入群组配置 |
 | `get_agents` | `GroupSettingsView.fetchAgents` | 无 | `AgentConfig[]` | 获取全部 Agent 摘要（用于成员选择器） |
 | `save_avatar_data` | `assistant.saveAvatar` | `{ ownerType, ownerId, mimeType, imageData }` | `string` | 返回 SHA-256 哈希 |
-| `get_avatar` | `avatarStore.getAvatarUrl` | `{ ownerType, ownerId }` | `AvatarResult` | 含 `mime_type`, `image_data`, `dominant_color` |
-| `store_dominant_color` | `avatarStore`（兜底计算后） | `{ ownerType, ownerId, color }` | `void` | 回写前端计算的主色调 |
+| `get_avatar` | `avatarStore.getAvatarUrl` | `{ ownerType, ownerId }` | `AvatarResult` | 含 `avatar_hash`, MIME、二进制、颜色与更新时间 |
+| `store_dominant_color` | `avatarStore`（兜底计算后） | `{ ownerType, ownerId, color, expectedAvatarHash }` | `boolean` | hash 仍匹配时回写主色调 |
 | `create_agent` | `assistant.createAgent` | `{ name }` | `AgentConfig` | 创建新 Agent |
 | `delete_agent` | `assistant.deleteAgent` | `{ agentId }` | `void` | 软删除 Agent |
 | `create_group` | `assistant.createGroup` | `{ name }` | `GroupConfig` | 创建新群组 |
@@ -626,7 +621,7 @@ Rust: 读取 avatars 表 → 返回 { mime_type, image_data, dominant_color }
 设置面板本身**不直接监听** Tauri 事件。所有状态更新均通过：
 1. **同步调用**：`invoke()` 的返回值直接更新本地状态
 2. **Store 刷新**：`saveAgent()` / `saveGroup()` 成功后调用 `fetchAgents()` / `fetchGroups()`，更新全局列表
-3. **Watch 驱动**：`avatarVersion` 变更驱动 `VcpAvatar` 重新加载
+3. **Store 驱动**：`avatarStore.refreshAvatar()` 更新 reactive cache，所有对应 `VcpAvatar` 自动切换
 
 ---
 
@@ -646,12 +641,9 @@ Rust 侧虽提供了 `update_agent_config`（JSON 合并写入），但前端统
 - 800ms 防抖已足够降低保存频率，无需字段级 diff 优化
 - 减少前端逻辑分支：Agent 与 Group 使用同一套保存范式
 
-### 9.3 头像裁剪输出 360x360 的考量
+### 9.3 头像工作副本与圆形输出的考量
 
-`AvatarCropper.vue` 固定输出 360x360 像素：
-- 该尺寸在移动端 2x/3x DPR 屏幕上作为 120px 展示尺寸足够清晰
-- `enlarge: 1` 禁止 `vue-cropper` 根据 DPR 自动放大，确保输出体积可控
-- 输出格式固定为 PNG，避免 JPEG 压缩导致的透明背景黑边问题
+原图不进入 WebView：Native 先按像素预算生成最长边 1120px 的工作副本，释放 Bitmap 后才返回路径。`AvatarCropper.vue` 使用 `high: false` 输出最大 360×360 的 PNG 方形透明画布，圆外透明；该尺寸用于头像展示足够清晰，同时避免 DPR 放大、Base64 与全分辨率解码峰值。
 
 ### 9.4 离开页面时是否需要确认未保存变更？
 
@@ -697,7 +689,7 @@ if (!groupConfig.value.memberTags[agentId]) {
 | **SlidePage** | 从右侧滑入的全屏覆盖层组件 | `src/components/ui/SlidePage.vue` |
 | **Page Stack** | OverlayStore 维护的虚拟页面栈，支持多层叠加 | `src/core/stores/overlay.ts` |
 | **originalConfig** | 配置加载时的深拷贝快照，用于 Watch 比对 | `AgentSettingsView.vue:120` |
-| **avatarVersion** | 时间戳，用于强制 VcpAvatar 跳过缓存重新加载 | `AgentSettingsView.vue:69` |
+| **avatar generation** | 每个 owner 的本地缓存代际，用于拒绝旧异步读取回灌 | `src/core/stores/avatar.ts` |
 | **Dominant Color** | 头像主色调，用于边框发光与 Fallback 背景 | `avatar.ts` / `avatar_service.rs` |
 | **ModelSelector** | BottomSheet 风格的模型选择抽屉 | `src/components/ModelSelector.vue` |
 | **SettingsSection** | 群组设置中的分类标题原子组件 | `src/components/settings/SettingsSection.vue` |

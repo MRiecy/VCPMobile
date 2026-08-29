@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { createPinia, setActivePinia } from 'pinia';
 // @ts-expect-error Vitest runs in Node; the application tsconfig intentionally omits Node types.
 import { readFileSync } from 'node:fs';
 // @ts-expect-error Vitest runs in Node; the application tsconfig intentionally omits Node types.
@@ -9,11 +10,20 @@ import androidManifest from '../../../../src-tauri/gen/android/app/src/main/Andr
 import viteConfig from '../../../../vite.config.ts?raw';
 import unoConfig from '../../../../uno.config.ts?raw';
 import appSource from '../../../App.vue?raw';
+import avatarCropperSource from '../../../components/ui/AvatarCropper.vue?raw';
+import vcpAvatarSource from '../../../components/ui/VcpAvatar.vue?raw';
 import leftSidebarSource from '../../../components/layout/AgentSidebar.vue?raw';
 import rightSidebarSource from '../../../components/layout/RightSidebar.vue?raw';
+import assistantStoreSource from '../../../core/stores/assistant.ts?raw';
+import avatarStoreSource from '../../../core/stores/avatar.ts?raw';
+import { useAvatarStore } from '../../../core/stores/avatar';
 import layersSource from '../../../core/constants/layers.ts?raw';
 import sidebarSwipeSource from '../../../core/composables/useSidebarSwipe.ts?raw';
+import agentSettingsSource from '../../../features/agent/AgentSettingsView.vue?raw';
+import groupSettingsSource from '../../../features/agent/GroupSettingsView.vue?raw';
 import diaryCenterSource from '../../../features/diary/DiaryCenterView.vue?raw';
+import userProfileSource from '../../../features/settings/components/UserProfileSection.vue?raw';
+import { mockInvoke } from '../../mocks/tauri';
 import { nativeInsetsToCss, normalizeNativeInsets } from '../../../core/composables/useKeyboardInsets';
 
 const themesSource = readFileSync(resolve('src/assets/themes.css'), 'utf8');
@@ -166,6 +176,66 @@ describe('Android mobile UI compatibility contracts', () => {
       expect(layersSource).toContain(`LAYER_${name.toUpperCase()} = ${value}`);
       expect(themesSource).toContain(`--layer-${name}: ${value}`);
       expect(unoConfig).toContain(`${name}: '${value}'`);
+    }
+  });
+
+  it('keeps avatar cropping circular, DPR-bounded and first in the Android back stack', () => {
+    expect(avatarCropperSource).toContain('fixed: true');
+    expect(avatarCropperSource).toContain('fixedNumber: [1, 1]');
+    expect(avatarCropperSource).toContain('high: false');
+    expect(avatarCropperSource).toContain('context.arc(');
+    expect(avatarCropperSource).toContain("registerModal(MODAL_ID, handleCancel)");
+  });
+
+  it('publishes saved avatars through the global cache owner instead of local view versions', () => {
+    expect(assistantStoreSource).toContain('await avatarStore.refreshAvatar(ownerType, ownerId, hash)');
+    expect(avatarStoreSource).toContain('const refreshAvatar =');
+    expect(avatarStoreSource).toContain('requestGeneration');
+    expect(avatarStoreSource).toContain('preloadMetadata');
+    expect(avatarStoreSource).not.toContain('item.imageData');
+    expect(vcpAvatarSource).toContain('v-intersection-observer');
+    for (const source of [agentSettingsSource, groupSettingsSource, userProfileSource]) {
+      expect(source).not.toContain('avatarVersion');
+    }
+  });
+
+  it('does not let an older avatar read overwrite a refresh that finished first', async () => {
+    setActivePinia(createPinia());
+    let resolveOldRead!: (value: unknown) => void;
+    mockInvoke('get_avatar', () => new Promise((resolve) => {
+      resolveOldRead = resolve;
+    }));
+
+    const createObjectUrl = vi.mocked(URL.createObjectURL);
+    let objectUrlSequence = 0;
+    createObjectUrl.mockImplementation(() => `blob:avatar-${++objectUrlSequence}`);
+
+    try {
+      const store = useAvatarStore();
+      const oldRead = store.getAvatarUrl('agent', 'agent-1');
+
+      mockInvoke('get_avatar', () => ({
+        avatar_hash: 'new-hash',
+        mime_type: 'image/png',
+        image_data: [2],
+        dominant_color: '#123456',
+        updated_at: 2,
+      }));
+      const refreshed = await store.refreshAvatar('agent', 'agent-1', 'new-hash');
+
+      resolveOldRead({
+        avatar_hash: 'old-hash',
+        mime_type: 'image/png',
+        image_data: [1],
+        dominant_color: '#654321',
+        updated_at: 1,
+      });
+
+      expect(refreshed).toBe('blob:avatar-1');
+      await expect(oldRead).resolves.toBe('blob:avatar-1');
+      expect(store.cache.get('agent:agent-1')?.blobUrl).toBe('blob:avatar-1');
+    } finally {
+      createObjectUrl.mockImplementation(() => 'blob:mock');
     }
   });
 

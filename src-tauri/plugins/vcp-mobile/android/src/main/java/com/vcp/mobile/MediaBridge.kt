@@ -36,11 +36,12 @@ object MediaBridge {
         fileIoExecutor.execute {
             var rawBitmap: Bitmap? = null
             var scaledBitmap: Bitmap? = null
-            try {
+            var orientedBitmap: Bitmap? = null
+            var outputFile: File? = null
+            val outcome = try {
                 val file = File(inputPath)
                 if (!file.exists()) {
-                    callback(Result.failure(FileNotFoundException("Input file not found: $inputPath")))
-                    return@execute
+                    throw FileNotFoundException("Input file not found: $inputPath")
                 }
 
                 // 1. 获取图片原始宽高而不加载入内存，防止 OOM
@@ -52,8 +53,7 @@ object MediaBridge {
                 val origH = options.outHeight
 
                 if (origW <= 0 || origH <= 0) {
-                    callback(Result.failure(Exception("Invalid image dimensions")))
-                    return@execute
+                    throw Exception("Invalid image dimensions")
                 }
 
                 // 2. 计算缩放包络
@@ -64,8 +64,9 @@ object MediaBridge {
                     1.0f
                 }
 
-                val targetW = (origW * scale).toInt()
-                val targetH = (origH * scale).toInt()
+                val targetW = (origW * scale).toInt().coerceAtLeast(1)
+                val targetH = (origH * scale).toInt().coerceAtLeast(1)
+                val orientation = readExifOrientation(inputPath)
 
                 // 3. 计算合理 sampling size 减少内存开销
                 val decodeOptions = BitmapFactory.Options().apply {
@@ -74,38 +75,52 @@ object MediaBridge {
                 rawBitmap = BitmapFactory.decodeFile(inputPath, decodeOptions)
                     ?: throw Exception("Failed to decode image bitmap")
 
-                // 4. 精确缩放 (filter = true 提供高保真插值)
-                scaledBitmap = if (rawBitmap.width != targetW || rawBitmap.height != targetH) {
+                // 4. 先缩至目标包络，再做 EXIF 方向归一化，避免同时持有两张采样大图。
+                val scaled = if (rawBitmap.width != targetW || rawBitmap.height != targetH) {
                     Bitmap.createScaledBitmap(rawBitmap, targetW, targetH, true)
                 } else {
                     rawBitmap
                 }
+                scaledBitmap = scaled
+                val oriented = applyExifOrientation(scaled, orientation)
+                orientedBitmap = oriented
+                val swapsDimensions = orientation == android.media.ExifInterface.ORIENTATION_TRANSPOSE ||
+                    orientation == android.media.ExifInterface.ORIENTATION_ROTATE_90 ||
+                    orientation == android.media.ExifInterface.ORIENTATION_TRANSVERSE ||
+                    orientation == android.media.ExifInterface.ORIENTATION_ROTATE_270
+                val visualTargetW = if (swapsDimensions) targetH else targetW
+                val visualTargetH = if (swapsDimensions) targetW else targetH
 
-                // 5. 写入 WebP
-                val uploadsDir = File(context.cacheDir, "uploads").apply { mkdirs() }
-                val outFile = File(uploadsDir, "img_" + UUID.randomUUID().toString() + ".webp")
+                // 5. 写入现有受控 bridge 临时目录，前端用 delete_temp_file 释放。
+                val bridgeTempDir = File(context.cacheDir, "vcp_bridge_temp").apply { mkdirs() }
+                val outFile = File(bridgeTempDir, "avatar_work_" + UUID.randomUUID().toString() + ".webp")
+                outputFile = outFile
                 FileOutputStream(outFile).use { out ->
-                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                        scaledBitmap.compress(Bitmap.CompressFormat.WEBP_LOSSY, 80, out)
+                    val compressed = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                        oriented.compress(Bitmap.CompressFormat.WEBP_LOSSY, 80, out)
                     } else {
                         @Suppress("DEPRECATION")
-                        scaledBitmap.compress(Bitmap.CompressFormat.WEBP, 80, out)
+                        oriented.compress(Bitmap.CompressFormat.WEBP, 80, out)
                     }
+                    if (!compressed) throw Exception("Failed to encode avatar working image")
                 }
 
-                Log.d(TAG, "Image scale success: ${outFile.absolutePath} (${targetW}x${targetH})")
-                callback(Result.success(outFile.absolutePath))
+                Log.d(TAG, "Image scale success: ${outFile.absolutePath} (${visualTargetW}x${visualTargetH})")
+                Result.success(outFile.absolutePath)
             } catch (e: Exception) {
                 Log.e(TAG, "Image scale error", e)
-                callback(Result.failure(e))
+                outputFile?.delete()
+                Result.failure(e)
             } finally {
-                scaledBitmap?.let {
-                    if (it != rawBitmap) {
-                        it.recycle()
-                    }
+                if (orientedBitmap !== rawBitmap) orientedBitmap?.recycle()
+                if (scaledBitmap !== rawBitmap && scaledBitmap !== orientedBitmap) {
+                    scaledBitmap?.recycle()
                 }
                 rawBitmap?.recycle()
             }
+
+            // 确保 Native 位图已释放后再把路径交给 WebView，避免两侧解码峰值重叠。
+            callback(outcome)
         }
     }
 
@@ -484,6 +499,47 @@ object MediaBridge {
             }
         }
         return inSampleSize
+    }
+
+    @Suppress("DEPRECATION")
+    private fun readExifOrientation(path: String): Int {
+        return try {
+            android.media.ExifInterface(path).getAttributeInt(
+                android.media.ExifInterface.TAG_ORIENTATION,
+                android.media.ExifInterface.ORIENTATION_NORMAL
+            )
+        } catch (error: Exception) {
+            Log.w(TAG, "Unable to read EXIF orientation for $path", error)
+            android.media.ExifInterface.ORIENTATION_NORMAL
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun applyExifOrientation(source: Bitmap, orientation: Int): Bitmap {
+        if (orientation == android.media.ExifInterface.ORIENTATION_NORMAL ||
+            orientation == android.media.ExifInterface.ORIENTATION_UNDEFINED
+        ) {
+            return source
+        }
+
+        val matrix = Matrix()
+        when (orientation) {
+            android.media.ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> matrix.setScale(-1f, 1f)
+            android.media.ExifInterface.ORIENTATION_ROTATE_180 -> matrix.setRotate(180f)
+            android.media.ExifInterface.ORIENTATION_FLIP_VERTICAL -> matrix.setScale(1f, -1f)
+            android.media.ExifInterface.ORIENTATION_TRANSPOSE -> {
+                matrix.setRotate(90f)
+                matrix.postScale(-1f, 1f)
+            }
+            android.media.ExifInterface.ORIENTATION_ROTATE_90 -> matrix.setRotate(90f)
+            android.media.ExifInterface.ORIENTATION_TRANSVERSE -> {
+                matrix.setRotate(-90f)
+                matrix.postScale(-1f, 1f)
+            }
+            android.media.ExifInterface.ORIENTATION_ROTATE_270 -> matrix.setRotate(-90f)
+            else -> return source
+        }
+        return Bitmap.createBitmap(source, 0, 0, source.width, source.height, matrix, true)
     }
 
     /**

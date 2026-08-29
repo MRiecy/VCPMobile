@@ -415,6 +415,7 @@ let agent_id = format!("{}_{}", base_id, timestamp);
 ```rust
 #[derive(serde::Serialize)]
 pub struct AvatarResult {
+    pub avatar_hash: String,
     pub mime_type: String,
     pub image_data: Vec<u8>,
     pub dominant_color: Option<String>,
@@ -422,7 +423,7 @@ pub struct AvatarResult {
 }
 ```
 
-前端通过 `get_avatar` 获取此结构，直接构造 `data:image/{mime_type};base64,{...}` 的 Data URL 展示头像，同时用 `dominant_color` 作为 UI 主题色或 Glassmorphism 背景色。
+前端通过 `get_avatar` 获取此结构并构造 Blob URL；`avatar_hash` 既用于缓存身份，也作为异步主色调回写的 CAS 条件。
 
 ### 4.2 保存头像（save_avatar_data）
 
@@ -456,7 +457,7 @@ pub struct AvatarResult {
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `owner_type` | `TEXT` | `'agent'` 或 `'group'`，联合主键的一部分 |
+| `owner_type` | `TEXT` | `'user'`、`'agent'` 或 `'group'`，联合主键的一部分 |
 | `owner_id` | `TEXT` | Agent ID 或 Group ID，联合主键的一部分 |
 | `avatar_hash` | `TEXT` | SHA-256 十六进制，用于快速比对内容变化 |
 | `mime_type` | `TEXT` | 如 `image/png`、`image/jpeg` |
@@ -471,7 +472,7 @@ pub struct AvatarResult {
 简单查询：
 
 ```sql
-SELECT mime_type, image_data, dominant_color, updated_at
+SELECT avatar_hash, mime_type, image_data, dominant_color, updated_at
 FROM avatars
 WHERE owner_type = ? AND owner_id = ?
 ```
@@ -482,27 +483,29 @@ WHERE owner_type = ? AND owner_id = ?
 
 > 函数位置：`src-tauri/src/vcp_modules/agent/avatar_service.rs` 第 112–154 行
 
-v1.1.3 新增的 Tauri Command，用于启动/同步场景一次性拉取所有头像二进制数据，避免前端逐个 IPC 请求。
+该 Tauri Command 用于启动/同步场景批量拉取轻量头像元数据，不包含 `image_data`。头像二进制由进入可视区的 `VcpAvatar` 通过 `get_avatar` 单项读取。
 
 ```sql
-SELECT owner_type, owner_id, mime_type, image_data, dominant_color, updated_at
+SELECT owner_type, owner_id, avatar_hash, dominant_color, updated_at
 FROM avatars
 WHERE owner_type IN ('agent', 'group', 'user')
 ```
 
-返回 `Vec<BatchAvatarItem>`，每项包含 `owner_type`、`owner_id` 及完整的 `AvatarResult` 字段。注意：该接口会在一次 IPC 中传输全部头像二进制，适用于头像数量可控的移动端场景。
+返回 `Vec<BatchAvatarMetadata>`。前端比较 hash：未变化时保留现有 Blob URL，变化或删除时定点失效；因此批量 IPC 的大小只随头像数量线性增长，不随图片字节数增长。
 
 ### 4.5 存储前端计算的主色调（store_dominant_color）
 
 > 函数位置：`src-tauri/src/vcp_modules/agent/avatar_service.rs` 第 156–182 行
 
-v1.1.3 新增的 Tauri Command，接收前端计算好的十六进制颜色字符串，回写 `avatars.dominant_color`：
+该命令接收前端计算好的十六进制颜色及读取时的 `expected_avatar_hash`，只允许仍为同一张头像且颜色尚为空的行更新：
 
 ```sql
-UPDATE avatars SET dominant_color = ? WHERE owner_type = ? AND owner_id = ?
+UPDATE avatars SET dominant_color = ?
+WHERE owner_type = ? AND owner_id = ? AND avatar_hash = ?
+  AND dominant_color IS NULL AND deleted_at IS NULL
 ```
 
-前端通常在头像上传后通过 Canvas / 颜色量化库计算主色调，再调用此接口完成持久化。后端仅负责存储，不参与任何图像解码或颜色算法。
+返回 `true` 表示写入成功；返回 `false` 表示头像已变化、颜色已由其他任务写入或记录已失效，调用方应丢弃旧结果。后端仅负责 CAS 存储，不参与图像解码或颜色算法。
 
 ### 4.6 兜底颜色提取（extract_dominant_color_from_bytes）
 
@@ -764,8 +767,8 @@ agent_chat_application_service → agent_service / message_service / vcp_client 
 | `create_agent(app_handle, state, name) -> Result<AgentConfig, String>` | `agent_service` | `AppHandle`, `AgentConfigState`, `String` | 新 Agent 配置 | 新建 Agent |
 | `save_avatar_data(app_handle, owner_type, owner_id, mime_type, image_data) -> Result<String, String>` | `avatar_service` | `AppHandle`, `String`×3, `Vec<u8>` | SHA-256 哈希 | 头像裁剪后上传；v1.1.3 起不再后端提取主色调 |
 | `get_avatar(app_handle, owner_type, owner_id) -> Result<Option<AvatarResult>, String>` | `avatar_service` | `AppHandle`, `String`, `String` | 头像二进制 + 元数据 | 加载头像展示 |
-| `batch_get_avatars(app_handle) -> Result<Vec<BatchAvatarItem>, String>` | `avatar_service` | `AppHandle` | 全部头像二进制列表 | 启动/同步场景一次性拉取 |
-| `store_dominant_color(db_state, owner_type, owner_id, color) -> Result<(), String>` | `avatar_service` | `DbState`, `String`×2, `String` | — | 前端计算主色调后回写数据库 |
+| `batch_get_avatars(app_handle) -> Result<Vec<BatchAvatarMetadata>, String>` | `avatar_service` | `AppHandle` | owner/hash/颜色/更新时间 | 启动与同步时刷新头像元数据 |
+| `store_dominant_color(db_state, owner_type, owner_id, color, expected_avatar_hash) -> Result<bool, String>` | `avatar_service` | `DbState`, owner、颜色、预期 hash | 是否成功写入 | 前端计算主色调后进行 CAS 回写 |
 | `handle_agent_chat_message(app_handle, agent_state, db_state, active_requests, payload, stream_channel) -> Result<Value, String>` | `agent_chat_application_service` | `AppHandle`, `AgentConfigState`, `DbState`, `ActiveRequests`, `AgentChatPayload`, `Channel<StreamEvent>` | `{ status: "sent", messageId }` | 用户发送消息 |
 
 ### 7.2 内部函数（不暴露给前端）
@@ -829,7 +832,7 @@ v1.1.3 之前，`avatar_service.rs` 包含 150+ 行后端颜色科学代码，�
 | 移动端专用提示词 | Mobile System Prompt | 仅在本机生效、不参与同步的系统提示词，用于移动端差异化行为 | `agent_types` |
 | 软删除 | Soft Delete | 通过设置 `deleted_at` 时间戳标记删除，而非物理删除记录 | `agent_service` |
 | 主色调 | Dominant Color | 从头像图片中提取的代表性颜色，用于 UI 主题色与 Glassmorphism 背景 | `avatar_service` |
-| AvatarResult | — | 头像查询结果结构体，含 MIME 类型、二进制数据、主色调、更新时间 | `avatar_service` |
+| AvatarResult | — | 头像查询结果结构体，含内容 hash、MIME、二进制、主色调、更新时间 | `avatar_service` |
 | HSV | Hue-Saturation-Value | 色相-饱和度-明度颜色模型，用于头像颜色过滤与增强 | `avatar_service` |
 | 512-bin 直方图 | 512-bin Histogram | 将 RGB 每通道量化为 3bit（8 级），共 512 个 bin 的颜色分布统计 | `avatar_service` |
 | Thinking Message ID | — | 流式响应开始前由后端生成并通过 SSE 事件推送的 Assistant 消息 ID，前端据此初始化占位气泡 | `agent_chat_application_service` |

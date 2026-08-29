@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { computed, ref, shallowRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { useAvatarStore } from "./avatar";
 import { useNotificationStore } from "./notification";
 import type {
   AgentConfigDto,
@@ -17,6 +18,7 @@ export const useAssistantStore = defineStore("assistant", () => {
   const loading = ref(false);
   const error = ref<string | null>(null);
   const notificationStore = useNotificationStore();
+  const avatarStore = useAvatarStore();
   let activeLoadingOperations = 0;
   let snapshotLoadId = 0;
   const beginLoading = () => {
@@ -225,7 +227,7 @@ export const useAssistantStore = defineStore("assistant", () => {
     }
   };
 
-  const saveAvatar = async (ownerType: 'agent' | 'group' | 'user', ownerId: string, mimeType: string, imageData: number[]) => {
+  const saveAvatar = async (ownerType: 'agent' | 'group' | 'user', ownerId: string, mimeType: string, imageData: Uint8Array) => {
     try {
       const hash = await invoke<string>("save_avatar_data", {
         ownerType,
@@ -233,6 +235,7 @@ export const useAssistantStore = defineStore("assistant", () => {
         mimeType,
         imageData,
       });
+      await avatarStore.refreshAvatar(ownerType, ownerId, hash);
       
       const label = ownerType === 'agent' ? 'Agent' : ownerType === 'group' ? 'Group' : '用户';
       notificationStore.addNotification({
@@ -245,6 +248,13 @@ export const useAssistantStore = defineStore("assistant", () => {
       return hash;
     } catch (e: any) {
       console.error(`[AssistantStore] Failed to save avatar for ${ownerType}:`, e);
+      const label = ownerType === 'agent' ? 'Agent' : ownerType === 'group' ? 'Group' : '用户';
+      notificationStore.addNotification({
+        type: "error",
+        title: `${label} 头像更新失败`,
+        message: e?.toString?.() || "请重新选择图片后重试",
+        toastOnly: true,
+      });
       throw e;
     }
   };

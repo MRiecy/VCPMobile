@@ -16,7 +16,7 @@ const SAVE_AVATAR_SQL: &str =
         dominant_color = excluded.dominant_color,
         updated_at = excluded.updated_at
      WHERE avatars.deleted_at IS NULL";
-const GET_AVATAR_SQL: &str = "SELECT mime_type, image_data, dominant_color, updated_at FROM avatars
+const GET_AVATAR_SQL: &str = "SELECT avatar_hash, mime_type, image_data, dominant_color, updated_at FROM avatars
      WHERE owner_type = ? AND owner_id = ? AND deleted_at IS NULL
        AND ((owner_type = 'user' AND owner_id = 'user_avatar')
          OR (owner_type = 'agent' AND EXISTS (
@@ -24,7 +24,7 @@ const GET_AVATAR_SQL: &str = "SELECT mime_type, image_data, dominant_color, upda
          OR (owner_type = 'group' AND EXISTS (
               SELECT 1 FROM groups WHERE owner_type = 'group' AND group_id = avatars.owner_id AND deleted_at IS NULL)))";
 const BATCH_AVATARS_SQL: &str =
-    "SELECT owner_type, owner_id, mime_type, image_data, dominant_color, updated_at
+    "SELECT owner_type, owner_id, avatar_hash, dominant_color, updated_at
      FROM avatars
      WHERE deleted_at IS NULL
        AND ((owner_type = 'user' AND owner_id = 'user_avatar')
@@ -33,7 +33,8 @@ const BATCH_AVATARS_SQL: &str =
          OR (owner_type = 'group' AND EXISTS (
               SELECT 1 FROM groups WHERE owner_type = 'group' AND group_id = avatars.owner_id AND deleted_at IS NULL)))";
 const STORE_AVATAR_COLOR_SQL: &str = "UPDATE avatars SET dominant_color = ?
-     WHERE owner_type = ? AND owner_id = ? AND deleted_at IS NULL";
+     WHERE owner_type = ? AND owner_id = ? AND avatar_hash = ?
+       AND dominant_color IS NULL AND deleted_at IS NULL";
 
 /// Tauri IPC Command: 保存头像二进制数据到数据库
 /// 前端裁剪后将 Blob/ArrayBuffer 传给 Rust
@@ -49,6 +50,12 @@ pub async fn save_avatar_data<R: Runtime>(
     let pool = &db_state.pool;
     if !is_valid_avatar_owner(&owner_type, &owner_id) {
         return Err(format!("Invalid avatar owner {owner_type}/{owner_id}"));
+    }
+    if image_data.is_empty() {
+        return Err("Avatar image must not be empty".to_string());
+    }
+    if !mime_type.starts_with("image/") {
+        return Err(format!("Invalid avatar MIME type {mime_type}"));
     }
     if image_data.len() > MAX_AVATAR_BYTES {
         return Err(format!(
@@ -125,6 +132,7 @@ pub async fn save_avatar_data<R: Runtime>(
 
 #[derive(serde::Serialize)]
 pub struct AvatarResult {
+    pub avatar_hash: String,
     pub mime_type: String,
     pub image_data: Vec<u8>,
     pub dominant_color: Option<String>,
@@ -179,6 +187,9 @@ pub async fn get_avatar<R: Runtime>(
     if let Some(row) = row_res {
         use sqlx::Row;
         Ok(Some(AvatarResult {
+            avatar_hash: row
+                .try_get("avatar_hash")
+                .map_err(|error| format!("Avatar hash decode failed: {error}"))?,
             mime_type: row
                 .try_get("mime_type")
                 .map_err(|error| format!("Avatar MIME decode failed: {error}"))?,
@@ -199,74 +210,40 @@ pub async fn get_avatar<R: Runtime>(
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct BatchAvatarItem {
+pub struct BatchAvatarMetadata {
     pub owner_type: String,
     pub owner_id: String,
-    pub mime_type: String,
-    pub image_data: Vec<u8>,
+    pub avatar_hash: String,
     pub dominant_color: Option<String>,
     pub updated_at: i64,
 }
 
-/// Tauri IPC Command: 批量获取所有头像二进制数据
+/// Tauri IPC Command: 批量获取头像元数据；二进制由可视区组件按需读取。
 #[tauri::command]
 pub async fn batch_get_avatars<R: Runtime>(
     app_handle: AppHandle<R>,
-) -> Result<Vec<BatchAvatarItem>, String> {
+) -> Result<Vec<BatchAvatarMetadata>, String> {
     let db_state = app_handle.state::<DbState>();
     let pool = &db_state.pool;
-
-    let size_row = sqlx::query(
-        "SELECT COALESCE(MAX(LENGTH(image_data)), 0) AS max_bytes,
-                COALESCE(SUM(LENGTH(image_data)), 0) AS total_bytes
-         FROM avatars
-         WHERE deleted_at IS NULL
-           AND ((owner_type = 'user' AND owner_id = 'user_avatar')
-             OR (owner_type = 'agent' AND EXISTS (
-                  SELECT 1 FROM agents WHERE owner_type = 'agent' AND agent_id = avatars.owner_id AND deleted_at IS NULL))
-             OR (owner_type = 'group' AND EXISTS (
-                  SELECT 1 FROM groups WHERE owner_type = 'group' AND group_id = avatars.owner_id AND deleted_at IS NULL)))",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|error| error.to_string())?;
-    use sqlx::Row;
-    let max_bytes: i64 = size_row
-        .try_get("max_bytes")
-        .map_err(|error| format!("Avatar max size decode failed: {error}"))?;
-    let total_bytes: i64 = size_row
-        .try_get("total_bytes")
-        .map_err(|error| format!("Avatar total size decode failed: {error}"))?;
-    let max_bytes = usize::try_from(max_bytes)
-        .map_err(|_| "Avatar batch contains an invalid image size".to_string())?;
-    let total_bytes = usize::try_from(total_bytes)
-        .map_err(|_| "Avatar batch contains an invalid total size".to_string())?;
-    if max_bytes > MAX_AVATAR_BYTES || total_bytes > MAX_AVATAR_BATCH_BYTES {
-        return Err(format!(
-            "Avatar batch exceeds the per-item ({MAX_AVATAR_BYTES}) or total ({MAX_AVATAR_BATCH_BYTES}) byte limit"
-        ));
-    }
 
     let rows = sqlx::query(BATCH_AVATARS_SQL)
         .fetch_all(pool)
         .await
         .map_err(|e| e.to_string())?;
 
+    use sqlx::Row;
     let mut results = Vec::with_capacity(rows.len());
     for row in rows {
-        results.push(BatchAvatarItem {
+        results.push(BatchAvatarMetadata {
             owner_type: row
                 .try_get("owner_type")
                 .map_err(|error| format!("Avatar owner type decode failed: {error}"))?,
             owner_id: row
                 .try_get("owner_id")
                 .map_err(|error| format!("Avatar owner id decode failed: {error}"))?,
-            mime_type: row
-                .try_get("mime_type")
-                .map_err(|error| format!("Avatar MIME decode failed: {error}"))?,
-            image_data: row
-                .try_get("image_data")
-                .map_err(|error| format!("Avatar image decode failed: {error}"))?,
+            avatar_hash: row
+                .try_get("avatar_hash")
+                .map_err(|error| format!("Avatar hash decode failed: {error}"))?,
             dominant_color: row
                 .try_get("dominant_color")
                 .map_err(|error| format!("Avatar color decode failed: {error}"))?,
@@ -286,7 +263,8 @@ pub async fn store_dominant_color(
     owner_type: String,
     owner_id: String,
     color: String,
-) -> Result<(), String> {
+    expected_avatar_hash: String,
+) -> Result<bool, String> {
     let pool = &db_state.pool;
     if !is_valid_avatar_owner(&owner_type, &owner_id) {
         return Err(format!("Invalid avatar owner {owner_type}/{owner_id}"));
@@ -296,13 +274,18 @@ pub async fn store_dominant_color(
         .bind(&color)
         .bind(&owner_type)
         .bind(&owner_id)
+        .bind(&expected_avatar_hash)
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
-    if updated.rows_affected() != 1 {
-        return Err(format!(
-            "Live avatar {owner_type}/{owner_id} does not exist"
-        ));
+    if updated.rows_affected() == 0 {
+        log::debug!(
+            "[AvatarService] Ignored stale dominant_color for {} {} at hash {}",
+            owner_type,
+            owner_id,
+            expected_avatar_hash
+        );
+        return Ok(false);
     }
 
     log::info!(
@@ -312,7 +295,7 @@ pub async fn store_dominant_color(
         color
     );
 
-    Ok(())
+    Ok(true)
 }
 
 /// 从字节数组中提取主色调 (公开供协议层兜底使用)
@@ -389,9 +372,30 @@ mod tests {
             .bind("#ffffff")
             .bind("agent")
             .bind("deleted")
+            .bind("old")
             .execute(&pool)
             .await
             .expect("guarded color update");
         assert_eq!(color.rows_affected(), 0);
+
+        let stale_color = sqlx::query(STORE_AVATAR_COLOR_SQL)
+            .bind("#abcdef")
+            .bind("user")
+            .bind("user_avatar")
+            .bind("stale")
+            .execute(&pool)
+            .await
+            .expect("stale color update");
+        assert_eq!(stale_color.rows_affected(), 0);
+
+        let current_color = sqlx::query(STORE_AVATAR_COLOR_SQL)
+            .bind("#abcdef")
+            .bind("user")
+            .bind("user_avatar")
+            .bind("user")
+            .execute(&pool)
+            .await
+            .expect("current color update");
+        assert_eq!(current_color.rows_affected(), 1);
     }
 }

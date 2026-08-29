@@ -92,14 +92,21 @@ export interface PickedFile {
   thumbnailPath?: string;
 }
 
-export function pickFile(): Promise<PickedFile> {
-  return invoke<PickedFile>('plugin:vcp-mobile|pick_file');
+export type PickFileMode = 'file' | 'camera' | 'gallery' | 'avatar';
+
+export function pickFile(mode?: PickFileMode): Promise<PickedFile> {
+  return invoke<PickedFile>('plugin:vcp-mobile|pick_file', mode ? { mode } : undefined);
+}
+
+export function deleteTempFile(filePath: string): Promise<void> {
+  return invoke('plugin:vcp-mobile|delete_temp_file', { filePath });
 }
 ```
 
 | 函数 | Tauri 命令 | 参数 | 返回值 | 对应 Rust 函数 |
 |------|-----------|------|--------|---------------|
-| `pickFile()` | `plugin:vcp-mobile\|pick_file` | 无 | `Promise<PickedFile>` | `system::pick_file` |
+| `pickFile(mode?)` | `plugin:vcp-mobile\|pick_file` | `{ mode? }` | `Promise<PickedFile>` | `system::pick_file` |
+| `deleteTempFile(path)` | `plugin:vcp-mobile\|delete_temp_file` | `{ filePath }` | `Promise<void>` | `system::delete_temp_file` |
 
 #### 返回值说明
 
@@ -109,6 +116,8 @@ export function pickFile(): Promise<PickedFile> {
 - **`size`**：文件大小（字节）。
 - **`hash`**：文件内容的 SHA-256 哈希值，用于去重与完整性校验。
 - **`thumbnailPath`**（可选）：当选择图片/视频时，系统生成的缩略图路径。
+
+`mode: "avatar"` 不发送附件 staging 事件：Native 将原图采样为最长边 1120px、EXIF 归一化的 WebP，删除原图 staging 后只返回受控工作副本；返回的 `size` 与 `hash` 均对应该 WebP。调用方在取消、确认或卸载时用 `deleteTempFile()` 释放。
 
 > **平台限制**：该接口仅在 Android 物理端可用；桌面端调用将抛出错误。
 
