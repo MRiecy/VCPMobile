@@ -75,6 +75,7 @@ describe("topic list concurrency guards", () => {
       topic("newer-created", "Newer created", { createdAt: 300, updatedAt: 400 }),
       topic("middle", "Middle", { createdAt: 200, updatedAt: 800 }),
     ];
+    store.setSortMode("created");
     store.toggleTopicPinned("agent-a", "agent", "older-active");
     store.toggleTopicPinned("agent-a", "agent", "newer-created");
 
@@ -95,6 +96,7 @@ describe("topic list concurrency guards", () => {
   it("uses deterministic ties and isolates pinned identities by owner", () => {
     const store = useTopicStore();
     store.topics = [topic("tie-a"), topic("tie-b")];
+    store.setSortMode("created");
     expect(store.topicSections.regular.map((item) => item.id)).toEqual([
       "tie-b",
       "tie-a",
@@ -109,18 +111,21 @@ describe("topic list concurrency guards", () => {
   it("lets an authoritative message bubble replace activity with an older live maximum", async () => {
     mockInvoke("get_topics_streamed", () => Promise.resolve());
     const store = useTopicStore();
+    store.setSortMode("updated");
     const loading = store.loadTopicList("agent-a", "agent");
     channelInstances[channelInstances.length - 1]?.emit([
       topic("topic-a", "Topic A", { updatedAt: 900 }),
+      topic("topic-b", "Topic B", { updatedAt: 500 }),
     ]);
     await loading;
 
     store.setTopicUpdatedAt("agent-a", "agent", "topic-a", 400);
-    expect(store.topics[0].updatedAt).toBe(400);
+    expect(store.topics.map((item) => item.id)).toEqual(["topic-b", "topic-a"]);
+    expect(store.topics.find((item) => item.id === "topic-a")?.updatedAt).toBe(400);
 
     mockInvoke("set_topic_unread", () => null);
     await store.setTopicUnread("agent-a", "agent", "topic-a", false);
-    expect(store.topics[0].updatedAt).toBe(400);
+    expect(store.topics.map((item) => item.id)).toEqual(["topic-b", "topic-a"]);
   });
 
   it("persists the global sort mode and local pinned topic keys", async () => {
@@ -223,6 +228,64 @@ describe("topic list concurrency guards", () => {
     ).toHaveLength(1);
     pending.resolve();
     await Promise.all([first, second]);
+  });
+
+  it("requests the selected backend order and preserves its streamed prefix", async () => {
+    const pending = deferred<void>();
+    mockInvoke("get_topics_streamed", () => pending.promise);
+    const store = useTopicStore();
+    store.setSortMode("updated");
+
+    const loading = store.loadTopicList("agent-a", "agent");
+    const channel = channelInstances[channelInstances.length - 1];
+    channel?.emit([
+      topic("most-active", "Most active", { createdAt: 100, updatedAt: 900 }),
+      topic("middle-active", "Middle active", { createdAt: 300, updatedAt: 800 }),
+    ]);
+    expect(store.topics.map((item) => item.id)).toEqual([
+      "most-active",
+      "middle-active",
+    ]);
+
+    channel?.emit([
+      topic("least-active", "Least active", { createdAt: 500, updatedAt: 400 }),
+    ]);
+    expect(store.topics.map((item) => item.id)).toEqual([
+      "most-active",
+      "middle-active",
+      "least-active",
+    ]);
+    expect(invokeMock).toHaveBeenCalledWith(
+      "get_topics_streamed",
+      expect.objectContaining({ sortMode: "updated" }),
+    );
+
+    pending.resolve();
+    await loading;
+  });
+
+  it("restarts an in-flight list when its backend sort mode changes", async () => {
+    const requests = [deferred<void>(), deferred<void>()];
+    let callIndex = 0;
+    mockInvoke("get_topics_streamed", () => requests[callIndex++].promise);
+    const store = useTopicStore();
+
+    const createdLoad = store.loadTopicList("agent-a", "agent");
+    store.setSortMode("updated");
+    await expect.poll(() => callIndex).toBe(2);
+
+    channelInstances[0]?.emit([topic("stale-created")]);
+    channelInstances[1]?.emit([
+      topic("fresh-updated", "Fresh updated", { updatedAt: 900 }),
+    ]);
+    expect(store.topics.map((item) => item.id)).toEqual(["fresh-updated"]);
+    expect(invokeMock.mock.calls
+      .filter(([command]) => command === "get_topics_streamed")
+      .map(([, args]) => args?.sortMode))
+      .toEqual(["created", "updated"]);
+
+    requests.forEach(({ resolve }) => resolve());
+    await Promise.all([createdLoad, requests[1].promise]);
   });
 
   it("watches semantic owner identity instead of owner object identity", async () => {

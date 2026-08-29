@@ -145,6 +145,7 @@ const handleImgError = () => {
     <img 
       v-if="imgExists && avatarUrl" 
       :src="avatarUrl" 
+      draggable="false"
       @error="handleImgError" 
       class="relative w-full h-full object-cover transition-opacity duration-300"
     />

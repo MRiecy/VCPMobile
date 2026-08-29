@@ -194,6 +194,7 @@ describe('Android mobile UI compatibility contracts', () => {
     expect(avatarStoreSource).toContain('preloadMetadata');
     expect(avatarStoreSource).not.toContain('item.imageData');
     expect(vcpAvatarSource).toContain('v-intersection-observer');
+    expect(vcpAvatarSource).toContain('draggable="false"');
     expect(viteConfig).toContain('exclude: ["tauri-plugin-vcp-mobile"]');
     for (const source of [agentSettingsSource, groupSettingsSource, userProfileSource]) {
       expect(source).not.toContain('avatarVersion');

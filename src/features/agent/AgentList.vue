@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onUnmounted, watch } from "vue";
 import Sortable from "sortablejs";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
@@ -61,78 +61,102 @@ const triggerDragHaptic = () => {
   }
 };
 
-const initSortable = () => {
-  if (groupListRef.value) {
-    Sortable.create(groupListRef.value, {
-      animation: 150,
-      handle: ".drag-handle",
-      delay: 200,
-      delayOnTouchOnly: true,
-      touchStartThreshold: 3,
-      direction: "vertical",
-      forceFallback: true,
-      fallbackOnBody: true,
-      ghostClass: "opacity-50",
-      onChoose: () => {
-        isSorting.value = true;
-        isDragging.value = false;
-        activeSwipeId.value = null;
-        currentSwipeX.value = 0;
-      },
-      onUnchoose: () => {
-        isSorting.value = false;
-      },
-      onStart: () => {
-        isSorting.value = true;
-        triggerDragHaptic();
-      },
-      onEnd: (evt) => {
-        isSorting.value = false;
-        const newOrder = orderedGroups.value.map((g) => g.id);
-        const [movedItem] = newOrder.splice(evt.oldIndex!, 1);
-        newOrder.splice(evt.newIndex!, 0, movedItem);
-        settingsStore.updateSettings({ groupOrder: newOrder });
-      },
-    });
-  }
+let groupSortable: Sortable | null = null;
+let agentSortable: Sortable | null = null;
 
-  if (agentListRef.value) {
-    Sortable.create(agentListRef.value, {
-      animation: 150,
-      handle: ".drag-handle",
-      delay: 200, // Important for mobile: delay so swipe isn't blocked by sort
-      delayOnTouchOnly: true,
-      touchStartThreshold: 3,
-      direction: "vertical",
-      forceFallback: true,
-      fallbackOnBody: true,
-      ghostClass: "opacity-50",
-      onChoose: () => {
-        isSorting.value = true;
-        isDragging.value = false;
-        activeSwipeId.value = null;
-        currentSwipeX.value = 0;
-      },
-      onUnchoose: () => {
-        isSorting.value = false;
-      },
-      onStart: () => {
-        isSorting.value = true;
-        triggerDragHaptic();
-      },
-      onEnd: (evt) => {
-        isSorting.value = false;
-        const newOrder = orderedAgents.value.map((a) => a.id);
-        const [movedItem] = newOrder.splice(evt.oldIndex!, 1);
-        newOrder.splice(evt.newIndex!, 0, movedItem);
-        settingsStore.updateSettings({ agentOrder: newOrder });
-      },
+const createSortable = (
+  element: HTMLElement,
+  ownerType: "agent" | "group",
+) => Sortable.create(element, {
+  animation: 150,
+  handle: ".drag-handle",
+  delay: 200,
+  delayOnTouchOnly: true,
+  touchStartThreshold: 3,
+  direction: "vertical",
+  forceFallback: true,
+  fallbackOnBody: true,
+  disabled: Boolean(props.searchQuery.trim()),
+  ghostClass: "opacity-50",
+  onChoose: () => {
+    isSorting.value = true;
+    isDragging.value = false;
+    activeSwipeId.value = null;
+    currentSwipeX.value = 0;
+  },
+  onUnchoose: () => {
+    isSorting.value = false;
+  },
+  onStart: () => {
+    isSorting.value = true;
+    triggerDragHaptic();
+  },
+  onEnd: (evt) => {
+    isSorting.value = false;
+    if (
+      evt.oldIndex === undefined ||
+      evt.newIndex === undefined ||
+      evt.oldIndex === evt.newIndex
+    ) return;
+
+    const newOrder = (ownerType === "group"
+      ? orderedGroups.value
+      : orderedAgents.value
+    ).map((item) => item.id);
+    const [movedItem] = newOrder.splice(evt.oldIndex, 1);
+    if (!movedItem) return;
+    newOrder.splice(evt.newIndex, 0, movedItem);
+    void settingsStore.updateSettings(
+      ownerType === "group"
+        ? { groupOrder: newOrder }
+        : { agentOrder: newOrder },
+    ).catch((error) => {
+      console.error(`[AgentList] Failed to persist ${ownerType} order:`, error);
     });
-  }
+  },
+});
+
+const destroyGroupSortable = () => {
+  groupSortable?.destroy();
+  groupSortable = null;
 };
 
-onMounted(() => {
-  initSortable();
+const destroyAgentSortable = () => {
+  agentSortable?.destroy();
+  agentSortable = null;
+};
+
+watch(
+  groupListRef,
+  (element) => {
+    destroyGroupSortable();
+    if (element) groupSortable = createSortable(element, "group");
+  },
+  { flush: "post" },
+);
+
+watch(
+  agentListRef,
+  (element) => {
+    destroyAgentSortable();
+    if (element) agentSortable = createSortable(element, "agent");
+  },
+  { flush: "post" },
+);
+
+watch(
+  () => props.searchQuery.trim(),
+  (query) => {
+    const disabled = Boolean(query);
+    groupSortable?.option("disabled", disabled);
+    agentSortable?.option("disabled", disabled);
+  },
+);
+
+onUnmounted(() => {
+  destroyGroupSortable();
+  destroyAgentSortable();
+  isSorting.value = false;
 });
 
 // --- Swipe Action Logic (Right Swipe) ---

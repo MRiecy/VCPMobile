@@ -408,8 +408,7 @@ const channel = new Channel<Topic[]>();
 topics.value = [];
 
 channel.onmessage = (chunk) => {
-  // 竞态检查：若用户已切换其他 Agent，丢弃旧结果
-  if (currentAgentId.value !== ownerId) return;
+  if (generation !== loadGeneration || !isCurrentOwner(ownerId, owner_type)) return;
 
   const mappedChunk = chunk.map((t) => ({
     ...t,
@@ -418,14 +417,19 @@ channel.onmessage = (chunk) => {
     name: t.name || t.title || t.id,
   }));
 
-  topics.value.push(...mappedChunk);
-  topics.value = [...topics.value]; // 强制触发虚拟列表重绘
+  for (const topic of mappedChunk) requestTopics.set(topic.id, topic);
+  topics.value = [...requestTopics.values()]; // 保持 SQLite 已确定的基础顺序
 };
 
-await invoke("get_topics_streamed", { ownerId, ownerType: owner_type, onChunk: channel });
+await invoke("get_topics_streamed", {
+  ownerId,
+  ownerType: owner_type,
+  sortMode: requestedSortMode,
+  onChunk: channel,
+});
 ```
 
-Rust 后端通过 Tauri `Channel` 分批次推送话题块。每次加载拥有不可变 `ownerKey = ownerType:ownerId` 与递增 `loadGeneration`，chunk 先按 ID 合并到本请求的 Map，只有 owner 与 generation 同时匹配才替换 `topics.value`。这同时覆盖不同 owner、同 owner 重入以及 A→B→A 的迟到回调。
+Rust 后端先按请求的 `sortMode` 完成全局排序，再通过 Tauri `Channel` 分批次推送话题块。每次加载拥有不可变 `ownerKey = ownerType:ownerId:sortMode` 与递增 `loadGeneration`，chunk 先按 ID 合并到本请求的 Map，只有 owner 与 generation 同时匹配才替换 `topics.value`。这同时覆盖不同 owner、不同排序模式、同 owner 重入以及 A→B→A 的迟到回调。
 
 ### 4.2 与 Agent 的从属关系
 
@@ -458,7 +462,7 @@ if (sessionStore.currentTopicId === topicId) {
 
 ### 4.3 话题排序与筛选
 
-**排序**：话题默认按后端返回顺序排列（通常为 `updated_at DESC`），前端不做二次排序。
+**排序**：后端严格按当前模式返回：创建模式为 `createdAt DESC → id DESC`，更新模式为 `updatedAt DESC → createdAt DESC → id DESC`。前端只在用户切换模式或某条 Topic 收到权威活动时间时重排一次状态数组，不在渲染计算中反复排序。
 
 **搜索筛选**：`filteredTopics` 计算属性支持按标题和创建日期搜索：
 
@@ -652,8 +656,8 @@ Rust 事务写入 SQLite
 | `get_avatar` | `avatarStore.getAvatarUrl` | `{ ownerType, ownerId }` | `AvatarResult \| null` | 获取头像数据 |
 | `store_dominant_color` | `avatarStore` (前端计算后) | `{ ownerType, ownerId, color, expectedAvatarHash }` | `boolean` | hash 仍匹配时回写主色调 |
 | `get_unread_counts` | `assistantStore.refreshUnreadCounts` | — | `Record<string, number>` | 批量获取未读计数 |
-| `get_topics_streamed` | `topicStore.loadTopicList` | `{ ownerId, ownerType, onChunk }` | — | 流式获取话题列表 |
-| `get_topics` | `chatSessionStore.selectItem` | `{ ownerId, ownerType }` | `any[]` | 获取话题列表（非流式 fallback） |
+| `get_topics_streamed` | `topicStore.loadTopicList` | `{ ownerId, ownerType, sortMode, onChunk }` | — | 按指定模式流式获取有序话题列表 |
+| `get_topics` | —（保留命令） | `{ ownerId, ownerType, sortMode? }` | `TopicListItemDto[]` | 一次性获取有序话题列表 |
 | `create_topic` | `topicStore.createTopic` | `{ ownerId, ownerType, name }` | `Topic` | 创建话题 |
 | `delete_topic` | `topicStore.deleteTopic` | `{ ownerId, ownerType, topicId }` | — | 删除话题 |
 | `update_topic_title` | `topicStore.updateTopicTitle` | `{ ownerId, ownerType, topicId, title }` | — | 更新话题标题 |

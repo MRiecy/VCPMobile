@@ -12,8 +12,8 @@ use sqlx::{sqlite::SqliteRow, Row};
 use std::collections::HashMap;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
 
-const TOPIC_LIST_QUERY: &str =
-    "SELECT t.topic_id, t.title, t.created_at, t.locked, t.unread, t.unread_count, t.msg_count,
+const TOPIC_LIST_QUERY: &str = "WITH topic_list AS (
+         SELECT t.topic_id, t.title, t.created_at, t.locked, t.unread, t.unread_count, t.msg_count,
             CASE
                 WHEN MAX(m.updated_at) IS NULL
                     THEN COALESCE(NULLIF(t.updated_at, 0), t.created_at)
@@ -21,13 +21,33 @@ const TOPIC_LIST_QUERY: &str =
                     THEN COALESCE(NULLIF(t.updated_at, 0), t.created_at)
                 ELSE MAX(m.updated_at)
             END AS list_updated_at
-     FROM topics t
-     LEFT JOIN messages m
-       ON m.owner_type = t.owner_type AND m.owner_id = t.owner_id
-      AND m.topic_id = t.topic_id AND m.deleted_at IS NULL
-     WHERE t.owner_id = ? AND t.owner_type = ? AND t.deleted_at IS NULL
-     GROUP BY t.owner_type, t.owner_id, t.topic_id
-     ORDER BY t.created_at DESC, t.topic_id DESC";
+         FROM topics t
+         LEFT JOIN messages m
+           ON m.owner_type = t.owner_type AND m.owner_id = t.owner_id
+          AND m.topic_id = t.topic_id AND m.deleted_at IS NULL
+         WHERE t.owner_id = ? AND t.owner_type = ? AND t.deleted_at IS NULL
+         GROUP BY t.owner_type, t.owner_id, t.topic_id
+     )
+     SELECT * FROM topic_list
+     ORDER BY CASE ? WHEN 1 THEN list_updated_at ELSE created_at END DESC,
+              created_at DESC, topic_id DESC";
+
+#[derive(Debug, serde::Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TopicSortMode {
+    #[default]
+    Created,
+    Updated,
+}
+
+impl TopicSortMode {
+    fn query_code(self) -> i32 {
+        match self {
+            Self::Created => 0,
+            Self::Updated => 1,
+        }
+    }
+}
 
 #[derive(Debug, serde::Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -113,11 +133,13 @@ pub async fn get_topics(
     db_state: State<'_, DbState>,
     owner_id: String,
     owner_type: String,
+    sort_mode: Option<TopicSortMode>,
 ) -> Result<Vec<TopicListItemDto>, String> {
     let pool = &db_state.pool;
     sqlx::query(TOPIC_LIST_QUERY)
         .bind(&owner_id)
         .bind(&owner_type)
+        .bind(sort_mode.unwrap_or_default().query_code())
         .fetch_all(pool)
         .await
         .map_err(|e| e.to_string())
@@ -133,12 +155,14 @@ pub async fn get_topics_streamed(
     db_state: State<'_, DbState>,
     owner_id: String,
     owner_type: String,
+    sort_mode: Option<TopicSortMode>,
     on_chunk: Channel<Vec<TopicListItemDto>>,
 ) -> Result<(), String> {
     let pool = &db_state.pool;
     let mut rows = sqlx::query(TOPIC_LIST_QUERY)
         .bind(&owner_id)
         .bind(&owner_type)
+        .bind(sort_mode.unwrap_or_default().query_code())
         .fetch(pool);
 
     use futures_util::StreamExt;
@@ -1099,6 +1123,7 @@ mod tests {
         let rows = sqlx::query(TOPIC_LIST_QUERY)
             .bind("agent")
             .bind("agent")
+            .bind(TopicSortMode::Created.query_code())
             .fetch_all(&pool)
             .await
             .expect("load topic list");
@@ -1127,6 +1152,31 @@ mod tests {
         assert_eq!(serialized["id"], "message-newer");
         assert_eq!(serialized["updatedAt"], 700);
 
+        let rows = sqlx::query(TOPIC_LIST_QUERY)
+            .bind("agent")
+            .bind("agent")
+            .bind(TopicSortMode::Updated.query_code())
+            .fetch_all(&pool)
+            .await
+            .expect("load topic list by activity");
+        let updated_items: Vec<TopicListItemDto> = rows
+            .iter()
+            .map(|row| topic_list_item_from_row(row, "agent", "agent"))
+            .collect();
+        assert_eq!(
+            updated_items
+                .iter()
+                .map(|item| item.topic.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "message-newer",
+                "created-fallback",
+                "metadata-newer",
+                "tie-b",
+                "tie-a",
+            ]
+        );
+
         sqlx::query(
             "UPDATE messages SET deleted_at = 1000
              WHERE owner_type = 'agent' AND owner_id = 'agent'
@@ -1139,6 +1189,7 @@ mod tests {
         let rows = sqlx::query(TOPIC_LIST_QUERY)
             .bind("agent")
             .bind("agent")
+            .bind(TopicSortMode::Updated.query_code())
             .fetch_all(&pool)
             .await
             .expect("reload topic list after tombstone");

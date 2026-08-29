@@ -75,8 +75,11 @@ export const useTopicStore = defineStore("topic", () => {
   let activeLoadPromise: Promise<void> | null = null;
   let unreadMutationTail: Promise<void> = Promise.resolve();
 
-  const ownerKey = (ownerId: string, ownerType: string) =>
-    `${ownerType}:${ownerId}`;
+  const ownerKey = (
+    ownerId: string,
+    ownerType: string,
+    topicSortMode: TopicSortMode,
+  ) => `${ownerType}:${ownerId}:${topicSortMode}`;
   const isCurrentOwner = (ownerId: string, ownerType: string) =>
     currentAgentId.value === ownerId && currentOwnerType.value === ownerType;
   const effectiveSortMode = computed<TopicSortMode>(() =>
@@ -156,8 +159,12 @@ export const useTopicStore = defineStore("topic", () => {
     return left > right ? -1 : 1;
   };
 
-  const compareTopics = (left: Topic, right: Topic) => {
-    if (effectiveSortMode.value === "updated") {
+  const compareTopics = (
+    left: Topic,
+    right: Topic,
+    topicSortMode: TopicSortMode = effectiveSortMode.value,
+  ) => {
+    if (topicSortMode === "updated") {
       const updatedComparison = compareDescending(
         left.updatedAt,
         right.updatedAt,
@@ -171,12 +178,22 @@ export const useTopicStore = defineStore("topic", () => {
     return left.id > right.id ? -1 : 1;
   };
 
+  const orderTopics = (
+    items: Topic[],
+    topicSortMode: TopicSortMode = effectiveSortMode.value,
+  ) => [...items].sort(
+    (left, right) => compareTopics(left, right, topicSortMode),
+  );
+
+  const reorderTopics = () => {
+    topics.value = orderTopics(topics.value);
+  };
+
   const topicSections = computed(() => {
     const pinned: Topic[] = [];
     const regular: Topic[] = [];
-    const orderedTopics = [...filteredTopics.value].sort(compareTopics);
 
-    for (const topic of orderedTopics) {
+    for (const topic of filteredTopics.value) {
       const target = isTopicPinned(topic.ownerId, topic.ownerType, topic.id)
         ? pinned
         : regular;
@@ -185,10 +202,6 @@ export const useTopicStore = defineStore("topic", () => {
 
     return { pinned, regular };
   });
-
-  const setSortMode = (mode: TopicSortMode) => {
-    sortMode.value = normalizeSortMode(mode);
-  };
 
   const toggleTopicPinned = (
     ownerId: string,
@@ -251,7 +264,7 @@ export const useTopicStore = defineStore("topic", () => {
       ...topics.value[index],
       updatedAt: nextUpdatedAt,
     };
-    topics.value = [...topics.value];
+    reorderTopics();
   };
 
   // --- 核心 Action (Actions) ---
@@ -267,7 +280,8 @@ export const useTopicStore = defineStore("topic", () => {
   ): Promise<void> => {
     if (!ownerId) return Promise.resolve();
 
-    const key = ownerKey(ownerId, owner_type);
+    const requestedSortMode = effectiveSortMode.value;
+    const key = ownerKey(ownerId, owner_type, requestedSortMode);
     if (activeLoadKey === key && activeLoadPromise) {
       return activeLoadPromise;
     }
@@ -310,6 +324,7 @@ export const useTopicStore = defineStore("topic", () => {
       await invoke("get_topics_streamed", { 
         ownerId, 
         ownerType: owner_type,
+        sortMode: requestedSortMode,
         onChunk: channel 
       });
 
@@ -352,6 +367,25 @@ export const useTopicStore = defineStore("topic", () => {
     return request;
   };
 
+  const setSortMode = (mode: TopicSortMode) => {
+    const normalizedMode = normalizeSortMode(mode);
+    const changed = normalizedMode !== effectiveSortMode.value;
+    sortMode.value = normalizedMode;
+    reorderTopics();
+
+    if (
+      changed &&
+      loading.value &&
+      currentAgentId.value &&
+      (currentOwnerType.value === "agent" || currentOwnerType.value === "group")
+    ) {
+      void loadTopicList(
+        currentAgentId.value,
+        currentOwnerType.value,
+      ).catch(() => {});
+    }
+  };
+
   /**
    * 创建新话题
    */
@@ -383,10 +417,10 @@ export const useTopicStore = defineStore("topic", () => {
       };
 
       if (isCurrentOwner(ownerId, ownerType)) {
-        topics.value = [
+        topics.value = orderTopics([
           topicWithState,
           ...topics.value.filter((topic) => topic.id !== topicWithState.id),
-        ];
+        ]);
       }
       notificationStore.addNotification({
         type: "success",
@@ -441,7 +475,9 @@ export const useTopicStore = defineStore("topic", () => {
 
       if (isCurrentOwner(ownerId, ownerType)) {
         const remaining = topics.value.filter((t) => t.id !== topicId);
-        topics.value = replacement ? [replacement, ...remaining] : remaining;
+        topics.value = orderTopics(
+          replacement ? [replacement, ...remaining] : remaining,
+        );
       }
       if (ownerType === "agent") {
         await enqueueUnreadMutation(() => assistantStore.refreshUnreadCounts());
@@ -504,8 +540,7 @@ export const useTopicStore = defineStore("topic", () => {
           name: newTitle,
           updatedAt,
         };
-        // 强制触发虚拟列表重绘
-        topics.value = [...topics.value];
+        reorderTopics();
       }
       return true;
     } catch (e) {
@@ -547,8 +582,7 @@ export const useTopicStore = defineStore("topic", () => {
         locked: targetLockState,
         updatedAt: updatedAt ?? topics.value[currentIndex].updatedAt,
       };
-      // 强制触发虚拟列表重绘
-      topics.value = [...topics.value];
+      reorderTopics();
     } catch (e) {
       console.error("[TopicStore] Failed to toggle topic lock:", e);
       throw e;
@@ -585,7 +619,7 @@ export const useTopicStore = defineStore("topic", () => {
               unreadCount: unread ? topics.value[index].unreadCount : 0,
               updatedAt: updatedAt ?? topics.value[index].updatedAt,
             };
-            topics.value = [...topics.value];
+            reorderTopics();
           }
         }
         await assistantStore.refreshUnreadCounts();
@@ -642,7 +676,7 @@ export const useTopicStore = defineStore("topic", () => {
               unread: true,
               updatedAt: result.updatedAt ?? topics.value[index].updatedAt,
             };
-            topics.value = [...topics.value];
+            reorderTopics();
           }
         }
         await assistantStore.refreshUnreadCounts();

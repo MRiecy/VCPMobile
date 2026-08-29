@@ -390,7 +390,7 @@ const msgToUse = activeMsg || chunk.message;
 | `filteredTopics` | `ComputedRef` | 按标题和创建日期过滤后的列表 |
 | `currentAgentId` | `string \| null` | 当前正在加载话题的 item ID（用于竞态丢弃） |
 
-**流式加载**：通过 `get_topics_streamed` + `Channel<Topic[]>` 实现话题列表的增量加载，每收到一个 chunk 即 `push` 到数组并强制触发重绘（`topics.value = [...topics.value]`），配合虚拟列表实现平滑的渐进式渲染。
+**流式加载**：通过 `get_topics_streamed` + `Channel<Topic[]>` 实现话题列表的增量加载。当前 `sortMode` 随 IPC 传给 Rust，SQLite 先确定全局顺序；前端按 Chunk 顺序合并并替换数组，不再在每次渲染时全量排序。
 
 **删除当前话题后的导航**：清空 `sessionStore.currentTopicId` 与陈旧记忆，不自动进入其他话题；由 `chatHistoryStore` 的 watch 同步清空历史。
 
@@ -1027,14 +1027,19 @@ await completePromise; // 等待全部 chunk 接收完毕
 // src/core/stores/topicListManager.ts 第 95–124 行
 const channel = new Channel<Topic[]>();
 channel.onmessage = (chunk) => {
-  if (currentAgentId.value !== ownerId) return; // 竞态丢弃
-  topics.value.push(...chunk.map(...));
-  topics.value = [...topics.value]; // 强制触发虚拟列表重绘
+  if (generation !== loadGeneration || !isCurrentOwner(ownerId, ownerType)) return;
+  for (const topic of chunk.map(...)) requestTopics.set(topic.id, topic);
+  topics.value = [...requestTopics.values()]; // 后端有序分片，按到达顺序追加
 };
-await invoke('get_topics_streamed', { ownerId, ownerType, onChunk: channel });
+await invoke('get_topics_streamed', {
+  ownerId,
+  ownerType,
+  sortMode: requestedSortMode,
+  onChunk: channel,
+});
 ```
 
-与 `chatHistoryStore` 不同，`topicListManager` 的 Channel 接收的是 `Topic[]` 数组而非单个对象，这意味着 Rust 后端可以按批次（如每 20 个话题为一组）推送，前端每批只更新一次 DOM。
+与 `chatHistoryStore` 不同，`topicListManager` 的 Channel 接收的是 `Topic[]` 数组而非单个对象。Rust 当前每 15 条推送一个有序分片，前端每批只更新一次 DOM。
 
 ---
 
