@@ -8,9 +8,6 @@ use sqlx::SqlitePool;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 const SQLITE_BIND_CHUNK: usize = 400;
-const MAX_PHASE3_MESSAGES_PER_TOPIC: usize = 10_000;
-const MAX_PHASE3_MESSAGES: usize = 100_000;
-const MAX_PHASE3_STATE_BYTES: usize = 64 * 1024 * 1024;
 
 pub struct Phase3Message;
 
@@ -24,44 +21,6 @@ pub struct TargetedTopicHashState {
 pub struct TopicLocalState {
     pub content_hash: String,
     pub messages: BTreeMap<String, MessageVersionState>,
-}
-
-#[derive(Default)]
-struct Phase3StateBudget {
-    messages: usize,
-    bytes: usize,
-}
-
-impl Phase3StateBudget {
-    fn observe_message(
-        &mut self,
-        topic_id: &str,
-        topic_messages: usize,
-        raw_bytes: usize,
-    ) -> Result<(), String> {
-        if topic_messages > MAX_PHASE3_MESSAGES_PER_TOPIC {
-            return Err(format!(
-                "Phase 3 topic {topic_id} exceeds the {MAX_PHASE3_MESSAGES_PER_TOPIC}-message limit"
-            ));
-        }
-        self.messages = self
-            .messages
-            .checked_add(1)
-            .ok_or_else(|| "Phase 3 message count overflow".to_string())?;
-        if self.messages > MAX_PHASE3_MESSAGES {
-            return Err(format!(
-                "Phase 3 state exceeds the {MAX_PHASE3_MESSAGES}-message limit"
-            ));
-        }
-        self.bytes = self
-            .bytes
-            .checked_add(raw_bytes)
-            .ok_or_else(|| "Phase 3 state size overflow".to_string())?;
-        if self.bytes > MAX_PHASE3_STATE_BYTES {
-            return Err("Phase 3 state exceeds the 64 MiB payload budget".to_string());
-        }
-        Ok(())
-    }
 }
 
 impl Phase3Message {
@@ -223,9 +182,7 @@ impl Phase3Message {
             ));
         }
 
-        // Stream the actual state once and enforce budgets before retaining each decoded row.
-        let mut budget = Phase3StateBudget::default();
-        // 批量查询所有消息 hash (包含已软删除的消息)
+        // Stream the actual state once (包含已软删除的消息).
         for topic_chunk in topic_keys.chunks(SQLITE_BIND_CHUNK / 3) {
             let placeholders = topic_chunk
                 .iter()
@@ -294,12 +251,6 @@ impl Phase3Message {
                         "Message update time is invalid for {topic_id}/{msg_id}"
                     ));
                 }
-                let topic_messages = state.messages.len().saturating_add(1);
-                let state_bytes = msg_id.len().saturating_add(match &version {
-                    MessageVersionState::Live(live) => live.message_hash.len() + 48,
-                    MessageVersionState::Deleted(_) => 32,
-                });
-                budget.observe_message(&topic_id, topic_messages, state_bytes)?;
                 if state.messages.insert(msg_id.clone(), version).is_some() {
                     return Err(format!(
                         "Message hash query returned duplicate message {msg_id} for {topic_id}"
@@ -317,24 +268,11 @@ impl Phase3Message {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MessageDeletedState, MessageLiveState, MessageVersionState, Phase3Message,
-        Phase3StateBudget, MAX_PHASE3_MESSAGES_PER_TOPIC,
-    };
+    use super::{MessageDeletedState, MessageLiveState, MessageVersionState, Phase3Message};
     use crate::vcp_modules::topic_types::TopicKey;
 
     fn topic(topic_id: &str) -> TopicKey {
         TopicKey::new("agent", "agent-a", topic_id)
-    }
-
-    #[test]
-    fn phase3_state_budget_rejects_an_oversized_single_topic() {
-        let mut budget = Phase3StateBudget::default();
-        let error = budget
-            .observe_message("topic", MAX_PHASE3_MESSAGES_PER_TOPIC + 1, 1)
-            .expect_err("oversized topic must fail before hash materialization");
-        assert!(error.contains("topic"));
-        assert!(error.contains("message limit"));
     }
 
     #[tokio::test]

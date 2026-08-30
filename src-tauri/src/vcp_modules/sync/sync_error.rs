@@ -419,24 +419,13 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             "手机端话题数据不完整或归属冲突",
             "检查手机端话题数据后重新同步；若仍失败，请保留日志。",
         ),
-        "SYNC_BUDGET_EXCEEDED"
-        | "PHASE3_DIFF_BUDGET_EXCEEDED"
-        | "PHASE3_DECISION_BUDGET_EXCEEDED"
-        | "RESPONSE_TOO_LARGE" => definition(
+        "SYNC_BUDGET_EXCEEDED" | "RESPONSE_TOO_LARGE" => definition(
             Category::Data,
             Origin::MobileSync,
             Stage::Messages,
             Retry::AfterUserAction,
             "本次同步数据量超过安全上限",
             "缩减异常大的同步实体或会话后再试。",
-        ),
-        "TOPIC_HASH_BUDGET_EXCEEDED" => definition(
-            Category::Data,
-            Origin::MobileSync,
-            Stage::TopicValidation,
-            Retry::AfterUserAction,
-            "本次同步数据量超过安全上限",
-            "拆分或清理异常大的会话后再试。",
         ),
         "TOPIC_HASH_STATE_INVALID" => definition(
             Category::Data,

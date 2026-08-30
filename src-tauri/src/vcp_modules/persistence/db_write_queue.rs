@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
-const DB_WRITE_QUEUE_CAPACITY: usize = 32;
+const DB_WRITE_QUEUE_CAPACITY: usize = 16;
 const MAX_TASKS_PER_TRANSACTION: usize = 32;
 const MAX_MESSAGES_PER_TRANSACTION: usize = 500;
 const BATCH_QUIET_WINDOW: Duration = Duration::from_millis(2);
@@ -1176,8 +1176,8 @@ impl DbWriteQueue {
     pub fn new(db_state: &DbState, session_id: u64) -> Self {
         let db_path = db_state.path.clone();
         let write_coordinator = db_state.write_coordinator().clone();
-        // One queued transaction worth of tasks is enough to keep the single writer busy while
-        // preserving Pull's upstream byte-weighted backpressure.
+        // Keep bounded lookahead ahead of the single writer while preserving Pull's upstream
+        // queue backpressure. This capacity is independent of the transaction task limit.
         let (tx, mut rx) = mpsc::channel(DB_WRITE_QUEUE_CAPACITY);
         let db_path_for_worker = db_path.clone();
         let write_coordinator_for_worker = write_coordinator;

@@ -1114,10 +1114,9 @@ pub(crate) async fn apply_sync_message_tombstones(
     if tombstones.is_empty() {
         return Ok(Vec::new());
     }
-    if tombstones.len() > 10_000
-        || tombstones.iter().any(|(id, deleted_at)| {
-            id.is_empty() || !(0..=MAX_SAFE_JSON_INTEGER).contains(deleted_at)
-        })
+    if tombstones
+        .iter()
+        .any(|(id, deleted_at)| id.is_empty() || !(0..=MAX_SAFE_JSON_INTEGER).contains(deleted_at))
         || tombstones
             .iter()
             .map(|(id, _)| id)
@@ -1126,7 +1125,7 @@ pub(crate) async fn apply_sync_message_tombstones(
             != tombstones.len()
     {
         return Err(
-            "Sync message tombstones require 1..=10000 unique ids and safe deletedAt values"
+            "Sync message tombstones require unique non-empty ids and safe deletedAt values"
                 .to_string(),
         );
     }

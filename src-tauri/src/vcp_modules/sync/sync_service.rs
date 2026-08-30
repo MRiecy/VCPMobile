@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
 use std::future::Future;
-use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -37,11 +36,9 @@ const WIRE_PROTOCOL_VERSION: &str = "1.4";
 const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
-const SYNC_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(270);
 const PHASE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 const FINAL_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SYNC_RETRIES: u32 = 3;
-const MAX_SYNC_TOPICS: usize = 10_000;
 #[cfg(target_os = "android")]
 const SYNC_GUARDIAN_LABEL: &str = "[数据同步] VCP Mobile";
 type RoutedSyncCommand = (u64, mpsc::UnboundedSender<SyncCommand>);
@@ -952,14 +949,7 @@ pub enum SyncCommand {
     Cancel,
 }
 
-fn validate_unique_topic_keys(
-    values: Vec<TopicKey>,
-    field: &str,
-    max_items: usize,
-) -> Result<Vec<TopicKey>, String> {
-    if values.len() > max_items {
-        return Err(format!("{field} exceeds {max_items} item budget"));
-    }
+fn validate_unique_topic_keys(values: Vec<TopicKey>, field: &str) -> Result<Vec<TopicKey>, String> {
     let mut seen = HashSet::new();
     let mut result = Vec::with_capacity(values.len());
     for key in values {
@@ -1280,9 +1270,10 @@ async fn run_sync_session(
         sync_log_level: configured_log_level,
     } = session_config;
 
+    // Sync HTTP operations end on connection/transport failure or explicit session
+    // cancellation. Dataset size and peer processing time are not correctness failures.
     let http_client = match reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .timeout(SYNC_HTTP_REQUEST_TIMEOUT)
         .build()
     {
         Ok(client) => client,
@@ -1736,15 +1727,6 @@ async fn run_sync_session(
 
                                     match Phase3Message::get_targeted_topic_hashes(&db.pool, &owners).await {
                                         Ok(topic_hashes) => {
-                                            if topic_hashes.len() > MAX_SYNC_TOPICS {
-                                                let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
-                                                    attempt_id,
-                                                    code: "TOPIC_HASH_BUDGET_EXCEEDED".to_string(),
-                                                    message: format!("Topic hash batch exceeds {MAX_SYNC_TOPICS} topic budget"),
-                                                    failed_topic_ids: Vec::new(),
-                                                });
-                                                continue 'attempt;
-                                            }
                                             let mut topic_states = Vec::new();
                                             let mut expected_topics = HashSet::new();
                                             for (key, state) in topic_hashes {
@@ -1886,13 +1868,13 @@ async fn run_sync_session(
                                                     let mut pending = pending_diff_batches.lock().await;
                                                     pending.clear();
                                                 }
-                                                // 按消息数量分批，每批最多 10000 条消息，避免超大 WS payload
+                                                // 以消息状态数量为多 Topic 组包目标；单个大 Topic 不拆分并独占一批。
                                                 let mut batches = match build_diff_batches(topic_states) {
                                                     Ok(batches) => batches,
                                                     Err(error) => {
                                                         let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
                                                             attempt_id,
-                                                            code: "PHASE3_DIFF_BUDGET_EXCEEDED".to_string(),
+                                                            code: "PHASE3_HASH_PREP_FAILED".to_string(),
                                                             message: error,
                                                             failed_topic_ids: changed_ids.iter().take(8).map(|key| key.topic_id.clone()).collect(),
                                                         });
@@ -1900,7 +1882,7 @@ async fn run_sync_session(
                                                     }
                                                 };
                                                 let batch_count = batches.len();
-                                                log::info!("[SyncService] Phase3 diff split into {} batches (max {} msgs/batch)", batch_count, MAX_MESSAGES_PER_BATCH);
+                                                log::info!("[SyncService] Phase3 diff split into {} batches (target {} msgs/batch)", batch_count, TARGET_MESSAGE_STATES_PER_BATCH);
 
                                                 let first_batch = batches.pop_front();
                                                 {
@@ -2574,7 +2556,6 @@ async fn run_sync_session(
                                             .and_then(|frame| validate_unique_topic_keys(
                                                 frame.changed_topics,
                                                 "SYNC_TOPIC_DIFF_RESULT.changedTopics",
-                                                MAX_SYNC_TOPICS,
                                             ))
                                             .and_then(|changed_topics| {
                                                 if let Some(unexpected) = changed_topics
@@ -2931,35 +2912,8 @@ async fn run_sync_session(
     shutdown_result
 }
 
-/// Phase 3 diff 同时受消息数和真实 JSON 字节预算约束。
-const MAX_MESSAGES_PER_BATCH: usize = 10000;
-const MAX_WS_DIFF_BATCH_BYTES: usize = 8 * 1024 * 1024;
-
-struct JsonSizeCounter {
-    bytes: usize,
-    limit: usize,
-}
-
-impl JsonSizeCounter {
-    fn new(limit: usize) -> Self {
-        Self { bytes: 0, limit }
-    }
-}
-
-impl Write for JsonSizeCounter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        let next = self.bytes.saturating_add(bytes.len());
-        if next > self.limit {
-            return Err(std::io::Error::other("JSON value exceeds its byte budget"));
-        }
-        self.bytes = next;
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
+/// Phase 3 diff 按消息状态数量分批，并保持单个 Topic 不跨批次。
+const TARGET_MESSAGE_STATES_PER_BATCH: usize = 10_000;
 
 pub(crate) struct Phase3DiffBatch {
     pub topics: Vec<MessageDiffTopicState>,
@@ -2976,19 +2930,11 @@ fn build_diff_batches(
     let mut current_topics = Vec::new();
     let mut current_keys = HashSet::new();
     let mut current_msg_count = 0usize;
-    let envelope_bytes = br#"{"type":"SYNC_MESSAGE_DIFF_REQUEST","topics":[]}"#.len();
-    let mut current_bytes = envelope_bytes;
     let mut topic_states = topic_states.into_iter().collect::<Vec<_>>();
     topic_states.sort_by(|left, right| left.0.cmp(&right.0));
 
     for (key, state) in topic_states {
         let msg_count = state.messages.len();
-        if msg_count > MAX_MESSAGES_PER_BATCH {
-            return Err(format!(
-                "Phase 3 diff topic {} exceeds the {MAX_MESSAGES_PER_BATCH}-message batch limit",
-                key.topic_id
-            ));
-        }
         let owner_type = OwnerType::try_from(key.owner_type.as_str())
             .map_err(|_| format!("Phase 3 topic {} has invalid ownerType", key.topic_id))?;
         let topic_obj = MessageDiffTopicState {
@@ -2998,24 +2944,8 @@ fn build_diff_batches(
             content_hash: state.content_hash,
             messages: state.messages,
         };
-        let mut counter = JsonSizeCounter::new(MAX_WS_DIFF_BATCH_BYTES);
-        serde_json::to_writer(&mut counter, &topic_obj)
-            .map_err(|error| format!("Failed to size Phase 3 topic {}: {error}", key.topic_id))?;
-        let entry_bytes = counter.bytes;
-        if envelope_bytes.saturating_add(entry_bytes) > MAX_WS_DIFF_BATCH_BYTES {
-            return Err(format!(
-                "Phase 3 diff topic {} exceeds the 8 MiB WebSocket frame limit",
-                key.topic_id
-            ));
-        }
-
-        let separator_bytes = usize::from(!current_topics.is_empty());
         if !current_topics.is_empty()
-            && (current_msg_count.saturating_add(msg_count) > MAX_MESSAGES_PER_BATCH
-                || current_bytes
-                    .saturating_add(separator_bytes)
-                    .saturating_add(entry_bytes)
-                    > MAX_WS_DIFF_BATCH_BYTES)
+            && current_msg_count.saturating_add(msg_count) > TARGET_MESSAGE_STATES_PER_BATCH
         {
             batches.push_back(Phase3DiffBatch {
                 topics: current_topics,
@@ -3024,12 +2954,8 @@ fn build_diff_batches(
             current_topics = Vec::new();
             current_keys = HashSet::new();
             current_msg_count = 0;
-            current_bytes = envelope_bytes;
         }
 
-        current_bytes = current_bytes
-            .saturating_add(usize::from(!current_topics.is_empty()))
-            .saturating_add(entry_bytes);
         current_keys.insert(key);
         current_topics.push(topic_obj);
         current_msg_count = current_msg_count.saturating_add(msg_count);
@@ -4153,36 +4079,22 @@ mod tests {
         let topic_a = TopicKey::new("agent", "agent-a", "topic-a");
         let topic_b = TopicKey::new("group", "group-a", "topic-b");
         assert_eq!(
-            validate_unique_topic_keys(
-                vec![topic_a.clone(), topic_b.clone()],
-                "changedTopics",
-                MAX_SYNC_TOPICS,
-            )
-            .expect("valid topic list"),
+            validate_unique_topic_keys(vec![topic_a.clone(), topic_b.clone()], "changedTopics")
+                .expect("valid topic list"),
             vec![topic_a.clone(), topic_b.clone()]
         );
         assert!(validate_unique_topic_keys(
             vec![TopicKey::new("agent", "agent-a", "")],
             "changedTopics",
-            MAX_SYNC_TOPICS,
         )
         .is_err());
-        assert!(validate_unique_topic_keys(
-            vec![topic_a.clone(), topic_a],
-            "changedTopics",
-            MAX_SYNC_TOPICS,
-        )
-        .is_err());
-        assert!(validate_unique_topic_keys(
-            vec![topic_b, TopicKey::new("agent", "agent-c", "topic-c")],
-            "changedTopics",
-            1
-        )
-        .is_err());
+        assert!(
+            validate_unique_topic_keys(vec![topic_a.clone(), topic_a], "changedTopics").is_err()
+        );
     }
 
     #[test]
-    fn phase3_diff_batches_enforce_serialized_byte_budget() {
+    fn phase3_diff_batches_use_message_count_as_a_grouping_target() {
         use crate::vcp_modules::sync_pipeline::phase3_message::TopicLocalState;
         use crate::vcp_modules::sync_types::{MessageLiveState, MessageVersionState};
         use std::collections::{BTreeMap, HashMap};
@@ -4194,29 +4106,65 @@ mod tests {
         };
 
         let mut states = HashMap::new();
-        for index in 0..3 {
+        for (index, count) in [5_000usize, 5_000, 1].into_iter().enumerate() {
             let key = TopicKey::new("agent", "agent-a", format!("topic-{index}"));
             states.insert(
                 key,
                 TopicLocalState {
                     content_hash: "h".repeat(64),
-                    messages: BTreeMap::from([(
-                        format!("message-{index}-{}", "x".repeat(3 * 1024 * 1024)),
-                        version(),
-                    )]),
+                    messages: (0..count)
+                        .map(|message_index| {
+                            (format!("message-{index}-{message_index}"), version())
+                        })
+                        .collect::<BTreeMap<_, _>>(),
                 },
             );
         }
-        let batches = build_diff_batches(states).expect("bounded batches");
-        assert!(batches.len() >= 2);
-        for batch in batches {
-            let bytes = serde_json::to_vec(&json!({
-                "type": "SYNC_MESSAGE_DIFF_REQUEST",
-                "topics": batch.topics,
-            }))
-            .expect("serialize batch");
-            assert!(bytes.len() <= MAX_WS_DIFF_BATCH_BYTES);
+        let batches = build_diff_batches(states).expect("build batches");
+        let message_counts = batches
+            .iter()
+            .map(|batch| {
+                batch
+                    .topics
+                    .iter()
+                    .map(|topic| topic.messages.len())
+                    .sum::<usize>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(message_counts, vec![TARGET_MESSAGE_STATES_PER_BATCH, 1]);
+
+        let mut oversized_states = HashMap::new();
+        for (topic_id, count) in [
+            ("topic-a-small", 1usize),
+            ("topic-b-large", TARGET_MESSAGE_STATES_PER_BATCH + 1),
+            ("topic-c-small", 1),
+        ] {
+            oversized_states.insert(
+                TopicKey::new("agent", "agent-a", topic_id),
+                TopicLocalState {
+                    content_hash: "h".repeat(64),
+                    messages: (0..count)
+                        .map(|message_index| (format!("message-{message_index}"), version()))
+                        .collect::<BTreeMap<_, _>>(),
+                },
+            );
         }
+        let oversized_batches =
+            build_diff_batches(oversized_states).expect("oversized topic should stand alone");
+        let oversized_counts = oversized_batches
+            .iter()
+            .map(|batch| {
+                batch
+                    .topics
+                    .iter()
+                    .map(|topic| topic.messages.len())
+                    .sum::<usize>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            oversized_counts,
+            vec![1, TARGET_MESSAGE_STATES_PER_BATCH + 1, 1]
+        );
     }
 
     #[tokio::test]

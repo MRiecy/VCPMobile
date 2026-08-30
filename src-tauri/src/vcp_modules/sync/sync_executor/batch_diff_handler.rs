@@ -20,9 +20,6 @@ use tokio::sync::mpsc;
 
 pub struct BatchDiffHandler;
 
-const MAX_PHASE3_TOPICS: usize = 10_000;
-const MAX_PHASE3_MESSAGES_PER_TOPIC: usize = 10_000;
-const MAX_PHASE3_MESSAGES: usize = 100_000;
 const MAX_SAFE_JSON_INTEGER: i64 = (1_i64 << 53) - 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,15 +148,6 @@ fn parse_topic_decision(
             topic_id,
         )
     })?;
-    if pull_message_ids.len() > MAX_PHASE3_MESSAGES_PER_TOPIC {
-        return Err(Phase3ProtocolError::for_topic(
-            "PHASE3_DECISION_BUDGET_EXCEEDED",
-            format!(
-                "Phase 3 pullMessageIds for {topic_id} exceeds {MAX_PHASE3_MESSAGES_PER_TOPIC} message budget"
-            ),
-            topic_id,
-        ));
-    }
     let mut seen = HashSet::new();
     for message_id in pull_message_ids {
         if message_id.is_empty() {
@@ -191,15 +179,6 @@ fn parse_topic_decision(
             topic_id,
         )
     })?;
-    if delete_messages.len() > MAX_PHASE3_MESSAGES_PER_TOPIC {
-        return Err(Phase3ProtocolError::for_topic(
-            "PHASE3_DECISION_BUDGET_EXCEEDED",
-            format!(
-                "Phase 3 deleteMessages for {topic_id} exceeds {MAX_PHASE3_MESSAGES_PER_TOPIC} message budget"
-            ),
-            topic_id,
-        ));
-    }
     let mut seen_deleted = HashSet::new();
     for item in delete_messages {
         if item.msg_id.is_empty() {
@@ -377,12 +356,6 @@ impl BatchDiffHandler {
         attempt_id: u64,
     ) -> Result<(), Phase3ProtocolError> {
         let results = frame.results;
-        if results.len() > MAX_PHASE3_TOPICS {
-            return Err(Phase3ProtocolError::new(
-                "PHASE3_DECISION_BUDGET_EXCEEDED",
-                format!("Phase 3 response exceeds {MAX_PHASE3_TOPICS} topic budget"),
-            ));
-        }
         let keyed_results = {
             let expected = expected_batch_topics.lock().await;
             validate_phase3_result_topics(&expected, &results).map_err(|message| {
@@ -405,33 +378,12 @@ impl BatchDiffHandler {
             let mut push_topics: Vec<TopicKey> = Vec::new();
             let mut pull_batch: Vec<(TopicKey, Vec<String>)> = Vec::new();
             let mut delete_batch: Vec<(TopicKey, Vec<MessageDeleteDecision>)> = Vec::new();
-            let mut total_message_operations = 0usize;
 
             for (topic, result) in keyed_results {
-                let topic_id = &topic.topic_id;
                 let decision = parse_topic_decision(&topic, result)?;
                 let to_pull_ids = decision.pull_message_ids;
                 let to_push = decision.push_topic;
                 let to_delete = decision.delete_messages;
-                total_message_operations = total_message_operations
-                    .checked_add(to_pull_ids.len())
-                    .and_then(|total| total.checked_add(to_delete.len()))
-                    .ok_or_else(|| {
-                        Phase3ProtocolError::for_topic(
-                            "PHASE3_DECISION_BUDGET_EXCEEDED",
-                            "Phase 3 message operation count overflow",
-                            topic_id,
-                        )
-                    })?;
-                if total_message_operations > MAX_PHASE3_MESSAGES {
-                    return Err(Phase3ProtocolError::for_topic(
-                        "PHASE3_DECISION_BUDGET_EXCEEDED",
-                        format!(
-                            "Phase 3 response exceeds {MAX_PHASE3_MESSAGES} message operation budget"
-                        ),
-                        topic_id,
-                    ));
-                }
 
                 // Phase 2.5 已判定该 topic 聚合哈希有变化；即使消息 diff 是合法
                 // no-op，也必须进入 finalizer 的 hash-repair 集。

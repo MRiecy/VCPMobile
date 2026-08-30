@@ -21,11 +21,7 @@ use std::io::Write;
 use tauri::{AppHandle, Manager, Runtime};
 
 const MAX_NDJSON_LINE_BYTES: usize = 32 * 1024 * 1024;
-const MAX_SYNC_BODY_BYTES: usize = 256 * 1024 * 1024;
 const MESSAGE_REQUEST_CHUNK_BYTES: usize = 8 * 1024 * 1024;
-const MAX_SYNC_TOPICS: usize = 10_000;
-const MAX_SYNC_MESSAGES: usize = 100_000;
-const MAX_MESSAGES_PER_TOPIC: usize = 10_000;
 const MESSAGE_PAGE_SIZE: usize = 100;
 const MAX_CONTROL_RESPONSE_BYTES: usize = 1024 * 1024;
 const OWNER_PUSH_IDEMPOTENCY_DOMAIN: &[u8] = b"VCPMobileSync.OwnerPush.Idempotency.v1";
@@ -132,8 +128,6 @@ pub struct PushBatchResult {
 
 struct SerializedTopicMessages {
     line: Vec<u8>,
-    live_count: usize,
-    tombstone_count: usize,
 }
 
 struct BoundedJsonLine {
@@ -299,12 +293,6 @@ async fn send_entity_items(
 ) -> Result<(), String> {
     if items.is_empty() {
         return Ok(());
-    }
-    if items.len() > MAX_SYNC_TOPICS {
-        return Err(format!(
-            "Entity push contains {} items, limit is {MAX_SYNC_TOPICS}",
-            items.len()
-        ));
     }
     let mut expected = HashSet::new();
     for item in &items {
@@ -674,11 +662,6 @@ async fn serialize_topic_messages(
             serialized_count = serialized_count
                 .checked_add(1)
                 .ok_or_else(|| "Message push count overflow".to_string())?;
-            if serialized_count > MAX_MESSAGES_PER_TOPIC {
-                return Err(format!(
-                    "Message push topic {topic_id} exceeds the {MAX_MESSAGES_PER_TOPIC}-message limit"
-                ));
-            }
             cursor = Some(next_cursor);
         }
         if page_len < MESSAGE_PAGE_SIZE {
@@ -734,19 +717,12 @@ async fn serialize_topic_messages(
         tombstone_count = tombstone_count
             .checked_add(1)
             .ok_or_else(|| "Message tombstone count overflow".to_string())?;
-        if serialized_count.saturating_add(tombstone_count) > MAX_MESSAGES_PER_TOPIC {
-            return Err(format!(
-                "Message push topic {topic_id} exceeds the {MAX_MESSAGES_PER_TOPIC}-message limit"
-            ));
-        }
     }
     drop(tombstones);
     line.write_all(b"]}\n")
         .map_err(|error| format!("Message push suffix failed for {topic_id}: {error}"))?;
     Ok(SerializedTopicMessages {
         line: line.into_bytes(),
-        live_count: serialized_count,
-        tombstone_count,
     })
 }
 
@@ -1000,13 +976,6 @@ impl PushExecutor {
         if topic_keys.is_empty() {
             return Ok(Vec::new());
         }
-        if topic_keys.len() > MAX_SYNC_TOPICS {
-            return Err(format!(
-                "Message push contains {} topics, limit is {}",
-                topic_keys.len(),
-                MAX_SYNC_TOPICS
-            ));
-        }
         let requested_topics = topic_keys.iter().cloned().collect::<HashSet<_>>();
         if requested_topics.len() != topic_keys.len()
             || requested_topics.iter().any(|topic| !topic.is_valid())
@@ -1016,8 +985,6 @@ impl PushExecutor {
 
         let db = app.state::<DbState>();
         let mut results = Vec::new();
-        let mut total_request_bytes = 0usize;
-        let mut total_messages = 0usize;
         let mut request_body = Vec::new();
         let mut request_topics = Vec::new();
 
@@ -1043,28 +1010,10 @@ impl PushExecutor {
                 return Err(format!("Message push topic {topic_id} is missing locally"));
             }
             let serialized = serialize_topic_messages(&mut read_tx, key).await?;
-            let topic_message_count = serialized
-                .live_count
-                .checked_add(serialized.tombstone_count)
-                .ok_or_else(|| format!("Message push count overflow for {topic_id}"))?;
-            total_messages = total_messages
-                .checked_add(topic_message_count)
-                .ok_or_else(|| "Message push count overflow".to_string())?;
-            if total_messages > MAX_SYNC_MESSAGES {
-                return Err(format!(
-                    "Message push contains more than {MAX_SYNC_MESSAGES} messages"
-                ));
-            }
             read_tx.commit().await.map_err(|error| {
                 format!("Message push snapshot close failed for {topic_id}: {error}")
             })?;
             let line = serialized.line;
-            total_request_bytes = total_request_bytes
-                .checked_add(line.len())
-                .ok_or_else(|| "Message push byte count overflow".to_string())?;
-            if total_request_bytes > MAX_SYNC_BODY_BYTES {
-                return Err("Message push exceeds the 256 MiB total limit".to_string());
-            }
             if !request_body.is_empty()
                 && request_body.len().saturating_add(line.len()) > MESSAGE_REQUEST_CHUNK_BYTES
             {
@@ -1249,12 +1198,24 @@ mod tests {
     }
 
     #[test]
-    fn message_push_result_is_independent_of_local_attachment_binaries() {
-        let expected = vec![topic("topic")];
-        let valid = br#"{"kind":"topic","topicId":"topic","ownerType":"agent","ownerId":"agent-a","ok":true}"#;
-        let results = parse_message_push_results(valid, &expected).expect("metadata-only result");
-        assert_eq!(results.len(), 1);
-        assert!(results[0].success);
+    fn message_push_results_require_exact_topic_coverage() {
+        let expected = vec![topic("topic-a"), topic("topic-b")];
+        let topic_a = r#"{"kind":"topic","topicId":"topic-a","ownerType":"agent","ownerId":"agent-a","ok":true}"#;
+        let topic_b = r#"{"kind":"topic","topicId":"topic-b","ownerType":"agent","ownerId":"agent-a","ok":true}"#;
+        let complete = format!("{topic_a}\n{topic_b}\n");
+        let results =
+            parse_message_push_results(complete.as_bytes(), &expected).expect("complete result");
+        assert_eq!(results.len(), 2);
+
+        let missing_error = parse_message_push_results(topic_a.as_bytes(), &expected)
+            .err()
+            .expect("missing topic must fail");
+        assert!(missing_error.contains("missing topics"));
+        let duplicate = format!("{topic_a}\n{topic_a}\n");
+        let duplicate_error = parse_message_push_results(duplicate.as_bytes(), &expected)
+            .err()
+            .expect("duplicate topic must fail");
+        assert!(duplicate_error.contains("duplicate topic"));
     }
 
     #[test]
@@ -1394,10 +1355,13 @@ mod tests {
         let serialized = serialize_topic_messages(&mut read_tx, &key)
             .await
             .expect("serialize topic snapshot");
-        assert_eq!(serialized.live_count, MESSAGE_PAGE_SIZE + 1);
-        assert_eq!(serialized.tombstone_count, 1);
         let frame: serde_json::Value =
             serde_json::from_slice(&serialized.line).expect("serialized topic frame");
+        assert_eq!(
+            frame["messages"].as_array().unwrap().len(),
+            MESSAGE_PAGE_SIZE + 1
+        );
+        assert_eq!(frame["deletedMessages"].as_array().unwrap().len(), 1);
         assert_eq!(frame["deletedMessages"][0]["msgId"], "message-deleted");
         assert_eq!(frame["deletedMessages"][0]["deletedAt"], 1234);
         let first = load_outbound_message_page(&mut read_tx, &key, None)

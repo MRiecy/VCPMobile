@@ -14,23 +14,15 @@ use bytes::{Bytes, BytesMut};
 use futures_util::StreamExt;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use tauri::{AppHandle, Runtime};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
 const MAX_NDJSON_LINE_BYTES: usize = 32 * 1024 * 1024;
-const MAX_NDJSON_TRANSPORT_CHUNK_BYTES: usize = MAX_NDJSON_LINE_BYTES;
-const MAX_NDJSON_TOTAL_BYTES: usize = 256 * 1024 * 1024;
-const MAX_NDJSON_ENTITIES: usize = 100_000;
 const MAX_WARNING_SAMPLES: usize = 8;
-const NDJSON_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const PULL_WORKER_BUDGET_UNIT_BYTES: usize = 1024 * 1024;
-const PULL_WORKER_BUDGET_UNITS: usize = MAX_NDJSON_LINE_BYTES / PULL_WORKER_BUDGET_UNIT_BYTES;
+// Waiting concurrency only: large syncs pause the NDJSON reader instead of rejecting more Topics.
+const PULL_WORKER_CONCURRENCY: usize = 2;
 const MAX_ENTITY_BATCH_BYTES: usize = 10 * 1024 * 1024;
-const MAX_ENTITY_BATCH_ITEMS: usize = 1_000;
-const MAX_MESSAGE_IDS_PER_TOPIC: usize = 10_000;
-const MAX_MESSAGE_PULL_TOPICS: usize = 10_000;
 const MAX_AVATAR_RESPONSE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES: usize = 1024 * 1024;
 
@@ -136,58 +128,6 @@ fn response_too_large(message: &str) -> String {
     )
 }
 
-struct NdjsonBudget {
-    max_frames: usize,
-    total_bytes: usize,
-    frames: usize,
-    entities: usize,
-}
-
-impl NdjsonBudget {
-    fn new(max_frames: usize) -> Self {
-        Self {
-            max_frames,
-            total_bytes: 0,
-            frames: 0,
-            entities: 0,
-        }
-    }
-
-    fn observe_chunk(&mut self, bytes: usize) -> Result<(), String> {
-        self.total_bytes = self
-            .total_bytes
-            .checked_add(bytes)
-            .ok_or_else(|| response_too_large("NDJSON response size overflow"))?;
-        if self.total_bytes > MAX_NDJSON_TOTAL_BYTES {
-            return Err(response_too_large("NDJSON response exceeds 256MB budget"));
-        }
-        Ok(())
-    }
-
-    fn observe_frame(&mut self, line_bytes: usize, entities: usize) -> Result<(), String> {
-        if line_bytes > MAX_NDJSON_LINE_BYTES {
-            return Err(response_too_large("NDJSON frame exceeds 32MB budget"));
-        }
-        self.frames += 1;
-        if self.frames > self.max_frames {
-            return Err(protocol_error(
-                SyncErrorStage::Messages,
-                "NDJSON response contains more frames than requested topics",
-            ));
-        }
-        self.entities = self
-            .entities
-            .checked_add(entities)
-            .ok_or_else(|| response_too_large("NDJSON entity count overflow"))?;
-        if self.entities > MAX_NDJSON_ENTITIES {
-            return Err(response_too_large(
-                "NDJSON response exceeds 100000 message budget",
-            ));
-        }
-        Ok(())
-    }
-}
-
 struct TopicNDJSONFrame {
     topic_id: String,
     owner_type: String,
@@ -201,6 +141,23 @@ struct TopicNDJSONFrame {
 enum ParsedNdjsonFrame {
     StreamError(String),
     Topic(TopicNDJSONFrame),
+}
+
+fn log_pull_worker_result(result: Result<(), tokio::task::JoinError>) {
+    if let Err(error) = result {
+        log::warn!("[PullExecutor] Batch pull worker failed: {}", error);
+    }
+}
+
+async fn wait_for_pull_worker_slot(workers: &mut JoinSet<()>) {
+    while let Some(result) = workers.try_join_next() {
+        log_pull_worker_result(result);
+    }
+    if workers.len() >= PULL_WORKER_CONCURRENCY {
+        if let Some(result) = workers.join_next().await {
+            log_pull_worker_result(result);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -470,11 +427,6 @@ fn parse_topic_ndjson_value(value: Value) -> Result<TopicNDJSONFrame, String> {
             ))
         }
     };
-    if raw_messages.len() > MAX_NDJSON_ENTITIES {
-        return Err(format!(
-            "NDJSON frame for {topic_id} exceeds {MAX_NDJSON_ENTITIES} message budget"
-        ));
-    }
     let mut seen_message_ids = HashSet::new();
     let mut messages = Vec::with_capacity(raw_messages.len());
     for raw_message in raw_messages {
@@ -608,12 +560,6 @@ fn validate_requested_message_ids(
             "NDJSON message set mismatch for {topic_id}: missing={missing:?}, unexpected={unexpected:?}"
         ),
     ))
-}
-
-fn pull_worker_permits(frame_bytes: usize) -> Result<u32, String> {
-    let units = frame_bytes.saturating_add(PULL_WORKER_BUDGET_UNIT_BYTES - 1)
-        / PULL_WORKER_BUDGET_UNIT_BYTES;
-    u32::try_from(units.max(1)).map_err(|_| "Pull worker permit count overflow".to_string())
 }
 
 /// 共享消息处理管线：规范消息 → 指纹/可选预渲染 → 写入队列。
@@ -751,11 +697,6 @@ impl PullExecutor {
         requests: Vec<EntitySelector>,
         write_queue: &DbWriteQueue,
     ) -> Result<(), String> {
-        if requests.len() > MAX_ENTITY_BATCH_ITEMS {
-            return Err(format!(
-                "Entity pull request contains more than {MAX_ENTITY_BATCH_ITEMS} items"
-            ));
-        }
         let mut expected = HashSet::new();
         for request in &requests {
             if !expected.insert(request.clone()) {
@@ -1051,8 +992,8 @@ impl PullExecutor {
     /// 桌面端以 NDJSON 逐 topic 分帧返回，手机端逐行消费，
     /// 不等待整个响应结束。任何 topic 失败都会通过结果传播并终止当前 attempt。
     ///
-    /// **并发控制**: 按原始 frame 字节加权的 Semaphore + tokio spawn 处理 topic 消息，
-    /// 在途原始帧预算为 32 MiB；有界 mpsc channel 实时推送进度日志并施加背压。
+    /// 每个成功的非空 topic frame 由独立 Tokio task 处理；有界 mpsc channel 实时推送
+    /// 进度日志，DbWriteQueue 在消息落盘入口施加背压。
     ///
     /// 返回每个 topic 的处理结果。
     pub async fn pull_messages_batch<R: Runtime>(
@@ -1067,32 +1008,12 @@ impl PullExecutor {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
-        if requests.len() > MAX_MESSAGE_PULL_TOPICS {
-            return Err(format!(
-                "Pull request exceeds {MAX_MESSAGE_PULL_TOPICS} topic budget"
-            ));
-        }
         let mut expected_message_ids = HashMap::new();
-        let mut total_message_ids = 0usize;
         for (key, message_ids) in requests {
             if !key.is_valid() || expected_message_ids.contains_key(key) {
                 return Err(
                     "Pull request contains an invalid or duplicate topic identity".to_string(),
                 );
-            }
-            if message_ids.len() > MAX_MESSAGE_IDS_PER_TOPIC {
-                return Err(format!(
-                    "Pull request for {} exceeds {MAX_MESSAGE_IDS_PER_TOPIC} message budget",
-                    key.topic_id
-                ));
-            }
-            total_message_ids = total_message_ids
-                .checked_add(message_ids.len())
-                .ok_or_else(|| "Pull request message count overflow".to_string())?;
-            if total_message_ids > MAX_NDJSON_ENTITIES {
-                return Err(format!(
-                    "Pull request exceeds {MAX_NDJSON_ENTITIES} message budget"
-                ));
             }
             let exact_messages = if message_ids.is_empty() {
                 None
@@ -1154,7 +1075,6 @@ impl PullExecutor {
         }
 
         // ── 并发基础设施 ──
-        let sem = Arc::new(Semaphore::new(PULL_WORKER_BUDGET_UNITS));
         let (tx, mut rx) = mpsc::channel::<BatchPullResult>(64);
         let mut spawn_handles = JoinSet::new();
         let total = requests.len();
@@ -1198,31 +1118,17 @@ impl PullExecutor {
         let mut stream = res.bytes_stream();
         let mut buffer = BytesMut::new();
         let mut search_start = 0; // 核心优化：新增扫描游标，避免 O(N^2) 重复扫描
-        let mut ndjson_budget = NdjsonBudget::new(requests.len());
 
         loop {
-            let next_chunk = tokio::time::timeout(NDJSON_IDLE_TIMEOUT, stream.next())
-                .await
-                .map_err(|_| {
-                    encode_local_sync_error(
-                        "HTTP_TRANSPORT_FAILED",
-                        SyncErrorStage::Messages,
-                        "NDJSON stream idle timeout after 30 seconds",
-                        Vec::new(),
-                    )
-                })?;
+            // The stream is bounded by explicit cancellation and transport failure, not
+            // elapsed wall-clock time. Large histories may legitimately pause between chunks.
+            let next_chunk = stream.next().await;
             let Some(chunk_result) = next_chunk else {
                 break;
             };
             let chunk = chunk_result.map_err(|error| {
                 http_transport_error("Batch pull stream read", SyncErrorStage::Messages, &error)
             })?;
-            ndjson_budget.observe_chunk(chunk.len())?;
-            if chunk.len() > MAX_NDJSON_TRANSPORT_CHUNK_BYTES {
-                return Err(response_too_large(
-                    "NDJSON transport chunk exceeds 32MB budget",
-                ));
-            }
 
             // Preserve the transport allocation whenever possible. If a partial line exists,
             // copy only the prefix needed to complete that one bounded frame and defer the
@@ -1279,26 +1185,12 @@ impl PullExecutor {
                     continue;
                 }
 
-                // Reserve the frame's weighted memory budget before JSON parsing expands it into
-                // Value/DTO allocations. The permit is kept through the worker and is released
-                // immediately on protocol-error or empty-message branches.
-                while let Some(result) = spawn_handles.try_join_next() {
-                    if let Err(error) = result {
-                        log::warn!("[PullExecutor] Batch pull worker failed: {}", error);
-                    }
-                }
-                let line_bytes = line.len();
-                let permit = sem
-                    .clone()
-                    .acquire_many_owned(pull_worker_permits(line_bytes)?)
-                    .await
-                    .map_err(|e| format!("Pull worker semaphore closed: {}", e))?;
+                wait_for_pull_worker_slot(&mut spawn_handles).await;
                 let frame = match parse_ndjson_frame(&line)? {
                     ParsedNdjsonFrame::StreamError(error) => return Err(error),
                     ParsedNdjsonFrame::Topic(frame) => frame,
                 };
                 drop(line);
-                ndjson_budget.observe_frame(line_bytes, frame.messages.len())?;
                 let key = validate_returned_topic_identity(&frame, &expected_topics)?;
                 let topic_id = key.topic_id.clone();
                 if !seen_topics.insert(key.clone()) {
@@ -1357,15 +1249,14 @@ impl PullExecutor {
                         .collect();
 
                     let decode_t = start_t.elapsed();
-                    let _permit = permit;
                     let proc_start = std::time::Instant::now();
                     match process_topic_messages(&key, messages, &wq_clone, prerender_enabled).await {
                         Ok(parsed) => {
                             let proc_t = proc_start.elapsed();
                             let total_t = start_t.elapsed();
                             log::debug!(
-                                "[PullExecutor] [ProfileSummary] topic={} msgs={} | decode={:?} sem_wait={:?} process={:?} | total={:?}",
-                                topic_id, parsed, decode_t, std::time::Duration::ZERO, proc_t, total_t
+                                "[PullExecutor] [ProfileSummary] topic={} msgs={} | decode={:?} process={:?} | total={:?}",
+                                topic_id, parsed, decode_t, proc_t, total_t
                             );
                             let _ = tx_clone
                                 .send(BatchPullResult {
@@ -1405,23 +1296,12 @@ impl PullExecutor {
                 ));
             }
             let trailing = std::mem::take(&mut buffer);
-            let trailing_bytes = trailing.len();
-            while let Some(result) = spawn_handles.try_join_next() {
-                if let Err(error) = result {
-                    log::warn!("[PullExecutor] Batch pull worker failed: {}", error);
-                }
-            }
-            let permit = sem
-                .clone()
-                .acquire_many_owned(pull_worker_permits(trailing_bytes)?)
-                .await
-                .map_err(|e| format!("Pull worker semaphore closed: {}", e))?;
+            wait_for_pull_worker_slot(&mut spawn_handles).await;
             let frame = match parse_ndjson_frame(&trailing)? {
                 ParsedNdjsonFrame::StreamError(error) => return Err(error),
                 ParsedNdjsonFrame::Topic(frame) => frame,
             };
             drop(trailing);
-            ndjson_budget.observe_frame(trailing_bytes, frame.messages.len())?;
             let key = validate_returned_topic_identity(&frame, &expected_topics)?;
             let topic_id = key.topic_id.clone();
             if !seen_topics.insert(key.clone()) {
@@ -1459,7 +1339,6 @@ impl PullExecutor {
                     let wq_clone = write_queue.clone();
                     let tx_clone = tx.clone();
                     spawn_handles.spawn(async move {
-                        let _permit = permit;
                         let messages: Vec<crate::vcp_modules::chat_manager::ChatMessage> =
                             pull_dtos
                                 .into_iter()
@@ -1519,9 +1398,7 @@ impl PullExecutor {
         drop(tx); // 关闭 channel，通知 receiver 不再有新消息
         let wait_for_workers = async move {
             while let Some(result) = spawn_handles.join_next().await {
-                if let Err(error) = result {
-                    log::warn!("[PullExecutor] Batch pull worker failed: {}", error);
-                }
+                log_pull_worker_result(result);
             }
         };
         wait_for_workers.await;
@@ -1541,17 +1418,13 @@ impl PullExecutor {
 }
 
 #[cfg(test)]
-mod ndjson_budget_tests {
+mod ndjson_frame_tests {
     use super::{
         parse_topic_ndjson_frame, validate_requested_message_ids, validate_returned_topic_identity,
-        NdjsonBudget, MAX_NDJSON_LINE_BYTES, MAX_NDJSON_TOTAL_BYTES, PULL_WORKER_BUDGET_UNITS,
     };
     use crate::vcp_modules::topic_types::TopicKey;
     use serde_json::json;
     use std::collections::HashSet;
-    use std::sync::Arc;
-    use std::time::Duration;
-    use tokio::sync::Semaphore;
 
     const MESSAGE_CANONICAL_CONTRACT: &[u8] =
         include_bytes!("../fixtures/message_canonical_contract.json");
@@ -1675,27 +1548,6 @@ mod ndjson_budget_tests {
     }
 
     #[test]
-    fn rejects_oversized_line_total_and_frame_fanout() {
-        let mut line = NdjsonBudget::new(1);
-        assert!(line.observe_frame(MAX_NDJSON_LINE_BYTES + 1, 0).is_err());
-
-        let mut total = NdjsonBudget::new(1);
-        assert!(total.observe_chunk(MAX_NDJSON_TOTAL_BYTES).is_ok());
-        assert!(total.observe_chunk(1).is_err());
-
-        let mut frames = NdjsonBudget::new(1);
-        assert!(frames.observe_frame(1, 1).is_ok());
-        assert!(frames.observe_frame(1, 1).is_err());
-    }
-
-    #[test]
-    fn rejects_entity_budget_before_unbounded_work_is_spawned() {
-        let mut budget = NdjsonBudget::new(2);
-        assert!(budget.observe_frame(1, 75_000).is_ok());
-        assert!(budget.observe_frame(1, 25_001).is_err());
-    }
-
-    #[test]
     fn ndjson_error_frames_require_the_wire_1_4_object() {
         let parsed = parse_topic_ndjson_frame(
             json!({
@@ -1800,32 +1652,6 @@ mod ndjson_budget_tests {
         let incomplete = HashSet::from(["message-a".to_string()]);
         assert!(validate_requested_message_ids("topic", Some(&incomplete), &messages).is_err());
         assert!(validate_requested_message_ids("topic", None, &messages).is_ok());
-    }
-
-    #[tokio::test]
-    async fn maximum_frame_holds_the_parse_budget_until_worker_release() {
-        let semaphore = Arc::new(Semaphore::new(PULL_WORKER_BUDGET_UNITS));
-        let first = semaphore
-            .clone()
-            .acquire_many_owned(PULL_WORKER_BUDGET_UNITS as u32)
-            .await
-            .expect("reserve first maximum frame");
-        let waiter_semaphore = semaphore.clone();
-        let mut second = tokio::spawn(async move {
-            waiter_semaphore
-                .acquire_many_owned(PULL_WORKER_BUDGET_UNITS as u32)
-                .await
-        });
-
-        assert!(tokio::time::timeout(Duration::from_millis(20), &mut second)
-            .await
-            .is_err());
-        drop(first);
-        let _second_permit = tokio::time::timeout(Duration::from_secs(1), second)
-            .await
-            .expect("second frame should proceed after release")
-            .expect("permit task should complete")
-            .expect("semaphore should remain open");
     }
 
     #[test]

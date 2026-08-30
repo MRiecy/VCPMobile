@@ -21,9 +21,8 @@ use tokio::sync::mpsc;
 
 pub struct DiffHandler;
 
-const ENTITY_OPERATION_CONCURRENCY: usize =
-    crate::vcp_modules::avatar_service::MAX_AVATAR_BATCH_BYTES
-        / crate::vcp_modules::avatar_service::MAX_AVATAR_BYTES;
+// Entity operations can include a 20 MiB avatar, so keep only a small waiting concurrency.
+const ENTITY_OPERATION_CONCURRENCY: usize = 3;
 const MAX_SAFE_JSON_INTEGER: i64 = (1_i64 << 53) - 1;
 
 fn consume_manifest_response_type(
