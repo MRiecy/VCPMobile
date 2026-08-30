@@ -1,134 +1,34 @@
-use sqlx::{sqlite::SqlitePoolOptions, Pool, Row, Sqlite};
+use super::db_write::{DbWriteTransaction, WriteCoordinator};
+use sqlx::{sqlite::SqlitePoolOptions, Connection, Pool, Row, Sqlite};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
-
-const DB_WRITE_GATE_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
-const DB_WRITE_GATE_SLOW_LOG_THRESHOLD: Duration = Duration::from_millis(500);
-
-/// Process-local admission control for the database's single physical SQLite writer.
-///
-/// Tokio's mutex is FIFO, so concurrent SQLx services and the rusqlite sync queue wait in one
-/// fair application-level line instead of racing inside SQLite. A permit must cover only one
-/// write transaction and must be released before cache invalidation, events, HTTP, or file I/O.
-#[derive(Clone, Debug)]
-pub struct DbWriteGate {
-    inner: Arc<AsyncMutex<()>>,
-}
-
-impl Default for DbWriteGate {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl DbWriteGate {
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(AsyncMutex::new(())),
-        }
-    }
-
-    pub async fn acquire(&self, writer_kind: &'static str) -> Result<DbWritePermit, String> {
-        let wait_started = Instant::now();
-        let guard = tokio::time::timeout(
-            DB_WRITE_GATE_ADMISSION_TIMEOUT,
-            self.inner.clone().lock_owned(),
-        )
-        .await
-        .map_err(|_| {
-            format!(
-                "DbWriteGate admission timed out after {:?} for {writer_kind}",
-                DB_WRITE_GATE_ADMISSION_TIMEOUT
-            )
-        })?;
-        Ok(DbWritePermit::new(
-            writer_kind,
-            wait_started.elapsed(),
-            guard,
-        ))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_locked(&self) -> bool {
-        self.inner.try_lock().is_err()
-    }
-}
-
-pub struct DbWritePermit {
-    writer_kind: &'static str,
-    wait_duration: Duration,
-    acquired_at: Instant,
-    _guard: OwnedMutexGuard<()>,
-}
-
-impl DbWritePermit {
-    fn new(writer_kind: &'static str, wait_duration: Duration, guard: OwnedMutexGuard<()>) -> Self {
-        log::debug!(
-            "[DbWriteGate] acquired writer_kind={} wait_ms={:.3}",
-            writer_kind,
-            wait_duration.as_secs_f64() * 1000.0
-        );
-        Self {
-            writer_kind,
-            wait_duration,
-            acquired_at: Instant::now(),
-            _guard: guard,
-        }
-    }
-}
-
-impl Drop for DbWritePermit {
-    fn drop(&mut self) {
-        let hold_duration = self.acquired_at.elapsed();
-        if self.wait_duration >= DB_WRITE_GATE_SLOW_LOG_THRESHOLD
-            || hold_duration >= DB_WRITE_GATE_SLOW_LOG_THRESHOLD
-        {
-            log::warn!(
-                "[DbWriteGate] slow writer_kind={} wait_ms={:.3} hold_ms={:.3}",
-                self.writer_kind,
-                self.wait_duration.as_secs_f64() * 1000.0,
-                hold_duration.as_secs_f64() * 1000.0
-            );
-        } else {
-            log::debug!(
-                "[DbWriteGate] released writer_kind={} wait_ms={:.3} hold_ms={:.3}",
-                self.writer_kind,
-                self.wait_duration.as_secs_f64() * 1000.0,
-                hold_duration.as_secs_f64() * 1000.0
-            );
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct DbState {
-    pub pool: Pool<Sqlite>,
-    pub path: std::path::PathBuf,
-    pub write_gate: DbWriteGate,
+    pub(crate) pool: Pool<Sqlite>,
+    pub(crate) path: std::path::PathBuf,
+    writes: WriteCoordinator,
 }
 
 impl DbState {
-    pub fn new(pool: Pool<Sqlite>, path: std::path::PathBuf) -> Self {
+    pub(crate) fn new(pool: Pool<Sqlite>, path: std::path::PathBuf) -> Self {
         Self {
             pool,
             path,
-            write_gate: DbWriteGate::new(),
+            writes: WriteCoordinator::new(),
         }
     }
 
-    pub async fn begin_write(
+    pub(crate) async fn write_transaction(
         &self,
-        writer_kind: &'static str,
-    ) -> Result<(DbWritePermit, sqlx::Transaction<'static, Sqlite>), String> {
-        let permit = self.write_gate.acquire(writer_kind).await?;
-        let transaction = begin_immediate_write(&self.pool)
-            .await
-            .map_err(|error| error.to_string())?;
-        Ok((permit, transaction))
+        operation: &'static str,
+    ) -> Result<DbWriteTransaction, String> {
+        self.writes.write_transaction(&self.pool, operation).await
+    }
+
+    pub(super) fn write_coordinator(&self) -> &WriteCoordinator {
+        &self.writes
     }
 
     /// 执行 SQLite 物理页面碎片分批回收与查询规划器索引优化
@@ -136,9 +36,8 @@ impl DbState {
         &self,
         pages_to_vacuum: i32,
     ) -> Result<(), sqlx::Error> {
-        let write_permit = self
-            .write_gate
-            .acquire("maintenance.sqlite")
+        let mut tx = self
+            .write_transaction("maintenance.sqlite")
             .await
             .map_err(sqlx::Error::Protocol)?;
         // 1. 分批页整理碎片，防堵大面积 I/O 阻塞
@@ -146,24 +45,12 @@ impl DbState {
             "PRAGMA incremental_vacuum({})",
             pages_to_vacuum
         )))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         // 2. 重构索引规划器
-        sqlx::query("PRAGMA optimize").execute(&self.pool).await?;
-        drop(write_permit);
-        Ok(())
+        sqlx::query("PRAGMA optimize").execute(&mut *tx).await?;
+        tx.commit().await.map_err(sqlx::Error::Protocol)
     }
-}
-
-/// Starts a SQLite write-intent transaction before any reads establish a snapshot.
-///
-/// A deferred transaction that reads before writing can fail immediately with SQLITE_BUSY while
-/// upgrading its snapshot, even when `busy_timeout` is configured. Sync deletion paths use this
-/// boundary because they intentionally run beside the DbWriteQueue writer.
-pub(crate) async fn begin_immediate_write(
-    pool: &Pool<Sqlite>,
-) -> Result<sqlx::Transaction<'static, Sqlite>, sqlx::Error> {
-    pool.begin_with("BEGIN IMMEDIATE").await
 }
 
 pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path::PathBuf), String> {
@@ -190,23 +77,15 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
         .filename(&db_path)
         .create_if_missing(true);
 
-    // 深度性能优化：
-    // 1. WAL 模式：允许读写并发，极大提升 UI 相应速度
-    // 2. Normal 同步：在 WAL 模式下兼顾安全性与速度
-    // 3. mmap_size: 开启内存映射 I/O (256MB)，将磁盘读取变为内存访问
-    // 4. temp_store: 将临时表、排序操作强制放在内存中
-    // 5. page_size: 提升至 16KB，优化现代闪存 I/O 效率
-    // 6. auto_vacuum: 开启增量清理逻辑，配合维护任务物理回收空间
-    // 7. foreign_keys: 开启外键约束，以支持级联删除
+    // 运行期连接只配置 connection-local PRAGMA。journal_mode/page_size/auto_vacuum
+    // 由 open_and_check_db 在连接池建立前通过单连接统一 bootstrap，避免池扩容时在
+    // WriteCoordinator 外重复触发持久数据库写入。
     connect_options = connect_options
-        .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
         .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
         .busy_timeout(std::time::Duration::from_secs(30))
         .pragma("mmap_size", "268435456")
         .pragma("temp_store", "2")
-        .pragma("page_size", "16384")
         .pragma("cache_size", "-8000")
-        .pragma("auto_vacuum", "2")
         .pragma("foreign_keys", "1");
 
     let pool = match open_and_check_db(&connect_options, &db_path).await {
@@ -312,7 +191,6 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
             .create_if_missing(true)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete);
 
-        use sqlx::Connection;
         match sqlx::sqlite::SqliteConnection::connect_with(&temp_options).await {
             Ok(mut temp_conn) => {
                 let _ = sqlx::query("PRAGMA page_size = 16384")
@@ -363,6 +241,29 @@ async fn open_and_check_db(
 ) -> Result<Pool<Sqlite>, DbOpenFailure> {
     let mut retry_count = 0;
     let pool = loop {
+        if let Err(e) = bootstrap_persistent_pragmas(db_path).await {
+            if is_confirmed_sqlite_corruption(&e) {
+                return Err(DbOpenFailure::ConfirmedCorruption {
+                    reason: e.to_string(),
+                    pool: None,
+                });
+            }
+            retry_count += 1;
+            if retry_count >= 3 {
+                return Err(DbOpenFailure::Unavailable(format!(
+                    "数据库持久 PRAGMA 初始化失败 (已重试 {} 次): {}",
+                    retry_count, e
+                )));
+            }
+            log::warn!(
+                "[DBManager] Persistent PRAGMA bootstrap failed: {}. Retrying in {}ms... (Attempt {})",
+                e,
+                retry_count * 50,
+                retry_count
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(retry_count * 50)).await;
+            continue;
+        }
         match SqlitePoolOptions::new()
             .max_connections(5)
             .connect_with(connect_options.clone())
@@ -412,6 +313,38 @@ async fn open_and_check_db(
     }
 
     Ok(pool)
+}
+
+/// Applies file-persistent SQLite settings once before a runtime pool is opened.
+async fn bootstrap_persistent_pragmas(db_path: &Path) -> Result<(), sqlx::Error> {
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(db_path)
+        .create_if_missing(true)
+        .busy_timeout(std::time::Duration::from_secs(30));
+    let mut connection = sqlx::sqlite::SqliteConnection::connect_with(&options).await?;
+    let result = async {
+        // page_size and auto_vacuum must be requested before a fresh database gains tables or WAL.
+        // Existing legacy databases are converted by the explicit DELETE-mode VACUUM path below.
+        sqlx::query("PRAGMA page_size = 16384")
+            .execute(&mut connection)
+            .await?;
+        sqlx::query("PRAGMA auto_vacuum = 2")
+            .execute(&mut connection)
+            .await?;
+        let journal_mode: String = sqlx::query_scalar("PRAGMA journal_mode = WAL")
+            .fetch_one(&mut connection)
+            .await?;
+        if !journal_mode.eq_ignore_ascii_case("wal") {
+            return Err(sqlx::Error::Protocol(format!(
+                "SQLite refused WAL mode and reported {journal_mode}"
+            )));
+        }
+        Ok(())
+    }
+    .await;
+    let close_result = connection.close().await;
+    result?;
+    close_result
 }
 
 enum DbOpenFailure {
@@ -1104,97 +1037,56 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn write_gate_cancelled_waiter_and_panicking_owner_do_not_leak_permit() {
-        let gate = DbWriteGate::new();
-        let holder = gate
-            .acquire("test.holder")
-            .await
-            .expect("acquire initial permit");
-
-        let waiting_gate = gate.clone();
-        let waiter = tokio::spawn(async move { waiting_gate.acquire("test.cancelled").await });
-        tokio::task::yield_now().await;
-        waiter.abort();
-        assert!(matches!(waiter.await, Err(error) if error.is_cancelled()));
-        drop(holder);
-
-        let panic_gate = gate.clone();
-        let owner = tokio::spawn(async move {
-            let _permit = panic_gate
-                .acquire("test.panicking")
-                .await
-                .expect("acquire permit before panic");
-            panic!("intentional gate owner panic");
-        });
-        assert!(owner.await.expect_err("owner must panic").is_panic());
-
-        let blocking_permit = gate
-            .acquire("test.blocking-panic")
-            .await
-            .expect("acquire permit before blocking panic");
-        let blocking_owner = tokio::task::spawn_blocking(move || {
-            let _permit = blocking_permit;
-            panic!("intentional blocking gate owner panic");
-        });
-        assert!(blocking_owner
-            .await
-            .expect_err("blocking owner must panic")
-            .is_panic());
-
-        tokio::time::timeout(Duration::from_secs(1), gate.acquire("test.after-panic"))
-            .await
-            .expect("gate permit leaked")
-            .expect("gate acquisition failed after panic");
-    }
-
-    #[tokio::test]
-    async fn immediate_write_waits_for_an_existing_writer_at_begin() {
-        let temp_dir = tempfile::tempdir().expect("create temp database directory");
-        let db_path = temp_dir.path().join("write-contention.sqlite");
-        let options = sqlx::sqlite::SqliteConnectOptions::new()
+    async fn persistent_pragmas_are_bootstrapped_before_the_runtime_pool() {
+        let temp_dir = tempfile::tempdir().expect("create pragma bootstrap directory");
+        let db_path = temp_dir.path().join("pragma-bootstrap.sqlite");
+        let runtime_options = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(&db_path)
             .create_if_missing(true)
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-            .busy_timeout(std::time::Duration::from_secs(1));
-        let pool = SqlitePoolOptions::new()
-            .max_connections(2)
-            .connect_with(options)
-            .await
-            .expect("open SQLx test pool");
-        sqlx::query("CREATE TABLE lock_probe (id INTEGER PRIMARY KEY)")
-            .execute(&pool)
-            .await
-            .expect("create lock probe table");
+            .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+            .busy_timeout(std::time::Duration::from_secs(2))
+            .pragma("foreign_keys", "1");
 
-        let mut holder = rusqlite::Connection::open(&db_path).expect("open writer connection");
-        holder
-            .busy_timeout(std::time::Duration::from_secs(1))
-            .expect("configure writer timeout");
-        let held = holder
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .expect("reserve writer");
+        let pool = open_and_check_db(&runtime_options, &db_path)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "open pool after persistent pragma bootstrap: {}",
+                    error.message()
+                )
+            });
+        let values: (String, i64, i64) = sqlx::query_as(
+            "SELECT
+                (SELECT journal_mode FROM pragma_journal_mode),
+                (SELECT page_size FROM pragma_page_size),
+                (SELECT auto_vacuum FROM pragma_auto_vacuum)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("read bootstrapped pragmas through runtime pool");
+        assert_eq!(values, ("wal".to_string(), 16_384, 2));
+        let db_state = DbState::new(pool.clone(), db_path.clone());
+        db_state
+            .run_incremental_vacuum_optimize(1)
+            .await
+            .expect("run SQLite maintenance inside the owned write transaction");
+        pool.close().await;
 
-        let waiter_pool = pool.clone();
-        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
-        let mut waiter = tokio::spawn(async move {
-            let _ = started_tx.send(());
-            let tx = begin_immediate_write(&waiter_pool).await?;
-            tx.commit().await
-        });
-        started_rx.await.expect("start waiting writer");
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(100), &mut waiter)
-                .await
-                .is_err(),
-            "the competing transaction must wait at BEGIN instead of taking a read snapshot"
+        let connection = rusqlite::Connection::open(&db_path)
+            .expect("reopen database without runtime connect pragmas");
+        let journal_mode: String = connection
+            .pragma_query_value(None, "journal_mode", |row| row.get(0))
+            .expect("read persisted journal mode");
+        let page_size: i64 = connection
+            .pragma_query_value(None, "page_size", |row| row.get(0))
+            .expect("read persisted page size");
+        let auto_vacuum: i64 = connection
+            .pragma_query_value(None, "auto_vacuum", |row| row.get(0))
+            .expect("read persisted auto vacuum mode");
+        assert_eq!(
+            (journal_mode, page_size, auto_vacuum),
+            ("wal".into(), 16_384, 2)
         );
-
-        held.commit().expect("release writer");
-        tokio::time::timeout(std::time::Duration::from_secs(2), waiter)
-            .await
-            .expect("waiting transaction timed out")
-            .expect("waiting transaction task failed")
-            .expect("waiting transaction failed after writer release");
     }
 
     #[test]

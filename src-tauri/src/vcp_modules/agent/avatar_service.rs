@@ -72,7 +72,7 @@ pub async fn save_avatar_data<R: Runtime>(
     let now = crate::vcp_modules::infra::utils::now_millis();
 
     // 3. 在同一事务内验证 live parent 并写入，防止 orphan avatar。
-    let (write_permit, mut transaction) = db_state.begin_write("identity.avatar.save").await?;
+    let mut transaction = db_state.write_transaction("identity.avatar.save").await?;
     let parent_is_live = match owner_type.as_str() {
         "agent" => sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM agents WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL)",
@@ -96,7 +96,6 @@ pub async fn save_avatar_data<R: Runtime>(
             .commit()
             .await
             .map_err(|error| error.to_string())?;
-        drop(write_permit);
         return Err(format!(
             "Avatar owner {owner_type}/{owner_id} is missing or deleted"
         ));
@@ -118,7 +117,6 @@ pub async fn save_avatar_data<R: Runtime>(
             .commit()
             .await
             .map_err(|error| error.to_string())?;
-        drop(write_permit);
         return Err(format!(
             "Avatar {owner_type}/{owner_id} is tombstoned and cannot be overwritten"
         ));
@@ -127,8 +125,6 @@ pub async fn save_avatar_data<R: Runtime>(
         .commit()
         .await
         .map_err(|error| error.to_string())?;
-    drop(write_permit);
-
     log::info!(
         "[AvatarService] Saved avatar for {} {}: hash={}, color={:?}",
         owner_type,
@@ -279,7 +275,7 @@ pub async fn store_dominant_color(
         return Err(format!("Invalid avatar owner {owner_type}/{owner_id}"));
     }
 
-    let (write_permit, mut tx) = db_state.begin_write("identity.avatar.color").await?;
+    let mut tx = db_state.write_transaction("identity.avatar.color").await?;
     let updated = sqlx::query(STORE_AVATAR_COLOR_SQL)
         .bind(&color)
         .bind(&owner_type)
@@ -289,7 +285,6 @@ pub async fn store_dominant_color(
         .await
         .map_err(|e| e.to_string())?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
     if updated.rows_affected() == 0 {
         log::debug!(
             "[AvatarService] Ignored stale dominant_color for {} {} at hash {}",

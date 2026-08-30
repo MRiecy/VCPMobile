@@ -1,4 +1,4 @@
-use crate::vcp_modules::db_manager::{begin_immediate_write, DbState};
+use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::sync_types::{MessageDeleteDecision, SYNC_TOMBSTONE_HASH};
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use tauri::{AppHandle, Manager, Runtime};
@@ -142,10 +142,7 @@ impl DeleteExecutor {
             return Err(format!("Invalid avatar owner {owner_type}/{owner_id}"));
         }
         let db = app.state::<DbState>();
-        let write_permit = db.write_gate.acquire("sync.delete.avatar").await?;
-        let mut tx = begin_immediate_write(&db.pool)
-            .await
-            .map_err(|e| e.to_string())?;
+        let mut tx = db.write_transaction("sync.delete.avatar").await?;
         sqlx::query(
             "INSERT INTO avatars (
                 owner_type, owner_id, avatar_hash, mime_type, image_data,
@@ -174,7 +171,6 @@ impl DeleteExecutor {
         .await
         .map_err(|e| e.to_string())?;
         tx.commit().await.map_err(|e| e.to_string())?;
-        drop(write_permit);
 
         Ok(())
     }
@@ -185,7 +181,9 @@ impl DeleteExecutor {
     ) -> Result<(), String> {
         let db = app.state::<DbState>();
         let threshold = chrono::Utc::now().timestamp_millis() - days * 24 * 60 * 60 * 1000;
-        let (write_permit, mut tx) = db.begin_write("maintenance.tombstone-cleanup").await?;
+        let mut tx = db
+            .write_transaction("maintenance.tombstone-cleanup")
+            .await?;
 
         // 1. 物理强清除已删除超过安全期（30天）的消息的预渲染缓存
         let render_cache = sqlx::query(
@@ -208,7 +206,6 @@ impl DeleteExecutor {
                 .await
                 .map_err(|e| e.to_string())?;
         tx.commit().await.map_err(|e| e.to_string())?;
-        drop(write_permit);
 
         log::info!(
             "[DeleteExecutor] Completed safety-period cleanup (older than {} days): cleared_messages_content={}, deleted_render_caches={}",
@@ -302,11 +299,10 @@ mod tests {
             .expect("create full sync baseline");
 
         let app = tauri::test::mock_app();
-        let db_state = DbState::new(pool.clone(), db_path.clone());
-        let gate = db_state.write_gate.clone();
+        let db_state = DbState::new(pool.clone(), db_path);
+        let queue = DbWriteQueue::new(&db_state, 9001);
         assert!(app.manage(db_state));
         assert!(app.manage(AgentConfigState::new()));
-        let queue = DbWriteQueue::new(pool.clone(), db_path, gate, 9001);
         for index in 0..9 {
             queue
                 .submit(DbWriteTask::Agent {
@@ -330,7 +326,7 @@ mod tests {
         let second_delete = DeleteExecutor::soft_delete_agent(&handle, "missing-delete-2", 101);
         let ordinary_write = async {
             let db = handle.state::<DbState>();
-            let (write_permit, mut tx) = db.begin_write("test.business-writer").await?;
+            let mut tx = db.write_transaction("test.business-writer").await?;
             sqlx::query(
                 "INSERT INTO settings (key, value, updated_at)
                  VALUES ('concurrent-business-write', 'ok', 1)",
@@ -339,7 +335,6 @@ mod tests {
             .await
             .map_err(|error| error.to_string())?;
             tx.commit().await.map_err(|error| error.to_string())?;
-            drop(write_permit);
             Ok::<(), String>(())
         };
         let (first_result, second_result, business_result, flush_result) =

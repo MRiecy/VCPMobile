@@ -1,6 +1,6 @@
 use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
 use crate::vcp_modules::content_parser::ContentBlock;
-use crate::vcp_modules::db_manager::{begin_immediate_write, DbState};
+use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::file_manager::resolve_attachment_cas_file;
 use crate::vcp_modules::message_repository::{
     compile_and_serialize_render_async, deserialize_render_async, resolve_message_updated_at,
@@ -706,7 +706,7 @@ pub async fn begin_stream_message(
         &[],
     );
     let is_group = key.owner_type == "group";
-    let (write_permit, mut tx) = db_state.begin_write("message.stream.begin").await?;
+    let mut tx = db_state.write_transaction("message.stream.begin").await?;
 
     let inserted = sqlx::query(
         "INSERT INTO messages (
@@ -742,7 +742,6 @@ pub async fn begin_stream_message(
     .map_err(|e| e.to_string())?;
     if inserted.rows_affected() != 1 {
         tx.commit().await.map_err(|e| e.to_string())?;
-        drop(write_permit);
         return Err(format!(
             "Topic {} does not belong to live {} {}",
             key.topic_id, key.owner_type, key.owner_id
@@ -783,7 +782,6 @@ pub async fn begin_stream_message(
     .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
     Ok(())
 }
 
@@ -809,7 +807,7 @@ pub async fn append_single_message<R: tauri::Runtime>(
 
     let key = TopicKey::new(owner_type, owner_id, &topic_id);
     let db_state = app_handle.state::<DbState>();
-    let (write_permit, mut tx) = db_state.begin_write("message.append").await?;
+    let mut tx = db_state.write_transaction("message.append").await?;
     let activity =
         MessageRepository::upsert_message(&mut tx, &message, &key, &render_bytes, false).await?;
     let activity = match activity {
@@ -818,7 +816,6 @@ pub async fn append_single_message<R: tauri::Runtime>(
     };
 
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
     Ok(MessageWriteResultDto {
         blocks,
         topic_updated_at: activity.updated_at,
@@ -929,7 +926,7 @@ pub async fn patch_single_message<R: tauri::Runtime>(
 
     let key = TopicKey::new(owner_type, owner_id, &topic_id);
     let db_state = app_handle.state::<DbState>();
-    let (write_permit, mut tx) = db_state.begin_write("message.patch").await?;
+    let mut tx = db_state.write_transaction("message.patch").await?;
     let activity =
         MessageRepository::upsert_message(&mut tx, &message, &key, &render_bytes, skip_bubble)
             .await?;
@@ -939,7 +936,6 @@ pub async fn patch_single_message<R: tauri::Runtime>(
     };
 
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
     Ok(MessageWriteResultDto {
         blocks,
         topic_updated_at: activity.updated_at,
@@ -983,7 +979,7 @@ pub async fn delete_messages(
     {
         return Err("Message delete requires a topic and 1..=10000 unique message ids".to_string());
     }
-    let (write_permit, mut tx) = db_state.begin_write("message.delete").await?;
+    let mut tx = db_state.write_transaction("message.delete").await?;
     let placeholders = msg_ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
     let select_deleted_ids = format!(
         "SELECT msg_id FROM messages
@@ -1097,7 +1093,6 @@ pub async fn delete_messages(
     // FTS 由 after_messages_logical_delete 触发器在同一事务中清理。
     let activity = HashAggregator::bubble_from_topic(&mut tx, key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
     Ok(MessageDeletionResult {
         deleted_ids,
         active_ids,
@@ -1136,10 +1131,7 @@ pub(crate) async fn apply_sync_message_tombstones(
         );
     }
 
-    let write_permit = db_state.write_gate.acquire("sync.delete.message").await?;
-    let mut tx = begin_immediate_write(&db_state.pool)
-        .await
-        .map_err(|error| error.to_string())?;
+    let mut tx = db_state.write_transaction("sync.delete.message").await?;
     let topic_is_live = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM topics
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL)",
@@ -1152,7 +1144,6 @@ pub(crate) async fn apply_sync_message_tombstones(
     .map_err(|error| error.to_string())?;
     if !topic_is_live {
         tx.commit().await.map_err(|error| error.to_string())?;
-        drop(write_permit);
         return Ok(Vec::new());
     }
 
@@ -1241,7 +1232,6 @@ pub(crate) async fn apply_sync_message_tombstones(
 
     // FTS is removed by after_messages_logical_delete in this same transaction.
     tx.commit().await.map_err(|error| error.to_string())?;
-    drop(write_permit);
     Ok(active_ids)
 }
 
@@ -1250,7 +1240,7 @@ pub async fn truncate_history_after_message(
     key: &TopicKey,
     anchor_message_id: &str,
 ) -> Result<MessageDeletionResult, String> {
-    let (write_permit, mut tx) = db_state.begin_write("message.truncate").await?;
+    let mut tx = db_state.write_transaction("message.truncate").await?;
     let anchor_timestamp: i64 = sqlx::query_scalar(
         "SELECT timestamp FROM messages
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
@@ -1393,7 +1383,6 @@ pub async fn truncate_history_after_message(
     // FTS 由 after_messages_logical_delete 触发器在同一事务中清理。
     let activity = HashAggregator::bubble_from_topic(&mut tx, key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
     Ok(MessageDeletionResult {
         deleted_ids,
         active_ids,
@@ -1572,7 +1561,9 @@ async fn commit_stream_message(
     let (blocks, render_bytes) =
         compile_and_serialize_render_async(final_content.to_string()).await?;
     let is_group = owner_type == "group";
-    let (write_permit, mut tx) = db_state.begin_write("message.stream.finalize").await?;
+    let mut tx = db_state
+        .write_transaction("message.stream.finalize")
+        .await?;
 
     let start_timestamp: i64 = sqlx::query_scalar(
         "SELECT m.timestamp FROM messages m
@@ -1707,7 +1698,6 @@ async fn commit_stream_message(
 
     let activity = HashAggregator::bubble_from_topic(&mut tx, key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
     Ok((blocks, start_timestamp as u64, activity.updated_at))
 }
 
@@ -1745,7 +1735,9 @@ async fn delete_message_attachment_in_db(
     hash: &str,
     now: i64,
 ) -> Result<TopicActivityDto, String> {
-    let (write_permit, mut tx) = db_state.begin_write("message.attachment.delete").await?;
+    let mut tx = db_state
+        .write_transaction("message.attachment.delete")
+        .await?;
     let deleted = sqlx::query(
         "DELETE FROM message_attachments \
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
@@ -1763,7 +1755,6 @@ async fn delete_message_attachment_in_db(
     if deleted.rows_affected() == 0 {
         let activity = HashAggregator::load_topic_activity(&mut tx, key).await?;
         tx.commit().await.map_err(|e| e.to_string())?;
-        drop(write_permit);
         return Ok(activity);
     }
 
@@ -1838,7 +1829,6 @@ async fn delete_message_attachment_in_db(
 
     let activity = HashAggregator::bubble_from_topic(&mut tx, key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
     Ok(activity)
 }
 

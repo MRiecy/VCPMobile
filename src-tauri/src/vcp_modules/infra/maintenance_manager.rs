@@ -25,7 +25,7 @@ pub struct AttachmentGcReport {
 
 /// 在同一 SQLite 快照中确定仍被存活消息引用的 CAS。
 async fn load_attachment_gc_snapshot(
-    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    tx: &mut sqlx::SqliteConnection,
 ) -> Result<AttachmentGcSnapshot, String> {
     let live_hashes = sqlx::query_as::<_, (String,)>(
         "SELECT DISTINCT ma.hash FROM message_attachments ma \
@@ -46,7 +46,7 @@ async fn load_attachment_gc_snapshot(
                  ))\
                )",
     )
-    .fetch_all(&mut **tx)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|error| format!("读取附件 GC 有效引用失败: {error}"))?
     .into_iter()
@@ -55,7 +55,7 @@ async fn load_attachment_gc_snapshot(
 
     let indexed_attachments =
         sqlx::query_as::<_, (String, String)>("SELECT hash, internal_path FROM attachments")
-            .fetch_all(&mut **tx)
+            .fetch_all(&mut *tx)
             .await
             .map_err(|error| format!("读取附件 GC 索引失败: {error}"))?;
 
@@ -158,8 +158,9 @@ async fn sweep_unindexed_derived_files(
 /// 此时上传 staging 已清空，前端尚不能创建新的暂存附件，因此无需在线租约或墓碑。
 pub async fn reclaim_orphaned_attachments<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
-    pool: &sqlx::SqlitePool,
+    db_state: &DbState,
 ) -> Result<AttachmentGcReport, String> {
+    let pool = &db_state.pool;
     let mut tx = pool
         .begin()
         .await
@@ -173,6 +174,7 @@ pub async fn reclaim_orphaned_attachments<R: tauri::Runtime>(
         retained: snapshot.live_hashes.len(),
         ..Default::default()
     };
+    let mut reclaimed_hashes = Vec::new();
     for (hash, internal_path) in snapshot.indexed_attachments {
         if snapshot.live_hashes.contains(&hash) || !is_valid_cas_hash(&hash) {
             continue;
@@ -181,12 +183,24 @@ pub async fn reclaim_orphaned_attachments<R: tauri::Runtime>(
             log::warn!("[Maintenance] Attachment GC kept {hash}: {error}");
             continue;
         }
-        sqlx::query("DELETE FROM attachments WHERE hash = ?")
-            .bind(&hash)
-            .execute(pool)
+        reclaimed_hashes.push(hash);
+    }
+    if !reclaimed_hashes.is_empty() {
+        let mut write_tx = db_state
+            .write_transaction("maintenance.attachment-gc")
+            .await?;
+        for hash in &reclaimed_hashes {
+            sqlx::query("DELETE FROM attachments WHERE hash = ?")
+                .bind(hash)
+                .execute(&mut *write_tx)
+                .await
+                .map_err(|error| format!("删除附件索引 {hash} 失败: {error}"))?;
+        }
+        write_tx
+            .commit()
             .await
-            .map_err(|error| format!("删除附件索引 {hash} 失败: {error}"))?;
-        report.reclaimed += 1;
+            .map_err(|error| format!("提交附件 GC 索引清理失败: {error}"))?;
+        report.reclaimed = reclaimed_hashes.len();
     }
 
     let indexed_attachments =
@@ -386,8 +400,8 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
 
         // 2. 自动清除已删除消息的多余附件关联
         let cleanup_result = async {
-            let (write_permit, mut tx) = db_state
-                .begin_write("maintenance.attachment-relations")
+            let mut tx = db_state
+                .write_transaction("maintenance.attachment-relations")
                 .await?;
             sqlx::query(
                 "DELETE FROM message_attachments WHERE (owner_type, owner_id, topic_id, msg_id) IN (\
@@ -400,7 +414,6 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
             .await
             .map_err(|error| error.to_string())?;
             tx.commit().await.map_err(|error| error.to_string())?;
-            drop(write_permit);
             Ok::<(), String>(())
         }
         .await;

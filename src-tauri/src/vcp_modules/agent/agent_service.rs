@@ -2,7 +2,7 @@
 // 职责: 作为应用层 Facade，协调数据库存储与业务逻辑，完全面向 SQLite 存储。
 
 use crate::vcp_modules::agent_types::{AgentConfig, AgentListItem};
-use crate::vcp_modules::db_manager::{begin_immediate_write, DbState};
+use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group::group_service::GroupManagerState;
 use crate::vcp_modules::group::group_types::GroupListItem;
 use crate::vcp_modules::infra::utils::desktop_compatible_id_base;
@@ -335,7 +335,7 @@ async fn internal_write_agent_config<R: Runtime>(
     let cache_generation = state.current_cache_generation();
     let db_state = app_handle.state::<DbState>();
     let now = crate::vcp_modules::infra::utils::now_millis();
-    let (write_permit, mut tx) = db_state.begin_write("identity.agent.save").await?;
+    let mut tx = db_state.write_transaction("identity.agent.save").await?;
 
     // 🛡️ 防擦除防线：如果前端发回的对象提示词为空，从 caches 或 SQLite 数据库提取原有 system_prompt 兜底
     let mut final_config = new_config.clone();
@@ -367,7 +367,6 @@ async fn internal_write_agent_config<R: Runtime>(
     .map_err(|e| e.to_string())?;
     if matches!(deleted_at, Some(Some(_))) {
         tx.commit().await.map_err(|e| e.to_string())?;
-        drop(write_permit);
         return Err(format!("Agent {agent_id} has been deleted"));
     }
 
@@ -414,8 +413,6 @@ async fn internal_write_agent_config<R: Runtime>(
     .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
-
     state.insert_cache_if_current(agent_id.to_string(), final_config.clone(), cache_generation);
 
     Ok(true)
@@ -455,7 +452,6 @@ pub async fn delete_agent_internal<R: Runtime>(
     let _lock = mutex.lock().await;
 
     let db_state = app_handle.state::<DbState>();
-    let pool = &db_state.pool;
     let now = requested_deleted_at.unwrap_or_else(crate::vcp_modules::infra::utils::now_millis);
     if now < 0 {
         return Err("Agent delete requires a non-negative deletedAt".to_string());
@@ -465,10 +461,7 @@ pub async fn delete_agent_internal<R: Runtime>(
     } else {
         "identity.agent.delete"
     };
-    let write_permit = db_state.write_gate.acquire(writer_kind).await?;
-    let mut tx = begin_immediate_write(pool)
-        .await
-        .map_err(|e| e.to_string())?;
+    let mut tx = db_state.write_transaction(writer_kind).await?;
 
     let existing_deleted_at: Option<Option<i64>> = sqlx::query_scalar(
         "SELECT deleted_at FROM agents WHERE owner_type = 'agent' AND agent_id = ?",
@@ -495,12 +488,10 @@ pub async fn delete_agent_internal<R: Runtime>(
         }
         None => {
             tx.commit().await.map_err(|e| e.to_string())?;
-            drop(write_permit);
             return Err(format!("Agent {agent_id} does not exist"));
         }
         Some(Some(existing)) => {
             tx.commit().await.map_err(|e| e.to_string())?;
-            drop(write_permit);
             state.caches.remove(agent_id);
             return Ok(existing);
         }
@@ -611,8 +602,6 @@ pub async fn delete_agent_internal<R: Runtime>(
     }
 
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
-
     if let Some(active_requests) =
         app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveRequests>()
     {
@@ -680,7 +669,7 @@ pub async fn create_agent(
 
     log::info!("[AgentService] Creating agent '{}' atomically.", agent_id);
 
-    let (write_permit, mut tx) = db_state.begin_write("identity.agent.create").await?;
+    let mut tx = db_state.write_transaction("identity.agent.create").await?;
 
     // 1. 插入 agents 表
     let dto = AgentSyncDTO::from(&config);
@@ -727,8 +716,6 @@ pub async fn create_agent(
     // 触发聚合哈希冒泡 (更新 agents.content_hash)
     HashAggregator::bubble_agent_hash(&mut tx, &agent_id).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
-
     state.insert_cache_if_current(agent_id.clone(), config.clone(), cache_generation);
 
     Ok(config)

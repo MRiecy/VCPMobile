@@ -1,11 +1,10 @@
 use crate::vcp_modules::chat_manager::ChatMessage;
-use crate::vcp_modules::db_manager::DbWriteGate;
+use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_types::serialize_member_tags;
 use crate::vcp_modules::sync_dto::{
     AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
 };
 use crate::vcp_modules::sync_hash::HashAggregator;
-use crate::vcp_modules::sync_logger::SyncLogger;
 use crate::vcp_modules::sync_types::is_valid_avatar_owner;
 use crate::vcp_modules::topic_types::{OwnerKey, TopicKey};
 use std::collections::{HashMap, HashSet};
@@ -78,7 +77,7 @@ mod tests {
         BATCH_QUIET_WINDOW,
     };
     use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
-    use crate::vcp_modules::db_manager::{begin_immediate_write, DbWriteGate};
+    use crate::vcp_modules::db_manager::DbState;
     use crate::vcp_modules::sync_dto::{
         AgentSyncDTO, AgentTopicSyncDTO, GroupSyncDTO, GroupTopicSyncDTO,
     };
@@ -87,12 +86,7 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::{mpsc, oneshot};
 
-    async fn file_backed_queue() -> (
-        tempfile::TempDir,
-        sqlx::SqlitePool,
-        DbWriteGate,
-        DbWriteQueue,
-    ) {
+    async fn file_backed_queue() -> (tempfile::TempDir, sqlx::SqlitePool, DbState, DbWriteQueue) {
         let temp_dir = tempfile::tempdir().expect("create queue database directory");
         let db_path = temp_dir.path().join("queue-gate.sqlite");
         let options = sqlx::sqlite::SqliteConnectOptions::new()
@@ -119,9 +113,9 @@ mod tests {
         .execute(&pool)
         .await
         .expect("seed queue parents");
-        let gate = DbWriteGate::new();
-        let queue = DbWriteQueue::new(pool.clone(), db_path, gate.clone(), 77);
-        (temp_dir, pool, gate, queue)
+        let db_state = DbState::new(pool.clone(), db_path);
+        let queue = DbWriteQueue::new(&db_state, 77);
+        (temp_dir, pool, db_state, queue)
     }
 
     fn avatar_task(owner_id: impl Into<String>) -> DbWriteTask {
@@ -227,13 +221,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sqlx_transaction_holds_gate_before_real_queue_writer() {
-        let (_temp_dir, pool, gate, queue) = file_backed_queue().await;
-        let sqlx_permit = gate
-            .acquire("test.sqlx-holder")
-            .await
-            .expect("acquire SQLx permit");
-        let mut sqlx_tx = begin_immediate_write(&pool)
+    async fn sqlx_transaction_holds_coordinator_before_real_queue_writer() {
+        let (_temp_dir, pool, db_state, queue) = file_backed_queue().await;
+        let mut sqlx_tx = db_state
+            .write_transaction("test.sqlx-holder")
             .await
             .expect("begin SQLx write transaction");
         sqlx::query("INSERT INTO settings (key, value, updated_at) VALUES ('gate-holder', '1', 1)")
@@ -251,11 +242,10 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(50), &mut flush)
                 .await
                 .is_err(),
-            "Queue must wait while SQLx owns the shared gate"
+            "Queue must wait while SQLx owns the shared coordinator"
         );
 
         sqlx_tx.commit().await.expect("commit SQLx holder");
-        drop(sqlx_permit);
         tokio::time::timeout(Duration::from_secs(3), flush)
             .await
             .expect("Queue Flush timed out")
@@ -270,35 +260,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_queue_transaction_holds_gate_before_sqlx_writer() {
-        let (_temp_dir, pool, gate, queue) = file_backed_queue().await;
-        sqlx::query(
-            "CREATE TRIGGER slow_queue_messages AFTER INSERT ON messages
-             BEGIN SELECT length(randomblob(250000)); END;",
-        )
-        .execute(&pool)
-        .await
-        .expect("install slow queue trigger");
+    async fn real_queue_transaction_holds_coordinator_before_sqlx_writer() {
+        let (temp_dir, pool, db_state, queue) = file_backed_queue().await;
+        let db_path = temp_dir.path().join("queue-gate.sqlite");
+        let mut external = rusqlite::Connection::open(db_path).expect("open external writer");
+        external
+            .busy_timeout(Duration::from_secs(2))
+            .expect("configure external writer timeout");
+        let held = external
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .expect("reserve external writer");
         queue
             .submit(rich_message_task("topic", 0, 500))
             .await
             .expect("submit large queue transaction");
 
         tokio::time::timeout(Duration::from_secs(2), async {
-            while !gate.is_locked() {
+            while !db_state.write_coordinator().is_locked() {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("Queue never acquired the shared gate");
+        .expect("Queue never acquired the shared coordinator");
 
-        let waiting_gate = gate.clone();
-        let waiting_pool = pool.clone();
+        let waiting_db = db_state.clone();
         let mut sqlx_writer = tokio::spawn(async move {
-            let permit = waiting_gate.acquire("test.sqlx-waiter").await?;
-            let mut tx = begin_immediate_write(&waiting_pool)
-                .await
-                .map_err(|error| error.to_string())?;
+            let mut tx = waiting_db.write_transaction("test.sqlx-waiter").await?;
             sqlx::query(
                 "INSERT INTO settings (key, value, updated_at) VALUES ('after-queue', '1', 1)",
             )
@@ -306,16 +293,16 @@ mod tests {
             .await
             .map_err(|error| error.to_string())?;
             tx.commit().await.map_err(|error| error.to_string())?;
-            drop(permit);
             Ok::<(), String>(())
         });
         assert!(
             tokio::time::timeout(Duration::from_millis(10), &mut sqlx_writer)
                 .await
                 .is_err(),
-            "SQLx writer must wait while the real Queue owns the gate"
+            "SQLx writer must wait while the real Queue owns the coordinator"
         );
 
+        held.commit().expect("release external writer");
         tokio::time::timeout(Duration::from_secs(5), queue.flush())
             .await
             .expect("Queue Flush timed out")
@@ -336,9 +323,45 @@ mod tests {
         assert_eq!(counts, (500, 1));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn queue_batch_survives_beyond_the_removed_admission_timeout() {
+        let (_temp_dir, pool, db_state, queue) = file_backed_queue().await;
+        tokio::time::pause();
+        let holder = db_state
+            .write_coordinator()
+            .acquire_lease("test.long-holder")
+            .await;
+        queue
+            .submit(avatar_task("owner"))
+            .await
+            .expect("submit queue write behind long holder");
+        let flush_queue = queue.clone();
+        let flush = tokio::spawn(async move { flush_queue.flush().await });
+
+        tokio::time::advance(Duration::from_secs(31)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !flush.is_finished(),
+            "Queue must keep the collected batch while admission remains busy"
+        );
+
+        drop(holder);
+        flush
+            .await
+            .expect("Queue Flush task failed")
+            .expect("Queue dropped a batch after the old admission deadline");
+        tokio::time::resume();
+        let avatar_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM avatars WHERE owner_id = 'owner'")
+                .fetch_one(&pool)
+                .await
+                .expect("read queued avatar after long admission wait");
+        assert_eq!(avatar_count, 1);
+    }
+
     #[tokio::test]
     async fn cancelled_real_flush_keeps_worker_failure_sticky() {
-        let (_temp_dir, pool, _gate, queue) = file_backed_queue().await;
+        let (_temp_dir, pool, _db_state, queue) = file_backed_queue().await;
         sqlx::query(
             "CREATE TRIGGER fail_queue_avatar BEFORE INSERT ON avatars
              BEGIN SELECT RAISE(ABORT, 'forced avatar failure'); END;",
@@ -1002,7 +1025,6 @@ mod tests {
 
 pub struct DbWriteQueue {
     sender: mpsc::Sender<DbWriteTask>,
-    logger: Option<Arc<Mutex<SyncLogger>>>,
     db_path: std::path::PathBuf,
     session_id: u64,
     _worker: Option<tokio::task::JoinHandle<()>>,
@@ -1012,7 +1034,6 @@ impl Clone for DbWriteQueue {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
-            logger: self.logger.clone(),
             db_path: self.db_path.clone(),
             session_id: self.session_id,
             _worker: None,
@@ -1121,17 +1142,14 @@ impl DbWriteQueue {
         coalesced
     }
 
-    pub fn new(
-        _pool: sqlx::SqlitePool,
-        db_path: std::path::PathBuf,
-        write_gate: DbWriteGate,
-        session_id: u64,
-    ) -> Self {
+    pub fn new(db_state: &DbState, session_id: u64) -> Self {
+        let db_path = db_state.path.clone();
+        let write_coordinator = db_state.write_coordinator().clone();
         // One queued transaction worth of tasks is enough to keep the single writer busy while
         // preserving Pull's upstream byte-weighted backpressure.
         let (tx, mut rx) = mpsc::channel(DB_WRITE_QUEUE_CAPACITY);
         let db_path_for_worker = db_path.clone();
-        let write_gate_for_worker = write_gate;
+        let write_coordinator_for_worker = write_coordinator;
 
         // 核心优化：利用 Mutex 持有持久连接，确保 spawn_blocking 之间 prepare_cached 缓存不失效
         let conn_holder: Arc<Mutex<Option<rusqlite::Connection>>> = Arc::new(Mutex::new(None));
@@ -1171,18 +1189,9 @@ impl DbWriteQueue {
 
                 // Batch collection intentionally runs outside the gate. Only the physical SQLite
                 // transaction is admitted into the process-wide single-writer boundary.
-                let write_permit = match write_gate_for_worker.acquire("sync.queue").await {
-                    Ok(permit) => permit,
-                    Err(error) => {
-                        error_count += 1;
-                        log::error!("[DbWriteQueue] write admission failed: {error}");
-                        pending_errors.push(format!("write admission error: {error}"));
-                        if let Some(tx) = flush_tx_opt {
-                            Self::deliver_flush_ack(tx, &mut pending_errors);
-                        }
-                        continue;
-                    }
-                };
+                let write_lease = write_coordinator_for_worker
+                    .acquire_lease("sync.queue")
+                    .await;
 
                 let db_path = db_path_for_worker.clone();
                 let ch = conn_holder.clone();
@@ -1190,12 +1199,20 @@ impl DbWriteQueue {
 
                 // [Turbo Phase 3] 使用 spawn_blocking + rusqlite 进行极致写入
                 let result = tokio::task::spawn_blocking(move || {
-                    let write_permit = write_permit;
+                    let mut write_lease = write_lease;
+                    let write_started = std::time::Instant::now();
+                    write_lease.mark_outcome("transaction_failed");
                     let mut guard = ch.lock().unwrap();
                     if guard.is_none() {
                         let conn = rusqlite::Connection::open(&db_path)?;
-                        // 极致性能调优 (仅在初始化连接时执行一次)
-                        conn.pragma_update(None, "journal_mode", "WAL")?;
+                        let journal_mode: String =
+                            conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+                        if !journal_mode.eq_ignore_ascii_case("wal") {
+                            return Err(Self::sync_contract_error(format!(
+                                "Queue requires bootstrapped WAL mode, got {journal_mode}"
+                            )));
+                        }
+                        // Connection-local tuning (仅在初始化连接时执行一次)
                         conn.pragma_update(None, "synchronous", "NORMAL")?;
                         // SQLite 内建 busy handler 做有界退避；2 秒后把错误交给 flush，
                         // 不再用 30 秒长事务阻塞正常聊天写入。
@@ -1317,7 +1334,7 @@ impl DbWriteQueue {
                     }
 
                     tx.commit()?;
-                    drop(write_permit);
+                    write_lease.finish("committed", write_started.elapsed());
                     Ok::<(), rusqlite::Error>(())
                 }).await;
 
@@ -1357,15 +1374,10 @@ impl DbWriteQueue {
 
         Self {
             sender: tx,
-            logger: None,
             db_path,
             session_id,
             _worker: Some(worker),
         }
-    }
-
-    pub fn set_logger(&mut self, logger: Arc<Mutex<SyncLogger>>) {
-        self.logger = Some(logger);
     }
 
     pub async fn submit(&self, task: DbWriteTask) -> Result<(), String> {

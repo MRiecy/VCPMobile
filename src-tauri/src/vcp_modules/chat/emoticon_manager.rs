@@ -264,7 +264,7 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
         }
     }
 
-    let (write_permit, mut transaction) = db_state.begin_write("emoticon.refresh").await?;
+    let mut transaction = db_state.write_transaction("emoticon.refresh").await?;
     sqlx::query("DELETE FROM emoticon_library")
         .execute(&mut *transaction)
         .await
@@ -293,7 +293,6 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
         .map_err(|e| e.to_string())?;
 
     transaction.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
 
     let count = library.len();
     let emoticon_state = app_handle.state::<EmoticonManagerState>();

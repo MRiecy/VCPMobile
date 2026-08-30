@@ -24,7 +24,9 @@ pub use crate::vcp_modules::infra::lifecycle_reconciler::{
 pub use crate::vcp_modules::infra::lifecycle_state::{CoreStatus, LifecycleState};
 
 async fn persist_delete_cleanup_marker(db_state: &DbState, now: i64) -> Result<(), String> {
-    let (write_permit, mut tx) = db_state.begin_write("maintenance.cleanup-marker").await?;
+    let mut tx = db_state
+        .write_transaction("maintenance.cleanup-marker")
+        .await?;
     sqlx::query("INSERT OR REPLACE INTO settings (key, value, updated_at) VALUES ('delete_executor_last_cleanup', ?, ?)")
         .bind(now.to_string())
         .bind(now)
@@ -32,7 +34,6 @@ async fn persist_delete_cleanup_marker(db_state: &DbState, now: i64) -> Result<(
         .await
         .map_err(|error| error.to_string())?;
     tx.commit().await.map_err(|error| error.to_string())?;
-    drop(write_permit);
     Ok(())
 }
 
@@ -55,10 +56,9 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     );
 
     // 1. 数据库初始化 (P0 - 绝对基础)
-    let pool = match init_db(&handle).await {
+    match init_db(&handle).await {
         Ok((p, path)) => {
-            handle.manage(DbState::new(p.clone(), path));
-            p
+            handle.manage(DbState::new(p, path));
         }
         Err(e) => {
             let err_msg = format!("数据库初始化失败: {}", e);
@@ -77,9 +77,10 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             );
             return Err(err_msg);
         }
-    };
+    }
 
-    match crate::vcp_modules::maintenance_manager::reclaim_orphaned_attachments(&handle, &pool)
+    let db_state = handle.state::<DbState>();
+    match crate::vcp_modules::maintenance_manager::reclaim_orphaned_attachments(&handle, &db_state)
         .await
     {
         Ok(report) if report.reclaimed > 0 || report.ghost_files > 0 => {

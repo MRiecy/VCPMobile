@@ -1,10 +1,10 @@
 ---
 id: MOD-PERSISTENCE-014
-version: "1.1.5"
-date: 2026-08-28
+version: "1.1.6"
+date: 2026-08-30
 module: persistence/
 scope: src-tauri/src/vcp_modules/persistence/
-related: [db_manager.rs, db_write_queue.rs, message_repository.rs, sync_service.rs, chat_manager.rs, message_service.rs]
+related: [db_manager.rs, db_write.rs, db_write_queue.rs, message_repository.rs, sync_service.rs, chat_manager.rs, message_service.rs]
 ---
 
 # 14_持久化层与数据访问（Persistence 领域总览）
@@ -25,6 +25,7 @@ related: [db_manager.rs, db_write_queue.rs, message_repository.rs, sync_service.
 | 模块 | 文件 | 核心职责 | 关键设计决策 |
 |------|------|---------|-------------|
 | 数据库管理器 | `db_manager.rs` | 连接池生命周期、Schema 初始化与迁移、PRAGMA 调优 | sqlx 异步连接池 (`max_connections=5`) + WAL 模式 |
+| 写事务所有者 | `db_write.rs` | 公平准入、取消安全的 SQLx BEGIN/COMMIT/ROLLBACK、wait/hold/outcome 观测 | 私有 `WriteCoordinator` + `DbWriteTransaction` |
 | 写入队列 | `db_write_queue.rs` | 单工作线程批量写入、消除 SQLite 并发锁竞争、同步哈希冒泡 | mpsc 队列 + `spawn_blocking` + rusqlite 直连 |
 | 消息仓储 | `message_repository.rs` | 消息读写、渲染编译、现有缓存刷新 | `MessageRenderCompiler` + 三段流水线 |
 
@@ -39,35 +40,36 @@ Vue 3 前端 / Rust 业务层
     │   ↓
     │   直接返回结果
     │
-    └─→ 写入/同步（如收到同步消息、创建话题）
-        ↓
-        DbWriteQueue.submit(DbWriteTask::TopicMessages { ... })
-        ↓
-        mpsc::channel(32) → 单 Worker
-        ↓
-        spawn_blocking → 复用持久 rusqlite::Connection
-        ↓
-        FIFO 批量事务 → 按任务更新哈希或留给 Finalizer → 提交
+    └─→ 写入
+        ├─→ 普通业务 / 删除 / Finalizer
+        │   DbState.write_transaction(operation)
+        │   → DbWriteTransaction（SQLx connection + immediate transaction + lease）
+        │
+        └─→ 同步 Pull 批量写
+            DbWriteQueue.submit(DbWriteTask::...)
+            → mpsc::channel(32) → 单 Worker
+            → persistence 内部 lease → spawn_blocking
+            → 复用持久 rusqlite::Connection → FIFO 批量事务
 ```
 
 **为什么查询与写入走不同通道？**
 - 查询需要高并发、低延迟、异步友好 → sqlx 连接池是最佳选择。
 - 写入在 SQLite 上天然串行（即使 WAL 模式，写操作仍需 `WAL_WRITE_LOCK`）。同步 Pull 若直接并发写入，会放大 `BUSY` 错误和重试。
-- 写入队列将同步 Pull 请求收敛为单消费者顺序批量事务；其他 sqlx 写路径仍共享数据库，并由 2 秒 busy timeout 有界协调。
+- 写入队列将同步 Pull 请求收敛为单消费者顺序批量事务；其他 SQLx 写路径通过同一私有 `WriteCoordinator` 排队，而不是依赖 busy timeout 互相碰撞。
 
 ---
 
 ## 2. 数据库管理器（`db_manager.rs`）
 
-`db_manager.rs`（约 740 行）是 persistence/ 领域的入口模块，负责 SQLite 数据库的初始化、连接池配置、**基于 sqlx 迁移引擎的版本化 Schema 管理**、页面大小优化与损坏自愈。
+`db_manager.rs` 是 persistence/ 领域的启动入口，负责 SQLite 数据库初始化、连接池配置、**基于 sqlx 迁移引擎的版本化 Schema 管理**、页面大小优化与损坏自愈；运行期写事务所有权独立收口在 `db_write.rs`。
 
 ### 2.1 DbState
 
 ```rust
 pub struct DbState {
-    pub pool: Pool<Sqlite>,
-    pub path: std::path::PathBuf,
-    pub write_gate: DbWriteGate,
+    pub(crate) pool: Pool<Sqlite>,
+    pub(crate) path: std::path::PathBuf,
+    writes: WriteCoordinator,
 }
 ```
 
@@ -75,9 +77,11 @@ pub struct DbState {
 |------|------|------|
 | `pool` | `Pool<Sqlite>` | sqlx 异步连接池，供全应用普通查询使用 |
 | `path` | `PathBuf` | 数据库文件的绝对物理路径，供 `DbWriteQueue` 直接打开 rusqlite 连接 |
-| `write_gate` | `DbWriteGate` | 每个数据库唯一的公平写入准入；只在一个运行期写事务内持有 |
+| `writes` | `WriteCoordinator` | 私有的每数据库公平写入协调器；业务模块无法取得 raw lease |
 
-`DbState` 以 Tauri `State` 形式挂载到 `AppHandle`。固定锁顺序是“领域锁 → `DbWriteGate` → `BEGIN IMMEDIATE`”；提交或回滚后先释放 Gate，再做缓存失效、请求取消、事件或网络操作。启动 migration/bootstrap 在并发服务启动前完成，是明确例外。
+`DbState` 以 Tauri `State` 形式挂载到 `AppHandle`。业务写入唯一入口是 `write_transaction(operation)`：返回的 `DbWriteTransaction` 同时拥有 SQLx 连接、`BEGIN IMMEDIATE` 事务和内部 lease。调用方不再维护 permit；只有 COMMIT、ROLLBACK，或失败后关闭不确定连接完成，lease 才释放。等待公平队列时可以取消；一旦取得 lease，BEGIN/COMMIT/ROLLBACK 由独立 Tokio 任务继续完成。该保证限于存活 runtime，Android 进程硬杀仍只依赖 SQLite 自身原子性。
+
+固定锁顺序是“领域锁 → `WriteCoordinator` → `BEGIN IMMEDIATE`”；事务结束后再做缓存失效、请求取消、事件或网络操作。同步 Queue、render-cache rusqlite writer 与非事务 PRAGMA 维护只能在 `persistence/` 内取得受限 `WriteLease`。
 
 ### 2.2 连接池初始化
 
@@ -88,10 +92,11 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, PathBuf), 
 **流程**（L11–L64）：
 
 1. **路径解析**：通过 `app_handle.path().app_config_dir()` 获取配置目录，追加 `vcp_avatar.db`（L26–L39）。在 Android 上，该路径通常为 `/data/user/0/com.vcp.avatar/files/vcp_avatar.db`。
-2. **连接选项配置**（L44–L65）：链式配置 SQLite PRAGMA。
-3. **连接池创建**：`SqlitePoolOptions::new().max_connections(5).connect_with(...)`（L67）。
-4. **运行版本化迁移**：调用 `run_migrations(&pool).await?`（L85），由 `sqlx::migrate!("./migrations")` 应用 `src-tauri/migrations/` 下的全部 SQL 迁移。
-5. **返回**：`(pool, db_path)`，由调用方（`lib.rs` 生命周期管理器）组装为 `DbState` 并挂载到 App State。
+2. **持久 PRAGMA bootstrap**：连接池建立前以单连接设置并验证 `page_size=16384`、`auto_vacuum=INCREMENTAL` 与 `journal_mode=WAL`。
+3. **运行期连接选项**：池内新连接只配置 `synchronous`、`busy_timeout`、`mmap_size`、`temp_store`、`cache_size` 与 `foreign_keys` 等 connection-local PRAGMA。
+4. **连接池创建**：`SqlitePoolOptions::new().max_connections(5).connect_with(...)`。
+5. **运行版本化迁移**：调用 `run_migrations(&pool).await?`，由 `sqlx::migrate!("./migrations")` 应用 `src-tauri/migrations/` 下的全部 SQL 迁移。
+6. **返回**：`(pool, db_path)`，由生命周期管理器组装为 `DbState` 并挂载到 App State。
 
 ### 2.3 损坏检测与恢复单元
 
@@ -106,18 +111,18 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, PathBuf), 
 
 ### 2.4 WAL 模式与深度性能调优
 
-连接选项通过链式 `pragma` 调用实现 9 项深度优化（`db_manager.rs:56-65`）：
+PRAGMA 分成“文件持久设置”和“每连接设置”，避免池扩容在写协调器之外重复修改数据库：
 
 | PRAGMA | 设置值 | 作用 |
 |--------|--------|------|
-| `journal_mode` | `WAL` | 启用 Write-Ahead Logging，允许读操作与写操作并发，极大降低 UI 卡顿 |
+| `journal_mode` | `WAL` | 启动单连接设置并验证；Queue/render-cache 连接只读验证，不再改写 |
 | `synchronous` | `NORMAL` | WAL 模式下兼顾安全性与速度（每次 checkpoint 同步，而非每次事务） |
 | `busy_timeout` | `30000` ms | 锁冲突时自动等待 30 秒，避免立刻抛出 `database is locked` |
 | `mmap_size` | `268435456` (256 MB) | 开启内存映射 I/O，将磁盘读取转为内存访问 |
 | `temp_store` | `2` (MEMORY) | 临时表与排序操作强制在内存中执行 |
-| `page_size` | `16384` (16 KB) | 匹配现代闪存页大小，提升顺序 I/O 效率 |
+| `page_size` | `16384` (16 KB) | 启动单连接预设；旧库由 DELETE-mode VACUUM 显式转换 |
 | `cache_size` | `-8000` (8000 页 ≈ 128 MB) | 负值表示以页为单位，增大数据页缓存 |
-| `auto_vacuum` | `2` (INCREMENTAL) | 增量清理逻辑，配合后续维护任务物理回收空间 |
+| `auto_vacuum` | `2` (INCREMENTAL) | 启动单连接设置，配合后续维护任务物理回收空间 |
 | `foreign_keys` | `1` | 开启外键约束，支持级联删除 |
 
 **WAL 模式的移动端优势**：
@@ -294,7 +299,7 @@ CREATE TABLE IF NOT EXISTS active_generations (
 
 ## 3. SQLite 写队列当前算法（`db_write_queue.rs`）
 
-> **状态边界（2026-08-30）**：当前算法是 **全局事务级 `DbWriteGate` + FIFO 贪婪前缀 + 2ms quiet / 10ms hard 双截止时间 + 事务内保序合并 + 固定 999 bind 预算**。Gate 不改变 Queue 的批次预算，只统一 Queue 与 SQLx/rusqlite 领域 writer 的准入。
+> **状态边界（2026-08-30）**：当前算法是 **私有 `WriteCoordinator` + FIFO 贪婪前缀 + 2ms quiet / 10ms hard 双截止时间 + 事务内保序合并 + 固定 999 bind 预算**。协调器不改变 Queue 的批次预算，只统一 Queue 与 SQLx/rusqlite writer 的事务准入。
 >
 > 一句话概括：多个同步 Pull 生产者把任务送入容量 32 的有界通道；唯一 Worker 按 FIFO 取“当前预算内最长连续前缀”，用一个持久 rusqlite 连接在单个事务中执行；`Flush` 是排在队列中的提交屏障。
 
@@ -321,7 +326,7 @@ flowchart LR
 
     Q --> W["唯一异步 Worker<br/>FIFO 收集批次"]
     W --> G["贪婪选择<br/>最长可容纳连续前缀"]
-    G --> A["DbWriteGate<br/>公平事务级准入"]
+    G --> A["WriteCoordinator<br/>内部 WriteLease"]
     A --> B["spawn_blocking"]
     B --> C["持久 rusqlite 连接<br/>prepare_cached 可跨批次复用"]
     C --> T["单个 SQLite 事务"]
@@ -331,9 +336,10 @@ flowchart LR
 
 这里的边界要说准确：
 
-- 队列负责合并同步 Pull；`DbWriteGate` 串行化整个进程内的物理写事务，普通业务写、同步删除、Finalizer 和维护 writer 使用同一实例。
-- Queue 在 2/10ms 收集窗口结束后才申请 Gate，等待期间不占用 SQLite；取得 permit 后使用 `BEGIN IMMEDIATE`，避免 DEFERRED 读快照升级为写锁时立即 `SQLITE_BUSY`。
+- 队列负责合并同步 Pull；私有 `WriteCoordinator` 串行化整个进程内的物理写事务，普通业务写通过 `DbWriteTransaction`，Queue/渲染缓存通过 persistence 内部 lease 使用同一实例。
+- Queue 在 2/10ms 收集窗口结束后才申请 lease，等待期间不占用 SQLite；取得 lease 后使用 `BEGIN IMMEDIATE`，避免 DEFERRED 读快照升级为写锁时立即 `SQLITE_BUSY`。协调器不设统一 30 秒 admission timeout，因此不会丢弃已收集的合法批次。
 - Queue 的 2 秒和 SQLx 的 30 秒 busy timeout 仍保留，但只处理漏接路径或外部连接，不是正常进程内调度机制。
+- 消息附件的 `internal_path` 文件元数据复核仍是事务内的窄例外，以保持 CAS 注册与 Queue 两种提交顺序；迁出必须配套 observed-path CAS，不能在本次事务 owner 重构中改变附件状态语义。
 - `submit().await` 只证明任务已经进入通道，不证明 SQLite 已提交；需要提交屏障时必须调用 `flush().await`。
 - 克隆 `DbWriteQueue` 只复制 sender 与只读元数据，`_worker` 置空；不会创建第二个 Worker 或第二条队列连接。
 
@@ -519,7 +525,7 @@ sequenceDiagram
 Worker 每批调用一次 `spawn_blocking`，但连接不是每次重开：
 
 1. 首批懒加载 `rusqlite::Connection`。
-2. 仅初始化一次 `journal_mode=WAL`、`synchronous=NORMAL`、`busy_timeout=2000ms`。
+2. 只读验证启动期已设置 `journal_mode=WAL`，并初始化 connection-local 的 `synchronous=NORMAL`、`busy_timeout=2000ms`。
 3. 连接保存在 `Arc<Mutex<Option<Connection>>>` 中，后续批次复用连接和 `prepare_cached` 缓存。
 4. 每批开启一个事务，严格按 `tasks_in_this_tx` 的 FIFO 顺序执行。
 5. 任一步失败会使事务回滚；成功才 `commit`。
@@ -527,7 +533,7 @@ Worker 每批调用一次 `spawn_blocking`，但连接不是每次重开：
 ```mermaid
 flowchart TD
     A["批次进入 spawn_blocking"] --> B["锁定并取得持久连接"]
-    B --> C["BEGIN TRANSACTION"]
+    B --> C["BEGIN IMMEDIATE"]
     C --> D["按 FIFO 遍历任务"]
 
     D --> E{"任务类型"}
@@ -827,6 +833,7 @@ fn run_render_cache_update_writer(
 
 **Writer（`run_render_cache_update_writer`）**：
 - 在 `spawn_blocking` 中运行，使用 rusqlite 直连。
+- 每个事务通过 persistence 内部 `WriteLease` 与 SQLx/Queue writer 共用公平准入；业务层看不到 lease。
 - 每收到一个 batch 开启一个事务，逐项调用 `update_render_cache_if_current`。
 - 写入携带 Reader 捕获的 `source_hash`；仅当 messages 当前 hash 仍相等且未删除时更新缓存。
 - 进度发射：每 32ms 或处理完成时，通过 `app_handle.emit` 向前端推送 `RebuildProgress`。
@@ -991,7 +998,7 @@ Agent/Group 同步写绕过业务 Facade，因此 session 成功或失败退出�
 
 > **关键设计决策备忘**
 >
-> 1. **读写分工**：纯读取走 WAL 并发；所有运行期 SQLx/rusqlite writer 共享 `DbWriteGate`，Gate 后以 `BEGIN IMMEDIATE` 开始事务。
+> 1. **读写分工**：纯读取走 WAL 并发；SQLx 业务写只使用取消安全的 `DbWriteTransaction`，rusqlite writer 只在 persistence 内使用同一 `WriteCoordinator` 的受限 lease，随后以 `BEGIN IMMEDIATE` 开始事务。
 > 2. **批量事务合并**：DbWriteQueue Worker 使用 2ms quiet / 首任务起算 10ms hard 双截止时间 + 32 任务/正常 500 消息预算；收集窗口不持有 Gate。
 > 3. **render_cache 独立表**：将预渲染 AST 二进制从 messages 表剥离，避免消息表膨胀，同时允许独立刷新已有缓存。
 > 4. **存储格式分工**：`messages.content` 保存明文 TEXT，`render_cache.render_content` 保存 zstd 压缩 AST。

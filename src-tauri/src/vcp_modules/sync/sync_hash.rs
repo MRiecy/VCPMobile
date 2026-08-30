@@ -7,13 +7,13 @@ use crate::vcp_modules::topic_types::{
     resolve_topic_activity_updated_at, TopicActivityDto, TopicKey,
 };
 
-use sqlx::{Row, Sqlite, Transaction};
+use sqlx::{Row, SqliteConnection};
 
 pub struct HashAggregator;
 
 impl HashAggregator {
     pub async fn load_topic_activity(
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut SqliteConnection,
         key: &TopicKey,
     ) -> Result<TopicActivityDto, String> {
         let row = sqlx::query(
@@ -24,7 +24,7 @@ impl HashAggregator {
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(&key.topic_id)
-        .fetch_one(&mut **tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
         let topic_updated_at: i64 = row
@@ -53,7 +53,7 @@ impl HashAggregator {
     }
 
     async fn compute_topic_content_aggregate(
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut SqliteConnection,
         key: &TopicKey,
     ) -> Result<(String, i32, i64), String> {
         let rows = sqlx::query(
@@ -63,7 +63,7 @@ impl HashAggregator {
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(&key.topic_id)
-        .fetch_all(&mut **tx)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -242,14 +242,14 @@ impl HashAggregator {
     }
 
     pub async fn compute_agent_root_hash(
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut SqliteConnection,
         agent_id: &str,
     ) -> Result<String, String> {
         let topic_rows = sqlx::query(
             "SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'agent' AND deleted_at IS NULL",
         )
         .bind(agent_id)
-        .fetch_all(&mut **tx)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -275,14 +275,14 @@ impl HashAggregator {
     }
 
     pub async fn compute_group_root_hash(
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut SqliteConnection,
         group_id: &str,
     ) -> Result<String, String> {
         let topic_rows = sqlx::query(
             "SELECT topic_id, config_hash, content_hash FROM topics WHERE owner_id = ? AND owner_type = 'group' AND deleted_at IS NULL",
         )
         .bind(group_id)
-        .fetch_all(&mut **tx)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -308,7 +308,7 @@ impl HashAggregator {
     }
 
     pub async fn bubble_topic_hash(
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut SqliteConnection,
         key: &TopicKey,
     ) -> Result<TopicActivityDto, String> {
         let (root_hash, msg_count, last_message_updated_at) =
@@ -338,7 +338,7 @@ impl HashAggregator {
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(&key.topic_id)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
         if updated.rows_affected() != 1 {
@@ -351,7 +351,7 @@ impl HashAggregator {
     }
 
     pub async fn bubble_topic_hash_with_meta(
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut SqliteConnection,
         key: &TopicKey,
         title: &str,
         created_at: i64,
@@ -400,7 +400,7 @@ impl HashAggregator {
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(&key.topic_id)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
         if updated.rows_affected() != 1 {
@@ -413,7 +413,7 @@ impl HashAggregator {
     }
 
     pub async fn bubble_agent_hash(
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut SqliteConnection,
         agent_id: &str,
     ) -> Result<(), String> {
         let root_hash = Self::compute_agent_root_hash(tx, agent_id).await?;
@@ -423,7 +423,7 @@ impl HashAggregator {
         )
         .bind(root_hash)
         .bind(agent_id)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
         if updated.rows_affected() != 1 {
@@ -433,7 +433,7 @@ impl HashAggregator {
     }
 
     pub async fn bubble_group_hash(
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut SqliteConnection,
         group_id: &str,
     ) -> Result<(), String> {
         let root_hash = Self::compute_group_root_hash(tx, group_id).await?;
@@ -443,7 +443,7 @@ impl HashAggregator {
         )
         .bind(root_hash)
         .bind(group_id)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
         if updated.rows_affected() != 1 {
@@ -454,7 +454,7 @@ impl HashAggregator {
 
     /// Group 成员等 DTO 字段在业务事务中变化后，按统一 DTO 合同重算配置哈希与时钟。
     pub async fn recompute_group_config_hash(
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut SqliteConnection,
         group_id: &str,
         updated_at: i64,
     ) -> Result<(), String> {
@@ -473,7 +473,7 @@ impl HashAggregator {
         .bind(updated_at)
         .bind(&config_hash)
         .bind(group_id)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
         if updated.rows_affected() != 1 {
@@ -485,7 +485,7 @@ impl HashAggregator {
     }
 
     pub async fn bubble_from_topic(
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut SqliteConnection,
         key: &TopicKey,
     ) -> Result<TopicActivityDto, String> {
         let activity = Self::bubble_topic_hash(tx, key).await?;
@@ -509,7 +509,7 @@ struct SyncDtoLoader;
 
 impl SyncDtoLoader {
     async fn load_agent_topic_dto(
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut SqliteConnection,
         key: &TopicKey,
     ) -> Result<AgentTopicSyncDTO, String> {
         let row = sqlx::query(
@@ -518,7 +518,7 @@ impl SyncDtoLoader {
         )
         .bind(&key.owner_id)
         .bind(&key.topic_id)
-        .fetch_one(&mut **tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -548,7 +548,7 @@ impl SyncDtoLoader {
     }
 
     async fn load_group_topic_dto(
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut SqliteConnection,
         key: &TopicKey,
     ) -> Result<GroupTopicSyncDTO, String> {
         let row = sqlx::query(
@@ -557,7 +557,7 @@ impl SyncDtoLoader {
         )
         .bind(&key.owner_id)
         .bind(&key.topic_id)
-        .fetch_one(&mut **tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -581,7 +581,7 @@ impl SyncDtoLoader {
     }
 
     async fn load_group_dto(
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut SqliteConnection,
         group_id: &str,
     ) -> Result<GroupSyncDTO, String> {
         let row = sqlx::query(
@@ -589,7 +589,7 @@ impl SyncDtoLoader {
              FROM groups WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL",
         )
         .bind(group_id)
-        .fetch_one(&mut **tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -634,14 +634,14 @@ impl SyncDtoLoader {
     }
 
     async fn load_group_members(
-        tx: &mut Transaction<'_, Sqlite>,
+        tx: &mut SqliteConnection,
         group_id: &str,
     ) -> Result<Vec<String>, String> {
         let rows = sqlx::query(
             "SELECT agent_id FROM group_members WHERE group_id = ? ORDER BY sort_order",
         )
         .bind(group_id)
-        .fetch_all(&mut **tx)
+        .fetch_all(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -841,7 +841,7 @@ mod tests {
         );
     }
 
-    async fn compute_owner_root(tx: &mut Transaction<'_, Sqlite>, owner_type: &str) -> String {
+    async fn compute_owner_root(tx: &mut SqliteConnection, owner_type: &str) -> String {
         if owner_type == "agent" {
             HashAggregator::compute_agent_root_hash(tx, "owner")
                 .await

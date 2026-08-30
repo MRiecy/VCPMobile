@@ -105,7 +105,7 @@ pub async fn write_render_cache_cas(
     render_content: &[u8],
 ) -> Result<bool, String> {
     let now = chrono::Utc::now().timestamp_millis();
-    let (write_permit, mut tx) = db_state.begin_write("message.render-cache").await?;
+    let mut tx = db_state.write_transaction("message.render-cache").await?;
     let result = sqlx::query(
         "INSERT INTO render_cache (
             owner_type, owner_id, topic_id, msg_id, render_content, content_hash,
@@ -145,7 +145,6 @@ pub async fn write_render_cache_cas(
     .await
     .map_err(|error| error.to_string())?;
     tx.commit().await.map_err(|error| error.to_string())?;
-    drop(write_permit);
     Ok(result.rows_affected() == 1)
 }
 
@@ -201,7 +200,14 @@ type RenderCacheWrite = (MessageKey, String, Vec<u8>);
 
 fn open_maintenance_rusqlite(db_path: &std::path::Path) -> Result<rusqlite::Connection, String> {
     let conn = rusqlite::Connection::open(db_path).map_err(|e| e.to_string())?;
-    conn.execute("PRAGMA journal_mode = WAL", []).ok();
+    let journal_mode: String = conn
+        .pragma_query_value(None, "journal_mode", |row| row.get(0))
+        .map_err(|error| error.to_string())?;
+    if !journal_mode.eq_ignore_ascii_case("wal") {
+        return Err(format!(
+            "Render-cache writer requires bootstrapped WAL mode, got {journal_mode}"
+        ));
+    }
     conn.execute("PRAGMA synchronous = NORMAL", []).ok();
     conn.execute("PRAGMA busy_timeout = 30000", []).ok();
     Ok(conn)
@@ -304,14 +310,16 @@ fn run_render_cache_update_writer(
 
         while let Some(batch) = rx.recv().await {
             let batch_len = batch.len();
-            let write_permit = db_state
-                .write_gate
-                .acquire("maintenance.render-cache")
-                .await?;
+            let write_lease = db_state
+                .write_coordinator()
+                .acquire_lease("maintenance.render-cache")
+                .await;
             let connection = connection.clone();
             let db_path = db_state.path.clone();
             tokio::task::spawn_blocking(move || -> Result<(), String> {
-                let write_permit = write_permit;
+                let mut write_lease = write_lease;
+                let write_started = std::time::Instant::now();
+                write_lease.mark_outcome("transaction_failed");
                 let mut connection = connection
                     .lock()
                     .map_err(|_| "预渲染缓存连接锁已损坏".to_string())?;
@@ -330,7 +338,7 @@ fn run_render_cache_update_writer(
                         .map_err(|e| e.to_string())?;
                 }
                 tx.commit().map_err(|e| e.to_string())?;
-                drop(write_permit);
+                write_lease.finish("committed", write_started.elapsed());
                 Ok(())
             })
             .await
@@ -608,7 +616,7 @@ impl MessageRepository {
     }
 
     async fn load_upsert_target_state(
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        tx: &mut sqlx::SqliteConnection,
         key: &TopicKey,
         msg_id: &str,
     ) -> Result<Option<ExistingMessageState>, String> {
@@ -621,7 +629,7 @@ impl MessageRepository {
         .bind(&key.owner_type)
         .bind(&key.owner_id)
         .bind(&key.topic_id)
-        .fetch_one(&mut **tx)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|error| error.to_string())?;
         if !topic_is_live {
@@ -638,7 +646,7 @@ impl MessageRepository {
         .bind(&key.owner_id)
         .bind(&key.topic_id)
         .bind(msg_id)
-        .fetch_optional(&mut **tx)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|error| error.to_string())?;
         let existing = existing_row
@@ -683,7 +691,7 @@ impl MessageRepository {
     }
 
     pub async fn upsert_message(
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        tx: &mut sqlx::SqliteConnection,
         message: &ChatMessage,
         key: &TopicKey,
         render_content: &[u8],
@@ -779,7 +787,7 @@ impl MessageRepository {
             .bind(&content_hash)
             .bind(message_timestamp) // created_at
             .bind(effective_updated_at)
-            .execute(&mut **tx)
+            .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
             if changed.rows_affected() != 1 {
@@ -811,7 +819,7 @@ impl MessageRepository {
         .bind(&content_hash)
         .bind(RENDERER_SCHEMA_VERSION)
         .bind(message.timestamp as i64)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -825,7 +833,7 @@ impl MessageRepository {
             .bind(&key.owner_id)
             .bind(&key.topic_id)
             .bind(&message.id)
-            .execute(&mut **tx)
+            .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -838,7 +846,7 @@ impl MessageRepository {
             .bind(&message.content)
             .bind(&key.owner_type)
             .bind(&key.owner_id)
-            .execute(&mut **tx)
+            .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
         }
@@ -862,7 +870,7 @@ impl MessageRepository {
             .bind(&key.owner_id)
             .bind(&key.topic_id)
             .bind(&message.id)
-            .execute(&mut **tx)
+            .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
         }
@@ -876,7 +884,7 @@ impl MessageRepository {
     }
 
     async fn upsert_attachments_for_message(
-        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        tx: &mut sqlx::SqliteConnection,
         key: &TopicKey,
         msg_id: &str,
         timestamp: i64,
@@ -922,7 +930,7 @@ impl MessageRepository {
             .bind(&att.thumbnail_path)
             .bind(timestamp)
             .bind(timestamp)
-            .execute(&mut **tx)
+            .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -954,7 +962,7 @@ impl MessageRepository {
             .bind(&att.src)
             .bind(&att.status)
             .bind(timestamp)
-            .execute(&mut **tx)
+            .execute(&mut *tx)
             .await
             .map_err(|e| e.to_string())?;
         }
@@ -969,7 +977,7 @@ impl MessageRepository {
         .bind(&key.topic_id)
         .bind(msg_id)
         .bind(i32::try_from(attachments.len()).map_err(|_| "Too many attachments".to_string())?)
-        .execute(&mut **tx)
+        .execute(&mut *tx)
         .await
         .map_err(|e| e.to_string())?;
 

@@ -1,4 +1,4 @@
-use crate::vcp_modules::db_manager::{begin_immediate_write, DbState};
+use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::emit_sync_log;
@@ -29,8 +29,8 @@ async fn finalize_modified_topics(
     db: &DbState,
     modified_topics: &HashSet<TopicKey>,
 ) -> Result<FinalizationStats, String> {
-    let write_permit = db.write_gate.acquire("sync.finalizer").await?;
-    let mut tx = begin_immediate_write(&db.pool)
+    let mut tx = db
+        .write_transaction("sync.finalizer")
         .await
         .map_err(|error| format!("开启同步收尾事务失败: {error}"))?;
     let mut meta_map = std::collections::HashMap::new();
@@ -150,7 +150,6 @@ async fn finalize_modified_topics(
     tx.commit()
         .await
         .map_err(|error| format!("提交同步收尾事务失败: {error}"))?;
-    drop(write_permit);
     Ok(FinalizationStats {
         bubbled_topics,
         affected_agents: affected_agents.len(),

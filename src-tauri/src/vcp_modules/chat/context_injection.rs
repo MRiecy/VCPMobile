@@ -378,7 +378,7 @@ pub async fn save_tarven_rule(
     let is_enabled_int = if rule.is_enabled { 1 } else { 0 };
     let wrap_int = if rule.wrap { 1 } else { 0 };
 
-    let (write_permit, mut tx) = db_state.begin_write("context.rule.save").await?;
+    let mut tx = db_state.write_transaction("context.rule.save").await?;
     sqlx::query(
         "INSERT INTO tarven_rules (id, name, rule_type, is_enabled, content, scope, wrap, role, depth, position, sort_order, created_at, updated_at) 
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -412,7 +412,6 @@ pub async fn save_tarven_rule(
     .await
     .map_err(|e| format!("Failed to save rule: {}", e))?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
 
     Ok(())
 }
@@ -423,14 +422,13 @@ pub async fn delete_tarven_rule(db_state: State<'_, DbState>, id: String) -> Res
         return Err("系统内置高级注入规则禁止被删除".to_string());
     }
 
-    let (write_permit, mut tx) = db_state.begin_write("context.rule.delete").await?;
+    let mut tx = db_state.write_transaction("context.rule.delete").await?;
     sqlx::query("DELETE FROM tarven_rules WHERE id = ?")
         .bind(id)
         .execute(&mut *tx)
         .await
         .map_err(|e| format!("Failed to delete rule: {}", e))?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
     Ok(())
 }
 
@@ -443,7 +441,7 @@ pub async fn toggle_rule_enabled(
     let enabled_int = if enabled { 1 } else { 0 };
     let now = Local::now().timestamp_millis();
 
-    let (write_permit, mut tx) = db_state.begin_write("context.rule.toggle").await?;
+    let mut tx = db_state.write_transaction("context.rule.toggle").await?;
     sqlx::query("UPDATE tarven_rules SET is_enabled = ?, updated_at = ? WHERE id = ?")
         .bind(enabled_int)
         .bind(now)
@@ -452,7 +450,6 @@ pub async fn toggle_rule_enabled(
         .await
         .map_err(|e| format!("Failed to toggle rule: {}", e))?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
     Ok(())
 }
 
@@ -462,7 +459,7 @@ pub async fn reorder_rules(
     rule_ids: Vec<String>,
 ) -> Result<(), String> {
     let now = Local::now().timestamp_millis();
-    let (write_permit, mut tx) = db_state.begin_write("context.rule.reorder").await?;
+    let mut tx = db_state.write_transaction("context.rule.reorder").await?;
 
     for (index, id) in rule_ids.iter().enumerate() {
         sqlx::query("UPDATE tarven_rules SET sort_order = ?, updated_at = ? WHERE id = ?")
@@ -475,7 +472,6 @@ pub async fn reorder_rules(
     }
 
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
     Ok(())
 }
 

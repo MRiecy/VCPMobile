@@ -502,7 +502,9 @@ async fn commit_registered_attachment(
     internal_path: &str,
     now: i64,
 ) -> Result<(), String> {
-    let (write_permit, mut tx) = db_state.begin_write("file.attachment.register").await?;
+    let mut tx = db_state
+        .write_transaction("file.attachment.register")
+        .await?;
     sqlx::query(
         "INSERT INTO attachments (hash, mime_type, size, internal_path, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?)
@@ -560,7 +562,6 @@ async fn commit_registered_attachment(
     .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
     Ok(())
 }
 
@@ -670,7 +671,9 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
     // 杜绝大文本数据在前端 WebView 绕一圈所导致的数据丢失或内存积压泄漏！
     if extracted_text.is_some() || thumbnail_path.is_some() {
         let derived_update = async {
-            let (write_permit, mut tx) = db_state.begin_write("file.attachment.derived").await?;
+            let mut tx = db_state
+                .write_transaction("file.attachment.derived")
+                .await?;
             sqlx::query(
                 "UPDATE attachments
                  SET extracted_text = ?, thumbnail_path = ?, updated_at = ?
@@ -684,7 +687,6 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
             .await
             .map_err(|error| error.to_string())?;
             tx.commit().await.map_err(|error| error.to_string())?;
-            drop(write_permit);
             Ok::<(), String>(())
         }
         .await;
@@ -1072,7 +1074,9 @@ pub async fn register_local_file(
             }
 
             // 更新 SQLite 中的 thumbnail_path，使其指向正式保存的缩略图
-            let (write_permit, mut tx) = db_state.begin_write("file.attachment.thumbnail").await?;
+            let mut tx = db_state
+                .write_transaction("file.attachment.thumbnail")
+                .await?;
             sqlx::query("UPDATE attachments SET thumbnail_path = ?, updated_at = ? WHERE hash = ?")
                 .bind(&dest_thumb_path_str)
                 .bind(attachment_data.created_at as i64)
@@ -1081,7 +1085,6 @@ pub async fn register_local_file(
                 .await
                 .map_err(|error| format!("更新附件缩略图元数据失败: {}", error))?;
             tx.commit().await.map_err(|error| error.to_string())?;
-            drop(write_permit);
             if let Err(error) = tokio::fs::remove_file(&source_thumb).await {
                 log::warn!("附件缩略图已注册，但清理 staging 文件失败: {}", error);
             }
@@ -1333,7 +1336,7 @@ pub async fn ensure_extracted_text(
         // 3. 异步持久化写入 SQLite，不阻塞当前的上下文加载请求
         tokio::spawn(async move {
             let result = async {
-                let (write_permit, mut tx) = db_c.begin_write("file.attachment.extract").await?;
+                let mut tx = db_c.write_transaction("file.attachment.extract").await?;
                 sqlx::query(
                     "UPDATE attachments SET extracted_text = ?, updated_at = ? WHERE hash = ?",
                 )
@@ -1344,7 +1347,6 @@ pub async fn ensure_extracted_text(
                 .await
                 .map_err(|error| error.to_string())?;
                 tx.commit().await.map_err(|error| error.to_string())?;
-                drop(write_permit);
                 Ok::<(), String>(())
             }
             .await;

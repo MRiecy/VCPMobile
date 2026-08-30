@@ -145,7 +145,7 @@ pub async fn refresh_models<R: Runtime>(
             let now = crate::vcp_modules::infra::utils::now_millis();
 
             let persist_result = async {
-                let (write_permit, mut tx) = db_state.begin_write("model.cache").await?;
+                let mut tx = db_state.write_transaction("model.cache").await?;
                 sqlx::query("INSERT INTO settings (key, value, updated_at) VALUES ('cached_models', ?, ?)
                              ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
                     .bind(json_str)
@@ -154,7 +154,6 @@ pub async fn refresh_models<R: Runtime>(
                     .await
                     .map_err(|error| error.to_string())?;
                 tx.commit().await.map_err(|error| error.to_string())?;
-                drop(write_permit);
                 Ok::<(), String>(())
             }
             .await;
@@ -227,7 +226,7 @@ pub async fn toggle_favorite_model<R: Runtime>(
     model_id: String,
 ) -> Result<bool, String> {
     let db_state = app.state::<DbState>();
-    let (write_permit, mut tx) = db_state.begin_write("model.favorite").await?;
+    let mut tx = db_state.write_transaction("model.favorite").await?;
 
     let row = sqlx::query("SELECT model_id FROM model_favorites WHERE model_id = ?")
         .bind(&model_id)
@@ -255,7 +254,6 @@ pub async fn toggle_favorite_model<R: Runtime>(
     };
 
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
 
     Ok(favorited)
 }
@@ -270,7 +268,7 @@ pub async fn record_model_usage<R: Runtime>(
 
     let now = crate::vcp_modules::infra::utils::now_millis();
 
-    let (write_permit, mut tx) = db_state.begin_write("model.usage").await?;
+    let mut tx = db_state.write_transaction("model.usage").await?;
     sqlx::query(
         "INSERT INTO model_usage_stats (model_id, usage_count, updated_at) 
          VALUES (?, 1, ?) 
@@ -282,7 +280,6 @@ pub async fn record_model_usage<R: Runtime>(
     .await
     .map_err(|e| e.to_string())?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    drop(write_permit);
 
     Ok(())
 }
