@@ -5,7 +5,9 @@ use crate::vcp_modules::sync_error::{
     build_local_error_payload, build_wire_error_payload, decode_wire_sync_error,
     encode_wire_sync_error, is_attempt_restart_code, SyncErrorPayload, WireSyncError,
 };
-use crate::vcp_modules::sync_logger::{redact_sync_diagnostic, LogLevel, SyncLogger};
+use crate::vcp_modules::sync_logger::{
+    redact_sync_diagnostic, DbWriteMetricLogBridge, LogLevel, SyncLogger,
+};
 use crate::vcp_modules::sync_pipeline::{Phase1Metadata, Phase3Message, SyncPipeline};
 use crate::vcp_modules::sync_types::{
     DeleteNotificationFrame, DeleteTarget, ManifestRequestFrame, ManifestResultFrame, ManifestType,
@@ -1303,7 +1305,7 @@ async fn run_sync_session(
     let mut next_attempt_id = 0u64;
 
     let db = app_handle.state::<DbState>();
-    let write_queue = DbWriteQueue::new(&db, session_id);
+    let write_metric_receiver = db.subscribe_write_metrics();
     let sync_log_level = LogLevel::parse(&configured_log_level).unwrap_or(LogLevel::Info);
     let invalid_log_level = LogLevel::parse(&configured_log_level).is_none();
     let log_dir = app_handle
@@ -1361,7 +1363,9 @@ async fn run_sync_session(
             "本次未生成诊断日志，同步过程仍可继续",
         );
     }
-    let write_queue = Arc::new(write_queue);
+    let db_write_metric_bridge =
+        DbWriteMetricLogBridge::start(write_metric_receiver, sync_logger.clone());
+    let write_queue = Arc::new(DbWriteQueue::new(&db, session_id));
 
     #[cfg(target_os = "android")]
     let sync_guardian_acquired = match tauri_plugin_vcp_mobile::stream::start_stream_service_inner(
@@ -2650,9 +2654,6 @@ async fn run_sync_session(
                                             pending_msg_topics_task.completion_summary().await,
                                         ).await;
                                         if sync_success {
-                                            if let Ok(mut logger) = sync_logger_task.lock() {
-                                                (*logger).end_session();
-                                            }
                                             emit_sync_log(&handle_clone, "success", "同步已完成，所有数据已对齐");
 
                                         }
@@ -2907,6 +2908,11 @@ async fn run_sync_session(
     };
     // 失败 attempt 也可能已有部分实体写入；离开 session 前必须丢弃旧 Facade cache。
     crate::vcp_modules::sync::sync_finalize::invalidate_sync_entity_caches(&app_handle);
+    db_write_metric_bridge.shutdown().await;
+    match sync_logger.lock() {
+        Ok(mut logger) => logger.end_session(),
+        Err(_) => log::error!("[SyncLogger] Session logger lock is poisoned during shutdown"),
+    }
 
     let sync_state = app_handle.state::<SyncState>();
     let _owner_commit = sync_state.owner_commit.lock().await;

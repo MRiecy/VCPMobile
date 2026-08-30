@@ -32,6 +32,52 @@ async fn wait_until_unlocked(coordinator: &WriteCoordinator) {
 }
 
 #[tokio::test]
+async fn committed_write_emits_one_complete_metric() {
+    let (_temp_dir, pool, coordinator) = file_backed_writer().await;
+    let mut metrics = coordinator.subscribe_metrics();
+
+    let tx = coordinator
+        .write_transaction(&pool, "test.metric-commit")
+        .await
+        .expect("begin metric transaction");
+    tx.commit().await.expect("commit metric transaction");
+
+    let metric = tokio::time::timeout(Duration::from_secs(1), metrics.recv())
+        .await
+        .expect("write metric timed out")
+        .expect("write metric stream closed");
+    assert_eq!(metric.operation, "test.metric-commit");
+    assert_eq!(metric.outcome, "committed");
+    assert!(metric.begin_duration.is_some());
+    assert!(metric.finish_duration.is_some());
+    assert!(
+        !coordinator.is_locked(),
+        "metric must be observable only after the writer guard is released"
+    );
+    assert!(matches!(
+        metrics.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    ));
+}
+
+#[tokio::test]
+async fn subscription_observes_a_preexisting_lease_when_it_finishes() {
+    let (_temp_dir, _pool, coordinator) = file_backed_writer().await;
+    let holder = coordinator.acquire_lease("test.preexisting-holder").await;
+    let mut metrics = coordinator.subscribe_metrics();
+
+    drop(holder);
+
+    let metric = tokio::time::timeout(Duration::from_secs(1), metrics.recv())
+        .await
+        .expect("preexisting holder metric timed out")
+        .expect("preexisting holder metric stream closed");
+    assert_eq!(metric.operation, "test.preexisting-holder");
+    assert_eq!(metric.outcome, "released");
+    assert!(!coordinator.is_locked());
+}
+
+#[tokio::test]
 async fn cancelled_gate_waiter_never_begins_a_transaction() {
     let (_temp_dir, pool, coordinator) = file_backed_writer().await;
     let holder = coordinator.acquire_lease("test.holder").await;
@@ -106,6 +152,7 @@ async fn cancelling_during_begin_keeps_the_lease_until_cleanup() {
 #[tokio::test]
 async fn dropped_and_panicking_transaction_bodies_roll_back_before_the_next_writer() {
     let (_temp_dir, pool, coordinator) = file_backed_writer().await;
+    let mut metrics = coordinator.subscribe_metrics();
 
     let mut dropped = coordinator
         .write_transaction(&pool, "test.dropped-body")
@@ -117,6 +164,10 @@ async fn dropped_and_panicking_transaction_bodies_roll_back_before_the_next_writ
         .expect("write dropped transaction row");
     drop(dropped);
     wait_until_unlocked(&coordinator).await;
+    let dropped_metric = metrics.recv().await.expect("dropped transaction metric");
+    assert_eq!(dropped_metric.operation, "test.dropped-body");
+    assert_eq!(dropped_metric.outcome, "rolled_back");
+    assert!(dropped_metric.finish_duration.is_some());
 
     let panic_coordinator = coordinator.clone();
     let panic_pool = pool.clone();
@@ -316,6 +367,7 @@ async fn cancelling_the_commit_waiter_does_not_cancel_the_commit() {
 #[tokio::test]
 async fn commit_error_closes_or_rolls_back_before_releasing_the_lease() {
     let (_temp_dir, pool, coordinator) = file_backed_writer().await;
+    let mut metrics = coordinator.subscribe_metrics();
     let mut tx = coordinator
         .write_transaction(&pool, "test.rejected-commit")
         .await
@@ -333,6 +385,11 @@ async fn commit_error_closes_or_rolls_back_before_releasing_the_lease() {
         .await
         .expect_err("commit hook must reject the transaction");
     assert!(!coordinator.is_locked());
+    let metric = metrics.recv().await.expect("rejected commit metric");
+    assert_eq!(metric.operation, "test.rejected-commit");
+    assert!(metric.outcome.starts_with("commit_failed_"));
+    assert!(metric.is_failure());
+    assert!(metric.finish_duration.is_some());
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM write_probe")
         .fetch_one(&pool)
         .await

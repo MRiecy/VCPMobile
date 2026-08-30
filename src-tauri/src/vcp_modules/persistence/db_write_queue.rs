@@ -221,6 +221,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn queue_reports_real_begin_and_commit_boundaries() {
+        let (_temp_dir, _pool, db_state, queue) = file_backed_queue().await;
+        let mut metrics = db_state.subscribe_write_metrics();
+
+        queue
+            .submit(avatar_task("owner"))
+            .await
+            .expect("submit measured queue write");
+        queue.flush().await.expect("flush measured queue write");
+
+        let metric = tokio::time::timeout(Duration::from_secs(1), metrics.recv())
+            .await
+            .expect("queue metric timed out")
+            .expect("queue metric stream closed");
+        assert_eq!(metric.operation, "sync.queue");
+        assert_eq!(metric.outcome, "committed");
+        assert!(metric.begin_duration.is_some());
+        assert!(metric.finish_duration.is_some());
+        assert!(!db_state.write_coordinator().is_locked());
+    }
+
+    #[tokio::test]
     async fn sqlx_transaction_holds_coordinator_before_real_queue_writer() {
         let (_temp_dir, pool, db_state, queue) = file_backed_queue().await;
         let mut sqlx_tx = db_state
@@ -361,7 +383,8 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_real_flush_keeps_worker_failure_sticky() {
-        let (_temp_dir, pool, _db_state, queue) = file_backed_queue().await;
+        let (_temp_dir, pool, db_state, queue) = file_backed_queue().await;
+        let mut metrics = db_state.subscribe_write_metrics();
         sqlx::query(
             "CREATE TRIGGER fail_queue_avatar BEFORE INSERT ON avatars
              BEGIN SELECT RAISE(ABORT, 'forced avatar failure'); END;",
@@ -387,6 +410,14 @@ mod tests {
             .await
             .expect_err("next live Flush must receive the sticky failure");
         assert!(error.contains("forced avatar failure"));
+        let metric = metrics
+            .recv()
+            .await
+            .expect("failed Queue transaction metric");
+        assert_eq!(metric.operation, "sync.queue");
+        assert_eq!(metric.outcome, "transaction_failed");
+        assert!(metric.is_failure());
+        assert!(metric.finish_duration.is_none());
         queue
             .flush()
             .await
@@ -1200,7 +1231,6 @@ impl DbWriteQueue {
                 // [Turbo Phase 3] 使用 spawn_blocking + rusqlite 进行极致写入
                 let result = tokio::task::spawn_blocking(move || {
                     let mut write_lease = write_lease;
-                    let write_started = std::time::Instant::now();
                     write_lease.mark_outcome("transaction_failed");
                     let mut guard = ch.lock().unwrap();
                     if guard.is_none() {
@@ -1221,6 +1251,7 @@ impl DbWriteQueue {
                     }
                     let conn = guard.as_mut().unwrap();
                     let tx = Self::begin_write_transaction(conn)?;
+                    write_lease.mark_begin(transaction_started.elapsed());
 
                     let mut affected_owners = HashSet::new();
 
@@ -1333,8 +1364,16 @@ impl DbWriteQueue {
                         }
                     }
 
-                    tx.commit()?;
-                    write_lease.finish("committed", write_started.elapsed());
+                    let finish_started = std::time::Instant::now();
+                    match tx.commit() {
+                        Ok(()) => {
+                            write_lease.finish("committed", finish_started.elapsed());
+                        }
+                        Err(error) => {
+                            write_lease.finish("commit_failed", finish_started.elapsed());
+                            return Err(error);
+                        }
+                    }
                     Ok::<(), rusqlite::Error>(())
                 }).await;
 

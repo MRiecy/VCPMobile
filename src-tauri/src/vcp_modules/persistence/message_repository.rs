@@ -314,11 +314,11 @@ fn run_render_cache_update_writer(
                 .write_coordinator()
                 .acquire_lease("maintenance.render-cache")
                 .await;
+            let transaction_started = std::time::Instant::now();
             let connection = connection.clone();
             let db_path = db_state.path.clone();
             tokio::task::spawn_blocking(move || -> Result<(), String> {
                 let mut write_lease = write_lease;
-                let write_started = std::time::Instant::now();
                 write_lease.mark_outcome("transaction_failed");
                 let mut connection = connection
                     .lock()
@@ -332,13 +332,22 @@ fn run_render_cache_update_writer(
                 let tx = connection
                     .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
                     .map_err(|error| error.to_string())?;
+                write_lease.mark_begin(transaction_started.elapsed());
                 let now = chrono::Utc::now().timestamp_millis();
                 for (key, content_hash, bytes) in batch {
                     update_render_cache_if_current(&tx, &key, &content_hash, &bytes, now)
                         .map_err(|e| e.to_string())?;
                 }
-                tx.commit().map_err(|e| e.to_string())?;
-                write_lease.finish("committed", write_started.elapsed());
+                let finish_started = std::time::Instant::now();
+                match tx.commit() {
+                    Ok(()) => {
+                        write_lease.finish("committed", finish_started.elapsed());
+                    }
+                    Err(error) => {
+                        write_lease.finish("commit_failed", finish_started.elapsed());
+                        return Err(error.to_string());
+                    }
+                }
                 Ok(())
             })
             .await

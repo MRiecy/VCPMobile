@@ -1,12 +1,54 @@
 use sqlx::pool::PoolConnection;
 use sqlx::{Pool, Sqlite, SqliteConnection};
+use std::fmt;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
-use tokio::sync::{Mutex, OwnedMutexGuard};
+use tokio::sync::{broadcast, Mutex, OwnedMutexGuard};
 
 const SLOW_WRITE_THRESHOLD: Duration = Duration::from_millis(500);
+const WRITE_METRIC_CAPACITY: usize = 256;
+
+/// A privacy-safe observation emitted after a physical SQLite write lease is released.
+///
+/// Subscribers observe writes that finish while they are active. The metric deliberately carries
+/// no SQL, entity identity, path, or session state so persistence remains independent from sync.
+#[derive(Clone, Debug)]
+pub(crate) struct DbWriteMetric {
+    pub(crate) operation: &'static str,
+    pub(crate) outcome: &'static str,
+    pub(crate) wait_duration: Duration,
+    pub(crate) begin_duration: Option<Duration>,
+    pub(crate) hold_duration: Duration,
+    pub(crate) finish_duration: Option<Duration>,
+}
+
+impl DbWriteMetric {
+    pub(crate) fn is_failure(&self) -> bool {
+        self.outcome.contains("failed")
+    }
+
+    pub(crate) fn is_slow(&self) -> bool {
+        self.wait_duration >= SLOW_WRITE_THRESHOLD || self.hold_duration >= SLOW_WRITE_THRESHOLD
+    }
+}
+
+impl fmt::Display for DbWriteMetric {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let millis = |duration: Duration| duration.as_secs_f64() * 1000.0;
+        write!(
+            formatter,
+            "operation={} outcome={} wait_ms={:.3} begin_ms={:.3} hold_ms={:.3} finish_ms={:.3}",
+            self.operation,
+            self.outcome,
+            millis(self.wait_duration),
+            self.begin_duration.map_or(0.0, millis),
+            millis(self.hold_duration),
+            self.finish_duration.map_or(0.0, millis),
+        )
+    }
+}
 
 /// Coordinates the process-local SQLite writer without exposing admission permits to business
 /// modules. SQLite remains the final cross-process lock; this coordinator only orders writers
@@ -15,13 +57,16 @@ const SLOW_WRITE_THRESHOLD: Duration = Duration::from_millis(500);
 pub(super) struct WriteCoordinator {
     gate: Arc<Mutex<()>>,
     runtime: Handle,
+    metrics: broadcast::Sender<DbWriteMetric>,
 }
 
 impl WriteCoordinator {
     pub(super) fn new() -> Self {
+        let (metrics, _) = broadcast::channel(WRITE_METRIC_CAPACITY);
         Self {
             gate: Arc::new(Mutex::new(())),
             runtime: Handle::current(),
+            metrics,
         }
     }
 
@@ -30,7 +75,16 @@ impl WriteCoordinator {
     pub(super) async fn acquire_lease(&self, operation: &'static str) -> WriteLease {
         let wait_started = Instant::now();
         let guard = self.gate.clone().lock_owned().await;
-        WriteLease::new(operation, wait_started.elapsed(), guard)
+        WriteLease::new(
+            operation,
+            wait_started.elapsed(),
+            guard,
+            self.metrics.clone(),
+        )
+    }
+
+    pub(super) fn subscribe_metrics(&self) -> broadcast::Receiver<DbWriteMetric> {
+        self.metrics.subscribe()
     }
 
     pub(super) async fn write_transaction(
@@ -66,11 +120,17 @@ pub(super) struct WriteLease {
     begin_duration: Option<Duration>,
     finish_duration: Option<Duration>,
     outcome: &'static str,
-    _guard: OwnedMutexGuard<()>,
+    guard: Option<OwnedMutexGuard<()>>,
+    metrics: broadcast::Sender<DbWriteMetric>,
 }
 
 impl WriteLease {
-    fn new(operation: &'static str, wait_duration: Duration, guard: OwnedMutexGuard<()>) -> Self {
+    fn new(
+        operation: &'static str,
+        wait_duration: Duration,
+        guard: OwnedMutexGuard<()>,
+        metrics: broadcast::Sender<DbWriteMetric>,
+    ) -> Self {
         Self {
             operation,
             wait_duration,
@@ -78,11 +138,12 @@ impl WriteLease {
             begin_duration: None,
             finish_duration: None,
             outcome: "released",
-            _guard: guard,
+            guard: Some(guard),
+            metrics,
         }
     }
 
-    fn mark_begin(&mut self, duration: Duration) {
+    pub(super) fn mark_begin(&mut self, duration: Duration) {
         self.begin_duration = Some(duration);
     }
 
@@ -99,47 +160,26 @@ impl WriteLease {
 impl Drop for WriteLease {
     fn drop(&mut self) {
         let hold_duration = self.acquired_at.elapsed();
-        let begin_ms = self
-            .begin_duration
-            .map_or(0.0, |duration| duration.as_secs_f64() * 1000.0);
-        let finish_ms = self
-            .finish_duration
-            .map_or(0.0, |duration| duration.as_secs_f64() * 1000.0);
-        let wait_ms = self.wait_duration.as_secs_f64() * 1000.0;
-        let hold_ms = hold_duration.as_secs_f64() * 1000.0;
+        let metric = DbWriteMetric {
+            operation: self.operation,
+            outcome: self.outcome,
+            wait_duration: self.wait_duration,
+            begin_duration: self.begin_duration,
+            hold_duration,
+            finish_duration: self.finish_duration,
+        };
 
-        if self.outcome.contains("failed") {
-            log::error!(
-                "[DbWrite] operation={} outcome={} wait_ms={:.3} begin_ms={:.3} hold_ms={:.3} finish_ms={:.3}",
-                self.operation,
-                self.outcome,
-                wait_ms,
-                begin_ms,
-                hold_ms,
-                finish_ms
-            );
-        } else if self.wait_duration >= SLOW_WRITE_THRESHOLD
-            || hold_duration >= SLOW_WRITE_THRESHOLD
-        {
-            log::warn!(
-                "[DbWrite] slow operation={} outcome={} wait_ms={:.3} begin_ms={:.3} hold_ms={:.3} finish_ms={:.3}",
-                self.operation,
-                self.outcome,
-                wait_ms,
-                begin_ms,
-                hold_ms,
-                finish_ms
-            );
+        // Logging and observers are diagnostic only. Release the physical writer boundary first
+        // so a slow logger or lagging receiver can never extend SQLite serialization.
+        drop(self.guard.take());
+        let _ = self.metrics.send(metric.clone());
+
+        if metric.is_failure() {
+            log::error!("[DbWrite] {metric}");
+        } else if metric.is_slow() {
+            log::warn!("[DbWrite] slow {metric}");
         } else {
-            log::debug!(
-                "[DbWrite] operation={} outcome={} wait_ms={:.3} begin_ms={:.3} hold_ms={:.3} finish_ms={:.3}",
-                self.operation,
-                self.outcome,
-                wait_ms,
-                begin_ms,
-                hold_ms,
-                finish_ms
-            );
+            log::debug!("[DbWrite] {metric}");
         }
     }
 }

@@ -1,3 +1,4 @@
+pub(crate) use super::db_write::DbWriteMetric;
 use super::db_write::{DbWriteTransaction, WriteCoordinator};
 use sqlx::{sqlite::SqlitePoolOptions, Connection, Pool, Row, Sqlite};
 use std::fs;
@@ -29,6 +30,14 @@ impl DbState {
 
     pub(super) fn write_coordinator(&self) -> &WriteCoordinator {
         &self.writes
+    }
+
+    /// Observes privacy-safe metrics for writes that finish while the receiver is active.
+    /// Diagnostics are lossy by design and never participate in transaction success.
+    pub(crate) fn subscribe_write_metrics(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<DbWriteMetric> {
+        self.writes.subscribe_metrics()
     }
 
     /// 执行 SQLite 物理页面碎片分批回收与查询规划器索引优化

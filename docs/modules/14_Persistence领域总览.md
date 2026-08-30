@@ -25,7 +25,7 @@ related: [db_manager.rs, db_write.rs, db_write_queue.rs, message_repository.rs, 
 | 模块 | 文件 | 核心职责 | 关键设计决策 |
 |------|------|---------|-------------|
 | 数据库管理器 | `db_manager.rs` | 连接池生命周期、Schema 初始化与迁移、PRAGMA 调优 | sqlx 异步连接池 (`max_connections=5`) + WAL 模式 |
-| 写事务所有者 | `db_write.rs` | 公平准入、取消安全的 SQLx BEGIN/COMMIT/ROLLBACK、wait/hold/outcome 观测 | 私有 `WriteCoordinator` + `DbWriteTransaction` |
+| 写事务所有者 | `db_write.rs` | 公平准入、取消安全的 SQLx BEGIN/COMMIT/ROLLBACK、wait/begin/hold/finish/outcome 观测 | 私有 `WriteCoordinator` + `DbWriteTransaction` + 有界中性指标流 |
 | 写入队列 | `db_write_queue.rs` | 单工作线程批量写入、消除 SQLite 并发锁竞争、同步哈希冒泡 | mpsc 队列 + `spawn_blocking` + rusqlite 直连 |
 | 消息仓储 | `message_repository.rs` | 消息读写、渲染编译、现有缓存刷新 | `MessageRenderCompiler` + 三段流水线 |
 
@@ -82,6 +82,8 @@ pub struct DbState {
 `DbState` 以 Tauri `State` 形式挂载到 `AppHandle`。业务写入唯一入口是 `write_transaction(operation)`：返回的 `DbWriteTransaction` 同时拥有 SQLx 连接、`BEGIN IMMEDIATE` 事务和内部 lease。调用方不再维护 permit；只有 COMMIT、ROLLBACK，或失败后关闭不确定连接完成，lease 才释放。等待公平队列时可以取消；一旦取得 lease，BEGIN/COMMIT/ROLLBACK 由独立 Tokio 任务继续完成。该保证限于存活 runtime，Android 进程硬杀仍只依赖 SQLite 自身原子性。
 
 固定锁顺序是“领域锁 → `WriteCoordinator` → `BEGIN IMMEDIATE`”；事务结束后再做缓存失效、请求取消、事件或网络操作。同步 Queue、render-cache rusqlite writer 与非事务 PRAGMA 维护只能在 `persistence/` 内取得受限 `WriteLease`。
+
+每个 lease 在物理 COMMIT/ROLLBACK/连接关闭完成时构造一次 `DbWriteMetric`。它只含静态 `operation` / `outcome` 与 `wait/begin/hold/finish` 时长，不含 SQL、实体 ID、路径或业务内容。`WriteLease` 先显式释放 writer guard，再向容量固定的 broadcast 流发送指标和写普通系统日志；无订阅者、订阅者落后或日志故障都只会损失诊断信息，不会延长 Gate 或改变事务结果。`DbState::subscribe_write_metrics()` 供上层在需要时观察“订阅期间完成的 writer”，persistence 不知道同步会话或 `SyncLogger`。
 
 ### 2.2 连接池初始化
 
@@ -909,11 +911,13 @@ persistence/
 │   ├─→ 被 db_write_queue.rs 引用：db_path 用于 rusqlite::Connection::open
 │   └─→ 被 message_repository.rs 引用：DbState.pool 用于普通查询
 │
+├── db_write.rs
+│   └─→ 仅发布中性 DbWriteMetric；不引用 sync、AppHandle 或日志文件
+│
 ├── db_write_queue.rs
 │   ├─→ 引用 sync_dto.rs：AgentSyncDTO, GroupSyncDTO, AgentTopicSyncDTO, GroupTopicSyncDTO
 │   ├─→ 引用 sync_hash.rs：HashAggregator（配置/元数据哈希计算）
 │   ├─→ 引用 sync_types.rs：compute_merkle_root（Merkle Root 计算）
-│   ├─→ 引用 sync_logger.rs：SyncLogger（可选审计日志）
 │   ├─→ 引用 avatar_service.rs：extract_dominant_color_from_bytes（头像主色调）
 │   └─→ 引用 chat_manager.rs：ChatMessage, Attachment（消息与附件类型）
 │
@@ -928,11 +932,12 @@ persistence/
 | 依赖领域 | 具体模块 | 依赖方向 | 说明 |
 |---------|---------|---------|------|
 | **sync/** | `sync_service.rs`, `sync_pipeline/` | `sync/` → `db_write_queue.rs` | 同步流水线将解析后的 DTO 批量提交给写入队列 |
+| **sync/** | `sync_logger.rs` | `sync/` → `db_manager.rs` | 同步会话订阅中性 `DbWriteMetric`，在 Gate 外写入会话诊断文件 |
 | **chat/** | `chat_manager.rs` | 双向 | `chat_manager` 定义 `ChatMessage` / `Attachment` 类型，被 persistence/ 消费；`chat_manager` 调用 `MessageRepository::upsert_message` 实时落盘 |
 | **sync/** | `sync_hash.rs`, `sync_types.rs` | `db_write_queue.rs` / `message_repository.rs` → `sync/` | 哈希计算与 Merkle Root 工具由同步子系统提供 |
 | **parser/** | `content_parser.rs` | `message_repository.rs` → `content_parser` | 渲染编译依赖内容解析器 |
 
-**依赖原则**：persistence/ 作为底层领域，**不主动调用**上层业务逻辑。所有上层写入均通过 `DbWriteQueue` 或 `MessageRepository` 的显式 API 进入 persistence/。
+**依赖原则**：persistence/ 作为底层领域，**不主动调用**上层业务逻辑。所有上层写入均通过 `DbWriteQueue` 或 `MessageRepository` 的显式 API 进入 persistence/；数据库观测只发布中性事件，由 sync 层单向订阅，禁止 persistence 反向持有 `SyncLogger`。
 
 ### 5.3 数据一致性边界
 
