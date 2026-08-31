@@ -25,14 +25,6 @@ vi.mock('@/core/stores/theme', () => ({
   useThemeStore: () => ({ isDarkResolved: false }),
 }));
 
-// happy-dom rejects DOMPurify's WHOLE_DOCUMENT node hoisting even though Chromium/WebView accepts
-// it. This suite verifies the iframe sandbox boundary; DOMPurify's patched version is audit-gated.
-vi.mock('dompurify', () => ({
-  default: {
-    sanitize: (dirty: string) => dirty,
-  },
-}));
-
 const HOST_HANDLER = "window.__TAURI_INTERNALS__.invoke('read_settings')";
 
 function parseHtml(html: string): HTMLDivElement {
@@ -269,8 +261,8 @@ describe('trusted-circle rich HTML active-content guard', () => {
     const sandbox = iframe.attributes('sandbox') || '';
     const srcdoc = iframe.attributes('srcdoc') || '';
 
-    expect(sandbox).toContain('allow-scripts');
-    expect(sandbox).not.toContain('allow-same-origin');
+    // 统一门禁基线：仅 allow-scripts；永久禁区 allow-same-origin / allow-top-navigation 不出现
+    expect(sandbox).toBe('allow-scripts');
     expect(srcdoc).toContain('document.body.dataset.preview');
     expect(srcdoc).toContain('<p>Preview</p>');
   });
