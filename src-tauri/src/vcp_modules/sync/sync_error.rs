@@ -545,10 +545,7 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             "话题数据读取或写入失败，系统未将其标记为成功",
             "检查手机与电脑端的存储和数据服务状态后重新同步；若仍失败，请保留日志。",
         ),
-        "SYNC_DB_QUERY_FAILED"
-        | "SYNC_INDEX_INVALID"
-        | "TOPIC_HASH_DB_FAILED"
-        | "TOPIC_VALIDATION_DRAIN_FAILED" => definition(
+        "SYNC_DB_QUERY_FAILED" | "SYNC_INDEX_INVALID" | "TOPIC_HASH_DB_FAILED" => definition(
             Category::Storage,
             Origin::MobileSync,
             Stage::TopicValidation,

@@ -1418,6 +1418,95 @@ impl PullExecutor {
 }
 
 #[cfg(test)]
+mod entity_pull_tests {
+    use super::PullExecutor;
+    use crate::vcp_modules::db_manager::DbState;
+    use crate::vcp_modules::db_write_queue::DbWriteQueue;
+    use crate::vcp_modules::sync_types::EntitySelector;
+    use crate::vcp_modules::topic_types::TopicKey;
+    use axum::{routing::post, Json, Router};
+    use serde_json::json;
+    use std::time::Duration;
+    use tauri::Manager;
+
+    #[tokio::test]
+    async fn topic_pull_returns_only_after_its_queue_write_is_submitted() {
+        let temp_dir = tempfile::tempdir().expect("create pull database directory");
+        let db_path = temp_dir.path().join("topic-pull.sqlite");
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(2)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&db_path)
+                    .create_if_missing(true)
+                    .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                    .busy_timeout(Duration::from_secs(2)),
+            )
+            .await
+            .expect("open pull database");
+        sqlx::raw_sql(include_str!("../../../../migrations/0100_baseline_v2.sql"))
+            .execute(&pool)
+            .await
+            .expect("create pull database schema");
+        let db_state = DbState::new(pool, db_path);
+        let queue = DbWriteQueue::new(&db_state, 81);
+
+        let server = Router::new().route(
+            "/api/mobile-sync/entities/pull",
+            post(|| async {
+                Json(json!({
+                    "results": [{
+                        "entityType": "topic",
+                        "ownerType": "agent",
+                        "ownerId": "missing-owner",
+                        "topicId": "topic-a",
+                        "ok": true,
+                        "data": {
+                            "id": "topic-a",
+                            "name": "Topic A",
+                            "createdAt": 1,
+                            "locked": true,
+                            "unread": false,
+                            "ownerId": "missing-owner"
+                        }
+                    }]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind pull server");
+        let address = listener.local_addr().expect("pull server address");
+        let server_task = tokio::spawn(async move {
+            axum::serve(listener, server)
+                .await
+                .expect("serve entity pull response");
+        });
+
+        let app = tauri::test::mock_app();
+        assert!(app.manage(crate::vcp_modules::sync_service::test_sync_state(81)));
+        let key = TopicKey::new("agent", "missing-owner", "topic-a");
+        PullExecutor::pull_entities_batch(
+            app.handle(),
+            &reqwest::Client::new(),
+            &format!("http://{address}"),
+            "test-token",
+            vec![EntitySelector::topic(&key).expect("valid topic selector")],
+            &queue,
+        )
+        .await
+        .expect("pull returns after enqueueing topic metadata");
+
+        let error = queue
+            .flush()
+            .await
+            .expect_err("metadata flush must observe the submitted topic write failure");
+        assert!(error.contains("missing or deleted"), "{error}");
+        server_task.abort();
+    }
+}
+
+#[cfg(test)]
 mod ndjson_frame_tests {
     use super::{
         parse_topic_ndjson_frame, validate_requested_message_ids, validate_returned_topic_identity,

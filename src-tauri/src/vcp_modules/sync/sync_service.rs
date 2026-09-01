@@ -1202,6 +1202,21 @@ pub fn init_sync_service(_app_handle: AppHandle) -> SyncState {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn test_sync_state(session_id: u64) -> SyncState {
+    SyncState {
+        ws_sender: SyncCommandRouter::default(),
+        connection_status: Arc::new(RwLock::new(String::from("disconnected"))),
+        current_log_path: Arc::new(RwLock::new(None)),
+        current_logger: Arc::new(std::sync::RwLock::new(None)),
+        lifecycle: AsyncMutex::new(()),
+        owner_commit: AsyncMutex::new(()),
+        session: AsyncMutex::new(None),
+        next_session_id: AtomicU64::new(session_id),
+        current_session_id: AtomicU64::new(session_id),
+    }
+}
+
 async fn cancelled_during(token: &CancellationToken, duration: Duration) -> bool {
     tokio::select! {
         biased;
@@ -2191,29 +2206,14 @@ async fn run_sync_session(
                                 },
                                 SyncCommand::StartMessages { attempt_id: command_attempt } => {
                                     if command_attempt != attempt_id { continue; }
-                                    let should_flush = {
+                                    let should_start = {
                                         if let Ok(mut gate) = phase_gate.lock() {
                                             gate.insert("messages".to_string())
                                         } else {
                                             false
                                         }
                                     };
-                                    if should_flush {
-                                        if let Err(error) = write_queue_task.flush().await {
-                                            let message = format!("Topic validation write drain failed: {}", error);
-                                            fatal_error = true;
-                                            emit_sync_log(&handle_clone, "error", &message);
-                                            publish_sync_error(
-                                                &handle_clone,
-                                                session_id,
-                                                &connection_status_for_task,
-                                                "TOPIC_VALIDATION_DRAIN_FAILED",
-                                                &message,
-                                                Vec::new(),
-                                            ).await;
-                                            let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                            break;
-                                        }
+                                    if should_start {
                                         let _ = pipeline_task.on_topic_validation_done();
                                     }
                                 },
@@ -3561,20 +3561,6 @@ mod tests {
     use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
 
     type TestServerWebSocket = WebSocketStream<tokio::net::TcpStream>;
-
-    fn test_sync_state(session_id: u64) -> SyncState {
-        SyncState {
-            ws_sender: SyncCommandRouter::default(),
-            connection_status: Arc::new(RwLock::new(String::from("disconnected"))),
-            current_log_path: Arc::new(RwLock::new(None)),
-            current_logger: Arc::new(std::sync::RwLock::new(None)),
-            lifecycle: AsyncMutex::new(()),
-            owner_commit: AsyncMutex::new(()),
-            session: AsyncMutex::new(None),
-            next_session_id: AtomicU64::new(session_id),
-            current_session_id: AtomicU64::new(session_id),
-        }
-    }
 
     fn mock_sync_app(session_id: u64) -> tauri::App<tauri::test::MockRuntime> {
         let app = tauri::test::mock_app();
