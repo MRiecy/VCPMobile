@@ -3,6 +3,23 @@ use crate::vcp_modules::group_types::{deserialize_member_tags, GroupConfig, Memb
 use crate::vcp_modules::topic_types::Topic;
 use serde::{Deserialize, Serialize};
 
+fn deserialize_required_content_hash<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.len() == 64
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && value.bytes().all(|byte| !byte.is_ascii_uppercase())
+    {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "expected a lowercase 64-character SHA-256",
+        ))
+    }
+}
+
 /// =================================================================
 /// vcp_modules/sync_dto.rs - 双端同步标准契约 (The Shared Truth)
 /// =================================================================
@@ -159,12 +176,6 @@ pub struct MessageSyncDTO {
     pub timestamp: u64,
     #[serde(rename = "updatedAt")]
     pub updated_at: u64,
-    #[serde(
-        rename = "isThinking",
-        default,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub is_thinking: Option<bool>,
     #[serde(rename = "agentId", default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
     #[serde(rename = "groupId", default, skip_serializing_if = "Option::is_none")]
@@ -181,8 +192,11 @@ pub struct MessageSyncDTO {
     pub finish_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachments: Option<Vec<AttachmentSyncDTO>>,
-    #[serde(rename = "contentHash", skip_serializing_if = "Option::is_none")]
-    pub content_hash: Option<String>,
+    #[serde(
+        rename = "contentHash",
+        deserialize_with = "deserialize_required_content_hash"
+    )]
+    pub content_hash: String,
 }
 
 impl From<MessageSyncDTO> for crate::vcp_modules::chat_manager::ChatMessage {
@@ -194,7 +208,7 @@ impl From<MessageSyncDTO> for crate::vcp_modules::chat_manager::ChatMessage {
             content: dto.content,
             timestamp: dto.timestamp,
             updated_at: Some(dto.updated_at),
-            is_thinking: dto.is_thinking,
+            is_thinking: None,
             agent_id: dto.agent_id,
             group_id: dto.group_id,
             topic_id: dto.topic_id,
@@ -220,7 +234,7 @@ impl From<MessageSyncDTO> for crate::vcp_modules::chat_manager::ChatMessage {
             }),
             // blocks/render_cache 是本地状态；下游依设置可选预渲染，否则由加载路径懒生成。
             blocks: None,
-            content_hash: dto.content_hash,
+            content_hash: Some(dto.content_hash),
             shell: None,
         }
     }
@@ -288,7 +302,6 @@ mod tests {
             content: "hello".to_string(),
             timestamp: 123,
             updated_at: 124,
-            is_thinking: Some(false),
             agent_id: Some("agent-1".to_string()),
             group_id: Some("group-1".to_string()),
             topic_id: Some("topic-1".to_string()),
@@ -298,12 +311,12 @@ mod tests {
                 r#type: "file".to_string(),
                 name: "a.txt".to_string(),
                 size: 10,
-                hash: "hash-a".to_string(),
+                hash: "a".repeat(64),
                 extracted_text: Some("extracted".to_string()),
                 image_frames: None,
                 created_at: Some(200),
             }]),
-            content_hash: Some("content-hash".to_string()),
+            content_hash: "b".repeat(64),
         };
 
         let msg = ChatMessage::from(dto);
@@ -317,14 +330,15 @@ mod tests {
         assert_eq!(msg.group_id.as_deref(), Some("group-1"));
         assert_eq!(msg.topic_id.as_deref(), Some("topic-1"));
         assert_eq!(msg.is_group_message, Some(true));
-        assert_eq!(msg.content_hash.as_deref(), Some("content-hash"));
+        assert_eq!(msg.content_hash.as_deref(), Some("b".repeat(64).as_str()));
+        assert!(msg.is_thinking.is_none());
         assert!(msg.blocks.is_none());
         assert!(msg.shell.is_none());
 
         let attachment = &msg.attachments.as_ref().unwrap()[0];
         assert_eq!(attachment.r#type, "file");
         assert_eq!(attachment.name, "a.txt");
-        assert_eq!(attachment.hash.as_deref(), Some("hash-a"));
+        assert_eq!(attachment.hash.as_deref(), Some("a".repeat(64).as_str()));
         assert_eq!(attachment.src, "");
         assert_eq!(attachment.internal_path, "");
         assert!(attachment.thumbnail_path.is_none());

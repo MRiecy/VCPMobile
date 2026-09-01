@@ -4,7 +4,6 @@ use crate::vcp_modules::sync_error::{
     encode_http_sync_error_body, encode_local_sync_error, encode_wire_sync_error,
     encode_wire_sync_error_value, parse_wire_sync_error, SyncErrorStage, WireSyncError,
 };
-use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_types::{
     EntityPullData, EntityPullRequest, EntityPullResponse, EntityPullResult, EntitySelector,
     MessagePullRequest, MessagePullTopicSelector, OwnerType,
@@ -163,133 +162,6 @@ async fn wait_for_pull_worker_slot(workers: &mut JoinSet<()>) {
     }
 }
 
-#[derive(Default)]
-struct BoundedWarnings {
-    count: usize,
-    samples: Vec<String>,
-}
-
-impl BoundedWarnings {
-    fn push(&mut self, message: String) {
-        self.count += 1;
-        if self.samples.len() < MAX_WARNING_SAMPLES {
-            self.samples.push(message);
-        }
-    }
-}
-
-enum HashField {
-    Missing,
-    Valid(String),
-    Invalid,
-}
-
-fn read_hash_field(object: &serde_json::Map<String, Value>, key: &str) -> HashField {
-    match object.get(key) {
-        None | Some(Value::Null) => HashField::Missing,
-        Some(Value::String(hash)) => {
-            let normalized = hash.to_ascii_lowercase();
-            if crate::vcp_modules::infra::utils::is_valid_cas_hash(&normalized) {
-                HashField::Valid(normalized)
-            } else {
-                HashField::Invalid
-            }
-        }
-        Some(_) => HashField::Invalid,
-    }
-}
-
-fn normalize_timestamp(value: Option<&Value>, message_id: &str) -> Result<u64, String> {
-    let timestamp = match value {
-        Some(Value::Number(number)) => number.as_u64().ok_or_else(|| {
-            format!("Message {message_id} timestamp must be a non-negative integer")
-        }),
-        Some(Value::String(timestamp)) => timestamp.parse::<u64>().map_err(|_| {
-            format!("Message {message_id} timestamp string must be a non-negative integer")
-        }),
-        _ => Err(format!(
-            "Message {message_id} timestamp must be a non-negative integer or integer string"
-        )),
-    }?;
-    if timestamp > i64::MAX as u64 {
-        return Err(format!(
-            "Message {message_id} timestamp exceeds the SQLite integer range"
-        ));
-    }
-    Ok(timestamp)
-}
-
-fn canonicalize_attachment(
-    value: Value,
-    message_id: &str,
-    attachment_index: usize,
-    warnings: &mut BoundedWarnings,
-) -> Result<Option<Value>, String> {
-    let mut object = match value {
-        Value::Object(object) => object,
-        _ => {
-            return Err(format!(
-                "Message {message_id} attachment {attachment_index} must be an object"
-            ))
-        }
-    };
-
-    let nested = match object.remove("_fileManagerData") {
-        None | Some(Value::Null) => None,
-        Some(Value::Object(nested)) => Some(nested),
-        Some(_) => {
-            warnings.push(format!(
-                "message={message_id} attachment={attachment_index}: invalid _fileManagerData"
-            ));
-            return Ok(None);
-        }
-    };
-    let top_hash = read_hash_field(&object, "hash");
-    let nested_hash = nested
-        .as_ref()
-        .map(|nested| read_hash_field(nested, "hash"))
-        .unwrap_or(HashField::Missing);
-
-    let normalized_hash = match (top_hash, nested_hash) {
-        (HashField::Valid(top), HashField::Valid(nested)) if top == nested => Some(top),
-        (HashField::Valid(_), HashField::Valid(_)) => None,
-        (HashField::Valid(hash), HashField::Missing | HashField::Invalid)
-        | (HashField::Missing | HashField::Invalid, HashField::Valid(hash)) => Some(hash),
-        (HashField::Missing | HashField::Invalid, HashField::Missing | HashField::Invalid) => None,
-    };
-    let Some(hash) = normalized_hash else {
-        warnings.push(format!(
-            "message={message_id} attachment={attachment_index}: missing, invalid, or conflicting SHA-256"
-        ));
-        return Ok(None);
-    };
-
-    if let Some(mut nested) = nested {
-        for (nested_key, public_key) in [
-            ("extractedText", "extractedText"),
-            ("imageFrames", "imageFrames"),
-            ("createdAt", "createdAt"),
-        ] {
-            if !object.contains_key(public_key) {
-                if let Some(value) = nested.remove(nested_key) {
-                    object.insert(public_key.to_string(), value);
-                }
-            }
-        }
-    }
-
-    object.insert("hash".to_string(), Value::String(hash));
-    object.remove("_fileManagerData");
-    object.remove("src");
-    object.remove("resolvedSrc");
-    object.remove("internalPath");
-    object.remove("thumbnailPath");
-    object.remove("path");
-    object.remove("filePath");
-    object.remove("status");
-    Ok(Some(Value::Object(object)))
-}
-
 fn parse_ndjson_frame(bytes: &[u8]) -> Result<ParsedNdjsonFrame, String> {
     parse_ndjson_frame_inner(bytes).map_err(|error| protocol_error(SyncErrorStage::Messages, error))
 }
@@ -397,7 +269,8 @@ fn parse_topic_ndjson_value(value: Value) -> Result<TopicNDJSONFrame, String> {
         ));
     }
 
-    let mut warnings = BoundedWarnings::default();
+    let mut legacy_attachment_warnings = 0;
+    let mut warning_samples = Vec::new();
     if has_warning_count {
         let count = object
             .get("legacyAttachmentWarnings")
@@ -413,8 +286,8 @@ fn parse_topic_ndjson_value(value: Value) -> Result<TopicNDJSONFrame, String> {
                 "NDJSON frame for {topic_id} warning samples must be strings"
             ));
         }
-        warnings.count = count;
-        warnings.samples = samples
+        legacy_attachment_warnings = count;
+        warning_samples = samples
             .iter()
             .filter_map(Value::as_str)
             .take(MAX_WARNING_SAMPLES)
@@ -433,7 +306,7 @@ fn parse_topic_ndjson_value(value: Value) -> Result<TopicNDJSONFrame, String> {
     let mut seen_message_ids = HashSet::new();
     let mut messages = Vec::with_capacity(raw_messages.len());
     for raw_message in raw_messages {
-        let mut message = match raw_message {
+        let message = match raw_message {
             Value::Object(message) => message,
             _ => return Err(format!("Topic {topic_id} contains a non-object message")),
         };
@@ -453,21 +326,6 @@ fn parse_topic_ndjson_value(value: Value) -> Result<TopicNDJSONFrame, String> {
             .and_then(Value::as_str)
             .filter(|role| !role.is_empty())
             .ok_or_else(|| format!("Message {message_id} has missing or empty role"))?;
-        // topicId 是来源元数据而非消息身份：frame topic 才是存储权威，消息
-        // 指纹也不含 topicId。不一致（或非字符串）时统一重写为 frame topic。
-        match message.get("topicId") {
-            None | Some(Value::Null) => {}
-            Some(Value::String(message_topic)) if message_topic == &topic_id => {}
-            Some(original) => {
-                log::warn!(
-                    "[PullExecutor] Message {} topicId {:?} normalized to frame topic {}",
-                    message_id,
-                    original,
-                    topic_id
-                );
-                message.insert("topicId".to_string(), Value::String(topic_id.clone()));
-            }
-        }
         if message.get("status").and_then(Value::as_str) == Some("removed")
             || message
                 .get("deletedAt")
@@ -477,36 +335,24 @@ fn parse_topic_ndjson_value(value: Value) -> Result<TopicNDJSONFrame, String> {
                 "Tombstoned message {message_id} must not appear in a live pull frame"
             ));
         }
-        let timestamp = normalize_timestamp(message.get("timestamp"), &message_id)?;
-        message.insert("timestamp".to_string(), Value::from(timestamp));
-        message.remove("contentHash");
-        message.remove("content_hash");
-
-        match message.remove("attachments") {
-            None | Some(Value::Null) => {}
-            Some(Value::Array(attachments)) => {
-                let mut canonical = Vec::with_capacity(attachments.len());
-                for (index, attachment) in attachments.into_iter().enumerate() {
-                    if let Some(attachment) =
-                        canonicalize_attachment(attachment, &message_id, index, &mut warnings)?
-                    {
-                        canonical.push(attachment);
-                    }
-                }
-                if !canonical.is_empty() {
-                    message.insert("attachments".to_string(), Value::Array(canonical));
-                }
-            }
-            Some(_) => {
-                return Err(format!(
-                    "Message {message_id} attachments must be an array or null"
-                ));
-            }
+        let dto: crate::vcp_modules::sync_dto::MessageSyncDTO =
+            serde_json::from_value(Value::Object(message)).map_err(|error| {
+                format!("Message {message_id} violates the canonical message contract: {error}")
+            })?;
+        if dto.timestamp > i64::MAX as u64 {
+            return Err(format!(
+                "Message {message_id} timestamp exceeds the SQLite integer range"
+            ));
         }
-
-        let dto = serde_json::from_value(Value::Object(message)).map_err(|error| {
-            format!("Message {message_id} violates the canonical message contract: {error}")
-        })?;
+        if dto
+            .topic_id
+            .as_deref()
+            .is_some_and(|message_topic| message_topic != topic_id)
+        {
+            return Err(format!(
+                "Message {message_id} topicId does not match frame topic {topic_id}"
+            ));
+        }
         messages.push(dto);
     }
 
@@ -516,8 +362,8 @@ fn parse_topic_ndjson_value(value: Value) -> Result<TopicNDJSONFrame, String> {
         owner_id,
         messages,
         error: None,
-        legacy_attachment_warnings: warnings.count,
-        warning_samples: warnings.samples,
+        legacy_attachment_warnings,
+        warning_samples,
     })
 }
 
@@ -565,12 +411,12 @@ fn validate_requested_message_ids(
     ))
 }
 
-/// 共享消息处理管线：规范消息 → 指纹/可选预渲染 → 写入队列。
+/// 共享消息处理管线：Wire DTO → 可选预渲染 → 写入队列。
 /// 被 `pull_messages_batch` 内各并发任务复用。
 /// 返回本 Topic 已接收并排队的消息数量；数据库成功由后续 flush 屏障确认。
 async fn process_topic_messages(
     key: &TopicKey,
-    parsed_messages: Vec<crate::vcp_modules::chat_manager::ChatMessage>,
+    parsed_messages: Vec<crate::vcp_modules::sync_dto::MessageSyncDTO>,
     write_queue: &DbWriteQueue,
     prerender_enabled: bool,
 ) -> Result<usize, String> {
@@ -581,36 +427,15 @@ async fn process_topic_messages(
     let mut t_submit = std::time::Duration::from_secs(0);
 
     if !parsed_messages.is_empty() {
-        // 1. 将指纹、预渲染和 Zstd 压缩移至 blocking 线程池。
+        // 1. 将预渲染和 Zstd 压缩移至 blocking 线程池；消息指纹直接使用 Wire 值。
         let t_block_start = std::time::Instant::now();
         let topic_id_clone = key.topic_id.clone();
         let prepared_writes = tokio::task::spawn_blocking(move || {
             let mut writes = Vec::with_capacity(parsed_messages.len());
 
-            for msg in parsed_messages {
-                // A. 计算/直读指纹
-                let attachment_hashes: Vec<String> = msg
-                    .attachments
-                    .as_ref()
-                    .map(|atts| {
-                        atts.iter()
-                            .map(|a| a.hash.clone().unwrap_or_default())
-                            .filter(|h| !h.is_empty())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-
-                // contentHash 只依据最终规范化消息计算，禁止复用桌面端在内部字段
-                // 尚未剥离时生成的旧指纹。
-                let content_hash = HashAggregator::compute_message_fingerprint(
-                    &msg.id,
-                    &msg.role,
-                    msg.name.as_deref(),
-                    &msg.content,
-                    msg.timestamp,
-                    msg.agent_id.as_deref(),
-                    &attachment_hashes,
-                );
+            for dto in parsed_messages {
+                let content_hash = dto.content_hash.clone();
+                let msg = crate::vcp_modules::chat_manager::ChatMessage::from(dto);
 
                 // B. 预渲染（按开关控制）
                 let content = &msg.content;
@@ -1246,21 +1071,16 @@ impl PullExecutor {
 
                 spawn_handles.spawn(async move {
                     let start_t = std::time::Instant::now();
-                    // ⚡ 核心转换：通过 DTO From 实现三层完全隔离，净化核心 ChatMessage
-                    let messages: Vec<crate::vcp_modules::chat_manager::ChatMessage> = pull_dtos
-                        .into_iter()
-                        .map(crate::vcp_modules::chat_manager::ChatMessage::from)
-                        .collect();
-
-                    let decode_t = start_t.elapsed();
-                    let proc_start = std::time::Instant::now();
-                    match process_topic_messages(&key, messages, &wq_clone, prerender_enabled).await {
+                    match process_topic_messages(&key, pull_dtos, &wq_clone, prerender_enabled)
+                        .await
+                    {
                         Ok(parsed) => {
-                            let proc_t = proc_start.elapsed();
-                            let total_t = start_t.elapsed();
+                            let process_t = start_t.elapsed();
                             log::debug!(
-                                "[PullExecutor] [ProfileSummary] topic={} msgs={} | decode={:?} process={:?} | total={:?}",
-                                topic_id, parsed, decode_t, proc_t, total_t
+                                "[PullExecutor] [ProfileSummary] topic={} msgs={} | process={:?}",
+                                topic_id,
+                                parsed,
+                                process_t
                             );
                             let _ = tx_clone
                                 .send(BatchPullResult {
@@ -1343,12 +1163,7 @@ impl PullExecutor {
                     let wq_clone = write_queue.clone();
                     let tx_clone = tx.clone();
                     spawn_handles.spawn(async move {
-                        let messages: Vec<crate::vcp_modules::chat_manager::ChatMessage> =
-                            pull_dtos
-                                .into_iter()
-                                .map(crate::vcp_modules::chat_manager::ChatMessage::from)
-                                .collect();
-                        match process_topic_messages(&key, messages, &wq_clone, prerender_enabled)
+                        match process_topic_messages(&key, pull_dtos, &wq_clone, prerender_enabled)
                             .await
                         {
                             Ok(_) => {
@@ -1517,6 +1332,7 @@ mod ndjson_frame_tests {
     };
     use crate::vcp_modules::topic_types::TopicKey;
     use serde_json::json;
+    use sha2::{Digest, Sha256};
     use std::collections::HashSet;
 
     const MESSAGE_CANONICAL_CONTRACT: &[u8] =
@@ -1551,7 +1367,7 @@ mod ndjson_frame_tests {
     }
 
     #[test]
-    fn canonical_message_contract_matches_mobile_projection_and_hashes() {
+    fn canonical_message_contract_matches_mobile_wire_dto_and_hashes() {
         let bundle: serde_json::Value =
             serde_json::from_slice(MESSAGE_CANONICAL_CONTRACT).expect("canonical contract JSON");
 
@@ -1559,62 +1375,40 @@ mod ndjson_frame_tests {
             .as_array()
             .expect("valid contract frames")
         {
-            let bytes = serde_json::to_vec(&success_frame(case["input"].clone()))
-                .expect("serialize contract frame");
-            let parsed = parse_topic_ndjson_frame(&bytes).expect("valid contract frame");
             let expected = &case["expected"];
+            let mut wire_frame = json!({
+                "topicId": expected["topicId"].clone(),
+                "messages": expected["canonicalMessages"].clone(),
+            });
+            if expected["warningCount"].as_u64().unwrap_or_default() > 0 {
+                wire_frame["legacyAttachmentWarnings"] = expected["warningCount"].clone();
+                wire_frame["warningSamples"] = json!([]);
+            }
+            let bytes =
+                serde_json::to_vec(&success_frame(wire_frame)).expect("serialize contract frame");
+            let parsed = parse_topic_ndjson_frame(&bytes).expect("valid contract frame");
             assert_eq!(parsed.topic_id, expected["topicId"]);
             assert_eq!(parsed.messages.len() as u64, expected["messageCount"]);
             assert_eq!(
                 parsed.legacy_attachment_warnings as u64,
                 expected["warningCount"]
             );
-            let logical_messages = parsed
-                .messages
-                .iter()
-                .map(|message| {
-                    let mut value = serde_json::to_value(message).expect("canonical message JSON");
-                    let object = value.as_object_mut().expect("canonical message object");
-                    for key in [
-                        "isThinking",
-                        "agentId",
-                        "groupId",
-                        "topicId",
-                        "isGroupMessage",
-                    ] {
-                        object.entry(key).or_insert(serde_json::Value::Null);
-                    }
-                    value
-                })
-                .collect::<Vec<_>>();
             assert_eq!(
-                serde_json::Value::Array(logical_messages),
+                serde_json::to_value(&parsed.messages).expect("canonical messages JSON"),
                 expected["canonicalMessages"]
+            );
+            let canonical_bytes =
+                serde_json::to_vec(&parsed.messages).expect("canonical message DTO bytes");
+            assert_eq!(
+                hex::encode(Sha256::digest(canonical_bytes)),
+                expected["canonicalMessagesSha256"]
+                    .as_str()
+                    .expect("canonical byte hash")
             );
             let content_hashes = parsed
                 .messages
                 .iter()
-                .map(|message| {
-                    let hashes = message
-                        .attachments
-                        .as_ref()
-                        .map(|attachments| {
-                            attachments
-                                .iter()
-                                .map(|attachment| attachment.hash.clone())
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    crate::vcp_modules::sync_hash::HashAggregator::compute_message_fingerprint(
-                        &message.id,
-                        &message.role,
-                        message.name.as_deref(),
-                        &message.content,
-                        message.timestamp,
-                        message.agent_id.as_deref(),
-                        &hashes,
-                    )
-                })
+                .map(|message| message.content_hash.clone())
                 .collect::<Vec<_>>();
             assert_eq!(
                 serde_json::to_value(content_hashes).expect("content hashes JSON"),
@@ -1707,14 +1501,13 @@ mod ndjson_frame_tests {
                 content: String::new(),
                 timestamp: 1,
                 updated_at: 1,
-                is_thinking: None,
                 agent_id: None,
                 group_id: None,
                 topic_id: None,
                 is_group_message: None,
                 finish_reason: None,
                 attachments: None,
-                content_hash: None,
+                content_hash: "a".repeat(64),
             },
             crate::vcp_modules::sync_dto::MessageSyncDTO {
                 id: "message-b".into(),
@@ -1723,14 +1516,13 @@ mod ndjson_frame_tests {
                 content: String::new(),
                 timestamp: 2,
                 updated_at: 2,
-                is_thinking: None,
                 agent_id: None,
                 group_id: None,
                 topic_id: None,
                 is_group_message: None,
                 finish_reason: None,
                 attachments: None,
-                content_hash: None,
+                content_hash: "b".repeat(64),
             },
         ];
         assert!(validate_requested_message_ids(
@@ -1748,15 +1540,18 @@ mod ndjson_frame_tests {
     }
 
     #[test]
-    fn inbound_cleaner_fails_closed_on_message_contract_errors() {
+    fn inbound_parser_fails_closed_on_message_contract_errors() {
+        let hash = "a".repeat(64);
         for frame in [
-            json!({ "topicId": "topic", "messages": [{ "id": "", "role": "user", "timestamp": 1 }] }),
-            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "", "timestamp": 1 }] }),
-            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "user", "timestamp": -1 }] }),
-            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "user", "timestamp": u64::MAX.to_string() }] }),
-            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "user", "timestamp": 1, "attachments": {} }] }),
+            json!({ "topicId": "topic", "messages": [{ "id": "", "role": "user", "timestamp": 1, "updatedAt": 1, "contentHash": hash }] }),
+            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "", "timestamp": 1, "updatedAt": 1, "contentHash": hash }] }),
+            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "user", "timestamp": -1, "updatedAt": 1, "contentHash": hash }] }),
+            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "user", "timestamp": u64::MAX.to_string(), "updatedAt": 1, "contentHash": hash }] }),
+            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "user", "timestamp": 1, "updatedAt": 1, "attachments": {}, "contentHash": hash }] }),
+            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "user", "timestamp": 1, "updatedAt": 1 }] }),
+            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "user", "timestamp": 1, "updatedAt": 1, "contentHash": "A".repeat(64) }] }),
         ] {
-            assert!(parse_topic_ndjson_frame(frame.to_string().as_bytes()).is_err());
+            assert!(parse_topic_ndjson_frame(success_frame(frame).to_string().as_bytes()).is_err());
         }
     }
 }

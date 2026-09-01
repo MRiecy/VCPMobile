@@ -422,7 +422,7 @@ async fn load_outbound_message_page(
     let mut query = if cursor.is_some() {
         sqlx::query(
             "SELECT msg_id, role, name, agent_id, content, timestamp, is_group_message,
-                    group_id, finish_reason, updated_at
+                    group_id, finish_reason, content_hash, updated_at
              FROM messages
              WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
                AND (timestamp > ? OR (timestamp = ? AND msg_id > ?))
@@ -432,7 +432,7 @@ async fn load_outbound_message_page(
     } else {
         sqlx::query(
             "SELECT msg_id, role, name, agent_id, content, timestamp, is_group_message,
-                    group_id, finish_reason, updated_at
+                    group_id, finish_reason, content_hash, updated_at
              FROM messages
              WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL
              ORDER BY timestamp ASC, msg_id ASC
@@ -478,6 +478,14 @@ async fn load_outbound_message_page(
         let is_group_message: i64 = row.try_get("is_group_message").map_err(|error| {
             format!("Message group flag decode failed for {topic_id}/{message_id}: {error}")
         })?;
+        let content_hash: String = row.try_get("content_hash").map_err(|error| {
+            format!("Message content hash decode failed for {topic_id}/{message_id}: {error}")
+        })?;
+        if canonical_sha256(&content_hash).as_deref() != Some(content_hash.as_str()) {
+            return Err(format!(
+                "Outbound message {topic_id}/{message_id} requires a lowercase 64-character contentHash"
+            ));
+        }
         messages.push(MessageSyncDTO {
             id: message_id,
             role,
@@ -489,7 +497,6 @@ async fn load_outbound_message_page(
             })?,
             timestamp,
             updated_at,
-            is_thinking: None,
             agent_id: row
                 .try_get("agent_id")
                 .map_err(|error| format!("Message agent decode failed for {topic_id}: {error}"))?,
@@ -502,7 +509,7 @@ async fn load_outbound_message_page(
                 format!("Message finish reason decode failed for {topic_id}: {error}")
             })?,
             attachments: None,
-            content_hash: None,
+            content_hash,
         });
     }
 
@@ -1346,10 +1353,11 @@ mod tests {
                 "INSERT INTO messages (
                     owner_type, owner_id, topic_id, msg_id, role, content, timestamp,
                     is_group_message, content_hash, created_at, updated_at
-                 ) VALUES ('agent', 'agent-a', 'topic', ?, 'user', 'body', ?, 0, 'hash', ?, ?)",
+                 ) VALUES ('agent', 'agent-a', 'topic', ?, 'user', 'body', ?, 0, ?, ?, ?)",
             )
             .bind(format!("message-{index:03}"))
             .bind(index as i64)
+            .bind("a".repeat(64))
             .bind(index as i64)
             .bind(index as i64)
             .execute(&pool)
@@ -1378,6 +1386,11 @@ mod tests {
             frame["messages"].as_array().unwrap().len(),
             MESSAGE_PAGE_SIZE + 1
         );
+        assert!(frame["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|message| message["contentHash"] == "a".repeat(64)));
         assert_eq!(frame["deletedMessages"].as_array().unwrap().len(), 1);
         assert_eq!(frame["deletedMessages"][0]["msgId"], "message-deleted");
         assert_eq!(frame["deletedMessages"][0]["deletedAt"], 1234);
@@ -1392,5 +1405,21 @@ mod tests {
             .expect("second page");
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].id, "message-100");
+        read_tx.commit().await.expect("close valid snapshot");
+
+        sqlx::query(
+            "UPDATE messages SET content_hash = ?
+             WHERE owner_type = 'agent' AND owner_id = 'agent-a'
+               AND topic_id = 'topic' AND msg_id = 'message-000'",
+        )
+        .bind("A".repeat(64))
+        .execute(&pool)
+        .await
+        .expect("poison outbound hash");
+        let mut invalid_tx = pool.begin().await.expect("begin invalid snapshot");
+        assert!(load_outbound_message_page(&mut invalid_tx, &key, None)
+            .await
+            .expect_err("uppercase contentHash must fail")
+            .contains("lowercase 64-character contentHash"));
     }
 }
