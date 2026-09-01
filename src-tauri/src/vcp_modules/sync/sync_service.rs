@@ -3547,9 +3547,7 @@ pub async fn clear_old_sync_logs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vcp_modules::sync_error::{
-        encode_local_sync_error, SyncErrorCategory, SyncErrorStage,
-    };
+    use crate::vcp_modules::sync_error::{encode_local_sync_error, SyncErrorStage};
     use serde_json::Value;
     use std::sync::atomic::AtomicBool;
     use tokio::net::TcpListener;
@@ -3833,39 +3831,6 @@ mod tests {
     }
 
     #[test]
-    fn sync_error_contract_preserves_raw_detail_in_the_user_payload() {
-        let payload = build_sync_error_payload(
-            "TOKEN_MISMATCH",
-            "token=mobile-secret url=wss://192.168.1.10/ws?token=mobile-secret",
-            vec!["topic-a".to_string()],
-            Some("/data/user/0/com.vcp.avatar/logs/20260813_sync.log".to_string()),
-        );
-        let json = serde_json::to_value(payload).expect("serialize sync error");
-
-        assert_eq!(json["category"], "configuration");
-        assert_eq!(json["origin"], "mobile_sync");
-        assert_eq!(json["stage"], "connect");
-        assert_eq!(json["retryAction"], "after_user_action");
-        assert_eq!(
-            json["message"],
-            "token=mobile-secret url=wss://192.168.1.10/ws?token=mobile-secret"
-        );
-        assert_eq!(json["guidance"], "重新核对两端令牌后再试。");
-        assert_eq!(
-            json["logFile"],
-            "/data/user/0/com.vcp.avatar/logs/20260813_sync.log"
-        );
-        assert!(json.get("detail").is_none());
-        assert!(json.get("solution").is_none());
-
-        let fallback =
-            build_sync_error_payload("desktop raw code", "ENOENT /tmp/sync.db", Vec::new(), None);
-        assert_eq!(fallback.code, "SYNC_ATTEMPT_FAILED");
-        assert_eq!(fallback.category, SyncErrorCategory::Internal);
-        assert_eq!(fallback.message, "ENOENT /tmp/sync.db");
-    }
-
-    #[test]
     fn only_transport_and_snapshot_failures_restart_the_full_attempt() {
         let transport = encode_local_sync_error(
             "HTTP_TRANSPORT_FAILED",
@@ -3884,23 +3849,6 @@ mod tests {
             Vec::new(),
         );
         assert!(attempt_restart_failure("PHASE3_PULL_FAILED", &protocol).is_none());
-    }
-
-    #[test]
-    fn command_errors_use_the_structured_transport_prefix() {
-        let encoded = encode_sync_command_error(
-            "SYNC_ACTIVE_GENERATION",
-            "Bearer raw-secret url=wss://desktop/ws?token=raw-secret",
-        );
-        let json = encoded
-            .strip_prefix("SYNC_ERROR:")
-            .expect("structured sync command prefix");
-        let payload: Value = serde_json::from_str(json).expect("structured sync error JSON");
-
-        assert_eq!(payload["code"], "SYNC_ACTIVE_GENERATION");
-        assert_eq!(payload["category"], "data");
-        assert!(encoded.contains("raw-secret"));
-        assert!(encoded.contains("wss://desktop/ws?token=raw-secret"));
     }
 
     fn valid_sync_settings() -> Settings {

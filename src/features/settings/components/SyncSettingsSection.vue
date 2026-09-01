@@ -61,6 +61,7 @@ const rebuildEmoticonLibrary = async () => {
     />
     <SettingsTextField
       v-model="settings.syncToken"
+      is-secure
       label="Mobile Sync Token"
       placeholder="输入桌面端 config.env 中的 Token"
       mono
@@ -69,6 +70,7 @@ const rebuildEmoticonLibrary = async () => {
     <div class="border-t border-black/5 dark:border-white/5 pt-2 space-y-4">
       <SettingsTextField
         v-model="settings.fileKey"
+        is-secure
         label="表情包图床密钥 (fileKey)"
         placeholder="用于构造表情包 URL 的密码"
         mono

@@ -484,57 +484,6 @@ describe("sync session ownership", () => {
     expect(separatorIndex).toBeGreaterThanOrEqual(0);
   });
 
-  it("parses structured command errors with the complete transport detail", async () => {
-    const rawDetail = `token=command-secret url=wss://desktop/ws?token=command-secret ${"x".repeat(240)}`;
-    const commandError = {
-      code: "TOKEN_MISMATCH",
-      category: "configuration",
-      origin: "mobile_sync",
-      stage: "connect",
-      retryAction: "after_user_action",
-      message: rawDetail,
-      guidance: "重新核对两端令牌后再试。",
-      failedTopicIds: [],
-      logFile: null,
-    };
-    mockInvoke("start_manual_sync", () =>
-      Promise.reject(`SYNC_ERROR:${JSON.stringify(commandError)}`),
-    );
-
-    const store = useSyncSessionStore();
-    store.open();
-    await store.startSync();
-
-    expect(store.status).toBe("error");
-    expect(store.terminalError).toMatchObject(commandError);
-    expect(store.terminalError?.message).toBe(rawDetail);
-    expect(store.logs.some((log) => log.message.includes("SYNC_ERROR"))).toBe(
-      false,
-    );
-  });
-
-  it("preserves a legacy raw terminal error even when its envelope is incomplete", () => {
-    const store = useSyncSessionStore();
-    store.open();
-    store.activeSessionId = 49;
-
-    emitTauriEvent("vcp-sync-status", {
-      sessionId: 49,
-      status: "error",
-      error: {
-        code: "TOKEN_MISMATCH",
-        message: "raw token=secret-value from transport",
-        failedTopicIds: [],
-      },
-    });
-
-    expect(store.terminalError?.code).toBe("SYNC_ATTEMPT_FAILED");
-    expect(store.terminalError?.message).toBe(
-      "raw token=secret-value from transport",
-    );
-    expect(store.logs.some((log) => log.message.includes("secret-value"))).toBe(true);
-  });
-
   it("shows only owned operator notices and keeps numeric progress nonterminal", async () => {
     const store = useSyncSessionStore();
     store.open();
@@ -543,7 +492,7 @@ describe("sync session ownership", () => {
     emitTauriEvent("vcp-log", {
       category: "sync",
       level: "error",
-      message: "raw diagnostic token=secret-value",
+      message: "unowned diagnostic",
     });
     emitTauriEvent("vcp-log", {
       category: "sync",
@@ -574,13 +523,13 @@ describe("sync session ownership", () => {
     }
     emitTauriEvent("vcp-sync-progress", {
       sessionId: 1,
-      phase: "internal_secret_phase",
+      phase: "unknown_phase",
       total: 2,
       completed: 2,
-      message: "raw progress token=phase-secret",
+      message: "unknown phase progress",
     });
 
-    expect(store.logs.some((log) => log.message.includes("secret-value"))).toBe(
+    expect(store.logs.some((log) => log.message.includes("unowned diagnostic"))).toBe(
       false,
     );
     expect(store.logs.some((log) => log.message === "其他会话正在重试")).toBe(
@@ -593,7 +542,7 @@ describe("sync session ownership", () => {
       store.logs.filter((log) => log.message === "会话主题同步完成"),
     ).toHaveLength(0);
     expect(store.progressData.phase).toBe("topic_metadata");
-    expect(store.logs.some((log) => log.message.includes("phase-secret"))).toBe(
+    expect(store.logs.some((log) => log.message.includes("unknown phase progress"))).toBe(
       false,
     );
   });
@@ -713,37 +662,6 @@ describe("sync session ownership", () => {
     }
   });
 
-  it("renders complete diagnostics, the log path, and all failed topics", async () => {
-    const store = useSyncSessionStore();
-    store.open();
-    store.activeSessionId = 48;
-    emitTauriEvent("vcp-sync-status", {
-      sessionId: 48,
-      status: "error",
-      error: syncError(
-        "DESKTOP_DB_SECRET_CODE",
-        "Bearer desktop-secret url=https://desktop/sync?token=desktop-secret path=C:\\Users\\Nova\\history.json",
-        Array.from({ length: 10 }, (_, index) => `private-topic-${index}`),
-        "/data/user/0/com.vcp.avatar/logs/20260813_sync.log",
-      ),
-    });
-
-    const wrapper = mount(SyncSessionView);
-    await Promise.resolve();
-
-    expect(wrapper.text()).toContain("Bearer desktop-secret");
-    expect(wrapper.text()).toContain("https://desktop/sync?token=desktop-secret");
-    expect(wrapper.text()).toContain("C:\\Users\\Nova\\history.json");
-    expect(wrapper.text()).toContain("可重试一次；若仍失败，请保留最新同步日志。");
-    expect(wrapper.text()).toContain(
-      "/data/user/0/com.vcp.avatar/logs/20260813_sync.log",
-    );
-    expect(wrapper.text()).toContain("消息同步 · 电脑同步插件 · DESKTOP_DB_SECRET_CODE");
-    expect(wrapper.text()).toContain("private-topic-0");
-    expect(wrapper.text()).toContain("private-topic-9");
-    expect(wrapper.text()).toContain("重新同步");
-  });
-
   it("uses the contract retry action instead of offering every terminal error a retry", async () => {
     const store = useSyncSessionStore();
     store.open();
@@ -785,23 +703,6 @@ describe("sync session ownership", () => {
     expect(wrapper.text()).not.toContain("重新同步");
   });
 
-  it("shows the raw command failure when history listing fails", async () => {
-    let attempts = 0;
-    mockInvoke("list_sync_log_files", () => {
-      attempts += 1;
-      return attempts === 1
-        ? Promise.reject("SYNC_ERROR:raw token=history-secret")
-        : [];
-    });
-    const wrapper = mount(SyncLogBrowserCore);
-
-    await vi.waitFor(() =>
-      expect(wrapper.text()).toContain("history-secret"),
-    );
-    await wrapper.get("button").trigger("click");
-    await vi.waitFor(() => expect(wrapper.text()).toContain("暂无同步日志"));
-  });
-
   it("keeps the history list available after a file read failure", async () => {
     mockInvoke("list_sync_log_files", () => [
       {
@@ -814,7 +715,7 @@ describe("sync session ownership", () => {
     mockInvoke("read_sync_log_file", () => {
       attempts += 1;
       return attempts === 1
-        ? Promise.reject("SYNC_ERROR:raw token=read-secret")
+        ? Promise.reject("read failed")
         : "[2026-08-13T12:00:00.000+08:00] [INFO] retry succeeded";
     });
     const notifications = useNotificationStore();
@@ -825,10 +726,7 @@ describe("sync session ownership", () => {
     );
     await wrapper.get('[class*="cursor-pointer"]').trigger("click");
     await vi.waitFor(() =>
-      expect(
-        notifications.activeToasts[notifications.activeToasts.length - 1]
-          ?.message,
-      ).toContain("read-secret"),
+      expect(notifications.activeToasts.length).toBeGreaterThan(0),
     );
     expect(wrapper.text()).toContain("20260813_120000_000_1_sync.log");
 

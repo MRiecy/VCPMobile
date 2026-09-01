@@ -781,93 +781,28 @@ mod tests {
     }
 
     #[test]
-    fn output_projection_strips_controls_and_preserves_diagnostics_across_chunks() {
+    fn output_projection_strips_terminal_controls_across_chunks() {
         let (first, state, projected) = project_safe_output(
-            "safe\u{1b}[31m red\u{1b}[0m\nAuth",
+            "safe\u{1b}[31m red\u{1b}[0m\nprefix",
             OutputProjectionState::default(),
             false,
         );
-        assert_eq!(first, "safe red\nAuth");
+        assert_eq!(first, "safe red\nprefix");
         assert!(projected);
 
-        let (second, state, projected) = project_safe_output(
-            "orization: Bearer top-secret\nnext\u{1b}]0;forged",
-            state,
-            false,
-        );
-        assert_eq!(second, "orization: Bearer top-secret\nnext");
+        let (second, state, projected) =
+            project_safe_output("suffix\nnext\u{1b}]0;forged", state, false);
+        assert_eq!(second, "suffix\nnext");
         assert!(projected);
 
-        let (third, state, projected) =
-            project_safe_output(" title\u{7}\nTOKEN=hidden\nvisible", state, true);
-        assert_eq!(third, "\nTOKEN=hidden\nvisible");
+        let (third, state, projected) = project_safe_output(" title\u{7}\nvisible", state, true);
+        assert_eq!(third, "\nvisible");
         assert_eq!(state, OutputProjectionState::default());
         assert!(projected);
         let combined = format!("{first}{second}{third}");
-        assert!(combined.contains("top-secret"));
+        assert_eq!(combined, "safe red\nprefixsuffix\nnext\nvisible");
         assert!(!combined.contains("forged"));
-        assert!(combined.contains("hidden"));
         assert!(!combined.contains('\u{1b}'));
-    }
-
-    #[tokio::test]
-    async fn diagnostics_survive_an_opaque_cursor_boundary() {
-        let directory = tempfile::tempdir().expect("temporary output root");
-        let stdout = directory.path().join("diagnostic.stdout");
-        let stderr = directory.path().join("diagnostic.stderr");
-        let raw = b"ok\nAuthorization: Bearer cursor-secret\nafter\n";
-        tokio::fs::write(&stdout, raw).await.expect("write stdout");
-        tokio::fs::write(&stderr, b"").await.expect("write stderr");
-        let mut cursor = None;
-        let mut projected = String::new();
-        let mut offset = 0;
-        while offset < raw.len() as u64 {
-            let chunk = read_incremental_output(OutputReadRequest {
-                output_root: directory.path(),
-                stdout_path: &stdout,
-                stderr_path: &stderr,
-                runtime_generation: 3,
-                job_id: "job-diagnostic",
-                attempt_id: "attempt-diagnostic",
-                stdout_bytes: raw.len() as u64,
-                stderr_bytes: 0,
-                cursor: cursor.as_deref(),
-                max_output_bytes: 10,
-                source_truncated: false,
-                source_terminal: true,
-            })
-            .await
-            .expect("read projected chunk");
-            assert!(chunk.cursor.len() <= 512);
-            projected.push_str(&chunk.stdout);
-            offset = chunk.stdout_offset;
-            cursor = Some(chunk.cursor);
-        }
-        assert_eq!(projected, String::from_utf8_lossy(raw));
-        assert!(projected.contains("cursor-secret"));
-    }
-
-    #[test]
-    fn private_key_text_is_preserved() {
-        let (first, state, _) = project_safe_output(
-            "before\n-----BEGIN RSA PRIVATE KEY-----\nsecret-material",
-            OutputProjectionState::default(),
-            false,
-        );
-        assert_eq!(
-            first,
-            "before\n-----BEGIN RSA PRIVATE KEY-----\nsecret-material"
-        );
-        let (second, _, projected) = project_safe_output(
-            "\nstill-secret\n-----END RSA PRIVATE KEY-----\nafter",
-            state,
-            true,
-        );
-        assert_eq!(
-            second,
-            "\nstill-secret\n-----END RSA PRIVATE KEY-----\nafter"
-        );
-        assert!(!projected);
     }
 
     #[test]

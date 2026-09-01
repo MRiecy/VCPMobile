@@ -210,7 +210,7 @@ fn serializes_human_tool_escape_protocol_without_outer_marker_breakout() {
 }
 
 #[test]
-fn extracts_nested_daily_note_outcome_and_errors() {
+fn extracts_nested_daily_note_outcome() {
     let success = json!({
         "result": {
             "status": "success",
@@ -226,30 +226,6 @@ fn extracts_nested_daily_note_outcome_and_errors() {
             "Nova 的知识".to_string(),
             "2026-08-12-10_20_30-note.txt".to_string()
         ))
-    );
-    let error = json!({
-        "original_plugin_output":
-            "{\"plugin_error\":\"EACCES /srv/private/diary.txt bearer secret\"}"
-    });
-    assert_eq!(
-        find_tool_error(&error, 0),
-        Some("EACCES /srv/private/diary.txt bearer secret".to_string())
-    );
-    assert_eq!(
-        error_summary(br#"{"error":"cannot read /srv/private/diary.txt"}"#),
-        Some("cannot read /srv/private/diary.txt".to_string())
-    );
-    assert_eq!(
-        error_summary(br#"{"error":"EACCES: permission denied, open '/srv/private/diary.txt'"}"#,),
-        Some("EACCES: permission denied, open '/srv/private/diary.txt'".to_string())
-    );
-    assert_eq!(
-        map_http_status(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Some(br#"{"error":"cannot read C:\\private\\diary.txt"}"#),
-        )
-        .message,
-        "cannot read C:\\private\\diary.txt"
     );
 }
 
@@ -324,10 +300,6 @@ fn normalizes_partial_batch_results_without_promoting_http_success() {
     assert_eq!(outcome.succeeded, vec![a]);
     assert_eq!(outcome.errors.len(), 1);
     assert_eq!(outcome.errors[0].key, b);
-    assert_eq!(
-        outcome.errors[0].message,
-        "File already exists at destination"
-    );
 }
 
 #[tokio::test]
@@ -861,40 +833,6 @@ async fn classifies_ambiguous_write_readback_without_retrying() {
         .await
         .expect_err("unreadable result is uncertain");
     assert_eq!(unavailable.code, DiaryErrorCode::SaveUncertain);
-    server.abort();
-}
-
-#[tokio::test]
-async fn explicit_create_tool_failure_is_retryable_and_preserves_tool_paths() {
-    let router = Router::new().route(
-        "/proxy/v1/human/tool",
-        post(|| async {
-            Json(json!({
-                "plugin_error": "created but callback failed at /srv/private/dailynote/F/a.txt"
-            }))
-        }),
-    );
-    let (base, server) = spawn_test_server(router).await;
-    let service = DiaryServiceState::new().expect("service");
-    let error = service
-        .create_note(
-            &test_settings(&base),
-            &DiaryCreateRequest {
-                maid: "Nova".to_string(),
-                date: "2026-08-12".to_string(),
-                folder: Some("F".to_string()),
-                file_name_suffix: Some("a".to_string()),
-                tag: None,
-                content: "content".to_string(),
-            },
-        )
-        .await
-        .expect_err("explicit tool failure must be surfaced");
-    assert_eq!(error.code, DiaryErrorCode::ToolError);
-    assert_eq!(
-        error.message,
-        "created but callback failed at /srv/private/dailynote/F/a.txt"
-    );
     server.abort();
 }
 

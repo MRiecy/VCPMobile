@@ -831,6 +831,7 @@ onBeforeUnmount(() => {
                 v-model="vcpKey"
                 label="VCP 鉴权密钥 / VCP API Key"
                 placeholder="授权校验密钥"
+                is-secure
                 :disabled="status.state !== 'disconnected'"
               />
             </div>

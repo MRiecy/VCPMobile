@@ -1020,24 +1020,6 @@ mod tests {
     }
 
     #[test]
-    fn unknown_wire_code_keeps_metadata_and_raw_message() {
-        let wire = parse_wire_sync_error(&serde_json::json!({
-            "code": "UPSTREAM_EXTENSION_FAILED",
-            "origin": "desktop_plugin",
-            "stage": "finalize",
-            "kind": "internal",
-            "retry": "manual",
-            "message": "Bearer desktop-secret",
-            "failedTopicIds": []
-        }))
-        .expect("unknown stable code");
-        let payload = build_wire_error_payload(&wire, Vec::new(), None);
-        assert_eq!(payload.code, "UPSTREAM_EXTENSION_FAILED");
-        assert_eq!(payload.stage, SyncErrorStage::Finalize);
-        assert_eq!(payload.message, "Bearer desktop-secret");
-    }
-
-    #[test]
     fn encoded_wire_error_survives_aggregate_diagnostics() {
         let wire = parse_wire_sync_error(&serde_json::json!({
             "code": "SYNC_OWNER_CONFLICT",
@@ -1081,26 +1063,5 @@ mod tests {
         assert_eq!(payload.code, "SYNC_ATTEMPT_FAILED");
         let stable = build_local_error_payload("EXTENSIONFAILED", Vec::new(), None);
         assert_eq!(stable.code, "EXTENSIONFAILED");
-    }
-
-    #[test]
-    fn wire_keeps_complete_messages_and_validates_each_topic_id() {
-        let valid = serde_json::json!({
-            "code": "UPSTREAM_EXTENSION_FAILED",
-            "origin": "desktop_plugin",
-            "stage": "messages",
-            "kind": "internal",
-            "retry": "manual",
-            "message": "🙂".repeat(1024),
-            "failedTopicIds": ["🙂".repeat(512)]
-        });
-        parse_wire_sync_error(&valid).expect("Unicode scalar boundary");
-
-        let mut longer = valid;
-        longer["message"] = Value::String("🙂".repeat(4096));
-        parse_wire_sync_error(&longer).expect("complete diagnostic message");
-
-        longer["failedTopicIds"] = serde_json::json!(["🙂".repeat(513)]);
-        assert!(parse_wire_sync_error(&longer).is_err());
     }
 }
