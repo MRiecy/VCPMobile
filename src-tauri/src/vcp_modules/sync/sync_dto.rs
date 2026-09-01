@@ -377,7 +377,6 @@ mod tests {
         assert_eq!(msg.topic_id.as_deref(), Some("topic-1"));
         assert_eq!(msg.is_group_message, Some(true));
         assert_eq!(msg.content_hash.as_deref(), Some("b".repeat(64).as_str()));
-        assert!(msg.is_thinking.is_none());
         assert!(msg.blocks.is_none());
         assert!(msg.shell.is_none());
 

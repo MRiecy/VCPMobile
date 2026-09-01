@@ -231,7 +231,6 @@ CREATE TABLE messages (
 |------|------|
 | `content` | 存储明文消息文本。v1.1.3 起由 zstd 压缩 BLOB 迁移为 TEXT，以支持 FTS5 全文搜索与直接读取 |
 | `content_hash` | 消息内容与附件 hash 的聚合指纹，用于同步 Diff；同步下载时若桌面端已提供则直接复用 |
-| `is_thinking` | **已弃用**。v0.9.14 起数据库 `messages` 表已移除该列；应用层 `ChatMessage` / Sync DTO 仍保留字段，读取时固定为 `Some(false)` |
 | `finish_reason` | 流式输出的结束原因（如 `stop`、`length`、`error`） |
 | `deleted_at` | 软删除时间戳，`NULL` 表示未删除。同步系统依赖此字段识别删除状态 |
 
