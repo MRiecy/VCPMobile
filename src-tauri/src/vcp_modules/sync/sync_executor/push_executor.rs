@@ -85,11 +85,11 @@ async fn parse_json_response<T: DeserializeOwned>(
             Ok(Some(encoded)) => Err(encoded),
             Ok(None) => Err(protocol_error(
                 stage,
-                format!("{operation} failed with HTTP {status} without a Wire 1.4 error object"),
+                format!("{operation} failed with HTTP {status} without a Wire 1.5 error object"),
             )),
             Err(error) => Err(protocol_error(
                 stage,
-                format!("{operation} returned an invalid Wire 1.4 error: {error}"),
+                format!("{operation} returned an invalid Wire 1.5 error: {error}"),
             )),
         };
     }
@@ -270,12 +270,12 @@ async fn send_message_chunk(
             Ok(None) => Err(protocol_error(
                 SyncErrorStage::Messages,
                 format!(
-                    "Batch push messages failed with HTTP {status} without a Wire 1.4 error object"
+                    "Batch push messages failed with HTTP {status} without a Wire 1.5 error object"
                 ),
             )),
             Err(error) => Err(protocol_error(
                 SyncErrorStage::Messages,
-                format!("Batch push messages returned an invalid Wire 1.4 error: {error}"),
+                format!("Batch push messages returned an invalid Wire 1.5 error: {error}"),
             )),
         };
     }
@@ -340,11 +340,11 @@ async fn send_entity_items(
             Ok(Some(encoded)) => Err(encoded),
             Ok(None) => Err(protocol_error(
                 response_stage,
-                format!("Entity push failed with HTTP {status} without a Wire 1.4 error object"),
+                format!("Entity push failed with HTTP {status} without a Wire 1.5 error object"),
             )),
             Err(error) => Err(protocol_error(
                 response_stage,
-                format!("Entity push returned an invalid Wire 1.4 error: {error}"),
+                format!("Entity push returned an invalid Wire 1.5 error: {error}"),
             )),
         };
     }

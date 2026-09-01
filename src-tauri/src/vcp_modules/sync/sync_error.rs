@@ -227,16 +227,24 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
                 Stage::Handshake,
                 Retry::AfterUserAction,
                 "手机端与电脑端同步版本不兼容",
-                "将手机端与电脑端同步插件更新到同一兼容版本后再试。",
+                "更新桌面端 VCPMobileSync 插件并重启电脑端后再试。",
             )
         }
-        "CDS_PROTOCOL_MISMATCH" => definition(
+        "CDS_BINARY_NOT_FOUND" => definition(
+            Category::Configuration,
+            Origin::DesktopCds,
+            Stage::Startup,
+            Retry::AfterUserAction,
+            "电脑端 CDS Rust 可执行文件不存在",
+            "重新编译并部署 rust_chat_data_service，然后重启电脑端再试。",
+        ),
+        "CDS_PROTOCOL_MISMATCH" | "CDS_SCHEMA_MISMATCH" => definition(
             Category::Compatibility,
             Origin::DesktopCds,
             Stage::Startup,
             Retry::AfterUserAction,
-            "电脑端内部数据服务版本不兼容",
-            "更新并重启电脑端应用后重新同步。",
+            "电脑端 CDS Rust 可执行文件版本不匹配",
+            "重新编译并部署 rust_chat_data_service，然后重启电脑端再试。",
         ),
         "VERSION_CHECK_TIMEOUT" => definition(
             Category::Connection,
@@ -340,7 +348,7 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::MobileSync,
             Stage::Handshake,
             Retry::AfterUserAction,
-            "同步响应不符合 Wire 1.4 规范，已安全停止",
+            "同步响应不符合 Wire 1.5 规范，已安全停止",
             "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留最新日志。",
         ),
         "INVALID_RESPONSE" | "INVALID_REQUEST" => definition(
@@ -356,7 +364,7 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::MobileSync,
             Stage::OwnerMetadata,
             Retry::AfterUserAction,
-            "同步响应不符合 Wire 1.4 规范，已安全停止",
+            "同步响应不符合 Wire 1.5 规范，已安全停止",
             "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留最新日志。",
         ),
         "SYNC_REQUEST_INVALID" => definition(
@@ -364,7 +372,7 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::MobileSync,
             Stage::Connect,
             Retry::AfterUserAction,
-            "同步请求不符合 Wire 1.4 规范，已安全停止",
+            "同步请求不符合 Wire 1.5 规范，已安全停止",
             "确认两端版本一致并重新同步；若仍出现，请保留最新日志。",
         ),
         "PROTOCOL_FRAME_INVALID" => definition(
@@ -372,7 +380,7 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::MobileSync,
             Stage::Messages,
             Retry::AfterUserAction,
-            "运行中的同步消息不符合 Wire 1.4 规范，已安全停止",
+            "运行中的同步消息不符合 Wire 1.5 规范，已安全停止",
             "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留最新日志。",
         ),
         "TOPIC_HASH_RESPONSE_OVERLAP" | "TOPIC_HASH_RESULTS_INVALID" => definition(
@@ -380,7 +388,7 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::MobileSync,
             Stage::TopicValidation,
             Retry::AfterUserAction,
-            "话题校验响应不符合 Wire 1.4 规范，已安全停止",
+            "话题校验响应不符合 Wire 1.5 规范，已安全停止",
             "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留最新日志。",
         ),
         "PHASE3_BATCH_OVERLAP"
@@ -392,7 +400,7 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::MobileSync,
             Stage::Messages,
             Retry::AfterUserAction,
-            "消息同步响应不符合 Wire 1.4 规范，已安全停止",
+            "消息同步响应不符合 Wire 1.5 规范，已安全停止",
             "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留最新日志。",
         ),
         "SYNC_LOG_PATH_INVALID" => definition(
@@ -588,13 +596,21 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             "同步历史或日志读取失败",
             "检查可用存储空间后重试；若仍失败，请保留日志。",
         ),
-        "CDS_UNAVAILABLE" | "CDS_ERROR" | "INTERNAL_ERROR" => definition(
+        "CDS_UNAVAILABLE" => definition(
+            Category::Configuration,
+            Origin::DesktopCds,
+            Stage::Startup,
+            Retry::AfterUserAction,
+            "电脑端选择了 CDS 模式，但数据服务不可用",
+            "在电脑端启用 CDS，或明确切换为 Legacy 模式并重启后再试。",
+        ),
+        "CDS_STARTUP_FAILED" | "CDS_ERROR" | "INTERNAL_ERROR" => definition(
             Category::Internal,
             Origin::DesktopCds,
             Stage::Startup,
             Retry::Manual,
             "电脑端数据服务未能启动",
-            "重启电脑端应用后重新同步；若仍失败，请保留日志。",
+            "查看电脑端同步日志并重启应用；若仍失败，请保留日志。",
         ),
         "SYNC_ALREADY_RUNNING" => definition(
             Category::Internal,
@@ -667,7 +683,7 @@ fn fallback_copy(category: SyncErrorCategory) -> (&'static str, &'static str) {
             "将两端更新到同一兼容版本后再试。",
         ),
         SyncErrorCategory::Protocol => (
-            "同步响应不符合 Wire 1.4 规范，已安全停止",
+            "同步响应不符合 Wire 1.5 规范，已安全停止",
             "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留日志。",
         ),
         SyncErrorCategory::Data => (
@@ -782,7 +798,7 @@ fn validate_wire_error(error: WireSyncError) -> Result<WireSyncError, String> {
 
 pub fn parse_wire_sync_error(value: &Value) -> Result<WireSyncError, String> {
     let error = serde_json::from_value::<WireSyncError>(value.clone())
-        .map_err(|parse_error| format!("invalid Wire 1.4 error object: {parse_error}"))?;
+        .map_err(|parse_error| format!("invalid Wire 1.5 error object: {parse_error}"))?;
     validate_wire_error(error)
 }
 
@@ -790,7 +806,7 @@ pub fn encode_wire_sync_error(error: &WireSyncError) -> Result<String, String> {
     let validated = validate_wire_error(error.clone())?;
     serde_json::to_string(&validated)
         .map(|json| format!("{WIRE_ERROR_MARKER}{json}"))
-        .map_err(|serialize_error| format!("failed to encode Wire 1.4 error: {serialize_error}"))
+        .map_err(|serialize_error| format!("failed to encode Wire 1.5 error: {serialize_error}"))
 }
 
 /// 将 Mobile 内部边界错误编码进既有私有标记，避免执行器退化为依赖文本猜测的
@@ -979,6 +995,24 @@ mod tests {
                 SyncErrorOrigin::DesktopCds,
                 SyncErrorStage::Startup,
             ),
+            (
+                "CDS_BINARY_NOT_FOUND",
+                SyncErrorCategory::Configuration,
+                SyncErrorOrigin::DesktopCds,
+                SyncErrorStage::Startup,
+            ),
+            (
+                "CDS_SCHEMA_MISMATCH",
+                SyncErrorCategory::Compatibility,
+                SyncErrorOrigin::DesktopCds,
+                SyncErrorStage::Startup,
+            ),
+            (
+                "CDS_UNAVAILABLE",
+                SyncErrorCategory::Configuration,
+                SyncErrorOrigin::DesktopCds,
+                SyncErrorStage::Startup,
+            ),
         ];
 
         for (code, category, origin, stage) in cases {
@@ -992,6 +1026,11 @@ mod tests {
         assert!(!cds_auth.guidance.contains("两端令牌"));
         let cds_timeout = build_local_error_payload("TIMEOUT", Vec::new(), None);
         assert!(!cds_timeout.guidance.contains("同一网络"));
+        let stale_cds = build_local_error_payload("CDS_PROTOCOL_MISMATCH", Vec::new(), None);
+        assert!(stale_cds.guidance.contains("rust_chat_data_service"));
+        let wire_mismatch =
+            build_local_error_payload("SYNC_VERSION_INCOMPATIBLE", Vec::new(), None);
+        assert!(wire_mismatch.guidance.contains("VCPMobileSync"));
     }
 
     #[test]

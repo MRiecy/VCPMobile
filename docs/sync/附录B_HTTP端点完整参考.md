@@ -82,7 +82,7 @@ Push 成功响应只回显 Topic 身份和 `ok:true`。Topic 失败使用 `ok:fa
 | `409 Conflict` | 已提交状态与请求冲突 | 当前操作失败 |
 | `500 Internal Server Error` | 桌面存储或 CDS 故障 | 保留结构化根因并终止 attempt |
 
-所有非 2xx 响应使用 `{"error": WireSyncError}`。逐项失败使用 `ok:false,error`；成功禁止携带 `error`。Wire 1.4 的错误对象固定包含 `code/origin/stage/kind/retry/message/failedTopicIds`。
+所有非 2xx 响应使用 `{"error": WireSyncError}`。逐项失败使用 `ok:false,error`；成功禁止携带 `error`。Wire 1.5 的错误对象固定包含 `code/origin/stage/kind/retry/message/failedTopicIds`。
 
 ### 流式端点特殊错误帧
 

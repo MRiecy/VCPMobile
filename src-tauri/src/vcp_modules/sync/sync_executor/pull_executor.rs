@@ -94,13 +94,13 @@ fn http_status_error(
         Ok(None) => encode_local_sync_error(
             "SYNC_PROTOCOL_INVALID",
             stage,
-            &format!("{operation} failed with HTTP {status} without a Wire 1.4 error object"),
+            &format!("{operation} failed with HTTP {status} without a Wire 1.5 error object"),
             Vec::new(),
         ),
         Err(error) => encode_local_sync_error(
             "SYNC_PROTOCOL_INVALID",
             stage,
-            &format!("{operation} returned an invalid Wire 1.4 error: {error}"),
+            &format!("{operation} returned an invalid Wire 1.5 error: {error}"),
             Vec::new(),
         ),
     }
@@ -1548,7 +1548,7 @@ mod ndjson_frame_tests {
     }
 
     #[test]
-    fn ndjson_error_frames_require_the_wire_1_4_object() {
+    fn ndjson_error_frames_require_the_wire_1_5_object() {
         let parsed = parse_topic_ndjson_frame(
             json!({
                 "kind": "topic",
@@ -1569,7 +1569,7 @@ mod ndjson_frame_tests {
             .to_string()
             .as_bytes(),
         )
-        .expect("Wire 1.4 error frame");
+        .expect("Wire 1.5 error frame");
         assert_eq!(parsed.error.expect("error").code, "TOPIC_NOT_FOUND");
         assert!(parse_topic_ndjson_frame(
             json!({

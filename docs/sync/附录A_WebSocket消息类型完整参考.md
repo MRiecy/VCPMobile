@@ -13,8 +13,8 @@ scope: 双端
 
 | 序号 | 消息名称 | 方向 | 触发时机 | Payload 关键字段 | 移动端处理函数/位置 | 桌面端处理函数/位置 | 对应代码文件 |
 |-----|---------|------|---------|-----------------|-------------------|-------------------|------------|
-| 1 | `VERSION_CHECK` | M→D | WS 连接建立后的第一条业务消息 | `mobileVersion`, `protocolVersion: "1.4"` | 发送并启动握手 deadline | 严格校验后构造 `VERSION_ACK` | `sync_service.rs`, `protocol.js` |
-| 2 | `VERSION_ACK` | D→M | 收到 `VERSION_CHECK` 后 | `pluginVersion`, `protocolVersion: "1.4"` | 兼容性只由 Wire 版本决定；插件版本用于诊断 | 回显插件包版本与固定 Wire 版本 | `sync_service.rs`, `protocol.js` |
+| 1 | `VERSION_CHECK` | M→D | WS 连接建立后的第一条业务消息 | `mobileVersion`, `protocolVersion: "1.5"` | 发送并启动握手 deadline | 严格校验后构造 `VERSION_ACK` | `sync_service.rs`, `protocol.js` |
+| 2 | `VERSION_ACK` | D→M | 收到 `VERSION_CHECK` 后 | `pluginVersion`, `protocolVersion: "1.5"`, `backendMode` | 兼容性只由 Wire 版本决定；记录当前桌面后端 | 回显插件包版本、固定 Wire 与 `legacy/cds` 模式 | `sync_service.rs`, `protocol.js` |
 | 3 | `PHASE_START` | M→D | 各同步阶段（Phase）开始时由移动端发送，通知桌面端进入新阶段 | `phase: string`，取值：`owner_metadata`、`topic_metadata`、`messages` | `run_sync_session` 中在每个 Phase 入口通过 `ws_stream.send` 发送；同时更新前端 `vcp-sync-progress` 事件 | `index.js` 中记录日志 `logger.logInfo`，返回 `PHASE_ACK` 确认帧 | `sync_service.rs`, `index.js` |
 | 4 | `PHASE_COMPLETED` | M→D | 各阶段完成后由移动端发送；最终 `messages` 帧是完成态提交边界 | 普通帧：`phase`；最终帧：`phase`, `sessionId`, `attemptId`, `nonce` | Finalize 落盘与哈希事务成功后发送，安装当前 pending key 和 30 秒 watchdog | `index.js` 记录并对最终帧原样回显身份字段 | `sync_service.rs`, `index.js` |
 | 5 | `PHASE_ACK` | D→M | 桌面端确认收到 `PHASE_START` 或 `PHASE_COMPLETED` | 普通 ACK：`phase`；最终 ACK：`phase`, `sessionId`, `attemptId`, `nonce` | 普通 ACK 仅记录；最终 ACK 必须精确匹配当前 pending key 并原子消费一次 | `index.js` 对最终 `messages` 帧必须原样回显四个身份字段 | `sync_service.rs`, `index.js` |
@@ -52,8 +52,9 @@ scope: 双端
 |--------|---------|---------|------|--------|------|
 | `type` | `string` | 所有消息 | 是 | — | 消息类型标识符，区分大小写，必须为首层字段 |
 | `mobileVersion` | `string` | `VERSION_CHECK` | 是 | — | 移动端应用版本号，编译期通过 `env!("CARGO_PKG_VERSION")` 嵌入 |
-| `pluginVersion` | `string` | `VERSION_ACK` | 是 | — | 插件包诊断版本；当前为 `1.4.0` |
-| `protocolVersion` | `string` | `VERSION_CHECK`, `VERSION_ACK` | 是 | — | 当前 Wire 固定为 `1.4` |
+| `pluginVersion` | `string` | `VERSION_ACK` | 是 | — | 插件包诊断版本；当前为 `1.5.0` |
+| `protocolVersion` | `string` | `VERSION_CHECK`, `VERSION_ACK` | 是 | — | 当前 Wire 固定为 `1.5` |
+| `backendMode` | `legacy \| cds` | `VERSION_ACK` | 是 | — | 当前 session 的桌面后端；仅展示和归因 |
 | `phase` | `string` | `PHASE_START`, `PHASE_COMPLETED`, `PHASE_ACK` | 是 | — | 阶段名称，取值：`owner_metadata`、`topic_metadata`、`messages` |
 | `sessionId` | `u64` / `number` | 最终 `PHASE_COMPLETED`, `PHASE_ACK` | 最终帧必填 | — | 移动端同步会话 owner generation；桌面端必须原样回显 |
 | `attemptId` | `u64` / `number` | 最终 `PHASE_COMPLETED`, `PHASE_ACK` | 最终帧必填 | — | 当前会话内的 reconnect attempt；桌面端必须原样回显 |
@@ -66,7 +67,7 @@ scope: 双端
 | `results` | 强类型结果数组 | 三类 Result | 是 | `[]` | 结果必须唯一并覆盖当前请求集合 |
 | `ok` | `boolean` | Message Diff 逐 Topic 结果 | 是 | — | `true` 使用决策字段；`false` 只使用 `error` |
 | `pullMessageIds` / `pushTopic` / `deleteMessages` | 数组 / 布尔 / 数组 | Message Diff 成功结果 | 是 | — | `pushTopic` 表示回写整 Topic 最终视图 |
-| `error` | `WireSyncError` | `SYNC_ERROR`, `ok:false` | 是 | — | 完整 Wire 1.4 对象 |
+| `error` | `WireSyncError` | `SYNC_ERROR`, `ok:false` | 是 | — | 完整 Wire 1.5 对象 |
 | `level` | `string` | `SYNC_LOG_EVENT` | 是 | — | 日志级别：`info`（白色）、`success`（绿色）、`warning`（黄色）、`error`（红色） |
 | `message` | `string` | `SYNC_LOG_EVENT`, `SyncError` | 是 | — | 诊断文本；Mobile 持久化时脱敏，前端不直接展示 |
 | `targetType` | `owner/topic/avatar/message` | `SYNC_ENTITY_DELETE` | 是 | — | 决定随后的完整身份字段 |
@@ -126,7 +127,7 @@ scope: 双端
 | 消息类型 | 移动端发送时机 | 桌面端处理函数 | 桌面端响应 | 所属协议阶段 | 关键常量/阈值 |
 |---------|-------------|-------------|-----------|------------|-------------|
 | `VERSION_CHECK` | WS 连接建立后 0ms | `index.js` switch-case | `VERSION_ACK` | 握手 | `VERSION_CHECK_TIMEOUT = 5s` |
-| `VERSION_ACK` | —（接收） | `run_sync_session` 版本校验 | 无 | 握手 | Wire 必须为 `1.4`；插件版本仅诊断 |
+| `VERSION_ACK` | —（接收） | `run_sync_session` 版本校验 | 无 | 握手 | Wire 必须为 `1.5`；插件版本仅诊断；模式仅属于当前 session |
 | `PHASE_START` | 各 Phase 开始时 | `index.js` 记录日志 | `PHASE_ACK` | 全阶段 | `PHASE_RESPONSE_TIMEOUT = 60s` |
 | `PHASE_COMPLETED` | 各 Phase 完成时 | `index.js` 记录日志 | `PHASE_ACK` | 全阶段 | `phase_gate` 去重；最终 ACK 严格匹配四元身份且只消费一次 |
 | `SYNC_MANIFEST_REQUEST` | Phase 1 Owner/Avatar；Phase 2 Topic | `handleSyncManifest` | `SYNC_MANIFEST_RESULT` | Phase 1/2 | 每个内部波次只能消费一次结果 |
@@ -230,7 +231,7 @@ scope: 双端
 | `PHASE_START` / `PHASE_COMPLETED` | `vcp-sync-progress` | `phase`, `total`, `completed` | 进度条更新 |
 | `SYNC_LOG_EVENT` | 无直接 WebView 事件 | `level`, `message` | 脱敏后写入持久诊断日志 |
 | `SYNC_ERROR` | `vcp-sync-status` | `status:"error"`, `error:{code,category,message,guidance,...}` | 错误卡只展示固定 `message + guidance` |
-| `VERSION_ACK`（校验通过） | `vcp-sync-status` | `sessionId`, `status:"connected"` | 同步面板进入进行中状态 |
+| `VERSION_ACK`（校验通过） | `vcp-sync-status` | `sessionId`, `status:"open"`, `desktop:{pluginVersion,backendMode}` | 同步面板进入进行中状态并显示桌面后端 |
 | `Finalize` 完成 | `vcp-sync-completed` | `status`, `summary` | 关闭面板时统一刷新数据 |
 | `DESKTOP_PHASE_*` | 无直接 WebView 事件 | `phase` | 写入诊断日志；用户阶段由 Mobile 结构化进度事件展示 |
 
@@ -244,7 +245,7 @@ scope: 双端
 | `PHASE_*` | 阶段控制与确认 | `PHASE_START`, `PHASE_COMPLETED`, `PHASE_ACK` | 小写阶段名作为参数 |
 | `DESKTOP_*` | 桌面端主动上报的进度消息 | `DESKTOP_PHASE_START` | 前缀标识来源端，避免命名冲突 |
 | `VERSION_*` | 握手协议 | `VERSION_CHECK`, `VERSION_ACK` | 仅握手阶段使用 |
-| 协议版本 | 只在握手表达 | `protocolVersion: 1.4` | 业务帧名不带 `V2/BATCH` 历史后缀 |
+| 协议版本 | 只在握手表达 | `protocolVersion: 1.5` | 业务帧名不带 `V2/BATCH` 历史后缀 |
 | `*_DELETE` | Mobile 在线删除通知 | `SYNC_ENTITY_DELETE` | 属于当前 session/attempt；离线删除仍由 Manifest/Phase 3 墓碑重放 |
 
 ---
@@ -257,7 +258,7 @@ scope: 双端
 | Phase 3 未传消息 | `SYNC_TOPIC_DIFF_REQUEST/RESULT` | `changedTopics` 为空时正确跳过 | `sync/diff.js` |
 | 消息重复同步 | `SYNC_MESSAGE_DIFF_RESULT` | 检查完整 TopicKey 覆盖与 `pullMessageIds` | `Phase3Tracker` |
 | 删除后另一端仍有数据 | Diff 删除动作 / `SYNC_ENTITY_DELETE` | 检查完整身份与 `deletedAt`，再检查下一次 Manifest 是否仍携带墓碑 | `sync_service.rs`, `DeleteExecutor` |
-| 版本不匹配导致连接断开 | `VERSION_CHECK` / `VERSION_ACK` | 核对双方 Wire 是否为 1.4；插件包版本只用于诊断 | `sync_service.rs` |
+| 版本不匹配导致连接断开 | `VERSION_CHECK` / `VERSION_ACK` | 核对双方 Wire 是否为 1.5；插件包版本只用于诊断 | `sync_service.rs` |
 | WS 连接频繁断开 | `SYNC_LOG_EVENT` / `SYNC_ERROR` | 检查网络稳定性、服务端状态与连接错误日志 | `sync_service.rs` 连接管理逻辑 |
 | Phase 2 数据传输量过大 | Topic Manifest | 检查 `targetedOwners` 与 `changed_owners` | `phase1_metadata.rs` |
 | 消息级差异比对过慢 | `SYNC_MESSAGE_DIFF_REQUEST` | 检查 `contentHash` Fast Path 与分片 | `sync/diff.js` |
@@ -266,4 +267,4 @@ scope: 双端
 
 ---
 
-*当前硬切基线：VCPMobileSync 包 `1.4.0`、Wire `1.4`；不保留旧字段或旧帧别名。*
+*当前硬切基线：VCPMobileSync 包 `1.5.0`、Wire `1.5`；不保留旧字段或旧帧别名。*

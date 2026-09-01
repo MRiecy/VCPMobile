@@ -14,10 +14,6 @@ import {
   mockInvoke,
 } from "@/tests/mocks/tauri";
 
-vi.mock("@tauri-apps/api/app", () => ({
-  getVersion: vi.fn(() => Promise.resolve("1.1.5")),
-}));
-
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
@@ -161,6 +157,41 @@ describe("sync session ownership", () => {
       },
     });
     await overlay.closeSyncSession();
+  });
+
+  it("shows desktop backend info only for the current connected session", async () => {
+    const store = useSyncSessionStore();
+    store.open();
+    await vi.waitFor(() => expect(listenMock).toHaveBeenCalledTimes(4));
+    store.activeSessionId = 61;
+
+    emitTauriEvent("vcp-sync-status", {
+      sessionId: 60,
+      status: "open",
+      desktop: { pluginVersion: "1.5.0", backendMode: "cds" },
+    });
+    expect(store.desktopInfo).toBeNull();
+
+    emitTauriEvent("vcp-sync-status", {
+      sessionId: 61,
+      status: "open",
+      desktop: { pluginVersion: "1.5.0", backendMode: "cds" },
+    });
+    expect(store.desktopInfo).toEqual({
+      pluginVersion: "1.5.0",
+      backendMode: "cds",
+    });
+
+    const wrapper = mount(SyncSessionView);
+    expect(wrapper.text()).toContain("桌面后端 CDS");
+    expect(wrapper.text()).toContain("插件 v1.5.0");
+    expect(wrapper.text()).not.toContain("复制诊断");
+
+    emitTauriEvent("vcp-sync-status", {
+      sessionId: 61,
+      status: "connecting",
+    });
+    expect(store.desktopInfo).toBeNull();
   });
 
   it("keeps a connecting sync page mounted while start_manual_sync is pending", async () => {
@@ -835,58 +866,4 @@ describe("sync session ownership", () => {
     ).toBe("已打开系统分享面板");
   });
 
-  it("copies bounded diagnostics without tokens or absolute paths", async () => {
-    const store = useSyncSessionStore();
-    store.open();
-    store.activeSessionId = 51;
-    emitTauriEvent("vcp-sync-status", {
-      sessionId: 51,
-      status: "error",
-      error: {
-        code: "UPLOAD_FAILED",
-        category: "data",
-        origin: "desktop_plugin",
-        stage: "messages",
-        retryAction: "manual",
-        message:
-          'Bearer secret-token; Bearer "alpha beta"; token=also-secret; C:\\Users\\me with space\\file.txt; upload failed at /home/me/file.txt; file:///mnt/private/cache.bin',
-        guidance: "可重试一次；若仍失败，请保留最新同步日志。",
-        failedTopicIds: [
-          "topic-a_sync_token=id-secret",
-          "/mnt/private folder/topic-b",
-          "/Users/me/topic-c",
-          "ERR(/root/private/file)",
-          "topic-/Users/me/secret",
-        ],
-        logFile: "20260813_120000_000_51_sync.log",
-      },
-    });
-
-    await store.copyDiagnostics();
-
-    const writeText = vi.mocked(navigator.clipboard.writeText);
-    const diagnostic = String(
-      writeText.mock.calls[writeText.mock.calls.length - 1]?.[0],
-    );
-    expect(diagnostic).toContain("VCP Mobile: 1.1.5");
-    expect(diagnostic).toMatch(/Wire protocol: \d+\.\d+/);
-    expect(diagnostic).toContain("Session: 51");
-    expect(diagnostic).not.toContain("secret-token");
-    expect(diagnostic).not.toContain("also-secret");
-    expect(diagnostic).not.toContain("alpha beta");
-    expect(diagnostic).not.toContain("id-secret");
-    expect(diagnostic).not.toContain("C:\\Users");
-    expect(diagnostic).not.toContain("/home/me");
-    expect(diagnostic).not.toContain("/root");
-    expect(diagnostic).not.toContain("/mnt");
-    expect(diagnostic).not.toContain("/Users");
-    expect(diagnostic).not.toContain("private/file");
-    expect(diagnostic).toContain("Error code: UPLOAD_FAILED");
-    expect(diagnostic).toContain("Error origin: desktop_plugin");
-    expect(diagnostic).toContain("Error stage: messages");
-    expect(diagnostic).toContain("Retry action: manual");
-    expect(diagnostic).toContain("Failed topic IDs:");
-    expect(diagnostic).toContain("[path]");
-    expect(diagnostic).toContain("20260813_120000_000_51_sync.log");
-  });
 });

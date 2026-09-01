@@ -1,6 +1,5 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import { getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useDataReload } from "../composables/useDataReload";
@@ -21,6 +20,11 @@ interface SyncSummary {
   failedTopics: number;
   legacyAttachmentWarnings: number;
   failedTopicIds: string[];
+}
+
+interface DesktopSyncInfo {
+  pluginVersion: string;
+  backendMode: "legacy" | "cds";
 }
 
 interface SyncTerminalError {
@@ -64,7 +68,6 @@ type BufferedSessionEvent = {
   payload: Record<string, unknown>;
 };
 
-const WIRE_PROTOCOL_VERSION = "1.4";
 const MAX_BUFFERED_SESSION_EVENTS = 32;
 const ERROR_CATEGORIES = new Set<SyncTerminalError["category"]>([
   "device",
@@ -144,7 +147,7 @@ const LOCAL_ERROR_COPY: Record<
     origin: "mobile_ui",
     stage: "finalize",
     retryAction: "after_user_action",
-    message: "同步响应不符合 Wire 1.4 规范，已安全停止",
+    message: "同步响应不符合 Wire 1.5 规范，已安全停止",
     guidance: "确认两端版本一致并重启电脑端同步插件；若仍出现，请保留最新日志。",
   },
   START_SYNC_FAILED: {
@@ -280,22 +283,6 @@ const emptySummary = (): SyncSummary => ({
   failedTopicIds: [],
 });
 
-const sanitizeDiagnosticText = (value: string) =>
-  value
-    .replace(
-      /Bearer\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s,;]+)/gi,
-      "Bearer [redacted]",
-    )
-    .replace(
-      /(?:sync[_-]?)?token\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
-      "token=[redacted]",
-    )
-    // Diagnostics favor over-redaction: once an absolute path starts, redact the
-    // remainder of that comma/semicolon-delimited fragment, including spaces.
-    .replace(/[A-Za-z]:[\\/][^\r\n,;]*/g, "[path]")
-    .replace(/file:\/\/\/[^\r\n,;]*/gi, "file:///[path]")
-    .replace(/(^|[^/])\/(?!\/)[^\r\n,;]*/g, "$1[path]");
-
 export const useSyncSessionStore = defineStore("syncSession", () => {
   // --- 视图状态 ---
   const isOpen = ref(false);
@@ -306,6 +293,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
   const activeSessionId = ref<number | null>(null);
   const summary = ref<SyncSummary>(emptySummary());
   const terminalError = ref<SyncTerminalError | null>(null);
+  const desktopInfo = ref<DesktopSyncInfo | null>(null);
   const retryInFlight = ref(false);
 
   // --- 面板视图 ---
@@ -357,6 +345,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     activeSessionId.value = null;
     summary.value = emptySummary();
     terminalError.value = null;
+    desktopInfo.value = null;
     retryInFlight.value = false;
     needsReload.value = false;
     awaitingSessionId = false;
@@ -501,6 +490,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       pushLog("info", "──────── 新同步尝试 ────────");
       status.value = "idle";
       terminalError.value = null;
+      desktopInfo.value = null;
       summary.value = emptySummary();
       lastLoggedPhase = "";
       lastConnectionStatus = "";
@@ -530,6 +520,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     startAttempt += 1;
     isOpen.value = false;
     activeSessionId.value = null;
+    desktopInfo.value = null;
     awaitingSessionId = false;
     bufferedSessionEvents = [];
     retryInFlight.value = false;
@@ -555,42 +546,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
           toastOnly: false,
         });
       }
-    }
-  };
-
-  const copyDiagnostics = async () => {
-    try {
-      const mobileVersion = await getVersion().catch(() => "unavailable");
-      const failedTopicIds = [
-        ...summary.value.failedTopicIds,
-        ...(terminalError.value?.failedTopicIds ?? []),
-      ];
-      const safeFailedTopicIds = [...new Set(failedTopicIds)]
-        .slice(0, 8)
-        .map(sanitizeDiagnosticText)
-        .join(", ");
-      const diagnostic = [
-        `VCP Mobile: ${mobileVersion}`,
-        `Wire protocol: ${WIRE_PROTOCOL_VERSION}`,
-        `Session: ${activeSessionId.value ?? "none"}`,
-        `Status: ${status.value}`,
-        `Topics: ${summary.value.successfulTopics}/${summary.value.totalTopics}`,
-        `Failed topics: ${summary.value.failedTopics}`,
-        `Failed topic IDs: ${safeFailedTopicIds || "none"}`,
-        `Legacy attachment warnings: ${summary.value.legacyAttachmentWarnings}`,
-        terminalError.value
-          ? `Error code: ${sanitizeDiagnosticText(terminalError.value.code)}`
-          : "Error: none",
-        `Error origin: ${terminalError.value?.origin ?? "unavailable"}`,
-        `Error stage: ${terminalError.value?.stage ?? "unavailable"}`,
-        `Retry action: ${terminalError.value?.retryAction ?? "unavailable"}`,
-        `Log file: ${terminalError.value?.logFile ?? "unavailable"}`,
-      ].join("\n");
-      await navigator.clipboard.writeText(diagnostic);
-      pushLog("success", "脱敏诊断信息已复制到剪贴板");
-    } catch (error: unknown) {
-      console.error("[SyncSession] Failed to copy diagnostics:", error);
-      pushLog("error", "复制诊断失败，请稍后再试");
     }
   };
 
@@ -633,6 +588,22 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       failedTopics,
       legacyAttachmentWarnings,
       failedTopicIds: allFailedTopicIds.slice(0, 8),
+    };
+  };
+
+  const readDesktopInfo = (value: unknown): DesktopSyncInfo | null => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const source = value as Record<string, unknown>;
+    if (
+      typeof source.pluginVersion !== "string" ||
+      source.pluginVersion.length === 0 ||
+      (source.backendMode !== "legacy" && source.backendMode !== "cds")
+    ) {
+      return null;
+    }
+    return {
+      pluginVersion: source.pluginVersion,
+      backendMode: source.backendMode,
     };
   };
 
@@ -788,6 +759,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       }
       if (isTerminal()) return;
       if (nextStatus === "open") {
+        desktopInfo.value = readDesktopInfo(payload.desktop);
         needsReload.value = true;
         status.value = "connected";
         canDismiss.value = false;
@@ -796,6 +768,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
           lastConnectionStatus = "open";
         }
       } else if (nextStatus === "connecting") {
+        desktopInfo.value = null;
         status.value = "connecting";
         canDismiss.value = false;
         if (lastConnectionStatus !== "connecting") {
@@ -941,6 +914,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     activeSessionId,
     summary,
     terminalError,
+    desktopInfo,
     retryInFlight,
     needsReload,
     logs,
@@ -950,7 +924,6 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     close,
     startSync,
     retrySync,
-    copyDiagnostics,
     switchTab,
   };
 });

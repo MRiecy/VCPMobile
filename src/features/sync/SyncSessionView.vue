@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch, nextTick } from 'vue';
-import { X, Copy, Play, RotateCcw } from 'lucide-vue-next';
+import { X, Play, RotateCcw } from 'lucide-vue-next';
 import SlidePage from '../../components/ui/SlidePage.vue';
 import SyncLogBrowserCore from '../../features/settings/components/SyncLogBrowserCore.vue';
 import { useSyncSessionStore } from '../../core/stores/syncSession';
@@ -301,6 +301,15 @@ const handlePrerenderToggle = async (val: boolean) => {
                 </span>
               </div>
 
+              <div
+                v-if="store.desktopInfo"
+                class="mt-2 flex items-center gap-2 font-mono text-[9px] text-white/35"
+              >
+                <span>桌面后端 {{ store.desktopInfo.backendMode === 'cds' ? 'CDS' : 'Legacy' }}</span>
+                <span>·</span>
+                <span>插件 v{{ store.desktopInfo.pluginVersion }}</span>
+              </div>
+
               <!-- 统计条：messages 阶段起随进度事件实时跳动；终态即使全零也展示 -->
               <div
                 v-if="store.summary.totalTopics > 0 || store.status === 'completed' || store.status === 'completed_with_warnings' || store.status === 'error'"
@@ -411,14 +420,6 @@ const handlePrerenderToggle = async (val: boolean) => {
           >
             <RotateCcw :size="12" :class="{ 'animate-spin': store.retryInFlight }" />
             {{ retryLabel }}
-          </button>
-          <button
-            v-if="store.logs.length > 0"
-            @click="store.copyDiagnostics()"
-            class="flex items-center gap-1 px-2 py-1 rounded text-[10px] text-white/50 hover:text-white hover:bg-white/10 transition-colors"
-          >
-            <Copy :size="12" />
-            复制诊断
           </button>
         </div>
       </div>

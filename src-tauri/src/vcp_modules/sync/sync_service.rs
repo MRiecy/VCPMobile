@@ -32,7 +32,7 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 
-const WIRE_PROTOCOL_VERSION: &str = "1.4";
+const WIRE_PROTOCOL_VERSION: &str = "1.5";
 const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -60,6 +60,21 @@ struct VersionAck {
     frame_type: String,
     plugin_version: String,
     protocol_version: String,
+    backend_mode: DesktopBackendMode,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum DesktopBackendMode {
+    Legacy,
+    Cds,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DesktopSyncInfo {
+    plugin_version: String,
+    backend_mode: DesktopBackendMode,
 }
 
 #[derive(Debug, Deserialize)]
@@ -227,7 +242,7 @@ async fn perform_version_handshake<R: Runtime>(
     connection_status: &Arc<RwLock<String>>,
     cancel_token: &CancellationToken,
     mut ws_stream: SyncWebSocket,
-) -> Result<SyncWebSocket, VersionHandshakeFailure> {
+) -> Result<(SyncWebSocket, DesktopSyncInfo), VersionHandshakeFailure> {
     let version_req = VersionCheckFrame {
         frame_type: "VERSION_CHECK",
         mobile_version: env!("CARGO_PKG_VERSION"),
@@ -293,7 +308,11 @@ async fn perform_version_handshake<R: Runtime>(
                     version_ack.plugin_version, version_ack.protocol_version
                 ),
             );
-            Ok(ws_stream)
+            let desktop_info = DesktopSyncInfo {
+                plugin_version: version_ack.plugin_version,
+                backend_mode: version_ack.backend_mode,
+            };
+            Ok((ws_stream, desktop_info))
         }
         Ok(Ok(version_ack)) => {
             publish_sync_error(
@@ -996,7 +1015,29 @@ async fn publish_sync_nonterminal_status<R: Runtime>(
     if sync_state.current_session_id.load(Ordering::SeqCst) != session_id {
         return;
     }
-    publish_sync_status_inner(app_handle, session_id, status, next_status, None).await;
+    publish_sync_status_inner(app_handle, session_id, status, next_status, None, None).await;
+}
+
+async fn publish_sync_open_status<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    session_id: u64,
+    status: &Arc<RwLock<String>>,
+    desktop_info: &DesktopSyncInfo,
+) {
+    let sync_state = app_handle.state::<SyncState>();
+    let _owner_commit = sync_state.owner_commit.lock().await;
+    if sync_state.current_session_id.load(Ordering::SeqCst) != session_id {
+        return;
+    }
+    publish_sync_status_inner(
+        app_handle,
+        session_id,
+        status,
+        "open",
+        None,
+        Some(desktop_info),
+    )
+    .await;
 }
 
 async fn publish_sync_error<R: Runtime>(
@@ -1030,7 +1071,7 @@ async fn publish_sync_error<R: Runtime>(
         Some(wire) => build_wire_error_payload(&wire, failed_topic_ids, log_file),
         None => build_sync_error_payload(code, failed_topic_ids, log_file),
     };
-    publish_sync_status_inner(app_handle, session_id, status, "error", Some(error)).await;
+    publish_sync_status_inner(app_handle, session_id, status, "error", Some(error), None).await;
 }
 
 async fn publish_sync_status_inner<R: Runtime>(
@@ -1039,6 +1080,7 @@ async fn publish_sync_status_inner<R: Runtime>(
     status: &Arc<RwLock<String>>,
     next_status: &str,
     error: Option<SyncErrorPayload>,
+    desktop_info: Option<&DesktopSyncInfo>,
 ) {
     {
         let mut guard = status.write().await;
@@ -1061,6 +1103,9 @@ async fn publish_sync_status_inner<R: Runtime>(
     });
     if let Some(error) = error {
         payload["error"] = json!(error);
+    }
+    if let Some(desktop_info) = desktop_info {
+        payload["desktop"] = json!(desktop_info);
     }
 
     let _ = app_handle.emit("vcp-sync-status", payload);
@@ -1406,7 +1451,7 @@ async fn run_sync_session(
 
         match connect_result {
             Ok(Ok((ws_stream, _))) => {
-                let mut ws_stream = match perform_version_handshake(
+                let (mut ws_stream, desktop_info) = match perform_version_handshake(
                     &handle_clone,
                     session_id,
                     &connection_status_for_task,
@@ -1415,7 +1460,7 @@ async fn run_sync_session(
                 )
                 .await
                 {
-                    Ok(ws_stream) => ws_stream,
+                    Ok(negotiated) => negotiated,
                     Err(VersionHandshakeFailure::Retry { code, message }) => {
                         if schedule_sync_retry(
                             &handle_clone,
@@ -1475,11 +1520,11 @@ async fn run_sync_session(
                     }
                     break 'session;
                 }
-                publish_sync_nonterminal_status(
+                publish_sync_open_status(
                     &handle_clone,
                     session_id,
                     &connection_status_for_task,
-                    "open",
+                    &desktop_info,
                 )
                 .await;
                 emit_sync_phase_activity(&handle_clone, session_id, "owner_metadata");
@@ -3579,8 +3624,9 @@ mod tests {
                 &mut server,
                 json!({
                     "type": "VERSION_ACK",
-                    "pluginVersion": "1.4.0",
+                    "pluginVersion": "1.5.0",
                     "protocolVersion": WIRE_PROTOCOL_VERSION,
+                    "backendMode": "cds",
                 }),
             )
             .await;
@@ -3592,10 +3638,12 @@ mod tests {
             assert!(matches!(message, Message::Ping(_)));
         });
 
-        let mut client =
+        let (mut client, desktop_info) =
             perform_version_handshake(app.handle(), session_id, &status, &cancel_token, client)
                 .await
                 .unwrap_or_else(|error| panic!("handshake failed: {error:?}"));
+        assert_eq!(desktop_info.plugin_version, "1.5.0");
+        assert_eq!(desktop_info.backend_mode, DesktopBackendMode::Cds);
         client
             .send(Message::Ping(vec![1].into()))
             .await
@@ -3995,30 +4043,34 @@ mod tests {
         let ack = parse_version_ack(
             &json!({
                 "type": "VERSION_ACK",
-                "pluginVersion": "1.4.0",
-                "protocolVersion": "1.4",
+                "pluginVersion": "1.5.0",
+                "protocolVersion": "1.5",
+                "backendMode": "cds",
             })
             .to_string(),
         )
-        .expect("strict 1.4 acknowledgement");
-        assert_eq!(ack.plugin_version, "1.4.0");
-        assert_eq!(ack.protocol_version, "1.4");
+        .expect("strict 1.5 acknowledgement");
+        assert_eq!(ack.plugin_version, "1.5.0");
+        assert_eq!(ack.protocol_version, "1.5");
+        assert_eq!(ack.backend_mode, DesktopBackendMode::Cds);
         assert!(is_wire_compatible(&ack));
         assert!(is_wire_compatible(&VersionAck {
             frame_type: "VERSION_ACK".to_string(),
-            plugin_version: "1.4.9".to_string(),
-            protocol_version: "1.4".to_string(),
+            plugin_version: "1.5.9".to_string(),
+            protocol_version: "1.5".to_string(),
+            backend_mode: DesktopBackendMode::Legacy,
         }));
         assert!(!is_wire_compatible(&VersionAck {
             frame_type: "VERSION_ACK".to_string(),
-            plugin_version: "1.4.0".to_string(),
-            protocol_version: "1.3".to_string(),
+            plugin_version: "1.5.0".to_string(),
+            protocol_version: "1.4".to_string(),
+            backend_mode: DesktopBackendMode::Cds,
         }));
 
         assert!(parse_version_ack(
             &json!({
                 "type": "VERSION_ACK",
-                "version": "1.4.0",
+                "version": "1.5.0",
             })
             .to_string()
         )
@@ -4026,8 +4078,19 @@ mod tests {
         assert!(parse_version_ack(
             &json!({
                 "type": "VERSION_ACK",
-                "pluginVersion": "1.4.0",
-                "protocolVersion": 1.4,
+                "pluginVersion": "1.5.0",
+                "protocolVersion": 1.5,
+                "backendMode": "cds",
+            })
+            .to_string()
+        )
+        .is_err());
+        assert!(parse_version_ack(
+            &json!({
+                "type": "VERSION_ACK",
+                "pluginVersion": "1.5.0",
+                "protocolVersion": "1.5",
+                "backendMode": "fallback",
             })
             .to_string()
         )

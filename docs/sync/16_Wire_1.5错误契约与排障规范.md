@@ -1,5 +1,5 @@
 ---
-title: Wire 1.4 错误契约与排障规范
+title: Wire 1.5 错误契约与排障规范
 scope: 双端
 related_files:
   - src-tauri/src/vcp_modules/sync/sync_error.rs
@@ -9,17 +9,17 @@ related_files:
   - VCPChat/VCPDistributedServer/Plugin/VCPMobileSync/error-contract.js
 ---
 
-# Wire 1.4 错误契约与排障规范
+# Wire 1.5 错误契约与排障规范
 
 ## 1. 目标与兼容边界
 
-Wire 1.4 保持双端共用的结构化错误对象，并统一逐项结果与 NDJSON 流帧：
+Wire 1.5 保持双端共用的结构化错误对象，并统一逐项结果与 NDJSON 流帧：
 
 1. 设备预检、版本兼容、连接、数据、存储和生命周期错误不再依赖关键词猜测；
 2. WebSocket、HTTP、NDJSON 与 Phase 3 逐 Topic 结果使用同一字段集合；
 3. VCPChat 返回的稳定根因码可穿过 Mobile Rust 层，到达前端安全错误卡，同时原始诊断文本只进入脱敏日志。
 
-当前桌面插件为 `1.4.0`，Wire protocol 为 `1.4`。兼容性只由 Wire 版本判断；旧字段、字符串错误和旧帧名均不兼容。
+当前桌面插件为 `1.5.0`，Wire protocol 为 `1.5`。兼容性只由 Wire 版本判断；旧字段、字符串错误和旧帧名均不兼容。
 
 ## 2. 唯一错误对象
 
@@ -143,11 +143,11 @@ VCPChat 拥有诊断事实，Mobile 拥有用户文案：
 - VCPChat `message` 保留可排障细节，但不得包含令牌、认证头或未脱敏绝对路径；
 - Mobile 将诊断 detail 写入会话日志，再按精确 code 注册表生成固定中文 `message + guidance`；
 - 未登记 code 使用 `kind` 对应的固定兜底文案，绝不把上游 `message` 直接渲染到 WebView；
-- 错误卡只显示固定原因、一个下一步，以及低显著度的 `阶段 · 来源 · code`；失败 Topic ID 仅进入复制诊断和日志。
+- 错误卡只显示固定原因、一个下一步，以及低显著度的 `阶段 · 来源 · code`；失败 Topic ID 仅进入日志和内部错误状态。
 
 ### 5.1 VCP-CDS 上游适配
 
-VCP-CDS internal protocol 3 不是 Mobile Wire 1.4。CDS 的 HTTP 与逐项失败统一为 `{code,message,retryable}`；Central Adapter 是唯一翻译边界：
+VCP-CDS internal protocol 3 不是 Mobile Wire 1.5。CDS 的 HTTP 与逐项失败统一为 `{code,message,retryable}`；Central Adapter 是唯一翻译边界：
 
 - HTTP 异常保留 CDS code，补 `origin=desktop_cds`、当前 `stage`、精确 `kind/retry` 与失败 Topic；
 - CDS 逐项错误在返回 Mobile 前扩展为七字段 `SyncError`；
@@ -156,6 +156,8 @@ VCP-CDS internal protocol 3 不是 Mobile Wire 1.4。CDS 的 HTTP 与逐项失�
 - Central 校验 CDS 响应外壳、完整身份和 Message Diff 请求集合覆盖；Mobile 的强类型解析继续作为公共 Wire 最终门禁；
 - 已登记的 CDS code（如 `INVALID_REQUEST`、`NOT_FOUND`、`AMBIGUOUS_IDENTITY`、`SERVICE_BUSY`、`INTERNAL_ERROR`）按精确表分类；
 - CDS internal protocol 的 `PROTOCOL_MISMATCH` 在适配边界重命名为 `CDS_PROTOCOL_MISMATCH`，不得与 Mobile wire 的 `PROTOCOL_MISMATCH` 共用用户文案；
+- 中央模式启动失败时，插件仍开放认证 WebSocket 控制面并在 ACK 前发送结构化错误：二进制缺失、internal protocol 不匹配、schema 不匹配分别映射为 `CDS_BINARY_NOT_FOUND`、`CDS_PROTOCOL_MISMATCH`、`CDS_SCHEMA_MISMATCH`，其他启动错误映射为 `CDS_STARTUP_FAILED`；
+- 上述失败不得挂载同步 HTTP 数据面，也不得自动回退 Legacy；完全无法连接 WebSocket 时 Mobile 只能报告连接故障，不能臆测插件或 CDS 根因；
 - ChatDataService 客户端产生的 `TIMEOUT`、`UNAVAILABLE`、`INVALID_RESPONSE`、`RESPONSE_TOO_LARGE` 等本地 code 也按精确表分类；
 - 新出现且格式合法的 CDS code 保留原码，以 `internal/manual` 安全兜底；平台 errno 回落到当前边界 code。
 
@@ -197,7 +199,7 @@ fixture 只记录真正跨端的结构与语义，不复制各端本地错误码
 用户提供诊断信息后，按 `stage → origin → code → failedTopicIds → logFile` 定位：
 
 1. `preflight/mobile_native`：先检查电量和省电策略，不检查桌面版本；
-2. `handshake/desktop_plugin`：先核对 Wire `1.4`，插件包版本只用于定位构建；
+2. `handshake/desktop_plugin`：先核对 Wire `1.5`，插件包版本只用于定位构建；
 3. `topic_metadata|messages/desktop_cds`：检查 CDS 返回对象和对应 Topic；
 4. `finalize/mobile_sync`：检查写队列 drain 与最终 ACK，不将其误报为普通网络建连失败；
 5. `shutdown/mobile_sync`：检查 session generation、owner、cancel 和 join，禁止重启一个仍在退出的旧 attempt。
