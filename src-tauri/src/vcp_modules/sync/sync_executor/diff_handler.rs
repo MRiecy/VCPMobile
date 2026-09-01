@@ -447,7 +447,8 @@ impl DiffHandler {
                     for chunk in requested_topics.chunks(TOPIC_QUERY_CHUNK) {
                         let placeholders = vec!["(?, ?, ?)"; chunk.len()].join(", ");
                         let query_sql = format!(
-                            "SELECT topic_id, title, created_at, locked, unread, owner_id, owner_type
+                            "SELECT topic_id, title, created_at, locked, unread, owner_id, owner_type,
+                                    config_hash, updated_at
                              FROM topics
                              WHERE (owner_type, owner_id, topic_id) IN ({placeholders})
                                AND deleted_at IS NULL"
@@ -477,6 +478,23 @@ impl DiffHandler {
 
                         for row in rows {
                             let decoded = (|| -> Result<_, String> {
+                                let config_hash = row
+                                    .try_get::<String, _>("config_hash")
+                                    .map_err(|error| format!("config_hash: {error}"))?;
+                                if !crate::vcp_modules::infra::utils::is_valid_cas_hash(
+                                    &config_hash,
+                                ) || config_hash.to_ascii_lowercase() != config_hash
+                                {
+                                    return Err("config_hash must be lowercase SHA-256".to_string());
+                                }
+                                let updated_at = row
+                                    .try_get::<i64, _>("updated_at")
+                                    .map_err(|error| format!("updated_at: {error}"))?;
+                                if !(0..=(1_i64 << 53) - 1).contains(&updated_at) {
+                                    return Err(
+                                        "updated_at must be a non-negative safe integer".to_string(),
+                                    );
+                                }
                                 Ok((
                                     row.try_get::<String, _>("topic_id")
                                         .map_err(|error| format!("topic id: {error}"))?,
@@ -492,6 +510,8 @@ impl DiffHandler {
                                         .map_err(|error| format!("owner_id: {error}"))?,
                                     row.try_get::<String, _>("owner_type")
                                         .map_err(|error| format!("owner_type: {error}"))?,
+                                    config_hash,
+                                    updated_at,
                                 ))
                             })();
                             let (
@@ -502,6 +522,8 @@ impl DiffHandler {
                                 unread,
                                 owner_id,
                                 owner_type,
+                                config_hash,
+                                updated_at,
                             ) = match decoded {
                                 Ok(decoded) => decoded,
                                 Err(error) => {
@@ -531,6 +553,8 @@ impl DiffHandler {
                                         locked: locked != 0,
                                         unread: unread != 0,
                                         owner_id,
+                                        config_hash,
+                                        updated_at,
                                     }),
                                 },
                                 "group" => EntityPushItem::Topic {
@@ -542,6 +566,8 @@ impl DiffHandler {
                                         name: title,
                                         created_at,
                                         owner_id,
+                                        config_hash,
+                                        updated_at,
                                     }),
                                 },
                                 _ => {

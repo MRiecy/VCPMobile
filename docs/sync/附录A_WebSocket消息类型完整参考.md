@@ -92,7 +92,7 @@ scope: 双端
 | `owner_id` | `String` | `ownerId` | 否 | 是 | — | Owner/Avatar 身份；Topic 在此基础上增加 `topicId` |
 | `topic_id` | `String` | `topicId` | 否 | Topic | — | Topic 身份字段 |
 | `config_hash` | `String` | `configHash` | 否 | live Owner/Topic | — | 同步 DTO Hash |
-| `content_hash` | `String` | `contentHash` | 否 | live Owner/Topic | — | 下级内容聚合 Hash |
+| `content_hash` | `String` | `contentHash` | 否 | live Owner Manifest / TopicDiff | — | 下级内容聚合 Hash；Topic Manifest 不重复携带 |
 | `binary_hash` | `String` | `binaryHash` | 否 | live Avatar | — | 原始头像 bytes Hash |
 | `updated_at` | `i64` | `updatedAt` | 否 | live | — | LWW 时间 |
 | `deleted_at` | `i64` | `deletedAt` | 否 | deleted | — | 墓碑时间；删除状态不伪造 live Hash |

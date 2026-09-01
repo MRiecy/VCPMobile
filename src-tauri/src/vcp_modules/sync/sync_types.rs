@@ -619,7 +619,6 @@ pub struct TopicManifestLive {
     pub owner_id: String,
     pub topic_id: String,
     pub config_hash: String,
-    pub content_hash: String,
     pub updated_at: i64,
 }
 

@@ -9,13 +9,6 @@ use tauri::{AppHandle, Manager};
 
 pub struct SyncFinalizer;
 
-struct TopicBubbleMeta {
-    title: String,
-    created_at: i64,
-    locked: bool,
-    unread: bool,
-}
-
 #[derive(Debug)]
 struct FinalizationStats {
     bubbled_topics: usize,
@@ -33,7 +26,7 @@ async fn finalize_modified_topics(
         .write_transaction("sync.finalizer")
         .await
         .map_err(|error| format!("开启同步收尾事务失败: {error}"))?;
-    let mut meta_map = std::collections::HashMap::new();
+    let mut actual_topics = HashSet::new();
     let topic_keys = modified_topics.iter().collect::<Vec<_>>();
     for topic_chunk in topic_keys.chunks(SQLITE_TOPIC_CHUNK) {
         let placeholders = topic_chunk
@@ -42,7 +35,7 @@ async fn finalize_modified_topics(
             .collect::<Vec<_>>()
             .join(",");
         let query_sql = format!(
-            "SELECT topic_id, owner_id, owner_type, title, created_at, locked, unread
+            "SELECT topic_id, owner_id, owner_type
              FROM topics WHERE deleted_at IS NULL
                AND (owner_type, owner_id, topic_id) IN ({placeholders})"
         );
@@ -68,34 +61,12 @@ async fn finalize_modified_topics(
                 .try_get("owner_type")
                 .map_err(|error| format!("解码同步收尾 owner_type 失败: {error}"))?;
             let key = TopicKey::new(owner_type, owner_id, &topic_id);
-            if meta_map
-                .insert(
-                    key,
-                    TopicBubbleMeta {
-                        title: row
-                            .try_get("title")
-                            .map_err(|error| format!("解码同步收尾 title 失败: {error}"))?,
-                        created_at: row
-                            .try_get("created_at")
-                            .map_err(|error| format!("解码同步收尾 created_at 失败: {error}"))?,
-                        locked: row
-                            .try_get::<i64, _>("locked")
-                            .map_err(|error| format!("解码同步收尾 locked 失败: {error}"))?
-                            != 0,
-                        unread: row
-                            .try_get::<i64, _>("unread")
-                            .map_err(|error| format!("解码同步收尾 unread 失败: {error}"))?
-                            != 0,
-                    },
-                )
-                .is_some()
-            {
+            if !actual_topics.insert(key) {
                 return Err(format!("同步收尾话题元数据重复: {topic_id}"));
             }
         }
     }
 
-    let actual_topics = meta_map.keys().cloned().collect::<HashSet<_>>();
     if actual_topics != *modified_topics {
         let mut missing = modified_topics
             .difference(&actual_topics)
@@ -108,17 +79,12 @@ async fn finalize_modified_topics(
     let mut affected_agents = HashSet::new();
     let mut affected_groups = HashSet::new();
     let mut bubbled_topics = 0usize;
-    for (key, meta) in &meta_map {
-        HashAggregator::bubble_topic_hash_with_meta(
-            &mut tx,
-            key,
-            &meta.title,
-            meta.created_at,
-            meta.locked,
-            meta.unread,
-        )
-        .await
-        .map_err(|error| format!("冒泡同步话题哈希失败 ({}): {error}", key.topic_id))?;
+    let mut ordered_topics = modified_topics.iter().collect::<Vec<_>>();
+    ordered_topics.sort();
+    for key in ordered_topics {
+        HashAggregator::refresh_topic_content_hash(&mut tx, key)
+            .await
+            .map_err(|error| format!("冒泡同步话题哈希失败 ({}): {error}", key.topic_id))?;
         bubbled_topics += 1;
         match key.owner_type.as_str() {
             "agent" => {

@@ -1,9 +1,8 @@
 use crate::vcp_modules::agent_types::AgentConfig;
 use crate::vcp_modules::group_types::{deserialize_member_tags, GroupConfig, MemberTags};
-use crate::vcp_modules::topic_types::Topic;
 use serde::{Deserialize, Serialize};
 
-fn deserialize_required_content_hash<'de, D>(deserializer: D) -> Result<String, D::Error>
+fn deserialize_required_sha256<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -16,6 +15,20 @@ where
     } else {
         Err(serde::de::Error::custom(
             "expected a lowercase 64-character SHA-256",
+        ))
+    }
+}
+
+fn deserialize_sync_updated_at<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = i64::deserialize(deserializer)?;
+    if (0..=(1_i64 << 53) - 1).contains(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(
+            "expected a non-negative safe integer updatedAt",
         ))
     }
 }
@@ -99,31 +112,16 @@ pub struct AgentTopicSyncDTO {
     pub id: String,
     pub name: String,
     pub created_at: i64,
-    #[serde(default = "default_locked")]
     pub locked: bool,
-    #[serde(default = "default_unread")]
     pub unread: bool,
     pub owner_id: String,
-}
-
-fn default_locked() -> bool {
-    true
-}
-fn default_unread() -> bool {
-    false
-}
-
-impl From<&Topic> for AgentTopicSyncDTO {
-    fn from(topic: &Topic) -> Self {
-        Self {
-            id: topic.id.clone(),
-            name: topic.name.clone(),
-            created_at: topic.created_at,
-            locked: topic.locked,
-            unread: topic.unread,
-            owner_id: topic.owner_id.clone(),
-        }
-    }
+    #[serde(
+        rename = "configHash",
+        deserialize_with = "deserialize_required_sha256"
+    )]
+    pub config_hash: String,
+    #[serde(rename = "updatedAt", deserialize_with = "deserialize_sync_updated_at")]
+    pub updated_at: i64,
 }
 
 /// Group Topic 同步 DTO (无 locked/unread)
@@ -134,17 +132,13 @@ pub struct GroupTopicSyncDTO {
     pub name: String,
     pub created_at: i64,
     pub owner_id: String,
-}
-
-impl From<&Topic> for GroupTopicSyncDTO {
-    fn from(topic: &Topic) -> Self {
-        Self {
-            id: topic.id.clone(),
-            name: topic.name.clone(),
-            created_at: topic.created_at,
-            owner_id: topic.owner_id.clone(),
-        }
-    }
+    #[serde(
+        rename = "configHash",
+        deserialize_with = "deserialize_required_sha256"
+    )]
+    pub config_hash: String,
+    #[serde(rename = "updatedAt", deserialize_with = "deserialize_sync_updated_at")]
+    pub updated_at: i64,
 }
 
 /// 附件同步 DTO
@@ -194,7 +188,7 @@ pub struct MessageSyncDTO {
     pub attachments: Option<Vec<AttachmentSyncDTO>>,
     #[serde(
         rename = "contentHash",
-        deserialize_with = "deserialize_required_content_hash"
+        deserialize_with = "deserialize_required_sha256"
     )]
     pub content_hash: String,
 }
@@ -244,20 +238,72 @@ impl From<MessageSyncDTO> for crate::vcp_modules::chat_manager::ChatMessage {
 mod tests {
     use super::*;
     use crate::vcp_modules::chat_manager::ChatMessage;
+    use crate::vcp_modules::sync_hash::HashAggregator;
     use serde_json::json;
+    use sha2::{Digest, Sha256};
+
+    const TOPIC_CANONICAL_CONTRACT: &[u8] =
+        include_bytes!("fixtures/topic_canonical_contract.json");
 
     #[test]
-    fn test_agent_topic_sync_dto_deserialization_defaults_locked_and_unread() {
+    fn agent_topic_sync_dto_requires_the_complete_wire_version() {
         let dto: AgentTopicSyncDTO = serde_json::from_value(json!({
             "id": "topic-1",
             "name": "Topic",
             "createdAt": 123,
-            "ownerId": "agent-1"
+            "locked": true,
+            "unread": false,
+            "ownerId": "agent-1",
+            "configHash": "a".repeat(64),
+            "updatedAt": 456
         }))
         .unwrap();
 
         assert!(dto.locked);
         assert!(!dto.unread);
+        assert_eq!(dto.config_hash, "a".repeat(64));
+        assert_eq!(dto.updated_at, 456);
+        assert!(serde_json::from_value::<AgentTopicSyncDTO>(json!({
+            "id": "topic-1",
+            "name": "Topic",
+            "createdAt": 123,
+            "locked": true,
+            "unread": false,
+            "ownerId": "agent-1",
+            "updatedAt": 456
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn topic_canonical_contract_matches_dto_bytes_and_config_hashes() {
+        let bundle: serde_json::Value = serde_json::from_slice(TOPIC_CANONICAL_CONTRACT)
+            .expect("topic canonical contract JSON");
+        for case in bundle["cases"].as_array().expect("topic cases") {
+            let expected_hash = case["dto"]["configHash"].as_str().expect("configHash");
+            let (wire, computed_hash) = if case["ownerType"] == "agent" {
+                let dto: AgentTopicSyncDTO =
+                    serde_json::from_value(case["dto"].clone()).expect("agent topic DTO");
+                let computed = HashAggregator::compute_agent_topic_metadata_hash(&dto);
+                (
+                    serde_json::to_vec(&dto).expect("agent topic bytes"),
+                    computed,
+                )
+            } else {
+                let dto: GroupTopicSyncDTO =
+                    serde_json::from_value(case["dto"].clone()).expect("group topic DTO");
+                let computed = HashAggregator::compute_group_topic_metadata_hash(&dto);
+                (
+                    serde_json::to_vec(&dto).expect("group topic bytes"),
+                    computed,
+                )
+            };
+            assert_eq!(computed_hash, expected_hash);
+            assert_eq!(
+                hex::encode(Sha256::digest(wire)),
+                case["dtoSha256"].as_str().expect("DTO byte hash")
+            );
+        }
     }
 
     #[test]

@@ -106,7 +106,7 @@ impl Phase1Metadata {
                 .collect::<Vec<_>>()
                 .join(" OR ");
             let query_str = format!(
-                "SELECT topic_id, config_hash, content_hash, updated_at, owner_type, owner_id, deleted_at
+                "SELECT topic_id, config_hash, updated_at, owner_type, owner_id, deleted_at
                  FROM topics WHERE {predicates}"
             );
             let mut query = sqlx::query(sqlx::AssertSqlSafe(query_str));
@@ -154,9 +154,6 @@ impl Phase1Metadata {
                 let config_hash: String = row.try_get("config_hash").map_err(|error| {
                     format!("Topic manifest config hash decode failed for {topic_id}: {error}")
                 })?;
-                let content_hash: String = row.try_get("content_hash").map_err(|error| {
-                    format!("Topic manifest content hash decode failed for {topic_id}: {error}")
-                })?;
                 let updated_at = row.try_get("updated_at").map_err(|error| {
                     format!("Topic manifest timestamp decode failed for {topic_id}: {error}")
                 })?;
@@ -165,7 +162,6 @@ impl Phase1Metadata {
                     owner_id,
                     topic_id,
                     config_hash,
-                    content_hash,
                     updated_at,
                 }));
             }
@@ -395,6 +391,5 @@ mod tests {
         assert_eq!(topic.topic_id, "topic-a");
         assert_eq!(topic.owner_id, "agent-a");
         assert_eq!(topic.config_hash, "config-hash");
-        assert_eq!(topic.content_hash, "content-hash");
     }
 }

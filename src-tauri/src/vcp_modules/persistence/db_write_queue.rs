@@ -863,6 +863,8 @@ mod tests {
                 locked: false,
                 unread: true,
                 owner_id: "agent-live".into(),
+                config_hash: "a".repeat(64),
+                updated_at: 2,
             },
         )
         .expect_err("tombstoned topic upsert must fail closed");
@@ -874,6 +876,8 @@ mod tests {
                 name: "stale-child".into(),
                 created_at: 2,
                 owner_id: "group-deleted".into(),
+                config_hash: "b".repeat(64),
+                updated_at: 2,
             },
         )
         .expect_err("topic with deleted owner must fail closed");
@@ -1037,6 +1041,8 @@ mod tests {
                 locked: true,
                 unread: false,
                 owner_id: "agent-b".into(),
+                config_hash: "c".repeat(64),
+                updated_at: 2,
             },
         )
         .expect_err("topic DTO must match its compound identity");
@@ -1721,9 +1727,6 @@ impl DbWriteQueue {
                 dto.owner_id
             )));
         }
-        let now = chrono::Utc::now().timestamp_millis();
-        let config_hash = HashAggregator::compute_agent_topic_metadata_hash(dto);
-
         let changed = tx.execute(
             "INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, config_hash, updated_at)
             SELECT ?, ?, ?, 'agent', ?, ?, ?, ?, ?
@@ -1748,7 +1751,7 @@ impl DbWriteQueue {
                 topic_id, &dto.name, &dto.owner_id, dto.created_at,
                 if dto.locked { 1 } else { 0 },
                 if dto.unread { 1 } else { 0 },
-                &config_hash, now, &dto.owner_id
+                &dto.config_hash, dto.updated_at, &dto.owner_id
             ]
         )?;
         if changed != 1 {
@@ -1789,9 +1792,6 @@ impl DbWriteQueue {
                 dto.owner_id
             )));
         }
-        let now = chrono::Utc::now().timestamp_millis();
-        let config_hash = HashAggregator::compute_group_topic_metadata_hash(dto);
-
         let changed = tx.execute(
             "INSERT INTO topics (topic_id, title, owner_id, owner_type, created_at, locked, unread, config_hash, updated_at)
             SELECT ?, ?, ?, 'group', ?, 1, 0, ?, ?
@@ -1809,7 +1809,7 @@ impl DbWriteQueue {
             WHERE topics.deleted_at IS NULL",
             rusqlite::params![
                 topic_id, &dto.name, &dto.owner_id, dto.created_at,
-                &config_hash, now, &dto.owner_id
+                &dto.config_hash, dto.updated_at, &dto.owner_id
             ]
         )?;
         if changed != 1 {

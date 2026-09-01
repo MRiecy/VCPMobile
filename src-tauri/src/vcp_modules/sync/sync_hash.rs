@@ -350,51 +350,19 @@ impl HashAggregator {
         Self::load_topic_activity(tx, key).await
     }
 
-    pub async fn bubble_topic_hash_with_meta(
+    pub async fn refresh_topic_content_hash(
         tx: &mut SqliteConnection,
         key: &TopicKey,
-        title: &str,
-        created_at: i64,
-        locked: bool,
-        unread: bool,
     ) -> Result<TopicActivityDto, String> {
-        // 1. 一次消息扫描同时计算 content_hash、msg_count 与列表更新时间投影
         let (root_hash, msg_count, last_message_updated_at) =
             Self::compute_topic_content_aggregate(tx, key).await?;
 
-        // 2. 直接根据外部传入的元数据参数计算 config_hash (省去 2 次 SELECT)
-        let config_hash = if key.owner_type == "agent" {
-            let dto = AgentTopicSyncDTO {
-                id: key.topic_id.clone(),
-                name: title.to_string(),
-                created_at,
-                locked,
-                unread,
-                owner_id: String::new(),
-            };
-            Self::compute_agent_topic_metadata_hash(&dto)
-        } else if key.owner_type == "group" {
-            let dto = GroupTopicSyncDTO {
-                id: key.topic_id.clone(),
-                name: title.to_string(),
-                created_at,
-                owner_id: String::new(),
-            };
-            Self::compute_group_topic_metadata_hash(&dto)
-        } else {
-            return Err(format!(
-                "Topic {} has unsupported owner type {}",
-                key.topic_id, key.owner_type
-            ));
-        };
-
         let updated = sqlx::query(
-            "UPDATE topics SET content_hash = ?, config_hash = ?, msg_count = ?,
+            "UPDATE topics SET content_hash = ?, msg_count = ?,
                  last_message_updated_at = ?
              WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
         )
         .bind(root_hash)
-        .bind(config_hash)
         .bind(msg_count)
         .bind(last_message_updated_at)
         .bind(&key.owner_type)
@@ -513,7 +481,8 @@ impl SyncDtoLoader {
         key: &TopicKey,
     ) -> Result<AgentTopicSyncDTO, String> {
         let row = sqlx::query(
-            "SELECT topic_id, title, created_at, locked, unread, owner_id FROM topics
+            "SELECT topic_id, title, created_at, locked, unread, owner_id,
+                    config_hash, updated_at FROM topics
              WHERE owner_type = 'agent' AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
         )
         .bind(&key.owner_id)
@@ -544,6 +513,18 @@ impl SyncDtoLoader {
             owner_id: row.try_get("owner_id").map_err(|error| {
                 format!("Agent topic {} owner decode failed: {error}", key.topic_id)
             })?,
+            config_hash: row.try_get("config_hash").map_err(|error| {
+                format!(
+                    "Agent topic {} config hash decode failed: {error}",
+                    key.topic_id
+                )
+            })?,
+            updated_at: row.try_get("updated_at").map_err(|error| {
+                format!(
+                    "Agent topic {} updated_at decode failed: {error}",
+                    key.topic_id
+                )
+            })?,
         })
     }
 
@@ -552,7 +533,7 @@ impl SyncDtoLoader {
         key: &TopicKey,
     ) -> Result<GroupTopicSyncDTO, String> {
         let row = sqlx::query(
-            "SELECT topic_id, title, created_at, owner_id FROM topics
+            "SELECT topic_id, title, created_at, owner_id, config_hash, updated_at FROM topics
              WHERE owner_type = 'group' AND owner_id = ? AND topic_id = ? AND deleted_at IS NULL",
         )
         .bind(&key.owner_id)
@@ -576,6 +557,18 @@ impl SyncDtoLoader {
             })?,
             owner_id: row.try_get("owner_id").map_err(|error| {
                 format!("Group topic {} owner decode failed: {error}", key.topic_id)
+            })?,
+            config_hash: row.try_get("config_hash").map_err(|error| {
+                format!(
+                    "Group topic {} config hash decode failed: {error}",
+                    key.topic_id
+                )
+            })?,
+            updated_at: row.try_get("updated_at").map_err(|error| {
+                format!(
+                    "Group topic {} updated_at decode failed: {error}",
+                    key.topic_id
+                )
             })?,
         })
     }
@@ -817,9 +810,13 @@ mod tests {
             locked: true,
             unread: false,
             owner_id: "agent-a".to_string(),
+            config_hash: "a".repeat(64),
+            updated_at: 456,
         };
         let mut topic_b = topic_a.clone();
         topic_b.owner_id = "agent-b".to_string();
+        topic_b.config_hash = "c".repeat(64);
+        topic_b.updated_at = 789;
 
         assert_eq!(
             HashAggregator::compute_agent_topic_metadata_hash(&topic_a),
@@ -831,9 +828,13 @@ mod tests {
             name: "Topic".to_string(),
             created_at: 123,
             owner_id: "group-a".to_string(),
+            config_hash: "b".repeat(64),
+            updated_at: 456,
         };
         let mut same_metadata_other_owner = group_topic.clone();
         same_metadata_other_owner.owner_id = "group-b".to_string();
+        same_metadata_other_owner.config_hash = "d".repeat(64);
+        same_metadata_other_owner.updated_at = 789;
 
         assert_eq!(
             HashAggregator::compute_group_topic_metadata_hash(&group_topic),
