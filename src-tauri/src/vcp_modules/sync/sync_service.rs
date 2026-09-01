@@ -696,6 +696,21 @@ async fn enforce_topic_hash_response_deadline(
     }
 }
 
+fn stage_topic_diff_request(
+    pending: &mut Option<HashSet<TopicKey>>,
+    expected_topics: HashSet<TopicKey>,
+    topic_states: Vec<TopicDiffState>,
+) -> Result<Option<TopicDiffRequestFrame>, String> {
+    if pending.is_some() {
+        return Err("A topic hash response is already pending".to_string());
+    }
+    if topic_states.is_empty() {
+        return Ok(None);
+    }
+    *pending = Some(expected_topics);
+    Ok(Some(TopicDiffRequestFrame::new(topic_states)))
+}
+
 #[derive(Clone, Default)]
 pub struct SyncCommandRouter {
     current: Arc<std::sync::RwLock<Option<RoutedSyncCommand>>>,
@@ -1796,20 +1811,34 @@ async fn run_sync_session(
                                                     content_hash: state.content_hash,
                                                 });
                                             }
-                                            {
+                                            let staged_request = {
                                                 let mut expected = expected_topic_hash_results.lock().await;
-                                                if expected.is_some() {
+                                                stage_topic_diff_request(
+                                                    &mut expected,
+                                                    expected_topics,
+                                                    topic_states,
+                                                )
+                                            };
+                                            let frame = match staged_request {
+                                                Ok(Some(frame)) => frame,
+                                                Ok(None) => {
+                                                    manifest_phase.store(4, Ordering::SeqCst);
+                                                    if let Ok(mut logger) = sync_logger_task.lock() {
+                                                        logger.log(LogLevel::Info, "topic_metadata", "Phase 2.5 skipped: no topics require validation");
+                                                    }
+                                                    let _ = tx_internal.send(SyncCommand::StartMessages { attempt_id });
+                                                    continue 'attempt;
+                                                }
+                                                Err(message) => {
                                                     let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
                                                         attempt_id,
                                                         code: "TOPIC_HASH_RESPONSE_OVERLAP".to_string(),
-                                                        message: "A topic hash response is already pending".to_string(),
+                                                        message,
                                                         failed_topic_ids: Vec::new(),
                                                     });
                                                     continue 'attempt;
                                                 }
-                                                *expected = Some(expected_topics);
-                                            }
-                                            let frame = TopicDiffRequestFrame::new(topic_states);
+                                            };
                                             if let Err(error) = send_ws_frame(&mut ws_stream, &frame).await {
                                                 terminate_after_protocol_send_failure(
                                                     &handle_clone,
@@ -4036,6 +4065,50 @@ mod tests {
             }
             _ => panic!("unexpected deadline command"),
         }
+    }
+
+    #[test]
+    fn empty_topic_diff_is_not_staged_as_a_pending_request() {
+        let mut pending = None;
+        let request = stage_topic_diff_request(&mut pending, HashSet::new(), Vec::new())
+            .expect("empty topic diff should short-circuit");
+
+        assert!(request.is_none());
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn nonempty_topic_diff_stages_the_exact_pending_request() {
+        let key = TopicKey::new("agent", "agent-a", "topic-a");
+        let expected = HashSet::from([key.clone()]);
+        let mut pending = None;
+        let request = stage_topic_diff_request(
+            &mut pending,
+            expected.clone(),
+            vec![TopicDiffState {
+                owner_type: OwnerType::Agent,
+                owner_id: key.owner_id,
+                topic_id: key.topic_id,
+                config_hash: "config-a".to_string(),
+                content_hash: "content-a".to_string(),
+            }],
+        )
+        .expect("non-empty topic diff should stage")
+        .expect("non-empty topic diff should create a request");
+
+        assert_eq!(request.topics.len(), 1);
+        assert_eq!(pending, Some(expected));
+    }
+
+    #[test]
+    fn topic_diff_staging_does_not_bypass_an_existing_pending_response() {
+        let original = HashSet::from([TopicKey::new("agent", "agent-a", "topic-a")]);
+        let mut pending = Some(original.clone());
+        let error = stage_topic_diff_request(&mut pending, HashSet::new(), Vec::new())
+            .expect_err("overlapping topic diff must fail closed");
+
+        assert_eq!(error, "A topic hash response is already pending");
+        assert_eq!(pending, Some(original));
     }
 
     #[test]
