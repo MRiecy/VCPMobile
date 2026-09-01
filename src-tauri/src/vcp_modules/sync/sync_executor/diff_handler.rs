@@ -191,6 +191,25 @@ fn validate_manifest_result(
     Ok((manifest_type, decisions))
 }
 
+fn validate_topic_owner_scope(
+    decisions: &[ManifestDecision],
+    targeted_owners: &HashSet<OwnerKey>,
+) -> Result<(), String> {
+    for decision in decisions {
+        let ManifestDecision::Topic(topic) = decision else {
+            continue;
+        };
+        let owner = OwnerKey::new(topic.owner_type.as_str(), &topic.owner_id);
+        if !targeted_owners.contains(&owner) {
+            return Err(format!(
+                "SYNC_MANIFEST_RESULT topic {}/{}/{} is outside targeted owner scope",
+                topic.owner_type, topic.owner_id, topic.topic_id
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl DiffHandler {
     #[allow(clippy::too_many_arguments)]
     pub async fn handle_diff(
@@ -213,6 +232,11 @@ impl DiffHandler {
         attempt_id: u64,
     ) -> Result<(), String> {
         let (manifest_type, decisions) = validate_manifest_result(result)?;
+
+        if manifest_type == ManifestType::Topic {
+            let targeted_owners = changed_owners.lock().await;
+            validate_topic_owner_scope(&decisions, &targeted_owners)?;
+        }
 
         let current_phase = manifest_phase.load(Ordering::SeqCst);
         let all_manifest_types_received =
@@ -867,8 +891,9 @@ impl DiffHandler {
 mod tests {
     use super::{
         consume_manifest_response_type, next_manifest_command, validate_manifest_result,
-        MAX_SAFE_JSON_INTEGER,
+        validate_topic_owner_scope, MAX_SAFE_JSON_INTEGER,
     };
+    use crate::vcp_modules::chat::topic_types::OwnerKey;
     use crate::vcp_modules::sync_service::SyncCommand;
     use crate::vcp_modules::sync_types::{ManifestResultFrame, ManifestType};
     use serde_json::json;
@@ -895,6 +920,40 @@ mod tests {
         assert_eq!(items.len(), 2);
 
         assert!(validate_manifest_result(result(&["agent-a", "agent-a"])).is_err());
+    }
+
+    #[test]
+    fn topic_results_must_stay_within_the_targeted_owner_scope() {
+        let result = |owner_type: &str, owner_id: &str, topic_id: &str| {
+            serde_json::from_value::<ManifestResultFrame>(json!({
+                "type": "SYNC_MANIFEST_RESULT",
+                "manifestType": "topic",
+                "results": [{
+                    "ownerType": owner_type,
+                    "ownerId": owner_id,
+                    "topicId": topic_id,
+                    "action": "PULL"
+                }]
+            }))
+            .expect("valid topic result frame")
+        };
+        let targeted_owners = HashSet::from([OwnerKey::new("agent", "shared-id")]);
+
+        let (_, desktop_only_topic) =
+            validate_manifest_result(result("agent", "shared-id", "desktop-only"))
+                .expect("valid in-scope topic result");
+        validate_topic_owner_scope(&desktop_only_topic, &targeted_owners)
+            .expect("desktop-only topics under a targeted owner are valid");
+
+        let (_, wrong_owner_type) =
+            validate_manifest_result(result("group", "shared-id", "group-topic"))
+                .expect("structurally valid topic result");
+        assert!(validate_topic_owner_scope(&wrong_owner_type, &targeted_owners).is_err());
+
+        let (_, wrong_owner_id) =
+            validate_manifest_result(result("agent", "other-id", "other-topic"))
+                .expect("structurally valid topic result");
+        assert!(validate_topic_owner_scope(&wrong_owner_id, &targeted_owners).is_err());
     }
 
     #[test]
