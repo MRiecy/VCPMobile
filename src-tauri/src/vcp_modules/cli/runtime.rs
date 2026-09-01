@@ -1837,9 +1837,7 @@ impl MobileCliRuntimeState {
             output_content.push_str(&stderr);
         }
         if safety_projected {
-            output_content.push_str(
-                "\n[output safety projection removed terminal controls and/or redacted sensitive text]",
-            );
+            output_content.push_str("\n[output projection removed terminal control sequences]");
         }
         if artifact_error.is_some() {
             truncated = true;

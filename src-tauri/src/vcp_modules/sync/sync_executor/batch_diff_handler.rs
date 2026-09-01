@@ -52,7 +52,6 @@ impl Phase3ProtocolError {
         if !failed_topic_ids.iter().any(|id| id == topic_id) {
             failed_topic_ids.push(topic_id.to_string());
         }
-        failed_topic_ids.truncate(8);
         let message = encode_wire_sync_error(&wire).map_err(|error| {
             Self::for_topic(
                 "PHASE3_DECISION_INVALID",
@@ -98,6 +97,7 @@ struct TopicBatchOutcome {
 struct TopicBatchFailure {
     message: String,
     restart_code: Option<String>,
+    failed_topics: Vec<TopicKey>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -242,6 +242,7 @@ fn validate_topic_batch_outcomes(
                 operation, topics, error
             ),
             restart_code,
+            failed_topics: topics,
         }
     })?;
     let expected_set = expected.iter().cloned().collect::<HashSet<_>>();
@@ -254,6 +255,7 @@ fn validate_topic_batch_outcomes(
                     outcome.topic.topic_id
                 ),
                 restart_code: None,
+                failed_topics: expected.to_vec(),
             });
         }
         if outcomes_by_topic
@@ -263,12 +265,14 @@ fn validate_topic_batch_outcomes(
             return Err(TopicBatchFailure {
                 message: format!("Phase 3 {operation} response contains duplicate topic"),
                 restart_code: None,
+                failed_topics: expected.to_vec(),
             });
         }
     }
 
     let mut successful = Vec::new();
     let mut failed = Vec::new();
+    let mut failed_topics = Vec::new();
     let mut restart_code = None;
     let mut all_failures_restartable = true;
     for topic in expected {
@@ -285,10 +289,12 @@ fn validate_topic_batch_outcomes(
                     all_failures_restartable = false;
                 }
                 failed.push(format!("{}: {}", topic.topic_id, detail));
+                failed_topics.push(topic.clone());
             }
             None => {
                 all_failures_restartable = false;
                 failed.push(format!("{}: missing from batch response", topic.topic_id));
+                failed_topics.push(topic.clone());
             }
         }
     }
@@ -297,9 +303,11 @@ fn validate_topic_batch_outcomes(
         Ok(successful)
     } else {
         failed.sort();
+        failed_topics.sort();
         Err(TopicBatchFailure {
             message: format!("Phase 3 {} failed topics: {}", operation, failed.join(", ")),
             restart_code: all_failures_restartable.then_some(restart_code).flatten(),
+            failed_topics,
         })
     }
 }
@@ -364,7 +372,6 @@ impl BatchDiffHandler {
                     .map(|topic| topic.topic_id.clone())
                     .collect::<Vec<_>>();
                 failed_topic_ids.sort();
-                failed_topic_ids.truncate(8);
                 Phase3ProtocolError {
                     code: "PHASE3_TOPIC_MISMATCH".to_string(),
                     message,
@@ -380,7 +387,13 @@ impl BatchDiffHandler {
             let mut delete_batch: Vec<(TopicKey, Vec<MessageDeleteDecision>)> = Vec::new();
 
             for (topic, result) in keyed_results {
-                let decision = parse_topic_decision(&topic, result)?;
+                let decision = match parse_topic_decision(&topic, result) {
+                    Ok(decision) => decision,
+                    Err(error) => {
+                        tracker.mark_failed(&topic).await;
+                        return Err(error);
+                    }
+                };
                 let to_pull_ids = decision.pull_message_ids;
                 let to_push = decision.push_topic;
                 let to_delete = decision.delete_messages;
@@ -481,15 +494,15 @@ impl BatchDiffHandler {
                             }
                         }
                         Err(failure) => {
-                            for topic in &pull_topics {
+                            for topic in &failure.failed_topics {
                                 tracker.mark_failed(topic).await;
                             }
-                            let mut failed_topic_ids = pull_topics
+                            let mut failed_topic_ids = failure
+                                .failed_topics
                                 .iter()
                                 .map(|topic| topic.topic_id.clone())
                                 .collect::<Vec<_>>();
                             failed_topic_ids.sort();
-                            failed_topic_ids.truncate(8);
                             return Err(Phase3ProtocolError {
                                 code: failure
                                     .restart_code
@@ -508,7 +521,6 @@ impl BatchDiffHandler {
                             .map(|topic| topic.topic_id.clone())
                             .collect::<Vec<_>>();
                         failed_topic_ids.sort();
-                        failed_topic_ids.truncate(8);
                         return Err(Phase3ProtocolError {
                             code: "PHASE3_PULL_FAILED".to_string(),
                             message: format!(
@@ -547,15 +559,15 @@ impl BatchDiffHandler {
                             }
                         }
                         Err(failure) => {
-                            for topic in &push_topics {
+                            for topic in &failure.failed_topics {
                                 tracker.mark_failed(topic).await;
                             }
-                            let mut failed_topic_ids = push_topics
+                            let mut failed_topic_ids = failure
+                                .failed_topics
                                 .iter()
                                 .map(|topic| topic.topic_id.clone())
                                 .collect::<Vec<_>>();
                             failed_topic_ids.sort();
-                            failed_topic_ids.truncate(8);
                             return Err(Phase3ProtocolError {
                                 code: failure
                                     .restart_code
@@ -788,5 +800,20 @@ mod tests {
         )
         .expect_err("mixed failures must remain terminal");
         assert!(mixed.restart_code.is_none());
+
+        let partial = validate_topic_batch_outcomes(
+            "pull",
+            &[topic("topic-a"), topic("topic-b")],
+            Ok(vec![
+                success("topic-a"),
+                TopicBatchOutcome {
+                    topic: topic("topic-b"),
+                    success: false,
+                    error: Some("desktop rejected topic-b".to_string()),
+                },
+            ]),
+        )
+        .expect_err("one failed topic must still fail the batch");
+        assert_eq!(partial.failed_topics, vec![topic("topic-b")]);
     }
 }

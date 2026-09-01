@@ -233,17 +233,15 @@ fn extracts_nested_daily_note_outcome_and_errors() {
     });
     assert_eq!(
         find_tool_error(&error, 0),
-        Some("Human Tool 执行失败，远端细节已隐藏".to_string())
+        Some("EACCES /srv/private/diary.txt bearer secret".to_string())
     );
     assert_eq!(
-        safe_error_summary(br#"{"error":"cannot read /srv/private/diary.txt"}"#),
-        None
+        error_summary(br#"{"error":"cannot read /srv/private/diary.txt"}"#),
+        Some("cannot read /srv/private/diary.txt".to_string())
     );
     assert_eq!(
-        safe_error_summary(
-            br#"{"error":"EACCES: permission denied, open '/srv/private/diary.txt'"}"#,
-        ),
-        None
+        error_summary(br#"{"error":"EACCES: permission denied, open '/srv/private/diary.txt'"}"#,),
+        Some("EACCES: permission denied, open '/srv/private/diary.txt'".to_string())
     );
     assert_eq!(
         map_http_status(
@@ -251,7 +249,7 @@ fn extracts_nested_daily_note_outcome_and_errors() {
             Some(br#"{"error":"cannot read C:\\private\\diary.txt"}"#),
         )
         .message,
-        "日记服务内部错误"
+        "cannot read C:\\private\\diary.txt"
     );
 }
 
@@ -326,7 +324,10 @@ fn normalizes_partial_batch_results_without_promoting_http_success() {
     assert_eq!(outcome.succeeded, vec![a]);
     assert_eq!(outcome.errors.len(), 1);
     assert_eq!(outcome.errors[0].key, b);
-    assert_eq!(outcome.errors[0].message, "目标文件已存在");
+    assert_eq!(
+        outcome.errors[0].message,
+        "File already exists at destination"
+    );
 }
 
 #[tokio::test]
@@ -864,7 +865,7 @@ async fn classifies_ambiguous_write_readback_without_retrying() {
 }
 
 #[tokio::test]
-async fn explicit_create_tool_failure_is_retryable_and_never_exposes_tool_paths() {
+async fn explicit_create_tool_failure_is_retryable_and_preserves_tool_paths() {
     let router = Router::new().route(
         "/proxy/v1/human/tool",
         post(|| async {
@@ -890,7 +891,10 @@ async fn explicit_create_tool_failure_is_retryable_and_never_exposes_tool_paths(
         .await
         .expect_err("explicit tool failure must be surfaced");
     assert_eq!(error.code, DiaryErrorCode::ToolError);
-    assert!(!error.message.contains("/srv/"));
+    assert_eq!(
+        error.message,
+        "created but callback failed at /srv/private/dailynote/F/a.txt"
+    );
     server.abort();
 }
 

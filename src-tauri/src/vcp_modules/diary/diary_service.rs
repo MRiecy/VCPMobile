@@ -835,15 +835,18 @@ fn response_too_large_error() -> DiaryError {
 
 fn map_transport_error(error: reqwest::Error) -> DiaryError {
     if error.is_timeout() {
-        DiaryError::new(DiaryErrorCode::Timeout, "网络请求超时")
+        DiaryError::new(DiaryErrorCode::Timeout, format!("网络请求超时: {error}"))
     } else {
-        DiaryError::new(DiaryErrorCode::Transport, "无法连接 VCP 服务")
+        DiaryError::new(
+            DiaryErrorCode::Transport,
+            format!("无法连接 VCP 服务: {error}"),
+        )
     }
 }
 
 fn map_http_status(status: StatusCode, body: Option<&[u8]>) -> DiaryError {
     let summary = body
-        .and_then(safe_error_summary)
+        .and_then(error_summary)
         .unwrap_or_else(|| default_status_message(status).to_string());
     let code = match status.as_u16() {
         400 | 422 => DiaryErrorCode::InvalidRequest,
@@ -881,76 +884,21 @@ fn default_status_message(status: StatusCode) -> &'static str {
     }
 }
 
-fn safe_error_summary(body: &[u8]) -> Option<String> {
+fn error_summary(body: &[u8]) -> Option<String> {
     let value: Value = serde_json::from_slice(body).ok()?;
     let object = value.as_object()?;
     for key in ["error", "message"] {
         if let Some(message) = object.get(key).and_then(Value::as_str) {
-            let sanitized = sanitize_remote_message(message);
-            if !sanitized.is_empty() {
-                return Some(sanitized);
+            let diagnostic = message
+                .chars()
+                .filter(|character| !character.is_control())
+                .collect::<String>();
+            if !diagnostic.trim().is_empty() {
+                return Some(diagnostic.trim().to_string());
             }
         }
     }
     None
-}
-
-fn sanitize_remote_message(message: &str) -> String {
-    let sanitized = message
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(240)
-        .collect::<String>()
-        .trim()
-        .to_string();
-    if remote_message_may_contain_sensitive_data(&sanitized) {
-        String::new()
-    } else {
-        sanitized
-    }
-}
-
-fn remote_message_may_contain_sensitive_data(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    if lower.contains("authorization")
-        || lower.contains("bearer ")
-        || lower.contains("basic ")
-        || lower.contains("file://")
-        || lower.contains("://")
-        || message.contains("\\\\")
-    {
-        return true;
-    }
-
-    let bytes = message.as_bytes();
-    if bytes.windows(3).any(|window| {
-        window[0].is_ascii_alphabetic() && window[1] == b':' && matches!(window[2], b'/' | b'\\')
-    }) {
-        return true;
-    }
-
-    message.split_whitespace().any(|token| {
-        let candidate = token.trim_matches(|character| {
-            matches!(
-                character,
-                '\'' | '"' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';'
-            )
-        });
-        candidate.len() > 1 && (candidate.starts_with('/') || candidate.starts_with("~/"))
-    })
-}
-
-fn sanitize_batch_error(message: &str) -> String {
-    let lower = message.to_ascii_lowercase();
-    if lower.contains("already exists") {
-        "目标文件已存在".to_string()
-    } else if lower.contains("not found") || lower.contains("enoent") {
-        "源文件不存在".to_string()
-    } else if lower.contains("invalid") || lower.contains("forbidden") {
-        "服务端拒绝了该文件路径".to_string()
-    } else {
-        "服务器未完成该文件操作".to_string()
-    }
 }
 
 fn normalize_server_base(raw: &str) -> Result<Url, DiaryError> {
@@ -1347,7 +1295,7 @@ fn find_tool_error(value: &Value, depth: usize) -> Option<String> {
             for key in ["plugin_error", "error"] {
                 if let Some(message) = object.get(key).and_then(Value::as_str) {
                     if !message.trim().is_empty() {
-                        return Some("Human Tool 执行失败，远端细节已隐藏".to_string());
+                        return Some(message.trim().to_string());
                     }
                 }
             }
@@ -1721,7 +1669,7 @@ fn error_map(
             by_wire
                 .get(&error.note)
                 .cloned()
-                .map(|key| (key, sanitize_batch_error(&error.error)))
+                .map(|key| (key, error.error))
         })
         .collect()
 }

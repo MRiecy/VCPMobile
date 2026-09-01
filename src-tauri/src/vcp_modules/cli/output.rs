@@ -52,22 +52,9 @@ enum TerminalControlState {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "m", content = "p", rename_all = "snake_case")]
-enum RedactionState {
-    #[default]
-    Normal,
-    Pending(String),
-    Line,
-    Pem(String),
-    PemTail,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 struct OutputProjectionState {
     #[serde(rename = "c")]
     control: TerminalControlState,
-    #[serde(rename = "r")]
-    redaction: RedactionState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,51 +318,6 @@ fn decode_utf8_incremental(bytes: &[u8], source_terminal: bool) -> (String, usiz
     (text, cursor, replacement_used)
 }
 
-// These are syntactic labels only. The runtime deliberately receives no host/API secrets and
-// never reads process environment values to build a guessed redaction list.
-const REDACT_LINE_PATTERNS: &[&str] = &[
-    "authorization:",
-    "proxy-authorization:",
-    "authorization=",
-    "x-api-key:",
-    "api-key:",
-    "bearer ",
-    "aws_secret_access_key=",
-    "client_secret=",
-    "access_token=",
-    "refresh_token=",
-    "api_key=",
-    "apikey=",
-    "password=",
-    "passwd=",
-    "secret=",
-    "token=",
-    "\"client_secret\":",
-    "\"access_token\":",
-    "\"refresh_token\":",
-    "\"api_key\":",
-    "\"password\":",
-    "\"secret\":",
-    "\"token\":",
-];
-const REDACT_PEM_START_PATTERNS: &[&str] = &[
-    "-----begin private key-----",
-    "-----begin encrypted private key-----",
-    "-----begin rsa private key-----",
-    "-----begin ec private key-----",
-    "-----begin dsa private key-----",
-    "-----begin openssh private key-----",
-];
-const REDACT_PEM_END_PATTERNS: &[&str] = &[
-    "-----end private key-----",
-    "-----end encrypted private key-----",
-    "-----end rsa private key-----",
-    "-----end ec private key-----",
-    "-----end dsa private key-----",
-    "-----end openssh private key-----",
-];
-const REDACTION_MARKER: &str = "[x]";
-
 fn project_safe_output(
     text: &str,
     mut state: OutputProjectionState,
@@ -398,9 +340,7 @@ fn project_safe_output(
                     state.control = TerminalControlState::String;
                     projected = true;
                 }
-                '\n' | '\t' => {
-                    feed_redactor(character, &mut state.redaction, &mut output, &mut projected)
-                }
+                '\n' | '\t' => output.push(character),
                 value
                     if value <= '\u{001f}'
                         || value == '\u{007f}'
@@ -408,7 +348,7 @@ fn project_safe_output(
                 {
                     projected = true;
                 }
-                value => feed_redactor(value, &mut state.redaction, &mut output, &mut projected),
+                value => output.push(value),
             },
             TerminalControlState::Escape => {
                 projected = true;
@@ -445,131 +385,11 @@ fn project_safe_output(
         }
     }
 
-    if source_terminal {
-        if state.control != TerminalControlState::Normal {
-            projected = true;
-            state.control = TerminalControlState::Normal;
-        }
-        flush_redactor(&mut state.redaction, &mut output, &mut projected);
+    if source_terminal && state.control != TerminalControlState::Normal {
+        projected = true;
+        state.control = TerminalControlState::Normal;
     }
     (output, state, projected)
-}
-
-fn feed_redactor(
-    character: char,
-    state: &mut RedactionState,
-    output: &mut String,
-    projected: &mut bool,
-) {
-    match state {
-        RedactionState::Normal => {
-            *state = RedactionState::Pending(character.to_string());
-            settle_normal_pending(state, output, projected);
-        }
-        RedactionState::Pending(pending) => {
-            pending.push(character);
-            settle_normal_pending(state, output, projected);
-        }
-        RedactionState::Line => {
-            *projected = true;
-            if character == '\n' {
-                output.push('\n');
-                *state = RedactionState::Normal;
-            }
-        }
-        RedactionState::Pem(pending) => {
-            *projected = true;
-            pending.push(character);
-            if REDACT_PEM_END_PATTERNS
-                .iter()
-                .any(|pattern| pending.eq_ignore_ascii_case(pattern))
-            {
-                *state = RedactionState::PemTail;
-            } else {
-                retain_possible_pattern_suffix(pending, REDACT_PEM_END_PATTERNS);
-            }
-        }
-        RedactionState::PemTail => {
-            *projected = true;
-            if character == '\n' {
-                output.push('\n');
-                *state = RedactionState::Normal;
-            }
-        }
-    }
-}
-
-fn settle_normal_pending(state: &mut RedactionState, output: &mut String, projected: &mut bool) {
-    loop {
-        let RedactionState::Pending(pending) = state else {
-            return;
-        };
-        if REDACT_LINE_PATTERNS
-            .iter()
-            .any(|pattern| pending.eq_ignore_ascii_case(pattern))
-        {
-            output.push_str(REDACTION_MARKER);
-            *projected = true;
-            *state = RedactionState::Line;
-            return;
-        }
-        if REDACT_PEM_START_PATTERNS
-            .iter()
-            .any(|pattern| pending.eq_ignore_ascii_case(pattern))
-        {
-            output.push_str(REDACTION_MARKER);
-            *projected = true;
-            *state = RedactionState::Pem(String::new());
-            return;
-        }
-        if all_start_patterns().any(|pattern| starts_with_ignore_ascii_case(pattern, pending)) {
-            return;
-        }
-        let Some(first) = pending.chars().next() else {
-            *state = RedactionState::Normal;
-            return;
-        };
-        output.push(first);
-        pending.drain(..first.len_utf8());
-        if pending.is_empty() {
-            *state = RedactionState::Normal;
-            return;
-        }
-    }
-}
-
-fn all_start_patterns() -> impl Iterator<Item = &'static str> {
-    REDACT_LINE_PATTERNS
-        .iter()
-        .chain(REDACT_PEM_START_PATTERNS.iter())
-        .copied()
-}
-
-fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
-    value
-        .get(..prefix.len())
-        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
-}
-
-fn retain_possible_pattern_suffix(pending: &mut String, patterns: &[&str]) {
-    while !pending.is_empty()
-        && !patterns
-            .iter()
-            .any(|pattern| starts_with_ignore_ascii_case(pattern, pending))
-    {
-        let first_len = pending.chars().next().map_or(0, char::len_utf8);
-        pending.drain(..first_len);
-    }
-}
-
-fn flush_redactor(state: &mut RedactionState, output: &mut String, projected: &mut bool) {
-    match std::mem::take(state) {
-        RedactionState::Pending(pending) => output.push_str(&pending),
-        RedactionState::Line | RedactionState::Pem(_) | RedactionState::PemTail => {
-            *projected = true;
-        }
-        RedactionState::Normal => {}
-    }
 }
 
 pub(super) fn hash_output_artifact_pair(
@@ -935,7 +755,7 @@ mod tests {
         })
         .await
         .expect("first Unicode poll");
-        assert!(first.stdout.is_empty());
+        assert_eq!(first.stdout, "a");
         assert_eq!(first.stdout_offset, 1);
         assert!(!first.truncated);
 
@@ -955,19 +775,19 @@ mod tests {
         })
         .await
         .expect("second Unicode poll");
-        assert_eq!(second.stdout, "a你b");
+        assert_eq!(second.stdout, "你b");
         assert_eq!(second.stdout_offset, 5);
         assert!(!second.truncated);
     }
 
     #[test]
-    fn output_projection_strips_controls_and_redacts_across_chunks() {
+    fn output_projection_strips_controls_and_preserves_diagnostics_across_chunks() {
         let (first, state, projected) = project_safe_output(
             "safe\u{1b}[31m red\u{1b}[0m\nAuth",
             OutputProjectionState::default(),
             false,
         );
-        assert_eq!(first, "safe red\n");
+        assert_eq!(first, "safe red\nAuth");
         assert!(projected);
 
         let (second, state, projected) = project_safe_output(
@@ -975,26 +795,26 @@ mod tests {
             state,
             false,
         );
-        assert_eq!(second, "[x]\nnex");
+        assert_eq!(second, "orization: Bearer top-secret\nnext");
         assert!(projected);
 
         let (third, state, projected) =
             project_safe_output(" title\u{7}\nTOKEN=hidden\nvisible", state, true);
-        assert_eq!(third, "t\n[x]\nvisible");
+        assert_eq!(third, "\nTOKEN=hidden\nvisible");
         assert_eq!(state, OutputProjectionState::default());
         assert!(projected);
         let combined = format!("{first}{second}{third}");
-        assert!(!combined.contains("top-secret"));
+        assert!(combined.contains("top-secret"));
         assert!(!combined.contains("forged"));
-        assert!(!combined.contains("hidden"));
+        assert!(combined.contains("hidden"));
         assert!(!combined.contains('\u{1b}'));
     }
 
     #[tokio::test]
-    async fn redaction_state_survives_an_opaque_cursor_boundary() {
+    async fn diagnostics_survive_an_opaque_cursor_boundary() {
         let directory = tempfile::tempdir().expect("temporary output root");
-        let stdout = directory.path().join("redaction.stdout");
-        let stderr = directory.path().join("redaction.stderr");
+        let stdout = directory.path().join("diagnostic.stdout");
+        let stderr = directory.path().join("diagnostic.stderr");
         let raw = b"ok\nAuthorization: Bearer cursor-secret\nafter\n";
         tokio::fs::write(&stdout, raw).await.expect("write stdout");
         tokio::fs::write(&stderr, b"").await.expect("write stderr");
@@ -1007,8 +827,8 @@ mod tests {
                 stdout_path: &stdout,
                 stderr_path: &stderr,
                 runtime_generation: 3,
-                job_id: "job-redaction",
-                attempt_id: "attempt-redaction",
+                job_id: "job-diagnostic",
+                attempt_id: "attempt-diagnostic",
                 stdout_bytes: raw.len() as u64,
                 stderr_bytes: 0,
                 cursor: cursor.as_deref(),
@@ -1023,26 +843,31 @@ mod tests {
             offset = chunk.stdout_offset;
             cursor = Some(chunk.cursor);
         }
-        assert_eq!(projected, "ok\n[x]\nafter\n");
-        assert!(!projected.contains("cursor-secret"));
+        assert_eq!(projected, String::from_utf8_lossy(raw));
+        assert!(projected.contains("cursor-secret"));
     }
 
     #[test]
-    fn private_key_redaction_is_fail_closed_until_matching_end() {
+    fn private_key_text_is_preserved() {
         let (first, state, _) = project_safe_output(
             "before\n-----BEGIN RSA PRIVATE KEY-----\nsecret-material",
             OutputProjectionState::default(),
             false,
         );
-        assert_eq!(first, "before\n[x]");
+        assert_eq!(
+            first,
+            "before\n-----BEGIN RSA PRIVATE KEY-----\nsecret-material"
+        );
         let (second, _, projected) = project_safe_output(
             "\nstill-secret\n-----END RSA PRIVATE KEY-----\nafter",
             state,
             true,
         );
-        assert_eq!(second, "\nafter");
-        assert!(projected);
-        assert!(!second.contains("secret"));
+        assert_eq!(
+            second,
+            "\nstill-secret\n-----END RSA PRIVATE KEY-----\nafter"
+        );
+        assert!(!projected);
     }
 
     #[test]

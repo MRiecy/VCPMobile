@@ -69,15 +69,15 @@ scope: 双端
 | `pullMessageIds` / `pushTopic` / `deleteMessages` | 数组 / 布尔 / 数组 | Message Diff 成功结果 | 是 | — | `pushTopic` 表示回写整 Topic 最终视图 |
 | `error` | `WireSyncError` | `SYNC_ERROR`, `ok:false` | 是 | — | 完整 Wire 1.5 对象 |
 | `level` | `string` | `SYNC_LOG_EVENT` | 是 | — | 日志级别：`info`（白色）、`success`（绿色）、`warning`（黄色）、`error`（红色） |
-| `message` | `string` | `SYNC_LOG_EVENT`, `SyncError` | 是 | — | 诊断文本；Mobile 持久化时脱敏，前端不直接展示 |
+| `message` | `string` | `SYNC_LOG_EVENT`, `SyncError` | 是 | — | 完整诊断文本；Mobile 原样持久化，错误原文直接展示 |
 | `targetType` | `owner/topic/avatar/message` | `SYNC_ENTITY_DELETE` | 是 | — | 决定随后的完整身份字段 |
 | `deletedAt` | `number` | Diff 删除动作、`SYNC_ENTITY_DELETE` | 是 | — | 非负毫秒时间戳 |
-| `code` | `string` | `SyncError` | 是 | — | 稳定大写机器码；已登记码映射固定中文文案，未知合法码保留但不展示原始 message |
+| `code` | `string` | `SyncError` | 是 | — | 稳定大写机器码；用于分类与重试，不覆盖原始 message |
 | `origin` | 闭合集合字符串 | `SyncError` | 是 | — | `mobile_ui/mobile_native/mobile_sync/desktop_plugin/desktop_cds` |
 | `stage` | 闭合集合字符串 | `SyncError` | 是 | — | 失败被确认时的精确阶段，不能统一降级为 `connect` |
 | `kind` | 闭合集合字符串 | `SyncError` | 是 | — | `device/configuration/connection/compatibility/protocol/data/storage/internal` |
 | `retry` | 闭合集合字符串 | `SyncError` | 是 | — | `automatic/after_user_action/manual/never`，直接控制 UI 行为 |
-| `failedTopicIds` | `string[]` | `SyncError` | 是 | `[]` | 去重且最多 8 项；仅用于诊断定位 |
+| `failedTopicIds` | `string[]` | `SyncError` | 是 | `[]` | 去重后的全部失败 Topic ID |
 | `ownerType/ownerId/topicId/msgId` | `string` | 对应对象身份 | 条件 | — | 不使用裸 `id` 或 Avatar 拼接 ID |
 | `contentHashMismatch` | `boolean` | Owner Manifest 结果 | 否 | `false` | Owner 下级内容根不一致，触发靶向 Topic 比对 |
 | `action` | `string` | Manifest Result | 是 | — | `PULL/PUSH/PULL_DELETE/PUSH_DELETE/SKIP` |
@@ -229,8 +229,8 @@ scope: 双端
 | WS 消息 | 前端事件 | Payload 字段映射 | 触发 UI 更新 |
 |---------|---------|-----------------|-------------|
 | `PHASE_START` / `PHASE_COMPLETED` | `vcp-sync-progress` | `phase`, `total`, `completed` | 进度条更新 |
-| `SYNC_LOG_EVENT` | 无直接 WebView 事件 | `level`, `message` | 脱敏后写入持久诊断日志 |
-| `SYNC_ERROR` | `vcp-sync-status` | `status:"error"`, `error:{code,category,message,guidance,...}` | 错误卡只展示固定 `message + guidance` |
+| `SYNC_LOG_EVENT` | 无直接 WebView 事件 | `level`, `message` | 原样写入持久诊断日志 |
+| `SYNC_ERROR` | `vcp-sync-status` | `status:"error"`, `error:{code,category,message,guidance,...}` | 错误卡展示完整 `message`、guidance、Topic 与日志路径 |
 | `VERSION_ACK`（校验通过） | `vcp-sync-status` | `sessionId`, `status:"open"`, `desktop:{packageVersion,backendMode}` | 同步面板进入进行中状态并显示桌面后端 |
 | `Finalize` 完成 | `vcp-sync-completed` | `status`, `summary` | 关闭面板时统一刷新数据 |
 | `DESKTOP_PHASE_*` | 无直接 WebView 事件 | `phase` | 写入诊断日志；用户阶段由 Mobile 结构化进度事件展示 |

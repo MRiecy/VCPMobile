@@ -11,9 +11,7 @@ use crate::vcp_modules::sync_error::{
     build_local_error_payload, build_wire_error_payload, decode_wire_sync_error,
     encode_wire_sync_error, is_attempt_restart_code, SyncErrorPayload, WireSyncError,
 };
-use crate::vcp_modules::sync_logger::{
-    redact_sync_diagnostic, DbWriteMetricLogBridge, LogLevel, SyncLogger,
-};
+use crate::vcp_modules::sync_logger::{DbWriteMetricLogBridge, LogLevel, SyncLogger};
 use crate::vcp_modules::sync_pipeline::{Phase1Metadata, Phase3Message, SyncPipeline};
 use crate::vcp_modules::sync_types::{
     DeleteNotificationFrame, DeleteTarget, ManifestRequestFrame, ManifestResultFrame, ManifestType,
@@ -878,7 +876,6 @@ impl Phase3Tracker {
             .map(|topic| topic.topic_id.clone())
             .collect::<Vec<_>>();
         failed_topic_ids.sort();
-        failed_topic_ids.truncate(8);
         SyncCompletionSummary {
             successful_topics,
             total_topics: self.total.load(Ordering::SeqCst),
@@ -1004,19 +1001,20 @@ fn validate_unique_topic_keys(values: Vec<TopicKey>, field: &str) -> Result<Vec<
 
 fn build_sync_error_payload(
     code: &str,
+    message: &str,
     failed_topic_ids: Vec<String>,
     log_file: Option<String>,
 ) -> SyncErrorPayload {
-    build_local_error_payload(code, failed_topic_ids, log_file)
+    let mut payload = build_local_error_payload(code, failed_topic_ids, log_file);
+    if !message.trim().is_empty() {
+        payload.message = message.trim().to_string();
+    }
+    payload
 }
 
 fn encode_sync_command_error(code: &str, detail: &str) -> String {
-    log::error!(
-        "[SyncCommand] [{}] {}",
-        code,
-        redact_sync_diagnostic(detail)
-    );
-    let payload = build_sync_error_payload(code, Vec::new(), None);
+    log::error!("[SyncCommand] [{}] {}", code, detail);
+    let payload = build_sync_error_payload(code, detail, Vec::new(), None);
     match serde_json::to_string(&payload) {
         Ok(json) => format!("SYNC_ERROR:{json}"),
         Err(_) => "SYNC_ERROR:{\"code\":\"SYNC_ATTEMPT_FAILED\",\"category\":\"internal\",\"origin\":\"mobile_sync\",\"stage\":\"startup\",\"retryAction\":\"manual\",\"message\":\"同步组件未能正常完成本次任务\",\"guidance\":\"重启应用后重新同步；若仍失败，请保留最新日志。\",\"failedTopicIds\":[],\"logFile\":null}".to_string(),
@@ -1079,16 +1077,10 @@ async fn publish_sync_error<R: Runtime>(
         "error",
         &format!("[{diagnostic_code}] {message}"),
     );
-    let log_file = sync_state
-        .current_log_path
-        .read()
-        .await
-        .as_deref()
-        .and_then(|path| std::path::Path::new(path).file_name())
-        .map(|name| name.to_string_lossy().into_owned());
+    let log_file = sync_state.current_log_path.read().await.clone();
     let error = match wire_error {
         Some(wire) => build_wire_error_payload(&wire, failed_topic_ids, log_file),
-        None => build_sync_error_payload(code, failed_topic_ids, log_file),
+        None => build_sync_error_payload(code, message, failed_topic_ids, log_file),
     };
     publish_sync_status_inner(app_handle, session_id, status, "error", Some(error), None).await;
 }
@@ -1244,14 +1236,14 @@ fn parse_sync_endpoint(
     let endpoint = url::Url::parse(raw).map_err(|error| {
         SyncConfigValidationError::new(
             "SYNC_CONFIG_INVALID",
-            format!("{label} is not a valid URL: {error}"),
+            format!("{label} {raw:?} is not a valid URL: {error}"),
         )
     })?;
     if !allowed_schemes.contains(&endpoint.scheme()) || endpoint.host().is_none() {
         return Err(SyncConfigValidationError::new(
             "SYNC_CONFIG_INVALID",
             format!(
-                "{label} must use {} and include a host",
+                "{label} {raw:?} must use {} and include a host",
                 allowed_schemes.join(" or ")
             ),
         ));
@@ -1388,6 +1380,13 @@ async fn run_sync_session(
         log_dir,
         session_id,
     )));
+    if let Ok(mut logger) = sync_logger.lock() {
+        logger.log_direct(
+            LogLevel::Info,
+            "config",
+            &format!("ws_url={ws_url} http_url={http_url} sync_token={sync_token}"),
+        );
+    }
     let (log_path, log_initialization_error) = {
         let logger = sync_logger.lock();
         match logger {
@@ -1424,7 +1423,7 @@ async fn run_sync_session(
         log::warn!(
             "[SyncLogger] Session {} continues without a diagnostic file: {}",
             session_id,
-            redact_sync_diagnostic(&detail)
+            detail
         );
         emit_operator_sync_log(
             &app_handle,
@@ -1446,7 +1445,7 @@ async fn run_sync_session(
         Err(error) => {
             let message = format!(
                 "Failed to acquire Android sync foreground lease; continuing without keepalive: {}",
-                redact_sync_diagnostic(&error)
+                error
             );
             log::warn!("[SyncService] Session {session_id}: {message}");
             emit_sync_log(&app_handle, "warning", &message);
@@ -1968,7 +1967,7 @@ async fn run_sync_session(
                                                             attempt_id,
                                                             code: "PHASE3_HASH_PREP_FAILED".to_string(),
                                                             message: error,
-                                                            failed_topic_ids: changed_ids.iter().take(8).map(|key| key.topic_id.clone()).collect(),
+                                                            failed_topic_ids: changed_ids.iter().map(|key| key.topic_id.clone()).collect(),
                                                         });
                                                         continue 'attempt;
                                                     }
@@ -3067,7 +3066,6 @@ pub(crate) fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, 
             logger.log(log_level, "sync", message);
         }
     } else {
-        let safe_message = redact_sync_diagnostic(message);
         let rust_log_level = match level {
             "trace" => log::Level::Trace,
             "debug" => log::Level::Debug,
@@ -3075,7 +3073,7 @@ pub(crate) fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, 
             "warn" | "warning" => log::Level::Warn,
             _ => log::Level::Info,
         };
-        log::log!(rust_log_level, "[Sync] [{}] {}", level, safe_message);
+        log::log!(rust_log_level, "[Sync] [{}] {}", level, message);
     }
 }
 
@@ -3118,10 +3116,7 @@ fn release_sync_guardian_with_diagnostics(app_handle: &AppHandle) {
         emit_sync_log(
             app_handle,
             "warning",
-            &format!(
-                "Failed to release Android sync foreground lease: {}",
-                redact_sync_diagnostic(&error)
-            ),
+            &format!("Failed to release Android sync foreground lease: {}", error),
         );
     }
 }
@@ -3540,10 +3535,7 @@ pub async fn clear_old_sync_logs(
                     &mut removed,
                     &mut failed,
                 ) {
-                    log::warn!(
-                        "[SyncLog] Failed to remove old log: {}",
-                        redact_sync_diagnostic(&error.to_string())
-                    );
+                    log::warn!("[SyncLog] Failed to remove old log: {}", error);
                 }
             }
         }
@@ -3841,11 +3833,12 @@ mod tests {
     }
 
     #[test]
-    fn sync_error_contract_keeps_raw_detail_out_of_the_user_payload() {
+    fn sync_error_contract_preserves_raw_detail_in_the_user_payload() {
         let payload = build_sync_error_payload(
             "TOKEN_MISMATCH",
+            "token=mobile-secret url=wss://192.168.1.10/ws?token=mobile-secret",
             vec!["topic-a".to_string()],
-            Some("20260813_120000_000_7_sync.log".to_string()),
+            Some("/data/user/0/com.vcp.avatar/logs/20260813_sync.log".to_string()),
         );
         let json = serde_json::to_value(payload).expect("serialize sync error");
 
@@ -3853,14 +3846,23 @@ mod tests {
         assert_eq!(json["origin"], "mobile_sync");
         assert_eq!(json["stage"], "connect");
         assert_eq!(json["retryAction"], "after_user_action");
-        assert_eq!(json["message"], "手机端与电脑端的同步令牌不一致");
+        assert_eq!(
+            json["message"],
+            "token=mobile-secret url=wss://192.168.1.10/ws?token=mobile-secret"
+        );
         assert_eq!(json["guidance"], "重新核对两端令牌后再试。");
+        assert_eq!(
+            json["logFile"],
+            "/data/user/0/com.vcp.avatar/logs/20260813_sync.log"
+        );
         assert!(json.get("detail").is_none());
         assert!(json.get("solution").is_none());
 
-        let fallback = build_sync_error_payload("desktop raw code", Vec::new(), None);
+        let fallback =
+            build_sync_error_payload("desktop raw code", "ENOENT /tmp/sync.db", Vec::new(), None);
         assert_eq!(fallback.code, "SYNC_ATTEMPT_FAILED");
         assert_eq!(fallback.category, SyncErrorCategory::Internal);
+        assert_eq!(fallback.message, "ENOENT /tmp/sync.db");
     }
 
     #[test]
@@ -3888,7 +3890,7 @@ mod tests {
     fn command_errors_use_the_structured_transport_prefix() {
         let encoded = encode_sync_command_error(
             "SYNC_ACTIVE_GENERATION",
-            "Bearer raw-secret should stay in native logs only",
+            "Bearer raw-secret url=wss://desktop/ws?token=raw-secret",
         );
         let json = encoded
             .strip_prefix("SYNC_ERROR:")
@@ -3897,7 +3899,8 @@ mod tests {
 
         assert_eq!(payload["code"], "SYNC_ACTIVE_GENERATION");
         assert_eq!(payload["category"], "data");
-        assert!(!encoded.contains("raw-secret"));
+        assert!(encoded.contains("raw-secret"));
+        assert!(encoded.contains("wss://desktop/ws?token=raw-secret"));
     }
 
     fn valid_sync_settings() -> Settings {

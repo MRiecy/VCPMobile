@@ -350,8 +350,17 @@ const handlePrerenderToggle = async (val: boolean) => {
                 <div class="mt-2 font-mono text-[9px] leading-relaxed text-white/35 break-all">
                   {{ errorStageLabel }} · {{ errorOriginLabel }} · {{ store.terminalError.code }}
                 </div>
+                <div
+                  v-if="store.terminalError.failedTopicIds.length > 0"
+                  class="mt-2 font-mono text-[9px] leading-relaxed text-red-300/70 break-all"
+                >
+                  失败 Topic · {{ store.terminalError.failedTopicIds.join(' · ') }}
+                </div>
                 <div class="mt-2 text-[9px] text-white/30">
-                  {{ store.terminalError.logFile ? '详细记录已保存至历史日志。' : '本次未生成诊断日志。' }}
+                  <template v-if="store.terminalError.logFile">
+                    日志 · <span class="font-mono break-all">{{ store.terminalError.logFile }}</span>
+                  </template>
+                  <template v-else>本次未生成诊断日志。</template>
                 </div>
               </div>
 

@@ -212,13 +212,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             }
         };
 
-        let masked_url = if ws_url.as_str().contains("VCP_Key=") {
-            let parts: Vec<&str> = ws_url.as_str().split("VCP_Key=").collect();
-            format!("{}VCP_Key=********", parts[0])
-        } else {
-            ws_url.to_string()
-        };
-        log::info!("[VCPLog] Attempting to connect to {}...", masked_url);
+        log::info!("[VCPLog] Attempting to connect to {}...", ws_url);
 
         {
             *CURRENT_LOG_STATUS.write().await = "connecting".to_string();
@@ -250,18 +244,11 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
         let mut interrupted_by_url_change = false;
 
         for (i, trial_url) in urls_to_try.iter().enumerate() {
-            let trial_masked_url = if trial_url.as_str().contains("VCP_Key=") {
-                let parts: Vec<&str> = trial_url.as_str().split("VCP_Key=").collect();
-                format!("{}VCP_Key=********", parts[0])
-            } else {
-                trial_url.to_string()
-            };
-
             log::info!(
                 "[VCPLog] Attempting connection trial {}/{}: {}...",
                 i + 1,
                 urls_to_try.len(),
-                trial_masked_url
+                trial_url
             );
 
             let mut request = match trial_url.as_str().into_client_request() {
@@ -270,7 +257,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     log::error!(
                         "[VCPLog] Failed to build request for trial {} ({}): {}",
                         i + 1,
-                        trial_masked_url,
+                        trial_url,
                         e
                     );
                     connection_error = Some(tokio_tungstenite::tungstenite::Error::Io(
@@ -329,7 +316,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                             log::warn!(
                                 "[VCPLog] Connection failed for trial {} ({}): {}",
                                 i + 1,
-                                trial_masked_url,
+                                trial_url,
                                 e
                             );
                             connection_error = Some(e);
@@ -338,7 +325,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                             log::warn!(
                                 "[VCPLog] Connection timed out (5s) for trial {} ({})",
                                 i + 1,
-                                trial_masked_url
+                                trial_url
                             );
                             connection_error = Some(tokio_tungstenite::tungstenite::Error::Io(
                                 std::io::Error::new(std::io::ErrorKind::TimedOut, "Connection timed out (5s)")
@@ -381,13 +368,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     *CURRENT_LOG_STATUS.write().await = "connected".to_string();
                 }
 
-                let final_masked_url = if final_ws_url.as_str().contains("VCP_Key=") {
-                    let parts: Vec<&str> = final_ws_url.as_str().split("VCP_Key=").collect();
-                    format!("{}VCP_Key=********", parts[0])
-                } else {
-                    final_ws_url.to_string()
-                };
-                log::info!("[VCPLog] Connected successfully to {}", final_masked_url);
+                log::info!("[VCPLog] Connected successfully to {}", final_ws_url);
 
                 let (mut ws_write, mut ws_read) = ws_stream.split();
 
@@ -505,7 +486,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     *tx_lock = None;
                 }
 
-                log::info!("[VCPLog] Disconnected from {}.", final_masked_url);
+                log::info!("[VCPLog] Disconnected from {}.", final_ws_url);
                 {
                     *CURRENT_LOG_STATUS.write().await = "closed".to_string();
                 }

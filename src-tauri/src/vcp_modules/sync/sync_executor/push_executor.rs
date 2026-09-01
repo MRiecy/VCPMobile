@@ -80,21 +80,29 @@ async fn parse_json_response<T: DeserializeOwned>(
 ) -> Result<T, String> {
     let (status, bytes) =
         read_response_limited(response, MAX_CONTROL_RESPONSE_BYTES, operation, stage).await?;
+    let response_body = String::from_utf8_lossy(&bytes);
     if !status.is_success() {
         return match encode_http_sync_error_body(&bytes) {
             Ok(Some(encoded)) => Err(encoded),
             Ok(None) => Err(protocol_error(
                 stage,
-                format!("{operation} failed with HTTP {status} without a Wire 1.5 error object"),
+                format!(
+                    "{operation} failed with HTTP {status} without a Wire 1.5 error object; body={response_body}"
+                ),
             )),
             Err(error) => Err(protocol_error(
                 stage,
-                format!("{operation} returned an invalid Wire 1.5 error: {error}"),
+                format!(
+                    "{operation} returned an invalid Wire 1.5 error: {error}; body={response_body}"
+                ),
             )),
         };
     }
     serde_json::from_slice(&bytes).map_err(|error| {
-        protocol_error(stage, format!("{operation} returned invalid JSON: {error}"))
+        protocol_error(
+            stage,
+            format!("{operation} returned invalid JSON: {error}; body={response_body}"),
+        )
     })
 }
 
@@ -265,17 +273,20 @@ async fn send_message_chunk(
     )
     .await?;
     if !status.is_success() {
+        let response_body = String::from_utf8_lossy(&bytes);
         return match encode_http_sync_error_body(&bytes) {
             Ok(Some(encoded)) => Err(encoded),
             Ok(None) => Err(protocol_error(
                 SyncErrorStage::Messages,
                 format!(
-                    "Batch push messages failed with HTTP {status} without a Wire 1.5 error object"
+                    "Batch push messages failed with HTTP {status} without a Wire 1.5 error object; body={response_body}"
                 ),
             )),
             Err(error) => Err(protocol_error(
                 SyncErrorStage::Messages,
-                format!("Batch push messages returned an invalid Wire 1.5 error: {error}"),
+                format!(
+                    "Batch push messages returned an invalid Wire 1.5 error: {error}; body={response_body}"
+                ),
             )),
         };
     }
@@ -336,22 +347,28 @@ async fn send_entity_items(
     let (status, bytes) =
         read_response_limited(response, 10 * 1024 * 1024, "Entity push", response_stage).await?;
     if !status.is_success() {
+        let response_body = String::from_utf8_lossy(&bytes);
         return match encode_http_sync_error_body(&bytes) {
             Ok(Some(encoded)) => Err(encoded),
             Ok(None) => Err(protocol_error(
                 response_stage,
-                format!("Entity push failed with HTTP {status} without a Wire 1.5 error object"),
+                format!(
+                    "Entity push failed with HTTP {status} without a Wire 1.5 error object; body={response_body}"
+                ),
             )),
             Err(error) => Err(protocol_error(
                 response_stage,
-                format!("Entity push returned an invalid Wire 1.5 error: {error}"),
+                format!(
+                    "Entity push returned an invalid Wire 1.5 error: {error}; body={response_body}"
+                ),
             )),
         };
     }
+    let response_body = String::from_utf8_lossy(&bytes);
     let response: EntityPushResponse = serde_json::from_slice(&bytes).map_err(|error| {
         protocol_error(
             response_stage,
-            format!("Entity push returned invalid JSON: {error}"),
+            format!("Entity push returned invalid JSON: {error}; body={response_body}"),
         )
     })?;
     let mut seen = HashSet::new();

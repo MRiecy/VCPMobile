@@ -2,9 +2,8 @@ use crate::vcp_modules::db_manager::DbWriteMetric;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
-use regex::Regex;
 use tokio::sync::{broadcast, oneshot};
 use tokio::task::JoinHandle;
 
@@ -50,35 +49,6 @@ impl LogLevel {
     }
 }
 
-pub(crate) fn redact_sync_diagnostic(value: &str) -> String {
-    static BEARER: OnceLock<Regex> = OnceLock::new();
-    static SECRET_FIELD: OnceLock<Regex> = OnceLock::new();
-    static SECRET_QUERY: OnceLock<Regex> = OnceLock::new();
-
-    let bearer = BEARER.get_or_init(|| {
-        Regex::new(r#"(?i)(\bBearer\s+)(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;]+)"#)
-            .expect("static bearer redaction regex must compile")
-    });
-    let secret_field = SECRET_FIELD.get_or_init(|| {
-        Regex::new(
-            r#"(?i)(\b(?:token|x[_-]?sync[_-]?token|sync[_-]?token|access[_-]?token|api[_-]?key|vcp[_-]?key|secret|password)\b\s*[:=]\s*)(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;&#]+)"#,
-        )
-        .expect("static secret field redaction regex must compile")
-    });
-    let secret_query = SECRET_QUERY.get_or_init(|| {
-        Regex::new(
-            r#"(?i)([?&](?:token|sync(?:[_-]|%5f)?token|access(?:[_-]|%5f)?token|api(?:[_-]|%5f)?key|vcp(?:[_-]|%5f)?key|secret|password)=)[^&#\s]*"#,
-        )
-        .expect("static secret query redaction regex must compile")
-    });
-
-    let redacted = bearer.replace_all(value, "${1}[redacted]");
-    let redacted = secret_field.replace_all(&redacted, "${1}[redacted]");
-    secret_query
-        .replace_all(&redacted, "${1}[redacted]")
-        .into_owned()
-}
-
 pub struct SyncLogger {
     log_level: LogLevel,
     log_file: Option<std::fs::File>,
@@ -105,20 +75,18 @@ impl SyncLogger {
                             (Some(file), Some(path), None)
                         }
                         Err(e) => {
-                            let detail = redact_sync_diagnostic(&format!(
+                            let detail = format!(
                                 "Failed to create sync log file at {}: {e}",
                                 path.display()
-                            ));
+                            );
                             log::error!("[SyncLogger] {detail}");
                             (None, None, Some(detail))
                         }
                     }
                 }
                 Err(e) => {
-                    let detail = redact_sync_diagnostic(&format!(
-                        "Failed to create sync log directory {}: {e}",
-                        dir.display()
-                    ));
+                    let detail =
+                        format!("Failed to create sync log directory {}: {e}", dir.display());
                     log::error!("[SyncLogger] {detail}");
                     (None, None, Some(detail))
                 }
@@ -144,21 +112,14 @@ impl SyncLogger {
     }
 
     pub fn log_direct(&mut self, level: LogLevel, phase: &str, message: &str) {
-        let safe_phase = redact_sync_diagnostic(phase);
-        let safe_message = redact_sync_diagnostic(message);
         let line = format!(
             "[{}] [{}] [{}] {}",
             chrono::Local::now().format("%Y-%m-%dT%H:%M:%S%.3f%:z"),
             level.as_str(),
-            safe_phase,
-            safe_message
+            phase,
+            message
         );
-        log::log!(
-            level.rust_level(),
-            "[Sync] [{}] {}",
-            safe_phase,
-            safe_message
-        );
+        log::log!(level.rust_level(), "[Sync] [{}] {}", phase, message);
 
         if let Some(ref mut file) = self.log_file {
             let _ = writeln!(file, "{}", line);
@@ -340,26 +301,6 @@ mod tests {
             hold_duration: std::time::Duration::from_millis(25),
             finish_duration: Some(std::time::Duration::from_millis(4)),
         }
-    }
-
-    #[test]
-    fn redacts_secrets_but_keeps_diagnostic_locations_and_ids() {
-        let input = concat!(
-            "Authorization: Bearer top-secret; ",
-            "syncToken=alpha, X-Sync-Token: beta, ",
-            "ws://192.168.1.9:5890/sync?token=gamma&sync%5Ftoken=delta&topic=topic-7 ",
-            "/data/user/0/com.vcp.avatar/logs/session.log"
-        );
-        let output = redact_sync_diagnostic(input);
-
-        assert!(!output.contains("top-secret"));
-        assert!(!output.contains("alpha"));
-        assert!(!output.contains("beta"));
-        assert!(!output.contains("gamma"));
-        assert!(!output.contains("delta"));
-        assert!(output.contains("192.168.1.9:5890"));
-        assert!(output.contains("topic-7"));
-        assert!(output.contains("/data/user/0/com.vcp.avatar/logs/session.log"));
     }
 
     #[tokio::test]

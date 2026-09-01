@@ -3,8 +3,6 @@ use serde_json::Value;
 use std::collections::HashSet;
 
 pub const WIRE_ERROR_MARKER: &str = "SYNC_WIRE_ERROR:";
-const MAX_ERROR_MESSAGE_CHARS: usize = 1024;
-const MAX_FAILED_TOPIC_IDS: usize = 8;
 const MAX_TOPIC_ID_CHARS: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -752,7 +750,7 @@ fn is_valid_wire_code(code: &str) -> bool {
         && !code.starts_with("SQLITE_")
 }
 
-fn sanitize_topic_ids<I>(topic_ids: I) -> Vec<String>
+fn normalize_topic_ids<I>(topic_ids: I) -> Vec<String>
 where
     I: IntoIterator<Item = String>,
 {
@@ -762,7 +760,6 @@ where
         .filter(|id| {
             !id.is_empty() && id.chars().count() <= MAX_TOPIC_ID_CHARS && seen.insert(id.clone())
         })
-        .take(MAX_FAILED_TOPIC_IDS)
         .collect()
 }
 
@@ -770,14 +767,13 @@ fn validate_wire_error(error: WireSyncError) -> Result<WireSyncError, String> {
     if !is_valid_wire_code(&error.code) {
         return Err("error.code is invalid".to_string());
     }
-    if error.message.trim().is_empty() || error.message.chars().count() > MAX_ERROR_MESSAGE_CHARS {
+    if error.message.trim().is_empty() {
         return Err("error.message is invalid".to_string());
     }
-    if error.failed_topic_ids.len() > MAX_FAILED_TOPIC_IDS
-        || error
-            .failed_topic_ids
-            .iter()
-            .any(|id| id.is_empty() || id.chars().count() > MAX_TOPIC_ID_CHARS)
+    if error
+        .failed_topic_ids
+        .iter()
+        .any(|id| id.is_empty() || id.chars().count() > MAX_TOPIC_ID_CHARS)
         || error.failed_topic_ids.iter().collect::<HashSet<_>>().len()
             != error.failed_topic_ids.len()
     {
@@ -819,23 +815,19 @@ pub fn encode_local_sync_error(
     };
     let fallback = error_definition("SYNC_ATTEMPT_FAILED").expect("fallback definition");
     let selected = error_definition(stable_code).unwrap_or(fallback);
-    let bounded_message = message
-        .trim()
-        .chars()
-        .take(MAX_ERROR_MESSAGE_CHARS)
-        .collect::<String>();
+    let message = message.trim();
     let wire = WireSyncError {
         code: stable_code.to_string(),
         origin: SyncErrorOrigin::MobileSync,
         stage,
         kind: selected.category,
         retry: selected.retry,
-        message: if bounded_message.is_empty() {
+        message: if message.is_empty() {
             selected.message.to_string()
         } else {
-            bounded_message
+            message.to_string()
         },
-        failed_topic_ids: sanitize_topic_ids(failed_topic_ids),
+        failed_topic_ids: normalize_topic_ids(failed_topic_ids),
     };
     encode_wire_sync_error(&wire).unwrap_or_else(|_| {
         format!(
@@ -891,7 +883,7 @@ pub fn build_local_error_payload(
         retry_action: selected.retry,
         message: selected.message.to_string(),
         guidance: selected.guidance.to_string(),
-        failed_topic_ids: sanitize_topic_ids(failed_topic_ids),
+        failed_topic_ids: normalize_topic_ids(failed_topic_ids),
         log_file,
     }
 }
@@ -901,9 +893,9 @@ pub fn build_wire_error_payload(
     additional_failed_topic_ids: Vec<String>,
     log_file: Option<String>,
 ) -> SyncErrorPayload {
-    let (message, guidance) = error_definition(&wire.code)
-        .map(|known| (known.message, known.guidance))
-        .unwrap_or_else(|| fallback_copy(wire.kind));
+    let guidance = error_definition(&wire.code)
+        .map(|known| known.guidance)
+        .unwrap_or_else(|| fallback_copy(wire.kind).1);
     let failed_topic_ids = wire
         .failed_topic_ids
         .iter()
@@ -916,9 +908,9 @@ pub fn build_wire_error_payload(
         origin: wire.origin,
         stage: wire.stage,
         retry_action: wire.retry,
-        message: message.to_string(),
+        message: wire.message.trim().to_string(),
         guidance: guidance.to_string(),
-        failed_topic_ids: sanitize_topic_ids(failed_topic_ids),
+        failed_topic_ids: normalize_topic_ids(failed_topic_ids),
         log_file,
     }
 }
@@ -1028,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_wire_code_keeps_metadata_but_never_exposes_raw_message() {
+    fn unknown_wire_code_keeps_metadata_and_raw_message() {
         let wire = parse_wire_sync_error(&serde_json::json!({
             "code": "UPSTREAM_EXTENSION_FAILED",
             "origin": "desktop_plugin",
@@ -1042,7 +1034,7 @@ mod tests {
         let payload = build_wire_error_payload(&wire, Vec::new(), None);
         assert_eq!(payload.code, "UPSTREAM_EXTENSION_FAILED");
         assert_eq!(payload.stage, SyncErrorStage::Finalize);
-        assert!(!payload.message.contains("desktop-secret"));
+        assert_eq!(payload.message, "Bearer desktop-secret");
     }
 
     #[test]
@@ -1092,7 +1084,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_bounds_count_unicode_scalar_values() {
+    fn wire_keeps_complete_messages_and_validates_each_topic_id() {
         let valid = serde_json::json!({
             "code": "UPSTREAM_EXTENSION_FAILED",
             "origin": "desktop_plugin",
@@ -1104,8 +1096,11 @@ mod tests {
         });
         parse_wire_sync_error(&valid).expect("Unicode scalar boundary");
 
-        let mut invalid = valid;
-        invalid["message"] = Value::String("🙂".repeat(1025));
-        assert!(parse_wire_sync_error(&invalid).is_err());
+        let mut longer = valid;
+        longer["message"] = Value::String("🙂".repeat(4096));
+        parse_wire_sync_error(&longer).expect("complete diagnostic message");
+
+        longer["failedTopicIds"] = serde_json::json!(["🙂".repeat(513)]);
+        assert!(parse_wire_sync_error(&longer).is_err());
     }
 }

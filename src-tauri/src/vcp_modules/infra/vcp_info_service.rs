@@ -152,13 +152,7 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             }
         };
 
-        let masked_url = if ws_url.as_str().contains("VCP_Key=") {
-            let parts: Vec<&str> = ws_url.as_str().split("VCP_Key=").collect();
-            format!("{}VCP_Key=********", parts[0])
-        } else {
-            ws_url.to_string()
-        };
-        log::info!("[VCPInfo] Attempting to connect to {}...", masked_url);
+        log::info!("[VCPInfo] Attempting to connect to {}...", ws_url);
 
         {
             *CURRENT_INFO_STATUS.write().await = "connecting".to_string();
@@ -293,7 +287,7 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                 {
                     *CURRENT_INFO_STATUS.write().await = "connected".to_string();
                 }
-                log::info!("[VCPInfo] Connected successfully to {}", masked_url);
+                log::info!("[VCPInfo] Connected successfully to {}", ws_url);
 
                 let (mut ws_write, mut ws_read) = ws_stream.split();
 
@@ -359,7 +353,7 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     }
                 }
 
-                log::info!("[VCPInfo] Disconnected from {}.", masked_url);
+                log::info!("[VCPInfo] Disconnected from {}.", ws_url);
                 {
                     *CURRENT_INFO_STATUS.write().await = "closed".to_string();
                 }

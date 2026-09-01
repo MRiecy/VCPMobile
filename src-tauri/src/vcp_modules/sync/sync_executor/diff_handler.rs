@@ -375,7 +375,6 @@ impl DiffHandler {
                                     .iter()
                                     .filter_map(EntitySelector::topic_id)
                                     .map(str::to_owned)
-                                    .take(8)
                                     .collect()
                             } else {
                                 Vec::new()
@@ -469,7 +468,6 @@ impl DiffHandler {
                                     message: format!("Failed to load topics for push: {error}"),
                                     failed_topic_ids: chunk
                                         .iter()
-                                        .take(8)
                                         .map(|key| key.topic_id.clone())
                                         .collect(),
                                 });
@@ -603,7 +601,6 @@ impl DiffHandler {
                         let failed_topic_ids = sub_batch
                             .iter()
                             .filter_map(|item| item.selector().topic_id().map(str::to_owned))
-                            .take(8)
                             .collect::<Vec<_>>();
                         log::debug!(
                             "[SyncDebug] Sending batch of {} topics to desktop",

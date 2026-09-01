@@ -44,7 +44,7 @@ Agent Android Debug 入口。它解决四个问题：代理/TUN 环境下的 USB
    代替状态摘要。
 4. `screenshot` 不输出 base64 或像素；`snapshot --screenshot` 也只输出 manifest 路径。
 5. 本地产物统一进入已忽略的 `.agent/android-debug/`。需要进入长期证据时，应人工选取
-   最小文件集并脱敏，不能提交整份 Dev 日志。
+   最小文件集即可；诊断内容保持原文，不改写 token、URL、路径或错误文本。
 
 ## 4. 推荐 Agent 旅程
 

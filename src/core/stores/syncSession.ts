@@ -176,11 +176,28 @@ const LOCAL_ERROR_COPY: Record<
   },
 };
 
-const localTerminalError = (code: string): SyncTerminalError => {
+const diagnosticText = (value: unknown): string => {
+  if (value instanceof Error) return value.message;
+  if (typeof value === "string") return value;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const message = (value as Record<string, unknown>).message;
+    if (typeof message === "string") return message;
+    try {
+      return JSON.stringify(value) ?? String(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value ?? "");
+};
+
+const localTerminalError = (code: string, detail?: unknown): SyncTerminalError => {
   const copy = LOCAL_ERROR_COPY[code] ?? LOCAL_ERROR_COPY.SYNC_ATTEMPT_FAILED;
+  const rawMessage = detail === undefined ? "" : diagnosticText(detail).trim();
   return {
     code,
     ...copy,
+    message: rawMessage || copy.message,
     failedTopicIds: [],
     logFile: null,
   };
@@ -204,10 +221,8 @@ const readSyncError = (value: unknown): SyncTerminalError | null => {
     ) ||
     typeof source.message !== "string" ||
     source.message.trim().length === 0 ||
-    source.message.length > 200 ||
     typeof source.guidance !== "string" ||
-    source.guidance.trim().length === 0 ||
-    source.guidance.length > 300
+    source.guidance.trim().length === 0
   ) {
     return null;
   }
@@ -217,14 +232,10 @@ const readSyncError = (value: unknown): SyncTerminalError | null => {
           (id): id is string =>
             typeof id === "string" && id.length > 0 && id.length <= 512,
         )
-        .slice(0, 8)
     : [];
   const logFile =
     typeof source.logFile === "string" &&
-    source.logFile.length > 0 &&
-    source.logFile.length <= 255 &&
-    !source.logFile.includes("/") &&
-    !source.logFile.includes("\\")
+    source.logFile.length > 0
       ? source.logFile
       : null;
   return {
@@ -253,11 +264,9 @@ const parseCommandError = (
         JSON.parse(raw.slice(markerIndex + marker.length)),
       );
       if (parsed) return parsed;
-    } catch {
-      // Invalid command errors stay behind the fixed user-facing fallback.
-    }
+    } catch {}
   }
-  return localTerminalError(fallbackCode);
+  return localTerminalError(fallbackCode, raw);
 };
 
 const PHASE_LABELS: Record<string, string> = {
@@ -369,8 +378,8 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     canDismiss.value = true;
   };
 
-  const setLocalError = (code: string) => {
-    setTerminalError(localTerminalError(code));
+  const setLocalError = (code: string, detail?: unknown) => {
+    setTerminalError(localTerminalError(code, detail));
   };
 
   const beginSync = async (preserveLogs: boolean) => {
@@ -397,7 +406,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     } catch (error: unknown) {
       if (isCurrentAttempt(generation, attempt)) {
         console.error("[SyncSession] Failed to register sync listeners:", error);
-        const terminal = localTerminalError("LISTENER_SETUP_FAILED");
+        const terminal = localTerminalError("LISTENER_SETUP_FAILED", error);
         pushLog("error", terminal.message);
         setTerminalError(terminal);
       }
@@ -587,7 +596,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       totalTopics,
       failedTopics,
       legacyAttachmentWarnings,
-      failedTopicIds: allFailedTopicIds.slice(0, 8),
+      failedTopicIds: allFailedTopicIds,
     };
   };
 
@@ -641,7 +650,10 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
   const readTerminalError = (
     payload: Record<string, unknown>,
   ): SyncTerminalError => {
-    return readSyncError(payload.error) ?? localTerminalError("SYNC_ATTEMPT_FAILED");
+    return (
+      readSyncError(payload.error) ??
+      localTerminalError("SYNC_ATTEMPT_FAILED", payload.error)
+    );
   };
 
   // 阶段内进度以「活进度行」呈现：原地刷新同一条日志，既保留进度感知又不刷屏。
@@ -678,7 +690,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       ) {
         pushLog(
           typeof payload.level === "string" ? payload.level : "info",
-          payload.message.trim().slice(0, 200),
+          payload.message.trim(),
         );
       }
       return;
@@ -793,13 +805,19 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       payload.status !== "completed_with_warnings"
     ) {
       pushLog("error", "完成事件协议错误: status 非法");
-      setLocalError("INVALID_COMPLETION_EVENT");
+      setLocalError(
+        "INVALID_COMPLETION_EVENT",
+        `完成事件 status 非法: ${diagnosticText(payload.status)}`,
+      );
       return;
     }
     const completedSummary = readSummary(payload.summary);
     if (!completedSummary) {
       pushLog("error", "完成事件协议错误: summary 非法");
-      setLocalError("INVALID_COMPLETION_EVENT");
+      setLocalError(
+        "INVALID_COMPLETION_EVENT",
+        `完成事件 summary 非法: ${diagnosticText(payload.summary)}`,
+      );
       return;
     }
     if (
@@ -811,7 +829,10 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         completedSummary.legacyAttachmentWarnings === 0)
     ) {
       pushLog("error", "完成事件协议错误: status 与 summary 不一致");
-      setLocalError("INVALID_COMPLETION_EVENT");
+      setLocalError(
+        "INVALID_COMPLETION_EVENT",
+        `完成事件 status 与 summary 不一致: status=${diagnosticText(payload.status)} summary=${diagnosticText(payload.summary)}`,
+      );
       return;
     }
     summary.value = completedSummary;

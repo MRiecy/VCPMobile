@@ -89,18 +89,21 @@ fn http_status_error(
     bytes: &[u8],
     stage: SyncErrorStage,
 ) -> String {
+    let body = String::from_utf8_lossy(bytes);
     match encode_http_sync_error_body(bytes) {
         Ok(Some(encoded)) => encoded,
         Ok(None) => encode_local_sync_error(
             "SYNC_PROTOCOL_INVALID",
             stage,
-            &format!("{operation} failed with HTTP {status} without a Wire 1.5 error object"),
+            &format!(
+                "{operation} failed with HTTP {status} without a Wire 1.5 error object; body={body}"
+            ),
             Vec::new(),
         ),
         Err(error) => encode_local_sync_error(
             "SYNC_PROTOCOL_INVALID",
             stage,
-            &format!("{operation} returned an invalid Wire 1.5 error: {error}"),
+            &format!("{operation} returned an invalid Wire 1.5 error: {error}; body={body}"),
             Vec::new(),
         ),
     }
@@ -740,10 +743,11 @@ impl PullExecutor {
                 response_stage,
             ));
         }
+        let response_body = String::from_utf8_lossy(&bytes);
         let response: EntityPullResponse = serde_json::from_slice(&bytes).map_err(|error| {
             protocol_error(
                 response_stage,
-                format!("Entity pull returned invalid JSON: {error}"),
+                format!("Entity pull returned invalid JSON: {error}; body={response_body}"),
             )
         })?;
         let results = response.results;

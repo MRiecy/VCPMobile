@@ -17,7 +17,7 @@ Wire 1.5 保持双端共用的结构化错误对象，并统一逐项结果与 N
 
 1. 设备预检、版本兼容、连接、数据、存储和生命周期错误不再依赖关键词猜测；
 2. WebSocket、HTTP、NDJSON 与 Phase 3 逐 Topic 结果使用同一字段集合；
-3. VCPChat 返回的稳定根因码可穿过 Mobile Rust 层，到达前端安全错误卡，同时原始诊断文本只进入脱敏日志。
+3. VCPChat 返回的稳定根因码与完整诊断原文穿过 Mobile Rust 层，同时进入前端错误卡和持久日志。
 
 当前桌面插件为 `1.5.0`，Wire protocol 为 `1.5`。兼容性只由 Wire 版本判断；旧字段、字符串错误和旧帧名均不兼容。
 
@@ -44,8 +44,8 @@ Wire 1.5 保持双端共用的结构化错误对象，并统一逐项结果与 N
 | `stage` | 闭合集合 | 失败被确认时所在的同步阶段 |
 | `kind` | 闭合集合 | 用户排障维度，不等同于阶段 |
 | `retry` | 闭合集合 | UI 唯一重试策略来源 |
-| `message` | 非空，最多 1024 字符 | 仅用于诊断日志，不作为用户主文案 |
-| `failedTopicIds` | 去重字符串数组，最多 8 项，每项最多 512 字符 | 有界定位信息；无失败 Topic 时也必须显式为 `[]` |
+| `message` | 非空字符串 | 完整诊断原文，直接进入日志与错误卡 |
+| `failedTopicIds` | 去重字符串数组，每项最多 512 字符 | 全部失败 Topic；无失败 Topic 时也必须显式为 `[]` |
 
 对象拒绝未知字段。缺字段、错类型、重复 Topic ID、越界值或旧字符串格式都属于协议错误，必须 fail closed。
 
@@ -138,12 +138,12 @@ Wire 1.5 保持双端共用的结构化错误对象，并统一逐项结果与 N
 4. 未登记但格式合法的上游 code 原样保留，其 `kind/origin/stage/retry` 仍按 wire 对象传递；
 5. Mobile Rust 内部 `Result<_, String>` 通过私有 `SYNC_WIRE_ERROR:<json>` 标记暂存完整对象；该标记不是公开 wire 格式。
 
-VCPChat 拥有诊断事实，Mobile 拥有用户文案：
+VCPChat 与 Mobile 共同保真诊断事实：
 
-- VCPChat `message` 保留可排障细节，但不得包含令牌、认证头或未脱敏绝对路径；
-- Mobile 将诊断 detail 写入会话日志，再按精确 code 注册表生成固定中文 `message + guidance`；
-- 未登记 code 使用 `kind` 对应的固定兜底文案，绝不把上游 `message` 直接渲染到 WebView；
-- 错误卡只显示固定原因、一个下一步，以及低显著度的 `阶段 · 来源 · code`；失败 Topic ID 仅进入日志和内部错误状态。
+- VCPChat `message` 原样保留令牌、认证头、URL、绝对路径与根因链；
+- Mobile 将同一原文写入会话日志并直接显示，code 注册表只补充分类、重试动作和 guidance；
+- 未登记 code 仍保留完整上游 `message`；
+- 错误卡显示原始原因、guidance、`阶段 · 来源 · code`、全部失败 Topic ID 与日志绝对路径。
 
 ### 5.1 VCP-CDS 上游适配
 
@@ -151,7 +151,7 @@ VCP-CDS internal protocol 3 不是 Mobile Wire 1.5。CDS 的 HTTP 与逐项失�
 
 - HTTP 异常保留 CDS code，补 `origin=desktop_cds`、当前 `stage`、精确 `kind/retry` 与失败 Topic；
 - CDS 逐项错误在返回 Mobile 前扩展为七字段 `SyncError`；
-- 消息 Pull/Push 的 CDS 私有 code 分别映射为 `SYNC_MESSAGE_READ_FAILED` 与 `SYNC_MESSAGE_WRITE_FAILED`，原始 `message` 仅用于诊断；
+- 消息 Pull/Push 的 CDS 私有 code 分别映射为 `SYNC_MESSAGE_READ_FAILED` 与 `SYNC_MESSAGE_WRITE_FAILED`，原始 `message` 同时进入错误卡与日志；
 - Entity Pull 将 `ENTITY_NOT_FOUND` 映射为 `SYNC_ENTITY_NOT_FOUND`，其他读取错误映射为 `SYNC_ENTITY_READ_FAILED`；
 - Central 校验 CDS 响应外壳、完整身份和 Message Diff 请求集合覆盖；Mobile 的强类型解析继续作为公共 Wire 最终门禁；
 - 已登记的 CDS code（如 `INVALID_REQUEST`、`NOT_FOUND`、`AMBIGUOUS_IDENTITY`、`SERVICE_BUSY`、`INTERNAL_ERROR`）按精确表分类；

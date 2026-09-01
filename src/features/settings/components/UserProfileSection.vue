@@ -133,7 +133,6 @@ onUnmounted(() => {
             v-model="settings.adminPassword" 
             label="管理员密码" 
             placeholder="鉴权密码" 
-            is-secure 
             mono
           />
         </div>

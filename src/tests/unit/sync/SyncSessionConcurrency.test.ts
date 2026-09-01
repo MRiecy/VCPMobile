@@ -484,14 +484,15 @@ describe("sync session ownership", () => {
     expect(separatorIndex).toBeGreaterThanOrEqual(0);
   });
 
-  it("parses structured command errors without exposing the transport detail", async () => {
+  it("parses structured command errors with the complete transport detail", async () => {
+    const rawDetail = `token=command-secret url=wss://desktop/ws?token=command-secret ${"x".repeat(240)}`;
     const commandError = {
       code: "TOKEN_MISMATCH",
       category: "configuration",
       origin: "mobile_sync",
       stage: "connect",
       retryAction: "after_user_action",
-      message: "手机端与电脑端的同步令牌不一致",
+      message: rawDetail,
       guidance: "重新核对两端令牌后再试。",
       failedTopicIds: [],
       logFile: null,
@@ -506,12 +507,13 @@ describe("sync session ownership", () => {
 
     expect(store.status).toBe("error");
     expect(store.terminalError).toMatchObject(commandError);
+    expect(store.terminalError?.message).toBe(rawDetail);
     expect(store.logs.some((log) => log.message.includes("SYNC_ERROR"))).toBe(
       false,
     );
   });
 
-  it("fails closed when a legacy raw terminal error lacks the safe copy contract", () => {
+  it("preserves a legacy raw terminal error even when its envelope is incomplete", () => {
     const store = useSyncSessionStore();
     store.open();
     store.activeSessionId = 49;
@@ -527,10 +529,10 @@ describe("sync session ownership", () => {
     });
 
     expect(store.terminalError?.code).toBe("SYNC_ATTEMPT_FAILED");
-    expect(store.terminalError?.message).toBe("同步未能完成");
-    expect(store.logs.some((log) => log.message.includes("secret-value"))).toBe(
-      false,
+    expect(store.terminalError?.message).toBe(
+      "raw token=secret-value from transport",
     );
+    expect(store.logs.some((log) => log.message.includes("secret-value"))).toBe(true);
   });
 
   it("shows only owned operator notices and keeps numeric progress nonterminal", async () => {
@@ -711,7 +713,7 @@ describe("sync session ownership", () => {
     }
   });
 
-  it("renders fixed copy plus the safe stage, origin, and code tuple", async () => {
+  it("renders complete diagnostics, the log path, and all failed topics", async () => {
     const store = useSyncSessionStore();
     store.open();
     store.activeSessionId = 48;
@@ -720,19 +722,25 @@ describe("sync session ownership", () => {
       status: "error",
       error: syncError(
         "DESKTOP_DB_SECRET_CODE",
-        "部分数据未能完成处理，系统未将其标记为成功",
-        ["private-topic-id"],
+        "Bearer desktop-secret url=https://desktop/sync?token=desktop-secret path=C:\\Users\\Nova\\history.json",
+        Array.from({ length: 10 }, (_, index) => `private-topic-${index}`),
+        "/data/user/0/com.vcp.avatar/logs/20260813_sync.log",
       ),
     });
 
     const wrapper = mount(SyncSessionView);
     await Promise.resolve();
 
-    expect(wrapper.text()).toContain("部分数据未能完成处理，系统未将其标记为成功");
+    expect(wrapper.text()).toContain("Bearer desktop-secret");
+    expect(wrapper.text()).toContain("https://desktop/sync?token=desktop-secret");
+    expect(wrapper.text()).toContain("C:\\Users\\Nova\\history.json");
     expect(wrapper.text()).toContain("可重试一次；若仍失败，请保留最新同步日志。");
-    expect(wrapper.text()).toContain("详细记录已保存至历史日志");
+    expect(wrapper.text()).toContain(
+      "/data/user/0/com.vcp.avatar/logs/20260813_sync.log",
+    );
     expect(wrapper.text()).toContain("消息同步 · 电脑同步插件 · DESKTOP_DB_SECRET_CODE");
-    expect(wrapper.text()).not.toContain("private-topic-id");
+    expect(wrapper.text()).toContain("private-topic-0");
+    expect(wrapper.text()).toContain("private-topic-9");
     expect(wrapper.text()).toContain("重新同步");
   });
 
@@ -777,7 +785,7 @@ describe("sync session ownership", () => {
     expect(wrapper.text()).not.toContain("重新同步");
   });
 
-  it("shows a fixed history error instead of the raw command failure", async () => {
+  it("shows the raw command failure when history listing fails", async () => {
     let attempts = 0;
     mockInvoke("list_sync_log_files", () => {
       attempts += 1;
@@ -788,9 +796,8 @@ describe("sync session ownership", () => {
     const wrapper = mount(SyncLogBrowserCore);
 
     await vi.waitFor(() =>
-      expect(wrapper.text()).toContain("无法加载同步日志，请稍后再试。"),
+      expect(wrapper.text()).toContain("history-secret"),
     );
-    expect(wrapper.text()).not.toContain("history-secret");
     await wrapper.get("button").trigger("click");
     await vi.waitFor(() => expect(wrapper.text()).toContain("暂无同步日志"));
   });
@@ -821,10 +828,9 @@ describe("sync session ownership", () => {
       expect(
         notifications.activeToasts[notifications.activeToasts.length - 1]
           ?.message,
-      ).toBe("无法打开此同步日志，请稍后再试"),
+      ).toContain("read-secret"),
     );
     expect(wrapper.text()).toContain("20260813_120000_000_1_sync.log");
-    expect(wrapper.text()).not.toContain("read-secret");
 
     await wrapper.get('[class*="cursor-pointer"]').trigger("click");
     await vi.waitFor(() => expect(wrapper.text()).toContain("retry succeeded"));

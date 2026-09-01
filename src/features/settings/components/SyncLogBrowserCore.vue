@@ -31,6 +31,9 @@ const linesPerPage = 500;
 const totalPages = ref(0);
 const lines = ref<string[]>([]);
 
+const diagnosticText = (error: unknown) =>
+  error instanceof Error ? error.message : String(error);
+
 const formatBytes = (bytes: number) => {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -50,7 +53,7 @@ const loadFiles = async () => {
   } catch (e) {
     console.error('[SyncLogBrowser] Failed to list files:', e);
     files.value = [];
-    errorText.value = '无法加载同步日志，请稍后再试。';
+    errorText.value = `无法加载同步日志：${diagnosticText(e)}`;
   } finally {
     loading.value = false;
   }
@@ -70,7 +73,7 @@ const openFile = async (filename: string) => {
     console.error('[SyncLogBrowser] Failed to read file:', e);
     notificationStore.addNotification({
       type: 'error',
-      message: '无法打开此同步日志，请稍后再试',
+      message: `无法打开此同步日志：${diagnosticText(e)}`,
       toastOnly: true
     });
   } finally {
@@ -97,7 +100,7 @@ const copyCurrentFile = async () => {
     console.error('[SyncLogBrowser] Copy failed:', e);
     notificationStore.addNotification({
       type: 'error',
-      message: '复制同步日志失败，请稍后再试',
+      message: `复制同步日志失败：${diagnosticText(e)}`,
       toastOnly: true
     });
   }
@@ -120,7 +123,7 @@ const shareCurrentFile = async () => {
     console.error('[SyncLogBrowser] Share failed:', e);
     notificationStore.addNotification({
       type: 'error',
-      message: '分享同步日志失败，请稍后再试',
+      message: `分享同步日志失败：${diagnosticText(e)}`,
       toastOnly: true
     });
   } finally {
@@ -149,7 +152,7 @@ const clearOldLogs = async () => {
     console.error('[SyncLogBrowser] Clear failed:', e);
     notificationStore.addNotification({
       type: 'error',
-      message: '清理日志失败，请稍后再试',
+      message: `清理日志失败：${diagnosticText(e)}`,
       toastOnly: true
     });
   }
