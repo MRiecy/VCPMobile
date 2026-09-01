@@ -220,16 +220,14 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             "电脑端未启用同步历史能力",
             "在电脑端启用中央同步服务后再试。",
         ),
-        "SYNC_VERSION_INCOMPATIBLE" | "PROTOCOL_MISMATCH" | "PLUGIN_VERSION_MISMATCH" => {
-            definition(
-                Category::Compatibility,
-                Origin::DesktopPlugin,
-                Stage::Handshake,
-                Retry::AfterUserAction,
-                "手机端与电脑端同步版本不兼容",
-                "更新桌面端 VCPMobileSync 插件并重启电脑端后再试。",
-            )
-        }
+        "WIRE_VERSION_MISMATCH" => definition(
+            Category::Compatibility,
+            Origin::MobileSync,
+            Stage::Handshake,
+            Retry::AfterUserAction,
+            "手机端与电脑端同步协议不兼容",
+            "更新版本较旧的一端；无法判断时同时更新 Mobile 与电脑同步插件，并重启电脑端。",
+        ),
         "CDS_BINARY_NOT_FOUND" => definition(
             Category::Configuration,
             Origin::DesktopCds,
@@ -957,9 +955,9 @@ mod tests {
                 SyncErrorStage::Handshake,
             ),
             (
-                "SYNC_VERSION_INCOMPATIBLE",
+                "WIRE_VERSION_MISMATCH",
                 SyncErrorCategory::Compatibility,
-                SyncErrorOrigin::DesktopPlugin,
+                SyncErrorOrigin::MobileSync,
                 SyncErrorStage::Handshake,
             ),
             (
@@ -1025,9 +1023,8 @@ mod tests {
         assert!(!cds_timeout.guidance.contains("同一网络"));
         let stale_cds = build_local_error_payload("CDS_PROTOCOL_MISMATCH", Vec::new(), None);
         assert!(stale_cds.guidance.contains("rust_chat_data_service"));
-        let wire_mismatch =
-            build_local_error_payload("SYNC_VERSION_INCOMPATIBLE", Vec::new(), None);
-        assert!(wire_mismatch.guidance.contains("VCPMobileSync"));
+        let wire_mismatch = build_local_error_payload("WIRE_VERSION_MISMATCH", Vec::new(), None);
+        assert!(wire_mismatch.guidance.contains("Mobile"));
     }
 
     #[test]

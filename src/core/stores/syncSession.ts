@@ -23,7 +23,7 @@ interface SyncSummary {
 }
 
 interface DesktopSyncInfo {
-  pluginVersion: string;
+  packageVersion: string;
   backendMode: "legacy" | "cds";
 }
 
@@ -595,14 +595,14 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     const source = value as Record<string, unknown>;
     if (
-      typeof source.pluginVersion !== "string" ||
-      source.pluginVersion.length === 0 ||
+      typeof source.packageVersion !== "string" ||
+      source.packageVersion.length === 0 ||
       (source.backendMode !== "legacy" && source.backendMode !== "cds")
     ) {
       return null;
     }
     return {
-      pluginVersion: source.pluginVersion,
+      packageVersion: source.packageVersion,
       backendMode: source.backendMode,
     };
   };

@@ -13,8 +13,8 @@ scope: 双端
 
 | 序号 | 消息名称 | 方向 | 触发时机 | Payload 关键字段 | 移动端处理函数/位置 | 桌面端处理函数/位置 | 对应代码文件 |
 |-----|---------|------|---------|-----------------|-------------------|-------------------|------------|
-| 1 | `VERSION_CHECK` | M→D | WS 连接建立后的第一条业务消息 | `mobileVersion`, `protocolVersion: "1.5"` | 发送并启动握手 deadline | 严格校验后构造 `VERSION_ACK` | `sync_service.rs`, `protocol.js` |
-| 2 | `VERSION_ACK` | D→M | 收到 `VERSION_CHECK` 后 | `pluginVersion`, `protocolVersion: "1.5"`, `backendMode` | 兼容性只由 Wire 版本决定；记录当前桌面后端 | 回显插件包版本、固定 Wire 与 `legacy/cds` 模式 | `sync_service.rs`, `protocol.js` |
+| 1 | `VERSION_CHECK` | M→D | WS 连接建立后的第一条业务消息 | `versions[mobile_app,wire]` | 发送并启动握手 deadline | 严格校验后构造 `VERSION_ACK` | `sync_service.rs`, `protocol.js` |
+| 2 | `VERSION_ACK` | D→M | 收到 `VERSION_CHECK` 后 | `versions[desktop_plugin,wire]`, `backendMode` | 兼容性只由 Wire 决定；记录当前桌面诊断投影 | 回显插件包版本、固定 Wire 与 `legacy/cds` 模式 | `sync_service.rs`, `protocol.js` |
 | 3 | `PHASE_START` | M→D | 各同步阶段（Phase）开始时由移动端发送，通知桌面端进入新阶段 | `phase: string`，取值：`owner_metadata`、`topic_metadata`、`messages` | `run_sync_session` 中在每个 Phase 入口通过 `ws_stream.send` 发送；同时更新前端 `vcp-sync-progress` 事件 | `index.js` 中记录日志 `logger.logInfo`，返回 `PHASE_ACK` 确认帧 | `sync_service.rs`, `index.js` |
 | 4 | `PHASE_COMPLETED` | M→D | 各阶段完成后由移动端发送；最终 `messages` 帧是完成态提交边界 | 普通帧：`phase`；最终帧：`phase`, `sessionId`, `attemptId`, `nonce` | Finalize 落盘与哈希事务成功后发送，安装当前 pending key 和 30 秒 watchdog | `index.js` 记录并对最终帧原样回显身份字段 | `sync_service.rs`, `index.js` |
 | 5 | `PHASE_ACK` | D→M | 桌面端确认收到 `PHASE_START` 或 `PHASE_COMPLETED` | 普通 ACK：`phase`；最终 ACK：`phase`, `sessionId`, `attemptId`, `nonce` | 普通 ACK 仅记录；最终 ACK 必须精确匹配当前 pending key 并原子消费一次 | `index.js` 对最终 `messages` 帧必须原样回显四个身份字段 | `sync_service.rs`, `index.js` |
@@ -51,9 +51,9 @@ scope: 双端
 | 字段名 | 数据类型 | 出现位置 | 必填 | 默认值 | 说明 |
 |--------|---------|---------|------|--------|------|
 | `type` | `string` | 所有消息 | 是 | — | 消息类型标识符，区分大小写，必须为首层字段 |
-| `mobileVersion` | `string` | `VERSION_CHECK` | 是 | — | 移动端应用版本号，编译期通过 `env!("CARGO_PKG_VERSION")` 嵌入 |
-| `pluginVersion` | `string` | `VERSION_ACK` | 是 | — | 插件包诊断版本；当前为 `1.5.0` |
-| `protocolVersion` | `string` | `VERSION_CHECK`, `VERSION_ACK` | 是 | — | 当前 Wire 固定为 `1.5` |
+| `versions` | `VersionClaim[2]` | `VERSION_CHECK`, `VERSION_ACK` | 是 | — | 顺序无关、组件唯一；CHECK 固定 `mobile_app+wire`，ACK 固定 `desktop_plugin+wire` |
+| `component` | `mobile_app \| desktop_plugin \| wire` | `versions[]` | 是 | — | 当前帧允许的版本轴；未知、缺失或重复均拒绝 |
+| `version` | `string` | `versions[]` | 是 | — | 1–64 字节安全 ASCII token；只有 `wire` 参与兼容仲裁 |
 | `backendMode` | `legacy \| cds` | `VERSION_ACK` | 是 | — | 当前 session 的桌面后端；仅展示和归因 |
 | `phase` | `string` | `PHASE_START`, `PHASE_COMPLETED`, `PHASE_ACK` | 是 | — | 阶段名称，取值：`owner_metadata`、`topic_metadata`、`messages` |
 | `sessionId` | `u64` / `number` | 最终 `PHASE_COMPLETED`, `PHASE_ACK` | 最终帧必填 | — | 移动端同步会话 owner generation；桌面端必须原样回显 |
@@ -231,7 +231,7 @@ scope: 双端
 | `PHASE_START` / `PHASE_COMPLETED` | `vcp-sync-progress` | `phase`, `total`, `completed` | 进度条更新 |
 | `SYNC_LOG_EVENT` | 无直接 WebView 事件 | `level`, `message` | 脱敏后写入持久诊断日志 |
 | `SYNC_ERROR` | `vcp-sync-status` | `status:"error"`, `error:{code,category,message,guidance,...}` | 错误卡只展示固定 `message + guidance` |
-| `VERSION_ACK`（校验通过） | `vcp-sync-status` | `sessionId`, `status:"open"`, `desktop:{pluginVersion,backendMode}` | 同步面板进入进行中状态并显示桌面后端 |
+| `VERSION_ACK`（校验通过） | `vcp-sync-status` | `sessionId`, `status:"open"`, `desktop:{packageVersion,backendMode}` | 同步面板进入进行中状态并显示桌面后端 |
 | `Finalize` 完成 | `vcp-sync-completed` | `status`, `summary` | 关闭面板时统一刷新数据 |
 | `DESKTOP_PHASE_*` | 无直接 WebView 事件 | `phase` | 写入诊断日志；用户阶段由 Mobile 结构化进度事件展示 |
 
@@ -245,7 +245,7 @@ scope: 双端
 | `PHASE_*` | 阶段控制与确认 | `PHASE_START`, `PHASE_COMPLETED`, `PHASE_ACK` | 小写阶段名作为参数 |
 | `DESKTOP_*` | 桌面端主动上报的进度消息 | `DESKTOP_PHASE_START` | 前缀标识来源端，避免命名冲突 |
 | `VERSION_*` | 握手协议 | `VERSION_CHECK`, `VERSION_ACK` | 仅握手阶段使用 |
-| 协议版本 | 只在握手表达 | `protocolVersion: 1.5` | 业务帧名不带 `V2/BATCH` 历史后缀 |
+| 协议版本 | 只在握手 `versions` 表达 | `{component:"wire",version:"1.5"}` | 业务帧名不带 `V2/BATCH` 历史后缀 |
 | `*_DELETE` | Mobile 在线删除通知 | `SYNC_ENTITY_DELETE` | 属于当前 session/attempt；离线删除仍由 Manifest/Phase 3 墓碑重放 |
 
 ---

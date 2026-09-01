@@ -168,23 +168,23 @@ describe("sync session ownership", () => {
     emitTauriEvent("vcp-sync-status", {
       sessionId: 60,
       status: "open",
-      desktop: { pluginVersion: "1.5.0", backendMode: "cds" },
+      desktop: { packageVersion: "1.5.0", backendMode: "cds" },
     });
     expect(store.desktopInfo).toBeNull();
 
     emitTauriEvent("vcp-sync-status", {
       sessionId: 61,
       status: "open",
-      desktop: { pluginVersion: "1.5.0", backendMode: "cds" },
+      desktop: { packageVersion: "1.5.0", backendMode: "cds" },
     });
     expect(store.desktopInfo).toEqual({
-      pluginVersion: "1.5.0",
+      packageVersion: "1.5.0",
       backendMode: "cds",
     });
 
     const wrapper = mount(SyncSessionView);
     expect(wrapper.text()).toContain("桌面后端 CDS");
-    expect(wrapper.text()).toContain("插件 v1.5.0");
+    expect(wrapper.text()).toContain("同步插件 v1.5.0");
     expect(wrapper.text()).not.toContain("复制诊断");
 
     emitTauriEvent("vcp-sync-status", {
@@ -744,7 +744,7 @@ describe("sync session ownership", () => {
       sessionId: 52,
       status: "error",
       error: {
-        ...syncError("PLUGIN_VERSION_MISMATCH"),
+        ...syncError("WIRE_VERSION_MISMATCH"),
         category: "compatibility",
         stage: "handshake",
         retryAction: "after_user_action",

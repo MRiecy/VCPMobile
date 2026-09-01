@@ -307,7 +307,7 @@ const handlePrerenderToggle = async (val: boolean) => {
               >
                 <span>桌面后端 {{ store.desktopInfo.backendMode === 'cds' ? 'CDS' : 'Legacy' }}</span>
                 <span>·</span>
-                <span>插件 v{{ store.desktopInfo.pluginVersion }}</span>
+                <span>同步插件 v{{ store.desktopInfo.packageVersion }}</span>
               </div>
 
               <!-- 统计条：messages 阶段起随进度事件实时跳动；终态即使全零也展示 -->

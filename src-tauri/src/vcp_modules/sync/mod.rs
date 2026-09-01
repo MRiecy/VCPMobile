@@ -7,3 +7,4 @@ pub mod sync_logger;
 pub mod sync_pipeline;
 pub mod sync_service;
 pub mod sync_types;
+mod sync_version;

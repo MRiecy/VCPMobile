@@ -1,3 +1,9 @@
+#[cfg(test)]
+use super::sync_version::WIRE_PROTOCOL_VERSION;
+use super::sync_version::{
+    build_version_check, parse_version_ack, AcceptedDesktopVersions, DesktopBackendMode,
+    VersionContractError,
+};
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
 use crate::vcp_modules::settings_manager::{read_settings, Settings, SettingsState};
@@ -32,7 +38,6 @@ use tokio_tungstenite::{
 };
 use tokio_util::sync::CancellationToken;
 
-const WIRE_PROTOCOL_VERSION: &str = "1.5";
 const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const WS_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -44,36 +49,10 @@ const SYNC_GUARDIAN_LABEL: &str = "[数据同步] VCP Mobile";
 type RoutedSyncCommand = (u64, mpsc::UnboundedSender<SyncCommand>);
 type SyncWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct VersionCheckFrame {
-    #[serde(rename = "type")]
-    frame_type: &'static str,
-    mobile_version: &'static str,
-    protocol_version: &'static str,
-}
-
-#[derive(Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct VersionAck {
-    #[serde(rename = "type")]
-    frame_type: String,
-    plugin_version: String,
-    protocol_version: String,
-    backend_mode: DesktopBackendMode,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum DesktopBackendMode {
-    Legacy,
-    Cds,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DesktopSyncInfo {
-    plugin_version: String,
+    package_version: String,
     backend_mode: DesktopBackendMode,
 }
 
@@ -139,8 +118,16 @@ struct DesktopPhaseEventFrame {
 #[derive(Debug, PartialEq, Eq)]
 enum VersionHandshakeError {
     Protocol(String),
+    Mismatch {
+        expected: &'static str,
+        received: String,
+        package_version: String,
+    },
     Remote(String),
-    Closed { code: Option<u16>, reason: String },
+    Closed {
+        code: Option<u16>,
+        reason: String,
+    },
     Transport(String),
 }
 
@@ -151,22 +138,9 @@ enum VersionHandshakeFailure {
     Cancelled,
 }
 
-fn parse_version_ack(text: &str) -> Result<VersionAck, String> {
-    let ack = serde_json::from_str::<VersionAck>(text)
-        .map_err(|error| format!("Invalid VERSION_ACK: {error}"))?;
-    if ack.frame_type != "VERSION_ACK" {
-        return Err("expected VERSION_ACK".to_string());
-    }
-    if ack.plugin_version.is_empty() {
-        return Err("VERSION_ACK.pluginVersion must be a non-empty string".to_string());
-    }
-    if ack.protocol_version.is_empty() {
-        return Err("VERSION_ACK.protocolVersion must be a non-empty string".to_string());
-    }
-    Ok(ack)
-}
-
-fn parse_version_handshake_text(text: &str) -> Result<Option<VersionAck>, VersionHandshakeError> {
+fn parse_version_handshake_text(
+    text: &str,
+) -> Result<Option<AcceptedDesktopVersions>, VersionHandshakeError> {
     let header = serde_json::from_str::<FrameHeader>(text).map_err(|error| {
         VersionHandshakeError::Protocol(format!("Malformed handshake frame: {error}"))
     })?;
@@ -185,14 +159,22 @@ fn parse_version_handshake_text(text: &str) -> Result<Option<VersionAck>, Versio
             })?;
             Ok(None)
         }
-        _ => parse_version_ack(text)
-            .map(Some)
-            .map_err(VersionHandshakeError::Protocol),
+        _ => match parse_version_ack(text) {
+            Ok(accepted) => Ok(Some(accepted)),
+            Err(VersionContractError::Invalid(message)) => {
+                Err(VersionHandshakeError::Protocol(message))
+            }
+            Err(VersionContractError::Mismatch {
+                expected,
+                received,
+                package_version,
+            }) => Err(VersionHandshakeError::Mismatch {
+                expected,
+                received,
+                package_version,
+            }),
+        },
     }
-}
-
-fn is_wire_compatible(version_ack: &VersionAck) -> bool {
-    version_ack.protocol_version == WIRE_PROTOCOL_VERSION
 }
 
 async fn send_ws_with_deadline(
@@ -243,10 +225,26 @@ async fn perform_version_handshake<R: Runtime>(
     cancel_token: &CancellationToken,
     mut ws_stream: SyncWebSocket,
 ) -> Result<(SyncWebSocket, DesktopSyncInfo), VersionHandshakeFailure> {
-    let version_req = VersionCheckFrame {
-        frame_type: "VERSION_CHECK",
-        mobile_version: env!("CARGO_PKG_VERSION"),
-        protocol_version: WIRE_PROTOCOL_VERSION,
+    let version_req = match build_version_check(env!("CARGO_PKG_VERSION")) {
+        Ok(frame) => frame,
+        Err(message) => {
+            emit_sync_log(
+                app_handle,
+                "error",
+                &format!("同步版本声明无效 [VERSION_CHECK_INVALID]: {message}"),
+            );
+            publish_sync_error(
+                app_handle,
+                session_id,
+                connection_status,
+                "VERSION_CHECK_INVALID",
+                &message,
+                Vec::new(),
+            )
+            .await;
+            let _ = close_ws_with_deadline(&mut ws_stream).await;
+            return Err(VersionHandshakeFailure::Stop);
+        }
     };
     if let Err(error) = send_ws_frame(&mut ws_stream, &version_req).await {
         terminate_after_protocol_send_failure(app_handle, &mut ws_stream, "version check", &error)
@@ -256,7 +254,7 @@ async fn perform_version_handshake<R: Runtime>(
             message: protocol_send_failure_message("version check", &error),
         });
     }
-    emit_sync_log(app_handle, "info", "正在验证桌面端插件版本...");
+    emit_sync_log(app_handle, "info", "正在校验同步兼容性...");
 
     let version_result = tokio::select! {
         biased;
@@ -299,47 +297,53 @@ async fn perform_version_handshake<R: Runtime>(
     };
 
     match version_result {
-        Ok(Ok(version_ack)) if is_wire_compatible(&version_ack) => {
+        Ok(Ok(accepted)) => {
+            let backend_label = match accepted.backend_mode {
+                DesktopBackendMode::Legacy => "Legacy",
+                DesktopBackendMode::Cds => "CDS",
+            };
             emit_sync_log(
                 app_handle,
                 "success",
                 &format!(
-                    "桌面端插件 v{} / 同步协议 {} 验证通过",
-                    version_ack.plugin_version, version_ack.protocol_version
+                    "同步兼容性通过：Wire {}；桌面同步插件 {}；后端 {}",
+                    accepted.wire_version, accepted.package_version, backend_label,
                 ),
             );
             let desktop_info = DesktopSyncInfo {
-                plugin_version: version_ack.plugin_version,
-                backend_mode: version_ack.backend_mode,
+                package_version: accepted.package_version,
+                backend_mode: accepted.backend_mode,
             };
             Ok((ws_stream, desktop_info))
         }
-        Ok(Ok(version_ack)) => {
+        Ok(Err(VersionHandshakeError::Mismatch {
+            expected,
+            received,
+            package_version,
+        })) => {
+            let message = format!(
+                "桌面同步插件 {package_version} 声明的 Wire {received} 与 Mobile 要求的 Wire {expected} 不兼容"
+            );
             publish_sync_error(
                 app_handle,
                 session_id,
                 connection_status,
-                "SYNC_VERSION_INCOMPATIBLE",
-                &format!(
-                    "桌面端插件 v{} 声明的同步协议 {} 与 Mobile 要求的协议 {} 不兼容",
-                    version_ack.plugin_version, version_ack.protocol_version, WIRE_PROTOCOL_VERSION,
-                ),
+                "WIRE_VERSION_MISMATCH",
+                &message,
                 Vec::new(),
             )
             .await;
             emit_sync_log(
                 app_handle,
                 "error",
-                &format!(
-                    "❌ 同步协议不匹配: 桌面端插件 v{} / 协议 {}，Mobile 要求协议 {}",
-                    version_ack.plugin_version, version_ack.protocol_version, WIRE_PROTOCOL_VERSION,
-                ),
+                &format!("同步兼容性不匹配 [WIRE_VERSION_MISMATCH]: {message}"),
             );
             emit_sync_log(
                 app_handle,
                 "error",
-                "👉 排查建议: 请前往 https://github.com/MRiecy/VCPMobile/releases 下载最新同步插件",
+                "处理建议：更新版本较旧的一端；无法判断时同时更新 Mobile 与电脑同步插件并重启电脑端。",
             );
+            let _ = close_ws_with_deadline(&mut ws_stream).await;
             Err(VersionHandshakeFailure::Stop)
         }
         Ok(Err(VersionHandshakeError::Protocol(message))) => {
@@ -451,7 +455,7 @@ async fn perform_version_handshake<R: Runtime>(
             let _ = close_ws_with_deadline(&mut ws_stream).await;
             Err(VersionHandshakeFailure::Retry {
                 code: "VERSION_CHECK_TIMEOUT",
-                message: "版本验证超时".to_string(),
+                message: "同步兼容性握手超时".to_string(),
             })
         }
     }
@@ -3604,8 +3608,14 @@ mod tests {
         };
         let payload: Value = serde_json::from_str(&text).expect("parse VERSION_CHECK");
         assert_eq!(payload["type"], "VERSION_CHECK");
-        assert_eq!(payload["mobileVersion"], env!("CARGO_PKG_VERSION"));
-        assert_eq!(payload["protocolVersion"], WIRE_PROTOCOL_VERSION);
+        assert_eq!(
+            payload["versions"],
+            json!([
+                {"component": "mobile_app", "version": env!("CARGO_PKG_VERSION")},
+                {"component": "wire", "version": WIRE_PROTOCOL_VERSION}
+            ])
+        );
+        assert_eq!(payload.as_object().map(serde_json::Map::len), Some(2));
     }
 
     async fn send_test_json(server: &mut TestServerWebSocket, payload: Value) {
@@ -3639,8 +3649,10 @@ mod tests {
                 &mut server,
                 json!({
                     "type": "VERSION_ACK",
-                    "pluginVersion": "1.5.0",
-                    "protocolVersion": WIRE_PROTOCOL_VERSION,
+                    "versions": [
+                        {"component": "desktop_plugin", "version": "1.5.0"},
+                        {"component": "wire", "version": WIRE_PROTOCOL_VERSION}
+                    ],
                     "backendMode": "cds",
                 }),
             )
@@ -3657,7 +3669,7 @@ mod tests {
             perform_version_handshake(app.handle(), session_id, &status, &cancel_token, client)
                 .await
                 .unwrap_or_else(|error| panic!("handshake failed: {error:?}"));
-        assert_eq!(desktop_info.plugin_version, "1.5.0");
+        assert_eq!(desktop_info.package_version, "1.5.0");
         assert_eq!(desktop_info.backend_mode, DesktopBackendMode::Cds);
         client
             .send(Message::Ping(vec![1].into()))
@@ -3665,6 +3677,44 @@ mod tests {
             .expect("use returned WebSocket");
         server_task.await.expect("join handshake server");
         assert_eq!(status.read().await.as_str(), "disconnected");
+    }
+
+    #[tokio::test]
+    async fn wire_mismatch_stops_and_closes_the_websocket() {
+        let session_id = 42;
+        let app = mock_sync_app(session_id);
+        let status = app.state::<SyncState>().connection_status.clone();
+        let cancel_token = CancellationToken::new();
+        let (client, mut server) = websocket_pair().await;
+        let server_task = tokio::spawn(async move {
+            expect_version_check(&mut server).await;
+            send_test_json(
+                &mut server,
+                json!({
+                    "type": "VERSION_ACK",
+                    "versions": [
+                        {"component": "desktop_plugin", "version": "1.5.0"},
+                        {"component": "wire", "version": "1.4"}
+                    ],
+                    "backendMode": "legacy",
+                }),
+            )
+            .await;
+            let close = tokio::time::timeout(Duration::from_secs(2), server.next())
+                .await
+                .expect("Mobile close timeout")
+                .expect("Mobile close stream ended")
+                .expect("read Mobile close");
+            assert!(matches!(close, Message::Close(_)));
+        });
+
+        let failure =
+            perform_version_handshake(app.handle(), session_id, &status, &cancel_token, client)
+                .await
+                .expect_err("wire mismatch must stop");
+        assert_eq!(failure, VersionHandshakeFailure::Stop);
+        server_task.await.expect("join mismatch server");
+        assert_eq!(status.read().await.as_str(), "error");
     }
 
     #[tokio::test]
@@ -4098,33 +4148,22 @@ mod tests {
     }
 
     #[test]
-    fn version_ack_is_strict_but_compatibility_is_owned_by_the_wire_version() {
-        let ack = parse_version_ack(
+    fn version_ack_contract_is_consumed_by_the_handshake_parser() {
+        let accepted = parse_version_ack(
             &json!({
                 "type": "VERSION_ACK",
-                "pluginVersion": "1.5.0",
-                "protocolVersion": "1.5",
+                "versions": [
+                    {"component": "wire", "version": "1.5"},
+                    {"component": "desktop_plugin", "version": "1.5.9"}
+                ],
                 "backendMode": "cds",
             })
             .to_string(),
         )
         .expect("strict 1.5 acknowledgement");
-        assert_eq!(ack.plugin_version, "1.5.0");
-        assert_eq!(ack.protocol_version, "1.5");
-        assert_eq!(ack.backend_mode, DesktopBackendMode::Cds);
-        assert!(is_wire_compatible(&ack));
-        assert!(is_wire_compatible(&VersionAck {
-            frame_type: "VERSION_ACK".to_string(),
-            plugin_version: "1.5.9".to_string(),
-            protocol_version: "1.5".to_string(),
-            backend_mode: DesktopBackendMode::Legacy,
-        }));
-        assert!(!is_wire_compatible(&VersionAck {
-            frame_type: "VERSION_ACK".to_string(),
-            plugin_version: "1.5.0".to_string(),
-            protocol_version: "1.4".to_string(),
-            backend_mode: DesktopBackendMode::Cds,
-        }));
+        assert_eq!(accepted.package_version, "1.5.9");
+        assert_eq!(accepted.wire_version, "1.5");
+        assert_eq!(accepted.backend_mode, DesktopBackendMode::Cds);
 
         assert!(parse_version_ack(
             &json!({
@@ -4137,8 +4176,10 @@ mod tests {
         assert!(parse_version_ack(
             &json!({
                 "type": "VERSION_ACK",
-                "pluginVersion": "1.5.0",
-                "protocolVersion": 1.5,
+                "versions": [
+                    {"component": "desktop_plugin", "version": "1.5.0"},
+                    {"component": "wire", "version": 1.5}
+                ],
                 "backendMode": "cds",
             })
             .to_string()
@@ -4147,8 +4188,10 @@ mod tests {
         assert!(parse_version_ack(
             &json!({
                 "type": "VERSION_ACK",
-                "pluginVersion": "1.5.0",
-                "protocolVersion": "1.5",
+                "versions": [
+                    {"component": "desktop_plugin", "version": "1.5.0"},
+                    {"component": "wire", "version": "1.5"}
+                ],
                 "backendMode": "fallback",
             })
             .to_string()
@@ -4162,12 +4205,12 @@ mod tests {
             &json!({
                 "type": "SYNC_ERROR",
                 "error": {
-                    "code": "PLUGIN_VERSION_MISMATCH",
+                    "code": "WIRE_VERSION_MISMATCH",
                     "origin": "desktop_plugin",
                     "stage": "handshake",
                     "kind": "compatibility",
                     "retry": "after_user_action",
-                    "message": "plugin package mismatch",
+                    "message": "wire protocol mismatch",
                     "failedTopicIds": []
                 }
             })
@@ -4180,7 +4223,7 @@ mod tests {
             decode_wire_sync_error(&encoded)
                 .expect("encoded error")
                 .code,
-            "PLUGIN_VERSION_MISMATCH"
+            "WIRE_VERSION_MISMATCH"
         );
         assert!(parse_version_handshake_text(
             &json!({

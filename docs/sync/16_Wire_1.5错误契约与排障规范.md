@@ -88,7 +88,7 @@ Wire 1.5 保持双端共用的结构化错误对象，并统一逐项结果与 N
 | `device` | 手机当前物理/系统状态是否允许同步 | `POWER_SAVE_MODE` |
 | `configuration` | 地址、路径、令牌或能力开关是否正确 | `SYNC_TOKEN_MISSING`, `SYNC_CONFIG_INVALID` |
 | `connection` | 已配置的通道是否可达或按时响应 | `CONNECTION_REFUSED`, `WS_CONNECT_TIMEOUT` |
-| `compatibility` | 双端声明的包/wire 版本是否兼容 | `PLUGIN_VERSION_MISMATCH` |
+| `compatibility` | 双端声明的 Wire 是否兼容 | `WIRE_VERSION_MISMATCH` |
 | `protocol` | 帧结构、字段类型、集合完整性是否满足契约 | `VERSION_ACK_INVALID`, `PHASE3_FRAME_INVALID` |
 | `data` | 业务身份、归属、存在性或预算是否有效 | `SYNC_OWNER_CONFLICT`, `TOPIC_NOT_FOUND` |
 | `storage` | DB、文件或写队列是否完成读写 | `SYNC_DB_QUERY_FAILED`, `SYNC_DB_DRAIN_FAILED` |
@@ -155,7 +155,7 @@ VCP-CDS internal protocol 3 不是 Mobile Wire 1.5。CDS 的 HTTP 与逐项失�
 - Entity Pull 将 `ENTITY_NOT_FOUND` 映射为 `SYNC_ENTITY_NOT_FOUND`，其他读取错误映射为 `SYNC_ENTITY_READ_FAILED`；
 - Central 校验 CDS 响应外壳、完整身份和 Message Diff 请求集合覆盖；Mobile 的强类型解析继续作为公共 Wire 最终门禁；
 - 已登记的 CDS code（如 `INVALID_REQUEST`、`NOT_FOUND`、`AMBIGUOUS_IDENTITY`、`SERVICE_BUSY`、`INTERNAL_ERROR`）按精确表分类；
-- CDS internal protocol 的 `PROTOCOL_MISMATCH` 在适配边界重命名为 `CDS_PROTOCOL_MISMATCH`，不得与 Mobile wire 的 `PROTOCOL_MISMATCH` 共用用户文案；
+- CDS internal protocol 的 `PROTOCOL_MISMATCH` 在适配边界重命名为 `CDS_PROTOCOL_MISMATCH`，不得与公开 Wire 的 `WIRE_VERSION_MISMATCH` 共用用户文案；
 - 中央模式启动失败时，插件仍开放认证 WebSocket 控制面并在 ACK 前发送结构化错误：二进制缺失、internal protocol 不匹配、schema 不匹配分别映射为 `CDS_BINARY_NOT_FOUND`、`CDS_PROTOCOL_MISMATCH`、`CDS_SCHEMA_MISMATCH`，其他启动错误映射为 `CDS_STARTUP_FAILED`；
 - 上述失败不得挂载同步 HTTP 数据面，也不得自动回退 Legacy；完全无法连接 WebSocket 时 Mobile 只能报告连接故障，不能臆测插件或 CDS 根因；
 - ChatDataService 客户端产生的 `TIMEOUT`、`UNAVAILABLE`、`INVALID_RESPONSE`、`RESPONSE_TOO_LARGE` 等本地 code 也按精确表分类；
