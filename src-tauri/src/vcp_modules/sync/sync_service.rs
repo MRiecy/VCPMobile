@@ -1891,26 +1891,6 @@ async fn run_sync_session(
                                 },
                                 crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::StartMessages => {
                                     emit_sync_phase_activity(&handle_clone, session_id, "messages");
-                                    if let Ok(mut logger) = sync_logger_task.lock() {
-                                        logger.log(LogLevel::Info, "messages", "=== Phase 3: Messages ===");
-                                    }
-                                    if let Err(error) = send_ws_frame(
-                                        &mut ws_stream,
-                                        &PhaseFrame {
-                                            frame_type: "PHASE_START",
-                                            phase: SyncPhase::Messages,
-                                        },
-                                    ).await {
-                                        terminate_after_protocol_send_failure(
-                                            &handle_clone,
-                                            &mut ws_stream,
-                                            "messages phase start",
-                                            &error,
-                                        ).await;
-                                        break 'attempt;
-                                    }
-
-                                    let db = handle_clone.state::<DbState>();
                                     let changed_ids = {
                                         let guard = changed_topics.lock().await;
                                         guard.clone()
@@ -1920,9 +1900,28 @@ async fn run_sync_session(
                                         if let Ok(mut logger) = sync_logger_task.lock() {
                                             logger.log(LogLevel::Info, "messages", "Phase 3 skipped: no changed topics");
                                         }
-                                        emit_sync_log(&handle_clone, "success", "Message phase skipped (no changed topics), proceeding to hash alignment");
                                         let _ = tx_internal.send(SyncCommand::Finalize { attempt_id });
                                     } else {
+                                        if let Ok(mut logger) = sync_logger_task.lock() {
+                                            logger.log(LogLevel::Info, "messages", "=== Phase 3: Messages ===");
+                                        }
+                                        if let Err(error) = send_ws_frame(
+                                            &mut ws_stream,
+                                            &PhaseFrame {
+                                                frame_type: "PHASE_START",
+                                                phase: SyncPhase::Messages,
+                                            },
+                                        ).await {
+                                            terminate_after_protocol_send_failure(
+                                                &handle_clone,
+                                                &mut ws_stream,
+                                                "messages phase start",
+                                                &error,
+                                            ).await;
+                                            break 'attempt;
+                                        }
+
+                                        let db = handle_clone.state::<DbState>();
                                         match Phase3Message::get_topic_message_hashes(&db.pool, &changed_ids).await {
                                             Ok(topic_states) => {
                                                 let topic_count = topic_states.len();

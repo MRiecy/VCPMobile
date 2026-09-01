@@ -15,9 +15,9 @@ scope: 双端
 |-----|---------|------|---------|-----------------|-------------------|-------------------|------------|
 | 1 | `VERSION_CHECK` | M→D | WS 连接建立后的第一条业务消息 | `versions[mobile_app,wire]` | 发送并启动握手 deadline | 严格校验后构造 `VERSION_ACK` | `sync_service.rs`, `protocol.js` |
 | 2 | `VERSION_ACK` | D→M | 收到 `VERSION_CHECK` 后 | `versions[desktop_plugin,wire]`, `backendMode` | 兼容性只由 Wire 决定；记录当前桌面诊断投影 | 回显插件包版本、固定 Wire 与 `legacy/cds` 模式 | `sync_service.rs`, `protocol.js` |
-| 3 | `PHASE_START` | M→D | 各同步阶段（Phase）开始时由移动端发送，通知桌面端进入新阶段 | `phase: string`，取值：`owner_metadata`、`topic_metadata`、`messages` | `run_sync_session` 中在每个 Phase 入口通过 `ws_stream.send` 发送；同时更新前端 `vcp-sync-progress` 事件 | `index.js` 中记录日志 `logger.logInfo`，返回 `PHASE_ACK` 确认帧 | `sync_service.rs`, `index.js` |
-| 4 | `PHASE_COMPLETED` | M→D | 各阶段完成后由移动端发送；最终 `messages` 帧是完成态提交边界 | 普通帧：`phase`；最终帧：`phase`, `sessionId`, `attemptId`, `nonce` | Finalize 落盘与哈希事务成功后发送，安装当前 pending key 和 30 秒 watchdog | `index.js` 记录并对最终帧原样回显身份字段 | `sync_service.rs`, `index.js` |
-| 5 | `PHASE_ACK` | D→M | 桌面端确认收到 `PHASE_START` 或 `PHASE_COMPLETED` | 普通 ACK：`phase`；最终 ACK：`phase`, `sessionId`, `attemptId`, `nonce` | 普通 ACK 仅记录；最终 ACK 必须精确匹配当前 pending key 并原子消费一次 | `index.js` 对最终 `messages` 帧必须原样回显四个身份字段 | `sync_service.rs`, `index.js` |
+| 3 | `PHASE_START` | M→D | 有实际工作的同步阶段开始时由移动端发送，通知桌面端进入新阶段 | `phase: string`，取值：`owner_metadata`、`topic_metadata`、`messages` | `run_sync_session` 发送；同时更新前端 `vcp-sync-progress` 事件；空 Messages 不发送 | `index.js` 记录日志；Owner handler 在放行后续帧前刷新提交视图；无响应 | `sync_service.rs`, `index.js` |
+| 4 | `PHASE_COMPLETED` | M→D | 各阶段完成后由移动端发送；最终 `messages` 帧是完成态提交边界 | 普通帧：`phase`；最终帧：`phase`, `sessionId`, `attemptId`, `nonce` | Finalize 落盘与哈希事务成功后发送，安装当前 pending key 和 30 秒 watchdog | 普通帧仅闭合日志且无响应；最终帧原样回显身份字段；无 Messages start 时记录 skipped | `sync_service.rs`, `index.js` |
+| 5 | `PHASE_ACK` | D→M | 桌面端接受最终 `messages` 完成帧后 | `phase`, `sessionId`, `attemptId`, `nonce` | 必须精确匹配当前 pending key 并原子消费一次 | `index.js` 对最终 `messages` 帧必须原样回显四个身份字段 | `sync_service.rs`, `index.js` |
 | 6 | `SYNC_LOG_EVENT` | D→M | 桌面端主动上报日志事件，通过 WS 广播给所有已连接客户端 | `level: string`，`message: string`，`phase: string`（可选） | 写入 Mobile 控制台/持久诊断文件；不将桌面端原始文本转发到 WebView | 桌面端内部 `SyncLogger` 触发 WS 广播，三个输出通道（控制台、文件、WS）同时写入 | `sync_service.rs`, `core/logger.js` |
 | 7 | `DESKTOP_PHASE_START` | D→M | 桌面端报告自身阶段开始，与移动端的 `PHASE_START` 对应 | `phase: string` | 以 `[Desktop] Phase X started` 写入诊断日志，不直接展示原始阶段字符串 | 桌面端 `logger.startPhase` 方法触发 WS 广播 | `sync_service.rs`, `core/logger.js` |
 | 9 | `DESKTOP_PHASE_COMPLETE` | D→M | 桌面端报告自身阶段完成 | `phase: string` | 日志输出：`[Desktop] Phase X completed` | 桌面端 `logger.completePhase` 方法触发 WS 广播 | `sync_service.rs`, `core/logger.js` |
@@ -128,8 +128,8 @@ scope: 双端
 |---------|-------------|-------------|-----------|------------|-------------|
 | `VERSION_CHECK` | WS 连接建立后 0ms | `index.js` switch-case | `VERSION_ACK` | 握手 | `VERSION_CHECK_TIMEOUT = 5s` |
 | `VERSION_ACK` | —（接收） | `run_sync_session` 版本校验 | 无 | 握手 | Wire 必须为 `1.5`；插件版本仅诊断；模式仅属于当前 session |
-| `PHASE_START` | 各 Phase 开始时 | `index.js` 记录日志 | `PHASE_ACK` | 全阶段 | `PHASE_RESPONSE_TIMEOUT = 60s` |
-| `PHASE_COMPLETED` | 各 Phase 完成时 | `index.js` 记录日志 | `PHASE_ACK` | 全阶段 | `phase_gate` 去重；最终 ACK 严格匹配四元身份且只消费一次 |
+| `PHASE_START` | 有实际工作的 Phase 开始时 | `index.js` 记录日志；Owner start 刷新提交视图 | 无 | 全阶段 | 同连接 `messageChain` 保证 handler FIFO |
+| `PHASE_COMPLETED` | 各 Phase 完成时 | `index.js` 记录日志 | 普通阶段无；最终 `messages` 返回 `PHASE_ACK` | 全阶段 | `phase_gate` 去重；最终 ACK 严格匹配四元身份且只消费一次 |
 | `SYNC_MANIFEST_REQUEST` | Phase 1 Owner/Avatar；Phase 2 Topic | `handleSyncManifest` | `SYNC_MANIFEST_RESULT` | Phase 1/2 | 每个内部波次只能消费一次结果 |
 | `SYNC_MANIFEST_RESULT` | —（接收） | 强类型任务派发 | 无 | Phase 1/2 | `pending_tasks` + `total_tasks` 计数 |
 | `SYNC_TOPIC_DIFF_REQUEST` | Phase 2.5 | `handleTopicDiff` | `SYNC_TOPIC_DIFF_RESULT` | Phase 2.5 | 最多 10000 Topic |
@@ -159,7 +159,7 @@ scope: 双端
 | 14 | 移动端 | `PHASE_COMPLETED` (topic_metadata) | Phase 2 结束（逻辑上包含 Phase 2.5） |
 | 15 | 移动端 | `SYNC_TOPIC_DIFF_REQUEST` | Phase 2.5 开始 |
 | 16 | 桌面端 | `SYNC_TOPIC_DIFF_RESULT` | 变更话题列表 |
-| 17 | 移动端 | `PHASE_START` (messages) | Phase 3 开始 |
+| 17 | 移动端 | `PHASE_START` (messages) | `changedTopics` 非空时开始 Phase 3；空集合不发送 |
 | 18 | 移动端 | `SYNC_MESSAGE_DIFF_REQUEST` (batch 1) | 第 1 批消息状态 |
 | 19 | 桌面端 | `SYNC_MESSAGE_DIFF_RESULT` | 第 1 批决策 |
 | 20 | 移动端 | `SYNC_MESSAGE_DIFF_REQUEST` (batch N) | 后续批次 |
@@ -217,11 +217,11 @@ scope: 双端
 | `SYNC_MANIFEST_REQUEST` | `handleSyncManifest(payload)` | `sync/manifest.js` | `SYNC_MANIFEST_RESULT` |
 | `SYNC_TOPIC_DIFF_REQUEST` | `handleSyncTopicDiff(payload)` | `sync/diff.js` | `SYNC_TOPIC_DIFF_RESULT` |
 | `SYNC_MESSAGE_DIFF_REQUEST` | `handleSyncMessageDiff(payload)` | `sync/diff.js` | `SYNC_MESSAGE_DIFF_RESULT` |
-| `PHASE_START` | 记录日志，返回 `PHASE_ACK` | `index.js` | `PHASE_ACK` |
-| `PHASE_COMPLETED` | 记录日志；最终帧原样回显四元身份 | `index.js` | `PHASE_ACK` |
+| `PHASE_START` | 记录日志；Owner start 刷新提交视图 | `index.js` | 无 |
+| `PHASE_COMPLETED` | 普通阶段闭合日志；最终帧原样回显四元身份；无 Messages start 时记录 skipped | `index.js` | 普通阶段无；最终为 `PHASE_ACK` |
 | `SYNC_ENTITY_DELETE` | `deleteEntity` / `deleteMessage` | `index.js` | 无业务 ACK |
 | `VERSION_ACK` | —（桌面端仅发送，不作为桌面端入站帧） | — | — |
-| `PHASE_ACK` | —（桌面端发送） | 普通阶段仅记录；最终阶段精确匹配 pending key | — |
+| `PHASE_ACK` | —（桌面端发送） | 仅最终阶段精确匹配 pending key | — |
 | `SYNC_LOG_EVENT` | —（桌面端仅发送，不作为桌面端入站帧） | — | — |
 | `SYNC_ERROR` | —（桌面端仅发送，不作为桌面端入站帧） | — | — |
 ## 表14：消息与前端事件映射
@@ -242,7 +242,7 @@ scope: 双端
 | 命名模式 | 使用场景 | 示例 | 说明 |
 |---------|---------|------|------|
 | `SYNC_*` | 同步核心业务消息 | `SYNC_MANIFEST_REQUEST/RESULT` | 请求/结果成对命名 |
-| `PHASE_*` | 阶段控制与确认 | `PHASE_START`, `PHASE_COMPLETED`, `PHASE_ACK` | 小写阶段名作为参数 |
+| `PHASE_*` | 阶段日志与最终确认 | `PHASE_START`, `PHASE_COMPLETED`, `PHASE_ACK` | 普通 marker 单向；最终 ACK 携带精确身份 |
 | `DESKTOP_*` | 桌面端主动上报的进度消息 | `DESKTOP_PHASE_START` | 前缀标识来源端，避免命名冲突 |
 | `VERSION_*` | 握手协议 | `VERSION_CHECK`, `VERSION_ACK` | 仅握手阶段使用 |
 | 协议版本 | 只在握手 `versions` 表达 | `{component:"wire",version:"1.5"}` | 业务帧名不带 `V2/BATCH` 历史后缀 |
@@ -254,7 +254,7 @@ scope: 双端
 
 | 现象 / 问题 | 检查消息类型 | 排查方向 | 关键代码位置 |
 |------------|------------|---------|------------|
-| 同步卡住，进度条不动 | `PHASE_START` / `PHASE_COMPLETED` / `PHASE_ACK` | 检查 `phase_gate`、差异任务错误；Finalize 时确认 peer 原样回显 `sessionId/attemptId/phase/nonce` | `sync_service.rs` phase_gate / final ACK 逻辑 |
+| 同步卡住，进度条不动 | `PHASE_START` / `PHASE_COMPLETED` / `PHASE_ACK` | 检查 `phase_gate`、差异任务错误与单向 marker 顺序；Finalize 时确认 peer 原样回显 `sessionId/attemptId/phase/nonce` | `sync_service.rs` phase_gate / final ACK 逻辑 |
 | Phase 3 未传消息 | `SYNC_TOPIC_DIFF_REQUEST/RESULT` | `changedTopics` 为空时正确跳过 | `sync/diff.js` |
 | 消息重复同步 | `SYNC_MESSAGE_DIFF_RESULT` | 检查完整 TopicKey 覆盖与 `pullMessageIds` | `Phase3Tracker` |
 | 删除后另一端仍有数据 | Diff 删除动作 / `SYNC_ENTITY_DELETE` | 检查完整身份与 `deletedAt`，再检查下一次 Manifest 是否仍携带墓碑 | `sync_service.rs`, `DeleteExecutor` |

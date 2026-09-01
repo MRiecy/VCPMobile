@@ -156,7 +156,7 @@ VCP-CDS internal protocol 3 不是 Mobile Wire 1.5。CDS 的 HTTP 与逐项失�
 - Central 校验 CDS 响应外壳、完整身份和 Message Diff 请求集合覆盖；Mobile 的强类型解析继续作为公共 Wire 最终门禁；
 - 已登记的 CDS code（如 `INVALID_REQUEST`、`NOT_FOUND`、`AMBIGUOUS_IDENTITY`、`SERVICE_BUSY`、`INTERNAL_ERROR`）按精确表分类；
 - CDS internal protocol 的 `PROTOCOL_MISMATCH` 在适配边界重命名为 `CDS_PROTOCOL_MISMATCH`，不得与公开 Wire 的 `WIRE_VERSION_MISMATCH` 共用用户文案；
-- 中央模式启动失败时，插件仍开放认证 WebSocket 控制面并在 ACK 前发送结构化错误：二进制缺失、internal protocol 不匹配、schema 不匹配分别映射为 `CDS_BINARY_NOT_FOUND`、`CDS_PROTOCOL_MISMATCH`、`CDS_SCHEMA_MISMATCH`，其他启动错误映射为 `CDS_STARTUP_FAILED`；
+- 中央模式启动失败时，插件仍开放认证 WebSocket 控制面并在 `VERSION_ACK` 前发送结构化错误：二进制缺失、internal protocol 不匹配、schema 不匹配分别映射为 `CDS_BINARY_NOT_FOUND`、`CDS_PROTOCOL_MISMATCH`、`CDS_SCHEMA_MISMATCH`，其他启动错误映射为 `CDS_STARTUP_FAILED`；
 - 上述失败不得挂载同步 HTTP 数据面，也不得自动回退 Legacy；完全无法连接 WebSocket 时 Mobile 只能报告连接故障，不能臆测插件或 CDS 根因；
 - ChatDataService 客户端产生的 `TIMEOUT`、`UNAVAILABLE`、`INVALID_RESPONSE`、`RESPONSE_TOO_LARGE` 等本地 code 也按精确表分类；
 - 新出现且格式合法的 CDS code 保留原码，以 `internal/manual` 安全兜底；平台 errno 回落到当前边界 code。
