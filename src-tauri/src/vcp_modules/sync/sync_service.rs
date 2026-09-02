@@ -826,7 +826,6 @@ pub struct SyncState {
 struct SyncSessionHandle {
     session_id: u64,
     cancel_token: CancellationToken,
-    command_tx: mpsc::UnboundedSender<SyncCommand>,
     join_handle: JoinHandle<Result<(), String>>,
 }
 
@@ -1041,7 +1040,6 @@ pub enum SyncCommand {
         message: String,
         failed_topic_ids: Vec<String>,
     },
-    Cancel,
 }
 
 fn validate_unique_topic_keys(values: Vec<TopicKey>, field: &str) -> Result<Vec<TopicKey>, String> {
@@ -2167,10 +2165,6 @@ async fn run_sync_session(
                                         }
                                     }
                                 },
-                                SyncCommand::Cancel => {
-                                    let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                    break;
-                                },
                                 SyncCommand::StartAvatarMetadata { attempt_id: command_attempt } => {
                                     if command_attempt != attempt_id { continue; }
                                     let should_start = {
@@ -3202,7 +3196,6 @@ pub async fn stop_sync(
 async fn cancel_and_join_session(session: SyncSessionHandle) -> Result<(), String> {
     log::info!("[SyncService] Cancelling session {}", session.session_id);
     session.cancel_token.cancel();
-    let _ = session.command_tx.send(SyncCommand::Cancel);
     session
         .join_handle
         .await
@@ -3283,11 +3276,10 @@ pub async fn start_manual_sync(
 
     let (tx, rx) = mpsc::unbounded_channel::<SyncCommand>();
     let session_id = state.next_session_id.fetch_add(1, Ordering::SeqCst) + 1;
-    let command_tx = tx.clone();
     {
         let _owner_commit = state.owner_commit.lock().await;
         state.current_session_id.store(session_id, Ordering::SeqCst);
-        state.ws_sender.install(session_id, command_tx.clone());
+        state.ws_sender.install(session_id, tx.clone());
         *state.connection_status.write().await = "disconnected".to_string();
         *state.current_log_path.write().await = None;
     }
@@ -3312,7 +3304,6 @@ pub async fn start_manual_sync(
     *state.session.lock().await = Some(SyncSessionHandle {
         session_id,
         cancel_token,
-        command_tx,
         join_handle,
     });
     Ok(session_id)
@@ -4362,7 +4353,6 @@ mod tests {
         let task_token = cancel_token.clone();
         let exited = Arc::new(AtomicBool::new(false));
         let task_exited = exited.clone();
-        let (command_tx, _command_rx) = mpsc::unbounded_channel();
         let join_handle = tokio::spawn(async move {
             task_token.cancelled().await;
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -4373,7 +4363,6 @@ mod tests {
         cancel_and_join_session(SyncSessionHandle {
             session_id: 1,
             cancel_token,
-            command_tx,
             join_handle,
         })
         .await
@@ -4512,7 +4501,9 @@ mod tests {
     #[test]
     fn command_router_tracks_the_current_session_owner() {
         let router = SyncCommandRouter::default();
-        assert!(router.send(SyncCommand::Cancel).is_err());
+        assert!(router
+            .send(SyncCommand::StartMessages { attempt_id: 1 })
+            .is_err());
 
         let (first_tx, _first_rx) = mpsc::unbounded_channel();
         router.install(1, first_tx);
@@ -4521,11 +4512,16 @@ mod tests {
 
         router.clear_if_owner(1);
         router
-            .send(SyncCommand::Cancel)
+            .send(SyncCommand::StartMessages { attempt_id: 2 })
             .expect("stale cleanup must preserve the current session sender");
-        assert!(matches!(second_rx.try_recv(), Ok(SyncCommand::Cancel)));
+        assert!(matches!(
+            second_rx.try_recv(),
+            Ok(SyncCommand::StartMessages { attempt_id: 2 })
+        ));
 
         router.clear_if_owner(2);
-        assert!(router.send(SyncCommand::Cancel).is_err());
+        assert!(router
+            .send(SyncCommand::StartMessages { attempt_id: 3 })
+            .is_err());
     }
 }
