@@ -30,6 +30,7 @@
     "perf:apk-size": "node tests/perf/scripts/measure_apk_size.cjs",
     "perf:startup": "node tests/perf/scripts/measure_startup_adb.cjs",
     "perf:collect:full": "node tests/perf/scripts/collect_android_dumpsys.cjs",
+    "perf:sync-pipeline": "node tests/perf/scripts/measure_sync_pipeline.cjs",
     "perf:rust-bench": "node tests/perf/scripts/run_rust_bench.cjs"
   },
   "dependencies": {

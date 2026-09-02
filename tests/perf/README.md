@@ -7,6 +7,8 @@ Current scope:
 - APK size report
 - Android cold-start timing via `adb shell am start -W`
 - Android dumpsys/logcat snapshot collection
+- Full-sync pipeline sampling (Mobile PSS/RSS, optional local Node/CDS RSS,
+  filtered sync metrics)
 - Rust Criterion benchmark artifact capture
 
 Timestamped device captures under `tests/perf/reports/` are local-only and
@@ -44,6 +46,12 @@ node tests/perf/scripts/measure_startup_adb.cjs --samples 10 --out tests/perf/re
 # Collect dumpsys/logcat snapshots
 node tests/perf/scripts/collect_android_dumpsys.cjs --out-dir tests/perf/reports/manual-run
 
+# Record a full-sync run; start this before tapping Sync and stop it after Final ACK
+pnpm perf:sync-pipeline -- --serial <serial> --out-dir tests/perf/reports/full-sync-worker-2
+
+# Add upstream RSS only when VChat Node/CDS run on this same host
+pnpm perf:sync-pipeline -- --serial <serial> --node-pid <pid> --cds-pid <pid>
+
 # Compile or run Rust benchmarks
 node tests/perf/scripts/run_rust_bench.cjs --no-run --out-dir tests/perf/reports/rust-bench
 node tests/perf/scripts/run_rust_bench.cjs --out-dir tests/perf/reports/rust-bench
@@ -52,6 +60,24 @@ node tests/perf/scripts/run_rust_bench.cjs --out-dir tests/perf/reports/rust-ben
 The startup helper resolves the installed package's explicit Launcher activity
 before calling `am start -W`. This is required on Android builds where a
 package-only MAIN/LAUNCHER intent does not resolve reliably.
+
+The full-sync sampler targets only the already-running `com.vcp.avatar.debug`
+process. It does not install, launch, clear, or configure the app. By default it
+records `/proc` RSS every 500ms and the heavier `dumpsys` PSS every 2 seconds,
+while retaining only a
+whitelist of sync timing/NDJSON/Flush/completion log lines. Reports remain under
+the ignored `tests/perf/reports/` tree and may include Topic IDs. Set
+`syncLogLevel=DEBUG` before the run so normal SQLite writer metrics are present.
+The Rust Pull path logs one `NdjsonFrame` record per complete Topic line and one
+`NdjsonStream` record per HTTP response; these are byte counters only and do not
+retain payload data or change synchronization behavior.
+The summary records the explicit `FinalAck accepted` marker before the final
+Queue Flush, so a network-complete run is not confused with a durable,
+acknowledged sync.
+
+Node/CDS memory is not observable through the phone. `--node-pid` and
+`--cds-pid` sample `/proc/<pid>/status` only when those processes are on the
+same Linux host as this command; otherwise collect upstream memory separately.
 
 `am start -W` ends at Activity display. It does not measure AppLifecycle READY,
 chat-shell paint, rich rendering settled, or energy. Current results remain

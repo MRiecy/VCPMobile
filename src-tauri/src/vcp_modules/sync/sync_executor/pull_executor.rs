@@ -20,7 +20,7 @@ use tokio::task::JoinSet;
 const MAX_NDJSON_LINE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_WARNING_SAMPLES: usize = 8;
 // Waiting concurrency only: large syncs pause the NDJSON reader instead of rejecting more Topics.
-const PULL_WORKER_CONCURRENCY: usize = 2;
+const PULL_WORKER_CONCURRENCY: usize = 4;
 const MAX_ENTITY_BATCH_BYTES: usize = 10 * 1024 * 1024;
 const MAX_AVATAR_RESPONSE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -876,6 +876,7 @@ impl PullExecutor {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
+        let request_started_at = std::time::Instant::now();
         let res = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", sync_token))
@@ -947,6 +948,10 @@ impl PullExecutor {
         let mut stream = res.bytes_stream();
         let mut buffer = BytesMut::new();
         let mut search_start = 0; // 核心优化：新增扫描游标，避免 O(N^2) 重复扫描
+        let mut stream_bytes = 0usize;
+        let mut stream_chunks = 0usize;
+        let mut first_chunk_at = None;
+        let mut last_chunk_at = None;
 
         loop {
             // The stream is bounded by explicit cancellation and transport failure, not
@@ -958,6 +963,13 @@ impl PullExecutor {
             let chunk = chunk_result.map_err(|error| {
                 http_transport_error("Batch pull stream read", SyncErrorStage::Messages, &error)
             })?;
+            let chunk_at = request_started_at.elapsed();
+            if first_chunk_at.is_none() {
+                first_chunk_at = Some(chunk_at);
+            }
+            last_chunk_at = Some(chunk_at);
+            stream_bytes = stream_bytes.saturating_add(chunk.len());
+            stream_chunks = stream_chunks.saturating_add(1);
 
             // Preserve the transport allocation whenever possible. If a partial line exists,
             // copy only the prefix needed to complete that one bounded frame and defer the
@@ -1015,6 +1027,7 @@ impl PullExecutor {
                 }
 
                 wait_for_pull_worker_slot(&mut spawn_handles).await;
+                let frame_bytes = line.len();
                 let frame = match parse_ndjson_frame(&line)? {
                     ParsedNdjsonFrame::StreamError(error) => return Err(error),
                     ParsedNdjsonFrame::Topic(frame) => frame,
@@ -1022,6 +1035,12 @@ impl PullExecutor {
                 drop(line);
                 let key = validate_returned_topic_identity(&frame, &expected_topics)?;
                 let topic_id = key.topic_id.clone();
+                log::debug!(
+                    "[PullExecutor] [NdjsonFrame] topic={} msgs={} wire_bytes={}",
+                    topic_id,
+                    frame.messages.len(),
+                    frame_bytes
+                );
                 if !seen_topics.insert(key.clone()) {
                     return Err(protocol_error(
                         SyncErrorStage::Messages,
@@ -1112,6 +1131,15 @@ impl PullExecutor {
             search_start = buffer.len();
         }
 
+        log::debug!(
+            "[PullExecutor] [NdjsonStream] topics={} chunks={} wire_bytes={} first_byte_ms={:.3} last_byte_ms={:.3}",
+            expected_topics.len(),
+            stream_chunks,
+            stream_bytes,
+            first_chunk_at.unwrap_or_default().as_secs_f64() * 1000.0,
+            last_chunk_at.unwrap_or_default().as_secs_f64() * 1000.0
+        );
+
         // 处理流结束后 buffer 中残留的非换行数据（兜底）
         if !buffer.is_empty() {
             if buffer.len() > MAX_NDJSON_LINE_BYTES {
@@ -1120,6 +1148,7 @@ impl PullExecutor {
                 ));
             }
             let trailing = std::mem::take(&mut buffer);
+            let frame_bytes = trailing.len();
             wait_for_pull_worker_slot(&mut spawn_handles).await;
             let frame = match parse_ndjson_frame(&trailing)? {
                 ParsedNdjsonFrame::StreamError(error) => return Err(error),
@@ -1128,6 +1157,12 @@ impl PullExecutor {
             drop(trailing);
             let key = validate_returned_topic_identity(&frame, &expected_topics)?;
             let topic_id = key.topic_id.clone();
+            log::debug!(
+                "[PullExecutor] [NdjsonFrame] topic={} msgs={} wire_bytes={}",
+                topic_id,
+                frame.messages.len(),
+                frame_bytes
+            );
             if !seen_topics.insert(key.clone()) {
                 return Err(protocol_error(
                     SyncErrorStage::Messages,

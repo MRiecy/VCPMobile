@@ -2713,6 +2713,9 @@ async fn run_sync_session(
                                             log::debug!("[SyncService] Ignoring mismatched, stale, or replayed final acknowledgement");
                                             continue;
                                         }
+                                        log::debug!(
+                                            "[SyncService] [FinalAck] accepted attempt_id={attempt_id}"
+                                        );
                                         manifest_phase.store(0, Ordering::SeqCst); // 同步完成，重置 manifest 阶段
                                         if let Err(error) = write_queue_task.flush().await {
                                             let message = format!("Final sync write drain failed: {}", error);
