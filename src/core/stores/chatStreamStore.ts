@@ -931,7 +931,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             } else if (aurora.tailOp.op === "replace") {
               update.tailContent = aurora.tailOp.content;
               update.tailBlock = {
-                type: "markdown",
+                type: aurora.tailOp.blockType,
                 content: aurora.tailOp.content,
                 hash: aurora.tailOp.hash,
                 render_mode: aurora.tailOp.mode,
@@ -941,13 +941,13 @@ export const useChatStreamStore = defineStore("chatStream", () => {
               const currentHash = currentBlock?.hash
                 ? String(currentBlock.hash)
                 : undefined;
-              if (currentHash !== aurora.tailOp.baseHash) {
+              if (currentHash !== aurora.tailOp.previousHash) {
                 update.needsSnapshotReason = "tail_base_mismatch";
               } else {
                 const nextContent = currentContent + aurora.tailOp.content;
                 update.tailContent = nextContent;
                 update.tailBlock = {
-                  type: "markdown",
+                  type: aurora.tailOp.blockType,
                   content: nextContent,
                   hash: aurora.tailOp.hash,
                   render_mode: aurora.tailOp.mode,

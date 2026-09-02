@@ -4,7 +4,7 @@ title: AstMutation 指令集与稀疏 IPC 协议 (AstMutation Instruction Set & 
 module: ast_diff.rs (AstMutation enum) + aurora_pipeline.rs (AuroraUpdate, TailFrame)
 related: [chat.ts (types), astExecutor.ts, chatStreamStore.ts]
 version: "1.1.0"
-last_updated: 2026-06-14
+last_updated: 2026-09-03
 ---
 
 # 03_AstMutation 指令集与稀疏 IPC 协议
@@ -36,13 +36,14 @@ sequenceDiagram
     participant DOM as Browser DOM
 
     SSE->>VC: SSE text chunk
+    VC->>VC: pending 合并，固定33ms最多 flush 一次
     VC->>AB: append_chunk + process_queue
-    AB->>DF: diff_ast(prev_tail, new_tail)
+    AB->>DF: diff_ast_streaming(prev_tail, new_tail)
     DF-->>AB: Vec<AstMutation>
-    AB->>VC: take_tail_frame() → TailFrame
+    AB->>VC: prepare_delta_update() → TailTextOp + TailFrame
     VC->>Event: emit("vcp-stream-event", { aurora: AuroraUpdate })
     Event->>CSS: processStreamEvent (type="aurora")
-    CSS->>CSS: mergeTailFrame + rAF throttle
+    CSS->>CSS: mergeTailFrame + 下一次 rAF 前原子合并
     CSS->>MR: ChatMessage.tailFrame = TailFrame
     MR->>AE: applyFrame(mutations, messageId, sandbox)
     AE->>DOM: appendData / replaceChild / setAttribute
@@ -290,27 +291,26 @@ mutations: if reset { Vec::new() } else { mutations },
 
 ```rust
 pub struct AuroraUpdate {
+    pub kind: AuroraUpdateKind,
+    pub stream_id: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub stable_blocks: Option<Vec<StreamBlock>>,   // 仅 stable_changed 时发送
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub stable_changed: bool,
-
+    pub stable_blocks: Option<Vec<StreamBlock>>,   // Snapshot 全量基线
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tail_block: Option<StreamBlock>,            // 仅 tail_changed 时发送
+    pub stable_append: Option<StableAppend>,         // Delta 仅追加新稳定块
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tail: Option<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub tail_changed: bool,
-
+    pub tail_block: Option<StreamBlock>,             // Snapshot tail 基线
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tail_frame: Option<TailFrame>,              // 🆕 v1.1.0 增量帧
+    pub tail_op: Option<TailTextOp>,                 // Delta 原文 append/replace/clear
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tail_snapshot: Option<Vec<MarkdownNode>>,    // 🆕 非帧恢复兜底
-
+    pub tail_frame: Option<TailFrame>,               // AST 增量帧或 reset snapshot
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,                    // 仅 stream end 时发送
+    pub content: Option<String>,                     // Snapshot/恢复全量正文
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk: Option<String>,                       // 新增原始正文
 }
 ```
+
+`TailTextOp::Append/Replace` 同时携带 `blockType: "markdown" | "html-preview"`。它是当前 tail 的渲染投影类型，不是第二份解析状态：后端仍以 canonical Markdown AST 为唯一识别结果。HTML 围栏 tail 只在组件外壳上与普通代码区分，正文继续消费同一个 `TailFrame`。`Append.previousHash` 是应用追加前前端应持有的 tail hash；`hash` 是追加后的结果 hash。
 
 ### 4.2 稀疏序列化策略
 
@@ -319,30 +319,23 @@ AuroraUpdate 使用**大量 `skip_serializing_if`** 来实现稀疏序列化—�
 ```mermaid
 graph TB
     subgraph Full["完整 AuroraUpdate（理论最大）"]
-        SB["stable_blocks: [StreamBlock; N]"]
-        SC["stable_changed: true"]
-        TB["tail_block: StreamBlock"]
-        TL["tail: String"]
-        TC["tail_changed: true"]
-        TF["tail_frame: TailFrame"]
-        TS["tail_snapshot: [MarkdownNode]"]
+        SI["streamId"]
+        SB["stableBlocks: [StreamBlock; N]"]
+        TB["tailBlock: StreamBlock"]
+        TM["tailMode"]
+        TF["tailFrame: TailFrame"]
         CT["content: String"]
     end
 
     subgraph Typical["典型 AuroraUpdate（流中增量）"]
         SB2["❌ 省略（stable 未变）"]
-        SC2["stable_changed: false → 省略"]
-        TB2["tail_block: StreamBlock"]
-        TL2["tail: 'Hello World'"]
-        TC2["tail_changed: true"]
-        TF2["tail_frame: { epoch:3, rev:5, mutations: [...] }"]
-        TS2["❌ 省略（非 reset）"]
+        SA2["stableAppend: 仅新增稳定块时出现"]
+        TO2["tailOp: append / replace / clear"]
+        TF2["tailFrame: { streamId, epoch, revision, frameSeq, mutations }"]
         CT2["❌ 省略（非终结）"]
     end
 
     style SB2 fill:#ff4444,color:#fff
-    style SC2 fill:#ff4444,color:#fff
-    style TS2 fill:#ff4444,color:#fff
     style CT2 fill:#ff4444,color:#fff
 ```
 
@@ -360,23 +353,30 @@ graph TB
 在 `chatStreamStore.ts` 中，`type === "aurora"` 事件的处理流程：
 
 ```typescript
-// chatStreamStore.ts:338-441 (简化)
+// chatStreamStore.ts（简化）
 if (type === "aurora") {
     const aurora = event.aurora;
     let update = rAFPendingUpdates.get(actualMessageId);
 
-    // 稀疏合并：只覆盖有值字段
+    // Snapshot 覆盖基线；Delta 只追加新稳定块。
     if (aurora.content !== undefined) update.content = aurora.content;
-    if (aurora.stableChanged) update.blocks = aurora.stableBlocks;
+    if (aurora.kind === "snapshot") update.blocks = aurora.stableBlocks;
+    if (aurora.stableAppend) {
+        update.blocks = [...currentStable, ...aurora.stableAppend.blocks];
+    }
+    if (aurora.tailOp?.op === "replace") {
+        update.tailBlock = {
+            type: aurora.tailOp.blockType,
+            content: aurora.tailOp.content,
+            hash: aurora.tailOp.hash,
+            render_mode: aurora.tailOp.mode,
+        };
+    }
     if (aurora.tailFrame) {
         update.tailFrame = mergeTailFrame(update.tailFrame, aurora.tailFrame);
     }
-    if (aurora.tailChanged) {
-        update.tailContent = aurora.tail;
-        update.tailBlock = aurora.tailBlock;
-    }
 
-    // rAF 30Hz 节流
+    // rAF 仅将到达事件与下一次绘制对齐；33ms 频率门禁只在 Rust 侧。
     if (update.animationFrameId === null) {
         update.animationFrameId = requestAnimationFrame(runRenderLoop);
     }
@@ -418,18 +418,19 @@ sequenceDiagram
 
     Note over SSE,DOM: Phase 1: 流式输出进行中
 
-    loop 每 33ms 或文本到达
+    loop 每33ms最多一次，终结时强制 flush
         SSE->>VC: SSE data chunk
+        VC->>VC: pending chunk 合并
         VC->>AB: append_chunk + process_queue
-        AB->>AB: diff_ast → mutations
-        AB->>VC: take_tail_frame() → TailFrame { epoch:3, rev:2, mutations: [...] }
-        VC->>IPC: emit("vcp-stream-event", { aurora: { tail_frame, tail, tailChanged } })
+        AB->>AB: diff_ast_streaming → mutations
+        AB->>VC: prepare_delta_update()
+        VC->>IPC: emit("vcp-stream-event", { aurora: { tailOp, tailFrame } })
         IPC->>CSS: processStreamEvent
-        CSS->>CSS: mergeTailFrame + rAF throttle
-        Note over CSS: 满足 30Hz 间隔 → flush
+        CSS->>CSS: mergeTailFrame + 暂存字段
+        Note over CSS: 下一次 VSync 原子提交，无第二个33ms门禁
         CSS->>Vue: ChatMessage.tailFrame = TailFrame
         Vue->>AE: applyFrame(mutations, id, sandbox)
-        AE->>DOM: appendData("新文本") / replaceChild(...)
+        AE->>DOM: appendData / PatchCode / replaceChild
     end
 
     Note over SSE,DOM: Phase 2: 新的稳定块到达
@@ -437,10 +438,10 @@ sequenceDiagram
     SSE->>VC: SSE data chunk (含完整语义块)
     VC->>AB: append_chunk + process_queue
     AB->>AB: new stable_block → epoch=4, rev=0, reset=true
-    AB->>VC: take_tail_frame() → TailFrame { epoch:4, rev:0, reset:true, snapshot: [...] }
-    VC->>IPC: emit(..., { tail_frame, stable_blocks, stableChanged })
+    AB->>VC: prepare_delta_update() → stableAppend + reset snapshot
+    VC->>IPC: emit(..., { stableAppend, tailFrame })
     IPC->>CSS: processStreamEvent
-    CSS->>Vue: ChatMessage.tailFrame = TailFrame + ChatMessage.blocks = stableBlocks
+    CSS->>Vue: ChatMessage.tailFrame = TailFrame + append stableBlocks
     Vue->>DOM: 清空 sandbox
     Vue->>AE: rebuildSnapshot(snapshot, id, sandbox)
     AE->>DOM: 重建 tail DOM 子树 + 填充 registry
@@ -449,8 +450,8 @@ sequenceDiagram
 
     SSE->>VC: SSE stream end
     VC->>AB: finalize()
-    AB->>VC: take_tail_frame() → TailFrame { epoch:5, reset:true, snapshot:[] }
-    VC->>IPC: emit(..., { tail_frame, content, blocks })
+    AB->>VC: prepare_snapshot_update() + durable final blocks
+    VC->>IPC: emit(..., { tailFrame, content, blocks })
     IPC->>CSS: clearRAFUpdate(id, forceFlush=true)
     CSS->>Vue: ChatMessage.blocks = finalBlocks, tailFrame = empty frame
     Vue->>DOM: 清空 tail sandbox，渲染稳定 blocks

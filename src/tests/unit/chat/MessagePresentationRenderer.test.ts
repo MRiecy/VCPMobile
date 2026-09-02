@@ -390,6 +390,7 @@ describe('MessageRenderer presentation shell', () => {
             content: fullContent,
             hash: `tail-${frameSeq}`,
             mode: 'ast',
+            blockType: 'markdown',
           },
           tailFrame: {
             streamId: 9,
@@ -529,6 +530,112 @@ describe('MessageRenderer presentation shell', () => {
     expect(plaintext.text()).toBe(literalTail);
     expect(plaintext.find('script').exists()).toBe(false);
     expect(wrapper.find('.vcp-ast-sandbox').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it('renders an HTML tail in the preview shell while PatchCode retains the code DOM', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const sessionStore = useChatSessionStore();
+    const streamStore = useChatStreamStore();
+    sessionStore.setConversation({
+      id: 'agent-a',
+      type: 'agent',
+      name: 'Agent A',
+    } as any, 'topic-a');
+    const context = {
+      ownerId: 'agent-a',
+      ownerType: 'agent' as const,
+      topicId: 'topic-a',
+      agentId: 'agent-a',
+    };
+    const eventBase = {
+      chunk: null,
+      finishReason: null,
+      error: null,
+      blocks: null,
+      timestamp: null,
+      topicUpdatedAt: null,
+    };
+    await streamStore.processStreamEvent({
+      ...eventBase,
+      type: 'thinking',
+      messageId: 'html-tail-message',
+      context,
+      aurora: null,
+    });
+    await streamStore.processStreamEvent({
+      ...eventBase,
+      type: 'aurora',
+      messageId: 'html-tail-message',
+      context,
+      aurora: {
+        kind: 'delta',
+        streamId: 31,
+        chunk: '```html\n<main>streaming',
+        tailOp: {
+          op: 'replace',
+          content: '```html\n<main>streaming',
+          hash: 'html-tail',
+          mode: 'ast',
+          blockType: 'html-preview',
+        },
+        tailFrame: {
+          streamId: 31,
+          epoch: 1,
+          revision: 1,
+          frameSeq: 1,
+          reset: true,
+          snapshot: [{
+            type: 'code_block',
+            lang: 'html',
+            code: '<main>streaming',
+            highlighted_html: '<pre class="vcp-code-block"><code data-vcp-stream-code><span data-vcp-code-stable></span><span data-vcp-code-active>&lt;main&gt;streaming</span></code></pre>',
+            theme: null,
+          }],
+          mutations: [],
+        },
+      },
+    });
+    await vi.waitFor(() => {
+      expect(streamStore.getActiveStreamMessage(
+        'agent-a', 'agent', 'topic-a', 'html-tail-message',
+      )?.tailBlock?.type).toBe('html-preview');
+    });
+    const message = streamStore.getActiveStreamMessage(
+      'agent-a', 'agent', 'topic-a', 'html-tail-message',
+    )!;
+
+    const wrapper = mount(MessageRenderer, {
+      props: { message },
+      global: {
+        plugins: [pinia],
+        directives: { longpress: {} },
+        stubs: {
+          VcpAvatar: markerStub('avatar'),
+          ToolBlock: markerStub('tool'),
+          ThoughtBlock: markerStub('thought'),
+          ToolSummaryBlock: markerStub('tool-summary'),
+          DiaryBlock: markerStub('diary'),
+          AttachmentPreview: markerStub('attachment'),
+          MermaidFullScreenViewer: markerStub('mermaid-viewer'),
+          ThinkingIndicator: markerStub('thinking'),
+          StreamingTag: markerStub('streaming'),
+        },
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(wrapper.get('.html-preview-block').text()).toContain('<main>streaming');
+    });
+    expect(wrapper.find('.vcp-ast-sandbox [data-vcp-stream-code]').exists()).toBe(true);
+    expect(wrapper.find('iframe').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain('代码');
+    expect(wrapper.text()).not.toContain('预览');
+    expect(wrapper.findAll('.html-preview-block button')).toHaveLength(2);
+    expect(wrapper.findAll('.html-preview-block button').every(
+      (button) => button.attributes('disabled') !== undefined,
+    )).toBe(true);
     wrapper.unmount();
   });
 });

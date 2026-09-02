@@ -318,6 +318,7 @@ export type StreamBlock =
     });
 
 export type TailRenderMode = "ast" | "plain";
+export type TailBlockType = "markdown" | "html-preview";
 
 export interface StableAppend {
   baseCount: number;
@@ -327,16 +328,18 @@ export interface StableAppend {
 export type TailTextOp =
   | {
       op: "append";
-      baseHash?: string;
+      previousHash?: string;
       content: string;
       hash: string;
       mode: TailRenderMode;
+      blockType: TailBlockType;
     }
   | {
       op: "replace";
       content: string;
       hash: string;
       mode: TailRenderMode;
+      blockType: TailBlockType;
     }
   | { op: "clear" };
 

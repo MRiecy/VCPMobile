@@ -53,6 +53,7 @@ const tailEvent = (
         content: text,
         hash: `${streamId}:${frameSeq}`,
         mode: "ast",
+        blockType: "markdown",
       },
       tailFrame: {
         streamId,
@@ -371,10 +372,11 @@ describe("stream render backpressure", () => {
           },
           tailOp: {
             op: "append",
-            baseHash: "28:1",
+            previousHash: "28:1",
             content: "!",
             hash: "28:2",
             mode: "ast",
+            blockType: "markdown",
           },
           tailFrame: {
             streamId: 28,
@@ -540,6 +542,7 @@ describe("stream render backpressure", () => {
               content: `tail-${index}`,
               hash: String(index),
               mode: "ast",
+              blockType: "markdown",
             },
             tailFrame: {
               streamId: 1,

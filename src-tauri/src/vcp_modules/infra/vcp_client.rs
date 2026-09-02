@@ -1317,7 +1317,7 @@ fn validate_helper_stop_ack(
     ))
 }
 
-/// 3. 抽离自适应降帧流式请求循环
+/// 3. 流式请求循环（固定 33ms Aurora 解析门禁）
 #[allow(clippy::too_many_arguments, unused_variables)]
 async fn handle_streaming_request<R: Runtime>(
     _app: &AppHandle<R>,

@@ -1,13 +1,13 @@
 ---
 id: AST-DIFF-005
-title: MessageRenderer 集成与 rAF 渲染节流 (MessageRenderer Integration & rAF Rendering Throttle)
-module: MessageRenderer.vue (watch logic) + chatStreamStore.ts (rAF throttle)
+title: MessageRenderer 集成与 rAF 绘制对齐 (MessageRenderer Integration & rAF Alignment)
+module: MessageRenderer.vue (watch logic) + chatStreamStore.ts (rAF alignment)
 related: [astExecutor.ts, astRenderer.ts, chat.ts (ChatMessage)]
 version: "1.1.0"
-last_updated: 2026-06-14
+last_updated: 2026-09-03
 ---
 
-# 05_MessageRenderer 集成与 rAF 渲染节流
+# 05_MessageRenderer 集成与 rAF 绘制对齐
 
 ## 1. 概述
 
@@ -17,7 +17,7 @@ last_updated: 2026-06-14
 
 | 模块 | 职责 | 文件行数 |
 |------|------|:------:|
-| **chatStreamStore.ts** | rAF 30Hz 帧合并、mergeTailFrame、AuroraUpdate 稀疏写入 | ~443 行（相关部分） |
+| **chatStreamStore.ts** | 下一次 rAF 前原子合并、mergeTailFrame、AuroraUpdate 稀疏写入 | ~443 行（相关部分） |
 | **MessageRenderer.vue** | watch 三源监听、Epoch 追踪、applyFrame 调度、错误恢复 | ~870 行（相关部分） |
 
 ### 1.2 集成架构概览
@@ -32,7 +32,7 @@ flowchart TD
         PS["processStreamEvent()"]
         RAF["rAFPendingUpdates Map"]
         M["mergeTailFrame()"]
-        RL["runRenderLoop (rAF)"]
+        RL["scheduleRAFUpdate callback"]
     end
 
     subgraph Vue["Vue 3 Reactivity"]
@@ -55,7 +55,7 @@ flowchart TD
     SE --> PS
     PS --> M
     M --> RAF
-    RAF -->|"≥ 33.3ms elapsed"| ASM
+    RAF -->|"下一次 VSync"| ASM
     ASM --> CM
     CM --> W
     W --> EP
@@ -71,130 +71,105 @@ flowchart TD
 
 ---
 
-## 2. chatStreamStore —— rAF 帧合并与 30Hz 节流
+## 2. chatStreamStore —— rAF 原子合并与绘制对齐
 
-### 2.1 为什么需要节流
+### 2.1 为什么前端不再设置时间门禁
 
-SSE 流可以以任意频率到达（通常每 50-100ms 一个 chunk），但 DOM 渲染不需要匹配这个频率：
+Rust `vcp_client` 已用固定 33ms 门禁合并 SSE chunk，这是 Aurora 唯一的频率上限。前端如果再按自己的 33ms 时钟节流，会因为后端时钟与屏幕 VSync 不同步而平白增加一帧延迟。
 
-- **60Hz 渲染**（每 16.7ms 一次）：移动端功耗高，人眼无法感知文本流的 60fps
-- **30Hz 渲染**（每 33.3ms 一次）：视觉上足够流畅，功耗降低 ~40%
-- **无节流**：高频 SSE → 高频 Vue 响应式 → 高频 DOM 操作 → CPU 飙升 → UI 卡顿
+因此前端 rAF 只承担两项职责：
+
+- 合并下一次绘制前到达的事件；
+- 将同一 Aurora 帧的 content、stable blocks、tail 与 TailFrame 原子写入 Vue。
 
 ### 2.2 rAFPendingUpdates 暂存池
 
 ```typescript
-// chatStreamStore.ts:68-78
 const rAFPendingUpdates = new Map<string, {
     content: string | null;
-    blocks: any[] | null;
+    blocks: ContentBlock[] | null;
     tailContent: string | null;
-    tailBlock: any | null;
+    tailBlock: StreamBlock | null;
+    tailBlockChanged: boolean;
     tailFrame: TailFrame | null;
-    tailSnapshot: any[] | null;
+    tailSnapshot: MarkdownNode[] | null;
+    streamId: number | null;
+    tailCursor: TailFrameCursor | null;
+    needsSnapshotReason: string | null;
     animationFrameId: number | null;
-    lastRenderTime: number;
 }>();
-const MIN_RENDER_INTERVAL_MS = 33.3;  // 30Hz 上限
 ```
 
-每个流式消息在 `rAFPendingUpdates` 中维护一个**暂存条目**。当 Aurora 事件到达时，数据先写入暂存池，不直接触发 Vue 响应式更新。
+每个流式消息维护一个暂存条目。Aurora 事件先合并进该条目；同一绘制周期只申请一个 rAF，不记录 `lastRenderTime`，也不存在 `MIN_RENDER_INTERVAL_MS`。
 
 ### 2.3 Aurora 事件写入暂存池
 
 ```typescript
-// chatStreamStore.ts:382-402 (简化)
-if (aurora.tailFrame) {
-    // 帧合并：同一 epoch 内合并 mutations，不同 epoch 或 reset 时替换
-    update.tailFrame = mergeTailFrame(update.tailFrame, aurora.tailFrame);
-    if (aurora.tailFrame.snapshot) {
-        update.tailSnapshot = aurora.tailFrame.snapshot;
+if (aurora.kind === "snapshot") {
+    update.blocks = aurora.stableBlocks;
+    update.tailBlock = aurora.tailBlock;
+} else {
+    if (aurora.stableAppend) {
+        update.blocks = [...currentStable, ...aurora.stableAppend.blocks];
+    }
+    if (aurora.tailOp?.op === "replace") {
+        update.tailBlock = {
+            type: aurora.tailOp.blockType,
+            content: aurora.tailOp.content,
+            hash: aurora.tailOp.hash,
+            render_mode: aurora.tailOp.mode,
+        };
     }
 }
-if (aurora.tailChanged) {
-    update.tailContent = aurora.tail || "";
-    update.tailBlock = aurora.tailBlock || null;
-}
-if (aurora.stableChanged && aurora.stableBlocks) {
-    update.blocks = aurora.stableBlocks;
+
+if (aurora.tailFrame) {
+    const merged = mergeTailFrame(...);
+    update.tailFrame = merged.frame ?? null;
 }
 ```
 
 ### 2.4 mergeTailFrame() —— 帧合并策略
 
-```typescript
-// chatStreamStore.ts:43-62
-function mergeTailFrame(existing: TailFrame | null, incoming: TailFrame): TailFrame {
-    const incomingMutations = incoming.mutations || [];
-    if (!existing || incoming.reset || incoming.epoch !== existing.epoch) {
-        // 首次、reset 或 Epoch 变更 → 全量替换
-        return {
-            ...incoming,
-            mutations: incoming.reset ? [] : [...incomingMutations],
-            snapshot: incoming.snapshot ? [...incoming.snapshot] : undefined,
-        };
-    }
-
-    // 同 Epoch 内 → 合并 mutations 数组
-    return {
-        ...incoming,
-        reset: existing.reset || incoming.reset,
-        snapshot: incoming.snapshot || existing.snapshot,
-        mutations: [
-            ...(existing.reset ? [] : existing.mutations || []),
-            ...incomingMutations,  // 拼接新旧 mutations
-        ],
-    };
-}
-```
-
 ```mermaid
 flowchart TD
-    MF["mergeTailFrame(existing, incoming)"] --> Check{"!existing<br/>OR incoming.reset<br/>OR epoch changed?"}
+    MF["mergeTailFrame(existing, cursor, incoming)"] --> Order{"stream/epoch/frameSeq 连续?"}
+    Order -->|"旧帧或重复帧"| Drop["丢弃"]
+    Order -->|"断档/换流/换 epoch"| Recover["使用随帧 snapshot<br/>或请求恢复 snapshot"]
+    Order -->|"连续"| Merge["合并下一次绘制前的 mutations"]
+    Merge --> Budget{"mutations ≤ 512?"}
+    Budget -->|"否"| Recover
+    Budget -->|"是"| Result["返回合并后的 TailFrame"]
 
-    Check -->|"Yes"| Replace["全量替换<br/>mutations = incoming.mutations<br/>snapshot = incoming.snapshot"]
-    Check -->|"No (同 Epoch)"| Merge["合并 mutations<br/>[...existing.mutations, ...incoming.mutations]<br/>snapshot = incoming || existing"]
-
-    Replace --> Result["返回合并后的 TailFrame"]
-    Merge --> Result
-
-    style Replace fill:#ff9800,color:#fff
+    style Recover fill:#ff9800,color:#fff
     style Merge fill:#4caf50,color:#fff
 ```
 
-> **为什么合并 mutations 数组？** 在同一个 33ms rAF 窗口内可能收到 2-3 个 Aurora 事件，每个携带少量 mutations。将它们合并为一个数组一次性执行，减少了 Vue 响应式触发次数和 DOM 操作批次，提高了效率。
+`TailFrameCursor` 同时校验 `streamId / epoch / revision / frameSeq`。重复、迟到、断档和超出512条待执行 mutation 都不会盲目落入 DOM，而是丢弃旧帧或请求权威 snapshot。
 
-### 2.5 rAF 渲染循环
+### 2.5 rAF 原子提交
 
 ```typescript
-// chatStreamStore.ts:406-441 (简化)
-const runRenderLoop = () => {
-    const up = rAFPendingUpdates.get(actualMessageId);
-    if (!up) return;
+const scheduleRAFUpdate = (messageKey: string) => {
+    const update = rAFPendingUpdates.get(messageKey);
+    if (!update || update.animationFrameId !== null) return;
 
-    const now = performance.now();
-    const elapsed = now - up.lastRenderTime;
+    update.animationFrameId = requestAnimationFrame(() => {
+        const up = rAFPendingUpdates.get(messageKey);
+        if (!up) return;
 
-    if (elapsed >= MIN_RENDER_INTERVAL_MS) {
-        // 满足 30Hz 间隔 → 写入 Vue 响应式
-        const m = activeStreamMessages.get(actualMessageId);
-        if (m) {
-            if (up.content !== null) m.content = up.content;
-            if (up.blocks !== null) m.blocks = up.blocks;
-            if (up.tailSnapshot !== null) m.tailSnapshot = up.tailSnapshot;
-            if (up.tailFrame !== null) m.tailFrame = up.tailFrame;
-            if (up.tailContent !== null) m.tailContent = up.tailContent;
-            if (up.tailBlock !== undefined) m.tailBlock = up.tailBlock;
+        const message = activeStreamMessages.get(messageKey);
+        if (message) {
+            if (up.content !== null) message.content = up.content;
+            if (up.blocks !== null) message.blocks = up.blocks;
+            if (up.tailContent !== null) message.tailContent = up.tailContent;
+            if (up.tailBlockChanged) message.tailBlock = up.tailBlock ?? undefined;
+            if (up.tailSnapshot !== null) message.tailSnapshot = up.tailSnapshot;
+            if (up.tailFrame !== null) message.tailFrame = up.tailFrame;
         }
-        up.lastRenderTime = now;
-        // 清空暂存
-        up.content = null; up.blocks = null; up.tailContent = null;
-        up.tailBlock = null; up.tailFrame = null; up.tailSnapshot = null;
+
+        clearPendingFields(up);
         up.animationFrameId = null;
-    } else {
-        // 未到 30Hz 门槛 → 在下一帧继续尝试
-        up.animationFrameId = requestAnimationFrame(runRenderLoop);
-    }
+    });
 };
 ```
 
@@ -212,17 +187,10 @@ sequenceDiagram
         Pool->>rAF: requestAnimationFrame(runRenderLoop)
     end
 
-    rAF->>Pool: runRenderLoop callback
-    Pool->>Pool: elapsed = now - lastRenderTime
-
-    alt elapsed >= 33.3ms
-        Pool->>Vue: 写入 ChatMessage.tailFrame/tailSnapshot/...
-        Vue->>MR: watch 触发
-        Pool->>Pool: 清空暂存
-    else elapsed < 33.3ms
-        Pool->>rAF: requestAnimationFrame(runRenderLoop)
-        Note over Pool,rAF: 继续等待下一帧
-    end
+    rAF->>Pool: 下一次 VSync callback
+    Pool->>Vue: 原子写入 ChatMessage.tailFrame/tailSnapshot/...
+    Vue->>MR: watch 触发
+    Pool->>Pool: 清空暂存并释放 rAF 句柄
 ```
 
 ### 2.6 clearRAFUpdate() —— 流结束的强制刷新
@@ -393,18 +361,12 @@ if (result.ok) {
 // MessageRenderer.vue:98-113
 function handleAstFrameFailure(sandbox: HTMLElement, reason: string): void {
     astFailureCount += 1;
-
-    if (getTailSnapshotNodes().length > 0) {
-        // ✅ 有 snapshot → 全量重建（保活）
-        rebuildTailSnapshot(sandbox);
-        return;  // 【意图性】不降级，保持 AST Diff 路径
-    }
-
-    if (astFailureCount >= 2) {
-        // ❌ 连续 2 次失败且无 snapshot → 彻底降级
-        enableAstDiff.value = false;
-        cleanupRegistry(props.message.id);
-    }
+    void requestCurrentTailSnapshot(reason).then((recovered) => {
+        if (!recovered && astFailureCount >= 2) {
+            enableAstDiff.value = false;
+            cleanupRegistry(props.message.id);
+        }
+    });
 }
 ```
 
@@ -412,53 +374,42 @@ function handleAstFrameFailure(sandbox: HTMLElement, reason: string): void {
 
 | 条件 | 行为 | 后果 |
 |------|------|------|
-| 单次失败 + 有 snapshot | 全量 snapshot 重建 | AST Diff 继续，DOM 短暂重建 |
-| 单次失败 + 无 snapshot | 记录失败，等待下一帧 | 可能自我修复（如下一帧的 reset） |
-| 连续 2 次失败 + 有 snapshot | 全量 snapshot 重建 | 同上 |
-| 连续 2 次失败 + 无 snapshot | **彻底降级到 innerHTML** | 流式组件切换 → DOM 全量重建 → 可能闪烁 |
+| 单次 applyFrame 失败 | 请求后端权威 snapshot | 成功后以 reset 帧重建 sandbox |
+| snapshot 请求进行中 | 复用同一个 recovery Promise | 不并发发起重复恢复 |
+| 连续 2 次失败且 snapshot 恢复也失败 | 关闭 AST Diff | Markdown 走 Morphdom，超限 tail 走 Vue 纯文本 |
 
-> **设计意图**：降级到 innerHTML 是**最后手段**。因为降级会导致前端从 AST Diff 路径切换到传统 innerHTML 路径，中间涉及组件销毁/重建、DOM 全量替换、布局抖动和输入框焦点丢失。AST Diff 的 `rebuildSnapshot` 重建虽然也是全量操作，但保持在同一个渲染路径内，不涉及组件层级的切换。
+> **设计意图**：优先通过后端 canonical AST 恢复，不用前端过期快照猜测。只有连续失败且恢复不可用时才关闭 AST Diff。
 
 ---
 
-## 4. 双路径渲染策略
+## 4. Tail 渲染路由
 
-### 4.1 两种渲染路径
+### 4.1 三种渲染路径
 
 ```mermaid
 flowchart TD
-    Entry["tail 区域需要渲染"] --> Flag{"useAstForCurrentTail?"}
-
-    Flag -->|"Yes ✅<br/>AST Diff 路径"| ASTPath["<div ref='tailSandboxRef'><br/>  applyFrame → 手术级 DOM 操作<br/></div>"]
-
-    Flag -->|"No ❌<br/>传统路径"| HTMLPath["<div v-html='renderMarkdownNodes(tailNodes)'><br/>  全量 innerHTML 替换<br/></div>"]
+    Entry["tail 区域需要渲染"] --> Plain{"plain / recovery?"}
+    Plain -->|"是"| TextPath["Vue 字面文本节点"]
+    Plain -->|"否"| Ast{"useAstForCurrentTail?"}
+    Ast -->|"是：markdown"| ASTPath["AST sandbox<br/>applyFrame / PatchCode"]
+    Ast -->|"是：html-preview"| HtmlPath["HtmlPreviewBlock 外壳<br/>代码 slot 内仍是 AST sandbox"]
+    Ast -->|"否"| Fallback["Markdown Morphdom<br/>或 HTML 安全转义代码视图"]
 
     style ASTPath fill:#4caf50,color:#fff
-    style HTMLPath fill:#ff9800,color:#fff
+    style HtmlPath fill:#2196f3,color:#fff
+    style Fallback fill:#ff9800,color:#fff
 ```
 
-对应的模板代码（`MessageRenderer.vue:947-954`）：
-
-```html
-<!-- AST Diff 路径：空白 sandbox，由 watch 中的 applyFrame 填充 -->
-<div v-if="useAstForCurrentTail && isPlainBlock(message.tailBlock.type)"
-     ref="tailSandboxRef"
-     class="vcp-tail-sandbox">
-</div>
-
-<!-- 传统路径：v-html 全量渲染 -->
-<div v-else-if="!useAstForCurrentTail && isPlainBlock(message.tailBlock.type)"
-     v-html="renderMarkdownNodes(tailNodes, message.id)">
-</div>
-```
+HTML tail 的组件外壳不接收增长全文作为 `v-html`。`HtmlPreviewBlock` 的命名 slot 内挂载同一个 `tailSandboxRef`，因此普通代码与 HTML 代码共用增量执行器；差别只在组件外观与交互门禁。
 
 ### 4.2 路径切换条件
 
 | 条件 | 走哪条路径 | 说明 |
 |------|:--------:|------|
 | AST Diff 启用 + tailFrame/tailBlock.nodes/tailSnapshot 存在 | AST Diff 路径 | 正常流式输出 |
-| AST Diff 被禁用（`enableAstDiff = false`） | 传统路径 | 错误降级后 |
-| Tail block 不是 plain 类型（如 thought/html-preview） | 传统路径 | 非纯文本块必须用 v-html |
+| `tailBlock.type === "html-preview"` 且 AST 可用 | HTML Vue 外壳 + AST slot | 不创建 iframe，不全量更新 v-html |
+| `render_mode === "plain"` 或恢复进行中 | Vue 字面文本 | 64KB安全降级或短暂恢复态 |
+| AST Diff 被禁用（`enableAstDiff = false`） | Morphdom/安全代码视图 | 错误恢复最终兜底 |
 
 ### 4.3 消息气泡分裂（`<!--brk-->`）
 
@@ -532,7 +483,7 @@ window.__VCP_STREAM_DEBUG__ = true;
 // 查看追踪数据
 window.__VCP_STREAM_TRACES__;
 // [
-//   { messageId: "msg-123", auroraPayload: { stableChanged, tailFrame: { epoch, mutationsCount, ... } }, ... },
+//   { messageId: "msg-123", auroraPayload: { stableAppendCount, tailFrame: { epoch, mutationsCount, ... } }, ... },
 // ]
 ```
 
@@ -574,13 +525,10 @@ onUnmounted(() => {
 | DOM: 节点操作 | `innerHTML =`（全量 parse + layout） | `appendData` / `replaceChild`（手术级） |
 | 单帧总耗时 | 20-50ms | 0.5-3ms |
 
-### 7.2 30Hz 节流的实际效果
+### 7.2 固定后端门禁与前端绘制对齐
 
-在典型的 SSE 流式场景中（chunk 约每 50-100ms 到达一次），30Hz 节流意味着：
-- 如果 chunk 到达频率 > 30Hz：自动降频到 30Hz，消除过度渲染
-- 如果 chunk 到达频率 < 30Hz：rAF 在一帧内即可满足间隔条件，直接渲染
-- 实际上绝大多数流式输出的 chunk 速率在 10-20Hz，**节流机制在大部分时间不生效**——它只在高频 burst 场景提供保护
+后端固定33ms门禁保证 Aurora 最多约30次/秒解析和发送；结束、中断与断线收口使用强制 flush。前端不再独立计算时间差，只把已经受控的事件提交到下一次 VSync。因此不会出现两个不同相位的33ms门禁叠加，也不会退化成逐 token 更新。
 
 ---
 
-*文档基于 `src/features/chat/MessageRenderer.vue`（watch 逻辑，~870行相关）及 `src/core/stores/chatStreamStore.ts`（rAF 节流，~443行相关）的源码分析生成。*
+*文档基于 `src/features/chat/MessageRenderer.vue`（watch 逻辑，~870行相关）及 `src/core/stores/chatStreamStore.ts`（rAF 绘制对齐，~443行相关）的源码分析生成。*

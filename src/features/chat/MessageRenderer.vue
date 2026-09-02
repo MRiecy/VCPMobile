@@ -83,7 +83,6 @@ let astRecoveryPromise: Promise<boolean> | null = null;
 const isPlainTailFallback = computed(() => {
   const block = props.message.tailBlock;
   return !!block
-    && isInlineHtmlBlock(block.type)
     && (
       block.render_mode === "plain"
       || (
@@ -1054,7 +1053,7 @@ onUnmounted(() => {
             <template v-if="bubble.blocks && bubble.blocks.length > 0">
               <template v-for="(block, index) in bubble.blocks" :key="getBlockKey(block, index, bubble.id)">
                 <!-- v-memo 使用含 bubble ID 的稳定 key，避免分条气泡之间复用错误子树 -->
-                <div v-memo="[getBlockKey(block, index, bubble.id)]">
+                <div v-memo="[getBlockKey(block, index, bubble.id), isStreaming]">
                   <DiaryBlock
                     v-if="block.type === 'diary' || block.type === 'diary-update'"
                     :block="block"
@@ -1087,7 +1086,6 @@ onUnmounted(() => {
                     :highlighted-content="block.highlighted_content"
                     :message-id="message.id"
                     :is-streaming="isStreaming"
-                    :is-active-stream="isMessageInActiveStream"
                   />
 
                   <ToolSummaryBlock
@@ -1110,6 +1108,19 @@ onUnmounted(() => {
                 :data-tail-render-mode="isAstRecoveryPending ? 'recovery-text' : 'plaintext'"
                 class="vcp-markdown-block whitespace-pre-wrap break-words"
               >{{ message.tailBlock.content || '' }}</div>
+              <HtmlPreviewBlock
+                v-else-if="message.tailBlock.type === 'html-preview'"
+                :content="useAstForCurrentTail ? '' : (message.tailBlock.content || '')"
+                :message-id="message.id"
+                :is-streaming="isStreaming"
+              >
+                <template v-if="useAstForCurrentTail" #code>
+                  <div
+                    :ref="(el) => { tailSandboxRef = el as HTMLElement | null }"
+                    class="vcp-markdown-block vcp-ast-sandbox"
+                  />
+                </template>
+              </HtmlPreviewBlock>
               <div v-else-if="useAstForCurrentTail && isInlineHtmlBlock(message.tailBlock.type)">
                 <div
                   :ref="(el) => { tailSandboxRef = el as HTMLElement | null }"
@@ -1122,7 +1133,7 @@ onUnmounted(() => {
                 class="vcp-markdown-block"
               />
             </div>
-            <div v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && message.tailContent && message.blocks && message.blocks.length > 0 && (!message.tailBlock || !isInlineHtmlBlock(message.tailBlock.type))" class="opacity-70 italic animate-pulse">
+            <div v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && message.tailContent && message.blocks && message.blocks.length > 0 && (!message.tailBlock || (!isInlineHtmlBlock(message.tailBlock.type) && message.tailBlock.type !== 'html-preview'))" class="opacity-70 italic animate-pulse">
               {{ message.tailContent }}
             </div>
           </div>

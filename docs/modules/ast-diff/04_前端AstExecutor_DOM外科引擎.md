@@ -4,7 +4,7 @@ title: 前端 AstExecutor DOM 外科引擎 (Frontend AstExecutor DOM Surgical En
 module: astExecutor.ts (~847 lines) + astRenderer.ts (~184 lines)
 related: [chat.ts (types), MessageRenderer.vue, morphdom]
 version: "1.1.0"
-last_updated: 2026-06-14
+last_updated: 2026-09-03
 ---
 
 # 04_前端 AstExecutor DOM 外科引擎
@@ -26,7 +26,7 @@ last_updated: 2026-06-14
 
 ```mermaid
 flowchart LR
-    CSS["chatStreamStore<br/>rAF 节流 + 帧合并"] -->|"ChatMessage.tailFrame"| MR["MessageRenderer.vue<br/>watch trigger"]
+    CSS["chatStreamStore<br/>rAF 绘制前原子合并"] -->|"ChatMessage.tailFrame"| MR["MessageRenderer.vue<br/>watch trigger"]
     MR -->|"applyFrame(mutations, id, sandbox)"| AE["astExecutor.ts"]
     AE -->|"registry.get(id)"| NR["Node Registry<br/>Map&lt;id, Node&gt;"]
     AE -->|"surgical DOM ops"| DOM["Browser DOM"]
@@ -529,25 +529,19 @@ export function rebuildSnapshot(
 // MessageRenderer.vue:98-113
 function handleAstFrameFailure(sandbox: HTMLElement, reason: string): void {
     astFailureCount += 1;
-    if (getTailSnapshotNodes().length > 0) {
-        rebuildTailSnapshot(sandbox);
-        // 【意图性设计说明】：直接 return，不执行关闭降级逻辑。
-        // 在流式输出过程中，宁可重建 snapshot 也不彻底降级到 innerHTML，
-        // 因为降级会导致流式组件切换、DOM 物理销毁重建和严重的布局抖动。
-        return;
-    }
-    if (astFailureCount >= 2) {
-        // 连续两次失败且无 snapshot 可用 → 彻底禁用 AST Diff
-        enableAstDiff.value = false;
-        cleanupRegistry(props.message.id);
-    }
+    void requestCurrentTailSnapshot(reason).then((recovered) => {
+        if (!recovered && astFailureCount >= 2) {
+            enableAstDiff.value = false;
+            cleanupRegistry(props.message.id);
+        }
+    });
 }
 ```
 
 **保活策略优先级**：
-1. 🟢 **首选**：snapshot 重建（从完整 AST 重建 DOM，reset Registry）
-2. 🟡 **次选**：连续 2 次失败且无 snapshot → 禁用 AST Diff，降级到 innerHTML
-3. 🔴 **避免**：不轻易降级——降级后 DOM 全量重建会导致输入框焦点丢失和视觉闪烁
+1. 🟢 **首选**：请求后端 canonical snapshot，以 reset 帧重建 DOM 与 Registry
+2. 🟡 **次选**：连续 2 次失败且 snapshot 恢复失败 → 禁用 AST Diff
+3. 🔴 **最终兜底**：Markdown 使用 Morphdom，超限 tail 使用 Vue 字面文本；不会执行未清洗的 raw HTML
 
 ---
 

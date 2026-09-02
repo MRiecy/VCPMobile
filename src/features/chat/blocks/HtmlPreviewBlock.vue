@@ -3,18 +3,30 @@ import { ref, watch, computed, onUnmounted } from 'vue';
 import { useThemeStore } from '../../../core/stores/theme';
 import { useModalHistory } from '../../../core/composables/useModalHistory';
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   content: string;
   messageId: string;
   highlightedContent?: string;
   isStreaming?: boolean;
-  isActiveStream?: boolean;
-}>();
+}>(), {
+  isStreaming: false,
+});
 
 const themeStore = useThemeStore();
 const isPreviewing = ref(false); // 默认开启代码模式，减小开销
 const isFullScreen = ref(false);
 const fullScreenTab = ref<'code' | 'preview'>('code');
+
+watch(
+  () => props.isStreaming,
+  (streaming) => {
+    if (!streaming) return;
+    isPreviewing.value = false;
+    isFullScreen.value = false;
+    fullScreenTab.value = 'code';
+  },
+  { immediate: true },
+);
 
 const { registerModal, unregisterModal } = useModalHistory();
 const modalId = `HtmlPreviewBlockFullScreen_${Math.random().toString(36).substring(2, 9)}`;
@@ -45,6 +57,7 @@ const highlightedCode = computed(() => {
 
 // 复制功能
 const copyCode = async () => {
+  if (props.isStreaming) return;
   try {
     await navigator.clipboard.writeText(props.content);
     // 这里如果以后有 Toast 提示可以加上
@@ -110,6 +123,7 @@ const sandboxHtml = computed(() => {
 });
 
 const openFullScreen = () => {
+  if (props.isStreaming) return;
   isFullScreen.value = true;
   fullScreenTab.value = isPreviewing.value ? 'preview' : 'code';
 };
@@ -117,6 +131,7 @@ const openFullScreen = () => {
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 const refreshPreview = () => {
+  if (props.isStreaming) return;
   const iframe = isFullScreen.value 
     ? document.querySelector('.vcp-fullscreen-iframe') as HTMLIFrameElement
     : document.querySelector('.vcp-inline-iframe') as HTMLIFrameElement;
@@ -178,14 +193,14 @@ onUnmounted(() => {
             </div>
 
             <div class="flex items-center gap-4">
-              <button v-if="fullScreenTab === 'preview'" @click="refreshPreview" class="p-2 active:rotate-180 transition-transform duration-500">
+              <button v-if="fullScreenTab === 'preview'" :disabled="isStreaming" @click="refreshPreview" class="p-2 active:rotate-180 transition-transform duration-500 disabled:opacity-30">
                 <div class="i-ph:arrow-clockwise-bold w-5 h-5 text-gray-400"></div>
               </button>
-              <button v-else @click="copyCode" class="p-2 active:scale-90 transition-transform">
+              <button v-else :disabled="isStreaming" @click="copyCode" class="p-2 active:scale-90 transition-transform disabled:opacity-30">
                 <div class="i-ph:copy-bold w-5 h-5 text-gray-400"></div>
               </button>
               
-              <div class="flex p-1 rounded-xl border transition-colors duration-300" :class="themeStore.isDarkResolved ? 'bg-white/5 border-white/5' : 'bg-black/5 border-black/5'">
+              <div v-if="!isStreaming" class="flex p-1 rounded-xl border transition-colors duration-300" :class="themeStore.isDarkResolved ? 'bg-white/5 border-white/5' : 'bg-black/5 border-black/5'">
                 <button @click="fullScreenTab = 'code'"
                   :class="[fullScreenTab === 'code' ? (themeStore.isDarkResolved ? 'bg-white/10 text-white shadow-md border-white/5' : 'bg-white text-gray-900 shadow-sm border-black/5') : (themeStore.isDarkResolved ? 'text-gray-400' : 'text-gray-500')]"
                   class="px-4 py-1 text-[11px] font-bold rounded-lg transition-all border border-transparent">代码</button>
@@ -231,21 +246,21 @@ onUnmounted(() => {
       
       <div class="flex items-center gap-3">
         <!-- 功能按钮：尺寸适中 -->
-        <button v-if="isPreviewing" @click.stop="refreshPreview" 
-          class="p-1.5 active:rotate-180 transition-transform duration-500 opacity-60 hover:opacity-100">
+        <button v-if="isPreviewing" :disabled="isStreaming" @click.stop="refreshPreview"
+          class="p-1.5 active:rotate-180 transition-transform duration-500 opacity-60 hover:opacity-100 disabled:opacity-30">
           <div class="i-ph:arrow-clockwise-bold w-5 h-5" :class="themeStore.isDarkResolved ? 'text-gray-400' : 'text-gray-600'"></div>
         </button>
-        <button v-else @click.stop="copyCode" 
-          class="p-1.5 active:scale-90 transition-transform opacity-60 hover:opacity-100">
+        <button v-else :disabled="isStreaming" @click.stop="copyCode"
+          class="p-1.5 active:scale-90 transition-transform opacity-60 hover:opacity-100 disabled:opacity-30">
           <div class="i-ph:copy-bold w-5 h-5" :class="themeStore.isDarkResolved ? 'text-gray-400' : 'text-gray-600'"></div>
         </button>
 
-        <button @click.stop="openFullScreen"
-          class="p-1.5 active:scale-90 transition-transform opacity-60 hover:opacity-100">
+        <button :disabled="isStreaming" @click.stop="openFullScreen"
+          class="p-1.5 active:scale-90 transition-transform opacity-60 hover:opacity-100 disabled:opacity-30">
           <div class="i-ph:arrows-out-bold w-4.5 h-4.5" :class="themeStore.isDarkResolved ? 'text-gray-400' : 'text-gray-600'"></div>
         </button>
 
-        <div class="flex p-0.8 rounded-xl border transition-colors duration-300" 
+        <div v-if="!isStreaming" class="flex p-0.8 rounded-xl border transition-colors duration-300"
           :class="themeStore.isDarkResolved ? 'bg-white/5 border-white/5' : 'bg-black/5 border-black/5'">
           <button @click.stop="isPreviewing = false"
             :class="[!isPreviewing ? (themeStore.isDarkResolved ? 'bg-white/10 text-white shadow-md border-white/5' : 'bg-white text-gray-900 shadow-sm border-black/5') : (themeStore.isDarkResolved ? 'text-gray-400' : 'text-gray-500')]"
@@ -267,8 +282,10 @@ onUnmounted(() => {
             ? 'bg-[#0d1117] text-[#c9d1d9]' 
             : 'bg-[#f6f8fa] text-[#24292e]'
         ]">
-        <div v-if="highlightedContent" class="vcp-html-highlighted-wrapper" v-html="highlightedCode"></div>
-        <pre v-else class="w-full min-w-max"><code class="hljs" v-html="highlightedCode"></code></pre>
+        <slot name="code">
+          <div v-if="highlightedContent" class="vcp-html-highlighted-wrapper" v-html="highlightedCode"></div>
+          <pre v-else class="w-full min-w-max"><code class="hljs" v-html="highlightedCode"></code></pre>
+        </slot>
       </div>
 
       <div v-if="isPreviewing" class="absolute inset-0 no-swipe" :class="themeStore.isDarkResolved ? 'bg-[#0d1117]' : 'bg-white'">

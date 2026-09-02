@@ -52,6 +52,13 @@ pub enum TailRenderMode {
     Plain,
 }
 
+#[derive(Debug, Serialize, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum TailBlockType {
+    Markdown,
+    HtmlPreview,
+}
+
 #[derive(Debug, Serialize, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StableAppend {
@@ -64,15 +71,20 @@ pub struct StableAppend {
 pub enum TailTextOp {
     Append {
         #[serde(skip_serializing_if = "Option::is_none")]
-        base_hash: Option<String>,
+        #[serde(rename = "previousHash")]
+        previous_hash: Option<String>,
         content: String,
         hash: String,
         mode: TailRenderMode,
+        #[serde(rename = "blockType")]
+        block_type: TailBlockType,
     },
     Replace {
         content: String,
         hash: String,
         mode: TailRenderMode,
+        #[serde(rename = "blockType")]
+        block_type: TailBlockType,
     },
     Clear,
 }
@@ -129,6 +141,7 @@ pub struct AuroraDeliveryCommit {
     pushed_tail_epoch: u64,
     pushed_tail_hash: Option<String>,
     pushed_tail_mode: Option<TailRenderMode>,
+    pushed_tail_block_type: Option<TailBlockType>,
     pushed_tail_source_start: Option<usize>,
     consumes_tail_frame: bool,
 }
@@ -170,6 +183,16 @@ impl TailFingerprint {
 struct TailProjection {
     fingerprint: TailFingerprint,
     mode: TailRenderMode,
+    block_type: TailBlockType,
+}
+
+fn classify_tail_block(nodes: &[MarkdownNode]) -> TailBlockType {
+    match nodes {
+        [MarkdownNode::CodeBlock {
+            lang: Some(lang), ..
+        }] if lang.eq_ignore_ascii_case("html") => TailBlockType::HtmlPreview,
+        _ => TailBlockType::Markdown,
+    }
 }
 
 /// Aurora 语义沉淀缓冲区
@@ -196,6 +219,7 @@ pub struct AuroraBuffer {
     pushed_tail_epoch: u64,
     pushed_tail_hash: Option<String>,
     pushed_tail_mode: Option<TailRenderMode>,
+    pushed_tail_block_type: Option<TailBlockType>,
     pushed_tail_source_start: Option<usize>,
     parser: StreamBlockParser,
     is_finishing: bool,
@@ -226,6 +250,7 @@ impl AuroraBuffer {
             pushed_tail_epoch: 0,
             pushed_tail_hash: None,
             pushed_tail_mode: None,
+            pushed_tail_block_type: None,
             pushed_tail_source_start: None,
             parser: StreamBlockParser::new(),
             is_finishing: false,
@@ -263,11 +288,16 @@ impl AuroraBuffer {
 
     fn current_tail_wire_block(&self) -> Option<StreamBlock> {
         let projection = self.tail_projection.as_ref()?;
-        Some(StreamBlock::markdown(
-            self.tail_content.clone(),
-            None,
-            projection.fingerprint.wire_hash(),
-        ))
+        let content = self.tail_content.clone();
+        let hash = projection.fingerprint.wire_hash();
+        Some(match projection.block_type {
+            TailBlockType::Markdown => StreamBlock::markdown(content, None, hash),
+            TailBlockType::HtmlPreview => StreamBlock::HtmlPreview {
+                content,
+                highlighted_content: None,
+                hash,
+            },
+        })
     }
 
     fn current_tail_source_start(&self) -> Option<usize> {
@@ -337,11 +367,16 @@ impl AuroraBuffer {
                 blocks: self.stable_blocks[self.pushed_stable_count..].to_vec(),
             });
         let (current_tail_hash, current_tail_mode) = self.current_tail_metadata();
+        let current_tail_block_type = self
+            .tail_projection
+            .as_ref()
+            .map(|projection| projection.block_type);
         let current_tail_source_start = self.current_tail_source_start();
         let tail_state_changed = self.tail_content.len() != self.pushed_tail_len
             || self.tail_epoch != self.pushed_tail_epoch
             || current_tail_hash != self.pushed_tail_hash
-            || current_tail_mode != self.pushed_tail_mode;
+            || current_tail_mode != self.pushed_tail_mode
+            || current_tail_block_type != self.pushed_tail_block_type;
         let tail_op = if !tail_state_changed {
             None
         } else if self.tail_content.is_empty() {
@@ -349,23 +384,27 @@ impl AuroraBuffer {
         } else {
             let hash = current_tail_hash.clone().unwrap_or_default();
             let mode = current_tail_mode.unwrap_or(TailRenderMode::Ast);
+            let block_type = current_tail_block_type.unwrap_or(TailBlockType::Markdown);
             let can_append = self.tail_epoch == self.pushed_tail_epoch
                 && self.tail_content.len() > self.pushed_tail_len
                 && current_tail_mode == self.pushed_tail_mode
+                && current_tail_block_type == self.pushed_tail_block_type
                 && current_tail_source_start == self.pushed_tail_source_start;
             if can_append {
                 if let Some(suffix) = self.tail_content.get(self.pushed_tail_len..) {
                     Some(TailTextOp::Append {
-                        base_hash: self.pushed_tail_hash.clone(),
+                        previous_hash: self.pushed_tail_hash.clone(),
                         content: suffix.to_string(),
                         hash,
                         mode,
+                        block_type,
                     })
                 } else {
                     Some(TailTextOp::Replace {
                         content: self.tail_content.clone(),
                         hash,
                         mode,
+                        block_type,
                     })
                 }
             } else {
@@ -373,6 +412,7 @@ impl AuroraBuffer {
                     content: self.tail_content.clone(),
                     hash,
                     mode,
+                    block_type,
                 })
             }
         };
@@ -401,6 +441,7 @@ impl AuroraBuffer {
             pushed_tail_epoch: self.tail_epoch,
             pushed_tail_hash: current_tail_hash,
             pushed_tail_mode: current_tail_mode,
+            pushed_tail_block_type: current_tail_block_type,
             pushed_tail_source_start: current_tail_source_start,
             consumes_tail_frame: update.tail_frame.is_some(),
         };
@@ -410,6 +451,10 @@ impl AuroraBuffer {
     pub fn prepare_snapshot_update(&self) -> (AuroraUpdate, AuroraDeliveryCommit) {
         let tail_block = self.current_tail_wire_block();
         let (current_tail_hash, current_tail_mode) = self.current_tail_metadata();
+        let current_tail_block_type = self
+            .tail_projection
+            .as_ref()
+            .map(|projection| projection.block_type);
         let current_tail_source_start = self.current_tail_source_start();
         let update = AuroraUpdate {
             kind: AuroraUpdateKind::Snapshot,
@@ -430,6 +475,7 @@ impl AuroraBuffer {
             pushed_tail_epoch: self.tail_epoch,
             pushed_tail_hash: current_tail_hash,
             pushed_tail_mode: current_tail_mode,
+            pushed_tail_block_type: current_tail_block_type,
             pushed_tail_source_start: current_tail_source_start,
             consumes_tail_frame: true,
         };
@@ -443,6 +489,7 @@ impl AuroraBuffer {
         self.pushed_tail_epoch = commit.pushed_tail_epoch;
         self.pushed_tail_hash = commit.pushed_tail_hash;
         self.pushed_tail_mode = commit.pushed_tail_mode;
+        self.pushed_tail_block_type = commit.pushed_tail_block_type;
         self.pushed_tail_source_start = commit.pushed_tail_source_start;
         if commit.consumes_tail_frame {
             self.tail_reset_pending = false;
@@ -487,6 +534,10 @@ impl AuroraBuffer {
         let (new_blocks, new_tail) = self.parser.process(&self.full_text);
         let new_tail_start = self.parser.tail_start();
         let tail_changed = self.tail_content != new_tail;
+        let previous_tail_block_type = self
+            .tail_projection
+            .as_ref()
+            .map(|projection| projection.block_type);
         let next_fingerprint =
             (!new_tail.is_empty()).then(|| self.next_tail_fingerprint(&new_tail, new_tail_start));
 
@@ -515,7 +566,18 @@ impl AuroraBuffer {
                     ),
                 )
             };
-            let mode = if let Some(new_nodes) = nodes {
+            let (mode, block_type) = if let Some(new_nodes) = nodes {
+                let block_type = classify_tail_block(&new_nodes);
+                if previous_tail_block_type.is_some()
+                    && previous_tail_block_type != Some(block_type)
+                    && !self.tail_reset_pending
+                {
+                    self.tail_epoch = self.tail_epoch.saturating_add(1);
+                    self.tail_revision = 0;
+                    self.tail_reset_pending = true;
+                    self.pending_mutations.clear();
+                    self.code_highlighter.clear();
+                }
                 // reset 帧直接从最新 prev_tail_ast 按需构造 snapshot，其间无需保留第二份树。
                 if !self.tail_reset_pending {
                     let mutations = diff_ast_streaming(
@@ -532,7 +594,7 @@ impl AuroraBuffer {
                 }
                 self.tail_revision = self.tail_revision.saturating_add(1);
                 self.prev_tail_ast = new_nodes;
-                TailRenderMode::Ast
+                (TailRenderMode::Ast, block_type)
             } else {
                 // 超长 tail（> MAX_SPECULATIVE_TAIL_AST_BYTES）降级为纯文本尾部。
                 // 不再逐帧产出 AST 帧，由 tail text op 走前端纯文本路径渲染（绝不留白）。
@@ -547,7 +609,7 @@ impl AuroraBuffer {
                     self.tail_revision = 0;
                     self.tail_reset_pending = true;
                 }
-                TailRenderMode::Plain
+                (TailRenderMode::Plain, TailBlockType::Markdown)
             };
 
             self.tail_projection = Some(TailProjection {
@@ -555,6 +617,7 @@ impl AuroraBuffer {
                     TailFingerprint::from_content(&self.tail_content, new_tail_start)
                 }),
                 mode,
+                block_type,
             });
         } else {
             self.tail_projection = None;
@@ -692,6 +755,13 @@ mod tests {
                     && code.contains("<!DOCTYPE html>")
                     && code.contains("<style>")
         ));
+        assert!(matches!(
+            buffer.current_tail_wire_block(),
+            Some(StreamBlock::HtmlPreview {
+                highlighted_content: None,
+                ..
+            })
+        ));
 
         buffer.finalize();
         assert!(matches!(
@@ -708,6 +778,42 @@ mod tests {
     }
 
     #[test]
+    fn recognizing_an_html_tail_resets_the_ast_for_the_new_vue_shell() {
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk("```ht");
+        assert_eq!(buffer.process_queue(), (false, true));
+        assert!(matches!(
+            buffer.current_tail_wire_block(),
+            Some(StreamBlock::Markdown { .. })
+        ));
+        let (_, first_commit) = buffer.prepare_delta_update().expect("partial fence delta");
+        buffer.commit_delivery(first_commit);
+
+        buffer.append_chunk("ml\n<main>streaming");
+        assert_eq!(buffer.process_queue(), (false, true));
+        let (html_update, _) = buffer.prepare_delta_update().expect("HTML tail delta");
+        assert!(matches!(
+            html_update.tail_op,
+            Some(TailTextOp::Replace {
+                block_type: TailBlockType::HtmlPreview,
+                ..
+            })
+        ));
+        assert!(matches!(
+            html_update.tail_frame,
+            Some(TailFrame {
+                reset: true,
+                snapshot: Some(ref nodes),
+                ..
+            }) if matches!(
+                nodes.as_slice(),
+                [MarkdownNode::CodeBlock { lang: Some(lang), .. }]
+                    if lang.eq_ignore_ascii_case("html")
+            )
+        ));
+    }
+
+    #[test]
     fn large_html_fence_streams_highlight_patches_then_hands_off_to_markdown() {
         let mut buffer = AuroraBuffer::new();
         let completed_lines = "<div class=\"row\">value</div>\n".repeat(180);
@@ -716,7 +822,25 @@ mod tests {
 
         buffer.append_chunk(&initial);
         assert_eq!(buffer.process_queue(), (false, true));
-        let initial_frame = buffer.take_tail_frame().expect("initial highlighted frame");
+        let (initial_update, initial_commit) = buffer
+            .prepare_delta_update()
+            .expect("initial highlighted delta");
+        assert!(matches!(
+            initial_update.tail_op,
+            Some(TailTextOp::Replace {
+                block_type: TailBlockType::HtmlPreview,
+                ..
+            })
+        ));
+        assert_eq!(
+            serde_json::to_value(&initial_update).expect("serialize HTML tail")["tailOp"]
+                ["blockType"],
+            "html-preview"
+        );
+        let initial_frame = initial_update
+            .tail_frame
+            .as_ref()
+            .expect("initial highlighted frame");
         assert!(matches!(
             initial_frame.mutations.as_slice(),
             [AstMutation::Add {
@@ -727,6 +851,7 @@ mod tests {
                 ..
             }] if html.contains("data-vcp-stream-code")
         ));
+        buffer.commit_delivery(initial_commit);
         assert!(matches!(
             buffer.prev_tail_ast.as_slice(),
             [MarkdownNode::CodeBlock {
@@ -1045,6 +1170,11 @@ mod tests {
             second.tail_op,
             Some(TailTextOp::Append { ref content, .. }) if content == "!"
         ));
+        let second_wire = serde_json::to_value(&second).expect("serialize append delta");
+        assert_eq!(
+            second_wire["tailOp"]["previousHash"], wire["tailOp"]["hash"],
+            "Rust append previous hash must use the frontend camelCase contract"
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@ title: Aurora 管道 Epoch 体系与增量 Diff 算法 (Aurora Pipeline Epoch Sy
 module: aurora_pipeline.rs + ast_diff.rs
 related: [markdown_ast.rs, stream_block_parser.rs, astExecutor.ts]
 version: "1.1.0"
-last_updated: 2026-06-14
+last_updated: 2026-09-03
 ---
 
 # 02_Aurora 管道 Epoch 体系与增量 Diff 算法
@@ -100,7 +100,8 @@ stateDiagram-v2
 **Epoch（纪元）**：标识 tail 内容的不同"世代"。当以下情况发生时递增：
 - 新的稳定块被识别（tail 内容从旧文本变为全新内容）
 - tail 变为空字符串
-- AST 解析失败（退回到原始 HTML 模式）
+- AST 模式切换为 64KB 纯文本兜底
+- tail 投影在普通 Markdown 与 HTML 专属组件之间切换
 
 **Revision（修订号）**：同一 Epoch 内的增量变化计数。每次 `process_queue()` 产出新的 mutations 时递增。
 
@@ -222,11 +223,8 @@ if !new_blocks.is_empty() {
 if !self.tail_content.is_empty() {
     let nodes = if self.tail_content.len() > MAX_SPECULATIVE_TAIL_AST_BYTES {
         None  // 包括 RawHtml 在内，统一回退纯文本兜底
-    } else if is_html_tag_block(&self.tail_content) {
-        // HTML 标签块：直接包装为 RawHtml，不经过 markdown parser
-        Some(vec![MarkdownNode::raw_html(self.tail_content.clone())])
     } else {
-        // 正常路径：解析为 AST
+        // 所有常规 tail 统一解析为流式 Markdown AST
         Some(parse_markdown_to_ast_streaming(&self.tail_content))
     };
     // ...
@@ -238,6 +236,8 @@ if !self.tail_content.is_empty() {
 |------|------|------|
 | > 64KB（包括 HTML） | `nodes=None` → **纯文本兜底** | 防止性能悬崖；常态走 `tailOp` 字面文本追加 |
 | ≤ 64KB | 统一调用流式 Markdown AST 解析 | 未闭合围栏由 Markdown 解析器推测为 `CodeBlock`，不再另做 HTML sniff |
+
+AST 解析后，如果整个 tail 恰好是一个 `lang=html` 的 `CodeBlock`，Aurora 只把其 Wire 投影类型标为 `html-preview`；普通代码仍为 `markdown`。两者的正文都继续使用同一份 `TailFrame + PatchCode` 增量 DOM。前端的 `HtmlPreviewBlock` 在流式期间仅提供专属外壳，代码插槽仍由 AST executor 持有；不会把增长全文交给 `v-html`，也不会创建预览 iframe。投影类型发生变化时会产生一次 epoch reset，使新外壳内的 sandbox 直接从完整 snapshot 接管。
 
 > **降级只 bump 一次 epoch**：当 tail 跨过 64KB 进入纯文本兜底时，**仅在 AST 模式 → 纯文本模式的「切换帧」**递增一次 epoch/reset；此后保持安静，不再每帧 bump。这与旧版「每帧 `nodes=None` 并 bump epoch/reset（降级到 innerHTML、反复留白）」的行为根本不同——旧版会在超阈值后每帧清空重建，造成可见闪烁。
 
