@@ -1785,6 +1785,10 @@ async fn run_sync_session(
                                         ).await;
                                         break 'attempt;
                                     }
+                                    if cancel_token.is_cancelled() {
+                                        let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                        break 'attempt;
+                                    }
 
                                     // Phase 2: 拉取缺失的 Topic Configs
                                     emit_sync_phase_activity(&handle_clone, session_id, "topic_metadata");
@@ -1917,6 +1921,10 @@ async fn run_sync_session(
                                             "topic metadata phase completion",
                                             &error,
                                         ).await;
+                                        break 'attempt;
+                                    }
+                                    if cancel_token.is_cancelled() {
+                                        let _ = close_ws_with_deadline(&mut ws_stream).await;
                                         break 'attempt;
                                     }
 
