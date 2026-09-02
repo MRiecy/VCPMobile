@@ -1286,7 +1286,9 @@ mod entity_pull_tests {
                             "createdAt": 1,
                             "locked": true,
                             "unread": false,
-                            "ownerId": "missing-owner"
+                            "ownerId": "missing-owner",
+                            "configHash": "a".repeat(64),
+                            "updatedAt": 1
                         }
                     }]
                 }))
