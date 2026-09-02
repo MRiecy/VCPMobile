@@ -12,7 +12,7 @@ use crate::vcp_modules::sync_error::{
     encode_wire_sync_error, is_attempt_restart_code, SyncErrorPayload, WireSyncError,
 };
 use crate::vcp_modules::sync_logger::{DbWriteMetricLogBridge, LogLevel, SyncLogger};
-use crate::vcp_modules::sync_pipeline::{Phase1Metadata, Phase3Message, SyncPipeline};
+use crate::vcp_modules::sync_pipeline::{Phase1Metadata, Phase3Message};
 use crate::vcp_modules::sync_types::{
     DeleteNotificationFrame, DeleteTarget, ManifestRequestFrame, ManifestResultFrame, ManifestType,
     MessageDiffRequestFrame, MessageDiffTopicState, OwnerType, SyncPhase, TopicDiffRequestFrame,
@@ -1568,10 +1568,6 @@ async fn run_sync_session(
                 let attempt_id = next_attempt_id;
                 let attempt_cancel = cancel_token.child_token();
                 let task_tracker = Arc::new(SyncTaskTracker::new(attempt_cancel.clone()));
-                let (pipeline_tx, mut pipeline_rx) = mpsc::unbounded_channel::<
-                    crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand,
-                >();
-                let pipeline_task = Arc::new(SyncPipeline::new(pipeline_tx));
                 let pending_tasks_task = Arc::new(AtomicU32::new(0));
                 let total_tasks_task = Arc::new(AtomicU32::new(0));
                 let pending_msg_topics_task = Arc::new(Phase3Tracker {
@@ -1689,9 +1685,54 @@ async fn run_sync_session(
                                 }
                             }
                         }
-                        Some(cmd) = pipeline_rx.recv() => {
+                        Some(cmd) = rx.recv() => {
                             match cmd {
-                                crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::StartTopicMetadata => {
+                                SyncCommand::StartTopicMetadata { attempt_id: command_attempt } => {
+                                    if command_attempt != attempt_id { continue; }
+                                    let should_start = {
+                                        if let Ok(mut gate) = phase_gate.lock() {
+                                            gate.insert("topic_metadata".to_string())
+                                        } else {
+                                            false
+                                        }
+                                    };
+                                    if !should_start {
+                                        continue;
+                                    }
+                                    if let Err(error) = write_queue_task.flush().await {
+                                        let message = format!("Owner metadata write drain failed: {}", error);
+                                        fatal_error = true;
+                                        emit_sync_log(&handle_clone, "error", &message);
+                                        publish_sync_error(
+                                            &handle_clone,
+                                            session_id,
+                                            &connection_status_for_task,
+                                            "OWNER_METADATA_DRAIN_FAILED",
+                                            &message,
+                                            Vec::new(),
+                                        ).await;
+                                        let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                        break;
+                                    }
+                                    crate::vcp_modules::sync::sync_finalize::invalidate_sync_entity_caches(
+                                        &handle_clone,
+                                    );
+                                    if let Err(error) = send_ws_frame(
+                                        &mut ws_stream,
+                                        &PhaseFrame {
+                                            frame_type: "PHASE_COMPLETED",
+                                            phase: SyncPhase::OwnerMetadata,
+                                        },
+                                    ).await {
+                                        terminate_after_protocol_send_failure(
+                                            &handle_clone,
+                                            &mut ws_stream,
+                                            "owner metadata phase completion",
+                                            &error,
+                                        ).await;
+                                        break 'attempt;
+                                    }
+
                                     // Phase 2: 拉取缺失的 Topic Configs
                                     emit_sync_phase_activity(&handle_clone, session_id, "topic_metadata");
                                     let db = handle_clone.state::<DbState>();
@@ -1790,7 +1831,52 @@ async fn run_sync_session(
                                         }
                                     }
                                 },
-                                crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::StartTopicValidation => {
+                                SyncCommand::StartTopicValidation { attempt_id: command_attempt } => {
+                                    if command_attempt != attempt_id { continue; }
+                                    let should_start = {
+                                        if let Ok(mut gate) = phase_gate.lock() {
+                                            gate.insert("topic_validation".to_string())
+                                        } else {
+                                            false
+                                        }
+                                    };
+                                    if !should_start {
+                                        continue;
+                                    }
+                                    if let Err(error) = write_queue_task.flush().await {
+                                        let message = format!("Topic metadata write drain failed: {}", error);
+                                        fatal_error = true;
+                                        emit_sync_log(&handle_clone, "error", &message);
+                                        publish_sync_error(
+                                            &handle_clone,
+                                            session_id,
+                                            &connection_status_for_task,
+                                            "TOPIC_METADATA_DRAIN_FAILED",
+                                            &message,
+                                            Vec::new(),
+                                        ).await;
+                                        let _ = close_ws_with_deadline(&mut ws_stream).await;
+                                        break;
+                                    }
+                                    crate::vcp_modules::sync::sync_finalize::invalidate_sync_entity_caches(
+                                        &handle_clone,
+                                    );
+                                    if let Err(error) = send_ws_frame(
+                                        &mut ws_stream,
+                                        &PhaseFrame {
+                                            frame_type: "PHASE_COMPLETED",
+                                            phase: SyncPhase::TopicMetadata,
+                                        },
+                                    ).await {
+                                        terminate_after_protocol_send_failure(
+                                            &handle_clone,
+                                            &mut ws_stream,
+                                            "topic metadata phase completion",
+                                            &error,
+                                        ).await;
+                                        break 'attempt;
+                                    }
+
                                     // Phase 2.5: 双哈希批量比对
                                     emit_sync_phase_activity(&handle_clone, session_id, "topic_validation");
                                     if let Ok(mut logger) = sync_logger_task.lock() {
@@ -1888,7 +1974,18 @@ async fn run_sync_session(
                                         }
                                     }
                                 },
-                                crate::vcp_modules::sync_pipeline::pipeline::PipelineCommand::StartMessages => {
+                                SyncCommand::StartMessages { attempt_id: command_attempt } => {
+                                    if command_attempt != attempt_id { continue; }
+                                    let should_start = {
+                                        if let Ok(mut gate) = phase_gate.lock() {
+                                            gate.insert("messages".to_string())
+                                        } else {
+                                            false
+                                        }
+                                    };
+                                    if !should_start {
+                                        continue;
+                                    }
                                     emit_sync_phase_activity(&handle_clone, session_id, "messages");
                                     let changed_ids = {
                                         let guard = changed_topics.lock().await;
@@ -2019,10 +2116,6 @@ async fn run_sync_session(
                                         }
                                     }
                                 },
-                            }
-                        },
-                        Some(cmd) = rx.recv() => {
-                            match cmd {
                                 SyncCommand::Cancel => {
                                     let _ = close_ws_with_deadline(&mut ws_stream).await;
                                     break;
@@ -2112,111 +2205,6 @@ async fn run_sync_session(
                                                 PHASE_RESPONSE_TIMEOUT,
                                             ))
                                             .await;
-                                    }
-                                },
-                                SyncCommand::StartTopicMetadata { attempt_id: command_attempt } => {
-                                    if command_attempt != attempt_id { continue; }
-                                    let should_flush = {
-                                        if let Ok(mut gate) = phase_gate.lock() {
-                                            gate.insert("topic_metadata".to_string())
-                                        } else {
-                                            false
-                                        }
-                                    };
-                                    if should_flush {
-                                        if let Err(error) = write_queue_task.flush().await {
-                                            let message = format!("Owner metadata write drain failed: {}", error);
-                                            fatal_error = true;
-                                            emit_sync_log(&handle_clone, "error", &message);
-                                            publish_sync_error(
-                                                &handle_clone,
-                                                session_id,
-                                                &connection_status_for_task,
-                                                "OWNER_METADATA_DRAIN_FAILED",
-                                                &message,
-                                                Vec::new(),
-                                            ).await;
-                                            let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                            break;
-                                        }
-                                        crate::vcp_modules::sync::sync_finalize::invalidate_sync_entity_caches(
-                                            &handle_clone,
-                                        );
-                                        if let Err(error) = send_ws_frame(
-                                            &mut ws_stream,
-                                            &PhaseFrame {
-                                                frame_type: "PHASE_COMPLETED",
-                                                phase: SyncPhase::OwnerMetadata,
-                                            },
-                                        ).await {
-                                            terminate_after_protocol_send_failure(
-                                                &handle_clone,
-                                                &mut ws_stream,
-                                                "owner metadata phase completion",
-                                                &error,
-                                            ).await;
-                                            break 'attempt;
-                                        }
-                                        let _ = pipeline_task.on_owner_metadata_done();
-                                    }
-                                },
-                                SyncCommand::StartTopicValidation { attempt_id: command_attempt } => {
-                                    if command_attempt != attempt_id { continue; }
-                                    let should_flush = {
-                                        if let Ok(mut gate) = phase_gate.lock() {
-                                            gate.insert("topic_validation".to_string())
-                                        } else {
-                                            false
-                                        }
-                                    };
-                                    if should_flush {
-                                        if let Err(error) = write_queue_task.flush().await {
-                                            let message = format!("Topic metadata write drain failed: {}", error);
-                                            fatal_error = true;
-                                            emit_sync_log(&handle_clone, "error", &message);
-                                            publish_sync_error(
-                                                &handle_clone,
-                                                session_id,
-                                                &connection_status_for_task,
-                                                "TOPIC_METADATA_DRAIN_FAILED",
-                                                &message,
-                                                Vec::new(),
-                                            ).await;
-                                            let _ = close_ws_with_deadline(&mut ws_stream).await;
-                                            break;
-                                        }
-                                        crate::vcp_modules::sync::sync_finalize::invalidate_sync_entity_caches(
-                                            &handle_clone,
-                                        );
-                                        if let Err(error) = send_ws_frame(
-                                            &mut ws_stream,
-                                            &PhaseFrame {
-                                                frame_type: "PHASE_COMPLETED",
-                                                phase: SyncPhase::TopicMetadata,
-                                            },
-                                        ).await {
-                                            terminate_after_protocol_send_failure(
-                                                &handle_clone,
-                                                &mut ws_stream,
-                                                "topic metadata phase completion",
-                                                &error,
-                                            ).await;
-                                            break 'attempt;
-                                        }
-                                        let _ = pipeline_task.on_topic_metadata_pull_done();
-                                    }
-                                },
-                                SyncCommand::StartMessages { attempt_id: command_attempt } => {
-                                    if command_attempt != attempt_id { continue; }
-                                    let should_start = {
-                                        if let Ok(mut gate) = phase_gate.lock() {
-                                            gate.insert("messages".to_string())
-                                        } else {
-                                            false
-                                        }
-                                    };
-                                    if should_start {
-                                        let _ = pipeline_task.on_topic_validation_done();
                                     }
                                 },
                                 SyncCommand::Finalize { attempt_id: command_attempt } => {
