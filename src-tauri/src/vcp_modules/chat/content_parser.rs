@@ -369,9 +369,6 @@ lazy_static! {
     pub(crate) static ref TOOL_CALL_SUMMARY_START: Regex = Regex::new(r"(?im)^[ \t]*\[本轮工具调用摘要:\]").unwrap();
     pub(crate) static ref TOOL_CALL_SUMMARY_END: Regex = Regex::new(r"(?im)^[ \t]*\[本轮工具调用摘要结束\]").unwrap();
 
-    pub(crate) static ref HTML_TAG_BLOCK_RE: Regex =
-        Regex::new(r"(?im)^[ \t]*<(?:style\b[^>]*>?|html[\s>]|!doctype\s+html|/?(?:div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>)").unwrap();
-
     pub(crate) static ref GENERIC_CODE_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*```[a-zA-Z0-9-]*[ \t]*\r?$").unwrap();
     pub(crate) static ref GENERIC_CODE_FENCE_END: Regex = Regex::new(r"(?im)^[ \t]*```[ \t]*\r?$").unwrap();
 
@@ -1218,10 +1215,6 @@ pub(crate) fn parse_tool_call_summary(content: &str) -> Vec<ToolCallSummaryItem>
         });
     }
     items
-}
-
-pub fn is_html_tag_block(text: &str) -> bool {
-    HTML_TAG_BLOCK_RE.is_match(text)
 }
 
 #[cfg(test)]

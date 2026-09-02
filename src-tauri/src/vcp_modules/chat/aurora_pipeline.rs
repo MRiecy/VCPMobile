@@ -10,10 +10,9 @@ use crate::vcp_modules::stream_block_parser::{StreamBlock, StreamBlockParser};
 ///
 /// 取值依据（perf profile 基准，见 ast_bench.rs，约等于发布版热路径速度）：
 /// - 解析本身极廉价：40KB tail 的 parse+hash+diff+serialize 仅约 0.55ms，远非瓶颈。
-/// - 真正的成本是 IPC 载荷：CodeBlock/RawHtml 走整节点 Replace，每帧重发整块，
-///   40KB 块在一次流式中累计推送可达 ~18.5MB。
+/// - 真正的成本是 IPC 载荷：CodeBlock/RawHtml 走整节点 Replace，每帧重发整块。
 ///   因此上限从 8192 提升到 65536（覆盖绝大多数真实 HTML/代码产物），
-///   并配合 vcp_client 的自适应降帧（30→10→5Hz）把每秒 IPC 载荷压到可接受范围。
+///   并由 vcp_client 固定 30Hz 合并发送，避免按上游 token 粒度重复解析与推送。
 ///   仅在 tail 超过 64KB 这种极端体量时才降级为纯文本，避免单帧 JSON 过大拖垮 webview。
 const MAX_SPECULATIVE_TAIL_AST_BYTES: usize = 65536;
 
@@ -501,38 +500,16 @@ impl AuroraBuffer {
         //    当 tail 超过 MAX_SPECULATIVE_TAIL_AST_BYTES 时跳过 AST 解析，
         //    避免在流式热路径上产生性能悬崖
         if !self.tail_content.is_empty() {
-            let (mut nodes, nodes_need_hashing) = if self.tail_content.len()
-                > MAX_SPECULATIVE_TAIL_AST_BYTES
-            {
-                (None, false)
-            } else if crate::vcp_modules::content_parser::is_html_tag_block(&self.tail_content) {
-                // 如果是以 HTML 容器/样式标签开头，直接将其作为 RawHtml 块，防止 pulldown_cmark 将内部 CSS 规则或内联样式解析为缩进代码块
-                (
-                    Some(vec![
-                        crate::vcp_modules::pre_renderer::MarkdownNode::raw_html(
-                            self.tail_content.clone(),
-                        ),
-                    ]),
-                    true,
-                )
+            let nodes = if self.tail_content.len() > MAX_SPECULATIVE_TAIL_AST_BYTES {
+                None
             } else {
-                (
-                    Some(
-                        crate::vcp_modules::pre_renderer::parse_markdown_to_ast_streaming(
-                            &self.tail_content,
-                        ),
+                Some(
+                    crate::vcp_modules::pre_renderer::parse_markdown_to_ast_streaming(
+                        &self.tail_content,
                     ),
-                    false,
                 )
             };
-            let mode = if let Some(mut new_nodes) = nodes.take() {
-                // parser 返回的树已经递归 hash；只有绕过 parser 手工构造的 RawHtml
-                // 需要在成为唯一 canonical AST 前补一次。
-                if nodes_need_hashing {
-                    for node in &mut new_nodes {
-                        node.compute_hashes_recursively();
-                    }
-                }
+            let mode = if let Some(new_nodes) = nodes {
                 // reset 帧直接从最新 prev_tail_ast 按需构造 snapshot，其间无需保留第二份树。
                 if !self.tail_reset_pending {
                     let mutations = diff_ast(&self.prev_tail_ast, &new_nodes, "t");
@@ -682,6 +659,36 @@ mod tests {
             .mutations
             .iter()
             .any(|mutation| matches!(mutation, AstMutation::AppendText { .. })));
+    }
+
+    #[test]
+    fn unclosed_html_fence_is_speculated_and_finalized_as_code_block() {
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk(
+            "```html\n<!DOCTYPE html>\n<html>\n<head>\n<style>body { color: red; }</style>\n</head>",
+        );
+        assert_eq!(buffer.process_queue(), (false, true));
+
+        assert!(matches!(
+            buffer.prev_tail_ast.as_slice(),
+            [MarkdownNode::CodeBlock { lang, code, .. }]
+                if lang.as_deref() == Some("html")
+                    && code.contains("<!DOCTYPE html>")
+                    && code.contains("<style>")
+        ));
+
+        buffer.finalize();
+        assert!(matches!(
+            buffer.stable_blocks.as_slice(),
+            [StreamBlock::Markdown { nodes: Some(nodes), .. }]
+                if matches!(
+                    nodes.as_slice(),
+                    [MarkdownNode::CodeBlock { lang, code, .. }]
+                        if lang.as_deref() == Some("html")
+                            && code.contains("<!DOCTYPE html>")
+                            && code.contains("<style>")
+                )
+        ));
     }
 
     #[test]

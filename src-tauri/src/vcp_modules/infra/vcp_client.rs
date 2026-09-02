@@ -401,24 +401,10 @@ fn streaming_failure(
     VcpRequestFailure::streaming(message, buffer.full_text.clone())
 }
 
-fn adaptive_aurora_parse_interval(tail_len: usize) -> Duration {
-    Duration::from_millis(match tail_len {
-        0..=8_191 => 33,
-        8_192..=24_575 => 100,
-        _ => 200,
-    })
-}
+const AURORA_PARSE_INTERVAL: Duration = Duration::from_millis(33);
 
-fn adaptive_aurora_force_bytes(tail_len: usize) -> usize {
-    match tail_len {
-        0..=8_191 => 1024,
-        8_192..=24_575 => 4096,
-        _ => 8192,
-    }
-}
-
-fn remaining_aurora_parse_delay(elapsed: Duration, projected_tail_len: usize) -> Duration {
-    adaptive_aurora_parse_interval(projected_tail_len).saturating_sub(elapsed)
+fn remaining_aurora_parse_delay(elapsed: Duration) -> Duration {
+    AURORA_PARSE_INTERVAL.saturating_sub(elapsed)
 }
 
 #[cfg(any(target_os = "android", test))]
@@ -1402,14 +1388,7 @@ async fn handle_streaming_request<R: Runtime>(
         if pending_chunk.is_empty() {
             return (false, false);
         }
-        let projected_tail_len = buffer
-            .tail_content
-            .len()
-            .saturating_add(pending_chunk.len());
-        if !force
-            && last_parse.elapsed() < adaptive_aurora_parse_interval(projected_tail_len)
-            && pending_chunk.len() < adaptive_aurora_force_bytes(projected_tail_len)
-        {
+        if !force && last_parse.elapsed() < AURORA_PARSE_INTERVAL {
             return (false, false);
         }
 
@@ -1635,14 +1614,8 @@ async fn handle_streaming_request<R: Runtime>(
                 {
                     if let Some(ref mut reader) = tcp_reader {
                         loop {
-                            let projected_tail_len = aurora_buffer
-                                .tail_content
-                                .len()
-                                .saturating_add(pending_aurora_chunk.len());
-                            let pending_flush_delay = remaining_aurora_parse_delay(
-                                last_aurora_parse.elapsed(),
-                                projected_tail_len,
-                            );
+                            let pending_flush_delay =
+                                remaining_aurora_parse_delay(last_aurora_parse.elapsed());
                             tokio::select! {
                                 biased;
                                 _ = cancellation_token.cancelled() => {
@@ -1818,14 +1791,8 @@ async fn handle_streaming_request<R: Runtime>(
                 {
                     if let Some(ref mut line_stream) = lines {
                         loop {
-                            let projected_tail_len = aurora_buffer
-                                .tail_content
-                                .len()
-                                .saturating_add(pending_aurora_chunk.len());
-                            let pending_flush_delay = remaining_aurora_parse_delay(
-                                last_aurora_parse.elapsed(),
-                                projected_tail_len,
-                            );
+                            let pending_flush_delay =
+                                remaining_aurora_parse_delay(last_aurora_parse.elapsed());
                             tokio::select! {
                                 biased;
                                 _ = cancellation_token.cancelled() => {
@@ -2934,36 +2901,18 @@ mod active_request_tests {
     }
 
     #[test]
-    fn aurora_parse_deadline_uses_the_active_tail_tier() {
-        assert_eq!(
-            adaptive_aurora_parse_interval(8_191),
-            Duration::from_millis(33)
-        );
-        assert_eq!(
-            adaptive_aurora_parse_interval(8_192),
-            Duration::from_millis(100)
-        );
-        assert_eq!(
-            adaptive_aurora_parse_interval(24_576),
-            Duration::from_millis(200)
-        );
-        assert_eq!(adaptive_aurora_force_bytes(8_191), 1024);
-        assert_eq!(adaptive_aurora_force_bytes(8_192), 4096);
-        assert_eq!(adaptive_aurora_force_bytes(24_576), 8192);
+    fn aurora_parse_interval_is_fixed_at_30hz() {
+        assert_eq!(AURORA_PARSE_INTERVAL, Duration::from_millis(33));
     }
 
     #[test]
     fn aurora_parse_deadline_is_anchored_to_the_last_parse() {
         assert_eq!(
-            remaining_aurora_parse_delay(Duration::from_millis(10), 1_000),
+            remaining_aurora_parse_delay(Duration::from_millis(10)),
             Duration::from_millis(23)
         );
         assert_eq!(
-            remaining_aurora_parse_delay(Duration::from_millis(99), 10_000),
-            Duration::from_millis(1)
-        );
-        assert_eq!(
-            remaining_aurora_parse_delay(Duration::from_millis(250), 30_000),
+            remaining_aurora_parse_delay(Duration::from_millis(99)),
             Duration::ZERO
         );
     }
