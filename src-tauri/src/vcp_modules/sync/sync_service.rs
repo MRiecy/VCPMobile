@@ -3433,14 +3433,6 @@ pub async fn list_sync_log_files(app: AppHandle) -> Result<Vec<SyncLogFileInfo>,
 }
 
 #[tauri::command]
-pub async fn get_sync_session_log_path(
-    state: State<'_, SyncState>,
-) -> Result<Option<String>, String> {
-    let guard = state.current_log_path.read().await;
-    Ok(guard.clone())
-}
-
-#[tauri::command]
 pub async fn read_sync_log_file(app: AppHandle, filename: String) -> Result<String, String> {
     let canonical_file = resolve_sync_log_file(&app, &filename, "SYNC_LOG_READ_FAILED").await?;
     let content = tokio::fs::read_to_string(&canonical_file)
