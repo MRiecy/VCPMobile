@@ -261,8 +261,10 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     pruneStreamTerminalTombstones();
   };
 
-  // ===== rAF 30Hz 帧合并直推暂存池 =====
-  // 记录每个消息最新的 Aurora 暂存数据，消灭定时器空转，硬件级防抖并实现30Hz降降基数
+  // ===== rAF 对齐绘制的原子提交暂存池 =====
+  // Rust vcp_client 的 33ms 门禁是 Aurora 唯一的频率上限。前端不能再设第二个
+  // 33ms 时间门禁：后端时钟与屏幕 VSync 不同步，叠加会平白增加一帧延迟。
+  // 此处 rAF 只合并下一次绘制前到达的事件，并将同一 Aurora 帧的字段原子写入 Vue。
   const rAFPendingUpdates = new Map<
     string,
     {
@@ -277,10 +279,8 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       tailCursor: TailFrameCursor | null;
       needsSnapshotReason: string | null;
       animationFrameId: number | null;
-      lastRenderTime: number;
     }
   >();
-  const MIN_RENDER_INTERVAL_MS = 33.3; // 限制最大刷新频率为 30Hz
 
   /**
    * 物理防线：强行中止、强制同步刷新并安全清理指定消息的 rAF 帧状态，杜绝任何泄漏与闪烁
@@ -318,43 +318,32 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     const update = rAFPendingUpdates.get(messageKey);
     if (!update || update.animationFrameId !== null) return;
 
-    const runRenderLoop = () => {
+    update.animationFrameId = requestAnimationFrame(() => {
       const up = rAFPendingUpdates.get(messageKey);
       if (!up) return;
 
-      const now = performance.now();
-      const elapsed = now - up.lastRenderTime;
-
-      if (elapsed >= MIN_RENDER_INTERVAL_MS) {
-        // 满足 30Hz 时间间隔，以原子事务方式刷入 Vue 响应式数据
-        const m = activeStreamMessages.get(messageKey);
-        if (m) {
-          if (up.content !== null) m.content = up.content;
-          if (up.blocks !== null) m.blocks = up.blocks;
-          if (up.tailSnapshot !== null) m.tailSnapshot = up.tailSnapshot;
-          if (up.tailFrame !== null) m.tailFrame = up.tailFrame;
-          if (up.tailContent !== null) m.tailContent = up.tailContent;
-          if (up.tailBlockChanged) {
-            m.tailBlock = up.tailBlock ?? undefined;
-          }
+      const m = activeStreamMessages.get(messageKey);
+      if (m) {
+        if (up.content !== null) m.content = up.content;
+        if (up.blocks !== null) m.blocks = up.blocks;
+        if (up.tailSnapshot !== null) m.tailSnapshot = up.tailSnapshot;
+        if (up.tailFrame !== null) m.tailFrame = up.tailFrame;
+        if (up.tailContent !== null) m.tailContent = up.tailContent;
+        if (up.tailBlockChanged) {
+          m.tailBlock = up.tailBlock ?? undefined;
         }
-        up.lastRenderTime = now;
-        // 重置当前帧内的合并暂存状态
-        up.content = null;
-        up.blocks = null;
-        up.tailContent = null;
-        up.tailBlock = null;
-        up.tailBlockChanged = false;
-        up.tailFrame = null;
-        up.tailSnapshot = null;
-        up.animationFrameId = null;
-      } else {
-        // 未到时间阀值，在下一物理帧继续尝试
-        up.animationFrameId = requestAnimationFrame(runRenderLoop);
       }
-    };
 
-    update.animationFrameId = requestAnimationFrame(runRenderLoop);
+      // 重置下一次绘制前的合并暂存状态。
+      up.content = null;
+      up.blocks = null;
+      up.tailContent = null;
+      up.tailBlock = null;
+      up.tailBlockChanged = false;
+      up.tailFrame = null;
+      up.tailSnapshot = null;
+      up.animationFrameId = null;
+    });
   };
 
   const auroraSnapshotJobs = new Map<string, Promise<boolean>>();
@@ -466,7 +455,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         latestPending.tailSnapshot = null;
         latestPending.tailFrame = null;
         latestPending.needsSnapshotReason = null;
-        latestPending.lastRenderTime = performance.now();
         return true;
       }
     })().finally(() => {
@@ -836,7 +824,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             tailCursor: null,
             needsSnapshotReason: null,
             animationFrameId: null,
-            lastRenderTime: 0,
           };
           rAFPendingUpdates.set(messageKey, update);
         }
