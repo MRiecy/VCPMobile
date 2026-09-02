@@ -108,9 +108,13 @@ describe('ThemePicker draft, preview and presentation controls', () => {
 
   it('exposes the second three-mode entry and persists a selection immediately', async () => {
     const store = useThemeStore();
-    wrapper = mount(ThemePicker, { global: { plugins: [pinia] } });
+    wrapper = mount(ThemePicker, {
+      props: { section: 'rendering' },
+      global: { plugins: [pinia] },
+    });
     await flushPromises();
 
+    expect(wrapper.find('[data-testid="theme-carousel"]').exists()).toBe(false);
     const options = wrapper.findAll('[data-presentation-value]');
     expect(options.map((option) => option.attributes('data-presentation-value'))).toEqual([
       'bubble',
@@ -126,5 +130,16 @@ describe('ThemePicker draft, preview and presentation controls', () => {
     expect(wrapper.get('[data-presentation-value="panel"]').attributes('aria-checked')).toBe('true');
     expect(wrapper.text()).toContain('消息呈现与内容宽度');
     expect(wrapper.text()).toContain('点选后立即生效');
+  });
+
+  it('keeps message rendering controls out of the theme-only section', async () => {
+    wrapper = mount(ThemePicker, {
+      props: { section: 'theme' },
+      global: { plugins: [pinia] },
+    });
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="theme-carousel"]').exists()).toBe(true);
+    expect(wrapper.find('[data-testid="presentation-settings"]').exists()).toBe(false);
   });
 });

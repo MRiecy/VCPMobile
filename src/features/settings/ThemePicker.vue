@@ -11,6 +11,14 @@ import {
 import { useNotificationStore } from '../../core/stores/notification';
 import ThemeLivePreview from './ThemeLivePreview.vue';
 
+type ThemePickerSection = 'all' | 'theme' | 'rendering';
+
+const props = withDefaults(defineProps<{
+  section?: ThemePickerSection;
+}>(), {
+  section: 'all',
+});
+
 const themeStore = useThemeStore();
 const notificationStore = useNotificationStore();
 const railRef = ref<HTMLElement | null>(null);
@@ -22,6 +30,9 @@ const presentationError = ref('');
 let scrollIdleTimer: number | null = null;
 let scrollMeasureFrame: number | null = null;
 let isActive = true;
+
+const showThemeSettings = computed(() => props.section !== 'rendering');
+const showRenderingSettings = computed(() => props.section !== 'theme');
 
 const appliedThemeKey = computed(() => {
   return normalizeThemeModuleKey(themeStore.currentTheme) || themeStore.availableThemes[0]?.fileName || '';
@@ -149,6 +160,8 @@ const selectPresentationMode = (mode: ChatPresentationMode) => {
 };
 
 onMounted(async () => {
+  if (!showThemeSettings.value) return;
+
   try {
     // 设置页打开时已预热主题清单（见 SettingsView.warmSubPages）；
     // 仅在未经预热直接进入时才自行拉取，避免重复构建清单数组引发的二次渲染。
@@ -174,6 +187,8 @@ onMounted(async () => {
 watch(
   () => themeStore.currentTheme,
   async (nextTheme, previousTheme) => {
+    if (!showThemeSettings.value) return;
+
     const previousAppliedKey = normalizeThemeModuleKey(previousTheme);
     const draftWasClean = !draftThemeKey.value || draftThemeKey.value === previousAppliedKey;
     if (!draftWasClean) return;
@@ -193,9 +208,9 @@ onBeforeUnmount(() => {
 <template>
   <div class="theme-picker-shell h-full min-h-0">
     <div class="theme-picker-scroll h-full min-h-0 overflow-y-auto no-rubber-band">
-      <ThemeLivePreview :theme="draftTheme" :initialization-error="initializationError" />
+      <ThemeLivePreview v-if="showThemeSettings" :theme="draftTheme" :initialization-error="initializationError" />
 
-      <section class="theme-settings-section" aria-labelledby="theme-carousel-title">
+      <section v-if="showThemeSettings" class="theme-settings-section" aria-labelledby="theme-carousel-title">
         <div class="theme-section-heading is-compact">
           <div>
             <h3 id="theme-carousel-title">主题选择</h3>
@@ -232,7 +247,7 @@ onBeforeUnmount(() => {
         </button>
       </section>
 
-      <section class="theme-settings-section presentation-settings" aria-labelledby="presentation-title"
+      <section v-if="showRenderingSettings" class="theme-settings-section presentation-settings" aria-labelledby="presentation-title"
         data-testid="presentation-settings">
         <div class="theme-section-heading">
           <div>

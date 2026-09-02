@@ -22,13 +22,11 @@ const ThemePicker = defineAsyncComponent(() => import("./ThemePicker.vue"));
 const ModelSelector = defineAsyncComponent(() => import("../../components/ModelSelector.vue"));
 const AboutSection = defineAsyncComponent(() => import("./components/AboutSection.vue"));
 
-// 低频子页面（advanced / power）：懒加载，用户点进子页面时才解析
+// 低频子页面（advanced / guide）：懒加载，用户点进子页面时才解析
 // const AssistantSettingsSection = defineAsyncComponent(() => import("./components/AssistantSettingsSection.vue"));
 const AiLogicSettingsSection = defineAsyncComponent(() => import("./components/AiLogicSettingsSection.vue"));
 const TopicSummarySection = defineAsyncComponent(() => import("./components/TopicSummarySection.vue"));
-const DistributedSettingsSection = defineAsyncComponent(() => import("../distributed/DistributedSettingsSection.vue"));
 const MaintenanceSection = defineAsyncComponent(() => import("./components/MaintenanceSection.vue"));
-const BatteryOptimizationGuide = defineAsyncComponent(() => import("./components/BatteryOptimizationGuide.vue"));
 const GuideCenterSection = defineAsyncComponent(() => import("../guide/components/GuideCenterSection.vue"));
 
 
@@ -95,9 +93,9 @@ const visibleSubPage = ref<string | null>(null);
 const categories = [
   { id: "identity", title: "用户身份", description: "头像、用户名与管理员账号" },
   { id: "connection", title: "服务器连接", description: "VCP Server API 与数据同步" },
-  { id: "theme", title: "主题切换", description: "主题预览与消息呈现" },
-  { id: "advanced", title: "高级功能", description: "话题总结、分布式节点与数据维护" },
-  { id: "power", title: "电池优化", description: "电池白名单与进程锁定设置" },
+  { id: "theme", title: "主题切换", description: "主题预览与切换" },
+  { id: "rendering", title: "消息渲染", description: "排版模式、内容宽度及后续渲染选项" },
+  { id: "advanced", title: "高级功能", description: "移动 CLI、话题总结与数据维护" },
   { id: "guide", title: "帮助与指引", description: "交互教学与功能指引回放" },
   { id: "about", title: "关于", description: "版本与更新" },
 ];
@@ -202,8 +200,8 @@ watch(
   },
 );
 
-// 纯展示型子页面：无可编辑内容，物理返回时跳过 saveSettings
-const READ_ONLY_SUBPAGES = new Set(['about', 'power']);
+// 不走 AppSettings 草稿持久化的子页面：物理返回时跳过无意义的 saveSettings
+const READ_ONLY_SUBPAGES = new Set(['about', 'rendering']);
 
 watch(currentSubPage, (val) => {
   if (val) {
@@ -338,7 +336,7 @@ watch(() => props.isOpen, syncFluidActive);
 
             <div
               class="flex-1"
-              :class="currentSubPage === 'theme'
+              :class="currentSubPage === 'theme' || currentSubPage === 'rendering'
                 ? 'overflow-hidden flex flex-col min-h-0'
                 : 'overflow-y-auto px-3 pt-6 space-y-6 no-rubber-band pb-[calc(var(--vcp-safe-bottom,48px))]'"
             >
@@ -383,7 +381,12 @@ watch(() => props.isOpen, syncFluidActive);
 
               <!-- 主题切换 -->
               <template v-if="visibleSubPage === 'theme'">
-                <ThemePicker />
+                <ThemePicker key="theme" section="theme" />
+              </template>
+
+              <!-- 消息渲染 -->
+              <template v-if="visibleSubPage === 'rendering'">
+                <ThemePicker key="rendering" section="rendering" />
               </template>
 
               <!-- 高级功能 -->
@@ -415,26 +418,12 @@ watch(() => props.isOpen, syncFluidActive);
                     </SettingsCard>
                   </div>
                   <div>
-                    <h3 class="text-[11px] font-black uppercase tracking-[0.15em] opacity-50 mb-3 px-1">分布式节点</h3>
-                    <SettingsCard>
-                      <DistributedSettingsSection
-                        :settings="settings"
-                        @save-request="saveSettings"
-                      />
-                    </SettingsCard>
-                  </div>
-                  <div>
                     <h3 class="text-[11px] font-black uppercase tracking-[0.15em] opacity-50 mb-3 px-1">数据维护</h3>
                     <SettingsCard>
                       <MaintenanceSection />
                     </SettingsCard>
                   </div>
                 </div>
-              </template>
-
-              <!-- 后台保活 -->
-              <template v-if="visibleSubPage === 'power'">
-                <BatteryOptimizationGuide />
               </template>
 
               <!-- 帮助与指引 -->
