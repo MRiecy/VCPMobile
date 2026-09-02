@@ -225,6 +225,7 @@ export type AstMutation =
   | { op: "append"; id: string; chunk: string }
   | { op: "prop"; id: string; key: string; value: string }
   | { op: "replace"; id: string; node: MarkdownNode }
+  | { op: "patch_code"; id: string; completed_html: string; active_html: string }
   | { op: "replace_inline"; id: string; node: InlineNode }
   | { op: "remove"; id: string };
 

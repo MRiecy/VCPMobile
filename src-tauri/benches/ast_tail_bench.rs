@@ -2,8 +2,8 @@
 
 //! Tail 处理性能基准（criterion harness）。
 //!
-//! 目的：为 `MAX_SPECULATIVE_TAIL_AST_BYTES`（当前 8192）和流式代码块高亮阈值
-//! （当前 4096）的取值提供实测数据，并为自适应降帧梯度提供单帧开销曲线。
+//! 目的：量化 `MAX_SPECULATIVE_TAIL_AST_BYTES`、全量 Syntect 基线与增量代码补丁
+//! 的单帧/累计开销，为 Aurora 热路径的人工性能复核提供数据。
 //!
 //! 运行方式（用 perf profile 逼近发布版热路径性能）：
 //!   cargo bench --profile perf
@@ -21,8 +21,10 @@ mod distributed;
 mod vcp_modules;
 
 use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, TailFrame};
-use crate::vcp_modules::chat::ast_diff::diff_ast;
-use crate::vcp_modules::pre_renderer::code_highlighter::highlight_code_block;
+use crate::vcp_modules::chat::ast_diff::{diff_ast_streaming, prime_stream_code_highlighter};
+use crate::vcp_modules::pre_renderer::code_highlighter::{
+    highlight_code_block, IncrementalCodeHighlighter,
+};
 use crate::vcp_modules::pre_renderer::{parse_markdown_to_ast_streaming, MarkdownNode};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 
@@ -52,8 +54,8 @@ fn as_open_code_fence(content: &str) -> String {
 
 /// 基准 1：单帧全链路开销 —— parse → hash → diff → serialize，外加 IPC 载荷字节数。
 ///
-/// 这是决定 8KB 上限的关键数据：一帧（一次 process_queue）在 tail 达到某尺寸时的总开销。
-/// 由于 CodeBlock 走整节点 Replace，每帧都会把整块重新 parse/hash/serialize。
+/// 一帧（一次 process_queue）在 tail 达到某尺寸时的总开销。代码块严格追加时走
+/// `PatchCode`，只序列化新完成行和当前活跃行。
 fn bench_single_frame_pipeline(c: &mut Criterion) {
     let html = load_genesis_html();
     let mut group = c.benchmark_group("tail_single_frame_pipeline");
@@ -68,7 +70,9 @@ fn bench_single_frame_pipeline(c: &mut Criterion) {
             b.iter(|| {
                 let parsed = parse_markdown_to_ast_streaming(&fenced);
                 let prev_ast = parse_markdown_to_ast_streaming(&prev_fenced);
-                let mutations = diff_ast(&prev_ast, &parsed, "t");
+                let mut highlighter = IncrementalCodeHighlighter::default();
+                prime_stream_code_highlighter(&prev_ast, "t", &mut highlighter);
+                let mutations = diff_ast_streaming(&prev_ast, &parsed, "t", &mut highlighter);
                 let frame = TailFrame {
                     stream_id: 1,
                     epoch: 1,
@@ -86,7 +90,7 @@ fn bench_single_frame_pipeline(c: &mut Criterion) {
     group.finish();
 }
 
-/// 基准 2：syntect 高亮开销（决定 4096 流式高亮阈值是否合理）。
+/// 基准 2：全量 Syntect 高亮基线，用于对照增量代码补丁。
 fn bench_syntect_highlight(c: &mut Criterion) {
     let html = load_genesis_html();
     let mut group = c.benchmark_group("tail_syntect_highlight");
@@ -131,11 +135,12 @@ fn bench_cumulative_stream(c: &mut Criterion) {
 
             b.iter(|| {
                 let mut prev_ast: Vec<MarkdownNode> = Vec::new();
+                let mut highlighter = IncrementalCodeHighlighter::default();
                 for &end in &bounds {
                     let content = &full[..end];
                     let fenced = as_open_code_fence(content);
                     let new_ast = parse_markdown_to_ast_streaming(&fenced);
-                    let mutations = diff_ast(&prev_ast, &new_ast, "t");
+                    let mutations = diff_ast_streaming(&prev_ast, &new_ast, "t", &mut highlighter);
                     let frame = TailFrame {
                         stream_id: 1,
                         epoch: 1,

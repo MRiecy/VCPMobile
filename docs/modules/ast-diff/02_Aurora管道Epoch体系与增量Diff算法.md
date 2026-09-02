@@ -233,12 +233,11 @@ if !self.tail_content.is_empty() {
 }
 ```
 
-三个分支的语义：
+两个分支的语义：
 | 条件 | 策略 | 理由 |
 |------|------|------|
 | > 64KB（包括 HTML） | `nodes=None` → **纯文本兜底** | 防止性能悬崖；常态走 `tailOp` 字面文本追加 |
-| ≤ 64KB 且以 HTML 标签开头 | 包装为 `RawHtml` | 防止 pulldown-cmark 将 CSS/内联样式解析为代码块 |
-| ≤ 64KB 且非 HTML | 正常 AST 解析 | 标准推测渲染路径 |
+| ≤ 64KB | 统一调用流式 Markdown AST 解析 | 未闭合围栏由 Markdown 解析器推测为 `CodeBlock`，不再另做 HTML sniff |
 
 > **降级只 bump 一次 epoch**：当 tail 跨过 64KB 进入纯文本兜底时，**仅在 AST 模式 → 纯文本模式的「切换帧」**递增一次 epoch/reset；此后保持安静，不再每帧 bump。这与旧版「每帧 `nodes=None` 并 bump epoch/reset（降级到 innerHTML、反复留白）」的行为根本不同——旧版会在超阈值后每帧清空重建，造成可见闪烁。
 
@@ -474,7 +473,8 @@ flowchart TD
     OrderedCheck -->|"Yes"| ListReplace["Emit Replace"]
     OrderedCheck -->|"No"| ItemDiff["逐 item 递归 diff_markdown_nodes。<br/>item 数量变化 → Replace"]
 
-    TypeDispatch -->|"Table / RawHtml / Mermaid / CodeBlock / ThematicBreak"| LeafReplace["Emit Replace<br/>(前端有优化策略)"]
+    TypeDispatch -->|"CodeBlock 严格追加"| CodePatch["Emit PatchCode<br/>完整行追加 + 活跃行替换"]
+    TypeDispatch -->|"Table / RawHtml / Mermaid / ThematicBreak"| LeafReplace["Emit Replace<br/>(前端有优化策略)"]
 
     style FullReplace fill:#ff9800,color:#fff
     style LeafReplace fill:#ff9800,color:#fff
@@ -558,6 +558,7 @@ fn diff_text_node(id: &str, old_value: &str, new_value: &str, mutations: &mut Ve
 | `pending_mutations` | ~200-800 bytes | 典型帧的突变指令集 |
 | `TailFrame` 序列化 JSON | ~300-1200 bytes | IPC 传输载荷 |
 | `tail_projection` | 常数级 | 保存可续算 SHA-256 状态与 AST/plain mode |
+| `code_highlighter` | 每个活跃 CodeBlock 一份 Syntect 状态 + 字节游标 | 不保存代码原文或完整 HTML 镜像；离开当前 AST 后立即释放 |
 
 ### 6.3 测试覆盖
 
@@ -567,23 +568,18 @@ fn diff_text_node(id: &str, old_value: &str, new_value: &str, mutations: &mut Ve
 2. **`test_diff_add_node`**：验证新增段落产生正确的 Add 突变
 3. **`test_real_agent_stream_simulation`**：从文件读取 9.8KB 的 Agent 输出样张，模拟真实的随机 SSE 分块（5-150 chars per chunk），全程追踪突变总数，验证 serde 序列化不会 panic
 
-### 6.4 自适应降帧 (Adaptive Frame-Rate Degradation)
+### 6.4 固定帧率与增量代码高亮
 
-CodeBlock / RawHtml 在 Diff 时是**整节点 Replace**（见 §4.5），意味着每一帧都把**整个不断增长的块**重新序列化进 IPC 载荷。对一个流式增长到 40KB 的块，累计重发量高达 **~18.5MB**——载荷体积是块大小的 O(N²)。
+后端以固定约 30Hz 合并 SSE chunk；前端 rAF 只负责对齐下一次绘制，不再设置第二个时间门禁。
 
-因此，引擎不再在旧的 8KB 悬崖处做「硬性纯文本降级」，而是改为两手并用：**把 AST 上限抬高到 64KB**（见 §2.3），**同时按 tail 字节长度对 emit 频率做节流**。节流实现在 `vcp_client.rs` 的 `flush_aurora_parse`（既有的 ~33ms 节流逻辑就在此处）：
+流式 `CodeBlock` 不再调用 `highlighted_html_for_string` 重建完整结果，也没有按代码长度关闭高亮的门禁。`IncrementalCodeHighlighter` 保存最后一个完整换行处的 Syntect `ParseState` / `HighlightState`：
 
-| Tail 字节长度 | emit 间隔 | 频率 | 说明 |
-|--------------|----------|:----:|------|
-| < 8KB | 33ms | 30Hz | 不变，肉眼无感 |
-| 8–24KB | 100ms | 10Hz | 进入降帧 |
-| ≥ 24KB | 200ms | 5Hz | 重度降帧 |
+- 新完成的行通过 `PatchCode.completed_html` 追加到稳定区；
+- 尚未换行的末行从行首 checkpoint 重算，通过 `active_html` 原地替换；
+- 后端 canonical AST 只持有代码原文，完整高亮 HTML 仅在首次 Add、Replace 或恢复 Snapshot 时临时生成；
+- 围栏闭合、epoch 变化、语言变化或源码不再严格追加时，释放旧 session 并执行一次完整边界重建。
 
-这把每秒 IPC 载荷量压住了：在 5Hz 下，一个 64KB 的块每秒重发 **~320KB/s**，而非 30Hz 下的 **~2MB/s**。`force-parse-bytes`（强制解析阈值）也随档位缩放（**1024 / 4096 / 8192**），使大块 chunk 不至于绕过节流。
-
-> **基准依据**：对一个 40KB tail 做 parse + hash + diff + serialize 仅 **~0.55ms**——**解析根本不是瓶颈**，真正的代价是 IPC 载荷体积。基准代码位于 `src-tauri/src/vcp_modules/chat/ast_bench.rs`。
-
-此外，流式期间 syntect 语法高亮被 `code.len() > 4096` 门控（`markdown_parser.rs`）。这道门是合理的：高亮成本随长度急剧上升（**7ms@4k → 66ms@40k**），而纯解析始终维持在亚毫秒级。
+64KB 纯文本兜底仍约束整个推测 tail 和通用 AST Snapshot；它不再承担代码高亮限流职责。
 
 ---
 

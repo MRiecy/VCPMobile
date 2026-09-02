@@ -1,3 +1,4 @@
+use crate::vcp_modules::pre_renderer::code_highlighter::IncrementalCodeHighlighter;
 use crate::vcp_modules::pre_renderer::markdown_ast::{InlineNode, MarkdownNode};
 use serde::{Deserialize, Serialize};
 
@@ -36,6 +37,12 @@ pub enum AstMutation {
     },
     #[serde(rename = "replace")]
     Replace { id: String, node: MarkdownNode },
+    #[serde(rename = "patch_code")]
+    PatchCode {
+        id: String,
+        completed_html: String,
+        active_html: String,
+    },
     #[serde(rename = "replace_inline")]
     ReplaceInline { id: String, node: InlineNode },
     #[serde(rename = "remove")]
@@ -43,22 +50,101 @@ pub enum AstMutation {
 }
 
 /// 对外暴露的 AST 对比入口
+#[allow(dead_code)]
 pub fn diff_ast(
     old_nodes: &[MarkdownNode],
     new_nodes: &[MarkdownNode],
     prefix: &str,
 ) -> Vec<AstMutation> {
     let mut mutations = Vec::new();
-    diff_markdown_nodes(old_nodes, new_nodes, "root", prefix, &mut mutations);
+    let mut highlighter = None;
+    diff_markdown_nodes_inner(
+        old_nodes,
+        new_nodes,
+        "root",
+        prefix,
+        &mut mutations,
+        &mut highlighter,
+    );
     mutations
 }
 
+/// Aurora 专用 AST diff：代码块严格追加时输出增量高亮补丁，其余节点沿用通用 diff。
+pub fn diff_ast_streaming(
+    old_nodes: &[MarkdownNode],
+    new_nodes: &[MarkdownNode],
+    prefix: &str,
+    code_highlighter: &mut IncrementalCodeHighlighter,
+) -> Vec<AstMutation> {
+    code_highlighter.begin_frame();
+    let mut mutations = Vec::new();
+    let mut highlighter = Some(code_highlighter);
+    diff_markdown_nodes_inner(
+        old_nodes,
+        new_nodes,
+        "root",
+        prefix,
+        &mut mutations,
+        &mut highlighter,
+    );
+    if let Some(highlighter) = highlighter {
+        mark_stream_code_nodes(new_nodes, prefix, highlighter);
+        highlighter.finish_frame();
+    }
+    mutations
+}
+
+/// epoch/reset 后只推进后端行状态，不保留已生成 HTML 镜像。
+pub fn prime_stream_code_highlighter(
+    nodes: &[MarkdownNode],
+    prefix: &str,
+    code_highlighter: &mut IncrementalCodeHighlighter,
+) {
+    code_highlighter.clear();
+    code_highlighter.begin_frame();
+    prime_stream_code_nodes(nodes, prefix, code_highlighter);
+    code_highlighter.finish_frame();
+}
+
+/// Snapshot/恢复帧按需生成完整高亮 DOM；临时状态随函数返回立即释放。
+pub fn render_stream_snapshot(nodes: &[MarkdownNode], prefix: &str) -> Vec<MarkdownNode> {
+    let mut highlighter = IncrementalCodeHighlighter::default();
+    highlighter.begin_frame();
+    nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            prepare_stream_node(node, &format!("{prefix}{index}"), &mut highlighter)
+        })
+        .collect()
+}
+
+#[allow(dead_code)]
 pub fn diff_markdown_nodes(
     old_list: &[MarkdownNode],
     new_list: &[MarkdownNode],
     parent_id: &str,
     prefix: &str,
     mutations: &mut Vec<AstMutation>,
+) {
+    let mut highlighter = None;
+    diff_markdown_nodes_inner(
+        old_list,
+        new_list,
+        parent_id,
+        prefix,
+        mutations,
+        &mut highlighter,
+    );
+}
+
+fn diff_markdown_nodes_inner(
+    old_list: &[MarkdownNode],
+    new_list: &[MarkdownNode],
+    parent_id: &str,
+    prefix: &str,
+    mutations: &mut Vec<AstMutation>,
+    highlighter: &mut Option<&mut IncrementalCodeHighlighter>,
 ) {
     let common_len = old_list.len().min(new_list.len());
 
@@ -72,16 +158,20 @@ pub fn diff_markdown_nodes(
             continue; // Hash 命中，相同，直接跳过
         }
 
-        diff_single_markdown_node(old_node, new_node, &node_id, mutations);
+        diff_single_markdown_node(old_node, new_node, &node_id, mutations, highlighter);
     }
 
     // 2. 新增的尾部节点
     for (i, item) in new_list.iter().enumerate().skip(common_len) {
         let node_id = format!("{}{}", prefix, i);
+        let node = highlighter.as_deref_mut().map_or_else(
+            || item.clone(),
+            |highlighter| prepare_stream_node(item, &node_id, highlighter),
+        );
         mutations.push(AstMutation::Add {
             id: node_id,
             parent: parent_id.to_string(),
-            node: item.clone(),
+            node,
         });
     }
 
@@ -97,12 +187,17 @@ fn diff_single_markdown_node(
     new_node: &MarkdownNode,
     node_id: &str,
     mutations: &mut Vec<AstMutation>,
+    highlighter: &mut Option<&mut IncrementalCodeHighlighter>,
 ) {
     if std::mem::discriminant(old_node) != std::mem::discriminant(new_node) {
         // 类型不同，直接 Replace
+        let node = highlighter.as_deref_mut().map_or_else(
+            || new_node.clone(),
+            |highlighter| prepare_stream_node(new_node, node_id, highlighter),
+        );
         mutations.push(AstMutation::Replace {
             id: node_id.to_string(),
-            node: new_node.clone(),
+            node,
         });
         return;
     }
@@ -163,12 +258,13 @@ fn diff_single_markdown_node(
                 ..
             },
         ) => {
-            diff_markdown_nodes(
+            diff_markdown_nodes_inner(
                 old_children,
                 new_children,
                 node_id,
                 &format!("{}.b", node_id),
                 mutations,
+                highlighter,
             );
         }
         (
@@ -185,29 +281,50 @@ fn diff_single_markdown_node(
         ) => {
             if old_ordered != new_ordered {
                 // 有序/无序切换会改变标签名（ul<->ol），无法原地修改，只能整体 Replace
+                let node = highlighter.as_deref_mut().map_or_else(
+                    || new_node.clone(),
+                    |highlighter| prepare_stream_node(new_node, node_id, highlighter),
+                );
                 mutations.push(AstMutation::Replace {
                     id: node_id.to_string(),
-                    node: new_node.clone(),
+                    node,
                 });
             } else {
                 let common_len = old_items.len().min(new_items.len());
                 // 1. 公共项：逐项递归 diff（item 内块级子节点 parent 为该 <li>）
                 for i in 0..common_len {
                     let item_prefix = format!("{}.li{}", node_id, i);
-                    diff_markdown_nodes(
+                    diff_markdown_nodes_inner(
                         &old_items[i],
                         &new_items[i],
                         &item_prefix,
                         &format!("{}.b", item_prefix),
                         mutations,
+                        highlighter,
                     );
                 }
                 // 2. 新增的尾部列表项：item 级别增量 Add（挂到 <ul>/<ol> 下），不再整表重建
                 for (i, item) in new_items.iter().enumerate().skip(common_len) {
+                    let item_id = format!("{}.li{}", node_id, i);
+                    let children = highlighter.as_deref_mut().map_or_else(
+                        || item.clone(),
+                        |highlighter| {
+                            item.iter()
+                                .enumerate()
+                                .map(|(block_index, child)| {
+                                    prepare_stream_node(
+                                        child,
+                                        &format!("{}.b{}", item_id, block_index),
+                                        highlighter,
+                                    )
+                                })
+                                .collect()
+                        },
+                    );
                     mutations.push(AstMutation::AddListItem {
-                        id: format!("{}.li{}", node_id, i),
+                        id: item_id,
                         parent: node_id.to_string(),
-                        children: item.clone(),
+                        children,
                     });
                 }
                 // 3. 删除的尾部列表项：直接 Remove 对应 <li>
@@ -218,13 +335,176 @@ fn diff_single_markdown_node(
                 }
             }
         }
-        // Table, RawHtml, CodeBlock, ThematicBreak 变化时直接 Replace 整个节点
+        (
+            MarkdownNode::CodeBlock {
+                lang: old_lang,
+                code: old_code,
+                ..
+            },
+            MarkdownNode::CodeBlock {
+                lang: new_lang,
+                code: new_code,
+                ..
+            },
+        ) => {
+            let lang = new_lang.as_deref().unwrap_or("plaintext");
+            let patch = highlighter.as_deref_mut().and_then(|highlighter| {
+                (old_lang == new_lang && lang != "mermaid")
+                    .then(|| highlighter.append(node_id, old_code, new_code, lang))
+                    .flatten()
+            });
+
+            if let Some(patch) = patch {
+                mutations.push(AstMutation::PatchCode {
+                    id: node_id.to_string(),
+                    completed_html: patch.completed_html,
+                    active_html: patch.active_html,
+                });
+            } else {
+                let node = highlighter.as_deref_mut().map_or_else(
+                    || new_node.clone(),
+                    |highlighter| prepare_stream_node(new_node, node_id, highlighter),
+                );
+                mutations.push(AstMutation::Replace {
+                    id: node_id.to_string(),
+                    node,
+                });
+            }
+        }
+        // Table、RawHtml、ThematicBreak 变化时直接 Replace 整个节点。
         _ => {
+            let node = highlighter.as_deref_mut().map_or_else(
+                || new_node.clone(),
+                |highlighter| prepare_stream_node(new_node, node_id, highlighter),
+            );
             mutations.push(AstMutation::Replace {
                 id: node_id.to_string(),
-                node: new_node.clone(),
+                node,
             });
         }
+    }
+}
+
+fn prepare_stream_node(
+    node: &MarkdownNode,
+    node_id: &str,
+    highlighter: &mut IncrementalCodeHighlighter,
+) -> MarkdownNode {
+    let mut prepared = node.clone();
+    match &mut prepared {
+        MarkdownNode::CodeBlock {
+            lang,
+            code,
+            highlighted_html,
+            ..
+        } => {
+            let lang = lang.as_deref().unwrap_or("plaintext");
+            if lang != "mermaid" {
+                *highlighted_html = highlighter.start(node_id, code, lang);
+            }
+        }
+        MarkdownNode::Blockquote { children, .. } => {
+            for (index, child) in children.iter_mut().enumerate() {
+                *child =
+                    prepare_stream_node(child, &format!("{}.b{}", node_id, index), highlighter);
+            }
+        }
+        MarkdownNode::List { items, .. } => {
+            for (item_index, item) in items.iter_mut().enumerate() {
+                for (block_index, child) in item.iter_mut().enumerate() {
+                    *child = prepare_stream_node(
+                        child,
+                        &format!("{}.li{}.b{}", node_id, item_index, block_index),
+                        highlighter,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+    prepared
+}
+
+fn prime_stream_code_nodes(
+    nodes: &[MarkdownNode],
+    prefix: &str,
+    highlighter: &mut IncrementalCodeHighlighter,
+) {
+    for (index, node) in nodes.iter().enumerate() {
+        prime_stream_code_node(node, &format!("{prefix}{index}"), highlighter);
+    }
+}
+
+fn prime_stream_code_node(
+    node: &MarkdownNode,
+    node_id: &str,
+    highlighter: &mut IncrementalCodeHighlighter,
+) {
+    match node {
+        MarkdownNode::CodeBlock { lang, code, .. } => {
+            let lang = lang.as_deref().unwrap_or("plaintext");
+            if lang != "mermaid" {
+                let _ = highlighter.prime(node_id, code, lang);
+            }
+        }
+        MarkdownNode::Blockquote { children, .. } => {
+            for (index, child) in children.iter().enumerate() {
+                prime_stream_code_node(child, &format!("{}.b{}", node_id, index), highlighter);
+            }
+        }
+        MarkdownNode::List { items, .. } => {
+            for (item_index, item) in items.iter().enumerate() {
+                for (block_index, child) in item.iter().enumerate() {
+                    prime_stream_code_node(
+                        child,
+                        &format!("{}.li{}.b{}", node_id, item_index, block_index),
+                        highlighter,
+                    );
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn mark_stream_code_nodes(
+    nodes: &[MarkdownNode],
+    prefix: &str,
+    highlighter: &mut IncrementalCodeHighlighter,
+) {
+    for (index, node) in nodes.iter().enumerate() {
+        mark_stream_code_node(node, &format!("{prefix}{index}"), highlighter);
+    }
+}
+
+fn mark_stream_code_node(
+    node: &MarkdownNode,
+    node_id: &str,
+    highlighter: &mut IncrementalCodeHighlighter,
+) {
+    match node {
+        MarkdownNode::CodeBlock { lang, .. } => {
+            if lang.as_deref() != Some("mermaid") {
+                highlighter.mark_seen(node_id);
+            }
+        }
+        MarkdownNode::Blockquote { children, .. } => {
+            for (index, child) in children.iter().enumerate() {
+                mark_stream_code_node(child, &format!("{}.b{}", node_id, index), highlighter);
+            }
+        }
+        MarkdownNode::List { items, .. } => {
+            for (item_index, item) in items.iter().enumerate() {
+                for (block_index, child) in item.iter().enumerate() {
+                    mark_stream_code_node(
+                        child,
+                        &format!("{}.li{}.b{}", node_id, item_index, block_index),
+                        highlighter,
+                    );
+                }
+            }
+        }
+        _ => {}
     }
 }
 

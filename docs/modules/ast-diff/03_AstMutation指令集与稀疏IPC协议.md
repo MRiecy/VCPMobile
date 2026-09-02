@@ -13,7 +13,7 @@ last_updated: 2026-06-14
 
 ### 1.1 模块定位
 
-AstMutation 指令集是 Rust 后端与 Vue 3 前端之间的**通用协议（Contract / Wire Protocol）**。它定义了 9 种最小粒度的 DOM 操作指令，Rust 侧通过 `diff_ast()` 产生，前端通过 `astExecutor.ts` 执行。
+AstMutation 指令集是 Rust 后端与 Vue 3 前端之间的**通用协议（Contract / Wire Protocol）**。它定义了 10 种最小粒度的 DOM 操作指令，Rust 侧通过通用 `diff_ast()` 或 Aurora `diff_ast_streaming()` 产生，前端通过 `astExecutor.ts` 执行。
 
 这套协议的三大设计目标：
 
@@ -52,7 +52,7 @@ sequenceDiagram
 
 ---
 
-## 2. AstMutation —— 9 种突变指令
+## 2. AstMutation —— 10 种突变指令
 
 ### 2.1 指令总览
 
@@ -69,6 +69,7 @@ pub enum AstMutation {
     AppendText { id, chunk: String },                          // op="append"
     UpdateProp { id, key, value: String },                     // op="prop"
     Replace { id, node: MarkdownNode },                        // op="replace"
+    PatchCode { id, completed_html, active_html },             // op="patch_code"
     ReplaceInline { id, node: InlineNode },                    // op="replace_inline"
     Remove { id },                                             // op="remove"
 }
@@ -85,6 +86,7 @@ export type AstMutation =
   | { op: "append"; id: string; chunk: string }
   | { op: "prop"; id: string; key: string; value: string }
   | { op: "replace"; id: string; node: MarkdownNode }
+  | { op: "patch_code"; id: string; completed_html: string; active_html: string }
   | { op: "replace_inline"; id: string; node: InlineNode }
   | { op: "remove"; id: string };
 ```
@@ -157,7 +159,20 @@ AddListItem { id: String, parent: String, children: Vec<MarkdownNode> }
 
 > **取代旧行为**：这取代了过去「列表项数量变化就整体 Replace 整个 list」的低效行为（O(n²) 重建）。现在新增尾部项只产生一条 AddListItem，已有列表项的 DOM 与 registry 完全保留。
 
-### 2.5 Replace / ReplaceInline —— 节点替换
+### 2.5 PatchCode —— 流式代码尾部补丁
+
+```rust
+PatchCode { id: String, completed_html: String, active_html: String }
+```
+
+| 字段 | 语义 |
+|------|------|
+| `completed_html` | 本帧新形成的一个或多个完整高亮行，只追加到稳定区 |
+| `active_html` | 当前尚未换行的末行高亮，替换活跃行容器内容 |
+
+首次 Add/恢复 Snapshot 会建立 `data-vcp-code-stable` 与 `data-vcp-code-active` 两个锚点。普通追加帧不再携带完整 `CodeBlock.code` 或完整 `highlighted_html`；若语言、前缀或 DOM 锚点不一致，则回退到一次 Replace/恢复 Snapshot。
+
+### 2.6 Replace / ReplaceInline —— 节点替换
 
 ```rust
 Replace { id: String, node: MarkdownNode }
@@ -182,7 +197,7 @@ Replace 节点类型?
 
 > **策略 C 的 registry 一致性**：块级 `raw_html`/`table` 始终是「整节点全替换」，从不做子节点级 diff。因此 morphdom 执行后，注册表只保留**根 ID**（映射回页面上存活的 `oldNode`，而非被 morphdom 丢弃的临时 `newDom`），其余后代条目一律清除。后代条目不可从临时 registry 的后代节点取用——那些节点可能已被 morphdom 抛弃。行内容器（link/strong/emphasis 等）的 registry 重建规则更复杂（需在 morphdom 前后对路径求值），详见 04 文档 §5。
 
-### 2.6 Remove —— 节点删除
+### 2.7 Remove —— 节点删除
 
 ```rust
 Remove { id: String }
@@ -194,7 +209,7 @@ Remove { id: String }
 | 前端执行 | `parentNode.removeChild(node)` + `cleanupSubtreeRefs(id)` |
 | 典型场景 | Tail 内容收缩（如 Agent 删除了未完成的段落） |
 
-### 2.7 UpdateProp —— 属性变更
+### 2.8 UpdateProp —— 属性变更
 
 ```rust
 UpdateProp { id: String, key: String, value: String }

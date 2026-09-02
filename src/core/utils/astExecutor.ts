@@ -550,6 +550,36 @@ function executeMutation(
       break;
     }
 
+    case "patch_code": {
+      const node = registry.get(mutation.id);
+      const codeRoot = node instanceof HTMLElement
+        ? Array.from(node.children).find((child) =>
+            child instanceof HTMLElement
+            && child.tagName === "CODE"
+            && child.hasAttribute("data-vcp-stream-code")
+          )
+        : undefined;
+      const stable = codeRoot?.querySelector<HTMLElement>("[data-vcp-code-stable]");
+      const active = codeRoot?.querySelector<HTMLElement>("[data-vcp-code-active]");
+
+      if (stable && active) {
+        // Syntect 已对源码做 HTML 转义，这里只解析后端生成的 span 片段。
+        // 完整行永久追加；只有尚未换行的末行会被替换。
+        const completedTemplate = document.createElement("template");
+        completedTemplate.innerHTML = mutation.completed_html;
+        const activeTemplate = document.createElement("template");
+        activeTemplate.innerHTML = mutation.active_html;
+        stable.appendChild(completedTemplate.content);
+        active.replaceChildren(activeTemplate.content);
+      } else {
+        status = "failed";
+        detail = node
+          ? "Incremental code anchors not found"
+          : "Code block not found in registry";
+      }
+      break;
+    }
+
     case "add": {
       const parentNode = mutation.parent === "root"
         ? sandbox

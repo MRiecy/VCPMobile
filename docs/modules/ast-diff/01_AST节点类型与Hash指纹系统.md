@@ -104,7 +104,7 @@ classDiagram
 |:----:|------------|-----------|------|:-------:|----------|
 | 1 | `paragraph` | `Paragraph { children, hash }` | 标准段落 | ✅ | 递归 diff inline children |
 | 2 | `heading` | `Heading { level, children, hash }` | 标题 H1-H6 | ✅ | level 变则 UpdateProp，否则递归 diff inline children |
-| 3 | `code_block` | `CodeBlock { lang, code, highlighted_html, theme, hash }` | 围栏代码块（含 `lang="mermaid"`） | ✅ | 整体 Replace（前端原地 innerHTML / mermaid textContent 优化） |
+| 3 | `code_block` | `CodeBlock { lang, code, highlighted_html, theme, hash }` | 围栏代码块（含 `lang="mermaid"`） | ✅ | 严格追加走 `PatchCode`；非前缀变化或 Mermaid 才 Replace |
 | 4 | `blockquote` | `Blockquote { children, hash }` | 嵌套引用块 | ✅ | 递归 diff 子 MarkdownNode |
 | 5 | `list` | `List { ordered, items, hash }` | 有序/无序列表 | ✅ | ordered 变则 Replace；否则逐 item 递归 diff + **item 级别 AddListItem/Remove 增量**（见 03_§2.8） |
 | 6 | `table` | `Table { header, rows, wrapper_class, hash }` | GFM 表格 | ✅ | 整体 Replace（前端 morphdom 优化） |

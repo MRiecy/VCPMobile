@@ -1243,7 +1243,9 @@ impl PartialNode {
             PartialNode::Heading { level, children } => MarkdownNode::heading(level, children),
             PartialNode::CodeBlock { lang, code } => {
                 let lang_str = lang.as_deref().unwrap_or("plaintext");
-                let highlighted = if lang_str == "mermaid" || (is_streaming && code.len() > 4096) {
+                // Aurora 流式代码块由有状态行高亮器生成增量补丁；这里不再构造完整 HTML 镜像。
+                // 非流式持久化解析仍一次性生成完整高亮结果。
+                let highlighted = if lang_str == "mermaid" || is_streaming {
                     None
                 } else {
                     highlight_code_block(&code, lang_str)

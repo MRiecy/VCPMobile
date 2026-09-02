@@ -2,7 +2,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::vcp_modules::chat::ast_diff::{diff_ast, AstMutation};
+use crate::vcp_modules::chat::ast_diff::{
+    diff_ast_streaming, prime_stream_code_highlighter, render_stream_snapshot, AstMutation,
+};
+use crate::vcp_modules::pre_renderer::code_highlighter::IncrementalCodeHighlighter;
 use crate::vcp_modules::pre_renderer::markdown_ast::MarkdownNode;
 use crate::vcp_modules::stream_block_parser::{StreamBlock, StreamBlockParser};
 
@@ -10,8 +13,8 @@ use crate::vcp_modules::stream_block_parser::{StreamBlock, StreamBlockParser};
 ///
 /// 取值依据（perf profile 基准，见 ast_bench.rs，约等于发布版热路径速度）：
 /// - 解析本身极廉价：40KB tail 的 parse+hash+diff+serialize 仅约 0.55ms，远非瓶颈。
-/// - 真正的成本是 IPC 载荷：CodeBlock/RawHtml 走整节点 Replace，每帧重发整块。
-///   因此上限从 8192 提升到 65536（覆盖绝大多数真实 HTML/代码产物），
+/// - CodeBlock 严格追加已改为完成行/活跃行补丁；RawHtml 等不可拆节点仍会整块 Replace。
+///   因此保留 65536 上限覆盖绝大多数真实 HTML/代码产物，同时约束通用 AST Snapshot，
 ///   并由 vcp_client 固定 30Hz 合并发送，避免按上游 token 粒度重复解析与推送。
 ///   仅在 tail 超过 64KB 这种极端体量时才降级为纯文本，避免单帧 JSON 过大拖垮 webview。
 const MAX_SPECULATIVE_TAIL_AST_BYTES: usize = 65536;
@@ -181,6 +184,7 @@ pub struct AuroraBuffer {
     pub prev_tail_ast: Vec<MarkdownNode>,
     /// 🆕 待发送的增量 AST 突变指令暂存池，防抖丢帧时防止中间差异丢失
     pub pending_mutations: Vec<AstMutation>,
+    code_highlighter: IncrementalCodeHighlighter,
     pub tail_epoch: u64,
     pub tail_revision: u64,
     pub tail_reset_pending: bool,
@@ -211,6 +215,7 @@ impl AuroraBuffer {
             tail_projection: None,
             prev_tail_ast: Vec::new(),
             pending_mutations: Vec::new(),
+            code_highlighter: IncrementalCodeHighlighter::default(),
             tail_epoch: 0,
             tail_revision: 0,
             tail_reset_pending: false,
@@ -296,7 +301,7 @@ impl AuroraBuffer {
 
     fn peek_tail_frame(&self, force_snapshot: bool) -> Option<TailFrame> {
         let reset = force_snapshot || self.tail_reset_pending;
-        let snapshot = reset.then(|| self.prev_tail_ast.clone());
+        let snapshot = reset.then(|| render_stream_snapshot(&self.prev_tail_ast, "t"));
         let mutations = self.pending_mutations.clone();
 
         if !reset && snapshot.is_none() && mutations.is_empty() {
@@ -465,7 +470,7 @@ impl AuroraBuffer {
             stable_blocks: buffer.stable_blocks,
             tail_block,
             tail_mode,
-            tail_snapshot: buffer.prev_tail_ast,
+            tail_snapshot: render_stream_snapshot(&buffer.prev_tail_ast, "t"),
         }
     }
 
@@ -492,6 +497,7 @@ impl AuroraBuffer {
             self.tail_reset_pending = true;
             self.pending_mutations.clear();
             self.prev_tail_ast.clear();
+            self.code_highlighter.clear();
         }
 
         self.tail_content = new_tail;
@@ -512,10 +518,17 @@ impl AuroraBuffer {
             let mode = if let Some(new_nodes) = nodes {
                 // reset 帧直接从最新 prev_tail_ast 按需构造 snapshot，其间无需保留第二份树。
                 if !self.tail_reset_pending {
-                    let mutations = diff_ast(&self.prev_tail_ast, &new_nodes, "t");
+                    let mutations = diff_ast_streaming(
+                        &self.prev_tail_ast,
+                        &new_nodes,
+                        "t",
+                        &mut self.code_highlighter,
+                    );
                     if !mutations.is_empty() {
                         self.pending_mutations.extend(mutations);
                     }
+                } else {
+                    prime_stream_code_highlighter(&new_nodes, "t", &mut self.code_highlighter);
                 }
                 self.tail_revision = self.tail_revision.saturating_add(1);
                 self.prev_tail_ast = new_nodes;
@@ -528,6 +541,7 @@ impl AuroraBuffer {
                 let was_ast_mode = !self.prev_tail_ast.is_empty();
                 self.prev_tail_ast.clear();
                 self.pending_mutations.clear();
+                self.code_highlighter.clear();
                 if was_ast_mode && !self.tail_reset_pending {
                     self.tail_epoch = self.tail_epoch.saturating_add(1);
                     self.tail_revision = 0;
@@ -551,6 +565,7 @@ impl AuroraBuffer {
                 self.pending_mutations.clear();
             }
             self.prev_tail_ast.clear();
+            self.code_highlighter.clear();
         }
 
         let stable_changed = self.stable_blocks.len() != prev_stable_count;
@@ -571,6 +586,7 @@ impl AuroraBuffer {
         self.tail_projection = None;
         self.prev_tail_ast.clear();
         self.pending_mutations.clear();
+        self.code_highlighter.clear();
         self.tail_epoch = self.tail_epoch.saturating_add(1);
         self.tail_revision = 0;
         self.tail_reset_pending = true;
@@ -688,6 +704,76 @@ mod tests {
                             && code.contains("<!DOCTYPE html>")
                             && code.contains("<style>")
                 )
+        ));
+    }
+
+    #[test]
+    fn large_html_fence_streams_highlight_patches_then_hands_off_to_markdown() {
+        let mut buffer = AuroraBuffer::new();
+        let completed_lines = "<div class=\"row\">value</div>\n".repeat(180);
+        let initial = format!("```html\n{completed_lines}<span>tail");
+        assert!(initial.len() > 4096);
+
+        buffer.append_chunk(&initial);
+        assert_eq!(buffer.process_queue(), (false, true));
+        let initial_frame = buffer.take_tail_frame().expect("initial highlighted frame");
+        assert!(matches!(
+            initial_frame.mutations.as_slice(),
+            [AstMutation::Add {
+                node: MarkdownNode::CodeBlock {
+                    highlighted_html: Some(html),
+                    ..
+                },
+                ..
+            }] if html.contains("data-vcp-stream-code")
+        ));
+        assert!(matches!(
+            buffer.prev_tail_ast.as_slice(),
+            [MarkdownNode::CodeBlock {
+                highlighted_html: None,
+                ..
+            }]
+        ));
+
+        buffer.append_chunk("中文说明</span>");
+        assert_eq!(buffer.process_queue(), (false, true));
+        let active_frame = buffer.take_tail_frame().expect("active line patch");
+        assert!(matches!(
+            active_frame.mutations.as_slice(),
+            [AstMutation::PatchCode {
+                completed_html,
+                active_html,
+                ..
+            }] if completed_html.is_empty() && active_html.contains("中文说明")
+        ));
+
+        buffer.append_chunk("\n<p>next");
+        assert_eq!(buffer.process_queue(), (false, true));
+        let newline_frame = buffer.take_tail_frame().expect("completed line patch");
+        assert!(matches!(
+            newline_frame.mutations.as_slice(),
+            [AstMutation::PatchCode {
+                completed_html,
+                active_html,
+                ..
+            }] if completed_html.contains("中文说明") && active_html.contains("next")
+        ));
+
+        buffer.append_chunk("\n```\n围栏后的解释");
+        assert_eq!(buffer.process_queue(), (true, true));
+        assert!(matches!(
+            buffer.stable_blocks.as_slice(),
+            [StreamBlock::HtmlPreview {
+                content,
+                highlighted_content: Some(html),
+                ..
+            }] if content.contains("中文说明") && html.contains("vcp-html-block")
+        ));
+        let handoff = buffer.take_tail_frame().expect("markdown handoff snapshot");
+        assert!(handoff.reset);
+        assert!(matches!(
+            handoff.snapshot.as_deref(),
+            Some([MarkdownNode::Paragraph { .. }])
         ));
     }
 

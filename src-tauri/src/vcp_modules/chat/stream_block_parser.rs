@@ -150,8 +150,12 @@ impl StreamBlock {
     }
 
     pub fn html_preview(content: String, hash: String) -> Self {
-        // 流式打字期间完全不调用 syntect 高亮，彻底避免高频流更新对后端 CPU 能耗的无谓消耗
-        let highlighted_content = None;
+        // 未闭合围栏由 Aurora tail 按行增量高亮；闭合后组件类型切换为 HtmlPreview，
+        // 此处只做一次终态 classed 高亮，避免交接后退回无样式代码。
+        let highlighted_content =
+            crate::vcp_modules::chat::pre_renderer::code_highlighter::highlight_html_block(
+                &content,
+            );
         Self::HtmlPreview {
             content,
             highlighted_content,
