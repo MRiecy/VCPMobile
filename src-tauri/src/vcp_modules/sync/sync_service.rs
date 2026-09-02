@@ -3203,11 +3203,6 @@ async fn cancel_and_join_session(session: SyncSessionHandle) -> Result<(), Strin
 }
 
 #[tauri::command]
-pub async fn get_sync_status(state: State<'_, SyncState>) -> Result<String, String> {
-    Ok(state.connection_status.read().await.clone())
-}
-
-#[tauri::command]
 pub async fn start_manual_sync(
     handle: AppHandle,
     state: State<'_, SyncState>,
