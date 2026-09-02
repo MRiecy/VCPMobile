@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { ref, watch, computed, onUnmounted } from 'vue';
-import DOMPurify from 'dompurify';
 import { useThemeStore } from '../../../core/stores/theme';
 import { useModalHistory } from '../../../core/composables/useModalHistory';
 
@@ -56,19 +55,11 @@ const copyCode = async () => {
 };
 
 // 构造沙箱 HTML
+// 统一门禁基线（见 plan/vcpmobile-widget-system-research/01 §6.1）：
+// 不做内容清洗——iframe sandbox + opaque origin 才是真边界，保留 <script> 的 DOMPurify 形同虚设。
 const sandboxHtml = computed(() => {
   const content = props.content;
   const isDark = themeStore.isDarkResolved;
-  
-  const cleanHtml = DOMPurify.sanitize(content, {
-    USE_PROFILES: { html: true, svg: true, mathMl: true },
-    ADD_TAGS: ['style', 'iframe', 'canvas', 'script', 'link', 'meta'], 
-    ADD_ATTR: ['*'],
-    FORBID_TAGS: ['applet', 'embed', 'object'],
-    ALLOW_UNKNOWN_PROTOCOLS: true,
-    WHOLE_DOCUMENT: true,
-    RETURN_DOM: false
-  });
 
   const vcpInjections = `
     <style>
@@ -108,19 +99,13 @@ const sandboxHtml = computed(() => {
           }, '*');
         }
       }, true);
-
-      const _originalAlert = window.alert;
-      window.alert = function(msg) {
-        console.log('[VCP Sandbox Alert]:', msg);
-        try { _originalAlert(msg); } catch (e) {}
-      };
     <` + `/script>
   `;
 
-  if (/<head[^>]*>/i.test(cleanHtml)) {
-    return cleanHtml.replace(/<head[^>]*>/i, `$&${vcpInjections}`);
+  if (/<head[^>]*>/i.test(content)) {
+    return content.replace(/<head[^>]*>/i, `$&${vcpInjections}`);
   } else {
-    return `<!DOCTYPE html><html><head>${vcpInjections}</head>${cleanHtml}</html>`;
+    return `<!DOCTYPE html><html><head>${vcpInjections}</head>${content}</html>`;
   }
 });
 
@@ -226,7 +211,7 @@ onUnmounted(() => {
             <iframe 
               v-show="fullScreenTab === 'preview'"
               class="vcp-fullscreen-iframe w-full h-full border-none"
-              sandbox="allow-scripts allow-modals allow-forms allow-popups"
+              sandbox="allow-scripts"
               loading="lazy"
               :srcdoc="sandboxHtml"
               :data-vcp-image-nonce="imageNonce"
@@ -289,7 +274,7 @@ onUnmounted(() => {
       <div v-if="isPreviewing" class="absolute inset-0 no-swipe" :class="themeStore.isDarkResolved ? 'bg-[#0d1117]' : 'bg-white'">
         <iframe 
           class="vcp-inline-iframe w-full h-full border-none no-swipe"
-          sandbox="allow-scripts allow-modals allow-forms"
+          sandbox="allow-scripts"
           loading="lazy"
           :srcdoc="sandboxHtml"
           :data-vcp-image-nonce="imageNonce"
