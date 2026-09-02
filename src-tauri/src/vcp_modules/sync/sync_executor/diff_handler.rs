@@ -2,7 +2,9 @@ use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
 use crate::vcp_modules::sync_dto::{AgentTopicSyncDTO, GroupTopicSyncDTO};
 use crate::vcp_modules::sync_executor::{PullExecutor, PushExecutor};
-use crate::vcp_modules::sync_service::{emit_sync_log, SyncCommand, SyncTaskTracker};
+use crate::vcp_modules::sync_service::{
+    emit_sync_log, ManifestResponseTracker, SyncCommand, SyncTaskTracker,
+};
 use crate::vcp_modules::sync_types::{
     is_valid_avatar_owner, AvatarManifestDecision, DeleteTarget, EntityPushData, EntityPushItem,
     EntitySelector, ManifestAction, ManifestResultFrame, ManifestType, OwnerManifestDecision,
@@ -15,7 +17,6 @@ use sqlx::Row;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
-use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 
@@ -24,22 +25,6 @@ pub struct DiffHandler;
 // Entity operations can include a 20 MiB avatar, so keep only a small waiting concurrency.
 const ENTITY_OPERATION_CONCURRENCY: usize = 3;
 const MAX_SAFE_JSON_INTEGER: i64 = (1_i64 << 53) - 1;
-
-fn consume_manifest_response_type(
-    manifest_type: ManifestType,
-    current_wave: u8,
-    expected_manifest_types: &Mutex<HashSet<ManifestType>>,
-) -> Result<bool, String> {
-    let mut remaining = expected_manifest_types
-        .lock()
-        .map_err(|_| "Expected manifest type set is poisoned".to_string())?;
-    if !remaining.remove(&manifest_type) {
-        return Err(format!(
-            "SYNC_MANIFEST_RESULT contains duplicate or unexpected manifestType {manifest_type} for wave {current_wave}"
-        ));
-    }
-    Ok(remaining.is_empty())
-}
 
 fn next_manifest_command(current_phase: u8, attempt_id: u64) -> Option<SyncCommand> {
     match current_phase {
@@ -221,9 +206,7 @@ impl DiffHandler {
         write_queue: &Arc<DbWriteQueue>,
         pending_tasks: &Arc<AtomicU32>,
         total_tasks: &Arc<AtomicU32>,
-        manifest_responses_received: &Arc<AtomicU32>,
-        expected_manifest_count: &Arc<AtomicU32>,
-        expected_manifest_types: &Arc<Mutex<HashSet<ManifestType>>>,
+        manifest_responses: &Arc<ManifestResponseTracker>,
         manifest_phase: &Arc<AtomicU8>,
         tx_internal: &mpsc::UnboundedSender<SyncCommand>,
         changed_owners: &Arc<tokio::sync::Mutex<HashSet<OwnerKey>>>,
@@ -239,8 +222,7 @@ impl DiffHandler {
         }
 
         let current_phase = manifest_phase.load(Ordering::SeqCst);
-        let all_manifest_types_received =
-            consume_manifest_response_type(manifest_type, current_phase, expected_manifest_types)?;
+        manifest_responses.consume(current_phase, manifest_type)?;
 
         {
             // 统计有效操作数（排除 SKIP）
@@ -266,27 +248,17 @@ impl DiffHandler {
             pending_tasks.fetch_add(total_ops, Ordering::SeqCst);
             total_tasks.fetch_add(total_ops, Ordering::SeqCst);
 
-            let received = manifest_responses_received.fetch_add(1, Ordering::SeqCst) + 1;
-            let expected = expected_manifest_count.load(Ordering::SeqCst);
-            if received > expected {
-                return Err(format!(
-                    "SYNC_MANIFEST_RESULT response count exceeds wave {current_phase} expectation"
-                ));
-            }
+            let current_pending = pending_tasks.load(Ordering::SeqCst);
+            log::info!(
+                "[SyncService] Manifest received for wave {}: manifestType={}, pending={}",
+                current_phase,
+                manifest_type,
+                current_pending
+            );
 
-            if all_manifest_types_received && received == expected {
-                let current_pending = pending_tasks.load(Ordering::SeqCst);
-                log::info!(
-                    "[SyncService] All manifests received for wave {}: manifestType={}, pending={}",
-                    current_phase,
-                    manifest_type,
-                    current_pending
-                );
-
-                if current_pending == 0 {
-                    if let Some(command) = next_manifest_command(current_phase, attempt_id) {
-                        let _ = tx_internal.send(command);
-                    }
+            if current_pending == 0 {
+                if let Some(command) = next_manifest_command(current_phase, attempt_id) {
+                    let _ = tx_internal.send(command);
                 }
             }
 
@@ -354,8 +326,6 @@ impl DiffHandler {
                 let pending = pending_tasks.clone();
                 let total_tasks_in = total_tasks.clone();
                 let tx_internal_in = tx_internal.clone();
-                let manifest_received_in = manifest_responses_received.clone();
-                let manifest_expected_in = expected_manifest_count.clone();
                 let manifest_phase_in = manifest_phase.clone();
                 let manifest_type_inner = manifest_type;
                 let attempt_id_inner = attempt_id;
@@ -409,10 +379,7 @@ impl DiffHandler {
                                     "completed": done,
                                 }),
                             );
-                            if current_pending == 0
-                                && manifest_received_in.load(Ordering::SeqCst)
-                                    == manifest_expected_in.load(Ordering::SeqCst)
-                            {
+                            if current_pending == 0 {
                                 let phase = manifest_phase_in.load(Ordering::SeqCst);
                                 if let Some(command) =
                                     next_manifest_command(phase, attempt_id_inner)
@@ -432,8 +399,6 @@ impl DiffHandler {
                 let pending = pending_tasks.clone();
                 let total_tasks_in = total_tasks.clone();
                 let tx_internal_in = tx_internal.clone();
-                let manifest_received_in = manifest_responses_received.clone();
-                let manifest_expected_in = expected_manifest_count.clone();
                 let manifest_phase_in = manifest_phase.clone();
                 let http_url = base_url.to_string();
                 let attempt_id_inner = attempt_id;
@@ -664,12 +629,9 @@ impl DiffHandler {
                         );
                     }
 
-                    // 信号外移：确保只要 pending 归零且 manifest 已收齐，就触发下一阶段
+                    // 单响应已经在任务派发前被精确消费；这里只需等待所有操作归零。
                     let current_pending = pending.load(Ordering::SeqCst);
-                    if current_pending == 0
-                        && manifest_received_in.load(Ordering::SeqCst)
-                            == manifest_expected_in.load(Ordering::SeqCst)
-                    {
+                    if current_pending == 0 {
                         let phase = manifest_phase_in.load(Ordering::SeqCst);
                         if let Some(command) = next_manifest_command(phase, attempt_id_inner) {
                             let _ = tx_internal_in.send(command);
@@ -687,8 +649,6 @@ impl DiffHandler {
                 let pending = pending_tasks.clone();
                 let total_tasks_in = total_tasks.clone();
                 let tx_internal_in = tx_internal.clone();
-                let manifest_received_in = manifest_responses_received.clone();
-                let manifest_expected_in = expected_manifest_count.clone();
                 let manifest_phase_in = manifest_phase.clone();
                 let manifest_type_base = manifest_type;
                 let attempt_id_inner = attempt_id;
@@ -708,8 +668,6 @@ impl DiffHandler {
                             let pending_task = pending.clone();
                             let total_tasks_task = total_tasks_in.clone();
                             let tx_internal_task = tx_internal_in.clone();
-                            let manifest_received_task = manifest_received_in.clone();
-                            let manifest_expected_task = manifest_expected_in.clone();
                             let manifest_phase_task = manifest_phase_in.clone();
                             let attempt_id_task = attempt_id_inner;
 
@@ -871,10 +829,7 @@ impl DiffHandler {
                                                 "completed": done,
                                             }),
                                         );
-                                        if current_pending == 0
-                                            && manifest_received_task.load(Ordering::SeqCst)
-                                                == manifest_expected_task.load(Ordering::SeqCst)
-                                        {
+                                        if current_pending == 0 {
                                             let phase = manifest_phase_task.load(Ordering::SeqCst);
                                             if let Some(command) =
                                                 next_manifest_command(phase, attempt_id_task)
@@ -913,15 +868,14 @@ impl DiffHandler {
 #[cfg(test)]
 mod tests {
     use super::{
-        consume_manifest_response_type, next_manifest_command, validate_manifest_result,
-        validate_topic_owner_scope, MAX_SAFE_JSON_INTEGER,
+        next_manifest_command, validate_manifest_result, validate_topic_owner_scope,
+        MAX_SAFE_JSON_INTEGER,
     };
     use crate::vcp_modules::chat::topic_types::OwnerKey;
-    use crate::vcp_modules::sync_service::SyncCommand;
+    use crate::vcp_modules::sync_service::{ManifestResponseTracker, SyncCommand};
     use crate::vcp_modules::sync_types::{ManifestResultFrame, ManifestType};
     use serde_json::json;
     use std::collections::HashSet;
-    use std::sync::Mutex;
 
     #[test]
     fn typed_topic_results_use_the_full_identity_and_reject_duplicates() {
@@ -980,13 +934,22 @@ mod tests {
     }
 
     #[test]
-    fn manifest_types_are_consumed_once_and_waves_keep_their_order() {
-        let expected = Mutex::new(HashSet::from([ManifestType::Owner]));
-        assert!(
-            consume_manifest_response_type(ManifestType::Owner, 1, &expected,)
-                .expect("owner response")
-        );
-        assert!(consume_manifest_response_type(ManifestType::Owner, 1, &expected,).is_err());
+    fn manifest_responses_are_exactly_once_and_waves_keep_their_order() {
+        let tracker = ManifestResponseTracker::default();
+        tracker.arm(1, ManifestType::Owner).expect("arm owner wave");
+        assert!(tracker.arm(2, ManifestType::Avatar).is_err());
+        assert!(tracker.consume(1, ManifestType::Topic).is_err());
+        assert!(tracker.consume(2, ManifestType::Owner).is_err());
+        tracker
+            .consume(1, ManifestType::Owner)
+            .expect("consume owner response");
+        assert!(tracker.consume(1, ManifestType::Owner).is_err());
+        tracker
+            .arm(2, ManifestType::Avatar)
+            .expect("arm avatar wave after owner response");
+        tracker
+            .consume(2, ManifestType::Avatar)
+            .expect("consume avatar response");
         assert!(matches!(
             next_manifest_command(1, 7),
             Some(SyncCommand::StartAvatarMetadata { attempt_id: 7 })

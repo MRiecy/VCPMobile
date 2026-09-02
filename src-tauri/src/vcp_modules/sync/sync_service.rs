@@ -636,8 +636,72 @@ async fn enforce_final_ack_deadline(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingManifestResponse {
+    phase: u8,
+    manifest_type: ManifestType,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ManifestResponseTracker {
+    pending: Mutex<Option<PendingManifestResponse>>,
+}
+
+impl ManifestResponseTracker {
+    pub(crate) fn arm(&self, phase: u8, manifest_type: ManifestType) -> Result<(), String> {
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|_| "Expected manifest response state is poisoned".to_string())?;
+        if let Some(existing) = *pending {
+            return Err(format!(
+                "Manifest response tracker already waits for {} in wave {}",
+                existing.manifest_type, existing.phase
+            ));
+        }
+        *pending = Some(PendingManifestResponse {
+            phase,
+            manifest_type,
+        });
+        Ok(())
+    }
+
+    pub(crate) fn consume(&self, phase: u8, manifest_type: ManifestType) -> Result<(), String> {
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|_| "Expected manifest response state is poisoned".to_string())?;
+        match *pending {
+            Some(expected)
+                if expected.phase == phase && expected.manifest_type == manifest_type =>
+            {
+                pending.take();
+                Ok(())
+            }
+            _ => Err(format!(
+                "SYNC_MANIFEST_RESULT contains duplicate or unexpected manifestType {manifest_type} for wave {phase}"
+            )),
+        }
+    }
+
+    fn missing_type(&self, phase: u8) -> Result<Option<ManifestType>, String> {
+        let pending = self
+            .pending
+            .lock()
+            .map_err(|_| "Expected manifest response state is poisoned".to_string())?;
+        match *pending {
+            Some(expected) if expected.phase == phase => Ok(Some(expected.manifest_type)),
+            Some(expected) => Err(format!(
+                "Manifest response tracker waits for wave {} while current wave is {phase}",
+                expected.phase
+            )),
+            None => Ok(None),
+        }
+    }
+}
+
 async fn enforce_manifest_response_deadline(
-    expected_types: Arc<Mutex<HashSet<ManifestType>>>,
+    tracker: Arc<ManifestResponseTracker>,
     manifest_phase: Arc<AtomicU8>,
     expected_phase: u8,
     tx: mpsc::UnboundedSender<SyncCommand>,
@@ -648,18 +712,14 @@ async fn enforce_manifest_response_deadline(
     if manifest_phase.load(Ordering::SeqCst) != expected_phase {
         return;
     }
-    let missing = match expected_types.lock() {
-        Ok(expected) if expected.is_empty() => return,
-        Ok(expected) => {
-            let mut missing = expected.iter().map(ToString::to_string).collect::<Vec<_>>();
-            missing.sort();
-            missing
-        }
-        Err(_) => {
+    let missing = match tracker.missing_type(expected_phase) {
+        Ok(None) => return,
+        Ok(Some(missing)) => vec![missing.to_string()],
+        Err(message) => {
             let _ = tx.send(SyncCommand::FailAttemptDetailed {
                 attempt_id,
                 code: "SYNC_STATE_POISONED".to_string(),
-                message: "Expected manifest type state is poisoned".to_string(),
+                message,
                 failed_topic_ids: Vec::new(),
             });
             return;
@@ -1599,10 +1659,8 @@ async fn run_sync_session(
                 let changed_owners: Arc<tokio::sync::Mutex<HashSet<OwnerKey>>> =
                     Arc::new(tokio::sync::Mutex::new(HashSet::new()));
 
-                // 用于跟踪 manifest diff 结果是否全部收到，防止 total_ops=0 时 Phase 1 卡住
-                let expected_manifest_count = Arc::new(AtomicU32::new(0));
-                let manifest_responses_received = Arc::new(AtomicU32::new(0));
-                let expected_manifest_types = Arc::new(Mutex::new(HashSet::<ManifestType>::new()));
+                // 每一波只允许一个精确类型的 Manifest 响应。
+                let manifest_responses = Arc::new(ManifestResponseTracker::default());
                 // 1: 基础 Metadata (agent, group, avatar), 2: Topic Metadata
                 let manifest_phase = Arc::new(AtomicU8::new(1));
                 let mut fatal_error = false;
@@ -1637,21 +1695,16 @@ async fn run_sync_session(
                             manifest_phase.store(1, Ordering::SeqCst);
                             match Phase1Metadata::build_owner_manifest(&db.pool).await {
                                 Ok(manifest) => {
-                                    expected_manifest_count.store(1, Ordering::SeqCst);
-                                    manifest_responses_received.store(0, Ordering::SeqCst);
-                                    match expected_manifest_types.lock() {
-                                        Ok(mut expected) => {
-                                            *expected = HashSet::from([ManifestType::Owner]);
-                                        }
-                                        Err(_) => {
-                                            let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
-                                                attempt_id,
-                                                code: "SYNC_STATE_POISONED".to_string(),
-                                                message: "Expected manifest type state is poisoned".to_string(),
-                                                failed_topic_ids: Vec::new(),
-                                            });
-                                            continue 'attempt;
-                                        }
+                                    if let Err(message) =
+                                        manifest_responses.arm(1, ManifestType::Owner)
+                                    {
+                                        let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
+                                            attempt_id,
+                                            code: "SYNC_STATE_POISONED".to_string(),
+                                            message,
+                                            failed_topic_ids: Vec::new(),
+                                        });
+                                        continue 'attempt;
                                     }
 
                                     let frame = ManifestRequestFrame::new(manifest);
@@ -1666,7 +1719,7 @@ async fn run_sync_session(
                                     }
                                     task_tracker
                                         .spawn(enforce_manifest_response_deadline(
-                                            expected_manifest_types.clone(),
+                                            manifest_responses.clone(),
                                             manifest_phase.clone(),
                                             1,
                                             tx_internal.clone(),
@@ -1742,11 +1795,6 @@ async fn run_sync_session(
                                     };
 
                                     if owners.is_empty() {
-                                        expected_manifest_count.store(0, Ordering::SeqCst);
-                                        manifest_responses_received.store(0, Ordering::SeqCst);
-                                        if let Ok(mut expected) = expected_manifest_types.lock() {
-                                            expected.clear();
-                                        }
                                         let _ = tx_internal.send(SyncCommand::StartTopicValidation { attempt_id });
                                     } else {
                                         match Phase1Metadata::build_targeted_topic_manifest(&db.pool, &owners).await {
@@ -1761,21 +1809,16 @@ async fn run_sync_session(
                                                 continue 'attempt;
                                             }
                                             manifest_phase.store(3, Ordering::SeqCst);
-                                            expected_manifest_count.store(1, Ordering::SeqCst);
-                                            manifest_responses_received.store(0, Ordering::SeqCst);
-                                            match expected_manifest_types.lock() {
-                                                Ok(mut expected) => {
-                                                    *expected = HashSet::from([ManifestType::Topic]);
-                                                }
-                                                Err(_) => {
-                                                    let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
-                                                        attempt_id,
-                                                        code: "SYNC_STATE_POISONED".to_string(),
-                                                        message: "Expected manifest type state is poisoned".to_string(),
-                                                        failed_topic_ids: Vec::new(),
-                                                    });
-                                                    continue 'attempt;
-                                                }
+                                            if let Err(message) =
+                                                manifest_responses.arm(3, ManifestType::Topic)
+                                            {
+                                                let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
+                                                    attempt_id,
+                                                    code: "SYNC_STATE_POISONED".to_string(),
+                                                    message,
+                                                    failed_topic_ids: Vec::new(),
+                                                });
+                                                continue 'attempt;
                                             }
                                             pending_tasks_task.store(0, Ordering::SeqCst);
                                             total_tasks_task.store(0, Ordering::SeqCst);
@@ -1811,7 +1854,7 @@ async fn run_sync_session(
                                             }
                                             task_tracker
                                                 .spawn(enforce_manifest_response_deadline(
-                                                    expected_manifest_types.clone(),
+                                                    manifest_responses.clone(),
                                                     manifest_phase.clone(),
                                                     3,
                                                     tx_internal.clone(),
@@ -2164,21 +2207,16 @@ async fn run_sync_session(
                                             }
                                         };
                                         manifest_phase.store(2, Ordering::SeqCst);
-                                        expected_manifest_count.store(1, Ordering::SeqCst);
-                                        manifest_responses_received.store(0, Ordering::SeqCst);
-                                        match expected_manifest_types.lock() {
-                                            Ok(mut expected) => {
-                                                *expected = HashSet::from([ManifestType::Avatar]);
-                                            }
-                                            Err(_) => {
-                                                let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
-                                                    attempt_id,
-                                                    code: "SYNC_STATE_POISONED".to_string(),
-                                                    message: "Expected avatar manifest state is poisoned".to_string(),
-                                                    failed_topic_ids: Vec::new(),
-                                                });
-                                                continue;
-                                            }
+                                        if let Err(message) =
+                                            manifest_responses.arm(2, ManifestType::Avatar)
+                                        {
+                                            let _ = tx_internal.send(SyncCommand::FailAttemptDetailed {
+                                                attempt_id,
+                                                code: "SYNC_STATE_POISONED".to_string(),
+                                                message,
+                                                failed_topic_ids: Vec::new(),
+                                            });
+                                            continue;
                                         }
                                         pending_tasks_task.store(0, Ordering::SeqCst);
                                         total_tasks_task.store(0, Ordering::SeqCst);
@@ -2197,7 +2235,7 @@ async fn run_sync_session(
                                         }
                                         task_tracker
                                             .spawn(enforce_manifest_response_deadline(
-                                                expected_manifest_types.clone(),
+                                                manifest_responses.clone(),
                                                 manifest_phase.clone(),
                                                 2,
                                                 tx_internal.clone(),
@@ -2529,9 +2567,7 @@ async fn run_sync_session(
                                             &wq,
                                             &pending_tasks_task,
                                             &total_tasks_task,
-                                            &manifest_responses_received,
-                                            &expected_manifest_count,
-                                            &expected_manifest_types,
+                                            &manifest_responses,
                                             &manifest_phase,
                                             &tx_internal,
                                             &changed_owners,
@@ -3997,10 +4033,10 @@ mod tests {
 
     #[tokio::test]
     async fn missing_manifest_frame_fails_the_current_attempt() {
-        let expected = Arc::new(Mutex::new(HashSet::from([
-            ManifestType::Owner,
-            ManifestType::Avatar,
-        ])));
+        let expected = Arc::new(ManifestResponseTracker::default());
+        expected
+            .arm(1, ManifestType::Owner)
+            .expect("arm owner manifest response");
         let phase = Arc::new(AtomicU8::new(1));
         let (tx, mut rx) = mpsc::unbounded_channel();
         enforce_manifest_response_deadline(expected, phase, 1, tx, 7, Duration::from_millis(1))
@@ -4015,10 +4051,28 @@ mod tests {
                 assert_eq!(attempt_id, 7);
                 assert_eq!(code, "MANIFEST_RESPONSE_TIMEOUT");
                 assert!(message.contains("owner"));
-                assert!(message.contains("avatar"));
             }
             _ => panic!("unexpected deadline command"),
         }
+    }
+
+    #[tokio::test]
+    async fn consumed_manifest_frame_does_not_timeout() {
+        let expected = Arc::new(ManifestResponseTracker::default());
+        expected
+            .arm(1, ManifestType::Owner)
+            .expect("arm owner manifest response");
+        expected
+            .consume(1, ManifestType::Owner)
+            .expect("consume owner manifest response");
+        let phase = Arc::new(AtomicU8::new(1));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        enforce_manifest_response_deadline(expected, phase, 1, tx, 7, Duration::from_millis(1))
+            .await;
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
     }
 
     #[tokio::test]
