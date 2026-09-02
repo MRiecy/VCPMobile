@@ -8,10 +8,6 @@ import { useNotificationStore, type VcpStatus } from './notification';
 import { useChatSessionStore } from './chatSessionStore';
 import { useChatHistoryStore } from './chatHistoryStore';
 import { useTopicStore } from './topicListManager';
-import {
-  updateDistributedState,
-  type DistributedStatus,
-} from '../../features/distributed/composables/useDistributed';
 import { useAvatarStore } from './avatar';
 import type {
   ListenerPermissionDto,
@@ -36,7 +32,6 @@ interface SystemSnapshotDto {
   message: string;
   log: Extract<VcpStatus['status'], 'closed' | 'connecting' | 'connected' | 'error'>;
   sync: string;
-  distributed: DistributedStatus['state'];
   databaseRecovery: DatabaseRecoveryNotice | null;
 }
 
@@ -308,9 +303,6 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         message: snapshot.log === 'connected' ? '已连接' : '正在连接...',
         source: 'VCPLog'
       });
-
-      // 同步分布式连接状态到专有的 Distributed Composable
-      updateDistributedState(snapshot.distributed);
 
       console.log('[Lifecycle] Snapshot hydrated:', JSON.stringify(snapshot));
     } catch (e) {

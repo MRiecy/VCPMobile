@@ -4,7 +4,7 @@
  *
  * 列出全部注册指引：标题 / 描述 / 完成状态 / 重播按钮；
  * 底部提供「重置全部指引进度」入口，供反复测试与重温。
- * 视觉沿用 BatteryOptimizationGuide 的线性列表风格。
+ * 视觉采用设置页一致的高密度线性列表风格。
  */
 import { computed } from 'vue';
 import { CircleCheck, Circle, Play, RotateCcw } from 'lucide-vue-next';

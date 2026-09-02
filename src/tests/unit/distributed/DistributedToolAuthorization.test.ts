@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import distributedViewSource from "@/features/distributed/DistributedView.vue?raw";
-import aiLogicSettingsSource from "@/features/settings/components/AiLogicSettingsSection.vue?raw";
 import commandsSource from "../../../../src-tauri/src/commands.rs?raw";
 import distributedCommandsSource from "../../../../src-tauri/src/distributed/mod.rs?raw";
 import registrySource from "../../../../src-tauri/src/distributed/tool_registry.rs?raw";
@@ -25,8 +24,6 @@ describe("distributed tool authorization contract", () => {
   });
 
   it("keeps authorization mutation in the catalog owner and uses accessible explicit controls", () => {
-    expect(aiLogicSettingsSource).not.toContain("update_enabled_tools");
-    expect(aiLogicSettingsSource).not.toContain("update_disabled_tools");
     expect(distributedViewSource).toContain('role="switch"');
     expect(distributedViewSource).toContain(':aria-checked="plugin.enabled"');
     expect(distributedViewSource).toContain(':data-tool-read="plugin.id"');

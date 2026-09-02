@@ -1,5 +1,5 @@
 // useConfigBackup: 「服务器连接」页配置备份（导出/导入）
-// 导出范围：用户身份 + 服务器连接 + 分布式节点（白名单字段）
+// 导出范围：用户身份 + 应用连接（含插件中心连接，白名单字段）
 // 头像不在导出范围：头像属于数据同步职责，重装后由同步带回
 // 评估与决策记录见 plan/Settings_Import_Export_Evaluation_2026-08-18.md
 import { invoke } from "@tauri-apps/api/core";
@@ -29,7 +29,7 @@ export const BACKUP_SETTINGS_KEYS = [
   "syncServerUrl",
   "syncToken",
   "fileKey",
-  // 分布式节点
+  // 插件中心连接
   "distributedEnabled",
   "distributedWsUrl",
   "distributedVcpKey",

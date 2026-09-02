@@ -299,7 +299,6 @@ pub struct SystemSnapshot {
     pub message: String,
     pub log: String,
     pub sync: String,
-    pub distributed: String,
     #[serde(rename = "databaseRecovery")]
     pub database_recovery:
         Option<crate::vcp_modules::infra::lifecycle_state::DatabaseRecoveryNotice>,
@@ -323,26 +322,11 @@ pub async fn get_system_snapshot(
         None => "closed".to_string(),
     };
 
-    // 获取分布式连接状态
-    let distributed = match app.try_state::<crate::distributed::DistributedState>() {
-        Some(s) => {
-            let client = s.client.read().await;
-            let status = client.get_status().await;
-            serde_json::to_value(status.state)
-                .unwrap_or_else(|_| serde_json::json!("disconnected"))
-                .as_str()
-                .unwrap_or("disconnected")
-                .to_string()
-        }
-        None => "disconnected".to_string(),
-    };
-
     Ok(SystemSnapshot {
         core,
         message,
         log,
         sync,
-        distributed,
         database_recovery,
     })
 }

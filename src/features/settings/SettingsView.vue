@@ -24,7 +24,6 @@ const AboutSection = defineAsyncComponent(() => import("./components/AboutSectio
 
 // 低频子页面（advanced / guide）：懒加载，用户点进子页面时才解析
 // const AssistantSettingsSection = defineAsyncComponent(() => import("./components/AssistantSettingsSection.vue"));
-const AiLogicSettingsSection = defineAsyncComponent(() => import("./components/AiLogicSettingsSection.vue"));
 const TopicSummarySection = defineAsyncComponent(() => import("./components/TopicSummarySection.vue"));
 const MaintenanceSection = defineAsyncComponent(() => import("./components/MaintenanceSection.vue"));
 const GuideCenterSection = defineAsyncComponent(() => import("../guide/components/GuideCenterSection.vue"));
@@ -95,7 +94,7 @@ const categories = [
   { id: "connection", title: "服务器连接", description: "VCP Server API 与数据同步" },
   { id: "theme", title: "主题切换", description: "主题预览与切换" },
   { id: "rendering", title: "消息渲染", description: "排版模式、内容宽度及后续渲染选项" },
-  { id: "advanced", title: "高级功能", description: "移动 CLI、话题总结与数据维护" },
+  { id: "advanced", title: "高级功能", description: "话题总结与数据维护" },
   { id: "guide", title: "帮助与指引", description: "交互教学与功能指引回放" },
   { id: "about", title: "关于", description: "版本与更新" },
 ];
@@ -401,12 +400,6 @@ watch(() => props.isOpen, syncFluidActive);
                     </SettingsCard>
                   </div>
                   -->
-                  <div>
-                    <h3 class="text-[11px] font-black uppercase tracking-[0.15em] opacity-50 mb-3 px-1">移动 CLI Agent</h3>
-                    <SettingsCard>
-                      <AiLogicSettingsSection :settings="settings" />
-                    </SettingsCard>
-                  </div>
                   <div>
                     <h3 class="text-[11px] font-black uppercase tracking-[0.15em] opacity-50 mb-3 px-1">话题总结</h3>
                     <SettingsCard>

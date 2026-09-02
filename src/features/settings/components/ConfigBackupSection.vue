@@ -96,7 +96,7 @@ const confirmImport = async () => {
   <div class="space-y-5 px-1">
     <SettingsActionWithStatus
       title="导出配置"
-      description="用户身份、服务器连接与分布式节点配置，保存到系统下载目录"
+      description="用户身份与应用连接配置，保存到系统下载目录"
       button-variant="primary"
       button-label="导出"
       :button-loading="exportStatus.type === 'loading'"
@@ -136,7 +136,7 @@ const confirmImport = async () => {
   <VcpConfirm
     v-model:is-open="showImportConfirm"
     title="导入配置备份"
-    :message="`将覆盖「用户身份」「服务器连接」与「分布式节点」的现有配置。\n\n备份导出时间：${pendingImport?.exportedAt || '未知'}\n\n确定继续吗？`"
+    :message="`将覆盖「用户身份」与「应用连接」的现有配置。\n\n备份导出时间：${pendingImport?.exportedAt || '未知'}\n\n确定继续吗？`"
     is-danger
     @confirm="confirmImport"
   />

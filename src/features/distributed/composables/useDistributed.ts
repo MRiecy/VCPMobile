@@ -1,7 +1,6 @@
 // features/distributed/composables/useDistributed.ts
-// Self-contained composable for distributed node state.
-// Does NOT import chatManager, assistant, or any other existing store.
-// Only reads 2 fields from settings (vcpLogUrl, vcpLogKey) for server URL reuse.
+// Plugin center connection status owner. It consumes the Rust snapshot command and
+// status event without importing global settings or unrelated feature stores.
 
 import { ref, readonly, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
@@ -26,8 +25,6 @@ const status = ref<DistributedStatus>({
   last_error: null,
   session_id: 0,
 });
-
-const loading = ref(false);
 
 let pendingListener: {
   generation: number;
@@ -164,14 +161,8 @@ export function useDistributed() {
 
   return {
     status: readonly(status),
-    loading: readonly(loading),
     activate,
     deactivate,
     refreshStatus,
   };
-}
-
-export function updateDistributedState(state: DistributedStatus["state"]) {
-  status.value.state = state;
-  status.value.connected = state === "connected";
 }
