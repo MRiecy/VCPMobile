@@ -44,13 +44,18 @@ describe("streaming motion policy", () => {
     expect(messageBlocksCss).not.toContain("custom-spin");
   });
 
-  it("keeps smooth stream fades finite without a second playback scheduler", () => {
+  it("keeps smooth stream reveals finite without a second playback scheduler", () => {
     expect(streamTextFadeSource).not.toContain("setTimeout");
     expect(streamTextFadeSource).not.toContain("requestAnimationFrame");
     expect(streamTextFadeSource).not.toContain("Intl.Segmenter");
+    expect(streamTextFadeSource).not.toContain("Math.log2");
+    expect(streamTextFadeSource).not.toContain("fromOpacity");
     expect(streamTextFadeSource).toContain("element.animate(");
+    expect(streamTextFadeSource).toContain("STREAM_REVEAL_DURATION_MS = 250");
     expect(streamTextFadeSource).toContain('addEventListener("change", handleReducedMotion)');
-    expect(messageBlocksCss).toContain("vcp-stream-inline-fade");
-    expect(messageBlocksCss).toContain("vcp-stream-block-fade 100ms");
+    expect(messageBlocksCss).toContain("vcp-stream-inline-reveal");
+    expect(messageBlocksCss).toContain("vcp-stream-element-reveal 250ms linear");
+    expect(messageBlocksCss).toContain("linear-gradient(");
+    expect(thoughtBlockSource).not.toContain("streamEntryFade");
   });
 });

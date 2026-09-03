@@ -50,6 +50,14 @@ function mountStreamRenderer(message: ChatMessage, pinia: Pinia) {
 
 function installRunningAnimationMock(): () => void {
   const original = Object.getOwnPropertyDescriptor(Element.prototype, 'animate');
+  const originalCss = Object.getOwnPropertyDescriptor(globalThis, 'CSS');
+  Object.defineProperty(globalThis, 'CSS', {
+    configurable: true,
+    value: {
+      supports: vi.fn(() => true),
+      registerProperty: vi.fn(),
+    },
+  });
   Object.defineProperty(Element.prototype, 'animate', {
     configurable: true,
     value: vi.fn(() => ({
@@ -64,6 +72,11 @@ function installRunningAnimationMock(): () => void {
       Object.defineProperty(Element.prototype, 'animate', original);
     } else {
       Reflect.deleteProperty(Element.prototype, 'animate');
+    }
+    if (originalCss) {
+      Object.defineProperty(globalThis, 'CSS', originalCss);
+    } else {
+      Reflect.deleteProperty(globalThis, 'CSS');
     }
   };
 }
@@ -605,6 +618,249 @@ describe('MessageRenderer presentation shell', () => {
     }
   });
 
+  it('reveals only stable Markdown blocks that were not already visible as the tail', async () => {
+    const restoreAnimations = installRunningAnimationMock();
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const sessionStore = useChatSessionStore();
+    const streamStore = useChatStreamStore();
+    const themeStore = useThemeStore();
+    sessionStore.setConversation({
+      id: 'agent-a',
+      type: 'agent',
+      name: 'Agent A',
+    } as any, 'topic-a');
+    streamStore.addSessionStream('agent-a', 'agent', 'topic-a', 'stable-reveal');
+    themeStore.setSmoothStreamingEnabled(true);
+
+    const message = reactive<ChatMessage>({
+      id: 'stable-reveal',
+      role: 'assistant',
+      timestamp: 1,
+      agentId: 'agent-a',
+      shell: {
+        avatarColor: '#64748b',
+        displayName: 'Agent A',
+        isUser: false,
+      },
+      blocks: [],
+      tailContent: '第一段',
+      tailBlock: {
+        type: 'markdown',
+        content: '第一段',
+        hash: 'tail-first',
+        render_mode: 'ast',
+      },
+      tailFrame: {
+        streamId: 5,
+        epoch: 1,
+        revision: 1,
+        frameSeq: 1,
+        reset: true,
+        snapshot: [{
+          type: 'paragraph',
+          children: [{ type: 'text', value: '第一段' }],
+        }],
+        mutations: [],
+      },
+    });
+    const wrapper = mountStreamRenderer(message, pinia);
+
+    try {
+      await nextTick();
+      await nextTick();
+      message.blocks = [
+        {
+          type: 'markdown',
+          content: '第一段',
+          hash: 'stable-first',
+          nodes: [{
+            type: 'paragraph',
+            children: [{ type: 'text', value: '第一段' }],
+          }],
+        },
+        {
+          type: 'markdown',
+          content: '第二段',
+          hash: 'stable-second',
+          nodes: [{
+            type: 'paragraph',
+            children: [{ type: 'text', value: '第二段' }],
+          }],
+        },
+      ];
+      message.tailFrame = {
+        streamId: 5,
+        epoch: 2,
+        revision: 0,
+        frameSeq: 2,
+        reset: true,
+        snapshot: [],
+        mutations: [],
+      };
+      message.tailContent = '';
+      message.tailBlock = undefined;
+      await nextTick();
+      await nextTick();
+
+      const stableBlocks = wrapper.findAll('.vcp-content-blocks > div');
+      expect(stableBlocks).toHaveLength(2);
+      expect(stableBlocks[0].classes()).not.toContain('vcp-stream-element-reveal');
+      expect(stableBlocks[1].classes()).toContain('vcp-stream-element-reveal');
+      expect(wrapper.text()).toContain('第一段');
+      expect(wrapper.text()).toContain('第二段');
+
+      stableBlocks[1].element.dispatchEvent(new Event('animationend'));
+      expect(stableBlocks[1].classes()).not.toContain('vcp-stream-element-reveal');
+
+      message.tailContent = '按钮拆分前的旧尾部';
+      message.tailBlock = {
+        type: 'markdown',
+        content: '按钮拆分前的旧尾部',
+        hash: 'button-tail',
+        render_mode: 'ast',
+        nodes: [{
+          type: 'paragraph',
+          children: [{ type: 'text', value: '按钮拆分前的旧尾部' }],
+        }],
+      };
+      message.tailFrame = {
+        streamId: 5,
+        epoch: 2,
+        revision: 1,
+        frameSeq: 3,
+        mutations: [],
+      };
+      await nextTick();
+      await nextTick();
+
+      message.blocks = [
+        ...message.blocks!,
+        {
+          type: 'markdown',
+          content: '按钮前',
+          hash: 'button-before',
+          nodes: [{ type: 'paragraph', children: [{ type: 'text', value: '按钮前' }] }],
+        },
+        { type: 'button-click', content: '确认', hash: 'button-middle' },
+        {
+          type: 'markdown',
+          content: '按钮后',
+          hash: 'button-after',
+          nodes: [{ type: 'paragraph', children: [{ type: 'text', value: '按钮后' }] }],
+        },
+      ];
+      message.tailFrame = {
+        streamId: 5,
+        epoch: 3,
+        revision: 0,
+        frameSeq: 4,
+        reset: true,
+        snapshot: [],
+        mutations: [],
+      };
+      message.tailContent = '';
+      message.tailBlock = undefined;
+      await nextTick();
+      await nextTick();
+
+      expect(wrapper.findAll('.vcp-stream-element-reveal')).toHaveLength(0);
+    } finally {
+      wrapper.unmount();
+      restoreAnimations();
+    }
+  });
+
+  it('starts a fresh same-batch stable reveal simultaneously for eligible blocks', async () => {
+    const restoreAnimations = installRunningAnimationMock();
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const sessionStore = useChatSessionStore();
+    const streamStore = useChatStreamStore();
+    const themeStore = useThemeStore();
+    sessionStore.setConversation({
+      id: 'agent-a',
+      type: 'agent',
+      name: 'Agent A',
+    } as any, 'topic-a');
+    streamStore.addSessionStream('agent-a', 'agent', 'topic-a', 'fresh-stable-reveal');
+    themeStore.setSmoothStreamingEnabled(true);
+
+    const message = reactive<ChatMessage>({
+      id: 'fresh-stable-reveal',
+      role: 'assistant',
+      timestamp: 1,
+      agentId: 'agent-a',
+      shell: {
+        avatarColor: '#64748b',
+        displayName: 'Agent A',
+        isUser: false,
+      },
+      blocks: [],
+      tailContent: '',
+      tailFrame: {
+        streamId: 6,
+        epoch: 1,
+        revision: 0,
+        frameSeq: 1,
+        reset: true,
+        snapshot: [],
+        mutations: [],
+      },
+    });
+    const wrapper = mountStreamRenderer(message, pinia);
+
+    try {
+      await nextTick();
+      message.blocks = [
+        {
+          type: 'markdown',
+          content: '甲',
+          hash: 'fresh-a',
+          nodes: [{ type: 'paragraph', children: [{ type: 'text', value: '甲' }] }],
+        },
+        {
+          type: 'markdown',
+          content: '乙',
+          hash: 'fresh-b',
+          nodes: [{ type: 'heading', level: 2, children: [{ type: 'text', value: '乙' }] }],
+        },
+        {
+          type: 'markdown',
+          content: '```ts\nconst x = 1\n```',
+          hash: 'fresh-code',
+          nodes: [{
+            type: 'code_block',
+            lang: 'ts',
+            code: 'const x = 1',
+            highlighted_html: null,
+            theme: null,
+          }],
+        },
+      ];
+      message.tailFrame = {
+        streamId: 6,
+        epoch: 2,
+        revision: 0,
+        frameSeq: 2,
+        reset: true,
+        snapshot: [],
+        mutations: [],
+      };
+      await nextTick();
+      await nextTick();
+
+      const stableBlocks = wrapper.findAll('.vcp-content-blocks > div');
+      expect(stableBlocks).toHaveLength(3);
+      expect(stableBlocks[0].classes()).toContain('vcp-stream-element-reveal');
+      expect(stableBlocks[1].classes()).toContain('vcp-stream-element-reveal');
+      expect(stableBlocks[2].classes()).not.toContain('vcp-stream-element-reveal');
+    } finally {
+      wrapper.unmount();
+      restoreAnimations();
+    }
+  });
+
   it('requests one canonical snapshot when an AST tail remounts after earlier deltas', async () => {
     const pinia = createPinia();
     setActivePinia(pinia);
@@ -1140,7 +1396,7 @@ describe('MessageRenderer presentation shell', () => {
     });
     const thoughtShell = wrapper.get('.vcp-thought-block').element;
     const tailSandbox = wrapper.get('.vcp-thought-block .vcp-ast-sandbox').element;
-    expect(wrapper.get('.vcp-thought-block').classes()).toContain('vcp-stream-element-fade-in');
+    expect(wrapper.get('.vcp-thought-block').classes()).not.toContain('vcp-stream-element-reveal');
     expect(wrapper.get('.vcp-thought-content').classes()).not.toContain('animate-slide-down');
     expect(wrapper.text()).not.toContain('<think>');
     expect(wrapper.find('.custom-spin').exists()).toBe(false);
@@ -1221,7 +1477,7 @@ describe('MessageRenderer presentation shell', () => {
       expect(wrapper.findAll('.vcp-thought-block')).toHaveLength(1);
     });
     expect(wrapper.get('.vcp-thought-block').text()).toContain('分析继续');
-    expect(wrapper.get('.vcp-thought-block').classes()).not.toContain('vcp-stream-element-fade-in');
+    expect(wrapper.get('.vcp-thought-block').classes()).not.toContain('vcp-stream-element-reveal');
     wrapper.unmount();
   });
 });

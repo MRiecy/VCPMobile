@@ -9,16 +9,13 @@ const props = withDefaults(
     block: ContentBlock;
     messageId: string;
     defaultExpanded?: boolean;
-    streamEntryFade?: boolean;
   }>(),
   {
     defaultExpanded: false,
-    streamEntryFade: false,
   }
 );
 
 const isExpanded = ref(props.defaultExpanded);
-const entryMotionActive = ref(props.streamEntryFade);
 
 watch(
   () => props.defaultExpanded,
@@ -27,19 +24,8 @@ watch(
   }
 );
 
-watch(
-  () => props.streamEntryFade,
-  (enabled) => {
-    if (!enabled) entryMotionActive.value = false;
-  },
-);
-
 const toggleExpand = () => {
   isExpanded.value = !isExpanded.value;
-};
-
-const finishEntryMotion = () => {
-  entryMotionActive.value = false;
 };
 
 function escapeHtml(text: string): string {
@@ -53,12 +39,7 @@ function escapeHtml(text: string): string {
 </script>
 
 <template>
-  <div
-    class="vcp-thought-block"
-    :class="{ 'vcp-stream-element-fade-in': entryMotionActive }"
-    @animationend.self="finishEntryMotion"
-    @animationcancel.self="finishEntryMotion"
-  >
+  <div class="vcp-thought-block">
     <div class="vcp-thought-header" @click="toggleExpand">
       <span class="vcp-thought-icon">🧠</span>
       <span class="vcp-thought-label flex items-center gap-1">

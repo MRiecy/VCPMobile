@@ -745,25 +745,44 @@ html:not(.dark) .vcp-html-block .numeric { color: #005cc5 !important; }
 html:not(.dark) .vcp-html-block .variable { color: #e36209 !important; }
 html:not(.dark) .vcp-html-block .punctuation { color: #24292e !important; }
 
-/* 流式新增内容只做一次有限 opacity fade；Aurora 仍是唯一更新节奏。 */
-@keyframes vcp-stream-block-fade {
-  from { opacity: 0.86; }
-  to { opacity: 1; }
+/* 完整 chunk 已进入布局；只用 / 形柔边从左向右揭露像素。 */
+@keyframes vcp-stream-element-reveal {
+  from { --vcp-stream-reveal-progress: 0%; }
+  to { --vcp-stream-reveal-progress: calc(100% + 1.732em); }
 }
 
-.vcp-stream-inline-fade {
+.vcp-stream-inline-reveal,
+.vcp-stream-element-reveal {
+  -webkit-mask-image: linear-gradient(
+    120deg,
+    #000 calc(var(--vcp-stream-reveal-progress) - 1.732em),
+    transparent var(--vcp-stream-reveal-progress)
+  );
+  mask-image: linear-gradient(
+    120deg,
+    #000 calc(var(--vcp-stream-reveal-progress) - 1.732em),
+    transparent var(--vcp-stream-reveal-progress)
+  );
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+}
+
+.vcp-stream-inline-reveal {
   display: inline;
 }
 
-.vcp-stream-element-fade-in {
-  animation: vcp-stream-block-fade 100ms cubic-bezier(0.2, 0, 0, 1) 1 backwards;
+.vcp-stream-element-reveal {
+  animation: vcp-stream-element-reveal 250ms linear 1 both;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .vcp-stream-inline-fade,
-  .vcp-stream-element-fade-in {
+  .vcp-stream-inline-reveal,
+  .vcp-stream-element-reveal {
     animation: none !important;
-    opacity: 1 !important;
+    -webkit-mask-image: none !important;
+    mask-image: none !important;
   }
 }
 

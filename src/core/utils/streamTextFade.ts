@@ -1,12 +1,57 @@
-export interface StreamTextFadeStyle {
-  durationMs: number;
-  fromOpacity: number;
+export const STREAM_REVEAL_DURATION_MS = 250;
+export const STREAM_INLINE_REVEAL_CLASS = "vcp-stream-inline-reveal";
+export const STREAM_ELEMENT_REVEAL_CLASS = "vcp-stream-element-reveal";
+
+const STREAM_REVEAL_PROGRESS = "--vcp-stream-reveal-progress";
+const STREAM_REVEAL_END = "calc(100% + 1.732em)";
+const STREAM_REVEAL_MASK = "linear-gradient(120deg, #000 calc(var(--vcp-stream-reveal-progress) - 1.732em), transparent var(--vcp-stream-reveal-progress))";
+
+let revealProgressRegistered = false;
+
+function ensureRevealProgressRegistered(): boolean {
+  if (revealProgressRegistered) return true;
+  if (typeof CSS === "undefined" || typeof CSS.registerProperty !== "function") {
+    return false;
+  }
+
+  try {
+    CSS.registerProperty({
+      name: STREAM_REVEAL_PROGRESS,
+      syntax: "<length-percentage>",
+      inherits: false,
+      initialValue: "0%",
+    });
+    revealProgressRegistered = true;
+  } catch (error) {
+    // HMR 或重复 bundle 可能已注册同名属性；这仍表示 typed interpolation 可用。
+    if ((error as { name?: string }).name !== "InvalidModificationError") {
+      return false;
+    }
+    revealProgressRegistered = true;
+  }
+  return true;
+}
+
+export function supportsStreamRevealMotion(): boolean {
+  if (
+    typeof Element === "undefined"
+    || typeof Element.prototype.animate !== "function"
+    || typeof CSS === "undefined"
+    || typeof CSS.supports !== "function"
+  ) {
+    return false;
+  }
+
+  const supportsMask = CSS.supports("mask-image", STREAM_REVEAL_MASK)
+    || CSS.supports("-webkit-mask-image", STREAM_REVEAL_MASK);
+  return supportsMask && ensureRevealProgressRegistered();
 }
 
 interface StreamTextFragment {
   chunk: string;
   element: HTMLSpanElement;
   animation: Animation;
+  frameToken: object;
   done: boolean;
   finish: () => void;
 }
@@ -20,18 +65,10 @@ interface StreamTextTarget {
 
 const fragmentsByMessage = new Map<string, Map<string, StreamTextTarget>>();
 
-export function resolveStreamTextFade(codeUnits: number): StreamTextFadeStyle {
-  const progress = Math.min(1, Math.max(0, Math.log2(Math.max(1, codeUnits)) / 6));
-  return {
-    durationMs: Math.round(110 - 50 * progress),
-    fromOpacity: 0.8 + 0.14 * progress,
-  };
-}
-
 function stopFragmentAnimation(fragment: StreamTextFragment): void {
   fragment.animation.onfinish = null;
   fragment.animation.oncancel = null;
-  if (fragment.animation.playState !== "finished") {
+  if (fragment.animation.playState !== "idle") {
     fragment.animation.cancel();
   }
 }
@@ -75,10 +112,10 @@ export function appendStreamTextFragment(
   targetId: string,
   textNode: Text,
   chunk: string,
-  fade: StreamTextFadeStyle,
+  frameToken: object,
 ): void {
   if (!chunk) return;
-  if (textNode.parentElement?.closest(".vcp-stream-element-fade-in")) {
+  if (textNode.parentElement?.closest(`.${STREAM_ELEMENT_REVEAL_CLASS}`)) {
     textNode.appendData(chunk);
     return;
   }
@@ -111,30 +148,45 @@ export function appendStreamTextFragment(
     return;
   }
 
-  const element = document.createElement("span");
-  element.className = "vcp-stream-inline-fade";
-  element.dataset.vcpStreamFragment = "";
-  element.style.setProperty("--vcp-stream-fade-duration", `${fade.durationMs}ms`);
-  element.style.setProperty("--vcp-stream-fade-from", fade.fromOpacity.toFixed(3));
-  element.textContent = chunk;
+  // 同一 applyFrame / Text target 的连续 append 是同一个视觉 surface。
+  if (
+    lastFragment
+    && lastFragment.frameToken === frameToken
+    && !lastFragment.done
+    && lastFragment.element.parentNode === parent
+  ) {
+    lastFragment.chunk += chunk;
+    lastFragment.element.append(chunk);
+    return;
+  }
 
-  if (typeof element.animate !== "function") {
+  if (!supportsStreamRevealMotion()) {
     settleTarget(state, true);
     textNode.appendData(chunk);
     return;
   }
 
+  const element = document.createElement("span");
+  element.className = STREAM_INLINE_REVEAL_CLASS;
+  element.dataset.vcpStreamFragment = "";
+  element.textContent = chunk;
+  parent.insertBefore(element, anchor.nextSibling);
+
   let animation: Animation;
   try {
     animation = element.animate(
-      [{ opacity: fade.fromOpacity }, { opacity: 1 }],
+      [
+        { [STREAM_REVEAL_PROGRESS]: "0%" },
+        { [STREAM_REVEAL_PROGRESS]: STREAM_REVEAL_END },
+      ] as Keyframe[],
       {
-        duration: fade.durationMs,
-        easing: "cubic-bezier(0.2, 0, 0, 1)",
-        fill: "backwards",
+        duration: STREAM_REVEAL_DURATION_MS,
+        easing: "linear",
+        fill: "both",
       },
     );
   } catch {
+    element.remove();
     settleTarget(state, true);
     textNode.appendData(chunk);
     return;
@@ -144,6 +196,7 @@ export function appendStreamTextFragment(
     chunk,
     element,
     animation,
+    frameToken,
     done: false,
     finish: () => {
       if (!state?.fragments.includes(fragment)) return;
@@ -154,7 +207,12 @@ export function appendStreamTextFragment(
   animation.onfinish = fragment.finish;
   animation.oncancel = fragment.finish;
   state.fragments.push(fragment);
-  parent.insertBefore(element, anchor.nextSibling);
+}
+
+export function clearStreamElementReveals(root: ParentNode = document): void {
+  root
+    .querySelectorAll(`.${STREAM_ELEMENT_REVEAL_CLASS}`)
+    .forEach((element) => element.classList.remove(STREAM_ELEMENT_REVEAL_CLASS));
 }
 
 export function flushStreamTextFragments(messageId: string): void {
@@ -169,10 +227,11 @@ export function discardStreamTextFragments(messageId: string): void {
   for (const state of [...messageTargets.values()]) settleTarget(state, false);
 }
 
-function flushAllStreamTextFragments(): void {
+function finishAllStreamRevealMotion(): void {
   for (const messageId of [...fragmentsByMessage.keys()]) {
     flushStreamTextFragments(messageId);
   }
+  if (typeof document !== "undefined") clearStreamElementReveals(document);
 }
 
 const reducedMotionQuery = typeof window !== "undefined"
@@ -182,10 +241,10 @@ export function prefersReducedStreamMotion(): boolean {
   return reducedMotionQuery?.matches === true;
 }
 const handleReducedMotion = (event: MediaQueryListEvent) => {
-  if (event.matches) flushAllStreamTextFragments();
+  if (event.matches) finishAllStreamRevealMotion();
 };
 const handleVisibilityChange = () => {
-  if (document.hidden) flushAllStreamTextFragments();
+  if (document.hidden) finishAllStreamRevealMotion();
 };
 
 reducedMotionQuery?.addEventListener("change", handleReducedMotion);
@@ -197,6 +256,6 @@ if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     reducedMotionQuery?.removeEventListener("change", handleReducedMotion);
     document.removeEventListener("visibilitychange", handleVisibilityChange);
-    flushAllStreamTextFragments();
+    finishAllStreamRevealMotion();
   });
 }

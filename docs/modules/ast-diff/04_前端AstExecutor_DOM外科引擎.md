@@ -246,14 +246,14 @@ flowchart TD
     style Dispatch fill:#ff9800,color:#fff
 ```
 
-### 5.2 AppendText —— 原地追加与可选有限淡入
+### 5.2 AppendText —— 原地追加与可选有限揭露
 
 ```typescript
 case "append": {
     const node = registry.get(mutation.id);
     if (node && node.nodeType === Node.TEXT_NODE) {
-        if (motion.inlineFade) {
-            appendStreamTextFragment(messageId, mutation.id, node as Text, mutation.chunk, motion.inlineFade);
+        if (motion.inlineRevealToken) {
+            appendStreamTextFragment(messageId, mutation.id, node as Text, mutation.chunk, motion.inlineRevealToken);
         } else {
             (node as CharacterData).appendData(mutation.chunk);
         }
@@ -270,7 +270,7 @@ case "append": {
 - ✅ `node.nodeType === Node.TEXT_NODE` → 可以安全使用 `CharacterData.appendData()`
 - ❌ 否则 → 返回失败，触发 snapshot 重建
 
-平滑模式只在整帧全部为 `AppendText` 时启用。完整 chunk 当帧进入普通 inline fragment，由浏览器原生 opacity animation 显现；完成后按帧顺序 `appendData()` 回原 Text node。任一结构 mutation 会先同步合并旧 fragment，本帧恢复原始直接追加路径。
+平滑模式只在整帧全部为 `AppendText` 时启用。同一帧、同一 Text target 的 append 合并为一个普通 inline fragment，完整内容当帧进入布局，再以相对垂直 30° 的 `/` 形柔边水平揭露。时长固定 250ms、水平羽化宽度固定 2em；完成后按 surface 顺序 `appendData()` 回原 Text node。任一结构 mutation 会先同步合并旧 fragment，本帧恢复原始直接追加路径。
 
 ### 5.3 Add / AddInline —— 新节点挂载
 
@@ -289,7 +289,7 @@ case "add": {
 }
 ```
 
-只有块级 `Add` 和 `AddListItem` 可在平滑模式下播放一次 100ms opacity fade；`AddInline` 始终静态挂载。若父级或祖先块仍在淡入，子块不再叠加动画。
+块级 `Add` 仅对 paragraph、heading、blockquote、list、table 播放同一套 250ms 揭露；code block、thematic break、raw HTML 静态挂载。`AddListItem` 可揭露，`AddInline` 始终静态挂载。若父级或祖先块仍在揭露，子块不再叠加动画。
 
 对应的有限动画定义在 `message-blocks.css`；关闭平滑模式时所有新增节点保持原始静态挂载路径。
 

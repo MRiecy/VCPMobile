@@ -16,10 +16,19 @@ import { useNotificationStore } from "../../core/stores/notification";
 import { useMessageEvents } from "../../core/composables/useMessageEvents";
 import { useEmoticonFixer } from "../../core/composables/useEmoticonFixer";
 import { renderMarkdownNodes } from "../../core/utils/astRenderer";
-import { applyFrame, cleanupRegistry, rebuildSnapshot } from "../../core/utils/astExecutor";
 import {
+  applyFrame,
+  cleanupRegistry,
+  rebuildSnapshot,
+  shouldRevealAddedMarkdownNode,
+} from "../../core/utils/astExecutor";
+import {
+  clearStreamElementReveals,
+  discardStreamTextFragments,
   flushStreamTextFragments,
   prefersReducedStreamMotion,
+  STREAM_ELEMENT_REVEAL_CLASS,
+  supportsStreamRevealMotion,
 } from "../../core/utils/streamTextFade";
 import { useMessageStyleInjector } from "../../core/composables/useMessageStyleInjector";
 import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from "lucide-vue-next";
@@ -186,9 +195,9 @@ function markTailFrameApplied(frame: TailFrame): void {
 
 function finishStreamMotion(): void {
   flushStreamTextFragments(props.message.id);
-  lastSandbox
-    ?.querySelectorAll(".vcp-stream-element-fade-in")
-    .forEach((element) => element.classList.remove("vcp-stream-element-fade-in"));
+  pendingStableRevealBlocks = new WeakSet();
+  if (messageContentRef.value) clearStreamElementReveals(messageContentRef.value);
+  else if (lastSandbox) clearStreamElementReveals(lastSandbox);
 }
 
 function isSmoothStreamMotionEnabled(): boolean {
@@ -206,10 +215,7 @@ function shouldAnimateTailFrame(frame: TailFrame): boolean {
   return isSmoothStreamMotionEnabled()
     && frame.reset !== true
     && frame.snapshot === undefined
-    && (
-      props.message.tailBlock?.type === "markdown"
-      || props.message.tailBlock?.type === "thought"
-    );
+    && props.message.tailBlock?.type === "markdown";
 }
 
 // === Mermaid FullScreen States ===
@@ -399,6 +405,7 @@ const messageBubbles = computed(() => {
               nodes: groupNodes,
               hash: block.hash !== undefined ? `${block.hash}-split-${idx}` : undefined
             };
+            inheritStableReveal(block, newBlock);
             currentBlocks.push(newBlock);
             if (idx < nodeGroups.length - 1) {
               pushCurrentGroup();
@@ -517,6 +524,25 @@ function getBlockKey(block: ContentBlock, index: number, bubbleId: string): stri
   }
   // Fallback for legacy data (index-based)
   return `${bubbleId}-${block.type}-idx-${index}`;
+}
+
+let pendingStableRevealBlocks = new WeakSet<ContentBlock>();
+
+function shouldRevealStableBlock(block: ContentBlock): boolean {
+  if (!pendingStableRevealBlocks.has(block) || block.type !== "markdown") return false;
+  if (isBrkBlock(block)) return false;
+  if (!block.nodes || block.nodes.length === 0) return !!block.content?.trim();
+  return block.nodes.every(shouldRevealAddedMarkdownNode);
+}
+
+function inheritStableReveal(source: ContentBlock, clone: ContentBlock): void {
+  if (pendingStableRevealBlocks.has(source)) pendingStableRevealBlocks.add(clone);
+}
+
+function finishStableBlockReveal(event: Event, block: ContentBlock): void {
+  if (event.target !== event.currentTarget) return;
+  pendingStableRevealBlocks.delete(block);
+  (event.currentTarget as HTMLElement).classList.remove(STREAM_ELEMENT_REVEAL_CLASS);
 }
 
 function escapeHtml(text: string): string {
@@ -688,6 +714,54 @@ const renderHeavyContent = async () => {
 // Note: blocks array reference changes when Rust parser returns new AST,
 // so shallow watch is sufficient. Avoid deep watch to prevent O(n) traversal
 // on every streaming chunk across all rendered messages.
+watch(
+  [
+    () => props.message.blocks,
+    () => props.message.tailBlock,
+    () => props.message.tailFrame,
+  ],
+  ([blocks, _tailBlock, frame], [previousBlocks, previousTailBlock, previousFrame]) => {
+    if (blocks === previousBlocks) return;
+    pendingStableRevealBlocks = new WeakSet();
+
+    const previous = previousBlocks ?? [];
+    if (
+      !blocks
+      || blocks.length <= previous.length
+      || !themeStore.smoothStreamingEnabled
+      || !isStreaming.value
+      || props.isBackground === true
+      || props.message.isReconnecting === true
+      || typeof document !== "undefined" && document.hidden
+      || prefersReducedStreamMotion()
+      || !supportsStreamRevealMotion()
+      || !frame?.reset
+      || !previousFrame
+      || frame.streamId !== previousFrame.streamId
+      || frame.epoch <= previousFrame.epoch
+      || !previous.every((block, index) => blocks[index] === block)
+    ) {
+      return;
+    }
+
+    const appended = blocks.slice(previous.length);
+    const hadVisibleTail = previousTailBlock !== undefined && previousTailBlock !== null;
+    if (hadVisibleTail) {
+      // stable 内容将在同一 Vue patch 接管；旧 fragment 必须丢弃，不能回写旧 Text node。
+      discardStreamTextFragments(props.message.id);
+      if (messageContentRef.value) clearStreamElementReveals(messageContentRef.value);
+
+      // 一个 tail 段可能被 button 标记切为 markdown/button/markdown；无 Wire 来源映射时整批静态更安全。
+      if (appended.some((block) => block.type === "button-click")) return;
+    }
+
+    for (const block of appended.slice(hadVisibleTail ? 1 : 0)) {
+      if (block.type === "markdown") pendingStableRevealBlocks.add(block);
+    }
+  },
+  { flush: "pre" },
+);
+
 watch(
   () => props.message.blocks,
   () => {
@@ -1127,7 +1201,12 @@ onUnmounted(() => {
             <template v-if="bubble.blocks && bubble.blocks.length > 0">
               <template v-for="(block, index) in bubble.blocks" :key="getBlockKey(block, index, bubble.id)">
                 <!-- v-memo 使用含 bubble ID 的稳定 key，避免分条气泡之间复用错误子树 -->
-                <div v-memo="[getBlockKey(block, index, bubble.id), isStreaming]">
+                <div
+                  v-memo="[getBlockKey(block, index, bubble.id), isStreaming, shouldRevealStableBlock(block)]"
+                  :class="{ [STREAM_ELEMENT_REVEAL_CLASS]: shouldRevealStableBlock(block) }"
+                  @animationend.self="finishStableBlockReveal($event, block)"
+                  @animationcancel.self="finishStableBlockReveal($event, block)"
+                >
                   <DiaryBlock
                     v-if="block.type === 'diary' || block.type === 'diary-update'"
                     :block="block"
@@ -1181,7 +1260,6 @@ onUnmounted(() => {
               :block="thoughtTailBlock"
               :message-id="message.id"
               :default-expanded="true"
-              :stream-entry-fade="isSmoothStreamMotionEnabled()"
             >
               <div
                 v-if="isPlainTailFallback || isAstRecoveryPending || !useAstForCurrentTail"

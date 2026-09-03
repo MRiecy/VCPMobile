@@ -4,10 +4,11 @@ import type { MarkdownNode, InlineNode, AstMutation } from "../types/chat";
 import { filterTrustedRichHtml, filterTrustedRichHtmlUrl } from "./astRenderer";
 import {
   appendStreamTextFragment,
+  clearStreamElementReveals,
   discardStreamTextFragments,
   flushStreamTextFragments,
-  resolveStreamTextFade,
-  type StreamTextFadeStyle,
+  STREAM_ELEMENT_REVEAL_CLASS,
+  supportsStreamRevealMotion,
 } from "./streamTextFade";
 
 function isAstDebugEnabled(): boolean {
@@ -101,23 +102,45 @@ export interface ApplyFrameOptions {
 }
 
 interface FrameMotion {
-  inlineFade?: StreamTextFadeStyle;
+  inlineRevealToken?: object;
   animateBlocks: boolean;
 }
 
 function animateStreamBlock(element: HTMLElement, parent: Node): void {
-  if (parent instanceof Element && parent.closest(".vcp-stream-element-fade-in")) {
+  if (
+    !supportsStreamRevealMotion()
+    || (parent instanceof Element && parent.closest(`.${STREAM_ELEMENT_REVEAL_CLASS}`))
+  ) {
     return;
   }
   const clear = (event: Event) => {
     if (event.target !== element) return;
-    element.classList.remove("vcp-stream-element-fade-in");
+    element.classList.remove(STREAM_ELEMENT_REVEAL_CLASS);
     element.removeEventListener("animationend", clear);
     element.removeEventListener("animationcancel", clear);
   };
-  element.classList.add("vcp-stream-element-fade-in");
+  element.classList.add(STREAM_ELEMENT_REVEAL_CLASS);
   element.addEventListener("animationend", clear);
   element.addEventListener("animationcancel", clear);
+}
+
+export function shouldRevealAddedMarkdownNode(node: MarkdownNode): boolean {
+  switch (node.type) {
+    case "paragraph":
+    case "heading":
+    case "blockquote":
+    case "list":
+    case "table":
+      return true;
+    case "code_block":
+    case "thematic_break":
+    case "raw_html":
+      return false;
+    default: {
+      const exhaustive: never = node;
+      return exhaustive;
+    }
+  }
 }
 
 type ExecuteMutationResult = {
@@ -564,13 +587,13 @@ function executeMutation(
     case "append": {
       const node = registry.get(mutation.id);
       if (node && node.nodeType === Node.TEXT_NODE) {
-        if (motion.inlineFade) {
+        if (motion.inlineRevealToken) {
           appendStreamTextFragment(
             messageId,
             mutation.id,
             node as Text,
             mutation.chunk,
-            motion.inlineFade,
+            motion.inlineRevealToken,
           );
         } else {
           (node as CharacterData).appendData(mutation.chunk);
@@ -629,7 +652,11 @@ function executeMutation(
         : registry.get(mutation.parent);
       if (parentNode) {
         const newDom = createDomFromNode(mutation.node, mutation.id, registry);
-        if (motion.animateBlocks && newDom instanceof HTMLElement) {
+        if (
+          motion.animateBlocks
+          && newDom instanceof HTMLElement
+          && shouldRevealAddedMarkdownNode(mutation.node)
+        ) {
           animateStreamBlock(newDom, parentNode);
         }
         parentNode.appendChild(newDom);
@@ -972,17 +999,10 @@ export function applyFrame(
     && mutations.every((mutation) => mutation.op === "append");
   if (!appendOnly) {
     flushStreamTextFragments(messageId);
+    clearStreamElementReveals(sandbox);
   }
-  const appendCodeUnits = appendOnly
-    ? mutations.reduce(
-        (total, mutation) => total + (mutation.op === "append" ? mutation.chunk.length : 0),
-        0,
-      )
-    : 0;
   const motion: FrameMotion = {
-    inlineFade: appendOnly && appendCodeUnits > 0
-      ? resolveStreamTextFade(appendCodeUnits)
-      : undefined,
+    inlineRevealToken: appendOnly ? {} : undefined,
     animateBlocks: options.smoothStreaming === true && !appendOnly,
   };
 
