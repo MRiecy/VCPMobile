@@ -267,6 +267,28 @@ onBeforeUnmount(() => {
 
       <section v-if="showRenderingSettings" class="theme-settings-section presentation-settings" aria-labelledby="presentation-title"
         data-testid="presentation-settings">
+        <div class="streaming-preference">
+          <SettingsRow title="平滑流式输出" description="让流式新增文字柔和显现，不改变回复内容；系统减少动态效果时自动停用。">
+            <template #action>
+              <button
+                type="button"
+                data-testid="smooth-streaming-switch"
+                class="smooth-streaming-toggle"
+                role="switch"
+                :aria-checked="themeStore.smoothStreamingEnabled"
+                aria-label="平滑流式输出"
+                @click="updateSmoothStreaming(!themeStore.smoothStreamingEnabled)"
+              >
+                <SettingsSwitch
+                  class="pointer-events-none"
+                  :model-value="themeStore.smoothStreamingEnabled"
+                />
+              </button>
+            </template>
+          </SettingsRow>
+        </div>
+        <p v-if="smoothStreamingError" class="theme-error" role="alert">{{ smoothStreamingError }}</p>
+
         <div class="theme-section-heading">
           <div>
             <h3 id="presentation-title">消息呈现与内容宽度</h3>
@@ -292,28 +314,7 @@ onBeforeUnmount(() => {
             </svg>
           </button>
         </div>
-        <div class="streaming-preference">
-          <SettingsRow title="平滑流式输出" description="让长回复分段自然出现，不改变回复内容；系统减少动态效果时自动停用。">
-            <template #action>
-              <button
-                type="button"
-                data-testid="smooth-streaming-switch"
-                class="smooth-streaming-toggle"
-                role="switch"
-                :aria-checked="themeStore.smoothStreamingEnabled"
-                aria-label="平滑流式输出"
-                @click="updateSmoothStreaming(!themeStore.smoothStreamingEnabled)"
-              >
-                <SettingsSwitch
-                  class="pointer-events-none"
-                  :model-value="themeStore.smoothStreamingEnabled"
-                />
-              </button>
-            </template>
-          </SettingsRow>
-        </div>
         <p v-if="presentationError" class="theme-error" role="alert">{{ presentationError }}</p>
-        <p v-if="smoothStreamingError" class="theme-error" role="alert">{{ smoothStreamingError }}</p>
       </section>
     </div>
   </div>
@@ -543,9 +544,9 @@ onBeforeUnmount(() => {
 }
 
 .streaming-preference {
-  margin-top: 0.5rem;
-  padding-top: 0.25rem;
-  border-top: 1px solid var(--vcp-border-subtle);
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid var(--vcp-border-subtle);
 }
 
 .smooth-streaming-toggle {

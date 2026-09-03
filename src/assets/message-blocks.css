@@ -745,6 +745,28 @@ html:not(.dark) .vcp-html-block .numeric { color: #005cc5 !important; }
 html:not(.dark) .vcp-html-block .variable { color: #e36209 !important; }
 html:not(.dark) .vcp-html-block .punctuation { color: #24292e !important; }
 
+/* 流式新增内容只做一次有限 opacity fade；Aurora 仍是唯一更新节奏。 */
+@keyframes vcp-stream-block-fade {
+  from { opacity: 0.86; }
+  to { opacity: 1; }
+}
+
+.vcp-stream-inline-fade {
+  display: inline;
+}
+
+.vcp-stream-element-fade-in {
+  animation: vcp-stream-block-fade 100ms cubic-bezier(0.2, 0, 0, 1) 1 backwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vcp-stream-inline-fade,
+  .vcp-stream-element-fade-in {
+    animation: none !important;
+    opacity: 1 !important;
+  }
+}
+
 /* ==========================================================================
    === VCP Flow Blocks Styles (ThoughtBlock & ToolBlock 100% Shared Styles) ===
    ========================================================================== */

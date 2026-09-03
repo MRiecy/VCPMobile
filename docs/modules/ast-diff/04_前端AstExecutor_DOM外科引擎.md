@@ -246,13 +246,17 @@ flowchart TD
     style Dispatch fill:#ff9800,color:#fff
 ```
 
-### 5.2 AppendText —— 零 reflow 追加
+### 5.2 AppendText —— 原地追加与可选有限淡入
 
 ```typescript
 case "append": {
     const node = registry.get(mutation.id);
     if (node && node.nodeType === Node.TEXT_NODE) {
-        (node as CharacterData).appendData(mutation.chunk);
+        if (motion.inlineFade) {
+            appendStreamTextFragment(messageId, mutation.id, node as Text, mutation.chunk, motion.inlineFade);
+        } else {
+            (node as CharacterData).appendData(mutation.chunk);
+        }
     } else {
         status = "failed";
         detail = node ? `Node type is not text (${node.nodeType})` : "Node not found in registry";
@@ -266,6 +270,8 @@ case "append": {
 - ✅ `node.nodeType === Node.TEXT_NODE` → 可以安全使用 `CharacterData.appendData()`
 - ❌ 否则 → 返回失败，触发 snapshot 重建
 
+平滑模式只在整帧全部为 `AppendText` 时启用。完整 chunk 当帧进入普通 inline fragment，由浏览器原生 opacity animation 显现；完成后按帧顺序 `appendData()` 回原 Text node。任一结构 mutation 会先同步合并旧 fragment，本帧恢复原始直接追加路径。
+
 ### 5.3 Add / AddInline —— 新节点挂载
 
 ```typescript
@@ -275,15 +281,17 @@ case "add": {
         : registry.get(mutation.parent);    // 子级节点通过 registry 找父节点
     if (parentNode) {
         const newDom = createDomFromNode(mutation.node, mutation.id, registry);
-        if (newDom instanceof HTMLElement) {
-            newDom.classList.add("vcp-stream-element-fade-in");  // CSS 淡入动画
+        if (motion.animateBlocks && newDom instanceof HTMLElement) {
+            animateStreamBlock(newDom, parentNode);
         }
         parentNode.appendChild(newDom);
     }
 }
 ```
 
-新增元素自动添加 `vcp-stream-element-fade-in` CSS 类，触发淡入动画（通过 UnoCSS 的 `animate-fade-in` 实现），让新出现的文本/元素有柔和的视觉过渡。
+只有块级 `Add` 和 `AddListItem` 可在平滑模式下播放一次 100ms opacity fade；`AddInline` 始终静态挂载。若父级或祖先块仍在淡入，子块不再叠加动画。
+
+对应的有限动画定义在 `message-blocks.css`；关闭平滑模式时所有新增节点保持原始静态挂载路径。
 
 ### 5.4 Replace —— 四级替换策略（块级节点）
 
@@ -380,13 +388,10 @@ if ((nodeType === "raw_html" || nodeType === "table") && oldNode instanceof HTML
 // 默认兜底
 cleanupSubtreeRefs(mutation.id, registry, true);
 const newDom = createDomFromNode(mutation.node, mutation.id, registry);
-if (newDom instanceof HTMLElement) {
-    newDom.classList.add("vcp-stream-element-fade-in");
-}
 parent.replaceChild(newDom, oldNode);
 ```
 
-最彻底的替换方式——完全销毁旧 DOM 树并创建新树。开销最大但在语义上永远正确。
+最彻底的替换方式——完全销毁旧 DOM 树并创建新树。开销最大但在语义上永远正确；Replace 与 ReplaceInline 都不播放入场动画。
 
 ### 5.5 ReplaceInline —— 行内节点四级替换策略
 

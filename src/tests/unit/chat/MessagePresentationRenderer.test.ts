@@ -48,6 +48,26 @@ function mountStreamRenderer(message: ChatMessage, pinia: Pinia) {
   });
 }
 
+function installRunningAnimationMock(): () => void {
+  const original = Object.getOwnPropertyDescriptor(Element.prototype, 'animate');
+  Object.defineProperty(Element.prototype, 'animate', {
+    configurable: true,
+    value: vi.fn(() => ({
+      playState: 'running',
+      onfinish: null,
+      oncancel: null,
+      cancel: vi.fn(),
+    } as unknown as Animation)),
+  });
+  return () => {
+    if (original) {
+      Object.defineProperty(Element.prototype, 'animate', original);
+    } else {
+      Reflect.deleteProperty(Element.prototype, 'animate');
+    }
+  };
+}
+
 beforeEach(() => {
   localStorage.removeItem('vcp-smooth-streaming-enabled');
 });
@@ -465,8 +485,8 @@ describe('MessageRenderer presentation shell', () => {
     wrapper.unmount();
   });
 
-  it('paces safe AST text appends and respects immediate lifecycle barriers', async () => {
-    vi.useFakeTimers();
+  it('reveals complete AST appends immediately and settles at lifecycle boundaries', async () => {
+    const restoreAnimations = installRunningAnimationMock();
     const pinia = createPinia();
     setActivePinia(pinia);
     const sessionStore = useChatSessionStore();
@@ -480,10 +500,6 @@ describe('MessageRenderer presentation shell', () => {
     streamStore.addSessionStream('agent-a', 'agent', 'topic-a', 'smooth-append');
     themeStore.setSmoothStreamingEnabled(true);
 
-    const baseNodes = [{
-      type: 'paragraph' as const,
-      children: [{ type: 'text' as const, value: 'base' }],
-    }];
     const message = reactive<ChatMessage>({
       id: 'smooth-append',
       role: 'assistant',
@@ -508,228 +524,6 @@ describe('MessageRenderer presentation shell', () => {
         revision: 1,
         frameSeq: 1,
         reset: true,
-        snapshot: baseNodes,
-        mutations: [],
-      },
-    });
-
-    const wrapper = mount(MessageRenderer, {
-      props: { message },
-      global: {
-        plugins: [pinia],
-        directives: { longpress: {} },
-        stubs: {
-          VcpAvatar: markerStub('avatar'),
-          ToolBlock: markerStub('tool'),
-          ThoughtBlock: markerStub('thought'),
-          HtmlPreviewBlock: markerStub('html-preview'),
-          ToolSummaryBlock: markerStub('tool-summary'),
-          DiaryBlock: markerStub('diary'),
-          AttachmentPreview: markerStub('attachment'),
-          MermaidFullScreenViewer: markerStub('mermaid-viewer'),
-          ThinkingIndicator: markerStub('thinking'),
-          StreamingTag: markerStub('streaming'),
-        },
-      },
-    });
-
-    try {
-      await nextTick();
-      await nextTick();
-      expect(wrapper.get('.vcp-ast-sandbox').text()).toContain('base');
-
-      message.tailContent = 'baseabcdefgh';
-      message.tailBlock = {
-        type: 'markdown',
-        content: 'baseabcdefgh',
-        hash: 'next',
-        render_mode: 'ast',
-      };
-      message.tailFrame = {
-        streamId: 4,
-        epoch: 1,
-        revision: 2,
-        frameSeq: 2,
-        mutations: [{ op: 'append', id: 't0.i0', chunk: 'abcdefgh' }],
-      };
-      await nextTick();
-      await nextTick();
-
-      expect(wrapper.get('.vcp-ast-sandbox').text()).toContain('baseabc');
-      expect(wrapper.get('.vcp-ast-sandbox').text()).not.toContain('baseabcdefgh');
-
-      message.tailContent = 'baseabcdefgh!';
-      message.tailBlock = {
-        type: 'markdown',
-        content: 'baseabcdefgh!',
-        hash: 'barrier',
-        render_mode: 'ast',
-      };
-      message.tailFrame = {
-        streamId: 4,
-        epoch: 1,
-        revision: 3,
-        frameSeq: 3,
-        mutations: [{ op: 'text', id: 't0.i0', value: 'baseabcdefgh!' }],
-      };
-      await nextTick();
-      await nextTick();
-      expect(wrapper.get('.vcp-ast-sandbox').text()).toContain('baseabcdefgh!');
-
-      message.tailContent = 'baseabcdefgh!ijklmnop';
-      message.tailBlock = {
-        type: 'markdown',
-        content: 'baseabcdefgh!ijklmnop',
-        hash: 'after-barrier',
-        render_mode: 'ast',
-      };
-      message.tailFrame = {
-        streamId: 4,
-        epoch: 1,
-        revision: 4,
-        frameSeq: 4,
-        mutations: [{ op: 'append', id: 't0.i0', chunk: 'ijklmnop' }],
-      };
-      await nextTick();
-      await nextTick();
-      expect(wrapper.get('.vcp-ast-sandbox').text()).not.toContain('baseabcdefgh!ijklmnop');
-
-      await wrapper.setProps({ isBackground: true });
-      await nextTick();
-      expect(wrapper.get('.vcp-ast-sandbox').text()).toContain('baseabcdefgh!ijklmnop');
-
-      await wrapper.setProps({ isBackground: false });
-      message.tailContent = 'baseabcdefgh!ijklmnopqrstuvwx';
-      message.tailBlock = {
-        type: 'markdown',
-        content: 'baseabcdefgh!ijklmnopqrstuvwx',
-        hash: 'after-background',
-        render_mode: 'ast',
-      };
-      message.tailFrame = {
-        streamId: 4,
-        epoch: 1,
-        revision: 5,
-        frameSeq: 5,
-        mutations: [{ op: 'append', id: 't0.i0', chunk: 'qrstuvwx' }],
-      };
-      await nextTick();
-      await nextTick();
-      expect(wrapper.get('.vcp-ast-sandbox').text()).not.toContain('baseabcdefgh!ijklmnopqrstuvwx');
-
-      message.isReconnecting = true;
-      await nextTick();
-      expect(wrapper.get('.vcp-ast-sandbox').text()).toContain('baseabcdefgh!ijklmnopqrstuvwx');
-
-      message.isReconnecting = false;
-      message.tailContent = 'baseabcdefgh!ijklmnopqrstuvwxCDEFGHIJ';
-      message.tailBlock = {
-        type: 'markdown',
-        content: 'baseabcdefgh!ijklmnopqrstuvwxCDEFGHIJ',
-        hash: 'after-reconnect',
-        render_mode: 'ast',
-      };
-      message.tailFrame = {
-        streamId: 4,
-        epoch: 1,
-        revision: 6,
-        frameSeq: 6,
-        mutations: [{ op: 'append', id: 't0.i0', chunk: 'CDEFGHIJ' }],
-      };
-      await nextTick();
-      await nextTick();
-      expect(wrapper.get('.vcp-ast-sandbox').text()).not.toContain('baseabcdefgh!ijklmnopqrstuvwxCDEFGHIJ');
-
-      themeStore.setSmoothStreamingEnabled(false);
-      await nextTick();
-
-      expect(wrapper.get('.vcp-ast-sandbox').text()).toContain('baseabcdefgh!ijklmnopqrstuvwxCDEFGHIJ');
-      await vi.advanceTimersByTimeAsync(1000);
-      expect(wrapper.get('.vcp-ast-sandbox').text()).toContain('baseabcdefgh!ijklmnopqrstuvwxCDEFGHIJ');
-
-      themeStore.setSmoothStreamingEnabled(true);
-      message.tailContent = 'baseabcdefgh!ijklmnopqrstuvwxCDEFGHIJKLMN';
-      message.tailBlock = {
-        type: 'markdown',
-        content: 'baseabcdefgh!ijklmnopqrstuvwxCDEFGHIJKLMN',
-        hash: 'before-terminal',
-        render_mode: 'ast',
-      };
-      message.tailFrame = {
-        streamId: 4,
-        epoch: 1,
-        revision: 7,
-        frameSeq: 7,
-        mutations: [{ op: 'append', id: 't0.i0', chunk: 'KLMN' }],
-      };
-      await nextTick();
-      await nextTick();
-      expect(wrapper.get('.vcp-ast-sandbox').text()).not.toContain('baseabcdefgh!ijklmnopqrstuvwxCDEFGHIJKLMN');
-
-      message.content = 'canonical final';
-      message.blocks = [{
-        type: 'markdown',
-        content: 'canonical final',
-        nodes: [{
-          type: 'paragraph',
-          children: [{ type: 'text', value: 'canonical final' }],
-        }],
-      }];
-      message.tailContent = '';
-      message.tailBlock = undefined;
-      streamStore.removeSessionStream('agent-a', 'agent', 'topic-a', 'smooth-append');
-      await nextTick();
-      await nextTick();
-
-      expect(wrapper.get('.vcp-markdown-block').text()).toContain('canonical final');
-      await vi.advanceTimersByTimeAsync(1000);
-      expect(wrapper.get('.vcp-markdown-block').text()).toContain('canonical final');
-    } finally {
-      wrapper.unmount();
-      themeStore.$dispose();
-      vi.useRealTimers();
-    }
-  });
-
-  it('lets a reset snapshot discard old reveal debt without a delayed append', async () => {
-    vi.useFakeTimers();
-    const pinia = createPinia();
-    setActivePinia(pinia);
-    const sessionStore = useChatSessionStore();
-    const streamStore = useChatStreamStore();
-    const themeStore = useThemeStore();
-    sessionStore.setConversation({
-      id: 'agent-a',
-      type: 'agent',
-      name: 'Agent A',
-    } as any, 'topic-a');
-    streamStore.addSessionStream('agent-a', 'agent', 'topic-a', 'smooth-reset');
-    themeStore.setSmoothStreamingEnabled(true);
-
-    const message = reactive<ChatMessage>({
-      id: 'smooth-reset',
-      role: 'assistant',
-      timestamp: 1,
-      agentId: 'agent-a',
-      shell: {
-        avatarColor: '#64748b',
-        displayName: 'Agent A',
-        isUser: false,
-      },
-      blocks: [],
-      tailContent: 'base',
-      tailBlock: {
-        type: 'markdown',
-        content: 'base',
-        hash: 'base',
-        render_mode: 'ast',
-      },
-      tailFrame: {
-        streamId: 20,
-        epoch: 1,
-        revision: 1,
-        frameSeq: 1,
-        reset: true,
         snapshot: [{
           type: 'paragraph',
           children: [{ type: 'text', value: 'base' }],
@@ -737,76 +531,77 @@ describe('MessageRenderer presentation shell', () => {
         mutations: [],
       },
     });
-    const wrapper = mount(MessageRenderer, {
-      props: { message },
-      global: {
-        plugins: [pinia],
-        directives: { longpress: {} },
-        stubs: {
-          VcpAvatar: markerStub('avatar'),
-          ToolBlock: markerStub('tool'),
-          ThoughtBlock: markerStub('thought'),
-          HtmlPreviewBlock: markerStub('html-preview'),
-          ToolSummaryBlock: markerStub('tool-summary'),
-          DiaryBlock: markerStub('diary'),
-          AttachmentPreview: markerStub('attachment'),
-          MermaidFullScreenViewer: markerStub('mermaid-viewer'),
-          ThinkingIndicator: markerStub('thinking'),
-          StreamingTag: markerStub('streaming'),
-        },
-      },
-    });
+    const wrapper = mountStreamRenderer(message, pinia);
 
     try {
       await nextTick();
       await nextTick();
-      message.tailContent = 'baseabcdefgh';
       message.tailBlock = {
-        type: 'markdown',
-        content: 'baseabcdefgh',
-        hash: 'pending',
-        render_mode: 'ast',
-      };
-      message.tailFrame = {
-        streamId: 20,
-        epoch: 1,
-        revision: 2,
-        frameSeq: 2,
-        mutations: [{ op: 'append', id: 't0.i0', chunk: 'abcdefgh' }],
-      };
-      await nextTick();
-      await nextTick();
-      expect(wrapper.get('.vcp-ast-sandbox').text()).not.toContain('baseabcdefgh');
+      type: 'markdown',
+      content: 'base完整新增',
+      hash: 'append-1',
+      render_mode: 'ast',
+    };
+    message.tailFrame = {
+      streamId: 4,
+      epoch: 1,
+      revision: 2,
+      frameSeq: 2,
+      mutations: [{ op: 'append', id: 't0.i0', chunk: '完整新增' }],
+    };
+    await nextTick();
+    await nextTick();
 
-      message.tailContent = 'fresh';
-      message.tailBlock = {
-        type: 'markdown',
-        content: 'fresh',
-        hash: 'fresh',
-        render_mode: 'ast',
-      };
-      message.tailFrame = {
-        streamId: 21,
-        epoch: 1,
-        revision: 1,
-        frameSeq: 1,
-        reset: true,
-        snapshot: [{
-          type: 'paragraph',
-          children: [{ type: 'text', value: 'fresh' }],
-        }],
-        mutations: [],
-      };
-      await nextTick();
-      await nextTick();
+    expect(wrapper.get('.vcp-ast-sandbox').text()).toBe('base完整新增');
+    expect(wrapper.find('[data-vcp-stream-fragment]').exists()).toBe(true);
 
-      expect(wrapper.get('.vcp-ast-sandbox').text()).toBe('fresh');
-      await vi.advanceTimersByTimeAsync(1000);
-      expect(wrapper.get('.vcp-ast-sandbox').text()).toBe('fresh');
+    await wrapper.setProps({ isBackground: true });
+    expect(wrapper.find('[data-vcp-stream-fragment]').exists()).toBe(false);
+    expect(wrapper.get('.vcp-ast-sandbox').text()).toBe('base完整新增');
+
+    await wrapper.setProps({ isBackground: false });
+    message.tailBlock = {
+      type: 'markdown',
+      content: 'base完整新增继续',
+      hash: 'append-2',
+      render_mode: 'ast',
+    };
+    message.tailFrame = {
+      streamId: 4,
+      epoch: 1,
+      revision: 3,
+      frameSeq: 3,
+      mutations: [{ op: 'append', id: 't0.i0', chunk: '继续' }],
+    };
+    await nextTick();
+    await nextTick();
+    expect(wrapper.find('[data-vcp-stream-fragment]').exists()).toBe(true);
+
+    themeStore.setSmoothStreamingEnabled(false);
+    await nextTick();
+    expect(wrapper.find('[data-vcp-stream-fragment]').exists()).toBe(false);
+    expect(wrapper.get('.vcp-ast-sandbox').text()).toBe('base完整新增继续');
+
+    message.content = '严格终态';
+    message.blocks = [{
+      type: 'markdown',
+      content: '严格终态',
+      nodes: [{
+        type: 'paragraph',
+        children: [{ type: 'text', value: '严格终态' }],
+      }],
+    }];
+    message.tailBlock = undefined;
+    message.tailContent = '';
+    streamStore.removeSessionStream('agent-a', 'agent', 'topic-a', message.id);
+    await nextTick();
+    await nextTick();
+
+      expect(wrapper.text()).toContain('严格终态');
+      expect(wrapper.find('[data-vcp-stream-fragment]').exists()).toBe(false);
     } finally {
       wrapper.unmount();
-      themeStore.$dispose();
-      vi.useRealTimers();
+      restoreAnimations();
     }
   });
 
@@ -1246,6 +1041,7 @@ describe('MessageRenderer presentation shell', () => {
     setActivePinia(pinia);
     const sessionStore = useChatSessionStore();
     const streamStore = useChatStreamStore();
+    useThemeStore().setSmoothStreamingEnabled(true);
     sessionStore.setConversation({
       id: 'agent-a',
       type: 'agent',
@@ -1344,7 +1140,8 @@ describe('MessageRenderer presentation shell', () => {
     });
     const thoughtShell = wrapper.get('.vcp-thought-block').element;
     const tailSandbox = wrapper.get('.vcp-thought-block .vcp-ast-sandbox').element;
-    expect(wrapper.get('.vcp-thought-content').classes()).toContain('animate-slide-down');
+    expect(wrapper.get('.vcp-thought-block').classes()).toContain('vcp-stream-element-fade-in');
+    expect(wrapper.get('.vcp-thought-content').classes()).not.toContain('animate-slide-down');
     expect(wrapper.text()).not.toContain('<think>');
     expect(wrapper.find('.custom-spin').exists()).toBe(false);
 
@@ -1424,7 +1221,7 @@ describe('MessageRenderer presentation shell', () => {
       expect(wrapper.findAll('.vcp-thought-block')).toHaveLength(1);
     });
     expect(wrapper.get('.vcp-thought-block').text()).toContain('分析继续');
-    expect(wrapper.get('.vcp-thought-content').classes()).not.toContain('animate-slide-down');
+    expect(wrapper.get('.vcp-thought-block').classes()).not.toContain('vcp-stream-element-fade-in');
     wrapper.unmount();
   });
 });

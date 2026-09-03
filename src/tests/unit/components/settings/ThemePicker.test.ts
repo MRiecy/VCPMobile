@@ -131,6 +131,8 @@ describe('ThemePicker draft, preview and presentation controls', () => {
     expect(wrapper.text()).toContain('消息呈现与内容宽度');
     expect(wrapper.text()).toContain('点选后立即生效');
     expect(store.smoothStreamingEnabled).toBe(false);
+    expect(wrapper.get('[data-testid="presentation-settings"]').element.firstElementChild)
+      .toBe(wrapper.get('.streaming-preference').element);
 
     await wrapper.get('[data-testid="smooth-streaming-switch"]').trigger('click');
 

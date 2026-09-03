@@ -2,6 +2,13 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import morphdom from "morphdom";
 import type { MarkdownNode, InlineNode, AstMutation } from "../types/chat";
 import { filterTrustedRichHtml, filterTrustedRichHtmlUrl } from "./astRenderer";
+import {
+  appendStreamTextFragment,
+  discardStreamTextFragments,
+  flushStreamTextFragments,
+  resolveStreamTextFade,
+  type StreamTextFadeStyle,
+} from "./streamTextFade";
 
 function isAstDebugEnabled(): boolean {
   return Boolean(import.meta.env.DEV && (window as any).__VCP_AST_DEBUG__);
@@ -89,6 +96,30 @@ export type ApplyFrameResult = {
   };
 };
 
+export interface ApplyFrameOptions {
+  smoothStreaming?: boolean;
+}
+
+interface FrameMotion {
+  inlineFade?: StreamTextFadeStyle;
+  animateBlocks: boolean;
+}
+
+function animateStreamBlock(element: HTMLElement, parent: Node): void {
+  if (parent instanceof Element && parent.closest(".vcp-stream-element-fade-in")) {
+    return;
+  }
+  const clear = (event: Event) => {
+    if (event.target !== element) return;
+    element.classList.remove("vcp-stream-element-fade-in");
+    element.removeEventListener("animationend", clear);
+    element.removeEventListener("animationcancel", clear);
+  };
+  element.classList.add("vcp-stream-element-fade-in");
+  element.addEventListener("animationend", clear);
+  element.addEventListener("animationcancel", clear);
+}
+
 type ExecuteMutationResult = {
   ok: boolean;
   reason?: string;
@@ -111,6 +142,7 @@ function getRegistry(messageId: string): Map<string, Node> {
  * 在 MessageRenderer.vue 卸载（onUnmounted）或清除聊天时调用。
  */
 export function cleanupRegistry(messageId: string): void {
+  discardStreamTextFragments(messageId);
   const registry = registryShards.get(messageId);
   const size = registry ? registry.size : 0;
   registryShards.delete(messageId);
@@ -516,7 +548,8 @@ export function rebuildSnapshot(
 function executeMutation(
   mutation: AstMutation,
   messageId: string,
-  sandbox: HTMLElement
+  sandbox: HTMLElement,
+  motion: FrameMotion,
 ): ExecuteMutationResult {
   const registry = getRegistry(messageId);
   const debugEnabled = import.meta.env.DEV && isAstDebugEnabled();
@@ -531,7 +564,17 @@ function executeMutation(
     case "append": {
       const node = registry.get(mutation.id);
       if (node && node.nodeType === Node.TEXT_NODE) {
-        (node as CharacterData).appendData(mutation.chunk);
+        if (motion.inlineFade) {
+          appendStreamTextFragment(
+            messageId,
+            mutation.id,
+            node as Text,
+            mutation.chunk,
+            motion.inlineFade,
+          );
+        } else {
+          (node as CharacterData).appendData(mutation.chunk);
+        }
       } else {
         status = "failed";
         detail = node ? `Node type is not text (${node.nodeType})` : "Node not found in registry";
@@ -586,8 +629,8 @@ function executeMutation(
         : registry.get(mutation.parent);
       if (parentNode) {
         const newDom = createDomFromNode(mutation.node, mutation.id, registry);
-        if (newDom instanceof HTMLElement) {
-          newDom.classList.add("vcp-stream-element-fade-in");
+        if (motion.animateBlocks && newDom instanceof HTMLElement) {
+          animateStreamBlock(newDom, parentNode);
         }
         parentNode.appendChild(newDom);
       } else {
@@ -601,9 +644,6 @@ function executeMutation(
       const parentNode = registry.get(mutation.parent);
       if (parentNode) {
         const newDom = createInlineDom(mutation.node, mutation.id, registry);
-        if (newDom instanceof HTMLElement) {
-          newDom.classList.add("vcp-stream-element-fade-in");
-        }
         parentNode.appendChild(newDom);
       } else {
         status = "failed";
@@ -623,7 +663,9 @@ function executeMutation(
           const childDom = createDomFromNode(child, `${mutation.id}.b${bIdx}`, registry);
           li.appendChild(childDom);
         });
-        li.classList.add("vcp-stream-element-fade-in");
+        if (motion.animateBlocks) {
+          animateStreamBlock(li, parentNode);
+        }
         parentNode.appendChild(li);
       } else {
         status = "failed";
@@ -746,9 +788,6 @@ function executeMutation(
           // 4. 默认兜底策略：传统的物理 DOM 树替换
           cleanupSubtreeRefs(mutation.id, registry, true);
           const newDom = createDomFromNode(mutation.node, mutation.id, registry);
-          if (newDom instanceof HTMLElement) {
-            newDom.classList.add("vcp-stream-element-fade-in");
-          }
           parent.replaceChild(newDom, oldNode);
           if (debugEnabled) astDebugLog(`[AST replace success] id=${mutation.id}`);
         } else {
@@ -860,9 +899,6 @@ function executeMutation(
           // 4. 默认兜底策略：物理 DOM 树替换
           cleanupSubtreeRefs(mutation.id, registry, true);
           const newDom = createInlineDom(mutation.node, mutation.id, registry);
-          if (newDom instanceof HTMLElement) {
-            newDom.classList.add("vcp-stream-element-fade-in");
-          }
           parent.replaceChild(newDom, oldNode);
         } else {
           status = "failed";
@@ -923,14 +959,35 @@ function executeMutation(
 export function applyFrame(
   mutations: AstMutation[],
   messageId: string,
-  sandbox: HTMLElement
+  sandbox: HTMLElement,
+  options: ApplyFrameOptions = {},
 ): ApplyFrameResult {
   const debugEnabled = import.meta.env.DEV && isAstDebugEnabled();
   const beforeHtml = debugEnabled ? sandbox.innerHTML : "";
   let result: ApplyFrameResult = { ok: true, applied: 0 };
 
+  // 平滑关闭时保持原热路径；开启后先整帧判定，避免结构 mutation 与临时 fragment 分叉。
+  const appendOnly = options.smoothStreaming === true
+    && mutations.length > 0
+    && mutations.every((mutation) => mutation.op === "append");
+  if (!appendOnly) {
+    flushStreamTextFragments(messageId);
+  }
+  const appendCodeUnits = appendOnly
+    ? mutations.reduce(
+        (total, mutation) => total + (mutation.op === "append" ? mutation.chunk.length : 0),
+        0,
+      )
+    : 0;
+  const motion: FrameMotion = {
+    inlineFade: appendOnly && appendCodeUnits > 0
+      ? resolveStreamTextFade(appendCodeUnits)
+      : undefined,
+    animateBlocks: options.smoothStreaming === true && !appendOnly,
+  };
+
   for (const [index, mutation] of mutations.entries()) {
-    const mutationResult = executeMutation(mutation, messageId, sandbox);
+    const mutationResult = executeMutation(mutation, messageId, sandbox, motion);
     if (!mutationResult.ok) {
       result = {
         ok: false,

@@ -17,13 +17,13 @@ import { useMessageEvents } from "../../core/composables/useMessageEvents";
 import { useEmoticonFixer } from "../../core/composables/useEmoticonFixer";
 import { renderMarkdownNodes } from "../../core/utils/astRenderer";
 import { applyFrame, cleanupRegistry, rebuildSnapshot } from "../../core/utils/astExecutor";
+import {
+  flushStreamTextFragments,
+  prefersReducedStreamMotion,
+} from "../../core/utils/streamTextFade";
 import { useMessageStyleInjector } from "../../core/composables/useMessageStyleInjector";
 import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from "lucide-vue-next";
 import morphdom from "morphdom";
-import {
-  canSmoothStreamAppend,
-  createStreamRevealController,
-} from "./streamRevealScheduler";
 
 const { processEmoticonsInContainer } = useEmoticonFixer();
 const mermaidCache = new Map<string, string>();
@@ -112,7 +112,6 @@ const useAstForCurrentTail = computed(() => {
   );
 });
 let lastAppliedFrameSeq = 0;
-let lastAcceptedFrameSeq = 0;
 let localTailStreamId = -1;
 let localTailEpoch = -1;
 let localTailRevision = -1;
@@ -168,7 +167,6 @@ function recoverTailSnapshotOrDowngrade(reason: string): void {
       astFailureCount = 0;
     } else if (astFailureCount >= 2) {
       enableAstDiff.value = false;
-      tailRevealController.cancel();
       cleanupRegistry(props.message.id);
     }
   });
@@ -180,57 +178,34 @@ function handleAstFrameFailure(_sandbox: HTMLElement | null, reason: string): vo
 
 function markTailFrameApplied(frame: TailFrame): void {
   lastAppliedFrameSeq = frame.frameSeq;
-  lastAcceptedFrameSeq = Math.max(lastAcceptedFrameSeq, frame.frameSeq);
   localTailStreamId = frame.streamId;
   localTailEpoch = frame.epoch;
   localTailRevision = frame.revision;
   astFailureCount = 0;
 }
 
-const tailRevealController = createStreamRevealController<TailFrame>({
-  apply(targetId, text) {
-    const sandbox = tailSandboxRef.value;
-    if (!sandbox || sandbox !== lastSandbox || !useAstForCurrentTail.value) {
-      return false;
-    }
-    return applyFrame(
-      [{ op: "append", id: targetId, chunk: text }],
-      props.message.id,
-      sandbox,
-    ).ok;
-  },
-  complete(frame) {
-    if (
-      frame.streamId === localTailStreamId
-      && frame.epoch === localTailEpoch
-    ) {
-      markTailFrameApplied(frame);
-    }
-  },
-  fail(_frame, reason) {
-    handleAstFrameFailure(tailSandboxRef.value, `smooth reveal ${reason}`);
-  },
-});
+function finishStreamMotion(): void {
+  flushStreamTextFragments(props.message.id);
+  lastSandbox
+    ?.querySelectorAll(".vcp-stream-element-fade-in")
+    .forEach((element) => element.classList.remove("vcp-stream-element-fade-in"));
+}
 
-function shouldSmoothTailFrame(frame: TailFrame): boolean {
-  if (
+function isSmoothStreamMotionEnabled(): boolean {
+  return !(
     !themeStore.smoothStreamingEnabled
     || !isStreaming.value
     || !useAstForCurrentTail.value
     || props.isBackground === true
     || typeof document !== "undefined" && document.hidden
-    || typeof window !== "undefined"
-      && window.matchMedia("(prefers-reduced-motion: reduce)").matches
-    || frame.reset === true
-    || frame.snapshot !== undefined
-  ) {
-    return false;
-  }
+    || prefersReducedStreamMotion()
+  );
+}
 
-  const mutations = frame.mutations || [];
-  return mutations.length === 1
-    && mutations[0].op === "append"
-    && canSmoothStreamAppend(mutations[0].chunk)
+function shouldAnimateTailFrame(frame: TailFrame): boolean {
+  return isSmoothStreamMotionEnabled()
+    && frame.reset !== true
+    && frame.snapshot === undefined
     && (
       props.message.tailBlock?.type === "markdown"
       || props.message.tailBlock?.type === "thought"
@@ -726,7 +701,7 @@ watch(
   isMessageInActiveStream,
   (inStream, wasInStream) => {
     if (wasInStream && !inStream) {
-      tailRevealController.cancel();
+      finishStreamMotion();
       renderHeavyContent();
     }
   }
@@ -735,21 +710,21 @@ watch(
 watch(
   () => themeStore.smoothStreamingEnabled,
   (enabled) => {
-    if (!enabled) tailRevealController.flush();
+    if (!enabled) finishStreamMotion();
   },
 );
 
 watch(
   () => props.message.isReconnecting,
   (isReconnecting) => {
-    if (isReconnecting) tailRevealController.flush();
+    if (isReconnecting) finishStreamMotion();
   },
 );
 
 watch(
   () => props.isBackground,
   (isBackground) => {
-    if (isBackground) tailRevealController.flush();
+    if (isBackground) finishStreamMotion();
   },
 );
 
@@ -964,28 +939,20 @@ watch(
           onBeforeElUpdated: (fromEl, toEl) => {
             if (fromEl.isEqualNode(toEl)) return false;
 
-            // 1. 保留可能存在的过渡/动画 class，防止 morphdom 移除它们
-            const animClasses = ['vcp-stream-element-fade-in', 'animate-fade-in', 'vcp-stream-content-pulse'];
-            for (const cls of animClasses) {
-              if (fromEl.classList.contains(cls)) {
-                toEl.classList.add(cls);
-              }
-            }
-
-            // 2. 保留媒体播放状态
+            // 1. 保留媒体播放状态
             if (fromEl.tagName === 'VIDEO' || fromEl.tagName === 'AUDIO') {
               const mediaEl = fromEl as HTMLMediaElement;
               if (!mediaEl.paused) return false;
             }
 
-            // 3. 保留输入焦点
+            // 2. 保留输入焦点
             if (fromEl === document.activeElement) {
               requestAnimationFrame(() => {
                 if (toEl && typeof toEl.focus === 'function') toEl.focus();
               });
             }
 
-            // 4. 保留已加载图片的可见性和状态，防止重新加载闪烁
+            // 3. 保留已加载图片的可见性和状态，防止重新加载闪烁
             if (fromEl.tagName === 'IMG') {
               const fromImg = fromEl as HTMLImageElement;
               const toImg = toEl as HTMLImageElement;
@@ -1022,7 +989,6 @@ watch(
     }
 
     if (!useAstForCurrentTail.value || !sandbox) {
-      tailRevealController.cancel();
       if (lastSandbox) {
         cleanupRegistry(props.message.id);
         lastSandbox.innerHTML = '';
@@ -1032,11 +998,9 @@ watch(
     }
 
     if (lastSandbox !== sandbox) {
-      tailRevealController.cancel();
       cleanupRegistry(props.message.id);
       sandbox.innerHTML = '';
       lastAppliedFrameSeq = 0;
-      lastAcceptedFrameSeq = 0;
       localTailStreamId = -1;
       localTailEpoch = -1;
       localTailRevision = -1;
@@ -1048,7 +1012,6 @@ watch(
         // epochChanged 必为真，会触发第二次全量重建）。重建已用当前完整 tail AST，无需再来一次。
         if (frame) {
           lastAppliedFrameSeq = frame.frameSeq;
-          lastAcceptedFrameSeq = frame.frameSeq;
         }
       } else if (
         frame
@@ -1070,15 +1033,15 @@ watch(
     const streamChanged = incomingStreamId !== localTailStreamId;
     const epochChanged = incomingEpoch !== localTailEpoch;
     const explicitReset = frame.reset === true || streamChanged || epochChanged;
+    let startsFromEmpty = false;
 
     // frameSeq 只在同一 stream/epoch 内有可比性；暖接续的新流必须先接管身份，
     // 不能被上一条流遗留的高序号提前拦截。
-    if (!explicitReset && frame.frameSeq <= lastAcceptedFrameSeq) {
+    if (!explicitReset && frame.frameSeq <= lastAppliedFrameSeq) {
       return;
     }
 
     if (explicitReset) {
-      tailRevealController.cancel();
       const snapshot = frame.snapshot ?? props.message.tailBlock?.nodes;
       const canStartFromEmpty = frame.reset !== true
         && frame.frameSeq === 1
@@ -1093,38 +1056,25 @@ watch(
       localTailEpoch = incomingEpoch;
       localTailRevision = incomingRevision;
       lastAppliedFrameSeq = 0;
-      lastAcceptedFrameSeq = 0;
       if (snapshot !== undefined) {
         rebuildSnapshot(snapshot, props.message.id, sandbox);
       }
+      startsFromEmpty = snapshot === undefined && canStartFromEmpty;
     }
 
     const mutations = frame.mutations || [];
     if (mutations.length === 0) {
-      if (!tailRevealController.flush()) return;
       markTailFrameApplied(frame);
       return;
     }
 
-    if (!explicitReset && shouldSmoothTailFrame(frame)) {
-      const mutation = mutations[0];
-      if (mutation.op !== "append") return;
-      lastAcceptedFrameSeq = frame.frameSeq;
-      tailRevealController.enqueue({
-        targetId: mutation.id,
-        text: mutation.chunk,
-        metadata: frame,
-      });
-      return;
-    }
-
-    // 任何结构变化都是展示屏障：先合并追平已经接收的安全文本，再原子执行本帧。
-    if (!tailRevealController.flush()) return;
-
     if (debugEnabled) {
       astDebugLog(`[AST Diff Apply] Executing frame ${frame.frameSeq} (${mutations.length} mutations) for ${props.message.id}`);
     }
-    const result = applyFrame(mutations, props.message.id, sandbox);
+    const result = applyFrame(mutations, props.message.id, sandbox, {
+      smoothStreaming: shouldAnimateTailFrame(frame)
+        && (!explicitReset || startsFromEmpty),
+    });
     if (result.ok) {
       markTailFrameApplied(frame);
     } else {
@@ -1136,7 +1086,6 @@ watch(
 
 onUnmounted(() => {
   rendererDisposed = true;
-  tailRevealController.dispose();
   removeScopedCss(props.message.id);
   cleanupRegistry(props.message.id);
 });
@@ -1144,7 +1093,7 @@ onUnmounted(() => {
 
 <template>
   <div ref="messageContentRef" v-longpress="showMessageContextMenu"
-    class="vcp-message-item flex flex-col w-full mb-6 animate-fade-in px-1 min-w-0" :data-message-id="message.id"
+    class="vcp-message-item flex flex-col w-full mb-6 px-1 min-w-0" :data-message-id="message.id"
     :data-role="message.role">
     
     <!-- 统一的气泡循环渲染列表 -->
@@ -1232,7 +1181,7 @@ onUnmounted(() => {
               :block="thoughtTailBlock"
               :message-id="message.id"
               :default-expanded="true"
-              animate-entry
+              :stream-entry-fade="isSmoothStreamMotionEnabled()"
             >
               <div
                 v-if="isPlainTailFallback || isAstRecoveryPending || !useAstForCurrentTail"
@@ -1319,14 +1268,5 @@ onUnmounted(() => {
   /* Native Virtual Scrolling: defers rendering and layout of off-screen messages */
   content-visibility: auto;
   contain-intrinsic-size: auto 100px;
-}
-
-.animate-fade-in {
-  animation: fadeIn 0.4s cubic-bezier(0.16, 1, 0.3, 1);
-}
-
-@keyframes fadeIn {
-  from { opacity: 0; transform: translateY(10px) scale(0.98); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 </style>

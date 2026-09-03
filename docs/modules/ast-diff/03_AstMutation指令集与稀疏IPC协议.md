@@ -142,7 +142,7 @@ AddInline { id: String, parent: String, node: InlineNode }
 | 触发条件 | 新 AST 在尾部有旧 AST 中不存在的节点 |
 | `parent` 取值 | `"root"`（挂载到 sandbox）或父节点的路径 ID（如 `"t0"`, `"t0.i0"`) |
 | 前端执行 | `createDomFromNode(node, id, registry)` → `parentNode.appendChild(dom)` |
-| CSS 动画 | 新增元素自动添加 `vcp-stream-element-fade-in` 类 |
+| CSS 动画 | 仅开启“平滑流式输出”时，块级 `Add` 可播放一次 100ms opacity fade；`AddInline` 始终静态挂载 |
 
 ### 2.4b AddListItem —— 新增列表项
 
@@ -157,6 +157,7 @@ AddListItem { id: String, parent: String, children: Vec<MarkdownNode> }
 | `parent` 取值 | 列表 `<ul>`/`<ol>` 的 ID（如 `"t3"`） |
 | 触发条件 | 流式列表新增尾部项时（见 02 文档的 List diff）。删除列表项则复用通用 `Remove { id: "t3.li5" }` |
 | 前端执行 | `astExecutor.ts` 的 `"add_list_item"` case：在存活的 `<ul>`/`<ol>` 下创建 `<li>`，按 `{id}.b{n}` 注册其块级子节点，追加到列表末尾 |
+| CSS 动画 | 仅开启“平滑流式输出”且祖先没有正在淡入的块时，新增 `<li>` 播放一次 100ms opacity fade |
 
 > **取代旧行为**：这取代了过去「列表项数量变化就整体 Replace 整个 list」的低效行为（O(n²) 重建）。现在新增尾部项只产生一条 AddListItem，已有列表项的 DOM 与 registry 完全保留。
 
