@@ -7,6 +7,60 @@ const flushFrames = async () => {
   await nextTick();
 };
 
+const settleInitialRendering = async () => {
+  await new Promise((resolve) => setTimeout(resolve, 210));
+  await nextTick();
+};
+
+function installControllableResizeObserver() {
+  const original = window.ResizeObserver;
+  let callback: ResizeObserverCallback | null = null;
+  let observer: ResizeObserver | null = null;
+
+  class TestResizeObserver implements ResizeObserver {
+    constructor(nextCallback: ResizeObserverCallback) {
+      callback = nextCallback;
+      observer = this;
+    }
+
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  }
+
+  window.ResizeObserver = TestResizeObserver;
+
+  return {
+    trigger: () => {
+      if (!callback || !observer) {
+        throw new Error("ResizeObserver has not been initialized");
+      }
+      callback([], observer);
+    },
+    restore: () => {
+      window.ResizeObserver = original;
+    },
+  };
+}
+
+function createTouchEvent(type: string, pageY?: number): TouchEvent {
+  const event = new Event(type, { bubbles: true });
+  Object.defineProperty(event, "touches", {
+    configurable: true,
+    value: pageY === undefined ? [] : [{ pageY }],
+  });
+  return event as TouchEvent;
+}
+
+function scrollTopArgument(
+  options?: ScrollToOptions | number,
+  y?: number,
+): number {
+  return typeof options === "number"
+    ? Number(y || 0)
+    : Number(options?.top || 0);
+}
+
 describe("useChatScroll pagination completion", () => {
   it("leaves loading-top after a zero-result page and permits retry", async () => {
     const list = document.createElement("div");
@@ -38,7 +92,7 @@ describe("useChatScroll pagination completion", () => {
     await flushFrames();
     expect(onLoadMore).toHaveBeenCalledTimes(1);
 
-    list.dispatchEvent(new Event("scroll"));
+    list.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
     await flushFrames();
     expect(onLoadMore).toHaveBeenCalledTimes(2);
     scroll.dispose();
@@ -58,6 +112,150 @@ function createLayoutScroll(list: HTMLElement) {
   messageListRef.value = list;
   return scroll;
 }
+
+describe("useChatScroll streaming follow intent", () => {
+  it("keeps following when a delayed programmatic scroll event sees another large content batch", async () => {
+    const resizeObserver = installControllableResizeObserver();
+    const list = document.createElement("div");
+    const inner = document.createElement("div");
+    inner.className = "messages-inner-container";
+    list.appendChild(inner);
+    let scrollHeight = 1000;
+    const clientHeight = 400;
+    Object.defineProperties(list, {
+      scrollHeight: { configurable: true, get: () => scrollHeight },
+      clientHeight: { configurable: true, get: () => clientHeight },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    });
+    list.scrollTo = vi.fn((options?: ScrollToOptions | number, y?: number) => {
+      list.scrollTop = Math.min(
+        scrollTopArgument(options, y),
+        Math.max(0, scrollHeight - clientHeight),
+      );
+    });
+    const scroll = createLayoutScroll(list);
+
+    try {
+      await nextTick();
+      resizeObserver.trigger();
+      await flushFrames();
+      expect(list.scrollTop).toBe(600);
+      await settleInitialRendering();
+
+      scrollHeight = 1200;
+      resizeObserver.trigger();
+      expect(list.scrollTop).toBe(800);
+
+      // 上一次程序置底的 scroll 事件抵达前，下一批内容又增长了 200px。
+      scrollHeight = 1400;
+      list.dispatchEvent(new Event("scroll"));
+      await flushFrames();
+      expect(scroll.showScrollToBottom.value).toBe(false);
+
+      resizeObserver.trigger();
+      expect(list.scrollTop).toBe(1000);
+      expect(scroll.showScrollToBottom.value).toBe(false);
+    } finally {
+      scroll.dispose();
+      resizeObserver.restore();
+    }
+  });
+
+  it("pauses following for a user drag toward history and resumes at the bottom", async () => {
+    const resizeObserver = installControllableResizeObserver();
+    const list = document.createElement("div");
+    const inner = document.createElement("div");
+    inner.className = "messages-inner-container";
+    list.appendChild(inner);
+    let scrollHeight = 1000;
+    const clientHeight = 400;
+    Object.defineProperties(list, {
+      scrollHeight: { configurable: true, get: () => scrollHeight },
+      clientHeight: { configurable: true, get: () => clientHeight },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    });
+    const scrollTo = vi.fn((options?: ScrollToOptions | number, y?: number) => {
+      list.scrollTop = Math.min(
+        scrollTopArgument(options, y),
+        Math.max(0, scrollHeight - clientHeight),
+      );
+    });
+    list.scrollTo = scrollTo;
+    const scroll = createLayoutScroll(list);
+
+    try {
+      await nextTick();
+      resizeObserver.trigger();
+      await settleInitialRendering();
+      scrollTo.mockClear();
+
+      list.dispatchEvent(createTouchEvent("touchstart", 100));
+      list.dispatchEvent(createTouchEvent("touchmove", 120));
+      list.scrollTop = 300;
+      list.dispatchEvent(new Event("scroll"));
+      list.dispatchEvent(createTouchEvent("touchend"));
+      await flushFrames();
+      expect(scroll.showScrollToBottom.value).toBe(true);
+
+      scrollHeight = 1200;
+      resizeObserver.trigger();
+      await flushFrames();
+      expect(scrollTo).not.toHaveBeenCalled();
+
+      list.scrollTop = 800;
+      list.dispatchEvent(new Event("scroll"));
+      await flushFrames();
+      expect(scroll.showScrollToBottom.value).toBe(false);
+
+      scrollHeight = 1300;
+      resizeObserver.trigger();
+      expect(list.scrollTop).toBe(900);
+      expect(scrollTo).toHaveBeenCalledTimes(1);
+    } finally {
+      scroll.dispose();
+      resizeObserver.restore();
+    }
+  });
+
+  it("re-applies bottom following when the scroll viewport height changes", async () => {
+    const resizeObserver = installControllableResizeObserver();
+    const list = document.createElement("div");
+    const inner = document.createElement("div");
+    inner.className = "messages-inner-container";
+    list.appendChild(inner);
+    const scrollHeight = 1000;
+    let clientHeight = 400;
+    Object.defineProperties(list, {
+      scrollHeight: { configurable: true, get: () => scrollHeight },
+      clientHeight: { configurable: true, get: () => clientHeight },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    });
+    const scrollTo = vi.fn((options?: ScrollToOptions | number, y?: number) => {
+      list.scrollTop = Math.min(
+        scrollTopArgument(options, y),
+        Math.max(0, scrollHeight - clientHeight),
+      );
+    });
+    list.scrollTo = scrollTo;
+    const scroll = createLayoutScroll(list);
+
+    try {
+      await nextTick();
+      resizeObserver.trigger();
+      await flushFrames();
+      expect(list.scrollTop).toBe(600);
+      scrollTo.mockClear();
+
+      clientHeight = 300;
+      resizeObserver.trigger();
+      expect(list.scrollTop).toBe(700);
+      expect(scrollTo).toHaveBeenCalledTimes(1);
+    } finally {
+      scroll.dispose();
+      resizeObserver.restore();
+    }
+  });
+});
 
 describe("useChatScroll layout-change anchoring", () => {
   it("keeps a near-bottom reader attached to the new bottom", async () => {

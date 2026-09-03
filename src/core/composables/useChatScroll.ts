@@ -19,6 +19,9 @@ interface UseChatScrollOptions {
 
 type ScrollScene = "initial" | "following" | "free" | "loading-top";
 
+const BOTTOM_PROXIMITY_PX = 150;
+const TOUCH_DETACH_DISTANCE_PX = 8;
+
 interface ViewportAnchor {
   stickToBottom: boolean;
   messageId?: string;
@@ -32,7 +35,8 @@ interface ViewportAnchor {
  * 核心架构：场景状态机 + 锚定元素恢复 + RAF 节流
  *
  * 放弃 IntersectionObserver 的模糊 rootMargin 和 nextTick 的"猜时机"，
- * 改用 scroll 事件精确几何检测 + MutationObserver 双重 RAF 确保布局稳定后操作。
+ * 改用用户滚动意图 + ResizeObserver 物理尺寸信号。内容增长不会被误判为
+ * 用户离底，异步媒体与视口尺寸变化也能在布局后统一收口。
  */
 export function useChatScroll(options: UseChatScrollOptions) {
   const {
@@ -48,6 +52,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
 
   // 高性能测量与安全保护罩状态
   let lastScrollHeight = 0;
+  let lastClientHeight = 0;
   const isInitialRendering = ref(true);
 
   // 加载锚点：记录加载前视口中最顶部可见消息
@@ -60,11 +65,16 @@ export function useChatScroll(options: UseChatScrollOptions) {
   let loadInFlight = false;
   let layoutChangeGeneration = 0;
   let isLayoutChanging = false;
+  let isUserDetaching = false;
   const layoutFrameResolvers = new Map<number, () => void>();
+
+  const isNearBottom = (list: HTMLElement) =>
+    list.scrollHeight - list.scrollTop - list.clientHeight < BOTTOM_PROXIMITY_PX;
 
   const scrollToBottom = (smooth = false) => {
     const list = messageListRef.value;
     if (!list) return;
+    isUserDetaching = false;
     list.scrollTo({
       top: list.scrollHeight,
       behavior: smooth ? "smooth" : "auto",
@@ -92,7 +102,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
     if (!list) return null;
 
     const fallbackScrollTop = list.scrollTop;
-    const stickToBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 150;
+    const stickToBottom = isNearBottom(list);
     if (stickToBottom) return { stickToBottom: true, fallbackScrollTop };
 
     const listRect = list.getBoundingClientRect();
@@ -140,7 +150,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
       list.scrollTop = Math.min(anchor.fallbackScrollTop, maximumScrollTop);
     }
 
-    const nearBottom = list.scrollHeight - list.scrollTop - list.clientHeight < 150;
+    const nearBottom = isNearBottom(list);
     showScrollToBottom.value = !nearBottom;
     if (scrollScene.value !== "loading-top") {
       scrollScene.value = nearBottom ? "following" : "free";
@@ -168,6 +178,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
       if (generation === layoutChangeGeneration) {
         isLayoutChanging = false;
         lastScrollHeight = messageListRef.value?.scrollHeight || 0;
+        lastClientHeight = messageListRef.value?.clientHeight || 0;
       }
     }
   };
@@ -272,13 +283,19 @@ export function useChatScroll(options: UseChatScrollOptions) {
     if (!list) return;
     if (isLayoutChanging) {
       lastScrollHeight = list.scrollHeight;
+      lastClientHeight = list.clientHeight;
       return;
     }
 
     const currentScrollHeight = list.scrollHeight;
-    // 高度物理守卫：物理高度若无实质变化，瞬间拦截并退出。这极大释放了 CPU 性能，并从物理上秒杀了用户手动上滑时的误置底无限回弹 Bug
-    if (currentScrollHeight === lastScrollHeight) return;
+    const currentClientHeight = list.clientHeight;
+    // 内容高度和视口高度均未变化时才拦截，避免空转。
+    if (
+      currentScrollHeight === lastScrollHeight
+      && currentClientHeight === lastClientHeight
+    ) return;
     lastScrollHeight = currentScrollHeight;
+    lastClientHeight = currentClientHeight;
 
     // 场景1：首屏加载完成（initial → following/free）
     if (scrollScene.value === "initial") {
@@ -322,6 +339,7 @@ export function useChatScroll(options: UseChatScrollOptions) {
     resizeObserver = new ResizeObserver(() => {
       if (isLayoutChanging) {
         lastScrollHeight = list.scrollHeight;
+        lastClientHeight = list.clientHeight;
         return;
       }
       // 🌟 流式跟随状态下，或正在加载历史消息时，必须同步处理滚动，以防止 DOM 重排和滚动条设置跨帧引发的上下跳变。
@@ -345,6 +363,9 @@ export function useChatScroll(options: UseChatScrollOptions) {
     });
 
     resizeObserver.observe(target);
+    if (target !== list) {
+      resizeObserver.observe(list);
+    }
   };
 
   const stopContentObserver = () => {
@@ -361,18 +382,6 @@ export function useChatScroll(options: UseChatScrollOptions) {
   // --- scroll 事件 ---
   const onScroll = () => {
     if (isLayoutChanging) return;
-    // 🌟 修复无限置底死锁：在 scroll 触发的第一时间，同步（非节流）判定是否已向上偏离底部。
-    // 若已偏离，瞬间切入 free 状态，使紧随其后的 ResizeObserver 同步回调直接走 else 节流分支，打断强位置底。
-    const list = messageListRef.value;
-    if (list) {
-      const nearBottom =
-        list.scrollHeight - list.scrollTop - list.clientHeight < 150;
-      if (!nearBottom && scrollScene.value === "following") {
-        scrollScene.value = "free";
-        showScrollToBottom.value = true;
-      }
-    }
-
     if (scrollThrottleId) return; // 已调度，节流中
     scrollThrottleId = requestAnimationFrame(() => {
       scrollThrottleId = null;
@@ -387,18 +396,20 @@ export function useChatScroll(options: UseChatScrollOptions) {
       }
 
       const nearTop = list.scrollTop < 100;
-      const nearBottom =
-        list.scrollHeight - list.scrollTop - list.clientHeight < 150;
+      const nearBottom = isNearBottom(list);
 
-      // 更新底部按钮显隐
-      showScrollToBottom.value = !nearBottom;
-
-      // 场景切换：following ↔ free
-      if (nearBottom && scrollScene.value === "free") {
+      // following 表示用户仍希望跟随。程序置底后的延迟 scroll 事件，
+      // 或下一批内容到达造成的几何偏离，都不得将它误判为 free。
+      if (
+        nearBottom
+        && scrollScene.value === "free"
+        && !isUserDetaching
+      ) {
         scrollScene.value = "following";
-      } else if (!nearBottom && scrollScene.value === "following") {
-        scrollScene.value = "free";
       }
+      showScrollToBottom.value = scrollScene.value === "following"
+        ? false
+        : !nearBottom;
 
       // 触发顶部加载（仅在 free 状态下，避免 following 模式误触）
       if (
@@ -415,7 +426,14 @@ export function useChatScroll(options: UseChatScrollOptions) {
   // --- 手势与鼠标滚轮物理置顶继续滑动判定 ---
   let startY = 0;
 
+  const detachFromBottom = () => {
+    if (scrollScene.value !== "following") return;
+    scrollScene.value = "free";
+    showScrollToBottom.value = true;
+  };
+
   const onTouchStart = (e: TouchEvent) => {
+    isUserDetaching = false;
     if (e.touches.length > 0) {
       startY = e.touches[0].pageY;
     }
@@ -425,18 +443,47 @@ export function useChatScroll(options: UseChatScrollOptions) {
     const list = messageListRef.value;
     if (!list) return;
 
+    const deltaY = e.touches.length > 0
+      ? e.touches[0].pageY - startY
+      : 0;
+    if (deltaY > TOUCH_DETACH_DISTANCE_PX) {
+      isUserDetaching = true;
+      detachFromBottom();
+    }
+
     // 如果已经在最顶部，且用户手指继续向下拉（deltaY > 10px）
     if (list.scrollTop <= 2 && e.touches.length > 0) {
-      const deltaY = e.touches[0].pageY - startY;
       if (deltaY > 10 && hasMoreHistory.value && !isLoadingHistory.value) {
         void requestLoadMore();
       }
     }
   };
 
+  const onTouchEnd = () => {
+    const wasDetaching = isUserDetaching;
+    isUserDetaching = false;
+    if (!wasDetaching) return;
+
+    const list = messageListRef.value;
+    if (!list) return;
+    if (scrollScene.value === "free" && isNearBottom(list)) {
+      scrollScene.value = "following";
+      showScrollToBottom.value = false;
+    } else if (scrollScene.value === "free") {
+      showScrollToBottom.value = true;
+    }
+  };
+
   const onWheel = (e: WheelEvent) => {
     const list = messageListRef.value;
     if (!list) return;
+
+    if (e.deltaY < 0) {
+      isUserDetaching = true;
+      detachFromBottom();
+    } else if (e.deltaY > 0) {
+      isUserDetaching = false;
+    }
 
     // 如果已经在最顶部，且鼠标滚轮继续向上滚（试图拉出顶部）
     if (list.scrollTop <= 2 && e.deltaY < 0) {
@@ -452,6 +499,8 @@ export function useChatScroll(options: UseChatScrollOptions) {
       oldEl.removeEventListener("scroll", onScroll);
       oldEl.removeEventListener("touchstart", onTouchStart);
       oldEl.removeEventListener("touchmove", onTouchMove);
+      oldEl.removeEventListener("touchend", onTouchEnd);
+      oldEl.removeEventListener("touchcancel", onTouchEnd);
       oldEl.removeEventListener("wheel", onWheel);
     }
     if (el) {
@@ -459,6 +508,8 @@ export function useChatScroll(options: UseChatScrollOptions) {
       el.addEventListener("scroll", onScroll, { passive: true });
       el.addEventListener("touchstart", onTouchStart, { passive: true });
       el.addEventListener("touchmove", onTouchMove, { passive: true });
+      el.addEventListener("touchend", onTouchEnd, { passive: true });
+      el.addEventListener("touchcancel", onTouchEnd, { passive: true });
       el.addEventListener("wheel", onWheel, { passive: true });
       stopWatchListRef();
     }
@@ -486,6 +537,8 @@ export function useChatScroll(options: UseChatScrollOptions) {
       showScrollToBottom.value = false;
       loadAnchor = null;
       lastScrollHeight = 0;
+      lastClientHeight = 0;
+      isUserDetaching = false;
       isInitialRendering.value = true;
     }
   });
@@ -501,6 +554,8 @@ export function useChatScroll(options: UseChatScrollOptions) {
     showScrollToBottom.value = false;
     loadAnchor = null;
     lastScrollHeight = 0;
+    lastClientHeight = 0;
+    isUserDetaching = false;
     isInitialRendering.value = true;
     if (scrollRafId) {
       cancelAnimationFrame(scrollRafId);
@@ -548,8 +603,11 @@ export function useChatScroll(options: UseChatScrollOptions) {
       list.removeEventListener("scroll", onScroll);
       list.removeEventListener("touchstart", onTouchStart);
       list.removeEventListener("touchmove", onTouchMove);
+      list.removeEventListener("touchend", onTouchEnd);
+      list.removeEventListener("touchcancel", onTouchEnd);
       list.removeEventListener("wheel", onWheel);
     }
+    isUserDetaching = false;
     loadAnchor = null;
   };
 
