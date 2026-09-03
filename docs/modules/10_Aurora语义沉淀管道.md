@@ -208,7 +208,7 @@ pub fn process_queue(&mut self) -> (bool, bool) {
     if !self.tail_content.is_empty() {
         let nodes = if self.tail_content.len() > MAX_SPECULATIVE_TAIL_AST_BYTES {
             None  // 超过 64KB → 跳过 AST，降级到纯文本
-        } else if is_html_tag_block(&self.tail_content) {
+        } else if raw_tail_type == Some(BlockType::HtmlContainer) {
             Some(vec![MarkdownNode::raw_html(self.tail_content.clone())])
         } else {
             Some(parse_markdown_to_ast_streaming(&self.tail_content))

@@ -223,8 +223,11 @@ if !new_blocks.is_empty() {
 if !self.tail_content.is_empty() {
     let nodes = if self.tail_content.len() > MAX_SPECULATIVE_TAIL_AST_BYTES {
         None  // 包括 RawHtml 在内，统一回退纯文本兜底
+    } else if raw_tail_type == Some(BlockType::HtmlContainer) {
+        // StreamBlockParser 已确认的裸 HTML 容器保持为一个完整 RawHtml 节点
+        Some(vec![MarkdownNode::raw_html(self.tail_content.clone())])
     } else {
-        // 所有常规 tail 统一解析为流式 Markdown AST
+        // 普通 Markdown 与所有代码围栏统一解析为流式 Markdown AST
         Some(parse_markdown_to_ast_streaming(&self.tail_content))
     };
     // ...
@@ -235,7 +238,8 @@ if !self.tail_content.is_empty() {
 | 条件 | 策略 | 理由 |
 |------|------|------|
 | > 64KB（包括 HTML） | `nodes=None` → **纯文本兜底** | 防止性能悬崖；常态走 `tailOp` 字面文本追加 |
-| ≤ 64KB | 统一调用流式 Markdown AST 解析 | 未闭合围栏由 Markdown 解析器推测为 `CodeBlock`，不再另做 HTML sniff |
+| ≤ 64KB 且 `tail_type=HtmlContainer` | 单个 `RawHtml(full_tail)` | 保持完整 DOM 子树，交给前端 morphdom 增量更新 |
+| ≤ 64KB 的其他 tail | 流式 Markdown AST | 所有未闭合代码围栏都由 Markdown 解析器识别为 `CodeBlock`，不再另做 HTML sniff |
 
 AST 解析后，如果整个 tail 恰好是一个 `lang=html` 的 `CodeBlock`，Aurora 只把其 Wire 投影类型标为 `html-preview`；普通代码仍为 `markdown`。两者的正文都继续使用同一份 `TailFrame + PatchCode` 增量 DOM。前端的 `HtmlPreviewBlock` 在流式期间仅提供专属外壳，代码插槽仍由 AST executor 持有；不会把增长全文交给 `v-html`，也不会创建预览 iframe。投影类型发生变化时会产生一次 epoch reset，使新外壳内的 sandbox 直接从完整 snapshot 接管。
 

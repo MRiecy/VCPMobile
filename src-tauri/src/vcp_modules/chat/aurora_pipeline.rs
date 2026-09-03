@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use crate::vcp_modules::chat::ast_diff::{
     diff_ast_streaming, prime_stream_code_highlighter, render_stream_snapshot, AstMutation,
 };
+use crate::vcp_modules::content_parser::BlockType;
 use crate::vcp_modules::pre_renderer::code_highlighter::IncrementalCodeHighlighter;
 use crate::vcp_modules::pre_renderer::markdown_ast::MarkdownNode;
 use crate::vcp_modules::stream_block_parser::{
@@ -556,7 +557,7 @@ impl AuroraBuffer {
         let prev_stable_count = self.stable_blocks.len();
 
         // 1. 增量解析全文，产出本次新增的已闭合块 + 尾部纯文本
-        let (new_blocks, raw_new_tail) = self.parser.process(&self.full_text);
+        let (new_blocks, raw_new_tail, raw_tail_type) = self.parser.process(&self.full_text);
         let raw_new_tail_start = self.parser.tail_start();
         let speculative_thought = speculative_thought_tail(&raw_new_tail);
         let (new_tail, new_tail_start, next_thought_theme) = match speculative_thought {
@@ -601,6 +602,10 @@ impl AuroraBuffer {
         if !self.tail_content.is_empty() || next_thought_theme.is_some() {
             let nodes = if self.tail_content.len() > MAX_SPECULATIVE_TAIL_AST_BYTES {
                 None
+            } else if raw_tail_type == Some(BlockType::HtmlContainer) {
+                let mut node = MarkdownNode::raw_html(self.tail_content.clone());
+                node.compute_hashes_recursively();
+                Some(vec![node])
             } else {
                 Some(
                     crate::vcp_modules::pre_renderer::parse_markdown_to_ast_streaming(
@@ -1140,26 +1145,45 @@ mod tests {
     #[test]
     fn raw_html_hashes_the_single_canonical_diff_baseline() {
         let mut buffer = AuroraBuffer::new();
-        buffer.append_chunk("<div>one");
+        let initial = "<div class=\"card\">\n\n<section>one";
+        buffer.append_chunk(initial);
         assert_eq!(buffer.process_queue(), (false, true));
 
         assert_eq!(
             buffer.tail_projection.as_ref().map(|state| state.mode),
             Some(TailRenderMode::Ast)
         );
-        assert!(buffer.prev_tail_ast[0].get_hash().is_some());
+        assert!(matches!(
+            buffer.prev_tail_ast.as_slice(),
+            [MarkdownNode::RawHtml {
+                content,
+                hash: Some(_),
+            }] if content == initial
+        ));
         let _ = buffer.take_tail_frame();
 
         assert_eq!(buffer.process_queue(), (false, false));
         assert!(buffer.take_tail_frame().is_none());
 
-        buffer.append_chunk("two");
+        let suffix = "</section>\n<p>two";
+        buffer.append_chunk(suffix);
         assert_eq!(buffer.process_queue(), (false, true));
+        let expected = format!("{initial}{suffix}");
+        assert!(matches!(
+            buffer.prev_tail_ast.as_slice(),
+            [MarkdownNode::RawHtml {
+                content,
+                hash: Some(_),
+            }] if content == &expected
+        ));
         let frame = buffer.take_tail_frame().expect("raw replace frame");
-        assert!(frame
-            .mutations
-            .iter()
-            .any(|mutation| matches!(mutation, AstMutation::Replace { .. })));
+        assert!(matches!(
+            frame.mutations.as_slice(),
+            [AstMutation::Replace {
+                id,
+                node: MarkdownNode::RawHtml { content, .. },
+            }] if id == "t0" && content == &expected
+        ));
     }
 
     #[test]

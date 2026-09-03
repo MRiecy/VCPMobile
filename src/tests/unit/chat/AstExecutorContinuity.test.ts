@@ -72,4 +72,34 @@ describe("AST executor continuity", () => {
       sandbox.remove();
     }
   });
+
+  it("morphs one raw HTML node without fragmenting its nested DOM", () => {
+    const sandbox = document.createElement("div");
+    document.body.appendChild(sandbox);
+
+    try {
+      rebuildSnapshot([{
+        type: "raw_html",
+        content: '<div class="card"><section><span>one</span></section></div>',
+      }], "raw-html-message", sandbox);
+      const rawRoot = sandbox.firstElementChild;
+
+      expect(applyFrame([{
+        op: "replace",
+        id: "t0",
+        node: {
+          type: "raw_html",
+          content: '<div class="card"><section><span>one two</span></section><p>tail</p></div>',
+        },
+      }], "raw-html-message", sandbox).ok).toBe(true);
+
+      expect(sandbox.firstElementChild).toBe(rawRoot);
+      expect(sandbox.querySelector(".card > section > span")?.textContent).toBe("one two");
+      expect(sandbox.querySelector(".card > p")?.textContent).toBe("tail");
+      expect(sandbox.querySelectorAll(".vcp-raw-html-container")).toHaveLength(1);
+    } finally {
+      cleanupRegistry("raw-html-message");
+      sandbox.remove();
+    }
+  });
 });

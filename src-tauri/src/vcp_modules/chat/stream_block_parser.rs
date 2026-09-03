@@ -4,9 +4,9 @@ use crate::vcp_modules::content_parser::{
     extract_tool_name, find_tool_request_end, parse_daily_note_tool_request,
     parse_legacy_daily_note, BlockType, ParsedDailyNote, ToolCallSummaryItem, ToolResultDetail,
     BUTTON_CLICK, DIARY_END, DIARY_START, GENERIC_CODE_FENCE_END, GENERIC_CODE_FENCE_START,
-    HTML_DOC_END, HTML_DOC_START, HTML_FENCE_START, KV_REGEX, ROLE_DIVIDER, STYLE_TAG_END,
-    STYLE_TAG_START, THINK_END, THINK_START, THOUGHT_END, THOUGHT_START, TOOL_RESULT_END,
-    TOOL_RESULT_START, TOOL_START,
+    HTML_DOC_END, HTML_DOC_START, KV_REGEX, ROLE_DIVIDER, STYLE_TAG_END, STYLE_TAG_START,
+    THINK_END, THINK_START, THOUGHT_END, THOUGHT_START, TOOL_RESULT_END, TOOL_RESULT_START,
+    TOOL_START,
 };
 use crate::vcp_modules::pre_renderer::MarkdownNode;
 use crate::vcp_modules::sync_hash::HashAggregator;
@@ -241,9 +241,9 @@ impl StreamBlockParser {
         self.processed_len
     }
 
-    /// 处理累积的全文，返回 (已完成的块列表, 尾部纯文本)
-    /// 已闭合的块从 tail 中移除加入 stable blocks，未闭合部分保留为 tail
-    pub fn process(&mut self, full_text: &str) -> (Vec<StreamBlock>, String) {
+    /// 处理累积的全文，返回 (已完成的块列表, 尾部纯文本, 未闭合特种块类型)。
+    /// 已闭合的块从 tail 中移除加入 stable blocks；普通 Markdown tail 的类型为 None。
+    pub fn process(&mut self, full_text: &str) -> (Vec<StreamBlock>, String, Option<BlockType>) {
         let mut blocks = Vec::new();
         let mut pos = self.processed_len.min(full_text.len());
 
@@ -306,7 +306,7 @@ impl StreamBlockParser {
                     // 找不到结束标记 → 之前已强制沉淀 md_tail（即 remaining[..start]），
                     // 故此帧游标推进 start 字节，将未闭合块起始作为 tail 返回，消灭重复渲染
                     self.processed_len = pos + start;
-                    return (blocks, remaining[start..].to_string());
+                    return (blocks, remaining[start..].to_string(), Some(block_type));
                 }
             } else {
                 // 4. 无任何特种块标记 → 全部按段落分割
@@ -314,24 +314,30 @@ impl StreamBlockParser {
                 blocks.extend(md_blocks);
                 if md_tail.is_empty() {
                     self.processed_len = full_text.len();
-                    return (blocks, String::new());
+                    return (blocks, String::new(), None);
                 } else {
                     self.processed_len = pos + remaining.len() - md_tail.len();
-                    return (blocks, md_tail.to_string());
+                    return (blocks, md_tail.to_string(), None);
                 }
             }
         }
 
         self.processed_len = full_text.len();
-        (blocks, String::new())
+        (blocks, String::new(), None)
     }
 
     /// 流结束：强制处理剩余 tail 为最后一个 Markdown 块
     pub fn finalize(&mut self, full_text: &str) -> Vec<StreamBlock> {
-        let (mut blocks, tail) = self.process(full_text);
+        let (mut blocks, tail, tail_type) = self.process(full_text);
         let trimmed = tail.trim();
         if !trimmed.is_empty() {
-            let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(trimmed);
+            let nodes = if tail_type == Some(BlockType::HtmlContainer) {
+                let mut node = MarkdownNode::raw_html(trimmed.to_string());
+                node.compute_hashes_recursively();
+                vec![node]
+            } else {
+                crate::vcp_modules::pre_renderer::parse_markdown_to_ast(trimmed)
+            };
             let hash = HashAggregator::compute_content_hash(trimmed);
             blocks.push(StreamBlock::markdown(
                 trimmed.to_string(),
@@ -354,13 +360,12 @@ impl StreamBlockParser {
 /// 在文本中寻找最早出现的特种块起始标记
 /// 返回 (start_offset, end_offset, BlockType)
 fn find_earliest_start_marker(text: &str) -> Option<(usize, usize, BlockType)> {
-    let checks: [(&regex::Regex, BlockType); 12] = [
+    let checks: [(&regex::Regex, BlockType); 11] = [
         (&TOOL_START, BlockType::Tool),
         (&THOUGHT_START, BlockType::Thought),
         (&THINK_START, BlockType::Think),
         (&TOOL_RESULT_START, BlockType::ToolResult),
         (&DIARY_START, BlockType::Diary),
-        (&HTML_FENCE_START, BlockType::HtmlFence),
         (&HTML_DOC_START, BlockType::HtmlDoc),
         (&ROLE_DIVIDER, BlockType::RoleDivider),
         (&STYLE_TAG_START, BlockType::Style),
@@ -399,7 +404,7 @@ fn find_end_marker(
 
     #[cfg(test)]
     {
-        if *block_type == BlockType::HtmlFence || *block_type == BlockType::CodeFence {
+        if *block_type == BlockType::CodeFence {
             let snippet: String = search_area.chars().take(100).collect();
             println!(
                 "[DIAG_END] find_end_marker for {:?}: search_area len: {}, starts with: {:?}",
@@ -608,6 +613,14 @@ fn build_stream_block(
             let fence = &remaining[start_idx..end_idx];
             let full_text = format!("{}\n{}\n```", fence, inner_content);
             let nodes = crate::vcp_modules::chat::pre_renderer::parse_markdown_to_ast(&full_text);
+            if matches!(
+                nodes.as_slice(),
+                [MarkdownNode::CodeBlock { lang: Some(lang), .. }]
+                    if lang.eq_ignore_ascii_case("html")
+            ) {
+                let hash = HashAggregator::compute_content_hash(inner_content);
+                return StreamBlock::html_preview(inner_content.to_string(), hash);
+            }
             let hash = HashAggregator::compute_content_hash(&full_text);
             StreamBlock::markdown(full_text, Some(nodes), hash)
         }
@@ -853,33 +866,78 @@ mod tests {
             "{}### 维度二：代码高亮\n\n测试流式传输未闭合时：\n\n```rust",
             padding
         );
-        let (blocks_1, tail_1) = parser.process(&frame_1);
+        let (blocks_1, tail_1, tail_type_1) = parser.process(&frame_1);
         println!("Frame 1 - Blocks: {}, Tail: {:?}", blocks_1.len(), tail_1);
         // 应该成功沉淀出前面的两个 Markdown 块（因 \n\n 物理分段），且 tail 只包含 ```rust
         assert_eq!(blocks_1.len(), 2);
         assert_eq!(tail_1, "```rust");
+        assert_eq!(tail_type_1, Some(BlockType::CodeFence));
 
         // 模拟第 2 帧：代码块流式增量增长，仍未闭合
         let frame_2 = format!(
             "{}### 维度二：代码高亮\n\n测试流式传输未闭合时：\n\n```rust\nuse tokio;\n",
             padding
         );
-        let (blocks_2, tail_2) = parser.process(&frame_2);
+        let (blocks_2, tail_2, tail_type_2) = parser.process(&frame_2);
         println!("Frame 2 - Blocks: {}, Tail: {:?}", blocks_2.len(), tail_2);
         // 应该没有任何新的 blocks（因为前段已经沉淀，后段未闭合），且 tail 应该是增量代码块且去掉了前段
         assert_eq!(blocks_2.len(), 0);
         assert_eq!(tail_2, "```rust\nuse tokio;\n");
+        assert_eq!(tail_type_2, Some(BlockType::CodeFence));
 
         // 模拟第 3 帧：流式代码块闭合
         let frame_3 = format!(
             "{}### 维度二：代码高亮\n\n测试流式传输未闭合时：\n\n```rust\nuse tokio;\n```",
             padding
         );
-        let (blocks_3, tail_3) = parser.process(&frame_3);
+        let (blocks_3, tail_3, tail_type_3) = parser.process(&frame_3);
         println!("Frame 3 - Blocks: {}, Tail: {:?}", blocks_3.len(), tail_3);
         // 应该成功闭合代码块并将其沉淀，且 tail 为空
         assert_eq!(blocks_3.len(), 1);
         assert!(tail_3.is_empty());
+        assert_eq!(tail_type_3, None);
+    }
+
+    #[test]
+    fn html_and_cpp_fences_share_the_generic_code_fence_type() {
+        for raw in [
+            "```html\n<div class=\"card\">streaming",
+            "```cpp\nint main() {",
+        ] {
+            let mut parser = StreamBlockParser::new();
+            let (blocks, tail, tail_type) = parser.process(raw);
+            assert!(blocks.is_empty());
+            assert_eq!(tail, raw);
+            assert_eq!(tail_type, Some(BlockType::CodeFence));
+        }
+    }
+
+    #[test]
+    fn unclosed_html_container_keeps_its_type_through_finalize() {
+        let raw = "<div class=\"card\">\n\n<section>one";
+        let mut parser = StreamBlockParser::new();
+        let (blocks, tail, tail_type) = parser.process(raw);
+        assert!(blocks.is_empty());
+        assert_eq!(tail, raw);
+        assert_eq!(tail_type, Some(BlockType::HtmlContainer));
+
+        let mut final_parser = StreamBlockParser::new();
+        let final_blocks = final_parser.finalize(raw);
+        assert!(matches!(
+            final_blocks.as_slice(),
+            [StreamBlock::Markdown {
+                content,
+                nodes: Some(nodes),
+                ..
+            }] if content == raw
+                && matches!(
+                    nodes.as_slice(),
+                    [MarkdownNode::RawHtml {
+                        content: raw_content,
+                        hash: Some(_),
+                    }] if raw_content == raw
+                )
+        ));
     }
 
     #[test]
@@ -894,15 +952,15 @@ mod tests {
         let frame_3 = format!("{frame_2}{{末ESCAPE}}\n<<<[END_TOOL_REQUEST]>>>");
 
         let mut parser = StreamBlockParser::new();
-        let (blocks_1, tail_1) = parser.process(frame_1);
+        let (blocks_1, tail_1, _) = parser.process(frame_1);
         assert!(blocks_1.is_empty());
         assert!(tail_1.starts_with("<<<[TOOL_REQUEST]>>>"));
 
-        let (blocks_2, tail_2) = parser.process(frame_2);
+        let (blocks_2, tail_2, _) = parser.process(frame_2);
         assert!(blocks_2.is_empty());
         assert!(tail_2.contains("after"));
 
-        let (blocks_3, tail_3) = parser.process(&frame_3);
+        let (blocks_3, tail_3, _) = parser.process(&frame_3);
         assert!(tail_3.is_empty());
         assert!(matches!(
             blocks_3.as_slice(),
