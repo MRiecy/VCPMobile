@@ -38,7 +38,8 @@ const toggleSubCard = async (subId: string) => {
     await nextTick();
     const subCardEl = subCardRefs.value[subId];
     if (subCardEl) {
-      subCardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      // 与外层卡片一致：收回后同帧直接定位，不走滚动动画
+      subCardEl.scrollIntoView({ behavior: 'instant', block: 'nearest' });
     }
   } else {
     expandedSubCardIds.value.add(subId);
@@ -265,7 +266,8 @@ const toggleCard = async (id: string) => {
     await nextTick();
     const cardEl = cardRefs.value[id];
     if (cardEl) {
-      cardEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      // 列表数据瞬间渲染完成，直接同帧定位，不走滚动动画
+      cardEl.scrollIntoView({ behavior: 'instant', block: 'nearest' });
     }
   } else {
     expandedCardIds.value.add(id);
