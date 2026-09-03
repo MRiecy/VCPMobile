@@ -317,4 +317,14 @@ describe('Android mobile UI compatibility contracts', () => {
       imeVisible: true,
     });
   });
+
+  it('keeps syntect token spans inline against global utility-class collisions', () => {
+    // syntect atom 类名是通用英文单词（meta.block.rust → 裸类名 block），
+    // 任何模板写 class="block" 都会让 UnoCSS 生成全局 .block{display:block}，
+    // 会把代码块内的行内 span 抬成块级盒子（大括号顶格独占一行并多出空行），
+    // 而文本 round-trip 测试对此完全失明——这条防御规则是外观级不变量。
+    expect(messageBlocksSource).toContain(':is(.vcp-html-block, .vcp-code-block) span');
+    expect(messageBlocksSource).toContain('display: inline !important');
+    expect(messageBlocksSource).toContain('position: static !important');
+  });
 });

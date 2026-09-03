@@ -733,6 +733,17 @@ html.dark .vcp-diary-update-block.is-valet .vcp-diary-update-content {
 /* 后端统一输出 scope 派生类 span（keyword/string/comment 等 atom 类，无内联样式），
    token 颜色全部在此按亮暗两态定义；!important 防御容器级 color 规则干扰 token 配色。 */
 
+/* --- 全局类名碰撞防御（文本 round-trip 测试无法覆盖的外观不变量） ---
+   syntect atom 类名是通用英文单词：meta.block.rust、punctuation.section.block.begin.rust
+   等 span 都携带裸类名 block；任意模板写 class="block" 都会让 UnoCSS 生成全局
+   .block{display:block}，把行内 token span 抬成块级盒子（症状：大括号顶格独占一行并
+   多出一个空行，剥标签后文本却逐字节不变）。块内 span 恒为行内盒，必须 !important。 */
+:is(.vcp-html-block, .vcp-code-block) span {
+  display: inline !important;
+  position: static !important;
+  float: none !important;
+}
+
 /* 暗色主题高亮 (GitHub Dark 风格自适应) */
 html.dark :is(.vcp-html-block, .vcp-code-block) .keyword,
 html.dark :is(.vcp-html-block, .vcp-code-block) .storage,
