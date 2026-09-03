@@ -171,8 +171,19 @@ impl DbWriteMetricLogBridge {
         receiver: broadcast::Receiver<DbWriteMetric>,
         logger: Arc<Mutex<SyncLogger>>,
     ) -> Self {
+        // The session threshold is immutable. Cache it once so filtered normal metrics do not
+        // allocate a formatted line or contend on the logger mutex.
+        let minimum_level = logger
+            .lock()
+            .map(|logger| logger.log_level)
+            .unwrap_or(LogLevel::Trace);
         let (stop, stop_rx) = oneshot::channel();
-        let task = tokio::spawn(run_db_write_metric_log_bridge(receiver, logger, stop_rx));
+        let task = tokio::spawn(run_db_write_metric_log_bridge(
+            receiver,
+            logger,
+            minimum_level,
+            stop_rx,
+        ));
         Self {
             stop: Some(stop),
             task,
@@ -192,19 +203,20 @@ impl DbWriteMetricLogBridge {
 async fn run_db_write_metric_log_bridge(
     mut receiver: broadcast::Receiver<DbWriteMetric>,
     logger: Arc<Mutex<SyncLogger>>,
+    minimum_level: LogLevel,
     mut stop: oneshot::Receiver<()>,
 ) {
     loop {
         tokio::select! {
             biased;
             _ = &mut stop => {
-                drain_db_write_metrics(&mut receiver, &logger);
+                drain_db_write_metrics(&mut receiver, &logger, minimum_level);
                 return;
             }
             received = receiver.recv() => {
                 match received {
                     Ok(metric) => {
-                        if !write_db_write_metric(&logger, metric) {
+                        if !write_db_write_metric(&logger, minimum_level, metric) {
                             return;
                         }
                     }
@@ -223,6 +235,7 @@ async fn run_db_write_metric_log_bridge(
 fn drain_db_write_metrics(
     receiver: &mut broadcast::Receiver<DbWriteMetric>,
     logger: &Arc<Mutex<SyncLogger>>,
+    minimum_level: LogLevel,
 ) {
     // Freeze the session cutoff before draining. A process-wide producer may continue publishing
     // ordinary writes after sync stops; chasing those new metrics could otherwise keep stop_sync
@@ -233,7 +246,7 @@ fn drain_db_write_metrics(
         match receiver.try_recv() {
             Ok(metric) => {
                 remaining -= 1;
-                if !write_db_write_metric(logger, metric) {
+                if !write_db_write_metric(logger, minimum_level, metric) {
                     return;
                 }
             }
@@ -251,15 +264,24 @@ fn drain_db_write_metrics(
     }
 }
 
-fn write_db_write_metric(logger: &Arc<Mutex<SyncLogger>>, metric: DbWriteMetric) -> bool {
-    let level = if metric.is_failure() {
+fn write_db_write_metric(
+    logger: &Arc<Mutex<SyncLogger>>,
+    minimum_level: LogLevel,
+    metric: DbWriteMetric,
+) -> bool {
+    let is_failure = metric.is_failure();
+    let is_slow = metric.is_slow();
+    let level = if is_failure {
         LogLevel::Error
-    } else if metric.is_slow() {
+    } else if is_slow {
         LogLevel::Warning
     } else {
         LogLevel::Debug
     };
-    let message = if metric.is_slow() && !metric.is_failure() {
+    if level < minimum_level {
+        return true;
+    }
+    let message = if is_slow && !is_failure {
         format!("slow {metric}")
     } else {
         metric.to_string()
@@ -370,6 +392,44 @@ mod tests {
 
         let contents = std::fs::read_to_string(log_path).expect("read filtered metric log");
         assert!(!contents.contains("test.filtered-commit"));
+        assert!(contents.contains("[ERROR] [db_write] operation=test.visible-failure"));
+    }
+
+    #[tokio::test]
+    async fn db_write_bridge_keeps_slow_and_failed_metrics_at_info() {
+        let temp_dir = tempfile::tempdir().expect("create info metric log directory");
+        let logger = Arc::new(Mutex::new(SyncLogger::new_session(
+            LogLevel::Info,
+            Some(temp_dir.path().to_path_buf()),
+            80,
+        )));
+        let log_path = logger
+            .lock()
+            .expect("lock info metric logger")
+            .log_path()
+            .cloned()
+            .expect("info metric logger path");
+        let (sender, receiver) = broadcast::channel(8);
+        let bridge = DbWriteMetricLogBridge::start(receiver, logger.clone());
+
+        sender
+            .send(test_metric("test.filtered-commit", "committed"))
+            .expect("send filtered normal metric");
+        let mut slow = test_metric("test.visible-slow", "committed");
+        slow.wait_duration = std::time::Duration::from_millis(500);
+        sender.send(slow).expect("send visible slow metric");
+        sender
+            .send(test_metric("test.visible-failure", "transaction_failed"))
+            .expect("send visible failure metric");
+        bridge.shutdown().await;
+        logger
+            .lock()
+            .expect("lock info logger for shutdown")
+            .end_session();
+
+        let contents = std::fs::read_to_string(log_path).expect("read info metric log");
+        assert!(!contents.contains("test.filtered-commit"));
+        assert!(contents.contains("[WARN] [db_write] slow operation=test.visible-slow"));
         assert!(contents.contains("[ERROR] [db_write] operation=test.visible-failure"));
     }
 

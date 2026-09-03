@@ -413,22 +413,15 @@ fn validate_requested_message_ids(
 
 /// 共享消息处理管线：Wire DTO → 可选预渲染 → 写入队列。
 /// 被 `pull_messages_batch` 内各并发任务复用。
-/// 返回本 Topic 已接收并排队的消息数量；数据库成功由后续 flush 屏障确认。
+/// 数据库成功由后续 flush 屏障确认。
 async fn process_topic_messages(
     key: &TopicKey,
     parsed_messages: Vec<crate::vcp_modules::sync_dto::MessageSyncDTO>,
     write_queue: &DbWriteQueue,
     prerender_enabled: bool,
-) -> Result<usize, String> {
-    let t_start = std::time::Instant::now();
-
-    let parsed_count = parsed_messages.len();
-    let mut t_block = std::time::Duration::from_secs(0);
-    let mut t_submit = std::time::Duration::from_secs(0);
-
+) -> Result<(), String> {
     if !parsed_messages.is_empty() {
         // 1. 将预渲染和 Zstd 压缩移至 blocking 线程池；消息指纹直接使用 Wire 值。
-        let t_block_start = std::time::Instant::now();
         let topic_id_clone = key.topic_id.clone();
         let prepared_writes = tokio::task::spawn_blocking(move || {
             let mut writes = Vec::with_capacity(parsed_messages.len());
@@ -473,10 +466,8 @@ async fn process_topic_messages(
         })
         .await
         .map_err(|e| format!("Spawn blocking failed: {}", e))?;
-        t_block = t_block_start.elapsed();
 
         // 2. 提交落盘
-        let t_submit_start = std::time::Instant::now();
         // 限制单个事务的消息规模；队列仍会合并相邻小任务，但总量上限为 500。
         const WRITE_CHUNK_MESSAGES: usize = 250;
         let mut writes = prepared_writes.into_iter();
@@ -492,18 +483,9 @@ async fn process_topic_messages(
                 })
                 .await?;
         }
-        t_submit = t_submit_start.elapsed();
     }
 
-    let t_total = t_start.elapsed();
-    if parsed_count > 0 {
-        log::debug!(
-            "[PullExecutor] [ProfileDetail] topic={} msgs={} | prepare={:?} submit_queue={:?} | total_proc={:?}",
-            key.topic_id, parsed_count, t_block, t_submit, t_total
-        );
-    }
-
-    Ok(parsed_count)
+    Ok(())
 }
 
 /// 批量 Pull 单 topic 处理结果
@@ -876,7 +858,6 @@ impl PullExecutor {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
-        let request_started_at = std::time::Instant::now();
         let res = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", sync_token))
@@ -948,10 +929,6 @@ impl PullExecutor {
         let mut stream = res.bytes_stream();
         let mut buffer = BytesMut::new();
         let mut search_start = 0; // 核心优化：新增扫描游标，避免 O(N^2) 重复扫描
-        let mut stream_bytes = 0usize;
-        let mut stream_chunks = 0usize;
-        let mut first_chunk_at = None;
-        let mut last_chunk_at = None;
 
         loop {
             // The stream is bounded by explicit cancellation and transport failure, not
@@ -963,13 +940,6 @@ impl PullExecutor {
             let chunk = chunk_result.map_err(|error| {
                 http_transport_error("Batch pull stream read", SyncErrorStage::Messages, &error)
             })?;
-            let chunk_at = request_started_at.elapsed();
-            if first_chunk_at.is_none() {
-                first_chunk_at = Some(chunk_at);
-            }
-            last_chunk_at = Some(chunk_at);
-            stream_bytes = stream_bytes.saturating_add(chunk.len());
-            stream_chunks = stream_chunks.saturating_add(1);
 
             // Preserve the transport allocation whenever possible. If a partial line exists,
             // copy only the prefix needed to complete that one bounded frame and defer the
@@ -1027,7 +997,6 @@ impl PullExecutor {
                 }
 
                 wait_for_pull_worker_slot(&mut spawn_handles).await;
-                let frame_bytes = line.len();
                 let frame = match parse_ndjson_frame(&line)? {
                     ParsedNdjsonFrame::StreamError(error) => return Err(error),
                     ParsedNdjsonFrame::Topic(frame) => frame,
@@ -1035,12 +1004,6 @@ impl PullExecutor {
                 drop(line);
                 let key = validate_returned_topic_identity(&frame, &expected_topics)?;
                 let topic_id = key.topic_id.clone();
-                log::debug!(
-                    "[PullExecutor] [NdjsonFrame] topic={} msgs={} wire_bytes={}",
-                    topic_id,
-                    frame.messages.len(),
-                    frame_bytes
-                );
                 if !seen_topics.insert(key.clone()) {
                     return Err(protocol_error(
                         SyncErrorStage::Messages,
@@ -1089,18 +1052,10 @@ impl PullExecutor {
                 let legacy_attachment_warnings = frame.legacy_attachment_warnings;
 
                 spawn_handles.spawn(async move {
-                    let start_t = std::time::Instant::now();
                     match process_topic_messages(&key, pull_dtos, &wq_clone, prerender_enabled)
                         .await
                     {
-                        Ok(parsed) => {
-                            let process_t = start_t.elapsed();
-                            log::debug!(
-                                "[PullExecutor] [ProfileSummary] topic={} msgs={} | process={:?}",
-                                topic_id,
-                                parsed,
-                                process_t
-                            );
+                        Ok(()) => {
                             let _ = tx_clone
                                 .send(BatchPullResult {
                                     topic: key,
@@ -1131,15 +1086,6 @@ impl PullExecutor {
             search_start = buffer.len();
         }
 
-        log::debug!(
-            "[PullExecutor] [NdjsonStream] topics={} chunks={} wire_bytes={} first_byte_ms={:.3} last_byte_ms={:.3}",
-            expected_topics.len(),
-            stream_chunks,
-            stream_bytes,
-            first_chunk_at.unwrap_or_default().as_secs_f64() * 1000.0,
-            last_chunk_at.unwrap_or_default().as_secs_f64() * 1000.0
-        );
-
         // 处理流结束后 buffer 中残留的非换行数据（兜底）
         if !buffer.is_empty() {
             if buffer.len() > MAX_NDJSON_LINE_BYTES {
@@ -1148,7 +1094,6 @@ impl PullExecutor {
                 ));
             }
             let trailing = std::mem::take(&mut buffer);
-            let frame_bytes = trailing.len();
             wait_for_pull_worker_slot(&mut spawn_handles).await;
             let frame = match parse_ndjson_frame(&trailing)? {
                 ParsedNdjsonFrame::StreamError(error) => return Err(error),
@@ -1157,12 +1102,6 @@ impl PullExecutor {
             drop(trailing);
             let key = validate_returned_topic_identity(&frame, &expected_topics)?;
             let topic_id = key.topic_id.clone();
-            log::debug!(
-                "[PullExecutor] [NdjsonFrame] topic={} msgs={} wire_bytes={}",
-                topic_id,
-                frame.messages.len(),
-                frame_bytes
-            );
             if !seen_topics.insert(key.clone()) {
                 return Err(protocol_error(
                     SyncErrorStage::Messages,
@@ -1201,7 +1140,7 @@ impl PullExecutor {
                         match process_topic_messages(&key, pull_dtos, &wq_clone, prerender_enabled)
                             .await
                         {
-                            Ok(_) => {
+                            Ok(()) => {
                                 let _ = tx_clone
                                     .send(BatchPullResult {
                                         topic: key,

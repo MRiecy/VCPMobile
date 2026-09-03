@@ -65,12 +65,14 @@ The full-sync sampler targets only the already-running `com.vcp.avatar.debug`
 process. It does not install, launch, clear, or configure the app. By default it
 records `/proc` RSS every 500ms and the heavier `dumpsys` PSS every 2 seconds,
 while retaining only a
-whitelist of sync timing/NDJSON/Flush/completion log lines. Reports remain under
+whitelist of SQLite timing, Flush, and completion log lines. Reports remain under
 the ignored `tests/perf/reports/` tree and may include Topic IDs. Set
 `syncLogLevel=DEBUG` before the run so normal SQLite writer metrics are present.
-The Rust Pull path logs one `NdjsonFrame` record per complete Topic line and one
-`NdjsonStream` record per HTTP response; these are byte counters only and do not
-retain payload data or change synchronization behavior.
+The current Rust Pull path no longer emits per-chunk, per-frame, or per-Topic
+profiling records. Report schema v2 therefore covers process memory, SQLite writer
+metrics, Queue Flush latency, and terminal milestones without presenting missing
+Pull observations as zero work. Reintroduce equivalent Debug-only instrumentation
+before using this helper to compare NDJSON throughput or Topic preparation time.
 The summary records the explicit `FinalAck accepted` marker before the final
 Queue Flush, so a network-complete run is not confused with a durable,
 acknowledged sync.

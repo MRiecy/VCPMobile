@@ -134,16 +134,6 @@ function parseCheckinPss(text, expectedPid) {
   return Number.isFinite(totalPssKb) ? totalPssKb : null;
 }
 
-function parseRustDurationMs(value) {
-  const match = String(value).match(/^([0-9.]+)(ns|µs|us|ms|s)$/);
-  if (!match) {
-    return null;
-  }
-  const amount = Number(match[1]);
-  const scale = { ns: 1e-6, µs: 1e-3, us: 1e-3, ms: 1, s: 1000 }[match[2]];
-  return Number.isFinite(amount) ? amount * scale : null;
-}
-
 function percentile(values, ratio) {
   if (values.length === 0) {
     return null;
@@ -184,7 +174,6 @@ function readHostProcess(pid) {
 
 function lineIsAllowed(line) {
   return [
-    /\[PullExecutor\] \[(?:ProfileDetail|ProfileSummary|NdjsonFrame|NdjsonStream)\]/,
     /\[Sync\] \[db_write\] operation=/,
     /\[DbWriteQueue\].*Flush/,
     /\[SyncService\] \[FinalAck\] accepted/,
@@ -214,43 +203,6 @@ function updateLogMetrics(line, metrics, receivedAt) {
   }
 
   let match = line.match(
-    /\[NdjsonFrame\] topic=(\S+) msgs=(\d+) wire_bytes=(\d+)/,
-  );
-  if (match) {
-    metrics.frames.push({
-      topic: match[1],
-      messages: Number(match[2]),
-      wireBytes: Number(match[3]),
-    });
-    return;
-  }
-  match = line.match(
-    /\[NdjsonStream\] topics=(\d+) chunks=(\d+) wire_bytes=(\d+) first_byte_ms=([0-9.]+) last_byte_ms=([0-9.]+)/,
-  );
-  if (match) {
-    metrics.streams.push({
-      topics: Number(match[1]),
-      chunks: Number(match[2]),
-      wireBytes: Number(match[3]),
-      firstByteMs: Number(match[4]),
-      lastByteMs: Number(match[5]),
-    });
-    return;
-  }
-  match = line.match(
-    /\[ProfileDetail\] topic=(\S+) msgs=(\d+) \| prepare=(\S+) submit_queue=(\S+) \| total_proc=(\S+)/,
-  );
-  if (match) {
-    metrics.profiles.push({
-      topic: match[1],
-      messages: Number(match[2]),
-      prepareMs: parseRustDurationMs(match[3]),
-      submitQueueMs: parseRustDurationMs(match[4]),
-      totalProcessMs: parseRustDurationMs(match[5]),
-    });
-    return;
-  }
-  match = line.match(
     /operation=(\S+) outcome=(\S+) wait_ms=([0-9.]+) begin_ms=([0-9.]+) hold_ms=([0-9.]+) finish_ms=([0-9.]+)/,
   );
   if (match) {
@@ -326,9 +278,6 @@ async function main() {
   const startedAt = new Date();
   const startedMonotonic = process.hrtime.bigint();
   const metrics = {
-    frames: [],
-    streams: [],
-    profiles: [],
     dbWrites: [],
     flushes: [],
     milestones: {
@@ -459,7 +408,7 @@ async function main() {
   };
 
   const buildSummary = () => ({
-    schema: "vcp.sync-pipeline-report.v1",
+    schema: "vcp.sync-pipeline-report.v2",
     startedAt: startedAt.toISOString(),
     endedAt: new Date().toISOString(),
     durationMs: Number(process.hrtime.bigint() - startedMonotonic) / 1e6,
@@ -476,28 +425,6 @@ async function main() {
       mobileSwapKb: numericSummary(mobileSwap),
       nodeRssKb: numericSummary(nodeRss),
       cdsRssKb: numericSummary(cdsRss),
-    },
-    ndjson: {
-      frameCount: metrics.frames.length,
-      totalFrameBytes: metrics.frames.reduce(
-        (sum, item) => sum + item.wireBytes,
-        0,
-      ),
-      frameBytes: numericSummary(metrics.frames.map((item) => item.wireBytes)),
-      messagesPerFrame: numericSummary(
-        metrics.frames.map((item) => item.messages),
-      ),
-      streams: metrics.streams,
-    },
-    topicProcessing: {
-      topicCount: metrics.profiles.length,
-      prepareMs: numericSummary(metrics.profiles.map((item) => item.prepareMs)),
-      submitQueueMs: numericSummary(
-        metrics.profiles.map((item) => item.submitQueueMs),
-      ),
-      totalProcessMs: numericSummary(
-        metrics.profiles.map((item) => item.totalProcessMs),
-      ),
     },
     dbWrites: {
       count: metrics.dbWrites.length,

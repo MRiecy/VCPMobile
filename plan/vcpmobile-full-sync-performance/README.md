@@ -1,12 +1,14 @@
 # VCPMobile 全量同步性能与内存专项
 
-> 状态：`IMPLEMENTED / ANDROID-DEBUG-VERIFIED / UPSTREAM-SPLIT-PENDING`
+> 状态：`COMPLETED / PULL-INSTRUMENTATION-RETIRED / UPSTREAM-SPLIT-PENDING`
 >
 > 测试日期：2026-09-02
 >
 > 实现提交：`430fb25 perf(sync): instrument full pulls and raise workers`
 >
 > 范围：空 Mobile Debug 全量 Pull、NDJSON 数据面、Topic worker、SQLite 写队列、Final ACK 与 Mobile 进程内存
+
+> 2026-09-03 收尾：下述 Pull 细粒度埋点及数据仍作为 2026-09-02 的历史测量证据保留在本文中；当前生产路径已移除逐 chunk、逐帧和逐 Topic 的一次性 Profile 代码。`worker=4`、Final ACK 标记、慢写/失败观测与 report-only 采样器继续保留，采样器报告格式升级为 v2。
 
 ## 1. 专项目标
 
@@ -204,7 +206,7 @@ R1 后立即进行第二次同步：
 
 1. 相同桌面数据及同一组 Topic/消息/Wire 字节数；
 2. 只清理 `com.vcp.avatar.debug` 的业务数据，Release 保持只读；
-3. `syncLogLevel=DEBUG`、预渲染关闭；
+3. `syncLogLevel=DEBUG`、预渲染关闭；若需要比较 NDJSON 吞吐或 Topic 处理耗时，必须在隔离的 Android Debug 测量版本中临时恢复等价埋点，当前 v2 采样器不会把缺失数据报告为零；
 4. 从同步前启动采样，持续到 Final ACK、最终 Flush、完成事件和 Session ended；
 5. 紧接着执行一次不清库的第二轮同步，必须出现 `Phase 3 skipped: no changed topics`；
 6. 报告区分源码事实、真机证据、静态推断和尚未测量项。
