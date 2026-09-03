@@ -195,6 +195,41 @@ pub struct StreamBlockParser {
     processed_len: usize,
 }
 
+/// 未闭合思维链 tail 的可撤销显示投影。
+///
+/// `content` 只用于活跃流中的 UI；只要尚未闭合且流仍在继续，就始终保持 Thought tail。
+/// 解析器另外保留包含起始标记的原始 tail，仅供流终止后的严格 finalize 在仍未闭合时
+/// 按完整原文降级为 Markdown。
+pub(crate) struct SpeculativeThoughtTail<'a> {
+    pub content: &'a str,
+    pub content_offset: usize,
+    pub theme: String,
+}
+
+pub(crate) fn speculative_thought_tail(tail: &str) -> Option<SpeculativeThoughtTail<'_>> {
+    if let Some(captures) = THOUGHT_START.captures(tail) {
+        let marker = captures.get(0)?;
+        if marker.start() == 0 {
+            let theme = captures
+                .get(1)
+                .map(|matched| matched.as_str().trim().replace('"', ""))
+                .unwrap_or_else(|| "元思考链".to_string());
+            return Some(SpeculativeThoughtTail {
+                content: &tail[marker.end()..],
+                content_offset: marker.end(),
+                theme,
+            });
+        }
+    }
+
+    let marker = THINK_START.find(tail)?;
+    (marker.start() == 0).then(|| SpeculativeThoughtTail {
+        content: &tail[marker.end()..],
+        content_offset: marker.end(),
+        theme: "思维链".to_string(),
+    })
+}
+
 impl StreamBlockParser {
     pub fn new() -> Self {
         Self { processed_len: 0 }

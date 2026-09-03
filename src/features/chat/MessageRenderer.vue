@@ -91,6 +91,9 @@ const isPlainTailFallback = computed(() => {
       )
     );
 });
+const thoughtTailBlock = computed(() => (
+  props.message.tailBlock?.type === "thought" ? props.message.tailBlock : null
+));
 const useAstForCurrentTail = computed(() => {
   if (!enableAstDiff.value || isAstRecoveryPending.value) return false;
   if (isPlainTailFallback.value) return false;
@@ -1101,8 +1104,28 @@ onUnmounted(() => {
               </div>
             </template>
 
-            <!-- 尾部流式推测渲染（只对最后一个活跃气泡生效，且正在流式、有 tailBlock 时渲染，完美拼合在气泡正文末尾） -->
-            <div v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && message.tailBlock" class="streaming-tail opacity-90">
+            <!-- 未闭合思维链：仅在活跃 tail 中使用可撤销 Thought 外壳，正文仍复用同一 AST 增量沙箱。 -->
+            <ThoughtBlock
+              v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && thoughtTailBlock"
+              :block="thoughtTailBlock"
+              :message-id="message.id"
+              :default-expanded="true"
+              animate-entry
+            >
+              <div
+                v-if="isPlainTailFallback || isAstRecoveryPending || !useAstForCurrentTail"
+                :data-tail-render-mode="isAstRecoveryPending ? 'recovery-text' : 'plaintext'"
+                class="thought-body vcp-markdown-block whitespace-pre-wrap break-words"
+              >{{ thoughtTailBlock.content }}</div>
+              <div
+                v-else
+                :ref="(el) => { tailSandboxRef = el as HTMLElement | null }"
+                class="thought-body vcp-markdown-block vcp-ast-sandbox"
+              />
+            </ThoughtBlock>
+
+            <!-- 其他尾部流式推测渲染（只对最后一个活跃气泡生效） -->
+            <div v-else-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && message.tailBlock" class="streaming-tail opacity-90">
               <div
                 v-if="isPlainTailFallback || isAstRecoveryPending"
                 :data-tail-render-mode="isAstRecoveryPending ? 'recovery-text' : 'plaintext'"
@@ -1133,7 +1156,7 @@ onUnmounted(() => {
                 class="vcp-markdown-block"
               />
             </div>
-            <div v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && message.tailContent && message.blocks && message.blocks.length > 0 && (!message.tailBlock || (!isInlineHtmlBlock(message.tailBlock.type) && message.tailBlock.type !== 'html-preview'))" class="opacity-70 italic animate-pulse">
+            <div v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && message.tailContent && message.blocks && message.blocks.length > 0 && (!message.tailBlock || (!isInlineHtmlBlock(message.tailBlock.type) && message.tailBlock.type !== 'html-preview' && message.tailBlock.type !== 'thought'))" class="opacity-70 italic">
               {{ message.tailContent }}
             </div>
           </div>

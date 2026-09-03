@@ -249,14 +249,9 @@ body {
   box-shadow: none !important;
 }
 
-.chat-view-container[data-presentation-mode="panel"] .vcp-bubble-container::before,
 .chat-view-container[data-presentation-mode="panel"] .vcp-bubble-container::after,
-.chat-view-container[data-presentation-mode="immersive"] .vcp-bubble-container::before,
 .chat-view-container[data-presentation-mode="immersive"] .vcp-bubble-container::after {
   display: none !important;
-  animation: none !important;
-  transform: none !important;
-  will-change: auto !important;
 }
 
 .chat-view-container[data-presentation-mode="panel"] .vcp-message-time {

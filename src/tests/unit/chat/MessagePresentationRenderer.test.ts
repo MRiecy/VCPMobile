@@ -638,4 +638,191 @@ describe('MessageRenderer presentation shell', () => {
     )).toBe(true);
     wrapper.unmount();
   });
+
+  it('keeps one thought shell while applying tail AST deltas, then hands off atomically', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const sessionStore = useChatSessionStore();
+    const streamStore = useChatStreamStore();
+    sessionStore.setConversation({
+      id: 'agent-a',
+      type: 'agent',
+      name: 'Agent A',
+    } as any, 'topic-a');
+    const context = {
+      ownerId: 'agent-a',
+      ownerType: 'agent' as const,
+      topicId: 'topic-a',
+      agentId: 'agent-a',
+    };
+    const eventBase = {
+      finishReason: null,
+      error: null,
+      blocks: null,
+      timestamp: null,
+      topicUpdatedAt: null,
+    };
+
+    await streamStore.processStreamEvent({
+      ...eventBase,
+      type: 'thinking',
+      messageId: 'thought-tail-message',
+      context,
+      chunk: null,
+      aurora: null,
+    });
+    await streamStore.processStreamEvent({
+      ...eventBase,
+      type: 'aurora',
+      messageId: 'thought-tail-message',
+      context,
+      chunk: null,
+      aurora: {
+        kind: 'delta',
+        streamId: 41,
+        chunk: '<think>分析',
+        tailOp: {
+          op: 'replace',
+          content: '分析',
+          hash: 'thought-tail-1',
+          mode: 'ast',
+          blockType: 'thought',
+          thoughtTheme: '思维链',
+        },
+        tailFrame: {
+          streamId: 41,
+          epoch: 1,
+          revision: 1,
+          frameSeq: 1,
+          reset: true,
+          snapshot: [{
+            type: 'paragraph',
+            children: [{ type: 'text', value: '分析' }],
+          }],
+          mutations: [],
+        },
+      },
+    });
+    await vi.waitFor(() => {
+      expect(streamStore.getActiveStreamMessage(
+        'agent-a', 'agent', 'topic-a', 'thought-tail-message',
+      )?.tailBlock?.type).toBe('thought');
+    });
+    const message = streamStore.getActiveStreamMessage(
+      'agent-a', 'agent', 'topic-a', 'thought-tail-message',
+    )!;
+    expect(message.tailBlock).toMatchObject({
+      type: 'thought',
+      theme: '思维链',
+      content: '分析',
+      is_complete: false,
+    });
+
+    const wrapper = mount(MessageRenderer, {
+      props: { message },
+      global: {
+        plugins: [pinia],
+        directives: { longpress: {} },
+        stubs: {
+          VcpAvatar: markerStub('avatar'),
+          ToolBlock: markerStub('tool'),
+          HtmlPreviewBlock: markerStub('html-preview'),
+          ToolSummaryBlock: markerStub('tool-summary'),
+          DiaryBlock: markerStub('diary'),
+          AttachmentPreview: markerStub('attachment'),
+          MermaidFullScreenViewer: markerStub('mermaid-viewer'),
+          ThinkingIndicator: markerStub('thinking'),
+          StreamingTag: markerStub('streaming'),
+        },
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(wrapper.get('.vcp-thought-block').text()).toContain('分析');
+    });
+    const thoughtShell = wrapper.get('.vcp-thought-block').element;
+    const tailSandbox = wrapper.get('.vcp-thought-block .vcp-ast-sandbox').element;
+    expect(wrapper.get('.vcp-thought-content').classes()).toContain('animate-slide-down');
+    expect(wrapper.text()).not.toContain('<think>');
+    expect(wrapper.find('.custom-spin').exists()).toBe(false);
+
+    await streamStore.processStreamEvent({
+      ...eventBase,
+      type: 'aurora',
+      messageId: 'thought-tail-message',
+      context,
+      chunk: null,
+      aurora: {
+        kind: 'delta',
+        streamId: 41,
+        chunk: '继续',
+        tailOp: {
+          op: 'append',
+          previousHash: 'thought-tail-1',
+          content: '继续',
+          hash: 'thought-tail-2',
+          mode: 'ast',
+          blockType: 'thought',
+          thoughtTheme: '思维链',
+        },
+        tailFrame: {
+          streamId: 41,
+          epoch: 1,
+          revision: 2,
+          frameSeq: 2,
+          mutations: [{ op: 'append', id: 't0.i0', chunk: '继续' }],
+        },
+      },
+    });
+    await vi.waitFor(() => {
+      expect(wrapper.get('.vcp-thought-block').text()).toContain('分析继续');
+    });
+    expect(wrapper.get('.vcp-thought-block').element).toBe(thoughtShell);
+    expect(wrapper.get('.vcp-thought-block .vcp-ast-sandbox').element).toBe(tailSandbox);
+
+    await streamStore.processStreamEvent({
+      ...eventBase,
+      type: 'aurora',
+      messageId: 'thought-tail-message',
+      context,
+      chunk: null,
+      aurora: {
+        kind: 'delta',
+        streamId: 41,
+        chunk: '</think>',
+        stableAppend: {
+          baseCount: 0,
+          blocks: [{
+            type: 'thought',
+            theme: '思维链',
+            content: '分析继续',
+            is_complete: true,
+            hash: 'stable-thought',
+            nodes: [{
+              type: 'paragraph',
+              children: [{ type: 'text', value: '分析继续' }],
+            }],
+          }],
+        },
+        tailOp: { op: 'clear' },
+        tailFrame: {
+          streamId: 41,
+          epoch: 2,
+          revision: 0,
+          frameSeq: 3,
+          reset: true,
+          snapshot: [],
+          mutations: [],
+        },
+      },
+    });
+    await vi.waitFor(() => {
+      expect(message.tailBlock).toBeUndefined();
+      expect(message.blocks).toHaveLength(1);
+      expect(wrapper.findAll('.vcp-thought-block')).toHaveLength(1);
+    });
+    expect(wrapper.get('.vcp-thought-block').text()).toContain('分析继续');
+    expect(wrapper.get('.vcp-thought-content').classes()).not.toContain('animate-slide-down');
+    wrapper.unmount();
+  });
 });

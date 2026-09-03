@@ -7,7 +7,9 @@ use crate::vcp_modules::chat::ast_diff::{
 };
 use crate::vcp_modules::pre_renderer::code_highlighter::IncrementalCodeHighlighter;
 use crate::vcp_modules::pre_renderer::markdown_ast::MarkdownNode;
-use crate::vcp_modules::stream_block_parser::{StreamBlock, StreamBlockParser};
+use crate::vcp_modules::stream_block_parser::{
+    speculative_thought_tail, StreamBlock, StreamBlockParser,
+};
 
 /// 推测渲染的 tail 字节上限：超过此阈值跳过 AST 解析，降级为纯文本尾部。
 ///
@@ -57,6 +59,7 @@ pub enum TailRenderMode {
 pub enum TailBlockType {
     Markdown,
     HtmlPreview,
+    Thought,
 }
 
 #[derive(Debug, Serialize, Clone, Deserialize)]
@@ -78,6 +81,8 @@ pub enum TailTextOp {
         mode: TailRenderMode,
         #[serde(rename = "blockType")]
         block_type: TailBlockType,
+        #[serde(rename = "thoughtTheme", skip_serializing_if = "Option::is_none")]
+        thought_theme: Option<String>,
     },
     Replace {
         content: String,
@@ -85,6 +90,8 @@ pub enum TailTextOp {
         mode: TailRenderMode,
         #[serde(rename = "blockType")]
         block_type: TailBlockType,
+        #[serde(rename = "thoughtTheme", skip_serializing_if = "Option::is_none")]
+        thought_theme: Option<String>,
     },
     Clear,
 }
@@ -109,7 +116,7 @@ pub struct AuroraUpdate {
     pub tail_block: Option<StreamBlock>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tail_mode: Option<TailRenderMode>,
-    /// Delta 中对 tail 原文的追加、替换或清空操作。
+    /// Delta 中对 tail 显示投影的追加、替换或清空操作；Thought 起始标记不进入该正文。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tail_op: Option<TailTextOp>,
     /// 流式 AST 单帧补丁。每个 frame 是独立发送批次，前端不得累计全历史 mutations。
@@ -184,6 +191,7 @@ struct TailProjection {
     fingerprint: TailFingerprint,
     mode: TailRenderMode,
     block_type: TailBlockType,
+    thought_theme: Option<String>,
 }
 
 fn classify_tail_block(nodes: &[MarkdownNode]) -> TailBlockType {
@@ -297,6 +305,16 @@ impl AuroraBuffer {
                 highlighted_content: None,
                 hash,
             },
+            TailBlockType::Thought => StreamBlock::thought(
+                projection
+                    .thought_theme
+                    .clone()
+                    .unwrap_or_else(|| "思维链".to_string()),
+                content,
+                false,
+                None,
+                hash,
+            ),
         })
     }
 
@@ -371,6 +389,10 @@ impl AuroraBuffer {
             .tail_projection
             .as_ref()
             .map(|projection| projection.block_type);
+        let current_thought_theme = self
+            .tail_projection
+            .as_ref()
+            .and_then(|projection| projection.thought_theme.clone());
         let current_tail_source_start = self.current_tail_source_start();
         let tail_state_changed = self.tail_content.len() != self.pushed_tail_len
             || self.tail_epoch != self.pushed_tail_epoch
@@ -379,7 +401,7 @@ impl AuroraBuffer {
             || current_tail_block_type != self.pushed_tail_block_type;
         let tail_op = if !tail_state_changed {
             None
-        } else if self.tail_content.is_empty() {
+        } else if self.tail_projection.is_none() {
             Some(TailTextOp::Clear)
         } else {
             let hash = current_tail_hash.clone().unwrap_or_default();
@@ -398,6 +420,7 @@ impl AuroraBuffer {
                         hash,
                         mode,
                         block_type,
+                        thought_theme: current_thought_theme.clone(),
                     })
                 } else {
                     Some(TailTextOp::Replace {
@@ -405,6 +428,7 @@ impl AuroraBuffer {
                         hash,
                         mode,
                         block_type,
+                        thought_theme: current_thought_theme.clone(),
                     })
                 }
             } else {
@@ -413,6 +437,7 @@ impl AuroraBuffer {
                     hash,
                     mode,
                     block_type,
+                    thought_theme: current_thought_theme,
                 })
             }
         };
@@ -531,15 +556,31 @@ impl AuroraBuffer {
         let prev_stable_count = self.stable_blocks.len();
 
         // 1. 增量解析全文，产出本次新增的已闭合块 + 尾部纯文本
-        let (new_blocks, new_tail) = self.parser.process(&self.full_text);
-        let new_tail_start = self.parser.tail_start();
-        let tail_changed = self.tail_content != new_tail;
+        let (new_blocks, raw_new_tail) = self.parser.process(&self.full_text);
+        let raw_new_tail_start = self.parser.tail_start();
+        let speculative_thought = speculative_thought_tail(&raw_new_tail);
+        let (new_tail, new_tail_start, next_thought_theme) = match speculative_thought {
+            Some(projection) => (
+                projection.content.to_string(),
+                raw_new_tail_start.saturating_add(projection.content_offset),
+                Some(projection.theme),
+            ),
+            None => (raw_new_tail, raw_new_tail_start, None),
+        };
         let previous_tail_block_type = self
             .tail_projection
             .as_ref()
             .map(|projection| projection.block_type);
-        let next_fingerprint =
-            (!new_tail.is_empty()).then(|| self.next_tail_fingerprint(&new_tail, new_tail_start));
+        let previous_thought_theme = self
+            .tail_projection
+            .as_ref()
+            .and_then(|projection| projection.thought_theme.as_deref());
+        let was_thought_tail = previous_tail_block_type == Some(TailBlockType::Thought);
+        let tail_changed = self.tail_content != new_tail
+            || was_thought_tail != next_thought_theme.is_some()
+            || previous_thought_theme != next_thought_theme.as_deref();
+        let next_fingerprint = (!new_tail.is_empty() || next_thought_theme.is_some())
+            .then(|| self.next_tail_fingerprint(&new_tail, new_tail_start));
 
         if !new_blocks.is_empty() {
             self.stable_blocks.extend(new_blocks);
@@ -553,10 +594,11 @@ impl AuroraBuffer {
 
         self.tail_content = new_tail;
 
-        // 2. 推测渲染 (Speculative Rendering)：将 tail 视为一个临时 Markdown 块
-        //    当 tail 超过 MAX_SPECULATIVE_TAIL_AST_BYTES 时跳过 AST 解析，
+        // 2. 推测渲染 (Speculative Rendering)：普通 tail 使用 Markdown，已识别的未闭合
+        //    思维链保留 Thought 外壳，但正文继续使用同一 Markdown AST。
+        //    当显示正文超过 MAX_SPECULATIVE_TAIL_AST_BYTES 时跳过 AST 解析，
         //    避免在流式热路径上产生性能悬崖
-        if !self.tail_content.is_empty() {
+        if !self.tail_content.is_empty() || next_thought_theme.is_some() {
             let nodes = if self.tail_content.len() > MAX_SPECULATIVE_TAIL_AST_BYTES {
                 None
             } else {
@@ -567,7 +609,10 @@ impl AuroraBuffer {
                 )
             };
             let (mode, block_type) = if let Some(new_nodes) = nodes {
-                let block_type = classify_tail_block(&new_nodes);
+                let block_type = next_thought_theme.as_ref().map_or_else(
+                    || classify_tail_block(&new_nodes),
+                    |_| TailBlockType::Thought,
+                );
                 if previous_tail_block_type.is_some()
                     && previous_tail_block_type != Some(block_type)
                     && !self.tail_reset_pending
@@ -609,7 +654,12 @@ impl AuroraBuffer {
                     self.tail_revision = 0;
                     self.tail_reset_pending = true;
                 }
-                (TailRenderMode::Plain, TailBlockType::Markdown)
+                (
+                    TailRenderMode::Plain,
+                    next_thought_theme
+                        .as_ref()
+                        .map_or(TailBlockType::Markdown, |_| TailBlockType::Thought),
+                )
             };
 
             self.tail_projection = Some(TailProjection {
@@ -618,6 +668,7 @@ impl AuroraBuffer {
                 }),
                 mode,
                 block_type,
+                thought_theme: next_thought_theme,
             });
         } else {
             self.tail_projection = None;
@@ -738,6 +789,190 @@ mod tests {
             .mutations
             .iter()
             .any(|mutation| matches!(mutation, AstMutation::AppendText { .. })));
+    }
+
+    #[test]
+    fn unclosed_think_tail_projects_empty_inner_then_appends_markdown() {
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk("<think>");
+        assert_eq!(buffer.process_queue(), (false, true));
+
+        assert!(matches!(
+            buffer.current_tail_wire_block(),
+            Some(StreamBlock::Thought {
+                ref theme,
+                ref content,
+                is_complete: false,
+                ..
+            }) if theme == "思维链" && content.is_empty()
+        ));
+        let (initial, initial_commit) =
+            buffer.prepare_delta_update().expect("thought opener delta");
+        assert!(matches!(
+            initial.tail_op,
+            Some(TailTextOp::Replace {
+                ref content,
+                block_type: TailBlockType::Thought,
+                thought_theme: Some(ref theme),
+                ..
+            }) if content.is_empty() && theme == "思维链"
+        ));
+        buffer.commit_delivery(initial_commit);
+
+        buffer.append_chunk("**分析中**");
+        assert_eq!(buffer.process_queue(), (false, true));
+        let (append, _) = buffer.prepare_delta_update().expect("thought body delta");
+        assert!(matches!(
+            append.tail_op,
+            Some(TailTextOp::Append {
+                ref content,
+                block_type: TailBlockType::Thought,
+                thought_theme: Some(ref theme),
+                ..
+            }) if content == "**分析中**" && theme == "思维链"
+        ));
+        assert!(matches!(
+            buffer.prev_tail_ast.as_slice(),
+            [MarkdownNode::Paragraph { .. }]
+        ));
+    }
+
+    #[test]
+    fn completing_a_partial_think_opener_replaces_and_resets_the_tail() {
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk("<thi");
+        assert_eq!(buffer.process_queue(), (false, true));
+        assert!(matches!(
+            buffer.current_tail_wire_block(),
+            Some(StreamBlock::Markdown { .. })
+        ));
+        let (_, markdown_commit) = buffer.prepare_delta_update().expect("partial opener delta");
+        buffer.commit_delivery(markdown_commit);
+
+        buffer.append_chunk("nk>");
+        assert_eq!(buffer.process_queue(), (false, true));
+        let (thought_update, _) = buffer
+            .prepare_delta_update()
+            .expect("completed opener delta");
+        assert!(matches!(
+            thought_update.tail_op,
+            Some(TailTextOp::Replace {
+                ref content,
+                block_type: TailBlockType::Thought,
+                ..
+            }) if content.is_empty()
+        ));
+        assert!(matches!(
+            thought_update.tail_frame,
+            Some(TailFrame {
+                reset: true,
+                snapshot: Some(ref nodes),
+                ..
+            }) if nodes.is_empty()
+        ));
+    }
+
+    #[test]
+    fn vcp_thought_recovery_keeps_theme_and_strips_only_the_opener() {
+        let raw = "[--- VCP元思考链: \"规划\" ---]\n- 第一步";
+        let snapshot = AuroraBuffer::compile_recovery_snapshot(raw.to_string());
+
+        assert!(matches!(
+            snapshot.tail_block,
+            Some(StreamBlock::Thought {
+                ref theme,
+                ref content,
+                is_complete: false,
+                ..
+            }) if theme == "规划" && content == "\n- 第一步"
+        ));
+        assert!(!snapshot.tail_snapshot.is_empty());
+    }
+
+    #[test]
+    fn strict_thought_close_moves_one_complete_block_out_of_the_tail() {
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk("<thinking>分析");
+        assert_eq!(buffer.process_queue(), (false, true));
+        let (_, commit) = buffer.prepare_delta_update().expect("open thought delta");
+        buffer.commit_delivery(commit);
+
+        buffer.append_chunk("完成</thinking>\n\n最终回答");
+        assert_eq!(buffer.process_queue(), (true, true));
+        assert!(matches!(
+            buffer.stable_blocks.as_slice(),
+            [StreamBlock::Thought {
+                content,
+                is_complete: true,
+                ..
+            }] if content == "分析完成"
+        ));
+        assert!(matches!(
+            buffer.current_tail_wire_block(),
+            Some(StreamBlock::Markdown { ref content, .. }) if content.contains("最终回答")
+        ));
+
+        let (handoff, _) = buffer
+            .prepare_delta_update()
+            .expect("closed thought handoff");
+        assert!(matches!(
+            handoff.stable_append,
+            Some(StableAppend { ref blocks, .. })
+                if matches!(blocks.as_slice(), [StreamBlock::Thought { is_complete: true, .. }])
+        ));
+        assert!(matches!(
+            handoff.tail_op,
+            Some(TailTextOp::Replace {
+                block_type: TailBlockType::Markdown,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn finalizing_an_unclosed_thought_restores_the_raw_markdown_tail() {
+        let raw = "<think>未完成的 **分析**";
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk(raw);
+        assert_eq!(buffer.process_queue(), (false, true));
+        assert!(matches!(
+            buffer.current_tail_wire_block(),
+            Some(StreamBlock::Thought {
+                is_complete: false,
+                ..
+            })
+        ));
+
+        buffer.finalize();
+        assert!(matches!(
+            buffer.stable_blocks.as_slice(),
+            [StreamBlock::Markdown { content, .. }] if content == raw
+        ));
+        assert!(buffer.current_tail_wire_block().is_none());
+    }
+
+    #[test]
+    fn oversized_thought_tail_keeps_its_shell_in_plain_mode() {
+        let mut buffer = AuroraBuffer::new();
+        let body = "长".repeat(MAX_SPECULATIVE_TAIL_AST_BYTES + 1);
+        buffer.append_chunk(&format!("<think>{body}"));
+        assert_eq!(buffer.process_queue(), (false, true));
+
+        assert_eq!(
+            buffer
+                .tail_projection
+                .as_ref()
+                .map(|projection| projection.mode),
+            Some(TailRenderMode::Plain)
+        );
+        assert!(matches!(
+            buffer.current_tail_wire_block(),
+            Some(StreamBlock::Thought {
+                ref content,
+                is_complete: false,
+                ..
+            }) if content == &body
+        ));
     }
 
     #[test]

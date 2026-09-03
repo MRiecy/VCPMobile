@@ -749,13 +749,7 @@ html:not(.dark) .vcp-html-block .punctuation { color: #24292e !important; }
    === VCP Flow Blocks Styles (ThoughtBlock & ToolBlock 100% Shared Styles) ===
    ========================================================================== */
 
-/* --- 1. Animation Keyframes (集中声明，提升渲染管线解析效率) --- */
-
-/* 基础匀速自旋转动画（用于 Loading 状态，提升至 GPU 合成层） */
-@keyframes vcp-spin {
-  from { transform: rotate(0deg) translate3d(0, 0, 0); }
-  to   { transform: rotate(360deg) translate3d(0, 0, 0); }
-}
+/* --- 1. Animation Keyframes --- */
 
 /* 抽屉/内容区下拉展开动效 */
 @keyframes slideDown {
@@ -831,7 +825,7 @@ html.dark .vcp-thought-block {
   position: relative;
 }
 
-/* ToolUse 状态：保留静态渐变与明确状态色，执行中仅 Loader2 自旋。 */
+/* ToolUse 状态：保留静态渐变与明确状态色。 */
 .vcp-tool-block.is-tool-use {
   background: linear-gradient(145deg, #3a7bd5 0%, #00d2ff 100%) !important;
   color: #ffffff !important;
@@ -878,7 +872,7 @@ html.dark .vcp-tool-block.is-tool-result {
   z-index: 1;
 }
 
-/* 工具图标保持静态；执行状态由紧邻文字的 Loader2 表达。 */
+/* 工具图标与执行状态均保持静态。 */
 .vcp-tool-block.is-tool-use .tool-icon-container {
   background: transparent !important;
   color: rgba(255, 255, 255, 0.9) !important;
@@ -970,14 +964,7 @@ html.dark .vcp-fullscreen-tool-panel.is-tool-result .vcp-fullscreen-header {
 }
 
 
-/* --- 5. 动效控制与渲染性能硬化类 --- */
-
-/* 统一的高画质 CSS 自旋转加速类 */
-.custom-spin {
-  animation: vcp-spin 1s linear infinite;
-  will-change: transform;
-  transform: translate3d(0, 0, 0);
-}
+/* --- 5. 有限动效控制 --- */
 
 /* 滑动下拉动画类 */
 .animate-slide-down {

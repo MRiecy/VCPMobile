@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { ChevronDown, ChevronUp, Loader2 } from "lucide-vue-next";
+import { ChevronDown, ChevronUp } from "lucide-vue-next";
 import { renderMarkdownNodes } from "../../../core/utils/astRenderer";
 import type { ContentBlock } from "../../../core/types/chat";
 
@@ -9,9 +9,11 @@ const props = withDefaults(
     block: ContentBlock;
     messageId: string;
     defaultExpanded?: boolean;
+    animateEntry?: boolean;
   }>(),
   {
     defaultExpanded: false,
+    animateEntry: false,
   }
 );
 
@@ -44,22 +46,26 @@ function escapeHtml(text: string): string {
       <span class="vcp-thought-icon">🧠</span>
       <span class="vcp-thought-label flex items-center gap-1">
         {{ block.theme || "元思考链" }}
-        <Loader2 v-if="!block.is_complete" :size="10" class="custom-spin" />
       </span>
       <component :is="isExpanded ? ChevronUp : ChevronDown" :size="14" class="opacity-40 ml-auto" />
     </div>
 
-    <div v-show="isExpanded" class="vcp-thought-content animate-slide-down">
-      <div
-        class="thought-body"
-        v-html="
-          block.nodes && block.nodes.length > 0
-            ? renderMarkdownNodes(block.nodes, messageId, block.hash)
-            : escapeHtml(block.content || '')
-        "
-      />
+    <div
+      v-show="isExpanded"
+      class="vcp-thought-content"
+      :class="{ 'animate-slide-down': animateEntry }"
+    >
+      <slot>
+        <div
+          class="thought-body"
+          v-html="
+            block.nodes && block.nodes.length > 0
+              ? renderMarkdownNodes(block.nodes, messageId, block.hash)
+              : escapeHtml(block.content || '')
+          "
+        />
+      </slot>
     </div>
   </div>
 </template>
-
 

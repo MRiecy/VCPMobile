@@ -1256,6 +1256,22 @@ mod tests {
     }
 
     #[test]
+    fn unclosed_thought_markers_remain_markdown_in_the_durable_render() {
+        for raw in [
+            "<think>unfinished **reasoning**",
+            "[--- VCP元思考链: 规划 ---]\nunfinished **reasoning**",
+        ] {
+            let blocks = parse_content(raw);
+            assert!(!blocks.is_empty());
+            assert!(blocks
+                .iter()
+                .all(|block| matches!(block, ContentBlock::Markdown { .. })));
+            let serialized = serde_json::to_string(&blocks).expect("serialize markdown fallback");
+            assert!(serialized.contains("unfinished"));
+        }
+    }
+
+    #[test]
     fn test_pre_txt_16_parsing() {
         let text = "### 16. 代码块内包含围栏\n\n````markdown\n```python\n# This is code inside markdown inside code\nprint(\"nested\")\n```\n````";
         let blocks = parse_content(text);

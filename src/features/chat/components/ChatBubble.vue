@@ -46,39 +46,7 @@ const mergedStyle = computed(() => {
   pointer-events: none;
 }
 
-@keyframes vcp-border-flow {
-  0% {
-    background-position: 0% 50%;
-  }
-
-  100% {
-    background-position: 200% 50%;
-  }
-}
-
-.streaming .vcp-bubble-container::before {
-  content: "";
-  position: absolute;
-  inset: -1px; /* 减薄边框 */
-  padding: 1px;
-  border-radius: inherit;
-  /* 优化：使用更简单的渐变，减少插值计算 */
-  background: linear-gradient(90deg,
-      transparent 25%,
-      var(--highlight-text, #3b82f6) 50%,
-      transparent 75%);
-  background-size: 200% 100%;
-  -webkit-mask:
-    linear-gradient(#fff 0 0) content-box,
-    linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  animation: vcp-border-flow 4s linear infinite; /* 减慢动画速度 */
-  pointer-events: none;
-  z-index: 1;
-  opacity: 0.6; /* 降低透明度 */
-  /* 强制提升为独立的 GPU 合成层，阻断重绘污染 */
-  will-change: transform, opacity;
-  transform: translate3d(0, 0, 0);
+.streaming .vcp-bubble-container {
+  border-color: var(--vcp-highlight-border-40, var(--highlight-text, #3b82f6));
 }
 </style>

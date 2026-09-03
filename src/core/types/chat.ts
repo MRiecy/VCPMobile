@@ -318,7 +318,7 @@ export type StreamBlock =
     });
 
 export type TailRenderMode = "ast" | "plain";
-export type TailBlockType = "markdown" | "html-preview";
+export type TailBlockType = "markdown" | "html-preview" | "thought";
 
 export interface StableAppend {
   baseCount: number;
@@ -333,6 +333,7 @@ export type TailTextOp =
       hash: string;
       mode: TailRenderMode;
       blockType: TailBlockType;
+      thoughtTheme?: string;
     }
   | {
       op: "replace";
@@ -340,6 +341,7 @@ export type TailTextOp =
       hash: string;
       mode: TailRenderMode;
       blockType: TailBlockType;
+      thoughtTheme?: string;
     }
   | { op: "clear" };
 

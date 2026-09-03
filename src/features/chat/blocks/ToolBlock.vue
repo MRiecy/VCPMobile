@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, onUnmounted } from 'vue';
-import { ChevronDown, ChevronUp, Settings, Loader2, Maximize2, Copy, X } from 'lucide-vue-next';
+import { ChevronDown, ChevronUp, Settings, Maximize2, Copy, X } from 'lucide-vue-next';
 import type { ContentBlock } from '../../../core/types/chat';
 import { marked } from 'marked';
 import { useNotificationStore } from '../../../core/stores/notification';
@@ -146,7 +146,6 @@ const isImageValue = (key: string, value: string): boolean => {
         <div>
           <span class="tool-label text-[10px] font-bold block leading-none mb-1 flex items-center gap-1">
             {{ type === 'tool-use' ? 'VCP-ToolUse' : 'VCP-ToolResult' }}
-            <Loader2 v-if="type === 'tool-use' && !block.is_complete" :size="10" class="custom-spin" />
           </span>
           <span class="tool-name text-xs font-bold font-mono">
             {{ block.tool_name || 'Unknown Tool' }}

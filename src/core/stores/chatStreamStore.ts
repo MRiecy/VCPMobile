@@ -19,6 +19,7 @@ import type {
   StreamEventDto,
   TailFrame,
   TailRenderMode,
+  TailTextOp,
 } from "../types/chat";
 import type {
   ConversationKey,
@@ -27,6 +28,34 @@ import type {
 
 interface StreamTerminalTombstone {
   terminalAt: number;
+}
+
+type TailContentOp = Extract<TailTextOp, { op: "append" | "replace" }>;
+
+function buildTailBlockFromOp(
+  op: TailContentOp,
+  content: string,
+  currentBlock?: StreamBlock,
+): StreamBlock {
+  const shared = {
+    content,
+    hash: op.hash,
+    render_mode: op.mode,
+  };
+
+  if (op.blockType === "thought") {
+    return {
+      ...shared,
+      type: "thought",
+      theme: op.thoughtTheme
+        ?? (currentBlock?.type === "thought" ? currentBlock.theme : "思维链"),
+      is_complete: false,
+    };
+  }
+  if (op.blockType === "html-preview") {
+    return { ...shared, type: "html-preview" };
+  }
+  return { ...shared, type: "markdown" };
 }
 
 export const useChatStreamStore = defineStore("chatStream", () => {
@@ -930,12 +959,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
               update.tailSnapshot = [];
             } else if (aurora.tailOp.op === "replace") {
               update.tailContent = aurora.tailOp.content;
-              update.tailBlock = {
-                type: aurora.tailOp.blockType,
-                content: aurora.tailOp.content,
-                hash: aurora.tailOp.hash,
-                render_mode: aurora.tailOp.mode,
-              };
+              update.tailBlock = buildTailBlockFromOp(
+                aurora.tailOp,
+                aurora.tailOp.content,
+                currentBlock,
+              );
               update.tailBlockChanged = true;
             } else {
               const currentHash = currentBlock?.hash
@@ -946,12 +974,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
               } else {
                 const nextContent = currentContent + aurora.tailOp.content;
                 update.tailContent = nextContent;
-                update.tailBlock = {
-                  type: aurora.tailOp.blockType,
-                  content: nextContent,
-                  hash: aurora.tailOp.hash,
-                  render_mode: aurora.tailOp.mode,
-                };
+                update.tailBlock = buildTailBlockFromOp(
+                  aurora.tailOp,
+                  nextContent,
+                  currentBlock,
+                );
                 update.tailBlockChanged = true;
               }
             }

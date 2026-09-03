@@ -15,31 +15,28 @@
   height: 4px;
   border-radius: 50%;
   background-color: currentColor;
-  opacity: 0.2;
-  animation: vcp-dot-pulse 1.4s infinite ease-in-out;
-  /* 提升至 GPU 独立合成层 */
-  will-change: transform, opacity;
-  transform: translate3d(0, 0, 0);
+  opacity: 0.25;
+  animation: vcp-dot-pulse 900ms ease-in-out 1;
 }
 
 .thinking-dots span:nth-child(2) {
-  animation-delay: 0.2s;
+  animation-delay: 120ms;
 }
 
 .thinking-dots span:nth-child(3) {
-  animation-delay: 0.4s;
+  animation-delay: 240ms;
 }
 
 @keyframes vcp-dot-pulse {
 
   0%,
   100% {
-    transform: scale(0.8) translate3d(0, 0, 0);
-    opacity: 0.2;
+    transform: scale(1);
+    opacity: 0.25;
   }
 
   50% {
-    transform: scale(1.2) translate3d(0, 0, 0);
+    transform: scale(1.25);
     opacity: 1;
   }
 }
