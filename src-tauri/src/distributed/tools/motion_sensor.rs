@@ -3,6 +3,7 @@
 
 use tauri::AppHandle;
 
+use crate::distributed::streaming_scheduler::SensorDemand;
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
 
@@ -26,6 +27,10 @@ impl StreamingTool for MotionSensorTool {
 
     fn poll_interval_secs(&self) -> u64 {
         30
+    }
+
+    fn sensor_demand(&self) -> SensorDemand {
+        SensorDemand::MOTION
     }
 
     fn read_current(&self, app: &AppHandle) -> Result<String, String> {

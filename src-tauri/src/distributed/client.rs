@@ -20,7 +20,8 @@ use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_util::sync::CancellationToken;
 
-use super::tool_registry::{ToolExecutionContext, ToolRegistry};
+use super::streaming_scheduler::StreamingScheduler;
+use super::tool_registry::{SessionToolPlan, ToolExecutionContext, ToolRegistry};
 use super::tools::distributed_operation_id;
 use super::types::*;
 use crate::vcp_modules::cli::runtime::MobileCliRuntimeState;
@@ -331,7 +332,7 @@ struct ConnectionConfig {
 struct SessionContext {
     status: Arc<RwLock<DistributedStatus>>,
     registry: Arc<ToolRegistry>,
-    re_register_rx: tokio::sync::mpsc::Receiver<()>,
+    reconfigure_rx: tokio::sync::mpsc::Receiver<()>,
     reconnect_rx: tokio::sync::mpsc::Receiver<()>,
     session_id: u64,
 }
@@ -339,9 +340,14 @@ struct SessionContext {
 /// Handle to an active connection session — created by start(), dropped by stop().
 struct ConnectionSession {
     cancel_token: CancellationToken,
-    re_register_tx: tokio::sync::mpsc::Sender<()>,
+    reconfigure_tx: tokio::sync::mpsc::Sender<()>,
     reconnect_tx: tokio::sync::mpsc::Sender<()>,
     task_handle: tokio::task::JoinHandle<()>,
+}
+
+struct SessionExit {
+    reason: String,
+    reconnect_immediately: bool,
 }
 
 /// Distributed node state, shared across async tasks.
@@ -423,7 +429,7 @@ impl DistributedClient {
 
         // Create fresh channels and cancellation token — no state reuse from previous cycles.
         let cancel_token = CancellationToken::new();
-        let (re_register_tx, re_register_rx) = tokio::sync::mpsc::channel(1);
+        let (reconfigure_tx, reconfigure_rx) = tokio::sync::mpsc::channel(1);
         let (reconnect_tx, reconnect_rx) = tokio::sync::mpsc::channel(1);
         let status = self.status.clone();
 
@@ -438,7 +444,7 @@ impl DistributedClient {
         let ctx = SessionContext {
             status,
             registry,
-            re_register_rx,
+            reconfigure_rx,
             reconnect_rx,
             session_id: next_session_id,
         };
@@ -460,7 +466,7 @@ impl DistributedClient {
 
         *self.session.lock().await = Some(ConnectionSession {
             cancel_token,
-            re_register_tx,
+            reconfigure_tx,
             reconnect_tx,
             task_handle,
         });
@@ -518,20 +524,15 @@ impl DistributedClient {
         self.status.read().await.clone()
     }
 
-    /// Check if the distributed client is connected.
-    pub async fn is_connected(&self) -> bool {
-        self.status.read().await.connected
-    }
-
     /// Check if the connection task is running (connecting, connected, or disconnecting).
     pub async fn is_running(&self) -> bool {
         self.status.read().await.state != ConnectionState::Disconnected
     }
 
-    /// Trigger re-registration of tools.
-    pub async fn re_register_tools(&self) {
+    /// 工具授权变化后结束当前连接，使服务端先清理旧工具/占位符，再以新计划立即重连。
+    pub async fn reconfigure_tools(&self) {
         if let Some(session) = self.session.lock().await.as_ref() {
-            let _ = session.re_register_tx.try_send(());
+            let _ = session.reconfigure_tx.try_send(());
         }
     }
 
@@ -554,7 +555,7 @@ impl DistributedClient {
     ) {
         let mut reconnect_interval = Duration::from_secs(5);
         let max_reconnect_interval = Duration::from_secs(60);
-        let mut re_register_rx = ctx.re_register_rx;
+        let mut reconfigure_rx = ctx.reconfigure_rx;
         let mut reconnect_rx = ctx.reconnect_rx;
         let status = ctx.status;
         let registry = ctx.registry;
@@ -600,7 +601,7 @@ impl DistributedClient {
                     reconnect_interval = Duration::from_secs(5); // Reset backoff on success.
 
                     // Run the session until it ends.
-                    let exit_reason = Self::run_session(
+                    let session_exit = Self::run_session(
                         &app,
                         ws_stream,
                         &config.device_name,
@@ -608,7 +609,7 @@ impl DistributedClient {
                         &cancel_token,
                         &status,
                         &registry,
-                        &mut re_register_rx,
+                        &mut reconfigure_rx,
                         session_id,
                     )
                     .await;
@@ -624,10 +625,16 @@ impl DistributedClient {
                             s.server_id = None;
                             s.client_id = None;
                             Self::clear_registered_tools_for_session(&mut s, session_id);
-                            s.last_error = Some(exit_reason);
+                            s.last_error = (!session_exit.reconnect_immediately)
+                                .then(|| session_exit.reason.clone());
                         }
                     }
                     Self::emit_status(&app, &status).await;
+
+                    if session_exit.reconnect_immediately && !cancel_token.is_cancelled() {
+                        log::info!("[Distributed] Reconnecting immediately with refreshed tool authorization.");
+                        continue;
+                    }
                 }
                 Some(Err(e)) => {
                     log::warn!("[Distributed] Connection failed: {}", e);
@@ -703,19 +710,12 @@ impl DistributedClient {
         cancel_token: &CancellationToken,
         status: &Arc<RwLock<DistributedStatus>>,
         registry: &Arc<ToolRegistry>,
-        re_register_rx: &mut tokio::sync::mpsc::Receiver<()>,
+        reconfigure_rx: &mut tokio::sync::mpsc::Receiver<()>,
         session_id: u64,
-    ) -> String {
+    ) -> SessionExit {
         use tokio_tungstenite::tungstenite::Message;
 
-        #[cfg(target_os = "android")]
-        if let Err(e) = tauri_plugin_vcp_mobile::system::start_sensor_collection(app.clone()) {
-            log::warn!(
-                "[Distributed] Failed to start native sensor collection: {}",
-                e
-            );
-        }
-
+        let tool_plan = Arc::new(registry.build_session_plan(app).await);
         let session_cancel = cancel_token.child_token();
         let child_tracker = Arc::new(SessionTaskTracker::new(session_cancel.clone()));
         let (mut ws_sink, mut ws_rx) = ws_stream.split();
@@ -757,13 +757,10 @@ impl DistributedClient {
             })
             .await;
 
-        // Static placeholder push timer — mirrors setupStaticPlaceholderUpdates() (30s interval)
-        let mut placeholder_interval = time::interval(Duration::from_secs(30));
-        // Skip the first immediate tick; we do an initial push below after registration.
-        placeholder_interval.tick().await;
-
         #[allow(unused_assignments)]
         let mut exit_reason = "Connection closed normally".to_string();
+        let mut reconnect_immediately = false;
+        let mut streaming_started = false;
 
         loop {
             tokio::select! {
@@ -779,7 +776,9 @@ impl DistributedClient {
                                 &ws_tx,
                                 status,
                                 registry,
+                                &tool_plan,
                                 &child_tracker,
+                                &mut streaming_started,
                                 session_id,
                             ).await;
                         }
@@ -808,32 +807,13 @@ impl DistributedClient {
                     }
                 }
 
-                // --- Out-of-band re-registration request ---
-                opt = re_register_rx.recv() => {
-                    if opt.is_some() {
-                        log::info!("[Distributed] Re-registering tools due to configuration change.");
-                        Self::register_tools(
-                            app,
-                            device_name,
-                            &ws_tx,
-                            registry,
-                            status,
-                            session_id,
-                        )
-                        .await;
-                        Self::emit_status_with_app(app, status).await;
-                    }
-                }
-
-                // --- Periodic static placeholder push ---
-                _ = placeholder_interval.tick() => {
-                    Self::push_static_placeholders(
-                        app,
-                        device_name,
-                        &ws_tx,
-                        registry,
-                        &child_tracker,
-                    ).await;
+                // VCPToolBox 的 register_tools 不是同连接替换语义。授权变化必须关闭旧会话，
+                // 由服务端 disconnect 清理旧工具/占位符后再以最新计划立即重连。
+                Some(()) = reconfigure_rx.recv() => {
+                    log::info!("[Distributed] Tool authorization changed; replacing connection session.");
+                    exit_reason = "Tool authorization changed".to_string();
+                    reconnect_immediately = true;
+                    break;
                 }
 
                 // --- Cancellation signal ---
@@ -846,19 +826,34 @@ impl DistributedClient {
         }
 
         if !session_cancel.is_cancelled() {
-            let _ = Self::send_ws_frame(&ws_tx, Message::Close(None)).await;
+            let close_sent = Self::send_ws_frame(&ws_tx, Message::Close(None))
+                .await
+                .is_ok();
+            if reconnect_immediately && close_sent {
+                let peer_closed = time::timeout(Duration::from_secs(2), async {
+                    while let Some(message) = ws_rx.next().await {
+                        match message {
+                            Ok(Message::Close(_)) | Err(_) => return true,
+                            _ => {}
+                        }
+                    }
+                    true
+                })
+                .await
+                .unwrap_or(false);
+                if !peer_closed {
+                    log::warn!(
+                        "[Distributed] Reconfigure close handshake timed out; using normal reconnect delay."
+                    );
+                    reconnect_immediately = false;
+                }
+            }
         }
         child_tracker.close_and_wait().await;
-
-        #[cfg(target_os = "android")]
-        if let Err(e) = tauri_plugin_vcp_mobile::system::stop_sensor_collection(app.clone()) {
-            log::warn!(
-                "[Distributed] Failed to stop native sensor collection: {}",
-                e
-            );
+        SessionExit {
+            reason: exit_reason,
+            reconnect_immediately,
         }
-
-        exit_reason
     }
 
     // ================================================================
@@ -874,7 +869,9 @@ impl DistributedClient {
         ws_tx: &WsSender,
         status: &Arc<RwLock<DistributedStatus>>,
         registry: &Arc<ToolRegistry>,
+        tool_plan: &Arc<SessionToolPlan>,
         child_tracker: &Arc<SessionTaskTracker>,
+        streaming_started: &mut bool,
         session_id: u64,
     ) {
         if text.len() > MAX_INCOMING_MESSAGE_BYTES {
@@ -922,8 +919,14 @@ impl DistributedClient {
                 }
                 Self::emit_status_with_app(app, status).await;
 
-                // Register tools — mirrors registerTools()
-                Self::register_tools(app, device_name, ws_tx, registry, status, session_id).await;
+                Self::publish_tool_registration(
+                    device_name,
+                    tool_plan.registration_manifests.clone(),
+                    ws_tx,
+                    status,
+                    session_id,
+                )
+                .await;
                 Self::emit_status_with_app(app, status).await;
 
                 // Report IP — mirrors reportIPAddress()
@@ -935,9 +938,37 @@ impl DistributedClient {
                     })
                     .await;
 
-                // Initial static placeholder push (2s delay in VCPChat, do it immediately here)
-                Self::push_static_placeholders(app, device_name, ws_tx, registry, child_tracker)
-                    .await;
+                if !*streaming_started {
+                    *streaming_started = true;
+                    if let Some(scheduler) = StreamingScheduler::new(tool_plan.streaming.clone()) {
+                        let scheduler_app = app.clone();
+                        let scheduler_cancel = child_tracker.cancel_token.clone();
+                        let scheduler_tx = ws_tx.clone();
+                        let scheduler_device_name = device_name.to_string();
+                        child_tracker
+                            .spawn(async move {
+                                scheduler
+                                    .run(scheduler_app, scheduler_cancel, move |placeholders| {
+                                        let tx = scheduler_tx.clone();
+                                        let server_name = scheduler_device_name.clone();
+                                        async move {
+                                            let message =
+                                                OutgoingMessage::UpdateStaticPlaceholders {
+                                                    server_name,
+                                                    placeholders,
+                                                };
+                                            Self::send_message(&tx, &message).await
+                                        }
+                                    })
+                                    .await;
+                            })
+                            .await;
+                    } else {
+                        log::info!(
+                            "[Distributed] Session has no enabled streaming tools; telemetry scheduler remains stopped."
+                        );
+                    }
+                }
             }
 
             IncomingMessage::ExecuteTool {
@@ -1085,20 +1116,6 @@ impl DistributedClient {
     // Protocol actions (mirrors DistributedServer methods)
     // ================================================================
 
-    /// Register tools with the main server.
-    /// VCPChat ref: registerTools() line 271-308
-    async fn register_tools(
-        app: &AppHandle,
-        device_name: &str,
-        ws_tx: &WsSender,
-        registry: &Arc<ToolRegistry>,
-        status: &Arc<RwLock<DistributedStatus>>,
-        session_id: u64,
-    ) {
-        let tools = registry.get_registration_manifests(app).await;
-        Self::publish_tool_registration(device_name, tools, ws_tx, status, session_id).await;
-    }
-
     async fn publish_tool_registration(
         device_name: &str,
         tools: Vec<Box<serde_json::value::RawValue>>,
@@ -1179,41 +1196,6 @@ impl DistributedClient {
             Ok(()) => log::info!("[Distributed] IP report sent."),
             Err(error) => log::warn!("[Distributed] Failed to report IP: {}", error),
         }
-    }
-
-    /// Push static placeholder values asynchronously to avoid blocking.
-    /// VCPChat ref: pushStaticPlaceholderValues() line 374-398
-    async fn push_static_placeholders(
-        app: &AppHandle,
-        device_name: &str,
-        ws_tx: &WsSender,
-        registry: &Arc<ToolRegistry>,
-        child_tracker: &Arc<SessionTaskTracker>,
-    ) {
-        let app_clone = app.clone();
-        let device_name_clone = device_name.to_string();
-        let ws_tx_clone = ws_tx.clone();
-        let registry_clone = registry.clone();
-
-        child_tracker
-            .spawn(async move {
-                let tag = format!("distributed:placeholder_push:{}", uuid::Uuid::new_v4());
-                let _lease = WakeLockLease::acquire(&app_clone, tag);
-                let placeholders = registry_clone.get_all_placeholder_values(&app_clone);
-                if !placeholders.is_empty() {
-                    let msg = OutgoingMessage::UpdateStaticPlaceholders {
-                        server_name: device_name_clone,
-                        placeholders,
-                    };
-                    if let Err(error) = Self::send_message(&ws_tx_clone, &msg).await {
-                        log::warn!(
-                            "[Distributed] Failed to push static placeholders: {}",
-                            error
-                        );
-                    }
-                }
-            })
-            .await;
     }
 
     /// Execute a tool and return the result message.
@@ -1524,7 +1506,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_registration_is_a_wire_message_that_withdraws_all_tools() {
+    fn empty_registration_serializes_an_explicit_empty_tool_set() {
         let message = OutgoingMessage::RegisterTools {
             server_name: "mobile".to_string(),
             tools: vec![],
@@ -1541,34 +1523,6 @@ mod tests {
                 }
             })
         );
-    }
-
-    #[tokio::test]
-    async fn repeated_empty_registration_withdraws_tools_and_keeps_count_zero() {
-        let status = Arc::new(RwLock::new(DistributedStatus {
-            registered_tools: 4,
-            session_id: 9,
-            ..DistributedStatus::default()
-        }));
-
-        for _ in 0..2 {
-            let (ws_tx, mut ws_rx) = mpsc::channel::<OutboundFrame>(1);
-            let receiver = tokio::spawn(async move {
-                let frame = ws_rx.recv().await.expect("registration frame");
-                let value = match frame.message {
-                    WsMessage::Text(text) => serde_json::from_str::<Value>(&text).unwrap(),
-                    other => panic!("unexpected registration frame: {other:?}"),
-                };
-                frame.completion.send(Ok(())).unwrap();
-                value
-            });
-
-            DistributedClient::publish_tool_registration("mobile", vec![], &ws_tx, &status, 9)
-                .await;
-            let value = receiver.await.unwrap();
-            assert_eq!(value["data"]["tools"], serde_json::json!([]));
-            assert_eq!(status.read().await.registered_tools, 0);
-        }
     }
 
     #[test]

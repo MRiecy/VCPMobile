@@ -9,12 +9,14 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::value::RawValue;
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
 
+use super::streaming_scheduler::{SensorDemand, StreamingPlan, StreamingToolSpec};
 use super::types::ToolManifest;
 
 const TOOL_CONFIG_FILE: &str = "distributed_tools.json";
@@ -155,8 +157,17 @@ pub trait StreamingTool: Send + Sync {
     /// Polling interval in seconds (metadata — not yet used by client.rs push loop, see C2)
     #[allow(dead_code)]
     fn poll_interval_secs(&self) -> u64;
+    /// 本工具在生成占位符前需要刷新哪些 Android 物理传感器。
+    fn sensor_demand(&self) -> SensorDemand {
+        SensorDemand::default()
+    }
     /// Read current snapshot value (must be fast/non-blocking)
     fn read_current(&self, app: &AppHandle) -> Result<String, String>;
+}
+
+pub struct SessionToolPlan {
+    pub registration_manifests: Vec<Box<RawValue>>,
+    pub streaming: StreamingPlan,
 }
 
 // ============================================================
@@ -341,17 +352,40 @@ impl ToolRegistry {
             .insert(name, ToolEntry::Streaming(Arc::new(tool)));
     }
 
-    /// Build the enabled and currently publishable manifest set for register_tools.
-    /// Catalog metadata remains visible regardless of authorization or availability.
-    pub async fn get_registration_manifests(&self, app: &AppHandle) -> Vec<Box<RawValue>> {
-        let mut names = self.tools.keys().cloned().collect::<Vec<_>>();
+    fn build_streaming_plan_for(&self, enabled: &HashSet<String>) -> StreamingPlan {
+        let mut names = enabled.iter().cloned().collect::<Vec<_>>();
+        names.sort_unstable();
+        let tools = names
+            .into_iter()
+            .filter_map(|name| match self.tools.get(&name) {
+                Some(ToolEntry::Streaming(tool)) => Some(StreamingToolSpec {
+                    name,
+                    placeholder: tool.placeholder_key().to_string(),
+                    interval: Duration::from_secs(tool.poll_interval_secs().max(1)),
+                    sensor_demand: tool.sensor_demand(),
+                    tool: tool.clone(),
+                }),
+                _ => None,
+            })
+            .collect();
+        StreamingPlan { tools }
+    }
+
+    /// 为一个 WebSocket 会话冻结工具授权、注册清单和 streaming 调度计划。
+    /// 配置更新持有同一把锁，因此同一会话不会观察到两套不同的授权快照。
+    pub async fn build_session_plan(&self, app: &AppHandle) -> SessionToolPlan {
+        let _update_guard = self.config_update_lock.lock().await;
+        let enabled = self
+            .enabled_names
+            .read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let streaming = self.build_streaming_plan_for(&enabled);
+        let mut names = enabled.into_iter().collect::<Vec<_>>();
         names.sort_unstable();
         let mut manifests = Vec::with_capacity(names.len());
 
         for name in names {
-            if !self.is_enabled(&name) {
-                continue;
-            }
             let Some(entry) = self.tools.get(&name) else {
                 continue;
             };
@@ -374,9 +408,8 @@ impl ToolRegistry {
                         continue;
                     }
                 },
-                ToolEntry::Interactive(_) | ToolEntry::Streaming(_) => {
-                    generic_registration_manifest(entry)
-                }
+                ToolEntry::Interactive(_) => generic_registration_manifest(entry),
+                ToolEntry::Streaming(_) => generic_registration_manifest(entry),
             };
             match manifest {
                 Ok(manifest) => manifests.push(manifest),
@@ -387,7 +420,10 @@ impl ToolRegistry {
                 ),
             }
         }
-        manifests
+        SessionToolPlan {
+            registration_manifests: manifests,
+            streaming,
+        }
     }
 
     /// Get all tool metadata with categories and placeholders for the frontend config.
@@ -419,22 +455,6 @@ impl ToolRegistry {
                 val
             })
             .collect()
-    }
-
-    /// Get all streaming placeholder values for update_static_placeholders.
-    /// Mirrors Plugin.js getAllPlaceholderValues()
-    pub fn get_all_placeholder_values(&self, app: &AppHandle) -> HashMap<String, String> {
-        let mut map = HashMap::new();
-        for (name, entry) in self.tools.iter() {
-            if self.is_enabled(name) {
-                if let ToolEntry::Streaming(tool) = entry {
-                    if let Ok(value) = tool.read_current(app) {
-                        map.insert(tool.placeholder_key().to_string(), value);
-                    }
-                }
-            }
-        }
-        map
     }
 
     /// Execute a tool by name. Routes to the correct handler.
@@ -730,6 +750,8 @@ mod tests {
         description: &'static str,
     }
 
+    struct DummyStreamingTool;
+
     #[async_trait]
     impl OneShotTool for DummyTool {
         fn manifest(&self) -> ToolManifest {
@@ -744,6 +766,34 @@ mod tests {
 
         async fn execute(&self, _args: Value, _app: &AppHandle) -> Result<Value, String> {
             Ok(Value::Null)
+        }
+    }
+
+    impl StreamingTool for DummyStreamingTool {
+        fn manifest(&self) -> ToolManifest {
+            ToolManifest {
+                name: "MobileMotion".to_string(),
+                description: "motion".to_string(),
+                display_name: "motion".to_string(),
+                placeholder: Some("{{MobileMotion}}".to_string()),
+                invocation_commands: vec![],
+            }
+        }
+
+        fn placeholder_key(&self) -> &str {
+            "{{MobileMotion}}"
+        }
+
+        fn poll_interval_secs(&self) -> u64 {
+            30
+        }
+
+        fn sensor_demand(&self) -> SensorDemand {
+            SensorDemand::MOTION
+        }
+
+        fn read_current(&self, _app: &AppHandle) -> Result<String, String> {
+            Ok("motion".to_string())
         }
     }
 
@@ -794,6 +844,24 @@ mod tests {
         assert!(!enabled_metadata(&registry, "DeviceInfo"));
         assert!(!registry.is_enabled("Clipboard"));
         assert!(!registry.is_enabled("DeviceInfo"));
+    }
+
+    #[test]
+    fn streaming_plan_never_activates_hardware_for_empty_or_oneshot_only_allowlists() {
+        let mut registry = test_registry();
+        registry.register_streaming(DummyStreamingTool);
+
+        assert!(registry
+            .build_streaming_plan_for(&HashSet::new())
+            .is_empty());
+        assert!(registry
+            .build_streaming_plan_for(&HashSet::from(["Clipboard".to_string()]))
+            .is_empty());
+
+        let plan = registry.build_streaming_plan_for(&HashSet::from(["MobileMotion".to_string()]));
+        assert_eq!(plan.tools.len(), 1);
+        assert_eq!(plan.tools[0].interval, Duration::from_secs(30));
+        assert_eq!(plan.tools[0].sensor_demand, SensorDemand::MOTION);
     }
 
     #[test]

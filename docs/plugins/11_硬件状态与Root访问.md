@@ -603,7 +603,7 @@ Android 11 (API 30) 引入了包可见性限制，默认情况下应用无法查
 
 - **完整实现**：[06_权限与系统控制.md 第 15 节](./06_权限与系统控制.md) — 含 Kotlin 源码、双锁参数详情、`onDestroy()` 清理逻辑
 - **使用场景**：[03_流式前台保活服务.md](./03_流式前台保活服务.md) — 前台 Service + WakeLock 双重保活在流式对话中的应用
-- **调用模式**：`src-tauri/src/distributed/client.rs` (`acquire_wake_lock_helper` / `release_wake_lock_helper` 在 connect / tool_exec / placeholder_push 三个 phase 中成对调用)
+- **调用模式**：分布式 connect / tool execution / 非空 telemetry batch 分别使用成对短时 lease；空工具计划不会创建周期性 lease。
 
 ---
 

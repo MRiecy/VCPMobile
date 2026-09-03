@@ -2,6 +2,7 @@
 // [Streaming] MobileStatus — aggregates all Phase 1 & 2 sensor data into a one-line summary.
 // Reads from other StreamingTools' data sources directly for minimal overhead.
 
+use crate::distributed::streaming_scheduler::SensorDemand;
 use crate::distributed::tool_registry::StreamingTool;
 use crate::distributed::types::ToolManifest;
 
@@ -27,6 +28,10 @@ impl StreamingTool for DeviceStatusSummaryTool {
 
     fn poll_interval_secs(&self) -> u64 {
         60
+    }
+
+    fn sensor_demand(&self) -> SensorDemand {
+        SensorDemand::LOCATION.union(SensorDemand::MOTION)
     }
 
     fn read_current(&self, app: &tauri::AppHandle) -> Result<String, String> {

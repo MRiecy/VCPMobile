@@ -491,32 +491,6 @@ Denies the get_pending_notification command without any pre-configured scope.
 <tr>
 <td>
 
-`vcp-mobile:allow-get-sensor-data`
-
-</td>
-<td>
-
-Enables the get_sensor_data command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`vcp-mobile:deny-get-sensor-data`
-
-</td>
-<td>
-
-Denies the get_sensor_data command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
 `vcp-mobile:allow-launch-root-manager`
 
 </td>
@@ -1063,32 +1037,6 @@ Denies the start_network_monitoring command without any pre-configured scope.
 <tr>
 <td>
 
-`vcp-mobile:allow-start-sensor-collection`
-
-</td>
-<td>
-
-Enables the start_sensor_collection command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`vcp-mobile:deny-start-sensor-collection`
-
-</td>
-<td>
-
-Denies the start_sensor_collection command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
 `vcp-mobile:allow-start-streaming-service`
 
 </td>
@@ -1108,32 +1056,6 @@ Enables the start_streaming_service command without any pre-configured scope.
 <td>
 
 Denies the start_streaming_service command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`vcp-mobile:allow-stop-sensor-collection`
-
-</td>
-<td>
-
-Enables the stop_sensor_collection command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`vcp-mobile:deny-stop-sensor-collection`
-
-</td>
-<td>
-
-Denies the stop_sensor_collection command without any pre-configured scope.
 
 </td>
 </tr>

@@ -14,25 +14,14 @@ import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat
 import app.tauri.plugin.JSObject
-import java.util.concurrent.Executors
-import java.util.concurrent.ScheduledExecutorService
-import java.util.concurrent.TimeUnit
 import java.util.Locale
 import kotlin.math.sqrt
 
 class SensorStatusManager(private val context: Context) {
     companion object {
         private const val TAG = "SensorStatusManager"
-        private const val BURST_ACTIVE_DURATION = 2000L // 2s sampling
-        private const val BURST_SLEEP_DURATION = 28000L // 28s sleep
+        private const val SAMPLE_DURATION_MS = 2000L
         private const val SAMPLING_PERIOD_US = 100000 // 100ms = 10Hz
-
-        // Location update tuning
-        private const val LOCATION_UPDATE_MIN_TIME_MS = 30000L      // 30s
-        private const val LOCATION_UPDATE_MIN_DISTANCE_M = 5f       // 5m
-        private const val LOCATION_FAST_FIX_TIMEOUT_MS = 30000L     // 30s aggressive first fix
-        private const val LOCATION_FAST_FIX_MIN_TIME_MS = 1000L     // 1s
-        private const val LOCATION_FAST_FIX_MIN_DISTANCE_M = 0f     // 0m
     }
 
     private val sensorManager = context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
@@ -43,10 +32,13 @@ class SensorStatusManager(private val context: Context) {
     @Volatile private var latestMotionStr = "运动状态: 静止"
     @Volatile private var latestAmbientStr = "环境传感器: 设备不支持或权限未授予"
 
-    private var isRunning = false
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var hasReceivedFirstLocation = false
-    private var fastFixRunnable: Runnable? = null
+    private var sampleActive = false
+    private var sampleLocation = false
+    private var sampleMotion = false
+    private var sampleAmbient = false
+    private var sampleCompletion: ((JSObject) -> Unit)? = null
+    private var sampleFinishRunnable: Runnable? = null
 
     // Sensor instances
     private val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
@@ -130,12 +122,6 @@ class SensorStatusManager(private val context: Context) {
     private val locationListener = object : LocationListener {
         override fun onLocationChanged(location: Location) {
             updateLocationString(location)
-            if (!hasReceivedFirstLocation) {
-                hasReceivedFirstLocation = true
-                cancelFastFixTimeout()
-                Log.i(TAG, "First location fix received, switching to steady update interval")
-                registerSteadyLocationUpdates()
-            }
         }
         @Deprecated("Deprecated in Java")
         override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
@@ -143,71 +129,97 @@ class SensorStatusManager(private val context: Context) {
         override fun onProviderDisabled(provider: String) {}
     }
 
+    /**
+     * 执行一次有界、按需求的物理传感器采样。调用者保证批次串行；若防御性地收到重叠
+     * 调用，先完整收尾并回传上一批，确保没有悬挂 Invoke 或遗留 listener。
+     */
     @Synchronized
-    fun start() {
-        if (isRunning) return
-        isRunning = true
-        hasReceivedFirstLocation = false
-        cancelFastFixTimeout()
-        Log.i(TAG, "Starting SensorStatusManager collection services")
-
-        // 1. Start Location Listening
-        startLocationListening()
-
-        // 2. Start Ambient Listening (continuous, low frequency)
-        if (lightSensor != null) {
-            sensorManager.registerListener(ambientListener, lightSensor, SensorManager.SENSOR_DELAY_NORMAL)
-        }
-        if (pressureSensor != null) {
-            sensorManager.registerListener(ambientListener, pressureSensor, SensorManager.SENSOR_DELAY_NORMAL)
+    fun sample(
+        location: Boolean,
+        motion: Boolean,
+        ambient: Boolean,
+        completion: (JSObject) -> Unit,
+    ) {
+        finishActiveSample()
+        if (!location && !motion && !ambient) {
+            completion(JSObject())
+            return
         }
 
-        // 3. Start Burst Motion Sensing
-        scheduleNextMotionBurst()
-    }
+        sampleActive = true
+        sampleLocation = location
+        sampleMotion = motion
+        sampleAmbient = ambient
+        sampleCompletion = completion
+        Log.i(
+            TAG,
+            "Starting bounded sensor sample: location=$location motion=$motion ambient=$ambient",
+        )
 
-    @Synchronized
-    fun stop() {
-        if (!isRunning) return
-        isRunning = false
-        hasReceivedFirstLocation = false
-        cancelFastFixTimeout()
-        Log.i(TAG, "Stopping SensorStatusManager collection services")
-
-        // Unregister location
         try {
-            locationManager.removeUpdates(locationListener)
-        } catch (e: SecurityException) {
-            Log.e(TAG, "Failed to remove location updates", e)
+            if (location) startLocationSample()
+            if (ambient) startAmbientSample()
+            if (motion) startMotionSample()
+        } catch (error: Exception) {
+            Log.e(TAG, "Failed to start bounded sensor sample", error)
+            if (location) latestLocationStr = "位置信息: 采样异常 (${error.message})"
+            if (motion) latestMotionStr = "运动传感器: 采样异常 (${error.message})"
+            if (ambient) latestAmbientStr = "环境传感器: 采样异常 (${error.message})"
+            finishActiveSample()
+            return
         }
 
-        // Unregister all sensors
-        sensorManager.unregisterListener(ambientListener)
-        sensorManager.unregisterListener(motionListener)
-        
-        // Cancel all scheduler tasks
-        mainHandler.removeCallbacksAndMessages(null)
+        val finish = Runnable { finishActiveSample() }
+        sampleFinishRunnable = finish
+        mainHandler.postDelayed(finish, SAMPLE_DURATION_MS)
     }
 
-    fun getSensorData(type: String): JSObject {
-        val obj = JSObject()
-        when (type) {
-            "location" -> obj.put("value", latestLocationStr)
-            "motion" -> obj.put("value", latestMotionStr)
-            "ambient" -> obj.put("value", latestAmbientStr)
-            "all" -> {
-                obj.put("location", latestLocationStr)
-                obj.put("motion", latestMotionStr)
-                obj.put("ambient", latestAmbientStr)
+    @Synchronized
+    fun shutdown() {
+        finishActiveSample()
+    }
+
+    @Synchronized
+    private fun finishActiveSample() {
+        if (!sampleActive) return
+        sampleFinishRunnable?.let(mainHandler::removeCallbacks)
+        sampleFinishRunnable = null
+
+        if (sampleLocation) {
+            try {
+                locationManager.removeUpdates(locationListener)
+            } catch (error: Exception) {
+                Log.w(TAG, "Failed to stop bounded location sample", error)
             }
         }
-        return obj
+        if (sampleAmbient) {
+            sensorManager.unregisterListener(ambientListener)
+            updateAmbientString()
+        }
+        if (sampleMotion) {
+            sensorManager.unregisterListener(motionListener)
+            processMotionBurstData()
+        }
+
+        val result = JSObject()
+        if (sampleLocation) result.put("location", latestLocationStr)
+        if (sampleMotion) result.put("motion", latestMotionStr)
+        if (sampleAmbient) result.put("ambient", latestAmbientStr)
+        val completion = sampleCompletion
+
+        sampleActive = false
+        sampleLocation = false
+        sampleMotion = false
+        sampleAmbient = false
+        sampleCompletion = null
+        Log.i(TAG, "Bounded sensor sample finished; all listeners released")
+        completion?.invoke(result)
     }
 
     // ==================================================================
     // Location Helpers
     // ==================================================================
-    private fun startLocationListening() {
+    private fun startLocationSample() {
         val hasFine = ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_FINE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
         val hasCoarse = ContextCompat.checkSelfPermission(context, android.Manifest.permission.ACCESS_COARSE_LOCATION) == android.content.pm.PackageManager.PERMISSION_GRANTED
 
@@ -218,19 +230,10 @@ class SensorStatusManager(private val context: Context) {
         }
 
         try {
-            // 1. Seed from last known location immediately
             seedLastKnownLocation(LocationManager.NETWORK_PROVIDER)
             seedLastKnownLocation(LocationManager.GPS_PROVIDER)
-
-            // 2. If we still don't have a fix, ask for a single-shot update right now
-            if (!hasValidLocation()) {
-                requestSingleUpdate(LocationManager.NETWORK_PROVIDER)
-                requestSingleUpdate(LocationManager.GPS_PROVIDER)
-            }
-
-            // 3. Start aggressive fast-fix listener: 1s / 0m for 30s
-            registerFastFixUpdates()
-            scheduleFastFixTimeout()
+            requestSingleUpdate(LocationManager.NETWORK_PROVIDER)
+            requestSingleUpdate(LocationManager.GPS_PROVIDER)
         } catch (e: SecurityException) {
             latestLocationStr = "位置信息: 获取异常 (${e.message})"
             Log.e(TAG, "SecurityException registering location updates", e)
@@ -267,92 +270,6 @@ class SensorStatusManager(private val context: Context) {
         }
     }
 
-    private fun registerFastFixUpdates() {
-        try {
-            if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-                locationManager.requestLocationUpdates(
-                    LocationManager.NETWORK_PROVIDER,
-                    LOCATION_FAST_FIX_MIN_TIME_MS,
-                    LOCATION_FAST_FIX_MIN_DISTANCE_M,
-                    locationListener,
-                    Looper.getMainLooper()
-                )
-            }
-            if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                locationManager.requestLocationUpdates(
-                    LocationManager.GPS_PROVIDER,
-                    LOCATION_FAST_FIX_MIN_TIME_MS,
-                    LOCATION_FAST_FIX_MIN_DISTANCE_M,
-                    locationListener,
-                    Looper.getMainLooper()
-                )
-            }
-        } catch (e: SecurityException) {
-            Log.e(TAG, "SecurityException registering fast-fix updates", e)
-        } catch (e: Exception) {
-            Log.e(TAG, "Exception registering fast-fix updates", e)
-        }
-    }
-
-    private fun registerSteadyLocationUpdates() {
-        // Remove the aggressive listener before installing the steady one
-        try {
-            locationManager.removeUpdates(locationListener)
-        } catch (e: SecurityException) {
-            Log.w(TAG, "SecurityException removing fast-fix updates", e)
-        } catch (e: Exception) {
-            Log.w(TAG, "Exception removing fast-fix updates", e)
-        }
-
-        try {
-            if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-                locationManager.requestLocationUpdates(
-                    LocationManager.NETWORK_PROVIDER,
-                    LOCATION_UPDATE_MIN_TIME_MS,
-                    LOCATION_UPDATE_MIN_DISTANCE_M,
-                    locationListener,
-                    Looper.getMainLooper()
-                )
-            }
-            if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                locationManager.requestLocationUpdates(
-                    LocationManager.GPS_PROVIDER,
-                    LOCATION_UPDATE_MIN_TIME_MS,
-                    LOCATION_UPDATE_MIN_DISTANCE_M,
-                    locationListener,
-                    Looper.getMainLooper()
-                )
-            }
-        } catch (e: SecurityException) {
-            latestLocationStr = "位置信息: 获取异常 (${e.message})"
-            Log.e(TAG, "SecurityException registering steady location updates", e)
-        } catch (e: Exception) {
-            latestLocationStr = "位置信息: 未开启定位服务"
-            Log.e(TAG, "Exception registering steady location updates", e)
-        }
-    }
-
-    private fun scheduleFastFixTimeout() {
-        val runnable = Runnable {
-            if (!hasReceivedFirstLocation) {
-                Log.w(TAG, "Fast-fix timeout reached without location fix")
-                latestLocationStr = "位置信息: 定位超时，请检查定位开关或移动到开阔地带"
-                registerSteadyLocationUpdates()
-            }
-        }
-        fastFixRunnable = runnable
-        mainHandler.postDelayed(runnable, LOCATION_FAST_FIX_TIMEOUT_MS)
-    }
-
-    private fun cancelFastFixTimeout() {
-        fastFixRunnable?.let { mainHandler.removeCallbacks(it) }
-        fastFixRunnable = null
-    }
-
-    private fun hasValidLocation(): Boolean {
-        return latestLocationStr.startsWith("坐标:")
-    }
-
     private fun updateLocationString(loc: Location) {
         val latitude = loc.latitude
         val longitude = loc.longitude
@@ -377,16 +294,7 @@ class SensorStatusManager(private val context: Context) {
     // ==================================================================
     // Motion Burst Sampling Helpers
     // ==================================================================
-    private fun scheduleNextMotionBurst() {
-        if (!isRunning) return
-        
-        mainHandler.post {
-            if (!isRunning) return@post
-            startMotionBurst()
-        }
-    }
-
-    private fun startMotionBurst() {
+    private fun startMotionSample() {
         if (accelerometer == null) {
             latestMotionStr = "运动状态: 设备无重力传感器"
             return
@@ -404,18 +312,6 @@ class SensorStatusManager(private val context: Context) {
             sensorManager.registerListener(motionListener, magneticField, SAMPLING_PERIOD_US)
         }
         
-        // Stop burst sampling after 2 seconds
-        mainHandler.postDelayed({
-            sensorManager.unregisterListener(motionListener)
-            processMotionBurstData()
-            
-            // Schedule next burst after 28 seconds sleep
-            if (isRunning) {
-                mainHandler.postDelayed({
-                    scheduleNextMotionBurst()
-                }, BURST_SLEEP_DURATION)
-            }
-        }, BURST_ACTIVE_DURATION)
     }
 
     private fun processMotionBurstData() {
@@ -470,6 +366,25 @@ class SensorStatusManager(private val context: Context) {
     // ==================================================================
     // Ambient Helpers
     // ==================================================================
+    private fun startAmbientSample() {
+        lastLux = -1.0
+        lastPressure = -1.0
+        if (lightSensor != null) {
+            sensorManager.registerListener(
+                ambientListener,
+                lightSensor,
+                SensorManager.SENSOR_DELAY_NORMAL,
+            )
+        }
+        if (pressureSensor != null) {
+            sensorManager.registerListener(
+                ambientListener,
+                pressureSensor,
+                SensorManager.SENSOR_DELAY_NORMAL,
+            )
+        }
+    }
+
     private fun updateAmbientString() {
         val lightStr = if (lightSensor != null) {
             if (lastLux >= 0.0) {

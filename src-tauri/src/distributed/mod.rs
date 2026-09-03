@@ -4,6 +4,7 @@
 // to the canonical protocol/runtime in vcp_modules::cli and must not duplicate that state.
 
 pub mod client;
+mod streaming_scheduler;
 pub mod telemetry_center;
 pub mod tool_registry;
 pub mod tools;
@@ -80,8 +81,8 @@ pub async fn update_enabled_tools(
 
     if changed {
         let client = state.client.read().await;
-        if client.is_connected().await {
-            client.re_register_tools().await;
+        if client.is_running().await {
+            client.reconfigure_tools().await;
         }
     }
     Ok(())
@@ -95,8 +96,8 @@ pub async fn reset_distributed_tools_disabled(
 ) -> Result<(), String> {
     state.registry.reset_all_disabled(&app).await?;
     let client = state.client.read().await;
-    if client.is_connected().await {
-        client.re_register_tools().await;
+    if client.is_running().await {
+        client.reconfigure_tools().await;
     }
     Ok(())
 }

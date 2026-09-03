@@ -987,78 +987,55 @@ pub fn toggle_floating_ball<R: Runtime>(app: AppHandle<R>, show: bool) -> Result
     }
 }
 
-#[tauri::command]
-pub fn start_sensor_collection<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    #[cfg(target_os = "android")]
-    {
-        let state = app.state::<VcpMobileState<R>>();
-        let plugin_handle = state.mobile_plugin_handle()?;
-
-        plugin_handle
-            .run_mobile_plugin::<serde_json::Value>("startSensorCollection", serde_json::json!({}))
-            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        let _ = app;
-    }
-    Ok(())
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SensorSample {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub motion: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ambient: Option<String>,
 }
 
-#[tauri::command]
-pub fn stop_sensor_collection<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    #[cfg(target_os = "android")]
-    {
-        let state = app.state::<VcpMobileState<R>>();
-        let plugin_handle = state.mobile_plugin_handle()?;
-
-        plugin_handle
-            .run_mobile_plugin::<serde_json::Value>("stopSensorCollection", serde_json::json!({}))
-            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
-    }
-    #[cfg(not(target_os = "android"))]
-    {
-        let _ = app;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub fn get_sensor_data<R: Runtime>(
+/// 按本批 streaming tools 的真实需求执行一次有界传感器采样。
+/// Android 回调最多等待一个短采样窗口；同步 PluginHandle 调用被放入 blocking worker，
+/// 避免占用 Tokio 网络任务线程。
+pub async fn sample_sensor_data<R: Runtime>(
     app: AppHandle<R>,
-    sensor_type: String,
-) -> Result<serde_json::Value, String> {
+    location: bool,
+    motion: bool,
+    ambient: bool,
+) -> Result<SensorSample, String> {
     #[cfg(target_os = "android")]
     {
         let state = app.state::<VcpMobileState<R>>();
         let plugin_handle = state.mobile_plugin_handle()?;
-
-        let data = plugin_handle
-            .run_mobile_plugin::<serde_json::Value>(
-                "getSensorData",
-                serde_json::json!({ "type": sensor_type }),
-            )
-            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
-        Ok(data)
+        tauri::async_runtime::spawn_blocking(move || {
+            plugin_handle
+                .run_mobile_plugin::<SensorSample>(
+                    "sampleSensorData",
+                    serde_json::json!({
+                        "location": location,
+                        "motion": motion,
+                        "ambient": ambient,
+                    }),
+                )
+                .map_err(|error| format!("run_mobile_plugin failed: {error}"))
+        })
+        .await
+        .map_err(|error| format!("sensor sample worker failed: {error}"))?
     }
     #[cfg(not(target_os = "android"))]
     {
         let _ = app;
-        let dummy = match sensor_type.as_str() {
-            "location" => "坐标: 39.9000°N, 116.4000°E | 精度: 15m | 海拔: 50m",
-            "motion" => "状态: 静止 | 平均加速度: 9.80m/s² | 峰值: 9.80m/s²",
-            "ambient" => "环境光: 150 lux (室内) | 气压: 1013 hPa",
-            _ => "{}",
-        };
-        if sensor_type == "all" {
-            Ok(serde_json::json!({
-                "location": "坐标: 39.9000°N, 116.4000°E | 精度: 15m | 海拔: 50m",
-                "motion": "状态: 静止 | 平均加速度: 9.80m/s² | 峰值: 9.80m/s²",
-                "ambient": "环境光: 150 lux (室内) | 气压: 1013 hPa",
-            }))
-        } else {
-            Ok(serde_json::json!({ "value": dummy }))
-        }
+        Ok(SensorSample {
+            location: location
+                .then(|| "坐标: 39.9000°N, 116.4000°E | 精度: 15m | 海拔: 50m (模拟)".to_string()),
+            motion: motion
+                .then(|| "状态: 静止 | 平均加速度: 9.80m/s² | 峰值: 9.80m/s² (模拟)".to_string()),
+            ambient: ambient.then(|| "环境光: 150 lux (室内) | 气压: 1013 hPa (模拟)".to_string()),
+        })
     }
 }
 

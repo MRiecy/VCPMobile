@@ -34,6 +34,10 @@ impl<T: Default> CacheItem<T> {
         }
     }
 
+    fn get_last(&self) -> Option<&T> {
+        self.last_updated.map(|_| &self.data)
+    }
+
     fn update(&mut self, data: T) {
         self.data = data;
         self.last_updated = Some(Instant::now());
@@ -73,6 +77,27 @@ impl TelemetryCenter {
             ambient_cache: Mutex::new(CacheItem::new(30)),
 
             cpu_prev_sample: Mutex::new(None),
+        }
+    }
+
+    pub fn update_sensor_snapshot(&self, snapshot: &tauri_plugin_vcp_mobile::system::SensorSample) {
+        if let Some(value) = &snapshot.location {
+            self.location_cache
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .update(value.clone());
+        }
+        if let Some(value) = &snapshot.motion {
+            self.motion_cache
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .update(value.clone());
+        }
+        if let Some(value) = &snapshot.ambient {
+            self.ambient_cache
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .update(value.clone());
         }
     }
 
@@ -169,37 +194,40 @@ impl TelemetryCenter {
         fresh
     }
 
-    pub fn get_location_info(&self, app: &AppHandle) -> String {
-        let mut guard = self
+    pub fn get_location_info(&self, _app: &AppHandle) -> String {
+        let guard = self
             .location_cache
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if let Some(val) = guard.get_valid() {
             return val.clone();
         }
-        let fresh = self.capture_location_info(app);
-        guard.update(fresh.clone());
-        fresh
+        guard
+            .get_last()
+            .cloned()
+            .unwrap_or_else(|| "位置信息: 尚未按需采样".to_string())
     }
 
-    pub fn get_motion_info(&self, app: &AppHandle) -> String {
-        let mut guard = self.motion_cache.lock().unwrap_or_else(|e| e.into_inner());
+    pub fn get_motion_info(&self, _app: &AppHandle) -> String {
+        let guard = self.motion_cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(val) = guard.get_valid() {
             return val.clone();
         }
-        let fresh = self.capture_motion_info(app);
-        guard.update(fresh.clone());
-        fresh
+        guard
+            .get_last()
+            .cloned()
+            .unwrap_or_else(|| "运动状态: 尚未按需采样".to_string())
     }
 
-    pub fn get_ambient_info(&self, app: &AppHandle) -> String {
-        let mut guard = self.ambient_cache.lock().unwrap_or_else(|e| e.into_inner());
+    pub fn get_ambient_info(&self, _app: &AppHandle) -> String {
+        let guard = self.ambient_cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(val) = guard.get_valid() {
             return val.clone();
         }
-        let fresh = self.capture_ambient_info(app);
-        guard.update(fresh.clone());
-        fresh
+        guard
+            .get_last()
+            .cloned()
+            .unwrap_or_else(|| "环境传感器: 尚未按需采样".to_string())
     }
 
     // =================================================================
@@ -510,88 +538,6 @@ impl TelemetryCenter {
         {
             let _ = app;
             "网络: 未连接".to_string()
-        }
-    }
-
-    fn capture_location_info(&self, app: &AppHandle) -> String {
-        #[cfg(target_os = "android")]
-        {
-            let result: Result<String, String> = (|| {
-                let data = tauri_plugin_vcp_mobile::system::get_sensor_data(
-                    app.clone(),
-                    "location".to_string(),
-                )?;
-                let val = data
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                Ok(val)
-            })();
-            result.unwrap_or_else(|e| format!("定位信息采集失败: {}", e))
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            let _ = app;
-            "坐标: 39.9000°N, 116.4000°E | 精度: 15m | 海拔: 50m (模拟)".to_string()
-        }
-    }
-
-    fn capture_motion_info(&self, app: &AppHandle) -> String {
-        #[cfg(target_os = "android")]
-        {
-            let result: Result<String, String> = (|| {
-                let data = tauri_plugin_vcp_mobile::system::get_sensor_data(
-                    app.clone(),
-                    "motion".to_string(),
-                )?;
-                let val = data
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                Ok(val)
-            })();
-            result.unwrap_or_else(|e| format!("运动传感器采集失败: {}", e))
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            let _ = app;
-            let brief = "状态: 静止 (模拟)";
-            let detail = "状态: 静止 | 平均加速度: 9.80m/s² (峰值: 9.80m/s²) (模拟)";
-            format!(
-                "[===vcp_fold: 0.0 ::desc: 物理运动姿态粗略状态(静止、步行、步行中或剧烈移动)===]\n{}\n\n[===vcp_fold: 0.50 ::desc: 九轴高频遥测指标、旋转角速度、加速度峰值、三轴磁敏度物理强度===]\n{}",
-                brief, detail
-            )
-        }
-    }
-
-    fn capture_ambient_info(&self, app: &AppHandle) -> String {
-        #[cfg(target_os = "android")]
-        {
-            let result: Result<String, String> = (|| {
-                let data = tauri_plugin_vcp_mobile::system::get_sensor_data(
-                    app.clone(),
-                    "ambient".to_string(),
-                )?;
-                let val = data
-                    .get("value")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                Ok(val)
-            })();
-            result.unwrap_or_else(|e| format!("环境传感器采集失败: {}", e))
-        }
-        #[cfg(not(target_os = "android"))]
-        {
-            let _ = app;
-            let brief = "环境光: 150 lux (室内) (模拟)";
-            let detail = "环境光: 150 lux (室内) | 气压: 1013 hPa (模拟)";
-            format!(
-                "[===vcp_fold: 0.0 ::desc: 当前所处的物理环境光照度大体描述(如暗、室内、户外)===]\n{}\n\n[===vcp_fold: 0.45 ::desc: 物理环境大气压强、精确光照度数值与场景气压监测===]\n{}",
-                brief, detail
-            )
         }
     }
 

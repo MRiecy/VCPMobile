@@ -85,7 +85,7 @@ const val PRIORITY_DISTRIBUTED = 10 // 分布式后台保活 — 低，不保持
 | `"prerender"` | 30 | ✅ | `[预渲染重建]` | `VcpMobilePlugin.startStreamingService()` 识别人工 Agent 名 |
 | `"stream:{AgentName}"` | 20 | ❌ | 用户可见 Agent 名 | `stream.rs` → `start_stream_service_inner()` |
 | `"distributed"` | 10 | ❌ | `distributed`（`resolveNotificationCopy` 映射为标题 "VCP Mobile" + "分布式后台连接维系中..."） | `stream.rs` → `set_keepalive_mode_inner()` / `vcp_log_service` linger |
-| `"distributed:connect"` / `"distributed:tool:*"` / `"distributed:placeholder_push:*"` | 10 | ❌ | `distributed`（统一内部标签，标题同样回落为 "VCP Mobile"） | `distributed/client.rs` → `acquire_wake_lock_helper()` |
+| `"distributed:connect"` / `"distributed:tool:*"` / `"distributed:telemetry:*"` | 10 | ❌ | `distributed`（统一内部标签，标题同样回落为 "VCP Mobile"） | 连接、工具执行或非空遥测批次的短时 lease；零 Streaming 工具不申请 |
 | `"vcp_log"` | 10 | ❌ | `VCP Log Linger`（`resolveNotificationCopy` 识别为内部 label：标题 "VCP Mobile" + "正在保持后台连接..."） | `lifecycle_controller.rs` 后台 linger |
 | `"manual_keepalive"` | 10 | ❌ | `[后台保活]` | `VcpMobilePlugin.acquireWakeLock()`（旧 API 兼容） |
 

@@ -517,18 +517,6 @@
           "markdownDescription": "Denies the get_pending_notification command without any pre-configured scope."
         },
         {
-          "description": "Enables the get_sensor_data command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-get-sensor-data",
-          "markdownDescription": "Enables the get_sensor_data command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the get_sensor_data command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-get-sensor-data",
-          "markdownDescription": "Denies the get_sensor_data command without any pre-configured scope."
-        },
-        {
           "description": "Enables the launch_root_manager command without any pre-configured scope.",
           "type": "string",
           "const": "allow-launch-root-manager",
@@ -781,18 +769,6 @@
           "markdownDescription": "Denies the start_network_monitoring command without any pre-configured scope."
         },
         {
-          "description": "Enables the start_sensor_collection command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-start-sensor-collection",
-          "markdownDescription": "Enables the start_sensor_collection command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the start_sensor_collection command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-start-sensor-collection",
-          "markdownDescription": "Denies the start_sensor_collection command without any pre-configured scope."
-        },
-        {
           "description": "Enables the start_streaming_service command without any pre-configured scope.",
           "type": "string",
           "const": "allow-start-streaming-service",
@@ -803,18 +779,6 @@
           "type": "string",
           "const": "deny-start-streaming-service",
           "markdownDescription": "Denies the start_streaming_service command without any pre-configured scope."
-        },
-        {
-          "description": "Enables the stop_sensor_collection command without any pre-configured scope.",
-          "type": "string",
-          "const": "allow-stop-sensor-collection",
-          "markdownDescription": "Enables the stop_sensor_collection command without any pre-configured scope."
-        },
-        {
-          "description": "Denies the stop_sensor_collection command without any pre-configured scope.",
-          "type": "string",
-          "const": "deny-stop-sensor-collection",
-          "markdownDescription": "Denies the stop_sensor_collection command without any pre-configured scope."
         },
         {
           "description": "Enables the stop_streaming_service command without any pre-configured scope.",

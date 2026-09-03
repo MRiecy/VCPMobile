@@ -1193,39 +1193,24 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
-    fun startSensorCollection(invoke: Invoke) {
+    fun sampleSensorData(invoke: Invoke) {
         try {
+            val args = invoke.parseArgs(SampleSensorDataArgs::class.java)
             activity.runOnUiThread {
-                sensorStatusManager.start()
-                invoke.resolve()
+                try {
+                    sensorStatusManager.sample(
+                        location = args.location,
+                        motion = args.motion,
+                        ambient = args.ambient,
+                        completion = invoke::resolve,
+                    )
+                } catch (error: Exception) {
+                    Log.e(TAG, "sampleSensorData failed on main thread", error)
+                    invoke.reject(error.message ?: "Unknown error")
+                }
             }
         } catch (e: Exception) {
-            Log.e(TAG, "startSensorCollection failed", e)
-            invoke.reject(e.message ?: "Unknown error")
-        }
-    }
-
-    @Command
-    fun stopSensorCollection(invoke: Invoke) {
-        try {
-            activity.runOnUiThread {
-                sensorStatusManager.stop()
-                invoke.resolve()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "stopSensorCollection failed", e)
-            invoke.reject(e.message ?: "Unknown error")
-        }
-    }
-
-    @Command
-    fun getSensorData(invoke: Invoke) {
-        try {
-            val args = invoke.parseArgs(GetSensorDataArgs::class.java)
-            val result = sensorStatusManager.getSensorData(args.type)
-            invoke.resolve(result)
-        } catch (e: Exception) {
-            Log.e(TAG, "getSensorData failed", e)
+            Log.e(TAG, "sampleSensorData failed", e)
             invoke.reject(e.message ?: "Unknown error")
         }
     }
@@ -1378,6 +1363,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         isDestroying.set(true)
         oomGuardFuture?.cancel(true)
         oomGuardFuture = null
+        sensorStatusManager.shutdown()
         executorDomains.shutdownNow().forEach { pendingTask ->
             (pendingTask as? PendingInvokeTask)?.rejectBeforeStart("plugin was destroyed")
         }
@@ -3108,8 +3094,10 @@ class ProcessSharedFileArgs {
 }
 
 @InvokeArg
-class GetSensorDataArgs {
-    lateinit var type: String
+class SampleSensorDataArgs {
+    var location: Boolean = false
+    var motion: Boolean = false
+    var ambient: Boolean = false
 }
 
 @InvokeArg
