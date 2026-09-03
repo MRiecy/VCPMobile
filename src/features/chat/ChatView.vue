@@ -336,6 +336,7 @@ onUnmounted(() => {
           :key="msg.id"
           :message="msg"
           :agent-id="sessionStore.currentSelectedItem?.id"
+          :is-background="lifecycleStore.isBackground"
           :data-message-id="msg.id"
         />
         <!-- 底部留白，避免最后一条消息被输入框遮挡 -->

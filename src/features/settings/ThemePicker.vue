@@ -9,6 +9,8 @@ import {
   type ThemeInfo,
 } from '../../core/stores/theme';
 import { useNotificationStore } from '../../core/stores/notification';
+import SettingsRow from '../../components/settings/SettingsRow.vue';
+import SettingsSwitch from '../../components/settings/SettingsSwitch.vue';
 import ThemeLivePreview from './ThemeLivePreview.vue';
 
 type ThemePickerSection = 'all' | 'theme' | 'rendering';
@@ -27,6 +29,7 @@ const isApplying = ref(false);
 const initializationError = ref('');
 const applyError = ref('');
 const presentationError = ref('');
+const smoothStreamingError = ref('');
 let scrollIdleTimer: number | null = null;
 let scrollMeasureFrame: number | null = null;
 let isActive = true;
@@ -159,6 +162,21 @@ const selectPresentationMode = (mode: ChatPresentationMode) => {
   });
 };
 
+const updateSmoothStreaming = (enabled: boolean) => {
+  smoothStreamingError.value = '';
+  const result = themeStore.setSmoothStreamingEnabled(enabled);
+  if (result.ok) return;
+
+  smoothStreamingError.value = result.error || '平滑流式设置保存失败';
+  notificationStore.addNotification({
+    id: 'smooth-streaming-save-failed',
+    type: 'error',
+    title: '平滑流式设置失败',
+    message: smoothStreamingError.value,
+    toastOnly: true,
+  });
+};
+
 onMounted(async () => {
   if (!showThemeSettings.value) return;
 
@@ -274,7 +292,28 @@ onBeforeUnmount(() => {
             </svg>
           </button>
         </div>
+        <div class="streaming-preference">
+          <SettingsRow title="平滑流式输出" description="让长回复分段自然出现，不改变回复内容；系统减少动态效果时自动停用。">
+            <template #action>
+              <button
+                type="button"
+                data-testid="smooth-streaming-switch"
+                class="smooth-streaming-toggle"
+                role="switch"
+                :aria-checked="themeStore.smoothStreamingEnabled"
+                aria-label="平滑流式输出"
+                @click="updateSmoothStreaming(!themeStore.smoothStreamingEnabled)"
+              >
+                <SettingsSwitch
+                  class="pointer-events-none"
+                  :model-value="themeStore.smoothStreamingEnabled"
+                />
+              </button>
+            </template>
+          </SettingsRow>
+        </div>
         <p v-if="presentationError" class="theme-error" role="alert">{{ presentationError }}</p>
+        <p v-if="smoothStreamingError" class="theme-error" role="alert">{{ smoothStreamingError }}</p>
       </section>
     </div>
   </div>
@@ -501,6 +540,24 @@ onBeforeUnmount(() => {
 .presentation-check {
   flex: 0 0 auto;
   color: var(--highlight-text);
+}
+
+.streaming-preference {
+  margin-top: 0.5rem;
+  padding-top: 0.25rem;
+  border-top: 1px solid var(--vcp-border-subtle);
+}
+
+.smooth-streaming-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  margin: -0.75rem -0.25rem -0.75rem 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
 }
 
 .theme-error {

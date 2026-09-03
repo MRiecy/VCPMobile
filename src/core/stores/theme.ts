@@ -41,6 +41,13 @@ export interface PresentationChangeResult {
   error?: string;
 }
 
+export interface SmoothStreamingChangeResult {
+  ok: boolean;
+  changed: boolean;
+  enabled: boolean;
+  error?: string;
+}
+
 export interface ThemeApplyResult {
   ok: boolean;
   themeKey: string | null;
@@ -59,6 +66,7 @@ export interface ThemeInfo {
 const DEFAULT_THEME = 'themes-star-abyss.ts';
 const THEME_NAME_STORAGE_KEY = 'vcp-theme-name';
 const PRESENTATION_STORAGE_KEY = 'vcp-chat-presentation-mode';
+const SMOOTH_STREAMING_STORAGE_KEY = 'vcp-smooth-streaming-enabled';
 
 const LEGACY_THEME_MAP: Record<string, string> = {
   'themes冰火魔歌.css': 'themes-ice-fire.css',
@@ -192,6 +200,19 @@ export const useThemeStore = defineStore('theme', () => {
     }
   }
   const presentationMode = ref<ChatPresentationMode>(initialPresentationMode);
+  const storedSmoothStreaming = readStoredValue(SMOOTH_STREAMING_STORAGE_KEY);
+  const smoothStreamingEnabled = ref(storedSmoothStreaming === 'true');
+  if (
+    storedSmoothStreaming !== null
+    && storedSmoothStreaming !== 'true'
+    && storedSmoothStreaming !== 'false'
+  ) {
+    try {
+      localStorage.setItem(SMOOTH_STREAMING_STORAGE_KEY, 'false');
+    } catch (error) {
+      console.warn('[themeStore] Failed to repair smooth streaming preference:', error);
+    }
+  }
 
   const initialTheme = normalizeThemeModuleKey(readStoredValue(THEME_NAME_STORAGE_KEY)) || DEFAULT_THEME;
   const currentTheme = ref(initialTheme);
@@ -462,6 +483,28 @@ export const useThemeStore = defineStore('theme', () => {
     }
   };
 
+  const setSmoothStreamingEnabled = (
+    enabled: boolean,
+  ): SmoothStreamingChangeResult => {
+    if (smoothStreamingEnabled.value === enabled) {
+      return { ok: true, changed: false, enabled };
+    }
+
+    try {
+      localStorage.setItem(SMOOTH_STREAMING_STORAGE_KEY, String(enabled));
+      smoothStreamingEnabled.value = enabled;
+      return { ok: true, changed: true, enabled };
+    } catch (error) {
+      console.error('[themeStore] Failed to persist smooth streaming preference:', error);
+      return {
+        ok: false,
+        changed: false,
+        enabled: smoothStreamingEnabled.value,
+        error: `平滑流式设置保存失败：${errorMessage(error)}`,
+      };
+    }
+  };
+
   const toggleTheme = () => {
     // Use the resolved state to decide the next mode,
     // this ensures that the first click always produces a visual change
@@ -493,6 +536,7 @@ export const useThemeStore = defineStore('theme', () => {
     mode,
     isDarkResolved,
     presentationMode,
+    smoothStreamingEnabled,
     currentTheme,
     currentThemeInfo,
     availableThemes,
@@ -503,6 +547,7 @@ export const useThemeStore = defineStore('theme', () => {
     toggleTheme,
     setMode,
     setPresentationMode,
+    setSmoothStreamingEnabled,
   };
 });
 

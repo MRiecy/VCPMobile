@@ -1,12 +1,12 @@
 import { defineComponent, nextTick, reactive, ref } from 'vue';
 import { mount } from '@vue/test-utils';
-import { createPinia, setActivePinia } from 'pinia';
-import { describe, expect, it, vi } from 'vitest';
+import { createPinia, setActivePinia, type Pinia } from 'pinia';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import MessageRenderer from '@/features/chat/MessageRenderer.vue';
 import type { ChatMessage } from '@/core/types/chat';
 import { useChatSessionStore } from '@/core/stores/chatSessionStore';
 import { useChatStreamStore } from '@/core/stores/chatStreamStore';
-import type { ChatPresentationMode } from '@/core/stores/theme';
+import { useThemeStore, type ChatPresentationMode } from '@/core/stores/theme';
 import { invokeMock, mockInvoke } from '@/tests/mocks/tauri';
 
 const { mermaidRenderMock } = vi.hoisted(() => ({
@@ -23,6 +23,132 @@ vi.mock('mermaid', () => ({
 const markerStub = (marker: string) => defineComponent({
   template: `<div data-strong-block="${marker}">${marker}</div>`,
 });
+
+const streamRendererStubs = {
+  VcpAvatar: markerStub('avatar'),
+  ToolBlock: markerStub('tool'),
+  ThoughtBlock: markerStub('thought'),
+  HtmlPreviewBlock: markerStub('html-preview'),
+  ToolSummaryBlock: markerStub('tool-summary'),
+  DiaryBlock: markerStub('diary'),
+  AttachmentPreview: markerStub('attachment'),
+  MermaidFullScreenViewer: markerStub('mermaid-viewer'),
+  ThinkingIndicator: markerStub('thinking'),
+  StreamingTag: markerStub('streaming'),
+};
+
+function mountStreamRenderer(message: ChatMessage, pinia: Pinia) {
+  return mount(MessageRenderer, {
+    props: { message },
+    global: {
+      plugins: [pinia],
+      directives: { longpress: {} },
+      stubs: streamRendererStubs,
+    },
+  });
+}
+
+beforeEach(() => {
+  localStorage.removeItem('vcp-smooth-streaming-enabled');
+});
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function seedRemountTail(
+  streamStore: ReturnType<typeof useChatStreamStore>,
+  messageId: string,
+  streamId: number,
+) {
+  const context = {
+    ownerId: 'agent-a',
+    ownerType: 'agent' as const,
+    topicId: 'topic-a',
+    agentId: 'agent-a',
+  };
+  const eventBase = {
+    chunk: null,
+    finishReason: null,
+    error: null,
+    blocks: null,
+    timestamp: null,
+    topicUpdatedAt: null,
+  };
+  await streamStore.processStreamEvent({
+    ...eventBase,
+    type: 'thinking',
+    messageId,
+    context,
+    aurora: null,
+  });
+
+  let fullContent = '';
+  for (let frameSeq = 1; frameSeq <= 5; frameSeq += 1) {
+    const chunk = String.fromCharCode(96 + frameSeq);
+    fullContent += chunk;
+    await streamStore.processStreamEvent({
+      ...eventBase,
+      type: 'aurora',
+      messageId,
+      context,
+      aurora: {
+        kind: 'delta',
+        streamId,
+        chunk,
+        tailOp: {
+          op: 'replace',
+          content: fullContent,
+          hash: `${messageId}-${frameSeq}`,
+          mode: 'ast',
+          blockType: 'markdown',
+        },
+        tailFrame: {
+          streamId,
+          epoch: 1,
+          revision: frameSeq,
+          frameSeq,
+          mutations: frameSeq === 1
+            ? [{
+                op: 'add',
+                id: 't0',
+                parent: 'root',
+                node: {
+                  type: 'paragraph',
+                  children: [{ type: 'text', value: chunk }],
+                },
+              }]
+            : [{ op: 'append', id: 't0.i0', chunk }],
+        },
+      },
+    });
+  }
+  await vi.waitFor(() => {
+    expect(streamStore.getActiveStreamMessage(
+      'agent-a',
+      'agent',
+      'topic-a',
+      messageId,
+    )?.tailFrame?.frameSeq).toBe(5);
+  });
+
+  return {
+    context,
+    eventBase,
+    message: streamStore.getActiveStreamMessage(
+      'agent-a',
+      'agent',
+      'topic-a',
+      messageId,
+    )!,
+  };
+}
 
 describe('MessageRenderer presentation shell', () => {
   it('enhances an already-rendered first-pass Mermaid SVG immediately', async () => {
@@ -339,6 +465,351 @@ describe('MessageRenderer presentation shell', () => {
     wrapper.unmount();
   });
 
+  it('paces safe AST text appends and respects immediate lifecycle barriers', async () => {
+    vi.useFakeTimers();
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const sessionStore = useChatSessionStore();
+    const streamStore = useChatStreamStore();
+    const themeStore = useThemeStore();
+    sessionStore.setConversation({
+      id: 'agent-a',
+      type: 'agent',
+      name: 'Agent A',
+    } as any, 'topic-a');
+    streamStore.addSessionStream('agent-a', 'agent', 'topic-a', 'smooth-append');
+    themeStore.setSmoothStreamingEnabled(true);
+
+    const baseNodes = [{
+      type: 'paragraph' as const,
+      children: [{ type: 'text' as const, value: 'base' }],
+    }];
+    const message = reactive<ChatMessage>({
+      id: 'smooth-append',
+      role: 'assistant',
+      timestamp: 1,
+      agentId: 'agent-a',
+      shell: {
+        avatarColor: '#64748b',
+        displayName: 'Agent A',
+        isUser: false,
+      },
+      blocks: [],
+      tailContent: 'base',
+      tailBlock: {
+        type: 'markdown',
+        content: 'base',
+        hash: 'base',
+        render_mode: 'ast',
+      },
+      tailFrame: {
+        streamId: 4,
+        epoch: 1,
+        revision: 1,
+        frameSeq: 1,
+        reset: true,
+        snapshot: baseNodes,
+        mutations: [],
+      },
+    });
+
+    const wrapper = mount(MessageRenderer, {
+      props: { message },
+      global: {
+        plugins: [pinia],
+        directives: { longpress: {} },
+        stubs: {
+          VcpAvatar: markerStub('avatar'),
+          ToolBlock: markerStub('tool'),
+          ThoughtBlock: markerStub('thought'),
+          HtmlPreviewBlock: markerStub('html-preview'),
+          ToolSummaryBlock: markerStub('tool-summary'),
+          DiaryBlock: markerStub('diary'),
+          AttachmentPreview: markerStub('attachment'),
+          MermaidFullScreenViewer: markerStub('mermaid-viewer'),
+          ThinkingIndicator: markerStub('thinking'),
+          StreamingTag: markerStub('streaming'),
+        },
+      },
+    });
+
+    try {
+      await nextTick();
+      await nextTick();
+      expect(wrapper.get('.vcp-ast-sandbox').text()).toContain('base');
+
+      message.tailContent = 'baseabcdefgh';
+      message.tailBlock = {
+        type: 'markdown',
+        content: 'baseabcdefgh',
+        hash: 'next',
+        render_mode: 'ast',
+      };
+      message.tailFrame = {
+        streamId: 4,
+        epoch: 1,
+        revision: 2,
+        frameSeq: 2,
+        mutations: [{ op: 'append', id: 't0.i0', chunk: 'abcdefgh' }],
+      };
+      await nextTick();
+      await nextTick();
+
+      expect(wrapper.get('.vcp-ast-sandbox').text()).toContain('baseabc');
+      expect(wrapper.get('.vcp-ast-sandbox').text()).not.toContain('baseabcdefgh');
+
+      message.tailContent = 'baseabcdefgh!';
+      message.tailBlock = {
+        type: 'markdown',
+        content: 'baseabcdefgh!',
+        hash: 'barrier',
+        render_mode: 'ast',
+      };
+      message.tailFrame = {
+        streamId: 4,
+        epoch: 1,
+        revision: 3,
+        frameSeq: 3,
+        mutations: [{ op: 'text', id: 't0.i0', value: 'baseabcdefgh!' }],
+      };
+      await nextTick();
+      await nextTick();
+      expect(wrapper.get('.vcp-ast-sandbox').text()).toContain('baseabcdefgh!');
+
+      message.tailContent = 'baseabcdefgh!ijklmnop';
+      message.tailBlock = {
+        type: 'markdown',
+        content: 'baseabcdefgh!ijklmnop',
+        hash: 'after-barrier',
+        render_mode: 'ast',
+      };
+      message.tailFrame = {
+        streamId: 4,
+        epoch: 1,
+        revision: 4,
+        frameSeq: 4,
+        mutations: [{ op: 'append', id: 't0.i0', chunk: 'ijklmnop' }],
+      };
+      await nextTick();
+      await nextTick();
+      expect(wrapper.get('.vcp-ast-sandbox').text()).not.toContain('baseabcdefgh!ijklmnop');
+
+      await wrapper.setProps({ isBackground: true });
+      await nextTick();
+      expect(wrapper.get('.vcp-ast-sandbox').text()).toContain('baseabcdefgh!ijklmnop');
+
+      await wrapper.setProps({ isBackground: false });
+      message.tailContent = 'baseabcdefgh!ijklmnopqrstuvwx';
+      message.tailBlock = {
+        type: 'markdown',
+        content: 'baseabcdefgh!ijklmnopqrstuvwx',
+        hash: 'after-background',
+        render_mode: 'ast',
+      };
+      message.tailFrame = {
+        streamId: 4,
+        epoch: 1,
+        revision: 5,
+        frameSeq: 5,
+        mutations: [{ op: 'append', id: 't0.i0', chunk: 'qrstuvwx' }],
+      };
+      await nextTick();
+      await nextTick();
+      expect(wrapper.get('.vcp-ast-sandbox').text()).not.toContain('baseabcdefgh!ijklmnopqrstuvwx');
+
+      message.isReconnecting = true;
+      await nextTick();
+      expect(wrapper.get('.vcp-ast-sandbox').text()).toContain('baseabcdefgh!ijklmnopqrstuvwx');
+
+      message.isReconnecting = false;
+      message.tailContent = 'baseabcdefgh!ijklmnopqrstuvwxCDEFGHIJ';
+      message.tailBlock = {
+        type: 'markdown',
+        content: 'baseabcdefgh!ijklmnopqrstuvwxCDEFGHIJ',
+        hash: 'after-reconnect',
+        render_mode: 'ast',
+      };
+      message.tailFrame = {
+        streamId: 4,
+        epoch: 1,
+        revision: 6,
+        frameSeq: 6,
+        mutations: [{ op: 'append', id: 't0.i0', chunk: 'CDEFGHIJ' }],
+      };
+      await nextTick();
+      await nextTick();
+      expect(wrapper.get('.vcp-ast-sandbox').text()).not.toContain('baseabcdefgh!ijklmnopqrstuvwxCDEFGHIJ');
+
+      themeStore.setSmoothStreamingEnabled(false);
+      await nextTick();
+
+      expect(wrapper.get('.vcp-ast-sandbox').text()).toContain('baseabcdefgh!ijklmnopqrstuvwxCDEFGHIJ');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(wrapper.get('.vcp-ast-sandbox').text()).toContain('baseabcdefgh!ijklmnopqrstuvwxCDEFGHIJ');
+
+      themeStore.setSmoothStreamingEnabled(true);
+      message.tailContent = 'baseabcdefgh!ijklmnopqrstuvwxCDEFGHIJKLMN';
+      message.tailBlock = {
+        type: 'markdown',
+        content: 'baseabcdefgh!ijklmnopqrstuvwxCDEFGHIJKLMN',
+        hash: 'before-terminal',
+        render_mode: 'ast',
+      };
+      message.tailFrame = {
+        streamId: 4,
+        epoch: 1,
+        revision: 7,
+        frameSeq: 7,
+        mutations: [{ op: 'append', id: 't0.i0', chunk: 'KLMN' }],
+      };
+      await nextTick();
+      await nextTick();
+      expect(wrapper.get('.vcp-ast-sandbox').text()).not.toContain('baseabcdefgh!ijklmnopqrstuvwxCDEFGHIJKLMN');
+
+      message.content = 'canonical final';
+      message.blocks = [{
+        type: 'markdown',
+        content: 'canonical final',
+        nodes: [{
+          type: 'paragraph',
+          children: [{ type: 'text', value: 'canonical final' }],
+        }],
+      }];
+      message.tailContent = '';
+      message.tailBlock = undefined;
+      streamStore.removeSessionStream('agent-a', 'agent', 'topic-a', 'smooth-append');
+      await nextTick();
+      await nextTick();
+
+      expect(wrapper.get('.vcp-markdown-block').text()).toContain('canonical final');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(wrapper.get('.vcp-markdown-block').text()).toContain('canonical final');
+    } finally {
+      wrapper.unmount();
+      themeStore.$dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets a reset snapshot discard old reveal debt without a delayed append', async () => {
+    vi.useFakeTimers();
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const sessionStore = useChatSessionStore();
+    const streamStore = useChatStreamStore();
+    const themeStore = useThemeStore();
+    sessionStore.setConversation({
+      id: 'agent-a',
+      type: 'agent',
+      name: 'Agent A',
+    } as any, 'topic-a');
+    streamStore.addSessionStream('agent-a', 'agent', 'topic-a', 'smooth-reset');
+    themeStore.setSmoothStreamingEnabled(true);
+
+    const message = reactive<ChatMessage>({
+      id: 'smooth-reset',
+      role: 'assistant',
+      timestamp: 1,
+      agentId: 'agent-a',
+      shell: {
+        avatarColor: '#64748b',
+        displayName: 'Agent A',
+        isUser: false,
+      },
+      blocks: [],
+      tailContent: 'base',
+      tailBlock: {
+        type: 'markdown',
+        content: 'base',
+        hash: 'base',
+        render_mode: 'ast',
+      },
+      tailFrame: {
+        streamId: 20,
+        epoch: 1,
+        revision: 1,
+        frameSeq: 1,
+        reset: true,
+        snapshot: [{
+          type: 'paragraph',
+          children: [{ type: 'text', value: 'base' }],
+        }],
+        mutations: [],
+      },
+    });
+    const wrapper = mount(MessageRenderer, {
+      props: { message },
+      global: {
+        plugins: [pinia],
+        directives: { longpress: {} },
+        stubs: {
+          VcpAvatar: markerStub('avatar'),
+          ToolBlock: markerStub('tool'),
+          ThoughtBlock: markerStub('thought'),
+          HtmlPreviewBlock: markerStub('html-preview'),
+          ToolSummaryBlock: markerStub('tool-summary'),
+          DiaryBlock: markerStub('diary'),
+          AttachmentPreview: markerStub('attachment'),
+          MermaidFullScreenViewer: markerStub('mermaid-viewer'),
+          ThinkingIndicator: markerStub('thinking'),
+          StreamingTag: markerStub('streaming'),
+        },
+      },
+    });
+
+    try {
+      await nextTick();
+      await nextTick();
+      message.tailContent = 'baseabcdefgh';
+      message.tailBlock = {
+        type: 'markdown',
+        content: 'baseabcdefgh',
+        hash: 'pending',
+        render_mode: 'ast',
+      };
+      message.tailFrame = {
+        streamId: 20,
+        epoch: 1,
+        revision: 2,
+        frameSeq: 2,
+        mutations: [{ op: 'append', id: 't0.i0', chunk: 'abcdefgh' }],
+      };
+      await nextTick();
+      await nextTick();
+      expect(wrapper.get('.vcp-ast-sandbox').text()).not.toContain('baseabcdefgh');
+
+      message.tailContent = 'fresh';
+      message.tailBlock = {
+        type: 'markdown',
+        content: 'fresh',
+        hash: 'fresh',
+        render_mode: 'ast',
+      };
+      message.tailFrame = {
+        streamId: 21,
+        epoch: 1,
+        revision: 1,
+        frameSeq: 1,
+        reset: true,
+        snapshot: [{
+          type: 'paragraph',
+          children: [{ type: 'text', value: 'fresh' }],
+        }],
+        mutations: [],
+      };
+      await nextTick();
+      await nextTick();
+
+      expect(wrapper.get('.vcp-ast-sandbox').text()).toBe('fresh');
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(wrapper.get('.vcp-ast-sandbox').text()).toBe('fresh');
+    } finally {
+      wrapper.unmount();
+      themeStore.$dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it('requests one canonical snapshot when an AST tail remounts after earlier deltas', async () => {
     const pinia = createPinia();
     setActivePinia(pinia);
@@ -471,6 +942,137 @@ describe('MessageRenderer presentation shell', () => {
       ([command]) => command === 'rebuild_aurora_snapshot',
     )).toHaveLength(1);
     wrapper.unmount();
+  });
+
+  it('downgrades to the canonical text fallback after repeated snapshot failures', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const sessionStore = useChatSessionStore();
+    const streamStore = useChatStreamStore();
+    sessionStore.setConversation({
+      id: 'agent-a',
+      type: 'agent',
+      name: 'Agent A',
+    } as any, 'topic-a');
+    const seeded = await seedRemountTail(streamStore, 'failed-recovery', 30);
+    mockInvoke('rebuild_aurora_snapshot', () => Promise.reject(new Error('offline')));
+
+    const wrapper = mount(MessageRenderer, {
+      props: { message: seeded.message },
+      global: {
+        plugins: [pinia],
+        directives: { longpress: {} },
+        stubs: {
+          VcpAvatar: markerStub('avatar'),
+          ToolBlock: markerStub('tool'),
+          ThoughtBlock: markerStub('thought'),
+          HtmlPreviewBlock: markerStub('html-preview'),
+          ToolSummaryBlock: markerStub('tool-summary'),
+          DiaryBlock: markerStub('diary'),
+          AttachmentPreview: markerStub('attachment'),
+          MermaidFullScreenViewer: markerStub('mermaid-viewer'),
+          ThinkingIndicator: markerStub('thinking'),
+          StreamingTag: markerStub('streaming'),
+        },
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(invokeMock.mock.calls.filter(
+        ([command]) => command === 'rebuild_aurora_snapshot',
+      )).toHaveLength(2);
+      expect(wrapper.get('.streaming-tail').text()).toContain('abcde');
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(invokeMock.mock.calls.filter(
+      ([command]) => command === 'rebuild_aurora_snapshot',
+    )).toHaveLength(2);
+    wrapper.unmount();
+  });
+
+  it('prevents an unmounted recovery callback from clearing a new renderer registry', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const sessionStore = useChatSessionStore();
+    const streamStore = useChatStreamStore();
+    sessionStore.setConversation({
+      id: 'agent-a',
+      type: 'agent',
+      name: 'Agent A',
+    } as any, 'topic-a');
+    const seeded = await seedRemountTail(streamStore, 'recovery-owner', 40);
+    const delayedFailure = deferred<never>();
+    let recoveryAttempt = 0;
+    mockInvoke('rebuild_aurora_snapshot', () => {
+      recoveryAttempt += 1;
+      if (recoveryAttempt === 1) return Promise.reject(new Error('first failure'));
+      return delayedFailure.promise;
+    });
+
+    const mountRenderer = () => mount(MessageRenderer, {
+      props: { message: seeded.message },
+      global: {
+        plugins: [pinia],
+        directives: { longpress: {} },
+        stubs: {
+          VcpAvatar: markerStub('avatar'),
+          ToolBlock: markerStub('tool'),
+          ThoughtBlock: markerStub('thought'),
+          HtmlPreviewBlock: markerStub('html-preview'),
+          ToolSummaryBlock: markerStub('tool-summary'),
+          DiaryBlock: markerStub('diary'),
+          AttachmentPreview: markerStub('attachment'),
+          MermaidFullScreenViewer: markerStub('mermaid-viewer'),
+          ThinkingIndicator: markerStub('thinking'),
+          StreamingTag: markerStub('streaming'),
+        },
+      },
+    });
+    const oldWrapper = mountRenderer();
+    await vi.waitFor(() => {
+      expect(invokeMock.mock.calls.filter(
+        ([command]) => command === 'rebuild_aurora_snapshot',
+      )).toHaveLength(2);
+    });
+    oldWrapper.unmount();
+
+    seeded.message.tailBlock = {
+      ...seeded.message.tailBlock!,
+      nodes: [{
+        type: 'paragraph',
+        children: [{ type: 'text', value: 'abcde' }],
+      }],
+    };
+    const newWrapper = mountRenderer();
+    await nextTick();
+    await nextTick();
+    expect(newWrapper.get('.vcp-ast-sandbox').text()).toContain('abcde');
+
+    delayedFailure.reject(new Error('late failure'));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    seeded.message.tailContent = 'abcde!';
+    seeded.message.tailBlock = {
+      type: 'markdown',
+      content: 'abcde!',
+      hash: 'recovery-owner-6',
+      render_mode: 'ast',
+      nodes: seeded.message.tailBlock.nodes,
+    };
+    seeded.message.tailFrame = {
+      streamId: 40,
+      epoch: 1,
+      revision: 6,
+      frameSeq: 6,
+      mutations: [{ op: 'append', id: 't0.i0', chunk: '!' }],
+    };
+    await nextTick();
+    await nextTick();
+
+    expect(newWrapper.get('.vcp-ast-sandbox').text()).toContain('abcde!');
+    expect(invokeMock.mock.calls.filter(
+      ([command]) => command === 'rebuild_aurora_snapshot',
+    )).toHaveLength(2);
+    newWrapper.unmount();
   });
 
   it('renders an AST-less streaming tail as literal plaintext', async () => {

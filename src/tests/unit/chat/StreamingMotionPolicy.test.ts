@@ -7,6 +7,7 @@ import thinkingIndicatorSource from "@/features/chat/components/ThinkingIndicato
 import thoughtBlockSource from "@/features/chat/blocks/ThoughtBlock.vue?raw";
 import toolBlockSource from "@/features/chat/blocks/ToolBlock.vue?raw";
 import messageBlocksCss from "@/assets/message-blocks.css?raw";
+import streamRevealSchedulerSource from "@/features/chat/streamRevealScheduler.ts?raw";
 
 describe("streaming motion policy", () => {
   it("keeps long-lived reply status indicators static", () => {
@@ -34,5 +35,11 @@ describe("streaming motion policy", () => {
     expect(thoughtBlockSource).not.toContain("custom-spin");
     expect(messageBlocksCss).not.toContain("vcp-spin");
     expect(messageBlocksCss).not.toContain("custom-spin");
+  });
+
+  it("keeps smooth text reveal demand-driven instead of installing an interval", () => {
+    expect(streamRevealSchedulerSource).not.toContain("setInterval");
+    expect(streamRevealSchedulerSource).toContain("cancelGlobalScheduleIfIdle");
+    expect(streamRevealSchedulerSource).toContain("REVEAL_FRAME_INTERVAL_MS");
   });
 });

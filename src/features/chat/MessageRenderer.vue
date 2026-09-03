@@ -5,11 +5,13 @@ import type {
   ContentBlock,
   InlineNode,
   MarkdownNode,
+  TailFrame,
 } from "../../core/types/chat";
 import { useOverlayStore } from "../../core/stores/overlay";
 import { useChatHistoryStore } from "../../core/stores/chatHistoryStore";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useChatStreamStore } from "../../core/stores/chatStreamStore";
+import { useThemeStore } from "../../core/stores/theme";
 import { useNotificationStore } from "../../core/stores/notification";
 import { useMessageEvents } from "../../core/composables/useMessageEvents";
 import { useEmoticonFixer } from "../../core/composables/useEmoticonFixer";
@@ -18,6 +20,10 @@ import { applyFrame, cleanupRegistry, rebuildSnapshot } from "../../core/utils/a
 import { useMessageStyleInjector } from "../../core/composables/useMessageStyleInjector";
 import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from "lucide-vue-next";
 import morphdom from "morphdom";
+import {
+  canSmoothStreamAppend,
+  createStreamRevealController,
+} from "./streamRevealScheduler";
 
 const { processEmoticonsInContainer } = useEmoticonFixer();
 const mermaidCache = new Map<string, string>();
@@ -57,6 +63,7 @@ const props = defineProps<{
   message: ChatMessage;
   agentId?: string;
   depth?: number;
+  isBackground?: boolean;
 }>();
 
 const overlayStore = useOverlayStore();
@@ -64,6 +71,7 @@ const notificationStore = useNotificationStore();
 const historyStore = useChatHistoryStore();
 const sessionStore = useChatSessionStore();
 const streamStore = useChatStreamStore();
+const themeStore = useThemeStore();
 
 function isAstDebugEnabled(): boolean {
   return Boolean(import.meta.env.DEV && (window as any).__VCP_AST_DEBUG__);
@@ -104,11 +112,13 @@ const useAstForCurrentTail = computed(() => {
   );
 });
 let lastAppliedFrameSeq = 0;
+let lastAcceptedFrameSeq = 0;
 let localTailStreamId = -1;
 let localTailEpoch = -1;
 let localTailRevision = -1;
 let astFailureCount = 0;
 let lastSandbox: HTMLElement | null = null;
+let rendererDisposed = false;
 
 function getTailSnapshotNodes() {
   const frameSnapshot = props.message.tailFrame?.reset
@@ -130,30 +140,101 @@ function requestCurrentTailSnapshot(reason: string): Promise<boolean> {
   if (!key) return Promise.resolve(false);
 
   isAstRecoveryPending.value = true;
-  astRecoveryPromise = streamStore.requestAuroraSnapshot(
+  const recovery = streamStore.requestAuroraSnapshot(
     key.ownerId,
     key.ownerType,
     key.topicId,
     props.message.id,
     reason,
-  ).finally(() => {
+  );
+  const completion = recovery.finally(() => {
+    if (rendererDisposed || astRecoveryPromise !== completion) return;
     isAstRecoveryPending.value = false;
     astRecoveryPromise = null;
   });
+  astRecoveryPromise = completion;
   return astRecoveryPromise;
 }
 
-function handleAstFrameFailure(_sandbox: HTMLElement, reason: string): void {
+function recoverTailSnapshotOrDowngrade(reason: string): void {
+  if (rendererDisposed || !enableAstDiff.value) return;
   astFailureCount += 1;
   if (import.meta.env.DEV && isAstDebugEnabled()) {
     astDebugLog(`[AST Diff Recovery] ${props.message.id}: ${reason}. failureCount=${astFailureCount}`);
   }
   void requestCurrentTailSnapshot(reason).then((recovered) => {
-    if (!recovered && astFailureCount >= 2) {
+    if (rendererDisposed) return;
+    if (recovered) {
+      astFailureCount = 0;
+    } else if (astFailureCount >= 2) {
       enableAstDiff.value = false;
+      tailRevealController.cancel();
       cleanupRegistry(props.message.id);
     }
   });
+}
+
+function handleAstFrameFailure(_sandbox: HTMLElement | null, reason: string): void {
+  recoverTailSnapshotOrDowngrade(reason);
+}
+
+function markTailFrameApplied(frame: TailFrame): void {
+  lastAppliedFrameSeq = frame.frameSeq;
+  lastAcceptedFrameSeq = Math.max(lastAcceptedFrameSeq, frame.frameSeq);
+  localTailStreamId = frame.streamId;
+  localTailEpoch = frame.epoch;
+  localTailRevision = frame.revision;
+  astFailureCount = 0;
+}
+
+const tailRevealController = createStreamRevealController<TailFrame>({
+  apply(targetId, text) {
+    const sandbox = tailSandboxRef.value;
+    if (!sandbox || sandbox !== lastSandbox || !useAstForCurrentTail.value) {
+      return false;
+    }
+    return applyFrame(
+      [{ op: "append", id: targetId, chunk: text }],
+      props.message.id,
+      sandbox,
+    ).ok;
+  },
+  complete(frame) {
+    if (
+      frame.streamId === localTailStreamId
+      && frame.epoch === localTailEpoch
+    ) {
+      markTailFrameApplied(frame);
+    }
+  },
+  fail(_frame, reason) {
+    handleAstFrameFailure(tailSandboxRef.value, `smooth reveal ${reason}`);
+  },
+});
+
+function shouldSmoothTailFrame(frame: TailFrame): boolean {
+  if (
+    !themeStore.smoothStreamingEnabled
+    || !isStreaming.value
+    || !useAstForCurrentTail.value
+    || props.isBackground === true
+    || typeof document !== "undefined" && document.hidden
+    || typeof window !== "undefined"
+      && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    || frame.reset === true
+    || frame.snapshot !== undefined
+  ) {
+    return false;
+  }
+
+  const mutations = frame.mutations || [];
+  return mutations.length === 1
+    && mutations[0].op === "append"
+    && canSmoothStreamAppend(mutations[0].chunk)
+    && (
+      props.message.tailBlock?.type === "markdown"
+      || props.message.tailBlock?.type === "thought"
+    );
 }
 
 // === Mermaid FullScreen States ===
@@ -645,9 +726,31 @@ watch(
   isMessageInActiveStream,
   (inStream, wasInStream) => {
     if (wasInStream && !inStream) {
+      tailRevealController.cancel();
       renderHeavyContent();
     }
   }
+);
+
+watch(
+  () => themeStore.smoothStreamingEnabled,
+  (enabled) => {
+    if (!enabled) tailRevealController.flush();
+  },
+);
+
+watch(
+  () => props.message.isReconnecting,
+  (isReconnecting) => {
+    if (isReconnecting) tailRevealController.flush();
+  },
+);
+
+watch(
+  () => props.isBackground,
+  (isBackground) => {
+    if (isBackground) tailRevealController.flush();
+  },
 );
 
 // === Context Menu ===
@@ -826,7 +929,7 @@ const fallbackTailSignature = computed(() => {
 });
 
 watch(
-  fallbackTailSignature,
+  [fallbackTailSignature, useAstForCurrentTail, tailRootRef],
   () => {
     const newTailBlock = props.message.tailBlock;
     if (useAstForCurrentTail.value) return; // 🆕 启用 AST Diff 且有节点时跳过 Morphdom
@@ -919,6 +1022,7 @@ watch(
     }
 
     if (!useAstForCurrentTail.value || !sandbox) {
+      tailRevealController.cancel();
       if (lastSandbox) {
         cleanupRegistry(props.message.id);
         lastSandbox.innerHTML = '';
@@ -928,9 +1032,11 @@ watch(
     }
 
     if (lastSandbox !== sandbox) {
+      tailRevealController.cancel();
       cleanupRegistry(props.message.id);
       sandbox.innerHTML = '';
       lastAppliedFrameSeq = 0;
+      lastAcceptedFrameSeq = 0;
       localTailStreamId = -1;
       localTailEpoch = -1;
       localTailRevision = -1;
@@ -942,13 +1048,14 @@ watch(
         // epochChanged 必为真，会触发第二次全量重建）。重建已用当前完整 tail AST，无需再来一次。
         if (frame) {
           lastAppliedFrameSeq = frame.frameSeq;
+          lastAcceptedFrameSeq = frame.frameSeq;
         }
       } else if (
         frame
         && frame.frameSeq > 1
         && !(frame.reset === true && frame.snapshot !== undefined)
       ) {
-        void requestCurrentTailSnapshot("sandbox_remount");
+        recoverTailSnapshotOrDowngrade("sandbox_remount");
         return;
       }
     }
@@ -966,17 +1073,18 @@ watch(
 
     // frameSeq 只在同一 stream/epoch 内有可比性；暖接续的新流必须先接管身份，
     // 不能被上一条流遗留的高序号提前拦截。
-    if (!explicitReset && frame.frameSeq <= lastAppliedFrameSeq) {
+    if (!explicitReset && frame.frameSeq <= lastAcceptedFrameSeq) {
       return;
     }
 
     if (explicitReset) {
+      tailRevealController.cancel();
       const snapshot = frame.snapshot ?? props.message.tailBlock?.nodes;
       const canStartFromEmpty = frame.reset !== true
         && frame.frameSeq === 1
         && lastAppliedFrameSeq === 0;
       if (snapshot === undefined && !canStartFromEmpty) {
-        void requestCurrentTailSnapshot("reset_without_snapshot");
+        recoverTailSnapshotOrDowngrade("reset_without_snapshot");
         return;
       }
       sandbox.innerHTML = '';
@@ -984,6 +1092,8 @@ watch(
       localTailStreamId = incomingStreamId;
       localTailEpoch = incomingEpoch;
       localTailRevision = incomingRevision;
+      lastAppliedFrameSeq = 0;
+      lastAcceptedFrameSeq = 0;
       if (snapshot !== undefined) {
         rebuildSnapshot(snapshot, props.message.id, sandbox);
       }
@@ -991,22 +1101,32 @@ watch(
 
     const mutations = frame.mutations || [];
     if (mutations.length === 0) {
-      lastAppliedFrameSeq = frame.frameSeq;
-      localTailStreamId = incomingStreamId;
-      localTailRevision = incomingRevision;
-      astFailureCount = 0;
+      if (!tailRevealController.flush()) return;
+      markTailFrameApplied(frame);
       return;
     }
+
+    if (!explicitReset && shouldSmoothTailFrame(frame)) {
+      const mutation = mutations[0];
+      if (mutation.op !== "append") return;
+      lastAcceptedFrameSeq = frame.frameSeq;
+      tailRevealController.enqueue({
+        targetId: mutation.id,
+        text: mutation.chunk,
+        metadata: frame,
+      });
+      return;
+    }
+
+    // 任何结构变化都是展示屏障：先合并追平已经接收的安全文本，再原子执行本帧。
+    if (!tailRevealController.flush()) return;
 
     if (debugEnabled) {
       astDebugLog(`[AST Diff Apply] Executing frame ${frame.frameSeq} (${mutations.length} mutations) for ${props.message.id}`);
     }
     const result = applyFrame(mutations, props.message.id, sandbox);
     if (result.ok) {
-      lastAppliedFrameSeq = frame.frameSeq;
-      localTailStreamId = incomingStreamId;
-      localTailRevision = incomingRevision;
-      astFailureCount = 0;
+      markTailFrameApplied(frame);
     } else {
       handleAstFrameFailure(sandbox, result.failed?.reason || "applyFrame failed");
     }
@@ -1015,6 +1135,8 @@ watch(
 );
 
 onUnmounted(() => {
+  rendererDisposed = true;
+  tailRevealController.dispose();
   removeScopedCss(props.message.id);
   cleanupRegistry(props.message.id);
 });

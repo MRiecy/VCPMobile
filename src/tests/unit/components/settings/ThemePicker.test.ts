@@ -130,6 +130,15 @@ describe('ThemePicker draft, preview and presentation controls', () => {
     expect(wrapper.get('[data-presentation-value="panel"]').attributes('aria-checked')).toBe('true');
     expect(wrapper.text()).toContain('消息呈现与内容宽度');
     expect(wrapper.text()).toContain('点选后立即生效');
+    expect(store.smoothStreamingEnabled).toBe(false);
+
+    await wrapper.get('[data-testid="smooth-streaming-switch"]').trigger('click');
+
+    expect(store.smoothStreamingEnabled).toBe(true);
+    expect(localStorage.getItem('vcp-smooth-streaming-enabled')).toBe('true');
+    expect(wrapper.text()).toContain('不改变回复内容');
+    expect(wrapper.get('[data-testid="smooth-streaming-switch"]').attributes('role')).toBe('switch');
+    expect(wrapper.get('[data-testid="smooth-streaming-switch"]').attributes('aria-checked')).toBe('true');
   });
 
   it('keeps message rendering controls out of the theme-only section', async () => {

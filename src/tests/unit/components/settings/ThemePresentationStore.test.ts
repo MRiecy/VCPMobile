@@ -47,6 +47,40 @@ describe('theme and chat presentation store contracts', () => {
     store.$dispose();
   });
 
+  it('keeps smooth streaming opt-in and restores the local rendering preference', () => {
+    const initialStore = useThemeStore();
+    expect(initialStore.smoothStreamingEnabled).toBe(false);
+    expect(initialStore.setSmoothStreamingEnabled(true)).toEqual({
+      ok: true,
+      changed: true,
+      enabled: true,
+    });
+    expect(localStorage.getItem('vcp-smooth-streaming-enabled')).toBe('true');
+    initialStore.$dispose();
+
+    setActivePinia(createPinia());
+    const restoredStore = useThemeStore();
+    expect(restoredStore.smoothStreamingEnabled).toBe(true);
+    restoredStore.$dispose();
+  });
+
+  it('keeps the previous smooth streaming preference when persistence fails', () => {
+    const store = useThemeStore();
+    const originalSetItem = localStorage.setItem.bind(localStorage);
+    vi.spyOn(localStorage, 'setItem').mockImplementation((key, value) => {
+      if (key === 'vcp-smooth-streaming-enabled') throw new Error('quota exceeded');
+      return originalSetItem(key, value);
+    });
+
+    const result = store.setSmoothStreamingEnabled(true);
+
+    expect(result.ok).toBe(false);
+    expect(result.changed).toBe(false);
+    expect(result.enabled).toBe(false);
+    expect(store.smoothStreamingEnabled).toBe(false);
+    store.$dispose();
+  });
+
   it('keeps the previous presentation mode when local persistence fails', () => {
     const store = useThemeStore();
     expect(store.setPresentationMode('panel').ok).toBe(true);
