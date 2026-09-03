@@ -362,17 +362,36 @@ pub fn highlight_code_block(code: &str, lang: &str) -> Option<String> {
     let mut html_generator =
         ClassedHTMLGenerator::new_with_class_style(syntax, &SYNTAX_SET, ClassStyle::Spaced);
 
-    for line in code.split('\n') {
-        let mut line_with_nl = line.to_string();
-        line_with_nl.push('\n');
-        html_generator
-            .parse_html_for_line_which_includes_newline(&line_with_nl)
-            .ok()?;
+    // newline 敏感的语法定义要求每行带换行结尾；原文最后一行若没有换行，
+    // 临时补一个参与解析，输出前再摘除（不属于原文，否则块尾会多出空行）。
+    let needs_synthetic_newline = !code.is_empty() && !code.ends_with('\n');
+    for line in LinesWithEndings::from(code) {
+        if line.ends_with('\n') {
+            html_generator
+                .parse_html_for_line_which_includes_newline(line)
+                .ok()?;
+        } else {
+            let mut owned = line.to_string();
+            owned.push('\n');
+            html_generator
+                .parse_html_for_line_which_includes_newline(&owned)
+                .ok()?;
+        }
+    }
+
+    let mut html = html_generator.finalize();
+    if needs_synthetic_newline {
+        if html.ends_with("\n</span>") {
+            html.truncate(html.len() - "\n</span>".len());
+            html.push_str("</span>");
+        } else if html.ends_with('\n') {
+            html.pop();
+        }
     }
 
     Some(format!(
         "<pre class=\"vcp-code-block vcp-scrollable\"><code>{}</code></pre>",
-        html_generator.finalize()
+        html
     ))
 }
 
@@ -457,5 +476,54 @@ mod tests {
             html,
             "<span class=\"comment block rust\">a</span>=<span class=\"comment block rust\">b</span>"
         );
+    }
+
+    #[test]
+    fn highlight_code_block_preserves_source_text_exactly() {
+        let code = "fn main() {\n    let x = 1;\n    if x > 0 {\n        println!(\"{}\", x);\n    }\n}";
+        let html = highlight_code_block(code, "rust").expect("highlight should succeed");
+        let inner = html
+            .strip_prefix("<pre class=\"vcp-code-block vcp-scrollable\"><code>")
+            .and_then(|s| s.strip_suffix("</code></pre>"))
+            .expect("shell wrapper");
+        assert_eq!(strip_tags_for_test(inner), code);
+    }
+
+    #[test]
+    fn incremental_stream_preserves_source_text_across_patches() {
+        let v1 = "fn main() {\n    let x";
+        let v2 = "fn main() {\n    let x = 1;\n    if x > 0 {\n        println!(\"{}\", x);\n    }\n}";
+        let mut highlighter = IncrementalCodeHighlighter::default();
+        highlighter.begin_frame();
+        let start_html = highlighter.start("n1", v1, "rust").expect("start");
+        assert_eq!(strip_tags_for_test(&start_html), v1);
+
+        let patch = highlighter.append("n1", v1, v2, "rust").expect("append");
+        let mut dom_text = strip_tags_for_test(&start_html);
+        dom_text = format!(
+            "{}{}{}",
+            // start 的活跃行被 replace：去掉 v1 的活跃部分 "    let x"
+            &dom_text[..dom_text.len() - "    let x".len()],
+            strip_tags_for_test(&patch.completed_html),
+            strip_tags_for_test(&patch.active_html),
+        );
+        assert_eq!(dom_text, v2);
+    }
+
+    fn strip_tags_for_test(html: &str) -> String {
+        let mut out = String::new();
+        let mut in_tag = false;
+        for ch in html.chars() {
+            match ch {
+                '<' => in_tag = true,
+                '>' => in_tag = false,
+                _ if !in_tag => out.push(ch),
+                _ => {}
+            }
+        }
+        out.replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
     }
 }
