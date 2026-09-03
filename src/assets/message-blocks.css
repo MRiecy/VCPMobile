@@ -163,17 +163,29 @@
 }
 
 /* --- Code Block Container --- */
-.vcp-markdown-block pre {
+/* 代码块外壳唯一定义点：类锚定（后端所有代码块产出路径均携带 vcp-code-block）。
+   有意保持 pre. 前缀抬升优先级，使 "某容器 pre" 式语境规则无法静默覆盖本规则，
+   特调（如 .vcp-tool-block、.html-preview-block 例外）必须显式写得更具体。
+   外壳亮暗两态：默认亮底深字，html.dark 下深底浅字；
+   token 配色统一下方 Classed Syntect 调色板（与 .vcp-html-block 共享）。 */
+pre.vcp-code-block {
   border-radius: 8px;
-  background: #2b303b;
+  background: #f6f8fa;
   padding: 12px;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(0, 0, 0, 0.08);
   margin: 8px 0;
   max-width: 100%;
   font-size: 0.8em;
   line-height: 1.6;
+  color: #24292e;
+}
+
+html.dark pre.vcp-code-block {
+  background: #2b303b;
+  border-color: rgba(255, 255, 255, 0.08);
+  color: #c9d1d9;
 }
 
 /* Code typography */
@@ -717,33 +729,92 @@ html.dark .vcp-diary-update-block.is-valet .vcp-diary-update-content {
   }
 }
 
-/* === Classed Syntect 专属 HTML 代码预览块自适应高亮主题系统 (.vcp-html-block) === */
+/* === Classed Syntect 自适应高亮主题系统（.vcp-html-block / .vcp-code-block 共享） === */
+/* 后端统一输出 scope 派生类 span（keyword/string/comment 等 atom 类，无内联样式），
+   token 颜色全部在此按亮暗两态定义；!important 防御容器级 color 规则干扰 token 配色。 */
 
 /* 暗色主题高亮 (GitHub Dark 风格自适应) */
-html.dark .vcp-html-block .keyword,
-html.dark .vcp-html-block .storage,
-html.dark .vcp-html-block .tag,
-html.dark .vcp-html-block .name { color: #ff7b72 !important; }
-html.dark .vcp-html-block .attribute { color: #79c0ff !important; }
-html.dark .vcp-html-block .string { color: #a5d6ff !important; }
-html.dark .vcp-html-block .comment { color: #8b949e !important; font-style: italic !important; }
-html.dark .vcp-html-block .constant,
-html.dark .vcp-html-block .numeric { color: #d2a8ff !important; }
-html.dark .vcp-html-block .variable { color: #ffa657 !important; }
-html.dark .vcp-html-block .punctuation { color: #c9d1d9 !important; }
+html.dark :is(.vcp-html-block, .vcp-code-block) .keyword,
+html.dark :is(.vcp-html-block, .vcp-code-block) .storage,
+html.dark :is(.vcp-html-block, .vcp-code-block) .tag,
+html.dark :is(.vcp-html-block, .vcp-code-block) .name { color: #ff7b72 !important; }
+html.dark :is(.vcp-html-block, .vcp-code-block) .attribute,
+html.dark :is(.vcp-html-block, .vcp-code-block) .support { color: #79c0ff !important; }
+html.dark :is(.vcp-html-block, .vcp-code-block) .string { color: #a5d6ff !important; }
+html.dark :is(.vcp-html-block, .vcp-code-block) .comment { color: #8b949e !important; font-style: italic !important; }
+html.dark :is(.vcp-html-block, .vcp-code-block) .constant,
+html.dark :is(.vcp-html-block, .vcp-code-block) .numeric { color: #d2a8ff !important; }
+html.dark :is(.vcp-html-block, .vcp-code-block) .variable { color: #ffa657 !important; }
+html.dark :is(.vcp-html-block, .vcp-code-block) .punctuation { color: #c9d1d9 !important; }
+html.dark :is(.vcp-html-block, .vcp-code-block) .invalid { color: #ff7b72 !important; }
 
 /* 亮色主题高亮 (GitHub Light 风格自适应) */
-html:not(.dark) .vcp-html-block .keyword,
-html:not(.dark) .vcp-html-block .storage,
-html:not(.dark) .vcp-html-block .tag,
-html:not(.dark) .vcp-html-block .name { color: #d73a49 !important; }
-html:not(.dark) .vcp-html-block .attribute { color: #005cc5 !important; }
-html:not(.dark) .vcp-html-block .string { color: #032f62 !important; }
-html:not(.dark) .vcp-html-block .comment { color: #6a737d !important; font-style: italic !important; }
-html:not(.dark) .vcp-html-block .constant,
-html:not(.dark) .vcp-html-block .numeric { color: #005cc5 !important; }
-html:not(.dark) .vcp-html-block .variable { color: #e36209 !important; }
-html:not(.dark) .vcp-html-block .punctuation { color: #24292e !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .keyword,
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .storage,
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .tag,
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .name { color: #d73a49 !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .attribute,
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .support { color: #005cc5 !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .string { color: #032f62 !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .comment { color: #6a737d !important; font-style: italic !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .constant,
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .numeric { color: #005cc5 !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .variable { color: #e36209 !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .punctuation { color: #24292e !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .invalid { color: #d73a49 !important; }
+
+/* --- 语义扩展组：diff / markup / 选择器（对齐旧 base16 内联主题的覆盖家族） ---
+   类化输出只携带类名不带 font-style，粗斜体在此一并补回。 */
+
+/* diff 代码块（markup.inserted/deleted/changed/ignored/untracked） */
+html.dark :is(.vcp-html-block, .vcp-code-block) .inserted { color: #7ee787 !important; }
+html.dark :is(.vcp-html-block, .vcp-code-block) .deleted { color: #ffa198 !important; }
+html.dark :is(.vcp-html-block, .vcp-code-block) .changed { color: #d2a8ff !important; }
+html.dark :is(.vcp-html-block, .vcp-code-block) .ignored,
+html.dark :is(.vcp-html-block, .vcp-code-block) .untracked { color: #8b949e !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .inserted { color: #1a7f37 !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .deleted { color: #cf222e !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .changed { color: #6f42c1 !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .ignored,
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .untracked { color: #6a737d !important; }
+
+/* markdown 代码块（markup.heading/bold/italic/quote/raw/list） */
+html.dark :is(.vcp-html-block, .vcp-code-block) .heading { color: #79c0ff !important; font-weight: 600 !important; }
+html.dark :is(.vcp-html-block, .vcp-code-block) .bold { color: #e5c07b !important; font-weight: 600 !important; }
+html.dark :is(.vcp-html-block, .vcp-code-block) .italic { color: #d2a8ff !important; font-style: italic !important; }
+html.dark :is(.vcp-html-block, .vcp-code-block) .quote { color: #8b949e !important; }
+html.dark :is(.vcp-html-block, .vcp-code-block) .raw { color: #a5d6ff !important; }
+html.dark :is(.vcp-html-block, .vcp-code-block) .list { color: #ff7b72 !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .heading { color: #005cc5 !important; font-weight: 600 !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .bold { color: #e36209 !important; font-weight: 600 !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .italic { color: #6f42c1 !important; font-style: italic !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .quote { color: #6a737d !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .raw { color: #032f62 !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .list { color: #d73a49 !important; }
+
+/* CSS 代码块选择器（meta.selector，span 同时携带 meta/selector 两个 atom 类） */
+html.dark :is(.vcp-html-block, .vcp-code-block) .meta.selector { color: #d2a8ff !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .meta.selector { color: #6f42c1 !important; }
+
+/* markdown 代码块链接/图片（meta.link / meta.image） */
+html.dark :is(.vcp-html-block, .vcp-code-block) .link,
+html.dark :is(.vcp-html-block, .vcp-code-block) .image { color: #ffa657 !important; }
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .link,
+html:not(.dark) :is(.vcp-html-block, .vcp-code-block) .image { color: #e36209 !important; }
+
+/* HtmlPreviewBlock 卡片内的流式增量 pre（#code slot 的 .vcp-ast-sandbox 直挂 DOM）：
+   透明化外壳融入卡片自带容器，与完成态 .vcp-html-highlighted-wrapper 的重置同构，
+   避免流式期间出现 "卡片里塞了一块普通深色代码块" 的突兀外观。 */
+.html-preview-block pre.vcp-code-block {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
+  margin: 0;
+  font-size: inherit;
+  line-height: inherit;
+}
 
 /* 完整 chunk 已进入布局；只用 / 形柔边从左向右揭露像素。 */
 @keyframes vcp-stream-element-reveal {

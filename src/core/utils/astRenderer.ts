@@ -189,6 +189,14 @@ export function clearMessageCache(messageId: string): void {
 }
 
 /**
+ * 给 marked 产出的裸 <pre> 注入代码块身份类，使其被全局 pre.vcp-code-block 外壳规则接管。
+ * Aurora AST 管线的 pre 已由后端携带该类，此函数仅覆盖 marked 渲染路径。
+ */
+export function withCodeBlockClass(html: string): string {
+  return html.replace(/<pre>/g, '<pre class="vcp-code-block vcp-scrollable">');
+}
+
+/**
  * 将 Rust 预渲染的 AST 节点树转换为 HTML 字符串
  */
 export function renderMarkdownNodes(

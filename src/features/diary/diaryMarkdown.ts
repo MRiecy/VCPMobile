@@ -1,4 +1,5 @@
 import { Marked } from "marked";
+import { withCodeBlockClass } from "../../core/utils/astRenderer";
 
 const diaryMarked = new Marked({
   gfm: true,
@@ -13,7 +14,7 @@ const diaryMarked = new Marked({
 export function renderDiaryMarkdown(content: string): string {
   try {
     const safeReferences = content.replace(/^(\s*)\[([^\]]+)\]:/gm, "$1\\[$2\\]:");
-    return diaryMarked.parse(safeReferences) as string;
+    return withCodeBlockClass(diaryMarked.parse(safeReferences) as string);
   } catch (error) {
     console.error("[DiaryCenter] Markdown render failed", error);
     return "<p>正文渲染失败，请切换到编辑态查看原文。</p>";

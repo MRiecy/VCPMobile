@@ -1,17 +1,11 @@
 use lazy_static::lazy_static;
 use std::collections::HashMap;
-use syntect::easy::HighlightLines;
-use syntect::highlighting::{Color, HighlightState, Theme, ThemeSet};
-use syntect::html::{
-    append_highlighted_html_for_styled_line, highlighted_html_for_string, ClassStyle,
-    ClassedHTMLGenerator, IncludeBackground,
-};
-use syntect::parsing::{ParseState, SyntaxReference, SyntaxSet};
+use syntect::html::{ClassStyle, ClassedHTMLGenerator};
+use syntect::parsing::{ParseState, Scope, ScopeStack, ScopeStackOp, SyntaxReference, SyntaxSet};
 use syntect::util::LinesWithEndings;
 
 lazy_static! {
     static ref SYNTAX_SET: SyntaxSet = SyntaxSet::load_defaults_newlines();
-    static ref THEME_SET: ThemeSet = ThemeSet::load_defaults();
 }
 
 const STREAM_CODE_ROOT_ATTR: &str = "data-vcp-stream-code";
@@ -26,15 +20,16 @@ pub struct IncrementalCodePatch {
 struct CodeHighlightSession {
     language: String,
     committed_len: usize,
-    highlight_state: HighlightState,
     parse_state: ParseState,
+    scope_stack: ScopeStack,
     seen_generation: u64,
 }
 
 /// Aurora 活跃代码块的增量 Syntect 状态。
 ///
-/// 每个节点只保留「最后一个完整换行之后」的解析/高亮状态和一个字节游标；代码原文仍由
+/// 每个节点只保留「最后一个完整换行之后」的解析状态（含 scope 栈）和一个字节游标；代码原文仍由
 /// `prev_tail_ast` 单独持有，已生成的 HTML 只存在于前端 DOM，避免后端再保存一份等长镜像。
+/// 输出为平铺的 scope 派生类 span（无内联样式、恒在行内闭合），token 配色由前端 CSS 按亮暗两态定义。
 #[derive(Default)]
 pub struct IncrementalCodeHighlighter {
     sessions: HashMap<String, CodeHighlightSession>,
@@ -96,7 +91,7 @@ impl IncrementalCodeHighlighter {
     ) -> Option<IncrementalCodePatch> {
         new_code.strip_prefix(old_code)?;
 
-        let (committed_len, highlight_state, parse_state) = {
+        let (committed_len, parse_state, scope_stack) = {
             let session = self.sessions.get(id)?;
             if !session.language.eq_ignore_ascii_case(lang)
                 || session.committed_len > old_code.len()
@@ -105,8 +100,8 @@ impl IncrementalCodeHighlighter {
             }
             (
                 session.committed_len,
-                session.highlight_state.clone(),
                 session.parse_state.clone(),
+                session.scope_stack.clone(),
             )
         };
 
@@ -114,21 +109,15 @@ impl IncrementalCodeHighlighter {
         let completed_len = complete_line_prefix_len(pending);
         let completed = &pending[..completed_len];
         let active = &pending[completed_len..];
-        let theme = default_theme()?;
 
-        let (next_highlight_state, next_parse_state, completed_html) =
-            advance_complete_lines(highlight_state, parse_state, completed, theme, true)?;
-        let active_html = render_active_line(
-            next_highlight_state.clone(),
-            next_parse_state.clone(),
-            active,
-            theme,
-        )?;
+        let (next_parse_state, next_scope_stack, completed_html) =
+            advance_complete_lines(parse_state, scope_stack, completed, true)?;
+        let active_html = render_active_line(next_parse_state.clone(), next_scope_stack.clone(), active)?;
 
         let session = self.sessions.get_mut(id)?;
         session.committed_len = committed_len.saturating_add(completed_len);
-        session.highlight_state = next_highlight_state;
         session.parse_state = next_parse_state;
+        session.scope_stack = next_scope_stack;
         session.seen_generation = self.generation;
 
         Some(IncrementalCodePatch {
@@ -155,13 +144,6 @@ fn syntax_for_language(lang: &str) -> &SyntaxReference {
         })
 }
 
-fn default_theme() -> Option<&'static Theme> {
-    THEME_SET
-        .themes
-        .get("base16-ocean.dark")
-        .or_else(|| THEME_SET.themes.values().next())
-}
-
 fn complete_line_prefix_len(code: &str) -> usize {
     code.rfind('\n').map_or(0, |index| index + 1)
 }
@@ -173,16 +155,15 @@ fn build_session(
     generation: u64,
 ) -> Option<(CodeHighlightSession, String, String)> {
     let syntax = syntax_for_language(lang);
-    let theme = default_theme()?;
-    let highlighter = HighlightLines::new(syntax, theme);
-    let (highlight_state, parse_state) = highlighter.state();
+    let parse_state = ParseState::new(syntax);
+    let scope_stack = ScopeStack::new();
     let committed_len = complete_line_prefix_len(code);
     let completed = &code[..committed_len];
     let active = &code[committed_len..];
-    let (highlight_state, parse_state, completed_html) =
-        advance_complete_lines(highlight_state, parse_state, completed, theme, render_html)?;
+    let (parse_state, scope_stack, completed_html) =
+        advance_complete_lines(parse_state, scope_stack, completed, render_html)?;
     let active_html = if render_html {
-        render_active_line(highlight_state.clone(), parse_state.clone(), active, theme)?
+        render_active_line(parse_state.clone(), scope_stack.clone(), active)?
     } else {
         String::new()
     };
@@ -191,8 +172,8 @@ fn build_session(
         CodeHighlightSession {
             language: normalize_language(lang),
             committed_len,
-            highlight_state,
             parse_state,
+            scope_stack,
             seen_generation: generation,
         },
         completed_html,
@@ -201,64 +182,144 @@ fn build_session(
 }
 
 fn advance_complete_lines(
-    highlight_state: HighlightState,
-    parse_state: ParseState,
+    mut parse_state: ParseState,
+    mut scope_stack: ScopeStack,
     code: &str,
-    theme: &Theme,
     render_html: bool,
-) -> Option<(HighlightState, ParseState, String)> {
-    let mut highlighter = HighlightLines::from_state(theme, highlight_state, parse_state);
+) -> Option<(ParseState, ScopeStack, String)> {
     let mut html = String::new();
-    let background = theme.settings.background.unwrap_or(Color::WHITE);
 
     for line in LinesWithEndings::from(code) {
-        let regions = highlighter.highlight_line(line, &SYNTAX_SET).ok()?;
+        let ops = parse_state.parse_line(line, &SYNTAX_SET).ok()?;
         if render_html {
-            append_highlighted_html_for_styled_line(
-                &regions,
-                IncludeBackground::IfDifferent(background),
-                &mut html,
-            )
-            .ok()?;
+            let line_html = classed_line_html(line, &ops, &mut scope_stack)?;
+            html.push_str(&line_html);
+        } else {
+            for (_, op) in &ops {
+                scope_stack.apply(op).ok()?;
+            }
         }
     }
 
-    let (highlight_state, parse_state) = highlighter.state();
-    Some((highlight_state, parse_state, html))
+    Some((parse_state, scope_stack, html))
 }
 
 fn render_active_line(
-    highlight_state: HighlightState,
     parse_state: ParseState,
+    scope_stack: ScopeStack,
     code: &str,
-    theme: &Theme,
 ) -> Option<String> {
     if code.is_empty() {
         return Some(String::new());
     }
 
-    let mut highlighter = HighlightLines::from_state(theme, highlight_state, parse_state);
-    let regions = highlighter.highlight_line(code, &SYNTAX_SET).ok()?;
-    let background = theme.settings.background.unwrap_or(Color::WHITE);
+    let mut parse_state = parse_state;
+    let mut scope_stack = scope_stack;
+    let ops = parse_state.parse_line(code, &SYNTAX_SET).ok()?;
+    classed_line_html(code, &ops, &mut scope_stack)
+}
+
+/// 把一行 token 按「最内层 scope」平铺输出为行内自闭合的类化 span。
+///
+/// 与 ClassedHTMLGenerator 的跨行嵌套输出刻意不同：平铺 span 恒在本行内闭合，
+/// 增量补丁的稳定区/活跃行才能作为两个互相独立的 DOM 片段安全拼接；
+/// 类名与 ClassStyle::Spaced 一致（scope atom 空格分隔），与 .vcp-html-block 共享同一套 CSS 调色板。
+///
+/// 发射层面两个性能不变量：
+/// - 相邻同 scope 的 token 合并进同一个 span（op 边界处内层 scope 开关而栈顶不变是常态），
+///   压缩 HTML 体积与前端 DOM 节点数；
+/// - scope → 类名字符串带单条目缓存，避免每个 token 都锁全局 scope 仓库并重复分配。
+fn classed_line_html(
+    line: &str,
+    ops: &[(usize, ScopeStackOp)],
+    stack: &mut ScopeStack,
+) -> Option<String> {
     let mut html = String::new();
-    append_highlighted_html_for_styled_line(
-        &regions,
-        IncludeBackground::IfDifferent(background),
-        &mut html,
-    )
-    .ok()?;
+    let mut cursor = 0;
+    let mut open_scope: Option<Scope> = None;
+    let mut class_cache: Option<(Scope, String)> = None;
+
+    for (index, op) in ops {
+        if *index > cursor {
+            append_classed_token(
+                &mut html,
+                &line[cursor..*index],
+                stack,
+                &mut open_scope,
+                &mut class_cache,
+            );
+            cursor = *index;
+        }
+        stack.apply(op).ok()?;
+    }
+    if cursor < line.len() {
+        append_classed_token(
+            &mut html,
+            &line[cursor..],
+            stack,
+            &mut open_scope,
+            &mut class_cache,
+        );
+    }
+    if open_scope.is_some() {
+        html.push_str("</span>");
+    }
+
     Some(html)
 }
 
+fn append_classed_token(
+    html: &mut String,
+    text: &str,
+    stack: &ScopeStack,
+    open_scope: &mut Option<Scope>,
+    class_cache: &mut Option<(Scope, String)>,
+) {
+    if text.is_empty() {
+        return;
+    }
+    let top = stack.scopes.last().copied();
+    if *open_scope == top {
+        // 栈顶未变：直接续进当前打开的 span（或继续裸文本），不新开标签。
+        escape_html_into(html, text);
+        return;
+    }
+    if open_scope.is_some() {
+        html.push_str("</span>");
+    }
+    *open_scope = top;
+    if let Some(scope) = top {
+        let class = match class_cache {
+            Some((cached_scope, cached_class)) if *cached_scope == scope => cached_class,
+            _ => {
+                *class_cache = Some((scope, scope.to_string().replace('.', " ")));
+                &class_cache.as_ref().expect("cache just filled").1
+            }
+        };
+        html.push_str("<span class=\"");
+        html.push_str(class);
+        html.push_str("\">");
+    }
+    escape_html_into(html, text);
+}
+
+fn escape_html_into(html: &mut String, text: &str) {
+    for ch in text.chars() {
+        match ch {
+            '&' => html.push_str("&amp;"),
+            '<' => html.push_str("&lt;"),
+            '>' => html.push_str("&gt;"),
+            _ => html.push(ch),
+        }
+    }
+}
+
+/// 仅输出带稳定区/活跃行锚点的纯净外壳。
+/// 背景、边框等外壳样式移交前端全局 CSS（pre.vcp-code-block）做亮暗自适应，
+/// 不再把 syntect 主题底色硬编码为内联样式（否则前端任何定制都压不过内联）。
 fn wrap_incremental_code_html(completed_html: &str, active_html: &str) -> String {
-    let background = default_theme()
-        .and_then(|theme| theme.settings.background)
-        .unwrap_or(Color::WHITE);
     format!(
-        "<pre class=\"vcp-code-block vcp-scrollable\" style=\"background-color:#{:02x}{:02x}{:02x};\"><code {}><span {}>{}</span><span {}>{}</span></code></pre>",
-        background.r,
-        background.g,
-        background.b,
+        "<pre class=\"vcp-code-block vcp-scrollable\"><code {}><span {}>{}</span><span {}>{}</span></code></pre>",
         STREAM_CODE_ROOT_ATTR,
         STREAM_CODE_STABLE_ATTR,
         completed_html,
@@ -268,7 +329,7 @@ fn wrap_incremental_code_html(completed_html: &str, active_html: &str) -> String
 }
 
 /// 专属 HTML 全预览卡片的高性能 Classed Syntect 高亮器
-/// 仅输出纯净的带语义类名的 DOM (DoubleMinus 模式，c--tag 等)，绝不硬编码任何 inline style！
+/// 仅输出纯净的带语义类名的 DOM（ClassStyle::Spaced，keyword/tag/string 等 scope 派生类），绝不硬编码任何 inline style！
 pub fn highlight_html_block(code: &str) -> Option<String> {
     let syntax = SYNTAX_SET
         .find_syntax_by_token("html")
@@ -287,26 +348,114 @@ pub fn highlight_html_block(code: &str) -> Option<String> {
     let html = html_generator.finalize();
 
     Some(format!(
-        "<pre class=\"vcp-code-block vcp-html-block vcp-scrollable\"><code>{}</code></pre>",
+        "<pre class=\"vcp-html-block vcp-scrollable\"><code>{}</code></pre>",
         html
     ))
 }
 
+/// 完成态普通代码块的一次性类化高亮（非流式持久化解析路径）。
+/// 与增量路径一致输出 ClassStyle::Spaced 类化 span，外壳只挂 vcp-code-block 锚点类，
+/// 底色与 token 配色全部移交前端全局 CSS（pre.vcp-code-block）按亮暗两态定义。
 pub fn highlight_code_block(code: &str, lang: &str) -> Option<String> {
     let syntax = syntax_for_language(lang);
-    let theme = default_theme()?;
 
-    let html = highlighted_html_for_string(code, &SYNTAX_SET, syntax, theme).ok()?;
+    let mut html_generator =
+        ClassedHTMLGenerator::new_with_class_style(syntax, &SYNTAX_SET, ClassStyle::Spaced);
 
-    // 统一添加 vcp-code-block 和 vcp-scrollable 类，并确保单层 pre 结构
-    let fixed = if html.starts_with("<pre") {
-        html.replacen("<pre", "<pre class=\"vcp-code-block vcp-scrollable\"", 1)
-    } else {
-        format!(
-            "<pre class=\"vcp-code-block vcp-scrollable\">{}</pre>",
-            html
-        )
-    };
+    for line in code.split('\n') {
+        let mut line_with_nl = line.to_string();
+        line_with_nl.push('\n');
+        html_generator
+            .parse_html_for_line_which_includes_newline(&line_with_nl)
+            .ok()?;
+    }
 
-    Some(fixed)
+    Some(format!(
+        "<pre class=\"vcp-code-block vcp-scrollable\"><code>{}</code></pre>",
+        html_generator.finalize()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn highlight_code_block_emits_classed_spans_without_inline_styles() {
+        let html =
+            highlight_code_block("fn main() {}\n", "rust").expect("highlight should succeed");
+        assert!(html.starts_with("<pre class=\"vcp-code-block vcp-scrollable\"><code>"));
+        assert!(html.contains("class=\""));
+        assert!(!html.contains("style="));
+    }
+
+    #[test]
+    fn incremental_start_emits_anchors_with_classed_spans() {
+        let mut highlighter = IncrementalCodeHighlighter::default();
+        highlighter.begin_frame();
+        let html = highlighter
+            .start("n1", "let a = 1;\nlet b", "rust")
+            .expect("incremental start should succeed");
+        assert!(html.contains(STREAM_CODE_ROOT_ATTR));
+        assert!(html.contains(STREAM_CODE_STABLE_ATTR));
+        assert!(html.contains(STREAM_CODE_ACTIVE_ATTR));
+        assert!(html.contains("class=\""));
+        assert!(!html.contains("style="));
+    }
+
+    #[test]
+    fn incremental_append_emits_classed_patch_without_inline_styles() {
+        let mut highlighter = IncrementalCodeHighlighter::default();
+        highlighter.begin_frame();
+        highlighter
+            .start("n1", "let a = 1;\nlet b", "rust")
+            .expect("incremental start should succeed");
+        let patch = highlighter
+            .append("n1", "let a = 1;\nlet b", "let a = 1;\nlet b = 2;\nlet c", "rust")
+            .expect("append patch should succeed");
+        assert!(patch.completed_html.contains("class=\""));
+        assert!(patch.completed_html.contains('2'));
+        assert!(patch.active_html.contains("let"));
+        assert!(patch.active_html.contains('c'));
+        assert!(!patch.completed_html.contains("style="));
+        assert!(!patch.active_html.contains("style="));
+    }
+
+    #[test]
+    fn flat_emitter_merges_adjacent_tokens_sharing_top_scope() {
+        let scope = Scope::new("source.rust").expect("valid scope");
+        // Noop 制造 op 边界但栈顶不变：两段 token 应合并进同一个 span。
+        let ops = [(0, ScopeStackOp::Push(scope)), (2, ScopeStackOp::Noop)];
+        let mut stack = ScopeStack::new();
+        let html = classed_line_html("aabb", &ops, &mut stack).expect("emit should succeed");
+        assert_eq!(html, "<span class=\"source rust\">aabb</span>");
+    }
+
+    #[test]
+    fn flat_emitter_splits_on_top_scope_change_and_escapes_bare_text() {
+        let keyword = Scope::new("keyword.control.rust").expect("valid scope");
+        // "if" 在 keyword 内，"<" 弹栈后为无 scope 裸文本，必须转义且不包 span。
+        let ops = [(0, ScopeStackOp::Push(keyword)), (2, ScopeStackOp::Pop(1))];
+        let mut stack = ScopeStack::new();
+        let html = classed_line_html("if<", &ops, &mut stack).expect("emit should succeed");
+        assert_eq!(html, "<span class=\"keyword control rust\">if</span>&lt;");
+    }
+
+    #[test]
+    fn flat_emitter_reuses_scope_class_cache_across_tokens() {
+        // 两段同 scope 裸文本之间隔一个无 scope 段：第二次开 span 仍走缓存，输出一致。
+        let scope = Scope::new("comment.block.rust").expect("valid scope");
+        let ops = [
+            (0, ScopeStackOp::Push(scope)),
+            (1, ScopeStackOp::Pop(1)),
+            (2, ScopeStackOp::Push(scope)),
+            (3, ScopeStackOp::Pop(1)),
+        ];
+        let mut stack = ScopeStack::new();
+        let html = classed_line_html("a=b", &ops, &mut stack).expect("emit should succeed");
+        assert_eq!(
+            html,
+            "<span class=\"comment block rust\">a</span>=<span class=\"comment block rust\">b</span>"
+        );
+    }
 }

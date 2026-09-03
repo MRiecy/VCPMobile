@@ -5,6 +5,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 import { useUpdateStore } from '../../core/stores/update';
 import { marked } from 'marked';
+import { withCodeBlockClass } from '../../core/utils/astRenderer';
 import DOMPurify from 'dompurify';
 
 const props = defineProps<{
@@ -67,7 +68,7 @@ marked.setOptions({ breaks: true, gfm: true });
 
 const releaseNotesHtml = computed(() => {
   if (!props.releaseNotes) return '';
-  const parsed = marked.parse(props.releaseNotes);
+  const parsed = withCodeBlockClass(marked.parse(props.releaseNotes) as string);
   return DOMPurify.sanitize(parsed as string);
 });
 

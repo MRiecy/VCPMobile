@@ -2,7 +2,7 @@
 import { ref, watch, nextTick } from "vue";
 import { marked } from "marked";
 import type { ChatMessage } from "../../core/types/chat";
-import { filterTrustedRichHtml } from "../../core/utils/astRenderer";
+import { filterTrustedRichHtml, withCodeBlockClass } from "../../core/utils/astRenderer";
 
 const props = defineProps<{
   message: ChatMessage;
@@ -20,7 +20,7 @@ marked.setOptions({
 function renderMarkdown(text: string): string {
   if (!text) return "";
   try {
-    return filterTrustedRichHtml(marked.parse(text) as string);
+    return filterTrustedRichHtml(withCodeBlockClass(marked.parse(text) as string));
   } catch {
     return escapeHtml(text);
   }
