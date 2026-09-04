@@ -835,12 +835,13 @@ impl AuroraBuffer {
             } else {
                 let exceeds_speculative_cap =
                     self.tail_content.len() > MAX_SPECULATIVE_TAIL_AST_BYTES;
-                // 代码围栏与协议块 tail 均为增量路径（O(chunk)/帧），不再受投机上限约束；
-                // 上限如今只兜底仍是 O(tail)/帧 的通用 Markdown / Thought tail（病理防呆）。
+                // 代码围栏 / HtmlDoc / 协议块 tail 均为增量路径（O(chunk)/帧），不再受投机
+                // 上限约束；上限如今只兜底仍是 O(tail)/帧 的通用 Markdown / Thought tail。
                 let incremental_tail = matches!(
                     raw_tail_type,
                     Some(
                         BlockType::CodeFence
+                            | BlockType::HtmlDoc
                             | BlockType::Tool
                             | BlockType::ToolResult
                             | BlockType::ToolCallSummary
@@ -857,6 +858,14 @@ impl AuroraBuffer {
                     // 代码围栏 tail 快速路径：stream 层已保证 tail = 开围栏行 + 未闭合内容，
                     // 跳过整条 Markdown 预处理管线（4 道全文本预处理 + pulldown），直接构造节点
                     Some(code_fence_tail_nodes(&self.tail_content))
+                } else if raw_tail_type == Some(BlockType::HtmlDoc) {
+                    // HtmlDoc = 未写围栏的完整 HTML 文档，与 ```html 围栏同族：
+                    // 流式期按 html 源码走增量高亮（与围栏代码块共用下游 PatchCode 管线），
+                    // 闭合后由 stream 层沉淀为 HtmlPreview 卡片。
+                    Some(vec![MarkdownNode::code_block(
+                        Some("html".to_string()),
+                        self.tail_content.clone(),
+                    )])
                 } else if matches!(
                     raw_tail_type,
                     Some(BlockType::Tool | BlockType::ToolResult | BlockType::ToolCallSummary)
@@ -864,7 +873,8 @@ impl AuroraBuffer {
                     // 未闭合协议块 tail：与桌面端 VCPChat 的「封印」语义对齐——转义原文包在
                     // 等宽 pre 里逐字显示（此处借 plaintext 代码节点走增量高亮的纯文本路径）。
                     // 协议文本不是 Markdown：逐帧解析既浪费，又可能被 * / $$ 等字符意外格式化。
-                    // Diary/Thought/Style/HtmlDoc 不在此列（日记与思维链正文本身是 Markdown）。
+                    // Diary/Thought/Style 不在此列（日记与思维链正文本身是 Markdown；
+                    // HtmlDoc 已在上一步路由进 html 源码增量路径）。
                     Some(vec![MarkdownNode::code_block(
                         Some("plaintext".to_string()),
                         self.tail_content.clone(),
@@ -1827,6 +1837,75 @@ mod tests {
             "strict append must produce PatchCode, got {:?}",
             second.mutations
         );
+    }
+
+    #[test]
+    fn html_doc_tail_streams_as_html_code_incrementally() {
+        // HtmlDoc（未写围栏的完整 HTML 文档）与 ```html 围栏同族：
+        // 流式期投影为 html 源码 CodeBlock，走同一增量高亮管线。
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk("<!DOCTYPE html>\n<html>\n<body>\n<p>hi");
+        buffer.process_queue();
+        assert_eq!(
+            buffer.tail_projection.as_ref().map(|p| p.block_type),
+            Some(TailBlockType::HtmlPreview)
+        );
+        match &buffer.prev_tail_ast[0] {
+            MarkdownNode::CodeBlock { lang, code, .. } => {
+                assert_eq!(lang.as_deref(), Some("html"));
+                assert!(code.contains("<!DOCTYPE html>") && code.contains("<p>hi"));
+            }
+            other => panic!("expected html CodeBlock projection, got {other:?}"),
+        }
+        let first = buffer.take_tail_frame().expect("first frame");
+        assert!(
+            matches!(first.mutations.as_slice(), [AstMutation::Add { .. }]),
+            "first frame must Add the html code node, got {:?}",
+            first.mutations
+        );
+
+        buffer.append_chunk("</p>\n<p>more");
+        buffer.process_queue();
+        let second = buffer.take_tail_frame().expect("second frame");
+        assert!(
+            matches!(second.mutations.as_slice(), [AstMutation::PatchCode { .. }]),
+            "strict append must produce PatchCode, got {:?}",
+            second.mutations
+        );
+
+        // 闭合 </html>：沉淀为 HtmlPreview stable 块，tail 清空
+        buffer.append_chunk("</p>\n</body>\n</html>");
+        let (stable_changed, _) = buffer.process_queue();
+        assert!(
+            stable_changed,
+            "html doc close must precipitate a stable block"
+        );
+        assert_eq!(buffer.stable_blocks.len(), 1);
+        assert!(buffer.tail_content.is_empty());
+    }
+
+    /// HtmlDoc tail 与代码围栏同族，不受 64KB 投机上限约束：超限后仍走增量高亮，
+    /// 不降级为纯文本。
+    #[test]
+    fn html_doc_exceeding_speculative_limit_stays_incremental() {
+        let big = format!(
+            "<!DOCTYPE html>\n<html>\n<body>\n{}",
+            "X".repeat(MAX_SPECULATIVE_TAIL_AST_BYTES + 20_000)
+        );
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk(&big);
+        assert_eq!(buffer.process_queue(), (false, true));
+
+        assert_eq!(
+            buffer.tail_projection.as_ref().map(|state| state.mode),
+            Some(TailRenderMode::Ast),
+            "HtmlDoc tail 超限后必须保持增量 AST 模式"
+        );
+        assert_eq!(
+            buffer.tail_projection.as_ref().map(|p| p.block_type),
+            Some(TailBlockType::HtmlPreview)
+        );
+        assert!(buffer.take_tail_frame().is_some());
     }
 
     #[test]
