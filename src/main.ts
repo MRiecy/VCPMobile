@@ -6,10 +6,14 @@ import { router } from "./core/router";
 import { vIntersectionObserver } from "./core/directives/intersectionObserver";
 import { vLongpress } from "./core/directives/longpress";
 import { vGuide } from "./features/guide/directives/vGuide";
+import { bootMark } from "./core/utils/bootTrace";
 
 import "./appStyles";
 import "./assets/message-blocks.css"
 import "katex/dist/katex.min.css"
+
+// 模块求值完成点（近似首屏 JS 解析执行耗时终点）
+bootMark("fe:main_module_evaluated");
 
 const app = createApp(App);
 const pinia = createPinia();
@@ -66,3 +70,4 @@ app.directive('intersection-observer', vIntersectionObserver);
 app.directive('longpress', vLongpress);
 app.directive('guide', vGuide);
 app.mount("#app");
+bootMark("fe:app_mounted");

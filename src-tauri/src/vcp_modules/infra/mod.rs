@@ -1,4 +1,5 @@
 pub mod admin_api;
+pub mod boot_trace;
 pub mod file_extractor;
 pub mod file_manager;
 pub mod high_speed_channel;

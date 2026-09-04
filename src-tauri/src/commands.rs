@@ -73,6 +73,7 @@ macro_rules! app_command_handler {
             create_group, delete_group, get_groups, read_group_config, save_group_config,
             update_group_config,
         };
+        use crate::vcp_modules::boot_trace::{get_boot_trace, save_boot_trace};
         use crate::vcp_modules::high_speed_channel::prepare_vcp_upload;
         use crate::vcp_modules::lifecycle_manager::{
             get_core_status, get_last_error, get_system_snapshot, reconcile_distributed_node_cmd,
@@ -323,11 +324,13 @@ macro_rules! app_command_handler {
                 init_vcp_log_connection,
                 send_vcp_log_message,
                 set_vcp_log_heartbeat,
-                // ── 生命周期与系统状态（lifecycle_manager）──
+                // ── 生命周期与系统状态（lifecycle_manager / boot_trace）──
+                get_boot_trace,
                 get_core_status,
                 get_last_error,
                 get_system_snapshot,
                 restart_or_exit_app,
+                save_boot_trace,
                 set_app_foreground_state,
                 // ── 同步（sync_service）──
                 clear_old_sync_logs,

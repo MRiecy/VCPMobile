@@ -13,6 +13,7 @@ import type {
   ListenerPermissionDto,
   PermissionStatusDto,
 } from '../types/native';
+import { bootMark, reportBootTrace, trackBootStage } from '../utils/bootTrace';
 
 export type AppState = 'PERMISSIONS' | 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'READY' | 'ERROR' | 'OPTIMIZING';
 
@@ -154,9 +155,9 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
       const topicStore = useTopicStore();
 
       const promises: Promise<unknown>[] = [
-        settingsStore.fetchSettings(),
-        assistantStore.fetchAgentsAndGroups(),
-        avatarStore.preloadMetadata()
+        trackBootStage('fe:preload_settings', settingsStore.fetchSettings()),
+        trackBootStage('fe:preload_agents', assistantStore.fetchAgentsAndGroups()),
+        trackBootStage('fe:preload_avatars', avatarStore.preloadMetadata())
       ];
 
       // 启动预加载：若 Pinia 恢复了活跃会话，提前拉取首屏聊天历史
@@ -168,11 +169,12 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         const topicId = sessionStore.currentTopicId;
         if (ownerType === 'agent' || ownerType === 'group') {
           console.log(`[Lifecycle] Preloading chat history for ${ownerType} ${ownerId}, topic: ${topicId}`);
-          promises.push(historyStore.preloadHistory(ownerId, ownerType, topicId, 5));
+          promises.push(trackBootStage('fe:preload_history', historyStore.preloadHistory(ownerId, ownerType, topicId, 5)));
         }
       }
 
       await Promise.all(promises);
+      bootMark('fe:preload_done');
       sessionStore.reconcileCurrentConversation();
 
       console.log(`[Lifecycle] [Concurrent] DONE Preloading in ${Date.now() - startTime}ms`);
@@ -182,6 +184,8 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
       isBootstrapping.value = false;
       bootstrapPromise = null;
       setState('READY', '应用就绪');
+      bootMark('fe:ready');
+      void reportBootTrace();
 
       // 话题列表延迟到 READY 后异步加载，不阻塞首屏渲染
       // 首屏只需 currentTopicId（Pinia persist 已恢复），话题列表仅侧边栏需要
@@ -323,6 +327,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
 
     bootstrapPromise = (async () => {
       try {
+        bootMark('fe:bootstrap_begin');
         isBootstrapping.value = true;
         errorMsg.value = null;
         hasBootstrapped.value = false;
@@ -332,6 +337,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         try {
           const pStatus = await invoke<PermissionStatusDto>('plugin:vcp-mobile|check_all_permissions');
           const listenerRes = await invoke<ListenerPermissionDto>('plugin:vcp-mobile|check_notification_listener_permission');
+          bootMark('fe:permissions_done');
           if (!pStatus.notification || !pStatus.battery || !listenerRes.enabled) {
             console.log('[Lifecycle] Missing keep-alive critical permissions, entering permission gate');
             // 仅在确认缺失权限时才将状态设为 PERMISSIONS，避免权限完整时引导页一闪而过
@@ -350,6 +356,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         
         // --- 核心优化：先拿快照，再跑流程 ---
         await hydrateSystemStatus();
+        bootMark('fe:hydrate_done');
 
         // --- 并行优化：主题初始化与核心就绪等待无数据依赖，并行执行 ---
         setState('CONNECTING', '等待后端核心服务就绪');
@@ -357,6 +364,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
           themeStore.initTheme(),
           waitForCoreReady()
         ]);
+        bootMark('fe:core_ready');
         console.log('[Lifecycle] Theme init + core ready complete');
         await startPreloading();
       } catch (error) {

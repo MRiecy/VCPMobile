@@ -23,6 +23,11 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .setup(|app| {
+            // 0. 启动分段计时：t0 近似进程起点，必须最先注册
+            let boot_trace = vcp_modules::boot_trace::BootTraceState::new();
+            boot_trace.mark("rs:setup_begin");
+            app.manage(boot_trace);
+
             // 2. 初始化核心状态
             app.manage(app.handle().clone());
             app.manage(LifecycleState::new());
@@ -54,6 +59,7 @@ pub fn run() {
 
             // 1. 清理上传缓存
             vcp_modules::file_manager::clear_upload_cache(&handle);
+            vcp_modules::boot_trace::boot_mark(&handle, "rs:setup_states_ready");
 
             // 2. 异步引导核心服务与系统维护
             tauri::async_runtime::spawn(async move {
@@ -115,6 +121,7 @@ pub fn run() {
                 });
             }
 
+            vcp_modules::boot_trace::boot_mark(&app.handle(), "rs:setup_end");
             Ok(())
         })
         .plugin(

@@ -43,6 +43,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     let handle = app.clone();
 
     info!("[Lifecycle] Starting bootstrap sequence...");
+    crate::vcp_modules::boot_trace::boot_mark(&handle, "rs:bootstrap_begin");
 
     // 发射初始状态
     let _ = handle.emit(
@@ -80,6 +81,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     }
 
     let db_state = handle.state::<DbState>();
+    crate::vcp_modules::boot_trace::boot_mark(&handle, "rs:init_db_done");
     match crate::vcp_modules::maintenance_manager::reclaim_orphaned_attachments(&handle, &db_state)
         .await
     {
@@ -94,6 +96,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             log::warn!("[Lifecycle] Attachment GC skipped after error: {error}");
         }
     }
+    crate::vcp_modules::boot_trace::boot_mark(&handle, "rs:attachment_gc_done");
 
     // 2. 基础状态管理注册已在 lib.rs 中的 setup 阶段提前同步完成，此处无需重复注册以避免覆盖已有缓存。
 
@@ -116,6 +119,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             return Err(err_msg);
         }
     };
+    crate::vcp_modules::boot_trace::boot_mark(&handle, "rs:read_settings_done");
 
     // Tool authorization is an offline policy and must be ready before any catalog read or
     // network reconciliation. Distributed being disabled must not hide persisted grants or
@@ -131,6 +135,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             tool_config_status
         );
     }
+    crate::vcp_modules::boot_trace::boot_mark(&handle, "rs:tool_auth_done");
 
     // 3.6 根据设置决定是否启动分布式节点 (自动重连)
     {
@@ -143,10 +148,12 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
         let _runtime_guard = settings_state.lock_runtime_reconcile().await;
         reconcile_distributed_node(&handle, false).await;
     }
+    crate::vcp_modules::boot_trace::boot_mark(&handle, "rs:distributed_reconcile_done");
 
     // 初始化同步服务
     let sync_state = init_sync_service(handle.clone());
     handle.manage(sync_state);
+    crate::vcp_modules::boot_trace::boot_mark(&handle, "rs:sync_init_done");
 
     // 4. 服务级后台初始化 (P2 - 非阻塞)
     {
@@ -277,6 +284,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     );
 
     info!("[Lifecycle] Bootstrap complete. Core is READY.");
+    crate::vcp_modules::boot_trace::boot_mark(&handle, "rs:core_ready");
 
     // 6. 核心就绪后，安全地激活安卓原生网络监听，彻底规避冷启动 JNI WebView 未就绪的死锁与崩塌
     let handle_net = handle.clone();
