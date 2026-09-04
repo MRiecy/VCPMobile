@@ -649,6 +649,16 @@ fn build_stream_block(
                     let hash = HashAggregator::compute_content_hash(&code);
                     return StreamBlock::html_preview(code, hash);
                 }
+                // 非 html：pulldown 已完成定界与提取，直接构造终态节点，
+                // 不再把围栏全文重走一遍完整 Markdown 管线（4 道预处理 + pulldown 重提取）
+                let mut node =
+                    crate::vcp_modules::chat::pre_renderer::markdown_parser::finalized_code_block_node(
+                        Some(lang),
+                        code,
+                    );
+                node.compute_hashes_recursively();
+                let hash = HashAggregator::compute_content_hash(full_text);
+                return StreamBlock::markdown(full_text.to_string(), Some(vec![node]), hash);
             }
             let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(full_text);
             let hash = HashAggregator::compute_content_hash(full_text);

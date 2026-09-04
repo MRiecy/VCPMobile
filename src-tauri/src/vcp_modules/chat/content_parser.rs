@@ -594,7 +594,8 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
 
             // 代码围栏（含 html 围栏）不进入正则定界流程：定界与内容提取统一交给
             // pulldown（CommonMark 语义，嵌套围栏按反引号数配对，天然无换行工件）。
-            // lang 为 html 时整块转为全预览卡片，否则按普通 markdown 代码块解析。
+            // lang 为 html 时整块转为全预览卡片；非 html 直接用已提取的 (lang, code)
+            // 构造终态节点，不再把围栏全文重走一遍完整 Markdown 管线。
             if matches!(block_type, BlockType::CodeFence) {
                 let fence_region = &remaining[start_idx..];
                 if let Some((lang, code, block_len)) =
@@ -603,12 +604,13 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                     let block = if lang.eq_ignore_ascii_case("html") {
                         ContentBlock::html_preview(code)
                     } else {
-                        ContentBlock::markdown(
-                            None,
-                            Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
-                                &fence_region[..block_len],
-                            )),
-                        )
+                        let mut node =
+                            crate::vcp_modules::chat::pre_renderer::markdown_parser::finalized_code_block_node(
+                                Some(lang),
+                                code,
+                            );
+                        node.compute_hashes_recursively();
+                        ContentBlock::markdown(None, Some(vec![node]))
                     };
                     blocks.push(block);
                     current_pos += start_idx + block_len;

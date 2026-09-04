@@ -124,6 +124,29 @@ pub(crate) fn parse_fenced_code_block(text: &str) -> Option<(String, String, usi
     None
 }
 
+/// 构造完成态代码围栏节点（等价于 pulldown 解析路径 `PartialNode::CodeBlock` 的
+/// 非流式终态）：一次性生成 syntect 类化高亮（mermaid 除外），不计算哈希——
+/// 哈希由调用方按需 `compute_hashes_recursively`（pulldown 解析路径在 impl 末尾统一计算）。
+///
+/// 供已定界完成提取的分块层（content_parser / stream_block_parser）直接构造节点，
+/// 避免把围栏全文再塞回完整 Markdown 管线做第二遍预处理 + 重提取。
+pub(crate) fn finalized_code_block_node(lang: Option<String>, code: String) -> MarkdownNode {
+    let lang_str = lang.as_deref().unwrap_or("plaintext");
+    let highlighted = if lang_str == "mermaid" {
+        None
+    } else {
+        highlight_code_block(&code, lang_str, CodeBlockShell::Code)
+    };
+    let mut node = MarkdownNode::code_block(lang, code);
+    if let MarkdownNode::CodeBlock {
+        highlighted_html, ..
+    } = &mut node
+    {
+        *highlighted_html = highlighted;
+    }
+    node
+}
+
 fn apply_flanking_fix(segment: &str) -> String {
     let mut result = String::with_capacity(segment.len() + 8);
     let chars: Vec<char> = segment.chars().collect();
@@ -1284,20 +1307,12 @@ impl PartialNode {
             PartialNode::CodeBlock { lang, code } => {
                 let lang_str = lang.as_deref().unwrap_or("plaintext");
                 // Aurora 流式代码块由有状态行高亮器生成增量补丁；这里不再构造完整 HTML 镜像。
-                // 非流式持久化解析仍一次性生成完整高亮结果。
-                let highlighted = if lang_str == "mermaid" || is_streaming {
-                    None
+                // 非流式持久化解析仍一次性生成完整高亮结果（与分块层直接构造共用一个终态构造器）。
+                if lang_str == "mermaid" || is_streaming {
+                    MarkdownNode::code_block(lang, code)
                 } else {
-                    highlight_code_block(&code, lang_str, CodeBlockShell::Code)
-                };
-                let mut node = MarkdownNode::code_block(lang, code);
-                if let MarkdownNode::CodeBlock {
-                    highlighted_html, ..
-                } = &mut node
-                {
-                    *highlighted_html = highlighted;
+                    finalized_code_block_node(lang, code)
                 }
-                node
             }
             PartialNode::Blockquote { children } => MarkdownNode::blockquote(children),
             PartialNode::List { ordered, items } => MarkdownNode::list(ordered, items),
@@ -1990,5 +2005,30 @@ mod tests {
         assert_eq!(parse_fenced_code_block("    ```rust\nx\n```"), None);
         // 起始是普通段落
         assert_eq!(parse_fenced_code_block("hello\n\n```rust\nx\n```"), None);
+    }
+
+    #[test]
+    fn finalized_code_block_node_matches_full_pipeline_output() {
+        // 分块层直接构造的终态节点必须与「围栏全文重走完整管线」逐字节等价
+        // （含高亮 HTML、mermaid 豁免、≤3 空格缩进、空 info string）
+        let cases = [
+            "```rust\nfn main() {\n    let x = 1;\n}\n```\n",
+            "```js\nlet a = `template *not-emphasis*`;\n```",
+            "  ```py\nprint('hi')\n```\n",
+            "```mermaid\ngraph TD;\n```\n",
+            "```\nplain <b>text</b>\n```\n",
+        ];
+        for src in cases {
+            let (lang, code, block_len) =
+                parse_fenced_code_block(src).expect("fence should parse");
+            let mut direct = finalized_code_block_node(Some(lang), code);
+            direct.compute_hashes_recursively();
+            let piped = parse_markdown_to_ast(&src[..block_len]);
+            assert_eq!(
+                format!("{:?}", vec![direct]),
+                format!("{:?}", piped),
+                "直接构造与完整管线输出必须一致: {src:?}"
+            );
+        }
     }
 }

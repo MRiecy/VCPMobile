@@ -215,6 +215,11 @@ pub fn process_queue(&mut self) -> (bool, bool) {
             // 其余作 code 直接构造节点，跳过整条 Markdown 预处理管线；
             // hash 留 None（内容逐帧增长，hash 门控必然 miss，计算只是浪费 O(n)）
             Some(code_fence_tail_nodes(&self.tail_content))
+        } else if matches!(raw_tail_type, Some(Tool | ToolResult | ToolCallSummary)) {
+            // 未闭合协议块 tail：与桌面端 VCPChat「封印」语义对齐，原样投影为
+            // plaintext 代码节点（等宽 pre 逐字显示），不做 Markdown 解析；
+            // Diary/Thought/Style/HtmlDoc 不在此列（日记与思维链正文本身是 Markdown）
+            Some(vec![MarkdownNode::code_block(Some("plaintext"), tail.clone())])
         } else {
             Some(parse_markdown_to_ast_streaming(&self.tail_content))
         };

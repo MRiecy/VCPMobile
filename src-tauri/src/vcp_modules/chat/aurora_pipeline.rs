@@ -643,6 +643,18 @@ impl AuroraBuffer {
                 // 代码围栏 tail 快速路径：stream 层已保证 tail = 开围栏行 + 未闭合内容，
                 // 跳过整条 Markdown 预处理管线（4 道全文本预处理 + pulldown），直接构造节点
                 Some(code_fence_tail_nodes(&self.tail_content))
+            } else if matches!(
+                raw_tail_type,
+                Some(BlockType::Tool | BlockType::ToolResult | BlockType::ToolCallSummary)
+            ) {
+                // 未闭合协议块 tail：与桌面端 VCPChat 的「封印」语义对齐——转义原文包在
+                // 等宽 pre 里逐字显示（此处借 plaintext 代码节点走增量高亮的纯文本路径）。
+                // 协议文本不是 Markdown：逐帧解析既浪费，又可能被 * / $$ 等字符意外格式化。
+                // Diary/Thought/Style/HtmlDoc 不在此列（日记与思维链正文本身是 Markdown）。
+                Some(vec![MarkdownNode::code_block(
+                    Some("plaintext".to_string()),
+                    self.tail_content.clone(),
+                )])
             } else {
                 Some(
                     crate::vcp_modules::pre_renderer::parse_markdown_to_ast_streaming(
@@ -1573,6 +1585,45 @@ mod tests {
         assert!(
             matches!(second.mutations.as_slice(), [AstMutation::PatchCode { .. }]),
             "strict append must produce PatchCode, got {:?}",
+            second.mutations
+        );
+    }
+
+    #[test]
+    fn unclosed_protocol_tail_projects_as_plaintext_code_node() {
+        // 与桌面端 VCPChat「封印」语义对齐：未闭合协议块 tail 原样投影为 plaintext
+        // 代码节点，不经过 Markdown 管线（协议文本里的 * / $$ 等字符不得被格式化）
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk(
+            "<<<[TOOL_REQUEST]>>>\ntool_name:「始」Diary「末」\ncontent:「始」*粗体* $$x$$ 保持字面",
+        );
+        buffer.process_queue();
+
+        assert_eq!(buffer.prev_tail_ast.len(), 1);
+        match &buffer.prev_tail_ast[0] {
+            MarkdownNode::CodeBlock { lang, code, .. } => {
+                assert_eq!(lang.as_deref(), Some("plaintext"));
+                assert_eq!(
+                    code,
+                    "<<<[TOOL_REQUEST]>>>\ntool_name:「始」Diary「末」\ncontent:「始」*粗体* $$x$$ 保持字面"
+                );
+            }
+            other => panic!("expected plaintext CodeBlock projection, got {other:?}"),
+        }
+        let first = buffer.take_tail_frame().expect("first frame");
+        assert!(
+            matches!(first.mutations.as_slice(), [AstMutation::Add { .. }]),
+            "first frame must Add the plaintext node, got {:?}",
+            first.mutations
+        );
+
+        // 增量补丁流仍然工作：追加内容产出 PatchCode 而非整树重建
+        buffer.append_chunk("\n更多内容");
+        buffer.process_queue();
+        let second = buffer.take_tail_frame().expect("second frame");
+        assert!(
+            matches!(second.mutations.as_slice(), [AstMutation::PatchCode { .. }]),
+            "protocol tail must flow through incremental code path, got {:?}",
             second.mutations
         );
     }
