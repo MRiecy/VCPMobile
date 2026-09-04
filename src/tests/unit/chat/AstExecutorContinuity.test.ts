@@ -102,4 +102,78 @@ describe("AST executor continuity", () => {
       sandbox.remove();
     }
   });
+
+  it("freezes closed root children of a growing raw HTML tail and keeps their DOM identity", () => {
+    const sandbox = document.createElement("div");
+    document.body.appendChild(sandbox);
+
+    try {
+      rebuildSnapshot([{
+        type: "raw_html",
+        content: '<div class="a">A</div>',
+      }], "freeze-message", sandbox);
+      const container = sandbox.querySelector(".vcp-raw-html-container");
+
+      const push = (content: string) =>
+        applyFrame(
+          [{ op: "replace", id: "t0", node: { type: "raw_html", content } }],
+          "freeze-message",
+          sandbox,
+        ).ok;
+
+      // 帧 1：b 未闭合（活跃区）；a 应在此帧建立冻结基线
+      expect(push('<div class="a">A</div><div class="b">B')).toBe(true);
+      const aEl = sandbox.querySelector(".a");
+
+      // 帧 2：b 闭合，c 活跃；a 必须保持对象身份（未被重建）
+      expect(push('<div class="a">A</div><div class="b">B</div><div class="c">C')).toBe(true);
+      const bEl = sandbox.querySelector(".b");
+
+      // 帧 3：c 内容变长后闭合，d 活跃
+      expect(push('<div class="a">A</div><div class="b">B</div><div class="c">CC</div><div class="d">D')).toBe(true);
+
+      expect(sandbox.querySelector(".a")).toBe(aEl);
+      expect(sandbox.querySelector(".b")).toBe(bEl);
+      expect(sandbox.querySelector(".c")?.textContent).toBe("CC");
+      expect(sandbox.querySelector(".d")?.textContent).toBe("D");
+      expect(container?.childNodes.length).toBe(4);
+      expect(container?.textContent).toBe("ABCCD");
+    } finally {
+      cleanupRegistry("freeze-message");
+      sandbox.remove();
+    }
+  });
+
+  it("updates a trailing live text node in place without touching frozen siblings", () => {
+    const sandbox = document.createElement("div");
+    document.body.appendChild(sandbox);
+
+    try {
+      rebuildSnapshot([{
+        type: "raw_html",
+        content: '<div class="a">A</div>',
+      }], "freeze-text-message", sandbox);
+
+      const push = (content: string) =>
+        applyFrame(
+          [{ op: "replace", id: "t0", node: { type: "raw_html", content } }],
+          "freeze-text-message",
+          sandbox,
+        ).ok;
+
+      expect(push('<div class="a">A</div>xy')).toBe(true);
+      const aEl = sandbox.querySelector(".a");
+
+      expect(push('<div class="a">A</div>xyz')).toBe(true);
+
+      const container = sandbox.querySelector(".vcp-raw-html-container");
+      expect(sandbox.querySelector(".a")).toBe(aEl);
+      expect(container?.childNodes.length).toBe(2);
+      expect(container?.lastChild?.nodeType).toBe(Node.TEXT_NODE);
+      expect(container?.lastChild?.nodeValue).toBe("xyz");
+    } finally {
+      cleanupRegistry("freeze-text-message");
+      sandbox.remove();
+    }
+  });
 });

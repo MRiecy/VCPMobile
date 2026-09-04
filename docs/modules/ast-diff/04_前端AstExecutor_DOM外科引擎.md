@@ -373,6 +373,15 @@ if ((nodeType === "raw_html" || nodeType === "table") && oldNode instanceof HTML
 }
 ```
 
+> **🆕 RawHtml 冻结前沿（freeze frontier）**：流式 tail 严格只追加，且 HTML 解析是
+> 确定性的——fresh 树的根级子节点中除最后一个外都已闭合定型（开放元素链、adoption
+> agency、foster parenting 的作用域都必然挂在最后一个根子节点上）。因此 `raw_html`
+> 的 Replace 帧优先走 `applyRawHtmlFreezeFrame`：新闭合的根子节点从 fresh 树直接
+> `appendChild` 物理搬入（零重 parse、保留既有 DOM 对象身份），morphdom 只收敛最后
+> 一个"活跃"根子节点。每帧成本从 O(整树) 降为 O(活跃子树)。首帧或子节点结构对不上
+> 时回退全量 morphdom 并重建基线（`resetRawHtmlFrontier`）。`table` 不走此路径，仍
+> 为整树 morphdom。
+
 **为什么用 morphdom 而不是直接 innerHTML？**
 - **媒体状态保持**：`<img>` 已完成加载的不重建，`<video>`/`<audio>` 正在播放的不中断
 - **表格滚动位置**：用户横向滚动的表格位置不被 innerHTML 重置

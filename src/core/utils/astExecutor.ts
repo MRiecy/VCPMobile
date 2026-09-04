@@ -566,6 +566,87 @@ export function rebuildSnapshot(
 }
 
 /**
+ * RawHtml 容器的冻结前沿：记录容器内已闭合定型的根级子节点数量。
+ *
+ * 依据：流式 tail 严格只追加，且 HTML 解析是确定性的——同一文本前缀解析出的已闭合
+ * 根级子树逐帧完全相同；开放元素链（含 adoption agency / foster parenting 的全部
+ * 作用域）必然挂在最后一个根级子节点上，够不着它之前的兄弟。因此每帧只需把新闭合的
+ * 根子节点从 fresh 树物理搬入（appendChild，零重 parse），再 morphdom 收敛最后一个
+ * "活跃"根子节点即可，全量 morphdom 的 O(整树)/帧 走查降为 O(活跃子树)/帧。
+ *
+ * 非追加式变化（epoch reset）会由前端重建容器元素，WeakMap 条目随之失效，天然安全。
+ */
+const rawHtmlFrozenCounts = new WeakMap<HTMLElement, number>();
+
+/** 活跃区 morphdom 的守卫选项（与全量路径一致：媒体/图片状态保留） */
+function morphdomLiveOptions() {
+  return {
+    childrenOnly: false,
+    onBeforeElUpdated: (fromEl: HTMLElement, toEl: HTMLElement) => {
+      if (fromEl.isEqualNode(toEl)) return false;
+      if (fromEl.tagName === "IMG" && (fromEl as HTMLImageElement).complete) return false;
+      if (fromEl.tagName === "VIDEO" || fromEl.tagName === "AUDIO") {
+        if (!(fromEl as HTMLMediaElement).paused) return false;
+      }
+      return true;
+    },
+  };
+}
+
+/**
+ * 对 raw_html 容器应用一帧"冻结前沿"增量更新。
+ * 返回 false 表示未建立基线或子节点结构对不上，调用方应回退全量 morphdom。
+ */
+function applyRawHtmlFreezeFrame(container: HTMLElement, fresh: HTMLElement): boolean {
+  const freshChildren = Array.from(fresh.childNodes);
+  // 最后一个根子节点是活跃区（开放元素链所在），其余全部已闭合定型
+  const eligible = freshChildren.length - 1;
+  if (eligible < 0) {
+    container.textContent = "";
+    rawHtmlFrozenCounts.set(container, 0);
+    return true;
+  }
+
+  const frozen = rawHtmlFrozenCounts.get(container);
+  if (frozen === undefined) return false; // 首帧：尚无基线
+  if (eligible < frozen || container.childNodes.length !== frozen + 1) {
+    return false; // 结构漂移（理论上不会发生），放弃增量
+  }
+
+  // 1. 新闭合的根子节点物理搬入活跃子节点之前（节点直接移动，无重 parse）
+  const live = container.childNodes[frozen] ?? null;
+  for (let i = frozen; i < eligible; i++) {
+    container.insertBefore(freshChildren[i], live);
+  }
+
+  // 2. 收敛活跃子节点
+  const newLive = freshChildren[eligible];
+  if (live) {
+    if (live.nodeType === Node.TEXT_NODE && newLive.nodeType === Node.TEXT_NODE) {
+      if (live.nodeValue !== newLive.nodeValue) live.nodeValue = newLive.nodeValue;
+    } else if (
+      live.nodeType === Node.ELEMENT_NODE &&
+      newLive.nodeType === Node.ELEMENT_NODE &&
+      (live as Element).tagName === (newLive as Element).tagName
+    ) {
+      morphdom(live as HTMLElement, newLive as HTMLElement, morphdomLiveOptions());
+    } else {
+      container.replaceChild(newLive, live);
+    }
+  } else {
+    container.appendChild(newLive);
+  }
+
+  rawHtmlFrozenCounts.set(container, eligible);
+  return true;
+}
+
+/** 全量 morphdom 之后重建冻结基线：除最后一个根子节点外全部视为已定型。 */
+function resetRawHtmlFrontier(container: HTMLElement) {
+  rawHtmlFrozenCounts.set(container, Math.max(0, container.childNodes.length - 1));
+}
+
+/**
  * 执行单条 AST Mutation 指令，以增量方式更新 DOM
  */
 function executeMutation(
@@ -789,7 +870,19 @@ function executeMutation(
           ) {
             const tempRegistry = new Map<string, Node>();
             const newDom = createDomFromNode(mutation.node, mutation.id, tempRegistry);
-            
+
+            // raw_html 走冻结前沿增量：新闭合根子节点物理搬入 + 仅 morphdom 活跃子树。
+            // 返回 false（首帧无基线 / 结构漂移）时回退全量 morphdom 并重建基线。
+            if (
+              nodeType === "raw_html" &&
+              applyRawHtmlFreezeFrame(oldNode, newDom as HTMLElement)
+            ) {
+              cleanupSubtreeRefs(mutation.id, registry, true);
+              registry.set(mutation.id, oldNode);
+              if (debugEnabled) astDebugLog(`[AST replace raw_html freeze-frontier] id=${mutation.id}`);
+              break;
+            }
+
             morphdom(oldNode, newDom, {
               childrenOnly: false,
               onBeforeElUpdated: (fromEl, toEl) => {
@@ -803,6 +896,9 @@ function executeMutation(
                 return true;
               }
             });
+            if (nodeType === "raw_html") {
+              resetRawHtmlFrontier(oldNode);
+            }
 
             // raw_html / table 是无 AST children 的整体节点（后端永远整块 Replace，绝不对其子树做
             // 增量 child diff），故只需保留根节点引用、清空全部子孙引用，杜绝悬空的 temp 子孙引用。
