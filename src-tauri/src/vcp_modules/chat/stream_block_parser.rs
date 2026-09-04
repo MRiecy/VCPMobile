@@ -3,10 +3,9 @@ use serde::{Deserialize, Serialize};
 use crate::vcp_modules::content_parser::{
     extract_tool_name, find_tool_request_end, parse_daily_note_tool_request,
     parse_legacy_daily_note, BlockType, ParsedDailyNote, ToolCallSummaryItem, ToolResultDetail,
-    BUTTON_CLICK, DIARY_END, DIARY_START, GENERIC_CODE_FENCE_END, GENERIC_CODE_FENCE_START,
-    HTML_DOC_END, HTML_DOC_START, KV_REGEX, ROLE_DIVIDER, STYLE_TAG_END, STYLE_TAG_START,
-    THINK_END, THINK_START, THOUGHT_END, THOUGHT_START, TOOL_RESULT_END, TOOL_RESULT_START,
-    TOOL_START,
+    BUTTON_CLICK, DIARY_END, DIARY_START, GENERIC_CODE_FENCE_START, HTML_DOC_END, HTML_DOC_START,
+    KV_REGEX, ROLE_DIVIDER, STYLE_TAG_END, STYLE_TAG_START, THINK_END, THINK_START, THOUGHT_END,
+    THOUGHT_START, TOOL_RESULT_END, TOOL_RESULT_START, TOOL_START,
 };
 use crate::vcp_modules::pre_renderer::MarkdownNode;
 use crate::vcp_modules::sync_hash::HashAggregator;
@@ -151,10 +150,12 @@ impl StreamBlock {
 
     pub fn html_preview(content: String, hash: String) -> Self {
         // 未闭合围栏由 Aurora tail 按行增量高亮；闭合后组件类型切换为 HtmlPreview，
-        // 此处只做一次终态 classed 高亮，避免交接后退回无样式代码。
+        // 此处只做一次终态 classed 高亮（HTML 外壳），避免交接后退回无样式代码。
         let highlighted_content =
-            crate::vcp_modules::chat::pre_renderer::code_highlighter::highlight_html_block(
+            crate::vcp_modules::chat::pre_renderer::code_highlighter::highlight_code_block(
                 &content,
+                "html",
+                crate::vcp_modules::chat::pre_renderer::code_highlighter::CodeBlockShell::Html,
             );
         Self::HtmlPreview {
             content,
@@ -402,24 +403,6 @@ fn find_end_marker(
     let content_start = end;
     let search_area = &remaining[content_start..];
 
-    #[cfg(test)]
-    {
-        if *block_type == BlockType::CodeFence {
-            let snippet: String = search_area.chars().take(100).collect();
-            println!(
-                "[DIAG_END] find_end_marker for {:?}: search_area len: {}, starts with: {:?}",
-                block_type,
-                search_area.len(),
-                snippet
-            );
-            let m_direct = GENERIC_CODE_FENCE_END.find(search_area);
-            println!(
-                "[DIAG_END] Direct regex match in find_end_marker: {:?}",
-                m_direct
-            );
-        }
-    }
-
     if let BlockType::HtmlContainer = block_type {
         let marker_text = &remaining[start..end];
         if let Some(caps) =
@@ -445,7 +428,15 @@ fn find_end_marker(
         BlockType::ToolCallSummary => {
             crate::vcp_modules::content_parser::TOOL_CALL_SUMMARY_END.find(search_area)
         }
-        BlockType::HtmlFence | BlockType::CodeFence => GENERIC_CODE_FENCE_END.find(search_area),
+        // 结束围栏的反引号数必须 ≥ 开围栏（CommonMark）：按起始标记动态计数配对，
+        // 嵌套围栏（如 ````html 内含 ```）不会被提前误判闭合。
+        BlockType::CodeFence => {
+            let (s, e, _) = crate::vcp_modules::content_parser::find_matching_fence_end(
+                search_area,
+                &remaining[start..end],
+            );
+            return s.zip(e);
+        }
         BlockType::HtmlDoc => HTML_DOC_END.find(search_area),
         BlockType::HtmlContainer => unreachable!(),
         BlockType::RoleDivider => {
@@ -576,7 +567,7 @@ fn build_stream_block(
             let hash = HashAggregator::compute_content_hash(inner_content);
             StreamBlock::tool_call_summary(items, inner_content.to_string(), hash)
         }
-        BlockType::HtmlFence | BlockType::HtmlDoc => {
+        BlockType::HtmlDoc => {
             let hash = HashAggregator::compute_content_hash(inner_content);
             StreamBlock::html_preview(inner_content.to_string(), hash)
         }
@@ -610,19 +601,22 @@ fn build_stream_block(
             StreamBlock::markdown(full_html, Some(nodes), hash)
         }
         BlockType::CodeFence => {
-            let fence = &remaining[start_idx..end_idx];
-            let full_text = format!("{}\n{}\n```", fence, inner_content);
-            let nodes = crate::vcp_modules::chat::pre_renderer::parse_markdown_to_ast(&full_text);
-            if matches!(
-                nodes.as_slice(),
-                [MarkdownNode::CodeBlock { lang: Some(lang), .. }]
-                    if lang.eq_ignore_ascii_case("html")
-            ) {
-                let hash = HashAggregator::compute_content_hash(inner_content);
-                return StreamBlock::html_preview(inner_content.to_string(), hash);
+            // 原文直接切片（含首尾围栏行），定界与提取交给 pulldown：
+            // code 不带正则切片的换行工件；lang 为 html 时整块转为全预览卡片。
+            let full_text = &remaining[start_idx..end_idx + end_end];
+            if let Some((lang, code, _)) =
+                crate::vcp_modules::chat::pre_renderer::markdown_parser::parse_fenced_code_block(
+                    full_text,
+                )
+            {
+                if lang.eq_ignore_ascii_case("html") {
+                    let hash = HashAggregator::compute_content_hash(&code);
+                    return StreamBlock::html_preview(code, hash);
+                }
             }
-            let hash = HashAggregator::compute_content_hash(&full_text);
-            StreamBlock::markdown(full_text, Some(nodes), hash)
+            let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(full_text);
+            let hash = HashAggregator::compute_content_hash(full_text);
+            StreamBlock::markdown(full_text.to_string(), Some(nodes), hash)
         }
         BlockType::RoleDivider => {
             let marker_text = &remaining[start_idx..end_idx];
@@ -910,6 +904,49 @@ mod tests {
             assert_eq!(tail, raw);
             assert_eq!(tail_type, Some(BlockType::CodeFence));
         }
+    }
+
+    #[test]
+    fn closed_html_fence_becomes_html_preview_with_clean_content() {
+        let raw = "前文\n\n```html\n<div class=\"card\">hi</div>\n```\n\n后文";
+        let mut parser = StreamBlockParser::new();
+        let blocks = parser.finalize(raw);
+        let preview = blocks
+            .iter()
+            .find(|b| matches!(b, StreamBlock::HtmlPreview { .. }))
+            .expect("html fence should precipitate as HtmlPreview");
+        let StreamBlock::HtmlPreview {
+            content,
+            highlighted_content,
+            ..
+        } = preview
+        else {
+            unreachable!()
+        };
+        // pulldown 提取的内容不带正则切片的首尾换行工件
+        assert_eq!(content, "<div class=\"card\">hi</div>\n");
+        assert!(highlighted_content.is_some());
+    }
+
+    #[test]
+    fn nested_inner_fence_does_not_close_html_fence_early() {
+        // 外层 4 反引号、内层 3 反引号：内层不闭合外层（结束配对按反引号数动态计数）
+        let raw = "````html\n<div>\n```js\nconsole.log(1)\n```\n</div>\n````\n\ndone";
+        let mut parser = StreamBlockParser::new();
+        let blocks = parser.finalize(raw);
+        let preview = blocks
+            .iter()
+            .find(|b| matches!(b, StreamBlock::HtmlPreview { .. }))
+            .expect("nested html fence should precipitate as one HtmlPreview");
+        let StreamBlock::HtmlPreview { content, .. } = preview else {
+            unreachable!()
+        };
+        assert_eq!(content, "<div>\n```js\nconsole.log(1)\n```\n</div>\n");
+    }
+
+    #[test]
+    fn html_fence_full_and_stream_wires_match() {
+        assert_full_and_stream_match("前文\n\n```html\n<div class=\"card\">hi</div>\n```\n\n后文");
     }
 
     #[test]

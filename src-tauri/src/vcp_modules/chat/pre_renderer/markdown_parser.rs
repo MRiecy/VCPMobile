@@ -1,4 +1,6 @@
-use crate::vcp_modules::pre_renderer::code_highlighter::highlight_code_block;
+use crate::vcp_modules::pre_renderer::code_highlighter::{
+    highlight_code_block, CodeBlockShell,
+};
 use crate::vcp_modules::pre_renderer::markdown_ast::{InlineNode, MarkdownNode};
 use lazy_static::lazy_static;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
@@ -82,6 +84,44 @@ fn get_fence_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
     }
 
     ranges
+}
+
+/// 从输入起始处解析第一个围栏代码块，返回 (语言, 内容, 整个块的字节长度)。
+///
+/// 定界与提取完全交给 pulldown（CommonMark 语义）：
+/// - 闭合围栏的反引号数必须 ≥ 开围栏，内容行字面保留——嵌套围栏天然安全；
+/// - 未闭合围栏延伸到输入末尾（等价于旧正则路径"未闭合吞掉剩余"的行为）；
+/// - 起始不是合法围栏（如缩进 ≥4，按规范属于缩进代码块）时返回 None，调用方回退旧路径。
+///
+/// 仅做轻量事件扫描，不构建 AST、不做语法高亮，供分块层（content_parser /
+/// stream_block_parser）统一完成"代码围栏定界 + lang 识别 + 内容提取"。
+/// lang 与 MarkdownNode::CodeBlock 一致取完整 info string（是否 html 由调用方判断）。
+pub(crate) fn parse_fenced_code_block(text: &str) -> Option<(String, String, usize)> {
+    let mut in_fence = false;
+    let mut lang = String::new();
+    let mut code = String::new();
+
+    for (event, range) in Parser::new_ext(
+        text,
+        Options::ENABLE_MATH | Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH,
+    )
+    .into_offset_iter()
+    {
+        match event {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) if !in_fence => {
+                lang = info.to_string();
+                in_fence = true;
+            }
+            Event::Text(piece) if in_fence => code.push_str(&piece),
+            Event::End(TagEnd::CodeBlock) if in_fence => {
+                return Some((lang, code, range.end));
+            }
+            // 首个事件不是围栏起始：输入并非以合法代码围栏开头（缩进代码块/段落等）
+            _ if !in_fence => return None,
+            _ => {}
+        }
+    }
+    None
 }
 
 fn apply_flanking_fix(segment: &str) -> String {
@@ -1248,7 +1288,7 @@ impl PartialNode {
                 let highlighted = if lang_str == "mermaid" || is_streaming {
                     None
                 } else {
-                    highlight_code_block(&code, lang_str)
+                    highlight_code_block(&code, lang_str, CodeBlockShell::Code)
                 };
                 let mut node = MarkdownNode::code_block(lang, code);
                 if let MarkdownNode::CodeBlock {
@@ -1916,5 +1956,44 @@ mod tests {
             !blocks.is_empty(),
             "brk.txt 经 parse_content 后应至少切分出一个块"
         );
+    }
+
+    #[test]
+    fn parse_fenced_code_block_extracts_lang_code_and_block_len() {
+        let text = "```rust\nlet a = 1;\n```\n\nafter";
+        let (lang, code, block_len) = parse_fenced_code_block(text).expect("fenced code block");
+        assert_eq!(lang, "rust");
+        // 内容逐行字面保留（含行尾换行），无首尾换行工件
+        assert_eq!(code, "let a = 1;\n");
+        // 块长度覆盖到闭合围栏行尾（不含其后的换行与下文）
+        assert_eq!(block_len, "```rust\nlet a = 1;\n```".len());
+        assert_eq!(&text[block_len..], "\n\nafter");
+    }
+
+    #[test]
+    fn parse_fenced_code_block_handles_nested_fences_by_backtick_count() {
+        // 外层 4 反引号、内层 3 反引号：内层不构成闭合（CommonMark：闭合数必须 ≥ 开围栏数）
+        let text = "````html\n<div>\n```js\nconsole.log(1)\n```\n</div>\n````\nafter";
+        let (lang, code, block_len) = parse_fenced_code_block(text).expect("fenced code block");
+        assert_eq!(lang, "html");
+        assert_eq!(code, "<div>\n```js\nconsole.log(1)\n```\n</div>\n");
+        assert_eq!(&text[block_len..], "\nafter");
+    }
+
+    #[test]
+    fn parse_fenced_code_block_extends_unclosed_fence_to_eof() {
+        let text = "```html\n<div>partial";
+        let (lang, code, block_len) = parse_fenced_code_block(text).expect("unclosed fence");
+        assert_eq!(lang, "html");
+        assert_eq!(code, "<div>partial");
+        assert_eq!(block_len, text.len());
+    }
+
+    #[test]
+    fn parse_fenced_code_block_rejects_non_fence_starts() {
+        // 起始缩进 ≥4：按 CommonMark 属于缩进代码块而非围栏，返回 None 让调用方回退
+        assert_eq!(parse_fenced_code_block("    ```rust\nx\n```"), None);
+        // 起始是普通段落
+        assert_eq!(parse_fenced_code_block("hello\n\n```rust\nx\n```"), None);
     }
 }

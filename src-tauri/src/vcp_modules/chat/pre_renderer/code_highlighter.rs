@@ -328,35 +328,21 @@ fn wrap_incremental_code_html(completed_html: &str, active_html: &str) -> String
     )
 }
 
-/// 专属 HTML 全预览卡片的高性能 Classed Syntect 高亮器
-/// 仅输出纯净的带语义类名的 DOM（ClassStyle::Spaced，keyword/tag/string 等 scope 派生类），绝不硬编码任何 inline style！
-pub fn highlight_html_block(code: &str) -> Option<String> {
-    let syntax = SYNTAX_SET
-        .find_syntax_by_token("html")
-        .or_else(|| SYNTAX_SET.find_syntax_by_token("HTML"))
-        .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-
-    let mut html_generator =
-        ClassedHTMLGenerator::new_with_class_style(syntax, &SYNTAX_SET, ClassStyle::Spaced);
-
-    for line in code.split('\n') {
-        let mut line_with_nl = line.to_string();
-        line_with_nl.push('\n');
-        let _ = html_generator.parse_html_for_line_which_includes_newline(&line_with_nl);
-    }
-
-    let html = html_generator.finalize();
-
-    Some(format!(
-        "<pre class=\"vcp-html-block vcp-scrollable\"><code>{}</code></pre>",
-        html
-    ))
+/// 完成态代码块一次性高亮的外壳类别：仅决定 `<pre>` 锚点类名。
+/// 前端 CSS 依据两个锚点类分别定制（pre.vcp-code-block / pre.vcp-html-block），不可合并。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CodeBlockShell {
+    /// 普通代码块。
+    Code,
+    /// HTML 全预览卡片。
+    Html,
 }
 
-/// 完成态普通代码块的一次性类化高亮（非流式持久化解析路径）。
-/// 与增量路径一致输出 ClassStyle::Spaced 类化 span，外壳只挂 vcp-code-block 锚点类，
-/// 底色与 token 配色全部移交前端全局 CSS（pre.vcp-code-block）按亮暗两态定义。
-pub fn highlight_code_block(code: &str, lang: &str) -> Option<String> {
+/// 完成态代码块的一次性类化高亮（非流式持久化解析路径）。
+/// 与增量路径一致输出 ClassStyle::Spaced 类化 span，外壳只挂锚点类，
+/// 底色与 token 配色全部移交前端全局 CSS（pre.vcp-code-block / pre.vcp-html-block）按亮暗两态定义。
+/// 输入内容来自 pulldown 围栏提取，已是干净文本，本函数不做任何裁剪。
+pub fn highlight_code_block(code: &str, lang: &str, shell: CodeBlockShell) -> Option<String> {
     let syntax = syntax_for_language(lang);
 
     let mut html_generator =
@@ -389,9 +375,13 @@ pub fn highlight_code_block(code: &str, lang: &str) -> Option<String> {
         }
     }
 
+    let shell_class = match shell {
+        CodeBlockShell::Code => "vcp-code-block",
+        CodeBlockShell::Html => "vcp-html-block",
+    };
     Some(format!(
-        "<pre class=\"vcp-code-block vcp-scrollable\"><code>{}</code></pre>",
-        html
+        "<pre class=\"{} vcp-scrollable\"><code>{}</code></pre>",
+        shell_class, html
     ))
 }
 
@@ -401,8 +391,8 @@ mod tests {
 
     #[test]
     fn highlight_code_block_emits_classed_spans_without_inline_styles() {
-        let html =
-            highlight_code_block("fn main() {}\n", "rust").expect("highlight should succeed");
+        let html = highlight_code_block("fn main() {}\n", "rust", CodeBlockShell::Code)
+            .expect("highlight should succeed");
         assert!(html.starts_with("<pre class=\"vcp-code-block vcp-scrollable\"><code>"));
         assert!(html.contains("class=\""));
         assert!(!html.contains("style="));
@@ -481,7 +471,8 @@ mod tests {
     #[test]
     fn highlight_code_block_preserves_source_text_exactly() {
         let code = "fn main() {\n    let x = 1;\n    if x > 0 {\n        println!(\"{}\", x);\n    }\n}";
-        let html = highlight_code_block(code, "rust").expect("highlight should succeed");
+        let html = highlight_code_block(code, "rust", CodeBlockShell::Code)
+            .expect("highlight should succeed");
         let inner = html
             .strip_prefix("<pre class=\"vcp-code-block vcp-scrollable\"><code>")
             .and_then(|s| s.strip_suffix("</code></pre>"))
@@ -508,6 +499,40 @@ mod tests {
             strip_tags_for_test(&patch.active_html),
         );
         assert_eq!(dom_text, v2);
+    }
+
+    #[test]
+    fn html_shell_uses_html_block_anchor_class() {
+        // Html 外壳挂 vcp-html-block 锚点类（与 vcp-code-block 区分），且不硬编码内联样式
+        let html = highlight_code_block("<div>hi</div>\n", "html", CodeBlockShell::Html)
+            .expect("highlight");
+        assert!(html.starts_with("<pre class=\"vcp-html-block vcp-scrollable\"><code>"));
+        assert!(html.contains("class=\""));
+        assert!(!html.contains("style="));
+    }
+
+    #[test]
+    fn html_shell_preserves_content_byte_exactly() {
+        // 上游已是 pulldown 提取的干净内容，高亮层不做任何裁剪
+        let html = highlight_code_block("<div>hi</div>\n", "html", CodeBlockShell::Html)
+            .expect("highlight");
+        let inner = html
+            .strip_prefix("<pre class=\"vcp-html-block vcp-scrollable\"><code>")
+            .and_then(|s| s.strip_suffix("</code></pre>"))
+            .expect("shell wrapper");
+        assert_eq!(strip_tags_for_test(inner), "<div>hi</div>\n");
+    }
+
+    #[test]
+    fn html_shell_preserves_blank_edges_verbatim() {
+        // 内容自身的首尾空行属于原文，原样保留（不再有围栏工件剥离逻辑）
+        let html = highlight_code_block("\n<div>hi</div>\n\n", "html", CodeBlockShell::Html)
+            .expect("highlight");
+        let inner = html
+            .strip_prefix("<pre class=\"vcp-html-block vcp-scrollable\"><code>")
+            .and_then(|s| s.strip_suffix("</code></pre>"))
+            .expect("shell wrapper");
+        assert_eq!(strip_tags_for_test(inner), "\n<div>hi</div>\n\n");
     }
 
     fn strip_tags_for_test(html: &str) -> String {

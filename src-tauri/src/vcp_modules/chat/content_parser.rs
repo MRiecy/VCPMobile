@@ -223,10 +223,12 @@ impl ContentBlock {
     }
 
     pub fn html_preview(content: String) -> Self {
-        // 在流结束后沉淀或全量重新编译时，调用专属 HTML classed 高亮预渲染，生成不含 style 的 DOM
+        // 在流结束后沉淀或全量重新编译时，做终态 classed 高亮预渲染（HTML 外壳），生成不含 style 的 DOM
         let highlighted_content =
-            crate::vcp_modules::chat::pre_renderer::code_highlighter::highlight_html_block(
+            crate::vcp_modules::chat::pre_renderer::code_highlighter::highlight_code_block(
                 &content,
+                "html",
+                crate::vcp_modules::chat::pre_renderer::code_highlighter::CodeBlockShell::Html,
             );
         Self::HtmlPreview {
             content,
@@ -293,7 +295,6 @@ pub(crate) enum BlockType {
     Think,
     ToolResult,
     Diary,
-    HtmlFence,
     HtmlDoc,
     HtmlContainer,
     Style,
@@ -353,9 +354,6 @@ lazy_static! {
 
     pub(crate) static ref KV_REGEX: Regex = Regex::new(r"^-\s*([^:]+):\s*(.*)").unwrap();
 
-    pub(crate) static ref HTML_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*```html[ \t]*\r?$").unwrap();
-    pub(crate) static ref HTML_FENCE_END: Regex = Regex::new(r"(?im)^[ \t]*```[ \t]*\r?$").unwrap();
-
     // 修复：强行增加行首锚定符 ^，防止正文中的内联 `<!DOCTYPE html>` 触发解析截断
     pub(crate) static ref HTML_DOC_START: Regex = Regex::new(r"(?im)^[ \t]*(?:<!doctype html>|<html[\s>])").unwrap();
     pub(crate) static ref HTML_DOC_END: Regex = Regex::new(r"(?i)</html>").unwrap();
@@ -369,8 +367,9 @@ lazy_static! {
     pub(crate) static ref TOOL_CALL_SUMMARY_START: Regex = Regex::new(r"(?im)^[ \t]*\[本轮工具调用摘要:\]").unwrap();
     pub(crate) static ref TOOL_CALL_SUMMARY_END: Regex = Regex::new(r"(?im)^[ \t]*\[本轮工具调用摘要结束\]").unwrap();
 
-    pub(crate) static ref GENERIC_CODE_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*```[a-zA-Z0-9-]*[ \t]*\r?$").unwrap();
-    pub(crate) static ref GENERIC_CODE_FENCE_END: Regex = Regex::new(r"(?im)^[ \t]*```[ \t]*\r?$").unwrap();
+    // 起始标记兼容 ≥3 反引号（CommonMark 允许任意长度围栏）；结束配对必须 ≥ 开围栏数，
+    // 由 find_matching_fence_end 按起始标记动态计数，不再使用固定三反引号的结束正则。
+    pub(crate) static ref GENERIC_CODE_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*`{3,}[a-zA-Z0-9-]*[ \t]*\r?$").unwrap();
 
 
     static ref LIST_REGEX: Regex = Regex::new(r"^[ \t]*([-*]|\d+\.)[ \t]+").unwrap();
@@ -465,7 +464,7 @@ pub fn de_indent_misinterpreted_code_blocks(text: &str) -> String {
     result
 }
 
-fn find_matching_fence_end(
+pub(crate) fn find_matching_fence_end(
     search_area: &str,
     start_marker_text: &str,
 ) -> (Option<usize>, Option<usize>, bool) {
@@ -499,7 +498,8 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
     let mut current_pos = 0;
 
     // 预编译主匹配正则（包含所有特种块起始标记，利用捕获组编号识别类型）
-    // 1: TOOL, 2: THOUGHT, 3: THINK, 4: TOOL_RESULT, 5: DIARY, 6: HTML_FENCE, 7: HTML_DOC, 8: ROLE_DIVIDER, 9: STYLE, 10: CODE_FENCE, 11: HTML_CONTAINER
+    // html 围栏不再是特例：与普通代码围栏共用组 9 命中，由 CodeFence 分支统一走 pulldown 识别
+    // 1: TOOL, 2: THOUGHT, 3: THINK, 4: TOOL_RESULT, 5: DIARY, 6: HTML_DOC, 7: ROLE_DIVIDER, 8: STYLE, 9: CODE_FENCE, 10: HTML_CONTAINER, 12: TOOL_CALL_SUMMARY
     lazy_static! {
         static ref MASTER_START: Regex = Regex::new(concat!(
             r"(?im)",
@@ -508,13 +508,12 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             r"(<think(?:ing)?>)|",                                     // 3
             r"(^[ \t]*\[\[VCP调用结果信息汇总:)|",                     // 4
             r"(^[ \t]*<<<DailyNoteStart>>>)|",                         // 5
-            r"(^[ \t]*`{3,}html[ \t]*$)|",                             // 6
-            r"(^[ \t]*(?:<!doctype html>|<html[\s>]))|",               // 7
-            r"(^[ \t]*<<<\[(?:END_)?ROLE_DIVIDE_(?:SYSTEM|ASSISTANT|USER)\]>>>)|", // 8
-            r"(^[ \t]*<style\b[^>]*>)|",                                      // 9
-            r"(^[ \t]*`{3,}[a-zA-Z0-9-]*[ \t]*$)|",                    // 10
-            r"(^[ \t]*<(div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>)|", // 11
-            r"(^[ \t]*\[本轮工具调用摘要:\])"                          // 13
+            r"(^[ \t]*(?:<!doctype html>|<html[\s>]))|",               // 6
+            r"(^[ \t]*<<<\[(?:END_)?ROLE_DIVIDE_(?:SYSTEM|ASSISTANT|USER)\]>>>)|", // 7
+            r"(^[ \t]*<style\b[^>]*>)|",                                      // 8
+            r"(^[ \t]*`{3,}[a-zA-Z0-9-]*[ \t]*$)|",                    // 9
+            r"(^[ \t]*<(div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>)|", // 10
+            r"(^[ \t]*\[本轮工具调用摘要:\])"                          // 12
         )).unwrap();
     }
 
@@ -554,21 +553,45 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             } else if caps.get(5).is_some() {
                 BlockType::Diary
             } else if caps.get(6).is_some() {
-                BlockType::HtmlFence
-            } else if caps.get(7).is_some() {
                 BlockType::HtmlDoc
-            } else if caps.get(8).is_some() {
+            } else if caps.get(7).is_some() {
                 BlockType::RoleDivider
-            } else if caps.get(9).is_some() {
+            } else if caps.get(8).is_some() {
                 BlockType::Style
-            } else if caps.get(10).is_some() {
+            } else if caps.get(9).is_some() {
                 BlockType::CodeFence
-            } else if caps.get(13).is_some() {
+            } else if caps.get(12).is_some() {
                 BlockType::ToolCallSummary
             } else {
-                container_tag = caps.get(12).unwrap().as_str().to_lowercase();
+                container_tag = caps.get(11).unwrap().as_str().to_lowercase();
                 BlockType::HtmlContainer
             };
+
+            // 代码围栏（含 html 围栏）不进入正则定界流程：定界与内容提取统一交给
+            // pulldown（CommonMark 语义，嵌套围栏按反引号数配对，天然无换行工件）。
+            // lang 为 html 时整块转为全预览卡片，否则按普通 markdown 代码块解析。
+            if matches!(block_type, BlockType::CodeFence) {
+                let fence_region = &remaining[start_idx..];
+                if let Some((lang, code, block_len)) =
+                    crate::vcp_modules::chat::pre_renderer::markdown_parser::parse_fenced_code_block(fence_region)
+                {
+                    let block = if lang.eq_ignore_ascii_case("html") {
+                        ContentBlock::html_preview(code)
+                    } else {
+                        ContentBlock::markdown(
+                            None,
+                            Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(
+                                &fence_region[..block_len],
+                            )),
+                        )
+                    };
+                    blocks.push(block);
+                    current_pos += start_idx + block_len;
+                    continue;
+                }
+                // pulldown 不认可的起始（如缩进 ≥4，规范上属于缩进代码块）：
+                // 回落到下方旧正则定界路径，保持历史行为。
+            }
 
             // 2. 寻找对应的结束标记
             let content_start = end_idx;
@@ -605,7 +628,6 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                     .map_or((None, None, false), |m| {
                         (Some(m.start()), Some(m.end()), true)
                     }),
-                BlockType::HtmlFence => find_matching_fence_end(search_area, start_marker_text),
                 BlockType::HtmlDoc => HTML_DOC_END
                     .find(search_area)
                     .map_or((None, None, false), |m| {
@@ -628,8 +650,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             if !is_complete
                 && !matches!(
                     block_type,
-                    BlockType::HtmlFence
-                        | BlockType::HtmlDoc
+                    BlockType::HtmlDoc
                         | BlockType::HtmlContainer
                         | BlockType::CodeFence
                         | BlockType::RoleDivider
@@ -700,7 +721,6 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                     let items = parse_tool_call_summary(inner_content);
                     ContentBlock::tool_call_summary(items, inner_content.to_string())
                 }
-                BlockType::HtmlFence => ContentBlock::html_preview(inner_content.to_string()),
                 BlockType::HtmlDoc => {
                     let mut full_html = String::new();
                     full_html.push_str(&remaining[start_idx..end_idx]);
@@ -1230,6 +1250,30 @@ mod tests {
             .iter()
             .find(|block| !matches!(block, ContentBlock::Markdown { .. }))
             .expect("expected a semantic content block")
+    }
+
+    #[test]
+    fn closed_html_fence_becomes_html_preview_without_artifacts() {
+        let blocks = parse_content("前文\n\n```html\n<div class=\"card\">hi</div>\n```\n\n后文");
+        let preview = blocks
+            .iter()
+            .find(|b| matches!(b, ContentBlock::HtmlPreview { .. }))
+            .expect("html fence should become HtmlPreview");
+        let ContentBlock::HtmlPreview {
+            content,
+            highlighted_content,
+            ..
+        } = preview
+        else {
+            unreachable!()
+        };
+        // pulldown 提取的内容不带正则切片的首尾换行工件
+        assert_eq!(content, "<div class=\"card\">hi</div>\n");
+        assert!(highlighted_content.is_some());
+        // 前后文 markdown 块仍然健在
+        assert!(blocks
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Markdown { .. })));
     }
 
     #[test]
