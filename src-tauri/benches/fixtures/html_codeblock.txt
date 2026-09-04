@@ -1,0 +1,403 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>VCP Hardware Monitoring & Control Panel</title>
+    <style>
+        /* Taste-Skill v2 Stark Light-Industries Theme */
+        :root {
+            --bg-base: #09090b;
+            --bg-panel: #18181b;
+            --bg-element: #27272a;
+            --border-color: #3f3f46;
+            --text-primary: #f4f4f5;
+            --text-secondary: #a1a1aa;
+            --text-dark: #71717a;
+            --accent: #10b981;
+            --accent-glow: rgba(16, 185, 129, 0.15);
+            --danger: #f43f5e;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-base);
+            color: var(--text-primary);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            padding: 16px;
+            font-size: 12px;
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+            overflow-x: hidden;
+            width: 100%;
+        }
+
+        /* Prevent Flex Deadlock & Viewport Explode */
+        .wrapper {
+            width: 100%;
+            max-width: 1200px;
+            margin: 0 auto;
+            min-width: 0;
+        }
+
+        /* Header Section */
+        header {
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 16px;
+            margin-bottom: 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+
+        .header-title h1 {
+            font-size: 16px;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            color: #ffffff;
+        }
+
+        .header-title span {
+            font-size: 9px;
+            color: var(--text-dark);
+            text-transform: uppercase;
+            letter-spacing: 0.2em;
+            display: block;
+            margin-bottom: 4px;
+        }
+
+        .status-badge {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            background: rgba(16, 185, 129, 0.05);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+            padding: 4px 12px;
+            border-radius: 4px;
+            font-size: 10px;
+            color: var(--accent);
+            font-weight: bold;
+        }
+
+        .pulse-dot {
+            width: 6px;
+            height: 6px;
+            background-color: var(--accent);
+            border-radius: 50%;
+            box-shadow: 0 0 8px var(--accent);
+            animation: pulse 1.8s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.9); opacity: 0.6; }
+            50% { transform: scale(1.15); opacity: 1; }
+            100% { transform: scale(0.9); opacity: 0.6; }
+        }
+
+        /* Non-symmetric Grid Layout */
+        .grid-container {
+            display: grid;
+            grid-template-columns: 1.4fr 0.82fr;
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+
+        @media (max-width: 768px) {
+            .grid-container {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background-color: var(--bg-panel);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 16px;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+        }
+
+        .card-header {
+            border-bottom: 1px solid var(--bg-element);
+            padding-bottom: 8px;
+            margin-bottom: 14px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .card-title {
+            font-size: 10px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+        }
+
+        /* Complex Metrics Table */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            text-align: left;
+            margin-top: 8px;
+        }
+
+        th {
+            font-size: 9px;
+            color: var(--text-dark);
+            text-transform: uppercase;
+            font-weight: 700;
+            padding-bottom: 8px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        td {
+            padding: 10px 0;
+            border-bottom: 1px solid var(--bg-element);
+            font-size: 11px;
+            color: var(--text-primary);
+        }
+
+        tr:last-child td {
+            border-bottom: none;
+        }
+
+        /* SVG Interactive Gauge inside code block */
+        .chart-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 16px 0;
+            background: var(--bg-base);
+            border: 1px solid var(--bg-element);
+            border-radius: 4px;
+            margin-top: 8px;
+        }
+
+        /* Responsive Form elements */
+        .control-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .control-group label {
+            font-size: 9px;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+        }
+
+        .control-row {
+            display: flex;
+            gap: 8px;
+        }
+
+        input[type="text"], select {
+            background-color: var(--bg-base);
+            border: 1px solid var(--border-color);
+            color: var(--text-primary);
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-family: inherit;
+            font-size: 11px;
+            width: 100%;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        input[type="text"]:focus, select:focus {
+            border-color: var(--accent);
+        }
+
+        /* Interactive Button simulation */
+        .btn-action {
+            background-color: var(--accent);
+            color: var(--bg-base);
+            border: none;
+            padding: 10px 16px;
+            font-family: inherit;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            border-radius: 4px;
+            cursor: pointer;
+            width: 100%;
+            transition: opacity 0.2s;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-action:hover {
+            opacity: 0.9;
+        }
+
+        .btn-action:active {
+            transform: scale(0.99);
+        }
+
+        /* Console log component */
+        .console-box {
+            background-color: #0c0c0e;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 12px;
+            font-size: 10.5px;
+            color: var(--text-secondary);
+            max-height: 120px;
+            overflow-y: auto;
+            margin-top: 16px;
+        }
+
+        .console-line {
+            margin-bottom: 4px;
+            display: flex;
+            gap: 8px;
+        }
+
+        .console-line .time {
+            color: var(--text-dark);
+            flex-shrink: 0;
+        }
+
+        .console-line .tag {
+            color: var(--accent);
+            font-weight: bold;
+            flex-shrink: 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="wrapper">
+        <!-- Header -->
+        <header>
+            <div class="header-title">
+                <span>VCP Real-time Environment Audit</span>
+                <h1>Sandbox Node 0xFA488</h1>
+            </div>
+            <div class="status-badge">
+                <div class="pulse-dot"></div>
+                SYSTEM ON-FIRE PREVENTED
+            </div>
+        </header>
+
+        <!-- Main Workspace -->
+        <div class="grid-container">
+            <!-- Left Heavy Panel: Hardware Engine -->
+            <div class="card">
+                <div>
+                    <div class="card-header">
+                        <span class="card-title">01 / THREAD SCHEDULING CONTROLS</span>
+                        <span style="color: var(--text-dark); font-size: 9px;">REFRESH RATE: 100MS</span>
+                    </div>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>PROCESS MODULE</th>
+                                <th>STRATEGY MODE</th>
+                                <th style="text-align: right;">BUFFER ALLOC</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td style="font-weight: bold; color: #ffffff;">Rust Parser AST</td>
+                                <td>RegEx Chunk Divider</td>
+                                <td style="text-align: right; color: var(--accent);">512KB Static</td>
+                            </tr>
+                            <tr>
+                                <td style="font-weight: bold; color: #ffffff;">Morphdom Delta</td>
+                                <td>onBeforeElUpdated Guard</td>
+                                <td style="text-align: right; color: var(--accent);">Dynamic Sync</td>
+                            </tr>
+                            <tr>
+                                <td style="font-weight: bold; color: #ffffff;">Iframe Sandboxing</td>
+                                <td>Opaque Origin Lock</td>
+                                <td style="text-align: right; color: var(--danger);">Hard Isolated</td>
+                            </tr>
+                            <tr>
+                                <td style="font-weight: bold; color: #ffffff;">CSS Garbage Collect</td>
+                                <td>onUnmounted GC Sweep</td>
+                                <td style="text-align: right; color: var(--accent);">Auto-purge</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <div class="chart-container">
+                    <!-- Clean SVG Vector Graph representing heavy calculation load -->
+                    <svg viewBox="0 0 500 100" style="width: 100%; height: auto; max-width: 420px;">
+                        <path d="M 0,80 Q 50,40 100,50 T 200,20 T 300,70 T 400,30 T 500,60" fill="none" stroke="var(--accent)" stroke-width="2"/>
+                        <path d="M 0,80 Q 50,40 100,50 T 200,20 T 300,70 T 400,30 T 500,60 L 500,100 L 0,100 Z" fill="var(--accent-glow)"/>
+                        <circle cx="200" cy="20" r="4" fill="var(--accent)"/>
+                        <text x="200" y="12" font-family="monospace" font-size="8" fill="var(--accent)" text-anchor="middle" font-weight="bold">CRITICAL APEX</text>
+                    </svg>
+                </div>
+            </div>
+
+            <!-- Right Panel: UI Action Sandbox -->
+            <div class="card">
+                <div class="card-header">
+                    <span class="card-title">02 / CORE REGULATOR</span>
+                </div>
+                <div class="control-panel">
+                    <div class="control-group">
+                        <label>Target Execution Model</label>
+                        <select id="model-select">
+                            <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (Default)</option>
+                            <option value="gemini-2.5-pro">gemini-2.5-pro (Heavy-Load)</option>
+                            <option value="claude-3.5-sonnet">claude-3.5-sonnet</option>
+                        </select>
+                    </div>
+
+                    <div class="control-group">
+                        <label>Custom Overclock Parameter</label>
+                        <input type="text" id="overclock-param" value="VARIANCE: 7 / MOTION: 3 / DENSITY: 4" placeholder="Enter custom taste dials...">
+                    </div>
+
+                    <!-- Safety Click Trigger Button -->
+                    <button class="btn-action" onclick="alert('VCP Native Bridge Hook: Safe Triggered!')">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                            <polygon points="5 3 19 12 5 21 5 3"/>
+                        </svg>
+                        Deploy Overclock Sandbox
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Real-time Log Simulation Footer -->
+        <div class="console-box">
+            <div class="console-line">
+                <span class="time">[04:30:35]</span>
+                <span class="tag">[SYS]</span>
+                <span>Iframe isolation barrier established. Safe viewport restricted.</span>
+            </div>
+            <div class="console-line">
+                <span class="time">[04:30:35]</span>
+                <span class="tag">[DOM]</span>
+                <span>Scale detection completed: scale(1.00). Fluid response active.</span>
+            </div>
+            <div class="console-line">
+                <span class="time">[04:30:35]</span>
+                <span class="tag">[OK]</span>
+                <span>Viewport locked on (device-width). Maximum-scale: 1.0.</span>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

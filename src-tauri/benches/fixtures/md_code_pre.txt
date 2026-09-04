@@ -1,0 +1,268 @@
+收到！代码块渲染专项验证，刚修完就直接上压力测试！
+
+---
+
+### 1. 单行极简
+
+```python
+print("hi")
+```
+
+```js
+console.log("yo");
+```
+
+```rust
+println!("sup");
+```
+
+### 2. 无语言标注
+
+```
+plain text code block
+no language hint
+should still render with monospace
+```
+
+### 3. 空代码块
+
+```python
+```
+
+### 4. 只有注释
+
+```python
+# 这是一行注释
+# 没有实际代码
+```
+
+### 5. 带空行
+
+```python
+def hello():
+
+    # 上面是空行
+    print("hello")
+
+    # 下面也是空行
+
+    return None
+```
+
+### 6. 超长行（横向滚动测试）
+
+```javascript
+const superLongVariableNameThatShouldTriggerHorizontalScrolling = someFunction(param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11, param12, param13, param14, param15);
+```
+
+### 7. HTML 内嵌
+
+```html
+<div class="container">
+  <p>Hello <strong>World</strong></p>
+  <ul>
+    <li>Item 1</li>
+    <li>Item 2</li>
+  </ul>
+</div>
+```
+
+### 8. CSS
+
+```css
+.bubble {
+  backdrop-filter: blur(12px);
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 1rem 1.25rem;
+  transition: transform 0.2s ease;
+}
+
+.bubble:active {
+  transform: scale(0.98);
+}
+```
+
+### 9. SQL
+
+```sql
+SELECT 
+    u.username,
+    COUNT(m.id) AS message_count,
+    MAX(m.created_at) AS last_message
+FROM users u
+LEFT JOIN messages m ON u.id = m.user_id
+WHERE u.active = true
+GROUP BY u.username
+HAVING COUNT(m.id) > 0
+ORDER BY message_count DESC
+LIMIT 10;
+```
+
+### 10. Bash
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+PROJECT_DIR="/opt/vcp"
+BACKUP_DIR="/backup/vcp-$(date +%Y%m%d)"
+
+mkdir -p "$BACKUP_DIR"
+cp -r "$PROJECT_DIR"/* "$BACKUP_DIR"/
+echo "Backup completed: $BACKUP_DIR"
+```
+
+### 11. Go
+
+```go
+package main
+
+import (
+    "fmt"
+    "sync"
+)
+
+func main() {
+    var wg sync.WaitGroup
+    for i := 0; i < 5; i++ {
+        wg.Add(1)
+        go func(n int) {
+            defer wg.Done()
+            fmt.Printf("Goroutine %d\n", n)
+        }(i)
+    }
+    wg.Wait()
+}
+```
+
+### 12. TypeScript 带泛型
+
+```typescript
+interface StreamBuffer<T> {
+    data: T[];
+    threshold: number;
+    flush(): T[];
+}
+
+function createBuffer<T>(threshold: number): StreamBuffer<T> {
+    return {
+        data: [],
+        threshold,
+        flush() {
+            const chunk = this.data;
+            this.data = [];
+            return chunk;
+        }
+    };
+}
+```
+
+### 13. 包含特殊字符
+
+```python
+# 特殊字符压力测试
+regex = r"(?im)^[ \t]*<!--\s*brk\s*-->"
+string_with_quotes = "He said \"Hello\" and 'Goodbye'"
+unicode_str = "中文 日本語 한국어 العربية ★☆✦✧ → ← ↔"
+emoji_in_string = "🎉🚀💻"
+multiline = """
+    Line 1
+    Line 2 with    tabs
+    Line 3
+"""
+```
+
+### 14. 四空格缩进代码（Markdown 旧语法）
+
+    This is indented code.
+    It uses 4 spaces.
+    Should it render as code block?
+
+### 15. 连续三个代码块无间隔
+
+```python
+a = 1
+```
+```python
+b = 2
+```
+```python
+c = 3
+```
+
+### 16. 代码块内包含围栏
+
+````markdown
+```python
+# This is code inside markdown inside code
+print("nested")
+```
+````
+
+### 17. JSON
+
+```json
+{
+  "name": "Nova",
+  "version": "1.1.1",
+  "features": [
+    "stream-rendering",
+    "burst-bubbles",
+    "katex-immunity",
+    "mermaid-async"
+  ],
+  "config": {
+    "buffer_threshold": 10,
+    "drain_timeout_ms": 5000
+  }
+}
+```
+
+### 18. 混合语言对比
+
+```python
+# Python 列表推导
+squares = [x**2 for x in range(10)]
+```
+
+```javascript
+// JS map
+const squares = [...Array(10).keys()].map(x => x ** 2);
+```
+
+```rust
+// Rust iterator
+let squares: Vec<i32> = (0..10).map(|x| x.pow(2)).collect();
+```
+
+```sql
+-- SQL 生成序列
+SELECT generate_series AS x, generate_series * generate_series AS square
+FROM generate_series(0, 9);
+```
+
+### 19. 行内代码混排
+
+这是行内代码 `let x = 1;` 和 `SELECT * FROM users` 以及 `print("hi")` 的混排测试。
+
+然后是 `包含 **加粗标记** 的行内代码` 以及 ``包含 `反引号` 的行内代码``。
+
+### 20. 嵌套引号的行内代码
+
+行内代码中的引号：`"He said 'hello'"` 和 `'She said "hi"'` 以及 `` `backtick` inside ``。
+
+---
+
+**主人请重点观察：**
+
+1. **无语言标注**（第2个）有没有语法高亮？背景色对不对？
+2. **空代码块**（第3个）有没有塌陷成一条线？
+3. **超长行**（第6个）横向滚动条有没有正常出现？文字有没有溢出气泡？
+4. **四空格缩进**（第14个）有没有被正确识别为代码块？
+5. **三个连续无间隔**（第15个）有没有合并成一个？还是正确分成三个？
+6. **嵌套围栏**（第16个）有没有被正确解析？
+7. **行内代码混排**（第19个）里的 `**加粗标记**` 有没有被误触发加粗？
+8. **整体闪烁**：刚修复的代码块渲染问题，现在流式输出时还闪不闪？
+
+主人，哪个有问题？
