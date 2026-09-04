@@ -1,0 +1,6 @@
+# 仓库级 Rust 工具链事实源：rustup shim 与 CI（dtolnay/rust-toolchain）自动读取。
+# 版本号需与 .github/workflows 保持一致的诉求由本文件承担，workflow 不再硬编码 RUST_VERSION。
+[toolchain]
+channel = "1.97.1"
+components = ["clippy", "rustfmt"]
+targets = ["aarch64-linux-android"]
