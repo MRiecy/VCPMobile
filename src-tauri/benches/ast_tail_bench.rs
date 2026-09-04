@@ -23,7 +23,7 @@ mod vcp_modules;
 use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, TailFrame};
 use crate::vcp_modules::chat::ast_diff::{diff_ast_streaming, prime_stream_code_highlighter};
 use crate::vcp_modules::pre_renderer::code_highlighter::{
-    highlight_code_block, IncrementalCodeHighlighter,
+    highlight_code_block, CodeBlockShell, IncrementalCodeHighlighter,
 };
 use crate::vcp_modules::pre_renderer::{parse_markdown_to_ast_streaming, MarkdownNode};
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
@@ -99,7 +99,7 @@ fn bench_syntect_highlight(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::from_parameter(tier), &tier, |b, &tier| {
             let content = truncate_on_char_boundary(html, tier).to_string();
             b.iter(|| {
-                let out = highlight_code_block(black_box(&content), "html");
+                let out = highlight_code_block(black_box(&content), "html", CodeBlockShell::Html);
                 black_box(out);
             });
         });
