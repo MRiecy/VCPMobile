@@ -727,6 +727,89 @@ function executeMutation(
       break;
     }
 
+    case "patch_raw_html": {
+      // 后端 html5ever 树权威切分：冻结域 = 未闭合最外层元素的子节点列表。
+      // 容器结构恒为 .vcp-raw-html-container > outer > [frozen × N] + [live?]；
+      // 种子帧整棵重建，稳态帧只搬入新冻结段并收敛 live 子节点。
+      // 冻结段每个字节全程只 parse 这一次，之后永久挂载、对象身份不变。
+      const existing = registry.get(mutation.id);
+      let container: HTMLElement;
+      if (existing instanceof HTMLElement) {
+        container = existing;
+      } else {
+        container = document.createElement("div");
+        container.className = "vcp-raw-html-container";
+        sandbox.appendChild(container);
+        registry.set(mutation.id, container);
+      }
+
+      if (mutation.seed) {
+        const seedTemplate = document.createElement("template");
+        seedTemplate.innerHTML = filterTrustedRichHtml(mutation.live_html);
+        container.replaceChildren(seedTemplate.content);
+        break;
+      }
+
+      const outer = container.firstElementChild;
+      if (!outer) {
+        status = "failed";
+        detail = "Raw html container missing outer element (no seed applied)";
+        break;
+      }
+
+      // 1. 搬入新冻结段。插入点 = 旧冻结数 = frozen_total - 本帧新增数
+      const frozenTemplate = document.createElement("template");
+      frozenTemplate.innerHTML = mutation.frozen_html
+        ? filterTrustedRichHtml(mutation.frozen_html)
+        : "";
+      const newFrozenCount = frozenTemplate.content.childNodes.length;
+      const prevFrozen = mutation.frozen_total - newFrozenCount;
+      if (
+        prevFrozen < 0 ||
+        (outer.childNodes.length !== prevFrozen && outer.childNodes.length !== prevFrozen + 1)
+      ) {
+        status = "failed";
+        detail = `Raw html frozen frontier desync (children=${outer.childNodes.length}, prevFrozen=${prevFrozen})`;
+        break;
+      }
+      {
+        const live = outer.childNodes[prevFrozen] ?? null;
+        for (const child of Array.from(frozenTemplate.content.childNodes)) {
+          outer.insertBefore(child, live);
+        }
+      }
+
+      // 2. 收敛活跃子节点（守卫与全量 morphdom 路径一致）
+      const liveTemplate = document.createElement("template");
+      liveTemplate.innerHTML = mutation.live_html
+        ? filterTrustedRichHtml(mutation.live_html)
+        : "";
+      const newLive = liveTemplate.content.firstChild ?? null;
+      const oldLive = outer.childNodes[mutation.frozen_total] ?? null;
+      if (oldLive && newLive) {
+        if (oldLive.nodeType === Node.TEXT_NODE && newLive.nodeType === Node.TEXT_NODE) {
+          if (oldLive.nodeValue !== newLive.nodeValue) oldLive.nodeValue = newLive.nodeValue;
+        } else if (
+          oldLive.nodeType === Node.ELEMENT_NODE &&
+          newLive.nodeType === Node.ELEMENT_NODE &&
+          (oldLive as Element).tagName === (newLive as Element).tagName
+        ) {
+          morphdom(oldLive as HTMLElement, newLive as HTMLElement, morphdomLiveOptions());
+        } else {
+          outer.replaceChild(newLive, oldLive);
+        }
+      } else if (newLive) {
+        outer.appendChild(newLive);
+      } else if (oldLive) {
+        outer.removeChild(oldLive);
+      }
+      if (outer.childNodes.length !== mutation.frozen_total + (newLive ? 1 : 0)) {
+        status = "failed";
+        detail = "Raw html live reconcile desync";
+      }
+      break;
+    }
+
     case "add": {
       const parentNode = mutation.parent === "root"
         ? sandbox

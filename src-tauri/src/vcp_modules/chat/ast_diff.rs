@@ -43,6 +43,19 @@ pub enum AstMutation {
         completed_html: String,
         active_html: String,
     },
+    /// RawHtml 容器 tail 的增量补丁：后端 html5ever 树分界。冻结域 = 未闭合最外层
+    /// 元素的子节点列表；frozen_html 为「新闭合定型的内层子节点」序列化（有序拼接，
+    /// 可能为空串），live_html 稳态帧为「当前活跃的最内层末子节点」，种子帧为
+    /// 「最外层元素整棵序列化」。frozen_total 为切分后的冻结总数（校验/基线用），
+    /// seed 帧前端整体重建容器内容并以 frozen_total 建立冻结基线。
+    #[serde(rename = "patch_raw_html")]
+    PatchRawHtml {
+        id: String,
+        frozen_html: String,
+        live_html: String,
+        frozen_total: usize,
+        seed: bool,
+    },
     #[serde(rename = "replace_inline")]
     ReplaceInline { id: String, node: InlineNode },
     #[serde(rename = "remove")]

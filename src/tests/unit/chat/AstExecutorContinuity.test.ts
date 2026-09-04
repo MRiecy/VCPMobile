@@ -176,4 +176,102 @@ describe("AST executor continuity", () => {
       sandbox.remove();
     }
   });
+
+  it("applies patch_raw_html seed then steady frozen/live advances with identity preserved", () => {
+    const sandbox = document.createElement("div");
+    document.body.appendChild(sandbox);
+
+    try {
+      // 种子帧：整棵外层下发，frozen_total=1 表示第一个子节点（section）已冻结
+      expect(applyFrame([{
+        op: "patch_raw_html",
+        id: "t0",
+        frozen_html: "",
+        live_html: '<div class="card"><section>one</section><p>B</p></div>',
+        frozen_total: 1,
+        seed: true,
+      }], "patch-msg", sandbox).ok).toBe(true);
+
+      const card = sandbox.querySelector(".card");
+      const sectionEl = sandbox.querySelector("section");
+      expect(card).not.toBeNull();
+      expect(sandbox.querySelector(".vcp-raw-html-container")).not.toBeNull();
+
+      // 稳态帧：p 闭合冻结，span 活跃
+      expect(applyFrame([{
+        op: "patch_raw_html",
+        id: "t0",
+        frozen_html: "<p>B</p>",
+        live_html: "<span>C</span>",
+        frozen_total: 2,
+        seed: false,
+      }], "patch-msg", sandbox).ok).toBe(true);
+
+      expect(sandbox.querySelector("section")).toBe(sectionEl); // 冻结节点对象身份不变
+      expect(card?.childNodes.length).toBe(3); // section / p / span
+      expect(card?.textContent).toBe("oneBC");
+
+      // 稳态帧：span 闭合冻结，尾部文本活跃
+      expect(applyFrame([{
+        op: "patch_raw_html",
+        id: "t0",
+        frozen_html: "<span>C</span>",
+        live_html: "tail",
+        frozen_total: 3,
+        seed: false,
+      }], "patch-msg", sandbox).ok).toBe(true);
+
+      expect(card?.childNodes.length).toBe(4);
+      expect(card?.lastChild?.nodeType).toBe(Node.TEXT_NODE);
+      expect(card?.lastChild?.nodeValue).toBe("tail");
+      expect(card?.textContent).toBe("oneBCtail");
+    } finally {
+      cleanupRegistry("patch-msg");
+      sandbox.remove();
+    }
+  });
+
+  it("sanitizes patch_raw_html payloads and fails loudly on frontier desync", () => {
+    const sandbox = document.createElement("div");
+    document.body.appendChild(sandbox);
+
+    try {
+      expect(applyFrame([{
+        op: "patch_raw_html",
+        id: "t0",
+        frozen_html: "",
+        live_html: '<div class="card"><p>A</p></div>',
+        frozen_total: 0,
+        seed: true,
+      }], "patch-sanitize", sandbox).ok).toBe(true);
+
+      // live_html 中引用宿主能力的危险属性必须被剥除（与本项目的安全画像一致：
+      // 良性 handler 保留，fetch/invoke 等宿主入口才剥除）
+      expect(applyFrame([{
+        op: "patch_raw_html",
+        id: "t0",
+        frozen_html: "",
+        live_html: '<span onclick="fetch(\'/leak\')">ok</span>',
+        frozen_total: 0,
+        seed: false,
+      }], "patch-sanitize", sandbox).ok).toBe(true);
+      const liveSpan = sandbox.querySelector(".card > span");
+      expect(liveSpan?.getAttribute("onclick")).toBeNull();
+      expect(liveSpan?.textContent).toBe("ok");
+
+      // 结构对不上（frozen_total 虚高）必须失败而非静默错位
+      const bad = applyFrame([{
+        op: "patch_raw_html",
+        id: "t0",
+        frozen_html: "",
+        live_html: "<span>ok</span>",
+        frozen_total: 99,
+        seed: false,
+      }], "patch-sanitize", sandbox);
+      expect(bad.ok).toBe(false);
+    } finally {
+      cleanupRegistry("patch-sanitize");
+      sandbox.remove();
+    }
+  });
 });

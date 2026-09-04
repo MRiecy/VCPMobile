@@ -42,8 +42,8 @@ futures-util = "0.3"
 url = "2"
 dashmap = "6"
 tokio-util = { version = "0.7", features = ["codec", "io", "rt"] }
-scraper = "0.19"
-ego-tree = "0.6"
+scraper = "0.27"
+ego-tree = "0.11"
 lru = "0.16.3"
 fancy-regex = "0.16"
 regex = "1"
@@ -79,6 +79,8 @@ chardetng = "0.1"
 mime_guess = "2.0"
 axum = { version = "0.7", features = ["ws"] }
 tower-http = { version = "0.5", features = ["fs", "cors", "trace"] }
+html5ever = "0.39"
+markup5ever_rcdom = "0.39"
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"

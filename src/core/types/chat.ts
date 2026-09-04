@@ -226,6 +226,7 @@ export type AstMutation =
   | { op: "prop"; id: string; key: string; value: string }
   | { op: "replace"; id: string; node: MarkdownNode }
   | { op: "patch_code"; id: string; completed_html: string; active_html: string }
+  | { op: "patch_raw_html"; id: string; frozen_html: string; live_html: string; frozen_total: number; seed: boolean }
   | { op: "replace_inline"; id: string; node: InlineNode }
   | { op: "remove"; id: string };
 
