@@ -1287,9 +1287,12 @@ onUnmounted(() => {
                 :is-streaming="isStreaming"
               >
                 <template v-if="useAstForCurrentTail" #code>
+                  <!-- 此沙箱只承载流式代码 pre，刻意不挂 vcp-markdown-block：
+                       其 15px 正文字号会截断代码区 10px 容器的 font-size 继承链，
+                       导致流式渲染字体明显大于静态完成态。 -->
                   <div
                     :ref="(el) => { tailSandboxRef = el as HTMLElement | null }"
-                    class="vcp-markdown-block vcp-ast-sandbox"
+                    class="vcp-ast-sandbox"
                   />
                 </template>
               </HtmlPreviewBlock>
