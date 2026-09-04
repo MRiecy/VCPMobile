@@ -49,6 +49,7 @@ macro_rules! app_command_handler {
             delete_tarven_rule, get_tarven_rules, preview_tarven_injection, reorder_rules,
             save_tarven_rule, toggle_rule_enabled,
         };
+        use crate::vcp_modules::context_sanitizer::{chat_sanitize_content, chat_strip_thought_chains};
         use crate::vcp_modules::db_manager::search_messages_fts;
         use crate::vcp_modules::diary::{
             diary_cancel_search, diary_cancel_semantic_search, diary_create_note,
@@ -162,8 +163,10 @@ macro_rules! app_command_handler {
         // 直接上下文后无法自行推断 R。
         let app_commands: std::sync::Arc<tauri::ipc::InvokeHandler<tauri::Wry>> =
             std::sync::Arc::new(tauri::generate_handler![
-                // ── 对话核心（chat_manager / message_service / message_repository / db_manager）──
+                // ── 对话核心（chat_manager / message_service / message_repository / db_manager / context_sanitizer）──
                 append_single_message,
+                chat_sanitize_content,
+                chat_strip_thought_chains,
                 delete_message_attachment,
                 delete_messages,
                 fetch_raw_message_content,

@@ -1,25 +1,32 @@
 //! vcp_modules/context_sanitizer.rs
-//! 上下文 HTML 标签转 MD 净化器模块（Rust 重构版）
-//! 处理 HTML 净化、多媒体保留、VCP 特殊块提取以及元思考链清理
+//! 上下文 HTML -> Markdown 净化器（薄门面）
+//!
+//! 转换引擎已迁移至 [`crate::vcp_modules::infra::html2md`]（htmd + VCP 自定义 handler）；
+//! 本模块保留门面职责：LRU+TTL 缓存、VCP 原始块直通、think 标签字面量保护、
+//! 元思考链明文剥离，流程对齐桌面端 contextSanitizer.js。
 
-use ego_tree::NodeRef;
-use fancy_regex::Regex;
 use lazy_static::lazy_static;
 use lru::LruCache;
-use scraper::{Html, Node};
+use regex::Regex;
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
+use crate::vcp_modules::infra::html2md;
+
 lazy_static! {
-    /// 清理 VCP 元思考链的正则表达式
-    static ref THOUGHT_CHAIN_REGEX: Regex = Regex::new(r#"(?s)\[--- VCP元思考链(?::\s*"([^"]*)")?\s*---\].*?\[--- 元思考链结束 ---\]"#).unwrap();
-    /// 清理常规 <think> 标签的正则表达式
-    static ref CONVENTIONAL_THOUGHT_REGEX: Regex = Regex::new(r"(?is)<think>.*?</think>").unwrap();
+    /// 剥离 VCP 元思考链（桌面行锚定语义：起止标记必须各自独占一行，
+    /// 正文/行内代码里的示例原样保留）
+    static ref THOUGHT_CHAIN_REGEX: Regex = Regex::new(r#"(?m)^[ \t]*\[--- VCP元思考链(?::\s*"[^"]*")?\s*---\][ \t]*\r?\n[\s\S]*?^[ \t]*\[--- 元思考链结束 ---\][ \t]*(?:\r?\n|$)"#).unwrap();
+    /// 剥离常规 <think>/<thinking> 块（行锚定 + 大小写不敏感）
+    static ref CONVENTIONAL_THOUGHT_REGEX: Regex = Regex::new(r"(?im)^[ \t]*<think(?:ing)?>[ \t]*\r?\n[\s\S]*?^[ \t]*</think(?:ing)?>[ \t]*(?:\r?\n|$)").unwrap();
+    /// think 标签字面量保护：转换前替换为占位符，防止解析器把协议讲解文本里的
+    /// think 标签当元素吞掉；转换后逐个恢复
+    static ref THINK_TAG_LITERAL_REGEX: Regex = Regex::new(r"(?i)</?think(?:ing)?>").unwrap();
     /// 简单检查是否包含 HTML 标签的正则表达式
     static ref HTML_CHECK_REGEX: Regex = Regex::new(r"<[^>]+>").unwrap();
     /// 清理多余空行（保留最多2个连续空行）的正则表达式
-    static ref MULTI_NEWLINE_REGEX: regex::Regex = regex::Regex::new(r"\n{3,}").unwrap();
+    static ref MULTI_NEWLINE_REGEX: Regex = Regex::new(r"\n{3,}").unwrap();
 }
 
 /// 缓存项结构，支持过期时间
@@ -29,7 +36,6 @@ pub struct CacheItem {
 }
 
 /// 上下文净化器结构体，管理 LRU 缓存与 TTL
-#[allow(dead_code)]
 pub struct ContextSanitizer {
     /// 线程安全的 LRU 缓存：内容哈希 -> 净化后的内容
     pub cache: Mutex<LruCache<String, CacheItem>>,
@@ -55,7 +61,6 @@ impl ContextSanitizer {
 
     /// 从缓存中获取已净化的内容
     /// @param key 缓存键
-    #[allow(dead_code)]
     pub fn get_cached(&self, key: &str) -> Option<String> {
         let mut cache = self.cache.lock().unwrap();
         if let Some(item) = cache.get(key) {
@@ -75,7 +80,6 @@ impl ContextSanitizer {
     /// 将净化后的内容存入缓存
     /// @param key 缓存键
     /// @param value 净化后的内容
-    #[allow(dead_code)]
     pub fn set_cached(&self, key: String, value: String) {
         let mut cache = self.cache.lock().unwrap();
         cache.put(
@@ -89,11 +93,16 @@ impl ContextSanitizer {
     }
 
     /// 净化单条消息内容：HTML -> Markdown (带缓存逻辑)
+    /// 流程对齐桌面端：空检查 -> VCP 原始块直通 -> HTML 检查 -> 缓存 -> 转换
     /// @param content 原始内容
     /// @param keep_thoughts 是否保留思考链
-    #[allow(dead_code)]
     pub fn sanitize_content(&self, content: &str, keep_thoughts: bool) -> String {
         if content.trim().is_empty() {
+            return content.to_string();
+        }
+
+        // 对原始工具调用块 / DailyNote 块做直通保护，避免被 Markdown 转义污染
+        if contains_raw_vcp_blocks(content) {
             return content.to_string();
         }
 
@@ -108,8 +117,10 @@ impl ContextSanitizer {
             return cached;
         }
 
-        // 核心执行：HTML 转换为 Markdown
-        let result = html_to_vcp_markdown(content, keep_thoughts);
+        // 核心执行：HTML 转换为 Markdown（出错时回退原始内容，且不进缓存）
+        let Some(result) = sanitize_core(content, keep_thoughts) else {
+            return content.to_string();
+        };
 
         // 存入缓存
         self.set_cached(cache_key, result.clone());
@@ -124,217 +135,72 @@ impl Default for ContextSanitizer {
     }
 }
 
-/// 清理元思考链（明文形式）
+/// 清理元思考链（明文形式，桌面行锚定语义）
+/// 只有起止标记分别独占一行时才视为思维链协议；
+/// 正文中的 `<think>...</think>` 示例、行内代码或标签说明必须原样保留。
 /// @param content 原始内容
 /// @returns 清理后的内容
-#[allow(dead_code)]
 pub fn strip_thought_chains(content: &str) -> String {
-    let s = THOUGHT_CHAIN_REGEX.replace_all(content, "").to_string();
+    let s = THOUGHT_CHAIN_REGEX.replace_all(content, "");
     CONVENTIONAL_THOUGHT_REGEX.replace_all(&s, "").to_string()
 }
 
-/// 核心算法：将 HTML 树转换为 VCP 风格的 Markdown
+/// 检查内容是否包含原始 VCP 特殊块（成对标记），避免进入 HTML -> Markdown 后被额外转义
+/// @param content 要检查的内容
+pub fn contains_raw_vcp_blocks(content: &str) -> bool {
+    (content.contains("<<<[TOOL_REQUEST]>>>") && content.contains("<<<[END_TOOL_REQUEST]>>>"))
+        || (content.contains("<<<DailyNoteStart>>>") && content.contains("<<<DailyNoteEnd>>>"))
+}
+
+/// 核心转换管线：think 字面量保护 -> html2md 引擎转换 -> 字面量恢复 -> 空行收敛 + trim
+/// 返回 None 表示转换失败（调用方按桌面语义回退原始内容）
+fn sanitize_core(content: &str, keep_thoughts: bool) -> Option<String> {
+    // 解析器会把用于讲解协议的字面量 <think>/<thinking> 标签当成未知 HTML 元素并吞掉标签本身，
+    // 先保护所有标签字面量；真正需要清理的完整思维链块由 strip_thought_chains 按独占行规则处理
+    let mut thought_tag_literals: Vec<String> = Vec::new();
+    let protected = THINK_TAG_LITERAL_REGEX
+        .replace_all(content, |caps: &regex::Captures| {
+            let placeholder = format!("VCPTHOUGHTTAGLITERAL{}TOKEN", thought_tag_literals.len());
+            thought_tag_literals.push(caps[0].to_string());
+            placeholder
+        })
+        .to_string();
+
+    let mut markdown = match html2md::convert(&protected, keep_thoughts) {
+        Ok(markdown) => markdown,
+        Err(error) => {
+            log::error!("[ContextSanitizer] Error sanitizing content: {}", error);
+            return None;
+        }
+    };
+
+    for (index, tag) in thought_tag_literals.iter().enumerate() {
+        markdown = markdown.replace(&format!("VCPTHOUGHTTAGLITERAL{index}TOKEN"), tag);
+    }
+
+    // 清理多余空行（保留最多2个连续空行）
+    Some(
+        MULTI_NEWLINE_REGEX
+            .replace_all(markdown.trim(), "\n\n")
+            .to_string(),
+    )
+}
+
+/// 核心转换管线的薄包装：HTML -> VCP 风格 Markdown（不含缓存与直通检查）
+/// 供测试与未来导出复用；完整净化流程请走 [`ContextSanitizer::sanitize_content`]
 /// @param html 输入的 HTML 字符串
 /// @param keep_thoughts 是否保留思考链
+#[allow(dead_code)]
 pub fn html_to_vcp_markdown(html: &str, keep_thoughts: bool) -> String {
-    let fragment = Html::parse_fragment(html);
-    let mut result = String::new();
-
-    // 遍历 HTML 树的根节点子代
-    for node in fragment.tree.root().children() {
-        process_node(node, &mut result, keep_thoughts);
-    }
-
-    // 清理多余空行，对齐 JS 逻辑
-    MULTI_NEWLINE_REGEX
-        .replace_all(result.trim(), "\n\n")
-        .to_string()
-}
-
-/// 递归处理 HTML 节点
-fn process_node(node: NodeRef<Node>, out: &mut String, keep_thoughts: bool) {
-    match node.value() {
-        // 处理文本节点
-        Node::Text(text) => {
-            out.push_str(&text.text);
-        }
-        // 处理元素节点
-        Node::Element(el) => {
-            let tag = el.name();
-
-            // 算法 A：特殊块的“零损提取”
-            // 检查是否有 data-raw-content 属性，如果有则直接返回原始内容
-            if let Some(raw) = el.attr("data-raw-content") {
-                out.push_str(raw);
-                return;
-            }
-
-            // 算法 B：多媒体与特殊结构处理
-            match tag {
-                // 保留图片标签
-                "img" => {
-                    let src = el.attr("src").unwrap_or("");
-                    let alt = el.attr("alt").unwrap_or("");
-                    if !src.is_empty() {
-                        out.push_str(&format!(r#"<img src="{}" alt="{}">"#, src, alt));
-                    }
-                }
-                // 保留音频/视频标签
-                "audio" | "video" => {
-                    let src = el.attr("src").unwrap_or("");
-                    if !src.is_empty() {
-                        out.push_str(&format!(r#"<{0} src="{1}"></{0}>"#, tag, src));
-                    } else {
-                        // 尝试从子节点 <source> 中提取
-                        let mut first_src = "";
-                        for child in node.children() {
-                            if let Node::Element(cel) = child.value() {
-                                if cel.name() == "source" {
-                                    if let Some(csrc) = cel.attr("src") {
-                                        first_src = csrc;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        if !first_src.is_empty() {
-                            out.push_str(&format!(r#"<{0} src="{1}"></{0}>"#, tag, first_src));
-                        }
-                    }
-                }
-                // 处理代码块与 VCP 特殊原始块
-                "pre" => {
-                    let mut text_content = String::new();
-                    collect_text(node, &mut text_content);
-
-                    // 检查是否包含 VCP 专用原始标记
-                    if text_content.contains("<<<[TOOL_REQUEST]>>>")
-                        || text_content.contains("<<<DailyNoteStart>>>")
-                    {
-                        out.push_str(&text_content);
-                    } else {
-                        // 普通 pre 标签转为 Markdown 代码块
-                        out.push_str("\n```\n");
-                        out.push_str(&text_content);
-                        out.push_str("\n```\n");
-                    }
-                }
-                // 算法 C：元思考链的结构化处理
-                "div"
-                    if el.has_class(
-                        "vcp-thought-chain-bubble",
-                        scraper::CaseSensitivity::AsciiCaseInsensitive,
-                    ) =>
-                {
-                    if keep_thoughts {
-                        let title = el.attr("data-thought-title").unwrap_or("");
-                        let title_part = if !title.is_empty() {
-                            format!(r#": "{}""#, title)
-                        } else {
-                            String::new()
-                        };
-                        out.push_str(&format!("\n\n[--- VCP元思考链{} ---]\n", title_part));
-                        for child in node.children() {
-                            process_node(child, out, keep_thoughts);
-                        }
-                        out.push_str("\n[--- 元思考链结束 ---]\n\n");
-                    }
-                }
-                // --- 基础 HTML 标签转 Markdown ---
-                "p" => {
-                    out.push('\n');
-                    for child in node.children() {
-                        process_node(child, out, keep_thoughts);
-                    }
-                    out.push('\n');
-                }
-                "br" => out.push('\n'),
-                "strong" | "b" => {
-                    out.push_str("**");
-                    for child in node.children() {
-                        process_node(child, out, keep_thoughts);
-                    }
-                    out.push_str("**");
-                }
-                "em" | "i" => {
-                    out.push('*');
-                    for child in node.children() {
-                        process_node(child, out, keep_thoughts);
-                    }
-                    out.push('*');
-                }
-                "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => {
-                    let level = tag.chars().last().unwrap().to_digit(10).unwrap_or(1);
-                    out.push('\n');
-                    for _ in 0..level {
-                        out.push('#');
-                    }
-                    out.push(' ');
-                    for child in node.children() {
-                        process_node(child, out, keep_thoughts);
-                    }
-                    out.push('\n');
-                }
-                "code" => {
-                    out.push('`');
-                    for child in node.children() {
-                        process_node(child, out, keep_thoughts);
-                    }
-                    out.push('`');
-                }
-                "ul" => {
-                    out.push('\n');
-                    for child in node.children() {
-                        process_node(child, out, keep_thoughts);
-                    }
-                    out.push('\n');
-                }
-                "li" => {
-                    out.push_str("- ");
-                    for child in node.children() {
-                        process_node(child, out, keep_thoughts);
-                    }
-                    out.push('\n');
-                }
-                "a" => {
-                    let href = el.attr("href").unwrap_or("");
-                    out.push('[');
-                    for child in node.children() {
-                        process_node(child, out, keep_thoughts);
-                    }
-                    out.push_str(&format!("]({})", href));
-                }
-                _ => {
-                    // 默认透传：递归处理子节点
-                    for child in node.children() {
-                        process_node(child, out, keep_thoughts);
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// 辅助函数：收集节点下所有的纯文本内容
-fn collect_text(node: NodeRef<Node>, out: &mut String) {
-    for child in node.children() {
-        match child.value() {
-            Node::Text(text) => out.push_str(&text.text),
-            Node::Element(_) => collect_text(child, out),
-            _ => {}
-        }
-    }
+    sanitize_core(html, keep_thoughts).unwrap_or_else(|| html.to_string())
 }
 
 /// 检查内容是否包含 HTML 标签
-#[allow(dead_code)]
 pub fn contains_html(content: &str) -> bool {
-    HTML_CHECK_REGEX.is_match(content).unwrap_or(false)
+    HTML_CHECK_REGEX.is_match(content)
 }
 
 /// 生成缓存键（使用哈希与长度组合）
-#[allow(dead_code)]
 pub fn generate_cache_key(content: &str, keep_thoughts: bool) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -346,15 +212,135 @@ pub fn generate_cache_key(content: &str, keep_thoughts: bool) -> String {
     format!("sanitized_{}_{}", hash, content.len())
 }
 
+// ---------------------------------------------------------
+// Tauri Commands
+// ---------------------------------------------------------
+
+/// 净化单条消息内容：HTML -> Markdown（含 LRU+TTL 缓存与 VCP 直通保护）
+#[tauri::command]
+pub async fn chat_sanitize_content(
+    sanitizer: tauri::State<'_, ContextSanitizer>,
+    content: String,
+    keep_thoughts: bool,
+) -> Result<String, String> {
+    Ok(sanitizer.sanitize_content(&content, keep_thoughts))
+}
+
+/// 明文剥离元思考链（桌面行锚定语义）
+#[tauri::command]
+pub async fn chat_strip_thought_chains(content: String) -> Result<String, String> {
+    Ok(strip_thought_chains(&content))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    // ── strip_thought_chains：桌面行锚定语义 ──
+
     #[test]
-    fn test_strip_thoughts() {
-        let input = "Hello [--- VCP元思考链: \"test\" ---] secret [--- 元思考链结束 ---] World <think>internal</think>";
-        assert_eq!(strip_thought_chains(input), "Hello  World ");
+    fn test_strip_thoughts_line_anchored_blocks_removed() {
+        // 起止标记各自独占一行 -> 整块剥离（含 <think> 与 <thinking> 变体）
+        let input = "前言\n\
+                     [--- VCP元思考链: \"计划\" ---]\n\
+                     秘密推理\n\
+                     [--- 元思考链结束 ---]\n\
+                     正文\n\
+                     <think>\n\
+                     内部独白\n\
+                     </think>\n\
+                     <thinking>\n\
+                     变体独白\n\
+                     </thinking>\n\
+                     结尾";
+        assert_eq!(strip_thought_chains(input), "前言\n正文\n结尾");
     }
+
+    #[test]
+    fn test_strip_thoughts_inline_mentions_preserved() {
+        // 行内提及（未独占行）必须原样保留
+        let input = "这是 [--- VCP元思考链: \"x\" ---] 示例 [--- 元思考链结束 ---] 与 `<think>a</think>` 讲解";
+        assert_eq!(strip_thought_chains(input), input);
+    }
+
+    #[test]
+    fn test_strip_thoughts_allows_leading_whitespace_on_marker_lines() {
+        let input = "前文\n  <think>\n内容\n\t</thinking>\n后文";
+        assert_eq!(strip_thought_chains(input), "前文\n后文");
+    }
+
+    // ── VCP 特殊块零损提取 ──
+
+    #[test]
+    fn test_prettified_bubble_returns_raw_content_verbatim() {
+        let html = r#"<pre class="vcp-tool-use-bubble" data-raw-content="<<<[TOOL_REQUEST]>>> call(**kwargs**) <<<[END_TOOL_REQUEST]>>>"><code>美化后的HTML不应出现</code></pre>"#;
+        let md = html_to_vcp_markdown(html, false);
+        assert_eq!(md, "<<<[TOOL_REQUEST]>>> call(**kwargs**) <<<[END_TOOL_REQUEST]>>>");
+
+        // maid-diary-bubble 变体
+        let html = r#"<pre class="maid-diary-bubble" data-raw-content="<<<DailyNoteStart>>> 日记 <<<DailyNoteEnd>>>">美化</pre>"#;
+        let md = html_to_vcp_markdown(html, false);
+        assert_eq!(md, "<<<DailyNoteStart>>> 日记 <<<DailyNoteEnd>>>");
+    }
+
+    #[test]
+    fn test_raw_content() {
+        let html = "<pre data-raw-content=\"<<<[TOOL_REQUEST]>>>\ncall()\"></pre>";
+        let md = html_to_vcp_markdown(html, false);
+        assert_eq!(md, "<<<[TOOL_REQUEST]>>>\ncall()");
+    }
+
+    #[test]
+    fn test_raw_marker_pre_passthrough() {
+        // 未美化但含特殊标记的 pre：textContent 原文直通
+        let html = "<pre><<<[TOOL_REQUEST]>>>\nfn call()\n<<<[END_TOOL_REQUEST]>>></pre>";
+        let md = html_to_vcp_markdown(html, false);
+        assert_eq!(md, "<<<[TOOL_REQUEST]>>>\nfn call()\n<<<[END_TOOL_REQUEST]>>>");
+
+        // 注意：`<<<DailyNoteStart>>>` 不带方括号，`<DailyNoteStart>` 会被 HTML5 解析器
+        // 当成未知元素吞掉（桌面 jsdom 行为相同），因此完整 DailyNote 块依赖
+        // contains_raw_vcp_blocks 前置直通保护（见 test_contains_raw_vcp_blocks_passthrough），
+        // pre handler 里的 DailyNote 标记检查仅作为与桌面规则4 的镜像兜底。
+    }
+
+    // ── 元思考链泡泡：keep / drop 两态 ──
+
+    #[test]
+    fn test_thought_chain_bubble_keep_with_title() {
+        let html = r#"<div class="vcp-thought-chain-bubble" data-thought-title="计划"><p>思考内容</p></div>"#;
+        let md = html_to_vcp_markdown(html, true);
+        assert!(md.contains("[--- VCP元思考链: \"计划\" ---]"), "md={md}");
+        assert!(md.contains("思考内容"), "md={md}");
+        assert!(md.contains("[--- 元思考链结束 ---]"), "md={md}");
+    }
+
+    #[test]
+    fn test_thought_chain_bubble_keep_without_title() {
+        let html = r#"<div class="vcp-thought-chain-bubble"><p>思考内容</p></div>"#;
+        let md = html_to_vcp_markdown(html, true);
+        assert!(md.contains("[--- VCP元思考链 ---]"), "md={md}");
+        assert!(md.contains("思考内容"), "md={md}");
+    }
+
+    #[test]
+    fn test_thought_chain_bubble_dropped_when_not_keeping() {
+        let html = r#"<p>前</p><div class="vcp-thought-chain-bubble" data-thought-title="计划"><p>思考内容</p></div><p>后</p>"#;
+        let md = html_to_vcp_markdown(html, false);
+        assert!(!md.contains("思考内容"), "md={md}");
+        assert!(!md.contains("VCP元思考链"), "md={md}");
+        assert!(md.contains('前'), "md={md}");
+        assert!(md.contains('后'), "md={md}");
+    }
+
+    #[test]
+    fn test_thought_chain_bubble_class_match_is_case_sensitive() {
+        // 对齐 JS classList 语义：大小写敏感（纠正旧实现的 AsciiCaseInsensitive 偏差）
+        let html = r#"<div class="VCP-THOUGHT-CHAIN-BUBBLE">内容保留</div>"#;
+        let md = html_to_vcp_markdown(html, false);
+        assert!(md.contains("内容保留"), "md={md}");
+    }
+
+    // ── 多媒体保留 ──
 
     #[test]
     fn test_html_to_md_img() {
@@ -364,11 +350,101 @@ mod tests {
     }
 
     #[test]
-    fn test_raw_content() {
-        let html = "<pre data-raw-content=\"<<<[TOOL_REQUEST]>>>\ncall()\"></pre>";
+    fn test_img_without_src_dropped() {
+        let html = r#"<p>前<img alt="no src">后</p>"#;
         let md = html_to_vcp_markdown(html, false);
-        assert_eq!(md, "<<<[TOOL_REQUEST]>>>\ncall()");
+        assert!(!md.contains("<img"), "md={md}");
+        assert!(md.contains("前"), "md={md}");
     }
+
+    #[test]
+    fn test_audio_video_preserved() {
+        let html = r#"<p><audio src="a.mp3"></audio><video src="v.mp4"></video></p>"#;
+        let md = html_to_vcp_markdown(html, false);
+        assert!(md.contains(r#"<audio src="a.mp3"></audio>"#), "md={md}");
+        assert!(md.contains(r#"<video src="v.mp4"></video>"#), "md={md}");
+    }
+
+    #[test]
+    fn test_media_source_child_fallback() {
+        // 无 src 时取第一个 <source> 子元素
+        let html = r#"<video><source src="fallback.mp4"></video>"#;
+        let md = html_to_vcp_markdown(html, false);
+        assert!(md.contains(r#"<video src="fallback.mp4"></video>"#), "md={md}");
+
+        // 第一个 <source> 无 src -> 丢弃（对齐桌面 querySelectorAll('source')[0] 语义）
+        let html = r#"<audio><source><source src="second.mp3"></audio>"#;
+        let md = html_to_vcp_markdown(html, false);
+        assert!(!md.contains("<audio"), "md={md}");
+    }
+
+    // ── sanitize_content 门面流程 ──
+
+    #[test]
+    fn test_contains_raw_vcp_blocks_passthrough() {
+        let sanitizer = ContextSanitizer::default();
+        // 成对标记存在时整条原样返回，即使内容里含 HTML 形态文本
+        let raw = "<<<[TOOL_REQUEST]>>>\n<think>伪标签</think>\n<<<[END_TOOL_REQUEST]>>>";
+        assert_eq!(sanitizer.sanitize_content(raw, false), raw);
+
+        let raw = "<p>说明</p>\n<<<DailyNoteStart>>>\nx\n<<<DailyNoteEnd>>>";
+        assert_eq!(sanitizer.sanitize_content(raw, false), raw);
+
+        // 不成对则正常走转换
+        assert!(!contains_raw_vcp_blocks("<<<[TOOL_REQUEST]>>> 单独的"));
+    }
+
+    #[test]
+    fn test_think_tag_literals_protected() {
+        let sanitizer = ContextSanitizer::default();
+        // 协议讲解文本里的 think 标签字面量：转换后必须原样还在
+        let input = "协议讲解：<think> 与 </think> 是字面量<strong>加粗</strong>";
+        let md = sanitizer.sanitize_content(input, false);
+        assert!(md.contains("<think>"), "md={md}");
+        assert!(md.contains("</think>"), "md={md}");
+        assert!(md.contains("**加粗**"), "md={md}");
+
+        // <thinking> 变体 + 大小写不敏感
+        let input = "变体 <thinking> 和 </THINKING> 讲解";
+        let md = sanitizer.sanitize_content(input, false);
+        assert!(md.contains("<thinking>"), "md={md}");
+        assert!(md.contains("</THINKING>"), "md={md}");
+    }
+
+    // ── 通用标签语义（不断言精确空白） ──
+
+    #[test]
+    fn test_general_html_semantics() {
+        let html = "<h1>标题一</h1><h3>标题三</h3>\
+                    <p><strong>粗</strong>与<em>斜</em>与<code>x=1</code></p>\
+                    <ul><li>甲</li><li>乙</li></ul>\
+                    <blockquote><p>引用</p></blockquote>\
+                    <pre><code>let x = 1;</code></pre>\
+                    <table><thead><tr><th>H</th></tr></thead><tbody><tr><td>C</td></tr></tbody></table>\
+                    <hr>";
+        let md = html_to_vcp_markdown(html, false);
+        assert!(md.contains("# 标题一"), "md={md}");
+        assert!(md.contains("### 标题三"), "md={md}");
+        assert!(md.contains("**粗**"), "md={md}");
+        assert!(md.contains("*斜*"), "md={md}");
+        assert!(md.contains("`x=1`"), "md={md}");
+        assert!(
+            md.lines().any(|line| line.starts_with("- ") && line.contains('甲')),
+            "md={md}"
+        );
+        assert!(
+            md.lines().any(|line| line.starts_with("- ") && line.contains('乙')),
+            "md={md}"
+        );
+        assert!(md.contains("> 引用"), "md={md}");
+        assert!(md.contains("```"), "md={md}");
+        assert!(md.contains("let x = 1;"), "md={md}");
+        assert!(md.contains('|') && md.contains('H') && md.contains('C'), "md={md}");
+        // HrStyle::Dashes 渲染为 `- - -`（桌面 turndown hr:'---' 意图的对齐项）
+        assert!(md.contains("- - -"), "md={md}");
+    }
+
+    // ── 缓存 ──
 
     #[test]
     fn test_cache_capacity_evicts_least_recent_item() {
@@ -380,5 +456,15 @@ mod tests {
 
         assert_eq!(sanitizer.get_cached("first"), None);
         assert_eq!(sanitizer.get_cached("second"), Some("two".to_string()));
+    }
+
+    #[test]
+    fn test_sanitize_content_uses_cache() {
+        let sanitizer = ContextSanitizer::default();
+        let html = "<p>Hello <strong>World</strong></p>";
+        let first = sanitizer.sanitize_content(html, false);
+        let second = sanitizer.sanitize_content(html, false);
+        assert_eq!(first, second);
+        assert!(first.contains("**World**"), "md={first}");
     }
 }

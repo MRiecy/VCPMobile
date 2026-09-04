@@ -3,6 +3,7 @@ pub mod boot_trace;
 pub mod file_extractor;
 pub mod file_manager;
 pub mod high_speed_channel;
+pub mod html2md;
 pub mod http_clients;
 pub mod lifecycle_controller;
 pub mod lifecycle_manager;
