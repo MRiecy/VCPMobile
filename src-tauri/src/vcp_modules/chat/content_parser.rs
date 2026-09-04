@@ -288,7 +288,7 @@ impl ContentBlock {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum BlockType {
     Tool,
     Thought,
@@ -478,12 +478,37 @@ pub(crate) fn find_matching_fence_end(
         return (None, None, false);
     }
 
-    let regex_str = format!(r"(?m)^[ \t]{{0,3}}\`{{{},}}[ \t]*\r?$", count);
+    // 手写行扫描，与原正则 `(?m)^[ \t]{0,3}\`{count,}[ \t]*\r?$` 语义等价：
+    // 结束围栏 = 行首至多 3 个空格/制表符 + 不少于开围栏数的反引号 + 仅空白收尾。
+    // 原实现每次调用都现编译一个新 Regex，而本函数处于流式热路径（未闭合代码块的每一帧
+    // 都会调一次），正则编译开销远超扫描本身。
+    let mut line_start = 0usize;
+    for line in search_area.split_inclusive('\n') {
+        let content = line.strip_suffix('\n').unwrap_or(line);
+        let bytes = content.as_bytes();
 
-    if let Ok(re) = Regex::new(&regex_str) {
-        if let Some(m) = re.find(search_area) {
-            return (Some(m.start()), Some(m.end()), true);
+        let mut i = 0;
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
         }
+        if i > 3 {
+            line_start += line.len();
+            continue;
+        }
+
+        let backticks = bytes[i..].iter().take_while(|&&b| b == b'`').count();
+        if backticks >= count {
+            let rest = &bytes[i + backticks..];
+            let rest = match rest.last() {
+                Some(b'\r') => &rest[..rest.len() - 1],
+                _ => rest,
+            };
+            if rest.iter().all(|&b| b == b' ' || b == b'\t') {
+                return (Some(line_start), Some(line_start + content.len()), true);
+            }
+        }
+
+        line_start += line.len();
     }
 
     (None, None, false)
@@ -1537,5 +1562,44 @@ mod tests {
             ContentBlock::Diary { valet, file_name, folder, .. }
                 if valet.is_empty() && file_name.is_empty() && folder.is_empty()
         ));
+    }
+
+    #[test]
+    fn fence_end_scanner_matches_commonmark_closing_rules() {
+        // 基本闭合：返回结束围栏行的 [start, end)，end 不含换行符
+        assert_eq!(
+            find_matching_fence_end("let x = 1;\n```\n", "```rust"),
+            (Some(11), Some(14), true)
+        );
+        // 结束围栏反引号数必须不少于开围栏（更多可以闭合）
+        assert_eq!(
+            find_matching_fence_end("```\nx\n````\n", "````rust"),
+            (Some(6), Some(10), true)
+        );
+        assert_eq!(
+            find_matching_fence_end("```\n", "````rust"),
+            (None, None, false),
+            "反引号不足不得闭合"
+        );
+        // 行首至多 3 个空白，4 个缩进不闭合；尾部空白与 CRLF 合法
+        assert_eq!(
+            find_matching_fence_end("  ```  \nrest", "```rust"),
+            (Some(0), Some(7), true)
+        );
+        assert_eq!(
+            find_matching_fence_end("    ```\n", "```rust"),
+            (None, None, false)
+        );
+        assert_eq!(
+            find_matching_fence_end("```\r\n", "```rust"),
+            (Some(0), Some(4), true)
+        );
+        // 行内反引号、非反引号起始标记、反引号不足的开围栏都不是合法配对
+        assert_eq!(
+            find_matching_fence_end("let ``` x\n```\n", "```rust"),
+            (Some(10), Some(13), true)
+        );
+        assert_eq!(find_matching_fence_end("```\n", "``"), (None, None, false));
+        assert_eq!(find_matching_fence_end("```\n", "~~~"), (None, None, false));
     }
 }

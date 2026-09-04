@@ -194,6 +194,19 @@ impl StreamBlock {
 /// 增量扫描 full_text，识别已闭合的语义块和未闭合的尾部
 pub struct StreamBlockParser {
     processed_len: usize,
+    /// 上一帧遗留的未闭合特种块书签：流式期间未闭合块（典型：增长中的代码围栏）会让
+    /// `processed_len` 停在块首，下一帧起始标记的类型与长度都已知，无需再用 11 条
+    /// 起始正则全扫 tail，直接续跑该块的结束匹配即可。
+    pending_block: Option<PendingBlock>,
+}
+
+#[derive(Clone, Copy)]
+struct PendingBlock {
+    block_type: BlockType,
+    /// 块起始标记在累积全文中的字节偏移（== 当时的 processed_len）。
+    start: usize,
+    /// 起始标记的字节长度（remaining 视图下恒为 end - start，其中 start 为 0）。
+    marker_len: usize,
 }
 
 /// 未闭合思维链 tail 的可撤销显示投影。
@@ -233,7 +246,10 @@ pub(crate) fn speculative_thought_tail(tail: &str) -> Option<SpeculativeThoughtT
 
 impl StreamBlockParser {
     pub fn new() -> Self {
-        Self { processed_len: 0 }
+        Self {
+            processed_len: 0,
+            pending_block: None,
+        }
     }
 
     /// 当前未闭合 tail 在累积全文中的起始字节位置。
@@ -247,12 +263,21 @@ impl StreamBlockParser {
     pub fn process(&mut self, full_text: &str) -> (Vec<StreamBlock>, String, Option<BlockType>) {
         let mut blocks = Vec::new();
         let mut pos = self.processed_len.min(full_text.len());
+        // 取出上一帧的未闭合块书签；本帧各返回路径负责重建（未闭合）或留空（已闭合/普通 tail）
+        let mut pending = self.pending_block.take();
 
         while pos < full_text.len() {
             let remaining = &full_text[pos..];
 
-            // 1. 寻找最早出现的特种块起始标记
-            if let Some((start, end, block_type)) = find_earliest_start_marker(remaining) {
+            // 1. 寻找最早出现的特种块起始标记。
+            //    书签恰好落在当前游标时（流式未闭合块续帧的常见情形），起始标记无需重新
+            //    识别——它仍在那里且类型不变，跳过 11 条起始正则的全文扫描。
+            let start_marker = match pending {
+                Some(p) if p.start == pos => Some((0usize, p.marker_len, p.block_type)),
+                _ => find_earliest_start_marker(remaining),
+            };
+
+            if let Some((start, end, block_type)) = start_marker {
                 #[cfg(test)]
                 {
                     let snippet: String = remaining[start..].chars().take(50).collect();
@@ -301,12 +326,22 @@ impl StreamBlockParser {
                     );
                     blocks.push(block);
                     pos += content_start + end_end;
+                    // 块已闭合，书签失效；后续游标位置必须重新做起始标记识别
+                    pending = None;
                 } else {
                     #[cfg(test)]
                     println!("[DIAG] FAILED to find end marker for {:?}. Returning remainder from start as tail.", block_type);
                     // 找不到结束标记 → 之前已强制沉淀 md_tail（即 remaining[..start]），
-                    // 故此帧游标推进 start 字节，将未闭合块起始作为 tail 返回，消灭重复渲染
+                    // 故此帧游标推进 start 字节，将未闭合块起始作为 tail 返回，消灭重复渲染；
+                    // 同时留下书签，下一帧直接续跑该块的结束匹配。
+                    // 例外：起始标记顶到输入末尾时（如仍在增长的 "```ru" 围栏行，`$` 可在 EOI
+                    // 命中），marker_len 会随追加过期，不留书签，下一帧重新识别起始标记。
                     self.processed_len = pos + start;
+                    self.pending_block = (end < remaining.len()).then_some(PendingBlock {
+                        block_type,
+                        start: pos + start,
+                        marker_len: end - start,
+                    });
                     return (blocks, remaining[start..].to_string(), Some(block_type));
                 }
             } else {
@@ -353,6 +388,7 @@ impl StreamBlockParser {
     #[allow(dead_code)]
     pub fn reset(&mut self) {
         self.processed_len = 0;
+        self.pending_block = None;
     }
 }
 
@@ -1061,5 +1097,67 @@ mod tests {
             blocks.as_slice(),
             [StreamBlock::Markdown { content, .. }] if content == raw.trim()
         ));
+    }
+
+    #[test]
+    fn pending_block_bookmark_matches_one_shot_parse_across_chunked_growth() {
+        // 未闭合代码围栏逐块增长（书签续扫路径）与整段一次解析必须产出相同的沉淀块。
+        // 7 字节步进会切开围栏起始行（如 "```ru"），覆盖标记未完整时不留书签的回退路径。
+        let full = "intro para\n\n```rust\nfn main() {\n    let x = 1;\n}\n```\n\noutro";
+        let mut incremental = StreamBlockParser::new();
+        let mut inc_blocks = Vec::new();
+        let mut fed = String::new();
+        let mut seen_unclosed = false;
+        while fed.len() < full.len() {
+            let end = (fed.len() + 7).min(full.len());
+            fed.push_str(&full[fed.len()..end]);
+            let (blocks, tail, tail_type) = incremental.process(&fed);
+            inc_blocks.extend(blocks);
+            if tail_type == Some(BlockType::CodeFence) {
+                seen_unclosed = true;
+                assert!(
+                    tail.starts_with('`'),
+                    "tail 必须起自围栏起始标记: {tail:?}"
+                );
+            }
+        }
+        assert!(seen_unclosed, "增长过程必须经历未闭合 CodeFence 阶段");
+        inc_blocks.extend(incremental.finalize(full));
+
+        let mut oneshot = StreamBlockParser::new();
+        let mut one_blocks = oneshot.process(full).0;
+        one_blocks.extend(oneshot.finalize(full));
+        assert_eq!(
+            format!("{:?}", inc_blocks),
+            format!("{:?}", one_blocks),
+            "书签续扫的增量解析必须与整段一次解析产出一致"
+        );
+    }
+
+    #[test]
+    fn pending_block_bookmark_invalidates_after_block_close() {
+        let mut parser = StreamBlockParser::new();
+        let part1 = "```js\nlet a = 1;";
+        let (_, tail, tail_type) = parser.process(part1);
+        assert_eq!(tail_type, Some(BlockType::CodeFence));
+        assert_eq!(tail, part1);
+        assert!(parser.pending_block.is_some(), "未闭合块必须留下书签");
+
+        let mut text = part1.to_string();
+        text.push_str("\n```\n\n```py\nprint(1)\n```");
+        let (blocks, tail, tail_type) = parser.process(&text);
+        assert_eq!(blocks.len(), 2, "两个围栏都应在同一帧闭合沉淀");
+        assert!(tail.is_empty(), "闭合后无剩余 tail: {tail:?}");
+        assert_eq!(tail_type, None);
+        assert!(
+            parser.pending_block.is_none(),
+            "块闭合后书签必须失效，不得带入后续帧"
+        );
+
+        // 无新数据时保持安静：不重复产出块或 tail
+        let (blocks2, tail2, tail_type2) = parser.process(&text);
+        assert!(blocks2.is_empty());
+        assert!(tail2.is_empty());
+        assert_eq!(tail_type2, None);
     }
 }

@@ -210,6 +210,11 @@ pub fn process_queue(&mut self) -> (bool, bool) {
             None  // 超过 64KB → 跳过 AST，降级到纯文本
         } else if raw_tail_type == Some(BlockType::HtmlContainer) {
             Some(vec![MarkdownNode::raw_html(self.tail_content.clone())])
+        } else if raw_tail_type == Some(BlockType::CodeFence) {
+            // 代码围栏快速路径：tail 必为「开围栏行 + 未闭合内容」，切首行取 lang、
+            // 其余作 code 直接构造节点，跳过整条 Markdown 预处理管线；
+            // hash 留 None（内容逐帧增长，hash 门控必然 miss，计算只是浪费 O(n)）
+            Some(code_fence_tail_nodes(&self.tail_content))
         } else {
             Some(parse_markdown_to_ast_streaming(&self.tail_content))
         };

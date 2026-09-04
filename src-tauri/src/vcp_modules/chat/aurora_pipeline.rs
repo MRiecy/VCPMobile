@@ -14,8 +14,11 @@ use crate::vcp_modules::stream_block_parser::{
 
 /// 推测渲染的 tail 字节上限：超过此阈值跳过 AST 解析，降级为纯文本尾部。
 ///
-/// 取值依据（perf profile 基准，见 ast_bench.rs，约等于发布版热路径速度）：
-/// - 解析本身极廉价：40KB tail 的 parse+hash+diff+serialize 仅约 0.55ms，远非瓶颈。
+/// 取值依据（perf profile 基准，见 benches/ast_tail_bench.rs，约等于发布版热路径速度）：
+/// - 代码围栏 tail 走 `code_fence_tail_nodes` 快速路径，每帧成本 O(Δ)（增量高亮补丁），
+///   40KB 规模端到端实测约 0.14ms/帧（tail_end_to_end_aurora）。
+/// - 通用 Markdown tail 仍是逐帧全量重解析（tail_cumulative_stream），40KB 末帧约 1ms，
+///   远非瓶颈。
 /// - CodeBlock 严格追加已改为完成行/活跃行补丁；RawHtml 等不可拆节点仍会整块 Replace。
 ///   因此保留 65536 上限覆盖绝大多数真实 HTML/代码产物，同时约束通用 AST Snapshot，
 ///   并由 vcp_client 固定 30Hz 合并发送，避免按上游 token 粒度重复解析与推送。
@@ -202,6 +205,36 @@ fn classify_tail_block(nodes: &[MarkdownNode]) -> TailBlockType {
         }] if lang.eq_ignore_ascii_case("html") => TailBlockType::HtmlPreview,
         _ => TailBlockType::Markdown,
     }
+}
+
+/// 未闭合代码围栏 tail 的快速节点构造。
+///
+/// stream 层只在结束围栏缺席时把 tail 标记为 CodeFence，因此 tail 必然是
+/// 「开围栏行 + 未闭合内容」：切首行取 info string 作 lang，其余原文作 code，
+/// 与 pulldown 路径语义一致（内容字面保留、未闭合延伸至 EOF）。
+/// hash 保持 None：tail 逐帧增长，diff 的 hash 门控必然 miss，计算只是浪费 O(n)。
+fn code_fence_tail_nodes(tail: &str) -> Vec<MarkdownNode> {
+    let (opener, code) = match tail.find('\n') {
+        Some(nl) => (&tail[..nl], &tail[nl + 1..]),
+        None => (tail, ""),
+    };
+    let opener = opener
+        .trim_end_matches('\r')
+        .trim_start_matches([' ', '\t']);
+    let backticks = opener.bytes().take_while(|&b| b == b'`').count();
+    if backticks < 3 {
+        // 防御：stream 层已判定 CodeFence，理论上不可达；回退完整管线保持正确性
+        return crate::vcp_modules::pre_renderer::parse_markdown_to_ast_streaming(tail);
+    }
+    // 与 pulldown 的 info string 语义严格对齐：去首尾空白，且恒为 Some（空 info 即 Some("")）
+    let info = opener[backticks..].trim();
+    // 与 pulldown 的行尾规范化对齐：CRLF / 孤 CR 统一为 LF
+    let code = if code.contains('\r') {
+        code.replace("\r\n", "\n").replace('\r', "\n")
+    } else {
+        code.to_string()
+    };
+    vec![MarkdownNode::code_block(Some(info.to_string()), code)]
 }
 
 /// Aurora 语义沉淀缓冲区
@@ -606,6 +639,10 @@ impl AuroraBuffer {
                 let mut node = MarkdownNode::raw_html(self.tail_content.clone());
                 node.compute_hashes_recursively();
                 Some(vec![node])
+            } else if raw_tail_type == Some(BlockType::CodeFence) {
+                // 代码围栏 tail 快速路径：stream 层已保证 tail = 开围栏行 + 未闭合内容，
+                // 跳过整条 Markdown 预处理管线（4 道全文本预处理 + pulldown），直接构造节点
+                Some(code_fence_tail_nodes(&self.tail_content))
             } else {
                 Some(
                     crate::vcp_modules::pre_renderer::parse_markdown_to_ast_streaming(
@@ -1471,5 +1508,72 @@ mod tests {
             }
             other => panic!("expected markdown recovery tail, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn code_fence_tail_nodes_matches_pulldown_semantics() {
+        // 快速路径与 pulldown 全管线逐字节一致（lang trim / 空 info / CRLF / 4+ 反引号 / 未换行 opener）
+        let cases = [
+            "```html\n<div>hi</div>\n",
+            "```rust\nfn main() {}\n}",
+            "```\nplain\n",
+            "````markdown\n```nested```\n",
+            "```html",
+            "```html\n",
+            "```js\r\nlet a = 1;\r\n",
+        ];
+        for tail in cases {
+            let fast = code_fence_tail_nodes(tail);
+            let reference = crate::vcp_modules::pre_renderer::parse_markdown_to_ast_streaming(tail);
+            let (
+                [MarkdownNode::CodeBlock {
+                    lang: fast_lang,
+                    code: fast_code,
+                    ..
+                }],
+                [MarkdownNode::CodeBlock {
+                    lang: ref_lang,
+                    code: ref_code,
+                    ..
+                }],
+            ) = (fast.as_slice(), reference.as_slice())
+            else {
+                panic!("both paths must yield exactly one CodeBlock for {tail:?}: {reference:?}");
+            };
+            assert_eq!(fast_code, ref_code, "code mismatch for {tail:?}");
+            assert_eq!(fast_lang, ref_lang, "lang mismatch for {tail:?}");
+            assert_eq!(
+                fast[0].get_hash(),
+                None,
+                "tail 节点不计算必然 miss 的 hash: {tail:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn code_fence_tail_fast_path_drives_incremental_patch_flow() {
+        // 快速路径产出的节点必须无缝接入既有增量高亮管线：首帧 Add，严格追加帧 PatchCode
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk("```html\n<div>hi</div>\n");
+        buffer.process_queue();
+        assert_eq!(
+            buffer.tail_projection.as_ref().map(|p| p.block_type),
+            Some(TailBlockType::HtmlPreview)
+        );
+        let first = buffer.take_tail_frame().expect("first frame");
+        assert!(
+            matches!(first.mutations.as_slice(), [AstMutation::Add { .. }]),
+            "first frame must Add the code node, got {:?}",
+            first.mutations
+        );
+
+        buffer.append_chunk("<p>more</p>\n");
+        buffer.process_queue();
+        let second = buffer.take_tail_frame().expect("second frame");
+        assert!(
+            matches!(second.mutations.as_slice(), [AstMutation::PatchCode { .. }]),
+            "strict append must produce PatchCode, got {:?}",
+            second.mutations
+        );
     }
 }

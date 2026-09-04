@@ -437,9 +437,9 @@ fn apply_flanking_fix(segment: &str) -> String {
     result
 }
 
-fn fix_flanking_delimiters(text: &str) -> String {
+fn fix_flanking_delimiters(text: &str) -> Cow<'_, str> {
     if !text.contains('*') {
-        return text.to_string();
+        return Cow::Borrowed(text);
     }
 
     let mut result = String::with_capacity(text.len() + 16);
@@ -456,7 +456,7 @@ fn fix_flanking_delimiters(text: &str) -> String {
     let tail = &text[last_end..];
     result.push_str(&apply_flanking_fix(tail));
 
-    result
+    Cow::Owned(result)
 }
 
 fn strip_display_math_indent(text: &str) -> Cow<'_, str> {
@@ -1395,47 +1395,42 @@ fn split_text_by_quotes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
     for node in inlines {
         match node {
             InlineNode::Text { value } => {
-                let mut temp = String::new();
-                let chars: Vec<char> = value.chars().collect();
-                let len = chars.len();
-                let mut j = 0;
-
-                while j < len {
-                    let c = chars[j];
+                // 按字节偏移切片，避免逐字符 Vec<char> 中转（CJK 文本每字 3-4 倍分配）
+                let mut last = 0;
+                for (idx, c) in value.char_indices() {
                     if c == '“' || c == '”' || c == '"' {
-                        if !temp.is_empty() {
-                            result.push(InlineNode::text(temp.clone()));
-                            temp.clear();
+                        if idx > last {
+                            result.push(InlineNode::text(value[last..idx].to_string()));
                         }
-                        result.push(InlineNode::text(c.to_string()));
-                    } else {
-                        temp.push(c);
+                        result.push(InlineNode::text(
+                            value[idx..idx + c.len_utf8()].to_string(),
+                        ));
+                        last = idx + c.len_utf8();
                     }
-                    j += 1;
                 }
-                if !temp.is_empty() {
-                    result.push(InlineNode::text(temp));
+                if last < value.len() {
+                    result.push(InlineNode::text(value[last..].to_string()));
                 }
             }
             mut other => {
                 match &mut other {
                     InlineNode::Strong { children, .. } => {
-                        *children = split_text_by_quotes(children.clone());
+                        *children = split_text_by_quotes(std::mem::take(children));
                     }
                     InlineNode::Emphasis { children, .. } => {
-                        *children = split_text_by_quotes(children.clone());
+                        *children = split_text_by_quotes(std::mem::take(children));
                     }
                     InlineNode::Link { children, .. } => {
-                        *children = split_text_by_quotes(children.clone());
+                        *children = split_text_by_quotes(std::mem::take(children));
                     }
                     InlineNode::Strikethrough { children, .. } => {
-                        *children = split_text_by_quotes(children.clone());
+                        *children = split_text_by_quotes(std::mem::take(children));
                     }
                     InlineNode::VcpCustom {
                         children: Some(children),
                         ..
                     } => {
-                        *children = split_text_by_quotes(children.clone());
+                        *children = split_text_by_quotes(std::mem::take(children));
                     }
                     _ => {}
                 }
