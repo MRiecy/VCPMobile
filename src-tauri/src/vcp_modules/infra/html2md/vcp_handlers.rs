@@ -10,8 +10,8 @@
 //! 未命中的元素一律经 `handlers.fallback(element)` 交还 htmd 内建 handler，
 //! 保持通用 HTML -> Markdown 语义不变。
 
-use htmd::Element;
 use htmd::element_handler::{HandlerResult, Handlers};
+use htmd::Element;
 use markup5ever_rcdom::{Node, NodeData};
 use std::rc::Rc;
 
@@ -101,7 +101,8 @@ pub(super) fn pre_handler(handlers: &dyn Handlers, element: Element) -> Option<H
 
     let mut text_content = String::new();
     collect_text(element.node, &mut text_content);
-    if text_content.contains("<<<[TOOL_REQUEST]>>>") || text_content.contains("<<<DailyNoteStart>>>")
+    if text_content.contains("<<<[TOOL_REQUEST]>>>")
+        || text_content.contains("<<<DailyNoteStart>>>")
     {
         return Some(text_content.into());
     }

@@ -1125,10 +1125,7 @@ mod tests {
             inc_blocks.extend(blocks);
             if tail_type == Some(BlockType::CodeFence) {
                 seen_unclosed = true;
-                assert!(
-                    tail.starts_with('`'),
-                    "tail 必须起自围栏起始标记: {tail:?}"
-                );
+                assert!(tail.starts_with('`'), "tail 必须起自围栏起始标记: {tail:?}");
             }
         }
         assert!(seen_unclosed, "增长过程必须经历未闭合 CodeFence 阶段");

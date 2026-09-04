@@ -14,8 +14,8 @@
 
 mod vcp_handlers;
 
-use htmd::HtmlToMarkdown;
 use htmd::options::{BulletListMarker, HrStyle, Options};
+use htmd::HtmlToMarkdown;
 use std::sync::OnceLock;
 
 /// 引擎实例：保留思维链（keep_thoughts = true）
@@ -51,8 +51,11 @@ fn build_engine(keep_thoughts: bool) -> HtmlToMarkdown {
         .add_handler(vec!["img"], vcp_handlers::img_handler)
         .add_handler(vec!["audio", "video"], vcp_handlers::media_handler)
         .add_handler(vec!["pre"], vcp_handlers::pre_handler)
-        .add_handler(vec!["div"], move |handlers: &dyn htmd::element_handler::Handlers, element: htmd::Element| {
-            vcp_handlers::div_handler(handlers, element, keep_thoughts)
-        })
+        .add_handler(
+            vec!["div"],
+            move |handlers: &dyn htmd::element_handler::Handlers, element: htmd::Element| {
+                vcp_handlers::div_handler(handlers, element, keep_thoughts)
+            },
+        )
         .build()
 }

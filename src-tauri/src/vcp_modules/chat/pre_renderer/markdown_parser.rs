@@ -1,6 +1,4 @@
-use crate::vcp_modules::pre_renderer::code_highlighter::{
-    highlight_code_block, CodeBlockShell,
-};
+use crate::vcp_modules::pre_renderer::code_highlighter::{highlight_code_block, CodeBlockShell};
 use crate::vcp_modules::pre_renderer::markdown_ast::{InlineNode, MarkdownNode};
 use lazy_static::lazy_static;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
@@ -1417,9 +1415,7 @@ fn split_text_by_quotes(inlines: Vec<InlineNode>) -> Vec<InlineNode> {
                         if idx > last {
                             result.push(InlineNode::text(value[last..idx].to_string()));
                         }
-                        result.push(InlineNode::text(
-                            value[idx..idx + c.len_utf8()].to_string(),
-                        ));
+                        result.push(InlineNode::text(value[idx..idx + c.len_utf8()].to_string()));
                         last = idx + c.len_utf8();
                     }
                 }
@@ -2019,8 +2015,7 @@ mod tests {
             "```\nplain <b>text</b>\n```\n",
         ];
         for src in cases {
-            let (lang, code, block_len) =
-                parse_fenced_code_block(src).expect("fence should parse");
+            let (lang, code, block_len) = parse_fenced_code_block(src).expect("fence should parse");
             let mut direct = finalized_code_block_node(Some(lang), code);
             direct.compute_hashes_recursively();
             let piped = parse_markdown_to_ast(&src[..block_len]);

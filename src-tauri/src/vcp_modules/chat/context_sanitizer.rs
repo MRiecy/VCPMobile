@@ -275,7 +275,10 @@ mod tests {
     fn test_prettified_bubble_returns_raw_content_verbatim() {
         let html = r#"<pre class="vcp-tool-use-bubble" data-raw-content="<<<[TOOL_REQUEST]>>> call(**kwargs**) <<<[END_TOOL_REQUEST]>>>"><code>美化后的HTML不应出现</code></pre>"#;
         let md = html_to_vcp_markdown(html, false);
-        assert_eq!(md, "<<<[TOOL_REQUEST]>>> call(**kwargs**) <<<[END_TOOL_REQUEST]>>>");
+        assert_eq!(
+            md,
+            "<<<[TOOL_REQUEST]>>> call(**kwargs**) <<<[END_TOOL_REQUEST]>>>"
+        );
 
         // maid-diary-bubble 变体
         let html = r#"<pre class="maid-diary-bubble" data-raw-content="<<<DailyNoteStart>>> 日记 <<<DailyNoteEnd>>>">美化</pre>"#;
@@ -295,7 +298,10 @@ mod tests {
         // 未美化但含特殊标记的 pre：textContent 原文直通
         let html = "<pre><<<[TOOL_REQUEST]>>>\nfn call()\n<<<[END_TOOL_REQUEST]>>></pre>";
         let md = html_to_vcp_markdown(html, false);
-        assert_eq!(md, "<<<[TOOL_REQUEST]>>>\nfn call()\n<<<[END_TOOL_REQUEST]>>>");
+        assert_eq!(
+            md,
+            "<<<[TOOL_REQUEST]>>>\nfn call()\n<<<[END_TOOL_REQUEST]>>>"
+        );
 
         // 注意：`<<<DailyNoteStart>>>` 不带方括号，`<DailyNoteStart>` 会被 HTML5 解析器
         // 当成未知元素吞掉（桌面 jsdom 行为相同），因此完整 DailyNote 块依赖
@@ -370,7 +376,10 @@ mod tests {
         // 无 src 时取第一个 <source> 子元素
         let html = r#"<video><source src="fallback.mp4"></video>"#;
         let md = html_to_vcp_markdown(html, false);
-        assert!(md.contains(r#"<video src="fallback.mp4"></video>"#), "md={md}");
+        assert!(
+            md.contains(r#"<video src="fallback.mp4"></video>"#),
+            "md={md}"
+        );
 
         // 第一个 <source> 无 src -> 丢弃（对齐桌面 querySelectorAll('source')[0] 语义）
         let html = r#"<audio><source><source src="second.mp3"></audio>"#;
@@ -429,17 +438,22 @@ mod tests {
         assert!(md.contains("*斜*"), "md={md}");
         assert!(md.contains("`x=1`"), "md={md}");
         assert!(
-            md.lines().any(|line| line.starts_with("- ") && line.contains('甲')),
+            md.lines()
+                .any(|line| line.starts_with("- ") && line.contains('甲')),
             "md={md}"
         );
         assert!(
-            md.lines().any(|line| line.starts_with("- ") && line.contains('乙')),
+            md.lines()
+                .any(|line| line.starts_with("- ") && line.contains('乙')),
             "md={md}"
         );
         assert!(md.contains("> 引用"), "md={md}");
         assert!(md.contains("```"), "md={md}");
         assert!(md.contains("let x = 1;"), "md={md}");
-        assert!(md.contains('|') && md.contains('H') && md.contains('C'), "md={md}");
+        assert!(
+            md.contains('|') && md.contains('H') && md.contains('C'),
+            "md={md}"
+        );
         // HrStyle::Dashes 渲染为 `- - -`（桌面 turndown hr:'---' 意图的对齐项）
         assert!(md.contains("- - -"), "md={md}");
     }

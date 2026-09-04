@@ -112,7 +112,8 @@ impl IncrementalCodeHighlighter {
 
         let (next_parse_state, next_scope_stack, completed_html) =
             advance_complete_lines(parse_state, scope_stack, completed, true)?;
-        let active_html = render_active_line(next_parse_state.clone(), next_scope_stack.clone(), active)?;
+        let active_html =
+            render_active_line(next_parse_state.clone(), next_scope_stack.clone(), active)?;
 
         let session = self.sessions.get_mut(id)?;
         session.committed_len = committed_len.saturating_add(completed_len);
@@ -420,7 +421,12 @@ mod tests {
             .start("n1", "let a = 1;\nlet b", "rust")
             .expect("incremental start should succeed");
         let patch = highlighter
-            .append("n1", "let a = 1;\nlet b", "let a = 1;\nlet b = 2;\nlet c", "rust")
+            .append(
+                "n1",
+                "let a = 1;\nlet b",
+                "let a = 1;\nlet b = 2;\nlet c",
+                "rust",
+            )
             .expect("append patch should succeed");
         assert!(patch.completed_html.contains("class=\""));
         assert!(patch.completed_html.contains('2'));
@@ -470,7 +476,8 @@ mod tests {
 
     #[test]
     fn highlight_code_block_preserves_source_text_exactly() {
-        let code = "fn main() {\n    let x = 1;\n    if x > 0 {\n        println!(\"{}\", x);\n    }\n}";
+        let code =
+            "fn main() {\n    let x = 1;\n    if x > 0 {\n        println!(\"{}\", x);\n    }\n}";
         let html = highlight_code_block(code, "rust", CodeBlockShell::Code)
             .expect("highlight should succeed");
         let inner = html
@@ -483,7 +490,8 @@ mod tests {
     #[test]
     fn incremental_stream_preserves_source_text_across_patches() {
         let v1 = "fn main() {\n    let x";
-        let v2 = "fn main() {\n    let x = 1;\n    if x > 0 {\n        println!(\"{}\", x);\n    }\n}";
+        let v2 =
+            "fn main() {\n    let x = 1;\n    if x > 0 {\n        println!(\"{}\", x);\n    }\n}";
         let mut highlighter = IncrementalCodeHighlighter::default();
         highlighter.begin_frame();
         let start_html = highlighter.start("n1", v1, "rust").expect("start");

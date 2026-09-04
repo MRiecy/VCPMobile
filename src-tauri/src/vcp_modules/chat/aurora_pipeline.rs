@@ -250,8 +250,7 @@ fn serialize_html_handle(handle: &markup5ever_rcdom::Handle) -> String {
         traversal_scope: TraversalScope::IncludeNode,
         ..SerializeOpts::default()
     };
-    serialize(&mut bytes, &serializable, opts)
-        .expect("html5ever serialize into Vec is infallible");
+    serialize(&mut bytes, &serializable, opts).expect("html5ever serialize into Vec is infallible");
     String::from_utf8(bytes).unwrap_or_default()
 }
 
@@ -289,11 +288,7 @@ fn html_tail_patch_parts(tail: &str, state: Option<usize>) -> Option<HtmlTailPat
         ParseOpts::default(),
         // QualName / ns! / local_name! 经 html5ever 的 markup5ever 重导出，
         // 版本随 html5ever 联动，无需单独 pin markup5ever。
-        html5ever::QualName::new(
-            None,
-            html5ever::ns!(html),
-            html5ever::local_name!("div"),
-        ),
+        html5ever::QualName::new(None, html5ever::ns!(html), html5ever::local_name!("div")),
         Vec::new(),
         false,
     )
@@ -319,7 +314,10 @@ fn html_tail_patch_parts(tail: &str, state: Option<usize>) -> Option<HtmlTailPat
                 .iter()
                 .map(serialize_html_handle)
                 .collect();
-            let live_html = children.last().map(serialize_html_handle).unwrap_or_default();
+            let live_html = children
+                .last()
+                .map(serialize_html_handle)
+                .unwrap_or_default();
             Some(HtmlTailPatch {
                 frozen_html,
                 live_html,
@@ -366,7 +364,8 @@ pub struct AuroraBuffer {
     /// HtmlContainer tail 的冻结前沿：已下发过的「闭合根级子节点」数量。
     /// None = 下一帧需作为种子帧（全量冻结段 + 活跃子树）下发。
     html_tail_frozen_count: Option<usize>,
-    parser: StreamBlockParser,    is_finishing: bool,
+    parser: StreamBlockParser,
+    is_finishing: bool,
 }
 
 impl AuroraBuffer {
@@ -765,7 +764,10 @@ impl AuroraBuffer {
                     // 根结构非「单个元素」时（起始标签未写完整、foster parenting 等）
                     // patch 切分不适用：回退旧的整块 Replace，并清空 patch 状态，
                     // 结构恢复后的下一帧会按种子帧重新建立基线。
-                    let mutation = match html_tail_patch_parts(&self.tail_content, self.html_tail_frozen_count) {
+                    let mutation = match html_tail_patch_parts(
+                        &self.tail_content,
+                        self.html_tail_frozen_count,
+                    ) {
                         Some(patch) => {
                             let seed = patch.seed || self.html_tail_frozen_count.is_none();
                             let mutation = AstMutation::PatchRawHtml {
@@ -792,10 +794,8 @@ impl AuroraBuffer {
 
                     // 与暂存池中上一条未发送的稳态 patch 合并（冻结段有序拼接，活跃区取最新）；
                     // 种子帧与 Replace 帧语义不同（live_html 为整棵外层），绝不参与合并。
-                    let mergeable = matches!(
-                        &mutation,
-                        AstMutation::PatchRawHtml { seed: false, .. }
-                    );
+                    let mergeable =
+                        matches!(&mutation, AstMutation::PatchRawHtml { seed: false, .. });
                     match (mergeable, self.pending_mutations.last_mut()) {
                         (
                             true,
@@ -833,110 +833,111 @@ impl AuroraBuffer {
                     thought_theme: None,
                 });
             } else {
-            let exceeds_speculative_cap = self.tail_content.len() > MAX_SPECULATIVE_TAIL_AST_BYTES;
-            // 代码围栏与协议块 tail 均为增量路径（O(chunk)/帧），不再受投机上限约束；
-            // 上限如今只兜底仍是 O(tail)/帧 的通用 Markdown / Thought tail（病理防呆）。
-            let incremental_tail = matches!(
-                raw_tail_type,
-                Some(
-                    BlockType::CodeFence
-                        | BlockType::Tool
-                        | BlockType::ToolResult
-                        | BlockType::ToolCallSummary
-                )
-            );
-            let nodes = if exceeds_speculative_cap && !incremental_tail {
-                None
-            } else if raw_tail_type == Some(BlockType::HtmlContainer) {
-                // 思维链外壳内的 HtmlContainer（罕见角落）：保持旧的整块 raw_html 语义
-                let mut node = MarkdownNode::raw_html(self.tail_content.clone());
-                node.compute_hashes_recursively();
-                Some(vec![node])
-            } else if raw_tail_type == Some(BlockType::CodeFence) {
-                // 代码围栏 tail 快速路径：stream 层已保证 tail = 开围栏行 + 未闭合内容，
-                // 跳过整条 Markdown 预处理管线（4 道全文本预处理 + pulldown），直接构造节点
-                Some(code_fence_tail_nodes(&self.tail_content))
-            } else if matches!(
-                raw_tail_type,
-                Some(BlockType::Tool | BlockType::ToolResult | BlockType::ToolCallSummary)
-            ) {
-                // 未闭合协议块 tail：与桌面端 VCPChat 的「封印」语义对齐——转义原文包在
-                // 等宽 pre 里逐字显示（此处借 plaintext 代码节点走增量高亮的纯文本路径）。
-                // 协议文本不是 Markdown：逐帧解析既浪费，又可能被 * / $$ 等字符意外格式化。
-                // Diary/Thought/Style/HtmlDoc 不在此列（日记与思维链正文本身是 Markdown）。
-                Some(vec![MarkdownNode::code_block(
-                    Some("plaintext".to_string()),
-                    self.tail_content.clone(),
-                )])
-            } else {
-                Some(
-                    crate::vcp_modules::pre_renderer::parse_markdown_to_ast_streaming(
-                        &self.tail_content,
-                    ),
-                )
-            };
-            let (mode, block_type) = if let Some(new_nodes) = nodes {
-                let block_type = next_thought_theme.as_ref().map_or_else(
-                    || classify_tail_block(&new_nodes),
-                    |_| TailBlockType::Thought,
+                let exceeds_speculative_cap =
+                    self.tail_content.len() > MAX_SPECULATIVE_TAIL_AST_BYTES;
+                // 代码围栏与协议块 tail 均为增量路径（O(chunk)/帧），不再受投机上限约束；
+                // 上限如今只兜底仍是 O(tail)/帧 的通用 Markdown / Thought tail（病理防呆）。
+                let incremental_tail = matches!(
+                    raw_tail_type,
+                    Some(
+                        BlockType::CodeFence
+                            | BlockType::Tool
+                            | BlockType::ToolResult
+                            | BlockType::ToolCallSummary
+                    )
                 );
-                if previous_tail_block_type.is_some()
-                    && previous_tail_block_type != Some(block_type)
-                    && !self.tail_reset_pending
-                {
-                    self.tail_epoch = self.tail_epoch.saturating_add(1);
-                    self.tail_revision = 0;
-                    self.tail_reset_pending = true;
+                let nodes = if exceeds_speculative_cap && !incremental_tail {
+                    None
+                } else if raw_tail_type == Some(BlockType::HtmlContainer) {
+                    // 思维链外壳内的 HtmlContainer（罕见角落）：保持旧的整块 raw_html 语义
+                    let mut node = MarkdownNode::raw_html(self.tail_content.clone());
+                    node.compute_hashes_recursively();
+                    Some(vec![node])
+                } else if raw_tail_type == Some(BlockType::CodeFence) {
+                    // 代码围栏 tail 快速路径：stream 层已保证 tail = 开围栏行 + 未闭合内容，
+                    // 跳过整条 Markdown 预处理管线（4 道全文本预处理 + pulldown），直接构造节点
+                    Some(code_fence_tail_nodes(&self.tail_content))
+                } else if matches!(
+                    raw_tail_type,
+                    Some(BlockType::Tool | BlockType::ToolResult | BlockType::ToolCallSummary)
+                ) {
+                    // 未闭合协议块 tail：与桌面端 VCPChat 的「封印」语义对齐——转义原文包在
+                    // 等宽 pre 里逐字显示（此处借 plaintext 代码节点走增量高亮的纯文本路径）。
+                    // 协议文本不是 Markdown：逐帧解析既浪费，又可能被 * / $$ 等字符意外格式化。
+                    // Diary/Thought/Style/HtmlDoc 不在此列（日记与思维链正文本身是 Markdown）。
+                    Some(vec![MarkdownNode::code_block(
+                        Some("plaintext".to_string()),
+                        self.tail_content.clone(),
+                    )])
+                } else {
+                    Some(
+                        crate::vcp_modules::pre_renderer::parse_markdown_to_ast_streaming(
+                            &self.tail_content,
+                        ),
+                    )
+                };
+                let (mode, block_type) = if let Some(new_nodes) = nodes {
+                    let block_type = next_thought_theme.as_ref().map_or_else(
+                        || classify_tail_block(&new_nodes),
+                        |_| TailBlockType::Thought,
+                    );
+                    if previous_tail_block_type.is_some()
+                        && previous_tail_block_type != Some(block_type)
+                        && !self.tail_reset_pending
+                    {
+                        self.tail_epoch = self.tail_epoch.saturating_add(1);
+                        self.tail_revision = 0;
+                        self.tail_reset_pending = true;
+                        self.pending_mutations.clear();
+                        self.code_highlighter.clear();
+                    }
+                    // reset 帧直接从最新 prev_tail_ast 按需构造 snapshot，其间无需保留第二份树。
+                    if !self.tail_reset_pending {
+                        let mutations = diff_ast_streaming(
+                            &self.prev_tail_ast,
+                            &new_nodes,
+                            "t",
+                            &mut self.code_highlighter,
+                        );
+                        if !mutations.is_empty() {
+                            self.pending_mutations.extend(mutations);
+                        }
+                    } else {
+                        prime_stream_code_highlighter(&new_nodes, "t", &mut self.code_highlighter);
+                    }
+                    self.tail_revision = self.tail_revision.saturating_add(1);
+                    self.prev_tail_ast = new_nodes;
+                    (TailRenderMode::Ast, block_type)
+                } else {
+                    // 超长 tail（> MAX_SPECULATIVE_TAIL_AST_BYTES）降级为纯文本尾部。
+                    // 不再逐帧产出 AST 帧，由 tail text op 走前端纯文本路径渲染（绝不留白）。
+                    // 仅在「首次从 AST 模式跨入纯文本模式」时触发一次 epoch reset 清空旧 AST 沙箱，
+                    // 之后保持安静，避免逐帧 epoch 自增与空转 reset 帧。
+                    let was_ast_mode = !self.prev_tail_ast.is_empty();
+                    self.prev_tail_ast.clear();
                     self.pending_mutations.clear();
                     self.code_highlighter.clear();
-                }
-                // reset 帧直接从最新 prev_tail_ast 按需构造 snapshot，其间无需保留第二份树。
-                if !self.tail_reset_pending {
-                    let mutations = diff_ast_streaming(
-                        &self.prev_tail_ast,
-                        &new_nodes,
-                        "t",
-                        &mut self.code_highlighter,
-                    );
-                    if !mutations.is_empty() {
-                        self.pending_mutations.extend(mutations);
+                    if was_ast_mode && !self.tail_reset_pending {
+                        self.tail_epoch = self.tail_epoch.saturating_add(1);
+                        self.tail_revision = 0;
+                        self.tail_reset_pending = true;
                     }
-                } else {
-                    prime_stream_code_highlighter(&new_nodes, "t", &mut self.code_highlighter);
-                }
-                self.tail_revision = self.tail_revision.saturating_add(1);
-                self.prev_tail_ast = new_nodes;
-                (TailRenderMode::Ast, block_type)
-            } else {
-                // 超长 tail（> MAX_SPECULATIVE_TAIL_AST_BYTES）降级为纯文本尾部。
-                // 不再逐帧产出 AST 帧，由 tail text op 走前端纯文本路径渲染（绝不留白）。
-                // 仅在「首次从 AST 模式跨入纯文本模式」时触发一次 epoch reset 清空旧 AST 沙箱，
-                // 之后保持安静，避免逐帧 epoch 自增与空转 reset 帧。
-                let was_ast_mode = !self.prev_tail_ast.is_empty();
-                self.prev_tail_ast.clear();
-                self.pending_mutations.clear();
-                self.code_highlighter.clear();
-                if was_ast_mode && !self.tail_reset_pending {
-                    self.tail_epoch = self.tail_epoch.saturating_add(1);
-                    self.tail_revision = 0;
-                    self.tail_reset_pending = true;
-                }
-                (
-                    TailRenderMode::Plain,
-                    next_thought_theme
-                        .as_ref()
-                        .map_or(TailBlockType::Markdown, |_| TailBlockType::Thought),
-                )
-            };
+                    (
+                        TailRenderMode::Plain,
+                        next_thought_theme
+                            .as_ref()
+                            .map_or(TailBlockType::Markdown, |_| TailBlockType::Thought),
+                    )
+                };
 
-            self.tail_projection = Some(TailProjection {
-                fingerprint: next_fingerprint.unwrap_or_else(|| {
-                    TailFingerprint::from_content(&self.tail_content, new_tail_start)
-                }),
-                mode,
-                block_type,
-                thought_theme: next_thought_theme,
-            });
+                self.tail_projection = Some(TailProjection {
+                    fingerprint: next_fingerprint.unwrap_or_else(|| {
+                        TailFingerprint::from_content(&self.tail_content, new_tail_start)
+                    }),
+                    mode,
+                    block_type,
+                    thought_theme: next_thought_theme,
+                });
             }
         } else {
             self.tail_projection = None;
@@ -993,8 +994,16 @@ mod tests {
         assert!(seed.seed);
         assert_eq!(seed.frozen_total, 1);
         assert!(seed.frozen_html.is_empty());
-        assert!(seed.live_html.contains("class=\"card\""), "seed.live={}", seed.live_html);
-        assert!(seed.live_html.contains("one"), "seed.live={}", seed.live_html);
+        assert!(
+            seed.live_html.contains("class=\"card\""),
+            "seed.live={}",
+            seed.live_html
+        );
+        assert!(
+            seed.live_html.contains("one"),
+            "seed.live={}",
+            seed.live_html
+        );
 
         // 稳态帧：在种子基础上继续闭合 <p>
         let steady = html_tail_patch_parts(
@@ -1006,7 +1015,10 @@ mod tests {
         assert_eq!(steady.frozen_total, 2);
         assert!(steady.frozen_html.contains('B') && !steady.frozen_html.contains("one"));
         assert!(steady.live_html.contains('C'));
-        assert!(!steady.live_html.contains("class=\"card\""), "稳态 live 不含外层");
+        assert!(
+            !steady.live_html.contains("class=\"card\""),
+            "稳态 live 不含外层"
+        );
 
         // 多根节点（病理/起始标签未完整）→ None，调用方回退 Replace
         assert!(html_tail_patch_parts("hello<div>x", None).is_none());
@@ -1459,7 +1471,10 @@ mod tests {
                 assert_eq!(id, "t0");
                 assert!(seed, "首帧应为种子帧");
                 assert!(frozen_html.is_empty());
-                assert!(live_html.contains("class=\"card\""), "seed live={live_html}");
+                assert!(
+                    live_html.contains("class=\"card\""),
+                    "seed live={live_html}"
+                );
                 assert!(live_html.contains("one"));
                 assert_eq!(*frozen_total, 1); // [text"\n", section] → 冻结 1（text）
             }
@@ -1497,7 +1512,10 @@ mod tests {
     #[test]
     fn raw_html_exceeding_speculative_limit_stays_incremental() {
         // 外层 div 永不闭合，内容远超 64KB
-        let big = format!("<div class=\"big\">{}", "X".repeat(MAX_SPECULATIVE_TAIL_AST_BYTES + 20_000));
+        let big = format!(
+            "<div class=\"big\">{}",
+            "X".repeat(MAX_SPECULATIVE_TAIL_AST_BYTES + 20_000)
+        );
         let mut buffer = AuroraBuffer::new();
         buffer.append_chunk(&big);
         assert_eq!(buffer.process_queue(), (false, true));
@@ -1516,7 +1534,9 @@ mod tests {
         // 继续追加：稳态 patch，冻结数不增（外层唯一子节点=文本，仍活跃）
         buffer.append_chunk("YYYYY");
         assert_eq!(buffer.process_queue(), (false, true));
-        let frame = buffer.take_tail_frame().expect("steady patch frame over limit");
+        let frame = buffer
+            .take_tail_frame()
+            .expect("steady patch frame over limit");
         match frame.mutations.as_slice() {
             [AstMutation::PatchRawHtml {
                 seed, live_html, ..

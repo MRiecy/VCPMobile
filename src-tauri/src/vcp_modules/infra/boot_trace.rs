@@ -53,7 +53,9 @@ pub fn boot_mark(app: &AppHandle, name: &str) {
 }
 
 #[tauri::command]
-pub async fn get_boot_trace(state: State<'_, BootTraceState>) -> Result<Vec<BootStageMark>, String> {
+pub async fn get_boot_trace(
+    state: State<'_, BootTraceState>,
+) -> Result<Vec<BootStageMark>, String> {
     Ok(state.snapshot())
 }
 

@@ -599,7 +599,9 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             if matches!(block_type, BlockType::CodeFence) {
                 let fence_region = &remaining[start_idx..];
                 if let Some((lang, code, block_len)) =
-                    crate::vcp_modules::chat::pre_renderer::markdown_parser::parse_fenced_code_block(fence_region)
+                    crate::vcp_modules::chat::pre_renderer::markdown_parser::parse_fenced_code_block(
+                        fence_region,
+                    )
                 {
                     let block = if lang.eq_ignore_ascii_case("html") {
                         ContentBlock::html_preview(code)
