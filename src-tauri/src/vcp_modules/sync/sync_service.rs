@@ -1022,6 +1022,8 @@ pub enum SyncCommand {
     },
     SendMessageDiff {
         attempt_id: u64,
+        batch_index: usize,
+        total_batches: usize,
         topics: Vec<MessageDiffTopicState>,
     },
     Phase3BatchFinished {
@@ -2132,6 +2134,12 @@ async fn run_sync_session(
                                                         let mut expected = expected_phase3_batch.lock().await;
                                                         *expected = batch.keys.clone();
                                                     }
+                                                    emit_phase3_batch_log(
+                                                        &handle_clone,
+                                                        batch.batch_index,
+                                                        batch.total_batches,
+                                                        batch.topics.len(),
+                                                    );
                                                     let frame = MessageDiffRequestFrame::new(batch.topics);
                                                     if let Err(error) = send_ws_frame(
                                                         &mut ws_stream,
@@ -2333,8 +2341,19 @@ async fn run_sync_session(
                                         break 'attempt;
                                     }
                                 },
-                                SyncCommand::SendMessageDiff { attempt_id: command_attempt, topics } => {
+                                SyncCommand::SendMessageDiff {
+                                    attempt_id: command_attempt,
+                                    batch_index,
+                                    total_batches,
+                                    topics,
+                                } => {
                                     if command_attempt != attempt_id { continue; }
+                                    emit_phase3_batch_log(
+                                        &handle_clone,
+                                        batch_index,
+                                        total_batches,
+                                        topics.len(),
+                                    );
                                     let frame = MessageDiffRequestFrame::new(topics);
                                     if let Err(error) = send_ws_frame(&mut ws_stream, &frame).await {
                                         terminate_after_protocol_send_failure(
@@ -3021,6 +3040,8 @@ async fn run_sync_session(
 const TARGET_MESSAGE_STATES_PER_BATCH: usize = 10_000;
 
 pub(crate) struct Phase3DiffBatch {
+    pub batch_index: usize,
+    pub total_batches: usize,
     pub topics: Vec<MessageDiffTopicState>,
     pub keys: HashSet<TopicKey>,
 }
@@ -3053,6 +3074,8 @@ fn build_diff_batches(
             && current_msg_count.saturating_add(msg_count) > TARGET_MESSAGE_STATES_PER_BATCH
         {
             batches.push_back(Phase3DiffBatch {
+                batch_index: 0,
+                total_batches: 0,
                 topics: current_topics,
                 keys: current_keys,
             });
@@ -3068,12 +3091,40 @@ fn build_diff_batches(
 
     if !current_topics.is_empty() {
         batches.push_back(Phase3DiffBatch {
+            batch_index: 0,
+            total_batches: 0,
             topics: current_topics,
             keys: current_keys,
         });
     }
 
+    let total = batches.len();
+    for (idx, batch) in batches.iter_mut().enumerate() {
+        batch.batch_index = idx + 1;
+        batch.total_batches = total;
+    }
+
     Ok(batches)
+}
+
+pub(crate) fn emit_phase3_batch_log<R: Runtime>(
+    app_handle: &AppHandle<R>,
+    batch_index: usize,
+    total_batches: usize,
+    topics_in_batch: usize,
+) {
+    let message = if total_batches <= 1 {
+        format!(
+            "⚡ [批次同步中] 当前话题已合并为单批次高效同步 (共 1 批 / {} 个话题)。单批最大可容纳 10,000 条消息，批量合并与数据库写入期间进度条暂不递增，此为正常现象而非卡死，请耐心等待...",
+            topics_in_batch
+        )
+    } else {
+        format!(
+            "⚡ [批次同步中] 正在进行第 {}/{} 批话题消息同步 (本批包含 {} 个话题)。批量合并与数据库写入期间进度条将在整批完成后更新，并非卡住，请耐心等待...",
+            batch_index, total_batches, topics_in_batch
+        )
+    };
+    emit_sync_log(app_handle, "warning", &message);
 }
 
 pub(crate) fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, message: &str) {
@@ -4278,6 +4329,10 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(message_counts, vec![TARGET_MESSAGE_STATES_PER_BATCH, 1]);
+        assert_eq!(batches[0].batch_index, 1);
+        assert_eq!(batches[0].total_batches, 2);
+        assert_eq!(batches[1].batch_index, 2);
+        assert_eq!(batches[1].total_batches, 2);
 
         let mut oversized_states = HashMap::new();
         for (topic_id, count) in [

@@ -607,6 +607,8 @@ impl BatchDiffHandler {
                 drop(expected);
                 let _ = tx_internal.send(SyncCommand::SendMessageDiff {
                     attempt_id,
+                    batch_index: next_batch.batch_index,
+                    total_batches: next_batch.total_batches,
                     topics: next_batch.topics,
                 });
             }
