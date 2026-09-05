@@ -2136,6 +2136,7 @@ async fn run_sync_session(
                                                     }
                                                     emit_phase3_batch_log(
                                                         &handle_clone,
+                                                        session_id,
                                                         batch.batch_index,
                                                         batch.total_batches,
                                                         batch.topics.len(),
@@ -2350,6 +2351,7 @@ async fn run_sync_session(
                                     if command_attempt != attempt_id { continue; }
                                     emit_phase3_batch_log(
                                         &handle_clone,
+                                        session_id,
                                         batch_index,
                                         total_batches,
                                         topics.len(),
@@ -3109,6 +3111,7 @@ fn build_diff_batches(
 
 pub(crate) fn emit_phase3_batch_log<R: Runtime>(
     app_handle: &AppHandle<R>,
+    session_id: u64,
     batch_index: usize,
     total_batches: usize,
     topics_in_batch: usize,
@@ -3125,6 +3128,7 @@ pub(crate) fn emit_phase3_batch_log<R: Runtime>(
         )
     };
     emit_sync_log(app_handle, "warning", &message);
+    emit_operator_sync_log(app_handle, session_id, "warning", &message);
 }
 
 pub(crate) fn emit_sync_log<R: Runtime>(app_handle: &AppHandle<R>, level: &str, message: &str) {
