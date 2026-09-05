@@ -121,7 +121,7 @@ pub fn run() {
                 });
             }
 
-            vcp_modules::boot_trace::boot_mark(&app.handle(), "rs:setup_end");
+            vcp_modules::boot_trace::boot_mark(app.handle(), "rs:setup_end");
             Ok(())
         })
         .plugin(

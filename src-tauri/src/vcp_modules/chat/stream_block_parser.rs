@@ -4,8 +4,8 @@ use crate::vcp_modules::content_parser::{
     extract_tool_name, find_tool_request_end, parse_daily_note_tool_request,
     parse_legacy_daily_note, BlockType, ParsedDailyNote, ToolCallSummaryItem, ToolResultDetail,
     BUTTON_CLICK, DIARY_END, DIARY_START, GENERIC_CODE_FENCE_START, HTML_DOC_END, HTML_DOC_START,
-    KV_REGEX, ROLE_DIVIDER, STYLE_TAG_END, STYLE_TAG_START, THINK_END, THINK_START,
-    THOUGHT_END, THOUGHT_START, TOOL_RESULT_END, TOOL_RESULT_START, TOOL_START,
+    KV_REGEX, ROLE_DIVIDER, STYLE_TAG_END, STYLE_TAG_START, THINK_END, THINK_START, THOUGHT_END,
+    THOUGHT_START, TOOL_RESULT_END, TOOL_RESULT_START, TOOL_START,
 };
 use crate::vcp_modules::pre_renderer::MarkdownNode;
 use crate::vcp_modules::sync_hash::HashAggregator;
