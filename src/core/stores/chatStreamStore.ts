@@ -302,6 +302,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       tailContent: string | null;
       tailBlock: StreamBlock | null;
       tailBlockChanged: boolean;
+      tailOp: TailTextOp | null;
       tailFrame: TailFrame | null;
       tailSnapshot: MarkdownNode[] | null;
       streamId: number | null;
@@ -331,6 +332,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           if (up.tailBlockChanged) {
             msg.tailBlock = up.tailBlock ?? undefined;
           }
+          if (up.tailOp !== null) msg.tailOp = up.tailOp;
           if (up.tailSnapshot !== null)
             msg.tailSnapshot = up.tailSnapshot;
           if (up.tailFrame !== null) msg.tailFrame = up.tailFrame;
@@ -361,6 +363,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         if (up.tailBlockChanged) {
           m.tailBlock = up.tailBlock ?? undefined;
         }
+        if (up.tailOp !== null) m.tailOp = up.tailOp;
       }
 
       // 重置下一次绘制前的合并暂存状态。
@@ -369,6 +372,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       up.tailContent = null;
       up.tailBlock = null;
       up.tailBlockChanged = false;
+      up.tailOp = null;
       up.tailFrame = null;
       up.tailSnapshot = null;
       up.animationFrameId = null;
@@ -847,6 +851,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             tailContent: null,
             tailBlock: null,
             tailBlockChanged: false,
+            tailOp: null,
             tailFrame: null,
             tailSnapshot: null,
             streamId: null,
@@ -875,6 +880,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             update.tailContent = null;
             update.tailBlock = null;
             update.tailBlockChanged = false;
+            update.tailOp = null;
             update.tailFrame = null;
             update.tailSnapshot = null;
             update.streamId = eventStreamId;
@@ -948,6 +954,26 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           }
 
           if (aurora.tailOp) {
+            if (update.tailOp && aurora.tailOp.op === "append") {
+              if (update.tailOp.op === "append") {
+                update.tailOp = {
+                  ...aurora.tailOp,
+                  content: update.tailOp.content + aurora.tailOp.content,
+                  previousHash: update.tailOp.previousHash,
+                };
+              } else if (update.tailOp.op === "replace") {
+                update.tailOp = {
+                  ...update.tailOp,
+                  content: update.tailOp.content + aurora.tailOp.content,
+                  hash: aurora.tailOp.hash,
+                };
+              } else {
+                update.tailOp = aurora.tailOp;
+              }
+            } else {
+              update.tailOp = aurora.tailOp;
+            }
+
             const currentBlock = update.tailBlock ?? msg!.tailBlock;
             const currentContent = update.tailContent !== null
               ? update.tailContent
@@ -1042,6 +1068,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         const finalizeStream = () => {
           msg!.tailContent = "";
           msg!.tailBlock = undefined;
+          msg!.tailOp = undefined;
           removeSessionStream(ownerId, ownerType, topicId, actualMessageId);
           if (callbacks?.onStreamFinished) {
             callbacks.onStreamFinished(actualMessageId, topicId);

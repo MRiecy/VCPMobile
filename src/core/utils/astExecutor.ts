@@ -10,6 +10,8 @@ import {
   STREAM_ELEMENT_REVEAL_CLASS,
   supportsStreamRevealMotion,
 } from "./streamTextFade";
+import { getRegistry, cleanupRegistry as cleanupEngineRegistry } from "../dom-engine/core/registry";
+import { applyCodePatch } from "../dom-engine/executors/code-patch-executor";
 
 function isAstDebugEnabled(): boolean {
   return Boolean(import.meta.env.DEV && (window as any).__VCP_AST_DEBUG__);
@@ -85,8 +87,6 @@ function recordAstTrace(data: any): void {
   }
 }
 
-const registryShards = new Map<string, Map<string, Node>>();
-
 export type ApplyFrameResult = {
   ok: boolean;
   applied: number;
@@ -149,26 +149,12 @@ type ExecuteMutationResult = {
 };
 
 /**
- * 获取或者为指定 Message ID 初始化一个 DOM 节点缓存表分片
- */
-function getRegistry(messageId: string): Map<string, Node> {
-  let shard = registryShards.get(messageId);
-  if (!shard) {
-    shard = new Map();
-    registryShards.set(messageId, shard);
-  }
-  return shard;
-}
-
-/**
  * 释放特定 Message ID 占用的全部 DOM 节点引用，防止内存泄漏。
  * 在 MessageRenderer.vue 卸载（onUnmounted）或清除聊天时调用。
  */
 export function cleanupRegistry(messageId: string): void {
   discardStreamTextFragments(messageId);
-  const registry = registryShards.get(messageId);
-  const size = registry ? registry.size : 0;
-  registryShards.delete(messageId);
+  const size = cleanupEngineRegistry(messageId);
 
   if (import.meta.env.DEV && isAstDebugEnabled()) {
     recordAstTrace({
@@ -699,30 +685,15 @@ function executeMutation(
 
     case "patch_code": {
       const node = registry.get(mutation.id);
-      const codeRoot = node instanceof HTMLElement
-        ? Array.from(node.children).find((child) =>
-            child instanceof HTMLElement
-            && child.tagName === "CODE"
-            && child.hasAttribute("data-vcp-stream-code")
-          )
-        : undefined;
-      const stable = codeRoot?.querySelector<HTMLElement>("[data-vcp-code-stable]");
-      const active = codeRoot?.querySelector<HTMLElement>("[data-vcp-code-active]");
-
-      if (stable && active) {
-        // Syntect 已对源码做 HTML 转义，这里只解析后端生成的 span 片段。
-        // 完整行永久追加；只有尚未换行的末行会被替换。
-        const completedTemplate = document.createElement("template");
-        completedTemplate.innerHTML = mutation.completed_html;
-        const activeTemplate = document.createElement("template");
-        activeTemplate.innerHTML = mutation.active_html;
-        stable.appendChild(completedTemplate.content);
-        active.replaceChildren(activeTemplate.content);
-      } else {
+      if (!node) {
         status = "failed";
-        detail = node
-          ? "Incremental code anchors not found"
-          : "Code block not found in registry";
+        detail = "Code block not found in registry";
+        break;
+      }
+      const res = applyCodePatch(node, mutation.completed_html, mutation.active_html);
+      if (!res.ok) {
+        status = "failed";
+        detail = res.reason || "applyCodePatch failed";
       }
       break;
     }

@@ -212,6 +212,7 @@ export interface ChatMessage {
   // 以下为纯前端运行时 UI 状态 (Ephemeral)，绝不进行持久化
   tailContent?: string;      // Aurora: 尾随区 Markdown (高频变动)
   tailBlock?: StreamBlock;
+  tailOp?: TailTextOp;
   tailFrame?: TailFrame;
   tailSnapshot?: MarkdownNode[];
   isReconnecting?: boolean;  // 🆕 流接续重连中状态

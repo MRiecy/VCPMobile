@@ -23,6 +23,10 @@ import {
   shouldRevealAddedMarkdownNode,
 } from "../../core/utils/astExecutor";
 import {
+  applyThoughtTailOp,
+  cleanupThoughtTail,
+} from "../../core/dom-engine";
+import {
   clearStreamElementReveals,
   discardStreamTextFragments,
   flushStreamTextFragments,
@@ -1158,10 +1162,45 @@ watch(
   { flush: "post", immediate: true }
 );
 
+// === Thought Tail DOM Surgical Executor ===
+const thoughtTailSandboxRef = ref<HTMLElement | null>(null);
+let lastThoughtSandbox: HTMLElement | null = null;
+
+watch(
+  [
+    () => props.message.tailOp,
+    () => props.message.tailBlock?.content,
+    thoughtTailSandboxRef,
+  ],
+  ([op, fallbackContent, sandbox]) => {
+    if (!sandbox || !thoughtTailBlock.value) {
+      if (lastThoughtSandbox) {
+        cleanupThoughtTail(props.message.id);
+        lastThoughtSandbox = null;
+      }
+      return;
+    }
+
+    if (lastThoughtSandbox !== sandbox) {
+      cleanupThoughtTail(props.message.id);
+      lastThoughtSandbox = sandbox;
+    }
+
+    applyThoughtTailOp(
+      props.message.id,
+      sandbox,
+      op,
+      fallbackContent,
+    );
+  },
+  { flush: "post", immediate: true }
+);
+
 onUnmounted(() => {
   rendererDisposed = true;
   removeScopedCss(props.message.id);
   cleanupRegistry(props.message.id);
+  cleanupThoughtTail(props.message.id);
 });
 </script>
 
@@ -1263,9 +1302,10 @@ onUnmounted(() => {
             >
               <div
                 v-if="isPlainTailFallback || isAstRecoveryPending || !useAstForCurrentTail"
+                :ref="(el) => { thoughtTailSandboxRef = el as HTMLElement | null }"
                 :data-tail-render-mode="isAstRecoveryPending ? 'recovery-text' : 'plaintext'"
                 class="thought-body vcp-markdown-block whitespace-pre-wrap break-words"
-              >{{ thoughtTailBlock.content }}</div>
+              />
               <div
                 v-else
                 :ref="(el) => { tailSandboxRef = el as HTMLElement | null }"

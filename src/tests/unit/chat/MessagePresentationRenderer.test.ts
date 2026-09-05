@@ -1480,4 +1480,154 @@ describe('MessageRenderer presentation shell', () => {
     expect(wrapper.get('.vcp-thought-block').classes()).not.toContain('vcp-stream-element-reveal');
     wrapper.unmount();
   });
+
+  it('思维链 Plain 模式下使用底层 DOM appendData 增量追加且闭合时沉淀', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const sessionStore = useChatSessionStore();
+    const streamStore = useChatStreamStore();
+    sessionStore.setConversation({
+      id: 'agent-a',
+      type: 'agent',
+      name: 'Agent A',
+    } as any, 'topic-a');
+    const context = {
+      ownerId: 'agent-a',
+      ownerType: 'agent' as const,
+      topicId: 'topic-a',
+      agentId: 'agent-a',
+    };
+    const eventBase = {
+      finishReason: null,
+      error: null,
+      blocks: null,
+      timestamp: null,
+      topicUpdatedAt: null,
+    };
+
+    await streamStore.processStreamEvent({
+      ...eventBase,
+      type: 'thinking',
+      messageId: 'thought-plain-message',
+      context,
+      chunk: null,
+      aurora: null,
+    });
+
+    await streamStore.processStreamEvent({
+      ...eventBase,
+      type: 'aurora',
+      messageId: 'thought-plain-message',
+      context,
+      chunk: null,
+      aurora: {
+        kind: 'delta',
+        streamId: 42,
+        chunk: '<think>分析第一阶段',
+        tailOp: {
+          op: 'replace',
+          content: '分析第一阶段',
+          hash: 'thought-p1',
+          mode: 'plain',
+          blockType: 'thought',
+          thoughtTheme: '思维链',
+        },
+      },
+    });
+
+    const message = streamStore.getActiveStreamMessage(
+      'agent-a', 'agent', 'topic-a', 'thought-plain-message',
+    )!;
+
+    const wrapper = mount(MessageRenderer, {
+      props: { message },
+      global: {
+        plugins: [pinia],
+        directives: { longpress: {} },
+        stubs: {
+          VcpAvatar: markerStub('avatar'),
+          ToolBlock: markerStub('tool'),
+          HtmlPreviewBlock: markerStub('html-preview'),
+          ToolSummaryBlock: markerStub('tool-summary'),
+          DiaryBlock: markerStub('diary'),
+          AttachmentPreview: markerStub('attachment'),
+          MermaidFullScreenViewer: markerStub('mermaid-viewer'),
+          ThinkingIndicator: markerStub('thinking'),
+          StreamingTag: markerStub('streaming'),
+        },
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(wrapper.get('.vcp-thought-block').text()).toContain('分析第一阶段');
+    });
+
+    const appendDataSpy = vi.spyOn(CharacterData.prototype, 'appendData');
+
+    await streamStore.processStreamEvent({
+      ...eventBase,
+      type: 'aurora',
+      messageId: 'thought-plain-message',
+      context,
+      chunk: null,
+      aurora: {
+        kind: 'delta',
+        streamId: 42,
+        chunk: ' -> 深入推理',
+        tailOp: {
+          op: 'append',
+          previousHash: 'thought-p1',
+          content: ' -> 深入推理',
+          hash: 'thought-p2',
+          mode: 'plain',
+          blockType: 'thought',
+          thoughtTheme: '思维链',
+        },
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(appendDataSpy).toHaveBeenCalledWith(' -> 深入推理');
+      expect(wrapper.get('.vcp-thought-block').text()).toContain('分析第一阶段 -> 深入推理');
+    });
+
+    appendDataSpy.mockRestore();
+
+    await streamStore.processStreamEvent({
+      ...eventBase,
+      type: 'aurora',
+      messageId: 'thought-plain-message',
+      context,
+      chunk: null,
+      aurora: {
+        kind: 'delta',
+        streamId: 42,
+        chunk: '</think>',
+        stableAppend: {
+          baseCount: 0,
+          blocks: [{
+            type: 'thought',
+            theme: '思维链',
+            content: '分析第一阶段 -> 深入推理',
+            is_complete: true,
+            hash: 'stable-thought-p',
+            nodes: [{
+              type: 'paragraph',
+              children: [{ type: 'text', value: '分析第一阶段 -> 深入推理' }],
+            }],
+          }],
+        },
+        tailOp: { op: 'clear' },
+      },
+    });
+
+    await vi.waitFor(() => {
+      expect(message.tailBlock).toBeUndefined();
+      expect(message.blocks).toHaveLength(1);
+      expect(wrapper.findAll('.vcp-thought-block')).toHaveLength(1);
+      expect(wrapper.get('.vcp-thought-block').text()).toContain('分析第一阶段 -> 深入推理');
+    });
+
+    wrapper.unmount();
+  });
 });
