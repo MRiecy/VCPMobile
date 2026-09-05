@@ -157,9 +157,10 @@ VCP-CDS internal protocol 3 不是 Mobile Wire 1.5。CDS 的 HTTP 与逐项失�
 - 已登记的 CDS code（如 `INVALID_REQUEST`、`NOT_FOUND`、`AMBIGUOUS_IDENTITY`、`SERVICE_BUSY`、`INTERNAL_ERROR`）按精确表分类；
 - CDS internal protocol 的 `PROTOCOL_MISMATCH` 在适配边界重命名为 `CDS_PROTOCOL_MISMATCH`，不得与公开 Wire 的 `WIRE_VERSION_MISMATCH` 共用用户文案；
 - 中央模式启动失败时，插件仍开放认证 WebSocket 控制面并在 `VERSION_ACK` 前发送结构化错误：二进制缺失、internal protocol 不匹配、schema 不匹配分别映射为 `CDS_BINARY_NOT_FOUND`、`CDS_PROTOCOL_MISMATCH`、`CDS_SCHEMA_MISMATCH`，其他启动错误映射为 `CDS_STARTUP_FAILED`；
-- 上述失败不得挂载同步 HTTP 数据面，也不得自动回退 Legacy；完全无法连接 WebSocket 时 Mobile 只能报告连接故障，不能臆测插件或 CDS 根因；
+- 上述失败不得挂载同步 HTTP 数据面，严禁自动回退 Legacy（引导用户在电脑端运行 `node rust_chat_data_service/build-runtime.js` 重新编译 CDS，以真正使用最新的 CDS 模式）；完全无法连接 WebSocket 时 Mobile 只能报告连接故障，不能臆测插件或 CDS 根因；
 - ChatDataService 客户端产生的 `TIMEOUT`、`UNAVAILABLE`、`INVALID_RESPONSE`、`RESPONSE_TOO_LARGE` 等本地 code 也按精确表分类；
-- 新出现且格式合法的 CDS code 保留原码，以 `internal/manual` 安全兜底；平台 errno 回落到当前边界 code。
+- 新出现且格式合法的 CDS code 保留原码，以 `internal/manual` 安全兜底；平台 errno 回落到当前边界 code；
+- 移动端在遇到此类 CDS/Wire 兼容与启动异常时，错误卡除展示固定 guidance 外，还会显式渲染重新编译命令 `node rust_chat_data_service/build-runtime.js` 并支持一键复制到剪贴板。
 
 不得要求 VCP-CDS 直接复用 Wire 对象，也不得把 internal protocol 的 `retryable` 布尔值未经翻译暴露给 Mobile。
 

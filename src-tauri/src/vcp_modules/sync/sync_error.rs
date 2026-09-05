@@ -223,8 +223,8 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::MobileSync,
             Stage::Handshake,
             Retry::AfterUserAction,
-            "手机端与电脑端同步协议不兼容",
-            "更新版本较旧的一端；无法判断时同时更新 Mobile 与电脑同步插件，并重启电脑端。",
+            "手机端与电脑端 Wire 同步协议不兼容",
+            "请更新 VChat 以同步最新插件；若两端版本差异较大，请同时更新 Mobile 与 VChat，并在电脑端运行 node rust_chat_data_service/build-runtime.js 重新编译 CDS，重启 VChat 后再试。",
         ),
         "CDS_BINARY_NOT_FOUND" => definition(
             Category::Configuration,
@@ -232,15 +232,15 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Stage::Startup,
             Retry::AfterUserAction,
             "电脑端 CDS Rust 可执行文件不存在",
-            "重新编译并部署 rust_chat_data_service，然后重启电脑端再试。",
+            "请更新 VChat 桌面端以同步插件代码，并在 VCPChat 根目录执行 node rust_chat_data_service/build-runtime.js 重新编译 CDS，重启电脑端后再试。",
         ),
         "CDS_PROTOCOL_MISMATCH" | "CDS_SCHEMA_MISMATCH" => definition(
             Category::Compatibility,
             Origin::DesktopCds,
             Stage::Startup,
             Retry::AfterUserAction,
-            "电脑端 CDS Rust 可执行文件版本不匹配",
-            "重新编译并部署 rust_chat_data_service，然后重启电脑端再试。",
+            "电脑端 CDS 数据服务协议或 Schema 版本不匹配",
+            "请更新 VChat 桌面端以同步插件代码，并在 VCPChat 根目录执行 node rust_chat_data_service/build-runtime.js 重新编译 CDS，重启电脑端后再试。",
         ),
         "VERSION_CHECK_TIMEOUT" => definition(
             Category::Connection,
@@ -287,8 +287,8 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::MobileSync,
             Stage::Connect,
             Retry::Manual,
-            "端口未开放：可能是没启动服务插件或正在构建索引",
-            "请稍后重新同步。",
+            "端口未开放：未能连接到电脑端同步服务",
+            "确认电脑端 VChat 已启动且 VCPMobileSync 插件已运行；若启用了 CDS 模式，请确保已运行 node rust_chat_data_service/build-runtime.js 编译并启动。",
         ),
         "WS_CLOSED"
         | "WS_DISCONNECTED"
@@ -315,8 +315,8 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::DesktopCds,
             Stage::Startup,
             Retry::Manual,
-            "电脑端数据服务连接异常或响应超时",
-            "重启电脑端应用后重新同步；若仍失败，请保留最新日志。",
+            "电脑端 CDS 数据服务连接异常或响应超时",
+            "请确认电脑端 CDS 进程已正常运行；若近期更新过 VChat，请在电脑端运行 node rust_chat_data_service/build-runtime.js 重新编译 CDS 并重启 VChat。",
         ),
         "SYNC_STREAM_FAILED" => definition(
             Category::Connection,
@@ -594,16 +594,16 @@ fn error_definition(code: &str) -> Option<ErrorDefinition> {
             Origin::DesktopCds,
             Stage::Startup,
             Retry::AfterUserAction,
-            "电脑端选择了 CDS 模式，但数据服务不可用",
-            "在电脑端启用 CDS，或明确切换为 Legacy 模式并重启后再试。",
+            "电脑端 CDS 数据服务不可用或未就绪",
+            "请更新 VChat 以同步插件，并在电脑端运行 node rust_chat_data_service/build-runtime.js 重新编译 CDS 后重启 VChat，以真正使用最新的 CDS 模式。",
         ),
         "CDS_STARTUP_FAILED" | "CDS_ERROR" | "INTERNAL_ERROR" => definition(
             Category::Internal,
             Origin::DesktopCds,
             Stage::Startup,
             Retry::Manual,
-            "电脑端数据服务未能启动",
-            "查看电脑端同步日志并重启应用；若仍失败，请保留日志。",
+            "电脑端 CDS 数据服务未能启动",
+            "请更新 VChat 并确保依赖完整，在电脑端运行 node rust_chat_data_service/build-runtime.js 重新编译 CDS 后重启 VChat；若仍失败请查看电脑端同步日志。",
         ),
         "SYNC_ALREADY_RUNNING" => definition(
             Category::Internal,
@@ -1015,8 +1015,13 @@ mod tests {
         assert!(!cds_timeout.guidance.contains("同一网络"));
         let stale_cds = build_local_error_payload("CDS_PROTOCOL_MISMATCH", Vec::new(), None);
         assert!(stale_cds.guidance.contains("rust_chat_data_service"));
+        assert!(stale_cds.guidance.contains("build-runtime.js"));
         let wire_mismatch = build_local_error_payload("WIRE_VERSION_MISMATCH", Vec::new(), None);
         assert!(wire_mismatch.guidance.contains("Mobile"));
+        assert!(wire_mismatch.guidance.contains("build-runtime.js"));
+        let cds_unavailable = build_local_error_payload("CDS_UNAVAILABLE", Vec::new(), None);
+        assert!(cds_unavailable.guidance.contains("build-runtime.js"));
+        assert!(!cds_unavailable.guidance.contains("Legacy"));
     }
 
     #[test]

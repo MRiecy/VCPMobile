@@ -770,4 +770,35 @@ describe("sync session ownership", () => {
     ).toBe("已打开系统分享面板");
   });
 
+  it("renders CDS compile command and copies to clipboard on CDS/Wire errors", async () => {
+    const store = useSyncSessionStore();
+    store.isOpen = true;
+    store.status = "error";
+    store.terminalError = {
+      code: "CDS_PROTOCOL_MISMATCH",
+      category: "compatibility",
+      origin: "desktop_cds",
+      stage: "startup",
+      retryAction: "after_user_action",
+      message: "电脑端 CDS 数据服务协议版本不匹配",
+      guidance: "请更新 VChat 桌面端以同步插件代码，并在 VCPChat 根目录执行 node rust_chat_data_service/build-runtime.js 重新编译 CDS，重启电脑端后再试。",
+      failedTopicIds: [],
+      logFile: null,
+    };
+
+    const wrapper = mount(SyncSessionView);
+    await Promise.resolve();
+
+    expect(wrapper.text()).toContain("node rust_chat_data_service/build-runtime.js");
+    expect(wrapper.text()).toContain("重新编译命令");
+
+    const copyBtn = wrapper.findAll("button").find((b) => b.text().includes("复制命令"));
+    expect(copyBtn).toBeTruthy();
+
+    await copyBtn!.trigger("click");
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("node rust_chat_data_service/build-runtime.js");
+
+    const notifications = useNotificationStore();
+    expect(notifications.activeToasts.some((t) => t.message === "已复制 CDS 编译命令")).toBe(true);
+  });
 });

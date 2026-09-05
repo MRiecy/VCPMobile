@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch, nextTick } from 'vue';
-import { X, Play, RotateCcw } from 'lucide-vue-next';
+import { X, Play, RotateCcw, Copy, Check } from 'lucide-vue-next';
 import SlidePage from '../../components/ui/SlidePage.vue';
 import SyncLogBrowserCore from '../../features/settings/components/SyncLogBrowserCore.vue';
 import { useSyncSessionStore } from '../../core/stores/syncSession';
@@ -142,8 +142,46 @@ const handleClose = async () => {
 
 import SettingsSwitch from '../../components/settings/SettingsSwitch.vue';
 import { useSettingsStore } from '../../core/stores/settings';
+import { useNotificationStore } from '../../core/stores/notification';
 
 const settingsStore = useSettingsStore();
+const notificationStore = useNotificationStore();
+
+const CDS_BUILD_CMD = 'node rust_chat_data_service/build-runtime.js';
+const isCopied = ref(false);
+let copiedTimer: ReturnType<typeof setTimeout> | null = null;
+
+const requiresCdsBuild = computed(() => {
+  if (!store.terminalError) return false;
+  const guidance = store.terminalError.guidance;
+  return guidance.includes(CDS_BUILD_CMD) || guidance.includes('build-runtime.js');
+});
+
+const copyBuildCommand = async () => {
+  try {
+    await navigator.clipboard.writeText(CDS_BUILD_CMD);
+    isCopied.value = true;
+    notificationStore.addNotification({
+      type: 'success',
+      title: '复制成功',
+      message: '已复制 CDS 编译命令',
+      toastOnly: true,
+      duration: 2000,
+    });
+    if (copiedTimer) clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => {
+      isCopied.value = false;
+    }, 2000);
+  } catch {
+    notificationStore.addNotification({
+      type: 'error',
+      title: '复制失败',
+      message: '请长按命令手动复制',
+      toastOnly: true,
+      duration: 3000,
+    });
+  }
+};
 
 const prerenderEnabled = computed(() =>
   settingsStore.settings?.syncPrerenderEnabled ?? false
@@ -346,6 +384,30 @@ const handlePrerenderToggle = async (val: boolean) => {
                 </div>
                 <div class="mt-1 text-[10px] leading-relaxed text-white/55 break-words">
                   {{ store.terminalError.guidance }}
+                </div>
+                <!-- 针对需要重新编译 CDS 的错误码，提供显式命令框与一键复制 -->
+                <div
+                  v-if="requiresCdsBuild"
+                  class="mt-2.5 rounded border border-white/10 bg-black/40 p-2 text-left"
+                >
+                  <div class="mb-1 flex items-center justify-between text-[9px] text-white/40">
+                    <span class="font-mono">电脑端 (VCPChat 根目录) 重新编译命令:</span>
+                    <button
+                      type="button"
+                      @click="copyBuildCommand"
+                      class="flex items-center gap-1 text-blue-400 hover:text-blue-300 active:opacity-70 transition-colors"
+                      title="复制命令"
+                    >
+                      <Check v-if="isCopied" :size="11" class="text-green-400" />
+                      <Copy v-else :size="11" />
+                      <span :class="isCopied ? 'text-green-400' : 'text-blue-400'">
+                        {{ isCopied ? '已复制' : '复制命令' }}
+                      </span>
+                    </button>
+                  </div>
+                  <div class="font-mono text-[10px] text-yellow-300/90 break-all select-all py-0.5">
+                    {{ CDS_BUILD_CMD }}
+                  </div>
                 </div>
                 <div class="mt-2 font-mono text-[9px] leading-relaxed text-white/35 break-all">
                   {{ errorStageLabel }} · {{ errorOriginLabel }} · {{ store.terminalError.code }}

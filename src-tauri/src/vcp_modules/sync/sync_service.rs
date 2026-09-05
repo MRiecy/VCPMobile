@@ -339,7 +339,7 @@ async fn perform_version_handshake<R: Runtime>(
             emit_sync_log(
                 app_handle,
                 "error",
-                "处理建议：更新版本较旧的一端；无法判断时同时更新 Mobile 与电脑同步插件并重启电脑端。",
+                "处理建议：更新 VChat 以同步最新插件，并在电脑端运行 node rust_chat_data_service/build-runtime.js 重新编译 CDS 后重启 VChat。",
             );
             let _ = close_ws_with_deadline(&mut ws_stream).await;
             Err(VersionHandshakeFailure::Stop)
