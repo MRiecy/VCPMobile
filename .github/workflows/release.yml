@@ -26,7 +26,7 @@ jobs:
 
       - name: Load pinned toolchain versions
         shell: bash
-        run: cat .github/toolchain.env >> "$GITHUB_ENV"
+        run: grep -E '^[A-Za-z_][A-Za-z0-9_]*=' .github/toolchain.env >> "$GITHUB_ENV"
 
       - name: Verify tag commit, CI gate, and version sources
         id: meta
