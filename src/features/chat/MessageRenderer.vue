@@ -898,10 +898,18 @@ const showMessageContextMenu = async () => {
       actions.push({
         label: "重新生成",
         icon: RotateCcw,
+        danger: true,
         disabled: generationActive,
-        handler: () => {
+        handler: async () => {
           if (streamStore.activeStreamingIds.size === 0) {
-            historyStore.regenerateResponse(messageKey);
+            const confirmed = await overlayStore.showConfirm({
+              title: "重新生成",
+              message: "确定要重新生成这条消息吗？",
+              isDanger: true,
+            });
+            if (confirmed) {
+              await historyStore.regenerateResponse(messageKey);
+            }
           }
         },
       });
@@ -909,10 +917,18 @@ const showMessageContextMenu = async () => {
       actions.push({
         label: "编辑重发",
         icon: Edit2,
+        danger: true,
         disabled: generationActive,
-        handler: () => {
+        handler: async () => {
           if (streamStore.activeStreamingIds.size === 0) {
-            historyStore.beginEditResend(messageKey);
+            const confirmed = await overlayStore.showConfirm({
+              title: "编辑重发",
+              message: "确定要编辑重发这条消息吗？",
+              isDanger: true,
+            });
+            if (confirmed) {
+              historyStore.beginEditResend(messageKey);
+            }
           }
         },
       });
