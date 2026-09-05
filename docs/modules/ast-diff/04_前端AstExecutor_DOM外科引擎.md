@@ -237,6 +237,8 @@ flowchart TD
     Dispatch -->|"prop"| Prop{"key === 'level' && tagName is H1-H6?"}
     Dispatch -->|"replace"| Replace["四级替换策略"]
     Dispatch -->|"replace_inline"| ReplaceInline["行内四级替换策略"]
+    Dispatch -->|"patch_code"| PatchCode["stable 锚点追加完整行 + active 锚点替换末行"]
+    Dispatch -->|"patch_raw_html"| PatchRawHtml["冻结段挂载 + 活跃子节点 morphdom"]
     Dispatch -->|"remove"| Remove["parent.removeChild + cleanupSubtreeRefs"]
 
     Prop -->|"Yes"| HeadingReplace["创建新 &lt;hN&gt; → replaceChild"]
@@ -454,6 +456,33 @@ case "prop": {
     }
 }
 ```
+
+### 5.8 PatchRawHtml —— RawHtml 容器冻结前沿挂载
+
+```typescript
+case "patch_raw_html": {
+    // 容器结构恒为 .vcp-raw-html-container > outer > [frozen × N] + [live?]
+    const existing = registry.get(mutation.id);
+    // …不存在则创建容器并注册
+    if (mutation.seed) {
+        // 种子帧：live_html 是整棵最外层元素，经 filterTrustedRichHtml 净化后整体重建
+        container.replaceChildren(seedTemplate.content);
+        break;
+    }
+    // 稳态帧：
+    // 1. 插入点 = frozen_total - 本帧新增数；与 outer.childNodes 校验前沿同步，
+    //    失同步 → status="failed" 触发 snapshot 重建（绝不静默写歪）
+    // 2. 新冻结段（frozen_html）parse 一次后 insertBefore 到 live 前，永久挂载
+    // 3. 活跃子节点（live_html）以与全量路径一致的守卫跑 morphdom 收敛
+}
+```
+
+| 属性 | 值 |
+|------|-----|
+| 冻结段身份 | 每个字节全程只 parse 一次，挂载后对象身份不变，后续帧永不重扫 |
+| 净化 | `frozen_html`/`live_html` 均过 `filterTrustedRichHtml`（与策略 C 同一信任边界） |
+| 乱序/丢帧防线 | `frozen_total` 与 `outer.childNodes.length` 前沿校验，失败即快照重建 |
+| 对应后端 | `aurora_pipeline.rs::html_tail_patch_parts`（html5ever 树权威切分） |
 
 ---
 

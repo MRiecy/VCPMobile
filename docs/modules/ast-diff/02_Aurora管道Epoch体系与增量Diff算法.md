@@ -201,7 +201,13 @@ sequenceDiagram
 let (new_blocks, new_tail) = self.parser.process(&self.full_text);
 ```
 
-`StreamBlockParser` 维护内部 `processed_len` 游标，只处理新增文本。返回已闭合的语义块列表和剩余 tail 文本。
+`StreamBlockParser` 维护 `processed_len` 主游标，stable 前缀绝不重扫。tail 内部的识别同样是增量的（frontier 游标续扫）：
+
+- **未闭合块书签**（`pending_block`）：起始标记类型/长度已知，跳过起始扫描直接续跑结束匹配；结束标记扫描也从续扫游标起扫（行锚定模式 frontier 行起扫、literal 定长回看），不再每帧全扫 tail。
+- **起始标记游标**（`marker_scan_end`）：行锚定模式的匹配状态随行完结而终定，每帧只重扫 frontier 行 + 新增文本；内部含无界重复的 4 条模式（THOUGHT/STYLE/HTML_CONTAINER/HTML_DOC）额外保留 4KB 回看窗口。
+- **段落断点游标**（`break_scan_end`）：`\n\n` 搜索从上帧终点回退 1 字节续扫（覆盖跨帧拼接断点）。
+
+因此 tail 识别成本为每帧 O(Δ)（Δ = 当帧新增字节），与 tail 总长无关；full_text 严格只增不减是全部游标正确性的前提。
 
 **Epoch 重置逻辑**（第 134-141 行）：
 ```rust
@@ -221,29 +227,38 @@ if !new_blocks.is_empty() {
 
 ```rust
 if !self.tail_content.is_empty() {
-    let nodes = if self.tail_content.len() > MAX_SPECULATIVE_TAIL_AST_BYTES {
-        None  // 包括 RawHtml 在内，统一回退纯文本兜底
+    let nodes = if next_thought_theme.is_some() {
+        None  // 思维链 tail：Thought 外壳 + 纯文本增量（Plain 模式），不做 md AST
     } else if raw_tail_type == Some(BlockType::HtmlContainer) {
-        // StreamBlockParser 已确认的裸 HTML 容器保持为一个完整 RawHtml 节点
-        Some(vec![MarkdownNode::raw_html(self.tail_content.clone())])
+        // PatchRawHtml 树权威路径：html5ever 切「新闭合根子节点 + 活跃子树」（见 03_§2.6）
+    } else if raw_tail_type == Some(BlockType::CodeFence) {
+        // 代码围栏快速路径：直接构造 CodeBlock 节点，走 PatchCode 行级增量高亮
+    } else if raw_tail_type == Some(BlockType::HtmlDoc) {
+        // 未围栏 HTML 文档：按 html 源码走 PatchCode 增量，闭合沉淀 HtmlPreview 卡片
+    } else if raw_tail_type 为 Tool/ToolResult/ToolCallSummary {
+        // 协议块封印：plaintext 代码节点，走 PatchCode 纯文本增量
+    } else if tail 超过 MAX_SPECULATIVE_TAIL_AST_BYTES {
+        None  // 通用 Markdown 超限：纯文本兜底
     } else {
-        // 普通 Markdown 与所有代码围栏统一解析为流式 Markdown AST
-        Some(parse_markdown_to_ast_streaming(&self.tail_content))
+        // 通用 Markdown tail：流式 Markdown AST
     };
     // ...
 }
 ```
 
-两个分支的语义：
-| 条件 | 策略 | 理由 |
-|------|------|------|
-| > 64KB（包括 HTML） | `nodes=None` → **纯文本兜底** | 防止性能悬崖；常态走 `tailOp` 字面文本追加 |
-| ≤ 64KB 且 `tail_type=HtmlContainer` | 单个 `RawHtml(full_tail)` | 保持完整 DOM 子树，交给前端 morphdom 增量更新 |
-| ≤ 64KB 的其他 tail | 流式 Markdown AST | 所有未闭合代码围栏都由 Markdown 解析器识别为 `CodeBlock`，不再另做 HTML sniff |
+各分支语义：
+
+| 条件 | 策略 | 每帧成本 |
+|------|------|---------|
+| 思维链 tail（Thought/Think） | Thought 外壳 + Plain 纯文本投影 | O(Δ) text op；未闭合思维链可劫持全流，md AST 在此等于每帧 O(全流) |
+| HtmlContainer tail | PatchRawHtml 冻结前沿补丁 | 后端 html5ever 全量 parse（O(tail)，native）+ IPC/前端 O(增量) |
+| CodeFence / HtmlDoc / 协议块 tail | PatchCode 增量高亮补丁 | O(Δ) |
+| 通用 Markdown ≤ 64KB | 流式 Markdown AST + diff | O(tail) 全量重解析（上限兜底） |
+| 通用 Markdown > 64KB | `nodes=None` → 纯文本兜底 | 防止性能悬崖；走 `tailOp` 字面文本追加 |
 
 AST 解析后，如果整个 tail 恰好是一个 `lang=html` 的 `CodeBlock`，Aurora 只把其 Wire 投影类型标为 `html-preview`；普通代码仍为 `markdown`。两者的正文都继续使用同一份 `TailFrame + PatchCode` 增量 DOM。前端的 `HtmlPreviewBlock` 在流式期间仅提供专属外壳，代码插槽仍由 AST executor 持有；不会把增长全文交给 `v-html`，也不会创建预览 iframe。投影类型发生变化时会产生一次 epoch reset，使新外壳内的 sandbox 直接从完整 snapshot 接管。
 
-> **降级只 bump 一次 epoch**：当 tail 跨过 64KB 进入纯文本兜底时，**仅在 AST 模式 → 纯文本模式的「切换帧」**递增一次 epoch/reset；此后保持安静，不再每帧 bump。这与旧版「每帧 `nodes=None` 并 bump epoch/reset（降级到 innerHTML、反复留白）」的行为根本不同——旧版会在超阈值后每帧清空重建，造成可见闪烁。
+> **降级只 bump 一次 epoch**：当 tail 跨过 64KB 进入纯文本兜底时，**仅在 AST 模式 → 纯文本模式的「切换帧」**递增一次 epoch/reset；此后保持安静，不再每帧 bump。这与旧版「每帧 `nodes=None` 并 bump epoch/reset（降级到 innerHTML、反复留白）」的行为根本不同——旧版会在超阈值后每帧清空重建，造成可见闪烁。思维链 tail 恒为 Plain 后同样适用：进入思维链只 reset 一次，续帧走纯增量 text op。
 
 #### Step 3-4：Hash 计算 + AST Diff
 

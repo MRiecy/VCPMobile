@@ -53,11 +53,11 @@ sequenceDiagram
 
 ---
 
-## 2. AstMutation —— 10 种突变指令
+## 2. AstMutation —— 11 种突变指令
 
 ### 2.1 指令总览
 
-定义于 `ast_diff.rs:4-35`，Rust 侧：
+定义于 `ast_diff.rs:4-62`，Rust 侧：
 
 ```rust
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -71,6 +71,7 @@ pub enum AstMutation {
     UpdateProp { id, key, value: String },                     // op="prop"
     Replace { id, node: MarkdownNode },                        // op="replace"
     PatchCode { id, completed_html, active_html },             // op="patch_code"
+    PatchRawHtml { id, frozen_html, live_html, frozen_total, seed }, // op="patch_raw_html"
     ReplaceInline { id, node: InlineNode },                    // op="replace_inline"
     Remove { id },                                             // op="remove"
 }
@@ -88,6 +89,7 @@ export type AstMutation =
   | { op: "prop"; id: string; key: string; value: string }
   | { op: "replace"; id: string; node: MarkdownNode }
   | { op: "patch_code"; id: string; completed_html: string; active_html: string }
+  | { op: "patch_raw_html"; id: string; frozen_html: string; live_html: string; frozen_total: number; seed: boolean }
   | { op: "replace_inline"; id: string; node: InlineNode }
   | { op: "remove"; id: string };
 ```
@@ -174,7 +176,29 @@ PatchCode { id: String, completed_html: String, active_html: String }
 
 首次 Add/恢复 Snapshot 会建立 `data-vcp-code-stable` 与 `data-vcp-code-active` 两个锚点。普通追加帧不再携带完整 `CodeBlock.code` 或完整 `highlighted_html`；若语言、前缀或 DOM 锚点不一致，则回退到一次 Replace/恢复 Snapshot。
 
-### 2.6 Replace / ReplaceInline —— 节点替换
+### 2.6 PatchRawHtml —— RawHtml 容器冻结前沿补丁
+
+```rust
+PatchRawHtml { id: String, frozen_html: String, live_html: String, frozen_total: usize, seed: bool }
+```
+
+| 字段 | 语义 |
+|------|------|
+| `frozen_html` | 本帧新闭合的**根级子节点**序列化结果（可为空串），有序追加到冻结段 |
+| `live_html` | 当前活跃子树（最后一个根子节点）的序列化结果，每帧整体替换 |
+| `frozen_total` | 截止本帧已冻结的根子节点总数（前端据此校验乱序/丢帧） |
+| `seed` | 种子帧标记：`true` 时 `live_html` 是整棵最外层元素（含标签），用于 reset 后重建基线；种子帧与 Replace 帧绝不参与后端暂存池合并 |
+
+| 属性 | 值 |
+|------|-----|
+| 触发条件 | tail 为未闭合 HtmlContainer（裸 `<div>`/`<section>` 等 9 标签白名单）时，取代逐帧全量 Replace。后端 `html_tail_patch_parts`（aurora_pipeline.rs）用 html5ever 规范级解析切出「新闭合根子节点 / 活跃子树」 |
+| 前端执行 | `astExecutor.ts` 的 `"patch_raw_html"` case：种子帧整体 morphdom 外层；稳态帧将 `frozen_html` parse 一次并永久挂载到冻结锚点，仅对活跃子树跑 morphdom —— 冻结段 DOM 永不重扫 |
+| 合并规则 | 后端暂存池对稳态 patch 做「冻结段有序拼接 + 活跃区取最新」合并（防抖丢帧不丢中间差异） |
+| 回退 | 根结构非单元素（起始标签未写完整、foster parenting 等）时切分不适用，回退整块 Replace 并清空 patch 状态，结构恢复后的下一帧按种子帧重建基线 |
+
+> **与 PatchCode 的分工**：PatchCode 服务「围栏代码块」的行级高亮增量（stable/active 双锚点），PatchRawHtml 服务「裸 HTML 容器」的树级结构增量（冻结前沿 + 活跃子树）。二者都把每帧 IPC 从 O(tail) 降到 O(增量)。
+
+### 2.7 Replace / ReplaceInline —— 节点替换
 
 ```rust
 Replace { id: String, node: MarkdownNode }
@@ -199,7 +223,7 @@ Replace 节点类型?
 
 > **策略 C 的 registry 一致性**：块级 `raw_html`/`table` 始终是「整节点全替换」，从不做子节点级 diff。因此 morphdom 执行后，注册表只保留**根 ID**（映射回页面上存活的 `oldNode`，而非被 morphdom 丢弃的临时 `newDom`），其余后代条目一律清除。后代条目不可从临时 registry 的后代节点取用——那些节点可能已被 morphdom 抛弃。行内容器（link/strong/emphasis 等）的 registry 重建规则更复杂（需在 morphdom 前后对路径求值），详见 04 文档 §5。
 
-### 2.7 Remove —— 节点删除
+### 2.8 Remove —— 节点删除
 
 ```rust
 Remove { id: String }
@@ -211,7 +235,7 @@ Remove { id: String }
 | 前端执行 | `parentNode.removeChild(node)` + `cleanupSubtreeRefs(id)` |
 | 典型场景 | Tail 内容收缩（如 Agent 删除了未完成的段落） |
 
-### 2.8 UpdateProp —— 属性变更
+### 2.9 UpdateProp —— 属性变更
 
 ```rust
 UpdateProp { id: String, key: String, value: String }
