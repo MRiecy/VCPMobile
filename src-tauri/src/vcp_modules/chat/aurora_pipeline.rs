@@ -19,9 +19,11 @@ use crate::vcp_modules::stream_block_parser::{
 ///   已豁免本上限。
 /// - 协议块（Tool/ToolResult/ToolCallSummary）tail 封印为 plaintext 代码节点走同一增量
 ///   路径，且工具结果必定闭合到达、不存在长期未闭合 tail，已豁免本上限。
+/// - 思维链 tail 走 Thought 外壳 + 纯文本增量投影（Plain 模式），根本不做 md AST 解析，
+///   与本上限无关。
 /// - RawHtml 容器 tail 走 html5ever 树权威 PatchRawHtml 路径（冻结段 + 活跃子树），
 ///   IPC/前端均 O(增量)，已豁免本上限。
-/// - 因此本上限如今只兜底仍是 O(tail)/帧 全量重解析的通用 Markdown / Thought tail：
+/// - 因此本上限如今只兜底仍是 O(tail)/帧 全量重解析的通用 Markdown tail：
 ///   正常流中段落会随空行沉淀为 stable 块，tail 难以涨大；64KB 纯属「模型输出永不换行
 ///   的巨型段落」病理防呆，避免最坏帧在低端机上失控。
 const MAX_SPECULATIVE_TAIL_AST_BYTES: usize = 65536;
@@ -712,7 +714,17 @@ impl AuroraBuffer {
             .as_ref()
             .and_then(|projection| projection.thought_theme.as_deref());
         let was_thought_tail = previous_tail_block_type == Some(TailBlockType::Thought);
-        let tail_changed = self.tail_content != new_tail
+        // O(1) tail 等价判定：full_text 严格只增不减（next_tail_fingerprint 内有
+        // debug_assert 守护该不变量），同一 tail 起点 + 同一长度即同一内容，
+        // 无需 O(tail) memcmp；theme 状态变化单独检查。
+        let tail_text_changed = match self.tail_projection.as_ref() {
+            Some(projection) => {
+                projection.fingerprint.source_start != new_tail_start
+                    || projection.fingerprint.content_len != new_tail.len()
+            }
+            None => !new_tail.is_empty(),
+        };
+        let tail_changed = tail_text_changed
             || was_thought_tail != next_thought_theme.is_some()
             || previous_thought_theme != next_thought_theme.as_deref();
         let next_fingerprint = (!new_tail.is_empty() || next_thought_theme.is_some())
@@ -731,10 +743,12 @@ impl AuroraBuffer {
 
         self.tail_content = new_tail;
 
-        // 2. 推测渲染 (Speculative Rendering)：普通 tail 使用 Markdown，已识别的未闭合
-        //    思维链保留 Thought 外壳，但正文继续使用同一 Markdown AST。
-        //    当显示正文超过 MAX_SPECULATIVE_TAIL_AST_BYTES 时跳过 AST 解析，
-        //    避免在流式热路径上产生性能悬崖
+        // 2. 推测渲染 (Speculative Rendering)：普通 tail 使用 Markdown AST；
+        //    已识别的未闭合思维链保留 Thought 外壳，但正文走纯文本增量投影（Plain
+        //    模式），不做 md 解析——未闭合思维链会把 processed_len 钉在起始标记上、
+        //    tail 可涨至全流级别，md AST 在此意味着每帧 O(全流) 解析。
+        //    当普通 tail 显示正文超过 MAX_SPECULATIVE_TAIL_AST_BYTES 时同样跳过 AST
+        //    解析降级纯文本，避免在流式热路径上产生性能悬崖
         if !self.tail_content.is_empty() || next_thought_theme.is_some() {
             if raw_tail_type == Some(BlockType::HtmlContainer) && next_thought_theme.is_none() {
                 // === HtmlContainer 树权威 patch 路径（全程增量，不受投机上限约束）===
@@ -836,7 +850,7 @@ impl AuroraBuffer {
                 let exceeds_speculative_cap =
                     self.tail_content.len() > MAX_SPECULATIVE_TAIL_AST_BYTES;
                 // 代码围栏 / HtmlDoc / 协议块 tail 均为增量路径（O(chunk)/帧），不再受投机
-                // 上限约束；上限如今只兜底仍是 O(tail)/帧 的通用 Markdown / Thought tail。
+                // 上限约束；上限如今只兜底仍是 O(tail)/帧 的通用 Markdown tail。
                 let incremental_tail = matches!(
                     raw_tail_type,
                     Some(
@@ -847,13 +861,15 @@ impl AuroraBuffer {
                             | BlockType::ToolCallSummary
                     )
                 );
-                let nodes = if exceeds_speculative_cap && !incremental_tail {
+                let nodes = if next_thought_theme.is_some() {
+                    // 思维链 tail：Thought 外壳 + 纯文本增量（TailRenderMode::Plain）。
+                    // 未闭合思维链会把 processed_len 钉在起始标记上、tail 可涨至全流
+                    // 级别；走 md AST 意味着每帧 O(全流) 解析，且越涨越慢。改为纯文本
+                    // 投影后每帧 O(Δ)，闭合时仍由 stream 层沉淀为正式 Thought 卡片。
+                    // （与桌面端「封印」语义对齐，但保留自有 Thought 外壳。）
                     None
-                } else if raw_tail_type == Some(BlockType::HtmlContainer) {
-                    // 思维链外壳内的 HtmlContainer（罕见角落）：保持旧的整块 raw_html 语义
-                    let mut node = MarkdownNode::raw_html(self.tail_content.clone());
-                    node.compute_hashes_recursively();
-                    Some(vec![node])
+                } else if exceeds_speculative_cap && !incremental_tail {
+                    None
                 } else if raw_tail_type == Some(BlockType::CodeFence) {
                     // 代码围栏 tail 快速路径：stream 层已保证 tail = 开围栏行 + 未闭合内容，
                     // 跳过整条 Markdown 预处理管线（4 道全文本预处理 + pulldown），直接构造节点
@@ -873,8 +889,8 @@ impl AuroraBuffer {
                     // 未闭合协议块 tail：与桌面端 VCPChat 的「封印」语义对齐——转义原文包在
                     // 等宽 pre 里逐字显示（此处借 plaintext 代码节点走增量高亮的纯文本路径）。
                     // 协议文本不是 Markdown：逐帧解析既浪费，又可能被 * / $$ 等字符意外格式化。
-                    // Diary/Thought/Style 不在此列（日记与思维链正文本身是 Markdown；
-                    // HtmlDoc 已在上一步路由进 html 源码增量路径）。
+                    // Diary/Style 不在此列（日记正文本身是 Markdown；思维链已在上方路由进
+                    // Thought 外壳纯文本投影；HtmlDoc 已路由进 html 源码增量路径）。
                     Some(vec![MarkdownNode::code_block(
                         Some("plaintext".to_string()),
                         self.tail_content.clone(),
@@ -1109,7 +1125,7 @@ mod tests {
     }
 
     #[test]
-    fn unclosed_think_tail_projects_empty_inner_then_appends_markdown() {
+    fn unclosed_think_tail_projects_empty_inner_then_appends_plain_text() {
         let mut buffer = AuroraBuffer::new();
         buffer.append_chunk("<think>");
         assert_eq!(buffer.process_queue(), (false, true));
@@ -1139,19 +1155,18 @@ mod tests {
         buffer.append_chunk("**分析中**");
         assert_eq!(buffer.process_queue(), (false, true));
         let (append, _) = buffer.prepare_delta_update().expect("thought body delta");
+        // Plain 投影：Append 携带原文（** 不作 md 解析），正文不进 AST 沙箱
         assert!(matches!(
             append.tail_op,
             Some(TailTextOp::Append {
                 ref content,
+                mode: TailRenderMode::Plain,
                 block_type: TailBlockType::Thought,
                 thought_theme: Some(ref theme),
                 ..
             }) if content == "**分析中**" && theme == "思维链"
         ));
-        assert!(matches!(
-            buffer.prev_tail_ast.as_slice(),
-            [MarkdownNode::Paragraph { .. }]
-        ));
+        assert!(buffer.prev_tail_ast.is_empty());
     }
 
     #[test]
@@ -1203,7 +1218,9 @@ mod tests {
                 ..
             }) if theme == "规划" && content == "\n- 第一步"
         ));
-        assert!(!snapshot.tail_snapshot.is_empty());
+        // Plain 投影：无 AST 快照，mode 为 Plain
+        assert!(snapshot.tail_snapshot.is_empty());
+        assert_eq!(snapshot.tail_mode, Some(TailRenderMode::Plain));
     }
 
     #[test]
@@ -1269,7 +1286,26 @@ mod tests {
     }
 
     #[test]
-    fn oversized_thought_tail_keeps_its_shell_in_plain_mode() {
+    fn thought_tail_is_always_plain_text_regardless_of_size() {
+        // 小体量思维链：同样走纯文本投影，不做 md AST（** 保持原文）
+        let mut small = AuroraBuffer::new();
+        small.append_chunk("<think>**加粗不应被解析**");
+        assert_eq!(small.process_queue(), (false, true));
+        assert_eq!(
+            small.tail_projection.as_ref().map(|p| p.mode),
+            Some(TailRenderMode::Plain)
+        );
+        assert!(small.prev_tail_ast.is_empty());
+        assert!(matches!(
+            small.current_tail_wire_block(),
+            Some(StreamBlock::Thought {
+                ref content,
+                is_complete: false,
+                ..
+            }) if content == "**加粗不应被解析**"
+        ));
+
+        // 超限思维链：不触发 64KB 降级（它本就恒为 Plain），且不受上限约束继续增量
         let mut buffer = AuroraBuffer::new();
         let body = "长".repeat(MAX_SPECULATIVE_TAIL_AST_BYTES + 1);
         buffer.append_chunk(&format!("<think>{body}"));
@@ -1289,6 +1325,23 @@ mod tests {
                 is_complete: false,
                 ..
             }) if content == &body
+        ));
+
+        // 继续追加仍走 O(Δ) Append
+        let (_, commit) = buffer
+            .prepare_delta_update()
+            .expect("initial thought delta");
+        buffer.commit_delivery(commit);
+        buffer.append_chunk("尾注");
+        assert_eq!(buffer.process_queue(), (false, true));
+        let (append, _) = buffer.prepare_delta_update().expect("append delta");
+        assert!(matches!(
+            append.tail_op,
+            Some(TailTextOp::Append {
+                ref content,
+                block_type: TailBlockType::Thought,
+                ..
+            }) if content == "尾注"
         ));
     }
 

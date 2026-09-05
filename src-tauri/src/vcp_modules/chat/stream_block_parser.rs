@@ -4,8 +4,9 @@ use crate::vcp_modules::content_parser::{
     extract_tool_name, find_tool_request_end, parse_daily_note_tool_request,
     parse_legacy_daily_note, BlockType, ParsedDailyNote, ToolCallSummaryItem, ToolResultDetail,
     BUTTON_CLICK, DIARY_END, DIARY_START, GENERIC_CODE_FENCE_START, HTML_DOC_END, HTML_DOC_START,
-    KV_REGEX, ROLE_DIVIDER, STYLE_TAG_END, STYLE_TAG_START, THINK_END, THINK_START, THOUGHT_END,
-    THOUGHT_START, TOOL_RESULT_END, TOOL_RESULT_START, TOOL_START,
+    KV_REGEX, ROLE_DIVIDER, STYLE_TAG_END, STYLE_TAG_START, THINK_END, THINK_START,
+    THINK_START_HEAD, THOUGHT_END, THOUGHT_START, THOUGHT_START_HEAD, TOOL_RESULT_END,
+    TOOL_RESULT_START, TOOL_START,
 };
 use crate::vcp_modules::pre_renderer::MarkdownNode;
 use crate::vcp_modules::sync_hash::HashAggregator;
@@ -195,9 +196,17 @@ impl StreamBlock {
 pub struct StreamBlockParser {
     processed_len: usize,
     /// 上一帧遗留的未闭合特种块书签：流式期间未闭合块（典型：增长中的代码围栏）会让
-    /// `processed_len` 停在块首，下一帧起始标记的类型与长度都已知，无需再用 11 条
-    /// 起始正则全扫 tail，直接续跑该块的结束匹配即可。
+    /// `processed_len` 停在块首，下一帧起始标记的类型与长度都已知，无需再用起始
+    /// 正则全扫 tail，直接续跑该块的结束匹配即可。
     pending_block: Option<PendingBlock>,
+    /// 起始标记扫描游标（full_text 绝对偏移）：不变量——[tail 起点, marker_scan_end) 内
+    /// 不存在未被消费的起始标记匹配起点。流式 full_text 严格只增不减，已完结行的匹配
+    /// 状态终定，下一帧只需从 frontier 行/有限回看窗口续扫，不再对 tail 全文跑全部
+    /// 起始正则（每帧 O(tail) → O(Δ)）。
+    marker_scan_end: usize,
+    /// `\n\n` 段落断点扫描游标（full_text 绝对偏移）：不变量——[tail 起点, break_scan_end)
+    /// 内不存在未被消费的 "\n\n"。续扫窗口带 1 字节重叠以覆盖跨帧拼接的断点。
+    break_scan_end: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -207,6 +216,37 @@ struct PendingBlock {
     start: usize,
     /// 起始标记的字节长度（remaining 视图下恒为 end - start，其中 start 为 0）。
     marker_len: usize,
+    /// 结束标记续扫游标（相对块首 remaining 视图，即绝对偏移 - start）：
+    /// 不变量——[marker_len, end_scan) 内不存在结束标记匹配起点。
+    end_scan: usize,
+}
+
+/// 非锚定 literal 起始标记（THINK_START，匹配最长 `<thinking>` = 10B）的跨界回看字节数。
+const LITERAL_MARKER_LOOKBEHIND: usize = 16;
+/// 内部含无界重复（`[^>]*` / `[^\]]*?` / `[\s>]`）的起始标记（THOUGHT_START /
+/// STYLE_TAG_START / HTML_CONTAINER_OPEN_RE / HTML_DOC_START）理论上匹配可跨行。
+/// 实务中标记都在单行内；给它们一个有限回看窗口，超过窗口的畸形跨行标记不再增量识别。
+const MULTILINE_MARKER_LOOKBEHIND: usize = 4096;
+/// 各 literal 结束标记的回看字节数（模式最长匹配 - 1）。
+const THINK_END_LOOKBEHIND: usize = 9; // `</thinking>`
+const HTML_DOC_END_LOOKBEHIND: usize = 6; // `</html>`
+const STYLE_TAG_END_LOOKBEHIND: usize = 7; // `</style>`
+
+/// text 中包含偏移 `at` 的那一行的行首（at 越界时按末尾处理；非 char boundary 先向下对齐）。
+fn line_start_of(text: &str, at: usize) -> usize {
+    let at = floor_char_boundary(text, at.min(text.len()));
+    match text[..at].rfind('\n') {
+        Some(nl) => nl + 1,
+        None => 0,
+    }
+}
+
+/// 将偏移向前对齐到 char boundary（回看窗口只许扩大不许缩小）。
+fn floor_char_boundary(text: &str, mut at: usize) -> usize {
+    while at > 0 && !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
 }
 
 /// 未闭合思维链 tail 的可撤销显示投影。
@@ -221,23 +261,23 @@ pub(crate) struct SpeculativeThoughtTail<'a> {
 }
 
 pub(crate) fn speculative_thought_tail(tail: &str) -> Option<SpeculativeThoughtTail<'_>> {
-    if let Some(captures) = THOUGHT_START.captures(tail) {
+    // 仅判定「tail 是否以思维链起始标记开头」：锚定 haystack 起点的变体正则，
+    // 引擎检查完位置 0 即停，不再对整尾做 O(tail) 扫描后按起点丢弃。
+    if let Some(captures) = THOUGHT_START_HEAD.captures(tail) {
         let marker = captures.get(0)?;
-        if marker.start() == 0 {
-            let theme = captures
-                .get(1)
-                .map(|matched| matched.as_str().trim().replace('"', ""))
-                .unwrap_or_else(|| "元思考链".to_string());
-            return Some(SpeculativeThoughtTail {
-                content: &tail[marker.end()..],
-                content_offset: marker.end(),
-                theme,
-            });
-        }
+        let theme = captures
+            .get(1)
+            .map(|matched| matched.as_str().trim().replace('"', ""))
+            .unwrap_or_else(|| "元思考链".to_string());
+        return Some(SpeculativeThoughtTail {
+            content: &tail[marker.end()..],
+            content_offset: marker.end(),
+            theme,
+        });
     }
 
-    let marker = THINK_START.find(tail)?;
-    (marker.start() == 0).then(|| SpeculativeThoughtTail {
+    let marker = THINK_START_HEAD.find(tail)?;
+    Some(SpeculativeThoughtTail {
         content: &tail[marker.end()..],
         content_offset: marker.end(),
         theme: "思维链".to_string(),
@@ -249,6 +289,8 @@ impl StreamBlockParser {
         Self {
             processed_len: 0,
             pending_block: None,
+            marker_scan_end: 0,
+            break_scan_end: 0,
         }
     }
 
@@ -262,19 +304,54 @@ impl StreamBlockParser {
     /// 已闭合的块从 tail 中移除加入 stable blocks；普通 Markdown tail 的类型为 None。
     pub fn process(&mut self, full_text: &str) -> (Vec<StreamBlock>, String, Option<BlockType>) {
         let mut blocks = Vec::new();
-        let mut pos = self.processed_len.min(full_text.len());
+        let base = self.processed_len.min(full_text.len());
+        let mut pos = base;
+        // 游标仅在「本帧尚未消费任何块」（pos 仍停在帧首 tail 起点）时生效；
+        // 一旦 pos 推进（沉淀/块闭合），后续迭代退回从 pos 全扫，与旧版语义逐字节一致。
+        self.marker_scan_end = self.marker_scan_end.clamp(base, full_text.len());
+        self.break_scan_end = self.break_scan_end.clamp(base, full_text.len());
         // 取出上一帧的未闭合块书签；本帧各返回路径负责重建（未闭合）或留空（已闭合/普通 tail）
         let mut pending = self.pending_block.take();
 
         while pos < full_text.len() {
             let remaining = &full_text[pos..];
+            let cursor_active = pos == base;
 
             // 1. 寻找最早出现的特种块起始标记。
             //    书签恰好落在当前游标时（流式未闭合块续帧的常见情形），起始标记无需重新
-            //    识别——它仍在那里且类型不变，跳过 11 条起始正则的全文扫描。
+            //    识别——它仍在那里且类型不变，跳过起始正则扫描。
             let start_marker = match pending {
                 Some(p) if p.start == pos => Some((0usize, p.marker_len, p.block_type)),
-                _ => find_earliest_start_marker(remaining),
+                _ => {
+                    // 游标续扫窗口（相对 remaining，全 0 即旧版全扫）：
+                    // - 行锚定单行有界模式：frontier 行起扫（已完结行的匹配状态终定）；
+                    // - 内部含无界重复、理论可跨行的模式：4KB 回看窗口的行首起扫；
+                    // - 非锚定 literal（THINK_START）：定长回看覆盖跨界匹配。
+                    // pos 已在帧内推进时游标可能落后于 pos，saturating_sub 归零即全扫。
+                    let scan_rel = self.marker_scan_end.saturating_sub(pos);
+                    let (bounded_from, multiline_from, literal_from) =
+                        if cursor_active && scan_rel > 0 {
+                            (
+                                line_start_of(remaining, scan_rel),
+                                line_start_of(
+                                    remaining,
+                                    scan_rel.saturating_sub(MULTILINE_MARKER_LOOKBEHIND),
+                                ),
+                                floor_char_boundary(
+                                    remaining,
+                                    scan_rel.saturating_sub(LITERAL_MARKER_LOOKBEHIND),
+                                ),
+                            )
+                        } else {
+                            (0, 0, 0)
+                        };
+                    find_earliest_start_marker(
+                        remaining,
+                        bounded_from,
+                        multiline_from,
+                        literal_from,
+                    )
+                }
             };
 
             if let Some((start, end, block_type)) = start_marker {
@@ -292,7 +369,7 @@ impl StreamBlockParser {
                 // 2. 标记之前的文本 → Markdown 段落
                 if start > 0 {
                     let before = &remaining[..start];
-                    let (md_blocks, md_tail) = split_markdown_paragraphs(before);
+                    let (md_blocks, md_tail) = split_markdown_paragraphs(before, 0);
                     blocks.extend(md_blocks);
                     if !md_tail.is_empty() {
                         #[cfg(test)]
@@ -309,9 +386,38 @@ impl StreamBlockParser {
                 // 3. 寻找对应结束标记
                 let content_start = end;
                 let search_area = &remaining[content_start..];
+                // 书签续帧：结束标记游标续扫（相对 search_area；Tool/HtmlContainer 本轮
+                // 不游标化，恒为全扫）。行锚定模式 frontier 行起扫，literal 定长回看。
+                let end_scan_from = match pending {
+                    Some(p) if p.start == pos => {
+                        let rel = p.end_scan.min(remaining.len());
+                        let from = match p.block_type {
+                            BlockType::CodeFence
+                            | BlockType::Thought
+                            | BlockType::ToolResult
+                            | BlockType::Diary
+                            | BlockType::ToolCallSummary => line_start_of(remaining, rel),
+                            BlockType::Think => floor_char_boundary(
+                                remaining,
+                                rel.saturating_sub(THINK_END_LOOKBEHIND),
+                            ),
+                            BlockType::HtmlDoc => floor_char_boundary(
+                                remaining,
+                                rel.saturating_sub(HTML_DOC_END_LOOKBEHIND),
+                            ),
+                            BlockType::Style => floor_char_boundary(
+                                remaining,
+                                rel.saturating_sub(STYLE_TAG_END_LOOKBEHIND),
+                            ),
+                            _ => content_start,
+                        };
+                        from.max(content_start) - content_start
+                    }
+                    _ => 0,
+                };
 
                 if let Some((end_start, end_end)) =
-                    find_end_marker(remaining, start, end, &block_type)
+                    find_end_marker(remaining, start, end, &block_type, end_scan_from)
                 {
                     #[cfg(test)]
                     println!("[DIAG] Found end marker for {:?} at pos + {}: relative start: {}, relative end: {}", block_type, pos + content_start, end_start, end_end);
@@ -341,13 +447,27 @@ impl StreamBlockParser {
                         block_type,
                         start: pos + start,
                         marker_len: end - start,
+                        end_scan: remaining.len() - start,
                     });
+                    // 起始扫描游标停在 tail 起点：标记行下一帧重扫（覆盖 ``` → ```rust 扩展）
+                    self.marker_scan_end = pos + start;
                     return (blocks, remaining[start..].to_string(), Some(block_type));
                 }
             } else {
                 // 4. 无任何特种块标记 → 全部按段落分割
-                let (md_blocks, md_tail) = split_markdown_paragraphs(remaining);
+                //    断点续扫：上一帧扫描终点回退 1 字节（覆盖跨帧拼接的 "\n\n"）起扫。
+                let break_from = if cursor_active {
+                    floor_char_boundary(
+                        remaining,
+                        self.break_scan_end.saturating_sub(pos).saturating_sub(1),
+                    )
+                } else {
+                    0
+                };
+                let (md_blocks, md_tail) = split_markdown_paragraphs(remaining, break_from);
                 blocks.extend(md_blocks);
+                self.marker_scan_end = full_text.len();
+                self.break_scan_end = full_text.len();
                 if md_tail.is_empty() {
                     self.processed_len = full_text.len();
                     return (blocks, String::new(), None);
@@ -359,6 +479,8 @@ impl StreamBlockParser {
         }
 
         self.processed_len = full_text.len();
+        self.marker_scan_end = full_text.len();
+        self.break_scan_end = full_text.len();
         (blocks, String::new(), None)
     }
 
@@ -389,6 +511,8 @@ impl StreamBlockParser {
     pub fn reset(&mut self) {
         self.processed_len = 0;
         self.pending_block = None;
+        self.marker_scan_end = 0;
+        self.break_scan_end = 0;
     }
 }
 
@@ -396,45 +520,72 @@ impl StreamBlockParser {
 
 /// 在文本中寻找最早出现的特种块起始标记
 /// 返回 (start_offset, end_offset, BlockType)
-fn find_earliest_start_marker(text: &str) -> Option<(usize, usize, BlockType)> {
-    let checks: [(&regex::Regex, BlockType); 11] = [
+///
+/// 三个窗口参数（相对 text 的字节偏移）分别给出三组模式的扫描起点；旧版全扫语义
+/// 等价于全传 0。游标续扫时：行锚定组起点为真实行首（`^` 语义与全扫一致），
+/// literal 组为定长回看，multiline 组为 4KB 窗口行首。
+fn find_earliest_start_marker(
+    text: &str,
+    bounded_from: usize,
+    multiline_from: usize,
+    literal_from: usize,
+) -> Option<(usize, usize, BlockType)> {
+    // 行首锚定、匹配必落在单行内的模式
+    let bounded: [(&regex::Regex, BlockType); 6] = [
         (&TOOL_START, BlockType::Tool),
-        (&THOUGHT_START, BlockType::Thought),
-        (&THINK_START, BlockType::Think),
         (&TOOL_RESULT_START, BlockType::ToolResult),
         (&DIARY_START, BlockType::Diary),
-        (&HTML_DOC_START, BlockType::HtmlDoc),
         (&ROLE_DIVIDER, BlockType::RoleDivider),
-        (&STYLE_TAG_START, BlockType::Style),
         (&GENERIC_CODE_FENCE_START, BlockType::CodeFence),
-        (
-            &crate::vcp_modules::content_parser::HTML_CONTAINER_OPEN_RE,
-            BlockType::HtmlContainer,
-        ),
         (
             &crate::vcp_modules::content_parser::TOOL_CALL_SUMMARY_START,
             BlockType::ToolCallSummary,
         ),
     ];
+    // 内部含无界重复（`[^>]*` / `[^\]]*?` / `[\s>]`）、理论上匹配可跨行的模式
+    let multiline: [(&regex::Regex, BlockType); 4] = [
+        (&THOUGHT_START, BlockType::Thought),
+        (&HTML_DOC_START, BlockType::HtmlDoc),
+        (&STYLE_TAG_START, BlockType::Style),
+        (
+            &crate::vcp_modules::content_parser::HTML_CONTAINER_OPEN_RE,
+            BlockType::HtmlContainer,
+        ),
+    ];
+    // 非行锚定的定长 literal
+    let literal: [(&regex::Regex, BlockType); 1] = [(&THINK_START, BlockType::Think)];
 
     let mut earliest: Option<(usize, usize, BlockType)> = None;
-    for (re, bt) in checks {
-        if let Some(m) = re.find(text) {
+    let mut consider = |found: Option<regex::Match>, bt: BlockType| {
+        if let Some(m) = found {
             if earliest.as_ref().is_none_or(|(s, _, _)| m.start() < *s) {
                 earliest = Some((m.start(), m.end(), bt));
             }
         }
+    };
+    for (re, bt) in bounded {
+        consider(re.find_at(text, bounded_from), bt);
+    }
+    for (re, bt) in multiline {
+        consider(re.find_at(text, multiline_from), bt);
+    }
+    for (re, bt) in literal {
+        consider(re.find_at(text, literal_from), bt);
     }
     earliest
 }
 
 /// 寻找对应块的结束标记
 /// 返回 (end_start_offset, end_end_offset) 在 remaining[content_start..] 内的相对偏移量
+///
+/// `scan_from`（相对 search_area）为游标续扫起点：调用方保证 [0, scan_from) 内不存在
+/// 结束标记匹配起点；全扫语义传 0。Tool / HtmlContainer 本轮不游标化，忽略该参数。
 fn find_end_marker(
     remaining: &str,
     start: usize,
     end: usize,
     block_type: &BlockType,
+    scan_from: usize,
 ) -> Option<(usize, usize)> {
     let content_start = end;
     let search_area = &remaining[content_start..];
@@ -457,29 +608,29 @@ fn find_end_marker(
 
     let m = match block_type {
         BlockType::Tool => unreachable!(),
-        BlockType::Thought => THOUGHT_END.find(search_area),
-        BlockType::Think => THINK_END.find(search_area),
-        BlockType::ToolResult => TOOL_RESULT_END.find(search_area),
-        BlockType::Diary => DIARY_END.find(search_area),
-        BlockType::ToolCallSummary => {
-            crate::vcp_modules::content_parser::TOOL_CALL_SUMMARY_END.find(search_area)
-        }
+        BlockType::Thought => THOUGHT_END.find_at(search_area, scan_from),
+        BlockType::Think => THINK_END.find_at(search_area, scan_from),
+        BlockType::ToolResult => TOOL_RESULT_END.find_at(search_area, scan_from),
+        BlockType::Diary => DIARY_END.find_at(search_area, scan_from),
+        BlockType::ToolCallSummary => crate::vcp_modules::content_parser::TOOL_CALL_SUMMARY_END
+            .find_at(search_area, scan_from),
         // 结束围栏的反引号数必须 ≥ 开围栏（CommonMark）：按起始标记动态计数配对，
         // 嵌套围栏（如 ````html 内含 ```）不会被提前误判闭合。
         BlockType::CodeFence => {
             let (s, e, _) = crate::vcp_modules::content_parser::find_matching_fence_end(
                 search_area,
                 &remaining[start..end],
+                scan_from,
             );
             return s.zip(e);
         }
-        BlockType::HtmlDoc => HTML_DOC_END.find(search_area),
+        BlockType::HtmlDoc => HTML_DOC_END.find_at(search_area, scan_from),
         BlockType::HtmlContainer => unreachable!(),
         BlockType::RoleDivider => {
             // RoleDivider 是单行标记，自闭合
             return Some((0, 0));
         }
-        BlockType::Style => STYLE_TAG_END.find(search_area),
+        BlockType::Style => STYLE_TAG_END.find_at(search_area, scan_from),
     };
     m.map(|m| (m.start(), m.end()))
 }
@@ -688,12 +839,17 @@ fn build_stream_block(
 
 /// 将纯文本按 \n\n 分割为 Markdown 段落块
 /// 返回 (completed_blocks, tail_text)
-fn split_markdown_paragraphs(text: &str) -> (Vec<StreamBlock>, String) {
+fn split_markdown_paragraphs(text: &str, break_from: usize) -> (Vec<StreamBlock>, String) {
     if text.is_empty() {
         return (Vec::new(), String::new());
     }
 
-    if let Some(last_break) = text.rfind("\n\n") {
+    // 断点续扫窗口：[0, break_from) 内由调用方保证不存在 "\n\n"；窗口起点向下对齐
+    // char boundary（只会扩大窗口）。全扫语义传 0。
+    let break_from = floor_char_boundary(text, break_from.min(text.len()));
+    let last_break = text[break_from..].rfind("\n\n").map(|idx| idx + break_from);
+
+    if let Some(last_break) = last_break {
         let stable = &text[..last_break + 2];
         let tail = &text[last_break + 2..];
 

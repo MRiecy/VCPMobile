@@ -341,8 +341,13 @@ lazy_static! {
     pub(crate) static ref THOUGHT_START: Regex = Regex::new(r"(?im)^[ \t]*\[--- VCP元思考链(?::\s*([^\]]*?))?\s*---\]").unwrap();
     pub(crate) static ref THOUGHT_END: Regex = Regex::new(r"(?im)^[ \t]*\[--- 元思考链结束 ---\]").unwrap();
 
+    // 仅锚定 haystack 起点的变体（无 (?m)）：投机投影只关心「tail 是否以标记开头」，
+    // 避免 (?m)^ 变体在整尾逐行扫一遍再按 start()==0 丢弃的 O(tail) 浪费。
+    pub(crate) static ref THOUGHT_START_HEAD: Regex = Regex::new(r"^[ \t]*\[--- VCP元思考链(?::\s*([^\]]*?))?\s*---\]").unwrap();
+
     pub(crate) static ref THINK_START: Regex = Regex::new(r"(?i)<think(?:ing)?>").unwrap();
     pub(crate) static ref THINK_END: Regex = Regex::new(r"(?i)</think(?:ing)?>").unwrap();
+    pub(crate) static ref THINK_START_HEAD: Regex = Regex::new(r"^(?i:<think(?:ing)?>)").unwrap();
 
     pub(crate) static ref TOOL_RESULT_START: Regex = Regex::new(r"(?im)^[ \t]*\[\[VCP调用结果信息汇总:").unwrap();
     pub(crate) static ref TOOL_RESULT_END: Regex = Regex::new(r"(?im)^[ \t]*VCP调用结果结束\]\]").unwrap();
@@ -467,6 +472,7 @@ pub fn de_indent_misinterpreted_code_blocks(text: &str) -> String {
 pub(crate) fn find_matching_fence_end(
     search_area: &str,
     start_marker_text: &str,
+    from: usize,
 ) -> (Option<usize>, Option<usize>, bool) {
     let trimmed = start_marker_text.trim_start();
     let fence_char = match trimmed.chars().next() {
@@ -482,8 +488,17 @@ pub(crate) fn find_matching_fence_end(
     // 结束围栏 = 行首至多 3 个空格/制表符 + 不少于开围栏数的反引号 + 仅空白收尾。
     // 原实现每次调用都现编译一个新 Regex，而本函数处于流式热路径（未闭合代码块的每一帧
     // 都会调一次），正则编译开销远超扫描本身。
-    let mut line_start = 0usize;
-    for line in search_area.split_inclusive('\n') {
+    // `from` 为游标续扫起点：其所在行的行首之前的行已由调用方确认无匹配，跳过。
+    let mut from = from.min(search_area.len());
+    while from > 0 && !search_area.is_char_boundary(from) {
+        from -= 1;
+    }
+    let from = match search_area[..from].rfind('\n') {
+        Some(nl) => nl + 1,
+        None => 0,
+    };
+    let mut line_start = from;
+    for line in search_area[from..].split_inclusive('\n') {
         let content = line.strip_suffix('\n').unwrap_or(line);
         let bytes = content.as_bytes();
 
@@ -672,7 +687,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
                     .map_or((None, None, false), |m| {
                         (Some(m.start()), Some(m.end()), true)
                     }),
-                BlockType::CodeFence => find_matching_fence_end(search_area, start_marker_text),
+                BlockType::CodeFence => find_matching_fence_end(search_area, start_marker_text, 0),
             };
 
             // 容错处理：未闭合的块（流式中断）降级为普通 Markdown
@@ -1572,38 +1587,65 @@ mod tests {
     fn fence_end_scanner_matches_commonmark_closing_rules() {
         // 基本闭合：返回结束围栏行的 [start, end)，end 不含换行符
         assert_eq!(
-            find_matching_fence_end("let x = 1;\n```\n", "```rust"),
+            find_matching_fence_end("let x = 1;\n```\n", "```rust", 0),
             (Some(11), Some(14), true)
         );
         // 结束围栏反引号数必须不少于开围栏（更多可以闭合）
         assert_eq!(
-            find_matching_fence_end("```\nx\n````\n", "````rust"),
+            find_matching_fence_end("```\nx\n````\n", "````rust", 0),
             (Some(6), Some(10), true)
         );
         assert_eq!(
-            find_matching_fence_end("```\n", "````rust"),
+            find_matching_fence_end("```\n", "````rust", 0),
             (None, None, false),
             "反引号不足不得闭合"
         );
         // 行首至多 3 个空白，4 个缩进不闭合；尾部空白与 CRLF 合法
         assert_eq!(
-            find_matching_fence_end("  ```  \nrest", "```rust"),
+            find_matching_fence_end("  ```  \nrest", "```rust", 0),
             (Some(0), Some(7), true)
         );
         assert_eq!(
-            find_matching_fence_end("    ```\n", "```rust"),
+            find_matching_fence_end("    ```\n", "```rust", 0),
             (None, None, false)
         );
         assert_eq!(
-            find_matching_fence_end("```\r\n", "```rust"),
+            find_matching_fence_end("```\r\n", "```rust", 0),
             (Some(0), Some(4), true)
         );
         // 行内反引号、非反引号起始标记、反引号不足的开围栏都不是合法配对
         assert_eq!(
-            find_matching_fence_end("let ``` x\n```\n", "```rust"),
+            find_matching_fence_end("let ``` x\n```\n", "```rust", 0),
             (Some(10), Some(13), true)
         );
-        assert_eq!(find_matching_fence_end("```\n", "``"), (None, None, false));
-        assert_eq!(find_matching_fence_end("```\n", "~~~"), (None, None, false));
+        assert_eq!(
+            find_matching_fence_end("```\n", "``", 0),
+            (None, None, false)
+        );
+        assert_eq!(
+            find_matching_fence_end("```\n", "~~~", 0),
+            (None, None, false)
+        );
+    }
+
+    #[test]
+    fn fence_end_scanner_resumes_from_cursor_line() {
+        // 游标续扫：from 之前的行不再检查，from 所在行（frontier 行）会重扫
+        let text = "let x = 1;\n```\n";
+        assert_eq!(
+            find_matching_fence_end(text, "```rust", 11),
+            (Some(11), Some(14), true),
+            "from 指向闭合行本身时仍应发现闭合"
+        );
+        assert_eq!(
+            find_matching_fence_end(text, "```rust", 12),
+            (Some(11), Some(14), true),
+            "from 落在闭合行中间时回退到行首重扫"
+        );
+        assert_eq!(
+            find_matching_fence_end("let x = 1;\nlet y = 2;\n", "```rust", 11),
+            (None, None, false),
+            "from 之后无闭合行则未闭合"
+        );
     }
 }
