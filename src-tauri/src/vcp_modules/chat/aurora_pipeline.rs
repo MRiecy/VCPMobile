@@ -696,7 +696,7 @@ impl AuroraBuffer {
         // 1. 增量解析全文，产出本次新增的已闭合块 + 尾部纯文本
         let (new_blocks, raw_new_tail, raw_tail_type) = self.parser.process(&self.full_text);
         let raw_new_tail_start = self.parser.tail_start();
-        let speculative_thought = speculative_thought_tail(&raw_new_tail);
+        let speculative_thought = speculative_thought_tail(&raw_new_tail, raw_tail_type);
         let (new_tail, new_tail_start, next_thought_theme) = match speculative_thought {
             Some(projection) => (
                 projection.content.to_string(),

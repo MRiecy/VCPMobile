@@ -341,13 +341,8 @@ lazy_static! {
     pub(crate) static ref THOUGHT_START: Regex = Regex::new(r"(?im)^[ \t]*\[--- VCP元思考链(?::\s*([^\]]*?))?\s*---\]").unwrap();
     pub(crate) static ref THOUGHT_END: Regex = Regex::new(r"(?im)^[ \t]*\[--- 元思考链结束 ---\]").unwrap();
 
-    // 仅锚定 haystack 起点的变体（无 (?m)）：投机投影只关心「tail 是否以标记开头」，
-    // 避免 (?m)^ 变体在整尾逐行扫一遍再按 start()==0 丢弃的 O(tail) 浪费。
-    pub(crate) static ref THOUGHT_START_HEAD: Regex = Regex::new(r"^[ \t]*\[--- VCP元思考链(?::\s*([^\]]*?))?\s*---\]").unwrap();
-
-    pub(crate) static ref THINK_START: Regex = Regex::new(r"(?i)<think(?:ing)?>").unwrap();
+    pub(crate) static ref THINK_START: Regex = Regex::new(r"(?im)^[ \t]*<think(?:ing)?>").unwrap();
     pub(crate) static ref THINK_END: Regex = Regex::new(r"(?i)</think(?:ing)?>").unwrap();
-    pub(crate) static ref THINK_START_HEAD: Regex = Regex::new(r"^(?i:<think(?:ing)?>)").unwrap();
 
     pub(crate) static ref TOOL_RESULT_START: Regex = Regex::new(r"(?im)^[ \t]*\[\[VCP调用结果信息汇总:").unwrap();
     pub(crate) static ref TOOL_RESULT_END: Regex = Regex::new(r"(?im)^[ \t]*VCP调用结果结束\]\]").unwrap();
@@ -545,7 +540,7 @@ pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
             r"(?im)",
             r"(^[ \t]*<<<\[TOOL_REQUEST\]>>>)|",                       // 1
             r"(^[ \t]*\[--- VCP元思考链(?::\s*[^\]]*?)?\s*---\])|",    // 2
-            r"(<think(?:ing)?>)|",                                     // 3
+            r"(^[ \t]*<think(?:ing)?>)|",                               // 3
             r"(^[ \t]*\[\[VCP调用结果信息汇总:)|",                     // 4
             r"(^[ \t]*<<<DailyNoteStart>>>)|",                         // 5
             r"(^[ \t]*(?:<!doctype html>|<html[\s>]))|",               // 6

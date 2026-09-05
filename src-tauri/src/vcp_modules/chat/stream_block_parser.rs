@@ -5,8 +5,7 @@ use crate::vcp_modules::content_parser::{
     parse_legacy_daily_note, BlockType, ParsedDailyNote, ToolCallSummaryItem, ToolResultDetail,
     BUTTON_CLICK, DIARY_END, DIARY_START, GENERIC_CODE_FENCE_START, HTML_DOC_END, HTML_DOC_START,
     KV_REGEX, ROLE_DIVIDER, STYLE_TAG_END, STYLE_TAG_START, THINK_END, THINK_START,
-    THINK_START_HEAD, THOUGHT_END, THOUGHT_START, THOUGHT_START_HEAD, TOOL_RESULT_END,
-    TOOL_RESULT_START, TOOL_START,
+    THOUGHT_END, THOUGHT_START, TOOL_RESULT_END, TOOL_RESULT_START, TOOL_START,
 };
 use crate::vcp_modules::pre_renderer::MarkdownNode;
 use crate::vcp_modules::sync_hash::HashAggregator;
@@ -221,8 +220,6 @@ struct PendingBlock {
     end_scan: usize,
 }
 
-/// 非锚定 literal 起始标记（THINK_START，匹配最长 `<thinking>` = 10B）的跨界回看字节数。
-const LITERAL_MARKER_LOOKBEHIND: usize = 16;
 /// 内部含无界重复（`[^>]*` / `[^\]]*?` / `[\s>]`）的起始标记（THOUGHT_START /
 /// STYLE_TAG_START / HTML_CONTAINER_OPEN_RE / HTML_DOC_START）理论上匹配可跨行。
 /// 实务中标记都在单行内；给它们一个有限回看窗口，超过窗口的畸形跨行标记不再增量识别。
@@ -260,28 +257,40 @@ pub(crate) struct SpeculativeThoughtTail<'a> {
     pub theme: String,
 }
 
-pub(crate) fn speculative_thought_tail(tail: &str) -> Option<SpeculativeThoughtTail<'_>> {
-    // 仅判定「tail 是否以思维链起始标记开头」：锚定 haystack 起点的变体正则，
-    // 引擎检查完位置 0 即停，不再对整尾做 O(tail) 扫描后按起点丢弃。
-    if let Some(captures) = THOUGHT_START_HEAD.captures(tail) {
-        let marker = captures.get(0)?;
-        let theme = captures
-            .get(1)
-            .map(|matched| matched.as_str().trim().replace('"', ""))
-            .unwrap_or_else(|| "元思考链".to_string());
-        return Some(SpeculativeThoughtTail {
-            content: &tail[marker.end()..],
-            content_offset: marker.end(),
-            theme,
-        });
+pub(crate) fn speculative_thought_tail<'a>(
+    tail: &'a str,
+    tail_type: Option<BlockType>,
+) -> Option<SpeculativeThoughtTail<'a>> {
+    match tail_type {
+        Some(BlockType::Thought) => {
+            let captures = THOUGHT_START.captures(tail)?;
+            let marker = captures.get(0)?;
+            if marker.start() != 0 {
+                return None;
+            }
+            let theme = captures
+                .get(1)
+                .map(|matched| matched.as_str().trim().replace('"', ""))
+                .unwrap_or_else(|| "元思考链".to_string());
+            Some(SpeculativeThoughtTail {
+                content: &tail[marker.end()..],
+                content_offset: marker.end(),
+                theme,
+            })
+        }
+        Some(BlockType::Think) => {
+            let marker = THINK_START.find(tail)?;
+            if marker.start() != 0 {
+                return None;
+            }
+            Some(SpeculativeThoughtTail {
+                content: &tail[marker.end()..],
+                content_offset: marker.end(),
+                theme: "思维链".to_string(),
+            })
+        }
+        _ => None,
     }
-
-    let marker = THINK_START_HEAD.find(tail)?;
-    Some(SpeculativeThoughtTail {
-        content: &tail[marker.end()..],
-        content_offset: marker.end(),
-        theme: "思维链".to_string(),
-    })
 }
 
 impl StreamBlockParser {
@@ -324,33 +333,22 @@ impl StreamBlockParser {
                 Some(p) if p.start == pos => Some((0usize, p.marker_len, p.block_type)),
                 _ => {
                     // 游标续扫窗口（相对 remaining，全 0 即旧版全扫）：
-                    // - 行锚定单行有界模式：frontier 行起扫（已完结行的匹配状态终定）；
-                    // - 内部含无界重复、理论可跨行的模式：4KB 回看窗口的行首起扫；
-                    // - 非锚定 literal（THINK_START）：定长回看覆盖跨界匹配。
+                    // - 行锚定单行有界模式（含 THINK_START）：frontier 行起扫（已完结行的匹配状态终定）；
+                    // - 内部含无界重复、理论可跨行的模式：4KB 回看窗口的行首起扫。
                     // pos 已在帧内推进时游标可能落后于 pos，saturating_sub 归零即全扫。
                     let scan_rel = self.marker_scan_end.saturating_sub(pos);
-                    let (bounded_from, multiline_from, literal_from) =
-                        if cursor_active && scan_rel > 0 {
-                            (
-                                line_start_of(remaining, scan_rel),
-                                line_start_of(
-                                    remaining,
-                                    scan_rel.saturating_sub(MULTILINE_MARKER_LOOKBEHIND),
-                                ),
-                                floor_char_boundary(
-                                    remaining,
-                                    scan_rel.saturating_sub(LITERAL_MARKER_LOOKBEHIND),
-                                ),
-                            )
-                        } else {
-                            (0, 0, 0)
-                        };
-                    find_earliest_start_marker(
-                        remaining,
-                        bounded_from,
-                        multiline_from,
-                        literal_from,
-                    )
+                    let (bounded_from, multiline_from) = if cursor_active && scan_rel > 0 {
+                        (
+                            line_start_of(remaining, scan_rel),
+                            line_start_of(
+                                remaining,
+                                scan_rel.saturating_sub(MULTILINE_MARKER_LOOKBEHIND),
+                            ),
+                        )
+                    } else {
+                        (0, 0)
+                    };
+                    find_earliest_start_marker(remaining, bounded_from, multiline_from)
                 }
             };
 
@@ -521,18 +519,18 @@ impl StreamBlockParser {
 /// 在文本中寻找最早出现的特种块起始标记
 /// 返回 (start_offset, end_offset, BlockType)
 ///
-/// 三个窗口参数（相对 text 的字节偏移）分别给出三组模式的扫描起点；旧版全扫语义
+/// 两个窗口参数（相对 text 的字节偏移）分别给出两组模式的扫描起点；旧版全扫语义
 /// 等价于全传 0。游标续扫时：行锚定组起点为真实行首（`^` 语义与全扫一致），
-/// literal 组为定长回看，multiline 组为 4KB 窗口行首。
+/// multiline 组为 4KB 窗口行首。
 fn find_earliest_start_marker(
     text: &str,
     bounded_from: usize,
     multiline_from: usize,
-    literal_from: usize,
 ) -> Option<(usize, usize, BlockType)> {
-    // 行首锚定、匹配必落在单行内的模式
-    let bounded: [(&regex::Regex, BlockType); 6] = [
+    // 行首锚定、匹配必落在单行内的模式（含 THINK_START）
+    let bounded: [(&regex::Regex, BlockType); 7] = [
         (&TOOL_START, BlockType::Tool),
+        (&THINK_START, BlockType::Think),
         (&TOOL_RESULT_START, BlockType::ToolResult),
         (&DIARY_START, BlockType::Diary),
         (&ROLE_DIVIDER, BlockType::RoleDivider),
@@ -552,8 +550,6 @@ fn find_earliest_start_marker(
             BlockType::HtmlContainer,
         ),
     ];
-    // 非行锚定的定长 literal
-    let literal: [(&regex::Regex, BlockType); 1] = [(&THINK_START, BlockType::Think)];
 
     let mut earliest: Option<(usize, usize, BlockType)> = None;
     let mut consider = |found: Option<regex::Match>, bt: BlockType| {
@@ -568,9 +564,6 @@ fn find_earliest_start_marker(
     }
     for (re, bt) in multiline {
         consider(re.find_at(text, multiline_from), bt);
-    }
-    for (re, bt) in literal {
-        consider(re.find_at(text, literal_from), bt);
     }
     earliest
 }
