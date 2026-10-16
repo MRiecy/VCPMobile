@@ -1,4 +1,4 @@
-import { ref, nextTick, watch, type Ref } from 'vue';
+import { ref, nextTick, onScopeDispose, watch, type Ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
 import { useAttachmentStore } from '../../../core/stores/attachmentStore';
@@ -6,18 +6,55 @@ import { useNotificationStore } from '../../../core/stores/notification';
 import type { AttachmentData } from '../../../core/types/chat';
 
 const LONG_TEXT_THRESHOLD = 1000;
+// 与 Rust store_file 的 IPC 上限一致；先计数再编码，避免超限文本生成大字节数组。
+const MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024;
+
+function fitsTextFileBudget(text: string): boolean {
+  if (text.length > MAX_TEXT_FILE_BYTES) return false;
+  let bytes = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code <= 0x7f) bytes += 1;
+    else if (code <= 0x7ff) bytes += 2;
+    else if (code >= 0xd800 && code <= 0xdbff && i + 1 < text.length &&
+      text.charCodeAt(i + 1) >= 0xdc00 && text.charCodeAt(i + 1) <= 0xdfff) {
+      bytes += 4;
+      i += 1;
+    } else {
+      // BMP 字符为三字节；孤立代理项由 TextEncoder 编为三字节替换字符。
+      bytes += 3;
+    }
+    if (bytes > MAX_TEXT_FILE_BYTES) return false;
+  }
+  return true;
+}
 
 export function useLongTextPaste(input: Ref<string>) {
   const sessionStore = useChatSessionStore();
   const attachmentStore = useAttachmentStore();
   const notificationStore = useNotificationStore();
   const isProcessing = ref(false);
+  let disposed = false;
+  let activeAttachmentId: string | null = null;
+  let restoredInput: string | null = null;
+
+  const removeActiveAttachment = () => {
+    const index = attachmentStore.stagedAttachments.findIndex(a => a.id === activeAttachmentId);
+    if (index !== -1) attachmentStore.stagedAttachments.splice(index, 1);
+  };
+
+  // 话题切换（包括切走再回来）及卸载不允许旧请求回填当前输入区。
+  watch(() => sessionStore.currentConversationKey?.epoch, removeActiveAttachment, { flush: 'sync' });
+  onScopeDispose(() => {
+    disposed = true;
+    removeActiveAttachment();
+  });
 
   /**
    * 校验是否已选择 Agent 和话题
    */
   const assertTopicSelected = (): boolean => {
-    if (!sessionStore.currentSelectedItem?.id || !sessionStore.currentTopicId) {
+    if (!sessionStore.currentConversationKey) {
       notificationStore.addNotification({
         type: 'warning',
         title: '无法粘贴长文本',
@@ -32,24 +69,51 @@ export function useLongTextPaste(input: Ref<string>) {
   /**
    * 将文本内容暂存为 .txt 附件
    */
-  const stageTextAsFile = async (text: string, fileName?: string) => {
-    const name = fileName || `pasted_text_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.txt`;
-    const bytes = new TextEncoder().encode(text);
-    const stableId = `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const stageTextAsFile = async (
+    text: string,
+    consumeInput: () => void,
+    recoveryInput?: string,
+  ) => {
+    // paste / beforeinput / watch 共享同一次占用；忙碌时保留普通文本输入。
+    if (disposed || isProcessing.value || !assertTopicSelected()) return;
+    if (!fitsTextFileBudget(text)) {
+      notificationStore.addNotification({
+        type: 'warning',
+        title: '长文本未转为附件',
+        message: '文本超过 2 MiB，请缩短文本或分段粘贴。原文本仍保留在输入框中。',
+        toastOnly: true,
+      });
+      return;
+    }
 
-    // 1. 插入 loading 占位
-    attachmentStore.stagedAttachments.unshift({
-      id: stableId,
-      type: 'text/plain',
-      src: '',
-      name,
-      size: bytes.length,
-      status: 'loading',
-    });
-    await nextTick();
-    window.dispatchEvent(new Event('resize'));
+    const conversation = sessionStore.currentConversationKey;
+    const isCurrent = () => !disposed && sessionStore.isConversationCurrent(conversation);
+    const recoveryText = recoveryInput ?? input.value + text;
+    const name = `pasted_text_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.txt`;
+    const stableId = `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    let consumed = false;
+    let retainedInput = input.value;
+    isProcessing.value = true;
+    activeAttachmentId = stableId;
 
     try {
+      const bytes = new TextEncoder().encode(text);
+      consumeInput();
+      consumed = true;
+      retainedInput = input.value;
+      // 1. 只有校验和编码完成后才消费输入、插入 loading 占位。
+      attachmentStore.stagedAttachments.unshift({
+        id: stableId,
+        type: 'text/plain',
+        src: '',
+        name,
+        size: bytes.length,
+        status: 'loading',
+      });
+      await nextTick();
+      if (!isCurrent()) return;
+      window.dispatchEvent(new Event('resize'));
+
       // 2. IPC 保存到附件目录
       const finalData = await invoke<AttachmentData>('store_file', {
         originalName: name,
@@ -57,20 +121,20 @@ export function useLongTextPaste(input: Ref<string>) {
         mimeType: 'text/plain',
       });
 
-      // 3. 更新为完成状态
+      if (!isCurrent()) return;
+      // 3. 更新为完成状态；用户已移除的占位不再报告成功。
       const index = attachmentStore.stagedAttachments.findIndex(a => a.id === stableId);
-      if (index !== -1) {
-        attachmentStore.stagedAttachments[index] = {
-          ...attachmentStore.stagedAttachments[index],
-          type: finalData.type,
-          src: finalData.internalPath,
-          name: finalData.name,
-          size: finalData.size,
-          hash: finalData.hash,
-          internalPath: finalData.internalPath,
-          status: 'done',
-        };
-      }
+      if (index === -1) return;
+      attachmentStore.stagedAttachments[index] = {
+        ...attachmentStore.stagedAttachments[index],
+        type: finalData.type,
+        src: finalData.internalPath,
+        name: finalData.name,
+        size: finalData.size,
+        hash: finalData.hash,
+        internalPath: finalData.internalPath,
+        status: 'done',
+      };
 
       notificationStore.addNotification({
         type: 'success',
@@ -80,14 +144,23 @@ export function useLongTextPaste(input: Ref<string>) {
       });
     } catch (err) {
       console.error('[useLongTextPaste] Failed to stage text as file:', err);
-      const index = attachmentStore.stagedAttachments.findIndex(a => a.id === stableId);
-      if (index !== -1) attachmentStore.stagedAttachments.splice(index, 1);
+      removeActiveAttachment();
+      if (!isCurrent()) return;
+      if (consumed) {
+        // 保留处理中用户继续输入的内容；恢复操作不能再触发自动转附件。
+        restoredInput = input.value === retainedInput ? recoveryText : input.value + text;
+        input.value = restoredInput;
+      }
       notificationStore.addNotification({
         type: 'error',
         title: '附件保存失败',
         message: err instanceof Error ? err.message : String(err),
         toastOnly: true,
       });
+    } finally {
+      if (!isCurrent()) removeActiveAttachment();
+      activeAttachmentId = null;
+      isProcessing.value = false;
     }
   };
 
@@ -96,11 +169,7 @@ export function useLongTextPaste(input: Ref<string>) {
    * 优先级：文件 > 图片 > 长文本 > 默认行为
    */
   const handlePaste = async (event: ClipboardEvent) => {
-    if (isProcessing.value) {
-      event.preventDefault();
-      return;
-    }
-
+    if (event.defaultPrevented || !event.cancelable) return;
     const clipboardData = event.clipboardData;
     if (!clipboardData) return;
 
@@ -115,16 +184,7 @@ export function useLongTextPaste(input: Ref<string>) {
     // 3. 检查纯文本长度
     const pastedText = clipboardData.getData('text/plain');
     if (pastedText && pastedText.length > LONG_TEXT_THRESHOLD) {
-      event.preventDefault();
-
-      if (!assertTopicSelected()) return;
-
-      isProcessing.value = true;
-      try {
-        await stageTextAsFile(pastedText);
-      } finally {
-        isProcessing.value = false;
-      }
+      await stageTextAsFile(pastedText, () => event.preventDefault());
     }
   };
 
@@ -132,6 +192,8 @@ export function useLongTextPaste(input: Ref<string>) {
    * beforeinput 事件处理器（覆盖 Android 键盘粘贴按钮）
    */
   const handleBeforeInput = (event: InputEvent) => {
+    // 无法阻止的输入交给后续 watch，避免同时留下文本和转换后的附件。
+    if (event.defaultPrevented || !event.cancelable) return;
     if (
       event.inputType !== 'insertFromPaste' &&
       event.inputType !== 'insertFromPasteAsQuotation'
@@ -139,11 +201,7 @@ export function useLongTextPaste(input: Ref<string>) {
 
     const text = event.data;
     if (text && text.length > LONG_TEXT_THRESHOLD) {
-      event.preventDefault();
-
-      if (!assertTopicSelected()) return;
-
-      stageTextAsFile(text).catch(console.error);
+      void stageTextAsFile(text, () => event.preventDefault());
     }
   };
 
@@ -151,6 +209,9 @@ export function useLongTextPaste(input: Ref<string>) {
    * Layer 3: watch 突变检测（覆盖不标准输入法的 paste）
    */
   watch(input, (newVal, oldVal) => {
+    const isRestored = newVal === restoredInput;
+    restoredInput = null;
+    if (isRestored || isProcessing.value) return;
     const delta = newVal.length - oldVal.length;
     if (delta > LONG_TEXT_THRESHOLD) {
       let pastedText = newVal;
@@ -158,12 +219,8 @@ export function useLongTextPaste(input: Ref<string>) {
         pastedText = newVal.slice(oldVal.length);
       }
 
-      // 恢复旧值
-      input.value = oldVal;
-
-      if (!assertTopicSelected()) return;
-
-      stageTextAsFile(pastedText).catch(console.error);
+      // 超限或没有话题时保留已经进入输入框的文本。
+      void stageTextAsFile(pastedText, () => { input.value = oldVal; }, newVal);
     }
   });
 

@@ -12,10 +12,16 @@
 
 use crate::vcp_modules::infra::admin_api;
 use crate::vcp_modules::settings_manager::{read_settings, Settings, SettingsState};
+use futures_util::TryStreamExt;
 use reqwest::{RequestBuilder, StatusCode};
 use serde_json::Value;
+use std::path::Path;
 use std::time::Duration;
-use tauri::{AppHandle, Runtime, State};
+use tauri::{AppHandle, Manager, Runtime, State};
+use tauri_plugin_vcp_mobile::system::DownloadsSaveResult;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::sync::Semaphore;
+use tokio_util::io::StreamReader;
 
 /// 常规读/写总超时。
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -467,10 +473,12 @@ pub async fn mail_search<R: Runtime>(
     .await
 }
 
-/// 附件下载上限（base64 经 IPC 回传，限制 16 MiB 原始字节）。
-const MAX_ATTACHMENT_BYTES: usize = 16 * 1024 * 1024;
+/// 保留附件大小上限；下载与原生保存使用相同的实际字节预算。
+const MAX_ATTACHMENT_BYTES: u64 = 16 * 1024 * 1024;
+/// 同一次导出持有至原生保存和临时文件清理结束；拒绝并发请求，不排队。
+static ATTACHMENT_EXPORT: Semaphore = Semaphore::const_new(1);
 
-/// 下载附件（base64 回传；前端负责落盘/预览）。
+/// 下载并保存附件；文件始终由本次操作持有，前端只接收保存结果。
 #[tauri::command]
 pub async fn mail_attachment<R: Runtime>(
     app_handle: AppHandle<R>,
@@ -479,8 +487,12 @@ pub async fn mail_attachment<R: Runtime>(
     part_id: String,
     mailbox: Option<String>,
     user: Option<String>,
-) -> Result<Value, String> {
-    let settings = settings_of(app_handle, settings_state).await?;
+    filename: Option<String>,
+) -> Result<DownloadsSaveResult, String> {
+    let _permit = ATTACHMENT_EXPORT
+        .try_acquire()
+        .map_err(|_| "已有附件正在导出，请等待完成后重试".to_string())?;
+    let settings = settings_of(app_handle.clone(), settings_state).await?;
     let mail_id = validate_mail_id(&mail_id)?;
     let part_id = part_id.trim();
     if part_id.is_empty() || part_id.chars().any(char::is_control) {
@@ -500,6 +512,17 @@ pub async fn mail_attachment<R: Runtime>(
         query.push(("user", user.trim().to_string()));
     }
 
+    let temp_dir = app_handle
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("获取附件临时目录失败: {e}"))?
+        .join("mail-exports");
+    tokio::fs::create_dir_all(&temp_dir)
+        .await
+        .map_err(|e| format!("创建附件临时目录失败: {e}"))?;
+    // 已持有独占导出额度，此目录内符合本操作命名约定的文件均为中断残片。
+    remove_stale_attachment_temps(&temp_dir).await;
+
     let resp = admin_api::client_get(&settings, &url)?
         .query(&query)
         .timeout(DEFAULT_TIMEOUT)
@@ -517,6 +540,11 @@ pub async fn mail_attachment<R: Runtime>(
             _ => format!("附件下载失败: HTTP {status}"),
         });
     }
+    if let Some(size) = resp.content_length() {
+        if size > MAX_ATTACHMENT_BYTES {
+            return Err("附件超过 16 MiB 上限，请在网页端下载".to_string());
+        }
+    }
 
     let content_type = resp
         .headers()
@@ -524,32 +552,113 @@ pub async fn mail_attachment<R: Runtime>(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("application/octet-stream")
         .to_string();
-    let filename = resp
+    let file_name = resp
         .headers()
         .get(reqwest::header::CONTENT_DISPOSITION)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.split("filename*=UTF-8''").nth(1).map(str::to_string))
         .and_then(|v| urlencoding_decode(&v))
+        .or(filename.filter(|name| !name.trim().is_empty()))
         .unwrap_or_else(|| format!("attachment-{part_id}.bin"));
 
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| format!("读取附件失败: {e}"))?;
-    if bytes.len() > MAX_ATTACHMENT_BYTES {
-        return Err(format!(
-            "附件超过 16 MiB 上限（{} 字节），请在网页端下载",
-            bytes.len()
-        ));
-    }
+    let temp_path = temp_dir.join(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let mut reader = StreamReader::new(resp.bytes_stream().map_err(std::io::Error::other));
+    stage_attachment(&mut reader, &temp_path, MAX_ATTACHMENT_BYTES).await?;
 
-    use base64::Engine;
-    Ok(serde_json::json!({
-        "filename": filename,
-        "contentType": content_type,
-        "size": bytes.len(),
-        "dataBase64": base64::engine::general_purpose::STANDARD.encode(&bytes),
-    }))
+    let result = tauri_plugin_vcp_mobile::system::save_file_to_downloads(
+        app_handle,
+        temp_path.to_string_lossy().into_owned(),
+        file_name,
+        Some(content_type),
+        MAX_ATTACHMENT_BYTES,
+    )
+    .await
+    .map_err(|e| format!("保存附件失败: {e}"));
+    remove_attachment_temp(&temp_path).await;
+    result
+}
+
+/// 固定缓冲并在每次读取前限制剩余额度，多读至多一字节判定超限。
+/// 失败时关闭句柄再删除残片，成功文件仅交给本次原生保存调用。
+async fn stage_attachment<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    path: &Path,
+    max_bytes: u64,
+) -> Result<(), String> {
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .await
+        .map_err(|e| format!("创建附件临时文件失败: {e}"))?;
+    let result = async {
+        let mut buffer = [0_u8; 64 * 1024];
+        let mut total = 0_u64;
+        loop {
+            let read_limit = (max_bytes - total + 1).min(buffer.len() as u64) as usize;
+            let count = reader
+                .read(&mut buffer[..read_limit])
+                .await
+                .map_err(|e| format!("附件下载失败: {e}"))?;
+            if count == 0 {
+                break;
+            }
+            total += count as u64;
+            if total > max_bytes {
+                return Err("附件超过 16 MiB 上限，请在网页端下载".to_string());
+            }
+            file.write_all(&buffer[..count])
+                .await
+                .map_err(|e| format!("写入附件临时文件失败: {e}"))?;
+        }
+        if total == 0 {
+            return Err("附件内容为空".to_string());
+        }
+        file.flush()
+            .await
+            .map_err(|e| format!("完成附件临时文件写入失败: {e}"))
+    }
+    .await;
+    drop(file);
+    if result.is_err() {
+        remove_attachment_temp(path).await;
+    }
+    result
+}
+
+async fn remove_attachment_temp(path: &Path) {
+    if let Err(error) = tokio::fs::remove_file(path).await {
+        // 清理结果不覆盖下载/保存终态，尤其不能把已经保存成功报告为失败。
+        log::warn!("[Mail] 清理附件临时文件失败: {error}");
+    }
+}
+
+async fn remove_stale_attachment_temps(directory: &Path) {
+    let mut entries = match tokio::fs::read_dir(directory).await {
+        Ok(entries) => entries,
+        Err(error) => {
+            log::warn!("[Mail] 读取附件临时目录失败: {error}");
+            return;
+        }
+    };
+    loop {
+        let entry = match entries.next_entry().await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => return,
+            Err(error) => {
+                log::warn!("[Mail] 读取附件临时目录项失败: {error}");
+                return;
+            }
+        };
+        let name = entry.file_name();
+        let owned_name = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".tmp"))
+            .is_some_and(|name| uuid::Uuid::parse_str(name).is_ok());
+        if owned_name && entry.file_type().await.is_ok_and(|kind| kind.is_file()) {
+            remove_attachment_temp(&entry.path()).await;
+        }
+    }
 }
 
 /// 极简 percent-decode（Content-Disposition filename* 用）。
@@ -573,6 +682,81 @@ fn urlencoding_decode(input: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn attachment_test_dir() -> tempfile::TempDir {
+        let root = Path::new("target/mail-export-tests");
+        tokio::fs::create_dir_all(root).await.unwrap();
+        tempfile::Builder::new()
+            .prefix("download-")
+            .tempdir_in(root)
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn attachment_stream_accepts_exact_limit_and_closes_output() {
+        let temp = attachment_test_dir().await;
+        let path = temp.path().join("attachment.tmp");
+        let mut reader = std::io::Cursor::new(b"attachment");
+        stage_attachment(&mut reader, &path, 10).await.unwrap();
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"attachment");
+        tokio::fs::remove_file(&path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn attachment_stream_stops_at_limit_and_removes_partial_file() {
+        let temp = attachment_test_dir().await;
+        let path = temp.path().join("attachment.tmp");
+        let mut reader = std::io::Cursor::new(vec![42_u8; 256 * 1024]);
+        let error = stage_attachment(&mut reader, &path, 64 * 1024)
+            .await
+            .unwrap_err();
+        assert!(error.contains("超过"));
+        assert_eq!(reader.position(), 64 * 1024 + 1);
+        assert!(!tokio::fs::try_exists(&path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn attachment_stream_failure_removes_already_written_bytes() {
+        let temp = attachment_test_dir().await;
+        let path = temp.path().join("attachment.tmp");
+        let chunks = futures_util::stream::iter([
+            Ok(bytes::Bytes::from_static(b"partial attachment")),
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "interrupted",
+            )),
+        ]);
+        let mut reader = StreamReader::new(chunks);
+        let error = stage_attachment(&mut reader, &path, MAX_ATTACHMENT_BYTES)
+            .await
+            .unwrap_err();
+        assert!(error.contains("附件下载失败"));
+        assert!(!tokio::fs::try_exists(&path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn attachment_recovery_only_removes_owned_temp_files() {
+        let temp = attachment_test_dir().await;
+        let owned = temp.path().join(format!("{}.tmp", uuid::Uuid::new_v4()));
+        let unrelated = temp.path().join("other.tmp");
+        let directory = temp.path().join(format!("{}.tmp", uuid::Uuid::new_v4()));
+        tokio::fs::write(&owned, b"interrupted download")
+            .await
+            .unwrap();
+        tokio::fs::write(&unrelated, b"unrelated file")
+            .await
+            .unwrap();
+        tokio::fs::create_dir(&directory).await.unwrap();
+
+        remove_stale_attachment_temps(temp.path()).await;
+
+        assert!(!tokio::fs::try_exists(&owned).await.unwrap());
+        assert_eq!(
+            tokio::fs::read(&unrelated).await.unwrap(),
+            b"unrelated file"
+        );
+        assert!(tokio::fs::try_exists(&directory).await.unwrap());
+    }
 
     #[test]
     fn validate_mail_id_accepts_opaque_ids() {

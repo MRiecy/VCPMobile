@@ -56,6 +56,7 @@ import android.media.MediaScannerConnection
 import android.util.Base64
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
+import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLDecoder
@@ -84,6 +85,94 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+
+/** A fixed buffer also bounds copies from files whose size changes after inspection. */
+internal fun copyExportStream(input: InputStream, output: OutputStream, maxBytes: Long): Long {
+    require(maxBytes > 0) { "文件大小限制无效" }
+    val buffer = ByteArray(64 * 1024)
+    var total = 0L
+    while (true) {
+        if (Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException("文件保存已停止")
+        val count = input.read(buffer)
+        if (count == -1) break
+        if (count == 0) continue
+        if (count.toLong() > maxBytes - total) throw IllegalArgumentException("文件大小超出允许范围")
+        output.write(buffer, 0, count)
+        total += count
+    }
+    require(total > 0) { "写入内容为空" }
+    return total
+}
+
+/** The reserved destination belongs to this write; a failure only removes that file. */
+internal fun writeLegacyExportFile(
+    directory: java.io.File,
+    displayName: String,
+    write: (OutputStream) -> Long,
+): Pair<java.io.File, Long> {
+    check(directory.isDirectory || directory.mkdirs()) { "无法创建导出目录" }
+    val base = displayName.substringBeforeLast('.', displayName)
+    val ext = displayName.substringAfterLast('.', "")
+    var outputFile = java.io.File(directory, displayName)
+    var index = 1
+    while (!outputFile.createNewFile()) {
+        outputFile = java.io.File(directory, if (ext.isBlank()) "${base}_$index" else "${base}_$index.$ext")
+        index += 1
+    }
+    try {
+        val size = outputFile.outputStream().use(write)
+        return outputFile to size
+    } catch (error: Throwable) {
+        try {
+            if (!outputFile.delete() && outputFile.exists()) {
+                error.addSuppressed(java.io.IOException("无法删除未完成导出: ${outputFile.name}"))
+            }
+        } catch (cleanupError: Throwable) {
+            error.addSuppressed(cleanupError)
+        }
+        throw error
+    }
+}
+
+/** Main-thread owner for the one downloads export waiting on legacy storage permission. */
+internal class DownloadsWritePermissionWait {
+    private var pending: Invoke? = null
+
+    fun request(invoke: Invoke, launch: () -> Unit) {
+        if (pending != null) {
+            invoke.reject("已有下载导出正在等待储存空间权限")
+            return
+        }
+        pending = invoke
+        try {
+            launch()
+        } catch (error: Exception) {
+            if (take(invoke)) invoke.reject("无法申请下载目录写入权限: ${error.message}")
+        }
+    }
+
+    fun complete(invoke: Invoke, granted: Boolean, save: () -> Unit) {
+        if (!take(invoke)) return
+        if (granted) {
+            // Ownership transfers to the file executor; destroy must not release its source early.
+            save()
+        } else {
+            invoke.reject("保存到下载目录需要储存空间权限")
+        }
+    }
+
+    fun destroy() {
+        val invoke = pending ?: return
+        pending = null
+        invoke.reject("saveFileToDownloads unavailable: plugin was destroyed")
+    }
+
+    private fun take(invoke: Invoke): Boolean {
+        if (pending !== invoke) return false
+        pending = null
+        return true
+    }
+}
 
 internal class PluginExecutorDomains(
     fileThreadCount: Int = 1,
@@ -256,6 +345,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         const val TAG = "VcpMobilePlugin"
         // 下载目录导出上限：设置备份（JSON + base64 头像）正常远低于此值
         private const val MAX_DOWNLOAD_EXPORT_BYTES = 8 * 1024 * 1024
+        private const val MAX_GALLERY_EXPORT_BYTES = 50 * 1024 * 1024
         private var instanceRef: java.lang.ref.WeakReference<VcpMobilePlugin>? = null
 
         fun getInstance(): VcpMobilePlugin? {
@@ -360,6 +450,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val cliPtyHost = CliPtyHostOwner.get(cliProcessHost)
     private val shareIntentHandler = ShareIntentHandler(this, executorDomains.fileIoExecutor)
     private val isDestroying = AtomicBoolean(false)
+    private val downloadsWritePermissionWait = DownloadsWritePermissionWait()
     @Volatile private var oomGuardFuture: ScheduledFuture<*>? = null
     private var cameraTempFile: java.io.File? = null
     private var networkCallback: android.net.ConnectivityManager.NetworkCallback? = null
@@ -1342,6 +1433,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     override fun onDestroy(activity: AppCompatActivity) {
         isDestroying.set(true)
+        activity.runOnUiThread { downloadsWritePermissionWait.destroy() }
         nativeEventChannel = null
         oomGuardFuture?.cancel(true)
         oomGuardFuture = null
@@ -2346,10 +2438,10 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             val externalFilesDir = context.getExternalFilesDir(null)?.canonicalFile
             val externalCacheDir = context.externalCacheDir?.canonicalFile
 
-            file.path.startsWith(cacheDir.path) ||
-            file.path.startsWith(filesDir.path) ||
-            (externalFilesDir != null && file.path.startsWith(externalFilesDir.path)) ||
-            (externalCacheDir != null && file.path.startsWith(externalCacheDir.path))
+            file.path.startsWith(cacheDir.path + java.io.File.separator) ||
+            file.path.startsWith(filesDir.path + java.io.File.separator) ||
+            (externalFilesDir != null && file.path.startsWith(externalFilesDir.path + java.io.File.separator)) ||
+            (externalCacheDir != null && file.path.startsWith(externalCacheDir.path + java.io.File.separator))
         } catch (e: Exception) {
             false
         }
@@ -2376,21 +2468,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     }
                 }
 
-                val loaded = loadImageBytes(args.sourceUrl)
-                if (!loaded.mimeType.startsWith("image/")) {
-                    invoke.reject("当前资源不是图片: ${loaded.mimeType}")
-                    return@fileTask
-                }
-
-                val displayName = buildGalleryFileName(args.fileName, args.sourceUrl, loaded.mimeType)
-                val savedUri = writeImageToGallery(loaded.bytes, displayName, loaded.mimeType)
-                val result = JSObject().apply {
-                    put("uri", savedUri.toString())
-                    put("displayName", displayName)
-                    put("mimeType", loaded.mimeType)
-                    put("size", loaded.bytes.size)
-                }
-                invoke.resolve(result)
+                invoke.resolve(saveImageSource(args.sourceUrl, args.fileName))
             } catch (e: Throwable) {
                 Log.e(TAG, "saveImageToGallery failed", e)
                 invoke.reject("保存图片失败: ${e.message}")
@@ -2406,20 +2484,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
 
-        // 1. 安全边界检查：强制限定临时文件必须处于沙箱缓存目录内，严防路径遍历与本地漏洞越界
-        if (!isSafeLocalPath(activity, args.imagePath)) {
-            invoke.reject("非法的本地文件读取边界，已被安全沙箱拒绝")
-            return
-        }
-
         executePluginTask(executorDomains.fileIoExecutor, invoke, "saveImageFromPath", fileTask@{
-            val file = java.io.File(args.imagePath)
             try {
-                if (!file.exists()) {
-                    invoke.reject("本地临时文件不存在")
-                    return@fileTask
-                }
-
                 if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
                     val writeGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
                     if (!writeGranted) {
@@ -2428,37 +2494,13 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     }
                 }
 
-                // 2. 读取图片二进制流
-                val bytes = file.readBytes()
-                
-                // 3. 安全魔数嗅探：强制检测图片格式，坚决拒收假冒图片绕过的攻击
-                val mimeType = sniffImageMime(bytes, file.name, true)
-                if (!mimeType.startsWith("image/")) {
-                    invoke.reject("当前资源不是图片: $mimeType")
-                    return@fileTask
+                val file = checkedExportFile(args.imagePath, Int.MAX_VALUE.toLong())
+                file.inputStream().use { input ->
+                    invoke.resolve(saveImageStream(input, args.fileName, file.name, file.name, true, Int.MAX_VALUE.toLong()))
                 }
-
-                val displayName = buildGalleryFileName(args.fileName, file.name, mimeType)
-                val savedUri = writeImageToGallery(bytes, displayName, mimeType)
-                val result = JSObject().apply {
-                    put("uri", savedUri.toString())
-                    put("displayName", displayName)
-                    put("mimeType", mimeType)
-                    put("size", bytes.size)
-                }
-                invoke.resolve(result)
             } catch (e: Throwable) {
                 Log.e(TAG, "saveImageFromPath failed", e)
                 invoke.reject("保存图片失败: ${e.message}")
-            } finally {
-                // 4. 秒结物理清理：无论写入成功与否，立即擦除临时物理文件，防范残留泄漏
-                try {
-                    if (file.exists()) {
-                        file.delete()
-                    }
-                } catch (ex: Exception) {
-                    Log.e(TAG, "Failed to clean up temporary save image file", ex)
-                }
             }
         })
     }
@@ -2475,6 +2517,10 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         }
         if (args.contentBase64.isBlank()) {
             invoke.reject("写入内容为空")
+            return
+        }
+        if (args.contentBase64.length.toLong() > ((MAX_DOWNLOAD_EXPORT_BYTES.toLong() + 2) / 3) * 4) {
+            invoke.reject("文件大小超出允许范围 (最大 ${MAX_DOWNLOAD_EXPORT_BYTES / 1024 / 1024}MB)")
             return
         }
 
@@ -2508,12 +2554,14 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 }
                 val mimeType = args.mimeType?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
 
-                val savedUri = writeFileToDownloads(bytes, displayName, mimeType)
+                val saved = bytes.inputStream().use {
+                    writeFileToDownloads(it, displayName, mimeType, MAX_DOWNLOAD_EXPORT_BYTES.toLong())
+                }
                 val result = JSObject().apply {
-                    put("uri", savedUri.toString())
-                    put("displayName", displayName)
+                    put("uri", saved.uri.toString())
+                    put("displayName", saved.displayName)
                     put("mimeType", mimeType)
-                    put("size", bytes.size)
+                    put("size", saved.size)
                 }
                 invoke.resolve(result)
             } catch (e: Throwable) {
@@ -2523,62 +2571,94 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         })
     }
 
-    private fun writeFileToDownloads(bytes: ByteArray, displayName: String, mimeType: String): Uri {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val resolver = activity.contentResolver
-            val values = ContentValues().apply {
-                put(MediaStore.Downloads.DISPLAY_NAME, displayName)
-                put(MediaStore.Downloads.MIME_TYPE, mimeType)
-                put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/VCPMobile")
-                put(MediaStore.Downloads.IS_PENDING, 1)
+    @Command
+    fun saveFileToDownloads(invoke: Invoke) {
+        if (isDestroying.get()) {
+            invoke.reject("plugin is shutting down")
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(activity, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        ) {
+            activity.runOnUiThread {
+                if (isDestroying.get()) {
+                    invoke.reject("plugin is shutting down")
+                } else {
+                    downloadsWritePermissionWait.request(invoke) {
+                        requestPermissionForAlias("storageLegacy", invoke, "onDownloadsWritePermissionResult")
+                    }
+                }
             }
-            val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
-                ?: throw IllegalStateException("无法在下载目录创建文件")
+            return
+        }
+        val args = try {
+            invoke.parseArgs(SaveFileToDownloadsArgs::class.java)
+        } catch (error: Exception) {
+            invoke.reject("下载导出参数无效: ${error.message}")
+            return
+        }
+        executePluginTask(executorDomains.fileIoExecutor, invoke, "saveFileToDownloads", {
             try {
-                resolver.openOutputStream(uri)?.use { it.write(bytes) }
-                    ?: throw IllegalStateException("无法写入下载目录文件")
-                values.clear()
-                values.put(MediaStore.Downloads.IS_PENDING, 0)
-                resolver.update(uri, values, null, null)
-                return uri
-            } catch (e: Throwable) {
-                resolver.delete(uri, null, null)
-                throw e
+                require(args.maxBytes in 1..Int.MAX_VALUE.toLong()) { "文件大小限制无效" }
+                val file = checkedExportFile(args.filePath, args.maxBytes)
+                val displayName = args.fileName.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), "_").trim()
+                require(displayName.isNotBlank() && displayName != "." && displayName != "..") { "文件名非法" }
+                val mimeType = args.mimeType?.takeIf { it.isNotBlank() } ?: "application/octet-stream"
+                val saved = file.inputStream().use { writeFileToDownloads(it, displayName, mimeType, args.maxBytes) }
+                invoke.resolve(JSObject().apply {
+                    put("uri", saved.uri.toString())
+                    put("displayName", saved.displayName)
+                    put("mimeType", mimeType)
+                    put("size", saved.size)
+                })
+            } catch (error: Throwable) {
+                Log.e(TAG, "saveFileToDownloads failed", error)
+                invoke.reject("保存到下载目录失败: ${error.message}")
             }
-        }
+        })
+    }
 
-        val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
-        val appDir = java.io.File(downloadsDir, "VCPMobile").apply { mkdirs() }
-        var outputFile = java.io.File(appDir, displayName)
-        if (outputFile.exists()) {
-            val base = displayName.substringBeforeLast('.', displayName)
-            val ext = displayName.substringAfterLast('.', "")
-            var index = 1
-            do {
-                outputFile = java.io.File(appDir, if (ext.isBlank()) "${base}_$index" else "${base}_$index.$ext")
-                index += 1
-            } while (outputFile.exists())
+    @PermissionCallback
+    fun onDownloadsWritePermissionResult(invoke: Invoke) {
+        activity.runOnUiThread {
+            val granted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+            downloadsWritePermissionWait.complete(invoke, granted) { saveFileToDownloads(invoke) }
         }
+    }
 
-        java.io.FileOutputStream(outputFile).use { it.write(bytes) }
-        MediaScannerConnection.scanFile(activity, arrayOf(outputFile.absolutePath), arrayOf(mimeType), null)
-        return Uri.fromFile(outputFile)
+    private fun checkedExportFile(path: String, maxBytes: Long): java.io.File {
+        require(path.isNotBlank() && isSafeLocalPath(activity, path)) { "禁止读取应用目录外的文件" }
+        val file = java.io.File(path).canonicalFile
+        require(file.isFile) { "本地文件不存在" }
+        require(file.length() in 1..maxBytes) { "文件大小超出允许范围" }
+        return file
+    }
+
+    private data class SavedPublicFile(val uri: Uri, val displayName: String, val size: Long)
+
+    private fun writeFileToDownloads(input: InputStream, displayName: String, mimeType: String, maxBytes: Long): SavedPublicFile {
+        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Downloads.EXTERNAL_CONTENT_URI else null
+        return writePublicExport(displayName, mimeType, Environment.DIRECTORY_DOWNLOADS, collection) {
+            copyExportStream(input, it, maxBytes)
+        }
     }
 
     private data class LoadedImage(val bytes: ByteArray, val mimeType: String)
 
-    private fun loadImageBytes(sourceUrl: String): LoadedImage {
+    private fun saveImageSource(sourceUrl: String, fileName: String?): JSObject {
         if (sourceUrl.startsWith("data:", ignoreCase = true)) {
-            return loadDataUrlImage(sourceUrl)
+            val loaded = loadDataUrlImage(sourceUrl)
+            return loaded.bytes.inputStream().use {
+                saveImageStream(it, fileName, sourceUrl, loaded.mimeType, false)
+            }
         }
 
         if (sourceUrl.startsWith("content:", ignoreCase = true)) {
             val uri = Uri.parse(sourceUrl)
             val mime = activity.contentResolver.getType(uri) ?: mimeFromSource(sourceUrl)
-            val bytes = activity.contentResolver.openInputStream(uri).use { input ->
-                readBytesLimited(input ?: throw IllegalStateException("无法读取 content 图片"))
+            return activity.contentResolver.openInputStream(uri).use { input ->
+                saveImageStream(input ?: throw IllegalStateException("无法读取 content 图片"), fileName, sourceUrl, mime, true)
             }
-            return LoadedImage(bytes, sniffImageMime(bytes, mime, isLocal = true))
         }
 
         if (sourceUrl.startsWith("file:", ignoreCase = true) || sourceUrl.startsWith("/")) {
@@ -2588,20 +2668,16 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 sourceUrl
             }
             
-            // 💥 安全防线：本地路径强制进行沙箱越权校验
-            if (!isSafeLocalPath(activity, path)) {
-                throw SecurityException("越权拒绝：禁止读取沙箱外部资源")
+            val file = checkedExportFile(path, MAX_GALLERY_EXPORT_BYTES.toLong())
+            return file.inputStream().use {
+                saveImageStream(it, fileName, file.name, mimeFromSource(file.name), true)
             }
-
-            val file = java.io.File(path)
-            val bytes = file.inputStream().use { readBytesLimited(it) }
-            return LoadedImage(bytes, sniffImageMime(bytes, mimeFromSource(file.name), isLocal = true))
         }
 
-        return loadNetworkImage(sourceUrl)
+        return saveNetworkImage(sourceUrl, fileName)
     }
 
-    private fun loadNetworkImage(sourceUrl: String): LoadedImage {
+    private fun saveNetworkImage(sourceUrl: String, fileName: String?): JSObject {
         val connection = (URL(sourceUrl).openConnection() as HttpURLConnection).apply {
             connectTimeout = 5000  // 💥 优化：降低至5秒
             readTimeout = 10000    // 💥 优化：降低至10秒
@@ -2615,8 +2691,10 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                 throw IllegalStateException("HTTP $status")
             }
             val contentType = connection.contentType?.substringBefore(";")?.lowercase(Locale.US)
-            val bytes = connection.inputStream.use { readBytesLimited(it) }
-            return LoadedImage(bytes, sniffImageMime(bytes, contentType ?: mimeFromSource(sourceUrl), isLocal = false))
+            require(connection.contentLengthLong <= MAX_GALLERY_EXPORT_BYTES) { "图片过大，超过 50MB" }
+            return connection.inputStream.use {
+                saveImageStream(it, fileName, sourceUrl, contentType ?: mimeFromSource(sourceUrl), false)
+            }
         } finally {
             connection.disconnect()
         }
@@ -2624,33 +2702,51 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun loadDataUrlImage(dataUrl: String): LoadedImage {
         val commaIndex = dataUrl.indexOf(',')
-        if (commaIndex <= 0) throw IllegalArgumentException("无效的 data URL")
+        if (commaIndex <= 0 || commaIndex > 256) throw IllegalArgumentException("无效的 data URL")
 
         val header = dataUrl.substring(5, commaIndex)
         val mime = header.substringBefore(";").ifBlank { "application/octet-stream" }.lowercase(Locale.US)
+        val isBase64 = header.contains(";base64", ignoreCase = true)
+        val maxEncodedLength = if (isBase64) ((MAX_GALLERY_EXPORT_BYTES.toLong() + 2) / 3) * 4 else MAX_GALLERY_EXPORT_BYTES.toLong()
+        require(dataUrl.length.toLong() - commaIndex - 1 <= maxEncodedLength) { "图片过大，超过 50MB" }
         val payload = dataUrl.substring(commaIndex + 1)
-        val bytes = if (header.contains(";base64", ignoreCase = true)) {
+        val bytes = if (isBase64) {
             Base64.decode(payload, Base64.DEFAULT)
         } else {
             URLDecoder.decode(payload, "UTF-8").toByteArray(Charsets.UTF_8)
         }
+        require(bytes.size in 1..MAX_GALLERY_EXPORT_BYTES) { "图片为空或超过 50MB" }
         return LoadedImage(bytes, sniffImageMime(bytes, mime, isLocal = false))
     }
 
-    private fun readBytesLimited(input: InputStream, maxBytes: Int = 50 * 1024 * 1024): ByteArray {
-        val output = ByteArrayOutputStream()
-        val buffer = ByteArray(64 * 1024)
-        var total = 0
-        while (true) {
-            val read = input.read(buffer)
-            if (read == -1) break
-            total += read
-            if (total > maxBytes) {
-                throw IllegalArgumentException("图片过大，超过 50MB")
-            }
-            output.write(buffer, 0, read)
+    private fun saveImageStream(
+        input: InputStream,
+        fileName: String?,
+        source: String,
+        fallbackMime: String,
+        isLocal: Boolean,
+        maxBytes: Long = MAX_GALLERY_EXPORT_BYTES.toLong(),
+    ): JSObject {
+        val buffered = input.buffered(64 * 1024)
+        buffered.mark(256)
+        val header = ByteArray(256)
+        var length = 0
+        while (length < header.size) {
+            val count = buffered.read(header, length, header.size - length)
+            if (count == -1) break
+            length += count
         }
-        return output.toByteArray()
+        buffered.reset()
+        val mimeType = sniffImageMime(header.copyOf(length), fallbackMime, isLocal)
+        require(mimeType.startsWith("image/")) { "当前资源不是图片: $mimeType" }
+        val displayName = buildGalleryFileName(fileName, source, mimeType)
+        val saved = writeImageToGallery(buffered, displayName, mimeType, maxBytes)
+        return JSObject().apply {
+            put("uri", saved.uri.toString())
+            put("displayName", saved.displayName)
+            put("mimeType", mimeType)
+            put("size", saved.size)
+        }
     }
 
     private fun sniffImageMime(bytes: ByteArray, fallback: String, isLocal: Boolean): String {
@@ -2727,46 +2823,56 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         return "$base.$ext"
     }
 
-    private fun writeImageToGallery(bytes: ByteArray, displayName: String, mimeType: String): Uri {
+    private fun writeImageToGallery(input: InputStream, displayName: String, mimeType: String, maxBytes: Long): SavedPublicFile {
+        val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) MediaStore.Images.Media.EXTERNAL_CONTENT_URI else null
+        return writePublicExport(displayName, mimeType, Environment.DIRECTORY_PICTURES, collection) {
+            copyExportStream(input, it, maxBytes)
+        }
+    }
+
+    private fun writePublicExport(
+        displayName: String,
+        mimeType: String,
+        directory: String,
+        collection: Uri?,
+        write: (OutputStream) -> Long,
+    ): SavedPublicFile {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val resolver = activity.contentResolver
             val values = ContentValues().apply {
-                put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
-                put(MediaStore.Images.Media.MIME_TYPE, mimeType)
-                put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/VCPMobile")
-                put(MediaStore.Images.Media.IS_PENDING, 1)
+                put(MediaStore.MediaColumns.DISPLAY_NAME, displayName)
+                put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "$directory/VCPMobile")
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
-            val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-                ?: throw IllegalStateException("无法创建相册图片")
+            val uri = resolver.insert(checkNotNull(collection), values)
+                ?: throw IllegalStateException("无法创建导出文件")
             try {
-                resolver.openOutputStream(uri)?.use { it.write(bytes) }
-                    ?: throw IllegalStateException("无法写入相册图片")
+                val size = resolver.openOutputStream(uri)?.use(write)
+                    ?: throw IllegalStateException("无法写入导出文件")
                 values.clear()
-                values.put(MediaStore.Images.Media.IS_PENDING, 0)
-                resolver.update(uri, values, null, null)
-                return uri
-            } catch (e: Throwable) {
-                resolver.delete(uri, null, null)
-                throw e
+                values.put(MediaStore.MediaColumns.IS_PENDING, 0)
+                check(resolver.update(uri, values, null, null) == 1) { "无法完成导出文件" }
+                return SavedPublicFile(uri, displayName, size)
+            } catch (error: Throwable) {
+                try {
+                    resolver.delete(uri, null, null)
+                } catch (cleanupError: Throwable) {
+                    error.addSuppressed(cleanupError)
+                }
+                throw error
             }
         }
 
-        val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
-        val appDir = java.io.File(picturesDir, "VCPMobile").apply { mkdirs() }
-        var outputFile = java.io.File(appDir, displayName)
-        if (outputFile.exists()) {
-            val base = displayName.substringBeforeLast('.', displayName)
-            val ext = displayName.substringAfterLast('.', "")
-            var index = 1
-            do {
-                outputFile = java.io.File(appDir, if (ext.isBlank()) "${base}_$index" else "${base}_$index.$ext")
-                index += 1
-            } while (outputFile.exists())
+        val publicDirectory = Environment.getExternalStoragePublicDirectory(directory)
+        val (outputFile, size) = writeLegacyExportFile(java.io.File(publicDirectory, "VCPMobile"), displayName, write)
+        try {
+            MediaScannerConnection.scanFile(activity, arrayOf(outputFile.absolutePath), arrayOf(mimeType), null)
+        } catch (error: Exception) {
+            // The file is already committed. A scanner failure must not report a failed save.
+            Log.w(TAG, "Saved export but could not notify media scanner", error)
         }
-
-        java.io.FileOutputStream(outputFile).use { it.write(bytes) }
-        MediaScannerConnection.scanFile(activity, arrayOf(outputFile.absolutePath), arrayOf(mimeType), null)
-        return Uri.fromFile(outputFile)
+        return SavedPublicFile(Uri.fromFile(outputFile), outputFile.name, size)
     }
 
     // ==================================================================
@@ -3031,6 +3137,14 @@ class SaveToDownloadsArgs {
     lateinit var fileName: String
     lateinit var contentBase64: String
     var mimeType: String? = null
+}
+
+@InvokeArg
+class SaveFileToDownloadsArgs {
+    lateinit var filePath: String
+    lateinit var fileName: String
+    var mimeType: String? = null
+    var maxBytes: Long = 0
 }
 
 @InvokeArg

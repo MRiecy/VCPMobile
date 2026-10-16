@@ -868,6 +868,50 @@ pub struct DownloadsSaveResult {
     pub size: i32,
 }
 
+/// Export an operation-owned file without routing its bytes through the WebView.
+/// The caller keeps the source alive until this completes and owns its cleanup.
+pub async fn save_file_to_downloads<R: Runtime>(
+    app: AppHandle<R>,
+    file_path: String,
+    file_name: String,
+    mime_type: Option<String>,
+    max_bytes: u64,
+) -> Result<DownloadsSaveResult, String> {
+    #[cfg(target_os = "android")]
+    {
+        if max_bytes == 0 || max_bytes > i32::MAX as u64 {
+            return Err("下载导出大小限制无效".to_string());
+        }
+        let state = app.state::<VcpMobileState<R>>();
+        let plugin_handle = state.mobile_plugin_handle()?;
+        tauri::async_runtime::spawn_blocking(move || {
+            plugin_handle
+                .run_mobile_plugin::<DownloadsSaveResult>(
+                    "saveFileToDownloads",
+                    serde_json::json!({
+                        "filePath": file_path,
+                        "fileName": file_name,
+                        "mimeType": mime_type,
+                        "maxBytes": max_bytes,
+                    }),
+                )
+                .map_err(|error| format!("run_mobile_plugin failed: {error}"))
+        })
+        .await
+        .map_err(|error| format!("downloads export worker failed: {error}"))?
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let _ = (app, file_path, file_name, mime_type, max_bytes);
+        crate::ios_not_implemented("save_file_to_downloads.files_export")
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = (app, file_path, file_name, mime_type, max_bytes);
+        Err("该接口仅在 Android 物理端可用".to_string())
+    }
+}
+
 #[tauri::command]
 pub fn save_to_downloads<R: Runtime>(
     app: AppHandle<R>,

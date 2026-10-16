@@ -19,6 +19,7 @@ import {
   renderMailMarkdown,
 } from '@/features/mail/mailTypes';
 import { useMailStore } from '@/features/mail/mailStore';
+import { useNotificationStore } from '@/core/stores/notification';
 import { clearInvokeMocks, mockInvoke } from '../../mocks/tauri';
 
 const testPlatform = vi.hoisted(() => ({ value: 'android' as 'android' | 'ios' }));
@@ -321,7 +322,7 @@ describe('邮箱 · V1.1（补丁端点）', () => {
     store.stopSession();
   });
 
-  it.each(['android', 'ios'] as const)('%s 附件导出门禁不影响读取正文与附件元数据', async (platform) => {
+  it.each(['android', 'ios'] as const)('%s 附件导出入口不影响读取正文与附件元数据', async (platform) => {
     testPlatform.value = platform;
     mockBase();
     const calls: string[] = [];
@@ -330,8 +331,8 @@ describe('邮箱 · V1.1（补丁端点）', () => {
       attachments: [{ partId: 'part-1', filename: 'note.txt', contentType: 'text/plain', size: 4 }],
     }));
     mockInvoke('mail_attachment', () => {
-      calls.push('download');
-      return { dataBase64: 'dGVzdA==', filename: 'note.txt', contentType: 'text/plain' };
+      calls.push('download-and-save');
+      return { uri: 'content://downloads/note.txt', displayName: 'note.txt', mimeType: 'text/plain', size: 4 };
     });
     mockInvoke('plugin:vcp-mobile|save_to_downloads', () => {
       calls.push('export');
@@ -344,7 +345,55 @@ describe('邮箱 · V1.1（补丁端点）', () => {
       await store.downloadAttachment('msg_001', 'part-1', 'note.txt');
       expect(store.detail?.text).toBe('邮件正文');
       expect(store.detail?.attachments[0]?.filename).toBe('note.txt');
-      expect(calls).toEqual(platform === 'android' ? ['download', 'export'] : []);
+      expect(calls).toEqual(platform === 'android' ? ['download-and-save'] : []);
+    } finally {
+      store.stopSession();
+    }
+  });
+
+  it('附件导出进行中拒绝重复点击，收到原生保存结果后才提示成功', async () => {
+    mockBase();
+    const notice = vi.spyOn(useNotificationStore(), 'addNotification');
+    let finish!: (value: unknown) => void;
+    const save = vi.fn(() => new Promise((resolve) => { finish = resolve; }));
+    mockInvoke('mail_attachment', save);
+    const store = useMailStore();
+    await store.startSession();
+    try {
+      const pending = store.downloadAttachment('msg_001', 'part-1', 'note.txt');
+      await store.downloadAttachment('msg_001', 'part-1', 'note.txt');
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(save).toHaveBeenCalledWith({
+        mailId: 'msg_001', partId: 'part-1', filename: 'note.txt', user: 'bot@claw.163.com',
+      });
+      expect(notice.mock.calls.some(([notification]) => notification.type === 'success')).toBe(false);
+      finish({ uri: 'content://downloads/note-1.txt', displayName: 'note-1.txt', mimeType: 'text/plain', size: 4 });
+      await pending;
+      expect(notice).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'success', message: '附件已保存到下载目录：note-1.txt',
+      }));
+    } finally {
+      store.stopSession();
+    }
+  });
+
+  it('保存失败保留具体错误，不重新下载，并允许用户随后再次操作', async () => {
+    mockBase();
+    const notice = vi.spyOn(useNotificationStore(), 'addNotification');
+    const save = vi.fn()
+      .mockRejectedValueOnce('保存附件失败: 未授予储存空间权限')
+      .mockResolvedValueOnce({ displayName: 'note.txt' });
+    mockInvoke('mail_attachment', save);
+    const store = useMailStore();
+    await store.startSession();
+    try {
+      await store.downloadAttachment('msg_001', 'part-1', 'note.txt');
+      expect(save).toHaveBeenCalledTimes(1);
+      expect(notice).toHaveBeenCalledWith(expect.objectContaining({
+        type: 'error', message: '保存附件失败: 未授予储存空间权限',
+      }));
+      await store.downloadAttachment('msg_001', 'part-1', 'note.txt');
+      expect(save).toHaveBeenCalledTimes(2);
     } finally {
       store.stopSession();
     }
