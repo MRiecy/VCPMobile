@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref, watch, onUnmounted } from 'vue';
 import type { OverlayActionItem } from '../../core/types/overlay';
+import { useModalHistory } from '../../core/composables/useModalHistory';
 
 const props = defineProps<{
   isOpen: boolean;
@@ -12,6 +13,13 @@ const props = defineProps<{
 const isSelectionMenu = computed(() => props.actions.some((action) => action.selected !== undefined));
 
 const emit = defineEmits(['close', 'action-click', 'header-action-click']);
+const surfaceRef = ref<HTMLElement | null>(null);
+const { registerModal, unregisterModal } = useModalHistory();
+watch(() => props.isOpen, (open) => {
+  if (open) registerModal('ContextMenu', () => emit('close'), () => surfaceRef.value);
+  else unregisterModal('ContextMenu');
+}, { immediate: true });
+onUnmounted(() => unregisterModal('ContextMenu'));
 
 const handleBackdropClick = () => {
   emit('close');
@@ -34,9 +42,9 @@ const handleHeaderAction = () => {
 <template>
   <Teleport to="body">
     <Transition name="fade">
-      <div v-if="isOpen" class="fixed inset-0 bg-black/20 pointer-events-auto z-dialog"
+      <div v-if="isOpen" class="vcp-viewport-surface fixed inset-0 bg-black/20 pointer-events-auto z-dialog"
         @click="handleBackdropClick">
-        <div
+        <div ref="surfaceRef"
           v-guide="'context-menu-sheet'"
           class="absolute left-1/2 -translate-x-1/2 w-[calc(100%-24px)] max-w-sm rounded-3xl border border-black/5 dark:border-white/10 bg-white/92 dark:bg-[#111827]/92 shadow-2xl overflow-hidden"
           :style="{ bottom: 'calc(var(--vcp-safe-bottom, 48px) + 24px)' }"

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+defineOptions({ inheritAttrs: false });
 import { LAYER_PAGE_BASE } from '../../core/constants/layers';
 
 interface Props {
@@ -15,7 +16,8 @@ const props = withDefaults(defineProps<Props>(), {
   <Transition name="slide-page" appear>
     <div
       v-show="props.isOpen"
-      class="vcp-safe-inline fixed inset-0 pointer-events-auto bg-[var(--primary-bg)]"
+      v-bind="$attrs"
+      class="vcp-viewport-surface vcp-safe-inline fixed inset-0 pointer-events-auto bg-[var(--primary-bg)]"
       :style="{ zIndex: props.zIndex }"
     >
       <slot />

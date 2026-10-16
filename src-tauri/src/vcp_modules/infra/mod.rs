@@ -2,7 +2,6 @@ pub mod admin_api;
 pub mod boot_trace;
 pub mod file_extractor;
 pub mod file_manager;
-pub mod high_speed_channel;
 pub mod html2md;
 pub mod http_clients;
 #[cfg(target_os = "ios")]
@@ -16,6 +15,7 @@ pub mod maintenance_manager;
 pub mod media_processor;
 pub mod model_manager;
 pub mod settings_manager;
+pub mod share_inbox;
 pub mod utils;
 pub mod vcp_client;
 pub mod vcp_info_service;

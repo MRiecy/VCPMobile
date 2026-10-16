@@ -1,12 +1,13 @@
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { saveImageToGallery } from 'tauri-plugin-vcp-mobile';
+import { saveBlobToGallery } from '@/core/utils/temporaryExport';
 import MermaidFullScreenViewer from '@/features/chat/blocks/MermaidFullScreenViewer.vue';
 
 const { notify } = vi.hoisted(() => ({ notify: vi.fn() }));
 vi.mock('@/core/stores/notification', () => ({ useNotificationStore: () => ({ addNotification: notify }) }));
 vi.mock('@/core/stores/theme', () => ({ useThemeStore: () => ({ isDarkResolved: false }) }));
-vi.mock('@/core/utils/platform', () => ({ isAndroid: true }));
+vi.mock('@/core/utils/platform', () => ({ isAndroid: true, isIOS: false }));
+vi.mock('@/core/utils/temporaryExport', () => ({ saveBlobToGallery: vi.fn(async () => ({ uri: 'content://gallery/image' })) }));
 vi.mock('@/core/composables/useModalHistory', () => ({
   useModalHistory: () => ({ registerModal: vi.fn(), unregisterModal: vi.fn() }),
 }));
@@ -21,21 +22,6 @@ class PendingImage {
   }
 }
 
-class PendingReader {
-  static instances: PendingReader[] = [];
-  result: string | null = null;
-  onload: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  onabort: (() => void) | null = null;
-  readAsDataURL = vi.fn();
-  abort = vi.fn(() => this.onabort?.());
-  constructor() { PendingReader.instances.push(this); }
-  complete() {
-    this.result = 'data:image/png;base64,cG5n';
-    this.onload?.();
-  }
-}
-
 describe('Mermaid gallery export', () => {
   let wrapper: VueWrapper | undefined;
   let encodings: Array<{ canvas: HTMLCanvasElement; width: number; height: number; finish: BlobCallback }>;
@@ -44,9 +30,7 @@ describe('Mermaid gallery export', () => {
   beforeEach(() => {
     encodings = [];
     PendingImage.instances = [];
-    PendingReader.instances = [];
     vi.stubGlobal('Image', PendingImage);
-    vi.stubGlobal('FileReader', PendingReader);
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({
       fillRect: vi.fn(), drawImage,
@@ -109,22 +93,20 @@ describe('Mermaid gallery export', () => {
     encodings[0].finish(new Blob(['png'], { type: 'image/png' }));
     await flushPromises();
     expect(encodings[0].canvas.width).toBe(0);
-    PendingReader.instances[0].complete();
-    await flushPromises();
-    expect(saveImageToGallery).toHaveBeenCalledOnce();
+    expect(saveBlobToGallery).toHaveBeenCalledOnce();
+    expect(saveBlobToGallery).toHaveBeenCalledWith(expect.any(Blob), expect.stringMatching(/^mermaid_.*\.png$/), expect.any(AbortSignal));
     expect(notify).toHaveBeenCalledWith(expect.objectContaining({ type: 'success' }));
     expect(button.attributes('disabled')).toBeUndefined();
   });
 
-  it('rejects oversized PNG before Base64 allocation or native submission', async () => {
+  it('rejects oversized PNG before temporary-file or native submission', async () => {
     await startEncoding();
     const png = new Blob(['png'], { type: 'image/png' });
-    Object.defineProperty(png, 'size', { value: 16 * 1024 * 1024 + 1 });
+    Object.defineProperty(png, 'size', { value: 8 * 1024 * 1024 + 1 });
     encodings[0].finish(png);
     await flushPromises();
-    expect(PendingReader.instances).toHaveLength(0);
-    expect(saveImageToGallery).not.toHaveBeenCalled();
-    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', message: expect.stringContaining('16 MiB') }));
+    expect(saveBlobToGallery).not.toHaveBeenCalled();
+    expect(notify).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', message: expect.stringContaining('8 MiB') }));
     expect(encodings[0].canvas.width).toBe(0);
   });
 
@@ -132,7 +114,7 @@ describe('Mermaid gallery export', () => {
     await startEncoding();
     encodings[0].finish(null);
     await flushPromises();
-    expect(saveImageToGallery).not.toHaveBeenCalled();
+    expect(saveBlobToGallery).not.toHaveBeenCalled();
     expect(notify).toHaveBeenCalledWith(expect.objectContaining({ type: 'error' }));
     expect(wrapper!.get('button[aria-busy]').attributes('disabled')).toBeUndefined();
     expect(encodings[0].canvas.width).toBe(0);
@@ -145,7 +127,7 @@ describe('Mermaid gallery export', () => {
     await open().trigger('click');
     PendingImage.instances[0].onload?.();
     await flushPromises();
-    expect(saveImageToGallery).not.toHaveBeenCalled();
+    expect(saveBlobToGallery).not.toHaveBeenCalled();
     expect(notify).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', message: expect.stringContaining('SecurityError') }));
     expect(wrapper!.get('button[aria-busy]').attributes('disabled')).toBeUndefined();
     expect(PendingImage.instances[0].src).toBe('');
@@ -161,7 +143,7 @@ describe('Mermaid gallery export', () => {
     expect(image.src).toBe('');
     expect(image.onload).toBeNull();
     expect(encodings).toHaveLength(0);
-    expect(saveImageToGallery).not.toHaveBeenCalled();
+    expect(saveBlobToGallery).not.toHaveBeenCalled();
     expect(notify).not.toHaveBeenCalled();
   });
 
@@ -173,33 +155,32 @@ describe('Mermaid gallery export', () => {
     expect(PendingImage.instances).toHaveLength(1);
     encodings[0].finish(new Blob(['png'], { type: 'image/png' }));
     await flushPromises();
-    expect(PendingReader.instances).toHaveLength(0);
-    expect(saveImageToGallery).not.toHaveBeenCalled();
+    expect(saveBlobToGallery).not.toHaveBeenCalled();
     expect(notify).not.toHaveBeenCalled();
     expect(wrapper!.get('button[aria-busy]').attributes('disabled')).toBeUndefined();
   });
 
-  it('aborts pending Base64 conversion when the component unmounts', async () => {
+  it('aborts temporary-file preparation when the component unmounts', async () => {
+    let signal: AbortSignal | undefined;
+    vi.mocked(saveBlobToGallery).mockImplementationOnce((_blob, _name, ownerSignal) => new Promise((_resolve, reject) => {
+      signal = ownerSignal;
+      ownerSignal?.addEventListener('abort', () => reject(new DOMException('cancelled', 'AbortError')), { once: true });
+    }));
     await startEncoding();
     encodings[0].finish(new Blob(['png'], { type: 'image/png' }));
     await flushPromises();
-    const reader = PendingReader.instances[0];
     wrapper!.unmount();
     wrapper = undefined;
-    reader.complete();
     await flushPromises();
-    expect(reader.abort).toHaveBeenCalledOnce();
-    expect(saveImageToGallery).not.toHaveBeenCalled();
+    expect(signal?.aborted).toBe(true);
     expect(notify).not.toHaveBeenCalled();
   });
 
   it('reports actual native completion even after the preview has closed', async () => {
-    let finishSave!: (value: Awaited<ReturnType<typeof saveImageToGallery>>) => void;
-    vi.mocked(saveImageToGallery).mockImplementationOnce(() => new Promise((resolve) => { finishSave = resolve; }));
+    let finishSave!: (value: Awaited<ReturnType<typeof saveBlobToGallery>>) => void;
+    vi.mocked(saveBlobToGallery).mockImplementationOnce(() => new Promise((resolve) => { finishSave = resolve; }));
     await startEncoding();
     encodings[0].finish(new Blob(['png'], { type: 'image/png' }));
-    await flushPromises();
-    PendingReader.instances[0].complete();
     await flushPromises();
     await wrapper!.setProps({ visible: false });
     expect(notify).not.toHaveBeenCalled();

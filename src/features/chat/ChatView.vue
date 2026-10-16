@@ -2,6 +2,8 @@
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useChatHistoryStore } from "../../core/stores/chatHistoryStore";
+import { useShareStore } from "../../core/stores/shareStore";
+import type { Attachment } from "../../core/types/chat";
 import { useChatStreamStore } from "../../core/stores/chatStreamStore";
 import { useTopicStore } from "../../core/stores/topicListManager";
 import { useThemeStore } from "../../core/stores/theme";
@@ -21,6 +23,7 @@ import { useChatScroll } from "../../core/composables/useChatScroll";
 import { openPresentationMenu } from "./presentationMenu";
 
 const sessionStore = useChatSessionStore();
+const shareStore = useShareStore();
 const historyStore = useChatHistoryStore();
 const topicStore = useTopicStore();
 const streamStore = useChatStreamStore();
@@ -148,31 +151,26 @@ watch(isStreamingActive, (active) => {
   active ? startAutoScroll() : stopAutoScroll();
 });
 
-// 外部分享意图：将已处理的文件挂载到附件栏
+// Share attachments have their own draft; replacement never destroys normal staged files.
+let ordinaryAttachments: Attachment[] | null = null;
 watch(
-  () => sessionStore.sharePrefillFiles,
-  (files) => {
-    if (!files || files.length === 0) return;
-
-    for (const file of files) {
-      const stableId = `share_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      attachmentStore.stagedAttachments.unshift({
-        id: stableId,
-        type: file.mime || "application/octet-stream",
-        src: file.path,
-        internalPath: file.path,
-        thumbnailPath: file.thumbnailPath ?? undefined,
-        name: file.name,
-        size: file.size,
-        hash: file.hash,
-        status: "done",
-      });
+  () => shareStore.activeDraft?.deliveryId,
+  (deliveryId, previous) => {
+    if (deliveryId) {
+      if (!previous) {
+        const unfinished = attachmentStore.stagedAttachments.some(item => item.status !== 'done');
+        ordinaryAttachments = attachmentStore.stagedAttachments.filter(item => item.status === 'done').map(item => ({ ...item }));
+        if (unfinished) notificationStore.addNotification({ type: 'info', message: '已取消原输入中尚未完成的附件，已完成附件会在结束分享后保留。', toastOnly: true });
+      }
+      attachmentStore.clearStaged();
+      attachmentStore.stagedAttachments = (shareStore.activeDraft?.attachments ?? []).map((item, index) => ({ ...item, id: `share_${deliveryId}_${index}` }));
+    } else if (previous) {
+      attachmentStore.clearStaged();
+      attachmentStore.stagedAttachments = ordinaryAttachments ?? [];
+      ordinaryAttachments = null;
     }
-
-    // 消费后清空
-    sessionStore.sharePrefillFiles = [];
   },
-  { deep: true },
+  { immediate: true },
 );
 
 // --- Keyboard Offset & Inset Handler ---

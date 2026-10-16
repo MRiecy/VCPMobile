@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onUnmounted, ref } from "vue";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { deleteTempFile, pickFile } from "tauri-plugin-vcp-mobile";
 import { useAssistantStore } from "../../../core/stores/assistant";
 import { useNotificationStore } from "../../../core/stores/notification";
@@ -25,6 +25,7 @@ const isSavingAvatar = ref(false);
 const cropImg = ref("");
 const avatarWorkingPath = ref<string | null>(null);
 let disposed = false;
+let avatarOperationId: string | null = null;
 
 const releaseAvatarWorkingCopy = async () => {
   const filePath = avatarWorkingPath.value;
@@ -40,22 +41,23 @@ const releaseAvatarWorkingCopy = async () => {
 
 const triggerFileInput = async () => {
   if (isPickingAvatar.value || isCropping.value || isSavingAvatar.value) return;
-  if (!isAndroid) {
+  if (!isAndroid && !isIOS) {
     notificationStore.addNotification({
       type: "info",
       title: "头像选图暂不可用",
-      message: isIOS
-        ? "当前 iOS 版本尚未接入头像选图，现有头像仍可正常使用。"
-        : "当前预览环境不提供原生头像选图。",
+      message: "当前预览环境不提供原生头像选图。",
       toastOnly: true,
     });
     return;
   }
   isPickingAvatar.value = true;
+  const operationId = `avatar_${crypto.randomUUID()}`;
+  avatarOperationId = operationId;
   try {
     await releaseAvatarWorkingCopy();
-    const picked = await pickFile("avatar");
-    if (disposed) {
+    if (disposed || avatarOperationId !== operationId) return;
+    const picked = await pickFile("avatar", { operationId });
+    if (disposed || avatarOperationId !== operationId) {
       await deleteTempFile(picked.path);
       return;
     }
@@ -63,6 +65,7 @@ const triggerFileInput = async () => {
     cropImg.value = convertFileSrc(picked.path);
     isCropping.value = true;
   } catch (error) {
+    if (disposed) return;
     if (!String(error).toLowerCase().includes("cancel")) {
       console.error("Failed to prepare user avatar image:", error);
       notificationStore.addNotification({
@@ -73,6 +76,7 @@ const triggerFileInput = async () => {
       });
     }
   } finally {
+    if (avatarOperationId === operationId) avatarOperationId = null;
     if (!disposed) isPickingAvatar.value = false;
   }
 };
@@ -105,6 +109,10 @@ const onCropConfirm = async (blob: Blob) => {
 
 onUnmounted(() => {
   disposed = true;
+  if (avatarOperationId) {
+    void invoke("plugin:vcp-mobile|cancel_file_operation", { operationId: avatarOperationId }).catch(console.warn);
+    avatarOperationId = null;
+  }
   void releaseAvatarWorkingCopy();
 });
 </script>

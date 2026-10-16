@@ -16,6 +16,18 @@ export const vLongpress: Directive = {
     let didLongPress = false;
     let lastLongPressAt: number | null = null;
 
+    const ownsGesture = (event: Event) => {
+      const selection = window.getSelection();
+      if (selection && !selection.isCollapsed) return false;
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target) return true;
+      if (el.matches('button, a, [role="button"]')) return true;
+      // A directive on a button still owns that button. Ancestor message actions
+      // must yield to text selection and independently interactive descendants.
+      const owner = target.closest('input, textarea, select, a, button, [role="button"], [contenteditable="true"], img, svg, canvas, video, audio, iframe, .select-text, .vcp-markdown-block, .ast-render-container');
+      return !owner || owner === el;
+    };
+
     const clearSuppressionExpiry = () => {
       if (suppressionExpiryTimer !== null) {
         clearTimeout(suppressionExpiryTimer);
@@ -34,6 +46,7 @@ export const vLongpress: Directive = {
 
     // 同一触摸长按可能同时产生 timer 与 contextmenu，只允许回调一次。
     const executeLongPress = (e: Event) => {
+      if (!ownsGesture(e)) return;
       const now = Date.now();
       if (lastLongPressAt !== null && now - lastLongPressAt < 800) return;
       lastLongPressAt = now;
@@ -42,6 +55,7 @@ export const vLongpress: Directive = {
     };
 
     const start = (e: Event) => {
+      if (!ownsGesture(e)) return;
       // 如果是鼠标事件且不是左键，跳过（右键由 contextmenu 处理）
       if (e.type === 'mousedown' && (e as MouseEvent).button !== 0) {
         return;
@@ -109,6 +123,7 @@ export const vLongpress: Directive = {
 
     // Context menu (桌面端原生右键)
     const onContextMenu = (e: Event) => {
+      if (!ownsGesture(e)) return;
       e.preventDefault(); // 拦截原生右键菜单
       cancel(); // 取消可能正在进行的长按计时
       executeLongPress(e);

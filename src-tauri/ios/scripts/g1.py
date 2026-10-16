@@ -186,15 +186,38 @@ def overlay(project_dir=APPLE):
     for filename in {entry["filename"] for entry in entries}:
         shutil.copyfile(ROOT / "icons" / "ios" / filename, icon_dir / filename)
     write_json(icon_dir / "Contents.json", {"images": entries, "info": {"version": 1, "author": "xcode"}})
+    share_dir = project_dir / "VCPShare"
+    share_dir.mkdir(parents=True, exist_ok=True)
+    for filename in ("ShareViewController.swift", "Info.plist", "AppGroups.entitlements", "PrivacyInfo.xcprivacy"):
+        shutil.copyfile(IOS / "share" / filename, share_dir / filename)
+    app_config = json.loads((ROOT / "tauri.conf.json").read_text(encoding="utf-8"))
+    ios_config = json.loads((ROOT / "tauri.ios.conf.json").read_text(encoding="utf-8"))
+    version = app_config["version"]
+    bundle_version = ios_config["bundle"]["iOS"].get("bundleVersion", version)
     output = project_dir / "project.vcp.json"
     write_json(output, {
         "include": ["project.yml"],
         "targets": {f"{name}_iOS": {
             "sources": [{"path": "VCPResources/PrivacyInfo.xcprivacy", "buildPhase": "resources"}],
+            "dependencies": [{"target": "VCPShare", "embed": True}],
             "settings": {"base": {
                 "TARGETED_DEVICE_FAMILY": "1,2",
                 "ASSETCATALOG_COMPILER_APPICON_NAME": "AppIcon", "CODE_SIGNING_ALLOWED": "NO",
+                "CODE_SIGN_ENTITLEMENTS": "VCPShare/AppGroups.entitlements",
+                "INFOPLIST_KEY_VCPShareAppGroup": "group.com.vcp.avatar",
             }, "configs": {"debug": {"DEBUG_INFORMATION_FORMAT": "dwarf-with-dsym", "STRIP_INSTALLED_PRODUCT": "NO"}}},
+        }, "VCPShare": {
+            "type": "app-extension", "platform": "iOS", "deploymentTarget": ios_config["bundle"]["iOS"]["minimumSystemVersion"],
+            "sources": [{"path": "VCPShare/ShareViewController.swift"}, {"path": "VCPShare/PrivacyInfo.xcprivacy", "buildPhase": "resources"}],
+            "settings": {"base": {
+                "PRODUCT_BUNDLE_IDENTIFIER": "com.vcp.avatar.share",
+                "INFOPLIST_FILE": "VCPShare/Info.plist",
+                "CODE_SIGN_ENTITLEMENTS": "VCPShare/AppGroups.entitlements",
+                "SWIFT_VERSION": "5.0", "TARGETED_DEVICE_FAMILY": "1,2",
+                "MARKETING_VERSION": version, "CURRENT_PROJECT_VERSION": bundle_version,
+                "APPLICATION_EXTENSION_API_ONLY": "YES", "SKIP_INSTALL": "YES",
+                "CODE_SIGNING_ALLOWED": "NO",
+            }},
         }},
     })
     return output
@@ -253,6 +276,19 @@ def collect_archives(evidence, manifest, env):
                 if privacy.is_file():
                     shutil.copyfile(privacy, details / privacy.name)
                 info = plistlib.loads((app / "Info.plist").read_bytes())
+                extension = app / "PlugIns" / "VCPShare.appex"
+                require(extension.is_dir(), f"{app.name}: Share Extension is not embedded")
+                extension_info = plistlib.loads((extension / "Info.plist").read_bytes())
+                require(extension_info.get("NSExtension", {}).get("NSExtensionPointIdentifier") == "com.apple.share-services", "Share Extension point is missing")
+                require(extension_info.get("MinimumOSVersion") == "26.0", "Share Extension minimum iOS must be 26.0")
+                for key in ("CFBundleShortVersionString", "CFBundleVersion", "VCPShareAppGroup"):
+                    require(extension_info.get(key) == info.get(key), f"Share Extension/main {key} mismatch")
+                extension_details = details / "VCPShare.appex"
+                extension_details.mkdir(exist_ok=True)
+                shutil.copyfile(extension / "Info.plist", extension_details / "Info.plist")
+                require((extension / "PrivacyInfo.xcprivacy").is_file(), "Share Extension privacy manifest is missing")
+                shutil.copyfile(extension / "PrivacyInfo.xcprivacy", extension_details / "PrivacyInfo.xcprivacy")
+                (extension_details / "architectures.txt").write_text(run(["xcrun", "lipo", "-archs", str(extension / extension_info["CFBundleExecutable"])], env=env), encoding="utf-8")
                 binary = app / info["CFBundleExecutable"]
                 for name, command in [
                     ("architectures", ["lipo", "-archs"]),

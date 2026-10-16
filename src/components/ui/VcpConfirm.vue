@@ -2,7 +2,7 @@
 defineOptions({
   inheritAttrs: false
 });
-import { watch } from 'vue';
+import { ref, watch, onUnmounted, useId } from 'vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 
 const props = defineProps<{
@@ -11,6 +11,7 @@ const props = defineProps<{
   isOpen: boolean;
   isDanger?: boolean;
   onlyConfirm?: boolean;
+  modalId?: string;
 }>();
 
 const emit = defineEmits<{
@@ -20,7 +21,8 @@ const emit = defineEmits<{
 }>();
 
 const { registerModal, unregisterModal } = useModalHistory();
-const modalId = 'VcpConfirm';
+const modalId = props.modalId || `VcpConfirm:${useId()}`;
+const surfaceRef = ref<HTMLElement | null>(null);
 
 watch(() => props.isOpen, (newVal) => {
   if (newVal) {
@@ -31,11 +33,12 @@ watch(() => props.isOpen, (newVal) => {
         emit('cancel');
       }
       emit('update:isOpen', false);
-    });
+    }, () => surfaceRef.value);
   } else {
     unregisterModal(modalId);
   }
-});
+}, { immediate: true });
+onUnmounted(() => unregisterModal(modalId));
 
 const handleConfirm = () => {
   emit('confirm');
@@ -51,8 +54,8 @@ const handleCancel = () => {
 <template>
   <Teleport to="body">
     <Transition name="fade">
-      <div v-if="isOpen" v-bind="$attrs"
-        class="fixed inset-0 z-dialog flex items-start justify-center pt-[15vh] bg-black/40"
+      <div v-if="isOpen" ref="surfaceRef" v-bind="$attrs" role="dialog" aria-modal="true" :aria-label="title"
+        class="vcp-viewport-surface fixed inset-0 z-dialog flex items-start justify-center pt-[15vh] bg-black/40"
         @click.self="onlyConfirm ? handleConfirm() : handleCancel()">
         <div
           class="vcp-confirm-modal bg-white dark:bg-[#1a2a30] w-11/12 max-w-sm rounded-2xl shadow-2xl border border-black/10 dark:border-white/10 p-5 transform transition-all relative overflow-hidden">

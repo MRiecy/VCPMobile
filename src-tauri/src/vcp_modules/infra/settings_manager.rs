@@ -7,7 +7,110 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tauri::{AppHandle, Manager, Runtime, State};
+use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
+
+const MAX_CONFIG_BACKUP_BYTES: u64 = 1024 * 1024;
+const BACKUP_STRING_KEYS: &[&str] = &[
+    "userName",
+    "adminUsername",
+    "adminPassword",
+    "vcpServerUrl",
+    "vcpApiKey",
+    "vcpLogUrl",
+    "vcpLogKey",
+    "syncHttpUrl",
+    "syncServerUrl",
+    "syncToken",
+    "fileKey",
+    "distributedWsUrl",
+    "distributedVcpKey",
+    "distributedDeviceName",
+];
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParsedConfigBackup {
+    settings: serde_json::Map<String, serde_json::Value>,
+    exported_at: String,
+}
+
+fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
+    if bytes.len() as u64 > MAX_CONFIG_BACKUP_BYTES {
+        return Err("备份文件过大（超过 1 MiB），已拒绝导入".into());
+    }
+    let raw: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|_| "备份文件不是合法的 JSON".to_string())?;
+    if raw["app"] != "vcp-mobile" || raw["kind"] != "vcp-mobile-settings-backup" {
+        return Err("这不是 VCP Mobile 的配置备份文件".into());
+    }
+    if raw["version"].as_u64() != Some(1) {
+        return Err("不支持的备份版本".into());
+    }
+    let source = raw["settings"]
+        .as_object()
+        .ok_or_else(|| "备份文件缺少配置内容".to_string())?;
+    let mut settings = serde_json::Map::new();
+    for key in BACKUP_STRING_KEYS {
+        if let Some(value) = source.get(*key).filter(|value| !value.is_null()) {
+            if !value.is_string() {
+                return Err(format!("备份字段 {key} 类型不正确"));
+            }
+            settings.insert((*key).to_string(), value.clone());
+        }
+    }
+    if let Some(value) = source
+        .get("distributedEnabled")
+        .filter(|value| !value.is_null())
+    {
+        if !value.is_boolean() {
+            return Err("备份字段 distributedEnabled 类型不正确".into());
+        }
+        settings.insert("distributedEnabled".into(), value.clone());
+    }
+    if let Some(value) = source
+        .get("chatEndpointMode")
+        .filter(|value| !value.is_null())
+    {
+        if !matches!(value.as_str(), Some("standard" | "vcpTools" | "raw")) {
+            return Err("备份字段 chatEndpointMode 类型不正确".into());
+        }
+        settings.insert("chatEndpointMode".into(), value.clone());
+    } else if let Some(value) = source.get("enableVcpToolInjection") {
+        let enabled = value
+            .as_bool()
+            .ok_or_else(|| "备份字段 enableVcpToolInjection 类型不正确".to_string())?;
+        settings.insert(
+            "chatEndpointMode".into(),
+            if enabled { "vcpTools" } else { "standard" }.into(),
+        );
+    }
+    Ok(ParsedConfigBackup {
+        settings,
+        exported_at: raw["exportedAt"].as_str().unwrap_or_default().to_string(),
+    })
+}
+
+/// Native selection hands over a temporary path; no external file bytes enter Vue.
+#[tauri::command]
+pub async fn parse_config_backup(path: String) -> Result<ParsedConfigBackup, String> {
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|error| error.to_string())?;
+    let metadata = file.metadata().await.map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("请选择配置备份文件".into());
+    }
+    if metadata.len() > MAX_CONFIG_BACKUP_BYTES {
+        return Err("备份文件过大（超过 1 MiB），已拒绝导入".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_CONFIG_BACKUP_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| error.to_string())?;
+    parse_backup_bytes(&bytes)
+}
 
 fn default_sync_log_level() -> String {
     "INFO".to_string()
@@ -484,6 +587,63 @@ pub async fn set_theme<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn backup_fixture(settings: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "app": "vcp-mobile", "kind": "vcp-mobile-settings-backup", "version": 1,
+            "exportedAt": "2026-10-16T00:00:00Z", "settings": settings,
+        })
+    }
+
+    #[test]
+    fn config_backup_import_preserves_connection_patch_and_drops_local_preferences() {
+        let fixture = backup_fixture(serde_json::json!({
+            "userName": "测试用户", "syncToken": "fixture-token", "distributedEnabled": true,
+            "chatEndpointMode": "raw", "enableVcpToolInjection": true,
+            "agentOrder": ["local-only"], "futureUnknownField": 123,
+        }));
+        let parsed = parse_backup_bytes(fixture.to_string().as_bytes()).unwrap();
+        assert_eq!(parsed.settings["userName"], "测试用户");
+        assert_eq!(parsed.settings["chatEndpointMode"], "raw");
+        assert_eq!(parsed.settings["distributedEnabled"], true);
+        assert!(!parsed.settings.contains_key("agentOrder"));
+        assert!(!parsed.settings.contains_key("enableVcpToolInjection"));
+        assert!(!parsed.settings.contains_key("futureUnknownField"));
+        assert_eq!(parsed.exported_at, "2026-10-16T00:00:00Z");
+    }
+
+    #[test]
+    fn config_backup_import_rejects_wrong_version_types_and_utf8_byte_overflow() {
+        let mut fixture = backup_fixture(serde_json::json!({}));
+        fixture["version"] = 2.into();
+        assert!(parse_backup_bytes(fixture.to_string().as_bytes())
+            .unwrap_err()
+            .contains("版本"));
+        for (key, value) in [
+            ("syncToken", serde_json::json!(123)),
+            ("distributedEnabled", serde_json::json!("true")),
+            ("chatEndpointMode", serde_json::json!("unknown")),
+        ] {
+            let fixture = backup_fixture(serde_json::json!({ key: value }));
+            assert!(parse_backup_bytes(fixture.to_string().as_bytes())
+                .unwrap_err()
+                .contains(key));
+        }
+        let text = "汉".repeat((MAX_CONFIG_BACKUP_BYTES / 3) as usize + 1);
+        assert!(text.chars().count() < MAX_CONFIG_BACKUP_BYTES as usize);
+        assert!(parse_backup_bytes(text.as_bytes())
+            .unwrap_err()
+            .contains("过大"));
+        assert!(parse_backup_bytes(b"{broken").unwrap_err().contains("JSON"));
+    }
+
+    #[test]
+    fn config_backup_import_migrates_legacy_endpoint_only_when_enum_absent() {
+        let fixture = backup_fixture(serde_json::json!({"enableVcpToolInjection": true}));
+        let parsed = parse_backup_bytes(fixture.to_string().as_bytes()).unwrap();
+        assert_eq!(parsed.settings["chatEndpointMode"], "vcpTools");
+        assert!(!parsed.settings.contains_key("enableVcpToolInjection"));
+    }
     use serde_json::json;
     use sqlx::Row;
 

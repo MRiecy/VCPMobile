@@ -11,6 +11,15 @@
     "vcp-mobile:allow-request-notification-permission",
     "vcp-mobile:allow-open-notification-settings",
     "vcp-mobile:allow-get-pending-notification",
-    "vcp-mobile:allow-get-battery-status"
+    "vcp-mobile:allow-get-battery-status",
+    "vcp-mobile:allow-pick-file",
+    "vcp-mobile:allow-cancel-file-operation",
+    "vcp-mobile:allow-get-webview-geometry",
+    "vcp-mobile:allow-open-file-native",
+    "vcp-mobile:allow-save-image-to-gallery",
+    "vcp-mobile:allow-save-image-from-path",
+    "vcp-mobile:allow-save-to-downloads",
+    "vcp-mobile:allow-write-temp-file",
+    "vcp-mobile:allow-delete-temp-file"
   ]
 }

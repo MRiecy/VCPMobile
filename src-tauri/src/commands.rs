@@ -61,8 +61,11 @@ macro_rules! app_command_handler {
             fix_emoticon_url, get_emoticon_library, regenerate_emoticon_library,
         };
         use crate::vcp_modules::file_manager::{
-            check_attachment_support, get_attachment_real_path, open_file, register_local_file,
-            store_file,
+            begin_file_operation, cancel_attachment_import, check_attachment_support,
+            export_attachment_file, finish_file_operation, get_attachment_image,
+            get_attachment_real_path, open_file, prepare_rendered_image, read_attachment_text_preview,
+            register_local_file, release_attachment_image, release_rendered_image,
+            release_temporary_export, store_file, store_temporary_export,
         };
         use crate::vcp_modules::forum::{
             forum_create_post, forum_delete, forum_get_post, forum_list_posts, forum_reply,
@@ -75,7 +78,6 @@ macro_rules! app_command_handler {
             update_group_config,
         };
         use crate::vcp_modules::boot_trace::{get_boot_trace, save_boot_trace};
-        use crate::vcp_modules::high_speed_channel::prepare_vcp_upload;
         use crate::vcp_modules::lifecycle_manager::{
             get_core_status, get_last_error, get_system_snapshot, reconcile_distributed_node_cmd,
             restart_or_exit_app,
@@ -98,11 +100,15 @@ macro_rules! app_command_handler {
             toggle_favorite_model,
         };
         use crate::vcp_modules::settings_manager::{
-            get_settings_recovery_status, read_settings, set_theme, update_settings,
+            get_settings_recovery_status, parse_config_backup, read_settings, set_theme, update_settings,
+        };
+        use crate::vcp_modules::infra::share_inbox::{
+            accept_android_share, bind_current_share, commit_share_message, discard_current_share,
+            finish_android_share, prepare_current_share, read_current_share, update_share_draft,
         };
         use crate::vcp_modules::sync_service::{
             clear_old_sync_logs, list_sync_log_files, prepare_sync_log_share_file,
-            read_sync_log_file, start_manual_sync, stop_sync,
+            read_sync_log_file, release_sync_log_share_file, start_manual_sync, stop_sync,
         };
         use crate::vcp_modules::taskcenter::{
             delegation_cancel, delegation_list, task_agent_list, task_create, task_delete,
@@ -231,6 +237,7 @@ macro_rules! app_command_handler {
                 toggle_rule_enabled,
                 // ── 设置（settings_manager）──
                 get_settings_recovery_status,
+                parse_config_backup,
                 read_settings,
                 set_theme,
                 update_settings,
@@ -298,13 +305,32 @@ macro_rules! app_command_handler {
                 // ── 日志中心（logcenter）──
                 logcenter_clear_server,
                 logcenter_fetch,
-                // ── 附件与文件（file_manager / high_speed_channel）──
+                // ── 附件与文件（file_manager）──
+                begin_file_operation,
+                cancel_attachment_import,
                 check_attachment_support,
+                export_attachment_file,
+                finish_file_operation,
+                get_attachment_image,
                 get_attachment_real_path,
                 open_file,
-                prepare_vcp_upload,
+                prepare_rendered_image,
+                read_attachment_text_preview,
                 register_local_file,
+                release_attachment_image,
+                release_rendered_image,
+                release_temporary_export,
                 store_file,
+                store_temporary_export,
+                // ── 当前一次分享（share_inbox）──
+                accept_android_share,
+                bind_current_share,
+                commit_share_message,
+                discard_current_share,
+                finish_android_share,
+                prepare_current_share,
+                read_current_share,
+                update_share_draft,
                 // ── 系统维护（maintenance_manager）──
                 clear_webview_cache,
                 reconstruct_system_cache,
@@ -339,6 +365,7 @@ macro_rules! app_command_handler {
                 list_sync_log_files,
                 prepare_sync_log_share_file,
                 read_sync_log_file,
+                release_sync_log_share_file,
                 start_manual_sync,
                 stop_sync,
                 // ── 分布式（distributed；reconcile 寄居 lifecycle_manager）──

@@ -192,7 +192,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div v-if="permissionItems.length > 0" class="vcp-permission-gate vcp-safe-inline fixed inset-0 z-gate bg-white flex flex-col items-center select-none overflow-hidden no-rubber-band">
+  <div v-if="permissionItems.length > 0" class="vcp-viewport-surface vcp-permission-gate vcp-safe-inline fixed inset-0 z-gate bg-white flex flex-col items-center select-none overflow-hidden no-rubber-band">
     <!-- Top Section: 米白（所有步骤共享） -->
     <div class="vcp-permission-hero w-full bg-[#FAF6EE] flex flex-col items-center px-5 pb-3 shrink-0">
       <!-- Top Illustration Area -->

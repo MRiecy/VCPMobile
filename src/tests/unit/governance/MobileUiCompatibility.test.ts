@@ -86,9 +86,9 @@ describe('Android mobile UI compatibility contracts', () => {
     );
   });
 
-  it('freezes a production syntax baseline and builds that artifact in CI', () => {
-    expect(viteConfig).toContain('target: "chrome87"');
-    expect(viteConfig).toContain('cssTarget: "chrome87"');
+  it('declares both mobile syntax targets and builds that artifact in CI', () => {
+    expect(viteConfig).toContain('target: ["chrome87", "safari26.0"]');
+    expect(viteConfig).toContain('cssTarget: ["chrome87", "safari26.0"]');
     expect(ciWorkflow).toContain('- name: Frontend Production Build');
     expect(ciWorkflow).toContain('run: pnpm build');
   });
@@ -154,7 +154,9 @@ describe('Android mobile UI compatibility contracts', () => {
           `${path} reintroduced an unapproved backdrop blur`,
         ).toBe(true);
       }
-      if (!path.endsWith('/assets/themes.css')) {
+      // Raw env values are sampled only by the iOS geometry owner outside the
+      // adjusted root; feature components consume the normalized shared values.
+      if (!path.endsWith('/assets/themes.css') && !path.endsWith('/core/composables/useIOSWindowGeometry.ts')) {
         expect(source, `${path} bypasses the shared Insets variables`).not.toContain(
           'env(safe-area-inset-',
         );

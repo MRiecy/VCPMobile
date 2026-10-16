@@ -3625,6 +3625,40 @@ pub async fn prepare_sync_log_share_file(
     Ok(staged_file.to_string_lossy().to_string())
 }
 
+/// Release only the snapshot created for this handoff; the source log remains owned by sync.
+#[tauri::command]
+pub async fn release_sync_log_share_file(app: AppHandle, path: String) -> Result<(), String> {
+    let file = std::path::PathBuf::from(path);
+    if !tokio::fs::try_exists(&file)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        return Ok(());
+    }
+    let root = app
+        .path()
+        .cache_dir()
+        .map_err(|error| error.to_string())?
+        .join("sync_log_shares");
+    let root = tokio::fs::canonicalize(root)
+        .await
+        .map_err(|error| error.to_string())?;
+    let file = tokio::fs::canonicalize(file)
+        .await
+        .map_err(|error| error.to_string())?;
+    let parent = file.parent().ok_or("无效的日志分享暂存路径")?;
+    if parent.parent() != Some(root.as_path()) {
+        return Err("拒绝删除非日志分享暂存文件".into());
+    }
+    tokio::fs::remove_file(&file)
+        .await
+        .map_err(|error| error.to_string())?;
+    if let Err(error) = tokio::fs::remove_dir(parent).await {
+        log::debug!("日志分享文件已释放，目录待后续清理: {error}");
+    }
+    Ok(())
+}
+
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncLogCleanupResult {

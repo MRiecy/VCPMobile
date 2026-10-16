@@ -183,9 +183,9 @@ const msgToUse = activeMsg || chunk.message;
 |------|------|------|
 | `stagedAttachments` | `Attachment[]` | 准备随下一条消息发送的暂存附件列表 |
 
-**双轨上传策略**：
-- **Android 端**：通过 `plugin:vcp-mobile|pick_file` 调用原生 Kotlin File Picker，配合 `vcp-mobile-file-*` 自定义事件完成沙盒拷贝与哈希计算
-- **非 Android 端**：标准 HTML `<input type="file">`，小文件（< 2MB）走 IPC `store_file`，大文件走高速 TCP 链路 `prepare_vcp_upload` + XHR
+**文件输入与取消**：
+- Android/iOS 均通过 `plugin:vcp-mobile|pick_file` 获取受控路径，再由 Rust 登记 CAS；operationId 关联进度和取消，页面只接收仍有效的结果。
+- `store_file` 只服务于有界 WebView 内存产物；HTML 文件选择和 XHR 上传通道已退役。当前文件、分享与派生资源契约见 [Phase 4 实施记录](../../../plan/vcpmobile-ios-compatibility-research/phase-4/04-实施记录与验证.md)。
 
 #### 会话与消息类 Store 协作流程
 

@@ -6,7 +6,7 @@ import { useNotificationStore } from '../../../core/stores/notification';
 import type { AttachmentData } from '../../../core/types/chat';
 
 const LONG_TEXT_THRESHOLD = 1000;
-// 与 Rust store_file 的 IPC 上限一致；先计数再编码，避免超限文本生成大字节数组。
+// 文本产物使用更低的独立预算；先计数再编码，避免生成大字节数组。
 const MAX_TEXT_FILE_BYTES = 2 * 1024 * 1024;
 
 function fitsTextFileBudget(text: string): boolean {
@@ -40,7 +40,7 @@ export function useLongTextPaste(input: Ref<string>) {
 
   const removeActiveAttachment = () => {
     const index = attachmentStore.stagedAttachments.findIndex(a => a.id === activeAttachmentId);
-    if (index !== -1) attachmentStore.stagedAttachments.splice(index, 1);
+    if (index !== -1) attachmentStore.removeStaged(index);
   };
 
   // 话题切换（包括切走再回来）及卸载不允许旧请求回填当前输入区。
@@ -112,6 +112,9 @@ export function useLongTextPaste(input: Ref<string>) {
       });
       await nextTick();
       if (!isCurrent()) return;
+      if (!attachmentStore.stagedAttachments.some(a => a.id === stableId)) return;
+      if (!await attachmentStore.beginImport(stableId)) return;
+      if (!isCurrent()) return;
       window.dispatchEvent(new Event('resize'));
 
       // 2. IPC 保存到附件目录
@@ -119,6 +122,7 @@ export function useLongTextPaste(input: Ref<string>) {
         originalName: name,
         fileBytes: bytes,
         mimeType: 'text/plain',
+        operationId: stableId,
       });
 
       if (!isCurrent()) return;
@@ -144,8 +148,10 @@ export function useLongTextPaste(input: Ref<string>) {
       });
     } catch (err) {
       console.error('[useLongTextPaste] Failed to stage text as file:', err);
+      const removed = !attachmentStore.stagedAttachments.some(a => a.id === stableId);
       removeActiveAttachment();
       if (!isCurrent()) return;
+      if (removed && String(err).toLowerCase().includes('cancel')) return;
       if (consumed) {
         // 保留处理中用户继续输入的内容；恢复操作不能再触发自动转附件。
         restoredInput = input.value === retainedInput ? recoveryText : input.value + text;
@@ -159,6 +165,7 @@ export function useLongTextPaste(input: Ref<string>) {
       });
     } finally {
       if (!isCurrent()) removeActiveAttachment();
+      await attachmentStore.finishImport(stableId);
       activeAttachmentId = null;
       isProcessing.value = false;
     }

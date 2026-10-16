@@ -109,33 +109,38 @@ const copyCurrentFile = async () => {
 
 const shareCurrentFile = async () => {
   if (!currentFile.value || shareBusy.value) return;
-  if (!isAndroid) {
+  if (!isAndroid && !isIOS) {
     notificationStore.addNotification({
       type: 'info',
-      message: isIOS ? '当前 iOS 版本尚未接入系统分享，可复制日志内容。' : '当前预览环境不提供原生分享，可复制日志内容。',
+      message: '当前预览环境不提供原生分享，可复制日志内容。',
       toastOnly: true,
     });
     return;
   }
   shareBusy.value = true;
+  let sharedPath: string | undefined;
   try {
     const path = await invoke<string>('prepare_sync_log_share_file', {
       filename: currentFile.value
     });
-    await shareFileNative(path);
+    sharedPath = path;
+    const result = await shareFileNative(path);
+    if (result.outcome === 'cancelled') return;
     notificationStore.addNotification({
       type: 'success',
-      message: '已打开系统分享面板',
+      message: result.outcome === 'completed' ? '已交给所选应用' : '已打开系统分享面板',
       toastOnly: true
     });
   } catch (e) {
     console.error('[SyncLogBrowser] Share failed:', e);
+    if (String(e).toLowerCase().includes('cancel')) return;
     notificationStore.addNotification({
       type: 'error',
       message: `分享同步日志失败：${diagnosticText(e)}`,
       toastOnly: true
     });
   } finally {
+    if (sharedPath) await invoke('release_sync_log_share_file', { path: sharedPath }).catch(console.warn);
     shareBusy.value = false;
   }
 };
@@ -254,7 +259,7 @@ onMounted(() => {
           </button>
           <button
             :disabled="shareBusy"
-            v-if="isAndroid"
+            v-if="isAndroid || isIOS"
             class="flex min-h-9 items-center gap-1 border-l border-white/10 px-3 text-[10px] text-blue-300 transition-colors active:text-white disabled:opacity-30"
             @click="shareCurrentFile"
           >

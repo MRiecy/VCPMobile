@@ -2,7 +2,7 @@
 defineOptions({
   inheritAttrs: false
 });
-import { ref, onMounted, nextTick, watch } from 'vue';
+import { ref, nextTick, watch, onUnmounted } from 'vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 
 const props = defineProps<{
@@ -19,21 +19,27 @@ const emit = defineEmits<{
 }>();
 
 const { registerModal, unregisterModal } = useModalHistory();
-const modalId = 'VcpPrompt';
+const modalId = 'Prompt';
+const surfaceRef = ref<HTMLElement | null>(null);
+const inputValue = ref(props.initialValue || '');
+const inputRef = ref<HTMLInputElement | null>(null);
 
 watch(() => props.isOpen, (newVal) => {
   if (newVal) {
     registerModal(modalId, () => {
       emit('cancel');
       emit('update:isOpen', false);
+    }, () => surfaceRef.value);
+    nextTick(() => {
+      if (!props.isOpen) return;
+      inputRef.value?.focus({ preventScroll: true });
+      inputRef.value?.select();
     });
   } else {
     unregisterModal(modalId);
   }
-});
-
-const inputValue = ref(props.initialValue || '');
-const inputRef = ref<HTMLInputElement | null>(null);
+}, { immediate: true });
+onUnmounted(() => unregisterModal(modalId));
 
 const handleConfirm = () => {
   emit('confirm', inputValue.value);
@@ -45,22 +51,13 @@ const handleCancel = () => {
   emit('update:isOpen', false);
 };
 
-// Focus the input when the prompt opens
-onMounted(() => {
-  if (props.isOpen) {
-    nextTick(() => {
-      inputRef.value?.focus();
-      inputRef.value?.select();
-    });
-  }
-});
 </script>
 
 <template>
   <Teleport to="body">
     <Transition name="fade">
-      <div v-if="isOpen" v-bind="$attrs"
-        class="fixed inset-0 z-dialog flex items-start justify-center pt-[15vh] bg-black/40"
+      <div v-if="isOpen" ref="surfaceRef" v-bind="$attrs" role="dialog" aria-modal="true" :aria-label="title"
+        class="vcp-viewport-surface fixed inset-0 z-dialog flex items-start justify-center pt-[15vh] bg-black/40"
         @click.self="handleCancel">
         <div
           class="vcp-prompt-modal bg-white dark:bg-[#1a2a30] w-11/12 max-w-sm rounded-2xl shadow-2xl border border-black/10 dark:border-white/10 p-5 transform transition-all relative overflow-hidden">

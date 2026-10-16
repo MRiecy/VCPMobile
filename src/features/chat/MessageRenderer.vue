@@ -37,25 +37,10 @@ import {
 import { useMessageStyleInjector } from "../../core/composables/useMessageStyleInjector";
 import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from "lucide-vue-next";
 import morphdom from "morphdom";
+import { instantiateMermaidSvg, renderMermaidTemplate } from './utils/mermaidRenderer';
 
 const { processEmoticonsInContainer } = useEmoticonFixer();
-const mermaidCache = new Map<string, string>();
-const MAX_MERMAID_CACHE_SIZE = 30;
-
-function setMermaidCache(key: string, value: string) {
-  if (mermaidCache.has(key)) {
-    mermaidCache.delete(key);
-  } else if (mermaidCache.size >= MAX_MERMAID_CACHE_SIZE) {
-    const firstKey = mermaidCache.keys().next().value;
-    if (firstKey !== undefined) {
-      mermaidCache.delete(firstKey);
-    }
-  }
-  mermaidCache.set(key, value);
-}
-
-const renderingMermaids = new Map<string, Promise<string>>();
-let mermaidInitialized = false;
+let heavyController: AbortController | null = null;
 
 // UI Components
 import ChatBubble from "./components/ChatBubble.vue";
@@ -607,19 +592,27 @@ function enhanceMermaid(el: HTMLElement, sourceCode: string) {
 
 // === Heavy Content Rendering (KaTeX inline math + Mermaid) ===
 const renderHeavyContent = async () => {
+  heavyController?.abort();
+  const controller = new AbortController();
+  heavyController = controller;
+  const messageId = props.message.id;
   await nextTick();
-  if (!messageContentRef.value) return;
+  const host = messageContentRef.value;
+  const isCurrent = () => !rendererDisposed && !controller.signal.aborted && props.message.id === messageId && messageContentRef.value === host;
+  if (!host || !isCurrent()) return;
 
   // 1. KaTeX math (inline + display mode, rendered inside markdown blocks via v-html)
   const mathElements = Array.from(
-    messageContentRef.value.querySelectorAll('.vcp-math-inline[data-latex], .vcp-math-block[data-latex]')
+    host.querySelectorAll('.vcp-math-inline[data-latex], .vcp-math-block[data-latex]')
   ).filter(el => !el.closest('.streaming-tail'));
 
   if (mathElements.length > 0) {
     try {
       const katexModule = await import('katex');
+      if (!isCurrent()) return;
       const katex = katexModule.default;
       mathElements.forEach((el) => {
+        if (!host.contains(el)) return;
         if (el.querySelector('.katex')) return; // already rendered
         const latex = el.getAttribute('data-latex');
         if (!latex) return;
@@ -637,18 +630,13 @@ const renderHeavyContent = async () => {
 
   // 2. Mermaid diagrams
   const mermaidPlaceholders = Array.from(
-    messageContentRef.value.querySelectorAll('.mermaid-placeholder, .mermaid, code.language-mermaid')
+    host.querySelectorAll('.mermaid-placeholder, .mermaid, code.language-mermaid')
   ).filter(el => !el.closest('.streaming-tail'));
 
   if (mermaidPlaceholders.length > 0) {
     try {
-      const mermaidModule = await import('mermaid');
-      const mermaid = mermaidModule.default;
-      if (!mermaidInitialized) {
-        mermaid.initialize({ startOnLoad: false, theme: 'dark' });
-        mermaidInitialized = true;
-      }
       for (const el of Array.from(mermaidPlaceholders)) {
+        if (!isCurrent()) return;
         const placeholder = el as HTMLElement;
         const wrapper = placeholder.closest('.vcp-mermaid-wrapper');
         if (wrapper && wrapper.querySelector('svg')) continue; // already rendered & enhanced
@@ -664,40 +652,19 @@ const renderHeavyContent = async () => {
         }
         
         const sourceCode = placeholder.dataset.mermaidSource || placeholder.textContent || '';
-        const codeKey = sourceCode;
         // Skip if Vue has replaced this element out of the DOM
-        if (!messageContentRef.value.contains(placeholder)) continue;
-        
-        // Use cache to avoid re-rendering the same diagram
-        if (mermaidCache.has(codeKey)) {
-          const cachedSvg = mermaidCache.get(codeKey)!;
-          placeholder.innerHTML = cachedSvg;
-          placeholder.classList.remove('mermaid-placeholder');
-          placeholder.classList.add('mermaid');
-          enhanceMermaid(placeholder, placeholder.dataset.mermaidSource || '');
-          continue;
-        }
+        if (!host.contains(placeholder)) continue;
         
         placeholder.dataset.mermaidSource = sourceCode;
         try {
-          let renderPromise = renderingMermaids.get(codeKey);
-          if (!renderPromise) {
-            const renderId = `vcp-mermaid-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-            renderPromise = mermaid.render(renderId, sourceCode).then(result => result.svg);
-            renderingMermaids.set(codeKey, renderPromise);
-            const release = () => {
-              if (renderingMermaids.get(codeKey) === renderPromise) renderingMermaids.delete(codeKey);
-            };
-            void renderPromise.then(release, release);
-          }
-          const renderedSvg = await renderPromise;
-          setMermaidCache(codeKey, renderedSvg);
-          if (!messageContentRef.value.contains(placeholder)) continue;
-          placeholder.innerHTML = renderedSvg;
+          const renderedSvg = await renderMermaidTemplate(sourceCode, themeStore.isDarkResolved, controller.signal);
+          if (!isCurrent() || !host.contains(placeholder) || placeholder.dataset.mermaidSource !== sourceCode) continue;
+          placeholder.innerHTML = instantiateMermaidSvg(renderedSvg);
           placeholder.classList.remove('mermaid-placeholder');
           placeholder.classList.add('mermaid');
           enhanceMermaid(placeholder, sourceCode);
         } catch (e: any) {
+          if (!isCurrent() || !host.contains(placeholder)) continue;
           const errorMsg = e?.str || e?.message || String(e);
           console.error('[MessageRenderer] Mermaid render failed:', errorMsg, e);
           placeholder.innerHTML = `<div class="text-red-500 text-[10px] p-4 rounded-xl border border-red-500/10 bg-red-500/5">图表渲染失败: ${escapeHtml(errorMsg)}</div>`;
@@ -709,8 +676,8 @@ const renderHeavyContent = async () => {
   }
 
   // 3. Emoticons
-  if (messageContentRef.value) {
-    processEmoticonsInContainer(messageContentRef.value);
+  if (isCurrent()) {
+    processEmoticonsInContainer(host);
   }
 };
 
@@ -773,6 +740,20 @@ watch(
   },
   { immediate: true }
 );
+
+watch(() => themeStore.isDarkResolved, () => {
+  const host = messageContentRef.value;
+  if (!host) return;
+  for (const diagram of host.querySelectorAll<HTMLElement>('[data-mermaid-source]')) {
+    const source = diagram.dataset.mermaidSource;
+    if (!source) continue;
+    diagram.textContent = source;
+    delete diagram.dataset.vcpMermaidEnhanced;
+    diagram.classList.remove('mermaid');
+    diagram.classList.add('mermaid-placeholder');
+  }
+  void renderHeavyContent();
+});
 
 // 消息真正离开活跃流后统一执行一次重渲染，确保 KaTeX/Mermaid/Emoticon 正确渲染
 watch(
@@ -1214,6 +1195,7 @@ watch(
 
 onUnmounted(() => {
   rendererDisposed = true;
+  heavyController?.abort();
   removeScopedCss(props.message.id);
   cleanupRegistry(props.message.id);
   cleanupThoughtTail(props.message.id);

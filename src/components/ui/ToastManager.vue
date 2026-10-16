@@ -15,13 +15,15 @@ const store = useNotificationStore();
 
 <style scoped>
 .vcp-toast-stack {
-  top: calc(var(--vcp-safe-top, 0px) + 16px);
+  top: calc(var(--vcp-viewport-top, 0px) + var(--vcp-safe-top, 0px) + 16px);
+  left: var(--vcp-viewport-left, 0px);
+  width: var(--vcp-viewport-width, 100%);
 }
 
 @media (pointer: coarse) {
   .vcp-toast-stack {
     /* Android WindowInsets owns the safe-area value; keep a small visual gap below it. */
-    top: calc(var(--vcp-safe-top, 0px) + 12px);
+    top: calc(var(--vcp-viewport-top, 0px) + var(--vcp-safe-top, 0px) + 12px);
   }
 }
 

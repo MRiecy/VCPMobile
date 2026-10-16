@@ -2,6 +2,7 @@
 import { ref, watch, computed, onUnmounted } from 'vue';
 import { useThemeStore } from '../../../core/stores/theme';
 import { useModalHistory } from '../../../core/composables/useModalHistory';
+import { sandboxImageBridge } from '../../../core/utils/sandboxImageBridge';
 
 const props = withDefaults(defineProps<{
   content: string;
@@ -16,6 +17,10 @@ const themeStore = useThemeStore();
 const isPreviewing = ref(false); // 默认开启代码模式，减小开销
 const isFullScreen = ref(false);
 const fullScreenTab = ref<'code' | 'preview'>('code');
+const inlineFrame = ref<HTMLIFrameElement | null>(null);
+const fullScreenFrame = ref<HTMLIFrameElement | null>(null);
+const surfaceRef = ref<HTMLElement | null>(null);
+const frameGeneration = ref(0);
 
 watch(
   () => props.isStreaming,
@@ -30,13 +35,14 @@ watch(
 
 const { registerModal, unregisterModal } = useModalHistory();
 const modalId = `HtmlPreviewBlockFullScreen_${Math.random().toString(36).substring(2, 9)}`;
-const imageNonce = Math.random().toString(36).substring(2, 15);
+const instanceNonce = crypto.randomUUID();
+const imageNonce = computed(() => `${instanceNonce}-${frameGeneration.value}`);
 
 watch(isFullScreen, (newVal) => {
   if (newVal) {
     registerModal(modalId, () => {
       isFullScreen.value = false;
-    });
+    }, () => surfaceRef.value);
   } else {
     unregisterModal(modalId);
   }
@@ -87,31 +93,7 @@ const sandboxHtml = computed(() => {
       canvas, img, video, iframe { max-width: 100% !important; }
     </style>
     <` + `script>
-      document.addEventListener('click', function(e) {
-        const target = e.target.closest('a');
-        if (target) {
-          const href = target.getAttribute('href');
-          if (!href || href === '#' || href.startsWith('javascript:')) {
-            e.preventDefault();
-          }
-        }
-
-        // 捕获并拦截图片点击，发送 postMessage 放大查看
-        const img = e.target.closest('img');
-        if (img) {
-          e.preventDefault();
-          window.parent.postMessage({
-            source: 'vcp-mobile',
-            type: 'rendered-image-click',
-            nonce: '${imageNonce}',
-            image: {
-              src: img.src,
-              alt: img.alt || '',
-              title: img.title || ''
-            }
-          }, '*');
-        }
-      }, true);
+      ${sandboxImageBridge(imageNonce.value)}
     <` + `/script>
   `;
 
@@ -128,23 +110,12 @@ const openFullScreen = () => {
   fullScreenTab.value = isPreviewing.value ? 'preview' : 'code';
 };
 
-let refreshTimer: ReturnType<typeof setTimeout> | null = null;
-
 const refreshPreview = () => {
   if (props.isStreaming) return;
-  const iframe = isFullScreen.value 
-    ? document.querySelector('.vcp-fullscreen-iframe') as HTMLIFrameElement
-    : document.querySelector('.vcp-inline-iframe') as HTMLIFrameElement;
-  
-  if (iframe) {
-    const currentSrc = iframe.srcdoc;
-    iframe.srcdoc = '';
-    if (refreshTimer) clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(() => {
-      iframe.srcdoc = currentSrc;
-    }, 50);
-  }
+  const iframe = isFullScreen.value ? fullScreenFrame.value : inlineFrame.value;
+  if (iframe) frameGeneration.value++;
 };
+watch([() => props.content, () => props.messageId, () => themeStore.isDarkResolved], () => { frameGeneration.value++; });
 
 // 同步普通视图与全屏视图的状态
 watch(isPreviewing, (val) => {
@@ -158,7 +129,7 @@ watch(fullScreenTab, (val) => {
 });
 
 onUnmounted(() => {
-  if (refreshTimer) clearTimeout(refreshTimer);
+  frameGeneration.value++;
   unregisterModal(modalId);
 });
 </script>
@@ -177,7 +148,7 @@ onUnmounted(() => {
         leave-from-class="translate-y-0 opacity-100"
         leave-to-class="translate-y-10 opacity-0"
       >
-        <div v-if="isFullScreen" class="vcp-safe-inline fixed inset-0 z-editor flex flex-col pb-[var(--vcp-safe-bottom,0px)]"
+        <div v-if="isFullScreen" ref="surfaceRef" class="vcp-viewport-surface vcp-safe-inline fixed inset-0 z-editor flex flex-col pb-[var(--vcp-safe-bottom,0px)]"
           :class="themeStore.isDarkResolved ? 'bg-[#0d1117]' : 'bg-[#f6f8fa] text-gray-900'">
           
           <!-- 全屏 Header -->
@@ -224,7 +195,9 @@ onUnmounted(() => {
               <pre v-else><code class="hljs" v-html="highlightedCode"></code></pre>
             </div>
             <iframe 
-              v-show="fullScreenTab === 'preview'"
+              v-if="fullScreenTab === 'preview'"
+              ref="fullScreenFrame"
+              :key="frameGeneration"
               class="vcp-fullscreen-iframe w-full h-full border-none"
               sandbox="allow-scripts"
               loading="lazy"
@@ -288,8 +261,10 @@ onUnmounted(() => {
         </slot>
       </div>
 
-      <div v-if="isPreviewing" class="absolute inset-0 no-swipe" :class="themeStore.isDarkResolved ? 'bg-[#0d1117]' : 'bg-white'">
+      <div v-if="isPreviewing && !isFullScreen" class="absolute inset-0 no-swipe" :class="themeStore.isDarkResolved ? 'bg-[#0d1117]' : 'bg-white'">
         <iframe 
+          ref="inlineFrame"
+          :key="frameGeneration"
           class="vcp-inline-iframe w-full h-full border-none no-swipe"
           sandbox="allow-scripts"
           loading="lazy"

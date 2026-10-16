@@ -153,6 +153,32 @@ Denies the cancel_download_notification command without any pre-configured scope
 <tr>
 <td>
 
+`vcp-mobile:allow-cancel-file-operation`
+
+</td>
+<td>
+
+Enables the cancel_file_operation command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:deny-cancel-file-operation`
+
+</td>
+<td>
+
+Denies the cancel_file_operation command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `vcp-mobile:allow-capture-window-snapshot`
 
 </td>
@@ -510,6 +536,32 @@ Enables the get_pending_notification command without any pre-configured scope.
 <td>
 
 Denies the get_pending_notification command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:allow-get-webview-geometry`
+
+</td>
+<td>
+
+Enables the get_webview_geometry command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:deny-get-webview-geometry`
+
+</td>
+<td>
+
+Denies the get_webview_geometry command without any pre-configured scope.
 
 </td>
 </tr>

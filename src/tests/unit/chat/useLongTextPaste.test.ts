@@ -14,7 +14,12 @@ vi.mock('@/core/stores/notification', () => ({ useNotificationStore: vi.fn() }))
 const MAX_BYTES = 2 * 1024 * 1024;
 const longText = '长文本'.repeat(400);
 const scopes: EffectScope[] = [];
-const attachments = reactive({ stagedAttachments: [] as Attachment[] });
+const attachments = reactive({
+  stagedAttachments: [] as Attachment[],
+  beginImport: vi.fn(async () => true),
+  finishImport: vi.fn(async () => {}),
+  removeStaged: (index: number) => { attachments.stagedAttachments.splice(index, 1); },
+});
 const notifications = { addNotification: vi.fn() };
 const session = reactive({
   currentConversationKey: null as ConversationKey | null,
@@ -91,7 +96,7 @@ describe('long text paste resource and input ownership', () => {
     expect(invokeMock).toHaveBeenCalledTimes(1);
     const args = invokeMock.mock.calls[0][1];
     expect((args?.fileBytes as Uint8Array).byteLength).toBe(MAX_BYTES);
-    expect(attachments.stagedAttachments[0].status).toBe('done');
+    await vi.waitFor(() => expect(attachments.stagedAttachments[0].status).toBe('done'));
   });
 
   it.each([
@@ -179,7 +184,7 @@ describe('long text paste resource and input ownership', () => {
     expect(input.value).toBe('');
     expect(invokeMock).toHaveBeenCalledTimes(1);
     expect(attachments.stagedAttachments).toHaveLength(1);
-    expect(attachments.stagedAttachments[0].status).toBe('done');
+    await vi.waitFor(() => expect(attachments.stagedAttachments[0].status).toBe('done'));
   });
 
   it('restores the exact watcher input after a failed conversion', async () => {
@@ -192,7 +197,7 @@ describe('long text paste resource and input ownership', () => {
     await nextTick();
     await nextTick();
 
-    expect(input.value).toBe(inserted);
+    await vi.waitFor(() => expect(input.value).toBe(inserted));
     expect(invokeMock).toHaveBeenCalledTimes(1);
     expect(attachments.stagedAttachments).toEqual([]);
   });

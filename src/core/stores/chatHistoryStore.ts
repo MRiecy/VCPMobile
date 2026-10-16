@@ -8,6 +8,7 @@ import { useAssistantStore } from "./assistant";
 import { useSettingsStore } from "./settings";
 import { useTopicStore } from "./topicListManager";
 import { useNotificationStore } from "./notification";
+import { useShareStore, type ShareIdentity } from "./shareStore";
 import { clearMessageCache } from "../utils/astRenderer";
 import { extractMentionedMemberIds } from "../utils/mention";
 
@@ -104,6 +105,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   const settingsStore = useSettingsStore();
   const topicStore = useTopicStore();
   const notificationStore = useNotificationStore();
+  const shareStore = useShareStore();
 
   const errorMessage = (error: unknown) =>
     error instanceof Error ? error.message : String(error);
@@ -541,12 +543,19 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   const triggerGeneration = async (
     userMsg: ChatMessage,
     frozenKey?: ConversationKey,
+    shareIdentity?: ShareIdentity,
   ): Promise<number | null> => {
     const key = frozenKey || captureLoadedConversation();
     if (!key) return null;
     let topicUpdatedAt: number;
+    let alreadySent = false;
     try {
-      const persisted = await invoke<MessageWriteResultDto>("append_single_message", {
+      const shareResult = shareIdentity ? await shareStore.commit(shareIdentity, userMsg) : null;
+      if (shareResult) {
+        Object.assign(userMsg, shareResult.message);
+        alreadySent = shareResult.alreadySent;
+      }
+      const persisted = shareResult?.persisted ?? await invoke<MessageWriteResultDto>("append_single_message", {
         ownerId: key.ownerId,
         ownerType: key.ownerType,
         topicId: key.topicId,
@@ -582,6 +591,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       return null;
     }
 
+    if (alreadySent) return topicUpdatedAt;
     try {
       const settings = settingsStore.settings;
       if (!settings) throw new Error("应用尚未完成初始化");
@@ -667,6 +677,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
    * 发送消息
    */
   const sendMessage = async (content: string) => {
+    const shareAtSend = shareStore.activeDraft ? {
+      generation: shareStore.activeDraft.generation,
+      deliveryId: shareStore.activeDraft.deliveryId,
+    } : undefined;
     if (hasEvictedNewer.value && !editingMessage.value) {
       const latest = await returnToLatest();
       if (latest.error || latest.aborted || hasEvictedNewer.value) return;
@@ -735,12 +749,15 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       ...attachment,
       attachmentOrder,
     }));
-    attachmentStore.clearStaged();
+    const shareIdentity = shareAtSend;
+    if (shareIdentity && shareStore.sending) return;
+    if (shareIdentity) shareStore.sending = true;
+    else attachmentStore.clearStaged();
 
     const now = Date.now();
     const userName = settingsStore.settings?.userName || "User";
     const userMsg: ChatMessage = {
-      id: `msg_${now}_user_${Math.random().toString(36).substring(2, 9)}`,
+      id: shareIdentity ? `msg_share_${shareIdentity.deliveryId}` : `msg_${now}_user_${Math.random().toString(36).substring(2, 9)}`,
       role: "user",
       name: userName,
       content,
@@ -758,7 +775,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       );
     }
     topicStore.incrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId);
-    const topicUpdatedAt = await triggerGeneration(userMsg, key);
+    const topicUpdatedAt = await triggerGeneration(userMsg, key, shareIdentity);
     if (topicUpdatedAt === null) {
       if (canCommitConversation(key)) {
         currentChatHistory.value = currentChatHistory.value.filter(

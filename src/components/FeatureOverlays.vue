@@ -14,7 +14,7 @@
  * 物理上它们会渲染在 GlobalOverlayManager 提供的容器中。
  */
 import { defineAsyncComponent, ref, watch } from 'vue';
-import { useOverlayStore } from '../core/stores/overlay';
+import { useOverlayStore, type OverlayPageType } from '../core/stores/overlay';
 import { useSettingsStore } from '../core/stores/settings';
 import { isAndroid } from '../core/utils/platform';
 import ToolInteractionOverlay from '../features/distributed/ToolInteractionOverlay.vue';
@@ -42,6 +42,7 @@ const TarvenSettingsView = defineAsyncComponent(() => import('../features/chat/c
 
 const overlayStore = useOverlayStore();
 const settingsStore = useSettingsStore();
+const pageModalId = (type: OverlayPageType) => overlayStore.pageStack.find(page => page.type === type)?.modalId;
 
 const createFirstOpenLatch = (isOpen: () => boolean) => {
   const mounted = ref(isOpen());
@@ -70,6 +71,7 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
 <template>
   <div>
     <SettingsView
+      :data-vcp-modal-id="pageModalId('settings')"
       v-if="settingsMounted"
       :is-open="overlayStore.isSettingsOpen"
       :z-index="overlayStore.getPageZIndex('settings')"
@@ -77,6 +79,7 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
     />
 
     <AgentSettingsView
+      :data-vcp-modal-id="pageModalId('agentSettings')"
       v-if="agentSettingsMounted"
       :is-open="overlayStore.isAgentSettingsOpen"
       :id="overlayStore.agentSettingsId"
@@ -85,6 +88,7 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
     />
 
     <GroupSettingsView
+      :data-vcp-modal-id="pageModalId('groupSettings')"
       v-if="groupSettingsMounted"
       :is-open="overlayStore.isGroupSettingsOpen"
       :id="overlayStore.groupSettingsId"
@@ -93,6 +97,7 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
     />
 
     <TarvenSettingsView
+      :data-vcp-modal-id="pageModalId('tarvenSettings')"
       v-if="tarvenSettingsMounted"
       :is-open="overlayStore.isTarvenSettingsOpen"
       :z-index="overlayStore.getPageZIndex('tarvenSettings')"
@@ -100,15 +105,18 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
     />
 
     <SyncSessionView
+      :data-vcp-modal-id="pageModalId('syncSession')"
       v-if="overlayStore.isSyncSessionOpen"
       :z-index="overlayStore.getPageZIndex('syncSession')"
     />
     <RebuildSessionView
+      :data-vcp-modal-id="pageModalId('rebuildSession')"
       v-if="overlayStore.isRebuildSessionOpen"
       :z-index="overlayStore.getPageZIndex('rebuildSession')"
     />
 
     <DistributedView
+      :data-vcp-modal-id="pageModalId('distributed')"
       v-if="distributedMounted"
       :is-open="overlayStore.isDistributedOpen"
       :z-index="overlayStore.getPageZIndex('distributed')"
@@ -116,6 +124,7 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
     />
 
     <RagObserverView
+      :data-vcp-modal-id="pageModalId('ragObserver')"
       v-if="ragObserverMounted"
       :is-open="overlayStore.isRagObserverOpen"
       :z-index="overlayStore.getPageZIndex('ragObserver')"
@@ -123,6 +132,7 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
     />
 
     <VcpCliManifestView
+      :data-vcp-modal-id="pageModalId('cliManifest')"
       v-if="cliManifestMounted && isAndroid"
       :is-open="overlayStore.isCliManifestOpen"
       :z-index="overlayStore.getPageZIndex('cliManifest')"
@@ -130,6 +140,7 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
     />
 
     <LogCenterView
+      :data-vcp-modal-id="pageModalId('logCenter')"
       v-if="logCenterMounted"
       :is-open="overlayStore.isLogCenterOpen"
       :z-index="overlayStore.getPageZIndex('logCenter')"
@@ -137,6 +148,7 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
     />
 
     <TaskCenterView
+      :data-vcp-modal-id="pageModalId('taskCenter')"
       v-if="taskCenterMounted"
       :is-open="overlayStore.isTaskCenterOpen"
       :z-index="overlayStore.getPageZIndex('taskCenter')"
@@ -144,6 +156,7 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
     />
 
     <AgentMgrView
+      :data-vcp-modal-id="pageModalId('agentMgr')"
       v-if="agentMgrMounted"
       :is-open="overlayStore.isAgentMgrOpen"
       :z-index="overlayStore.getPageZIndex('agentMgr')"
@@ -151,6 +164,7 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
     />
 
     <ForumListView
+      :data-vcp-modal-id="pageModalId('forum')"
       v-if="forumMounted"
       :is-open="overlayStore.isForumOpen"
       :z-index="overlayStore.getPageZIndex('forum')"
@@ -158,6 +172,7 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
     />
 
     <MailListView
+      :data-vcp-modal-id="pageModalId('mail')"
       v-if="mailMounted"
       :is-open="overlayStore.isMailOpen"
       :z-index="overlayStore.getPageZIndex('mail')"
@@ -165,6 +180,7 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
     />
 
     <GlobalSearchView
+      :data-vcp-modal-id="pageModalId('globalSearch')"
       v-if="globalSearchMounted"
       :is-open="overlayStore.isGlobalSearchOpen"
       :z-index="overlayStore.getPageZIndex('globalSearch')"
@@ -173,6 +189,7 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
 
     <Suspense v-if="diaryMounted">
       <DiaryCenterView
+        :data-vcp-modal-id="pageModalId('diaryCenter')"
         :is-open="overlayStore.isDiaryCenterOpen"
         :z-index="overlayStore.getPageZIndex('diaryCenter')"
         :open-target="overlayStore.diaryOpenTarget"
@@ -182,7 +199,7 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
       <template #fallback>
         <div
           v-if="overlayStore.isDiaryCenterOpen"
-          class="fixed inset-0 pointer-events-auto grid place-items-center bg-[var(--primary-bg)] text-sm text-[var(--primary-text)]"
+          class="vcp-viewport-surface fixed inset-0 pointer-events-auto grid place-items-center bg-[var(--primary-bg)] text-sm text-[var(--primary-text)]"
           :style="{ zIndex: overlayStore.getPageZIndex('diaryCenter') }"
         >
           正在打开日记中心…

@@ -361,6 +361,18 @@
           "markdownDescription": "Denies the cancel_download_notification command without any pre-configured scope."
         },
         {
+          "description": "Enables the cancel_file_operation command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-cancel-file-operation",
+          "markdownDescription": "Enables the cancel_file_operation command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the cancel_file_operation command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-cancel-file-operation",
+          "markdownDescription": "Denies the cancel_file_operation command without any pre-configured scope."
+        },
+        {
           "description": "Enables the capture_window_snapshot command without any pre-configured scope.",
           "type": "string",
           "const": "allow-capture-window-snapshot",
@@ -527,6 +539,18 @@
           "type": "string",
           "const": "deny-get-pending-notification",
           "markdownDescription": "Denies the get_pending_notification command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the get_webview_geometry command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-get-webview-geometry",
+          "markdownDescription": "Enables the get_webview_geometry command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the get_webview_geometry command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-get-webview-geometry",
+          "markdownDescription": "Denies the get_webview_geometry command without any pre-configured scope."
         },
         {
           "description": "Enables the launch_root_manager command without any pre-configured scope.",

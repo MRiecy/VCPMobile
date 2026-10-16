@@ -51,6 +51,9 @@ const isLastStep = computed(() => {
 });
 
 const cardEl = ref<HTMLElement | null>(null);
+const surfaceRef = ref<HTMLElement | null>(null);
+const surfaceBounds = () => surfaceRef.value?.getBoundingClientRect()
+  ?? { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
 const spotRect = ref<SpotRect | null>(null);
 const cardStyle = ref<Record<string, string>>({ top: '-9999px', left: '-9999px' });
 /** 卡片完成首次定位后才启用位置过渡（避免 -9999px 占位处飞入）。 */
@@ -125,13 +128,14 @@ const clearTimers = () => {
 
 const rectOf = (el: HTMLElement): SpotRect => {
   const r = el.getBoundingClientRect();
+  const surface = surfaceBounds();
   return {
-    top: r.top,
-    left: r.left,
+    top: r.top - surface.top,
+    left: r.left - surface.left,
     width: r.width,
     height: r.height,
-    right: r.right,
-    bottom: r.bottom,
+    right: r.right - surface.left,
+    bottom: r.bottom - surface.top,
   };
 };
 
@@ -144,8 +148,8 @@ const sameRect = (a: SpotRect, b: SpotRect): boolean =>
 const isInViewport = (r: SpotRect): boolean =>
   r.top >= -1 &&
   r.left >= -1 &&
-  r.right <= window.innerWidth + 1 &&
-  r.bottom <= window.innerHeight + 1;
+  r.right <= surfaceBounds().width + 1 &&
+  r.bottom <= surfaceBounds().height + 1;
 
 const readSafeInsets = () => {
   const style = getComputedStyle(document.documentElement);
@@ -184,7 +188,7 @@ const targetIdOf = (): string | null => {
 const clampX = (x: number, cardW: number, insets: { left: number; right: number }): number => {
   const maxLeft = Math.max(
     insets.left + SAFE_MARGIN,
-    window.innerWidth - insets.right - SAFE_MARGIN - cardW,
+    surfaceBounds().width - insets.right - SAFE_MARGIN - cardW,
   );
   return Math.min(Math.max(x, insets.left + SAFE_MARGIN), maxLeft);
 };
@@ -192,15 +196,14 @@ const clampX = (x: number, cardW: number, insets: { left: number; right: number 
 const clampY = (y: number, cardH: number, insets: { top: number; bottom: number }): number => {
   const maxTop = Math.max(
     insets.top + SAFE_MARGIN,
-    window.innerHeight - insets.bottom - SAFE_MARGIN - cardH,
+    surfaceBounds().height - insets.bottom - SAFE_MARGIN - cardH,
   );
   return Math.min(Math.max(y, insets.top + SAFE_MARGIN), maxTop);
 };
 
 /** 卡片方位：首选 → 四向翻转 → 全不满足时取空间最大侧并钳制进安全区。 */
 const positionCard = (r: SpotRect | null) => {
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
+  const { width: vw, height: vh } = surfaceBounds();
   const insets = readSafeInsets();
   const measuredW = cardEl.value?.offsetWidth ?? 0;
   const measuredH = cardEl.value?.offsetHeight ?? 0;
@@ -437,6 +440,7 @@ onMounted(() => {
   guideStore.init();
   window.addEventListener('resize', restartMeasure);
   window.addEventListener('vcp-keyboard-inset', restartMeasure);
+  window.addEventListener('vcp-window-geometry-applied', restartMeasure);
   listen<{ state: string }>('vcp-lifecycle-changed', (event) => {
     if (event.payload?.state === 'resume') restartMeasure();
   })
@@ -451,6 +455,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('resize', restartMeasure);
   window.removeEventListener('vcp-keyboard-inset', restartMeasure);
+  window.removeEventListener('vcp-window-geometry-applied', restartMeasure);
   lifecycleUnlisten?.();
   clearTimers();
   targetObserver?.disconnect();
@@ -462,7 +467,8 @@ onBeforeUnmount(() => {
   <Transition name="guide-fade">
     <div
       v-if="isActive"
-      class="guide-overlay fixed inset-0 z-guide select-none"
+      ref="surfaceRef"
+      class="vcp-viewport-surface guide-overlay fixed inset-0 z-guide select-none"
       @click.prevent
       @contextmenu.prevent
       @wheel.prevent

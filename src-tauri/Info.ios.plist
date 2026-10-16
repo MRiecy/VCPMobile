@@ -2,6 +2,26 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+  <key>VCPShareAppGroup</key>
+  <string>group.com.vcp.avatar</string>
+  <key>UTExportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>com.vcp.avatar.configuration</string>
+      <key>UTTypeDescription</key>
+      <string>VCPMobile 配置备份</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.json</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array><string>vcpcfg</string></array>
+        <key>public.mime-type</key>
+        <string>application/vnd.vcp.config+json</string>
+      </dict>
+    </dict>
+  </array>
   <key>NSLocalNetworkUsageDescription</key>
   <string>连接您配置的局域网 VCP 服务，进行聊天、数据同步和设备工具协作。</string>
   <key>NSAppTransportSecurity</key>
@@ -11,6 +31,10 @@
   </dict>
   <key>NSMotionUsageDescription</key>
   <string>在您启用设备传感器工具时，读取运动和气压数据并返回给您连接的 VCP 服务。</string>
+  <key>NSCameraUsageDescription</key>
+  <string>在您点击拍照时拍摄照片，并作为聊天附件添加。</string>
+  <key>NSPhotoLibraryAddUsageDescription</key>
+  <string>在您点击保存图片时，将所选图片或图表写入照片图库。</string>
   <key>NSLocationWhenInUseUsageDescription</key>
   <string>在您启用定位工具并发起采样时，获取设备位置并返回给您连接的 VCP 服务。</string>
   <key>UIApplicationSceneManifest</key>

@@ -1,6 +1,6 @@
 # Phase 4：WebKit 缓存与交互重构方案
 
-> 2026-10-16；审查基线 `7e4d645b`。这是 P4-5 方案草案，未实施生产代码，未执行 Apple 构建或 iOS 运行诊断。目标为最低 iOS/iPadOS 26.0、固定构建 Xcode 26.2；构建 SDK 与最低运行系统分别维护。
+> 2026-10-16；P4-5 方案已确认并接入生产代码，实际参数和检查结果见 [实施记录](./04-实施记录与验证.md)。本文保留审查基线 `7e4d645b` 的设计依据。最低 iOS/iPadOS 26.0、固定构建 Xcode 26.2；本轮 Apple 编译及原生运行仍单独待验证。
 
 ## 1. 目标与设计范围
 
@@ -188,8 +188,8 @@ Mermaid 渲染服务在消息领域维护一个按估算字符串字节计量的
 | 文本预览字节 | 建议默认 128KiB；读取缓冲另计 UTF-8 边界所需最多 4 字节 | Rust 读取前限量，返回 truncated |
 | Canvas 导出活动数 | 建议 1 | 导出 operation 队列 |
 | Mermaid 渲染活动数 | 建议 1，相同 key 合并在途任务 | 消息领域渲染服务 |
-| Canvas maxSide / maxPixels / maxEncodedBytes | 待按输出清晰度与副本核算定值 | 分配前约束尺寸，编码后约束字节 |
-| Mermaid cacheBytes / maxEntryBytes | 待按长会话资源预算定值 | 计量 LRU 插入、命中与淘汰 |
+| Canvas maxSide / maxPixels / maxEncodedBytes | 2048 / 2048² / 8 MiB | 分配前约束尺寸，编码后约束字节 |
+| Mermaid cacheBytes / maxEntryBytes | 4 MiB / 512 KiB | 计量 LRU 插入、命中与淘汰 |
 | 列表/全屏图尺寸、像素、编码字节和累计缓存 | 与 P4-2 按用途确定 | 图像服务及 viewer 使用期 |
 | 临时导出字节、传输块大小和占盘 | 与 P4-1/P4-3 统一确定 | 字节接收、临时文件及系统消费期 |
 
@@ -215,7 +215,7 @@ Mermaid 渲染服务在消息领域维护一个按估算字符串字节计量的
 
 W1 可独立完成；W2 的坐标契约供 W3 的原生锚点复用；W4 与 P4-1/P4-2/P4-3 的文件和图像接口同步实施。每个片段完成跨层静态检查和针对性验证，再形成审查结果。
 
-本轮证据为生产入口、锁定依赖源码和平台 API 文档；本方案尚未实施。iOS 26 WKWebView 的实际 geometry、popover、文本选区、Canvas 和自定义协议运行结果仍待目标诊断。后续 `pnpm check`、领域用例、生产资源检查、device archive 及按需 Actions 单项 Simulator 结果分别记录。日常采用源码审计和阶段性 Actions，不建设项目 iOS 实机测试体系。
+源码接入、host 领域用例和构建检查结果见实施记录。iOS 26 WKWebView 的实际 geometry、popover、文本选区、Canvas 和自定义协议运行结果仍待目标诊断。device archive 与按需 Actions 结果分别记录；不建设项目 iOS 实机测试体系。
 
 ## 8. 实施入口与一手资料
 

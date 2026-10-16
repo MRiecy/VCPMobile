@@ -730,7 +730,7 @@ watch(() => props.isOpen, (val) => {
     <Teleport to="body">
       <Transition name="fade">
         <div v-if="showDeleteConfirm" 
-          class="fixed inset-0 bg-black/70 z-dialog flex items-center justify-center p-6"
+          class="vcp-viewport-surface fixed inset-0 bg-black/70 z-dialog flex items-center justify-center p-6"
           @click="cancelDelete"
           @touchmove.prevent>
           

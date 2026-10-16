@@ -3,6 +3,7 @@
 // 头像不在导出范围：头像属于数据同步职责，重装后由同步带回
 // 评估与决策记录见 plan/Settings_Import_Export_Evaluation_2026-08-18.md
 import { invoke } from "@tauri-apps/api/core";
+import { pickFile, deleteTempFile } from "tauri-plugin-vcp-mobile";
 import type { AppSettings } from "../../core/stores/settings";
 import type { DownloadsSaveResultDto } from "../../core/types/native";
 import { isAndroid, isIOS } from "../../core/utils/platform";
@@ -101,72 +102,6 @@ export function buildBackupPayload(
   };
 }
 
-/**
- * 解析并校验备份文件内容。失败时抛出带中文说明的 Error。
- * 只放行白名单字段，未知字段一律丢弃（防止垃圾键经 extra flatten 灌入设置）。
- */
-export function parseBackupFile(text: string): ParsedConfigBackup {
-  if (text.length > MAX_BACKUP_FILE_BYTES) {
-    throw new Error("备份文件过大，已拒绝解析");
-  }
-
-  let raw: unknown;
-  try {
-    raw = JSON.parse(text);
-  } catch {
-    throw new Error("备份文件不是合法的 JSON");
-  }
-  if (typeof raw !== "object" || raw === null) {
-    throw new Error("备份文件格式不正确");
-  }
-
-  const file = raw as Record<string, unknown>;
-  if (file.app !== "vcp-mobile" || file.kind !== CONFIG_BACKUP_KIND) {
-    throw new Error("这不是 VCP Mobile 的配置备份文件");
-  }
-  if (file.version !== CONFIG_BACKUP_VERSION) {
-    throw new Error(`不支持的备份版本: ${String(file.version)}`);
-  }
-  if (typeof file.settings !== "object" || file.settings === null) {
-    throw new Error("备份文件缺少配置内容");
-  }
-
-  const rawSettings = file.settings as Record<string, unknown>;
-  const settings: Record<string, string | boolean> = {};
-  for (const key of BACKUP_SETTINGS_KEYS) {
-    const value = rawSettings[key];
-    if (value === undefined || value === null) continue;
-    if (key === "chatEndpointMode") {
-      if (typeof value !== "string" || !CHAT_ENDPOINT_MODES.has(value)) {
-        throw new Error(`备份字段 ${key} 类型不正确`);
-      }
-      settings[key] = value;
-    } else if (BOOLEAN_BACKUP_KEYS.has(key)) {
-      if (typeof value !== "boolean") {
-        throw new Error(`备份字段 ${key} 类型不正确`);
-      }
-      settings[key] = value;
-    } else {
-      if (typeof value !== "string") {
-        throw new Error(`备份字段 ${key} 类型不正确`);
-      }
-      settings[key] = value;
-    }
-  }
-
-  // 仅导入时识别旧布尔开关；新枚举优先，旧字段绝不进入输出 patch。
-  if (settings.chatEndpointMode === undefined && rawSettings.enableVcpToolInjection !== undefined) {
-    if (typeof rawSettings.enableVcpToolInjection !== "boolean") {
-      throw new Error("备份字段 enableVcpToolInjection 类型不正确");
-    }
-    settings.chatEndpointMode = rawSettings.enableVcpToolInjection ? "vcpTools" : "standard";
-  }
-
-  return {
-    settings: settings as Partial<AppSettings>,
-    exportedAt: typeof file.exportedAt === "string" ? file.exportedAt : "",
-  };
-}
 
 // ------------------------------------------------------------------
 // Base64 工具（分块避免栈溢出）
@@ -204,29 +139,37 @@ async function invokeSaveToDownloads(
 export async function exportConfigBackup(
   settings: AppSettings,
 ): Promise<DownloadsSaveResultDto> {
-  if (!isAndroid) {
-    throw new Error(isIOS ? '当前 iOS 版本尚未接入配置文件导出' : '当前预览环境不提供原生配置文件导出');
+  if (!isAndroid && !isIOS) {
+    throw new Error('当前预览环境不提供原生配置文件导出');
   }
   const payload = buildBackupPayload(settings);
-  const contentBase64 = bytesToBase64(new TextEncoder().encode(JSON.stringify(payload, null, 2)));
+  const bytes = new TextEncoder().encode(JSON.stringify(payload, null, 2));
+  if (bytes.byteLength > MAX_BACKUP_FILE_BYTES) {
+    throw new Error('配置备份超过 1 MiB，请检查连接配置字段');
+  }
+  const contentBase64 = bytesToBase64(bytes);
   const fileName = buildBackupFileName();
 
   try {
     return await invokeSaveToDownloads(fileName, contentBase64);
   } catch (e: any) {
     const message = String(e);
-    if (!message.includes("储存空间权限")) throw e;
+    if (!isAndroid || !message.includes("储存空间权限")) throw e;
     // API 26–28：引导用户授予储存空间权限后重试一次
     await invoke("plugin:vcp-mobile|request_android_permission", { pType: "storage" });
     return await invokeSaveToDownloads(fileName, contentBase64);
   }
 }
 
-/** 读取并解析导入文件（纯 IO + 校验，不写入任何状态） */
-export async function readConfigBackupFile(file: File): Promise<ParsedConfigBackup> {
-  if (file.size > MAX_BACKUP_FILE_BYTES) {
-    throw new Error("备份文件过大（超过 4MB），已拒绝导入");
+/** Native staging is released after Rust has returned the validated patch. */
+export async function pickConfigBackup(operationId: string): Promise<ParsedConfigBackup> {
+  if (!isAndroid && !isIOS) {
+    throw new Error('当前预览环境不提供原生配置文件导入');
   }
-  const text = await file.text();
-  return parseBackupFile(text);
+  const picked = await pickFile('config', { operationId, maxBytes: MAX_BACKUP_FILE_BYTES });
+  try {
+    return await invoke<ParsedConfigBackup>('parse_config_backup', { path: picked.path });
+  } finally {
+    await deleteTempFile(picked.path).catch(console.warn);
+  }
 }

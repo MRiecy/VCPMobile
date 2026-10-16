@@ -641,7 +641,7 @@ pub async fn load_chat_text_history_for_context(
 }
 
 /// 以 Mobile 本地 CAS 为唯一文件真理源，禁止消息写入隐式下载桌面附件。
-async fn normalize_attachments_from_local_cas<R: tauri::Runtime>(
+pub(crate) async fn normalize_attachments_from_local_cas<R: tauri::Runtime>(
     app: &AppHandle<R>,
     pool: &sqlx::SqlitePool,
     message: &mut ChatMessage,

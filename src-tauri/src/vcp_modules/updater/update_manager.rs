@@ -1115,7 +1115,10 @@ pub async fn install_update(
             app.clone(),
             staged_string.clone(),
             None,
-        );
+            None,
+            None,
+        )
+        .await;
         if let Err(error) = result {
             remove_file_if_exists(&staged).await.ok();
             let status = transition_install_error(&app, &session, error, true).await;

@@ -9,18 +9,20 @@
     <!-- Image Card -->
     <div class="w-full h-full rounded-xl overflow-hidden bg-black/5 dark:bg-white/5">
       <img 
+        v-if="safeSrc"
         :src="safeSrc" 
         :alt="file.name"
         class="w-full h-full object-cover"
         loading="lazy"
       />
+      <span v-else class="flex h-full items-center justify-center text-[10px] opacity-50">图片</span>
     </div>
   </AttachmentPreviewBase>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { ref, watch } from "vue";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import AttachmentPreviewBase from "../AttachmentPreviewBase.vue";
 import type { Attachment } from "../../../../core/types/chat";
 
@@ -38,22 +40,31 @@ const props = withDefaults(defineProps<Props>(), {
 
 const emit = defineEmits<{ (e: "remove", index: number): void }>();
 
-const safeSrc = computed(() => {
-  // Priority use thumbnailPath if available
-  const src = props.file.thumbnailPath || props.file.src;
-  if (!src) return "";
-  
-  if (
-    src.startsWith("http") ||
-    src.startsWith("data:") ||
-    src.startsWith("blob:")
-  ) {
-    return src;
-  }
+const safeSrc = ref("");
+watch([() => props.file.hash, () => props.file.thumbnailPath], async ([hash, thumbnail], _old, onCleanup) => {
+  let active = true;
+  let ownedPath: string | undefined;
+  onCleanup(() => {
+    active = false;
+    if (ownedPath) void invoke("release_attachment_image", { path: ownedPath }).catch(console.warn);
+  });
+  safeSrc.value = "";
   try {
-    return convertFileSrc(src.replace("file://", ""));
-  } catch (e) {
-    return "";
+    if (thumbnail) {
+      safeSrc.value = convertFileSrc(thumbnail.replace("file://", ""));
+    } else if (hash) {
+      const image = await invoke<{ path: string }>("get_attachment_image", {
+        hash, purpose: "display", maxDimension: 512,
+      });
+      if (!active) {
+        await invoke("release_attachment_image", { path: image.path }).catch(console.warn);
+        return;
+      }
+      ownedPath = image.path;
+      safeSrc.value = convertFileSrc(image.path);
+    }
+  } catch (error) {
+    console.warn("[ImageAttachment] Preview unavailable:", error);
   }
-});
+}, { immediate: true });
 </script>

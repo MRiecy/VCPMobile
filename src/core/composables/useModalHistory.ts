@@ -1,4 +1,4 @@
-import { ref } from 'vue';
+import { ref, nextTick } from 'vue';
 
 /**
  * VCP Mobile Unified Modal History Stack 2.0 (Operation Aegis)
@@ -13,10 +13,88 @@ interface ModalInstance {
   id: string;
   /** Return false when the current modal owns a non-dismissible operation. */
   close: () => boolean | void;
+  surface?: () => HTMLElement | null;
+  opener: HTMLElement | null;
+  route: string;
+  canDismiss?: () => boolean;
 }
 
 // Global stack to track open modals across the entire application
 const modalStack = ref<ModalInstance[]>([]);
+let stackRevision = 0;
+
+function resolveSurface(modal: ModalInstance): HTMLElement | null {
+  return modal.surface?.() ?? document.querySelector<HTMLElement>(`[data-vcp-modal-id="${CSS.escape(modal.id)}"]`);
+}
+
+function isAvailableFocusTarget(element: HTMLElement): boolean {
+  if (!element.isConnected || element.matches(':disabled')
+    || element.closest('[hidden], [inert], [aria-hidden="true"]')) return false;
+  for (let node: HTMLElement | null = element; node; node = node.parentElement) {
+    const style = getComputedStyle(node);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+  }
+  return true;
+}
+
+function removeModal(index: number) {
+  const wasTop = index === modalStack.value.length - 1;
+  const modal = modalStack.value[index];
+  const activeAtClose = document.activeElement;
+  modalStack.value.splice(index, 1);
+  const revision = ++stackRevision;
+  if (!wasTop) return;
+  const surface = resolveSurface(modal);
+  if (surface && activeAtClose !== modal.opener && activeAtClose !== document.body
+    && activeAtClose !== document.documentElement && !surface.contains(activeAtClose)) return;
+  void nextTick(() => {
+    const active = document.activeElement;
+    if (revision !== stackRevision || !modal.opener?.isConnected || modal.route !== window.location.hash) return;
+    // A different focus chosen while closing belongs to the user/new context.
+    if (active !== activeAtClose && active !== document.body && active !== document.documentElement) return;
+    const parent = modalStack.value[modalStack.value.length - 1];
+    const parentSurface = parent ? resolveSurface(parent) : null;
+    if (parentSurface && !parentSurface.contains(modal.opener)) return;
+    if (!isAvailableFocusTarget(modal.opener)) return;
+    modal.opener.focus({ preventScroll: true });
+  });
+}
+
+function closeModal(modal: ModalInstance) {
+  if (modal.canDismiss?.() === false) return false;
+  if (modal.close() === false) return false;
+  useModalHistory().unregisterModal(modal.id);
+  return true;
+}
+
+function handleModalKeydown(event: KeyboardEvent) {
+  const modal = modalStack.value[modalStack.value.length - 1];
+  if (!modal || event.isComposing || event.defaultPrevented) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    // Reuse unregisterModal's history ordering for keyboard-driven close.
+    closeModal(modal);
+    return;
+  }
+  if (event.key !== 'Tab') return;
+  const surface = resolveSurface(modal);
+  if (!surface) return;
+  const focusable = Array.from(surface.querySelectorAll<HTMLElement>(
+    'button, a[href], input, textarea, select, [tabindex], [contenteditable="true"]',
+  )).filter(element => element.tabIndex >= 0 && isAvailableFocusTarget(element));
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  const active = document.activeElement;
+  if (!first) {
+    event.preventDefault();
+    surface.tabIndex = -1;
+    surface.focus({ preventScroll: true });
+  } else if (active === surface || !surface.contains(active) || (event.shiftKey ? active === first : active === last)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first)?.focus({ preventScroll: true });
+  }
+}
 
 // Modal history runtime state machine
 // IDLE: normal state
@@ -61,12 +139,12 @@ const handlePopState = (event: PopStateEvent) => {
     state = 'POPSTATE_HANDLING';
     let shouldClose = true;
     try {
-      shouldClose = topModal.close() !== false;
+      shouldClose = topModal.canDismiss?.() !== false && topModal.close() !== false;
     } finally {
       if (shouldClose) {
         // 主动从栈中移除，不再依赖 close 回调自行调用 unregisterModal
         const idx = modalStack.value.findIndex(m => m.id === topModal.id);
-        if (idx !== -1) modalStack.value.splice(idx, 1);
+        if (idx !== -1) removeModal(idx);
       } else {
         // 返回键已将当前 history entry 弹出；拒绝关闭时立即补回同一个
         // modal entry，否则下一次系统返回会绕过仍在屏幕上的页面。
@@ -95,6 +173,7 @@ if (typeof window !== 'undefined' && !listenerRegistered) {
   listenerRegistered = true;
   popstateHandler = handlePopState;
   window.addEventListener('popstate', popstateHandler);
+  window.addEventListener('keydown', handleModalKeydown, true);
 
   // Initial check: if we are at root, push the dummy state
   // Note: App.vue will call this again after router is ready to be 100% sure
@@ -104,6 +183,7 @@ if (typeof window !== 'undefined' && !listenerRegistered) {
 export function cleanupModalHistory() {
   if (popstateHandler && typeof window !== 'undefined') {
     window.removeEventListener('popstate', popstateHandler);
+    window.removeEventListener('keydown', handleModalKeydown, true);
     popstateHandler = null;
     listenerRegistered = false;
   }
@@ -115,15 +195,22 @@ export function useModalHistory() {
    * @param id Unique identifier for the modal
    * @param closeHandler Callback to close the modal (triggered by back gesture)
    */
-  const registerModal = (id: string, closeHandler: () => boolean | void) => {
+  const registerModal = (id: string, closeHandler: () => boolean | void, surface?: () => HTMLElement | null, canDismiss?: () => boolean) => {
     // Avoid double registration
-    if (modalStack.value.some(m => m.id === id)) return;
+    const existing = modalStack.value.find(m => m.id === id);
+    if (existing) {
+      if (surface) existing.surface = surface;
+      if (canDismiss) existing.canDismiss = canDismiss;
+      return;
+    }
 
     // Push state to history
     window.history.pushState({ vcpRoot: true, vcpModalId: id }, '');
 
     // Add to our LIFO stack
-    modalStack.value.push({ id, close: closeHandler });
+    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    modalStack.value.push({ id, close: closeHandler, surface, canDismiss, opener, route: window.location.hash });
+    stackRevision += 1;
   };
 
   /**
@@ -145,7 +232,7 @@ export function useModalHistory() {
       }
     }
 
-    modalStack.value.splice(index, 1);
+    removeModal(index);
   };
 
   const closeTopModal = (): boolean => {
@@ -155,11 +242,7 @@ export function useModalHistory() {
       console.log(`[ModalHistory] Closing top modal: ${topModal.id}`);
 
       try {
-        if (topModal.close() !== false) {
-          // close 回调可能已自行 unregister，因此按 identity 二次兜底。
-          const index = modalStack.value.findIndex(modal => modal.id === topModal.id);
-          if (index !== -1) modalStack.value.splice(index, 1);
-        }
+        closeModal(topModal);
       } catch (err) {
         console.error(`[ModalHistory] Failed to call close on modal ${topModal.id}:`, err);
       }

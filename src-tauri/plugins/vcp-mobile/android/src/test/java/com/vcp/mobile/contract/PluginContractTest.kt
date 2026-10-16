@@ -119,8 +119,8 @@ class PluginContractTest {
 
         assertTrue(
             "guest-js 应暴露独立的 shareFileNative API",
-            guestJs.contains("function shareFileNative(path: string)") &&
-                guestJs.contains("{ path, action: 'share' }"),
+            guestJs.contains("function shareFileNative(path: string, fileName?: string)") &&
+                guestJs.contains("{ path, action: 'share', fileName }"),
         )
         assertTrue(
             "Rust 桥接只允许 view/share 两种动作",

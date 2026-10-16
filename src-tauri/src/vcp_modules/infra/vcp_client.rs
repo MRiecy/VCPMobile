@@ -1219,6 +1219,7 @@ async fn preprocess_multimodal_messages<R: Runtime>(
     raw_messages: Vec<Value>,
 ) -> Result<Vec<Value>, String> {
     let mut messages: Vec<Value> = Vec::new();
+    let mut image_data_bytes = 0usize;
     for msg_val in raw_messages.into_iter() {
         if !msg_val.is_object() {
             messages.push(json!({"role": "system", "content": "[Invalid message]"}));
@@ -1268,7 +1269,7 @@ async fn preprocess_multimodal_messages<R: Runtime>(
                         if let Ok(record) = resolved {
                             let path_buf = record.path;
                             if media_kind == "image" {
-                                // 图片类型：长边 > 1120px 时缩放，避免多模态 payload 过大
+                                // 静态用途派生：保留原件，单图与整个请求分别执行预算。
                                 let path_buf_clone = path_buf.clone();
                                 let app_clone = app.clone();
                                 match tokio::task::spawn_blocking(move || {
@@ -1277,6 +1278,12 @@ async fn preprocess_multimodal_messages<R: Runtime>(
                                 .await
                                 {
                                     Ok(Ok(data_url)) => {
+                                        image_data_bytes = image_data_bytes
+                                            .checked_add(data_url.len())
+                                            .ok_or("模型图片请求大小溢出")?;
+                                        if image_data_bytes > crate::vcp_modules::media_processor::image_extractor::MODEL_REQUEST_IMAGE_DATA_MAX_BYTES {
+                                            return Err("本次请求图片超过 16 MiB 编码预算，请减少图片数量或缩短包含图片的历史".into());
+                                        }
                                         new_parts.push(json!({
                                             "type": "image_url",
                                             "image_url": { "url": data_url }
@@ -1284,10 +1291,7 @@ async fn preprocess_multimodal_messages<R: Runtime>(
                                         converted = true;
                                     }
                                     Ok(Err(e)) => {
-                                        log::warn!(
-                                                "[VCPClient] Image conversion failed for attachment CAS {}: {}",
-                                                short_hash(hash), e
-                                            );
+                                        return Err(format!("图片 {label} 处理失败：{e}"))
                                     }
                                     Err(e) => {
                                         log::warn!(
@@ -1305,6 +1309,10 @@ async fn preprocess_multimodal_messages<R: Runtime>(
                                     }).await {
                                         Ok(Ok(frames)) => {
                                             for frame_url in frames {
+                                                image_data_bytes = image_data_bytes.checked_add(frame_url.len()).ok_or("模型图片请求大小溢出")?;
+                                                if image_data_bytes > crate::vcp_modules::media_processor::image_extractor::MODEL_REQUEST_IMAGE_DATA_MAX_BYTES {
+                                                    return Err("本次请求图片超过 16 MiB 编码预算，请减少图片或视频数量".into());
+                                                }
                                                 new_parts.push(json!({
                                                     "type": "image_url",
                                                     "image_url": { "url": frame_url }
@@ -1364,6 +1372,21 @@ async fn preprocess_multimodal_messages<R: Runtime>(
                             }));
                         }
                     } else {
+                        if obj.get("type").and_then(Value::as_str) == Some("image_url") {
+                            if let Some(url) = obj
+                                .get("image_url")
+                                .and_then(|image| image.get("url"))
+                                .and_then(Value::as_str)
+                                .filter(|url| url.starts_with("data:"))
+                            {
+                                image_data_bytes = image_data_bytes
+                                    .checked_add(url.len())
+                                    .ok_or("模型图片请求大小溢出")?;
+                                if image_data_bytes > crate::vcp_modules::media_processor::image_extractor::MODEL_REQUEST_IMAGE_DATA_MAX_BYTES {
+                                    return Err("本次请求图片超过 16 MiB 编码预算，请减少图片数量".into());
+                                }
+                            }
+                        }
                         new_parts.push(part.clone());
                     }
                 } else {

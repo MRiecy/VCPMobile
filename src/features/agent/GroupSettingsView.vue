@@ -88,6 +88,7 @@ let saveSuccessTimer: ReturnType<typeof setTimeout> | null = null;
 const originalConfig = ref<EditableGroupConfig | null>(null);
 
 onUnmounted(() => {
+  cancelAvatarPicker();
   if (saveSuccessTimer) {
     clearTimeout(saveSuccessTimer);
     saveSuccessTimer = null;
@@ -102,6 +103,13 @@ const isCropping = ref(false);
 const isPickingAvatar = ref(false);
 const cropImg = ref("");
 const avatarWorkingPath = ref<string | null>(null);
+let avatarOperationId: string | null = null;
+
+const cancelAvatarPicker = () => {
+  const operationId = avatarOperationId;
+  avatarOperationId = null;
+  if (operationId) void invoke("plugin:vcp-mobile|cancel_file_operation", { operationId }).catch(console.warn);
+};
 
 const releaseAvatarWorkingCopy = async () => {
   const filePath = avatarWorkingPath.value;
@@ -120,23 +128,24 @@ const triggerFileInput = async () => {
   const epoch = editorEpoch;
   const groupId = props.id;
   if (!groupId || !isOpenEditorCurrent(epoch, groupId)) return;
-  if (!isAndroid) {
+  if (!isAndroid && !isIOS) {
     notificationStore.addNotification({
       type: "info",
       title: "头像选图暂不可用",
-      message: isIOS
-        ? "当前 iOS 版本尚未接入头像选图，现有头像仍可正常使用。"
-        : "当前预览环境不提供原生头像选图。",
+      message: "当前预览环境不提供原生头像选图。",
       toastOnly: true,
     });
     return;
   }
 
   isPickingAvatar.value = true;
+  const operationId = `avatar_${crypto.randomUUID()}`;
+  avatarOperationId = operationId;
   try {
     await releaseAvatarWorkingCopy();
-    const picked = await pickFile("avatar");
-    if (!isOpenEditorCurrent(epoch, groupId)) {
+    if (avatarOperationId !== operationId || !isOpenEditorCurrent(epoch, groupId)) return;
+    const picked = await pickFile("avatar", { operationId });
+    if (avatarOperationId !== operationId || !isOpenEditorCurrent(epoch, groupId)) {
       await deleteTempFile(picked.path);
       return;
     }
@@ -144,6 +153,7 @@ const triggerFileInput = async () => {
     cropImg.value = convertFileSrc(picked.path);
     isCropping.value = true;
   } catch (error) {
+    if (!isOpenEditorCurrent(epoch, groupId)) return;
     if (!String(error).toLowerCase().includes("cancel")) {
       console.error("Failed to prepare Group avatar image:", error);
       notificationStore.addNotification({
@@ -154,6 +164,7 @@ const triggerFileInput = async () => {
       });
     }
   } finally {
+    if (avatarOperationId === operationId) avatarOperationId = null;
     if (isEpochCurrent(epoch)) isPickingAvatar.value = false;
   }
 };
@@ -272,6 +283,7 @@ const saveOnClose = async (epoch: number) => {
 };
 
 watch([() => props.isOpen, () => props.id], ([isOpen, id]) => {
+  cancelAvatarPicker();
   const epoch = ++editorEpoch;
   isPickingAvatar.value = false;
   isCropping.value = false;

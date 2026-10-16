@@ -345,7 +345,7 @@ describe('邮箱 · V1.1（补丁端点）', () => {
       await store.downloadAttachment('msg_001', 'part-1', 'note.txt');
       expect(store.detail?.text).toBe('邮件正文');
       expect(store.detail?.attachments[0]?.filename).toBe('note.txt');
-      expect(calls).toEqual(platform === 'android' ? ['download-and-save'] : []);
+      expect(calls).toEqual(['download-and-save']);
     } finally {
       store.stopSession();
     }

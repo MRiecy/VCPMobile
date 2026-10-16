@@ -28,12 +28,14 @@ export interface BatteryStatusDto {
 }
 
 export interface NativeFileStartDetail {
+  operationId?: string;
   name: string;
   size: number;
   mime: string;
 }
 
 export interface NativeFileProgressDetail {
+  operationId?: string;
   name: string;
   mime: string;
   loaded: number;

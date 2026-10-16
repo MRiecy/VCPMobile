@@ -30,11 +30,12 @@ gh workflow run ios-g1.yml --ref main -f phase=phase-3 -f profile=debug
 | 文件 | 所有权 |
 |---|---|
 | `../../.github/toolchain.env` | CI、Android Release 与 iOS 阶段诊断共用的 Node/pnpm 精确版本；各 workflow 在安装前读取 |
-| `../tauri.ios.conf.json` | 最低 iOS/iPadOS 26.0，以及 Network/UserNotifications/CoreMotion/CoreLocation framework；不覆盖 Android 配置，Metal 由锁定 CLI 模板提供 |
-| `../Info.ios.plist` | 单 Scene manifest、LAN/定位/运动用途；Tauri build 自动合并 |
+| `../tauri.ios.conf.json` | 最低 iOS/iPadOS 26.0；声明网络、通知、传感器以及 PhotosUI/Photos/ImageIO/CoreGraphics/AVFoundation/QuickLook/UniformTypeIdentifiers/CryptoKit framework；Metal 由锁定 CLI 模板提供 |
+| `../Info.ios.plist` | 单 Scene、LAN/定位/运动/相机/相册用途、`.vcpcfg` 类型和主 App Group 标识；Tauri build 自动合并 |
 | `g1-inputs.json` | 固定 Xcode 26.2 的路径、XcodeGen 下载地址和下载完整性摘要 |
 | `PrivacyInfo.xcprivacy` | 文件元数据、计时和本机磁盘容量展示的 required reasons；后续原生 API/数据使用变化需按真实用途核对 |
 | `scripts/g1.py` | 初始化证据、重放工程、真实 device 构建、归档收集及结果摘要 |
+| [`share/`](share/README.md) | 独立 Share Extension 源码、Info、双 target App Group entitlement 和 Phase 6 重签输入 |
 
 Swift plugin 的源文件仍归 `../plugins/vcp-mobile/ios/`。构建直接使用 Tauri/SwiftPM 的正常依赖流程，不拦截 `swift`，不维护构建包白名单，不向 registry 预置或改写 lock。Cargo/pnpm 的正常锁文件和 VCP Swift manifest 的依赖约束继续生效。
 
@@ -44,11 +45,11 @@ Rust `swift-rs` 与 SwiftPM `SwiftRs` 是独立依赖。各 Swift root 按自己
 
 ## 工程重放
 
-Actions 中先安装 device Rust target，执行 `pnpm tauri ios init --ci --skip-targets-install`，再执行 overlay。overlay 新增 `project.vcp.json`，通过 XcodeGen `include` 合并 CLI 的 `project.yml`；补充隐私 resource、device family 和 G1 诊断选项，并从现有 `icons/ios/` 重建 AppIcon catalog。minimum 读取 `tauri.ios.conf.json`；不在 G1 配置重复维护。对相同输入重复 overlay 不会累加 resource，也不改写 CLI spec。
+Actions 中先安装 device Rust target，执行 `pnpm tauri ios init --ci --skip-targets-install`，再执行 overlay。overlay 新增 `project.vcp.json`，通过 XcodeGen `include` 合并 CLI 的 `project.yml`；补充隐私 resource、device family、Share Extension target/embed dependency 和 G1 诊断选项，并从现有 `icons/ios/` 重建 AppIcon catalog。两个 target 的 minimum 读取 `tauri.ios.conf.json`；扩展版本读取 Tauri 产品版本与 iOS bundleVersion。对相同输入重复 overlay 不会累加 resource，也不改写 CLI spec。
 
 `build` 仅允许在 GitHub Actions macOS 中执行，要求 `gen/apple` 尚不存在，避免覆盖已有工程。workflow 选择 runner，Node/pnpm 从共用 `toolchain.env` 读取。脚本先用 `sudo -n xcode-select --switch` 将临时 runner 的系统 Xcode 切到配置固定的 26.2，再记录工具版本并构建；同时保留 `DEVELOPER_DIR`，使直接调用和 Tauri 过滤环境变量后的子进程使用同一套工具。切换失败即停止，日志保存为 `xcode-select.log`；选择路径、可用 Xcode 和实际工具版本写入 manifest。编译目标仍为 device arm64，使用 `--no-sign`，并清除子进程环境的签名输入。下载摘要、解压路径/符号链接和 overlay 写入边界保护保留。iOS 专用 profile 和 Apple 环境设置不影响 Android 构建。
 
-编译成功后用 `ditto` 保存实际 `.xcarchive.zip`，manifest 记录归档摘要；同时收集 bundle 文件列表、Info.plist、已有隐私清单及 `lipo`/`nm`/`otool` 原始输出。不对 Bundle ID、Scene、图标、minimum、符号或包集合写第二套预期断言。诊断采集失败写入 `diagnosticErrors`，仍保留已生成归档；真实构建/归档收集失败则正常失败。
+编译成功后用 `ditto` 保存实际 `.xcarchive.zip`，manifest 记录归档摘要；同时收集 bundle 文件列表、Info.plist、已有隐私清单及 `lipo`/`nm`/`otool` 原始输出。Phase 4 对实际 `.appex` 嵌入、分享入口、最低版本以及主/扩展版本和 App Group 字段一致性进行归档检查，失败使本次诊断失败；它不证明最终签名授权。普通诊断采集失败写入 `diagnosticErrors`，仍保留已生成归档；真实构建/归档收集失败则正常失败。
 
 manifest 的 `status=built` 仅表示构建和归档收集成功，产物内容由人工结合源码与诊断判断。阶段诊断不自动关闭 G1，也不替代 G2 的结构检查和用户打包；不生成 `.ipa`。
 

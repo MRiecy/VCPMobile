@@ -47,6 +47,9 @@ const isLoading = computed(() => props.file.status === "loading");
         class="text-[9px] text-white font-bold tabular-nums"
         >{{ file.progress }}%</span
       >
+      <span v-else-if="file.transferredBytes !== undefined" class="text-[9px] text-white font-mono">
+        已复制 {{ (file.transferredBytes / 1024 / 1024).toFixed(1) }} MiB
+      </span>
     </div>
   </div>
 </template>

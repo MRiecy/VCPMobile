@@ -55,7 +55,7 @@ const modes = [
     <Transition name="fade">
       <div
         v-if="props.modelValue"
-        class="fixed inset-0 z-dialog bg-black/50 flex items-center justify-center p-6"
+        class="vcp-viewport-surface fixed inset-0 z-dialog bg-black/50 flex items-center justify-center p-6"
         @click.self="close"
         @touchmove.prevent
       >

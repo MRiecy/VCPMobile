@@ -64,6 +64,7 @@ src-tauri/src/
 - `vcp_modules/<domain>/` 持有对应业务状态、输入校验、生命周期和副作用。
 - `persistence/` 持有数据库写入与读取边界，调用领域不复制第二套持久化状态。
 - `infra/` 提供被多个领域共享的生命周期和基础能力，不反向拥有各业务领域结果。
+- `infra/file_manager/operations.rs` 裁定文件取消与 CAS 提交，`resources.rs` 管理用途派生、文本预览和临时导出；`infra/share_inbox.rs` 持有当前分享记录与跨进程槽位，发送经现有消息仓储同事务落盘。启动附件回收同时读取当前分享持有的 hash。
 - `distributed/` 的 client、registry 与 telemetry 由 `DistributedState` 汇合；设备工具保持自包含，不复制 CLI 或其他领域已有的运行时。
 
 新增全局状态前先确定唯一 owner、建立时点、替换条件和释放路径。`app.manage` 只是状态注入机制，不等于状态所有权可以分散到多个调用者。

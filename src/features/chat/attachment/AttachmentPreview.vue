@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { shareFileNative, type NativeFileActionResult } from "tauri-plugin-vcp-mobile";
 import { X } from "lucide-vue-next";
 import AttachmentViewer from "./AttachmentViewer.vue";
 import AttachmentRenderer from './AttachmentRenderer.vue';
@@ -19,6 +20,8 @@ const props = defineProps<{
 
 const isViewerOpen = ref(false);
 const activeFile = ref<Attachment | null>(null);
+const nativeBusy = ref(false);
+const unsupportedPreviewPath = ref("");
 
 const overlayStore = useOverlayStore();
 const notificationStore = useNotificationStore();
@@ -53,6 +56,8 @@ const isPreviewableText = (att: Attachment): boolean => {
 
 const openViewer = (att: Attachment) => {
   if (att.status === "desktop_only") return;
+  unsupportedPreviewPath.value = "";
+  activeFile.value = att;
   const ext = att.name.split(".").pop()?.toLowerCase() || "";
   const isImage = IMAGE_WHITELIST.includes(ext) || (att.type || "").startsWith("image/");
   const isText = isPreviewableText(att);
@@ -67,6 +72,7 @@ const openViewer = (att: Attachment) => {
 };
 
 const openExternal = async (path: string) => {
+  if (nativeBusy.value) return;
   if (!path) {
     notificationStore.addNotification({
       type: "error",
@@ -75,26 +81,60 @@ const openExternal = async (path: string) => {
     });
     return;
   }
-  if (!isAndroid) {
+  if (!isAndroid && !isIOS) {
     notificationStore.addNotification({
       type: "info",
       title: "原生文件打开暂不可用",
-      message: isIOS
-        ? "当前 iOS 版本尚未接入此类文件的原生打开方式，附件仍保留。"
-        : "当前预览环境不提供原生文件打开。",
+      message: "当前预览环境不提供原生文件打开。",
       toastOnly: true,
     });
     return;
   }
+  nativeBusy.value = true;
   try {
-    await invoke("open_file", { path });
+    const result = await invoke<NativeFileActionResult>("open_file", { path, fileName: activeFile.value?.name });
+    unsupportedPreviewPath.value = result.outcome === "cannotPreview" ? path : "";
   } catch (e) {
+    if (String(e).toLowerCase().includes("cancel")) return;
     console.error("[AttachmentPreview] Open failed:", e);
     notificationStore.addNotification({
       type: "error",
       title: "无法打开附件",
       message: e instanceof Error ? e.message : String(e),
     });
+  } finally {
+    nativeBusy.value = false;
+  }
+};
+
+const handoffAttachment = async (action: "share" | "export") => {
+  const path = unsupportedPreviewPath.value || activeFile.value?.internalPath || activeFile.value?.src;
+  if (!path || nativeBusy.value) return;
+  nativeBusy.value = true;
+  try {
+    if (action === "share") {
+      const result = await shareFileNative(path, activeFile.value?.name);
+      if (result.outcome === "cancelled") return;
+      notificationStore.addNotification({
+        type: "success", toastOnly: true,
+        message: result.outcome === "completed" ? "已交给所选应用" : "已打开系统分享面板",
+      });
+    } else {
+      const result = await invoke<{ displayName: string }>("export_attachment_file", {
+        path, fileName: activeFile.value?.name,
+      });
+      notificationStore.addNotification({
+        type: "success", toastOnly: true,
+        message: `${isIOS ? '已保存到所选文件位置' : '已保存到下载目录'}：${result.displayName}`,
+      });
+    }
+    unsupportedPreviewPath.value = "";
+  } catch (error) {
+    if (!String(error).toLowerCase().includes("cancel")) {
+      notificationStore.addNotification({ type: "error", message: String(error), toastOnly: true });
+    }
+  } finally {
+    nativeBusy.value = false;
   }
 };
 
@@ -135,6 +175,14 @@ const removeAttachment = async (index: number) => {
   <div
     class="vcp-attachment-preview flex flex-wrap gap-3 mt-3 w-full max-w-full overflow-hidden"
   >
+    <div v-if="unsupportedPreviewPath" class="w-full border-l-2 border-gray-400 pl-3 py-2 text-xs">
+      <p class="mb-2 opacity-70">系统无法预览此文件，附件仍保留。</p>
+      <div class="flex flex-wrap items-center gap-3">
+        <button :disabled="nativeBusy" class="min-h-11 underline disabled:opacity-40" @click="handoffAttachment('share')">分享给其他应用</button>
+        <button :disabled="nativeBusy" class="min-h-11 underline disabled:opacity-40" @click="handoffAttachment('export')">导出到文件</button>
+        <button :disabled="nativeBusy" class="min-h-11 opacity-60" @click="unsupportedPreviewPath = ''">关闭</button>
+      </div>
+    </div>
     <div
       v-for="(att, index) in (attachments || []).filter(Boolean)"
       :key="`${att?.hash || 'attachment'}:${att?.attachmentOrder ?? index}`"
@@ -176,6 +224,8 @@ const removeAttachment = async (index: number) => {
         :is-open="isViewerOpen"
         @close="isViewerOpen = false"
         @open-external="openExternal"
+        @share-file="handoffAttachment('share')"
+        @export-file="handoffAttachment('export')"
       />
     </Teleport>
   </div>

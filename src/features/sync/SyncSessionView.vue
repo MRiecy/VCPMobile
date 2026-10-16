@@ -201,7 +201,7 @@ const handlePrerenderToggle = async (val: boolean) => {
 
 <template>
   <SlidePage :is-open="store.isOpen" :z-index="props.zIndex">
-    <div class="vcp-safe-inline fixed inset-0 flex flex-col bg-[#0a0f14] text-white overflow-hidden"
+    <div class="vcp-viewport-surface vcp-safe-inline fixed inset-0 flex flex-col bg-[#0a0f14] text-white overflow-hidden"
          :class="{ 'pointer-events-none': !store.isOpen }">
 
       <!-- 顶部栏 -->

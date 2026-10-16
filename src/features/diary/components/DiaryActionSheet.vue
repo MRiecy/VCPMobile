@@ -23,7 +23,7 @@ const emit = defineEmits<{
 
 <template>
   <Transition name="diary-sheet">
-    <div v-if="open" class="fixed inset-0 z-sheet no-swipe">
+    <div v-if="open" data-vcp-modal-id="Diary:Sheet" class="vcp-viewport-surface fixed inset-0 z-sheet no-swipe">
       <button type="button" class="absolute inset-0 w-full h-full border-0 bg-black/45" aria-label="关闭操作面板" @click="emit('close')" />
       <section
         class="diary-action-sheet absolute inset-x-0 bottom-0 text-[var(--primary-text)] pb-[var(--vcp-safe-bottom,48px)]"

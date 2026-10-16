@@ -30,6 +30,10 @@ vi.mock('../../../core/stores/overlay', () => ({ useOverlayStore: () => ({}) }))
 vi.mock('../../../core/stores/notification', () => ({ useNotificationStore: () => ({ addNotification: context.notice }) }));
 vi.mock('../../../core/stores/chatSessionStore', () => ({ useChatSessionStore: () => ({ currentSelectedItem: null, selectTopicById: context.selectTopic }) }));
 vi.mock('../../../core/stores/assistant', () => ({ useAssistantStore: () => ({}) }));
+vi.mock('../../../core/stores/shareStore', () => ({ useShareStore: () => ({
+  current: null, failures: [], selectorOpen: false, busy: false,
+  refresh: async () => {}, receiveAndroid: () => {}, notify: () => {},
+}) }));
 vi.mock('../../../features/cli/vcpCliStore', () => ({ useVcpCliStore: () => ({}) }));
 vi.mock('vue-router', () => ({ useRouter: () => ({ isReady: async () => {}, afterEach: () => () => {} }) }));
 

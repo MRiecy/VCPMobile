@@ -2,9 +2,10 @@
 defineOptions({
   inheritAttrs: false
 });
-import { ref, watch, nextTick } from 'vue';
+import { ref, watch, nextTick, onUnmounted } from 'vue';
 import { X, Check, Loader2 } from 'lucide-vue-next';
 import { useKeyboardInsets } from '../../core/composables/useKeyboardInsets';
+import { useModalHistory } from '../../core/composables/useModalHistory';
 
 const props = defineProps<{
   isOpen: boolean;
@@ -21,16 +22,27 @@ const emit = defineEmits<{
 const editorContent = ref(props.initialValue || '');
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 const { keyboardHeight } = useKeyboardInsets();
+const surfaceRef = ref<HTMLElement | null>(null);
+const { registerModal, unregisterModal } = useModalHistory();
 
 watch(() => props.isOpen, (newVal) => {
   if (newVal) {
+    registerModal('FullScreenEditor', () => {
+      if (props.saving) return false;
+      emit('cancel');
+      emit('update:isOpen', false);
+    }, () => surfaceRef.value, () => !props.saving);
     editorContent.value = props.initialValue || '';
     nextTick(() => {
+      if (!props.isOpen) return;
       textareaRef.value?.focus();
       textareaRef.value?.setSelectionRange(editorContent.value.length, editorContent.value.length);
     });
+  } else {
+    unregisterModal('FullScreenEditor');
   }
-});
+}, { immediate: true });
+onUnmounted(() => unregisterModal('FullScreenEditor'));
 
 // 键盘弹出后，确保光标/底部内容仍在可视区域内
 watch(keyboardHeight, () => {
@@ -94,8 +106,8 @@ const handleTouchMove = (e: TouchEvent) => {
 <template>
   <Teleport to="body">
     <Transition name="slide-up">
-      <div v-if="isOpen" v-bind="$attrs"
-        class="vcp-safe-inline fixed inset-0 z-viewer flex flex-col bg-[#f0f4f8] dark:bg-[#121e23] overflow-hidden"
+      <div v-if="isOpen" ref="surfaceRef" v-bind="$attrs" role="dialog" aria-modal="true" aria-label="编辑消息"
+        class="vcp-viewport-surface vcp-safe-inline fixed inset-0 z-viewer flex flex-col bg-[#f0f4f8] dark:bg-[#121e23] overflow-hidden"
         :style="{ paddingBottom: `calc(var(--vcp-safe-bottom, 0px) + ${keyboardHeight}px)` }">
 
         <!-- 顶部导航栏 -->

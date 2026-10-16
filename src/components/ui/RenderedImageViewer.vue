@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { saveImageToGallery } from 'tauri-plugin-vcp-mobile';
+import { exportSvg, IMAGE_EXPORT_MAX_BYTES, readBoundedImageBlob, withImageExportQueue } from '../../core/utils/renderedImageExport';
 import { Download, Minus, Plus, RotateCcw, X } from "lucide-vue-next";
 import { useModalHistory } from "../../core/composables/useModalHistory";
 import { useNotificationStore } from "../../core/stores/notification";
@@ -13,8 +15,12 @@ interface SandboxImageMessage {
   source?: string;
   type?: string;
   nonce?: string;
+  requestId?: string;
+  error?: string;
   image?: {
     src?: string;
+    bytes?: ArrayBuffer;
+    mime?: string;
     alt?: string;
     title?: string;
     fileName?: string;
@@ -28,6 +34,86 @@ const { registerModal, unregisterModal } = useModalHistory();
 
 const containerRef = ref<HTMLElement | null>(null);
 const imageRef = ref<HTMLImageElement | null>(null);
+const surfaceRef = ref<HTMLElement | null>(null);
+const displaySrc = ref('');
+const preparationError = ref('');
+const isPreparing = ref(false);
+interface PreparedImage { path: string; displayPath: string; mime: string; size: number; width: number; height: number; svgMarkup?: string }
+interface ImageLease { image: PreparedImage; temporaryPath?: string; users: number }
+let currentLease: ImageLease | null = null;
+let preparationController: AbortController | null = null;
+
+async function releaseLease(lease: ImageLease) {
+  if (--lease.users !== 0) return;
+  await invoke('release_rendered_image', { path: lease.image.path, displayPath: lease.image.displayPath }).catch(console.warn);
+  if (lease.temporaryPath) await invoke('release_temporary_export', { path: lease.temporaryPath }).catch(console.warn);
+}
+
+watch(() => state.revision, async () => {
+  preparationController?.abort();
+  const previous = currentLease;
+  currentLease = null;
+  displaySrc.value = '';
+  if (previous) void releaseLease(previous);
+  preparationError.value = '';
+  isPreparing.value = false;
+  if (!state.isOpen || !state.src) return;
+  const controller = new AbortController();
+  preparationController = controller;
+  const revision = state.revision;
+  let source = state.src;
+  let temporaryPath: string | undefined;
+  let prepared: PreparedImage | undefined;
+  isPreparing.value = true;
+  try {
+    if (/^(blob:|data:)/i.test(source)) {
+      let blob = await readBoundedImageBlob(source, controller.signal);
+      if (blob.type.split(';')[0] === 'image/svg+xml') {
+        const svg = new DOMParser().parseFromString(await blob.text(), 'image/svg+xml').documentElement;
+        if (svg.localName !== 'svg' || svg.querySelector('parsererror')) throw new Error('SVG 图片格式无效');
+        blob = await exportSvg(svg as unknown as SVGSVGElement, controller.signal);
+      }
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      if (controller.signal.aborted) return;
+      const temporary = await invoke<{path: string}>('store_temporary_export', {
+        fileBytes: Array.from(bytes), originalName: state.fileName || 'rendered-image',
+      });
+      temporaryPath = source = temporary.path;
+    }
+    if (controller.signal.aborted) return;
+    prepared = await invoke<PreparedImage>('prepare_rendered_image', { source });
+    if (prepared.svgMarkup && !controller.signal.aborted) {
+      const vector = prepared;
+      prepared = undefined;
+      try {
+        const svg = new DOMParser().parseFromString(vector.svgMarkup!, 'image/svg+xml').documentElement;
+        if (svg.localName !== 'svg' || svg.querySelector('parsererror')) throw new Error('SVG 图片格式无效');
+        const blob = await exportSvg(svg as unknown as SVGSVGElement, controller.signal);
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        if (controller.signal.aborted) return;
+        const raster = await invoke<{path: string}>('store_temporary_export', { fileBytes: Array.from(bytes), originalName: 'rendered-svg.png' });
+        if (temporaryPath) await invoke('release_temporary_export', { path: temporaryPath }).catch(console.warn);
+        temporaryPath = raster.path;
+        if (controller.signal.aborted) return;
+        prepared = await invoke<PreparedImage>('prepare_rendered_image', { source: raster.path });
+      } finally {
+        await invoke('release_rendered_image', { path: vector.path, displayPath: vector.displayPath }).catch(console.warn);
+      }
+    }
+    if (controller.signal.aborted || state.revision !== revision) return;
+    currentLease = { image: prepared, temporaryPath, users: 1 };
+    displaySrc.value = convertFileSrc(prepared.displayPath);
+    // The lease now owns both resources, including the retained original for saving.
+    prepared = undefined;
+    temporaryPath = undefined;
+  } catch (error) {
+    if (!controller.signal.aborted) preparationError.value = String(error);
+  } finally {
+    if (prepared) await invoke('release_rendered_image', { path: prepared.path, displayPath: prepared.displayPath }).catch(console.warn);
+    if (temporaryPath) await invoke('release_temporary_export', { path: temporaryPath }).catch(console.warn);
+    if (preparationController === controller) isPreparing.value = false;
+  }
+}, { immediate: true });
 
 const zoom = ref(1);
 const panX = ref(0);
@@ -371,32 +457,15 @@ function guessFileName(): string {
 }
 
 async function saveImage(): Promise<void> {
-  if (!state.src || isSaving.value) return;
+  const lease = currentLease;
+  if (!lease || isSaving.value) return;
+  lease.users++;
   isSaving.value = true;
-  const fileName = guessFileName();
+  const requestedName = guessFileName();
+  const fileName = lease.image.mime === 'image/png' && /\.svg$/i.test(requestedName) ? requestedName.replace(/\.svg$/i, '.png') : requestedName;
 
   try {
-    let sourceUrl = state.src;
-
-    // 如果是 blob 链接，由于 Android 底层无法直接读取 WebView 的 blob 协议内存数据，
-    // 我们在前端将其转换为 data:url (Base64) 字符串。
-    // 这在 JS 中是异步且高效的，不需要转为普通 JSON 数组，避免了 GC 和序列化开销。
-    if (state.src.startsWith("blob:")) {
-      const response = await fetch(state.src);
-      const blob = await response.blob();
-      sourceUrl = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve(reader.result as string);
-        reader.onerror = reject;
-        reader.readAsDataURL(blob);
-      });
-    }
-
-    // 直接调用原生插件提供的 save_image_to_gallery 接口，仅传输几十字节的 URL 或 Base64 字符串
-    await invoke("plugin:vcp-mobile|save_image_to_gallery", {
-      sourceUrl,
-      fileName,
-    });
+    await saveImageToGallery(lease.image.path, fileName);
 
     notificationStore.addNotification({
       type: "success",
@@ -413,6 +482,7 @@ async function saveImage(): Promise<void> {
       toastOnly: true,
     });
   } finally {
+    await releaseLease(lease);
     isSaving.value = false;
   }
 }
@@ -437,28 +507,90 @@ function trustedSandboxFrame(
   return null;
 }
 
+interface SandboxExportSlot {
+  frame: HTMLIFrameElement;
+  granted: boolean;
+  controller: AbortController;
+  finish: () => void;
+}
+const sandboxSlots = new Map<string, SandboxExportSlot>();
+
+function requestSandboxSlot(frame: HTMLIFrameElement, nonce: string, requestId: string) {
+  if (!requestId || requestId.length > 100 || [...sandboxSlots.values()].some(slot => slot.frame === frame)) return;
+  const key = `${nonce}:${requestId}`;
+  const controller = new AbortController();
+  let complete!: () => void;
+  const completion = new Promise<void>(resolve => { complete = resolve; });
+  const slot: SandboxExportSlot = { frame, granted: false, controller, finish: complete };
+  const timer = setTimeout(() => {
+    if (!slot.granted) { controller.abort(); complete(); }
+    else frame.contentWindow?.postMessage({ source: 'vcp-mobile', type: 'rendered-image-cancel', nonce, requestId }, '*');
+    // A granted toBlob has no cancellation API; its terminal reply releases the slot.
+  }, 30000);
+  const observer = new MutationObserver(() => {
+    if (!frame.isConnected || frame.dataset.vcpImageNonce !== nonce) { controller.abort(); complete(); }
+  });
+  observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-vcp-image-nonce'] });
+  sandboxSlots.set(key, slot);
+  void withImageExportQueue(async () => {
+    if (!frame.isConnected || frame.dataset.vcpImageNonce !== nonce) return;
+    slot.granted = true;
+    frame.contentWindow?.postMessage({ source: 'vcp-mobile', type: 'rendered-image-grant', nonce, requestId }, '*');
+    await completion;
+  }, controller.signal).catch(() => {}).finally(() => {
+    clearTimeout(timer);
+    observer.disconnect();
+    sandboxSlots.delete(key);
+  });
+}
+
 function handleSandboxMessage(event: MessageEvent<SandboxImageMessage>): void {
   const data = event.data;
   if (
     !data ||
     typeof data !== "object" ||
     data.source !== "vcp-mobile" ||
-    data.type !== "rendered-image-click"
+    !['rendered-image-click', 'rendered-image-error', 'rendered-image-request'].includes(data.type || '')
   )
     return;
   const frame = trustedSandboxFrame(event);
   if (!frame || !data.nonce || frame.dataset.vcpImageNonce !== data.nonce) {
     return;
   }
+  if (data.type === 'rendered-image-request') {
+    requestSandboxSlot(frame, data.nonce, data.requestId || '');
+    return;
+  }
+  const slot = sandboxSlots.get(`${data.nonce}:${data.requestId}`);
+  if (!slot || slot.frame !== frame) return;
+  slot.finish();
+  if (!slot.granted) slot.controller.abort();
+  if (!slot.granted || slot.controller.signal.aborted) return;
+  if (data.type === 'rendered-image-error') {
+    notificationStore.addNotification({ type: 'error', title: '图片预览失败', message: String(data.error || '无法取得当前预览图片').slice(0, 500), toastOnly: true });
+    return;
+  }
   const image = data.image;
-  if (!image?.src) return;
+  if (!image) return;
+  let src = image.src || '';
+  let ownedObjectUrl = false;
+  if (image.bytes instanceof ArrayBuffer) {
+    if (!image.bytes.byteLength || image.bytes.byteLength > IMAGE_EXPORT_MAX_BYTES || !/^image\//i.test(image.mime || '')) return;
+    src = URL.createObjectURL(new Blob([image.bytes], { type: image.mime }));
+    ownedObjectUrl = true;
+  } else {
+    // A blob belongs to its opaque document and must arrive as bounded bytes.
+    if (!/^(https?:\/\/|asset:|file:)/i.test(src)) return;
+  }
   openRenderedImageViewer({
-    src: image.src,
+    src,
+    ownedObjectUrl,
     alt: image.alt,
     title: image.title,
     fileName: image.fileName,
     sourceLabel: image.sourceLabel || "HTML 预览图片",
   });
+  frame.contentWindow?.postMessage({ source: 'vcp-mobile', type: 'rendered-image-received', nonce: data.nonce, requestId: data.requestId }, '*');
 }
 
 watch(
@@ -466,7 +598,7 @@ watch(
   (isOpen) => {
     if (isOpen) {
       resetView();
-      registerModal(modalId, close);
+      registerModal(modalId, close, () => surfaceRef.value);
     } else {
       unregisterModal(modalId);
       touchStartDist = 0;
@@ -480,6 +612,11 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  for (const slot of sandboxSlots.values()) { slot.controller.abort(); slot.finish(); }
+  preparationController?.abort();
+  if (currentLease) void releaseLease(currentLease);
+  currentLease = null;
+  closeRenderedImageViewer();
   window.removeEventListener("message", handleSandboxMessage);
   unregisterModal(modalId);
 });
@@ -490,7 +627,8 @@ onUnmounted(() => {
     <Transition name="rendered-image-viewer">
       <div
         v-if="state.isOpen"
-        class="rendered-image-viewer vcp-safe-inline fixed inset-0 flex flex-col bg-[#05070a] text-white pointer-events-auto select-none z-viewer"
+        ref="surfaceRef"
+        class="rendered-image-viewer vcp-viewport-surface vcp-safe-inline fixed inset-0 flex flex-col bg-[#05070a] text-white pointer-events-auto select-none z-viewer"
         @click.self="close"
       >
         <div
@@ -527,7 +665,7 @@ onUnmounted(() => {
             </button>
             <button
               class="p-2 rounded-full text-white/80 active:bg-white/10 active:scale-95 transition disabled:opacity-40"
-              :disabled="isSaving"
+              :disabled="isSaving || isPreparing || !displaySrc"
               @click="saveImage"
             >
               <Download :size="20" />
@@ -549,9 +687,12 @@ onUnmounted(() => {
           @touchend="handleTouchEnd"
           @touchcancel="handleTouchEnd"
         >
+          <div v-if="isPreparing" class="text-sm text-white/60">正在准备图片…</div>
+          <div v-else-if="preparationError" class="text-sm text-red-300 break-all p-4">{{ preparationError }}</div>
           <img
+            v-else-if="displaySrc"
             ref="imageRef"
-            :src="state.src"
+            :src="displaySrc"
             :alt="state.alt || displayTitle"
             class="max-w-full max-h-full object-contain rendered-image-viewer__image"
             :style="imageStyle"

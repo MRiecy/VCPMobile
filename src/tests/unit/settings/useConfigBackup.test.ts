@@ -7,7 +7,6 @@ import {
   buildBackupFileName,
   buildBackupPayload,
   bytesToBase64,
-  parseBackupFile,
   pickBackupSettings,
 } from "../../../features/settings/useConfigBackup";
 import type { AppSettings } from "../../../core/stores/settings";
@@ -91,95 +90,6 @@ describe("useConfigBackup 导出 payload", () => {
   });
 });
 
-describe("useConfigBackup 导入解析", () => {
-  it("导出→导入 roundtrip 保持字段一致", () => {
-    const payload = buildBackupPayload(makeSettings(), new Date(2026, 7, 18));
-    const parsed = parseBackupFile(JSON.stringify(payload));
-    expect(parsed.settings).toEqual(payload.settings);
-    expect(parsed.exportedAt).toBe(payload.exportedAt);
-  });
-
-  it("拒绝非 JSON / 错误种类 / 错误版本 / 缺失 settings", () => {
-    expect(() => parseBackupFile("{broken")).toThrow("JSON");
-    expect(() => parseBackupFile(JSON.stringify({ app: "other", kind: CONFIG_BACKUP_KIND }))).toThrow(
-      "不是 VCP Mobile",
-    );
-    expect(() =>
-      parseBackupFile(
-        JSON.stringify({ app: "vcp-mobile", kind: CONFIG_BACKUP_KIND, version: 99, settings: {} }),
-      ),
-    ).toThrow("版本");
-    expect(() =>
-      parseBackupFile(
-        JSON.stringify({ app: "vcp-mobile", kind: CONFIG_BACKUP_KIND, version: CONFIG_BACKUP_VERSION }),
-      ),
-    ).toThrow("缺少配置内容");
-  });
-
-  it("未知字段一律丢弃，不进入导入 patch", () => {
-    const payload = buildBackupPayload(makeSettings());
-    const hacked = {
-      ...payload,
-      settings: {
-        ...payload.settings,
-        agentOrder: ["evil"],
-        enableVcpToolInjection: true,
-        somethingNew: "x",
-      },
-    };
-    const parsed = parseBackupFile(JSON.stringify(hacked));
-    expect("agentOrder" in parsed.settings).toBe(false);
-    expect("enableVcpToolInjection" in parsed.settings).toBe(false);
-    expect(parsed.settings.chatEndpointMode).toBe("vcpTools");
-    expect("somethingNew" in parsed.settings).toBe(false);
-    expect(parsed.settings.vcpApiKey).toBe("api-key-1");
-  });
-
-  it("旧工具注入布尔值迁移为闭合端点模式，且新枚举优先", () => {
-    const payload = buildBackupPayload(makeSettings());
-    const legacy = {
-      ...payload,
-      settings: {
-        vcpServerUrl: "https://legacy.example.com",
-        enableVcpToolInjection: false,
-      },
-    };
-    expect(parseBackupFile(JSON.stringify(legacy)).settings.chatEndpointMode).toBe("standard");
-
-    const mixed = {
-      ...payload,
-      settings: {
-        chatEndpointMode: "raw",
-        enableVcpToolInjection: true,
-      },
-    };
-    expect(parseBackupFile(JSON.stringify(mixed)).settings.chatEndpointMode).toBe("raw");
-  });
-
-  it("白名单字段类型错误时拒绝导入", () => {
-    const payload = buildBackupPayload(makeSettings());
-    const badString = { ...payload, settings: { ...payload.settings, syncToken: 123 } };
-    expect(() => parseBackupFile(JSON.stringify(badString))).toThrow("syncToken");
-
-    const badBool = { ...payload, settings: { ...payload.settings, distributedEnabled: "true" } };
-    expect(() => parseBackupFile(JSON.stringify(badBool))).toThrow("distributedEnabled");
-
-    const badMode = { ...payload, settings: { ...payload.settings, chatEndpointMode: "invalid" } };
-    expect(() => parseBackupFile(JSON.stringify(badMode))).toThrow("chatEndpointMode");
-  });
-
-  it("旧版含头像的备份文件可导入，头像字段被忽略", () => {
-    const payload = buildBackupPayload(makeSettings());
-    const legacy = { ...payload, avatar: { mimeType: "image/png", dataBase64: "QUJD" } };
-    const parsed = parseBackupFile(JSON.stringify(legacy));
-    expect(parsed.settings.vcpApiKey).toBe("api-key-1");
-  });
-
-  it("超过大小上限的文本直接拒绝", () => {
-    const huge = " ".repeat(1024 * 1024 + 1);
-    expect(() => parseBackupFile(huge)).toThrow("过大");
-  });
-});
 
 describe("useConfigBackup Base64 工具", () => {
   it("bytesToBase64 对 UTF-8 中文编码可逆", () => {

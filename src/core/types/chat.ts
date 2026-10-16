@@ -156,6 +156,7 @@ export interface Attachment {
   name: string;
   size: number;
   progress?: number; // 0-100 的真实上传进度
+  transferredBytes?: number; // 未知总量复制时已取得的字节，仅暂存卡片使用
   src: string; // 物理存储路径：真理之源。用于后续超栈文件追踪，或跨端同步时的原始路径参考
   resolvedSrc?: string; // Webview 可用的 asset:// 路径 (运行时动态生成，不进行持久化)
   hash?: string;

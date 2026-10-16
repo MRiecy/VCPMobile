@@ -9,12 +9,12 @@ use tauri::{AppHandle, Runtime};
 // The explicit host branches below are development fixtures. iOS must use
 // its own adapter or return an unavailable error; it never consumes fixtures.
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 const TEMP_FILE_MAX_BYTES: usize = 20 * 1024 * 1024;
 #[cfg(target_os = "android")]
 const MAX_SHARED_FILES: usize = 16;
 
-#[cfg(any(target_os = "android", test))]
+#[cfg(any(target_os = "android", target_os = "ios", test))]
 fn safe_leaf_name(file_name: &str) -> Result<&str, String> {
     let path = std::path::Path::new(file_name);
     if file_name.is_empty()
@@ -31,7 +31,7 @@ fn safe_leaf_name(file_name: &str) -> Result<&str, String> {
     Ok(file_name)
 }
 
-#[cfg(any(target_os = "android", test))]
+#[cfg(any(target_os = "android", target_os = "ios", test))]
 fn canonical_file_in(root: &std::path::Path, path: &std::path::Path) -> Result<bool, String> {
     if !path.exists() {
         return Ok(false);
@@ -407,35 +407,190 @@ pub struct PickedFileInfo {
 }
 
 #[tauri::command]
-pub fn pick_file<R: Runtime>(
+pub async fn pick_file<R: Runtime>(
     app: AppHandle<R>,
     mode: Option<String>,
+    operation_id: Option<String>,
+    max_bytes: Option<u64>,
 ) -> Result<PickedFileInfo, String> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
+        let mode = mode.unwrap_or_else(|| "file".into());
+        if !matches!(
+            mode.as_str(),
+            "file" | "camera" | "gallery" | "avatar" | "config"
+        ) {
+            return Err("invalid_picker_mode".into());
+        }
+        let operation_id = operation_id.unwrap_or_else(native_operation_id);
+        validate_operation_id(&operation_id)?;
+        let max_bytes = max_bytes.unwrap_or(if mode == "config" {
+            1024 * 1024
+        } else {
+            512 * 1024 * 1024
+        });
+        if max_bytes == 0 || max_bytes > 512 * 1024 * 1024 {
+            return Err("invalid_file_budget".into());
+        }
+        let staging = app
+            .path()
+            .app_cache_dir()
+            .map_err(|e| e.to_string())?
+            .join("uploads");
         let state = app.state::<VcpMobileState<R>>();
         let plugin_handle = state.mobile_plugin_handle()?;
-
-        let file_info = plugin_handle
-            .run_mobile_plugin::<PickedFileInfo>(
-                "pickFile",
-                serde_json::json!({
-                    "mode": mode.unwrap_or_else(|| "file".to_string())
-                }),
-            )
-            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
-        Ok(file_info)
-    }
-    #[cfg(target_os = "ios")]
-    {
-        let _ = (app, mode);
-        crate::ios_not_implemented("pick_file")
+        tauri::async_runtime::spawn_blocking(move || {
+            plugin_handle
+                .run_mobile_plugin::<PickedFileInfo>(
+                    "pickFile",
+                    serde_json::json!({
+                        "mode": mode, "operationId": operation_id,
+                        "stagingDir": staging, "maxBytes": max_bytes,
+                    }),
+                )
+                .map_err(|e| format!("native_picker: {e}"))
+        })
+        .await
+        .map_err(|e| format!("native_picker_worker: {e}"))?
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
+        let _ = (app, mode, operation_id, max_bytes);
+        Err("文件选择仅在移动端可用".to_string())
+    }
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn native_operation_id() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    format!(
+        "native-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    )
+}
+
+#[cfg(any(target_os = "android", target_os = "ios"))]
+fn validate_operation_id(id: &str) -> Result<(), String> {
+    if id.is_empty()
+        || id.len() > 100
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err("invalid_operation_id".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cancel_file_operation<R: Runtime>(
+    app: AppHandle<R>,
+    operation_id: String,
+) -> Result<(), String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        validate_operation_id(&operation_id)?;
+        let handle = app.state::<VcpMobileState<R>>().mobile_plugin_handle()?;
+        tauri::async_runtime::spawn_blocking(move || {
+            handle
+                .run_mobile_plugin::<serde_json::Value>(
+                    "cancelFileOperation",
+                    serde_json::json!({"operationId":operation_id}),
+                )
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = (app, operation_id);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DerivedImageInfo {
+    pub path: String,
+    pub mime: String,
+    pub size: u64,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[tauri::command]
+pub async fn get_webview_geometry<R: Runtime>(
+    app: AppHandle<R>,
+    sample_id: u64,
+    viewport_revision: u64,
+) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "ios")]
+    {
+        crate::ios::run_async(
+            app,
+            "getWebViewGeometry",
+            serde_json::json!({"sampleId":sample_id,"viewportRevision":viewport_revision}),
+        )
+        .await
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (app, sample_id, viewport_revision);
+        Err("WebView geometry sampling requires iOS".into())
+    }
+}
+
+pub fn clear_webview_cache_native<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+    #[cfg(target_os = "ios")]
+    {
+        crate::ios::run::<R, serde_json::Value>(
+            app.clone(),
+            "clearWebViewCache",
+            serde_json::json!({}),
+        )
+        .map(|_| ())
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
         let _ = app;
-        let _ = mode;
-        Err("该接口仅在 Android 物理端可用".to_string())
+        Err("This WebView cache adapter requires iOS".into())
+    }
+}
+
+/// Called from the file domain's serial blocking image worker.
+#[allow(clippy::too_many_arguments)]
+pub fn derive_image<R: Runtime>(
+    app: &AppHandle<R>,
+    source_path: &str,
+    output_path: &str,
+    max_dimension: u32,
+    max_pixels: u64,
+    max_bytes: u64,
+    quality: f64,
+    preserve_alpha: bool,
+) -> Result<DerivedImageInfo, String> {
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        app.state::<VcpMobileState<R>>().mobile_plugin_handle()?.run_mobile_plugin("deriveImage", serde_json::json!({
+            "sourcePath":source_path,"outputPath":output_path,"maxDimension":max_dimension,"maxPixels":max_pixels,"maxBytes":max_bytes,"quality":quality,"preserveAlpha":preserve_alpha
+        })).map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = (
+            app,
+            source_path,
+            output_path,
+            max_dimension,
+            max_pixels,
+            max_bytes,
+            quality,
+            preserve_alpha,
+        );
+        Err("图像派生仅在移动端可用".into())
     }
 }
 
@@ -560,12 +715,20 @@ pub fn get_device_snapshot<R: Runtime>(app: AppHandle<R>) -> Result<DeviceSnapsh
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeFileActionResult {
+    pub outcome: String,
+}
+
 #[tauri::command]
-pub fn open_file_native<R: Runtime>(
+pub async fn open_file_native<R: Runtime>(
     app: AppHandle<R>,
     path: String,
     action: Option<String>,
-) -> Result<(), String> {
+    operation_id: Option<String>,
+    file_name: Option<String>,
+) -> Result<NativeFileActionResult, String> {
     let action = action.unwrap_or_else(|| "view".to_string());
     if action != "view" && action != "share" {
         return Err("Unsupported native file action".to_string());
@@ -576,28 +739,32 @@ pub fn open_file_native<R: Runtime>(
         let state = app.state::<VcpMobileState<R>>();
         let plugin_handle = state.mobile_plugin_handle()?;
 
-        plugin_handle
-            .run_mobile_plugin::<serde_json::Value>(
-                "openFile",
-                serde_json::json!({ "path": path, "action": action }),
-            )
-            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
+        tauri::async_runtime::spawn_blocking(move || {
+            plugin_handle
+                .run_mobile_plugin::<serde_json::Value>(
+                    "openFile",
+                    serde_json::json!({ "path": path, "action": action, "fileName":file_name }),
+                )
+                .map_err(|e| format!("run_mobile_plugin failed: {}", e))
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let _ = operation_id;
+        Ok(NativeFileActionResult {
+            outcome: "opened".into(),
+        })
     }
     #[cfg(target_os = "ios")]
     {
-        let _ = (app, path);
-        if action == "share" {
-            return crate::ios_not_implemented("open_file_native.share");
-        }
-        crate::ios_not_implemented::<()>("open_file_native")?;
+        let operation_id = operation_id.unwrap_or_else(native_operation_id);
+        validate_operation_id(&operation_id)?;
+        crate::ios::run_async(app, "openFile", serde_json::json!({"path":path,"action":action,"operationId":operation_id,"fileName":file_name})).await
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        let _ = app;
-        let _ = path;
-        let _ = action;
+        let _ = (app, path, action, operation_id, file_name);
+        Err("原生文件操作仅在移动端可用".into())
     }
-    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -793,7 +960,7 @@ pub struct GallerySaveResult {
     pub size: i32,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_image_to_gallery<R: Runtime>(
     app: AppHandle<R>,
     source_url: String,
@@ -814,8 +981,11 @@ pub fn save_image_to_gallery<R: Runtime>(
     }
     #[cfg(target_os = "ios")]
     {
-        let _ = (app, source_url, file_name);
-        crate::ios_not_implemented("save_image_to_gallery")
+        crate::ios::run(
+            app,
+            "saveImageToGallery",
+            serde_json::json!({"sourceUrl":source_url,"fileName":file_name}),
+        )
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
@@ -826,7 +996,7 @@ pub fn save_image_to_gallery<R: Runtime>(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_image_from_path<R: Runtime>(
     app: AppHandle<R>,
     image_path: String,
@@ -847,8 +1017,11 @@ pub fn save_image_from_path<R: Runtime>(
     }
     #[cfg(target_os = "ios")]
     {
-        let _ = (app, image_path, file_name);
-        crate::ios_not_implemented("save_image_from_path")
+        crate::ios::run(
+            app,
+            "saveImageFromPath",
+            serde_json::json!({"imagePath":image_path,"fileName":file_name}),
+        )
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
@@ -902,8 +1075,9 @@ pub async fn save_file_to_downloads<R: Runtime>(
     }
     #[cfg(target_os = "ios")]
     {
-        let _ = (app, file_path, file_name, mime_type, max_bytes);
-        crate::ios_not_implemented("save_file_to_downloads.files_export")
+        crate::ios::run_async(app, "saveFileToDownloads", serde_json::json!({
+            "filePath":file_path,"fileName":file_name,"mimeType":mime_type,"maxBytes":max_bytes,"operationId":native_operation_id()
+        })).await
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
@@ -912,7 +1086,7 @@ pub async fn save_file_to_downloads<R: Runtime>(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_to_downloads<R: Runtime>(
     app: AppHandle<R>,
     file_name: String,
@@ -938,8 +1112,13 @@ pub fn save_to_downloads<R: Runtime>(
     }
     #[cfg(target_os = "ios")]
     {
-        let _ = (app, file_name, content_base64, mime_type);
-        crate::ios_not_implemented("save_to_downloads.files_export")
+        crate::ios::run(
+            app,
+            "saveToDownloads",
+            serde_json::json!({
+                "fileName":file_name,"contentBase64":content_base64,"mimeType":mime_type,"operationId":native_operation_id()
+            }),
+        )
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
@@ -951,13 +1130,13 @@ pub fn save_to_downloads<R: Runtime>(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn write_temp_file<R: Runtime>(
     app: AppHandle<R>,
     bytes: Vec<u8>,
     file_name: String,
 ) -> Result<String, String> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         use tauri::Manager;
         if bytes.len() > TEMP_FILE_MAX_BYTES {
@@ -979,11 +1158,6 @@ pub fn write_temp_file<R: Runtime>(
         std::fs::write(&temp_path, bytes).map_err(|e| e.to_string())?;
         Ok(temp_path.to_string_lossy().to_string())
     }
-    #[cfg(target_os = "ios")]
-    {
-        let _ = (app, bytes, file_name);
-        crate::ios_not_implemented("write_temp_file")
-    }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = app;
@@ -993,9 +1167,9 @@ pub fn write_temp_file<R: Runtime>(
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_temp_file<R: Runtime>(app: AppHandle<R>, file_path: String) -> Result<(), String> {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         use std::path::Path;
         let path = Path::new(&file_path);
@@ -1007,16 +1181,17 @@ pub fn delete_temp_file<R: Runtime>(app: AppHandle<R>, file_path: String) -> Res
         if !path.exists() {
             return Ok(());
         }
-        if !path.is_absolute() || !canonical_file_in(&temp_dir, path)? {
+        let uploads = app
+            .path()
+            .app_cache_dir()
+            .map_err(|e| e.to_string())?
+            .join("uploads");
+        let in_uploads = uploads.exists() && canonical_file_in(&uploads, path)?;
+        if !path.is_absolute() || (!canonical_file_in(&temp_dir, path)? && !in_uploads) {
             return Err("拒绝删除非 bridge staging 文件".to_string());
         }
         std::fs::remove_file(path).map_err(|e| e.to_string())?;
         Ok(())
-    }
-    #[cfg(target_os = "ios")]
-    {
-        let _ = (app, file_path);
-        crate::ios_not_implemented("delete_temp_file")
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {

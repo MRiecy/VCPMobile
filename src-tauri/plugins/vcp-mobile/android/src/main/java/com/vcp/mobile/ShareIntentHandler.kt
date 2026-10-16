@@ -46,6 +46,7 @@ internal class ShareIntentOwner {
 
     fun begin(): String = UUID.randomUUID().toString().also(current::set)
     fun isCurrent(ownerId: String): Boolean = current.get() == ownerId
+    fun currentId(): String? = current.get()
 }
 
 internal data class PendingSharePayload<T>(val ownerId: String, val value: T)
@@ -62,6 +63,7 @@ internal class LatestSharePayload<T> {
     }
 
     fun isCurrent(ownerId: String): Boolean = owner.isCurrent(ownerId)
+    fun currentId(): String? = owner.currentId()
 
     @Synchronized
     fun publish(ownerId: String, value: T): Boolean {
@@ -84,8 +86,8 @@ internal class LatestSharePayload<T> {
 }
 
 internal class ShareCopyBudget(
-    private val maxFileBytes: Long = 100L * 1024 * 1024,
-    private val maxTotalBytes: Long = 200L * 1024 * 1024,
+    private val maxFileBytes: Long = 512L * 1024 * 1024,
+    private val maxTotalBytes: Long = 512L * 1024 * 1024,
     private val globalDeadlineNanos: Long = System.nanoTime() + 60_000_000_000L,
     private val perFileNanos: Long = 30_000_000_000L,
 ) {
@@ -126,7 +128,7 @@ class ShareIntentHandler(
     companion object {
         private const val TAG = "ShareIntentHandler"
         private const val MAX_SHARE_FILES = 16
-        private const val MAX_TEXT_CHARS = 1_000_000
+        private const val MAX_TEXT_BYTES = 1024 * 1024
         private const val MIN_FREE_BYTES = 64L * 1024 * 1024
     }
 
@@ -151,6 +153,7 @@ class ShareIntentHandler(
     }
 
     fun isCurrentOwner(ownerId: String): Boolean = sharePayload.isCurrent(ownerId)
+    fun currentOwnerId(): String? = sharePayload.currentId()
 
     fun claimStagedFile(ownerId: String, file: File): Boolean {
         if (!sharePayload.isCurrent(ownerId)) return false
@@ -177,6 +180,15 @@ class ShareIntentHandler(
         stagedFilesByOwner.entries.forEach { (_, files) -> cleanupStagedFiles(files.toList()) }
         stagedFilesByOwner.clear()
         val ownerId = sharePayload.begin()
+        // Acceptance invalidates an older draft before provider IO starts.
+        val receiving = JSObject().apply {
+            put("intentId", ownerId)
+            put("state", "receiving")
+            put("text", "")
+            put("files", JSArray())
+        }
+        sharePayload.publish(ownerId, receiving)
+        injectShareData(plugin.webViewRef)
         Log.i(TAG, "[handleShareIntent] Queuing share intent owner=$ownerId, type=${intent.type}, action=$action")
 
         try {
@@ -214,6 +226,16 @@ class ShareIntentHandler(
                     extraction?.let { cleanupStagedFiles(it.stagedFiles) }
                     if (sharePayload.isCurrent(ownerId)) {
                         Log.e(TAG, "[handleShareIntent] Share extraction failed for owner=$ownerId", error)
+                        plugin.pluginActivity.runOnUiThread {
+                            val failed = JSObject().apply {
+                                put("intentId", ownerId)
+                                put("state", "failed")
+                                put("error", error.message ?: "无法读取分享内容")
+                                put("text", "")
+                                put("files", JSArray())
+                            }
+                            if (sharePayload.publish(ownerId, failed)) injectShareData(plugin.webViewRef)
+                        }
                     }
                 }
             }
@@ -228,6 +250,7 @@ class ShareIntentHandler(
     private fun extractSharedContent(intent: Intent, context: Context, ownerId: String): ShareExtraction {
         val root = JSObject()
         root.put("intentId", ownerId)
+        root.put("state", "ready")
 
         // ACTION_PROCESS_TEXT: 浏览器/阅读器选中文字菜单
         val processText = if (intent.action == Intent.ACTION_PROCESS_TEXT) {
@@ -254,7 +277,8 @@ class ShareIntentHandler(
             }
         }
 
-        root.put("text", combinedText.take(MAX_TEXT_CHARS).ifBlank { "" })
+        require(combinedText.toByteArray(Charsets.UTF_8).size <= MAX_TEXT_BYTES) { "分享文字超过 1 MiB" }
+        root.put("text", combinedText.ifBlank { "" })
 
         // 提取文件 URIs
         val files = JSArray()

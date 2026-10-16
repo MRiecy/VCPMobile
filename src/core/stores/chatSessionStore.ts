@@ -1,14 +1,11 @@
 import { defineStore } from "pinia";
 import { ref, computed } from "vue";
-import type { PickedFile } from "tauri-plugin-vcp-mobile";
 import { useAssistantStore } from "./assistant";
 import { useTopicStore } from "./topicListManager";
 import type {
   ConversationOwnerItem,
   OwnerType,
 } from "../types/assistant";
-
-export type PickedFileInfo = PickedFile;
 
 export type ConversationOwnerType = OwnerType;
 
@@ -116,60 +113,7 @@ export const useChatSessionStore = defineStore("chatSession", () => {
     return currentTopic.value?.name || currentSelectedItem.value?.name || "VCP Mobile";
   });
 
-  // Share intent prefill state
-  const sharePrefillText = ref("");
-  const sharePrefillFiles = ref<PickedFileInfo[]>([]);
-
   const assistantStore = useAssistantStore();
-
-  /**
-   * 从外部分享意图启动会话
-   * 1. 选择 Agent → 创建话题 → 切换到聊天 → 预填输入
-   */
-  const startShareSession = async (
-    agentId: string,
-    sharedText: string,
-    sharedFiles: PickedFileInfo[],
-  ) => {
-    // 1. 查找并选中 agent
-    const agent = assistantStore.agents.find((a) => a.id === agentId);
-    if (!agent) {
-      throw new Error(`Agent ${agentId} not found`);
-    }
-
-    // 2. 创建新话题（复用 TopicCreator 默认命名逻辑）
-    const newTopicName = `新话题 ${new Date().toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    })}`;
-
-    const topicStore = useTopicStore();
-    const newTopic = await topicStore.createTopic(agentId, "agent", newTopicName);
-
-    if (!newTopic?.id) {
-      throw new Error("Failed to create topic");
-    }
-
-    // 3. 选择 topic（设置 currentSelectedItem 和 currentTopicId）
-    await selectTopicById(agentId, "agent", newTopic.id);
-    if (
-      !topicStore.topics.some(
-        (topic) =>
-          topic.ownerType === "agent" &&
-          topic.ownerId === agentId &&
-          topic.id === newTopic.id,
-      )
-    ) {
-      void topicStore.loadTopicList(agentId, "agent").catch(() => {});
-    }
-
-    // 4. 存储预填数据（由 ChatView/InputEnhancer 消费后清空）
-    sharePrefillText.value = sharedText;
-    sharePrefillFiles.value = sharedFiles;
-
-    return { topicId: newTopic.id, agentId };
-  };
 
   /**
    * 选择一个助手或群组，并自动跳转到最近的话题
@@ -312,9 +256,6 @@ export const useChatSessionStore = defineStore("chatSession", () => {
     currentTopic,
     headerTitle,
     lastActiveTopicMap,
-    sharePrefillText,
-    sharePrefillFiles,
-    startShareSession,
     setConversation,
     clearConversation,
     clearCurrentTopic,

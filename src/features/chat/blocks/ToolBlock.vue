@@ -61,6 +61,7 @@ watch(
 );
 
 const isFullScreen = ref(false);
+const surfaceRef = ref<HTMLElement | null>(null);
 
 const { registerModal, unregisterModal } = useModalHistory();
 const modalId = `ToolBlockFullScreen_${Math.random().toString(36).substring(2, 9)}`;
@@ -69,7 +70,7 @@ watch(isFullScreen, (newVal) => {
   if (newVal) {
     registerModal(modalId, () => {
       isFullScreen.value = false;
-    });
+    }, () => surfaceRef.value);
   } else {
     unregisterModal(modalId);
   }
@@ -211,7 +212,8 @@ const isImageValue = (key: string, value: string): boolean => {
   <Teleport to="body">
     <Transition name="fade-slide">
       <div v-if="isFullScreen" 
-        class="vcp-fullscreen-tool-panel fixed inset-0 z-viewer flex flex-col"
+        ref="surfaceRef" role="dialog" aria-modal="true" aria-label="工具详情"
+        class="vcp-viewport-surface vcp-fullscreen-tool-panel fixed inset-0 z-viewer flex flex-col"
         :class="[type === 'tool-result' ? 'is-tool-result' : '']"
       >
         <!-- Fullscreen Header -->

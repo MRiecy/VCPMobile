@@ -1,9 +1,10 @@
 import { defineStore } from "pinia";
-import { ref, nextTick } from "vue";
+import { ref, nextTick, onScopeDispose, watch } from "vue";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useNotificationStore } from "./notification";
-import { isAndroid } from "../utils/platform";
+import { useChatSessionStore } from "./chatSessionStore";
+import { isAndroid, isIOS } from "../utils/platform";
 import type { PickedFile } from "tauri-plugin-vcp-mobile";
 import type {
   NativeFileProgressDetail,
@@ -18,32 +19,12 @@ import type {
 
 
 
-/**
- * 前端辅助：异步读取图片原始分辨率（不依赖后端）
- * 用于上传前拦截超限图片（>8K×8K）
- */
-const checkImageDimensions = (file: File): Promise<{ width: number; height: number }> => {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve({ width: img.naturalWidth, height: img.naturalHeight });
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("无法读取图片尺寸"));
-    };
-    img.src = url;
-  });
-};
-
 export const useAttachmentStore = defineStore("attachment", () => {
   // 暂存的附件列表，准备随下一条消息发送
   const stagedAttachments = ref<Attachment[]>([]);
 
   // 全局监听 Rust 端发出的注册进度，用于大文件哈希/移动等Phase 2流程
-  listen<AttachmentRegisterProgressDto>("vcp-file-register-progress", (event) => {
+  const progressListener = listen<AttachmentRegisterProgressDto>("vcp-file-register-progress", (event) => {
     const { progress, stableId } = event.payload;
     if (stableId) {
       const idx = stagedAttachments.value.findIndex((a) => a.id === stableId);
@@ -70,8 +51,8 @@ export const useAttachmentStore = defineStore("attachment", () => {
     // 处理附件 (仅处理图片类型)
     if (msg.attachments && msg.attachments.length > 0) {
       msg.attachments.forEach((att: Attachment) => {
-        // Rust 后端返回的路径现在主要在 internalPath，如果不在，回退到 src
-        const sourcePath = att.internalPath || att.src;
+        // 消息内显示只使用有界派生；原件保持业务资源身份。
+        const sourcePath = att.thumbnailPath;
         if (
           att.type.startsWith("image/") &&
           sourcePath &&
@@ -91,463 +72,149 @@ export const useAttachmentStore = defineStore("attachment", () => {
     }
   };
 
-  /**
-   * 触发文件选择器并暂存附件；Android 使用原生选择器，其他环境沿用 HTML 导入。
-   */
-  const handleAttachment = async (mode: 'camera' | 'gallery' | 'file' = 'file') => {
-    if (mode === 'camera' && !isAndroid) return;
-    
-    // ==================================================================
-    // Android 端主链路：原生插件拦截直传
-    //   - 不走下方的 store_file / prepare_vcp_upload 分流逻辑
-    //   - 由 Kotlin 侧的 VcpMobilePlugin.pickFile 启动系统文件选择器
-    //   - Native 层流式拷贝到 cacheDir 并计算 SHA-256，最后通过
-    //     register_local_file 零拷贝注册到附件目录
-    // ==================================================================
-    if (isAndroid) {
-      console.log(`[AttachmentStore] Using native picker. Mode: ${mode}`);
-      const notificationStore = useNotificationStore();
-      
-      const stableId = `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      
-      try {
-        // 1. 调用物理端原生 File Picker (双轨事件监听 + 5分钟熔断)
-        
-        const picked = await new Promise<PickedFile>((resolve, reject) => {
-          let resolved = false;
+  // The card identity is also the native/Rust operation identity. Removing a card
+  // invalidates its consumer immediately; the resource owners finish cancellation.
+  const activeOperations = new Set<string>();
+  let picking = false;
 
-          const handleStart = (event: Event) => {
-            if (resolved) return;
-            const { name, size, mime } = (event as CustomEvent<NativeFileStartDetail>).detail;
-            stagedAttachments.value.unshift({
-              id: stableId,
-              type: mime || "application/octet-stream",
-              src: "",
-              name: name || "文件",
-              size: size || 0,
-              progress: 0,
-              status: "loading",
-            });
-          };
-
-          const handleProgress = (event: Event) => {
-            if (resolved) return;
-            const { progress, name, mime, total } = (event as CustomEvent<NativeFileProgressDetail>).detail;
-            const idx = stagedAttachments.value.findIndex(a => a.id === stableId);
-            const scaledProgress = Math.round(progress * 0.9); // Kotlin 沙盒拷贝与哈希阶段占 90%
-            if (idx !== -1) {
-              stagedAttachments.value[idx].progress = scaledProgress;
-            } else if (name) {
-              // 自我修复：如果 WebView 错过了 vcp-mobile-file-start 事件，在这里补建卡片
-              stagedAttachments.value.unshift({
-                id: stableId,
-                type: mime || "application/octet-stream",
-                src: "",
-                name: name,
-                size: total || 0,
-                progress: scaledProgress,
-                status: "loading",
-              });
-            }
-          };
-
-          const handlePicked = (event: Event) => {
-            if (resolved) return;
-            resolved = true;
-            cleanup();
-            const picked = (event as CustomEvent<PickedFile>).detail;
-            console.log("[AttachmentStore] Native picker returned via EventBus:", picked);
-            resolve(picked);
-          };
-
-          const cleanup = () => {
-            window.removeEventListener('vcp-mobile-file-start', handleStart);
-            window.removeEventListener('vcp-mobile-file-progress', handleProgress);
-            window.removeEventListener('vcp-mobile-file-picked', handlePicked);
-            clearTimeout(timer);
-          };
-
-          window.addEventListener('vcp-mobile-file-start', handleStart);
-          window.addEventListener('vcp-mobile-file-progress', handleProgress);
-          window.addEventListener('vcp-mobile-file-picked', handlePicked);
-
-          const timer = setTimeout(() => {
-            if (!resolved) {
-              resolved = true;
-              cleanup();
-              reject(new Error("Native file picker timed out (5 mins) without reporting"));
-            }
-          }, 300000);
-
-          invoke<PickedFile>("plugin:vcp-mobile|pick_file", { mode }).then((res) => {
-            if (!resolved) {
-              resolved = true;
-              cleanup();
-              console.log("[AttachmentStore] Native picker returned via Invoke:", res);
-              resolve(res);
-            }
-          }).catch((err) => {
-             if (!resolved) {
-               resolved = true;
-               cleanup();
-               reject(err);
-             }
-          });
-        });
-        
-        if (!picked || !picked.path) {
-          console.log("[AttachmentStore] Pick cancelled or returned empty path.");
-          const existingIdx = stagedAttachments.value.findIndex(a => a.id === stableId);
-          if (existingIdx !== -1) {
-            stagedAttachments.value.splice(existingIdx, 1);
-          }
-          return;
-        }
-
-        // ⚡ 附件防线：拦截无法解析的二进制/未知异构格式 (调用后端统一检测接口)
-        if (picked.name) {
-          try {
-            await invoke("check_attachment_support", { originalName: picked.name });
-          } catch (err: any) {
-            const errMsg = err?.message || String(err);
-            notificationStore.addNotification({
-              type: "warning",
-              title: "不支持的附件格式",
-              message: errMsg.startsWith("❌") ? errMsg : `❌ ${errMsg}`,
-              toastOnly: false,
-            });
-            const existingIdx = stagedAttachments.value.findIndex(a => a.id === stableId);
-            if (existingIdx !== -1) {
-              stagedAttachments.value.splice(existingIdx, 1);
-            }
-            return;
-          }
-        }
-
-        // 兜底：如果卡片还没插入，补插一张
-        const existingIdx = stagedAttachments.value.findIndex(a => a.id === stableId);
-        if (existingIdx === -1) {
-          stagedAttachments.value.unshift({
-            id: stableId,
-            type: picked.mime || "application/octet-stream",
-            src: "",
-            name: picked.name || "文件",
-            size: picked.size || 0,
-            progress: 90,
-            status: "loading",
-          });
-        } else {
-          stagedAttachments.value[existingIdx].progress = 90;
-        }
-
-        // 缩略图展示策略：若有 native thumbnail 物理路径则通过 convertFileSrc 转换，否则如果为图片，转换 path 自身
-        let displaySrc = "";
-        if (picked.thumbnailPath) {
-          displaySrc = convertFileSrc(picked.thumbnailPath);
-        } else if (picked.mime?.startsWith("image/")) {
-          displaySrc = convertFileSrc(picked.path);
-        }
-
-        if (displaySrc) {
-          const finalIdx = stagedAttachments.value.findIndex(a => a.id === stableId);
-          if (finalIdx !== -1) {
-            stagedAttachments.value[finalIdx].src = displaySrc;
-          }
-        }
-
-        await nextTick();
-        window.dispatchEvent(new Event("resize"));
-
-        // 3. 后端零拷贝直传与注册 (会触发 rename 移动，缩略图生成，文本提取)
-        const finalData = await invoke<AttachmentData>("register_local_file", {
-          localPath: picked.path,
-          originalName: picked.name,
-          mimeType: picked.mime || "application/octet-stream",
-          thumbnailPath: picked.thumbnailPath || null,
-          stableId: stableId,
-          expectedHash: picked.hash || null,
-        });
-
-        if (finalData) {
-          const index = stagedAttachments.value.findIndex((a) => a.id === stableId);
-          if (index !== -1) {
-            stagedAttachments.value[index] = {
-              ...stagedAttachments.value[index],
-              type: finalData.type,
-              src: finalData.internalPath,
-              name: finalData.name,
-              size: finalData.size,
-              hash: finalData.hash,
-              thumbnailPath: finalData.thumbnailPath ?? undefined,
-              status: "done",
-              progress: undefined,
-            };
-          }
-        }
-      } catch (err: any) {
-        console.error("[AttachmentStore] Native file pick & registration failed:", err);
-        // 清理由于取消或失败而滞留的暂存卡片
-        const existingIdx = stagedAttachments.value.findIndex(a => a.id === stableId);
-        if (existingIdx !== -1) {
-          stagedAttachments.value.splice(existingIdx, 1);
-        }
-
-        const errMsg = err?.message || String(err);
-        const isCancelled = errMsg === "Cancelled" || errMsg.includes("Cancelled") || errMsg.includes("cancel");
-        if (!isCancelled) {
-          notificationStore.addNotification({
-            type: "warning",
-            title: "选取附件失败",
-            message: `❌ 异常捕获: ${errMsg}`,
-            toastOnly: true,
-          });
-        }
-      }
-      return;
-    }
-
-    // ==================================================================
-    // 尚无原生 adapter 时的独立 HTML `<input>` 子路径；不代表 native picker 已实现
-    //   - 含旧版分流逻辑：小文件 (<2MB) 走 store_file IPC；大文件走
-    //     prepare_vcp_upload 高速 TCP 链路
-    //   - Android 端已在上方通过原生插件处理，不会执行到此处
-    // ==================================================================
-    return new Promise<void>((resolve, reject) => {
-      const input = document.createElement("input");
-      input.type = "file";
-      input.multiple = false;
-      
-      // 根据模式设置 accept 和 capture
-      if (mode === 'camera') {
-        input.accept = "image/*";
-        input.setAttribute("capture", "environment");
-      } else if (mode === 'gallery') {
-        input.accept = "image/*";
-      } else {
-        input.accept = "*/*";
-      }
-
-      input.onchange = async (e: Event) => {
-        try {
-          const target = e.target as HTMLInputElement;
-          if (!target.files || target.files.length === 0) {
-            resolve();
-            return;
-          }
-
-          const file = target.files[0];
-          console.log(
-            `[AttachmentStore] Selected file via HTML input: ${file.name}, type: ${file.type}, size: ${file.size}`,
-          );
-
-          const ext = file.name.split('.').pop()?.toLowerCase() || '';
-          const notificationStore = useNotificationStore();
-
-          // ⚡ 附件防线：拦截无法解析的二进制/未知异构格式 (调用后端统一检测接口)
-          try {
-            await invoke("check_attachment_support", { originalName: file.name });
-          } catch (err: any) {
-            const errMsg = err?.message || String(err);
-            notificationStore.addNotification({
-              type: "warning",
-              title: "不支持的附件格式",
-              message: errMsg.startsWith("❌") ? errMsg : `❌ ${errMsg}`,
-              toastOnly: false,
-            });
-            resolve();
-            return;
-          }
-
-          const isGif = ext === 'gif' || file.type === 'image/gif';
-          const isImage = file.type.startsWith('image/');
-
-          // 1. 大小拦截：非 GIF 图片 > 10MB 直接拒绝
-          if (isImage && !isGif && file.size > 10 * 1024 * 1024) {
-            notificationStore.addNotification({
-              type: "warning",
-              title: "图片过大",
-              message: "图片过大（>10MB），请压缩后重试。",
-              toastOnly: true,
-            });
-            resolve();
-            return;
-          }
-
-          // 2. 分辨率拦截：非 GIF 图片 > 8Kx8K 直接拒绝
-          if (isImage && !isGif) {
-            try {
-              const dims = await checkImageDimensions(file);
-              if (dims.width > 8192 || dims.height > 8192) {
-                notificationStore.addNotification({
-                  type: "warning",
-                  title: "分辨率过高",
-                  message: "图片分辨率过高（>8K），请压缩后重试。",
-                  toastOnly: true,
-                });
-                resolve();
-                return;
-              }
-            } catch (e) {
-              console.warn("[AttachmentStore] Failed to check image dimensions:", e);
-              // 尺寸检测失败不阻断上传，继续
-            }
-          }
-
-          // 3. 生成稳定 ID 并使用 unshift 插入首位 (实现"最新附件最先看到")
-          const stableId = `att_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-          const blobUrl = URL.createObjectURL(file);
-
-          stagedAttachments.value.unshift({
-            id: stableId,
-            type: file.type || "application/octet-stream",
-            src: blobUrl,
-            name: file.name,
-            size: file.size,
-            status: "loading",
-          });
-
-          await nextTick();
-          window.dispatchEvent(new Event("resize"));
-
-          try {
-            let finalData: AttachmentData | null = null;
-
-            // --- 分流策略：小文件 ( < 2MB ) 走 IPC，大文件走高速 TCP 链路 ---
-            if (file.size < 2 * 1024 * 1024) {
-              console.log(
-                `[AttachmentStore] Small file detected (<2MB), using store_file IPC for ${file.name}`,
-              );
-              // 将 File 转换为 Uint8Array (Tauri v2 支持直接传递二进制)
-              const arrayBuffer = await file.arrayBuffer();
-              const bytes = new Uint8Array(arrayBuffer);
-
-              // 零拷贝 IPC 发送前直接切入 processing 阶段，后端同步做文本提取
-              const attIndex = stagedAttachments.value.findIndex(
-                (a) => a.id === stableId,
-              );
-              if (attIndex !== -1) {
-                stagedAttachments.value[attIndex].status = "processing";
-              }
-
-              finalData = await invoke<AttachmentData>("store_file", {
-                originalName: file.name,
-                fileBytes: bytes, 
-                mimeType: file.type || "application/octet-stream",
-              });
-            } else {
-              console.log(
-                `[AttachmentStore] Large file detected, opening High-Speed Link for ${file.name} (${file.size} bytes)`,
-              );
-
-              // 1. 准备链路 (Rust 开启临时本地 TCP 接收器)
-              const endpoint = await invoke<{ url: string; token: string }>("prepare_vcp_upload", {
-                metadata: {
-                  name: file.name,
-                  mime: file.type || "application/octet-stream",
-                  size: file.size,
-                },
-              });
-
-              // 2. 内核级搬运 (利用流式上传)
-              const xhr = new XMLHttpRequest();
-              const uploadPromise = new Promise<AttachmentData>((res, rej) => {
-                xhr.open("POST", endpoint.url, true);
-                xhr.setRequestHeader(
-                  "Content-Type",
-                  "application/octet-stream",
-                );
-                xhr.setRequestHeader("X-Upload-Token", endpoint.token);
-
-                let lastUpdate = 0;
-                xhr.upload.onprogress = (event) => {
-                  if (event.lengthComputable) {
-                    const now = Date.now();
-                    // 限制刷新频率为 ~30fps (每 33ms 刷新一次)，避免高频重绘导致卡顿
-                    if (now - lastUpdate < 33) return;
-                    lastUpdate = now;
-
-                    const progress = Math.round(
-                      (event.loaded / event.total) * 100,
-                    );
-                    const attIndex = stagedAttachments.value.findIndex(
-                      (a) => a.id === stableId,
-                    );
-                    if (attIndex !== -1) {
-                      if (progress >= 99) {
-                        stagedAttachments.value[attIndex].status = "processing";
-                        stagedAttachments.value[attIndex].progress = undefined;
-                      } else {
-                        stagedAttachments.value[attIndex].progress = progress;
-                      }
-                    }
-                  }
-                };
-
-                xhr.onload = () => {
-                  if (xhr.status >= 200 && xhr.status < 300) {
-                    res(JSON.parse(xhr.responseText) as AttachmentData);
-                  } else {
-                    rej(new Error(`Upload failed with status ${xhr.status}`));
-                  }
-                };
-
-                xhr.onerror = () => rej(new Error("XHR Network Error"));
-                xhr.send(file);
-              });
-
-              finalData = await uploadPromise;
-            }
-
-            if (finalData) {
-              const index = stagedAttachments.value.findIndex(
-                (a) => a.id === stableId,
-              );
-              if (index !== -1) {
-                stagedAttachments.value[index] = {
-                  ...stagedAttachments.value[index],
-                  type: finalData.type,
-                  src: finalData.internalPath,
-                  name: finalData.name,
-                  size: finalData.size,
-                  hash: finalData.hash,
-                  status: "done",
-                };
-              }
-            }
-            resolve();
-          } catch (err) {
-            console.error("[AttachmentStore] High-speed upload failed:", err);
-            const index = stagedAttachments.value.findIndex(
-              (a) => a.id === stableId,
-            );
-            if (index !== -1) stagedAttachments.value.splice(index, 1);
-            reject(err);
-          } finally {
-            URL.revokeObjectURL(blobUrl);
-          }
-          resolve();
-        } catch (err) {
-          console.error(
-            "[AttachmentStore] Failed to pick or store attachment:",
-            err,
-          );
-          reject(err);
-        }
-      };
-
-      input.oncancel = () => {
-        resolve();
-      };
-
-      input.click();
-    });
+  const cancelOperation = (operationId: string) => {
+    if (!activeOperations.delete(operationId)) return;
+    void invoke("cancel_attachment_import", { operationId }).catch(console.warn);
+    void invoke("plugin:vcp-mobile|cancel_file_operation", { operationId }).catch(console.warn);
   };
 
+  const beginImport = async (operationId: string) => {
+    activeOperations.add(operationId);
+    await invoke("begin_file_operation", { operationId });
+    if (activeOperations.has(operationId)) return true;
+    await invoke("cancel_attachment_import", { operationId });
+    return false;
+  };
+
+  const finishImport = async (operationId: string) => {
+    activeOperations.delete(operationId);
+    await invoke("finish_file_operation", { operationId }).catch(console.warn);
+  };
+
+  const sessionStore = useChatSessionStore();
+  watch(() => sessionStore.currentConversationKey?.epoch, () => {
+    const invalidated = new Set(activeOperations);
+    for (const operationId of invalidated) cancelOperation(operationId);
+    stagedAttachments.value = stagedAttachments.value.filter(a => !a.id || !invalidated.has(a.id));
+  }, { flush: "sync" });
+
+  /** External files always enter through the native picker and an owned path. */
+  const handleAttachment = async (mode: 'camera' | 'gallery' | 'file' = 'file') => {
+    const notificationStore = useNotificationStore();
+    if (!isAndroid && !isIOS) {
+      notificationStore.addNotification({
+        type: "info", message: "请在移动端应用中选取附件。", toastOnly: true,
+      });
+      return;
+    }
+    if (picking) return;
+    picking = true;
+    const operationId = `att_${crypto.randomUUID()}`;
+    let picked: PickedFile | undefined;
+    const current = () => activeOperations.has(operationId);
+    const card = () => stagedAttachments.value.find((a) => a.id === operationId);
+    const updateCard = (name: string, mime: string, size: number, progress: number) => {
+      if (!current()) return;
+      const existing = card();
+      if (existing) {
+        existing.name = name || existing.name;
+        existing.type = mime || existing.type;
+        existing.size = size || existing.size;
+        existing.progress = Math.max(existing.progress || 0, progress);
+      } else {
+        stagedAttachments.value.unshift({
+          id: operationId, name: name || "正在选取附件", type: mime || "application/octet-stream",
+          src: "", size, progress, status: "loading",
+        });
+      }
+    };
+    const handleStart = (event: Event) => {
+      const detail = (event as CustomEvent<NativeFileStartDetail>).detail;
+      if (detail.operationId === operationId) {
+        updateCard(detail.name, detail.mime, detail.size, 0);
+        const pending = card();
+        if (pending && !detail.size) pending.progress = undefined;
+      }
+    };
+    const handleProgress = (event: Event) => {
+      const detail = (event as CustomEvent<NativeFileProgressDetail>).detail;
+      if (detail.operationId === operationId) {
+        updateCard(detail.name, detail.mime, detail.total, Math.min(90, Math.round(detail.progress * 0.9)));
+        const pending = card();
+        if (pending) {
+          pending.transferredBytes = detail.loaded;
+          if (!detail.total) pending.progress = undefined;
+        }
+      }
+    };
+    window.addEventListener("vcp-mobile-file-start", handleStart);
+    window.addEventListener("vcp-mobile-file-progress", handleProgress);
+    try {
+      if (!await beginImport(operationId)) return;
+      updateCard("正在选择文件", "application/octet-stream", 0, 0);
+      const pending = card();
+      if (pending) pending.progress = undefined;
+      picked = await invoke<PickedFile>("plugin:vcp-mobile|pick_file", { mode, operationId });
+      if (!current() || !picked?.path) return;
+      updateCard(picked.name, picked.mime, picked.size, 90);
+      await nextTick();
+      if (!current()) return;
+      await invoke("check_attachment_support", { originalName: picked.name });
+      if (!current()) return;
+      const finalData = await invoke<AttachmentData>("register_local_file", {
+        localPath: picked.path, originalName: picked.name,
+        mimeType: picked.mime || "application/octet-stream",
+        thumbnailPath: picked.thumbnailPath || null,
+        stableId: operationId, operationId, expectedHash: picked.hash || null,
+      });
+      if (!current()) return;
+      const index = stagedAttachments.value.findIndex((a) => a.id === operationId);
+      if (index !== -1) {
+        stagedAttachments.value[index] = {
+          ...stagedAttachments.value[index], ...finalData,
+          id: operationId,
+          src: finalData.internalPath, internalPath: finalData.internalPath,
+          thumbnailPath: finalData.thumbnailPath ?? undefined,
+          extractedText: finalData.extractedText ?? undefined,
+          status: "done", progress: undefined, transferredBytes: undefined,
+        };
+      }
+    } catch (error) {
+      if (!current()) return;
+      const index = stagedAttachments.value.findIndex((a) => a.id === operationId);
+      if (index !== -1) stagedAttachments.value.splice(index, 1);
+      if (!String(error).toLowerCase().includes("cancel")) {
+        notificationStore.addNotification({
+          type: "warning", title: "选取附件失败", message: String(error), toastOnly: true,
+        });
+      }
+    } finally {
+      window.removeEventListener("vcp-mobile-file-start", handleStart);
+      window.removeEventListener("vcp-mobile-file-progress", handleProgress);
+      picking = false;
+      await finishImport(operationId);
+      // A committed CAS file is owned by Rust; this command only removes native
+      // staging paths, including unsupported files and stale picker completions.
+      if (picked?.path) {
+        await invoke("plugin:vcp-mobile|delete_temp_file", { filePath: picked.path }).catch(console.warn);
+      }
+      if (picked?.thumbnailPath) {
+        await invoke("plugin:vcp-mobile|delete_temp_file", { filePath: picked.thumbnailPath }).catch(console.warn);
+      }
+    }
+  };
   /**
    * 移除特定位置的暂存附件
    */
   const removeStaged = (index: number) => {
     if (index >= 0 && index < stagedAttachments.value.length) {
+      const operationId = stagedAttachments.value[index].id;
+      if (operationId) cancelOperation(operationId);
       stagedAttachments.value.splice(index, 1);
     }
   };
@@ -556,8 +223,14 @@ export const useAttachmentStore = defineStore("attachment", () => {
    * 清空暂存附件
    */
   const clearStaged = () => {
+    for (const operationId of activeOperations) cancelOperation(operationId);
     stagedAttachments.value = [];
   };
+
+  onScopeDispose(() => {
+    clearStaged();
+    void progressListener.then((unlisten) => unlisten()).catch(console.warn);
+  });
 
   return {
     stagedAttachments,
@@ -565,5 +238,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
     resolveMessageAssets,
     removeStaged,
     clearStaged,
+    beginImport,
+    finishImport,
   };
 });

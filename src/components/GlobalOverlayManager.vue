@@ -33,7 +33,7 @@ const handleEditorSave = async (newContent: string) => {
 </script>
 
 <template>
-  <div class="fixed inset-0 pointer-events-none z-toast">
+  <div class="vcp-viewport-surface fixed inset-0 pointer-events-none z-toast">
     <!-- 1. 全局基础 UI (Prompt/Toast) -->
     <VcpPrompt v-if="overlayStore.promptConfig" :is-open="!!overlayStore.promptConfig"
       :title="overlayStore.promptConfig.title" :initial-value="overlayStore.promptConfig.initialValue"
@@ -41,7 +41,7 @@ const handleEditorSave = async (newContent: string) => {
       @cancel="overlayStore.closePrompt()" @update:isOpen="!$event && overlayStore.closePrompt()" />
 
     <!-- 全局 Confirm -->
-    <VcpConfirm v-if="overlayStore.confirmConfig" :is-open="!!overlayStore.confirmConfig"
+    <VcpConfirm v-if="overlayStore.confirmConfig" modal-id="Confirm" :is-open="!!overlayStore.confirmConfig"
       :title="overlayStore.confirmConfig.title" :message="overlayStore.confirmConfig.message"
       :is-danger="overlayStore.confirmConfig.isDanger" :only-confirm="overlayStore.confirmConfig.onlyConfirm"
       @confirm="overlayStore.confirmConfig.onConfirm()" @cancel="overlayStore.confirmConfig.onCancel()"

@@ -3,7 +3,11 @@
   "bundle": {
     "iOS": {
       "minimumSystemVersion": "26.0",
-      "frameworks": ["Network", "UserNotifications", "CoreMotion", "CoreLocation"]
+      "frameworks": [
+        "Network", "UserNotifications", "CoreMotion", "CoreLocation",
+        "PhotosUI", "Photos", "ImageIO", "CoreGraphics", "AVFoundation",
+        "QuickLook", "UniformTypeIdentifiers", "CryptoKit"
+      ]
     }
   }
 }

@@ -63,7 +63,6 @@ pub use persistence::message_repository;
 // --- Infra 领域 ---
 pub use infra::boot_trace;
 pub use infra::file_manager;
-pub use infra::high_speed_channel;
 pub use infra::lifecycle_manager;
 pub use infra::maintenance_manager;
 pub use infra::media_processor;

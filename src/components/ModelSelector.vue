@@ -176,7 +176,7 @@ const refresh = () => {
 // --- Modal History Stack Registration ---
 watch(() => props.modelValue, (newVal) => {
   if (newVal) {
-    registerModal(modalId, close);
+    registerModal(modalId, close, () => sheetRef.value);
     // 🌟 5分钟检测：如果为空，或者距离上次同步超过 5 分钟，直接触发强力同步（与点击刷新按钮完全等价，自动播放转圈并展示 Toast）
     const shouldRefresh = modelStore.models.length === 0 || (Date.now() - modelStore.lastRefreshed > 1000 * 60 * 5);
     if (shouldRefresh) {
@@ -257,7 +257,7 @@ onUnmounted(() => {
   <Teleport to="body">
     <!-- 遮罩层 -->
     <Transition name="fade">
-      <div v-if="modelValue" class="fixed inset-0 bg-black/50 z-sheet" @click="close"
+      <div v-if="modelValue" class="vcp-viewport-surface fixed inset-0 bg-black/50 z-sheet" @click="close"
         @touchmove.prevent>
       </div>
     </Transition>
@@ -266,7 +266,7 @@ onUnmounted(() => {
     <Transition name="slide-up">
       <div v-if="modelValue"
         ref="sheetRef"
-        class="fixed bottom-0 left-0 right-0 z-sheet bg-white/95 dark:bg-zinc-900/95 rounded-t-3xl shadow-2xl flex flex-col border-t border-black/5 dark:border-white/10 max-h-[85vh] overflow-hidden select-none no-rubber-band"
+        class="vcp-viewport-bottom fixed bottom-0 left-0 right-0 z-sheet bg-white/95 dark:bg-zinc-900/95 rounded-t-3xl shadow-2xl flex flex-col border-t border-black/5 dark:border-white/10 max-h-[85vh] overflow-hidden select-none no-rubber-band"
         style="padding-right: var(--vcp-safe-right, 0px); padding-bottom: calc(var(--vcp-safe-bottom, 48px) + 12px); padding-left: var(--vcp-safe-left, 0px);"
         :class="{ 'transition-transform duration-300': !isDragging }">
 

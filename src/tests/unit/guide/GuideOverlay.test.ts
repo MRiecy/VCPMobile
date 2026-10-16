@@ -24,6 +24,10 @@ const MOCK_RECT = {
 
 // 固定几何：happy-dom 默认 rect 全为 0，覆盖为确定性坐标。
 Element.prototype.getBoundingClientRect = function getBoundingClientRect() {
+  if (this.classList.contains('guide-overlay')) {
+    return { top: 0, left: 0, x: 0, y: 0, width: window.innerWidth, height: window.innerHeight,
+      right: window.innerWidth, bottom: window.innerHeight, toJSON: () => ({}) } as DOMRect;
+  }
   return MOCK_RECT as DOMRect;
 };
 Element.prototype.scrollIntoView = function scrollIntoView() {};

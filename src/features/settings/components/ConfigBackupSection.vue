@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, onUnmounted, watch } from "vue";
+import { invoke } from "@tauri-apps/api/core";
 import type { AppSettings } from "../../../core/stores/settings";
 import { useSettingsStore } from "../../../core/stores/settings";
-import { isAndroid } from "../../../core/utils/platform";
+import { isIOS } from "../../../core/utils/platform";
 import SettingsActionWithStatus from "../../../components/settings/SettingsActionWithStatus.vue";
 import VcpConfirm from "../../../components/ui/VcpConfirm.vue";
 import {
   exportConfigBackup,
-  readConfigBackupFile,
+  pickConfigBackup,
   type ParsedConfigBackup,
 } from "../useConfigBackup";
 
@@ -26,22 +27,31 @@ const exportStatus = ref<Status>({ type: null, message: "" });
 const importStatus = ref<Status>({ type: null, message: "" });
 
 const settingsStore = useSettingsStore();
+let disposed = false;
+let importOperationId: string | null = null;
 
 // ------------------------------------------------------------------
 // 导出
 // ------------------------------------------------------------------
 const onExport = async () => {
+  if (exportStatus.value.type === "loading") return;
   // 先把页面上未保存的修改落盘，保证导出内容与用户所见一致
   emit("save-request");
 
   exportStatus.value = { type: "loading", message: "正在生成备份文件..." };
   try {
     const result = await exportConfigBackup(props.settings);
+    if (disposed) return;
     exportStatus.value = {
       type: "success",
-      message: `已导出到 下载/VCPMobile/${result.displayName}\n文件包含明文密钥，请妥善保管`,
+      message: `${isIOS ? '已保存到所选文件位置' : '已导出到 下载/VCPMobile'}：${result.displayName}\n文件包含明文密钥，请妥善保管`,
     };
   } catch (e: any) {
+    if (disposed) return;
+    if (String(e).toLowerCase().includes("cancel")) {
+      exportStatus.value = { type: null, message: "" };
+      return;
+    }
     exportStatus.value = { type: "error", message: `导出失败: ${e}` };
   }
 };
@@ -49,30 +59,45 @@ const onExport = async () => {
 // ------------------------------------------------------------------
 // 导入
 // ------------------------------------------------------------------
-const fileInput = ref<HTMLInputElement | null>(null);
 const pendingImport = ref<ParsedConfigBackup | null>(null);
 const showImportConfirm = ref(false);
 const importing = ref(false);
 
-const triggerImport = () => {
-  fileInput.value?.click();
-};
-
-const onFileChange = async (e: Event) => {
-  const input = e.target as HTMLInputElement;
-  const file = input.files?.[0];
-  input.value = ""; // 允许重复选择同一文件
-  if (!file) return;
-
-  importStatus.value = { type: "loading", message: "正在解析备份文件..." };
+const triggerImport = async () => {
+  if (importOperationId || importing.value || showImportConfirm.value) return;
+  const operationId = `config_${crypto.randomUUID()}`;
+  importOperationId = operationId;
+  importStatus.value = { type: "loading", message: "正在选取并解析备份文件..." };
   try {
-    pendingImport.value = await readConfigBackupFile(file);
+    const parsed = await pickConfigBackup(operationId);
+    if (disposed || importOperationId !== operationId) return;
+    pendingImport.value = parsed;
     showImportConfirm.value = true;
     importStatus.value = { type: null, message: "" };
   } catch (e: any) {
+    if (disposed || importOperationId !== operationId) return;
+    if (String(e).toLowerCase().includes("cancel")) {
+      importStatus.value = { type: null, message: "" };
+      return;
+    }
     importStatus.value = { type: "error", message: `导入失败: ${e?.message ?? e}` };
+  } finally {
+    if (importOperationId === operationId) importOperationId = null;
   }
 };
+
+watch(showImportConfirm, (open) => {
+  if (!open) pendingImport.value = null;
+});
+
+onUnmounted(() => {
+  disposed = true;
+  pendingImport.value = null;
+  if (importOperationId) {
+    void invoke("plugin:vcp-mobile|cancel_file_operation", { operationId: importOperationId }).catch(console.warn);
+    importOperationId = null;
+  }
+});
 
 const confirmImport = async () => {
   const backup = pendingImport.value;
@@ -96,9 +121,8 @@ const confirmImport = async () => {
 <template>
   <div class="space-y-5 px-1">
     <SettingsActionWithStatus
-      v-if="isAndroid"
       title="导出配置"
-      description="用户身份与应用连接配置，保存到系统下载目录"
+      :description="isIOS ? '用户身份与应用连接配置，保存到文件' : '用户身份与应用连接配置，保存到系统下载目录'"
       button-variant="primary"
       button-label="导出"
       :button-loading="exportStatus.type === 'loading'"
@@ -108,7 +132,7 @@ const confirmImport = async () => {
       @action-click="onExport"
     />
 
-    <div v-if="isAndroid" class="border-t border-black/5 dark:border-white/5 pt-2"></div>
+    <div class="border-t border-black/5 dark:border-white/5 pt-2"></div>
 
     <SettingsActionWithStatus
       title="导入配置"
@@ -126,13 +150,6 @@ const confirmImport = async () => {
       * 备份文件为明文 JSON（.vcpcfg 后缀），包含 API Key 与密码，请勿分享给他人
     </p>
 
-    <input
-      type="file"
-      ref="fileInput"
-      class="hidden"
-      accept=".vcpcfg,application/json"
-      @change="onFileChange"
-    />
   </div>
 
   <VcpConfirm

@@ -6,9 +6,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::io::AsyncReadExt;
 
+pub mod operations;
+pub mod resources;
+pub use operations::*;
+pub use resources::*;
+
 use tauri::{AppHandle, Emitter, Manager, State};
 
-const STORE_FILE_IPC_MAX_BYTES: usize = 2 * 1024 * 1024;
+const STORE_FILE_IPC_MAX_BYTES: usize = 8 * 1024 * 1024;
 const STAGED_FILE_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 fn store_file_semaphore() -> Arc<tokio::sync::Semaphore> {
@@ -70,6 +75,7 @@ fn verify_streamed_size(expected_size: u64, actual_size: u64) -> Result<(), Stri
 /// 存在半文件。「同尺寸不同内容」仅剩磁盘级损坏一种来源，而「能改写应用私有目录
 /// 的攻击者」本就超出哈希校验能防的威胁模型。去掉重哈希后，重复附件命中不再产生
 /// 第三次全量读盘（Kotlin 拷入一次 + Rust staging 重算一次已经足够）。
+#[cfg(test)]
 fn check_existing_cas_size(path: &std::path::Path, expected_size: u64) -> Result<(), String> {
     let metadata =
         fs::metadata(path).map_err(|error| format!("CAS 文件元数据读取失败: {}", error))?;
@@ -158,7 +164,7 @@ pub fn get_cache_root_dir<R: tauri::Runtime>(
     app_handle.path().app_cache_dir().map_err(|e| e.to_string())
 }
 
-/// 附件导入暂存区。原生复制、HTTP 上传、登记和冷启动清理共用此路径。
+/// 附件导入暂存区。原生复制、内存产物、登记和冷启动清理共用此路径。
 /// 只存未提交的临时文件；CAS 成功登记后由导入 owner 释放，不能当作长期附件路径。
 pub fn get_upload_staging_dir<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
@@ -181,6 +187,9 @@ pub fn get_attachments_root_dir<R: tauri::Runtime>(
 pub fn get_thumbnails_root_dir<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
 ) -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "ios")]
+    let mut path = get_cache_root_dir(app_handle)?;
+    #[cfg(not(target_os = "ios"))]
     let mut path = get_data_root_dir(app_handle)?;
     path.push("thumbnails");
     Ok(path)
@@ -196,33 +205,6 @@ pub fn get_multimodal_cache_dir<R: tauri::Runtime>(
     let mut path = get_data_root_dir(app_handle)?;
     path.push("multimodal_cache");
     Ok(path)
-}
-
-/// 物理安全的文件重命名工具，能够跨越物理挂载分区 (EXDEV) 降级进行物理拷贝+删除
-pub fn safe_rename<P: AsRef<std::path::Path>, Q: AsRef<std::path::Path>>(
-    from: P,
-    to: Q,
-) -> std::io::Result<()> {
-    let from = from.as_ref();
-    let to = to.as_ref();
-
-    if std::fs::rename(from, to).is_err() {
-        // 跨分区时先复制到目标目录的唯一临时文件，再原子提交，禁止正式路径出现半文件。
-        let parent = to.parent().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "附件目标缺少父目录")
-        })?;
-        let temporary = parent.join(format!(".ingest-{}.tmp", uuid::Uuid::new_v4()));
-        if let Err(error) = std::fs::copy(from, &temporary) {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(error);
-        }
-        if let Err(error) = std::fs::rename(&temporary, to) {
-            let _ = std::fs::remove_file(&temporary);
-            return Err(error);
-        }
-        let _ = std::fs::remove_file(from);
-    }
-    Ok(())
 }
 
 /// 附件元数据结构
@@ -466,17 +448,42 @@ pub fn get_refined_mime_type(
     current_mime
 }
 
-/// 内部辅助函数：生成图片缩略图（短边 200px 自适应，已下沉到 Android Kotlin 侧，此处直接返回 None）
+/// 原件不变；使用同一原生派生服务生成 512px 列表图，记录真实编码后缀。
 pub async fn generate_thumbnail<R: tauri::Runtime>(
-    _app_handle: &tauri::AppHandle<R>,
-    _original_path: &std::path::Path,
-    _hash: &str,
+    app_handle: &tauri::AppHandle<R>,
+    original_path: &std::path::Path,
+    hash: &str,
 ) -> Option<String> {
-    None
+    let directory = get_thumbnails_root_dir(app_handle).ok()?;
+    tokio::fs::create_dir_all(&directory).await.ok()?;
+    let output = directory.join(format!("{hash}_thumb"));
+    let source = original_path.to_owned();
+    let app = app_handle.clone();
+    match tokio::task::spawn_blocking(move || {
+        super::media_processor::image_extractor::derive_image(
+            &app,
+            &source,
+            &output,
+            512,
+            512 * 512,
+            1024 * 1024,
+        )
+    })
+    .await
+    {
+        Ok(Ok(image)) => Some(image.path),
+        Ok(Err(error)) => {
+            log::warn!("附件缩略图生成失败: {error}");
+            None
+        }
+        Err(error) => {
+            log::warn!("附件缩略图任务异常: {error}");
+            None
+        }
+    }
 }
 
 /// 内部辅助函数：校验路径安全性，防止路径遍历攻击
-#[cfg(not(target_os = "ios"))]
 fn ensure_safe_path(app_handle: &AppHandle, path: &std::path::Path) -> Result<(), String> {
     // 物理展开目标路径的所有相对路径分量 (..)，杜绝字符级前缀欺骗的沙盒逃逸
     let canonical_path = if path.exists() {
@@ -619,8 +626,9 @@ async fn commit_registered_attachment(
     Ok(())
 }
 
-/// 将文件元数据注册到数据库并触发后处理 (缩略图、文本提取)
-pub async fn register_attachment_internal<R: tauri::Runtime>(
+/// 将文件元数据注册到数据库并触发后处理 (缩略图、文本提取)。
+#[allow(clippy::too_many_arguments)]
+async fn register_attachment_with_operation<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,
     pool: &sqlx::SqlitePool,
     hash: String,
@@ -628,6 +636,7 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
     mime_type: String,
     size: u64,
     internal_path: String,
+    operation: &operations::Operation,
 ) -> Result<AttachmentData, String> {
     let now = crate::vcp_modules::infra::utils::now_secs() as u64;
     let db_state = app_handle.state::<DbState>();
@@ -644,6 +653,8 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
         .await
         .map_err(|error| format!("读取现有附件元数据失败: {error}"))?;
         let existing_path = existing.path.to_string_lossy().into_owned();
+        let mut commit_guard = operation.status.lock().await;
+        operation.check()?;
         commit_registered_attachment(
             &db_state,
             &hash,
@@ -653,6 +664,8 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
             now as i64,
         )
         .await?;
+        *commit_guard = operations::Status::Committed;
+        drop(commit_guard);
 
         let candidate = std::path::Path::new(&internal_path);
         if candidate != existing.path && candidate.exists() {
@@ -674,6 +687,31 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
             .and_then(|value| value.to_str())
             .ok_or_else(|| "现有附件文件名不是有效 UTF-8".to_string())?
             .to_string();
+        let thumbnail_path = match existing_metadata.1 {
+            Some(path) if tokio::fs::try_exists(&path).await.unwrap_or(false) => Some(path),
+            _ if existing.mime_type.starts_with("image/") => {
+                generate_thumbnail(app_handle, &existing.path, &hash).await
+            }
+            _ => None,
+        };
+        if let Some(path) = &thumbnail_path {
+            let update = async {
+                let mut tx = db_state
+                    .write_transaction("file.attachment.thumbnail")
+                    .await?;
+                sqlx::query("UPDATE attachments SET thumbnail_path = ? WHERE hash = ?")
+                    .bind(path)
+                    .bind(&hash)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                tx.commit().await.map_err(|e| e.to_string())
+            }
+            .await;
+            if let Err(error) = update {
+                log::warn!("附件缩略图登记失败: {error}");
+            }
+        }
         return Ok(AttachmentData {
             id: format!("attachment_{hash}"),
             name: original_name,
@@ -685,10 +723,13 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
             created_at: u64::try_from(existing_metadata.2)
                 .map_err(|_| "现有附件创建时间无效".to_string())?,
             extracted_text: None,
-            thumbnail_path: existing_metadata.1,
+            thumbnail_path,
         });
     }
 
+    // 取消与主记录提交只在这个短临界区裁定，派生处理不持有锁。
+    let mut commit_guard = operation.status.lock().await;
+    operation.check()?;
     // 1. 原子更新 CAS 索引，并把仍然存活的 desktop_only 关系提升为 ready。
     commit_registered_attachment(
         &db_state,
@@ -699,6 +740,8 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
         now as i64,
     )
     .await?;
+    *commit_guard = operations::Status::Committed;
+    drop(commit_guard);
 
     let internal_file_path = std::path::PathBuf::from(&internal_path);
 
@@ -765,18 +808,15 @@ pub async fn register_attachment_internal<R: tauri::Runtime>(
         size,
         hash,
         created_at: now,
-        extracted_text: None, // 掐断大文本在前端的冗余中转传输，前端预览直接 fetch 物理路径
+        extracted_text: None, // 正文留在 Rust，前端预览通过有界读取命令。
         thumbnail_path,
     })
 }
 
 /// 存储文件到中心化附件目录 (内容寻址存储)
 ///
-/// 【适用场景】非 Android 端的前端小文件上传 (<2MB) 及录音片段、二维码等内存数据。
-/// Android 端不走此函数：Android 通过原生插件 `pick_file` 在 Native 层完成文件拷贝与
-/// 哈希计算后，直接调用 `register_local_file` 进行零拷贝注册。
-///
-/// IPC 仅承载小文件；更大文件必须走现有高速流式通道。
+/// 仅用于 WebView 已生成的头像、文本、录音等内存产物。
+/// 外部文件由双端原生选择器交接路径，纯导出使用 store_temporary_export。
 #[tauri::command]
 pub async fn store_file(
     app_handle: AppHandle,
@@ -784,66 +824,45 @@ pub async fn store_file(
     original_name: String,
     file_bytes: Vec<u8>,
     mime_type: String,
+    operation_id: Option<String>,
 ) -> Result<AttachmentData, String> {
     if file_bytes.len() > STORE_FILE_IPC_MAX_BYTES {
-        return Err("文件过大，请使用高速链路上传 (Limit: 2MB)".to_string());
+        return Err("内存产物超过 8 MiB，请缩小输出；外部文件请使用系统选择器".to_string());
     }
-
-    let attachments_dir = get_attachments_root_dir(&app_handle)?;
-    tokio::fs::create_dir_all(&attachments_dir)
+    let (id, operation) = operations::acquire(operation_id)?;
+    let _operation_lifetime = operations::FinishOnDrop(id.clone());
+    let uploads = get_upload_staging_dir(&app_handle)?;
+    tokio::fs::create_dir_all(&uploads)
         .await
         .map_err(|e| e.to_string())?;
-
+    let path = uploads.join(format!("{id}-{}.memory", uuid::Uuid::new_v4()));
     let _permit = store_file_semaphore()
         .acquire_owned()
         .await
         .map_err(|_| "文件存储执行器已关闭".to_string())?;
-    let size = file_bytes.len() as u64;
-    let extension = safe_storage_extension(&original_name).map(str::to_owned);
-    let (hash, internal_file_path) = tokio::task::spawn_blocking(move || {
-        let hash = crate::vcp_modules::infra::utils::calculate_sha256(&file_bytes);
-        let internal_file_name = extension
-            .map(|extension| format!("{}.{}", hash, extension))
-            .unwrap_or_else(|| hash.clone());
-        let internal_file_path = attachments_dir.join(internal_file_name);
-        if internal_file_path.exists() {
-            check_existing_cas_size(&internal_file_path, file_bytes.len() as u64)?;
-        } else {
-            let temporary_path =
-                attachments_dir.join(format!(".ingest-{}-{}.tmp", hash, uuid::Uuid::new_v4()));
-            if let Err(error) = fs::write(&temporary_path, &file_bytes) {
-                let _ = fs::remove_file(&temporary_path);
-                return Err(error.to_string());
-            }
-            if let Err(error) = fs::rename(&temporary_path, &internal_file_path) {
-                let _ = fs::remove_file(&temporary_path);
-                if !internal_file_path.exists() {
-                    return Err(error.to_string());
-                }
-                check_existing_cas_size(&internal_file_path, file_bytes.len() as u64)?;
-            }
-        }
-        Ok::<_, String>((hash, internal_file_path))
-    })
-    .await
-    .map_err(|error| format!("文件存储任务异常: {}", error))??;
-    let internal_path_str = internal_file_path
-        .to_str()
-        .ok_or("无效的附件路径字符")?
-        .to_string();
-
-    // 3. 注册并返回元数据
-    let refined_mime = get_refined_mime_type(&internal_file_path, &original_name, &mime_type);
-    register_attachment_internal(
-        &app_handle,
-        &db_state.pool,
-        hash,
-        original_name,
-        refined_mime,
-        size,
-        internal_path_str,
-    )
-    .await
+    let result = async {
+        operation.check()?;
+        tokio::fs::write(&path, file_bytes)
+            .await
+            .map_err(|e| e.to_string())?;
+        operation.check()?;
+        register_staged_file(
+            &app_handle,
+            &db_state,
+            path.to_string_lossy().into_owned(),
+            original_name,
+            Some(mime_type),
+            None,
+            Some(id.clone()),
+            None,
+            &operation,
+        )
+        .await
+    }
+    .await;
+    let _ = tokio::fs::remove_file(&path).await;
+    operations::finish(&id);
+    result
 }
 
 /// 注册本地已有的文件（例如 Android Kotlin 端沙盒临时复制的大文件/硬解缩略图）
@@ -868,9 +887,54 @@ pub async fn register_local_file(
     thumbnail_path: Option<String>,
     stable_id: Option<String>,
     expected_hash: Option<String>,
+    operation_id: Option<String>,
 ) -> Result<AttachmentData, String> {
+    let (id, operation) = operations::acquire(operation_id)?;
+    let _operation_lifetime = operations::FinishOnDrop(id.clone());
+    let result = register_staged_file(
+        &app_handle,
+        &db_state,
+        local_path.clone(),
+        original_name,
+        mime_type,
+        thumbnail_path.clone(),
+        stable_id,
+        expected_hash,
+        &operation,
+    )
+    .await;
+    // 只删除已验证属于 staging 的本次文件，不触碰已发布的同 hash CAS。
+    if let Ok(root) = get_upload_staging_dir(&app_handle) {
+        if let Ok(path) = canonical_staged_file(&root, Path::new(&local_path), "附件") {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        if let Some(path) = thumbnail_path {
+            if let Ok(path) =
+                canonical_staged_file(&root.join("thumbnails"), Path::new(&path), "缩略图")
+            {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+        }
+    }
+    operations::finish(&id);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn register_staged_file(
+    app_handle: &AppHandle,
+    db_state: &DbState,
+    local_path: String,
+    original_name: String,
+    mime_type: Option<String>,
+    thumbnail_path: Option<String>,
+    stable_id: Option<String>,
+    expected_hash: Option<String>,
+    operation: &operations::Operation,
+) -> Result<AttachmentData, String> {
+    operation.check()?;
     // 命令仍由中央 IPC 总闸 offload；哈希缓冲必须保持堆分配，避免再次内联进 future。
-    let uploads_root = get_upload_staging_dir(&app_handle)?;
+    let uploads_root = get_upload_staging_dir(app_handle)?;
     tokio::fs::create_dir_all(&uploads_root)
         .await
         .map_err(|e| format!("无法创建上传 staging 目录: {}", e))?;
@@ -920,6 +984,7 @@ pub async fn register_local_file(
     let mut hashed_bytes = 0u64;
     let mut last_emit_time = std::time::Instant::now();
     loop {
+        operation.check()?;
         let n = file
             .read(&mut buffer)
             .await
@@ -957,6 +1022,8 @@ pub async fn register_local_file(
         }
     }
     verify_streamed_size(size, hashed_bytes)?;
+    drop(file);
+    operation.check()?;
     let hash = crate::vcp_modules::infra::utils::finalize_sha256_hex(hasher);
     verify_expected_hash(expected_hash.as_deref(), &hash)?;
 
@@ -965,7 +1032,7 @@ pub async fn register_local_file(
         .map(|extension| format!("{}.{}", hash, extension))
         .unwrap_or_else(|| hash.clone());
 
-    let attachments_dir = get_attachments_root_dir(&app_handle)?;
+    let attachments_dir = get_attachments_root_dir(app_handle)?;
     if !attachments_dir.exists() {
         tokio::fs::create_dir_all(&attachments_dir)
             .await
@@ -1016,7 +1083,7 @@ pub async fn register_local_file(
         } else {
             let temporary_path =
                 attachments_dir.join(format!(".ingest-{}-{}.tmp", hash, uuid::Uuid::new_v4()));
-            if let Err(error) = tokio::fs::copy(&source_path, &temporary_path).await {
+            if let Err(error) = copy_cancellable(&source_path, &temporary_path, operation).await {
                 let _ = tokio::fs::remove_file(&temporary_path).await;
                 return Err(format!("复制文件到正式目录失败: {}", error));
             }
@@ -1051,14 +1118,15 @@ pub async fn register_local_file(
     let refined_mime = get_refined_mime_type(&dest_path, &original_name, &initial_mime);
 
     // 6. 调用统一的附件注册逻辑
-    let registration = register_attachment_internal(
-        &app_handle,
+    let registration = register_attachment_with_operation(
+        app_handle,
         &db_state.pool,
         hash.clone(),
         original_name,
         refined_mime,
         size,
         dest_path_str,
+        operation,
     )
     .await;
     let mut attachment_data = match registration {
@@ -1086,13 +1154,22 @@ pub async fn register_local_file(
 
     if let Some(source_thumb) = staged_thumbnail {
         let thumbnail_result: Result<String, String> = async {
-            let thumbs_dir = get_thumbnails_root_dir(&app_handle)?;
+            let thumbs_dir = get_thumbnails_root_dir(app_handle)?;
             if !thumbs_dir.exists() {
                 tokio::fs::create_dir_all(&thumbs_dir)
                     .await
                     .map_err(|e| e.to_string())?;
             }
-            let dest_thumb_path = thumbs_dir.join(format!("{}_thumb.webp", hash));
+            let kind = infer::get_from_path(&source_thumb)
+                .map_err(|e| e.to_string())?
+                .ok_or("无法识别缩略图编码")?;
+            let extension = match kind.mime_type() {
+                "image/jpeg" => "jpg",
+                "image/png" => "png",
+                "image/webp" => "webp",
+                _ => return Err("缩略图编码不受支持".into()),
+            };
+            let dest_thumb_path = thumbs_dir.join(format!("{hash}_thumb.{extension}"));
             let dest_thumb_path_str = dest_thumb_path
                 .to_str()
                 .ok_or("无效的缩略图目标路径字符")?
@@ -1147,7 +1224,79 @@ pub async fn register_local_file(
     Ok(attachment_data)
 }
 
-/// 移动端/桌面端原生文件选取与存储 (流式防 OOM 优化版)
+async fn copy_cancellable(
+    source: &Path,
+    target: &Path,
+    operation: &operations::Operation,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let mut input = tokio::fs::File::open(source)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut output = tokio::fs::File::create(target)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut buffer = vec![0u8; 64 * 1024];
+    let mut copied = 0u64;
+    loop {
+        operation.check()?;
+        let size = input.read(&mut buffer).await.map_err(|e| e.to_string())?;
+        if size == 0 {
+            break;
+        }
+        copied = copied.checked_add(size as u64).ok_or("复制字节数溢出")?;
+        if copied > STAGED_FILE_MAX_BYTES {
+            return Err("文件超过 512 MiB".into());
+        }
+        output
+            .write_all(&buffer[..size])
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    output.flush().await.map_err(|e| e.to_string())?;
+    operation.check()
+}
+
+/// 分享 owner 已核对当前 generation；保留交接原件，独立副本进入普通 CAS 管线。
+pub async fn import_shared_file(
+    app: &AppHandle,
+    pool: &sqlx::SqlitePool,
+    source_path: &Path,
+    original_name: String,
+    mime_type: Option<String>,
+    operation_id: String,
+    expected_hash: Option<String>,
+) -> Result<AttachmentData, String> {
+    let _ = pool; // DbState 的统一写事务仍从 app owner 取得。
+    let operation = operations::begin(&operation_id)?;
+    let _operation_lifetime = operations::FinishOnDrop(operation_id.clone());
+    let uploads = get_upload_staging_dir(app)?;
+    tokio::fs::create_dir_all(&uploads)
+        .await
+        .map_err(|e| e.to_string())?;
+    let staged = uploads.join(format!("{operation_id}-{}.shared", uuid::Uuid::new_v4()));
+    let result = async {
+        copy_cancellable(source_path, &staged, &operation).await?;
+        register_staged_file(
+            app,
+            &app.state::<DbState>(),
+            staged.to_string_lossy().into_owned(),
+            original_name,
+            mime_type,
+            None,
+            Some(operation_id.clone()),
+            expected_hash,
+            &operation,
+        )
+        .await
+    }
+    .await;
+    let _ = tokio::fs::remove_file(staged).await;
+    operations::finish(&operation_id);
+    result
+}
+
+/// 取得已登记附件的当前物理路径。
 #[tauri::command]
 pub async fn get_attachment_real_path(
     app_handle: AppHandle,
@@ -1160,19 +1309,25 @@ pub async fn get_attachment_real_path(
         .map(|record| record.path.to_string_lossy().into_owned())
 }
 
-/// 唤起系统默认应用打开文件或 URL
-#[cfg(not(target_os = "ios"))]
+/// 系统预览/打开：结果由真实原生 completion 决定。
 #[tauri::command]
-pub async fn open_file(app_handle: AppHandle, path: String) -> Result<(), String> {
-    let clean_path = path.replace("file://", "");
+pub async fn open_file(
+    app_handle: AppHandle,
+    path: String,
+    file_name: Option<String>,
+) -> Result<tauri_plugin_vcp_mobile::system::NativeFileActionResult, String> {
+    let clean_path = path.strip_prefix("file://").unwrap_or(&path).to_string();
 
     // 网络 URL 直接打开，跳过本地路径安全校验
     if clean_path.starts_with("http://") || clean_path.starts_with("https://") {
         use tauri_plugin_opener::OpenerExt;
-        return app_handle
+        app_handle
             .opener()
             .open_url(clean_path, Option::<String>::None)
-            .map_err(|e| e.to_string());
+            .map_err(|e| e.to_string())?;
+        return Ok(tauri_plugin_vcp_mobile::system::NativeFileActionResult {
+            outcome: "opened".into(),
+        });
     }
 
     let path_buf = std::path::PathBuf::from(&clean_path);
@@ -1180,27 +1335,49 @@ pub async fn open_file(app_handle: AppHandle, path: String) -> Result<(), String
     // 安全校验：禁止打开系统敏感路径
     ensure_safe_path(&app_handle, &path_buf)?;
 
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     {
-        return tauri_plugin_vcp_mobile::system::open_file_native(app_handle, clean_path, None);
+        return tauri_plugin_vcp_mobile::system::open_file_native(
+            app_handle, clean_path, None, None, file_name,
+        )
+        .await;
     }
 
     // 使用 tauri-plugin-opener 的原生能力
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
+        let _ = file_name;
         use tauri_plugin_opener::OpenerExt;
         app_handle
             .opener()
             .open_path(clean_path, Option::<String>::None)
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        Ok(tauri_plugin_vcp_mobile::system::NativeFileActionResult {
+            outcome: "opened".into(),
+        })
     }
 }
 
-#[cfg(target_os = "ios")]
 #[tauri::command]
-pub async fn open_file(app_handle: AppHandle, path: String) -> Result<(), String> {
-    let _ = (app_handle, path);
-    Err("not_implemented: 当前 iOS 版本尚不支持原生文件预览".to_string())
+pub async fn export_attachment_file(
+    app_handle: AppHandle,
+    path: String,
+    file_name: Option<String>,
+) -> Result<tauri_plugin_vcp_mobile::system::DownloadsSaveResult, String> {
+    let path = PathBuf::from(path.strip_prefix("file://").unwrap_or(&path));
+    ensure_safe_path(&app_handle, &path)?;
+    let name = file_name
+        .or_else(|| path.file_name().and_then(|n| n.to_str()).map(str::to_owned))
+        .ok_or("文件名无效")?;
+    let mime = get_refined_mime_type(&path, &name, "application/octet-stream");
+    tauri_plugin_vcp_mobile::system::save_file_to_downloads(
+        app_handle,
+        path.to_string_lossy().into_owned(),
+        name,
+        Some(mime),
+        STAGED_FILE_MAX_BYTES,
+    )
+    .await
 }
 
 /// 清理上传缓存目录以及多媒体缓存碎片 (通常在启动时执行，清除上次闪退/强杀留下的僵尸文件)
@@ -1214,6 +1391,14 @@ pub fn clear_upload_cache(app_handle: &AppHandle) {
             let _ = fs::remove_dir_all(&uploads_path);
             let _ = fs::create_dir_all(&uploads_path);
             log::info!("[FileManager] Upload cache cleared.");
+        }
+
+        // 这些目录只有当前进程的临时资源；Share Inbox 在 App Group，不在本清理范围。
+        for name in ["image-work", "temporary-exports", "rendered-input"] {
+            let path = cache_dir.join(name);
+            if path.is_dir() {
+                let _ = fs::remove_dir_all(path);
+            }
         }
 
         // 2. 🌟多媒体零拷贝转码垃圾碎片冷启动清理防线（Sweeper）🌟
@@ -1478,13 +1663,17 @@ pub async fn delete_attachment_physical<R: tauri::Runtime>(
 
     // 统一处理缩略图定位与删除
     let thumbnails_root = get_thumbnails_root_dir(app_handle).map_err(invalid_delete_target)?;
-    let thumb_name = format!("{}_thumb.webp", hash);
-    let thumb_path = thumbnails_root.join(&thumb_name);
-    let thumbnail_path = validated_direct_file(
-        &thumbnails_root,
-        &thumb_path,
-        std::ffi::OsStr::new(&thumb_name),
-    )?;
+    let mut thumbnail_paths = Vec::new();
+    for extension in ["webp", "jpg", "png"] {
+        let name = format!("{hash}_thumb.{extension}");
+        if let Some(path) = validated_direct_file(
+            &thumbnails_root,
+            &thumbnails_root.join(&name),
+            std::ffi::OsStr::new(&name),
+        )? {
+            thumbnail_paths.push(path);
+        }
+    }
 
     // 统一处理多模态持久化缓存删除
     let cache_root = get_multimodal_cache_dir(app_handle).map_err(invalid_delete_target)?;
@@ -1493,9 +1682,10 @@ pub async fn delete_attachment_physical<R: tauri::Runtime>(
     let multimodal_path =
         validated_direct_file(&cache_root, &cache_path, std::ffi::OsStr::new(&cache_name))?;
 
-    for validated in [attachment_path, thumbnail_path, multimodal_path]
+    for validated in [attachment_path, multimodal_path]
         .into_iter()
         .flatten()
+        .chain(thumbnail_paths)
     {
         tokio::fs::remove_file(validated).await?;
     }

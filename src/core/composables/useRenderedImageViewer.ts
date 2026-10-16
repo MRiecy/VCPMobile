@@ -6,6 +6,8 @@ export interface RenderedImageViewerPayload {
   title?: string;
   fileName?: string;
   sourceLabel?: string;
+  /** Only URLs created by this viewer handoff may be revoked by the viewer. */
+  ownedObjectUrl?: boolean;
 }
 
 const state = reactive({
@@ -15,7 +17,9 @@ const state = reactive({
   title: "",
   fileName: "",
   sourceLabel: "",
+  revision: 0,
 });
+let ownedObjectUrl = '';
 
 export function sanitizeRenderedImageSrc(value: string): string {
   const src = value.trim();
@@ -38,7 +42,9 @@ export function openRenderedImageViewer(
 ): void {
   const src = sanitizeRenderedImageSrc(payload.src || "");
   if (!src) return;
-
+  if (ownedObjectUrl) URL.revokeObjectURL(ownedObjectUrl);
+  ownedObjectUrl = payload.ownedObjectUrl && src.startsWith('blob:') ? src : '';
+  state.revision++;
   state.src = src;
   state.alt = payload.alt || "";
   state.title = payload.title || "";
@@ -49,6 +55,10 @@ export function openRenderedImageViewer(
 
 export function closeRenderedImageViewer(): void {
   state.isOpen = false;
+  state.revision++;
+  if (ownedObjectUrl) URL.revokeObjectURL(ownedObjectUrl);
+  ownedObjectUrl = '';
+  state.src = '';
 }
 
 export function useRenderedImageViewer() {

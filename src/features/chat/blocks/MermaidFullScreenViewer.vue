@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { ref, watch, onUnmounted } from 'vue';
+import { computed, ref, watch, onUnmounted } from 'vue';
 import { useModalHistory } from '../../../core/composables/useModalHistory';
 import { useNotificationStore } from '../../../core/stores/notification';
 import { useThemeStore } from '../../../core/stores/theme';
-import { isAndroid } from '../../../core/utils/platform';
-import { saveImageToGallery } from 'tauri-plugin-vcp-mobile';
+import { isAndroid, isIOS } from '../../../core/utils/platform';
+import { saveBlobToGallery } from '../../../core/utils/temporaryExport';
+import { exportSvg } from '../../../core/utils/renderedImageExport';
+import { instantiateMermaidSvg } from '../utils/mermaidRenderer';
 
 const props = defineProps<{
   visible: boolean;
@@ -30,6 +32,8 @@ const isDragging = ref(false);
 
 const fullscreenViewportRef = ref<HTMLElement | null>(null);
 const fullscreenCanvasRef = ref<HTMLElement | null>(null);
+const surfaceRef = ref<HTMLElement | null>(null);
+const instanceSvg = computed(() => props.svgHtml ? instantiateMermaidSvg(props.svgHtml) : '');
 
 const isCopyDropdownVisible = ref(false);
 const isExporting = ref(false);
@@ -48,7 +52,7 @@ watch(() => props.visible, (newVal) => {
   if (newVal) {
     registerModal(modalId, () => {
       emit('close');
-    });
+    }, () => surfaceRef.value);
     // Reset transform on open to default 100% size
     scale.value = 1;
     translateX.value = 0;
@@ -61,7 +65,7 @@ watch(() => props.visible, (newVal) => {
     window.removeEventListener('click', closeCopyDropdown);
     isCopyDropdownVisible.value = false;
   }
-});
+}, { immediate: true });
 
 watch(() => props.svgHtml, () => exportController?.abort());
 
@@ -215,12 +219,6 @@ const copySvg = async () => {
 };
 
 
-// 保持小图最高 2.5x 的清晰度；大图在 SVG 解码及画布分配前限制为 2048² 像素。
-const MAX_EXPORT_EDGE = 2048;
-const MAX_EXPORT_PIXELS = MAX_EXPORT_EDGE * MAX_EXPORT_EDGE;
-// 编码文件预算独立于像素预算；16 MiB 与最大 RGBA8 画布的裸像素量相当。
-const MAX_EXPORT_PNG_BYTES = 16 * 1024 * 1024;
-
 const exportToGallery = async () => {
   if (isExporting.value || !props.visible || !fullscreenCanvasRef.value) return;
   const svg = fullscreenCanvasRef.value.querySelector('svg');
@@ -229,114 +227,15 @@ const exportToGallery = async () => {
   isExporting.value = true;
   const controller = new AbortController();
   exportController = controller;
-  let img: HTMLImageElement | null = null;
-  let canvas: HTMLCanvasElement | null = null;
   let submitted = false;
-  const ensureActive = () => {
-    if (controller.signal.aborted) throw new DOMException('导出已取消', 'AbortError');
-  };
-
   try {
-    const viewBox = svg.viewBox?.baseVal;
-    const bounds = viewBox?.width && viewBox?.height ? viewBox : svg.getBBox?.();
-    const svgWidth = bounds?.width || svg.clientWidth || 600;
-    const svgHeight = bounds?.height || svg.clientHeight || 400;
-    if (!Number.isFinite(svgWidth) || !Number.isFinite(svgHeight) || svgWidth <= 0 || svgHeight <= 0) {
-      throw new Error('图表尺寸无效');
-    }
-    const scaleFactor = Math.min(
-      2.5,
-      MAX_EXPORT_EDGE / Math.max(svgWidth, svgHeight),
-      Math.sqrt(MAX_EXPORT_PIXELS / svgWidth / svgHeight),
-    );
-    const width = Math.max(1, Math.floor(svgWidth * scaleFactor));
-    const height = Math.max(1, Math.floor(svgHeight * scaleFactor));
-    const background = themeStore.isDarkResolved ? '#0d1117' : '#ffffff';
-
-    const clonedSvg = svg.cloneNode(true) as SVGSVGElement;
-    clonedSvg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
-    if (!viewBox?.width || !viewBox?.height) {
-      clonedSvg.setAttribute('viewBox', `${bounds?.x || 0} ${bounds?.y || 0} ${svgWidth} ${svgHeight}`);
-    }
-    clonedSvg.setAttribute('width', String(width));
-    clonedSvg.setAttribute('height', String(height));
-    clonedSvg.style.width = `${width}px`;
-    clonedSvg.style.height = `${height}px`;
-    clonedSvg.style.maxWidth = 'none';
-    clonedSvg.style.maxHeight = 'none';
-
-    // 保留现有 Android WebView 的 inline SVG 加载方式；外部资源仍可能使画布污损，
-    // 由编码错误路径反馈，不把 Data URL 或 Object URL 当作安全保证。
-    const svgString = new XMLSerializer().serializeToString(clonedSvg);
-    const dataUrlSrc = `data:image/svg+xml;base64,${window.btoa(unescape(encodeURIComponent(svgString)))}`;
-    img = new Image(width, height);
-    const exportImage = img;
-    await new Promise<void>((resolve, reject) => {
-      const cleanup = () => {
-        exportImage.onload = null;
-        exportImage.onerror = null;
-        controller.signal.removeEventListener('abort', abort);
-      };
-      const abort = () => {
-        cleanup();
-        exportImage.src = '';
-        reject(new DOMException('导出已取消', 'AbortError'));
-      };
-      exportImage.onload = () => { cleanup(); resolve(); };
-      exportImage.onerror = () => { cleanup(); reject(new Error('图表图像加载失败，无法渲染')); };
-      controller.signal.addEventListener('abort', abort, { once: true });
-      exportImage.src = dataUrlSrc;
+    // The shared pixel queue ends after encoding; native presentation owns its file separately.
+    const png = await exportSvg(svg, controller.signal, {
+      preferredScale: 2.5,
+      background: themeStore.isDarkResolved ? '#0d1117' : '#ffffff',
     });
-    ensureActive();
-
-    canvas = document.createElement('canvas');
-    canvas.width = width;
-    canvas.height = height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('无法创建导出画布');
-    ctx.fillStyle = background;
-    ctx.fillRect(0, 0, width, height);
-    ctx.drawImage(exportImage, 0, 0, width, height);
-    exportImage.src = '';
-
-    // toBlob 无取消 API；关闭后仍等待编码结束，避免重开页面积压并行编码。
-    const png = await new Promise<Blob>((resolve, reject) => {
-      canvas!.toBlob((blob) => {
-        if (blob) resolve(blob);
-        else reject(new Error('图表 PNG 编码失败'));
-      }, 'image/png');
-    });
-    canvas.width = 0;
-    canvas.height = 0;
-    ensureActive();
-    if (png.size > MAX_EXPORT_PNG_BYTES) {
-      throw new Error('图表 PNG 超过 16 MiB，请复制 SVG 代码保存');
-    }
-
-    // 仅已通过像素和编码大小预算的 PNG 才转换为现有相册接口的 Data URL。
-    const dataUrl = await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      const cleanup = () => {
-        reader.onload = null;
-        reader.onerror = null;
-        reader.onabort = null;
-        controller.signal.removeEventListener('abort', abort);
-      };
-      const abort = () => reader.abort();
-      reader.onload = () => {
-        const result = reader.result;
-        cleanup();
-        if (typeof result === 'string') resolve(result);
-        else reject(new Error('读取图表 PNG 失败'));
-      };
-      reader.onerror = () => { cleanup(); reject(new Error('读取图表 PNG 失败')); };
-      reader.onabort = () => { cleanup(); reject(new DOMException('导出已取消', 'AbortError')); };
-      controller.signal.addEventListener('abort', abort, { once: true });
-      reader.readAsDataURL(png);
-    });
-    ensureActive();
     submitted = true;
-    await saveImageToGallery(dataUrl, `mermaid_${Date.now()}.png`);
+    await saveBlobToGallery(png, `mermaid_${Date.now()}.png`, controller.signal);
     // 原生保存已提交后，关闭预览不意味着取消；按实际结果提示。
     notificationStore.addNotification({
       type: 'success',
@@ -345,7 +244,7 @@ const exportToGallery = async () => {
       toastOnly: true,
     });
   } catch (err) {
-    if (submitted || !controller.signal.aborted) {
+    if (!(err instanceof DOMException && err.name === 'AbortError') && (submitted || !controller.signal.aborted)) {
       console.error('Export image to gallery failed:', err);
       notificationStore.addNotification({
         type: 'error',
@@ -355,15 +254,6 @@ const exportToGallery = async () => {
       });
     }
   } finally {
-    if (img) {
-      img.onload = null;
-      img.onerror = null;
-      img.src = '';
-    }
-    if (canvas) {
-      canvas.width = 0;
-      canvas.height = 0;
-    }
     if (exportController === controller) {
       exportController = null;
       isExporting.value = false;
@@ -382,7 +272,7 @@ const exportToGallery = async () => {
       leave-from-class="translate-y-0 opacity-100"
       leave-to-class="translate-y-10 opacity-0"
     >
-      <div v-if="visible" class="vcp-safe-inline fixed inset-0 z-viewer flex flex-col select-none overflow-hidden pb-[var(--vcp-safe-bottom,0px)]"
+      <div v-if="visible" ref="surfaceRef" class="vcp-viewport-surface vcp-safe-inline fixed inset-0 z-viewer flex flex-col select-none overflow-hidden pb-[var(--vcp-safe-bottom,0px)]"
         :class="themeStore.isDarkResolved ? 'bg-[#0d1117] text-gray-200' : 'bg-[#f8fafc] text-gray-800'">
         
         <!-- Header -->
@@ -424,7 +314,7 @@ const exportToGallery = async () => {
             </div>
 
             <!-- 保存到相册按钮（改用下载图标，文字按钮样式） -->
-            <button v-if="isAndroid" @click="exportToGallery" :disabled="isExporting" :aria-busy="isExporting" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs active:scale-95 transition-all disabled:opacity-50"
+            <button v-if="isAndroid || isIOS" @click="exportToGallery" :disabled="isExporting" :aria-busy="isExporting" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs active:scale-95 transition-all disabled:opacity-50"
               :class="themeStore.isDarkResolved ? 'border-white/10 bg-white/5 text-gray-400' : 'border-black/10 bg-black/5 text-gray-600'">
               <div class="i-ph:download-simple-bold w-3.5 h-3.5"></div>
               <span>{{ isExporting ? '正在保存…' : '保存到相册' }}</span>
@@ -456,7 +346,7 @@ const exportToGallery = async () => {
               transform: `translate(${translateX}px, ${translateY}px) scale(${scale})`,
               transition: isDragging ? 'none' : 'transform 0.1s ease-out'
             }"
-            v-html="svgHtml"
+            v-html="instanceSvg"
           ></div>
         </div>
         

@@ -34,6 +34,8 @@ private struct NativeEvent<Payload: Encodable>: Encodable {
 
 final class VcpMobilePlugin: Plugin {
     let notifications = NativeNotifications()
+    let presentation = NativePresentation()
+    let webKit = NativeWebKit()
 
     // UIKit state, these process facts, and subscription ownership are main-queue only.
     // A Channel/WebView/plugin replacement must not reset Rust's sequence gate.
@@ -63,6 +65,9 @@ final class VcpMobilePlugin: Plugin {
             guard let self = self else { return }
             guard self.webView !== webview else { return }
             self.webView = webview
+            self.presentation.attach(webview)
+            self.webKit.attach(webview)
+            NativeShareInbox.configure(webView: webview)
             // Tauri may attach a replacement WebView to the same plugin instance.
             if let channel = self.channel {
                 do {
@@ -89,6 +94,10 @@ final class VcpMobilePlugin: Plugin {
         } catch {
             invoke.reject("invalid_native_events_args: \(error.localizedDescription)")
         }
+    }
+
+    @objc public func shareInboxLocation(_ invoke: Invoke) {
+        NativeShareInbox.location(invoke)
     }
 
     private func replaceSubscription(_ newChannel: Channel) throws {

@@ -3,6 +3,7 @@ import { ref, watch, nextTick, computed, onMounted, onUnmounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useChatHistoryStore } from '../../core/stores/chatHistoryStore';
 import { useChatSessionStore } from '../../core/stores/chatSessionStore';
+import { useShareStore } from '../../core/stores/shareStore';
 import { useChatStreamStore } from '../../core/stores/chatStreamStore';
 import { useAttachmentStore } from '../../core/stores/attachmentStore';
 import { useNotificationStore } from '../../core/stores/notification';
@@ -45,6 +46,7 @@ watch(attachMenuOpen, (val) => {
 });
 const historyStore = useChatHistoryStore();
 const sessionStore = useChatSessionStore();
+const shareStore = useShareStore();
 const streamStore = useChatStreamStore();
 const attachmentStore = useAttachmentStore();
 const notificationStore = useNotificationStore();
@@ -383,7 +385,7 @@ const hasContent = computed(() => input.value.trim() !== '' || attachmentStore.s
 const attachmentsReady = computed(() =>
   attachmentStore.stagedAttachments.every(attachment => attachment.status === 'done'),
 );
-const canSend = computed(() => hasContent.value && attachmentsReady.value && !props.disabled);
+const canSend = computed(() => hasContent.value && attachmentsReady.value && !props.disabled && !shareStore.sending);
 
 // 编辑重发意图与原会话绑定；切换会话取消意图时同时清理注入内容。
 watch(() => historyStore.editingMessage, async (intent, previousIntent) => {
@@ -400,24 +402,35 @@ watch(() => historyStore.editingMessage, async (intent, previousIntent) => {
   }
 });
 
-// 监听外部分享意图预填文本
-watch(() => sessionStore.sharePrefillText, async (newText) => {
-  if (newText) {
-    input.value = newText;
-    sessionStore.sharePrefillText = "";
+// Keep ordinary input separate from the one replaceable share draft.
+let ordinaryInput: string | null = null;
+watch(() => shareStore.activeDraft?.deliveryId, async (deliveryId, previous) => {
+  if (deliveryId) {
+    if (!previous) ordinaryInput = input.value;
+    input.value = shareStore.activeDraft?.text ?? '';
     isAudioMode.value = false;
     await nextTick();
     if (textareaRef.value) {
       textareaRef.value.focus();
       textareaRef.value.dispatchEvent(new Event('input', { bubbles: true }));
     }
+  } else if (previous) {
+    input.value = ordinaryInput ?? '';
+    ordinaryInput = null;
   }
-});
+}, { immediate: true });
+watch([input, () => attachmentStore.stagedAttachments], () => {
+  shareStore.editDraft(input.value, attachmentStore.stagedAttachments);
+}, { deep: true });
 
-const handleSend = () => {
+const handleSend = async () => {
   if (canSend.value) {
-    emit('send', input.value);
-    input.value = '';
+    if (shareStore.activeDraft) {
+      await historyStore.sendMessage(input.value);
+    } else {
+      emit('send', input.value);
+      input.value = '';
+    }
     attachMenuOpen.value = false;
   }
 };
@@ -681,7 +694,7 @@ onUnmounted(() => {
             v-if="highlightActive && !isAudioMode && !isLongPressRecording"
             ref="highlightRef"
             aria-hidden="true"
-            class="absolute left-0 right-0 top-[1px] bottom-[1px] py-[8px] text-[15px] leading-[1.25] whitespace-pre-wrap break-words overflow-hidden pointer-events-none select-none text-[var(--primary-text)]"
+            class="vcp-input-text-metrics absolute left-0 right-0 top-[1px] bottom-[1px] py-[8px] text-[15px] leading-[1.25] whitespace-pre-wrap break-words overflow-hidden pointer-events-none select-none text-[var(--primary-text)]"
           ><template v-for="(seg, i) in mentionHighlightSegments" :key="i"><span v-if="seg.mention" class="text-orange-500 bg-orange-500/15 rounded-sm font-semibold">{{ seg.text }}</span><template v-else>{{ seg.text }}</template></template>&#8203;</div>
 
           <!-- 情况 1：普通文本输入键盘状态 -->
@@ -797,7 +810,7 @@ onUnmounted(() => {
         :class="attachMenuOpen ? 'translate-y-0 opacity-100 scale-100' : 'translate-y-4 opacity-0 scale-95'"
       >
         <!-- 拍摄按钮 -->
-        <button v-if="isAndroid" @click="triggerFilePick('camera')"
+        <button v-if="isAndroid || isIOS" @click="triggerFilePick('camera')"
           class="group flex flex-col items-center gap-1.5 active:scale-95 transition-all outline-none"
         >
           <div class="w-13 h-13 flex items-center justify-center rounded-2xl bg-black/5 dark:bg-white/5 border border-[var(--border-color)]/30 group-hover:border-[var(--highlight-text)]/40 transition-all shadow-inner">

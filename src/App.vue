@@ -3,7 +3,6 @@ import { onMounted, onUnmounted, computed, nextTick, ref, watch, type WatchStopH
 import { useRouter } from "vue-router";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import type { PickedFile } from "tauri-plugin-vcp-mobile";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { useSidebarSwipe } from "./core/composables/useSidebarSwipe";
 import { useThemeStore } from "./core/stores/theme";
@@ -17,15 +16,13 @@ import { useNotificationProcessor } from "./core/composables/useNotificationProc
 import { useEmoticonFixer } from "./core/composables/useEmoticonFixer";
 import { useAutoUpdate } from "./core/composables/useAutoUpdate";
 import { useChatSessionStore } from "./core/stores/chatSessionStore";
-import { useAssistantStore } from "./core/stores/assistant";
 import { useAppLifecycle } from "./core/composables/useAppLifecycle";
 import { retainNativeInsetsBridge } from "./core/composables/useKeyboardInsets";
-import { LatestIntentOwner } from "./core/utils/latestIntentOwner";
+import { useShareStore } from "./core/stores/shareStore";
 import {
   useVcpCliStore,
   type VcpCliNotificationTarget,
 } from "./features/cli/vcpCliStore";
-import type { AttachmentData } from "./core/types/chat";
 import type { AgentListItemDto, TopicDto } from "./core/types/assistant";
 
 // 初始化应用生命周期监听
@@ -45,28 +42,12 @@ import UpdatePrompt from "./components/ui/UpdatePrompt.vue";
 import ShareAgentSelector from "./features/chat/components/ShareAgentSelector.vue";
 
 
-interface SharedFileEntry {
-  cachePath: string;
-  mimeType: string;
-  fileName: string;
-  size: number;
-  stagingTicket: string;
-}
-
-interface SharedContentData {
-  intentId: string;
-  operationId: string;
-  text: string;
-  files: SharedFileEntry[];
-}
-
 const themeStore = useThemeStore();
 const lifecycleStore = useAppLifecycleStore();
 const notificationStore = useNotificationStore();
 const layoutStore = useLayoutStore();
 const overlayStore = useOverlayStore();
 const sessionStore = useChatSessionStore();
-const assistantStore = useAssistantStore();
 const { processPayload } = useNotificationProcessor();
 const leftSidebarPersistent = window.matchMedia("(min-width: 1024px)");
 const rightSidebarPersistent = window.matchMedia("(min-width: 1280px)");
@@ -83,172 +64,27 @@ const router = useRouter();
 
 const { initRootHistory } = useModalHistory();
 
-// --- Share Intent State ---
-const sharedContent = ref<SharedContentData>({ intentId: "", operationId: "", text: "", files: [] });
-const showShareSelector = ref(false);
-const pendingSharedFiles = ref<PickedFile[]>([]);
-const shareIntentOwner = new LatestIntentOwner();
-let stopShareReadyWatch: WatchStopHandle | null = null;
-
-const handleShareIntent = (e: Event) => {
-  processSharedIntent((e as CustomEvent<unknown>).detail);
+// One recoverable share; native acquisition and message commits are owned by Rust.
+const shareStore = useShareStore();
+let pendingAndroidShare: unknown = null;
+const handleShareIntent = (event: Event) => {
+  const detail = (event as CustomEvent<unknown>).detail;
+  if (lifecycleStore.state !== "READY") pendingAndroidShare = detail;
+  else shareStore.receiveAndroid(detail);
 };
-
-const isSharedFileEntry = (value: unknown): value is SharedFileEntry => {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const file = value as Record<string, unknown>;
-  return typeof file.cachePath === "string" &&
-    typeof file.mimeType === "string" &&
-    typeof file.fileName === "string" &&
-    typeof file.size === "number" &&
-    Number.isSafeInteger(file.size) &&
-    file.size >= 0 &&
-    typeof file.stagingTicket === "string";
+const refreshShare = () => {
+  if (lifecycleStore.state !== "READY" || (!isAndroid && !isIOS)) return;
+  if (pendingAndroidShare) {
+    shareStore.receiveAndroid(pendingAndroidShare);
+    pendingAndroidShare = null;
+  } else void shareStore.refresh().catch(shareStore.notify);
 };
-
-const processSharedIntent = async (detail: unknown) => {
-  const operationId = shareIntentOwner.begin();
-  const source = detail && typeof detail === "object" && !Array.isArray(detail)
-    ? detail as Record<string, unknown>
-    : {};
-  const intentId = typeof source.intentId === "string" ? source.intentId : "";
-  const text = typeof source.text === "string" ? source.text : "";
-  const files = Array.isArray(source.files)
-    ? source.files.filter(isSharedFileEntry)
-    : [];
-  console.log("[App] Share intent received", {
-    intentId,
-    textLength: text.length,
-    fileCount: files.length,
-  });
-  const snapshot: SharedContentData = { intentId, operationId, text, files };
-
-  stopShareReadyWatch?.();
-  stopShareReadyWatch = null;
-  sharedContent.value = snapshot;
-  pendingSharedFiles.value = [];
-  showShareSelector.value = false;
-
-  // Wait for core to be ready, then process files
-  if (lifecycleStore.state !== "READY") {
-    console.log("[App] Core not ready yet, deferring share intent processing...");
-    stopShareReadyWatch = watch(
-      () => lifecycleStore.state,
-      async (state) => {
-        if (state === "READY" && shareIntentOwner.isCurrent(operationId)) {
-          stopShareReadyWatch?.();
-          stopShareReadyWatch = null;
-          await prepareShareFiles(snapshot, operationId);
-        }
-      },
-    );
-    return;
-  }
-
-  await prepareShareFiles(snapshot, operationId);
-};
-
-const prepareShareFiles = async (content: SharedContentData, operationId: string) => {
-  const files = content.files;
-  if (files.length > 0) {
-    try {
-      console.log(`[App] Registering ${files.length} shared file(s)...`);
-      for (const file of files) {
-        await invoke("check_attachment_support", { originalName: file.fileName });
-      }
-      const stagedResults = await invoke<PickedFile[]>("plugin:vcp-mobile|register_shared_files", {
-        ownerId: content.intentId,
-        files: files.map((f) => ({
-          cachePath: f.cachePath,
-          mimeType: f.mimeType,
-          fileName: f.fileName,
-          stagingTicket: f.stagingTicket,
-        })),
-      });
-      if (!shareIntentOwner.isCurrent(operationId)) return;
-
-      const results: PickedFile[] = [];
-      for (const staged of stagedResults) {
-        if (!shareIntentOwner.isCurrent(operationId)) return;
-        const registered = await invoke<AttachmentData>("register_local_file", {
-          localPath: staged.path,
-          originalName: staged.name,
-          mimeType: staged.mime || "application/octet-stream",
-          thumbnailPath: staged.thumbnailPath || null,
-          stableId: `share_${operationId}_${results.length}`,
-          expectedHash: staged.hash,
-        });
-        results.push({
-          path: registered.internalPath,
-          name: registered.name,
-          mime: registered.type,
-          size: registered.size,
-          hash: registered.hash,
-          thumbnailPath: registered.thumbnailPath ?? undefined,
-        });
-      }
-      if (!shareIntentOwner.isCurrent(operationId)) return;
-      pendingSharedFiles.value = results;
-      console.log(`[App] Shared files registered: ${results.length}`);
-    } catch (error) {
-      if (!shareIntentOwner.isCurrent(operationId)) return;
-      console.error("[App] Failed to register shared files", error);
-      pendingSharedFiles.value = [];
-      notificationStore.addNotification({
-        type: "error",
-        title: "分享附件处理失败",
-        message: error instanceof Error ? error.message : String(error),
-        toastOnly: false,
-      });
-    }
-  } else {
-    pendingSharedFiles.value = [];
-  }
-
-  // Ensure agents are loaded
-  if (assistantStore.agents.length === 0) {
-    try {
-      await assistantStore.fetchAgentsAndGroups();
-    } catch (e) {
-      console.error("[App] Failed to fetch agents for share selector:", e);
-    }
-  }
-
-  if (shareIntentOwner.isCurrent(operationId)) {
-    showShareSelector.value = true;
-  }
-};
-
-const handleShareAgentSelected = async (agent: AgentListItemDto) => {
-  const operationId = sharedContent.value.operationId;
-  showShareSelector.value = false;
-
-  try {
-    await sessionStore.startShareSession(
-      agent.id,
-      sharedContent.value.text,
-      pendingSharedFiles.value,
-    );
-  } catch (err) {
-    console.error("[App] Failed to start share session:", err);
-    notificationStore.addNotification({
-      type: "error",
-      title: "打开分享会话失败",
-      message: err instanceof Error ? err.message : String(err),
-      toastOnly: false,
-    });
-  }
-
-  // Clear share state
-  if (shareIntentOwner.isCurrent(operationId)) {
-    shareIntentOwner.clear(operationId);
-    sharedContent.value = { intentId: "", operationId: "", text: "", files: [] };
-    pendingSharedFiles.value = [];
-  }
-};
-
-const handleShareSelectorClose = () => {
-  showShareSelector.value = false;
+watch(() => lifecycleStore.state, state => { if (state === "READY") refreshShare(); });
+watch(() => lifecycleStore.lifecycleSnapshot?.phase, (phase, previous) => {
+  if (phase === "active" && previous !== "active") refreshShare();
+});
+const handleShareAgentSelected = (agent: AgentListItemDto, allowPartial = false) => {
+  void shareStore.openDraft(agent.id, allowPartial);
 };
 
 // --- Notification Click Routing State & Logic ---
@@ -656,6 +492,7 @@ onMounted(async () => {
     window.addEventListener("vcp-notification-click", handleNotificationClick);
   }
   if (isIOS) void subscribeNativeNotifications();
+  if (isIOS) window.addEventListener("vcp-share-inbox-changed", refreshShare);
   leftSidebarPersistent.addEventListener("change", reconcileDrawerPresentation);
   rightSidebarPersistent.addEventListener("change", reconcileDrawerPresentation);
   reconcileDrawerPresentation();
@@ -699,8 +536,6 @@ onMounted(async () => {
 onUnmounted(() => {
   appUnmounted = true;
   notificationNavigationGeneration++;
-  stopShareReadyWatch?.();
-  stopShareReadyWatch = null;
   stopNotificationReadyWatch?.();
   stopNotificationReadyWatch = null;
   if (unlistenLog) unlistenLog();
@@ -709,6 +544,7 @@ onUnmounted(() => {
   window.removeEventListener("vcp-exit-requested", handleExitRequest);
   window.removeEventListener("vcp-hardware-back", handleExitRequest);
   window.removeEventListener("vcp-share-intent", handleShareIntent);
+  window.removeEventListener("vcp-share-inbox-changed", refreshShare);
   window.removeEventListener("vcp-notification-click", handleNotificationClick);
   leftSidebarPersistent.removeEventListener("change", reconcileDrawerPresentation);
   rightSidebarPersistent.removeEventListener("change", reconcileDrawerPresentation);
@@ -719,7 +555,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div ref="appRootRef" class="vcp-app-root h-full w-full overflow-hidden flex flex-col select-none relative">
+  <div ref="appRootRef" class="vcp-app-root vcp-viewport-surface h-full w-full overflow-hidden flex flex-col select-none relative">
     <!-- 0. 权限门禁（仅在 PERMISSIONS 状态显示；保活核心权限缺失时阻断进入） -->
     <PermissionGate v-if="lifecycleStore.state === 'PERMISSIONS'" />
 
@@ -780,10 +616,16 @@ onUnmounted(() => {
 
     <!-- 7. 分享意图 Agent 选择器 -->
     <ShareAgentSelector v-if="lifecycleStore.state === 'READY'"
-      :is-open="showShareSelector"
-      :shared-text="sharedContent.text"
-      :shared-file-count="sharedContent.files.length"
-      @close="handleShareSelectorClose"
+      :is-open="shareStore.selectorOpen"
+      :shared-text="shareStore.current?.text || ''"
+      :shared-file-count="shareStore.current?.attachments.length || 0"
+      :failures="shareStore.failures"
+      :busy="shareStore.busy"
+      :error="shareStore.current?.error"
+      :is-draft="shareStore.current?.state === 'draft'"
+      @close="shareStore.selectorOpen = false"
+      @discard="shareStore.discard"
+      @retry="shareStore.prepare().catch(shareStore.notify)"
       @selected="handleShareAgentSelected"
     />
 

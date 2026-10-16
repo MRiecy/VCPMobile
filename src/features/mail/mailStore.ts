@@ -454,8 +454,8 @@ export const useMailStore = defineStore('mail', () => {
   ): Promise<void> {
     const box = selectedMailbox.value;
     if (!box) return;
-    if (!isAndroid) {
-      toast('info', isIOS ? '当前 iOS 版本尚未接入附件文件导出' : '当前预览环境不提供原生附件文件导出');
+    if (!isAndroid && !isIOS) {
+      toast('info', '当前预览环境不提供原生附件文件导出');
       return;
     }
     if (attachmentExporting) {
@@ -470,8 +470,9 @@ export const useMailStore = defineStore('mail', () => {
         filename,
         ...addressingOf(box),
       });
-      toast('success', `附件已保存到下载目录：${result.displayName}`);
+      toast('success', `${isIOS ? '附件已保存到所选文件位置' : '附件已保存到下载目录'}：${result.displayName}`);
     } catch (raw) {
+      if (String(raw).toLowerCase().includes('cancel')) return;
       toast('error', toMessage(raw));
     } finally {
       attachmentExporting = false;

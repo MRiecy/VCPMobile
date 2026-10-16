@@ -3,11 +3,15 @@ import { openUrl as openExternal } from "@tauri-apps/plugin-opener";
 import { useChatHistoryStore } from "../stores/chatHistoryStore";
 import { openRenderedImageViewer } from "./useRenderedImageViewer";
 import { scrollToMessageById } from "../utils/scrollToMessage";
+import { findRenderedImagePayload } from '../utils/renderedImage';
+import { useNotificationStore } from '../stores/notification';
 
 export function useMessageEvents(containerRef: Ref<HTMLElement | null>) {
   const historyStore = useChatHistoryStore();
+  const notification = useNotificationStore();
+  let imageController: AbortController | null = null;
 
-  const handleClick = (e: MouseEvent) => {
+  const handleClick = async (e: MouseEvent) => {
     const target = e.target as HTMLElement;
 
     // 1. VCP 按钮点击 (e.g., [[点击按钮:xxx]])
@@ -75,24 +79,28 @@ export function useMessageEvents(containerRef: Ref<HTMLElement | null>) {
     }
 
     // 4. 气泡内普通图片点击劫持 (排除带有 vcp-emoticon 的表情包以及消息附件缩略图)
-    if (target.tagName.toLowerCase() === "img") {
-      const isEmoticon = target.classList.contains("vcp-emoticon");
+    const imageElement = target.closest('img, image, svg, canvas');
+    if (imageElement && !target.closest('.vcp-mermaid-wrapper')) {
+      const isEmoticon = imageElement.classList.contains("vcp-emoticon");
       const isAttachment = target.closest(".vcp-attachment-preview") !== null;
 
       if (!isEmoticon && !isAttachment) {
         e.preventDefault();
         e.stopPropagation();
 
-        const src = target.getAttribute("src") || "";
-        const alt = target.getAttribute("alt") || "";
-        const title = target.getAttribute("title") || "";
-
-        openRenderedImageViewer({
-          src,
-          alt,
-          title,
-          sourceLabel: "聊天图片",
-        });
+        imageController?.abort();
+        const controller = new AbortController();
+        imageController = controller;
+        try {
+          const payload = await findRenderedImagePayload(target, containerRef.value, controller.signal);
+          if (payload) {
+            if (controller.signal.aborted || !containerRef.value?.contains(imageElement)) {
+              if (payload.ownedObjectUrl) URL.revokeObjectURL(payload.src);
+            } else openRenderedImageViewer({ ...payload, sourceLabel: '聊天图片' });
+          }
+        } catch (error) {
+          if (!controller.signal.aborted) notification.addNotification({ type: 'error', title: '图片预览失败', message: String(error), toastOnly: true });
+        }
         return;
       }
     }
@@ -105,6 +113,7 @@ export function useMessageEvents(containerRef: Ref<HTMLElement | null>) {
   });
 
   onUnmounted(() => {
+    imageController?.abort();
     if (containerRef.value) {
       containerRef.value.removeEventListener("click", handleClick);
     }

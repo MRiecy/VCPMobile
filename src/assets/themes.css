@@ -92,6 +92,51 @@ body {
   padding-right: var(--vcp-safe-right, 0px);
 }
 
+/* iOS surfaces share one paired native/visual-viewport rectangle. html/body
+ * retain their original viewport dimensions as the geometry sampling baseline. */
+html[data-vcp-platform="ios"] .vcp-viewport-surface {
+  position: fixed;
+  inset: auto;
+  left: var(--vcp-viewport-left, 0px);
+  top: var(--vcp-viewport-top, 0px);
+  width: var(--vcp-viewport-width, 100%);
+  height: var(--vcp-viewport-height, 100%);
+  max-height: var(--vcp-viewport-height, 100%);
+  box-sizing: border-box;
+}
+
+html[data-vcp-platform="ios"] .vcp-viewport-bottom {
+  left: var(--vcp-viewport-left, 0px);
+  right: auto;
+  bottom: auto;
+  top: calc(var(--vcp-viewport-top, 0px) + var(--vcp-viewport-height, 100%));
+  width: var(--vcp-viewport-width, 100%);
+  max-height: var(--vcp-viewport-height, 100%);
+  translate: 0 -100%;
+  box-sizing: border-box;
+  overflow-y: auto;
+}
+
+/* Native selection and editor focus are independent from message actions. */
+html[data-vcp-platform="ios"] :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), textarea, select, [contenteditable="true"], .vcp-input-text-metrics) {
+  font-size: max(16px, 1em);
+}
+
+html[data-vcp-platform="ios"] :is(button, [role="button"]) {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+html[data-vcp-platform="ios"] :is(input, textarea, [contenteditable="true"], .vcp-markdown-block) {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+html[data-vcp-platform="ios"] :is(button, a, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--highlight-text, currentColor);
+  outline-offset: 2px;
+}
+
 /* 抽屉投影使用固定渐变层，避免大面积 box-shadow 重绘和退场残影。 */
 .vcp-drawer::after {
   position: absolute;

@@ -50,13 +50,15 @@ src/
 
 ### 3.1 根应用
 
-`main.ts` 装配主应用；`App.vue` 持有进程级前端启动、原生窗口事件、分享与通知入口、Insets 桥、返回链和主工作区。全局监听必须在对应生命周期建立，并在卸载路径释放；不得由普通 Feature 重复注册第二套根监听。
+`main.ts` 装配主应用；`App.vue` 持有进程级前端启动、原生窗口事件、分享与通知入口、Insets 桥、返回链和主工作区。`core/stores/shareStore.ts` 管理当前一次分享、草稿 revision 和消息提交，App 只转交入口事件；新分享覆盖未发送内容，已提交消息归聊天。全局监听必须在对应生命周期建立，并在卸载路径释放；不得由普通 Feature 重复注册第二套根监听。
 
 `floating-main.ts` 是浮动助手，现已退役，仅存档。
 
 前端从 [core/utils/platform.ts](core/utils/platform.ts) 同步取得 OS 插件提供的平台身份，普通差异由共享 Vue 中的运行时分支处理。`appLifecycle.bootstrap` 继续拥有启动编排；实际权限、生命周期和任务状态由各自操作取得，平台识别不再等待能力查询。具体约定见 [跨平台开发规范](../docs/CROSS_PLATFORM_DEVELOPMENT.md)。
 
 `useAppLifecycle` 将 iOS 原生 network online 与既有浏览器 online 汇入同一个流恢复 owner；iOS 在首次真实 active snapshot 前不发起恢复。卸载释放两条原生监听，迟到安装立即释放；网络路径可用只表示可以尝试对账，不表示服务端已可达。
+
+`useIOSWindowGeometry` 在根部配对原生 bounds/键盘与 visualViewport，同一可用矩形供根、全屏和底部 sheet 消费。内部组件不重复加 iOS 键盘 padding；浮动键盘只影响当前编辑区。`attachmentStore` 的 operation ID 贯穿原生选择与 Rust 登记，外部文件没有 HTML/XHR 入口；`temporaryExport` 只接 WebView 内存产物。
 
 `useNotificationProcessor` 将实时事件和系统快照中的原生事件注册失败归为同一固定 ID 告知；`notification` Store 私有的 `oncePerWebview` 接受记忆先于原 30 秒去重，关闭 Toast、清除或淘汰历史不会重置。新 WebView 的新 Pinia 可再次接受 Rust 保留的真实注册失败；guardian/helper 继续原有通知语义。
 

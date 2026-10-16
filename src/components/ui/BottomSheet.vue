@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { watch } from 'vue';
+import { ref, watch, onUnmounted, useId } from 'vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 
 export interface ActionItem {
@@ -21,17 +21,19 @@ const props = defineProps<{
 const emit = defineEmits(['update:modelValue']);
 
 const { registerModal, unregisterModal } = useModalHistory();
-const modalId = 'BottomSheet';
+const modalId = `BottomSheet:${useId()}`;
+const surfaceRef = ref<HTMLElement | null>(null);
 
 watch(() => props.modelValue, (newVal) => {
   if (newVal) {
     registerModal(modalId, () => {
       emit('update:modelValue', false);
-    });
+    }, () => surfaceRef.value);
   } else {
     unregisterModal(modalId);
   }
-});
+}, { immediate: true });
+onUnmounted(() => unregisterModal(modalId));
 
 const close = () => {
   emit('update:modelValue', false);
@@ -48,15 +50,15 @@ const handleAction = (action: ActionItem) => {
   <Teleport to="body">
     <!-- 遮罩层 -->
     <Transition name="fade">
-      <div v-if="modelValue" class="fixed inset-0 bg-black/50 z-sheet" @click="close"
+      <div v-if="modelValue" class="vcp-viewport-surface fixed inset-0 bg-black/50 z-sheet" @click="close"
         @touchmove.prevent>
       </div>
     </Transition>
 
     <!-- 抽屉内容 -->
     <Transition name="slide-up">
-      <div v-if="modelValue"
-        class="fixed bottom-0 left-0 right-0 z-sheet bg-white/90 dark:bg-gray-900/90 rounded-t-[2rem] shadow-2xl p-4 flex flex-col border-t border-white/20 dark:border-white/5"
+      <div v-if="modelValue" ref="surfaceRef" role="dialog" aria-modal="true" :aria-label="title || '操作'"
+        class="vcp-viewport-bottom fixed bottom-0 left-0 right-0 z-sheet bg-white/90 dark:bg-gray-900/90 rounded-t-[2rem] shadow-2xl p-4 flex flex-col border-t border-white/20 dark:border-white/5"
         style="padding-right: calc(var(--vcp-safe-right, 0px) + 16px); padding-bottom: calc(var(--vcp-safe-bottom, 48px) + 16px); padding-left: calc(var(--vcp-safe-left, 0px) + 16px);">
 
         <!-- 顶部拉手条 -->

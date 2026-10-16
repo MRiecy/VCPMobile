@@ -1,5 +1,6 @@
 import type { RenderedImageViewerPayload } from "../composables/useRenderedImageViewer";
 import { sanitizeRenderedImageSrc } from "../composables/useRenderedImageViewer";
+import { exportCanvas, exportSvg } from './renderedImageExport';
 
 const URL_IN_CSS_RE = /url\((["']?)(.*?)\1\)/i;
 
@@ -29,26 +30,10 @@ function fileNameFromUrl(url: string): string {
   }
 }
 
-function svgToDataUrl(svg: SVGSVGElement): string {
-  const clone = svg.cloneNode(true) as SVGSVGElement;
-  if (!clone.getAttribute("xmlns")) {
-    clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
-  }
-  const markup = new XMLSerializer().serializeToString(clone);
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(markup)}`;
-}
-
-function canvasToDataUrl(canvas: HTMLCanvasElement): string {
-  try {
-    return canvas.toDataURL("image/png");
-  } catch {
-    return "";
-  }
-}
-
-function imagePayloadFromElement(
+async function imagePayloadFromElement(
   element: Element,
-): RenderedImageViewerPayload | null {
+  signal?: AbortSignal,
+): Promise<RenderedImageViewerPayload | null> {
   if (element instanceof HTMLImageElement) {
     const src = absoluteUrl(
       element.dataset.vcpImageSrc ||
@@ -82,24 +67,25 @@ function imagePayloadFromElement(
   }
 
   if (element instanceof HTMLCanvasElement) {
-    const src = canvasToDataUrl(element);
-    if (!src) return null;
+    const src = URL.createObjectURL(await exportCanvas(element, signal));
     return {
       src,
+      ownedObjectUrl: true,
       title: element.getAttribute("aria-label") || "",
       fileName: "vcp-canvas.png",
     };
   }
 
   if (element instanceof SVGSVGElement) {
-    const src = svgToDataUrl(element);
+    const src = URL.createObjectURL(await exportSvg(element, signal));
     return {
       src,
+      ownedObjectUrl: true,
       title:
         element.getAttribute("aria-label") ||
         element.querySelector("title")?.textContent ||
         "",
-      fileName: "vcp-svg.svg",
+      fileName: "vcp-svg.png",
     };
   }
 
@@ -126,15 +112,16 @@ function backgroundPayloadFromElement(
   };
 }
 
-export function findRenderedImagePayload(
+export async function findRenderedImagePayload(
   target: EventTarget | null,
   container?: HTMLElement | null,
-): RenderedImageViewerPayload | null {
+  signal?: AbortSignal,
+): Promise<RenderedImageViewerPayload | null> {
   if (!(target instanceof Element)) return null;
 
   const directImage = target.closest("img, image, canvas, svg");
   if (directImage && (!container || container.contains(directImage))) {
-    const payload = imagePayloadFromElement(directImage);
+    const payload = await imagePayloadFromElement(directImage, signal);
     if (payload) return payload;
   }
 

@@ -106,7 +106,7 @@ describe("VCP CLI canonical manifest boundary", () => {
     vi.mocked(writeTempFile).mockResolvedValue(
       "/cache/VCPMobileCLI.manifest.json",
     );
-    vi.mocked(openFileNative).mockResolvedValue(undefined);
+    vi.mocked(openFileNative).mockResolvedValue({ outcome: 'opened' });
     mockInvoke(VCP_CLI_STATUS_COMMAND, () => readyStatus);
     mockInvoke(VCP_CLI_ACTION_COMMAND, (args) => {
       const request = args?.request as { operation_id: string };

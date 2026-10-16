@@ -110,7 +110,7 @@ function activateFolder(folder: string): void {
 
 <template>
   <Transition name="diary-sheet">
-    <div v-if="open" class="fixed inset-0 z-sheet no-swipe" role="presentation">
+    <div v-if="open" data-vcp-modal-id="Diary:Sheet" class="vcp-viewport-surface fixed inset-0 z-sheet no-swipe" role="presentation">
       <button
         type="button"
         class="absolute inset-0 w-full h-full border-0 bg-black/45"

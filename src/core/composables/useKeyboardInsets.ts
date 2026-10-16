@@ -1,4 +1,6 @@
 import { ref, onMounted, onUnmounted, type Ref } from "vue";
+import { isIOS } from '../utils/platform';
+import { attachIOSWindowGeometry, refreshIOSWindowGeometry } from './useIOSWindowGeometry';
 
 export interface NativeInsetsSnapshot {
   safeTopPx: number;
@@ -45,6 +47,7 @@ const safeAreaBottom = ref(0);
 let nativeBridgeUsers = 0;
 let nativeBridgeAttached = false;
 let nativeSnapshotSeen = false;
+let releaseIOSGeometry: (() => void) | null = null;
 
 const nonNegativePx = (value: unknown): number =>
   typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
@@ -119,10 +122,19 @@ function replayNativeInsets(): boolean {
 export function retainNativeInsetsBridge(): () => void {
   nativeBridgeUsers += 1;
   if (!nativeBridgeAttached) {
-    window.addEventListener("vcp-keyboard-inset", handleNativeInset);
+    if (isIOS) {
+      releaseIOSGeometry = attachIOSWindowGeometry((geometry) => {
+        // iOS consumes keyboard occlusion at the shared surface boundary once.
+        keyboardHeight.value = 0;
+        safeAreaBottom.value = geometry.safeInsets.bottom;
+        isKeyboardOpen.value = geometry.keyboardVisible;
+      });
+    } else {
+      window.addEventListener("vcp-keyboard-inset", handleNativeInset);
+    }
     nativeBridgeAttached = true;
   }
-  replayNativeInsets();
+  if (!isIOS) replayNativeInsets();
 
   let released = false;
   return () => {
@@ -131,6 +143,8 @@ export function retainNativeInsetsBridge(): () => void {
     nativeBridgeUsers = Math.max(0, nativeBridgeUsers - 1);
     if (nativeBridgeUsers === 0 && nativeBridgeAttached) {
       window.removeEventListener("vcp-keyboard-inset", handleNativeInset);
+      releaseIOSGeometry?.();
+      releaseIOSGeometry = null;
       nativeBridgeAttached = false;
     }
   };
@@ -223,11 +237,16 @@ export function useKeyboardInsets(): UseKeyboardInsetsReturn {
 
   // --- 公共方法：强制重算 ---
   const forceRecalculate = () => {
+    if (isIOS) {
+      refreshIOSWindowGeometry();
+      return;
+    }
     if (!replayNativeInsets()) estimateFromScroll();
   };
 
   onMounted(() => {
     releaseNativeBridge = retainNativeInsetsBridge();
+    if (isIOS) return;
     setupVirtualKeyboard();
     document.addEventListener("focusin", handleFocusIn);
     document.addEventListener("focusout", handleFocusOut);

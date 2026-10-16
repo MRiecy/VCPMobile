@@ -23,11 +23,11 @@ pub struct AttachmentGcReport {
     pub ghost_files: usize,
 }
 
-/// 在同一 SQLite 快照中确定仍被存活消息引用的 CAS。
+/// 在同一 SQLite 快照中确定存活消息和当前分享草稿持有的 CAS。
 async fn load_attachment_gc_snapshot(
     tx: &mut sqlx::SqliteConnection,
 ) -> Result<AttachmentGcSnapshot, String> {
-    let live_hashes = sqlx::query_as::<_, (String,)>(
+    let mut live_hashes: HashSet<String> = sqlx::query_as::<_, (String,)>(
         "SELECT DISTINCT ma.hash FROM message_attachments ma \
              INNER JOIN messages m ON ma.owner_type = m.owner_type AND ma.owner_id = m.owner_id \
                 AND ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
@@ -52,6 +52,17 @@ async fn load_attachment_gc_snapshot(
     .into_iter()
     .map(|(hash,)| hash)
     .collect();
+
+    let current_share: Option<String> =
+        sqlx::query_scalar("SELECT record FROM current_share WHERE singleton = 1")
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("读取附件 GC 分享引用失败: {error}"))?;
+    if let Some(record) = current_share {
+        // A recoverable share may have imported CAS files before its first
+        // message exists. Its persisted draft owns those files across restart.
+        live_hashes.extend(super::share_inbox::active_attachment_hashes(&record)?);
+    }
 
     let indexed_attachments =
         sqlx::query_as::<_, (String, String)>("SELECT hash, internal_path FROM attachments")
@@ -233,6 +244,8 @@ pub async fn reclaim_orphaned_attachments<R: tauri::Runtime>(
     report.ghost_files +=
         sweep_unindexed_derived_files(&thumbnails_root, &indexed_hashes, |name| {
             name.strip_suffix("_thumb.webp")
+                .or_else(|| name.strip_suffix("_thumb.jpg"))
+                .or_else(|| name.strip_suffix("_thumb.png"))
         })
         .await;
     report.ghost_files +=
@@ -301,8 +314,13 @@ pub async fn clear_webview_cache(app: AppHandle) -> Result<String, String> {
 
 #[cfg(target_os = "ios")]
 #[tauri::command]
-pub async fn clear_webview_cache(_app: AppHandle) -> Result<String, String> {
-    Err("not_implemented: 当前 iOS 版本尚不支持清理 WebView 缓存".to_string())
+pub async fn clear_webview_cache(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        tauri_plugin_vcp_mobile::system::clear_webview_cache_native(&app)
+    })
+    .await
+    .map_err(|error| format!("WebKit 缓存清理任务失败: {error}"))??;
+    Ok("已完成 WebKit 磁盘与内存浏览缓存清理；聊天、附件与设置保留".to_string())
 }
 
 /// 3. 重建系统缓存与性能物理整理 (Level 3)
@@ -504,6 +522,58 @@ mod tests {
         .execute(pool)
         .await
         .expect("create groups");
+        sqlx::query(
+            "CREATE TABLE current_share (singleton INTEGER PRIMARY KEY, record TEXT NOT NULL)",
+        )
+        .execute(pool)
+        .await
+        .expect("create current share");
+    }
+
+    #[tokio::test]
+    async fn restart_gc_retains_unsent_share_files_until_the_share_is_discarded() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open database");
+        create_live_set_tables(&pool).await;
+        sqlx::query(
+            "CREATE TABLE attachments (hash TEXT PRIMARY KEY, internal_path TEXT NOT NULL)",
+        )
+        .execute(&pool)
+        .await
+        .expect("create attachment index");
+        let mut record = serde_json::json!({
+            "generation": 1, "deliveryId": "share-1", "state": "draft",
+            "attachments": [{"hash": "draft-hash", "type": "image/png", "src": "/draft", "name": "draft.png", "size": 4}],
+            "items": [{"itemId": "item-1", "fileName": "import.png", "attachment": {"hash": "import-hash", "type": "image/png", "src": "/import", "name": "import.png", "size": 4}}]
+        });
+        sqlx::query("INSERT INTO current_share VALUES (1, ?)")
+            .bind(record.to_string())
+            .execute(&pool)
+            .await
+            .expect("persist draft");
+        let mut tx = pool.begin().await.expect("begin snapshot");
+        let snapshot = load_attachment_gc_snapshot(&mut tx)
+            .await
+            .expect("read live refs");
+        assert!(snapshot.live_hashes.contains("draft-hash"));
+        assert!(snapshot.live_hashes.contains("import-hash"));
+        tx.commit().await.expect("finish snapshot");
+
+        record["state"] = "discarded".into();
+        sqlx::query("UPDATE current_share SET record = ? WHERE singleton = 1")
+            .bind(record.to_string())
+            .execute(&pool)
+            .await
+            .expect("discard share");
+        let mut tx = pool.begin().await.expect("begin later snapshot");
+        assert!(load_attachment_gc_snapshot(&mut tx)
+            .await
+            .expect("read terminal refs")
+            .live_hashes
+            .is_empty());
     }
 
     #[tokio::test]

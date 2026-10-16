@@ -1198,10 +1198,10 @@ mod tests {
         );
     }
 
-    /// 全新安装快速路径：空库 → 只执行 baseline → 全部既有迁移 seed 为已应用，
-    /// 直接得到 trigram 终态 FTS，不经过 unicode61 中间态。
+    /// 全新安装先执行 baseline、seed 历史迁移，再执行后续迁移；
+    /// 直接得到 trigram FTS，同时必须具有当前分享的持久存储。
     #[tokio::test]
-    async fn fresh_install_fast_path_runs_only_baseline() {
+    async fn fresh_install_uses_baseline_and_applies_subsequent_migrations() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -1210,7 +1210,7 @@ mod tests {
 
         run_migrations(&pool).await.expect("run migrations");
 
-        // 全部 1..=8 + baseline 记录已 seed，migrator 无事可做
+        // 1..=8 与 baseline 已 seed，101 必须实际执行而不能被 seed 跳过。
         let versions: Vec<i64> =
             sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
                 .fetch_all(&pool)
@@ -1218,6 +1218,7 @@ mod tests {
                 .expect("read seeded versions");
         let mut expected: Vec<i64> = (1..=BASELINE_INCREMENTAL_MAX).collect();
         expected.push(BASELINE_VERSION);
+        expected.push(101);
         assert_eq!(versions, expected);
 
         // FTS 直接是 trigram 终态
@@ -1229,14 +1230,20 @@ mod tests {
         assert!(fts_ddl.contains("trigram"), "baseline FTS must be trigram");
 
         // 代表性表与 0007/0008 产物齐全
-        for name in ["messages", "topics", "active_generations", "render_cache"] {
+        for name in [
+            "messages",
+            "topics",
+            "active_generations",
+            "render_cache",
+            "current_share",
+        ] {
             let exists: bool =
                 sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?)")
                     .bind(name)
                     .fetch_one(&pool)
                     .await
                     .expect("inspect table");
-            assert!(exists, "baseline must create {}", name);
+            assert!(exists, "fresh install must create {}", name);
         }
         let has_agent_idx: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='idx_messages_agent_id')",
