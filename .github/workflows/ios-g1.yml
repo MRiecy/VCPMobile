@@ -14,10 +14,6 @@ on:
         type: choice
         default: debug
         options: [debug, release]
-      developer_dir:
-        description: Optional Xcode Developer directory; empty uses g1-inputs.json
-        type: string
-        default: ''
 
 permissions:
   contents: read
@@ -36,7 +32,6 @@ jobs:
     env:
       IOS_DIAGNOSTIC_PHASE: ${{ inputs.phase }}
       IOS_DIAGNOSTIC_PROFILE: ${{ inputs.profile }}
-      IOS_DEVELOPER_DIR: ${{ inputs.developer_dir }}
     steps:
       - name: Checkout selected revision
         id: checkout

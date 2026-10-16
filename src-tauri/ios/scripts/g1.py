@@ -56,7 +56,7 @@ def prepare():
         "phase": os.environ.get("IOS_DIAGNOSTIC_PHASE", "phase-3"),
         "profile": os.environ.get("IOS_DIAGNOSTIC_PROFILE", "debug"),
         "target": "aarch64-apple-ios", "inputs": INPUTS,
-        "developerDir": os.environ.get("IOS_DEVELOPER_DIR") or INPUTS["developerDir"],
+        "developerDir": INPUTS["developerDir"],
         "commit": run(["git", "rev-parse", "HEAD"]),
         "ref": os.environ.get("GITHUB_REF"),
         "runId": os.environ.get("GITHUB_RUN_ID"),
@@ -283,6 +283,9 @@ def build():
             require(manifest["phase"] in {f"phase-{index}" for index in range(7)}, "Unknown diagnostic phase")
             env = os.environ.copy()
             env["DEVELOPER_DIR"] = manifest["developerDir"]
+            # Tauri filters DEVELOPER_DIR from xcodebuild's environment; bind the
+            # disposable runner's system selection before probing or building.
+            run(["sudo", "-n", "xcode-select", "--switch", manifest["developerDir"]], env=env, log=evidence / "xcode-select.log")
             manifest["xcode"] = run(["xcodebuild", "-version"], env=env)
             manifest["sdkVersion"] = run(["xcrun", "--sdk", "iphoneos", "--show-sdk-version"], env=env)
             manifest["macOS"] = run(["sw_vers"], env=env)

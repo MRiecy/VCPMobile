@@ -195,6 +195,8 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 
 **步骤 2：执行强制检查**
 
+升级 `@tauri-apps/cli` 时，同时按 [§6.3 的模板维护说明](#63-kotlin-版本与-tauri-模板)核对已提交的 Android 工程文件，将需要的模板迁移与依赖升级一起提交。
+
 ```powershell
 # 1. 更新 pnpm lockfile
 pnpm install
@@ -373,6 +375,7 @@ pnpm tauri android build --apk --target aarch64
 
 | 环境 | 当前 NDK 版本 | 配置位置 |
 |------|--------------|---------|
+| CI (`ci.yml`) | `29.0.14206865` | `.github/toolchain.env`；安装后通过 `GITHUB_ENV` 设置 `NDK_HOME`，供初始化及后续步骤使用 |
 | Release (`release.yml`) | `29.0.14206865` | `.github/toolchain.env`（由 workflow 读取） |
 | Android 原生插件 | `29.0.14206865` | `src-tauri/plugins/vcp-mobile/android/build.gradle.kts` |
 | 本地开发 | `29.0.14206865` | Android SDK 的 `ndk/29.0.14206865/` |
@@ -386,6 +389,10 @@ pnpm tauri android build --apk --target aarch64
 - NDK 版本与 `rustc` 的目标 `aarch64-linux-android` 存在隐性兼容关系，升级前查阅 Rust Android 社区反馈。
 
 ### 6.3 Kotlin 版本与 Tauri 模板
+
+`src-tauri/gen/android/` 中已有文件进入 Git，升级 Tauri CLI 时须核对新版本模板，尤其是配套的 [BuildTask.kt](../src-tauri/gen/android/buildSrc/src/main/java/com/vcp/avatar/kotlin/BuildTask.kt) 与 [RustPlugin.kt](../src-tauri/gen/android/buildSrc/src/main/java/com/vcp/avatar/kotlin/RustPlugin.kt)。按实际差异迁移，并保留 MainActivity、Manifest 和 Gradle 配置中的项目定制。
+
+不要把重新执行 `tauri android init` 当作完整模板升级：例如 [CLI 2.12.1 的生成逻辑](https://github.com/tauri-apps/tauri/blob/tauri-cli-v2.12.1/crates/tauri-cli/src/mobile/android/project.rs#L189)会覆盖 `BuildTask.kt`，却保留已有的 `RustPlugin.kt` 等文件。CI 生成树无差异也不能证明这些保留文件已完成配套迁移。
 
 当前 Kotlin Gradle Plugin：`1.9.25`。
 
@@ -492,6 +499,7 @@ sdkmanager --list_installed | findstr ndk
 | Rust Crates | `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock` |
 | Rust 插件 | `src-tauri/Cargo.toml` |
 | npm Runtime / Dev / 插件 | `package.json`, `pnpm-lock.yaml` |
+| Tauri CLI 工程模板 | `src-tauri/gen/android/` 中已提交的工程文件，尤其是配套的 `BuildTask.kt` / `RustPlugin.kt`；见 [§6.3](#63-kotlin-版本与-tauri-模板) |
 | AGP / Kotlin / Gradle 供应链 | `src-tauri/gen/android/build.gradle.kts`, `src-tauri/gen/android/buildSrc/build.gradle.kts`, `src-tauri/gen/android/gradle/wrapper/` |
 | AndroidX | `src-tauri/gen/android/app/build.gradle.kts` |
 | SDK / NDK | `src-tauri/gen/android/app/build.gradle.kts`, `.github/workflows/release.yml` |
