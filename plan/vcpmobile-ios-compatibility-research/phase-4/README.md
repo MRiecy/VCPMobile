@@ -30,8 +30,8 @@ Files/PHPicker/security scope/staging/ImageIO/CAS、拍照、相册保存、图�
 |---|---|---|
 | P4-1 Files/PHPicker | 原生选择、security scope、provider 副本与导入操作，汇入 Rust CAS | 状态、取消/提交裁定、字节预算与 staging 清理归同一次操作 |
 | P4-2 拍照、相册保存与 ImageIO | 相机获取；列表/全屏/头像/模型图片派生；附件、Mermaid、HTML 图片保存 | 元数据先读、用途预算、真实编码；相机与 add-only 授权；系统完成后释放副本 |
-| P4-3 预览、导出与 outgoing share | Files 导出、只读 Quick Look、系统分享；覆盖配置、邮件、附件、同步日志 | 明确各 API 的完成结果、文件持有和 iPad 呈现；取消独立反馈 |
-| P4-4 incoming share | Share Extension、共享收件箱、持久批次记录、目标话题和可恢复预填 | 原子交接、冷/热启动去重、发送提交与清理；扩展和自签输入交 Phase 6 |
+| P4-3 导出/导入、预览与 outgoing share | Files 导出、配置原生导入导出、只读 Quick Look、系统分享；覆盖配置、邮件、附件、同步日志 | 明确各 API 的完成结果、文件持有和 iPad 呈现；取消独立反馈 |
+| P4-4 incoming share | Share Extension、当前分享槽位、目标话题和当前预填；新分享覆盖旧分享，只维护一次 | 覆盖/发送顺序、迟到回调失效、当前分享恢复与资源清理；扩展和自签输入交 Phase 6 |
 | P4-5 WebKit 缓存与交互 | 限定缓存操作；统一可用矩形；选择/焦点/返回；富消息资源预算 | 数据类别准确、几何只消费一次、iPad 输入适配、强消息渲染完整 |
 
 视频抽帧仍为未批准实施的保留项；语音保持未开发说明，不因拍照或分享接入自动扩大其范围。
