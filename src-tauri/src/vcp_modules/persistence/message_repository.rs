@@ -159,11 +159,11 @@ impl MessageRenderCompiler {
 
     /// Serializes AST blocks to compressed binary (JSON + zstd)
     pub fn serialize(blocks: &[ContentBlock]) -> Result<Vec<u8>, String> {
-        let json_bytes =
-            serde_json::to_vec(blocks).map_err(|e| format!("json serialize failed: {}", e))?;
-        let compressed = zstd::bulk::compress(&json_bytes, 3)
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3)
             .map_err(|e| format!("zstd compress failed: {}", e))?;
-        Ok(compressed)
+        serde_json::to_writer(&mut encoder, blocks)
+            .map_err(|e| format!("json serialize failed: {}", e))?;
+        encoder.finish().map_err(|e| format!("zstd compress failed: {}", e))
     }
 
     /// Deserializes compressed binary back to AST blocks (JSON + zstd)
@@ -367,6 +367,31 @@ fn run_render_cache_update_writer(
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod render_compression_tests {
+    use super::MessageRenderCompiler;
+
+    #[test]
+    fn streaming_encoder_preserves_the_existing_render_cache_format() {
+        let blocks = MessageRenderCompiler::compile(
+            "中文 🦀 **正文**\n\n```rust\nlet text = \"quote\\slash\";\n```\n\n<think>思考\n内容</think>",
+        );
+        let expected_json = serde_json::to_vec(&blocks).expect("legacy JSON encoding");
+        let legacy_frame = zstd::bulk::compress(&expected_json, 3).expect("legacy bulk frame");
+        let streamed_frame = MessageRenderCompiler::serialize(&blocks).expect("streamed frame");
+
+        // Existing bulk readers must read frames without a pledged content size.
+        let decoded = zstd::bulk::decompress(&streamed_frame, 16 * 1024 * 1024)
+            .expect("existing cache reader accepts streaming frames");
+        assert_eq!(decoded, expected_json);
+        for frame in [&legacy_frame, &streamed_frame] {
+            let restored = MessageRenderCompiler::deserialize(frame).expect("cache compatibility");
+            assert_eq!(serde_json::to_vec(&restored).unwrap(), expected_json);
+        }
+        assert!(MessageRenderCompiler::deserialize(&streamed_frame[..streamed_frame.len() / 2]).is_err());
+    }
 }
 
 #[cfg(test)]

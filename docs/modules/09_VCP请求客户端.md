@@ -17,6 +17,8 @@ related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_ap
 
 > **2026-10-17 生命周期收口**：前端统一调用 `reconnect_chat_streams`，Rust 协调活动 request、群聊换棒、helper 与离线结果。原 `get_active_generations`、`recover_active_generation` 及无消费者的 `sendToVCP` 不再是公开 IPC；内部恢复仍从 claim 到持久提交持有同一 attempt lease，不重发上游请求。正文只有生产者 buffer 一份权威流状态，消费者更换在该生产者锁下要求先 snapshot 后 delta。本文其余旧行号、事件索引及 `sse_cache` 描述属于历史实现；本轮具体契约和验证见 [阶段五记录](../../plan/vcpmobile-ios-compatibility-research/phase-5/01-SSE统一接管与操作边界重构.md)。
 
+> 2026-10-17 资源收尾：网络层以 `VcpResponse` 移交正文、结束原因和取消状态，单聊/群聊/恢复直接把正文移动到 finalizer；内部恢复返回 `RecoveryStatus`，权威正文仍只经原终态 Channel 交付。渲染缓存采用 JSON 直接写入 zstd 编码器，避免完整未压缩 JSON 中间缓冲；worker 输入与终态事件的共享优化未实施。范围及验证见 [资源收尾记录](../../plan/vcpmobile-ios-compatibility-research/phase-5/02-SSE资源收尾重构.md)。
+
 其核心职责包括：
 - 使用 Rust 设置快照冻结本次 turn 的最终 Chat 端点并组装 HTTP 请求
 - 在请求预处理阶段完成**多模态本地文件编码**（图片/视频/音频 → data URL）

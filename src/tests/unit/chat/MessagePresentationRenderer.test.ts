@@ -186,6 +186,74 @@ async function seedRemountTail(
 }
 
 describe('MessageRenderer presentation shell', () => {
+  it.each([false, true])('keeps stable text and the tail visible after terminal rendering (failed=%s)', async failed => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const sessionStore = useChatSessionStore();
+    const streamStore = useChatStreamStore();
+    sessionStore.setConversation({ id: 'agent-a', type: 'agent' }, 'topic-a');
+    mockInvoke('reconnect_chat_streams', () => ({ generations: [], groupTurns: [], activeRequests: [] }));
+    await streamStore.checkAndRecoverInterruptedStreams();
+    const context = { ownerId: 'agent-a', ownerType: 'agent' as const, topicId: 'topic-a', agentId: 'agent-a' };
+    const base = {
+      consumerRevision: 1, messageId: 'terminal-tail', context, chunk: null,
+      finishReason: null, error: null, blocks: null, timestamp: null, topicUpdatedAt: null,
+    };
+    await streamStore.processStreamEvent({
+      ...base, type: 'aurora',
+      aurora: {
+        kind: 'snapshot', streamId: 1, content: 'stable prefix\nvisible tail',
+        stableBlocks: [{ type: 'markdown', content: 'stable prefix', hash: 'prefix', nodes: [{
+          type: 'paragraph', children: [{ type: 'text', value: 'stable prefix' }],
+        }] }],
+        tailBlock: { type: 'markdown', content: 'visible tail', hash: 'tail' },
+        tailMode: 'ast',
+        tailFrame: {
+          streamId: 1, epoch: 1, revision: 1, frameSeq: 1, reset: true, mutations: [],
+          snapshot: [{ type: 'paragraph', children: [{ type: 'text', value: 'visible tail' }] }],
+        },
+      },
+    });
+    await vi.waitFor(() => expect(streamStore.getActiveStreamMessage(
+      'agent-a', 'agent', 'topic-a', 'terminal-tail',
+    )?.tailFrame).toBeDefined());
+    const message = streamStore.getActiveStreamMessage('agent-a', 'agent', 'topic-a', 'terminal-tail')!;
+    const wrapper = mountStreamRenderer(message, pinia);
+    const errorLog = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await vi.waitFor(() => {
+        expect(wrapper.text()).toContain('stable prefix');
+        expect(wrapper.get('.vcp-ast-sandbox').text()).toContain('visible tail');
+      });
+      const originalSandbox = wrapper.get('.vcp-ast-sandbox').element;
+      mockInvoke('process_message_content', () => failed
+        ? Promise.reject(new Error('renderer unavailable'))
+        : [{ type: 'markdown', content: 'stable prefix\nvisible tail', nodes: [{
+            type: 'paragraph', children: [{ type: 'text', value: 'stable prefix\nvisible tail' }],
+          }] }]);
+      await streamStore.processStreamEvent({
+        ...base, type: 'end', aurora: null, finishReason: 'completed', content: 'stable prefix\nvisible tail',
+      });
+      await vi.waitFor(() => expect(streamStore.isMessageActive('agent-a', 'agent', 'topic-a', 'terminal-tail')).toBe(false));
+      await nextTick();
+      expect(wrapper.text()).toContain('stable prefix');
+      expect(wrapper.text().match(/visible tail/g)).toHaveLength(1);
+      expect(wrapper.find('[data-strong-block="streaming"]').exists()).toBe(false);
+      expect(streamStore.isConversationBusy('agent-a', 'agent', 'topic-a')).toBe(false);
+      if (failed) {
+        expect(wrapper.get('.vcp-ast-sandbox').element).toBe(originalSandbox);
+      } else {
+        expect(wrapper.find('.streaming-tail').exists()).toBe(false);
+        expect(message.tailFrame).toBeUndefined();
+        expect(message.tailSnapshot).toBeUndefined();
+      }
+    } finally {
+      wrapper.unmount();
+      streamStore.$dispose();
+      errorLog.mockRestore();
+    }
+  });
+
   it('enhances an already-rendered first-pass Mermaid SVG immediately', async () => {
     const pinia = createPinia();
     setActivePinia(pinia);

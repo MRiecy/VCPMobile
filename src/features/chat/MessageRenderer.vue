@@ -247,6 +247,11 @@ const isStreaming = computed(() => {
   );
 });
 
+// 终态渲染失败时继续展示已收到的尾部；展示引用不延长生成活动或操作占用。
+const showMessageTail = computed(() => isStreaming.value || Boolean(
+  props.message.finishReason && (props.message.tailBlock || props.message.tailContent),
+));
+
 const streamStatusLabel = computed(() => {
   if (props.message.isStopping) return "停止待确认";
   if (props.message.streamRecoveryState === "waiting_retry") return "接续失败，等待重试";
@@ -429,7 +434,7 @@ const messageBubbles = computed(() => {
     return last ? isBrkBlock(last) : false;
   })();
 
-  if (isStreaming.value && props.message.tailBlock && lastBlockIsBrk) {
+  if (showMessageTail.value && props.message.tailBlock && lastBlockIsBrk) {
     list.push({
       id: `${props.message.id}-bubble-${bubbleIndex++}`,
       blocks: []
@@ -1296,15 +1301,15 @@ onUnmounted(() => {
                 </div>
               </template>
             </template>
-            <template v-else-if="bubbleIndex === 0 && message.content && (!isStreaming || !message.tailBlock)">
+            <template v-else-if="bubbleIndex === 0 && message.content && (!showMessageTail || !message.tailBlock)">
               <div class="vcp-markdown-block select-text">
                 <p>{{ message.content }}</p>
               </div>
             </template>
 
-            <!-- 未闭合思维链：仅在活跃 tail 中使用可撤销 Thought 外壳，正文仍复用同一 AST 增量沙箱。 -->
+            <!-- 思维链尾部复用同一 AST 沙箱；终态解析失败时保留已有展示。 -->
             <ThoughtBlock
-              v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && thoughtTailBlock"
+              v-if="showMessageTail && (bubbleIndex === messageBubbles.length - 1) && thoughtTailBlock"
               :block="thoughtTailBlock"
               :message-id="message.id"
               :default-expanded="true"
@@ -1322,8 +1327,8 @@ onUnmounted(() => {
               />
             </ThoughtBlock>
 
-            <!-- 其他尾部流式推测渲染（只对最后一个活跃气泡生效） -->
-            <div v-else-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && message.tailBlock" class="streaming-tail opacity-90">
+            <!-- 其他尾部展示只归属最后一个气泡，完整 blocks 接管后移除。 -->
+            <div v-else-if="showMessageTail && (bubbleIndex === messageBubbles.length - 1) && message.tailBlock" class="streaming-tail opacity-90">
               <div
                 v-if="isPlainTailFallback || isAstRecoveryPending"
                 :data-tail-render-mode="isAstRecoveryPending ? 'recovery-text' : 'plaintext'"
@@ -1357,7 +1362,7 @@ onUnmounted(() => {
                 class="vcp-markdown-block"
               />
             </div>
-            <div v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && message.tailContent && message.blocks && message.blocks.length > 0 && (!message.tailBlock || (!isInlineHtmlBlock(message.tailBlock.type) && message.tailBlock.type !== 'html-preview' && message.tailBlock.type !== 'thought'))" class="opacity-70 italic">
+            <div v-if="showMessageTail && (bubbleIndex === messageBubbles.length - 1) && message.tailContent && message.blocks && message.blocks.length > 0 && (!message.tailBlock || (!isInlineHtmlBlock(message.tailBlock.type) && message.tailBlock.type !== 'html-preview' && message.tailBlock.type !== 'thought'))" class="opacity-70 italic">
               {{ message.tailContent }}
             </div>
           </div>

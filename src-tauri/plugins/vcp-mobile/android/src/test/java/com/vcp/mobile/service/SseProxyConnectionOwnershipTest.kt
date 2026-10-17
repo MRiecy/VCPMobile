@@ -13,6 +13,8 @@ import org.json.JSONObject
 import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import okhttp3.Request
+import okhttp3.sse.EventSource
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
@@ -258,6 +260,21 @@ class SseProxyProtocolTest {
         return frames.dropLast(1)
     }
 
+    private fun awaitCondition(timeoutMs: Long, condition: () -> Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs)
+        while (!condition() && System.nanoTime() < deadline) Thread.sleep(10)
+        assertTrue("Condition did not become true within ${timeoutMs}ms", condition())
+    }
+
+    private fun retries(session: SseProxyService.StreamSession): Int =
+        synchronized(session) { session.publicationRetriesAttempted }
+
+    private fun assertHandoffWakeLockReleased(session: SseProxyService.StreamSession) {
+        assertEquals(0L, session.handoffWakeDeadlineMs)
+        val field = SseProxyService::class.java.getDeclaredField("wakeLock").apply { isAccessible = true }
+        awaitCondition(1_000) { field.get(service) == null }
+    }
+
     @Test
     fun intermediateFinishReasonsKeepReceivingBodyAndNeverWriteFiles() {
         val session = session()
@@ -361,6 +378,154 @@ class SseProxyProtocolTest {
         } finally {
             mailbox.delete()
         }
+    }
+
+    @Test
+    fun publicationRetriesWaitTwoThenFourSecondsAndPublishTheOriginalBody() {
+        val mailbox = java.io.File(service.cacheDir, "sse_offline_completed")
+        mailbox.writeText("block publication")
+        val session = session("original reply survives both failures")
+        session.complete("stop")
+        invoke("cleanupSessionIfCompletedAndDisconnected", session)
+        assertHandoffWakeLockReleased(session)
+        Thread.sleep(1_000)
+        assertEquals(0, retries(session))
+        awaitCondition(2_000) { retries(session) == 1 }
+        assertHandoffWakeLockReleased(session)
+
+        // The first retry has really failed. Restore the filesystem before the
+        // second retry; its success must retain the exact original generation.
+        assertTrue(mailbox.delete())
+        assertTrue(mailbox.mkdir())
+        Thread.sleep(3_000)
+        assertSame(session, sessions[session.requestId])
+        assertEquals(1, retries(session))
+        awaitCondition(2_000) { sessions[session.requestId] == null }
+        assertEquals(2, retries(session))
+        val stored = mailbox.listFiles()!!.single { it.extension == "completed" }.readText()
+        assertEquals(session.generation, JSONObject(stored.substringBefore('\n')).getString("generation"))
+        assertEquals("original reply survives both failures", stored.substringAfter('\n'))
+    }
+
+    @Test
+    fun exhaustedRetriesRetainBodyWithoutAnotherTimerOrWakeLock() {
+        val mailbox = java.io.File(service.cacheDir, "sse_offline_completed")
+        mailbox.writeText("persistent publication failure")
+        val session = session("never discard the unsaved reply")
+        session.complete("stop")
+        invoke("cleanupSessionIfCompletedAndDisconnected", session)
+        awaitCondition(8_000) { retries(session) == 2 }
+        assertHandoffWakeLockReleased(session)
+        assertNull(synchronized(session) { session.handoffJob })
+        assertSame(session, sessions[session.requestId])
+        assertEquals("never discard the unsaved reply", session.fullContent.toString())
+
+        assertTrue(mailbox.delete())
+        assertTrue(mailbox.mkdir())
+        Thread.sleep(2_200)
+        assertTrue(mailbox.listFiles()!!.isEmpty())
+        assertEquals(2, retries(session))
+        val (query, output) = connection()
+        invoke("handleQueryStream", session.requestId, query)
+        assertEquals("completed", frames(query, output).single().getString("status"))
+        assertEquals(2, retries(session))
+    }
+
+    @Test
+    fun commitAckAndDiscardCancelPendingRetriesWithoutResurrectingFiles() {
+        val mailbox = java.io.File(service.cacheDir, "sse_offline_completed")
+        mailbox.writeText("block publication")
+        val acknowledged = session("already committed")
+        val discarded = session("deleted result")
+        for (session in listOf(acknowledged, discarded)) {
+            session.complete("stop")
+            invoke("cleanupSessionIfCompletedAndDisconnected", session)
+        }
+        val acknowledgedJob = synchronized(acknowledged) { acknowledged.handoffJob!! }
+        val discardedJob = synchronized(discarded) { discarded.handoffJob!! }
+        val (control, _) = connection()
+        invoke("handleControl", "ack_committed", acknowledged.requestId, acknowledged.generation, control)
+        invoke("handleControl", "discard", discarded.requestId, discarded.generation, control)
+        assertTrue(acknowledgedJob.isCancelled)
+        assertTrue(discardedJob.isCancelled)
+        assertNull(sessions[acknowledged.requestId])
+        assertNull(sessions[discarded.requestId])
+        val replacement = SseProxyService.StreamSession(acknowledged.requestId)
+        replacement.fullContent.append("new generation")
+        sessions[replacement.requestId] = replacement
+        assertTrue(mailbox.delete())
+        assertTrue(mailbox.mkdir())
+        Thread.sleep(2_200)
+        assertTrue(mailbox.listFiles()!!.isEmpty())
+        assertEquals(0, retries(acknowledged))
+        assertEquals(0, retries(discarded))
+        assertSame(replacement, sessions[replacement.requestId])
+        assertEquals("new generation", replacement.fullContent.toString())
+    }
+
+    @Test
+    fun resumeReplacesRetryWithAckWaitWithoutResettingGenerationBudget() {
+        val mailbox = java.io.File(service.cacheDir, "sse_offline_completed")
+        mailbox.writeText("block publication")
+        val session = session("resumable terminal body")
+        session.complete("stop")
+        invoke("cleanupSessionIfCompletedAndDisconnected", session)
+        awaitCondition(3_000) { retries(session) == 1 }
+        val retryJob = synchronized(session) { session.handoffJob!! }
+        val (stream, output) = connection()
+        assertSame(session, invoke("handleResumeStream", session.requestId, session.generation, stream))
+        assertTrue(retryJob.isCancelled)
+        assertEquals(1, retries(session))
+        assertTrue(frames(stream, output).last().getBoolean("completed"))
+        assertTrue(mailbox.delete())
+        assertTrue(mailbox.mkdir())
+        // The cancelled 4-second retry must not close the resumed consumer.
+        Thread.sleep(4_200)
+        assertSame(session, sessions[session.requestId])
+        assertFalse(stream.socket.isClosed)
+        assertTrue(mailbox.listFiles()!!.isEmpty())
+        awaitCondition(2_000) { sessions[session.requestId] == null }
+        assertEquals(1, retries(session))
+        assertTrue(stream.socket.isClosed)
+    }
+
+    @Test
+    fun destructionAttemptsPublicationOnceAndDoesNotScheduleNewRetries() {
+        val mailbox = java.io.File(service.cacheDir, "sse_offline_completed")
+        mailbox.writeText("block publication")
+        val session = session("pending at destruction")
+        session.complete("stop")
+        invoke("cleanupSessionIfCompletedAndDisconnected", session)
+        val retryJob = synchronized(session) { session.handoffJob!! }
+        service.onDestroy()
+        assertTrue(retryJob.isCancelled)
+        assertNull(synchronized(session) { session.handoffJob })
+        assertEquals(0, retries(session))
+        assertHandoffWakeLockReleased(session)
+        assertTrue(mailbox.delete())
+    }
+
+    @Test
+    fun terminalDropsTheNetworkOwnerBeforeLateCancellationCallback() {
+        val session = session("finished reply")
+        val (stream, _) = connection()
+        session.replaceConnection(stream)
+        val cancellations = AtomicInteger(0)
+        session.eventSource = object : EventSource {
+            override fun request(): Request = Request.Builder().url("https://example.invalid").build()
+
+            override fun cancel() {
+                cancellations.incrementAndGet()
+                assertNull(session.eventSource)
+                invoke("completeSession", session, "error", "late cancellation callback")
+            }
+        }
+        invoke("acceptUpstreamEvent", session, "[DONE]")
+        assertNull(session.eventSource)
+        assertEquals(1, cancellations.get())
+        assertEquals("completed", session.lastFinishReason)
+        assertNull(session.terminalError)
+        assertEquals("finished reply", session.fullContent.toString())
     }
 
     @Test

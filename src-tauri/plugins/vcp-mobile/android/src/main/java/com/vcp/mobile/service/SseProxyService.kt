@@ -236,6 +236,8 @@ class SseProxyService : Service() {
         const val CHANNEL_ID = "vcp_sse_proxy_helper"
         const val NOTIFICATION_ID_SERVICE = 0x53545202
 
+        // 2026-10-17 用户决定：正文规模沿用 LLM 单次生成的物理上限与现有 8 路接收并发约束。
+        // 不另设单条正文、累计字节或总驻留 Session 配额，也不引入超限截断与容量驱逐。
         internal const val MAX_ACTIVE_SESSIONS = 8
         internal const val CONTENT_FRAME_CHARS = 16 * 1024
         internal const val TERMINAL_ACK_TIMEOUT_MS = 5_000L
@@ -249,6 +251,7 @@ class SseProxyService : Service() {
         val requestId: String,
         val generation: String = UUID.randomUUID().toString(),
         @Volatile var eventSource: EventSource? = null,
+        // 完整正文用于接管和终态交接；按上述规模约定保留，不另设长度截断或转文件阈值。
         val fullContent: StringBuilder = StringBuilder(),
         @Volatile var isCompleted: Boolean = false,
         @Volatile var lastFinishReason: String? = null,
@@ -258,6 +261,9 @@ class SseProxyService : Service() {
     ) {
         @Volatile var handoffWakeDeadlineMs: Long = 0
         var handoffJob: Job? = null
+        // Automatic publication retries belong to this generation. Replacing
+        // its consumer never replenishes the two-attempt budget.
+        var publicationRetriesAttempted: Int = 0
         @Synchronized
         internal fun complete(reason: String, error: String? = null): Boolean {
             if (isCompleted) return false
@@ -292,6 +298,13 @@ class SseProxyService : Service() {
             val connection = activeConnection
             activeConnection = null
             return connection
+        }
+
+        @Synchronized
+        internal fun takeEventSource(): EventSource? {
+            val source = eventSource
+            eventSource = null
+            return source
         }
     }
 
@@ -366,8 +379,9 @@ class SseProxyService : Service() {
         for (session in sessions) {
             val detached = synchronized(session) {
                 session.handoffJob?.cancel()
+                session.handoffJob = null
                 if (!session.isCompleted) activeSessions.remove(session.requestId, session)
-                Pair(session.eventSource, session.takeConnection())
+                Pair(session.takeEventSource(), session.takeConnection())
             }
             detached.first?.cancel()
             detached.second?.close()
@@ -550,6 +564,7 @@ class SseProxyService : Service() {
             when {
                 !isServiceRunning -> "service_stopping" to "Helper service is shutting down"
                 activeSessions.containsKey(requestId) -> "session_already_exists" to "Session already exists"
+                // 限制正在接收的流；完成态由 ACK/离线交接回收，落盘失败按交接生命周期处理。
                 activeSessions.values.count { !it.isCompleted } >= MAX_ACTIVE_SESSIONS ->
                     "capacity_exhausted" to "Helper session limit reached"
                 else -> {
@@ -738,7 +753,7 @@ class SseProxyService : Service() {
                 if (action == "ack_committed" && !session.isCompleted) return@synchronized null
                 if (!removeSession(session)) return@synchronized null
                 accepted = true
-                Pair(session.eventSource, session.takeConnection())
+                Pair(session.takeEventSource(), session.takeConnection())
             }
             if (action == "cancel" && accepted) {
                 completeSession(session, "cancelled_by_user")
@@ -815,10 +830,15 @@ class SseProxyService : Service() {
 
     private fun completeSession(session: StreamSession, reason: String, error: String? = null) {
         var failedConnection: ClientConnection? = null
+        var finishedSource: EventSource? = null
         val completed = synchronized(session) {
             if (!isCurrentSession(session) || !session.complete(reason, error)) {
                 false
             } else {
+                // Completion and installation use the same monitor. If the
+                // factory returns later, its completed check cancels that source
+                // instead of restoring a network owner to this terminal session.
+                finishedSource = session.takeEventSource()
                 session.handoffWakeDeadlineMs = SystemClock.elapsedRealtime() + TERMINAL_ACK_TIMEOUT_MS
                 session.activeConnection?.let { connection ->
                     val event = sessionEvent(session, "terminal").apply {
@@ -835,7 +855,7 @@ class SseProxyService : Service() {
         }
         if (!completed) return
         updateLocks()
-        session.eventSource?.cancel()
+        finishedSource?.cancel()
         failedConnection?.close()
         if (reason != "cancelled_by_user") {
             showStreamNotification(session, isSuccess = error == null, errorMsg = error)
@@ -847,38 +867,66 @@ class SseProxyService : Service() {
     private fun scheduleCompletedHandoff(session: StreamSession) {
         synchronized(session) {
             if (!isCurrentSession(session) || !session.isCompleted || session.activeConnection == null) return
-            session.handoffJob?.cancel()
             session.handoffWakeDeadlineMs = SystemClock.elapsedRealtime() + TERMINAL_ACK_TIMEOUT_MS
-            val job = serviceScope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
-                delay(TERMINAL_ACK_TIMEOUT_MS)
-                publishCompletedSession(session, requireDisconnected = false, expectedJob = coroutineContext[Job])
-            }
-            session.handoffJob = job
-            job.start()
+            scheduleHandoff(session, TERMINAL_ACK_TIMEOUT_MS, automaticRetry = false)
         }
+    }
+
+    // The session monitor owns ACK waiting, publication and retry waiting. A
+    // resumed consumer replaces the same job; there is never a second retry loop.
+    private fun scheduleHandoff(session: StreamSession, delayMs: Long, automaticRetry: Boolean) {
+        session.handoffJob?.cancel()
+        val job = serviceScope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
+            delay(delayMs)
+            publishCompletedSession(session, requireDisconnected = false,
+                expectedJob = coroutineContext[Job], automaticRetry = automaticRetry)
+        }
+        session.handoffJob = job
+        job.start()
     }
 
     private fun cleanupSessionIfCompletedAndDisconnected(session: StreamSession) {
         publishCompletedSession(session, requireDisconnected = true)
     }
 
-    private fun publishCompletedSession(session: StreamSession, requireDisconnected: Boolean, expectedJob: Job? = null) {
+    private fun publishCompletedSession(
+        session: StreamSession,
+        requireDisconnected: Boolean,
+        expectedJob: Job? = null,
+        automaticRetry: Boolean = false,
+    ) {
         var connection: ClientConnection? = null
         synchronized(session) {
             if (!isCurrentSession(session) || !session.isCompleted ||
                 (requireDisconnected && session.activeConnection != null) ||
-                (expectedJob != null && session.handoffJob !== expectedJob)) return
+                (expectedJob != null && (!isServiceRunning || session.handoffJob !== expectedJob))) return
+            // A real disconnect/destruction keeps its immediate best-effort
+            // write. It supersedes pending work but never resets the retry budget.
+            if (expectedJob == null) session.handoffJob?.cancel()
+            if (automaticRetry) session.publicationRetriesAttempted++
             // Disk I/O gets its own bounded CPU handoff window. A failed or
             // stalled fsync must never keep a completed reply's wake lock forever.
             session.handoffWakeDeadlineMs = SystemClock.elapsedRealtime() + TERMINAL_ACK_TIMEOUT_MS
             updateLocks()
             // ACK, discard and resume all take this monitor. Publication precedes
             // removal, so not_found always permits Rust to recheck the mailbox.
-            if (persistOfflineCompletedSession(session)) {
+            val published = persistOfflineCompletedSession(session)
+            if (published) {
                 removeSession(session)
                 connection = session.takeConnection()
             }
             session.handoffWakeDeadlineMs = 0
+            if (!published) {
+                session.handoffJob?.cancel()
+                session.handoffJob = null
+                if (isServiceRunning && session.publicationRetriesAttempted < 2) {
+                    // Delay starts after the previous write returned failure:
+                    // 2 seconds before retry 1, then 4 seconds before retry 2.
+                    // Backoff holds no handoff WakeLock and emits no notification.
+                    val delayMs = 2_000L * (session.publicationRetriesAttempted + 1)
+                    scheduleHandoff(session, delayMs, automaticRetry = true)
+                }
+            }
         }
         connection?.close()
         updateLocks()

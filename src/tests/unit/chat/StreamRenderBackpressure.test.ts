@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { useChatStreamStore } from "@/core/stores/chatStreamStore";
 import { invokeMock, mockInvoke } from "@/tests/mocks/tauri";
-import type { MarkdownNode, StreamEventDto } from "@/core/types/chat";
+import type { ContentBlock, MarkdownNode, StreamEventDto } from "@/core/types/chat";
 
 const streamEvent = (
   event: Pick<StreamEventDto, "type" | "messageId"> & Partial<StreamEventDto>,
@@ -216,11 +216,7 @@ describe("stream render backpressure", () => {
         chunk: "!",
         mutationChunk: "!",
       }));
-      await store.processStreamEvent(streamEvent({
-        type: "end",
-        messageId: "assistant-1",
-        context: streamContext,
-      }));
+      manualRaf.flush();
 
       const message = store.getActiveStreamMessage(
         "agent-a",
@@ -263,11 +259,7 @@ describe("stream render backpressure", () => {
           { content: "onethree" },
         );
       });
-      await store.processStreamEvent(streamEvent({
-        type: "end",
-        messageId: "assistant-1",
-        context: streamContext,
-      }));
+      manualRaf.flush();
 
       const frame = store.getActiveStreamMessage(
         "agent-a",
@@ -302,11 +294,7 @@ describe("stream render backpressure", () => {
 
       await store.processStreamEvent(tailEvent(25, 1, "one"));
       await store.processStreamEvent(tailEvent(25, 2, "two"));
-      await store.processStreamEvent(streamEvent({
-        type: "end",
-        messageId: "assistant-1",
-        context: streamContext,
-      }));
+      manualRaf.flush();
 
       const frame = store.getActiveStreamMessage(
         "agent-a",
@@ -483,6 +471,135 @@ describe("stream render backpressure", () => {
     }
   });
 
+  it.each(["error", "stopping", "end"] as const)(
+    "releases tail AST references only after the %s render has taken over",
+    async (type) => {
+      const raf = installManualRaf();
+      const store = useChatStreamStore();
+      try {
+        await store.processStreamEvent(tailEvent(1, 1, "streamed", { reset: true }));
+        raf.flush();
+        const message = store.getActiveStreamMessage("agent-a", "agent", "topic-a", "assistant-1")!;
+        const previousFrame = message.tailFrame;
+        const previousSnapshot = message.tailSnapshot;
+        expect(previousFrame?.snapshot).toHaveLength(1);
+        expect(previousSnapshot).toHaveLength(1);
+
+        let resolveCompile!: (blocks: ContentBlock[]) => void;
+        mockInvoke("process_message_content", () => new Promise<ContentBlock[]>(resolve => {
+          resolveCompile = resolve;
+        }));
+        await store.processStreamEvent(streamEvent({
+          type, messageId: "assistant-1", context: streamContext,
+          content: "authoritative partial",
+          finishReason: type === "end" ? "completed" : null,
+          error: type === "error" ? "commit failed" : null,
+        }));
+        expect(message.tailFrame).toBe(previousFrame);
+        expect(message.tailSnapshot).toBe(previousSnapshot);
+
+        const blocks: ContentBlock[] = [{ type: "markdown", content: "authoritative partial" }];
+        resolveCompile(blocks);
+        await vi.waitFor(() => expect(message.tailFrame).toBeUndefined());
+        expect(message.blocks).toEqual(blocks);
+        expect(message.content).toBe("authoritative partial");
+        expect(message.tailSnapshot).toBeUndefined();
+        expect(message.tailBlock).toBeUndefined();
+        expect(message.tailOp).toBeUndefined();
+        expect(message.tailContent).toBe("");
+        expect(store.isMessageActive("agent-a", "agent", "topic-a", "assistant-1")).toBe(type !== "end");
+        if (type === "error") expect(message.streamRecoveryState).toBe("waiting_retry");
+        if (type === "stopping") expect(message.isStopping).toBe(true);
+      } finally {
+        store.$dispose();
+        raf.restore();
+      }
+    },
+  );
+
+  it("releases the tail when durable end already contains compiled blocks", async () => {
+    const raf = installManualRaf();
+    const store = useChatStreamStore();
+    try {
+      await store.processStreamEvent(tailEvent(1, 1, "streamed", { reset: true }));
+      raf.flush();
+      const message = store.getActiveStreamMessage("agent-a", "agent", "topic-a", "assistant-1")!;
+      await store.processStreamEvent(streamEvent({
+        type: "end", messageId: "assistant-1", context: streamContext,
+        content: "saved", blocks: [{ type: "markdown", content: "saved" }], finishReason: "completed",
+      }));
+      expect(message.tailFrame).toBeUndefined();
+      expect(message.tailSnapshot).toBeUndefined();
+      expect(message.blocks).toEqual([{ type: "markdown", content: "saved" }]);
+      expect(invokeMock.mock.calls.some(([command]) => command === "process_message_content")).toBe(false);
+    } finally {
+      store.$dispose();
+      raf.restore();
+    }
+  });
+
+  it("keeps the existing tail visible when terminal rendering fails", async () => {
+    const raf = installManualRaf();
+    const store = useChatStreamStore();
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await store.processStreamEvent(tailEvent(1, 1, "streamed", { reset: true }));
+      raf.flush();
+      const message = store.getActiveStreamMessage("agent-a", "agent", "topic-a", "assistant-1")!;
+      const previousFrame = message.tailFrame;
+      const previousSnapshot = message.tailSnapshot;
+      mockInvoke("process_message_content", () => Promise.reject(new Error("renderer unavailable")));
+      await store.processStreamEvent(streamEvent({
+        type: "end", messageId: "assistant-1", context: streamContext,
+        content: "saved", finishReason: "completed",
+      }));
+      await vi.waitFor(() => expect(store.isMessageActive("agent-a", "agent", "topic-a", "assistant-1")).toBe(false));
+      expect(message.content).toBe("saved");
+      expect(message.tailFrame).toBe(previousFrame);
+      expect(message.tailSnapshot).toBe(previousSnapshot);
+      expect(message.tailContent).toBe("streamed");
+    } finally {
+      errorLog.mockRestore();
+      store.$dispose();
+      raf.restore();
+    }
+  });
+
+  it.each(["error", "stopping"] as const)("does not let a late %s render clear a replacement consumer's tail", async type => {
+    const raf = installManualRaf();
+    const store = useChatStreamStore();
+    try {
+      await store.processStreamEvent(tailEvent(1, 1, "old", { reset: true }));
+      raf.flush();
+      let resolveCompile!: (blocks: ContentBlock[]) => void;
+      mockInvoke("process_message_content", () => new Promise<ContentBlock[]>(resolve => {
+        resolveCompile = resolve;
+      }));
+      await store.processStreamEvent(streamEvent({
+        type, messageId: "assistant-1", context: streamContext, content: "old partial",
+      }));
+      await store.processStreamEvent({
+        ...tailEvent(2, 1, "new", { reset: true }), consumerRevision: 2,
+        aurora: {
+          ...tailEvent(2, 1, "new", { reset: true }).aurora!,
+          kind: "snapshot", content: "new", stableBlocks: [],
+        },
+      });
+      raf.flush();
+      const message = store.getActiveStreamMessage("agent-a", "agent", "topic-a", "assistant-1")!;
+      const replacementFrame = message.tailFrame;
+      resolveCompile([{ type: "markdown", content: "old partial" }]);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(message.content).toBe("new");
+      expect(message.tailFrame).toBe(replacementFrame);
+      expect(message.tailFrame?.streamId).toBe(2);
+    } finally {
+      store.$dispose();
+      raf.restore();
+    }
+  });
+
   it("keeps a commit error recoverable and accepts the later durable end", async () => {
     const store = useChatStreamStore();
     await store.processStreamEvent(streamEvent({
@@ -612,16 +729,9 @@ describe("stream render backpressure", () => {
         );
       });
 
-      await store.processStreamEvent(streamEvent({
-        type: "end",
-        messageId: "assistant-1",
-        context: {
-          ownerId: "agent-a",
-          ownerType: "agent",
-          topicId: "topic-a",
-          agentId: "agent-a",
-        },
-      }));
+      await vi.waitFor(() => expect(store.getActiveStreamMessage(
+        "agent-a", "agent", "topic-a", "assistant-1",
+      )?.tailFrame?.reset).toBe(true));
 
       const frame = store.getActiveStreamMessage(
         "agent-a",

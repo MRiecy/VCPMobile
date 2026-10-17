@@ -65,4 +65,6 @@ iOS 后续继续按 P5-1 核对严格 SSE 目标与真实系统执行条件，�
 | Android 定向 `:tauri-plugin-vcp-mobile:testDebugUnitTest` | `SseProxyConnectionOwnershipTest` 7 项、`SseProxyProtocolTest` 12 项通过；包括真实 5 秒 timer、ACK/落盘、失败保留及通知摘要 |
 | `git diff --check` | 通过 |
 
-本轮未取得手机 Freezer/长期后台运行证据，未执行 Apple 构建或 iOS 实机验证。不将源码、host、Android 目标编译和 JVM 结果互相替代。后续 P5-1 继续核对严格 SSE 目标与系统机制，原生 adapter、进度与常亮仍按 P5-3/P5-4 实施；另行审议的正文/总内存硬上限不在本轮完成范围内。
+本轮未取得手机 Freezer/长期后台运行证据，未执行 Apple 构建或 iOS 实机验证。不将源码、host、Android 目标编译和 JVM 结果互相替代。后续 P5-1 继续核对严格 SSE 目标与系统机制，原生 adapter、进度与常亮仍按 P5-3/P5-4 实施。
+
+后续内存审议已确定：单条正文规模沿用 LLM 单次生成边界，总量沿用现有 8 路并发，不新增容量配额、截断或驱逐。最后一轮正文传递、渲染缓冲释放与 helper 两次退避重试见 [资源收尾记录](./02-SSE资源收尾重构.md)。

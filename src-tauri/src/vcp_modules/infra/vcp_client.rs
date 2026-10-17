@@ -336,6 +336,25 @@ impl StreamEvent {
     }
 }
 
+/// Transport-owned text is moved into the durable finalizer. Internal callers
+/// consume these fields directly instead of serializing a second JSON response.
+#[derive(Debug)]
+pub struct VcpResponse {
+    pub full_content: String,
+    pub finish_reason: Option<String>,
+    pub is_aborted: bool,
+}
+
+impl VcpResponse {
+    pub(crate) fn cancelled() -> Self {
+        Self {
+            full_content: String::new(),
+            finish_reason: Some("cancelled_by_user".to_string()),
+            is_aborted: true,
+        }
+    }
+}
+
 /// VCP 请求失败的内部类型。流式路径显式携带已经接收的完整 partial，
 /// 防止上层只能从尚未写入正文的 pending 数据库行猜测内容。
 #[derive(Debug, Clone)]
@@ -1134,7 +1153,7 @@ fn get_or_calculate_message_hash(content: &Value) -> String {
 }
 
 /// 核心请求实现函数，可供 Tauri Command 或 内部 Rust 模块(如 GroupOrchestrator) 调用
-/// 返回 Result<(全量内容/响应体, 是否被中止), 错误信息>
+/// Returns the owned response text and transport outcome without a JSON bridge.
 #[allow(dead_code)] // DORMANT ASSET: only the unregistered floating-assistant bridge uses this API.
 pub async fn perform_vcp_request<R: Runtime>(
     app: &AppHandle<R>,
@@ -1142,7 +1161,7 @@ pub async fn perform_vcp_request<R: Runtime>(
     request_key: MessageKey,
     payload: VcpRequestPayload,
     stream_channel: Option<Channel<StreamEvent>>,
-) -> Result<(Value, bool), VcpRequestFailure> {
+) -> Result<VcpResponse, VcpRequestFailure> {
     #[cfg(target_os = "android")]
     let transport_request_id = payload.effective_transport_request_id().to_string();
     let (lease, cancellation_token) =
@@ -1178,7 +1197,7 @@ pub async fn perform_vcp_request_registered<R: Runtime>(
     payload: VcpRequestPayload,
     stream_channel: Option<Channel<StreamEvent>>,
     cancellation_token: CancellationToken,
-) -> Result<(Value, bool), VcpRequestFailure> {
+) -> Result<VcpResponse, VcpRequestFailure> {
     log::info!(
         "[VCPClient] perform_vcp_request called for messageId: {}, context: {:?}",
         payload.message_id,
@@ -1921,11 +1940,9 @@ async fn handle_streaming_request<R: Runtime>(
     cancellation_token: CancellationToken,
     output: Arc<RequestOutput>,
     is_resume: bool,
-) -> Result<(Value, bool), VcpRequestFailure> {
+) -> Result<VcpResponse, VcpRequestFailure> {
     if !is_resume && cancellation_token.is_cancelled() {
-        return Ok((json!({
-            "fullContent": "", "finishReason": "cancelled_by_user", "streamingStarted": false,
-        }), true));
+        return Ok(VcpResponse::cancelled());
     }
     let _transport_slot = CHAT_TRANSPORT_SLOTS
         .try_acquire()
@@ -1990,11 +2007,7 @@ async fn handle_streaming_request<R: Runtime>(
         let response = tokio::select! {
             biased;
             _ = cancellation_token.cancelled() => {
-                return Ok((json!({
-                    "fullContent": "",
-                    "finishReason": "cancelled_by_user",
-                    "streamingStarted": false,
-                }), true));
+                return Ok(VcpResponse::cancelled());
             }
             response = client.post(final_url)
                 .header(AUTHORIZATION, format!("Bearer {api_key}"))
@@ -2235,18 +2248,15 @@ async fn handle_streaming_request<R: Runtime>(
     flush_aurora_window(&mut aurora_buffer, &mut pending_chunk);
     aurora_buffer.finalize();
     send_update(&mut aurora_buffer);
-    outcome.map_err(|message| {
-        VcpRequestFailure::streaming(message, aurora_buffer.full_text.clone())
-    })?;
+    if let Err(message) = outcome {
+        return Err(VcpRequestFailure::streaming(message, aurora_buffer.full_text));
+    }
     let is_aborted = last_finish_reason.as_deref() == Some("cancelled_by_user");
-    Ok((
-        json!({
-            "fullContent": aurora_buffer.full_text,
-            "streamingStarted": true,
-            "finishReason": last_finish_reason.unwrap_or_else(|| "completed".to_string()),
-        }),
+    Ok(VcpResponse {
+        full_content: aurora_buffer.full_text,
+        finish_reason: Some(last_finish_reason.unwrap_or_else(|| "completed".to_string())),
         is_aborted,
-    ))
+    })
 }
 
 /// 4. 抽离非流式请求循环
@@ -2260,25 +2270,13 @@ async fn handle_non_streaming_request(
     context: Option<Value>,
     cancellation_token: CancellationToken,
     output: Arc<RequestOutput>,
-) -> Result<(Value, bool), String> {
+) -> Result<VcpResponse, String> {
     let _transport_slot = CHAT_TRANSPORT_SLOTS
         .try_acquire()
         .map_err(|_| STREAM_CAPACITY_EXHAUSTED.to_string())?;
     let send_stream_event = |event: StreamEvent| {
         output.send(event);
     };
-    let cancelled_result = || {
-        (
-            json!({
-                "response": Value::Null,
-                "fullContent": "",
-                "finishReason": "cancelled_by_user",
-                "context": context,
-            }),
-            true,
-        )
-    };
-
     let request_future = client
         .post(final_url)
         .header(AUTHORIZATION, format!("Bearer {}", api_key))
@@ -2290,7 +2288,7 @@ async fn handle_non_streaming_request(
         _ = cancellation_token.cancelled() => {
             log::warn!("[VCPClient] Non-streaming request aborted before response for message: {}", message_id);
             // 用户取消由上层统一 Finalizer 持久化并发送唯一终态事件。
-            return Ok(cancelled_result());
+            return Ok(VcpResponse::cancelled());
         }
         res = request_future => {
             match res {
@@ -2306,34 +2304,38 @@ async fn handle_non_streaming_request(
     if !response.status().is_success() {
         let status = response.status();
         let text = tokio::select! {
-            _ = cancellation_token.cancelled() => return Ok(cancelled_result()),
+            _ = cancellation_token.cancelled() => return Ok(VcpResponse::cancelled()),
             text = response.text() => text.unwrap_or_default(),
         };
         let err_msg = format!("VCP服务器错误: {} - {}", status, text);
         return Err(err_msg);
     }
 
-    let vcp_response = tokio::select! {
-        _ = cancellation_token.cancelled() => return Ok(cancelled_result()),
+    let mut vcp_response = tokio::select! {
+        _ = cancellation_token.cancelled() => return Ok(VcpResponse::cancelled()),
         value = response.json::<Value>() => value.map_err(|error| format!("JSON解析失败: {error}"))?,
     };
 
     // 从标准的 OpenAI 格式中提取文本和结束原因
-    let choices = vcp_response["choices"].as_array();
-    let first_choice = choices.and_then(|c| c.first());
-    let full_content = first_choice
-        .and_then(|choice| choice["message"]["content"].as_str())
-        .unwrap_or("")
-        .to_string();
-    let finish_reason = first_choice
-        .and_then(|choice| choice["finish_reason"].as_str())
-        .map(|r| {
-            if r == "stop" {
-                "completed".to_string()
-            } else {
-                r.to_string()
-            }
-        });
+    let first_choice = vcp_response.get_mut("choices")
+        .and_then(Value::as_array_mut)
+        .and_then(|choices| choices.first_mut());
+    let (full_content, finish_reason) = if let Some(choice) = first_choice {
+        let content = match choice.get_mut("message")
+            .and_then(|message| message.get_mut("content")).map(Value::take) {
+            Some(Value::String(content)) => content,
+            _ => String::new(),
+        };
+        let reason = match choice.get_mut("finish_reason").map(Value::take) {
+            Some(Value::String(reason)) if reason == "stop" => Some("completed".to_string()),
+            Some(Value::String(reason)) => Some(reason),
+            _ => None,
+        };
+        (content, reason)
+    } else {
+        (String::new(), None)
+    };
+    drop(vcp_response);
 
     // 发送单次 aurora 事件以将文本呈现在 UI 中
     let update = AuroraUpdate {
@@ -2354,15 +2356,11 @@ async fn handle_non_streaming_request(
         context.clone(),
     ));
 
-    Ok((
-        json!({
-            "response": vcp_response,
-            "fullContent": full_content,
-            "finishReason": finish_reason,
-            "context": context
-        }),
-        false,
-    ))
+    Ok(VcpResponse {
+        full_content,
+        finish_reason,
+        is_aborted: false,
+    })
 }
 
 /// 中止请求 Command: interruptRequest
@@ -2896,7 +2894,7 @@ async fn remove_offline_completed(path: &std::path::Path) -> Result<(), String> 
 #[cfg(target_os = "android")]
 async fn read_completed_transport<R: Runtime>(
     app: &AppHandle<R>, request_id: &str, output: &RequestOutput,
-) -> Result<Option<Result<(Value, bool), VcpRequestFailure>>, VcpRequestFailure> {
+) -> Result<Option<Result<VcpResponse, VcpRequestFailure>>, VcpRequestFailure> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
     let mut files = Vec::new();
     for path in offline_completed_paths(app, Some(request_id)).await
@@ -2919,8 +2917,11 @@ async fn read_completed_transport<R: Runtime>(
     }
     let reason = file.metadata.finish_reason.unwrap_or_else(|| "completed".to_string());
     let aborted = reason == "cancelled_by_user";
-    Ok(Some(Ok((json!({ "fullContent": content, "finishReason": reason,
-        "streamingStarted": true }), aborted))))
+    Ok(Some(Ok(VcpResponse {
+        full_content: content,
+        finish_reason: Some(reason),
+        is_aborted: aborted,
+    })))
 }
 
 #[cfg(target_os = "android")]
@@ -2941,6 +2942,16 @@ async fn checkpoint_stop_partial<R: Runtime>(
     Ok(())
 }
 
+/// Recovery sends authoritative content through StreamEvent, never in a second
+/// internal JSON response. Only the coordination outcome needs to be returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RecoveryStatus {
+    Attached,
+    Completed,
+    Failed,
+    NotFound,
+}
+
 /// Called with the message's ActiveRequestLease held. The helper file remains
 /// available after read or transaction failures; only a durable DB decision consumes it.
 async fn finalize_offline_completed<R: Runtime>(
@@ -2948,14 +2959,14 @@ async fn finalize_offline_completed<R: Runtime>(
     key: &MessageKey,
     file: OfflineCompletedFile,
     stream_channel: Channel<StreamEvent>,
-) -> Result<Value, String> {
+) -> Result<RecoveryStatus, String> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-    type OfflineMessageRow = (String, Option<String>, Option<i64>, Option<String>, bool);
+    type OfflineMessageRow = (Option<String>, Option<i64>, Option<String>, bool);
 
     let db = app.state::<DbState>();
     let row: Option<OfflineMessageRow> = sqlx::query_as(
-        "SELECT m.content, m.finish_reason, m.deleted_at, m.agent_id,
+        "SELECT m.finish_reason, m.deleted_at, m.agent_id,
                 EXISTS(SELECT 1 FROM active_generations ag
                        WHERE ag.owner_type = m.owner_type AND ag.owner_id = m.owner_id
                          AND ag.topic_id = m.topic_id AND ag.msg_id = m.msg_id)
@@ -2969,16 +2980,16 @@ async fn finalize_offline_completed<R: Runtime>(
     .fetch_optional(&db.pool)
     .await
     .map_err(|error| error.to_string())?;
-    let Some((content, finish_reason, deleted_at, agent_id, pending)) = row else {
+    let Some((finish_reason, deleted_at, agent_id, pending)) = row else {
         remove_offline_completed(&file.path).await?;
-        return Ok(json!({ "status": "not_found", "content": "" }));
+        return Ok(RecoveryStatus::NotFound);
     };
     if deleted_at.is_some() || finish_reason.is_some() {
         remove_offline_completed(&file.path).await?;
         return Ok(if deleted_at.is_some() {
-            json!({ "status": "not_found", "content": "" })
+            RecoveryStatus::NotFound
         } else {
-            json!({ "status": "completed", "content": content, "finishReason": finish_reason })
+            RecoveryStatus::Completed
         });
     }
     if !pending {
@@ -3019,18 +3030,14 @@ async fn finalize_offline_completed<R: Runtime>(
     )
     .await?;
     remove_offline_completed(&file.path).await?;
-    Ok(match committed {
-        Some(message) => json!({ "status": "completed", "content": message.content,
-            "finishReason": message.finish_reason }),
-        None => json!({ "status": "not_found", "content": "" }),
-    })
+    Ok(if committed.is_some() { RecoveryStatus::Completed } else { RecoveryStatus::NotFound })
 }
 
 async fn recover_offline_generation<R: Runtime>(
     app: &AppHandle<R>,
     key: &MessageKey,
     stream_channel: Channel<StreamEvent>,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<RecoveryStatus>, String> {
     let request_id = message_transport_request_id(key);
     let mut files = Vec::new();
     for path in offline_completed_paths(app, Some(&request_id)).await? {
@@ -3054,9 +3061,9 @@ async fn recover_offline_generation<R: Runtime>(
 async fn terminal_generation_result(
     pool: &sqlx::Pool<sqlx::Sqlite>,
     key: &MessageKey,
-) -> Result<Value, String> {
-    let terminal: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT content, finish_reason FROM messages
+) -> Result<RecoveryStatus, String> {
+    let terminal: Option<Option<String>> = sqlx::query_scalar(
+        "SELECT finish_reason FROM messages
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
            AND deleted_at IS NULL",
     )
@@ -3068,11 +3075,9 @@ async fn terminal_generation_result(
     .await
     .map_err(|error| error.to_string())?;
     Ok(match terminal {
-        Some((content, Some(finish_reason))) => json!({
-            "status": "completed", "content": content, "finishReason": finish_reason,
-        }),
-        Some((content, None)) => json!({ "status": "failed", "content": content }),
-        None => json!({ "status": "not_found", "content": "" }),
+        Some(Some(_)) => RecoveryStatus::Completed,
+        Some(None) => RecoveryStatus::Failed,
+        None => RecoveryStatus::NotFound,
     })
 }
 
@@ -3085,7 +3090,7 @@ async fn recover_active_generation<R: Runtime>(
     topic_id: String,
     msg_id: String,
     mut stream_channel: Channel<StreamEvent>,
-) -> Result<Value, String> {
+) -> Result<RecoveryStatus, String> {
     log::info!(
         "[VCPClient] recover_active_generation called for {}/{}/{}/{}",
         owner_type,
@@ -3135,7 +3140,7 @@ async fn recover_active_generation<R: Runtime>(
                         entry.output.send(recovery_state_event(&key,
                             if entry.cancellation_token.is_cancelled() { "stopping" } else { "connected" }));
                     }
-                    return Ok(json!({ "status": "attached" }));
+                    return Ok(RecoveryStatus::Attached);
                 }
                 entry.released.cancelled().await;
             }
@@ -3182,19 +3187,14 @@ async fn recover_active_generation<R: Runtime>(
 
     #[cfg(target_os = "android")]
     {
-        let resumed = resume_claimed_generation(
+        return resume_claimed_generation(
             &app,
             &key,
             agent_id,
             stream_channel,
             _recovery_cancellation_token.clone(),
         )
-        .await?;
-        return Ok(json!({
-            "status": resumed["status"].as_str().unwrap_or("completed"),
-            "content": resumed["fullContent"],
-            "finishReason": resumed["finishReason"],
-        }));
+        .await;
     }
 
     #[cfg(not(target_os = "android"))]
@@ -3204,7 +3204,7 @@ async fn recover_active_generation<R: Runtime>(
                 app.clone(), &db.pool, &key, stop_partial.unwrap_or_default(), true,
                 Some("cancelled_by_user".to_string()), Some(stream_channel.clone()), agent_id,
             ).await?;
-            return Ok(json!({ "status": if committed.is_some() { "completed" } else { "not_found" } }));
+            return Ok(if committed.is_some() { RecoveryStatus::Completed } else { RecoveryStatus::NotFound });
         }
 
         log::warn!(
@@ -3222,31 +3222,17 @@ async fn recover_active_generation<R: Runtime>(
         )
         .await?;
 
-        let content: Option<String> = sqlx::query_scalar(
-            "SELECT content FROM messages
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
-           AND deleted_at IS NULL",
-        )
-        .bind(&owner_type)
-        .bind(&owner_id)
-        .bind(&topic_id)
-        .bind(&msg_id)
-        .fetch_optional(&db.pool)
-        .await
-        .map_err(|e| e.to_string())?;
-        Ok(json!({ "status": "failed", "content": content.unwrap_or_default() }))
+        Ok(RecoveryStatus::Failed)
     }
     }.await;
     match &result {
-        Ok(result) if result["status"] != "attached" => {
+        Ok(RecoveryStatus::Completed | RecoveryStatus::Failed) => {
             // A terminal row can win just before this connection attaches. Its
             // durable result is delivered through the same channel, once.
-            if result["status"] == "completed" || result["status"] == "failed" {
-                if let Err(error) = emit_persisted_terminal(&app, &key, &output).await {
-                    output.send(StreamEvent::error(key.msg_id.clone(),
-                        recovery_state_event(&key, "error").context, error.clone()));
-                    return Err(error);
-                }
+            if let Err(error) = emit_persisted_terminal(&app, &key, &output).await {
+                output.send(StreamEvent::error(key.msg_id.clone(),
+                    recovery_state_event(&key, "error").context, error.clone()));
+                return Err(error);
             }
         }
         Err(error) => {
@@ -3306,7 +3292,7 @@ async fn handle_recovery_failure<R: Runtime>(
     key: &MessageKey,
     failure: VcpRequestFailure,
     stream_channel: Channel<StreamEvent>,
-) -> Result<Value, String> {
+) -> Result<RecoveryStatus, String> {
     let recovery_pending = failure.is_recovery_pending();
     let stop_pending = failure.is_stop_pending();
     let (error, partial_content) = failure.into_parts();
@@ -3317,11 +3303,7 @@ async fn handle_recovery_failure<R: Runtime>(
         if let Some(recovered) =
             recover_offline_generation(app, key, stream_channel.clone()).await?
         {
-            return Ok(json!({
-                "status": recovered["status"],
-                "fullContent": recovered["content"],
-                "finishReason": recovered["finishReason"],
-            }));
+            return Ok(recovered);
         }
         let db = app.state::<DbState>();
         let stop: Option<Option<String>> = sqlx::query_scalar(
@@ -3335,11 +3317,7 @@ async fn handle_recovery_failure<R: Runtime>(
                 app.clone(), &db.pool, key, partial_content.or(stored_partial).unwrap_or_default(),
                 true, Some("cancelled_by_user".to_string()), Some(stream_channel), None,
             ).await?;
-            return Ok(match committed {
-                Some(message) => json!({ "status": "completed", "fullContent": message.content,
-                    "finishReason": message.finish_reason }),
-                None => json!({ "status": "not_found", "fullContent": "" }),
-            });
+            return Ok(if committed.is_some() { RecoveryStatus::Completed } else { RecoveryStatus::NotFound });
         }
     } else if recovery_pending || error == STREAM_CAPACITY_EXHAUSTED {
         // The helper still owns the complete response. A local attachment or
@@ -3375,19 +3353,10 @@ async fn handle_recovery_failure<R: Runtime>(
     let pool = &db.pool;
     let committed_content =
         finalize_stream_error(app, pool, key, partial_content, error, Some(stream_channel)).await?;
-    let Some(committed_content) = committed_content else {
-        let terminal = terminal_generation_result(pool, key).await?;
-        return Ok(json!({
-            "status": terminal["status"],
-            "fullContent": terminal["content"],
-            "finishReason": terminal["finishReason"],
-        }));
-    };
-    Ok(json!({
-        "status": "failed",
-        "fullContent": committed_content,
-        "finishReason": "error",
-    }))
+    if committed_content.is_none() {
+        return terminal_generation_result(pool, key).await;
+    }
+    Ok(RecoveryStatus::Failed)
 }
 
 #[cfg(target_os = "android")]
@@ -3397,7 +3366,7 @@ async fn resume_claimed_generation<R: Runtime>(
     agent_id: Option<String>,
     stream_channel: Channel<StreamEvent>,
     cancellation_token: CancellationToken,
-) -> Result<Value, String> {
+) -> Result<RecoveryStatus, String> {
     let msg_id = key.msg_id.clone();
     let topic_id = key.topic.topic_id.clone();
     let owner_id = key.topic.owner_id.clone();
@@ -3422,7 +3391,7 @@ async fn resume_claimed_generation<R: Runtime>(
         "agentId": if owner_type == "agent" { Some(&owner_id) } else { None },
     });
 
-    let (mut res, is_aborted) = match handle_streaming_request(
+    let response = match handle_streaming_request(
         app,
         client,
         "",
@@ -3447,32 +3416,20 @@ async fn resume_claimed_generation<R: Runtime>(
         }
     };
 
-    let finish_reason = if is_aborted {
-        Some("cancelled_by_user".to_string())
-    } else {
-        res["finishReason"].as_str().map(|s| s.to_string())
-    };
-
     log::info!("[VCPClient] Claimed recovery completed. Finalizing message.");
     let committed = crate::vcp_modules::chat::message_service::finalize_stream_message(
         app.clone(),
         &pool,
         key,
-        res["fullContent"].as_str().unwrap_or("").to_string(),
-        is_aborted,
-        finish_reason,
+        response.full_content,
+        response.is_aborted,
+        response.finish_reason,
         Some(stream_channel),
         agent_id,
     )
     .await?;
 
-    if let Some(message) = committed {
-        res["fullContent"] = json!(message.content);
-        res["finishReason"] = json!(message.finish_reason);
-    } else {
-        res = json!({ "status": "not_found", "fullContent": "" });
-    }
-    Ok(res)
+    Ok(if committed.is_some() { RecoveryStatus::Completed } else { RecoveryStatus::NotFound })
 }
 
 #[cfg(test)]
@@ -3814,15 +3771,14 @@ mod offline_completed_tests {
         let result = finalize_offline_completed(app.handle(), &key, file, channel)
             .await
             .expect("durable recovery");
-        assert_eq!(result["content"], "第一行 🦀\n{\"正文不是JSON\":true}\n");
-        assert_eq!(result["finishReason"], "stop");
+        assert_eq!(result, RecoveryStatus::Completed);
         assert!(!tokio::fs::try_exists(&path).await.expect("file consumed"));
         let durable: (String, Option<String>) =
             sqlx::query_as("SELECT content, finish_reason FROM messages")
                 .fetch_one(&pool)
                 .await
                 .expect("committed message");
-        assert_eq!(durable.0, result["content"].as_str().unwrap());
+        assert_eq!(durable.0, "第一行 🦀\n{\"正文不是JSON\":true}\n");
         assert_eq!(durable.1.as_deref(), Some("stop"));
         let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM active_generations")
             .fetch_one(&pool)
@@ -3852,15 +3808,13 @@ mod offline_completed_tests {
         let result = finalize_offline_completed(app.handle(), &key, file, channel)
             .await
             .expect("discard deleted file");
-        assert_eq!(result["status"], "not_found");
-        assert_eq!(result["content"], "");
+        assert_eq!(result, RecoveryStatus::NotFound);
         assert_eq!(sent.load(std::sync::atomic::Ordering::SeqCst), 0);
         assert!(!tokio::fs::try_exists(&path).await.expect("file consumed"));
         let terminal = terminal_generation_result(&app.state::<DbState>().pool, &key)
             .await
             .expect("late recovery result");
-        assert_eq!(terminal["status"], "not_found");
-        assert_eq!(terminal["content"], "");
+        assert_eq!(terminal, RecoveryStatus::NotFound);
     }
 
     #[tokio::test]
@@ -3998,7 +3952,7 @@ mod active_request_tests {
         let (channel, mut events) = event_channel();
         let output = Arc::new(RequestOutput::default());
         output.bind_initial(Some(channel));
-        let (result, aborted) = handle_streaming_request(
+        let result = handle_streaming_request(
             app.handle(),
             Client::new(),
             &endpoint,
@@ -4013,9 +3967,9 @@ mod active_request_tests {
         )
         .await
         .unwrap();
-        assert_eq!(result["fullContent"], "firsttail");
-        assert_eq!(result["finishReason"], "stop");
-        assert!(!aborted);
+        assert_eq!(result.full_content, "firsttail");
+        assert_eq!(result.finish_reason.as_deref(), Some("stop"));
+        assert!(!result.is_aborted);
         let mut delivered = String::new();
         while let Ok(event) = events.try_recv() {
             assert_eq!(event["aurora"]["kind"], "delta");
@@ -4137,13 +4091,13 @@ mod active_request_tests {
         );
         assert!(old_events.try_recv().is_err());
         cancellation.cancel();
-        let (result, aborted) = tokio::time::timeout(Duration::from_secs(1), request)
+        let result = tokio::time::timeout(Duration::from_secs(1), request)
             .await
             .unwrap()
             .unwrap()
             .unwrap();
-        assert!(aborted);
-        assert_eq!(result["fullContent"], "<think>first");
+        assert!(result.is_aborted);
+        assert_eq!(result.full_content, "<think>first");
         release_server.cancel();
         server.await.unwrap();
     }
@@ -4218,6 +4172,45 @@ mod active_request_tests {
     }
 
     #[tokio::test]
+    async fn non_streaming_http_preserves_text_and_finish_metadata() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for reason in [Some("stop"), Some("length"), None] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0; 4096];
+                assert!(socket.read(&mut request).await.unwrap() > 0);
+                let body = json!({
+                    "choices": [{ "message": { "content": "正文 🦀\n\"quote\"\\tail" }, "finish_reason": reason }],
+                    "usage": { "completion_tokens": 7 },
+                }).to_string();
+                socket.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len(),
+                ).as_bytes()).await.unwrap();
+            }
+        });
+        for reason in [Some("completed"), Some("length"), None] {
+            let (channel, mut events) = event_channel();
+            let output = Arc::new(RequestOutput::default());
+            output.bind_initial(Some(channel));
+            let response = handle_non_streaming_request(
+                Client::new(), &endpoint, "", json!({}), "message".into(),
+                Some(json!({ "topicId": "topic" })), CancellationToken::new(), output,
+            ).await.unwrap();
+            assert_eq!(response.full_content, "正文 🦀\n\"quote\"\\tail");
+            assert_eq!(response.finish_reason.as_deref(), reason);
+            assert!(!response.is_aborted);
+            let event = events.recv().await.unwrap();
+            assert_eq!(event["aurora"]["content"], response.full_content);
+            assert_eq!(event["context"]["topicId"], "topic");
+            assert!(events.try_recv().is_err(), "the application finalizer owns the terminal event");
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn cancellation_during_non_streaming_body_does_not_wait_for_body_completion() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4255,13 +4248,13 @@ mod active_request_tests {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         cancellation.cancel();
-        let (result, aborted) = tokio::time::timeout(Duration::from_secs(1), request)
+        let result = tokio::time::timeout(Duration::from_secs(1), request)
             .await
             .unwrap()
             .unwrap()
             .unwrap();
-        assert!(aborted);
-        assert_eq!(result["finishReason"], "cancelled_by_user");
+        assert!(result.is_aborted);
+        assert_eq!(result.finish_reason.as_deref(), Some("cancelled_by_user"));
         release_server.cancel();
         server.await.unwrap();
     }

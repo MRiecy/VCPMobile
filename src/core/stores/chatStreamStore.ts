@@ -350,6 +350,16 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     }
   };
 
+  // 完整 blocks 接管显示后，历史列表也不再需要流式尾部的 AST 和更新帧。
+  const applyCompiledBlocks = (message: ChatMessage, blocks: ContentBlock[]) => {
+    message.blocks = blocks;
+    message.tailContent = "";
+    message.tailBlock = undefined;
+    message.tailOp = undefined;
+    message.tailFrame = undefined;
+    message.tailSnapshot = undefined;
+  };
+
   /**
    * 调度并申请 rAF 渲染，合并 data 和 aurora 的高频更新，在同一渲染帧内原子写入
    */
@@ -968,10 +978,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             .then(blocks => {
               if (!ownsConsumer() || hasStreamTerminalTombstone(messageKey)
                 || !msg!.isStopping || msg!.content !== content || rAFPendingUpdates.has(messageKey)) return;
-              msg!.blocks = blocks;
-              msg!.tailContent = "";
-              msg!.tailBlock = undefined;
-              msg!.tailOp = undefined;
+              applyCompiledBlocks(msg!, blocks);
             })
             .catch(error => console.error("[ChatStreamStore] Failed to render stopping partial:", error));
         }
@@ -1226,10 +1233,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           .then(blocks => {
             if (!ownsConsumer() || hasStreamTerminalTombstone(messageKey)
               || msg!.streamRecoveryState !== "waiting_retry" || msg!.content !== content) return;
-            msg!.blocks = blocks;
-            msg!.tailContent = "";
-            msg!.tailBlock = undefined;
-            msg!.tailOp = undefined;
+            applyCompiledBlocks(msg!, blocks);
           })
           .catch(error => console.error("[ChatStreamStore] Failed to render recoverable partial:", error));
       }
@@ -1272,11 +1276,10 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         }
 
         // 定义闭环终结函数，保证在 blocks 赋值完成后才移除活动流状态
-        const finalizeStream = () => {
+        const finalizeStream = (blocks?: ContentBlock[]) => {
           if (!ownsConsumer()) return;
-          msg!.tailContent = "";
-          msg!.tailBlock = undefined;
-          msg!.tailOp = undefined;
+          // 解析失败时保留已有展示；只有完整结果到达才释放旧尾部。
+          if (blocks) applyCompiledBlocks(msg!, blocks);
           removeSessionStream(ownerId, ownerType, topicId, actualMessageId);
           if (callbacks?.onStreamFinished) {
             callbacks.onStreamFinished(actualMessageId, topicId);
@@ -1289,16 +1292,13 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         try {
           // 如果后端已经带回了预渲染好的 blocks，直接使用，跳过冗余解析
           if (event.blocks) {
-            msg.blocks = event.blocks;
-            finalizeStream();
+            finalizeStream(event.blocks);
           } else {
             invoke<ContentBlock[]>("process_message_content", {
               content: msg!.content || "",
             })
               .then((compiledBlocks) => {
-                if (!ownsConsumer()) return;
-                msg.blocks = compiledBlocks;
-                finalizeStream();
+                finalizeStream(compiledBlocks);
               })
               .catch((e) => {
                 console.error(

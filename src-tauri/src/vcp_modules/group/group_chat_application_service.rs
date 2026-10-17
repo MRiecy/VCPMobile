@@ -13,7 +13,7 @@ use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use crate::vcp_modules::vcp_client::{
     freeze_chat_connection, message_transport_request_id, perform_vcp_request_registered,
     ActiveGroupTurnLease, ActiveGroupTurns, ActiveRequestLease, ActiveRequests,
-    ChatConnectionSnapshot, ChatRequestPurpose, StreamEvent, VcpRequestPayload,
+    ChatConnectionSnapshot, ChatRequestPurpose, StreamEvent, VcpRequestPayload, VcpResponse,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -218,7 +218,7 @@ async fn run_group_speaker_turn<R: Runtime>(
     // Once begin_stream_message has committed, even an already cancelled
     // speaker finishes through the durable finalizer rather than aborting DB IO.
     let res_result = if cancellation_token.is_cancelled() {
-        Ok((json!({ "fullContent": "" }), true))
+        Ok(VcpResponse::cancelled())
     } else {
         perform_vcp_request_registered(
             app_handle,
@@ -230,59 +230,50 @@ async fn run_group_speaker_turn<R: Runtime>(
     };
 
     match res_result {
-        Ok((res, is_aborted)) => {
-            if let Some(full_content) = res["fullContent"].as_str() {
-                let finish_reason = if is_aborted {
-                    Some("cancelled_by_user".to_string())
-                } else {
-                    res["finishReason"].as_str().map(|s| s.to_string())
-                };
+        Ok(response) => {
+            // 1. 委托流终结器落盘与发射事件
+            let finalized = message_service::finalize_stream_message(
+                app_handle.clone(),
+                db_pool,
+                &request_key,
+                response.full_content,
+                response.is_aborted,
+                response.finish_reason,
+                stream_channel.clone(),
+                Some(agent_id.clone()),
+            )
+            .await;
+            let finalized = match finalized {
+                Ok(Some(message)) => message,
+                Ok(None) => return Ok(GroupSpeakerOutcome::Discarded),
+                Err(_) => return Ok(GroupSpeakerOutcome::RecoveryPending),
+            };
 
-                // 1. 委托流终结器落盘与发射事件
-                let finalized = message_service::finalize_stream_message(
-                    app_handle.clone(),
-                    db_pool,
-                    &request_key,
-                    full_content.to_string(),
-                    is_aborted,
-                    finish_reason,
-                    stream_channel.clone(),
-                    Some(agent_id.clone()),
-                )
-                .await;
-                let finalized = match finalized {
-                    Ok(Some(message)) => message,
-                    Ok(None) => return Ok(GroupSpeakerOutcome::Discarded),
-                    Err(_) => return Ok(GroupSpeakerOutcome::RecoveryPending),
-                };
-
-                // 2. 将此棒生成的回复追加到内存上下文中，提供给接力赛的下一个 Agent
-                let ai_msg = ChatMessage {
-                    id: message_id,
-                    role: "assistant".to_string(),
-                    name: Some(agent_name),
-                    content: finalized.content,
-                    timestamp: finalized.timestamp,
-                    updated_at: None,
-                    is_thinking: Some(false),
-                    agent_id: Some(agent_id.clone()),
-                    group_id: Some(group_id.to_string()),
-                    topic_id: Some(topic_id.to_string()),
-                    is_group_message: Some(true),
-                    finish_reason: Some(finalized.finish_reason),
-                    attachments: None,
-                    blocks: None,
-                    shell: None,
-                    content_hash: None,
-                };
-                full_history_for_context.push(ai_msg);
-                return Ok(if is_aborted {
-                    GroupSpeakerOutcome::Cancelled
-                } else {
-                    GroupSpeakerOutcome::Settled
-                });
-            }
-            Err("群聊生成未返回可提交的正文".to_string())
+            // 2. 将此棒生成的回复追加到内存上下文中，提供给接力赛的下一个 Agent
+            let ai_msg = ChatMessage {
+                id: message_id,
+                role: "assistant".to_string(),
+                name: Some(agent_name),
+                content: finalized.content,
+                timestamp: finalized.timestamp,
+                updated_at: None,
+                is_thinking: Some(false),
+                agent_id: Some(agent_id.clone()),
+                group_id: Some(group_id.to_string()),
+                topic_id: Some(topic_id.to_string()),
+                is_group_message: Some(true),
+                finish_reason: Some(finalized.finish_reason),
+                attachments: None,
+                blocks: None,
+                shell: None,
+                content_hash: None,
+            };
+            full_history_for_context.push(ai_msg);
+            Ok(if response.is_aborted {
+                GroupSpeakerOutcome::Cancelled
+            } else {
+                GroupSpeakerOutcome::Settled
+            })
         }
         Err(failure) => {
             log::error!(

@@ -239,29 +239,21 @@ async fn process_prepared_agent_chat_message(
     // Keep the native lease through the durable finalizer (including errors).
     // 8. 流式结束后（含中断），将最终内容委派统一的 Finalizer 进行存盘与事件分发
     match result {
-        Ok((res, is_aborted)) => {
-            if let Some(full_content) = res["fullContent"].as_str() {
-                let finish_reason = if is_aborted {
-                    Some("cancelled_by_user".to_string())
-                } else {
-                    res["finishReason"].as_str().map(|s| s.to_string())
-                };
-
-                if message_service::finalize_stream_message(
-                    app_handle.clone(),
-                    &db_state.pool,
-                    &request_key,
-                    full_content.to_string(),
-                    is_aborted,
-                    finish_reason,
-                    Some(stream_channel),
-                    Some(agent_id.clone()),
-                )
-                .await
-                .is_err()
-                {
-                    return Ok(json!({ "status": "recovery_pending", "messageId": thinking_id }));
-                }
+        Ok(response) => {
+            if message_service::finalize_stream_message(
+                app_handle.clone(),
+                &db_state.pool,
+                &request_key,
+                response.full_content,
+                response.is_aborted,
+                response.finish_reason,
+                Some(stream_channel),
+                Some(agent_id.clone()),
+            )
+            .await
+            .is_err()
+            {
+                return Ok(json!({ "status": "recovery_pending", "messageId": thinking_id }));
             }
         }
         Err(failure) => {
@@ -421,25 +413,17 @@ pub async fn handle_assistant_chat_stream(
     // 7. 处理请求结果并补发流终结事件
     let final_ts = crate::vcp_modules::infra::utils::now_millis() as u64;
     match result {
-        Ok((res, is_aborted)) => {
-            if res["fullContent"].is_string() {
-                let finish_reason = if is_aborted {
-                    Some("cancelled_by_user".to_string())
-                } else {
-                    res["finishReason"].as_str().map(|s| s.to_string())
-                };
-
-                // 发送 end 事件让前端知道传输完毕
-                let _ = stream_channel.send(StreamEvent::end(
-                    thinking_id.clone(),
-                    context,
-                    finish_reason,
-                    res["fullContent"].as_str().map(str::to_string),
-                    None,
-                    Some(final_ts),
-                    None,
-                ));
-            }
+        Ok(response) => {
+            // 发送 end 事件让前端知道传输完毕
+            let _ = stream_channel.send(StreamEvent::end(
+                thinking_id.clone(),
+                context,
+                response.finish_reason,
+                Some(response.full_content),
+                None,
+                Some(final_ts),
+                None,
+            ));
         }
         Err(failure) => {
             log::error!(
