@@ -40,6 +40,7 @@ final class VcpMobilePlugin: Plugin {
     let notifications = NativeNotifications()
     let presentation = NativePresentation()
     let webKit = NativeWebKit()
+    let media = NativeMedia()
 
     // UIKit state, these process facts, and subscription ownership are main-queue only.
     // A Channel/WebView/plugin replacement must not reset Rust's sequence gate.
@@ -303,6 +304,7 @@ final class VcpMobilePlugin: Plugin {
     }
 
     deinit {
+        media.shutdown()
         // Neither operation reads UIKit. Callback closures hold only weak self;
         // queued deliveries cannot resurrect the plugin after it is released.
         for token in observers {

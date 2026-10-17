@@ -37,6 +37,7 @@ Rust 核心内部调用 ─> Rust 公开入口 ─┼─> PluginHandle / JNI
 | `ios/Sources/NativePresentation.swift`、`NativeFiles.swift` | 主 Scene 单操作呈现；picker 按调用 WebView/Scene 先登记 reservation 再启动，取消可撤销未启动登记；Files/PHPicker、Quick Look、导出与活动面板的文件持有至原生终态 |
 | `ios/Sources/NativeImages.swift`、`NativeCamera.swift` | 串行 ImageIO 下采样、SDR 派生与真实编码，PhotoKit add-only、AVCapturePhotoOutput 有界静态拍照 |
 | `android/src/main/.../NativeFileImages.kt` | 按用途预算下采样、EXIF 方向和 JPEG/PNG 编码；外部输入保持原件，头像工作副本单独派生 |
+| `android/src/main/.../NativeMediaProcessor.kt`、`ios/Sources/NativeMedia.swift` | 音视频文件处理资源；先登记再执行，取消排队或运行中的解码，结果按路径及真实格式交回 Rust。Android Media3 / iOS AVAudioConverter 音频、系统视频抽帧；不持有聊天终态或改动音频播放会话 |
 | `ios/Sources/NativeWebKit.swift`、`NativeShareInbox.swift` | WebView 几何/浏览缓存操作，及主 App 的 App Group 收件位置桥接 |
 | `src/screen.rs` | 经 WebView JNI 进入 `ScreenKeepOnArbiter` |
 | `src/stream.rs` | 请求独立的前台保活租约与 helper service 的 Rust 边界 |

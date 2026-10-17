@@ -363,6 +363,7 @@ pub struct VcpRequestFailure {
     partial_content: Option<String>,
     recovery_pending: bool,
     stop_pending: bool,
+    preparation_failure: bool,
 }
 
 impl VcpRequestFailure {
@@ -372,6 +373,7 @@ impl VcpRequestFailure {
             partial_content: Some(partial_content),
             recovery_pending: false,
             stop_pending: false,
+            preparation_failure: false,
         }
     }
 
@@ -382,6 +384,7 @@ impl VcpRequestFailure {
             partial_content,
             recovery_pending: true,
             stop_pending: false,
+            preparation_failure: false,
         }
     }
 
@@ -393,6 +396,19 @@ impl VcpRequestFailure {
         self.stop_pending
     }
 
+    fn preparation(message: String) -> Self {
+        Self {
+            preparation_failure: true,
+            ..Self::from(format!(
+                "附件准备失败，本次请求未发送。原消息与附件仍保留，可重试或移除问题附件。\n{message}"
+            ))
+        }
+    }
+
+    pub(crate) fn is_preparation_failure(&self) -> bool {
+        self.preparation_failure
+    }
+
     #[cfg(target_os = "android")]
     fn stopping(message: impl Into<String>, partial_content: Option<String>) -> Self {
         Self {
@@ -400,6 +416,7 @@ impl VcpRequestFailure {
             partial_content,
             recovery_pending: true,
             stop_pending: true,
+            preparation_failure: false,
         }
     }
 
@@ -423,6 +440,7 @@ impl From<String> for VcpRequestFailure {
             partial_content: None,
             recovery_pending: false,
             stop_pending: false,
+            preparation_failure: false,
         }
     }
 }
@@ -1217,9 +1235,16 @@ pub async fn perform_vcp_request_registered<R: Runtime>(
     };
 
     // === 1. 数据验证和多模态资产转换 ===
-    let mut messages = preprocess_multimodal_messages(app, payload.messages)
-        .await
-        .map_err(VcpRequestFailure::from)?;
+    if cancellation_token.is_cancelled() {
+        return Ok(VcpResponse::cancelled());
+    }
+    let prepared = preprocess_multimodal_messages(app, payload.messages, &cancellation_token).await;
+    // Cancellation wins a simultaneous native failure, and no request reaches
+    // either transport after the user stopped during attachment preparation.
+    if cancellation_token.is_cancelled() {
+        return Ok(VcpResponse::cancelled());
+    }
+    let mut messages = prepared.map_err(VcpRequestFailure::preparation)?;
 
     // === 2. 使用 turn 起点冻结的最终端点；重试与 Android Helper 始终复用此值 ===
     let final_url = payload.vcp_url.clone();
@@ -1256,6 +1281,9 @@ pub async fn perform_vcp_request_registered<R: Runtime>(
     let client = super::http_clients::client(super::http_clients::HttpProfile::ChatStream).clone();
 
     // === 7. 分发至专职处理器执行请求 ===
+    if cancellation_token.is_cancelled() {
+        return Ok(VcpResponse::cancelled());
+    }
     if is_stream {
         handle_streaming_request(
             app,
@@ -1318,14 +1346,29 @@ fn remove_internal_local_attachment_metadata(message: &mut Value) {
     }
 }
 
-/// 1. 抽离多模态消息预处理逻辑
+// Count all audio data URLs, including historical/prepared context, separately
+// from the existing image budget. This bounds the actual outbound payload.
+const MODEL_REQUEST_AUDIO_DATA_MAX_BYTES: usize = 24 * 1024 * 1024;
+
+fn account_audio_data(total: &mut usize, bytes: usize) -> Result<(), String> {
+    *total = total.checked_add(bytes).ok_or("模型音频请求大小溢出")?;
+    if *total > MODEL_REQUEST_AUDIO_DATA_MAX_BYTES {
+        return Err("本次请求音频超过 24 MiB 编码预算，请减少音频数量或缩短包含音频的历史".into());
+    }
+    Ok(())
+}
+
+/// Resolve CAS attachments and normalize their model payload before transport.
 async fn preprocess_multimodal_messages<R: Runtime>(
     app: &AppHandle<R>,
     raw_messages: Vec<Value>,
+    cancellation: &CancellationToken,
 ) -> Result<Vec<Value>, String> {
     let mut messages: Vec<Value> = Vec::new();
     let mut image_data_bytes = 0usize;
+    let mut audio_data_bytes = 0usize;
     for msg_val in raw_messages.into_iter() {
+        crate::vcp_modules::media_processor::check_media_cancelled(cancellation)?;
         if !msg_val.is_object() {
             messages.push(json!({"role": "system", "content": "[Invalid message]"}));
             continue;
@@ -1339,6 +1382,7 @@ async fn preprocess_multimodal_messages<R: Runtime>(
         if let Some(content_array) = content.as_array() {
             let mut new_parts = Vec::new();
             for part in content_array {
+                crate::vcp_modules::media_processor::check_media_cancelled(cancellation)?;
                 if let Some(obj) = part.as_object() {
                     // local_file 只携带 CAS hash；host path 不进入模型消息。
                     if obj.get("type").and_then(|t| t.as_str()) == Some("local_file") {
@@ -1406,59 +1450,43 @@ async fn preprocess_multimodal_messages<R: Runtime>(
                                     }
                                 }
                             } else if media_kind == "video" {
-                                // 视频：抽帧 → 每张帧作为 image_url
-                                let path_clone = path_buf.clone();
-                                let app_clone = app.clone();
-                                match tokio::task::spawn_blocking(move || {
-                                        crate::vcp_modules::media_processor::process_video_for_multimodal(&app_clone, &path_clone)
-                                    }).await {
-                                        Ok(Ok(frames)) => {
-                                            for frame_url in frames {
-                                                image_data_bytes = image_data_bytes.checked_add(frame_url.len()).ok_or("模型图片请求大小溢出")?;
-                                                if image_data_bytes > crate::vcp_modules::media_processor::image_extractor::MODEL_REQUEST_IMAGE_DATA_MAX_BYTES {
-                                                    return Err("本次请求图片超过 16 MiB 编码预算，请减少图片或视频数量".into());
-                                                }
-                                                new_parts.push(json!({
-                                                    "type": "image_url",
-                                                    "image_url": { "url": frame_url }
-                                                }));
-                                            }
-                                            converted = true;
-                                        }
-                                        Ok(Err(e)) => {
-                                            log::warn!("[VCPClient] Video frame extraction failed for attachment CAS {}: {}", short_hash(hash), e);
-                                        }
-                                        Err(e) => {
-                                            log::warn!("[VCPClient] Video processing task panicked: {}", e);
-                                        }
+                                let frames = crate::vcp_modules::media_processor::process_video_for_multimodal(
+                                    app, &path_buf, cancellation,
+                                )
+                                .await
+                                .map_err(|error| format!("视频附件 {label} 处理失败：{error}"))?;
+                                for frame_url in frames {
+                                    image_data_bytes = image_data_bytes
+                                        .checked_add(frame_url.len())
+                                        .ok_or("模型图片请求大小溢出")?;
+                                    if image_data_bytes > crate::vcp_modules::media_processor::image_extractor::MODEL_REQUEST_IMAGE_DATA_MAX_BYTES {
+                                        return Err("本次请求图片超过 16 MiB 编码预算，请减少图片或视频数量".into());
                                     }
+                                    new_parts.push(json!({
+                                        "type": "image_url",
+                                        "image_url": { "url": frame_url }
+                                    }));
+                                }
+                                converted = true;
                             } else if media_kind == "audio" {
-                                // 音频：提取为 MP3 (32kbps) 或 AAC (32kbps) -> input_audio
-                                let path_clone = path_buf.clone();
-                                let app_clone = app.clone();
-                                match tokio::task::spawn_blocking(move || {
-                                        crate::vcp_modules::media_processor::process_audio_for_multimodal(&app_clone, &path_clone)
-                                    }).await {
-                                        Ok(Ok(audio_url)) => {
-                                            let format_str = if audio_url.starts_with("data:audio/aac") { "aac" } else { "mp3" };
-                                            new_parts.push(json!({
-                                                "type": "input_audio",
-                                                "input_audio": { 
-                                                    "data": audio_url, 
-                                                    "format": format_str
-                                                }
-                                            }));
-                                            converted = true;
-                                        }
-                                        Ok(Err(e)) => {
-                                            log::warn!("[VCPClient] Audio extraction failed for attachment CAS {}: {}", short_hash(hash), e);
-                                        }
-                                        Err(e) => {
-                                            log::warn!("[VCPClient] Audio processing task panicked: {}", e);
-                                        }
-                                    }
+                                let audio_url = crate::vcp_modules::media_processor::process_audio_for_multimodal(
+                                    app, &path_buf, cancellation,
+                                )
+                                .await
+                                .map_err(|error| format!("音频附件 {label} 处理失败：{error}"))?;
+                                account_audio_data(&mut audio_data_bytes, audio_url.len())?;
+                                // VCP's multimodal proxy reads MIME-bearing data
+                                // URLs in image_url, including audio/mp4 payloads.
+                                new_parts.push(json!({
+                                    "type": "image_url",
+                                    "image_url": { "url": audio_url }
+                                }));
+                                converted = true;
                             }
                         } else {
+                            if matches!(media_kind, "audio" | "video") {
+                                return Err(format!("音视频附件 {label} 的本地文件不可用，请重新导入后重试"));
+                            }
                             log::warn!(
                                 "[VCPClient] Attachment CAS {} is unavailable for multimodal preprocessing",
                                 short_hash(hash)
@@ -1484,11 +1512,15 @@ async fn preprocess_multimodal_messages<R: Runtime>(
                                 .and_then(Value::as_str)
                                 .filter(|url| url.starts_with("data:"))
                             {
-                                image_data_bytes = image_data_bytes
-                                    .checked_add(url.len())
-                                    .ok_or("模型图片请求大小溢出")?;
-                                if image_data_bytes > crate::vcp_modules::media_processor::image_extractor::MODEL_REQUEST_IMAGE_DATA_MAX_BYTES {
-                                    return Err("本次请求图片超过 16 MiB 编码预算，请减少图片数量".into());
+                                if url.starts_with("data:audio/") {
+                                    account_audio_data(&mut audio_data_bytes, url.len())?;
+                                } else {
+                                    image_data_bytes = image_data_bytes
+                                        .checked_add(url.len())
+                                        .ok_or("模型图片请求大小溢出")?;
+                                    if image_data_bytes > crate::vcp_modules::media_processor::image_extractor::MODEL_REQUEST_IMAGE_DATA_MAX_BYTES {
+                                        return Err("本次请求图片超过 16 MiB 编码预算，请减少图片数量".into());
+                                    }
                                 }
                             }
                         }

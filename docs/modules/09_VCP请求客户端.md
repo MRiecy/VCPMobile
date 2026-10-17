@@ -226,20 +226,17 @@ pub struct ActiveGroupTurns(Arc<DashMap<TopicKey, CancellationToken>>);
 
 ### 3.2 多模态预处理（阶段 0）
 
-当 `content` 为数组且包含 `{"type": "local_file", "path": "file://..."}` 时，模块执行以下转换：
+当 `content` 数组包含 `{"type": "local_file", "hash": "..."}` 时，Rust 解析本机 CAS 记录，按实际 MIME 选择处理器；主机路径不进入模型消息。
 
-| 扩展名 | MIME | part_type | 处理方式 | 降级策略 |
-|--------|------|-----------|---------|---------|
-| png/jpg/jpeg/webp/gif/bmp/heic/heif/avif | image | `image_url` | ffmpeg 转 webp，长边缩放到 ≤1120px | 保留文本占位 `[附件文件: {path}]` |
-| mp4/webm/3gp/3g2/mov | video | `image_url` | 场景检测 + 均匀采样抽帧 → JPEG base64 | 同上 |
-| mp3/wav/ogg/flac/aac/m4a/opus/amr | audio | `input_audio` | ffmpeg 提取 MP3/AAC（32kbps）→ base64 | 同上 |
-| 其他 | application | `file_url` | 不支持多模态，直接降级为文本占位 | — |
+| MIME 类别 | 输出 | 处理方式 | 失败反馈 |
+|---|---|---|---|
+| image | `image_url`，真实 JPEG/PNG Data URI | 既有双端原生用途派生，图片实现保持不变 | 图片处理错误返回现有失败链 |
+| video | 多个 `image_url`，JPEG Data URI | Android 系统缩放抽帧；iOS AVAssetImageGenerator，最多 300 帧 | 抽帧、读取或预算失败阻止本次请求，不用文件名代替内容 |
+| audio | `image_url`，`data:audio/mp4;base64,...` | Android Media3 / iOS 原生转换为 AAC-LC、16 kHz、单声道、32 kbps，封装 M4A | 无原件直读回退；明确指出失败附件 |
 
-关键实现细节：
-- 路径清洗：`"file://"` 前缀被移除
-- 文件不存在或读取失败时，**静默降级为文本占位**，避免内容完全丢失（`if !converted` 分支）
-- 图片/视频/音频处理均在 `tokio::task::spawn_blocking` 中执行，避免阻塞 async 运行时
-- 视频抽帧有**硬上限 300 帧**，防止极端长视频导致 OOM 或 API 超时
+音频使用 VCP 桌面端及服务器多模态处理器已有的媒体 Data URI 契约；不是标准 OpenAI `input_audio`，不据此承诺所有直连模型均接收音频。编码、容器和 MIME 由原生结果与文件核对，不再把所有非 AAC 标成 MP3。
+
+音视频资源 worker 持有原生调用的接收端，执行登记、处理、取消、最终回调及清理。请求 CancellationToken 控制停止；准备结束后再次检查取消，未取消才发送网络请求。已保存用户消息和附件保留；准备失败通过原有 durable finalizer 显示，群聊停止本轮后续发言。预算、缓存版本及临时资源细节见 [双端实施记录](../../plan/vcpmobile-ios-compatibility-research/phase-5/05-双端音视频附件处理.md)。
 
 ### 3.3 Chat 端点路由（阶段 1–2）
 

@@ -1566,7 +1566,7 @@ pub fn clear_upload_cache(app_handle: &AppHandle) {
         }
 
         // 这些目录只有当前进程的临时资源；Share Inbox 在 App Group，不在本清理范围。
-        for name in ["image-work", "temporary-exports", "rendered-input"] {
+        for name in ["image-work", "media-work", "temporary-exports", "rendered-input"] {
             let path = cache_dir.join(name);
             if path.is_dir() {
                 let _ = fs::remove_dir_all(path);

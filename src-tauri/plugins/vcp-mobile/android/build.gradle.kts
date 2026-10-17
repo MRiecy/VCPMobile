@@ -64,9 +64,12 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-common:2.7.0")
     implementation("androidx.lifecycle:lifecycle-process:2.7.0")
     implementation("com.github.topjohnwu.libsu:core:5.0.3")
-    implementation("androidx.media3:media3-transformer:1.3.1")
-    implementation("androidx.media3:media3-effect:1.3.1")
-    implementation("androidx.media3:media3-common:1.3.1")
+    // Attachment audio uses this version's Transformer + PCM/mixing/Sonic processors.
+    // Keep the modules aligned; video thumbnails still use MediaMetadataRetriever.
+    val media3Version = "1.3.1"
+    implementation("androidx.media3:media3-transformer:$media3Version")
+    implementation("androidx.media3:media3-effect:$media3Version")
+    implementation("androidx.media3:media3-common:$media3Version")
     
     // 原生轻量级推送监听器所需的 SSE 长连接支持
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

@@ -1,178 +1,82 @@
+use super::native_media::{
+    check_cancelled, read_cache, read_output_file, run_native_media, write_cache, AUDIO_MAX_BYTES,
+};
 use base64::Engine as _;
 use std::path::Path;
 use tauri::{AppHandle, Runtime};
+use tokio_util::sync::CancellationToken;
 
-/// 处理音频：优先在 Android 侧提取为 16kHz 单声道 (32kbps) AAC，返回 base64 data URL
-/// 如果在 Android 平台转码失败或在非 Android 平台，
-/// 当且仅当文件大小 < 5MB 时允许直接无处理读取原音频字节转 Base64 传输，超过 5MB 则禁止回退直接报错。
-pub fn process_audio_for_multimodal<R: Runtime>(
+const AUDIO_DATA_PREFIX: &str = "data:audio/mp4;base64,";
+
+/// Normalize both mobile platforms to AAC-LC in an M4A container. VCP's
+/// multimodal proxy consumes an audio data URL, not an OpenAI input_audio field.
+pub async fn process_audio_for_multimodal<R: Runtime>(
     app: &AppHandle<R>,
     path: &Path,
+    cancellation: &CancellationToken,
 ) -> Result<String, String> {
-    let hash = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("")
-        .to_string();
-
-    let cache_dir = crate::vcp_modules::infra::file_manager::get_multimodal_cache_dir(app)?;
-    if !cache_dir.exists() {
-        let _ = std::fs::create_dir_all(&cache_dir);
-    }
-    let cache_path = cache_dir.join(format!("{}.json", hash));
-
-    // 1. 检查并命中缓存
-    if !hash.is_empty() && cache_path.exists() {
-        if let Ok(json_str) = std::fs::read_to_string(&cache_path) {
-            if let Ok(cached_data) = serde_json::from_str::<Vec<String>>(&json_str) {
-                if let Some(audio_url) = cached_data.first() {
-                    log::info!(
-                        "[AudioExtractor] Cache HIT for hash: {}, returning audio payload instantly",
-                        hash
-                    );
-                    return Ok(audio_url.clone());
-                }
-            }
+    check_cancelled(cancellation)?;
+    if let Some(cached) = read_cache::<_, String>(app, path, "audio-m4a", 24 * 1024 * 1024).await {
+        check_cancelled(cancellation)?;
+        if cached.starts_with(AUDIO_DATA_PREFIX)
+            && cached.len() > AUDIO_DATA_PREFIX.len()
+            && cached.len() <= (AUDIO_MAX_BYTES as usize).div_ceil(3) * 4 + AUDIO_DATA_PREFIX.len()
+        {
+            return Ok(cached);
         }
     }
-
-    // 2. 缓存未命中，执行内部提取逻辑
-    let result = process_audio_for_multimodal_internal(app, path)?;
-
-    // 3. 写入持久化缓存
-    if !hash.is_empty() && !result.is_empty() {
-        let wrapper = vec![result.clone()];
-        if let Ok(json_str) = serde_json::to_string(&wrapper) {
-            if let Err(e) = std::fs::write(&cache_path, json_str) {
-                log::warn!("[AudioExtractor] Failed to write cache for {}: {}", hash, e);
-            } else {
-                log::info!(
-                    "[AudioExtractor] Successfully cached audio payload for hash: {}",
-                    hash
-                );
-                // 🌟 写入缓存后，主动运行一次大小收敛，限制在 300MB，清理至 150MB 🌟
-                crate::vcp_modules::infra::file_manager::evict_multimodal_cache_if_needed(
-                    app,
-                    300 * 1024 * 1024,
-                    150 * 1024 * 1024,
-                );
-            }
-        }
-    }
-
+    let result = process_audio_for_multimodal_internal(app, path, cancellation).await?;
+    check_cancelled(cancellation)?;
+    let result = write_cache(app, path, "audio-m4a", result).await?;
+    check_cancelled(cancellation)?;
     Ok(result)
 }
 
-fn process_audio_for_multimodal_internal<R: Runtime>(
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessAudioResult {
+    path: String,
+    mime: String,
+    codec: String,
+    container: String,
+    sample_rate: u32,
+    channels: u32,
+}
+
+async fn process_audio_for_multimodal_internal<R: Runtime>(
     app: &AppHandle<R>,
     path: &Path,
+    cancellation: &CancellationToken,
 ) -> Result<String, String> {
-    let process_err: Option<String>;
-
-    #[cfg(target_os = "android")]
-    {
-        use tauri::Manager;
-        use tauri_plugin_vcp_mobile::VcpMobileState;
-
-        let state = app.state::<VcpMobileState<R>>();
-        match (|| -> Result<String, String> {
-            let plugin_handle = state.mobile_plugin_handle()?;
-
-            #[derive(serde::Deserialize)]
-            struct ProcessAudioResult {
-                path: String,
+    run_native_media(
+        app,
+        path,
+        "processAudio",
+        AUDIO_MAX_BYTES,
+        cancellation,
+        |result: ProcessAudioResult, output_dir, token| {
+            check_cancelled(token)?;
+            if result.mime != "audio/mp4"
+                || result.codec != "aac"
+                || result.container != "m4a"
+                || result.sample_rate != 16_000
+                || result.channels != 1
+            {
+                return Err("原生音频输出不是约定的 AAC-LC/16kHz 单声道 M4A".into());
             }
-
-            let input_str = path.to_str().ok_or("Invalid audio path")?;
-            log::info!(
-                "[AudioExtractor] Cache MISS. Invoking Kotlin processAudio for: {}",
-                input_str
-            );
-
-            let res = plugin_handle
-                .run_mobile_plugin::<ProcessAudioResult>(
-                    "processAudio",
-                    serde_json::json!({ "path": input_str }),
-                )
-                .map_err(|e| format!("Kotlin processAudio failed: {}", e))?;
-
-            log::info!(
-                "[AudioExtractor] Kotlin processAudio success, output: {}",
-                res.path
-            );
-            let output_path = Path::new(&res.path);
-
-            let aac_bytes = std::fs::read(output_path)
-                .map_err(|e| format!("Failed to read processed AAC file: {}", e))?;
-
-            let _ = std::fs::remove_file(output_path);
-
-            let prefix = "data:audio/aac;base64,";
-            let b64_len = (aac_bytes.len() * 4).div_ceil(3);
-            let mut result = String::with_capacity(prefix.len() + b64_len);
-            result.push_str(prefix);
-            base64::engine::general_purpose::STANDARD.encode_string(&aac_bytes, &mut result);
-            Ok(result)
-        })() {
-            Ok(data_url) => return Ok(data_url),
-            Err(e) => {
-                log::warn!(
-                    "[AudioExtractor] Native processing failed: {}. Falling back if < 5MB.",
-                    e
-                );
-                process_err = Some(e);
+            let bytes = read_output_file(output_dir, Path::new(&result.path), AUDIO_MAX_BYTES)?;
+            // Both native writers produce an ISO BMFF file. Do not label ADTS,
+            // arbitrary original bytes, or a mismatched container as audio/mp4.
+            if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
+                return Err("原生音频输出缺少 M4A 容器头".into());
             }
-        }
-    }
-
-    #[cfg(not(target_os = "android"))]
-    {
-        let _ = app;
-        process_err = Some("非 Android 物理端不支持原生硬件音频转码".to_string());
-    }
-
-    // 共享的严格大小受限降级兜底逻辑
-    let file_size = std::fs::metadata(path)
-        .map(|m| m.len())
-        .map_err(|e| format!("Failed to read raw audio metadata: {}", e))?;
-
-    const FIVE_MB: u64 = 5_000_000;
-    if file_size >= FIVE_MB {
-        return Err(format!(
-            "Audio transcode failed ({:?}), and raw size ({} bytes) >= 5MB. Direct fallback prohibited.",
-            process_err, file_size
-        ));
-    }
-
-    log::info!(
-        "[AudioExtractor] Processing failed ({:?}), falling back to direct byte read for small audio: {} bytes",
-        process_err, file_size
-    );
-
-    let bytes =
-        std::fs::read(path).map_err(|e| format!("Failed to read raw audio bytes: {}", e))?;
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("mp3")
-        .to_lowercase();
-
-    let mime = match ext.as_str() {
-        "mp3" => "audio/mpeg",
-        "wav" => "audio/wav",
-        "ogg" => "audio/ogg",
-        "flac" => "audio/flac",
-        "aac" => "audio/aac",
-        "m4a" => "audio/mp4",
-        "opus" => "audio/opus",
-        _ => "audio/mpeg", // 兜底
-    };
-
-    let prefix = format!("data:{};base64,", mime);
-    let b64_len = (bytes.len() * 4).div_ceil(3);
-    let mut result = String::with_capacity(prefix.len() + b64_len);
-    result.push_str(&prefix);
-    base64::engine::general_purpose::STANDARD.encode_string(&bytes, &mut result);
-
-    Ok(result)
+            check_cancelled(token)?;
+            let prefix = AUDIO_DATA_PREFIX;
+            let mut data_url = String::with_capacity(prefix.len() + bytes.len().div_ceil(3) * 4);
+            data_url.push_str(prefix);
+            base64::engine::general_purpose::STANDARD.encode_string(&bytes, &mut data_url);
+            Ok(data_url)
+        },
+    )
+    .await
 }

@@ -94,7 +94,7 @@
 | D18 | 原生获取/staging/大图，Rust 解析与 CAS，附件 P0 | Files/PHPicker/security scope/ImageIO 与三条导入链 |
 | D19 | 真实 token/字符/字节/chunk/terminal，未知总量表达为未知 | 领域计量与系统 Progress 分层，具体适配问题见 04 |
 
-相机、PhotoKit 保存、outgoing share、设备/完整网络信息与 Distributed 的原延期已被最新审批覆盖：媒体/分享归 Phase 4，设备工具/Distributed 归 Phase 3。语音实现、视频抽帧和 Android 本地 CLI 的原范围未被改变。关于页集中功能说明 U1 仍是未批准建议，不自动加入产品。
+相机、PhotoKit 保存、outgoing share、设备/完整网络信息与 Distributed 的原延期已被最新审批覆盖：媒体/分享归 Phase 4，设备工具/Distributed 归 Phase 3。2026-10-17 用户又批准双端音视频附件处理：Android Media3 音频与现有视频抽帧优化、iOS 原生音频转换与视频抽帧，图片保持现状，详见 [实施记录](./phase-5/05-双端音视频附件处理.md)。语音输入和 Android 本地 CLI 的原范围未被改变。关于页集中功能说明 U1 仍是未批准建议，不自动加入产品。
 
 ### 2026-10-09 开发方式与新增任务
 

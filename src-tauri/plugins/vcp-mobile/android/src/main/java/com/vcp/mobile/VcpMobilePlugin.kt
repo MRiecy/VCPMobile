@@ -445,6 +445,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     }
     private val keyboardInsetsManager = KeyboardInsetsManager(activity)
     private val webViewResume = NativeWebViewResume(activity)
+    private val mediaProcessor = NativeMediaProcessor(activity)
     private val lifecycleBridge = LifecycleBridge()
     private val batteryStatusManager = BatteryStatusManager(activity)
     private val networkStatusManager = NetworkStatusManager(activity)
@@ -1468,6 +1469,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     override fun onDestroy(activity: AppCompatActivity) {
         isDestroying.set(true)
         webViewResume.destroy()
+        mediaProcessor.destroy()
         fileOperation.get()?.let { it.cancelled.set(true); it.reject("cancelled: plugin destroyed") }
         activity.runOnUiThread { downloadsWritePermissionWait.destroy() }
         nativeEventChannel = null
@@ -2663,6 +2665,28 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     @Command
+    fun prepareMediaOperation(invoke: Invoke) {
+        try {
+            val args = invoke.parseArgs(MediaOperationArgs::class.java)
+            mediaProcessor.prepare(args.operationId)
+            invoke.resolve()
+        } catch (error: Exception) {
+            invoke.reject(error.message ?: "Failed to prepare media operation")
+        }
+    }
+
+    @Command
+    fun cancelMediaOperation(invoke: Invoke) {
+        try {
+            val args = invoke.parseArgs(MediaOperationArgs::class.java)
+            mediaProcessor.cancel(args.operationId)
+            invoke.resolve()
+        } catch (error: Exception) {
+            invoke.reject(error.message ?: "Failed to cancel media operation")
+        }
+    }
+
+    @Command
     fun processVideo(invoke: Invoke) {
         val args = try {
             invoke.parseArgs(ProcessVideoArgs::class.java)
@@ -2671,7 +2695,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
 
-        MediaBridge.processVideoAsync(args.path, activity) { result ->
+        mediaProcessor.processVideo(args.operationId, args.path, args.outputDir, args.maxBytes) { result ->
             result.onSuccess { framePaths ->
                 val arr = JSArray()
                 for (p in framePaths) {
@@ -2696,10 +2720,15 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
 
-        MediaBridge.processAudioAsync(args.path, activity) { result ->
-            result.onSuccess { outputPath ->
+        mediaProcessor.processAudio(args.operationId, args.path, args.outputDir, args.maxBytes) { result ->
+            result.onSuccess { audio ->
                 val resObj = JSObject().apply {
-                    put("path", outputPath)
+                    put("path", audio.path)
+                    put("mime", audio.mime)
+                    put("codec", audio.codec)
+                    put("container", audio.container)
+                    put("sampleRate", audio.sampleRate)
+                    put("channels", audio.channels)
                 }
                 invoke.resolve(resObj)
             }.onFailure { exception ->
@@ -2889,13 +2918,24 @@ class ProcessImageArgs {
 }
 
 @InvokeArg
+class MediaOperationArgs {
+    lateinit var operationId: String
+}
+
+@InvokeArg
 class ProcessVideoArgs {
+    lateinit var operationId: String
     lateinit var path: String
+    lateinit var outputDir: String
+    var maxBytes: Long = 0
 }
 
 @InvokeArg
 class ProcessAudioArgs {
+    lateinit var operationId: String
     lateinit var path: String
+    lateinit var outputDir: String
+    var maxBytes: Long = 0
 }
 
 @InvokeArg

@@ -54,6 +54,7 @@ struct GroupSpeakerTurnParams<'a, R: Runtime> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GroupSpeakerOutcome {
     Settled,
+    PreparationFailed,
     Cancelled,
     Stopping,
     RecoveryPending,
@@ -63,7 +64,9 @@ enum GroupSpeakerOutcome {
 impl GroupSpeakerOutcome {
     fn status(self) -> &'static str {
         match self {
-            Self::Settled => "completed",
+            // A preparation failure is durably settled, but must not advance
+            // the relay to another speaker with the same unusable attachment.
+            Self::Settled | Self::PreparationFailed => "completed",
             Self::Cancelled => "cancelled",
             Self::Stopping => "stopping",
             Self::RecoveryPending => "recovery_pending",
@@ -73,7 +76,8 @@ impl GroupSpeakerOutcome {
 }
 
 /// Automatic relay and explicit invitations share one turn owner and history.
-/// Only a settled speaker (including a durably saved error) may advance it.
+/// Only a settled speaker may advance it. A durably saved attachment preparation
+/// failure ends the turn; ordinary upstream errors retain their existing policy.
 async fn run_group_speakers<R: Runtime>(
     params: &GroupSpeakerTurnParams<'_, R>,
     speakers: &[crate::vcp_modules::agent_types::AgentConfig],
@@ -283,6 +287,7 @@ async fn run_group_speaker_turn<R: Runtime>(
             );
             let stop_pending = failure.is_stop_pending();
             let recovery_pending = failure.is_recovery_pending();
+            let preparation_failure = failure.is_preparation_failure();
             let (error, partial_content) = failure.into_parts();
             if stop_pending {
                 // A separately stopped speaker may still own an unconfirmed helper
@@ -324,6 +329,7 @@ async fn run_group_speaker_turn<R: Runtime>(
             )
             .await;
             Ok(match finalized {
+                Ok(Some(_)) if preparation_failure => GroupSpeakerOutcome::PreparationFailed,
                 Ok(Some(_)) => GroupSpeakerOutcome::Settled,
                 Ok(None) => GroupSpeakerOutcome::Discarded,
                 Err(_) => GroupSpeakerOutcome::RecoveryPending,
