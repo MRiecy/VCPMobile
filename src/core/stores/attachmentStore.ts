@@ -5,7 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useNotificationStore } from "./notification";
 import { useChatSessionStore } from "./chatSessionStore";
 import { isAndroid, isIOS } from "../utils/platform";
-import type { PickedFile } from "tauri-plugin-vcp-mobile";
+import type { PickedFile, PickedFiles } from "tauri-plugin-vcp-mobile";
 import type {
   NativeFileProgressDetail,
   NativeFileStartDetail,
@@ -115,7 +115,15 @@ export const useAttachmentStore = defineStore("attachment", () => {
     if (picking) return;
     picking = true;
     const operationId = `att_${crypto.randomUUID()}`;
-    let picked: PickedFile | undefined;
+    const pendingFiles = new Set<PickedFile>();
+    const pendingIds = new Set<string>();
+    const releasePickedFile = async (file: PickedFile) => {
+      if (!pendingFiles.delete(file)) return;
+      await invoke("plugin:vcp-mobile|delete_temp_file", { filePath: file.path }).catch(console.warn);
+      if (file.thumbnailPath) {
+        await invoke("plugin:vcp-mobile|delete_temp_file", { filePath: file.thumbnailPath }).catch(console.warn);
+      }
+    };
     const current = () => activeOperations.has(operationId);
     const card = () => stagedAttachments.value.find((a) => a.id === operationId);
     const updateCard = (name: string, mime: string, size: number, progress: number) => {
@@ -136,15 +144,25 @@ export const useAttachmentStore = defineStore("attachment", () => {
     const handleStart = (event: Event) => {
       const detail = (event as CustomEvent<NativeFileStartDetail>).detail;
       if (detail.operationId === operationId) {
-        updateCard(detail.name, detail.mime, detail.size, 0);
+        const label = detail.selectionCount && detail.selectionCount > 1
+          ? `（${(detail.selectionIndex ?? 0) + 1}/${detail.selectionCount}）${detail.name}`
+          : detail.name;
+        updateCard(label, detail.mime, detail.size, 0);
         const pending = card();
-        if (pending && !detail.size) pending.progress = undefined;
+        if (pending) {
+          pending.size = detail.size;
+          pending.progress = detail.size ? 0 : undefined;
+          pending.transferredBytes = undefined;
+        }
       }
     };
     const handleProgress = (event: Event) => {
       const detail = (event as CustomEvent<NativeFileProgressDetail>).detail;
       if (detail.operationId === operationId) {
-        updateCard(detail.name, detail.mime, detail.total, Math.min(90, Math.round(detail.progress * 0.9)));
+        const label = detail.selectionCount && detail.selectionCount > 1
+          ? `（${(detail.selectionIndex ?? 0) + 1}/${detail.selectionCount}）${detail.name}`
+          : detail.name;
+        updateCard(label, detail.mime, detail.total, Math.min(90, Math.round(detail.progress * 0.9)));
         const pending = card();
         if (pending) {
           pending.transferredBytes = detail.loaded;
@@ -159,30 +177,70 @@ export const useAttachmentStore = defineStore("attachment", () => {
       updateCard("正在选择文件", "application/octet-stream", 0, 0);
       const pending = card();
       if (pending) pending.progress = undefined;
-      picked = await invoke<PickedFile>("plugin:vcp-mobile|pick_file", { mode, operationId });
-      if (!current() || !picked?.path) return;
-      updateCard(picked.name, picked.mime, picked.size, 90);
-      await nextTick();
+      const result = mode === "camera"
+        ? { files: [await invoke<PickedFile>("plugin:vcp-mobile|pick_file", { mode, operationId })], errors: [] }
+        : await invoke<PickedFiles>("plugin:vcp-mobile|pick_file", { mode, operationId, multiple: true });
+      const pickedFiles = result.files;
+      for (const file of pickedFiles) pendingFiles.add(file);
+      window.removeEventListener("vcp-mobile-file-start", handleStart);
+      window.removeEventListener("vcp-mobile-file-progress", handleProgress);
       if (!current()) return;
-      await invoke("check_attachment_support", { originalName: picked.name });
-      if (!current()) return;
-      const finalData = await invoke<AttachmentData>("register_local_file", {
-        localPath: picked.path, originalName: picked.name,
-        mimeType: picked.mime || "application/octet-stream",
-        thumbnailPath: picked.thumbnailPath || null,
-        stableId: operationId, operationId, expectedHash: picked.hash || null,
+      stagedAttachments.value = stagedAttachments.value.filter(a => a.id !== operationId);
+      const failures = result.errors.map(error => `${error.name}: ${error.message}`);
+      let importedCount = 0;
+      // Acquire as one cancellable selection, then give each CAS registration its
+      // own identity. All queued cards exist before the first registration starts.
+      const imports = pickedFiles.map(file => {
+        const id = `att_${crypto.randomUUID()}`;
+        activeOperations.add(id);
+        pendingIds.add(id);
+        return { id, file };
       });
-      if (!current()) return;
-      const index = stagedAttachments.value.findIndex((a) => a.id === operationId);
-      if (index !== -1) {
-        stagedAttachments.value[index] = {
-          ...stagedAttachments.value[index], ...finalData,
-          id: operationId,
-          src: finalData.internalPath, internalPath: finalData.internalPath,
-          thumbnailPath: finalData.thumbnailPath ?? undefined,
-          extractedText: finalData.extractedText ?? undefined,
-          status: "done", progress: undefined, transferredBytes: undefined,
-        };
+      stagedAttachments.value.unshift(...imports.map(({ id, file }): Attachment => ({
+        id, name: file.name, type: file.mime || "application/octet-stream",
+        src: "", size: file.size, progress: 90, status: "loading",
+      })));
+      await nextTick();
+      for (const { id, file } of imports) {
+        try {
+          if (!current() || !activeOperations.has(id)) continue;
+          if (!await beginImport(id)) continue;
+          await invoke("check_attachment_support", { originalName: file.name });
+          if (!activeOperations.has(id)) continue;
+          const finalData = await invoke<AttachmentData>("register_local_file", {
+            localPath: file.path, originalName: file.name,
+            mimeType: file.mime || "application/octet-stream",
+            thumbnailPath: file.thumbnailPath || null,
+            stableId: id, operationId: id, expectedHash: file.hash || null,
+          });
+          if (!activeOperations.has(id)) continue;
+          const index = stagedAttachments.value.findIndex(a => a.id === id);
+          if (index !== -1) {
+            stagedAttachments.value[index] = {
+              ...stagedAttachments.value[index], ...finalData, id,
+              src: finalData.internalPath, internalPath: finalData.internalPath,
+              thumbnailPath: finalData.thumbnailPath ?? undefined,
+              extractedText: finalData.extractedText ?? undefined,
+              status: "done", progress: undefined, transferredBytes: undefined,
+            };
+            importedCount++;
+          }
+        } catch (error) {
+          if (activeOperations.has(id) && !String(error).toLowerCase().includes("cancel")) {
+            failures.push(`${file.name}: ${String(error)}`);
+          }
+          stagedAttachments.value = stagedAttachments.value.filter(a => a.id !== id);
+        } finally {
+          pendingIds.delete(id);
+          await finishImport(id);
+          await releasePickedFile(file);
+        }
+      }
+      if (current() && failures.length) {
+        notificationStore.addNotification({
+          type: "warning", title: importedCount ? "部分附件未能导入" : "附件导入失败",
+          message: `已导入 ${importedCount} 项；${failures.join("；")}`, toastOnly: false,
+        });
       }
     } catch (error) {
       if (!current()) return;
@@ -196,16 +254,17 @@ export const useAttachmentStore = defineStore("attachment", () => {
     } finally {
       window.removeEventListener("vcp-mobile-file-start", handleStart);
       window.removeEventListener("vcp-mobile-file-progress", handleProgress);
-      picking = false;
+      stagedAttachments.value = stagedAttachments.value.filter(a => a.id !== operationId);
+      stagedAttachments.value = stagedAttachments.value.filter(a => !a.id || !pendingIds.has(a.id));
+      for (const id of pendingIds) {
+        cancelOperation(id);
+        await finishImport(id);
+      }
       await finishImport(operationId);
       // A committed CAS file is owned by Rust; this command only removes native
       // staging paths, including unsupported files and stale picker completions.
-      if (picked?.path) {
-        await invoke("plugin:vcp-mobile|delete_temp_file", { filePath: picked.path }).catch(console.warn);
-      }
-      if (picked?.thumbnailPath) {
-        await invoke("plugin:vcp-mobile|delete_temp_file", { filePath: picked.thumbnailPath }).catch(console.warn);
-      }
+      for (const file of pendingFiles) await releasePickedFile(file);
+      picking = false;
     }
   };
   /**

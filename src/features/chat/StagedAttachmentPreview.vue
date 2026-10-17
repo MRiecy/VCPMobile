@@ -14,7 +14,7 @@ const attachmentType = computed(() =>
 
 const isImage = computed(() => attachmentType.value === AttachmentType.IMAGE);
 
-const isLoading = computed(() => props.file.status === "loading");
+const isLoading = computed(() => props.file.status === "loading" || props.file.status === "processing");
 </script>
 
 <template>
@@ -23,11 +23,12 @@ const isLoading = computed(() => props.file.status === "loading");
        ImageAttachment 内层 rounded-xl overflow-hidden 与下方 Loading
        Overlay 自带的 rounded-xl 各自承担，无需本层代劳。 -->
   <div
-    class="relative shrink-0 rounded-xl"
-    :class="[isImage ? 'w-14 h-14' : 'max-w-[180px]']"
+    class="staged-attachment relative shrink-0 rounded-xl"
+    :class="[isImage ? (isLoading ? 'w-36 h-14' : 'w-14 h-14') : 'max-w-[180px]']"
   >
     <!-- Use new component system -->
     <AttachmentRenderer 
+      :style="isImage && isLoading ? { width: '100%' } : undefined"
       :file="file" 
       :index="index"
       :show-remove="true"
@@ -37,13 +38,18 @@ const isLoading = computed(() => props.file.status === "loading");
     <!-- Loading Overlay -->
     <div
       v-if="isLoading"
-      class="absolute inset-0 bg-black/60 rounded-xl flex flex-col items-center justify-center z-10 gap-1"
+      class="absolute inset-0 bg-black/60 rounded-xl flex flex-col items-center justify-center z-10 gap-0.5 pointer-events-none"
     >
+      <span class="max-w-full px-2 truncate text-[10px] text-white" :title="file.name">{{ file.name }}</span>
       <div
-        class="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin"
+        class="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin"
       ></div>
       <span
-        v-if="file.progress !== undefined"
+        v-if="file.status === 'processing'"
+        class="text-[9px] text-white"
+      >正在处理</span>
+      <span
+        v-else-if="file.progress !== undefined"
         class="text-[9px] text-white font-bold tabular-nums"
         >{{ file.progress }}%</span
       >
@@ -55,6 +61,11 @@ const isLoading = computed(() => props.file.status === "loading");
 </template>
 
 <style scoped>
+/* This staged card owns the progress label, including acquisition byte counts. */
+.staged-attachment :deep(.attachment-progress) {
+  display: none;
+}
+
 .list-enter-active,
 .list-leave-active {
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);

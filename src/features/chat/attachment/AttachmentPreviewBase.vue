@@ -28,7 +28,7 @@
     <!-- Loading Overlay -->
     <div
       v-if="isLoading || isProcessing"
-      class="absolute inset-0 bg-black/40 rounded-xl flex flex-col items-center justify-center z-10 gap-1"
+      class="attachment-progress absolute inset-0 bg-black/40 rounded-xl flex flex-col items-center justify-center z-10 gap-1"
     >
       <div
         v-if="isLoading"

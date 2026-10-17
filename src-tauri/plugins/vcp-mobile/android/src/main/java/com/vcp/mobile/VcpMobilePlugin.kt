@@ -1551,6 +1551,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                     val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                         type = if (args.mode == "gallery" || args.mode == "avatar") "image/*" else "*/*"
                         addCategory(Intent.CATEGORY_OPENABLE)
+                        putExtra(Intent.EXTRA_ALLOW_MULTIPLE, args.selectionLimit > 1)
                     }
                     startActivityForResult(invoke, intent, "onPickFileResult")
                 }
@@ -1570,7 +1571,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             file?.delete(); operation.reject("cancelled: camera"); finishFileOperation(operation); return
         }
         if (file == null || !file.isFile) { operation.reject("camera_capture: no output file"); finishFileOperation(operation); return }
-        acquirePickedFile(operation, Uri.fromFile(file), "Camera.jpg", "image/jpeg", file)
+        acquirePickedFiles(operation, listOf(Uri.fromFile(file)), "Camera.jpg", "image/jpeg", file)
     }
 
     @ActivityCallback
@@ -1579,90 +1580,132 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         if (result.resultCode != Activity.RESULT_OK || operation.cancelled.get()) {
             operation.reject("cancelled: file picker"); finishFileOperation(operation); return
         }
-        val uri = result.data?.data
-        if (uri == null) { operation.reject("file_provider: no file selected"); finishFileOperation(operation); return }
-        acquirePickedFile(operation, uri, null, null, null)
+        val data = result.data
+        val uris = linkedSetOf<Uri>()
+        val clip = data?.clipData
+        if (clip != null) {
+            for (index in 0 until clip.itemCount) clip.getItemAt(index).uri?.let { uris.add(it) }
+        }
+        if (uris.isEmpty()) data?.data?.let { uris.add(it) }
+        if (uris.isEmpty()) { operation.reject("cancelled: no file selected"); finishFileOperation(operation); return }
+        acquirePickedFiles(operation, uris.take(operation.args.selectionLimit), null, null, null,
+            (uris.size - operation.args.selectionLimit).coerceAtLeast(0))
     }
 
-    private fun acquirePickedFile(operation: FileOperation, uri: Uri, suppliedName: String?, suppliedMime: String?, ownedSource: java.io.File?) {
-        val task = PendingInvokeTask(operation.invoke, "acquirePickedFile", task = {
-            var staging: java.io.File? = null
-            var derivative: java.io.File? = null
+    private fun acquirePickedFiles(operation: FileOperation, uris: List<Uri>, suppliedName: String?, suppliedMime: String?, ownedSource: java.io.File?, overflow: Int = 0) {
+        val task = PendingInvokeTask(operation.invoke, "acquirePickedFiles", task = {
+            val files = mutableListOf<JSObject>()
+            val errors = org.json.JSONArray()
+            val owned = mutableListOf<java.io.File>()
+            var delivered = false
+            var remainingBytes = operation.args.maxBytes
             try {
-                operation.check()
-                val resolver = activity.contentResolver
-                var name = suppliedName ?: "file"
-                if (suppliedName == null) resolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
-                    if (it.moveToFirst()) name = it.getString(0) ?: "file"
-                }
-                name = java.io.File(name).name.take(150).ifBlank { "file" }
-                val mime = suppliedMime ?: resolver.getType(uri) ?: "application/octet-stream"
-                val declaredSize = if (ownedSource != null) ownedSource.length() else {
-                    var declared = 0L
-                    resolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)?.use {
-                        if (it.moveToFirst() && !it.isNull(0)) declared = it.getLong(0).coerceAtLeast(0L)
-                    }
-                    declared
-                }
-                emitFileProgress(operation, "vcp-mobile-file-start", JSObject().apply {
-                    put("name", name); put("mime", mime); put("size", declaredSize)
+                if (overflow > 0) errors.put(JSObject().apply {
+                    put("name", "其余 $overflow 项"); put("message", "每次最多选择 ${operation.args.selectionLimit} 个附件")
                 })
-                val uploads = java.io.File(operation.args.stagingDir).apply { mkdirs() }
-                val extension = java.io.File(name).extension.filter { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' }.take(12)
-                val target = java.io.File(uploads, "${operation.args.operationId}-${java.util.UUID.randomUUID()}" + if (extension.isEmpty()) "" else ".$extension")
-                staging = target
-                val digest = java.security.MessageDigest.getInstance("SHA-256")
-                var size = 0L
-                var lastProgress = 0L
-                resolver.openInputStream(uri).use { input ->
-                    requireNotNull(input) { "file_provider: could not open input" }
-                    target.outputStream().use { output ->
-                        val buffer = ByteArray(64 * 1024)
-                        while (true) {
-                            operation.check()
-                            val count = input.read(buffer)
-                            if (count < 0) break
-                            require(count.toLong() <= operation.args.maxBytes - size) { "file_too_large: input exceeds byte budget" }
-                            output.write(buffer, 0, count); digest.update(buffer, 0, count); size += count
-                            val now = android.os.SystemClock.elapsedRealtime()
-                            if (now - lastProgress >= 200) {
-                                lastProgress = now
-                                emitFileProgress(operation, "vcp-mobile-file-progress", JSObject().apply {
-                                    put("name", name); put("mime", mime); put("loaded", size); put("total", declaredSize)
-                                    put("progress", if (declaredSize > 0) (size.toDouble() / declaredSize * 100).coerceAtMost(100.0) else 0)
-                                })
+                for ((index, uri) in uris.withIndex()) {
+                    var staging: java.io.File? = null
+                    var derivative: java.io.File? = null
+                    var name = suppliedName ?: "文件 ${index + 1}"
+                    try {
+                        operation.check()
+                        val resolver = activity.contentResolver
+                        if (suppliedName == null) resolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+                            if (it.moveToFirst()) name = it.getString(0) ?: "file"
+                        }
+                        name = java.io.File(name).name.take(150).ifBlank { "file" }
+                        val mime = suppliedMime ?: resolver.getType(uri) ?: "application/octet-stream"
+                        val declaredSize = if (ownedSource != null) ownedSource.length() else {
+                            var declared = 0L
+                            resolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)?.use {
+                                if (it.moveToFirst() && !it.isNull(0)) declared = it.getLong(0).coerceAtLeast(0L)
+                            }
+                            declared
+                        }
+                        emitFileProgress(operation, "vcp-mobile-file-start", JSObject().apply {
+                            put("name", name); put("mime", mime); put("size", declaredSize)
+                            put("selectionIndex", index); put("selectionCount", uris.size)
+                        })
+                        val uploads = java.io.File(operation.args.stagingDir).apply { mkdirs() }
+                        val extension = java.io.File(name).extension.filter { it in 'A'..'Z' || it in 'a'..'z' || it in '0'..'9' }.take(12)
+                        val target = java.io.File(uploads, "${operation.args.operationId}-${java.util.UUID.randomUUID()}" + if (extension.isEmpty()) "" else ".$extension")
+                        staging = target
+                        val digest = java.security.MessageDigest.getInstance("SHA-256")
+                        var size = 0L
+                        var lastProgress = 0L
+                        resolver.openInputStream(uri).use { input ->
+                            requireNotNull(input) { "file_provider: could not open input" }
+                            target.outputStream().use { output ->
+                                val buffer = ByteArray(64 * 1024)
+                                while (true) {
+                                    operation.check()
+                                    val count = input.read(buffer)
+                                    if (count < 0) break
+                                    require(count.toLong() <= remainingBytes - size) { "file_too_large: selection exceeds byte budget" }
+                                    output.write(buffer, 0, count); digest.update(buffer, 0, count); size += count
+                                    val now = android.os.SystemClock.elapsedRealtime()
+                                    if (now - lastProgress >= 200) {
+                                        lastProgress = now
+                                        emitFileProgress(operation, "vcp-mobile-file-progress", JSObject().apply {
+                                            put("name", name); put("mime", mime); put("loaded", size); put("total", declaredSize)
+                                            put("selectionIndex", index); put("selectionCount", uris.size)
+                                            put("progress", if (declaredSize > 0) (size.toDouble() / declaredSize * 100).coerceAtMost(100.0) else 0)
+                                        })
+                                    }
+                                }
+                                output.fd.sync()
                             }
                         }
-                        output.fd.sync()
+                        operation.check()
+                        val hash = digest.digest().joinToString("") { "%02x".format(it) }
+                        val value = if (operation.args.mode == "avatar") {
+                            val image = NativeFileImages.derive(DeriveImageArgs().apply {
+                                sourcePath = target.absolutePath; outputPath = target.absolutePath + "-avatar"
+                                maxDimension = 2048; maxPixels = 4_194_304; maxBytes = 20 * 1024 * 1024; preserveAlpha = true
+                            })
+                            val output = java.io.File(image.getString("path") ?: error("image output path missing"))
+                            derivative = output
+                            JSObject().apply {
+                                put("path", output.absolutePath); put("name", "avatar_work." + output.extension)
+                                put("mime", image.getString("mime")); put("size", output.length()); put("hash", "")
+                                put("thumbnailPath", org.json.JSONObject.NULL)
+                            }
+                        } else JSObject().apply {
+                            put("path", target.absolutePath); put("name", name); put("mime", mime)
+                            put("size", size); put("hash", hash); put("thumbnailPath", org.json.JSONObject.NULL)
+                        }
+                        operation.check()
+                        files.add(value)
+                        remainingBytes -= size
+                        if (derivative != null) {
+                            owned.add(derivative)
+                            derivative = null
+                        } else {
+                            owned.add(target)
+                            staging = null
+                        }
+                    } catch (error: Throwable) {
+                        operation.check()
+                        if (operation.args.selectionLimit == 1) throw error
+                        errors.put(JSObject().apply { put("name", name); put("message", "file_acquisition: ${error.message}") })
+                    } finally {
+                        staging?.delete(); derivative?.delete()
                     }
                 }
                 operation.check()
-                val hash = digest.digest().joinToString("") { "%02x".format(it) }
-                val value = if (operation.args.mode == "avatar") {
-                    val image = NativeFileImages.derive(DeriveImageArgs().apply {
-                        sourcePath = target.absolutePath; outputPath = target.absolutePath + "-avatar"
-                        maxDimension = 2048; maxPixels = 4_194_304; maxBytes = 20 * 1024 * 1024; preserveAlpha = true
-                    })
-                    val output = java.io.File(image.getString("path") ?: error("image output path missing"))
-                    derivative = output
-                    JSObject().apply {
-                        put("path", output.absolutePath); put("name", "avatar_work." + output.extension)
-                        put("mime", image.getString("mime")); put("size", output.length()); put("hash", "")
-                        put("thumbnailPath", org.json.JSONObject.NULL)
-                    }
-                } else JSObject().apply {
-                    put("path", target.absolutePath); put("name", name); put("mime", mime)
-                    put("size", size); put("hash", hash); put("thumbnailPath", org.json.JSONObject.NULL)
-                }
-                operation.check()
+                val value = if (operation.args.selectionLimit > 1) JSObject().apply {
+                    put("files", org.json.JSONArray(files)); put("errors", errors)
+                } else files.single()
+                // Cancellation wins ownership until the single terminal response.
                 if (operation.settled.compareAndSet(false, true)) {
                     operation.invoke.resolve(value)
-                    if (derivative != null) derivative = null else staging = null
+                    delivered = true
                 }
             } catch (error: Throwable) {
                 operation.reject(if (operation.cancelled.get()) "cancelled: file acquisition" else "file_acquisition: ${error.message}")
             } finally {
-                staging?.delete(); derivative?.delete(); ownedSource?.delete()
+                if (!delivered) owned.forEach { it.delete() }
+                ownedSource?.delete()
                 finishFileOperation(operation)
             }
         }, reject = {
@@ -2747,6 +2790,8 @@ class PickFileArgs {
     var operationId: String = ""
     var stagingDir: String = ""
     var maxBytes: Long = 512L * 1024 * 1024
+    var maxFiles: Int = 1
+    val selectionLimit: Int get() = if (mode == "file" || mode == "gallery") maxFiles.coerceIn(1, 16) else 1
 }
 
 @InvokeArg

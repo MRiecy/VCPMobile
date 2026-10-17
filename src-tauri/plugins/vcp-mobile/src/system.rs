@@ -406,13 +406,35 @@ pub struct PickedFileInfo {
     pub thumbnail_path: Option<String>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct PickedFileFailure {
+    pub name: String,
+    pub message: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct PickedFilesInfo {
+    pub files: Vec<PickedFileInfo>,
+    pub errors: Vec<PickedFileFailure>,
+}
+
+// Single-resource consumers (avatar/config/camera/CLI) and attachment batches
+// share the same native acquisition owner, with explicit result shapes.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PickFileResult {
+    Single(PickedFileInfo),
+    Multiple(PickedFilesInfo),
+}
+
 #[tauri::command]
 pub async fn pick_file<R: Runtime>(
     app: AppHandle<R>,
     mode: Option<String>,
     operation_id: Option<String>,
     max_bytes: Option<u64>,
-) -> Result<PickedFileInfo, String> {
+    multiple: Option<bool>,
+) -> Result<PickFileResult, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let mode = mode.unwrap_or_else(|| "file".into());
@@ -422,6 +444,12 @@ pub async fn pick_file<R: Runtime>(
         ) {
             return Err("invalid_picker_mode".into());
         }
+        let max_files = if multiple.unwrap_or(false) && matches!(mode.as_str(), "file" | "gallery")
+        {
+            16
+        } else {
+            1
+        };
         let operation_id = operation_id.unwrap_or_else(native_operation_id);
         validate_operation_id(&operation_id)?;
         let max_bytes = max_bytes.unwrap_or(if mode == "config" {
@@ -441,11 +469,11 @@ pub async fn pick_file<R: Runtime>(
         let plugin_handle = state.mobile_plugin_handle()?;
         tauri::async_runtime::spawn_blocking(move || {
             plugin_handle
-                .run_mobile_plugin::<PickedFileInfo>(
+                .run_mobile_plugin::<PickFileResult>(
                     "pickFile",
                     serde_json::json!({
                         "mode": mode, "operationId": operation_id,
-                        "stagingDir": staging, "maxBytes": max_bytes,
+                        "stagingDir": staging, "maxBytes": max_bytes, "maxFiles": max_files,
                     }),
                 )
                 .map_err(|e| format!("native_picker: {e}"))
@@ -455,7 +483,7 @@ pub async fn pick_file<R: Runtime>(
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        let _ = (app, mode, operation_id, max_bytes);
+        let _ = (app, mode, operation_id, max_bytes, multiple);
         Err("文件选择仅在移动端可用".to_string())
     }
 }

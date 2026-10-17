@@ -136,19 +136,23 @@ final class NativePresentation: NSObject {
     }
 
     func resolve<T: Encodable>(_ operation: NativeFileOperation, _ result: T, keeping: URL? = nil) {
-        finish(operation, keeping: keeping) { operation.invoke.resolve(result) }
+        resolve(operation, result, keepingFiles: keeping.map { [$0] } ?? [])
+    }
+
+    func resolve<T: Encodable>(_ operation: NativeFileOperation, _ result: T, keepingFiles: [URL]) {
+        finish(operation, keeping: Set(keepingFiles)) { operation.invoke.resolve(result) }
     }
 
     func fail(_ operation: NativeFileOperation, _ message: String) {
         finish(operation) { operation.invoke.reject(message) }
     }
 
-    private func finish(_ operation: NativeFileOperation, keeping: URL? = nil, response: @escaping () -> Void) {
+    private func finish(_ operation: NativeFileOperation, keeping: Set<URL> = [], response: @escaping () -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard !operation.finished else { return }
         operation.finished = true
         let cleanup = {
-            operation.owned.filter { $0 != keeping }.forEach { try? FileManager.default.removeItem(at: $0) }
+            operation.owned.filter { !keeping.contains($0) }.forEach { try? FileManager.default.removeItem(at: $0) }
             operation.owned.removeAll()
             operation.delegate = nil
             operation.anchorView?.removeFromSuperview()

@@ -25,6 +25,12 @@ export interface PickedFile {
   thumbnailPath?: string | null;
 }
 
+/** Multi-select acquisition keeps successful items when another provider fails. */
+export interface PickedFiles {
+  files: PickedFile[];
+  errors: { name: string; message: string }[];
+}
+
 export type PickFileMode = 'file' | 'camera' | 'gallery' | 'avatar' | 'config';
 
 export function pickFile(mode?: PickFileMode, options?: { operationId?: string; maxBytes?: number }): Promise<PickedFile> {

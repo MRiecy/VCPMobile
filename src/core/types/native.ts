@@ -29,6 +29,8 @@ export interface BatteryStatusDto {
 
 export interface NativeFileStartDetail {
   operationId?: string;
+  selectionIndex?: number;
+  selectionCount?: number;
   name: string;
   size: number;
   mime: string;
@@ -36,6 +38,8 @@ export interface NativeFileStartDetail {
 
 export interface NativeFileProgressDetail {
   operationId?: string;
+  selectionIndex?: number;
+  selectionCount?: number;
   name: string;
   mime: string;
   loaded: number;
