@@ -1,9 +1,9 @@
 ---
 id: VUE-CORE-002
 title: 状态管理总览与Store全景图
-description: VCP Mobile 前端 21 个 Pinia Store 的职责分类、依赖关系与状态设计全景
+description: VCP Mobile 前端共享及功能共置 Pinia Store 的职责分类、依赖关系与状态设计全景
 version: 1.1.4
-date: 2026-08-12
+date: 2026-10-18
 ---
 
 # 02. 状态管理总览与Store全景图
@@ -12,9 +12,9 @@ date: 2026-08-12
 
 ### 1.1 领域定位
 
-`src/core/stores/` 是 VCP Mobile Vue 3 前端层的**全局状态中枢目录**，承载 20 个 Pinia Store；`src/features/diary/diaryStore.ts` 另有 1 个功能共置 Store。21 个 Store 按领域边界覆盖会话消息、UI 覆盖层、Agent/群组管理、系统设置、同步与分布式、浮动助手及日记中心（浮动助手在 v1.1.3 已暂停使用）。
+`src/core/stores/` 承载跨 Feature 的共享状态；功能共置 Store 位于所属领域，例如 `src/features/diary/diaryStore.ts` 与 `src/features/chat/preferences/store.ts`。Store 按领域覆盖会话消息、UI 覆盖层、Agent/群组管理、系统设置、同步与分布式及功能本地偏好（浮动助手在 v1.1.3 已暂停使用）。
 
-与 Rust 后端不同，前端 Store 不负责数据持久化（SQLite 由后端托管），而是承担以下职责：
+SQLite 业务数据由 Rust 后端托管；前端 Store 管理运行态、正式数据镜像及少量领域本地偏好，承担以下职责：
 
 - **运行时状态聚合**：当前选中的 Agent/Group、活跃话题、流式消息池、抽屉开关等
 - **IPC 调用编排**：封装 Tauri `invoke()` / `Channel` / `listen()` 调用，提供类型安全的 Action 接口
@@ -26,7 +26,7 @@ date: 2026-08-12
 - HTTP 网络请求底层（由 Rust 后端 `vcp_client.rs` 负责）
 - 文件系统读写（由 Rust 后端 `file_manager.rs` 负责）
 
-### 1.2 模块构成表（21 个 Store）
+### 1.2 模块构成表
 
 | 分类 | 文件名 | Store 名 | 职责简述 | 持久化 |
 |------|--------|----------|----------|--------|
@@ -38,12 +38,14 @@ date: 2026-08-12
 | UI 与覆盖层 | `overlay.ts` | `useOverlayStore` | 页面栈（SlidePage）、Prompt、ContextMenu、Editor | ❌ |
 | UI 与覆盖层 | `notification.ts` | `useNotificationStore` | Toast 气泡、通知中心历史、系统状态栏 | ❌ |
 | UI 与覆盖层 | `theme.ts` | `useThemeStore` | 主题模式（light/dark/system）、主题加载与变量注入 | ⚠️ localStorage |
+| 聊天偏好 | `features/chat/preferences/store.ts` | `useChatPreferencesStore` | 呈现、平滑动效、消息震动、流式工具折叠 | ⚠️ localStorage |
 | Agent 与群组 | `assistant.ts` | `useAssistantStore` | Agent/Group CRUD、未读计数聚合 | ❌ |
 | Agent 与群组 | `avatar.ts` | `useAvatarStore` | 头像二进制缓存、Blob URL 管理、主色调同步提取 | ❌ |
 | Agent 与群组 | `modelStore.ts` | `useModelStore` | VCP 模型列表、热门模型、收藏管理 | ❌ |
 | Agent 与群组 | `topicListManager.ts` | `useTopicStore` | 话题列表流式加载、CRUD、未读/消息计数乐观更新 | ❌ |
 | 系统与设置 | `appLifecycle.ts` | `useAppLifecycleStore` | 应用启动状态机（BOOTING → READY）、预加载编排 | ❌ |
-| 系统与设置 | `settings.ts` | `useSettingsStore` | 全局配置读写（后端 SQLite 持久化） | ❌ |
+| 系统与设置 | `settings.ts` | `useSettingsStore` | 正式配置快照与串行 patch 读写（后端 SQLite 持久化） | ❌ |
+| 系统与设置 | `update.ts` | `useUpdateStore` | Rust 更新状态镜像与本地自动检查偏好 | ⚠️ 仅自动检查偏好 |
 | 系统与设置 | `rebuildSession.ts` | `useRebuildSessionStore` | 预渲染重建任务会话（状态机 + 进度监听） | ❌ |
 | 同步与分布式 | `syncSession.ts` | `useSyncSessionStore` | 手动同步会话（WebSocket 连接、日志、进度） | ❌ |
 | 系统与设置 | `tarvenStore.ts` | `useTarvenStore` | Tarven 注入规则列表、启用状态、选择器开关 | ❌ |
@@ -306,7 +308,7 @@ const msgToUse = activeMsg || chunk.message;
 |------|------|------|
 | `mode` | `ThemeMode` | 当前主题模式（`light`/`dark`/`system`） |
 | `isDarkResolved` | `boolean` | 实际解析后的暗色状态（`system` 模式下跟随 OS） |
-| `currentTheme` | `string` | 当前主题文件名（如 `themes-bear-holiday.css`） |
+| `currentTheme` | `string` | 当前主题规范 TS module key（如 `themes-bear-holiday.ts`） |
 | `availableThemes` | `ThemeInfo[]` | 扫描到的全部可用主题列表 |
 | `currentThemeInfo` | `ThemeInfo \| null` | 当前主题的完整元数据 |
 
@@ -315,6 +317,21 @@ const msgToUse = activeMsg || chunk.message;
 **Legacy 主题映射**：`LEGACY_THEME_MAP` 将旧版中文文件名（如 `themes冰火魔歌.css`）映射到新版英文文件名，保证旧用户升级后主题不丢失。
 
 ---
+
+#### chatPreferences —— 聊天本地偏好
+
+> 文件位置：`src/features/chat/preferences/store.ts`
+
+Store 创建时同步恢复四项偏好，直接供 ChatView、MessageRenderer、快捷呈现菜单及消息发送/流结束路径消费，不等待设置页或 themeStore 初始化。
+
+| 状态 | 默认值 | 本地 key |
+|------|--------|----------|
+| `presentationMode` | `bubble` | `vcp-chat-presentation-mode` |
+| `smoothStreamingEnabled` | false | `vcp-smooth-streaming-enabled` |
+| `messageHapticsEnabled` | true | `vcp-message-haptics-enabled` |
+| `collapseToolsWhileStreaming` | false | `vcp-collapse-tools-while-streaming` |
+
+对外状态只读；每项通过对应 setter 先写存储再发布新值，相同值不写，失败返回旧值和 error。model/storage 分别拥有类型、合法值、缺省和修复规则。持久化偏好表示用户意图，设备触感能力、活动流、减少动态效果、工具块手动选择等仍由真实消费路径判断。
 
 ### 2.3 Agent 与群组类
 
@@ -439,17 +456,19 @@ READY (应用可用)
 
 > 文件位置：`src/core/stores/settings.ts`
 
-`useSettingsStore` 是前端访问 Rust 后端 `settings_manager` 的**统一封装层**。
+`useSettingsStore` 是 Rust 配置的唯一正式快照入口。`settings` 是 AppSettings 或 null，`loading` 反映队列中操作，`error` 记录操作错误。fetch 与 update 共用串行队列，保留损坏恢复通知。
 
-**核心状态**（3 个）：
+`updateSettings` 在入队前复制 patch，调用 Rust `update_settings` 的顶层字段合并；它不是 JSON Patch 操作列表，也不做嵌套深合并。成功更新 Store 并提示“设置已保存”，不宣称连接或同步已经完成。
 
-| 状态 | 类型 | 说明 |
-|------|------|------|
-| `settings` | `AppSettings \| null` | 完整的全局配置对象（含 VCP URL、API Key、主题设置等） |
-| `loading` | `boolean` | 读写加载状态 |
-| `error` | `string \| null` | 最近一次操作错误 |
+`features/settings/editing/useSettingsEditSession.ts` 是页面访问期的 composable，不是第二个配置 Store。身份、连接、总结各自投影字段，通过 base/draft/revision/pending 重基并提交 dirty patch。外部正式值到达时保留用户已编辑字段；离开保存、依赖动作与导入排空分别使用 `prepareLeave`、`save`、`settlePending`。隐藏释放会话，不启动保存。
 
-**增量更新**：`updateSettings` 调用后端 `update_settings`，支持 JSON Patch 风格的增量合并，避免前端构造完整配置对象。
+#### update —— 更新状态与自动检查偏好
+
+> 文件位置：`src/core/stores/update.ts`
+
+Rust UpdateSession 仍拥有 OTA 任务，前端经状态事件与补拉镜像。自动检查偏好独立保存在 `vcp_auto_update_check`，沿用 `on/off` 编码和“非 off 视为开”的读取规则。`autoCheckEnabled` 只读，`setAutoCheckEnabled` 成功写入后更新，失败保持旧值。
+
+`useAutoUpdate` 与 UpdateSection 使用同一 Store；冷却时间戳和跳过版本仍沿原流程。它与聊天偏好共用 `core/preferences/localPreference.ts` 的窄读写工具，key、默认值、解码与修复仍由所属领域决定。
 
 #### rebuildSession —— 预渲染重建任务会话
 
@@ -847,6 +866,8 @@ export const useXxxStore = defineStore('storeId', () => {
 - Vite HMR 场景下需要更精细的持久化/恢复控制
 - `LEGACY_THEME_MAP` 需要在读取时进行文件名迁移
 
+聊天偏好和自动检查更新同样手动持久化，但由各自领域 Store 管理；共享 `localPreference` 只返回原始读取/写入成功或失败，不合并业务状态，也不替代备份与同步范围。
+
 ### 4.3 跨 Store 通信模式
 
 前端 Store 间通信采用三种模式，按优先级递减排列：
@@ -1055,12 +1076,9 @@ await invoke('get_topics_streamed', {
 
 ### 6.2 哪些 Store 需要持久化、哪些不需要？
 
-持久化的决策遵循"**最小持久化原则**"：
+持久化由真实消费者决定。chatSessionStore 使用插件保留少量会话选择；themeStore、chatPreferences 和 updateStore 的自动检查项使用领域本地偏好。settingsStore 只镜像 Rust 正式配置，消息、Agent 与话题业务数据继续由后端管理。
 
-- **持久化**：仅 `chatSessionStore`（3 个字段）和 `themeStore`（通过 `localStorage`）。这两者代表用户的"回到上次离开的地方"和"视觉偏好"，属于跨会话的个性化状态。
-- **不持久化**：其余 14 个 Store。业务数据（消息、Agent、话题）由后端 SQLite 作为唯一持久源；运行时状态（流、Toast、抽屉）是瞬时的，无需恢复。
-
-这一决策避免了 `localStorage` 容量限制（通常 5MB）和版本兼容性问题，同时确保多端同步时前端不会持有过期的本地缓存。
+配置编辑草稿、pending 批次、页面访问序号和工具块手动展开属于当前交互生命周期，不进入长期偏好或配置备份。聊天/更新共享存储 IO 不意味着共享领域、备份范围或跨设备同步策略。
 
 ### 6.3 Store 分层的设计逻辑
 
@@ -1071,7 +1089,7 @@ await invoke('get_topics_streamed', {
 | **导航层** | 低（用户切换会话） | `chatSessionStore` |
 | **内容层** | 高（每发送一条消息） | `chatHistoryStore`、`chatStreamStore` |
 | **资产层** | 中（上传附件、切换头像） | `attachmentStore`、`avatarStore` |
-| **配置层** | 低（应用设置变更） | `settings`、`theme` |
+| **配置层** | 低（应用设置变更） | `settings`、`theme`、`chatPreferences`、`update` 的本地偏好 |
 | **基础设施层** | 极低（应用启动一次） | `appLifecycle` |
 | **浮动助手层** | 中（每次打开悬浮窗） | `floatingAssistant` |
 
@@ -1151,4 +1169,4 @@ Diary Store 专项测试验证 A→B→A 旧请求、搜索 request owner、不�
 
 ---
 
-*最后更新：2026-08-12 | VCP Mobile v1.1.4*
+*最后更新：2026-10-18 | VCP Mobile v1.1.4*

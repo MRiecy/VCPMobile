@@ -34,11 +34,67 @@ const available: UpdateStatus = {
 describe('update store', () => {
   let pinia: Pinia;
   beforeEach(() => {
+    localStorage.clear();
     pinia = createPinia();
     setActivePinia(pinia);
   });
 
-  afterEach(() => disposePinia(pinia));
+  afterEach(() => {
+    disposePinia(pinia);
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    [null, true],
+    ['on', true],
+    ['off', false],
+    ['legacy-value', true],
+  ] as const)('restores the local auto-check preference %s without initializing OTA', (stored, enabled) => {
+    if (stored !== null) localStorage.setItem('vcp_auto_update_check', stored);
+    const store = useUpdateStore();
+    expect(store.autoCheckEnabled).toBe(enabled);
+    expect(store.status).toEqual(idle);
+    expect(invokeMock).not.toHaveBeenCalled();
+    expect(listenMock).not.toHaveBeenCalled();
+  });
+
+  it('publishes the local preference after saving and leaves it unchanged on a failed write', () => {
+    const store = useUpdateStore();
+    expect(store.setAutoCheckEnabled(false)).toEqual({ ok: true, changed: true, enabled: false });
+    expect(localStorage.getItem('vcp_auto_update_check')).toBe('off');
+    expect(store.autoCheckEnabled).toBe(false);
+
+    vi.stubGlobal('localStorage', {
+      getItem: localStorage.getItem.bind(localStorage),
+      setItem: () => { throw new Error('quota exceeded'); },
+    });
+    expect(store.setAutoCheckEnabled(true)).toEqual({
+      ok: false, changed: false, enabled: false, error: 'Error: quota exceeded',
+    });
+    expect(store.autoCheckEnabled).toBe(false);
+    expect(store.status).toEqual(idle);
+    expect(localStorage.getItem('vcp_auto_update_check')).toBe('off');
+
+    vi.unstubAllGlobals();
+    expect(store.setAutoCheckEnabled(true)).toEqual({ ok: true, changed: true, enabled: true });
+    expect(localStorage.getItem('vcp_auto_update_check')).toBe('on');
+    expect(store.autoCheckEnabled).toBe(true);
+  });
+
+  it('uses the default when reading storage is unavailable without breaking the OTA owner', () => {
+    const read = vi.fn(() => {
+      throw new Error('storage unavailable');
+    });
+    vi.stubGlobal('localStorage', { getItem: read });
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = useUpdateStore();
+    expect(store.autoCheckEnabled).toBe(true);
+    expect(store.status).toEqual(idle);
+    expect(read).toHaveBeenCalledWith('vcp_auto_update_check');
+    expect(console.warn).toHaveBeenCalledWith(
+      '[UpdateStore] Failed to read auto-check preference:', 'Error: storage unavailable',
+    );
+  });
 
   it('init pulls the current snapshot once and then follows broadcast events', async () => {
     mockInvoke('get_update_status', () => idle);

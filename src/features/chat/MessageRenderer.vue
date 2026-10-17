@@ -12,6 +12,7 @@ import { useChatHistoryStore } from "../../core/stores/chatHistoryStore";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useChatStreamStore } from "../../core/stores/chatStreamStore";
 import { useThemeStore } from "../../core/stores/theme";
+import { useChatPreferencesStore } from "./preferences/store";
 import { useNotificationStore } from "../../core/stores/notification";
 import { useMessageEvents } from "../../core/composables/useMessageEvents";
 import { useEmoticonFixer } from "../../core/composables/useEmoticonFixer";
@@ -73,6 +74,7 @@ const historyStore = useChatHistoryStore();
 const sessionStore = useChatSessionStore();
 const streamStore = useChatStreamStore();
 const themeStore = useThemeStore();
+const chatPreferences = useChatPreferencesStore();
 
 function isAstDebugEnabled(): boolean {
   return Boolean(import.meta.env.DEV && (window as any).__VCP_AST_DEBUG__);
@@ -194,7 +196,7 @@ function finishStreamMotion(): void {
 
 function isSmoothStreamMotionEnabled(): boolean {
   return !(
-    !themeStore.smoothStreamingEnabled
+    !chatPreferences.smoothStreamingEnabled
     || !isStreaming.value
     || !useAstForCurrentTail.value
     || props.isBackground === true
@@ -247,6 +249,10 @@ const isStreaming = computed(() => {
     props.message.id,
   );
 });
+
+const expandToolsByDefault = computed(() =>
+  isMessageInActiveStream.value && !chatPreferences.collapseToolsWhileStreaming,
+);
 
 // 终态渲染失败时继续展示已收到的尾部；展示引用不延长生成活动或操作占用。
 const showMessageTail = computed(() => isStreaming.value || Boolean(
@@ -522,7 +528,57 @@ function renderBlockHtml(block: ContentBlock): string {
   }
 }
 
+type ToolContentBlock = Extract<ContentBlock, { type: "tool-use" | "tool-result" }>;
+
+function sameToolContent(previous: ToolContentBlock, current: ToolContentBlock): boolean {
+  if (previous === current) return true;
+  if (previous.tool_name !== current.tool_name) return false;
+  if (previous.type === "tool-use" && current.type === "tool-use") {
+    return previous.content === current.content;
+  }
+  if (previous.type === "tool-result" && current.type === "tool-result") {
+    return previous.status === current.status
+      && previous.footer === current.footer
+      && previous.details.length === current.details.length
+      && previous.details.every((detail, index) =>
+        detail.key === current.details[index].key && detail.value === current.details[index].value,
+      );
+  }
+  return false;
+}
+
+// 流式与终态 hash 不同，但两条解析链按相同顺序产生工具块。
+// 只对齐工具次序，排除 markdown 合并造成的位置变化；语义变化则建立新交互身份。
+// 真正插入/删除工具改变次序时，后续无法同位匹配的工具按新结构恢复默认。
+// 上一版只保留块引用和短 key，不复制可能包含大段正文/base64 的工具结果。
+let previousToolBlocks: ToolContentBlock[] = [];
+let previousToolKeys: string[] = [];
+let previousToolMessageId = "";
+let nextToolIdentity = 0;
+const toolBlockKeys = computed(() => {
+  const currentBlocks: ToolContentBlock[] = [];
+  const currentKeys: string[] = [];
+  const keys = new Map<ContentBlock, string>();
+  for (const block of props.message.blocks ?? []) {
+    if (block.type !== "tool-use" && block.type !== "tool-result") continue;
+    const index = currentBlocks.length;
+    const previous = previousToolBlocks[index];
+    const key = previousToolMessageId === props.message.id && previous && sameToolContent(previous, block)
+      ? previousToolKeys[index]
+      : `${props.message.id}-tool-${nextToolIdentity++}`;
+    currentBlocks.push(block);
+    currentKeys.push(key);
+    keys.set(block, key);
+  }
+  previousToolBlocks = currentBlocks;
+  previousToolKeys = currentKeys;
+  previousToolMessageId = props.message.id;
+  return keys;
+});
+
 function getBlockKey(block: ContentBlock, index: number, bubbleId: string): string {
+  const toolKey = toolBlockKeys.value.get(block);
+  if (toolKey !== undefined) return toolKey;
   if (block.hash !== undefined && block.hash !== null) {
     return `${bubbleId}-${block.type}-${String(block.hash)}-${index}`;
   }
@@ -706,7 +762,7 @@ watch(
     if (
       !blocks
       || blocks.length <= previous.length
-      || !themeStore.smoothStreamingEnabled
+      || !chatPreferences.smoothStreamingEnabled
       || !isStreaming.value
       || props.isBackground === true
       || props.message.isReconnecting === true
@@ -760,7 +816,7 @@ watch(
 );
 
 watch(
-  () => themeStore.smoothStreamingEnabled,
+  () => chatPreferences.smoothStreamingEnabled,
   (enabled) => {
     if (!enabled) finishStreamMotion();
   },
@@ -1277,9 +1333,9 @@ onUnmounted(() => {
           <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
             <template v-if="bubble.blocks && bubble.blocks.length > 0">
               <template v-for="(block, index) in bubble.blocks" :key="getBlockKey(block, index, bubble.id)">
-                <!-- v-memo 使用含 bubble ID 的稳定 key，避免分条气泡之间复用错误子树 -->
+                <!-- v-memo 包含块身份与实际展示输入，设置变化不会被旧子树缓存吞掉。 -->
                 <div
-                  v-memo="[getBlockKey(block, index, bubble.id), isStreaming, shouldRevealStableBlock(block)]"
+                  v-memo="[getBlockKey(block, index, bubble.id), block, isStreaming, isMessageInActiveStream, expandToolsByDefault, shouldRevealStableBlock(block)]"
                   data-message-render-region="stable"
                   :class="{ [STREAM_ELEMENT_REVEAL_CLASS]: shouldRevealStableBlock(block) }"
                   @animationend.self="finishStableBlockReveal($event, block)"
@@ -1301,7 +1357,7 @@ onUnmounted(() => {
                     :type="block.type"
                     :content="block.content"
                     :block="block"
-                    :default-expanded="isMessageInActiveStream"
+                    :default-expanded="expandToolsByDefault"
                   />
 
                   <ThoughtBlock

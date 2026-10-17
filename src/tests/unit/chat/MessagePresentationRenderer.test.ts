@@ -1,12 +1,13 @@
-import { defineComponent, nextTick, reactive, ref } from 'vue';
+import { defineComponent, isVNode, nextTick, reactive, ref, type VNode } from 'vue';
 import { mount } from '@vue/test-utils';
 import { createPinia, setActivePinia, type Pinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import MessageRenderer from '@/features/chat/MessageRenderer.vue';
-import type { ChatMessage } from '@/core/types/chat';
+import type { ChatMessage, StreamBlock } from '@/core/types/chat';
 import { useChatSessionStore } from '@/core/stores/chatSessionStore';
 import { useChatStreamStore } from '@/core/stores/chatStreamStore';
-import { useThemeStore, type ChatPresentationMode } from '@/core/stores/theme';
+import { useChatPreferencesStore } from '@/features/chat/preferences/store';
+import type { ChatPresentationMode } from '@/features/chat/preferences/model';
 import { invokeMock, mockInvoke } from '@/tests/mocks/tauri';
 
 const { mermaidRenderMock } = vi.hoisted(() => ({
@@ -48,6 +49,22 @@ function mountStreamRenderer(message: ChatMessage, pinia: Pinia) {
   });
 }
 
+function renderedVNodeKeys(root: VNode): Array<string | number | symbol> {
+  const visited = new Set<VNode>();
+  const keys: Array<string | number | symbol> = [];
+  const visit = (node: VNode) => {
+    if (visited.has(node)) return;
+    visited.add(node);
+    if (node.key !== null) keys.push(node.key);
+    if (node.component) visit(node.component.subTree);
+    if (Array.isArray(node.children)) {
+      node.children.forEach(child => { if (isVNode(child)) visit(child); });
+    }
+  };
+  visit(root);
+  return keys;
+}
+
 function installRunningAnimationMock(): () => void {
   const original = Object.getOwnPropertyDescriptor(Element.prototype, 'animate');
   const originalCss = Object.getOwnPropertyDescriptor(globalThis, 'CSS');
@@ -83,6 +100,7 @@ function installRunningAnimationMock(): () => void {
 
 beforeEach(() => {
   localStorage.removeItem('vcp-smooth-streaming-enabled');
+  localStorage.removeItem('vcp-collapse-tools-while-streaming');
 });
 
 function deferred<T>() {
@@ -186,6 +204,171 @@ async function seedRemountTail(
 }
 
 describe('MessageRenderer presentation shell', () => {
+  it('keeps manual tool expansion across preference changes and terminal recompilation', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const preferences = useChatPreferencesStore();
+    preferences.setCollapseToolsWhileStreaming(true);
+    const stream = useChatStreamStore();
+    useChatSessionStore().setConversation({ id: 'agent-a', type: 'agent' }, 'topic-a');
+    const context = { ownerId: 'agent-a', ownerType: 'agent' as const, topicId: 'topic-a', agentId: 'agent-a' };
+    const base = {
+      consumerRevision: 1, messageId: 'tool-preferences', context, chunk: null,
+      finishReason: null, error: null, timestamp: null, topicUpdatedAt: null,
+    };
+    const stableBlocks: StreamBlock[] = [
+      { type: 'markdown', content: 'first', hash: 'text-a' },
+      { type: 'markdown', content: 'second', hash: 'text-b' },
+      { type: 'tool-use', tool_name: 'Search', content: 'query: example', hash: 'tool-a' },
+      { type: 'tool-use', tool_name: 'Search', content: 'query: example', hash: 'tool-a' },
+      { type: 'tool-result', tool_name: 'Search', status: 'success', details: [{ key: 'answer', value: 'found' }], footer: '', hash: 'result-a' },
+      { type: 'thought', theme: 'reasoning', content: 'thinking', is_complete: true, hash: 'thought-a' },
+    ];
+    await stream.processStreamEvent({
+      ...base, type: 'aurora', blocks: null,
+      aurora: { kind: 'snapshot', streamId: 11, content: 'response', stableBlocks, tailMode: 'ast' },
+    });
+    const message = stream.getActiveStreamMessage('agent-a', 'agent', 'topic-a', 'tool-preferences')!;
+    await vi.waitFor(() => expect(message.blocks).toHaveLength(stableBlocks.length));
+    const { ToolBlock: _toolStub, ThoughtBlock: _thoughtStub, ...stubs } = streamRendererStubs;
+    const mountTools = () => mount(MessageRenderer, {
+      props: { message },
+      global: { plugins: [pinia], directives: { longpress: {} }, stubs },
+    });
+    const wrapper = mountTools();
+    const toolElements = wrapper.findAll('.vcp-tool-block').map(tool => tool.element);
+    const expanded = () => wrapper.findAll<HTMLElement>('.vcp-tool-block .tool-content-scrollable').map(content => content.element.style.display !== 'none');
+    expect(expanded()).toEqual([false, false, false]);
+    expect(wrapper.get('.vcp-thought-content').isVisible()).toBe(true);
+
+    await wrapper.findAll('.vcp-tool-block > .tool-header-content:first-child')[0].trigger('click');
+    expect(expanded()).toEqual([true, false, false]);
+    preferences.setCollapseToolsWhileStreaming(false);
+    await nextTick();
+    expect(expanded()).toEqual([true, true, true]);
+    await wrapper.findAll('.vcp-tool-block > .tool-header-content:first-child')[2].trigger('click');
+    preferences.setCollapseToolsWhileStreaming(true);
+    await nextTick();
+    expect(expanded()).toEqual([true, false, false]);
+    preferences.setCollapseToolsWhileStreaming(false);
+    await nextTick();
+    expect(expanded()).toEqual([true, true, false]);
+
+    // 持久化解析合并了相邻 markdown，并把字符串 hash 换成数值 hash。
+    await stream.processStreamEvent({
+      ...base, type: 'end', finishReason: 'completed', aurora: null,
+      blocks: [
+        { type: 'markdown', content: 'first\nsecond', hash: 100 },
+        { type: 'tool-use', tool_name: 'Search', content: 'query: example', is_complete: true, hash: 101 },
+        { type: 'tool-use', tool_name: 'Search', content: 'query: example', is_complete: true, hash: 101 },
+        { type: 'tool-result', tool_name: 'Search', status: 'success', details: [{ key: 'answer', value: 'found' }], footer: '', hash: 102 },
+        { type: 'thought', theme: 'reasoning', content: 'thinking', is_complete: true, hash: 103 },
+      ],
+    });
+    await nextTick();
+    expect(wrapper.findAll('.vcp-tool-block').map(tool => tool.element)).toEqual(toolElements);
+    expect(expanded()).toEqual([true, false, false]);
+    wrapper.unmount();
+    const remounted = mountTools();
+    expect(remounted.findAll<HTMLElement>('.vcp-tool-block .tool-content-scrollable').every(content => content.element.style.display === 'none')).toBe(true);
+    remounted.unmount();
+  });
+
+  it('preserves the default streaming behavior and treats changed tool content as a new block', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const stream = useChatStreamStore();
+    useChatSessionStore().setConversation({ id: 'agent-a', type: 'agent' }, 'topic-a');
+    stream.addSessionStream('agent-a', 'agent', 'topic-a', 'tool-default');
+    const message = reactive<ChatMessage>({
+      id: 'tool-default', role: 'assistant', timestamp: 1,
+      shell: { avatarColor: '#64748b', displayName: 'Agent', isUser: false },
+      blocks: [{ type: 'tool-use', tool_name: 'Search', content: 'original', hash: 'original' }],
+    });
+    const { ToolBlock: _toolStub, ...stubs } = streamRendererStubs;
+    const wrapper = mount(MessageRenderer, {
+      props: { message },
+      global: { plugins: [pinia], directives: { longpress: {} }, stubs },
+    });
+    expect(wrapper.get<HTMLElement>('.tool-content-scrollable').element.style.display).not.toBe('none');
+    await wrapper.get('.vcp-tool-block > .tool-header-content').trigger('click');
+    expect(wrapper.get<HTMLElement>('.tool-content-scrollable').element.style.display).toBe('none');
+    message.blocks = [{ type: 'tool-use', tool_name: 'Search', content: 'new request', hash: 'replacement' }];
+    await nextTick();
+    expect(wrapper.get<HTMLElement>('.tool-content-scrollable').element.style.display).not.toBe('none');
+    stream.removeSessionStream('agent-a', 'agent', 'topic-a', 'tool-default');
+    await nextTick();
+    expect(wrapper.get<HTMLElement>('.tool-content-scrollable').element.style.display).toBe('none');
+    wrapper.unmount();
+  });
+
+  it('preserves large tool results across hash changes and resets when their trailing content changes', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const stream = useChatStreamStore();
+    useChatSessionStore().setConversation({ id: 'agent-a', type: 'agent' }, 'topic-a');
+    stream.addSessionStream('agent-a', 'agent', 'topic-a', 'large-tool-result');
+    const image = `data:image/png;base64,${'A'.repeat(256 * 1024)}`;
+    const resultBlock = (value: string, hash: string | number) => ({
+      type: 'tool-result' as const, tool_name: 'Image', status: 'success',
+      details: [{ key: 'image', value }], footer: '', hash,
+    });
+    const message = reactive<ChatMessage>({
+      id: 'large-tool-result', role: 'assistant', timestamp: 1,
+      shell: { avatarColor: '#64748b', displayName: 'Agent', isUser: false },
+      blocks: [resultBlock(image, 'stream-hash')],
+    });
+    const { ToolBlock: _toolStub, ...stubs } = streamRendererStubs;
+    const wrapper = mount(MessageRenderer, {
+      props: { message },
+      global: { plugins: [pinia], directives: { longpress: {} }, stubs },
+    });
+    await wrapper.get('.vcp-tool-block > .tool-header-content').trigger('click');
+    const toolElement = wrapper.get('.vcp-tool-block').element;
+    const stringKeys = renderedVNodeKeys(wrapper.vm.$.subTree).filter((key): key is string => typeof key === 'string');
+    expect(stringKeys.length).toBeGreaterThan(0);
+    expect(stringKeys.every(key => key.length < 128)).toBe(true);
+    message.blocks = [resultBlock(image, 12345)];
+    await nextTick();
+    expect(wrapper.get('.vcp-tool-block').element).toBe(toolElement);
+    expect(wrapper.get<HTMLElement>('.tool-content-scrollable').element.style.display).toBe('none');
+    message.blocks = [resultBlock(`${image.slice(0, -1)}B`, 12346)];
+    await nextTick();
+    expect(wrapper.get('.vcp-tool-block').element).not.toBe(toolElement);
+    expect(wrapper.get<HTMLElement>('.tool-content-scrollable').element.style.display).not.toBe('none');
+    wrapper.unmount();
+  });
+
+  it('does not carry tool interaction state into another message with identical content', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const stream = useChatStreamStore();
+    useChatSessionStore().setConversation({ id: 'agent-a', type: 'agent' }, 'topic-a');
+    const makeMessage = (id: string): ChatMessage => ({
+      id, role: 'assistant', timestamp: 1,
+      shell: { avatarColor: '#64748b', displayName: 'Agent', isUser: false },
+      blocks: [{ type: 'tool-use', tool_name: 'Search', content: 'same request', hash: 'same-hash' }],
+    });
+    stream.addSessionStream('agent-a', 'agent', 'topic-a', 'previous-message');
+    stream.addSessionStream('agent-a', 'agent', 'topic-a', 'next-message');
+    const { ToolBlock: _toolStub, ...stubs } = streamRendererStubs;
+    const wrapper = mount(MessageRenderer, {
+      props: { message: makeMessage('previous-message') },
+      global: { plugins: [pinia], directives: { longpress: {} }, stubs },
+    });
+    await wrapper.get('.vcp-tool-block > .tool-header-content').trigger('click');
+    expect(wrapper.get<HTMLElement>('.tool-content-scrollable').element.style.display).toBe('none');
+    const previousKeys = renderedVNodeKeys(wrapper.vm.$.subTree).filter(key =>
+      typeof key === 'string' && key.includes('previous-message'),
+    );
+    expect(previousKeys.length).toBeGreaterThan(0);
+    await wrapper.setProps({ message: makeMessage('next-message') });
+    const nextKeys = renderedVNodeKeys(wrapper.vm.$.subTree);
+    expect(nextKeys.some(key => previousKeys.includes(key))).toBe(false);
+    expect(wrapper.get<HTMLElement>('.tool-content-scrollable').element.style.display).not.toBe('none');
+    wrapper.unmount();
+  });
+
   it.each([false, true])('keeps stable text and the tail visible after terminal rendering (failed=%s)', async failed => {
     const pinia = createPinia();
     setActivePinia(pinia);
@@ -574,14 +757,14 @@ describe('MessageRenderer presentation shell', () => {
     setActivePinia(pinia);
     const sessionStore = useChatSessionStore();
     const streamStore = useChatStreamStore();
-    const themeStore = useThemeStore();
+    const chatPreferences = useChatPreferencesStore();
     sessionStore.setConversation({
       id: 'agent-a',
       type: 'agent',
       name: 'Agent A',
     } as any, 'topic-a');
     streamStore.addSessionStream('agent-a', 'agent', 'topic-a', 'smooth-append');
-    themeStore.setSmoothStreamingEnabled(true);
+    chatPreferences.setSmoothStreamingEnabled(true);
 
     const message = reactive<ChatMessage>({
       id: 'smooth-append',
@@ -660,7 +843,7 @@ describe('MessageRenderer presentation shell', () => {
     await nextTick();
     expect(wrapper.find('[data-vcp-stream-fragment]').exists()).toBe(true);
 
-    themeStore.setSmoothStreamingEnabled(false);
+    chatPreferences.setSmoothStreamingEnabled(false);
     await nextTick();
     expect(wrapper.find('[data-vcp-stream-fragment]').exists()).toBe(false);
     expect(wrapper.get('.vcp-ast-sandbox').text()).toBe('base完整新增继续');
@@ -694,14 +877,14 @@ describe('MessageRenderer presentation shell', () => {
     setActivePinia(pinia);
     const sessionStore = useChatSessionStore();
     const streamStore = useChatStreamStore();
-    const themeStore = useThemeStore();
+    const chatPreferences = useChatPreferencesStore();
     sessionStore.setConversation({
       id: 'agent-a',
       type: 'agent',
       name: 'Agent A',
     } as any, 'topic-a');
     streamStore.addSessionStream('agent-a', 'agent', 'topic-a', 'stable-reveal');
-    themeStore.setSmoothStreamingEnabled(true);
+    chatPreferences.setSmoothStreamingEnabled(true);
 
     const message = reactive<ChatMessage>({
       id: 'stable-reveal',
@@ -847,14 +1030,14 @@ describe('MessageRenderer presentation shell', () => {
     setActivePinia(pinia);
     const sessionStore = useChatSessionStore();
     const streamStore = useChatStreamStore();
-    const themeStore = useThemeStore();
+    const chatPreferences = useChatPreferencesStore();
     sessionStore.setConversation({
       id: 'agent-a',
       type: 'agent',
       name: 'Agent A',
     } as any, 'topic-a');
     streamStore.addSessionStream('agent-a', 'agent', 'topic-a', 'fresh-stable-reveal');
-    themeStore.setSmoothStreamingEnabled(true);
+    chatPreferences.setSmoothStreamingEnabled(true);
 
     const message = reactive<ChatMessage>({
       id: 'fresh-stable-reveal',
@@ -1371,7 +1554,7 @@ describe('MessageRenderer presentation shell', () => {
     setActivePinia(pinia);
     const sessionStore = useChatSessionStore();
     const streamStore = useChatStreamStore();
-    useThemeStore().setSmoothStreamingEnabled(true);
+    useChatPreferencesStore().setSmoothStreamingEnabled(true);
     sessionStore.setConversation({
       id: 'agent-a',
       type: 'agent',

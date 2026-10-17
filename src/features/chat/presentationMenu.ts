@@ -9,13 +9,13 @@ import { useOverlayStore } from '../../core/stores/overlay';
 import { useNotificationStore } from '../../core/stores/notification';
 import {
   CHAT_PRESENTATION_OPTIONS,
-  useThemeStore,
   type ChatPresentationMode,
-} from '../../core/stores/theme';
+} from './preferences/model';
+import { useChatPreferencesStore } from './preferences/store';
 
 export function handlePresentationSelection(mode: ChatPresentationMode): void {
-  const themeStore = useThemeStore();
-  const result = themeStore.setPresentationMode(mode);
+  const preferences = useChatPreferencesStore();
+  const result = preferences.setPresentationMode(mode);
   if (!result.ok) {
     useNotificationStore().addNotification({
       id: 'chat-presentation-save-failed',
@@ -34,11 +34,11 @@ export function openPresentationMenu(): void {
     // Haptics are an optional enhancement; unsupported devices stay silent.
   }
 
-  const themeStore = useThemeStore();
+  const preferences = useChatPreferencesStore();
   useOverlayStore().openContextMenu(
     CHAT_PRESENTATION_OPTIONS.map((option) => ({
       label: option.label,
-      selected: themeStore.presentationMode === option.value,
+      selected: preferences.presentationMode === option.value,
       handler: () => handlePresentationSelection(option.value),
     })),
     '消息呈现',

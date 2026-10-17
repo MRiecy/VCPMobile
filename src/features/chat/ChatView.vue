@@ -7,6 +7,7 @@ import type { Attachment } from "../../core/types/chat";
 import { useChatStreamStore } from "../../core/stores/chatStreamStore";
 import { useTopicStore } from "../../core/stores/topicListManager";
 import { useThemeStore } from "../../core/stores/theme";
+import { useChatPreferencesStore } from "./preferences/store";
 import { useOverlayStore } from "../../core/stores/overlay";
 import { useAppLifecycleStore } from "../../core/stores/appLifecycle";
 import { useLayoutStore } from "../../core/stores/layout";
@@ -36,6 +37,7 @@ const topicStore = useTopicStore();
 const streamStore = useChatStreamStore();
 const attachmentStore = useAttachmentStore();
 const themeStore = useThemeStore();
+const chatPreferences = useChatPreferencesStore();
 const lifecycleStore = useAppLifecycleStore();
 const layoutStore = useLayoutStore();
 const notificationStore = useNotificationStore();
@@ -96,7 +98,7 @@ const isPresentationMenuOpen = computed(
 // The pre-flush watcher captures the old geometry before Vue patches the data
 // attribute. This protects both the long-press menu and the settings-page entry.
 watch(
-  () => themeStore.presentationMode,
+  () => chatPreferences.presentationMode,
   () => {
     void preserveViewportAcrossLayoutChange(() => undefined);
   },
@@ -246,7 +248,7 @@ onUnmounted(() => {
 
 <template>
   <div ref="chatViewContainerRef" class="chat-view-container flex flex-col h-full w-full min-w-0 relative bg-transparent overflow-hidden"
-    :data-presentation-mode="themeStore.presentationMode" @touchmove="handleContainerTouchMove">
+    :data-presentation-mode="chatPreferences.presentationMode" @touchmove="handleContainerTouchMove">
     <!-- 1. Header (强制保底高度 80px，确保刘海屏可见) -->
     <header class="vcp-header-fixed shrink-0 flex items-center justify-between gap-3 px-4 border-b border-white/5">
       <div class="flex items-center gap-3 min-w-0 flex-1">

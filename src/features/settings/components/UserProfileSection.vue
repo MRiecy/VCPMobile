@@ -1,20 +1,23 @@
 <script setup lang="ts">
-import { onUnmounted, ref } from "vue";
+import { onUnmounted, ref, watch } from "vue";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { deleteTempFile } from "tauri-plugin-vcp-mobile";
 import { cancelFileOperation, pickFile } from "../../../core/utils/nativeFilePicker";
 import { useAssistantStore } from "../../../core/stores/assistant";
 import { useNotificationStore } from "../../../core/stores/notification";
 import { isAndroid, isIOS } from "../../../core/utils/platform";
-import type { AppSettings } from "../../../core/stores/settings";
+import type { IdentityFields } from "../editing/fieldSets";
 import SettingsCard from "../../../components/settings/SettingsCard.vue";
 import SettingsTextField from "../../../components/settings/SettingsTextField.vue";
 import AvatarCropper from "../../../components/ui/AvatarCropper.vue";
 import VcpAvatar from "../../../components/ui/VcpAvatar.vue";
 
-defineProps<{
-  settings: AppSettings;
+const props = defineProps<{
+  settings: Readonly<IdentityFields>;
+  active: boolean;
+  disabled?: boolean;
 }>();
+const emit = defineEmits<{ edit: [patch: Partial<IdentityFields>] }>();
 
 const assistantStore = useAssistantStore();
 const notificationStore = useNotificationStore();
@@ -41,7 +44,7 @@ const releaseAvatarWorkingCopy = async () => {
 };
 
 const triggerFileInput = async () => {
-  if (isPickingAvatar.value || isCropping.value || isSavingAvatar.value) return;
+  if (disposed || !props.active || props.disabled || isPickingAvatar.value || isCropping.value || isSavingAvatar.value) return;
   if (!isAndroid && !isIOS) {
     notificationStore.addNotification({
       type: "info",
@@ -90,6 +93,7 @@ const cancelAvatarCrop = () => {
 // Removed avatarUrl computed as we use avatarDisplayUrl via IPC
 
 const onCropConfirm = async (blob: Blob) => {
+  if (disposed || !props.active || props.disabled) return;
   isCropping.value = false;
   isSavingAvatar.value = true;
   
@@ -108,14 +112,19 @@ const onCropConfirm = async (blob: Blob) => {
   }
 };
 
-onUnmounted(() => {
+const deactivate = () => {
   disposed = true;
+  isCropping.value = false;
+  isPickingAvatar.value = false;
   if (avatarOperationId) {
-    void cancelFileOperation(avatarOperationId).catch(console.warn);
+    const operationId = avatarOperationId;
     avatarOperationId = null;
+    void cancelFileOperation(operationId).catch(console.warn);
   }
   void releaseAvatarWorkingCopy();
-});
+};
+watch(() => props.active, (active) => { if (!active) deactivate(); }, { flush: 'sync' });
+onUnmounted(deactivate);
 </script>
 
 <template>
@@ -135,7 +144,8 @@ onUnmounted(() => {
         </div>
       </div>
       <div class="flex-1 min-w-0">
-        <SettingsTextField v-model="settings.userName" label="用户名" placeholder="输入你的名字..." />
+        <SettingsTextField :model-value="settings.userName" :disabled="disabled" label="用户名" placeholder="输入你的名字..."
+          @update:model-value="emit('edit', { userName: $event })" />
       </div>
     </div>
     
@@ -143,7 +153,9 @@ onUnmounted(() => {
       <div class="flex gap-4">
         <div class="flex-1">
           <SettingsTextField 
-            v-model="settings.adminUsername" 
+            :model-value="settings.adminUsername"
+            :disabled="disabled"
+            @update:model-value="emit('edit', { adminUsername: $event })"
             label="管理员账号" 
             placeholder="VCP 管理员用户名" 
             mono
@@ -151,7 +163,9 @@ onUnmounted(() => {
         </div>
         <div class="flex-1">
           <SettingsTextField 
-            v-model="settings.adminPassword" 
+            :model-value="settings.adminPassword"
+            :disabled="disabled"
+            @update:model-value="emit('edit', { adminPassword: $event })"
             label="管理员密码" 
             placeholder="鉴权密码" 
             is-secure 
@@ -167,5 +181,5 @@ onUnmounted(() => {
   </SettingsCard>
 
   <!-- 头像裁剪器 -->
-  <AvatarCropper v-if="isCropping" :img="cropImg" @cancel="cancelAvatarCrop" @confirm="onCropConfirm" />
+  <AvatarCropper v-if="active && isCropping" :img="cropImg" @cancel="cancelAvatarCrop" @confirm="onCropConfirm" />
 </template>

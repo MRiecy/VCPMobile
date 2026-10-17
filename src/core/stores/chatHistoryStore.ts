@@ -12,6 +12,7 @@ import { useShareStore, type ShareIdentity } from "./shareStore";
 import { clearMessageCache } from "../utils/astRenderer";
 import { extractMentionedMemberIds } from "../utils/mention";
 import { allowChatMutation } from "../../features/chat/chatMutationPolicy";
+import { useChatPreferencesStore } from "../../features/chat/preferences/store";
 
 import type {
   ChatMessage,
@@ -107,6 +108,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   const topicStore = useTopicStore();
   const notificationStore = useNotificationStore();
   const shareStore = useShareStore();
+  const chatPreferences = useChatPreferencesStore();
 
   const errorMessage = (error: unknown) =>
     error instanceof Error ? error.message : String(error);
@@ -699,7 +701,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     if (!key || (!content.trim() && attachmentStore.stagedAttachments.length === 0)) return;
     if (attachmentStore.stagedAttachments.some(attachment => attachment.status !== "done")) return;
 
-    if (typeof navigator !== "undefined" && navigator.vibrate) {
+    if (chatPreferences.messageHapticsEnabled && typeof navigator !== "undefined" && navigator.vibrate) {
       navigator.vibrate(25);
     }
 

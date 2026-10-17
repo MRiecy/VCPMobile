@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted, watch } from 'vue';
 import { getVersion } from '@tauri-apps/api/app';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import SettingsCard from '../../../components/settings/SettingsCard.vue';
@@ -10,9 +10,9 @@ import { useThemeStore } from '../../../core/stores/theme';
 
 // 背景（WebGL 流体 + 噪点）由 SettingsView 的常驻宿主层承担，本组件只负责内容。
 
+const props = withDefaults(defineProps<{ active?: boolean }>(), { active: true });
 const themeStore = useThemeStore();
-
-const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+let disposed = false;
 
 const currentVersion = ref('');
 const notificationStore = useNotificationStore();
@@ -21,7 +21,8 @@ defineEmits(['back']);
 
 onMounted(async () => {
   try {
-    currentVersion.value = await getVersion();
+    const version = await getVersion();
+    if (!disposed && props.active) currentVersion.value = version;
   } catch (e) {
     console.error('[AboutSection] Failed to get version:', e);
   }
@@ -35,11 +36,46 @@ const isMixing = ref(false);
 const transitionStyle = ref('transform 0.2s ease-out');
 
 let animSessionId = 0;
+let animationTimer: ReturnType<typeof setTimeout> | null = null;
+let finishAnimationWait: (() => void) | null = null;
+
+const stopAnimationSequence = () => {
+  animSessionId++;
+  if (animationTimer !== null) clearTimeout(animationTimer);
+  animationTimer = null;
+  const finishWait = finishAnimationWait;
+  finishAnimationWait = null;
+  finishWait?.();
+};
+
+watch(() => props.active, (active) => {
+  if (!active) {
+    stopAnimationSequence();
+    isMixing.value = false;
+  }
+}, { flush: 'sync' });
+
+onUnmounted(() => {
+  disposed = true;
+  stopAnimationSequence();
+});
 
 const startAnimationSequence = async () => {
-  animSessionId++;
+  if (!props.active || disposed) return;
+  stopAnimationSequence();
   const sessionId = animSessionId;
-  const checkAbort = () => sessionId !== animSessionId;
+  const checkAbort = () => disposed || !props.active || sessionId !== animSessionId;
+  const sleep = (ms: number): Promise<void> => {
+    if (checkAbort()) return Promise.resolve();
+    return new Promise((resolve) => {
+      finishAnimationWait = resolve;
+      animationTimer = setTimeout(() => {
+        animationTimer = null;
+        finishAnimationWait = null;
+        resolve();
+      }, ms);
+    });
+  };
 
   const animateTo = async (x: number, y: number, durationMs: number, easing = 'ease-in-out') => {
     if (checkAbort()) return;
@@ -100,6 +136,7 @@ const startAnimationSequence = async () => {
 };
 
 const handlePress = () => {
+  if (!props.active || disposed) return;
   if (!isMixing.value) {
     isMixing.value = true;
     startAnimationSequence();
@@ -107,10 +144,10 @@ const handlePress = () => {
 };
 
 const handleMove = (e: MouseEvent | TouchEvent) => {
-  if (!hitboxRef.value) return;
+  if (!props.active || disposed || !hitboxRef.value) return;
   
   // Intervene: Cancel sequence and track mouse/finger instantly
-  animSessionId++;
+  stopAnimationSequence();
   isMixing.value = true;
   transitionStyle.value = 'none'; // 0延迟，极致跟手
   
@@ -146,12 +183,14 @@ const handleMove = (e: MouseEvent | TouchEvent) => {
 };
 
 const resetRotation = () => {
-  animSessionId++;
+  if (!props.active || disposed) return;
+  stopAnimationSequence();
   transitionStyle.value = 'transform 0.5s ease-out';
   rotation.value = { x: 0, y: 0 };
 };
 
 const showFeatures = () => {
+  if (!props.active || disposed) return;
   notificationStore.addNotification({
     type: 'info',
     title: '功能介绍',
@@ -161,22 +200,26 @@ const showFeatures = () => {
 };
 
 const openGitHub = () => {
+  if (!props.active || disposed) return;
   openUrl('https://github.com/MRiecy/VCPMobile');
 };
 
 const openFeedback = () => {
+  if (!props.active || disposed) return;
   openUrl('https://github.com/MRiecy/VCPMobile/issues');
 };
 </script>
 
 <template>
   <div 
+    :inert="!props.active"
     class="flex flex-col flex-1 h-full relative bg-transparent overflow-hidden transition-colors duration-300"
     :class="themeStore.isDarkResolved ? 'theme-dark' : 'theme-light'"
   >
     <!-- Immersive Back Button -->
     <button 
-      @click="$emit('back')"
+      :disabled="!props.active"
+      @click="props.active && $emit('back')"
       class="absolute left-4 z-20 p-2 active:scale-90 transition-all flex items-center justify-center opacity-70 active:opacity-100"
       style="top: calc(var(--vcp-safe-top, 24px) + 12px);"
     >

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onUnmounted, watch } from "vue";
 import type { AppSettings } from "../../../core/stores/settings";
-import { useSettingsStore } from "../../../core/stores/settings";
+import type { SettingsSaveResult } from "../editing/useSettingsEditSession";
 import { isIOS } from "../../../core/utils/platform";
 import { cancelFileOperation } from "../../../core/utils/nativeFilePicker";
 import SettingsActionWithStatus from "../../../components/settings/SettingsActionWithStatus.vue";
@@ -13,12 +13,10 @@ import {
 } from "../useConfigBackup";
 
 const props = defineProps<{
-  settings: AppSettings;
-}>();
-
-const emit = defineEmits<{
-  (e: "save-request"): void;
-  (e: "config-imported"): void;
+  active: boolean;
+  disabled?: boolean;
+  commit: () => Promise<SettingsSaveResult>;
+  applyImport: (patch: Partial<AppSettings>) => Promise<void>;
 }>();
 
 type Status = { type: "success" | "error" | "loading" | null; message: string };
@@ -26,7 +24,6 @@ type Status = { type: "success" | "error" | "loading" | null; message: string };
 const exportStatus = ref<Status>({ type: null, message: "" });
 const importStatus = ref<Status>({ type: null, message: "" });
 
-const settingsStore = useSettingsStore();
 let disposed = false;
 let importOperationId: string | null = null;
 
@@ -34,14 +31,14 @@ let importOperationId: string | null = null;
 // 导出
 // ------------------------------------------------------------------
 const onExport = async () => {
-  if (exportStatus.value.type === "loading") return;
-  // 先把页面上未保存的修改落盘，保证导出内容与用户所见一致
-  emit("save-request");
-
+  if (disposed || !props.active || props.disabled || importOperationId || importing.value || showImportConfirm.value || exportStatus.value.type === "loading") return;
   exportStatus.value = { type: "loading", message: "正在生成备份文件..." };
   try {
-    const result = await exportConfigBackup(props.settings);
-    if (disposed) return;
+    const saved = await props.commit();
+    if (disposed || !props.active) return;
+    if (!saved.ok) throw new Error(saved.error);
+    const result = await exportConfigBackup(saved.snapshot);
+    if (disposed || !props.active) return;
     exportStatus.value = {
       type: "success",
       message: `${isIOS ? '已保存到所选文件位置' : '已导出到 下载/VCPMobile'}：${result.displayName}\n文件包含明文密钥，请妥善保管`,
@@ -64,7 +61,7 @@ const showImportConfirm = ref(false);
 const importing = ref(false);
 
 const triggerImport = async () => {
-  if (importOperationId || importing.value || showImportConfirm.value) return;
+  if (disposed || !props.active || props.disabled || exportStatus.value.type === "loading" || importOperationId || importing.value || showImportConfirm.value) return;
   const operationId = `config_${crypto.randomUUID()}`;
   importOperationId = operationId;
   importStatus.value = { type: "loading", message: "正在选取并解析备份文件..." };
@@ -90,30 +87,37 @@ watch(showImportConfirm, (open) => {
   if (!open) pendingImport.value = null;
 });
 
-onUnmounted(() => {
+const deactivate = () => {
   disposed = true;
+  showImportConfirm.value = false;
   pendingImport.value = null;
   if (importOperationId) {
-    void cancelFileOperation(importOperationId).catch(console.warn);
+    const operationId = importOperationId;
     importOperationId = null;
+    void cancelFileOperation(operationId).catch(console.warn);
   }
-});
+};
+watch(() => props.active, (active) => { if (!active) deactivate(); }, { flush: 'sync' });
+onUnmounted(deactivate);
 
 const confirmImport = async () => {
+  if (disposed || !props.active || props.disabled || importing.value) return;
   const backup = pendingImport.value;
   pendingImport.value = null;
+  showImportConfirm.value = false;
   if (!backup) return;
 
   importing.value = true;
   importStatus.value = { type: "loading", message: "正在应用配置..." };
   try {
-    await settingsStore.updateSettings(backup.settings);
-    emit("config-imported");
+    await props.applyImport(backup.settings);
+    if (disposed || !props.active) return;
     importStatus.value = { type: "success", message: "配置导入成功" };
   } catch (e: any) {
+    if (disposed || !props.active) return;
     importStatus.value = { type: "error", message: `导入失败: ${e}` };
   } finally {
-    importing.value = false;
+    if (!disposed) importing.value = false;
   }
 };
 </script>
@@ -126,6 +130,7 @@ const confirmImport = async () => {
       button-variant="primary"
       button-label="导出"
       :button-loading="exportStatus.type === 'loading'"
+      :button-disabled="disabled || !!importOperationId || importing || showImportConfirm"
       :status-type="exportStatus.type"
       :status-message="exportStatus.message"
       status-multiline
@@ -140,6 +145,7 @@ const confirmImport = async () => {
       button-variant="secondary"
       button-label="导入"
       :button-loading="importStatus.type === 'loading' || importing"
+      :button-disabled="disabled || exportStatus.type === 'loading'"
       :status-type="importStatus.type"
       :status-message="importStatus.message"
       status-multiline
@@ -153,6 +159,7 @@ const confirmImport = async () => {
   </div>
 
   <VcpConfirm
+    v-if="active"
     v-model:is-open="showImportConfirm"
     title="导入配置备份"
     :message="`将覆盖「用户身份」与「应用连接」的现有配置。\n\n备份导出时间：${pendingImport?.exportedAt || '未知'}\n\n确定继续吗？`"

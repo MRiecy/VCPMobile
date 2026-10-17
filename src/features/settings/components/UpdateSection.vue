@@ -9,12 +9,9 @@ import SettingsActionButton from '../../../components/settings/SettingsActionBut
 import SettingsInlineStatus from '../../../components/settings/SettingsInlineStatus.vue';
 import SettingsSwitch from '../../../components/settings/SettingsSwitch.vue';
 
-const AUTO_CHECK_KEY = 'vcp_auto_update_check';
-
 const currentVersion = ref('');
 const checking = ref(false);
 const justCheckedNoUpdate = ref(false);
-const autoCheckEnabled = ref(localStorage.getItem(AUTO_CHECK_KEY) !== 'off');
 
 const updateStore = useUpdateStore();
 const notificationStore = useNotificationStore();
@@ -33,8 +30,15 @@ onMounted(async () => {
 });
 
 const onAutoCheckChange = (value: boolean) => {
-  autoCheckEnabled.value = value;
-  localStorage.setItem(AUTO_CHECK_KEY, value ? 'on' : 'off');
+  const result = updateStore.setAutoCheckEnabled(value);
+  if (!result.ok) {
+    notificationStore.addNotification({
+      type: 'error',
+      title: '保存失败',
+      message: '自动检查更新偏好未能保存，请重试。',
+      toastOnly: true,
+    });
+  }
 };
 
 const rowDescription = computed(() => {
@@ -141,7 +145,11 @@ const openPrompt = () => {
 
     <SettingsRow v-if="isAndroid" title="自动检查更新" description="启动时检查新版本（24 小时内最多一次）">
       <template #action>
-        <SettingsSwitch :model-value="autoCheckEnabled" @update:model-value="onAutoCheckChange" />
+        <SettingsSwitch
+          :model-value="updateStore.autoCheckEnabled"
+          aria-label="自动检查更新"
+          @update:model-value="onAutoCheckChange"
+        />
       </template>
     </SettingsRow>
 

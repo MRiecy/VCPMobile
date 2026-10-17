@@ -52,11 +52,12 @@ const props = withDefaults(
 );
 
 const isExpanded = ref(props.defaultExpanded);
+let hasManualExpansion = false;
 
 watch(
   () => props.defaultExpanded,
   (newVal) => {
-    isExpanded.value = newVal;
+    if (!hasManualExpansion) isExpanded.value = newVal;
   }
 );
 
@@ -118,6 +119,7 @@ onUnmounted(() => {
 });
 
 const toggleExpand = () => {
+  hasManualExpansion = true;
   isExpanded.value = !isExpanded.value;
 };
 

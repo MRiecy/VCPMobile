@@ -10,10 +10,16 @@ interface Props {
 const props = withDefaults(defineProps<Props>(), {
   zIndex: LAYER_PAGE_BASE,
 });
+
+const emit = defineEmits<{
+  'before-leave': [element: Element];
+  'after-leave': [element: Element];
+}>();
 </script>
 
 <template>
-  <Transition name="slide-page" appear>
+  <Transition name="slide-page" appear
+    @before-leave="emit('before-leave', $event)" @after-leave="emit('after-leave', $event)">
     <div
       v-show="props.isOpen"
       v-bind="$attrs"

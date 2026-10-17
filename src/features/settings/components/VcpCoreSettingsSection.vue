@@ -1,16 +1,21 @@
 <script setup lang="ts">
 import { onUnmounted, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import type { AppSettings, ChatEndpointMode } from '../../../core/stores/settings';
+import type { ChatEndpointMode } from '../../../core/stores/settings';
+import type { ConnectionFields } from '../editing/fieldSets';
+import type { SettingsSaveResult } from '../editing/useSettingsEditSession';
 import SettingsTextField from '../../../components/settings/SettingsTextField.vue';
 import SettingsActionWithStatus from '../../../components/settings/SettingsActionWithStatus.vue';
 
 const props = defineProps<{
-  settings: AppSettings;
+  settings: Readonly<ConnectionFields>;
+  active: boolean;
+  disabled?: boolean;
+  commit: () => Promise<SettingsSaveResult>;
 }>();
 
 const emit = defineEmits<{
-  (e: 'save-request'): void;
+  (e: 'edit', patch: Partial<ConnectionFields>): void;
 }>();
 
 const vcpPingStatus = ref<{ type: 'success' | 'error' | 'loading' | 'info' | null; message: string }>({ type: null, message: '' });
@@ -34,6 +39,8 @@ const endpointPreview = ref<ChatEndpointPreview | null>(null);
 const endpointPreviewError = ref('');
 let previewTimer: ReturnType<typeof setTimeout> | null = null;
 let previewGeneration = 0;
+let testGeneration = 0;
+let disposed = false;
 
 const scheduleEndpointPreview = () => {
   if (previewTimer) clearTimeout(previewTimer);
@@ -42,7 +49,7 @@ const scheduleEndpointPreview = () => {
   const chatEndpointMode = props.settings.chatEndpointMode;
   endpointPreview.value = null;
   endpointPreviewError.value = '';
-  if (!vcpUrl) return;
+  if (!vcpUrl || !props.active || disposed) return;
 
   previewTimer = setTimeout(async () => {
     try {
@@ -60,15 +67,26 @@ const scheduleEndpointPreview = () => {
 };
 
 watch(
-  [() => props.settings.vcpServerUrl, () => props.settings.chatEndpointMode],
+  [() => props.settings.vcpServerUrl, () => props.settings.chatEndpointMode, () => props.active],
   scheduleEndpointPreview,
   { immediate: true },
 );
 
 onUnmounted(() => {
+  disposed = true;
   if (previewTimer) clearTimeout(previewTimer);
   previewGeneration += 1;
+  testGeneration += 1;
 });
+
+watch(
+  [() => props.settings.vcpServerUrl, () => props.settings.vcpApiKey, () => props.settings.chatEndpointMode, () => props.active],
+  () => {
+    testGeneration += 1;
+    vcpPingStatus.value = { type: null, message: '' };
+  },
+  { flush: 'sync' },
+);
 
 interface VcpConnectionTestResult {
   success: boolean;
@@ -79,21 +97,22 @@ interface VcpConnectionTestResult {
 }
 
 const testVcpConnection = async () => {
-  emit('save-request');
-
-  if (!props.settings.vcpServerUrl) {
-    vcpPingStatus.value = { type: 'error', message: '请先输入 Chat 服务器 URL' };
-    return;
-  }
-
+  if (disposed || !props.active || props.disabled || vcpPingStatus.value.type === 'loading') return;
+  const generation = ++testGeneration;
   vcpPingStatus.value = { type: 'loading', message: '正在检查模型列表...' };
   try {
+    const saved = await props.commit();
+    if (disposed || !props.active || generation !== testGeneration) return;
+    if (!saved.ok) throw new Error(saved.error);
+    const snapshot = saved.snapshot;
+    if (!snapshot.vcpServerUrl) throw new Error('请先输入 Chat 服务器 URL');
     const res = await invoke<VcpConnectionTestResult>('test_vcp_connection', {
-      vcpUrl: props.settings.vcpServerUrl,
-      vcpApiKey: props.settings.vcpApiKey,
-      chatEndpointMode: props.settings.chatEndpointMode,
+      vcpUrl: snapshot.vcpServerUrl,
+      vcpApiKey: snapshot.vcpApiKey,
+      chatEndpointMode: snapshot.chatEndpointMode,
     });
 
+    if (disposed || !props.active || generation !== testGeneration) return;
     if (!res.modelDiscoveryAvailable) {
       vcpPingStatus.value = {
         type: 'info',
@@ -105,6 +124,7 @@ const testVcpConnection = async () => {
       vcpPingStatus.value = { type: 'error', message: `验证失败, HTTP 状态码: ${res.status}` };
     }
   } catch (e: any) {
+    if (disposed || !props.active || generation !== testGeneration) return;
     vcpPingStatus.value = { type: 'error', message: `${e}` };
   }
 };
@@ -112,7 +132,8 @@ const testVcpConnection = async () => {
 
 <template>
   <div class="space-y-5 px-1">
-    <SettingsTextField v-model="settings.vcpServerUrl" label="Chat 服务器 URL (HTTP/HTTPS)"
+    <SettingsTextField :model-value="settings.vcpServerUrl" :disabled="disabled"
+      @update:model-value="emit('edit', { vcpServerUrl: $event })" label="Chat 服务器 URL (HTTP/HTTPS)"
       placeholder="https://vcp-endpoint.com" />
 
     <fieldset class="border-t border-black/5 dark:border-white/5 pt-3">
@@ -123,9 +144,10 @@ const testVcpConnection = async () => {
           :key="option.value"
           type="button"
           role="radio"
+          :disabled="disabled"
           :aria-checked="settings.chatEndpointMode === option.value"
           class="relative w-full py-3 pl-3 pr-2 text-left transition-colors active:bg-black/5 dark:active:bg-white/5"
-          @click="settings.chatEndpointMode = option.value"
+          @click="emit('edit', { chatEndpointMode: option.value })"
         >
           <span class="absolute left-0 top-2 bottom-2 w-0.5 bg-blue-500 transition-opacity"
             :class="settings.chatEndpointMode === option.value ? 'opacity-100' : 'opacity-0'"></span>
@@ -157,19 +179,23 @@ const testVcpConnection = async () => {
       </p>
     </div>
 
-    <SettingsTextField v-model="settings.vcpApiKey" is-secure label="API Key" placeholder="输入 API Key" />
+    <SettingsTextField :model-value="settings.vcpApiKey" :disabled="disabled"
+      @update:model-value="emit('edit', { vcpApiKey: $event })" is-secure label="API Key" placeholder="输入 API Key" />
 
     <div class="border-t border-black/5 dark:border-white/5 pt-2"></div>
 
-    <SettingsTextField v-model="settings.vcpLogUrl" label="VCP WebSocket 服务器 URL" placeholder="ws://localhost:6005"
+    <SettingsTextField :model-value="settings.vcpLogUrl" :disabled="disabled"
+      @update:model-value="emit('edit', { vcpLogUrl: $event })" label="VCP WebSocket 服务器 URL" placeholder="ws://localhost:6005"
       mono />
-    <SettingsTextField v-model="settings.vcpLogKey" is-secure label="VCP WebSocket 鉴权 Key"
+    <SettingsTextField :model-value="settings.vcpLogKey" :disabled="disabled"
+      @update:model-value="emit('edit', { vcpLogKey: $event })" is-secure label="VCP WebSocket 鉴权 Key"
       placeholder="输入 WebSocket Key" mono />
 
     <SettingsActionWithStatus
       button-variant="primary"
       button-label="检查模型发现"
       :button-loading="vcpPingStatus.type === 'loading'"
+      :button-disabled="disabled"
       :status-type="vcpPingStatus.type"
       :status-message="vcpPingStatus.message"
       status-multiline

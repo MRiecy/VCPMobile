@@ -79,6 +79,14 @@ src/
 
 `GlobalOverlayManager` 负责 Prompt、Confirm、ContextMenu、Editor、Toast 与共享 Viewer，并提供 Feature Teleport 目标。新增全局覆盖面前先找到现有 owner、挂载点与关闭路径；局部弹层留在局部组件，不因层级问题直接抬成全局状态。
 
+### 3.4 设置与领域偏好
+
+`features/settings/catalog.ts` 组织稳定页面 ID、懒加载组件与布局；`SettingsView` / `useSettingsNavigation` 只拥有当前访问、退场画面和返回桥接。身份、连接、总结页面分别通过 `editing/useSettingsPageSession` 建立字段会话，正式快照始终归 `core/stores/settings.ts`。修改字段走显式 edit；保存只提交本页 dirty patch，外部快照重基不能覆盖用户后续输入。
+
+依赖保存的诊断、重建与导出等待 commit 的确定结果；导入由连接页冻结并 settlePending 后提交，只接受覆盖字段。`active=false` 立即释放本次会话并关闭局部 ModelSelector、裁剪和导入确认，未交付 picker 沿既有 helper 取消；隐藏不启动保存，已提交任务继续归原 owner。
+
+`features/chat/preferences/` 拥有消息呈现、平滑动效、消息震动和流式工具折叠的类型、存储及只读 Store；`features/chat/settings/ChatPreferencesPage.vue` 只是一个入口，聊天消费者不依赖它挂载。主题草稿/确认仍归 ThemePicker 与 themeStore；自动检查更新偏好归 updateStore。聊天与更新共用 `core/preferences/localPreference.ts` 的异常捕获 IO，领域各自保留 key、编码和默认值。新增偏好应在所属领域接通 UI 与真实消费者，不把设置中心或主题 Store 扩为业务总容器。
+
 ---
 
 ## 4. 消息渲染与交互完整性
@@ -88,6 +96,8 @@ src/
 Markdown、代码、KaTeX、Mermaid、SVG/MathML、受控 raw HTML、Tool、Thought、Diary、附件和流式收敛共同构成现有消息能力。兼容或安全修改必须保留结构、样式、媒体与交互；隔离能够触达宿主或外部状态的主动执行面，不采用整块转义、纯文本降级或禁用全部脚本来替代边界设计。
 
 消息内部按钮、链接、图片与引用由现有事件桥和对应 Store 处理。新增交互必须复用真实消费入口，区分 DOM 局部反馈与业务结果，不在渲染器内另建业务状态所有者。
+
+工具折叠偏好只控制默认策略，ToolBlock 的本次手动展开/收起优先。MessageRenderer 在同一消息中按工具次序和逐字段语义比较延续短交互 key，避免 Markdown 合并或终态 hash 变化丢掉手动选择；工具结构改变或组件卸载可重建默认状态，不复制大正文/base64 到 key，也不持久化该交互状态。消息震动开关共同控制原发送与流结束的设备支持触感，不接管长按等界面反馈。
 
 ---
 

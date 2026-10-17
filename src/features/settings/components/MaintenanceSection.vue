@@ -1,20 +1,27 @@
 <script setup lang="ts">
-import { ref, onUnmounted } from 'vue';
+import { ref, onUnmounted, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import SettingsActionWithStatus from '../../../components/settings/SettingsActionWithStatus.vue';
 import { useOverlayStore } from '../../../core/stores/overlay';
 import { isAndroid, isIOS } from '../../../core/utils/platform';
 
 
+const props = withDefaults(defineProps<{ active?: boolean; disabled?: boolean }>(), { active: true });
 const overlayStore = useOverlayStore();
 
 const cacheStatus = ref<{ type: 'success' | 'error' | 'loading' | 'info' | null; message: string }>({ type: null, message: '' });
 let disposed = false;
 let clearStatusTimer: ReturnType<typeof setTimeout> | undefined;
 onUnmounted(() => { disposed = true; clearTimeout(clearStatusTimer); });
+watch(() => props.active, (active) => {
+  if (!active) {
+    disposed = true;
+    clearTimeout(clearStatusTimer);
+  }
+}, { flush: 'sync' });
 
 const clearSystemCache = async () => {
-  if (cacheStatus.value.type === 'loading') return;
+  if (disposed || !props.active || props.disabled || cacheStatus.value.type === 'loading') return;
   clearTimeout(clearStatusTimer);
   if (!isAndroid && !isIOS) {
     cacheStatus.value = {
@@ -38,6 +45,7 @@ const clearSystemCache = async () => {
 };
 
 const openRebuildSession = () => {
+  if (disposed || !props.active || props.disabled) return;
   overlayStore.openRebuildSession('preRender');
 };
 </script>
@@ -52,6 +60,7 @@ const openRebuildSession = () => {
         button-size="sm"
         :button-label="isAndroid || isIOS ? '立即清理' : '查看说明'"
         :button-loading="cacheStatus.type === 'loading'"
+        :button-disabled="disabled"
         :status-type="cacheStatus.type"
         :status-message="cacheStatus.message"
         status-mono
@@ -67,6 +76,7 @@ const openRebuildSession = () => {
         button-variant="primary"
         button-size="sm"
         button-label="开始刷新"
+        :button-disabled="disabled"
         status-mono
         @action-click="openRebuildSession"
       />

@@ -34,19 +34,6 @@ export interface AppSettings {
   [key: string]: unknown;
 }
 
-export function diffSettingsPatch(
-  baseline: AppSettings,
-  edited: AppSettings,
-): Partial<AppSettings> {
-  const patch: Partial<AppSettings> = {};
-  for (const key of Object.keys(edited)) {
-    if (JSON.stringify(edited[key]) !== JSON.stringify(baseline[key])) {
-      patch[key] = edited[key];
-    }
-  }
-  return patch;
-}
-
 interface SettingsRecoveryStatus {
   recoveredCorrupt: boolean;
   backupKey: string | null;
@@ -97,25 +84,29 @@ export const useSettingsStore = defineStore("settings", () => {
     }
   });
 
-  const updateSettings = (updates: Partial<AppSettings>) => enqueueOperation(async () => {
-    error.value = null;
-    try {
-      const updated = await invoke<AppSettings>("update_settings", { updates });
-      settings.value = updated;
+  const updateSettings = async (updates: Partial<AppSettings>): Promise<AppSettings> => {
+    // Capture at intent time: queued writes must not observe later draft/array edits.
+    const capturedUpdates = JSON.parse(JSON.stringify(updates)) as Partial<AppSettings>;
+    return enqueueOperation(async () => {
+      error.value = null;
+      try {
+        const updated = await invoke<AppSettings>("update_settings", { updates: capturedUpdates });
+        settings.value = updated;
 
-      notificationStore.addNotification({
-        type: "success",
-        title: "配置同步成功",
-        message: "变更已生效",
-        toastOnly: true,
-      });
-      return updated;
-    } catch (e: any) {
-      error.value = e.toString();
-      console.error("[SettingsStore] Failed to update settings:", e);
-      throw e;
-    }
-  });
+        notificationStore.addNotification({
+          type: "success",
+          title: "设置已保存",
+          message: "配置变更已保存",
+          toastOnly: true,
+        });
+        return updated;
+      } catch (e: any) {
+        error.value = e.toString();
+        console.error("[SettingsStore] Failed to update settings:", e);
+        throw e;
+      }
+    });
+  };
 
   return {
     settings,

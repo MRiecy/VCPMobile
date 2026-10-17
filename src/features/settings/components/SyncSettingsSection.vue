@@ -1,21 +1,25 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { onUnmounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import type { AppSettings } from "../../../core/stores/settings";
+import type { ConnectionFields } from "../editing/fieldSets";
+import type { SettingsSaveResult } from "../editing/useSettingsEditSession";
 import { useOverlayStore } from "../../../core/stores/overlay";
 import SettingsTextField from "../../../components/settings/SettingsTextField.vue";
 import SettingsActionButton from "../../../components/settings/SettingsActionButton.vue";
 import SettingsActionWithStatus from "../../../components/settings/SettingsActionWithStatus.vue";
 import SettingsRow from "../../../components/settings/SettingsRow.vue";
 
-defineProps<{
-  settings: AppSettings;
+const props = defineProps<{
+  settings: Readonly<ConnectionFields>;
+  active: boolean;
+  disabled?: boolean;
+  commit: () => Promise<SettingsSaveResult>;
 }>();
 
 const overlayStore = useOverlayStore();
 
 const emit = defineEmits<{
-  (e: "save-request"): void;
+  (e: "edit", patch: Partial<ConnectionFields>): void;
 }>();
 
 const emoticonStatus = ref<{
@@ -24,22 +28,42 @@ const emoticonStatus = ref<{
 }>({ type: null, message: "" });
 
 const startManualSync = () => {
+  if (!props.active || props.disabled) return;
   overlayStore.openSyncSession();
 };
 
+let disposed = false;
+let generation = 0;
+let clearTimer: ReturnType<typeof setTimeout> | null = null;
+const deactivate = () => {
+  generation += 1;
+  if (clearTimer) clearTimeout(clearTimer);
+  clearTimer = null;
+};
+watch(() => props.active, (active) => { if (!active) deactivate(); }, { flush: 'sync' });
+onUnmounted(() => { disposed = true; deactivate(); });
+
 const rebuildEmoticonLibrary = async () => {
-  emit("save-request");
+  if (disposed || !props.active || props.disabled || emoticonStatus.value.type === 'loading') return;
+  const request = ++generation;
+  if (clearTimer) clearTimeout(clearTimer);
   emoticonStatus.value = { type: "loading", message: "正在从远程服务器获取..." };
   try {
+    const saved = await props.commit();
+    if (disposed || !props.active || request !== generation) return;
+    if (!saved.ok) throw new Error(saved.error);
     const count = await invoke<number>("regenerate_emoticon_library");
+    if (disposed || !props.active || request !== generation) return;
     emoticonStatus.value = {
       type: "success",
       message: `同步成功：共计 ${count} 个表情`,
     };
-    setTimeout(() => {
-      emoticonStatus.value = { type: null, message: "" };
+    clearTimer = setTimeout(() => {
+      if (!disposed && props.active && request === generation) emoticonStatus.value = { type: null, message: "" };
+      clearTimer = null;
     }, 3000);
   } catch (e: any) {
+    if (disposed || !props.active || request !== generation) return;
     emoticonStatus.value = { type: "error", message: `同步失败: ${e}` };
   }
 };
@@ -48,19 +72,25 @@ const rebuildEmoticonLibrary = async () => {
 <template>
   <div class="space-y-5 px-1">
     <SettingsTextField
-      v-model="settings.syncHttpUrl"
+      :model-value="settings.syncHttpUrl"
+      :disabled="disabled"
+      @update:model-value="emit('edit', { syncHttpUrl: $event })"
       label="HTTP 服务 URL"
       placeholder="http://192.168.x.x:5974"
       mono
     />
     <SettingsTextField
-      v-model="settings.syncServerUrl"
+      :model-value="settings.syncServerUrl"
+      :disabled="disabled"
+      @update:model-value="emit('edit', { syncServerUrl: $event })"
       label="WebSocket 服务 URL"
       placeholder="ws://192.168.x.x:5975"
       mono
     />
     <SettingsTextField
-      v-model="settings.syncToken"
+      :model-value="settings.syncToken"
+      :disabled="disabled"
+      @update:model-value="emit('edit', { syncToken: $event })"
       is-secure
       label="Mobile Sync Token"
       placeholder="输入桌面端 config.env 中的 Token"
@@ -69,7 +99,9 @@ const rebuildEmoticonLibrary = async () => {
 
     <div class="border-t border-black/5 dark:border-white/5 pt-2 space-y-4">
       <SettingsTextField
-        v-model="settings.fileKey"
+        :model-value="settings.fileKey"
+        :disabled="disabled"
+        @update:model-value="emit('edit', { fileKey: $event })"
         is-secure
         label="表情包图床密钥 (fileKey)"
         placeholder="用于构造表情包 URL 的密码"
@@ -83,6 +115,7 @@ const rebuildEmoticonLibrary = async () => {
         button-size="sm"
         button-label="REFRESH"
         :button-loading="emoticonStatus.type === 'loading'"
+        :button-disabled="disabled"
         :status-type="emoticonStatus.type"
         :status-message="emoticonStatus.message"
         @action-click="rebuildEmoticonLibrary"
@@ -96,6 +129,7 @@ const rebuildEmoticonLibrary = async () => {
           <SettingsActionButton
             variant="secondary"
             size="sm"
+            :disabled="disabled"
             @click="startManualSync"
           >
             OPEN PANEL

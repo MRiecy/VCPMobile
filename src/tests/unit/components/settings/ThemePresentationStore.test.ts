@@ -1,14 +1,27 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import {
-  normalizeChatPresentationMode,
   normalizeThemeModuleKey,
   resolveThemeWallpaperUrl,
   useThemeStore,
 } from '@/core/stores/theme';
+import { normalizeChatPresentationMode } from '@/features/chat/preferences/model';
+import { useChatPreferencesStore } from '@/features/chat/preferences/store';
 
 describe('theme and chat presentation store contracts', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
   beforeEach(() => {
+    // Happy DOM binds Storage methods through a Proxy. A plain facade keeps
+    // failure spies reversible while retaining its actual backing storage.
+    const storage = window.localStorage;
+    vi.stubGlobal('localStorage', {
+      getItem: storage.getItem.bind(storage), setItem: storage.setItem.bind(storage),
+      removeItem: storage.removeItem.bind(storage), clear: storage.clear.bind(storage),
+    });
     localStorage.clear();
     document.documentElement.style.cssText = '';
     document.documentElement.className = '';
@@ -20,7 +33,7 @@ describe('theme and chat presentation store contracts', () => {
     'restores the legal presentation value %s',
     (mode) => {
       localStorage.setItem('vcp-chat-presentation-mode', mode);
-      const store = useThemeStore();
+      const store = useChatPreferencesStore();
       expect(store.presentationMode).toBe(mode);
       store.$dispose();
     },
@@ -28,7 +41,7 @@ describe('theme and chat presentation store contracts', () => {
 
   it('falls back to bubble and repairs an invalid persisted presentation value', () => {
     localStorage.setItem('vcp-chat-presentation-mode', 'magazine');
-    const store = useThemeStore();
+    const store = useChatPreferencesStore();
 
     expect(store.presentationMode).toBe('bubble');
     expect(localStorage.getItem('vcp-chat-presentation-mode')).toBe('bubble');
@@ -37,7 +50,7 @@ describe('theme and chat presentation store contracts', () => {
   });
 
   it('does not write or reflow when setting the current presentation value', () => {
-    const store = useThemeStore();
+    const store = useChatPreferencesStore();
     const setItem = vi.spyOn(localStorage, 'setItem');
 
     const result = store.setPresentationMode('bubble');
@@ -48,7 +61,7 @@ describe('theme and chat presentation store contracts', () => {
   });
 
   it('keeps smooth streaming opt-in and restores the local rendering preference', () => {
-    const initialStore = useThemeStore();
+    const initialStore = useChatPreferencesStore();
     expect(initialStore.smoothStreamingEnabled).toBe(false);
     expect(initialStore.setSmoothStreamingEnabled(true)).toEqual({
       ok: true,
@@ -59,13 +72,13 @@ describe('theme and chat presentation store contracts', () => {
     initialStore.$dispose();
 
     setActivePinia(createPinia());
-    const restoredStore = useThemeStore();
+    const restoredStore = useChatPreferencesStore();
     expect(restoredStore.smoothStreamingEnabled).toBe(true);
     restoredStore.$dispose();
   });
 
   it('keeps the previous smooth streaming preference when persistence fails', () => {
-    const store = useThemeStore();
+    const store = useChatPreferencesStore();
     const originalSetItem = localStorage.setItem.bind(localStorage);
     vi.spyOn(localStorage, 'setItem').mockImplementation((key, value) => {
       if (key === 'vcp-smooth-streaming-enabled') throw new Error('quota exceeded');
@@ -82,7 +95,7 @@ describe('theme and chat presentation store contracts', () => {
   });
 
   it('keeps the previous presentation mode when local persistence fails', () => {
-    const store = useThemeStore();
+    const store = useChatPreferencesStore();
     expect(store.setPresentationMode('panel').ok).toBe(true);
 
     const originalSetItem = localStorage.setItem.bind(localStorage);
@@ -97,6 +110,61 @@ describe('theme and chat presentation store contracts', () => {
     expect(result.changed).toBe(false);
     expect(store.presentationMode).toBe('panel');
     expect(localStorage.getItem('vcp-chat-presentation-mode')).toBe('panel');
+    store.$dispose();
+  });
+
+  it('restores message feedback and tool folding without initializing a theme', () => {
+    const store = useChatPreferencesStore();
+    expect(store.messageHapticsEnabled).toBe(true);
+    expect(store.collapseToolsWhileStreaming).toBe(false);
+    store.setMessageHapticsEnabled(false);
+    store.setCollapseToolsWhileStreaming(true);
+    store.$dispose();
+
+    setActivePinia(createPinia());
+    const restored = useChatPreferencesStore();
+    expect(restored.messageHapticsEnabled).toBe(false);
+    expect(restored.collapseToolsWhileStreaming).toBe(true);
+    expect(document.documentElement.style.cssText).toBe('');
+    expect(localStorage.getItem('vcp-theme-mode')).toBeNull();
+    restored.$dispose();
+  });
+
+  it.each([
+    ['vcp-message-haptics-enabled', 'messageHapticsEnabled', 'setMessageHapticsEnabled', false, true],
+    ['vcp-collapse-tools-while-streaming', 'collapseToolsWhileStreaming', 'setCollapseToolsWhileStreaming', true, false],
+  ] as const)('does not publish %s when storage rejects a change', (key, field, setter, next, previous) => {
+    const store = useChatPreferencesStore();
+    const originalSetItem = localStorage.setItem.bind(localStorage);
+    vi.spyOn(localStorage, 'setItem').mockImplementation((storageKey, value) => {
+      if (storageKey === key) throw new Error('quota exceeded');
+      return originalSetItem(storageKey, value);
+    });
+    expect(store[setter](next)).toMatchObject({ ok: false, changed: false, enabled: previous });
+    expect(store[field]).toBe(previous);
+    expect(localStorage.getItem(key)).toBeNull();
+    store.$dispose();
+  });
+
+  it('keeps exposed preference state read-only so controls cannot bypass persistence', () => {
+    const store = useChatPreferencesStore();
+    const write = vi.spyOn(localStorage, 'setItem');
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    Reflect.set(store, 'messageHapticsEnabled', false);
+    expect(store.messageHapticsEnabled).toBe(true);
+    expect(write).not.toHaveBeenCalled();
+    store.$dispose();
+  });
+
+  it('uses safe defaults without trying to repair values that could not be read', () => {
+    vi.spyOn(localStorage, 'getItem').mockImplementation(() => { throw new Error('access denied'); });
+    const write = vi.spyOn(localStorage, 'setItem');
+    const store = useChatPreferencesStore();
+    expect(store.presentationMode).toBe('bubble');
+    expect(store.smoothStreamingEnabled).toBe(false);
+    expect(store.messageHapticsEnabled).toBe(true);
+    expect(store.collapseToolsWhileStreaming).toBe(false);
+    expect(write).not.toHaveBeenCalled();
     store.$dispose();
   });
 

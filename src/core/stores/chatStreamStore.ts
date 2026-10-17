@@ -8,6 +8,7 @@ import { useAvatarStore } from "./avatar";
 import { useTopicStore } from "./topicListManager";
 import { useChatHistoryStore } from "./chatHistoryStore";
 import { useNotificationStore } from "./notification";
+import { useChatPreferencesStore } from "../../features/chat/preferences/store";
 import type {
   ActiveGenerationDto,
   AuroraRecoverySnapshot,
@@ -551,6 +552,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   const assistantStore = useAssistantStore();
   const avatarStore = useAvatarStore();
   const topicStore = useTopicStore();
+  const chatPreferences = useChatPreferencesStore();
 
   /**
    * 在前端本地计算 MessageShell（替代 Rust 的 precompute_shell）
@@ -1284,7 +1286,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           if (callbacks?.onStreamFinished) {
             callbacks.onStreamFinished(actualMessageId, topicId);
           }
-          if (typeof navigator !== "undefined" && navigator.vibrate) {
+          if (chatPreferences.messageHapticsEnabled && typeof navigator !== "undefined" && navigator.vibrate) {
             navigator.vibrate(40);
           }
         };

@@ -6,7 +6,6 @@ import { isAndroid } from '../utils/platform';
 
 const LAST_CHECK_KEY = 'vcp_last_update_check';
 const SKIPPED_VERSION_KEY = 'vcp_update_skipped_version';
-const AUTO_CHECK_KEY = 'vcp_auto_update_check';
 const COOLDOWN_MS = 24 * 60 * 60 * 1000;
 
 export function useAutoUpdate() {
@@ -28,8 +27,6 @@ export function useAutoUpdate() {
 
   const hasCheckedThisSession = ref(false);
 
-  const isAutoCheckEnabled = () => localStorage.getItem(AUTO_CHECK_KEY) !== 'off';
-
   const shouldCheck = () => {
     const last = localStorage.getItem(LAST_CHECK_KEY);
     if (!last) return true;
@@ -41,7 +38,7 @@ export function useAutoUpdate() {
     if (hasCheckedThisSession.value) return;
     hasCheckedThisSession.value = true;
 
-    if (!isAutoCheckEnabled() || !shouldCheck()) {
+    if (!updateStore.autoCheckEnabled || !shouldCheck()) {
       return;
     }
 

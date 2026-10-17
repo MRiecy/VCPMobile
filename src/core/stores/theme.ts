@@ -3,51 +3,6 @@ import { onScopeDispose, ref, watch } from 'vue';
 
 export type ThemeMode = 'light' | 'dark' | 'system';
 
-export const CHAT_PRESENTATION_MODES = ['bubble', 'panel', 'immersive'] as const;
-export type ChatPresentationMode = (typeof CHAT_PRESENTATION_MODES)[number];
-
-export interface ChatPresentationOption {
-  value: ChatPresentationMode;
-  label: string;
-  title: string;
-  description: string;
-}
-
-export const CHAT_PRESENTATION_OPTIONS: readonly ChatPresentationOption[] = [
-  {
-    value: 'bubble',
-    label: '气泡',
-    title: '气泡模式',
-    description: '保留左右气泡、头像与紧凑内容宽度。',
-  },
-  {
-    value: 'panel',
-    label: '统一',
-    title: '统一模式',
-    description: '消息共用连续全宽表面，以细分隔线区分。',
-  },
-  {
-    value: 'immersive',
-    label: '刊物',
-    title: '刊物模式',
-    description: '隐藏头像，使用居中的长文阅读宽度。',
-  },
-] as const;
-
-export interface PresentationChangeResult {
-  ok: boolean;
-  changed: boolean;
-  mode: ChatPresentationMode;
-  error?: string;
-}
-
-export interface SmoothStreamingChangeResult {
-  ok: boolean;
-  changed: boolean;
-  enabled: boolean;
-  error?: string;
-}
-
 export interface ThemeApplyResult {
   ok: boolean;
   themeKey: string | null;
@@ -65,8 +20,6 @@ export interface ThemeInfo {
 
 const DEFAULT_THEME = 'themes-star-abyss.ts';
 const THEME_NAME_STORAGE_KEY = 'vcp-theme-name';
-const PRESENTATION_STORAGE_KEY = 'vcp-chat-presentation-mode';
-const SMOOTH_STREAMING_STORAGE_KEY = 'vcp-smooth-streaming-enabled';
 
 const LEGACY_THEME_MAP: Record<string, string> = {
   'themes冰火魔歌.css': 'themes-ice-fire.css',
@@ -98,12 +51,6 @@ for (const [path, mod] of Object.entries(themeModules)) {
   const key = path.split(/[\\/]/).pop() || '';
   if (key) themeModulesByKey.set(key, mod);
 }
-
-export const normalizeChatPresentationMode = (value: unknown): ChatPresentationMode => {
-  return CHAT_PRESENTATION_MODES.includes(value as ChatPresentationMode)
-    ? (value as ChatPresentationMode)
-    : 'bubble';
-};
 
 export const normalizeThemeModuleKey = (value: unknown): string | null => {
   if (typeof value !== 'string') return null;
@@ -189,30 +136,6 @@ export const useThemeStore = defineStore('theme', () => {
   const isDarkResolved = ref(false);
   const lastModeSwitchAt = ref(0);
   const MODE_SWITCH_DEBOUNCE_MS = 420;
-
-  const storedPresentationMode = readStoredValue(PRESENTATION_STORAGE_KEY);
-  const initialPresentationMode = normalizeChatPresentationMode(storedPresentationMode);
-  if (storedPresentationMode !== null && storedPresentationMode !== initialPresentationMode) {
-    try {
-      localStorage.setItem(PRESENTATION_STORAGE_KEY, initialPresentationMode);
-    } catch (error) {
-      console.warn('[themeStore] Failed to repair presentation preference:', error);
-    }
-  }
-  const presentationMode = ref<ChatPresentationMode>(initialPresentationMode);
-  const storedSmoothStreaming = readStoredValue(SMOOTH_STREAMING_STORAGE_KEY);
-  const smoothStreamingEnabled = ref(storedSmoothStreaming === 'true');
-  if (
-    storedSmoothStreaming !== null
-    && storedSmoothStreaming !== 'true'
-    && storedSmoothStreaming !== 'false'
-  ) {
-    try {
-      localStorage.setItem(SMOOTH_STREAMING_STORAGE_KEY, 'false');
-    } catch (error) {
-      console.warn('[themeStore] Failed to repair smooth streaming preference:', error);
-    }
-  }
 
   const initialTheme = normalizeThemeModuleKey(readStoredValue(THEME_NAME_STORAGE_KEY)) || DEFAULT_THEME;
   const currentTheme = ref(initialTheme);
@@ -462,49 +385,6 @@ export const useThemeStore = defineStore('theme', () => {
     mode.value = newMode;
   };
 
-  const setPresentationMode = (candidate: unknown): PresentationChangeResult => {
-    const nextMode = normalizeChatPresentationMode(candidate);
-    if (presentationMode.value === nextMode) {
-      return { ok: true, changed: false, mode: nextMode };
-    }
-
-    try {
-      localStorage.setItem(PRESENTATION_STORAGE_KEY, nextMode);
-      presentationMode.value = nextMode;
-      return { ok: true, changed: true, mode: nextMode };
-    } catch (error) {
-      console.error('[themeStore] Failed to persist presentation mode:', error);
-      return {
-        ok: false,
-        changed: false,
-        mode: presentationMode.value,
-        error: `消息呈现设置保存失败：${errorMessage(error)}`,
-      };
-    }
-  };
-
-  const setSmoothStreamingEnabled = (
-    enabled: boolean,
-  ): SmoothStreamingChangeResult => {
-    if (smoothStreamingEnabled.value === enabled) {
-      return { ok: true, changed: false, enabled };
-    }
-
-    try {
-      localStorage.setItem(SMOOTH_STREAMING_STORAGE_KEY, String(enabled));
-      smoothStreamingEnabled.value = enabled;
-      return { ok: true, changed: true, enabled };
-    } catch (error) {
-      console.error('[themeStore] Failed to persist smooth streaming preference:', error);
-      return {
-        ok: false,
-        changed: false,
-        enabled: smoothStreamingEnabled.value,
-        error: `流式平滑动效设置保存失败：${errorMessage(error)}`,
-      };
-    }
-  };
-
   const toggleTheme = () => {
     // Use the resolved state to decide the next mode,
     // this ensures that the first click always produces a visual change
@@ -535,8 +415,6 @@ export const useThemeStore = defineStore('theme', () => {
   return {
     mode,
     isDarkResolved,
-    presentationMode,
-    smoothStreamingEnabled,
     currentTheme,
     currentThemeInfo,
     availableThemes,
@@ -546,8 +424,6 @@ export const useThemeStore = defineStore('theme', () => {
     initTheme,
     toggleTheme,
     setMode,
-    setPresentationMode,
-    setSmoothStreamingEnabled,
   };
 });
 
