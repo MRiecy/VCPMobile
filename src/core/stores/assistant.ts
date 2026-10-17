@@ -3,6 +3,7 @@ import { computed, ref, shallowRef } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useAvatarStore } from "./avatar";
 import { useNotificationStore } from "./notification";
+import { allowChatMutation } from "../../features/chat/chatMutationPolicy";
 import type {
   AgentConfigDto,
   AgentListItemDto,
@@ -106,6 +107,7 @@ export const useAssistantStore = defineStore("assistant", () => {
   };
 
   const deleteAgent = async (id: string) => {
+    if (!allowChatMutation({ ownerId: id, ownerType: "agent" })) return false;
     try {
       await invoke("delete_agent", { agentId: id });
       invalidateSnapshotLoads();
@@ -121,6 +123,7 @@ export const useAssistantStore = defineStore("assistant", () => {
         message: "助手已从列表中移除",
         toastOnly: true,
       });
+      return true;
     } catch (e: any) {
       console.error("[AssistantStore] Failed to delete agent:", e);
       throw e;
@@ -149,6 +152,7 @@ export const useAssistantStore = defineStore("assistant", () => {
   };
 
   const deleteGroup = async (id: string) => {
+    if (!allowChatMutation({ ownerId: id, ownerType: "group" })) return false;
     try {
       await invoke("delete_group", { groupId: id });
       invalidateSnapshotLoads();
@@ -160,6 +164,7 @@ export const useAssistantStore = defineStore("assistant", () => {
         message: "群组已解散",
         toastOnly: true,
       });
+      return true;
     } catch (e: any) {
       console.error("[AssistantStore] Failed to delete group:", e);
       throw e;

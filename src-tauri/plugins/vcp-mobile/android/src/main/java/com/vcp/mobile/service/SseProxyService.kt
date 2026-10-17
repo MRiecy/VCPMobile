@@ -12,9 +12,11 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -32,6 +34,7 @@ import okhttp3.sse.EventSources
 import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
+import java.io.BufferedOutputStream
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.net.InetAddress
@@ -41,9 +44,8 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CountDownLatch
-import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
-import java.util.concurrent.ScheduledExecutorService
+import java.util.concurrent.ScheduledThreadPoolExecutor
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -57,19 +59,59 @@ internal fun contentChunkEnd(content: CharSequence, start: Int, limit: Int): Int
     return end
 }
 
+// Scan the original buffer without copying a long reasoning prefix. Only the
+// visible notification preview is allocated, even when a tag spans TCP chunks.
+internal fun notificationReplyPreview(content: CharSequence, limit: Int = 80): String {
+    val preview = StringBuilder(limit + 1)
+    var offset = 0
+    var pendingSpace = false
+    var visibleCharacters = 0
+    while (offset < content.length) {
+        val endTag = when {
+            content.startsWith("<think>", offset, ignoreCase = true) -> "</think>"
+            content.startsWith("[--- VCP元思考链:", offset, ignoreCase = true) -> "元思考链结束 ---]"
+            else -> null
+        }
+        if (endTag != null) {
+            val end = content.indexOf(endTag, offset, ignoreCase = true)
+            if (end < 0) break
+            offset = end + endTag.length
+            continue
+        }
+        val codePoint = Character.codePointAt(content, offset)
+        offset += Character.charCount(codePoint)
+        if (Character.isWhitespace(codePoint)) {
+            pendingSpace = preview.isNotEmpty()
+            continue
+        }
+        if (visibleCharacters == limit) return preview.append("...").toString()
+        if (pendingSpace) {
+            preview.append(' ')
+            visibleCharacters++
+            pendingSpace = false
+            if (visibleCharacters == limit) return preview.append("...").toString()
+        }
+        preview.appendCodePoint(codePoint)
+        visibleCharacters++
+    }
+    return preview.toString()
+}
+
 internal class ClientConnection(
     val socket: Socket,
-    val outputStream: java.io.OutputStream,
+    outputStream: java.io.OutputStream,
 ) {
     companion object {
         private const val WRITE_TIMEOUT_SECONDS = 5L
         private const val MAX_PENDING_FRAMES = 128
-        private val writeWatchdog: ScheduledExecutorService =
-            Executors.newSingleThreadScheduledExecutor { runnable ->
+        private val writeWatchdog =
+            ScheduledThreadPoolExecutor(1) { runnable ->
                 Thread(runnable, "vcp-sse-write-watchdog").apply { isDaemon = true }
-            }
+            }.apply { removeOnCancelPolicy = true }
     }
 
+    private val socketOutput = outputStream
+    private val outputStream = BufferedOutputStream(outputStream)
     private val closed = AtomicBoolean(false)
     private val writer = ThreadPoolExecutor(
         1,
@@ -172,8 +214,10 @@ internal class ClientConnection(
     fun close() {
         if (!closed.compareAndSet(false, true)) return
         writer.shutdownNow()
-        try { outputStream.close() } catch (ignored: Exception) {}
+        // Close the socket first: flushing a buffered stream can wait for a
+        // blocked writer, and the watchdog must be able to interrupt that write.
         try { socket.close() } catch (ignored: Exception) {}
+        try { socketOutput.close() } catch (ignored: Exception) {}
     }
 }
 
@@ -182,8 +226,8 @@ internal class ClientConnection(
  * 
  * 【职责】：
  * 1. 运行在独立的 ":helper" 进程中，通过本地 TCP 套接字与主进程通信，彻底避免 Binder 限制与高频 IPC 开销。
- * 2. 采用全内存设计，主进程死亡时后台下载流直接缓存在内存中，避免磁盘 I/O。
- * 3. 动态锁控：只在流下载时持有 WakeLock/WifiLock，下载完成后即刻释放，闲置时自动退出服务。
+ * 2. 下载正文保留在内存；终态未在 5 秒内确认提交时原子发布离线结果。
+ * 3. WifiLock 覆盖网络接收，WakeLock 另外覆盖有界终态交接，闲置后退出。
  */
 class SseProxyService : Service() {
 
@@ -194,6 +238,7 @@ class SseProxyService : Service() {
 
         internal const val MAX_ACTIVE_SESSIONS = 8
         internal const val CONTENT_FRAME_CHARS = 16 * 1024
+        internal const val TERMINAL_ACK_TIMEOUT_MS = 5_000L
         private const val IDLE_SERVICE_GRACE_MS = 30 * 1000L
 
         @Volatile
@@ -211,6 +256,8 @@ class SseProxyService : Service() {
         var activeConnection: ClientConnection? = null,
         val contextJson: JSONObject? = null,
     ) {
+        @Volatile var handoffWakeDeadlineMs: Long = 0
+        var handoffJob: Job? = null
         @Synchronized
         internal fun complete(reason: String, error: String? = null): Boolean {
             if (isCompleted) return false
@@ -262,6 +309,7 @@ class SseProxyService : Service() {
     
     private var serverSocket: ServerSocket? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wakeLockDeadlineMs: Long = 0
     private var wifiLock: WifiManager.WifiLock? = null
 
     override fun onCreate() {
@@ -293,17 +341,8 @@ class SseProxyService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        serverSocket?.let { server ->
-            serviceScope.launch(Dispatchers.IO) {
-                try {
-                    val portFile = File(applicationContext.cacheDir, "sse_helper.port")
-                    portFile.writeText(server.localPort.toString())
-                    Log.i(TAG, "onStartCommand: Rewrote port file with ${server.localPort}")
-                } catch (e: Exception) {
-                    Log.e(TAG, "onStartCommand: Failed to write port file", e)
-                }
-            }
-        }
+        // Discovery is published once with the listener. Rewriting an unchanged
+        // port used to expose an empty truncate/write window to control calls.
         scheduleIdleStopIfNeeded()
         return START_NOT_STICKY
     }
@@ -315,21 +354,18 @@ class SseProxyService : Service() {
 
     override fun onDestroy() {
         Log.i(TAG, "onDestroy: shutting down TCP server and all sessions.")
-        isServiceRunning = false
-        try {
-            val portFile = File(applicationContext.cacheDir, "sse_helper.port")
-            if (portFile.exists()) {
-                portFile.delete()
-            }
-        } catch (ignored: Exception) {}
-        
-        try {
-            serverSocket?.close()
-        } catch (ignored: Exception) {}
+        val listener = synchronized(this) {
+            isServiceRunning = false
+            cancelIdleStop()
+            unpublishPort()
+            serverSocket.also { serverSocket = null }
+        }
+        try { listener?.close() } catch (ignored: Exception) {}
         
         val sessions = activeSessions.values.toList()
         for (session in sessions) {
             val detached = synchronized(session) {
+                session.handoffJob?.cancel()
                 if (!session.isCompleted) activeSessions.remove(session.requestId, session)
                 Pair(session.eventSource, session.takeConnection())
             }
@@ -351,20 +387,52 @@ class SseProxyService : Service() {
         serviceScope.launch(Dispatchers.IO) {
             try {
                 val server = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
-                serverSocket = server
                 val port = server.localPort
+                val published = synchronized(this@SseProxyService) {
+                    if (!isServiceRunning) false else {
+                        serverSocket = server
+                        publishPort(port)
+                        true
+                    }
+                }
+                if (!published) {
+                    server.close()
+                    return@launch
+                }
                 Log.i(TAG, "TCP Server listening on 127.0.0.1:$port")
-                
-                val portFile = File(applicationContext.cacheDir, "sse_helper.port")
-                portFile.writeText(port.toString())
                 
                 while (!server.isClosed) {
                     val socket = server.accept()
                     handleClientSocket(socket)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "TCP Server error or closed: ", e)
+                if (isServiceRunning) {
+                    Log.e(TAG, "TCP Server failed", e)
+                    stopIfIdle()
+                }
             }
+        }
+    }
+
+    // Called under the lifecycle monitor, also used by listener shutdown.
+    private fun publishPort(port: Int) {
+        val target = File(applicationContext.cacheDir, "sse_helper.port")
+        val temporary = File(applicationContext.cacheDir, "sse_helper.port.tmp")
+        try {
+            temporary.writeText(port.toString())
+            Files.move(temporary.toPath(), target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+        } finally {
+            temporary.delete()
+        }
+    }
+
+    private fun unpublishPort() {
+        val port = serverSocket?.localPort ?: return
+        try {
+            val target = File(applicationContext.cacheDir, "sse_helper.port")
+            if (target.exists() && target.readText().trim() == port.toString()) target.delete()
+        } catch (error: Exception) {
+            Log.w(TAG, "Failed to remove helper discovery file", error)
         }
     }
 
@@ -457,8 +525,20 @@ class SseProxyService : Service() {
         contextJson: JSONObject?,
         connection: ClientConnection
     ): StreamSession? {
-        if (!isServiceRunning) {
-            sendProtocolError(connection, requestId, "Helper service is shutting down")
+        val request = try {
+            val builder = Request.Builder().url(url)
+            val headers = JSONObject(headersJson)
+            val keys = headers.keys()
+            while (keys.hasNext()) {
+                val key = keys.next()
+                builder.header(key, headers.getString(key))
+            }
+            if (body.isNotEmpty()) {
+                builder.post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
+            }
+            builder.build()
+        } catch (error: Exception) {
+            sendProtocolError(connection, requestId, "Invalid helper request: ${error.message}", "invalid_request")
             return null
         }
         val session = StreamSession(
@@ -466,24 +546,22 @@ class SseProxyService : Service() {
             activeConnection = connection,
             contextJson = contextJson,
         )
-        val existing = synchronized(activeSessions) {
-            if (activeSessions.values.count { !it.isCompleted } >= MAX_ACTIVE_SESSIONS) {
-                session
-            } else {
-                activeSessions.putIfAbsent(requestId, session)
+        val rejection = synchronized(this) {
+            when {
+                !isServiceRunning -> "service_stopping" to "Helper service is shutting down"
+                activeSessions.containsKey(requestId) -> "session_already_exists" to "Session already exists"
+                activeSessions.values.count { !it.isCompleted } >= MAX_ACTIVE_SESSIONS ->
+                    "capacity_exhausted" to "Helper session limit reached"
+                else -> {
+                    activeSessions[requestId] = session
+                    isTaskRemoved = false
+                    cancelIdleStop()
+                    null
+                }
             }
         }
-        if (existing != null) {
-            val message = if (existing === session) "Helper session limit reached" else "Session already exists"
-            Log.w(TAG, "start rejected for id=$requestId: $message")
-            val code = if (existing === session) "capacity_exhausted" else "session_already_exists"
-            sendProtocolError(connection, requestId, message, code)
-            return null
-        }
-        cancelIdleStop()
-        if (!isServiceRunning) {
-            removeSession(session)
-            sendProtocolError(connection, requestId, "Helper service is shutting down")
+        if (rejection != null) {
+            sendProtocolError(connection, requestId, rejection.second, rejection.first)
             return null
         }
         synchronized(session) {
@@ -493,23 +571,6 @@ class SseProxyService : Service() {
         }
         
         try {
-            val requestBuilder = Request.Builder().url(url)
-            try {
-                val headersObj = JSONObject(headersJson)
-                val keys = headersObj.keys()
-                while (keys.hasNext()) {
-                    val key = keys.next()
-                    requestBuilder.header(key, headersObj.getString(key))
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to parse headers", e)
-            }
-            
-            if (body.isNotEmpty()) {
-                val mediaType = "application/json; charset=utf-8".toMediaType()
-                requestBuilder.post(body.toRequestBody(mediaType))
-            }
-            
             val listener = object : EventSourceListener() {
                 override fun onOpen(eventSource: EventSource, response: Response) {
                     if (!isCurrentSession(session)) return
@@ -535,7 +596,7 @@ class SseProxyService : Service() {
                 }
             }
             
-            val source = EventSources.createFactory(httpClient).newEventSource(requestBuilder.build(), listener)
+            val source = EventSources.createFactory(httpClient).newEventSource(request, listener)
             val installed = synchronized(session) {
                 if (isServiceRunning && isCurrentSession(session) && !session.isCompleted) {
                     session.eventSource = source
@@ -553,11 +614,10 @@ class SseProxyService : Service() {
             }
             updateLocks()
         } catch (e: Exception) {
-            removeSession(session)
-            session.eventSource?.cancel()
             Log.e(TAG, "Failed to start stream source for $requestId", e)
-            updateLocks()
-            throw e
+            // Once started was accepted the protocol must end with this
+            // generation's terminal result, including local startup failures.
+            completeSession(session, "error", "Failed to start stream source: ${e.message}")
         }
         return session
     }
@@ -578,6 +638,10 @@ class SseProxyService : Service() {
                 (expectedGeneration != null && expectedGeneration != session.generation)) {
                 false
             } else {
+                synchronized(this) {
+                    isTaskRemoved = false
+                    cancelIdleStop()
+                }
                 previousConnection = session.replaceConnection(connection)
                 val length = session.fullContent.length
                 val completed = session.isCompleted
@@ -585,7 +649,7 @@ class SseProxyService : Service() {
                 val error = session.terminalError
                 // Enqueue the prefix and replace the consumer under the same
                 // lock used by live appends. Later data always follows it.
-                connection.enqueueFrames { emit ->
+                val queued = connection.enqueueFrames { emit ->
                     emit(sessionEvent(session, "snapshot_start").toString())
                     var offset = 0
                     while (offset < length) {
@@ -599,6 +663,8 @@ class SseProxyService : Service() {
                         put("error", error)
                     }.toString())
                 }
+                if (queued && completed) scheduleCompletedHandoff(session)
+                queued
             }
         }
         previousConnection?.close()
@@ -719,6 +785,7 @@ class SseProxyService : Service() {
         val choice = payload.optJSONArray("choices")?.optJSONObject(0) ?: return
         val content = choice.optJSONObject("delta")?.opt("content") as? String ?: ""
         val reason = (choice.opt("finish_reason") as? String)?.takeIf { it.isNotEmpty() }
+        if (content.isEmpty() && reason == null) return
         var failedConnection: ClientConnection? = null
         synchronized(session) {
             if (!isCurrentSession(session) || session.isCompleted) return
@@ -752,6 +819,7 @@ class SseProxyService : Service() {
             if (!isCurrentSession(session) || !session.complete(reason, error)) {
                 false
             } else {
+                session.handoffWakeDeadlineMs = SystemClock.elapsedRealtime() + TERMINAL_ACK_TIMEOUT_MS
                 session.activeConnection?.let { connection ->
                     val event = sessionEvent(session, "terminal").apply {
                         put("finishReason", session.lastFinishReason)
@@ -761,10 +829,12 @@ class SseProxyService : Service() {
                         failedConnection = connection
                     }
                 }
+                scheduleCompletedHandoff(session)
                 true
             }
         }
         if (!completed) return
+        updateLocks()
         session.eventSource?.cancel()
         failedConnection?.close()
         if (reason != "cancelled_by_user") {
@@ -774,21 +844,52 @@ class SseProxyService : Service() {
         updateLocks()
     }
 
-    private fun cleanupSessionIfCompletedAndDisconnected(session: StreamSession) {
+    private fun scheduleCompletedHandoff(session: StreamSession) {
         synchronized(session) {
-            if (!isCurrentSession(session) || !session.isCompleted || session.activeConnection != null) return
-            // A resume waits for publication before observing not_found. The
-            // caller then rechecks the mailbox, avoiding an ownership gap.
+            if (!isCurrentSession(session) || !session.isCompleted || session.activeConnection == null) return
+            session.handoffJob?.cancel()
+            session.handoffWakeDeadlineMs = SystemClock.elapsedRealtime() + TERMINAL_ACK_TIMEOUT_MS
+            val job = serviceScope.launch(Dispatchers.IO, start = CoroutineStart.LAZY) {
+                delay(TERMINAL_ACK_TIMEOUT_MS)
+                publishCompletedSession(session, requireDisconnected = false, expectedJob = coroutineContext[Job])
+            }
+            session.handoffJob = job
+            job.start()
+        }
+    }
+
+    private fun cleanupSessionIfCompletedAndDisconnected(session: StreamSession) {
+        publishCompletedSession(session, requireDisconnected = true)
+    }
+
+    private fun publishCompletedSession(session: StreamSession, requireDisconnected: Boolean, expectedJob: Job? = null) {
+        var connection: ClientConnection? = null
+        synchronized(session) {
+            if (!isCurrentSession(session) || !session.isCompleted ||
+                (requireDisconnected && session.activeConnection != null) ||
+                (expectedJob != null && session.handoffJob !== expectedJob)) return
+            // Disk I/O gets its own bounded CPU handoff window. A failed or
+            // stalled fsync must never keep a completed reply's wake lock forever.
+            session.handoffWakeDeadlineMs = SystemClock.elapsedRealtime() + TERMINAL_ACK_TIMEOUT_MS
+            updateLocks()
+            // ACK, discard and resume all take this monitor. Publication precedes
+            // removal, so not_found always permits Rust to recheck the mailbox.
             if (persistOfflineCompletedSession(session)) {
                 removeSession(session)
+                connection = session.takeConnection()
             }
+            session.handoffWakeDeadlineMs = 0
         }
+        connection?.close()
         updateLocks()
     }
 
     private fun removeSession(session: StreamSession): Boolean {
         val removed = activeSessions.remove(session.requestId, session)
         if (removed) {
+            session.handoffJob?.cancel()
+            session.handoffJob = null
+            session.handoffWakeDeadlineMs = 0
             scheduleIdleStopIfNeeded()
         }
         return removed
@@ -802,14 +903,27 @@ class SseProxyService : Service() {
 
     @Synchronized
     private fun scheduleIdleStopIfNeeded() {
-        if (activeSessions.isNotEmpty() || idleStopJob?.isActive == true) return
+        if (!isServiceRunning || activeSessions.isNotEmpty() || idleStopJob?.isActive == true) return
         idleStopJob = serviceScope.launch {
             delay(IDLE_SERVICE_GRACE_MS)
-            if (activeSessions.isEmpty()) {
-                Log.i(TAG, "Helper idle grace expired; stopping service.")
-                stopSelf()
-            }
+            stopIfIdle()
         }
+    }
+
+    private fun stopIfIdle(taskRemovedOnly: Boolean = false) {
+        val listener = synchronized(this) {
+            if (!isServiceRunning || activeSessions.isNotEmpty() || (taskRemovedOnly && !isTaskRemoved)) return
+            // Same monitor as admission: no upstream request can be accepted
+            // after this transition, even before Android delivers onDestroy.
+            isServiceRunning = false
+            cancelIdleStop()
+            unpublishPort()
+            serverSocket.also { serverSocket = null }
+        }
+        try { listener?.close() } catch (ignored: Exception) {}
+        Log.i(TAG, "All helper sessions released; stopping service.")
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     private fun isGenerationId(value: String): Boolean = try {
@@ -866,7 +980,7 @@ class SseProxyService : Service() {
         }
     }
 
-    private var isTaskRemoved = false
+    @Volatile private var isTaskRemoved = false
 
     override fun onTaskRemoved(rootIntent: Intent?) {
         super.onTaskRemoved(rootIntent)
@@ -875,50 +989,54 @@ class SseProxyService : Service() {
         checkSelfTermination()
     }
 
-    @Synchronized
     private fun checkSelfTermination() {
-        if (isTaskRemoved && activeSessions.isEmpty()) {
-            Log.i(TAG, "Task removed and all sessions released. Stopping service.")
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                stopForeground(STOP_FOREGROUND_REMOVE)
-            } else {
-                @Suppress("DEPRECATION")
-                stopForeground(true)
-            }
-            stopSelf()
-        }
+        if (isTaskRemoved) stopIfIdle(taskRemovedOnly = true)
     }
 
-    @Synchronized
     private fun updateLocks() {
-        val hasRunning = activeSessions.values.any { !it.isCompleted }
-        if (hasRunning) {
-            cancelIdleStop()
-            acquireLocks()
-        } else {
-            releaseLocks()
-            if (activeSessions.isEmpty()) scheduleIdleStopIfNeeded()
+        synchronized(this) {
+            val hasRunning = activeSessions.values.any { !it.isCompleted }
+            val handoffDeadline = activeSessions.values.maxOfOrNull { it.handoffWakeDeadlineMs } ?: 0
+            if (hasRunning) {
+                cancelIdleStop()
+                acquireWakeLock(0)
+                acquireWifiLock()
+            } else {
+                releaseWifiLock()
+                if (handoffDeadline > SystemClock.elapsedRealtime()) {
+                    acquireWakeLock(handoffDeadline)
+                } else {
+                    releaseWakeLock()
+                }
+                if (activeSessions.isEmpty()) scheduleIdleStopIfNeeded()
+            }
         }
         checkSelfTermination()
     }
 
-    private fun acquireLocks() {
+    private fun acquireWakeLock(deadlineMs: Long) {
         val appContext = applicationContext
         if (wakeLock == null) {
             val powerManager = appContext.getSystemService(Context.POWER_SERVICE) as? PowerManager
             if (powerManager != null) {
                 wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VCP:SseProxyWakeLock")
+                    .apply { setReferenceCounted(false) }
             }
         }
         wakeLock?.let {
-            if (!it.isHeld) {
-                it.acquire()
+            if (!it.isHeld || wakeLockDeadlineMs != deadlineMs) {
+                if (it.isHeld) it.release()
+                if (deadlineMs == 0L) it.acquire()
+                else it.acquire(maxOf(1, deadlineMs - SystemClock.elapsedRealtime()))
+                wakeLockDeadlineMs = deadlineMs
                 Log.i(TAG, "SseProxy WakeLock ACQUIRED.")
             }
         }
+    }
 
+    private fun acquireWifiLock() {
         if (wifiLock == null) {
-            val wifiManager = appContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
             if (wifiManager != null) {
                 @Suppress("DEPRECATION")
                 wifiLock = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -937,6 +1055,11 @@ class SseProxyService : Service() {
     }
 
     private fun releaseLocks() {
+        releaseWakeLock()
+        releaseWifiLock()
+    }
+
+    private fun releaseWakeLock() {
         wakeLock?.let {
             if (it.isHeld) {
                 it.release()
@@ -944,7 +1067,10 @@ class SseProxyService : Service() {
             }
         }
         wakeLock = null
+        wakeLockDeadlineMs = 0
+    }
 
+    private fun releaseWifiLock() {
         wifiLock?.let {
             if (it.isHeld) {
                 it.release()
@@ -1065,20 +1191,6 @@ class SseProxyService : Service() {
         return false
     }
 
-    private fun cleanTextForNotification(text: String): String {
-        var clean = text
-        // 1. 去除元思考链 [--- VCP元思考链:xxx ---] ... [--- 元思考链结束 ---]
-        clean = clean.replace(Regex("\\[--- VCP元思考链:[\\s\\S]*?元思考链结束 ---\\]", RegexOption.IGNORE_CASE), "")
-        // 2. 去除通用 <think>...</think> 标签
-        clean = clean.replace(Regex("<think>[\\s\\S]*?</think>", RegexOption.IGNORE_CASE), "")
-        // 3. 去除未闭合的 <think> 和元思考链
-        clean = clean.replace(Regex("<think>[\\s\\S]*", RegexOption.IGNORE_CASE), "")
-        clean = clean.replace(Regex("\\[--- VCP元思考链:[\\s\\S]*", RegexOption.IGNORE_CASE), "")
-        // 4. 去除多余空行
-        clean = clean.replace(Regex("\\n\\s*\\n+"), "\n")
-        return clean.trim()
-    }
-
     private fun showStreamNotification(session: StreamSession, isSuccess: Boolean, errorMsg: String?) {
         // 只有当主应用在后台时，才进行通知栏提醒
         if (isAppInForeground()) {
@@ -1113,14 +1225,12 @@ class SseProxyService : Service() {
         if (isSuccess) {
             title = "✨ $agentName 已回复"
             
-            val replyText = synchronized(session) {
-                session.contentChunk(0, session.fullContent.length).trim()
+            val preview = synchronized(session) {
+                notificationReplyPreview(session.fullContent)
             }
-            val cleanReply = cleanTextForNotification(replyText)
-            val singleLineReply = cleanReply.replace("\n", " ").replace("\r", " ").trim()
             
-            contentText = if (singleLineReply.isNotEmpty()) {
-                if (singleLineReply.length > 80) singleLineReply.take(80) + "..." else singleLineReply
+            contentText = if (preview.isNotEmpty()) {
+                preview
             } else {
                 "回复内容已生成，点击进入应用查看。"
             }

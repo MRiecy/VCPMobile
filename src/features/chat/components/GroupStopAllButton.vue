@@ -8,7 +8,7 @@ const sessionStore = useChatSessionStore();
 const streamStore = useChatStreamStore();
 
 const isVisible = computed(() => {
-  return streamStore.isGroupGenerating && streamStore.activeStreamingIds.size > 0;
+  return streamStore.isGroupGenerating;
 });
 
 const activeCount = computed(() => streamStore.activeStreamingIds.size);
@@ -33,7 +33,7 @@ const handleStopAll = () => {
       >
         <Octagon :size="12" class="text-red-500" />
         <span class="uppercase tracking-wider font-medium">停止群组发言</span>
-        <span class="px-1.5 py-0.5 rounded bg-red-950/60 text-[10px] font-mono border border-red-900/50 text-red-300 leading-none">{{ activeCount }}</span>
+        <span v-if="activeCount > 0" class="px-1.5 py-0.5 rounded bg-red-950/60 text-[10px] font-mono border border-red-900/50 text-red-300 leading-none">{{ activeCount }}</span>
       </button>
     </div>
   </Transition>

@@ -15,7 +15,7 @@ related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_ap
 
 `vcp_client.rs` 是 VCP Mobile 核心层（Rust 后端）的**统一 VCP 请求处理模块**，位于 `src-tauri/src/vcp_modules/infra/vcp_client.rs`（约 2100 行）。该模块对应原桌面端项目的 `modules/vcpClient.js`，负责处理所有与 VCP 服务器的通信，是前端对话引擎与后端网络层之间的唯一 HTTP 出入口。
 
-> **2026-08-10 生命周期收口**：Android SSE Helper 仍负责缓存与按事件索引续接，但恢复入口已合并为单个 `recover_active_generation`。它从 claim、query/cache、resume 一直持有同一 attempt lease 到 terminal DB commit，不再暴露独立 `resume_stream` Tauri Command。
+> **2026-10-17 生命周期收口**：前端统一调用 `reconnect_chat_streams`，Rust 协调活动 request、群聊换棒、helper 与离线结果。原 `get_active_generations`、`recover_active_generation` 及无消费者的 `sendToVCP` 不再是公开 IPC；内部恢复仍从 claim 到持久提交持有同一 attempt lease，不重发上游请求。正文只有生产者 buffer 一份权威流状态，消费者更换在该生产者锁下要求先 snapshot 后 delta。本文其余旧行号、事件索引及 `sse_cache` 描述属于历史实现；本轮具体契约和验证见 [阶段五记录](../../plan/vcpmobile-ios-compatibility-research/phase-5/01-SSE统一接管与操作边界重构.md)。
 
 其核心职责包括：
 - 使用 Rust 设置快照冻结本次 turn 的最终 Chat 端点并组装 HTTP 请求
@@ -35,10 +35,10 @@ related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_ap
 | 上下文注入 | 读取 `music_state.json`、`songlist.json`，注入 System Message | `perform_vcp_request:403` |
 | 流式 SSE 解析 | 使用 `LinesCodec` + `tokio::select!` 逐行解析 `data:` 事件 | `perform_vcp_request:536` |
 | Aurora 语义沉淀驱动 | 每收到文本 chunk 追加到 `AuroraBuffer`，触发增量块解析与推测渲染 | `perform_vcp_request:591` |
-| 请求中止 | `ActiveRequests` + attempt UUID + `oneshot::Sender` + RAII lease | `ActiveRequestEntry`, `ActiveRequestLease`, `interruptRequest` |
+| 请求中止 | `ActiveRequests` + attempt UUID + `CancellationToken` + RAII lease；pending 表保留明确停止意图 | `ActiveRequestEntry`, `ActiveRequestLease`, `interruptRequest` |
 | 连接测试 | 对齐桌面端逻辑的 `/v1/models` 探测与模型计数 | `test_vcp_connection:762` |
-| 活跃生成恢复 | 查询 `active_generations`、本地 `sse_cache` 及助手内存，恢复异常中断的流 | `get_active_generations:1611`, `recover_active_generation:1767` |
-| 流式断点续传 | `recover_active_generation` 在已 claim 的 attempt 内按 `startIndex` 续接 Helper 流 | `resume_claimed_generation`, `handle_streaming_request` |
+| 活跃生成恢复 | 统一绑定当前界面输出，按 pending、live owner 与离线 mailbox 安排对账 | `reconnect_chat_streams` |
+| 流式接管 | 内部恢复在同一 attempt 内接收 helper 的完整前缀快照，再消费后续增量 | `resume_claimed_generation`, `handle_streaming_request` |
 | 助手进程通信 | `LengthDelimitedCodec` 帧协议：4 字节大端长度 + JSON payload | `send_command_to_stream:705`, `connect_to_helper:612` |
 
 ### 1.3 调用入口
@@ -173,7 +173,7 @@ pub struct ActiveGroupTurns(Arc<DashMap<TopicKey, CancellationToken>>);
 ### 3.1 整体请求生命周期
 
 ```
-前端调用 sendToVCP(payload, channel)
+前端调用 handle_agent_chat_message / handle_group_chat_message
            │
            ▼
     ┌──────────────┐
@@ -369,22 +369,13 @@ vcp_client.rs SSE 循环
 
 ## 4. 公共接口（Tauri Commands）
 
-### 4.1 sendToVCP
+### 4.1 reconnect_chat_streams
 
-```rust
-pub async fn sendToVCP<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<'_, ActiveRequests>,
-    payload: VcpRequestPayload,
-    stream_channel: Channel<StreamEvent>,
-) -> Result<Value, String>
-```
+首次 `invoke('reconnect_chat_streams', { connectionId, channel })` 登记当前 WebView 的输出；后续同界面只传 `connectionId`，复用 Rust 持有的 Channel 实例。可选 Channel 由 `JavaScriptChannelId` 延迟创建，避免 Tauri 在重复反序列化时重置同一 JS 回调的消息序号。
 
-- **前端调用方式**：`invoke('sendToVCP', { payload, streamChannel })`
-- `stream_channel` 为 `Channel<StreamEvent>`，支持服务端向前端推送事件流
-- 流式模式下，函数返回后仍会通过 `stream_channel` 持续发送事件，直到 `end` 或 `error`
-- 返回的 `Value` 在流式模式下包含 `{ fullContent, streamingStarted, finishReason }`
-- 面向正式 Agent/Group 对话时，generation 的 pending/terminal 生命周期由 application service 的 `begin_stream_message` / `finalize_stream_message` 管理；`sendToVCP` 本身不再以 key-only 删除恢复记录。
+命令只返回活动消息/群轮的对账收据，不返回正文，也不等待生成结束。各条生成的接管状态、快照、增量和持久终态经 Channel 投递；前端不按收据再调用单消息恢复。新界面更换消费者，原 request owner 保留；旧连接的迟到工作不能重新取得输出所有权。
+
+正式生成继续通过 Agent/Group application service 建立 pending 消息并调用 finalizer。`sendToVCP` 无实际消费者，其专用包装及命令注册已移除。
 
 ### 4.2 interruptRequest
 
@@ -567,29 +558,22 @@ Helper 向主进程回传的事件帧：
 |------|------|---------|
 | 正常生成 | request lease 一直覆盖到 `finalize_stream_message` 原子提交 | Agent/Group application service |
 | 请求明确失败 | 写入简短错误原因并提交 `finish_reason=error`，同时删除 active row | Agent/Group application service, `mark_message_as_error` |
-| `recover_active_generation` | 先 claim attempt，再依次检查 DB pending、`sse_cache`、Helper，并在同一 lease 内完成续接/终态提交 | `vcp_client.rs` |
-| terminal 已存在 | 返回已有 content/finishReason，迟到恢复不得反向改写 error | `recover_active_generation`, `mark_message_as_error` |
+| 统一接管 | live owner 只更换消费者；缺 owner 的 pending/离线结果由内部恢复认领 lease 后收尾 | `reconnect_chat_streams`、内部 `recover_active_generation` |
+| terminal 已存在 | 向当前消费者发送持久 content/finishReason/timestamp，迟到结果不覆盖数据库 | `emit_persisted_terminal`、`finalize_stream_message` |
 
 ### 8.5 恢复流程
 
 ```text
-recover_active_generation(msg_id)
+reconnect_chat_streams(connectionId, 首次 channel)
     │
-    ├─ try_acquire attempt 失败 → 返回 { status: "already_running" }
-    ├─ DB 已无 pending active row → 幂等返回 terminal / not_found
-    │
-    ├─ 清理超过 24h 的本地 sse_cache 文件
-    │
-    ├─ 读取本地 sse_recovered_{hash}.json（24h 内有效）
-    │   └─ 命中 → finalize_stream_message → 返回 completed
-    │
-    ├─ Android: 通过 TCP 向 Helper 查询会话状态
-    │   ├─ completed → finalize → 返回 completed
-    │   ├─ streaming → 同一 command 内 resume_claimed_generation
-    │   └─ not_found → 继续下一步
-    │
-    └─ 在 pending 仍存在时原子标记 error；若其他 owner 已提交则幂等 no-op
-       └─ 返回 { status: "failed" }
+    ├─ 活动请求/群轮 → 绑定当前消费者，后续发言继承
+    ├─ pending / 离线文件 → 安排由 request lease 持有的内部恢复
+    │   ├─ 离线结果 → 原 finalizer 持久提交
+    │   ├─ helper 存活 → 前缀 snapshot → 后续 delta → terminal
+    │   ├─ 已请求停止 → 对账并取消，不恢复继续生成
+    │   ├─ 明确 not_found → 再查 mailbox 后按真实中断/停止收尾
+    │   └─ 暂时不可达 → 保留 pending，Channel 告知待重试/停止待确认
+    └─ 返回活动收据；各消息持久 end 仍经同一 Channel 投递
 ```
 
 ---

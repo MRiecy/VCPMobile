@@ -186,6 +186,19 @@ class SseProxyConnectionOwnershipTest {
             connection.close()
         }
     }
+
+    @Test
+    fun notificationPreviewSkipsReasoningBeyondFrameBoundaries() {
+        val text = StringBuilder("<THINK>")
+            .append("private reasoning".repeat(5000))
+            .append("</THINK>\n[--- VCP元思考链:planning ---]")
+            .append("more reasoning".repeat(5000))
+            .append("[--- 元思考链结束 ---]\n\nVisible reply\r\nwith spacing")
+        assertEquals("Visible reply with spacing", notificationReplyPreview(text))
+        assertEquals("", notificationReplyPreview(StringBuilder("<think>never closed")))
+        assertEquals("Safe prefix", notificationReplyPreview(StringBuilder("Safe prefix<think>private")))
+        assertEquals("😀".repeat(80) + "...", notificationReplyPreview(StringBuilder("😀".repeat(81))))
+    }
 }
 
 @RunWith(RobolectricTestRunner::class)
@@ -342,9 +355,93 @@ class SseProxyProtocolTest {
             invoke("cleanupSessionIfCompletedAndDisconnected", session)
             assertSame(session, sessions[session.requestId])
             assertEquals("must survive disk failure", session.fullContent.toString())
+            assertEquals(0L, session.handoffWakeDeadlineMs)
+            val wakeLock = SseProxyService::class.java.getDeclaredField("wakeLock").apply { isAccessible = true }
+            assertNull(wakeLock.get(service))
         } finally {
             mailbox.delete()
         }
+    }
+
+    @Test
+    fun terminalWithoutAckPublishesAfterFiveSecondsBeforeClosingTheConsumer() {
+        val session = session("durable before disconnect")
+        val disconnected = CountDownLatch(1)
+        val publishedAtDisconnect = java.util.concurrent.atomic.AtomicBoolean(false)
+        val socket = object : Socket() {
+            override fun close() {
+                val files = java.io.File(service.cacheDir, "sse_offline_completed").listFiles()
+                publishedAtDisconnect.set(files?.any {
+                    it.name.endsWith(".${session.generation}.completed") &&
+                        it.readText().substringAfter('\n') == "durable before disconnect"
+                } == true)
+                super.close()
+                disconnected.countDown()
+            }
+        }
+        val stream = ClientConnection(socket, ByteArrayOutputStream())
+        connections.add(stream)
+        session.replaceConnection(stream)
+        invoke("acceptUpstreamEvent", session, "[DONE]")
+        assertFalse(disconnected.await(1, TimeUnit.SECONDS))
+        assertSame(session, sessions[session.requestId])
+        assertTrue(disconnected.await(6, TimeUnit.SECONDS))
+        assertTrue(publishedAtDisconnect.get())
+        assertNull(sessions[session.requestId])
+
+        val (control, _) = connection()
+        invoke("handleControl", "ack_committed", session.requestId, session.generation, control)
+        assertTrue(java.io.File(service.cacheDir, "sse_offline_completed").listFiles()!!
+            .none { it.name.endsWith(".${session.generation}.completed") })
+    }
+
+    @Test
+    fun emptyDeltaChunksDoNotProduceFramesOrDisruptTheConsumer() {
+        val session = session()
+        val (stream, output) = connection()
+        session.replaceConnection(stream)
+        repeat(500) {
+            invoke("acceptUpstreamEvent", session, """{"choices":[{"delta":{"reasoning_content":"private"}}]}""")
+        }
+        invoke("acceptUpstreamEvent", session, """{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}""")
+        val events = frames(stream, output)
+        assertEquals(1, events.size)
+        assertEquals("tool_calls", events.single().getString("finishReason"))
+        assertFalse(stream.socket.isClosed)
+    }
+
+    @Test
+    fun invalidStartIsRejectedBeforeAStartedFrameOrSessionExists() {
+        val (stream, output) = connection()
+        assertNull(invoke("handleStartStream", "bad-url", "not a URL", "{}", "", null, stream))
+        val events = frames(stream, output)
+        assertEquals(listOf("error"), events.map { it.getString("eventType") })
+        assertEquals("invalid_request", events.single().getString("code"))
+        assertTrue(sessions.isEmpty())
+    }
+
+    @Test
+    fun idleStopClosesAdmissionBeforeAndroidDestroysTheService() {
+        invoke("stopIfIdle", false)
+        assertFalse(SseProxyService.isServiceRunning)
+        val (stream, output) = connection()
+        assertNull(invoke("handleStartStream", "late-start", "https://example.invalid", "{}", "", null, stream))
+        assertEquals("service_stopping", frames(stream, output).single().getString("code"))
+        assertTrue(sessions.isEmpty())
+    }
+
+    @Test
+    fun queryKeepsTaskRemovedButResumeResetsIt() {
+        val session = session()
+        service.onTaskRemoved(null)
+        val removed = SseProxyService::class.java.getDeclaredField("isTaskRemoved").apply { isAccessible = true }
+        assertTrue(removed.getBoolean(service))
+        val (query, _) = connection()
+        invoke("handleQueryStream", session.requestId, query)
+        assertTrue(removed.getBoolean(service))
+        val (stream, _) = connection()
+        assertSame(session, invoke("handleResumeStream", session.requestId, session.generation, stream))
+        assertFalse(removed.getBoolean(service))
     }
 
     @Test

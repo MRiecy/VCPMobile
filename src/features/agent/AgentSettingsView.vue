@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onUnmounted, watch } from "vue";
+import { computed, ref, onUnmounted, watch } from "vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { deleteTempFile, pickFile } from "tauri-plugin-vcp-mobile";
 import { useAssistantStore } from "../../core/stores/assistant";
@@ -12,6 +12,7 @@ import ModelSelector from "../../components/ModelSelector.vue";
 import AvatarCropper from "../../components/ui/AvatarCropper.vue";
 import VcpAvatar from "../../components/ui/VcpAvatar.vue";
 import type { AgentConfigDto } from "../../core/types/assistant";
+import { allowChatMutation, chatMutationBlockReason } from "../chat/chatMutationPolicy";
 
 const props = withDefaults(defineProps<{
   id?: string;
@@ -44,6 +45,9 @@ const createEmptyConfig = (id = ""): AgentConfigDto => ({
   topics: [],
 });
 const agentConfig = ref<AgentConfigDto>(createEmptyConfig(props.id));
+const deleteBlockReason = computed(() => chatMutationBlockReason({
+  ownerId: agentConfig.value.id, ownerType: "agent",
+}));
 let editorEpoch = 0;
 const pendingSaves = new Map<string, Promise<void>>();
 const isEpochCurrent = (epoch: number) => editorEpoch === epoch;
@@ -280,6 +284,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => {
 const handleDelete = async () => {
   const epoch = editorEpoch;
   const agentId = agentConfig.value.id;
+  if (!allowChatMutation({ ownerId: agentId, ownerType: "agent" })) return;
   const confirmed = await overlayStore.showConfirm({
     title: "删除 Agent",
     message: "确定要删除这个 Agent 吗？此操作不可撤销。",
@@ -287,7 +292,7 @@ const handleDelete = async () => {
   });
   if (confirmed && agentId && isOpenEditorCurrent(epoch, agentId)) {
     try {
-      await assistantStore.deleteAgent(agentId);
+      if (!await assistantStore.deleteAgent(agentId)) return;
       if (!isOpenEditorCurrent(epoch, agentId)) return;
       if (
         sessionStore.currentSelectedItem?.type === "agent" &&
@@ -455,10 +460,11 @@ const handleDelete = async () => {
 
         <!-- Actions -->
         <div class="pt-4 pb-8">
-          <button @click="handleDelete"
-            class="w-full py-3 bg-transparent border border-red-500/20 text-red-500/60 hover:bg-red-500/5 active:bg-red-500/10 active:scale-95 transition-all rounded-xl font-bold uppercase tracking-widest text-[11px]">
+          <button @click="handleDelete" :disabled="deleteBlockReason !== null"
+            class="w-full py-3 bg-transparent border border-red-500/20 text-red-500/60 enabled:hover:bg-red-500/5 enabled:active:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors rounded-xl font-bold uppercase tracking-widest text-[11px]">
             删除此 Agent
           </button>
+          <p v-if="deleteBlockReason" class="mt-2 text-xs opacity-60">{{ deleteBlockReason }}</p>
         </div>
       </div>
 

@@ -7,6 +7,8 @@ import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useLayoutStore } from "../../core/stores/layout";
 import { useOverlayStore } from "../../core/stores/overlay";
 import { useNotificationStore } from "../../core/stores/notification";
+import { allowChatMutation, chatMutationBlockReason } from "../chat/chatMutationPolicy";
+import type { OverlayActionItem } from "../../core/types/overlay";
 import { Edit3, Lock, LockOpen, CheckCircle, Trash2, Copy, Pin, PinOff } from "lucide-vue-next";
 
 const emit = defineEmits<{
@@ -84,7 +86,8 @@ const showTopicContextMenu = (topicId: string) => {
   const itemId = topic.ownerId;
   const ownerType = topic.ownerType;
 
-  const menuItems: any[] = [
+  const mutationScope = { ownerId: itemId, ownerType, topicId: topic.id };
+  const menuItems: OverlayActionItem[] = [
     {
       label: "修改标题",
       icon: Edit3,
@@ -160,7 +163,9 @@ const showTopicContextMenu = (topicId: string) => {
     label: "删除话题",
     icon: Trash2,
     danger: true,
+    get disabled() { return chatMutationBlockReason(mutationScope) !== null; },
     handler: async () => {
+      if (!allowChatMutation(mutationScope)) return;
       const confirm1 = await overlayStore.showConfirm({
         title: "删除话题",
         message: `确定要删除话题 "${topic.name}" 吗？此操作不可逆转。`,
@@ -173,7 +178,7 @@ const showTopicContextMenu = (topicId: string) => {
           isDanger: true
         });
         if (confirm2) {
-          topicListStore.deleteTopic(itemId, ownerType, topic.id);
+          await topicListStore.deleteTopic(itemId, ownerType, topic.id);
         }
       }
     },

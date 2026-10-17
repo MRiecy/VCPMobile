@@ -378,14 +378,18 @@ watch(input, () => {
 });
 
 // 是否正在生成中
-const isGenerating = computed(() => streamStore.activeStreamingIds.size > 0);
+const isGenerating = computed(() => streamStore.isGroupGenerating || streamStore.activeStreamingIds.size > 0);
+const isPreparing = computed(() => {
+  const key = sessionStore.currentConversationKey;
+  return !isGenerating.value && !!key && streamStore.isConversationPreparing(key.ownerId, key.ownerType, key.topicId);
+});
 
 // 是否有内容可发送
 const hasContent = computed(() => input.value.trim() !== '' || attachmentStore.stagedAttachments.length > 0);
 const attachmentsReady = computed(() =>
   attachmentStore.stagedAttachments.every(attachment => attachment.status === 'done'),
 );
-const canSend = computed(() => hasContent.value && attachmentsReady.value && !props.disabled && !shareStore.sending);
+const canSend = computed(() => hasContent.value && attachmentsReady.value && !props.disabled && !shareStore.sending && !isPreparing.value);
 
 // 编辑重发意图与原会话绑定；切换会话取消意图时同时清理注入内容。
 watch(() => historyStore.editingMessage, async (intent, previousIntent) => {
@@ -440,6 +444,10 @@ const handleAction = () => {
     const activeIds = Array.from(streamStore.activeStreamingIds);
     const key = sessionStore.currentConversationKey;
     if (!key) return;
+    if (key.ownerType === "group") {
+      void streamStore.stopGroupTurn(key.ownerId, key.topicId);
+      return;
+    }
     activeIds.forEach(id =>
       streamStore.stopMessage(key.ownerId, key.ownerType, key.topicId, id as string),
     );
@@ -784,13 +792,15 @@ onUnmounted(() => {
 
           <Transition name="pop-slide">
             <!-- 发送/中止按钮 -->
-            <button v-if="hasContent || isGenerating"
+            <button v-if="hasContent || isGenerating || isPreparing"
               @click="handleAction"
+              :aria-label="isGenerating ? '停止生成' : isPreparing ? '正在准备消息' : '发送消息'"
               :disabled="!isGenerating && !canSend"
               class="w-8 h-8 flex items-center justify-center rounded-full shadow-sm active:scale-95 transition-all bg-blue-500 text-white"
               :class="{ 'bg-red-500': isGenerating, 'opacity-40': !isGenerating && !canSend }"
             >
               <div v-if="isGenerating" class="i-heroicons-stop-16-solid text-lg"></div>
+              <div v-else-if="isPreparing" class="i-heroicons-ellipsis-horizontal text-lg"></div>
               <div v-else class="i-heroicons-paper-airplane text-[15px] -rotate-45 translate-x-0.2 -translate-y-0.2"></div>
             </button>
           </Transition>

@@ -507,7 +507,8 @@ describe("stream render backpressure", () => {
       "assistant-1",
     );
     expect(message?.content).toBe("candidate partial");
-    expect(message?.isReconnecting).toBe(true);
+    expect(message?.isReconnecting).toBe(false);
+    expect(message?.streamRecoveryState).toBe("waiting_retry");
     expect(message?.finishReason).toBeUndefined();
     expect(store.isMessageActive("agent-a", "agent", "topic-a", "assistant-1")).toBe(true);
 

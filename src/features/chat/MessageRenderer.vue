@@ -38,6 +38,8 @@ import { useMessageStyleInjector } from "../../core/composables/useMessageStyleI
 import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from "lucide-vue-next";
 import morphdom from "morphdom";
 import { instantiateMermaidSvg, renderMermaidTemplate } from './utils/mermaidRenderer';
+import { allowChatMutation, chatMutationBlockReason } from "./chatMutationPolicy";
+import type { OverlayActionItem } from "../../core/types/overlay";
 
 const { processEmoticonsInContainer } = useEmoticonFixer();
 let heavyController: AbortController | null = null;
@@ -243,6 +245,13 @@ const isStreaming = computed(() => {
     key.topicId,
     props.message.id,
   );
+});
+
+const streamStatusLabel = computed(() => {
+  if (props.message.isStopping) return "停止待确认";
+  if (props.message.streamRecoveryState === "waiting_retry") return "接续失败，等待重试";
+  if (props.message.streamRecoveryState === "reconnecting") return "正在接续";
+  return props.message.finishReason === "cancelled_by_user" ? "已停止" : "";
 });
 
 function isBrkNode(node: MarkdownNode): boolean {
@@ -791,8 +800,8 @@ watch(
 const showMessageContextMenu = async () => {
   const messageKey = historyStore.captureMessageActionKey(props.message.id);
   if (!messageKey) return;
-  const actions: any[] = [];
-  const generationActive = streamStore.activeStreamingIds.size > 0;
+  const actions: OverlayActionItem[] = [];
+  const mutationBlocked = () => chatMutationBlockReason(messageKey.conversation) !== null;
 
   if (isStreaming.value && !shell.value?.isUser) {
     actions.push({
@@ -880,9 +889,9 @@ const showMessageContextMenu = async () => {
         label: "重新生成",
         icon: RotateCcw,
         danger: true,
-        disabled: generationActive,
+        get disabled() { return mutationBlocked(); },
         handler: async () => {
-          if (streamStore.activeStreamingIds.size === 0) {
+          if (allowChatMutation(messageKey.conversation)) {
             const confirmed = await overlayStore.showConfirm({
               title: "重新生成",
               message: "确定要重新生成这条消息吗？",
@@ -899,9 +908,9 @@ const showMessageContextMenu = async () => {
         label: "编辑重发",
         icon: Edit2,
         danger: true,
-        disabled: generationActive,
+        get disabled() { return mutationBlocked(); },
         handler: async () => {
-          if (streamStore.activeStreamingIds.size === 0) {
+          if (allowChatMutation(messageKey.conversation)) {
             const confirmed = await overlayStore.showConfirm({
               title: "编辑重发",
               message: "确定要编辑重发这条消息吗？",
@@ -920,7 +929,9 @@ const showMessageContextMenu = async () => {
     label: "删除消息",
     icon: Trash2,
     danger: true,
+    get disabled() { return mutationBlocked(); },
     handler: async () => {
+      if (!allowChatMutation(messageKey.conversation)) return;
       const confirmed = await overlayStore.showConfirm({
         title: "删除消息",
         message: "确定要删除这条消息吗？",
@@ -1232,7 +1243,7 @@ onUnmounted(() => {
           :class="bubbleIndex > 0 ? 'mt-2' : ''"
         >
           <!-- 初始思考指示灯：仅在此活跃气泡没有任何已确认 blocks，且仍在流式并未吐出 tail 时显示 -->
-          <ThinkingIndicator v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1) && (!message.blocks || message.blocks.length === 0) && !message.tailBlock" />
+          <ThinkingIndicator v-if="isStreaming && !streamStatusLabel && (bubbleIndex === messageBubbles.length - 1) && (!message.blocks || message.blocks.length === 0) && !message.tailBlock" />
 
           <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
             <template v-if="bubble.blocks && bubble.blocks.length > 0">
@@ -1359,7 +1370,12 @@ onUnmounted(() => {
             class="pt-3 border-t border-black/5 dark:border-white/5" 
           />
 
-          <StreamingTag v-if="isStreaming && (bubbleIndex === messageBubbles.length - 1)" />
+          <template v-if="bubbleIndex === messageBubbles.length - 1">
+            <div v-if="streamStatusLabel" role="status" class="pt-2 text-xs opacity-60">
+              {{ streamStatusLabel }}
+            </div>
+            <StreamingTag v-else-if="isStreaming" />
+          </template>
 
           <template #footer>
             <div class="vcp-message-time text-[9px] mt-1.5 px-1 opacity-50 font-mono tracking-tighter w-full"

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onUnmounted, watch } from "vue";
+import { computed, ref, onUnmounted, watch } from "vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { deleteTempFile, pickFile } from "tauri-plugin-vcp-mobile";
 import { useAssistantStore } from "../../core/stores/assistant";
@@ -15,6 +15,7 @@ import SettingsSection from "../../components/settings/SettingsSection.vue";
 import SettingsRow from "../../components/settings/SettingsRow.vue";
 import SettingsSwitch from "../../components/settings/SettingsSwitch.vue";
 import GroupModeHelpDialog from "./GroupModeHelpDialog.vue";
+import { allowChatMutation, chatMutationBlockReason } from "../chat/chatMutationPolicy";
 import type {
   AgentListItemDto,
   GroupConfigDto,
@@ -73,6 +74,9 @@ const normalizeGroupConfig = (config: GroupConfigDto): EditableGroupConfig => ({
   tagMatchMode: config.tagMatchMode || "strict",
 });
 const groupConfig = ref<EditableGroupConfig>(createEmptyConfig(props.id));
+const deleteBlockReason = computed(() => chatMutationBlockReason({
+  ownerId: groupConfig.value.id, ownerType: "group",
+}));
 let editorEpoch = 0;
 const pendingSaves = new Map<string, Promise<void>>();
 const isEpochCurrent = (epoch: number) => editorEpoch === epoch;
@@ -324,6 +328,7 @@ const onModelSelect = (modelId: string) => {
 const handleDelete = async () => {
   const epoch = editorEpoch;
   const groupId = groupConfig.value.id;
+  if (!allowChatMutation({ ownerId: groupId, ownerType: "group" })) return;
   const confirmed = await overlayStore.showConfirm({
     title: "删除群组",
     message: "确定要删除这个群组吗？所有聊天记录将被标记为删除。",
@@ -331,7 +336,7 @@ const handleDelete = async () => {
   });
   if (confirmed && groupId && isOpenEditorCurrent(epoch, groupId)) {
     try {
-      await assistantStore.deleteGroup(groupId);
+      if (!await assistantStore.deleteGroup(groupId)) return;
       if (!isOpenEditorCurrent(epoch, groupId)) return;
       if (
         sessionStore.currentSelectedItem?.type === "group" &&
@@ -536,10 +541,11 @@ const showModeHelp = ref(false);
 
         <!-- Actions -->
         <div class="pt-4 pb-8">
-          <button @click="handleDelete"
-            class="w-full py-3.5 bg-transparent border border-red-500/20 text-red-500/60 hover:bg-red-500/5 active:bg-red-500/10 active:scale-95 transition-all rounded-2xl font-black uppercase tracking-widest text-[11px]">
+          <button @click="handleDelete" :disabled="deleteBlockReason !== null"
+            class="w-full py-3.5 bg-transparent border border-red-500/20 text-red-500/60 enabled:hover:bg-red-500/5 enabled:active:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors rounded-2xl font-black uppercase tracking-widest text-[11px]">
             删除此群组
           </button>
+          <p v-if="deleteBlockReason" class="mt-2 text-xs opacity-60">{{ deleteBlockReason }}</p>
         </div>
       </div>
 

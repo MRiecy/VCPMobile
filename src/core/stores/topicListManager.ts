@@ -9,6 +9,7 @@ import { useAssistantStore } from "./assistant";
 import type { TopicDto } from "../types/assistant";
 
 import { useNotificationStore } from "./notification";
+import { allowChatMutation } from "../../features/chat/chatMutationPolicy";
 
 export type TopicSortMode = "created" | "updated";
 export type Topic = TopicDto & { updatedAt: number };
@@ -453,6 +454,7 @@ export const useTopicStore = defineStore("topic", () => {
     ownerType: ConversationOwnerType,
     topicId: string,
   ) => {
+    if (!allowChatMutation({ ownerId, ownerType, topicId })) return;
     try {
       console.log(`[TopicStore] Deleting topic ${topicId}`);
       const replacementDto = await invoke<TopicDto | null>("delete_topic", {

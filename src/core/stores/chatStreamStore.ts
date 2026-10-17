@@ -1,6 +1,6 @@
 import { defineStore } from "pinia";
 import { ref, computed, reactive, onScopeDispose } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, type Channel } from "@tauri-apps/api/core";
 
 import { useChatSessionStore } from "./chatSessionStore";
 import { useAssistantStore } from "./assistant";
@@ -15,17 +15,15 @@ import type {
   ContentBlock,
   MarkdownNode,
   MessageShell,
-  RecoveryResultDto,
+  InterruptRequestDto,
+  ReconnectChatStreamsDto,
   StreamBlock,
   StreamEventDto,
   TailFrame,
   TailRenderMode,
   TailTextOp,
 } from "../types/chat";
-import type {
-  ConversationKey,
-  ConversationOwnerType,
-} from "./chatSessionStore";
+import type { ConversationOwnerType } from "./chatSessionStore";
 
 interface StreamTerminalTombstone {
   terminalAt: number;
@@ -83,11 +81,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     messageId,
   );
 
-  const compareMessageOrder = (a: ChatMessage, b: ChatMessage) => {
-    if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
-    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-  };
-
   // 核心：记录每个完整会话是否处于活动流状态。
   const sessionActiveStreams = ref<Record<string, string[]>>({});
 
@@ -98,9 +91,21 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     string,
     StreamTerminalTombstone
   >();
-  // Covers a recovery command or its attached live consumer until end/error.
-  const recoveryMessageIds = new Map<string, object>();
   const streamConsumerRevisions = new Map<string, number>();
+  const conversationOperations = reactive(new Map<string, number>());
+  const activeGroupTurns = reactive(new Map<string, string>());
+  const groupConsumerRevisions = new Map<string, number>();
+  const activeRequests = reactive(new Map<string, Set<string>>());
+  const requestConsumerRevisions = new Map<string, number>();
+  const MAX_REQUEST_ACTIVITY_REVISIONS = 1024;
+  const activityInventoryKnown = ref(false);
+  let reconnectChannel: Channel<StreamEventDto> | null = null;
+  const connectionId = crypto.randomUUID();
+  let connectionEpoch = 0;
+  let reconnectPromise: Promise<void> | null = null;
+  let receiptEventConversations: Set<string> | null = null;
+  let receiptEventMessages: Set<string> | null = null;
+  let receiptRequestKeys: Set<string> | null = null;
   let disposed = false;
 
   function isStreamDebugEnabled(): boolean {
@@ -608,6 +613,61 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     );
   }
 
+  // 覆盖请求持久化/上下文准备以及首个 thinking 事件前的窗口。
+  function beginConversationOperation(
+    ownerId: string,
+    ownerType: ConversationOwnerType,
+    topicId: string,
+  ): () => void {
+    const key = conversationMapKey(ownerId, ownerType, topicId);
+    conversationOperations.set(key, (conversationOperations.get(key) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const remaining = (conversationOperations.get(key) ?? 0) - 1;
+      if (remaining > 0) conversationOperations.set(key, remaining);
+      else conversationOperations.delete(key);
+    };
+  }
+
+  function isConversationBusy(
+    ownerId: string,
+    ownerType: ConversationOwnerType,
+    topicId: string,
+  ): boolean {
+    const key = conversationMapKey(ownerId, ownerType, topicId);
+    return !activityInventoryKnown.value
+      || conversationOperations.has(key)
+      || activeGroupTurns.has(key)
+      || activeRequests.has(key)
+      || Boolean(sessionActiveStreams.value[key]?.length);
+  }
+
+  function isConversationPreparing(
+    ownerId: string,
+    ownerType: ConversationOwnerType,
+    topicId: string,
+  ): boolean {
+    const key = conversationMapKey(ownerId, ownerType, topicId);
+    return conversationOperations.has(key) || activeRequests.has(key);
+  }
+
+  function isOwnerBusy(ownerId: string, ownerType: ConversationOwnerType): boolean {
+    if (!activityInventoryKnown.value) return true;
+    const keys = new Set([
+      ...conversationOperations.keys(),
+      ...activeGroupTurns.keys(),
+      ...activeRequests.keys(),
+      ...Object.keys(sessionActiveStreams.value),
+    ]);
+    for (const key of keys) {
+      const [type, id] = JSON.parse(key) as [ConversationOwnerType, string, string];
+      if (type === ownerType && id === ownerId) return true;
+    }
+    return false;
+  }
+
   function getActiveStreamMessage(
     ownerId: string,
     ownerType: ConversationOwnerType,
@@ -643,8 +703,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       "group",
       sessionStore.currentTopicId,
     );
-    const streams = sessionActiveStreams.value[key];
-    return streams ? streams.length > 0 : false;
+    return activeGroupTurns.has(key) || Boolean(sessionActiveStreams.value[key]?.length);
   });
 
   // 全局流消息池上限，防止极端场景下 OOM
@@ -660,6 +719,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       if (!activeStreamKeySet.value.has(messageKey)) {
         activeStreamMessages.delete(messageKey);
         streamConsumerRevisions.delete(messageKey);
+        clearRAFUpdate(messageKey, false);
         remaining -= 1;
       }
     }
@@ -735,7 +795,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   ) => {
     const messageKey = streamMessageMapKey(ownerId, ownerType, topicId, messageId);
     recordStreamTerminalTombstone(messageKey);
-    recoveryMessageIds.delete(messageKey);
     if (streamingMessageKey.value === messageKey) streamingMessageKey.value = null;
     removeSessionStream(ownerId, ownerType, topicId, messageId, true);
   };
@@ -759,11 +818,52 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     const ownerId = ctx.ownerId;
 
     if (
-      !actualMessageId ||
       !topicId ||
       !ownerId ||
       (ownerType !== "agent" && ownerType !== "group")
     ) return;
+    if (!Number.isSafeInteger(event.consumerRevision) || event.consumerRevision <= 0) return;
+    const conversationKey = conversationMapKey(ownerId, ownerType, topicId);
+    if (type === "request_activity") {
+      if (typeof ctx.requestId !== "string") return;
+      const requestKey = streamMessageMapKeyFromConversation(conversationKey, ctx.requestId);
+      const previousRevision = requestConsumerRevisions.get(requestKey) ?? 0;
+      if (event.consumerRevision < previousRevision) return;
+      requestConsumerRevisions.set(requestKey, event.consumerRevision);
+      receiptRequestKeys?.add(requestKey);
+      const activity = event.chunk as { active?: boolean } | null;
+      if (activity?.active === true) {
+        if (!activeRequests.has(conversationKey)) activeRequests.set(conversationKey, new Set());
+        activeRequests.get(conversationKey)!.add(ctx.requestId);
+      } else if (activity?.active === false) {
+        const requests = activeRequests.get(conversationKey);
+        requests?.delete(ctx.requestId);
+        if (requests?.size === 0) activeRequests.delete(conversationKey);
+      }
+      // 仅保留近期已结束 attempt 的交付序号；正在执行的 owner 不被淘汰。
+      if (requestConsumerRevisions.size > MAX_REQUEST_ACTIVITY_REVISIONS) {
+        for (const key of requestConsumerRevisions.keys()) {
+          if (requestConsumerRevisions.size <= MAX_REQUEST_ACTIVITY_REVISIONS) break;
+          const [scope, requestId] = JSON.parse(key) as [string, string];
+          if (!activeRequests.get(scope)?.has(requestId)) requestConsumerRevisions.delete(key);
+        }
+      }
+      return;
+    }
+    if (type === "group_turn") {
+      if (ownerType !== "group" || typeof ctx.turnId !== "string") return;
+      const previousRevision = groupConsumerRevisions.get(conversationKey) ?? 0;
+      if (event.consumerRevision < previousRevision) return;
+      receiptEventConversations?.add(conversationKey);
+      groupConsumerRevisions.set(conversationKey, event.consumerRevision);
+      const activity = event.chunk as { active?: boolean } | null;
+      if (activity?.active === true) activeGroupTurns.set(conversationKey, ctx.turnId);
+      else if (activity?.active === false && activeGroupTurns.get(conversationKey) === ctx.turnId) {
+        activeGroupTurns.delete(conversationKey);
+      }
+      return;
+    }
+    if (!actualMessageId) return;
     const messageKey = streamMessageMapKey(
       ownerId,
       ownerType,
@@ -772,15 +872,13 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     );
 
     if (hasStreamTerminalTombstone(messageKey)) return;
-    if (!Number.isSafeInteger(event.consumerRevision) || event.consumerRevision <= 0) return;
     const currentRevision = streamConsumerRevisions.get(messageKey) ?? 0;
     if (event.consumerRevision < currentRevision) return;
+    receiptEventMessages?.add(messageKey);
     if (event.consumerRevision > currentRevision) {
       clearRAFUpdate(messageKey, false);
-      if (recoveryMessageIds.has(messageKey)) recoveryMessageIds.set(messageKey, {});
     }
     streamConsumerRevisions.set(messageKey, event.consumerRevision);
-    if (type === "end" || type === "error") recoveryMessageIds.delete(messageKey);
     if (type === "end") {
       recordStreamTerminalTombstone(messageKey);
     }
@@ -806,7 +904,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         role: "assistant",
         name: ctx.agentName,
         content: "",
-        timestamp: Date.now(),
+        timestamp: event.timestamp ?? Date.now(),
         isThinking: type === "thinking",
         agentId: ctx.agentId,
         groupId: ownerType === "group" ? ownerId : undefined,
@@ -821,17 +919,23 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     }
 
     if (isNewStream) {
-      topicStore.incrementTopicMsgCount(ownerId, ownerType, topicId);
+      const isRecoveryStatus = type === "reconnecting" || type === "connected" || type === "stopping";
+      if (!isRecoveryStatus) topicStore.incrementTopicMsgCount(ownerId, ownerType, topicId);
       const currentKey = sessionStore.currentConversationKey;
-      if (
+      if (!isRecoveryStatus && (
         !currentKey ||
         currentKey.ownerId !== ownerId ||
         currentKey.ownerType !== ownerType ||
         currentKey.topicId !== topicId
-      ) {
+      )) {
         void topicStore
           .incrementTopicUnreadCount(ownerId, ownerType, topicId)
           .catch(() => {});
+      }
+      if (isRecoveryStatus && ownerType === "agent" && (
+        currentKey?.ownerId !== ownerId || currentKey.ownerType !== ownerType || currentKey.topicId !== topicId
+      )) {
+        void topicStore.setTopicUnread(ownerId, ownerType, topicId, true).catch(() => {});
       }
 
       // 回调：通知 UI 列表插入新消息
@@ -843,13 +947,41 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     // 维护流状态
     if (type === "thinking") {
       msg!.isThinking = true;
+      msg!.isReconnecting = false;
+      msg!.streamRecoveryState = undefined;
       addSessionStream(ownerId, ownerType, topicId, actualMessageId);
       if (!streamingMessageKey.value) {
         streamingMessageKey.value = messageKey;
       }
+    } else if (type === "reconnecting" || type === "connected" || type === "stopping") {
+      msg!.isThinking = false;
+      msg!.isReconnecting = type === "reconnecting";
+      msg!.streamRecoveryState = type === "reconnecting" ? "reconnecting" : undefined;
+      // 停止意图属于请求 owner，接管成功不会把它重新解释成继续生成。
+      if (type === "stopping") {
+        msg!.isStopping = true;
+        clearRAFUpdate(messageKey, true);
+        if (typeof event.content === "string" && event.content !== msg!.content) {
+          const content = event.content;
+          msg!.content = content;
+          void invoke<ContentBlock[]>("process_message_content", { content })
+            .then(blocks => {
+              if (!ownsConsumer() || hasStreamTerminalTombstone(messageKey)
+                || !msg!.isStopping || msg!.content !== content || rAFPendingUpdates.has(messageKey)) return;
+              msg!.blocks = blocks;
+              msg!.tailContent = "";
+              msg!.tailBlock = undefined;
+              msg!.tailOp = undefined;
+            })
+            .catch(error => console.error("[ChatStreamStore] Failed to render stopping partial:", error));
+        }
+      }
+      if (msg!.finishReason === "error") msg!.finishReason = undefined;
+      addSessionStream(ownerId, ownerType, topicId, actualMessageId);
     } else if (type === "aurora") {
       msg!.isThinking = false;
       msg!.isReconnecting = false;
+      msg!.streamRecoveryState = undefined;
       addSessionStream(ownerId, ownerType, topicId, actualMessageId);
 
       const aurora = event.aurora;
@@ -1081,9 +1213,35 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       // error 表示尚未 durable（终态提交失败或 Helper 接管中断）。保留 partial 和 active owner，
       // 不写终态 tombstone；后续 recovery 的权威 end 仍必须能够进入。
       clearRAFUpdate(messageKey, true);
+      const contentChanged = typeof event.content === "string" && event.content !== msg!.content;
       if (typeof event.content === "string") msg!.content = event.content;
       msg!.isThinking = false;
-      msg!.isReconnecting = true;
+      msg!.isReconnecting = false;
+      const wasWaiting = msg!.streamRecoveryState === "waiting_retry";
+      msg!.streamRecoveryState = "waiting_retry";
+      addSessionStream(ownerId, ownerType, topicId, actualMessageId);
+      if (contentChanged) {
+        const content = msg!.content || "";
+        void invoke<ContentBlock[]>("process_message_content", { content })
+          .then(blocks => {
+            if (!ownsConsumer() || hasStreamTerminalTombstone(messageKey)
+              || msg!.streamRecoveryState !== "waiting_retry" || msg!.content !== content) return;
+            msg!.blocks = blocks;
+            msg!.tailContent = "";
+            msg!.tailBlock = undefined;
+            msg!.tailOp = undefined;
+          })
+          .catch(error => console.error("[ChatStreamStore] Failed to render recoverable partial:", error));
+      }
+      if (!wasWaiting && !msg!.isStopping) {
+        useNotificationStore().addNotification({
+          id: `stream-recovery:${messageKey}`,
+          type: "error",
+          title: "流式接续失败",
+          message: event.error || "连接暂不可用，等待重试",
+          toastOnly: true,
+        });
+      }
     } else if (type === "end") {
       const finishReason = event.finishReason;
       if (typeof event.topicUpdatedAt === "number") {
@@ -1107,6 +1265,8 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       if (msg) {
         msg!.isThinking = false;
         msg!.isReconnecting = false;
+        msg!.streamRecoveryState = undefined;
+        msg!.isStopping = false;
         if (event.timestamp) {
           msg!.timestamp = event.timestamp;
         }
@@ -1167,21 +1327,36 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     topicId: string,
     messageId: string,
   ) => {
-    console.log(
-      `[ChatStreamStore] Sending interrupt signal for message: ${messageId}`,
-    );
+    const message = getActiveStreamMessage(ownerId, ownerType, topicId, messageId);
+    const messageKey = streamMessageMapKey(ownerId, ownerType, topicId, messageId);
+    if (message) message.isStopping = true;
     try {
-      await invoke("interruptRequest", {
+      const receipt = await invoke<InterruptRequestDto>("interruptRequest", {
         ownerId,
         ownerType,
         topicId,
         messageId,
       });
+      if (disposed) return;
+      if (receipt?.status === "completed" && !hasStreamTerminalTombstone(messageKey)
+        && isMessageActive(ownerId, ownerType, topicId, messageId)) {
+        // 收据只证明后端已提交；缺失的正文仍经统一连接/历史对账取得。
+        await checkAndRecoverInterruptedStreams();
+      }
     } catch (e) {
       console.error(
         `[ChatStreamStore] Failed to interrupt stream for ${messageId}:`,
         e,
       );
+      if (!disposed && isMessageActive(ownerId, ownerType, topicId, messageId)) {
+        useNotificationStore().addNotification({
+          id: `stream-stop:${messageKey}`,
+          type: "warning",
+          title: "停止待确认",
+          message: e instanceof Error ? e.message : String(e),
+          toastOnly: true,
+        });
+      }
     }
   };
 
@@ -1189,30 +1364,43 @@ export const useChatStreamStore = defineStore("chatStream", () => {
    * 强行中止整个群组的接力赛回合
    */
   const stopGroupTurn = async (ownerId: string, topicId: string) => {
-    console.log(
-      `[ChatStreamStore] Global Group Interruption for topic: ${topicId}`,
-    );
-    // 在首个 await 前冻结目标集合，避免切换会话后误停新话题的流。
-    const activeIds = Array.from(activeStreamingIds.value);
+    const conversationKey = conversationMapKey(ownerId, "group", topicId);
+    for (const id of sessionActiveStreams.value[conversationKey] ?? []) {
+      const message = getActiveStreamMessage(ownerId, "group", topicId, id);
+      if (message) message.isStopping = true;
+    }
     try {
       await invoke("interruptGroupTurn", {
         ownerId,
         ownerType: "group",
         topicId,
       });
-      if (activeIds.length > 0) {
-        await Promise.all(
-          activeIds.map((id) => stopMessage(ownerId, "group", topicId, id)),
-        );
-      }
     } catch (e) {
       console.error("[ChatStreamStore] Failed to stop group turn:", e);
+      if (!disposed && (activeGroupTurns.has(conversationKey) || sessionActiveStreams.value[conversationKey]?.length)) {
+        useNotificationStore().addNotification({
+          id: `stream-stop-group:${conversationKey}`,
+          type: "warning",
+          title: "停止待确认",
+          message: e instanceof Error ? e.message : String(e),
+          toastOnly: true,
+        });
+      }
     }
   };
 
   onScopeDispose(() => {
     disposed = true;
-    recoveryMessageIds.clear();
+    connectionEpoch += 1;
+    reconnectChannel = null;
+    receiptEventConversations = null;
+    receiptEventMessages = null;
+    receiptRequestKeys = null;
+    conversationOperations.clear();
+    activeGroupTurns.clear();
+    groupConsumerRevisions.clear();
+    activeRequests.clear();
+    requestConsumerRevisions.clear();
     cleanupTimers.forEach(clearTimeout);
     cleanupTimers.clear();
     rAFPendingUpdates.forEach((up) => {
@@ -1225,295 +1413,191 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     streamConsumerRevisions.clear();
   });
 
-  const isRecovering = ref(false);
+  const connectionError = ref<string | null>(null);
+
+  const createOutputChannel = (): Channel<StreamEventDto> => {
+    const epoch = ++connectionEpoch;
+    const channel = useChatHistoryStore().makeStreamChannel(null);
+    const handleEvent = channel.onmessage;
+    channel.onmessage = event => {
+      if (!disposed && epoch === connectionEpoch) handleEvent(event);
+    };
+    reconnectChannel = channel;
+    return channel;
+  };
 
   /**
-   * 检查并恢复被异常打断的活跃生成（冷启动自对齐与流接续）
+   * 同一 WebView 只持有一个输出连接。Rust 安排接管；每条生成的结果只从 Channel 归约。
    */
-  const checkAndRecoverInterruptedStreams = async () => {
-    if (disposed || isRecovering.value) return;
-    isRecovering.value = true;
+  const checkAndRecoverInterruptedStreams = (): Promise<void> => {
+    if (disposed) return Promise.resolve();
+    if (reconnectPromise) return reconnectPromise;
+    // Tauri 每次反序列化 Channel 都新建原生序号，不能重复传递同一个 JS Channel。
+    // 注册后只传连接身份，让 Rust 复用最初注册的 Channel 实例及其有序序号。
+    let registrationChannel = reconnectChannel ? undefined : createOutputChannel();
+    let epoch = connectionEpoch;
+    const previousActiveKeys = new Set(activeStreamKeySet.value);
+    const eventConversations = new Set<string>();
+    const eventMessages = new Set<string>();
+    const requestEvents = new Set<string>();
+    receiptEventConversations = eventConversations;
+    receiptEventMessages = eventMessages;
+    receiptRequestKeys = requestEvents;
 
-    // 1. 本地扫表：无网状态下也能运行
-    let activeGens: ActiveGenerationDto[] = [];
-    try {
-      const streamChannel = useChatHistoryStore().makeStreamChannel(null);
-      activeGens = await invoke<ActiveGenerationDto[]>("get_active_generations", { streamChannel });
-    } catch (e) {
-      console.error("[ChatStreamStore] Failed to get active generations:", e);
-      isRecovering.value = false;
-      return;
-    }
-
-    if (disposed) {
-      isRecovering.value = false;
-      return;
-    }
-    activeGens = (activeGens ?? []).filter((generation) =>
-      (generation.ownerType === "agent" || generation.ownerType === "group")
-      && !recoveryMessageIds.has(streamMessageMapKey(
-        generation.ownerId, generation.ownerType, generation.topicId, generation.msgId,
-      ))
-      && !hasStreamTerminalTombstone(streamMessageMapKey(
-        generation.ownerId, generation.ownerType, generation.topicId, generation.msgId,
-      )),
-    );
-
-    if (!activeGens || activeGens.length === 0) {
-      isRecovering.value = false;
-      return;
-    }
-
-    try {
-      console.log(
-        `[ChatStreamStore] Found ${activeGens.length} interrupted active generations:`,
-        activeGens,
-      );
-      // 扫描前已有的活跃消息无需再次标记未读。
-      const existingMessageIds = new Set(activeStreamMessages.keys());
-      const recoveryUnreadUpdates: Promise<void>[] = [];
-
-      // 2. UI 预处理：在内存中将消息标记为 reconnecting，让用户在界面上看到“重连中”
-      for (const gen of activeGens) {
-        const { msgId, topicId, ownerId, ownerType, agentId, agentName } = gen;
-        if (ownerType !== "agent" && ownerType !== "group") continue;
-        const messageKey = streamMessageMapKey(
-          ownerId,
-          ownerType,
-          topicId,
-          msgId,
-        );
-
-        let msg = activeStreamMessages.get(messageKey);
-        if (!msg) {
-          const historyStore = useChatHistoryStore();
-          const currentKey = sessionStore.currentConversationKey;
-          const isCurrentConversation = Boolean(
-            currentKey &&
-              currentKey.topicId === topicId &&
-              currentKey.ownerId === ownerId &&
-              currentKey.ownerType === ownerType,
-          );
-          const existingMsg = isCurrentConversation
-            ? historyStore.currentChatHistory.find((x) => x.id === msgId)
-            : undefined;
-
-          if (existingMsg) {
-            msg = existingMsg;
-            msg.isReconnecting = true;
-          } else {
-            msg = reactive<ChatMessage>({
-              id: msgId,
-              role: "assistant",
-              name: agentName ?? undefined,
-              content: "",
-              timestamp: gen.createdAt || Date.now(),
-              isThinking: false,
-              isReconnecting: true,
-              agentId: agentId || (ownerType === "agent" ? ownerId : undefined),
-              groupId: ownerType === "group" ? ownerId : undefined,
-              isGroupMessage: ownerType === "group",
-              shell: computeShell({
-                role: "assistant",
-                agentId: agentId || (ownerType === "agent" ? ownerId : undefined),
-              }),
-            });
-
-            // 如果是当前展示的话题，且历史中没有，立即推入历史中展示
-            if (isCurrentConversation) {
-              historyStore.currentChatHistory.push(msg);
-              historyStore.currentChatHistory.sort(compareMessageOrder);
-            }
-          }
-          activeStreamMessages.set(messageKey, msg);
-        } else {
-          msg.isReconnecting = true;
+    reconnectPromise = (async () => {
+      try {
+        let receipt: ReconnectChatStreamsDto;
+        try {
+          receipt = await invoke<ReconnectChatStreamsDto>("reconnect_chat_streams", {
+            connectionId,
+            ...(registrationChannel ? { channel: registrationChannel } : {}),
+          });
+        } catch (error) {
+          if (disposed || epoch !== connectionEpoch) return;
+          if (String(error) !== "connection_not_registered" || registrationChannel) throw error;
+          registrationChannel = createOutputChannel();
+          epoch = connectionEpoch;
+          receipt = await invoke<ReconnectChatStreamsDto>("reconnect_chat_streams", {
+            connectionId, channel: registrationChannel,
+          });
         }
-        // 数据库仍将该消息列为 pending；上次接续拒绝的临时错误不属于生成终态。
-        if (msg.finishReason === "error") msg.finishReason = undefined;
-        addSessionStream(ownerId, ownerType, topicId, msgId);
-      }
-
-      for (const gen of activeGens) {
-        const { msgId, topicId, ownerId, ownerType } = gen;
-        if (ownerType !== "agent" && ownerType !== "group") continue;
-        const messageKey = streamMessageMapKey(
-          ownerId,
-          ownerType,
-          topicId,
-          msgId,
-        );
-        const currentKey = sessionStore.currentConversationKey;
-        const recoveryKey: ConversationKey | null =
-          currentKey &&
-          currentKey.topicId === topicId &&
-          currentKey.ownerId === ownerId &&
-          currentKey.ownerType === ownerType
-            ? {
-                ownerId: currentKey.ownerId,
-                ownerType: currentKey.ownerType,
-                topicId: currentKey.topicId,
-                epoch: currentKey.epoch,
-              }
-            : null;
-
-        if (recoveryMessageIds.has(messageKey)) continue;
-        const recoveryOwner = {};
-        recoveryMessageIds.set(messageKey, recoveryOwner);
-        const ownsRecovery = () => !disposed
-          && recoveryMessageIds.get(messageKey) === recoveryOwner
-          && !hasStreamTerminalTombstone(messageKey);
-
-        if (!existingMessageIds.has(messageKey) && ownerType === "agent" && !recoveryKey) {
-          recoveryUnreadUpdates.push(
-            topicStore.setTopicUnread(ownerId, ownerType, topicId, true),
-          );
+        if (disposed || epoch !== connectionEpoch) return;
+        if (!receipt || !Array.isArray(receipt.generations) || !Array.isArray(receipt.groupTurns)
+          || !Array.isArray(receipt.activeRequests)) {
+          throw new Error("聊天连接未返回有效的活动状态");
         }
-        let msg = activeStreamMessages.get(messageKey);
-        if (!msg) {
-          // 说明是冷启动后第一次加载或者流不在活跃池中
-          const historyStore = useChatHistoryStore();
-          const existing = recoveryKey
-            ? historyStore.currentChatHistory.find((x) => x.id === msgId)
-            : undefined;
-          if (existing) {
-            msg = existing;
-            activeStreamMessages.set(messageKey, msg);
+        activityInventoryKnown.value = true;
+        connectionError.value = null;
+        const pendingKeys = new Set<string>();
+        for (const generation of receipt.generations) {
+          if (generation.ownerType !== "agent" && generation.ownerType !== "group") continue;
+          const { ownerId, ownerType, topicId, msgId } = generation;
+          const messageKey = streamMessageMapKey(ownerId, ownerType, topicId, msgId);
+          pendingKeys.add(messageKey);
+          // 事件可先于收据抵达；收据从不覆盖新快照、待重试状态或持久终态。
+          if (hasStreamTerminalTombstone(messageKey)) continue;
+          hydratePendingReceipt(generation, ownerType, eventMessages.has(messageKey));
+        }
+
+        const liveTurns = new Map(receipt.groupTurns.map(turn => [
+          conversationMapKey(turn.ownerId, "group", turn.topicId), turn.turnId,
+        ]));
+        for (const key of activeGroupTurns.keys()) {
+          if (!eventConversations.has(key) && !liveTurns.has(key)) activeGroupTurns.delete(key);
+        }
+        for (const [key, turnId] of liveTurns) {
+          if (!eventConversations.has(key)) activeGroupTurns.set(key, turnId);
+        }
+
+        const liveRequestKeys = new Set<string>();
+        for (const request of receipt.activeRequests) {
+          const key = conversationMapKey(request.ownerId, request.ownerType, request.topicId);
+          const requestKey = streamMessageMapKeyFromConversation(key, request.requestId);
+          liveRequestKeys.add(requestKey);
+          if (!requestEvents.has(requestKey)) {
+            if (!activeRequests.has(key)) activeRequests.set(key, new Set());
+            activeRequests.get(key)!.add(request.requestId);
           }
         }
-
-        const recoveryMessage = msg;
-        // 保留已显示内容，首个权威 snapshot 会原子覆盖正文、稳定块与尾部。
-        if (recoveryMessage) {
-          recoveryMessage.isThinking = false;
+        for (const [key, requests] of activeRequests) {
+          for (const requestId of requests) {
+            const requestKey = streamMessageMapKeyFromConversation(key, requestId);
+            if (!liveRequestKeys.has(requestKey) && !requestEvents.has(requestKey)) requests.delete(requestId);
+          }
+          if (requests.size === 0) activeRequests.delete(key);
         }
 
-        const compileRecoveredContent = () => {
-          if (!recoveryMessage) return;
-          const content = recoveryMessage.content || "";
-          const consumerRevision = streamConsumerRevisions.get(messageKey);
-          void invoke<ContentBlock[]>("process_message_content", { content })
-            .then((compiledBlocks) => {
-              if (disposed || hasStreamTerminalTombstone(messageKey)
-                || streamConsumerRevisions.get(messageKey) !== consumerRevision
-                || recoveryMessage.content !== content) return;
-              recoveryMessage.blocks = compiledBlocks;
-              recoveryMessage.tailContent = "";
-              recoveryMessage.tailBlock = undefined;
-              recoveryMessage.tailOp = undefined;
-            })
-            .catch((error) => {
-              console.error("[ChatStreamStore] Failed to compile recovered message:", error);
-            });
-        };
-
-        const streamChannel = useChatHistoryStore().makeStreamChannel(null);
-
-        // 后端在一个 owner lease 内先判定 durable 状态，再决定是否需要网络接续。
-        // navigator.onLine 不能前置否决：Finalizing/Interrupted 等状态必须可离线收口。
-        // 扫描门闩可以释放，但 recoveryMessageIds 会覆盖整个长连接生命周期。
-        let attached = false;
-        void invoke<RecoveryResultDto>("recover_active_generation", {
-          ownerId,
-          ownerType,
-          topicId,
-          msgId,
-          streamChannel,
-        })
-          .then((res) => {
-            if (!ownsRecovery()) return;
-            console.log(
-              `[ChatStreamStore] Recovery status for ${msgId}: ${String(res?.status ?? "unknown")}`,
-            );
-            if (res.status === "attached") {
-              attached = true;
-              return;
-            }
-
-            if (recoveryMessage) {
-              recoveryMessage.isReconnecting = false;
-              recoveryMessage.isThinking = false;
-              if (typeof res.content === "string") {
-                clearRAFUpdate(messageKey, false);
-                recoveryMessage.content = res.content;
-                compileRecoveredContent();
-              }
-              if (res.status === "failed" || res.status === "not_found") {
-                recoveryMessage.finishReason = "error";
-              } else if (res.status === "completed" && res.finishReason) {
-                recoveryMessage.finishReason = res.finishReason;
-              }
-            }
-            removeSessionStream(ownerId, ownerType, topicId, msgId);
-
-            if (
-              recoveryKey &&
-              sessionStore.isConversationCurrent(recoveryKey)
-            ) {
-              const historyStore = useChatHistoryStore();
-              if (
-                !historyStore.currentChatHistory.some((x) => x.id === msgId)
-              ) {
-                void historyStore.loadHistory(ownerId, ownerType, topicId);
-              }
-            }
-          })
-          .catch((err) => {
-            if (!ownsRecovery()) return;
-            console.error(
-              `[ChatStreamStore] Failed to recover stream for ${msgId}:`,
-              err,
-            );
-            if (recoveryMessage) {
-              clearRAFUpdate(messageKey, true);
-              recoveryMessage.isReconnecting = false;
-              recoveryMessage.finishReason = "error";
-              compileRecoveredContent();
-            }
-            removeSessionStream(ownerId, ownerType, topicId, msgId);
-            useNotificationStore().addNotification({
-              type: "error",
-              title: "流式接续失败",
-              message: err instanceof Error ? err.message : String(err),
-              toastOnly: true,
-            });
-          })
-          .finally(() => {
-            if (!attached && recoveryMessageIds.get(messageKey) === recoveryOwner) {
-              recoveryMessageIds.delete(messageKey);
-            }
-          });
+        // end 可能在 WebView 离线期间已经提交。只清理本次连接前已有且不在收据中的状态，
+        // 不把收据缺席解释为业务失败；当前界面的权威正文由历史重新取得。
+        let reloadCurrentHistory = false;
+        for (const messageKey of previousActiveKeys) {
+          if (pendingKeys.has(messageKey) || eventMessages.has(messageKey)
+            || hasStreamTerminalTombstone(messageKey)) continue;
+          const [conversationKey, messageId] = JSON.parse(messageKey) as [string, string];
+          const [ownerType, ownerId, topicId] = JSON.parse(conversationKey) as [ConversationOwnerType, string, string];
+          const message = activeStreamMessages.get(messageKey);
+          if (message) {
+            clearRAFUpdate(messageKey, true);
+            message.isThinking = false;
+            message.isReconnecting = false;
+            message.streamRecoveryState = undefined;
+            message.isStopping = false;
+          }
+          // 清退旧交付身份，避免迟到帧重新插入已不 pending 的气泡；不推断业务 finishReason。
+          recordStreamTerminalTombstone(messageKey);
+          removeSessionStream(ownerId, ownerType, topicId, messageId, true);
+          const current = sessionStore.currentConversationKey;
+          if (current?.ownerId === ownerId && current.ownerType === ownerType
+            && current.topicId === topicId) reloadCurrentHistory = true;
+        }
+        const current = sessionStore.currentConversationKey;
+        if (reloadCurrentHistory && current) {
+          await useChatHistoryStore().loadHistory(current.ownerId, current.ownerType, current.topicId);
+        }
+      } catch (error) {
+        if (disposed || epoch !== connectionEpoch) return;
+        connectionError.value = error instanceof Error ? error.message : String(error);
+        useNotificationStore().addNotification({
+          id: "chat-output-connection",
+          type: "error",
+          title: "聊天连接失败",
+          message: `${connectionError.value}。返回前台或网络恢复后将重新连接。`,
+          toastOnly: true,
+        });
+      } finally {
+        if (receiptEventConversations === eventConversations) receiptEventConversations = null;
+        if (receiptEventMessages === eventMessages) receiptEventMessages = null;
+        if (receiptRequestKeys === requestEvents) receiptRequestKeys = null;
+        reconnectPromise = null;
       }
-
-      if (recoveryUnreadUpdates.length > 0) {
-        await Promise.allSettled(recoveryUnreadUpdates);
-      }
-
-      const selectedOwner = sessionStore.currentSelectedItem;
-      if (
-        selectedOwner &&
-        (selectedOwner.type === "agent" || selectedOwner.type === "group") &&
-        activeGens.some(
-          (generation) =>
-            generation.ownerId === selectedOwner.id &&
-            generation.ownerType === selectedOwner.type,
-        )
-      ) {
-        await topicStore
-          .loadTopicList(selectedOwner.id, selectedOwner.type)
-          .catch((error) => {
-            console.error(
-              "[ChatStreamStore] Failed to reconcile topic list after recovery:",
-              error,
-            );
-          });
-      }
-    } catch (e) {
-      console.error("[ChatStreamStore] Cloud sync failed during recovery:", e);
-    } finally {
-      isRecovering.value = false;
-    }
+    })();
+    return reconnectPromise;
   };
+
+  function hydratePendingReceipt(
+    generation: ActiveGenerationDto,
+    ownerType: ConversationOwnerType,
+    preserveEventState: boolean,
+  ): void {
+    const { ownerId, topicId, msgId } = generation;
+    const messageKey = streamMessageMapKey(ownerId, ownerType, topicId, msgId);
+    const history = useChatHistoryStore();
+    const loaded = history.loadedConversationKey;
+    const isLoaded = loaded?.ownerId === ownerId && loaded.ownerType === ownerType
+      && loaded.topicId === topicId && sessionStore.isConversationCurrent(loaded);
+    let message = activeStreamMessages.get(messageKey);
+    if (!message && isLoaded) message = history.currentChatHistory.find(item => item.id === msgId);
+    if (!message) {
+      message = reactive<ChatMessage>({
+        id: msgId,
+        role: "assistant",
+        name: generation.agentName ?? undefined,
+        content: "",
+        timestamp: generation.createdAt,
+        agentId: generation.agentId ?? (ownerType === "agent" ? ownerId : undefined),
+        groupId: ownerType === "group" ? ownerId : undefined,
+        isGroupMessage: ownerType === "group",
+      });
+    }
+    // live owner 的 connected 可先于元数据抵达；只补展示身份，不覆盖它已交付的正文/状态。
+    if (!message.name && generation.agentName) message.name = generation.agentName;
+    if (!message.agentId && generation.agentId) message.agentId = generation.agentId;
+    if (generation.createdAt > 0) message.timestamp = generation.createdAt;
+    message.shell = computeShell({ role: message.role, agentId: message.agentId, name: message.name ?? undefined });
+    activeStreamMessages.set(messageKey, message);
+    if (isLoaded && !history.currentChatHistory.some(item => item.id === msgId)) {
+      history.currentChatHistory.push(message);
+      history.currentChatHistory.sort((left, right) =>
+        left.timestamp - right.timestamp || left.id.localeCompare(right.id));
+    }
+    // 只有没有事件状态的冷占位才表示等待接管；已有消息状态由生产者继续控制。
+    if (!preserveEventState && !streamConsumerRevisions.has(messageKey)) {
+      message.isReconnecting = !generation.stopRequested;
+      message.streamRecoveryState = generation.stopRequested ? undefined : "reconnecting";
+    }
+    if (!preserveEventState && generation.stopRequested) message.isStopping = true;
+    addSessionStream(ownerId, ownerType, topicId, msgId);
+  }
 
   return {
     streamingMessageKey,
@@ -1525,6 +1609,12 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     isMessageActiveInSession,
     getActiveStreamMessage,
     isGroupGenerating,
+    beginConversationOperation,
+    isConversationBusy,
+    isConversationPreparing,
+    isOwnerBusy,
+    activityInventoryKnown,
+    connectionError,
     computeShell,
     addSessionStream,
     removeSessionStream,

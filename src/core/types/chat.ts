@@ -217,6 +217,8 @@ export interface ChatMessage {
   tailFrame?: TailFrame;
   tailSnapshot?: MarkdownNode[];
   isReconnecting?: boolean;  // 🆕 流接续重连中状态
+  streamRecoveryState?: "reconnecting" | "waiting_retry";
+  isStopping?: boolean;
 }
 
 export type AstMutation =
@@ -379,12 +381,14 @@ export interface StreamContextDto {
   ownerId?: string;
   ownerType?: "agent" | "group";
   agentName?: string;
+  turnId?: string;
+  requestId?: string;
   [key: string]: unknown;
 }
 
 /** Rust `StreamEvent` 的完整 Channel 载荷；Option 字段会被序列化为 null。 */
 export interface StreamEventDto {
-  type: "thinking" | "aurora" | "end" | "error";
+  type: "thinking" | "reconnecting" | "connected" | "stopping" | "group_turn" | "request_activity" | "aurora" | "end" | "error";
   chunk: unknown | null;
   messageId: string;
   context: StreamContextDto | null;
@@ -416,15 +420,38 @@ export interface ActiveGenerationDto {
   createdAt: number;
   agentId: string | null;
   agentName: string | null;
+  stopRequested: boolean;
 }
 
-export type RecoveryResultDto =
-  | { status: "attached" }
-  | { status: "completed"; content: string; finishReason?: string | null }
-  | { status: "failed" | "not_found"; content: string };
+export interface ActiveGroupTurnDto {
+  ownerId: string;
+  ownerType: "group";
+  topicId: string;
+  turnId: string;
+}
+
+export interface ActiveRequestDto {
+  ownerId: string;
+  ownerType: "agent" | "group";
+  topicId: string;
+  requestId: string;
+}
+
+/** 连接建立收据仅用于对齐活动范围；正文与生成状态始终由 Channel 交付。 */
+export interface ReconnectChatStreamsDto {
+  generations: ActiveGenerationDto[];
+  groupTurns: ActiveGroupTurnDto[];
+  activeRequests: ActiveRequestDto[];
+}
+
+export interface InterruptRequestDto {
+  success: boolean;
+  status: "completed" | "cancelling";
+  finishReason?: string;
+}
 
 export type GroupChatResultDto =
-  | { status: "completed" }
+  | { status: "completed" | "cancelled" | "stopping" | "discarded" | "recovery_pending" }
   | { status: "no_ai_response"; reason: "invite_only" | "no_speakers" }
   | {
       status: "no_ai_response";

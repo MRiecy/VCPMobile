@@ -24,7 +24,7 @@ use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, AuroraUpdate, AuroraUpda
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::settings_manager::{
-    read_settings, ChatEndpointMode, Settings, SettingsState,
+    ChatEndpointMode, Settings,
 };
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 
@@ -343,6 +343,7 @@ pub struct VcpRequestFailure {
     message: String,
     partial_content: Option<String>,
     recovery_pending: bool,
+    stop_pending: bool,
 }
 
 impl VcpRequestFailure {
@@ -351,6 +352,7 @@ impl VcpRequestFailure {
             message: message.into(),
             partial_content: Some(partial_content),
             recovery_pending: false,
+            stop_pending: false,
         }
     }
 
@@ -360,11 +362,26 @@ impl VcpRequestFailure {
             message: message.into(),
             partial_content,
             recovery_pending: true,
+            stop_pending: false,
         }
     }
 
     pub(crate) fn is_recovery_pending(&self) -> bool {
         self.recovery_pending
+    }
+
+    pub(crate) fn is_stop_pending(&self) -> bool {
+        self.stop_pending
+    }
+
+    #[cfg(target_os = "android")]
+    fn stopping(message: impl Into<String>, partial_content: Option<String>) -> Self {
+        Self {
+            message: message.into(),
+            partial_content,
+            recovery_pending: true,
+            stop_pending: true,
+        }
     }
 
     pub fn into_parts(self) -> (String, Option<String>) {
@@ -386,6 +403,7 @@ impl From<String> for VcpRequestFailure {
             message,
             partial_content: None,
             recovery_pending: false,
+            stop_pending: false,
         }
     }
 }
@@ -417,6 +435,7 @@ struct RequestOutputState {
     snapshot_pending: bool,
     closed: bool,
     consumer_revision: u64,
+    owner_released: bool,
 }
 
 static NEXT_CONSUMER_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -443,9 +462,30 @@ struct HelperHandoff {
     transport_request_id: String,
     generation: String,
     _stream: Option<tokio::net::TcpStream>,
+    completed_file: Option<std::path::PathBuf>,
 }
 
 impl RequestOutput {
+    fn send_activity(&self, key: &MessageKey, request_id: uuid::Uuid, active: bool) -> bool {
+        let Ok(mut state) = self.state.lock() else { return false; };
+        if state.owner_released {
+            return false;
+        }
+        if !active {
+            state.owner_released = true;
+        }
+        // Owner metadata survives a content end/error so the lease can always
+        // release its preparation/busy indicator after durable settlement.
+        Self::send_locked(&state, StreamEvent {
+            r#type: "request_activity".to_string(),
+            context: Some(json!({
+                "ownerType": key.topic.owner_type, "ownerId": key.topic.owner_id,
+                "topicId": key.topic.topic_id, "requestId": request_id,
+            })),
+            chunk: Some(json!({ "active": active })),
+            ..Default::default()
+        })
+    }
     #[cfg(target_os = "android")]
     fn retain_helper_handoff(
         &self,
@@ -458,6 +498,19 @@ impl RequestOutput {
                 transport_request_id,
                 generation,
                 _stream: stream,
+                completed_file: None,
+            });
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    fn retain_completed_file(&self, file: &OfflineCompletedFile) {
+        if let Ok(mut handoff) = self.helper_handoff.lock() {
+            *handoff = Some(HelperHandoff {
+                transport_request_id: file.metadata.request_id.clone(),
+                generation: file.metadata.generation.clone(),
+                _stream: None,
+                completed_file: Some(file.path.clone()),
             });
         }
     }
@@ -472,11 +525,15 @@ impl RequestOutput {
     }
 
     fn attach(&self, channel: Channel<StreamEvent>) -> Result<bool, String> {
+        self.attach_connection(channel, false)
+    }
+
+    fn attach_connection(&self, channel: Channel<StreamEvent>, replace_connection: bool) -> Result<bool, String> {
         let mut state = self.state.lock().map_err(|error| error.to_string())?;
-        if state.closed {
+        if state.closed || state.owner_released {
             return Ok(false);
         }
-        if state
+        if !replace_connection && state
             .channel
             .as_ref()
             .is_some_and(|current| current.id() == channel.id())
@@ -578,6 +635,11 @@ fn request_output<R: Runtime>(
     key: &MessageKey,
     channel: Option<Channel<StreamEvent>>,
 ) -> Arc<RequestOutput> {
+    // A reconnect can finish discovery after another WebView has connected.
+    // New owners always take the current consumer, never that stale caller's.
+    let requests = app.try_state::<ActiveRequests>();
+    let connection = requests.as_ref().and_then(|requests| requests.1.lock().ok());
+    let channel = connection.as_ref().and_then(|connection| connection.as_ref().map(|connection| connection.channel.clone())).or(channel);
     let output = app
         .try_state::<ActiveRequests>()
         .and_then(|requests| requests.0.get(key).map(|entry| entry.output.clone()))
@@ -622,6 +684,10 @@ pub(crate) async fn discard_request_helper<R: Runtime>(app: &AppHandle<R>, key: 
 /// process has restarted and no local request lease exists anymore.
 pub(crate) async fn discard_deleted_generation<R: Runtime>(app: &AppHandle<R>, key: &MessageKey) {
     if let Some(requests) = app.try_state::<ActiveRequests>() {
+        if let Some(request) = requests.0.get(key) {
+            request.output.send_activity(key, request.attempt_id, false);
+            request.output.close();
+        }
         let _ = requests.cancel(key);
     }
     #[cfg(target_os = "android")]
@@ -703,6 +769,11 @@ async fn settle_helper_handoff<R: Runtime>(app: &AppHandle<R>, key: &MessageKey,
                 // socket lets the helper publish an orphan for later cleanup.
                 log::warn!("[VCPClient] Helper terminal handoff failed: {error}");
             }
+            if let Some(path) = handoff.completed_file {
+                if let Err(error) = remove_offline_completed(&path).await {
+                    log::warn!("[VCPClient] Settled helper file cleanup failed: {error}");
+                }
+            }
         }
     }
     #[cfg(not(target_os = "android"))]
@@ -712,12 +783,20 @@ async fn settle_helper_handoff<R: Runtime>(app: &AppHandle<R>, key: &MessageKey,
 pub type ActiveRequestMap = Arc<DashMap<MessageKey, Arc<ActiveRequestEntry>>>;
 
 /// 全局活跃请求管理器。相同 message id 只允许一个 live attempt。
-pub struct ActiveRequests(pub ActiveRequestMap);
+pub struct ActiveRequests(
+    pub ActiveRequestMap,
+    std::sync::Mutex<Option<ChatOutputConnection>>,
+);
+
+struct ChatOutputConnection {
+    id: String,
+    channel: Channel<StreamEvent>,
+}
 
 impl Default for ActiveRequests {
     fn default() -> Self {
         log::info!("[VCPClient] Initialized ActiveRequests successfully.");
-        Self(Arc::new(DashMap::new()))
+        Self(Arc::new(DashMap::new()), std::sync::Mutex::new(None))
     }
 }
 
@@ -740,12 +819,29 @@ pub struct ActiveRequestLease {
 }
 
 impl ActiveRequestLease {
+    pub(crate) fn bind_output<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        channel: Channel<StreamEvent>,
+    ) -> Result<(), String> {
+        let output = request_output(app, &self.key, Some(channel));
+        output.send_activity(&self.key, self.entry.attempt_id, true);
+        Ok(())
+    }
+
     pub fn try_acquire(
         requests: ActiveRequestMap,
         key: MessageKey,
     ) -> Result<(Self, CancellationToken), String> {
+        Self::try_acquire_with_cancellation(requests, key, CancellationToken::new())
+    }
+
+    pub(crate) fn try_acquire_with_cancellation(
+        requests: ActiveRequestMap,
+        key: MessageKey,
+        cancellation_token: CancellationToken,
+    ) -> Result<(Self, CancellationToken), String> {
         let attempt_id = uuid::Uuid::new_v4();
-        let cancellation_token = CancellationToken::new();
         let entry = Arc::new(ActiveRequestEntry {
             attempt_id,
             cancellation_token: cancellation_token.clone(),
@@ -775,6 +871,7 @@ impl ActiveRequestLease {
 
 impl Drop for ActiveRequestLease {
     fn drop(&mut self) {
+        self.entry.output.send_activity(&self.key, self.entry.attempt_id, false);
         self.entry.output.close();
         if let Entry::Occupied(entry) = self.requests.entry(self.key.clone()) {
             if entry.get().attempt_id == self.entry.attempt_id {
@@ -786,6 +883,7 @@ impl Drop for ActiveRequestLease {
 }
 
 struct ActiveGroupTurnEntry {
+    turn_id: uuid::Uuid,
     cancellation_token: CancellationToken,
     channel: std::sync::Mutex<Option<Channel<StreamEvent>>>,
 }
@@ -809,6 +907,7 @@ impl ActiveGroupTurns {
         match self.0.entry(key.clone()) {
             Entry::Vacant(slot) => {
                 slot.insert(Arc::new(ActiveGroupTurnEntry {
+                    turn_id: uuid::Uuid::new_v4(),
                     cancellation_token: cancellation_token.clone(),
                     channel: std::sync::Mutex::new(None),
                 }));
@@ -839,9 +938,9 @@ impl ActiveGroupTurns {
         requests: &ActiveRequests,
         key: &TopicKey,
         channel: Channel<StreamEvent>,
-    ) -> Result<(), String> {
-        let Some(turn) = self.0.get(key).map(|entry| entry.value().clone()) else {
-            return Ok(());
+    ) -> Result<Option<Value>, String> {
+        let Some(turn) = self.0.get(key) else {
+            return Ok(None);
         };
         let mut current = turn.channel.lock().map_err(|error| error.to_string())?;
         *current = Some(channel.clone());
@@ -852,7 +951,11 @@ impl ActiveGroupTurns {
         {
             request.output.attach(channel.clone())?;
         }
-        Ok(())
+        let _ = channel.send(group_turn_event(key, &turn, true));
+        Ok(Some(json!({
+            "ownerType": key.owner_type, "ownerId": key.owner_id,
+            "topicId": key.topic_id, "turnId": turn.turn_id,
+        })))
     }
 }
 
@@ -866,18 +969,62 @@ impl ActiveGroupTurnLease {
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancellation_token.is_cancelled()
     }
+
+    pub(crate) fn child_token(&self) -> CancellationToken {
+        self.cancellation_token.child_token()
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancellation_token.cancel();
+    }
+
+    pub(crate) fn bind_output<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        channel: Channel<StreamEvent>,
+    ) -> Result<(), String> {
+        let requests = app.state::<ActiveRequests>();
+        let connection = requests.1.lock().map_err(|error| error.to_string())?;
+        let channel = connection.as_ref().map(|connection| connection.channel.clone()).unwrap_or(channel);
+        if let Some(turn) = self.turns.get(&self.key) {
+            let mut current = turn.channel.lock().map_err(|error| error.to_string())?;
+            *current = Some(channel.clone());
+            let _ = channel.send(group_turn_event(&self.key, &turn, true));
+        }
+        Ok(())
+    }
 }
 
 impl Drop for ActiveGroupTurnLease {
     fn drop(&mut self) {
-        self.turns.remove(&self.key);
+        if let Some((_, turn)) = self.turns.remove(&self.key) {
+            if let Ok(channel) = turn.channel.lock() {
+                if let Some(channel) = channel.as_ref() {
+                    let _ = channel.send(group_turn_event(&self.key, &turn, false));
+                }
+            }
+        }
+    }
+}
+
+fn group_turn_event(key: &TopicKey, turn: &ActiveGroupTurnEntry, active: bool) -> StreamEvent {
+    StreamEvent {
+        r#type: "group_turn".to_string(),
+        context: Some(json!({
+            "ownerType": key.owner_type, "ownerId": key.owner_id,
+            "topicId": key.topic_id, "turnId": turn.turn_id,
+        })),
+        chunk: Some(json!({ "active": active })),
+        consumer_revision: next_consumer_revision(),
+        ..Default::default()
     }
 }
 
 /// 中止群组的整个接力赛回合
 #[tauri::command]
 #[allow(non_snake_case)]
-pub fn interruptGroupTurn(
+pub async fn interruptGroupTurn(
+    app: AppHandle,
     state: tauri::State<'_, ActiveGroupTurns>,
     owner_id: String,
     owner_type: String,
@@ -888,12 +1035,45 @@ pub fn interruptGroupTurn(
         topic_id
     );
     let key = TopicKey::new(owner_type, owner_id, topic_id);
+    let db = app.state::<DbState>();
+    let pending = sqlx::query_scalar::<_, String>(
+        "UPDATE active_generations SET stop_requested = 1
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? RETURNING msg_id",
+    )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .fetch_all(&db.pool)
+    .await
+    .map_err(|error| error.to_string())?;
     let cancelled = state.cancel(&key);
-    Ok(json!({"status": if cancelled { "cancelled" } else { "not_running" }}))
+    let requests = app.state::<ActiveRequests>();
+    for message_id in &pending {
+        schedule_pending_stop(&app, &requests, MessageKey::new(key.clone(), message_id));
+    }
+    Ok(json!({"status": if cancelled || !pending.is_empty() { "cancelling" } else { "not_running" }}))
 }
 
-/// 核心请求函数：sendToVCP
-/// 对应 JS 版的 sendToVCP。处理逻辑：
+fn schedule_pending_stop<R: Runtime>(app: &AppHandle<R>, requests: &ActiveRequests, key: MessageKey) {
+    if let Some(entry) = requests.0.get(&key) {
+        entry.cancellation_token.cancel();
+        return;
+    }
+    let channel = requests.1.lock().ok().and_then(|connection| connection.as_ref()
+        .map(|connection| connection.channel.clone())).unwrap_or_else(|| Channel::new(|_| Ok(())));
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = recover_active_generation(
+            app.clone(), app.state::<ActiveRequests>(), key.topic.owner_id,
+            key.topic.owner_type, key.topic.topic_id, key.msg_id, channel,
+        ).await {
+            log::warn!("[VCPClient] Stop remains pending: {error}");
+        }
+    });
+}
+
+/// 从正式应用服务冻结的请求上下文取得完整消息身份。
+/// 请求入口负责以下步骤：
 /// 1. 数据验证与规范化 (通过 Rust 类型系统自动处理部分)
 /// 2. 按 turn 起点冻结的 typed route 选择普通 completions 或 /v1/chatvcp/completions
 /// 3. 上下文注入 (音乐信息、UI 规范要求)
@@ -922,100 +1102,6 @@ fn message_key_from_context(
         TopicKey::new(owner_type, owner_id, topic_id),
         message_id,
     ))
-}
-
-#[tauri::command]
-#[allow(non_snake_case)]
-pub async fn sendToVCP<R: Runtime>(
-    app: AppHandle<R>,
-    state: tauri::State<'_, ActiveRequests>,
-    settings_state: tauri::State<'_, SettingsState>,
-    mut payload: VcpRequestPayload,
-    stream_channel: Channel<StreamEvent>,
-) -> Result<Value, String> {
-    let settings = read_settings(app.clone(), settings_state).await?;
-    let connection = freeze_chat_connection(&settings, ChatRequestPurpose::Interactive)?;
-    payload.vcp_url = connection.endpoint_url;
-    payload.vcp_api_key = connection.api_key;
-
-    let message_id = payload.message_id.clone();
-    let context = payload.context.clone();
-    let is_stream = payload.model_config["stream"].as_bool().unwrap_or(false);
-    let request_key = message_key_from_context(&context, &message_id)?;
-    if payload.transport_request_id.is_none() {
-        payload.transport_request_id = Some(message_transport_request_id(&request_key));
-    }
-
-    let (lease, cancellation_token) =
-        ActiveRequestLease::try_acquire(state.0.clone(), request_key.clone())?;
-    let (res, is_aborted) = match perform_vcp_request_registered(
-        &app,
-        payload,
-        Some(stream_channel.clone()),
-        cancellation_token,
-    )
-    .await
-    {
-        Ok(val) => val,
-        Err(failure) => {
-            let recovery_pending = failure.is_recovery_pending();
-            let (error, partial_content) = failure.into_parts();
-            if recovery_pending {
-                let notice = format!("后台生成连接中断，稍后返回前台可继续接管：{error}");
-                let mut event =
-                    StreamEvent::error(message_id.clone(), context.clone(), notice.clone());
-                event.content = partial_content;
-                deliver_request_event(&app, &request_key, Some(stream_channel.clone()), event);
-                return Err(notice);
-            }
-            if is_stream {
-                let pool = app
-                    .state::<crate::vcp_modules::db_manager::DbState>()
-                    .pool
-                    .clone();
-                let _ = finalize_stream_error(
-                    &app,
-                    &pool,
-                    &request_key,
-                    partial_content.unwrap_or_default(),
-                    error.clone(),
-                    Some(stream_channel.clone()),
-                )
-                .await?;
-            }
-            return Err(error);
-        }
-    };
-
-    if is_stream {
-        let finish_reason = if is_aborted {
-            Some("cancelled_by_user".to_string())
-        } else {
-            res["finishReason"].as_str().map(|s| s.to_string())
-        };
-
-        let agent_id = context.as_ref().and_then(|value| value["agentId"].as_str());
-
-        let pool = app
-            .state::<crate::vcp_modules::db_manager::DbState>()
-            .pool
-            .clone();
-
-        crate::vcp_modules::chat::message_service::finalize_stream_message(
-            app.clone(),
-            &pool,
-            &request_key,
-            res["fullContent"].as_str().unwrap_or("").to_string(),
-            is_aborted,
-            finish_reason,
-            Some(stream_channel),
-            agent_id.map(|s| s.to_string()),
-        )
-        .await?;
-    }
-
-    drop(lease);
-    Ok(res)
 }
 
 fn extract_text_for_hash(content: &Value) -> String {
@@ -1836,6 +1922,11 @@ async fn handle_streaming_request<R: Runtime>(
     output: Arc<RequestOutput>,
     is_resume: bool,
 ) -> Result<(Value, bool), VcpRequestFailure> {
+    if !is_resume && cancellation_token.is_cancelled() {
+        return Ok((json!({
+            "fullContent": "", "finishReason": "cancelled_by_user", "streamingStarted": false,
+        }), true));
+    }
     let _transport_slot = CHAT_TRANSPORT_SLOTS
         .try_acquire()
         .map_err(|_| VcpRequestFailure::from(STREAM_CAPACITY_EXHAUSTED.to_string()))?;
@@ -1866,9 +1957,14 @@ async fn handle_streaming_request<R: Runtime>(
                 })),
             )
         };
-        let stream = connect_to_helper(app, action, &transport_request_id, params)
-            .await
-            .map_err(|error| VcpRequestFailure::recoverable_helper(error, None))?;
+        let stream = match connect_to_helper(app, action, &transport_request_id, params).await {
+            Ok(stream) => stream,
+            Err(error) if cancellation_token.is_cancelled() => {
+                checkpoint_stop_partial(app, &context, &message_id, None).await?;
+                return Err(VcpRequestFailure::stopping(error, None));
+            }
+            Err(error) => return Err(VcpRequestFailure::recoverable_helper(error, None)),
+        };
         FramedRead::new(stream, helper_frame_codec())
     };
     #[cfg(target_os = "android")]
@@ -1879,6 +1975,8 @@ async fn handle_streaming_request<R: Runtime>(
     let mut snapshot_received = false;
     #[cfg(target_os = "android")]
     let mut helper_terminal_received = false;
+    #[cfg(target_os = "android")]
+    let mut helper_rejected = false;
     #[cfg(target_os = "android")]
     let mut cancel_sent = false;
 
@@ -1996,7 +2094,11 @@ async fn handle_streaming_request<R: Runtime>(
                                 return Err(HELPER_SESSION_NOT_FOUND.to_string());
                             }
                             if event_type == "error" && event["code"].as_str() == Some("capacity_exhausted") {
+                                helper_rejected = true;
                                 return Err(STREAM_CAPACITY_EXHAUSTED.to_string());
+                            }
+                            if event_type == "error" && matches!(event["code"].as_str(), Some("invalid_request" | "service_stopping")) {
+                                helper_rejected = true;
                             }
                             if let Some(generation) = event["generation"].as_str() {
                                 if let Some(current) = helper_generation.as_deref() {
@@ -2087,7 +2189,7 @@ async fn handle_streaming_request<R: Runtime>(
 
     #[cfg(target_os = "android")]
     let outcome = match outcome {
-        Err(message) if !helper_terminal_received && message != STREAM_CAPACITY_EXHAUSTED => {
+        Err(message) if !helper_terminal_received && !helper_rejected => {
             // Losing the local transport says nothing about the upstream
             // generation. The helper remains its owner; a later explicit
             // recovery can claim a complete snapshot or its completed mailbox.
@@ -2099,6 +2201,23 @@ async fn handle_streaming_request<R: Runtime>(
                 send_update(&mut aurora_buffer);
                 Some(aurora_buffer.full_text)
             };
+            // The helper may have published its completed result after the
+            // five-second ACK grace. EOF is not a new generation failure.
+            match read_completed_transport(app, &transport_request_id, &output).await {
+                Ok(Some(result)) => return result,
+                Ok(None) => {}
+                Err(error) => {
+                    if cancelled || cancellation_token.is_cancelled() {
+                        checkpoint_stop_partial(app, &context, &message_id, partial_content.as_deref()).await?;
+                        return Err(VcpRequestFailure::stopping(error.to_string(), partial_content));
+                    }
+                    return Err(VcpRequestFailure::recoverable_helper(error.to_string(), partial_content));
+                }
+            }
+            if cancelled || cancellation_token.is_cancelled() {
+                checkpoint_stop_partial(app, &context, &message_id, partial_content.as_deref()).await?;
+                return Err(VcpRequestFailure::stopping(message, partial_content));
+            }
             return Err(VcpRequestFailure::recoverable_helper(
                 message,
                 partial_content,
@@ -2267,9 +2386,19 @@ pub async fn interruptRequest(
         message_id,
         state.0.len()
     );
+    let db = app.state::<DbState>();
+    let pending = sqlx::query(
+        "UPDATE active_generations SET stop_requested = 1
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+    )
+    .bind(&key.topic.owner_type).bind(&key.topic.owner_id).bind(&key.topic.topic_id).bind(&key.msg_id)
+    .execute(&db.pool).await.map_err(|error| error.to_string())?.rows_affected() != 0;
     let entry = state.0.get(&key).map(|entry| entry.value().clone());
     if let Some(entry) = &entry {
         entry.cancellation_token.cancel();
+    } else if pending {
+        schedule_pending_stop(&app, &state, key.clone());
+        return Ok(json!({ "success": true, "status": "cancelling" }));
     }
     let settlement = async {
         if let Some(entry) = entry {
@@ -2290,10 +2419,8 @@ pub async fn interruptRequest(
             Some(reason) => {
                 Ok(json!({ "success": true, "status": "completed", "finishReason": reason }))
             }
-            None => Err(format!(
-                "Request {} is no longer running but has no committed terminal result",
-                message_id
-            )),
+            None if pending => Ok(json!({ "success": true, "status": "cancelling" })),
+            None => Err(format!("Request {} has no committed terminal result", message_id)),
         }
     };
     // Cancelling this wait never aborts the request owner or its commit.
@@ -2375,33 +2502,147 @@ pub struct ActiveGeneration {
     pub created_at: i64,
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
+    pub stop_requested: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReconnectChatStreamsResult {
+    generations: Vec<ActiveGeneration>,
+    group_turns: Vec<Value>,
+    active_requests: Vec<Value>,
+}
+
+/// Replaces the interface consumer once, then delegates every transport or
+/// mailbox reconciliation to its existing request lease. No generation is
+/// awaited by this command and no response text is copied into its receipt.
 #[tauri::command]
-pub async fn get_active_generations(
-    app: tauri::AppHandle,
-    active_requests: tauri::State<'_, ActiveRequests>,
-    stream_channel: Channel<StreamEvent>,
-) -> Result<Vec<ActiveGeneration>, String> {
-    // A group turn can be assembling its next speaker while no generation row
-    // exists. Install the consumer on the turn before reading pending messages.
+pub async fn reconnect_chat_streams<R: Runtime>(
+    app: AppHandle<R>,
+    webview: tauri::Webview<R>,
+    connection_id: String,
+    channel: Option<tauri::ipc::JavaScriptChannelId>,
+) -> Result<ReconnectChatStreamsResult, String> {
+    let channel = channel.map(|channel| channel.channel_on(webview.clone()));
+    reconnect_chat_output_for_webview(app, connection_id, channel, Some(webview)).await
+}
+
+#[cfg(test)]
+async fn reconnect_chat_output<R: Runtime>(
+    app: AppHandle<R>, connection_id: String, channel: Option<Channel<StreamEvent>>,
+) -> Result<ReconnectChatStreamsResult, String> {
+    reconnect_chat_output_for_webview(app, connection_id, channel, None).await
+}
+
+fn is_current_webview<R: Runtime>(app: &AppHandle<R>, webview: &tauri::Webview<R>) -> bool {
+    let Some(current) = app.get_webview_window(webview.label()) else { return false; };
+    // Tauri 2.12.1 clones share their Arc<ResourceTable>; a replacement with the
+    // same label has a different table. Drop each guard before taking the next:
+    // current and caller can refer to the same non-reentrant mutex.
+    let current_table = {
+        let resources = current.resources_table();
+        std::ptr::from_ref(&*resources) as usize
+    };
+    let caller_table = {
+        let resources = webview.resources_table();
+        std::ptr::from_ref(&*resources) as usize
+    };
+    current_table == caller_table
+}
+
+async fn reconnect_chat_output_for_webview<R: Runtime>(
+    app: AppHandle<R>,
+    connection_id: String,
+    channel: Option<Channel<StreamEvent>>,
+    webview: Option<tauri::Webview<R>>,
+) -> Result<ReconnectChatStreamsResult, String> {
+    let requests = app.state::<ActiveRequests>();
     let turns = app.state::<ActiveGroupTurns>();
-    let turn_keys = turns
-        .0
-        .iter()
-        .map(|entry| entry.key().clone())
-        .collect::<Vec<_>>();
-    for key in turn_keys {
-        turns.attach_output(&active_requests, &key, stream_channel.clone())?;
-    }
-    for request in active_requests.0.iter() {
-        request.output.attach(stream_channel.clone())?;
-    }
-    recover_offline_completed(&app, &active_requests, stream_channel.clone()).await?;
+    let mut keys = std::collections::HashSet::new();
+    let mut group_turns = Vec::new();
+    let mut active_requests = Vec::new();
+    let channel = {
+        let mut current = requests.1.lock().map_err(|error| error.to_string())?;
+        if webview.as_ref().is_some_and(|webview| !is_current_webview(&app, webview)) {
+            return Err("connection_stale".to_string());
+        }
+        let replace_connection = channel.is_some();
+        if let Some(channel) = channel {
+            *current = Some(ChatOutputConnection { id: connection_id.clone(), channel });
+        }
+        let connection = current.as_ref().ok_or("connection_not_registered")?;
+        if connection.id != connection_id {
+            return Err("connection_stale".to_string());
+        }
+        let channel = connection.channel.clone();
+        // A new WebView may reuse a numeric JS callback ID. Registration
+        // replaces the consumer by connection identity, not by that number.
+        for request in requests.0.iter() {
+            if request.output.attach_connection(channel.clone(), replace_connection)?
+                && request.output.send_activity(request.key(), request.attempt_id, true) {
+                active_requests.push(json!({
+                    "ownerType": request.key().topic.owner_type,
+                    "ownerId": request.key().topic.owner_id,
+                    "topicId": request.key().topic.topic_id,
+                    "requestId": request.attempt_id,
+                }));
+            }
+            keys.insert(request.key().clone());
+        }
+        let active_turns = turns.0.iter().map(|turn| turn.key().clone()).collect::<Vec<_>>();
+        for key in active_turns {
+            if let Some(turn) = turns.attach_output(&requests, &key, channel.clone())? {
+                group_turns.push(turn);
+            }
+        }
+        channel
+    };
     let db = app.state::<DbState>();
+    let generations = pending_generations(&db.pool).await?;
+    for generation in &generations {
+        keys.insert(MessageKey::new(
+            TopicKey::new(&generation.owner_type, &generation.owner_id, &generation.topic_id),
+            &generation.msg_id,
+        ));
+    }
+    for path in offline_completed_paths(&app, None).await? {
+        match open_offline_completed(path.clone()).await {
+            Ok(file) => {
+                let key = file.metadata.message_key()?;
+                if file.metadata.request_id == message_transport_request_id(&key) {
+                    keys.insert(key);
+                }
+            }
+            Err(error) => log::warn!("[VCPClient] Keeping unreadable offline SSE file {path:?}: {error}"),
+        }
+    }
+    if requests.1.lock().map_err(|error| error.to_string())?
+        .as_ref().is_none_or(|connection| connection.id != connection_id) {
+        return Err("connection_stale".to_string());
+    }
+    for key in keys {
+        let app = app.clone();
+        let channel = channel.clone();
+        tauri::async_runtime::spawn(async move {
+            let result = recover_active_generation(
+                app.clone(), app.state::<ActiveRequests>(), key.topic.owner_id.clone(),
+                key.topic.owner_type.clone(), key.topic.topic_id.clone(), key.msg_id.clone(),
+                channel.clone(),
+            ).await;
+            if let Err(error) = result {
+                // The owner sends detailed recoverable failures itself. A DB or
+                // mailbox failure before a transport exists still needs an event.
+                log::warn!("[VCPClient] Reconnect for {} remains pending: {error}", key.msg_id);
+            }
+        });
+    }
+    Ok(ReconnectChatStreamsResult { generations, group_turns, active_requests })
+}
+
+async fn pending_generations(pool: &sqlx::SqlitePool) -> Result<Vec<ActiveGeneration>, String> {
     let rows = sqlx::query(
         "SELECT ag.msg_id, ag.topic_id, ag.owner_id, ag.owner_type, ag.created_at, \
-                m.agent_id, COALESCE(m.name, a.name) AS agent_name \
+                m.agent_id, COALESCE(m.name, a.name) AS agent_name, ag.stop_requested \
          FROM active_generations ag \
          JOIN messages m ON m.owner_type = ag.owner_type \
             AND m.owner_id = ag.owner_id AND m.topic_id = ag.topic_id AND m.msg_id = ag.msg_id \
@@ -2409,7 +2650,7 @@ pub async fn get_active_generations(
          WHERE m.deleted_at IS NULL AND m.finish_reason IS NULL \
          ORDER BY ag.created_at ASC",
     )
-    .fetch_all(&db.pool)
+    .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
 
@@ -2430,6 +2671,7 @@ pub async fn get_active_generations(
             created_at: row.get("created_at"),
             agent_id: row.get("agent_id"),
             agent_name: row.get("agent_name"),
+            stop_requested: row.get("stop_requested"),
         });
     }
     Ok(list)
@@ -2444,6 +2686,8 @@ pub(crate) async fn finalize_stream_error<R: Runtime>(
     stream_channel: Option<Channel<StreamEvent>>,
 ) -> Result<Option<String>, String> {
     use sqlx::Row;
+    let failure_channel = stream_channel.clone();
+    let result: Result<Option<String>, String> = async {
 
     let pending = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(
@@ -2480,18 +2724,18 @@ pub(crate) async fn finalize_stream_error<R: Runtime>(
         };
         let final_content = stream_error_content(&partial_content, error);
 
-        crate::vcp_modules::chat::message_service::finalize_stream_message(
+        let committed = crate::vcp_modules::chat::message_service::finalize_stream_message(
             app_handle.clone(),
             pool,
             key,
-            final_content.clone(),
+            final_content,
             false,
             Some("error".to_string()),
             stream_channel,
             agent_id,
         )
         .await?;
-        return Ok(Some(final_content));
+        return Ok(committed.map(|message| message.content));
     } else {
         // Another owner may have committed the terminal message after recovery began.
         // Terminal rows are immutable: a late recovery must be an idempotent no-op.
@@ -2502,6 +2746,17 @@ pub(crate) async fn finalize_stream_error<R: Runtime>(
         discard_request_helper(app_handle, key).await;
     }
     Ok(None)
+    }.await;
+    if let Err(error) = &result {
+        let mut event = StreamEvent::error(
+            key.msg_id.clone(), recovery_state_event(key, "error").context, error.clone(),
+        );
+        event.content = Some(partial_content);
+        // Query failures precede the finalizer; commit failures may already
+        // have emitted an error. RequestOutput closes that delivery once.
+        deliver_request_event(app_handle, key, failure_channel, event);
+    }
+    result
 }
 
 #[derive(Debug, Deserialize)]
@@ -2638,6 +2893,54 @@ async fn remove_offline_completed(path: &std::path::Path) -> Result<(), String> 
     }
 }
 
+#[cfg(target_os = "android")]
+async fn read_completed_transport<R: Runtime>(
+    app: &AppHandle<R>, request_id: &str, output: &RequestOutput,
+) -> Result<Option<Result<(Value, bool), VcpRequestFailure>>, VcpRequestFailure> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+    let mut files = Vec::new();
+    for path in offline_completed_paths(app, Some(request_id)).await
+        .map_err(|error| VcpRequestFailure::recoverable_helper(error, None))? {
+        files.push(open_offline_completed(path).await
+            .map_err(|error| VcpRequestFailure::recoverable_helper(error, None))?);
+    }
+    files.sort_by_key(|file| std::cmp::Reverse(file.metadata.completed_at));
+    let Some(file) = files.into_iter().next() else { return Ok(None); };
+    let mut reader = tokio::fs::File::open(&file.path).await
+        .map_err(|error| VcpRequestFailure::recoverable_helper(error.to_string(), None))?;
+    reader.seek(std::io::SeekFrom::Start(file.content_offset)).await
+        .map_err(|error| VcpRequestFailure::recoverable_helper(error.to_string(), None))?;
+    let mut content = String::new();
+    reader.read_to_string(&mut content).await
+        .map_err(|error| VcpRequestFailure::recoverable_helper(error.to_string(), None))?;
+    output.retain_completed_file(&file);
+    if let Some(error) = file.metadata.error {
+        return Ok(Some(Err(VcpRequestFailure::streaming(error, content))));
+    }
+    let reason = file.metadata.finish_reason.unwrap_or_else(|| "completed".to_string());
+    let aborted = reason == "cancelled_by_user";
+    Ok(Some(Ok((json!({ "fullContent": content, "finishReason": reason,
+        "streamingStarted": true }), aborted))))
+}
+
+#[cfg(target_os = "android")]
+async fn checkpoint_stop_partial<R: Runtime>(
+    app: &AppHandle<R>, context: &Option<Value>, message_id: &str, partial: Option<&str>,
+) -> Result<(), VcpRequestFailure> {
+    let key = message_key_from_context(context, message_id)?;
+    let db = app.state::<DbState>();
+    sqlx::query(
+        "UPDATE active_generations SET stop_requested = 1,
+         stop_partial_content = COALESCE(?, stop_partial_content)
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+    )
+    .bind(partial).bind(&key.topic.owner_type).bind(&key.topic.owner_id)
+    .bind(&key.topic.topic_id).bind(&key.msg_id)
+    .execute(&db.pool).await.map_err(|error| VcpRequestFailure::stopping(
+        format!("停止待确认，暂存正文失败：{error}"), partial.map(str::to_string)))?;
+    Ok(())
+}
+
 /// Called with the message's ActiveRequestLease held. The helper file remains
 /// available after read or transaction failures; only a durable DB decision consumes it.
 async fn finalize_offline_completed<R: Runtime>(
@@ -2704,7 +3007,7 @@ async fn finalize_offline_completed<R: Runtime>(
             .finish_reason
             .unwrap_or_else(|| "completed".to_string())
     };
-    let content = crate::vcp_modules::chat::message_service::finalize_stream_message(
+    let committed = crate::vcp_modules::chat::message_service::finalize_stream_message(
         app.clone(),
         &db.pool,
         key,
@@ -2716,50 +3019,11 @@ async fn finalize_offline_completed<R: Runtime>(
     )
     .await?;
     remove_offline_completed(&file.path).await?;
-    Ok(json!({ "status": "completed", "content": content, "finishReason": finish_reason }))
-}
-
-async fn recover_offline_completed<R: Runtime>(
-    app: &AppHandle<R>,
-    active_requests: &ActiveRequests,
-    stream_channel: Channel<StreamEvent>,
-) -> Result<(), String> {
-    let mut files = Vec::new();
-    for path in offline_completed_paths(app, None).await? {
-        match open_offline_completed(path.clone()).await {
-            Ok(file) => files.push(file),
-            Err(error) => log::warn!(
-                "[VCPClient] Keeping unreadable offline SSE file {:?}: {}",
-                path,
-                error
-            ),
-        }
-    }
-    files.sort_by_key(|file| std::cmp::Reverse(file.metadata.completed_at));
-    for file in files {
-        let key = file.metadata.message_key()?;
-        // CLI step transports belong to their turn owner, not the chat-message
-        // finalizer. Never commit one step as the whole message on cold recovery.
-        if file.metadata.request_id != message_transport_request_id(&key) {
-            continue;
-        }
-        let Ok((_lease, _cancellation)) =
-            ActiveRequestLease::try_acquire(active_requests.0.clone(), key.clone())
-        else {
-            continue;
-        };
-        request_output(app, &key, Some(stream_channel.clone()));
-        if let Err(error) =
-            finalize_offline_completed(app, &key, file, stream_channel.clone()).await
-        {
-            log::warn!(
-                "[VCPClient] Offline SSE recovery for {} remains pending: {}",
-                key.msg_id,
-                error
-            );
-        }
-    }
-    Ok(())
+    Ok(match committed {
+        Some(message) => json!({ "status": "completed", "content": message.content,
+            "finishReason": message.finish_reason }),
+        None => json!({ "status": "not_found", "content": "" }),
+    })
 }
 
 async fn recover_offline_generation<R: Runtime>(
@@ -2812,16 +3076,15 @@ async fn terminal_generation_result(
     })
 }
 
-#[tauri::command]
 #[allow(clippy::too_many_arguments)]
-pub async fn recover_active_generation<R: Runtime>(
+async fn recover_active_generation<R: Runtime>(
     app: AppHandle<R>,
     active_requests: tauri::State<'_, ActiveRequests>,
     owner_id: String,
     owner_type: String,
     topic_id: String,
     msg_id: String,
-    stream_channel: Channel<StreamEvent>,
+    mut stream_channel: Channel<StreamEvent>,
 ) -> Result<Value, String> {
     log::info!(
         "[VCPClient] recover_active_generation called for {}/{}/{}/{}",
@@ -2832,14 +3095,16 @@ pub async fn recover_active_generation<R: Runtime>(
     );
     let key = MessageKey::new(TopicKey::new(&owner_type, &owner_id, &topic_id), &msg_id);
 
-    if let Some(turns) = app.try_state::<ActiveGroupTurns>() {
-        turns.attach_output(&active_requests, &key.topic, stream_channel.clone())?;
-    }
-
     // Keep the live attempt and replace only its consumer. If finalization won
     // the output lock first, wait for that lease to leave before reading its
     // durable result; do not claim a second attempt beside a closing one.
     let (_recovery_lease, _recovery_cancellation_token) = loop {
+        {
+            let current = active_requests.1.lock().map_err(|error| error.to_string())?;
+            if let Some(channel) = current.as_ref() {
+                stream_channel = channel.channel.clone();
+            }
+        }
         match ActiveRequestLease::try_acquire(active_requests.0.clone(), key.clone()) {
             Ok(claim) => break claim,
             Err(_) => {
@@ -2850,22 +3115,42 @@ pub async fn recover_active_generation<R: Runtime>(
                 else {
                     continue;
                 };
-                if entry.output.attach(stream_channel.clone())? {
+                let attached = {
+                    let current = active_requests.1.lock().map_err(|error| error.to_string())?;
+                    if let Some(channel) = current.as_ref() {
+                        stream_channel = channel.channel.clone();
+                    }
+                    entry.output.attach(stream_channel.clone())?
+                };
+                if attached {
+                    let db = app.state::<DbState>();
+                    let pending: bool = sqlx::query_scalar(
+                        "SELECT EXISTS(SELECT 1 FROM active_generations
+                         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?)",
+                    )
+                    .bind(&key.topic.owner_type).bind(&key.topic.owner_id)
+                    .bind(&key.topic.topic_id).bind(&key.msg_id)
+                    .fetch_one(&db.pool).await.map_err(|error| error.to_string())?;
+                    if pending {
+                        entry.output.send(recovery_state_event(&key,
+                            if entry.cancellation_token.is_cancelled() { "stopping" } else { "connected" }));
+                    }
                     return Ok(json!({ "status": "attached" }));
                 }
                 entry.released.cancelled().await;
             }
         }
     };
-    request_output(&app, &key, Some(stream_channel.clone()));
+    let output = request_output(&app, &key, Some(stream_channel.clone()));
+    let result = async {
 
     if let Some(recovered) = recover_offline_generation(&app, &key, stream_channel.clone()).await? {
         return Ok(recovered);
     }
 
     let db = app.state::<DbState>();
-    let pending: Option<(Option<String>,)> = sqlx::query_as(
-        "SELECT m.agent_id \
+    let pending: Option<(Option<String>, bool, Option<String>, i64, Option<String>)> = sqlx::query_as(
+        "SELECT m.agent_id, ag.stop_requested, ag.stop_partial_content, ag.created_at, m.name \
          FROM active_generations ag \
          JOIN messages m ON m.owner_type = ag.owner_type AND m.owner_id = ag.owner_id \
             AND m.topic_id = ag.topic_id AND m.msg_id = ag.msg_id \
@@ -2880,9 +3165,20 @@ pub async fn recover_active_generation<R: Runtime>(
     .await
     .map_err(|e| e.to_string())?;
 
-    let Some((agent_id,)) = pending else {
+    let Some((agent_id, stop_requested, stop_partial, created_at, agent_name)) = pending else {
         return terminal_generation_result(&db.pool, &key).await;
     };
+    let mut event = recovery_state_event(&key, if stop_requested { "stopping" } else { "reconnecting" });
+    event.timestamp = Some(created_at.max(0) as u64);
+    if let Some(context) = event.context.as_mut() {
+        context["agentId"] = json!(agent_id);
+        context["agentName"] = json!(agent_name);
+    }
+    event.content = stop_partial.clone();
+    output.send(event);
+    if stop_requested {
+        _recovery_cancellation_token.cancel();
+    }
 
     #[cfg(target_os = "android")]
     {
@@ -2891,7 +3187,7 @@ pub async fn recover_active_generation<R: Runtime>(
             &key,
             agent_id,
             stream_channel,
-            _recovery_cancellation_token,
+            _recovery_cancellation_token.clone(),
         )
         .await?;
         return Ok(json!({
@@ -2903,7 +3199,13 @@ pub async fn recover_active_generation<R: Runtime>(
 
     #[cfg(not(target_os = "android"))]
     {
-        let _ = agent_id;
+        if stop_requested {
+            let committed = crate::vcp_modules::chat::message_service::finalize_stream_message(
+                app.clone(), &db.pool, &key, stop_partial.unwrap_or_default(), true,
+                Some("cancelled_by_user".to_string()), Some(stream_channel.clone()), agent_id,
+            ).await?;
+            return Ok(json!({ "status": if committed.is_some() { "completed" } else { "not_found" } }));
+        }
 
         log::warn!(
         "[VCPClient] Active generation {} not found in active_requests and no local cache available. Marking as failed.",
@@ -2934,6 +3236,68 @@ pub async fn recover_active_generation<R: Runtime>(
         .map_err(|e| e.to_string())?;
         Ok(json!({ "status": "failed", "content": content.unwrap_or_default() }))
     }
+    }.await;
+    match &result {
+        Ok(result) if result["status"] != "attached" => {
+            // A terminal row can win just before this connection attaches. Its
+            // durable result is delivered through the same channel, once.
+            if result["status"] == "completed" || result["status"] == "failed" {
+                if let Err(error) = emit_persisted_terminal(&app, &key, &output).await {
+                    output.send(StreamEvent::error(key.msg_id.clone(),
+                        recovery_state_event(&key, "error").context, error.clone()));
+                    return Err(error);
+                }
+            }
+        }
+        Err(error) => {
+            let mut event = StreamEvent::error(
+                key.msg_id.clone(), recovery_state_event(&key, "error").context, error.clone(),
+            );
+            if _recovery_cancellation_token.is_cancelled() {
+                event.r#type = "stopping".to_string();
+            }
+            output.send(event);
+        }
+        _ => {}
+    }
+    result
+}
+
+fn recovery_state_event(key: &MessageKey, state: &str) -> StreamEvent {
+    StreamEvent {
+        r#type: state.to_string(),
+        message_id: key.msg_id.clone(),
+        context: Some(json!({
+            "ownerType": key.topic.owner_type, "ownerId": key.topic.owner_id,
+            "topicId": key.topic.topic_id,
+        })),
+        ..Default::default()
+    }
+}
+
+async fn emit_persisted_terminal<R: Runtime>(
+    app: &AppHandle<R>, key: &MessageKey, output: &RequestOutput,
+) -> Result<(), String> {
+    let db = app.state::<DbState>();
+    let row: Option<(String, String, i64, Option<String>, Option<String>, i64)> = sqlx::query_as(
+        "SELECT m.content, m.finish_reason, m.timestamp, m.agent_id, m.name, t.updated_at
+         FROM messages m JOIN topics t ON t.owner_type = m.owner_type AND t.owner_id = m.owner_id
+           AND t.topic_id = m.topic_id
+         WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.msg_id = ?
+           AND m.deleted_at IS NULL AND m.finish_reason IS NOT NULL",
+    )
+    .bind(&key.topic.owner_type).bind(&key.topic.owner_id).bind(&key.topic.topic_id).bind(&key.msg_id)
+    .fetch_optional(&db.pool).await.map_err(|error| error.to_string())?;
+    if let Some((content, reason, timestamp, agent_id, name, topic_updated_at)) = row {
+        let mut context = recovery_state_event(key, "end").context;
+        if let Some(context) = context.as_mut() {
+            context["agentId"] = json!(agent_id);
+            context["agentName"] = json!(name);
+        }
+        output.send(StreamEvent::end(key.msg_id.clone(), context, Some(reason), Some(content),
+            None, Some(timestamp.max(0) as u64), Some(topic_updated_at)));
+    }
+    Ok(())
 }
 
 #[cfg(any(target_os = "android", test))]
@@ -2944,6 +3308,7 @@ async fn handle_recovery_failure<R: Runtime>(
     stream_channel: Channel<StreamEvent>,
 ) -> Result<Value, String> {
     let recovery_pending = failure.is_recovery_pending();
+    let stop_pending = failure.is_stop_pending();
     let (error, partial_content) = failure.into_parts();
     if error == HELPER_SESSION_NOT_FOUND {
         // Publication and live-session removal are one helper transition.
@@ -2958,6 +3323,24 @@ async fn handle_recovery_failure<R: Runtime>(
                 "finishReason": recovered["finishReason"],
             }));
         }
+        let db = app.state::<DbState>();
+        let stop: Option<Option<String>> = sqlx::query_scalar(
+            "SELECT stop_partial_content FROM active_generations
+             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ? AND stop_requested = 1",
+        )
+        .bind(&key.topic.owner_type).bind(&key.topic.owner_id).bind(&key.topic.topic_id).bind(&key.msg_id)
+        .fetch_optional(&db.pool).await.map_err(|error| error.to_string())?;
+        if let Some(stored_partial) = stop {
+            let committed = crate::vcp_modules::chat::message_service::finalize_stream_message(
+                app.clone(), &db.pool, key, partial_content.or(stored_partial).unwrap_or_default(),
+                true, Some("cancelled_by_user".to_string()), Some(stream_channel), None,
+            ).await?;
+            return Ok(match committed {
+                Some(message) => json!({ "status": "completed", "fullContent": message.content,
+                    "finishReason": message.finish_reason }),
+                None => json!({ "status": "not_found", "fullContent": "" }),
+            });
+        }
     } else if recovery_pending || error == STREAM_CAPACITY_EXHAUSTED {
         // The helper still owns the complete response. A local attachment or
         // admission failure must not commit our absent or incomplete snapshot.
@@ -2968,11 +3351,16 @@ async fn handle_recovery_failure<R: Runtime>(
             "ownerId": key.topic.owner_id,
             "topicId": key.topic.topic_id,
         }));
+        let mut event = StreamEvent::error(key.msg_id.clone(), context, error.clone());
+        event.content = partial_content;
+        if stop_pending {
+            event.r#type = "stopping".to_string();
+        }
         deliver_request_event(
             app,
             key,
             Some(stream_channel),
-            StreamEvent::error(key.msg_id.clone(), context, error.clone()),
+            event,
         );
         return Err(error);
     }
@@ -3066,7 +3454,7 @@ async fn resume_claimed_generation<R: Runtime>(
     };
 
     log::info!("[VCPClient] Claimed recovery completed. Finalizing message.");
-    let committed_content = crate::vcp_modules::chat::message_service::finalize_stream_message(
+    let committed = crate::vcp_modules::chat::message_service::finalize_stream_message(
         app.clone(),
         &pool,
         key,
@@ -3078,7 +3466,12 @@ async fn resume_claimed_generation<R: Runtime>(
     )
     .await?;
 
-    res["fullContent"] = json!(committed_content);
+    if let Some(message) = committed {
+        res["fullContent"] = json!(message.content);
+        res["finishReason"] = json!(message.finish_reason);
+    } else {
+        res = json!({ "status": "not_found", "fullContent": "" });
+    }
     Ok(res)
 }
 
@@ -3096,6 +3489,8 @@ mod offline_completed_tests {
             .execute(&pool)
             .await
             .expect("schema");
+        sqlx::raw_sql(include_str!("../../../migrations/0102_stream_stop_intent.sql"))
+            .execute(&pool).await.expect("stop intent schema");
         sqlx::raw_sql(
             "INSERT INTO agents (owner_type, agent_id, name, model, updated_at)
              VALUES ('agent', 'offline-agent', 'Agent', 'test', 1);
@@ -3151,6 +3546,171 @@ mod offline_completed_tests {
         (db, key, directory, path)
     }
 
+    fn channel() -> (Channel<StreamEvent>, tokio::sync::mpsc::UnboundedReceiver<Value>) {
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        (Channel::new(move |body| {
+            let _ = sender.send(body.deserialize::<Value>()?);
+            Ok(())
+        }), receiver)
+    }
+
+    #[tokio::test]
+    async fn preparing_owner_reconnects_without_creating_a_pending_message() {
+        let (db, key, _directory, _path) = fixture().await;
+        sqlx::query("DELETE FROM active_generations").execute(&db.pool).await.unwrap();
+        let app = tauri::test::mock_app();
+        app.manage(db);
+        app.manage(ActiveRequests::default());
+        app.manage(ActiveGroupTurns::default());
+        let requests = app.state::<ActiveRequests>();
+        let (lease, _) = ActiveRequestLease::try_acquire(requests.0.clone(), key).unwrap();
+        lease.bind_output(app.handle(), channel().0).unwrap();
+        let (replacement, mut events) = channel();
+        let receipt = reconnect_chat_output(app.handle().clone(), "preparing-interface".into(), Some(replacement))
+            .await.unwrap();
+        assert!(receipt.generations.is_empty());
+        assert_eq!(receipt.active_requests.len(), 1);
+        tokio::task::yield_now().await;
+        let active = events.recv().await.unwrap();
+        assert_eq!(active["type"], "request_activity");
+        assert_eq!(active["messageId"], "");
+        assert_eq!(active["chunk"]["active"], true);
+        drop(lease);
+        let inactive = events.recv().await.unwrap();
+        assert_eq!(inactive["type"], "request_activity");
+        assert_eq!(inactive["chunk"]["active"], false);
+        assert_eq!(active["context"]["requestId"], inactive["context"]["requestId"]);
+        assert!(events.try_recv().is_err(), "preparation must not create a chat bubble");
+    }
+
+    #[tokio::test]
+    async fn stale_webview_with_the_same_label_cannot_replace_the_current_connection() {
+        let previous_app = tauri::test::mock_app();
+        let previous = tauri::WebviewWindowBuilder::new(
+            &previous_app, "main", tauri::WebviewUrl::App("index.html".into()),
+        ).build().unwrap();
+        let app = tauri::test::mock_app();
+        let current = tauri::WebviewWindowBuilder::new(
+            &app, "main", tauri::WebviewUrl::App("index.html".into()),
+        ).build().unwrap();
+        app.manage(ActiveRequests::default());
+        app.manage(ActiveGroupTurns::default());
+        assert!(is_current_webview(app.handle(), current.as_ref()));
+        assert!(!is_current_webview(app.handle(), previous.as_ref()));
+        *app.state::<ActiveRequests>().1.lock().unwrap() = Some(ChatOutputConnection {
+            id: "current-interface".into(), channel: channel().0,
+        });
+        let result = reconnect_chat_output_for_webview(
+            app.handle().clone(), "late-old-interface".into(), Some(channel().0),
+            Some(previous.as_ref().clone()),
+        ).await;
+        assert_eq!(result.err().as_deref(), Some("connection_stale"));
+        assert_eq!(app.state::<ActiveRequests>().1.lock().unwrap().as_ref().unwrap().id,
+            "current-interface");
+    }
+
+    #[tokio::test]
+    async fn reconnect_returns_while_generation_runs_and_reuses_registered_consumer() {
+        let (db, key, _directory, _path) = fixture().await;
+        let app = tauri::test::mock_app();
+        app.manage(db);
+        app.manage(ActiveRequests::default());
+        app.manage(ActiveGroupTurns::default());
+        let requests = app.state::<ActiveRequests>();
+        let (_lease, token) = ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).unwrap();
+        let output = request_output(app.handle(), &key, None);
+        let (consumer, mut events) = channel();
+        let receipt = tokio::time::timeout(Duration::from_secs(2), reconnect_chat_output(
+            app.handle().clone(), "interface-a".into(), Some(consumer.clone()),
+        )).await.unwrap().unwrap();
+        assert_eq!(receipt.generations.len(), 1);
+        assert!(!token.is_cancelled());
+        assert!(requests.0.contains_key(&key));
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk("已有正文");
+        buffer.process_queue();
+        output.send_aurora(&mut buffer, &key.msg_id, &None, None, false);
+        let revision = output.state.lock().unwrap().consumer_revision;
+        reconnect_chat_output(app.handle().clone(), "interface-a".into(), None).await.unwrap();
+        assert_eq!(output.state.lock().unwrap().consumer_revision, revision);
+        buffer.append_chunk("继续");
+        buffer.process_queue();
+        output.send_aurora(&mut buffer, &key.msg_id, &None, None, false);
+        let mut aurora = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event["type"] == "aurora" { aurora.push(event); }
+        }
+        assert_eq!(aurora.len(), 2);
+        assert_eq!(aurora[0]["aurora"]["kind"], "snapshot");
+        assert_eq!(aurora[1]["aurora"]["kind"], "delta");
+        assert_eq!(aurora[1]["aurora"]["chunk"], "继续");
+        // Callback numbers are local to an interface. A new connection must
+        // replace the consumer even when that numeric ID is reused.
+        reconnect_chat_output(app.handle().clone(), "interface-b".into(), Some(consumer)).await.unwrap();
+        let replacement_revision = output.state.lock().unwrap().consumer_revision;
+        assert!(replacement_revision > revision);
+        assert_eq!(reconnect_chat_output(app.handle().clone(), "interface-a".into(), None)
+            .await.err().as_deref(), Some("connection_stale"));
+        assert_eq!(output.state.lock().unwrap().consumer_revision, replacement_revision);
+    }
+
+    #[tokio::test]
+    #[cfg(not(target_os = "android"))]
+    async fn cold_reconnect_settles_persisted_stop_without_error_text() {
+        let (db, key, _directory, _path) = fixture().await;
+        sqlx::query("UPDATE active_generations SET stop_requested = 1, stop_partial_content = ?")
+            .bind("保留已经收到的正文").execute(&db.pool).await.unwrap();
+        let app = tauri::test::mock_app();
+        let pool = db.pool.clone();
+        app.manage(db);
+        app.manage(ActiveRequests::default());
+        app.manage(ActiveGroupTurns::default());
+        let (consumer, mut events) = channel();
+        let receipt = reconnect_chat_output(app.handle().clone(), "stop-interface".into(), Some(consumer))
+            .await.unwrap();
+        assert!(receipt.generations[0].stop_requested);
+        let end = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if event["type"] == "end" { break event; }
+                assert_eq!(event["type"], "stopping");
+            }
+        }).await.unwrap();
+        assert_eq!(end["content"], "保留已经收到的正文");
+        assert_eq!(end["finishReason"], "cancelled_by_user");
+        let pending: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM active_generations")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(pending, 0);
+        assert_eq!(end["messageId"], key.msg_id);
+    }
+
+    #[test]
+    fn group_turn_child_cancellation_and_drop_use_the_current_consumer() {
+        let app = tauri::test::mock_app();
+        app.manage(ActiveRequests::default());
+        app.manage(ActiveGroupTurns::default());
+        let turns = app.state::<ActiveGroupTurns>();
+        let requests = app.state::<ActiveRequests>();
+        let key = TopicKey::new("group", "group-a", "topic-a");
+        let turn = turns.try_acquire(key.clone()).unwrap();
+        let (original, mut original_events) = channel();
+        turn.bind_output(app.handle(), original).unwrap();
+        assert_eq!(original_events.try_recv().unwrap()["chunk"]["active"], true);
+        let child = turn.child_token();
+        let (replacement, mut events) = channel();
+        turns.attach_output(&requests, &key, replacement).unwrap();
+        let active = events.try_recv().unwrap();
+        turn.cancel();
+        assert!(child.is_cancelled());
+        drop(turn);
+        let inactive = events.try_recv().unwrap();
+        assert_eq!(inactive["chunk"]["active"], false);
+        assert_eq!(active["context"]["turnId"], inactive["context"]["turnId"]);
+        assert!(inactive["consumerRevision"].as_u64().unwrap() > active["consumerRevision"].as_u64().unwrap());
+        assert!(original_events.try_recv().is_err());
+        assert!(turns.attach_output(&requests, &key, channel().0).unwrap().is_none());
+    }
+
     #[tokio::test]
     async fn recovery_capacity_and_partial_snapshot_failures_preserve_pending_content() {
         let (db, key, _directory, path) = fixture().await;
@@ -3183,6 +3743,7 @@ mod offline_completed_tests {
             let output = request_output(app.handle(), &key, Some(old_channel.clone()));
             output.attach(channel.clone()).expect("replacement WebView");
             let reason = failure.to_string();
+            let expected_partial = failure.partial_content.clone();
             let result = handle_recovery_failure(app.handle(), &key, failure, old_channel).await;
             assert_eq!(
                 result.expect_err("attachment failure must remain retryable"),
@@ -3204,7 +3765,12 @@ mod offline_completed_tests {
                 .expect("complete backup retained"));
             let event = events.try_recv().expect("replacement consumer notified");
             assert_eq!(event["type"], "error");
-            assert!(event["content"].is_null());
+            assert_eq!(event["content"], json!(expected_partial));
+            assert!(events.try_recv().is_err());
+            drop(_lease);
+            let released = events.try_recv().expect("request activity released");
+            assert_eq!(released["type"], "request_activity");
+            assert_eq!(released["chunk"]["active"], false);
             assert!(events.try_recv().is_err());
         }
     }
@@ -3604,6 +4170,9 @@ mod active_request_tests {
         assert_eq!(original_events.recv().await.unwrap()["messageId"], "first");
         let (replacement, mut replacement_events) = event_channel();
         turns.attach_output(&requests, &topic, replacement).unwrap();
+        let turn_activity = replacement_events.recv().await.unwrap();
+        assert_eq!(turn_activity["type"], "group_turn");
+        assert_eq!(turn_activity["chunk"]["active"], true);
         deliver_request_event(
             app.handle(),
             &first_key,
@@ -3623,11 +4192,17 @@ mod active_request_tests {
         let released = first_lease.entry.released.clone();
         drop(first_lease);
         assert!(released.is_cancelled());
+        let released_activity = replacement_events.recv().await.unwrap();
+        assert_eq!(released_activity["type"], "request_activity");
+        assert_eq!(released_activity["chunk"]["active"], false);
 
         let (gap_replacement, mut gap_events) = event_channel();
         turns
             .attach_output(&requests, &topic, gap_replacement)
             .unwrap();
+        let gap_activity = gap_events.recv().await.unwrap();
+        assert_eq!(gap_activity["type"], "group_turn");
+        assert_eq!(gap_activity["chunk"]["active"], true);
         let second_key = MessageKey::new(topic, "second");
         let (_second_lease, _) =
             ActiveRequestLease::try_acquire(requests.0.clone(), second_key.clone()).unwrap();

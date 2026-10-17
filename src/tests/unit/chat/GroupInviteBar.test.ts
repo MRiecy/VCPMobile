@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { nextTick } from 'vue';
-import { mockInvoke } from '../../mocks/tauri';
+import { invokeMock, mockInvoke } from '../../mocks/tauri';
 import GroupInviteBar from '../../../features/chat/components/GroupInviteBar.vue';
 import { useAssistantStore } from '../../../core/stores/assistant';
 import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
 import { useChatStreamStore } from '../../../core/stores/chatStreamStore';
+import { useChatHistoryStore } from '../../../core/stores/chatHistoryStore';
+import { useSettingsStore } from '../../../core/stores/settings';
+import { flushPromises } from '../../utils/flush';
 import { mountWithPinia } from '../../utils/mount';
 import type { ConversationOwnerItem } from '../../../core/types/assistant';
 
@@ -63,6 +66,21 @@ describe('GroupInviteBar', () => {
     const first = wrapper.find('button');
     expect(first.exists()).toBe(true);
     expect(first.attributes('disabled')).toBeDefined();
+  });
+
+  it('invites a clicked member through a single-member batch', async () => {
+    const wrapper = await mountBar({ id: 'g1', type: 'group', name: '邀约群' });
+    const session = useChatSessionStore();
+    session.currentTopicId = 't1';
+    useChatHistoryStore().loadedConversationKey = session.currentConversationKey;
+    useSettingsStore().settings = { vcpServerUrl: 'http://vcp.test', vcpApiKey: 'key' } as any;
+    mockInvoke('invite_group_member_to_speak', () => ({ status: 'completed' }));
+    await wrapper.find('button').trigger('click');
+    await flushPromises();
+    expect(invokeMock).toHaveBeenCalledWith('invite_group_member_to_speak', expect.objectContaining({
+      payload: { groupId: 'g1', topicId: 't1', agentIds: ['a1'] },
+    }));
+    wrapper.unmount();
   });
 
   it('saveGroup syncs mode into the groups snapshot (invite bar data source)', async () => {

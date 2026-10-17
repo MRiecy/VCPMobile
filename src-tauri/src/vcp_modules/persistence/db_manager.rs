@@ -1210,7 +1210,7 @@ mod tests {
 
         run_migrations(&pool).await.expect("run migrations");
 
-        // 1..=8 与 baseline 已 seed，101 必须实际执行而不能被 seed 跳过。
+        // 1..=8 与 baseline 已 seed，101/102 必须实际执行而不能被 seed 跳过。
         let versions: Vec<i64> =
             sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
                 .fetch_all(&pool)
@@ -1219,6 +1219,7 @@ mod tests {
         let mut expected: Vec<i64> = (1..=BASELINE_INCREMENTAL_MAX).collect();
         expected.push(BASELINE_VERSION);
         expected.push(101);
+        expected.push(102);
         assert_eq!(versions, expected);
 
         // FTS 直接是 trigram 终态

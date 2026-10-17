@@ -1406,8 +1406,25 @@ async fn decode_valid_render_cache(
     serde_json::to_value(blocks).ok()
 }
 
+/// The durable message identity returned to request owners. A removed message
+/// has no result and must never be reintroduced into a later group context.
+#[derive(Debug)]
+pub(crate) struct FinalizedStreamMessage {
+    pub(crate) content: String,
+    pub(crate) finish_reason: String,
+    pub(crate) timestamp: u64,
+    pub(crate) topic_updated_at: Option<i64>,
+}
+
+#[derive(Debug)]
+enum StreamCommit {
+    Committed(Vec<ContentBlock>, u64, i64),
+    AlreadyFinalized(FinalizedStreamMessage),
+    Removed,
+}
+
 #[allow(clippy::too_many_arguments)]
-pub async fn finalize_stream_message<R: tauri::Runtime>(
+pub(crate) async fn finalize_stream_message<R: tauri::Runtime>(
     app_handle: AppHandle<R>,
     pool: &sqlx::Pool<sqlx::Sqlite>,
     message_key: &MessageKey,
@@ -1416,7 +1433,7 @@ pub async fn finalize_stream_message<R: tauri::Runtime>(
     finish_reason: Option<String>,
     stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
     agent_id: Option<String>,
-) -> Result<String, String> {
+) -> Result<Option<FinalizedStreamMessage>, String> {
     finalize_stream_message_inner(
         app_handle,
         pool,
@@ -1440,17 +1457,14 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
     finish_reason: Option<String>,
     stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
     agent_id: Option<String>,
-) -> Result<String, String> {
+) -> Result<Option<FinalizedStreamMessage>, String> {
     let owner_id = message_key.topic.owner_id.as_str();
     let owner_type = message_key.topic.owner_type.as_str();
     let topic_id = message_key.topic.topic_id.as_str();
     let message_id = message_key.msg_id.as_str();
     let final_ts = crate::vcp_modules::infra::utils::now_millis() as u64;
 
-    let mut final_content = full_content;
-    if is_aborted {
-        final_content.push_str("\n\n> VCP流式错误: 请求已中止");
-    }
+    let final_content = full_content;
 
     let is_group = owner_type == "group";
 
@@ -1473,7 +1487,11 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
         }
     }
 
-    let terminal_reason = finish_reason.unwrap_or_else(|| "completed".to_string());
+    let terminal_reason = if is_aborted {
+        "cancelled_by_user".to_string()
+    } else {
+        finish_reason.unwrap_or_else(|| "completed".to_string())
+    };
     let context = if owner_id.is_empty() || topic_id.is_empty() {
         None
     } else if is_group {
@@ -1508,30 +1526,43 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
             )
             .await
             {
-                Ok((blocks, start_timestamp, updated_at)) => {
+                Ok(StreamCommit::Committed(blocks, start_timestamp, updated_at)) => {
                     (Some(blocks), start_timestamp, Some(updated_at))
                 }
-                Err(error) => {
-                    // A deletion or a competing durable commit may have won
-                    // while this stream was draining. Such a result has no
-                    // recovery owner; a real database failure still retains it.
-                    let pending = sqlx::query_scalar::<_, bool>(
-                        "SELECT EXISTS(SELECT 1 FROM active_generations
-                         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?)",
+                Ok(StreamCommit::AlreadyFinalized(message)) => {
+                    crate::vcp_modules::vcp_client::release_committed_helper(
+                        &app_handle,
+                        message_key,
                     )
-                    .bind(owner_type)
-                    .bind(owner_id)
-                    .bind(topic_id)
-                    .bind(message_id)
-                    .fetch_one(pool)
                     .await;
-                    if matches!(pending, Ok(false)) {
-                        crate::vcp_modules::vcp_client::discard_request_helper(
-                            &app_handle,
-                            message_key,
-                        )
-                        .await;
-                    }
+                    // A different durable writer may have settled the row while
+                    // this consumer was attached. Replay that result through the
+                    // same output owner; its closed flag suppresses duplicates.
+                    crate::vcp_modules::vcp_client::deliver_request_event(
+                        &app_handle,
+                        message_key,
+                        stream_channel,
+                        crate::vcp_modules::vcp_client::StreamEvent::end(
+                            message_id.to_string(),
+                            context,
+                            Some(message.finish_reason.clone()),
+                            Some(message.content.clone()),
+                            None,
+                            Some(message.timestamp),
+                            message.topic_updated_at,
+                        ),
+                    );
+                    return Ok(Some(message));
+                }
+                Ok(StreamCommit::Removed) => {
+                    crate::vcp_modules::vcp_client::discard_request_helper(
+                        &app_handle,
+                        message_key,
+                    )
+                    .await;
+                    return Ok(None);
+                }
+                Err(error) => {
                     let mut event = crate::vcp_modules::vcp_client::StreamEvent::error(
                         message_id.to_string(),
                         context.clone(),
@@ -1555,7 +1586,7 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
         let event = crate::vcp_modules::vcp_client::StreamEvent::end(
             message_id.to_string(),
             context,
-            Some(terminal_reason),
+            Some(terminal_reason.clone()),
             Some(final_content.clone()),
             end_blocks,
             Some(end_timestamp),
@@ -1569,7 +1600,12 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
         );
     }
 
-    Ok(final_content)
+    Ok(Some(FinalizedStreamMessage {
+        content: final_content,
+        finish_reason: terminal_reason,
+        timestamp: end_timestamp,
+        topic_updated_at,
+    }))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1581,7 +1617,7 @@ async fn commit_stream_message(
     finish_reason: &str,
     agent_id: Option<&str>,
     agent_name: Option<&str>,
-) -> Result<(Vec<ContentBlock>, u64, i64), String> {
+) -> Result<StreamCommit, String> {
     let key = &message_key.topic;
     let owner_id = key.owner_id.as_str();
     let owner_type = key.owner_type.as_str();
@@ -1594,13 +1630,14 @@ async fn commit_stream_message(
         .write_transaction("message.stream.finalize")
         .await?;
 
-    let start_timestamp: i64 = sqlx::query_scalar(
-        "SELECT m.timestamp FROM messages m
-         JOIN active_generations ag
+    let row = sqlx::query(
+        "SELECT m.timestamp, m.content, m.finish_reason, m.deleted_at,
+                ag.msg_id IS NOT NULL AS pending
+         FROM messages m
+         LEFT JOIN active_generations ag
            ON ag.owner_type = m.owner_type AND ag.owner_id = m.owner_id
           AND ag.topic_id = m.topic_id AND ag.msg_id = m.msg_id
-         WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.msg_id = ?
-           AND m.finish_reason IS NULL AND m.deleted_at IS NULL",
+         WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.msg_id = ?",
     )
     .bind(&key.owner_type)
     .bind(&key.owner_id)
@@ -1608,15 +1645,31 @@ async fn commit_stream_message(
     .bind(message_id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|e| e.to_string())?
-    .ok_or_else(|| {
-        format!(
-            "Generation {} is not pending for {} {} topic {}",
-            message_id, owner_type, owner_id, topic_id
-        )
-    })?;
+    .map_err(|e| e.to_string())?;
+    let Some(row) = row else {
+        return Ok(StreamCommit::Removed);
+    };
+    if row.get::<Option<i64>, _>("deleted_at").is_some() {
+        return Ok(StreamCommit::Removed);
+    }
+    let start_timestamp: i64 = row.get("timestamp");
     let fingerprint_timestamp = u64::try_from(start_timestamp)
         .map_err(|_| format!("Message {message_id} has a negative timestamp"))?;
+    if let Some(reason) = row.get::<Option<String>, _>("finish_reason") {
+        let activity = HashAggregator::load_topic_activity(&mut tx, key).await?;
+        return Ok(StreamCommit::AlreadyFinalized(FinalizedStreamMessage {
+            content: row.get("content"),
+            finish_reason: reason,
+            timestamp: fingerprint_timestamp,
+            topic_updated_at: Some(activity.updated_at),
+        }));
+    }
+    if !row.get::<bool, _>("pending") {
+        return Err(format!(
+            "Generation {} is not pending for {} {} topic {}",
+            message_id, owner_type, owner_id, topic_id
+        ));
+    }
     let content_hash = HashAggregator::compute_message_fingerprint(
         message_id,
         "assistant",
@@ -1727,7 +1780,11 @@ async fn commit_stream_message(
 
     let activity = HashAggregator::bubble_from_topic(&mut tx, key).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
-    Ok((blocks, start_timestamp as u64, activity.updated_at))
+    Ok(StreamCommit::Committed(
+        blocks,
+        start_timestamp as u64,
+        activity.updated_at,
+    ))
 }
 
 #[tauri::command]
@@ -1884,6 +1941,10 @@ mod stream_lifecycle_tests {
             .execute(&pool)
             .await
             .expect("baseline schema");
+        sqlx::raw_sql(include_str!("../../../migrations/0102_stream_stop_intent.sql"))
+            .execute(&pool)
+            .await
+            .expect("stream stop intent schema");
         sqlx::query(
             "INSERT INTO agents (owner_type, agent_id, name, model, updated_at)
              VALUES ('agent', 'agent-1', 'Agent', 'test', 1)",
@@ -2120,7 +2181,7 @@ mod stream_lifecycle_tests {
         .await
         .expect("skeleton identity");
 
-        let (_, terminal_timestamp, terminal_topic_updated_at) = commit_stream_message(
+        let committed = commit_stream_message(
             &db_state,
             &key,
             "terminal body",
@@ -2131,6 +2192,10 @@ mod stream_lifecycle_tests {
         )
         .await
         .expect("finalize generation");
+        let StreamCommit::Committed(_, terminal_timestamp, terminal_topic_updated_at) = committed
+        else {
+            panic!("pending generation must commit");
+        };
         assert_eq!(terminal_timestamp, skeleton.0 as u64);
         assert_eq!(terminal_topic_updated_at, 2);
         let topic_updated_after_finalize: i64 =
@@ -2159,7 +2224,7 @@ mod stream_lifecycle_tests {
         .await
         .expect("active count");
         assert_eq!(active, 0);
-        assert!(commit_stream_message(
+        let repeated = commit_stream_message(
             &db_state,
             &key,
             "late body",
@@ -2169,7 +2234,40 @@ mod stream_lifecycle_tests {
             Some("Agent"),
         )
         .await
-        .is_err());
+        .expect("late finalization is idempotent");
+        let StreamCommit::AlreadyFinalized(message) = repeated else {
+            panic!("late finalization must return the durable message");
+        };
+        assert_eq!(message.content, "terminal body");
+        assert_eq!(message.finish_reason, "completed");
+        assert_eq!(message.timestamp, skeleton.0 as u64);
+        assert_eq!(message.topic_updated_at, Some(terminal_topic_updated_at));
+
+        let app = tauri::test::mock_app();
+        app.manage(db_state);
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let channel = Channel::new(move |body| {
+            let _ = events.send(body.deserialize::<serde_json::Value>()?);
+            Ok(())
+        });
+        finalize_stream_message(
+            app.handle().clone(),
+            &pool,
+            &key,
+            "late partial".to_string(),
+            true,
+            None,
+            Some(channel),
+            Some("agent-1".to_string()),
+        )
+        .await
+        .expect("late consumer receives the durable result");
+        let event = received.try_recv().expect("durable end event");
+        assert_eq!(event["type"], "end");
+        assert_eq!(event["content"], "terminal body");
+        assert_eq!(event["finishReason"], "completed");
+        assert_eq!(event["timestamp"], skeleton.0);
+        assert!(received.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -2247,7 +2345,7 @@ mod stream_lifecycle_tests {
     }
 
     #[tokio::test]
-    async fn tombstoned_generation_rejects_late_finalization() {
+    async fn tombstoned_generation_discards_late_finalization() {
         let pool = test_pool().await;
         let db_state = DbState::new(pool.clone(), std::path::PathBuf::new());
         let key = message_key("message-deleted");
@@ -2263,17 +2361,28 @@ mod stream_lifecycle_tests {
         )
         .await
         .expect("delete generation");
-        assert!(commit_stream_message(
-            &db_state,
+        let app = tauri::test::mock_app();
+        app.manage(db_state);
+        let events = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let event_count = events.clone();
+        let channel = Channel::new(move |_| {
+            event_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        });
+        let late = finalize_stream_message(
+            app.handle().clone(),
+            &pool,
             &key,
-            "late terminal body",
-            999,
-            "completed",
-            Some("agent-1"),
-            Some("Agent"),
+            "late terminal body".to_string(),
+            false,
+            Some("completed".to_string()),
+            Some(channel),
+            Some("agent-1".to_string()),
         )
         .await
-        .is_err());
+        .expect("deleted generation is settled without an error");
+        assert!(late.is_none());
+        assert_eq!(events.load(std::sync::atomic::Ordering::Relaxed), 0);
 
         let deleted_at: Option<i64> =
             sqlx::query_scalar("SELECT deleted_at FROM messages WHERE msg_id = 'message-deleted'")
@@ -2288,6 +2397,69 @@ mod stream_lifecycle_tests {
         .await
         .expect("active count");
         assert_eq!(active, 0);
+    }
+
+    #[tokio::test]
+    async fn stopped_generation_preserves_body_and_persists_cancelled_reason() {
+        let pool = test_pool().await;
+        let db_state = DbState::new(pool.clone(), std::path::PathBuf::new());
+        let key = message_key("message-stopped");
+        begin_stream_message(&db_state, &key, Some("agent-1"), Some("Agent"))
+            .await
+            .expect("begin generation");
+        let app = tauri::test::mock_app();
+        app.manage(db_state);
+
+        let message = finalize_stream_message(
+            app.handle().clone(),
+            &pool,
+            &key,
+            "partial reply".to_string(),
+            true,
+            None,
+            None,
+            Some("agent-1".to_string()),
+        )
+        .await
+        .expect("commit stopped generation")
+        .expect("stopped message remains visible");
+        assert_eq!(message.content, "partial reply");
+        assert_eq!(message.finish_reason, "cancelled_by_user");
+        let persisted: (String, String) = sqlx::query_as(
+            "SELECT content, finish_reason FROM messages WHERE msg_id = 'message-stopped'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("durable stopped message");
+        assert_eq!(
+            persisted,
+            ("partial reply".to_string(), "cancelled_by_user".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn live_unfinished_message_without_generation_remains_an_error() {
+        let pool = test_pool().await;
+        let db_state = DbState::new(pool.clone(), std::path::PathBuf::new());
+        let key = message_key("message-unowned");
+        begin_stream_message(&db_state, &key, Some("agent-1"), Some("Agent"))
+            .await
+            .expect("begin generation");
+        sqlx::query("DELETE FROM active_generations WHERE msg_id = 'message-unowned'")
+            .execute(&pool)
+            .await
+            .expect("simulate inconsistent pending state");
+        assert!(commit_stream_message(
+            &db_state,
+            &key,
+            "unowned body",
+            999,
+            "completed",
+            Some("agent-1"),
+            Some("Agent"),
+        )
+        .await
+        .is_err());
     }
 
     #[tokio::test]

@@ -5,16 +5,18 @@ import MessageRenderer from '@/features/chat/MessageRenderer.vue';
 import type { ChatMessage } from '@/core/types/chat';
 import { useChatHistoryStore } from '@/core/stores/chatHistoryStore';
 import { useChatSessionStore } from '@/core/stores/chatSessionStore';
+import { useChatStreamStore } from '@/core/stores/chatStreamStore';
 import { useOverlayStore } from '@/core/stores/overlay';
-import { mockInvoke } from '@/tests/mocks/tauri';
+import { invokeMock, mockInvoke } from '@/tests/mocks/tauri';
 
 describe('MessageRenderer - 重新生成确认提示框', () => {
   let pinia: ReturnType<typeof createPinia>;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     pinia = createPinia();
     setActivePinia(pinia);
-    mockInvoke('get_active_generations', () => []);
+    mockInvoke('reconnect_chat_streams', () => ({ generations: [], groupTurns: [], activeRequests: [] }));
+    await useChatStreamStore().checkAndRecoverInterruptedStreams();
   });
 
   it('长按消息菜单点击重新生成时弹出确认提示框，取消时不触发重新生成，确认时触发重新生成', async () => {
@@ -194,5 +196,65 @@ describe('MessageRenderer - 重新生成确认提示框', () => {
         messageId: 'msg-user-1',
       }),
     );
+  });
+
+  it('菜单打开后开始生成时实时禁用删除，已打开的确认框也不能删除消息', async () => {
+    const session = useChatSessionStore();
+    session.setConversation({ id: 'agent-1', type: 'agent' }, 'topic-1');
+    const history = useChatHistoryStore();
+    history.loadedConversationKey = session.currentConversationKey;
+    const message: ChatMessage = {
+      id: 'old', role: 'assistant', content: 'saved', timestamp: 1, blocks: [],
+      shell: { isUser: false, displayName: 'Agent', avatarColor: '' },
+    };
+    history.currentChatHistory = [message];
+    let openMenu!: () => Promise<void>;
+    const wrapper = mount(MessageRenderer, {
+      props: { message },
+      global: {
+        plugins: [pinia],
+        directives: { longpress: { mounted(_el, binding) { openMenu = binding.value; } } },
+        stubs: { VcpAvatar: true, AttachmentPreview: true, MermaidFullScreenViewer: true, StreamingTag: true },
+      },
+    });
+    await openMenu();
+    const overlay = useOverlayStore();
+    const remove = overlay.contextMenuConfig!.actions.find(action => action.label === '删除消息')!;
+    expect(remove.disabled).toBe(false);
+    let confirm!: (confirmed: boolean) => void;
+    vi.spyOn(overlay, 'showConfirm').mockReturnValue(new Promise(resolve => { confirm = resolve; }));
+    const deleting = remove.handler();
+    const release = useChatStreamStore().beginConversationOperation('agent-1', 'agent', 'topic-1');
+    expect(remove.disabled).toBe(true);
+    confirm(true);
+    await deleting;
+    expect(invokeMock).not.toHaveBeenCalledWith('delete_messages', expect.anything());
+    expect(history.currentChatHistory[0].id).toBe('old');
+    release();
+    expect(remove.disabled).toBe(false);
+    wrapper.unmount();
+  });
+
+  it.each([
+    { state: { streamRecoveryState: 'waiting_retry' as const }, label: '接续失败，等待重试' },
+    { state: { isStopping: true }, label: '停止待确认' },
+  ])('空正文等待状态只展示 $label，不继续显示正在思考', ({ state, label }) => {
+    const session = useChatSessionStore();
+    session.setConversation({ id: 'agent-1', type: 'agent' }, 'topic-1');
+    useChatStreamStore().addSessionStream('agent-1', 'agent', 'topic-1', 'pending');
+    const wrapper = mount(MessageRenderer, {
+      props: { message: {
+        id: 'pending', role: 'assistant', content: '', blocks: [], timestamp: 1,
+        shell: { isUser: false, displayName: 'Agent', avatarColor: '' }, ...state,
+      } },
+      global: {
+        plugins: [pinia], directives: { longpress: {} },
+        stubs: { VcpAvatar: true, ThinkingIndicator: true, StreamingTag: true, MermaidFullScreenViewer: true },
+      },
+    });
+    expect(wrapper.text()).toContain(label);
+    expect(wrapper.find('thinking-indicator-stub').exists()).toBe(false);
+    expect(wrapper.find('streaming-tag-stub').exists()).toBe(false);
+    wrapper.unmount();
   });
 });

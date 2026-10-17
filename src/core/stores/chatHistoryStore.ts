@@ -11,6 +11,7 @@ import { useNotificationStore } from "./notification";
 import { useShareStore, type ShareIdentity } from "./shareStore";
 import { clearMessageCache } from "../utils/astRenderer";
 import { extractMentionedMemberIds } from "../utils/mention";
+import { allowChatMutation } from "../../features/chat/chatMutationPolicy";
 
 import type {
   ChatMessage,
@@ -506,11 +507,12 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   };
 
   /**
-   * 邀请群成员单人发言（invite_only 模式入口）
+   * 同一次邀约由 Rust 的同一个群轮 owner 顺序执行，停止会覆盖剩余成员。
    */
-  const inviteGroupMember = async (agentId: string, frozenKey?: ConversationKey) => {
+  const inviteGroupMembers = async (agentIds: string[], frozenKey?: ConversationKey) => {
     const key = frozenKey || captureLoadedConversation();
-    if (!key || key.ownerType !== "group") return;
+    if (!key || key.ownerType !== "group" || agentIds.length === 0) return;
+    const releaseOperation = streamStore.beginConversationOperation(key.ownerId, key.ownerType, key.topicId);
     try {
       const settings = settingsStore.settings;
       if (!settings) throw new Error("应用尚未完成初始化");
@@ -520,13 +522,12 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         payload: {
           groupId: key.ownerId,
           topicId: key.topicId,
-          agentId,
+          agentIds,
         },
         streamChannel,
       });
     } catch (e) {
       console.error("[ChatHistoryStore] Invite failed:", e);
-      // 邀请链路失败绝不能静默：必须给用户可见反馈
       notificationStore.addNotification({
         type: "error",
         title: "邀请发言失败",
@@ -534,8 +535,13 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         toastOnly: true,
         duration: 6000,
       });
+    } finally {
+      releaseOperation();
     }
   };
+
+  const inviteGroupMember = (agentId: string, frozenKey?: ConversationKey) =>
+    inviteGroupMembers([agentId], frozenKey);
 
   /**
    * 触发 AI 生成逻辑
@@ -547,6 +553,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   ): Promise<number | null> => {
     const key = frozenKey || captureLoadedConversation();
     if (!key) return null;
+    const releaseOperation = streamStore.beginConversationOperation(key.ownerId, key.ownerType, key.topicId);
     let topicUpdatedAt: number;
     let alreadySent = false;
     try {
@@ -588,10 +595,14 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         toastOnly: true,
         duration: 6000,
       });
+      releaseOperation();
       return null;
     }
 
-    if (alreadySent) return topicUpdatedAt;
+    if (alreadySent) {
+      releaseOperation();
+      return topicUpdatedAt;
+    }
     try {
       const settings = settingsStore.settings;
       if (!settings) throw new Error("应用尚未完成初始化");
@@ -611,7 +622,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         // 否则用户看到的是"发送后没有任何反应"
         if (result?.status === "no_ai_response") {
           if (result.reason === "invite_only") {
-            // 提及即邀约：消息中 @ 到的成员按出现顺序依次单人发言（群聊串行约束）；
+            // 提及即邀约：整批成员按出现顺序交给同一群轮，停止不会另启后续邀约；
             // 未提及任何成员时引导用户使用邀约横条
             const group = assistantStore.groups.find((g) => g.id === key.ownerId);
             const mentionedIds = group
@@ -624,9 +635,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
                 )
               : [];
             if (mentionedIds.length > 0) {
-              for (const agentId of mentionedIds) {
-                await inviteGroupMember(agentId, key);
-              }
+              await inviteGroupMembers(mentionedIds, key);
             } else {
               notificationStore.addNotification({
                 type: "info",
@@ -661,7 +670,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       }
     } catch (e) {
       console.error("[ChatHistoryStore] Generation failed:", e);
-      // 生成链路失败绝不能静默：release 下控制台不可见，必须给用户可见反馈
       notificationStore.addNotification({
         type: "error",
         title: "消息生成失败",
@@ -669,6 +677,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         toastOnly: true,
         duration: 6000,
       });
+    } finally {
+      releaseOperation();
     }
     return topicUpdatedAt;
   };
@@ -695,8 +705,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
 
     if (editingMessage.value) {
       const intent = editingMessage.value;
-      editingMessage.value = null;
       if (!sameConversation(intent.key.conversation, key)) return;
+      if (!allowChatMutation(key)) return;
+      editingMessage.value = null;
       const originalId = intent.key.messageId;
       const targetIndex = currentChatHistory.value.findIndex(m => m.id === originalId);
       if (targetIndex === -1) return;
@@ -705,6 +716,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         content,
         blocks: [{ type: "markdown" as const, content }],
       };
+      const releaseOperation = streamStore.beginConversationOperation(key.ownerId, key.ownerType, key.topicId);
       try {
         const activity = await invoke<TopicActivityDto>("truncate_history_after_message", {
           ownerId: key.ownerId,
@@ -741,6 +753,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
           toastOnly: true,
           duration: 6000,
         });
+      } finally {
+        releaseOperation();
       }
       return;
     }
@@ -793,6 +807,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     const key = messageKey.conversation;
     const messageId = messageKey.messageId;
     if (!isMessageActionCurrent(messageKey)) return;
+    if (!allowChatMutation(key)) return;
 
     const targetIndex = currentChatHistory.value.findIndex(m => m.id === messageId);
     if (targetIndex === -1) return;
@@ -923,8 +938,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     const key = messageKey.conversation;
     const targetMessageId = messageKey.messageId;
     if (!isMessageActionCurrent(messageKey)) return;
+    if (!allowChatMutation(key)) return;
     const targetIndex = currentChatHistory.value.findIndex(m => m.id === targetMessageId);
     if (targetIndex === -1) return;
+    const releaseOperation = streamStore.beginConversationOperation(key.ownerId, key.ownerType, key.topicId);
 
     // 当前窗口仅负责乐观更新；权威用户锚点由后端从完整历史中寻找。
     let lastUserMsgIndex = targetIndex - 1;
@@ -939,23 +956,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     }
 
     try {
-      const streamChannel = new Channel<StreamEventDto>();
-      streamChannel.onmessage = (event) => streamStore.processStreamEvent(event, {
-        onMessageCreated: (msg, tid) => {
-          if (tid === key.topicId && canCommitConversation(key) && !currentChatHistory.value.some(m => m.id === msg.id)) {
-            currentChatHistory.value = mergeHistoryWindow(
-              currentChatHistory.value,
-              [msg],
-              false,
-            );
-          }
-        },
-        onStreamFinished: (_mid, tid) => {
-          if (tid === key.topicId && canCommitConversation(key)) {
-            summarizeTopic();
-          }
-        }
-      });
+      const streamChannel = makeStreamChannel(key);
 
       const result = await invoke<RegenerateTopicResultDto>("regenerate_topic_response", {
         ownerId: key.ownerId,
@@ -970,7 +971,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       topicStore.setTopicMsgCount(key.ownerId, key.ownerType, key.topicId, result.msgCount);
     } catch (e) {
       console.error("[ChatHistoryStore] Regeneration failed:", e);
-      // 与 triggerGeneration 一致：重新生成失败同样需要用户可见反馈
       notificationStore.addNotification({
         type: "error",
         title: "重新生成失败",
@@ -986,6 +986,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
           });
         }
       }
+    } finally {
+      releaseOperation();
     }
   };
 
@@ -1015,8 +1017,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   };
 
   const beginEditResend = async (messageKey: MessageActionKey) => {
+    if (!allowChatMutation(messageKey.conversation)) return;
     const initialContent = await fetchRawContent(messageKey);
     if (!isMessageActionCurrent(messageKey)) return;
+    if (!allowChatMutation(messageKey.conversation)) return;
     editingMessage.value = {
       key: messageKey,
       initialContent,
