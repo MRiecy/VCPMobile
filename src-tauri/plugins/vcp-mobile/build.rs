@@ -20,6 +20,8 @@ const COMMANDS: &[&str] = &[
     "prepare_file_operation",
     "cancel_file_operation",
     "get_webview_geometry",
+    "connect_webview_resume",
+    "complete_webview_resume",
     "get_battery_status",
     "get_network_status",
     "open_file_native",

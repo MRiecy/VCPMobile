@@ -10,6 +10,7 @@ mod ios;
 mod screen;
 pub mod stream;
 pub mod system;
+mod webview;
 
 #[cfg(target_os = "ios")]
 tauri::ios_plugin_binding!(init_plugin_vcp_mobile);
@@ -75,6 +76,8 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             system::prepare_file_operation,
             system::cancel_file_operation,
             system::get_webview_geometry,
+            webview::connect_webview_resume,
+            webview::complete_webview_resume,
             system::get_battery_status,
             system::get_network_status,
             system::open_file_native,

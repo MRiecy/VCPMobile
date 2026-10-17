@@ -55,6 +55,7 @@ private final class GeometryProbe: UIView {
 /// Owns only WebKit/UIKit resources. The WKWebView bounds never follow the CSS
 /// usable surface, so keyboard avoidance cannot feed back into native sampling.
 final class NativeWebKit {
+    let resume = NativeWebViewResume()
     private static var nextGeneration: UInt64 = 0
     private static var clearingStores = Set<ObjectIdentifier>()
     private weak var webView: WKWebView?
@@ -73,6 +74,7 @@ final class NativeWebKit {
         Self.nextGeneration += 1
         generation = Self.nextGeneration
         self.webView = webView
+        resume.attach(webView)
         let currentGeneration = generation
         // Wry owns the view's frame. viewport-fit=cover and no automatic UIKit
         // safe-area adjustment keep document width aligned with these bounds.
@@ -135,7 +137,9 @@ final class NativeWebKit {
     }
 
     private func invalidate(_ expectedGeneration: UInt64) {
-        guard generation == expectedGeneration, !invalidationQueued else { return }
+        guard generation == expectedGeneration else { return }
+        resume.layoutChanged()
+        guard !invalidationQueued else { return }
         invalidationQueued = true
         DispatchQueue.main.async { [weak self] in
             guard let self = self, self.generation == expectedGeneration else { return }
@@ -206,6 +210,7 @@ final class NativeWebKit {
     }
 
     private func detach() {
+        resume.detach()
         for token in observations { NotificationCenter.default.removeObserver(token) }
         observations.removeAll()
         boundsObservation = nil
@@ -227,6 +232,8 @@ final class NativeWebKit {
 }
 
 extension VcpMobilePlugin {
+    @objc public func connectWebViewResume(_ invoke: Invoke) { webKit.resume.connect(invoke) }
+    @objc public func completeWebViewResume(_ invoke: Invoke) { webKit.resume.complete(invoke) }
     @objc public func getWebViewGeometry(_ invoke: Invoke) { webKit.getGeometry(invoke) }
     @objc public func clearWebViewCache(_ invoke: Invoke) { webKit.clearCache(invoke) }
 }

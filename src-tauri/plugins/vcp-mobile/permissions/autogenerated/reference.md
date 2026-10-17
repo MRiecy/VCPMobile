@@ -335,6 +335,58 @@ Denies the clear_keep_screen_on command without any pre-configured scope.
 <tr>
 <td>
 
+`vcp-mobile:allow-complete-webview-resume`
+
+</td>
+<td>
+
+Enables the complete_webview_resume command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:deny-complete-webview-resume`
+
+</td>
+<td>
+
+Denies the complete_webview_resume command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:allow-connect-webview-resume`
+
+</td>
+<td>
+
+Enables the connect_webview_resume command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:deny-connect-webview-resume`
+
+</td>
+<td>
+
+Denies the connect_webview_resume command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `vcp-mobile:allow-delete-temp-file`
 
 </td>

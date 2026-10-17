@@ -41,6 +41,7 @@ Rust 核心内部调用 ─> Rust 公开入口 ─┼─> PluginHandle / JNI
 | `src/screen.rs` | 经 WebView JNI 进入 `ScreenKeepOnArbiter` |
 | `src/stream.rs` | 请求独立的前台保活租约与 helper service 的 Rust 边界 |
 | `src/system.rs` | 承接权限、文件、设备状态、更新与系统能力调用 |
+| `src/webview.rs`、`android/src/main/.../NativeWebViewResume.kt`、`ios/Sources/NativeWebViewResume.swift` | 双端视觉恢复握手；原生持有单份旧画面遮罩并等待绘制提交，Vue 只确认当前文档布局就绪，不改变业务生命周期或主题底色 |
 | `src/cli.rs` | 承接 Rust 核心到 Android CLI process / PTY 的异步桥接 |
 | `android/src/main/.../VcpMobilePlugin.kt` | Kotlin 命令入口与插件 attach/destroy 编排 |
 | `android/src/main/.../{service,cli}/` 与各 Manager | 执行独立的原生生命周期、后台服务和平台操作 |

@@ -58,6 +58,8 @@ src/
 
 `useAppLifecycle` 将 iOS 原生 network online 与既有浏览器 online 汇入同一个流恢复 owner；iOS 在首次真实 active snapshot 前不发起恢复。卸载释放两条原生监听，迟到安装立即释放；网络路径可用只表示可以尝试对账，不表示服务端已可达。
 
+`useWebViewResume` 只向原生快照遮罩报告当前文档的可展示状态；按恢复 token、文档身份、首屏历史与壁纸解码配对，原生继续等待实际绘制提交。它不重跑 bootstrap、不接管 SSE、不以持续流式内容稳定作为揭幕条件。
+
 `useIOSWindowGeometry` 在根部配对原生 bounds/键盘与 visualViewport，同一可用矩形供根、全屏和底部 sheet 消费。内部组件不重复加 iOS 键盘 padding；浮动键盘只影响当前编辑区。`attachmentStore` 的 operation ID 贯穿原生选择与 Rust 登记，外部文件没有 HTML/XHR 入口；`temporaryExport` 只接 WebView 内存产物。
 
 `core/utils/nativeFilePicker.ts` 统一附件、头像、配置的 iOS 原生选择接纳：prepare 返回前保留取消意图，取得 reservation 后才启动 picker，结束后撤销剩余登记。Android 继续原单次选择。这个短期调用记录不替代 `attachmentStore` 的导入/CAS owner；已交付文件仍由实际消费者释放。

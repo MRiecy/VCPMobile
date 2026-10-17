@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-connect-webview-resume"
+description = "Enables the connect_webview_resume command without any pre-configured scope."
+commands.allow = ["connect_webview_resume"]
+
+[[permission]]
+identifier = "deny-connect-webview-resume"
+description = "Denies the connect_webview_resume command without any pre-configured scope."
+commands.deny = ["connect_webview_resume"]

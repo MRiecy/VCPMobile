@@ -16,6 +16,8 @@
     "vcp-mobile:allow-prepare-file-operation",
     "vcp-mobile:allow-cancel-file-operation",
     "vcp-mobile:allow-get-webview-geometry",
+    "vcp-mobile:allow-connect-webview-resume",
+    "vcp-mobile:allow-complete-webview-resume",
     "vcp-mobile:allow-open-file-native",
     "vcp-mobile:allow-save-image-to-gallery",
     "vcp-mobile:allow-save-image-from-path",

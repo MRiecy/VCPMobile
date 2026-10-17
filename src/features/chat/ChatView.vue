@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
-import { useChatSessionStore } from "../../core/stores/chatSessionStore";
+import { useChatSessionStore, type ConversationKey } from "../../core/stores/chatSessionStore";
 import { useChatHistoryStore } from "../../core/stores/chatHistoryStore";
 import { useShareStore } from "../../core/stores/shareStore";
 import type { Attachment } from "../../core/types/chat";
@@ -21,6 +21,13 @@ import { useAttachmentStore } from "../../core/stores/attachmentStore";
 import { useKeyboardInsets } from "../../core/composables/useKeyboardInsets";
 import { useChatScroll } from "../../core/composables/useChatScroll";
 import { openPresentationMenu } from "./presentationMenu";
+
+const emit = defineEmits<{
+  (event: "content-settled", key: ConversationKey | null): void;
+  (event: "content-pending", key: ConversationKey | null): void;
+}>();
+let contentGeneration = 0;
+let viewDisposed = false;
 
 const sessionStore = useChatSessionStore();
 const shareStore = useShareStore();
@@ -127,6 +134,27 @@ watch(
   { immediate: true }
 );
 
+// Follow the actual history owner, including a replacement load in the same
+// conversation. An old aborted Promise cannot declare the new page ready.
+watch(
+  [() => historyStore.loading, isConversationReady, () => sessionStore.currentConversationKey?.epoch],
+  async ([loading]) => {
+    const generation = ++contentGeneration;
+    const key = sessionStore.currentConversationKey;
+    if (!isConversationReady.value) emit("content-pending", key);
+    // Loading an older page retains the current visible window. Only a reset
+    // current window revokes readiness, including a reload in the same epoch.
+    if (loading && !isConversationReady.value) return;
+    await nextTick();
+    if (viewDisposed || generation !== contentGeneration
+      || historyStore.loading && !isConversationReady.value) return;
+    if (key ? !sessionStore.isConversationCurrent(key) : sessionStore.currentConversationKey !== null) return;
+    // Load errors already have visible feedback and are a usable rendered state.
+    emit("content-settled", key);
+  },
+  { immediate: true, flush: "sync" },
+);
+
 // --- 阻止非交互空白区域的 touchmove，防止 WebView viewport 被拖动 ---
 const handleContainerTouchMove = (e: TouchEvent) => {
   // 系统滚动过程中事件不可取消，强行 preventDefault 会报错
@@ -204,6 +232,8 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  viewDisposed = true;
+  contentGeneration += 1;
   window.removeEventListener("vcp-button-click", handleVcpButtonClick);
 
   if (chatViewContainerRef.value) {

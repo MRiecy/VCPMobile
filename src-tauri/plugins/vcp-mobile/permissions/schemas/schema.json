@@ -445,6 +445,30 @@
           "markdownDescription": "Denies the clear_keep_screen_on command without any pre-configured scope."
         },
         {
+          "description": "Enables the complete_webview_resume command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-complete-webview-resume",
+          "markdownDescription": "Enables the complete_webview_resume command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the complete_webview_resume command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-complete-webview-resume",
+          "markdownDescription": "Denies the complete_webview_resume command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the connect_webview_resume command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-connect-webview-resume",
+          "markdownDescription": "Enables the connect_webview_resume command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the connect_webview_resume command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-connect-webview-resume",
+          "markdownDescription": "Denies the connect_webview_resume command without any pre-configured scope."
+        },
+        {
           "description": "Enables the delete_temp_file command without any pre-configured scope.",
           "type": "string",
           "const": "allow-delete-temp-file",

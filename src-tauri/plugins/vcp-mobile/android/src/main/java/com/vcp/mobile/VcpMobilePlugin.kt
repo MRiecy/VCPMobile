@@ -317,21 +317,34 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private val activityLifecycleCallbacks = object : android.app.Application.ActivityLifecycleCallbacks {
+        override fun onActivityPrePaused(a: Activity) {
+            if (a === activity) webViewResume.onPausing()
+        }
         override fun onActivityResumed(a: Activity) {
             if (a === activity) {
                 ScreenKeepOnArbiter.setAppInForeground(activity, true)
+                webViewResume.onResumed()
             }
         }
         override fun onActivityPaused(a: Activity) {
             if (a === activity) {
+                // On API 26–28 this runs inside Activity.super.onPause(), before
+                // the locked WryActivity calls WebView.onPause().
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) webViewResume.onPausing()
                 ScreenKeepOnArbiter.setAppInForeground(activity, false)
             }
         }
         override fun onActivityCreated(a: Activity, savedInstanceState: android.os.Bundle?) {}
-        override fun onActivityStarted(a: Activity) {}
-        override fun onActivityStopped(a: Activity) {}
+        override fun onActivityStarted(a: Activity) {
+            if (a === activity) webViewResume.onStarted()
+        }
+        override fun onActivityStopped(a: Activity) {
+            if (a === activity) webViewResume.onStopped()
+        }
         override fun onActivitySaveInstanceState(a: Activity, outState: android.os.Bundle) {}
-        override fun onActivityDestroyed(a: Activity) {}
+        override fun onActivityDestroyed(a: Activity) {
+            if (a === activity) webViewResume.destroy()
+        }
     }
 
     companion object {
@@ -431,6 +444,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
     private val keyboardInsetsManager = KeyboardInsetsManager(activity)
+    private val webViewResume = NativeWebViewResume(activity)
     private val lifecycleBridge = LifecycleBridge()
     private val batteryStatusManager = BatteryStatusManager(activity)
     private val networkStatusManager = NetworkStatusManager(activity)
@@ -1328,6 +1342,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     override fun load(webView: WebView) {
         super.load(webView)
         webViewRef = webView
+        webViewResume.attach(webView)
 
         keyboardInsetsManager.attach(webView)
         lifecycleBridge.attach(activity, this)
@@ -1336,6 +1351,32 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         shareIntentHandler.handleShareIntent(activity.intent)
         shareIntentHandler.injectShareData(webView)
         handleNotificationIntent(activity.intent)
+    }
+
+    @Command
+    fun connectWebViewResume(invoke: Invoke) {
+        val args = try { invoke.parseArgs(ConnectWebViewResumeArgs::class.java) }
+        catch (error: Exception) { invoke.reject("Invalid resume connection: ${error.message}"); return }
+        if (args.documentId.isBlank()) { invoke.reject("Resume document identity is required"); return }
+        activity.runOnUiThread {
+            val token = webViewResume.connect(args.documentId)
+            invoke.resolve(JSObject().apply { put("token", token ?: org.json.JSONObject.NULL) })
+        }
+    }
+
+    @Command
+    fun completeWebViewResume(invoke: Invoke) {
+        val args = try { invoke.parseArgs(CompleteWebViewResumeArgs::class.java) }
+        catch (error: Exception) { invoke.reject("Invalid resume completion: ${error.message}"); return }
+        if (args.documentId.isBlank() || args.token.isBlank()) {
+            invoke.reject("Resume document and token are required")
+            return
+        }
+        activity.runOnUiThread {
+            webViewResume.complete(args.documentId, args.token)
+            // Renderer/copy callbacks are owned by NativeWebViewResume, not this IPC.
+            invoke.resolve()
+        }
     }
 
     @Command
@@ -1426,6 +1467,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     override fun onDestroy(activity: AppCompatActivity) {
         isDestroying.set(true)
+        webViewResume.destroy()
         fileOperation.get()?.let { it.cancelled.set(true); it.reject("cancelled: plugin destroyed") }
         activity.runOnUiThread { downloadsWritePermissionWait.destroy() }
         nativeEventChannel = null
@@ -2760,6 +2802,17 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve(JSObject())
         }
     }
+}
+
+@InvokeArg
+class ConnectWebViewResumeArgs {
+    var documentId: String = ""
+}
+
+@InvokeArg
+class CompleteWebViewResumeArgs {
+    var documentId: String = ""
+    var token: String = ""
 }
 
 @InvokeArg

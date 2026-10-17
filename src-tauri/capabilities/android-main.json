@@ -15,6 +15,8 @@
     "vcp-mobile:allow-get-free-disk-space",
     "vcp-mobile:allow-pick-file",
     "vcp-mobile:allow-cancel-file-operation",
+    "vcp-mobile:allow-connect-webview-resume",
+    "vcp-mobile:allow-complete-webview-resume",
     "vcp-mobile:allow-get-battery-status",
     "vcp-mobile:allow-open-file-native",
     "vcp-mobile:allow-save-image-to-gallery",

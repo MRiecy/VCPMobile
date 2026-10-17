@@ -15,9 +15,10 @@ import { useNotificationStore } from "./core/stores/notification";
 import { useNotificationProcessor } from "./core/composables/useNotificationProcessor";
 import { useEmoticonFixer } from "./core/composables/useEmoticonFixer";
 import { useAutoUpdate } from "./core/composables/useAutoUpdate";
-import { useChatSessionStore } from "./core/stores/chatSessionStore";
+import { useChatSessionStore, type ConversationKey } from "./core/stores/chatSessionStore";
 import { useAppLifecycle } from "./core/composables/useAppLifecycle";
 import { retainNativeInsetsBridge } from "./core/composables/useKeyboardInsets";
+import { useWebViewResume } from "./core/composables/useWebViewResume";
 import { useShareStore } from "./core/stores/shareStore";
 import {
   useVcpCliStore,
@@ -322,6 +323,15 @@ const processNotificationClick = async (
 // --- Global Swipe Logic for Sidebar ---
 const appRootRef = ref<HTMLElement | null>(null);
 useSidebarSwipe(appRootRef, { type: "global" });
+const renderedConversationEpoch = ref<number | null>(null);
+const handleContentSettled = (key: ConversationKey | null) => {
+  if (key && sessionStore.isConversationCurrent(key)) renderedConversationEpoch.value = key.epoch;
+};
+const handleContentPending = (key: ConversationKey | null) => {
+  if (key ? sessionStore.isConversationCurrent(key) : !sessionStore.currentConversationKey) {
+    renderedConversationEpoch.value = null;
+  }
+};
 
 const bootstrapApp = async () => {
   try {
@@ -333,11 +343,11 @@ const bootstrapApp = async () => {
 
 
 
-const backgroundStyle = computed(() => {
+const wallpaperUrl = computed(() => {
   const themeInfo = themeStore.currentThemeInfo || themeStore.availableThemes.find(
     (t) => t.fileName === themeStore.currentTheme,
   );
-  if (!themeInfo) return {};
+  if (!themeInfo) return null;
 
   const isLight = !themeStore.isDarkResolved;
   let rawValue = isLight
@@ -351,7 +361,7 @@ const backgroundStyle = computed(() => {
       : themeInfo.variables.light?.["--chat-wallpaper-light"];
   }
 
-  if (!rawValue || rawValue === "none") return {};
+  if (!rawValue || rawValue === "none") return null;
 
   // Extract filename and clean it robustly
   const match = rawValue.match(/url\(['"]?(.*?)['"]?\)/);
@@ -362,7 +372,19 @@ const backgroundStyle = computed(() => {
   // 2. Strip ANY existing extension and force .webp (matching optimized public/wallpaper)
   filename = filename.split(".")[0] + ".webp";
 
-  return { backgroundImage: `url("/wallpaper/${filename}")` };
+  return `/wallpaper/${filename}`;
+});
+const backgroundStyle = computed(() => wallpaperUrl.value
+  ? { backgroundImage: `url("${wallpaperUrl.value}")` }
+  : {});
+
+useWebViewResume({
+  root: appRootRef,
+  ready: () => lifecycleStore.state === 'PERMISSIONS' || lifecycleStore.state === 'ERROR'
+    || lifecycleStore.state === 'READY' && (!sessionStore.currentConversationKey
+      || renderedConversationEpoch.value === sessionStore.currentConversationKey.epoch),
+  appearance: () => `${themeStore.currentTheme}:${themeStore.isDarkResolved}`,
+  wallpaperUrl: () => wallpaperUrl.value,
 });
 
 // 用于取消监听的清理函数
@@ -594,7 +616,8 @@ onUnmounted(() => {
 
       <main class="vcp-workspace-main flex-1 min-w-0 min-h-0 relative overflow-hidden">
         <router-view v-slot="{ Component }">
-          <component v-if="Component" :is="Component" />
+          <component v-if="Component" :is="Component" @content-settled="handleContentSettled"
+            @content-pending="handleContentPending" />
         </router-view>
       </main>
 
