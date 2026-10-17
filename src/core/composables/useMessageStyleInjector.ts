@@ -1,7 +1,4 @@
-
-
-const injectedStyles = new Map<string, string>();
-const rawCssCache = new Map<string, string>();
+import { onScopeDispose } from 'vue';
 
 /**
  * Composable that provides scoped style injection helpers for message bubbles.
@@ -9,16 +6,30 @@ const rawCssCache = new Map<string, string>();
  * to prevent user/agent-generated HTML preview styles from polluting the global application theme.
  */
 export function useMessageStyleInjector() {
+  // Each mounted message owns its actual style element, including during overlapping remounts.
+  let styleEl: HTMLStyleElement | null = null;
+  let currentMessageId = '';
+  let currentCss = '';
+
+  const removeScopedCss = () => {
+    styleEl?.remove();
+    styleEl = null;
+    currentMessageId = '';
+    currentCss = '';
+  };
+  onScopeDispose(removeScopedCss);
   /**
    * Scopes and injects raw CSS scoped to a specific message ID.
    * Modifies selectors (except keyframe definitions) to be nested under `[data-message-id="..."]`.
    */
   const injectScopedCss = (css: string, messageId: string) => {
-    if (!css || !messageId) return;
+    if (!css.trim() || !messageId) {
+      removeScopedCss();
+      return;
+    }
     
     // 提前去重校验：若原始 CSS 无变化，直接拦截，完全跳过后面重型 selector scoping 的正则运算
-    if (rawCssCache.get(messageId) === css) return;
-    rawCssCache.set(messageId, css);
+    if (currentMessageId === messageId && currentCss === css && styleEl?.isConnected) return;
 
     const scopeSelector = `[data-message-id="${messageId}"]`;
     const scopedCss = css.replace(
@@ -42,47 +53,17 @@ export function useMessageStyleInjector() {
       },
     );
 
-    if (injectedStyles.get(messageId) === scopedCss) return;
-    injectedStyles.set(messageId, scopedCss);
-
-    let styleEl = document.getElementById(`style-${messageId}`);
     if (!styleEl) {
       styleEl = document.createElement("style");
-      styleEl.id = `style-${messageId}`;
-      styleEl.setAttribute("data-vcp-scope-id", messageId);
-      document.head.appendChild(styleEl);
     }
+    styleEl.setAttribute("data-vcp-scope-id", messageId);
     styleEl.textContent = scopedCss;
-  };
-
-  /**
-   * Removes the scoped style element associated with a specific message ID.
-   * Uses a setTimeout delay to prevent the style sheet from being instantly removed
-   * and re-injected during the streaming-to-stable transition tick, which causes layout flicker.
-   */
-  const removeScopedCss = (messageId: string) => {
-    if (!messageId) return;
-    
-    // 立即注销 rawCss 活跃状态。如果后面有新静态块接管，它会同步重新执行 injectScopedCss 重新 set 写入
-    rawCssCache.delete(messageId);
-    
-    // 延迟 50ms 物理清理，给新静态块挂载和样式接管留出时间差
-    setTimeout(() => {
-      // 核心门禁：如果在这 50ms 期间有新块重新写入并接管了该 messageId，说明样式依然活跃，保留它
-      if (rawCssCache.has(messageId)) {
-        return;
-      }
-      
-      const styleEl = document.getElementById(`style-${messageId}`);
-      if (styleEl) {
-        styleEl.remove();
-      }
-      injectedStyles.delete(messageId);
-    }, 50);
+    if (!styleEl.isConnected) document.head.appendChild(styleEl);
+    currentMessageId = messageId;
+    currentCss = css;
   };
 
   return {
     injectScopedCss,
-    removeScopedCss,
   };
 }

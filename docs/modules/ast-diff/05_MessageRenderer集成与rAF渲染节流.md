@@ -1,10 +1,10 @@
 ---
 id: AST-DIFF-005
 title: MessageRenderer 集成与 rAF 绘制对齐 (MessageRenderer Integration & rAF Alignment)
-module: MessageRenderer.vue (watch logic) + chatStreamStore.ts (rAF alignment)
+module: useMessageTailRenderer.ts (DOM ownership) + chatStreamStore.ts (rAF alignment)
 related: [astExecutor.ts, astRenderer.ts, chat.ts (ChatMessage)]
 version: "1.1.0"
-last_updated: 2026-09-03
+last_updated: 2026-10-18
 ---
 
 # 05_MessageRenderer 集成与 rAF 绘制对齐
@@ -13,12 +13,15 @@ last_updated: 2026-09-03
 
 ### 1.1 模块定位
 
-本章覆盖 AST Diff 引擎与 Vue 3 渲染管线的**集成层**，由两个关键模块组成：
+本章覆盖 AST Diff 引擎与 Vue 3 渲染管线的**集成层**。当前消息组件只提供尾部宿主与动画判定，尾部执行状态随消息实例由 composable 持有：
 
-| 模块 | 职责 | 文件行数 |
-|------|------|:------:|
-| **chatStreamStore.ts** | 下一次 rAF 前原子合并、mergeTailFrame、AuroraUpdate 稀疏写入 | ~443 行（相关部分） |
-| **MessageRenderer.vue** | watch 三源监听、Epoch 追踪、applyFrame 调度、错误恢复 | ~870 行（相关部分） |
+| 模块 | 职责 |
+|------|------|
+| **chatStreamStore.ts** | 下一次 rAF 前原子合并、mergeTailFrame；统一提交/清理暂存投影，snapshot/终态替换 |
+| **useMessageTailRenderer.ts** | watch 三源监听、stream/epoch/已应用帧、applyFrame 调度、恢复/降级与清理 |
+| **MessageRenderer.vue** | 稳定气泡投影、尾部宿主模板、稳定内容增强、交互与样式入口 |
+
+2026-10-18：尾部实现从组件移入 `src/features/chat/composables/useMessageTailRenderer.ts`，不改变消息级生命周期；write-only `localTailRevision` 和无生产调用的 driver 门面已删除。Store 使用 `commitPendingRender`/`clearPendingRender` 统一 rAF 与强制 flush，`replaceRenderProjection` 处理恢复和完整终态接管；snapshot 显式产生 replace/clear tailOp。下文的历史集成示例用于解释序列协议，当前执行入口与清理边界以这些生产文件为准。
 
 ### 1.2 集成架构概览
 
@@ -40,9 +43,9 @@ flowchart TD
         CM["ChatMessage.tailFrame<br/>ChatMessage.tailSnapshot<br/>ChatMessage.tailContent<br/>ChatMessage.tailBlock"]
     end
 
-    subgraph Component["MessageRenderer.vue"]
+    subgraph Component["useMessageTailRenderer（消息生命周期）"]
         W["watch([tailFrame, tailSnapshot, sandboxRef])"]
-        EP["Epoch/Revision 追踪<br/>(localTailEpoch, localTailRevision)"]
+        EP["stream/epoch/已应用 frameSeq 追踪"]
         AF["applyFrame(mutations)"]
     end
 
@@ -436,7 +439,7 @@ function splitMarkdownNodes(nodes: any[]): any[][] {
 }
 ```
 
-一个 AI 回复可以被 `<!--brk-->` 分割为多个独立的聊天气泡。分裂在 `messageBubbles` computed 中进行，完全独立于 AST Diff 路径，两者可以共存。
+一个 AI 回复可以被 `<!--brk-->` 分割为多个独立的聊天气泡。分裂在只依赖稳定内容的 `stableBubbleProjection` computed 中进行；`messageBubbles` 只按尾部存在性追加必要空组。尾部更新不重遍历稳定 AST，宿主移动也不重置 message-scoped 尾部恢复状态。
 
 ---
 

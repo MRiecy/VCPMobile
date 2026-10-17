@@ -194,7 +194,7 @@ const isImageValue = (key: string, value: string): boolean => {
                 <span>复制</span>
               </button>
             </div>
-            <div class="min-w-0">
+            <div class="min-w-0" data-message-content>
               <!-- 图片值直接渲染为 img，其他值走 Markdown 管线 -->
               <template v-if="item.value && isImageValue(item.key, item.value)">
                 <a :href="item.value" target="_blank" rel="noopener noreferrer" class="block">
@@ -204,7 +204,7 @@ const isImageValue = (key: string, value: string): boolean => {
               <div v-else class="text-xs opacity-90 vcp-markdown-block compact-markdown select-text" v-html="renderMarkdown(item.value || '')"></div>
             </div>
           </div>
-          <div v-if="block.footer" class="mt-2.5 pt-2.5 border-t border-black/10 dark:border-white/10 text-xs opacity-70 vcp-markdown-block compact-markdown select-text" v-html="renderMarkdown(block.footer)"></div>
+          <div v-if="block.footer" data-message-content class="mt-2.5 pt-2.5 border-t border-black/10 dark:border-white/10 text-xs opacity-70 vcp-markdown-block compact-markdown select-text" v-html="renderMarkdown(block.footer)"></div>
         </div>
       </template>
     </div>

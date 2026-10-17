@@ -58,6 +58,19 @@ function buildTailBlockFromOp(
   return { ...shared, type: "markdown" };
 }
 
+// 快照提供完整正文基线，不能让先前未消费的 append/replace 继续代表它。
+function buildTailSnapshotOp(block: StreamBlock | null, mode: TailRenderMode): TailTextOp {
+  if (!block) return { op: "clear" };
+  return {
+    op: "replace",
+    content: block.content ?? "",
+    hash: block.hash,
+    mode,
+    blockType: block.type === "thought" || block.type === "html-preview" ? block.type : "markdown",
+    thoughtTheme: block.type === "thought" ? block.theme : undefined,
+  };
+}
+
 export const useChatStreamStore = defineStore("chatStream", () => {
   const streamingMessageKey = ref<string | null>(null);
 
@@ -303,23 +316,58 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   // Rust vcp_client 的 33ms 门禁是 Aurora 唯一的频率上限。前端不能再设第二个
   // 33ms 时间门禁：后端时钟与屏幕 VSync 不同步，叠加会平白增加一帧延迟。
   // 此处 rAF 只合并下一次绘制前到达的事件，并将同一 Aurora 帧的字段原子写入 Vue。
-  const rAFPendingUpdates = new Map<
-    string,
-    {
-      content: string | null;
-      blocks: ContentBlock[] | null;
-      tailContent: string | null;
-      tailBlock: StreamBlock | null;
-      tailBlockChanged: boolean;
-      tailOp: TailTextOp | null;
-      tailFrame: TailFrame | null;
-      tailSnapshot: MarkdownNode[] | null;
-      streamId: number | null;
-      tailCursor: TailFrameCursor | null;
-      needsSnapshotReason: string | null;
-      animationFrameId: number | null;
-    }
-  >();
+  interface PendingRenderUpdate {
+    content: string | null;
+    blocks: ContentBlock[] | null;
+    tailContent: string | null;
+    tailBlock: StreamBlock | null;
+    tailBlockChanged: boolean;
+    tailOp: TailTextOp | null;
+    tailFrame: TailFrame | null;
+    tailSnapshot: MarkdownNode[] | null;
+    streamId: number | null;
+    tailCursor: TailFrameCursor | null;
+    needsSnapshotReason: string | null;
+    animationFrameId: number | null;
+  }
+  const rAFPendingUpdates = new Map<string, PendingRenderUpdate>();
+
+  // rAF 与强制 flush 提交同一组字段；null 表示本批未更新，tailBlockChanged 区分清空。
+  const commitPendingRender = (message: ChatMessage, update: PendingRenderUpdate) => {
+    if (update.content !== null) message.content = update.content;
+    if (update.blocks !== null) message.blocks = update.blocks;
+    if (update.tailContent !== null) message.tailContent = update.tailContent;
+    if (update.tailBlockChanged) message.tailBlock = update.tailBlock ?? undefined;
+    if (update.tailOp !== null) message.tailOp = update.tailOp;
+    if (update.tailSnapshot !== null) message.tailSnapshot = update.tailSnapshot;
+    if (update.tailFrame !== null) message.tailFrame = update.tailFrame;
+  };
+
+  // 只清除待提交投影；流身份、连续性游标和恢复原因由各自的接管路径处理。
+  const clearPendingRender = (update: PendingRenderUpdate) => {
+    update.content = null;
+    update.blocks = null;
+    update.tailContent = null;
+    update.tailBlock = null;
+    update.tailBlockChanged = false;
+    update.tailOp = null;
+    update.tailFrame = null;
+    update.tailSnapshot = null;
+  };
+
+  // Snapshot 完整覆盖渲染基线；完整 blocks 不带 tail，因而同时释放旧尾部。
+  const replaceRenderProjection = (
+    message: ChatMessage,
+    blocks: ContentBlock[],
+    tail?: { block: StreamBlock | null; mode: TailRenderMode; snapshot: MarkdownNode[]; frame: TailFrame },
+  ) => {
+    message.blocks = blocks;
+    message.tailContent = tail?.block?.content ?? "";
+    message.tailBlock = tail?.block ?? undefined;
+    message.tailOp = tail ? buildTailSnapshotOp(tail.block, tail.mode) : undefined;
+    message.tailSnapshot = tail?.snapshot;
+    message.tailFrame = tail?.frame;
+  };
 
   /**
    * 物理防线：强行中止、强制同步刷新并安全清理指定消息的 rAF 帧状态，杜绝任何泄漏与闪烁
@@ -333,32 +381,10 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       }
       if (forceFlush) {
         const msg = activeStreamMessages.get(messageKey);
-        if (msg) {
-          if (up.content !== null) msg.content = up.content;
-          if (up.blocks !== null) msg.blocks = up.blocks;
-          // 漏洞 1 修复：同步强刷收尾时，必须将暂存池中的 tail 字段强刷，绝不允许丢字闪烁
-          if (up.tailContent !== null) msg.tailContent = up.tailContent;
-          if (up.tailBlockChanged) {
-            msg.tailBlock = up.tailBlock ?? undefined;
-          }
-          if (up.tailOp !== null) msg.tailOp = up.tailOp;
-          if (up.tailSnapshot !== null)
-            msg.tailSnapshot = up.tailSnapshot;
-          if (up.tailFrame !== null) msg.tailFrame = up.tailFrame;
-        }
+        if (msg) commitPendingRender(msg, up);
       }
       rAFPendingUpdates.delete(messageKey);
     }
-  };
-
-  // 完整 blocks 接管显示后，历史列表也不再需要流式尾部的 AST 和更新帧。
-  const applyCompiledBlocks = (message: ChatMessage, blocks: ContentBlock[]) => {
-    message.blocks = blocks;
-    message.tailContent = "";
-    message.tailBlock = undefined;
-    message.tailOp = undefined;
-    message.tailFrame = undefined;
-    message.tailSnapshot = undefined;
   };
 
   /**
@@ -373,27 +399,10 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       if (!up) return;
 
       const m = activeStreamMessages.get(messageKey);
-      if (m) {
-        if (up.content !== null) m.content = up.content;
-        if (up.blocks !== null) m.blocks = up.blocks;
-        if (up.tailSnapshot !== null) m.tailSnapshot = up.tailSnapshot;
-        if (up.tailFrame !== null) m.tailFrame = up.tailFrame;
-        if (up.tailContent !== null) m.tailContent = up.tailContent;
-        if (up.tailBlockChanged) {
-          m.tailBlock = up.tailBlock ?? undefined;
-        }
-        if (up.tailOp !== null) m.tailOp = up.tailOp;
-      }
+      if (m) commitPendingRender(m, up);
 
       // 重置下一次绘制前的合并暂存状态。
-      up.content = null;
-      up.blocks = null;
-      up.tailContent = null;
-      up.tailBlock = null;
-      up.tailBlockChanged = false;
-      up.tailOp = null;
-      up.tailFrame = null;
-      up.tailSnapshot = null;
+      clearPendingRender(up);
       up.animationFrameId = null;
     });
   };
@@ -495,19 +504,14 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           latestPending.animationFrameId = null;
         }
         latestMessage.content = latestSource;
-        latestMessage.blocks = snapshot.stableBlocks;
-        latestMessage.tailContent = snapshot.tailBlock?.content || "";
-        latestMessage.tailBlock = tailBlock ?? undefined;
-        latestMessage.tailSnapshot = snapshot.tailSnapshot;
-        latestMessage.tailFrame = resetFrame;
+        replaceRenderProjection(latestMessage, snapshot.stableBlocks, {
+          block: tailBlock,
+          mode,
+          snapshot: snapshot.tailSnapshot,
+          frame: resetFrame,
+        });
 
-        latestPending.content = null;
-        latestPending.blocks = null;
-        latestPending.tailContent = null;
-        latestPending.tailBlock = null;
-        latestPending.tailBlockChanged = false;
-        latestPending.tailSnapshot = null;
-        latestPending.tailFrame = null;
+        clearPendingRender(latestPending);
         latestPending.needsSnapshotReason = null;
         return true;
       }
@@ -980,7 +984,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             .then(blocks => {
               if (!ownsConsumer() || hasStreamTerminalTombstone(messageKey)
                 || !msg!.isStopping || msg!.content !== content || rAFPendingUpdates.has(messageKey)) return;
-              applyCompiledBlocks(msg!, blocks);
+              replaceRenderProjection(msg!, blocks);
             })
             .catch(error => console.error("[ChatStreamStore] Failed to render stopping partial:", error));
         }
@@ -1063,14 +1067,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           if (update.streamId !== null && eventStreamId < update.streamId) return;
           if (update.streamId === null || eventStreamId > update.streamId) {
             streamChanged = update.streamId !== null;
-            update.content = null;
-            update.blocks = null;
-            update.tailContent = null;
-            update.tailBlock = null;
-            update.tailBlockChanged = false;
-            update.tailOp = null;
-            update.tailFrame = null;
-            update.tailSnapshot = null;
+            clearPendingRender(update);
             update.streamId = eventStreamId;
             update.tailCursor = null;
             update.needsSnapshotReason = null;
@@ -1128,6 +1125,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             ? { ...aurora.tailBlock, render_mode: snapshotMode }
             : null;
           update.tailBlockChanged = true;
+          update.tailOp = buildTailSnapshotOp(update.tailBlock, snapshotMode);
         } else if (aurora.kind === "delta") {
           if (aurora.stableAppend) {
             const stableBase = update.blocks ?? msg!.blocks ?? [];
@@ -1235,7 +1233,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           .then(blocks => {
             if (!ownsConsumer() || hasStreamTerminalTombstone(messageKey)
               || msg!.streamRecoveryState !== "waiting_retry" || msg!.content !== content) return;
-            applyCompiledBlocks(msg!, blocks);
+            replaceRenderProjection(msg!, blocks);
           })
           .catch(error => console.error("[ChatStreamStore] Failed to render recoverable partial:", error));
       }
@@ -1281,7 +1279,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         const finalizeStream = (blocks?: ContentBlock[]) => {
           if (!ownsConsumer()) return;
           // 解析失败时保留已有展示；只有完整结果到达才释放旧尾部。
-          if (blocks) applyCompiledBlocks(msg!, blocks);
+          if (blocks) replaceRenderProjection(msg!, blocks);
           removeSessionStream(ownerId, ownerType, topicId, actualMessageId);
           if (callbacks?.onStreamFinished) {
             callbacks.onStreamFinished(actualMessageId, topicId);

@@ -55,6 +55,7 @@ function escapeHtml(text: string): string {
       <slot>
         <div
           class="thought-body"
+          data-message-content
           v-html="
             block.nodes && block.nodes.length > 0
               ? renderMarkdownNodes(block.nodes, messageId, block.hash)

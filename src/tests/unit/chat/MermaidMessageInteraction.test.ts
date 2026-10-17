@@ -57,6 +57,7 @@ function markdown(source: string, hash: string): Extract<StreamBlock, { type: 'm
 
 function mountMessage(message: ChatMessage) {
   const wrapper = mount(MessageRenderer, {
+    attachTo: document.body,
     props: { message },
     global: {
       plugins: [pinia],
@@ -249,7 +250,7 @@ describe('Mermaid event ownership', () => {
         useMessageEvents(root, open);
         return { root, html };
       },
-      template: '<div ref="root"><div data-message-render-region="stable" v-html="html" /></div>',
+      template: '<div ref="root"><div data-message-render-region="stable" data-message-content v-html="html" /></div>',
     }), { global: { plugins: [pinia] } });
     wrappers.push(wrapper);
     return { wrapper, open };

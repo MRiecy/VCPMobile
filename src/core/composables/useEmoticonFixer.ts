@@ -8,6 +8,27 @@ export interface EmoticonItem {
   searchKey: string;
 }
 
+interface EmoticonInput {
+  src: string;
+  alt: string;
+  isEmoticon: boolean;
+}
+
+// 节点只记住处理过的输入及分类；私有属性不会被 AST/morphdom 的属性同步清除。
+// 所有 composable 实例及全局 onerror 共用这个标记，避免同一输入重复 IPC。
+const processedInput = Symbol('processedEmoticonInput');
+type EmoticonImage = HTMLImageElement & { [processedInput]?: EmoticonInput };
+
+function mentionsEmoticon(value: string): boolean {
+  if (value.includes('表情包')) return true;
+  if (!value.includes('%')) return false;
+  try {
+    return decodeURIComponent(value).includes('表情包');
+  } catch {
+    return false;
+  }
+}
+
 export function useEmoticonFixer() {
   const fixUrl = async (url: string): Promise<string> => {
     try {
@@ -36,43 +57,57 @@ export function useEmoticonFixer() {
     }
   };
 
+  const processImage = (img: EmoticonImage, owner: Node, showFailure = false): Promise<void> | void => {
+    if (!img.isConnected) return;
+
+    const src = img.getAttribute('src') || '';
+    const alt = img.alt;
+    const previous = img[processedInput];
+    if (previous?.src === src && previous.alt === alt) {
+      if (previous.isEmoticon && !img.classList.contains('vcp-emoticon')) {
+        img.classList.add('vcp-emoticon');
+      }
+      if (showFailure) img.style.visibility = 'visible';
+      return;
+    }
+
+    const isEmoticon = mentionsEmoticon(src) || mentionsEmoticon(alt);
+    const input = { src, alt, isEmoticon };
+    img[processedInput] = input;
+    if (!isEmoticon) {
+      if (previous) img.classList.remove('vcp-emoticon');
+      if (showFailure) img.style.visibility = 'visible';
+      return;
+    }
+    img.classList.add('vcp-emoticon');
+
+    return fixUrl(src).then((fixedUrl) => {
+      // AST 可以原地改写图片，终态也可以替换整棵 DOM；迟到结果只属于发起时的输入和容器。
+      if (
+        img[processedInput] !== input
+        || (img.getAttribute('src') || '') !== src
+        || img.alt !== alt
+        || !img.isConnected
+        || !owner.contains(img)
+      ) return;
+
+      if (fixedUrl && fixedUrl !== src) {
+        img.src = fixedUrl;
+        // 修复后的 URL 也是同一次已处理输入，加载失败时不再递归修复。
+        img[processedInput] = { src: img.getAttribute('src') || '', alt, isEmoticon };
+      } else if (showFailure) {
+        img.style.visibility = 'visible';
+      }
+    });
+  };
+
   const initGlobalFixer = () => {
-    (window as any).__vcpFixEmoticon = async (img: HTMLImageElement) => {
-      // 1. 如果已经尝试修复过且依然报错，则显示破碎图片并停止
-      if (img.dataset.vcpFixed === 'true') {
-        img.style.visibility = 'visible';
-        return;
-      }
-
-      const originalSrc = img.src;
-
-      // 2. 只有包含“表情包”关键词的才尝试修复
-      const isEmoticon = decodeURIComponent(originalSrc).includes('表情包');
-      if (!isEmoticon) {
-        img.style.visibility = 'visible';
-        return;
-      }
-
-      img.dataset.vcpFixed = 'true';
-
-      try {
-        const fixedUrl = await fixUrl(originalSrc);
-        if (fixedUrl && fixedUrl !== originalSrc) {
-          // console.log(`[EmoticonFixer] Fixed: ${originalSrc} -> ${fixedUrl}`);
-          img.src = fixedUrl; // 这会重新触发加载，如果再次失败会进入上面的 dataset 拦截
-        } else {
-          // 无法修复，直接显示破碎图标
-          img.style.visibility = 'visible';
-        }
-      } catch (e) {
-        console.error('[EmoticonFixer] Error in global fixer:', e);
-        img.style.visibility = 'visible';
-      }
-    };
+    (window as any).__vcpFixEmoticon = (img: HTMLImageElement) =>
+      processImage(img, img.parentNode ?? img.ownerDocument, true);
 
     // 辅助函数：加载成功后显示
     (window as any).__vcpShowEmoticon = (img: HTMLImageElement) => {
-      img.style.visibility = 'visible';
+      if (img.isConnected) img.style.visibility = 'visible';
     };
   };
 
@@ -83,30 +118,8 @@ export function useEmoticonFixer() {
     const promises: Promise<void>[] = [];
 
     imgs.forEach((img) => {
-      // 避免重复处理
-      if (img.dataset.vcpProcessed === 'true') return;
-      img.dataset.vcpProcessed = 'true';
-
-      const originalSrc = decodeURIComponent(img.src);
-      const alt = decodeURIComponent(img.alt || '');
-
-      const isEmoticon = originalSrc.includes('表情包') || alt.includes('表情包');
-      if (isEmoticon) {
-        img.classList.add('vcp-emoticon');
-        const rawSrc = img.getAttribute('src') || originalSrc;
-        
-        const fixPromise = async () => {
-          try {
-            const fixedUrl = await fixUrl(rawSrc);
-            if (fixedUrl && fixedUrl !== rawSrc) {
-              img.src = fixedUrl;
-            }
-          } catch (e) {
-            console.error('[EmoticonFixer] Failed to fix emoticon:', rawSrc, e);
-          }
-        };
-        promises.push(fixPromise());
-      }
+      const pending = processImage(img, container);
+      if (pending) promises.push(pending);
     });
 
     await Promise.allSettled(promises);

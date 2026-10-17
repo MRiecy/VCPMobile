@@ -1,4 +1,4 @@
-import type { CodePatchDriver, CodePatchResult } from "../types";
+import type { CodePatchResult } from "../types";
 
 /**
  * 在目标 DOM 容器中查找流式代码块的稳定行锚点与活跃行锚点
@@ -68,15 +68,4 @@ export function applyCodePatch(
   anchors.active.replaceChildren(activeTemplate.content);
 
   return { ok: true };
-}
-
-/**
- * 实例化代码围栏增量补丁驱动
- */
-export function createCodePatchDriver(): CodePatchDriver {
-  return {
-    applyPatch(targetNode: Node, completedHtml: string, activeHtml: string) {
-      return applyCodePatch(targetNode, completedHtml, activeHtml);
-    },
-  };
 }

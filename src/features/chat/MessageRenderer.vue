@@ -17,27 +17,18 @@ import { useNotificationStore } from "../../core/stores/notification";
 import { useMessageEvents } from "../../core/composables/useMessageEvents";
 import { useEmoticonFixer } from "../../core/composables/useEmoticonFixer";
 import { MERMAID_CONTENT_SELECTOR, renderMarkdownNodes } from "../../core/utils/astRenderer";
-import {
-  applyFrame,
-  cleanupRegistry,
-  rebuildSnapshot,
-  shouldRevealAddedMarkdownNode,
-} from "../../core/utils/astExecutor";
-import {
-  applyThoughtTailOp,
-  cleanupThoughtTail,
-} from "../../core/dom-engine";
+import { shouldRevealAddedMarkdownNode } from "../../core/utils/astExecutor";
 import {
   clearStreamElementReveals,
   discardStreamTextFragments,
-  flushStreamTextFragments,
   prefersReducedStreamMotion,
   STREAM_ELEMENT_REVEAL_CLASS,
   supportsStreamRevealMotion,
 } from "../../core/utils/streamTextFade";
 import { useMessageStyleInjector } from "../../core/composables/useMessageStyleInjector";
 import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from "lucide-vue-next";
-import morphdom from "morphdom";
+import { useMessageTailRenderer } from './composables/useMessageTailRenderer';
+import { separateMessageStyles, stableMessageStyles, standaloneStyleSource } from './utils/messageStyles';
 import { instantiateMermaidSvg, renderMermaidTemplate } from './utils/mermaidRenderer';
 import { allowChatMutation, chatMutationBlockReason } from "./chatMutationPolicy";
 import type { OverlayActionItem } from "../../core/types/overlay";
@@ -76,122 +67,32 @@ const streamStore = useChatStreamStore();
 const themeStore = useThemeStore();
 const chatPreferences = useChatPreferencesStore();
 
-function isAstDebugEnabled(): boolean {
-  return Boolean(import.meta.env.DEV && (window as any).__VCP_AST_DEBUG__);
-}
-
-function astDebugLog(...args: unknown[]): void {
-  if (import.meta.env.DEV && isAstDebugEnabled()) {
-    console.warn(...args);
-  }
-}
-
-// === AST Diff Feature Flags & Refs ===
-const tailSandboxRef = ref<HTMLElement | null>(null);
-const enableAstDiff = ref(true); // Feature Flag, 默认开启
-const isAstRecoveryPending = ref(false);
-let astRecoveryPromise: Promise<boolean> | null = null;
-const isPlainTailFallback = computed(() => {
-  const block = props.message.tailBlock;
-  return !!block
-    && (
-      block.render_mode === "plain"
-      || (
-        block.render_mode === undefined
-        && (!block.nodes || block.nodes.length === 0)
-      )
-    );
-});
-const thoughtTailBlock = computed(() => (
-  props.message.tailBlock?.type === "thought" ? props.message.tailBlock : null
-));
-const useAstForCurrentTail = computed(() => {
-  if (!enableAstDiff.value || isAstRecoveryPending.value) return false;
-  if (isPlainTailFallback.value) return false;
-  return (
-    !!props.message.tailFrame ||
-    !!props.message.tailBlock?.nodes ||
-    !!props.message.tailSnapshot
-  );
-});
-let lastAppliedFrameSeq = 0;
-let localTailStreamId = -1;
-let localTailEpoch = -1;
-let localTailRevision = -1;
-let astFailureCount = 0;
-let lastSandbox: HTMLElement | null = null;
 let rendererDisposed = false;
-
-function getTailSnapshotNodes() {
-  const frameSnapshot = props.message.tailFrame?.reset
-    ? props.message.tailFrame.snapshot
-    : undefined;
-  return frameSnapshot || props.message.tailBlock?.nodes || [];
-}
-
-function rebuildTailSnapshot(sandbox: HTMLElement): void {
-  rebuildSnapshot(getTailSnapshotNodes(), props.message.id, sandbox);
-  localTailStreamId = props.message.tailFrame?.streamId ?? localTailStreamId;
-  localTailEpoch = props.message.tailFrame?.epoch ?? localTailEpoch;
-  localTailRevision = props.message.tailFrame?.revision ?? localTailRevision;
-}
-
-function requestCurrentTailSnapshot(reason: string): Promise<boolean> {
-  if (astRecoveryPromise) return astRecoveryPromise;
-  const key = sessionStore.currentConversationKey;
-  if (!key) return Promise.resolve(false);
-
-  isAstRecoveryPending.value = true;
-  const recovery = streamStore.requestAuroraSnapshot(
-    key.ownerId,
-    key.ownerType,
-    key.topicId,
-    props.message.id,
-    reason,
-  );
-  const completion = recovery.finally(() => {
-    if (rendererDisposed || astRecoveryPromise !== completion) return;
-    isAstRecoveryPending.value = false;
-    astRecoveryPromise = null;
-  });
-  astRecoveryPromise = completion;
-  return astRecoveryPromise;
-}
-
-function recoverTailSnapshotOrDowngrade(reason: string): void {
-  if (rendererDisposed || !enableAstDiff.value) return;
-  astFailureCount += 1;
-  if (import.meta.env.DEV && isAstDebugEnabled()) {
-    astDebugLog(`[AST Diff Recovery] ${props.message.id}: ${reason}. failureCount=${astFailureCount}`);
-  }
-  void requestCurrentTailSnapshot(reason).then((recovered) => {
-    if (rendererDisposed) return;
-    if (recovered) {
-      astFailureCount = 0;
-    } else if (astFailureCount >= 2) {
-      enableAstDiff.value = false;
-      cleanupRegistry(props.message.id);
-    }
-  });
-}
-
-function handleAstFrameFailure(_sandbox: HTMLElement | null, reason: string): void {
-  recoverTailSnapshotOrDowngrade(reason);
-}
-
-function markTailFrameApplied(frame: TailFrame): void {
-  lastAppliedFrameSeq = frame.frameSeq;
-  localTailStreamId = frame.streamId;
-  localTailEpoch = frame.epoch;
-  localTailRevision = frame.revision;
-  astFailureCount = 0;
-}
+const {
+  tailSandboxRef,
+  tailRootRef,
+  thoughtTailSandboxRef,
+  isPlainTailFallback,
+  thoughtTailBlock,
+  useAstForCurrentTail,
+  isAstRecoveryPending,
+  finishTailMotion,
+} = useMessageTailRenderer({
+  getMessage: () => props.message,
+  renderTailHtml: () => tailProjection.value.html,
+  isInlineHtmlBlock,
+  shouldAnimateFrame: shouldAnimateTailFrame,
+  requestSnapshot: (messageId, reason) => {
+    const key = sessionStore.currentConversationKey;
+    return key ? streamStore.requestAuroraSnapshot(
+      key.ownerId, key.ownerType, key.topicId, messageId, reason,
+    ) : null;
+  },
+});
 
 function finishStreamMotion(): void {
-  flushStreamTextFragments(props.message.id);
   pendingStableRevealBlocks = new WeakSet();
-  if (messageContentRef.value) clearStreamElementReveals(messageContentRef.value);
-  else if (lastSandbox) clearStreamElementReveals(lastSandbox);
+  finishTailMotion(messageContentRef.value);
 }
 
 function isSmoothStreamMotionEnabled(): boolean {
@@ -358,7 +259,8 @@ interface BubbleGroup {
   isTail?: boolean;
 }
 
-const messageBubbles = computed(() => {
+// Tail chunks only change the last host; they must not re-project the stable AST.
+const stableBubbleProjection = computed(() => {
   const list: BubbleGroup[] = [];
   let currentBlocks: ContentBlock[] = [];
   let bubbleIndex = 0;
@@ -441,22 +343,15 @@ const messageBubbles = computed(() => {
     return last ? isBrkBlock(last) : false;
   })();
 
+  return { bubbles: list, lastBlockIsBrk };
+});
+
+const messageBubbles = computed(() => {
+  const { bubbles, lastBlockIsBrk } = stableBubbleProjection.value;
   if (showMessageTail.value && props.message.tailBlock && lastBlockIsBrk) {
-    list.push({
-      id: `${props.message.id}-bubble-${bubbleIndex++}`,
-      blocks: []
-    });
+    return [...bubbles, { id: `${props.message.id}-bubble-${bubbles.length}`, blocks: [] }];
   }
-
-  // 兜底：如果整个消息 blocks 为空
-  if (list.length === 0) {
-    list.push({
-      id: `${props.message.id}-bubble-0`,
-      blocks: []
-    });
-  }
-
-  return list;
+  return bubbles.length ? bubbles : [{ id: `${props.message.id}-bubble-0`, blocks: [] }];
 });
 
 // === Event Delegation ===
@@ -476,22 +371,7 @@ function renderBlockHtml(block: ContentBlock): string {
   switch (block.type) {
     case "markdown":
       if (block.nodes && block.nodes.length > 0) {
-        if (
-          block.nodes.length === 1 &&
-          block.nodes[0].type === "raw_html" &&
-          block.nodes[0].content?.trimStart().toLowerCase().startsWith("<style")
-        ) {
-          const content = block.nodes[0].content;
-          let cssContent = "";
-          content.replace(/<style\b[^>]*>([\s\S]*?)(?:<\/style>|$)/gi, (_, css) => {
-            cssContent += css.trim() + "\n";
-            return "";
-          });
-          if (cssContent.trim().length > 0) {
-            injectScopedCss(cssContent, props.message.id);
-          }
-          return ""; // Keep unclosed style invisible in chat body
-        }
+        if (standaloneStyleSource(block) !== null) return "";
         return `<div class="vcp-markdown-block">${renderMarkdownNodes(block.nodes, props.message.id, block.hash)}</div>`;
       }
       return `<div class="vcp-markdown-block"><p>${escapeHtml(block.content || "")}</p></div>`;
@@ -1041,260 +921,29 @@ function formatTime(ts: number) {
   return `${year}-${month}-${day} ${hours}:${minutes}`;
 }
 
-// === Style Block CSS Injection ===
-const { injectScopedCss, removeScopedCss } = useMessageStyleInjector();
-
-watch(
-  () => props.message.blocks,
-  (blocks) => {
-    if (!blocks) return;
-    for (const block of blocks) {
-      if (block.type === "style" && block.content) {
-        injectScopedCss(block.content, props.message.id);
-      }
-    }
-  },
-  { immediate: true }
-);
-
-// === Stream Tail Morphdom Smooth Rendering ===
-const tailRootRef = ref<HTMLElement | null>(null);
-const fallbackTailSignature = computed(() => {
+// Stable CSS only depends on stable content; tail updates never rescan its AST.
+const stableCss = computed(() => stableBubbleProjection.value.bubbles
+  .map(bubble => stableMessageStyles(bubble.blocks)).filter(Boolean).join('\n'));
+const emptyTailProjection = { html: '', css: '' };
+const tailProjection = computed(() => {
   const block = props.message.tailBlock;
-  if (!block) return "";
-
-  const contentSignal = block.hash !== undefined && block.hash !== null
-    ? String(block.hash)
-    : block.content || "";
-
-  return [
-    block.type,
-    contentSignal,
-    block.nodes?.length ?? 0,
-  ].join("|");
+  if (!showMessageTail.value || !block || isAstRecoveryPending.value || useAstForCurrentTail.value || isPlainTailFallback.value || !isInlineHtmlBlock(block.type)) {
+    return emptyTailProjection;
+  }
+  const styleSource = standaloneStyleSource(block);
+  if (styleSource !== null) return { html: '', css: separateMessageStyles(styleSource).css };
+  return separateMessageStyles(renderBlockHtml(block));
 });
-
+const { injectScopedCss } = useMessageStyleInjector();
 watch(
-  [fallbackTailSignature, useAstForCurrentTail, tailRootRef],
-  () => {
-    const newTailBlock = props.message.tailBlock;
-    if (useAstForCurrentTail.value) return; // 🆕 启用 AST Diff 且有节点时跳过 Morphdom
-    if (isPlainTailFallback.value) return; // 超限 tail 直接由 Vue 文本节点渲染，不做 HTML parse/morphdom
-    if (!newTailBlock || !isInlineHtmlBlock(newTailBlock.type)) return;
-    nextTick(() => {
-      if (!tailRootRef.value) return;
-      const html = renderBlockHtml(newTailBlock);
-
-      // 实时提取未闭合/已闭合的 <style> 并物理抹除以防 morphdom 崩溃
-      let cssContent = "";
-      const processedHtml = html.replace(
-        /<style\b[^>]*>([\s\S]*?)(?:<\/style>|$)/gi,
-        (_, css) => {
-          cssContent += css.trim() + "\n";
-          return ""; // 从正文 HTML 中抹除 style 标签
-        }
-      );
-
-      if (cssContent.trim().length > 0) {
-        injectScopedCss(cssContent, props.message.id);
-      }
-
-      try {
-        morphdom(tailRootRef.value, `<div>${processedHtml}</div>`, {
-          childrenOnly: true,
-          getNodeKey: (node) => {
-            if (!node || node.nodeType !== 1) return undefined;
-            const el = node as Element;
-            return el.id || el.getAttribute('data-vcp-key') || undefined;
-          },
-          onBeforeElUpdated: (fromEl, toEl) => {
-            if (fromEl.isEqualNode(toEl)) return false;
-
-            // 1. 保留媒体播放状态
-            if (fromEl.tagName === 'VIDEO' || fromEl.tagName === 'AUDIO') {
-              const mediaEl = fromEl as HTMLMediaElement;
-              if (!mediaEl.paused) return false;
-            }
-
-            // 2. 保留输入焦点
-            if (fromEl === document.activeElement) {
-              requestAnimationFrame(() => {
-                if (toEl && typeof toEl.focus === 'function') toEl.focus();
-              });
-            }
-
-            // 3. 保留已加载图片的可见性和状态，防止重新加载闪烁
-            if (fromEl.tagName === 'IMG') {
-              const fromImg = fromEl as HTMLImageElement;
-              const toImg = toEl as HTMLImageElement;
-              if (fromImg.onerror && !toImg.onerror) toImg.onerror = fromImg.onerror;
-              if (fromImg.onload && !toImg.onload) toImg.onload = fromImg.onload;
-              if (fromImg.style.visibility) toImg.style.visibility = fromImg.style.visibility;
-              if (fromImg.complete && fromImg.naturalWidth > 0) return false;
-            }
-
-            return true;
-          }
-        });
-      } catch (e) {
-        console.debug('[TailMorphdom] Skipped frame:', e);
-      }
-    });
-  },
-  { immediate: true, flush: 'post' }
-);
-
-
-// === AST Diff Executor ===
-
-watch(
-  [
-    () => props.message.tailFrame,
-    () => props.message.tailSnapshot,
-    tailSandboxRef,
-  ],
-  ([frame, _snapshot, sandbox]) => {
-    const debugEnabled = import.meta.env.DEV && isAstDebugEnabled();
-    if (debugEnabled) {
-      astDebugLog(`[AST Diff Watch] Msg ${props.message.id} stream=${frame?.streamId ?? 'none'}, frame=${frame ? frame.frameSeq : 'none'}, mutations=${frame?.mutations?.length || 0}, sandbox=${sandbox ? 'Ready' : 'Null'}, epoch=${frame?.epoch}, revision=${frame?.revision}`);
-    }
-
-    if (!useAstForCurrentTail.value || !sandbox) {
-      if (lastSandbox) {
-        cleanupRegistry(props.message.id);
-        lastSandbox.innerHTML = '';
-        lastSandbox = null;
-      }
-      return;
-    }
-
-    if (lastSandbox !== sandbox) {
-      cleanupRegistry(props.message.id);
-      sandbox.innerHTML = '';
-      lastAppliedFrameSeq = 0;
-      localTailStreamId = -1;
-      localTailEpoch = -1;
-      localTailRevision = -1;
-      lastSandbox = sandbox;
-      if (frame?.reset !== true && props.message.tailBlock?.nodes) {
-        rebuildTailSnapshot(sandbox); // 内部已将 localTailEpoch/Revision 同步到当前 frame
-        astFailureCount = 0;
-        // 认领当前帧，避免下方 reset 分支对同一帧重复重建（新 sandbox 时 localTailEpoch 刚被重置，
-        // epochChanged 必为真，会触发第二次全量重建）。重建已用当前完整 tail AST，无需再来一次。
-        if (frame) {
-          lastAppliedFrameSeq = frame.frameSeq;
-        }
-      } else if (
-        frame
-        && frame.frameSeq > 1
-        && !(frame.reset === true && frame.snapshot !== undefined)
-      ) {
-        recoverTailSnapshotOrDowngrade("sandbox_remount");
-        return;
-      }
-    }
-
-    if (!frame) {
-      return;
-    }
-
-    const incomingStreamId = frame.streamId ?? 0;
-    const incomingEpoch = frame.epoch ?? 0;
-    const incomingRevision = frame.revision ?? -1;
-    const streamChanged = incomingStreamId !== localTailStreamId;
-    const epochChanged = incomingEpoch !== localTailEpoch;
-    const explicitReset = frame.reset === true || streamChanged || epochChanged;
-    let startsFromEmpty = false;
-
-    // frameSeq 只在同一 stream/epoch 内有可比性；暖接续的新流必须先接管身份，
-    // 不能被上一条流遗留的高序号提前拦截。
-    if (!explicitReset && frame.frameSeq <= lastAppliedFrameSeq) {
-      return;
-    }
-
-    if (explicitReset) {
-      const snapshot = frame.snapshot ?? props.message.tailBlock?.nodes;
-      const canStartFromEmpty = frame.reset !== true
-        && frame.frameSeq === 1
-        && lastAppliedFrameSeq === 0;
-      if (snapshot === undefined && !canStartFromEmpty) {
-        recoverTailSnapshotOrDowngrade("reset_without_snapshot");
-        return;
-      }
-      sandbox.innerHTML = '';
-      cleanupRegistry(props.message.id);
-      localTailStreamId = incomingStreamId;
-      localTailEpoch = incomingEpoch;
-      localTailRevision = incomingRevision;
-      lastAppliedFrameSeq = 0;
-      if (snapshot !== undefined) {
-        rebuildSnapshot(snapshot, props.message.id, sandbox);
-      }
-      startsFromEmpty = snapshot === undefined && canStartFromEmpty;
-    }
-
-    const mutations = frame.mutations || [];
-    if (mutations.length === 0) {
-      markTailFrameApplied(frame);
-      return;
-    }
-
-    if (debugEnabled) {
-      astDebugLog(`[AST Diff Apply] Executing frame ${frame.frameSeq} (${mutations.length} mutations) for ${props.message.id}`);
-    }
-    const result = applyFrame(mutations, props.message.id, sandbox, {
-      smoothStreaming: shouldAnimateTailFrame(frame)
-        && (!explicitReset || startsFromEmpty),
-    });
-    if (result.ok) {
-      markTailFrameApplied(frame);
-    } else {
-      handleAstFrameFailure(sandbox, result.failed?.reason || "applyFrame failed");
-    }
-  },
-  { flush: "post", immediate: true }
-);
-
-// === Thought Tail DOM Surgical Executor ===
-const thoughtTailSandboxRef = ref<HTMLElement | null>(null);
-let lastThoughtSandbox: HTMLElement | null = null;
-
-watch(
-  [
-    () => props.message.tailOp,
-    () => props.message.tailBlock?.content,
-    thoughtTailSandboxRef,
-  ],
-  ([op, fallbackContent, sandbox]) => {
-    if (!sandbox || !thoughtTailBlock.value) {
-      if (lastThoughtSandbox) {
-        cleanupThoughtTail(props.message.id);
-        lastThoughtSandbox = null;
-      }
-      return;
-    }
-
-    if (lastThoughtSandbox !== sandbox) {
-      cleanupThoughtTail(props.message.id);
-      lastThoughtSandbox = sandbox;
-    }
-
-    applyThoughtTailOp(
-      props.message.id,
-      sandbox,
-      op,
-      fallbackContent,
-    );
-  },
-  { flush: "post", immediate: true }
+  [() => props.message.id, stableCss, () => tailProjection.value.css],
+  ([messageId, stable, tail]) => injectScopedCss([stable, tail].filter(Boolean).join('\n'), messageId),
+  { immediate: true, flush: 'post' },
 );
 
 onUnmounted(() => {
   rendererDisposed = true;
   heavyController?.abort();
-  removeScopedCss(props.message.id);
-  cleanupRegistry(props.message.id);
-  cleanupThoughtTail(props.message.id);
 });
 </script>
 
@@ -1332,9 +981,10 @@ onUnmounted(() => {
 
           <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
             <template v-if="bubble.blocks && bubble.blocks.length > 0">
-              <template v-for="(block, index) in bubble.blocks" :key="getBlockKey(block, index, bubble.id)">
-                <!-- v-memo 包含块身份与实际展示输入，设置变化不会被旧子树缓存吞掉。 -->
+                <!-- memo 与循环位于同一节点，按列表项缓存；保留所有实际展示输入。 -->
                 <div
+                  v-for="(block, index) in bubble.blocks"
+                  :key="getBlockKey(block, index, bubble.id)"
                   v-memo="[getBlockKey(block, index, bubble.id), block, isStreaming, isMessageInActiveStream, expandToolsByDefault, shouldRevealStableBlock(block)]"
                   data-message-render-region="stable"
                   :class="{ [STREAM_ELEMENT_REVEAL_CLASS]: shouldRevealStableBlock(block) }"
@@ -1349,6 +999,7 @@ onUnmounted(() => {
 
                   <div
                     v-else-if="isInlineHtmlBlock(block.type)"
+                    data-message-content
                     v-html="renderBlockHtml(block)"
                   />
 
@@ -1380,7 +1031,6 @@ onUnmounted(() => {
                     :block="block"
                   />
                 </div>
-              </template>
             </template>
             <template v-else-if="bubbleIndex === 0 && message.content && (!showMessageTail || !message.tailBlock)">
               <div class="vcp-markdown-block select-text">
@@ -1399,12 +1049,14 @@ onUnmounted(() => {
               <div
                 v-if="isPlainTailFallback || isAstRecoveryPending || !useAstForCurrentTail"
                 :ref="(el) => { thoughtTailSandboxRef = el as HTMLElement | null }"
+                data-message-content
                 :data-tail-render-mode="isAstRecoveryPending ? 'recovery-text' : 'plaintext'"
                 class="thought-body vcp-markdown-block whitespace-pre-wrap break-words"
               />
               <div
                 v-else
                 :ref="(el) => { tailSandboxRef = el as HTMLElement | null }"
+                data-message-content
                 class="thought-body vcp-markdown-block vcp-ast-sandbox"
               />
             </ThoughtBlock>
@@ -1435,12 +1087,14 @@ onUnmounted(() => {
               <div v-else-if="useAstForCurrentTail && isInlineHtmlBlock(message.tailBlock.type)">
                 <div
                   :ref="(el) => { tailSandboxRef = el as HTMLElement | null }"
+                  data-message-content
                   class="vcp-markdown-block vcp-ast-sandbox"
                 />
               </div>
               <div
                 v-else-if="!useAstForCurrentTail && isInlineHtmlBlock(message.tailBlock.type)"
                 :ref="(el) => { tailRootRef = el as HTMLElement | null }"
+                data-message-content
                 class="vcp-markdown-block"
               />
             </div>

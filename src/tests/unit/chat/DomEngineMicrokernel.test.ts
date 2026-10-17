@@ -11,10 +11,7 @@ import {
   applyThoughtTailOp,
   cleanupThoughtTail,
   getThoughtTailState,
-  createThoughtTailDriver,
   applyCodePatch,
-  createCodePatchDriver,
-  useDomRenderer,
 } from "../../../core/dom-engine";
 
 describe("DOM Engine Microkernel", () => {
@@ -95,7 +92,7 @@ describe("DOM Engine Microkernel", () => {
       expect(container.childNodes.length).toBe(1);
     });
 
-    it("should support replace operation and update state", () => {
+    it("should replace text while preserving the existing text node", () => {
       const container = document.createElement("div");
       document.body.appendChild(container);
 
@@ -103,6 +100,7 @@ describe("DOM Engine Microkernel", () => {
         op: "append",
         content: "Initial thought",
       });
+      const textNode = container.firstChild;
 
       applyThoughtTailOp("msg-test-1", container, {
         op: "replace",
@@ -110,8 +108,7 @@ describe("DOM Engine Microkernel", () => {
       });
 
       expect(container.textContent).toBe("Replaced thought");
-      const state = getThoughtTailState("msg-test-1");
-      expect(state?.lastAppliedContent).toBe("Replaced thought");
+      expect(container.firstChild).toBe(textNode);
     });
 
     it("should clean up thought tail state and text node", () => {
@@ -124,22 +121,7 @@ describe("DOM Engine Microkernel", () => {
       expect(getThoughtTailState("msg-test-1")).toBeDefined();
       cleanupThoughtTail("msg-test-1");
       expect(getThoughtTailState("msg-test-1")).toBeUndefined();
-    });
-
-    it("should work through createThoughtTailDriver", () => {
-      const container = document.createElement("div");
-      const driver = createThoughtTailDriver("msg-test-1");
-      driver.bindContainer(container);
-
-      driver.applyOp({ op: "append", content: "Step 1: Analyzed." });
-      driver.applyOp({ op: "append", content: " Step 2: Formulated." });
-      expect(container.textContent).toBe("Step 1: Analyzed. Step 2: Formulated.");
-
-      driver.applyOp({ op: "replace", content: "Final Summary." });
-      expect(container.textContent).toBe("Final Summary.");
-
-      driver.cleanup();
-      expect(getThoughtTailState("msg-test-1")).toBeUndefined();
+      expect(container.childNodes.length).toBe(0);
     });
   });
 
@@ -222,38 +204,5 @@ describe("DOM Engine Microkernel", () => {
       expect(res2.reason).toContain("Incremental code anchors");
     });
 
-    it("should work through createCodePatchDriver", () => {
-      const { wrapper, stableSpan, activeSpan } = createMockCodeBlock();
-      const driver = createCodePatchDriver();
-
-      const res = driver.applyPatch(
-        wrapper,
-        `<span>completed</span>`,
-        `<span>typing</span>`,
-      );
-      expect(res.ok).toBe(true);
-      expect(stableSpan.innerHTML).toBe(`<span>completed</span>`);
-      expect(activeSpan.innerHTML).toBe(`<span>typing</span>`);
-    });
-  });
-
-  describe("useDomRenderer Facade", () => {
-    it("should orchestrate thought and registry cleanup on dispose", () => {
-      const messageId = "msg-facade-1";
-      const renderer = useDomRenderer(messageId);
-
-      const container = document.createElement("div");
-      renderer.thought.bindContainer(container);
-      renderer.thought.applyOp({ op: "append", content: "Thinking in facade..." });
-      expect(getThoughtTailState(messageId)?.lastAppliedContent).toBe("Thinking in facade...");
-
-      setNode(messageId, "node-1", container);
-      expect(hasRegistry(messageId)).toBe(true);
-
-      renderer.dispose();
-
-      expect(getThoughtTailState(messageId)).toBeUndefined();
-      expect(hasRegistry(messageId)).toBe(false);
-    });
   });
 });

@@ -1,9 +1,8 @@
-import type { ThoughtTailDriver, ThoughtTailOpPayload } from "../types";
+import type { ThoughtTailOpPayload } from "../types";
 
 export interface ThoughtTailState {
   container: HTMLElement;
   textNode: Text;
-  lastAppliedContent: string;
 }
 
 const thoughtTailShards = new Map<string, ThoughtTailState>();
@@ -37,7 +36,6 @@ export function applyThoughtTailOp(
     thoughtTailShards.set(messageId, {
       container,
       textNode,
-      lastAppliedContent: initialContent,
     });
     return;
   }
@@ -49,14 +47,12 @@ export function applyThoughtTailOp(
     case "append": {
       // 🚀 核心路径：原生 CharacterData.appendData，纳秒级增量文本追加
       existing.textNode.appendData(op.content);
-      existing.lastAppliedContent += op.content;
       break;
     }
 
     case "replace": {
       if (existing.textNode.data !== op.content) {
         existing.textNode.data = op.content;
-        existing.lastAppliedContent = op.content;
       }
       break;
     }
@@ -85,28 +81,4 @@ export function cleanupThoughtTail(messageId: string): void {
  */
 export function getThoughtTailState(messageId: string): ThoughtTailState | undefined {
   return thoughtTailShards.get(messageId);
-}
-
-/**
- * 实例化指定消息的思维链驱动对象
- */
-export function createThoughtTailDriver(messageId: string): ThoughtTailDriver {
-  let activeContainer: HTMLElement | null = null;
-
-  return {
-    bindContainer(container: HTMLElement | null) {
-      activeContainer = container;
-      if (!container) {
-        cleanupThoughtTail(messageId);
-      }
-    },
-    applyOp(op?: ThoughtTailOpPayload | null, fallbackContent?: string) {
-      if (!activeContainer) return;
-      applyThoughtTailOp(messageId, activeContainer, op, fallbackContent);
-    },
-    cleanup() {
-      cleanupThoughtTail(messageId);
-      activeContainer = null;
-    },
-  };
 }

@@ -93,6 +93,8 @@ src/
 
 `MessageRenderer.vue` 消费当前消息、AST snapshot 与 TailFrame；`core/utils/astExecutor.ts`、`core/dom-engine/` 和各 Rich Block 承接局部更新及交互。修改任一环节时沿实际数据形态追踪生成者、缓存身份、DOM owner、恢复路径和卸载清理，不能用全量重渲染掩盖增量链错误。
 
+`features/chat/composables/useMessageTailRenderer.ts` 随消息实例持有尾部 refs、DOM 已应用帧、恢复与清理；气泡移动不重置这份生命周期。稳定气泡投影与尾部更新分开计算。`features/chat/utils/messageStyles.ts` 纯计算原有作用域样式输入，消息级样式实例一次提交有序合集。`data-message-content` 仅标记生成内容的交互范围，不能用包含组件控件的 stable/tail 外壳替代。流式期间增量展示，终态完整结果一次接管；两阶段分块与 hash 不要求统一。
+
 Markdown、代码、KaTeX、Mermaid、SVG/MathML、受控 raw HTML、Tool、Thought、Diary、附件和流式收敛共同构成现有消息能力。兼容或安全修改必须保留结构、样式、媒体与交互；隔离能够触达宿主或外部状态的主动执行面，不采用整块转义、纯文本降级或禁用全部脚本来替代边界设计。
 
 消息内部按钮、链接、图片与引用由现有事件桥和对应 Store 处理。新增交互必须复用真实消费入口，区分 DOM 局部反馈与业务结果，不在渲染器内另建业务状态所有者。

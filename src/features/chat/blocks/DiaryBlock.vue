@@ -79,6 +79,7 @@ const replaceHtml = computed(() => {
     <div
       v-if="hasNodes(block.nodes)"
       class="vcp-diary-content vcp-markdown-block"
+      data-message-content
       v-html="diaryHtml"
     />
     <div v-else class="vcp-diary-content vcp-markdown-block">
@@ -108,6 +109,7 @@ const replaceHtml = computed(() => {
         <div
           v-if="block.target?.trim() && hasNodes(block.target_nodes)"
           class="vcp-diary-update-content vcp-markdown-block"
+          data-message-content
           v-html="targetHtml"
         />
         <div v-else-if="block.target?.trim()" class="vcp-diary-update-content vcp-markdown-block">
@@ -123,6 +125,7 @@ const replaceHtml = computed(() => {
         <div
           v-if="block.replace?.trim() && hasNodes(block.replace_nodes)"
           class="vcp-diary-update-content vcp-markdown-block"
+          data-message-content
           v-html="replaceHtml"
         />
         <div v-else-if="block.replace?.trim()" class="vcp-diary-update-content vcp-markdown-block">
