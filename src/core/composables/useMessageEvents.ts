@@ -5,14 +5,33 @@ import { openRenderedImageViewer } from "./useRenderedImageViewer";
 import { scrollToMessageById } from "../utils/scrollToMessage";
 import { findRenderedImagePayload } from '../utils/renderedImage';
 import { useNotificationStore } from '../stores/notification';
+import { MERMAID_CONTENT_SELECTOR } from '../utils/astRenderer';
 
-export function useMessageEvents(containerRef: Ref<HTMLElement | null>) {
+export function useMessageEvents(
+  containerRef: Ref<HTMLElement | null>,
+  openMermaid: (svgHtml: string, sourceCode: string) => void,
+) {
   const historyStore = useChatHistoryStore();
   const notification = useNotificationStore();
   let imageController: AbortController | null = null;
+  let eventContainer: HTMLElement | null = null;
 
   const handleClick = async (e: MouseEvent) => {
-    const target = e.target as HTMLElement;
+    const target = e.target;
+    const container = containerRef.value;
+    if (!(target instanceof Element) || !container?.contains(target)) return;
+
+    // 图表身份先于按钮、链接和图片；交互不依赖异步渲染是否安装了 wrapper。
+    const diagram = target.closest<HTMLElement>(MERMAID_CONTENT_SELECTOR);
+    if (diagram && container.contains(diagram)) {
+      e.preventDefault();
+      e.stopPropagation();
+      const svg = diagram.querySelector('svg');
+      if (svg && diagram.closest('[data-message-render-region]')?.getAttribute('data-message-render-region') === 'stable') {
+        openMermaid(svg.outerHTML, diagram.dataset.mermaidSource ?? '');
+      }
+      return;
+    }
 
     // 1. VCP 按钮点击 (e.g., [[点击按钮:xxx]])
     const vcpButton = target.closest('[data-vcp-button]');
@@ -80,7 +99,7 @@ export function useMessageEvents(containerRef: Ref<HTMLElement | null>) {
 
     // 4. 气泡内普通图片点击劫持 (排除带有 vcp-emoticon 的表情包以及消息附件缩略图)
     const imageElement = target.closest('img, image, svg, canvas');
-    if (imageElement && !target.closest('.vcp-mermaid-wrapper')) {
+    if (imageElement) {
       const isEmoticon = imageElement.classList.contains("vcp-emoticon");
       const isAttachment = target.closest(".vcp-attachment-preview") !== null;
 
@@ -106,16 +125,22 @@ export function useMessageEvents(containerRef: Ref<HTMLElement | null>) {
     }
   };
 
-  onMounted(() => {
-    if (containerRef.value) {
-      containerRef.value.addEventListener("click", handleClick);
+  const handleDoubleClick = (e: MouseEvent) => {
+    if (e.target instanceof Element && e.target.closest(MERMAID_CONTENT_SELECTOR)) {
+      e.stopPropagation();
     }
+  };
+
+  onMounted(() => {
+    eventContainer = containerRef.value;
+    eventContainer?.addEventListener("click", handleClick);
+    eventContainer?.addEventListener("dblclick", handleDoubleClick);
   });
 
   onUnmounted(() => {
     imageController?.abort();
-    if (containerRef.value) {
-      containerRef.value.removeEventListener("click", handleClick);
-    }
+    eventContainer?.removeEventListener("click", handleClick);
+    eventContainer?.removeEventListener("dblclick", handleDoubleClick);
+    eventContainer = null;
   });
 }

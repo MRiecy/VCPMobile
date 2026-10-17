@@ -1,6 +1,9 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import type { MarkdownNode, InlineNode } from "../types/chat";
 
+// AST 占位、历史 raw HTML 与 marked 代码块共享同一图表身份。
+export const MERMAID_CONTENT_SELECTOR = '[data-content-kind="mermaid"], .mermaid-placeholder, .mermaid, code.language-mermaid';
+
 const ACTIVE_URL_ATTRIBUTES = new Set([
   "action",
   "archive",
@@ -236,7 +239,8 @@ function renderNode(node: MarkdownNode, messageId: string): string {
     
     case 'code_block': {
       if (node.lang === 'mermaid') {
-        return `<div class="mermaid-placeholder">${escapeHtml(node.code)}</div>`;
+        const source = escapeHtml(node.code);
+        return `<div class="mermaid-placeholder" data-content-kind="mermaid" data-mermaid-source="${source}">${source}</div>`;
       }
       let html = node.highlighted_html;
       if (html) {

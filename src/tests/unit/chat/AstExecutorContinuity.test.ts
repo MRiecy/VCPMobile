@@ -6,6 +6,24 @@ import {
 } from "@/core/utils/astExecutor";
 
 describe("AST executor continuity", () => {
+  it("keeps Mermaid source metadata current when replacing a tail node in place", () => {
+    const sandbox = document.createElement("div");
+    const node = { type: "code_block" as const, lang: "mermaid", code: "graph TD; A-->B", highlighted_html: null, theme: null };
+    try {
+      rebuildSnapshot([node], "mermaid-tail-source", sandbox);
+      const placeholder = sandbox.firstElementChild as HTMLElement;
+      expect(placeholder.dataset.contentKind).toBe("mermaid");
+      expect(placeholder.dataset.mermaidSource).toBe(node.code);
+      const source = 'graph TD; A["<&>"]-->C';
+      expect(applyFrame([{ op: "replace", id: "t0", node: { ...node, code: source } }], "mermaid-tail-source", sandbox).ok).toBe(true);
+      expect(sandbox.firstElementChild).toBe(placeholder);
+      expect(placeholder.dataset.mermaidSource).toBe(source);
+      expect(placeholder.textContent).toBe(source);
+    } finally {
+      cleanupRegistry("mermaid-tail-source");
+    }
+  });
+
   it("keeps heading child registry references live after changing the level", () => {
     const sandbox = document.createElement("div");
     document.body.appendChild(sandbox);

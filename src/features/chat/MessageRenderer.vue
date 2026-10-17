@@ -15,7 +15,7 @@ import { useThemeStore } from "../../core/stores/theme";
 import { useNotificationStore } from "../../core/stores/notification";
 import { useMessageEvents } from "../../core/composables/useMessageEvents";
 import { useEmoticonFixer } from "../../core/composables/useEmoticonFixer";
-import { renderMarkdownNodes } from "../../core/utils/astRenderer";
+import { MERMAID_CONTENT_SELECTOR, renderMarkdownNodes } from "../../core/utils/astRenderer";
 import {
   applyFrame,
   cleanupRegistry,
@@ -455,7 +455,7 @@ const messageBubbles = computed(() => {
 
 // === Event Delegation ===
 const messageContentRef = ref<HTMLElement | null>(null);
-useMessageEvents(messageContentRef);
+useMessageEvents(messageContentRef, openMermaidFullScreen);
 
 // === Block Rendering Helper ===
 function isInlineHtmlBlock(type: string): boolean {
@@ -558,19 +558,17 @@ function escapeHtml(text: string): string {
     .replace(/'/g, "&#039;");
 }
 
-const openMermaidFullScreen = (svgHtml: string, sourceCode: string) => {
+function openMermaidFullScreen(svgHtml: string, sourceCode: string) {
   activeMermaidSvg.value = svgHtml;
   activeMermaidSource.value = sourceCode;
   isMermaidFullScreen.value = true;
-};
+}
 
-function enhanceMermaid(el: HTMLElement, sourceCode: string) {
-  if (!el || el.dataset.vcpMermaidEnhanced === 'true') return;
-  
+// 只整理外观；图表的点击由消息根代理始终负责。
+function decorateMermaid(el: HTMLElement) {
   const svg = el.querySelector('svg');
   if (!svg) return;
-  
-  el.dataset.vcpMermaidEnhanced = 'true';
+  if (svg.parentElement?.classList.contains('vcp-mermaid-wrapper')) return;
   
   // 给 SVG 设置基础样式，使其自适应显示
   svg.removeAttribute('style');
@@ -590,15 +588,6 @@ function enhanceMermaid(el: HTMLElement, sourceCode: string) {
   fullscreenBtn.innerHTML = '<div class="i-ph:arrows-out-bold w-4 h-4"></div>';
   fullscreenBtn.title = '全屏查看图表';
   
-  wrapper.addEventListener('click', (e) => {
-    e.stopPropagation();
-    openMermaidFullScreen(svg.outerHTML, sourceCode);
-  });
-  
-  wrapper.addEventListener('dblclick', (e) => {
-    e.stopPropagation();
-  });
-  
   el.textContent = '';
   wrapper.appendChild(fullscreenBtn);
   wrapper.appendChild(svg);
@@ -606,20 +595,31 @@ function enhanceMermaid(el: HTMLElement, sourceCode: string) {
 }
 
 // === Heavy Content Rendering (KaTeX inline math + Mermaid) ===
-const renderHeavyContent = async () => {
+const renderHeavyContent = async (refreshMermaid: boolean) => {
   heavyController?.abort();
   const controller = new AbortController();
   heavyController = controller;
   const messageId = props.message.id;
-  await nextTick();
+  const dark = themeStore.isDarkResolved;
   const host = messageContentRef.value;
-  const isCurrent = () => !rendererDisposed && !controller.signal.aborted && props.message.id === messageId && messageContentRef.value === host;
+  const isCurrent = () => !rendererDisposed && !controller.signal.aborted && props.message.id === messageId && messageContentRef.value === host && themeStore.isDarkResolved === dark;
   if (!host || !isCurrent()) return;
 
+  // 稳定块包含正文、Thought、Diary、Tool；活动 AST/morphdom 尾部不在这些区域内。
+  const stableRegions = Array.from(host.querySelectorAll<HTMLElement>('[data-message-render-region="stable"]'));
+  const queryStable = (selector: string) => stableRegions.flatMap(region => Array.from(region.querySelectorAll<HTMLElement>(selector)));
+  if (refreshMermaid) {
+    for (const diagram of queryStable(MERMAID_CONTENT_SELECTOR)) {
+      const source = diagram.dataset.mermaidSource;
+      if (source === undefined) continue;
+      diagram.textContent = source;
+      diagram.classList.remove('mermaid');
+      diagram.classList.add('mermaid-placeholder');
+    }
+  }
+
   // 1. KaTeX math (inline + display mode, rendered inside markdown blocks via v-html)
-  const mathElements = Array.from(
-    host.querySelectorAll('.vcp-math-inline[data-latex], .vcp-math-block[data-latex]')
-  ).filter(el => !el.closest('.streaming-tail'));
+  const mathElements = queryStable('.vcp-math-inline[data-latex], .vcp-math-block[data-latex]');
 
   if (mathElements.length > 0) {
     try {
@@ -644,42 +644,33 @@ const renderHeavyContent = async () => {
   }
 
   // 2. Mermaid diagrams
-  const mermaidPlaceholders = Array.from(
-    host.querySelectorAll('.mermaid-placeholder, .mermaid, code.language-mermaid')
-  ).filter(el => !el.closest('.streaming-tail'));
+  const mermaidPlaceholders = queryStable(MERMAID_CONTENT_SELECTOR);
 
   if (mermaidPlaceholders.length > 0) {
     try {
-      for (const el of Array.from(mermaidPlaceholders)) {
+      for (const placeholder of mermaidPlaceholders) {
         if (!isCurrent()) return;
-        const placeholder = el as HTMLElement;
-        const wrapper = placeholder.closest('.vcp-mermaid-wrapper');
-        if (wrapper && wrapper.querySelector('svg')) continue; // already rendered & enhanced
+        if (!host.contains(placeholder)) continue;
+        placeholder.dataset.contentKind = 'mermaid';
 
-        // 流式 AST 与异步 Mermaid 渲染可能先完成 SVG 注入、后触发本轮增强。
-        // 已有 SVG 只代表“可见”，不代表点击/全屏交互已经绑定。
+        // 历史 raw HTML 可直接提供 SVG；不能把 SVG 标签文字当作 Mermaid 源码。
         if (placeholder.querySelector('svg')) {
-          enhanceMermaid(
-            placeholder,
-            placeholder.dataset.mermaidSource || placeholder.textContent || '',
-          );
+          decorateMermaid(placeholder);
           continue;
         }
         
-        const sourceCode = placeholder.dataset.mermaidSource || placeholder.textContent || '';
-        // Skip if Vue has replaced this element out of the DOM
-        if (!host.contains(placeholder)) continue;
-        
+        const sourceCode = placeholder.dataset.mermaidSource ?? placeholder.textContent ?? '';
         placeholder.dataset.mermaidSource = sourceCode;
+        const canCommit = () => isCurrent() && host.contains(placeholder) && placeholder.dataset.mermaidSource === sourceCode;
         try {
-          const renderedSvg = await renderMermaidTemplate(sourceCode, themeStore.isDarkResolved, controller.signal);
-          if (!isCurrent() || !host.contains(placeholder) || placeholder.dataset.mermaidSource !== sourceCode) continue;
+          const renderedSvg = await renderMermaidTemplate(sourceCode, dark, controller.signal);
+          if (!canCommit()) continue;
           placeholder.innerHTML = instantiateMermaidSvg(renderedSvg);
           placeholder.classList.remove('mermaid-placeholder');
           placeholder.classList.add('mermaid');
-          enhanceMermaid(placeholder, sourceCode);
+          decorateMermaid(placeholder);
         } catch (e: any) {
-          if (!isCurrent() || !host.contains(placeholder)) continue;
+          if (!canCommit()) continue;
           const errorMsg = e?.str || e?.message || String(e);
           console.error('[MessageRenderer] Mermaid render failed:', errorMsg, e);
           placeholder.innerHTML = `<div class="text-red-500 text-[10px] p-4 rounded-xl border border-red-500/10 bg-red-500/5">图表渲染失败: ${escapeHtml(errorMsg)}</div>`;
@@ -690,9 +681,10 @@ const renderHeavyContent = async () => {
     }
   }
 
-  // 3. Emoticons
+  // 3. 保留尾部图片的 URL 修复与表情标识；等待 AST 的 post 更新完成。
+  await nextTick();
   if (isCurrent()) {
-    processEmoticonsInContainer(host);
+    void processEmoticonsInContainer(host);
   }
 };
 
@@ -748,35 +740,21 @@ watch(
   { flush: "pre" },
 );
 
+// DOM patch 后统一处理内容、主题和终态变化；同一轮更新不重复取消/启动渲染。
 watch(
-  () => props.message.blocks,
-  () => {
-    renderHeavyContent();
+  [messageContentRef, () => props.message.blocks, isMessageInActiveStream, () => themeStore.isDarkResolved],
+  ([_host, _blocks, _active, dark], previous) => {
+    void renderHeavyContent(dark !== previous[3]);
   },
-  { immediate: true }
+  { flush: 'post' },
 );
 
-watch(() => themeStore.isDarkResolved, () => {
-  const host = messageContentRef.value;
-  if (!host) return;
-  for (const diagram of host.querySelectorAll<HTMLElement>('[data-mermaid-source]')) {
-    const source = diagram.dataset.mermaidSource;
-    if (!source) continue;
-    diagram.textContent = source;
-    delete diagram.dataset.vcpMermaidEnhanced;
-    diagram.classList.remove('mermaid');
-    diagram.classList.add('mermaid-placeholder');
-  }
-  void renderHeavyContent();
-});
-
-// 消息真正离开活跃流后统一执行一次重渲染，确保 KaTeX/Mermaid/Emoticon 正确渲染
+// 消息离开活跃流后收束文字动画；重内容由上面的 post watcher 统一调度。
 watch(
   isMessageInActiveStream,
   (inStream, wasInStream) => {
     if (wasInStream && !inStream) {
       finishStreamMotion();
-      renderHeavyContent();
     }
   }
 );
@@ -1302,6 +1280,7 @@ onUnmounted(() => {
                 <!-- v-memo 使用含 bubble ID 的稳定 key，避免分条气泡之间复用错误子树 -->
                 <div
                   v-memo="[getBlockKey(block, index, bubble.id), isStreaming, shouldRevealStableBlock(block)]"
+                  data-message-render-region="stable"
                   :class="{ [STREAM_ELEMENT_REVEAL_CLASS]: shouldRevealStableBlock(block) }"
                   @animationend.self="finishStableBlockReveal($event, block)"
                   @animationcancel.self="finishStableBlockReveal($event, block)"
@@ -1356,6 +1335,7 @@ onUnmounted(() => {
             <!-- 思维链尾部复用同一 AST 沙箱；终态解析失败时保留已有展示。 -->
             <ThoughtBlock
               v-if="showMessageTail && (bubbleIndex === messageBubbles.length - 1) && thoughtTailBlock"
+              data-message-render-region="tail"
               :block="thoughtTailBlock"
               :message-id="message.id"
               :default-expanded="true"
@@ -1374,7 +1354,7 @@ onUnmounted(() => {
             </ThoughtBlock>
 
             <!-- 其他尾部展示只归属最后一个气泡，完整 blocks 接管后移除。 -->
-            <div v-else-if="showMessageTail && (bubbleIndex === messageBubbles.length - 1) && message.tailBlock" class="streaming-tail opacity-90">
+            <div v-else-if="showMessageTail && (bubbleIndex === messageBubbles.length - 1) && message.tailBlock" data-message-render-region="tail" class="streaming-tail opacity-90">
               <div
                 v-if="isPlainTailFallback || isAstRecoveryPending"
                 :data-tail-render-mode="isAstRecoveryPending ? 'recovery-text' : 'plaintext'"

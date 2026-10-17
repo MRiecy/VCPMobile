@@ -277,6 +277,8 @@ function createDomFromNode(
       if (node.lang === "mermaid") {
         el = document.createElement("div");
         el.className = "mermaid-placeholder";
+        el.dataset.contentKind = "mermaid";
+        el.dataset.mermaidSource = node.code || "";
         el.textContent = node.code || "";
       } else {
         if (node.highlighted_html) {
@@ -912,6 +914,7 @@ function executeMutation(
             oldNode.classList.contains("mermaid-placeholder")
           ) {
             cleanupSubtreeRefs(mutation.id, registry, false); // 保留外壳的 ref
+            oldNode.dataset.mermaidSource = mutation.node.code || "";
             oldNode.textContent = mutation.node.code || "";
             if (debugEnabled) astDebugLog(`[AST replace mermaid optimized] id=${mutation.id}`);
             break;
