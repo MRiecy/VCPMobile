@@ -138,7 +138,7 @@ describe('ThemePicker draft, preview and presentation controls', () => {
 
     expect(store.smoothStreamingEnabled).toBe(true);
     expect(localStorage.getItem('vcp-smooth-streaming-enabled')).toBe('true');
-    expect(wrapper.text()).toContain('不改变回复内容');
+    expect(wrapper.text()).toContain('减少跳字感');
     expect(wrapper.get('[data-testid="smooth-streaming-switch"]').attributes('role')).toBe('switch');
     expect(wrapper.get('[data-testid="smooth-streaming-switch"]').attributes('aria-checked')).toBe('true');
   });

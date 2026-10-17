@@ -500,7 +500,7 @@ export const useThemeStore = defineStore('theme', () => {
         ok: false,
         changed: false,
         enabled: smoothStreamingEnabled.value,
-        error: `平滑流式设置保存失败：${errorMessage(error)}`,
+        error: `流式平滑动效设置保存失败：${errorMessage(error)}`,
       };
     }
   };

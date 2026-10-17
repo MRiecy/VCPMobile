@@ -167,11 +167,11 @@ const updateSmoothStreaming = (enabled: boolean) => {
   const result = themeStore.setSmoothStreamingEnabled(enabled);
   if (result.ok) return;
 
-  smoothStreamingError.value = result.error || '平滑流式设置保存失败';
+  smoothStreamingError.value = result.error || '流式平滑动效设置保存失败';
   notificationStore.addNotification({
     id: 'smooth-streaming-save-failed',
     type: 'error',
-    title: '平滑流式设置失败',
+    title: '流式平滑动效设置失败',
     message: smoothStreamingError.value,
     toastOnly: true,
   });
@@ -268,7 +268,7 @@ onBeforeUnmount(() => {
       <section v-if="showRenderingSettings" class="theme-settings-section presentation-settings" aria-labelledby="presentation-title"
         data-testid="presentation-settings">
         <div class="streaming-preference">
-          <SettingsRow title="平滑流式输出" description="让流式新增文字柔和显现，不改变回复内容；系统减少动态效果时自动停用。">
+          <SettingsRow title="流式平滑动效" description="让实时生成的文字柔和淡入，减少跳字感；系统减弱动态效果时自动停用。">
             <template #action>
               <button
                 type="button"
@@ -276,7 +276,7 @@ onBeforeUnmount(() => {
                 class="smooth-streaming-toggle"
                 role="switch"
                 :aria-checked="themeStore.smoothStreamingEnabled"
-                aria-label="平滑流式输出"
+                aria-label="流式平滑动效"
                 @click="updateSmoothStreaming(!themeStore.smoothStreamingEnabled)"
               >
                 <SettingsSwitch
