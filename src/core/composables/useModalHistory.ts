@@ -69,7 +69,7 @@ function closeModal(modal: ModalInstance) {
 
 function handleModalKeydown(event: KeyboardEvent) {
   const modal = modalStack.value[modalStack.value.length - 1];
-  if (!modal || event.isComposing || event.defaultPrevented) return;
+  if (!modal || event.isComposing || event.keyCode === 229 || event.defaultPrevented) return;
   if (event.key === 'Escape') {
     event.preventDefault();
     event.stopImmediatePropagation();

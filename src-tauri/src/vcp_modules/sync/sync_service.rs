@@ -45,7 +45,7 @@ const MAX_SYNC_RETRIES: u32 = 3;
 // Bound how long a caller waits, not the lifetime of already accepted DB writes.
 // A session which exceeds this budget remains owned until its real drain exits.
 const SYNC_STOP_WAIT: Duration = Duration::from_secs(5);
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 const SYNC_GUARDIAN_LABEL: &str = "[数据同步] VCP Mobile";
 type RoutedSyncCommand = (u64, mpsc::UnboundedSender<SyncCommand>);
 type SyncWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
@@ -1499,9 +1499,10 @@ async fn run_sync_session(
     }
     let db_write_metric_bridge =
         DbWriteMetricLogBridge::start(write_metric_receiver, sync_logger.clone());
-    let write_queue = Arc::new(DbWriteQueue::new(&db, session_id));
+    let attachments_root = crate::vcp_modules::file_manager::get_attachments_root_dir(&app_handle)?;
+    let write_queue = Arc::new(DbWriteQueue::new(&db, session_id, attachments_root));
 
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     let sync_guardian_lease = match tauri_plugin_vcp_mobile::stream::ForegroundLease::acquire(
         &app_handle,
         tauri_plugin_vcp_mobile::stream::ForegroundTask::Sync,
@@ -1510,7 +1511,7 @@ async fn run_sync_session(
         Ok(lease) => Some(lease),
         Err(error) => {
             let message = format!(
-                "Failed to acquire Android sync foreground lease; continuing without keepalive: {}",
+                "Failed to acquire native sync foreground resources; continuing without them: {}",
                 error
             );
             log::warn!("[SyncService] Session {session_id}: {message}");
@@ -1519,7 +1520,7 @@ async fn run_sync_session(
                 &app_handle,
                 session_id,
                 "warning",
-                "后台保活申请失败，本次同步仍将继续",
+                "原生任务资源申请失败，本次同步仍将继续",
             );
             None
         }
@@ -3028,7 +3029,7 @@ async fn run_sync_session(
     }
 
     // Each session releases only its own native lease, even after losing ownership.
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     if let Some(lease) = sync_guardian_lease {
         let _ = lease.release();
     }

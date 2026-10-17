@@ -83,9 +83,11 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
 
     let db_state = handle.state::<DbState>();
     crate::vcp_modules::boot_trace::boot_mark(&handle, "rs:init_db_done");
-    match crate::vcp_modules::maintenance_manager::reclaim_orphaned_attachments(&handle, &db_state)
-        .await
-    {
+    let attachment_cleanup = async {
+        crate::vcp_modules::file_manager::reconcile_attachment_storage(&handle, &db_state).await?;
+        crate::vcp_modules::maintenance_manager::reclaim_orphaned_attachments(&handle, &db_state).await
+    }.await;
+    match attachment_cleanup {
         Ok(report) if report.reclaimed > 0 || report.ghost_files > 0 => {
             info!(
                 "[Lifecycle] Attachment GC reclaimed {} indexed CAS entries and {} ghost files; retained {} live hashes.",
@@ -94,7 +96,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
         }
         Ok(_) => {}
         Err(error) => {
-            log::warn!("[Lifecycle] Attachment GC skipped after error: {error}");
+            log::warn!("[Lifecycle] Attachment path repair/GC skipped after error: {error}");
         }
     }
     crate::vcp_modules::boot_trace::boot_mark(&handle, "rs:attachment_gc_done");
@@ -335,6 +337,11 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
                         }
                         NativeEvent::NotificationClick(payload) => {
                             let _ = event_handle.emit("vcp-notification-click", payload);
+                        }
+                        NativeEvent::BackgroundExecutionFailure { reason } => {
+                            tauri_plugin_vcp_mobile::events::report_service_failure(
+                                &event_handle, "guardian", &reason,
+                            );
                         }
                         NativeEvent::Other {} => {}
                     }

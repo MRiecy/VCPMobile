@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { ref, onUnmounted, watch } from "vue";
-import { invoke } from "@tauri-apps/api/core";
 import type { AppSettings } from "../../../core/stores/settings";
 import { useSettingsStore } from "../../../core/stores/settings";
 import { isIOS } from "../../../core/utils/platform";
+import { cancelFileOperation } from "../../../core/utils/nativeFilePicker";
 import SettingsActionWithStatus from "../../../components/settings/SettingsActionWithStatus.vue";
 import VcpConfirm from "../../../components/ui/VcpConfirm.vue";
 import {
@@ -94,7 +94,7 @@ onUnmounted(() => {
   disposed = true;
   pendingImport.value = null;
   if (importOperationId) {
-    void invoke("plugin:vcp-mobile|cancel_file_operation", { operationId: importOperationId }).catch(console.warn);
+    void cancelFileOperation(importOperationId).catch(console.warn);
     importOperationId = null;
   }
 });

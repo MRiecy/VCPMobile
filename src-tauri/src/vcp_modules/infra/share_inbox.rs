@@ -188,6 +188,38 @@ async fn save(db: &mut sqlx::SqliteConnection, share: &CurrentShare) -> Result<(
     Ok(())
 }
 
+async fn refresh_share_attachment_paths<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    share: &mut CurrentShare,
+) {
+    for attachment in &mut share.attachments {
+        super::file_manager::refresh_attachment_paths(app, attachment).await;
+    }
+    for item in &mut share.items {
+        if let Some(attachment) = item.attachment.as_mut() {
+            super::file_manager::refresh_attachment_paths(app, attachment).await;
+        }
+    }
+    if let Some(attachments) = share.message.as_mut().and_then(|message| message.attachments.as_mut()) {
+        for attachment in attachments {
+            super::file_manager::refresh_attachment_paths(app, attachment).await;
+        }
+    }
+}
+
+/// The startup relocation transaction owns this update; share identity,
+/// generation, revision and committed message contents remain unchanged.
+pub(crate) async fn reconcile_current_share_paths<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    db: &mut sqlx::SqliteConnection,
+) -> Result<(), String> {
+    if let Some(mut share) = load(db).await? {
+        refresh_share_attachment_paths(app, &mut share).await;
+        save(db, &share).await?;
+    }
+    Ok(())
+}
+
 fn from_slot(slot: &Slot) -> CurrentShare {
     CurrentShare {
         generation: slot.generation,
@@ -356,6 +388,7 @@ pub async fn read_current_share(
     } else if share.state == "receiving" && slot.state == "ready" {
         share.state = "ready".into();
     }
+    refresh_share_attachment_paths(&app, &mut share).await;
     save(&mut tx, &share).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     drop(guard);

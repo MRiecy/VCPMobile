@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, onUnmounted, watch } from "vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { deleteTempFile, pickFile } from "tauri-plugin-vcp-mobile";
+import { deleteTempFile } from "tauri-plugin-vcp-mobile";
+import { cancelFileOperation, pickFile } from "../../core/utils/nativeFilePicker";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useNotificationStore } from "../../core/stores/notification";
@@ -112,7 +113,7 @@ let avatarOperationId: string | null = null;
 const cancelAvatarPicker = () => {
   const operationId = avatarOperationId;
   avatarOperationId = null;
-  if (operationId) void invoke("plugin:vcp-mobile|cancel_file_operation", { operationId }).catch(console.warn);
+  if (operationId) void cancelFileOperation(operationId).catch(console.warn);
 };
 
 const releaseAvatarWorkingCopy = async () => {

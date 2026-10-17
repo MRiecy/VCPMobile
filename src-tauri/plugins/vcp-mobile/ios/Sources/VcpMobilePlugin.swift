@@ -27,6 +27,10 @@ private struct NetworkPayload: Encodable {
     let connected: Bool
 }
 
+private struct BackgroundExecutionFailurePayload: Encodable {
+    let reason: String
+}
+
 private struct NativeEvent<Payload: Encodable>: Encodable {
     let event: String
     let payload: Payload
@@ -104,6 +108,11 @@ final class VcpMobilePlugin: Plugin {
         dispatchPrecondition(condition: .onQueue(.main))
         invalidateSubscription()
         channel = newChannel
+        // Native resources outlive a WebView. Replay an undelivered failure via
+        // this same process Channel instead of registering another event bridge.
+        NativeBackgroundExecution.shared.setFailureHandler { [weak self] reason in
+            self?.sendBackgroundExecutionFailure(reason) ?? false
+        }
         let subscriptionGeneration = generation
         installLifecycleObservers(generation: subscriptionGeneration)
         // Observers and this snapshot are installed in one main-queue turn.
@@ -253,6 +262,20 @@ final class VcpMobilePlugin: Plugin {
     private func failSubscription(_ error: Error) {
         invalidateSubscription()
         NSLog("[VcpMobilePlugin] Native event source failed: %@", error.localizedDescription)
+    }
+
+    private func sendBackgroundExecutionFailure(_ reason: String) -> Bool {
+        guard let channel = channel else { return false }
+        do {
+            try channel.send(NativeEvent(
+                event: "backgroundExecutionFailure",
+                payload: BackgroundExecutionFailurePayload(reason: reason)
+            ))
+            return true
+        } catch {
+            NSLog("[VcpMobilePlugin] Background execution failure delivery failed: %@", error.localizedDescription)
+            return false
+        }
     }
 
     private func sendNotificationClick(_ click: NativeNotificationClick) {

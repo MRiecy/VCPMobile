@@ -12,6 +12,9 @@ pub enum NativeEvent {
     Network { connected: bool },
     #[serde(rename = "notificationClick")]
     NotificationClick(NativeNotificationClick),
+    /// A native resource failure does not finish or restart a Chat request.
+    #[serde(rename = "backgroundExecutionFailure")]
+    BackgroundExecutionFailure { reason: String },
     // Configuration/memory notifications do not describe an app phase.
     #[serde(rename = "configuration", alias = "memory-pressure")]
     Other {},

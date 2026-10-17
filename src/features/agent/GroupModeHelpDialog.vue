@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { watch } from 'vue';
+import { onUnmounted, ref, watch } from 'vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 
 /**
@@ -19,17 +19,20 @@ const close = () => emit('update:modelValue', false);
 
 const { registerModal, unregisterModal } = useModalHistory();
 const modalId = 'GroupModeHelpDialog';
+const surfaceRef = ref<HTMLElement | null>(null);
 
 watch(
   () => props.modelValue,
   (val) => {
     if (val) {
-      registerModal(modalId, close);
+      registerModal(modalId, close, () => surfaceRef.value);
     } else {
       unregisterModal(modalId);
     }
   },
+  { immediate: true },
 );
+onUnmounted(() => unregisterModal(modalId));
 
 const modes = [
   {
@@ -60,8 +63,10 @@ const modes = [
         @touchmove.prevent
       >
         <div
+          ref="surfaceRef"
           class="w-full max-w-sm max-h-[75vh] flex flex-col bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-2xl shadow-2xl overflow-hidden"
           role="dialog"
+          aria-modal="true"
           aria-label="发言模式说明"
         >
           <!-- 标题栏 -->

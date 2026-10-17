@@ -25,6 +25,39 @@ pub struct MessageWriteResultDto {
     pub topic_updated_at: i64,
 }
 
+async fn project_history_attachment(
+    app: &AppHandle,
+    db: &DbState,
+    row: &sqlx::sqlite::SqliteRow,
+    include_extracted_text: bool,
+) -> Attachment {
+    let mut attachment = Attachment {
+        r#type: row.get("mime_type"),
+        src: row.get("src"),
+        name: row.get("display_name"),
+        size: row.get::<i64, _>("size") as u64,
+        hash: Some(row.get("hash")),
+        status: Some(row.get("status")),
+        attachment_order: Some(row.get("attachment_order")),
+        internal_path: row.get("internal_path"),
+        extracted_text: row.get("extracted_text"),
+        image_frames: row.get::<Option<String>, _>("image_frames")
+            .and_then(|frames| serde_json::from_str(&frames).ok()),
+        thumbnail_path: row.get("thumbnail_path"),
+        created_at: Some(row.get::<i64, _>("created_at") as u64),
+    };
+    crate::vcp_modules::file_manager::refresh_attachment_paths(app, &mut attachment).await;
+    if include_extracted_text && attachment.extracted_text.is_none()
+        && attachment.status.as_deref() == Some("ready") {
+        if let Some(hash) = attachment.hash.as_deref() {
+            attachment.extracted_text = crate::vcp_modules::file_manager::ensure_extracted_text(
+                db, hash, &attachment.internal_path, &attachment.r#type,
+            ).await;
+        }
+    }
+    attachment
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn load_chat_history_internal(
     _app_handle: &AppHandle,
@@ -181,41 +214,8 @@ async fn convert_history_rows(
 
         for ar in att_rows {
             let msg_id: String = ar.get("msg_id");
-            let hash: String = ar.get("hash");
-            let mime_type: String = ar.get("mime_type");
-            let internal_path: String = ar.get("internal_path");
-            let display_name: String = ar.get("display_name");
-            let size_i64: i64 = ar.get("size");
-            let created_at_i64: i64 = ar.get("created_at");
-            let mut extracted_text: Option<String> = ar.get("extracted_text");
-
-            // ⚡ 极度优雅的消息-附件解耦调用：将物理文件判定、异步持久化完全委托给 file_manager
-            if include_extracted_text && extracted_text.is_none() {
-                extracted_text = crate::vcp_modules::infra::file_manager::ensure_extracted_text(
-                    &db_state,
-                    &hash,
-                    &internal_path,
-                    &mime_type,
-                )
-                .await;
-            }
-
-            att_map.entry(msg_id).or_default().push(Attachment {
-                r#type: mime_type,
-                src: ar.get("src"),
-                name: display_name,
-                size: size_i64 as u64,
-                hash: Some(hash),
-                status: Some(ar.get("status")),
-                attachment_order: Some(ar.get("attachment_order")),
-                internal_path,
-                extracted_text,
-                image_frames: ar
-                    .get::<Option<String>, _>("image_frames")
-                    .and_then(|s| serde_json::from_str(&s).ok()),
-                thumbnail_path: ar.get("thumbnail_path"),
-                created_at: Some(created_at_i64 as u64),
-            });
+            let attachment = project_history_attachment(app_handle, &db_state, &ar, include_extracted_text).await;
+            att_map.entry(msg_id).or_default().push(attachment);
         }
     }
 
@@ -560,40 +560,8 @@ pub async fn load_chat_text_history_for_context(
 
         for ar in att_rows {
             let msg_id: String = ar.get("msg_id");
-            let hash: String = ar.get("hash");
-            let mime_type: String = ar.get("mime_type");
-            let internal_path: String = ar.get("internal_path");
-            let display_name: String = ar.get("display_name");
-            let size_i64: i64 = ar.get("size");
-            let created_at_i64: i64 = ar.get("created_at");
-            let mut extracted_text: Option<String> = ar.get("extracted_text");
-
-            if include_extracted_text && extracted_text.is_none() {
-                extracted_text = crate::vcp_modules::infra::file_manager::ensure_extracted_text(
-                    &db_state,
-                    &hash,
-                    &internal_path,
-                    &mime_type,
-                )
-                .await;
-            }
-
-            att_map.entry(msg_id).or_default().push(Attachment {
-                r#type: mime_type,
-                src: ar.get("src"),
-                name: display_name,
-                size: size_i64 as u64,
-                hash: Some(hash),
-                status: Some(ar.get("status")),
-                attachment_order: Some(ar.get("attachment_order")),
-                internal_path,
-                extracted_text,
-                image_frames: ar
-                    .get::<Option<String>, _>("image_frames")
-                    .and_then(|s| serde_json::from_str(&s).ok()),
-                thumbnail_path: ar.get("thumbnail_path"),
-                created_at: Some(created_at_i64 as u64),
-            });
+            let attachment = project_history_attachment(app_handle, &db_state, &ar, include_extracted_text).await;
+            att_map.entry(msg_id).or_default().push(attachment);
         }
     }
 

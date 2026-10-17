@@ -625,6 +625,18 @@
           "markdownDescription": "Denies the pick_file command without any pre-configured scope."
         },
         {
+          "description": "Enables the prepare_file_operation command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-prepare-file-operation",
+          "markdownDescription": "Enables the prepare_file_operation command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the prepare_file_operation command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-prepare-file-operation",
+          "markdownDescription": "Denies the prepare_file_operation command without any pre-configured scope."
+        },
+        {
           "description": "Enables the register_shared_files command without any pre-configured scope.",
           "type": "string",
           "const": "allow-register-shared-files",

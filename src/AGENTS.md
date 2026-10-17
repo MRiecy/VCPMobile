@@ -60,6 +60,8 @@ src/
 
 `useIOSWindowGeometry` 在根部配对原生 bounds/键盘与 visualViewport，同一可用矩形供根、全屏和底部 sheet 消费。内部组件不重复加 iOS 键盘 padding；浮动键盘只影响当前编辑区。`attachmentStore` 的 operation ID 贯穿原生选择与 Rust 登记，外部文件没有 HTML/XHR 入口；`temporaryExport` 只接 WebView 内存产物。
 
+`core/utils/nativeFilePicker.ts` 统一附件、头像、配置的 iOS 原生选择接纳：prepare 返回前保留取消意图，取得 reservation 后才启动 picker，结束后撤销剩余登记。Android 继续原单次选择。这个短期调用记录不替代 `attachmentStore` 的导入/CAS owner；已交付文件仍由实际消费者释放。
+
 `useNotificationProcessor` 将实时事件和系统快照中的原生事件注册失败归为同一固定 ID 告知；`notification` Store 私有的 `oncePerWebview` 接受记忆先于原 30 秒去重，关闭 Toast、清除或淘汰历史不会重置。新 WebView 的新 Pinia 可再次接受 Rust 保留的真实注册失败；guardian/helper 继续原有通知语义。
 
 ### 3.2 Store、Composable 与组件

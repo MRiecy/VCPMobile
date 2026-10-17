@@ -1242,7 +1242,7 @@ mod entity_pull_tests {
             .await
             .expect("create pull database schema");
         let db_state = DbState::new(pool, db_path);
-        let queue = DbWriteQueue::new(&db_state, 81);
+        let queue = DbWriteQueue::new(&db_state, 81, temp_dir.path().join("attachments"));
 
         let server = Router::new().route(
             "/api/mobile-sync/entities/pull",

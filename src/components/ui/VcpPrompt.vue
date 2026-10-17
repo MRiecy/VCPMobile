@@ -23,8 +23,10 @@ const modalId = 'Prompt';
 const surfaceRef = ref<HTMLElement | null>(null);
 const inputValue = ref(props.initialValue || '');
 const inputRef = ref<HTMLInputElement | null>(null);
+const isComposing = ref(false);
 
 watch(() => props.isOpen, (newVal) => {
+  isComposing.value = false;
   if (newVal) {
     registerModal(modalId, () => {
       emit('cancel');
@@ -51,6 +53,17 @@ const handleCancel = () => {
   emit('update:isOpen', false);
 };
 
+const handleInputKeydown = (event: KeyboardEvent) => {
+  if (isComposing.value || event.isComposing || event.keyCode === 229) return;
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    handleConfirm();
+  } else if (event.key === 'Escape') {
+    event.preventDefault();
+    handleCancel();
+  }
+};
+
 </script>
 
 <template>
@@ -72,7 +85,8 @@ const handleCancel = () => {
           <div class="relative mb-6">
             <input ref="inputRef" v-model="inputValue" type="text" :placeholder="placeholder"
               class="w-full bg-black/5 dark:bg-black/20 text-gray-800 dark:text-gray-100 px-4 py-3 rounded-xl border border-black/10 dark:border-white/10 outline-none focus:border-blue-500/50 focus:ring-2 focus:ring-blue-500/20 transition-all text-sm"
-              @keydown.enter="handleConfirm" @keydown.esc="handleCancel" />
+              @compositionstart="isComposing = true" @compositionend="isComposing = false"
+              @blur="isComposing = false" @keydown="handleInputKeydown" />
           </div>
 
           <div class="flex justify-end gap-3">

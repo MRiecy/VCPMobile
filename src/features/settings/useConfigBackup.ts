@@ -3,7 +3,8 @@
 // 头像不在导出范围：头像属于数据同步职责，重装后由同步带回
 // 评估与决策记录见 plan/Settings_Import_Export_Evaluation_2026-08-18.md
 import { invoke } from "@tauri-apps/api/core";
-import { pickFile, deleteTempFile } from "tauri-plugin-vcp-mobile";
+import { deleteTempFile } from "tauri-plugin-vcp-mobile";
+import { pickFile } from "../../core/utils/nativeFilePicker";
 import type { AppSettings } from "../../core/stores/settings";
 import type { DownloadsSaveResultDto } from "../../core/types/native";
 import { isAndroid, isIOS } from "../../core/utils/platform";

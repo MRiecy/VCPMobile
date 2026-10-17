@@ -725,6 +725,32 @@ Denies the pick_file command without any pre-configured scope.
 <tr>
 <td>
 
+`vcp-mobile:allow-prepare-file-operation`
+
+</td>
+<td>
+
+Enables the prepare_file_operation command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:deny-prepare-file-operation`
+
+</td>
+<td>
+
+Denies the prepare_file_operation command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `vcp-mobile:allow-register-shared-files`
 
 </td>

@@ -545,6 +545,7 @@ const handleMentionSelect = (member: MentionMember) => {
 };
 
 const handleKeydown = (e: KeyboardEvent) => {
+  if (isComposing.value || e.isComposing || e.keyCode === 229) return;
   if (e.key === 'Escape' && mentionOpen.value) {
     e.preventDefault();
     dismissMention();

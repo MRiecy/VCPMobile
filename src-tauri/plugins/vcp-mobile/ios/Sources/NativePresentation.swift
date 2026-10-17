@@ -35,11 +35,22 @@ final class NativeFileOperation {
     func check() throws { if cancelled { throw NativeFileError.failure("cancelled: file operation") } }
 }
 
+private final class NativePickerReservation {
+    let id: String
+    let token = UUID().uuidString
+    weak var webView: WKWebView?
+    weak var scene: UIWindowScene?
+    init(id: String, webView: WKWebView, scene: UIWindowScene) {
+        self.id = id; self.webView = webView; self.scene = scene
+    }
+}
+
 /// One modal owner for the attached Scene. Inactive notifications from system
 /// pickers/permissions do not cancel a user's operation.
 final class NativePresentation: NSObject {
     weak var webView: WKWebView?
     private(set) var current: NativeFileOperation?
+    private var reservation: NativePickerReservation?
     private var sceneObserver: NSObjectProtocol?
 
     override init() {
@@ -55,23 +66,53 @@ final class NativePresentation: NSObject {
     }
 
     func attach(_ view: WKWebView) {
-        if webView !== view, let operation = current { cancel(operation.id) }
+        if webView !== view {
+            reservation = nil
+            if let operation = current { cancel(operation.id) }
+        }
         webView = view
         if sceneObserver == nil {
             sceneObserver = NotificationCenter.default.addObserver(
                 forName: UIScene.didDisconnectNotification, object: nil, queue: .main
             ) { [weak self] notification in
-                guard let self = self, let scene = notification.object as? UIScene,
-                      self.webView?.window?.windowScene === scene,
-                      let operation = self.current else { return }
-                self.cancel(operation.id)
+                guard let self = self, let scene = notification.object as? UIScene else { return }
+                if self.reservation?.scene === scene { self.reservation = nil }
+                if self.webView?.window?.windowScene === scene, let operation = self.current {
+                    self.cancel(operation.id)
+                }
             }
         }
     }
 
+    func preparePicker(_ id: String, sourceWebView: String) throws -> String {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard current == nil, reservation == nil else { throw NativeFileError.failure("busy: another native file operation is active") }
+        guard let view = webView, let scene = view.window?.windowScene,
+              String(UInt(bitPattern: Unmanaged.passUnretained(view).toOpaque()), radix: 16) == sourceWebView else {
+            throw NativeFileError.failure("cancelled: requesting WebView is no longer attached")
+        }
+        let pending = NativePickerReservation(id: id, webView: view, scene: scene)
+        reservation = pending
+        return pending.token
+    }
+
+    func beginPicker(_ id: String, reservationToken: String?, _ invoke: Invoke) throws -> NativeFileOperation {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let reservationToken = reservationToken, let pending = reservation,
+              pending.id == id, pending.token == reservationToken else {
+            throw NativeFileError.failure("cancelled: picker reservation is no longer active")
+        }
+        reservation = nil
+        guard pending.webView === webView, let scene = pending.scene,
+              scene === webView?.window?.windowScene else {
+            throw NativeFileError.failure("cancelled: picker Scene is no longer attached")
+        }
+        return try begin(id, invoke)
+    }
+
     func begin(_ id: String, _ invoke: Invoke) throws -> NativeFileOperation {
         dispatchPrecondition(condition: .onQueue(.main))
-        guard current == nil else { throw NativeFileError.failure("busy: another native file operation is active") }
+        guard current == nil, reservation == nil else { throw NativeFileError.failure("busy: another native file operation is active") }
         guard webView?.window?.windowScene != nil else { throw NativeFileError.failure("presentation_unavailable: no attached Scene") }
         let operation = NativeFileOperation(id: id, invoke: invoke)
         current = operation
@@ -125,6 +166,7 @@ final class NativePresentation: NSObject {
     }
 
     func cancel(_ id: String) {
+        if reservation?.id == id { reservation = nil }
         guard let operation = current, operation.id == id else { return }
         operation.cancel()
         if let cancel = operation.cancellationHandler { cancel(); return }

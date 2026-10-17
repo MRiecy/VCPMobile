@@ -54,6 +54,7 @@ watch(
 // ---------- 快捷回复 ----------
 const replyMaid = ref('');
 const replyContent = ref('');
+const isReplyComposing = ref(false);
 
 onMounted(() => {
   replyMaid.value = settingsStore.settings?.userName ?? '';
@@ -67,6 +68,13 @@ async function sendReply(): Promise<void> {
   if (!canReply.value) return;
   const ok = await store.reply(props.uid, replyMaid.value.trim(), replyContent.value.trim());
   if (ok) replyContent.value = '';
+}
+
+function handleReplyKeydown(event: KeyboardEvent): void {
+  if (isReplyComposing.value || event.isComposing || event.keyCode === 229) return;
+  if (event.key !== 'Enter' || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
+  event.preventDefault();
+  void sendReply();
 }
 
 function refresh(): void {
@@ -203,7 +211,10 @@ async function deletePost(): Promise<void> {
         rows="1"
         placeholder="回复…"
         enterkeyhint="send"
-        @keydown.enter.exact.prevent="sendReply"
+        @compositionstart="isReplyComposing = true"
+        @compositionend="isReplyComposing = false"
+        @blur="isReplyComposing = false"
+        @keydown="handleReplyKeydown"
       />
       <button
         type="button"

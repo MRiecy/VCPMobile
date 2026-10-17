@@ -17,6 +17,7 @@ const emit = defineEmits<{
 
 const value = ref("");
 const input = ref<HTMLInputElement | null>(null);
+const isComposing = ref(false);
 const localError = computed(() => {
   if (!value.value.trim()) return "文件名不能为空";
   if (!isValidDiaryFileName(value.value)) return "文件名不能包含路径分隔符或路径语义";
@@ -25,6 +26,7 @@ const localError = computed(() => {
 });
 
 watch(() => props.open, async (open) => {
+  isComposing.value = false;
   if (!open) return;
   value.value = props.currentFile;
   await nextTick();
@@ -36,6 +38,17 @@ watch(() => props.open, async (open) => {
 function submit(): void {
   if (localError.value || props.busy) return;
   emit("confirm", value.value.trim());
+}
+
+function handleInputKeydown(event: KeyboardEvent): void {
+  if (isComposing.value || event.isComposing || event.keyCode === 229) return;
+  if (event.key === "Enter") {
+    event.preventDefault();
+    submit();
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    emit("close");
+  }
 }
 </script>
 
@@ -56,8 +69,10 @@ function submit(): void {
         class="diary-rename-input"
         autocomplete="off"
         aria-label="新文件名"
-        @keydown.enter="submit"
-        @keydown.esc="emit('close')"
+        @compositionstart="isComposing = true"
+        @compositionend="isComposing = false"
+        @blur="isComposing = false"
+        @keydown="handleInputKeydown"
       />
       <p v-if="localError || serverError" class="min-h-4 mt-2 mb-0 text-xs text-[var(--danger-color)]" role="status">
         {{ localError || serverError }}

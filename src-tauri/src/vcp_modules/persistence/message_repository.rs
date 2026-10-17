@@ -497,7 +497,7 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
         return Ok(());
     }
 
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     let foreground_lease = tauri_plugin_vcp_mobile::stream::ForegroundLease::acquire(
         &app_handle,
         tauri_plugin_vcp_mobile::stream::ForegroundTask::Prerender,
@@ -592,7 +592,7 @@ pub async fn rebuild_all_pre_renders(app_handle: AppHandle) -> Result<(), String
         Err(error) => Err(format!("预渲染缓存写入任务失败: {error}")),
     };
 
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     if let Some(lease) = foreground_lease {
         let _ = lease.release();
     }

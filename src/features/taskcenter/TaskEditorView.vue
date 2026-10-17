@@ -71,6 +71,7 @@ const runAtInput = computed({
 const isAgentPickerOpen = ref(false);
 const agentSearch = ref('');
 const manualAgentName = ref('');
+const isManualAgentComposing = ref(false);
 
 // 选择器注册进 Modal History：返回手势先关选择器而不是编辑器
 const { registerModal, unregisterModal } = useModalHistory();
@@ -125,6 +126,13 @@ function addManualAgent(): void {
   if (!name || draft.agents.includes(name)) return;
   draft.agents.push(name);
   manualAgentName.value = '';
+}
+
+function handleManualAgentKeydown(event: KeyboardEvent): void {
+  if (isManualAgentComposing.value || event.isComposing || event.keyCode === 229) return;
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  addManualAgent();
 }
 
 function removeAgent(name: string): void {
@@ -321,7 +329,10 @@ async function remove(): Promise<void> {
             type="text"
             class="tce-input tce-manual-input"
             placeholder="手动输入 Agent 中文名"
-            @keyup.enter="addManualAgent"
+            @compositionstart="isManualAgentComposing = true"
+            @compositionend="isManualAgentComposing = false"
+            @blur="isManualAgentComposing = false"
+            @keydown="handleManualAgentKeydown"
           />
           <button type="button" class="tce-manual-add" @click="addManualAgent">添加</button>
         </div>

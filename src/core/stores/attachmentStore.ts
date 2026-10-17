@@ -5,7 +5,8 @@ import { listen } from "@tauri-apps/api/event";
 import { useNotificationStore } from "./notification";
 import { useChatSessionStore } from "./chatSessionStore";
 import { isAndroid, isIOS } from "../utils/platform";
-import type { PickedFile, PickedFiles } from "tauri-plugin-vcp-mobile";
+import { cancelFileOperation, pickFile, pickFiles } from "../utils/nativeFilePicker";
+import type { PickedFile } from "tauri-plugin-vcp-mobile";
 import type {
   NativeFileProgressDetail,
   NativeFileStartDetail,
@@ -80,7 +81,7 @@ export const useAttachmentStore = defineStore("attachment", () => {
   const cancelOperation = (operationId: string) => {
     if (!activeOperations.delete(operationId)) return;
     void invoke("cancel_attachment_import", { operationId }).catch(console.warn);
-    void invoke("plugin:vcp-mobile|cancel_file_operation", { operationId }).catch(console.warn);
+    void cancelFileOperation(operationId).catch(console.warn);
   };
 
   const beginImport = async (operationId: string) => {
@@ -178,8 +179,8 @@ export const useAttachmentStore = defineStore("attachment", () => {
       const pending = card();
       if (pending) pending.progress = undefined;
       const result = mode === "camera"
-        ? { files: [await invoke<PickedFile>("plugin:vcp-mobile|pick_file", { mode, operationId })], errors: [] }
-        : await invoke<PickedFiles>("plugin:vcp-mobile|pick_file", { mode, operationId, multiple: true });
+        ? { files: [await pickFile(mode, { operationId })], errors: [] }
+        : await pickFiles(mode, { operationId });
       const pickedFiles = result.files;
       for (const file of pickedFiles) pendingFiles.add(file);
       window.removeEventListener("vcp-mobile-file-start", handleStart);

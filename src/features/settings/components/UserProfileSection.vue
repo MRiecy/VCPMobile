@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { onUnmounted, ref } from "vue";
-import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { deleteTempFile, pickFile } from "tauri-plugin-vcp-mobile";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { deleteTempFile } from "tauri-plugin-vcp-mobile";
+import { cancelFileOperation, pickFile } from "../../../core/utils/nativeFilePicker";
 import { useAssistantStore } from "../../../core/stores/assistant";
 import { useNotificationStore } from "../../../core/stores/notification";
 import { isAndroid, isIOS } from "../../../core/utils/platform";
@@ -110,7 +111,7 @@ const onCropConfirm = async (blob: Blob) => {
 onUnmounted(() => {
   disposed = true;
   if (avatarOperationId) {
-    void invoke("plugin:vcp-mobile|cancel_file_operation", { operationId: avatarOperationId }).catch(console.warn);
+    void cancelFileOperation(avatarOperationId).catch(console.warn);
     avatarOperationId = null;
   }
   void releaseAvatarWorkingCopy();

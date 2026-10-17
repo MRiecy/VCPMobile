@@ -31,6 +31,7 @@ struct NativeFileSaveResult: Encodable {
 
 private struct PickArgs: Decodable {
     let operationId: String
+    let reservationToken: String?
     let mode: String
     let stagingDir: String
     let maxBytes: UInt64
@@ -38,6 +39,7 @@ private struct PickArgs: Decodable {
 
     var selectionLimit: Int { mode == "file" || mode == "gallery" ? max(1, min(maxFiles, 16)) : 1 }
 }
+private struct PreparePickerArgs: Decodable { let operationId: String; let sourceWebView: String }
 private struct CancelFileArgs: Decodable { let operationId: String }
 private struct OpenArgs: Decodable { let path: String; let action: String; let operationId: String; let fileName: String? }
 private struct ExportArgs: Decodable {
@@ -249,6 +251,16 @@ private final class ExportDelegate: NSObject, UIDocumentPickerDelegate, UIAdapti
 }
 
 extension VcpMobilePlugin {
+    @objc public func prepareFileOperation(_ invoke: Invoke) {
+        do {
+            let args = try invoke.parseArgs(PreparePickerArgs.self)
+            DispatchQueue.main.async {
+                do { invoke.resolve(["reservationToken": try self.presentation.preparePicker(args.operationId, sourceWebView: args.sourceWebView)]) }
+                catch { invoke.reject(error.localizedDescription) }
+            }
+        } catch { invoke.reject(error.localizedDescription) }
+    }
+
     @objc public func cancelFileOperation(_ invoke: Invoke) {
         do {
             let args = try invoke.parseArgs(CancelFileArgs.self)
@@ -260,7 +272,7 @@ extension VcpMobilePlugin {
             let args = try invoke.parseArgs(PickArgs.self)
             DispatchQueue.main.async {
                 do {
-                    let operation = try self.presentation.begin(args.operationId, invoke)
+                    let operation = try self.presentation.beginPicker(args.operationId, reservationToken: args.reservationToken, invoke)
                     if args.mode == "camera" {
                         NativeCamera.start(owner: self.presentation, operation: operation, stagingDir: args.stagingDir, maxBytes: args.maxBytes)
                         return

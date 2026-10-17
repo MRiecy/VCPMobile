@@ -1,28 +1,30 @@
 # VCPMobile iOS 兼容适配专项研究
 
-> 修订：2026-10-09。最初研究基线：`4c6e25bb`；本轮 Phase 3 从 `8207ec70` 实施，VCPMobile `1.1.6`。历史执行结果保留其原基线。
+> 修订：2026-10-17。最初研究基线：`4c6e25bb`；Phase 3 从 `8207ec70` 实施，本轮统一修复从 `16558bb0` 开始。历史执行结果保留其原基线。
 >
 > 目标：同一 Vue/Rust 核心的 iPhone/iPad 实验性客户端；开发采用源码与编译语义推演，产物供用户自行签名。
 
 ## 分期实施工作区（2026-10-08 启动）
 
-2026-10-16：用户允许每阶段按需进行手动 GitHub Actions 诊断，已将现有 G1 入口扩展为 [iOS stage diagnostics](../../src-tauri/ios/README.md)，默认 Phase 3 / debug；G1/G2 的验收职责保留。本次准备入口不代表已取得新的 Apple 编译结果。
+2026-10-17：用户批准六项兼容复审修复，并选择 iOS SSE 原生循环静音音频的尽力保活，接受系统中断；常亮维持同步和预渲染刷新两类场景。源码实施及边界见 [Phase 5 收口记录](./phase-5/03-兼容复审修复与iOS尽力保活.md)。本轮按用户要求不执行检查、测试或构建，后续再安排验证和 Phase 6 打包。
 
-2026-10-09：沿既有 `plugin-os` 同步身份与 Vue 运行时分支进入 Phase 3，接入共同通知权限、本 App 本地通知/冷启动点击、设备/传感器、剪贴板与 iOS Distributed，并处理 Chat 输出接管、Sync/LAN 生命周期。具体源码结果和本地验证见阶段三记录。G1 Apple 构建仍未执行，不以源码或 host 检查宣称原生编译/运行已通过。
+2026-10-16：已有 [Phase 3/debug 诊断归档](https://github.com/MRiecy/VCPMobile/actions/runs/38884164944)，提交 `a8482b60`，实际使用 Xcode 16.4 / SDK 18.5。已固定 [iOS stage diagnostics](../../src-tauri/ios/README.md) 使用 Xcode 26.2；修正后及 Phase 4/5 后续源码尚无 Apple 构建结果。G1/G2 的验收职责保留。
 
-本目录 00–09 是后续施工使用的专题研究，按 [Phase 2 功能审批](./phase-2/09-功能权限与提示审议表.md) 更新范围与任务。每个 Phase 保存对应施工和证据；Phase 0/1 的完成记录属于各自基线，Phase 2 源码接入和平台简化已有记录、G1 待执行。Phase 3 授权源码链已接入、复审及 Vue/host 检查通过，领域结果见阶段记录；Phase 4–6 仍待实施。本轮不扩展为全部原生媒体/分享或 SSE 后台功能。
+2026-10-09：沿既有 `plugin-os` 同步身份与 Vue 运行时分支进入 Phase 3，接入共同通知权限、本 App 本地通知/冷启动点击、设备/传感器、剪贴板与 iOS Distributed，并处理 Chat 输出接管、Sync/LAN 生命周期。具体源码结果和当时本地验证见阶段三记录，不以源码或 host 检查宣称原生运行已通过。
+
+本目录 00–09 保留专题研究与决策沿革，范围以 [Phase 2 功能审批](./phase-2/09-功能权限与提示审议表.md)及后续 [D2 更新](./09-Magi综合裁决与待决策清单.md)为准。Phase 0/1 的完成记录属于各自基线；Phase 2–4 及共享 SSE 已有源码与对应历史检查，本轮补兼容缺口和 iOS 尽力资源支持。Phase 6 用户打包与最新提交的目标验证尚未进行。
 
 | 工作区 | 当前职责 |
 |---|---|
 | [Phase 0](./phase-0/README.md) | 已完成输入与目标源码审计；具体证据和后续问题见阶段验收记录 |
 | [Phase 1](./phase-1/README.md) | 保存 cfg/ACL、目录与生命周期契约的阶段证据；当时的统一能力表已被本轮轻量平台身份替代 |
-| [Phase 2](./phase-2/README.md) | Swift/Channel/生命周期与可重放工程已接入；复审、修正及平台简化见阶段记录，G1 Apple 构建待执行 |
+| [Phase 2](./phase-2/README.md) | Swift/Channel/生命周期与可重放工程已接入；历史源码和后续旧提交归档证据分别记录 |
 | [Phase 3](./phase-3/README.md) | 本轮 Chat/Sync/LAN、共同通知权限、本地通知与设备/网络/Distributed 实施、独立复审和验证记录 |
-| [Phase 4](./phase-4/README.md) | 原生文件媒体、拍照/相册、双向分享、WebKit 缓存与交互 |
-| [Phase 5](./phase-5/README.md) | SSE 后台持续接收专项、其余尽力后台与单次终态 |
+| [Phase 4](./phase-4/README.md) | 原生文件媒体、拍照/相册、双向分享、WebKit 已接入；本轮补路径、缓存和交互遗漏，Apple 目标验证待执行 |
+| [Phase 5](./phase-5/README.md) | 共享 SSE 收尾、iOS 静音音频尽力保活及任务常亮；本轮验证延后 |
 | [Phase 6](./phase-6/README.md) | G2 集中验收与用户自签产物 |
 
-Phase 0 已同步 [移动端 UI 规范](../../docs/MOBILE_UI_COMPATIBILITY.md)；2026-10-09 用户明确将最低 iOS/iPadOS 提高到 26.0，`tauri.ios.conf.json` 与 Swift package 同步采用该目标，编译核验仍待 G1。原 15.0 是 Phase 0–2 历史基线。[跨平台开发规范](../../docs/CROSS_PLATFORM_DEVELOPMENT.md) 现规定共享 Vue 中直接使用运行时平台分支，不再要求统一能力状态表或逐层复制功能门禁。
+Phase 0 已同步 [移动端 UI 规范](../../docs/MOBILE_UI_COMPATIBILITY.md)；2026-10-09 用户明确将最低 iOS/iPadOS 提高到 26.0，`tauri.ios.conf.json` 与 Swift package 同步采用该目标，固定 Xcode 26.2 后仍待构建复验。原 15.0 是 Phase 0–2 历史基线。[跨平台开发规范](../../docs/CROSS_PLATFORM_DEVELOPMENT.md)规定共享 Vue 中直接使用运行时平台分支，不再要求统一能力状态表或逐层复制功能门禁。
 
 ## 研究目标与开发方式
 
@@ -42,10 +44,10 @@ Phase 0 已同步 [移动端 UI 规范](../../docs/MOBILE_UI_COMPATIBILITY.md)�
 
 | 主题 | 当前处理 |
 |---|---|
-| 插件命令 | 自有插件当前 45 条；原 42 条的 `R3 / S7 / L15 / X17` 分类仅保留历史索引，另列本轮 3 条通知授权/设置命令 |
+| 插件命令 | Phase 3 的 45 条及原 42 条分类仅保留历史索引；文件操作等新增入口以当前插件注册、build.rs 和实际 ACL 为准 |
 | 生命周期 | Swift producer、Rust subscribe 和 bootstrap 已接通；原 Android-only 订阅问题属于已修正的历史发现 |
 | 平台身份 | `src/core/utils/platform.ts` 同步导出 `nativePlatform/isAndroid/isIOS`；已删除 Rust/前端统一能力表与 Swift 能力查询 |
-| 后台专项 | SSE 持续接收是最新重点要求；其余任务尽力后台。静音音频等候选另行研究，不把 API 存在当作效果已满足 |
+| 后台专项 | 2026-10-17 接受 SSE 静音音频尽力保活及系统中断；同步/预渲染仅申请前台常亮，不把源码接入当作后台效果已验证 |
 | 用户自签产物 | 恢复 D8；检查 device Mach-O、包结构、最终 Bundle ID 与 entitlement 配套，见 06 |
 | 前端现状 | 保留 PermissionGate 已挂载、Router 仅 `/ → /chat`、overlay/page stack 承载业务页的修正 |
 | 决策归属 | D1–D19 沿革保留；2026-10-09 逐项审批优先于旧延期/隐藏意见。源码审计与 G1/G2 方式不变 |
@@ -57,10 +59,10 @@ Phase 0 已同步 [移动端 UI 规范](../../docs/MOBILE_UI_COMPATIBILITY.md)�
 - iPhone/iPad 共用 Chat、Diary、Settings、SQLite 与手动 Sync；
 - 原生 Files/PHPicker、security-scoped staging、大图/HEIC 处理与附件 CAS；
 - safe area、键盘、返回、文本选择与当前窗口宽度响应；
-- SSE 后台持续接收专项，以及 iOS 26+ continued-task 等候选与前台常亮回退；其余任务接受尽力后台，尚无已完成的 iOS 后台 adapter；
+- SSE 原生静音音频尽力保活；同步与预渲染刷新保持前台常亮；其余任务沿原用途尽力执行与收尾；
 - 独立的 iOS 构建与打包路径，保留 Android arm64 正式链路。
 
-最新审批已纳入 incoming/outgoing share、本 App 系统通知、相机、PhotoKit 保存、网络遥测与 Distributed，以及电量、空间、常亮、缓存和共同权限引导。当前 P3 已有通知/设备/工具源码；P4 文件媒体/分享/缓存与 P5 常亮/后台资源仍待实现。系统通知只接本 App 本地通知，不自动等同 APNs。语音、Root/APK 和 Android CLI 的既定边界保持；minimum 26.0 以上新增 API 仍核对 availability，系统授权、资源获得和任务激活仍取真实结果。每项完成度按实际源码和对应证据记录，不从批准范围推定完成。
+最新审批已纳入 incoming/outgoing share、本 App 系统通知、相机、PhotoKit 保存、网络遥测与 Distributed，以及电量、空间、常亮、缓存和共同权限引导。P3/4 实施与本轮 P5 资源接入分别记录源码范围及验证边界。系统通知只接本 App 本地通知，不自动等同 APNs。语音、Root/APK 和 Android CLI 的既定边界保持；minimum 26.0 以上新增 API 仍核对 availability，系统授权和资源取得仍取真实结果。每项完成度按实际源码和对应证据记录，不从批准范围推定完成。
 
 ### 关键施工任务
 

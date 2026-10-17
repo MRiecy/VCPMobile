@@ -33,7 +33,8 @@ Rust 核心内部调用 ─> Rust 公开入口 ─┼─> PluginHandle / JNI
 | `ios/Sources/NativeNotifications.swift`、`NativeNotificationSceneBridge.swift` | 真实通知授权、发送、前台展示和点击快照；在插件初始化时接入锁定 Tao Scene 入口并完整转发原窗口实现 |
 | `ios/Sources/NativeDevice.swift`、`NativeSensors.swift` | 设备/电量/空间/网络快照、单 owner 有界传感器采样；缺失字段保留原因，退后台停止采样 |
 | `ios/Sources/NativeClipboard.swift` | 前台系统剪贴板读写，UIKit 操作在主队列执行 |
-| `ios/Sources/NativePresentation.swift`、`NativeFiles.swift` | 主 Scene 单操作呈现、Files/PHPicker、operation 取消、只读 Quick Look、Files 导出与活动面板；文件持有至原生终态 |
+| `ios/Sources/NativeBackgroundExecution.swift` | 进程级任务租约；Stream 尽力静音音频、Sync/Prerender 前台常亮，音频中断不产生业务终态 |
+| `ios/Sources/NativePresentation.swift`、`NativeFiles.swift` | 主 Scene 单操作呈现；picker 按调用 WebView/Scene 先登记 reservation 再启动，取消可撤销未启动登记；Files/PHPicker、Quick Look、导出与活动面板的文件持有至原生终态 |
 | `ios/Sources/NativeImages.swift`、`NativeCamera.swift` | 串行 ImageIO 下采样、SDR 派生与真实编码，PhotoKit add-only、AVCapturePhotoOutput 有界静态拍照 |
 | `android/src/main/.../NativeFileImages.kt` | 按用途预算下采样、EXIF 方向和 JPEG/PNG 编码；外部输入保持原件，头像工作副本单独派生 |
 | `ios/Sources/NativeWebKit.swift`、`NativeShareInbox.swift` | WebView 几何/浏览缓存操作，及主 App 的 App Group 收件位置桥接 |

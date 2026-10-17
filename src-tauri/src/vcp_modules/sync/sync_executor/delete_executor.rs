@@ -284,7 +284,7 @@ mod tests {
 
         let app = tauri::test::mock_app();
         let db_state = DbState::new(pool.clone(), db_path);
-        let queue = DbWriteQueue::new(&db_state, 9001);
+        let queue = DbWriteQueue::new(&db_state, 9001, temp_dir.path().join("attachments"));
         assert!(app.manage(db_state));
         assert!(app.manage(AgentConfigState::new()));
         for index in 0..9 {

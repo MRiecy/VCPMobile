@@ -40,6 +40,7 @@ import morphdom from "morphdom";
 import { instantiateMermaidSvg, renderMermaidTemplate } from './utils/mermaidRenderer';
 import { allowChatMutation, chatMutationBlockReason } from "./chatMutationPolicy";
 import type { OverlayActionItem } from "../../core/types/overlay";
+import { isIOS } from "../../core/utils/platform";
 
 const { processEmoticonsInContainer } = useEmoticonFixer();
 let heavyController: AbortController | null = null;
@@ -827,8 +828,13 @@ const showMessageContextMenu = async () => {
     });
   }
 
+  const getCachedFullText = () => props.message.id === messageKey.messageId
+    ? props.message.content
+    : undefined;
   const getFullText = async () => {
-    if (props.message.content) return props.message.content;
+    if (!historyStore.isMessageActionCurrent(messageKey)) return "";
+    const cachedText = getCachedFullText();
+    if (cachedText) return cachedText;
     return await historyStore.fetchRawContent(messageKey);
   };
 
@@ -853,14 +859,54 @@ const showMessageContextMenu = async () => {
     label: "复制内容",
     icon: Copy,
     handler: async () => {
-      const fullText = await getFullText();
-      if (!fullText) return;
-      await navigator.clipboard.writeText(fullText);
-      notificationStore.addNotification({
-        type: "success",
-        title: "复制成功",
-        message: "内容已复制到剪贴板",
-      });
+      let contentError: unknown;
+      const requireCurrentText = (text?: string) => {
+        if (!historyStore.isMessageActionCurrent(messageKey)) {
+          throw new Error("会话已切换，请重新选择要复制的消息。");
+        }
+        if (!text) throw new Error("未能读取消息正文，或此消息没有可复制的文字。");
+        return text;
+      };
+      try {
+        if (!historyStore.isMessageActionCurrent(messageKey)) {
+          throw new Error("会话已切换，请重新选择要复制的消息。");
+        }
+        const clipboard = navigator.clipboard;
+        if (!clipboard?.writeText) throw new Error("当前环境无法访问剪贴板。");
+        const cachedText = getCachedFullText();
+        if (cachedText) {
+          // Keep already available text synchronous with the click on both platforms.
+          await clipboard.writeText(requireCurrentText(cachedText));
+        } else if (isIOS) {
+          if (typeof ClipboardItem === "undefined" || !clipboard.write) {
+            throw new Error("当前系统不支持异步全文复制，请先打开编辑消息加载正文后重试。");
+          }
+          const content = getFullText()
+            .then(text => new Blob([requireCurrentText(text)], { type: "text/plain" }))
+            .catch(error => { contentError = error; throw error; });
+          // Observe a late read rejection even if ClipboardItem/write rejects before
+          // consuming it. The original promise still rejects the clipboard write.
+          void content.catch(() => undefined);
+          // WebKit must receive write() in the click, before the original-text IPC settles.
+          await clipboard.write([new ClipboardItem({ "text/plain": content })]);
+        } else {
+          // Older Android WebViews need not support promise-backed ClipboardItem.
+          await clipboard.writeText(requireCurrentText(await getFullText()));
+        }
+        notificationStore.addNotification({
+          type: "success",
+          title: "复制成功",
+          message: "内容已复制到剪贴板",
+        });
+      } catch (error) {
+        const cause = contentError ?? error;
+        notificationStore.addNotification({
+          type: "error",
+          title: "复制失败",
+          message: cause instanceof Error ? cause.message : String(cause),
+          toastOnly: true,
+        });
+      }
     },
   });
 

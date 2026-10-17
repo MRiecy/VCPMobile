@@ -428,12 +428,49 @@ pub enum PickFileResult {
 }
 
 #[tauri::command]
+pub async fn prepare_file_operation<R: Runtime>(
+    app: AppHandle<R>,
+    webview: tauri::Webview<R>,
+    operation_id: String,
+) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "ios")]
+    {
+        validate_operation_id(&operation_id)?;
+        // Bind admission to the requesting WKWebView, not whichever replacement
+        // happens to be attached when the queued native call is finally handled.
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        webview
+            .with_webview(move |view| {
+                let _ = sender.send(format!("{:x}", view.inner() as usize));
+            })
+            .map_err(|error| format!("cancelled: requesting WebView is unavailable: {error}"))?;
+        let source_webview = receiver
+            .await
+            .map_err(|_| "cancelled: requesting WebView was detached".to_string())?;
+        crate::ios::run_async(
+            app,
+            "prepareFileOperation",
+            serde_json::json!({
+                "operationId": operation_id, "sourceWebView": source_webview,
+            }),
+        )
+        .await
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (app, webview, operation_id);
+        Err("Picker admission is only used on iOS".into())
+    }
+}
+
+#[tauri::command]
 pub async fn pick_file<R: Runtime>(
     app: AppHandle<R>,
     mode: Option<String>,
     operation_id: Option<String>,
     max_bytes: Option<u64>,
     multiple: Option<bool>,
+    reservation_token: Option<String>,
 ) -> Result<PickFileResult, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
@@ -452,6 +489,10 @@ pub async fn pick_file<R: Runtime>(
         };
         let operation_id = operation_id.unwrap_or_else(native_operation_id);
         validate_operation_id(&operation_id)?;
+        #[cfg(target_os = "ios")]
+        if reservation_token.as_deref().is_none_or(str::is_empty) {
+            return Err("cancelled: picker must be prepared before starting".into());
+        }
         let max_bytes = max_bytes.unwrap_or(if mode == "config" {
             1024 * 1024
         } else {
@@ -474,6 +515,7 @@ pub async fn pick_file<R: Runtime>(
                     serde_json::json!({
                         "mode": mode, "operationId": operation_id,
                         "stagingDir": staging, "maxBytes": max_bytes, "maxFiles": max_files,
+                        "reservationToken": reservation_token,
                     }),
                 )
                 .map_err(|e| format!("native_picker: {e}"))
@@ -483,7 +525,7 @@ pub async fn pick_file<R: Runtime>(
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        let _ = (app, mode, operation_id, max_bytes, multiple);
+        let _ = (app, mode, operation_id, max_bytes, multiple, reservation_token);
         Err("文件选择仅在移动端可用".to_string())
     }
 }

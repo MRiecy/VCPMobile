@@ -99,7 +99,7 @@ fn is_managed_attachment_temp(name: &str) -> bool {
 
 async fn sweep_attachment_files(
     root: &std::path::Path,
-    indexed_paths: &HashSet<std::path::PathBuf>,
+    protected_hashes: &HashSet<String>,
 ) -> usize {
     let Ok(mut entries) = tokio::fs::read_dir(root).await else {
         return 0;
@@ -120,8 +120,7 @@ async fn sweep_attachment_files(
         let is_unindexed_cas = std::path::Path::new(name)
             .file_stem()
             .and_then(|value| value.to_str())
-            .is_some_and(is_valid_cas_hash)
-            && !indexed_paths.contains(&path);
+            .is_some_and(|hash| is_valid_cas_hash(hash) && !protected_hashes.contains(hash));
         if (is_managed_temp || is_unindexed_cas) && tokio::fs::remove_file(&path).await.is_ok() {
             removed += 1;
         }
@@ -223,24 +222,13 @@ pub async fn reclaim_orphaned_attachments<R: tauri::Runtime>(
         .iter()
         .map(|(hash, _)| hash.clone())
         .collect();
-    let indexed_paths: HashSet<std::path::PathBuf> = indexed_attachments
-        .iter()
-        .filter_map(|(hash, internal_path)| {
-            let clean_path = internal_path
-                .strip_prefix("file://")
-                .unwrap_or(internal_path);
-            let path = std::path::PathBuf::from(clean_path);
-            let matches_hash = path
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .is_some_and(|value| value == hash && is_valid_cas_hash(value));
-            matches_hash.then_some(path)
-        })
-        .collect();
+    // Local roots can change after an iOS update/restore. A referenced hash is
+    // never a ghost merely because its previous absolute path differs.
+    let protected_hashes = indexed_hashes.union(&snapshot.live_hashes).cloned().collect();
     let attachments_root = get_attachments_root_dir(app_handle)?;
     let thumbnails_root = get_thumbnails_root_dir(app_handle)?;
     let multimodal_root = get_multimodal_cache_dir(app_handle)?;
-    report.ghost_files += sweep_attachment_files(&attachments_root, &indexed_paths).await;
+    report.ghost_files += sweep_attachment_files(&attachments_root, &protected_hashes).await;
     report.ghost_files +=
         sweep_unindexed_derived_files(&thumbnails_root, &indexed_hashes, |name| {
             name.strip_suffix("_thumb.webp")

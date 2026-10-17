@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, watch } from 'vue';
+import { onUnmounted, ref, watch } from 'vue';
 import { useTarvenStore } from '../../../core/stores/tarvenStore';
 import { useOverlayStore } from '../../../core/stores/overlay';
 import { useModalHistory } from '../../../core/composables/useModalHistory';
@@ -9,17 +9,18 @@ const overlayStore = useOverlayStore();
 const { registerModal, unregisterModal } = useModalHistory();
 
 const modalId = 'TarvenSelector';
+const surfaceRef = ref<HTMLElement | null>(null);
 
 watch(() => tarvenStore.isSelectorOpen, (newVal) => {
   if (newVal) {
     tarvenStore.fetchRules();
     registerModal(modalId, () => {
       tarvenStore.isSelectorOpen = false;
-    });
+    }, () => surfaceRef.value);
   } else {
     unregisterModal(modalId);
   }
-});
+}, { immediate: true });
 
 const close = () => {
   tarvenStore.isSelectorOpen = false;
@@ -37,11 +38,7 @@ const toggleRuleState = (id: string) => {
   tarvenStore.toggleRule(id);
 };
 
-onMounted(() => {
-  if (tarvenStore.isSelectorOpen) {
-    tarvenStore.fetchRules();
-  }
-});
+onUnmounted(() => unregisterModal(modalId));
 </script>
 
 <template>
@@ -55,7 +52,7 @@ onMounted(() => {
 
     <!-- 抽屉体 (高颜值磨砂玻璃) -->
     <Transition name="slide-up">
-      <div v-if="tarvenStore.isSelectorOpen"
+      <div v-if="tarvenStore.isSelectorOpen" ref="surfaceRef" role="dialog" aria-modal="true" aria-label="VCPChatTarven 规则仓"
         v-guide="'tarven-selector'"
         class="vcp-viewport-bottom fixed bottom-0 left-0 right-0 z-sheet bg-white dark:bg-zinc-900 rounded-t-3xl shadow-2xl p-5 flex flex-col border-t border-black/10 dark:border-white/10"
         style="padding-right: calc(var(--vcp-safe-right, 0px) + 1.25rem); padding-bottom: calc(var(--vcp-safe-bottom, 48px) + 12px); padding-left: calc(var(--vcp-safe-left, 0px) + 1.25rem);">

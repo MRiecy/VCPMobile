@@ -44,8 +44,26 @@ pub struct ForegroundLease<R: Runtime> {
 impl<R: Runtime> ForegroundLease<R> {
     pub fn acquire(app: &AppHandle<R>, task: ForegroundTask, label: &str) -> Result<Self, String> {
         let tag = task.unique_tag();
-        let (_, priority, screen_keep_on) = task.policy();
-        acquire_foreground_inner(app, &tag, priority, label, screen_keep_on)?;
+        let (_, _priority, screen_keep_on) = task.policy();
+        #[cfg(target_os = "ios")]
+        {
+            crate::ios::run::<R, ()>(
+                app.clone(),
+                "acquireBackgroundExecution",
+                serde_json::json!({
+                    "tag": tag,
+                    "audioRequired": matches!(task, ForegroundTask::Stream),
+                    "screenKeepOn": screen_keep_on,
+                }),
+            )
+            .map_err(|error| {
+                crate::events::report_service_failure(app, "guardian", &error);
+                error
+            })?;
+            log::info!("[VcpMobilePlugin] iOS task resource acquired: tag={tag}, label={label}");
+        }
+        #[cfg(not(target_os = "ios"))]
+        acquire_foreground_inner(app, &tag, _priority, label, screen_keep_on)?;
         Ok(Self {
             app: app.clone(),
             tag: Some(tag),
@@ -64,7 +82,7 @@ impl<R: Runtime> Drop for ForegroundLease<R> {
     fn drop(&mut self) {
         if let Some(tag) = self.tag.take() {
             let app = self.app.clone();
-            // Mobile IPC waits for Android. Cancellation cleanup must not block
+            // Mobile IPC waits for the native owner. Cancellation cleanup must not block
             // the thread dropping the future (or a native event callback).
             tauri::async_runtime::spawn_blocking(move || {
                 let _ = release_foreground_inner(&app, &tag);
@@ -118,7 +136,15 @@ pub fn acquire_foreground_inner<R: Runtime>(
 /// 释放进程级前台锁 (语义化接口)
 pub fn release_foreground_inner<R: Runtime>(_app: &AppHandle<R>, tag: &str) -> Result<(), String> {
     #[cfg(target_os = "ios")]
-    crate::ios_not_implemented::<()>("release_foreground")?;
+    crate::ios::run::<R, ()>(
+        _app.clone(),
+        "releaseBackgroundExecution",
+        serde_json::json!({ "tag": tag }),
+    )
+    .map_err(|error| {
+        crate::events::report_service_failure(_app, "guardian", &error);
+        error
+    })?;
 
     #[cfg(target_os = "android")]
     {

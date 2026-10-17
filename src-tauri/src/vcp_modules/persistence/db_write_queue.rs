@@ -114,7 +114,7 @@ mod tests {
         .await
         .expect("seed queue parents");
         let db_state = DbState::new(pool.clone(), db_path);
-        let queue = DbWriteQueue::new(&db_state, 77);
+        let queue = DbWriteQueue::new(&db_state, 77, temp_dir.path().join("attachments"));
         (temp_dir, pool, db_state, queue)
     }
 
@@ -680,7 +680,7 @@ mod tests {
         let tx = conn.transaction().expect("begin message transaction");
         match tasks.pop().expect("coalesced task") {
             DbWriteTask::TopicMessages { key, writes } => {
-                DbWriteQueue::rusqlite_upsert_messages_batch(&tx, &key, writes)
+                DbWriteQueue::rusqlite_upsert_messages_batch(&tx, &key, writes, std::path::Path::new("attachments"))
                     .expect("write coalesced messages");
             }
             task => panic!("unexpected coalesced task: {task:?}"),
@@ -987,6 +987,7 @@ mod tests {
                 render_bytes: vec![1, 2, 3],
                 content_hash: "stale-hash".into(),
             }],
+            std::path::Path::new("attachments"),
         )
         .expect("guarded message batch");
 
@@ -1054,6 +1055,7 @@ mod tests {
             &tx,
             &TopicKey::new("agent", "agent-a", "missing-topic"),
             Vec::new(),
+            std::path::Path::new("attachments"),
         )
         .expect_err("even an empty message batch requires its live topic");
         assert!(missing_parent.to_string().contains("parent topic"));
@@ -1179,7 +1181,7 @@ impl DbWriteQueue {
         coalesced
     }
 
-    pub fn new(db_state: &DbState, session_id: u64) -> Self {
+    pub fn new(db_state: &DbState, session_id: u64, attachments_root: std::path::PathBuf) -> Self {
         let db_path = db_state.path.clone();
         let write_coordinator = db_state.write_coordinator().clone();
         // Keep bounded lookahead ahead of the single writer while preserving Pull's upstream
@@ -1231,6 +1233,7 @@ impl DbWriteQueue {
                     .await;
 
                 let db_path = db_path_for_worker.clone();
+                let attachments_root = attachments_root.clone();
                 let ch = conn_holder.clone();
                 let transaction_started = std::time::Instant::now();
 
@@ -1291,7 +1294,7 @@ impl DbWriteQueue {
                                 }
                             }
                             DbWriteTask::TopicMessages { key, writes } => {
-                                Self::rusqlite_upsert_messages_batch(&tx, &key, writes)?;
+                                Self::rusqlite_upsert_messages_batch(&tx, &key, writes, &attachments_root)?;
                             }
                             DbWriteTask::Flush { .. } => unreachable!(),
                         }
@@ -1825,6 +1828,7 @@ impl DbWriteQueue {
         tx: &rusqlite::Transaction,
         key: &TopicKey,
         mut writes: Vec<PreparedMessageWrite>,
+        attachments_root: &std::path::Path,
     ) -> rusqlite::Result<()> {
         let topic_is_live: bool = tx.query_row(
             "SELECT EXISTS(
@@ -2171,37 +2175,36 @@ impl DbWriteQueue {
                     {
                         readiness.clone()
                     } else {
-                        let current_path: String = tx.query_row(
-                            "SELECT internal_path FROM attachments WHERE hash = ?",
+                        let (stored_path, size): (String, i64) = tx.query_row(
+                            "SELECT internal_path, size FROM attachments WHERE hash = ?",
                             [&hash],
-                            |row| row.get(0),
+                            |row| Ok((row.get(0)?, row.get(1)?)),
                         )?;
-                        let clean_path = current_path.trim_start_matches("file://");
-                        let verified_path = if clean_path.is_empty() {
-                            None
-                        } else {
-                            match std::fs::metadata(clean_path) {
-                                Ok(metadata) if metadata.is_file() => Some(clean_path),
-                                Ok(_) => None,
-                                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                                Err(error) => {
-                                    return Err(Self::sync_contract_error(format!(
-                                        "Failed to inspect local attachment {hash}: {error}"
-                                    )));
-                                }
+                        let size = u64::try_from(size).map_err(|_| Self::sync_contract_error("Attachment size is invalid"))?;
+                        let (current_path, verified_path) = match crate::vcp_modules::file_manager::current_attachment_path(
+                            attachments_root, &hash, &stored_path,
+                        ) {
+                            Ok(path) => {
+                                let current_path = path.map(|path| path.to_string_lossy().into_owned()).unwrap_or_default();
+                                let verified = crate::vcp_modules::file_manager::resolve_existing_attachment_path(
+                                    attachments_root, &hash, &stored_path, size,
+                                ).unwrap_or_else(|error| {
+                                    log::warn!("[DbWriteQueue] Local attachment {hash} remains unavailable: {error}");
+                                    None
+                                });
+                                (current_path, verified)
+                            }
+                            Err(error) => {
+                                log::warn!("[DbWriteQueue] Keeping unresolved local attachment identity {hash}: {error}");
+                                (stored_path.clone(), None)
                             }
                         };
+                        if current_path != stored_path {
+                            tx.execute("UPDATE attachments SET internal_path = ? WHERE hash = ?", [&current_path, &hash])?;
+                        }
                         let readiness = match verified_path {
-                            Some(path) => (format!("file://{path}"), "ready".to_string()),
-                            None => {
-                                if !current_path.trim().is_empty() {
-                                    tx.execute(
-                                        "UPDATE attachments SET internal_path = '' WHERE hash = ?",
-                                        [&hash],
-                                    )?;
-                                }
-                                (String::new(), "desktop_only".to_string())
-                            }
+                            Some(path) => (format!("file://{}", path.to_string_lossy()), "ready".to_string()),
+                            None => (String::new(), "desktop_only".to_string()),
                         };
                         readiness_by_hash.insert(hash.clone(), readiness.clone());
                         readiness

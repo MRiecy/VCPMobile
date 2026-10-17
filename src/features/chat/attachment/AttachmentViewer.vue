@@ -17,6 +17,7 @@ const emit = defineEmits(["close", "open-external", "share-file", "export-file"]
 
 const { registerModal, unregisterModal } = useModalHistory();
 const modalId = 'AttachmentViewer';
+const surfaceRef = ref<HTMLElement | null>(null);
 const notificationStore = useNotificationStore();
 const hasLocalCapability = computed(() =>
   !!props.file &&
@@ -82,7 +83,7 @@ watch([() => props.isOpen, () => props.file], async ([open, file], _old, onClean
   isLoading.value = false;
   if (!open || !file) return;
   if (!hasLocalCapability.value) { close(); return; }
-  registerModal(modalId, close);
+  registerModal(modalId, close, () => surfaceRef.value);
   registered = true;
   if (!file.hash) {
     previewError.value = "附件缺少本地资源标识，请使用系统预览。";
@@ -152,6 +153,10 @@ const saveToAlbum = async () => {
   <Transition name="viewer-fade">
     <div
       v-show="isOpen && file && hasLocalCapability"
+      ref="surfaceRef"
+      role="dialog"
+      aria-modal="true"
+      :aria-label="file?.name || '附件预览'"
       class="vcp-attachment-viewer vcp-viewport-surface vcp-safe-inline fixed inset-0 z-viewer flex flex-col pointer-events-auto"
       @click.self="close"
     >
