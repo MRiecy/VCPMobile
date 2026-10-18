@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, ref, watch } from 'vue';
-import SettingsCard from '../../../components/settings/SettingsCard.vue';
+import SettingsSection from '../../../components/settings/SettingsSection.vue';
 import TopicSummarySection from '../components/TopicSummarySection.vue';
 import MaintenanceSection from '../components/MaintenanceSection.vue';
 import { SUMMARY_FIELDS } from '../editing/fieldSets';
@@ -30,23 +30,19 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
 </script>
 
 <template>
-  <div class="space-y-6">
+  <div class="flex flex-col gap-6">
     <p v-if="error" role="alert" class="text-sm text-red-500 break-words">
       {{ error }}
       <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading" @click="reload">重试</button>
     </p>
-    <section v-if="draft">
-      <h3 class="text-[11px] font-black tracking-[0.15em] opacity-50 mb-3 px-1">话题总结</h3>
-      <SettingsCard>
-        <TopicSummarySection :model-value="draft.topicSummaryModel" :disabled="disabled"
-          @update:model-value="setModel" @save="save" @open-model-selector="openSelector" />
-      </SettingsCard>
-    </section>
+    <SettingsSection v-if="draft" title="话题总结">
+      <TopicSummarySection :model-value="draft.topicSummaryModel" :disabled="disabled"
+        @update:model-value="setModel" @save="save" @open-model-selector="openSelector" />
+    </SettingsSection>
     <p v-else-if="loading" class="text-sm opacity-60">正在加载设置...</p>
-    <section>
-      <h3 class="text-[11px] font-black tracking-[0.15em] opacity-50 mb-3 px-1">数据维护</h3>
-      <SettingsCard><MaintenanceSection :active="active" :disabled="disabled" /></SettingsCard>
-    </section>
+    <SettingsSection title="数据维护">
+      <MaintenanceSection :active="active" :disabled="disabled" />
+    </SettingsSection>
     <p v-if="leaving" role="status" class="text-xs opacity-60">正在保存设置...</p>
     <ModelSelector v-if="selectorMounted && active" v-model="showSelector"
       :current-model="draft?.topicSummaryModel" title="选择总结专用模型" @select="setModel" />

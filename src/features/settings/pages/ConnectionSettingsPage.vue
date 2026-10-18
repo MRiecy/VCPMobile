@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { useSettingsStore, type AppSettings } from '../../../core/stores/settings';
-import SettingsCard from '../../../components/settings/SettingsCard.vue';
+import SettingsSection from '../../../components/settings/SettingsSection.vue';
 import VcpCoreSettingsSection from '../components/VcpCoreSettingsSection.vue';
 import SyncSettingsSection from '../components/SyncSettingsSection.vue';
 import ConfigBackupSection from '../components/ConfigBackupSection.vue';
@@ -62,30 +62,21 @@ defineExpose({
 </script>
 
 <template>
-  <div class="space-y-6">
+  <div class="flex flex-col gap-6">
     <p v-if="error" role="alert" class="text-sm text-red-500 break-words">
       {{ error }}
       <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading" @click="reload">重试</button>
     </p>
     <template v-if="draft">
-      <section>
-        <h3 class="text-[11px] font-black tracking-[0.15em] opacity-50 mb-3 px-1">核心连接</h3>
-        <SettingsCard>
-          <VcpCoreSettingsSection :settings="draft" :active="active" :disabled="disabled" :commit="commitForAction" @edit="edit" />
-        </SettingsCard>
-      </section>
-      <section>
-        <h3 class="text-[11px] font-black tracking-[0.15em] opacity-50 mb-3 px-1">数据同步</h3>
-        <SettingsCard>
-          <SyncSettingsSection :settings="draft" :active="active" :disabled="disabled" :commit="commitForAction" @edit="edit" />
-        </SettingsCard>
-      </section>
-      <section>
-        <h3 class="text-[11px] font-black tracking-[0.15em] opacity-50 mb-3 px-1">配置备份</h3>
-        <SettingsCard>
-          <ConfigBackupSection :active="active" :disabled="disabled" :commit="commitForAction" :apply-import="applyImport" />
-        </SettingsCard>
-      </section>
+      <SettingsSection title="核心连接">
+        <VcpCoreSettingsSection :settings="draft" :active="active" :disabled="disabled" :commit="commitForAction" @edit="edit" />
+      </SettingsSection>
+      <SettingsSection title="数据同步">
+        <SyncSettingsSection :settings="draft" :active="active" :disabled="disabled" :commit="commitForAction" @edit="edit" />
+      </SettingsSection>
+      <SettingsSection title="配置备份">
+        <ConfigBackupSection :active="active" :disabled="disabled" :commit="commitForAction" :apply-import="applyImport" />
+      </SettingsSection>
     </template>
     <p v-else-if="loading" class="text-sm opacity-60">正在加载设置...</p>
     <p v-if="leaving" role="status" class="text-xs opacity-60">正在保存设置...</p>

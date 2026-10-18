@@ -426,7 +426,7 @@ const showModeHelp = ref(false);
         </section>
 
         <!-- 2. Members Section -->
-        <SettingsSection title="群组成员" description="勾选要加入群组的助手，并设置其触发标签">
+        <SettingsSection title="群组成员" description="勾选要加入群组的助手，并设置其触发标签" :card="false" accent-color="bg-blue-500">
           <!-- 成员多时容器限高滚动（max-h-80 = 5 行成员），避免列表无限拉长设置页 -->
           <div class="card-modern !p-0 max-h-80 overflow-y-auto vcp-scrollable">
             <div v-for="agent in allAgents" :key="agent.id"
@@ -455,7 +455,7 @@ const showModeHelp = ref(false);
         </SettingsSection>
 
         <!-- 3. Chat Modes -->
-        <SettingsSection title="群聊模式" accent-color="bg-purple-500">
+        <SettingsSection title="群聊模式" :card="false" accent-color="bg-purple-500">
           <template #action>
             <button
               class="w-6 h-6 flex items-center justify-center rounded-full text-primary-text opacity-40 hover:opacity-80 active:text-blue-500 active:scale-90 transition-all"
@@ -497,7 +497,7 @@ const showModeHelp = ref(false);
         </SettingsSection>
 
         <!-- 4. Model Settings -->
-        <SettingsSection title="模型设置" accent-color="bg-orange-500">
+        <SettingsSection title="模型设置" :card="false" accent-color="bg-orange-500">
           <div class="card-modern">
             <SettingsRow title="启用群组统一模型" description="所有成员强制使用同一模型，忽略其各自配置">
               <template #action>
@@ -523,7 +523,7 @@ const showModeHelp = ref(false);
         </SettingsSection>
 
         <!-- 5. Prompts -->
-        <SettingsSection title="提示词设置" accent-color="bg-green-500">
+        <SettingsSection title="提示词设置" :card="false" accent-color="bg-green-500">
           <div class="space-y-4">
             <div class="card-modern">
               <label class="text-[10px] uppercase font-bold opacity-40 mb-2 block">群组提示词 (Group Prompt)</label>

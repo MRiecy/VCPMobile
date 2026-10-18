@@ -198,7 +198,7 @@ onScopeDispose(() => fluidBgRef.value?.setActive(false));
               class="flex-1 min-h-0"
               :class="displayedPage.frame === 'viewport'
                 ? 'overflow-hidden flex flex-col'
-                : 'overflow-y-auto px-3 pt-6 space-y-6 no-rubber-band pb-[calc(var(--vcp-safe-bottom,48px))]'"
+                : 'overflow-y-auto px-3 pt-3 no-rubber-band pb-[calc(var(--vcp-safe-bottom,0px)+32px)]'"
             >
               <div v-if="pageError" class="p-3 space-y-3">
                 <p role="alert" class="text-sm text-red-500">页面加载失败：{{ pageError }}</p>

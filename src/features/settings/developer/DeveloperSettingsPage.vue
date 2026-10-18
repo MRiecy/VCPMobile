@@ -17,7 +17,7 @@ function disableDeveloperMode() {
 </script>
 
 <template>
-  <div :inert="!active" class="space-y-6" data-testid="developer-settings-page">
+  <div :inert="!active" class="flex flex-col gap-6" data-testid="developer-settings-page">
     <HapticsDebugPanel :active="active && developerSettings.enabled" />
     <div class="border-t border-[var(--vcp-border-subtle)] pt-4">
       <button type="button" :disabled="!active" class="min-h-11 w-full border border-[var(--vcp-border-subtle)] rounded-lg px-3 text-sm text-[var(--primary-text)] active:bg-[var(--vcp-highlight-bg-10)] transition-colors"

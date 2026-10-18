@@ -55,7 +55,7 @@ const resetAll = async () => {
 </script>
 
 <template>
-  <div class="space-y-6">
+  <div class="flex flex-col gap-6">
     <!-- 顶部说明 -->
     <div class="flex gap-3 p-3.5 rounded-xl bg-blue-500/10 border border-blue-500/20 text-blue-600 dark:text-blue-400">
       <Play class="w-5 h-5 shrink-0 mt-0.5" />

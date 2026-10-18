@@ -19,7 +19,7 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
 </script>
 
 <template>
-  <div class="space-y-4">
+  <div class="flex flex-col gap-4">
     <p v-if="error" role="alert" class="text-sm text-red-500 break-words">
       {{ error }}
       <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading" @click="reload">重试</button>
