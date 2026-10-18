@@ -51,6 +51,31 @@ describe('Haptics Debug & Native Haptics Suite', () => {
     });
   });
 
+  it('keeps controls enabled during feedback while ignoring overlapping requests', async () => {
+    let resolve!: (result: { submitted: boolean }) => void;
+    mockInvoke('plugin:vcp-mobile|trigger_haptic_feedback', () => new Promise((done) => { resolve = done; }));
+    wrapper = mount(HapticsDebugPanel, { props: { active: true } });
+    const send = wrapper.findAll('button').find((b) => b.text().startsWith('发送消息'))!;
+    const complete = wrapper.findAll('button').find((b) => b.text().startsWith('回复完整生成'))!;
+    const web = wrapper.findAll('button').find((b) => b.text().startsWith('10ms 脉冲'))!;
+    await send.trigger('click');
+    expect(wrapper.get('fieldset').element.disabled).toBe(false);
+    expect(wrapper.get('fieldset').attributes('aria-busy')).toBe('true');
+    await send.trigger('click');
+    await complete.trigger('click');
+    await web.trigger('click');
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(navigator.vibrate)).not.toHaveBeenCalled();
+
+    resolve({ submitted: true });
+    await flushPromises();
+    expect(wrapper.get('fieldset').attributes('aria-busy')).toBe('false');
+    await complete.trigger('click');
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+    resolve({ submitted: true });
+    await flushPromises();
+  });
+
   it('ignores late feedback after leaving and blocks hidden interactions', async () => {
     let resolve!: (result: { submitted: boolean }) => void;
     mockInvoke('plugin:vcp-mobile|trigger_haptic_feedback', () => new Promise((done) => { resolve = done; }));

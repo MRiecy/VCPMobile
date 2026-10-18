@@ -47,7 +47,7 @@ async function testHaptic(payload: NativeHapticFeedbackPayload, label: string) {
     if (!props.active || request !== generation) return;
     lastLog.title = label;
     lastLog.type = `${payload.type}${payload.effect ? ` (${payload.effect})` : ''}`;
-    lastLog.detail = `${result.submitted ? '已提交' : '未提交'} · ${JSON.stringify(result)}`;
+    lastLog.detail = `${result.submitted ? '已提交（未确认实际振动）' : '未提交'} · ${JSON.stringify(result)}`;
     lastLog.time = formatTime();
     lastLog.success = result.submitted;
   } finally {
@@ -92,7 +92,7 @@ function testWebVibrate(ms: number, label: string) {
 
     <p class="mb-3 text-xs text-[var(--secondary-text)]">测试仅试听效果，不修改聊天偏好。系统与设备决定是否实际播放触感。</p>
     <SettingsCard v-if="isExpanded">
-      <fieldset :disabled="!active || busy || (!isAndroid && !isIOS)" class="border-0 p-0 m-0 min-w-0">
+      <fieldset :disabled="!active || (!isAndroid && !isIOS)" :aria-busy="busy" class="border-0 p-0 m-0 min-w-0">
       <div class="space-y-4 text-xs">
         <!-- 实时监控状态 -->
         <div class="p-2.5 rounded-lg bg-black/10 dark:bg-white/5 border border-black/5 dark:border-white/10 font-mono">
@@ -143,9 +143,9 @@ function testWebVibrate(ms: number, label: string) {
         <div v-if="isAndroid">
           <div class="text-[11px] font-bold text-[var(--primary-text)] mb-1.5 flex items-center gap-1.5">
             <span>1. 系统视图触感 (View Haptics)</span>
-            <span class="text-[10px] font-mono px-1 py-0.2 rounded bg-blue-500/10 text-blue-400">极轻·打字同款</span>
+            <span class="text-[10px] font-mono px-1 py-0.2 rounded bg-blue-500/10 text-blue-400">系统控制</span>
           </div>
-          <p class="text-[10px] text-[var(--secondary-text)] mb-2">Android 系统输入法/原生控件同款单瞬态触感，几乎无马达嗡鸣：</p>
+          <p class="text-[10px] text-[var(--secondary-text)] mb-2">请求 Android 系统控件触感；“已提交”仅表示 API 接受请求，系统设置与设备实现决定是否播放。此项不代表正式消息触感的可用性。</p>
           <div class="grid grid-cols-2 gap-2">
             <button
               type="button"
@@ -153,7 +153,7 @@ function testWebVibrate(ms: number, label: string) {
               @click="testViewHaptic('keyboard_tap', '键盘轻点 (KEYBOARD_TAP)')"
             >
               <span>键盘轻点 (TAP)</span>
-              <small>打字同款·极轻脆</small>
+              <small>系统键盘轻点请求</small>
             </button>
             <button
               type="button"
@@ -161,7 +161,7 @@ function testWebVibrate(ms: number, label: string) {
               @click="testViewHaptic('clock_tick', '时钟刻度 (CLOCK_TICK)')"
             >
               <span>时钟刻度 (TICK)</span>
-              <small>微弱齿轮刻度感</small>
+              <small>系统刻度反馈请求</small>
             </button>
             <button
               type="button"
@@ -169,7 +169,7 @@ function testWebVibrate(ms: number, label: string) {
               @click="testViewHaptic('virtual_key', '虚拟按键 (VIRTUAL_KEY)')"
             >
               <span>虚拟按键 (KEY)</span>
-              <small>经典系统按键感</small>
+              <small>系统虚拟按键请求</small>
             </button>
             <button
               type="button"
@@ -177,7 +177,7 @@ function testWebVibrate(ms: number, label: string) {
               @click="testViewHaptic('confirm', '操作确认 (CONFIRM)')"
             >
               <span>操作确认 (CONFIRM)</span>
-              <small>Android 11+ 完成感</small>
+              <small>Android 11+ 确认请求</small>
             </button>
             <button
               type="button"
@@ -185,7 +185,7 @@ function testWebVibrate(ms: number, label: string) {
               @click="testViewHaptic('reject', '操作拒绝 (REJECT)')"
             >
               <span>操作拒绝 (REJECT)</span>
-              <small>Android 11+ 双顿挫</small>
+              <small>Android 11+ 拒绝请求</small>
             </button>
             <button
               type="button"

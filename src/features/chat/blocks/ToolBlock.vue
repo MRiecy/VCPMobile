@@ -139,7 +139,7 @@ const isImageValue = (key: string, value: string): boolean => {
     isExpanded ? 'shadow-md' : 'shadow-sm'
   ]">
     <!-- Header -->
-    <div class="tool-header-content flex items-center justify-between p-3 cursor-pointer select-none"
+    <div class="tool-header-content flex items-center justify-between p-3 cursor-pointer select-none" data-longpress-native
       @click="toggleExpand">
       <div class="flex items-center gap-2">
         <div class="tool-icon-container p-1.5 rounded-lg">

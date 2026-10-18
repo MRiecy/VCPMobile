@@ -1,7 +1,27 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { defineComponent } from 'vue';
-import { mount } from '@vue/test-utils';
+import { enableAutoUnmount, mount } from '@vue/test-utils';
 import { vLongpress } from '@/core/directives/longpress';
+
+enableAutoUnmount(afterEach);
+
+function pointer(target: Element, type: string, init: PointerEventInit = {}): PointerEvent {
+  const event = new PointerEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    pointerId: 17,
+    pointerType: 'touch',
+    isPrimary: true,
+    button: 0,
+    buttons: type === 'pointerup' || type === 'pointercancel' ? 0 : 1,
+    detail: type === 'click' ? 1 : 0,
+    clientX: 40,
+    clientY: 30,
+    ...init,
+  });
+  target.dispatchEvent(event);
+  return event;
+}
 
 function mountLongpressButton(
   longpress: () => void,
@@ -16,6 +36,7 @@ function mountLongpressButton(
   });
 
   return mount(component, {
+    attachTo: document.body,
     global: { directives: { longpress: vLongpress } },
   });
 }
@@ -36,17 +57,20 @@ describe('longpress presentation shortcut', () => {
     const wrapper = mountLongpressButton(longpress, click, true);
     const button = wrapper.get('button');
 
-    await button.trigger('touchstart');
+    pointer(button.element, 'pointerdown');
     vi.advanceTimersByTime(599);
     expect(longpress).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1);
     expect(longpress).toHaveBeenCalledTimes(1);
 
-    await button.trigger('touchend');
-    await button.trigger('click');
+    pointer(button.element, 'pointerup');
+    pointer(button.element, 'click', { buttons: 0 });
     expect(click).not.toHaveBeenCalled();
 
-    await button.trigger('click');
+    pointer(button.element, 'pointerdown', { pointerId: 18 });
+    vi.advanceTimersByTime(100);
+    pointer(button.element, 'pointerup', { pointerId: 18 });
+    pointer(button.element, 'click', { pointerId: 18, buttons: 0 });
     expect(click).toHaveBeenCalledTimes(1);
     wrapper.unmount();
   });
@@ -57,43 +81,41 @@ describe('longpress presentation shortcut', () => {
     const wrapper = mountLongpressButton(longpress, click, false);
     const button = wrapper.get('button');
 
-    await button.trigger('touchstart');
+    pointer(button.element, 'pointerdown');
     vi.advanceTimersByTime(600);
-    await button.trigger('touchend');
-    await button.trigger('click');
+    pointer(button.element, 'pointerup');
+    pointer(button.element, 'click', { buttons: 0 });
 
     expect(longpress).toHaveBeenCalledTimes(1);
     expect(click).toHaveBeenCalledTimes(1);
     wrapper.unmount();
   });
 
-  it('cancels on movement and ignores a non-primary mouse button', async () => {
+  it('cancels on touch movement and does not restart from a compatibility mouse stream', async () => {
     const longpress = vi.fn();
     const wrapper = mountLongpressButton(longpress, vi.fn(), true);
     const button = wrapper.get('button');
 
-    await button.trigger('touchstart');
-    await button.trigger('touchmove');
+    pointer(button.element, 'pointerdown');
+    pointer(button.element, 'pointermove', { clientX: 65 });
     vi.advanceTimersByTime(700);
     expect(longpress).not.toHaveBeenCalled();
 
-    await button.trigger('mousedown', { button: 2 });
+    pointer(button.element, 'pointerup', { clientX: 65 });
+    button.element.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 65, clientY: 30 }));
+    button.element.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, clientX: 65, clientY: 30 }));
     vi.advanceTimersByTime(700);
     expect(longpress).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 
-  it('cancels pending presses on touch cancellation and pointer leave', async () => {
+  it('cancels a pending press on touch-pointer cancellation', async () => {
     const longpress = vi.fn();
     const wrapper = mountLongpressButton(longpress, vi.fn(), true);
     const button = wrapper.get('button');
 
-    await button.trigger('touchstart');
-    await button.trigger('touchcancel');
-    vi.advanceTimersByTime(700);
-
-    await button.trigger('mousedown', { button: 0 });
-    await button.trigger('mouseleave');
+    pointer(button.element, 'pointerdown');
+    pointer(button.element, 'pointercancel');
     vi.advanceTimersByTime(700);
 
     expect(longpress).not.toHaveBeenCalled();
@@ -105,11 +127,99 @@ describe('longpress presentation shortcut', () => {
     const wrapper = mountLongpressButton(longpress, vi.fn(), true);
     const button = wrapper.get('button');
 
-    await button.trigger('touchstart');
+    pointer(button.element, 'pointerdown');
     vi.advanceTimersByTime(600);
-    await button.trigger('contextmenu');
+    pointer(button.element, 'contextmenu', { button: 2 });
 
     expect(longpress).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it.each(['pointer', 'mouse'] as const)('accepts the observed Android compatibility sequence with a %s click without toggling the theme', (clickKind) => {
+    const longpress = vi.fn();
+    const click = vi.fn();
+    const wrapper = mountLongpressButton(longpress, click, true);
+    const button = wrapper.get('button').element;
+
+    pointer(button, 'pointerdown');
+    const touch = new Touch({ identifier: 17, target: button, clientX: 40, clientY: 30 });
+    button.dispatchEvent(new TouchEvent('touchstart', { bubbles: true, touches: [touch], changedTouches: [touch] }));
+    vi.advanceTimersByTime(492);
+    button.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, clientX: 40, clientY: 30 }));
+    vi.advanceTimersByTime(2);
+    const context = pointer(button, 'contextmenu', { button: 2, buttons: 0 });
+    vi.advanceTimersByTime(547);
+    expect(longpress).toHaveBeenCalledTimes(1);
+    expect(context.defaultPrevented).toBe(true);
+
+    pointer(button, 'pointerup');
+    button.dispatchEvent(new TouchEvent('touchend', { bubbles: true, touches: [], changedTouches: [touch] }));
+    for (const type of ['mousemove', 'mousedown', 'mouseup']) {
+      button.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, button: 0, clientX: 40, clientY: 30 }));
+    }
+    if (clickKind === 'pointer') pointer(button, 'click', { buttons: 0 });
+    else button.dispatchEvent(new MouseEvent('click', {
+      bubbles: true, cancelable: true, button: 0, detail: 1, clientX: 40, clientY: 30,
+    }));
+    vi.advanceTimersByTime(800);
+    expect(click).not.toHaveBeenCalled();
+    expect(longpress).toHaveBeenCalledTimes(1);
+
+    pointer(button, 'pointerdown', { pointerId: 18 });
+    vi.advanceTimersByTime(80);
+    pointer(button, 'pointerup', { pointerId: 18 });
+    pointer(button, 'click', { pointerId: 18, buttons: 0 });
+    expect(click).toHaveBeenCalledTimes(1);
+    expect(longpress).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps release-click suppression for a finger held well beyond the native contextmenu', () => {
+    const longpress = vi.fn();
+    const click = vi.fn();
+    const wrapper = mountLongpressButton(longpress, click, true);
+    const button = wrapper.get('button').element;
+    pointer(button, 'pointerdown');
+    vi.advanceTimersByTime(500);
+    pointer(button, 'contextmenu', { button: 2, buttons: 0 });
+    vi.advanceTimersByTime(4_500);
+    pointer(button, 'pointerup');
+    pointer(button, 'click', { buttons: 0 });
+    expect(longpress).toHaveBeenCalledTimes(1);
+    expect(click).not.toHaveBeenCalled();
+  });
+
+  it('does not let late movement or release from another pointer cancel the held finger', () => {
+    const longpress = vi.fn();
+    const wrapper = mountLongpressButton(longpress, vi.fn(), true);
+    const button = wrapper.get('button').element;
+    pointer(button, 'pointerdown', { pointerId: 25 });
+    vi.advanceTimersByTime(300);
+    pointer(button, 'pointermove', { pointerId: 24, clientX: 150 });
+    pointer(button, 'pointerup', { pointerId: 24 });
+    vi.advanceTimersByTime(300);
+    expect(longpress).toHaveBeenCalledTimes(1);
+    pointer(button, 'pointerup', { pointerId: 25 });
+  });
+
+  it('cancels a press released outside the original button before the hold threshold', () => {
+    const longpress = vi.fn();
+    const wrapper = mountLongpressButton(longpress, vi.fn(), true);
+    pointer(wrapper.get('button').element, 'pointerdown');
+    vi.advanceTimersByTime(250);
+    pointer(document.body, 'pointerup');
+    vi.advanceTimersByTime(500);
+    expect(longpress).not.toHaveBeenCalled();
+  });
+
+  it('expires click suppression after a completed press receives touchcancel', async () => {
+    const click = vi.fn();
+    const wrapper = mountLongpressButton(vi.fn(), click, true);
+    pointer(wrapper.get('button').element, 'pointerdown');
+    vi.advanceTimersByTime(600);
+    pointer(wrapper.get('button').element, 'pointercancel');
+    vi.advanceTimersByTime(2_000);
+    await wrapper.get('button').trigger('click');
+    expect(click).toHaveBeenCalledTimes(1);
     wrapper.unmount();
   });
 });

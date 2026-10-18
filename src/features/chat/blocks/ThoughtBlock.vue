@@ -40,7 +40,7 @@ function escapeHtml(text: string): string {
 
 <template>
   <div class="vcp-thought-block">
-    <div class="vcp-thought-header" @click="toggleExpand">
+    <div class="vcp-thought-header" data-longpress-native @click="toggleExpand">
       <span class="vcp-thought-icon">🧠</span>
       <span class="vcp-thought-label flex items-center gap-1">
         {{ block.theme || "元思考链" }}

@@ -27,7 +27,8 @@
 tests/
 ├── e2e-android/scripts/
 │   ├── adb-env.cjs                 # ADB 定位、设备选择与 Debug 包常量
-│   └── android-debug-agent.cjs     # doctor/dev/status/logs/snapshot/database-backup 等统一入口
+│   ├── android-debug-agent.cjs     # doctor/dev/status/logs/snapshot/database-backup 等统一入口
+│   └── android-gesture-check.cjs   # gesture-check：固定 Debug WebView 目标的触屏检查与有界事件回放
 └── perf/scripts/
     ├── measure_apk_size.cjs        # APK 文件与可读取 section 的体积报告
     ├── measure_startup_adb.cjs     # adb am start -W 冷启动采样
@@ -53,6 +54,7 @@ tests/
 - `dev` 只建立并清理本次 supervisor 实际拥有的 reverse；已有同值映射可以复用但不能冒领，冲突映射不能覆盖。
 - `stop` 只收敛当前 supervisor 和自有映射；禁止执行全局 `adb reverse --remove-all`。
 - 日志只读取当前 Debug 主进程 PID，并保持行数上限；进程不存在时不回退到全局 logcat，任何路径都不得清空设备日志。
+- `gesture-check` 只连接指定 USB 设备的 Debug PID socket，使用本次分配的临时 forward；固定主题按钮和普通正文两种目标，不接受任意选择器、脚本、包名或页面 URL。输出绑定实际加载的指令与文档身份，CDP 输入和观测序列回放明确区别于手指实测。
 - 截图必须由用户命令或显式参数触发，一次只采集一张；输出只允许位于仓库或系统临时目录。
 
 ---

@@ -948,7 +948,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div ref="messageContentRef" v-longpress="showMessageContextMenu"
+  <div ref="messageContentRef" v-longpress.message="showMessageContextMenu"
     class="vcp-message-item flex flex-col w-full mb-6 px-1 min-w-0" :data-message-id="message.id"
     :data-role="message.role">
     

@@ -46,6 +46,7 @@ Commands:
   stop         Ask the active dev supervisor to stop and clean owned tunnels
   install      Verify an APK application id, then install only the Debug package
   grant        Best-effort runtime grants for only the Debug package
+  gesture-check  Check theme/message long-press through the selected Debug WebView
   database-backup  Stop Debug and preserve its SQLite DB/WAL/SHM under .agent
 
 Options:
@@ -87,8 +88,8 @@ function parseArgs(argv) {
     if (token === '--') {
       continue;
     }
-    if (command === 'database-backup' && !['--serial', '--json', '--help', '-h'].includes(token)) {
-      throw new Error('database-backup accepts only --serial and --json');
+    if (['database-backup', 'gesture-check'].includes(command) && !['--serial', '--json', '--help', '-h'].includes(token)) {
+      throw new Error(`${command} accepts only --serial and --json`);
     }
     if (token === '--serial') {
       options.serial = requireValue(tokens, ++index, token);
@@ -939,6 +940,11 @@ async function main(argv = process.argv.slice(2)) {
   if (command === 'stop') return commandStop(options);
   if (command === 'install') return commandInstall(options);
   if (command === 'grant') return commandGrant(options);
+  if (command === 'gesture-check') {
+    const result = await require('./android-gesture-check.cjs').runGestureCheck(options);
+    printPayload(options, result);
+    return result.status === 'passed' ? 0 : 1;
+  }
   throw new Error(`Unknown command: ${command}`);
 }
 

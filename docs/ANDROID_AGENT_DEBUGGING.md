@@ -31,9 +31,12 @@ Agent Android Debug 入口。它解决四个问题：代理/TUN 环境下的 USB
 | `pnpm android:debug:install -- --apk <path>` | 用 `aapt` 验证 application id 后安装 Debug APK | 是，仅验证通过的 Debug APK |
 | `pnpm android:debug:grant` | Debug 包普通运行时权限 best-effort 预授权 | 是，仅 Debug 包 |
 | `pnpm android:debug -- database-backup --serial <id> --json` | 停止 Debug 后保全 SQLite DB/WAL/SHM 文件组 | 仅停止 Debug；数据库只读导出 |
+| `pnpm android:debug -- gesture-check --serial <id> --json` | 在当前 Debug WebView 检查主题按钮与正文长按 | 是，仅固定目标的 CDP 触屏输入与本次临时 forward |
 
 所有命令接受 `--serial <id>`。`doctor/status/logs/snapshot/screenshot/install/grant`
 支持 `--json`；`dev --json` 输出逐行 NDJSON 事件。
+
+`gesture-check` 只接受显式 USB `--serial` 与 `--json`，仅连接当前 Debug PID 的 WebView socket 和允许的开发页面。它记录实际已加载指令的源码指纹、文档身份及有界事件；每个固定目标分别运行浏览器持按和已观测 Android 兼容事件顺序回放。回放的 `mousemove/contextmenu` 明确标记为合成事件，不能代替手指操作证据。工具不读取消息正文、不暴露任意脚本或选择器入口，使用 `touchCancel` 释放触点、Escape 关闭本次菜单，finally 释放观察器和自有 forward；不验证抬手产生的 click，后者由独立事件验证和手指体验补齐。
 
 `database-backup` 只接受 `--serial`、`--json` 和帮助参数。它确认 Debug 进程停止后，
 从固定包私有目录流式读取 `vcp_avatar.db` 及实际存在的 WAL/SHM，写入新建的

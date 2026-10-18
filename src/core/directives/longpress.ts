@@ -1,155 +1,253 @@
 import type { Directive, DirectiveBinding } from 'vue';
+import { MERMAID_CONTENT_SELECTOR } from '../utils/astRenderer';
 
-export const vLongpress: Directive = {
-  mounted(el: HTMLElement, binding: DirectiveBinding) {
-    if (typeof binding.value !== 'function') {
-      console.warn('v-longpress requires a function value');
-      return;
-    }
+const CONTROLS = 'input, textarea, select, a, button, summary, [role="button"], [role="link"], [contenteditable]:not([contenteditable="false"])';
+const MESSAGE_CONTROLS = `${CONTROLS}, pre, [data-longpress-native], [data-vcp-button], [onclick], [oncontextmenu], [ontouchstart], [onpointerdown], video, audio, iframe`;
 
-    const callback = binding.value;
-    const delay = 600; // 长按触发时间 ms
-    const suppressClick = binding.modifiers['suppress-click'] === true;
-    let pressTimer: number | null = null;
-    let suppressionExpiryTimer: number | null = null;
-    let isTouchMoved = false;
-    let didLongPress = false;
-    let lastLongPressAt: number | null = null;
+type Callback = (event: Event) => void;
+type LongpressElement = HTMLElement & { _longpressCleanup?: () => void };
 
-    const ownsGesture = (event: Event) => {
-      const selection = window.getSelection();
-      if (selection && !selection.isCollapsed) return false;
-      const target = event.target instanceof Element ? event.target : null;
-      if (!target) return true;
-      if (el.matches('button, a, [role="button"]')) return true;
-      // A directive on a button still owns that button. Ancestor message actions
-      // must yield to text selection and independently interactive descendants.
-      const owner = target.closest('input, textarea, select, a, button, [role="button"], [contenteditable="true"], img, svg, canvas, video, audio, iframe, .select-text, .vcp-markdown-block, .ast-render-container');
-      return !owner || owner === el;
-    };
+interface Options {
+  callback: Callback | null;
+  suppressClick: boolean;
+  messageSurface: boolean;
+}
 
-    const clearSuppressionExpiry = () => {
-      if (suppressionExpiryTimer !== null) {
-        clearTimeout(suppressionExpiryTimer);
-        suppressionExpiryTimer = null;
-      }
-    };
+interface TouchGesture {
+  pointerId: number;
+  x: number;
+  y: number;
+  target: Element;
+  startEvent: PointerEvent;
+  timer: number | null;
+  fired: boolean;
+  cancelled: boolean;
+}
 
-    const armSuppressionExpiry = () => {
-      if (!suppressClick || !didLongPress) return;
-      clearSuppressionExpiry();
-      suppressionExpiryTimer = window.setTimeout(() => {
-        didLongPress = false;
-        suppressionExpiryTimer = null;
-      }, 700);
-    };
+interface Controller {
+  update(binding: DirectiveBinding): void;
+  dispose(): void;
+}
 
-    // 同一触摸长按可能同时产生 timer 与 contextmenu，只允许回调一次。
-    const executeLongPress = (e: Event) => {
-      if (!ownsGesture(e)) return;
-      const now = Date.now();
-      if (lastLongPressAt !== null && now - lastLongPressAt < 800) return;
-      lastLongPressAt = now;
-      didLongPress = suppressClick;
-      callback(e);
-    };
+const controllers = new WeakMap<HTMLElement, Controller>();
 
-    const start = (e: Event) => {
-      if (!ownsGesture(e)) return;
-      // 如果是鼠标事件且不是左键，跳过（右键由 contextmenu 处理）
-      if (e.type === 'mousedown' && (e as MouseEvent).button !== 0) {
-        return;
-      }
-      clearSuppressionExpiry();
-      didLongPress = false;
-      isTouchMoved = false;
+function targetElement(event: Event): Element | null {
+  return event.target instanceof Element ? event.target
+    : event.target instanceof Node ? event.target.parentElement : null;
+}
 
-      if (pressTimer === null) {
-        pressTimer = window.setTimeout(() => {
-          pressTimer = null;
-          if (!isTouchMoved) {
-            executeLongPress(e);
-          }
-        }, delay);
-      }
-    };
+function ownsGesture(el: HTMLElement, event: Event, messageSurface: boolean): boolean {
+  const target = targetElement(event);
+  if (!target || (target !== el && !el.contains(target))) return false;
+  // A button owns its own gesture even when another part of the page has selected text.
+  if (el.matches('button, a, [role="button"]')) return true;
 
-    const end = () => {
-      cancel();
-      armSuppressionExpiry();
-    };
+  const selection = window.getSelection();
+  if (!messageSurface && selection && !selection.isCollapsed
+    && ((selection.anchorNode && el.contains(selection.anchorNode))
+      || (selection.focusNode && el.contains(selection.focusNode)))) return false;
 
-    const cancel = () => {
-      if (pressTimer !== null) {
-        clearTimeout(pressTimer);
-        pressTimer = null;
-      }
-    };
-
-    const move = (e: Event) => {
-      // 容忍轻微的手指抖动
-      if (e.type === 'touchmove') {
-        // 此处可以加入坐标计算来容忍位移，但最简单的是只要触发了 move 就认为要滑动
-        isTouchMoved = true;
-      } else {
-        isTouchMoved = true;
-      }
-      cancel();
-    };
-
-    // --- 绑定事件 ---
-
-    // Touch events (移动端)
-    el.addEventListener('touchstart', start, { passive: true });
-    el.addEventListener('touchend', end);
-    el.addEventListener('touchmove', move, { passive: true });
-    el.addEventListener('touchcancel', end);
-
-    // Mouse events (桌面端模拟长按)
-    el.addEventListener('mousedown', start);
-    el.addEventListener('mouseup', end);
-    el.addEventListener('mousemove', move);
-    el.addEventListener('mouseleave', end);
-
-    const onClickCapture = (e: MouseEvent) => {
-      if (!suppressClick || !didLongPress) return;
-      didLongPress = false;
-      clearSuppressionExpiry();
-      e.preventDefault();
-      e.stopPropagation();
-      e.stopImmediatePropagation();
-    };
-    el.addEventListener('click', onClickCapture, true);
-
-    // Context menu (桌面端原生右键)
-    const onContextMenu = (e: Event) => {
-      if (!ownsGesture(e)) return;
-      e.preventDefault(); // 拦截原生右键菜单
-      cancel(); // 取消可能正在进行的长按计时
-      executeLongPress(e);
-      armSuppressionExpiry();
-    };
-    el.addEventListener('contextmenu', onContextMenu);
-
-    // 保存清理函数
-    (el as any)._longpressCleanup = () => {
-      el.removeEventListener('touchstart', start);
-      el.removeEventListener('touchend', end);
-      el.removeEventListener('touchmove', move);
-      el.removeEventListener('touchcancel', end);
-      el.removeEventListener('mousedown', start);
-      el.removeEventListener('mouseup', end);
-      el.removeEventListener('mousemove', move);
-      el.removeEventListener('mouseleave', end);
-      el.removeEventListener('click', onClickCapture, true);
-      el.removeEventListener('contextmenu', onContextMenu);
-      cancel();
-      clearSuppressionExpiry();
-    };
-  },
-  unmounted(el: HTMLElement) {
-    if ((el as any)._longpressCleanup) {
-      (el as any)._longpressCleanup();
+  const owner = target.closest(messageSurface ? MESSAGE_CONTROLS
+    : `${CONTROLS}, img, svg, canvas, video, audio, iframe, .select-text, .vcp-markdown-block, .ast-render-container`);
+  if (owner && owner !== el && el.contains(owner)) return false;
+  if (messageSurface) {
+    // Generated media has its own handlers; avatars/header SVGs belong to the message.
+    const content = target.closest('[data-message-content]');
+    if (content && el.contains(content)) {
+      const diagram = target.closest(MERMAID_CONTENT_SELECTOR);
+      if (diagram && content.contains(diagram)) return false;
+      const image = target.closest('img, image, svg, canvas');
+      if (image && content.contains(image) && !image.classList.contains('vcp-emoticon')) return false;
     }
   }
+  return true;
+}
+
+function readOptions(binding: DirectiveBinding): Options {
+  const callback = typeof binding.value === 'function' ? binding.value as Callback : null;
+  if (!callback) console.warn('v-longpress requires a function value');
+  return {
+    callback,
+    suppressClick: binding.modifiers['suppress-click'] === true,
+    messageSurface: binding.modifiers.message === true,
+  };
+}
+
+function createController(el: HTMLElement, binding: DirectiveBinding): Controller {
+  let options = readOptions(binding);
+  let gesture: TouchGesture | null = null;
+  let disposed = false;
+  let suppressNextClick = false;
+  let suppressionExpiry: number | null = null;
+
+  const clearSuppression = () => {
+    suppressNextClick = false;
+    if (suppressionExpiry !== null) window.clearTimeout(suppressionExpiry);
+    suppressionExpiry = null;
+  };
+
+  const expireSuppressionAfterRelease = () => {
+    if (!suppressNextClick) return;
+    if (suppressionExpiry !== null) window.clearTimeout(suppressionExpiry);
+    suppressionExpiry = window.setTimeout(clearSuppression, 700);
+  };
+
+  const clearTimer = (current: TouchGesture) => {
+    if (current.timer !== null) window.clearTimeout(current.timer);
+    current.timer = null;
+  };
+
+  const stopTracking = () => {
+    document.removeEventListener('pointerdown', onAdditionalPointer, true);
+    document.removeEventListener('pointermove', onPointerMove, true);
+    document.removeEventListener('pointerup', onPointerEnd, true);
+    document.removeEventListener('pointercancel', onPointerEnd, true);
+    document.removeEventListener('scroll', onScroll, true);
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+    window.removeEventListener('blur', endGesture);
+  };
+
+  function endGesture() {
+    if (gesture) clearTimer(gesture);
+    gesture = null;
+    stopTracking();
+    expireSuppressionAfterRelease();
+  }
+
+  const cancelPending = () => {
+    if (!gesture || gesture.fired) return;
+    gesture.cancelled = true;
+    clearTimer(gesture);
+  };
+
+  const fire = (current: TouchGesture, event: Event) => {
+    if (disposed || gesture !== current || current.cancelled || current.fired || !options.callback
+      || !ownsGesture(el, event, options.messageSurface)) return;
+    clearTimer(current);
+    current.fired = true;
+    if (options.suppressClick) suppressNextClick = true;
+    if (options.messageSurface) {
+      const selection = window.getSelection();
+      if (selection?.anchorNode && selection.focusNode
+        && el.contains(selection.anchorNode) && el.contains(selection.focusNode)) selection.removeAllRanges();
+    }
+    options.callback(event);
+  };
+
+  function onAdditionalPointer(event: PointerEvent) {
+    if (gesture && event.pointerType === 'touch' && event.pointerId !== gesture.pointerId) cancelPending();
+  }
+
+  function onPointerMove(event: PointerEvent) {
+    if (!gesture || event.pointerId !== gesture.pointerId || event.pointerType !== 'touch') return;
+    if (Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > 10) cancelPending();
+  }
+
+  function onPointerEnd(event: PointerEvent) {
+    if (gesture && event.pointerId === gesture.pointerId && event.pointerType === 'touch') endGesture();
+  }
+
+  function onScroll(event: Event) {
+    if (!gesture || gesture.fired) return;
+    // Only motion of the pressed content's scroll ancestry can cancel this hold.
+    // Message-list auto-scroll must not cancel a sibling header button.
+    if (event.target === document
+      || (event.target instanceof Element && event.target.contains(gesture.target))) cancelPending();
+  }
+
+  function onVisibilityChange() {
+    if (document.hidden) endGesture();
+  }
+
+  const onPointerDown = (event: PointerEvent) => {
+    // This directive is a mobile touch interaction. Compatibility mouse events
+    // emitted by Android around contextmenu never enter the gesture state machine.
+    if (event.pointerType !== 'touch') return;
+    if (!event.isPrimary) { cancelPending(); return; }
+    endGesture();
+    clearSuppression();
+    if (!options.callback || !ownsGesture(el, event, options.messageSurface)) return;
+    const target = targetElement(event);
+    if (!target) return;
+    const current: TouchGesture = {
+      pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+      target, startEvent: event, timer: null, fired: false, cancelled: false,
+    };
+    gesture = current;
+    current.timer = window.setTimeout(() => fire(current, current.startEvent), 600);
+    document.addEventListener('pointerdown', onAdditionalPointer, { capture: true, passive: true });
+    document.addEventListener('pointermove', onPointerMove, { capture: true, passive: true });
+    document.addEventListener('pointerup', onPointerEnd, { capture: true, passive: true });
+    document.addEventListener('pointercancel', onPointerEnd, { capture: true, passive: true });
+    document.addEventListener('scroll', onScroll, { capture: true, passive: true });
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    window.addEventListener('blur', endGesture);
+  };
+
+  const onContextMenu = (event: Event) => {
+    const current = gesture;
+    if (!current || current.cancelled || !ownsGesture(el, event, options.messageSurface)) return;
+    event.preventDefault();
+    // Android can emit this before our timer. The current gesture owns both
+    // signals, so either ordering invokes the action once. System contextmenu
+    // pointer IDs need not match the touch pointer that is still held.
+    fire(current, event);
+  };
+
+  const onClickCapture = (event: MouseEvent) => {
+    if (!suppressNextClick) return;
+    clearSuppression();
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+  };
+
+  const onSelectStart = (event: Event) => {
+    if (options.messageSurface && ownsGesture(el, event, true)) event.preventDefault();
+  };
+
+  el.addEventListener('pointerdown', onPointerDown, { passive: true });
+  el.addEventListener('contextmenu', onContextMenu);
+  el.addEventListener('click', onClickCapture, true);
+  el.addEventListener('selectstart', onSelectStart);
+
+  return {
+    update(nextBinding) {
+      const next = readOptions(nextBinding);
+      if (!next.callback || next.messageSurface !== options.messageSurface
+        || next.suppressClick !== options.suppressClick) {
+        endGesture();
+        clearSuppression();
+      }
+      options = next;
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      endGesture();
+      clearSuppression();
+      el.removeEventListener('pointerdown', onPointerDown);
+      el.removeEventListener('contextmenu', onContextMenu);
+      el.removeEventListener('click', onClickCapture, true);
+      el.removeEventListener('selectstart', onSelectStart);
+    },
+  };
+}
+
+export const vLongpress: Directive = {
+  mounted(el: LongpressElement, binding: DirectiveBinding) {
+    // Also retires an old installation if the same element is mounted again during development.
+    el._longpressCleanup?.();
+    const controller = createController(el, binding);
+    controllers.set(el, controller);
+    el._longpressCleanup = controller.dispose;
+  },
+  updated(el: LongpressElement, binding: DirectiveBinding) {
+    controllers.get(el)?.update(binding);
+  },
+  unmounted(el: LongpressElement) {
+    el._longpressCleanup?.();
+    delete el._longpressCleanup;
+    controllers.delete(el);
+  },
 };

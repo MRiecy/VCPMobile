@@ -25,16 +25,24 @@ internal class NativeHaptics(private val activity: Activity, private val runtime
         }
     }
 
-    private fun vibrateTouch(vibrator: Vibrator, effect: VibrationEffect) {
+    private fun vibrateTouch(vibrator: Vibrator, effect: VibrationEffect): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            // The service applies touch intensity and user policy. The deprecated
+            // HAPTIC_FEEDBACK_ENABLED setting is not authoritative on API 33+.
             vibrator.vibrate(effect, android.os.VibrationAttributes.createForUsage(android.os.VibrationAttributes.USAGE_TOUCH))
         } else {
+            // Legacy direct Vibrator calls need the touch toggle applied by the
+            // caller. View.performHapticFeedback handles its own settings.
+            @Suppress("DEPRECATION")
+            if (android.provider.Settings.System.getInt(activity.contentResolver,
+                    android.provider.Settings.System.HAPTIC_FEEDBACK_ENABLED, 1) == 0) return false
             @Suppress("DEPRECATION")
             vibrator.vibrate(effect, android.media.AudioAttributes.Builder()
                 .setUsage(android.media.AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
                 .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
                 .build())
         }
+        return true
     }
 
     fun triggerHapticFeedback(invoke: Invoke) {
@@ -63,12 +71,6 @@ internal class NativeHaptics(private val activity: Activity, private val runtime
             try {
                 if (runtime.isDestroying) {
                     result.put("reason", "plugin_destroyed")
-                    invoke.resolve(result)
-                    return@runOnUiThread
-                }
-                if (android.provider.Settings.System.getInt(activity.contentResolver,
-                        android.provider.Settings.System.HAPTIC_FEEDBACK_ENABLED, 1) == 0) {
-                    result.put("reason", "system_haptics_disabled")
                     invoke.resolve(result)
                     return@runOnUiThread
                 }
@@ -125,8 +127,9 @@ internal class NativeHaptics(private val activity: Activity, private val runtime
                                 else -> throw IllegalArgumentException("未知预定义触感: $effect")
                             }
                             val vibrationEffect = VibrationEffect.createPredefined(effectId)
-                            vibrateTouch(vibrator, vibrationEffect)
-                            result.put("submitted", true)
+                            val submitted = vibrateTouch(vibrator, vibrationEffect)
+                            result.put("submitted", submitted)
+                            if (!submitted) result.put("reason", "system_haptics_disabled")
                             result.put("effectId", effectId)
                             result.put("resolvedEffect", resolvedEffect)
                         } else {
@@ -158,8 +161,9 @@ internal class NativeHaptics(private val activity: Activity, private val runtime
                         }
                         result.put("hasAmplitudeControl", vibrator.hasAmplitudeControl())
                         val amp = if (amplitude in 1..255) amplitude else VibrationEffect.DEFAULT_AMPLITUDE
-                        vibrateTouch(vibrator, VibrationEffect.createOneShot(durationMs, amp))
-                        result.put("submitted", true)
+                        val submitted = vibrateTouch(vibrator, VibrationEffect.createOneShot(durationMs, amp))
+                        result.put("submitted", submitted)
+                        if (!submitted) result.put("reason", "system_haptics_disabled")
                         result.put("durationMs", durationMs)
                         result.put("amplitude", amp)
                     }

@@ -100,6 +100,8 @@ Markdown、代码、KaTeX、Mermaid、SVG/MathML、受控 raw HTML、Tool、Thou
 
 消息内部按钮、链接、图片与引用由现有事件桥和对应 Store 处理。新增交互必须复用真实消费入口，区分 DOM 局部反馈与业务结果，不在渲染器内另建业务状态所有者。
 
+消息根使用 `v-longpress.message`，普通正文、角色名、头像和留白共享消息菜单；Markdown/AST 容器不是独立交互所有者。代码选字、表单、链接、媒体预览及显式 `data-longpress-native` 控件保留自身交互，普通消息正文的选择样式随这个范围处理，不能影响消息外的富文本选择。
+
 工具折叠偏好只控制默认策略，ToolBlock 的本次手动展开/收起优先。MessageRenderer 在同一消息中按工具次序和逐字段语义比较延续短交互 key，避免 Markdown 合并或终态 hash 变化丢掉手动选择；工具结构改变或组件卸载可重建默认状态，不复制大正文/base64 到 key，也不持久化该交互状态。消息震动开关共同控制原生 send 与正常 complete 意图，已提交终态和离线完成恢复通过 context.replayed 保持静默，不接管长按等界面反馈。
 
 ---

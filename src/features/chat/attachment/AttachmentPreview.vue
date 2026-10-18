@@ -210,6 +210,7 @@ const removeAttachment = async (index: number) => {
       </div>
       <AttachmentRenderer
         v-else
+        data-longpress-native
         :file="att"
         :index="index"
         :show-remove="!!props.messageId"

@@ -28,6 +28,29 @@
 
 /* === Markdown Block Styles (restored from legacy MarkdownBlock.vue) === */
 
+/* Message actions own ordinary prose, including streamed DOM and text fallbacks.
+   Keep this scoped: rich text outside messages still supports native selection. */
+html .vcp-message-item,
+html .vcp-message-item :is(.vcp-markdown-block, .ast-render-container, .thought-body, .select-text) {
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* Code and editors retain their own selection; native links/media keep callouts. */
+html .vcp-message-item :is(pre, pre *, input, textarea, select, [contenteditable]:not([contenteditable="false"])),
+html .vcp-message-item [contenteditable]:not([contenteditable="false"]) :is(.vcp-markdown-block, .ast-render-container, .thought-body, .select-text),
+html .vcp-message-item [data-longpress-native] .select-text {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
+html .vcp-message-item :is(a, button, video, audio, iframe, [data-longpress-native]),
+html .vcp-message-item [data-message-content] :is(img:not(.vcp-emoticon), image, svg, canvas) {
+  -webkit-touch-callout: default;
+}
+
 .vcp-markdown-block {
   word-break: break-word;
   overflow-wrap: break-word;
