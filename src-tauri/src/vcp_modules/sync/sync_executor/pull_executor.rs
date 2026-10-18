@@ -1,5 +1,6 @@
 use crate::vcp_modules::db_write_queue::{DbWriteQueue, DbWriteTask, PreparedMessageWrite};
 use crate::vcp_modules::message_repository::MessageRenderCompiler;
+use crate::vcp_modules::sync::sync_transfer::SyncHttpClient;
 use crate::vcp_modules::sync_error::{
     encode_http_sync_error_body, encode_local_sync_error, encode_wire_sync_error,
     encode_wire_sync_error_value, parse_wire_sync_error, SyncErrorStage, WireSyncError,
@@ -26,7 +27,7 @@ const MAX_AVATAR_RESPONSE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES: usize = 1024 * 1024;
 
 async fn read_response_limited(
-    response: reqwest::Response,
+    response: crate::vcp_modules::sync::sync_transfer::SyncResponse,
     max_bytes: usize,
     operation: &str,
     stage: SyncErrorStage,
@@ -501,7 +502,7 @@ pub struct PullExecutor;
 impl PullExecutor {
     pub async fn pull_entities_batch<R: Runtime>(
         app: &AppHandle<R>,
-        client: &reqwest::Client,
+        client: &SyncHttpClient,
         http_url: &str,
         sync_token: &str,
         requests: Vec<EntitySelector>,
@@ -733,7 +734,7 @@ impl PullExecutor {
 
     pub async fn pull_avatar<R: Runtime>(
         _app: &AppHandle<R>,
-        client: &reqwest::Client,
+        client: &SyncHttpClient,
         http_url: &str,
         sync_token: &str,
         owner_type: &str,
@@ -809,7 +810,7 @@ impl PullExecutor {
     /// 返回每个 topic 的处理结果。
     pub async fn pull_messages_batch<R: Runtime>(
         app: &AppHandle<R>,
-        client: &reqwest::Client,
+        client: &SyncHttpClient,
         http_url: &str,
         sync_token: &str,
         requests: &[(TopicKey, Vec<String>)], // (topic identity, msg_ids)，空 vec = 拉全部消息
@@ -861,7 +862,11 @@ impl PullExecutor {
         let res = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", sync_token))
-            .json(&MessagePullRequest { topics: req_body })
+            .header("Content-Type", "application/json")
+            .body(
+                serde_json::to_vec(&MessagePullRequest { topics: req_body })
+                    .map_err(|error| format!("Batch pull request serialization failed: {error}"))?,
+            )
             .send()
             .await
             .map_err(|error| {
@@ -1283,7 +1288,7 @@ mod entity_pull_tests {
         let key = TopicKey::new("agent", "missing-owner", "topic-a");
         PullExecutor::pull_entities_batch(
             app.handle(),
-            &reqwest::Client::new(),
+            &super::SyncHttpClient::new(reqwest::Client::new(), Default::default()),
             &format!("http://{address}"),
             "test-token",
             vec![EntitySelector::topic(&key).expect("valid topic selector")],

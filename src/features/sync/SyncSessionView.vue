@@ -37,6 +37,18 @@ const progressPercent = computed(() => {
   return Math.min(100, Math.round((store.progressData.completed / store.progressData.total) * 100));
 });
 
+const averageTransferSpeed = computed(() => {
+  const transfer = store.transfer;
+  if (!transfer || transfer.activeDurationMs <= 0) return '—';
+  const bytes = transfer.uploadedBytes + transfer.downloadedBytes;
+  if (bytes <= 0) return '—';
+  const bytesPerSecond = bytes / (transfer.activeDurationMs / 1000);
+  if (!Number.isFinite(bytesPerSecond)) return '—';
+  if (bytesPerSecond >= 1_000_000) return `${(bytesPerSecond / 1_000_000).toFixed(2)} MB/s`;
+  if (bytesPerSecond >= 1_000) return `${(bytesPerSecond / 1_000).toFixed(2)} KB/s`;
+  return `${Math.round(bytesPerSecond)} B/s`;
+});
+
 const phaseLabel = computed(() => {
   const map: Record<string, string> = {
     'initialization': '初始化',
@@ -332,20 +344,26 @@ const handlePrerenderToggle = async (val: boolean) => {
                   :style="{ width: progressPercent + '%' }"
                 ></div>
               </div>
-              <div class="flex justify-between text-[10px] mt-1 opacity-50">
-                <span>{{ phaseLabel }}</span>
-                <span v-if="store.progressData.total > 0">
-                  {{ store.progressData.completed }}/{{ store.progressData.total }} · {{ progressPercent }}%
-                </span>
-              </div>
-
-              <div
-                v-if="store.desktopInfo"
-                class="mt-2 flex items-center gap-2 font-mono text-[9px] text-white/35"
-              >
-                <span>桌面后端 {{ store.desktopInfo.backendMode === 'cds' ? 'CDS' : 'Legacy' }}</span>
-                <span>·</span>
-                <span>同步插件 v{{ store.desktopInfo.packageVersion }}</span>
+              <div class="mt-1 flex items-start gap-3">
+                <div class="min-w-0 flex-1">
+                  <div class="flex flex-wrap justify-between gap-x-2 gap-y-0.5 text-[10px] text-white/50">
+                    <span>{{ phaseLabel }}</span>
+                    <span v-if="store.progressData.total > 0" class="font-mono">
+                      {{ store.progressData.completed }}/{{ store.progressData.total }} · {{ progressPercent }}%
+                    </span>
+                  </div>
+                  <div
+                    v-if="store.desktopInfo"
+                    class="mt-2 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 font-mono text-[9px] text-white/35"
+                  >
+                    <span>桌面后端 {{ store.desktopInfo.backendMode === 'cds' ? 'CDS' : 'Legacy' }}</span>
+                    <span class="min-w-0 break-words">· 同步插件 v{{ store.desktopInfo.packageVersion }}</span>
+                  </div>
+                </div>
+                <div class="w-28 shrink-0 text-right" role="group" aria-label="平均同步速度">
+                  <div class="text-[10px] text-white/40">平均同步速度</div>
+                  <div class="mt-1 font-mono text-xs tabular-nums text-white/75">{{ averageTransferSpeed }}</div>
+                </div>
               </div>
 
               <!-- 统计条：messages 阶段起随进度事件实时跳动；终态即使全零也展示 -->

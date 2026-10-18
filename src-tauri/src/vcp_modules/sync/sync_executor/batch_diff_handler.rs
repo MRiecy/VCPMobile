@@ -1,4 +1,5 @@
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
+use crate::vcp_modules::sync::sync_transfer::SyncHttpClient;
 use crate::vcp_modules::sync_error::{
     decode_wire_sync_error, encode_wire_sync_error, is_attempt_restart_code, WireSyncError,
 };
@@ -351,7 +352,7 @@ impl BatchDiffHandler {
     pub async fn handle_diff_batch(
         app_handle: &AppHandle,
         frame: MessageDiffResultFrame,
-        http_client: &reqwest::Client,
+        http_client: &SyncHttpClient,
         base_url: &str,
         token: &str,
         tracker: &Arc<Phase3Tracker>,

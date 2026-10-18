@@ -6,5 +6,6 @@ pub mod sync_hash;
 pub mod sync_logger;
 pub mod sync_pipeline;
 pub mod sync_service;
+mod sync_transfer;
 pub mod sync_types;
 mod sync_version;

@@ -102,7 +102,7 @@ describe("sync session ownership", () => {
   });
 
   it("unlistens registrations that resolve after the panel closes", async () => {
-    const registrations = Array.from({ length: 4 }, () =>
+    const registrations = Array.from({ length: 5 }, () =>
       deferred<() => void>(),
     );
     const unlisteners = registrations.map(() => vi.fn());
@@ -232,7 +232,7 @@ describe("sync session ownership", () => {
     const store = useSyncSessionStore();
     overlay.openSyncSession();
 
-    await vi.waitFor(() => expect(listenMock).toHaveBeenCalledTimes(4));
+    await vi.waitFor(() => expect(listenMock).toHaveBeenCalledTimes(5));
     const statusRegistration = listenMock.mock.calls.find(
       ([eventName]) => eventName === "vcp-sync-status",
     );
@@ -264,7 +264,7 @@ describe("sync session ownership", () => {
   it("shows desktop backend info only for the current connected session", async () => {
     const store = useSyncSessionStore();
     store.open();
-    await vi.waitFor(() => expect(listenMock).toHaveBeenCalledTimes(4));
+    await vi.waitFor(() => expect(listenMock).toHaveBeenCalledTimes(5));
     store.activeSessionId = 61;
 
     emitTauriEvent("vcp-sync-status", {
@@ -294,6 +294,135 @@ describe("sync session ownership", () => {
       status: "connecting",
     });
     expect(store.desktopInfo).toBeNull();
+  });
+
+  it("buffers transfer snapshots until the start receipt identifies the owning session", async () => {
+    const pendingStart = deferred<number>();
+    mockInvoke("start_manual_sync", () => pendingStart.promise);
+    const store = useSyncSessionStore();
+    store.open();
+    const starting = store.startSync();
+    await vi.waitFor(() => expect(invokeMock).toHaveBeenCalledWith("start_manual_sync"));
+
+    const transfer = { uploadedBytes: 500, downloadedBytes: 1_500, activeDurationMs: 250.5 };
+    emitTauriEvent("vcp-sync-transfer", { sessionId: 70, ...transfer, uploadedBytes: 9_000 });
+    emitTauriEvent("vcp-sync-transfer", { sessionId: 71, ...transfer });
+    emitTauriEvent("vcp-sync-transfer", transfer);
+    expect(store.transfer).toBeNull();
+
+    pendingStart.resolve(71);
+    await starting;
+    expect(store.transfer).toEqual(transfer);
+    emitTauriEvent("vcp-sync-transfer", { sessionId: 70, ...transfer, uploadedBytes: 10_000 });
+    expect(store.transfer).toEqual(transfer);
+  });
+
+  it("rejects malformed and regressing transfer snapshots without losing the last reading", () => {
+    const store = useSyncSessionStore();
+    store.open();
+    store.activeSessionId = 72;
+    const transfer = { uploadedBytes: 100, downloadedBytes: 900, activeDurationMs: 100.5 };
+    emitTauriEvent("vcp-sync-transfer", { sessionId: 72, ...transfer });
+
+    for (const patch of [
+      { uploadedBytes: -1 },
+      { uploadedBytes: Number.MAX_SAFE_INTEGER + 1 },
+      { uploadedBytes: 100.1 },
+      { downloadedBytes: "900" },
+      { downloadedBytes: Number.NaN },
+      { activeDurationMs: Number.POSITIVE_INFINITY },
+      { activeDurationMs: -1 },
+      { uploadedBytes: 99 },
+      { downloadedBytes: 899 },
+      { activeDurationMs: 100.4 },
+    ]) {
+      emitTauriEvent("vcp-sync-transfer", { sessionId: 72, ...transfer, ...patch });
+      expect(store.transfer).toEqual(transfer);
+    }
+  });
+
+  it("retains speed through automatic reconnect and local finalization, then resets for a manual retry", async () => {
+    let nextSession = 0;
+    mockInvoke("start_manual_sync", () => ++nextSession);
+    const store = useSyncSessionStore();
+    store.open();
+    await store.startSync();
+    const transfer = { uploadedBytes: 500, downloadedBytes: 1_500, activeDurationMs: 1_000 };
+    emitTauriEvent("vcp-sync-transfer", { sessionId: 1, ...transfer });
+    emitTauriEvent("vcp-sync-status", { sessionId: 1, status: "connecting" });
+    emitTauriEvent("vcp-sync-progress", { sessionId: 1, phase: "finalize" });
+    expect(store.transfer).toEqual(transfer);
+
+    emitTauriEvent("vcp-sync-status", { sessionId: 1, status: "error", error: syncError("RETRYABLE") });
+    expect(store.transfer).toEqual(transfer);
+    await store.retrySync();
+    expect(store.activeSessionId).toBe(2);
+    expect(store.transfer).toBeNull();
+    emitTauriEvent("vcp-sync-transfer", { sessionId: 1, ...transfer });
+    expect(store.transfer).toBeNull();
+  });
+
+  it.each(["error", "completed", "completed_with_warnings"] as const)(
+    "takes the final transfer snapshot from %s and ignores later measurements",
+    (status) => {
+      const store = useSyncSessionStore();
+      store.open();
+      store.activeSessionId = 73;
+      emitTauriEvent("vcp-sync-transfer", {
+        sessionId: 73, uploadedBytes: 100, downloadedBytes: 900, activeDurationMs: 1_000,
+      });
+      const transfer = { uploadedBytes: 200, downloadedBytes: 1_800, activeDurationMs: 1_500 };
+      if (status === "error") {
+        emitTauriEvent("vcp-sync-status", { sessionId: 73, status, error: syncError("END"), transfer });
+      } else {
+        emitTauriEvent("vcp-sync-completed", {
+          sessionId: 73, status, transfer,
+          summary: {
+            successfulTopics: 1, totalTopics: 1, failedTopics: 0, failedTopicIds: [],
+            legacyAttachmentWarnings: status === "completed_with_warnings" ? 1 : 0,
+          },
+        });
+      }
+      expect(store.status).toBe(status);
+      expect(store.transfer).toEqual(transfer);
+      emitTauriEvent("vcp-sync-transfer", {
+        sessionId: 73, uploadedBytes: 300, downloadedBytes: 2_700, activeDurationMs: 2_000,
+      });
+      expect(store.transfer).toEqual(transfer);
+    },
+  );
+
+  it("clears transfer data when reopening and rejects a previous view's listener callback", async () => {
+    const store = useSyncSessionStore();
+    store.open();
+    store.activeSessionId = 74;
+    const oldListener = listenMock.mock.calls.find(([name]) => name === "vcp-sync-transfer")?.[1];
+    const transfer = { uploadedBytes: 100, downloadedBytes: 900, activeDurationMs: 500 };
+    emitTauriEvent("vcp-sync-transfer", { sessionId: 74, ...transfer });
+    expect(store.transfer).toEqual(transfer);
+    await store.close();
+    store.open();
+    store.activeSessionId = 74;
+    oldListener?.({ payload: { sessionId: 74, ...transfer } });
+    expect(store.transfer).toBeNull();
+  });
+
+  it.each([
+    { uploadedBytes: 0, downloadedBytes: 0, activeDurationMs: 1_000, expected: "—" },
+    { uploadedBytes: 100, downloadedBytes: 900, activeDurationMs: 0, expected: "—" },
+    { uploadedBytes: 125, downloadedBytes: 375, activeDurationMs: 1_000, expected: "500 B/s" },
+    { uploadedBytes: 1_000, downloadedBytes: 4_000, activeDurationMs: 2_000, expected: "2.50 KB/s" },
+    { uploadedBytes: 1_000_000, downloadedBytes: 3_000_000, activeDurationMs: 2_000, expected: "2.00 MB/s" },
+    { uploadedBytes: 250, downloadedBytes: 750, activeDurationMs: 0.5, expected: "2.00 MB/s" },
+  ])("renders application-byte average as $expected", async ({ expected, ...transfer }) => {
+    const store = useSyncSessionStore();
+    store.open();
+    await store.startSync();
+    const wrapper = mount(SyncSessionView);
+    expect(wrapper.get('[aria-label="平均同步速度"]').text()).toContain("—");
+    emitTauriEvent("vcp-sync-transfer", { sessionId: 1, ...transfer });
+    await Promise.resolve();
+    expect(wrapper.get('[aria-label="平均同步速度"]').text()).toContain(expected);
   });
 
   it("keeps a connecting sync page mounted while start_manual_sync is pending", async () => {
@@ -348,7 +477,7 @@ describe("sync session ownership", () => {
       const overlay = useOverlayStore();
       const store = useSyncSessionStore();
       overlay.openSyncSession();
-      await vi.waitFor(() => expect(listenMock).toHaveBeenCalledTimes(4));
+      await vi.waitFor(() => expect(listenMock).toHaveBeenCalledTimes(5));
 
       if (terminalStatus === "error") {
         store.activeSessionId = 31;

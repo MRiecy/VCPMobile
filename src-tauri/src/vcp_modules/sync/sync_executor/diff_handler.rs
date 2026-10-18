@@ -1,5 +1,6 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
+use crate::vcp_modules::sync::sync_transfer::SyncHttpClient;
 use crate::vcp_modules::sync_dto::{AgentTopicSyncDTO, GroupTopicSyncDTO};
 use crate::vcp_modules::sync_executor::{PullExecutor, PushExecutor};
 use crate::vcp_modules::sync_service::{
@@ -200,7 +201,7 @@ impl DiffHandler {
     pub async fn handle_diff(
         app_handle: &AppHandle,
         result: ManifestResultFrame,
-        http_client: &reqwest::Client,
+        http_client: &SyncHttpClient,
         base_url: &str,
         token: &str,
         write_queue: &Arc<DbWriteQueue>,

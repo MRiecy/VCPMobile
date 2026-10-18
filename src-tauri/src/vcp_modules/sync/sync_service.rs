@@ -1,3 +1,4 @@
+use super::sync_transfer::{SyncHttpClient, SyncWebSocket, TransferMeter, TransferSnapshot};
 #[cfg(test)]
 use super::sync_version::WIRE_PROTOCOL_VERSION;
 use super::sync_version::{
@@ -19,6 +20,7 @@ use crate::vcp_modules::sync_types::{
     TopicDiffResultFrame, TopicDiffState,
 };
 use crate::vcp_modules::topic_types::{OwnerKey, TopicKey};
+#[cfg(test)]
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -31,9 +33,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, Runtime, State};
 use tokio::sync::{mpsc, Mutex as AsyncMutex, RwLock};
 use tokio::task::{JoinHandle, JoinSet};
-use tokio_tungstenite::{
-    connect_async, tungstenite::protocol::Message, MaybeTlsStream, WebSocketStream,
-};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 use tokio_util::sync::CancellationToken;
 
 const VERSION_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -48,7 +48,45 @@ const SYNC_STOP_WAIT: Duration = Duration::from_secs(5);
 #[cfg(any(target_os = "android", target_os = "ios"))]
 const SYNC_GUARDIAN_LABEL: &str = "[数据同步] VCP Mobile";
 type RoutedSyncCommand = (u64, mpsc::UnboundedSender<SyncCommand>);
-type SyncWebSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+struct TransferReporter(JoinHandle<()>);
+
+impl Drop for TransferReporter {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn session_transfer_snapshot<R: Runtime>(
+    app: &AppHandle<R>,
+    session_id: u64,
+    freeze: bool,
+) -> TransferSnapshot {
+    let state = app.state::<SyncState>();
+    let transfer = state
+        .current_transfer
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    transfer
+        .as_ref()
+        .filter(|(id, _)| *id == session_id)
+        .map_or_else(TransferSnapshot::default, |(_, meter)| {
+            if freeze {
+                meter.freeze()
+            } else {
+                meter.snapshot()
+            }
+        })
+}
+
+fn emit_transfer_snapshot<R: Runtime>(
+    app: &AppHandle<R>,
+    session_id: u64,
+    snapshot: TransferSnapshot,
+) {
+    let mut payload = json!(snapshot);
+    payload["sessionId"] = json!(session_id);
+    let _ = app.emit("vcp-sync-transfer", payload);
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -819,6 +857,7 @@ pub struct SyncState {
     pub connection_status: Arc<RwLock<String>>,
     pub current_log_path: Arc<RwLock<Option<String>>>,
     pub current_logger: Arc<std::sync::RwLock<Option<Arc<std::sync::Mutex<SyncLogger>>>>>,
+    current_transfer: Mutex<Option<(u64, TransferMeter)>>,
     lifecycle: AsyncMutex<()>,
     owner_commit: AsyncMutex<()>,
     session: AsyncMutex<Option<SyncSessionHandle>>,
@@ -1181,6 +1220,9 @@ async fn publish_sync_status_inner<R: Runtime>(
     if let Some(desktop_info) = desktop_info {
         payload["desktop"] = json!(desktop_info);
     }
+    if next_status == "error" {
+        payload["transfer"] = json!(session_transfer_snapshot(app_handle, session_id, true));
+    }
 
     let _ = app_handle.emit("vcp-sync-status", payload);
 }
@@ -1217,6 +1259,7 @@ async fn publish_sync_completed(
     } else {
         "completed"
     };
+    let transfer = session_transfer_snapshot(app_handle, session_id, true);
     let _ = app_handle.emit(
         "vcp-sync-completed",
         json!({
@@ -1224,6 +1267,7 @@ async fn publish_sync_completed(
             "sessionId": session_id,
             "status": terminal_status,
             "summary": summary,
+            "transfer": transfer,
         }),
     );
     let _ = app_handle.emit(
@@ -1232,6 +1276,7 @@ async fn publish_sync_completed(
             "status": terminal_status,
             "source": "Sync",
             "sessionId": session_id,
+            "transfer": transfer,
         }),
     );
     true
@@ -1253,6 +1298,7 @@ pub fn init_sync_service(_app_handle: AppHandle) -> SyncState {
         connection_status: Arc::new(RwLock::new(String::from("disconnected"))),
         current_log_path: Arc::new(RwLock::new(None)),
         current_logger: Arc::new(std::sync::RwLock::new(None)),
+        current_transfer: Mutex::new(None),
         lifecycle: AsyncMutex::new(()),
         owner_commit: AsyncMutex::new(()),
         session: AsyncMutex::new(None),
@@ -1268,6 +1314,7 @@ pub(crate) fn test_sync_state(session_id: u64) -> SyncState {
         connection_status: Arc::new(RwLock::new(String::from("disconnected"))),
         current_log_path: Arc::new(RwLock::new(None)),
         current_logger: Arc::new(std::sync::RwLock::new(None)),
+        current_transfer: Mutex::new(None),
         lifecycle: AsyncMutex::new(()),
         owner_commit: AsyncMutex::new(()),
         session: AsyncMutex::new(None),
@@ -1406,13 +1453,42 @@ async fn run_sync_session(
         sync_log_level: configured_log_level,
     } = session_config;
 
+    let transfer = TransferMeter::default();
+    {
+        let state = app_handle.state::<SyncState>();
+        let _owner_commit = state.owner_commit.lock().await;
+        if state.current_session_id.load(Ordering::SeqCst) != session_id {
+            return Ok(());
+        }
+        *state
+            .current_transfer
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some((session_id, transfer.clone()));
+    }
+    let reporter_app = app_handle.clone();
+    let reporter_meter = transfer.clone();
+    let _transfer_reporter = TransferReporter(tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let state = reporter_app.state::<SyncState>();
+            if reporter_meter.is_frozen()
+                || state.current_session_id.load(Ordering::SeqCst) != session_id
+            {
+                break;
+            }
+            emit_transfer_snapshot(&reporter_app, session_id, reporter_meter.snapshot());
+        }
+    }));
+
     // Sync HTTP operations end on connection/transport failure or explicit session
     // cancellation. Dataset size and peer processing time are not correctness failures.
     let http_client = match reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .build()
     {
-        Ok(client) => client,
+        Ok(client) => SyncHttpClient::new(client, transfer.clone()),
         Err(error) => {
             let message = format!("Failed to initialize sync HTTP client: {error}");
             publish_sync_error(
@@ -1556,7 +1632,7 @@ async fn run_sync_session(
                     session_id,
                     &connection_status_for_task,
                     &cancel_token,
-                    ws_stream,
+                    SyncWebSocket::new(ws_stream, transfer.clone()),
                 )
                 .await
                 {
@@ -2863,6 +2939,7 @@ async fn run_sync_session(
                         else => break,
                     }
                 }
+                ws_stream.clear_pending_transfer();
                 attempt_cancel.cancel();
                 task_tracker.close_and_wait().await;
                 if !sync_success {
@@ -3003,6 +3080,7 @@ async fn run_sync_session(
     // No session is considered stopped until its children can no longer enqueue
     // writes and the session-local queue has drained everything already accepted.
     cancel_token.cancel();
+    emit_transfer_snapshot(&app_handle, session_id, transfer.freeze());
     let shutdown_result = match write_queue.flush().await {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -3308,9 +3386,10 @@ async fn finish_sync_session(handle: &AppHandle, session_id: u64, outcome: &Resu
 
 fn emit_sync_interruption(handle: &AppHandle, session_id: u64, code: &str) {
     let error = build_local_error_payload(code, Vec::new(), None);
+    let transfer = session_transfer_snapshot(handle, session_id, true);
     let _ = handle.emit(
         "vcp-sync-status",
-        json!({ "sessionId": session_id, "status": "error", "source": "Sync", "error": error }),
+        json!({ "sessionId": session_id, "status": "error", "source": "Sync", "error": error, "transfer": transfer }),
     );
 }
 
@@ -3746,7 +3825,7 @@ mod tests {
     use tokio::net::TcpListener;
     use tokio_tungstenite::tungstenite::protocol::{frame::coding::CloseCode, CloseFrame};
 
-    type TestServerWebSocket = WebSocketStream<tokio::net::TcpStream>;
+    type TestServerWebSocket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
 
     fn mock_sync_app(session_id: u64) -> tauri::App<tauri::test::MockRuntime> {
         let app = tauri::test::mock_app();
@@ -3776,7 +3855,10 @@ mod tests {
         let (client, _) = connect_async(format!("ws://{address}"))
             .await
             .expect("connect test WebSocket");
-        (client, server.await.expect("join test WebSocket server"))
+        (
+            SyncWebSocket::new(client, TransferMeter::default()),
+            server.await.expect("join test WebSocket server"),
+        )
     }
 
     async fn expect_version_check(server: &mut TestServerWebSocket) {

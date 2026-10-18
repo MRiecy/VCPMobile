@@ -28,6 +28,12 @@ interface DesktopSyncInfo {
   backendMode: "legacy" | "cds";
 }
 
+interface SyncTransferSnapshot {
+  uploadedBytes: number;
+  downloadedBytes: number;
+  activeDurationMs: number;
+}
+
 interface SyncTerminalError {
   code: string;
   category:
@@ -65,7 +71,7 @@ interface SyncTerminalError {
 }
 
 type BufferedSessionEvent = {
-  kind: "status" | "progress" | "completed" | "log";
+  kind: "status" | "progress" | "completed" | "log" | "transfer";
   payload: Record<string, unknown>;
 };
 
@@ -360,6 +366,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
   const summary = ref<SyncSummary>(emptySummary());
   const terminalError = ref<SyncTerminalError | null>(null);
   const desktopInfo = ref<DesktopSyncInfo | null>(null);
+  const transfer = ref<SyncTransferSnapshot | null>(null);
   const retryInFlight = ref(false);
 
   // --- 面板视图 ---
@@ -414,6 +421,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     summary.value = emptySummary();
     terminalError.value = null;
     desktopInfo.value = null;
+    transfer.value = null;
     retryInFlight.value = false;
     awaitingSessionId = false;
     bufferedSessionEvents = [];
@@ -476,6 +484,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     const generation = viewGeneration;
     const attempt = ++startAttempt;
 
+    transfer.value = null;
     if (!preserveLogs) logs.value = [];
     progressData.value = {
       phase: "initialization",
@@ -721,6 +730,30 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     };
   };
 
+  const applyTransferSnapshot = (value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    const { uploadedBytes, downloadedBytes, activeDurationMs } = value as Record<string, unknown>;
+    if (
+      typeof uploadedBytes !== "number" ||
+      !Number.isSafeInteger(uploadedBytes) || uploadedBytes < 0 ||
+      typeof downloadedBytes !== "number" ||
+      !Number.isSafeInteger(downloadedBytes) || downloadedBytes < 0 ||
+      typeof activeDurationMs !== "number" ||
+      !Number.isFinite(activeDurationMs) || activeDurationMs < 0
+    ) {
+      return;
+    }
+    const previous = transfer.value;
+    if (previous && (
+      uploadedBytes < previous.uploadedBytes ||
+      downloadedBytes < previous.downloadedBytes ||
+      activeDurationMs < previous.activeDurationMs
+    )) {
+      return;
+    }
+    transfer.value = { uploadedBytes, downloadedBytes, activeDurationMs };
+  };
+
   const readProgressSummary = (
     payload: Record<string, unknown>,
   ): Omit<SyncSummary, "failedTopicIds"> | null => {
@@ -787,6 +820,11 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     kind: BufferedSessionEvent["kind"],
     payload: Record<string, unknown>,
   ) => {
+    if (kind === "transfer") {
+      if (!isTerminal()) applyTransferSnapshot(payload);
+      return;
+    }
+
     if (kind === "log") {
       if (
         payload.audience === "operator" &&
@@ -855,6 +893,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         ) {
           return;
         }
+        if (!isTerminal()) applyTransferSnapshot(payload.transfer);
         terminalError.value = readTerminalError(payload);
         pushLog("error", terminalError.value.message);
         const failedTopics = Math.max(
@@ -896,6 +935,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         nextStatus === "completed" ||
         nextStatus === "completed_with_warnings"
       ) {
+        applyTransferSnapshot(payload.transfer);
         // The completed event carries the mandatory summary and is the only
         // authoritative success transition. A status-only terminal frame cannot
         // manufacture success or bypass summary validation.
@@ -940,6 +980,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
       );
       return;
     }
+    if (!isTerminal()) applyTransferSnapshot(payload.transfer);
     summary.value = completedSummary;
     status.value = payload.status;
     canDismiss.value = true;
@@ -1002,6 +1043,10 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
         routeSessionEvent("progress", payload),
       ),
 
+      registerListener(generation, "vcp-sync-transfer", (payload) =>
+        routeSessionEvent("transfer", payload),
+      ),
+
       registerListener(generation, "vcp-sync-status", (payload) =>
         routeSessionEvent("status", payload),
       ),
@@ -1041,6 +1086,7 @@ export const useSyncSessionStore = defineStore("syncSession", () => {
     summary,
     terminalError,
     desktopInfo,
+    transfer,
     retryInFlight,
     needsReload,
     logs,
