@@ -1,0 +1,2 @@
+# SQLx hashes migration text verbatim; keep the same bytes on every build host.
+/src-tauri/migrations/*.sql text eol=lf

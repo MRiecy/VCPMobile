@@ -4,6 +4,9 @@ const fs = require('fs');
 const net = require('net');
 const os = require('os');
 const path = require('path');
+const { createHash } = require('crypto');
+const { Transform } = require('stream');
+const { pipeline } = require('stream/promises');
 const { spawn, spawnSync } = require('child_process');
 const {
   ROOT,
@@ -43,6 +46,7 @@ Commands:
   stop         Ask the active dev supervisor to stop and clean owned tunnels
   install      Verify an APK application id, then install only the Debug package
   grant        Best-effort runtime grants for only the Debug package
+  database-backup  Stop Debug and preserve its SQLite DB/WAL/SHM under .agent
 
 Options:
   --serial <id>       Required when more than one adb device is connected
@@ -64,6 +68,7 @@ Safety boundary:
 
 function parseArgs(argv) {
   const tokens = [...argv];
+  while (tokens[0] === '--') tokens.shift();
   const command = tokens[0] && !tokens[0].startsWith('-') ? tokens.shift() : 'help';
   const options = {
     serial: '',
@@ -81,6 +86,9 @@ function parseArgs(argv) {
     const token = tokens[index];
     if (token === '--') {
       continue;
+    }
+    if (command === 'database-backup' && !['--serial', '--json', '--help', '-h'].includes(token)) {
+      throw new Error('database-backup accepts only --serial and --json');
     }
     if (token === '--serial') {
       options.serial = requireValue(tokens, ++index, token);
@@ -163,12 +171,19 @@ function resolveOutputPath(candidate, fallback) {
   return resolved;
 }
 
-function packageManagerName() {
-  return process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
+function packageManagerCommand(args) {
+  // Windows batch shims need cmd.exe; Node cannot spawn pnpm.cmd directly.
+  // These arguments are fixed by this CLI, never assembled from device input.
+  return process.platform === 'win32'
+    ? { command: process.env.ComSpec || 'cmd.exe', args: ['/d', '/s', '/c', 'pnpm.cmd', ...args] }
+    : { command: 'pnpm', args };
 }
 
-function commandVersion(command, args) {
-  const result = spawnSync(command, args, { cwd: ROOT, encoding: 'utf8', stdio: 'pipe' });
+function packageManagerVersion() {
+  const invocation = packageManagerCommand(['--version']);
+  const result = spawnSync(invocation.command, invocation.args, {
+    cwd: ROOT, encoding: 'utf8', stdio: 'pipe', windowsHide: true,
+  });
   return result.status === 0 ? (result.stdout || '').trim() : null;
 }
 
@@ -352,7 +367,7 @@ async function commandDoctor(options) {
     schema: `vcp.android-debug.doctor.v${SCHEMA_VERSION}`,
     ok: true,
     adb: findAdb(),
-    pnpm: commandVersion(packageManagerName(), ['--version']),
+    pnpm: packageManagerVersion(),
     node: process.version,
     device: {
       serial: device.serial,
@@ -416,6 +431,98 @@ async function commandLogs(options) {
     for (const line of result.lines) console.log(line);
   }
   return result.pid ? 0 : 4;
+}
+
+async function commandDatabaseBackup(options) {
+  const device = ensureUsbDevice();
+  // Pin every operation to the device selected above, including when --serial was omitted.
+  process.env.ANDROID_SERIAL = device.serial;
+  const adb = findAdb();
+  const allowedFiles = ['vcp_avatar.db', 'vcp_avatar.db-wal', 'vcp_avatar.db-shm'];
+  const assertStopped = () => {
+    const result = spawnSync(adb, ['-s', device.serial, 'shell', 'pidof', DEBUG_PACKAGE], {
+      encoding: 'utf8', stdio: 'pipe', maxBuffer: 16 * 1024, windowsHide: true,
+    });
+    if (result.error || (result.stderr || '').trim() || (result.status !== 0 && result.status !== 1)) {
+      throw new Error('Could not verify that the Debug database process is stopped');
+    }
+    if ((result.stdout || '').trim() || result.status === 0) {
+      throw new Error('Debug app is running; refusing an inconsistent database backup');
+    }
+  };
+  runAdb(['shell', 'am', 'force-stop', DEBUG_PACKAGE]);
+  assertStopped();
+  const listing = runAdb(
+    ['shell', 'run-as', DEBUG_PACKAGE, 'ls', '-1', ...allowedFiles],
+    { allowFailure: true, maxBuffer: 16 * 1024 },
+  ).split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (listing.some((name) => !allowedFiles.includes(name)) || !listing.includes(allowedFiles[0])) {
+    throw new Error('Debug vcp_avatar.db is absent or run-as could not list its SQLite files');
+  }
+  const filenames = allowedFiles.filter((name) => listing.includes(name));
+  const backupRoot = path.join(ARTIFACT_ROOT, 'db-backups');
+  ensureDir(backupRoot);
+  const directory = path.join(backupRoot, timestamp());
+  fs.mkdirSync(directory); // A colliding destination must fail instead of replacing a backup.
+  const files = [];
+  const manifestPath = path.join(directory, 'manifest.json');
+  const manifest = (status) => ({
+    schema: `vcp.android-debug.database-backup.v${SCHEMA_VERSION}`,
+    status, serial: device.serial, package: DEBUG_PACKAGE, directory, files,
+  });
+  try {
+    for (const filename of filenames) {
+      assertStopped();
+      const partialPath = path.join(directory, `${filename}.partial`);
+      const destination = path.join(directory, filename);
+      const hash = createHash('sha256');
+      let size = 0;
+      const child = spawn(adb, ['-s', device.serial, 'exec-out', 'run-as', DEBUG_PACKAGE, 'cat', filename], {
+        stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
+      });
+      // stderr can contain only transport/file diagnostics, but still keep it bounded.
+      let stderr = '';
+      child.stderr.on('data', (chunk) => {
+        if (stderr.length < 4096) stderr += chunk.toString('utf8').slice(0, 4096 - stderr.length);
+      });
+      const exited = new Promise((resolve, reject) => {
+        child.once('error', reject);
+        child.once('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`Debug database export failed for ${filename} (exit ${code}): ${stderr.trim()}`));
+        });
+      });
+      const digest = new Transform({
+        transform(chunk, _encoding, callback) {
+          size += chunk.length;
+          hash.update(chunk);
+          callback(null, chunk);
+        },
+      });
+      const copied = pipeline(child.stdout, digest, fs.createWriteStream(partialPath, { flags: 'wx' }));
+      try {
+        await Promise.all([copied, exited]);
+      } catch (error) {
+        child.kill();
+        await Promise.allSettled([copied, exited]);
+        throw error; // Keep this explicitly named partial file and every completed copy.
+      }
+      // An exclusive hard link publishes the completed file without overwriting any path.
+      fs.linkSync(partialPath, destination);
+      fs.unlinkSync(partialPath);
+      files.push({ path: destination, size, sha256: hash.digest('hex') });
+    }
+    assertStopped();
+    const result = manifest('complete');
+    fs.writeFileSync(manifestPath, `${JSON.stringify(result, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+    printPayload(options, { ...result, manifest: manifestPath });
+    return 0;
+  } catch (error) {
+    if (!fs.existsSync(manifestPath)) {
+      fs.writeFileSync(manifestPath, `${JSON.stringify(manifest('partial'), null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+    }
+    throw new Error(`Database backup incomplete; preserved copies at ${directory}: ${error.message}`);
+  }
 }
 
 function captureScreenshot(outputPath) {
@@ -623,13 +730,15 @@ function commandDev(options) {
     CARGO_TERM_COLOR: 'never',
     GRADLE_OPTS: `${process.env.GRADLE_OPTS || ''} -Dorg.gradle.console=plain`.trim(),
   };
+  const invocation = packageManagerCommand(['tauri', 'android', 'dev', '--host', '127.0.0.1']);
   const child = spawn(
-    packageManagerName(),
-    ['tauri', 'android', 'dev', '--host', '127.0.0.1'],
+    invocation.command,
+    invocation.args,
     {
       cwd: ROOT,
       env: environment,
       detached: process.platform !== 'win32',
+      windowsHide: true,
       stdio: ['inherit', 'pipe', 'pipe'],
     },
   );
@@ -823,6 +932,7 @@ async function main(argv = process.argv.slice(2)) {
   if (command === 'dev') return commandDev(options);
   if (command === 'status') return commandStatus(options);
   if (command === 'logs') return commandLogs(options);
+  if (command === 'database-backup') return commandDatabaseBackup(options);
   if (command === 'snapshot') return commandSnapshot(options);
   if (command === 'screenshot') return commandScreenshot(options);
   if (command === 'reload') return commandReload(options);

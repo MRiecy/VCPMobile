@@ -27,7 +27,7 @@
 tests/
 ├── e2e-android/scripts/
 │   ├── adb-env.cjs                 # ADB 定位、设备选择与 Debug 包常量
-│   └── android-debug-agent.cjs     # doctor/dev/status/logs/snapshot 等统一入口
+│   └── android-debug-agent.cjs     # doctor/dev/status/logs/snapshot/database-backup 等统一入口
 └── perf/scripts/
     ├── measure_apk_size.cjs        # APK 文件与可读取 section 的体积报告
     ├── measure_startup_adb.cjs     # adb am start -W 冷启动采样

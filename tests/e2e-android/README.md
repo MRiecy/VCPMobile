@@ -23,6 +23,7 @@ pnpm android:debug:snapshot -- --screenshot
 pnpm android:debug:screenshot -- --name theme-page
 pnpm android:debug:reload
 pnpm android:debug:stop
+pnpm android:debug -- database-backup --serial <adb-serial> --json
 ```
 
 `dev` is foreground and low-noise. Complete build output is written under
@@ -30,6 +31,11 @@ pnpm android:debug:stop
 diagnostics and 30-second heartbeats. `logs` is PID-scoped and capped at 200
 lines. `snapshot` writes files and prints paths instead of embedding images or
 large diagnostics in the caller response.
+
+`database-backup` stops only the Debug app and streams its SQLite DB and existing
+WAL/SHM files into a new `.agent/android-debug/db-backups/` directory. It prints
+only file metadata, retains partial exports on failure, and never writes back to
+the device database. Inspect copies while preserving the original backup.
 
 The retired `adb-smoke.cjs`, `install-apk.cjs` and `grant-permissions.cjs`
 entrypoints must not be restored. Their safe Debug-only behavior is available
