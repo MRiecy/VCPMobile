@@ -118,7 +118,51 @@ async fn root(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-// std File locking uses flock on Apple platforms, matching the Swift extension.
+// Rust 1.97's std file locks do not support Android. Use Bionic flock there;
+// Apple std locks already use flock, matching the Swift extension. The owning
+// File remains the lease: closing it releases the lock on every exit path.
+fn lock_file(file: &File) -> std::io::Result<()> {
+    #[cfg(target_os = "android")]
+    {
+        use std::os::fd::AsRawFd;
+        loop {
+            // SAFETY: file is borrowed throughout the call and owns a valid descriptor.
+            // flock only locks that descriptor; it neither closes nor takes ownership of it.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } == 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(error);
+            }
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    file.lock()
+}
+
+fn try_lock_file(file: &File) -> Result<(), std::fs::TryLockError> {
+    #[cfg(target_os = "android")]
+    {
+        use std::os::fd::AsRawFd;
+        loop {
+            // SAFETY: file owns the descriptor for the whole borrowed call. flock does
+            // not retain or close it; File drop still owns release of the acquired lease.
+            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return Ok(());
+            }
+            let error = std::io::Error::last_os_error();
+            match error.kind() {
+                std::io::ErrorKind::Interrupted => continue,
+                std::io::ErrorKind::WouldBlock => return Err(std::fs::TryLockError::WouldBlock),
+                _ => return Err(std::fs::TryLockError::Error(error)),
+            }
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    file.try_lock()
+}
+
 async fn lock(root: &Path) -> Result<File, String> {
     let path = root.join("current.lock");
     tokio::task::spawn_blocking(move || {
@@ -129,7 +173,7 @@ async fn lock(root: &Path) -> Result<File, String> {
             .truncate(false)
             .open(path)
             .map_err(|e| e.to_string())?;
-        file.lock().map_err(|e| e.to_string())?;
+        lock_file(&file).map_err(|e| e.to_string())?;
         Ok(file)
     })
     .await
@@ -254,7 +298,7 @@ fn acquisition_interrupted(root: &Path, slot: &Slot, android_owner: Option<&str>
         .write(true)
         .open(root.join(&slot.delivery_id).join("lease.lock"))
     {
-        Ok(file) => file.try_lock().is_ok(),
+        Ok(file) => try_lock_file(&file).is_ok(),
         Err(error) => error.kind() == std::io::ErrorKind::NotFound,
     }
 }
@@ -303,7 +347,7 @@ async fn cleanup(root: PathBuf, finished_delivery: Option<String>) {
             else {
                 continue;
             };
-            if slot_guard.lock().is_err() {
+            if lock_file(&slot_guard).is_err() {
                 continue;
             }
             let Ok(latest) = slot(&root) else {
@@ -321,7 +365,7 @@ async fn cleanup(root: PathBuf, finished_delivery: Option<String>) {
             else {
                 continue;
             };
-            if lease.try_lock().is_err() {
+            if try_lock_file(&lease).is_err() {
                 continue;
             }
             // A live provider/import holds this directory lease. No other generation is touched.
@@ -438,7 +482,7 @@ pub async fn prepare_current_share(
             .write(true)
             .open(lease_path)
             .map_err(|e| e.to_string())?;
-        file.lock().map_err(|e| e.to_string())?;
+        lock_file(&file).map_err(|e| e.to_string())?;
         Ok::<_, String>(file)
     })
     .await
@@ -752,7 +796,7 @@ async fn finish_android_share_inner(
         .truncate(false)
         .open(folder.join("lease.lock"))
         .map_err(|e| e.to_string())?;
-    match lease.try_lock() {
+    match try_lock_file(&lease) {
         Ok(()) => {}
         Err(std::fs::TryLockError::WouldBlock) => return Ok(existing),
         Err(error) => return Err(error.to_string()),
@@ -1096,6 +1140,70 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn independent_share_lock_handles_exclude_until_the_owner_drops() {
+        let temporary = tempfile::tempdir_in("tests").unwrap();
+        let owner = directory(temporary.path(), "lease");
+        let path = temporary.path().join("lease/lease.lock");
+        let contender = File::options().read(true).write(true).open(&path).unwrap();
+        lock_file(&owner).unwrap();
+        assert!(matches!(
+            try_lock_file(&contender),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(owner);
+        try_lock_file(&contender).unwrap();
+        let next = File::options().read(true).write(true).open(path).unwrap();
+        assert!(matches!(
+            try_lock_file(&next),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(contender);
+        try_lock_file(&next).unwrap();
+    }
+
+    #[test]
+    fn blocking_share_lock_waits_and_error_exit_releases_the_lease() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let temporary = tempfile::tempdir_in("tests").unwrap();
+        let owner = directory(temporary.path(), "lease");
+        let path = temporary.path().join("lease/lease.lock");
+        lock_file(&owner).unwrap();
+        let (waiting_tx, waiting_rx) = mpsc::channel();
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let waiting_path = path.clone();
+        let waiter = std::thread::spawn(move || {
+            let result = (|| -> Result<(), &'static str> {
+                let lease = File::options()
+                    .read(true)
+                    .write(true)
+                    .open(waiting_path)
+                    .unwrap();
+                assert!(matches!(
+                    try_lock_file(&lease),
+                    Err(std::fs::TryLockError::WouldBlock)
+                ));
+                waiting_tx.send(()).unwrap();
+                lock_file(&lease).unwrap();
+                acquired_tx.send(()).unwrap();
+                Err("import failed after acquiring its lease")
+            })();
+            assert!(result.is_err());
+        });
+        waiting_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(
+            acquired_rx.recv_timeout(Duration::from_millis(100)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        drop(owner);
+        acquired_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        waiter.join().unwrap();
+        let next = File::options().read(true).write(true).open(path).unwrap();
+        try_lock_file(&next).unwrap();
+    }
+
     #[tokio::test]
     async fn delayed_cleanup_cannot_delete_a_new_share_or_a_live_reader() {
         let temporary = tempfile::tempdir_in("tests").unwrap();
@@ -1103,7 +1211,7 @@ mod tests {
         let slot_guard = lock(root).await.unwrap();
         write_slot(root, &test_slot(1, "first")).unwrap();
         let first = directory(root, "first");
-        first.lock().unwrap();
+        lock_file(&first).unwrap();
         let second = directory(root, "second");
         drop(second);
         write_slot(root, &test_slot(2, "second")).unwrap();
@@ -1147,7 +1255,7 @@ mod tests {
         let mut source = test_slot(1, "receiving");
         source.state = "receiving".into();
         let lease = directory(root, "receiving");
-        lease.lock().unwrap();
+        lock_file(&lease).unwrap();
         assert!(!acquisition_interrupted(root, &source, None));
         drop(lease);
         assert!(acquisition_interrupted(root, &source, None));
