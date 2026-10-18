@@ -471,7 +471,6 @@ pub async fn pick_file<R: Runtime>(
     max_bytes: Option<u64>,
     multiple: Option<bool>,
     reservation_token: Option<String>,
-    allow_other_files: Option<bool>,
 ) -> Result<PickFileResult, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
@@ -517,7 +516,6 @@ pub async fn pick_file<R: Runtime>(
                         "mode": mode, "operationId": operation_id,
                         "stagingDir": staging, "maxBytes": max_bytes, "maxFiles": max_files,
                         "reservationToken": reservation_token,
-                        "allowOtherFiles": mode == "config" && allow_other_files.unwrap_or(false),
                     }),
                 )
                 .map_err(|e| format!("native_picker: {e}"))
@@ -534,7 +532,6 @@ pub async fn pick_file<R: Runtime>(
             max_bytes,
             multiple,
             reservation_token,
-            allow_other_files,
         );
         Err("文件选择仅在移动端可用".to_string())
     }

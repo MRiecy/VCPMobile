@@ -288,11 +288,11 @@ export async function exportConfigBackup(
 }
 
 /** Native staging is released after Rust has returned the validated patch. */
-export async function pickConfigBackup(operationId: string, allowOtherFiles = false): Promise<ParsedConfigBackup> {
+export async function pickConfigBackup(operationId: string): Promise<ParsedConfigBackup> {
   if (!isAndroid && !isIOS) {
     throw new Error('当前预览环境不提供原生配置文件导入');
   }
-  const picked = await pickFile('config', { operationId, maxBytes: MAX_BACKUP_FILE_BYTES, allowOtherFiles });
+  const picked = await pickFile('config', { operationId, maxBytes: MAX_BACKUP_FILE_BYTES });
   try {
     return await invoke<ParsedConfigBackup>('parse_config_backup', { path: picked.path });
   } finally {

@@ -65,13 +65,12 @@ class FilePickerBatchTest {
         unmockkAll()
     }
 
-    private fun start(mode: String = "file", maxFiles: Int = 16, maxBytes: Long = 100, allowOtherFiles: Boolean = false): Invoke {
+    private fun start(mode: String = "file", maxFiles: Int = 16, maxBytes: Long = 100): Invoke {
         val invoke = mockk<Invoke>(relaxed = true)
         every { invoke.parseArgs(PickFileArgs::class.java) } returns PickFileArgs().apply {
             this.mode = mode
             this.maxFiles = maxFiles
             this.maxBytes = maxBytes
-            this.allowOtherFiles = allowOtherFiles
             operationId = "batch_test"
             stagingDir = uploads.absolutePath
         }
@@ -185,18 +184,12 @@ class FilePickerBatchTest {
         verify(exactly = 1) { avatar.reject("cancelled: file picker") }
     }
 
-    @Test fun configPickerStartsAtExportsAndOnlyBroadensForExplicitLegacySelection() {
+    @Test fun configPickerStartsAtExportsAndAcceptsCurrentAndLegacyBackupTypesTogether() {
         val first = start(mode = "config")
-        assertArrayEquals(arrayOf("application/json", "application/vnd.vcp.config+json"), launched.getStringArrayExtra(Intent.EXTRA_MIME_TYPES))
+        assertArrayEquals(arrayOf("application/json", "application/vnd.vcp.config+json", "application/octet-stream"), launched.getStringArrayExtra(Intent.EXTRA_MIME_TYPES))
         val directory = launched.getParcelableExtra<Uri>(DocumentsContract.EXTRA_INITIAL_URI)
         assertEquals("primary:Download/VCPMobile", DocumentsContract.getDocumentId(directory!!))
         plugin.onPickFileResult(first, ActivityResult(Activity.RESULT_CANCELED, null))
-
-        val legacy = start(mode = "config", allowOtherFiles = true)
-        assertEquals("*/*", launched.type)
-        assertFalse(launched.hasExtra(Intent.EXTRA_MIME_TYPES))
-        assertEquals(directory, launched.getParcelableExtra<Uri>(DocumentsContract.EXTRA_INITIAL_URI))
-        plugin.onPickFileResult(legacy, ActivityResult(Activity.RESULT_CANCELED, null))
 
         val ordinary = start(mode = "file")
         assertFalse(launched.hasExtra(DocumentsContract.EXTRA_INITIAL_URI))

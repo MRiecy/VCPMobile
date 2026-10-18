@@ -74,13 +74,13 @@ const importConfirmation = computed(() => {
     + `\n\n备份导出时间：${backup.exportedAt || '未知'}\n\n确定继续吗？`;
 });
 
-const triggerImport = async (allowOtherFiles = false) => {
+const triggerImport = async () => {
   if (disposed || !props.active || props.disabled || exportStatus.value.type === "loading" || importOperationId || importing.value || showImportConfirm.value) return;
   const operationId = `config_${crypto.randomUUID()}`;
   importOperationId = operationId;
   importStatus.value = { type: "loading", message: "正在选取并解析备份文件..." };
   try {
-    const parsed = await pickConfigBackup(operationId, allowOtherFiles);
+    const parsed = await pickConfigBackup(operationId);
     if (disposed || importOperationId !== operationId) return;
     if (!configBackupScopes(parsed).length) throw new Error('备份未包含可恢复的配置');
     pendingImport.value = parsed;
@@ -184,12 +184,8 @@ const confirmImport = async () => {
       :status-type="importStatus.type"
       :status-message="importStatus.message"
       status-multiline
-      @action-click="triggerImport()"
+      @action-click="triggerImport"
     />
-
-    <button type="button" class="min-h-11 px-1 text-xs text-[var(--secondary-text)] underline underline-offset-3 disabled:opacity-40"
-      :disabled="disabled || exportStatus.type === 'loading' || !!importOperationId || importing || showImportConfirm"
-      @click="triggerImport(true)">选择旧版或其他文件</button>
 
     <p class="text-[10px] opacity-40 px-1 italic">
       * 备份文件为明文 JSON，包含 API Key 与密码，请勿分享给他人

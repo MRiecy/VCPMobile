@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { PickedFile, PickedFiles, PickFileMode } from 'tauri-plugin-vcp-mobile';
 import { isIOS } from './platform';
 
-interface PickerOptions { operationId?: string; maxBytes?: number; allowOtherFiles?: boolean }
+interface PickerOptions { operationId?: string; maxBytes?: number }
 interface PickerAdmission { cancelled: boolean; starting: boolean }
 
 // These entries exist only while the corresponding picker/export is in flight.

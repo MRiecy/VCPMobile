@@ -36,7 +36,6 @@ private struct PickArgs: Decodable {
     let stagingDir: String
     let maxBytes: UInt64
     let maxFiles: Int
-    let allowOtherFiles: Bool?
 
     var selectionLimit: Int { mode == "file" || mode == "gallery" ? max(1, min(maxFiles, 16)) : 1 }
 }
@@ -287,7 +286,7 @@ extension VcpMobilePlugin {
                         NativeConfigBackupDirectory.prepare(owner: self.presentation, operation: operation, create: false) { access in
                             delegate.configDirectoryAccess = access
                             operation.delegate = delegate
-                            let types: [UTType] = args.allowOtherFiles == true ? [.item] : [
+                            let types: [UTType] = [
                                 .json, UTType(exportedAs: "com.vcp.avatar.configuration", conformingTo: .json)
                             ]
                             let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: false)

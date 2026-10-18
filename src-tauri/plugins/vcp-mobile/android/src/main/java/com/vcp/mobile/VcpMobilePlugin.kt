@@ -1602,10 +1602,10 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                         addCategory(Intent.CATEGORY_OPENABLE)
                         putExtra(Intent.EXTRA_ALLOW_MULTIPLE, args.selectionLimit > 1)
                         if (args.mode == "config") {
-                            // Unknown legacy MIME types are available through the explicit
-                            // "choose other files" entry instead of broadening this default.
-                            if (!args.allowOtherFiles) putExtra(Intent.EXTRA_MIME_TYPES, arrayOf(
-                                "application/json", "application/vnd.vcp.config+json"
+                            // Providers may classify the legacy .vcpcfg extension as binary.
+                            // Both backup generations use this picker and the same content validator.
+                            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf(
+                                "application/json", "application/vnd.vcp.config+json", "application/octet-stream"
                             ))
                             putExtra(DocumentsContract.EXTRA_INITIAL_URI, DocumentsContract.buildDocumentUri(
                                 "com.android.externalstorage.documents", "primary:${Environment.DIRECTORY_DOWNLOADS}/VCPMobile"
@@ -3052,7 +3052,6 @@ class PickFileArgs {
     var stagingDir: String = ""
     var maxBytes: Long = 512L * 1024 * 1024
     var maxFiles: Int = 1
-    var allowOtherFiles: Boolean = false
     val selectionLimit: Int get() = if (mode == "file" || mode == "gallery") maxFiles.coerceIn(1, 16) else 1
 }
 
