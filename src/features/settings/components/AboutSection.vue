@@ -241,7 +241,7 @@ const openFeedback = () => {
     <!-- Header with 3D Logo (Invisible Hitbox Layer) -->
     <div 
       ref="hitboxRef"
-      class="relative pt-16 pb-12 flex flex-col items-center justify-center z-10"
+      class="relative pt-12 pb-8 flex flex-col items-center justify-center z-10"
       @mousemove="handleMove"
       @mouseleave="resetRotation"
       @touchmove.prevent="handleMove"
@@ -320,7 +320,7 @@ const openFeedback = () => {
     </div>
 
     <!-- Footer -->
-    <div class="footer-section mt-auto pt-8 pb-4 text-center space-y-1 opacity-30 relative z-10 pointer-events-none transition-colors duration-300">
+    <div class="footer-section mt-auto pt-4 pb-4 text-center space-y-1 opacity-30 relative z-10 pointer-events-none transition-colors duration-300">
       <p class="text-[9px] font-mono tracking-[0.2em] uppercase">Powered by Tauri & Vue 3</p>
       <p class="text-[9px] opacity-80">2024-2026 © VCPMobile PROJECT AVATAR</p>
     </div>
