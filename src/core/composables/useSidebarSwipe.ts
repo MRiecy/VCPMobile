@@ -1,6 +1,7 @@
 import { useSwipe } from '@vueuse/core';
 import { useLayoutStore } from '../stores/layout';
-import type { Ref } from 'vue';
+import { useVoiceCallStore } from '../../features/chat/voice/voiceCallStore';
+import { computed, watch, type Ref } from 'vue';
 
 export type SidebarSwipeType = 'global' | 'left' | 'right';
 
@@ -75,10 +76,24 @@ function isScrollableArea(el: Element): boolean {
  */
 export function useSidebarSwipe(target: Ref<HTMLElement | null>, options: SidebarSwipeOptions) {
   const layoutStore = useLayoutStore();
+  const voiceCallStore = useVoiceCallStore();
+  const swipeTarget = computed(() => voiceCallStore.active ? null : target.value);
+  let gestureAllowed = false;
 
-  const { direction, lengthX, lengthY, isSwiping } = useSwipe(target, {
+  watch(() => voiceCallStore.active, (active) => {
+    if (active) gestureAllowed = false;
+  }, { flush: 'sync' });
+
+  const { direction, lengthX, lengthY, isSwiping } = useSwipe(swipeTarget, {
     threshold: options.type === 'global' ? 30 : 15,
+    onSwipeStart: () => {
+      gestureAllowed = !voiceCallStore.active;
+    },
     onSwipeEnd: (e: TouchEvent | MouseEvent) => {
+      const canHandle = gestureAllowed && !voiceCallStore.active;
+      gestureAllowed = false;
+      if (!canHandle) return;
+
       // 检查是否从受限区域发起
       if (e.target instanceof Element && e.target.closest('.no-swipe')) return;
 

@@ -14,6 +14,8 @@ export type OverlayPageType =
   | 'syncSession'
   | 'rebuildSession'
   | 'tarvenSettings'
+  | 'voiceSettings'
+  | 'voicePresets'
   | 'distributed'
   | 'ragObserver'
   | 'diaryCenter'
@@ -56,6 +58,8 @@ export const useOverlayStore = defineStore('overlay', () => {
   const isSyncSessionOpen = computed(() => pageStack.value.some(p => p.type === 'syncSession'));
   const isRebuildSessionOpen = computed(() => pageStack.value.some(p => p.type === 'rebuildSession'));
   const isTarvenSettingsOpen = computed(() => pageStack.value.some(p => p.type === 'tarvenSettings'));
+  const isVoiceSettingsOpen = computed(() => pageStack.value.some(p => p.type === 'voiceSettings'));
+  const isVoicePresetsOpen = computed(() => pageStack.value.some(p => p.type === 'voicePresets'));
   const isDistributedOpen = computed(() => pageStack.value.some(p => p.type === 'distributed'));
   const isRagObserverOpen = computed(() => pageStack.value.some(p => p.type === 'ragObserver'));
   const isDiaryCenterOpen = computed(() => pageStack.value.some(p => p.type === 'diaryCenter'));
@@ -202,6 +206,26 @@ export const useOverlayStore = defineStore('overlay', () => {
   };
 
   const closeTarvenSettings = () => {
+    popPage();
+  };
+
+  const openVoiceSettings = () => {
+    if (isVoiceSettingsOpen.value) return;
+    pushPage('voiceSettings');
+  };
+
+  const closeVoiceSettings = () => {
+    if (pageStackTop.value?.type !== 'voiceSettings') return;
+    popPage();
+  };
+
+  const openVoicePresets = () => {
+    if (isVoicePresetsOpen.value) return;
+    pushPage('voicePresets');
+  };
+
+  const closeVoicePresets = () => {
+    if (pageStackTop.value?.type !== 'voicePresets') return;
     popPage();
   };
 
@@ -396,6 +420,8 @@ export const useOverlayStore = defineStore('overlay', () => {
     isSyncSessionOpen,
     isRebuildSessionOpen,
     isTarvenSettingsOpen,
+    isVoiceSettingsOpen,
+    isVoicePresetsOpen,
     isDistributedOpen,
     isRagObserverOpen,
     isDiaryCenterOpen,
@@ -420,6 +446,10 @@ export const useOverlayStore = defineStore('overlay', () => {
     closeRebuildSession,
     openTarvenSettings,
     closeTarvenSettings,
+    openVoiceSettings,
+    closeVoiceSettings,
+    openVoicePresets,
+    closeVoicePresets,
     openDistributed,
     closeDistributed,
     openRagObserver,

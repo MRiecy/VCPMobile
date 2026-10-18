@@ -9,6 +9,10 @@ const context = vi.hoisted(() => ({
   lifecycle: {} as { state: string; lifecycleSnapshot: { phase: string } | null; bootstrap: () => Promise<void> },
   selectTopic: vi.fn(async () => {}),
   notice: vi.fn(),
+  voice: {} as { active: boolean },
+  selectedItem: null as { id: string } | null,
+  clearConversation: vi.fn(),
+  closeTopModal: vi.fn(() => false),
 }));
 const native = vi.hoisted(() => ({ ios: true }));
 vi.mock('../../../core/utils/platform', () => ({
@@ -22,13 +26,18 @@ vi.mock('../../../core/composables/useSidebarSwipe', () => ({ useSidebarSwipe: (
 vi.mock('../../../core/composables/useEmoticonFixer', () => ({ useEmoticonFixer: () => ({ initGlobalFixer: () => {} }) }));
 vi.mock('../../../core/composables/useNotificationProcessor', () => ({ useNotificationProcessor: () => ({ processPayload: () => ({ silent: true }) }) }));
 vi.mock('../../../core/composables/useAutoUpdate', () => ({ useAutoUpdate: () => ({ isPromptOpen: false, updateInfo: null }) }));
-vi.mock('../../../core/composables/useModalHistory', () => ({ useModalHistory: () => ({ initRootHistory: () => {}, closeTopModal: () => false, modalStackLength: () => 0 }) }));
+vi.mock('../../../core/composables/useModalHistory', () => ({ useModalHistory: () => ({ initRootHistory: () => {}, closeTopModal: context.closeTopModal, modalStackLength: () => 0 }) }));
 vi.mock('../../../core/stores/appLifecycle', () => ({ useAppLifecycleStore: () => context.lifecycle }));
 vi.mock('../../../core/stores/theme', () => ({ useThemeStore: () => ({ availableThemes: [], currentThemeInfo: null, isDarkResolved: false }) }));
 vi.mock('../../../core/stores/layout', () => ({ useLayoutStore: () => ({ leftDrawerOpen: false, rightDrawerOpen: false, setLeftDrawer: () => {}, setRightDrawer: () => {} }) }));
 vi.mock('../../../core/stores/overlay', () => ({ useOverlayStore: () => ({}) }));
 vi.mock('../../../core/stores/notification', () => ({ useNotificationStore: () => ({ addNotification: context.notice }) }));
-vi.mock('../../../core/stores/chatSessionStore', () => ({ useChatSessionStore: () => ({ currentSelectedItem: null, selectTopicById: context.selectTopic }) }));
+vi.mock('../../../core/stores/chatSessionStore', () => ({ useChatSessionStore: () => ({
+  get currentSelectedItem() { return context.selectedItem; },
+  selectTopicById: context.selectTopic,
+  clearConversation: context.clearConversation,
+}) }));
+vi.mock('../../../features/chat/voice/voiceCallStore', () => ({ useVoiceCallStore: () => context.voice }));
 vi.mock('../../../core/stores/assistant', () => ({ useAssistantStore: () => ({}) }));
 vi.mock('../../../core/stores/shareStore', () => ({ useShareStore: () => ({
   current: null, failures: [], selectorOpen: false, busy: false,
@@ -61,12 +70,59 @@ beforeEach(() => {
   context.lifecycle = reactive({ state: 'BOOTING', lifecycleSnapshot: null, bootstrap: vi.fn(async () => {}) });
   context.selectTopic.mockClear();
   context.notice.mockClear();
+  context.voice = reactive({ active: false });
+  context.selectedItem = null;
+  context.clearConversation.mockClear();
+  context.closeTopModal.mockReset().mockReturnValue(false);
   mockInvoke('plugin:vcp-mobile|get_pending_notification', () => null);
   mockInvoke('get_topics', () => [{ id: 'old' }, { id: 'new' }]);
 });
 afterEach(() => {
   wrapper?.unmount();
   wrapper = undefined;
+});
+
+describe('root voice call navigation', () => {
+  it('lets upper surfaces consume back and keeps the conversation until the call ends', async () => {
+    context.lifecycle.state = 'READY';
+    context.selectedItem = { id: 'agent' };
+    context.voice.active = true;
+    mountApp();
+    await flushPromises();
+
+    context.closeTopModal.mockReturnValueOnce(true);
+    window.dispatchEvent(new CustomEvent('vcp-hardware-back'));
+    window.dispatchEvent(new CustomEvent('vcp-exit-requested'));
+    expect(context.closeTopModal).toHaveBeenCalledTimes(2);
+    expect(context.clearConversation).not.toHaveBeenCalled();
+
+    context.voice.active = false;
+    window.dispatchEvent(new CustomEvent('vcp-hardware-back'));
+    expect(context.clearConversation).toHaveBeenCalledOnce();
+  });
+
+  it('hides both sidebar surfaces without replacing the chat workspace', async () => {
+    context.lifecycle.state = 'READY';
+    mountApp();
+    await flushPromises();
+    const main = wrapper!.find('.vcp-workspace-main').element;
+    const left = wrapper!.find('.vcp-workspace-left').element;
+    const right = wrapper!.find('.vcp-workspace-right').element;
+
+    context.voice.active = true;
+    await flushPromises();
+    expect(wrapper!.find('.vcp-workspace-row').classes()).toContain('is-voice-call');
+    expect((left as HTMLElement).style.display).toBe('none');
+    expect((right as HTMLElement).style.display).toBe('none');
+    expect(wrapper!.find('.vcp-workspace-main').element).toBe(main);
+
+    context.voice.active = false;
+    await flushPromises();
+    expect(wrapper!.find('.vcp-workspace-left').element).toBe(left);
+    expect(wrapper!.find('.vcp-workspace-right').element).toBe(right);
+    expect((left as HTMLElement).style.display).not.toBe('none');
+    expect((right as HTMLElement).style.display).not.toBe('none');
+  });
 });
 
 describe('root notification navigation', () => {

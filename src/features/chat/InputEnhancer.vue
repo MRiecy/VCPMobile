@@ -7,6 +7,8 @@ import { useShareStore } from '../../core/stores/shareStore';
 import { useChatStreamStore } from '../../core/stores/chatStreamStore';
 import { useAttachmentStore } from '../../core/stores/attachmentStore';
 import { useNotificationStore } from '../../core/stores/notification';
+import { useOverlayStore } from '../../core/stores/overlay';
+import { Phone } from 'lucide-vue-next';
 import { useTarvenStore } from '../../core/stores/tarvenStore';
 import { isAndroid, isIOS } from '../../core/utils/platform';
 import { useLongTextPaste } from './composables/useLongTextPaste';
@@ -25,12 +27,13 @@ import type { AttachmentData } from '../../core/types/chat';
 const tarvenStore = useTarvenStore();
 
 const openTarvenSelector = () => {
-  if (props.disabled) return;
+  if (props.disabled || props.suspended) return;
   tarvenStore.isSelectorOpen = true;
 };
 
 const props = defineProps<{
   disabled?: boolean;
+  suspended?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -38,6 +41,7 @@ const emit = defineEmits<{
   (e: 'attach'): void;
   (e: 'toggle-menu', visible: boolean): void;
   (e: 'focus-input'): void;
+  (e: 'start-call'): void;
 }>();
 
 const input = ref('');
@@ -51,6 +55,7 @@ const shareStore = useShareStore();
 const streamStore = useChatStreamStore();
 const attachmentStore = useAttachmentStore();
 const notificationStore = useNotificationStore();
+const overlayStore = useOverlayStore();
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 const rootRef = ref<HTMLElement | null>(null);
 const isExpanded = ref(false);
@@ -77,6 +82,7 @@ const toggleEditor = () => {
 };
 
 const handleAttachToggle = () => {
+  if (props.suspended) return;
   // 附件选择沿原输入区展开，避免 112px 菜单挤掉键盘上方的编辑/发送区域。
   collapseEditor();
   toggleAttachMenu();
@@ -114,6 +120,29 @@ let touchStartY = 0;
 let iconTouchStartTime = 0;
 let isIconLongPress = false;
 let iconLongPressTimeout: number | null = null;
+let voiceInputGeneration = 0;
+
+const prepareForVoice = () => {
+  voiceInputGeneration += 1;
+  if (iconLongPressTimeout !== null) window.clearTimeout(iconLongPressTimeout);
+  iconLongPressTimeout = null;
+  cancelListening();
+  cancelRecording();
+  isSTTActive.value = false;
+  isLongPressRecording.value = false;
+  isIconLongPress = false;
+  isSwipeCancel.value = false;
+  attachMenuOpen.value = false;
+  collapseEditor();
+  dismissMention();
+  textareaRef.value?.blur();
+};
+
+defineExpose({ prepareForVoice });
+watch(() => props.suspended, suspended => {
+  if (suspended) prepareForVoice();
+  else void nextTick(autoResize);
+}, { flush: 'sync' });
 
 const explainVoiceUnavailable = () => {
   notificationStore.addNotification({
@@ -126,12 +155,12 @@ const explainVoiceUnavailable = () => {
 
 const handleVoiceClick = () => {
   // touchstart.prevent 阻止触摸合成 click；独立指针、键盘和辅助技术仍可查看说明。
-  if (!props.disabled && isIOS) explainVoiceUnavailable();
+  if (!props.disabled && !props.suspended && isIOS) explainVoiceUnavailable();
 };
 
 // 切换语音模式与普通文本模式
 const toggleAudioMode = () => {
-  if (props.disabled || !isAndroid) return;
+  if (props.disabled || props.suspended || !isAndroid) return;
   collapseEditor();
   
   attachMenuOpen.value = false;
@@ -151,7 +180,7 @@ const toggleAudioMode = () => {
   
   if (!isAudioMode.value) {
     nextTick(() => {
-      if (textareaRef.value) {
+      if (textareaRef.value && !props.suspended) {
         textareaRef.value.focus();
         autoResize();
       }
@@ -163,7 +192,8 @@ const toggleAudioMode = () => {
 // 交互 A：在“按住 说话”大长条上的 STT 手势管理
 // ----------------------------------------------------
 const handleSTTTouchStart = async (e: TouchEvent) => {
-  if (props.disabled || !isAndroid) return;
+  if (props.disabled || props.suspended || !isAndroid) return;
+  const generation = voiceInputGeneration;
   if (e.cancelable) e.preventDefault(); // 阻断默认上下文菜单与滚动
 
   isSTTActive.value = true;
@@ -174,7 +204,9 @@ const handleSTTTouchStart = async (e: TouchEvent) => {
     await startListening((_text) => {
       // 实时流式回调更新 transcriptionResult
     });
+    if (generation !== voiceInputGeneration) cancelListening();
   } catch (err: any) {
+    if (generation !== voiceInputGeneration) return;
     isSTTActive.value = false;
     notificationStore.addNotification({
       type: 'warning',
@@ -214,7 +246,9 @@ const handleSTTTouchEnd = async (e: TouchEvent) => {
       toastOnly: true,
     });
   } else {
+    const generation = voiceInputGeneration;
     const recognizedText = await stopListening();
+    if (generation !== voiceInputGeneration || props.suspended) return;
     if (recognizedText && !recognizedText.startsWith('[')) {
       input.value += recognizedText;
       
@@ -243,7 +277,7 @@ const handleSTTTouchCancel = (e: TouchEvent) => {
 // 交互 B：直接长按左侧语音按钮，进行附件录制并松手直发
 // ----------------------------------------------------
 const handleIconTouchStart = (e: TouchEvent) => {
-  if (props.disabled) return;
+  if (props.disabled || props.suspended) return;
   if (isIOS) {
     explainVoiceUnavailable();
     return;
@@ -266,12 +300,15 @@ const handleIconTouchStart = (e: TouchEvent) => {
   touchStartY = e.touches[0].clientY;
 
   iconLongPressTimeout = window.setTimeout(async () => {
+    const generation = voiceInputGeneration;
     collapseEditor();
     isIconLongPress = true;
     isLongPressRecording.value = true;
     try {
       await startRecording();
+      if (generation !== voiceInputGeneration) cancelRecording();
     } catch (err: any) {
+      if (generation !== voiceInputGeneration) return;
       isLongPressRecording.value = false;
       isIconLongPress = false;
     }
@@ -294,7 +331,7 @@ const handleIconTouchMove = (e: TouchEvent) => {
 
 const handleIconTouchEnd = async (e: TouchEvent) => {
   if (e.cancelable) e.preventDefault();
-  if (!isAndroid) return;
+  if (!isAndroid || props.suspended) return;
   
   if (iconLongPressTimeout) {
     clearTimeout(iconLongPressTimeout);
@@ -318,8 +355,10 @@ const handleIconTouchEnd = async (e: TouchEvent) => {
         toastOnly: true,
       });
     } else {
+      const generation = voiceInputGeneration;
       const voiceConversation = sessionStore.currentConversationKey;
       const result = await stopRecording();
+      if (generation !== voiceInputGeneration || props.suspended) return;
       if (result) {
         try {
           const originalName = `Voice_${Date.now()}.webm`;
@@ -331,6 +370,7 @@ const handleIconTouchEnd = async (e: TouchEvent) => {
           });
 
           if (finalData) {
+            if (generation !== voiceInputGeneration || props.suspended) return;
             if (!sessionStore.isConversationCurrent(voiceConversation)) {
               notificationStore.addNotification({
                 type: 'warning',
@@ -440,15 +480,46 @@ const hasContent = computed(() => input.value.trim() !== '' || attachmentStore.s
 const attachmentsReady = computed(() =>
   attachmentStore.stagedAttachments.every(attachment => attachment.status === 'done'),
 );
-const canSend = computed(() => hasContent.value && attachmentsReady.value && !props.disabled && !shareStore.sending && !isPreparing.value);
+const canSend = computed(() => hasContent.value && attachmentsReady.value && !props.disabled && !props.suspended && !shareStore.sending && !isPreparing.value);
 
 // 编辑重发意图与原会话绑定；切换会话取消意图时同时清理注入内容。
+let voiceResendEditor: typeof overlayStore.editorConfig = null;
+let voiceResendIntent: typeof historyStore.editingMessage = null;
+watch(() => overlayStore.editorConfig, current => {
+  if (!voiceResendEditor || current === voiceResendEditor) return;
+  voiceResendEditor = null;
+  if (historyStore.editingMessage === voiceResendIntent) historyStore.editingMessage = null;
+  voiceResendIntent = null;
+});
 watch(() => historyStore.editingMessage, async (intent, previousIntent) => {
+  // Editing remains available during a call without replacing the parked draft
+  // or bringing the hidden composer back into focus.
+  if (props.suspended) {
+    if (intent) {
+      // Failed sends restore the same intent. Keep the user's open editor and
+      // edited text instead of replacing it with the original message again.
+      if (voiceResendEditor && overlayStore.editorConfig === voiceResendEditor) return;
+      overlayStore.openEditor({
+        initialValue: intent.initialContent,
+        onSave: async content => {
+          if (historyStore.editingMessage !== intent || !sessionStore.isConversationCurrent(intent.key.conversation)) {
+            throw new Error('原消息所在会话已变化，请重新选择消息。');
+          }
+          if (!attachmentsReady.value) throw new Error('请等待草稿附件处理完成后再重发。');
+          await historyStore.sendMessage(content);
+          if (historyStore.editingMessage === intent) throw new Error('消息重发未完成，请稍后重试。');
+        },
+      });
+      voiceResendEditor = overlayStore.editorConfig;
+      voiceResendIntent = intent;
+    }
+    return;
+  }
   if (intent) {
     input.value = intent.initialContent;
     isAudioMode.value = false; // 强行切回键盘输入态
     await nextTick();
-    if (textareaRef.value) {
+    if (textareaRef.value && !props.suspended) {
       textareaRef.value.focus();
       textareaRef.value.dispatchEvent(new Event('input', { bubbles: true }));
     }
@@ -465,7 +536,7 @@ watch(() => shareStore.activeDraft?.deliveryId, async (deliveryId, previous) => 
     input.value = shareStore.activeDraft?.text ?? '';
     isAudioMode.value = false;
     await nextTick();
-    if (textareaRef.value) {
+    if (textareaRef.value && !props.suspended) {
       textareaRef.value.focus();
       textareaRef.value.dispatchEvent(new Event('input', { bubbles: true }));
     }
@@ -694,6 +765,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  prepareForVoice();
   textareaObserver?.disconnect();
   unregisterModal(expandedModalId);
   document.removeEventListener('click', handleClickOutside, true);
@@ -982,6 +1054,15 @@ onUnmounted(() => {
             <div class="i-heroicons-document-text text-2xl text-orange-500/80 group-hover:text-orange-500 group-hover:scale-105 transition-all"></div>
           </div>
           <span class="text-[11px] font-semibold text-[var(--primary-text)]/70 group-hover:text-[var(--primary-text)] transition-colors">文件</span>
+        </button>
+
+        <button type="button" aria-label="开始语音通话" :disabled="disabled || suspended"
+          @click="emit('start-call')"
+          class="group flex flex-col items-center gap-1.5 transition-opacity active:opacity-60 disabled:opacity-40">
+          <span class="w-13 h-13 flex items-center justify-center rounded-2xl bg-black/5 dark:bg-white/5 border border-[var(--border-color)]/30">
+            <Phone :size="24" :stroke-width="1.8" class="text-emerald-500/80 group-hover:text-emerald-500 transition-colors" aria-hidden="true" />
+          </span>
+          <span class="text-[11px] font-semibold text-[var(--primary-text)]/70">通话</span>
         </button>
       </div>
     </div>

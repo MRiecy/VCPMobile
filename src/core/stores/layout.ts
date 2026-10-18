@@ -1,9 +1,11 @@
 import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import { useModalHistory } from '../composables/useModalHistory';
+import { useVoiceCallStore } from '../../features/chat/voice/voiceCallStore';
 
 export const useLayoutStore = defineStore('layout', () => {
   const { registerModal, unregisterModal } = useModalHistory();
+  const voiceCallStore = useVoiceCallStore();
 
   const leftDrawerOpen = ref(false);
   const rightDrawerOpen = ref(false);
@@ -12,6 +14,7 @@ export const useLayoutStore = defineStore('layout', () => {
   const toggleRightDrawer = () => setRightDrawer(!rightDrawerOpen.value);
 
   const setLeftDrawer = (open: boolean) => {
+    if (open && voiceCallStore.active) return;
     if (open === leftDrawerOpen.value) return;
 
     if (!open) {
@@ -26,6 +29,7 @@ export const useLayoutStore = defineStore('layout', () => {
   };
 
   const setRightDrawer = (open: boolean) => {
+    if (open && voiceCallStore.active) return;
     if (open === rightDrawerOpen.value) return;
 
     if (!open) {

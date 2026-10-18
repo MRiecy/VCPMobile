@@ -80,6 +80,8 @@ src/
 
 ### 3.4 设置与领域偏好
 
+`features/chat/voice/voiceCallStore.ts` 持有绑定 `ConversationKey` 的通话呈现和麦克风状态；`microphoneMonitor.ts` 只采集有界实时音量与频谱，不录制附件或发起 ASR/TTS。ChatView 原位保留消息与输入实例，进入时收起输入交互，挂断恢复草稿；后台关闭麦克风，回前台需显式开启。App 根返回先关闭上层页面，再由通话消费；layout 与侧滑共同隔离左右侧栏。预设/配置入口复用 overlay page stack，语音设置内容同时供全局设置使用。
+
 `features/settings/catalog.ts` 组织稳定页面 ID、懒加载组件与布局；`SettingsView` / `useSettingsNavigation` 只拥有当前访问、退场画面和返回桥接。身份、连接、总结页面分别通过 `editing/useSettingsPageSession` 建立字段会话，正式快照始终归 `core/stores/settings.ts`。修改字段走显式 edit；保存只提交本页 dirty patch，外部快照重基不能覆盖用户后续输入。
 
 依赖保存的诊断、重建与导出等待 commit 的确定结果；导入由连接页冻结并 settlePending 后提交，只接受覆盖字段。`active=false` 立即释放本次会话并关闭局部 ModelSelector、裁剪和导入确认，未交付 picker 沿既有 helper 取消；隐藏不启动保存，已提交任务继续归原 owner。

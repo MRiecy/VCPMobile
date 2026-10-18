@@ -2,6 +2,7 @@ import AVFoundation
 import Foundation
 import Tauri
 import UIKit
+import WebKit
 
 private struct BackgroundExecutionArgs: Decodable {
     let tag: String
@@ -25,6 +26,7 @@ final class NativeBackgroundExecution: NSObject, AVAudioPlayerDelegate {
     }
 
     private let session = AVAudioSession.sharedInstance()
+    private weak var webKit: NativeWebKit?
     private var leases: [String: Lease] = [:]
     private var player: AVAudioPlayer?
     private var ownsAudioActivation = false
@@ -64,6 +66,11 @@ final class NativeBackgroundExecution: NSObject, AVAudioPlayerDelegate {
         dispatchPrecondition(condition: .onQueue(.main))
         failureHandler = handler
         if let reason = pendingFailure, handler(reason) { pendingFailure = nil }
+    }
+
+    func attachWebKit(_ webKit: NativeWebKit) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        self.webKit = webKit
     }
 
     func acquire(tag: String, audioRequired: Bool, screenKeepOn: Bool) throws {
@@ -116,7 +123,17 @@ final class NativeBackgroundExecution: NSObject, AVAudioPlayerDelegate {
     }
 
     private func startPlayback(newForegroundTask: Bool = false) throws {
+        dispatchPrecondition(condition: .onQueue(.main))
         guard needsAudio else { return }
+        let captureState = webKit?.microphoneCaptureState ?? .none
+        if captureState == .active || captureState == .muted {
+            // Read the attached WebView's actual capture state. Its audio session
+            // category may remain playAndRecord after the tracks have stopped.
+            // Keep the Stream lease, but yield its best-effort silent audio
+            // without deactivating WebKit's active or temporarily muted capture.
+            try stopPlayback(deactivate: false)
+            return
+        }
         guard !mediaServicesUnavailable else { throw failure("background_audio_media_services_unavailable") }
         guard !interrupted else { throw failure("background_audio_interrupted") }
         if requiresNewForegroundTask && !newForegroundTask {

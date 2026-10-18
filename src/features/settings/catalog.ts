@@ -20,6 +20,10 @@ export const settingsPages: readonly SettingsPageEntry[] = [
     component: defineAsyncComponent(() => import('../chat/settings/ChatPreferencesPage.vue')),
   },
   {
+    id: 'voice', title: '语音设置', description: '语音预设、识别与朗读', frame: 'list',
+    component: defineAsyncComponent(() => import('../chat/voice/VoiceSettingsPage.vue')),
+  },
+  {
     id: 'advanced', title: '高级功能', description: '话题总结与数据维护', frame: 'list',
     component: defineAsyncComponent(() => import('./pages/AdvancedSettingsPage.vue')),
   },

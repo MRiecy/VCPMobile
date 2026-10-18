@@ -38,6 +38,7 @@ const MailListView = defineAsyncComponent(() => import('../features/mail/MailLis
 const GlobalSearchView = defineAsyncComponent(() => import('../features/globalsearch/GlobalSearchView.vue'));
 const VcpCliManifestView = defineAsyncComponent(() => import('../features/cli/components/VcpCliManifestView.vue'));
 const TarvenSettingsView = defineAsyncComponent(() => import('../features/chat/components/TarvenSettings.vue'));
+const VoiceOptionsView = defineAsyncComponent(() => import('../features/chat/voice/VoiceOptionsView.vue'));
 
 
 const overlayStore = useOverlayStore();
@@ -56,6 +57,8 @@ const settingsMounted = createFirstOpenLatch(() => overlayStore.isSettingsOpen);
 const agentSettingsMounted = createFirstOpenLatch(() => overlayStore.isAgentSettingsOpen);
 const groupSettingsMounted = createFirstOpenLatch(() => overlayStore.isGroupSettingsOpen);
 const tarvenSettingsMounted = createFirstOpenLatch(() => overlayStore.isTarvenSettingsOpen);
+const voiceSettingsMounted = createFirstOpenLatch(() => overlayStore.isVoiceSettingsOpen);
+const voicePresetsMounted = createFirstOpenLatch(() => overlayStore.isVoicePresetsOpen);
 const distributedMounted = createFirstOpenLatch(() => overlayStore.isDistributedOpen);
 const ragObserverMounted = createFirstOpenLatch(() => overlayStore.isRagObserverOpen);
 const diaryMounted = createFirstOpenLatch(() => overlayStore.isDiaryCenterOpen);
@@ -108,6 +111,24 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
       :data-vcp-modal-id="pageModalId('syncSession')"
       v-if="overlayStore.isSyncSessionOpen"
       :z-index="overlayStore.getPageZIndex('syncSession')"
+    />
+    <VoiceOptionsView
+      v-if="voiceSettingsMounted"
+      :data-vcp-modal-id="pageModalId('voiceSettings')"
+      mode="settings"
+      :is-open="overlayStore.isVoiceSettingsOpen"
+      :active="overlayStore.pageStackTop?.type === 'voiceSettings'"
+      :z-index="overlayStore.getPageZIndex('voiceSettings')"
+      @close="overlayStore.closeVoiceSettings()"
+    />
+    <VoiceOptionsView
+      v-if="voicePresetsMounted"
+      :data-vcp-modal-id="pageModalId('voicePresets')"
+      mode="presets"
+      :is-open="overlayStore.isVoicePresetsOpen"
+      :active="overlayStore.pageStackTop?.type === 'voicePresets'"
+      :z-index="overlayStore.getPageZIndex('voicePresets')"
+      @close="overlayStore.closeVoicePresets()"
     />
     <RebuildSessionView
       :data-vcp-modal-id="pageModalId('rebuildSession')"

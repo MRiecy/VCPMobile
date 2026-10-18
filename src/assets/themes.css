@@ -242,6 +242,18 @@ html[data-vcp-platform="ios"] :is(button, a, input, textarea, select, [tabindex]
   background-color: var(--vcp-panel-bg-90);
 }
 
+/* During a call, one continuous surface owns the reading tint through the
+ * controls and safe area. The list must not composite a second translucent fill. */
+.chat-view-container[data-voice-active="true"][data-presentation-mode="panel"] .chat-conversation-surface,
+.chat-view-container[data-voice-active="true"][data-presentation-mode="immersive"] .chat-conversation-surface {
+  background-color: var(--vcp-panel-bg-90);
+}
+
+.chat-view-container[data-voice-active="true"][data-presentation-mode="panel"] .messages-inner-container,
+.chat-view-container[data-voice-active="true"][data-presentation-mode="immersive"] .messages-inner-container {
+  background-color: transparent;
+}
+
 .chat-view-container[data-presentation-mode="panel"] .vcp-message-item,
 .chat-view-container[data-presentation-mode="immersive"] .vcp-message-item {
   margin-bottom: 0 !important;

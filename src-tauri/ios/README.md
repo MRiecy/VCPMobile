@@ -31,7 +31,7 @@ gh workflow run ios-g1.yml --ref main -f phase=phase-3 -f profile=debug
 |---|---|
 | `../../.github/toolchain.env` | CI、Android Release 与 iOS 阶段诊断共用的 Node/pnpm 精确版本；各 workflow 在安装前读取 |
 | `../tauri.ios.conf.json` | 最低 iOS/iPadOS 26.0；声明网络、通知、传感器以及 PhotosUI/Photos/ImageIO/CoreGraphics/AVFoundation/QuickLook/UniformTypeIdentifiers/CryptoKit framework；Metal 由锁定 CLI 模板提供 |
-| `../Info.ios.plist` | 单 Scene、LAN/定位/运动/相机/相册用途、`.vcpcfg` 类型和主 App Group 标识；Tauri build 自动合并 |
+| `../Info.ios.plist` | 单 Scene、LAN/定位/运动/相机/麦克风/相册用途、`.vcpcfg` 类型和主 App Group 标识；Tauri build 自动合并 |
 | `g1-inputs.json` | 固定 Xcode 26.2 的路径、XcodeGen 下载地址和下载完整性摘要 |
 | `PrivacyInfo.xcprivacy` | 文件元数据、计时和本机磁盘容量展示的 required reasons；后续原生 API/数据使用变化需按真实用途核对 |
 | `scripts/g1.py` | 初始化证据、重放工程、真实 device 构建、归档收集及结果摘要 |

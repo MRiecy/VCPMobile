@@ -16,6 +16,7 @@ import { useNotificationProcessor } from "./core/composables/useNotificationProc
 import { useEmoticonFixer } from "./core/composables/useEmoticonFixer";
 import { useAutoUpdate } from "./core/composables/useAutoUpdate";
 import { useChatSessionStore, type ConversationKey } from "./core/stores/chatSessionStore";
+import { useVoiceCallStore } from "./features/chat/voice/voiceCallStore";
 import { useAppLifecycle } from "./core/composables/useAppLifecycle";
 import { retainNativeInsetsBridge } from "./core/composables/useKeyboardInsets";
 import { useWebViewResume } from "./core/composables/useWebViewResume";
@@ -49,6 +50,7 @@ const notificationStore = useNotificationStore();
 const layoutStore = useLayoutStore();
 const overlayStore = useOverlayStore();
 const sessionStore = useChatSessionStore();
+const voiceCallStore = useVoiceCallStore();
 const { processPayload } = useNotificationProcessor();
 const leftSidebarPersistent = window.matchMedia("(min-width: 1024px)");
 const rightSidebarPersistent = window.matchMedia("(min-width: 1280px)");
@@ -408,6 +410,9 @@ const handleExitRequest = async () => {
     return;
   }
 
+  // 通话由显式挂断结束；上层菜单、设置与查看器仍先消费返回。
+  if (voiceCallStore.active) return;
+
   // 2. 第二级：若当前在 Agent 聊天中（且已就绪），按返回键退回到初始零数据引导欢迎页
   if (lifecycleStore.state === 'READY' && sessionStore.currentSelectedItem !== null) {
     console.log('[ExitRequest] Resetting active session to welcome boot screen.');
@@ -595,6 +600,7 @@ onUnmounted(() => {
     <div
       v-if="lifecycleStore.state === 'READY'"
       class="vcp-workspace-row flex-1 min-w-0 min-h-0 relative overflow-hidden"
+      :class="{ 'is-voice-call': voiceCallStore.active }"
     >
       <!-- 对应侧栏仍为 drawer 时显示遮罩；DOM 置于侧栏前，确保侧栏稳定位于其上 -->
       <Transition name="fade">
@@ -612,7 +618,7 @@ onUnmounted(() => {
         ></div>
       </Transition>
 
-      <AgentSidebar class="vcp-workspace-left" />
+      <AgentSidebar v-show="!voiceCallStore.active" class="vcp-workspace-left" />
 
       <main class="vcp-workspace-main flex-1 min-w-0 min-h-0 relative overflow-hidden">
         <router-view v-slot="{ Component }">
@@ -622,6 +628,7 @@ onUnmounted(() => {
       </main>
 
       <RightSidebar
+        v-show="!voiceCallStore.active"
         class="vcp-workspace-right"
         :is-open="layoutStore.rightDrawerOpen"
         @close="layoutStore.setRightDrawer(false)"
@@ -716,6 +723,12 @@ body,
   .vcp-drawer-overlay {
     display: none;
   }
+}
+
+/* 沉浸通话收起常驻侧栏后，由聊天区重新承接两侧安全区。 */
+.vcp-workspace-row.is-voice-call > .vcp-workspace-main {
+  padding-left: var(--vcp-workspace-safe-left);
+  padding-right: var(--vcp-workspace-safe-right);
 }
 
 .vcp-background-layer {
