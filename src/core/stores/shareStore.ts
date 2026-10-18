@@ -38,12 +38,20 @@ export const useShareStore = defineStore('share', () => {
   let pendingEdit: { identity: ShareIdentity; text: string; attachments: Attachment[] } | null = null;
   let writing: Promise<void> | null = null;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  let dismissedShare: ShareIdentity | null = null;
   const activeDraft = computed(() => current.value?.state === 'draft'
     && current.value.topicId === session.currentTopicId
     && current.value.agentId === session.currentSelectedItem?.id ? current.value : null);
   const failures = computed(() => current.value?.items.filter(item => item.error) ?? []);
   const identity = (value: ShareIdentity): ShareIdentity => ({ generation: value.generation, deliveryId: value.deliveryId });
   const isCurrent = (value: ShareIdentity) => current.value?.generation === value.generation && current.value?.deliveryId === value.deliveryId;
+  const closeSelector = () => {
+    dismissedShare = current.value ? identity(current.value) : null;
+    selectorOpen.value = false;
+  };
+  const showSelector = () => {
+    if (!dismissedShare || !isCurrent(dismissedShare)) selectorOpen.value = true;
+  };
   const notify = (error: unknown) => useNotificationStore().addNotification({
     type: 'error', title: '分享处理失败', message: error instanceof Error ? error.message : String(error), toastOnly: false,
   });
@@ -53,7 +61,7 @@ export const useShareStore = defineStore('share', () => {
     const changed = value?.deliveryId !== current.value?.deliveryId;
     if (changed) { pendingEdit = null; selectorOpen.value = false; }
     current.value = value;
-    if (value && !['sent', 'discarded', 'receiving'].includes(value.state) && changed) selectorOpen.value = true;
+    if (value && !['sent', 'discarded', 'receiving'].includes(value.state) && changed) showSelector();
   };
   const prepare = async () => {
     const share = current.value;
@@ -62,11 +70,11 @@ export const useShareStore = defineStore('share', () => {
     busy.value = true;
     try {
       const result = await invoke<CurrentShare>('prepare_current_share', { ...identity(share) });
-      if (isCurrent(share)) { apply(result); if (!activeDraft.value) selectorOpen.value = true; }
+      if (isCurrent(share)) { apply(result); if (!activeDraft.value) showSelector(); }
     } catch (error) { if (isCurrent(share)) throw error; }
     finally { if (preparingId === share.deliveryId) { preparingId = null; busy.value = false; } }
   };
-  const refresh = (): Promise<void> => {
+  const readCurrent = (): Promise<void> => {
     if (readInFlight) { readAgain = true; return readInFlight; }
     readInFlight = (async () => {
       const value = await invoke<CurrentShare | null>('read_current_share');
@@ -75,12 +83,18 @@ export const useShareStore = defineStore('share', () => {
       if (value && previous?.deliveryId === value.deliveryId && value.revision < previous.revision) return;
       apply(value);
       if (value && ['ready', 'draft'].includes(value.state)) void prepare().catch(notify);
-      else if (value && ['draft', 'prepared', 'failed'].includes(value.state) && !activeDraft.value) selectorOpen.value = true;
+      else if (value && ['draft', 'prepared', 'failed'].includes(value.state) && !activeDraft.value) showSelector();
     })().finally(() => {
       readInFlight = null;
-      if (readAgain) { readAgain = false; void refresh().catch(notify); }
+      if (readAgain) { readAgain = false; void readCurrent().catch(notify); }
     });
     return readInFlight;
+  };
+  const refresh = (): Promise<void> => {
+    // A fresh READY/foreground entry may resume the retained share. Continuations of
+    // an older read/import keep the user's close intent until such an entry occurs.
+    dismissedShare = null;
+    return readCurrent();
   };
   const receiveAndroid = (detail: unknown) => {
     if (!detail || typeof detail !== 'object') return;
@@ -93,13 +107,13 @@ export const useShareStore = defineStore('share', () => {
         error: typeof source.error === 'string' ? source.error : null,
       });
       apply(value);
-      if (source.error) selectorOpen.value = true;
+      if (source.error) showSelector();
       if (source.state === 'receiving' || source.error || ['sent', 'draft', 'discarded'].includes(value.state)) return;
       // Ready processing is detached from acceptance; a later share can immediately invalidate it.
       void invoke<CurrentShare>('finish_android_share', {
         ...identity(value), text: typeof source.text === 'string' ? source.text : '', files: Array.isArray(source.files) ? source.files : [],
       }).then(async result => { if (isCurrent(value)) { apply(result); await prepare(); } }).catch(error => {
-        if (isCurrent(value)) { notify(error); void refresh().catch(notify); }
+        if (isCurrent(value)) { notify(error); void readCurrent().catch(notify); }
       });
     }).catch(notify);
   };
@@ -163,5 +177,5 @@ export const useShareStore = defineStore('share', () => {
       if (isCurrent(share) && current.value) { current.value = { ...current.value, state: 'discarded' }; selectorOpen.value = false; }
     } catch (error) { notify(error); }
   };
-  return { current, activeDraft, failures, selectorOpen, busy, sending, refresh, prepare, receiveAndroid, openDraft, editDraft, flushDraft, commit, discard, notify };
+  return { current, activeDraft, failures, selectorOpen, busy, sending, refresh, prepare, receiveAndroid, openDraft, editDraft, flushDraft, commit, discard, closeSelector, notify };
 });

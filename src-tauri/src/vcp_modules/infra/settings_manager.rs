@@ -26,13 +26,79 @@ const BACKUP_STRING_KEYS: &[&str] = &[
     "distributedWsUrl",
     "distributedVcpKey",
     "distributedDeviceName",
+    "topicSummaryModel",
 ];
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParsedConfigBackup {
     settings: serde_json::Map<String, serde_json::Value>,
+    preferences: serde_json::Map<String, serde_json::Value>,
     exported_at: String,
+}
+
+fn parse_backup_preferences(
+    raw: Option<&serde_json::Value>,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let mut preferences = serde_json::Map::new();
+    let Some(raw) = raw else {
+        return Ok(preferences);
+    };
+    let source = raw
+        .as_object()
+        .ok_or_else(|| "备份字段 preferences 类型不正确".to_string())?;
+
+    if let Some(theme) = source.get("theme") {
+        let source = theme
+            .as_object()
+            .ok_or_else(|| "备份字段 preferences.theme 类型不正确".to_string())?;
+        let mut theme = serde_json::Map::new();
+        if let Some(key) = source.get("themeKey") {
+            if !key.is_string() {
+                return Err("备份字段 preferences.theme.themeKey 类型不正确".into());
+            }
+            // Availability belongs to the bundled frontend theme registry.
+            theme.insert("themeKey".into(), key.clone());
+        }
+        if let Some(mode) = source.get("mode") {
+            if !matches!(mode.as_str(), Some("light" | "dark" | "system")) {
+                return Err("备份字段 preferences.theme.mode 类型不正确".into());
+            }
+            theme.insert("mode".into(), mode.clone());
+        }
+        if !theme.is_empty() {
+            preferences.insert("theme".into(), theme.into());
+        }
+    }
+
+    if let Some(chat) = source.get("chat") {
+        let source = chat
+            .as_object()
+            .ok_or_else(|| "备份字段 preferences.chat 类型不正确".to_string())?;
+        let mut chat = serde_json::Map::new();
+        if let Some(mode) = source.get("presentationMode") {
+            if !matches!(mode.as_str(), Some("bubble" | "panel" | "immersive")) {
+                return Err("备份字段 preferences.chat.presentationMode 类型不正确".into());
+            }
+            chat.insert("presentationMode".into(), mode.clone());
+        }
+        for key in [
+            "smoothStreamingEnabled",
+            "messageHapticsEnabled",
+            "collapseToolsWhileStreaming",
+        ] {
+            if let Some(value) = source.get(key) {
+                if !value.is_boolean() {
+                    return Err(format!("备份字段 preferences.chat.{key} 类型不正确"));
+                }
+                chat.insert(key.into(), value.clone());
+            }
+        }
+        if !chat.is_empty() {
+            preferences.insert("chat".into(), chat.into());
+        }
+    }
+    Ok(preferences)
 }
 
 fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
@@ -44,7 +110,8 @@ fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
     if raw["app"] != "vcp-mobile" || raw["kind"] != "vcp-mobile-settings-backup" {
         return Err("这不是 VCP Mobile 的配置备份文件".into());
     }
-    if raw["version"].as_u64() != Some(1) {
+    let version = raw["version"].as_u64();
+    if !matches!(version, Some(1 | 2)) {
         return Err("不支持的备份版本".into());
     }
     let source = raw["settings"]
@@ -87,6 +154,11 @@ fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
     }
     Ok(ParsedConfigBackup {
         settings,
+        preferences: if version == Some(2) {
+            parse_backup_preferences(raw.get("preferences"))?
+        } else {
+            serde_json::Map::new()
+        },
         exported_at: raw["exportedAt"].as_str().unwrap_or_default().to_string(),
     })
 }
@@ -615,7 +687,7 @@ mod tests {
     #[test]
     fn config_backup_import_rejects_wrong_version_types_and_utf8_byte_overflow() {
         let mut fixture = backup_fixture(serde_json::json!({}));
-        fixture["version"] = 2.into();
+        fixture["version"] = 3.into();
         assert!(parse_backup_bytes(fixture.to_string().as_bytes())
             .unwrap_err()
             .contains("版本"));
@@ -643,6 +715,58 @@ mod tests {
         let parsed = parse_backup_bytes(fixture.to_string().as_bytes()).unwrap();
         assert_eq!(parsed.settings["chatEndpointMode"], "vcpTools");
         assert!(!parsed.settings.contains_key("enableVcpToolInjection"));
+    }
+
+    #[test]
+    fn config_backup_v2_preserves_partial_preferences_and_empty_summary_model() {
+        let mut fixture = backup_fixture(serde_json::json!({"topicSummaryModel": ""}));
+        fixture["version"] = 2.into();
+        fixture["preferences"] = serde_json::json!({
+            "theme": {"themeKey": "future-theme.ts", "mode": "system", "css": "ignored"},
+            "chat": {"presentationMode": "immersive", "messageHapticsEnabled": false},
+            "developerMode": true
+        });
+        let parsed = parse_backup_bytes(fixture.to_string().as_bytes()).unwrap();
+        assert_eq!(parsed.settings["topicSummaryModel"], "");
+        assert_eq!(
+            parsed.preferences["theme"],
+            serde_json::json!({"themeKey": "future-theme.ts", "mode": "system"})
+        );
+        assert_eq!(
+            parsed.preferences["chat"],
+            serde_json::json!({"presentationMode": "immersive", "messageHapticsEnabled": false})
+        );
+        assert!(!parsed.preferences.contains_key("developerMode"));
+        let legacy = parse_backup_bytes(
+            backup_fixture(serde_json::json!({"vcpApiKey": "key"}))
+                .to_string()
+                .as_bytes(),
+        )
+        .unwrap();
+        assert!(legacy.preferences.is_empty());
+        assert!(!legacy.settings.contains_key("topicSummaryModel"));
+    }
+
+    #[test]
+    fn config_backup_v2_rejects_invalid_preferences_before_returning_a_patch() {
+        for preferences in [
+            serde_json::json!(null),
+            serde_json::json!({"theme": []}),
+            serde_json::json!({"theme": {"themeKey": 123}}),
+            serde_json::json!({"theme": {"mode": "auto"}}),
+            serde_json::json!({"chat": false}),
+            serde_json::json!({"chat": {"presentationMode": "magazine"}}),
+            serde_json::json!({"chat": {"smoothStreamingEnabled": "true"}}),
+            serde_json::json!({"chat": {"messageHapticsEnabled": 1}}),
+            serde_json::json!({"chat": {"collapseToolsWhileStreaming": null}}),
+        ] {
+            let mut fixture = backup_fixture(serde_json::json!({"vcpApiKey": "otherwise-valid"}));
+            fixture["version"] = 2.into();
+            fixture["preferences"] = preferences;
+            assert!(parse_backup_bytes(fixture.to_string().as_bytes())
+                .unwrap_err()
+                .contains("preferences"));
+        }
     }
     use serde_json::json;
     use sqlx::Row;

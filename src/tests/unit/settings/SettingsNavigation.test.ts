@@ -39,6 +39,81 @@ describe('settings page navigation with the real modal history', () => {
     scope.stop();
   });
 
+  it('keeps developer visits inside the about modal and returns one level at a time', () => {
+    nav.openPage('developer');
+    nav.openDeveloperPage();
+    expect(nav.activeVisit.value).toBeNull();
+    expect(modals.modalStackLength()).toBe(0);
+    nav.openPage('about');
+    nav.openDeveloperPage();
+    expect(nav.activeVisit.value?.id).toBe('developer');
+    expect(modals.modalStackLength()).toBe(1);
+    expect(nav.requestLeave()).toBe(false);
+    expect(nav.activeVisit.value?.id).toBe('about');
+    expect(modals.modalStackLength()).toBe(1);
+    expect(window.history.state.vcpModalId).toBe(SETTINGS_SUBPAGE_MODAL_ID);
+    expect(nav.requestLeave()).toBe(true);
+    expect(nav.activeVisit.value).toBeNull();
+    expect(modals.modalStackLength()).toBe(0);
+  });
+
+  it('restores the about history entry on hardware back from developer and closes on the next back', () => {
+    nav.openPage('about');
+    nav.openDeveloperPage();
+    const popBrowserEntry = () => {
+      window.history.replaceState({ vcpRoot: true, vcpMain: true }, '');
+      window.dispatchEvent(new PopStateEvent('popstate', { state: window.history.state }));
+    };
+    popBrowserEntry();
+    expect(nav.activeVisit.value?.id).toBe('about');
+    expect(modals.modalStackLength()).toBe(1);
+    expect(window.history.state.vcpModalId).toBe(SETTINGS_SUBPAGE_MODAL_ID);
+    popBrowserEntry();
+    expect(nav.activeVisit.value).toBeNull();
+    expect(modals.modalStackLength()).toBe(0);
+    expect(window.history.state.vcpModalId).toBeUndefined();
+  });
+
+  it('closes a developer visit with one asynchronous history traversal and no orphan entry', () => {
+    const pending: Array<() => void> = [];
+    vi.mocked(window.history.back).mockImplementation(() => {
+      pending.push(() => {
+        window.history.replaceState({ vcpRoot: true, vcpMain: true }, '');
+        window.dispatchEvent(new PopStateEvent('popstate', { state: window.history.state }));
+      });
+    });
+    nav.openPage('about');
+    nav.openDeveloperPage();
+    isOpen.value = false;
+    expect(nav.activeVisit.value).toBeNull();
+    expect(modals.modalStackLength()).toBe(0);
+    expect(pending).toHaveLength(1);
+    pending.shift()!();
+    expect(window.history.state.vcpModalId).toBeUndefined();
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it('does not let a hidden developer ref, load error, or leave callback affect a new visit', () => {
+    nav.openPage('about');
+    nav.openDeveloperPage();
+    const developer = nav.activeVisit.value!;
+    isOpen.value = false;
+    isOpen.value = true;
+    nav.openPage('connection');
+    const current = nav.activeVisit.value!;
+    const lateLeave = vi.fn();
+    developer.setHandle({ beforeLeave: lateLeave });
+    nav.failPage(developer.serial, new Error('late developer chunk'));
+    nav.finishPageLeave(developer.serial);
+    expect(nav.activeVisit.value).toBe(current);
+    expect(nav.displayedVisit.value).toBe(current);
+    expect(nav.pageError.value).toBe('');
+    expect(nav.requestLeave()).toBe(true);
+    expect(lateLeave).not.toHaveBeenCalled();
+    expect(nav.activeVisit.value).toBeNull();
+    expect(modals.modalStackLength()).toBe(0);
+  });
+
   it('waits once for repeated hardware back, keeps a failed edit open, and retries', async () => {
     const first = deferred<boolean>();
     const beforeLeave = vi.fn().mockReturnValueOnce(first.promise).mockResolvedValueOnce(true);

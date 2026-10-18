@@ -31,4 +31,8 @@ export const settingsPages: readonly SettingsPageEntry[] = [
     id: 'about', title: '关于', description: '版本与更新', frame: 'immersive',
     component: defineAsyncComponent(() => import('./components/AboutSection.vue')),
   },
+  {
+    id: 'developer', title: '开发者选项', description: '触感与调试工具', frame: 'list', parent: 'about',
+    component: defineAsyncComponent(() => import('./developer/DeveloperSettingsPage.vue')),
+  },
 ];

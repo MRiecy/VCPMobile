@@ -1411,6 +1411,33 @@ pub(crate) async fn finalize_stream_message<R: tauri::Runtime>(
         finish_reason,
         stream_channel,
         agent_id,
+        false,
+    )
+    .await
+}
+
+/// A completed helper file is recovered history even when SQLite has not yet
+/// accepted its terminal transaction. Preserve that origin on the normal end event.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn finalize_recovered_stream_message<R: tauri::Runtime>(
+    app_handle: AppHandle<R>,
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    message_key: &MessageKey,
+    full_content: String,
+    finish_reason: String,
+    stream_channel: Channel<crate::vcp_modules::vcp_client::StreamEvent>,
+    agent_id: Option<String>,
+) -> Result<Option<FinalizedStreamMessage>, String> {
+    finalize_stream_message_inner(
+        app_handle,
+        pool,
+        message_key,
+        full_content,
+        finish_reason == "cancelled_by_user",
+        Some(finish_reason),
+        Some(stream_channel),
+        agent_id,
+        true,
     )
     .await
 }
@@ -1425,6 +1452,7 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
     finish_reason: Option<String>,
     stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
     agent_id: Option<String>,
+    replayed: bool,
 ) -> Result<Option<FinalizedStreamMessage>, String> {
     let owner_id = message_key.topic.owner_id.as_str();
     let owner_type = message_key.topic.owner_type.as_str();
@@ -1460,7 +1488,7 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
     } else {
         finish_reason.unwrap_or_else(|| "completed".to_string())
     };
-    let context = if owner_id.is_empty() || topic_id.is_empty() {
+    let mut context = if owner_id.is_empty() || topic_id.is_empty() {
         None
     } else if is_group {
         Some(serde_json::json!({
@@ -1478,6 +1506,11 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
             "topicId": topic_id,
         }))
     };
+    if replayed {
+        if let Some(context) = context.as_mut() {
+            context["replayed"] = serde_json::json!(true);
+        }
+    }
     let (end_blocks, end_timestamp, topic_updated_at) =
         if owner_id.is_empty() || topic_id.is_empty() {
             (None, final_ts, None)
@@ -1506,6 +1539,10 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
                     // A different durable writer may have settled the row while
                     // this consumer was attached. Replay that result through the
                     // same output owner; its closed flag suppresses duplicates.
+                    let mut context = context;
+                    if let Some(context) = context.as_mut() {
+                        context["replayed"] = serde_json::json!(true);
+                    }
                     crate::vcp_modules::vcp_client::deliver_request_event(
                         &app_handle,
                         message_key,
@@ -2232,6 +2269,7 @@ mod stream_lifecycle_tests {
         .expect("late consumer receives the durable result");
         let event = received.try_recv().expect("durable end event");
         assert_eq!(event["type"], "end");
+        assert_eq!(event["context"]["replayed"], true);
         assert_eq!(event["content"], "terminal body");
         assert_eq!(event["finishReason"], "completed");
         assert_eq!(event["timestamp"], skeleton.0);

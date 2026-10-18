@@ -3,6 +3,11 @@ import { onScopeDispose, ref, watch } from 'vue';
 
 export type ThemeMode = 'light' | 'dark' | 'system';
 
+export interface ThemePreferences {
+  themeKey: string;
+  mode: ThemeMode;
+}
+
 export interface ThemeApplyResult {
   ok: boolean;
   themeKey: string | null;
@@ -146,6 +151,7 @@ export const useThemeStore = defineStore('theme', () => {
   const lastAppliedVarKeys = ref<string[]>([]);
   let currentThemeModule: ThemeModule | null = null;
   let isInitializing = true;
+  let restoringMode = false;
 
   const triggerThemeSwitchTransition = () => {
     if (isInitializing) return;
@@ -201,7 +207,7 @@ export const useThemeStore = defineStore('theme', () => {
     themeThumbnails.value = thumbs;
   };
 
-  const applyThemeFile = async (fileName: string): Promise<ThemeApplyResult> => {
+  const applyThemeSelection = async (fileName: string, restoredMode?: ThemeMode): Promise<ThemeApplyResult> => {
     const resolved = findThemeModule(fileName);
     if (!resolved) {
       const error = `Theme module not found: ${String(fileName)}`;
@@ -223,8 +229,10 @@ export const useThemeStore = defineStore('theme', () => {
     }
 
     let previousStoredTheme: string | null;
+    let previousStoredMode: string | null = null;
     try {
       previousStoredTheme = localStorage.getItem(THEME_NAME_STORAGE_KEY);
+      if (restoredMode !== undefined) previousStoredMode = localStorage.getItem('vcp-theme-mode');
     } catch (error) {
       return {
         ok: false,
@@ -236,8 +244,14 @@ export const useThemeStore = defineStore('theme', () => {
     const previousTheme = currentTheme.value;
     const previousThemeInfo = currentThemeInfo.value;
     const previousThemeModule = currentThemeModule;
+    const previousMode = mode.value;
+    const previousDark = isDarkResolved.value;
+    const previousDarkClass = document.documentElement.classList.contains('dark');
+    const previousLightClass = document.body.classList.contains('light-theme');
     const previousVarKeys = [...lastAppliedVarKeys.value];
-    const nextVars = isDarkResolved.value ? mod.variables.dark : mod.variables.light;
+    const nextDark = restoredMode === undefined ? previousDark : restoredMode === 'dark'
+      || (restoredMode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    const nextVars = nextDark ? mod.variables.dark : mod.variables.light;
     const affectedVarKeys = Array.from(new Set([...previousVarKeys, ...Object.keys(nextVars)]));
     const previousRootVariables = affectedVarKeys.map((property) => ({
       property,
@@ -247,12 +261,19 @@ export const useThemeStore = defineStore('theme', () => {
     const existingStyleTag = document.getElementById('vcp-custom-theme');
     const previousStyleText = existingStyleTag?.textContent ?? '';
     let createdStyleTag = false;
+    let themePersisted = false;
+    let modePersisted = false;
 
     try {
       triggerThemeSwitchTransition();
       console.log('[themeStore] Loaded module for', themeKey, mod.meta.name);
 
       injectVariables(nextVars);
+      if (restoredMode !== undefined) {
+        isDarkResolved.value = nextDark;
+        document.documentElement.classList.toggle('dark', nextDark);
+        document.body.classList.toggle('light-theme', !nextDark);
+      }
 
       currentThemeModule = mod;
       currentThemeInfo.value = {
@@ -275,6 +296,13 @@ export const useThemeStore = defineStore('theme', () => {
       // Persist only after the complete visual state has been prepared. A storage
       // failure rolls the DOM and refs back to the previously applied theme.
       localStorage.setItem(THEME_NAME_STORAGE_KEY, themeKey);
+      themePersisted = true;
+      if (restoredMode !== undefined) {
+        localStorage.setItem('vcp-theme-mode', restoredMode);
+        modePersisted = true;
+        restoringMode = true;
+        try { mode.value = restoredMode; } finally { restoringMode = false; }
+      }
       return { ok: true, themeKey };
     } catch (error) {
       console.error('Failed to apply theme file:', error);
@@ -294,6 +322,11 @@ export const useThemeStore = defineStore('theme', () => {
       currentTheme.value = previousTheme;
       currentThemeInfo.value = previousThemeInfo;
       currentThemeModule = previousThemeModule;
+      isDarkResolved.value = previousDark;
+      document.documentElement.classList.toggle('dark', previousDarkClass);
+      document.body.classList.toggle('light-theme', previousLightClass);
+      restoringMode = true;
+      try { mode.value = previousMode; } finally { restoringMode = false; }
 
       const styleTag = document.getElementById('vcp-custom-theme');
       if (createdStyleTag) {
@@ -302,22 +335,37 @@ export const useThemeStore = defineStore('theme', () => {
         styleTag.textContent = previousStyleText;
       }
 
+      let rollbackFailure = '';
       try {
-        if (previousStoredTheme === null) {
-          localStorage.removeItem(THEME_NAME_STORAGE_KEY);
-        } else {
-          localStorage.setItem(THEME_NAME_STORAGE_KEY, previousStoredTheme);
+        if (themePersisted) {
+          if (previousStoredTheme === null) localStorage.removeItem(THEME_NAME_STORAGE_KEY);
+          else localStorage.setItem(THEME_NAME_STORAGE_KEY, previousStoredTheme);
+        }
+        if (modePersisted) {
+          if (previousStoredMode === null) localStorage.removeItem('vcp-theme-mode');
+          else localStorage.setItem('vcp-theme-mode', previousStoredMode);
         }
       } catch (rollbackError) {
         console.error('[themeStore] Failed to restore persisted theme:', rollbackError);
+        rollbackFailure = `；恢复原主题存储失败：${errorMessage(rollbackError)}`;
       }
 
       return {
         ok: false,
         themeKey: null,
-        error: `主题应用失败：${errorMessage(error)}`,
+        error: `主题应用失败：${errorMessage(error)}${rollbackFailure}`,
       };
     }
+  };
+
+  const applyThemeFile = (fileName: string) => applyThemeSelection(fileName);
+
+  // Backup restore is a persisted operation, independent of tap debouncing.
+  const restorePreferences = (preferences: Partial<ThemePreferences>): Promise<ThemeApplyResult> => {
+    if (preferences.mode !== undefined && !['light', 'dark', 'system'].includes(preferences.mode)) {
+      return Promise.resolve({ ok: false, themeKey: null, error: '主题深浅模式无效' });
+    }
+    return applyThemeSelection(preferences.themeKey ?? currentTheme.value, preferences.mode);
   };
 
   const initTheme = async () => {
@@ -359,8 +407,8 @@ export const useThemeStore = defineStore('theme', () => {
   };
 
   watch(mode, (newMode) => {
-    applyTheme(newMode);
-  }, { immediate: true });
+    if (!restoringMode) applyTheme(newMode);
+  }, { immediate: true, flush: 'sync' });
 
   // Listen for system theme changes
   const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
@@ -421,6 +469,7 @@ export const useThemeStore = defineStore('theme', () => {
     themeThumbnails,
     fetchThemes,
     applyThemeFile,
+    restorePreferences,
     initTheme,
     toggleTheme,
     setMode,

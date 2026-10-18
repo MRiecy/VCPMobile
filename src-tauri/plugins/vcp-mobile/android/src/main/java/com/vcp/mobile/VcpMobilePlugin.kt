@@ -55,6 +55,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.content.ContentValues
 import android.provider.MediaStore
+import android.provider.DocumentsContract
 import android.os.Environment
 import android.media.MediaScannerConnection
 import android.util.Base64
@@ -1600,6 +1601,16 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
                         type = if (args.mode == "gallery" || args.mode == "avatar") "image/*" else "*/*"
                         addCategory(Intent.CATEGORY_OPENABLE)
                         putExtra(Intent.EXTRA_ALLOW_MULTIPLE, args.selectionLimit > 1)
+                        if (args.mode == "config") {
+                            // Unknown legacy MIME types are available through the explicit
+                            // "choose other files" entry instead of broadening this default.
+                            if (!args.allowOtherFiles) putExtra(Intent.EXTRA_MIME_TYPES, arrayOf(
+                                "application/json", "application/vnd.vcp.config+json"
+                            ))
+                            putExtra(DocumentsContract.EXTRA_INITIAL_URI, DocumentsContract.buildDocumentUri(
+                                "com.android.externalstorage.documents", "primary:${Environment.DIRECTORY_DOWNLOADS}/VCPMobile"
+                            ))
+                        }
                     }
                     startActivityForResult(invoke, intent, "onPickFileResult")
                 }
@@ -2564,12 +2575,16 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             val uri = resolver.insert(checkNotNull(collection), values)
                 ?: throw IllegalStateException("无法创建导出文件")
             try {
+                // MediaProvider may append a MIME extension or a duplicate-name suffix.
+                val savedName = resolver.query(uri, arrayOf(MediaStore.MediaColumns.DISPLAY_NAME), null, null, null)?.use {
+                    if (it.moveToFirst()) it.getString(0) else null
+                }?.takeIf { it.isNotBlank() } ?: throw java.io.IOException("无法读取导出文件名")
                 val size = resolver.openOutputStream(uri)?.use(write)
                     ?: throw IllegalStateException("无法写入导出文件")
                 values.clear()
                 values.put(MediaStore.MediaColumns.IS_PENDING, 0)
                 check(resolver.update(uri, values, null, null) == 1) { "无法完成导出文件" }
-                return SavedPublicFile(uri, displayName, size)
+                return SavedPublicFile(uri, savedName, size)
             } catch (error: Throwable) {
                 try {
                     resolver.delete(uri, null, null)
@@ -2835,13 +2850,25 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve(JSObject())
         }
     }
-    private fun getSystemServiceVibrator(): Vibrator {
+    private fun getSystemServiceVibrator(): Vibrator? {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val vm = activity.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
-            vm?.defaultVibrator ?: (activity.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator)
+            vm?.defaultVibrator ?: (activity.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator)
         } else {
             @Suppress("DEPRECATION")
-            activity.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            activity.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+        }
+    }
+
+    private fun vibrateTouch(vibrator: Vibrator, effect: VibrationEffect) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            vibrator.vibrate(effect, android.os.VibrationAttributes.createForUsage(android.os.VibrationAttributes.USAGE_TOUCH))
+        } else {
+            @Suppress("DEPRECATION")
+            vibrator.vibrate(effect, android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                .setContentType(android.media.AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build())
         }
     }
 
@@ -2866,96 +2893,121 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         val result = JSObject()
         result.put("type", type)
         result.put("effect", effect)
+        result.put("submitted", false)
 
-        try {
-            when (type) {
-                "view" -> {
-                    val constant = when (effect.lowercase(Locale.ROOT)) {
-                        "keyboard_tap" -> HapticFeedbackConstants.KEYBOARD_TAP
-                        "virtual_key" -> HapticFeedbackConstants.VIRTUAL_KEY
-                        "clock_tick" -> HapticFeedbackConstants.CLOCK_TICK
-                        "context_click" -> {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) HapticFeedbackConstants.CONTEXT_CLICK else HapticFeedbackConstants.LONG_PRESS
+        activity.runOnUiThread {
+            try {
+                if (isDestroying.get()) {
+                    result.put("reason", "plugin_destroyed")
+                    invoke.resolve(result)
+                    return@runOnUiThread
+                }
+                if (android.provider.Settings.System.getInt(activity.contentResolver,
+                        android.provider.Settings.System.HAPTIC_FEEDBACK_ENABLED, 1) == 0) {
+                    result.put("reason", "system_haptics_disabled")
+                    invoke.resolve(result)
+                    return@runOnUiThread
+                }
+                val resolvedType = if (type == "message") "predefined" else type
+                val resolvedEffect = if (type == "message") when (effect) {
+                    "send" -> "tick"
+                    "complete" -> "click"
+                    else -> throw IllegalArgumentException("未知消息触感: $effect")
+                } else effect.lowercase(Locale.ROOT)
+                when (resolvedType) {
+                    "view" -> {
+                        val constant = when (resolvedEffect) {
+                            "keyboard_tap" -> HapticFeedbackConstants.KEYBOARD_TAP
+                            "virtual_key" -> HapticFeedbackConstants.VIRTUAL_KEY
+                            "clock_tick" -> HapticFeedbackConstants.CLOCK_TICK
+                            "context_click" -> {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) HapticFeedbackConstants.CONTEXT_CLICK else HapticFeedbackConstants.LONG_PRESS
+                            }
+                            "confirm" -> {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.VIRTUAL_KEY
+                            }
+                            "reject" -> {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) HapticFeedbackConstants.REJECT else HapticFeedbackConstants.LONG_PRESS
+                            }
+                            "gesture_start" -> {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) HapticFeedbackConstants.GESTURE_START else HapticFeedbackConstants.VIRTUAL_KEY
+                            }
+                            "gesture_end" -> {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) HapticFeedbackConstants.GESTURE_END else HapticFeedbackConstants.VIRTUAL_KEY
+                            }
+                            "long_press" -> HapticFeedbackConstants.LONG_PRESS
+                            else -> throw IllegalArgumentException("未知视图触感: $effect")
                         }
-                        "confirm" -> {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.VIRTUAL_KEY
-                        }
-                        "reject" -> {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) HapticFeedbackConstants.REJECT else HapticFeedbackConstants.LONG_PRESS
-                        }
-                        "gesture_start" -> {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) HapticFeedbackConstants.GESTURE_START else HapticFeedbackConstants.VIRTUAL_KEY
-                        }
-                        "gesture_end" -> {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) HapticFeedbackConstants.GESTURE_END else HapticFeedbackConstants.VIRTUAL_KEY
-                        }
-                        "long_press" -> HapticFeedbackConstants.LONG_PRESS
-                        else -> HapticFeedbackConstants.KEYBOARD_TAP
-                    }
 
-                    activity.runOnUiThread {
-                        if (isDestroying.get()) return@runOnUiThread
-                        val view = activity.window.decorView
-                        val flags = HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING or HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING
-                        val performed = view.performHapticFeedback(constant, flags)
-                        result.put("performed", performed)
+                        val submitted = activity.window.decorView.performHapticFeedback(constant)
+                        result.put("submitted", submitted)
                         result.put("constant", constant)
-                        invoke.resolve(result)
+                        result.put("resolvedEffect", resolvedEffect)
+                        if (!submitted) result.put("reason", "system_suppressed")
                     }
-                    return
-                }
-                "predefined" -> {
-                    val vibrator = getSystemServiceVibrator()
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        val effectId = when (effect.lowercase(Locale.ROOT)) {
-                            "tick" -> VibrationEffect.EFFECT_TICK
-                            "click" -> VibrationEffect.EFFECT_CLICK
-                            "heavy_click" -> VibrationEffect.EFFECT_HEAVY_CLICK
-                            "double_click" -> VibrationEffect.EFFECT_DOUBLE_CLICK
-                            else -> VibrationEffect.EFFECT_TICK
+                    "predefined" -> {
+                        val vibrator = getSystemServiceVibrator()
+                        if (vibrator?.hasVibrator() != true) {
+                            result.put("reason", "no_vibrator")
+                            invoke.resolve(result)
+                            return@runOnUiThread
                         }
-                        val vibrationEffect = VibrationEffect.createPredefined(effectId)
-                        vibrator.vibrate(vibrationEffect)
-                        result.put("performed", true)
-                        result.put("effectId", effectId)
-                    } else {
-                        val duration = if (effect == "tick") 10L else 20L
-                        @Suppress("DEPRECATION")
-                        vibrator.vibrate(duration)
-                        result.put("performed", true)
-                        result.put("fallback", true)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                            val effectId = when (resolvedEffect) {
+                                "tick" -> VibrationEffect.EFFECT_TICK
+                                "click" -> VibrationEffect.EFFECT_CLICK
+                                "heavy_click" -> VibrationEffect.EFFECT_HEAVY_CLICK
+                                "double_click" -> VibrationEffect.EFFECT_DOUBLE_CLICK
+                                else -> throw IllegalArgumentException("未知预定义触感: $effect")
+                            }
+                            val vibrationEffect = VibrationEffect.createPredefined(effectId)
+                            vibrateTouch(vibrator, vibrationEffect)
+                            result.put("submitted", true)
+                            result.put("effectId", effectId)
+                            result.put("resolvedEffect", resolvedEffect)
+                        } else {
+                            // API 26–28 cannot play predefined effects. Keep this a system
+                            // touch cue instead of replacing it with an arbitrary timed buzz.
+                            val constant = when (resolvedEffect) {
+                                "tick" -> HapticFeedbackConstants.CLOCK_TICK
+                                "click" -> HapticFeedbackConstants.VIRTUAL_KEY
+                                else -> {
+                                    result.put("reason", "effect_unavailable")
+                                    invoke.resolve(result)
+                                    return@runOnUiThread
+                                }
+                            }
+                            val submitted = activity.window.decorView.performHapticFeedback(constant)
+                            result.put("submitted", submitted)
+                            result.put("fallback", true)
+                            result.put("constant", constant)
+                            result.put("resolvedEffect", if (resolvedEffect == "tick") "clock_tick" else "virtual_key")
+                            if (!submitted) result.put("reason", "system_suppressed")
+                        }
                     }
-                }
-                "one_shot" -> {
-                    val vibrator = getSystemServiceVibrator()
-                    val hasAmplitudeControl = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                        vibrator.hasAmplitudeControl()
-                    } else {
-                        false
-                    }
-                    result.put("hasAmplitudeControl", hasAmplitudeControl)
-
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    "one_shot" -> {
+                        val vibrator = getSystemServiceVibrator()
+                        if (vibrator?.hasVibrator() != true) {
+                            result.put("reason", "no_vibrator")
+                            invoke.resolve(result)
+                            return@runOnUiThread
+                        }
+                        result.put("hasAmplitudeControl", vibrator.hasAmplitudeControl())
                         val amp = if (amplitude in 1..255) amplitude else VibrationEffect.DEFAULT_AMPLITUDE
-                        val vibrationEffect = VibrationEffect.createOneShot(durationMs, amp)
-                        vibrator.vibrate(vibrationEffect)
-                    } else {
-                        @Suppress("DEPRECATION")
-                        vibrator.vibrate(durationMs)
+                        vibrateTouch(vibrator, VibrationEffect.createOneShot(durationMs, amp))
+                        result.put("submitted", true)
+                        result.put("durationMs", durationMs)
+                        result.put("amplitude", amp)
                     }
-                    result.put("performed", true)
-                    result.put("durationMs", durationMs)
-                    result.put("amplitude", amplitude)
+                    else -> {
+                        result.put("reason", "unsupported_haptic_type")
+                    }
                 }
-                else -> {
-                    invoke.reject("未知触感类型: $type")
-                    return
-                }
+                invoke.resolve(result)
+            } catch (e: Exception) {
+                Log.e("VcpMobilePlugin", "triggerHapticFeedback 失败", e)
+                invoke.reject("触发触感失败: ${e.message}")
             }
-            invoke.resolve(result)
-        } catch (e: Exception) {
-            Log.e("VcpMobilePlugin", "triggerHapticFeedback 失败", e)
-            invoke.reject("触发触感失败: ${e.message}")
         }
     }
 }
@@ -3000,6 +3052,7 @@ class PickFileArgs {
     var stagingDir: String = ""
     var maxBytes: Long = 512L * 1024 * 1024
     var maxFiles: Int = 1
+    var allowOtherFiles: Boolean = false
     val selectionLimit: Int get() = if (mode == "file" || mode == "gallery") maxFiles.coerceIn(1, 16) else 1
 }
 
@@ -3127,4 +3180,5 @@ class TriggerHapticFeedbackArgs {
     var effect: String? = null
     var durationMs: Long? = 20L
     var amplitude: Int? = null
+    var intensity: Double? = null
 }

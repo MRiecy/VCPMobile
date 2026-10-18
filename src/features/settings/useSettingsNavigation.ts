@@ -26,6 +26,7 @@ export function useSettingsNavigation(options: {
   const leaving = ref(false);
   let serial = 0;
   let leavePromise: Promise<void> | null = null;
+  let developerOpen = false;
 
   const isCurrent = (visit: PageVisit) =>
     options.isOpen.value && activeVisit.value === visit;
@@ -44,6 +45,13 @@ export function useSettingsNavigation(options: {
     if (!visit) {
       if (options.isOpen.value) options.close();
       return true;
+    }
+    if (developerOpen) {
+      developerOpen = false;
+      showPage('about');
+      // The settings visit still owns this modal. Hardware back restores its
+      // history entry; the next back can leave About normally.
+      return false;
     }
     if (leavePromise) return false;
     const beforeLeave = pageHandle.value?.beforeLeave;
@@ -74,8 +82,7 @@ export function useSettingsNavigation(options: {
     return false;
   };
 
-  const openPage = (id: SettingsPageId) => {
-    if (!options.isOpen.value || activeVisit.value) return;
+  const showPage = (id: SettingsPageId) => {
     const visit: PageVisit = {
       id,
       serial: ++serial,
@@ -93,7 +100,18 @@ export function useSettingsNavigation(options: {
     attempt.value = 0;
     activeVisit.value = visit;
     displayedVisit.value = visit;
+  };
+
+  const openPage = (id: SettingsPageId) => {
+    if (!options.isOpen.value || activeVisit.value || id === 'developer') return;
+    showPage(id);
     registerModal(SETTINGS_SUBPAGE_MODAL_ID, requestLeave, options.surface);
+  };
+
+  const openDeveloperPage = () => {
+    if (!options.isOpen.value || activeVisit.value?.id !== 'about' || leaving.value) return;
+    developerOpen = true;
+    showPage('developer');
   };
 
   const failPage = (visitSerial: number, error: unknown) => {
@@ -126,6 +144,7 @@ export function useSettingsNavigation(options: {
   const hide = () => {
     // Releasing a page never starts a save. Submitted work still belongs to its store.
     serial += 1;
+    developerOpen = false;
     closePage();
     leavePromise = null;
   };
@@ -152,6 +171,7 @@ export function useSettingsNavigation(options: {
     loading: computed(() => !!activeVisit.value && !pageHandle.value && !pageError.value),
     loaded,
     openPage,
+    openDeveloperPage,
     requestLeave,
     failPage,
     retryPage,

@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import { ref, onUnmounted, watch } from "vue";
-import type { AppSettings } from "../../../core/stores/settings";
+import { computed, ref, onUnmounted, watch } from "vue";
 import type { SettingsSaveResult } from "../editing/useSettingsEditSession";
 import { isIOS } from "../../../core/utils/platform";
 import { cancelFileOperation } from "../../../core/utils/nativeFilePicker";
@@ -9,6 +8,9 @@ import VcpConfirm from "../../../components/ui/VcpConfirm.vue";
 import {
   exportConfigBackup,
   pickConfigBackup,
+  configBackupScopes,
+  unavailableBackupTheme,
+  type BackupImportResult,
   type ParsedConfigBackup,
 } from "../useConfigBackup";
 
@@ -16,16 +18,17 @@ const props = defineProps<{
   active: boolean;
   disabled?: boolean;
   commit: () => Promise<SettingsSaveResult>;
-  applyImport: (patch: Partial<AppSettings>) => Promise<void>;
+  applyImport: (backup: ParsedConfigBackup) => Promise<BackupImportResult>;
 }>();
 
-type Status = { type: "success" | "error" | "loading" | null; message: string };
+type Status = { type: "success" | "error" | "loading" | "info" | null; message: string };
 
 const exportStatus = ref<Status>({ type: null, message: "" });
 const importStatus = ref<Status>({ type: null, message: "" });
 
 let disposed = false;
 let importOperationId: string | null = null;
+let exportOperationId: string | null = null;
 
 // ------------------------------------------------------------------
 // 导出
@@ -37,11 +40,12 @@ const onExport = async () => {
     const saved = await props.commit();
     if (disposed || !props.active) return;
     if (!saved.ok) throw new Error(saved.error);
-    const result = await exportConfigBackup(saved.snapshot);
+    exportOperationId = `config_export_${crypto.randomUUID()}`;
+    const result = await exportConfigBackup(saved.snapshot, exportOperationId);
     if (disposed || !props.active) return;
     exportStatus.value = {
       type: "success",
-      message: `${isIOS ? '已保存到所选文件位置' : '已导出到 下载/VCPMobile'}：${result.displayName}\n文件包含明文密钥，请妥善保管`,
+      message: `${isIOS ? '已保存到配置备份目录' : '已导出到 下载/VCPMobile'}：${result.displayName}\n文件包含明文密钥，请妥善保管`,
     };
   } catch (e: any) {
     if (disposed) return;
@@ -50,6 +54,8 @@ const onExport = async () => {
       return;
     }
     exportStatus.value = { type: "error", message: `导出失败: ${e}` };
+  } finally {
+    exportOperationId = null;
   }
 };
 
@@ -59,15 +65,24 @@ const onExport = async () => {
 const pendingImport = ref<ParsedConfigBackup | null>(null);
 const showImportConfirm = ref(false);
 const importing = ref(false);
+const importConfirmation = computed(() => {
+  const backup = pendingImport.value;
+  if (!backup) return '';
+  const missing = unavailableBackupTheme(backup);
+  return `将覆盖备份中包含的配置：${configBackupScopes(backup).join('、')}。未包含的设置保持当前值。`
+    + (missing === null ? '' : `\n\n主题 ${missing} 在当前版本不可用，将保留当前主题与深浅模式。`)
+    + `\n\n备份导出时间：${backup.exportedAt || '未知'}\n\n确定继续吗？`;
+});
 
-const triggerImport = async () => {
+const triggerImport = async (allowOtherFiles = false) => {
   if (disposed || !props.active || props.disabled || exportStatus.value.type === "loading" || importOperationId || importing.value || showImportConfirm.value) return;
   const operationId = `config_${crypto.randomUUID()}`;
   importOperationId = operationId;
   importStatus.value = { type: "loading", message: "正在选取并解析备份文件..." };
   try {
-    const parsed = await pickConfigBackup(operationId);
+    const parsed = await pickConfigBackup(operationId, allowOtherFiles);
     if (disposed || importOperationId !== operationId) return;
+    if (!configBackupScopes(parsed).length) throw new Error('备份未包含可恢复的配置');
     pendingImport.value = parsed;
     showImportConfirm.value = true;
     importStatus.value = { type: null, message: "" };
@@ -91,6 +106,11 @@ const deactivate = () => {
   disposed = true;
   showImportConfirm.value = false;
   pendingImport.value = null;
+  if (exportOperationId) {
+    const operationId = exportOperationId;
+    exportOperationId = null;
+    void cancelFileOperation(operationId).catch(console.warn);
+  }
   if (importOperationId) {
     const operationId = importOperationId;
     importOperationId = null;
@@ -110,9 +130,20 @@ const confirmImport = async () => {
   importing.value = true;
   importStatus.value = { type: "loading", message: "正在应用配置..." };
   try {
-    await props.applyImport(backup.settings);
+    const result = await props.applyImport(backup);
     if (disposed || !props.active) return;
-    importStatus.value = { type: "success", message: "配置导入成功" };
+    const summary = result.failed.length
+      ? (result.applied.length ? '配置部分导入，部分项目保存失败' : '配置导入未完成')
+      : result.skipped.length ? '配置导入完成，部分项目已跳过' : '配置导入成功';
+    importStatus.value = {
+      type: result.failed.length ? 'error' : result.skipped.length ? 'info' : 'success',
+      message: [
+        summary,
+        ...(result.applied.length ? [`已恢复：${result.applied.join('、')}`] : []),
+        ...result.skipped.map(message => `已跳过：${message}`),
+        ...result.failed.map(failure => `未恢复：${failure.scope}：${failure.message}`),
+      ].join('\n'),
+    };
   } catch (e: any) {
     if (disposed || !props.active) return;
     importStatus.value = { type: "error", message: `导入失败: ${e}` };
@@ -126,7 +157,7 @@ const confirmImport = async () => {
   <div class="space-y-5 px-1">
     <SettingsActionWithStatus
       title="导出配置"
-      :description="isIOS ? '用户身份与应用连接配置，保存到文件' : '用户身份与应用连接配置，保存到系统下载目录'"
+      description="备份身份与连接、分布式、主题、聊天偏好和话题总结模型"
       button-variant="primary"
       button-label="导出"
       :button-loading="exportStatus.type === 'loading'"
@@ -137,11 +168,15 @@ const confirmImport = async () => {
       @action-click="onExport"
     />
 
+    <p v-if="isIOS" class="text-xs text-[var(--secondary-text)] px-1 leading-relaxed">
+      首次导出时选择保存目录；后续导入与导出会优先使用该位置。
+    </p>
+
     <div class="border-t border-black/5 dark:border-white/5 pt-2"></div>
 
     <SettingsActionWithStatus
       title="导入配置"
-      description="从 .vcpcfg 备份文件一键恢复全部连接配置"
+      description="恢复 .vcpcfg.json 配置备份，也支持旧版 .vcpcfg 文件"
       button-variant="secondary"
       button-label="导入"
       :button-loading="importStatus.type === 'loading' || importing"
@@ -149,11 +184,15 @@ const confirmImport = async () => {
       :status-type="importStatus.type"
       :status-message="importStatus.message"
       status-multiline
-      @action-click="triggerImport"
+      @action-click="triggerImport()"
     />
 
+    <button type="button" class="min-h-11 px-1 text-xs text-[var(--secondary-text)] underline underline-offset-3 disabled:opacity-40"
+      :disabled="disabled || exportStatus.type === 'loading' || !!importOperationId || importing || showImportConfirm"
+      @click="triggerImport(true)">选择旧版或其他文件</button>
+
     <p class="text-[10px] opacity-40 px-1 italic">
-      * 备份文件为明文 JSON（.vcpcfg 后缀），包含 API Key 与密码，请勿分享给他人
+      * 备份文件为明文 JSON，包含 API Key 与密码，请勿分享给他人
     </p>
 
   </div>
@@ -162,7 +201,7 @@ const confirmImport = async () => {
     v-if="active"
     v-model:is-open="showImportConfirm"
     title="导入配置备份"
-    :message="`将覆盖「用户身份」与「应用连接」的现有配置。\n\n备份导出时间：${pendingImport?.exportedAt || '未知'}\n\n确定继续吗？`"
+    :message="importConfirmation"
     is-danger
     @confirm="confirmImport"
   />

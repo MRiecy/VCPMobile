@@ -238,4 +238,44 @@ describe('theme and chat presentation store contracts', () => {
     expect(store.availableThemes.every((theme) => theme.fileName.endsWith('.ts'))).toBe(true);
     store.$dispose();
   });
+
+  it('restores theme and mode together without the interactive mode debounce', async () => {
+    const store = useThemeStore();
+    store.setMode('dark');
+    const result = await store.restorePreferences({ themeKey: 'themes-simple-bw.ts', mode: 'system' });
+    expect(result.ok).toBe(true);
+    expect(store.mode).toBe('system');
+    expect(store.isDarkResolved).toBe(false);
+    expect(localStorage.getItem('vcp-theme-mode')).toBe('system');
+    expect(localStorage.getItem('vcp-theme-name')).toBe('themes-simple-bw.ts');
+    store.$dispose();
+
+    setActivePinia(createPinia());
+    const reopened = useThemeStore();
+    expect(reopened.mode).toBe('system');
+    expect(reopened.currentTheme).toBe('themes-simple-bw.ts');
+    reopened.$dispose();
+  });
+
+  it('restores the previous theme, mode, DOM and storage when the second preference write fails', async () => {
+    const store = useThemeStore();
+    await store.restorePreferences({ themeKey: 'themes-simple-bw.ts', mode: 'dark' });
+    const style = document.documentElement.style;
+    const before = Object.fromEntries(Array.from(style).map(key => [key, style.getPropertyValue(key)]));
+    const originalWrite = localStorage.setItem.bind(localStorage);
+    vi.spyOn(localStorage, 'setItem').mockImplementation((key, value) => {
+      if (key === 'vcp-theme-mode' && value === 'system') throw new Error('mode storage full');
+      originalWrite(key, value);
+    });
+    const result = await store.restorePreferences({ themeKey: 'themes-bear-holiday.ts', mode: 'system' });
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining('mode storage full') });
+    expect(store.currentTheme).toBe('themes-simple-bw.ts');
+    expect(store.mode).toBe('dark');
+    expect(store.isDarkResolved).toBe(true);
+    expect(document.documentElement.classList.contains('dark')).toBe(true);
+    expect(Object.fromEntries(Array.from(style).map(key => [key, style.getPropertyValue(key)]))).toEqual(before);
+    expect(localStorage.getItem('vcp-theme-name')).toBe('themes-simple-bw.ts');
+    expect(localStorage.getItem('vcp-theme-mode')).toBe('dark');
+    store.$dispose();
+  });
 });

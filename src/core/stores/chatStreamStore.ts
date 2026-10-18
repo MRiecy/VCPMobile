@@ -9,6 +9,7 @@ import { useTopicStore } from "./topicListManager";
 import { useChatHistoryStore } from "./chatHistoryStore";
 import { useNotificationStore } from "./notification";
 import { useChatPreferencesStore } from "../../features/chat/preferences/store";
+import { triggerMessageHaptic } from "../utils/nativeHaptics";
 import type {
   ActiveGenerationDto,
   AuroraRecoverySnapshot,
@@ -1248,6 +1249,11 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       }
     } else if (type === "end") {
       const finishReason = event.finishReason;
+      // Only a live response completing normally is a new completion cue. Durable
+      // history replays and user cancellation still follow the same rendering owner.
+      const playCompletionFeedback = isMessageActive(ownerId, ownerType, topicId, actualMessageId)
+        && ctx.replayed !== true && !event.error
+        && (finishReason === 'completed' || finishReason === 'stop' || finishReason === 'length');
       if (typeof event.topicUpdatedAt === "number") {
         topicStore.setTopicUpdatedAt(
           ownerId,
@@ -1284,9 +1290,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
           if (callbacks?.onStreamFinished) {
             callbacks.onStreamFinished(actualMessageId, topicId);
           }
-          if (chatPreferences.messageHapticsEnabled && typeof navigator !== "undefined" && navigator.vibrate) {
-            navigator.vibrate(40);
-          }
+          if (playCompletionFeedback && chatPreferences.messageHapticsEnabled) triggerMessageHaptic('complete');
         };
 
         try {

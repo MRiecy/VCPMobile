@@ -147,9 +147,18 @@ onUnmounted(() => {
             <div class="i-heroicons-chevron-right text-zinc-400 text-lg shrink-0"></div>
           </button>
         </div>
-        <div class="flex justify-between mt-3 border-t border-black/10 dark:border-white/10 pt-2">
-          <button class="btn text-red-500" :disabled="busy" @click="emit('discard')">丢弃分享</button>
-          <button class="btn" @click="emit('close')">稍后继续</button>
+        <div class="grid grid-cols-2 gap-2 mt-3 border-t border-black/10 dark:border-white/10 pt-3">
+          <button
+            type="button"
+            class="min-h-11 rounded-lg border border-red-500/25 bg-transparent px-3 text-[14px] font-medium text-red-600 dark:text-red-400 transition-colors active:bg-red-500/10 disabled:opacity-40"
+            :disabled="busy"
+            @click="emit('discard')"
+          >丢弃分享</button>
+          <button
+            type="button"
+            class="min-h-11 rounded-lg border border-zinc-800 bg-zinc-800 px-3 text-[14px] font-medium text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900 transition-colors active:bg-zinc-700 dark:active:bg-zinc-200"
+            @click="emit('close')"
+          >稍后继续</button>
         </div>
       </div>
     </Transition>

@@ -646,7 +646,7 @@ onUnmounted(() => {
       :busy="shareStore.busy"
       :error="shareStore.current?.error"
       :is-draft="shareStore.current?.state === 'draft'"
-      @close="shareStore.selectorOpen = false"
+      @close="shareStore.closeSelector"
       @discard="shareStore.discard"
       @retry="shareStore.prepare().catch(shareStore.notify)"
       @selected="handleShareAgentSelected"

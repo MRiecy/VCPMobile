@@ -87,6 +87,8 @@ src/
 
 `features/chat/preferences/` 拥有消息呈现、平滑动效、消息震动和流式工具折叠的类型、存储及只读 Store；`features/chat/settings/ChatPreferencesPage.vue` 只是一个入口，聊天消费者不依赖它挂载。主题草稿/确认仍归 ThemePicker 与 themeStore；自动检查更新偏好归 updateStore。聊天与更新共用 `core/preferences/localPreference.ts` 的异常捕获 IO，领域各自保留 key、编码和默认值。新增偏好应在所属领域接通 UI 与真实消费者，不把设置中心或主题 Store 扩为业务总容器。
 
+`features/settings/developer/` 持有本机开发者模式和显式触感试听。关于页六连击解锁后，经同一设置导航进入；返回开发者页的父级仍保留 SettingsSubPage 的 modal 所有权。解锁状态与试听参数不进入备份。配置备份 v2 由 `useConfigBackup` 协调 Settings、theme、chatPreferences 各自的持久化入口；v1 缺失字段保留当前值，部分失败按实际范围报告。
+
 ---
 
 ## 4. 消息渲染与交互完整性
@@ -99,7 +101,7 @@ Markdown、代码、KaTeX、Mermaid、SVG/MathML、受控 raw HTML、Tool、Thou
 
 消息内部按钮、链接、图片与引用由现有事件桥和对应 Store 处理。新增交互必须复用真实消费入口，区分 DOM 局部反馈与业务结果，不在渲染器内另建业务状态所有者。
 
-工具折叠偏好只控制默认策略，ToolBlock 的本次手动展开/收起优先。MessageRenderer 在同一消息中按工具次序和逐字段语义比较延续短交互 key，避免 Markdown 合并或终态 hash 变化丢掉手动选择；工具结构改变或组件卸载可重建默认状态，不复制大正文/base64 到 key，也不持久化该交互状态。消息震动开关共同控制原发送与流结束的设备支持触感，不接管长按等界面反馈。
+工具折叠偏好只控制默认策略，ToolBlock 的本次手动展开/收起优先。MessageRenderer 在同一消息中按工具次序和逐字段语义比较延续短交互 key，避免 Markdown 合并或终态 hash 变化丢掉手动选择；工具结构改变或组件卸载可重建默认状态，不复制大正文/base64 到 key，也不持久化该交互状态。消息震动开关共同控制原生 send 与正常 complete 意图，已提交终态和离线完成恢复通过 context.replayed 保持静默，不接管长按等界面反馈。
 
 ---
 

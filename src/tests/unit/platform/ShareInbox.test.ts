@@ -27,6 +27,67 @@ beforeEach(() => {
 });
 
 describe('one current share', () => {
+  it('keeps a dismissed selector closed when preparation finishes and resumes on a fresh entry', async () => {
+    const prepared = { ...share(1, 'prepared'), text: 'retained shared text', revision: 1 };
+    const pending = deferred<CurrentShare>();
+    let reads = 0;
+    mockInvoke('read_current_share', () => ++reads === 1 ? share(1, 'ready') : prepared);
+    mockInvoke('prepare_current_share', () => pending.promise);
+    const store = useShareStore();
+
+    await store.refresh();
+    expect(store.selectorOpen).toBe(true);
+    expect(store.busy).toBe(true);
+    store.closeSelector();
+    pending.resolve(prepared);
+    await flushPromises();
+
+    expect(store.selectorOpen).toBe(false);
+    expect(store.busy).toBe(false);
+    expect(store.current).toEqual(prepared);
+    expect(invokeMock.mock.calls.some(([command]) => command === 'discard_current_share')).toBe(false);
+    await store.refresh();
+    expect(store.selectorOpen).toBe(true);
+    expect(store.current).toEqual(prepared);
+  });
+
+  it('preserves a close across an in-flight read and its already queued follow-up', async () => {
+    const prepared = share(2, 'prepared');
+    const pending = deferred<CurrentShare>();
+    let reads = 0;
+    mockInvoke('read_current_share', () => ++reads === 2 ? pending.promise : prepared);
+    const store = useShareStore();
+    await store.refresh();
+    const reading = store.refresh();
+    void store.refresh();
+    store.closeSelector();
+    pending.resolve(prepared);
+    await reading;
+    await flushPromises();
+
+    expect(reads).toBe(3);
+    expect(store.current).toEqual(prepared);
+    expect(store.selectorOpen).toBe(false);
+    await store.refresh();
+    expect(store.selectorOpen).toBe(true);
+  });
+
+  it('opens a new native share without reviving the dismissed previous share', async () => {
+    mockInvoke('read_current_share', () => share(3, 'prepared'));
+    mockInvoke('accept_android_share', () => share(4, 'receiving'));
+    mockInvoke('finish_android_share', () => share(4, 'ready'));
+    mockInvoke('prepare_current_share', () => share(4, 'prepared'));
+    const store = useShareStore();
+    await store.refresh();
+    store.closeSelector();
+    store.receiveAndroid({ intentId: 'share-4', state: 'ready', text: 'new native share', files: [] });
+    await flushPromises();
+
+    expect(store.current?.deliveryId).toBe('share-4');
+    expect(store.current?.state).toBe('prepared');
+    expect(store.selectorOpen).toBe(true);
+  });
+
   it('receives B while A imports and ignores the late A result', async () => {
     const pending = deferred<CurrentShare>();
     const store = useShareStore();

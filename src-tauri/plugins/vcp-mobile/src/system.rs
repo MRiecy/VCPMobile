@@ -471,6 +471,7 @@ pub async fn pick_file<R: Runtime>(
     max_bytes: Option<u64>,
     multiple: Option<bool>,
     reservation_token: Option<String>,
+    allow_other_files: Option<bool>,
 ) -> Result<PickFileResult, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
@@ -516,6 +517,7 @@ pub async fn pick_file<R: Runtime>(
                         "mode": mode, "operationId": operation_id,
                         "stagingDir": staging, "maxBytes": max_bytes, "maxFiles": max_files,
                         "reservationToken": reservation_token,
+                        "allowOtherFiles": mode == "config" && allow_other_files.unwrap_or(false),
                     }),
                 )
                 .map_err(|e| format!("native_picker: {e}"))
@@ -525,7 +527,15 @@ pub async fn pick_file<R: Runtime>(
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        let _ = (app, mode, operation_id, max_bytes, multiple, reservation_token);
+        let _ = (
+            app,
+            mode,
+            operation_id,
+            max_bytes,
+            multiple,
+            reservation_token,
+            allow_other_files,
+        );
         Err("文件选择仅在移动端可用".to_string())
     }
 }
@@ -1162,9 +1172,16 @@ pub fn save_to_downloads<R: Runtime>(
     file_name: String,
     content_base64: String,
     mime_type: Option<String>,
+    purpose: Option<String>,
+    operation_id: Option<String>,
+    reservation_token: Option<String>,
 ) -> Result<DownloadsSaveResult, String> {
+    if purpose.as_deref().is_some_and(|value| value != "config") {
+        return Err("invalid_export_purpose".into());
+    }
     #[cfg(target_os = "android")]
     {
+        let _ = (operation_id, reservation_token);
         let state = app.state::<VcpMobileState<R>>();
         let plugin_handle = state.mobile_plugin_handle()?;
 
@@ -1182,11 +1199,19 @@ pub fn save_to_downloads<R: Runtime>(
     }
     #[cfg(target_os = "ios")]
     {
+        let operation_id = operation_id.unwrap_or_else(native_operation_id);
+        validate_operation_id(&operation_id)?;
+        if purpose.as_deref() == Some("config")
+            && reservation_token.as_deref().is_none_or(str::is_empty)
+        {
+            return Err("cancelled: config export must be prepared before starting".into());
+        }
         crate::ios::run(
             app,
             "saveToDownloads",
             serde_json::json!({
-                "fileName":file_name,"contentBase64":content_base64,"mimeType":mime_type,"operationId":native_operation_id()
+                "fileName":file_name,"contentBase64":content_base64,"mimeType":mime_type,
+                "purpose":purpose,"operationId":operation_id,"reservationToken":reservation_token
             }),
         )
     }
@@ -1196,6 +1221,7 @@ pub fn save_to_downloads<R: Runtime>(
         let _ = file_name;
         let _ = content_base64;
         let _ = mime_type;
+        let _ = (operation_id, reservation_token);
         Err("该接口仅在 Android 物理端可用".to_string())
     }
 }
@@ -1963,6 +1989,7 @@ pub struct HapticFeedbackArgs {
     pub effect: Option<String>,
     pub duration_ms: Option<u64>,
     pub amplitude: Option<i32>,
+    pub intensity: Option<f64>,
 }
 
 #[tauri::command(async)]
@@ -1984,14 +2011,17 @@ pub fn trigger_haptic_feedback<R: Runtime>(
     }
     #[cfg(target_os = "ios")]
     {
-        let _ = (app, payload);
-        crate::ios_not_implemented("trigger_haptic_feedback")
+        crate::ios::run(
+            app,
+            "triggerHapticFeedback",
+            serde_json::to_value(&payload).map_err(|error| error.to_string())?,
+        )
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let _ = (app, payload);
         Ok(serde_json::json!({
-            "performed": false,
+            "submitted": false,
             "reason": "host_mock"
         }))
     }

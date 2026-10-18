@@ -8,6 +8,7 @@ import ConfigBackupSection from '../components/ConfigBackupSection.vue';
 import { CONNECTION_FIELDS, type ConnectionFields } from '../editing/fieldSets';
 import { useSettingsPageSession } from '../editing/useSettingsPageSession';
 import type { SettingsSaveResult } from '../editing/useSettingsEditSession';
+import { applyConfigBackup, type BackupImportResult, type ParsedConfigBackup } from '../useConfigBackup';
 
 const props = defineProps<{ active: boolean }>();
 const settingsStore = useSettingsStore();
@@ -37,17 +38,19 @@ const commitForAction = async (): Promise<SettingsSaveResult> => {
   }
 };
 
-const applyImport = async (patch: Partial<AppSettings>): Promise<void> => {
+const applyImport = async (backup: ParsedConfigBackup): Promise<BackupImportResult> => {
   if (disabled.value) throw new Error('设置页面当前不可操作');
   actionBusy.value = true;
   try {
     const settled = await session.settlePending();
     if (!settled.ok) throw new Error(settled.error);
     if (!props.active) throw new Error('设置页面已关闭');
-    await settingsStore.updateSettings(patch);
-    if (props.active) {
-      session.acceptImport(CONNECTION_FIELDS.filter((key) => Object.prototype.hasOwnProperty.call(patch, key)));
-    }
+    return await applyConfigBackup(backup, async (patch: Partial<AppSettings>) => {
+      await settingsStore.updateSettings(patch);
+      if (props.active) {
+        session.acceptImport(CONNECTION_FIELDS.filter((key) => Object.prototype.hasOwnProperty.call(patch, key)));
+      }
+    });
   } finally {
     actionBusy.value = false;
   }

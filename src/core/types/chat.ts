@@ -383,6 +383,8 @@ export interface StreamContextDto {
   agentName?: string;
   turnId?: string;
   requestId?: string;
+  /** A persisted or offline-recovered terminal result, not a new live completion. */
+  replayed?: boolean;
   [key: string]: unknown;
 }
 

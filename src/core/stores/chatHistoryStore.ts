@@ -11,6 +11,7 @@ import { useNotificationStore } from "./notification";
 import { useShareStore, type ShareIdentity } from "./shareStore";
 import { clearMessageCache } from "../utils/astRenderer";
 import { extractMentionedMemberIds } from "../utils/mention";
+import { triggerMessageHaptic } from "../utils/nativeHaptics";
 import { allowChatMutation } from "../../features/chat/chatMutationPolicy";
 import { useChatPreferencesStore } from "../../features/chat/preferences/store";
 
@@ -701,10 +702,6 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     if (!key || (!content.trim() && attachmentStore.stagedAttachments.length === 0)) return;
     if (attachmentStore.stagedAttachments.some(attachment => attachment.status !== "done")) return;
 
-    if (chatPreferences.messageHapticsEnabled && typeof navigator !== "undefined" && navigator.vibrate) {
-      navigator.vibrate(25);
-    }
-
     if (editingMessage.value) {
       const intent = editingMessage.value;
       if (!sameConversation(intent.key.conversation, key)) return;
@@ -713,6 +710,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       const originalId = intent.key.messageId;
       const targetIndex = currentChatHistory.value.findIndex(m => m.id === originalId);
       if (targetIndex === -1) return;
+      if (chatPreferences.messageHapticsEnabled) triggerMessageHaptic('send');
       const targetMsg = {
         ...currentChatHistory.value[targetIndex],
         content,
@@ -767,6 +765,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     }));
     const shareIdentity = shareAtSend;
     if (shareIdentity && shareStore.sending) return;
+    if (chatPreferences.messageHapticsEnabled) triggerMessageHaptic('send');
     if (shareIdentity) shareStore.sending = true;
     else attachmentStore.clearStaged();
 

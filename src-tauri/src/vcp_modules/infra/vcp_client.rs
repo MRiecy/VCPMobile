@@ -3050,14 +3050,13 @@ async fn finalize_offline_completed<R: Runtime>(
             .finish_reason
             .unwrap_or_else(|| "completed".to_string())
     };
-    let committed = crate::vcp_modules::chat::message_service::finalize_stream_message(
+    let committed = crate::vcp_modules::chat::message_service::finalize_recovered_stream_message(
         app.clone(),
         &db.pool,
         key,
         content,
-        finish_reason == "cancelled_by_user",
-        Some(finish_reason.clone()),
-        Some(stream_channel),
+        finish_reason.clone(),
+        stream_channel,
         agent_id,
     )
     .await?;
@@ -3311,6 +3310,7 @@ async fn emit_persisted_terminal<R: Runtime>(
         if let Some(context) = context.as_mut() {
             context["agentId"] = json!(agent_id);
             context["agentName"] = json!(name);
+            context["replayed"] = json!(true);
         }
         output.send(StreamEvent::end(key.msg_id.clone(), context, Some(reason), Some(content),
             None, Some(timestamp.max(0) as u64), Some(topic_updated_at)));
@@ -3800,10 +3800,18 @@ mod offline_completed_tests {
         let file = open_offline_completed(path.clone())
             .await
             .expect("reread retained file");
+        let (events, mut received) = tokio::sync::mpsc::unbounded_channel();
+        let channel = Channel::new(move |body| {
+            let _ = events.send(body.deserialize::<Value>()?);
+            Ok(())
+        });
         let result = finalize_offline_completed(app.handle(), &key, file, channel)
             .await
             .expect("durable recovery");
         assert_eq!(result, RecoveryStatus::Completed);
+        let event = received.try_recv().expect("recovered terminal event");
+        assert_eq!(event["type"], "end");
+        assert_eq!(event["context"]["replayed"], true);
         assert!(!tokio::fs::try_exists(&path).await.expect("file consumed"));
         let durable: (String, Option<String>) =
             sqlx::query_as("SELECT content, finish_reason FROM messages")

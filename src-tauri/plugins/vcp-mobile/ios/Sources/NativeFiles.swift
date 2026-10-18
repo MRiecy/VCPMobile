@@ -36,6 +36,7 @@ private struct PickArgs: Decodable {
     let stagingDir: String
     let maxBytes: UInt64
     let maxFiles: Int
+    let allowOtherFiles: Bool?
 
     var selectionLimit: Int { mode == "file" || mode == "gallery" ? max(1, min(maxFiles, 16)) : 1 }
 }
@@ -51,6 +52,8 @@ private struct ExportArgs: Decodable {
 }
 private struct ExportBytesArgs: Decodable {
     let fileName: String; let contentBase64: String; let mimeType: String?; let operationId: String
+    let purpose: String?
+    let reservationToken: String?
 }
 
 enum NativeFileIO {
@@ -106,6 +109,7 @@ private final class FilePickerDelegate: NSObject, UIDocumentPickerDelegate, PHPi
     let owner: NativePresentation
     let operation: NativeFileOperation
     let args: PickArgs
+    var configDirectoryAccess: NativeConfigBackupDirectory.Access?
     init(_ owner: NativePresentation, _ operation: NativeFileOperation, _ args: PickArgs) {
         self.owner = owner; self.operation = operation; self.args = args
     }
@@ -279,6 +283,23 @@ extension VcpMobilePlugin {
                     }
                     let delegate = FilePickerDelegate(self.presentation, operation, args)
                     operation.delegate = delegate
+                    if args.mode == "config" {
+                        NativeConfigBackupDirectory.prepare(owner: self.presentation, operation: operation, create: false) { access in
+                            delegate.configDirectoryAccess = access
+                            operation.delegate = delegate
+                            let types: [UTType] = args.allowOtherFiles == true ? [.item] : [
+                                .json, UTType(exportedAs: "com.vcp.avatar.configuration", conformingTo: .json)
+                            ]
+                            let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: false)
+                            picker.directoryURL = access.directory
+                            picker.shouldShowFileExtensions = true
+                            picker.allowsMultipleSelection = false
+                            picker.delegate = delegate
+                            do { try self.presentation.present(picker, for: operation); picker.presentationController?.delegate = delegate }
+                            catch { self.presentation.fail(operation, error.localizedDescription) }
+                        }
+                        return
+                    }
                     let controller: UIViewController
                     if args.mode == "gallery" || args.mode == "avatar" {
                         var configuration = PHPickerConfiguration()
@@ -289,10 +310,7 @@ extension VcpMobilePlugin {
                         let picker = PHPickerViewController(configuration: configuration)
                         picker.delegate = delegate; controller = picker
                     } else {
-                        let types: [UTType] = args.mode == "config"
-                            ? [.json, UTType(exportedAs: "com.vcp.avatar.configuration", conformingTo: .json)]
-                            : [.item]
-                        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: false)
+                        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item], asCopy: false)
                         picker.allowsMultipleSelection = args.selectionLimit > 1; picker.delegate = delegate; controller = picker
                     }
                     do { try self.presentation.present(controller, for: operation); controller.presentationController?.delegate = delegate }
@@ -353,6 +371,16 @@ extension VcpMobilePlugin {
         do {
             let args = try invoke.parseArgs(ExportBytesArgs.self)
             guard args.contentBase64.utf8.count <= 28 * 1024 * 1024 else { throw NativeFileError.failure("file_too_large: export exceeds byte budget") }
+            if args.purpose == "config" {
+                DispatchQueue.main.async {
+                    do {
+                        let operation = try self.presentation.beginPicker(args.operationId, reservationToken: args.reservationToken, invoke)
+                        NativeConfigBackupDirectory.export(contentBase64: args.contentBase64, fileName: args.fileName,
+                                                           mimeType: args.mimeType, owner: self.presentation, operation: operation)
+                    } catch { invoke.reject(error.localizedDescription) }
+                }
+                return
+            }
             NativeFileIO.queue.async {
                 let source = NativeFileIO.temporary(args.fileName)
                 do {

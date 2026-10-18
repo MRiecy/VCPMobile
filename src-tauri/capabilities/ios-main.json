@@ -12,6 +12,7 @@
     "vcp-mobile:allow-open-notification-settings",
     "vcp-mobile:allow-get-pending-notification",
     "vcp-mobile:allow-get-battery-status",
+    "vcp-mobile:allow-trigger-haptic-feedback",
     "vcp-mobile:allow-pick-file",
     "vcp-mobile:allow-prepare-file-operation",
     "vcp-mobile:allow-cancel-file-operation",

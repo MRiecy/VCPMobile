@@ -7,6 +7,7 @@ import SettingsRow from '../../../components/settings/SettingsRow.vue';
 import UpdateSection from './UpdateSection.vue';
 import { useNotificationStore } from '../../../core/stores/notification';
 import { useThemeStore } from '../../../core/stores/theme';
+import { useDeveloperSettingsStore } from '../developer/store';
 
 // 背景（WebGL 流体 + 噪点）由 SettingsView 的常驻宿主层承担，本组件只负责内容。
 
@@ -16,8 +17,11 @@ let disposed = false;
 
 const currentVersion = ref('');
 const notificationStore = useNotificationStore();
+const developerSettings = useDeveloperSettingsStore();
+let featureTapCount = 0;
+let lastFeatureTapAt = 0;
 
-defineEmits(['back']);
+const emit = defineEmits<{ back: []; 'open-developer': [] }>();
 
 onMounted(async () => {
   try {
@@ -50,6 +54,8 @@ const stopAnimationSequence = () => {
 
 watch(() => props.active, (active) => {
   if (!active) {
+    featureTapCount = 0;
+    lastFeatureTapAt = 0;
     stopAnimationSequence();
     isMixing.value = false;
   }
@@ -191,6 +197,26 @@ const resetRotation = () => {
 
 const showFeatures = () => {
   if (!props.active || disposed) return;
+  if (developerSettings.enabled) {
+    emit('open-developer');
+    return;
+  }
+  const now = Date.now();
+  featureTapCount = featureTapCount > 0 && now - lastFeatureTapAt <= 1200 ? featureTapCount + 1 : 1;
+  lastFeatureTapAt = now;
+  if (featureTapCount === 6) {
+    featureTapCount = 0;
+    const result = developerSettings.setEnabled(true);
+    notificationStore.addNotification({
+      id: 'developer-mode-unlock',
+      type: result.ok ? 'success' : 'error',
+      title: result.ok ? '已开启开发者模式' : '开发者模式开启失败',
+      message: result.ok ? '再次点击功能介绍，进入开发者选项。' : result.error,
+      toastOnly: true,
+    });
+    return;
+  }
+  if (featureTapCount !== 1) return;
   notificationStore.addNotification({
     type: 'info',
     title: '功能介绍',
@@ -283,7 +309,8 @@ const openFeedback = () => {
           <SettingsRow 
             title="功能介绍" 
             clickable
-            description="了解 VCPMobile 的核心特性"
+            :description="developerSettings.enabled ? '了解 VCPMobile 的核心特性 · 已开启开发者模式' : '了解 VCPMobile 的核心特性'"
+            data-testid="features-entry"
             class="py-3"
             @click="showFeatures"
           >

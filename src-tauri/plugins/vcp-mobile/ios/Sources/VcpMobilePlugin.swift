@@ -41,6 +41,7 @@ final class VcpMobilePlugin: Plugin {
     let presentation = NativePresentation()
     let webKit = NativeWebKit()
     let media = NativeMedia()
+    let haptics = NativeHaptics()
 
     // UIKit state, these process facts, and subscription ownership are main-queue only.
     // A Channel/WebView/plugin replacement must not reset Rust's sequence gate.
@@ -72,6 +73,7 @@ final class VcpMobilePlugin: Plugin {
             self.webView = webview
             self.presentation.attach(webview)
             self.webKit.attach(webview)
+            self.haptics.attach(webview)
             NativeShareInbox.configure(webView: webview)
             // Tauri may attach a replacement WebView to the same plugin instance.
             if let channel = self.channel {

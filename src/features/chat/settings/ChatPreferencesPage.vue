@@ -3,7 +3,6 @@ import { reactive } from 'vue';
 import SettingsCard from '../../../components/settings/SettingsCard.vue';
 import SettingsRow from '../../../components/settings/SettingsRow.vue';
 import SettingsSwitch from '../../../components/settings/SettingsSwitch.vue';
-import HapticsDebugCard from './HapticsDebugCard.vue';
 import { useNotificationStore } from '../../../core/stores/notification';
 import { CHAT_PRESENTATION_OPTIONS, type ChatPresentationMode } from '../preferences/model';
 import { useChatPreferencesStore } from '../preferences/store';
@@ -99,7 +98,6 @@ function updateCollapseTools(enabled: boolean) {
         </SettingsRow>
       </SettingsCard>
       <p v-if="errors.haptics" class="preference-error" role="alert">{{ errors.haptics }}</p>
-      <HapticsDebugCard :active="active" />
     </section>
   </div>
 </template>

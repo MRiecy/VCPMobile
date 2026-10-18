@@ -1,13 +1,23 @@
 <script setup lang="ts">
-import { ref, reactive } from 'vue';
+import { ref, reactive, watch, onScopeDispose } from 'vue';
 import SettingsCard from '../../../components/settings/SettingsCard.vue';
-import { triggerNativeHaptic, type NativeHapticFeedbackResult } from '../../../core/utils/nativeHaptics';
+import { triggerNativeHaptic, type NativeHapticFeedbackPayload } from '../../../core/utils/nativeHaptics';
+import { isAndroid, isIOS } from '../../../core/utils/platform';
 
-defineProps<{ active?: boolean }>();
+const props = withDefaults(defineProps<{ active?: boolean }>(), { active: true });
 
 const isExpanded = ref(true);
 const customDuration = ref(15);
 const customAmplitude = ref(60);
+const intensity = ref(0.5);
+const impactStyles = ['light', 'medium', 'heavy', 'soft', 'rigid'] as const;
+const notificationEffects = ['success', 'warning', 'error'] as const;
+const busy = ref(false);
+let generation = 0;
+watch(() => props.active, (active) => {
+  if (!active) { generation += 1; busy.value = false; }
+}, { flush: 'sync' });
+onScopeDispose(() => { generation += 1; });
 
 const lastLog = reactive<{
   title: string;
@@ -28,47 +38,33 @@ function formatTime(): string {
   return now.toTimeString().split(' ')[0];
 }
 
-async function testViewHaptic(name: string, label: string) {
-  const res: NativeHapticFeedbackResult = await triggerNativeHaptic({
-    type: 'view',
-    effect: name,
-  });
-  lastLog.title = label;
-  lastLog.type = `View Haptics (${name})`;
-  lastLog.detail = `performed: ${res.performed ?? false}, constant: ${res.constant ?? 'N/A'}${res.fallback ? ' (fallback web)' : ''}`;
-  lastLog.time = formatTime();
-  lastLog.success = res.performed !== false;
+async function testHaptic(payload: NativeHapticFeedbackPayload, label: string) {
+  if (!props.active || busy.value) return;
+  busy.value = true;
+  const request = ++generation;
+  try {
+    const result = await triggerNativeHaptic(payload);
+    if (!props.active || request !== generation) return;
+    lastLog.title = label;
+    lastLog.type = `${payload.type}${payload.effect ? ` (${payload.effect})` : ''}`;
+    lastLog.detail = `${result.submitted ? '已提交' : '未提交'} · ${JSON.stringify(result)}`;
+    lastLog.time = formatTime();
+    lastLog.success = result.submitted;
+  } finally {
+    if (request === generation) busy.value = false;
+  }
 }
 
-async function testPredefinedHaptic(name: string, label: string) {
-  const res: NativeHapticFeedbackResult = await triggerNativeHaptic({
-    type: 'predefined',
-    effect: name,
-  });
-  lastLog.title = label;
-  lastLog.type = `Predefined Effect (${name})`;
-  lastLog.detail = `performed: ${res.performed ?? false}, effectId: ${res.effectId ?? 'N/A'}${res.fallback ? ' (fallback duration)' : ''}`;
-  lastLog.time = formatTime();
-  lastLog.success = res.performed !== false;
-}
-
-async function testOneShot(durationMs: number, amplitude: number, label: string) {
-  const res: NativeHapticFeedbackResult = await triggerNativeHaptic({
-    type: 'one_shot',
-    durationMs,
-    amplitude,
-  });
-  lastLog.title = label;
-  lastLog.type = `OneShot (${durationMs}ms / amp ${amplitude})`;
-  lastLog.detail = `performed: ${res.performed ?? false}, ampControl: ${res.hasAmplitudeControl ? '支持' : '不支持'}`;
-  lastLog.time = formatTime();
-  lastLog.success = res.performed !== false;
-}
+const testViewHaptic = (effect: string, label: string) => testHaptic({ type: 'view', effect }, label);
+const testPredefinedHaptic = (effect: string, label: string) => testHaptic({ type: 'predefined', effect }, label);
+const testOneShot = (durationMs: number, amplitude: number, label: string) =>
+  testHaptic({ type: 'one_shot', durationMs, amplitude }, label);
 
 function testWebVibrate(ms: number, label: string) {
+  if (!props.active || busy.value) return;
   let performed = false;
   if (typeof navigator !== 'undefined' && navigator.vibrate) {
-    performed = navigator.vibrate(ms);
+    try { performed = navigator.vibrate(ms); } catch { performed = false; }
   }
   lastLog.title = label;
   lastLog.type = `Web API (navigator.vibrate)`;
@@ -79,22 +75,24 @@ function testWebVibrate(ms: number, label: string) {
 </script>
 
 <template>
-  <div class="haptics-debug-wrapper mt-4">
+  <div :inert="!active" class="haptics-debug-wrapper">
     <div class="flex items-center justify-between py-2 px-1">
       <div class="flex items-center gap-2">
-        <span class="inline-block w-2 h-2 rounded-full bg-[var(--highlight-text)] animate-pulse"></span>
-        <h4 class="text-xs font-black tracking-wider uppercase opacity-80">系统级触感调试实验室 (Debug)</h4>
+        <h3 class="text-sm font-semibold">消息触感与效果测试</h3>
       </div>
       <button
         type="button"
-        class="text-xs font-mono text-[var(--highlight-text)] hover:underline active:opacity-60 transition-opacity"
+        :disabled="!active"
+        class="min-h-11 px-2 text-xs text-[var(--highlight-text)] active:opacity-60 transition-opacity"
         @click="isExpanded = !isExpanded"
       >
         {{ isExpanded ? '[ 收起 ]' : '[ 展开测试 ]' }}
       </button>
     </div>
 
+    <p class="mb-3 text-xs text-[var(--secondary-text)]">测试仅试听效果，不修改聊天偏好。系统与设备决定是否实际播放触感。</p>
     <SettingsCard v-if="isExpanded">
+      <fieldset :disabled="!active || busy || (!isAndroid && !isIOS)" class="border-0 p-0 m-0 min-w-0">
       <div class="space-y-4 text-xs">
         <!-- 实时监控状态 -->
         <div class="p-2.5 rounded-lg bg-black/10 dark:bg-white/5 border border-black/5 dark:border-white/10 font-mono">
@@ -108,8 +106,41 @@ function testWebVibrate(ms: number, label: string) {
           </div>
         </div>
 
-        <!-- 分类 1: 系统视图触觉 (View Haptics) -->
         <div>
+          <h4 class="text-xs font-semibold mb-2">正式消息触感</h4>
+          <div class="grid grid-cols-2 gap-2">
+            <button type="button" class="haptic-btn" @click="testHaptic({ type: 'message', effect: 'send' }, '发送消息')">
+              <span>发送消息</span><small>试听发送反馈</small>
+            </button>
+            <button type="button" class="haptic-btn" @click="testHaptic({ type: 'message', effect: 'complete' }, '回复完整生成')">
+              <span>回复完整生成</span><small>试听完成反馈</small>
+            </button>
+          </div>
+        </div>
+
+        <div v-if="isIOS" class="pt-2 border-t border-[var(--vcp-border-subtle)] space-y-3">
+          <h4 class="text-xs font-semibold">iOS 原生触感</h4>
+          <label class="flex min-h-11 items-center gap-3">
+            <span class="shrink-0">强度 <span class="font-mono">{{ intensity.toFixed(1) }}</span></span>
+            <input v-model.number="intensity" type="range" min="0" max="1" step="0.1" class="min-w-0 flex-1 accent-[var(--highlight-text)]" />
+          </label>
+          <div class="grid grid-cols-2 gap-2">
+            <button v-for="style in impactStyles" :key="style" type="button" class="haptic-btn"
+              @click="testHaptic({ type: 'impact', effect: style, intensity }, `Impact ${style}`)">
+              <span class="font-mono">{{ style }}</span><small>Impact · {{ intensity.toFixed(1) }}</small>
+            </button>
+            <button type="button" class="haptic-btn" @click="testHaptic({ type: 'selection' }, '选择变化')">
+              <span>选择变化</span><small>Selection</small>
+            </button>
+            <button v-for="effect in notificationEffects" :key="effect" type="button" class="haptic-btn"
+              @click="testHaptic({ type: 'notification', effect }, `Notification ${effect}`)">
+              <span class="font-mono">{{ effect }}</span><small>Notification</small>
+            </button>
+          </div>
+        </div>
+
+        <!-- 分类 1: 系统视图触觉 (View Haptics) -->
+        <div v-if="isAndroid">
           <div class="text-[11px] font-bold text-[var(--primary-text)] mb-1.5 flex items-center gap-1.5">
             <span>1. 系统视图触感 (View Haptics)</span>
             <span class="text-[10px] font-mono px-1 py-0.2 rounded bg-blue-500/10 text-blue-400">极轻·打字同款</span>
@@ -168,7 +199,7 @@ function testWebVibrate(ms: number, label: string) {
         </div>
 
         <!-- 分类 2: 马达预定义波形 (Predefined VibrationEffect) -->
-        <div class="pt-2 border-t border-[var(--vcp-border-subtle)]">
+        <div v-if="isAndroid" class="pt-2 border-t border-[var(--vcp-border-subtle)]">
           <div class="text-[11px] font-bold text-[var(--primary-text)] mb-1.5 flex items-center gap-1.5">
             <span>2. 预定义原生波形 (Predefined Effect)</span>
             <span class="text-[10px] font-mono px-1 py-0.2 rounded bg-emerald-500/10 text-emerald-400">Android 10+</span>
@@ -211,7 +242,7 @@ function testWebVibrate(ms: number, label: string) {
         </div>
 
         <!-- 分类 3: 振幅调控微震 (OneShot with Amplitude) -->
-        <div class="pt-2 border-t border-[var(--vcp-border-subtle)]">
+        <div v-if="isAndroid" class="pt-2 border-t border-[var(--vcp-border-subtle)]">
           <div class="text-[11px] font-bold text-[var(--primary-text)] mb-1.5 flex items-center gap-1.5">
             <span>3. 振幅微调控制 (OneShot Amplitude)</span>
             <span class="text-[10px] font-mono px-1 py-0.2 rounded bg-purple-500/10 text-purple-400">功率降级</span>
@@ -265,7 +296,7 @@ function testWebVibrate(ms: number, label: string) {
         </div>
 
         <!-- 分类 4: Web API 时长对照 (navigator.vibrate) -->
-        <div class="pt-2 border-t border-[var(--vcp-border-subtle)]">
+        <div v-if="isAndroid" class="pt-2 border-t border-[var(--vcp-border-subtle)]">
           <div class="text-[11px] font-bold text-[var(--primary-text)] mb-1.5 flex items-center gap-1.5">
             <span>4. Web API 时长对照 (navigator.vibrate)</span>
             <span class="text-[10px] font-mono px-1 py-0.2 rounded bg-amber-500/10 text-amber-400">全功率蜂鸣对照</span>
@@ -291,22 +322,24 @@ function testWebVibrate(ms: number, label: string) {
             <button
               type="button"
               class="haptic-btn"
-              @click="testWebVibrate(25, 'Web API (25ms 当前发送消息)')"
+              @click="testWebVibrate(25, 'Web API (25ms)')"
             >
-              <span>25ms 发送</span>
-              <small>当前【发送】默认</small>
+              <span>25ms 脉冲</span>
+              <small>历史发送效果对照</small>
             </button>
             <button
               type="button"
               class="haptic-btn border-red-500/30 text-red-400"
-              @click="testWebVibrate(40, 'Web API (40ms 当前收到回复)')"
+              @click="testWebVibrate(40, 'Web API (40ms)')"
             >
-              <span>40ms 回复</span>
-              <small>当前【收到回复】默认 (震感大)</small>
+              <span>40ms 脉冲</span>
+              <small>历史回复效果对照</small>
             </button>
           </div>
         </div>
       </div>
+      </fieldset>
+      <p v-if="!isAndroid && !isIOS" class="mt-2 text-xs text-[var(--secondary-text)]">请在移动设备上测试原生触感。</p>
     </SettingsCard>
   </div>
 </template>
@@ -318,11 +351,12 @@ function testWebVibrate(ms: number, label: string) {
   align-items: flex-start;
   justify-content: center;
   padding: 0.45rem 0.6rem;
+  min-height: 44px;
   border: 1px solid var(--vcp-border-subtle);
   border-radius: 0.5rem;
   background: rgba(0, 0, 0, 0.03);
   text-align: left;
-  transition: all 0.15s ease;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 
 :global(.dark) .haptic-btn {
@@ -332,8 +366,9 @@ function testWebVibrate(ms: number, label: string) {
 .haptic-btn:active {
   background: var(--vcp-highlight-bg-10, rgba(59, 130, 246, 0.15));
   border-color: var(--highlight-text, #3b82f6);
-  transform: scale(0.98);
 }
+
+.haptic-btn:disabled { opacity: 0.45; }
 
 .haptic-btn span {
   font-size: 0.6875rem;

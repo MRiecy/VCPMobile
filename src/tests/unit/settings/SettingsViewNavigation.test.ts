@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { defineAsyncComponent, defineComponent, h, onUnmounted, watch } from 'vue';
+import { defineAsyncComponent, defineComponent, h, onUnmounted, watch, type Component } from 'vue';
+import { createPinia, setActivePinia } from 'pinia';
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import SettingsView from '@/features/settings/SettingsView.vue';
 import { settingsPages } from '@/features/settings/catalog';
 import type { SettingsPageEntry } from '@/features/settings/contracts';
 import { useModalHistory } from '@/core/composables/useModalHistory';
+import { useDeveloperSettingsStore } from '@/features/settings/developer/store';
 
 vi.mock('@/features/settings/catalog', () => ({ settingsPages: [] }));
 vi.mock('@/core/stores/theme', () => ({
@@ -39,7 +41,28 @@ describe('SettingsView page loading and retained transitions', () => {
     },
   });
 
-  function catalogEntry(loader: () => Promise<typeof Page>, frame: SettingsPageEntry['frame'] = 'list'): SettingsPageEntry {
+  const About = defineComponent({
+    props: { active: Boolean },
+    emits: ['back', 'open-developer'],
+    setup(props, { emit }) {
+      return () => h('div', { 'data-testid': 'about-body' }, [
+        h('button', { disabled: !props.active, onClick: () => emit('open-developer') }, '开发者入口'),
+        h('button', { disabled: !props.active, onClick: () => emit('back') }, '关于返回'),
+      ]);
+    },
+  });
+  const Developer = defineComponent({
+    props: { active: Boolean },
+    setup: (props) => () => h('div', { 'data-testid': 'developer-body', 'data-active': props.active }, '诊断工具'),
+  });
+  function developerEntries(loader: () => Promise<Component> = async () => Developer): SettingsPageEntry[] {
+    return [
+      { id: 'about', title: '关于', description: '版本与更新', frame: 'immersive', component: defineAsyncComponent(async () => About) },
+      { id: 'developer', title: '开发者选项', description: '调试工具', frame: 'list', parent: 'about', component: defineAsyncComponent(loader) },
+    ];
+  }
+
+  function catalogEntry(loader: () => Promise<Component>, frame: SettingsPageEntry['frame'] = 'list'): SettingsPageEntry {
     return {
       id: frame === 'immersive' ? 'about' : 'connection',
       title: frame === 'immersive' ? '关于' : '服务器连接',
@@ -48,8 +71,8 @@ describe('SettingsView page loading and retained transitions', () => {
     };
   }
 
-  function mountShell(entry: SettingsPageEntry) {
-    (settingsPages as SettingsPageEntry[]).splice(0, settingsPages.length, entry);
+  function mountShell(...entries: SettingsPageEntry[]) {
+    (settingsPages as SettingsPageEntry[]).splice(0, settingsPages.length, ...entries);
     wrapper = mount(SettingsView, {
       props: { isOpen: true },
       attachTo: document.body,
@@ -59,6 +82,8 @@ describe('SettingsView page loading and retained transitions', () => {
   }
 
   beforeEach(() => {
+    localStorage.clear();
+    setActivePinia(createPinia());
     wrapper = null;
     activeChanges.length = 0;
     beforeLeave.mockResolvedValue(true);
@@ -69,7 +94,53 @@ describe('SettingsView page loading and retained transitions', () => {
     });
   });
 
-  afterEach(() => wrapper?.unmount());
+  afterEach(() => { wrapper?.unmount(); localStorage.clear(); });
+
+  it('keeps developer tools out of the root list and enters them only from an unlocked about visit', async () => {
+    const developer = useDeveloperSettingsStore();
+    const shell = mountShell(...developerEntries());
+    expect(shell.findAll('.settings-row')).toHaveLength(1);
+    expect(shell.get('.settings-row').text()).toContain('关于');
+    await shell.get('.settings-row').trigger('click');
+    await flushPromises();
+    await shell.get('[data-testid="about-body"] button').trigger('click');
+    await flushPromises();
+    expect(shell.find('[data-testid="developer-body"]').exists()).toBe(false);
+    expect(developer.setEnabled(true).ok).toBe(true);
+    await shell.get('[data-testid="about-body"] button').trigger('click');
+    await flushPromises();
+    expect(shell.get('[data-testid="developer-body"]').attributes('data-active')).toBe('true');
+    expect(shell.findAll('.settings-row')).toHaveLength(1);
+    expect(useModalHistory().modalStackLength()).toBe(1);
+    await shell.get('button[aria-label="返回关于"]').trigger('click');
+    await flushPromises();
+    expect(shell.find('[data-testid="about-body"]').exists()).toBe(true);
+    expect(useModalHistory().modalStackLength()).toBe(1);
+    await shell.findAll('[data-testid="about-body"] button').find((button) => button.text() === '关于返回')!.trigger('click');
+    await flushPromises();
+    expect(useModalHistory().modalStackLength()).toBe(0);
+  });
+
+  it('ignores a late developer chunk after returning to about and then hiding settings', async () => {
+    let resolve!: (component: Component) => void;
+    useDeveloperSettingsStore().setEnabled(true);
+    const shell = mountShell(...developerEntries(() => new Promise((accept) => { resolve = accept; })));
+    await shell.get('.settings-row').trigger('click');
+    await flushPromises();
+    await shell.get('[data-testid="about-body"] button').trigger('click');
+    expect(shell.find('button[aria-label="返回关于"]').exists()).toBe(true);
+    await shell.get('button[aria-label="返回关于"]').trigger('click');
+    resolve(Developer);
+    await flushPromises();
+    expect(shell.find('[data-testid="developer-body"]').exists()).toBe(false);
+    expect(shell.find('[data-testid="about-body"]').exists()).toBe(true);
+    await shell.setProps({ isOpen: false });
+    expect(useModalHistory().modalStackLength()).toBe(0);
+    expect(setFluidActive).toHaveBeenLastCalledWith(false);
+    await shell.setProps({ isOpen: true });
+    expect(shell.find('[data-testid="developer-body"]').exists()).toBe(false);
+    await vi.waitFor(() => expect(shell.find('[data-testid="about-body"]').exists()).toBe(false));
+  });
 
   it('retries a failed lazy chunk and then uses the loaded page leave hook', async () => {
     const loader = vi.fn().mockRejectedValueOnce(new Error('chunk unavailable')).mockResolvedValue(Page);

@@ -1,21 +1,24 @@
 // useConfigBackup: 「服务器连接」页配置备份（导出/导入）
-// 导出范围：用户身份 + 应用连接（含插件中心连接，白名单字段）
+// 导出范围：用户身份、应用连接、总结模型与已应用的主题/聊天偏好。
 // 头像不在导出范围：头像属于数据同步职责，重装后由同步带回
 // 评估与决策记录见 plan/Settings_Import_Export_Evaluation_2026-08-18.md
 import { invoke } from "@tauri-apps/api/core";
 import { deleteTempFile } from "tauri-plugin-vcp-mobile";
-import { pickFile } from "../../core/utils/nativeFilePicker";
+import { pickFile, withNativeFileOperation } from "../../core/utils/nativeFilePicker";
 import type { AppSettings } from "../../core/stores/settings";
+import { normalizeThemeModuleKey, useThemeStore, type ThemePreferences } from "../../core/stores/theme";
+import { useChatPreferencesStore } from "../chat/preferences/store";
+import type { ChatPreferences } from "../chat/preferences/model";
 import type { DownloadsSaveResultDto } from "../../core/types/native";
 import { isAndroid, isIOS } from "../../core/utils/platform";
 
 export const CONFIG_BACKUP_KIND = "vcp-mobile-settings-backup";
-export const CONFIG_BACKUP_VERSION = 1;
-export const CONFIG_BACKUP_EXTENSION = ".vcpcfg";
+export const CONFIG_BACKUP_VERSION = 2;
+export const CONFIG_BACKUP_EXTENSION = ".vcpcfg.json";
 /** 导入文件大小上限（纯配置 JSON 正常仅数 KB） */
 export const MAX_BACKUP_FILE_BYTES = 1024 * 1024;
 
-/** 导出白名单：仅这些字段进入备份文件；extra 透传字段与本地偏好被显式排除 */
+/** SQLite 设置白名单；主题与聊天由各领域 owner 单独提供。 */
 export const BACKUP_SETTINGS_KEYS = [
   // 用户身份
   "userName",
@@ -37,6 +40,7 @@ export const BACKUP_SETTINGS_KEYS = [
   "distributedWsUrl",
   "distributedVcpKey",
   "distributedDeviceName",
+  "topicSummaryModel",
 ] as const;
 
 export type BackupSettingsKey = (typeof BACKUP_SETTINGS_KEYS)[number];
@@ -51,11 +55,114 @@ export interface ConfigBackupFile {
   version: number;
   exportedAt: string;
   settings: Partial<AppSettings>;
+  preferences: { theme: ThemePreferences; chat: ChatPreferences };
 }
 
 export interface ParsedConfigBackup {
   settings: Partial<AppSettings>;
+  preferences?: { theme?: Partial<ThemePreferences>; chat?: Partial<ChatPreferences> };
   exportedAt: string;
+}
+
+export interface BackupImportResult {
+  applied: string[];
+  skipped: string[];
+  failed: { scope: string; message: string }[];
+}
+
+const SETTINGS_SCOPES = [
+  { label: '用户身份', keys: ['userName', 'adminUsername', 'adminPassword'] },
+  { label: '服务器与同步连接', keys: ['vcpServerUrl', 'chatEndpointMode', 'vcpApiKey', 'vcpLogUrl', 'vcpLogKey', 'syncHttpUrl', 'syncServerUrl', 'syncToken', 'fileKey'] },
+  { label: '分布式系统', keys: ['distributedEnabled', 'distributedWsUrl', 'distributedVcpKey', 'distributedDeviceName'] },
+  { label: '话题总结模型', keys: ['topicSummaryModel'] },
+] as const;
+
+const hasFields = (value: object | undefined): boolean => Boolean(value && Object.keys(value).length);
+const settingsScopes = (settings: Partial<AppSettings>) => SETTINGS_SCOPES
+  .filter(scope => scope.keys.some(key => Object.prototype.hasOwnProperty.call(settings, key)))
+  .map(scope => scope.label);
+
+export function configBackupScopes(backup: ParsedConfigBackup): string[] {
+  return [
+    ...settingsScopes(backup.settings),
+    ...(hasFields(backup.preferences?.theme) ? ['主题与深浅模式'] : []),
+    ...(hasFields(backup.preferences?.chat) ? ['聊天偏好'] : []),
+  ];
+}
+
+export function unavailableBackupTheme(backup: ParsedConfigBackup): string | null {
+  const key = backup.preferences?.theme?.themeKey;
+  return key !== undefined && !normalizeThemeModuleKey(key) ? key : null;
+}
+
+export function captureBackupPreferences(): ConfigBackupFile['preferences'] {
+  const theme = useThemeStore();
+  const chat = useChatPreferencesStore();
+  return {
+    theme: { themeKey: theme.currentTheme, mode: theme.mode },
+    chat: {
+      presentationMode: chat.presentationMode,
+      smoothStreamingEnabled: chat.smoothStreamingEnabled,
+      messageHapticsEnabled: chat.messageHapticsEnabled,
+      collapseToolsWhileStreaming: chat.collapseToolsWhileStreaming,
+    },
+  };
+}
+
+/** Apply only validated, present fields through their existing persistence owners. */
+export async function applyConfigBackup(
+  backup: ParsedConfigBackup,
+  applySettings: (patch: Partial<AppSettings>) => Promise<void>,
+): Promise<BackupImportResult> {
+  const result: BackupImportResult = { applied: [], skipped: [], failed: [] };
+  const databaseScopes = settingsScopes(backup.settings);
+  if (databaseScopes.length) {
+    try {
+      await applySettings(backup.settings);
+      result.applied.push(...databaseScopes);
+    } catch (error) {
+      result.failed.push({ scope: databaseScopes.join('、'), message: String(error) });
+    }
+  }
+
+  const theme = backup.preferences?.theme;
+  if (hasFields(theme)) {
+    const missing = unavailableBackupTheme(backup);
+    if (missing !== null) {
+      result.skipped.push(`主题 ${missing} 在当前版本不可用，已保留当前主题与深浅模式`);
+    } else {
+      try {
+        const applied = await useThemeStore().restorePreferences(theme!);
+        if (applied.ok) result.applied.push('主题与深浅模式');
+        else result.failed.push({ scope: '主题与深浅模式', message: applied.error || '主题应用失败' });
+      } catch (error) {
+        result.failed.push({ scope: '主题与深浅模式', message: String(error) });
+      }
+    }
+  }
+
+  const chat = backup.preferences?.chat;
+  if (hasFields(chat)) {
+    const owner = useChatPreferencesStore();
+    const fields = [
+      { key: 'presentationMode', label: '消息呈现', apply: () => owner.setPresentationMode(chat!.presentationMode!) },
+      { key: 'smoothStreamingEnabled', label: '流式平滑动效', apply: () => owner.setSmoothStreamingEnabled(chat!.smoothStreamingEnabled!) },
+      { key: 'messageHapticsEnabled', label: '消息震动', apply: () => owner.setMessageHapticsEnabled(chat!.messageHapticsEnabled!) },
+      { key: 'collapseToolsWhileStreaming', label: '流式工具折叠', apply: () => owner.setCollapseToolsWhileStreaming(chat!.collapseToolsWhileStreaming!) },
+    ] as const;
+    for (const field of fields) {
+      if (!Object.prototype.hasOwnProperty.call(chat, field.key)) continue;
+      const scope = `聊天偏好 · ${field.label}`;
+      try {
+        const applied = field.apply();
+        if (applied.ok) result.applied.push(scope);
+        else result.failed.push({ scope, message: applied.error || '设置保存失败' });
+      } catch (error) {
+        result.failed.push({ scope, message: String(error) });
+      }
+    }
+  }
+  return result;
 }
 
 // ------------------------------------------------------------------
@@ -82,7 +189,7 @@ export function pickBackupSettings(settings: AppSettings): Partial<AppSettings> 
   return picked as Partial<AppSettings>;
 }
 
-/** 生成导出文件名：vcp-mobile-config-YYYYMMDD-HHmm.vcpcfg */
+/** 生成导出文件名：vcp-mobile-config-YYYYMMDD-HHmm.vcpcfg.json */
 export function buildBackupFileName(now: Date = new Date()): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`;
@@ -92,6 +199,7 @@ export function buildBackupFileName(now: Date = new Date()): string {
 /** 组装备份文件 payload */
 export function buildBackupPayload(
   settings: AppSettings,
+  preferences: ConfigBackupFile['preferences'],
   now: Date = new Date(),
 ): ConfigBackupFile {
   return {
@@ -100,6 +208,15 @@ export function buildBackupPayload(
     version: CONFIG_BACKUP_VERSION,
     exportedAt: now.toISOString(),
     settings: pickBackupSettings(settings),
+    preferences: {
+      theme: { themeKey: preferences.theme.themeKey, mode: preferences.theme.mode },
+      chat: {
+        presentationMode: preferences.chat.presentationMode,
+        smoothStreamingEnabled: preferences.chat.smoothStreamingEnabled,
+        messageHapticsEnabled: preferences.chat.messageHapticsEnabled,
+        collapseToolsWhileStreaming: preferences.chat.collapseToolsWhileStreaming,
+      },
+    },
   };
 }
 
@@ -124,11 +241,16 @@ export function bytesToBase64(bytes: Uint8Array): string {
 async function invokeSaveToDownloads(
   fileName: string,
   contentBase64: string,
+  operationId: string,
+  reservationToken?: string,
 ): Promise<DownloadsSaveResultDto> {
   return await invoke<DownloadsSaveResultDto>("plugin:vcp-mobile|save_to_downloads", {
     fileName,
     contentBase64,
     mimeType: "application/json",
+    purpose: 'config',
+    operationId,
+    ...(reservationToken ? { reservationToken } : {}),
   });
 }
 
@@ -139,35 +261,38 @@ async function invokeSaveToDownloads(
  */
 export async function exportConfigBackup(
   settings: AppSettings,
+  operationId: string = `config_export_${crypto.randomUUID()}`,
 ): Promise<DownloadsSaveResultDto> {
   if (!isAndroid && !isIOS) {
     throw new Error('当前预览环境不提供原生配置文件导出');
   }
-  const payload = buildBackupPayload(settings);
+  const payload = buildBackupPayload(settings, captureBackupPreferences());
   const bytes = new TextEncoder().encode(JSON.stringify(payload, null, 2));
   if (bytes.byteLength > MAX_BACKUP_FILE_BYTES) {
-    throw new Error('配置备份超过 1 MiB，请检查连接配置字段');
+    throw new Error('配置备份超过 1 MiB，请检查配置字段');
   }
   const contentBase64 = bytesToBase64(bytes);
   const fileName = buildBackupFileName();
 
-  try {
-    return await invokeSaveToDownloads(fileName, contentBase64);
-  } catch (e: any) {
-    const message = String(e);
-    if (!isAndroid || !message.includes("储存空间权限")) throw e;
-    // API 26–28：引导用户授予储存空间权限后重试一次
-    await invoke("plugin:vcp-mobile|request_android_permission", { pType: "storage" });
-    return await invokeSaveToDownloads(fileName, contentBase64);
-  }
+  return withNativeFileOperation(operationId, async reservationToken => {
+    try {
+      return await invokeSaveToDownloads(fileName, contentBase64, operationId, reservationToken);
+    } catch (e: any) {
+      const message = String(e);
+      if (!isAndroid || !message.includes("储存空间权限")) throw e;
+      // API 26–28：引导用户授予储存空间权限后重试一次
+      await invoke("plugin:vcp-mobile|request_android_permission", { pType: "storage" });
+      return await invokeSaveToDownloads(fileName, contentBase64, operationId, reservationToken);
+    }
+  });
 }
 
 /** Native staging is released after Rust has returned the validated patch. */
-export async function pickConfigBackup(operationId: string): Promise<ParsedConfigBackup> {
+export async function pickConfigBackup(operationId: string, allowOtherFiles = false): Promise<ParsedConfigBackup> {
   if (!isAndroid && !isIOS) {
     throw new Error('当前预览环境不提供原生配置文件导入');
   }
-  const picked = await pickFile('config', { operationId, maxBytes: MAX_BACKUP_FILE_BYTES });
+  const picked = await pickFile('config', { operationId, maxBytes: MAX_BACKUP_FILE_BYTES, allowOtherFiles });
   try {
     return await invoke<ParsedConfigBackup>('parse_config_backup', { path: picked.path });
   } finally {

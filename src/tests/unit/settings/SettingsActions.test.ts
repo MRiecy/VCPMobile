@@ -154,7 +154,7 @@ describe('依赖配置提交的设置动作', () => {
     }]]);
   });
 
-  it('导出编码保存成功的快照，并继续排除本地偏好与非备份字段', async () => {
+  it('导出编码保存成功的快照和正式偏好，并排除非备份字段', async () => {
     const pending = deferred<SettingsSaveResult>();
     const wrapper = render(ConfigBackupSection, { active: true, disabled: false, commit: () => pending.promise, applyImport: vi.fn() });
     await action(wrapper, '导出').get('button').trigger('click');
@@ -168,7 +168,9 @@ describe('依赖配置提交的设置动作', () => {
     const payload = JSON.parse(new TextDecoder().decode(bytes));
     expect(payload.settings.userName).toBe('已提交用户');
     expect(payload.settings.vcpApiKey).toBe('saved-key');
-    expect(payload.settings).not.toHaveProperty('topicSummaryModel');
+    expect(payload.settings.topicSummaryModel).toBe('summary-model');
+    expect(payload.preferences.theme.themeKey).toBeTruthy();
+    expect(payload.preferences.chat).toHaveProperty('messageHapticsEnabled');
     expect(payload.settings).not.toHaveProperty('agentOrder');
   });
 
@@ -192,7 +194,7 @@ describe('配置导入的原生选择与局部覆盖层生命周期', () => {
     const picked = deferred<{ path: string }>();
     mockInvoke('plugin:vcp-mobile|pick_file', () => picked.promise);
     mockInvoke('parse_config_backup', () => backup);
-    const applyImport = vi.fn(async () => undefined);
+    const applyImport = vi.fn(async () => ({ applied: ['服务器与同步连接'], skipped: [], failed: [] }));
     const wrapper = render(ConfigBackupSection, { active: true, disabled: false, commit: async () => saved(), applyImport });
 
     await action(wrapper, '导入').get('button').trigger('click');
@@ -214,7 +216,7 @@ describe('配置导入的原生选择与局部覆盖层生命周期', () => {
   it('active=false在退场仍挂载时关闭确认并注销其modal，不应用导入', async () => {
     mockInvoke('plugin:vcp-mobile|pick_file', () => ({ path: filePath }));
     mockInvoke('parse_config_backup', () => backup);
-    const applyImport = vi.fn(async () => undefined);
+    const applyImport = vi.fn(async () => ({ applied: ['服务器与同步连接'], skipped: [], failed: [] }));
     const wrapper = render(ConfigBackupSection, { active: true, disabled: false, commit: async () => saved(), applyImport });
 
     await action(wrapper, '导入').get('button').trigger('click');
@@ -232,7 +234,7 @@ describe('配置导入的原生选择与局部覆盖层生命周期', () => {
     mockInvoke('plugin:vcp-mobile|pick_file', () => ({ path: filePath }));
     mockInvoke('parse_config_backup', () => backup);
     const commit = vi.fn(async () => saved());
-    const applyImport = vi.fn(async () => undefined);
+    const applyImport = vi.fn(async () => ({ applied: ['服务器与同步连接'], skipped: [], failed: [] }));
     const wrapper = render(ConfigBackupSection, { active: true, disabled: false, commit, applyImport });
 
     await action(wrapper, '导入').get('button').trigger('click');
@@ -240,7 +242,7 @@ describe('配置导入的原生选择与局部覆盖层生命周期', () => {
     await confirmImport(wrapper);
     await flushPromises();
 
-    expect(applyImport).toHaveBeenCalledExactlyOnceWith(backup.settings);
+    expect(applyImport).toHaveBeenCalledExactlyOnceWith(backup);
     expect(commit).not.toHaveBeenCalled();
     expect(deleteTempFile).toHaveBeenCalledWith(filePath);
   });

@@ -35,6 +35,8 @@ Rust 核心内部调用 ─> Rust 公开入口 ─┼─> PluginHandle / JNI
 | `ios/Sources/NativeClipboard.swift` | 前台系统剪贴板读写，UIKit 操作在主队列执行 |
 | `ios/Sources/NativeBackgroundExecution.swift` | 进程级任务租约；Stream 尽力静音音频、Sync/Prerender 前台常亮，音频中断不产生业务终态 |
 | `ios/Sources/NativePresentation.swift`、`NativeFiles.swift` | 主 Scene 单操作呈现；picker 按调用 WebView/Scene 先登记 reservation 再启动，取消可撤销未启动登记；Files/PHPicker、Quick Look、导出与活动面板的文件持有至原生终态 |
+| `ios/Sources/NativeConfigBackupDirectory.swift` | 配置备份目录 bookmark、授权生命周期、VCPMobile 子目录和协调读写；仅配置导入导出复用，普通文件导出仍由原生保存面板处理 |
+| `ios/Sources/NativeHaptics.swift` | 主队列 UIKit 消息触感与显式试听；返回 API 提交结果，不宣称硬件实际播放 |
 | `ios/Sources/NativeImages.swift`、`NativeCamera.swift` | 串行 ImageIO 下采样、SDR 派生与真实编码，PhotoKit add-only、AVCapturePhotoOutput 有界静态拍照 |
 | `android/src/main/.../NativeFileImages.kt` | 按用途预算下采样、EXIF 方向和 JPEG/PNG 编码；外部输入保持原件，头像工作副本单独派生 |
 | `android/src/main/.../NativeMediaProcessor.kt`、`ios/Sources/NativeMedia.swift` | 音视频文件处理资源；先登记再执行，取消排队或运行中的解码，结果按路径及真实格式交回 Rust。Android Media3 / iOS AVAudioConverter 音频、系统视频抽帧；不持有聊天终态或改动音频播放会话 |

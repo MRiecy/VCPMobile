@@ -7,7 +7,8 @@ export type SettingsPageId =
   | 'rendering'
   | 'advanced'
   | 'guide'
-  | 'about';
+  | 'about'
+  | 'developer';
 
 export interface SettingsPageEntry {
   id: SettingsPageId;
@@ -15,6 +16,7 @@ export interface SettingsPageEntry {
   description: string;
   component: Component;
   frame: 'list' | 'viewport' | 'immersive';
+  parent?: SettingsPageId;
 }
 
 export interface SettingsPageHandle {

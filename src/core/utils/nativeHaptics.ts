@@ -1,14 +1,16 @@
 import { invoke } from '@tauri-apps/api/core';
 
 export interface NativeHapticFeedbackPayload {
-  type: 'view' | 'predefined' | 'one_shot';
+  type: 'message' | 'view' | 'predefined' | 'one_shot' | 'impact' | 'selection' | 'notification';
   effect?: string;
   durationMs?: number;
   amplitude?: number;
+  intensity?: number;
 }
 
 export interface NativeHapticFeedbackResult {
-  performed?: boolean;
+  /** The native API accepted the request; hardware playback remains system-controlled. */
+  submitted: boolean;
   type?: string;
   effect?: string;
   constant?: number;
@@ -16,13 +18,15 @@ export interface NativeHapticFeedbackResult {
   hasAmplitudeControl?: boolean;
   durationMs?: number;
   amplitude?: number;
+  intensity?: number;
+  resolvedEffect?: string;
   fallback?: boolean;
   reason?: string;
 }
 
 /**
- * 触发系统级/原生触觉反馈。
- * 优先调用移动端插件命令；若在非 Android 环境或调用失败，自动回退到 Web Vibration API。
+ * Submit one native haptic request. Unsupported or suppressed feedback stays silent:
+ * falling back to a timed Web vibration would change the selected effect and system policy.
  */
 export async function triggerNativeHaptic(
   payload: NativeHapticFeedbackPayload,
@@ -31,25 +35,15 @@ export async function triggerNativeHaptic(
     const result = await invoke<NativeHapticFeedbackResult>('plugin:vcp-mobile|trigger_haptic_feedback', {
       payload,
     });
-    return result;
+    return typeof result?.submitted === 'boolean'
+      ? result
+      : { submitted: false, reason: 'invalid_native_haptic_result' };
   } catch (error) {
-    // 非 Android 环境或模拟器 fallback
-    if (typeof navigator !== 'undefined' && navigator.vibrate) {
-      const ms = payload.durationMs || (payload.type === 'view' ? 15 : 20);
-      try {
-        navigator.vibrate(ms);
-        return {
-          performed: true,
-          type: payload.type,
-          effect: payload.effect,
-          fallback: true,
-          durationMs: ms,
-          reason: `fallback_navigator_vibrate: ${String(error)}`,
-        };
-      } catch (vibErr) {
-        return { performed: false, reason: String(vibErr) };
-      }
-    }
-    return { performed: false, reason: String(error) };
+    return { submitted: false, reason: String(error) };
   }
+}
+
+/** Fire-and-forget enhancement; the chat owners decide eligibility and read the live preference. */
+export function triggerMessageHaptic(effect: 'send' | 'complete'): void {
+  void triggerNativeHaptic({ type: 'message', effect });
 }

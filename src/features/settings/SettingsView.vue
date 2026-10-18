@@ -9,6 +9,7 @@ import SettingsRow from "../../components/settings/SettingsRow.vue";
 import FluidBackground from "../../components/ui/WebGLFluidBackground.vue";
 import { settingsPages } from "./catalog";
 import { useSettingsNavigation } from "./useSettingsNavigation";
+import { useDeveloperSettingsStore } from './developer/store';
 
 const props = withDefaults(
   defineProps<{
@@ -28,12 +29,16 @@ const emit = defineEmits<{
 const subpageSurface = ref<HTMLElement | null>(null);
 const {
   activeVisit, displayedVisit, pageError, navigationError, attempt, loading, loaded,
-  openPage, requestLeave, failPage, retryPage, finishPageLeave,
+  openPage, openDeveloperPage, requestLeave, failPage, retryPage, finishPageLeave,
 } = useSettingsNavigation({
   isOpen: computed(() => props.isOpen),
   surface: () => subpageSurface.value,
   close: () => emit("close"),
 });
+
+const developerSettings = useDeveloperSettingsStore();
+const rootPages = settingsPages.filter((page) => !page.parent);
+const openDeveloper = () => { if (developerSettings.enabled) openDeveloperPage(); };
 
 const displayedPage = computed(() => settingsPages.find((page) => page.id === displayedVisit.value?.id));
 const subPageTitle = computed(() => settingsPages.find((page) => page.id === activeVisit.value?.id)?.title || "");
@@ -120,7 +125,7 @@ onScopeDispose(() => fluidBgRef.value?.setActive(false));
         <h2 class="text-xl font-bold">{{ activeVisit ? subPageTitle : '全局设置' }}</h2>
         <button
           type="button"
-          :aria-label="activeVisit ? '返回设置首页' : '关闭设置'"
+          :aria-label="activeVisit?.id === 'developer' ? '返回关于' : activeVisit ? '返回设置首页' : '关闭设置'"
           @click="requestLeave"
           class="min-h-11 min-w-11 p-2 transition-opacity flex items-center justify-center opacity-70 active:opacity-100"
         >
@@ -162,7 +167,7 @@ onScopeDispose(() => fluidBgRef.value?.setActive(false));
           <SettingsCard>
             <div class="divide-y divide-black/5 dark:divide-white/5">
               <SettingsRow
-                v-for="cat in settingsPages"
+                v-for="cat in rootPages"
                 :key="cat.id"
                 :title="cat.title"
                 :description="cat.description"
@@ -236,7 +241,7 @@ onScopeDispose(() => fluidBgRef.value?.setActive(false));
             </div>
             <PageLoadBoundary :key="`${displayedVisit.serial}:${attempt}`" :visit="displayedVisit.serial" @error="failPage">
               <component v-if="pageActive || loaded" :is="displayedPage.component" :ref="displayedVisit.setHandle"
-                :active="pageActive" @back="requestLeave" />
+                :active="pageActive" @back="requestLeave" @open-developer="openDeveloper" />
             </PageLoadBoundary>
           </template>
         </div>

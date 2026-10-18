@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.ClipData
 import android.content.Intent
 import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.activity.result.ActivityResult
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
@@ -64,12 +65,13 @@ class FilePickerBatchTest {
         unmockkAll()
     }
 
-    private fun start(mode: String = "file", maxFiles: Int = 16, maxBytes: Long = 100): Invoke {
+    private fun start(mode: String = "file", maxFiles: Int = 16, maxBytes: Long = 100, allowOtherFiles: Boolean = false): Invoke {
         val invoke = mockk<Invoke>(relaxed = true)
         every { invoke.parseArgs(PickFileArgs::class.java) } returns PickFileArgs().apply {
             this.mode = mode
             this.maxFiles = maxFiles
             this.maxBytes = maxBytes
+            this.allowOtherFiles = allowOtherFiles
             operationId = "batch_test"
             stagingDir = uploads.absolutePath
         }
@@ -181,5 +183,24 @@ class FilePickerBatchTest {
         assertFalse(launched.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false))
         plugin.onPickFileResult(avatar, ActivityResult(Activity.RESULT_CANCELED, null))
         verify(exactly = 1) { avatar.reject("cancelled: file picker") }
+    }
+
+    @Test fun configPickerStartsAtExportsAndOnlyBroadensForExplicitLegacySelection() {
+        val first = start(mode = "config")
+        assertArrayEquals(arrayOf("application/json", "application/vnd.vcp.config+json"), launched.getStringArrayExtra(Intent.EXTRA_MIME_TYPES))
+        val directory = launched.getParcelableExtra<Uri>(DocumentsContract.EXTRA_INITIAL_URI)
+        assertEquals("primary:Download/VCPMobile", DocumentsContract.getDocumentId(directory!!))
+        plugin.onPickFileResult(first, ActivityResult(Activity.RESULT_CANCELED, null))
+
+        val legacy = start(mode = "config", allowOtherFiles = true)
+        assertEquals("*/*", launched.type)
+        assertFalse(launched.hasExtra(Intent.EXTRA_MIME_TYPES))
+        assertEquals(directory, launched.getParcelableExtra<Uri>(DocumentsContract.EXTRA_INITIAL_URI))
+        plugin.onPickFileResult(legacy, ActivityResult(Activity.RESULT_CANCELED, null))
+
+        val ordinary = start(mode = "file")
+        assertFalse(launched.hasExtra(DocumentsContract.EXTRA_INITIAL_URI))
+        assertFalse(launched.hasExtra(Intent.EXTRA_MIME_TYPES))
+        plugin.onPickFileResult(ordinary, ActivityResult(Activity.RESULT_CANCELED, null))
     }
 }
