@@ -865,6 +865,18 @@
           "markdownDescription": "Denies the start_network_monitoring command without any pre-configured scope."
         },
         {
+          "description": "Enables the trigger_haptic_feedback command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-trigger-haptic-feedback",
+          "markdownDescription": "Enables the trigger_haptic_feedback command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the trigger_haptic_feedback command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-trigger-haptic-feedback",
+          "markdownDescription": "Denies the trigger_haptic_feedback command without any pre-configured scope."
+        },
+        {
           "description": "Enables the update_download_notification command without any pre-configured scope.",
           "type": "string",
           "const": "allow-update-download-notification",

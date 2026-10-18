@@ -49,6 +49,7 @@ const COMMANDS: &[&str] = &[
     "open_unknown_sources_settings",
     "acquire_ota_keepalive",
     "release_ota_keepalive",
+    "trigger_haptic_feedback",
 ];
 
 fn main() {

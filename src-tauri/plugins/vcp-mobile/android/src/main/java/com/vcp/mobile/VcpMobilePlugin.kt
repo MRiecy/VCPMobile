@@ -26,6 +26,10 @@ import android.os.Handler
 import android.os.Looper
 import android.os.Message
 import android.os.PowerManager
+import android.os.Vibrator
+import android.os.VibratorManager
+import android.os.VibrationEffect
+import android.view.HapticFeedbackConstants
 import android.net.Uri
 import android.provider.Settings
 import android.content.pm.PackageManager
@@ -2831,6 +2835,129 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             invoke.resolve(JSObject())
         }
     }
+    private fun getSystemServiceVibrator(): Vibrator {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val vm = activity.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? VibratorManager
+            vm?.defaultVibrator ?: (activity.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator)
+        } else {
+            @Suppress("DEPRECATION")
+            activity.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+        }
+    }
+
+    @Command
+    fun triggerHapticFeedback(invoke: Invoke) {
+        if (isDestroying.get()) {
+            invoke.reject("插件已在销毁过程中")
+            return
+        }
+        val args = try {
+            invoke.parseArgs(TriggerHapticFeedbackArgs::class.java)
+        } catch (e: Exception) {
+            invoke.reject("参数解析失败: ${e.message}")
+            return
+        }
+
+        val type = args.type ?: "view"
+        val effect = args.effect ?: "keyboard_tap"
+        val durationMs = (args.durationMs ?: 20L).coerceIn(1L, 5000L)
+        val amplitude = args.amplitude ?: -1
+
+        val result = JSObject()
+        result.put("type", type)
+        result.put("effect", effect)
+
+        try {
+            when (type) {
+                "view" -> {
+                    val constant = when (effect.lowercase(Locale.ROOT)) {
+                        "keyboard_tap" -> HapticFeedbackConstants.KEYBOARD_TAP
+                        "virtual_key" -> HapticFeedbackConstants.VIRTUAL_KEY
+                        "clock_tick" -> HapticFeedbackConstants.CLOCK_TICK
+                        "context_click" -> {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) HapticFeedbackConstants.CONTEXT_CLICK else HapticFeedbackConstants.LONG_PRESS
+                        }
+                        "confirm" -> {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) HapticFeedbackConstants.CONFIRM else HapticFeedbackConstants.VIRTUAL_KEY
+                        }
+                        "reject" -> {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) HapticFeedbackConstants.REJECT else HapticFeedbackConstants.LONG_PRESS
+                        }
+                        "gesture_start" -> {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) HapticFeedbackConstants.GESTURE_START else HapticFeedbackConstants.VIRTUAL_KEY
+                        }
+                        "gesture_end" -> {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) HapticFeedbackConstants.GESTURE_END else HapticFeedbackConstants.VIRTUAL_KEY
+                        }
+                        "long_press" -> HapticFeedbackConstants.LONG_PRESS
+                        else -> HapticFeedbackConstants.KEYBOARD_TAP
+                    }
+
+                    activity.runOnUiThread {
+                        if (isDestroying.get()) return@runOnUiThread
+                        val view = activity.window.decorView
+                        val flags = HapticFeedbackConstants.FLAG_IGNORE_GLOBAL_SETTING or HapticFeedbackConstants.FLAG_IGNORE_VIEW_SETTING
+                        val performed = view.performHapticFeedback(constant, flags)
+                        result.put("performed", performed)
+                        result.put("constant", constant)
+                        invoke.resolve(result)
+                    }
+                    return
+                }
+                "predefined" -> {
+                    val vibrator = getSystemServiceVibrator()
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        val effectId = when (effect.lowercase(Locale.ROOT)) {
+                            "tick" -> VibrationEffect.EFFECT_TICK
+                            "click" -> VibrationEffect.EFFECT_CLICK
+                            "heavy_click" -> VibrationEffect.EFFECT_HEAVY_CLICK
+                            "double_click" -> VibrationEffect.EFFECT_DOUBLE_CLICK
+                            else -> VibrationEffect.EFFECT_TICK
+                        }
+                        val vibrationEffect = VibrationEffect.createPredefined(effectId)
+                        vibrator.vibrate(vibrationEffect)
+                        result.put("performed", true)
+                        result.put("effectId", effectId)
+                    } else {
+                        val duration = if (effect == "tick") 10L else 20L
+                        @Suppress("DEPRECATION")
+                        vibrator.vibrate(duration)
+                        result.put("performed", true)
+                        result.put("fallback", true)
+                    }
+                }
+                "one_shot" -> {
+                    val vibrator = getSystemServiceVibrator()
+                    val hasAmplitudeControl = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        vibrator.hasAmplitudeControl()
+                    } else {
+                        false
+                    }
+                    result.put("hasAmplitudeControl", hasAmplitudeControl)
+
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        val amp = if (amplitude in 1..255) amplitude else VibrationEffect.DEFAULT_AMPLITUDE
+                        val vibrationEffect = VibrationEffect.createOneShot(durationMs, amp)
+                        vibrator.vibrate(vibrationEffect)
+                    } else {
+                        @Suppress("DEPRECATION")
+                        vibrator.vibrate(durationMs)
+                    }
+                    result.put("performed", true)
+                    result.put("durationMs", durationMs)
+                    result.put("amplitude", amplitude)
+                }
+                else -> {
+                    invoke.reject("未知触感类型: $type")
+                    return
+                }
+            }
+            invoke.resolve(result)
+        } catch (e: Exception) {
+            Log.e("VcpMobilePlugin", "triggerHapticFeedback 失败", e)
+            invoke.reject("触发触感失败: ${e.message}")
+        }
+    }
 }
 
 @InvokeArg
@@ -2992,4 +3119,12 @@ class WriteClipboardArgs {
 class SendLocalNotificationArgs {
     lateinit var title: String
     lateinit var body: String
+}
+
+@InvokeArg
+class TriggerHapticFeedbackArgs {
+    var type: String? = "view"
+    var effect: String? = null
+    var durationMs: Long? = 20L
+    var amplitude: Int? = null
 }

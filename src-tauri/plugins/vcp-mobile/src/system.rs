@@ -1956,6 +1956,47 @@ pub fn get_pending_notification<R: Runtime>(
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HapticFeedbackArgs {
+    pub r#type: String,
+    pub effect: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub amplitude: Option<i32>,
+}
+
+#[tauri::command(async)]
+pub fn trigger_haptic_feedback<R: Runtime>(
+    app: AppHandle<R>,
+    payload: HapticFeedbackArgs,
+) -> Result<serde_json::Value, String> {
+    #[cfg(target_os = "android")]
+    {
+        let state = app.state::<VcpMobileState<R>>();
+        let plugin_handle = state.mobile_plugin_handle()?;
+
+        plugin_handle
+            .run_mobile_plugin::<serde_json::Value>(
+                "triggerHapticFeedback",
+                serde_json::to_value(&payload).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| format!("run_mobile_plugin triggerHapticFeedback failed: {}", e))
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let _ = (app, payload);
+        crate::ios_not_implemented("trigger_haptic_feedback")
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = (app, payload);
+        Ok(serde_json::json!({
+            "performed": false,
+            "reason": "host_mock"
+        }))
+    }
+}
+
 #[cfg(test)]
 mod device_result_tests {
     use super::{BatteryStatus, NetworkStatus};

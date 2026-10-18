@@ -31,6 +31,7 @@
     "vcp-mobile:allow-register-shared-files",
     "vcp-mobile:allow-check-root-access",
     "vcp-mobile:allow-launch-root-manager",
-    "vcp-mobile:allow-open-unknown-sources-settings"
+    "vcp-mobile:allow-open-unknown-sources-settings",
+    "vcp-mobile:allow-trigger-haptic-feedback"
   ]
 }

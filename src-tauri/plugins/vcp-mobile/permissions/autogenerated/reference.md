@@ -1245,6 +1245,32 @@ Denies the start_network_monitoring command without any pre-configured scope.
 <tr>
 <td>
 
+`vcp-mobile:allow-trigger-haptic-feedback`
+
+</td>
+<td>
+
+Enables the trigger_haptic_feedback command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:deny-trigger-haptic-feedback`
+
+</td>
+<td>
+
+Denies the trigger_haptic_feedback command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `vcp-mobile:allow-update-download-notification`
 
 </td>
