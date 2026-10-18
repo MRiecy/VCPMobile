@@ -15,7 +15,7 @@ related_files:
 
 # 硬件状态与 Root 访问
 
-> 当前 iOS 设备查询位于 [NativeDevice.swift](../../src-tauri/plugins/vcp-mobile/ios/Sources/NativeDevice.swift)，传感器请求位于 [NativeSensors.swift](../../src-tauri/plugins/vcp-mobile/ios/Sources/NativeSensors.swift)。前者提供 UIDevice/ProcessInfo/Mach 的设备、CPU/内存/热状态，Metal 设备名称及按次 NWPath/接口地址快照；后者持有串行 CoreLocation/CoreMotion 采样。`get_device_snapshot` 是 Rust 内部设备工具入口，不是前端能力查询。无法取得的字段由共享 DTO 的 `unavailable` 说明；下文 EGL、sysfs、ConnectivityManager 与 Root 流程描述 Android 实现，host fixture 不进入 iOS 分支。
+> 当前 iOS 设备查询位于 [NativeDevice.swift](../../src-tauri/plugins/vcp-mobile/ios/Sources/Device/NativeDevice.swift)，传感器请求位于 [NativeSensors.swift](../../src-tauri/plugins/vcp-mobile/ios/Sources/Device/NativeSensors.swift)。前者提供 UIDevice/ProcessInfo/Mach 的设备、CPU/内存/热状态，Metal 设备名称及按次 NWPath/接口地址快照；后者持有串行 CoreLocation/CoreMotion 采样。`get_device_snapshot` 是 Rust 内部设备工具入口，不是前端能力查询。无法取得的字段由共享 DTO 的 `unavailable` 说明；下文 EGL、sysfs、ConnectivityManager 与 Root 流程描述 Android 实现，host fixture 不进入 iOS 分支。
 
 ## 1. 功能概述
 

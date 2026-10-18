@@ -11,6 +11,7 @@ enum NativeFileError: LocalizedError {
 final class NativeFileOperation {
     let id: String
     let invoke: Invoke
+    private(set) weak var scene: UIWindowScene? // bound by begin, independent of later WebView detachment
     private let lock = NSLock()
     private var cancelledValue = false
     var cancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelledValue }
@@ -30,7 +31,9 @@ final class NativeFileOperation {
     var cancellationHandler: (() -> Void)? // main queue, resource-specific shutdown
     var finished = false // main queue only
     var owned: [URL] = [] // worker publishes ownership before returning to main
-    init(id: String, invoke: Invoke) { self.id = id; self.invoke = invoke }
+    init(id: String, invoke: Invoke, scene: UIWindowScene? = nil) {
+        self.id = id; self.invoke = invoke; self.scene = scene
+    }
     func cancel() { lock.lock(); cancelledValue = true; let progress = progressValue; lock.unlock(); progress?.cancel() }
     func check() throws { if cancelled { throw NativeFileError.failure("cancelled: file operation") } }
 }
@@ -77,7 +80,7 @@ final class NativePresentation: NSObject {
             ) { [weak self] notification in
                 guard let self = self, let scene = notification.object as? UIScene else { return }
                 if self.reservation?.scene === scene { self.reservation = nil }
-                if self.webView?.window?.windowScene === scene, let operation = self.current {
+                if let operation = self.current, operation.scene === scene {
                     self.cancel(operation.id)
                 }
             }
@@ -113,8 +116,8 @@ final class NativePresentation: NSObject {
     func begin(_ id: String, _ invoke: Invoke) throws -> NativeFileOperation {
         dispatchPrecondition(condition: .onQueue(.main))
         guard current == nil, reservation == nil else { throw NativeFileError.failure("busy: another native file operation is active") }
-        guard webView?.window?.windowScene != nil else { throw NativeFileError.failure("presentation_unavailable: no attached Scene") }
-        let operation = NativeFileOperation(id: id, invoke: invoke)
+        guard let scene = webView?.window?.windowScene else { throw NativeFileError.failure("presentation_unavailable: no attached Scene") }
+        let operation = NativeFileOperation(id: id, invoke: invoke, scene: scene)
         current = operation
         return operation
     }
@@ -131,8 +134,10 @@ final class NativePresentation: NSObject {
     }
 
     func present(_ controller: UIViewController, for operation: NativeFileOperation) throws {
+        dispatchPrecondition(condition: .onQueue(.main))
         try operation.check()
         guard current === operation, let window = webView?.window,
+              let scene = operation.scene, window.windowScene === scene,
               var presenter = window.rootViewController else {
             throw NativeFileError.failure("presentation_unavailable: Scene was detached")
         }

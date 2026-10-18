@@ -22,7 +22,7 @@ g1 = load("g1", "g1.py")
 
 class EngineeringFileTests(unittest.TestCase):
     def test_overlay_replays_without_changing_cli_spec_or_duplicating_resources(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as temporary:
             project = Path(temporary) / "apple"
             project.mkdir()
             source = "name: vcp-mobile\ntargets:\n  vcp-mobile_iOS:\n    platform: iOS\n"
@@ -38,8 +38,31 @@ class EngineeringFileTests(unittest.TestCase):
             self.assertEqual(len(overlay["targets"]["vcp-mobile_iOS"]["sources"]), 1)
             self.assertEqual(g1.digest(project / "VCPResources" / "PrivacyInfo.xcprivacy"), g1.digest(g1.IOS / "PrivacyInfo.xcprivacy"))
 
+    def test_overlay_copies_share_sources_into_the_extension_only(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as temporary:
+            project = Path(temporary) / "apple"
+            project.mkdir()
+            (project / "project.yml").write_text("name: vcp-mobile\n", encoding="utf-8")
+            with patch.object(g1, "APPLE", project):
+                overlay = json.loads(g1.overlay(project).read_text(encoding="utf-8"))
+            extension = overlay["targets"]["VCPShare"]
+            source_files = {source.name: source for source in (g1.IOS / "share").rglob("*.swift")}
+            compiled_paths = [entry["path"] for entry in extension["sources"] if entry["path"].endswith(".swift")]
+            self.assertEqual(set(compiled_paths), {f"VCPShare/{name}" for name in source_files})
+            self.assertEqual(len(compiled_paths), len(source_files))
+            for source_path in compiled_paths:
+                generated = project / source_path
+                self.assertTrue(generated.is_file())
+                self.assertEqual(g1.digest(generated), g1.digest(source_files[generated.name]))
+            main = overlay["targets"]["vcp-mobile_iOS"]
+            self.assertTrue(set(compiled_paths).isdisjoint(entry["path"] for entry in main["sources"]))
+            self.assertEqual(main["dependencies"], [{"target": "VCPShare", "embed": True}])
+            self.assertEqual(extension["type"], "app-extension")
+            self.assertEqual(extension.get("dependencies", []), [])
+            self.assertEqual(extension["settings"]["base"]["APPLICATION_EXTENSION_API_ONLY"], "YES")
+
     def test_overlay_rejects_outside_generated_tree(self):
-        with tempfile.TemporaryDirectory() as temporary:
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as temporary:
             with patch.object(g1, "APPLE", Path(temporary) / "apple"):
                 with self.assertRaisesRegex(RuntimeError, "must stay in gen/apple"):
                     g1.overlay(temporary)

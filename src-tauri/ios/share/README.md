@@ -1,6 +1,12 @@
 # Share Extension 工程与交接输入
 
-`g1.py overlay` 将本目录复制至生成树的 `VCPShare/`，添加独立 iOS 26.0 `app-extension` target，并由主 target 以 embed dependency 嵌入 `PlugIns/VCPShare.appex`。扩展只编译 `ShareViewController.swift`，不链接 Tauri 主插件；`APPLICATION_EXTENSION_API_ONLY=YES`。版本读取当前 Tauri 配置，默认 `CFBundleVersion` 与产品版本一致。
+`g1.py overlay` 将本目录顶层的实际 Swift 源码和配套声明复制至生成树的 `VCPShare/`，添加独立 iOS 26.0 `app-extension` target，并由主 target 以 embed dependency 嵌入 `PlugIns/VCPShare.appex`。复制与编译使用同一份源码清单，不链接 Tauri 主插件；`APPLICATION_EXTENSION_API_ONLY=YES`。版本读取当前 Tauri 配置，默认 `CFBundleVersion` 与产品版本一致。
+
+- `ShareViewController.swift`：原生界面、系统输入与 `extensionContext` 完成/取消回传。
+- `ShareAcquisition.swift`：provider 获取、有界复制、取消、在途读取排空与唯一终态裁决；异步工作持有自身，UI 回调弱引用控制器。
+- `ShareInboxStorage.swift`：delivery 身份、槽锁、文件租约及原子清单写入；不持有另一套业务终态。
+
+成功、错误和取消先进入同一个终态入口，读取排空后才领取提交权。此前的取消优先；提交开始后的迟到取消不再覆写 `ready`，也不提前结束扩展。提交失败仍发布失败结果，写入收尾后释放租约。状态锁只保护短状态裁决，不跨 `flock`、文件写入或 `fsync`。
 
 扩展自己的 `PrivacyInfo.xcprivacy` 随 target 复制，磁盘容量调用仅用于复制前/期间检查可写空间，声明 `NSPrivacyAccessedAPICategoryDiskSpace / E174.1`。
 

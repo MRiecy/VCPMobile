@@ -8,6 +8,25 @@
 
 附件复审后，用户进一步批准 Android 音频改用 Media3、优化现有视频抽帧，iOS 使用原生接口补齐音视频，图片保持现状；同时修正媒体格式与失败反馈。范围、协议及源码复审记录见 [05-双端音视频附件处理](./05-双端音视频附件处理.md)。录音/语音输入仍未纳入。
 
+## 2026-10-18：iOS 原生职责整理与复审
+
+基线为 `83a77c5a`。用户批准保留主插件单一 SwiftPM target 和独立 Share Extension，先修取消/终态，再按功能归目录。当前源码导航见 [插件局部索引](../../../src-tauri/plugins/vcp-mobile/AGENTS.md) 和 [插件总览](../../../docs/plugins/00_总览与导航.md)。
+
+- 主插件按 Lifecycle、Files、Media、Device、WebView、Notifications、Background、Sharing、Clipboard、Haptics 组织；根入口 322 → 50 行。事件订阅整体提取，保留单一长期 Channel、进程序列和替换 generation；36 个命令 selector 的名称与签名保持。
+- Files 分离选择、对外交付、流式 IO 和真实共享结果类型。普通 Files 与配置备份共用可取消协调；呈现操作保存初始弱 Scene 身份，断开清理不再依赖当时的 WebView window。系统读取中的文件继续等真实终态释放。
+- Share Extension 分为 UI、获取与槽位存储。获取 owner 统一裁决成功/失败/取消，provider 读取排空后才提交终态并释放 lease；成功提交不会被迟到取消覆写。复审补齐扩展内部协调等待的取消，provider Progress 与 NSFileCoordinator 分别持有，锁外执行取消。
+- 独立网络查询与恢复遮罩按职责提取；相机、图片、音视频、传感器、通知和后台资源状态机保持原 owner。扩展工程输入从实际 Swift 文件收集同一份复制/编译清单，主应用只嵌入扩展。
+
+主代理和四位子代理完成交叉源码复审，覆盖 selector/DTO、Swift 访问范围、Channel/观察者、Scene 断开、provider 借用 URL、媒体结果交付、后台租约、跨进程文件锁与 lease。没有修改 Rust/Vue 协议、SwiftPM target、部署版本、系统权限或 workflow。
+
+| 验证 | 本轮结果与范围 |
+|---|---|
+| `pnpm check` | 通过；Vue/TypeScript 与 host Rust 静态检查，不编译 Swift |
+| `cargo test --locked -p tauri-plugin-vcp-mobile --lib` | 5 项通过；覆盖原生 receiver 保活、故障快照及文件边界，属于 host 执行证据 |
+| `python -B src-tauri/ios/scripts/test_g1.py` | 7 项通过；验证实际扩展源码复制、编译清单、目标隔离及诊断输出，不调用 Apple 构建 |
+| 差异与入口核对 | 差异检查通过；36 个原生命令入口完整唯一，功能迁移未增加 SwiftPM target |
+| Apple/iOS | 本轮未取得编译、链接或原生运行证据；固定工具链的 G1 及 Phase 6 集成/打包仍待执行 |
+
 ## 输入
 
 Phase 2 native 接入、Phase 3 attempt/terminal/settle 契约；与 Phase 4 可按依赖并行。

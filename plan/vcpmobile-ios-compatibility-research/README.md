@@ -1,10 +1,12 @@
 # VCPMobile iOS 兼容适配专项研究
 
-> 修订：2026-10-17。最初研究基线：`4c6e25bb`；Phase 3 从 `8207ec70` 实施，本轮统一修复从 `16558bb0` 开始。历史执行结果保留其原基线。
+> 修订：2026-10-18。最初研究基线：`4c6e25bb`；Phase 3 从 `8207ec70` 实施，兼容统一修复从 `16558bb0` 开始；本次 iOS 原生职责整理基线为 `83a77c5a`。历史执行结果保留其原基线。
 >
 > 目标：同一 Vue/Rust 核心的 iPhone/iPad 实验性客户端；开发采用源码与编译语义推演，产物供用户自行签名。
 
 ## 分期实施工作区（2026-10-08 启动）
+
+2026-10-18：完成主插件单 SwiftPM target 内的功能目录整理、文件/事件等必要拆分，以及独立 Share Extension 的 UI/获取/存储拆分。修复 Files/扩展协调取消、分享成功与取消的终态竞态及面板 Scene 清理身份；已完成交叉源码复审、`pnpm check`、5 项插件 host 测试和 7 项本地工程脚本测试。范围与证据见 [Phase 5 本轮记录](./phase-5/README.md#2026-10-18ios-原生职责整理与复审)。这些结果不替代 Apple 编译/链接，G1 复验和 Phase 6 打包仍待执行。
 
 2026-10-17：用户批准六项兼容复审修复，并选择 iOS SSE 原生循环静音音频的尽力保活，接受系统中断；常亮维持同步和预渲染刷新两类场景。源码实施及边界见 [Phase 5 收口记录](./phase-5/03-兼容复审修复与iOS尽力保活.md)。本轮按用户要求不执行检查、测试或构建，后续再安排验证和 Phase 6 打包。
 
@@ -21,7 +23,7 @@
 | [Phase 2](./phase-2/README.md) | Swift/Channel/生命周期与可重放工程已接入；历史源码和后续旧提交归档证据分别记录 |
 | [Phase 3](./phase-3/README.md) | 本轮 Chat/Sync/LAN、共同通知权限、本地通知与设备/网络/Distributed 实施、独立复审和验证记录 |
 | [Phase 4](./phase-4/README.md) | 原生文件媒体、拍照/相册、双向分享、WebKit 已接入；本轮补路径、缓存和交互遗漏，Apple 目标验证待执行 |
-| [Phase 5](./phase-5/README.md) | 共享 SSE 收尾、iOS 静音音频尽力保活及任务常亮；本轮验证延后 |
+| [Phase 5](./phase-5/README.md) | 共享 SSE 收尾、iOS 音频/常亮与原生职责整理；已记录本地检查，Apple 验证待执行 |
 | [Phase 6](./phase-6/README.md) | G2 集中验收与用户自签产物 |
 
 Phase 0 已同步 [移动端 UI 规范](../../docs/MOBILE_UI_COMPATIBILITY.md)；2026-10-09 用户明确将最低 iOS/iPadOS 提高到 26.0，`tauri.ios.conf.json` 与 Swift package 同步采用该目标，固定 Xcode 26.2 后仍待构建复验。原 15.0 是 Phase 0–2 历史基线。[跨平台开发规范](../../docs/CROSS_PLATFORM_DEVELOPMENT.md)规定共享 Vue 中直接使用运行时平台分支，不再要求统一能力状态表或逐层复制功能门禁。

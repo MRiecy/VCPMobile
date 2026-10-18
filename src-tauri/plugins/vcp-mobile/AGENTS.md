@@ -29,22 +29,24 @@ Rust 核心内部调用 ─> Rust 公开入口 ─┼─> PluginHandle / JNI
 | `src/lib.rs` | 组合插件、注册前端可调用命令、注入 `VcpMobileState` |
 | `src/events.rs` | Rust 原生 Channel 订阅、生命周期/网络事件类型、后台服务失败通知与快照收集；真实 Events 注册失败保留至进程结束，Guardian/Helper 取走 |
 | `src/ios.rs` | Swift 调用与事件注册；原生 receiver 持有至最终结果。授权等长等待和工具查询由调用者移入 blocking worker，事件订阅使用独立异步接收任务 |
-| `ios/Package.swift`、`ios/Sources/VcpMobilePlugin.swift` | Swift product/初始化符号、主队列 app/Scene 观察与 NWPathMonitor；不拥有业务状态 |
-| `ios/Sources/NativeNotifications.swift`、`NativeNotificationSceneBridge.swift` | 真实通知授权、发送、前台展示和点击快照；在插件初始化时接入锁定 Tao Scene 入口并完整转发原窗口实现 |
-| `ios/Sources/NativeDevice.swift`、`NativeSensors.swift` | 设备/电量/空间/网络快照、单 owner 有界传感器采样；缺失字段保留原因，退后台停止采样 |
-| `ios/Sources/NativeClipboard.swift` | 前台系统剪贴板读写，UIKit 操作在主队列执行 |
-| `ios/Sources/NativeBackgroundExecution.swift` | 进程级任务租约；Stream 尽力静音音频、Sync/Prerender 前台常亮，音频中断不产生业务终态 |
-| `ios/Sources/NativePresentation.swift`、`NativeFiles.swift` | 主 Scene 单操作呈现；picker 按调用 WebView/Scene 先登记 reservation 再启动，取消可撤销未启动登记；Files/PHPicker、Quick Look、导出与活动面板的文件持有至原生终态 |
-| `ios/Sources/NativeConfigBackupDirectory.swift` | 配置备份目录 bookmark、授权生命周期、VCPMobile 子目录和协调读写；仅配置导入导出复用，普通文件导出仍由原生保存面板处理 |
-| `ios/Sources/NativeHaptics.swift` | 主队列 UIKit 消息触感与显式试听；返回 API 提交结果，不宣称硬件实际播放 |
-| `ios/Sources/NativeImages.swift`、`NativeCamera.swift` | 串行 ImageIO 下采样、SDR 派生与真实编码，PhotoKit add-only、AVCapturePhotoOutput 有界静态拍照 |
+| `ios/Package.swift`、`ios/Sources/VcpMobilePlugin.swift` | 单一 SwiftPM target、初始化符号、同步通知安装和 WebView attach 的组合入口 |
+| `ios/Sources/Lifecycle/NativeEventSubscription.swift` | 唯一长期 Channel、主队列 App/Scene 观察、NWPathMonitor、进程序列和订阅 generation；不拥有业务状态 |
+| `ios/Sources/Notifications/NativeNotifications.swift`、`NativeNotificationSceneBridge.swift` | 真实通知授权、发送、前台展示和点击快照；在插件初始化时接入锁定 Tao Scene 入口并完整转发原窗口实现 |
+| `ios/Sources/Device/` | 设备/电量/空间快照、按次网络查询和单 owner 有界传感器采样；缺失字段保留原因，退后台停止采样 |
+| `ios/Sources/Clipboard/NativeClipboard.swift` | 前台系统剪贴板读写，UIKit 操作在主队列执行 |
+| `ios/Sources/Background/NativeBackgroundExecution.swift` | 进程级任务租约；Stream 尽力静音音频、Sync/Prerender 前台常亮，音频中断不产生业务终态 |
+| `ios/Sources/Files/` | `NativePresentation` 持有单操作、reservation 和所属 Scene；`NativeFilePicker` 获取文件，`NativeOutgoingFiles` 管预览/分享/导出；`NativeFileIO` 持有有界复制和可取消协调，结果类型只在实际消费者间共享 |
+| `ios/Sources/Files/NativeConfigBackupDirectory.swift` | 配置备份目录 bookmark、授权生命周期、VCPMobile 子目录和协调读写；仅配置导入导出复用，普通文件导出仍由原生保存面板处理 |
+| `ios/Sources/Haptics/NativeHaptics.swift` | 主队列 UIKit 消息触感与显式试听；返回 API 提交结果，不宣称硬件实际播放 |
+| `ios/Sources/Media/NativeImages.swift`、`NativeCamera.swift` | 串行 ImageIO 下采样、SDR 派生与真实编码，PhotoKit add-only、AVCapturePhotoOutput 有界静态拍照 |
 | `android/src/main/.../media/NativeFileImages.kt` | 按用途预算下采样、EXIF 方向和 JPEG/PNG 编码；外部输入保持原件，头像工作副本单独派生 |
-| `android/src/main/.../media/NativeMediaProcessor.kt`、`ios/Sources/NativeMedia.swift` | 音视频文件处理资源；先登记再执行，取消排队或运行中的解码，结果按路径及真实格式交回 Rust。Android Media3 / iOS AVAudioConverter 音频、系统视频抽帧；不持有聊天终态或改动音频播放会话 |
-| `ios/Sources/NativeWebKit.swift`、`NativeShareInbox.swift` | WebView 几何/浏览缓存操作，及主 App 的 App Group 收件位置桥接 |
+| `android/src/main/.../media/NativeMediaProcessor.kt`、`ios/Sources/Media/NativeMedia.swift` | 音视频文件处理资源；先登记再执行，取消排队或运行中的解码，结果按路径及真实格式交回 Rust。Android Media3 / iOS AVAudioConverter 音频、系统视频抽帧；不持有聊天终态或改动音频播放会话 |
+| `ios/Sources/WebView/` | WebView 几何/浏览缓存、单 owner 视觉恢复和独立的 `ResumeCover` 呈现 |
+| `ios/Sources/Sharing/NativeShareInbox.swift` | 主 App 的 App Group 收件位置及变更提示桥接；分享业务状态归 Rust |
 | `src/screen.rs` | 经 WebView JNI 进入 `ScreenKeepOnArbiter` |
 | `src/stream.rs` | 请求独立的前台保活租约与 helper service 的 Rust 边界 |
 | `src/system.rs` | 承接权限、文件、设备状态、更新与系统能力调用 |
-| `src/webview.rs`、`android/src/main/.../webview/NativeWebViewResume.kt`、`ios/Sources/NativeWebViewResume.swift` | 双端视觉恢复握手；原生持有单份旧画面遮罩并等待绘制提交，Vue 只确认当前文档布局就绪，不改变业务生命周期或主题底色 |
+| `src/webview.rs`、`android/src/main/.../webview/NativeWebViewResume.kt`、`ios/Sources/WebView/NativeWebViewResume.swift` | 双端视觉恢复握手；原生持有单份旧画面遮罩并等待绘制提交，Vue 只确认当前文档布局就绪，不改变业务生命周期或主题底色 |
 | `src/cli.rs` | 承接 Rust 核心到 Android CLI process / PTY 的异步桥接 |
 | `android/src/main/.../VcpMobilePlugin.kt` | Kotlin 命令入口与插件 attach/destroy 编排 |
 | `android/src/main/.../{service,cli}/` 与各 Manager | 执行独立的原生生命周期、后台服务和平台操作 |
@@ -58,6 +60,14 @@ Android 保留单一 Gradle 插件模块，`com.vcp.mobile` 内按真实职责�
 `@Command`、`@ActivityCallback`、`@PermissionCallback` 留在插件的薄入口，组合对象不由 Tauri 自动扫描。参数类随功能共置。操作的权限等待、取消、终态与清理属于同一资源所有者，不能因分包复制状态或建立通用任务总线。原生 Channel 与 WebView CustomEvent 保持各自实际消费者。
 
 当前所有权与迁移约束见 [Android 功能分包与资源所有权](../../../docs/plugins/13_Android功能分包与资源所有权.md)。浮窗和旧 `processImage/MediaBridge` 路径已移除；共享主应用的 Intent 接收、图片派生与媒体处理继续使用各自活动入口。
+
+### 1.4 iOS 功能目录与扩展边界
+
+主插件保留单一 SwiftPM product/target，`Sources/` 下按 `Lifecycle/`、`Files/`、`Media/`、`Device/`、`WebView/`、`Notifications/`、`Background/`、`Sharing/`、`Clipboard/`、`Haptics/` 组织。目录只提供职责导航；封装仍由类型和访问级别表达。功能文件中的 `VcpMobilePlugin` extension 保留 `@objc` selector，普通资源对象不直接成为 Tauri 命令入口。各命令参数随入口保持私有，仅真实共享结果类型使用 target 内部可见性。
+
+`NativeEventSubscription` 整体持有 Channel、观察者、网络监听及 generation，进程序列不会随 WebView attach 重置。文件选择、相机和导出共用一个呈现 owner；操作保存初始 Scene 身份，取消仍等待系统读写的真实终态。媒体预约、取消和交付继续归 `NativeMedia`，后台音频及常亮继续归进程级租约 owner。
+
+独立 Share Extension 位于应用的 `src-tauri/ios/share/`，不链接主插件。`ShareViewController` 处理 UI，`ShareAcquisition` 统一获取/取消/终态，`ShareInboxStorage` 持有槽锁、文件租约和清单。新增扩展源码必须进入 `src-tauri/ios/scripts/g1.py` 的可重放工程输入；获取与写入收尾后才结束扩展，CAS、草稿、消息仍归 Rust。
 
 ---
 
@@ -95,4 +105,4 @@ Swift 接入时同步核对 `ios_path`、SwiftPM product、初始化 binding、s
 
 两平台真实 Events 注册失败没有进程内重试入口，由 `ServiceFailureNotices` 留存并经 `collect_service_failure_notices` 重放给新 WebView；Guardian/Helper 仍按原语义取走。当前 WebView 的一次告知由前端通知 Store 管理。真正订阅失败需完全关闭应用后重新打开；未来增加注册恢复成功路径时，必须同步调整故障留存期限。
 
-**完成**：实际消费者、Rust 边界、Kotlin 所有者、平台声明及返回通道保持一致，并分别说明已取得的 host、Android 构建或设备证据。
+**完成**：实际消费者、Rust 边界、原生资源所有者、平台声明及返回通道保持一致，并分别说明已取得的 host、Android、Apple 构建或原生运行证据。

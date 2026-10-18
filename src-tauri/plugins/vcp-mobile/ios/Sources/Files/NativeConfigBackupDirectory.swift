@@ -16,7 +16,8 @@ enum NativeConfigBackupDirectory {
             guard parent.startAccessingSecurityScopedResource() else { throw DirectoryError.chooseAgain }
             self.parent = parent
             do {
-                self.directory = try NativeConfigBackupDirectory.coordinated(parent, writing: create, operation: operation) { coordinatedParent in
+                self.directory = try NativeFileIO.coordinated(parent, writing: create, operation: operation,
+                                                              missingResult: "file_provider: directory coordination failed") { coordinatedParent in
                     try operation.check()
                     guard try coordinatedParent.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else {
                         throw DirectoryError.chooseAgain
@@ -176,7 +177,8 @@ enum NativeConfigBackupDirectory {
                           let data = Data(base64Encoded: contentBase64), !data.isEmpty, data.count <= 1024 * 1024 else {
                         throw NativeFileError.failure("invalid_export: 配置备份无效或超过 1 MiB")
                     }
-                    return try coordinated(access.directory, writing: true, operation: operation) { directory in
+                    return try NativeFileIO.coordinated(access.directory, writing: true, operation: operation,
+                                                       missingResult: "file_provider: directory coordination failed") { directory in
                         try operation.check()
                         let name = NativeFileIO.leaf(fileName)
                         let suffix = name.hasSuffix(".vcpcfg.json") ? ".vcpcfg.json" : "." + URL(fileURLWithPath: name).pathExtension
@@ -214,26 +216,4 @@ enum NativeConfigBackupDirectory {
         }
     }
 
-    private static func coordinated<T>(_ url: URL, writing: Bool, operation: NativeFileOperation, body: (URL) throws -> T) throws -> T {
-        let coordinator = NSFileCoordinator()
-        let progress = Progress(totalUnitCount: 1)
-        progress.cancellationHandler = { coordinator.cancel() }
-        operation.progress = progress
-        defer { operation.progress = nil }
-        var coordinationError: NSError?
-        var result: Result<T, Error>?
-        if writing {
-            coordinator.coordinate(writingItemAt: url, options: .forMerging, error: &coordinationError) { coordinatedURL in
-                result = Result { try body(coordinatedURL) }
-            }
-        } else {
-            coordinator.coordinate(readingItemAt: url, options: .withoutChanges, error: &coordinationError) { coordinatedURL in
-                result = Result { try body(coordinatedURL) }
-            }
-        }
-        if let result = result { return try result.get() }
-        try operation.check()
-        if let coordinationError = coordinationError { throw coordinationError }
-        throw NativeFileError.failure("file_provider: directory coordination failed")
-    }
 }

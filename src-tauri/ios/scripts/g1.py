@@ -188,7 +188,11 @@ def overlay(project_dir=APPLE):
     write_json(icon_dir / "Contents.json", {"images": entries, "info": {"version": 1, "author": "xcode"}})
     share_dir = project_dir / "VCPShare"
     share_dir.mkdir(parents=True, exist_ok=True)
-    for filename in ("ShareViewController.swift", "Info.plist", "AppGroups.entitlements", "PrivacyInfo.xcprivacy"):
+    share_sources = sorted((IOS / "share").glob("*.swift"))
+    require(any(source.name == "ShareViewController.swift" for source in share_sources), "Share Extension entry source is missing")
+    for source in share_sources:
+        shutil.copyfile(source, share_dir / source.name)
+    for filename in ("Info.plist", "AppGroups.entitlements", "PrivacyInfo.xcprivacy"):
         shutil.copyfile(IOS / "share" / filename, share_dir / filename)
     app_config = json.loads((ROOT / "tauri.conf.json").read_text(encoding="utf-8"))
     ios_config = json.loads((ROOT / "tauri.ios.conf.json").read_text(encoding="utf-8"))
@@ -208,7 +212,8 @@ def overlay(project_dir=APPLE):
             }, "configs": {"debug": {"DEBUG_INFORMATION_FORMAT": "dwarf-with-dsym", "STRIP_INSTALLED_PRODUCT": "NO"}}},
         }, "VCPShare": {
             "type": "app-extension", "platform": "iOS", "deploymentTarget": ios_config["bundle"]["iOS"]["minimumSystemVersion"],
-            "sources": [{"path": "VCPShare/ShareViewController.swift"}, {"path": "VCPShare/PrivacyInfo.xcprivacy", "buildPhase": "resources"}],
+            "sources": [{"path": f"VCPShare/{source.name}"} for source in share_sources]
+                + [{"path": "VCPShare/PrivacyInfo.xcprivacy", "buildPhase": "resources"}],
             "settings": {"base": {
                 "PRODUCT_BUNDLE_IDENTIFIER": "com.vcp.avatar.share",
                 "INFOPLIST_FILE": "VCPShare/Info.plist",
