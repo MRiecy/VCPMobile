@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, nextTick, computed, onMounted, onUnmounted } from 'vue';
+import { ref, watch, nextTick, computed, onMounted, onUnmounted, useId } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { useChatHistoryStore } from '../../core/stores/chatHistoryStore';
 import { useChatSessionStore } from '../../core/stores/chatSessionStore';
@@ -12,6 +12,7 @@ import { isAndroid, isIOS } from '../../core/utils/platform';
 import { useLongTextPaste } from './composables/useLongTextPaste';
 import { useSpeechRecognition } from '../../core/composables/useSpeechRecognition';
 import { useAudioRecorder } from '../../core/composables/useAudioRecorder';
+import { useModalHistory } from '../../core/composables/useModalHistory';
 import { attachMenuOpen, toggleAttachMenu } from './attachMenuController';
 import StagedAttachmentPreview from './StagedAttachmentPreview.vue';
 import GroupStopAllButton from './components/GroupStopAllButton.vue';
@@ -51,6 +52,40 @@ const streamStore = useChatStreamStore();
 const attachmentStore = useAttachmentStore();
 const notificationStore = useNotificationStore();
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
+const rootRef = ref<HTMLElement | null>(null);
+const isExpanded = ref(false);
+const canExpand = ref(false);
+const collapsedHeight = ref(0);
+const expandedModalId = `ChatInputExpanded-${useId()}`;
+const { registerModal, unregisterModal } = useModalHistory();
+
+const collapseEditor = () => {
+  if (!isExpanded.value) return;
+  isExpanded.value = false;
+  unregisterModal(expandedModalId);
+};
+
+const toggleEditor = () => {
+  if (isExpanded.value) {
+    collapseEditor();
+  } else if (canExpand.value && !props.disabled) {
+    collapsedHeight.value = rootRef.value?.offsetHeight ?? 0;
+    attachMenuOpen.value = false;
+    isExpanded.value = true;
+    registerModal(expandedModalId, collapseEditor, () => rootRef.value);
+  }
+};
+
+const handleAttachToggle = () => {
+  // 附件选择沿原输入区展开，避免 112px 菜单挤掉键盘上方的编辑/发送区域。
+  collapseEditor();
+  toggleAttachMenu();
+};
+
+watch(() => props.disabled, (disabled) => {
+  if (disabled) collapseEditor();
+});
+watch(() => sessionStore.currentConversationKey?.epoch, collapseEditor);
 
 // ----------------------------------------------------
 // 语音模块：实时识别 (STT) 与 录音附件 Hook 联动
@@ -97,6 +132,7 @@ const handleVoiceClick = () => {
 // 切换语音模式与普通文本模式
 const toggleAudioMode = () => {
   if (props.disabled || !isAndroid) return;
+  collapseEditor();
   
   attachMenuOpen.value = false;
   
@@ -230,6 +266,7 @@ const handleIconTouchStart = (e: TouchEvent) => {
   touchStartY = e.touches[0].clientY;
 
   iconLongPressTimeout = window.setTimeout(async () => {
+    collapseEditor();
     isIconLongPress = true;
     isLongPressRecording.value = true;
     try {
@@ -359,18 +396,32 @@ const handleFocus = () => {
 const autoResize = () => {
   const el = textareaRef.value;
   if (!el) return;
+  // 展开时由 flex/grid 分配可用空间，不能把满高编辑区当作内容行数。
+  if (isExpanded.value) {
+    el.style.height = '';
+    syncHighlightScroll();
+    return;
+  }
   // 空内容时恢复默认单行高度：多行 placeholder 会在部分 WebView 中撑大
   // scrollHeight，删除文字后留下"幻影换行"
   if (!input.value) {
     el.style.height = '';
+    canExpand.value = false;
     return;
   }
+  const scrollTop = el.scrollTop;
   el.style.height = 'auto'; // Reset height
   const scrollHeight = el.scrollHeight;
+  const metrics = getComputedStyle(el);
+  const lineHeight = parseFloat(metrics.lineHeight);
+  const padding = parseFloat(metrics.paddingTop) + parseFloat(metrics.paddingBottom);
+  // 包括软换行；留 1px 容差给 WebView 对 scrollHeight 的整数取整。
+  canExpand.value = scrollHeight - padding > lineHeight * 4 + 1;
   el.style.height = `${scrollHeight}px`;
+  el.scrollTop = scrollTop;
 };
 
-watch(input, () => {
+watch([input, isExpanded], () => {
   nextTick(() => {
     autoResize();
     syncHighlightScroll();
@@ -429,6 +480,7 @@ watch([input, () => attachmentStore.stagedAttachments], () => {
 
 const handleSend = async () => {
   if (canSend.value) {
+    collapseEditor();
     if (shareStore.activeDraft) {
       await historyStore.sendMessage(input.value);
     } else {
@@ -519,6 +571,33 @@ const syncHighlightScroll = () => {
   }
 };
 
+// textarea 没有 DOM caret rect；仅在尺寸改变时测量当前选区端点，
+// 不重设选区、不重新 focus，也不打断输入法。普通输入仍交给浏览器滚动。
+const revealCursorAfterResize = () => {
+  const el = textareaRef.value;
+  if (!el || document.activeElement !== el || isComposing.value || !el.value) return;
+  const metrics = getComputedStyle(el);
+  const mirror = document.createElement('div');
+  mirror.style.cssText = `position:fixed;top:0;left:0;visibility:hidden;pointer-events:none;box-sizing:border-box;width:${el.clientWidth}px;`;
+  for (const property of ['font-family', 'font-size', 'font-weight', 'font-style', 'line-height', 'letter-spacing',
+    'white-space', 'word-break', 'overflow-wrap', 'tab-size', 'text-indent',
+    'padding-top', 'padding-right', 'padding-bottom', 'padding-left']) {
+    mirror.style.setProperty(property, metrics.getPropertyValue(property));
+  }
+  const cursor = el.selectionDirection === 'backward' ? el.selectionStart : el.selectionEnd;
+  mirror.textContent = el.value.slice(0, cursor);
+  const marker = document.createElement('span');
+  marker.textContent = el.value.slice(cursor) || '\u200b';
+  mirror.append(marker);
+  document.body.append(mirror);
+  const top = marker.getBoundingClientRect().top - mirror.getBoundingClientRect().top;
+  const bottom = top + parseFloat(metrics.lineHeight) + parseFloat(metrics.paddingBottom);
+  mirror.remove();
+  if (top < el.scrollTop) el.scrollTop = Math.max(0, top - parseFloat(metrics.paddingTop));
+  else if (bottom > el.scrollTop + el.clientHeight) el.scrollTop = bottom - el.clientHeight;
+  syncHighlightScroll();
+};
+
 const syncMentionCursor = (e: Event) => {
   const el = e.target as HTMLTextAreaElement | null;
   if (el) updateMentionCursor(el.selectionStart ?? el.value.length);
@@ -569,33 +648,76 @@ const removeStagedAttachment = (index: number) => {
   attachmentStore.removeStaged(index);
 };
 
-const rootRef = ref<HTMLElement | null>(null);
-
 const handleClickOutside = (event: MouseEvent) => {
   if (attachMenuOpen.value && rootRef.value && !rootRef.value.contains(event.target as Node)) {
     attachMenuOpen.value = false;
   }
 };
 
+// 观察实际文本宽度，覆盖软换行、侧栏布局、旋转与语音切回文字。
+let textareaObserver: ResizeObserver | null = null;
+let measuredWidth = -1;
+let measuredHeight = -1;
+let measuredLineHeight = '';
+watch(textareaRef, (el, previous) => {
+  if (previous) textareaObserver?.unobserve(previous);
+  measuredWidth = -1;
+  measuredHeight = -1;
+  if (el) {
+    textareaObserver?.observe(el);
+    autoResize();
+  }
+}, { flush: 'post' });
+
 onMounted(() => {
   document.addEventListener('click', handleClickOutside, true);
+  if (typeof ResizeObserver !== 'undefined') {
+    textareaObserver = new ResizeObserver(() => {
+      const el = textareaRef.value;
+      if (!el) return;
+      const width = el.clientWidth;
+      const height = el.clientHeight;
+      const lineHeight = getComputedStyle(el).lineHeight;
+      const geometryChanged = width !== measuredWidth || height !== measuredHeight || lineHeight !== measuredLineHeight;
+      if (width !== measuredWidth || lineHeight !== measuredLineHeight) {
+        measuredWidth = width;
+        measuredLineHeight = lineHeight;
+        autoResize();
+      }
+      measuredHeight = el.clientHeight;
+      if (geometryChanged) revealCursorAfterResize();
+      syncHighlightScroll();
+    });
+    if (textareaRef.value) textareaObserver.observe(textareaRef.value);
+  }
+  autoResize();
 });
 
 onUnmounted(() => {
+  textareaObserver?.disconnect();
+  unregisterModal(expandedModalId);
   document.removeEventListener('click', handleClickOutside, true);
 });
 </script>
 
 <template>
-  <div ref="rootRef" class="px-1 py-1 w-full transition-opacity duration-300 no-swipe relative flex flex-col gap-1.5" :class="{ 'opacity-70 pointer-events-none': disabled }">
-    <!-- 全局群组停止按钮 -->
-    <GroupStopAllButton />
+  <div :style="isExpanded ? { height: `${collapsedHeight}px` } : undefined">
+  <!-- 与编辑区保留在同一 stacking context；不搬动正在组合输入的 textarea。 -->
+  <div v-if="isExpanded" class="vcp-viewport-surface fixed inset-0 z-sheet bg-black/40 no-swipe"
+    aria-hidden="true" @click.stop="collapseEditor" @touchmove.prevent></div>
+  <div ref="rootRef" class="input-enhancer px-1 py-1 w-full transition-opacity duration-300 no-swipe relative flex flex-col gap-1.5"
+    :class="{ 'opacity-70 pointer-events-none': disabled, 'input-expanded vcp-viewport-bottom z-sheet': isExpanded }"
+    :role="isExpanded ? 'dialog' : undefined" :aria-modal="isExpanded ? true : undefined"
+    :aria-label="isExpanded ? '编辑消息' : undefined">
+    <!-- 展开时由底部同一停止操作承接，避免重复按钮悬出编辑外壳。 -->
+    <GroupStopAllButton v-if="!isExpanded" />
 
+    <div class="input-context">
     <!-- 群组邀请发言横条（invite_only 模式） -->
     <GroupInviteBar />
 
     <!-- 暂存附件预览区 -->
-    <div v-if="attachmentStore.stagedAttachments.length > 0" class="flex items-center gap-2 mb-2 px-2 overflow-x-auto pb-1 pt-2">
+    <div v-if="attachmentStore.stagedAttachments.length > 0" class="input-attachments flex items-center gap-2 mb-2 px-2 overflow-x-auto pb-1 pt-2">
       <TransitionGroup name="list">
         <StagedAttachmentPreview 
           v-for="(file, idx) in attachmentStore.stagedAttachments" 
@@ -606,15 +728,26 @@ onUnmounted(() => {
         />
       </TransitionGroup>
     </div>
+    </div>
 
     <!-- 框体主容器 -->
-    <div class="flex items-end gap-2 px-1">
-      <div class="flex-1 flex items-end gap-1.5 bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-2xl px-2 py-1 shadow-sm relative overflow-visible transition-all duration-300"
+    <div class="input-shell flex items-end gap-2 px-1">
+      <div class="input-box flex-1 min-w-0 flex items-end gap-1.5 bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-2xl px-2 py-1 shadow-sm relative overflow-visible"
         :class="{ 
           'ring-1 ring-blue-500/30 border-blue-500/50': isSTTActive || isLongPressRecording, 
           'ring-1 ring-red-500/30 border-red-500/50': isSwipeCancel 
         }"
       >
+        <span v-if="isExpanded" class="input-editor-title text-sm text-[var(--primary-text)] opacity-60">编辑消息</span>
+        <button v-if="(canExpand || isExpanded) && !isAudioMode && !isLongPressRecording"
+          type="button" class="input-expand-toggle absolute right-1 top-1 z-local w-11 h-11 flex items-center justify-center rounded-lg text-[var(--primary-text)] opacity-60 active:opacity-100"
+          :aria-label="isExpanded ? '缩小输入框' : '展开输入框'" :aria-expanded="isExpanded"
+          @pointerdown.prevent @mousedown.prevent @click="toggleEditor">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path v-if="isExpanded" d="M4 9h5V4M9 9 3 3m17 12h-5v5m0-5 6 6" />
+            <path v-else d="M15 3h6v6m0-6-7 7M9 21H3v-6m0 6 7-7" />
+          </svg>
+        </button>
         
         <!-- 左侧：语音/键盘切换及长按附件录制按钮 -->
         <button
@@ -625,7 +758,7 @@ onUnmounted(() => {
           @touchcancel="handleIconTouchCancel"
           @click="handleVoiceClick"
           :aria-label="isIOS ? '语音输入（尚未开发）' : isAudioMode ? '切换文字输入' : '语音输入'"
-          class="w-9 h-9 mb-0.5 flex items-center justify-center shrink-0 rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-[var(--primary-text)] opacity-90 active:scale-90 transition-all relative select-none touch-none"
+          class="input-voice w-9 h-9 mb-0.5 flex items-center justify-center shrink-0 rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-[var(--primary-text)] opacity-90 active:scale-90 transition-all relative select-none touch-none"
           :class="{ 
             'bg-blue-500/10 text-blue-500': isAudioMode || isLongPressRecording,
             'bg-red-500/10 text-red-500': isSwipeCancel && isLongPressRecording
@@ -655,18 +788,18 @@ onUnmounted(() => {
         </button>
 
         <!-- 核心输入/按住说话极简交互区 (极致自然：仅原 textarea 区域变化，右侧按钮完全正常静止显示) -->
-        <div class="flex-1 flex flex-col justify-end relative min-h-[36px] py-[1px] overflow-visible">
+        <div class="input-writing-area flex-1 min-w-0 flex flex-col justify-end relative min-h-[36px] py-[1px] overflow-visible">
 
           <!-- @提及 成员选择浮层（锚定于输入框上方，z-local 局部悬浮） -->
           <Transition name="fade">
             <div
               v-if="mentionOpen"
-              class="absolute bottom-full left-1 right-1 mb-1.5 z-local bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-xl shadow-lg overflow-hidden"
+              class="input-mention-menu absolute bottom-full left-1 right-1 mb-1.5 z-local bg-[var(--secondary-bg)] border border-[var(--border-color)] rounded-xl shadow-lg overflow-hidden"
             >
               <div class="px-3 pt-2 pb-1 text-[10px] font-bold uppercase tracking-wider text-primary-text opacity-40 select-none">
                 提及成员
               </div>
-              <div class="max-h-44 overflow-y-auto pb-1">
+              <div class="min-h-0 max-h-44 overflow-y-auto pb-1">
                 <button
                   v-for="member in mentionFiltered"
                   :key="member.id"
@@ -724,7 +857,7 @@ onUnmounted(() => {
             rows="1"
             class="w-full bg-transparent border-none focus:outline-none focus:ring-0 text-[15px] placeholder-opacity-40 resize-none leading-[1.25] py-[8px] scrollbar-hide vcp-textarea relative"
             :class="highlightActive ? 'text-transparent [caret-color:var(--primary-text)]' : 'text-[var(--primary-text)]'"
-            style="max-height: 114px;"
+            aria-label="消息内容"
             :placeholder="inputPlaceholder"
             :disabled="disabled"
           ></textarea>
@@ -763,7 +896,7 @@ onUnmounted(() => {
             </div>
           </div>
           
-          <div class="absolute top-0 left-0 right-0 h-4 pointer-events-none bg-[var(--secondary-bg)] opacity-90"
+          <div v-if="!isExpanded" class="absolute top-0 left-0 right-0 h-4 pointer-events-none bg-[var(--secondary-bg)] opacity-90"
             style="mask-image: linear-gradient(to bottom, black, transparent); -webkit-mask-image: linear-gradient(to bottom, black, transparent);"></div>
 
           <!-- 群聊富文本占位提示：高亮 @，内容为空时显示（替代原生 placeholder） -->
@@ -776,12 +909,13 @@ onUnmounted(() => {
         </div>
 
         <!-- 右侧动态操作区 (始终正常、平静地保留，保证视觉绝无抖动！) -->
-        <div class="flex items-center shrink-0 mb-0.5 relative gap-1.5">
+        <div class="input-actions flex items-center shrink-0 mb-0.5 relative gap-1.5">
           <!-- 展开附件按钮 -->
           <button
             v-longpress="openTarvenSelector"
             v-guide="'chat-plus-button'"
-            @click="toggleAttachMenu()"
+            @click="handleAttachToggle"
+            aria-label="添加附件"
             class="w-9 h-9 flex items-center justify-center rounded-full hover:bg-black/5 dark:hover:bg-white/5 text-[var(--primary-text)] opacity-80 hover:opacity-100 active:scale-90 transition-all relative"
           >
             <div class="i-heroicons-plus-circle text-2xl transition-transform duration-300 ease-out" :class="{ 'rotate-45': attachMenuOpen }"></div>
@@ -793,7 +927,7 @@ onUnmounted(() => {
 
           <Transition name="pop-slide">
             <!-- 发送/中止按钮 -->
-            <button v-if="hasContent || isGenerating || isPreparing"
+            <button v-if="hasContent || isGenerating || isPreparing || isExpanded"
               @click="handleAction"
               :aria-label="isGenerating ? '停止生成' : isPreparing ? '正在准备消息' : '发送消息'"
               :disabled="!isGenerating && !canSend"
@@ -852,6 +986,7 @@ onUnmounted(() => {
       </div>
     </div>
   </div>
+  </div>
 </template>
 
 <style scoped>
@@ -875,9 +1010,126 @@ onUnmounted(() => {
 
 /* 优化 Android WebView 中 textarea 的点击与 focus 行为 */
 .vcp-textarea {
+  max-height: 114px;
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
   cursor: text;
+}
+
+/* 同一编辑节点原地展开；Android IME 净增量与 iOS 可用矩形只各消费一次。 */
+.input-expanded {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: var(--vcp-ime-offset, 0px);
+  height: min(80vh, calc(var(--vcp-viewport-height, 100%) - var(--vcp-safe-top, 24px) - var(--vcp-ime-offset, 0px) - 12px));
+  min-height: 0;
+  box-sizing: border-box;
+  padding: 8px calc(var(--vcp-safe-right, 0px) + 20px) calc(var(--vcp-safe-bottom, 48px) + 10px) calc(var(--vcp-safe-left, 0px) + 20px);
+  border-top: 1px solid var(--border-color);
+  border-radius: 24px 24px 0 0;
+  background: var(--secondary-bg);
+}
+
+.input-enhancer.input-expanded {
+  overflow: hidden;
+}
+
+.input-expanded > :not(.input-shell):not(.input-context) {
+  flex-shrink: 0;
+}
+
+.input-context {
+  display: contents;
+}
+
+.input-expanded .input-context {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  max-height: 25%;
+  overflow-y: auto;
+}
+
+.input-expanded .input-context > * {
+  flex-shrink: 0;
+}
+
+.input-expanded .input-context:empty {
+  display: none;
+}
+
+.input-expanded .input-shell {
+  flex: 1;
+  min-height: 0;
+}
+
+.input-expanded .input-box {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-rows: 44px minmax(0, 1fr) 44px;
+  height: 100%;
+  min-height: 0;
+  width: 100%;
+  border-color: transparent;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.input-editor-title {
+  grid-area: 1 / 1;
+  align-self: center;
+}
+
+.input-expanded .input-writing-area {
+  grid-area: 2 / 1 / 3 / -1;
+  height: 100%;
+  min-height: 0;
+}
+
+.input-expanded .vcp-textarea {
+  height: 100%;
+  max-height: none;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.input-expanded .input-voice {
+  grid-area: 3 / 1;
+}
+
+.input-expanded .input-actions {
+  grid-area: 3 / 2;
+  justify-self: end;
+}
+
+.input-expanded .input-mention-menu {
+  bottom: 0;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 矮窗口给正文让出标题行；收起按钮仍在右上，不覆盖文字。 */
+@media (max-height: 500px) {
+  .input-expanded .input-box {
+    grid-template-rows: minmax(0, 1fr) 44px;
+  }
+  .input-expanded .input-editor-title {
+    display: none;
+  }
+  .input-expanded .input-writing-area {
+    grid-area: 1 / 1 / 2 / -1;
+    margin-right: 44px;
+  }
+  .input-expanded .input-voice {
+    grid-row: 2;
+  }
+  .input-expanded .input-actions {
+    grid-row: 2;
+  }
 }
 
 /* 气泡弹出/切换动画 */

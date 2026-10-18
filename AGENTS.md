@@ -10,8 +10,8 @@
 >
 > | 目录            | 规则                                      |
 > | --------------- | ----------------------------------------- |
-> | `G:\VCPMobile`  | ✅ 可读可写                                |
-> | `G:\VCPToolBox` | ❌ 参考工程，禁止修改                      |
+> | `E:\VCPMobile`  | ✅ 可读可写                                |
+> | `E:\VCPToolBox` | ❌ 参考工程，禁止修改                      |
 >
 > **VChat 仅允许修改 `VCPDistributedServer/Plugin/VCPMobileSync/**` 与 `rust_chat_data_service/**`，严禁修改任何非同步模块。**
 
