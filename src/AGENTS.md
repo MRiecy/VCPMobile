@@ -27,7 +27,6 @@ Rust AST / TailFrame ──> MessageRenderer ──> AstExecutor / DOM Engine �
 ```
 src/
 ├── main.ts                    # 主 WebView：Vue、Pinia、Router、全局指令与错误入口
-├── floating-main.ts           # 浮动助手 WebView 的独立 Vue 入口
 ├── App.vue                    # 生命周期、原生事件、Insets、外层工作区与全局挂载面
 ├── appStyles.ts               # reset、UnoCSS、主题样式的加载顺序
 ├── core/
@@ -52,7 +51,7 @@ src/
 
 `main.ts` 装配主应用；`App.vue` 持有进程级前端启动、原生窗口事件、分享与通知入口、Insets 桥、返回链和主工作区。`core/stores/shareStore.ts` 管理当前一次分享、草稿 revision 和消息提交，App 只转交入口事件；新分享覆盖未发送内容，已提交消息归聊天。全局监听必须在对应生命周期建立，并在卸载路径释放；不得由普通 Feature 重复注册第二套根监听。
 
-`floating-main.ts` 是浮动助手，现已退役，仅存档。
+浮动助手的独立 WebView、页面、Store 与设置入口已移除；`core/stores/assistant.ts` 仍是主应用的智能体/群组列表所有者。
 
 前端从 [core/utils/platform.ts](core/utils/platform.ts) 同步取得 OS 插件提供的平台身份，普通差异由共享 Vue 中的运行时分支处理。`appLifecycle.bootstrap` 继续拥有启动编排；实际权限、生命周期和任务状态由各自操作取得，平台识别不再等待能力查询。具体约定见 [跨平台开发规范](../docs/CROSS_PLATFORM_DEVELOPMENT.md)。
 

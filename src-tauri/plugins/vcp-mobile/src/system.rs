@@ -1378,32 +1378,6 @@ pub fn cancel_download_notification<R: Runtime>(app: AppHandle<R>) -> Result<(),
     Ok(())
 }
 
-#[tauri::command]
-pub fn request_overlay_permission<R: Runtime>(app: AppHandle<R>) -> Result<(), String> {
-    #[cfg(target_os = "android")]
-    {
-        let state = app.state::<VcpMobileState<R>>();
-        let plugin_handle = state.mobile_plugin_handle()?;
-
-        plugin_handle
-            .run_mobile_plugin::<serde_json::Value>(
-                "requestOverlayPermission",
-                serde_json::json!({}),
-            )
-            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
-    }
-    #[cfg(target_os = "ios")]
-    {
-        let _ = app;
-        crate::ios_unsupported::<()>("request_overlay_permission")?;
-    }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        let _ = app;
-    }
-    Ok(())
-}
-
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SharedFileItem {
@@ -1524,39 +1498,6 @@ mod file_boundary_tests {
         assert_eq!(canonical_file_in(&root, &inside_file), Ok(true));
         assert_eq!(canonical_file_in(&root, &outside_file), Ok(false));
         let _ = fs::remove_dir_all(temp);
-    }
-}
-
-#[tauri::command]
-pub fn toggle_floating_ball<R: Runtime>(app: AppHandle<R>, show: bool) -> Result<bool, String> {
-    #[cfg(target_os = "android")]
-    {
-        let state = app.state::<VcpMobileState<R>>();
-        let plugin_handle = state.mobile_plugin_handle()?;
-
-        #[derive(Deserialize)]
-        struct ToggleResult {
-            success: bool,
-        }
-
-        let res = plugin_handle
-            .run_mobile_plugin::<ToggleResult>(
-                "toggleFloatingBall",
-                serde_json::json!({ "show": show }),
-            )
-            .map_err(|e| format!("run_mobile_plugin failed: {}", e))?;
-        Ok(res.success)
-    }
-    #[cfg(target_os = "ios")]
-    {
-        let _ = (app, show);
-        crate::ios_unsupported("toggle_floating_ball")
-    }
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        let _ = app;
-        let _ = show;
-        Ok(false)
     }
 }
 

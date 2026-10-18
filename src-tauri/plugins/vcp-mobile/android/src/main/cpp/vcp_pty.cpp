@@ -118,6 +118,11 @@ Java_com_vcp_mobile_cli_CliPtyNative_spawn(
   auto env_values = string_array(env, env_input, kMaxEnvCount);
   if (env->ExceptionCheck()) return nullptr;
 
+  // Allocate the managed handoff before owning an fd or child process. If the
+  // VM cannot allocate it, no native session can become unreachable to Kotlin.
+  jlongArray result = env->NewLongArray(2);
+  if (result == nullptr) return nullptr;
+
   int master_fd = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
   if (master_fd < 0 || grantpt(master_fd) != 0 || unlockpt(master_fd) != 0) {
     const int saved = errno;
@@ -241,8 +246,7 @@ Java_com_vcp_mobile_cli_CliPtyNative_spawn(
     g_sessions.emplace(handle, std::make_unique<PtySession>(master_fd, pid));
   }
   jlong values[2] = {handle, static_cast<jlong>(pid)};
-  jlongArray result = env->NewLongArray(2);
-  if (result != nullptr) env->SetLongArrayRegion(result, 0, 2, values);
+  env->SetLongArrayRegion(result, 0, 2, values);
   return result;
 }
 

@@ -320,6 +320,11 @@ object ForegroundGuardian {
     }
 
     @Synchronized
+    fun clearScreenStateListener(listener: (Boolean) -> Unit) {
+        if (screenStateListener === listener) screenStateListener = null
+    }
+
+    @Synchronized
     fun setCliLeaseLossListener(listener: ((List<CliNotificationTarget>) -> Unit)?) {
         cliLeaseLossListener = listener
     }

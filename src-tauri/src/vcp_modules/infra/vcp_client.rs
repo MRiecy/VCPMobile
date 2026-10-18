@@ -1170,45 +1170,6 @@ fn get_or_calculate_message_hash(content: &Value) -> String {
     format!("sha256:{}", hash)
 }
 
-/// 核心请求实现函数，可供 Tauri Command 或 内部 Rust 模块(如 GroupOrchestrator) 调用
-/// Returns the owned response text and transport outcome without a JSON bridge.
-#[allow(dead_code)] // DORMANT ASSET: only the unregistered floating-assistant bridge uses this API.
-pub async fn perform_vcp_request<R: Runtime>(
-    app: &AppHandle<R>,
-    active_requests: ActiveRequestMap,
-    request_key: MessageKey,
-    payload: VcpRequestPayload,
-    stream_channel: Option<Channel<StreamEvent>>,
-) -> Result<VcpResponse, VcpRequestFailure> {
-    #[cfg(target_os = "android")]
-    let transport_request_id = payload.effective_transport_request_id().to_string();
-    let (lease, cancellation_token) =
-        ActiveRequestLease::try_acquire(active_requests, request_key.clone())
-            .map_err(VcpRequestFailure::from)?;
-    let result =
-        perform_vcp_request_registered(app, payload, stream_channel, cancellation_token).await;
-    // This entry point serves the ephemeral assistant, which has no database
-    // finalizer and must not leave an unclaimable offline result behind.
-    discard_request_helper(app, &request_key).await;
-    #[cfg(target_os = "android")]
-    if result
-        .as_ref()
-        .is_err_and(|failure| failure.is_recovery_pending())
-    {
-        // A broken local socket intentionally leaves no handoff for normal
-        // chat recovery. This ephemeral caller has no such recovery owner.
-        if let Ok(generation) = query_helper_generation(app, &transport_request_id).await {
-            if let Err(error) =
-                discard_helper_session(app, &transport_request_id, &generation).await
-            {
-                log::warn!("[VCPClient] Ephemeral helper cleanup failed: {error}");
-            }
-        }
-    }
-    drop(lease);
-    result
-}
-
 /// 执行一个已经注册的请求。调用方持有 lease，决定请求在 finalizer 提交后才退出 live 状态。
 pub async fn perform_vcp_request_registered<R: Runtime>(
     app: &AppHandle<R>,

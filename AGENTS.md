@@ -59,7 +59,6 @@ VCPMobile/
 │   │   ├── sync/               # 同步前端
 │   │   ├── distributed/        # 分布式能力
 │   │   ├── rag/                # RAG 灵视中心
-│   │   └── assistant/          # 浮动助手
 │   ├── components/             # 共享组件
 │   │   ├── layout/             # 布局外壳
 │   │   ├── settings/           # 设置页原子组件
@@ -117,7 +116,7 @@ VCPMobile/
 | `docs/vue_docs/` | `src/` 全部 Vue 3 / TypeScript 前端源码                      |             27              | 前端开发者、UI 调试者         |
 | `docs/modules/`  | `src-tauri/src/vcp_modules/` + `src-tauri/src/distributed/` 中**长期稳定、低修改频率**的核心模块 | 31（含 ast-diff 专栏 6 份） | 新成员快速了解基础设施        |
 | `docs/sync/`     | 同步 V2 子系统全链路（WebSocket + HTTP + SHA-256 Hash 差异） |             20              | 同步功能开发者                |
-| `docs/plugins/`  | `src-tauri/plugins/vcp-mobile/` 全部功能模块的**代码级**说明 |             13              | 维护 Android 原生插件的开发者 |
+| `docs/plugins/`  | `src-tauri/plugins/vcp-mobile/` 全部功能模块的**代码级**说明 |             14              | 维护 Android 原生插件的开发者 |
 
 四者与 `docs/*.md` 顶层规范文档的关系：
 

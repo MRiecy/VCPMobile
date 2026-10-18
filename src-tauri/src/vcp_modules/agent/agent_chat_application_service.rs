@@ -5,9 +5,9 @@ use crate::vcp_modules::message_service;
 use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use crate::vcp_modules::vcp_client::{
-    freeze_chat_connection, message_transport_request_id, perform_vcp_request,
-    perform_vcp_request_registered, ActiveRequestLease, ActiveRequests, ChatConnectionSnapshot,
-    ChatRequestPurpose, StreamEvent, VcpRequestPayload,
+    freeze_chat_connection, message_transport_request_id, perform_vcp_request_registered,
+    ActiveRequestLease, ActiveRequests, ChatConnectionSnapshot, ChatRequestPurpose, StreamEvent,
+    VcpRequestPayload,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -304,146 +304,6 @@ async fn process_prepared_agent_chat_message(
             {
                 return Ok(json!({ "status": "recovery_pending", "messageId": thinking_id }));
             }
-        }
-    }
-
-    Ok(json!({ "status": "sent", "messageId": thinking_id }))
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // DORMANT ASSET: floating-assistant bridge is retained but not registered.
-pub struct AssistantChatPayload {
-    pub agent_id: String,
-    pub temp_messages: Vec<crate::vcp_modules::chat::topic_service::TempMessage>,
-}
-
-#[tauri::command]
-#[allow(dead_code)] // DORMANT ASSET: floating-assistant bridge is retained but not registered.
-pub async fn handle_assistant_chat_stream(
-    app_handle: AppHandle,
-    agent_state: State<'_, AgentConfigState>,
-    active_requests: State<'_, ActiveRequests>,
-    settings_state: State<'_, SettingsState>,
-    payload: AssistantChatPayload,
-    stream_channel: Channel<crate::vcp_modules::vcp_client::StreamEvent>,
-) -> Result<Value, String> {
-    let settings = read_settings(app_handle.clone(), settings_state).await?;
-    let connection = freeze_chat_connection(&settings, ChatRequestPurpose::Interactive)?;
-    let agent_id = payload.agent_id;
-    let temp_messages = payload.temp_messages;
-
-    let thinking_id = format!("msg_{}", uuid::Uuid::new_v4());
-
-    // 1. 读取 Agent 配置
-    let agent_config =
-        read_agent_config_internal(&app_handle, &agent_state, &agent_id, Some(true)).await?;
-
-    // 2. 启动前台服务保活
-    let _foreground_lease =
-        ForegroundLease::acquire(&app_handle, ForegroundTask::Stream, &agent_config.name).ok();
-
-    // 3. 构造请求消息数组 (注入 System Prompt)
-    let mut messages: Vec<Value> = Vec::new();
-
-    let effective_prompt = if !agent_config.mobile_system_prompt.is_empty() {
-        agent_config.mobile_system_prompt.clone()
-    } else {
-        agent_config.system_prompt.clone()
-    };
-
-    messages.push(json!({
-        "role": "system",
-        "content": effective_prompt
-    }));
-
-    for temp_msg in temp_messages {
-        messages.push(json!({
-            "role": temp_msg.role,
-            "content": temp_msg.content
-        }));
-    }
-
-    // 4. 构造 VCP 请求载荷
-    let mut model_config = json!({
-        "model": agent_config.model,
-        "max_tokens": agent_config.max_output_tokens,
-        "contextTokenLimit": agent_config.context_token_limit,
-        "stream": agent_config.stream_output
-    });
-    if agent_config.use_temperature {
-        model_config["temperature"] = json!(agent_config.temperature);
-    }
-
-    let context = Some(json!({
-        "agentId": agent_id,
-        "ownerId": agent_id,
-        "ownerType": "agent",
-        "topicId": "assistant_chat",
-        "agentName": agent_config.name
-    }));
-
-    let request_key = MessageKey::new(
-        TopicKey::new("agent", &agent_id, "assistant_chat"),
-        thinking_id.clone(),
-    );
-    let request_payload = VcpRequestPayload {
-        vcp_url: connection.endpoint_url,
-        vcp_api_key: connection.api_key,
-        messages,
-        model_config,
-        message_id: thinking_id.clone(),
-        context: context.clone(),
-        transport_request_id: Some(message_transport_request_id(&request_key)),
-    };
-
-    // 发送 thinking 事件通知前端初始化气泡
-    let _ = stream_channel.send(StreamEvent::thinking(thinking_id.clone(), context.clone()));
-
-    // 5. 发起流式请求 (直接调用 perform_vcp_request，不存入 DB)
-    let result = perform_vcp_request(
-        &app_handle,
-        active_requests.0.clone(),
-        request_key,
-        request_payload,
-        Some(stream_channel.clone()),
-    )
-    .await;
-
-    // 7. 处理请求结果并补发流终结事件
-    let final_ts = crate::vcp_modules::infra::utils::now_millis() as u64;
-    match result {
-        Ok(response) => {
-            // 发送 end 事件让前端知道传输完毕
-            let _ = stream_channel.send(StreamEvent::end(
-                thinking_id.clone(),
-                context,
-                response.finish_reason,
-                Some(response.full_content),
-                None,
-                Some(final_ts),
-                None,
-            ));
-        }
-        Err(failure) => {
-            log::error!(
-                "[AssistantChatAppService] perform_vcp_request failed: {}",
-                failure
-            );
-            let (error, partial_content) = failure.into_parts();
-            let final_content = crate::vcp_modules::vcp_client::stream_error_content(
-                partial_content.as_deref().unwrap_or_default(),
-                &error,
-            );
-            let _ = stream_channel.send(StreamEvent::end(
-                thinking_id.clone(),
-                context,
-                Some("error".to_string()),
-                Some(final_content),
-                None,
-                Some(final_ts),
-                None,
-            ));
         }
     }
 

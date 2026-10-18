@@ -10,8 +10,6 @@ use tokio::sync::RwLock;
 #[cfg(not(target_os = "ios"))]
 use tokio_util::sync::CancellationToken;
 
-use crate::vcp_modules::infra::local_server::ServerHandle;
-
 #[derive(Debug, Serialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum CoreStatus {
@@ -99,10 +97,6 @@ pub struct LifecycleState {
     pub last_error: Arc<RwLock<Option<String>>>,
     /// 启动早期的数据库恢复结果。保留到前端读取系统快照，避免一次性事件先于监听器发出。
     pub database_recovery: Arc<RwLock<Option<DatabaseRecoveryNotice>>>,
-    /// 划词助手本地服务器句柄：用于根据设置动态启停
-    #[allow(dead_code)]
-    // DORMANT ASSET: no production lifecycle path currently reads this handle.
-    pub local_server_handle: Arc<tokio::sync::Mutex<Option<ServerHandle>>>,
     /// 应用前台状态，统一替代原裸静态全局变量
     pub is_foreground: Arc<AtomicBool>,
     /// None until an actual native/host event has reached the authoritative owner.
@@ -122,7 +116,6 @@ impl LifecycleState {
             status_message: Arc::new(RwLock::new("核心引擎初始化中...".to_string())),
             last_error: Arc::new(RwLock::new(None)),
             database_recovery: Arc::new(RwLock::new(None)),
-            local_server_handle: Arc::new(tokio::sync::Mutex::new(None)),
             // iOS services wait for an actual active observation. An initial
             // inactive snapshot must not suppress the first active transition.
             is_foreground: Arc::new(AtomicBool::new(!cfg!(target_os = "ios"))),

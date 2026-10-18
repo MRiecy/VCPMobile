@@ -3,7 +3,6 @@ import { mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
 import ToolBlock from '@/features/chat/blocks/ToolBlock.vue';
 import HtmlPreviewBlock from '@/features/chat/blocks/HtmlPreviewBlock.vue';
-import AssistantMessageCard from '@/features/assistant/AssistantMessageCard.vue';
 import RagPayloadDetail from '@/features/rag/RagPayloadDetail.vue';
 import {
   clearHtmlCache,
@@ -198,33 +197,22 @@ describe('trusted-circle rich HTML active-content guard', () => {
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it('applies the same rich-HTML guard to dormant assistant cards and reachable RAG details', () => {
+  it('applies the rich-HTML guard to RAG details', () => {
     const richPayload = `## Rich payload
 
 <custom-panel id="local-panel" onclick="this.classList.toggle('active')">
   <img src="x" onerror="${HOST_HANDLER}">
   <script>${HOST_HANDLER}</script>
 </custom-panel>`;
-    const assistant = mount(AssistantMessageCard, {
-      props: {
-        message: {
-          id: 'dormant-assistant-message',
-          role: 'assistant',
-          content: richPayload,
-          timestamp: 0,
-        },
-      },
-    });
     const rag = mount(RagPayloadDetail, {
       props: { text: richPayload },
     });
 
-    for (const host of [assistant.element, rag.element]) {
-      expect(host.querySelector('h2')?.textContent).toBe('Rich payload');
-      expect(host.querySelector('#local-panel')?.getAttribute('onclick'))
-        .toBe("this.classList.toggle('active')");
-      expectHostCapabilityBlocked(host);
-    }
+    const host = rag.element;
+    expect(host.querySelector('h2')?.textContent).toBe('Rich payload');
+    expect(host.querySelector('#local-panel')?.getAttribute('onclick'))
+      .toBe("this.classList.toggle('active')");
+    expectHostCapabilityBlocked(host);
   });
 
   it('keeps unrestricted scripts inside the existing sandboxed HTML Preview', async () => {

@@ -1,5 +1,12 @@
 package com.vcp.mobile.service
 
+import com.vcp.mobile.sse.ClientConnection
+import com.vcp.mobile.sse.CONTENT_FRAME_CHARS
+import com.vcp.mobile.sse.StreamSession
+import com.vcp.mobile.sse.SsePowerLocks
+import com.vcp.mobile.sse.SseSessionCoordinator
+import com.vcp.mobile.sse.notificationReplyPreview
+
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -10,7 +17,8 @@ import org.junit.After
 import org.junit.Before
 import org.junit.runner.RunWith
 import org.json.JSONObject
-import org.robolectric.Robolectric
+import android.content.Context
+import androidx.test.core.app.ApplicationProvider
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import okhttp3.Request
@@ -18,13 +26,19 @@ import okhttp3.sse.EventSource
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
+import java.io.DataOutputStream
 import java.io.OutputStream
+import java.net.ConnectException
+import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketException
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.ConcurrentHashMap
 import java.util.UUID
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CoroutineDispatcher
 
 class SseProxyConnectionOwnershipTest {
     private class TrackingSocket : Socket() {
@@ -73,7 +87,7 @@ class SseProxyConnectionOwnershipTest {
 
     @Test
     fun staleConnectionCannotDetachOrCloseCurrentResumeConnection() {
-        val session = SseProxyService.StreamSession("request-1")
+        val session = StreamSession("request-1")
         val first = connection()
         val resumed = connection()
 
@@ -91,7 +105,7 @@ class SseProxyConnectionOwnershipTest {
 
     @Test
     fun delayedFinalizersAcrossThreeResumesOnlyCloseTheirOwnConnections() {
-        val session = SseProxyService.StreamSession("request-2")
+        val session = StreamSession("request-2")
         val first = connection()
         val second = connection()
         val third = connection()
@@ -130,7 +144,7 @@ class SseProxyConnectionOwnershipTest {
 
     @Test
     fun aTerminalSessionCannotBeReclassifiedByLateCloseOrFailure() {
-        val session = SseProxyService.StreamSession("request-terminal")
+        val session = StreamSession("request-terminal")
         session.fullContent.append("received prefix")
         session.lastFinishReason = "tool_calls"
         assertFalse(session.isCompleted)
@@ -145,8 +159,8 @@ class SseProxyConnectionOwnershipTest {
 
     @Test
     fun snapshotPrefixStaysExactAcrossUnicodeBoundariesAndConcurrentAppend() {
-        val session = SseProxyService.StreamSession("request-snapshot")
-        val prefix = "x".repeat(SseProxyService.CONTENT_FRAME_CHARS - 1) + "😀尾声"
+        val session = StreamSession("request-snapshot")
+        val prefix = "x".repeat(CONTENT_FRAME_CHARS - 1) + "😀尾声"
         session.fullContent.append(prefix)
         val boundary = session.fullContent.length
         val first = session.contentChunk(0, boundary)
@@ -206,23 +220,45 @@ class SseProxyConnectionOwnershipTest {
 @RunWith(RobolectricTestRunner::class)
 @Config(manifest = Config.NONE, sdk = [28])
 class SseProxyProtocolTest {
-    private lateinit var service: SseProxyService
-    private lateinit var sessions: ConcurrentHashMap<String, SseProxyService.StreamSession>
+    private lateinit var context: Context
+    private lateinit var coordinator: SseSessionCoordinator
     private val connections = mutableListOf<ClientConnection>()
+    private val stopRequests = AtomicInteger(0)
+
+    private class HeldClientDispatcher : CoroutineDispatcher() {
+        val dispatched = CountDownLatch(1)
+        private val pending = ConcurrentLinkedQueue<Runnable>()
+
+        override fun dispatch(context: CoroutineContext, block: Runnable) {
+            pending.add(block)
+            dispatched.countDown()
+        }
+
+        fun drain() {
+            while (true) (pending.poll() ?: return).run()
+        }
+    }
 
     @Before
-    fun attachServiceWithoutStartingNetworkOrForegroundWork() {
-        service = Robolectric.buildService(SseProxyService::class.java).get()
-        val field = SseProxyService::class.java.getDeclaredField("activeSessions").apply { isAccessible = true }
-        @Suppress("UNCHECKED_CAST")
-        sessions = field.get(service) as ConcurrentHashMap<String, SseProxyService.StreamSession>
-        SseProxyService.isServiceRunning = true
+    fun activateCoordinatorWithControlledUpstream() {
+        context = ApplicationProvider.getApplicationContext()
+        coordinator = SseSessionCoordinator(
+            context,
+            stopService = { stopRequests.incrementAndGet() },
+            eventSourceFactory = EventSource.Factory { request, _ ->
+                object : EventSource {
+                    override fun request(): Request = request
+                    override fun cancel() = Unit
+                }
+            },
+        )
+        coordinator.activate()
     }
 
     @After
     fun releaseService() {
         connections.forEach { it.close() }
-        service.onDestroy()
+        coordinator.destroy()
     }
 
     private fun connection(): Pair<ClientConnection, ByteArrayOutputStream> {
@@ -232,20 +268,26 @@ class SseProxyProtocolTest {
         return connection to output
     }
 
-    private fun session(content: String = ""): SseProxyService.StreamSession {
-        val context = JSONObject().put("ownerType", "agent").put("ownerId", "agent-1")
+    private fun session(content: String = "", requestId: String = UUID.randomUUID().toString()): StreamSession {
+        val metadata = JSONObject().put("ownerType", "agent").put("ownerId", "agent-1")
             .put("topicId", "topic-1").put("messageId", "message-1")
-        return SseProxyService.StreamSession(UUID.randomUUID().toString(), contextJson = context).also {
+        val (initial, _) = connection()
+        return requireNotNull(coordinator.handleStartStream(
+            requestId, "https://example.invalid", "{}", "", metadata, initial,
+        )).also {
+            it.detachConnection(initial)
+            initial.close()
             it.fullContent.append(content)
-            sessions[it.requestId] = it
         }
     }
 
-    private fun invoke(name: String, vararg arguments: Any?): Any? {
-        val method = SseProxyService::class.java.declaredMethods.single {
-            it.name == name && it.parameterTypes.size == arguments.size
-        }.apply { isAccessible = true }
-        return method.invoke(service, *arguments)
+    private fun holdsNativeWakeLock(): Boolean {
+        val ownerField = SseSessionCoordinator::class.java.getDeclaredField("powerLocks")
+            .apply { isAccessible = true }
+        val lockField = SsePowerLocks::class.java.getDeclaredField("wakeLock")
+            .apply { isAccessible = true }
+        val lock = lockField.get(ownerField.get(coordinator)) as? android.os.PowerManager.WakeLock
+        return lock?.isHeld == true
     }
 
     private fun frames(connection: ClientConnection, output: ByteArrayOutputStream): List<JSONObject> {
@@ -266,35 +308,51 @@ class SseProxyProtocolTest {
         assertTrue("Condition did not become true within ${timeoutMs}ms", condition())
     }
 
-    private fun retries(session: SseProxyService.StreamSession): Int =
+    private fun retries(session: StreamSession): Int =
         synchronized(session) { session.publicationRetriesAttempted }
 
-    private fun assertHandoffWakeLockReleased(session: SseProxyService.StreamSession) {
+    private fun assertHandoffWakeLockReleased(session: StreamSession) {
         assertEquals(0L, session.handoffWakeDeadlineMs)
-        val field = SseProxyService::class.java.getDeclaredField("wakeLock").apply { isAccessible = true }
-        awaitCondition(1_000) { field.get(service) == null }
+        awaitCondition(1_000) { !holdsNativeWakeLock() }
+    }
+
+    private fun startListener(): Int {
+        val discovery = java.io.File(context.cacheDir, "sse_helper.port")
+        coordinator.startListening()
+        awaitCondition(2_000) { discovery.exists() && discovery.readText().toIntOrNull() != null }
+        return discovery.readText().toInt()
+    }
+
+    private fun assertSocketDisconnected(socket: Socket) {
+        socket.soTimeout = 1_000
+        try {
+            assertEquals(-1, socket.getInputStream().read())
+        } catch (_: SocketException) {
+            // Closing a socket with unread command bytes may reset the peer.
+            // A read timeout is not a disconnect and deliberately fails this test.
+        }
     }
 
     @Test
     fun intermediateFinishReasonsKeepReceivingBodyAndNeverWriteFiles() {
         val session = session()
-        invoke("acceptUpstreamEvent", session, "")
-        invoke("acceptUpstreamEvent", session, """{"choices":[{"delta":{"content":"first"},"finish_reason":"tool_calls"}]}""")
-        invoke("acceptUpstreamEvent", session, """{"choices":[{"delta":{"content":"second"},"finish_reason":"stop"}]}""")
+        coordinator.acceptUpstreamEvent(session, "")
+        coordinator.acceptUpstreamEvent(session, """{"choices":[{"delta":{"content":"first"},"finish_reason":"tool_calls"}]}""")
+        coordinator.acceptUpstreamEvent(session, """{"choices":[{"delta":{"content":"second"},"finish_reason":"stop"}]}""")
         assertFalse(session.isCompleted)
         assertEquals("firstsecond", session.fullContent.toString())
         assertEquals("stop", session.lastFinishReason)
-        assertFalse(java.io.File(service.cacheDir, "sse_offline_completed").exists())
+        assertFalse(java.io.File(context.cacheDir, "sse_offline_completed").exists())
     }
 
     @Test
     fun moreThanTwentyThousandUpstreamChunksRemainOneCompleteBody() {
         val session = session()
         val delta = """{"choices":[{"delta":{"content":"字"}}]}"""
-        repeat(20_005) { invoke("acceptUpstreamEvent", session, delta) }
+        repeat(20_005) { coordinator.acceptUpstreamEvent(session, delta) }
         assertFalse(session.isCompleted)
         assertEquals("字".repeat(20_005), session.fullContent.toString())
-        assertFalse(java.io.File(service.cacheDir, "sse_offline_completed").exists())
+        assertFalse(java.io.File(context.cacheDir, "sse_offline_completed").exists())
     }
 
     @Test
@@ -302,19 +360,19 @@ class SseProxyProtocolTest {
         val session = session()
         val (stream, output) = connection()
         session.replaceConnection(stream)
-        invoke("acceptUpstreamEvent", session, """{"choices":[{"delta":{"content":"first"},"finish_reason":"tool_calls"}]}""")
-        invoke("acceptUpstreamEvent", session, """{"choices":[{"delta":{"content":"second"},"finish_reason":"stop"}]}""")
+        coordinator.acceptUpstreamEvent(session, """{"choices":[{"delta":{"content":"first"},"finish_reason":"tool_calls"}]}""")
+        coordinator.acceptUpstreamEvent(session, """{"choices":[{"delta":{"content":"second"},"finish_reason":"stop"}]}""")
         assertFalse(session.isCompleted)
-        invoke("acceptUpstreamEvent", session, "[DONE]")
-        invoke("acceptUpstreamEvent", session, "[DONE]")
-        invoke("acceptUpstreamEvent", session, """{"error":{"message":"late cancellation callback"}}""")
+        coordinator.acceptUpstreamEvent(session, "[DONE]")
+        coordinator.acceptUpstreamEvent(session, "[DONE]")
+        coordinator.acceptUpstreamEvent(session, """{"error":{"message":"late cancellation callback"}}""")
         val terminals = frames(stream, output).filter { it.optString("eventType") == "terminal" }
         assertEquals(1, terminals.size)
         assertEquals("stop", terminals.single().getString("finishReason"))
         assertEquals("firstsecond", session.fullContent.toString())
         assertTrue(session.isCompleted)
-        assertSame(session, sessions[session.requestId])
-        assertFalse(java.io.File(service.cacheDir, "sse_offline_completed").exists())
+        assertSame(session, coordinator.findSession(session.requestId))
+        assertFalse(java.io.File(context.cacheDir, "sse_offline_completed").exists())
     }
 
     @Test
@@ -323,17 +381,17 @@ class SseProxyProtocolTest {
         val (stream, _) = connection()
         session.replaceConnection(stream)
         session.complete("stop")
-        invoke("cleanupSessionIfCompletedAndDisconnected", session)
-        assertSame(session, sessions[session.requestId])
-        assertFalse(java.io.File(service.cacheDir, "sse_offline_completed").exists())
+        coordinator.cleanupSessionIfCompletedAndDisconnected(session)
+        assertSame(session, coordinator.findSession(session.requestId))
+        assertFalse(java.io.File(context.cacheDir, "sse_offline_completed").exists())
 
         val (control, _) = connection()
-        invoke("handleControl", "ack_committed", session.requestId, UUID.randomUUID().toString(), control)
-        assertSame(session, sessions[session.requestId])
-        invoke("handleControl", "ack_committed", session.requestId, session.generation, control)
-        assertNull(sessions[session.requestId])
+        coordinator.handleControl("ack_committed", session.requestId, UUID.randomUUID().toString(), control)
+        assertSame(session, coordinator.findSession(session.requestId))
+        coordinator.handleControl("ack_committed", session.requestId, session.generation, control)
+        assertNull(coordinator.findSession(session.requestId))
         assertTrue(stream.socket.isClosed)
-        assertFalse(java.io.File(service.cacheDir, "sse_offline_completed").exists())
+        assertFalse(java.io.File(context.cacheDir, "sse_offline_completed").exists())
     }
 
     @Test
@@ -341,9 +399,9 @@ class SseProxyProtocolTest {
         val content = "😀第一行\n".repeat(4000)
         val session = session(content)
         session.complete("error", "connection reset")
-        invoke("cleanupSessionIfCompletedAndDisconnected", session)
-        assertNull(sessions[session.requestId])
-        val directory = java.io.File(service.cacheDir, "sse_offline_completed")
+        coordinator.cleanupSessionIfCompletedAndDisconnected(session)
+        assertNull(coordinator.findSession(session.requestId))
+        val directory = java.io.File(context.cacheDir, "sse_offline_completed")
         val file = directory.listFiles()!!.single { it.extension == "completed" }
         val stored = file.readText(Charsets.UTF_8)
         val metadata = JSONObject(stored.substringBefore('\n'))
@@ -356,25 +414,24 @@ class SseProxyProtocolTest {
         assertTrue(directory.listFiles()!!.none { it.extension == "tmp" })
 
         val (control, _) = connection()
-        invoke("handleControl", "ack_committed", session.requestId, UUID.randomUUID().toString(), control)
+        coordinator.handleControl("ack_committed", session.requestId, UUID.randomUUID().toString(), control)
         assertTrue(file.exists())
-        invoke("handleControl", "ack_committed", session.requestId, session.generation, control)
+        coordinator.handleControl("ack_committed", session.requestId, session.generation, control)
         assertFalse(file.exists())
     }
 
     @Test
     fun publicationFailureRetainsTheOnlyBodyForResume() {
-        val mailbox = java.io.File(service.cacheDir, "sse_offline_completed")
+        val mailbox = java.io.File(context.cacheDir, "sse_offline_completed")
         mailbox.writeText("not a directory")
         val session = session("must survive disk failure")
         session.complete("stop")
         try {
-            invoke("cleanupSessionIfCompletedAndDisconnected", session)
-            assertSame(session, sessions[session.requestId])
+            coordinator.cleanupSessionIfCompletedAndDisconnected(session)
+            assertSame(session, coordinator.findSession(session.requestId))
             assertEquals("must survive disk failure", session.fullContent.toString())
             assertEquals(0L, session.handoffWakeDeadlineMs)
-            val wakeLock = SseProxyService::class.java.getDeclaredField("wakeLock").apply { isAccessible = true }
-            assertNull(wakeLock.get(service))
+            assertFalse(holdsNativeWakeLock())
         } finally {
             mailbox.delete()
         }
@@ -382,11 +439,11 @@ class SseProxyProtocolTest {
 
     @Test
     fun publicationRetriesWaitTwoThenFourSecondsAndPublishTheOriginalBody() {
-        val mailbox = java.io.File(service.cacheDir, "sse_offline_completed")
+        val mailbox = java.io.File(context.cacheDir, "sse_offline_completed")
         mailbox.writeText("block publication")
         val session = session("original reply survives both failures")
         session.complete("stop")
-        invoke("cleanupSessionIfCompletedAndDisconnected", session)
+        coordinator.cleanupSessionIfCompletedAndDisconnected(session)
         assertHandoffWakeLockReleased(session)
         Thread.sleep(1_000)
         assertEquals(0, retries(session))
@@ -398,9 +455,9 @@ class SseProxyProtocolTest {
         assertTrue(mailbox.delete())
         assertTrue(mailbox.mkdir())
         Thread.sleep(3_000)
-        assertSame(session, sessions[session.requestId])
+        assertSame(session, coordinator.findSession(session.requestId))
         assertEquals(1, retries(session))
-        awaitCondition(2_000) { sessions[session.requestId] == null }
+        awaitCondition(2_000) { coordinator.findSession(session.requestId) == null }
         assertEquals(2, retries(session))
         val stored = mailbox.listFiles()!!.single { it.extension == "completed" }.readText()
         assertEquals(session.generation, JSONObject(stored.substringBefore('\n')).getString("generation"))
@@ -409,15 +466,15 @@ class SseProxyProtocolTest {
 
     @Test
     fun exhaustedRetriesRetainBodyWithoutAnotherTimerOrWakeLock() {
-        val mailbox = java.io.File(service.cacheDir, "sse_offline_completed")
+        val mailbox = java.io.File(context.cacheDir, "sse_offline_completed")
         mailbox.writeText("persistent publication failure")
         val session = session("never discard the unsaved reply")
         session.complete("stop")
-        invoke("cleanupSessionIfCompletedAndDisconnected", session)
+        coordinator.cleanupSessionIfCompletedAndDisconnected(session)
         awaitCondition(8_000) { retries(session) == 2 }
         assertHandoffWakeLockReleased(session)
         assertNull(synchronized(session) { session.handoffJob })
-        assertSame(session, sessions[session.requestId])
+        assertSame(session, coordinator.findSession(session.requestId))
         assertEquals("never discard the unsaved reply", session.fullContent.toString())
 
         assertTrue(mailbox.delete())
@@ -426,54 +483,52 @@ class SseProxyProtocolTest {
         assertTrue(mailbox.listFiles()!!.isEmpty())
         assertEquals(2, retries(session))
         val (query, output) = connection()
-        invoke("handleQueryStream", session.requestId, query)
+        coordinator.handleQueryStream(session.requestId, query)
         assertEquals("completed", frames(query, output).single().getString("status"))
         assertEquals(2, retries(session))
     }
 
     @Test
     fun commitAckAndDiscardCancelPendingRetriesWithoutResurrectingFiles() {
-        val mailbox = java.io.File(service.cacheDir, "sse_offline_completed")
+        val mailbox = java.io.File(context.cacheDir, "sse_offline_completed")
         mailbox.writeText("block publication")
         val acknowledged = session("already committed")
         val discarded = session("deleted result")
         for (session in listOf(acknowledged, discarded)) {
             session.complete("stop")
-            invoke("cleanupSessionIfCompletedAndDisconnected", session)
+            coordinator.cleanupSessionIfCompletedAndDisconnected(session)
         }
         val acknowledgedJob = synchronized(acknowledged) { acknowledged.handoffJob!! }
         val discardedJob = synchronized(discarded) { discarded.handoffJob!! }
         val (control, _) = connection()
-        invoke("handleControl", "ack_committed", acknowledged.requestId, acknowledged.generation, control)
-        invoke("handleControl", "discard", discarded.requestId, discarded.generation, control)
+        coordinator.handleControl("ack_committed", acknowledged.requestId, acknowledged.generation, control)
+        coordinator.handleControl("discard", discarded.requestId, discarded.generation, control)
         assertTrue(acknowledgedJob.isCancelled)
         assertTrue(discardedJob.isCancelled)
-        assertNull(sessions[acknowledged.requestId])
-        assertNull(sessions[discarded.requestId])
-        val replacement = SseProxyService.StreamSession(acknowledged.requestId)
-        replacement.fullContent.append("new generation")
-        sessions[replacement.requestId] = replacement
+        assertNull(coordinator.findSession(acknowledged.requestId))
+        assertNull(coordinator.findSession(discarded.requestId))
+        val replacement = session("new generation", acknowledged.requestId)
         assertTrue(mailbox.delete())
         assertTrue(mailbox.mkdir())
         Thread.sleep(2_200)
         assertTrue(mailbox.listFiles()!!.isEmpty())
         assertEquals(0, retries(acknowledged))
         assertEquals(0, retries(discarded))
-        assertSame(replacement, sessions[replacement.requestId])
+        assertSame(replacement, coordinator.findSession(replacement.requestId))
         assertEquals("new generation", replacement.fullContent.toString())
     }
 
     @Test
     fun resumeReplacesRetryWithAckWaitWithoutResettingGenerationBudget() {
-        val mailbox = java.io.File(service.cacheDir, "sse_offline_completed")
+        val mailbox = java.io.File(context.cacheDir, "sse_offline_completed")
         mailbox.writeText("block publication")
         val session = session("resumable terminal body")
         session.complete("stop")
-        invoke("cleanupSessionIfCompletedAndDisconnected", session)
+        coordinator.cleanupSessionIfCompletedAndDisconnected(session)
         awaitCondition(3_000) { retries(session) == 1 }
         val retryJob = synchronized(session) { session.handoffJob!! }
         val (stream, output) = connection()
-        assertSame(session, invoke("handleResumeStream", session.requestId, session.generation, stream))
+        assertSame(session, coordinator.handleResumeStream(session.requestId, session.generation, stream))
         assertTrue(retryJob.isCancelled)
         assertEquals(1, retries(session))
         assertTrue(frames(stream, output).last().getBoolean("completed"))
@@ -481,23 +536,23 @@ class SseProxyProtocolTest {
         assertTrue(mailbox.mkdir())
         // The cancelled 4-second retry must not close the resumed consumer.
         Thread.sleep(4_200)
-        assertSame(session, sessions[session.requestId])
+        assertSame(session, coordinator.findSession(session.requestId))
         assertFalse(stream.socket.isClosed)
         assertTrue(mailbox.listFiles()!!.isEmpty())
-        awaitCondition(2_000) { sessions[session.requestId] == null }
+        awaitCondition(2_000) { coordinator.findSession(session.requestId) == null }
         assertEquals(1, retries(session))
         assertTrue(stream.socket.isClosed)
     }
 
     @Test
     fun destructionAttemptsPublicationOnceAndDoesNotScheduleNewRetries() {
-        val mailbox = java.io.File(service.cacheDir, "sse_offline_completed")
+        val mailbox = java.io.File(context.cacheDir, "sse_offline_completed")
         mailbox.writeText("block publication")
         val session = session("pending at destruction")
         session.complete("stop")
-        invoke("cleanupSessionIfCompletedAndDisconnected", session)
+        coordinator.cleanupSessionIfCompletedAndDisconnected(session)
         val retryJob = synchronized(session) { session.handoffJob!! }
-        service.onDestroy()
+        coordinator.destroy()
         assertTrue(retryJob.isCancelled)
         assertNull(synchronized(session) { session.handoffJob })
         assertEquals(0, retries(session))
@@ -517,10 +572,10 @@ class SseProxyProtocolTest {
             override fun cancel() {
                 cancellations.incrementAndGet()
                 assertNull(session.eventSource)
-                invoke("completeSession", session, "error", "late cancellation callback")
+                coordinator.completeSession(session, "error", "late cancellation callback")
             }
         }
-        invoke("acceptUpstreamEvent", session, "[DONE]")
+        coordinator.acceptUpstreamEvent(session, "[DONE]")
         assertNull(session.eventSource)
         assertEquals(1, cancellations.get())
         assertEquals("completed", session.lastFinishReason)
@@ -535,7 +590,7 @@ class SseProxyProtocolTest {
         val publishedAtDisconnect = java.util.concurrent.atomic.AtomicBoolean(false)
         val socket = object : Socket() {
             override fun close() {
-                val files = java.io.File(service.cacheDir, "sse_offline_completed").listFiles()
+                val files = java.io.File(context.cacheDir, "sse_offline_completed").listFiles()
                 publishedAtDisconnect.set(files?.any {
                     it.name.endsWith(".${session.generation}.completed") &&
                         it.readText().substringAfter('\n') == "durable before disconnect"
@@ -547,16 +602,16 @@ class SseProxyProtocolTest {
         val stream = ClientConnection(socket, ByteArrayOutputStream())
         connections.add(stream)
         session.replaceConnection(stream)
-        invoke("acceptUpstreamEvent", session, "[DONE]")
+        coordinator.acceptUpstreamEvent(session, "[DONE]")
         assertFalse(disconnected.await(1, TimeUnit.SECONDS))
-        assertSame(session, sessions[session.requestId])
+        assertSame(session, coordinator.findSession(session.requestId))
         assertTrue(disconnected.await(6, TimeUnit.SECONDS))
         assertTrue(publishedAtDisconnect.get())
-        assertNull(sessions[session.requestId])
+        assertNull(coordinator.findSession(session.requestId))
 
         val (control, _) = connection()
-        invoke("handleControl", "ack_committed", session.requestId, session.generation, control)
-        assertTrue(java.io.File(service.cacheDir, "sse_offline_completed").listFiles()!!
+        coordinator.handleControl("ack_committed", session.requestId, session.generation, control)
+        assertTrue(java.io.File(context.cacheDir, "sse_offline_completed").listFiles()!!
             .none { it.name.endsWith(".${session.generation}.completed") })
     }
 
@@ -566,9 +621,9 @@ class SseProxyProtocolTest {
         val (stream, output) = connection()
         session.replaceConnection(stream)
         repeat(500) {
-            invoke("acceptUpstreamEvent", session, """{"choices":[{"delta":{"reasoning_content":"private"}}]}""")
+            coordinator.acceptUpstreamEvent(session, """{"choices":[{"delta":{"reasoning_content":"private"}}]}""")
         }
-        invoke("acceptUpstreamEvent", session, """{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}""")
+        coordinator.acceptUpstreamEvent(session, """{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}""")
         val events = frames(stream, output)
         assertEquals(1, events.size)
         assertEquals("tool_calls", events.single().getString("finishReason"))
@@ -578,48 +633,165 @@ class SseProxyProtocolTest {
     @Test
     fun invalidStartIsRejectedBeforeAStartedFrameOrSessionExists() {
         val (stream, output) = connection()
-        assertNull(invoke("handleStartStream", "bad-url", "not a URL", "{}", "", null, stream))
+        assertNull(coordinator.handleStartStream("bad-url", "not a URL", "{}", "", null, stream))
         val events = frames(stream, output)
         assertEquals(listOf("error"), events.map { it.getString("eventType") })
         assertEquals("invalid_request", events.single().getString("code"))
-        assertTrue(sessions.isEmpty())
+        assertTrue(coordinator.isIdle)
     }
 
     @Test
     fun idleStopClosesAdmissionBeforeAndroidDestroysTheService() {
-        invoke("stopIfIdle", false)
-        assertFalse(SseProxyService.isServiceRunning)
+        coordinator.stopIfIdle(false)
+        assertFalse(coordinator.isRunning)
         val (stream, output) = connection()
-        assertNull(invoke("handleStartStream", "late-start", "https://example.invalid", "{}", "", null, stream))
+        assertNull(coordinator.handleStartStream("late-start", "https://example.invalid", "{}", "", null, stream))
         assertEquals("service_stopping", frames(stream, output).single().getString("code"))
-        assertTrue(sessions.isEmpty())
+        assertTrue(coordinator.isIdle)
+    }
+
+    @Test
+    fun listenerPublishesAUsableFramedEndpointAndIdleStopRemovesDiscovery() {
+        val discovery = java.io.File(context.cacheDir, "sse_helper.port")
+        coordinator.startListening()
+        awaitCondition(2_000) { discovery.exists() && discovery.readText().toIntOrNull() != null }
+        val port = discovery.readText().toInt()
+        Socket("127.0.0.1", port).use { socket ->
+            socket.soTimeout = 2_000
+            val request = """{"action":"query","requestId":"missing"}""".toByteArray(Charsets.UTF_8)
+            val writer = DataOutputStream(socket.getOutputStream())
+            writer.writeInt(request.size)
+            writer.write(request)
+            writer.flush()
+            val reader = DataInputStream(socket.getInputStream())
+            val bytes = ByteArray(reader.readInt())
+            reader.readFully(bytes)
+            assertEquals("not_found", JSONObject(String(bytes, Charsets.UTF_8)).getString("status"))
+        }
+
+        assertEquals(0, stopRequests.get())
+        // Reading the query reply does not mean the server coroutine has
+        // finished releasing its accepted-socket registration yet.
+        val clientsField = SseSessionCoordinator::class.java.getDeclaredField("clientSockets")
+            .apply { isAccessible = true }
+        awaitCondition(2_000) { (clientsField.get(coordinator) as Set<*>).isEmpty() }
+        coordinator.stopIfIdle()
+        assertEquals(1, stopRequests.get())
+        assertFalse(coordinator.isRunning)
+        assertFalse(discovery.exists())
+        assertFalse(java.io.File(context.cacheDir, "sse_helper.port.tmp").exists())
+        Socket().use { probe ->
+            val refused = try {
+                probe.connect(InetSocketAddress("127.0.0.1", port), 1_000)
+                false
+            } catch (_: ConnectException) {
+                true
+            }
+            assertTrue("The stopped listener must refuse new TCP connections", refused)
+        }
+    }
+
+    @Test
+    fun destructionClosesAnAcceptedSocketBeforeItsCoroutineRuns() {
+        coordinator.destroy()
+        val dispatcher = HeldClientDispatcher()
+        coordinator = SseSessionCoordinator(
+            context,
+            stopService = { stopRequests.incrementAndGet() },
+            clientDispatcher = dispatcher,
+        )
+        coordinator.activate()
+        val port = startListener()
+        try {
+            Socket("127.0.0.1", port).use { socket ->
+                assertTrue(dispatcher.dispatched.await(2, TimeUnit.SECONDS))
+                coordinator.destroy()
+                assertSocketDisconnected(socket)
+                assertFalse(java.io.File(context.cacheDir, "sse_helper.port").exists())
+            }
+        } finally {
+            dispatcher.drain()
+        }
+    }
+
+    @Test
+    fun destructionInterruptsAPartialCommandReadWithoutWaitingForItsTimeout() {
+        val port = startListener()
+        Socket("127.0.0.1", port).use { socket ->
+            val writer = DataOutputStream(socket.getOutputStream())
+            writer.writeInt(128)
+            writer.writeByte('{'.code)
+            writer.flush()
+            val socketsField = SseSessionCoordinator::class.java.getDeclaredField("clientSockets")
+                .apply { isAccessible = true }
+            awaitCondition(2_000) {
+                @Suppress("UNCHECKED_CAST")
+                val accepted = socketsField.get(coordinator) as Set<Socket>
+                accepted.any { !it.isClosed && it.soTimeout == 5_000 }
+            }
+
+            coordinator.destroy()
+
+            assertSocketDisconnected(socket)
+            assertTrue(coordinator.isIdle)
+        }
+    }
+
+    @Test
+    fun taskRemovalWaitsForTheLastControlAckBeforeStopping() {
+        val session = session("committed body")
+        val (stream, _) = connection()
+        session.replaceConnection(stream)
+        coordinator.completeSession(session, "completed")
+        coordinator.onTaskRemoved()
+        val port = startListener()
+        Socket("127.0.0.1", port).use { socket ->
+            socket.soTimeout = 2_000
+            val request = JSONObject().put("action", "ack_committed")
+                .put("requestId", session.requestId).put("generation", session.generation)
+                .toString().toByteArray(Charsets.UTF_8)
+            val writer = DataOutputStream(socket.getOutputStream())
+            writer.writeInt(request.size)
+            writer.write(request)
+            writer.flush()
+            val reader = DataInputStream(socket.getInputStream())
+            val bytes = ByteArray(reader.readInt())
+            reader.readFully(bytes)
+            val ack = JSONObject(String(bytes, Charsets.UTF_8))
+            assertEquals("ack_committed_ack", ack.getString("action"))
+            assertEquals(session.generation, ack.getString("generation"))
+            assertTrue(ack.getBoolean("accepted"))
+        }
+        awaitCondition(2_000) { stopRequests.get() == 1 }
+        assertFalse(coordinator.isRunning)
+        assertNull(coordinator.findSession(session.requestId))
+        assertFalse(java.io.File(context.cacheDir, "sse_helper.port").exists())
     }
 
     @Test
     fun queryKeepsTaskRemovedButResumeResetsIt() {
         val session = session()
-        service.onTaskRemoved(null)
-        val removed = SseProxyService::class.java.getDeclaredField("isTaskRemoved").apply { isAccessible = true }
-        assertTrue(removed.getBoolean(service))
+        coordinator.onTaskRemoved()
+        assertTrue(coordinator.isTaskRemoved)
         val (query, _) = connection()
-        invoke("handleQueryStream", session.requestId, query)
-        assertTrue(removed.getBoolean(service))
+        coordinator.handleQueryStream(session.requestId, query)
+        assertTrue(coordinator.isTaskRemoved)
         val (stream, _) = connection()
-        assertSame(session, invoke("handleResumeStream", session.requestId, session.generation, stream))
-        assertFalse(removed.getBoolean(service))
+        assertSame(session, coordinator.handleResumeStream(session.requestId, session.generation, stream))
+        assertFalse(coordinator.isTaskRemoved)
     }
 
     @Test
     fun resumeSnapshotLiveSuffixAndCancellationShareOneOrderedConnection() {
-        val prefix = "x".repeat(SseProxyService.CONTENT_FRAME_CHARS - 1) + "😀" + "y".repeat(20000)
+        val prefix = "x".repeat(CONTENT_FRAME_CHARS - 1) + "😀" + "y".repeat(20000)
         val session = session(prefix)
         val (old, _) = connection()
         session.replaceConnection(old)
         val (resumed, output) = connection()
-        assertSame(session, invoke("handleResumeStream", session.requestId, session.generation, resumed))
-        invoke("acceptUpstreamEvent", session, """{"choices":[{"delta":{"content":"suffix"}}]}""")
+        assertSame(session, coordinator.handleResumeStream(session.requestId, session.generation, resumed))
+        coordinator.acceptUpstreamEvent(session, """{"choices":[{"delta":{"content":"suffix"}}]}""")
         val (control, _) = connection()
-        invoke("handleControl", "cancel", session.requestId, session.generation, control)
+        coordinator.handleControl("cancel", session.requestId, session.generation, control)
 
         val events = frames(resumed, output)
         assertEquals("snapshot_start", events.first().getString("eventType"))
@@ -631,9 +803,9 @@ class SseProxyProtocolTest {
         assertEquals("suffix", events[snapshotEnd + 1].getString("content"))
         assertEquals("terminal", events.last().getString("eventType"))
         assertEquals("cancelled_by_user", events.last().getString("finishReason"))
-        assertSame(session, sessions[session.requestId])
+        assertSame(session, coordinator.findSession(session.requestId))
         assertSame(resumed, session.activeConnection)
         assertTrue(old.socket.isClosed)
-        assertFalse(java.io.File(service.cacheDir, "sse_offline_completed").exists())
+        assertFalse(java.io.File(context.cacheDir, "sse_offline_completed").exists())
     }
 }

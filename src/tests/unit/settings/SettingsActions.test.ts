@@ -38,7 +38,7 @@ function makeSettings(overrides: Partial<AppSettings> = {}): AppSettings {
     vcpServerUrl: 'https://draft.example', chatEndpointMode: 'standard', vcpApiKey: 'draft-key',
     vcpLogUrl: '', vcpLogKey: '', syncServerUrl: '', syncHttpUrl: '', syncToken: '', fileKey: '',
     topicSummaryModel: 'summary-model', syncLogLevel: 'INFO', agentOrder: [], groupOrder: [],
-    currentThemeMode: null, syncPrerenderEnabled: false, enableAssistant: false, assistantAgentId: '',
+    currentThemeMode: null, syncPrerenderEnabled: false,
     distributedEnabled: false, distributedWsUrl: '', distributedVcpKey: '', distributedDeviceName: '',
     ...overrides,
   };

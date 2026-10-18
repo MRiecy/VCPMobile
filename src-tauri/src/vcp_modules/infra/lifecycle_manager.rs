@@ -18,9 +18,7 @@ pub use crate::vcp_modules::infra::lifecycle_controller::is_app_in_foreground;
 pub use crate::vcp_modules::infra::lifecycle_controller::{
     reserve_lifecycle_transition, set_app_foreground_state_for_epoch,
 };
-pub use crate::vcp_modules::infra::lifecycle_reconciler::{
-    reconcile_distributed_node, reconcile_local_server,
-};
+pub use crate::vcp_modules::infra::lifecycle_reconciler::reconcile_distributed_node;
 pub use crate::vcp_modules::infra::lifecycle_state::{CoreStatus, LifecycleState};
 
 async fn persist_delete_cleanup_marker(db_state: &DbState, now: i64) -> Result<(), String> {
@@ -406,23 +404,6 @@ pub async fn get_system_snapshot(
         background_service_failures:
             tauri_plugin_vcp_mobile::events::collect_service_failure_notices(&app),
     })
-}
-
-/// 前端保存设置后调用，即时生效启用/停用划词助手本地服务器 - 暂时停用该功能
-#[tauri::command]
-#[allow(dead_code)] // DORMANT ASSET: implementation is retained but absent from generate_handler!.
-pub async fn reconcile_local_server_cmd(
-    app_handle: AppHandle,
-    state: State<'_, LifecycleState>,
-    enable: bool,
-) -> Result<bool, String> {
-    log::info!(
-        "[Lifecycle] reconcile_local_server_cmd called (temporarily disabled): enable={}",
-        enable
-    );
-    let lifecycle = &*state;
-    reconcile_local_server(&app_handle, lifecycle, false).await;
-    Ok(false)
 }
 
 #[tauri::command]

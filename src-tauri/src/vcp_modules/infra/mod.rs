@@ -10,7 +10,6 @@ pub mod lifecycle_controller;
 pub mod lifecycle_manager;
 pub mod lifecycle_reconciler;
 pub mod lifecycle_state;
-pub mod local_server;
 pub mod maintenance_manager;
 pub mod media_processor;
 pub mod model_manager;

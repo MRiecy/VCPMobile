@@ -38,18 +38,26 @@ Rust 核心内部调用 ─> Rust 公开入口 ─┼─> PluginHandle / JNI
 | `ios/Sources/NativeConfigBackupDirectory.swift` | 配置备份目录 bookmark、授权生命周期、VCPMobile 子目录和协调读写；仅配置导入导出复用，普通文件导出仍由原生保存面板处理 |
 | `ios/Sources/NativeHaptics.swift` | 主队列 UIKit 消息触感与显式试听；返回 API 提交结果，不宣称硬件实际播放 |
 | `ios/Sources/NativeImages.swift`、`NativeCamera.swift` | 串行 ImageIO 下采样、SDR 派生与真实编码，PhotoKit add-only、AVCapturePhotoOutput 有界静态拍照 |
-| `android/src/main/.../NativeFileImages.kt` | 按用途预算下采样、EXIF 方向和 JPEG/PNG 编码；外部输入保持原件，头像工作副本单独派生 |
-| `android/src/main/.../NativeMediaProcessor.kt`、`ios/Sources/NativeMedia.swift` | 音视频文件处理资源；先登记再执行，取消排队或运行中的解码，结果按路径及真实格式交回 Rust。Android Media3 / iOS AVAudioConverter 音频、系统视频抽帧；不持有聊天终态或改动音频播放会话 |
+| `android/src/main/.../media/NativeFileImages.kt` | 按用途预算下采样、EXIF 方向和 JPEG/PNG 编码；外部输入保持原件，头像工作副本单独派生 |
+| `android/src/main/.../media/NativeMediaProcessor.kt`、`ios/Sources/NativeMedia.swift` | 音视频文件处理资源；先登记再执行，取消排队或运行中的解码，结果按路径及真实格式交回 Rust。Android Media3 / iOS AVAudioConverter 音频、系统视频抽帧；不持有聊天终态或改动音频播放会话 |
 | `ios/Sources/NativeWebKit.swift`、`NativeShareInbox.swift` | WebView 几何/浏览缓存操作，及主 App 的 App Group 收件位置桥接 |
 | `src/screen.rs` | 经 WebView JNI 进入 `ScreenKeepOnArbiter` |
 | `src/stream.rs` | 请求独立的前台保活租约与 helper service 的 Rust 边界 |
 | `src/system.rs` | 承接权限、文件、设备状态、更新与系统能力调用 |
-| `src/webview.rs`、`android/src/main/.../NativeWebViewResume.kt`、`ios/Sources/NativeWebViewResume.swift` | 双端视觉恢复握手；原生持有单份旧画面遮罩并等待绘制提交，Vue 只确认当前文档布局就绪，不改变业务生命周期或主题底色 |
+| `src/webview.rs`、`android/src/main/.../webview/NativeWebViewResume.kt`、`ios/Sources/NativeWebViewResume.swift` | 双端视觉恢复握手；原生持有单份旧画面遮罩并等待绘制提交，Vue 只确认当前文档布局就绪，不改变业务生命周期或主题底色 |
 | `src/cli.rs` | 承接 Rust 核心到 Android CLI process / PTY 的异步桥接 |
 | `android/src/main/.../VcpMobilePlugin.kt` | Kotlin 命令入口与插件 attach/destroy 编排 |
 | `android/src/main/.../{service,cli}/` 与各 Manager | 执行独立的原生生命周期、后台服务和平台操作 |
 | `guest-js/index.ts` | 提供被显式导出的前端包级调用 |
 | `build.rs`、`permissions/`、`AndroidManifest.xml` | 声明命令生成、Tauri 授权和 Android 组件连接 |
+
+### 1.3 Android 功能分包
+
+Android 保留单一 Gradle 插件模块，`com.vcp.mobile` 内按真实职责分包；目录与 Kotlin package 一致。根包保留 `VcpMobilePlugin` 的框架入口和 JNI 固定符号 `ScreenKeepOnArbiter`。功能实现归 `files/`、`sharing/`、`permissions/`、`device/`、`media/`、`webview/`、`lifecycle/`、`runtime/`、`notifications/`、`haptics/`、`clipboard/`、`root/`、`updater/`、`cli/`、`sse/`；Manifest 声明的组件继续位于 `service/`。
+
+`@Command`、`@ActivityCallback`、`@PermissionCallback` 留在插件的薄入口，组合对象不由 Tauri 自动扫描。参数类随功能共置。操作的权限等待、取消、终态与清理属于同一资源所有者，不能因分包复制状态或建立通用任务总线。原生 Channel 与 WebView CustomEvent 保持各自实际消费者。
+
+当前所有权与迁移约束见 [Android 功能分包与资源所有权](../../../docs/plugins/13_Android功能分包与资源所有权.md)。浮窗和旧 `processImage/MediaBridge` 路径已移除；共享主应用的 Intent 接收、图片派生与媒体处理继续使用各自活动入口。
 
 ---
 

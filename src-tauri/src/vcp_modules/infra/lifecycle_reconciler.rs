@@ -1,34 +1,5 @@
-use crate::vcp_modules::infra::lifecycle_state::LifecycleState;
-use crate::vcp_modules::infra::local_server;
 use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 use tauri::{AppHandle, Manager};
-
-/// 根据设置决定启动或停止划词助手本地服务器
-#[allow(dead_code)] // DORMANT ASSET: retained for a possible future assistant redesign.
-pub async fn reconcile_local_server(
-    app_handle: &AppHandle,
-    lifecycle: &LifecycleState,
-    enable_assistant: bool,
-) {
-    let mut handle_lock = lifecycle.local_server_handle.lock().await;
-    let has_server = handle_lock.is_some();
-
-    match (enable_assistant, has_server) {
-        (true, false) => {
-            log::info!("[Lifecycle] enableAssistant=true, starting local server...");
-            *handle_lock = Some(local_server::start_server(app_handle.clone()));
-        }
-        (false, true) => {
-            log::info!("[Lifecycle] enableAssistant=false, stopping local server...");
-            if let Some(h) = handle_lock.take() {
-                h.shutdown().await;
-            }
-        }
-        _ => {
-            // 无需变更
-        }
-    }
-}
 
 /// 根据设置决定启动或停止分布式节点连接
 pub async fn reconcile_distributed_node(app_handle: &AppHandle, force_reconnect: bool) {

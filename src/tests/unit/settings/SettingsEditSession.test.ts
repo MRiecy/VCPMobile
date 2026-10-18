@@ -33,8 +33,6 @@ const initialSettings = (): AppSettings => ({
   groupOrder: [],
   currentThemeMode: null,
   syncPrerenderEnabled: false,
-  enableAssistant: false,
-  assistantAgentId: "",
   distributedEnabled: false,
   distributedWsUrl: "",
   distributedVcpKey: "",

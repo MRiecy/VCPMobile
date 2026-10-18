@@ -7,9 +7,9 @@ date: 2026-10-09
 related_files:
   - src-tauri/plugins/vcp-mobile/src/system.rs
   - src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/VcpMobilePlugin.kt
-  - src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/CpuStatusManager.kt
-  - src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/GpuStatusManager.kt
-  - src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/NetworkStatusManager.kt
+  - src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/device/CpuStatusManager.kt
+  - src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/device/GpuStatusManager.kt
+  - src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/device/NetworkStatusManager.kt
   - src-tauri/plugins/vcp-mobile/android/src/main/AndroidManifest.xml
 ---
 
@@ -69,7 +69,7 @@ VcpMobilePlugin.kt（硬件状态与 Root 相关部分）
 
 ## 3. CpuStatusManager —— CPU 热状态分级
 
-> 源码：`src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/CpuStatusManager.kt`（38 行）
+> 源码：`src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/device/CpuStatusManager.kt`（38 行）
 
 ### 3.1 概述
 
@@ -152,7 +152,7 @@ Rust 解包 ThermalResponse { status } → Result<String, String>
 
 ## 4. GpuStatusManager —— GPU 硬件信息拉取
 
-> 源码：`src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/GpuStatusManager.kt`（84 行）
+> 源码：`src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/device/GpuStatusManager.kt`（84 行）
 
 ### 4.1 概述
 
@@ -243,7 +243,7 @@ fun getGpuRenderer(): String {
 
 ## 5. NetworkStatusManager —— 网络连接与带宽状态
 
-> 源码：`src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/NetworkStatusManager.kt`（86 行）
+> 源码：`src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/device/NetworkStatusManager.kt`（86 行）
 
 ### 5.1 概述
 

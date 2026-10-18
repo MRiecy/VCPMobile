@@ -13,15 +13,17 @@
 
 VCP Mobile 采用**单一自定义插件** `tauri-plugin-vcp-mobile` 统一管理全部 Android 原生能力。
 
+插件内部按真实职责分包，保持一个 Gradle 模块。当前功能入口、资源所有权和验证范围见 [Android 功能分包与资源所有权](plugins/13_Android功能分包与资源所有权.md)。
+
 | 功能 | Rust 模块 | Kotlin 模块 | 通信方式 |
 |------|-----------|-------------|----------|
-| 屏幕常亮 | `src/screen.rs` | — | Rust 侧 Raw JNI |
+| 屏幕常亮 | `src/screen.rs` | `ScreenKeepOnArbiter.kt` | Raw JNI 提交 manual 意图，与 Guardian 和前后台状态共同仲裁 |
 | 前台锁协同 | `src/stream.rs` | `service/ForegroundGuardian.kt` | `PluginHandle.run_mobile_plugin`（v1.1.2 新增） |
 | 流式前台保活 | `src/stream.rs` | `service/StreamKeepaliveService.kt` | `PluginHandle.run_mobile_plugin` |
 | SSE 代理（`:helper` 进程） | `src/stream.rs` | `service/SseProxyService.kt` | `startForegroundService` + 本地 TCP |
 | 键盘 Insets | — | `KeyboardInsetsManager.kt` | `evaluateJavascript` 注入 CustomEvent |
 | 返回键拦截 | — | `MainActivity.onWebViewCreate()` | `OnBackPressedDispatcher` |
-| 生命周期事件 | — | `LifecycleBridge.kt` | `plugin.trigger("lifecycle")` → Rust `listen_any` → Tauri Event `vcp-lifecycle-changed`（v1.1.2/v1.1.3 升级） |
+| 生命周期事件 | `src/events.rs` | `lifecycle/LifecycleBridge.kt`、`lifecycle/NativeEvents.kt` | 原生 Channel → Rust 生命周期 owner → Tauri Event |
 | 麦克风权限 | `src/system.rs` | `VcpMobilePlugin.kt` | `requestPermissionForAlias("microphone")`（Tauri 别名机制） |
 | 通知栏监听 | `src/system.rs` | `service/VcpNotificationListenerService.kt` | 跳转 `ACTION_NOTIFICATION_LISTENER_SETTINGS` |
 | 自启动/电源管理 | `src/system.rs` | `VcpMobilePlugin.kt` | 厂商 Intent 链 + 设置页兜底 |
@@ -39,15 +41,13 @@ src-tauri/plugins/vcp-mobile/
 │   ├── src/main/AndroidManifest.xml
 │   └── src/main/java/com/vcp/mobile/
 │       ├── VcpMobilePlugin.kt
-│       ├── KeyboardInsetsManager.kt
-│       ├── LifecycleBridge.kt
-│       ├── FloatingWindowManager.kt
-│       ├── ShareIntentHandler.kt
-│       ├── BatteryStatusManager.kt
-│       ├── SensorStatusManager.kt
-│       ├── CpuStatusManager.kt
-│       ├── GpuStatusManager.kt
-│       ├── NetworkStatusManager.kt
+│       ├── ScreenKeepOnArbiter.kt  # JNI 固定符号
+│       ├── files/、sharing/       # 文件操作与分享交接
+│       ├── device/、media/        # 设备快照与媒体资源
+│       ├── lifecycle/、webview/   # 原生事件、Insets 与恢复
+│       ├── runtime/、permissions/ # 执行器、权限与设置导航
+│       ├── notifications/、haptics/、clipboard/、root/、updater/
+│       ├── cli/、sse/            # 进程与 helper 会话
 │       └── service/
 │           ├── StreamKeepaliveService.kt
 │           ├── ForegroundGuardian.kt
@@ -103,8 +103,12 @@ src-tauri/plugins/vcp-mobile/
     android:name=".service.StreamKeepaliveService"
     android:enabled="true"
     android:exported="false"
-    android:foregroundServiceType="remoteMessaging"
-    android:stopWithTask="true" />
+    android:foregroundServiceType="remoteMessaging|specialUse"
+    android:stopWithTask="false">
+    <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="user_visible_local_cli_job_started_by_the_user_or_owned_agent_turn" />
+</service>
 
 <!-- :helper 进程 SSE 代理，独立管理锁与断线缓存 -->
 <service
@@ -127,7 +131,7 @@ src-tauri/plugins/vcp-mobile/
 </service>
 ```
 
-> **v1.1.2 变更**：`StreamKeepaliveService` 的 `stopWithTask` 从 `false` 改为 `true`。ForegroundGuardian 已接管全部锁管理，进程被划掉后锁即消亡，残留前台服务无实际保活作用。
+> **当前实现**：`StreamKeepaliveService` 的 `stopWithTask=false`，供主进程普通租约与用户可见 CLI 租约使用。任务移除、Service 就绪和销毁通过 Guardian 的 generation 协调；不能按旧版 `stopWithTask=true` 描述修改当前组件。
 > **v1.1.3 新增**：`SseProxyService` 运行在独立的 `:helper` 进程，`stopWithTask="false"`，与主进程生命周期解耦。`VcpNotificationListenerService` 为系统通知栏监听占位服务，需在系统设置中手动授权。
 
 ---
@@ -138,17 +142,19 @@ src-tauri/plugins/vcp-mobile/
 
 | 通道 | 前端监听方式 | 适用场景 | 当前使用 |
 |------|-------------|----------|---------|
-| `Plugin.trigger()` | Rust `listen_any("vcp-mobile://<channel>")` → `app.emit("<event>")` → 前端 `listen()` | Tauri 官方插件事件通道 | `lifecycle` → `vcp-lifecycle-changed`、`vcp-network-status-changed` |
+| 原生 `Channel.send({event,payload})` | `src/events.rs` → Rust 生命周期/网络 owner | 原生事件与快照 | lifecycle、network、configuration 与 memory-pressure |
 | `evaluateJavascript` + `CustomEvent` | `window.addEventListener()` | 需要前端 window 级别事件兼容性 | `vcp-keyboard-inset`、`vcp-hardware-back`、`vcp-exit-requested`、`vcp-share-intent`、`vcp-permission-change` 等（生命周期事件 v1.1.3 起已迁移至 Tauri Event `vcp-lifecycle-changed`） |
-| `PluginHandle.run_mobile_plugin` | 无需监听，直接 invoke | Rust 到 Kotlin 单向命令调用 | `startStreamingService`、`acquireForeground`、`releaseForeground`、`startHelperService`、`checkAllPermissions` 等 |
+| `PluginHandle.run_mobile_plugin` | Kotlin 命令返回调用结果 | Rust 提交原生操作 | `acquireForeground`、`releaseForeground`、`startHelperService`、`checkAllPermissions` 等 |
 
-### 4.2 关键约束：trigger() 与前端 listen() 不直接互通
+### 4.2 通道与所有权
 
-`Plugin.trigger()` 发射到 Tauri 插件内部频道，Rust 侧通过 `listen_any("vcp-mobile://<channel>")` 接收并处理后，再通过 `app.emit("<event>")` 转发到前端全局事件总线。前端 `@tauri-apps/api/event` 的 `listen()` 监听的是 Rust 转发后的全局事件，而非直接监听 `Plugin.trigger()`。
+`registerNativeEvents` 安装唯一 Channel，并先回放生命周期和网络快照，再完成注册。`LifecycleBridge` 通过窄回调发送进程状态；网络观察者归 `NativeEvents` 建立和释放。当前生命周期不使用 `plugin.trigger/listen_any`。
 
 因此：
-- 若事件需要 Rust 侧参与处理（如生命周期状态、网络状态变化），使用 `Plugin.trigger()` + Rust 转发。
+- 生命周期与网络事件继续进入原生 Channel，由 Rust 的实际 owner 消费；注册、快照和发送在主线程串行完成。
 - 若前端使用 `window.addEventListener()` 监听，Kotlin 侧**必须**使用 `evaluateJavascript` 注入 `CustomEvent`。
+
+两种通道不合并成统一事件队列。Activity 的窗口恢复时序也不替代 `ProcessLifecycleOwner` 的进程生命周期。
 
 ### 4.3 evaluateJavascript 事件格式标准
 
@@ -189,7 +195,7 @@ Insets 事件的附加约束：
 ### 5.2 Kotlin 侧
 
 - **类注解**：`@TauriPlugin` 必须标注在 `Plugin(activity)` 子类上
-- **命令注解**：`@Command` 标注公开方法，方法参数固定为 `Invoke`
+- **命令注解**：`@Command` 标注插件类上的公开方法，方法参数固定为 `Invoke`。锁定 Tauri 只扫描插件实例及父类，普通组合对象和 extension 不会自动注册；`@ActivityCallback`、`@PermissionCallback` 也保留插件薄入口。
 - **参数解析**：`invoke.parseArgs(ArgsClass::class.java)`，参数类必须标注 `@InvokeArg`
 - **返回值**：成功调用 `invoke.resolve()`；失败调用 `invoke.reject(message)`
 
@@ -214,7 +220,7 @@ Insets 事件的附加约束：
 |--------|------|
 | 1 | **官方插件优先**：文件打开用 `tauri-plugin-opener`，触觉反馈用 `tauri-plugin-haptics` |
 | 2 | **自定义插件兜底**：Android 特有的前台服务、键盘 Insets、生命周期桥接，官方无覆盖，必须自建插件 |
-| 3 | **Raw JNI 仅限一次性调用**：`FLAG_KEEP_SCREEN_ON` 只需一次 `addFlags()`/`clearFlags()`，维持 Rust 侧 JNI 裸调比新增 Kotlin 方法更简洁 |
+| 3 | **Raw JNI 维持明确边界**：`screen.rs` 经固定 JNI 符号进入 `ScreenKeepOnArbiter`；manual、Guardian 和前后台状态由同一 Kotlin owner 仲裁 |
 
 ---
 

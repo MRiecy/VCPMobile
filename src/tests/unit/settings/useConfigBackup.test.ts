@@ -54,8 +54,6 @@ function makeSettings(): AppSettings {
     groupOrder: [],
     currentThemeMode: null,
     syncPrerenderEnabled: false,
-    enableAssistant: false,
-    assistantAgentId: "",
   };
 }
 

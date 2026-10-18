@@ -5,7 +5,7 @@ description: 通过 WindowInsetsCompat 监听键盘状态并实时推送到前�
 version: 1.1.4
 date: 2026-08-13
 related_files:
-  - src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/KeyboardInsetsManager.kt
+  - src-tauri/plugins/vcp-mobile/android/src/main/java/com/vcp/mobile/webview/KeyboardInsetsManager.kt
 ---
 
 # 键盘 Insets 管理

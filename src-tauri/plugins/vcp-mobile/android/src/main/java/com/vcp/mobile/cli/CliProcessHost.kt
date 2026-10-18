@@ -4,26 +4,13 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Process as AndroidProcess
-import android.system.ErrnoException
-import android.system.Os
-import android.system.OsConstants
 import android.util.Log
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import app.tauri.annotation.InvokeArg
 import app.tauri.plugin.JSObject
 import com.vcp.mobile.service.ForegroundGuardian
 import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.io.InputStream
-import java.io.OutputStream
 import java.nio.charset.StandardCharsets
-import java.nio.file.LinkOption
-import java.nio.file.StandardCopyOption
-import java.nio.file.attribute.BasicFileAttributes
-import java.security.MessageDigest
-import java.util.UUID
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -33,25 +20,14 @@ import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
-import kotlin.math.min
 
-private const val ROOTFS_ASSET_NAME = "vcp-cli-rootfs-3.24.1-aarch64.tar.zst"
 private const val TAG = "CliProcessHost"
-private const val PROOT_LIBRARY_NAME = "libvcp_proot.so"
-private const val PROOT_LOADER_LIBRARY_NAME = "libvcp_proot_loader.so"
-private const val MAX_ROOTFS_ARCHIVE_BYTES = 512L * 1024L * 1024L
-private const val MAX_PROOT_BYTES = 64L * 1024L * 1024L
-private const val MAX_PROOT_LOADER_BYTES = 4L * 1024L * 1024L
-private const val MAX_ARTIFACT_BYTES = 256L * 1024L * 1024L
 private const val MAX_COMMAND_BYTES = 64 * 1024
 private const val MAX_ACTIVE_PROCESSES = 4
 private const val MAX_REMEMBERED_PROCESSES = 1024
 private const val MAX_CANCEL_GRACE_MS = 5_000L
 private const val HANDSHAKE_TIMEOUT_MS = 3_000L
-private const val GROUP_KILL_WAIT_MS = 2_000L
-private const val PROOT_TRACEES_QUIT_GRACE_MS = 1_000L
 private const val ORPHAN_GRACE_MS = 250L
 private const val THREAD_JOIN_MS = 2_000L
 private const val TERMINAL_DRAIN_WAIT_MS = 10_000L
@@ -60,64 +36,19 @@ private const val FOREGROUND_READINESS_WAIT_MS = 6_000L
 // (MAP_NORESERVE, no committed RAM) when exec'ing the host PRoot PIE. A smaller
 // RLIMIT_AS makes the linker abort with linker_cfi.cpp "MapShadow" failure (code 134).
 private const val PROCESS_ADDRESS_SPACE_KIB = 4L * 1024L * 1024L
-private const val GUEST_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-private val LEGACY_SEMANTIC_ASSET_NAMES = listOf(
-    "vcp-semantic-model-r2.safetensors",
-    "vcp-semantic-tokenizer-r2.vcpbpe",
-)
 
-// The command is never interpolated into this host script. It is passed after the
-// handshake path as an argv element and reaches Bash as the argument following -lc.
-internal const val HOST_HANDSHAKE_SCRIPT =
-    "umask 077; printf '%s\\n' \"\$\$\" > \"\$1\"; " +
-        "memory_kib=\$2; shift 2; " +
-        "ulimit -v \"\$memory_kib\" || exit 126; " +
-        "IFS= read -r ready; [ \"\$ready\" = GO ] || exit 125; exec \"\$@\""
-
-@InvokeArg
-class PrepareCliRuntimeArgs {
-    lateinit var operationId: String
-    lateinit var profileId: String
-    var runtimeGeneration: Long = 0
-    var rootfsArchiveBytes: Long = 0
-    lateinit var rootfsArchiveSha256: String
-    var prootBytes: Long = 0
-    lateinit var prootSha256: String
-    var prootLoaderBytes: Long = 0
-    lateinit var prootLoaderSha256: String
-}
-
-@InvokeArg
-class StartCliProcessArgs {
-    lateinit var operationId: String
-    lateinit var jobId: String
-    lateinit var attemptId: String
-    var runtimeGeneration: Long = 0
-    lateinit var command: String
-    lateinit var rootfsPath: String
-    lateinit var cwd: String
-    var artifactMaxBytes: Long = 0
-    var backgroundLease: Boolean = false
-    var timeoutMs: Long = 0
-    lateinit var displayLabel: String
-    var sessionId: String? = null
-}
-
-@InvokeArg
-class InspectCliProcessArgs {
-    lateinit var operationId: String
-    lateinit var jobId: String
-    lateinit var attemptId: String
-    var runtimeGeneration: Long = 0
-}
-
-@InvokeArg
-class CancelCliProcessArgs {
-    lateinit var operationId: String
-    lateinit var jobId: String
-    lateinit var attemptId: String
-    var runtimeGeneration: Long = 0
-    var graceMs: Long = 0
+/** A cleanup failure must not skip another resource or replace the operation's original error. */
+private inline fun cleanupCliResource(
+    resource: String,
+    primaryError: Throwable? = null,
+    cleanup: () -> Unit,
+) {
+    try {
+        cleanup()
+    } catch (error: Throwable) {
+        if (primaryError != null && error !== primaryError) primaryError.addSuppressed(error)
+        Log.w(TAG, "Unable to clean up CLI $resource", error)
+    }
 }
 
 private data class ProcessKey(
@@ -126,45 +57,9 @@ private data class ProcessKey(
     val runtimeGeneration: Long,
 )
 
-private data class GroupTermination(
-    val termSent: Boolean,
-    val killSent: Boolean,
-    val groupGone: Boolean,
-)
-
 private data class CliForegroundLease(
     val tag: String,
     val generation: Long,
-)
-
-internal data class ProcIdentity(
-    val pid: Int,
-    val pgid: Int,
-    val sessionId: Int,
-    val startTimeTicks: Long,
-    val uid: Int,
-)
-
-private data class PreparedRuntime(
-    val profileId: String,
-    val runtimeGeneration: Long,
-    val archive: File,
-    val rootfsParent: File,
-    val workspace: File,
-    val skills: File,
-    val output: File,
-    val projectionRoot: File,
-    val proot: File,
-    val prootLoader: File,
-    val prootTmpParent: File,
-    val handshakeParent: File,
-)
-
-internal data class CliPtyLaunchSpec(
-    val runtimeGeneration: Long,
-    val argv: List<String>,
-    val environment: Map<String, String>,
-    val prootTmpDir: File,
 )
 
 private data class PrepareResult(
@@ -225,532 +120,6 @@ private class CliProcessHandle(
     lateinit var waiter: Thread
 
     fun isCompleted(): Boolean = finished.count == 0L
-}
-
-internal enum class ArtifactStream {
-    STDOUT,
-    STDERR,
-}
-
-/**
- * A shared cap across stdout and stderr. Writes stop at the cap, but the caller
- * keeps draining the child pipe so a verbose process cannot deadlock or grow RAM.
- */
-internal class ArtifactBudget(
-    private val maxBytes: Long,
-    stdoutFile: File,
-    stderrFile: File,
-) {
-    private val lock = Any()
-    private val stdout: FileOutputStream
-    private val stderr: FileOutputStream
-    private var stdoutOpen = true
-    private var stderrOpen = true
-    private var totalBytes = 0L
-
-    val stdoutBytes = AtomicLong(0)
-    val stderrBytes = AtomicLong(0)
-    val stdoutTruncated = AtomicBoolean(false)
-    val stderrTruncated = AtomicBoolean(false)
-
-    init {
-        require(maxBytes in 0..MAX_ARTIFACT_BYTES) { "artifactMaxBytes is outside the supported range" }
-        val stdoutStream = FileOutputStream(stdoutFile, false)
-        try {
-            val stderrStream = FileOutputStream(stderrFile, false)
-            stdout = stdoutStream
-            stderr = stderrStream
-        } catch (error: Throwable) {
-            try {
-                stdoutStream.close()
-            } catch (_: Exception) {}
-            throw error
-        }
-    }
-
-    fun write(stream: ArtifactStream, bytes: ByteArray, count: Int) {
-        if (count <= 0) return
-        synchronized(lock) {
-            val output = outputFor(stream)
-            if (output == null) {
-                markTruncated(stream)
-                return
-            }
-
-            val allowed = min(count.toLong(), maxBytes - totalBytes).coerceAtLeast(0).toInt()
-            if (allowed > 0) {
-                try {
-                    output.write(bytes, 0, allowed)
-                    totalBytes += allowed
-                    storedCounter(stream).addAndGet(allowed.toLong())
-                } catch (_: Exception) {
-                    markTruncated(stream)
-                    closeStreamLocked(stream, sync = false)
-                    return
-                }
-            }
-            if (allowed < count) markTruncated(stream)
-        }
-    }
-
-    fun closeStream(stream: ArtifactStream) {
-        synchronized(lock) {
-            closeStreamLocked(stream, sync = true)
-        }
-    }
-
-    fun closeAll() {
-        synchronized(lock) {
-            closeStreamLocked(ArtifactStream.STDOUT, sync = true)
-            closeStreamLocked(ArtifactStream.STDERR, sync = true)
-        }
-    }
-
-    fun abandonStream(stream: ArtifactStream) {
-        synchronized(lock) {
-            markTruncated(stream)
-            closeStreamLocked(stream, sync = true)
-        }
-    }
-
-    private fun outputFor(stream: ArtifactStream): FileOutputStream? = when (stream) {
-        ArtifactStream.STDOUT -> if (stdoutOpen) stdout else null
-        ArtifactStream.STDERR -> if (stderrOpen) stderr else null
-    }
-
-    private fun storedCounter(stream: ArtifactStream) = when (stream) {
-        ArtifactStream.STDOUT -> stdoutBytes
-        ArtifactStream.STDERR -> stderrBytes
-    }
-
-    private fun markTruncated(stream: ArtifactStream) {
-        when (stream) {
-            ArtifactStream.STDOUT -> stdoutTruncated.set(true)
-            ArtifactStream.STDERR -> stderrTruncated.set(true)
-        }
-    }
-
-    private fun closeStreamLocked(stream: ArtifactStream, sync: Boolean) {
-        val output = outputFor(stream) ?: return
-        try {
-            output.flush()
-            if (sync) output.fd.sync()
-        } catch (_: Exception) {
-            markTruncated(stream)
-        } finally {
-            try {
-                output.close()
-            } catch (_: Exception) {
-                markTruncated(stream)
-            }
-            when (stream) {
-                ArtifactStream.STDOUT -> stdoutOpen = false
-                ArtifactStream.STDERR -> stderrOpen = false
-            }
-        }
-    }
-}
-
-internal fun parseProcStat(stat: String, uid: Int): ProcIdentity {
-    val openParen = stat.indexOf('(')
-    val closeParen = stat.lastIndexOf(')')
-    require(openParen > 0 && closeParen > openParen) { "malformed /proc stat comm field" }
-    val pid = stat.substring(0, openParen).trim().toInt()
-    val fields = stat.substring(closeParen + 1).trim().split(Regex("\\s+"))
-    require(fields.size > 19) { "incomplete /proc stat" }
-    return ProcIdentity(
-        pid = pid,
-        pgid = fields[2].toInt(),
-        sessionId = fields[3].toInt(),
-        startTimeTicks = fields[19].toLong(),
-        uid = uid,
-    )
-}
-
-/**
- * Parses the PID only after the shell has published a complete newline-terminated
- * snapshot. Redirection creates the handshake file before `printf` writes into it,
- * so an empty or partial snapshot is a normal in-progress state rather than an
- * invalid identity.
- */
-internal fun parseHandshakePidSnapshot(snapshot: ByteArray): Int? {
-    if (snapshot.isEmpty() || snapshot.last() != '\n'.code.toByte()) return null
-
-    val value = snapshot.toString(StandardCharsets.US_ASCII).dropLast(1)
-    require(value.isNotEmpty() && value.all { it in '0'..'9' }) {
-        "invalid process identity handshake"
-    }
-    val pid = value.toIntOrNull()
-    require(pid != null && pid > 1) { "invalid process identity handshake" }
-    return pid
-}
-
-internal fun validateGuestCwd(cwd: String): String {
-    require(cwd.length <= 4096 && cwd.startsWith('/')) { "cwd must be a bounded guest absolute path" }
-    require(!cwd.contains('\u0000') && !cwd.contains("//")) { "cwd contains an invalid path component" }
-    val components = cwd.split('/').drop(1)
-    require(components.none { it.isEmpty() || it == "." || it == ".." }) {
-        "cwd contains an invalid path component"
-    }
-    require(cwd == "/workspace" || cwd.startsWith("/workspace/")) {
-        "cwd must remain inside /workspace"
-    }
-    return cwd
-}
-
-internal fun buildProotArguments(
-    prootPath: String,
-    rootfsPath: String,
-    workspacePath: String,
-    cwd: String,
-    command: String,
-    sessionId: String? = null,
-): List<String> = buildList {
-    add(prootPath)
-    add("-0")
-    add("--kill-on-exit")
-    add("--link2symlink")
-    add("-r")
-    add(rootfsPath)
-    add("-b")
-    add("/dev")
-    add("-b")
-    add("/proc")
-    add("-b")
-    add("$workspacePath:/workspace")
-    add("-w")
-    add(validateGuestCwd(cwd))
-    add("/usr/bin/env")
-    add("-i")
-    add("HOME=/root")
-    add("USER=root")
-    add("LOGNAME=root")
-    add("SHELL=/bin/bash")
-    add("PATH=$GUEST_PATH")
-    add("TMPDIR=/tmp")
-    add("VCP_CLI_WORKSPACE=/workspace")
-    if (sessionId != null) add("VCP_CLI_SESSION_ID=$sessionId")
-    add("TERM=dumb")
-    add("/bin/bash")
-    add("-lc")
-    add(command)
-}
-
-internal fun buildProotTerminalArguments(
-    prootPath: String,
-    rootfsPath: String,
-    workspacePath: String,
-    cwd: String,
-): List<String> = buildList {
-    add(prootPath)
-    add("-0")
-    add("--kill-on-exit")
-    add("--link2symlink")
-    add("-r")
-    add(rootfsPath)
-    add("-b")
-    add("/dev")
-    add("-b")
-    add("/proc")
-    add("-b")
-    add("$workspacePath:/workspace")
-    add("-w")
-    add(validateGuestCwd(cwd))
-    add("/usr/bin/env")
-    add("-i")
-    add("HOME=/root")
-    add("USER=root")
-    add("LOGNAME=root")
-    add("SHELL=/bin/bash")
-    add("PATH=$GUEST_PATH")
-    add("TMPDIR=/tmp")
-    add("VCP_CLI_WORKSPACE=/workspace")
-    add("TERM=xterm-256color")
-    add("COLORTERM=truecolor")
-    add("/bin/bash")
-    add("-l")
-}
-
-internal fun buildHostEnvironment(prootTmpPath: String, prootLoaderPath: String): Map<String, String> {
-    require(prootTmpPath.startsWith('/') && !prootTmpPath.contains('\u0000')) {
-        "PROOT_TMP_DIR must be an absolute private path"
-    }
-    require(prootLoaderPath.startsWith('/') && !prootLoaderPath.contains('\u0000')) {
-        "PROOT_LOADER must be an absolute APK-native path"
-    }
-    return linkedMapOf(
-        "PATH" to "/system/bin:/system/xbin",
-        "TMPDIR" to prootTmpPath,
-        "PROOT_TMP_DIR" to prootTmpPath,
-        "PROOT_LOADER" to prootLoaderPath,
-    )
-}
-
-internal fun buildHostCommand(
-    handshakePath: String,
-    processAddressSpaceKib: Long,
-    prootArguments: List<String>,
-): List<String> =
-    listOf(
-        "/system/bin/toybox",
-        "setsid",
-        "/system/bin/sh",
-        "-c",
-        HOST_HANDSHAKE_SCRIPT,
-        "vcp-cli-host",
-        handshakePath,
-        processAddressSpaceKib.toString(),
-    ) + prootArguments
-
-internal fun sha256Hex(bytes: ByteArray): String =
-    MessageDigest.getInstance("SHA-256").digest(bytes).toHex()
-
-private fun ByteArray.toHex(): String = joinToString(separator = "") { byte -> "%02x".format(byte) }
-
-private fun validateSha256(value: String, field: String): String {
-    require(value.length == 64 && value.all { it in '0'..'9' || it in 'a'..'f' || it in 'A'..'F' }) {
-        "$field must be a SHA-256 hex digest"
-    }
-    return value.lowercase()
-}
-
-private fun sha256File(file: File, maxBytes: Long): Pair<Long, String> {
-    require(file.isFile) { "runtime file is missing: ${file.name}" }
-    val digest = MessageDigest.getInstance("SHA-256")
-    var total = 0L
-    FileInputStream(file).use { input ->
-        val buffer = ByteArray(64 * 1024)
-        while (true) {
-            val read = input.read(buffer)
-            if (read < 0) break
-            total += read
-            require(total <= maxBytes) { "runtime file exceeds its size budget: ${file.name}" }
-            digest.update(buffer, 0, read)
-        }
-    }
-    return total to digest.digest().toHex()
-}
-
-internal fun verifyNativeExecutable(
-    nativeLibraryDirectory: File,
-    libraryName: String,
-    expectedBytes: Long,
-    expectedSha256: String,
-): File {
-    require(libraryName.isNotEmpty() && libraryName == File(libraryName).name) {
-        "native executable name must be a leaf"
-    }
-    val directory = nativeLibraryDirectory.canonicalFile
-    val candidatePath = File(nativeLibraryDirectory, libraryName).toPath()
-    val attributes = java.nio.file.Files.readAttributes(
-        candidatePath,
-        BasicFileAttributes::class.java,
-        LinkOption.NOFOLLOW_LINKS,
-    )
-    require(attributes.isRegularFile && !attributes.isSymbolicLink) {
-        "native executable must be a real regular file: $libraryName"
-    }
-    val candidate = candidatePath.toFile().canonicalFile
-    require(candidate.parentFile == directory) {
-        "native executable escaped nativeLibraryDir: $libraryName"
-    }
-    require(attributes.size() == expectedBytes) {
-        "native executable size does not match the frozen profile: $libraryName"
-    }
-    val (actualBytes, actualHash) = sha256File(candidate, expectedBytes)
-    require(actualBytes == expectedBytes && actualHash == validateSha256(expectedSha256, libraryName)) {
-        "native executable SHA-256 does not match the frozen profile: $libraryName"
-    }
-    require(candidate.canExecute()) { "native executable is not executable: $libraryName" }
-    return candidate
-}
-
-internal fun copyVerifiedStreamAtomically(
-    openInput: () -> InputStream,
-    destination: File,
-    expectedBytes: Long,
-    expectedSha256: String,
-    syncParent: (File) -> Unit = {},
-) {
-    require(expectedBytes in 1..MAX_ROOTFS_ARCHIVE_BYTES) { "rootfsArchiveBytes is outside the supported range" }
-    val expectedHash = validateSha256(expectedSha256, "rootfsArchiveSha256")
-    val parent = destination.parentFile ?: error("archive destination has no parent")
-    require(parent.isDirectory || parent.mkdirs()) { "failed to create archive directory" }
-    val staging = File(parent, ".${destination.name}.install-${UUID.randomUUID()}")
-    try {
-        val digest = MessageDigest.getInstance("SHA-256")
-        var total = 0L
-        openInput().use { input ->
-            FileOutputStream(staging, false).use { output ->
-                val buffer = ByteArray(64 * 1024)
-                while (true) {
-                    val read = input.read(buffer)
-                    if (read < 0) break
-                    total += read
-                    require(total <= expectedBytes) { "rootfs archive is larger than the frozen profile" }
-                    digest.update(buffer, 0, read)
-                    output.write(buffer, 0, read)
-                }
-                output.flush()
-                output.fd.sync()
-            }
-        }
-        require(total == expectedBytes) { "rootfs archive size does not match the frozen profile" }
-        require(digest.digest().toHex() == expectedHash) {
-            "rootfs archive SHA-256 does not match the frozen profile"
-        }
-        java.nio.file.Files.move(
-            staging.toPath(),
-            destination.toPath(),
-            StandardCopyOption.ATOMIC_MOVE,
-            StandardCopyOption.REPLACE_EXISTING,
-        )
-        syncParent(parent)
-    } finally {
-        if (staging.exists()) staging.delete()
-    }
-}
-
-private class CliRuntimeInstaller(private val context: Context) {
-    fun prepare(args: PrepareCliRuntimeArgs): PreparedRuntime {
-        validateIdentifier(args.profileId, "profileId")
-        require(args.runtimeGeneration > 0) { "runtimeGeneration must be positive" }
-        require(args.rootfsArchiveBytes in 1..MAX_ROOTFS_ARCHIVE_BYTES) {
-            "rootfsArchiveBytes is outside the supported range"
-        }
-        require(args.prootBytes in 1..MAX_PROOT_BYTES) { "prootBytes is outside the supported range" }
-        require(args.prootLoaderBytes in 1..MAX_PROOT_LOADER_BYTES) {
-            "prootLoaderBytes is outside the supported range"
-        }
-        val archiveHash = validateSha256(args.rootfsArchiveSha256, "rootfsArchiveSha256")
-        val prootHash = validateSha256(args.prootSha256, "prootSha256")
-        val prootLoaderHash = validateSha256(args.prootLoaderSha256, "prootLoaderSha256")
-
-        val privateRoot = File(context.noBackupFilesDir, "vcp-cli").ensureDirectory()
-        val archiveDirectory = File(privateRoot, "assets").ensureDirectory()
-        cleanupLegacySemanticAssets(archiveDirectory)
-        val archive = File(archiveDirectory, ROOTFS_ASSET_NAME)
-        val currentArchive = if (archive.exists()) {
-            runCatching { sha256File(archive, args.rootfsArchiveBytes) }.getOrNull()
-        } else {
-            null
-        }
-        if (currentArchive?.first != args.rootfsArchiveBytes || currentArchive.secondOrNull() != archiveHash) {
-            copyVerifiedStreamAtomically(
-                openInput = { context.assets.open(ROOTFS_ASSET_NAME) },
-                destination = archive,
-                expectedBytes = args.rootfsArchiveBytes,
-                expectedSha256 = archiveHash,
-                syncParent = ::fsyncDirectory,
-            )
-        }
-
-        val nativeLibraryDirectory = File(context.applicationInfo.nativeLibraryDir)
-        val proot = verifyNativeExecutable(
-            nativeLibraryDirectory,
-            PROOT_LIBRARY_NAME,
-            args.prootBytes,
-            prootHash,
-        )
-        val prootLoader = verifyNativeExecutable(
-            nativeLibraryDirectory,
-            PROOT_LOADER_LIBRARY_NAME,
-            args.prootLoaderBytes,
-            prootLoaderHash,
-        )
-        require(prootLoader != proot) { "PRoot loader must be a separate APK-native executable" }
-
-        val rootfsParent = File(privateRoot, "rootfs").ensureDirectory()
-        val output = File(privateRoot, "output").ensureDirectory()
-        val projectionRoot = File(privateRoot, "projections").ensureDirectory(mode = 0x1c0)
-        val prootTmpParent = File(privateRoot, "proot-tmp").ensureDirectory(mode = 0x1c0)
-        val handshakeParent = File(privateRoot, "handshakes").ensureDirectory(mode = 0x1c0)
-        val workspace = File(context.filesDir, "vcp-cli/workspace").ensureDirectory()
-        val skills = File(context.filesDir, "vcp-cli/skills").ensureDirectory()
-
-        return PreparedRuntime(
-            profileId = args.profileId,
-            runtimeGeneration = args.runtimeGeneration,
-            archive = archive.canonicalFile,
-            rootfsParent = rootfsParent.canonicalFile,
-            workspace = workspace.canonicalFile,
-            skills = skills.canonicalFile,
-            output = output.canonicalFile,
-            projectionRoot = projectionRoot.canonicalFile,
-            proot = proot,
-            prootLoader = prootLoader,
-            prootTmpParent = prootTmpParent.canonicalFile,
-            handshakeParent = handshakeParent.canonicalFile,
-        )
-    }
-
-}
-
-private fun fsyncDirectory(directory: File) {
-    val descriptor = Os.open(
-        directory.absolutePath,
-        OsConstants.O_RDONLY or OsConstants.O_CLOEXEC,
-        0,
-    )
-    try {
-        Os.fsync(descriptor)
-    } finally {
-        Os.close(descriptor)
-    }
-}
-
-private fun Pair<Long, String>?.secondOrNull(): String? = this?.second
-
-private fun File.ensureDirectory(mode: Int? = null): File {
-    require(isDirectory || mkdirs()) { "failed to create private runtime directory: $name" }
-    if (mode != null) Os.chmod(absolutePath, mode)
-    require(isDirectory && !java.nio.file.Files.isSymbolicLink(toPath())) {
-        "private runtime directory is not a real directory: $name"
-    }
-    return this
-}
-
-private fun cleanupLegacySemanticAssets(assets: File) {
-    runCatching {
-        if (!assets.isDirectory || java.nio.file.Files.isSymbolicLink(assets.toPath())) return
-        LEGACY_SEMANTIC_ASSET_NAMES.forEach { name ->
-            java.nio.file.Files.deleteIfExists(File(assets, name).toPath())
-        }
-    }
-}
-
-internal fun validateIdentifier(value: String, field: String) {
-    require(value.isNotBlank() && value.toByteArray(StandardCharsets.UTF_8).size <= 256) {
-        "$field must be a non-empty bounded identifier"
-    }
-    require(!value.contains('\u0000')) { "$field contains NUL" }
-}
-
-internal fun fingerprint(args: StartCliProcessArgs): String {
-    val digest = MessageDigest.getInstance("SHA-256")
-    val fields = mutableListOf(
-        args.jobId,
-        args.attemptId,
-        args.runtimeGeneration.toString(),
-        args.command,
-        args.rootfsPath,
-        args.cwd,
-        args.artifactMaxBytes.toString(),
-        args.backgroundLease.toString(),
-        args.timeoutMs.toString(),
-        args.displayLabel,
-    )
-    fields.forEach { value ->
-        val bytes = value.toByteArray(StandardCharsets.UTF_8)
-        digest.update(byteArrayOf(
-            (bytes.size ushr 24).toByte(),
-            (bytes.size ushr 16).toByte(),
-            (bytes.size ushr 8).toByte(),
-            bytes.size.toByte(),
-        ))
-        digest.update(bytes)
-    }
-    return digest.digest().toHex()
 }
 
 private fun safeFileStem(key: ProcessKey): String = sha256Hex(
@@ -895,20 +264,15 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         failure: (String) -> Unit,
         action: () -> JSObject,
     ) {
+        val pending = CliPendingRequest(success, failure, action)
         if (closed.get()) {
-            failure("CLI ProcessHost is closed")
+            pending.rejectBeforeStart("CLI ProcessHost is closed")
             return
         }
         try {
-            executor.execute {
-                try {
-                    success(action())
-                } catch (error: Throwable) {
-                    failure(error.message ?: error.javaClass.simpleName)
-                }
-            }
+            executor.execute(pending)
         } catch (_: RejectedExecutionException) {
-            failure("CLI ProcessHost $queueName queue is unavailable")
+            pending.rejectBeforeStart("CLI ProcessHost $queueName queue is unavailable")
         }
     }
 
@@ -969,10 +333,16 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         var stderrReader: Thread? = null
         var verifiedIdentity: ProcIdentity? = null
         var foregroundLease: CliForegroundLease? = null
+        var ownsStdout = false
+        var ownsStderr = false
+        var ownsHandshake = false
         try {
             require(stdoutFile.createNewFile()) { "stdout artifact identity already exists" }
+            ownsStdout = true
             require(stderrFile.createNewFile()) { "stderr artifact identity already exists" }
+            ownsStderr = true
             if (handshakeFile.exists()) require(handshakeFile.delete()) { "stale handshake cannot be removed" }
+            ownsHandshake = true
             val activeProotTmpDir = File(prepared.prootTmpParent, stem).ensureDirectory(mode = 0x1c0)
             prootTmpDir = activeProotTmpDir
             val activeBudget = ArtifactBudget(args.artifactMaxBytes, stdoutFile, stderrFile)
@@ -1006,21 +376,19 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
             }
 
             process = processBuilder.start()
-            stdoutReader = startDrainThread(
+            stdoutReader = activeBudget.startDrainThread(
                 name = "vcp-cli-stdout-${stem.take(12)}",
                 input = process.inputStream,
                 stream = ArtifactStream.STDOUT,
-                budget = activeBudget,
             )
-            stderrReader = startDrainThread(
+            stderrReader = activeBudget.startDrainThread(
                 name = "vcp-cli-stderr-${stem.take(12)}",
                 input = process.errorStream,
                 stream = ArtifactStream.STDERR,
-                budget = activeBudget,
             )
 
             val pid = waitForHandshakePid(handshakeFile, process)
-            val identity = readProcessIdentity(pid) ?: error("process leader disappeared during identity handshake")
+            val identity = OwnedProcessGroup.readIdentity(pid) ?: error("process leader disappeared during identity handshake")
             require(identity.pid == pid && identity.pgid == pid && identity.sessionId == pid) {
                 "setsid did not establish a dedicated process group and session"
             }
@@ -1050,12 +418,24 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
             handles[key] = handle
             return StartResult(args.operationId, handle)
         } catch (error: Throwable) {
-            foregroundLease?.let(::releaseForegroundLease)
-            abortUnregisteredProcess(process, verifiedIdentity, stdoutReader, stderrReader, budget)
-            stdoutFile.delete()
-            stderrFile.delete()
-            handshakeFile.delete()
-            prootTmpDir?.deleteRecursively()
+            foregroundLease?.let { lease ->
+                cleanupCliResource("foreground lease after start failure", error) { releaseForegroundLease(lease) }
+            }
+            abortUnregisteredProcess(process, verifiedIdentity, stdoutReader, stderrReader, budget, error)
+            if (ownsStdout) cleanupCliResource("stdout after start failure", error) {
+                check(stdoutFile.delete() || !stdoutFile.exists()) { "Unable to remove stdout artifact" }
+            }
+            if (ownsStderr) cleanupCliResource("stderr after start failure", error) {
+                check(stderrFile.delete() || !stderrFile.exists()) { "Unable to remove stderr artifact" }
+            }
+            if (ownsHandshake) cleanupCliResource("handshake after start failure", error) {
+                check(handshakeFile.delete() || !handshakeFile.exists()) { "Unable to remove handshake" }
+            }
+            prootTmpDir?.let { directory ->
+                cleanupCliResource("temporary directory after start failure", error) {
+                    check(directory.deleteRecursively() || !directory.exists()) { "Unable to remove PRoot temporary directory" }
+                }
+            }
             throw error
         }
     }
@@ -1097,17 +477,26 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         val readiness = CountDownLatch(1)
         val accepted = AtomicBoolean(false)
         val failure = AtomicReference<String?>(null)
-        ForegroundGuardian.awaitServiceReadiness(context, generation) { success, reason ->
-            accepted.set(success)
-            failure.set(reason)
-            readiness.countDown()
+        try {
+            ForegroundGuardian.awaitServiceReadiness(context, generation) { success, reason ->
+                accepted.set(success)
+                failure.set(reason)
+                readiness.countDown()
+            }
+            val completed = readiness.await(FOREGROUND_READINESS_WAIT_MS, TimeUnit.MILLISECONDS)
+            check(completed && accepted.get()) {
+                failure.get() ?: "CLI foreground service readiness timed out"
+            }
+            return CliForegroundLease(tag, generation)
+        } catch (error: Throwable) {
+            // The caller does not own the lease until readiness succeeds, including when
+            // host shutdown interrupts this wait or readiness registration itself fails.
+            cleanupCliResource("foreground lease before readiness", error) {
+                ForegroundGuardian.release(context, tag, generation)
+            }
+            if (error is InterruptedException) Thread.currentThread().interrupt()
+            throw error
         }
-        val completed = readiness.await(FOREGROUND_READINESS_WAIT_MS, TimeUnit.MILLISECONDS)
-        if (!completed || !accepted.get()) {
-            ForegroundGuardian.release(context, tag, generation)
-            error(failure.get() ?: "CLI foreground service readiness timed out")
-        }
-        return CliForegroundLease(tag, generation)
     }
 
     private fun releaseForegroundLease(lease: CliForegroundLease) {
@@ -1165,7 +554,7 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         if (handle == null) {
             return cancelResponse(args, found = false, termSent = false, killSent = false, groupGone = true, exitCode = null)
         }
-        if (handle.isCompleted() && !isGroupAlive(handle.identity.pgid)) {
+        if (handle.isCompleted() && !OwnedProcessGroup.isAlive(handle.identity.pgid)) {
             return cancelResponse(
                 args,
                 found = true,
@@ -1177,7 +566,7 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         }
 
         synchronized(handle.terminationLock) {
-            if (handle.isCompleted() && !isGroupAlive(handle.identity.pgid)) {
+            if (handle.isCompleted() && !OwnedProcessGroup.isAlive(handle.identity.pgid)) {
                 return cancelResponse(
                     args,
                     found = true,
@@ -1187,7 +576,7 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
                     exitCode = handle.exitCode.get(),
                 )
             }
-            val termination = terminateOwnedGroup(handle, args.graceMs)
+            val termination = OwnedProcessGroup.terminate(handle.identity, args.graceMs)
             if (!termination.groupGone) {
                 throw IllegalStateException("CLI process group remained alive after SIGKILL")
             }
@@ -1222,31 +611,6 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         put("exitCode", exitCode ?: org.json.JSONObject.NULL)
     }
 
-    private fun startDrainThread(
-        name: String,
-        input: InputStream,
-        stream: ArtifactStream,
-        budget: ArtifactBudget,
-    ): Thread = Thread({
-        try {
-            input.use {
-                val buffer = ByteArray(16 * 1024)
-                while (true) {
-                    val read = it.read(buffer)
-                    if (read < 0) break
-                    budget.write(stream, buffer, read)
-                }
-            }
-        } catch (_: Exception) {
-            // A close during cancellation is expected. The waiter still fences terminal state.
-        } finally {
-            budget.closeStream(stream)
-        }
-    }, name).apply {
-        isDaemon = true
-        start()
-    }
-
     private fun startWaiter(handle: CliProcessHandle): Thread = Thread({
         val code = try {
             handle.process.waitFor()
@@ -1254,7 +618,7 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
             null
         }
         if (code != null) handle.exitCode.compareAndSet(null, code)
-        val termination = runCatching { terminateOwnedGroup(handle, ORPHAN_GRACE_MS) }.getOrNull()
+        val termination = runCatching { OwnedProcessGroup.terminate(handle.identity, ORPHAN_GRACE_MS) }.getOrNull()
         if (termination?.groupGone == true && drainReadersForTerminal(handle)) {
             finalizeHandle(handle)
         }
@@ -1276,116 +640,24 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         error("process identity handshake timed out")
     }
 
-    private fun readProcessIdentity(pid: Int): ProcIdentity? = try {
-        val procDirectory = File("/proc/$pid")
-        val uid = Os.stat(procDirectory.absolutePath).st_uid
-        val stat = File(procDirectory, "stat").readText(Charsets.US_ASCII)
-        parseProcStat(stat, uid)
-    } catch (_: Exception) {
-        null
-    }
-
-    private fun canSignalOwnedGroup(handle: CliProcessHandle): Boolean {
-        val current = readProcessIdentity(handle.identity.pid)
-        if (current != null) {
-            return current.pid == handle.identity.pid &&
-                current.pgid == handle.identity.pgid &&
-                current.sessionId == handle.identity.sessionId &&
-                current.startTimeTicks == handle.identity.startTimeTicks &&
-                current.uid == handle.identity.uid &&
-                current.uid == AndroidProcess.myUid()
-        }
-        return groupHasOnlyVisibleAppUidMembers(handle.identity.pgid)
-    }
-
-    private fun groupHasOnlyVisibleAppUidMembers(pgid: Int): Boolean {
-        var found = false
-        val entries = File("/proc").listFiles() ?: return false
-        for (entry in entries) {
-            val pid = entry.name.toIntOrNull() ?: continue
-            val identity = readProcessIdentity(pid) ?: continue
-            if (identity.pgid == pgid) {
-                if (identity.uid != AndroidProcess.myUid()) return false
-                found = true
-            }
-        }
-        return found
-    }
-
-    private fun signalGroup(pgid: Int, signal: Int): Boolean = try {
-        Os.kill(-pgid, signal)
-        true
-    } catch (error: ErrnoException) {
-        if (error.errno == OsConstants.ESRCH) false else throw error
-    }
-
-    private fun isGroupAlive(pgid: Int): Boolean = try {
-        Os.kill(-pgid, 0)
-        true
-    } catch (error: ErrnoException) {
-        when (error.errno) {
-            OsConstants.ESRCH -> false
-            OsConstants.EPERM -> true
-            else -> throw error
-        }
-    }
-
-    private fun signalOwnedLeader(handle: CliProcessHandle, signal: Int): Boolean {
-        val current = readProcessIdentity(handle.identity.pid) ?: return false
-        require(current == handle.identity && current.uid == AndroidProcess.myUid()) {
-            "CLI process identity changed before signaling its PRoot leader"
-        }
-        return try {
-            Os.kill(current.pid, signal)
-            true
-        } catch (error: ErrnoException) {
-            if (error.errno == OsConstants.ESRCH) false else throw error
-        }
-    }
-
-    private fun waitForGroupGone(pgid: Int, waitMs: Long): Boolean {
-        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(waitMs)
-        do {
-            if (!isGroupAlive(pgid)) return true
-            if (System.nanoTime() >= deadline) return false
-            Thread.sleep(20)
-        } while (true)
-    }
-
-    private fun terminateOwnedGroup(handle: CliProcessHandle, graceMs: Long): GroupTermination {
-        if (!isGroupAlive(handle.identity.pgid)) {
-            return GroupTermination(termSent = false, killSent = false, groupGone = true)
-        }
-        require(canSignalOwnedGroup(handle)) { "CLI process identity no longer matches its owned process group" }
-        val termSent = signalGroup(handle.identity.pgid, OsConstants.SIGTERM)
-        if (waitForGroupGone(handle.identity.pgid, graceMs)) {
-            return GroupTermination(termSent = termSent, killSent = false, groupGone = true)
-        }
-
-        // PRoot handles SIGQUIT by stopping its remaining tracees. Give that
-        // --kill-on-exit path a bounded chance to reap guest processes that
-        // created a new session before the outer process group is force-killed.
-        if (signalOwnedLeader(handle, OsConstants.SIGQUIT) &&
-            waitForGroupGone(handle.identity.pgid, PROOT_TRACEES_QUIT_GRACE_MS)
-        ) {
-            return GroupTermination(termSent = termSent, killSent = false, groupGone = true)
-        }
-        require(canSignalOwnedGroup(handle)) { "CLI process group ownership changed before SIGKILL" }
-        val killSent = signalGroup(handle.identity.pgid, OsConstants.SIGKILL)
-        return GroupTermination(
-            termSent = termSent,
-            killSent = killSent,
-            groupGone = waitForGroupGone(handle.identity.pgid, GROUP_KILL_WAIT_MS),
-        )
-    }
-
     private fun finalizeHandle(handle: CliProcessHandle) {
         if (!handle.finalized.compareAndSet(false, true)) return
-        handle.artifactBudget.closeAll()
-        handle.prootTmpDir.deleteRecursively()
-        handle.foregroundLease?.let(::releaseForegroundLease)
-        handle.finished.countDown()
-        completedKeys.offer(handle.key)
+        // Callers have already established group disappearance and reader completion.
+        // Ancillary resource failures cannot turn that terminal fact into an endless wait.
+        try {
+            cleanupCliResource("terminal output descriptors") { handle.artifactBudget.closeAll() }
+            cleanupCliResource("terminal temporary directory") {
+                check(handle.prootTmpDir.deleteRecursively() || !handle.prootTmpDir.exists()) {
+                    "Unable to remove PRoot temporary directory"
+                }
+            }
+            handle.foregroundLease?.let { lease ->
+                cleanupCliResource("terminal foreground lease") { releaseForegroundLease(lease) }
+            }
+        } finally {
+            handle.finished.countDown()
+            completedKeys.offer(handle.key)
+        }
     }
 
     private fun completeHandleAfterGroupGone(handle: CliProcessHandle, waitMs: Long) {
@@ -1421,36 +693,30 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         stdoutReader: Thread?,
         stderrReader: Thread?,
         budget: ArtifactBudget?,
+        primaryError: Throwable,
     ) {
-        if (identity != null && isGroupAlive(identity.pgid) && canSignalOwnedIdentity(identity)) {
-            signalGroup(identity.pgid, OsConstants.SIGKILL)
-            waitForGroupGone(identity.pgid, GROUP_KILL_WAIT_MS)
+        if (identity != null) cleanupCliResource("unregistered process group", primaryError) {
+            OwnedProcessGroup.abort(identity)
         }
         if (process != null) {
-            process.destroyForcibly()
-            try {
-                process.waitFor(THREAD_JOIN_MS, TimeUnit.MILLISECONDS)
-            } catch (_: InterruptedException) {
-                Thread.currentThread().interrupt()
+            cleanupCliResource("unregistered direct child", primaryError) { process.destroyForcibly() }
+            cleanupCliResource("unregistered direct child wait", primaryError) {
+                try {
+                    process.waitFor(THREAD_JOIN_MS, TimeUnit.MILLISECONDS)
+                } catch (error: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                    throw error
+                }
             }
-            closeProcessStreams(process)
+            closeProcessStreams(process, primaryError)
         }
-        if (stdoutReader != null) joinThread(stdoutReader, THREAD_JOIN_MS)
-        if (stderrReader != null) joinThread(stderrReader, THREAD_JOIN_MS)
-        budget?.closeAll()
-    }
-
-    private fun canSignalOwnedIdentity(identity: ProcIdentity): Boolean {
-        val current = readProcessIdentity(identity.pid)
-        if (current != null) {
-            return current.pid == identity.pid &&
-                current.pgid == identity.pgid &&
-                current.sessionId == identity.sessionId &&
-                current.startTimeTicks == identity.startTimeTicks &&
-                current.uid == identity.uid &&
-                current.uid == AndroidProcess.myUid()
+        if (stdoutReader != null) cleanupCliResource("unregistered stdout reader", primaryError) {
+            joinThread(stdoutReader, THREAD_JOIN_MS)
         }
-        return groupHasOnlyVisibleAppUidMembers(identity.pgid)
+        if (stderrReader != null) cleanupCliResource("unregistered stderr reader", primaryError) {
+            joinThread(stderrReader, THREAD_JOIN_MS)
+        }
+        if (budget != null) cleanupCliResource("unregistered output descriptors", primaryError) { budget.closeAll() }
     }
 
     private fun evictCompletedHandlesIfNeeded() {
@@ -1461,16 +727,10 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         }
     }
 
-    private fun closeProcessStreams(process: Process) {
-        try {
-            process.outputStream.close()
-        } catch (_: Exception) {}
-        try {
-            process.inputStream.close()
-        } catch (_: Exception) {}
-        try {
-            process.errorStream.close()
-        } catch (_: Exception) {}
+    private fun closeProcessStreams(process: Process, primaryError: Throwable? = null) {
+        cleanupCliResource("stdin", primaryError) { process.outputStream.close() }
+        cleanupCliResource("stdout pipe", primaryError) { process.inputStream.close() }
+        cleanupCliResource("stderr pipe", primaryError) { process.errorStream.close() }
     }
 
     private fun joinThread(thread: Thread, waitMs: Long) {
@@ -1504,24 +764,31 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
 
     override fun close() {
         if (!closed.compareAndSet(false, true)) return
-        controlExecutor.shutdownNow()
-        inspectExecutor.shutdownNow()
-        cancelExecutor.shutdownNow()
+        val abandoned = controlExecutor.shutdownNow() +
+            inspectExecutor.shutdownNow() +
+            cancelExecutor.shutdownNow()
+        abandoned.forEach { request ->
+            try {
+                (request as? CliPendingRequest)?.rejectBeforeStart("CLI ProcessHost is closed")
+            } catch (error: Throwable) {
+                Log.w(TAG, "Unable to deliver queued CLI request shutdown", error)
+            }
+        }
         synchronized(lifecycleLock) {
             handles.values.forEach { handle ->
-                try {
-                    val termination = terminateOwnedGroup(handle, graceMs = 0)
+                cleanupCliResource("process group during host close") {
+                    val termination = OwnedProcessGroup.terminate(handle.identity, graceMs = 0)
                     if (termination.groupGone) completeHandleAfterGroupGone(handle, THREAD_JOIN_MS)
-                } catch (_: Exception) {
-                    // Direct-child cleanup below is still mandatory during teardown.
                 }
-                handle.process.destroyForcibly()
+                cleanupCliResource("direct child during host close") { handle.process.destroyForcibly() }
                 closeProcessStreams(handle.process)
-                joinThread(handle.stdoutReader, THREAD_JOIN_MS)
-                joinThread(handle.stderrReader, THREAD_JOIN_MS)
-                joinThread(handle.waiter, THREAD_JOIN_MS)
-                handle.artifactBudget.closeAll()
-                handle.foregroundLease?.let(::releaseForegroundLease)
+                cleanupCliResource("stdout reader during host close") { joinThread(handle.stdoutReader, THREAD_JOIN_MS) }
+                cleanupCliResource("stderr reader during host close") { joinThread(handle.stderrReader, THREAD_JOIN_MS) }
+                cleanupCliResource("waiter during host close") { joinThread(handle.waiter, THREAD_JOIN_MS) }
+                cleanupCliResource("output descriptors during host close") { handle.artifactBudget.closeAll() }
+                handle.foregroundLease?.let { lease ->
+                    cleanupCliResource("foreground lease during host close") { releaseForegroundLease(lease) }
+                }
             }
             handles.clear()
             completedKeys.clear()
