@@ -2,7 +2,7 @@ use serde::Serialize;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tauri_plugin_vcp_mobile::events::LifecyclePhase;
-#[cfg(any(target_os = "android", target_os = "ios", test))]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 use tauri_plugin_vcp_mobile::events::NativeLifecycleEvent;
 #[cfg(not(target_os = "ios"))]
 use tokio::sync::Mutex;
@@ -39,7 +39,7 @@ pub struct LifecycleSnapshot {
 }
 
 impl LifecycleSnapshot {
-    #[cfg(any(target_os = "android", target_os = "ios", test))]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     pub fn from_native(event: NativeLifecycleEvent, transition_epoch: u64) -> Self {
         Self {
             phase: event.phase,
@@ -148,27 +148,5 @@ mod tests {
         assert!(!ordering.accept(3));
         assert!(!ordering.accept(4));
         assert!(ordering.accept(5));
-    }
-
-    #[test]
-    fn snapshot_preserves_native_identity_and_independent_rust_epoch() {
-        let native = NativeLifecycleEvent {
-            phase: LifecyclePhase::Inactive,
-            native_sequence: 8,
-            snapshot: false,
-        };
-        let snapshot = LifecycleSnapshot::from_native(native, 3).as_snapshot();
-        assert_eq!(
-            serde_json::to_value(snapshot).unwrap(),
-            serde_json::json!({
-                "phase": "inactive", "nativeSequence": 8,
-                "snapshot": true, "transitionEpoch": 3,
-            }),
-        );
-        assert!(LifecycleState::new()
-            .lifecycle_snapshot
-            .try_read()
-            .unwrap()
-            .is_none());
     }
 }

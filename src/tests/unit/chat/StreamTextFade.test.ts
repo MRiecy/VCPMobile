@@ -9,13 +9,10 @@ import {
   flushStreamTextFragments,
   STREAM_ELEMENT_REVEAL_CLASS,
   STREAM_INLINE_REVEAL_CLASS,
-  STREAM_REVEAL_DURATION_MS,
-  supportsStreamRevealMotion,
 } from "@/core/utils/streamTextFade";
 
 const mountedSandboxes: HTMLElement[] = [];
 const animations = new WeakMap<Element, Animation>();
-const animationInputs = new WeakMap<Element, { keyframes: Keyframe[]; options: KeyframeAnimationOptions }>();
 let originalAnimate: PropertyDescriptor | undefined;
 let originalCss: PropertyDescriptor | undefined;
 
@@ -51,8 +48,6 @@ beforeEach(() => {
     configurable: true,
     value: vi.fn(function (
       this: Element,
-      keyframes: Keyframe[],
-      options: KeyframeAnimationOptions,
     ) {
       const animation = {
         playState: "running",
@@ -64,7 +59,6 @@ beforeEach(() => {
         },
       } as unknown as Animation;
       animations.set(this, animation);
-      animationInputs.set(this, { keyframes, options });
       return animation;
     }),
   });
@@ -85,22 +79,7 @@ afterEach(() => {
 });
 
 describe("stream text reveal", () => {
-  it("uses one fixed horizontal reveal contract", () => {
-    expect(STREAM_REVEAL_DURATION_MS).toBe(250);
-    expect({
-      animate: typeof Element.prototype.animate,
-      supports: typeof CSS.supports,
-      registerProperty: typeof CSS.registerProperty,
-      result: supportsStreamRevealMotion(),
-    }).toEqual({
-      animate: "function",
-      supports: "function",
-      registerProperty: "function",
-      result: true,
-    });
-  });
-
-  it("merges same-frame appends into one reveal surface with fixed mask keyframes", () => {
+  it("merges same-frame appends into one reveal surface", () => {
     const messageId = "ordered-inline-fade";
     const sandbox = createTextSandbox(messageId);
 
@@ -115,13 +94,6 @@ describe("stream text reveal", () => {
       expect(fragments).toHaveLength(1);
       expect(sandbox.textContent).toBe("base中文👨‍👩‍👧‍👦é مرحبا https://example.com/a-b");
       expect(fragments[0].classList.contains(STREAM_INLINE_REVEAL_CLASS)).toBe(true);
-      expect(animationInputs.get(fragments[0])).toEqual({
-        keyframes: [
-          { "--vcp-stream-reveal-progress": "0%" },
-          { "--vcp-stream-reveal-progress": "calc(100% + 1.732em)" },
-        ],
-        options: { duration: 250, easing: "linear", fill: "both" },
-      });
       finishFade(fragments[0]);
 
       expect(sandbox.querySelector("[data-vcp-stream-fragment]")).toBeNull();

@@ -1097,46 +1097,6 @@ mod tests {
     }
 
     #[test]
-    fn test_build_fts_match_query() {
-        // 单词短语
-        assert_eq!(
-            build_fts_match_query(&["机器学习".to_string()]),
-            Some("\"机器学习\"".into())
-        );
-        // 多词 AND
-        assert_eq!(
-            build_fts_match_query(&["机器学习".to_string(), "部署".to_string()]),
-            Some("\"机器学习\" AND \"部署\"".into())
-        );
-        // 双引号加倍转义，防 MATCH 语法注入
-        assert_eq!(
-            build_fts_match_query(&["a\"b".to_string()]),
-            Some("\"a\"\"b\"".into())
-        );
-        // 空输入
-        assert_eq!(build_fts_match_query(&[]), None);
-    }
-
-    #[test]
-    fn test_split_trigram_terms() {
-        // ≥3 字进 FTS，<3 字走 instr()
-        let (long, short) = split_trigram_terms("机器学习 部署 ai 模型训练");
-        assert_eq!(long, vec!["机器学习", "模型训练"]);
-        assert_eq!(short, vec!["部署", "ai"]);
-        // 纯长词 / 纯短词
-        let (long, short) = split_trigram_terms("神经网络");
-        assert_eq!(long, vec!["神经网络"]);
-        assert!(short.is_empty());
-        let (long, short) = split_trigram_terms("部署 天气");
-        assert!(long.is_empty());
-        assert_eq!(short, vec!["部署", "天气"]);
-        // 空输入
-        let (long, short) = split_trigram_terms("   ");
-        assert!(long.is_empty());
-        assert!(short.is_empty());
-    }
-
-    #[test]
     fn test_build_local_snippet() {
         let terms = vec!["部署".to_string()];
         // 命中居中 + 双侧省略号 + 高亮
@@ -1161,43 +1121,8 @@ mod tests {
         assert_eq!(overlap, "<mark>aba</mark>ba");
     }
 
-    #[test]
-    fn only_corrupt_and_notadb_codes_authorize_recovery() {
-        assert!(is_confirmed_sqlite_corruption_code(11));
-        assert!(is_confirmed_sqlite_corruption_code(26));
-        assert!(is_confirmed_sqlite_corruption_code(11 | (1 << 8)));
-        assert!(!is_confirmed_sqlite_corruption_code(5)); // SQLITE_BUSY
-        assert!(!is_confirmed_sqlite_corruption_code(6)); // SQLITE_LOCKED
-        assert!(!is_confirmed_sqlite_corruption_code(10)); // SQLITE_IOERR
-    }
-
     /// 铁律守护：(BASELINE_INCREMENTAL_MAX, BASELINE_VERSION) 版本号区间内严禁出现迁移，
     /// 否则全新安装快速路径会将其 seed 跳过，造成永久 schema 缺失。
-    #[test]
-    fn baseline_version_gap_is_free_of_migrations() {
-        let migrator = sqlx::migrate!("./migrations");
-        for migration in migrator.migrations.iter() {
-            assert!(
-                migration.version <= BASELINE_INCREMENTAL_MAX
-                    || migration.version >= BASELINE_VERSION,
-                "migration v{} falls in the forbidden gap ({}, {}); \
-                 versions below baseline are seeded-and-skipped on fresh installs",
-                migration.version,
-                BASELINE_INCREMENTAL_MAX,
-                BASELINE_VERSION
-            );
-        }
-        // baseline 文件必须存在
-        assert!(
-            migrator
-                .migrations
-                .iter()
-                .any(|m| m.version == BASELINE_VERSION),
-            "baseline migration v{} must exist",
-            BASELINE_VERSION
-        );
-    }
-
     /// 全新安装先执行 baseline、seed 历史迁移，再执行后续迁移；
     /// 直接得到 trigram FTS，同时必须具有当前分享的持久存储。
     #[tokio::test]

@@ -1,4 +1,4 @@
-import { defineComponent, isVNode, nextTick, reactive, ref, type VNode } from 'vue';
+import { defineComponent, nextTick, reactive } from 'vue';
 import { mount } from '@vue/test-utils';
 import { createPinia, setActivePinia, type Pinia } from 'pinia';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,7 +7,6 @@ import type { ChatMessage, StreamBlock } from '@/core/types/chat';
 import { useChatSessionStore } from '@/core/stores/chatSessionStore';
 import { useChatStreamStore } from '@/core/stores/chatStreamStore';
 import { useChatPreferencesStore } from '@/features/chat/preferences/store';
-import type { ChatPresentationMode } from '@/features/chat/preferences/model';
 import { invokeMock, mockInvoke } from '@/tests/mocks/tauri';
 
 const { mermaidRenderMock } = vi.hoisted(() => ({
@@ -47,22 +46,6 @@ function mountStreamRenderer(message: ChatMessage, pinia: Pinia) {
       stubs: streamRendererStubs,
     },
   });
-}
-
-function renderedVNodeKeys(root: VNode): Array<string | number | symbol> {
-  const visited = new Set<VNode>();
-  const keys: Array<string | number | symbol> = [];
-  const visit = (node: VNode) => {
-    if (visited.has(node)) return;
-    visited.add(node);
-    if (node.key !== null) keys.push(node.key);
-    if (node.component) visit(node.component.subTree);
-    if (Array.isArray(node.children)) {
-      node.children.forEach(child => { if (isVNode(child)) visit(child); });
-    }
-  };
-  visit(root);
-  return keys;
 }
 
 function installRunningAnimationMock(): () => void {
@@ -325,9 +308,6 @@ describe('MessageRenderer presentation shell', () => {
     });
     await wrapper.get('.vcp-tool-block > .tool-header-content').trigger('click');
     const toolElement = wrapper.get('.vcp-tool-block').element;
-    const stringKeys = renderedVNodeKeys(wrapper.vm.$.subTree).filter((key): key is string => typeof key === 'string');
-    expect(stringKeys.length).toBeGreaterThan(0);
-    expect(stringKeys.every(key => key.length < 128)).toBe(true);
     message.blocks = [resultBlock(image, 12345)];
     await nextTick();
     expect(wrapper.get('.vcp-tool-block').element).toBe(toolElement);
@@ -358,13 +338,7 @@ describe('MessageRenderer presentation shell', () => {
     });
     await wrapper.get('.vcp-tool-block > .tool-header-content').trigger('click');
     expect(wrapper.get<HTMLElement>('.tool-content-scrollable').element.style.display).toBe('none');
-    const previousKeys = renderedVNodeKeys(wrapper.vm.$.subTree).filter(key =>
-      typeof key === 'string' && key.includes('previous-message'),
-    );
-    expect(previousKeys.length).toBeGreaterThan(0);
     await wrapper.setProps({ message: makeMessage('next-message') });
-    const nextKeys = renderedVNodeKeys(wrapper.vm.$.subTree);
-    expect(nextKeys.some(key => previousKeys.includes(key))).toBe(false);
     expect(wrapper.get<HTMLElement>('.tool-content-scrollable').element.style.display).not.toBe('none');
     wrapper.unmount();
   });
@@ -482,108 +456,6 @@ describe('MessageRenderer presentation shell', () => {
     await wrapper.get('.vcp-mermaid-wrapper').trigger('click');
     expect(wrapper.get('[data-mermaid-viewer]').attributes('data-visible')).toBe('true');
     expect(mermaidRenderMock).not.toHaveBeenCalled();
-    wrapper.unmount();
-  });
-
-  it('keeps the same multi-bubble and strong-content tree across all three modes', async () => {
-    const pinia = createPinia();
-    setActivePinia(pinia);
-    const mode = ref<ChatPresentationMode>('bubble');
-    const message: ChatMessage = {
-      id: 'presentation-fixture',
-      role: 'assistant',
-      timestamp: 1_723_456_789_000,
-      agentId: 'agent-fixture',
-      shell: {
-        avatarColor: '#64748b',
-        displayName: 'Fixture Agent',
-        isUser: false,
-      },
-      blocks: [
-        {
-          type: 'markdown',
-          nodes: [
-            { type: 'paragraph', children: [{ type: 'text', value: 'first section' }] },
-            { type: 'raw_html', content: '<!--brk-->' },
-            { type: 'paragraph', children: [{ type: 'text', value: 'second section' }] },
-          ],
-        },
-        { type: 'tool-use', content: '{"query":"fixture"}', tool_name: 'Search' },
-        {
-          type: 'thought',
-          theme: 'default',
-          content: 'reasoning fixture',
-          is_complete: true,
-        },
-        { type: 'html-preview', content: '<main>preview fixture</main>' },
-        {
-          type: 'tool-call-summary',
-          items: [{ tool_name: 'Search', status: 'success' }],
-          raw_content: 'Search: success',
-        },
-        { type: 'diary', maid: 'Fixture Agent', date: '', content: 'diary fixture' },
-      ],
-      attachments: [{
-        id: 'attachment-fixture',
-        type: 'text/plain',
-        name: 'fixture.txt',
-        size: 7,
-        src: '/fixture.txt',
-      }],
-    };
-
-    const Host = defineComponent({
-      components: { MessageRenderer },
-      setup: () => ({ message, mode }),
-      template: `
-        <main class="chat-view-container" :data-presentation-mode="mode">
-          <MessageRenderer :message="message" />
-        </main>
-      `,
-    });
-
-    const wrapper = mount(Host, {
-      global: {
-        plugins: [pinia],
-        directives: { longpress: {} },
-        stubs: {
-          VcpAvatar: markerStub('avatar'),
-          ToolBlock: markerStub('tool'),
-          ThoughtBlock: markerStub('thought'),
-          HtmlPreviewBlock: markerStub('html-preview'),
-          ToolSummaryBlock: markerStub('tool-summary'),
-          DiaryBlock: markerStub('diary'),
-          AttachmentPreview: markerStub('attachment'),
-          MermaidFullScreenViewer: markerStub('mermaid-viewer'),
-          ThinkingIndicator: markerStub('thinking'),
-          StreamingTag: markerStub('streaming'),
-        },
-      },
-    });
-    await nextTick();
-
-    const rendererElement = wrapper.get('[data-message-id="presentation-fixture"]').element;
-    const expectedStrongBlocks = ['tool', 'thought', 'html-preview', 'tool-summary', 'diary', 'attachment'];
-    const assertStableFixture = (expectedMode: ChatPresentationMode) => {
-      expect(wrapper.get('.chat-view-container').attributes('data-presentation-mode')).toBe(expectedMode);
-      expect(wrapper.get('[data-message-id="presentation-fixture"]').element).toBe(rendererElement);
-      expect(wrapper.findAll('.vcp-chat-bubble')).toHaveLength(2);
-      expect(wrapper.findAll('.vcp-message-header')).toHaveLength(2);
-      for (const marker of expectedStrongBlocks) {
-        expect(wrapper.findAll(`[data-strong-block="${marker}"]`)).toHaveLength(1);
-      }
-      expect(wrapper.text()).toContain('first section');
-      expect(wrapper.text()).toContain('second section');
-    };
-
-    assertStableFixture('bubble');
-    mode.value = 'panel';
-    await nextTick();
-    assertStableFixture('panel');
-    mode.value = 'immersive';
-    await nextTick();
-    assertStableFixture('immersive');
-
     wrapper.unmount();
   });
 

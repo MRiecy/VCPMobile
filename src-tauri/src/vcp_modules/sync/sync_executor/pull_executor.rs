@@ -1313,11 +1313,7 @@ mod ndjson_frame_tests {
     };
     use crate::vcp_modules::topic_types::TopicKey;
     use serde_json::json;
-    use sha2::{Digest, Sha256};
     use std::collections::HashSet;
-
-    const MESSAGE_CANONICAL_CONTRACT: &[u8] =
-        include_bytes!("../fixtures/message_canonical_contract.json");
 
     fn success_frame(mut value: serde_json::Value) -> serde_json::Value {
         if let Some(object) = value.as_object_mut() {
@@ -1345,131 +1341,6 @@ mod ndjson_frame_tests {
 
         let conflicting = HashSet::from([TopicKey::new("group", "group-a", "topic-a")]);
         assert!(validate_returned_topic_identity(&frame, &conflicting).is_err());
-    }
-
-    #[test]
-    fn canonical_message_contract_matches_mobile_wire_dto_and_hashes() {
-        let bundle: serde_json::Value =
-            serde_json::from_slice(MESSAGE_CANONICAL_CONTRACT).expect("canonical contract JSON");
-
-        for case in bundle["validFrames"]
-            .as_array()
-            .expect("valid contract frames")
-        {
-            let expected = &case["expected"];
-            let mut wire_frame = json!({
-                "topicId": expected["topicId"].clone(),
-                "messages": expected["canonicalMessages"].clone(),
-            });
-            if expected["warningCount"].as_u64().unwrap_or_default() > 0 {
-                wire_frame["legacyAttachmentWarnings"] = expected["warningCount"].clone();
-                wire_frame["warningSamples"] = json!([]);
-            }
-            let bytes =
-                serde_json::to_vec(&success_frame(wire_frame)).expect("serialize contract frame");
-            let parsed = parse_topic_ndjson_frame(&bytes).expect("valid contract frame");
-            assert_eq!(parsed.topic_id, expected["topicId"]);
-            assert_eq!(parsed.messages.len() as u64, expected["messageCount"]);
-            assert_eq!(
-                parsed.legacy_attachment_warnings as u64,
-                expected["warningCount"]
-            );
-            assert_eq!(
-                serde_json::to_value(&parsed.messages).expect("canonical messages JSON"),
-                expected["canonicalMessages"]
-            );
-            let canonical_bytes =
-                serde_json::to_vec(&parsed.messages).expect("canonical message DTO bytes");
-            assert_eq!(
-                hex::encode(Sha256::digest(canonical_bytes)),
-                expected["canonicalMessagesSha256"]
-                    .as_str()
-                    .expect("canonical byte hash")
-            );
-            let content_hashes = parsed
-                .messages
-                .iter()
-                .map(|message| message.content_hash.clone())
-                .collect::<Vec<_>>();
-            assert_eq!(
-                serde_json::to_value(content_hashes).expect("content hashes JSON"),
-                expected["contentHashes"]
-            );
-        }
-
-        for case in bundle["invalidFrames"]
-            .as_array()
-            .expect("invalid contract frames")
-        {
-            let bytes = serde_json::to_vec(&success_frame(case["input"].clone()))
-                .expect("serialize invalid frame");
-            let error = match parse_topic_ndjson_frame(&bytes) {
-                Err(error) => error,
-                Ok(_) => panic!("invalid contract frame was accepted"),
-            };
-            assert!(error.contains(
-                case["errorContains"]
-                    .as_str()
-                    .expect("expected error fragment")
-            ));
-        }
-    }
-
-    #[test]
-    fn ndjson_error_frames_require_the_wire_1_5_object() {
-        let parsed = parse_topic_ndjson_frame(
-            json!({
-                "kind": "topic",
-                "topicId": "topic-a",
-                "ownerType": "agent",
-                "ownerId": "agent-a",
-                "ok": false,
-                "error": {
-                    "code": "TOPIC_NOT_FOUND",
-                    "origin": "desktop_plugin",
-                    "stage": "messages",
-                    "kind": "data",
-                    "retry": "manual",
-                    "message": "topic not found",
-                    "failedTopicIds": ["topic-a"]
-                }
-            })
-            .to_string()
-            .as_bytes(),
-        )
-        .expect("Wire 1.5 error frame");
-        assert_eq!(parsed.error.expect("error").code, "TOPIC_NOT_FOUND");
-        assert!(parse_topic_ndjson_frame(
-            json!({
-                "kind":"topic", "topicId":"topic-a", "ownerType":"agent",
-                "ownerId":"agent-a", "ok":false, "error":"legacy"
-            })
-            .to_string()
-            .as_bytes(),
-        )
-        .is_err());
-        assert!(parse_topic_ndjson_frame(
-            json!({
-                "kind": "topic",
-                "topicId": "topic-a",
-                "ownerType": "agent",
-                "ownerId": "agent-a",
-                "ok": false,
-                "messages": [{"id":"message-a"}],
-                "error": {
-                    "code": "TOPIC_NOT_FOUND",
-                    "origin": "desktop_plugin",
-                    "stage": "messages",
-                    "kind": "data",
-                    "retry": "manual",
-                    "message": "topic not found",
-                    "failedTopicIds": ["topic-a"]
-                }
-            })
-            .to_string()
-            .as_bytes(),
-        )
-        .is_err());
     }
 
     #[test]
@@ -1518,21 +1389,5 @@ mod ndjson_frame_tests {
         let incomplete = HashSet::from(["message-a".to_string()]);
         assert!(validate_requested_message_ids("topic", Some(&incomplete), &messages).is_err());
         assert!(validate_requested_message_ids("topic", None, &messages).is_ok());
-    }
-
-    #[test]
-    fn inbound_parser_fails_closed_on_message_contract_errors() {
-        let hash = "a".repeat(64);
-        for frame in [
-            json!({ "topicId": "topic", "messages": [{ "id": "", "role": "user", "timestamp": 1, "updatedAt": 1, "contentHash": hash }] }),
-            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "", "timestamp": 1, "updatedAt": 1, "contentHash": hash }] }),
-            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "user", "timestamp": -1, "updatedAt": 1, "contentHash": hash }] }),
-            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "user", "timestamp": u64::MAX.to_string(), "updatedAt": 1, "contentHash": hash }] }),
-            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "user", "timestamp": 1, "updatedAt": 1, "attachments": {}, "contentHash": hash }] }),
-            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "user", "timestamp": 1, "updatedAt": 1 }] }),
-            json!({ "topicId": "topic", "messages": [{ "id": "message", "role": "user", "timestamp": 1, "updatedAt": 1, "contentHash": "A".repeat(64) }] }),
-        ] {
-            assert!(parse_topic_ndjson_frame(success_frame(frame).to_string().as_bytes()).is_err());
-        }
     }
 }

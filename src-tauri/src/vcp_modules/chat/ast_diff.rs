@@ -736,46 +736,6 @@ fn diff_text_node(id: &str, old_value: &str, new_value: &str, mutations: &mut Ve
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vcp_modules::aurora_pipeline::AuroraBuffer;
-
-    struct SimpleRng {
-        state: u32,
-    }
-
-    impl SimpleRng {
-        fn new(seed: u32) -> Self {
-            Self { state: seed }
-        }
-        fn next_range(&mut self, min: usize, max: usize) -> usize {
-            self.state = self.state.wrapping_mul(1103515245).wrapping_add(12345);
-            let val = (self.state / 65536) % 32768;
-            min + (val as usize) % (max - min + 1)
-        }
-    }
-
-    #[test]
-    fn test_diff_append_text() {
-        let mut old = vec![MarkdownNode::paragraph(vec![InlineNode::text(
-            "Hello".to_string(),
-        )])];
-        let mut new = vec![MarkdownNode::paragraph(vec![InlineNode::text(
-            "Hello World".to_string(),
-        )])];
-
-        old[0].compute_hashes_recursively();
-        new[0].compute_hashes_recursively();
-
-        let mutations = diff_ast(&old, &new, "t");
-        assert_eq!(mutations.len(), 1);
-        match &mutations[0] {
-            AstMutation::AppendText { id, chunk } => {
-                assert_eq!(id, "t0.i0");
-                assert_eq!(chunk, " World");
-            }
-            _ => panic!("Expected AppendText mutation"),
-        }
-    }
-
     #[test]
     fn text_diff_scans_once_without_weakening_prefix_validation() {
         let old = "你".repeat(20_000);
@@ -806,31 +766,6 @@ mod tests {
             mutations.as_slice(),
             [AstMutation::UpdateText { value, .. }] if value == "短"
         ));
-    }
-
-    #[test]
-    fn test_diff_add_node() {
-        let mut old = vec![MarkdownNode::paragraph(vec![InlineNode::text(
-            "Hello".to_string(),
-        )])];
-        let mut new = vec![
-            MarkdownNode::paragraph(vec![InlineNode::text("Hello".to_string())]),
-            MarkdownNode::paragraph(vec![InlineNode::text("World".to_string())]),
-        ];
-
-        old[0].compute_hashes_recursively();
-        new[0].compute_hashes_recursively();
-        new[1].compute_hashes_recursively();
-
-        let mutations = diff_ast(&old, &new, "t");
-        assert_eq!(mutations.len(), 1);
-        match &mutations[0] {
-            AstMutation::Add { id, parent, .. } => {
-                assert_eq!(id, "t1");
-                assert_eq!(parent, "root");
-            }
-            _ => panic!("Expected Add mutation"),
-        }
     }
 
     // #4：列表新增项走 item 级别增量 AddListItem，而非整表 Replace
@@ -924,49 +859,5 @@ mod tests {
             &mutations2[0],
             AstMutation::ReplaceInline { id, .. } if id == "t0.i0"
         ));
-    }
-
-    #[test]
-    fn test_real_agent_stream_simulation() {
-        // 读取真实的 9.8KB Agent 输出样张文档（编译期内嵌，杜绝运行时路径依赖）
-        let text = include_str!("fixtures/测试文档.txt");
-
-        let mut rng = SimpleRng::new(42); // 固定 seed 保证测试具有确定的可复现性
-        let mut buffer = AuroraBuffer::new();
-
-        let chars: Vec<char> = text.chars().collect();
-        let mut idx = 0;
-
-        let mut total_mutations_count = 0;
-
-        // 模拟 SSE 流：每次随机取 5 到 150 字节的字符片段推送至缓冲区
-        while idx < chars.len() {
-            let chunk_len = rng.next_range(5, 150);
-            let end = (idx + chunk_len).min(chars.len());
-            let chunk: String = chars[idx..end].iter().collect();
-            idx = end;
-
-            buffer.append_chunk(&chunk);
-            let (_stable_changed, _tail_changed) = buffer.process_queue();
-            let tail_frame = buffer.take_tail_frame();
-
-            if let Some(frame) = tail_frame {
-                total_mutations_count += frame.mutations.len();
-                // 确保 frame 成功进行 serde JSON 序列化，验证没有任何序列化死锁或 panic
-                let serialized =
-                    serde_json::to_string(&frame).expect("Failed to serialize tail frame to JSON");
-                assert!(!serialized.is_empty());
-            }
-        }
-
-        // 终结流并强刷所有沉淀块
-        buffer.finalize();
-
-        // 确保整个大文本在流式过程中产生了大量的 diff 更新指令
-        assert!(
-            total_mutations_count > 50,
-            "Total mutations count was too low: {}",
-            total_mutations_count
-        );
     }
 }

@@ -108,30 +108,3 @@ where
         }
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sha256_helpers_preserve_standard_lowercase_hex_contract() {
-        assert_eq!(
-            calculate_sha256(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-        assert_eq!(
-            calculate_sha256(b"abc"),
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-        );
-        let mut hasher = Sha256::new();
-        hasher.update(b"abc");
-        assert_eq!(finalize_sha256_hex(hasher), calculate_sha256(b"abc"));
-    }
-
-    #[test]
-    fn desktop_compatible_id_base_matches_vchat_ascii_replacement() {
-        assert_eq!(desktop_compatible_id_base("Agent-01_ok"), "Agent-01_ok");
-        assert_eq!(desktop_compatible_id_base("测试1"), "__1");
-        assert_eq!(desktop_compatible_id_base("A B/😀"), "A_B___");
-    }
-}

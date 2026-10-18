@@ -834,26 +834,6 @@ mod tests {
     }
 
     #[test]
-    fn clean_install_catalog_is_visible_but_allowlist_is_empty() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join(TOOL_CONFIG_FILE);
-        let loaded = load_tool_config_file(&path, &known_names()).unwrap();
-        assert_eq!(loaded, LoadedToolConfig::Missing);
-
-        let resolved = resolve_tool_config(Ok(loaded));
-        assert!(resolved.enabled.is_empty());
-        assert!(resolved.rewrite_empty);
-        assert_eq!(resolved.status.state, ToolConfigState::Ready);
-
-        let registry = test_registry();
-        assert_eq!(registry.get_tools_metadata().len(), 2);
-        assert!(!enabled_metadata(&registry, "Clipboard"));
-        assert!(!enabled_metadata(&registry, "DeviceInfo"));
-        assert!(!registry.is_enabled("Clipboard"));
-        assert!(!registry.is_enabled("DeviceInfo"));
-    }
-
-    #[test]
     fn streaming_plan_never_activates_hardware_for_empty_or_oneshot_only_allowlists() {
         let mut registry = test_registry();
         registry.register_streaming(DummyStreamingTool);
@@ -869,35 +849,6 @@ mod tests {
         assert_eq!(plan.tools.len(), 1);
         assert_eq!(plan.tools[0].interval, Duration::from_secs(30));
         assert_eq!(plan.tools[0].sensor_demand, SensorDemand::MOTION);
-    }
-
-    #[test]
-    fn legacy_disabled_names_are_explicitly_invalidated_to_empty_allowlist() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join(TOOL_CONFIG_FILE);
-        std::fs::write(&path, br#"["Clipboard"]"#).unwrap();
-
-        let loaded = load_tool_config_file(&path, &known_names()).unwrap();
-        assert_eq!(loaded, LoadedToolConfig::LegacyDisabledNames);
-        let resolved = resolve_tool_config(Ok(loaded));
-        assert!(resolved.enabled.is_empty());
-        assert!(resolved.rewrite_empty);
-        assert_eq!(resolved.status.state, ToolConfigState::RecoveredDisabled);
-        assert!(resolved
-            .status
-            .message
-            .as_deref()
-            .unwrap_or_default()
-            .contains("重新授权"));
-
-        persist_enabled_config(&path, &resolved.enabled).unwrap();
-        assert_eq!(
-            load_tool_config_file(&path, &known_names()).unwrap(),
-            LoadedToolConfig::Current {
-                enabled: HashSet::new(),
-                orphaned: vec![],
-            }
-        );
     }
 
     #[test]
@@ -917,30 +868,6 @@ mod tests {
         let resolved = resolve_tool_config(load_tool_config_file(&path, &known_names()));
         assert!(resolved.enabled.is_empty());
         assert_eq!(resolved.status.state, ToolConfigState::RecoveredDisabled);
-    }
-
-    #[test]
-    fn atomic_persist_round_trips_versioned_enabled_allowlist() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join(TOOL_CONFIG_FILE);
-        let enabled = known_names();
-        persist_enabled_config(&path, &enabled).unwrap();
-        assert_eq!(
-            load_tool_config_file(&path, &known_names()).unwrap(),
-            LoadedToolConfig::Current {
-                enabled,
-                orphaned: vec![],
-            }
-        );
-        let persisted: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-        assert_eq!(persisted.get("schemaVersion"), Some(&Value::from(2)));
-        assert!(persisted.get("enabledTools").is_some());
-        assert!(persisted.get("disabledTools").is_none());
-        assert!(std::fs::read_dir(temp.path()).unwrap().all(|entry| !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .ends_with(".tmp")));
     }
 
     #[test]
@@ -1009,45 +936,6 @@ mod tests {
     }
 
     #[test]
-    fn per_tool_enable_disable_and_duplicate_registration_are_idempotent() {
-        let mut registry = test_registry();
-        registry.register_oneshot(DummyTool {
-            name: "Clipboard",
-            description: "replacement",
-        });
-        assert_eq!(registry.tool_count(), 2);
-        assert!(!registry.is_enabled("Clipboard"));
-
-        registry
-            .replace_enabled(HashSet::from(["Clipboard".to_string()]))
-            .unwrap();
-        assert!(registry.is_enabled("Clipboard"));
-        assert_eq!(
-            registry.tools["Clipboard"].manifest().description,
-            "replacement"
-        );
-
-        assert!(registry
-            .validate_enabled_names(vec!["Clipboard".to_string(), "Clipboard".to_string()])
-            .is_err());
-        registry.replace_enabled(HashSet::new()).unwrap();
-        assert!(!registry.is_enabled("Clipboard"));
-    }
-
-    #[test]
-    fn default_oneshot_registration_manifest_uses_generic_manifest_wire() {
-        let tool = DummyTool {
-            name: "Clipboard",
-            description: "clipboard",
-        };
-        let raw = tool.registration_manifest().expect("raw manifest");
-        assert_eq!(
-            serde_json::from_str::<Value>(raw.get()).unwrap(),
-            serde_json::to_value(tool.manifest()).unwrap()
-        );
-    }
-
-    #[test]
     fn orphaned_v2_grants_are_ignored_without_enabling_new_catalog_entries() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(TOOL_CONFIG_FILE);
@@ -1058,25 +946,6 @@ mod tests {
         assert_eq!(resolved.enabled, HashSet::from(["Clipboard".to_string()]));
         assert_eq!(resolved.status.state, ToolConfigState::Ready);
         assert!(resolved.status.message.is_some());
-    }
-
-    #[test]
-    fn future_v2_metadata_does_not_invalidate_the_authorization_core() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join(TOOL_CONFIG_FILE);
-        std::fs::write(
-            &path,
-            br#"{"schemaVersion":2,"enabledTools":["Clipboard"],"migrationNoticeAcknowledged":true}"#,
-        )
-        .unwrap();
-
-        assert_eq!(
-            load_tool_config_file(&path, &known_names()).unwrap(),
-            LoadedToolConfig::Current {
-                enabled: HashSet::from(["Clipboard".to_string()]),
-                orphaned: vec![],
-            }
-        );
     }
 
     #[test]

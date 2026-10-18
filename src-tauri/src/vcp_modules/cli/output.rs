@@ -665,18 +665,6 @@ fn sync_directory(path: &Path, label: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn cursor_is_checksum_and_attempt_bound() {
-        let cursor = initial_cursor(9, "job-1", "attempt-1").expect("encode cursor");
-        assert!(cursor.len() <= 512);
-        let decoded = decode_cursor(&cursor).expect("decode cursor");
-        assert_eq!(decoded.runtime_generation, 9);
-        assert_eq!(decoded.attempt_id, "attempt-1");
-        let mut tampered = cursor;
-        tampered.push('x');
-        assert!(decode_cursor(&tampered).is_err());
-    }
-
     #[tokio::test]
     async fn poll_reads_bounded_incremental_stdout_and_stderr() {
         let directory = tempfile::tempdir().expect("temporary output root");

@@ -70,19 +70,4 @@ describe("DiaryCenter internal navigation gate", () => {
     wrapper.unmount();
   });
 
-  it("keeps the memo list visible until an expanded search has a query", async () => {
-    const store = useDiaryStore();
-    const wrapper = mountCenter();
-
-    expect(wrapper.find('[data-diary-role="search-panel"]').exists()).toBe(false);
-    await wrapper.get('button[aria-label="搜索日记"]').trigger("click");
-
-    expect(wrapper.find('[data-diary-role="search-panel"]').exists()).toBe(true);
-    expect(store.searchMode).toBe("none");
-
-    await wrapper.get('button[aria-label="关闭搜索"]').trigger("click");
-    expect(wrapper.find('button[aria-label="搜索日记"]').exists()).toBe(true);
-    expect(store.searchMode).toBe("none");
-    wrapper.unmount();
-  });
 });

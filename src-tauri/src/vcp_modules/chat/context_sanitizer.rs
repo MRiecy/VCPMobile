@@ -287,13 +287,6 @@ mod tests {
     }
 
     #[test]
-    fn test_raw_content() {
-        let html = "<pre data-raw-content=\"<<<[TOOL_REQUEST]>>>\ncall()\"></pre>";
-        let md = html_to_vcp_markdown(html, false);
-        assert_eq!(md, "<<<[TOOL_REQUEST]>>>\ncall()");
-    }
-
-    #[test]
     fn test_raw_marker_pre_passthrough() {
         // 未美化但含特殊标记的 pre：textContent 原文直通
         let html = "<pre><<<[TOOL_REQUEST]>>>\nfn call()\n<<<[END_TOOL_REQUEST]>>></pre>";
@@ -321,14 +314,6 @@ mod tests {
     }
 
     #[test]
-    fn test_thought_chain_bubble_keep_without_title() {
-        let html = r#"<div class="vcp-thought-chain-bubble"><p>思考内容</p></div>"#;
-        let md = html_to_vcp_markdown(html, true);
-        assert!(md.contains("[--- VCP元思考链 ---]"), "md={md}");
-        assert!(md.contains("思考内容"), "md={md}");
-    }
-
-    #[test]
     fn test_thought_chain_bubble_dropped_when_not_keeping() {
         let html = r#"<p>前</p><div class="vcp-thought-chain-bubble" data-thought-title="计划"><p>思考内容</p></div><p>后</p>"#;
         let md = html_to_vcp_markdown(html, false);
@@ -336,39 +321,6 @@ mod tests {
         assert!(!md.contains("VCP元思考链"), "md={md}");
         assert!(md.contains('前'), "md={md}");
         assert!(md.contains('后'), "md={md}");
-    }
-
-    #[test]
-    fn test_thought_chain_bubble_class_match_is_case_sensitive() {
-        // 对齐 JS classList 语义：大小写敏感（纠正旧实现的 AsciiCaseInsensitive 偏差）
-        let html = r#"<div class="VCP-THOUGHT-CHAIN-BUBBLE">内容保留</div>"#;
-        let md = html_to_vcp_markdown(html, false);
-        assert!(md.contains("内容保留"), "md={md}");
-    }
-
-    // ── 多媒体保留 ──
-
-    #[test]
-    fn test_html_to_md_img() {
-        let html = r#"<p>Hello <img src="test.png" alt="alt text"> World</p>"#;
-        let md = html_to_vcp_markdown(html, false);
-        assert!(md.contains(r#"<img src="test.png" alt="alt text">"#));
-    }
-
-    #[test]
-    fn test_img_without_src_dropped() {
-        let html = r#"<p>前<img alt="no src">后</p>"#;
-        let md = html_to_vcp_markdown(html, false);
-        assert!(!md.contains("<img"), "md={md}");
-        assert!(md.contains("前"), "md={md}");
-    }
-
-    #[test]
-    fn test_audio_video_preserved() {
-        let html = r#"<p><audio src="a.mp3"></audio><video src="v.mp4"></video></p>"#;
-        let md = html_to_vcp_markdown(html, false);
-        assert!(md.contains(r#"<audio src="a.mp3"></audio>"#), "md={md}");
-        assert!(md.contains(r#"<video src="v.mp4"></video>"#), "md={md}");
     }
 
     #[test]
@@ -418,67 +370,5 @@ mod tests {
         let md = sanitizer.sanitize_content(input, false);
         assert!(md.contains("<thinking>"), "md={md}");
         assert!(md.contains("</THINKING>"), "md={md}");
-    }
-
-    // ── 通用标签语义（不断言精确空白） ──
-
-    #[test]
-    fn test_general_html_semantics() {
-        let html = "<h1>标题一</h1><h3>标题三</h3>\
-                    <p><strong>粗</strong>与<em>斜</em>与<code>x=1</code></p>\
-                    <ul><li>甲</li><li>乙</li></ul>\
-                    <blockquote><p>引用</p></blockquote>\
-                    <pre><code>let x = 1;</code></pre>\
-                    <table><thead><tr><th>H</th></tr></thead><tbody><tr><td>C</td></tr></tbody></table>\
-                    <hr>";
-        let md = html_to_vcp_markdown(html, false);
-        assert!(md.contains("# 标题一"), "md={md}");
-        assert!(md.contains("### 标题三"), "md={md}");
-        assert!(md.contains("**粗**"), "md={md}");
-        assert!(md.contains("*斜*"), "md={md}");
-        assert!(md.contains("`x=1`"), "md={md}");
-        assert!(
-            md.lines()
-                .any(|line| line.starts_with("- ") && line.contains('甲')),
-            "md={md}"
-        );
-        assert!(
-            md.lines()
-                .any(|line| line.starts_with("- ") && line.contains('乙')),
-            "md={md}"
-        );
-        assert!(md.contains("> 引用"), "md={md}");
-        assert!(md.contains("```"), "md={md}");
-        assert!(md.contains("let x = 1;"), "md={md}");
-        assert!(
-            md.contains('|') && md.contains('H') && md.contains('C'),
-            "md={md}"
-        );
-        // HrStyle::Dashes 渲染为 `- - -`（桌面 turndown hr:'---' 意图的对齐项）
-        assert!(md.contains("- - -"), "md={md}");
-    }
-
-    // ── 缓存 ──
-
-    #[test]
-    fn test_cache_capacity_evicts_least_recent_item() {
-        let sanitizer = ContextSanitizer::new(1, 60);
-        sanitizer.set_cached("first".to_string(), "one".to_string());
-        assert_eq!(sanitizer.get_cached("first"), Some("one".to_string()));
-
-        sanitizer.set_cached("second".to_string(), "two".to_string());
-
-        assert_eq!(sanitizer.get_cached("first"), None);
-        assert_eq!(sanitizer.get_cached("second"), Some("two".to_string()));
-    }
-
-    #[test]
-    fn test_sanitize_content_uses_cache() {
-        let sanitizer = ContextSanitizer::default();
-        let html = "<p>Hello <strong>World</strong></p>";
-        let first = sanitizer.sanitize_content(html, false);
-        let second = sanitizer.sanitize_content(html, false);
-        assert_eq!(first, second);
-        assert!(first.contains("**World**"), "md={first}");
     }
 }

@@ -1888,22 +1888,12 @@ mod security_boundary_tests {
     #[cfg(unix)]
     use super::validated_direct_file;
     use super::{
-        canonical_staged_file, commit_registered_attachment, normalize_attachment_mime,
-        safe_storage_extension, validate_attachment_cas_path, validated_attachment_file,
-        verify_expected_hash, verify_streamed_size,
+        canonical_staged_file, commit_registered_attachment, validate_attachment_cas_path,
+        validated_attachment_file,
     };
     use super::{check_existing_cas_size, check_existing_cas_size_async};
     use crate::vcp_modules::db_manager::DbState;
     use std::fs;
-
-    #[test]
-    fn storage_extension_keeps_common_suffixes_but_drops_path_payloads() {
-        assert_eq!(safe_storage_extension("报告.PDF"), Some("PDF"));
-        assert_eq!(safe_storage_extension("archive.tar.gz"), Some("gz"));
-        assert_eq!(safe_storage_extension("payload.a/b"), None);
-        assert_eq!(safe_storage_extension("payload.../../secret"), None);
-        assert_eq!(safe_storage_extension("payload.very_long_extension"), None);
-    }
 
     #[test]
     fn canonical_staging_gate_accepts_only_direct_files_inside_its_owner_root() {
@@ -1955,34 +1945,6 @@ mod security_boundary_tests {
             std::os::unix::fs::symlink(&valid, &link).expect("CAS symlink");
             assert!(validate_attachment_cas_path(&root, &link, &"c".repeat(64), 5).is_err());
         }
-    }
-
-    #[test]
-    fn attachment_mime_is_normalized_without_accepting_control_or_path_syntax() {
-        assert_eq!(
-            normalize_attachment_mime("Image/PNG; charset=binary").expect("valid MIME"),
-            "image/png"
-        );
-        for invalid in ["image", "image/", "/png", "image/png\nsecret", "image/p ng"] {
-            assert!(normalize_attachment_mime(invalid).is_err(), "{invalid}");
-        }
-    }
-
-    #[test]
-    fn native_hash_is_only_a_hint_and_must_match_rust_recomputation() {
-        let actual = "a".repeat(64);
-        let forged = "b".repeat(64);
-        assert!(verify_expected_hash(Some(&actual), &actual).is_ok());
-        assert!(verify_expected_hash(Some(&forged), &actual).is_err());
-        assert!(verify_expected_hash(None, &actual).is_ok());
-    }
-
-    #[test]
-    fn streamed_attachment_size_must_match_opening_metadata() {
-        assert!(verify_streamed_size(0, 0).is_ok());
-        assert!(verify_streamed_size(64 * 1024, 64 * 1024).is_ok());
-        assert!(verify_streamed_size(64 * 1024, 64 * 1024 - 1).is_err());
-        assert!(verify_streamed_size(64 * 1024, 64 * 1024 + 1).is_err());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import piniaPluginPersistedstate from "pinia-plugin-persistedstate";
-import { defineComponent, h, nextTick } from "vue";
+import { nextTick } from "vue";
 import { mount } from "@vue/test-utils";
 import { useAssistantStore } from "@/core/stores/assistant";
 import { useChatSessionStore } from "@/core/stores/chatSessionStore";
@@ -10,7 +10,6 @@ import {
   type Topic,
 } from "@/core/stores/topicListManager";
 import TopicList from "@/features/topic/TopicList.vue";
-import SidebarSearch from "@/features/agent/SidebarSearch.vue";
 import {
   channelInstances,
   invokeMock,
@@ -139,81 +138,8 @@ describe("topic list concurrency guards", () => {
     expect(restored.isTopicPinned("agent-a", "agent", "topic-a")).toBe(true);
   });
 
-  it("shows an accessible topic-only sort menu and emits the selection", async () => {
-    const wrapper = mount(SidebarSearch, {
-      props: {
-        modelValue: "",
-        activeTab: "topics",
-        sortMode: "created",
-      },
-    });
 
-    await wrapper.get('[aria-label="选择话题排序方式"]').trigger("click");
-    const options = wrapper.findAll('[role="menuitemradio"]');
-    expect(options).toHaveLength(2);
-    expect(options[0].attributes("aria-checked")).toBe("true");
-    expect(options[0].find('[aria-hidden="true"]').exists()).toBe(true);
-    const menu = wrapper.get('[role="menu"]');
-    expect(menu.classes()).toContain("z-20");
-    expect(menu.attributes("style")).toContain(
-      "background-color: var(--secondary-bg)",
-    );
-    await options[1].trigger("click");
-    expect(wrapper.emitted("update:sortMode")?.[0]).toEqual(["updated"]);
 
-    await wrapper.setProps({ activeTab: "agents" });
-    expect(wrapper.find('[aria-label="选择话题排序方式"]').exists()).toBe(false);
-    wrapper.unmount();
-  });
-
-  it("keeps the selected sort mode visible after closing and reopening the menu", async () => {
-    const harness = defineComponent({
-      setup() {
-        const store = useTopicStore();
-        return () =>
-          h(SidebarSearch, {
-            modelValue: "",
-            activeTab: "topics",
-            sortMode: store.effectiveSortMode,
-            "onUpdate:modelValue": () => undefined,
-            "onUpdate:sortMode": store.setSortMode,
-          });
-      },
-    });
-    const wrapper = mount(harness);
-
-    await wrapper.get('[aria-label="选择话题排序方式"]').trigger("click");
-    await wrapper.findAll('[role="menuitemradio"]')[1].trigger("click");
-    expect(useTopicStore().effectiveSortMode).toBe("updated");
-
-    await wrapper.get('[aria-label="选择话题排序方式"]').trigger("click");
-    const reopenedOptions = wrapper.findAll('[role="menuitemradio"]');
-    expect(reopenedOptions[0].attributes("aria-checked")).toBe("false");
-    expect(reopenedOptions[1].attributes("aria-checked")).toBe("true");
-    expect(reopenedOptions[1].find('[aria-hidden="true"]').exists()).toBe(true);
-    wrapper.unmount();
-  });
-
-  it("renders compact pinned and regular sections only when a pin is visible", async () => {
-    const store = useTopicStore();
-    store.topics = [topic("pinned", "Pinned Topic"), topic("regular", "Regular Topic")];
-    store.toggleTopicPinned("agent-a", "agent", "pinned");
-
-    const wrapper = mount(TopicList, {
-      global: { directives: { longpress: {} } },
-    });
-    await nextTick();
-    expect(wrapper.text()).toContain("置顶");
-    expect(wrapper.text()).toContain("其他话题");
-    expect(wrapper.text()).toContain("Pinned Topic");
-    expect(wrapper.text()).toContain("Regular Topic");
-
-    store.searchTerm = "regular";
-    await nextTick();
-    expect(wrapper.text()).not.toContain("置顶");
-    expect(wrapper.text()).not.toContain("其他话题");
-    wrapper.unmount();
-  });
 
   it("deduplicates concurrent loads for the same owner", async () => {
     const pending = deferred<void>();

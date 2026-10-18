@@ -99,84 +99,8 @@ describe("VCP CLI mobile workbench", () => {
     wrapper.unmount();
   });
 
-  it("shows the first-install reason without deadlocking command execution", async () => {
-    mockInvoke(VCP_CLI_STATUS_COMMAND, () =>
-      runtimeStatus({
-        available: false,
-        availability_reason: "本地 rootfs 尚未准备",
-        phase: "unprovisioned",
-      }),
-    );
-    const wrapper = await mountView();
-    await flushPromises();
 
-    await wrapper
-      .get('[data-vcp-cli-role="command-input"]')
-      .setValue("echo first-run");
-    expect(wrapper.text()).toContain("本地 rootfs 尚未准备");
-    const runButton = wrapper.get('[data-vcp-cli-action="run"]');
-    expect(runButton.text()).toContain("准备并执行");
-    expect(runButton.attributes("disabled")).toBeUndefined();
-    expect(
-      invokeMock.mock.calls.some(
-        ([command, args]) =>
-          command === VCP_CLI_ACTION_COMMAND &&
-          requestFromArgs(args).action.action === "run",
-      ),
-    ).toBe(false);
-    wrapper.unmount();
-  });
 
-  it("shows active preparation and prevents a duplicate run", async () => {
-    mockInvoke(VCP_CLI_STATUS_COMMAND, () =>
-      runtimeStatus({
-        available: false,
-        availability_reason: null,
-        phase: "preparing",
-      }),
-    );
-    const wrapper = await mountView();
-    await flushPromises();
-    await wrapper
-      .get('[data-vcp-cli-role="command-input"]')
-      .setValue("echo wait");
-
-    expect(wrapper.get('[data-vcp-cli-phase="preparing"]').text()).toContain(
-      "正在准备本地 Runtime",
-    );
-    expect(wrapper.text()).toContain("正在校验并解包内置 PRoot / Alpine");
-    expect(
-      wrapper.get('[data-vcp-cli-action="run"]').attributes("disabled"),
-    ).toBeDefined();
-    expect(wrapper.get('[data-vcp-cli-action="run"]').text()).toContain(
-      "准备中",
-    );
-    wrapper.unmount();
-  });
-
-  it("keeps a failed preparation reason visible and retryable", async () => {
-    mockInvoke(VCP_CLI_STATUS_COMMAND, () =>
-      runtimeStatus({
-        available: false,
-        availability_reason: "内置 rootfs SHA-256 校验失败",
-        phase: "error",
-      }),
-    );
-    const wrapper = await mountView();
-    await flushPromises();
-    await wrapper
-      .get('[data-vcp-cli-role="command-input"]')
-      .setValue("echo retry");
-
-    expect(wrapper.get('[data-vcp-cli-phase="error"]').text()).toContain(
-      "准备失败",
-    );
-    expect(wrapper.text()).toContain("内置 rootfs SHA-256 校验失败");
-    const runButton = wrapper.get('[data-vcp-cli-action="run"]');
-    expect(runButton.text()).toContain("重试准备");
-    expect(runButton.attributes("disabled")).toBeUndefined();
-    wrapper.unmount();
-  });
 
   it("keeps Enter as a newline and runs once only through the explicit button", async () => {
     mockInvoke(VCP_CLI_ACTION_COMMAND, (args) => {

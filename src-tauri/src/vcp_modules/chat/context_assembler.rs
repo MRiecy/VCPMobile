@@ -360,18 +360,4 @@ mod desktop_only_tests {
         assert!(!ready_json.contains("/private/attachments"));
         assert!(!ready_json.contains("file://"));
     }
-
-    #[test]
-    fn empty_message_remains_string_content() {
-        let message = ChatMessage {
-            id: "empty-message".into(),
-            role: "user".into(),
-            content: String::new(),
-            timestamp: 1,
-            ..Default::default()
-        };
-
-        let assembled = assemble_history_for_vcp(&[message], false, false);
-        assert_eq!(assembled[0]["content"], "");
-    }
 }

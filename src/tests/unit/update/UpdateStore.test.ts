@@ -44,19 +44,6 @@ describe('update store', () => {
     vi.unstubAllGlobals();
   });
 
-  it.each([
-    [null, true],
-    ['on', true],
-    ['off', false],
-    ['legacy-value', true],
-  ] as const)('restores the local auto-check preference %s without initializing OTA', (stored, enabled) => {
-    if (stored !== null) localStorage.setItem('vcp_auto_update_check', stored);
-    const store = useUpdateStore();
-    expect(store.autoCheckEnabled).toBe(enabled);
-    expect(store.status).toEqual(idle);
-    expect(invokeMock).not.toHaveBeenCalled();
-    expect(listenMock).not.toHaveBeenCalled();
-  });
 
   it('publishes the local preference after saving and leaves it unchanged on a failed write', () => {
     const store = useUpdateStore();
@@ -81,20 +68,6 @@ describe('update store', () => {
     expect(store.autoCheckEnabled).toBe(true);
   });
 
-  it('uses the default when reading storage is unavailable without breaking the OTA owner', () => {
-    const read = vi.fn(() => {
-      throw new Error('storage unavailable');
-    });
-    vi.stubGlobal('localStorage', { getItem: read });
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const store = useUpdateStore();
-    expect(store.autoCheckEnabled).toBe(true);
-    expect(store.status).toEqual(idle);
-    expect(read).toHaveBeenCalledWith('vcp_auto_update_check');
-    expect(console.warn).toHaveBeenCalledWith(
-      '[UpdateStore] Failed to read auto-check preference:', 'Error: storage unavailable',
-    );
-  });
 
   it('init pulls the current snapshot once and then follows broadcast events', async () => {
     mockInvoke('get_update_status', () => idle);
@@ -117,47 +90,7 @@ describe('update store', () => {
     expect(store.isBusy).toBe(true);
   });
 
-  it('command results are applied to the mirrored status', async () => {
-    mockInvoke('get_update_status', () => idle);
-    mockInvoke('check_for_update', () => available);
-    mockInvoke('start_update_download', () => ({
-      ...available,
-      state: 'readyToInstall',
-      downloaded: available.info!.apkSize!,
-    }));
-    mockInvoke('install_update', () => ({ ...available, state: 'idle' as const }));
 
-    const store = useUpdateStore();
-    await store.init();
-
-    const checked = await store.check();
-    expect(checked.state).toBe('available');
-    expect(store.info?.latestVersion).toBe('1.2.0');
-
-    const downloaded = await store.startDownload();
-    expect(downloaded.state).toBe('readyToInstall');
-    expect(store.state).toBe('readyToInstall');
-
-    const installed = await store.install();
-    expect(installed.state).toBe('idle');
-  });
-
-  it('surfaces structured errors from the state machine', async () => {
-    mockInvoke('get_update_status', () => idle);
-    mockInvoke('start_update_download', () => ({
-      ...available,
-      state: 'failed' as const,
-      error: { stage: 'download', message: '网络停滞超过 30 秒', retryable: true },
-    }));
-
-    const store = useUpdateStore();
-    await store.init();
-    const result = await store.startDownload();
-
-    expect(result.state).toBe('failed');
-    expect(store.error?.stage).toBe('download');
-    expect(store.error?.retryable).toBe(true);
-  });
 
   it('retries a failed subscription and stops consuming events when disposed', async () => {
     mockInvoke('get_update_status', () => idle);

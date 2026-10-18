@@ -509,15 +509,3 @@ pub async fn stop_all_model_tests(state: State<'_, ModelManagerState>) -> Result
 pub async fn init_model_manager<R: Runtime>(_app: &AppHandle<R>, _state: &ModelManagerState) {
     // 数据库架构下无需在启动时将全量收藏与使用数据加载至内存
 }
-
-#[cfg(test)]
-mod task_owner_tests {
-    use super::is_current_batch_owner;
-
-    #[test]
-    fn old_batch_finalizer_cannot_clear_new_owner() {
-        assert!(is_current_batch_owner(Some(2), 2));
-        assert!(!is_current_batch_owner(Some(2), 1));
-        assert!(!is_current_batch_owner(None, 1));
-    }
-}

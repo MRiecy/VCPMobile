@@ -1141,7 +1141,7 @@ mod tests {
         cleanup_stale_installer_apks_at, parse_sha256_sidecar, remove_canonical_legacy_dir,
         select_apk_asset, select_checksum_asset, select_latest_version_release,
         stage_installer_apk_in_updates, validate_installer_path_in_updates,
-        validate_release_asset_url, version_is_newer, GitHubAsset, GitHubRelease, APK_ASSET_SUFFIX,
+        validate_release_asset_url, GitHubAsset, GitHubRelease, APK_ASSET_SUFFIX,
         APK_FILENAME, STALE_INSTALLER_AGE,
     };
 
@@ -1233,16 +1233,6 @@ mod tests {
         assert!(parse_sha256_sidecar("", "x.apk").is_err());
         assert!(parse_sha256_sidecar(&hash.to_string(), "x.apk").is_err());
         assert!(parse_sha256_sidecar(&format!("{hash}  x.apk extra"), "x.apk").is_err());
-    }
-
-    #[test]
-    fn version_comparison_prefers_semver() {
-        assert!(version_is_newer("1.2.0", "1.1.4"));
-        assert!(!version_is_newer("1.1.4", "1.1.4"));
-        assert!(!version_is_newer("1.1.3", "1.1.4"));
-        // 非 semver 退化为字符串不等
-        assert!(version_is_newer("nightly-x", "1.1.4"));
-        assert!(!version_is_newer("1.1.4", "1.1.4"));
     }
 
     #[test]

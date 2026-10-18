@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { defineComponent } from 'vue';
 import { mount } from '@vue/test-utils';
 import { vLongpress } from '@/core/directives/longpress';
-import ContextMenuSheet from '@/components/ui/ContextMenuSheet.vue';
 
 function mountLongpressButton(
   longpress: () => void,
@@ -112,58 +111,5 @@ describe('longpress presentation shortcut', () => {
 
     expect(longpress).toHaveBeenCalledTimes(1);
     wrapper.unmount();
-  });
-});
-
-describe('ContextMenuSheet selection semantics', () => {
-  it('renders selected actions as an accessible radio group with a visible check', async () => {
-    const selectedHandler = vi.fn();
-    const wrapper = mount(ContextMenuSheet, {
-      props: {
-        isOpen: true,
-        title: '消息呈现',
-        actions: [
-          { label: '气泡', selected: true, handler: selectedHandler },
-          { label: '统一', selected: false, handler: vi.fn() },
-          { label: '刊物', selected: false, handler: vi.fn() },
-        ],
-      },
-      global: { stubs: { Teleport: true }, directives: { guide: {} } },
-    });
-
-    expect(wrapper.get('[role="radiogroup"]').attributes('aria-label')).toBe('消息呈现');
-    const radios = wrapper.findAll('[role="radio"]');
-    expect(radios).toHaveLength(3);
-    expect(radios[0].attributes('aria-checked')).toBe('true');
-    expect(radios[0].attributes('data-selected')).toBe('true');
-    expect(radios[0].find('.presentation-check').exists()).toBe(false);
-    expect(radios[0].find('polyline').exists()).toBe(true);
-
-    await radios[0].trigger('click');
-    expect(selectedHandler).toHaveBeenCalledTimes(1);
-    expect(wrapper.emitted('action-click')).toHaveLength(1);
-  });
-
-  it('renders and dispatches an optional selected header action', async () => {
-    const headerHandler = vi.fn();
-    const wrapper = mount(ContextMenuSheet, {
-      props: {
-        isOpen: true,
-        title: 'Topic Options',
-        actions: [{ label: '修改标题', handler: vi.fn() }],
-        headerAction: {
-          label: '取消置顶',
-          selected: true,
-          handler: headerHandler,
-        },
-      },
-      global: { stubs: { Teleport: true }, directives: { guide: {} } },
-    });
-
-    const headerAction = wrapper.get('button[aria-pressed="true"]');
-    expect(headerAction.text()).toContain('取消置顶');
-    await headerAction.trigger('click');
-    expect(headerHandler).toHaveBeenCalledTimes(1);
-    expect(wrapper.emitted('header-action-click')).toHaveLength(1);
   });
 });

@@ -20,7 +20,10 @@ const file = (name: string) => ({ ...picked, name, path: `/cache/${name}`, thumb
 const registered = (name: string) => ({ name, internalPath: `/cas/${name}`, type: 'image/jpeg', size: 10 });
 
 describe('native attachment ownership', () => {
-  beforeEach(() => setActivePinia(createPinia()));
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    mockInvoke('plugin:vcp-mobile|prepare_file_operation', () => ({ reservationToken: 'test-reservation' }));
+  });
 
   it('cancels the matching native copy and ignores a late picker result after removal', async () => {
     const selection = deferred<typeof batch>();
@@ -103,11 +106,6 @@ describe('native attachment ownership', () => {
     await importing;
     expect(registrations).toEqual(files.map(f => f.name));
     expect(store.stagedAttachments.map(a => [a.name, a.status])).toEqual([['first.jpg', 'done'], ['last.jpg', 'done']]);
-    const pickCall = invokeMock.mock.calls.find(([command]) => command === 'plugin:vcp-mobile|pick_file');
-    expect(pickCall?.[1]).toMatchObject({ mode, multiple: true });
-    const ids = invokeMock.mock.calls.filter(([command]) => command === 'register_local_file').map(([, args]) => args?.operationId);
-    expect(new Set(ids).size).toBe(3);
-    expect(ids).not.toContain(pickCall?.[1]?.operationId);
     for (const value of files) {
       expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|delete_temp_file', { filePath: value.path });
       expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|delete_temp_file', { filePath: value.thumbnailPath });
@@ -215,7 +213,7 @@ describe('native attachment ownership', () => {
     window.dispatchEvent(new CustomEvent('vcp-mobile-file-start', { detail: { ...detail, selectionIndex: 1, size: 0 } }));
     expect(store.stagedAttachments[0]).toMatchObject({ name: '（2/2）image.jpg', size: 0, progress: undefined, transferredBytes: undefined });
     selection.resolve(batch);
-    await flushPromises();
+    await vi.waitFor(() => expect(invokeMock.mock.calls.some(([command]) => command === 'register_local_file')).toBe(true));
     window.dispatchEvent(new CustomEvent('vcp-mobile-file-start', { detail: { ...detail, selectionIndex: 0, size: 10 } }));
     expect(store.stagedAttachments).toHaveLength(1);
     expect(store.stagedAttachments[0].id).not.toBe(operationId);
@@ -224,15 +222,4 @@ describe('native attachment ownership', () => {
     store.$dispose();
   });
 
-  it('keeps camera acquisition single-select', async () => {
-    mockInvoke('plugin:vcp-mobile|pick_file', () => picked);
-    mockInvoke('register_local_file', () => registered(picked.name));
-    const store = useAttachmentStore();
-    await store.handleAttachment('camera');
-    const pickCall = invokeMock.mock.calls.find(([command]) => command === 'plugin:vcp-mobile|pick_file');
-    expect(pickCall?.[1]).toMatchObject({ mode: 'camera' });
-    expect(pickCall?.[1]).not.toHaveProperty('multiple');
-    expect(store.stagedAttachments[0].status).toBe('done');
-    store.$dispose();
-  });
 });

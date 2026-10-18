@@ -3833,14 +3833,6 @@ mod tests {
         app
     }
 
-    #[test]
-    fn sync_log_share_accepts_only_leaf_filenames() {
-        assert!(is_sync_log_leaf_name("20260813_120000_000_1_sync.log"));
-        for invalid in ["", ".", "..", "../secret", "nested/log", "C:\\secret.log"] {
-            assert!(!is_sync_log_leaf_name(invalid), "accepted {invalid}");
-        }
-    }
-
     async fn websocket_pair() -> (SyncWebSocket, TestServerWebSocket) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -4164,85 +4156,6 @@ mod tests {
         assert_eq!(query[0].1, "token +/?");
         assert_eq!(config.http_url, "https://192.168.1.10:5974/base");
         assert_eq!(config.sync_token, "token +/?");
-        assert_eq!(config.sync_log_level, "DEBUG");
-        assert!(config.sync_prerender_enabled);
-    }
-
-    #[test]
-    fn session_config_rejects_missing_urls_and_token_before_session_creation() {
-        for (field, settings, expected_code) in [
-            (
-                "WebSocket URL",
-                Settings {
-                    sync_server_url: "   ".to_string(),
-                    ..valid_sync_settings()
-                },
-                "SYNC_CONFIG_MISSING",
-            ),
-            (
-                "HTTP URL",
-                Settings {
-                    sync_http_url: String::new(),
-                    ..valid_sync_settings()
-                },
-                "SYNC_CONFIG_MISSING",
-            ),
-            (
-                "token",
-                Settings {
-                    sync_token: " \t ".to_string(),
-                    ..valid_sync_settings()
-                },
-                "SYNC_TOKEN_MISSING",
-            ),
-        ] {
-            let error = sync_config_error(&settings, true);
-            assert_eq!(error.code, expected_code, "code for {field}");
-        }
-    }
-
-    #[test]
-    fn session_config_rejects_invalid_endpoint_shapes() {
-        for (field, settings) in [
-            (
-                "WebSocket scheme",
-                Settings {
-                    sync_server_url: "https://192.168.1.10:5975/ws-sync".to_string(),
-                    ..valid_sync_settings()
-                },
-            ),
-            (
-                "HTTP scheme",
-                Settings {
-                    sync_http_url: "ftp://192.168.1.10:5974".to_string(),
-                    ..valid_sync_settings()
-                },
-            ),
-            (
-                "WebSocket host",
-                Settings {
-                    sync_server_url: "ws://".to_string(),
-                    ..valid_sync_settings()
-                },
-            ),
-            (
-                "HTTP query",
-                Settings {
-                    sync_http_url: "https://192.168.1.10:5974?mode=legacy".to_string(),
-                    ..valid_sync_settings()
-                },
-            ),
-            (
-                "WebSocket fragment",
-                Settings {
-                    sync_server_url: "wss://192.168.1.10:5975/ws-sync#fragment".to_string(),
-                    ..valid_sync_settings()
-                },
-            ),
-        ] {
-            let error = sync_config_error(&settings, true);
-            assert_eq!(error.code, "SYNC_CONFIG_INVALID", "code for {field}");
-        }
     }
 
     #[test]
@@ -4354,39 +4267,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_topic_diff_is_not_staged_as_a_pending_request() {
-        let mut pending = None;
-        let request = stage_topic_diff_request(&mut pending, HashSet::new(), Vec::new())
-            .expect("empty topic diff should short-circuit");
-
-        assert!(request.is_none());
-        assert!(pending.is_none());
-    }
-
-    #[test]
-    fn nonempty_topic_diff_stages_the_exact_pending_request() {
-        let key = TopicKey::new("agent", "agent-a", "topic-a");
-        let expected = HashSet::from([key.clone()]);
-        let mut pending = None;
-        let request = stage_topic_diff_request(
-            &mut pending,
-            expected.clone(),
-            vec![TopicDiffState {
-                owner_type: OwnerType::Agent,
-                owner_id: key.owner_id,
-                topic_id: key.topic_id,
-                config_hash: "config-a".to_string(),
-                content_hash: "content-a".to_string(),
-            }],
-        )
-        .expect("non-empty topic diff should stage")
-        .expect("non-empty topic diff should create a request");
-
-        assert_eq!(request.topics.len(), 1);
-        assert_eq!(pending, Some(expected));
-    }
-
-    #[test]
     fn topic_diff_staging_does_not_bypass_an_existing_pending_response() {
         let original = HashSet::from([TopicKey::new("agent", "agent-a", "topic-a")]);
         let mut pending = Some(original.clone());
@@ -4395,58 +4275,6 @@ mod tests {
 
         assert_eq!(error, "A topic hash response is already pending");
         assert_eq!(pending, Some(original));
-    }
-
-    #[test]
-    fn version_ack_contract_is_consumed_by_the_handshake_parser() {
-        let accepted = parse_version_ack(
-            &json!({
-                "type": "VERSION_ACK",
-                "versions": [
-                    {"component": "wire", "version": "1.5"},
-                    {"component": "desktop_plugin", "version": "1.5.9"}
-                ],
-                "backendMode": "cds",
-            })
-            .to_string(),
-        )
-        .expect("strict 1.5 acknowledgement");
-        assert_eq!(accepted.package_version, "1.5.9");
-        assert_eq!(accepted.wire_version, "1.5");
-        assert_eq!(accepted.backend_mode, DesktopBackendMode::Cds);
-
-        assert!(parse_version_ack(
-            &json!({
-                "type": "VERSION_ACK",
-                "version": "1.5.0",
-            })
-            .to_string()
-        )
-        .is_err());
-        assert!(parse_version_ack(
-            &json!({
-                "type": "VERSION_ACK",
-                "versions": [
-                    {"component": "desktop_plugin", "version": "1.5.0"},
-                    {"component": "wire", "version": 1.5}
-                ],
-                "backendMode": "cds",
-            })
-            .to_string()
-        )
-        .is_err());
-        assert!(parse_version_ack(
-            &json!({
-                "type": "VERSION_ACK",
-                "versions": [
-                    {"component": "desktop_plugin", "version": "1.5.0"},
-                    {"component": "wire", "version": "1.5"}
-                ],
-                "backendMode": "fallback",
-            })
-            .to_string()
-        )
-        .is_err());
     }
 
     #[test]

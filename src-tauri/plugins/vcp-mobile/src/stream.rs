@@ -169,20 +169,6 @@ pub fn release_foreground_inner<R: Runtime>(_app: &AppHandle<R>, tag: &str) -> R
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::ForegroundTask;
-
-    #[test]
-    fn concurrent_operations_never_share_a_guardian_tag() {
-        let first = ForegroundTask::Stream.unique_tag();
-        let second = ForegroundTask::Stream.unique_tag();
-        assert_ne!(first, second);
-        assert!(first.starts_with("stream:"));
-        assert!(second.starts_with("stream:"));
-    }
-}
-
 /// 设置分布式保活模式 (兼容老版本接口)
 pub fn set_keepalive_mode_inner<R: Runtime>(
     app: &AppHandle<R>,

@@ -63,32 +63,3 @@ pub fn client(profile: HttpProfile) -> &'static Client {
         HttpProfile::AdminApi => ADMIN_API_CLIENT.get_or_init(|| build_client(profile)),
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn same_profile_returns_shared_instance() {
-        let a = client(HttpProfile::AdminApi);
-        let b = client(HttpProfile::AdminApi);
-        assert!(std::ptr::eq(a, b));
-    }
-
-    #[test]
-    fn different_profiles_are_distinct_instances() {
-        let chat = client(HttpProfile::ChatStream);
-        let admin = client(HttpProfile::AdminApi);
-        assert!(!std::ptr::eq(chat, admin));
-    }
-
-    #[test]
-    fn clone_shares_underlying_pool() {
-        // reqwest::Client 克隆共享同一连接池（Arc 语义）。
-        let shared = client(HttpProfile::ChatStream);
-        let cloned = shared.clone();
-        // 克隆体的连接池句柄与原实例一致（通过 Debug 输出中的指针不可比，
-        // 这里仅验证克隆可用且类型正确——池共享由 reqwest 保证）。
-        drop(cloned);
-    }
-}

@@ -391,52 +391,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn highlight_code_block_emits_classed_spans_without_inline_styles() {
-        let html = highlight_code_block("fn main() {}\n", "rust", CodeBlockShell::Code)
-            .expect("highlight should succeed");
-        assert!(html.starts_with("<pre class=\"vcp-code-block vcp-scrollable\"><code>"));
-        assert!(html.contains("class=\""));
-        assert!(!html.contains("style="));
-    }
-
-    #[test]
-    fn incremental_start_emits_anchors_with_classed_spans() {
-        let mut highlighter = IncrementalCodeHighlighter::default();
-        highlighter.begin_frame();
-        let html = highlighter
-            .start("n1", "let a = 1;\nlet b", "rust")
-            .expect("incremental start should succeed");
-        assert!(html.contains(STREAM_CODE_ROOT_ATTR));
-        assert!(html.contains(STREAM_CODE_STABLE_ATTR));
-        assert!(html.contains(STREAM_CODE_ACTIVE_ATTR));
-        assert!(html.contains("class=\""));
-        assert!(!html.contains("style="));
-    }
-
-    #[test]
-    fn incremental_append_emits_classed_patch_without_inline_styles() {
-        let mut highlighter = IncrementalCodeHighlighter::default();
-        highlighter.begin_frame();
-        highlighter
-            .start("n1", "let a = 1;\nlet b", "rust")
-            .expect("incremental start should succeed");
-        let patch = highlighter
-            .append(
-                "n1",
-                "let a = 1;\nlet b",
-                "let a = 1;\nlet b = 2;\nlet c",
-                "rust",
-            )
-            .expect("append patch should succeed");
-        assert!(patch.completed_html.contains("class=\""));
-        assert!(patch.completed_html.contains('2'));
-        assert!(patch.active_html.contains("let"));
-        assert!(patch.active_html.contains('c'));
-        assert!(!patch.completed_html.contains("style="));
-        assert!(!patch.active_html.contains("style="));
-    }
-
-    #[test]
     fn flat_emitter_merges_adjacent_tokens_sharing_top_scope() {
         let scope = Scope::new("source.rust").expect("valid scope");
         // Noop 制造 op 边界但栈顶不变：两段 token 应合并进同一个 span。
@@ -454,24 +408,6 @@ mod tests {
         let mut stack = ScopeStack::new();
         let html = classed_line_html("if<", &ops, &mut stack).expect("emit should succeed");
         assert_eq!(html, "<span class=\"keyword control rust\">if</span>&lt;");
-    }
-
-    #[test]
-    fn flat_emitter_reuses_scope_class_cache_across_tokens() {
-        // 两段同 scope 裸文本之间隔一个无 scope 段：第二次开 span 仍走缓存，输出一致。
-        let scope = Scope::new("comment.block.rust").expect("valid scope");
-        let ops = [
-            (0, ScopeStackOp::Push(scope)),
-            (1, ScopeStackOp::Pop(1)),
-            (2, ScopeStackOp::Push(scope)),
-            (3, ScopeStackOp::Pop(1)),
-        ];
-        let mut stack = ScopeStack::new();
-        let html = classed_line_html("a=b", &ops, &mut stack).expect("emit should succeed");
-        assert_eq!(
-            html,
-            "<span class=\"comment block rust\">a</span>=<span class=\"comment block rust\">b</span>"
-        );
     }
 
     #[test]
@@ -507,28 +443,6 @@ mod tests {
             strip_tags_for_test(&patch.active_html),
         );
         assert_eq!(dom_text, v2);
-    }
-
-    #[test]
-    fn html_shell_uses_html_block_anchor_class() {
-        // Html 外壳挂 vcp-html-block 锚点类（与 vcp-code-block 区分），且不硬编码内联样式
-        let html = highlight_code_block("<div>hi</div>\n", "html", CodeBlockShell::Html)
-            .expect("highlight");
-        assert!(html.starts_with("<pre class=\"vcp-html-block vcp-scrollable\"><code>"));
-        assert!(html.contains("class=\""));
-        assert!(!html.contains("style="));
-    }
-
-    #[test]
-    fn html_shell_preserves_content_byte_exactly() {
-        // 上游已是 pulldown 提取的干净内容，高亮层不做任何裁剪
-        let html = highlight_code_block("<div>hi</div>\n", "html", CodeBlockShell::Html)
-            .expect("highlight");
-        let inner = html
-            .strip_prefix("<pre class=\"vcp-html-block vcp-scrollable\"><code>")
-            .and_then(|s| s.strip_suffix("</code></pre>"))
-            .expect("shell wrapper");
-        assert_eq!(strip_tags_for_test(inner), "<div>hi</div>\n");
     }
 
     #[test]

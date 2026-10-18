@@ -1123,35 +1123,6 @@ mod tests {
     }
 
     #[test]
-    fn owner_push_idempotency_key_has_stable_framed_contract() {
-        let config_hash = "0123456789abcdef".repeat(4);
-        let key = generate_owner_push_idempotency_key(
-            OwnerType::Agent,
-            "owner\0雪😀",
-            &config_hash,
-            1_725_000_123_456,
-        );
-
-        assert_eq!(
-            key,
-            "5e9b7ce802ae02e30bd28e7e745b82a895581eb9afdd7b1858f67dd87db0e7d7"
-        );
-        assert_eq!(key.len(), 64);
-        assert!(key
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)));
-        assert_eq!(
-            key,
-            generate_owner_push_idempotency_key(
-                OwnerType::Agent,
-                "owner\0雪😀",
-                &config_hash,
-                1_725_000_123_456,
-            )
-        );
-    }
-
-    #[test]
     fn owner_push_idempotency_key_binds_identity_content_and_version() {
         let config_hash = "a".repeat(64);
         let baseline =

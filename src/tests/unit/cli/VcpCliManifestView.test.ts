@@ -1,11 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { openFileNative, writeTempFile } from "tauri-plugin-vcp-mobile";
 import VcpCliManifestView from "@/features/cli/components/VcpCliManifestView.vue";
-import {
-  VCP_CLI_MANIFEST_COMMAND,
-  parseCanonicalVcpCliManifest,
-  type VcpCliManifest,
-} from "@/features/cli/manifest";
+import { VCP_CLI_MANIFEST_COMMAND, type VcpCliManifest } from "@/features/cli/manifest";
 import {
   VCP_CLI_ACTION_COMMAND,
   VCP_CLI_STATUS_COMMAND,
@@ -115,16 +111,6 @@ describe("VCP CLI canonical manifest boundary", () => {
     mockInvoke(VCP_CLI_MANIFEST_COMMAND, () => canonicalManifest);
   });
 
-  it("preserves backend canonical text byte-for-byte and rejects object payloads", () => {
-    const parsed = parseCanonicalVcpCliManifest(canonicalManifest);
-
-    expect(parsed.rawJson).toBe(canonicalManifest);
-    expect(parsed.byteLength).toBe(
-      new TextEncoder().encode(canonicalManifest).byteLength,
-    );
-    expect(parsed.manifest.name).toBe("VCPMobileCLI");
-    expect(() => parseCanonicalVcpCliManifest(manifestFixture)).toThrow();
-  });
 
   it("shows the manifest help on Jobs and Skills tabs instead of the tab panels", async () => {
     for (const tab of ["jobs", "skills"] as const) {

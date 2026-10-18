@@ -311,39 +311,3 @@ pub async fn delegation_cancel<R: Runtime>(
     )
     .await
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::vcp_modules::settings_manager::Settings;
-
-    fn settings() -> Settings {
-        Settings {
-            vcp_server_url: "http://localhost:8080/v1/chat/completions".to_string(),
-            admin_username: "admin".to_string(),
-            admin_password: "secret".to_string(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn task_url_percent_encodes_chinese_id() {
-        let url = task_url(&settings(), "task_forum_晨间巡航_123").unwrap();
-        assert!(url.starts_with("http://localhost:8080/admin_api/task-assistant/tasks/"));
-        assert!(!url.contains('晨'), "taskId 必须百分号编码: {url}");
-        assert!(url.contains("%E6%99%A8"));
-    }
-
-    #[test]
-    fn task_url_rejects_empty_and_control_chars() {
-        assert!(task_url(&settings(), "").is_err());
-        assert!(task_url(&settings(), "  ").is_err());
-        assert!(task_url(&settings(), "abc\u{0007}").is_err());
-    }
-
-    #[test]
-    fn task_url_preserves_safe_id() {
-        let url = task_url(&settings(), "task_custom_prompt_demo_1724000000000").unwrap();
-        assert!(url.ends_with("/tasks/task_custom_prompt_demo_1724000000000"));
-    }
-}

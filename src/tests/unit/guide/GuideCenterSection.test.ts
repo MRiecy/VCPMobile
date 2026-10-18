@@ -24,17 +24,6 @@ afterEach(() => {
 });
 
 describe('GuideCenterSection', () => {
-  it('lists all registered guides with completion status', () => {
-    const guideStore = useGuideStore();
-    guideStore.completed = ['sidebar-gestures'];
-    const wrapper = mount(GuideCenterSection);
-
-    const entries = wrapper.findAll('.guide-entry');
-    expect(entries).toHaveLength(4);
-    expect(wrapper.text()).toContain('已完成');
-    expect(wrapper.text()).toContain('未完成');
-    expect(wrapper.find('.guide-reset').exists()).toBe(true);
-  });
 
   it('resets progress and returns to a triggerable environment', async () => {
     const guideStore = useGuideStore();

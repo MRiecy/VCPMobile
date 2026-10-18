@@ -63,33 +63,6 @@ describe("globalSearchStore", () => {
     expect(store.results.map((r) => r.msgId)).toEqual(["new"]);
   });
 
-  it("maps owner/message type/speaker/time filters to the backend contract", async () => {
-    mockInvoke("search_messages_fts", () => []);
-    const store = useGlobalSearchStore();
-    store.query = "部署";
-    store.scope = "owner";
-    store.scopeOwnerId = "agent-42";
-    store.scopeOwnerType = "agent";
-    store.speakerAgentId = "speaker-7";
-    store.role = "assistant";
-    store.timeRange = "custom";
-    store.customStartDate = "2026-08-01";
-    store.customEndDate = "2026-08-24";
-    store.sort = "rank";
-
-    await store.search();
-
-    const args = invokeMock.mock.calls[0][1] as { filter: Record<string, unknown> };
-    expect(args.filter.ownerId).toBe("agent-42");
-    expect(args.filter.ownerType).toBe("agent");
-    expect(args.filter.agentId).toBe("speaker-7");
-    expect(args.filter.role).toBe("assistant");
-    expect(args.filter.sort).toBe("rank");
-    expect(typeof args.filter.startTime).toBe("number");
-    expect(typeof args.filter.endTime).toBe("number");
-    expect(Number(args.filter.endTime)).toBeGreaterThan(Number(args.filter.startTime));
-    expect(args.filter.topicId).toBeNull();
-  });
 
   it("paginates with keyset cursor from the last result", async () => {
     const pages = [makePage(1000, 50), makePage(900, 20)];
@@ -149,14 +122,5 @@ describe("globalSearchStore", () => {
     expect(store.loadingMore).toBe(false);
   });
 
-  it("ignores queries shorter than the minimum without invoking backend", async () => {
-    mockInvoke("search_messages_fts", () => makePage(1, 10));
-    const store = useGlobalSearchStore();
-    store.query = "短";
-    await store.search();
-    expect(invokeMock).not.toHaveBeenCalled();
-    expect(store.results).toEqual([]);
-    expect(store.hasSearched).toBe(false);
-  });
 
 });

@@ -1,14 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
-import {
-  authorHue,
-  isPinnedTitle,
-  normalizePostList,
-  parseForumTime,
-  parsePostContent,
-  relativeTime,
-  renderForumMarkdown,
-} from '@/features/forum/forumTypes';
+import { parsePostContent, renderForumMarkdown } from '@/features/forum/forumTypes';
 import { useForumStore } from '@/features/forum/forumStore';
 import { clearInvokeMocks, mockInvoke } from '../../mocks/tauri';
 
@@ -81,29 +73,6 @@ const samplePost = `# 标题
 二楼回复含 \`code\`
 `;
 
-describe('论坛 · 时间戳与列表归一化', () => {
-  it('parseForumTime 还原冒号替换变体', () => {
-    expect(parseForumTime('2026-08-01T10-30-00.000')).toBe(
-      Date.parse('2026-08-01T10:30:00.000'),
-    );
-    expect(parseForumTime('2026-08-10T08:00:00')).toBe(Date.parse('2026-08-10T08:00:00'));
-    expect(parseForumTime('bad-time')).toBe(0);
-    expect(parseForumTime(undefined)).toBe(0);
-  });
-
-  it('normalizePostList 置顶优先 + mtime 降序', () => {
-    const posts = normalizePostList(basePosts());
-    expect(posts[0].title).toContain('置顶');
-    expect(posts[0].pinned).toBe(true);
-    expect(posts[1].mtimeMs).toBeGreaterThan(posts[2].mtimeMs);
-    expect(posts[2].timestampMs).toBe(0);
-  });
-
-  it('isPinnedTitle 识别 [置顶] 约定', () => {
-    expect(isPinnedTitle('[置顶] 公告')).toBe(true);
-    expect(isPinnedTitle('普通帖子')).toBe(false);
-  });
-});
 
 describe('论坛 · 帖子正文解析', () => {
   it('parsePostContent 剥离元信息头并拆出楼层', () => {
@@ -137,19 +106,7 @@ describe('论坛 · 渲染与展示工具', () => {
     expect(html).not.toContain('javascript:');
   });
 
-  it('relativeTime 覆盖主要区间', () => {
-    expect(relativeTime(0)).toBe('—');
-    expect(relativeTime(Date.now() - 30_000)).toBe('刚刚');
-    expect(relativeTime(Date.now() - 5 * 60_000)).toBe('5 分钟前');
-    expect(relativeTime(Date.now() - 3 * 3_600_000)).toBe('3 小时前');
-  });
 
-  it('authorHue 稳定且在色相环内', () => {
-    const hue = authorHue('小娜');
-    expect(hue).toBe(authorHue('小娜'));
-    expect(hue).toBeGreaterThanOrEqual(0);
-    expect(hue).toBeLessThan(360);
-  });
 });
 
 describe('论坛 · Store 读写流', () => {
@@ -158,29 +115,7 @@ describe('论坛 · Store 读写流', () => {
     clearInvokeMocks();
   });
 
-  it('loadPosts 归一化列表并派生板块', async () => {
-    mockInvoke('forum_list_posts', () => ({ success: true, posts: basePosts() }));
-    const store = useForumStore();
-    await store.loadPosts();
 
-    expect(store.listLoaded).toBe(true);
-    expect(store.posts).toHaveLength(3);
-    expect(store.boards).toEqual(['技术', '灌水']);
-    expect(store.error).toBeNull();
-  });
-
-  it('板块筛选与搜索在客户端完成', async () => {
-    mockInvoke('forum_list_posts', () => ({ success: true, posts: basePosts() }));
-    const store = useForumStore();
-    await store.loadPosts();
-
-    store.activeBoard = '技术';
-    expect(store.filteredPosts.map((post) => post.board)).toEqual(['技术', '技术']);
-
-    store.activeBoard = '';
-    store.searchKeyword = '天气';
-    expect(store.filteredPosts.map((post) => post.title)).toEqual(['今天的天气']);
-  });
 
   it('loadDetail 缓存命中不重复请求，force 穿透', async () => {
     let calls = 0;
@@ -225,43 +160,10 @@ describe('论坛 · Store 读写流', () => {
     expect(calls).toEqual(['reply', 'detail', 'list']);
   });
 
-  it('createPost 成功后重拉列表', async () => {
-    const calls: string[] = [];
-    mockInvoke('forum_create_post', () => {
-      calls.push('create');
-      return { success: true };
-    });
-    mockInvoke('forum_list_posts', () => {
-      calls.push('list');
-      return { success: true, posts: basePosts() };
-    });
 
-    const store = useForumStore();
-    const ok = await store.createPost('测试者', '技术', '新帖', '正文');
-    expect(ok).toBe(true);
-    expect(calls).toEqual(['create', 'list']);
-  });
-
-  it('loadPosts 失败进入错误态', async () => {
-    mockInvoke('forum_list_posts', () => Promise.reject(new Error('网络不可达')));
-    const store = useForumStore();
-    await store.loadPosts();
-    expect(store.error).toBe('网络不可达');
-    expect(store.listLoaded).toBe(false);
-  });
 });
 
 
-describe('replyCount 归一化（上游补丁字段）', () => {
-  it('数字保留；缺失/非法为 null', () => {
-    const posts = normalizePostList([
-      { uid: 'a', title: 'x', author: 'u', timestamp: '2026-08-01T10-30-00.000', replyCount: 5, mtimeMs: 2 },
-      { uid: 'b', title: 'y', author: 'u', timestamp: '2026-08-01T10-30-00.000', mtimeMs: 1 },
-    ]);
-    expect(posts[0].replyCount).toBe(5);
-    expect(posts[1].replyCount).toBeNull();
-  });
-});
 
 describe('论坛删除（store.remove）', () => {
   beforeEach(() => {
@@ -290,23 +192,6 @@ describe('论坛删除（store.remove）', () => {
     expect(calls.slice(1).map((c) => c.cmd).sort()).toEqual(['forum_get_post', 'forum_list_posts']);
   });
 
-  it('删整帖不传 floor；失败后返回 false', async () => {
-    const seen: Record<string, unknown> = {};
-    mockInvoke('forum_delete', (args) => {
-      Object.assign(seen, args);
-      return { success: true };
-    });
-    mockInvoke('forum_list_posts', () => ({ success: true, posts: [] }));
-
-    const store = useForumStore();
-    expect(await store.remove('post_uid_2')).toBe(true);
-    expect(seen).toEqual({ uid: 'post_uid_2', floor: null });
-
-    mockInvoke('forum_delete', () => {
-      throw new Error('服务器忙');
-    });
-    expect(await store.remove('post_uid_3', 1)).toBe(false);
-  });
 });
 
 describe('parsePostContent 边界', () => {

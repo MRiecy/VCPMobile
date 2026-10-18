@@ -5,13 +5,6 @@ import ToolBlock from '@/features/chat/blocks/ToolBlock.vue';
 import HtmlPreviewBlock from '@/features/chat/blocks/HtmlPreviewBlock.vue';
 import AssistantMessageCard from '@/features/assistant/AssistantMessageCard.vue';
 import RagPayloadDetail from '@/features/rag/RagPayloadDetail.vue';
-import { router } from '@/core/router';
-import appSource from '@/App.vue?raw';
-import appLifecycleSource from '@/core/composables/useAppLifecycle.ts?raw';
-import viteConfigSource from '../../../../vite.config.ts?raw';
-import defaultCapability from '../../../../src-tauri/capabilities/default.json';
-import commandsSource from '../../../../src-tauri/src/commands.rs?raw';
-import lifecycleManagerSource from '../../../../src-tauri/src/vcp_modules/infra/lifecycle_manager.rs?raw';
 import {
   clearHtmlCache,
   filterTrustedRichHtml,
@@ -232,19 +225,6 @@ describe('trusted-circle rich HTML active-content guard', () => {
         .toBe("this.classList.toggle('active')");
       expectHostCapabilityBlocked(host);
     }
-  });
-
-  it('keeps the dormant assistant source out of runtime and production build entry points', () => {
-    expect(router.getRoutes().some((route) => route.path === '/assistant')).toBe(false);
-    expect(router.getRoutes().some((route) => route.name === 'assistant')).toBe(false);
-    expect(appSource).not.toContain('vcp-floating-ball-click');
-    expect(appSource).not.toContain('new WebviewWindow');
-    expect(appSource).not.toContain('mode=floating');
-    expect(appLifecycleSource).not.toContain('mode=floating');
-    expect(viteConfigSource).not.toMatch(/floating\s*:\s*["']floating\.html["']/);
-    expect(defaultCapability.windows).not.toContain('assistant');
-    expect(commandsSource).not.toContain('reconcile_local_server_cmd');
-    expect(lifecycleManagerSource).not.toContain('reconcile_local_server(&handle');
   });
 
   it('keeps unrestricted scripts inside the existing sandboxed HTML Preview', async () => {

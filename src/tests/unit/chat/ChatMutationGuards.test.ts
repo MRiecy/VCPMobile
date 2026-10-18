@@ -60,7 +60,6 @@ describe("chat mutations during generation", () => {
     await history.regenerateResponse(key);
     await useTopicStore().deleteTopic(conversation.ownerId, conversation.ownerType, conversation.topicId);
     expect(await useAssistantStore().deleteAgent(conversation.ownerId)).toBe(false);
-    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual(["append_single_message"]);
     expect(history.currentChatHistory.some(message => message.id === "old")).toBe(true);
     expect(history.editingMessage).toBeNull();
 

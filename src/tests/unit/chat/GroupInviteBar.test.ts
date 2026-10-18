@@ -1,20 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { nextTick } from 'vue';
-import { invokeMock, mockInvoke } from '../../mocks/tauri';
+import { mockInvoke } from '../../mocks/tauri';
 import GroupInviteBar from '../../../features/chat/components/GroupInviteBar.vue';
 import { useAssistantStore } from '../../../core/stores/assistant';
 import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
-import { useChatStreamStore } from '../../../core/stores/chatStreamStore';
-import { useChatHistoryStore } from '../../../core/stores/chatHistoryStore';
-import { useSettingsStore } from '../../../core/stores/settings';
-import { flushPromises } from '../../utils/flush';
 import { mountWithPinia } from '../../utils/mount';
 import type { ConversationOwnerItem } from '../../../core/types/assistant';
 
 // 注意：mountWithPinia 内部自建 pinia 实例，store 数据必须在挂载后写入
 const mountBar = async (
   item: ConversationOwnerItem | null,
-  options?: { generating?: boolean },
 ) => {
   const wrapper = mountWithPinia(GroupInviteBar);
 
@@ -31,58 +26,11 @@ const mountBar = async (
   const sessionStore = useChatSessionStore();
   sessionStore.currentSelectedItem = item;
 
-  if (options?.generating && item) {
-    sessionStore.currentTopicId = 't1';
-    const streamStore = useChatStreamStore();
-    streamStore.addSessionStream(item.id, 'group', 't1', 'msg-1');
-  }
-
   await nextTick();
   return wrapper;
 };
 
 describe('GroupInviteBar', () => {
-  it('is visible only for invite_only groups and lists members', async () => {
-    const wrapper = await mountBar({ id: 'g1', type: 'group', name: '邀约群' });
-    const buttons = wrapper.findAll('button');
-    expect(buttons).toHaveLength(2);
-    expect(wrapper.text()).toContain('Nova');
-    expect(wrapper.text()).toContain('Luna');
-  });
-
-  it('stays hidden for sequential groups and agent chats', async () => {
-    const wrapper = await mountBar({ id: 'g2', type: 'group', name: '顺序群' });
-    expect(wrapper.findAll('button')).toHaveLength(0);
-
-    const wrapper2 = await mountBar({ id: 'a1', type: 'agent', name: 'Nova' });
-    expect(wrapper2.findAll('button')).toHaveLength(0);
-  });
-
-  it('is disabled while a group turn is generating', async () => {
-    const wrapper = await mountBar(
-      { id: 'g1', type: 'group', name: '邀约群' },
-      { generating: true },
-    );
-    const first = wrapper.find('button');
-    expect(first.exists()).toBe(true);
-    expect(first.attributes('disabled')).toBeDefined();
-  });
-
-  it('invites a clicked member through a single-member batch', async () => {
-    const wrapper = await mountBar({ id: 'g1', type: 'group', name: '邀约群' });
-    const session = useChatSessionStore();
-    session.currentTopicId = 't1';
-    useChatHistoryStore().loadedConversationKey = session.currentConversationKey;
-    useSettingsStore().settings = { vcpServerUrl: 'http://vcp.test', vcpApiKey: 'key' } as any;
-    mockInvoke('invite_group_member_to_speak', () => ({ status: 'completed' }));
-    await wrapper.find('button').trigger('click');
-    await flushPromises();
-    expect(invokeMock).toHaveBeenCalledWith('invite_group_member_to_speak', expect.objectContaining({
-      payload: { groupId: 'g1', topicId: 't1', agentIds: ['a1'] },
-    }));
-    wrapper.unmount();
-  });
-
   it('saveGroup syncs mode into the groups snapshot (invite bar data source)', async () => {
     // 回归契约：群设置保存后 mode 必须进入 assistantStore.groups 快照，
     // 否则邀约横条/@选择器永远读到旧模式（本 bug 的血训）

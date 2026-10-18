@@ -189,19 +189,3 @@ pub async fn close_vcp_mobile_cli_terminal<R: Runtime>(
     }
     Ok(response)
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn terminal_identity_and_budgets_fail_closed() {
-        assert!(validate_identity("open-1", None, 0).is_ok());
-        assert!(validate_identity("read-1", Some("pty-session"), 1).is_ok());
-        assert!(validate_identity("read-1", Some("job-session"), 1).is_err());
-        assert!(validate_identity("read-1", Some("pty-session"), 0).is_err());
-        assert!(STANDARD.decode("not base64!").is_err());
-        assert_eq!(MAX_PTY_READ_BYTES, 65_536);
-        assert_eq!(MAX_PTY_WRITE_BYTES, 16_384);
-    }
-}

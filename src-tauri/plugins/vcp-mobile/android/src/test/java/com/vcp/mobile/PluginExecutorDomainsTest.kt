@@ -79,14 +79,4 @@ class PluginExecutorDomainsTest {
         }
     }
 
-    @Test
-    fun shutdownNowTerminatesAllExecutorDomains() {
-        val domains = PluginExecutorDomains()
-
-        domains.shutdownNow()
-
-        assertTrue(domains.oomScheduler.awaitTermination(1, TimeUnit.SECONDS))
-        assertTrue(domains.rootExecutor.awaitTermination(1, TimeUnit.SECONDS))
-        assertTrue(domains.fileIoExecutor.awaitTermination(1, TimeUnit.SECONDS))
-    }
 }

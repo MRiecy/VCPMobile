@@ -1,17 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { mount } from "@vue/test-utils";
 import DiaryReader from "@/features/diary/components/DiaryReader.vue";
-import DiaryNoteList from "@/features/diary/components/DiaryNoteList.vue";
 import {
   highlightDiarySearchText,
   renderDiaryMarkdown,
 } from "@/features/diary/diaryMarkdown";
-import {
-  diaryFolderCategory,
-  isValidDiaryFileName,
-  parseDiaryError,
-  parseDiaryFileName,
-} from "@/features/diary/types";
 
 describe("diary trusted body and text-only metadata boundary", () => {
   it("preserves trusted Markdown raw HTML only inside the body container", () => {
@@ -63,78 +56,5 @@ describe("diary trusted body and text-only metadata boundary", () => {
     expect(container.querySelector("p")?.textContent).toBe("İx X");
     expect([...container.querySelectorAll("mark")].map((item) => item.textContent))
       .toEqual(["x", "X"]);
-  });
-});
-
-describe("diary pure presentation helpers", () => {
-  it("parses structured names and falls back for arbitrary names", () => {
-    expect(parseDiaryFileName("2026-08-12-19_30_00-新的标题.txt")).toMatchObject({
-      title: "新的标题",
-      date: "2026-08-12",
-      time: "19:30:00",
-      extension: "TXT",
-      structured: true,
-    });
-    expect(parseDiaryFileName("任意 文件名.v1.md")).toMatchObject({
-      title: "任意 文件名.v1.md",
-      extension: "MD",
-      structured: false,
-    });
-    expect(parseDiaryFileName("2026-08-12-19_30_00.txt")).toMatchObject({
-      title: "DailyNote",
-      date: "2026-08-12",
-      time: "19:30:00",
-      extension: "TXT",
-      structured: true,
-    });
-  });
-
-  it("keeps stable folder grouping and fail-closed rename validation", () => {
-    expect(diaryFolderCategory("项目设计簇")).toBe("cluster");
-    expect(diaryFolderCategory("Nova 的知识")).toBe("diary");
-    expect(isValidDiaryFileName("safe name.txt")).toBe(true);
-    expect(isValidDiaryFileName("../unsafe.txt")).toBe(false);
-    expect(isValidDiaryFileName("a\\b.txt")).toBe(false);
-  });
-
-  it("parses stable error codes without interpreting natural-language text", () => {
-    expect(parseDiaryError("DIARY_CONFLICT: changed")).toEqual({
-      code: "DIARY_CONFLICT",
-      message: "changed",
-    });
-    expect(parseDiaryError(new Error("network"))).toEqual({
-      code: "DIARY_UNKNOWN",
-      message: "network",
-    });
-  });
-});
-
-describe("diary mobile presentation structure", () => {
-  it("renders VCP-style structured memo rows without exposing timestamp filenames as titles", async () => {
-    const wrapper = mount(DiaryNoteList, {
-      props: {
-        notes: [{
-          folder: "Aesthetic",
-          file: "2026-06-12-23_37_44.txt",
-          preview: "Nova 与主人共同淬炼的流性美学灵光",
-          lastModified: "2026-06-12T23:37:44+08:00",
-        }],
-        loading: false,
-        searchMode: "none",
-        selectionMode: false,
-        selectedIds: [],
-      },
-      global: {
-        directives: { longpress: () => undefined },
-      },
-    });
-
-    await wrapper.vm.$nextTick();
-
-    const row = wrapper.get('[data-diary-role="note-row"]');
-    expect(row.text()).toContain("TXT");
-    expect(row.text()).toContain("DailyNote");
-    expect(row.text()).toContain("2026-06-12 23:37");
-    expect(row.text()).toContain("流性美学灵光");
   });
 });

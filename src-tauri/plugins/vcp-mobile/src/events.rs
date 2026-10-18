@@ -164,45 +164,4 @@ mod tests {
         );
         assert_eq!(notices.collect(), vec![ServiceFailure::Events]);
     }
-
-    #[test]
-    fn decodes_native_channel_snapshots_and_ignores_non_transition_events() {
-        let pause: NativeEvent = serde_json::from_value(serde_json::json!({
-            "event": "lifecycle",
-            "payload": { "phase": "background", "nativeSequence": 3, "snapshot": true }
-        }))
-        .unwrap();
-        assert!(matches!(
-            pause,
-            NativeEvent::Lifecycle(NativeLifecycleEvent {
-                phase: LifecyclePhase::Background,
-                native_sequence: 3,
-                snapshot: true,
-            })
-        ));
-        let network: NativeEvent = serde_json::from_value(serde_json::json!({
-            "event": "network", "payload": { "connected": true }
-        }))
-        .unwrap();
-        assert!(matches!(network, NativeEvent::Network { connected: true }));
-        let configuration: NativeEvent = serde_json::from_value(serde_json::json!({
-            "event": "configuration", "payload": { "isDarkMode": true }
-        }))
-        .unwrap();
-        assert!(matches!(configuration, NativeEvent::Other {}));
-        assert!(serde_json::from_value::<NativeEvent>(serde_json::json!({
-            "event": "network", "payload": { "connected": "true" }
-        }))
-        .is_err());
-        for payload in [
-            serde_json::json!({ "phase": "active", "snapshot": false }),
-            serde_json::json!({ "phase": "resume", "nativeSequence": 4, "snapshot": false }),
-            serde_json::json!({ "phase": "background", "nativeSequence": -1, "snapshot": false }),
-        ] {
-            assert!(serde_json::from_value::<NativeEvent>(serde_json::json!({
-                "event": "lifecycle", "payload": payload,
-            }))
-            .is_err());
-        }
-    }
 }

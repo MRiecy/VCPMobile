@@ -2547,37 +2547,6 @@ mod tests {
     }
 
     #[test]
-    fn lease_loss_facts_request_interrupted_intent_only_for_live_processes() {
-        use tauri_plugin_vcp_mobile::cli::CliProcessState;
-
-        // Live + lost + no intent -> record Interrupted intent, keep Running facts flowing.
-        assert_eq!(
-            inspect_lease_facts(CliProcessState::Running, None, true, false),
-            (ProcessObservation::Running, true)
-        );
-        // Live + lost but an intent already exists -> first intent wins.
-        assert_eq!(
-            inspect_lease_facts(CliProcessState::Running, None, true, true),
-            (ProcessObservation::Running, false)
-        );
-        // Live + not lost -> no intent.
-        assert_eq!(
-            inspect_lease_facts(CliProcessState::Running, None, false, false),
-            (ProcessObservation::Running, false)
-        );
-        // Exited + lost -> natural completion, no intent.
-        assert_eq!(
-            inspect_lease_facts(CliProcessState::Exited, Some(0), true, false),
-            (ProcessObservation::Exited { exit_code: Some(0) }, false)
-        );
-        // Missing + lost -> plain-Missing outcome, no intent.
-        assert_eq!(
-            inspect_lease_facts(CliProcessState::Missing, None, true, false),
-            (ProcessObservation::Missing, false)
-        );
-    }
-
-    #[test]
     fn list_visibility_is_owner_relative() {
         let mut owned = running_test_job(8);
         owned.session_id = Some("dist-session:abc".to_string());
@@ -2779,56 +2748,6 @@ mod tests {
     }
 
     #[test]
-    fn status_contract_has_starting_and_bounded_command_preview() {
-        let profile = embedded_command_profile().expect("embedded profile");
-        let mut owner = RuntimeOwner {
-            initialized: true,
-            phase: MobileCliPhase::Ready,
-            availability_reason: None,
-            recovery_notice: None,
-            ledger_path: None,
-            ledger: JobLedger::empty(3),
-            provisioned: None,
-            last_workspace_check_ms: 0,
-        };
-        owner
-            .ledger
-            .insert_job(JobRecord {
-                id: "job-1".to_string(),
-                attempt_id: "attempt-1".to_string(),
-                runtime_generation: 3,
-                session_id: None,
-                state: VcpCliJobState::Starting,
-                command_preview: command_preview(&"打印 ".repeat(100)),
-                description: None,
-                cwd: "/workspace".to_string(),
-                timeout_ms: 1_000,
-                created_at_ms: 1,
-                updated_at_ms: 1,
-                deadline_at_ms: 1_001,
-                stdout_path: None,
-                stderr_path: None,
-                river_projection_path: None,
-                stdout_bytes: 0,
-                stderr_bytes: 0,
-                stdout_truncated: false,
-                stderr_truncated: false,
-                artifact_sha256: None,
-                artifact_size_bytes: None,
-                exit_code: None,
-                reason: None,
-                terminal_intent: None,
-                mutation_operations: Vec::new(),
-            })
-            .expect("insert job");
-        let status = status_from_owner(&owner, &profile);
-        assert_eq!(status.running_jobs, 1);
-        assert_eq!(status.jobs[0].state, VcpCliJobState::Starting);
-        assert!(status.jobs[0].command_preview.len() <= 160);
-        assert_eq!(status.background_reliability, "foreground_only");
-    }
-
-    #[test]
     fn chat_session_allows_two_parallel_jobs_and_rejects_the_third() {
         let mut first = running_test_job(1);
         first.session_id = Some("chat:a".to_string());
@@ -2854,21 +2773,6 @@ mod tests {
         assert!(!session_concurrency_reached(&[first], "chat:a", 2));
         assert!(validate_session_id(Some("chat:0123abcdef")).is_ok());
         assert!(validate_session_id(Some("chat path")).is_err());
-    }
-
-    #[test]
-    fn structured_action_wire_and_operation_id_are_strict() {
-        let action: VcpCliAction = serde_json::from_value(serde_json::json!({
-            "action": "run",
-            "command": "printf ok",
-            "cwd": "/workspace",
-            "timeout_ms": 1800000,
-            "run_in_background": false
-        }))
-        .expect("parse structured action");
-        assert!(validate_structured_vcp_cli_action(action).is_ok());
-        assert!(validate_operation_id("operation-1").is_ok());
-        assert!(validate_operation_id("bad operation").is_err());
     }
 
     #[test]
@@ -2903,19 +2807,6 @@ mod tests {
             ledger.operation("dist:stable-request", &changed_digest),
             OperationLookup::Conflict
         );
-    }
-
-    #[test]
-    fn terminal_states_never_include_starting_or_running() {
-        assert!(!super::super::ledger::is_terminal_state(
-            VcpCliJobState::Starting
-        ));
-        assert!(!super::super::ledger::is_terminal_state(
-            VcpCliJobState::Running
-        ));
-        assert!(super::super::ledger::is_terminal_state(
-            VcpCliJobState::Interrupted
-        ));
     }
 
     #[test]

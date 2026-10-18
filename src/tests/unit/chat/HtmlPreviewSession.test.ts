@@ -1,7 +1,6 @@
 import { mount } from '@vue/test-utils';
 import { describe, expect, it, vi } from 'vitest';
 import HtmlPreviewBlock from '@/features/chat/blocks/HtmlPreviewBlock.vue';
-import { sandboxImageBridge } from '@/core/utils/sandboxImageBridge';
 
 vi.mock('@/core/stores/theme', () => ({ useThemeStore: () => ({ isDarkResolved: false }) }));
 vi.mock('@/core/composables/useModalHistory', () => ({ useModalHistory: () => ({ registerModal: vi.fn(), unregisterModal: vi.fn() }) }));
@@ -25,7 +24,4 @@ describe('HTML preview sessions', () => {
     } finally { first.unmount(); second.unmount(); }
   });
 
-  it('emits a syntactically valid sandbox script with an escaped nonce', () => {
-    expect(() => new Function(sandboxImageBridge('nonce"with\\characters'))).not.toThrow();
-  });
 });

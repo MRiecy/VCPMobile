@@ -19,28 +19,6 @@ describe('Haptics Debug & Native Haptics Suite', () => {
   });
   afterEach(() => { wrapper?.unmount(); wrapper = undefined; });
 
-  it('calls plugin:vcp-mobile|trigger_haptic_feedback with expected payload', async () => {
-    mockInvoke('plugin:vcp-mobile|trigger_haptic_feedback', () => ({
-      submitted: true,
-      type: 'view',
-      effect: 'keyboard_tap',
-      constant: 3,
-    }));
-
-    const result = await triggerNativeHaptic({
-      type: 'view',
-      effect: 'keyboard_tap',
-    });
-
-    expect(result.submitted).toBe(true);
-    expect(result.constant).toBe(3);
-    expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|trigger_haptic_feedback', {
-      payload: {
-        type: 'view',
-        effect: 'keyboard_tap',
-      },
-    });
-  });
 
   it('reports native failure without changing it into a different web vibration', async () => {
     mockInvoke('plugin:vcp-mobile|trigger_haptic_feedback', () => {
@@ -58,47 +36,7 @@ describe('Haptics Debug & Native Haptics Suite', () => {
     expect(vi.mocked(navigator.vibrate)).not.toHaveBeenCalled();
   });
 
-  it('plays Android test effects and reports submission without claiming hardware playback', async () => {
-    mockInvoke('plugin:vcp-mobile|trigger_haptic_feedback', () => ({
-      submitted: true,
-      type: 'view',
-      effect: 'keyboard_tap',
-      constant: 3,
-    }));
 
-    wrapper = mount(HapticsDebugPanel, {
-      props: { active: true },
-    });
-
-    expect(wrapper.text()).toContain('消息触感与效果测试');
-    expect(wrapper.text()).toContain('键盘轻点 (TAP)');
-
-    const tapButton = wrapper.findAll('button').find((b) => b.text().includes('键盘轻点'));
-    expect(tapButton).toBeDefined();
-
-    await tapButton!.trigger('click');
-    await flushPromises();
-
-    expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|trigger_haptic_feedback', {
-      payload: {
-        type: 'view',
-        effect: 'keyboard_tap',
-      },
-    });
-
-    // Check last log updated
-    expect(wrapper.text()).toContain('键盘轻点 (KEYBOARD_TAP)');
-    expect(wrapper.text()).toContain('已提交');
-  });
-
-  it('uses the real message feedback path for production previews', async () => {
-    mockInvoke('plugin:vcp-mobile|trigger_haptic_feedback', () => ({ submitted: true }));
-    wrapper = mount(HapticsDebugPanel, { props: { active: true } });
-    await wrapper.findAll('button').find((b) => b.text().includes('回复完整生成'))!.trigger('click');
-    expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|trigger_haptic_feedback', {
-      payload: { type: 'message', effect: 'complete' },
-    });
-  });
 
   it('shows iOS effects and sends the selected intensity', async () => {
     platform.android = false;

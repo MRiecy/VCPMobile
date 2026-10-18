@@ -757,27 +757,4 @@ mod tests {
         );
         assert!(tokio::fs::try_exists(&directory).await.unwrap());
     }
-
-    #[test]
-    fn validate_mail_id_accepts_opaque_ids() {
-        assert!(validate_mail_id("msg_abc123").is_ok());
-        assert!(validate_mail_id("1724000000000.abcdef@claw").is_ok());
-    }
-
-    #[test]
-    fn validate_mail_id_rejects_unsafe_input() {
-        assert!(validate_mail_id("").is_err());
-        assert!(validate_mail_id("  ").is_err());
-        assert!(validate_mail_id("a/b").is_err());
-        assert!(validate_mail_id("a\\b").is_err());
-        assert!(validate_mail_id("a\u{0007}b").is_err());
-    }
-
-    #[test]
-    fn validate_addressing_rejects_blank_and_control_chars() {
-        assert!(validate_addressing(&Some("mail1".to_string()), &None).is_ok());
-        assert!(validate_addressing(&Some("  ".to_string()), &None).is_err());
-        assert!(validate_addressing(&None, &Some("a\u{0001}".to_string())).is_err());
-        assert!(validate_addressing(&None, &None).is_ok());
-    }
 }

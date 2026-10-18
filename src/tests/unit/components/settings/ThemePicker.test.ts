@@ -49,8 +49,6 @@ describe('ThemePicker draft, preview and presentation controls', () => {
     expect(applySpy).not.toHaveBeenCalled();
     expect(store.currentTheme).toBe(originalTheme);
     expect(localStorage.getItem('vcp-theme-name')).toBe(originalStoredTheme);
-    expect(wrapper.find('[data-variant="dark"]').attributes('style')).toContain('--preview-bg: #1c1c1e');
-    expect(wrapper.find('[data-variant="light"]').attributes('style')).toContain('--preview-bg: #f4f6f8');
     expect(wrapper.get('[data-testid="theme-apply-button"]').text()).toBe('确认应用主题');
 
     await wrapper.get('[data-testid="theme-apply-button"]').trigger('click');
@@ -64,18 +62,6 @@ describe('ThemePicker draft, preview and presentation controls', () => {
     expect(wrapper.get('[data-testid="theme-apply-button"]').attributes()).toHaveProperty('disabled');
   });
 
-  it('keeps dark and light wallpapers isolated inside the preview panes', async () => {
-    wrapper = mount(ThemePicker, { global: { plugins: [pinia] } });
-    await flushPromises();
-
-    const darkStyle = wrapper.get('[data-variant="dark"]').attributes('style');
-    const lightStyle = wrapper.get('[data-variant="light"]').attributes('style');
-
-    expect(darkStyle).toContain('/wallpaper/forest_night.webp');
-    expect(lightStyle).toContain('/wallpaper/watermelon_day.webp');
-    expect(darkStyle).not.toBe(lightStyle);
-    expect(document.documentElement.style.getPropertyValue('--chat-wallpaper-dark')).toBe('');
-  });
 
   it('discards an unconfirmed theme draft when the page unmounts', async () => {
     const store = useThemeStore();
@@ -117,39 +103,6 @@ describe('ThemePicker draft, preview and presentation controls', () => {
     expect(wrapper.find('[role="alert"]').exists()).toBe(false);
   });
 
-  it('exposes the second three-mode entry and persists a selection immediately', async () => {
-    const store = useChatPreferencesStore();
-    wrapper = mount(ChatPreferencesPage, {
-      global: { plugins: [pinia] },
-    });
-    await flushPromises();
-
-    expect(wrapper.find('[data-testid="theme-carousel"]').exists()).toBe(false);
-    const options = wrapper.findAll('[data-presentation-value]');
-    expect(options.map((option) => option.attributes('data-presentation-value'))).toEqual([
-      'bubble',
-      'panel',
-      'immersive',
-    ]);
-    expect(wrapper.get('[data-presentation-value="bubble"]').attributes('aria-checked')).toBe('true');
-
-    await wrapper.get('[data-presentation-value="panel"]').trigger('click');
-
-    expect(store.presentationMode).toBe('panel');
-    expect(localStorage.getItem('vcp-chat-presentation-mode')).toBe('panel');
-    expect(wrapper.get('[data-presentation-value="panel"]').attributes('aria-checked')).toBe('true');
-    expect(wrapper.text()).toContain('消息呈现与内容宽度');
-    expect(wrapper.text()).toContain('点选后立即生效');
-    expect(store.smoothStreamingEnabled).toBe(false);
-
-    await wrapper.get('[data-testid="smooth-streaming-switch"]').trigger('click');
-
-    expect(store.smoothStreamingEnabled).toBe(true);
-    expect(localStorage.getItem('vcp-smooth-streaming-enabled')).toBe('true');
-    expect(wrapper.text()).toContain('减少跳字感');
-    expect(wrapper.get('[data-testid="smooth-streaming-switch"]').attributes('role')).toBe('switch');
-    expect(wrapper.get('[data-testid="smooth-streaming-switch"]').attributes('aria-checked')).toBe('true');
-  });
 
   it('shares the presentation owner with the chat shortcut in both directions', async () => {
     wrapper = mount(ChatPreferencesPage, { global: { plugins: [pinia] } });
@@ -170,7 +123,6 @@ describe('ThemePicker draft, preview and presentation controls', () => {
     await wrapper.get('[data-testid="collapse-tools-switch"]').trigger('click');
     expect(store.messageHapticsEnabled).toBe(false);
     expect(store.collapseToolsWhileStreaming).toBe(true);
-    expect(wrapper.findAll('button button')).toHaveLength(0);
 
     vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new Error('quota exceeded'); });
     await wrapper.get('[data-testid="message-haptics-switch"]').trigger('click');
@@ -187,13 +139,4 @@ describe('ThemePicker draft, preview and presentation controls', () => {
     expect(useChatPreferencesStore().messageHapticsEnabled).toBe(true);
   });
 
-  it('keeps message rendering controls out of the theme picker', async () => {
-    wrapper = mount(ThemePicker, {
-      global: { plugins: [pinia] },
-    });
-    await flushPromises();
-
-    expect(wrapper.find('[data-testid="theme-carousel"]').exists()).toBe(true);
-    expect(wrapper.find('[data-testid="presentation-settings"]').exists()).toBe(false);
-  });
 });

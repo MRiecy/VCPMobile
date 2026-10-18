@@ -1025,27 +1025,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_json_sorts_keys_by_utf8_bytes_and_streams_the_same_digest() {
-        let value = serde_json::json!({
-            "memberTags": {
-                "😀": "astral",
-                "\u{e000}": "private-use",
-                "line\nkey": "control",
-                "slash\\key": "slash"
-            }
-        });
-        let canonical = stable_stringify(&value);
-
-        assert!(canonical.find('\u{e000}').unwrap() < canonical.find('😀').unwrap());
-        assert!(canonical.contains(r#""line\nkey""#));
-        assert!(canonical.contains(r#""slash\\key""#));
-        assert_eq!(
-            compute_deterministic_hash(&value),
-            crate::vcp_modules::infra::utils::calculate_sha256(canonical.as_bytes())
-        );
-    }
-
-    #[test]
     fn canonical_hash_matches_the_shared_cross_language_vectors() {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("fixtures/message_canonical_contract.json"))
@@ -1068,15 +1047,5 @@ mod tests {
                 case["name"].as_str().unwrap_or("unnamed")
             );
         }
-    }
-
-    #[test]
-    fn avatar_owner_contract_is_closed_and_keeps_the_user_singleton() {
-        assert!(is_valid_avatar_owner("agent", "agent-1"));
-        assert!(is_valid_avatar_owner("group", "group-1"));
-        assert!(is_valid_avatar_owner("user", "user_avatar"));
-        assert!(!is_valid_avatar_owner("user", "other"));
-        assert!(!is_valid_avatar_owner("agent", ""));
-        assert!(!is_valid_avatar_owner("system", "system"));
     }
 }

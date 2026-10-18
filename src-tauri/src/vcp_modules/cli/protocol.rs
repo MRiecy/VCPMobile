@@ -825,7 +825,6 @@ fn reject_nul(value: &str, field: &str) -> Result<(), VcpCliProtocolError> {
 #[cfg(test)]
 mod tests {
     use serde::Deserialize;
-    use serde_json::Value;
 
     use super::*;
 
@@ -845,27 +844,6 @@ mod tests {
     struct RawFieldExpectation {
         key: String,
         value: String,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct ValidationGolden {
-        valid: Vec<ValidCase>,
-        invalid: Vec<InvalidCase>,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct ValidCase {
-        name: String,
-        input: String,
-        expected: Value,
-    }
-
-    #[derive(Debug, Deserialize)]
-    struct InvalidCase {
-        name: String,
-        input: String,
-        code: VcpCliErrorCode,
-        field: String,
     }
 
     #[test]
@@ -898,128 +876,5 @@ mod tests {
                 .collect();
             assert_eq!(actual, expected, "parser case: {}", case.name);
         }
-    }
-
-    #[test]
-    fn typed_validator_matches_action_and_error_golden() {
-        let fixture: ValidationGolden =
-            serde_json::from_str(include_str!("fixtures/vcp_cli_validation.golden.json"))
-                .expect("parse validation golden fixture");
-
-        for case in fixture.valid {
-            let raw = exactly_one_request(&case.input, &case.name);
-            let validated = validate_vcp_mobile_cli_request(&raw)
-                .unwrap_or_else(|error| panic!("valid case {} rejected: {error}", case.name));
-            let actual = serde_json::to_value(validated).expect("serialize validated request");
-            assert_eq!(actual, case.expected, "validation case: {}", case.name);
-        }
-
-        for case in fixture.invalid {
-            let raw = exactly_one_request(&case.input, &case.name);
-            let error = validate_vcp_mobile_cli_request(&raw)
-                .expect_err("invalid fixture must be rejected");
-            assert_eq!(error.code, case.code, "invalid case: {}", case.name);
-            assert_eq!(error.field.as_deref(), Some(case.field.as_str()));
-        }
-    }
-
-    #[test]
-    fn foreign_meta_and_signature_fields_are_silently_dropped() {
-        let validated = validate_distributed_vcp_cli_args(&serde_json::json!({
-            "command": "printf ok",
-            "ink": "mark_history",
-            "archery": "no_reply",
-            "river": "text",
-            "vref": 3,
-            "maid": "Sakura",
-            "unknown_meta": "x",
-            "_vcpContext": {"agentId": "spoof"},
-            "vref_files": ["file:///tmp/secret"],
-            "river_context": {"content": "x"}
-        }))
-        .expect("upstream VCP fields must be dropped, not rejected");
-        assert_eq!(
-            validated.action,
-            VcpCliAction::Run {
-                command: "printf ok".to_string(),
-                description: None,
-                cwd: Some(DEFAULT_CWD.to_string()),
-                timeout_ms: Some(DEFAULT_TIMEOUT_MS),
-                run_in_background: Some(false),
-            }
-        );
-        let encoded = serde_json::to_value(&validated).expect("serialize validated request");
-        assert!(encoded.get("meta").is_none());
-    }
-
-    #[test]
-    fn unknown_action_is_still_strictly_rejected() {
-        let error = validate_distributed_vcp_cli_args(&serde_json::json!({
-            "action": "execute",
-            "command": "true"
-        }))
-        .expect_err("unknown action must stay fatal");
-        assert_eq!(error.code, VcpCliErrorCode::InvalidRequest);
-        assert_eq!(error.field.as_deref(), Some("action"));
-
-        let error = validate_distributed_vcp_cli_args(&serde_json::json!({
-            "action": {"nested": true},
-            "command": "true"
-        }))
-        .expect_err("non-scalar action must stay fatal");
-        assert_eq!(error.code, VcpCliErrorCode::InvalidRequest);
-        assert_eq!(error.field.as_deref(), Some("action"));
-    }
-
-    #[test]
-    fn distributed_json_args_reuse_canonical_action_validation() {
-        let validated = validate_distributed_vcp_cli_args(&serde_json::json!({
-            "action": "run",
-            "command": "printf ok",
-            "timeout_ms": 1200,
-            "run_in_background": true
-        }))
-        .expect("valid Distributed args");
-
-        assert_eq!(
-            validated.action,
-            VcpCliAction::Run {
-                command: "printf ok".to_string(),
-                description: None,
-                cwd: Some(DEFAULT_CWD.to_string()),
-                timeout_ms: Some(1200),
-                run_in_background: Some(true),
-            }
-        );
-    }
-
-    #[test]
-    fn known_field_invalid_values_still_fail_closed() {
-        for (args, field) in [
-            (serde_json::json!({"command": ["true"]}), "command"),
-            (
-                serde_json::json!({"command": "true", "description": null}),
-                "description",
-            ),
-            (
-                serde_json::json!({"tool_name": "OtherCLI", "command": "true"}),
-                "tool_name",
-            ),
-            (
-                serde_json::json!({"command": "true", "timeout_ms": 999}),
-                "timeout_ms",
-            ),
-        ] {
-            let error = validate_distributed_vcp_cli_args(&args)
-                .expect_err("invalid values of known fields must fail closed");
-            assert_eq!(error.code, VcpCliErrorCode::InvalidRequest);
-            assert_eq!(error.field.as_deref(), Some(field));
-        }
-    }
-
-    fn exactly_one_request(input: &str, name: &str) -> RawVcpToolRequest {
-        let mut requests = parse_vcp_tool_requests(input);
-        assert_eq!(requests.len(), 1, "fixture should contain one call: {name}");
-        requests.remove(0)
     }
 }

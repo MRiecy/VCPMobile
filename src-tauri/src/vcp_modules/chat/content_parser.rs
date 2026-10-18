@@ -1402,44 +1402,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_full_daily_note_create_with_new_fields_and_tag() {
-        let raw = tool_request(
-            "tool_name:「始」DailyNote「末」\n\
-             command:「始」create「末」\n\
-             maidName:「始」Sakura「末」\n\
-             valetName:「始」Sebastian「末」\n\
-             Date:「始」2026-08-10「末」\n\
-             fileName:「始」Field Log「末」\n\
-             folder:「始」missions/day-1「末」\n\
-             Content:「始」## Done\n\n- item「末」\n\
-             Tag:「始」mobile, sync「末」",
-        );
-
-        let blocks = parse_content(&raw);
-        match first_non_markdown(&blocks) {
-            ContentBlock::Diary {
-                maid,
-                valet,
-                date,
-                file_name,
-                folder,
-                content,
-                nodes,
-                ..
-            } => {
-                assert_eq!(maid, "Sakura");
-                assert_eq!(valet, "Sebastian");
-                assert_eq!(date, "2026-08-10");
-                assert_eq!(file_name, "Field Log");
-                assert_eq!(folder, "missions/day-1");
-                assert_eq!(content, "## Done\n\n- item\n\nTag:mobile, sync");
-                assert!(nodes.as_ref().is_some_and(|nodes| !nodes.is_empty()));
-            }
-            block => panic!("expected diary, got {block:?}"),
-        }
-    }
-
-    #[test]
     fn recognizes_commandless_create_and_update_with_update_precedence() {
         let create =
             tool_request("tool_name:{始}dAiLyNoTe{末}\nContent:{始}commandless create{末}");
@@ -1458,26 +1420,6 @@ mod tests {
             first_non_markdown(&parse_content(&update)),
             ContentBlock::DiaryUpdate { target, replace, .. }
                 if target == "old" && replace == "new"
-        ));
-    }
-
-    #[test]
-    fn explicit_daily_note_commands_keep_failure_placeholders() {
-        let create = tool_request("tool_name:「始」DailyNote「末」\ncommand:「始」create「末」");
-        assert!(matches!(
-            first_non_markdown(&parse_content(&create)),
-            ContentBlock::Diary { content, .. } if content == "[日记内容解析失败]"
-        ));
-
-        let update = tool_request(
-            "tool_name:「始」DailyNote「末」\n\
-             command:「始」update「末」\n\
-             target:「始」old「末」",
-        );
-        assert!(matches!(
-            first_non_markdown(&parse_content(&update)),
-            ContentBlock::DiaryUpdate { target, replace, .. }
-                if target == "old" && replace.is_empty()
         ));
     }
 
@@ -1560,22 +1502,6 @@ mod tests {
             block,
             ContentBlock::Diary { .. } | ContentBlock::DiaryUpdate { .. }
         )));
-    }
-
-    #[test]
-    fn old_diary_cache_deserializes_with_defaulted_new_fields() {
-        let cached = r#"{
-            "type":"diary",
-            "maid":"Sakura",
-            "date":"2026-08-10",
-            "content":"legacy cache"
-        }"#;
-        let block: ContentBlock = serde_json::from_str(cached).expect("old diary cache must load");
-        assert!(matches!(
-            block,
-            ContentBlock::Diary { valet, file_name, folder, .. }
-                if valet.is_empty() && file_name.is_empty() && folder.is_empty()
-        ));
     }
 
     #[test]

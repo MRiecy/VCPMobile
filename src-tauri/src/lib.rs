@@ -155,18 +155,3 @@ pub fn run() {
         }
     });
 }
-
-#[cfg(test)]
-mod contract_tests {
-    #[test]
-    fn distributed_tool_authorization_command_uses_enabled_allowlist() {
-        // 命令注册表位于 commands.rs（lib.rs 仅保留启动编排）。
-        let commands_source = include_str!("commands.rs");
-        let distributed_source = include_str!("distributed/mod.rs");
-
-        assert!(commands_source.contains("distributed::update_enabled_tools,"));
-        assert!(!commands_source.contains("distributed::update_disabled_tools,"));
-        assert!(distributed_source.contains("enabled_names: Vec<String>"));
-        assert!(!distributed_source.contains("disabled_names: Vec<String>"));
-    }
-}

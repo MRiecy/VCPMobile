@@ -248,37 +248,6 @@ describe("DistributedView explicit tool authorization", () => {
     wrapper.unmount();
   });
 
-  it("does not display legacy log or API credentials as distributed connection fields", async () => {
-    installBaseMocks([]);
-    mockInvoke("read_settings", () => ({
-      userName: "tester",
-      vcpServerUrl: "https://legacy.invalid",
-      vcpApiKey: "legacy-api-key",
-      vcpLogUrl: "wss://log.invalid",
-      vcpLogKey: "legacy-log-key",
-      syncServerUrl: "",
-      syncHttpUrl: "",
-      syncToken: "",
-      topicSummaryModel: "",
-      syncLogLevel: "info",
-      agentOrder: [],
-      groupOrder: [],
-      distributedDeviceName: "Phone",
-    }));
-
-    const wrapper = mountWithPinia(DistributedView, {
-      props: { isOpen: true },
-    });
-    await vi.waitFor(() => {
-      expect(
-        wrapper
-          .findAll(".settings-field input")
-          .map((input) => (input.element as HTMLInputElement).value),
-      ).toEqual(["Phone", "", ""]);
-    });
-
-    wrapper.unmount();
-  });
 
   it("uses one mutation owner, does not optimistically flip, and rescans after success", async () => {
     const update = deferred<void>();

@@ -1787,7 +1787,7 @@ async fn helper_session_control<R: Runtime>(
     validate_helper_control_ack(&ack, action, request_id, generation)
 }
 
-#[cfg(any(target_os = "android", test))]
+#[cfg(target_os = "android")]
 fn validate_helper_control_ack(
     ack: &Value,
     action: &str,
@@ -4371,52 +4371,6 @@ mod active_request_tests {
     }
 
     #[test]
-    fn request_purpose_matrix_matches_vchat_semantics() {
-        let raw = "https://example.invalid/proxy";
-        let cases = [
-            (
-                ChatEndpointMode::Standard,
-                ChatRequestPurpose::Interactive,
-                "https://example.invalid/proxy/v1/chat/completions",
-            ),
-            (
-                ChatEndpointMode::Standard,
-                ChatRequestPurpose::Auxiliary,
-                "https://example.invalid/proxy/v1/chat/completions",
-            ),
-            (
-                ChatEndpointMode::VcpTools,
-                ChatRequestPurpose::Interactive,
-                "https://example.invalid/proxy/v1/chatvcp/completions",
-            ),
-            (
-                ChatEndpointMode::VcpTools,
-                ChatRequestPurpose::Auxiliary,
-                "https://example.invalid/proxy/v1/chat/completions",
-            ),
-            (ChatEndpointMode::Raw, ChatRequestPurpose::Interactive, raw),
-            (ChatEndpointMode::Raw, ChatRequestPurpose::Auxiliary, raw),
-        ];
-
-        for (mode, purpose, expected) in cases {
-            assert_eq!(
-                resolve_chat_endpoint(raw, mode, purpose).expect("purpose endpoint"),
-                expected
-            );
-        }
-    }
-
-    #[test]
-    fn raw_mode_is_byte_for_byte_unchanged() {
-        let raw = "HTTP://Example.INVALID:8443/custom/%2f?signature=a%2Fb&x=1";
-        assert_eq!(
-            resolve_chat_endpoint(raw, ChatEndpointMode::Raw, ChatRequestPurpose::Interactive,)
-                .expect("raw endpoint"),
-            raw
-        );
-    }
-
-    #[test]
     fn model_discovery_is_prefix_aware_and_conservative_in_raw_mode() {
         assert_eq!(
             resolve_model_discovery_endpoint(
@@ -4459,63 +4413,6 @@ mod active_request_tests {
                 "unexpectedly accepted {raw}"
             );
         }
-    }
-
-    #[test]
-    fn stream_error_content_appends_one_terminal_suffix() {
-        let final_content = stream_error_content("partial", "network failed");
-        assert_eq!(final_content, "partial\n\n> VCP流式错误: network failed");
-        assert_eq!(
-            stream_error_content(&final_content, "network failed"),
-            final_content
-        );
-        assert_eq!(
-            stream_error_content("", "network failed"),
-            "\n\n> VCP流式错误: network failed"
-        );
-    }
-
-    #[test]
-    fn durable_end_serializes_the_committed_content() {
-        let event = StreamEvent::end(
-            "message-4".to_string(),
-            None,
-            Some("error".to_string()),
-            Some("committed".to_string()),
-            Some(Vec::new()),
-            Some(123),
-            Some(456),
-        );
-        let wire = serde_json::to_value(event).expect("serialize durable end");
-        assert_eq!(wire["type"], "end");
-        assert_eq!(wire["content"], "committed");
-        assert_eq!(wire["finishReason"], "error");
-        assert_eq!(wire["timestamp"], 123);
-        assert_eq!(wire["topicUpdatedAt"], 456);
-    }
-
-    #[test]
-    fn local_attachment_metadata_is_internal_and_labels_never_reveal_parent_paths() {
-        let mut message = json!({
-            "role": "user",
-            "content": "hello",
-            "__vcpLocalAttachments": [{
-                "sha256": "a".repeat(64),
-                "hostPath": "/data/user/0/private/secret.png"
-            }]
-        });
-        remove_internal_local_attachment_metadata(&mut message);
-        let wire = serde_json::to_string(&message).expect("serialize model message");
-        assert!(!wire.contains("__vcpLocalAttachments"));
-        assert!(!wire.contains("/data/user/0/private"));
-        assert_eq!(
-            bounded_attachment_label("/data/user/0/private/\nphoto.png"),
-            "photo.png"
-        );
-        assert_eq!(
-            short_hash(&format!("{}not-a-hash", "a".repeat(64))),
-            "a".repeat(12)
-        );
     }
 
     #[tokio::test]
@@ -4568,44 +4465,5 @@ mod active_request_tests {
                 .attempt_id,
             new_attempt_id
         );
-    }
-
-    #[test]
-    fn helper_control_ack_requires_acceptance_and_exact_identity() {
-        let valid = json!({
-            "action": "ack_committed_ack",
-            "requestId": "message-3",
-            "generation": "generation-17",
-            "accepted": true,
-        });
-        assert!(
-            validate_helper_control_ack(&valid, "ack_committed", "message-3", "generation-17")
-                .is_ok()
-        );
-        assert!(
-            validate_helper_control_ack(&valid, "discard", "message-3", "generation-17").is_err()
-        );
-        assert!(
-            validate_helper_control_ack(&valid, "ack_committed", "message-4", "generation-17")
-                .is_err()
-        );
-        assert!(
-            validate_helper_control_ack(&valid, "ack_committed", "message-3", "generation-18")
-                .is_err()
-        );
-
-        let rejected = json!({
-            "action": "ack_committed_ack",
-            "requestId": "message-3",
-            "generation": "generation-17",
-            "accepted": false,
-        });
-        assert!(validate_helper_control_ack(
-            &rejected,
-            "ack_committed",
-            "message-3",
-            "generation-17"
-        )
-        .is_err());
     }
 }

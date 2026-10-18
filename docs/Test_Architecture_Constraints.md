@@ -3,7 +3,7 @@
 > 版本：v1.2（价值密度校准）
 > 状态：**正式约束文档** — 所有测试 Agent 必须遵循，冲突项需重新报批
 > 范围：Rust 后端 / Tauri 核心 / 自定义插件 / Vue 前端 / Android arm64 E2E / 手工性能诊断 / iOS 源码审计与阶段性 Actions 验收
-> 最近校准：2026-08-27
+> 最近校准：2026-10-18（按用户要求清理低价值测试）
 > 当前实现：单一 `ci.yml` + Vitest/happy-dom + Rust tests + Android 插件 JVM tests + Android Debug Agent CLI
 
 ---
@@ -35,7 +35,7 @@
 | L2 | Rust 集成测试 | 文件提取与真实 fixture 边界 | 仓库级跨格式路径 | 每次 PR/push | cargo test、tempfile、固定二进制 fixture |
 | L3 | Android 插件单元测试 | Kotlin 纯逻辑、Shadow 系统服务 | ForegroundGuardian、安全校验、固定事件 schema | 每次 PR/push | JUnit 4、Robolectric、MockK |
 | L4 | 前端组件/Store 测试 | Vue 原子组件、纯状态 Store | L1 组件、无重副作用 Store | 每次 PR/push | Vitest、@vue/test-utils、happy-dom |
-| L5 | 契约测试 | Rust/TS/Kotlin/权限/Release/Android UI 静态契约 | 命令、参数、生成物与治理一致性 | 每次 PR/push | Vitest 文本契约、Kotlin 反射/文本契约 |
+| L5 | 边界行为测试 | 跨层输入输出、失败路径与状态交接 | 能揭示实际行为退化的边界 | 每次 PR/push | Vitest、Rust、Kotlin 行为测试 |
 | L6 | Android 集成/设备测试 | Service/Activity/权限生命周期 | 需要模拟器或真机的原生行为 | 手工按需 | AndroidX Test / adb |
 | L7 | 移动端 E2E | 真机关键用户旅程与多窗口 UI | P0/P1 旅程 | release 前具名验收 | Android Debug Agent、人工触控/截图 |
 | L8 | 性能与稳定性 | 启动时间、APK 体积、长稳指标 | 诊断报告，不设当前自动阈值 | 手工按需 | Criterion、`tests/perf/` ADB 脚本 |
@@ -59,7 +59,7 @@
 - 对已经移除的兼容路径、旧 schema、旧命令或旧 UI 结构继续做存在性断言；
 - mock 完整复述实现步骤，导致生产代码改名即可失败，却无法区分用户行为是否退化。
 
-源码文本契约只用于没有更强验证手段的安全、权限、发布和跨语言接缝；不得用它同步文档措辞、视觉细节或普通模块清单。业务行为迁移后，应从公开输入/输出和可观察状态重写；业务契约已经退出时，删除旧测试和 fixture。
+2026-10-18 用户决定以清理为主：代码文本、字段清单、格式复述、几乎必定正确及难以说明额外信息价值的测试直接删除，不因冠以安全、权限、发布或跨语言契约之名保留。保留能暴露实际状态、并发、资源、解析或失败路径问题的行为测试；删除后同时清理无消费者的 fixture 和测试辅助，不补建同类门禁。
 
 ---
 
@@ -81,7 +81,7 @@ VCPMobile/
 ├── src/
 │   └── tests/                          # 前端测试
 │       ├── setup.ts / mocks/ / utils/
-│       └── unit/                       # Store、组件、跨层文本/治理契约
+│       └── unit/                       # Store、组件与边界行为测试
 ├── tests/                              # 仓库级脚本与 E2E
 │   ├── e2e-android/scripts/            # Debug-only Agent CLI 与 ADB 基础层
 │   └── perf/scripts/                   # 手工性能/体积/启动诊断
@@ -109,7 +109,7 @@ VCPMobile/
 - Vitest：Vite 原生集成。
 - `@vue/test-utils` + happy-dom：组件挂载与 DOM 断言。
 - `src/tests/mocks/`：统一 mock invoke/listen/Channel、plugin guest-js 与浏览器 API。
-- 手写文本/运行时契约：覆盖 Rust command ↔ TS 调用、权限声明、Release 与 Android UI 治理；当前没有 tauri-specta。
+- 边界行为测试验证实际输入输出与状态交接，不以源码字符串或字段清单冻结实现；当前没有 tauri-specta。
 
 ### 4.4 移动端 Debug / E2E
 - 当前只使用 `tests/e2e-android/scripts/` 中的 Node.js + adb。Agent 统一入口为 `android-debug-agent.cjs`：固定 Debug 包、USB Dev、设备发现、验证后安装、权限预授权、有限日志、状态与 opt-in 单张截图。
@@ -162,7 +162,7 @@ VCPMobile/
 | 能力面 | 状态 | 当前落点 |
 |---|---|---|
 | 软件测试基础设施 | ✅ 已落地 | 单一 CI、Vitest、Rust tests、Kotlin JVM tests |
-| 跨层与治理契约 | ✅ 已落地并持续维护 | 前端/Android/Release 文本和行为契约 |
+| 跨层边界验证 | 按行为价值保留 | 已清理源码文本与字段清单式治理断言 |
 | Android Debug Agent | ✅ 已落地 | Debug-only USB Dev、有限诊断与单张截图；不冒充完整 UI runner |
 | Android 多设备样式验收 | `DEVICE-EVIDENCE-PENDING` | 按 `MOBILE_UI_COMPATIBILITY.md` Android 章节归档具名证据 |
 | 性能 Phase 1 | `ACTIVE / REPORT-ONLY` | D0 因果定位与 D1 packaged Debug A/B 已通过；R1、BootTrace 与固定 SLA 仍 pending |
@@ -175,7 +175,7 @@ VCPMobile/
 2. **Android 真机限制**：部分权限和厂商保活设置无法 adb 自动授权，E2E 需依赖预配置测试机或 root 设备。
 3. **Host scaffold 边界**：host 编译和非 Android fallback 只用于开发/测试；通过不代表 Windows/macOS/Linux 产品支持。
 4. **Mock 边界**：PluginHandle、Raw JNI、AppHandle.path() 等若确实需要抽象，必须作为独立生产重构评审，不能为追求覆盖率顺手增加 trait 层。
-5. **前端动态渲染**：聊天消息块、KaTeX、Mermaid 等不做白盒 DOM 断言，改为"渲染不崩溃 + 关键容器存在 + E2E 截图兜底"。
+5. **前端动态渲染**：围绕内容保持、增量收敛、交互与资源释放验证；仅渲染不崩溃或容器存在不足以保留用例，自动测试不能替代真机视觉证据。
 
 ---
 

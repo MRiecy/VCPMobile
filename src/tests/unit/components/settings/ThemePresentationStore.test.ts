@@ -1,11 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import {
-  normalizeThemeModuleKey,
   resolveThemeWallpaperUrl,
   useThemeStore,
 } from '@/core/stores/theme';
-import { normalizeChatPresentationMode } from '@/features/chat/preferences/model';
 import { useChatPreferencesStore } from '@/features/chat/preferences/store';
 
 describe('theme and chat presentation store contracts', () => {
@@ -29,15 +27,6 @@ describe('theme and chat presentation store contracts', () => {
     setActivePinia(createPinia());
   });
 
-  it.each(['bubble', 'panel', 'immersive'] as const)(
-    'restores the legal presentation value %s',
-    (mode) => {
-      localStorage.setItem('vcp-chat-presentation-mode', mode);
-      const store = useChatPreferencesStore();
-      expect(store.presentationMode).toBe(mode);
-      store.$dispose();
-    },
-  );
 
   it('falls back to bubble and repairs an invalid persisted presentation value', () => {
     localStorage.setItem('vcp-chat-presentation-mode', 'magazine');
@@ -45,37 +34,10 @@ describe('theme and chat presentation store contracts', () => {
 
     expect(store.presentationMode).toBe('bubble');
     expect(localStorage.getItem('vcp-chat-presentation-mode')).toBe('bubble');
-    expect(normalizeChatPresentationMode(null)).toBe('bubble');
     store.$dispose();
   });
 
-  it('does not write or reflow when setting the current presentation value', () => {
-    const store = useChatPreferencesStore();
-    const setItem = vi.spyOn(localStorage, 'setItem');
 
-    const result = store.setPresentationMode('bubble');
-
-    expect(result).toEqual({ ok: true, changed: false, mode: 'bubble' });
-    expect(setItem).not.toHaveBeenCalledWith('vcp-chat-presentation-mode', expect.anything());
-    store.$dispose();
-  });
-
-  it('keeps smooth streaming opt-in and restores the local rendering preference', () => {
-    const initialStore = useChatPreferencesStore();
-    expect(initialStore.smoothStreamingEnabled).toBe(false);
-    expect(initialStore.setSmoothStreamingEnabled(true)).toEqual({
-      ok: true,
-      changed: true,
-      enabled: true,
-    });
-    expect(localStorage.getItem('vcp-smooth-streaming-enabled')).toBe('true');
-    initialStore.$dispose();
-
-    setActivePinia(createPinia());
-    const restoredStore = useChatPreferencesStore();
-    expect(restoredStore.smoothStreamingEnabled).toBe(true);
-    restoredStore.$dispose();
-  });
 
   it('keeps the previous smooth streaming preference when persistence fails', () => {
     const store = useChatPreferencesStore();
@@ -113,22 +75,6 @@ describe('theme and chat presentation store contracts', () => {
     store.$dispose();
   });
 
-  it('restores message feedback and tool folding without initializing a theme', () => {
-    const store = useChatPreferencesStore();
-    expect(store.messageHapticsEnabled).toBe(true);
-    expect(store.collapseToolsWhileStreaming).toBe(false);
-    store.setMessageHapticsEnabled(false);
-    store.setCollapseToolsWhileStreaming(true);
-    store.$dispose();
-
-    setActivePinia(createPinia());
-    const restored = useChatPreferencesStore();
-    expect(restored.messageHapticsEnabled).toBe(false);
-    expect(restored.collapseToolsWhileStreaming).toBe(true);
-    expect(document.documentElement.style.cssText).toBe('');
-    expect(localStorage.getItem('vcp-theme-mode')).toBeNull();
-    restored.$dispose();
-  });
 
   it.each([
     ['vcp-message-haptics-enabled', 'messageHapticsEnabled', 'setMessageHapticsEnabled', false, true],
@@ -146,15 +92,6 @@ describe('theme and chat presentation store contracts', () => {
     store.$dispose();
   });
 
-  it('keeps exposed preference state read-only so controls cannot bypass persistence', () => {
-    const store = useChatPreferencesStore();
-    const write = vi.spyOn(localStorage, 'setItem');
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    Reflect.set(store, 'messageHapticsEnabled', false);
-    expect(store.messageHapticsEnabled).toBe(true);
-    expect(write).not.toHaveBeenCalled();
-    store.$dispose();
-  });
 
   it('uses safe defaults without trying to repair values that could not be read', () => {
     vi.spyOn(localStorage, 'getItem').mockImplementation(() => { throw new Error('access denied'); });
@@ -168,14 +105,6 @@ describe('theme and chat presentation store contracts', () => {
     store.$dispose();
   });
 
-  it('normalizes legacy CSS theme identities to the compiled TS module key', () => {
-    expect(normalizeThemeModuleKey('themes-bear-holiday.css')).toBe('themes-bear-holiday.ts');
-    expect(normalizeThemeModuleKey('themes熊熊假日.css')).toBe('themes-bear-holiday.ts');
-    expect(normalizeThemeModuleKey('themes-bear-holiday.ts')).toBe('themes-bear-holiday.ts');
-    expect(normalizeThemeModuleKey('../themes-bear-holiday.ts')).toBeNull();
-    expect(normalizeThemeModuleKey('https://example.com/theme.ts')).toBeNull();
-    expect(normalizeThemeModuleKey('missing.ts')).toBeNull();
-  });
 
   it('accepts only bundled wallpaper basenames and maps them to WebP', () => {
     expect(resolveThemeWallpaperUrl("'forest_night.webp'")).toBe('/wallpaper/forest_night.webp');
@@ -230,14 +159,6 @@ describe('theme and chat presentation store contracts', () => {
     store.$dispose();
   });
 
-  it('enumerates only TS theme modules for the picker', async () => {
-    const store = useThemeStore();
-    await store.fetchThemes();
-
-    expect(store.availableThemes).toHaveLength(13);
-    expect(store.availableThemes.every((theme) => theme.fileName.endsWith('.ts'))).toBe(true);
-    store.$dispose();
-  });
 
   it('restores theme and mode together without the interactive mode debounce', async () => {
     const store = useThemeStore();

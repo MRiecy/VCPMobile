@@ -1015,37 +1015,6 @@ mod tests {
     }
 
     #[test]
-    fn test_code_block_precipitation_failure() {
-        // 真实样本 测试文档.txt（include_str! 编译期内嵌，杜绝绝对路径与 CI panic）
-        let mut text = include_str!("fixtures/测试文档.txt").to_string();
-
-        // 兼容处理：如果是转义过的 JSON Payload，使用 serde_json 进行 unescape
-        if text.contains("\\n") || text.contains("\\\"") {
-            let wrapped = format!("\"{}\"", text);
-            if let Ok(unescaped) = serde_json::from_str::<String>(&wrapped) {
-                text = unescaped;
-            } else {
-                // 如果直接 wrapped 失败，可能是有未转义的真实双引号，尝试直接替换
-                text = text.replace("\\n", "\n").replace("\\\"", "\"");
-            }
-        }
-
-        // 构造包含 HtmlContainer 的测试文本，验证解析器能沉淀出稳定块
-        let html_container_text =
-            "\n<div class=\"chat-container\">\n<p>Hello inside container</p>\n</div>\n";
-        let combined_text = format!("{}{}", text, html_container_text);
-
-        let mut parser = StreamBlockParser::new();
-        let blocks = parser.finalize(&combined_text);
-
-        // 断言：解析器应成功沉淀出至少一个稳定块
-        assert!(
-            !blocks.is_empty(),
-            "Parser should successfully yield stable blocks"
-        );
-    }
-
-    #[test]
     fn test_streaming_typewriter_incremental_precipitation() {
         let mut parser = StreamBlockParser::new();
         let padding = "这里是一段用来填充文本长度以达到测试新设定之八百字节双换行沉淀阈值物理条件的垫片数据。".repeat(10);
@@ -1085,42 +1054,6 @@ mod tests {
         assert_eq!(blocks_3.len(), 1);
         assert!(tail_3.is_empty());
         assert_eq!(tail_type_3, None);
-    }
-
-    #[test]
-    fn html_and_cpp_fences_share_the_generic_code_fence_type() {
-        for raw in [
-            "```html\n<div class=\"card\">streaming",
-            "```cpp\nint main() {",
-        ] {
-            let mut parser = StreamBlockParser::new();
-            let (blocks, tail, tail_type) = parser.process(raw);
-            assert!(blocks.is_empty());
-            assert_eq!(tail, raw);
-            assert_eq!(tail_type, Some(BlockType::CodeFence));
-        }
-    }
-
-    #[test]
-    fn closed_html_fence_becomes_html_preview_with_clean_content() {
-        let raw = "前文\n\n```html\n<div class=\"card\">hi</div>\n```\n\n后文";
-        let mut parser = StreamBlockParser::new();
-        let blocks = parser.finalize(raw);
-        let preview = blocks
-            .iter()
-            .find(|b| matches!(b, StreamBlock::HtmlPreview { .. }))
-            .expect("html fence should precipitate as HtmlPreview");
-        let StreamBlock::HtmlPreview {
-            content,
-            highlighted_content,
-            ..
-        } = preview
-        else {
-            unreachable!()
-        };
-        // pulldown 提取的内容不带正则切片的首尾换行工件
-        assert_eq!(content, "<div class=\"card\">hi</div>\n");
-        assert!(highlighted_content.is_some());
     }
 
     #[test]

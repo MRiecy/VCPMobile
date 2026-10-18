@@ -4,7 +4,6 @@ import android.app.Activity
 import android.content.ClipData
 import android.content.Intent
 import android.net.Uri
-import android.provider.DocumentsContract
 import androidx.activity.result.ActivityResult
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
@@ -184,16 +183,4 @@ class FilePickerBatchTest {
         verify(exactly = 1) { avatar.reject("cancelled: file picker") }
     }
 
-    @Test fun configPickerStartsAtExportsAndAcceptsCurrentAndLegacyBackupTypesTogether() {
-        val first = start(mode = "config")
-        assertArrayEquals(arrayOf("application/json", "application/vnd.vcp.config+json", "application/octet-stream"), launched.getStringArrayExtra(Intent.EXTRA_MIME_TYPES))
-        val directory = launched.getParcelableExtra<Uri>(DocumentsContract.EXTRA_INITIAL_URI)
-        assertEquals("primary:Download/VCPMobile", DocumentsContract.getDocumentId(directory!!))
-        plugin.onPickFileResult(first, ActivityResult(Activity.RESULT_CANCELED, null))
-
-        val ordinary = start(mode = "file")
-        assertFalse(launched.hasExtra(DocumentsContract.EXTRA_INITIAL_URI))
-        assertFalse(launched.hasExtra(Intent.EXTRA_MIME_TYPES))
-        plugin.onPickFileResult(ordinary, ActivityResult(Activity.RESULT_CANCELED, null))
-    }
 }

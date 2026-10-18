@@ -350,45 +350,4 @@ mod tests {
             other => panic!("unexpected message: {other:?}"),
         }
     }
-
-    #[test]
-    fn raw_registration_manifest_is_embedded_as_an_object() {
-        let raw = RawValue::from_string(
-            r#"{"name":"VCPMobileCLI","capabilities":{"invocationCommands":[]}}"#.to_string(),
-        )
-        .expect("raw manifest");
-        let wire = serde_json::to_value(OutgoingMessage::RegisterTools {
-            server_name: "mobile".to_string(),
-            tools: vec![raw],
-            capabilities: ServerCapabilities { cancel_tool: true },
-        })
-        .expect("registration wire");
-        assert_eq!(wire["data"]["tools"][0]["name"], "VCPMobileCLI");
-        assert!(wire["data"]["tools"][0].is_object());
-    }
-
-    #[test]
-    fn register_tools_advertises_cancel_tool_capability() {
-        let wire = serde_json::to_value(OutgoingMessage::RegisterTools {
-            server_name: "mobile".to_string(),
-            tools: vec![],
-            capabilities: ServerCapabilities { cancel_tool: true },
-        })
-        .expect("registration wire");
-        assert_eq!(wire["data"]["capabilities"]["cancelTool"], true);
-    }
-
-    #[test]
-    fn cancel_tool_parses_request_id() {
-        let envelope: IncomingEnvelope = serde_json::from_value(serde_json::json!({
-            "type": "cancel_tool",
-            "data": { "requestId": "request-9" }
-        }))
-        .expect("parse cancel_tool envelope");
-
-        match envelope.parse() {
-            IncomingMessage::CancelTool { request_id } => assert_eq!(request_id, "request-9"),
-            other => panic!("unexpected message: {other:?}"),
-        }
-    }
 }

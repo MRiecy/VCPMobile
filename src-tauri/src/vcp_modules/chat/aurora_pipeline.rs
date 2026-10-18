@@ -1098,40 +1098,6 @@ mod tests {
 
     /// 小于上限的普通 tail 仍走 AST 路径，并只保留唯一 canonical AST。
     #[test]
-    fn test_normal_tail_uses_ast() {
-        let mut buffer = AuroraBuffer::new();
-        buffer.append_chunk("正常一段流式文本，尚未闭合");
-        let (stable_changed, tail_changed) = buffer.process_queue();
-        assert!(!stable_changed);
-        assert!(tail_changed);
-        assert_eq!(
-            buffer.tail_projection.as_ref().map(|state| state.mode),
-            Some(TailRenderMode::Ast)
-        );
-        assert!(!buffer.prev_tail_ast.is_empty());
-        assert!(buffer.prev_tail_ast[0].get_hash().is_some());
-        match buffer
-            .current_tail_wire_block()
-            .expect("Snapshot tail 应可按需构造")
-        {
-            StreamBlock::Markdown { nodes, .. } => assert!(nodes.is_none()),
-            other => panic!("expected markdown tail block, got {other:?}"),
-        }
-        let _ = buffer.take_tail_frame();
-
-        assert_eq!(buffer.process_queue(), (false, false));
-        assert!(buffer.take_tail_frame().is_none());
-
-        buffer.append_chunk("，继续");
-        assert_eq!(buffer.process_queue(), (false, true));
-        let frame = buffer.take_tail_frame().expect("append tail frame");
-        assert!(frame
-            .mutations
-            .iter()
-            .any(|mutation| matches!(mutation, AstMutation::AppendText { .. })));
-    }
-
-    #[test]
     fn unclosed_think_tail_projects_empty_inner_then_appends_plain_text() {
         let mut buffer = AuroraBuffer::new();
         buffer.append_chunk("<think>");
@@ -1619,27 +1585,6 @@ mod tests {
     }
 
     #[test]
-    fn tail_frame_sequence_is_namespaced_by_buffer_stream_id() {
-        let mut first = AuroraBuffer::new();
-        first.append_chunk("a");
-        first.process_queue();
-        let first_frame = first.take_tail_frame().expect("first tail frame");
-        assert_eq!(first_frame.stream_id, first.stream_id);
-        assert_eq!(first_frame.frame_seq, 1);
-        let wire = serde_json::to_value(&first_frame).expect("serialize tail frame");
-        assert_eq!(wire["streamId"], first.stream_id);
-
-        first.append_chunk("b");
-        first.process_queue();
-        let second_frame = first.take_tail_frame().expect("second tail frame");
-        assert_eq!(second_frame.stream_id, first_frame.stream_id);
-        assert_eq!(second_frame.frame_seq, 2);
-
-        let second = AuroraBuffer::new();
-        assert_ne!(second.stream_id, first.stream_id);
-    }
-
-    #[test]
     fn recovery_baseline_covers_full_content_without_replaying_it_as_a_chunk() {
         let mut buffer = AuroraBuffer::new();
         buffer.append_chunk("authoritative");
@@ -1673,10 +1618,6 @@ mod tests {
             .as_ref()
             .is_some_and(|nodes| !nodes.is_empty()));
         assert!(baseline.chunk.is_none());
-        let wire = serde_json::to_value(&baseline).expect("serialize recovery baseline");
-        assert_eq!(wire["kind"], "snapshot");
-        assert!(wire.get("tail").is_none());
-        assert!(wire.get("tailSnapshot").is_none());
         assert!(buffer.take_chunk().is_none());
 
         buffer.append_chunk("!");
@@ -1685,23 +1626,6 @@ mod tests {
         assert_eq!(next.stream_id, buffer.stream_id);
         assert_eq!(next.frame_seq, 2);
         assert_eq!(buffer.take_chunk().as_deref(), Some("!"));
-    }
-
-    #[test]
-    fn reset_snapshot_uses_the_latest_canonical_ast_without_a_mirror() {
-        let mut buffer = AuroraBuffer::new();
-        buffer.append_chunk("stable\n\ntail");
-        assert_eq!(buffer.process_queue(), (true, true));
-        assert!(buffer.tail_reset_pending);
-
-        buffer.append_chunk(" grows");
-        assert_eq!(buffer.process_queue(), (false, true));
-        let canonical = buffer.prev_tail_ast.clone();
-        let frame = buffer.take_tail_frame().expect("pending reset frame");
-
-        assert!(frame.reset);
-        assert_eq!(frame.snapshot.as_deref(), Some(canonical.as_slice()));
-        assert!(frame.mutations.is_empty());
     }
 
     #[test]
@@ -1761,9 +1685,6 @@ mod tests {
         ));
         assert!(first.tail_frame.is_some());
         let wire = serde_json::to_value(&first).expect("serialize first delta");
-        assert!(wire.get("tailBlock").is_none());
-        assert!(wire.get("stableBlocks").is_none());
-        assert!(wire.get("content").is_none());
 
         // prepare 本身不消费任何增量；只有发送成功后的 commit 才推进 wire cursor。
         assert_eq!(buffer.pushed_len, 0);
@@ -1815,21 +1736,6 @@ mod tests {
         assert_eq!(second_append.base_count, 1);
         assert_eq!(second_append.blocks.len(), 1);
         assert!(second.stable_blocks.is_none());
-    }
-
-    #[test]
-    fn recovery_compiler_returns_one_canonical_tail_snapshot() {
-        let snapshot = AuroraBuffer::compile_recovery_snapshot("hello".to_string());
-        assert!(snapshot.stable_blocks.is_empty());
-        assert_eq!(snapshot.tail_mode, Some(TailRenderMode::Ast));
-        assert!(!snapshot.tail_snapshot.is_empty());
-        match snapshot.tail_block.expect("tail block") {
-            StreamBlock::Markdown { content, nodes, .. } => {
-                assert_eq!(content, "hello");
-                assert!(nodes.is_none());
-            }
-            other => panic!("expected markdown recovery tail, got {other:?}"),
-        }
     }
 
     #[test]

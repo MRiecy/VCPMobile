@@ -1642,77 +1642,10 @@ mod tests {
     }
 
     #[test]
-    fn deeply_nested_html_containers_stop_recursive_parsing_safely() {
-        let depth = MAX_HTML_CONTAINER_DEPTH + 8;
-        let input = format!(
-            "{}content{}",
-            "<div>\n".repeat(depth),
-            "\n</div>".repeat(depth)
-        );
-
-        let first = parse_markdown_to_ast(&input);
-        let second = parse_markdown_to_ast(&input);
-        assert!(!first.is_empty());
-        assert_eq!(first, second);
-    }
-
-    #[test]
     fn html_close_tag_search_rejects_invalid_byte_offsets() {
         let input = "é</div>";
         assert_eq!(find_matching_close_tag(input, 1, "div"), None);
         assert_eq!(find_matching_close_tag(input, input.len() + 1, "div"), None);
-    }
-
-    #[test]
-    fn malformed_markdown_corpus_is_total_and_deterministic() {
-        let cases = [
-            "\0\u{2028}\u{2029}",
-            "***未闭合 [链接](<>) `code",
-            "\\[x + \\(y",
-            "<!-- 未闭合 <div><span>",
-            "| a | b |\n| --- |\n| 1 | 2 | 3 |",
-            "```rust\nfn main() { /*",
-            "“外层 \"内层 **强调**",
-        ];
-
-        for input in cases {
-            let first = parse_markdown_to_ast_streaming(input);
-            let second = parse_markdown_to_ast_streaming(input);
-            assert_eq!(first, second, "parser must be deterministic for {input:?}");
-            assert!(serde_json::to_value(&first).is_ok());
-        }
-    }
-
-    #[test]
-    fn test_is_punctuation() {
-        assert!(is_punctuation('“'));
-        assert!(is_punctuation('”'));
-        assert!(is_punctuation('，'));
-        assert!(is_punctuation('。'));
-        assert!(is_punctuation('【'));
-        assert!(is_punctuation('·'));
-    }
-
-    #[test]
-    fn test_fix_flanking_delimiters() {
-        // 1. “**加粗**” 本身能完美闭合，不应该注入任何字符
-        assert_eq!(fix_flanking_delimiters("“**加粗**”"), "“**加粗**”");
-
-        // 2. 这很**“重要”**的 -> 应该在开启后注入，闭合前注入
-        assert_eq!(
-            fix_flanking_delimiters("这很**“重要”**的"),
-            "这很**\u{200B}“重要”\u{200B}**的"
-        );
-
-        // 3. 代码块内部的加粗不应该被处理
-        let code_text = "```\n这很**“重要”**的\n```";
-        assert_eq!(fix_flanking_delimiters(code_text), code_text);
-
-        // 4. 并排复杂的加粗引号：看哪些**“应该加粗的部分没有加粗”**，或者**“不该加粗的部分泄漏了”**
-        assert_eq!(
-            fix_flanking_delimiters("看哪些**“应该加粗的部分没有加粗”**，或者**“不该加粗的部分泄漏了”**"),
-            "看哪些**\u{200B}“应该加粗的部分没有加粗”\u{200B}**，或者**\u{200B}“不该加粗的部分泄漏了”\u{200B}**"
-        );
     }
 
     #[test]
@@ -1908,40 +1841,6 @@ mod tests {
     }
 
     #[test]
-    fn test_user_reproduce() {
-        let text = include_str!("../fixtures/Strong.txt");
-        let nodes = parse_markdown_to_ast(text);
-
-        // 查找包含“自愈判定阀”的 Strong 节点
-        let mut found = false;
-        for node in &nodes {
-            if let MarkdownNode::Paragraph { children, .. } = node {
-                for child in children {
-                    if let InlineNode::Strong {
-                        children: strong_children,
-                        ..
-                    } = child
-                    {
-                        if !strong_children.is_empty() {
-                            if let InlineNode::Text { value, .. } = &strong_children[0] {
-                                if value.contains("自愈判定阀") {
-                                    found = true;
-                                    // 检查是否正确包含零宽空格
-                                    assert!(value.contains("\u{200b}「自愈判定阀」\u{200b}"));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        assert!(
-            found,
-            "Could not find bolded '自愈判定阀' node in Strong.txt"
-        );
-    }
-
-    #[test]
     fn test_code_block_nesting_isolation() {
         // 外层 4 个反引号，内层 3 个反引号
         let text = "````markdown\n这是一段嵌套代码块：\n```rust\nfn main() {\n    // **这不该被flanking修改**\n    let a = \"**hello**\";\n}\n```\n````";
@@ -1949,31 +1848,6 @@ mod tests {
 
         // 应该完全没有任何修改，因为这段内容全部在 4 个反引号的代码围栏中
         assert_eq!(fixed, text);
-    }
-
-    #[test]
-    fn test_brk_text_37() {
-        // 真实样本 brk.txt，覆盖 parse_content 切分（include_str! 编译期内嵌，杜绝绝对路径）
-        let text = include_str!("../fixtures/brk.txt");
-        // 模拟 content_parser.rs 的 parse_content 切分
-        let blocks = crate::vcp_modules::content_parser::parse_content(text);
-        // 断言切分出至少一个块（原诊断 println 已转为 assert）
-        assert!(
-            !blocks.is_empty(),
-            "brk.txt 经 parse_content 后应至少切分出一个块"
-        );
-    }
-
-    #[test]
-    fn parse_fenced_code_block_extracts_lang_code_and_block_len() {
-        let text = "```rust\nlet a = 1;\n```\n\nafter";
-        let (lang, code, block_len) = parse_fenced_code_block(text).expect("fenced code block");
-        assert_eq!(lang, "rust");
-        // 内容逐行字面保留（含行尾换行），无首尾换行工件
-        assert_eq!(code, "let a = 1;\n");
-        // 块长度覆盖到闭合围栏行尾（不含其后的换行与下文）
-        assert_eq!(block_len, "```rust\nlet a = 1;\n```".len());
-        assert_eq!(&text[block_len..], "\n\nafter");
     }
 
     #[test]

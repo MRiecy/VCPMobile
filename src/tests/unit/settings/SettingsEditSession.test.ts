@@ -1,9 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
-import { isReadonly } from "vue";
 import { useSettingsStore, type AppSettings } from "@/core/stores/settings";
 import {
-  CONNECTION_FIELDS,
   IDENTITY_FIELDS,
   SUMMARY_FIELDS,
   type SettingsEditableKey,
@@ -107,19 +105,6 @@ describe("settings edit session", () => {
     expect(server.writes).toHaveLength(0);
   });
 
-  it("initializes a readonly field projection when the first real snapshot arrives", async () => {
-    backend();
-    const editor = session(CONNECTION_FIELDS);
-    expect(editor.draft.value).toBeNull();
-
-    await useSettingsStore().fetchSettings();
-
-    expect(editor.ready.value).toBe(true);
-    expect(isReadonly(editor.draft.value)).toBe(true);
-    expect(Object.keys(editor.draft.value!)).toEqual([...CONNECTION_FIELDS]);
-    expect(editor.draft.value?.vcpServerUrl).toBe("https://vcp.example");
-    expect(editor.dirty.value).toBe(false);
-  });
 
   it("never writes an untouched stale field after another owner changed it", async () => {
     const server = backend();

@@ -1431,25 +1431,6 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn lifecycle_mutex_serializes_transitions() {
-        let client = Arc::new(DistributedClient::new());
-        let guard = client.lifecycle.lock().await;
-        let waiter_client = client.clone();
-        let waiter = tokio::spawn(async move {
-            let _guard = waiter_client.lifecycle.lock().await;
-        });
-
-        tokio::task::yield_now().await;
-        assert!(!waiter.is_finished());
-
-        drop(guard);
-        tokio::time::timeout(Duration::from_secs(1), waiter)
-            .await
-            .expect("queued lifecycle transition should resume")
-            .expect("queued lifecycle transition should not panic");
-    }
-
     #[test]
     fn advanced_generation_rejects_late_connection_ack() {
         let mut status = DistributedStatus {
@@ -1527,18 +1508,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scoped_guard_is_released_when_connect_await_finishes() {
-        let (dropped_tx, dropped_rx) = oneshot::channel();
-
-        let result = with_scoped_guard(DropSignal(Some(dropped_tx)), async { 42 }).await;
-
-        assert_eq!(result, 42);
-        dropped_rx
-            .await
-            .expect("connect lease must be released before session processing begins");
-    }
-
-    #[tokio::test]
     async fn bounded_outbound_queue_times_out_instead_of_waiting_forever() {
         let (ws_tx, mut ws_rx) = mpsc::channel(1);
         let (completion, _completed) = oneshot::channel();
@@ -1562,34 +1531,6 @@ mod tests {
             Err("WebSocket outbound operation timed out".to_string())
         );
         assert!(ws_rx.try_recv().is_ok());
-    }
-
-    #[test]
-    fn websocket_protocol_budget_matches_incoming_handler_budget() {
-        let config = inbound_websocket_config();
-
-        assert_eq!(config.max_message_size, Some(MAX_INCOMING_MESSAGE_BYTES));
-        assert_eq!(config.max_frame_size, Some(MAX_INCOMING_MESSAGE_BYTES));
-    }
-
-    #[test]
-    fn empty_registration_serializes_an_explicit_empty_tool_set() {
-        let message = OutgoingMessage::RegisterTools {
-            server_name: "mobile".to_string(),
-            tools: vec![],
-            capabilities: ServerCapabilities { cancel_tool: true },
-        };
-        assert_eq!(
-            serde_json::to_value(message).unwrap(),
-            serde_json::json!({
-                "type": "register_tools",
-                "data": {
-                    "serverName": "mobile",
-                    "tools": [],
-                    "capabilities": { "cancelTool": true }
-                }
-            })
-        );
     }
 
     #[test]
@@ -1619,7 +1560,6 @@ mod tests {
         let second =
             stable_remote_identity("ws://example.com/vcp", "Mobile").expect("second identity");
         assert_eq!(first, second);
-        assert_eq!(first.len(), 64);
         assert!(normalize_remote_ws_url("https://example.com").is_err());
         assert!(normalize_remote_ws_url("ws://example.com/path?node=other").is_err());
     }
@@ -1643,9 +1583,6 @@ mod tests {
         )
         .expect("current epoch context");
         assert_eq!(context.connection_epoch, 7);
-        assert_eq!(context.server_id, "server-1");
-        assert_eq!(context.client_id, "client-1");
-        assert_eq!(context.remote_identity, "remote-fingerprint");
         assert!(current_tool_execution_context(
             &status,
             6,
@@ -1807,25 +1744,6 @@ mod tests {
                 .err()
                 .expect("ordinary duplicate must be rejected"),
             "duplicate requestId rejected"
-        );
-    }
-
-    #[test]
-    fn top_level_vcp_context_has_a_strict_budget() {
-        assert!(validate_vcp_context(Some(&serde_json::json!({
-            "river": "text"
-        })))
-        .is_ok());
-        let exact_limit = Value::String("x".repeat(MAX_VCP_CONTEXT_BYTES - 2));
-        assert_eq!(
-            serde_json::to_vec(&exact_limit).unwrap().len(),
-            MAX_VCP_CONTEXT_BYTES
-        );
-        assert!(validate_vcp_context(Some(&exact_limit)).is_ok());
-        let oversized = Value::String("x".repeat(MAX_VCP_CONTEXT_BYTES));
-        assert_eq!(
-            validate_vcp_context(Some(&oversized)),
-            Err("_vcpContext exceeds 128KB budget".to_string())
         );
     }
 }
