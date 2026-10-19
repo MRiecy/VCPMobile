@@ -41,6 +41,7 @@ macro_rules! app_command_handler {
             begin_voice_conversation, end_voice_conversation, get_voice_conversation_snapshot,
             start_voice_microphone, close_voice_microphone,
             start_tts_session, stop_tts, submit_tts_text,
+            preview_tts, import_voice_clone_sample, get_voice_clone_sample, discard_voice_clone_sample,
         };
         use crate::vcp_modules::cli::{
             close_vcp_mobile_cli_terminal, commit_vcp_mobile_cli_skill_import,
@@ -201,6 +202,10 @@ macro_rules! app_command_handler {
                 start_tts_session,
                 stop_tts,
                 submit_tts_text,
+                preview_tts,
+                import_voice_clone_sample,
+                get_voice_clone_sample,
+                discard_voice_clone_sample,
                 // ── VCP 连接与生成控制（vcp_client）──
                 reconnect_chat_streams,
                 interruptGroupTurn,

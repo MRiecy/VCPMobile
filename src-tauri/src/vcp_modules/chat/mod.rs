@@ -12,5 +12,6 @@ pub mod stream_block_parser;
 pub mod topic_service;
 pub mod topic_summary_service;
 pub mod topic_types;
+pub(crate) mod voice_guidance;
 pub mod voice_service;
 pub(crate) mod voice_submission;

@@ -97,6 +97,12 @@ pub enum StreamBlock {
         raw_content: String,
         hash: String,
     },
+    #[serde(rename = "voice-guidance")]
+    VoiceGuidance {
+        content: String,
+        is_complete: bool,
+        hash: String,
+    },
 }
 
 impl StreamBlock {
@@ -321,6 +327,9 @@ impl StreamBlockParser {
         self.break_scan_end = self.break_scan_end.clamp(base, full_text.len());
         // 取出上一帧的未闭合块书签；本帧各返回路径负责重建（未闭合）或留空（已闭合/普通 tail）
         let mut pending = self.pending_block.take();
+        let mut guidance_blocks: Option<
+            Vec<crate::vcp_modules::chat::voice_guidance::GuidanceBlock>,
+        > = None;
 
         while pos < full_text.len() {
             let remaining = &full_text[pos..];
@@ -351,6 +360,49 @@ impl StreamBlockParser {
                     find_earliest_start_marker(remaining, bounded_from, multiline_from)
                 }
             };
+
+            // 候选出现时每帧至多扫描一次原始全文，保留已沉淀前文的 Markdown
+            // 范围证据（列表、惰性引用、tilde 围栏）。普通输出与 opaque 书签续跑
+            // 不增加全量 Markdown 扫描。未闭合指导不送入 Aurora Markdown tail。
+            let guidance = if pending.is_none() && has_guidance_candidate(remaining) {
+                guidance_blocks
+                    .get_or_insert_with(|| {
+                        crate::vcp_modules::chat::voice_guidance::blocks(full_text, false)
+                    })
+                    .iter()
+                    .find(|block| block.range.start >= pos)
+                    .cloned()
+            } else {
+                None
+            };
+            if let Some(guidance) = guidance.filter(|block| {
+                start_marker.map_or(true, |(start, _, _)| block.range.start <= pos + start)
+            }) {
+                let before = &full_text[pos..guidance.range.start];
+                let (md_blocks, md_tail) = split_markdown_paragraphs(before, 0);
+                blocks.extend(md_blocks);
+                if !md_tail.is_empty() {
+                    let nodes = crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&md_tail);
+                    let hash = HashAggregator::compute_content_hash(&md_tail);
+                    blocks.push(StreamBlock::markdown(md_tail, Some(nodes), hash));
+                }
+                if guidance.complete {
+                    let hash = HashAggregator::compute_content_hash(&full_text[guidance.range.clone()]);
+                    blocks.push(StreamBlock::VoiceGuidance {
+                        content: guidance.content,
+                        is_complete: true,
+                        hash,
+                    });
+                    pos = guidance.range.end;
+                    pending = None;
+                    continue;
+                }
+                self.processed_len = guidance.range.start;
+                self.pending_block = None;
+                self.marker_scan_end = self.processed_len;
+                self.break_scan_end = self.processed_len;
+                return (blocks, String::new(), None);
+            }
 
             if let Some((start, end, block_type)) = start_marker {
                 #[cfg(test)]
@@ -485,6 +537,30 @@ impl StreamBlockParser {
     /// 流结束：强制处理剩余 tail 为最后一个 Markdown 块
     pub fn finalize(&mut self, full_text: &str) -> Vec<StreamBlock> {
         let (mut blocks, tail, tail_type) = self.process(full_text);
+        // 活跃流中的半包始终隐藏；流结束后保留可检查的未完成指导块，而不是
+        // 把协议标记降级为可见 Markdown。完整块已由 process 消费。
+        if tail.is_empty() && self.processed_len < full_text.len() {
+            let mut cursor = self.processed_len;
+            for guidance in crate::vcp_modules::chat::voice_guidance::blocks(full_text, true)
+                .into_iter()
+                .filter(|block| block.range.start >= self.processed_len)
+            {
+                if cursor < guidance.range.start {
+                    blocks.push(final_markdown_block(&full_text[cursor..guidance.range.start]));
+                }
+                cursor = guidance.range.end;
+                blocks.push(StreamBlock::VoiceGuidance {
+                    content: guidance.content,
+                    is_complete: guidance.complete,
+                    hash: HashAggregator::compute_content_hash(&full_text[guidance.range]),
+                });
+            }
+            // '<' 之类只有流式期间存在歧义的前缀，在终态仍须恢复为普通正文。
+            if cursor < full_text.len() {
+                blocks.push(final_markdown_block(&full_text[cursor..]));
+            }
+            self.processed_len = full_text.len();
+        }
         let trimmed = tail.trim();
         if !trimmed.is_empty() {
             let nodes = if tail_type == Some(BlockType::HtmlContainer) {
@@ -515,6 +591,23 @@ impl StreamBlockParser {
 }
 
 // ── 内部辅助函数 ──────────────────────────────────────────────────────
+
+fn has_guidance_candidate(text: &str) -> bool {
+    use crate::vcp_modules::chat::voice_guidance::GUIDANCE_START;
+    text.contains(GUIDANCE_START)
+        || text.rsplit('\n').next().is_some_and(|line| {
+            let marker = line.trim();
+            !marker.is_empty() && GUIDANCE_START.starts_with(marker)
+        })
+}
+
+fn final_markdown_block(text: &str) -> StreamBlock {
+    StreamBlock::markdown(
+        text.to_owned(),
+        Some(crate::vcp_modules::pre_renderer::parse_markdown_to_ast(text)),
+        HashAggregator::compute_content_hash(text),
+    )
+}
 
 /// 在文本中寻找最早出现的特种块起始标记
 /// 返回 (start_offset, end_offset, BlockType)
@@ -1221,6 +1314,66 @@ mod tests {
             format!("{:?}", one_blocks),
             "书签续扫的增量解析必须与整段一次解析产出一致"
         );
+    }
+
+    #[test]
+    fn guidance_never_leaks_markers_through_partial_stream_tails() {
+        let full = "<<<[VOICE_GUIDANCE]>>>\n自然清亮\n<<<[END_VOICE_GUIDANCE]>>>\n[轻笑]你好。";
+        let mut parser = StreamBlockParser::new();
+        let mut text = String::new();
+        let mut completed = Vec::new();
+        for ch in full.chars() {
+            text.push(ch);
+            let (blocks, tail, _) = parser.process(&text);
+            assert!(!tail.contains('<'), "protocol leaked through tail: {tail:?}");
+            completed.extend(blocks);
+        }
+        completed.extend(parser.finalize(full));
+        assert!(matches!(completed.first(), Some(StreamBlock::VoiceGuidance {
+            content, is_complete: true, ..
+        }) if content == "自然清亮"));
+        assert!(matches!(completed.last(), Some(StreamBlock::Markdown { content, .. }) if content == "[轻笑]你好。"));
+        assert_eq!(completed.iter().filter(|block| matches!(block, StreamBlock::VoiceGuidance { .. })).count(), 1);
+    }
+
+    #[test]
+    fn finalized_guidance_eof_and_ambiguous_prefix_match_terminal_meaning() {
+        for (raw, complete) in [
+            ("<<<[VOICE_GUIDANCE]>>>\n自然\n<<<[END_VOICE_GUIDANCE]>>>", true),
+            ("<<<[VOICE_GUIDANCE]>>>\n自然", false),
+        ] {
+            let mut parser = StreamBlockParser::new();
+            let (active, tail, _) = parser.process(raw);
+            assert!(active.is_empty());
+            assert!(tail.is_empty());
+            assert!(matches!(parser.finalize(raw).as_slice(), [StreamBlock::VoiceGuidance {
+                content, is_complete, ..
+            }] if content == "自然" && *is_complete == complete));
+        }
+        let mut parser = StreamBlockParser::new();
+        assert!(parser.process("<").1.is_empty());
+        assert!(matches!(parser.finalize("<").as_slice(), [StreamBlock::Markdown { content, .. }] if content == "<"));
+    }
+
+    #[test]
+    fn guidance_scope_survives_precipitated_markdown_and_opaque_blocks() {
+        let guidance = "<<<[VOICE_GUIDANCE]>>>\n示例\n<<<[END_VOICE_GUIDANCE]>>>\n";
+        for example in [
+            format!("~~~text\n先前段落\n\n{guidance}~~~\n"),
+            format!("```text\n先前段落\n\n{guidance}```\n"),
+            format!("<think>\n先前段落\n\n{guidance}</think>\n"),
+            format!("<<<[TOOL_REQUEST]>>>\n{guidance}<<<[END_TOOL_REQUEST]>>>\n"),
+        ] {
+            let mut parser = StreamBlockParser::new();
+            let mut text = String::new();
+            let mut blocks = Vec::new();
+            for line in example.split_inclusive('\n') {
+                text.push_str(line);
+                blocks.extend(parser.process(&text).0);
+            }
+            blocks.extend(parser.finalize(&text));
+            assert!(!blocks.iter().any(|block| matches!(block, StreamBlock::VoiceGuidance { .. })), "{example}");
+        }
     }
 
     #[test]

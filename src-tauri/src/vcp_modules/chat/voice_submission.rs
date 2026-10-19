@@ -7,6 +7,7 @@ use crate::vcp_modules::agent_chat_application_service::{
     process_prepared_agent_chat_message, AgentChatPayload, PreparedAgentRequest,
 };
 use crate::vcp_modules::agent_service::AgentConfigState;
+use crate::vcp_modules::chat::voice_service::VoiceReplyPolicy;
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_chat_application_service::{
@@ -21,6 +22,7 @@ use crate::vcp_modules::vcp_client::{
     ChatRequestPurpose,
 };
 use serde_json::{json, Value};
+use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio_util::sync::CancellationToken;
 
@@ -35,6 +37,7 @@ pub(crate) struct PreparedVoiceSubmission {
     message: ChatMessage,
     cancellation: CancellationToken,
     owner: PreparedChatOwner,
+    reply_policy: Arc<VoiceReplyPolicy>,
 }
 
 /// Register only in memory. A token cancelled before registration stays
@@ -47,6 +50,7 @@ pub(crate) fn prepare_voice_submission(
     origin: String,
     text: String,
     cancellation: CancellationToken,
+    reply_policy: Arc<VoiceReplyPolicy>,
 ) -> Result<PreparedVoiceSubmission, String> {
     if !target.is_valid() || origin.is_empty() || text.trim().is_empty() {
         return Err("语音消息的会话、标识或正文无效。".into());
@@ -86,6 +90,7 @@ pub(crate) fn prepare_voice_submission(
         message,
         cancellation,
         owner,
+        reply_policy,
     })
 }
 
@@ -98,7 +103,9 @@ impl PreparedVoiceSubmission {
         self,
         on_persisted: impl FnOnce(ChatMessage, MessageWriteResultDto),
     ) -> Result<Value, String> {
-        let Self { app, target, mut message, cancellation, owner } = self;
+        let Self {
+            app, target, mut message, cancellation, owner, reply_policy,
+        } = self;
         if cancellation.is_cancelled() {
             return Ok(json!({ "status": "cancelled" }));
         }
@@ -123,6 +130,7 @@ impl PreparedVoiceSubmission {
                     connection,
                     None,
                     false,
+                    Some(reply_policy),
                 )
                 .await
             }
@@ -142,6 +150,7 @@ impl PreparedVoiceSubmission {
                         stream_channel: None,
                     },
                     false,
+                    Some(reply_policy),
                 )
                 .await
             }

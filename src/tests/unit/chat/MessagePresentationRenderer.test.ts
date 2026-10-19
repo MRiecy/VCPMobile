@@ -187,6 +187,37 @@ async function seedRemountTail(
 }
 
 describe('MessageRenderer presentation shell', () => {
+  it('keeps a pending guidance marker private and preserves its expansion across final hashes', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useChatSessionStore().setConversation({ id: 'agent-a', type: 'agent' }, 'topic-a');
+    const stream = useChatStreamStore();
+    stream.addSessionStream('agent-a', 'agent', 'topic-a', 'voice-guidance');
+    const message = reactive<ChatMessage>({
+      id: 'voice-guidance', role: 'assistant', timestamp: 1,
+      content: '<<<[VOICE_GUIDANCE]>>>\n生成中的指导', blocks: [],
+      shell: { isUser: false, displayName: 'Agent', avatarColor: '#888' },
+    });
+    const wrapper = mountStreamRenderer(message, pinia);
+    expect(wrapper.text()).not.toContain('<<<[');
+    expect(wrapper.text()).not.toContain('生成中的指导');
+
+    message.blocks = [{ type: 'voice-guidance', content: '自然轻快', is_complete: true, hash: 'stream-hash' }];
+    await nextTick();
+    const toggle = wrapper.get('.voice-guidance-toggle');
+    expect(toggle.attributes('aria-expanded')).toBe('false');
+    await toggle.trigger('click');
+    message.blocks = [
+      { type: 'voice-guidance', content: '自然轻快', is_complete: true, hash: 123456 },
+      { type: 'markdown', content: '[轻笑]你好。', hash: 7654321 },
+    ];
+    await nextTick();
+    expect(wrapper.get('.voice-guidance-toggle').attributes('aria-expanded')).toBe('true');
+    expect(wrapper.text()).toContain('[轻笑]你好。');
+    expect(wrapper.text()).not.toContain('<<<[');
+    wrapper.unmount();
+  });
+
   it('keeps manual tool expansion across preference changes and terminal recompilation', async () => {
     const pinia = createPinia();
     setActivePinia(pinia);

@@ -310,6 +310,7 @@ pub async fn begin_voice_conversation(
     let result = async {
         // Reserve before the first await so hangup can revoke an initializing
         // call. Repeated begin/microphone intents keep the same VAD snapshot.
+        tts::stop_preview(&app).await?;
         current.vad_config.get_or_try_init(|| async {
             let config = read_settings(app.clone(), app.state::<SettingsState>()).await?.voice_vad_config();
             config.validate()?;
@@ -334,6 +335,13 @@ pub async fn begin_voice_conversation(
         return Err(error);
     }
     get_voice_conversation_snapshot(app)?.ok_or_else(|| network::CANCELLED.into())
+}
+
+pub(super) fn is_active<R: Runtime>(app: &AppHandle<R>) -> Result<bool, String> {
+    let Some(state) = app.try_state::<VoiceCallState>() else { return Ok(false); };
+    let current = state.registry.lock().map_err(|e| e.to_string())?.current.clone();
+    current.map(|call| call.inner.lock().map(|inner| inner.snapshot.active).map_err(|e| e.to_string()))
+        .transpose().map(|active| active.unwrap_or(false))
 }
 
 #[tauri::command]
@@ -605,12 +613,20 @@ pub(super) fn offer(app: &AppHandle, offer: Offer) {
         if !reply.wait_previous(previous_submission.as_deref()).await {
             return;
         }
+        let narration = match tts::prepare_narration(&app, &reply.cancel).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                if !reply.cancel.is_cancelled() { submission_failed(&app, &call, &reply, error); }
+                return;
+            }
+        };
         let prepared = match prepare_voice_submission(
             &app,
             target,
             reply.origin.clone(),
             offer.text.clone(),
             reply.cancel.clone(),
+            narration.policy.clone(),
         ) {
             Ok(prepared) => prepared,
             Err(error) => {
@@ -621,10 +637,11 @@ pub(super) fn offer(app: &AppHandle, offer: Offer) {
         if let Some(id) = previous_tts {
             let _ = tts::stop_tts(app.clone(), id).await;
         }
-        let tts_result = tts::start_tts_session(
+        let tts_result = tts::start_prepared_narration(
             app.clone(),
             reply.tts_id.clone(),
-            Some(reply.origin.clone()),
+            reply.origin.clone(),
+            narration,
         )
         .await;
         if let Some(work) = &work {

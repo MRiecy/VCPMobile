@@ -110,6 +110,13 @@ pub enum ContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         hash: Option<u64>,
     },
+    #[serde(rename = "voice-guidance")]
+    VoiceGuidance {
+        content: String,
+        is_complete: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<u64>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Hash)]
@@ -279,6 +286,7 @@ impl ContentBlock {
             ContentBlock::RoleDivider { hash, .. } => *hash = Some(h),
             ContentBlock::Style { hash, .. } => *hash = Some(h),
             ContentBlock::ToolCallSummary { hash, .. } => *hash = Some(h),
+            ContentBlock::VoiceGuidance { hash, .. } => *hash = Some(h),
         }
     }
 
@@ -526,6 +534,30 @@ pub(crate) fn find_matching_fence_end(
 
 /// 核心解析函数：将原始 Markdown 文本解析为 AST 块数组
 pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
+    // 指导协议必须先在原始文本中定界；普通 Markdown 的容错去缩进不能把代码
+    // 示例变成可执行的指导。这里只派生显示块，原文和同步哈希保持不变。
+    let guidance = crate::vcp_modules::chat::voice_guidance::blocks(raw_text, true);
+    if guidance.is_empty() {
+        return parse_ordinary_content(raw_text);
+    }
+    let mut blocks = Vec::new();
+    let mut cursor = 0;
+    for block in guidance {
+        blocks.extend(parse_ordinary_content(&raw_text[cursor..block.range.start]));
+        let mut display = ContentBlock::VoiceGuidance {
+            content: block.content,
+            is_complete: block.complete,
+            hash: None,
+        };
+        display.compute_hashes_recursively();
+        blocks.push(display);
+        cursor = block.range.end;
+    }
+    blocks.extend(parse_ordinary_content(&raw_text[cursor..]));
+    blocks
+}
+
+fn parse_ordinary_content(raw_text: &str) -> Vec<ContentBlock> {
     let deindented_text = de_indent_misinterpreted_code_blocks(raw_text);
     let text = deindented_text.as_str();
 
@@ -1547,6 +1579,35 @@ mod tests {
             find_matching_fence_end("```\n", "~~~", 0),
             (None, None, false)
         );
+    }
+
+    #[test]
+    fn guidance_projection_keeps_audio_tags_and_canonical_source() {
+        let raw = "<<<[VOICE_GUIDANCE]>>>\n清亮、自然的声音。\n<<<[END_VOICE_GUIDANCE]>>>\n[轻笑]你好。";
+        let blocks = parse_content(raw);
+        assert!(matches!(blocks.first(), Some(ContentBlock::VoiceGuidance {
+            content, is_complete: true, hash: Some(_),
+        }) if content == "清亮、自然的声音。"));
+        let rendered = serde_json::to_string(&blocks).unwrap();
+        assert!(rendered.contains("[轻笑]你好。"));
+        assert!(!rendered.contains("<<<["));
+        assert!(raw.contains("<<<[VOICE_GUIDANCE]>>>"));
+    }
+
+    #[test]
+    fn guidance_examples_stay_literal_and_unfinished_controls_stay_foldable() {
+        let block = "<<<[VOICE_GUIDANCE]>>>\n示例\n<<<[END_VOICE_GUIDANCE]>>>";
+        for example in [
+            format!("~~~text\n{block}\n~~~"),
+            block.lines().map(|line| format!("    {line}\n")).collect(),
+            block.lines().map(|line| format!("> {line}\n")).collect(),
+            format!("<think>\n{block}\n</think>"),
+            format!("<<<[TOOL_REQUEST]>>>\n{block}\n<<<[END_TOOL_REQUEST]>>>"),
+        ] {
+            assert!(!parse_content(&example).iter().any(|block| matches!(block, ContentBlock::VoiceGuidance { .. })), "{example}");
+        }
+        assert!(matches!(parse_content("<<<[VOICE_GUIDANCE]>>>\n尚未完成").as_slice(),
+            [ContentBlock::VoiceGuidance { content, is_complete: false, .. }] if content == "尚未完成"));
     }
 
     #[test]

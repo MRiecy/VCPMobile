@@ -1,4 +1,4 @@
-use super::network::MAX_TEXT_BYTES;
+use super::{network::MAX_TEXT_BYTES, readable::MAX_AUDIO_TAG_CHARS};
 
 pub(super) const SAMPLE_RATE: u64 = 16000;
 const PRE_ROLL_SAMPLES: u64 = SAMPLE_RATE / 2;
@@ -22,15 +22,19 @@ pub(super) struct CaptureWindow {
 }
 
 impl CaptureWindow {
-    pub(super) fn new(epoch: u32, confirmed_start: u64, allowed_after: u64, onset_samples: u64) -> Self {
+    pub(super) fn new(
+        epoch: u32,
+        confirmed_start: u64,
+        allowed_after: u64,
+        onset_samples: u64,
+    ) -> Self {
         // Keep the original half-second for normal settings. Longer custom
         // confirmation includes every onset frame and a short leading margin.
-        let pre_roll = PRE_ROLL_SAMPLES.max(onset_samples.div_ceil(512) * 512 + LEADING_PAD_SAMPLES);
+        let pre_roll =
+            PRE_ROLL_SAMPLES.max(onset_samples.div_ceil(512) * 512 + LEADING_PAD_SAMPLES);
         Self {
             epoch,
-            cursor: confirmed_start
-                .saturating_sub(pre_roll)
-                .max(allowed_after),
+            cursor: confirmed_start.saturating_sub(pre_roll).max(allowed_after),
             next_cut: confirmed_start.saturating_add(CUT_SAMPLES),
             sequence: 0,
         }
@@ -67,6 +71,9 @@ pub(super) struct ReplyBuffer {
     text: String,
     emitted_bytes: usize,
     finished: bool,
+    global_style: Option<String>,
+    style_decided: bool,
+    inherit_global_style: bool,
 }
 
 pub(super) enum ReplyPiece {
@@ -76,6 +83,13 @@ pub(super) enum ReplyPiece {
 }
 
 impl ReplyBuffer {
+    pub(super) fn new(inherit_global_style: bool) -> Self {
+        Self {
+            inherit_global_style,
+            ..Default::default()
+        }
+    }
+
     pub(super) fn update(&mut self, text: String, finished: bool) -> Result<(), String> {
         if text.len() > MAX_TEXT_BYTES {
             return Err("语音回复超过 64 KiB，已停止本次朗读。".into());
@@ -88,10 +102,56 @@ impl ReplyBuffer {
         }
         self.text = text;
         self.finished = finished;
+        if self.emitted_bytes == 0 {
+            self.global_style = None;
+            self.style_decided = false;
+        }
         Ok(())
     }
 
     pub(super) fn next(&mut self) -> ReplyPiece {
+        if !self.style_decided {
+            let start = self.text.trim_start();
+            let closing = match (self.inherit_global_style, start.chars().next()) {
+                (true, Some('(')) => Some(')'),
+                (true, Some('（')) => Some('）'),
+                _ => None,
+            };
+            if let Some(closing) = closing {
+                let mut valid = true;
+                let mut count = 0;
+                let mut end = None;
+                for (offset, ch) in start.char_indices().skip(1) {
+                    if ch == closing {
+                        end = Some(offset + ch.len_utf8());
+                        break;
+                    }
+                    count += 1;
+                    if count > 80
+                        || matches!(
+                            ch,
+                            '\n' | '\r' | '。' | '！' | '？' | '!' | '?' | '.' | '(' | '（'
+                        )
+                    {
+                        valid = false;
+                        break;
+                    }
+                }
+                if valid {
+                    if let Some(end) = end {
+                        if count > 0 {
+                            self.global_style = Some(start[..end].to_owned());
+                        }
+                    } else if !self.finished {
+                        return ReplyPiece::Wait;
+                    }
+                }
+            }
+            if self.text.is_empty() && !self.finished {
+                return ReplyPiece::Wait;
+            }
+            self.style_decided = true;
+        }
         loop {
             let remaining = &self.text[self.emitted_bytes..];
             if remaining.is_empty() {
@@ -105,10 +165,47 @@ impl ReplyBuffer {
             let mut last_space = None;
             let mut characters = remaining.char_indices().peekable();
             let mut count = 0;
+            let mut tag_end = 0;
+            let mut pending_tags_start = None;
+            let style_prefix_end = if self.emitted_bytes == 0 {
+                self.global_style.as_ref().map_or(0, |style| {
+                    remaining.len() - remaining.trim_start().len() + style.len()
+                })
+            } else {
+                0
+            };
             while let Some((offset, ch)) = characters.next() {
-                count += 1;
                 let end = offset + ch.len_utf8();
-                if ch.is_whitespace() {
+                if ch == '[' && end > tag_end {
+                    let tail = &remaining[end..];
+                    let mut bounded = true;
+                    let mut closing = None;
+                    for (count, (inner, tag_ch)) in tail.char_indices().enumerate() {
+                        if tag_ch == ']' {
+                            closing = Some(end + inner + 1);
+                            break;
+                        }
+                        if count >= MAX_AUDIO_TAG_CHARS || matches!(tag_ch, '\n' | '\r' | '[') {
+                            bounded = false;
+                            break;
+                        }
+                    }
+                    if let Some(closing) = closing {
+                        tag_end = closing;
+                        pending_tags_start.get_or_insert(offset);
+                    } else if bounded && !self.finished {
+                        return ReplyPiece::Wait;
+                    }
+                }
+                // Tags describe the following speech. They neither consume
+                // its text budget nor form a cut point at the closing bracket.
+                if end <= tag_end || end <= style_prefix_end {
+                    continue;
+                }
+                count += 1;
+                if !ch.is_whitespace() {
+                    pending_tags_start = None;
+                } else if pending_tags_start.is_none() {
                     last_space = Some(end);
                 }
                 let sentence_end = matches!(ch, '。' | '！' | '？' | '!' | '?')
@@ -123,6 +220,15 @@ impl ReplyBuffer {
                     break;
                 }
                 if count >= 160 {
+                    if let Some(tag_start) = pending_tags_start {
+                        if tag_start > 0 {
+                            cut = Some(tag_start);
+                            break;
+                        }
+                        // A leading tag still needs its first spoken content;
+                        // spaces alone cannot become a detached tag segment.
+                        continue;
+                    }
                     cut = Some(
                         last_space
                             .filter(|space| *space > remaining.len().min(end) / 2)
@@ -134,9 +240,15 @@ impl ReplyBuffer {
             let Some(cut) = cut.or_else(|| self.finished.then_some(remaining.len())) else {
                 return ReplyPiece::Wait;
             };
-            let piece = remaining[..cut].trim().to_string();
+            let mut piece = remaining[..cut].trim().to_string();
+            let first_piece = self.emitted_bytes == 0;
             self.emitted_bytes += cut;
             if !piece.is_empty() {
+                if !first_piece {
+                    if let Some(style) = &self.global_style {
+                        piece.insert_str(0, style);
+                    }
+                }
                 return ReplyPiece::Text(piece);
             }
         }
@@ -185,8 +297,12 @@ mod tests {
         // to this utterance, despite its final frame being output-inactive.
         let speech_start = SAMPLE_RATE;
         let confirmed = speech_start + 30_720;
-        let mut window = CaptureWindow::new(1, confirmed, 0,
-            config.onset_samples(true).max(config.onset_samples(false)));
+        let mut window = CaptureWindow::new(
+            1,
+            confirmed,
+            0,
+            config.onset_samples(true).max(config.onset_samples(false)),
+        );
         let segment = window.advance(confirmed + SAMPLE_RATE, true)[0];
         assert!(segment.start <= speech_start);
     }
@@ -232,5 +348,97 @@ mod tests {
         reply.update("字".repeat(200), false).unwrap();
         assert!(matches!(reply.next(), ReplyPiece::Text(text) if text.chars().count() == 160));
         assert!(reply.update("字".repeat(MAX_TEXT_BYTES), true).is_err());
+    }
+
+    #[test]
+    fn tags_are_never_cut_and_global_style_repeats_without_repeating_local_actions() {
+        let mut reply = ReplyBuffer::new(true);
+        reply
+            .update("(温柔、轻松)[轻笑]第一句。[叹气]第二句。".into(), true)
+            .unwrap();
+        assert!(
+            matches!(reply.next(), ReplyPiece::Text(text) if text == "(温柔、轻松)[轻笑]第一句。")
+        );
+        assert!(
+            matches!(reply.next(), ReplyPiece::Text(text) if text == "(温柔、轻松)[叹气]第二句。")
+        );
+        let mut reply = ReplyBuffer::default();
+        reply
+            .update(
+                format!("{}[轻声，说得慢一点]尾句。", "字".repeat(155)),
+                true,
+            )
+            .unwrap();
+        assert!(
+            matches!(reply.next(), ReplyPiece::Text(text) if text == format!("{}[轻声，说得慢一点]尾句。", "字".repeat(155)))
+        );
+        assert!(matches!(reply.next(), ReplyPiece::Finished));
+        let mut boundary = ReplyBuffer::default();
+        boundary
+            .update(format!("{}[轻声][慢一点]尾句。", "字".repeat(160)), true)
+            .unwrap();
+        assert!(matches!(boundary.next(), ReplyPiece::Text(text) if text == "字".repeat(160)));
+        assert!(
+            matches!(boundary.next(), ReplyPiece::Text(text) if text == "[轻声][慢一点]尾句。")
+        );
+        let mut spacing = ReplyBuffer::default();
+        spacing
+            .update(format!("{}[低声][轻笑] 尾句。", "字".repeat(159)), true)
+            .unwrap();
+        assert!(matches!(spacing.next(), ReplyPiece::Text(text) if text == "字".repeat(159)));
+        assert!(matches!(spacing.next(), ReplyPiece::Text(text) if text == "[低声][轻笑] 尾句。"));
+    }
+
+    #[test]
+    fn partial_global_style_waits_with_a_bound_and_does_not_inherit_a_new_message() {
+        let mut reply = ReplyBuffer::new(true);
+        reply.update("（温柔".into(), false).unwrap();
+        assert!(matches!(reply.next(), ReplyPiece::Wait));
+        reply
+            .update("（温柔）第一句。第二句。".into(), true)
+            .unwrap();
+        assert!(matches!(reply.next(), ReplyPiece::Text(text) if text == "（温柔）第一句。"));
+        assert!(matches!(reply.next(), ReplyPiece::Text(text) if text == "（温柔）第二句。"));
+        let mut next = ReplyBuffer::new(true);
+        next.update("[轻笑]不同消息。".into(), true).unwrap();
+        assert!(matches!(next.next(), ReplyPiece::Text(text) if text == "[轻笑]不同消息。"));
+        let mut unclosed = ReplyBuffer::new(true);
+        unclosed
+            .update(format!("({}", "字".repeat(200)), false)
+            .unwrap();
+        assert!(matches!(unclosed.next(), ReplyPiece::Text(_)));
+    }
+
+    #[test]
+    fn ordinary_parenthetical_prose_is_not_repeated_outside_design_mode() {
+        let mut reply = ReplyBuffer::default();
+        reply
+            .update("(注：这是一段说明)第一句。第二句。".into(), true)
+            .unwrap();
+        assert!(
+            matches!(reply.next(), ReplyPiece::Text(text) if text == "(注：这是一段说明)第一句。")
+        );
+        assert!(matches!(reply.next(), ReplyPiece::Text(text) if text == "第二句。"));
+    }
+
+    #[test]
+    fn oversized_or_unclosed_square_text_cannot_bypass_the_segment_limit() {
+        for text in [
+            format!("[{}", "字".repeat(300)),
+            format!("[{}]结尾。", "字".repeat(300)),
+        ] {
+            let mut reply = ReplyBuffer::default();
+            reply.update(text, false).unwrap();
+            assert!(matches!(reply.next(), ReplyPiece::Text(text) if text.chars().count() == 160));
+        }
+        let mut reply = ReplyBuffer::default();
+        reply.update("[轻声，".into(), false).unwrap();
+        assert!(matches!(reply.next(), ReplyPiece::Wait));
+        reply
+            .update("[轻声，说得慢一点]正文。".into(), true)
+            .unwrap();
+        assert!(
+            matches!(reply.next(), ReplyPiece::Text(text) if text == "[轻声，说得慢一点]正文。")
+        );
     }
 }

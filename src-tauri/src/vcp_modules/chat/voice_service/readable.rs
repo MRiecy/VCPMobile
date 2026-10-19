@@ -3,9 +3,10 @@ use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use regex::Regex;
 use std::sync::LazyLock;
 
-static THOUGHT_TAG: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?is)</?think(?:ing)?\b[^>]*>").expect("literal thought pattern")
-});
+pub(super) const MAX_AUDIO_TAG_CHARS: usize = 80;
+
+// Legacy inline artifacts are not top-level VCP scopes. Structured blocks
+// have already been removed through the shared field-aware scope projection.
 static OPAQUE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     [
         r"(?is)\[---\s*VCP元思考链[^\]]*\].*?(?:\[---\s*元思考链结束\s*---\]|$)",
@@ -20,27 +21,6 @@ static OPAQUE: LazyLock<Vec<Regex>> = LazyLock::new(|| {
     .map(|pattern| Regex::new(pattern).expect("literal speech block pattern"))
     .collect()
 });
-
-fn without_thoughts(source: &str) -> String {
-    let mut depth = 0usize;
-    let mut offset = 0;
-    let mut result = String::new();
-    for matched in THOUGHT_TAG.find_iter(source) {
-        if depth == 0 {
-            result.push_str(&source[offset..matched.start()]);
-        }
-        if matched.as_str().starts_with("</") {
-            depth = depth.saturating_sub(1);
-        } else {
-            depth += 1;
-        }
-        offset = matched.end();
-    }
-    if depth == 0 {
-        result.push_str(&source[offset..]);
-    }
-    result
-}
 
 fn without_html(source: &str) -> String {
     let lower = source.to_ascii_lowercase();
@@ -119,7 +99,7 @@ fn without_html(source: &str) -> String {
     output
 }
 
-fn stable_suffix(source: &str) -> &str {
+fn stable_suffix(source: &str, finished: bool) -> &str {
     const PREFIXES: [&str; 5] = [
         "[本轮工具调用摘要:",
         "[--- VCP元思考链",
@@ -155,14 +135,19 @@ fn stable_suffix(source: &str) -> &str {
             openings.pop();
         }
     }
-    if let Some(start) = openings.first().copied() {
+    if let Some(start) = openings
+        .into_iter()
+        .find(|start| source[*start + 1..].chars().count() <= MAX_AUDIO_TAG_CHARS)
+    {
         return &source[..start.saturating_sub(usize::from(
             start > 0 && source.as_bytes()[start - 1] == b'!',
         ))];
     }
-    if source.ends_with(']') {
+    if !finished && source.ends_with(']') {
         if let Some(start) = source.rfind('[') {
-            return &source[..start];
+            if source[start + 1..source.len() - 1].chars().count() <= MAX_AUDIO_TAG_CHARS {
+                return &source[..start];
+            }
         }
     }
     if let Some(label_end) = source.rfind("](") {
@@ -176,12 +161,18 @@ fn stable_suffix(source: &str) -> &str {
 }
 
 pub(super) fn text(source: &str) -> String {
-    let mut source = without_thoughts(source);
+    // Used only to decide whether a prefix already contains readable prose.
+    // The actual playback projection propagates errors through `project`.
+    project(source, false).unwrap_or_default()
+}
+
+pub(super) fn project(source: &str, finished: bool) -> Result<String, String> {
+    let mut source = crate::vcp_modules::chat::voice_guidance::speech_opaque_projection(source)?;
     for pattern in OPAQUE.iter() {
         source = pattern.replace_all(&source, "").into_owned();
     }
     source = without_html(&source);
-    let source = stable_suffix(&source);
+    let source = stable_suffix(&source, finished);
     let mut output = String::new();
     let mut opaque = 0usize;
     for event in Parser::new_ext(
@@ -208,7 +199,7 @@ pub(super) fn text(source: &str) -> String {
             _ => {}
         }
     }
-    output.split_whitespace().collect::<Vec<_>>().join(" ")
+    Ok(output.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 #[cfg(test)]
@@ -250,5 +241,21 @@ mod tests {
         );
         assert_eq!(text("正文。<think>还没闭合"), "正文。");
         assert_eq!(text("正文。\n```rust\nlet secret = 1;"), "正文。");
+    }
+
+    #[test]
+    fn audio_tags_survive_and_a_final_tag_is_released_only_when_stable() {
+        assert_eq!(text("[轻笑]你好。[叹气]继续。"), "[轻笑]你好。[叹气]继续。");
+        assert_eq!(text("你好。[叹气]"), "你好。");
+        assert_eq!(project("你好。[叹气]", true).unwrap(), "你好。[叹气]");
+        assert_eq!(project("你好。[未闭合", true).unwrap(), "你好。");
+        let long = format!("正文[{}", "字".repeat(MAX_AUDIO_TAG_CHARS + 1));
+        assert_eq!(text(&long), long);
+    }
+
+    #[test]
+    fn a_tool_field_literal_end_cannot_leak_its_remaining_content_to_speech() {
+        let raw = "正文。\n<<<[TOOL_REQUEST]>>>\ncontent:「始」\n<<<[END_TOOL_REQUEST]>>>\n不能朗读的工具正文\n「末」\n<<<[END_TOOL_REQUEST]>>>\n结尾。";
+        assert_eq!(project(raw, true).unwrap(), "正文。 结尾。");
     }
 }

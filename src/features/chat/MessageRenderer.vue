@@ -47,6 +47,7 @@ import AttachmentPreview from "./attachment/AttachmentPreview.vue";
 // Interactive Block Components
 import ToolBlock from "./blocks/ToolBlock.vue";
 import ThoughtBlock from "./blocks/ThoughtBlock.vue";
+import VoiceGuidanceBlock from "./blocks/VoiceGuidanceBlock.vue";
 import HtmlPreviewBlock from "./blocks/HtmlPreviewBlock.vue";
 import ToolSummaryBlock from "./blocks/ToolSummaryBlock.vue";
 import DiaryBlock from "./blocks/DiaryBlock.vue";
@@ -457,6 +458,10 @@ const toolBlockKeys = computed(() => {
 });
 
 function getBlockKey(block: ContentBlock, index: number, bubbleId: string): string {
+  if (block.type === "voice-guidance") {
+    const ordinal = props.message.blocks?.filter(candidate => candidate.type === "voice-guidance").indexOf(block) ?? index;
+    return `${props.message.id}-voice-guidance-${ordinal}`;
+  }
   const toolKey = toolBlockKeys.value.get(block);
   if (toolKey !== undefined) return toolKey;
   if (block.hash !== undefined && block.hash !== null) {
@@ -1018,6 +1023,11 @@ onUnmounted(() => {
                     :default-expanded="isMessageInActiveStream"
                   />
 
+                  <VoiceGuidanceBlock
+                    v-else-if="block.type === 'voice-guidance'"
+                    :block="block"
+                  />
+
                   <HtmlPreviewBlock
                     v-else-if="block.type === 'html-preview'"
                     :content="block.content || ''"
@@ -1032,7 +1042,7 @@ onUnmounted(() => {
                   />
                 </div>
             </template>
-            <template v-else-if="bubbleIndex === 0 && message.content && (!showMessageTail || !message.tailBlock)">
+            <template v-else-if="bubbleIndex === 0 && message.content && !showMessageTail">
               <div class="vcp-markdown-block select-text">
                 <p>{{ message.content }}</p>
               </div>

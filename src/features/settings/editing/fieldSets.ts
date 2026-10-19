@@ -23,13 +23,17 @@ export const SUMMARY_FIELDS = ["topicSummaryModel"] as const;
 export const VOICE_FIELDS = [
   "voiceApiBaseUrl", "voiceApiKey", "voiceInputEncoding", "voiceAsrStream", "voiceTtsStream", "voiceLanguage", "voiceTtsVoice",
   "voiceVadSensitivity", "voiceVadEndSilenceMs", "voiceVadPlaybackOnsetMs",
+  "voiceTtsMode", "voiceTtsStylePrompt", "voiceTtsDesignPrompt", "voiceTtsCloneSampleId",
 ] as const;
+
+export const VOICE_PRESET_FIELDS = ["voiceAudioTagRules", "voiceAutoGuidance", "voiceGuidanceRules"] as const;
 
 export type SettingsEditableKey =
   | (typeof IDENTITY_FIELDS)[number]
   | (typeof CONNECTION_FIELDS)[number]
   | (typeof SUMMARY_FIELDS)[number]
-  | (typeof VOICE_FIELDS)[number];
+  | (typeof VOICE_FIELDS)[number]
+  | (typeof VOICE_PRESET_FIELDS)[number];
 
 export type IdentityFields = Pick<AppSettings, (typeof IDENTITY_FIELDS)[number]>;
 export type ConnectionFields = Pick<AppSettings, (typeof CONNECTION_FIELDS)[number]>;

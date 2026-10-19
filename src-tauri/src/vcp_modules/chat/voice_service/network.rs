@@ -1,5 +1,8 @@
-use super::{sse::SseDecoder, wav, InputAudio, VoiceServiceConfig};
+use super::{
+    samples::PreparedCloneSample, sse::SseDecoder, wav, InputAudio, VoiceServiceConfig, VoiceTtsMode,
+};
 use crate::vcp_modules::infra::http_clients::{client, HttpProfile};
+use crate::vcp_modules::settings_manager::VOICE_GUIDANCE_MAX_CHARS;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::StreamExt;
 use serde_json::{json, Value};
@@ -211,9 +214,56 @@ impl PcmPackets {
     }
 }
 
+fn synthesis_request(
+    config: &VoiceServiceConfig,
+    text: &str,
+    guidance: Option<&str>,
+    sample: Option<&PreparedCloneSample>,
+) -> Result<Value, String> {
+    let stream = config.tts_streaming();
+    let mut audio = json!({"format": if stream { "pcm16" } else { "wav" }});
+    let model = match config.tts_mode {
+        VoiceTtsMode::Builtin => {
+            audio["voice"] = json!(config.voice);
+            "mimo-v2.5-tts"
+        }
+        VoiceTtsMode::Design => {
+            audio["optimize_text_preview"] = json!(false);
+            "mimo-v2.5-tts-voicedesign"
+        }
+        VoiceTtsMode::Clone => {
+            let sample = sample.ok_or("音色复刻参考音频未准备完成。")?;
+            audio["voice"] = json!(sample.data_url.as_ref());
+            "mimo-v2.5-tts-voiceclone"
+        }
+    };
+    let prompt = if config.tts_mode == VoiceTtsMode::Design {
+        guidance
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(&config.tts_design_prompt)
+    } else {
+        &config.tts_style_prompt
+    }
+    .trim();
+    if config.tts_mode == VoiceTtsMode::Design && prompt.is_empty() {
+        return Err("本条回复没有有效语音指导，请填写文字设计的默认指导。".into());
+    }
+    if text.len() > MAX_TEXT_BYTES || prompt.chars().count() > VOICE_GUIDANCE_MAX_CHARS {
+        return Err("单段语音正文或指导过长。".into());
+    }
+    let mut messages = Vec::with_capacity(2);
+    if !prompt.is_empty() {
+        messages.push(json!({"role": "user", "content": prompt}));
+    }
+    messages.push(json!({"role": "assistant", "content": text}));
+    Ok(json!({ "model": model, "stream": stream, "messages": messages, "audio": audio }))
+}
+
 pub(super) async fn synthesize<F, Fut>(
     config: &VoiceServiceConfig,
     text: &str,
+    guidance: Option<&str>,
+    sample: Option<&PreparedCloneSample>,
     cancel: &CancellationToken,
     mut output: F,
 ) -> Result<(), String>
@@ -221,13 +271,14 @@ where
     F: FnMut(Vec<u8>) -> Fut,
     Fut: Future<Output = Result<(), String>>,
 {
-    let response = request(config, &json!({
-        "model": "mimo-v2.5-tts", "stream": config.tts_stream,
-        "messages": [{ "role": "assistant", "content": text }],
-        "audio": { "format": if config.tts_stream { "pcm16" } else { "wav" }, "voice": config.voice },
-    }), cancel).await?;
+    if cancel.is_cancelled() {
+        return Err(CANCELLED.into());
+    }
+    let body = synthesis_request(config, text, guidance, sample)?;
+    let response = request(config, &body, cancel).await?;
+    drop(body);
     let mut packets = PcmPackets::default();
-    if !config.tts_stream {
+    if !config.tts_streaming() {
         let value = read_json(response, cancel).await?;
         let encoded = value
             .pointer("/choices/0/message/audio/data")
@@ -353,6 +404,10 @@ mod tests {
             tts_stream: true,
             language: "zh".into(),
             voice: "白桦".into(),
+            tts_mode: VoiceTtsMode::Builtin,
+            tts_style_prompt: String::new(),
+            tts_design_prompt: String::new(),
+            clone_sample_id: String::new(),
         };
         let server = tokio::spawn(async move {
             let (mut socket, _) = timeout(Duration::from_secs(3), listener.accept())
@@ -638,6 +693,8 @@ mod tests {
             synthesize(
                 &config,
                 "按原顺序朗读。",
+                None,
+                None,
                 &CancellationToken::new(),
                 |part| {
                     output.push(part);
@@ -682,6 +739,8 @@ mod tests {
             synthesize(
                 &config,
                 "完整合成。",
+                None,
+                None,
                 &CancellationToken::new(),
                 |part| {
                     output.push(part);
@@ -721,6 +780,8 @@ mod tests {
             synthesize(
                 &config,
                 "不能错误变速。",
+                None,
+                None,
                 &CancellationToken::new(),
                 |part| {
                     output.push(part);
@@ -733,6 +794,67 @@ mod tests {
         assert!(result.is_err());
         assert!(output.is_empty());
         server.await.expect("fixture completed without retries");
+    }
+
+    #[tokio::test]
+    async fn design_and_clone_use_nonstream_wav_with_their_distinct_provider_contracts() {
+        for mode in [VoiceTtsMode::Design, VoiceTtsMode::Clone] {
+            let pcm = vec![1, 2, 3, 4];
+            let HttpFixture { mut config, server } = http_fixture(
+                200,
+                "application/json",
+                json_fragments(json!({"choices":[{"message":{"audio":{"data":STANDARD.encode(wav_with_padding(24000, &pcm))}}}]})),
+                false,
+            ).await;
+            config.tts_mode = mode;
+            // A saved builtin preference cannot turn compatibility SSE on.
+            config.tts_stream = true;
+            config.tts_style_prompt = "轻声慢说".into();
+            config.tts_design_prompt = "兜底指导".into();
+            let sample = PreparedCloneSample {
+                data_url: std::sync::Arc::from("data:audio/wav;base64,AQIDBA=="),
+            };
+            let mut output = Vec::new();
+            synthesize(&config, "[轻笑]你好。", Some("本条自动指导"), Some(&sample),
+                &CancellationToken::new(), |part| {
+                    output.extend(part);
+                    std::future::ready(Ok(()))
+                }).await.expect("synthetic provider WAV is decoded");
+            assert_eq!(output, pcm);
+            let captured = server.await.expect("one request without retry");
+            assert_request_headers(&captured);
+            assert_eq!(captured.body["stream"], false);
+            assert_eq!(captured.body["audio"]["format"], "wav");
+            assert_eq!(captured.body["messages"][1], json!({"role":"assistant","content":"[轻笑]你好。"}));
+            if mode == VoiceTtsMode::Design {
+                assert_eq!(captured.body["model"], "mimo-v2.5-tts-voicedesign");
+                assert!(captured.body["audio"].get("voice").is_none());
+                assert_eq!(captured.body["audio"]["optimize_text_preview"], false);
+                assert_eq!(captured.body["messages"][0], json!({"role":"user","content":"本条自动指导"}));
+            } else {
+                assert_eq!(captured.body["model"], "mimo-v2.5-tts-voiceclone");
+                assert_eq!(captured.body["audio"]["voice"], sample.data_url.as_ref());
+                assert!(captured.body["audio"].get("optimize_text_preview").is_none());
+                assert_eq!(captured.body["messages"][0], json!({"role":"user","content":"轻声慢说"}));
+            }
+        }
+    }
+
+    #[test]
+    fn design_fallback_and_missing_sample_fail_before_networking() {
+        let mut settings = crate::vcp_modules::settings_manager::Settings::default();
+        settings.voice_tts_mode = VoiceTtsMode::Design;
+        settings.voice_tts_design_prompt = "固定声线".into();
+        let mut config = VoiceServiceConfig::from_settings(settings);
+        for guidance in [None, Some(" \n")] {
+            let body = synthesis_request(&config, "正文", guidance, None).unwrap();
+            assert_eq!(body["messages"][0]["content"], "固定声线");
+        }
+        config.tts_design_prompt.clear();
+        assert!(synthesis_request(&config, "正文", None, None).is_err());
+        assert!(synthesis_request(&config, "正文", Some("本条指导"), None).is_ok());
+        config.tts_mode = VoiceTtsMode::Clone;
+        assert!(synthesis_request(&config, "正文", None, None).is_err());
     }
 
     #[tokio::test]

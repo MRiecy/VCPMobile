@@ -1,6 +1,7 @@
 export type VoiceLanguage = 'auto' | 'zh' | 'en';
 export type VoiceInputEncoding = 'wav' | 'mp3_64';
 export type VoiceVadSensitivity = 'low' | 'standard' | 'high';
+export type VoiceTtsMode = 'builtin' | 'design' | 'clone';
 export type VoiceTtsVoice = 'mimo_default' | '冰糖' | '茉莉' | '苏打' | '白桦' | 'Mia' | 'Chloe' | 'Milo' | 'Dean';
 
 /** These fields belong to the committed AppSettings snapshot in SQLite. */
@@ -12,6 +13,13 @@ export interface VoiceServiceSettings {
   voiceTtsStream: boolean;
   voiceLanguage: VoiceLanguage;
   voiceTtsVoice: VoiceTtsVoice;
+  voiceTtsMode: VoiceTtsMode;
+  voiceTtsStylePrompt: string;
+  voiceTtsDesignPrompt: string;
+  voiceTtsCloneSampleId: string;
+  voiceAudioTagRules: string;
+  voiceAutoGuidance: boolean;
+  voiceGuidanceRules: string;
   voiceVadSensitivity: VoiceVadSensitivity;
   voiceVadEndSilenceMs: number;
   voiceVadPlaybackOnsetMs: number;
@@ -25,10 +33,23 @@ export const DEFAULT_VOICE_SETTINGS: Readonly<VoiceServiceSettings> = {
   voiceTtsStream: true,
   voiceLanguage: 'auto',
   voiceTtsVoice: 'mimo_default',
+  voiceTtsMode: 'builtin',
+  voiceTtsStylePrompt: '',
+  voiceTtsDesignPrompt: '清晰自然的中性声线，语气平和，语速适中，按正文语言发音。',
+  voiceTtsCloneSampleId: '',
+  voiceAudioTagRules: '回复将用于语音通话。保持当前角色和正常对话内容，只在确有表达需要时添加简短音频标签。整体风格写在正文开头的半角圆括号内，例如（温柔 平静）应写为 (温柔 平静)；局部声音或情绪写在对应文字前的方括号内，例如 [轻笑]、[叹气]、[低声]。标签使用自然语言，完整闭合，不解释标签，不使用唱歌模式，不把整句正文放入标签。',
+  voiceAutoGuidance: true,
+  voiceGuidanceRules: '在每条助手回复的正文之前，为本条回复生成一份完整的自然语言语音指导。依据当前角色、人设、对话场景和情绪，描述声音质感、语气、语速与必要的停顿；同一角色保持声线特征一致。用一至四句清晰描述，避免互相矛盾的要求，不要求混响、回声等后期效果。指导只描述如何说，不重复待朗读的正文。',
   voiceVadSensitivity: 'standard',
   voiceVadEndSilenceMs: 512,
   voiceVadPlaybackOnsetMs: 192,
 };
+
+export const MIMO_TTS_MODES = [
+  { value: 'builtin', label: '预置音色', model: 'mimo-v2.5-tts' },
+  { value: 'design', label: '文字设计', model: 'mimo-v2.5-tts-voicedesign' },
+  { value: 'clone', label: '样本复刻', model: 'mimo-v2.5-tts-voiceclone' },
+] as const;
 
 // IDs are the official API values, including the four Chinese voice IDs.
 export const MIMO_VOICES: ReadonlyArray<{ value: VoiceTtsVoice; label: string }> = [

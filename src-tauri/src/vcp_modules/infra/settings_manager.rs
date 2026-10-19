@@ -30,6 +30,11 @@ const BACKUP_STRING_KEYS: &[&str] = &[
     "topicSummaryModel",
     "voiceApiBaseUrl",
     "voiceApiKey",
+    "voiceTtsStylePrompt",
+    "voiceTtsDesignPrompt",
+    "voiceTtsCloneSampleId",
+    "voiceAudioTagRules",
+    "voiceGuidanceRules",
 ];
 
 #[derive(Debug, Serialize)]
@@ -126,10 +131,15 @@ fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
             if !value.is_string() {
                 return Err(format!("备份字段 {key} 类型不正确"));
             }
+            if let Some(limit) = voice_prompt_limit(key) {
+                if value.as_str().is_some_and(|text| text.chars().count() > limit) {
+                    return Err(format!("备份字段 {key} 超过本地长度限制"));
+                }
+            }
             settings.insert((*key).to_string(), value.clone());
         }
     }
-    for key in ["distributedEnabled", "voiceAsrStream", "voiceTtsStream"] {
+    for key in ["distributedEnabled", "voiceAsrStream", "voiceTtsStream", "voiceAutoGuidance"] {
         if let Some(value) = source.get(key).filter(|value| !value.is_null()) {
             if !value.is_boolean() {
                 return Err(format!("备份字段 {key} 类型不正确"));
@@ -140,6 +150,7 @@ fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
     for (key, allowed) in [
         ("voiceLanguage", VOICE_LANGUAGES),
         ("voiceTtsVoice", VOICE_TTS_VOICES),
+        ("voiceTtsMode", &["builtin", "design", "clone"][..]),
         ("voiceInputEncoding", &["wav", "mp3_64"][..]),
         ("voiceVadSensitivity", &["low", "standard", "high"][..]),
     ] {
@@ -217,6 +228,15 @@ fn default_sync_log_level() -> String {
 }
 
 const VOICE_LANGUAGES: &[&str] = &["auto", "zh", "en"];
+pub const VOICE_RULE_MAX_CHARS: usize = 8000;
+pub const VOICE_GUIDANCE_MAX_CHARS: usize = crate::vcp_modules::chat::voice_guidance::MAX_GUIDANCE_CHARS;
+fn voice_prompt_limit(key: &str) -> Option<usize> {
+    match key {
+        "voiceAudioTagRules" | "voiceGuidanceRules" => Some(VOICE_RULE_MAX_CHARS),
+        "voiceTtsStylePrompt" | "voiceTtsDesignPrompt" => Some(VOICE_GUIDANCE_MAX_CHARS),
+        _ => None,
+    }
+}
 const VOICE_TTS_VOICES: &[&str] = &[
     "mimo_default",
     "冰糖",
@@ -239,6 +259,18 @@ fn default_voice_language() -> String {
 }
 fn default_voice_tts_voice() -> String {
     "mimo_default".into()
+}
+pub const DEFAULT_VOICE_AUDIO_TAG_RULES: &str = "回复将用于语音通话。保持当前角色和正常对话内容，只在确有表达需要时添加简短音频标签。整体风格写在正文开头的半角圆括号内，例如（温柔 平静）应写为 (温柔 平静)；局部声音或情绪写在对应文字前的方括号内，例如 [轻笑]、[叹气]、[低声]。标签使用自然语言，完整闭合，不解释标签，不使用唱歌模式，不把整句正文放入标签。";
+pub const DEFAULT_VOICE_GUIDANCE_RULES: &str = "在每条助手回复的正文之前，为本条回复生成一份完整的自然语言语音指导。依据当前角色、人设、对话场景和情绪，描述声音质感、语气、语速与必要的停顿；同一角色保持声线特征一致。用一至四句清晰描述，避免互相矛盾的要求，不要求混响、回声等后期效果。指导只描述如何说，不重复待朗读的正文。";
+pub const DEFAULT_VOICE_TTS_DESIGN_PROMPT: &str = "清晰自然的中性声线，语气平和，语速适中，按正文语言发音。";
+fn default_voice_audio_tag_rules() -> String {
+    DEFAULT_VOICE_AUDIO_TAG_RULES.into()
+}
+fn default_voice_guidance_rules() -> String {
+    DEFAULT_VOICE_GUIDANCE_RULES.into()
+}
+fn default_voice_tts_design_prompt() -> String {
+    DEFAULT_VOICE_TTS_DESIGN_PROMPT.into()
 }
 fn default_voice_vad_end_silence_ms() -> u32 {
     VoiceVadConfig::DEFAULT_END_SILENCE_MS
@@ -263,6 +295,15 @@ pub enum VoiceInputEncoding {
     Wav,
     #[serde(rename = "mp3_64")]
     Mp3,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum VoiceTtsMode {
+    #[default]
+    Builtin,
+    Design,
+    Clone,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -330,6 +371,23 @@ pub struct Settings {
     pub voice_language: String,
     #[serde(default = "default_voice_tts_voice")]
     pub voice_tts_voice: String,
+    #[serde(default)]
+    pub voice_tts_mode: VoiceTtsMode,
+    #[serde(default)]
+    pub voice_tts_style_prompt: String,
+    #[serde(default = "default_voice_tts_design_prompt")]
+    pub voice_tts_design_prompt: String,
+    // Device-local reference. Config backups retain the ID, not the audio file;
+    // a missing imported reference must request reimport instead of reusing a
+    // different local sample.
+    #[serde(default)]
+    pub voice_tts_clone_sample_id: String,
+    #[serde(default = "default_voice_audio_tag_rules")]
+    pub voice_audio_tag_rules: String,
+    #[serde(default = "default_voice_stream")]
+    pub voice_auto_guidance: bool,
+    #[serde(default = "default_voice_guidance_rules")]
+    pub voice_guidance_rules: String,
 
     // 本地人声判定配置，独立于网络语音服务，每次开始通话时取快照。
     #[serde(default)]
@@ -369,6 +427,29 @@ impl Default for Settings {
 }
 
 impl Settings {
+    fn validate_voice_prompts(&self) -> Result<(), String> {
+        for (text, name, limit) in [
+            (&self.voice_audio_tag_rules, "音频标签规则", VOICE_RULE_MAX_CHARS),
+            (&self.voice_guidance_rules, "自动语音指导规则", VOICE_RULE_MAX_CHARS),
+            (&self.voice_tts_style_prompt, "演绎指导", VOICE_GUIDANCE_MAX_CHARS),
+            (&self.voice_tts_design_prompt, "默认音色指导", VOICE_GUIDANCE_MAX_CHARS),
+        ] {
+            if text.chars().count() > limit {
+                return Err(format!("{name}不能超过 {limit} 字。"));
+            }
+        }
+        if self.voice_audio_tag_rules.trim().is_empty() {
+            return Err("请填写音频标签规则。".into());
+        }
+        if self.voice_auto_guidance && self.voice_guidance_rules.trim().is_empty() {
+            return Err("请填写自动语音指导规则。".into());
+        }
+        if self.voice_tts_mode == VoiceTtsMode::Design && self.voice_tts_design_prompt.trim().is_empty() {
+            return Err("请填写文字设计的默认音色指导。".into());
+        }
+        Ok(())
+    }
+
     pub fn voice_vad_config(&self) -> VoiceVadConfig {
         VoiceVadConfig {
             sensitivity: self.voice_vad_sensitivity,
@@ -471,6 +552,13 @@ pub fn create_default_settings() -> Settings {
         voice_tts_stream: true,
         voice_language: default_voice_language(),
         voice_tts_voice: default_voice_tts_voice(),
+        voice_tts_mode: VoiceTtsMode::Builtin,
+        voice_tts_style_prompt: String::new(),
+        voice_tts_design_prompt: default_voice_tts_design_prompt(),
+        voice_tts_clone_sample_id: String::new(),
+        voice_audio_tag_rules: default_voice_audio_tag_rules(),
+        voice_auto_guidance: true,
+        voice_guidance_rules: default_voice_guidance_rules(),
         voice_vad_sensitivity: VoiceVadSensitivity::default(),
         voice_vad_end_silence_ms: default_voice_vad_end_silence_ms(),
         voice_vad_playback_onset_ms: default_voice_vad_playback_onset_ms(),
@@ -643,8 +731,12 @@ pub async fn write_settings<R: Runtime>(
 ) -> Result<bool, String> {
     let _runtime_guard = state.lock_runtime_reconcile().await;
     let _lock = state.lock.lock().await;
-    let _ = read_settings_locked(&app_handle, &state).await?;
-    internal_write_settings(&app_handle, &state, &settings).await
+    let current = read_settings_locked(&app_handle, &state).await?;
+    let saved = internal_write_settings(&app_handle, &state, &settings).await?;
+    drop(_lock);
+    drop(_runtime_guard);
+    release_replaced_voice_sample(&app_handle, &current, &settings).await;
+    Ok(saved)
 }
 
 #[tauri::command]
@@ -677,8 +769,24 @@ pub async fn update_settings<R: Runtime>(
         return Err("语音合成音色不受支持".into());
     }
     internal_write_settings(&app_handle, &state, &new_settings).await?;
+    drop(_lock);
+    drop(_runtime_guard);
+    release_replaced_voice_sample(&app_handle, &current, &new_settings).await;
 
     Ok(new_settings)
+}
+
+async fn release_replaced_voice_sample<R: Runtime>(app: &AppHandle<R>, old: &Settings, new: &Settings) {
+    if old.voice_tts_clone_sample_id.is_empty() || old.voice_tts_clone_sample_id == new.voice_tts_clone_sample_id {
+        return;
+    }
+    // Commit already succeeded. Cleanup must not turn a successful save into a
+    // reported failure, and discard rechecks the latest selection under its lock.
+    if let Err(error) = crate::vcp_modules::chat::voice_service::discard_voice_clone_sample(
+        app.clone(), old.voice_tts_clone_sample_id.clone(),
+    ).await {
+        log::warn!("[VoiceSample] Replaced reference cleanup failed: {error}");
+    }
 }
 
 async fn internal_write_settings<R: Runtime>(
@@ -687,6 +795,7 @@ async fn internal_write_settings<R: Runtime>(
     settings: &Settings,
 ) -> Result<bool, String> {
     settings.voice_vad_config().validate()?;
+    settings.validate_voice_prompts()?;
     let db_state = app_handle.state::<DbState>();
 
     let content = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
@@ -793,6 +902,13 @@ mod tests {
         assert_eq!(settings.voice_input_encoding, VoiceInputEncoding::Wav);
         assert_eq!(settings.voice_language, "auto");
         assert_eq!(settings.voice_tts_voice, "mimo_default");
+        assert_eq!(settings.voice_tts_mode, VoiceTtsMode::Builtin);
+        assert!(settings.voice_tts_style_prompt.is_empty());
+        assert!(settings.voice_tts_clone_sample_id.is_empty());
+        assert_eq!(settings.voice_tts_design_prompt, DEFAULT_VOICE_TTS_DESIGN_PROMPT);
+        assert!(settings.voice_auto_guidance);
+        assert_eq!(settings.voice_audio_tag_rules, DEFAULT_VOICE_AUDIO_TAG_RULES);
+        assert_eq!(settings.voice_guidance_rules, DEFAULT_VOICE_GUIDANCE_RULES);
         assert_eq!(settings.voice_vad_config(), VoiceVadConfig::default());
         assert!(Settings::default().voice_asr_stream);
     }
@@ -864,6 +980,56 @@ mod tests {
             settings["voiceInputEncoding"] = value;
             assert!(serde_json::from_value::<Settings>(settings).is_err());
         }
+    }
+
+    #[test]
+    fn synthesis_modes_rules_and_local_sample_reference_round_trip_in_config_backup() {
+        let values = serde_json::json!({
+            "voiceTtsMode": "design",
+            "voiceTtsStylePrompt": "轻声慢说",
+            "voiceTtsDesignPrompt": "清晰声线",
+            "voiceTtsCloneSampleId": "fixture-sample-reference",
+            "voiceAudioTagRules": "保留音频标签",
+            "voiceAutoGuidance": false,
+            "voiceGuidanceRules": "按角色生成指导",
+        });
+        let backup = |settings: serde_json::Value| serde_json::to_vec(&serde_json::json!({
+            "app": "vcp-mobile", "kind": "vcp-mobile-settings-backup", "version": 2,
+            "settings": settings,
+        })).unwrap();
+        let imported = parse_backup_bytes(&backup(values.clone())).unwrap();
+        assert_eq!(serde_json::Value::Object(imported.settings.clone()), values);
+        let restored: Settings = serde_json::from_value(imported.settings.into()).unwrap();
+        assert_eq!(restored.voice_tts_mode, VoiceTtsMode::Design);
+        assert!(!restored.voice_auto_guidance);
+        assert_eq!(restored.voice_tts_clone_sample_id, "fixture-sample-reference");
+        assert!(restored.extra.get("voiceTtsMode").is_none());
+        for value in [serde_json::json!("unknown"), serde_json::json!(3), serde_json::json!(false)] {
+            assert!(parse_backup_bytes(&backup(serde_json::json!({"voiceTtsMode": value}))).is_err());
+        }
+        assert!(parse_backup_bytes(&backup(serde_json::json!({"voiceAutoGuidance": "false"}))).is_err());
+        assert!(parse_backup_bytes(&backup(serde_json::json!({"voiceGuidanceRules": true}))).is_err());
+        assert!(parse_backup_bytes(&backup(serde_json::json!({"voiceGuidanceRules": "字".repeat(8001)}))).is_err());
+        assert!(parse_backup_bytes(&backup(serde_json::json!({"voiceTtsDesignPrompt": "字".repeat(2001)}))).is_err());
+    }
+
+    #[test]
+    fn voice_prompt_validation_counts_unicode_and_allows_disabled_optional_rule() {
+        let mut settings = Settings::default();
+        settings.voice_audio_tag_rules = "🗣".repeat(VOICE_RULE_MAX_CHARS);
+        assert!(settings.validate_voice_prompts().is_ok());
+        settings.voice_audio_tag_rules.push('字');
+        assert!(settings.validate_voice_prompts().is_err());
+        settings.voice_audio_tag_rules = " ".into();
+        assert!(settings.validate_voice_prompts().is_err());
+        settings.voice_audio_tag_rules = "标签规则".into();
+        settings.voice_guidance_rules.clear();
+        assert!(settings.validate_voice_prompts().is_err());
+        settings.voice_auto_guidance = false;
+        assert!(settings.validate_voice_prompts().is_ok());
+        settings.voice_tts_mode = VoiceTtsMode::Design;
+        settings.voice_tts_design_prompt.clear();
+        assert!(settings.validate_voice_prompts().is_err());
     }
 
     #[test]

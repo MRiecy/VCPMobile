@@ -1,4 +1,5 @@
 use crate::vcp_modules::agent_service::{read_agent_config_internal, AgentConfigState};
+use crate::vcp_modules::chat::voice_service::VoiceReplyPolicy;
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::message_service;
@@ -11,6 +12,7 @@ use crate::vcp_modules::vcp_client::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::Arc;
 use tauri::{ipc::Channel, AppHandle, State};
 use tauri_plugin_vcp_mobile::stream::{ForegroundLease, ForegroundTask};
 use tokio_util::sync::CancellationToken;
@@ -81,6 +83,7 @@ pub async fn handle_agent_chat_message(
         connection,
         Some(stream_channel),
         false, // append_user_msg
+        None,
     )
     .await
 }
@@ -112,6 +115,7 @@ pub async fn internal_process_agent_chat_message(
         connection,
         Some(stream_channel),
         append_user_msg,
+        None,
     )
     .await
 }
@@ -126,6 +130,7 @@ pub(crate) async fn process_prepared_agent_chat_message(
     connection: ChatConnectionSnapshot,
     stream_channel: Option<Channel<StreamEvent>>,
     append_user_msg: bool,
+    reply_policy: Option<Arc<VoiceReplyPolicy>>,
 ) -> Result<Value, String> {
     let agent_id = payload.agent_id;
     let topic_id = payload.topic_id;
@@ -184,6 +189,7 @@ pub(crate) async fn process_prepared_agent_chat_message(
         "agent",
         effective_prompt,
         None,
+        reply_policy.as_deref(),
     )
     .await?;
 

@@ -65,6 +65,7 @@ src-tauri/src/
 - `chat/voice_service/` 的 `call.rs` 持有固定目标、转写提交接纳、精确回复关联与通话快照；原生 VAD 直接触发 Rust 插话取消，ASR 完成直接提交，无需 WebView 消费事件。`voice_submission.rs` 先注册真实聊天 owner，保存用户消息后复用 Agent/Group 应用服务，UI Channel 可缺席；不复制上下文或模型网络实现。关麦在 Rust 内停止原生采集并封存尾音，已接纳 ASR 继续；后台不取消后续发送与朗读，挂断才取消本通话未发送内容及对应回复。输入、模型和 TTS 取消状态独立，有限工作租约覆盖 ASR 至实际播放收尾。统一 RequestOutput/群轮按 `originUserMessageId` 供给 TTS，前端恢复只读取快照和已持久化消息，不重放业务动作。
 - `persistence/` 持有数据库写入与读取边界，调用领域不复制第二套持久化状态。
 - `chat/voice_service/workers.rs` 在原生 WAV 读入并回收文件后，按每次开麦时的配置生成 WAV 或 MP3 输入；`../crates/voice-mp3/` 提供双端共享的有界 LAME 64 kbps CBR 编码，运行于 blocking worker。编码保留音频槽及后台租约，取消等待真实收尾；网络 MIME 来自已准备载荷，TTS 不受输入编码设置影响。
+- `chat/voice_service/` 的 `VoiceReplyPolicy` 为一次通话回复固定 TTS 配置和 LLM 规则；`voice_submission` 经 Agent/Group 将其交给 `context_assembler`，在 Tavern 后拼接唯一末尾注入节点。`chat/voice_guidance.rs` 共享控制块识别，供历史、渲染与逐消息朗读投影使用，原始消息不变。`samples.rs` 管理复刻音频文件与一次朗读共享的编码数据；样本快照与回收按同一锁序处理，设置写入完成并释放锁后才清理旧引用。设计/复刻网络结果转换到现有 PCM 播放链，试听使用同一 TTS owner 的独立身份。
 - `infra/` 提供被多个领域共享的生命周期和基础能力，不反向拥有各业务领域结果。
 - `infra/file_manager/operations.rs` 裁定文件取消与 CAS 提交，`resources.rs` 管理用途派生、文本预览和临时导出；`infra/share_inbox.rs` 持有当前分享记录与跨进程槽位，发送经现有消息仓储同事务落盘。启动附件回收同时读取当前分享持有的 hash。
 - `distributed/` 的 client、registry 与 telemetry 由 `DistributedState` 汇合；设备工具保持自包含，不复制 CLI 或其他领域已有的运行时。

@@ -2,6 +2,7 @@
 // 职责: 1. 读取配置 2. 保存消息 3. 决策发言者 4. 组装上下文 5. 执行 AI 调用 6. 发射事件
 
 use crate::vcp_modules::agent_service::{read_agent_config_internal, AgentConfigState};
+use crate::vcp_modules::chat::voice_service::VoiceReplyPolicy;
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_context_assembler::assemble_group_context;
@@ -17,6 +18,7 @@ use crate::vcp_modules::vcp_client::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::sync::Arc;
 
 use tauri::{ipc::Channel, AppHandle, Manager, Runtime, State};
 use tauri_plugin_vcp_mobile::stream::{ForegroundLease, ForegroundTask};
@@ -49,6 +51,7 @@ struct GroupSpeakerTurnParams<'a, R: Runtime> {
     topic_id: &'a str,
     connection: &'a ChatConnectionSnapshot,
     stream_channel: &'a Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
+    reply_policy: Option<&'a VoiceReplyPolicy>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,6 +167,7 @@ async fn run_group_speaker_turn<R: Runtime>(
         "group",
         base_system_prompt,
         invite_prompt_processed,
+        params.reply_policy,
     )
     .await?;
 
@@ -365,6 +369,7 @@ pub async fn internal_process_group_chat_message(
         group_turn,
         params,
         append_user_msg,
+        None,
     )
     .await
 }
@@ -379,6 +384,7 @@ pub(crate) async fn process_prepared_group_chat_message(
     group_turn: ActiveGroupTurnLease,
     params: GroupChatParams,
     append_user_msg: bool,
+    reply_policy: Option<Arc<VoiceReplyPolicy>>,
 ) -> Result<Value, String> {
     let stream_channel = params.stream_channel;
     let group_id = params.group_id;
@@ -496,6 +502,7 @@ pub(crate) async fn process_prepared_group_chat_message(
         topic_id: &topic_id,
         connection: &connection,
         stream_channel: &stream_channel,
+        reply_policy: reply_policy.as_deref(),
     };
     let outcome =
         run_group_speakers(&turn_params, &speakers, &mut full_history_for_context).await?;
@@ -609,6 +616,7 @@ mod group_turn_tests {
             topic_id: "topic",
             connection: &connection,
             stream_channel: &stream_channel,
+            reply_policy: None,
         };
         let mut history = Vec::new();
         let outcome =
@@ -813,6 +821,7 @@ pub async fn invite_group_member_to_speak(
         topic_id: &payload.topic_id,
         connection: &connection,
         stream_channel: &stream_channel,
+        reply_policy: None,
     };
 
     let outcome =

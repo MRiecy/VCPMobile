@@ -133,6 +133,11 @@ export type ContentBlock =
       content: string;
       is_complete: boolean;
     })
+  | (RenderBlockFields & {
+      type: "voice-guidance";
+      content: string;
+      is_complete: boolean;
+    })
   | (RenderBlockFields & { type: "button-click"; content: string })
   | (RenderBlockFields & { type: "html-preview"; content: string })
   | (RenderBlockFields & {
@@ -281,6 +286,11 @@ export type StreamBlock =
   | (StreamBlockFields & {
       type: "thought";
       theme: string;
+      content: string;
+      is_complete: boolean;
+    })
+  | (StreamBlockFields & {
+      type: "voice-guidance";
       content: string;
       is_complete: boolean;
     })

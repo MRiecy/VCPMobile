@@ -29,10 +29,6 @@ let closing: Promise<void> | null = null;
 const close = (): boolean => {
   if (!mounted) return true;
   if (!pageActive.value || closing) return false;
-  if (props.mode === 'presets') {
-    emit('close');
-    return true;
-  }
   const serial = visit.value;
   navigationError.value = '';
   const operation = nextTick().then(() => mounted && pageActive.value && visit.value === serial
@@ -49,11 +45,9 @@ watch(pageActive, active => {
   if (active) {
     visit.value += 1;
     navigationError.value = '';
-    if (props.mode === 'settings') {
-      // OverlayStore already owns this ID. registerModal only updates canDismiss
-      // on an existing entry, without adding another history level.
-      registerModal('Page:voiceSettings:', close, undefined, close);
-    }
+    // OverlayStore already owns this ID. Update its dismissal guard without
+    // adding another history level, for either editable voice page.
+    registerModal(props.mode === 'settings' ? 'Page:voiceSettings:' : 'Page:voicePresets:', close, undefined, close);
   }
 }, { immediate: true, flush: 'sync' });
 onBeforeUnmount(() => { mounted = false; });
@@ -70,12 +64,10 @@ onBeforeUnmount(() => { mounted = false; });
         </button>
         <h2 class="m-0 text-base font-semibold">{{ title }}</h2>
       </header>
-      <div class="flex-1 min-h-0" :class="mode === 'settings'
-        ? 'overflow-hidden flex flex-col'
-        : 'overflow-y-auto no-rubber-band px-4 pt-6 pb-[calc(var(--vcp-safe-bottom,0px)+24px)]'">
+      <div class="flex-1 min-h-0 overflow-hidden flex flex-col">
         <p v-if="navigationError" class="shrink-0 px-4 py-2 text-sm text-red-500" role="alert">{{ navigationError }}</p>
         <VoiceSettingsPage v-if="mode === 'settings'" :key="visit" ref="pageHandle" :active="pageActive" />
-        <VoicePresetsPage v-else :active="pageActive" />
+        <VoicePresetsPage v-else :key="visit" ref="pageHandle" :active="pageActive" />
       </div>
     </div>
   </SlidePage>

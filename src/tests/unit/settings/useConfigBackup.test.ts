@@ -93,6 +93,20 @@ describe('配置恢复的真实领域状态与失败边界', () => {
     expect(applySettings).toHaveBeenCalledExactlyOnceWith(vad);
   });
 
+  it('备份保留三模式与注入规则的类型，复刻恢复明确提示音频需在本机存在', async () => {
+    const fields = {
+      voiceTtsMode: 'clone' as const, voiceTtsCloneSampleId: 'sample-id', voiceTtsStylePrompt: '轻松自然',
+      voiceTtsDesignPrompt: '平和中性声线', voiceAudioTagRules: '必要时生成标签', voiceAutoGuidance: false, voiceGuidanceRules: '按角色描述',
+    };
+    const payload = buildBackupPayload({ ...makeSettings(), ...fields }, captureBackupPreferences());
+    expect(payload.settings).toMatchObject(fields);
+    const applySettings = vi.fn(async () => {});
+    const result = await applyConfigBackup({ settings: fields, exportedAt: '' }, applySettings);
+    expect(applySettings).toHaveBeenCalledExactlyOnceWith(fields);
+    expect(result.applied).toEqual(['语音服务']);
+    expect(result.skipped).toEqual([expect.stringContaining('参考音频不包含在配置备份中')]);
+  });
+
   it('捕获已应用的主题与聊天偏好，不使用 SQLite 中未消费的主题字段', async () => {
     const theme = useThemeStore();
     await theme.restorePreferences({ themeKey: 'themes-simple-bw.ts', mode: 'system' });

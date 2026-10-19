@@ -80,7 +80,7 @@ src/
 
 ### 3.4 设置与领域偏好
 
-`features/chat/voice/voiceCallStore.ts` 与 `voiceConversation.ts` 提交通话操作并按 revision 呈现 Rust 快照，不再认领转写、提交消息或协调生成取消。`microphoneMonitor.ts` 接收 `vcp-voice-audio` 的有界频带；开关麦通过 Rust 单次命令完成准备、原生调用与封存，开麦意图携点击时的生命周期 epoch，防止后台恢复后执行旧意图。PCM、AEC、Silero、缓存和播放归移动插件。关麦及后台停止新采集，已录内容由 Rust 继续识别、发送和朗读；回前台不自动开麦。`voiceHistorySync.ts` 订阅已落盘消息并在应用恢复时对账，历史窗口按 ID 合并，深翻历史保留锚点；恢复不会重发转写、重播 TTS 或消费草稿、附件和编辑态。通用监听卸载只脱离视图，主动切换聊天和挂断仍结束通话。插话、挂断、手动停止模型会停止对应生成与朗读；TTS 独立停止或失败不取消模型。配置复用全局 Settings；预设保留入口，气泡朗读入口尚未接入。语音按纯文本进入现有群聊发言模式，不扩展手动 `@` 邀请。本地诊断不进入 ASR，系统 AEC 启用不代表效果已验证。
+`features/chat/voice/voiceCallStore.ts` 与 `voiceConversation.ts` 提交通话操作并按 revision 呈现 Rust 快照，不再认领转写、提交消息或协调生成取消。`microphoneMonitor.ts` 接收 `vcp-voice-audio` 的有界频带；开关麦通过 Rust 单次命令完成准备、原生调用与封存，开麦意图携点击时的生命周期 epoch，防止后台恢复后执行旧意图。PCM、AEC、Silero、缓存和播放归移动插件。关麦及后台停止新采集，已录内容由 Rust 继续识别、发送和朗读；回前台不自动开麦。`voiceHistorySync.ts` 订阅已落盘消息并在应用恢复时对账，历史窗口按 ID 合并，深翻历史保留锚点；恢复不会重发转写、重播 TTS 或消费草稿、附件和编辑态。通用监听卸载只脱离视图，主动切换聊天和挂断仍结束通话。插话、挂断、手动停止模型会停止对应生成与朗读；TTS 独立停止或失败不取消模型。配置复用全局 Settings；`VoicePresetsPage` 编辑两项全局 LLM 注入规则及自动指导开关，`VoiceSettingsPage` 管理三种音色模式与单份设计描述，均返回保存；没有手动预设库，气泡朗读入口尚未接入。`VoiceTtsPreview` 使用草稿与独立任务 ID，`VoiceCloneSample` 通过原生 picker 导入持久样本引用。`VoiceGuidanceBlock` 默认折叠指导，正文音频标签不改展示。语音按纯文本进入现有群聊发言模式，不扩展手动 `@` 邀请。本地诊断不进入 ASR，系统 AEC 启用不代表效果已验证。
 
 `features/settings/catalog.ts` 组织稳定页面 ID、懒加载组件与布局；`SettingsView` / `useSettingsNavigation` 只拥有当前访问、退场画面和返回桥接。身份、连接、总结页面分别通过 `editing/useSettingsPageSession` 建立字段会话，正式快照始终归 `core/stores/settings.ts`。修改字段走显式 edit；保存只提交本页 dirty patch，外部快照重基不能覆盖用户后续输入。
 

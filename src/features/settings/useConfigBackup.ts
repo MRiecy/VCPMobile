@@ -48,6 +48,13 @@ export const BACKUP_SETTINGS_KEYS = [
   "voiceTtsStream",
   "voiceLanguage",
   "voiceTtsVoice",
+  "voiceTtsMode",
+  "voiceTtsStylePrompt",
+  "voiceTtsDesignPrompt",
+  "voiceTtsCloneSampleId",
+  "voiceAudioTagRules",
+  "voiceAutoGuidance",
+  "voiceGuidanceRules",
   "voiceVadSensitivity",
   "voiceVadEndSilenceMs",
   "voiceVadPlaybackOnsetMs",
@@ -56,7 +63,7 @@ export const BACKUP_SETTINGS_KEYS = [
 export type BackupSettingsKey = (typeof BACKUP_SETTINGS_KEYS)[number];
 
 /** 布尔字段单独归一化，其余白名单字段保留字符串或数值类型。 */
-const BOOLEAN_BACKUP_KEYS: ReadonlySet<string> = new Set(["distributedEnabled", "voiceAsrStream", "voiceTtsStream"]);
+const BOOLEAN_BACKUP_KEYS: ReadonlySet<string> = new Set(["distributedEnabled", "voiceAsrStream", "voiceTtsStream", "voiceAutoGuidance"]);
 const CHAT_ENDPOINT_MODES = new Set(["standard", "vcpTools", "raw"]);
 
 export interface ConfigBackupFile {
@@ -85,7 +92,7 @@ const SETTINGS_SCOPES = [
   { label: '服务器与同步连接', keys: ['vcpServerUrl', 'chatEndpointMode', 'vcpApiKey', 'vcpLogUrl', 'vcpLogKey', 'syncHttpUrl', 'syncServerUrl', 'syncToken', 'fileKey'] },
   { label: '分布式系统', keys: ['distributedEnabled', 'distributedWsUrl', 'distributedVcpKey', 'distributedDeviceName'] },
   { label: '话题总结模型', keys: ['topicSummaryModel'] },
-  { label: '语音服务', keys: ['voiceApiBaseUrl', 'voiceApiKey', 'voiceInputEncoding', 'voiceAsrStream', 'voiceTtsStream', 'voiceLanguage', 'voiceTtsVoice', 'voiceVadSensitivity', 'voiceVadEndSilenceMs', 'voiceVadPlaybackOnsetMs'] },
+  { label: '语音服务', keys: ['voiceApiBaseUrl', 'voiceApiKey', 'voiceInputEncoding', 'voiceAsrStream', 'voiceTtsStream', 'voiceLanguage', 'voiceTtsVoice', 'voiceTtsMode', 'voiceTtsStylePrompt', 'voiceTtsDesignPrompt', 'voiceTtsCloneSampleId', 'voiceAudioTagRules', 'voiceAutoGuidance', 'voiceGuidanceRules', 'voiceVadSensitivity', 'voiceVadEndSilenceMs', 'voiceVadPlaybackOnsetMs'] },
 ] as const;
 
 const hasFields = (value: object | undefined): boolean => Boolean(value && Object.keys(value).length);
@@ -126,6 +133,9 @@ export async function applyConfigBackup(
   applySettings: (patch: Partial<AppSettings>) => Promise<void>,
 ): Promise<BackupImportResult> {
   const result: BackupImportResult = { applied: [], skipped: [], failed: [] };
+  if (backup.settings.voiceTtsMode === 'clone') {
+    result.skipped.push('复刻参考音频不包含在配置备份中；请在语音设置中确认或重新导入本机样本');
+  }
   const databaseScopes = settingsScopes(backup.settings);
   if (databaseScopes.length) {
     try {

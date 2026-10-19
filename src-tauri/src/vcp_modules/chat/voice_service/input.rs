@@ -500,7 +500,7 @@ async fn start_voice_service(
         .await
         .and_then(|settings| {
             let config = VoiceServiceConfig::from_settings(settings);
-            config.validate()?;
+            config.validate_asr()?;
             Ok(config)
         });
     if cancel.is_cancelled() {
@@ -916,6 +916,10 @@ mod tests {
                 tts_stream: true,
                 language: "auto".into(),
                 voice: "mimo_default".into(),
+                tts_mode: Default::default(),
+                tts_style_prompt: String::new(),
+                tts_design_prompt: String::new(),
+                clone_sample_id: String::new(),
             },
             inner: Mutex::new(SessionInner::default()),
             resources: VoiceServiceState::default().resources,
