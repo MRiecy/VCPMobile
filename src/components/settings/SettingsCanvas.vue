@@ -22,7 +22,20 @@ provide('vcp-settings-canvas', true);
 </template>
 
 <style scoped>
-.settings-canvas { min-width: 0; color: var(--primary-text); }
+.settings-canvas {
+  --settings-input-font-size: 14px;
+  --settings-divider: var(--border-color);
+  --settings-row-divider: var(--settings-divider);
+  min-width: 0;
+  color: var(--primary-text);
+}
+@supports (color: color-mix(in srgb, black, white)) {
+  .settings-canvas {
+    --settings-divider: color-mix(in srgb, var(--primary-text) 22%, var(--primary-bg));
+    --settings-row-divider: color-mix(in srgb, var(--primary-text) 14%, var(--primary-bg));
+  }
+}
+:global(html[data-vcp-platform="ios"] .settings-canvas) { --settings-input-font-size: 16px; }
 .settings-canvas--viewport {
   display: flex;
   flex: 1;
@@ -38,20 +51,19 @@ provide('vcp-settings-canvas', true);
 .settings-canvas-content { display: flex; flex-direction: column; gap: 24px; }
 .settings-canvas--viewport .settings-canvas-content { padding: 16px; }
 .settings-canvas--viewport .settings-canvas-scroll--standalone .settings-canvas-content { padding-bottom: calc(16px + var(--vcp-safe-bottom, 0px)); }
-.settings-canvas-actions { flex-shrink: 0; background: var(--primary-bg); border-top: 1px solid var(--vcp-border-subtle, var(--border-color)); }
+.settings-canvas-actions { flex-shrink: 0; background: var(--primary-bg); border-top: 1px solid var(--settings-divider); }
 .settings-canvas--viewport .settings-canvas-actions { padding-bottom: var(--vcp-safe-bottom, 0px); }
 .settings-canvas-actions-content { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; padding: 8px 16px; }
 
 .settings-canvas :deep(.settings-section) { gap: 8px; }
+.settings-canvas :deep(.settings-canvas-title) { margin: 0; font-size: 16px; line-height: 24px; font-weight: 600; }
 .settings-canvas :deep(.settings-section-header) { padding: 0; flex-wrap: wrap; }
-.settings-canvas :deep(.settings-section-title) { color: var(--primary-text); font-size: 13px; line-height: 20px; font-weight: 600; }
+.settings-canvas :deep(.settings-section-title) { color: var(--primary-text); font-size: 15px; line-height: 22px; font-weight: 600; }
 .settings-canvas :deep(.settings-section-description),
-.settings-canvas :deep(.settings-section-meta),
 .settings-canvas :deep(.settings-section-footer) { color: var(--secondary-text); font-size: 12px; line-height: 18px; }
-.settings-canvas :deep(.settings-section-meta) { overflow-wrap: anywhere; }
 .settings-canvas :deep(.settings-section-footer) { padding: 0; }
 .settings-canvas :deep(.settings-row) { width: 100%; min-height: 52px; padding: 4px 0; border: 0; border-radius: 0; background: transparent; text-align: left; transition: opacity 120ms ease; }
-.settings-canvas :deep(.settings-row + .settings-row) { border-top: 1px solid var(--vcp-border-subtle, var(--border-color)); }
+.settings-canvas :deep(.settings-row + .settings-row) { border-top: 1px solid var(--settings-row-divider); }
 .settings-canvas :deep(.settings-row:active) { transform: none; }
 .settings-canvas :deep(button.settings-row:active) { opacity: 0.65; }
 .settings-canvas :deep(.settings-row-title) { font-size: 14px; line-height: 20px; font-weight: 500; white-space: normal; }
@@ -59,7 +71,7 @@ provide('vcp-settings-canvas', true);
 .settings-canvas :deep(.settings-row-action) { min-width: 0; max-width: 55%; flex-shrink: 1; }
 .settings-canvas :deep(.settings-row-value) { min-width: 0; color: var(--secondary-text); font-size: 14px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-canvas :deep(.settings-field-label) { padding: 0; font-size: 12px; line-height: 18px; font-weight: 500; color: var(--secondary-text); opacity: 1; text-transform: none; letter-spacing: 0; }
-.settings-canvas :deep(.settings-field-input) { min-height: 44px; padding: 8px 12px; font-size: 16px; line-height: 24px; border-radius: 8px; }
+.settings-canvas :deep(.settings-field-input) { min-height: 44px; padding: 8px 12px; font-size: var(--settings-input-font-size); line-height: 22px; border-radius: 8px; }
 .settings-canvas :deep(.settings-field-input--secure) { padding-right: 48px; }
 .settings-canvas :deep(.settings-disclosure) { border: 0; border-radius: 0; background: transparent; box-shadow: none; transition: none; }
 .settings-canvas :deep(.settings-disclosure-toggle) { min-height: 52px; padding: 4px 0; background: transparent; transition: opacity 120ms ease; }

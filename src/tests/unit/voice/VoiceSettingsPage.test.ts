@@ -111,10 +111,9 @@ function field(wrapper: VueWrapper, label: string) {
   return component.get('input');
 }
 
-function saveButton(wrapper: VueWrapper) {
-  const button = wrapper.findAll('button').find(candidate => candidate.text() === '保存语音设置');
-  if (!button) throw new Error('Missing save button');
-  return button;
+async function leaveVoiceSettings(wrapper: VueWrapper) {
+  await wrapper.get('button[aria-label="返回，关闭语音设置"]').trigger('click');
+  await flushPromises();
 }
 const updates = () => invokeMock.mock.calls.filter(([command]) => command === 'update_settings');
 
@@ -210,43 +209,46 @@ describe('语音设置使用正式设置快照', () => {
     expect(useOverlayStore().contextMenuConfig).toBeNull();
     expect(updates()).toHaveLength(0);
     expect(useSettingsStore().settings?.voiceInputEncoding).toBe('wav');
-    expect(wrapper.get('footer').text()).toContain('有未保存修改');
-    await saveButton(wrapper).trigger('click');
+    expect(wrapper.find('footer').exists()).toBe(false);
+    expect(wrapper.find('.voice-settings-save').exists()).toBe(false);
+    await leaveVoiceSettings(wrapper);
     await flushPromises();
     expect(updates()[0]?.[1]?.updates).toEqual({ voiceInputEncoding: 'mp3_64' });
     expect(database.voiceInputEncoding).toBe('mp3_64');
     expect(database.voiceTtsStream).toBe(true);
     expect(database.voiceTtsVoice).toBe('mimo_default');
-    expect(wrapper.get('footer').text()).toContain('暂无修改');
-    expect(wrapper.get('footer button').attributes('disabled')).toBeDefined();
+    expect(wrapper.emitted('close')).toHaveLength(1);
     await wrapper.setProps({ active: false });
     await wrapper.setProps({ active: true });
     await flushPromises();
     expect(wrapper.get('button[aria-label="语音输入编码"]').text()).toContain('MP3 64 kbps');
     await choose(wrapper, '语音输入编码', 'WAV 无损');
-    await saveButton(wrapper).trigger('click');
+    await leaveVoiceSettings(wrapper);
     await flushPromises();
     expect(updates()[1]?.[1]?.updates).toEqual({ voiceInputEncoding: 'wav' });
     expect(database.voiceInputEncoding).toBe('wav');
   });
 
   it('只提交本页dirty字段，两个流式开关互不改变，中文音色ID原样保存', async () => {
-    const wrapper = await renderPage();
+    const { wrapper } = await renderOverlay();
     await field(wrapper, '语音 API Key').setValue('voice-secret');
     await choose(wrapper, '识别语言', '中文');
     await choose(wrapper, '朗读音色', '白桦 · 中文男声');
     await wrapper.get('[role="switch"][aria-label="流式识别结果"]').trigger('click');
     expect(updates()).toHaveLength(0);
     expect(useSettingsStore().settings?.voiceApiKey).toBe('');
-    await saveButton(wrapper).trigger('click');
+    await leaveVoiceSettings(wrapper);
     await flushPromises();
     expect(updates()[0]?.[1]?.updates).toEqual({
       voiceApiKey: 'voice-secret', voiceLanguage: 'zh', voiceTtsVoice: '白桦', voiceAsrStream: false,
     });
     expect(database.voiceTtsStream).toBe(true);
     expect(database.vcpApiKey).toBe('chat-key');
+    await wrapper.setProps({ active: false });
+    await wrapper.setProps({ active: true });
+    await flushPromises();
     await wrapper.get('[role="switch"][aria-label="流式朗读"]').trigger('click');
-    await saveButton(wrapper).trigger('click');
+    await leaveVoiceSettings(wrapper);
     await flushPromises();
     expect(updates()[1]?.[1]?.updates).toEqual({ voiceTtsStream: false });
     expect(database.voiceAsrStream).toBe(false);
@@ -278,16 +280,24 @@ describe('语音设置使用正式设置快照', () => {
   it('保存失败不回显或记录密钥，保留草稿供重试', async () => {
     const log = vi.spyOn(console, 'error').mockImplementation(() => {});
     mockInvoke('update_settings', () => Promise.reject(new Error('request rejected: voice-private-token')));
-    const wrapper = await renderPage();
+    const { wrapper } = await renderOverlay();
     await field(wrapper, '语音 API Key').setValue('voice-private-token');
-    await saveButton(wrapper).trigger('click');
+    await leaveVoiceSettings(wrapper);
     await flushPromises();
     expect(wrapper.get('[role="alert"]').text()).toContain('语音设置保存失败');
     expect(wrapper.get('[role="alert"]').text()).not.toContain('voice-private-token');
     expect(JSON.stringify(log.mock.calls)).not.toContain('voice-private-token');
     expect((field(wrapper, '语音 API Key').element as HTMLInputElement).value).toBe('voice-private-token');
     expect(database.voiceApiKey).toBe('');
-    expect((saveButton(wrapper).element as HTMLButtonElement).disabled).toBe(false);
+    expect(wrapper.emitted('close')).toBeUndefined();
+    expect(modals.modalStackLength()).toBe(1);
+    mockInvoke('update_settings', args => {
+      database = { ...database, ...(args?.updates as Partial<AppSettings>) };
+      return { ...database };
+    });
+    await leaveVoiceSettings(wrapper);
+    expect(database.voiceApiKey).toBe('voice-private-token');
+    expect(wrapper.emitted('close')).toHaveLength(1);
   });
 
   it('进入预设前等待当前草稿确定保存', async () => {
@@ -335,7 +345,7 @@ describe('语音设置使用正式设置快照', () => {
     await flushPromises();
     expect((field(wrapper, '语音 API Key').element as HTMLInputElement).value).toBe('');
     await field(wrapper, '语音 API Key').setValue('new-draft');
-    await saveButton(wrapper).trigger('click');
+    await leaveVoiceSettings(wrapper);
     await flushPromises();
     expect(database.voiceApiKey).toBe('new-draft');
     expect(modals.modalStackLength()).toBe(1);

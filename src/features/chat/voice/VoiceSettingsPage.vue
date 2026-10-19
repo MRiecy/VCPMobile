@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, ref, useId, watch } from 'vue';
 import { ListChecks, Play, Square } from 'lucide-vue-next';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { useOverlayStore } from '../../../core/stores/overlay';
@@ -17,13 +17,13 @@ import { useVoiceCallStore } from './voiceCallStore';
 import { DEFAULT_VOICE_SETTINGS, MIMO_VOICES, type VoiceServiceSettings } from './settings';
 
 const props = defineProps<SettingsPageProps>();
+const providerTitleId = useId();
 const overlayStore = useOverlayStore();
 const voiceCall = useVoiceCallStore();
 const { session, loading, error, reload } = useSettingsPageSession(VOICE_FIELDS, () => props.active);
-const { draft, dirty, saving, leaving } = session;
+const { draft, saving, leaving } = session;
 const openingPresets = ref(false);
 const disabled = computed(() => !props.active || leaving.value || openingPresets.value);
-const save = () => { if (!disabled.value) void session.save(); };
 type SelectionField = 'voiceLanguage' | 'voiceInputEncoding' | 'voiceTtsVoice';
 const selections = {
   voiceLanguage: {
@@ -107,13 +107,15 @@ defineExpose({ beforeLeave: () => openingPresets.value ? Promise.resolve(false) 
 <template>
   <SettingsCanvas viewport :inert="!active">
         <p v-if="error" role="alert" class="m-0 text-sm text-red-500">
-          {{ draft ? '语音设置保存失败，请重试。' : '语音设置加载失败，请重试。' }}
+          {{ draft ? '语音设置保存失败，修改已保留，请再次返回重试。' : '语音设置加载失败，请重试。' }}
           <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading || !active" @click="reload">重试</button>
         </p>
         <p v-else-if="!draft && loading" class="m-0 text-sm opacity-60" role="status">正在加载设置…</p>
+        <p v-if="saving || leaving" class="m-0 text-xs text-[var(--secondary-text)]" role="status">正在保存语音设置…</p>
 
-        <template v-if="draft">
-          <SettingsSection title="服务连接" description="MiMo · 识别与朗读共用">
+        <section v-if="draft" class="voice-provider-section" :aria-labelledby="providerTitleId">
+          <h2 :id="providerTitleId" class="settings-canvas-title">MiMo 语音服务</h2>
+          <SettingsSection title="服务器连接">
             <div class="voice-connection-fields">
               <SettingsTextField :model-value="draft.voiceApiBaseUrl" :disabled="disabled"
                 label="API 地址" :placeholder="DEFAULT_VOICE_SETTINGS.voiceApiBaseUrl" mono
@@ -124,13 +126,13 @@ defineExpose({ beforeLeave: () => openingPresets.value ? Promise.resolve(false) 
             </div>
             <template #footer>
               <p class="m-0">
-                {{ draft.voiceApiKey.trim() ? '保存后，重新开启麦克风或开始新的朗读时生效。' : '填写并保存 API Key 后，可进行语音识别与朗读；配置在下次开麦或新朗读时生效。' }}
+                {{ draft.voiceApiKey.trim() ? '返回时自动保存，重新开启麦克风或开始新的朗读时生效。' : '填写 API Key 后返回会自动保存；配置在下次开麦或新朗读时生效。' }}
               </p>
             </template>
           </SettingsSection>
 
           <SettingsSection title="语音识别 ASR">
-            <template #action><code class="settings-section-meta font-mono">mimo-v2.5-asr</code></template>
+            <template #description>模型：<code class="font-mono">mimo-v2.5-asr</code></template>
             <div>
               <SettingsRow v-for="field in recognitionFields" :key="field" :title="selections[field].title"
                 :description="field === 'voiceInputEncoding' ? 'MP3 约节省 75% 上传流量' : undefined"
@@ -147,7 +149,7 @@ defineExpose({ beforeLeave: () => openingPresets.value ? Promise.resolve(false) 
           </SettingsSection>
 
           <SettingsSection title="语音朗读 TTS">
-            <template #action><code class="settings-section-meta font-mono">mimo-v2.5-tts</code></template>
+            <template #description>模型：<code class="font-mono">mimo-v2.5-tts</code></template>
             <div>
               <SettingsRow title="朗读音色" :value="selectedLabel('voiceTtsVoice')" clickable
                 :disabled="disabled" aria-label="朗读音色" aria-haspopup="dialog"
@@ -160,7 +162,7 @@ defineExpose({ beforeLeave: () => openingPresets.value ? Promise.resolve(false) 
               </SettingsRow>
             </div>
           </SettingsSection>
-        </template>
+        </section>
 
         <SettingsRow title="语音预设" description="回复风格与提示词" :icon="ListChecks" clickable
           :disabled="disabled" class="voice-preset-entry" @click="openPresets" />
@@ -193,28 +195,19 @@ defineExpose({ beforeLeave: () => openingPresets.value ? Promise.resolve(false) 
           </div>
         </SettingsDisclosure>
 
-    <template v-if="draft" #actions>
-        <div class="min-w-0">
-          <p class="m-0 text-xs font-medium" :class="error ? 'text-red-500' : ''" role="status" aria-live="polite">
-            {{ saving || leaving ? '正在保存…' : error ? '保存失败，请重试' : dirty ? '有未保存修改' : '暂无修改' }}
-          </p>
-        </div>
-        <button type="button" class="voice-settings-save shrink-0" :disabled="disabled || saving || !dirty" @click="save">
-          {{ saving || leaving ? '正在保存…' : '保存语音设置' }}
-        </button>
-    </template>
   </SettingsCanvas>
 </template>
 
 <style scoped>
+.voice-provider-section { display: flex; flex-direction: column; gap: 20px; }
+
 .voice-connection-fields {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 14px;
 }
 
-.voice-probe-button,
-.voice-settings-save {
+.voice-probe-button {
   display: inline-flex;
   align-items: center;
   align-self: flex-start;
@@ -231,10 +224,7 @@ defineExpose({ beforeLeave: () => openingPresets.value ? Promise.resolve(false) 
   touch-action: manipulation;
 }
 
-.voice-settings-save { align-self: center; font-weight: 600; }
-.voice-settings-save:enabled { @apply bg-green-700 border-green-700 text-white; }
-.voice-probe-button:disabled,
-.voice-settings-save:disabled { opacity: 0.4; cursor: default; }
+.voice-probe-button:disabled { opacity: 0.4; cursor: default; }
 
 @media (min-width: 768px) {
   .voice-connection-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
