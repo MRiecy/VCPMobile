@@ -13,7 +13,7 @@ describe('voice guidance display', () => {
     expect(toggle.attributes('aria-expanded')).toBe('false');
     expect(toggle.attributes('data-longpress-native')).toBeDefined();
     expect(body.attributes('style')).toContain('display: none');
-    expect(toggle.text()).toBe('语音指导');
+    expect(toggle.text()).toBe('风格指导');
     await toggle.trigger('click');
     expect(toggle.attributes('aria-expanded')).toBe('true');
     expect(body.attributes('style') ?? '').not.toContain('display: none');

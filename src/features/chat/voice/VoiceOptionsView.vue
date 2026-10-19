@@ -2,20 +2,20 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { ArrowLeft } from 'lucide-vue-next';
 import SlidePage from '../../../components/ui/SlidePage.vue';
-import VoicePresetsPage from './VoicePresetsPage.vue';
+import VoiceStyleGuidancePage from './VoiceStyleGuidancePage.vue';
 import VoiceSettingsPage from './VoiceSettingsPage.vue';
 import { useModalHistory } from '../../../core/composables/useModalHistory';
 import type { SettingsPageHandle } from '../../settings/contracts';
 
 const props = defineProps<{
-  mode: 'settings' | 'presets';
+  mode: 'settings' | 'styleGuidance';
   isOpen: boolean;
   active: boolean;
   zIndex: number;
 }>();
 
 const emit = defineEmits<{ close: [] }>();
-const title = computed(() => props.mode === 'settings' ? '语音设置' : '语音预设');
+const title = computed(() => props.mode === 'settings' ? '语音设置' : '风格指导');
 const pageActive = computed(() => props.isOpen && props.active);
 const pageHandle = ref<SettingsPageHandle | null>(null);
 const visit = ref(0);
@@ -47,7 +47,7 @@ watch(pageActive, active => {
     navigationError.value = '';
     // OverlayStore already owns this ID. Update its dismissal guard without
     // adding another history level, for either editable voice page.
-    registerModal(props.mode === 'settings' ? 'Page:voiceSettings:' : 'Page:voicePresets:', close, undefined, close);
+    registerModal(props.mode === 'settings' ? 'Page:voiceSettings:' : 'Page:voiceStyleGuidance:', close, undefined, close);
   }
 }, { immediate: true, flush: 'sync' });
 onBeforeUnmount(() => { mounted = false; });
@@ -67,7 +67,7 @@ onBeforeUnmount(() => { mounted = false; });
       <div class="flex-1 min-h-0 overflow-hidden flex flex-col">
         <p v-if="navigationError" class="shrink-0 px-4 py-2 text-sm text-red-500" role="alert">{{ navigationError }}</p>
         <VoiceSettingsPage v-if="mode === 'settings'" :key="visit" ref="pageHandle" :active="pageActive" />
-        <VoicePresetsPage v-else :key="visit" ref="pageHandle" :active="pageActive" />
+        <VoiceStyleGuidancePage v-else :key="visit" ref="pageHandle" :active="pageActive" />
       </div>
     </div>
   </SlidePage>

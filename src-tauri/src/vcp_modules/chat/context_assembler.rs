@@ -73,7 +73,7 @@ pub(crate) async fn orchestrate_chat_context(
 
     // A call owns this request's immutable policy. Append after every Tavern
     // rule so the two voice instructions share one final, non-persisted node.
-    if let Some(content) = reply_policy.and_then(VoiceReplyPolicy::context_injection) {
+    if let Some(content) = reply_policy.map(VoiceReplyPolicy::context_injection) {
         messages.push(json!({ "role": "user", "content": content }));
     }
 
@@ -337,9 +337,9 @@ mod voice_policy_tests {
         pool
     }
 
-    fn policy(auto_guidance: bool) -> VoiceReplyPolicy {
+    fn policy(mode: VoiceTtsMode, auto_guidance: bool) -> VoiceReplyPolicy {
         VoiceReplyPolicy::from_settings(Settings {
-            voice_tts_mode: VoiceTtsMode::Design,
+            voice_tts_mode: mode,
             voice_audio_tag_rules: "音频标签规则".into(),
             voice_auto_guidance: auto_guidance,
             voice_guidance_rules: "自然语言指导规则".into(),
@@ -356,8 +356,13 @@ mod voice_policy_tests {
             content: "用户原话".into(),
             ..Default::default()
         }];
-        let reply_policy = policy(true);
-        for (scope, invite) in [("agent", None), ("group", Some("请成员发言".into()))] {
+        for (mode, scope, invite) in [
+            (VoiceTtsMode::Builtin, "agent", None),
+            (VoiceTtsMode::Builtin, "group", Some("请成员发言".into())),
+            (VoiceTtsMode::Clone, "agent", None),
+            (VoiceTtsMode::Clone, "group", Some("请成员发言".into())),
+        ] {
+            let reply_policy = policy(mode, true);
             let topic = TopicKey::new(scope, "owner", "topic");
             let messages = orchestrate_chat_context(
                 &pool,
@@ -396,10 +401,10 @@ mod voice_policy_tests {
     }
 
     #[tokio::test]
-    async fn disabling_automatic_guidance_keeps_required_tags_and_builtin_injects_nothing() {
+    async fn disabling_automatic_guidance_keeps_tags_without_affecting_ordinary_chat() {
         let pool = pool_with_tail_rule().await;
         let topic = TopicKey::new("agent", "owner", "topic");
-        let tags_only = policy(false);
+        let tags_only = policy(VoiceTtsMode::Builtin, false);
         let tagged = orchestrate_chat_context(
             &pool,
             &[],
@@ -417,7 +422,6 @@ mod voice_policy_tests {
         assert!(!content.contains("自然语言指导规则"));
         assert!(!content.contains("<<<[VOICE_GUIDANCE]>>>"));
 
-        let builtin = VoiceReplyPolicy::from_settings(Settings::default());
         let ordinary = orchestrate_chat_context(
             &pool,
             &[],
@@ -426,7 +430,7 @@ mod voice_policy_tests {
             "agent",
             String::new(),
             None,
-            Some(&builtin),
+            None,
         )
         .await
         .unwrap();

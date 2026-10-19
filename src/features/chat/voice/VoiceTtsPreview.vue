@@ -59,7 +59,7 @@ const toggle = async () => {
     if (task !== current) await invoke('stop_tts', { ttsId: current.id });
   } catch {
     if (task === current) {
-      feedback.value = '试听未能开始，请检查连接、音色描述或参考音频后重试。';
+      feedback.value = '试听未能开始，请检查连接、音色或参考音频后重试。';
       await stop();
     }
   }
@@ -74,8 +74,8 @@ defineExpose({ stop, busy });
   <SettingsDisclosure title="试听声音" :description="unavailable" :disabled="disabled">
     <div class="flex flex-col gap-3">
       <VoiceTextArea v-model="text" label="试听文本" :rows="3" :max-length="500" :disabled="disabled" />
-      <p v-if="settings.voiceTtsMode === 'design'" class="m-0 text-xs leading-relaxed text-[var(--secondary-text)]">
-        试听使用音色描述，不调用聊天模型生成指导。
+      <p class="m-0 text-xs leading-relaxed text-[var(--secondary-text)]">
+        试听使用默认演绎指导，不调用聊天模型生成指导。
       </p>
       <button type="button" class="voice-preview-button" :disabled="!active || (!busy && !canStart)" @click="toggle">
         <Square v-if="busy" :size="16" aria-hidden="true" /><Play v-else :size="16" aria-hidden="true" />

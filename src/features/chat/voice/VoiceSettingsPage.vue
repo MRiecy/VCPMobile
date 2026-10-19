@@ -27,16 +27,15 @@ const voiceCall = useVoiceCallStore();
 const settingsStore = useSettingsStore();
 const { session, loading, error, reload } = useSettingsPageSession(VOICE_FIELDS, () => props.active);
 const { draft, saving, leaving } = session;
-const openingPresets = ref(false);
+const openingStyleGuidance = ref(false);
 const preview = ref<InstanceType<typeof VoiceTtsPreview> | null>(null);
 const cloneSample = ref<InstanceType<typeof VoiceCloneSample> | null>(null);
-const validationError = ref('');
 const previewSettings = computed<VoiceServiceSettings>(() => {
   const source = { ...DEFAULT_VOICE_SETTINGS, ...settingsStore.settings, ...draft.value };
   return Object.fromEntries(Object.keys(DEFAULT_VOICE_SETTINGS).map(key => [key, source[key as keyof VoiceServiceSettings]])) as unknown as VoiceServiceSettings;
 });
 const ttsModel = computed(() => MIMO_TTS_MODES.find(mode => mode.value === draft.value?.voiceTtsMode)?.model ?? MIMO_TTS_MODES[0].model);
-const disabled = computed(() => !props.active || leaving.value || openingPresets.value);
+const disabled = computed(() => !props.active || leaving.value || openingStyleGuidance.value);
 type DurationField = 'voiceVadEndSilenceMs' | 'voiceVadPlaybackOnsetMs';
 type SelectionField = 'voiceLanguage' | 'voiceInputEncoding' | 'voiceTtsVoice' | 'voiceTtsMode' | 'voiceVadSensitivity' | DurationField;
 const durationSettings = {
@@ -161,33 +160,23 @@ onBeforeUnmount(() => {
   if (props.active) void voiceCall.setProbe(false);
 });
 
-const openPresets = async () => {
+const openStyleGuidance = async () => {
   if (disabled.value) return;
-  if (!validateDraft()) return;
-  openingPresets.value = true;
+  openingStyleGuidance.value = true;
   try {
     cloneSample.value?.cancelPending();
     await preview.value?.stop();
     // A covering page ends this visit in the voice overlay. Commit the visible
     // draft before navigating, just like leaving the global settings page.
     if (draft.value && !(await session.save()).ok) return;
-    if (props.active) overlayStore.openVoicePresets();
+    if (props.active) overlayStore.openVoiceStyleGuidance();
   } finally {
-    openingPresets.value = false;
+    openingStyleGuidance.value = false;
   }
-};
-
-const validateDraft = () => {
-  validationError.value = '';
-  if (draft.value?.voiceTtsMode === 'design' && !draft.value.voiceTtsDesignPrompt.trim()) {
-    validationError.value = '请填写音色描述，用于自动指导关闭或缺失时的朗读。';
-    return false;
-  }
-  return true;
 };
 
 const beforeLeave = async () => {
-  if (openingPresets.value || !validateDraft()) return false;
+  if (openingStyleGuidance.value) return false;
   cloneSample.value?.cancelPending();
   await preview.value?.stop();
   return session.prepareLeave();
@@ -208,7 +197,6 @@ defineExpose({ beforeLeave });
         </p>
         <p v-else-if="!draft && loading" class="m-0 text-sm opacity-60" role="status">正在加载设置…</p>
         <p v-if="saving || leaving" class="m-0 text-xs text-[var(--secondary-text)]" role="status">正在保存语音设置…</p>
-        <p v-if="validationError" class="m-0 text-sm text-red-500" role="alert">{{ validationError }}</p>
 
         <section v-if="draft" class="voice-provider-section" :aria-labelledby="providerTitleId">
           <h2 :id="providerTitleId" class="settings-canvas-title">MiMo 语音服务</h2>
@@ -265,14 +253,11 @@ defineExpose({ beforeLeave });
               :model-value="draft.voiceTtsCloneSampleId" :active="active" :disabled="disabled || preview?.busy"
               :settle-before-discard="session.settlePending"
               @update:model-value="session.edit('voiceTtsCloneSampleId', $event)" />
-            <VoiceTextArea v-if="draft.voiceTtsMode === 'design'" label="音色描述" :disabled="disabled"
-              :model-value="draft.voiceTtsDesignPrompt" :max-length="2000"
-              description="自动指导关闭或缺失时使用。描述声线、语气与节奏。"
-              @update:model-value="session.edit('voiceTtsDesignPrompt', $event)" />
-            <SettingsDisclosure v-else title="演绎指导" :disabled="disabled"
-              :description="draft.voiceTtsStylePrompt.trim() ? '已填写，自然语言控制语气与节奏' : '可选 · 语气、节奏与发音要求'">
-              <VoiceTextArea label="自然语言演绎指导" :disabled="disabled" :max-length="2000"
+            <SettingsDisclosure title="默认演绎指导" :disabled="disabled"
+              :description="draft.voiceTtsStylePrompt.trim() ? '已填写 · 自动指导关闭或缺失时使用' : '可选 · 自动指导关闭或缺失时使用'">
+              <VoiceTextArea label="默认演绎指导" :disabled="disabled" :max-length="2000"
                 :model-value="draft.voiceTtsStylePrompt" placeholder="例如：语气轻松自然，语速稍慢。"
+                description="保留所选音色，控制情绪、语气与节奏；留空则自然朗读。"
                 @update:model-value="session.edit('voiceTtsStylePrompt', $event)" />
             </SettingsDisclosure>
             <p v-if="draft.voiceTtsMode !== 'builtin'" class="m-0 text-xs leading-relaxed text-[var(--secondary-text)]">
@@ -283,8 +268,8 @@ defineExpose({ beforeLeave });
           </SettingsSection>
         </section>
 
-        <SettingsRow title="语音预设" description="文字设计模式 · LLM 标签与指导规则" :icon="ListChecks" clickable
-          :disabled="disabled" class="voice-preset-entry" @click="openPresets" />
+        <SettingsRow title="风格指导" description="LLM 音频标签与自然语言指导规则" :icon="ListChecks" clickable
+          :disabled="disabled" class="voice-style-guidance-entry" @click="openStyleGuidance" />
 
         <SettingsDisclosure v-if="draft" title="高级参数" description="本地人声检测与插话" :disabled="disabled">
           <div>

@@ -152,7 +152,6 @@ pub struct TtsPreviewSettings {
     voice_tts_voice: String,
     voice_tts_stream: bool,
     voice_tts_style_prompt: String,
-    voice_tts_design_prompt: String,
     voice_tts_clone_sample_id: String,
 }
 
@@ -165,7 +164,6 @@ impl TtsPreviewSettings {
             voice_tts_voice: self.voice_tts_voice,
             voice_tts_stream: self.voice_tts_stream,
             voice_tts_style_prompt: self.voice_tts_style_prompt,
-            voice_tts_design_prompt: self.voice_tts_design_prompt,
             voice_tts_clone_sample_id: self.voice_tts_clone_sample_id,
             voice_auto_guidance: false,
             ..Settings::default()
@@ -465,19 +463,15 @@ async fn start_narration<R: Runtime>(
         }
         return Ok(VoiceServiceStart { configured: false });
     }
-    let design_mode = config.tts_mode == VoiceTtsMode::Design;
     let narration = Arc::new(TtsJob {
         id: tts_id.clone(),
         work: Mutex::new(work),
         origin: origin_user_message_id,
-        chat: Mutex::new(ChatFeed::new(
-            design_mode && policy.auto_guidance,
-            design_mode,
-        )),
+        chat: Mutex::new(ChatFeed::new(policy.auto_guidance, true)),
         config,
         sample,
         cancel: cancel.clone(),
-        reply: Mutex::new(ReplyBuffer::new(design_mode)),
+        reply: Mutex::new(ReplyBuffer::default()),
         ready: Notify::new(),
         worker_started: AtomicBool::new(false),
         player_started: AtomicBool::new(false),
@@ -777,7 +771,6 @@ mod tests {
                 voice: "mimo_default".into(),
                 tts_mode: VoiceTtsMode::Builtin,
                 tts_style_prompt: String::new(),
-                tts_design_prompt: String::new(),
                 clone_sample_id: String::new(),
             },
             sample: None,

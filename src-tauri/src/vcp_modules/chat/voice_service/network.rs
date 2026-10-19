@@ -227,27 +227,16 @@ fn synthesis_request(
             audio["voice"] = json!(config.voice);
             "mimo-v2.5-tts"
         }
-        VoiceTtsMode::Design => {
-            audio["optimize_text_preview"] = json!(false);
-            "mimo-v2.5-tts-voicedesign"
-        }
         VoiceTtsMode::Clone => {
             let sample = sample.ok_or("音色复刻参考音频未准备完成。")?;
             audio["voice"] = json!(sample.data_url.as_ref());
             "mimo-v2.5-tts-voiceclone"
         }
     };
-    let prompt = if config.tts_mode == VoiceTtsMode::Design {
-        guidance
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or(&config.tts_design_prompt)
-    } else {
-        &config.tts_style_prompt
-    }
-    .trim();
-    if config.tts_mode == VoiceTtsMode::Design && prompt.is_empty() {
-        return Err("本条回复没有有效语音指导，请填写文字设计的默认指导。".into());
-    }
+    let prompt = guidance
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(&config.tts_style_prompt)
+        .trim();
     if text.len() > MAX_TEXT_BYTES || prompt.chars().count() > VOICE_GUIDANCE_MAX_CHARS {
         return Err("单段语音正文或指导过长。".into());
     }
@@ -406,7 +395,6 @@ mod tests {
             voice: "白桦".into(),
             tts_mode: VoiceTtsMode::Builtin,
             tts_style_prompt: String::new(),
-            tts_design_prompt: String::new(),
             clone_sample_id: String::new(),
         };
         let server = tokio::spawn(async move {
@@ -797,8 +785,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn design_and_clone_use_nonstream_wav_with_their_distinct_provider_contracts() {
-        for mode in [VoiceTtsMode::Design, VoiceTtsMode::Clone] {
+    async fn builtin_and_clone_submit_automatic_style_with_their_distinct_voices() {
+        for mode in [VoiceTtsMode::Builtin, VoiceTtsMode::Clone] {
             let pcm = vec![1, 2, 3, 4];
             let HttpFixture { mut config, server } = http_fixture(
                 200,
@@ -807,10 +795,9 @@ mod tests {
                 false,
             ).await;
             config.tts_mode = mode;
-            // A saved builtin preference cannot turn compatibility SSE on.
-            config.tts_stream = true;
+            // A saved builtin preference cannot turn clone compatibility SSE on.
+            config.tts_stream = mode == VoiceTtsMode::Clone;
             config.tts_style_prompt = "轻声慢说".into();
-            config.tts_design_prompt = "兜底指导".into();
             let sample = PreparedCloneSample {
                 data_url: std::sync::Arc::from("data:audio/wav;base64,AQIDBA=="),
             };
@@ -826,35 +813,43 @@ mod tests {
             assert_eq!(captured.body["stream"], false);
             assert_eq!(captured.body["audio"]["format"], "wav");
             assert_eq!(captured.body["messages"][1], json!({"role":"assistant","content":"[轻笑]你好。"}));
-            if mode == VoiceTtsMode::Design {
-                assert_eq!(captured.body["model"], "mimo-v2.5-tts-voicedesign");
-                assert!(captured.body["audio"].get("voice").is_none());
-                assert_eq!(captured.body["audio"]["optimize_text_preview"], false);
-                assert_eq!(captured.body["messages"][0], json!({"role":"user","content":"本条自动指导"}));
+            assert_eq!(captured.body["messages"][0], json!({"role":"user","content":"本条自动指导"}));
+            assert!(captured.body["audio"].get("optimize_text_preview").is_none());
+            if mode == VoiceTtsMode::Builtin {
+                assert_eq!(captured.body["model"], "mimo-v2.5-tts");
+                assert_eq!(captured.body["audio"]["voice"], config.voice);
             } else {
                 assert_eq!(captured.body["model"], "mimo-v2.5-tts-voiceclone");
                 assert_eq!(captured.body["audio"]["voice"], sample.data_url.as_ref());
-                assert!(captured.body["audio"].get("optimize_text_preview").is_none());
-                assert_eq!(captured.body["messages"][0], json!({"role":"user","content":"轻声慢说"}));
             }
         }
     }
 
     #[test]
-    fn design_fallback_and_missing_sample_fail_before_networking() {
-        let mut settings = crate::vcp_modules::settings_manager::Settings::default();
-        settings.voice_tts_mode = VoiceTtsMode::Design;
-        settings.voice_tts_design_prompt = "固定声线".into();
-        let mut config = VoiceServiceConfig::from_settings(settings);
-        for guidance in [None, Some(" \n")] {
-            let body = synthesis_request(&config, "正文", guidance, None).unwrap();
-            assert_eq!(body["messages"][0]["content"], "固定声线");
+    fn automatic_style_overrides_optional_fallback_in_both_modes() {
+        let sample = PreparedCloneSample {
+            data_url: std::sync::Arc::from("data:audio/wav;base64,AQIDBA=="),
+        };
+        for mode in [VoiceTtsMode::Builtin, VoiceTtsMode::Clone] {
+            let mut config = VoiceServiceConfig::from_settings(
+                crate::vcp_modules::settings_manager::Settings::default(),
+            );
+            config.tts_mode = mode;
+            config.tts_style_prompt = "轻声慢说".into();
+            for guidance in [None, Some(" \n")] {
+                let body = synthesis_request(&config, "正文", guidance, Some(&sample)).unwrap();
+                assert_eq!(body["messages"][0]["content"], "轻声慢说");
+            }
+            let body = synthesis_request(&config, "正文", Some("本条指导"), Some(&sample)).unwrap();
+            assert_eq!(body["messages"][0]["content"], "本条指导");
+            config.tts_style_prompt.clear();
+            let body = synthesis_request(&config, "正文", None, Some(&sample)).unwrap();
+            assert_eq!(body["messages"], json!([{"role":"assistant", "content":"正文"}]));
+            assert!(synthesis_request(&config, "正文", Some("本条指导"), Some(&sample)).is_ok());
+            if mode == VoiceTtsMode::Clone {
+                assert!(synthesis_request(&config, "正文", Some("本条指导"), None).is_err());
+            }
         }
-        config.tts_design_prompt.clear();
-        assert!(synthesis_request(&config, "正文", None, None).is_err());
-        assert!(synthesis_request(&config, "正文", Some("本条指导"), None).is_ok());
-        config.tts_mode = VoiceTtsMode::Clone;
-        assert!(synthesis_request(&config, "正文", None, None).is_err());
     }
 
     #[tokio::test]

@@ -58,7 +58,7 @@ const agentSettingsMounted = createFirstOpenLatch(() => overlayStore.isAgentSett
 const groupSettingsMounted = createFirstOpenLatch(() => overlayStore.isGroupSettingsOpen);
 const tarvenSettingsMounted = createFirstOpenLatch(() => overlayStore.isTarvenSettingsOpen);
 const voiceSettingsMounted = createFirstOpenLatch(() => overlayStore.isVoiceSettingsOpen);
-const voicePresetsMounted = createFirstOpenLatch(() => overlayStore.isVoicePresetsOpen);
+const voiceStyleGuidanceMounted = createFirstOpenLatch(() => overlayStore.isVoiceStyleGuidanceOpen);
 const distributedMounted = createFirstOpenLatch(() => overlayStore.isDistributedOpen);
 const ragObserverMounted = createFirstOpenLatch(() => overlayStore.isRagObserverOpen);
 const diaryMounted = createFirstOpenLatch(() => overlayStore.isDiaryCenterOpen);
@@ -122,13 +122,13 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
       @close="overlayStore.closeVoiceSettings()"
     />
     <VoiceOptionsView
-      v-if="voicePresetsMounted"
-      :data-vcp-modal-id="pageModalId('voicePresets')"
-      mode="presets"
-      :is-open="overlayStore.isVoicePresetsOpen"
-      :active="overlayStore.pageStackTop?.type === 'voicePresets'"
-      :z-index="overlayStore.getPageZIndex('voicePresets')"
-      @close="overlayStore.closeVoicePresets()"
+      v-if="voiceStyleGuidanceMounted"
+      :data-vcp-modal-id="pageModalId('voiceStyleGuidance')"
+      mode="styleGuidance"
+      :is-open="overlayStore.isVoiceStyleGuidanceOpen"
+      :active="overlayStore.pageStackTop?.type === 'voiceStyleGuidance'"
+      :z-index="overlayStore.getPageZIndex('voiceStyleGuidance')"
+      @close="overlayStore.closeVoiceStyleGuidance()"
     />
     <RebuildSessionView
       :data-vcp-modal-id="pageModalId('rebuildSession')"

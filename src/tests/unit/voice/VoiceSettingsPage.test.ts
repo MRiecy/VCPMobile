@@ -13,7 +13,7 @@ import { useModalHistory } from '../../../core/composables/useModalHistory';
 import { emitTauriEvent, invokeMock, listenMock, mockInvoke } from '../../mocks/tauri';
 
 const context = vi.hoisted(() => ({
-  openPresets: vi.fn(),
+  openStyleGuidance: vi.fn(),
   voice: {} as {
     active: boolean; microphoneState: string; playbackActive: boolean; probeActive: boolean; probePending: boolean;
     speechActive: boolean; aecState: string | null; route: string; probeError: string;
@@ -50,8 +50,8 @@ beforeEach(() => {
   pinia = createPinia();
   setActivePinia(pinia);
   database = snapshot();
-  context.openPresets.mockReset();
-  vi.spyOn(useOverlayStore(), 'openVoicePresets').mockImplementation(context.openPresets);
+  context.openStyleGuidance.mockReset();
+  vi.spyOn(useOverlayStore(), 'openVoiceStyleGuidance').mockImplementation(context.openStyleGuidance);
   context.voice = reactive({
     active: true, microphoneState: 'on', playbackActive: false, probeActive: false, probePending: false,
     aecState: 'enabled', speechActive: false, route: 'speaker', probeError: '',
@@ -82,7 +82,7 @@ afterEach(() => {
   useOverlayStore().closeContextMenu();
   useOverlayStore().closePrompt();
   modals.unregisterModal('Page:voiceSettings:');
-  modals.unregisterModal('Page:voicePresets:');
+  modals.unregisterModal('Page:voiceStyleGuidance:');
   disposePinia(pinia);
   vi.restoreAllMocks();
 });
@@ -94,9 +94,9 @@ async function renderPage() {
   return wrapper;
 }
 
-async function renderOverlay(mode: 'settings' | 'presets' = 'settings') {
+async function renderOverlay(mode: 'settings' | 'styleGuidance' = 'settings') {
   const fallbackClose = vi.fn();
-  modals.registerModal(mode === 'settings' ? 'Page:voiceSettings:' : 'Page:voicePresets:', fallbackClose);
+  modals.registerModal(mode === 'settings' ? 'Page:voiceSettings:' : 'Page:voiceStyleGuidance:', fallbackClose);
   const wrapper = mount(VoiceOptionsView, {
     attachTo: document.body,
     props: { mode, isOpen: true, active: true, zIndex: 40 },
@@ -217,12 +217,12 @@ describe('local voice diagnostics', () => {
 });
 
 describe('语音设置使用正式设置快照', () => {
-  it('高级参数在语音预设之后默认折叠，预设时长使用 ms 并在返回时保存', async () => {
+  it('高级参数在风格指导之后默认折叠，预设时长使用 ms 并在返回时保存', async () => {
     const { wrapper } = await renderOverlay();
     const advanced = disclosure(wrapper, '高级参数');
     expect(advanced.attributes('aria-expanded')).toBe('false');
     expect(wrapper.find('button[aria-label="人声检测灵敏度"]').exists()).toBe(false);
-    expect(wrapper.text().indexOf('语音预设')).toBeLessThan(wrapper.text().indexOf('高级参数'));
+    expect(wrapper.text().indexOf('风格指导')).toBeLessThan(wrapper.text().indexOf('高级参数'));
     expect(wrapper.text().indexOf('高级参数')).toBeLessThan(wrapper.text().indexOf('本地诊断'));
     await advanced.trigger('click');
     expect(wrapper.get('button[aria-label="人声检测灵敏度"]').text()).toContain('标准');
@@ -423,17 +423,17 @@ describe('语音设置使用正式设置快照', () => {
     expect(wrapper.emitted('close')).toHaveLength(1);
   });
 
-  it('进入预设前等待当前草稿确定保存', async () => {
+  it('进入风格指导前等待当前草稿确定保存', async () => {
     const pending = deferred<AppSettings>();
     mockInvoke('update_settings', () => pending.promise);
     const wrapper = await renderPage();
     await field(wrapper, '语音 API Key').setValue('configured-key');
-    await wrapper.get('.voice-preset-entry').trigger('click');
+    await wrapper.get('.voice-style-guidance-entry').trigger('click');
     await flushPromises();
-    expect(context.openPresets).not.toHaveBeenCalled();
+    expect(context.openStyleGuidance).not.toHaveBeenCalled();
     pending.resolve({ ...database, voiceApiKey: 'configured-key' });
     await flushPromises();
-    expect(context.openPresets).toHaveBeenCalledOnce();
+    expect(context.openStyleGuidance).toHaveBeenCalledOnce();
   });
 
   it('系统返回复用原页面history entry并等待保存，不直接弹出', async () => {
@@ -487,30 +487,36 @@ describe('语音设置使用正式设置快照', () => {
     expect(modals.modalStackLength()).toBe(1);
   });
 
-  it('三模式按实际能力显示，切换保留各自内容，返回只提交更改字段', async () => {
+  it('仅提供预置和复刻，两种模式共用默认演绎指导，切换保留草稿', async () => {
     const { wrapper } = await renderOverlay();
-    await choose(wrapper, '音色模式', '文字设计');
-    expect(wrapper.text()).toContain('mimo-v2.5-tts-voicedesign');
-    expect(wrapper.find('[aria-label="朗读音色"]').exists()).toBe(false);
-    expect(wrapper.find('[role="switch"][aria-label="流式朗读"]').exists()).toBe(false);
-    expect(wrapper.text()).toContain('每个文本分段合成完成后返回音频');
+    const menu = await openSelection(wrapper, '音色模式');
+    expect(menu.findAll('[role="radio"]').map(item => item.text())).toEqual(['预置音色', '样本复刻']);
+    useOverlayStore().closeContextMenu();
+    await flushPromises();
+    await disclosure(wrapper, '默认演绎指导').trigger('click');
     const description = wrapper.get('textarea');
-    await description.setValue('低沉温和，语速稍慢。');
+    await description.setValue('语气温和，语速稍慢。');
     await choose(wrapper, '音色模式', '样本复刻');
     expect(wrapper.text()).toContain('mimo-v2.5-tts-voiceclone');
     expect(wrapper.get('[aria-label="参考音频"]').isVisible()).toBe(true);
-    await choose(wrapper, '音色模式', '文字设计');
-    expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('低沉温和，语速稍慢。');
+    expect(wrapper.find('[aria-label="朗读音色"]').exists()).toBe(false);
+    expect(wrapper.find('[role="switch"][aria-label="流式朗读"]').exists()).toBe(false);
+    expect(wrapper.text()).toContain('每个文本分段合成完成后返回音频');
+    expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('语气温和，语速稍慢。');
+    await choose(wrapper, '音色模式', '预置音色');
+    expect(wrapper.get('[aria-label="参考音频"]').isVisible()).toBe(false);
+    expect(wrapper.find('[aria-label="朗读音色"]').exists()).toBe(true);
     await leaveVoiceSettings(wrapper);
-    expect(updates()[0]?.[1]?.updates).toEqual({ voiceTtsMode: 'design', voiceTtsDesignPrompt: '低沉温和，语速稍慢。' });
+    expect(updates()[0]?.[1]?.updates).toEqual({ voiceTtsStylePrompt: '语气温和，语速稍慢。' });
     expect(database.voiceTtsStream).toBe(true);
   });
 
-  it('预设两规则共用同一保存会话，自动关闭保留规则且系统返回等待保存', async () => {
+  it('风格指导两规则共用同一保存会话，自动关闭保留规则且系统返回等待保存', async () => {
     const pending = deferred<AppSettings>();
     mockInvoke('update_settings', () => pending.promise);
-    const { wrapper, fallbackClose } = await renderOverlay('presets');
+    const { wrapper, fallbackClose } = await renderOverlay('styleGuidance');
     expect(wrapper.text()).toContain('同一个注入块');
+    expect(wrapper.text()).toContain('适用于预置音色与样本复刻');
     expect(wrapper.text()).not.toContain('手动指导');
     const areas = wrapper.findAll('textarea');
     expect(areas).toHaveLength(2);
@@ -529,16 +535,16 @@ describe('语音设置使用正式设置快照', () => {
     expect(modals.modalStackLength()).toBe(1);
   });
 
-  it('预设必需规则留空时保留编辑页，可恢复默认再返回', async () => {
-    const { wrapper } = await renderOverlay('presets');
+  it('风格指导必需规则留空时保留编辑页，可恢复默认再返回', async () => {
+    const { wrapper } = await renderOverlay('styleGuidance');
     await wrapper.findAll('textarea')[0].setValue(' ');
-    await wrapper.get('button[aria-label="返回，关闭语音预设"]').trigger('click');
+    await wrapper.get('button[aria-label="返回，关闭风格指导"]').trigger('click');
     await flushPromises();
     expect(updates()).toHaveLength(0);
     expect(wrapper.emitted('close')).toBeUndefined();
     expect(wrapper.get('[role="alert"]').text()).toContain('请填写音频标签规则');
     await wrapper.findAll('button').find(button => button.text() === '恢复默认标签规则')!.trigger('click');
-    await wrapper.get('button[aria-label="返回，关闭语音预设"]').trigger('click');
+    await wrapper.get('button[aria-label="返回，关闭风格指导"]').trigger('click');
     await flushPromises();
     expect(wrapper.emitted('close')).toHaveLength(1);
   });

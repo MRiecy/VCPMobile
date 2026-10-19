@@ -410,7 +410,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_parenthetical_prose_is_not_repeated_outside_design_mode() {
+    fn standalone_parenthetical_prose_is_not_repeated_as_global_style() {
         let mut reply = ReplyBuffer::default();
         reply
             .update("(注：这是一段说明)第一句。第二句。".into(), true)

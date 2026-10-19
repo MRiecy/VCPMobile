@@ -325,7 +325,7 @@ describe('chat scene voice transitions', () => {
     await view.get('[data-message-id="existing-message"] button').trigger('click');
     expect(message.textContent).toBe('消息已展开');
     expect(attachMenuOpen.value).toBe(false);
-    expect(view.find('[aria-label="语音预设"]').exists()).toBe(true);
+    expect(view.find('[aria-label="风格指导"]').exists()).toBe(true);
     expect(view.find('[aria-label="语音设置"]').exists()).toBe(true);
     await view.get('[aria-label="挂断并退出语音模式"]').trigger('click');
     await settle();
@@ -345,13 +345,13 @@ describe('chat scene voice transitions', () => {
     const view = mountComposer(ChatView);
     const overlay = useOverlayStore();
     const settings = vi.spyOn(overlay, 'openVoiceSettings').mockImplementation(() => {});
-    const presets = vi.spyOn(overlay, 'openVoicePresets').mockImplementation(() => {});
+    const styleGuidance = vi.spyOn(overlay, 'openVoiceStyleGuidance').mockImplementation(() => {});
     await settle();
     await view.get('[aria-label="开始语音通话"]').trigger('click');
     await settle();
-    await view.get('[aria-label="语音预设"]').trigger('click');
+    await view.get('[aria-label="风格指导"]').trigger('click');
     await view.get('[aria-label="语音设置"]').trigger('click');
-    expect(presets).toHaveBeenCalledOnce();
+    expect(styleGuidance).toHaveBeenCalledOnce();
     expect(settings).toHaveBeenCalledOnce();
     expect(useVoiceCallStore().active).toBe(true);
   });

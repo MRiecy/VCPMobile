@@ -275,10 +275,10 @@ onUnmounted(() => {
     <header class="vcp-header-fixed shrink-0 flex items-center justify-between gap-3 px-4 border-b border-white/5">
       <div class="flex items-center gap-3 min-w-0 flex-1">
         <!-- 侧边栏按钮 (使用内联 SVG 确保 100% 可见) -->
-        <button @click="voiceCall.active ? overlayStore.openVoicePresets() : layoutStore.toggleLeftDrawer()"
+        <button @click="voiceCall.active ? overlayStore.openVoiceStyleGuidance() : layoutStore.toggleLeftDrawer()"
           class="w-10 h-10 shrink-0 flex items-center justify-center rounded-xl bg-black/5 dark:bg-white/10 active:opacity-60 transition-opacity border border-black/5 dark:border-white/5"
           :class="{ 'vcp-left-drawer-trigger': !voiceCall.active }"
-          :aria-label="voiceCall.active ? '语音预设' : '打开助手与话题侧栏'"
+          :aria-label="voiceCall.active ? '风格指导' : '打开助手与话题侧栏'"
           :aria-controls="voiceCall.active ? undefined : 'agent-sidebar'"
           :aria-expanded="voiceCall.active ? undefined : layoutStore.leftDrawerOpen">
           <Transition name="voice-icon" mode="out-in">

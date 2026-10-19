@@ -22,7 +22,7 @@ const contentId = useId();
       @click.stop="expanded = !expanded"
     >
       <AudioLines :size="15" aria-hidden="true" />
-      <span>语音指导</span>
+      <span>风格指导</span>
       <span v-if="!block.is_complete" class="voice-guidance-status">未完成</span>
       <ChevronDown
         :size="14"

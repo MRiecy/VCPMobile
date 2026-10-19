@@ -54,8 +54,6 @@ pub struct VoiceServiceConfig {
     #[serde(default)]
     pub tts_style_prompt: String,
     #[serde(default)]
-    pub tts_design_prompt: String,
-    #[serde(default)]
     pub clone_sample_id: String,
 }
 
@@ -79,10 +77,7 @@ impl VoiceReplyPolicy {
         }
     }
 
-    pub(crate) fn context_injection(&self) -> Option<String> {
-        if self.config.tts_mode != VoiceTtsMode::Design {
-            return None;
-        }
+    pub(crate) fn context_injection(&self) -> String {
         let tags = self.audio_tag_rules.trim();
         let tags = if tags.is_empty() {
             DEFAULT_VOICE_AUDIO_TAG_RULES
@@ -90,7 +85,7 @@ impl VoiceReplyPolicy {
             tags
         };
         if !self.auto_guidance {
-            return Some(tags.to_string());
+            return tags.to_string();
         }
         let guidance = self.guidance_rules.trim();
         let guidance = if guidance.is_empty() {
@@ -98,7 +93,7 @@ impl VoiceReplyPolicy {
         } else {
             guidance
         };
-        Some(format!("{tags}\n{guidance}\n语音指导输出格式：在每条助手消息的可朗读正文之前，只输出一次以下控制块。起止标记必须独占一行，内部只放本条回复的完整自然语言指导，不嵌套、不放进代码块、不等待工具回执。控制块之后再输出带音频标签的正常正文。\n<<<[VOICE_GUIDANCE]>>>\n本条回复的语音指导\n<<<[END_VOICE_GUIDANCE]>>>"))
+        format!("{tags}\n{guidance}\n风格指导输出格式：在每条助手消息的可朗读正文之前，只输出一次以下控制块。起止标记必须独占一行，内部只放本条回复的完整自然语言指导，不嵌套、不放进代码块、不等待工具回执。控制块之后再输出带音频标签的正常正文。\n<<<[VOICE_GUIDANCE]>>>\n本条回复的风格指导\n<<<[END_VOICE_GUIDANCE]>>>")
     }
 }
 
@@ -120,7 +115,6 @@ impl VoiceServiceConfig {
             voice: settings.voice_tts_voice,
             tts_mode: settings.voice_tts_mode,
             tts_style_prompt: settings.voice_tts_style_prompt,
-            tts_design_prompt: settings.voice_tts_design_prompt,
             clone_sample_id: settings.voice_tts_clone_sample_id,
         }
     }
@@ -191,34 +185,29 @@ mod tests {
         config.tts_mode = VoiceTtsMode::Clone;
         assert!(config.validate_asr().is_ok());
         assert!(config.validate_tts().is_err());
-        config.tts_mode = VoiceTtsMode::Design;
+        config.tts_mode = VoiceTtsMode::Builtin;
+        config.voice = "mimo_default".into();
         config.language = "invalid-language".into();
         assert!(config.validate_asr().is_err());
         assert!(config.validate_tts().is_ok());
     }
 
     #[test]
-    fn reply_snapshot_has_one_design_only_injection_and_preserves_automatic_switch() {
+    fn both_modes_share_one_injection_and_preserve_the_automatic_switch() {
         let mut settings = Settings::default();
-        settings.voice_tts_mode = VoiceTtsMode::Design;
         settings.voice_audio_tag_rules = "标签规则".into();
         settings.voice_guidance_rules = "指导规则".into();
-        let policy = VoiceReplyPolicy::from_settings(settings.clone());
-        let injection = policy.context_injection().unwrap();
-        assert!(injection.starts_with("标签规则\n指导规则\n"));
-        assert_eq!(injection.matches("<<<[VOICE_GUIDANCE]>>>").count(), 1);
-        settings.voice_auto_guidance = false;
-        let without_automatic = VoiceReplyPolicy::from_settings(settings.clone());
-        assert_eq!(
-            without_automatic.context_injection().as_deref(),
-            Some("标签规则")
-        );
-        assert!(policy.auto_guidance);
         for mode in [VoiceTtsMode::Builtin, VoiceTtsMode::Clone] {
             settings.voice_tts_mode = mode;
-            assert!(VoiceReplyPolicy::from_settings(settings.clone())
-                .context_injection()
-                .is_none());
+            settings.voice_auto_guidance = true;
+            let policy = VoiceReplyPolicy::from_settings(settings.clone());
+            let injection = policy.context_injection();
+            assert!(injection.starts_with("标签规则\n指导规则\n"));
+            assert_eq!(injection.matches("<<<[VOICE_GUIDANCE]>>>").count(), 1);
+            settings.voice_auto_guidance = false;
+            let without_automatic = VoiceReplyPolicy::from_settings(settings.clone());
+            assert_eq!(without_automatic.context_injection(), "标签规则");
+            assert!(policy.auto_guidance);
         }
     }
 }

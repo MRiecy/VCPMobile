@@ -15,7 +15,7 @@ export type OverlayPageType =
   | 'rebuildSession'
   | 'tarvenSettings'
   | 'voiceSettings'
-  | 'voicePresets'
+  | 'voiceStyleGuidance'
   | 'distributed'
   | 'ragObserver'
   | 'diaryCenter'
@@ -59,7 +59,7 @@ export const useOverlayStore = defineStore('overlay', () => {
   const isRebuildSessionOpen = computed(() => pageStack.value.some(p => p.type === 'rebuildSession'));
   const isTarvenSettingsOpen = computed(() => pageStack.value.some(p => p.type === 'tarvenSettings'));
   const isVoiceSettingsOpen = computed(() => pageStack.value.some(p => p.type === 'voiceSettings'));
-  const isVoicePresetsOpen = computed(() => pageStack.value.some(p => p.type === 'voicePresets'));
+  const isVoiceStyleGuidanceOpen = computed(() => pageStack.value.some(p => p.type === 'voiceStyleGuidance'));
   const isDistributedOpen = computed(() => pageStack.value.some(p => p.type === 'distributed'));
   const isRagObserverOpen = computed(() => pageStack.value.some(p => p.type === 'ragObserver'));
   const isDiaryCenterOpen = computed(() => pageStack.value.some(p => p.type === 'diaryCenter'));
@@ -219,13 +219,13 @@ export const useOverlayStore = defineStore('overlay', () => {
     popPage();
   };
 
-  const openVoicePresets = () => {
-    if (isVoicePresetsOpen.value) return;
-    pushPage('voicePresets');
+  const openVoiceStyleGuidance = () => {
+    if (isVoiceStyleGuidanceOpen.value) return;
+    pushPage('voiceStyleGuidance');
   };
 
-  const closeVoicePresets = () => {
-    if (pageStackTop.value?.type !== 'voicePresets') return;
+  const closeVoiceStyleGuidance = () => {
+    if (pageStackTop.value?.type !== 'voiceStyleGuidance') return;
     popPage();
   };
 
@@ -421,7 +421,7 @@ export const useOverlayStore = defineStore('overlay', () => {
     isRebuildSessionOpen,
     isTarvenSettingsOpen,
     isVoiceSettingsOpen,
-    isVoicePresetsOpen,
+    isVoiceStyleGuidanceOpen,
     isDistributedOpen,
     isRagObserverOpen,
     isDiaryCenterOpen,
@@ -448,8 +448,8 @@ export const useOverlayStore = defineStore('overlay', () => {
     closeTarvenSettings,
     openVoiceSettings,
     closeVoiceSettings,
-    openVoicePresets,
-    closeVoicePresets,
+    openVoiceStyleGuidance,
+    closeVoiceStyleGuidance,
     openDistributed,
     closeDistributed,
     openRagObserver,

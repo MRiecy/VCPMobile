@@ -93,10 +93,10 @@ describe('配置恢复的真实领域状态与失败边界', () => {
     expect(applySettings).toHaveBeenCalledExactlyOnceWith(vad);
   });
 
-  it('备份保留三模式与注入规则的类型，复刻恢复明确提示音频需在本机存在', async () => {
+  it('备份保留音色模式与风格规则的类型，复刻恢复明确提示音频需在本机存在', async () => {
     const fields = {
       voiceTtsMode: 'clone' as const, voiceTtsCloneSampleId: 'sample-id', voiceTtsStylePrompt: '轻松自然',
-      voiceTtsDesignPrompt: '平和中性声线', voiceAudioTagRules: '必要时生成标签', voiceAutoGuidance: false, voiceGuidanceRules: '按角色描述',
+      voiceAudioTagRules: '必要时生成标签', voiceAutoGuidance: false, voiceGuidanceRules: '按角色描述',
     };
     const payload = buildBackupPayload({ ...makeSettings(), ...fields }, captureBackupPreferences());
     expect(payload.settings).toMatchObject(fields);
