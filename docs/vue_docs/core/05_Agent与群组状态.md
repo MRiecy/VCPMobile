@@ -8,6 +8,8 @@ date: 2026-08-11
 
 # 05. Agent与群组状态
 
+2026-10-19 更新：群列表快照的 `mode` 表示本机有效模式；完整 `GroupConfigDto.mode` 仍为共享原值，本机覆盖为 `modeOverride`。`saveGroup(group, baseline)` 经 `update_group_config` 提交变更字段，并以返回的 `modeOverride ?? mode` 更新列表。配置备份导入群本机设置后刷新助手快照，群页面不保存到同步 DTO。
+
 ## 1. 概述
 
 ### 1.1 领域定位

@@ -35,11 +35,17 @@ export type VoiceGuidanceConfig = { audioTagRules: string, autoGuidance: boolean
 
 export type VoiceConfig = { connection: VoiceConnectionConfig, asr: VoiceAsrConfig, tts: VoiceTtsConfig, guidance: VoiceGuidanceConfig, vad: VoiceVadConfig, };
 
+export type JevProvider = "typesafe" | "openrouter";
+
+export type JevProviderConfig = { apiUrl: string, apiKey: string, model: string, };
+
+export type JevConfig = { enabled: boolean, provider: JevProvider, typesafe: JevProviderConfig, openrouter: JevProviderConfig, timeoutMs: number, maxRetries: number, retryBaseDelayMs: number, proxyUrl: string, httpReferer: string, appTitle: string, };
+
 export type NavigationConfig = { agentOrder: Array<string>, groupOrder: Array<string>, };
 
-export type Settings = { identity: IdentityConfig, server: ServerConfig, log: LogConfig, sync: SyncConfig, distributed: DistributedConfig, conversation: ConversationConfig, voice: VoiceConfig, navigation: NavigationConfig, };
+export type Settings = { identity: IdentityConfig, server: ServerConfig, log: LogConfig, sync: SyncConfig, distributed: DistributedConfig, conversation: ConversationConfig, voice: VoiceConfig, jev: JevConfig, navigation: NavigationConfig, };
 
-export type ConfigDomain = "identity" | "server" | "log" | "sync" | "distributed" | "conversation" | "voice" | "navigation";
+export type ConfigDomain = "identity" | "server" | "log" | "sync" | "distributed" | "conversation" | "voice" | "jev" | "navigation";
 
 export type DomainHealth = "ready" | "recovered" | "unavailable";
 
@@ -49,9 +55,11 @@ export type DomainStatus = { revision: string, schemaVersion: number, issues: Ar
 
 export type ConfigSnapshot = { data: Settings, domains: { [key in ConfigDomain]: DomainStatus }, };
 
-export type DomainPatch = { domain: ConfigDomain, expectedRevision: string, changes: { [key in string]: JsonValue }, baseValues: { [key in string]: JsonValue }, repair: boolean, };
+export type DomainPatch = { domain: ConfigDomain, expectedRevision: string, changes: { [key in string]: JsonValue }, baseValues: { [key in string]: JsonValue }, };
 
 export type ConfigUpdate = { patches: Array<DomainPatch>, };
+
+export type ConfigReset = { domain: ConfigDomain, expectedRevision: string, };
 
 export type ConfigSaveResult = { "status": "saved", snapshot: ConfigSnapshot, } | { "status": "rejected", issues: Array<FieldIssue>, } | { "status": "conflict", snapshot: ConfigSnapshot, conflicts: Array<FieldIssue>, };
 

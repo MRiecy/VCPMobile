@@ -1,5 +1,7 @@
 <script setup lang="ts">
+defineOptions({ inheritAttrs: false });
 import { computed, ref, onUnmounted, watch } from "vue";
+import { ArrowDown, ArrowLeft, ArrowUp, HelpCircle } from "lucide-vue-next";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { deleteTempFile } from "tauri-plugin-vcp-mobile";
 import { cancelFileOperation, pickFile } from "../../core/utils/nativeFilePicker";
@@ -7,20 +9,28 @@ import { useAssistantStore } from "../../core/stores/assistant";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useNotificationStore } from "../../core/stores/notification";
 import { useOverlayStore } from "../../core/stores/overlay";
+import { useModalHistory } from "../../core/composables/useModalHistory";
+import { LAYER_PAGE_BASE } from "../../core/constants/layers";
 import { isAndroid, isIOS } from "../../core/utils/platform";
 import SlidePage from "../../components/ui/SlidePage.vue";
 import ModelSelector from "../../components/ModelSelector.vue";
 import AvatarCropper from "../../components/ui/AvatarCropper.vue";
 import VcpAvatar from "../../components/ui/VcpAvatar.vue";
 import SettingsSection from "../../components/settings/SettingsSection.vue";
+import SettingsCanvas from "../../components/settings/SettingsCanvas.vue";
+import SettingsDisclosure from "../../components/settings/SettingsDisclosure.vue";
+import SettingsTextField from "../../components/settings/SettingsTextField.vue";
 import SettingsRow from "../../components/settings/SettingsRow.vue";
 import SettingsSwitch from "../../components/settings/SettingsSwitch.vue";
 import GroupModeHelpDialog from "./GroupModeHelpDialog.vue";
+import GroupSettingsTextArea from "./GroupSettingsTextArea.vue";
 import { allowChatMutation, chatMutationBlockReason } from "../chat/chatMutationPolicy";
 import type {
   AgentListItemDto,
   GroupConfigDto,
+  GroupMode,
 } from "../../core/types/assistant";
+import type { ContextMenuConfig, OverlayActionItem } from "../../core/types/overlay";
 
 type EditableGroupConfig = Omit<
   GroupConfigDto,
@@ -39,7 +49,7 @@ const props = withDefaults(defineProps<{
   zIndex?: number;
 }>(), {
   isOpen: false,
-  zIndex: 50,
+  zIndex: LAYER_PAGE_BASE,
 });
 
 const emit = defineEmits(["close"]);
@@ -48,59 +58,46 @@ const assistantStore = useAssistantStore();
 const sessionStore = useChatSessionStore();
 const notificationStore = useNotificationStore();
 const overlayStore = useOverlayStore();
+const { registerModal } = useModalHistory();
 
-const createEmptyConfig = (id = ""): EditableGroupConfig => ({
-  id,
-  name: "",
-  avatarCalculatedColor: null,
-  members: [],
-  mode: "sequential",
-  memberTags: {},
-  groupPrompt: "",
-  invitePrompt: "",
-  useUnifiedModel: false,
-  unifiedModel: "",
-  tagMatchMode: "strict",
-  topics: [],
-  createdAt: 0,
-});
 const normalizeGroupConfig = (config: GroupConfigDto): EditableGroupConfig => ({
-  ...createEmptyConfig(config.id),
   ...config,
-  mode: config.mode || "sequential",
   memberTags: config.memberTags ?? {},
   groupPrompt: config.groupPrompt || "",
   invitePrompt: config.invitePrompt || "",
   unifiedModel: config.unifiedModel || "",
   tagMatchMode: config.tagMatchMode || "strict",
 });
-const groupConfig = ref<EditableGroupConfig>(createEmptyConfig(props.id));
-const deleteBlockReason = computed(() => chatMutationBlockReason({
+const groupConfig = ref<EditableGroupConfig | null>(null);
+const deleteBlockReason = computed(() => groupConfig.value ? chatMutationBlockReason({
   ownerId: groupConfig.value.id, ownerType: "group",
-}));
+}) : null);
 let editorEpoch = 0;
-const pendingSaves = new Map<string, Promise<void>>();
+let mounted = true;
+const pendingSaves = new Map<string, Promise<boolean>>();
+const retainedDrafts = new Map<string, { draft: EditableGroupConfig; baseline: EditableGroupConfig }>();
 const isEpochCurrent = (epoch: number) => editorEpoch === epoch;
 const isOpenEditorCurrent = (epoch: number, id: string) =>
-  isEpochCurrent(epoch) && props.isOpen && props.id === id;
+  mounted && isEpochCurrent(epoch) && props.isOpen && props.id === id;
 
-const allAgents = ref<Pick<AgentListItemDto, "id" | "name">[]>([]);
+const allAgents = computed<Pick<AgentListItemDto, "id" | "name">[]>(() => assistantStore.agents);
+const isLoading = ref(false);
 const isSaving = ref(false);
-const saveSuccess = ref(false);
-let saveSuccessTimer: ReturnType<typeof setTimeout> | null = null;
+const isDeleting = ref(false);
+const isLeaving = ref(false);
+const loadError = ref("");
+const saveError = ref("");
+const disabled = computed(() => !props.isOpen || isLoading.value || isSaving.value || isDeleting.value || isLeaving.value);
 
 // 原始配置快照，用于判断用户是否真正修改了内容
 const originalConfig = ref<EditableGroupConfig | null>(null);
 
 onUnmounted(() => {
+  mounted = false;
+  editorEpoch += 1;
   cancelAvatarPicker();
-  if (saveSuccessTimer) {
-    clearTimeout(saveSuccessTimer);
-    saveSuccessTimer = null;
-  }
+  closeSelection();
   void releaseAvatarWorkingCopy();
-  const epoch = ++editorEpoch;
-  void startSaveOnClose(epoch);
 });
 
 // Avatar Upload Logic
@@ -129,7 +126,7 @@ const releaseAvatarWorkingCopy = async () => {
 };
 
 const triggerFileInput = async () => {
-  if (isPickingAvatar.value || isCropping.value || isSaving.value) return;
+  if (disabled.value || isPickingAvatar.value || isCropping.value) return;
   const epoch = editorEpoch;
   const groupId = props.id;
   if (!groupId || !isOpenEditorCurrent(epoch, groupId)) return;
@@ -181,7 +178,7 @@ const cancelAvatarCrop = () => {
 
 const onCropConfirm = async (blob: Blob) => {
   const epoch = editorEpoch;
-  const groupId = groupConfig.value.id;
+  const groupId = groupConfig.value?.id;
   if (!groupId || !isOpenEditorCurrent(epoch, groupId)) {
     isCropping.value = false;
     await releaseAvatarWorkingCopy();
@@ -207,105 +204,143 @@ const onCropConfirm = async (blob: Blob) => {
   }
 };
 
-const fetchAgents = () => {
-  allAgents.value = assistantStore.agents.map(a => ({
-    id: a.id,
-    name: a.name,
-    avatar: ""
-  }));
-};
-
 const fetchGroupConfig = async (epoch: number, groupId: string) => {
   if (!groupId) return;
+  isLoading.value = true;
+  loadError.value = "";
   try {
     const pendingSave = pendingSaves.get(groupId);
     if (pendingSave) {
       await pendingSave;
       if (!isOpenEditorCurrent(epoch, groupId)) return;
     }
+    const retained = retainedDrafts.get(groupId);
+    if (retained) {
+      groupConfig.value = cloneConfig(retained.draft);
+      originalConfig.value = cloneConfig(retained.baseline);
+      saveError.value = "已恢复未保存的修改，请重试保存。";
+      return;
+    }
     const config = await invoke<GroupConfigDto>("read_group_config", { groupId });
     if (!isOpenEditorCurrent(epoch, groupId)) return;
     groupConfig.value = normalizeGroupConfig(config);
-    originalConfig.value = JSON.parse(JSON.stringify(groupConfig.value));
+    originalConfig.value = cloneConfig(groupConfig.value);
   } catch (err) {
+    if (!isOpenEditorCurrent(epoch, groupId)) return;
+    loadError.value = `群组设置读取失败：${String(err)}`;
     console.error("Failed to load group config:", err);
+  } finally {
+    if (isOpenEditorCurrent(epoch, groupId)) isLoading.value = false;
   }
 };
 
-const startSaveOnClose = (epoch: number): Promise<void> => {
-  const groupId = groupConfig.value.id;
-  const task = saveOnClose(epoch);
-  if (groupId) pendingSaves.set(groupId, task);
-  void task.finally(() => {
-    if (pendingSaves.get(groupId) === task) pendingSaves.delete(groupId);
-  });
-  return task;
+const cloneConfig = (config: EditableGroupConfig): EditableGroupConfig => JSON.parse(JSON.stringify(config));
+const hasChanges = computed(() => !!groupConfig.value && !!originalConfig.value &&
+  JSON.stringify(groupConfig.value) !== JSON.stringify(originalConfig.value));
+const retainDraft = () => {
+  if (hasChanges.value && groupConfig.value && originalConfig.value) {
+    retainedDrafts.set(groupConfig.value.id, {
+      draft: cloneConfig(groupConfig.value),
+      baseline: cloneConfig(originalConfig.value),
+    });
+  }
 };
 
-const saveOnClose = async (epoch: number) => {
-  const draft = JSON.parse(JSON.stringify(groupConfig.value)) as EditableGroupConfig;
-  const baseline = originalConfig.value
-    ? JSON.parse(JSON.stringify(originalConfig.value)) as EditableGroupConfig
-    : null;
-  if (!draft.id) return;
-
-  // 仅在配置真正被修改时才触发保存，避免无意义的后端调用
-  if (baseline && JSON.stringify(draft) !== JSON.stringify(baseline)) {
-    if (isEpochCurrent(epoch)) {
-      isSaving.value = true;
-      saveSuccess.value = false;
-    }
-
-    // 加固防重入：在 await 之前同步更新快照，拦截后续瞬时触发的并发保存调用
-    if (isEpochCurrent(epoch)) originalConfig.value = draft;
-
+const saveChanges = async (): Promise<boolean> => {
+  if (isSaving.value || isLoading.value) return false;
+  if (!groupConfig.value || !originalConfig.value || !hasChanges.value) return true;
+  const validation = validateDraft(groupConfig.value);
+  if (validation) {
+    saveError.value = validation;
+    return false;
+  }
+  const epoch = editorEpoch;
+  const draft = cloneConfig(groupConfig.value);
+  const baseline = cloneConfig(originalConfig.value);
+  isSaving.value = true;
+  saveError.value = "";
+  const task = (async () => {
     try {
-      const canonical = normalizeGroupConfig(await assistantStore.saveGroup(draft));
-      if (!isEpochCurrent(epoch)) return;
+      const canonical = normalizeGroupConfig(await assistantStore.saveGroup(draft, baseline));
+      const retained = retainedDrafts.get(draft.id);
+      if (retained && JSON.stringify(retained.draft) === JSON.stringify(draft)) retainedDrafts.delete(draft.id);
+      if (!isOpenEditorCurrent(epoch, draft.id)) return false;
       groupConfig.value = canonical;
-      originalConfig.value = JSON.parse(JSON.stringify(canonical));
-      saveSuccess.value = true;
-      if (saveSuccessTimer) clearTimeout(saveSuccessTimer);
-      saveSuccessTimer = setTimeout(() => {
-        saveSuccess.value = false;
-      }, 2000);
-    } catch (err: any) {
-      // 失败时回滚快照，以便后续有机会重新触发保存
-      if (isEpochCurrent(epoch)) originalConfig.value = baseline;
-      console.error("Save group config on close failed:", err);
-      
-      // 加固异常感知：通过 Toast 提示用户保存失败
-      notificationStore.addNotification({
-        type: "error",
-        title: `${draft.name || draft.id} 群组设置保存失败`,
-        message: err.toString() || "请重新打开设置后重试",
-        toastOnly: true,
-      });
+      originalConfig.value = cloneConfig(canonical);
+      retainedDrafts.delete(draft.id);
+      return true;
+    } catch (err) {
+      if (isOpenEditorCurrent(epoch, draft.id)) {
+        saveError.value = `保存失败，修改已保留：${String(err)}`;
+        retainDraft();
+      }
+      return false;
     } finally {
-      if (isEpochCurrent(epoch)) isSaving.value = false;
+      if (isOpenEditorCurrent(epoch, draft.id)) isSaving.value = false;
     }
+  })();
+  pendingSaves.set(draft.id, task);
+  try {
+    return await task;
+  } finally {
+    if (pendingSaves.get(draft.id) === task) pendingSaves.delete(draft.id);
   }
 };
 
-watch([() => props.isOpen, () => props.id], ([isOpen, id]) => {
+// Reuse OverlayStore's existing modal entry. System back stays on this page
+// until the frozen draft has been saved successfully.
+const requestClose = (): boolean => {
+  if (!mounted) return true;
+  if (!props.isOpen || isLeaving.value || isSaving.value || isDeleting.value) return false;
+  const epoch = editorEpoch;
+  const groupId = props.id;
+  isLeaving.value = true;
   cancelAvatarPicker();
+  closeSelection();
+  const save = isLoading.value || !groupConfig.value ? Promise.resolve(true) : saveChanges();
+  void save.then(saved => {
+    if (saved && isOpenEditorCurrent(epoch, groupId)) emit("close");
+  }).finally(() => {
+    if (isEpochCurrent(epoch)) isLeaving.value = false;
+  });
+  return false;
+};
+
+const discardAndClose = async () => {
+  if (disabled.value || !groupConfig.value) return;
+  const epoch = editorEpoch;
+  const groupId = props.id;
+  if (!await overlayStore.showConfirm({ title: "放弃修改", message: "放弃本次未保存的群组设置并返回？" })) return;
+  if (!isOpenEditorCurrent(epoch, groupId)) return;
+  retainedDrafts.delete(groupId);
+  originalConfig.value = cloneConfig(groupConfig.value);
+  emit("close");
+};
+
+const updateEditor = (isOpen: boolean, id: string) => {
+  retainDraft();
+  cancelAvatarPicker();
+  closeSelection();
   const epoch = ++editorEpoch;
+  isLeaving.value = false;
+  isDeleting.value = false;
   isPickingAvatar.value = false;
   isCropping.value = false;
+  showModelSelector.value = false;
+  showModeHelp.value = false;
   void releaseAvatarWorkingCopy();
   if (isOpen && id) {
-    groupConfig.value = createEmptyConfig(id);
+    groupConfig.value = null;
     originalConfig.value = null;
     isSaving.value = false;
-    saveSuccess.value = false;
-    fetchAgents();
+    saveError.value = "";
+    registerModal(`Page:groupSettings:${id}`, requestClose, undefined, requestClose);
     void fetchGroupConfig(epoch, id);
-  } else {
-    void startSaveOnClose(epoch);
   }
-}, { immediate: true });
+};
 
 const toggleMember = (agentId: string) => {
+  if (disabled.value || !groupConfig.value) return;
   const index = groupConfig.value.members.indexOf(agentId);
   if (index === -1) {
     groupConfig.value.members.push(agentId);
@@ -317,16 +352,19 @@ const toggleMember = (agentId: string) => {
     groupConfig.value.members.splice(index, 1);
     // 对齐 VChat：保留 memberTags，便于该 Agent 重新加入时恢复。
   }
+  normalizeSpeakerOrder();
 };
 
-const isMember = (agentId: string) => groupConfig.value.members.includes(agentId);
+const isMember = (agentId: string) => groupConfig.value?.members.includes(agentId) ?? false;
 
 const showModelSelector = ref(false);
 const onModelSelect = (modelId: string) => {
+  if (disabled.value || !groupConfig.value) return;
   groupConfig.value.unifiedModel = modelId;
 };
 
 const handleDelete = async () => {
+  if (disabled.value || !groupConfig.value) return;
   const epoch = editorEpoch;
   const groupId = groupConfig.value.id;
   if (!allowChatMutation({ ownerId: groupId, ownerType: "group" })) return;
@@ -336,6 +374,7 @@ const handleDelete = async () => {
     isDanger: true
   });
   if (confirmed && groupId && isOpenEditorCurrent(epoch, groupId)) {
+    isDeleting.value = true;
     try {
       if (!await assistantStore.deleteGroup(groupId)) return;
       if (!isOpenEditorCurrent(epoch, groupId)) return;
@@ -346,7 +385,8 @@ const handleDelete = async () => {
         sessionStore.clearConversation();
       }
       // 删除成功后关闭页面不再把当前草稿自动保存到墓碑实体。
-      originalConfig.value = JSON.parse(JSON.stringify(groupConfig.value));
+      retainedDrafts.delete(groupId);
+      originalConfig.value = cloneConfig(groupConfig.value);
       emit("close");
     } catch (err: any) {
       notificationStore.addNotification({
@@ -354,203 +394,272 @@ const handleDelete = async () => {
         message: "删除失败: " + (err?.message || err),
         toastOnly: true
       });
+    } finally {
+      if (isEpochCurrent(epoch)) isDeleting.value = false;
     }
   }
 };
 
 const modeOptions = [
-  { value: "sequential", label: "顺序发言", desc: "成员按预定顺序轮流发言" },
+  { value: "sequential", label: "顺序发言", desc: "每次发送后，成员按下方次序依次回复" },
   { value: "naturerandom", label: "自然随机", desc: "基于标签和 @提及智能选择发言者" },
   { value: "invite_only", label: "邀请发言", desc: "由用户手动点击或提示词邀约" },
-];
+  { value: "jev", label: "JEV 智能群聊", desc: "由 JEV 决定谁继续发言，以及何时自然结束" },
+] satisfies { value: GroupMode; label: string; desc: string }[];
 
 const tagModeOptions = [
   { value: "strict", label: "严格模式", desc: "原始行为，严格匹配标签" },
   { value: "natural", label: "自然模式", desc: "区分 Tag 来源，避免循环触发" },
 ];
 
+const modeName = (mode: string) => modeOptions.find(option => option.value === mode)?.label ?? `未知模式：${mode}`;
+const effectiveMode = computed(() => groupConfig.value?.modeOverride ?? groupConfig.value?.mode ?? "");
+const modeDescription = computed(() => modeOptions.find(option => option.value === effectiveMode.value)?.desc ?? "请选择本机使用的群聊模式。");
+const availableMembers = computed(() => {
+  const knownIds = new Set(allAgents.value.map(agent => agent.id));
+  return [
+    ...allAgents.value.map(agent => ({ ...agent, available: true })),
+    ...(groupConfig.value?.members ?? []).filter(id => !knownIds.has(id)).map(id => ({ id, name: id, available: false })),
+  ];
+});
+const selectedMembers = computed(() => (groupConfig.value?.members ?? []).map(id =>
+  availableMembers.value.find(agent => agent.id === id) ?? { id, name: id, available: false },
+));
+const orderedMembers = computed(() => {
+  const group = groupConfig.value;
+  if (!group) return [];
+  const members = new Set(group.members);
+  const order = [...new Set([...group.modeSettings.sequential.speakerOrder, ...group.members])].filter(id => members.has(id));
+  return order.map(id => selectedMembers.value.find(agent => agent.id === id)!);
+});
+const normalizeSpeakerOrder = () => {
+  if (groupConfig.value) groupConfig.value.modeSettings.sequential.speakerOrder = orderedMembers.value.map(agent => agent.id);
+};
+const moveMember = (index: number, offset: number) => {
+  if (disabled.value || !groupConfig.value) return;
+  const next = index + offset;
+  const order = orderedMembers.value.map(agent => agent.id);
+  if (next < 0 || next >= order.length) return;
+  [order[index], order[next]] = [order[next], order[index]];
+  groupConfig.value.modeSettings.sequential.speakerOrder = order;
+};
+
+let selectionMenu: ContextMenuConfig | null = null;
+const closeSelection = () => {
+  if (selectionMenu && overlayStore.contextMenuConfig === selectionMenu) overlayStore.closeContextMenu();
+  selectionMenu = null;
+};
+const openModeSelection = (event: MouseEvent) => {
+  const group = groupConfig.value;
+  if (disabled.value || !group) return;
+  const epoch = editorEpoch;
+  (event.currentTarget as HTMLElement).focus({ preventScroll: true });
+  const options = [
+    { value: null, label: `跟随群组（${modeName(group.mode)}）` },
+    ...modeOptions,
+  ];
+  const actions: OverlayActionItem[] = options.map(option => ({
+    label: option.label,
+    selected: group.modeOverride === option.value,
+    handler: () => {
+      if (disabled.value || !isOpenEditorCurrent(epoch, group.id) || overlayStore.contextMenuConfig?.actions !== actions) return;
+      group.modeOverride = option.value;
+    },
+  }));
+  overlayStore.openContextMenu(actions, "本机群聊模式");
+  selectionMenu = overlayStore.contextMenuConfig;
+};
+const openTagSelection = (event: MouseEvent) => {
+  const group = groupConfig.value;
+  if (disabled.value || !group) return;
+  const epoch = editorEpoch;
+  (event.currentTarget as HTMLElement).focus({ preventScroll: true });
+  const actions: OverlayActionItem[] = tagModeOptions.map(option => ({
+    label: option.label,
+    selected: group.tagMatchMode === option.value,
+    handler: () => {
+      if (disabled.value || !isOpenEditorCurrent(epoch, group.id) || overlayStore.contextMenuConfig?.actions !== actions) return;
+      group.tagMatchMode = option.value;
+    },
+  }));
+  overlayStore.openContextMenu(actions, "Tag 匹配模式");
+  selectionMenu = overlayStore.contextMenuConfig;
+};
+
+const jevNumericFields = [
+  { key: "maxSpeakersPerRound", title: "每轮最多发言人数", description: "一次裁决入选的成员数 K", min: 1, max: 32, step: 1 },
+  { key: "maxAutonomousRounds", title: "最多自治裁决轮数", description: "达到上限后结束本次自动讨论", min: 1, max: 100, step: 1 },
+  { key: "speakerThreshold", title: "发言权重阈值", description: "低于阈值的成员不进入本轮队列", min: 0, max: 1, step: 0.01 },
+  { key: "continueThreshold", title: "继续讨论阈值", description: "继续讨论的概率低于此值时结束", min: 0, max: 1, step: 0.01 },
+  { key: "stopThreshold", title: "结束选项阈值", description: "结束权重最高且达到此值时结束", min: 0, max: 1, step: 0.01 },
+  { key: "historyWindow", title: "JEV 裁决历史", description: "裁判读取的最近消息数，与成员模型上下文独立", min: 1, max: 200, step: 1 },
+  { key: "continueDebounceMs", title: "继续群聊防抖", description: "重复继续操作的间隔，单位 ms", min: 0, max: 10000, step: 100 },
+] as const;
+const validateDraft = (draft: EditableGroupConfig): string | null => {
+  if (!draft.name.trim()) return "请填写群组名称。";
+  if (draft.useUnifiedModel && !draft.unifiedModel.trim()) return "启用群组统一模型后，请选择一个模型。";
+  for (const field of jevNumericFields) {
+    const value = draft.modeSettings.jev[field.key];
+    if (!Number.isFinite(value) || value < field.min || value > field.max || (field.step >= 1 && !Number.isInteger(value))) {
+      return `${field.title}需填写 ${field.min}–${field.max} 之间的${field.step >= 1 ? "整数" : "数值"}。`;
+    }
+  }
+  if (!Number.isInteger(draft.contextMessageWindowSize) || draft.contextMessageWindowSize < 1 || draft.contextMessageWindowSize > 10000) {
+    return "成员模型上下文窗口需填写 1–10000 之间的整数。";
+  }
+  return null;
+};
+
 // 「群聊模式」帮助说明弹窗
 const showModeHelp = ref(false);
+watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpen, id), { immediate: true });
 </script>
 
 <template>
-  <SlidePage :is-open="props.isOpen" :z-index="props.zIndex">
-    <div class="group-settings-view flex flex-col h-full w-full bg-secondary-bg text-primary-text pointer-events-auto">
-      <!-- Header -->
-      <header
-        class="p-3 flex items-center justify-between border-b border-black/10 dark:border-white/10 pt-[calc(var(--vcp-safe-top,24px)+10px)] pb-3 shrink-0 bg-black/5 dark:bg-white/5">
-        <div class="flex items-center gap-2">
-          <button @click="emit('close')"
-            class="p-2 hover:bg-black/5 dark:hover:bg-white/10 rounded-lg active:scale-95 transition-all">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-              stroke-linecap="round" stroke-linejoin="round">
-              <line x1="19" y1="12" x2="5" y2="12"></line>
-              <polyline points="12 19 5 12 12 5"></polyline>
-            </svg>
-          </button>
-          <h2 class="text-base font-bold">群组设置</h2>
-        </div>
-        <div class="text-xs font-bold transition-opacity duration-300" :class="{
-          'opacity-100': isSaving || saveSuccess,
-          'opacity-0': !isSaving && !saveSuccess,
-        }">
-          <span v-if="isSaving" class="text-blue-400 animate-pulse">保存中...</span>
-          <span v-else-if="saveSuccess" class="text-green-500">已保存 ✅</span>
-        </div>
+  <SlidePage v-bind="$attrs" :is-open="props.isOpen" :z-index="props.zIndex" :inert="!props.isOpen"
+    :aria-hidden="!props.isOpen" aria-label="群组设置" role="dialog" :aria-modal="props.isOpen ? 'true' : undefined">
+    <div class="group-settings-view flex flex-col h-full w-full min-w-0 text-primary-text">
+      <header class="group-settings-header flex items-center gap-3 shrink-0 px-3 border-b border-[var(--border-color)]">
+        <button type="button" class="group-icon-button" :disabled="isSaving || isDeleting || isLeaving" aria-label="返回并保存群组设置" @click="requestClose">
+          <ArrowLeft :size="22" :stroke-width="1.8" aria-hidden="true" />
+        </button>
+        <h2 class="m-0 text-base font-semibold flex-1">群组设置</h2>
+        <span v-if="isSaving || isLeaving" role="status" class="text-xs text-[var(--secondary-text)]">保存中…</span>
       </header>
 
-      <div class="flex-1 overflow-y-auto p-5 space-y-8 pb-[calc(var(--vcp-safe-bottom,48px))] no-rubber-band">
-        <!-- 1. Basic Info -->
-        <section class="flex flex-col items-center gap-6 py-2">
-          <div class="relative group" @click="triggerFileInput">
-            <VcpAvatar
-              owner-type="group"
-              :owner-id="props.id"
-              :fallback-name="groupConfig.name"
-              size="w-24 h-24"
-              rounded="rounded-full"
-              :dominant-color="groupConfig.avatarCalculatedColor"
-              class="border-2 border-dashed border-black/10 dark:border-white/20 shadow-inner group-active:scale-95 transition-all"
-            />
-            <div
-              class="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 rounded-full flex items-center justify-center transition-opacity cursor-pointer z-20">
-              <span class="text-[10px] text-white font-bold tracking-widest uppercase">更换头像</span>
-            </div>
+      <SettingsCanvas viewport>
+        <p v-if="loadError" role="alert" class="m-0 text-sm text-red-500">
+          {{ loadError }}
+          <button type="button" class="group-text-button" :disabled="isLoading" @click="fetchGroupConfig(editorEpoch, props.id)">重试</button>
+        </p>
+        <p v-else-if="isLoading" role="status" class="m-0 text-sm text-[var(--secondary-text)]">正在加载群组设置…</p>
+        <div v-if="saveError" role="alert" class="flex flex-col gap-2">
+          <p class="m-0 text-sm text-red-500">{{ saveError }}</p>
+          <div class="flex gap-4">
+            <button type="button" class="group-text-button" :disabled="disabled" @click="saveChanges">重试保存</button>
+            <button type="button" class="group-text-button" :disabled="disabled" @click="discardAndClose">放弃修改并返回</button>
           </div>
-
-          <div class="w-full">
-            <label class="text-[11px] uppercase font-black tracking-widest opacity-40 mb-2 block text-center">群组名称</label>
-            <input v-model="groupConfig.name" placeholder="设置群组名称..."
-              class="bg-black/5 dark:bg-white/5 border border-black/5 dark:border-white/10 w-full rounded-2xl focus:border-blue-500/50 outline-none py-3.5 px-4 text-center text-lg font-bold transition-all text-primary-text shadow-sm" />
-          </div>
-        </section>
-
-        <!-- 2. Members Section -->
-        <SettingsSection title="群组成员" description="勾选要加入群组的助手，并设置其触发标签" :card="false" accent-color="bg-blue-500">
-          <!-- 成员多时容器限高滚动（max-h-80 = 5 行成员），避免列表无限拉长设置页 -->
-          <div class="card-modern !p-0 max-h-80 overflow-y-auto vcp-scrollable">
-            <div v-for="agent in allAgents" :key="agent.id"
-              class="flex items-center gap-3 p-3 border-b border-black/5 dark:border-white/5 last:border-0 active:bg-black/5 dark:active:bg-white/5 transition-all">
-              <input type="checkbox" :checked="isMember(agent.id)" @change="toggleMember(agent.id)"
-                class="w-5 h-5 rounded-md accent-blue-500 cursor-pointer" />
-
-              <VcpAvatar
-                owner-type="agent"
-                :owner-id="agent.id"
-                :fallback-name="agent.name"
-                size="w-10 h-10"
-                rounded="rounded-full"
-                dominant-color="var(--primary)"
-              />
-
-              <div class="flex-1 min-w-0">
-                <div class="text-sm font-bold truncate">{{ agent.name }}</div>
-                <div v-if="isMember(agent.id)" class="mt-1">
-                  <input v-model="groupConfig.memberTags[agent.id]" placeholder="设置触发标签..."
-                    class="w-full bg-black/5 dark:bg-white/5 rounded-lg px-2 py-1.5 text-[11px] outline-none border border-transparent focus:border-blue-500/30 transition-all font-mono" />
-                </div>
-              </div>
-            </div>
-          </div>
-        </SettingsSection>
-
-        <!-- 3. Chat Modes -->
-        <SettingsSection title="群聊模式" :card="false" accent-color="bg-purple-500">
-          <template #action>
-            <button
-              class="w-6 h-6 flex items-center justify-center rounded-full text-primary-text opacity-40 hover:opacity-80 active:text-blue-500 active:scale-90 transition-all"
-              aria-label="发言模式说明"
-              @click="showModeHelp = true"
-            >
-              <div class="i-heroicons-question-mark-circle text-lg"></div>
-            </button>
-          </template>
-          <div class="card-modern space-y-4">
-            <div>
-              <label class="text-[10px] uppercase font-bold opacity-40 mb-3 block">发言逻辑 (Mode)</label>
-              <div class="grid grid-cols-1 gap-2">
-                <button v-for="opt in modeOptions" :key="opt.value" @click="groupConfig.mode = opt.value"
-                  class="flex flex-col p-3 rounded-xl border transition-all text-left" :class="groupConfig.mode === opt.value
-                    ? 'bg-blue-500/10 border-blue-500/30 text-blue-500'
-                    : 'bg-black/5 dark:bg-white/5 border-transparent opacity-60'">
-                  <span class="text-sm font-bold">{{ opt.label }}</span>
-                  <span class="text-[10px] mt-0.5 opacity-60">{{ opt.desc }}</span>
-                </button>
-              </div>
-            </div>
-
-            <div class="pt-4 border-t border-black/5 dark:border-white/5">
-              <label class="text-[10px] uppercase font-bold opacity-40 mb-3 block">Tag 匹配模式</label>
-              <div class="flex gap-2">
-                <button v-for="opt in tagModeOptions" :key="opt.value" @click="groupConfig.tagMatchMode = opt.value"
-                  class="flex-1 py-2.5 rounded-xl border transition-all text-[12px] font-bold" :class="groupConfig.tagMatchMode === opt.value
-                    ? 'bg-purple-500/10 border-purple-500/30 text-purple-500'
-                    : 'bg-black/5 dark:bg-white/5 border-transparent opacity-60'">
-                  {{ opt.label }}
-                </button>
-              </div>
-              <p class="mt-2 text-[9px] opacity-30 leading-tight">
-                自然模式会区分 Tag 来源，尽量避免 Agent 因引用自身历史发言而重复触发。
-              </p>
-            </div>
-          </div>
-        </SettingsSection>
-
-        <!-- 4. Model Settings -->
-        <SettingsSection title="模型设置" :card="false" accent-color="bg-orange-500">
-          <div class="card-modern">
-            <SettingsRow title="启用群组统一模型" description="所有成员强制使用同一模型，忽略其各自配置">
-              <template #action>
-                <SettingsSwitch v-model="groupConfig.useUnifiedModel" />
-              </template>
-            </SettingsRow>
-
-            <div v-if="groupConfig.useUnifiedModel" class="mt-4 pt-4 border-t border-black/5 dark:border-white/5">
-              <label class="text-[10px] uppercase font-bold opacity-40 mb-2 block">选择群组统一模型</label>
-              <div class="flex gap-2">
-                <input v-model="groupConfig.unifiedModel" readonly @click="showModelSelector = true"
-                  class="flex-1 bg-black/5 dark:bg-white/5 rounded-xl px-4 py-3 text-sm outline-none font-mono cursor-pointer" />
-                <button @click="showModelSelector = true"
-                  class="w-12 h-12 bg-orange-500/10 text-orange-500 rounded-xl flex items-center justify-center active:scale-90 transition-all">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-                    stroke-linecap="round" stroke-linejoin="round">
-                    <path d="M8.25 15L12 18.75 15.75 15m-7.5-6L12 5.25 15.75 9"></path>
-                  </svg>
-                </button>
-              </div>
-            </div>
-          </div>
-        </SettingsSection>
-
-        <!-- 5. Prompts -->
-        <SettingsSection title="提示词设置" :card="false" accent-color="bg-green-500">
-          <div class="space-y-4">
-            <div class="card-modern">
-              <label class="text-[10px] uppercase font-bold opacity-40 mb-2 block">群组提示词 (Group Prompt)</label>
-              <textarea v-model="groupConfig.groupPrompt" placeholder="在这里输入群组的全局背景信息..."
-                class="w-full bg-black/5 dark:bg-white/5 rounded-xl p-3 text-sm outline-none min-h-[100px] resize-none focus:bg-black/10 transition-all leading-relaxed"></textarea>
-            </div>
-
-            <div class="card-modern">
-              <label class="text-[10px] uppercase font-bold opacity-40 mb-2 block">邀请提示词 (Invite Prompt)</label>
-              <textarea v-model="groupConfig.invitePrompt" placeholder="当轮到某位助手发言时的提示语..."
-                class="w-full bg-black/5 dark:bg-white/5 rounded-xl p-3 text-xs outline-none min-h-[80px] resize-none focus:bg-black/10 transition-all leading-relaxed font-mono"></textarea>
-              <p v-pre class="mt-2 text-[9px] opacity-30">使用 {{VCPChatAgentName}} 作为占位符。</p>
-            </div>
-          </div>
-        </SettingsSection>
-
-        <!-- Actions -->
-        <div class="pt-4 pb-8">
-          <button @click="handleDelete" :disabled="deleteBlockReason !== null"
-            class="w-full py-3.5 bg-transparent border border-red-500/20 text-red-500/60 enabled:hover:bg-red-500/5 enabled:active:bg-red-500/10 disabled:opacity-40 disabled:cursor-not-allowed transition-colors rounded-2xl font-black uppercase tracking-widest text-[11px]">
-            删除此群组
-          </button>
-          <p v-if="deleteBlockReason" class="mt-2 text-xs opacity-60">{{ deleteBlockReason }}</p>
         </div>
-      </div>
 
-      <ModelSelector v-model="showModelSelector" :current-model="groupConfig.unifiedModel" title="选择群组统一模型"
+        <template v-if="groupConfig">
+          <SettingsSection title="基础信息">
+            <div class="flex items-center gap-4">
+              <button type="button" class="group-avatar-button" :disabled="disabled || isPickingAvatar" aria-label="更换群组头像" @click="triggerFileInput">
+                <VcpAvatar owner-type="group" :owner-id="props.id" :fallback-name="groupConfig.name"
+                  size="w-14 h-14" rounded="rounded-full" :dominant-color="groupConfig.avatarCalculatedColor" />
+                <span class="text-xs text-[var(--secondary-text)]">{{ isPickingAvatar ? '选择中…' : '更换头像' }}</span>
+              </button>
+              <SettingsTextField v-model="groupConfig.name" label="群组名称" placeholder="填写群组名称" :disabled="disabled" />
+            </div>
+          </SettingsSection>
+
+          <SettingsSection title="群组成员" :description="`已加入 ${groupConfig.members.length} 位成员`">
+            <div class="group-members-list vcp-scrollable">
+              <label v-for="agent in availableMembers" :key="agent.id" class="group-member-row">
+                <input type="checkbox" :checked="isMember(agent.id)" :disabled="disabled" class="w-5 h-5 shrink-0 accent-blue-500" @change="toggleMember(agent.id)" />
+                <VcpAvatar owner-type="agent" :owner-id="agent.id" :fallback-name="agent.name" size="w-8 h-8" rounded="rounded-full" />
+                <span class="flex-1 min-w-0 break-words text-sm" :class="{ 'font-mono': !agent.available }">{{ agent.name }}</span>
+                <span v-if="!agent.available" class="text-xs text-[var(--secondary-text)]">不可用</span>
+              </label>
+            </div>
+            <p v-if="!availableMembers.length" class="group-note">暂无助手，请先创建助手再加入群组。</p>
+          </SettingsSection>
+
+          <SettingsSection title="群聊模式">
+            <template #action>
+              <button type="button" class="group-icon-button" aria-label="发言模式说明" @click="showModeHelp = true">
+                <HelpCircle :size="18" aria-hidden="true" />
+              </button>
+            </template>
+            <SettingsRow title="本机发言模式" :value="modeName(effectiveMode)" :description="modeDescription" clickable :disabled="disabled"
+              aria-haspopup="dialog" @click="openModeSelection" />
+            <p class="group-note">{{ groupConfig.modeOverride === null ? '当前跟随群组模式。在本机选择其他模式后，不会改变其他设备的发言方式。' : '已为本机单独选择模式；可在模式菜单中恢复跟随群组。' }}</p>
+
+            <div v-if="effectiveMode === 'sequential'">
+              <p class="group-note mb-2">按以下次序依次发言，新加入的成员排在末尾。</p>
+              <div v-for="(agent, index) in orderedMembers" :key="agent.id" class="group-member-row">
+                <span class="w-5 shrink-0 font-mono text-xs text-[var(--secondary-text)]">{{ index + 1 }}</span>
+                <span class="flex-1 min-w-0 break-words text-sm" :class="{ 'font-mono': !agent.available }">{{ agent.name }}</span>
+                <button type="button" class="group-icon-button" :disabled="disabled || index === 0" :aria-label="`上移 ${agent.name}`" @click="moveMember(index, -1)">
+                  <ArrowUp :size="18" aria-hidden="true" />
+                </button>
+                <button type="button" class="group-icon-button" :disabled="disabled || index === orderedMembers.length - 1" :aria-label="`下移 ${agent.name}`" @click="moveMember(index, 1)">
+                  <ArrowDown :size="18" aria-hidden="true" />
+                </button>
+              </div>
+              <p v-if="!orderedMembers.length" class="group-note">加入成员后可调整发言次序。</p>
+            </div>
+
+            <div v-else-if="effectiveMode === 'naturerandom'" class="flex flex-col gap-3">
+              <SettingsRow title="Tag 匹配模式" :value="tagModeOptions.find(option => option.value === groupConfig?.tagMatchMode)?.label"
+                description="自然模式区分 Tag 来源，减少历史引用导致的重复触发。" clickable :disabled="disabled" aria-haspopup="dialog" @click="openTagSelection" />
+              <SettingsTextField v-for="agent in selectedMembers" :key="agent.id" v-model="groupConfig.memberTags[agent.id]"
+                :label="`${agent.name} 的触发标签`" placeholder="多个标签用逗号分隔" :disabled="disabled" />
+            </div>
+
+            <div v-else-if="effectiveMode === 'jev'" class="flex flex-col gap-4">
+              <GroupSettingsTextArea v-model="groupConfig.modeSettings.jev.navigatorPrompt" label="JEV 导航员提示词" :disabled="disabled" :rows="5"
+                description="指导裁判安排成员发言和结束讨论；留空恢复内置规则。" />
+              <SettingsDisclosure title="成员发言风格" description="告诉 JEV 每位成员适合在什么话题或情境下回应" :disabled="disabled">
+                <div class="flex flex-col gap-4">
+                  <GroupSettingsTextArea v-for="agent in selectedMembers" :key="agent.id" :model-value="groupConfig.modeSettings.jev.memberStyles[agent.id] ?? ''"
+                    :label="agent.name" :rows="3" :disabled="disabled" placeholder="例如：熟悉技术细节，能补充新信息或被点名时积极回应，避免重复结论。"
+                    @update:model-value="groupConfig.modeSettings.jev.memberStyles[agent.id] = $event" />
+                  <p v-if="!selectedMembers.length" class="group-note">加入成员后可填写发言风格。</p>
+                </div>
+              </SettingsDisclosure>
+              <div>
+                <SettingsRow v-for="field in jevNumericFields.slice(0, 2)" :key="field.key" :title="field.title" :description="field.description">
+                  <template #action>
+                    <input v-model.number="groupConfig.modeSettings.jev[field.key]" type="number" inputmode="numeric" :min="field.min" :max="field.max" :step="field.step"
+                      :disabled="disabled" :aria-label="field.title" class="group-number-input" />
+                  </template>
+                </SettingsRow>
+              </div>
+              <SettingsDisclosure title="JEV 高级参数" description="裁决阈值、历史消息数与继续防抖" :disabled="disabled">
+                <SettingsRow v-for="field in jevNumericFields.slice(2)" :key="field.key" :title="field.title" :description="field.description">
+                  <template #action>
+                    <input v-model.number="groupConfig.modeSettings.jev[field.key]" type="number" :inputmode="field.step < 1 ? 'decimal' : 'numeric'"
+                      :min="field.min" :max="field.max" :step="field.step" :disabled="disabled" :aria-label="field.title" class="group-number-input" />
+                  </template>
+                </SettingsRow>
+              </SettingsDisclosure>
+              <p class="group-note">JEV 连接与密钥在全局设置的「JEV 决策」中配置。本群的发言策略只保存在本机。</p>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection title="成员模型">
+            <div>
+              <SettingsRow title="启用群组统一模型" description="所有成员使用同一聊天模型；JEV 裁判使用独立的服务配置。">
+                <template #action><SettingsSwitch v-model="groupConfig.useUnifiedModel" :disabled="disabled" aria-label="启用群组统一模型" /></template>
+              </SettingsRow>
+              <SettingsRow v-if="groupConfig.useUnifiedModel" title="统一模型" :value="groupConfig.unifiedModel || '请选择'" clickable :disabled="disabled"
+                @click="showModelSelector = true" />
+              <SettingsRow title="限制成员模型上下文" description="仅发送最近的消息，完整聊天记录仍会保存和显示。此项只在本机生效。">
+                <template #action><SettingsSwitch v-model="groupConfig.enableContextMessageWindow" :disabled="disabled" aria-label="限制成员模型上下文" /></template>
+              </SettingsRow>
+              <SettingsRow v-if="groupConfig.enableContextMessageWindow" title="最近消息数" description="包括用户与成员消息，与 JEV 裁决历史独立。">
+                <template #action>
+                  <input v-model.number="groupConfig.contextMessageWindowSize" type="number" inputmode="numeric" min="1" max="10000" step="1"
+                    :disabled="disabled" aria-label="成员模型上下文消息数" class="group-number-input" />
+                </template>
+              </SettingsRow>
+            </div>
+          </SettingsSection>
+
+          <SettingsSection title="提示词">
+            <GroupSettingsTextArea v-model="groupConfig.groupPrompt" label="群组提示词" placeholder="群组背景与整体对话要求" :disabled="disabled" />
+            <GroupSettingsTextArea v-model="groupConfig.invitePrompt" label="邀请提示词" placeholder="轮到成员发言时发送的提示语" :disabled="disabled" :rows="3" />
+            <template #footer><span v-pre>使用 {{VCPChatAgentName}} 作为被邀请成员的名字。</span></template>
+          </SettingsSection>
+
+          <p class="group-note">返回时自动保存。切换模式会保留其他模式的设置。</p>
+          <SettingsRow title="删除此群组" :description="deleteBlockReason ?? undefined" clickable danger
+            :disabled="disabled || deleteBlockReason !== null" @click="handleDelete" />
+        </template>
+      </SettingsCanvas>
+
+      <ModelSelector v-model="showModelSelector" :current-model="groupConfig?.unifiedModel ?? ''" title="选择群组统一模型"
         @select="onModelSelect" />
     </div>
   </SlidePage>
@@ -565,12 +674,19 @@ const showModeHelp = ref(false);
 .group-settings-view {
   background-color: var(--primary-bg);
 }
-
-.card-modern {
-  @apply bg-black/5 dark:bg-white/5 border border-black/5 dark:border-white/10 rounded-2xl p-4 shadow-sm;
-}
-
-textarea::-webkit-scrollbar {
-  display: none;
-}
+.group-settings-header { padding-top: var(--vcp-safe-top, 24px); padding-bottom: 8px; }
+.group-icon-button { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; padding: 8px; border: 0; border-radius: 8px; background: transparent; color: inherit; touch-action: manipulation; transition: opacity 120ms ease; }
+.group-icon-button:active, .group-avatar-button:active { opacity: 0.6; }
+.group-icon-button:disabled { opacity: 0.25; }
+.group-avatar-button { display: flex; align-items: center; flex-direction: column; flex-shrink: 0; gap: 6px; padding: 0; border: 0; background: transparent; touch-action: manipulation; }
+.group-avatar-button:disabled { opacity: 0.5; }
+.group-members-list { max-height: 320px; overflow-y: auto; }
+.group-member-row { display: flex; align-items: center; gap: 12px; min-height: 48px; padding-block: 4px; }
+.group-member-row + .group-member-row { border-top: 1px solid var(--settings-row-divider, var(--border-color)); }
+.group-note { margin: 0; font-size: 12px; line-height: 1.6; color: var(--secondary-text); }
+.group-text-button { align-self: flex-start; min-height: 44px; padding: 6px 0; border: 0; background: transparent; color: var(--secondary-text); font-size: 12px; text-decoration: underline; touch-action: manipulation; }
+.group-text-button:disabled { opacity: 0.5; }
+.group-number-input { width: 88px; max-width: 100%; min-height: 44px; padding: 8px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--input-bg, transparent); color: var(--primary-text); font-family: monospace; font-size: var(--settings-input-font-size, 16px); text-align: right; }
+.group-number-input:disabled { opacity: 0.5; }
+.group-number-input:focus-visible, .group-icon-button:focus-visible { outline: 2px solid var(--highlight-text, var(--primary-text)); outline-offset: 2px; }
 </style>

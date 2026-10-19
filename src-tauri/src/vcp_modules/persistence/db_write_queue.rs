@@ -785,6 +785,57 @@ mod tests {
     }
 
     #[test]
+    fn sync_group_upsert_preserves_local_mode_and_parameters() {
+        let mut connection =
+            rusqlite::Connection::open_in_memory().expect("open group sync database");
+        connection
+            .execute_batch(include_str!("../../../migrations/0100_baseline_v2.sql"))
+            .expect("create shared schema");
+        connection
+            .execute_batch(include_str!(
+                "../../../migrations/0104_group_local_settings.sql"
+            ))
+            .expect("create local settings schema");
+        let mut local = crate::vcp_modules::group_types::GroupLocalSettings::default();
+        local.mode_override = Some("jev".into());
+        local.mode_settings.sequential.speaker_order = vec!["b".into(), "a".into()];
+        local.mode_settings.jev.history_window = 23;
+        let raw = serde_json::to_string(&local).expect("encode local settings");
+        connection
+            .execute(
+                "INSERT INTO group_local_settings VALUES('group',?1,7)",
+                [&raw],
+            )
+            .expect("import preferences before remote owner exists");
+        let dto: GroupSyncDTO = serde_json::from_value(serde_json::json!({
+            "name":"Remote group","members":["a","b"],"mode":"sequential",
+            "useUnifiedModel":false,"createdAt":1
+        }))
+        .expect("decode existing sync DTO");
+        let transaction = connection.transaction().expect("begin sync write");
+        DbWriteQueue::rusqlite_upsert_group(&transaction, "group", &dto)
+            .expect("actual sync group writer");
+        transaction.commit().expect("commit sync group");
+        let stored: (String, i64) = connection
+            .query_row(
+                "SELECT settings_json,updated_at FROM group_local_settings WHERE group_id='group'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read preserved local state");
+        assert_eq!(stored, (raw, 7));
+        let (mode, hash): (String, String) = connection
+            .query_row(
+                "SELECT mode,config_hash FROM groups WHERE group_id='group'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read remote shared state");
+        assert_eq!(mode, "sequential");
+        assert_eq!(hash, HashAggregator::compute_group_config_hash(&dto));
+    }
+
+    #[test]
     fn sync_entity_upserts_never_rewrite_tombstones_or_children() {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open test database");
         conn.execute_batch(include_str!("../../../migrations/0100_baseline_v2.sql"))

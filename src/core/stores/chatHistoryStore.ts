@@ -552,6 +552,29 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   const inviteGroupMember = (agentId: string, frozenKey?: ConversationKey) =>
     inviteGroupMembers([agentId], frozenKey);
 
+  /** 只提交用户意图；会话、仲裁和后续成员始终由 Rust 群轮 owner 执行。 */
+  const controlGroupSession = async (action: "start" | "continue") => {
+    const key = captureLoadedConversation();
+    if (!key || key.ownerType !== "group") return;
+    const releaseOperation = streamStore.beginConversationOperation(key.ownerId, "group", key.topicId);
+    try {
+      await invoke<GroupChatResultDto>("control_group_session", {
+        payload: { groupId: key.ownerId, topicId: key.topicId, action },
+        streamChannel: makeStreamChannel(key),
+      });
+    } catch (error) {
+      notificationStore.addNotification({
+        type: "error",
+        title: action === "start" ? "发起群聊失败" : "继续群聊失败",
+        message: errorMessage(error),
+        toastOnly: true,
+        duration: 6000,
+      });
+    } finally {
+      releaseOperation();
+    }
+  };
+
   /**
    * 触发 AI 生成逻辑
    */
@@ -1133,6 +1156,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     returnToLatest,
     resetHistoryForConversation,
     sendMessage,
+    controlGroupSession,
     mergePersistedVoiceMessage,
     reconcileVoiceHistory,
     deleteMessage,

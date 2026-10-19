@@ -2,7 +2,12 @@ use super::schema;
 use super::{read_config_snapshot, ConfigDomain, ConfigSnapshot, DomainHealth, SettingsState};
 use serde::Serialize;
 use serde_json::{Map, Value};
-use tauri::{AppHandle, Runtime, State};
+use tauri::{AppHandle, Manager, Runtime, State};
+use std::collections::BTreeMap;
+use crate::vcp_modules::group::{
+    group_service,
+    group_types::{GroupLocalSettings, GroupLocalSettingsPatch},
+};
 use tokio::io::AsyncReadExt;
 
 const MAX_CONFIG_BACKUP_BYTES: u64 = 1024 * 1024;
@@ -12,6 +17,7 @@ const MAX_CONFIG_BACKUP_BYTES: u64 = 1024 * 1024;
 pub struct ParsedConfigBackup {
     domains: Map<String, Value>,
     preferences: Map<String, Value>,
+    group_preferences: BTreeMap<String, GroupLocalSettingsPatch>,
     exported_at: String,
 }
 
@@ -213,6 +219,7 @@ fn parse_v1_backup(raw: &Value) -> Result<ParsedConfigBackup, String> {
         domains,
         // v1 never owned UI preferences; even unexpected preferences are ignored.
         preferences: Map::new(),
+        group_preferences: BTreeMap::new(),
         exported_at: raw["exportedAt"].as_str().unwrap_or_default().to_string(),
     })
 }
@@ -235,7 +242,7 @@ fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
         object.keys().any(|key| {
             !matches!(
                 key.as_str(),
-                "app" | "kind" | "version" | "exportedAt" | "domains" | "preferences"
+                "app" | "kind" | "version" | "exportedAt" | "domains" | "preferences" | "groupPreferences"
             )
         })
     }) {
@@ -264,6 +271,10 @@ fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
     Ok(ParsedConfigBackup {
         domains,
         preferences: parse_backup_preferences(raw.get("preferences"))?,
+        group_preferences: match raw.get("groupPreferences") {
+            Some(value) => group_service::parse_group_local_settings_backup(value)?,
+            None => BTreeMap::new(),
+        },
         exported_at: raw["exportedAt"].as_str().unwrap_or_default().to_string(),
     })
 }
@@ -344,6 +355,13 @@ fn backup_domains(snapshot: &ConfigSnapshot) -> Result<Map<String, Value>, Strin
     Ok(domains)
 }
 
+#[tauri::command]
+pub async fn export_group_preferences<R: Runtime>(
+    app: AppHandle<R>,
+) -> Result<BTreeMap<String, GroupLocalSettings>, String> {
+    group_service::export_group_local_settings(&app.state::<crate::vcp_modules::db_manager::DbState>().pool).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{DomainStatus, FieldIssue, Settings};
@@ -376,6 +394,42 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn group_backup_parser_preserves_only_supplied_nested_fields_and_explicit_empty_values() {
+        let patches = json!({
+            "group-a": {
+                "modeOverride":null,
+                "enableContextMessageWindow":false,
+                "modeSettings":{
+                    "sequential":{"speakerOrder":[]},
+                    "jev":{"navigatorPrompt":"","memberStyles":{}}
+                }
+            }
+        });
+        let bytes = serde_json::to_vec(&json!({
+            "app":"vcp-mobile", "kind":"vcp-mobile-settings-backup", "version":2,
+            "domains":{}, "groupPreferences":patches,
+        })).unwrap();
+        let parsed = parse_backup_bytes(&bytes).unwrap();
+        assert_eq!(serde_json::to_value(parsed.group_preferences).unwrap(), patches);
+        assert!(parsed.domains.is_empty());
+    }
+
+    #[test]
+    fn jev_credentials_and_provider_choice_round_trip_as_local_configuration() {
+        let mut snapshot = snapshot();
+        snapshot.data.jev.enabled = true;
+        snapshot.data.jev.provider = super::super::JevProvider::Openrouter;
+        snapshot.data.jev.typesafe.api_key = "official-key".into();
+        snapshot.data.jev.openrouter.api_key = "router-key".into();
+        let domains = backup_domains(&snapshot).unwrap();
+        let parsed = parse_backup_bytes(&backup(domains.into())).unwrap();
+        assert_eq!(parsed.domains["jev"]["provider"], "openrouter");
+        assert_eq!(parsed.domains["jev"]["typesafe"]["apiKey"], "official-key");
+        assert_eq!(parsed.domains["jev"]["openrouter"]["apiKey"], "router-key");
+        assert!(parsed.group_preferences.is_empty());
     }
 
     #[test]

@@ -28,6 +28,12 @@ export const VOICE_FIELDS = [
 
 export const VOICE_STYLE_GUIDANCE_FIELDS = ["voice.guidance.audioTagRules", "voice.guidance.autoGuidance", "voice.guidance.guidanceRules"] as const;
 
+export const JEV_FIELDS = [
+  'jev.enabled', 'jev.provider', 'jev.typesafe.apiUrl', 'jev.typesafe.apiKey', 'jev.typesafe.model',
+  'jev.openrouter.apiUrl', 'jev.openrouter.apiKey', 'jev.openrouter.model',
+  'jev.timeoutMs', 'jev.maxRetries', 'jev.retryBaseDelayMs', 'jev.proxyUrl', 'jev.httpReferer', 'jev.appTitle',
+] as const;
+
 export type SettingsEditableKey = SettingsFieldPath;
 
 export type IdentityFields = Pick<SettingsFieldValues, (typeof IDENTITY_FIELDS)[number]>;

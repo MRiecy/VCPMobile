@@ -63,6 +63,46 @@ impl VoiceTtsMode {
     pub const ALL: [Self; 2] = [Self::Builtin, Self::Clone];
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "config-export", derive(ts_rs::TS))]
+#[serde(rename_all = "lowercase")]
+pub enum JevProvider {
+    #[default]
+    Typesafe,
+    Openrouter,
+}
+
+impl JevProvider {
+    pub const ALL: [Self; 2] = [Self::Typesafe, Self::Openrouter];
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "config-export", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct JevProviderConfig {
+    pub api_url: String,
+    pub api_key: String,
+    pub model: String,
+}
+
+impl JevProviderConfig {
+    fn typesafe() -> Self {
+        Self {
+            api_url: "https://api.typesafe.ai/v1/systemone".into(),
+            api_key: String::new(),
+            model: "jev-latest".into(),
+        }
+    }
+
+    fn openrouter() -> Self {
+        Self {
+            api_url: "https://openrouter.ai/api/alpha/decisions".into(),
+            api_key: String::new(),
+            model: "~typesafe/jev-latest".into(),
+        }
+    }
+}
+
 // Serde's struct-level default uses exactly the same source as new installs and
 // field recovery; there are no separate per-field deserialization defaults.
 macro_rules! config_struct {
@@ -140,6 +180,28 @@ config_struct!(NavigationConfig {
     agent_order: Vec<String> = Vec::new(),
     group_order: Vec<String> = Vec::new(),
 });
+config_struct!(JevConfig {
+    enabled: bool = false,
+    provider: JevProvider = JevProvider::default(),
+    typesafe: JevProviderConfig = JevProviderConfig::typesafe(),
+    openrouter: JevProviderConfig = JevProviderConfig::openrouter(),
+    timeout_ms: u32 = 30_000,
+    max_retries: u32 = 2,
+    retry_base_delay_ms: u32 = 500,
+    proxy_url: String = String::new(),
+    http_referer: String = String::new(),
+    app_title: String = "VCPMobile".into(),
+});
+
+impl JevConfig {
+    pub fn active_provider(&self) -> &JevProviderConfig {
+        match self.provider {
+            JevProvider::Typesafe => &self.typesafe,
+            JevProvider::Openrouter => &self.openrouter,
+        }
+    }
+}
+
 config_struct!(Settings {
     identity: IdentityConfig = IdentityConfig::default(),
     server: ServerConfig = ServerConfig::default(),
@@ -148,6 +210,7 @@ config_struct!(Settings {
     distributed: DistributedConfig = DistributedConfig::default(),
     conversation: ConversationConfig = ConversationConfig::default(),
     voice: VoiceConfig = VoiceConfig::default(),
+    jev: JevConfig = JevConfig::default(),
     navigation: NavigationConfig = NavigationConfig::default(),
 });
 
@@ -168,11 +231,12 @@ pub enum ConfigDomain {
     Distributed,
     Conversation,
     Voice,
+    Jev,
     Navigation,
 }
 
 impl ConfigDomain {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Identity,
         Self::Server,
         Self::Log,
@@ -180,6 +244,7 @@ impl ConfigDomain {
         Self::Distributed,
         Self::Conversation,
         Self::Voice,
+        Self::Jev,
         Self::Navigation,
     ];
 
@@ -192,6 +257,7 @@ impl ConfigDomain {
             Self::Distributed => "distributed",
             Self::Conversation => "conversation",
             Self::Voice => "voice",
+            Self::Jev => "jev",
             Self::Navigation => "navigation",
         }
     }
@@ -267,8 +333,6 @@ pub struct DomainPatch {
     pub expected_revision: String,
     pub changes: serde_json::Map<String, serde_json::Value>,
     pub base_values: serde_json::Map<String, serde_json::Value>,
-    #[serde(default)]
-    pub repair: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
@@ -276,6 +340,14 @@ pub struct DomainPatch {
 #[serde(rename_all = "camelCase")]
 pub struct ConfigUpdate {
     pub patches: Vec<DomainPatch>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "config-export", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigReset {
+    pub domain: ConfigDomain,
+    pub expected_revision: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]

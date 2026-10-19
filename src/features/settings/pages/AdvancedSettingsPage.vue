@@ -32,8 +32,7 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
 
 <template>
   <div class="flex flex-col gap-6">
-    <SettingsDomainIssues :domains="session.domainIssues.value" :errors="session.fieldErrors.value" :fields="SUMMARY_FIELDS"
-      :disabled="disabled || session.saving.value" :repair="session.repairDomain" @reset="session.resetField" />
+    <SettingsDomainIssues :domains="session.domainIssues.value" :errors="session.fieldErrors.value" :fields="SUMMARY_FIELDS" />
     <p v-if="error" role="alert" class="text-sm text-red-500 break-words">
       {{ error }}
       <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading" @click="reload">重试</button>

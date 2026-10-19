@@ -11,8 +11,9 @@ use crate::vcp_modules::chat::voice_service::VoiceReplyPolicy;
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_chat_application_service::{
-    process_prepared_group_chat_message, GroupChatParams,
+    process_prepared_group_chat_message, submit_group_session_input, GroupChatParams,
 };
+use crate::vcp_modules::group::group_session::GroupInputReservation;
 use crate::vcp_modules::group_service::GroupManagerState;
 use crate::vcp_modules::message_service::{self, MessageWriteResultDto};
 use crate::vcp_modules::settings_manager::{read_config, SettingsState};
@@ -29,6 +30,7 @@ use tokio_util::sync::CancellationToken;
 enum PreparedChatOwner {
     Agent(PreparedAgentRequest),
     Group(ActiveGroupTurnLease),
+    GroupSession(GroupInputReservation),
 }
 
 pub(crate) struct PreparedVoiceSubmission {
@@ -63,13 +65,16 @@ pub(crate) fn prepare_voice_submission(
         ..Default::default()
     };
     let owner = if target.owner_type == "group" {
-        let turn = app.state::<ActiveGroupTurns>().try_acquire_with_cancellation(
-            target.clone(),
-            cancellation.clone(),
-        )?;
-        turn.set_origin_user_message(&message.id)?;
-        turn.bind_optional_output(app, None)?;
-        PreparedChatOwner::Group(turn)
+        if let Some(session) = app.state::<ActiveGroupTurns>().session(&target) {
+            PreparedChatOwner::GroupSession(session.reserve_with_cancellation(cancellation.clone())?)
+        } else {
+            // The session's hard stop and this voice origin have separate
+            // lifetimes once a later typed input joins the same JEV session.
+            let turn = app.state::<ActiveGroupTurns>().try_acquire(target.clone())?;
+            turn.set_origin_user_message(&message.id)?;
+            turn.bind_optional_output(app, None)?;
+            PreparedChatOwner::Group(turn)
+        }
     } else {
         let request = PreparedAgentRequest::acquire(
             app,
@@ -134,6 +139,10 @@ impl PreparedVoiceSubmission {
                 )
                 .await
             }
+            PreparedChatOwner::GroupSession(reservation) => {
+                let scope = submit_group_session_input(&app, reservation, &message, Some(reply_policy), cancellation).await?;
+                scope.wait().await
+            }
             PreparedChatOwner::Group(turn) => {
                 process_prepared_group_chat_message(
                     app.clone(),
@@ -151,6 +160,7 @@ impl PreparedVoiceSubmission {
                     },
                     false,
                     Some(reply_policy),
+                    Some(cancellation),
                 )
                 .await
             }

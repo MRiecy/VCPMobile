@@ -69,6 +69,10 @@ impl DeleteExecutor {
 
         let active_ids = soft_delete_topic_data(&db, key, deleted_at).await?;
 
+        if let Some(turns) = app.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>() {
+            turns.cancel(key);
+        }
+
         // Cancellation is intentionally post-commit: late finalizers already require the
         // active row, so the durable tombstone remains the authority if cancellation races.
         for key in active_ids {
@@ -104,6 +108,9 @@ impl DeleteExecutor {
         let active_ids =
             crate::vcp_modules::message_service::apply_sync_message_tombstones(&db, key, &writes)
                 .await?;
+        if let Some(turns) = app.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>() {
+            turns.notify_history_changed(key);
+        }
         for active_id in active_ids {
             crate::vcp_modules::vcp_client::discard_deleted_generation(
                 app,

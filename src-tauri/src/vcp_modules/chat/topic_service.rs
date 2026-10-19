@@ -273,6 +273,10 @@ pub async fn delete_topic(
         return Ok(None);
     }
 
+    // 仲裁阶段可能尚未创建活动消息，不能只靠下方 active_messages 取消。
+    if let Some(turns) = app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>() {
+        turns.cancel(&key);
+    }
     for message_key in deletion.active_messages {
         crate::vcp_modules::vcp_client::discard_deleted_generation(&app_handle, &message_key).await;
     }
@@ -863,7 +867,7 @@ pub async fn regenerate_topic_response(
                 owner_id.clone(),
             )
             .await?;
-            match group_config.mode.as_str() {
+            match group_config.effective_mode() {
                 "sequential" | "naturerandom" => {}
                 "invite_only" => {
                     return Err("邀请发言群组不能使用自动重新生成，请直接邀请成员发言".to_string())

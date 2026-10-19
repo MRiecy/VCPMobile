@@ -290,6 +290,10 @@ describe('连接设置页与真实编辑会话的集成', () => {
       persisted = applyRequest(persisted, args?.request as ConfigUpdate);
       return { status: 'saved', snapshot: persisted };
     });
+    mockInvoke('import_settings_backup', (args) => {
+      persisted = applyRequest(persisted, args?.request as ConfigUpdate);
+      return { status: 'saved', snapshot: persisted };
+    });
     return render(ConnectionSettingsPage, { active: true });
   }
 
@@ -307,14 +311,34 @@ describe('连接设置页与真实编辑会话的集成', () => {
     await confirmImport(wrapper);
     await flushPromises();
 
-    expect(callsFor('update_settings')).toEqual([['update_settings', { request: { patches: [{ domain: 'server', expectedRevision: '1', changes: { apiKey: 'imported-key' }, baseValues: { apiKey: 'draft-key' }, repair: false }] } }]]);
+    expect(callsFor('import_settings_backup')).toEqual([['import_settings_backup', { request: { patches: [{ domain: 'server', expectedRevision: '1', changes: { apiKey: 'imported-key' }, baseValues: { apiKey: 'draft-key' } }] }, groupPreferences: {} }]]);
     expect((field(wrapper, 'API Key').element as HTMLInputElement).value).toBe('imported-key');
     expect((field(wrapper, 'Mobile Sync Token').element as HTMLInputElement).value).toBe('unsubmitted-token');
     expect(useSettingsStore().settings?.sync.token).toBe('');
 
     expect(await (wrapper.vm as unknown as { beforeLeave(): Promise<boolean> }).beforeLeave()).toBe(true);
     const updates = callsFor('update_settings');
-    expect(updates[updates.length - 1]).toEqual(['update_settings', { request: { patches: [{ domain: 'sync', expectedRevision: '1', changes: { token: 'unsubmitted-token' }, baseValues: { token: '' }, repair: false }] } }]);
+    expect(updates[updates.length - 1]).toEqual(['update_settings', { request: { patches: [{ domain: 'sync', expectedRevision: '1', changes: { token: 'unsubmitted-token' }, baseValues: { token: '' } }] } }]);
+  });
+
+  it('群本机设置按字段恢复，确认后原样提交部分字段并刷新群列表', async () => {
+    const groupPreferences = { 'group-a': { modeSettings: { jev: { historyWindow: 25 } } } };
+    mockInvoke('plugin:vcp-mobile|pick_file', () => ({ path: 'tests/fixtures/group-partial.vcpcfg' }));
+    mockInvoke('parse_config_backup', () => ({ domains: {}, groupPreferences, exportedAt: '' }));
+    mockInvoke('get_assistants_snapshot', () => ({ agents: [], groups: [], unreadCounts: {} }));
+    const wrapper = renderPage();
+    await flushPromises();
+    await action(wrapper, '导入').get('button').trigger('click');
+    await flushPromises();
+    expect(wrapper.get('[role="dialog"]').text()).toContain('按字段恢复，缺项保留当前值');
+    expect(wrapper.get('[role="dialog"]').text()).not.toContain('整组恢复');
+    await confirmImport(wrapper);
+    await flushPromises();
+    expect(callsFor('import_settings_backup')).toEqual([
+      ['import_settings_backup', { request: { patches: [] }, groupPreferences }],
+    ]);
+    expect(callsFor('get_assistants_snapshot')).toHaveLength(1);
+    expect(wrapper.text()).toContain('配置导入成功');
   });
 
   it('导入应用期间冻结本页动作；失败后恢复输入并保留原草稿', async () => {
@@ -324,7 +348,7 @@ describe('连接设置页与真实编辑会话的集成', () => {
     await flushPromises();
     await field(wrapper, 'API Key').setValue('unsubmitted-key');
     const updating = deferred<ConfigSaveResult>();
-    mockInvoke('update_settings', () => updating.promise);
+    mockInvoke('import_settings_backup', () => updating.promise);
     await action(wrapper, '导入').get('button').trigger('click');
     await flushPromises();
     await confirmImport(wrapper);
@@ -332,7 +356,7 @@ describe('连接设置页与真实编辑会话的集成', () => {
 
     expect(field(wrapper, 'API Key').attributes()).toHaveProperty('disabled');
     expect(await (wrapper.vm as unknown as { beforeLeave(): Promise<boolean> }).beforeLeave()).toBe(false);
-    expect(callsFor('update_settings')).toHaveLength(1);
+    expect(callsFor('import_settings_backup')).toHaveLength(1);
     updating.reject(new Error('导入写入失败'));
     await flushPromises();
 

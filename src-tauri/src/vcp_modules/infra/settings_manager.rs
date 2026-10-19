@@ -6,7 +6,7 @@ mod repository;
 pub mod schema;
 pub mod types;
 
-pub use backup::{export_config_domains, parse_config_backup};
+pub use backup::{export_config_domains, export_group_preferences, parse_config_backup};
 pub use repository::SettingsState;
 pub use types::*;
 
@@ -52,29 +52,82 @@ pub async fn update_settings<R: Runtime>(
         .apply(
             app_handle.state::<DbState>().inner(),
             request,
+            move |old, snapshot| settings_committed(app, old, snapshot),
+        )
+        .await
+}
+
+#[tauri::command]
+pub async fn import_settings_backup<R: Runtime>(
+    app_handle: AppHandle<R>,
+    state: State<'_, SettingsState>,
+    request: ConfigUpdate,
+    group_preferences: serde_json::Value,
+) -> Result<ConfigSaveResult, String> {
+    let preferences =
+        crate::vcp_modules::group::group_service::parse_group_local_settings_backup(&group_preferences)?;
+    let group_ids: Vec<_> = preferences.keys().cloned().collect();
+    let app = app_handle.clone();
+    state
+        .import_backup(
+            app_handle.state::<DbState>().inner(),
+            request,
+            preferences,
             move |old, snapshot| {
-                let _ = app.emit("vcp-config-changed", snapshot.as_ref());
-                let changes = classify_runtime_settings_changes(Some(&old), &snapshot.data);
-                let flags = u8::from(changes.vcp_log_changed)
-                    | (u8::from(changes.distributed_reconcile_required) << 1);
-                if flags != 0 {
-                    // The mock/host exporter need not install the concrete mobile handle.
-                    if let Some(concrete) = app.try_state::<tauri::AppHandle>() {
-                        let concrete_app = concrete.inner().clone();
-                        let state = app.state::<SettingsState>();
-                        let generation = state.reserve_runtime_reconcile(flags);
-                        tauri::async_runtime::spawn(reconcile_current_runtime_settings(
-                            concrete_app,
-                            generation,
-                        ));
+                if let Some(groups) = app.try_state::<crate::vcp_modules::group::group_service::GroupManagerState>() {
+                    groups.invalidate_cache();
+                }
+                if let Some(turns) = app.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>() {
+                    for id in &group_ids {
+                        turns.notify_group_changed(id);
                     }
                 }
-                tauri::async_runtime::spawn(async move {
-                    release_replaced_voice_sample(&app, &old, &snapshot.data).await;
-                });
+                settings_committed(app, old, snapshot);
             },
         )
         .await
+}
+
+#[tauri::command]
+pub async fn reset_settings_domain<R: Runtime>(
+    app_handle: AppHandle<R>,
+    state: State<'_, SettingsState>,
+    request: ConfigReset,
+) -> Result<ConfigSaveResult, String> {
+    let app = app_handle.clone();
+    state
+        .reset(
+            app_handle.state::<DbState>().inner(),
+            request,
+            move |old, snapshot| settings_committed(app, old, snapshot),
+        )
+        .await
+}
+
+fn settings_committed<R: Runtime>(
+    app: AppHandle<R>,
+    old: Arc<Settings>,
+    snapshot: Arc<ConfigSnapshot>,
+) {
+    let _ = app.emit("vcp-config-changed", snapshot.as_ref());
+    let changes = classify_runtime_settings_changes(Some(&old), &snapshot.data);
+    let flags =
+        u8::from(changes.vcp_log_changed) | (u8::from(changes.distributed_reconcile_required) << 1);
+    if flags != 0 {
+        // The mock/host exporter need not install the concrete mobile handle.
+        if let Some(concrete) = app.try_state::<tauri::AppHandle>() {
+            let concrete_app = concrete.inner().clone();
+            let state = app.state::<SettingsState>();
+            let generation = state.reserve_runtime_reconcile(flags);
+            tauri::async_runtime::spawn(reconcile_current_runtime_settings(
+                concrete_app,
+                generation,
+            ));
+        }
+    }
+    tauri::async_runtime::spawn(async move {
+        release_replaced_voice_sample(&app, &old, &snapshot.data).await;
+    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

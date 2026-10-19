@@ -77,7 +77,7 @@ macro_rules! app_command_handler {
             forum_create_post, forum_delete, forum_get_post, forum_list_posts, forum_reply,
         };
         use crate::vcp_modules::group_chat_application_service::{
-            handle_group_chat_message, invite_group_member_to_speak,
+            control_group_session, handle_group_chat_message, invite_group_member_to_speak,
         };
         use crate::vcp_modules::group_service::{
             create_group, delete_group, get_groups, read_group_config, save_group_config,
@@ -106,7 +106,9 @@ macro_rules! app_command_handler {
             toggle_favorite_model,
         };
         use crate::vcp_modules::settings_manager::{
-            export_config_domains, parse_config_backup, read_settings, update_settings,
+            export_config_domains, export_group_preferences, import_settings_backup,
+            parse_config_backup, read_settings, reset_settings_domain,
+            update_settings,
         };
         use crate::vcp_modules::infra::share_inbox::{
             accept_android_share, bind_current_share, commit_share_message, discard_current_share,
@@ -240,6 +242,7 @@ macro_rules! app_command_handler {
                 create_group,
                 delete_group,
                 get_groups,
+                control_group_session,
                 handle_group_chat_message,
                 invite_group_member_to_speak,
                 read_group_config,
@@ -254,9 +257,12 @@ macro_rules! app_command_handler {
                 toggle_rule_enabled,
                 // ── 设置（settings_manager）──
                 export_config_domains,
+                export_group_preferences,
+                import_settings_backup,
                 parse_config_backup,
                 read_settings,
                 update_settings,
+                reset_settings_domain,
                 // ── 日记（diary）──
                 diary_cancel_search,
                 diary_cancel_semantic_search,

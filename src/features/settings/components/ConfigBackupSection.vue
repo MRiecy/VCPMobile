@@ -8,6 +8,7 @@ import VcpConfirm from "../../../components/ui/VcpConfirm.vue";
 import {
   exportConfigBackup,
   captureBackupDomains,
+  captureBackupGroupPreferences,
   pickConfigBackup,
   configBackupScopes,
   unavailableBackupTheme,
@@ -41,10 +42,10 @@ const onExport = async () => {
     const saved = await props.commit();
     if (disposed || !props.active) return;
     if (!saved.ok) throw new Error(saved.error);
-    const domains = await captureBackupDomains();
+    const [domains, groupPreferences] = await Promise.all([captureBackupDomains(), captureBackupGroupPreferences()]);
     if (disposed || !props.active) return;
     exportOperationId = `config_export_${crypto.randomUUID()}`;
-    const result = await exportConfigBackup(domains, exportOperationId);
+    const result = await exportConfigBackup(domains, exportOperationId, groupPreferences);
     if (disposed || !props.active) return;
     exportStatus.value = {
       type: "success",
@@ -73,6 +74,7 @@ const importConfirmation = computed(() => {
   if (!backup) return '';
   const missing = unavailableBackupTheme(backup);
   return `将覆盖备份中包含的配置：${configBackupScopes(backup).join('、')}。未包含的设置保持当前值。`
+    + (Object.keys(backup.groupPreferences ?? {}).length ? '\n\n群聊本机设置按字段恢复，缺项保留当前值；尚无本机配置时，缺项使用默认值。已删除的群组不会恢复。' : '')
     + (missing === null ? '' : `\n\n主题 ${missing} 在当前版本不可用，将保留当前主题与深浅模式。`)
     + `\n\n备份导出时间：${backup.exportedAt || '未知'}\n\n确定继续吗？`;
 });
@@ -160,7 +162,7 @@ const confirmImport = async () => {
   <div class="space-y-5 px-1">
     <SettingsActionWithStatus
       title="导出配置"
-      description="备份身份、连接、语音、分布式、主题、聊天偏好和话题总结模型"
+      description="备份身份、连接、语音、JEV、群聊本机设置、主题与聊天偏好"
       button-variant="primary"
       button-label="导出"
       :button-loading="exportStatus.type === 'loading'"
@@ -195,6 +197,9 @@ const confirmImport = async () => {
     </p>
     <p class="text-xs text-[var(--secondary-text)] px-1 leading-relaxed">
       复刻音频文件不包含在备份中；更换设备后需重新导入参考音频。
+    </p>
+    <p class="text-xs text-[var(--secondary-text)] px-1 leading-relaxed">
+      群聊本机设置按群组 ID、按字段恢复，缺项保留；新手机缺项使用默认值，尚未同步的群组会等待绑定。
     </p>
 
   </div>

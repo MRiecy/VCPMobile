@@ -437,7 +437,19 @@ export interface ActiveGenerationDto {
   stopRequested: boolean;
 }
 
-export interface ActiveGroupTurnDto {
+/** Rust 群轮 owner 的展示快照；前端不据此自行推进队列。 */
+export interface GroupTurnSnapshotDto {
+  mode?: string;
+  phase?: "deciding" | "speaking" | "waiting" | "stopping" | "idle";
+  queuedAgentIds?: string[];
+  currentAgentId?: string | null;
+  autonomousRounds?: number;
+  revision?: number;
+  stopReason?: string | null;
+  error?: string | null;
+}
+
+export interface ActiveGroupTurnDto extends GroupTurnSnapshotDto {
   ownerId: string;
   ownerType: "group";
   topicId: string;
@@ -465,7 +477,7 @@ export interface InterruptRequestDto {
 }
 
 export type GroupChatResultDto =
-  | { status: "completed" | "cancelled" | "stopping" | "discarded" | "recovery_pending" }
+  | { status: "accepted" | "completed" | "cancelled" | "stopping" | "discarded" | "recovery_pending" }
   | { status: "no_ai_response"; reason: "invite_only" | "no_speakers" }
   | {
       status: "no_ai_response";

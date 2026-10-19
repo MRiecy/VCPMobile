@@ -34,7 +34,7 @@ export function buildSettingsUpdate(
     const domain = domainName as ConfigDomain;
     let patch = patches.get(domain);
     if (!patch) {
-      patch = { domain, expectedRevision: revisions[domain] ?? snapshot.domains[domain].revision, changes: {}, baseValues: {}, repair: false };
+      patch = { domain, expectedRevision: revisions[domain] ?? snapshot.domains[domain].revision, changes: {}, baseValues: {} };
       patches.set(domain, patch);
     }
     const field = parts.join('.');

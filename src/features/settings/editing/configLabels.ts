@@ -1,10 +1,22 @@
 import type { ConfigDomain, FieldIssue } from '../../../core/config/generated/config';
 import type { SettingsFieldPath } from '../../../core/config/fields';
-import { SETTINGS_FIELDS } from '../../../core/config/generated/metadata';
 
 export const CONFIG_DOMAIN_LABELS: Record<ConfigDomain, string> = {
   identity: '用户身份', server: '主服务器', log: '日志连接', sync: '数据同步',
   distributed: '分布式', conversation: '对话辅助', voice: '语音', navigation: '侧栏排序',
+  jev: 'JEV 决策',
+};
+
+export const CONFIG_DOMAIN_RESET_SCOPE: Record<ConfigDomain, string> = {
+  identity: '用户名',
+  server: 'Chat 连接地址、请求入口和 API Key、管理员账号密码、图床密钥',
+  log: '日志连接地址和鉴权 Key',
+  sync: '同步 HTTP 与 WebSocket 地址、Token、日志级别和预渲染设置',
+  distributed: '分布式连接开关、服务器地址、鉴权 Key 和设备名称',
+  conversation: '话题总结模型',
+  voice: '语音连接与 API Key、识别、朗读、音色、风格指导和人声检测设置',
+  navigation: '智能体和群组排序',
+  jev: 'JEV 开关、服务商连接与 API Key、模型、超时重试和应用标识',
 };
 
 const FIELD_LABELS: Record<SettingsFieldPath, string> = {
@@ -26,28 +38,14 @@ const FIELD_LABELS: Record<SettingsFieldPath, string> = {
   'voice.vad.sensitivity': '人声检测灵敏度', 'voice.vad.endSilenceMs': '说完等待时间',
   'voice.vad.playbackOnsetMs': '朗读时插话确认',
   'navigation.agentOrder': '智能体排序', 'navigation.groupOrder': '群组排序',
+  'jev.enabled': '启用 JEV', 'jev.provider': 'JEV 服务商',
+  'jev.typesafe.apiUrl': 'TypeSafe API URL', 'jev.typesafe.apiKey': 'TypeSafe API Key', 'jev.typesafe.model': 'TypeSafe 模型',
+  'jev.openrouter.apiUrl': 'OpenRouter API URL', 'jev.openrouter.apiKey': 'OpenRouter API Key', 'jev.openrouter.model': 'OpenRouter 模型',
+  'jev.timeoutMs': '决策请求超时', 'jev.maxRetries': '最大重试次数', 'jev.retryBaseDelayMs': '重试基础延迟',
+  'jev.proxyUrl': 'JEV 代理 URL', 'jev.httpReferer': 'HTTP Referer', 'jev.appTitle': '应用标题',
 };
 
 export function configIssueLabel(issue: FieldIssue): string {
   const field = FIELD_LABELS[`${issue.domain}.${issue.field}` as SettingsFieldPath];
   return field ? `${CONFIG_DOMAIN_LABELS[issue.domain]} · ${field}` : CONFIG_DOMAIN_LABELS[issue.domain];
-}
-
-/** Credential-coupled fields are reset together, following Rust's validation groups. */
-export function configResetFields(path: SettingsFieldPath): SettingsFieldPath[] {
-  const field = SETTINGS_FIELDS.find(item => `${item.domain}.${item.path}` === path);
-  if (!field || !['connection', 'adminCredentials'].includes(field.validationGroup)) return [path];
-  return SETTINGS_FIELDS.filter(item => item.domain === field.domain && item.validationGroup === field.validationGroup)
-    .map(item => `${item.domain}.${item.path}` as SettingsFieldPath);
-}
-
-export function configResetLabel(path: SettingsFieldPath): string {
-  const fields = configResetFields(path);
-  if (fields.length === 1) return '使用默认值';
-  const domain = path.split('.')[0] as ConfigDomain;
-  return fields.includes('server.adminUsername') ? '恢复管理员凭据默认值' : `恢复${CONFIG_DOMAIN_LABELS[domain]}${domain === 'log' ? '' : '连接'}默认值`;
-}
-
-export function configResetDescription(path: SettingsFieldPath): string {
-  return configResetFields(path).map(field => FIELD_LABELS[field]).join('、');
 }

@@ -3,21 +3,21 @@ import { createPinia, setActivePinia } from "pinia";
 import { useSettingsStore, type AppSettings } from "@/core/stores/settings";
 import {
   IDENTITY_FIELDS,
-  CONNECTION_FIELDS,
   SUMMARY_FIELDS,
   type SettingsEditableKey,
 } from "@/features/settings/editing/fieldSets";
 import { useSettingsEditSession } from "@/features/settings/editing/useSettingsEditSession";
-import { mockInvoke } from "../../mocks/tauri";
+import { invokeMock, mockInvoke } from "../../mocks/tauri";
 import { makeSettings, makeConfigSnapshot, configRequestChanges } from '../../helpers/config';
 import { applySettingsFields, type SettingsFieldValues } from '@/core/config/fields';
-import type { ConfigUpdate, ConfigSaveResult } from '@/core/config/generated/config';
+import type { ConfigUpdate, ConfigReset, ConfigSaveResult } from '@/core/config/generated/config';
 import { emitTauriEvent } from '../../mocks/tauri';
 
-const { notify } = vi.hoisted(() => ({ notify: vi.fn() }));
+const { notify, confirm } = vi.hoisted(() => ({ notify: vi.fn(), confirm: vi.fn() }));
 vi.mock("@/core/stores/notification", () => ({
   useNotificationStore: () => ({ addNotification: notify }),
 }));
+vi.mock('@/core/stores/overlay', () => ({ useOverlayStore: () => ({ showConfirm: confirm }) }));
 
 const initialSettings = (): AppSettings => makeSettings({
   'identity.userName': 'original', 'server.url': 'https://vcp.example', 'server.apiKey': 'key',
@@ -70,6 +70,8 @@ function session<const Keys extends readonly SettingsEditableKey[]>(keys: Keys) 
 beforeEach(() => {
   setActivePinia(createPinia());
   notify.mockClear();
+  confirm.mockReset();
+  confirm.mockResolvedValue(false);
 });
 
 afterEach(() => {
@@ -271,6 +273,98 @@ describe("settings edit session", () => {
     expect(editor.dirty.value).toBe(true);
     editor.edit("identity.userName", "corrected-name");
     expect(editor.draft.value?.["identity.userName"]).toBe("corrected-name");
+    expect(confirm).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('only discards a reset-blocked draft after explicit confirmation: %s', async (accepted) => {
+    const server = backend();
+    const store = useSettingsStore();
+    await store.fetchSettings();
+    const editor = session(IDENTITY_FIELDS);
+    editor.edit('identity.userName', 'unsaved');
+    const damaged = makeConfigSnapshot(initialSettings(), '2');
+    damaged.domains.identity.health = 'unavailable';
+    damaged.domains.identity.issues = [{ domain: 'identity', field: '', code: 'invalidJson', message: '身份配置无法解析' }];
+    mockInvoke('read_settings', () => damaged);
+    confirm.mockResolvedValueOnce(accepted);
+
+    const leaving = editor.prepareLeave();
+    (await server.write(0)).respond({ status: 'rejected', issues: [
+      { domain: 'identity', field: '', code: 'requiresReset', message: '请在设置首页重置用户身份配置' },
+    ] });
+
+    expect(await leaving).toBe(accepted);
+    expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ title: '放弃本页未保存修改并返回？' }));
+    expect(editor.ready.value).toBe(!accepted);
+    expect(editor.dirty.value).toBe(!accepted);
+    expect(editor.draft.value?.['identity.userName']).toBe('unsaved');
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'read_settings')).toHaveLength(accepted ? 2 : 1);
+    expect(server.writes).toHaveLength(1);
+    if (accepted) expect(store.snapshot?.domains.identity.issues).toEqual(damaged.domains.identity.issues);
+    else {
+      expect(editor.leaving.value).toBe(false);
+      editor.edit('identity.userName', 'kept-editing');
+      expect(editor.draft.value?.['identity.userName']).toBe('kept-editing');
+    }
+  });
+
+  it('keeps normal validation failures editable without prompting or refreshing', async () => {
+    const server = backend();
+    await useSettingsStore().fetchSettings();
+    const editor = session(IDENTITY_FIELDS);
+    editor.edit('identity.userName', 'invalid-name');
+    const leaving = editor.prepareLeave();
+    (await server.write(0)).respond({ status: 'rejected', issues: [
+      { domain: 'identity', field: 'userName', code: 'tooLong', message: '用户名过长' },
+    ] });
+    expect(await leaving).toBe(false);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'read_settings')).toHaveLength(1);
+    expect(editor.ready.value).toBe(true);
+    expect(editor.dirty.value).toBe(true);
+    expect(editor.fieldErrors.value[0].code).toBe('tooLong');
+  });
+
+  it('does not trap an explicitly discarded draft when refreshing the home notice fails', async () => {
+    const server = backend();
+    const store = useSettingsStore();
+    await store.fetchSettings();
+    const editor = session(IDENTITY_FIELDS);
+    editor.edit('identity.userName', 'unsaved');
+    confirm.mockResolvedValueOnce(true);
+    mockInvoke('read_settings', () => { throw new Error('read unavailable'); });
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const leaving = editor.prepareLeave();
+    (await server.write(0)).respond({ status: 'rejected', issues: [
+      { domain: 'identity', field: '', code: 'requiresReset', message: '需要重置' },
+    ] });
+    expect(await leaving).toBe(true);
+    expect(store.error).toContain('read unavailable');
+    expect(editor.ready.value).toBe(false);
+    expect(server.writes).toHaveLength(1);
+  });
+
+  it('does not prompt to discard on an explicit save or revive a disposed leave confirmation', async () => {
+    const server = backend();
+    await useSettingsStore().fetchSettings();
+    const editor = session(IDENTITY_FIELDS);
+    editor.edit('identity.userName', 'unsaved');
+    const rejection: ConfigSaveResult = { status: 'rejected', issues: [
+      { domain: 'identity', field: '', code: 'requiresReset', message: '需要重置' },
+    ] };
+    const saving = editor.save();
+    (await server.write(0)).respond(rejection);
+    expect(await saving).toMatchObject({ ok: false });
+    expect(confirm).not.toHaveBeenCalled();
+    let accept!: (value: boolean) => void;
+    confirm.mockImplementationOnce(() => new Promise<boolean>(resolve => { accept = resolve; }));
+    const leaving = editor.prepareLeave();
+    (await server.write(1)).respond(rejection);
+    await vi.waitFor(() => expect(confirm).toHaveBeenCalledOnce());
+    editor.dispose();
+    accept(true);
+    expect(await leaving).toBe(false);
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'read_settings')).toHaveLength(1);
   });
 
   it("ends an old visit without cancelling its submitted write or changing a new draft", async () => {
@@ -328,50 +422,20 @@ describe("settings edit session", () => {
 });
 
 describe("settings Store queue", () => {
-  it('does not silently refresh a repair revision after its confirmation scope changed', async () => {
+  it('does not retry a domain reset or refresh its captured revision after a conflict', async () => {
     const server = backend();
     const store = useSettingsStore();
     await store.fetchSettings();
-    const editor = session(IDENTITY_FIELDS);
     const newer = makeConfigSnapshot(makeSettings({ 'identity.userName': 'changed-while-confirming' }), '2');
     emitTauriEvent('vcp-config-changed', newer);
-    const repair = editor.repairDomain('identity', '1');
-    const write = await server.write(0);
-    expect(write.request.patches[0].expectedRevision).toBe('1');
-    write.respond({ status: 'conflict', snapshot: newer, conflicts: [{ domain: 'identity', field: '', code: 'revisionConflict', message: '请重新确认修复范围' }] });
-    expect(await repair).toBe(false);
-    expect(editor.dirty.value).toBe(false);
-    expect(await editor.prepareLeave()).toBe(true);
-  });
-
-  it('explicitly writes every connection default even when the safe projection already hides old credentials', async () => {
-    const server = backend();
-    const projected = makeConfigSnapshot(makeSettings());
-    projected.domains.server.health = 'recovered';
-    projected.domains.server.issues = [{ domain: 'server', field: 'url', code: 'invalidType', message: '服务器地址类型无效' }];
-    mockInvoke('read_settings', () => projected);
-    await useSettingsStore().fetchSettings();
-    const editor = session(CONNECTION_FIELDS);
-    editor.resetField('server.url');
-    expect(editor.dirty.value).toBe(true);
-    const saving = editor.save();
-    const write = await server.write(0);
-    expect(write.request.patches).toEqual([{ domain: 'server', expectedRevision: '1', changes: { apiKey: '', url: '' }, baseValues: { apiKey: '', url: '' }, repair: false }]);
-    write.respond({ status: 'saved', snapshot: makeConfigSnapshot(makeSettings(), '2') });
-    expect(await saving).toMatchObject({ ok: true, dirty: false });
-  });
-
-  it('resets both administrator credentials without touching the ordinary server connection', async () => {
-    const server = backend();
-    await useSettingsStore().fetchSettings();
-    const editor = session(IDENTITY_FIELDS);
-    editor.resetField('server.adminUsername');
-    const saving = editor.save();
-    const write = await server.write(0);
-    expect(write.patch).toEqual({ 'server.adminUsername': '', 'server.adminPassword': '' });
-    write.commit();
-    await saving;
-    expect(useSettingsStore().settings?.server.apiKey).toBe('key');
+    const reset = vi.fn((): ConfigSaveResult => ({ status: 'conflict', snapshot: newer, conflicts: [
+      { domain: 'identity', field: '', code: 'revisionConflict', message: '请重新确认重置范围' },
+    ] }));
+    mockInvoke('reset_settings_domain', reset);
+    expect(await store.resetDomain({ domain: 'identity', expectedRevision: '1' })).toMatchObject({ status: 'conflict' });
+    expect(reset).toHaveBeenCalledExactlyOnceWith({ request: { domain: 'identity', expectedRevision: '1' } });
+    expect(store.settings?.identity.userName).toBe('changed-while-confirming');
+    expect(server.writes).toHaveLength(0);
   });
 
   it('keeps an older edit baseline through an external update and exposes a real field conflict', async () => {
@@ -416,21 +480,24 @@ describe("settings Store queue", () => {
     expect(store.settings?.server.apiKey).toBe('new-key');
   });
 
-  it('can explicitly repair an unreadable domain without discarding typing during the repair', async () => {
+  it('queues a captured domain reset behind a save and accepts its committed snapshot', async () => {
     const server = backend();
-    const unreadable = makeConfigSnapshot(initialSettings());
-    unreadable.domains.identity = { revision: '4', schemaVersion: 1, health: 'unavailable', issues: [{ domain: 'identity', field: '', code: 'invalid_json', message: '身份配置无法解析' }] };
-    mockInvoke('read_settings', () => unreadable);
-    await useSettingsStore().fetchSettings();
-    const editor = session(IDENTITY_FIELDS);
-    const repair = editor.repairDomain('identity');
+    const store = useSettingsStore();
+    await store.fetchSettings();
+    const saving = store.updateFields({ 'server.apiKey': 'submitted-key' });
     const write = await server.write(0);
-    expect(write.request.patches).toEqual([{ domain: 'identity', expectedRevision: '4', changes: {}, baseValues: {}, repair: true }]);
-    editor.edit('identity.userName', 'typed-during-repair');
-    write.respond({ status: 'saved', snapshot: makeConfigSnapshot(makeSettings(), '5') });
-    expect(await repair).toBe(true);
-    expect(editor.draft.value?.['identity.userName']).toBe('typed-during-repair');
-    expect(editor.dirty.value).toBe(true);
+    const committed = makeConfigSnapshot(makeSettings({ 'server.apiKey': 'submitted-key' }), '3');
+    const reset = vi.fn((): ConfigSaveResult => ({ status: 'saved', snapshot: committed }));
+    mockInvoke('reset_settings_domain', reset);
+    const request: ConfigReset = { domain: 'identity', expectedRevision: '1' };
+    const resetting = store.resetDomain(request);
+    request.expectedRevision = '999';
+    expect(reset).not.toHaveBeenCalled();
+    write.commit();
+    await saving;
+    expect(await resetting).toMatchObject({ status: 'saved' });
+    expect(reset).toHaveBeenCalledExactlyOnceWith({ request: { domain: 'identity', expectedRevision: '1' } });
+    expect(store.settings).toEqual(committed.data);
   });
 
   it("captures patch arrays at enqueue time and describes only configuration persistence", async () => {

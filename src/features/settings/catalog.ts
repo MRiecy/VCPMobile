@@ -24,6 +24,10 @@ export const settingsPages: readonly SettingsPageEntry[] = [
     component: defineAsyncComponent(() => import('../chat/voice/VoiceSettingsPage.vue')),
   },
   {
+    id: 'jev', title: 'JEV 决策', description: '群聊发言决策与服务连接', frame: 'viewport',
+    component: defineAsyncComponent(() => import('./pages/JevSettingsPage.vue')),
+  },
+  {
     id: 'advanced', title: '高级功能', description: '话题总结与数据维护', frame: 'list',
     component: defineAsyncComponent(() => import('./pages/AdvancedSettingsPage.vue')),
   },

@@ -1,0 +1,98 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createPinia, disposePinia, setActivePinia, type Pinia } from 'pinia';
+import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
+import JevSettingsPage from '../../../features/settings/pages/JevSettingsPage.vue';
+import SettingsRow from '../../../components/settings/SettingsRow.vue';
+import SettingsTextField from '../../../components/settings/SettingsTextField.vue';
+import { useOverlayStore } from '../../../core/stores/overlay';
+import { useSettingsStore } from '../../../core/stores/settings';
+import { applySettingsFields } from '../../../core/config/fields';
+import type { ConfigUpdate } from '../../../core/config/generated/config';
+import { makeSettings, makeConfigSnapshot, configRequestChanges } from '../../helpers/config';
+import { invokeMock, mockInvoke } from '../../mocks/tauri';
+
+vi.mock('../../../core/stores/notification', () => ({ useNotificationStore: () => ({ addNotification: vi.fn() }) }));
+
+let pinia: Pinia;
+let wrappers: VueWrapper[] = [];
+beforeEach(() => {
+  pinia = createPinia();
+  setActivePinia(pinia);
+  let settings = makeSettings();
+  mockInvoke('read_settings', () => makeConfigSnapshot(settings));
+  mockInvoke('update_settings', args => {
+    settings = applySettingsFields(settings, configRequestChanges(args?.request as ConfigUpdate));
+    return { status: 'saved', snapshot: makeConfigSnapshot(settings, '2') };
+  });
+});
+afterEach(() => {
+  wrappers.forEach(wrapper => wrapper.unmount());
+  wrappers = [];
+  disposePinia(pinia);
+  vi.restoreAllMocks();
+});
+
+async function renderPage() {
+  const wrapper = mount(JevSettingsPage, { props: { active: true } });
+  wrappers.push(wrapper);
+  await flushPromises();
+  return wrapper;
+}
+function field(wrapper: VueWrapper, label: string) {
+  const component = wrapper.findAllComponents(SettingsTextField).find(item => item.props('label') === label);
+  if (!component) throw new Error(`Missing JEV field: ${label}`);
+  return component.get('input');
+}
+async function openProvider(wrapper: VueWrapper) {
+  const row = wrapper.findAllComponents(SettingsRow).find(item => item.props('title') === '服务提供商');
+  if (!row) throw new Error('Missing provider selector');
+  await row.trigger('click');
+  return useOverlayStore().contextMenuConfig!;
+}
+async function choose(wrapper: VueWrapper, provider: string) {
+  const menu = await openProvider(wrapper);
+  const action = menu.actions.find(item => item.label === provider);
+  if (!action) throw new Error(`Missing JEV provider: ${provider}`);
+  await action.handler?.();
+  useOverlayStore().closeContextMenu();
+  await flushPromises();
+}
+
+describe('JEV 设置由同一领域编辑会话保存', () => {
+  it('切换服务商分别保留地址、密钥和模型，返回时一次提交', async () => {
+    const wrapper = await renderPage();
+    expect(field(wrapper, 'API URL').element).toHaveProperty('value', 'https://api.typesafe.ai/v1/systemone');
+    await field(wrapper, 'API Key（支持多个）').setValue('official-one，official-two');
+    await choose(wrapper, 'OpenRouter');
+    expect(field(wrapper, 'API URL').element).toHaveProperty('value', 'https://openrouter.ai/api/alpha/decisions');
+    expect(field(wrapper, '决策模型').element).toHaveProperty('value', '~typesafe/jev-latest');
+    await field(wrapper, 'API Key（支持多个）').setValue('router-key');
+    await field(wrapper, 'API URL').setValue('https://router.example/decisions');
+    await choose(wrapper, 'TypeSafe 官方');
+    expect(field(wrapper, 'API Key（支持多个）').element).toHaveProperty('value', 'official-one，official-two');
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'update_settings')).toHaveLength(0);
+
+    expect(await (wrapper.vm as unknown as { beforeLeave(): Promise<boolean> }).beforeLeave()).toBe(true);
+    const calls = invokeMock.mock.calls.filter(([command]) => command === 'update_settings');
+    expect(calls).toHaveLength(1);
+    expect(configRequestChanges(calls[0][1]!.request as ConfigUpdate)).toEqual({
+      'jev.typesafe.apiKey': 'official-one，official-two',
+      'jev.openrouter.apiKey': 'router-key',
+      'jev.openrouter.apiUrl': 'https://router.example/decisions',
+    });
+    expect(useSettingsStore().settings?.jev.openrouter.apiKey).toBe('router-key');
+    expect(useSettingsStore().settings?.jev.typesafe.apiKey).toBe('official-one，official-two');
+  });
+
+  it('页面隐藏关闭自己的菜单，迟到选择不保存或改变正式配置', async () => {
+    const wrapper = await renderPage();
+    const menu = await openProvider(wrapper);
+    const stale = menu.actions.find(item => item.label === 'OpenRouter')!;
+    await wrapper.setProps({ active: false });
+    expect(useOverlayStore().contextMenuConfig).toBeNull();
+    await stale.handler?.();
+    await flushPromises();
+    expect(useSettingsStore().settings?.jev.provider).toBe('typesafe');
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'update_settings')).toHaveLength(0);
+  });
+});

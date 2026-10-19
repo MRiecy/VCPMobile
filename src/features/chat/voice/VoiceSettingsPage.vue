@@ -193,8 +193,7 @@ defineExpose({ beforeLeave });
 
 <template>
   <SettingsCanvas viewport :inert="!active">
-        <SettingsDomainIssues :domains="session.domainIssues.value" :errors="session.fieldErrors.value" :fields="VOICE_FIELDS"
-          :disabled="disabled || saving" :repair="session.repairDomain" @reset="session.resetField" />
+        <SettingsDomainIssues :domains="session.domainIssues.value" :errors="session.fieldErrors.value" :fields="VOICE_FIELDS" />
         <p v-if="error" role="alert" class="m-0 text-sm text-red-500">
           {{ error }}
           <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading || !active" @click="reload">重试</button>

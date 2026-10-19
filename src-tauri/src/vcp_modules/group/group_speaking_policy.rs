@@ -3,6 +3,159 @@ use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::group_types::GroupConfig;
 use rand::Rng;
 use regex::Regex;
+use crate::vcp_modules::group::{
+    group_session::GroupDecisionContext,
+    jev_protocol::{JevDecisionRequest, JevDecisionResponse, JevQuestion},
+};
+use std::collections::BTreeMap;
+
+pub(crate) struct GroupMemberHistoryStats {
+    pub speech_count: i64,
+    pub last_speech_distance: i64,
+}
+
+pub(crate) fn determine_sequential_speakers(
+    members: &[AgentConfig],
+    group: &GroupConfig,
+) -> Vec<AgentConfig> {
+    let order = &group.local_settings.mode_settings.sequential.speaker_order;
+    let mut speakers = members.to_vec();
+    speakers.sort_by_key(|member| {
+        order
+            .iter()
+            .position(|id| id == &member.id)
+            .unwrap_or(usize::MAX)
+    });
+    speakers
+}
+
+pub(crate) fn build_jev_request(
+    members: &[AgentConfig],
+    history: &[ChatMessage],
+    group: &GroupConfig,
+    runtime: &GroupDecisionContext,
+    history_stats: &BTreeMap<String, GroupMemberHistoryStats>,
+) -> JevDecisionRequest {
+    let settings = &group.local_settings.mode_settings.jev;
+    let mut criteria = BTreeMap::new();
+    for (index, member) in members.iter().enumerate() {
+        let style = settings
+            .member_styles
+            .get(&member.id)
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("未配置特殊触发风格；根据上下文相关性判断。");
+        criteria.insert(
+            format!("agent_{index}"),
+            format!("{}：{style}", member.name),
+        );
+    }
+    criteria.insert(
+        "end_conversation".into(),
+        "当前话题已经自然结束、问题已解决，或继续发言只会重复已有内容。".into(),
+    );
+    let mut questions = BTreeMap::new();
+    questions.insert(
+        "speaker_routing".into(),
+        JevQuestion::Choice {
+            instructions: settings.navigator_prompt.clone(),
+            criteria,
+        },
+    );
+    questions.insert(
+        "continue_discussion".into(),
+        JevQuestion::Noul {
+            instructions:
+                "基于当前对话，继续由群聊成员自主推进是否仍然自然、有价值且不会只是重复？".into(),
+        },
+    );
+    JevDecisionRequest {
+        state: serde_json::json!({
+            "group": { "id": group.id, "name": group.name, "prompt": group.group_prompt.as_deref().unwrap_or("") },
+            "recentMessages": history.iter().map(|message| serde_json::json!({
+                "id": message.id, "role": message.role, "speakerName": message.name.as_deref().unwrap_or(if message.role == "user" { "用户" } else { "AI" }),
+                "agentId": message.agent_id, "text": message.content, "timestamp": message.timestamp,
+            })).collect::<Vec<_>>(),
+            "members": members.iter().map(|member| serde_json::json!({
+                "agentId": member.id, "name": member.name,
+                "triggerStyle": settings.member_styles.get(&member.id).map(String::as_str).unwrap_or(""),
+                "messagesSinceLastSpeech": history_stats.get(&member.id).map(|stats| stats.last_speech_distance),
+                "totalSpeechCount": history_stats.get(&member.id).map(|stats| stats.speech_count).unwrap_or(0),
+                "autonomousRunSpeechCount": runtime.counts.get(&member.id).copied().unwrap_or(0),
+                "manuallyQueued": false,
+            })).collect::<Vec<_>>(),
+            "runtime": { "trigger": runtime.trigger, "autonomousRound": runtime.rounds + 1,
+                "forceContinue": runtime.force_continue, "latestUserMessageId": runtime.scope.as_ref().map(|scope| &scope.origin) }
+        }),
+        questions,
+    }
+}
+
+pub(crate) fn parse_jev_decision(
+    response: &JevDecisionResponse,
+    request: &JevDecisionRequest,
+    members: &[AgentConfig],
+    group: &GroupConfig,
+    force_continue: bool,
+) -> Result<(Vec<String>, Option<String>), String> {
+    response.validate_for(request).map_err(str::to_string)?;
+    let settings = &group.local_settings.mode_settings.jev;
+    let routing = response
+        .answers
+        .get("speaker_routing")
+        .and_then(|answer| answer.probabilities.as_ref())
+        .ok_or("JEV 缺少发言概率")?;
+    let continuation = response
+        .answers
+        .get("continue_discussion")
+        .and_then(|answer| answer.noul)
+        .ok_or("JEV 缺少继续概率")?;
+    let mut ranked = members
+        .iter()
+        .enumerate()
+        .map(|(index, member)| {
+            routing
+                .get(&format!("agent_{index}"))
+                .copied()
+                .map(|probability| (member.id.clone(), probability))
+                .ok_or("JEV 缺少成员概率")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    ranked.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let end = routing
+        .get("end_conversation")
+        .copied()
+        .ok_or("JEV 缺少结束概率")?;
+    if !force_continue && continuation < settings.continue_threshold {
+        return Ok((vec![], Some("continue_probability_below_threshold".into())));
+    }
+    if !force_continue
+        && end >= settings.stop_threshold
+        && end >= ranked.first().map(|(_, value)| *value).unwrap_or(0.0)
+    {
+        return Ok((vec![], Some("end_option_selected".into())));
+    }
+    let mut selected = ranked
+        .iter()
+        .filter(|(_, value)| *value >= settings.speaker_threshold)
+        .take(settings.max_speakers_per_round as usize)
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    if selected.is_empty() && (force_continue || settings.fallback_policy == "top_speaker") {
+        if let Some((id, _)) = ranked.first() {
+            selected.push(id.clone());
+        }
+    }
+    let reason = selected
+        .is_empty()
+        .then(|| "no_speaker_above_threshold".to_string());
+    Ok((selected, reason))
+}
 
 /// NatureRandom 决策引擎
 pub fn determine_naturerandom_speakers(

@@ -50,12 +50,19 @@ pub(super) async fn ensure_migrated(db: &DbState) -> Result<(), String> {
         None => default_domains(),
         Some(_) => match parsed.as_ref().filter(|value| value.is_object()) {
             Some(value) => split_legacy(value)?,
-            // A malformed original is archived intact. Null domain records
-            // intentionally remain unavailable until explicitly repaired; a
-            // temporary runtime default must never become a silent disk reset.
+            // A malformed original is archived intact. Only domains that
+            // actually owned legacy fields remain unavailable until repaired.
+            // Newly introduced domains have no damaged predecessor to inherit.
             None => ConfigDomain::ALL
                 .into_iter()
-                .map(|domain| (domain, Value::Null))
+                .map(|domain| {
+                    let value = if legacy_fields().iter().any(|(owner, _, _)| *owner == domain) {
+                        Value::Null
+                    } else {
+                        domain_defaults(domain)
+                    };
+                    (domain, value)
+                })
                 .collect(),
         },
     };

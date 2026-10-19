@@ -3,8 +3,9 @@ import { computed, shallowRef, ref, onScopeDispose } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useNotificationStore } from "./notification";
-import type { ConfigSnapshot, ConfigUpdate, ConfigSaveResult, Settings } from "../config/generated/config";
+import type { ConfigSnapshot, ConfigUpdate, ConfigReset, ConfigSaveResult, Settings } from "../config/generated/config";
 import { buildSettingsUpdate, cloneConfig, type SettingsFieldValues } from "../config/fields";
+import type { GroupLocalSettingsPatch } from '../types/assistant';
 export type { ChatEndpointMode } from "../config/generated/config";
 export type AppSettings = Settings;
 
@@ -75,26 +76,43 @@ export const useSettingsStore = defineStore("settings", () => {
     }
   });
 
-  const updateSettings = (request: ConfigUpdate): Promise<ConfigSaveResult> => {
+  const submitSettingsChange = (
+    command: 'update_settings' | 'reset_settings_domain' | 'import_settings_backup',
+    request: ConfigUpdate | ConfigReset,
+    groupPreferences?: Record<string, GroupLocalSettingsPatch>,
+  ): Promise<ConfigSaveResult> => {
     const captured = cloneConfig(request);
+    const capturedGroups = groupPreferences === undefined ? undefined : cloneConfig(groupPreferences);
     return enqueueOperation(async () => {
       error.value = null;
       try {
-        const result = await invoke<ConfigSaveResult>("update_settings", { request: captured });
+        const result = await invoke<ConfigSaveResult>(command, {
+          request: captured,
+          ...(capturedGroups === undefined ? {} : { groupPreferences: capturedGroups }),
+        });
         if (result.status === "saved" || result.status === "conflict") acceptSnapshot(result.snapshot);
         if (result.status === "saved") {
-          notificationStore.addNotification({ type: "success", title: "设置已保存", message: "配置变更已保存", toastOnly: true });
+          notificationStore.addNotification({
+            type: "success", toastOnly: true,
+            title: command === 'reset_settings_domain' ? '配置已恢复默认' : '设置已保存',
+            message: command === 'reset_settings_domain' ? '该组配置已恢复默认值' : '配置变更已保存',
+          });
         } else {
           const issues = result.status === "rejected" ? result.issues : result.conflicts;
           error.value = issues.map(issue => issue.message).join("；");
         }
         return result;
       } catch {
-        error.value = "设置保存失败，请重试";
+        error.value = command === 'reset_settings_domain' ? '配置重置失败，请重试' : '设置保存失败，请重试';
         throw new Error(error.value);
       }
     });
   };
+
+  const updateSettings = (request: ConfigUpdate) => submitSettingsChange('update_settings', request);
+  const resetDomain = (request: ConfigReset) => submitSettingsChange('reset_settings_domain', request);
+  const importBackup = (request: ConfigUpdate, groupPreferences: Record<string, GroupLocalSettingsPatch>) =>
+    submitSettingsChange('import_settings_backup', request, groupPreferences);
 
   const updateFields = (changes: Partial<SettingsFieldValues>): Promise<ConfigSaveResult> => {
     if (!snapshot.value) return Promise.reject(new Error("设置尚未加载"));
@@ -111,6 +129,8 @@ export const useSettingsStore = defineStore("settings", () => {
     error,
     fetchSettings,
     updateSettings,
+    resetDomain,
+    importBackup,
     updateFields,
   };
 });

@@ -154,7 +154,7 @@ describe("DistributedView explicit tool authorization", () => {
         'distributed.enabled': true,
       });
       expect(request.patches).toEqual([expect.objectContaining({
-        domain: 'distributed', expectedRevision: '1', repair: false,
+        domain: 'distributed', expectedRevision: '1',
         baseValues: { deviceName: 'Tablet', wsUrl: 'wss://configured.example/ws', vcpKey: 'configured-key', enabled: false },
       })]);
 
@@ -201,7 +201,7 @@ describe("DistributedView explicit tool authorization", () => {
       await saveButton.trigger('click');
       await flushPromises();
       expect(invokeMock).toHaveBeenCalledWith('update_settings', { request: { patches: [{
-        domain: 'distributed', expectedRevision: '2', repair: false,
+        domain: 'distributed', expectedRevision: '2',
         changes: { deviceName: 'Reloaded tablet', wsUrl: 'wss://reloaded.example/ws', vcpKey: 'reloaded-key', enabled: true },
         baseValues: { deviceName: 'Reloaded tablet', wsUrl: 'wss://reloaded.example/ws', vcpKey: 'reloaded-key', enabled: false },
       }] } });
@@ -223,7 +223,7 @@ describe("DistributedView explicit tool authorization", () => {
       await button.trigger('click');
       await flushPromises();
       expect(invokeMock).toHaveBeenCalledWith('update_settings', { request: { patches: [{
-        domain: 'distributed', expectedRevision: '1', repair: false,
+        domain: 'distributed', expectedRevision: '1',
         changes: { wsUrl: 'wss://distributed.example/ws', vcpKey: 'distributed-key', deviceName: 'Phone', enabled: true },
         baseValues: { wsUrl: 'wss://distributed.example/ws', vcpKey: 'distributed-key', deviceName: 'Phone', enabled: true },
       }] } });
@@ -598,7 +598,7 @@ describe("DistributedView explicit tool authorization", () => {
       await wrapper.findAll('button').find(button => button.text() === '断开连接')!.trigger('click');
       await flushPromises();
       expect(invokeMock).toHaveBeenCalledWith('update_settings', { request: { patches: [{
-        domain: 'distributed', expectedRevision: '1', repair: false,
+        domain: 'distributed', expectedRevision: '1',
         changes: { enabled: false }, baseValues: { enabled: true },
       }] } });
     } finally {

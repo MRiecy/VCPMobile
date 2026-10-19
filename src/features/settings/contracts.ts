@@ -6,6 +6,7 @@ export type SettingsPageId =
   | 'theme'
   | 'rendering'
   | 'voice'
+  | 'jev'
   | 'advanced'
   | 'guide'
   | 'about'

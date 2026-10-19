@@ -201,9 +201,21 @@ export const useAssistantStore = defineStore("assistant", () => {
     }
   };
 
-  const saveGroup = async (group: GroupConfigDto) => {
+  const saveGroup = async (group: GroupConfigDto, baseline?: GroupConfigDto) => {
     try {
-      const canonical = await invoke<GroupConfigDto>("save_group_config", { group });
+      // A local behavior edit must not write back shared fields captured before
+      // a concurrent sync. Send only the fields this editor actually changed.
+      const editableFields = [
+        "name", "members", "memberTags", "groupPrompt", "invitePrompt",
+        "useUnifiedModel", "unifiedModel", "tagMatchMode", "modeOverride",
+        "modeSettings", "enableContextMessageWindow", "contextMessageWindowSize",
+      ] as const;
+      const updates = baseline ? Object.fromEntries(editableFields
+        .filter(field => JSON.stringify(group[field]) !== JSON.stringify(baseline[field]))
+        .map(field => [field, group[field]])) : undefined;
+      const canonical = baseline
+        ? await invoke<GroupConfigDto>("update_group_config", { groupId: group.id, updates })
+        : await invoke<GroupConfigDto>("save_group_config", { group });
       invalidateSnapshotLoads();
 
       // 点对点局部更新（仅更新轻量列表渲染字段）
@@ -214,8 +226,8 @@ export const useAssistantStore = defineStore("assistant", () => {
           ...updated[index],
           name: canonical.name,
           members: canonical.members,
-          // mode 被邀请横条与 @提及 选择器消费，必须随保存同步
-          mode: canonical.mode,
+          // 列表与运行使用本机有效模式，共享原值仅留在完整配置中。
+          mode: canonical.modeOverride ?? canonical.mode,
           avatarCalculatedColor: canonical.avatarCalculatedColor || updated[index].avatarCalculatedColor,
         };
         groups.value = updated;

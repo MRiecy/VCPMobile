@@ -1146,6 +1146,7 @@ mod tests {
         expected.push(101);
         expected.push(102);
         expected.push(103);
+        expected.push(104);
         assert_eq!(versions, expected);
 
         // FTS 直接是 trigram 终态
@@ -1166,6 +1167,7 @@ mod tests {
             "config_domains",
             "config_recovery",
             "config_metadata",
+            "group_local_settings",
         ] {
             let exists: bool =
                 sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?)")

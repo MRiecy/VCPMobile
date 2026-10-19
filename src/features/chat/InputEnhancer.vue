@@ -563,7 +563,8 @@ const handleSend = async () => {
 };
 
 const handleAction = () => {
-  if (isGenerating.value) {
+  if (props.disabled || props.suspended) return;
+  if (actionIsStop.value) {
     const activeIds = Array.from(streamStore.activeStreamingIds);
     const key = sessionStore.currentConversationKey;
     if (!key) return;
@@ -591,6 +592,11 @@ const {
   updateCursor: updateMentionCursor,
   dismiss: dismissMention,
 } = useMentionSelector(input);
+
+// JEV 持续会话允许在成员发言/仲裁时追加消息；无草稿时仍可一键中断全部。
+const actionIsStop = computed(() => isGenerating.value
+  && !((streamStore.currentGroupTurn?.mode ?? mentionGroupMode.value) === 'jev'
+    && hasContent.value && !historyStore.editingMessage));
 
 // 输入法组合态（拼音上屏前）：v-model 此时尚未更新，覆盖层必须全部让位，
 // 否则富文本提示/高亮背板会盖住正在组合的拼音串
@@ -785,7 +791,7 @@ onUnmounted(() => {
     <GroupStopAllButton v-if="!isExpanded" />
 
     <div class="input-context">
-    <!-- 群组邀请发言横条（invite_only 模式） -->
+    <!-- 群组邀请与 JEV 会话控制 -->
     <GroupInviteBar />
 
     <!-- 暂存附件预览区 -->
@@ -1002,12 +1008,12 @@ onUnmounted(() => {
             <!-- 发送/中止按钮 -->
             <button v-if="hasContent || isGenerating || isPreparing || isExpanded"
               @click="handleAction"
-              :aria-label="isGenerating ? '停止生成' : isPreparing ? '正在准备消息' : '发送消息'"
-              :disabled="!isGenerating && !canSend"
+              :aria-label="actionIsStop ? '停止生成' : isPreparing ? '正在准备消息' : '发送消息'"
+              :disabled="!actionIsStop && !canSend"
               class="w-8 h-8 flex items-center justify-center rounded-full shadow-sm active:scale-95 transition-all bg-blue-500 text-white"
-              :class="{ 'bg-red-500': isGenerating, 'opacity-40': !isGenerating && !canSend }"
+              :class="{ 'bg-red-500': actionIsStop, 'opacity-40': !actionIsStop && !canSend }"
             >
-              <div v-if="isGenerating" class="i-heroicons-stop-16-solid text-lg"></div>
+              <div v-if="actionIsStop" class="i-heroicons-stop-16-solid text-lg"></div>
               <div v-else-if="isPreparing" class="i-heroicons-ellipsis-horizontal text-lg"></div>
               <div v-else class="i-heroicons-paper-airplane text-[15px] -rotate-45 translate-x-0.2 -translate-y-0.2"></div>
             </button>

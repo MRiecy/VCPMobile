@@ -11,6 +11,7 @@ import { normalizeThemeModuleKey, useThemeStore, type ThemePreferences } from ".
 import { useChatPreferencesStore } from "../chat/preferences/store";
 import type { ChatPreferences } from "../chat/preferences/model";
 import type { DownloadsSaveResultDto } from "../../core/types/native";
+import type { GroupLocalSettings, GroupLocalSettingsPatch } from '../../core/types/assistant';
 import { isAndroid, isIOS } from "../../core/utils/platform";
 
 export const CONFIG_BACKUP_KIND = "vcp-mobile-settings-backup";
@@ -30,11 +31,13 @@ export interface ConfigBackupFile {
   exportedAt: string;
   domains: BackupDomains;
   preferences: { theme: ThemePreferences; chat: ChatPreferences };
+  groupPreferences?: Record<string, GroupLocalSettings>;
 }
 
 export interface ParsedConfigBackup {
   domains: BackupDomains;
   preferences?: { theme?: Partial<ThemePreferences>; chat?: Partial<ChatPreferences> };
+  groupPreferences?: Record<string, GroupLocalSettingsPatch>;
   exportedAt: string;
 }
 
@@ -47,6 +50,7 @@ export interface BackupImportResult {
 const DOMAIN_LABELS: Record<keyof AppSettings, string> = {
   identity: '用户身份', server: '主服务器连接', log: '日志连接', sync: '数据同步',
   distributed: '分布式系统', conversation: '话题总结模型', voice: '语音服务', navigation: '侧栏排序',
+  jev: 'JEV 决策服务',
 };
 
 const hasFields = (value: object | undefined): boolean => Boolean(value && Object.keys(value).length);
@@ -73,6 +77,7 @@ export function configBackupScopes(backup: ParsedConfigBackup): string[] {
     ...settingsScopes(backup.domains),
     ...(hasFields(backup.preferences?.theme) ? ['主题与深浅模式'] : []),
     ...(hasFields(backup.preferences?.chat) ? ['聊天偏好'] : []),
+    ...(hasFields(backup.groupPreferences) ? ['群聊本机设置'] : []),
   ];
 }
 
@@ -98,16 +103,17 @@ export function captureBackupPreferences(): ConfigBackupFile['preferences'] {
 /** Apply only validated, present fields through their existing persistence owners. */
 export async function applyConfigBackup(
   backup: ParsedConfigBackup,
-  applySettings: (changes: Partial<SettingsFieldValues>) => Promise<void>,
+  applySettings: (changes: Partial<SettingsFieldValues>, groupPreferences: Record<string, GroupLocalSettingsPatch>) => Promise<void>,
 ): Promise<BackupImportResult> {
   const result: BackupImportResult = { applied: [], skipped: [], failed: [] };
   if (backup.domains.voice?.tts?.mode === 'clone' || backup.domains.voice?.tts?.cloneSampleId) {
     result.skipped.push('复刻参考音频不包含在配置备份中；请在语音设置中确认或重新导入本机样本');
   }
   const databaseScopes = settingsScopes(backup.domains);
+  if (hasFields(backup.groupPreferences)) databaseScopes.push('群聊本机设置');
   if (databaseScopes.length) {
     try {
-      await applySettings(backupFieldChanges(backup.domains));
+      await applySettings(backupFieldChanges(backup.domains), backup.groupPreferences ?? {});
       result.applied.push(...databaseScopes);
     } catch (error) {
       result.failed.push({ scope: databaseScopes.join('、'), message: String(error) });
@@ -163,6 +169,10 @@ export function captureBackupDomains(): Promise<BackupDomains> {
   return invoke<BackupDomains>('export_config_domains');
 }
 
+export function captureBackupGroupPreferences(): Promise<Record<string, GroupLocalSettings>> {
+  return invoke<Record<string, GroupLocalSettings>>('export_group_preferences');
+}
+
 /** 生成导出文件名：vcp-mobile-config-YYYYMMDD-HHmm.vcpcfg.json */
 export function buildBackupFileName(now: Date = new Date()): string {
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -175,6 +185,7 @@ export function buildBackupPayload(
   domains: BackupDomains,
   preferences: ConfigBackupFile['preferences'],
   now: Date = new Date(),
+  groupPreferences: Record<string, GroupLocalSettings> = {},
 ): ConfigBackupFile {
   return {
     app: "vcp-mobile",
@@ -182,6 +193,7 @@ export function buildBackupPayload(
     version: CONFIG_BACKUP_VERSION,
     exportedAt: now.toISOString(),
     domains,
+    groupPreferences,
     preferences: {
       theme: { themeKey: preferences.theme.themeKey, mode: preferences.theme.mode },
       chat: {
@@ -236,11 +248,12 @@ async function invokeSaveToDownloads(
 export async function exportConfigBackup(
   domains: BackupDomains,
   operationId: string = `config_export_${crypto.randomUUID()}`,
+  groupPreferences: Record<string, GroupLocalSettings> = {},
 ): Promise<DownloadsSaveResultDto> {
   if (!isAndroid && !isIOS) {
     throw new Error('当前预览环境不提供原生配置文件导出');
   }
-  const payload = buildBackupPayload(domains, captureBackupPreferences());
+  const payload = buildBackupPayload(domains, captureBackupPreferences(), new Date(), groupPreferences);
   const bytes = new TextEncoder().encode(JSON.stringify(payload, null, 2));
   if (bytes.byteLength > MAX_BACKUP_FILE_BYTES) {
     throw new Error('配置备份超过 1 MiB，请检查配置字段');

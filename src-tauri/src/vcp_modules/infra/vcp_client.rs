@@ -955,21 +955,37 @@ struct ActiveGroupTurnEntry {
     channel: std::sync::Mutex<Option<Channel<StreamEvent>>>,
     origin_user_message_id: std::sync::Mutex<Option<String>>,
     chat_feed: std::sync::Mutex<Option<Arc<dyn Fn(&StreamEvent) + Send + Sync>>>,
+    session: std::sync::Mutex<Option<Arc<crate::vcp_modules::group::group_session::GroupSession>>>,
 }
 
 type ActiveGroupTurnMap = Arc<DashMap<TopicKey, Arc<ActiveGroupTurnEntry>>>;
 
 /// 每个 Topic 同时只允许一个群组回合，并由同一所有者承载回合取消状态。
-pub struct ActiveGroupTurns(ActiveGroupTurnMap);
+pub struct ActiveGroupTurns(
+    ActiveGroupTurnMap,
+    std::sync::Mutex<std::collections::VecDeque<(TopicKey, std::time::Instant)>>,
+);
 
 impl Default for ActiveGroupTurns {
     fn default() -> Self {
         log::info!("[VCPClient] Initialized ActiveGroupTurns successfully.");
-        Self(Arc::new(DashMap::new()))
+        Self(Arc::new(DashMap::new()), std::sync::Mutex::new(std::collections::VecDeque::new()))
     }
 }
 
 impl ActiveGroupTurns {
+    pub(crate) fn accept_continue(&self, key: &TopicKey, debounce_ms: u32) -> Result<(), String> {
+        let mut recent = self.1.lock().map_err(|e| e.to_string())?;
+        recent.retain(|(_, time)| time.elapsed() < Duration::from_secs(10));
+        if recent.iter().any(|(topic, time)| topic == key && time.elapsed() < Duration::from_millis(debounce_ms as u64)) {
+            return Err("继续操作过于频繁，请稍后重试。".into());
+        }
+        recent.retain(|(topic, _)| topic != key);
+        while recent.len() >= 128 { recent.pop_front(); }
+        recent.push_back((key.clone(), std::time::Instant::now()));
+        Ok(())
+    }
+
     pub(crate) fn try_acquire(&self, key: TopicKey) -> Result<ActiveGroupTurnLease, String> {
         self.try_acquire_with_cancellation(key, CancellationToken::new())
     }
@@ -988,6 +1004,7 @@ impl ActiveGroupTurns {
                     channel: std::sync::Mutex::new(None),
                     origin_user_message_id: std::sync::Mutex::new(None),
                     chat_feed: std::sync::Mutex::new(None),
+                    session: std::sync::Mutex::new(None),
                 }));
                 Ok(ActiveGroupTurnLease {
                     turns: self.0.clone(),
@@ -1002,13 +1019,56 @@ impl ActiveGroupTurns {
         }
     }
 
-    fn cancel(&self, key: &TopicKey) -> bool {
+    pub(crate) fn cancel(&self, key: &TopicKey) -> bool {
         let Some(entry) = self.0.get(key) else {
             return false;
         };
         entry.cancellation_token.cancel();
+        if let Ok(session) = entry.session.lock() {
+            if let Some(session) = session.as_ref() { session.cancel_scopes(); session.invalidate(); }
+        }
+        let event = group_turn_event(key, &entry, true);
+        if let Ok(channel) = entry.channel.lock() { if let Some(channel) = channel.as_ref() { let _ = channel.send(event); } }
         drop(entry);
         true
+    }
+
+    pub(crate) fn cancel_owner(&self, owner_type: &str, owner_id: &str) {
+        let keys = self.0.iter().filter(|entry| entry.key().owner_type == owner_type && entry.key().owner_id == owner_id)
+            .map(|entry| entry.key().clone()).collect::<Vec<_>>();
+        for key in keys { self.cancel(&key); }
+    }
+
+    pub(crate) fn notify_history_changed(&self, key: &TopicKey) {
+        if let Some(session) = self.session(key) { session.invalidate(); self.publish(key); }
+    }
+
+    pub(crate) fn notify_group_changed(&self, group_id: &str) {
+        let keys = self.0.iter().filter(|entry| entry.key().owner_type == "group" && entry.key().owner_id == group_id)
+            .map(|entry| entry.key().clone()).collect::<Vec<_>>();
+        for key in keys { self.notify_history_changed(&key); }
+    }
+
+    pub(crate) fn notify_all_groups_changed(&self) {
+        let keys = self.0.iter().map(|entry| entry.key().clone()).collect::<Vec<_>>();
+        for key in keys { self.notify_history_changed(&key); }
+    }
+
+    pub(crate) fn topic_for_session(&self, session: &Arc<crate::vcp_modules::group::group_session::GroupSession>) -> Option<TopicKey> {
+        self.0.iter().find_map(|entry| {
+            entry.session.lock().ok()?.as_ref().filter(|current| Arc::ptr_eq(current, session)).map(|_| entry.key().clone())
+        })
+    }
+
+    pub(crate) fn session(&self, key: &TopicKey) -> Option<Arc<crate::vcp_modules::group::group_session::GroupSession>> {
+        self.0.get(key).and_then(|entry| entry.session.lock().ok()?.clone())
+    }
+
+    pub(crate) fn publish(&self, key: &TopicKey) {
+        if let Some(entry) = self.0.get(key) {
+            let event = group_turn_event(key, &entry, true);
+            if let Ok(channel) = entry.channel.lock() { if let Some(channel) = channel.as_ref() { let _ = channel.send(event); } }
+        }
     }
 
     fn attach_output(
@@ -1032,10 +1092,18 @@ impl ActiveGroupTurns {
         let event = group_turn_event(key, &turn, true);
         if let Ok(feed) = turn.chat_feed.lock() { if let Some(feed) = feed.as_ref() { feed(&event); } }
         let _ = channel.send(event);
-        Ok(Some(json!({
+        let mut snapshot = json!({
             "ownerType": key.owner_type, "ownerId": key.owner_id,
             "topicId": key.topic_id, "turnId": turn.turn_id,
-        })))
+        });
+        if let Ok(session) = turn.session.lock() {
+            if let Some(session) = session.as_ref() {
+                if let Ok(Value::Object(extra)) = session.snapshot().and_then(|snapshot| serde_json::to_value(snapshot).map_err(|e| e.to_string())) {
+                    if let Some(snapshot) = snapshot.as_object_mut() { snapshot.extend(extra); }
+                }
+            }
+        }
+        Ok(Some(snapshot))
     }
 }
 
@@ -1046,6 +1114,15 @@ pub(crate) struct ActiveGroupTurnLease {
 }
 
 impl ActiveGroupTurnLease {
+    pub(crate) fn start_session(&self, trigger: &'static str, force_continue: bool) -> Result<Arc<crate::vcp_modules::group::group_session::GroupSession>, String> {
+        let turn = self.turns.get(&self.key).ok_or("群聊执行租约已经释放")?;
+        let mut slot = turn.session.lock().map_err(|e| e.to_string())?;
+        if slot.is_some() { return Err("群聊会话已经启动".into()); }
+        let session = crate::vcp_modules::group::group_session::GroupSession::new(turn.turn_id.to_string(), self.cancellation_token.clone(), trigger, force_continue);
+        *slot = Some(session.clone());
+        Ok(session)
+    }
+
     pub(crate) fn set_origin_user_message(&self, id: &str) -> Result<(), String> {
         if let Some(turn) = self.turns.get(&self.key) {
             *turn.origin_user_message_id.lock().map_err(|error| error.to_string())? = Some(id.to_string());
@@ -1104,6 +1181,12 @@ impl ActiveGroupTurnLease {
 impl Drop for ActiveGroupTurnLease {
     fn drop(&mut self) {
         if let Some((_, turn)) = self.turns.remove(&self.key) {
+            if let Ok(session) = turn.session.lock() {
+                if let Some(session) = session.as_ref() {
+                    session.close(if self.cancellation_token.is_cancelled() { Some("cancelled_by_user".into()) } else { None });
+                    session.released.cancel();
+                }
+            }
             let event = group_turn_event(&self.key, &turn, false);
             if let Ok(feed) = turn.chat_feed.lock() { if let Some(feed) = feed.as_ref() { feed(&event); } }
             if let Ok(channel) = turn.channel.lock() {
@@ -1116,6 +1199,14 @@ impl Drop for ActiveGroupTurnLease {
 }
 
 fn group_turn_event(key: &TopicKey, turn: &ActiveGroupTurnEntry, active: bool) -> StreamEvent {
+    let mut chunk = json!({ "active": active });
+    if let Ok(session) = turn.session.lock() {
+        if let Some(session) = session.as_ref() {
+            if let Ok(Value::Object(extra)) = session.snapshot().and_then(|snapshot| serde_json::to_value(snapshot).map_err(|e| e.to_string())) {
+                if let Some(chunk) = chunk.as_object_mut() { chunk.extend(extra); }
+            }
+        }
+    }
     StreamEvent {
         r#type: "group_turn".to_string(),
         context: Some(json!({
@@ -1123,7 +1214,7 @@ fn group_turn_event(key: &TopicKey, turn: &ActiveGroupTurnEntry, active: bool) -
             "topicId": key.topic_id, "turnId": turn.turn_id,
             "originUserMessageId": turn.origin_user_message_id.lock().ok().and_then(|id| id.clone()),
         })),
-        chunk: Some(json!({ "active": active })),
+        chunk: Some(chunk),
         consumer_revision: next_consumer_revision(),
         ..Default::default()
     }

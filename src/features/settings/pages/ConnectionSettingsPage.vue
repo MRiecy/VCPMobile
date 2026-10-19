@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { useSettingsStore } from '../../../core/stores/settings';
+import { useAssistantStore } from '../../../core/stores/assistant';
+import { useNotificationStore } from '../../../core/stores/notification';
 import { buildSettingsUpdate } from '../../../core/config/fields';
 import SettingsSection from '../../../components/settings/SettingsSection.vue';
 import VcpCoreSettingsSection from '../components/VcpCoreSettingsSection.vue';
@@ -47,16 +49,26 @@ const applyImport = async (backup: ParsedConfigBackup): Promise<BackupImportResu
     const settled = await session.settlePending();
     if (!settled.ok) throw new Error(settled.error);
     if (!props.active) throw new Error('设置页面已关闭');
-    return await applyConfigBackup(backup, async (changes) => {
+    return await applyConfigBackup(backup, async (changes, groupPreferences) => {
       const snapshot = settingsStore.snapshot;
       if (!snapshot) throw new Error('配置尚未加载');
-      const result = await settingsStore.updateSettings(buildSettingsUpdate(snapshot, changes));
+      const result = await settingsStore.importBackup(buildSettingsUpdate(snapshot, changes), groupPreferences);
       if (result.status !== 'saved') {
         const issues = result.status === 'rejected' ? result.issues : result.conflicts;
         throw new Error(issues.map(issue => `${issue.domain}.${issue.field}: ${issue.message}`).join('\n'));
       }
       if (props.active) {
         session.acceptImport(CONNECTION_FIELDS.filter((key) => Object.prototype.hasOwnProperty.call(changes, key)));
+      }
+      if (Object.keys(groupPreferences).length) {
+        try {
+          await useAssistantStore().fetchAgentsAndGroups();
+        } catch {
+          useNotificationStore().addNotification({
+            type: 'warning', title: '配置已导入',
+            message: '群聊本机设置已保存，列表暂未刷新；请重新打开群聊。', toastOnly: true,
+          });
+        }
       }
     });
   } finally {
@@ -76,7 +88,7 @@ defineExpose({
       <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading" @click="reload">重试</button>
     </p>
     <template v-if="draft">
-      <SettingsDomainIssues :domains="session.domainIssues.value" :errors="session.fieldErrors.value" :fields="CONNECTION_FIELDS" :disabled="disabled" :repair="session.repairDomain" @reset="session.resetField" />
+      <SettingsDomainIssues :domains="session.domainIssues.value" :errors="session.fieldErrors.value" :fields="CONNECTION_FIELDS" />
       <SettingsSection title="核心连接">
         <VcpCoreSettingsSection :settings="draft" :active="active" :disabled="disabled" :commit="commitForAction" @edit="edit" />
       </SettingsSection>

@@ -7,6 +7,13 @@ import { settingsPages } from '@/features/settings/catalog';
 import type { SettingsPageEntry } from '@/features/settings/contracts';
 import { useModalHistory } from '@/core/composables/useModalHistory';
 import { useDeveloperSettingsStore } from '@/features/settings/developer/store';
+import { useSettingsStore } from '@/core/stores/settings';
+import { makeConfigSnapshot, makeSettings } from '../../helpers/config';
+import { emitTauriEvent, mockInvoke } from '../../mocks/tauri';
+import type { ConfigSaveResult } from '@/core/config/generated/config';
+
+const { confirm } = vi.hoisted(() => ({ confirm: vi.fn() }));
+vi.mock('@/core/stores/overlay', () => ({ useOverlayStore: () => ({ showConfirm: confirm }) }));
 
 vi.mock('@/features/settings/catalog', () => ({ settingsPages: [] }));
 vi.mock('@/core/stores/theme', () => ({
@@ -87,6 +94,8 @@ describe('SettingsView page loading and retained transitions', () => {
     wrapper = null;
     activeChanges.length = 0;
     beforeLeave.mockResolvedValue(true);
+    confirm.mockReset();
+    confirm.mockResolvedValue(false);
     window.history.replaceState({ vcpRoot: true, vcpMain: true }, '', '#/chat');
     vi.spyOn(window.history, 'back').mockImplementation(() => {
       window.history.replaceState({ vcpRoot: true, vcpMain: true }, '');
@@ -95,6 +104,76 @@ describe('SettingsView page loading and retained transitions', () => {
   });
 
   afterEach(() => { wrapper?.unmount(); localStorage.clear(); });
+
+  function damagedServer(revision = '1') {
+    const snapshot = makeConfigSnapshot(makeSettings({ 'server.adminUsername': 'admin' }), revision);
+    snapshot.domains.server.health = 'recovered';
+    snapshot.domains.server.issues = [{ domain: 'server', field: 'url', code: 'invalidType', message: '连接地址类型无效' }];
+    return snapshot;
+  }
+
+  it('confirms the entire server domain and requires a new explicit action after a revision conflict', async () => {
+    mockInvoke('read_settings', () => damagedServer());
+    await useSettingsStore().fetchSettings();
+    const newer = damagedServer('2');
+    const reset = vi.fn((): ConfigSaveResult => ({ status: 'conflict', snapshot: newer, conflicts: [
+      { domain: 'server', field: '', code: 'revisionConflict', message: '配置已变化，请重新确认重置范围' },
+    ] }));
+    mockInvoke('reset_settings_domain', reset);
+    let accept!: (value: boolean) => void;
+    confirm.mockImplementationOnce(() => new Promise<boolean>(resolve => { accept = resolve; }));
+    const shell = mountShell();
+    await shell.findAll('button').find(button => button.text() === '将主服务器整组恢复默认值')!.trigger('click');
+    expect(confirm).toHaveBeenCalledWith(expect.objectContaining({
+      message: expect.stringContaining('管理员账号密码、图床密钥'),
+    }));
+    emitTauriEvent('vcp-config-changed', newer);
+    accept(true);
+    await flushPromises();
+    expect(reset).toHaveBeenCalledExactlyOnceWith({ request: { domain: 'server', expectedRevision: '1' } });
+    expect(shell.text()).toContain('配置已变化，请重新确认重置范围');
+
+    const restored = makeConfigSnapshot(makeSettings(), '3');
+    reset.mockReturnValueOnce({ status: 'saved', snapshot: restored });
+    confirm.mockResolvedValueOnce(true);
+    await shell.findAll('button').find(button => button.text() === '将主服务器整组恢复默认值')!.trigger('click');
+    await flushPromises();
+    expect(reset).toHaveBeenLastCalledWith({ request: { domain: 'server', expectedRevision: '2' } });
+    expect(reset).toHaveBeenCalledTimes(2);
+    expect(shell.text()).not.toContain('将主服务器整组恢复默认值');
+  });
+
+  it.each(['cancel', 'navigate', 'close'])('does not reset after confirmation loses its home context: %s', async (change) => {
+    mockInvoke('read_settings', () => damagedServer());
+    await useSettingsStore().fetchSettings();
+    const reset = vi.fn();
+    mockInvoke('reset_settings_domain', reset);
+    let accept!: (value: boolean) => void;
+    confirm.mockImplementationOnce(() => new Promise<boolean>(resolve => { accept = resolve; }));
+    const shell = mountShell(catalogEntry(async () => Page));
+    await shell.findAll('button').find(button => button.text() === '将主服务器整组恢复默认值')!.trigger('click');
+    if (change === 'navigate') await shell.get('.settings-row').trigger('click');
+    if (change === 'close') {
+      await shell.setProps({ isOpen: false });
+      await shell.setProps({ isOpen: true });
+    }
+    accept(change !== 'cancel');
+    await flushPromises();
+    expect(reset).not.toHaveBeenCalled();
+  });
+
+  it('offers a home reload after a failed read and then displays the real domain issue', async () => {
+    mockInvoke('read_settings', () => { throw new Error('storage unavailable'); });
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    await expect(useSettingsStore().fetchSettings()).rejects.toThrow('storage unavailable');
+    const shell = mountShell();
+    expect(shell.text()).toContain('storage unavailable');
+    mockInvoke('read_settings', () => damagedServer());
+    await shell.findAll('button').find(button => button.text() === '重新加载')!.trigger('click');
+    await flushPromises();
+    expect(shell.text()).not.toContain('storage unavailable');
+    expect(shell.text()).toContain('将主服务器整组恢复默认值');
+  });
 
   it('keeps developer tools out of the root list and enters them only from an unlocked about visit', async () => {
     const developer = useDeveloperSettingsStore();
@@ -116,7 +195,9 @@ describe('SettingsView page loading and retained transitions', () => {
     await flushPromises();
     expect(shell.find('[data-testid="about-body"]').exists()).toBe(true);
     expect(useModalHistory().modalStackLength()).toBe(1);
-    await shell.findAll('[data-testid="about-body"] button').find((button) => button.text() === '关于返回')!.trigger('click');
+    // The previous About surface can remain mounted during its leave transition.
+    await vi.waitFor(() => expect(shell.findAll('[data-testid="about-body"]')).toHaveLength(1));
+    await shell.findAll('[data-testid="about-body"] button:not(:disabled)').find((button) => button.text() === '关于返回')!.trigger('click');
     await flushPromises();
     expect(useModalHistory().modalStackLength()).toBe(0);
   });

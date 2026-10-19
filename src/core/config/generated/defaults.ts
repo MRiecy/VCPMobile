@@ -63,6 +63,26 @@ export const SETTINGS_DEFAULTS: Settings = {
       "playbackOnsetMs": 192
     }
   },
+  "jev": {
+    "enabled": false,
+    "provider": "typesafe",
+    "typesafe": {
+      "apiUrl": "https://api.typesafe.ai/v1/systemone",
+      "apiKey": "",
+      "model": "jev-latest"
+    },
+    "openrouter": {
+      "apiUrl": "https://openrouter.ai/api/alpha/decisions",
+      "apiKey": "",
+      "model": "~typesafe/jev-latest"
+    },
+    "timeoutMs": 30000,
+    "maxRetries": 2,
+    "retryBaseDelayMs": 500,
+    "proxyUrl": "",
+    "httpReferer": "",
+    "appTitle": "VCPMobile"
+  },
   "navigation": {
     "agentOrder": [],
     "groupOrder": []

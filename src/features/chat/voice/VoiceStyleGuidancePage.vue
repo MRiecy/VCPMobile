@@ -28,8 +28,7 @@ defineExpose({ beforeLeave });
     <p v-else-if="!draft && loading" role="status" class="m-0 text-sm text-[var(--secondary-text)]">正在加载风格指导…</p>
     <p v-if="saving || leaving" role="status" class="m-0 text-xs text-[var(--secondary-text)]">正在保存风格指导…</p>
 
-    <SettingsDomainIssues :domains="session.domainIssues.value" :errors="session.fieldErrors.value" :fields="VOICE_STYLE_GUIDANCE_FIELDS"
-      :disabled="disabled || saving" :repair="session.repairDomain" @reset="session.resetField" />
+    <SettingsDomainIssues :domains="session.domainIssues.value" :errors="session.fieldErrors.value" :fields="VOICE_STYLE_GUIDANCE_FIELDS" />
     <template v-if="draft">
       <p class="m-0 text-xs leading-relaxed text-[var(--secondary-text)]">
         适用于预置音色与样本复刻的通话回复。两项规则换行拼接为同一个注入块，固定放在上下文末尾。

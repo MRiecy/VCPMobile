@@ -13,12 +13,14 @@ import { triggerMessageHaptic } from "../utils/nativeHaptics";
 import { useVoiceCallStore } from "../../features/chat/voice/voiceCallStore";
 import type {
   ActiveGenerationDto,
+  ActiveGroupTurnDto,
   AuroraRecoverySnapshot,
   ChatMessage,
   ContentBlock,
   MarkdownNode,
   MessageShell,
   InterruptRequestDto,
+  GroupTurnSnapshotDto,
   ReconnectChatStreamsDto,
   StreamBlock,
   StreamEventDto,
@@ -109,7 +111,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   >();
   const streamConsumerRevisions = new Map<string, number>();
   const conversationOperations = reactive(new Map<string, number>());
-  const activeGroupTurns = reactive(new Map<string, string>());
+  const activeGroupTurns = reactive(new Map<string, ActiveGroupTurnDto>());
   const groupConsumerRevisions = new Map<string, number>();
   const activeRequests = reactive(new Map<string, Set<string>>());
   const requestConsumerRevisions = new Map<string, number>();
@@ -724,6 +726,12 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     return activeGroupTurns.has(key) || Boolean(sessionActiveStreams.value[key]?.length);
   });
 
+  const currentGroupTurn = computed(() => {
+    const key = sessionStore.currentConversationKey;
+    if (!key || key.ownerType !== "group") return null;
+    return activeGroupTurns.get(conversationMapKey(key.ownerId, "group", key.topicId)) ?? null;
+  });
+
   // 全局流消息池上限，防止极端场景下 OOM
   const MAX_STREAM_MESSAGES = 100;
 
@@ -874,10 +882,27 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       if (event.consumerRevision < previousRevision) return;
       receiptEventConversations?.add(conversationKey);
       groupConsumerRevisions.set(conversationKey, event.consumerRevision);
-      const activity = event.chunk as { active?: boolean } | null;
-      if (activity?.active === true) activeGroupTurns.set(conversationKey, ctx.turnId);
-      else if (activity?.active === false && activeGroupTurns.get(conversationKey) === ctx.turnId) {
+      const activity = event.chunk as (GroupTurnSnapshotDto & { active?: boolean }) | null;
+      const previousTurn = activeGroupTurns.get(conversationKey);
+      if (previousTurn?.turnId === ctx.turnId && activity?.revision !== undefined
+        && previousTurn.revision !== undefined && activity.revision < previousTurn.revision) return;
+      if (activity?.active === true) {
+        activeGroupTurns.set(conversationKey, {
+          ...activity, ownerId, ownerType: "group", topicId, turnId: ctx.turnId,
+        });
+      } else if (activity?.active === false && previousTurn?.turnId === ctx.turnId) {
         activeGroupTurns.delete(conversationKey);
+      }
+      if (activity?.active === false && activity.stopReason === "error" && !ctx.replayed
+        && (!previousTurn || previousTurn.turnId === ctx.turnId)) {
+        useNotificationStore().addNotification({
+          id: `group-session-error:${conversationKey}:${ctx.turnId}`,
+          oncePerWebview: true,
+          type: "error",
+          title: "群聊已停止",
+          message: activity.error || "群聊决策或发言失败，请检查配置后继续。",
+          duration: 6000,
+        });
       }
       return;
     }
@@ -1485,13 +1510,13 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         }
 
         const liveTurns = new Map(receipt.groupTurns.map(turn => [
-          conversationMapKey(turn.ownerId, "group", turn.topicId), turn.turnId,
+          conversationMapKey(turn.ownerId, "group", turn.topicId), turn,
         ]));
         for (const key of activeGroupTurns.keys()) {
           if (!eventConversations.has(key) && !liveTurns.has(key)) activeGroupTurns.delete(key);
         }
-        for (const [key, turnId] of liveTurns) {
-          if (!eventConversations.has(key)) activeGroupTurns.set(key, turnId);
+        for (const [key, turn] of liveTurns) {
+          if (!eventConversations.has(key)) activeGroupTurns.set(key, turn);
         }
 
         const liveRequestKeys = new Set<string>();
@@ -1616,6 +1641,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     isMessageActiveInSession,
     getActiveStreamMessage,
     isGroupGenerating,
+    currentGroupTurn,
     beginConversationOperation,
     isConversationBusy,
     isConversationPreparing,

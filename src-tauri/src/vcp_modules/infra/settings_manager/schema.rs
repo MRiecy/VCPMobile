@@ -75,14 +75,16 @@ fn collect_fields(
                 | (ConfigDomain::Sync, "token")
                 | (ConfigDomain::Distributed, "vcpKey")
                 | (ConfigDomain::Voice, "connection.apiKey")
+                | (ConfigDomain::Jev, "typesafe.apiKey" | "openrouter.apiKey" | "proxyUrl")
         ),
         validation_group: prefix.into(),
         effect: match domain {
             ConfigDomain::Log | ConfigDomain::Distributed => ConfigEffect::Reconnect,
             ConfigDomain::Sync => ConfigEffect::NextSync,
-            ConfigDomain::Identity | ConfigDomain::Server | ConfigDomain::Conversation => {
-                ConfigEffect::NextRequest
-            }
+            ConfigDomain::Identity
+            | ConfigDomain::Server
+            | ConfigDomain::Conversation
+            | ConfigDomain::Jev => ConfigEffect::NextRequest,
             ConfigDomain::Navigation => ConfigEffect::Immediate,
             ConfigDomain::Voice if prefix.starts_with("vad.") => ConfigEffect::NextCall,
             ConfigDomain::Voice if prefix.starts_with("connection.") => ConfigEffect::NextVoiceTask,
@@ -96,6 +98,32 @@ fn collect_fields(
         max_chars: None,
     };
     match (domain, prefix) {
+        (ConfigDomain::Jev, "provider") => field.options = serialized_options(&JevProvider::ALL),
+        (ConfigDomain::Jev, "timeoutMs") => {
+            field.min = Some(1_000);
+            field.max = Some(300_000);
+        }
+        (ConfigDomain::Jev, "maxRetries") => {
+            field.min = Some(0);
+            field.max = Some(10);
+        }
+        (ConfigDomain::Jev, "retryBaseDelayMs") => {
+            field.min = Some(1);
+            field.max = Some(30_000);
+        }
+        (
+            ConfigDomain::Jev,
+            "typesafe.apiUrl" | "openrouter.apiUrl" | "typesafe.model" | "openrouter.model",
+        ) => {
+            field.required = true;
+            field.max_chars = Some(2_048);
+        }
+        (ConfigDomain::Jev, "typesafe.apiKey" | "openrouter.apiKey") => {
+            field.max_chars = Some(32_768)
+        }
+        (ConfigDomain::Jev, "proxyUrl" | "httpReferer" | "appTitle") => {
+            field.max_chars = Some(2_048)
+        }
         (ConfigDomain::Server, "endpointMode") => {
             field.options = serialized_options(&ChatEndpointMode::ALL)
         }
@@ -140,6 +168,12 @@ fn collect_fields(
         _ => {}
     }
     match (domain, prefix) {
+        (ConfigDomain::Jev, "typesafe.apiUrl" | "typesafe.apiKey" | "typesafe.model") => {
+            field.validation_group = "typesafeConnection".into();
+        }
+        (ConfigDomain::Jev, "openrouter.apiUrl" | "openrouter.apiKey" | "openrouter.model") => {
+            field.validation_group = "openrouterConnection".into();
+        }
         (ConfigDomain::Server, "url" | "apiKey")
         | (ConfigDomain::Log, "url" | "key")
         | (ConfigDomain::Sync, "serverUrl" | "httpUrl" | "token")
@@ -327,7 +361,7 @@ pub fn project_domain(domain: ConfigDomain, raw: &Value) -> (Value, Vec<FieldIss
         .filter(|field| {
             matches!(
                 field.validation_group.as_str(),
-                "connection" | "adminCredentials"
+                "connection" | "adminCredentials" | "typesafeConnection" | "openrouterConnection"
             ) && issues.iter().any(|issue| issue.field == field.path)
         })
         .map(|field| field.validation_group.as_str())
@@ -420,6 +454,24 @@ mod tests {
                 domain_defaults(domain)
             );
         }
+    }
+
+    #[test]
+    fn jev_provider_recovery_keeps_credentials_bound_to_their_endpoint() {
+        let raw = serde_json::json!({
+            "provider":"openrouter",
+            "typesafe":{"apiKey":"official-secret"},
+            "openrouter":{"apiUrl":false,"apiKey":"router-secret"},
+            "maxRetries":0,
+        });
+        let (effective, issues) = project_domain(ConfigDomain::Jev, &raw);
+        assert_eq!(effective["typesafe"]["apiKey"], "official-secret");
+        assert_eq!(effective["openrouter"], domain_defaults(ConfigDomain::Jev)["openrouter"]);
+        assert_eq!(effective["maxRetries"], 0);
+        assert_eq!(effective["provider"], "openrouter");
+        assert!(!serde_json::to_string(&issues).unwrap().contains("secret"));
+        assert!(validate_field(ConfigDomain::Jev, "timeoutMs", &serde_json::json!(999)).iter().any(|issue| issue.code == "outOfRange"));
+        assert!(validate_field(ConfigDomain::Jev, "maxRetries", &serde_json::json!(11)).iter().any(|issue| issue.code == "outOfRange"));
     }
 
     #[test]

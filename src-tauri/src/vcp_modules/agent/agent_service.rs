@@ -760,11 +760,12 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
     }
 
     // 2. 获取 groups，同样只生成列表快照而不预热实体缓存。
-    // mode 必须随快照下发：前端邀约横条/@选择器的模式判定只读列表快照。
+    // 列表只暴露本机有效模式，实体与同步仍保留 groups.mode 的共享值。
     let group_rows = sqlx::query(
-        "SELECT g.group_id, g.name, COALESCE(g.mode, 'sequential') AS mode, av.dominant_color
+        "SELECT g.group_id, g.name, COALESCE(g.mode, 'sequential') AS mode, av.dominant_color, local.settings_json
          FROM groups g
          LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group' AND av.deleted_at IS NULL
+         LEFT JOIN group_local_settings local ON local.group_id = g.group_id
          WHERE g.owner_type = 'group' AND g.deleted_at IS NULL",
     )
     .fetch_all(&mut *tx)
@@ -799,7 +800,12 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
         let avatar_calculated_color: Option<String> = row.get("dominant_color");
         let name: String = row.get("name");
 
-        let mode: String = row.get("mode");
+        let shared_mode: String = row.get("mode");
+        let settings_json: Option<String> = row.get("settings_json");
+        let local_settings = crate::vcp_modules::group_types::parse_group_local_settings(
+            settings_json.as_deref(),
+        )?;
+        let mode = local_settings.effective_mode(&shared_mode).to_string();
         let members = group_members.remove(&group_id).unwrap_or_default();
         groups_list.push(GroupListItem {
             id: group_id,
@@ -902,6 +908,7 @@ mod cache_generation_tests {
             "CREATE TABLE agents (owner_type TEXT, agent_id TEXT, name TEXT, model TEXT, deleted_at INTEGER, PRIMARY KEY (owner_type, agent_id));
              CREATE TABLE avatars (owner_id TEXT, owner_type TEXT, dominant_color TEXT, deleted_at INTEGER);
              CREATE TABLE groups (owner_type TEXT, group_id TEXT, name TEXT, mode TEXT, deleted_at INTEGER, PRIMARY KEY (owner_type, group_id));
+             CREATE TABLE group_local_settings (group_id TEXT PRIMARY KEY, settings_json TEXT NOT NULL, updated_at INTEGER NOT NULL);
              CREATE TABLE group_members (group_id TEXT, agent_id TEXT, sort_order INTEGER);
              CREATE TABLE topics (owner_type TEXT, owner_id TEXT, unread_count INTEGER, unread INTEGER, deleted_at INTEGER);",
         )
@@ -928,5 +935,18 @@ mod cache_generation_tests {
         // 历史数据 mode 可能为 NULL：必须回退 sequential 而非查询失败
         let g2 = snapshot.groups.iter().find(|g| g.id == "g2").expect("g2");
         assert_eq!(g2.mode, "sequential");
+
+        sqlx::query("INSERT INTO group_local_settings VALUES ('g1', ?, 1)")
+            .bind(r#"{"modeOverride":"jev"}"#)
+            .execute(&pool)
+            .await
+            .expect("set mobile mode");
+        let snapshot = build_assistants_snapshot(&pool).await.expect("local snapshot");
+        assert_eq!(snapshot.groups.iter().find(|g| g.id == "g1").expect("g1").mode, "jev");
+        let shared_mode: String = sqlx::query_scalar("SELECT mode FROM groups WHERE group_id = 'g1'")
+            .fetch_one(&pool)
+            .await
+            .expect("shared mode");
+        assert_eq!(shared_mode, "invite_only");
     }
 }
