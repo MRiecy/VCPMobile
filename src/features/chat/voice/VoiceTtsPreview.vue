@@ -6,9 +6,10 @@ import { Play, Square } from 'lucide-vue-next';
 import SettingsDisclosure from '../../../components/settings/SettingsDisclosure.vue';
 import VoiceTextArea from './VoiceTextArea.vue';
 import { useVoiceCallStore } from './voiceCallStore';
-import type { VoiceServiceSettings } from './settings';
+import type { VoiceConfig } from '../../../core/config/generated/config';
+import { cloneConfig } from '../../../core/config/fields';
 
-const props = defineProps<{ settings: VoiceServiceSettings; active: boolean; disabled?: boolean }>();
+const props = defineProps<{ settings: VoiceConfig; active: boolean; disabled?: boolean }>();
 const voiceCall = useVoiceCallStore();
 const text = ref('你好，很高兴和你聊天。我们慢慢说，一起把事情理清楚。');
 const busy = ref(false);
@@ -37,7 +38,7 @@ const toggle = async () => {
   busy.value = true;
   feedback.value = '';
   // Freeze the visible draft before any asynchronous admission.
-  const settings = { ...props.settings };
+  const settings = cloneConfig({ connection: props.settings.connection, tts: props.settings.tts });
   const previewText = text.value.trim();
   try {
     const unlisten = await listen<{ ttsId: string; kind: string; stage: string; message?: string }>('vcp-tts', event => {

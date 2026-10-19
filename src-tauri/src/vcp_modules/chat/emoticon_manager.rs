@@ -1,5 +1,5 @@
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
+use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -186,11 +186,11 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
 
     // 1. 获取配置
     let settings_state = app_handle.state::<SettingsState>();
-    let settings = read_settings(app_handle.clone(), settings_state).await?;
-    let vcp_server_url = settings.vcp_server_url;
-    let admin_user = settings.admin_username;
-    let admin_pass = settings.admin_password;
-    let file_key = settings.file_key;
+    let settings = read_config(app_handle.clone(), settings_state).await?;
+    let vcp_server_url = &settings.server.url;
+    let admin_user = &settings.server.admin_username;
+    let admin_pass = &settings.server.admin_password;
+    let file_key = &settings.server.file_key;
 
     if vcp_server_url.is_empty() {
         return Err("VCP Server URL is empty in settings".to_string());
@@ -203,7 +203,7 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
     }
 
     // 2. 构造基础 URL (去除末尾斜杠并规范化)
-    let base_url = if let Ok(u) = Url::parse(&vcp_server_url) {
+    let base_url = if let Ok(u) = Url::parse(vcp_server_url) {
         let scheme = u.scheme();
         let host = u.host_str().unwrap_or("");
         if let Some(port) = u.port() {
@@ -223,7 +223,7 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
 
     let mut req = client.get(&api_url);
     if !admin_user.is_empty() && !admin_pass.is_empty() {
-        req = req.basic_auth(&admin_user, Some(&admin_pass));
+        req = req.basic_auth(admin_user, Some(admin_pass));
     }
     let resp = req
         .send()

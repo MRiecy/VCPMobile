@@ -7,6 +7,7 @@ import SettingsActionWithStatus from "../../../components/settings/SettingsActio
 import VcpConfirm from "../../../components/ui/VcpConfirm.vue";
 import {
   exportConfigBackup,
+  captureBackupDomains,
   pickConfigBackup,
   configBackupScopes,
   unavailableBackupTheme,
@@ -40,8 +41,10 @@ const onExport = async () => {
     const saved = await props.commit();
     if (disposed || !props.active) return;
     if (!saved.ok) throw new Error(saved.error);
+    const domains = await captureBackupDomains();
+    if (disposed || !props.active) return;
     exportOperationId = `config_export_${crypto.randomUUID()}`;
-    const result = await exportConfigBackup(saved.snapshot, exportOperationId);
+    const result = await exportConfigBackup(domains, exportOperationId);
     if (disposed || !props.active) return;
     exportStatus.value = {
       type: "success",
@@ -157,7 +160,7 @@ const confirmImport = async () => {
   <div class="space-y-5 px-1">
     <SettingsActionWithStatus
       title="导出配置"
-      description="备份身份与连接、分布式、主题、聊天偏好和话题总结模型"
+      description="备份身份、连接、语音、分布式、主题、聊天偏好和话题总结模型"
       button-variant="primary"
       button-label="导出"
       :button-loading="exportStatus.type === 'loading'"
@@ -176,7 +179,7 @@ const confirmImport = async () => {
 
     <SettingsActionWithStatus
       title="导入配置"
-      description="恢复 .vcpcfg.json 配置备份，也支持旧版 .vcpcfg 文件"
+      description="恢复 .vcpcfg.json 配置备份，未包含的选项保持当前值"
       button-variant="secondary"
       button-label="导入"
       :button-loading="importStatus.type === 'loading' || importing"
@@ -189,6 +192,9 @@ const confirmImport = async () => {
 
     <p class="text-[10px] opacity-40 px-1 italic">
       * 备份文件为明文 JSON，包含 API Key 与密码，请勿分享给他人
+    </p>
+    <p class="text-xs text-[var(--secondary-text)] px-1 leading-relaxed">
+      复刻音频文件不包含在备份中；更换设备后需重新导入参考音频。
     </p>
 
   </div>

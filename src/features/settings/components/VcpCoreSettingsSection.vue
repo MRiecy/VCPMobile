@@ -45,8 +45,8 @@ let disposed = false;
 const scheduleEndpointPreview = () => {
   if (previewTimer) clearTimeout(previewTimer);
   const generation = ++previewGeneration;
-  const vcpUrl = props.settings.vcpServerUrl;
-  const chatEndpointMode = props.settings.chatEndpointMode;
+  const vcpUrl = props.settings['server.url'];
+  const chatEndpointMode = props.settings['server.endpointMode'];
   endpointPreview.value = null;
   endpointPreviewError.value = '';
   if (!vcpUrl || !props.active || disposed) return;
@@ -67,7 +67,7 @@ const scheduleEndpointPreview = () => {
 };
 
 watch(
-  [() => props.settings.vcpServerUrl, () => props.settings.chatEndpointMode, () => props.active],
+  [() => props.settings['server.url'], () => props.settings['server.endpointMode'], () => props.active],
   scheduleEndpointPreview,
   { immediate: true },
 );
@@ -80,7 +80,7 @@ onUnmounted(() => {
 });
 
 watch(
-  [() => props.settings.vcpServerUrl, () => props.settings.vcpApiKey, () => props.settings.chatEndpointMode, () => props.active],
+  [() => props.settings['server.url'], () => props.settings['server.apiKey'], () => props.settings['server.endpointMode'], () => props.active],
   () => {
     testGeneration += 1;
     vcpPingStatus.value = { type: null, message: '' };
@@ -105,11 +105,11 @@ const testVcpConnection = async () => {
     if (disposed || !props.active || generation !== testGeneration) return;
     if (!saved.ok) throw new Error(saved.error);
     const snapshot = saved.snapshot;
-    if (!snapshot.vcpServerUrl) throw new Error('请先输入 Chat 服务器 URL');
+    if (!snapshot.server.url) throw new Error('请先输入 Chat 服务器 URL');
     const res = await invoke<VcpConnectionTestResult>('test_vcp_connection', {
-      vcpUrl: snapshot.vcpServerUrl,
-      vcpApiKey: snapshot.vcpApiKey,
-      chatEndpointMode: snapshot.chatEndpointMode,
+      vcpUrl: snapshot.server.url,
+      vcpApiKey: snapshot.server.apiKey,
+      chatEndpointMode: snapshot.server.endpointMode,
     });
 
     if (disposed || !props.active || generation !== testGeneration) return;
@@ -132,8 +132,8 @@ const testVcpConnection = async () => {
 
 <template>
   <div class="space-y-5 px-1">
-    <SettingsTextField :model-value="settings.vcpServerUrl" :disabled="disabled"
-      @update:model-value="emit('edit', { vcpServerUrl: $event })" label="Chat 服务器 URL (HTTP/HTTPS)"
+    <SettingsTextField :model-value="settings['server.url']" :disabled="disabled"
+      @update:model-value="emit('edit', { 'server.url': $event })" label="Chat 服务器 URL (HTTP/HTTPS)"
       placeholder="https://vcp-endpoint.com" />
 
     <fieldset class="border-t border-black/5 dark:border-white/5 pt-3">
@@ -145,19 +145,19 @@ const testVcpConnection = async () => {
           type="button"
           role="radio"
           :disabled="disabled"
-          :aria-checked="settings.chatEndpointMode === option.value"
+          :aria-checked="settings['server.endpointMode'] === option.value"
           class="relative w-full py-3 pl-3 pr-2 text-left transition-colors active:bg-black/5 dark:active:bg-white/5"
-          @click="emit('edit', { chatEndpointMode: option.value })"
+          @click="emit('edit', { 'server.endpointMode': option.value })"
         >
           <span class="absolute left-0 top-2 bottom-2 w-0.5 bg-blue-500 transition-opacity"
-            :class="settings.chatEndpointMode === option.value ? 'opacity-100' : 'opacity-0'"></span>
+            :class="settings['server.endpointMode'] === option.value ? 'opacity-100' : 'opacity-0'"></span>
           <span class="flex items-center justify-between gap-3">
             <span class="min-w-0">
               <span class="block text-sm font-semibold">{{ option.title }}</span>
               <span class="mt-0.5 block text-[11px] leading-4 opacity-50">{{ option.description }}</span>
             </span>
             <span class="h-3.5 w-3.5 shrink-0 rounded-full border"
-              :class="settings.chatEndpointMode === option.value
+              :class="settings['server.endpointMode'] === option.value
                 ? 'border-blue-500 bg-blue-500'
                 : 'border-black/20 dark:border-white/25'"></span>
           </span>
@@ -179,16 +179,16 @@ const testVcpConnection = async () => {
       </p>
     </div>
 
-    <SettingsTextField :model-value="settings.vcpApiKey" :disabled="disabled"
-      @update:model-value="emit('edit', { vcpApiKey: $event })" is-secure label="API Key" placeholder="输入 API Key" />
+    <SettingsTextField :model-value="settings['server.apiKey']" :disabled="disabled"
+      @update:model-value="emit('edit', { 'server.apiKey': $event })" is-secure label="API Key" placeholder="输入 API Key" />
 
     <div class="border-t border-black/5 dark:border-white/5 pt-2"></div>
 
-    <SettingsTextField :model-value="settings.vcpLogUrl" :disabled="disabled"
-      @update:model-value="emit('edit', { vcpLogUrl: $event })" label="VCP WebSocket 服务器 URL" placeholder="ws://localhost:6005"
+    <SettingsTextField :model-value="settings['log.url']" :disabled="disabled"
+      @update:model-value="emit('edit', { 'log.url': $event })" label="VCP WebSocket 服务器 URL" placeholder="ws://localhost:6005"
       mono />
-    <SettingsTextField :model-value="settings.vcpLogKey" :disabled="disabled"
-      @update:model-value="emit('edit', { vcpLogKey: $event })" is-secure label="VCP WebSocket 鉴权 Key"
+    <SettingsTextField :model-value="settings['log.key']" :disabled="disabled"
+      @update:model-value="emit('edit', { 'log.key': $event })" is-secure label="VCP WebSocket 鉴权 Key"
       placeholder="输入 WebSocket Key" mono />
 
     <SettingsActionWithStatus

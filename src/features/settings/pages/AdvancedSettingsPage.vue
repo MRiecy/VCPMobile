@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, ref, watch } from 'vue';
 import SettingsSection from '../../../components/settings/SettingsSection.vue';
+import SettingsDomainIssues from '../editing/SettingsDomainIssues.vue';
 import TopicSummarySection from '../components/TopicSummarySection.vue';
 import MaintenanceSection from '../components/MaintenanceSection.vue';
 import { SUMMARY_FIELDS } from '../editing/fieldSets';
@@ -21,7 +22,7 @@ const openSelector = () => {
 };
 const setModel = (value: string) => {
   if (disabled.value) return;
-  session.edit('topicSummaryModel', value);
+  session.edit('conversation.topicSummaryModel', value);
   void session.save();
 };
 const save = () => { if (!disabled.value) void session.save(); };
@@ -31,12 +32,14 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
 
 <template>
   <div class="flex flex-col gap-6">
+    <SettingsDomainIssues :domains="session.domainIssues.value" :errors="session.fieldErrors.value" :fields="SUMMARY_FIELDS"
+      :disabled="disabled || session.saving.value" :repair="session.repairDomain" @reset="session.resetField" />
     <p v-if="error" role="alert" class="text-sm text-red-500 break-words">
       {{ error }}
       <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading" @click="reload">重试</button>
     </p>
     <SettingsSection v-if="draft" title="话题总结">
-      <TopicSummarySection :model-value="draft.topicSummaryModel" :disabled="disabled"
+      <TopicSummarySection :model-value="draft['conversation.topicSummaryModel']" :disabled="disabled"
         @update:model-value="setModel" @save="save" @open-model-selector="openSelector" />
     </SettingsSection>
     <p v-else-if="loading" class="text-sm opacity-60">正在加载设置...</p>
@@ -45,6 +48,6 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
     </SettingsSection>
     <p v-if="leaving" role="status" class="text-xs opacity-60">正在保存设置...</p>
     <ModelSelector v-if="selectorMounted && active" v-model="showSelector"
-      :current-model="draft?.topicSummaryModel" title="选择总结专用模型" @select="setModel" />
+      :current-model="draft?.['conversation.topicSummaryModel']" title="选择总结专用模型" @select="setModel" />
   </div>
 </template>

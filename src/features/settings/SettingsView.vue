@@ -10,6 +10,10 @@ import FluidBackground from "../../components/ui/WebGLFluidBackground.vue";
 import { settingsPages } from "./catalog";
 import { useSettingsNavigation } from "./useSettingsNavigation";
 import { useDeveloperSettingsStore } from './developer/store';
+import { SETTINGS_FIELDS } from '../../core/config/generated/metadata';
+import type { SettingsFieldPath } from '../../core/config/fields';
+import { useSettingsEditSession } from './editing/useSettingsEditSession';
+import SettingsDomainIssues from './editing/SettingsDomainIssues.vue';
 
 const props = withDefaults(
   defineProps<{
@@ -43,6 +47,13 @@ const openDeveloper = () => { if (developerSettings.enabled) openDeveloperPage()
 const displayedPage = computed(() => settingsPages.find((page) => page.id === displayedVisit.value?.id));
 const subPageTitle = computed(() => settingsPages.find((page) => page.id === activeVisit.value?.id)?.title || "");
 const pageActive = computed(() => props.isOpen && activeVisit.value === displayedVisit.value && !!activeVisit.value);
+const recoveryFields = SETTINGS_FIELDS.map(field => `${field.domain}.${field.path}` as SettingsFieldPath);
+const recovery = useSettingsEditSession(recoveryFields);
+const resetRecoveredField = (field: SettingsFieldPath) => {
+  if (!props.isOpen || activeVisit.value || recovery.saving.value) return;
+  recovery.resetField(field);
+  void recovery.save();
+};
 // Outer close retains the current picture; its own after-leave releases the child.
 const pageVisible = computed(() => !!activeVisit.value || !props.isOpen);
 
@@ -164,6 +175,10 @@ onScopeDispose(() => fluidBgRef.value?.setActive(false));
         <!-- 主页 -->
         <div :inert="!!displayedVisit || !props.isOpen"
           class="h-full overflow-y-auto px-3 pt-8 pb-safe flex flex-col no-rubber-band">
+          <SettingsDomainIssues class="mb-4" :domains="recovery.domainIssues.value" :errors="recovery.fieldErrors.value"
+            :fields="recoveryFields" :disabled="!props.isOpen || !!displayedVisit || recovery.saving.value"
+            :repair="recovery.repairDomain" @reset="resetRecoveredField" />
+          <p v-if="recovery.error.value && !recovery.fieldErrors.value.length" role="alert" class="text-sm text-red-500">{{ recovery.error.value }}</p>
           <SettingsCard>
             <div class="divide-y divide-black/5 dark:divide-white/5">
               <SettingsRow

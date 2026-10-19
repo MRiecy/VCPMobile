@@ -839,7 +839,7 @@ pub async fn regenerate_topic_response(
     // 3. 在写入任何墓碑前完成可确定的生成前检查。检查失败时前端重新加载
     // 历史即可恢复乐观隐藏的旧消息，无需设计墓碑撤销机制。
     let settings =
-        crate::vcp_modules::settings_manager::read_settings(app_handle.clone(), settings_state)
+        crate::vcp_modules::settings_manager::read_config(app_handle.clone(), settings_state)
             .await?;
     let connection = crate::vcp_modules::vcp_client::freeze_chat_connection(
         &settings,

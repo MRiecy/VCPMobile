@@ -229,6 +229,6 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
     </Suspense>
 
     <!-- 设备工具交互目前仅接入 Android；用户启用节点后才挂载对应监听。 -->
-    <ToolInteractionOverlay v-if="isAndroid && settingsStore.settings?.distributedEnabled" />
+    <ToolInteractionOverlay v-if="isAndroid && settingsStore.settings?.distributed.enabled" />
   </div>
 </template>

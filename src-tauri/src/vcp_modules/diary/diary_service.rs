@@ -1,5 +1,5 @@
 use super::diary_types::*;
-use crate::vcp_modules::settings_manager::{read_settings, Settings, SettingsState};
+use crate::vcp_modules::settings_manager::{read_config, Settings, SettingsState};
 use futures_util::StreamExt;
 use percent_encoding::percent_decode_str;
 use reqwest::{redirect::Policy, Client, Method, RequestBuilder, StatusCode, Url};
@@ -255,7 +255,10 @@ impl DiaryServiceState {
             let request_builder = self
                 .client
                 .get(url)
-                .basic_auth(&settings.admin_username, Some(&settings.admin_password))
+                .basic_auth(
+                    &settings.server.admin_username,
+                    Some(&settings.server.admin_password),
+                )
                 .header(reqwest::header::ACCEPT, "application/json");
             let response: SearchEnvelope = self
                 .request_json(
@@ -653,19 +656,22 @@ impl DiaryServiceState {
         Ok(self
             .client
             .request(method, url)
-            .basic_auth(&settings.admin_username, Some(&settings.admin_password))
+            .basic_auth(
+                &settings.server.admin_username,
+                Some(&settings.server.admin_password),
+            )
             .header(reqwest::header::ACCEPT, "application/json"))
     }
 
     fn admin_url(&self, settings: &Settings, suffix: &[&str]) -> Result<Url, DiaryError> {
-        let mut url = normalize_server_base(&settings.vcp_server_url)?;
+        let mut url = normalize_server_base(&settings.server.url)?;
         append_url_segments(&mut url, &["admin_api", "dailynotes"])?;
         append_url_segments(&mut url, suffix)?;
         Ok(url)
     }
 
     fn human_tool_url(&self, settings: &Settings) -> Result<Url, DiaryError> {
-        let mut url = normalize_server_base(&settings.vcp_server_url)?;
+        let mut url = normalize_server_base(&settings.server.url)?;
         append_url_segments(&mut url, &["v1", "human", "tool"])?;
         Ok(url)
     }
@@ -681,7 +687,7 @@ impl DiaryServiceState {
         let request = self
             .client
             .post(url)
-            .bearer_auth(&settings.vcp_api_key)
+            .bearer_auth(&settings.server.api_key)
             .header(reqwest::header::CONTENT_TYPE, "text/plain;charset=UTF-8")
             .header(reqwest::header::ACCEPT, "application/json")
             .body(body);
@@ -957,8 +963,8 @@ fn append_url_segments(url: &mut Url, segments: &[&str]) -> Result<(), DiaryErro
 }
 
 fn ensure_admin_config(settings: &Settings) -> Result<(), DiaryError> {
-    normalize_server_base(&settings.vcp_server_url)?;
-    if settings.admin_username.trim().is_empty() || settings.admin_password.is_empty() {
+    normalize_server_base(&settings.server.url)?;
+    if settings.server.admin_username.trim().is_empty() || settings.server.admin_password.is_empty() {
         return Err(DiaryError::new(
             DiaryErrorCode::ConfigMissing,
             "日记管理需要管理员用户名与密码",
@@ -968,8 +974,8 @@ fn ensure_admin_config(settings: &Settings) -> Result<(), DiaryError> {
 }
 
 fn ensure_bearer_config(settings: &Settings) -> Result<(), DiaryError> {
-    normalize_server_base(&settings.vcp_server_url)?;
-    if settings.vcp_api_key.trim().is_empty() {
+    normalize_server_base(&settings.server.url)?;
+    if settings.server.api_key.trim().is_empty() {
         return Err(DiaryError::new(
             DiaryErrorCode::ConfigMissing,
             "DailyNote 与 LightMemo 需要 VCP API Key",
@@ -1735,7 +1741,7 @@ fn normalize_delete_outcome(
 async fn settings_snapshot<R: Runtime>(
     app_handle: AppHandle<R>,
     settings_state: State<'_, SettingsState>,
-) -> Result<Settings, String> {
+) -> Result<std::sync::Arc<Settings>, String> {
     if app_handle
         .try_state::<crate::vcp_modules::db_manager::DbState>()
         .is_none()
@@ -1745,7 +1751,7 @@ async fn settings_snapshot<R: Runtime>(
                 .command_string(),
         );
     }
-    read_settings(app_handle, settings_state)
+    read_config(app_handle, settings_state)
         .await
         .map_err(|_| {
             DiaryError::new(DiaryErrorCode::ServiceUnavailable, "无法读取应用设置").command_string()

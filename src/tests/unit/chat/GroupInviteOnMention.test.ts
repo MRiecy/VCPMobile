@@ -8,6 +8,7 @@ import { useNotificationStore } from "@/core/stores/notification";
 import { clearInvokeMocks, invokeMock, mockInvoke } from "@/tests/mocks/tauri";
 import { useChatStreamStore } from "@/core/stores/chatStreamStore";
 import { flushPromises } from "@/tests/utils/flush";
+import { makeConfigSnapshot, makeSettings } from "@/tests/helpers/config";
 
 /**
  * invite_only 群组「提及即邀约」链路的 store 级回归测试：
@@ -28,11 +29,11 @@ const setupInviteOnlyGroup = async () => {
   ] as any;
 
   const settings = useSettingsStore();
-  settings.settings = {
-    vcpServerUrl: "http://vcp.test",
-    vcpApiKey: "key",
-    userName: "User",
-  } as any;
+  settings.snapshot = makeConfigSnapshot(makeSettings({
+    "server.url": "http://vcp.test",
+    "server.apiKey": "key",
+    "identity.userName": "User",
+  }));
 
   const session = useChatSessionStore();
   session.setConversation({ id: "g1", type: "group" }, "t1");

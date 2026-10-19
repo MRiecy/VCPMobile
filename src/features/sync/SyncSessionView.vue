@@ -196,7 +196,7 @@ const copyBuildCommand = async () => {
 };
 
 const prerenderEnabled = computed(() =>
-  settingsStore.settings?.syncPrerenderEnabled ?? false
+  settingsStore.settings?.sync.prerenderEnabled ?? false
 );
 
 const handlePrerenderToggle = async (val: boolean) => {
@@ -207,7 +207,11 @@ const handlePrerenderToggle = async (val: boolean) => {
     });
     if (!ok) return;
   }
-  settingsStore.updateSettings({ syncPrerenderEnabled: val });
+  try {
+    await settingsStore.updateFields({ 'sync.prerenderEnabled': val });
+  } catch {
+    notificationStore.addNotification({ type: 'error', title: '预渲染设置未保存', message: '配置已变化或保存失败，请重试。', toastOnly: true });
+  }
 };
 </script>
 

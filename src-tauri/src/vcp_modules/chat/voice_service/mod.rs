@@ -34,7 +34,7 @@ pub use samples::{discard_voice_clone_sample, get_voice_clone_sample, import_voi
 
 use crate::vcp_modules::settings_manager::{
     Settings, VoiceInputEncoding, VoiceTtsMode, DEFAULT_VOICE_AUDIO_TAG_RULES,
-    DEFAULT_VOICE_GUIDANCE_RULES,
+    DEFAULT_VOICE_GUIDANCE_RULES, VOICE_LANGUAGES, VOICE_TTS_VOICES,
 };
 use serde::{Deserialize, Serialize};
 
@@ -68,11 +68,11 @@ pub(crate) struct VoiceReplyPolicy {
 }
 
 impl VoiceReplyPolicy {
-    pub(crate) fn from_settings(settings: Settings) -> Self {
+    pub(crate) fn from_settings(settings: &Settings) -> Self {
         Self {
-            audio_tag_rules: settings.voice_audio_tag_rules.clone(),
-            auto_guidance: settings.voice_auto_guidance,
-            guidance_rules: settings.voice_guidance_rules.clone(),
+            audio_tag_rules: settings.voice.guidance.audio_tag_rules.clone(),
+            auto_guidance: settings.voice.guidance.auto_guidance,
+            guidance_rules: settings.voice.guidance.guidance_rules.clone(),
             config: VoiceServiceConfig::from_settings(settings),
         }
     }
@@ -104,18 +104,18 @@ pub(super) struct InputAudio {
 }
 
 impl VoiceServiceConfig {
-    pub(crate) fn from_settings(settings: Settings) -> Self {
+    pub(crate) fn from_settings(settings: &Settings) -> Self {
         Self {
-            base_url: settings.voice_api_base_url,
-            api_key: settings.voice_api_key.trim().to_string(),
-            asr_stream: settings.voice_asr_stream,
-            input_encoding: settings.voice_input_encoding,
-            tts_stream: settings.voice_tts_stream,
-            language: settings.voice_language,
-            voice: settings.voice_tts_voice,
-            tts_mode: settings.voice_tts_mode,
-            tts_style_prompt: settings.voice_tts_style_prompt,
-            clone_sample_id: settings.voice_tts_clone_sample_id,
+            base_url: settings.voice.connection.api_base_url.clone(),
+            api_key: settings.voice.connection.api_key.trim().to_string(),
+            asr_stream: settings.voice.asr.stream,
+            input_encoding: settings.voice.asr.input_encoding,
+            tts_stream: settings.voice.tts.stream,
+            language: settings.voice.asr.language.clone(),
+            voice: settings.voice.tts.voice.clone(),
+            tts_mode: settings.voice.tts.mode,
+            tts_style_prompt: settings.voice.tts.style_prompt.clone(),
+            clone_sample_id: settings.voice.tts.clone_sample_id.clone(),
         }
     }
     fn configured(&self) -> bool {
@@ -135,7 +135,7 @@ impl VoiceServiceConfig {
             return Ok(());
         }
         self.endpoint()?;
-        if !matches!(self.language.as_str(), "auto" | "zh" | "en") {
+        if !VOICE_LANGUAGES.contains(&self.language.as_str()) {
             return Err("语音识别语言配置无效。".into());
         }
         Ok(())
@@ -147,10 +147,7 @@ impl VoiceServiceConfig {
         }
         self.endpoint()?;
         if self.tts_mode == VoiceTtsMode::Builtin
-            && !matches!(
-                self.voice.as_str(),
-                "mimo_default" | "冰糖" | "茉莉" | "苏打" | "白桦" | "Mia" | "Chloe" | "Milo" | "Dean"
-            )
+            && !VOICE_TTS_VOICES.contains(&self.voice.as_str())
         {
             return Err("语音合成音色配置无效。".into());
         }
@@ -177,9 +174,9 @@ mod tests {
     #[test]
     fn narration_misconfiguration_cannot_block_asr() {
         let mut settings = Settings::default();
-        settings.voice_api_key = "fixture-key".into();
-        settings.voice_tts_voice = "invalid-voice".into();
-        let mut config = VoiceServiceConfig::from_settings(settings);
+        settings.voice.connection.api_key = "fixture-key".into();
+        settings.voice.tts.voice = "invalid-voice".into();
+        let mut config = VoiceServiceConfig::from_settings(&settings);
         assert!(config.validate_asr().is_ok());
         assert!(config.validate_tts().is_err());
         config.tts_mode = VoiceTtsMode::Clone;
@@ -195,17 +192,17 @@ mod tests {
     #[test]
     fn both_modes_share_one_injection_and_preserve_the_automatic_switch() {
         let mut settings = Settings::default();
-        settings.voice_audio_tag_rules = "标签规则".into();
-        settings.voice_guidance_rules = "指导规则".into();
+        settings.voice.guidance.audio_tag_rules = "标签规则".into();
+        settings.voice.guidance.guidance_rules = "指导规则".into();
         for mode in [VoiceTtsMode::Builtin, VoiceTtsMode::Clone] {
-            settings.voice_tts_mode = mode;
-            settings.voice_auto_guidance = true;
-            let policy = VoiceReplyPolicy::from_settings(settings.clone());
+            settings.voice.tts.mode = mode;
+            settings.voice.guidance.auto_guidance = true;
+            let policy = VoiceReplyPolicy::from_settings(&settings);
             let injection = policy.context_injection();
             assert!(injection.starts_with("标签规则\n指导规则\n"));
             assert_eq!(injection.matches("<<<[VOICE_GUIDANCE]>>>").count(), 1);
-            settings.voice_auto_guidance = false;
-            let without_automatic = VoiceReplyPolicy::from_settings(settings.clone());
+            settings.voice.guidance.auto_guidance = false;
+            let without_automatic = VoiceReplyPolicy::from_settings(&settings);
             assert_eq!(without_automatic.context_injection(), "标签规则");
             assert!(policy.auto_guidance);
         }

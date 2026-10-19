@@ -776,7 +776,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     else attachmentStore.clearStaged();
 
     const now = Date.now();
-    const userName = settingsStore.settings?.userName || "User";
+    const userName = settingsStore.settings?.identity.userName || "User";
     const userMsg: ChatMessage = {
       id: shareIdentity ? `msg_share_${shareIdentity.deliveryId}` : `msg_${now}_user_${Math.random().toString(36).substring(2, 9)}`,
       role: "user",

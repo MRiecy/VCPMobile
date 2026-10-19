@@ -6,6 +6,7 @@ const ONSET_SAMPLES: u64 = 1536; // 96 ms at 16 kHz
 const SAMPLES_PER_MS: u64 = 16;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "config-export", derive(ts_rs::TS))]
 #[serde(rename_all = "lowercase")]
 pub enum VoiceVadSensitivity {
     Low,
@@ -15,6 +16,8 @@ pub enum VoiceVadSensitivity {
 }
 
 impl VoiceVadSensitivity {
+    pub const ALL: [Self; 3] = [Self::Low, Self::Standard, Self::High];
+
     fn onset_threshold(self, playback: bool) -> f32 {
         match (self, playback) {
             (Self::Low, false) | (Self::Standard, true) => 0.7,
@@ -27,7 +30,9 @@ impl VoiceVadSensitivity {
 
 /// A microphone session's immutable VAD policy. Millisecond values are kept as
 /// entered; decisions occur on the first 32 ms frame that meets the duration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(feature = "config-export", derive(ts_rs::TS))]
+#[serde(default, rename_all = "camelCase")]
 pub struct VoiceVadConfig {
     pub sensitivity: VoiceVadSensitivity,
     pub end_silence_ms: u32,

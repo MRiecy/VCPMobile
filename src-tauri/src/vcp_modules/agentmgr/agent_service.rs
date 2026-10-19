@@ -12,7 +12,7 @@
 //! - chineseName 重复时后写覆盖先写（运行时只剩一个）。
 
 use crate::vcp_modules::infra::admin_api;
-use crate::vcp_modules::settings_manager::{read_settings, Settings, SettingsState};
+use crate::vcp_modules::settings_manager::{read_config, Settings, SettingsState};
 use reqwest::{RequestBuilder, StatusCode};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -77,8 +77,8 @@ async fn send_json(request: RequestBuilder, timeout: Duration) -> Result<Value, 
 async fn settings_of<R: Runtime>(
     app_handle: AppHandle<R>,
     settings_state: State<'_, SettingsState>,
-) -> Result<Settings, String> {
-    let settings = read_settings(app_handle, settings_state).await?;
+) -> Result<std::sync::Arc<Settings>, String> {
+    let settings = read_config(app_handle, settings_state).await?;
     admin_api::ensure_admin_config(&settings, "Agent 管理")?;
     Ok(settings)
 }

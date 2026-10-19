@@ -9,7 +9,7 @@ use crate::vcp_modules::group_context_assembler::assemble_group_context;
 use crate::vcp_modules::group_service::{read_group_config, GroupManagerState};
 use crate::vcp_modules::group_speaking_policy::determine_naturerandom_speakers;
 use crate::vcp_modules::message_service;
-use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
+use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use crate::vcp_modules::vcp_client::{
     freeze_chat_connection, message_transport_request_id, perform_vcp_request_registered,
@@ -687,7 +687,7 @@ pub async fn handle_group_chat_message(
         payload.group_id
     );
 
-    let settings = read_settings(app_handle.clone(), settings_state).await?;
+    let settings = read_config(app_handle.clone(), settings_state).await?;
     let connection = freeze_chat_connection(&settings, ChatRequestPurpose::Interactive)?;
 
     internal_process_group_chat_message(
@@ -753,7 +753,7 @@ pub async fn invite_group_member_to_speak(
         group_turn.set_origin_user_message(origin)?;
     }
     group_turn.bind_output(&app_handle, stream_channel.clone())?;
-    let settings = read_settings(app_handle.clone(), settings_state).await?;
+    let settings = read_config(app_handle.clone(), settings_state).await?;
     let connection = freeze_chat_connection(&settings, ChatRequestPurpose::Interactive)?;
 
     let group_config = read_group_config(

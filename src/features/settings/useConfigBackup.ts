@@ -6,6 +6,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { deleteTempFile } from "tauri-plugin-vcp-mobile";
 import { pickFile, withNativeFileOperation } from "../../core/utils/nativeFilePicker";
 import type { AppSettings } from "../../core/stores/settings";
+import type { SettingsFieldValues } from "../../core/config/fields";
 import { normalizeThemeModuleKey, useThemeStore, type ThemePreferences } from "../../core/stores/theme";
 import { useChatPreferencesStore } from "../chat/preferences/store";
 import type { ChatPreferences } from "../chat/preferences/model";
@@ -18,64 +19,21 @@ export const CONFIG_BACKUP_EXTENSION = ".vcpcfg.json";
 /** 导入文件大小上限（纯配置 JSON 正常仅数 KB） */
 export const MAX_BACKUP_FILE_BYTES = 1024 * 1024;
 
-/** SQLite 设置白名单；主题与聊天由各领域 owner 单独提供。 */
-export const BACKUP_SETTINGS_KEYS = [
-  // 用户身份
-  "userName",
-  "adminUsername",
-  "adminPassword",
-  // 核心连接
-  "vcpServerUrl",
-  "chatEndpointMode",
-  "vcpApiKey",
-  "vcpLogUrl",
-  "vcpLogKey",
-  // 数据同步
-  "syncHttpUrl",
-  "syncServerUrl",
-  "syncToken",
-  "fileKey",
-  // 插件中心连接
-  "distributedEnabled",
-  "distributedWsUrl",
-  "distributedVcpKey",
-  "distributedDeviceName",
-  "topicSummaryModel",
-  "voiceApiBaseUrl",
-  "voiceApiKey",
-  "voiceInputEncoding",
-  "voiceAsrStream",
-  "voiceTtsStream",
-  "voiceLanguage",
-  "voiceTtsVoice",
-  "voiceTtsMode",
-  "voiceTtsStylePrompt",
-  "voiceTtsCloneSampleId",
-  "voiceAudioTagRules",
-  "voiceAutoGuidance",
-  "voiceGuidanceRules",
-  "voiceVadSensitivity",
-  "voiceVadEndSilenceMs",
-  "voiceVadPlaybackOnsetMs",
-] as const;
-
-export type BackupSettingsKey = (typeof BACKUP_SETTINGS_KEYS)[number];
-
-/** 布尔字段单独归一化，其余白名单字段保留字符串或数值类型。 */
-const BOOLEAN_BACKUP_KEYS: ReadonlySet<string> = new Set(["distributedEnabled", "voiceAsrStream", "voiceTtsStream", "voiceAutoGuidance"]);
-const CHAT_ENDPOINT_MODES = new Set(["standard", "vcpTools", "raw"]);
+type PartialConfig<T> = { [K in keyof T]?: T[K] extends readonly unknown[] ? T[K] : T[K] extends object ? PartialConfig<T[K]> : T[K] };
+/** Rust schema owns export eligibility and import validation; no second field whitelist. */
+export type BackupDomains = PartialConfig<AppSettings>;
 
 export interface ConfigBackupFile {
   app: "vcp-mobile";
   kind: typeof CONFIG_BACKUP_KIND;
   version: number;
   exportedAt: string;
-  settings: Partial<AppSettings>;
+  domains: BackupDomains;
   preferences: { theme: ThemePreferences; chat: ChatPreferences };
 }
 
 export interface ParsedConfigBackup {
-  settings: Partial<AppSettings>;
+  domains: BackupDomains;
   preferences?: { theme?: Partial<ThemePreferences>; chat?: Partial<ChatPreferences> };
   exportedAt: string;
 }
@@ -86,22 +44,33 @@ export interface BackupImportResult {
   failed: { scope: string; message: string }[];
 }
 
-const SETTINGS_SCOPES = [
-  { label: '用户身份', keys: ['userName', 'adminUsername', 'adminPassword'] },
-  { label: '服务器与同步连接', keys: ['vcpServerUrl', 'chatEndpointMode', 'vcpApiKey', 'vcpLogUrl', 'vcpLogKey', 'syncHttpUrl', 'syncServerUrl', 'syncToken', 'fileKey'] },
-  { label: '分布式系统', keys: ['distributedEnabled', 'distributedWsUrl', 'distributedVcpKey', 'distributedDeviceName'] },
-  { label: '话题总结模型', keys: ['topicSummaryModel'] },
-  { label: '语音服务', keys: ['voiceApiBaseUrl', 'voiceApiKey', 'voiceInputEncoding', 'voiceAsrStream', 'voiceTtsStream', 'voiceLanguage', 'voiceTtsVoice', 'voiceTtsMode', 'voiceTtsStylePrompt', 'voiceTtsCloneSampleId', 'voiceAudioTagRules', 'voiceAutoGuidance', 'voiceGuidanceRules', 'voiceVadSensitivity', 'voiceVadEndSilenceMs', 'voiceVadPlaybackOnsetMs'] },
-] as const;
+const DOMAIN_LABELS: Record<keyof AppSettings, string> = {
+  identity: '用户身份', server: '主服务器连接', log: '日志连接', sync: '数据同步',
+  distributed: '分布式系统', conversation: '话题总结模型', voice: '语音服务', navigation: '侧栏排序',
+};
 
 const hasFields = (value: object | undefined): boolean => Boolean(value && Object.keys(value).length);
-const settingsScopes = (settings: Partial<AppSettings>) => SETTINGS_SCOPES
-  .filter(scope => scope.keys.some(key => Object.prototype.hasOwnProperty.call(settings, key)))
-  .map(scope => scope.label);
+const settingsScopes = (domains: BackupDomains) => (Object.keys(domains) as (keyof AppSettings)[])
+  .filter(domain => hasFields(domains[domain]))
+  .map(domain => DOMAIN_LABELS[domain]);
+
+/** Only called for nested leaves already accepted by Rust's domain schema. */
+export function backupFieldChanges(domains: BackupDomains): Partial<SettingsFieldValues> {
+  const changes: Record<string, unknown> = {};
+  const visit = (value: unknown, path: string) => {
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      for (const [key, child] of Object.entries(value)) visit(child, path ? `${path}.${key}` : key);
+    } else {
+      changes[path] = value;
+    }
+  };
+  visit(domains, '');
+  return changes as Partial<SettingsFieldValues>;
+}
 
 export function configBackupScopes(backup: ParsedConfigBackup): string[] {
   return [
-    ...settingsScopes(backup.settings),
+    ...settingsScopes(backup.domains),
     ...(hasFields(backup.preferences?.theme) ? ['主题与深浅模式'] : []),
     ...(hasFields(backup.preferences?.chat) ? ['聊天偏好'] : []),
   ];
@@ -129,16 +98,16 @@ export function captureBackupPreferences(): ConfigBackupFile['preferences'] {
 /** Apply only validated, present fields through their existing persistence owners. */
 export async function applyConfigBackup(
   backup: ParsedConfigBackup,
-  applySettings: (patch: Partial<AppSettings>) => Promise<void>,
+  applySettings: (changes: Partial<SettingsFieldValues>) => Promise<void>,
 ): Promise<BackupImportResult> {
   const result: BackupImportResult = { applied: [], skipped: [], failed: [] };
-  if (backup.settings.voiceTtsMode === 'clone') {
+  if (backup.domains.voice?.tts?.mode === 'clone' || backup.domains.voice?.tts?.cloneSampleId) {
     result.skipped.push('复刻参考音频不包含在配置备份中；请在语音设置中确认或重新导入本机样本');
   }
-  const databaseScopes = settingsScopes(backup.settings);
+  const databaseScopes = settingsScopes(backup.domains);
   if (databaseScopes.length) {
     try {
-      await applySettings(backup.settings);
+      await applySettings(backupFieldChanges(backup.domains));
       result.applied.push(...databaseScopes);
     } catch (error) {
       result.failed.push({ scope: databaseScopes.join('、'), message: String(error) });
@@ -189,24 +158,9 @@ export async function applyConfigBackup(
 // 纯函数（可单测）
 // ------------------------------------------------------------------
 
-/** 按白名单从完整设置中提取备份字段 */
-export function pickBackupSettings(settings: AppSettings): Partial<AppSettings> {
-  const picked: Record<string, string | boolean | number> = {};
-  for (const key of BACKUP_SETTINGS_KEYS) {
-    const value = settings[key];
-    if (key === "chatEndpointMode") {
-      picked[key] = typeof value === "string" && CHAT_ENDPOINT_MODES.has(value)
-        ? value
-        : "standard";
-    } else if (BOOLEAN_BACKUP_KEYS.has(key)) {
-      picked[key] = value === true;
-    } else if (typeof value === "string" || typeof value === "number") {
-      picked[key] = value;
-    } else {
-      picked[key] = "";
-    }
-  }
-  return picked as Partial<AppSettings>;
+/** Capture one committed SQLite snapshot, filtered by the Rust field definitions. */
+export function captureBackupDomains(): Promise<BackupDomains> {
+  return invoke<BackupDomains>('export_config_domains');
 }
 
 /** 生成导出文件名：vcp-mobile-config-YYYYMMDD-HHmm.vcpcfg.json */
@@ -218,7 +172,7 @@ export function buildBackupFileName(now: Date = new Date()): string {
 
 /** 组装备份文件 payload */
 export function buildBackupPayload(
-  settings: AppSettings,
+  domains: BackupDomains,
   preferences: ConfigBackupFile['preferences'],
   now: Date = new Date(),
 ): ConfigBackupFile {
@@ -227,7 +181,7 @@ export function buildBackupPayload(
     kind: CONFIG_BACKUP_KIND,
     version: CONFIG_BACKUP_VERSION,
     exportedAt: now.toISOString(),
-    settings: pickBackupSettings(settings),
+    domains,
     preferences: {
       theme: { themeKey: preferences.theme.themeKey, mode: preferences.theme.mode },
       chat: {
@@ -280,13 +234,13 @@ async function invokeSaveToDownloads(
  * @returns 保存结果（含展示文件名）
  */
 export async function exportConfigBackup(
-  settings: AppSettings,
+  domains: BackupDomains,
   operationId: string = `config_export_${crypto.randomUUID()}`,
 ): Promise<DownloadsSaveResultDto> {
   if (!isAndroid && !isIOS) {
     throw new Error('当前预览环境不提供原生配置文件导出');
   }
-  const payload = buildBackupPayload(settings, captureBackupPreferences());
+  const payload = buildBackupPayload(domains, captureBackupPreferences());
   const bytes = new TextEncoder().encode(JSON.stringify(payload, null, 2));
   if (bytes.byteLength > MAX_BACKUP_FILE_BYTES) {
     throw new Error('配置备份超过 1 MiB，请检查配置字段');

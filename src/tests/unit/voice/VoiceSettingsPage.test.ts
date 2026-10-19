@@ -7,7 +7,9 @@ import VoiceOptionsView from '../../../features/chat/voice/VoiceOptionsView.vue'
 import SettingsTextField from '../../../components/settings/SettingsTextField.vue';
 import GlobalOverlayManager from '../../../components/GlobalOverlayManager.vue';
 import { useOverlayStore } from '../../../core/stores/overlay';
-import { DEFAULT_VOICE_SETTINGS } from '../../../features/chat/voice/settings';
+import { makeSettings, makeConfigSnapshot, configRequestChanges } from '../../helpers/config';
+import { applySettingsFields, type SettingsFieldValues } from '../../../core/config/fields';
+import type { ConfigUpdate, ConfigSaveResult } from '../../../core/config/generated/config';
 import { useSettingsStore, type AppSettings } from '../../../core/stores/settings';
 import { useModalHistory } from '../../../core/composables/useModalHistory';
 import { emitTauriEvent, invokeMock, listenMock, mockInvoke } from '../../mocks/tauri';
@@ -25,14 +27,12 @@ vi.mock('../../../features/chat/voice/voiceCallStore', () => ({ useVoiceCallStor
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn().mockResolvedValue(undefined) }));
 
 function snapshot(): AppSettings {
-  return {
-    ...DEFAULT_VOICE_SETTINGS,
-    userName: 'user', vcpServerUrl: 'https://chat.example', chatEndpointMode: 'standard', vcpApiKey: 'chat-key',
-    vcpLogUrl: '', vcpLogKey: '', syncServerUrl: '', syncHttpUrl: '', syncToken: '',
-    adminUsername: '', adminPassword: '', fileKey: '', topicSummaryModel: '', syncLogLevel: 'INFO',
-    agentOrder: [], groupOrder: [], currentThemeMode: null, syncPrerenderEnabled: false,
-    distributedEnabled: false, distributedWsUrl: '', distributedVcpKey: '', distributedDeviceName: '',
-  };
+  return makeSettings({ 'identity.userName': 'user', 'server.url': 'https://chat.example', 'server.apiKey': 'chat-key' });
+}
+function saved(changes: Partial<SettingsFieldValues> = {}): ConfigSaveResult {
+  database = applySettingsFields(database, changes);
+  revision += 1;
+  return { status: 'saved', snapshot: makeConfigSnapshot(database, String(revision)) };
 }
 
 function deferred<T>() {
@@ -43,6 +43,7 @@ function deferred<T>() {
 
 let pinia: Pinia;
 let database: AppSettings;
+let revision = 1;
 const wrappers: VueWrapper[] = [];
 const modals = useModalHistory();
 
@@ -50,6 +51,7 @@ beforeEach(() => {
   pinia = createPinia();
   setActivePinia(pinia);
   database = snapshot();
+  revision = 1;
   context.openStyleGuidance.mockReset();
   vi.spyOn(useOverlayStore(), 'openVoiceStyleGuidance').mockImplementation(context.openStyleGuidance);
   context.voice = reactive({
@@ -57,11 +59,9 @@ beforeEach(() => {
     aecState: 'enabled', speechActive: false, route: 'speaker', probeError: '',
     setProbe: vi.fn().mockResolvedValue(true),
   });
-  mockInvoke('read_settings', () => ({ ...database }));
-  mockInvoke('get_settings_recovery_status', () => ({ recoveredCorrupt: false }));
+  mockInvoke('read_settings', () => makeConfigSnapshot(database, String(revision)));
   mockInvoke('update_settings', args => {
-    database = { ...database, ...(args?.updates as Partial<AppSettings>) };
-    return { ...database };
+    return saved(configRequestChanges(args?.request as ConfigUpdate));
   });
   window.history.replaceState({ vcpRoot: true, vcpMain: true }, '', '#/chat');
   vi.spyOn(window.history, 'back').mockImplementation(() => {
@@ -243,8 +243,8 @@ describe('语音设置使用正式设置快照', () => {
     await choose(wrapper, '朗读时插话确认', '128 ms');
     expect(updates()).toHaveLength(0);
     await leaveVoiceSettings(wrapper);
-    expect(updates()[0]?.[1]?.updates).toEqual({
-      voiceVadSensitivity: 'high', voiceVadEndSilenceMs: 800, voiceVadPlaybackOnsetMs: 128,
+    expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({
+      'voice.vad.sensitivity': 'high', 'voice.vad.endSilenceMs': 800, 'voice.vad.playbackOnsetMs': 128,
     });
   });
 
@@ -279,7 +279,7 @@ describe('语音设置使用正式设置快照', () => {
     expect(useOverlayStore().promptConfig).toBeNull();
     expect(wrapper.get('button[aria-label="朗读时插话确认"]').text()).toContain('192 ms');
     await leaveVoiceSettings(wrapper);
-    expect(updates()[0]?.[1]?.updates).toEqual({ voiceVadEndSilenceMs: 777 });
+    expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.vad.endSilenceMs': 777 });
   });
 
   it('自定义输入随访问失活关闭，迟到确认不能改写新访问，系统返回先关闭输入', async () => {
@@ -331,15 +331,15 @@ describe('语音设置使用正式设置快照', () => {
     await flushPromises();
     expect(useOverlayStore().contextMenuConfig).toBeNull();
     expect(updates()).toHaveLength(0);
-    expect(useSettingsStore().settings?.voiceInputEncoding).toBe('wav');
+    expect(useSettingsStore().settings?.voice.asr.inputEncoding).toBe('wav');
     expect(wrapper.find('footer').exists()).toBe(false);
     expect(wrapper.find('.voice-settings-save').exists()).toBe(false);
     await leaveVoiceSettings(wrapper);
     await flushPromises();
-    expect(updates()[0]?.[1]?.updates).toEqual({ voiceInputEncoding: 'mp3_64' });
-    expect(database.voiceInputEncoding).toBe('mp3_64');
-    expect(database.voiceTtsStream).toBe(true);
-    expect(database.voiceTtsVoice).toBe('mimo_default');
+    expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.asr.inputEncoding': 'mp3_64' });
+    expect(database.voice.asr.inputEncoding).toBe('mp3_64');
+    expect(database.voice.tts.stream).toBe(true);
+    expect(database.voice.tts.voice).toBe('mimo_default');
     expect(wrapper.emitted('close')).toHaveLength(1);
     await wrapper.setProps({ active: false });
     await wrapper.setProps({ active: true });
@@ -348,8 +348,8 @@ describe('语音设置使用正式设置快照', () => {
     await choose(wrapper, '语音输入编码', 'WAV 无损');
     await leaveVoiceSettings(wrapper);
     await flushPromises();
-    expect(updates()[1]?.[1]?.updates).toEqual({ voiceInputEncoding: 'wav' });
-    expect(database.voiceInputEncoding).toBe('wav');
+    expect(configRequestChanges(updates()[1]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.asr.inputEncoding': 'wav' });
+    expect(database.voice.asr.inputEncoding).toBe('wav');
   });
 
   it('只提交本页dirty字段，两个流式开关互不改变，中文音色ID原样保存', async () => {
@@ -359,22 +359,22 @@ describe('语音设置使用正式设置快照', () => {
     await choose(wrapper, '朗读音色', '白桦 · 中文男声');
     await wrapper.get('[role="switch"][aria-label="流式识别结果"]').trigger('click');
     expect(updates()).toHaveLength(0);
-    expect(useSettingsStore().settings?.voiceApiKey).toBe('');
+    expect(useSettingsStore().settings?.voice.connection.apiKey).toBe('');
     await leaveVoiceSettings(wrapper);
     await flushPromises();
-    expect(updates()[0]?.[1]?.updates).toEqual({
-      voiceApiKey: 'voice-secret', voiceLanguage: 'zh', voiceTtsVoice: '白桦', voiceAsrStream: false,
+    expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({
+      'voice.connection.apiKey': 'voice-secret', 'voice.asr.language': 'zh', 'voice.tts.voice': '白桦', 'voice.asr.stream': false,
     });
-    expect(database.voiceTtsStream).toBe(true);
-    expect(database.vcpApiKey).toBe('chat-key');
+    expect(database.voice.tts.stream).toBe(true);
+    expect(database.server.apiKey).toBe('chat-key');
     await wrapper.setProps({ active: false });
     await wrapper.setProps({ active: true });
     await flushPromises();
     await wrapper.get('[role="switch"][aria-label="流式朗读"]').trigger('click');
     await leaveVoiceSettings(wrapper);
     await flushPromises();
-    expect(updates()[1]?.[1]?.updates).toEqual({ voiceTtsStream: false });
-    expect(database.voiceAsrStream).toBe(false);
+    expect(configRequestChanges(updates()[1]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.tts.stream': false });
+    expect(database.voice.asr.stream).toBe(false);
     expect(wrapper.text()).toContain('整段上传');
     expect(wrapper.text()).toContain('重新开启麦克风');
   });
@@ -389,8 +389,8 @@ describe('语音设置使用正式设置快照', () => {
     await flushPromises();
     expect(useOverlayStore().contextMenuConfig).toBeNull();
     expect(updates()).toHaveLength(0);
-    expect(database.voiceApiKey).toBe('');
-    expect(database.voiceInputEncoding).toBe('wav');
+    expect(database.voice.connection.apiKey).toBe('');
+    expect(database.voice.asr.inputEncoding).toBe('wav');
     expect(context.voice.setProbe).toHaveBeenCalledWith(false);
     await wrapper.setProps({ active: true });
     await flushPromises();
@@ -407,37 +407,36 @@ describe('语音设置使用正式设置快照', () => {
     await field(wrapper, '语音 API Key').setValue('voice-private-token');
     await leaveVoiceSettings(wrapper);
     await flushPromises();
-    expect(wrapper.get('[role="alert"]').text()).toContain('语音设置保存失败');
+    expect(wrapper.get('[role="alert"]').text()).toContain('设置保存失败');
     expect(wrapper.get('[role="alert"]').text()).not.toContain('voice-private-token');
     expect(JSON.stringify(log.mock.calls)).not.toContain('voice-private-token');
     expect((field(wrapper, '语音 API Key').element as HTMLInputElement).value).toBe('voice-private-token');
-    expect(database.voiceApiKey).toBe('');
+    expect(database.voice.connection.apiKey).toBe('');
     expect(wrapper.emitted('close')).toBeUndefined();
     expect(modals.modalStackLength()).toBe(1);
     mockInvoke('update_settings', args => {
-      database = { ...database, ...(args?.updates as Partial<AppSettings>) };
-      return { ...database };
+      return saved(configRequestChanges(args?.request as ConfigUpdate));
     });
     await leaveVoiceSettings(wrapper);
-    expect(database.voiceApiKey).toBe('voice-private-token');
+    expect(database.voice.connection.apiKey).toBe('voice-private-token');
     expect(wrapper.emitted('close')).toHaveLength(1);
   });
 
   it('进入风格指导前等待当前草稿确定保存', async () => {
-    const pending = deferred<AppSettings>();
+    const pending = deferred<ConfigSaveResult>();
     mockInvoke('update_settings', () => pending.promise);
     const wrapper = await renderPage();
     await field(wrapper, '语音 API Key').setValue('configured-key');
     await wrapper.get('.voice-style-guidance-entry').trigger('click');
     await flushPromises();
     expect(context.openStyleGuidance).not.toHaveBeenCalled();
-    pending.resolve({ ...database, voiceApiKey: 'configured-key' });
+    pending.resolve(saved({ 'voice.connection.apiKey': 'configured-key' }));
     await flushPromises();
     expect(context.openStyleGuidance).toHaveBeenCalledOnce();
   });
 
   it('系统返回复用原页面history entry并等待保存，不直接弹出', async () => {
-    const pending = deferred<AppSettings>();
+    const pending = deferred<ConfigSaveResult>();
     mockInvoke('update_settings', () => pending.promise);
     const { wrapper, fallbackClose } = await renderOverlay();
     expect(modals.modalStackLength()).toBe(1);
@@ -455,7 +454,7 @@ describe('语音设置使用正式设置快照', () => {
     expect(fallbackClose).not.toHaveBeenCalled();
     expect(wrapper.emitted('close')).toBeUndefined();
     expect(modals.modalStackLength()).toBe(1);
-    pending.resolve({ ...database, voiceApiKey: 'back-key' });
+    pending.resolve(saved({ 'voice.connection.apiKey': 'back-key' }));
     await flushPromises();
     expect(wrapper.emitted('close')).toHaveLength(1);
   });
@@ -470,7 +469,7 @@ describe('语音设置使用正式设置快照', () => {
     await field(wrapper, '语音 API Key').setValue('new-draft');
     await leaveVoiceSettings(wrapper);
     await flushPromises();
-    expect(database.voiceApiKey).toBe('new-draft');
+    expect(database.voice.connection.apiKey).toBe('new-draft');
     expect(modals.modalStackLength()).toBe(1);
   });
 
@@ -507,12 +506,12 @@ describe('语音设置使用正式设置快照', () => {
     expect(wrapper.get('[aria-label="参考音频"]').isVisible()).toBe(false);
     expect(wrapper.find('[aria-label="朗读音色"]').exists()).toBe(true);
     await leaveVoiceSettings(wrapper);
-    expect(updates()[0]?.[1]?.updates).toEqual({ voiceTtsStylePrompt: '语气温和，语速稍慢。' });
-    expect(database.voiceTtsStream).toBe(true);
+    expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.tts.stylePrompt': '语气温和，语速稍慢。' });
+    expect(database.voice.tts.stream).toBe(true);
   });
 
   it('风格指导两规则共用同一保存会话，自动关闭保留规则且系统返回等待保存', async () => {
-    const pending = deferred<AppSettings>();
+    const pending = deferred<ConfigSaveResult>();
     mockInvoke('update_settings', () => pending.promise);
     const { wrapper, fallbackClose } = await renderOverlay('styleGuidance');
     expect(wrapper.text()).toContain('同一个注入块');
@@ -528,19 +527,22 @@ describe('语音设置使用正式设置快照', () => {
     await flushPromises();
     expect(fallbackClose).not.toHaveBeenCalled();
     expect(wrapper.emitted('close')).toBeUndefined();
-    expect(updates()[0]?.[1]?.updates).toEqual({ voiceAudioTagRules: '仅在需要时使用 [轻笑]。', voiceAutoGuidance: false, voiceGuidanceRules: '依据当前角色生成声音描述。' });
-    pending.resolve({ ...database, voiceAudioTagRules: '仅在需要时使用 [轻笑]。', voiceAutoGuidance: false, voiceGuidanceRules: '依据当前角色生成声音描述。' });
+    expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.guidance.audioTagRules': '仅在需要时使用 [轻笑]。', 'voice.guidance.autoGuidance': false, 'voice.guidance.guidanceRules': '依据当前角色生成声音描述。' });
+    pending.resolve(saved({ 'voice.guidance.audioTagRules': '仅在需要时使用 [轻笑]。', 'voice.guidance.autoGuidance': false, 'voice.guidance.guidanceRules': '依据当前角色生成声音描述。' }));
     await flushPromises();
     expect(wrapper.emitted('close')).toHaveLength(1);
     expect(modals.modalStackLength()).toBe(1);
   });
 
   it('风格指导必需规则留空时保留编辑页，可恢复默认再返回', async () => {
+    mockInvoke('update_settings', () => ({ status: 'rejected', issues: [{
+      domain: 'voice', field: 'guidance.audioTagRules', code: 'required', message: '请填写音频标签规则',
+    }] }));
     const { wrapper } = await renderOverlay('styleGuidance');
     await wrapper.findAll('textarea')[0].setValue(' ');
     await wrapper.get('button[aria-label="返回，关闭风格指导"]').trigger('click');
     await flushPromises();
-    expect(updates()).toHaveLength(0);
+    expect(updates()).toHaveLength(1);
     expect(wrapper.emitted('close')).toBeUndefined();
     expect(wrapper.get('[role="alert"]').text()).toContain('请填写音频标签规则');
     await wrapper.findAll('button').find(button => button.text() === '恢复默认标签规则')!.trigger('click');
@@ -558,7 +560,7 @@ describe('语音设置使用正式设置快照', () => {
     await wrapper.get('.voice-preview-button').trigger('click');
     await flushPromises();
     const previewCall = invokeMock.mock.calls.find(([command]) => command === 'preview_tts')!;
-    expect(previewCall[1]?.settings).toMatchObject({ voiceApiKey: 'draft-preview-key', voiceTtsVoice: '冰糖' });
+    expect(previewCall[1]?.settings).toMatchObject({ connection: { apiKey: 'draft-preview-key' }, tts: { voice: '冰糖' } });
     expect(previewCall[1]?.settings).not.toHaveProperty('vcpApiKey');
     expect(updates()).toHaveLength(0);
     expect(wrapper.get('.voice-preview-button').text()).toBe('停止试听');
@@ -567,7 +569,7 @@ describe('语音设置使用正式设置快照', () => {
     expect(wrapper.get('.voice-preview-button').text()).toBe('停止试听');
     await leaveVoiceSettings(wrapper);
     expect(invokeMock.mock.calls.filter(([command]) => command === 'stop_tts').map(([, args]) => args?.ttsId)).toEqual([previewCall[1]?.ttsId]);
-    expect(database.voiceApiKey).toBe('draft-preview-key');
+    expect(database.voice.connection.apiKey).toBe('draft-preview-key');
   });
 
   it('通话中不能试听，试听提交后失活会处理迟到接纳且不保存草稿', async () => {
@@ -644,8 +646,8 @@ describe('语音设置使用正式设置快照', () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === 'discard_voice_clone_sample')).toHaveLength(0);
     await choose(wrapper, '音色模式', '样本复刻');
     await leaveVoiceSettings(wrapper);
-    expect(database.voiceTtsCloneSampleId).toBe('new-sample');
-    expect(updates()[0]?.[1]?.updates).toEqual({ voiceTtsMode: 'clone', voiceTtsCloneSampleId: 'new-sample' });
+    expect(database.voice.tts.cloneSampleId).toBe('new-sample');
+    expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.tts.mode': 'clone', 'voice.tts.cloneSampleId': 'new-sample' });
   });
 
   it('失活后的迟到复刻导入不更新设置，释放新资产', async () => {
@@ -661,11 +663,11 @@ describe('语音设置使用正式设置快照', () => {
     await flushPromises();
     expect(invokeMock).toHaveBeenCalledWith('discard_voice_clone_sample', { sampleId: 'late-sample' });
     expect(updates()).toHaveLength(0);
-    expect(database.voiceTtsCloneSampleId).toBe('');
+    expect(database.voice.tts.cloneSampleId).toBe('');
   });
 
   it('样本草稿已提交保存时，失活清理等待真实保存完成', async () => {
-    const pending = deferred<AppSettings>();
+    const pending = deferred<ConfigSaveResult>();
     const asset = { id: 'saving-sample', fileName: 'saving.wav', format: 'wav', bytes: 96000 };
     mockInvoke('plugin:vcp-mobile|pick_file', () => ({ path: '/native/staging/saving.wav', name: 'saving.wav', size: 96000, mime: 'audio/wav', hash: 'saving-hash' }));
     mockInvoke('import_voice_clone_sample', () => asset);
@@ -680,9 +682,9 @@ describe('语音设置使用正式设置快照', () => {
     await wrapper.setProps({ active: false });
     await flushPromises();
     expect(invokeMock.mock.calls.filter(([command]) => command === 'discard_voice_clone_sample')).toHaveLength(0);
-    pending.resolve({ ...database, voiceTtsMode: 'clone', voiceTtsCloneSampleId: asset.id });
+    pending.resolve(saved({ 'voice.tts.mode': 'clone', 'voice.tts.cloneSampleId': asset.id }));
     await flushPromises();
     expect(invokeMock).toHaveBeenCalledWith('discard_voice_clone_sample', { sampleId: asset.id });
-    expect(useSettingsStore().settings?.voiceTtsCloneSampleId).toBe(asset.id);
+    expect(useSettingsStore().settings?.voice.tts.cloneSampleId).toBe(asset.id);
   });
 });

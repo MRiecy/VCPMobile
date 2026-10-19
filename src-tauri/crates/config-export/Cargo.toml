@@ -1,0 +1,15 @@
+[package]
+name = "vcp-config-export"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[features]
+default = ["config-export"]
+config-export = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+ts-rs = { version = "=12.0.1", features = ["serde-json-impl"] }
+tauri-plugin-vcp-mobile = { path = "../../plugins/vcp-mobile", features = ["config-export"] }

@@ -140,8 +140,8 @@ export function useSpeechRecognition() {
       const { blob } = recordResult;
       
       // 检查配置
-      const serverUrl = settingsStore.settings?.vcpServerUrl;
-      const apiKey = settingsStore.settings?.vcpApiKey;
+      const serverUrl = settingsStore.settings?.server.url;
+      const apiKey = settingsStore.settings?.server.apiKey;
 
       if (!serverUrl || !apiKey) {
         console.warn('[SpeechRecognition] Server settings missing for Whisper STT.');

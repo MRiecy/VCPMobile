@@ -9,12 +9,12 @@ const props = withDefaults(defineProps<{
   disabled?: boolean;
   rows?: number;
   maxLength?: number;
-}>(), { rows: 4, maxLength: 8000 });
+}>(), { rows: 4 });
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>();
 const id = useId();
 const onInput = (event: Event) => {
   const input = event.target as HTMLTextAreaElement;
-  const value = Array.from(input.value).slice(0, props.maxLength).join('');
+  const value = props.maxLength === undefined ? input.value : Array.from(input.value).slice(0, props.maxLength).join('');
   if (input.value !== value) input.value = value;
   emit('update:modelValue', value);
 };

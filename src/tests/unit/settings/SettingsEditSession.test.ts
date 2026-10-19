@@ -3,64 +3,52 @@ import { createPinia, setActivePinia } from "pinia";
 import { useSettingsStore, type AppSettings } from "@/core/stores/settings";
 import {
   IDENTITY_FIELDS,
+  CONNECTION_FIELDS,
   SUMMARY_FIELDS,
   type SettingsEditableKey,
 } from "@/features/settings/editing/fieldSets";
 import { useSettingsEditSession } from "@/features/settings/editing/useSettingsEditSession";
 import { mockInvoke } from "../../mocks/tauri";
-import { DEFAULT_VOICE_SETTINGS } from "@/features/chat/voice/settings";
+import { makeSettings, makeConfigSnapshot, configRequestChanges } from '../../helpers/config';
+import { applySettingsFields, type SettingsFieldValues } from '@/core/config/fields';
+import type { ConfigUpdate, ConfigSaveResult } from '@/core/config/generated/config';
+import { emitTauriEvent } from '../../mocks/tauri';
 
 const { notify } = vi.hoisted(() => ({ notify: vi.fn() }));
 vi.mock("@/core/stores/notification", () => ({
   useNotificationStore: () => ({ addNotification: notify }),
 }));
 
-const initialSettings = (): AppSettings => ({
-  ...DEFAULT_VOICE_SETTINGS,
-  userName: "original",
-  vcpServerUrl: "https://vcp.example",
-  chatEndpointMode: "standard",
-  vcpApiKey: "key",
-  vcpLogUrl: "",
-  vcpLogKey: "",
-  syncServerUrl: "",
-  syncHttpUrl: "",
-  syncToken: "",
-  adminUsername: "admin",
-  adminPassword: "password",
-  fileKey: "",
-  topicSummaryModel: "model-a",
-  syncLogLevel: "INFO",
-  agentOrder: ["agent-a"],
-  groupOrder: [],
-  currentThemeMode: null,
-  syncPrerenderEnabled: false,
-  distributedEnabled: false,
-  distributedWsUrl: "",
-  distributedVcpKey: "",
-  distributedDeviceName: "device",
+const initialSettings = (): AppSettings => makeSettings({
+  'identity.userName': 'original', 'server.url': 'https://vcp.example', 'server.apiKey': 'key',
+  'server.adminUsername': 'admin', 'server.adminPassword': 'password',
+  'conversation.topicSummaryModel': 'model-a', 'navigation.agentOrder': ['agent-a'],
 });
 
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
 interface PendingWrite {
-  patch: Partial<AppSettings>;
+  patch: Partial<SettingsFieldValues>;
+  request: ConfigUpdate;
   commit(): void;
+  respond(result: ConfigSaveResult): void;
   reject(error: Error): void;
 }
 
 function backend() {
-  const database = { settings: initialSettings() };
+  const database = { settings: initialSettings(), revision: 1 };
   const writes: PendingWrite[] = [];
-  mockInvoke("read_settings", () => clone(database.settings));
-  mockInvoke("get_settings_recovery_status", () => ({ recoveredCorrupt: false }));
-  mockInvoke("update_settings", (args) => new Promise<AppSettings>((resolve, reject) => {
-    const patch = clone(args?.updates as Partial<AppSettings>);
+  mockInvoke("read_settings", () => makeConfigSnapshot(database.settings, String(database.revision)));
+  mockInvoke("update_settings", (args) => new Promise<ConfigSaveResult>((resolve, reject) => {
+    const request = clone(args?.request as ConfigUpdate);
+    const patch = configRequestChanges(request);
     writes.push({
-      patch,
+      patch, request,
+      respond: resolve,
       commit: () => {
-        database.settings = { ...database.settings, ...patch };
-        resolve(clone(database.settings));
+        database.settings = applySettingsFields(database.settings, patch);
+        database.revision += 1;
+        resolve({status: "saved", snapshot: makeConfigSnapshot(database.settings, String(database.revision))});
       },
       reject,
     });
@@ -96,7 +84,7 @@ describe("settings edit session", () => {
     const editor = session(IDENTITY_FIELDS);
 
     await expect(useSettingsStore().fetchSettings()).rejects.toThrow("offline");
-    editor.edit("userName", "unsaved");
+    editor.edit("identity.userName", "unsaved");
     expect(editor.ready.value).toBe(false);
     expect(editor.draft.value).toBeNull();
     expect((await editor.save()).ok).toBe(false);
@@ -111,43 +99,43 @@ describe("settings edit session", () => {
     const store = useSettingsStore();
     await store.fetchSettings();
     const editor = session(IDENTITY_FIELDS);
-    editor.edit("userName", "local-name");
+    editor.edit("identity.userName", "local-name");
     const firstSave = editor.save();
     const firstWrite = await server.write(0);
-    expect(firstWrite.patch).toEqual({ userName: "local-name" });
+    expect(firstWrite.patch).toEqual({ "identity.userName": "local-name" });
 
     // Rust merges against the current database, including independent changes.
-    server.database.settings.adminUsername = "remote-admin";
-    server.database.settings.agentOrder = ["agent-b", "agent-a"];
+    server.database.settings.server.adminUsername = "remote-admin";
+    server.database.settings.navigation.agentOrder = ["agent-b", "agent-a"];
     firstWrite.commit();
     await firstSave;
-    expect(editor.draft.value?.adminUsername).toBe("remote-admin");
+    expect(editor.draft.value?.["server.adminUsername"]).toBe("remote-admin");
 
-    editor.edit("adminPassword", "new-password");
+    editor.edit("server.adminPassword", "new-password");
     const secondSave = editor.save();
     const secondWrite = await server.write(1);
-    expect(secondWrite.patch).toEqual({ adminPassword: "new-password" });
+    expect(secondWrite.patch).toEqual({ "server.adminPassword": "new-password" });
     secondWrite.commit();
     await secondSave;
-    expect(store.settings?.adminUsername).toBe("remote-admin");
-    expect(store.settings?.agentOrder).toEqual(["agent-b", "agent-a"]);
+    expect(store.settings?.server.adminUsername).toBe("remote-admin");
+    expect(store.settings?.navigation.agentOrder).toEqual(["agent-b", "agent-a"]);
   });
 
   it("keeps typing during a save without claiming those later edits were committed", async () => {
     const server = backend();
     await useSettingsStore().fetchSettings();
     const editor = session(IDENTITY_FIELDS);
-    editor.edit("userName", "submitted");
+    editor.edit("identity.userName", "submitted");
     const saving = editor.save();
     const write = await server.write(0);
 
-    editor.edit("userName", "still-typing");
+    editor.edit("identity.userName", "still-typing");
     write.commit();
     const result = await saving;
 
     expect(result).toMatchObject({ ok: true, changed: true, dirty: true });
-    if (result.ok) expect(result.snapshot.userName).toBe("submitted");
-    expect(editor.draft.value?.userName).toBe("still-typing");
+    if (result.ok) expect(result.snapshot.identity.userName).toBe("submitted");
+    expect(editor.draft.value?.["identity.userName"]).toBe("still-typing");
     expect(server.writes).toHaveLength(1);
   });
 
@@ -155,20 +143,20 @@ describe("settings edit session", () => {
     const server = backend();
     await useSettingsStore().fetchSettings();
     const editor = session(IDENTITY_FIELDS);
-    editor.edit("userName", "submitted");
+    editor.edit("identity.userName", "submitted");
     const firstSave = editor.save();
     const firstWrite = await server.write(0);
 
-    editor.edit("userName", "original");
+    editor.edit("identity.userName", "original");
     expect(editor.dirty.value).toBe(false);
     expect(editor.save()).toBe(firstSave);
     firstWrite.commit();
     const secondWrite = await server.write(1);
-    expect(secondWrite.patch).toEqual({ userName: "original" });
+    expect(secondWrite.patch).toEqual({ "identity.userName": "original" });
     secondWrite.commit();
 
     expect(await firstSave).toMatchObject({ ok: true, changed: true, dirty: false });
-    expect(editor.draft.value?.userName).toBe("original");
+    expect(editor.draft.value?.["identity.userName"]).toBe("original");
   });
 
   it("stops a failed save chain, preserves the latest draft, and retries explicitly", async () => {
@@ -176,22 +164,22 @@ describe("settings edit session", () => {
     await useSettingsStore().fetchSettings();
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const editor = session(SUMMARY_FIELDS);
-    editor.edit("topicSummaryModel", "model-b");
+    editor.edit("conversation.topicSummaryModel", "model-b");
     const firstSave = editor.save();
     const firstWrite = await server.write(0);
-    editor.edit("topicSummaryModel", "model-c");
+    editor.edit("conversation.topicSummaryModel", "model-c");
     editor.save();
     firstWrite.reject(new Error("disk full"));
 
-    expect(await firstSave).toEqual({ ok: false, error: "Error: disk full" });
+    expect(await firstSave).toMatchObject({ ok: false, error: "Error: 设置保存失败，请重试" });
     expect(server.writes).toHaveLength(1);
-    expect(editor.error.value).toContain("disk full");
-    expect(editor.draft.value?.topicSummaryModel).toBe("model-c");
+    expect(editor.error.value).toContain("设置保存失败");
+    expect(editor.draft.value?.["conversation.topicSummaryModel"]).toBe("model-c");
     expect(editor.dirty.value).toBe(true);
 
     const retry = editor.save();
     const retryWrite = await server.write(1);
-    expect(retryWrite.patch).toEqual({ topicSummaryModel: "model-c" });
+    expect(retryWrite.patch).toEqual({ "conversation.topicSummaryModel": "model-c" });
     retryWrite.commit();
     expect(await retry).toMatchObject({ ok: true, dirty: false });
     expect(editor.error.value).toBeNull();
@@ -201,17 +189,17 @@ describe("settings edit session", () => {
     const server = backend();
     await useSettingsStore().fetchSettings();
     const editor = session(IDENTITY_FIELDS);
-    editor.edit("userName", "submitted");
+    editor.edit("identity.userName", "submitted");
     const save = editor.save();
     const write = await server.write(0);
-    editor.edit("adminPassword", "unrequested-password");
+    editor.edit("server.adminPassword", "unrequested-password");
     expect(editor.settlePending()).toBe(save);
     write.commit();
     expect(await save).toMatchObject({ ok: true, dirty: true });
 
     expect(await editor.settlePending()).toMatchObject({ ok: true, changed: false, dirty: true });
     expect(server.writes).toHaveLength(1);
-    expect(editor.draft.value?.adminPassword).toBe("unrequested-password");
+    expect(editor.draft.value?.["server.adminPassword"]).toBe("unrequested-password");
   });
 
   it("rejects importing over its pending save and accepts only replaced fields afterward", async () => {
@@ -219,28 +207,28 @@ describe("settings edit session", () => {
     const store = useSettingsStore();
     await store.fetchSettings();
     const editor = session(IDENTITY_FIELDS);
-    editor.edit("userName", "saving-name");
+    editor.edit("identity.userName", "saving-name");
     const save = editor.save();
-    expect(() => editor.acceptImport(["userName"])).toThrow("保存完成");
+    expect(() => editor.acceptImport(["identity.userName"])).toThrow("保存完成");
     (await server.write(0)).commit();
     await save;
 
-    editor.edit("userName", "unsubmitted-name");
-    editor.edit("adminPassword", "keep-this-draft");
-    const imported = store.updateSettings({ userName: "imported-name" });
+    editor.edit("identity.userName", "unsubmitted-name");
+    editor.edit("server.adminPassword", "keep-this-draft");
+    const imported = store.updateFields({ "identity.userName": "imported-name" });
     (await server.write(1)).commit();
     await imported;
-    expect(editor.draft.value?.userName).toBe("unsubmitted-name");
+    expect(editor.draft.value?.["identity.userName"]).toBe("unsubmitted-name");
 
     // Another committed update before acceptance must not be replaced by an old response.
-    const latest = store.updateSettings({ userName: "latest-name" });
+    const latest = store.updateFields({ "identity.userName": "latest-name" });
     (await server.write(2)).commit();
     await latest;
-    editor.acceptImport(["userName"]);
+    editor.acceptImport(["identity.userName"]);
     expect(editor.draft.value).toEqual({
-      userName: "latest-name",
-      adminUsername: "admin",
-      adminPassword: "keep-this-draft",
+      "identity.userName": "latest-name",
+      "server.adminUsername": "admin",
+      "server.adminPassword": "keep-this-draft",
     });
     expect(editor.dirty.value).toBe(true);
   });
@@ -249,24 +237,24 @@ describe("settings edit session", () => {
     const server = backend();
     await useSettingsStore().fetchSettings();
     const editor = session(IDENTITY_FIELDS);
-    editor.edit("userName", "first-name");
+    editor.edit("identity.userName", "first-name");
     const save = editor.save();
     const firstWrite = await server.write(0);
-    editor.edit("userName", "last-name");
+    editor.edit("identity.userName", "last-name");
 
     const leaving = editor.prepareLeave();
     expect(editor.prepareLeave()).toBe(leaving);
     expect(editor.leaving.value).toBe(true);
-    editor.edit("userName", "blocked-edit");
+    editor.edit("identity.userName", "blocked-edit");
     firstWrite.commit();
     const finalWrite = await server.write(1);
-    expect(finalWrite.patch).toEqual({ userName: "last-name" });
+    expect(finalWrite.patch).toEqual({ "identity.userName": "last-name" });
     finalWrite.commit();
 
     expect(await leaving).toBe(true);
     expect(await save).toMatchObject({ ok: true, dirty: false });
     expect(editor.leaving.value).toBe(true);
-    expect(editor.draft.value?.userName).toBe("last-name");
+    expect(editor.draft.value?.["identity.userName"]).toBe("last-name");
   });
 
   it("keeps the page editable when leaving fails", async () => {
@@ -274,15 +262,15 @@ describe("settings edit session", () => {
     await useSettingsStore().fetchSettings();
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const editor = session(IDENTITY_FIELDS);
-    editor.edit("userName", "new-name");
+    editor.edit("identity.userName", "new-name");
     const leaving = editor.prepareLeave();
     (await server.write(0)).reject(new Error("write denied"));
 
     expect(await leaving).toBe(false);
     expect(editor.leaving.value).toBe(false);
     expect(editor.dirty.value).toBe(true);
-    editor.edit("userName", "corrected-name");
-    expect(editor.draft.value?.userName).toBe("corrected-name");
+    editor.edit("identity.userName", "corrected-name");
+    expect(editor.draft.value?.["identity.userName"]).toBe("corrected-name");
   });
 
   it("ends an old visit without cancelling its submitted write or changing a new draft", async () => {
@@ -290,20 +278,20 @@ describe("settings edit session", () => {
     const store = useSettingsStore();
     await store.fetchSettings();
     const oldEditor = session(IDENTITY_FIELDS);
-    oldEditor.edit("userName", "old-submitted");
+    oldEditor.edit("identity.userName", "old-submitted");
     const save = oldEditor.save();
     const oldWrite = await server.write(0);
-    oldEditor.edit("userName", "never-submit");
+    oldEditor.edit("identity.userName", "never-submit");
     oldEditor.save();
     oldEditor.dispose();
 
     const newEditor = session(IDENTITY_FIELDS);
-    newEditor.edit("userName", "new-visit-draft");
+    newEditor.edit("identity.userName", "new-visit-draft");
     oldWrite.commit();
     expect((await save).ok).toBe(false);
-    expect(store.settings?.userName).toBe("old-submitted");
-    expect(newEditor.draft.value?.userName).toBe("new-visit-draft");
-    expect(oldEditor.draft.value?.userName).toBe("never-submit");
+    expect(store.settings?.identity.userName).toBe("old-submitted");
+    expect(newEditor.draft.value?.["identity.userName"]).toBe("new-visit-draft");
+    expect(oldEditor.draft.value?.["identity.userName"]).toBe("never-submit");
     expect(oldEditor.ready.value).toBe(false);
     expect(oldEditor.error.value).toBeNull();
     expect(server.writes).toHaveLength(1);
@@ -316,7 +304,7 @@ describe("settings edit session", () => {
     const noOp = editor.save();
     // The first microtask processes the empty batch; its public Promise may still settle.
     await Promise.resolve();
-    editor.edit("topicSummaryModel", "model-b");
+    editor.edit("conversation.topicSummaryModel", "model-b");
     const changed = editor.save();
     (await server.write(0)).commit();
 
@@ -334,28 +322,133 @@ describe("settings edit session", () => {
     expect(server.writes).toHaveLength(0);
     if (!result.ok) throw new Error(result.error);
 
-    store.settings!.agentOrder.push("later-agent");
-    expect(result.snapshot.agentOrder).toEqual(["agent-a"]);
+    store.settings!.navigation.agentOrder.push("later-agent");
+    expect(result.snapshot.navigation.agentOrder).toEqual(["agent-a"]);
   });
 });
 
 describe("settings Store queue", () => {
+  it('does not silently refresh a repair revision after its confirmation scope changed', async () => {
+    const server = backend();
+    const store = useSettingsStore();
+    await store.fetchSettings();
+    const editor = session(IDENTITY_FIELDS);
+    const newer = makeConfigSnapshot(makeSettings({ 'identity.userName': 'changed-while-confirming' }), '2');
+    emitTauriEvent('vcp-config-changed', newer);
+    const repair = editor.repairDomain('identity', '1');
+    const write = await server.write(0);
+    expect(write.request.patches[0].expectedRevision).toBe('1');
+    write.respond({ status: 'conflict', snapshot: newer, conflicts: [{ domain: 'identity', field: '', code: 'revisionConflict', message: '请重新确认修复范围' }] });
+    expect(await repair).toBe(false);
+    expect(editor.dirty.value).toBe(false);
+    expect(await editor.prepareLeave()).toBe(true);
+  });
+
+  it('explicitly writes every connection default even when the safe projection already hides old credentials', async () => {
+    const server = backend();
+    const projected = makeConfigSnapshot(makeSettings());
+    projected.domains.server.health = 'recovered';
+    projected.domains.server.issues = [{ domain: 'server', field: 'url', code: 'invalidType', message: '服务器地址类型无效' }];
+    mockInvoke('read_settings', () => projected);
+    await useSettingsStore().fetchSettings();
+    const editor = session(CONNECTION_FIELDS);
+    editor.resetField('server.url');
+    expect(editor.dirty.value).toBe(true);
+    const saving = editor.save();
+    const write = await server.write(0);
+    expect(write.request.patches).toEqual([{ domain: 'server', expectedRevision: '1', changes: { apiKey: '', url: '' }, baseValues: { apiKey: '', url: '' }, repair: false }]);
+    write.respond({ status: 'saved', snapshot: makeConfigSnapshot(makeSettings(), '2') });
+    expect(await saving).toMatchObject({ ok: true, dirty: false });
+  });
+
+  it('resets both administrator credentials without touching the ordinary server connection', async () => {
+    const server = backend();
+    await useSettingsStore().fetchSettings();
+    const editor = session(IDENTITY_FIELDS);
+    editor.resetField('server.adminUsername');
+    const saving = editor.save();
+    const write = await server.write(0);
+    expect(write.patch).toEqual({ 'server.adminUsername': '', 'server.adminPassword': '' });
+    write.commit();
+    await saving;
+    expect(useSettingsStore().settings?.server.apiKey).toBe('key');
+  });
+
+  it('keeps an older edit baseline through an external update and exposes a real field conflict', async () => {
+    const server = backend();
+    const store = useSettingsStore();
+    await store.fetchSettings();
+    const editor = session(IDENTITY_FIELDS);
+    editor.edit('identity.userName', 'local');
+    const remote = makeConfigSnapshot(makeSettings({ 'identity.userName': 'remote' }), '2');
+    emitTauriEvent('vcp-config-changed', remote);
+    expect(editor.draft.value?.['identity.userName']).toBe('local');
+    const saving = editor.save();
+    const write = await server.write(0);
+    expect(write.request.patches[0]).toMatchObject({ expectedRevision: '1', baseValues: { userName: 'original' } });
+    write.respond({ status: 'conflict', snapshot: remote, conflicts: [{ domain: 'identity', field: 'userName', code: 'conflict', message: '用户名已被其他操作修改' }] });
+    expect(await saving).toMatchObject({ ok: false });
+    expect(editor.fieldErrors.value[0].field).toBe('userName');
+    expect(editor.draft.value?.['identity.userName']).toBe('local');
+    editor.edit('identity.userName', 'explicit-new-intent');
+    const retry = editor.save();
+    const next = await server.write(1);
+    expect(next.request.patches[0].baseValues).toEqual({ userName: 'remote' });
+    next.respond({ status: 'saved', snapshot: makeConfigSnapshot(makeSettings({ 'identity.userName': 'explicit-new-intent' }), '3') });
+    expect(await retry).toMatchObject({ ok: true, dirty: false });
+  });
+
+  it('does not replace a newer per-domain event with a late read or save result', async () => {
+    const server = backend();
+    const store = useSettingsStore();
+    await store.fetchSettings();
+    const remote = makeConfigSnapshot(makeSettings({ 'identity.userName': 'remote' }), '3');
+    emitTauriEvent('vcp-config-changed', remote);
+    await store.fetchSettings();
+    expect(store.settings?.identity.userName).toBe('remote');
+    const save = store.updateFields({ 'server.apiKey': 'new-key' });
+    const write = await server.write(0);
+    const ack = makeConfigSnapshot(makeSettings({ 'server.apiKey': 'new-key' }), '1');
+    ack.domains.server.revision = '4';
+    write.respond({ status: 'saved', snapshot: ack });
+    await save;
+    expect(store.settings?.identity.userName).toBe('remote');
+    expect(store.settings?.server.apiKey).toBe('new-key');
+  });
+
+  it('can explicitly repair an unreadable domain without discarding typing during the repair', async () => {
+    const server = backend();
+    const unreadable = makeConfigSnapshot(initialSettings());
+    unreadable.domains.identity = { revision: '4', schemaVersion: 1, health: 'unavailable', issues: [{ domain: 'identity', field: '', code: 'invalid_json', message: '身份配置无法解析' }] };
+    mockInvoke('read_settings', () => unreadable);
+    await useSettingsStore().fetchSettings();
+    const editor = session(IDENTITY_FIELDS);
+    const repair = editor.repairDomain('identity');
+    const write = await server.write(0);
+    expect(write.request.patches).toEqual([{ domain: 'identity', expectedRevision: '4', changes: {}, baseValues: {}, repair: true }]);
+    editor.edit('identity.userName', 'typed-during-repair');
+    write.respond({ status: 'saved', snapshot: makeConfigSnapshot(makeSettings(), '5') });
+    expect(await repair).toBe(true);
+    expect(editor.draft.value?.['identity.userName']).toBe('typed-during-repair');
+    expect(editor.dirty.value).toBe(true);
+  });
+
   it("captures patch arrays at enqueue time and describes only configuration persistence", async () => {
     const server = backend();
     const store = useSettingsStore();
     await store.fetchSettings();
-    const first = store.updateSettings({ userName: "hold-the-queue" });
+    const first = store.updateFields({ "identity.userName": "hold-the-queue" });
     const firstWrite = await server.write(0);
     const order = ["agent-b", "agent-a"];
-    const patch = { agentOrder: order };
-    const queued = store.updateSettings(patch);
+    const patch = { "navigation.agentOrder": order };
+    const queued = store.updateFields(patch);
     order.push("later-mutation");
-    patch.agentOrder = ["replacement"];
+    patch["navigation.agentOrder"] = ["replacement"];
 
     firstWrite.commit();
     await first;
     const queuedWrite = await server.write(1);
-    expect(queuedWrite.patch).toEqual({ agentOrder: ["agent-b", "agent-a"] });
+    expect(queuedWrite.patch).toEqual({ "navigation.agentOrder": ["agent-b", "agent-a"] });
     queuedWrite.commit();
     await queued;
     expect(notify).toHaveBeenLastCalledWith(expect.objectContaining({ title: "设置已保存" }));

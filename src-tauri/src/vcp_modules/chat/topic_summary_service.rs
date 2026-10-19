@@ -1,5 +1,5 @@
 use crate::vcp_modules::message_service;
-use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
+use crate::vcp_modules::settings_manager::{read_config, ConversationConfig, SettingsState};
 use crate::vcp_modules::vcp_client::{resolve_chat_endpoint, ChatRequestPurpose};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -7,9 +7,6 @@ use tauri::{AppHandle, State};
 
 /// 话题总结的默认 Prompt
 const DEFAULT_SUMMARY_PROMPT: &str = "请根据以上对话内容，仅返回一个简洁的话题标题。要求：1. 标题长度控制在15个汉字以内。2. 标题本身不能包含任何标点符号、数字编号 or 任何非标题文字。3. 直接给出标题文字，不要添加任何解释或前缀。";
-
-/// 话题总结的默认模型
-const DEFAULT_SUMMARY_MODEL: &str = "gemini-3.1-flash-lite";
 
 /// 注：不主动发送 temperature 参数，以兼容 o1/Gemini thinking 等不支持该参数的模型
 /// AI 请求超时时间 (秒)
@@ -26,8 +23,8 @@ pub async fn summarize_topic(
     topic_id: String,
     agent_name: String,
 ) -> Result<String, String> {
-    let settings = read_settings(app_handle.clone(), settings_state).await?;
-    if settings.vcp_server_url.is_empty() || settings.vcp_api_key.is_empty() {
+    let settings = read_config(app_handle.clone(), settings_state).await?;
+    if settings.server.url.is_empty() || settings.server.api_key.is_empty() {
         return Err("VCP settings are missing".to_string());
     }
 
@@ -53,7 +50,7 @@ pub async fn summarize_topic(
     let mut recent_content = String::new();
     for msg in messages {
         let role_name = if msg.role == "user" {
-            settings.user_name.as_str()
+            settings.identity.user_name.as_str()
         } else {
             agent_name.as_str()
         };
@@ -71,20 +68,20 @@ pub async fn summarize_topic(
         crate::vcp_modules::infra::http_clients::HttpProfile::ChatStream,
     );
 
-    let model = if settings.topic_summary_model.is_empty() {
-        DEFAULT_SUMMARY_MODEL.to_string()
+    let model = if settings.conversation.topic_summary_model.is_empty() {
+        ConversationConfig::default().topic_summary_model
     } else {
-        settings.topic_summary_model
+        settings.conversation.topic_summary_model.clone()
     };
 
     let vcp_url = resolve_chat_endpoint(
-        &settings.vcp_server_url,
-        settings.chat_endpoint_mode,
+        &settings.server.url,
+        settings.server.endpoint_mode,
         ChatRequestPurpose::Auxiliary,
     )?;
     let response = client
         .post(&vcp_url)
-        .header("Authorization", format!("Bearer {}", settings.vcp_api_key))
+        .header("Authorization", format!("Bearer {}", settings.server.api_key))
         .header("Content-Type", "application/json")
         .json(&json!({
             "messages": [{"role": "user", "content": summary_prompt}],

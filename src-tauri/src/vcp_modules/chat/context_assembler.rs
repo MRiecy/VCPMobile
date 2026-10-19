@@ -312,7 +312,9 @@ pub fn assemble_history_for_vcp(
 #[cfg(test)]
 mod voice_policy_tests {
     use super::*;
-    use crate::vcp_modules::settings_manager::{Settings, VoiceTtsMode};
+    use crate::vcp_modules::settings_manager::{
+        Settings, VoiceConfig, VoiceGuidanceConfig, VoiceTtsConfig, VoiceTtsMode,
+    };
 
     async fn pool_with_tail_rule() -> Pool<Sqlite> {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -338,11 +340,19 @@ mod voice_policy_tests {
     }
 
     fn policy(mode: VoiceTtsMode, auto_guidance: bool) -> VoiceReplyPolicy {
-        VoiceReplyPolicy::from_settings(Settings {
-            voice_tts_mode: mode,
-            voice_audio_tag_rules: "音频标签规则".into(),
-            voice_auto_guidance: auto_guidance,
-            voice_guidance_rules: "自然语言指导规则".into(),
+        VoiceReplyPolicy::from_settings(&Settings {
+            voice: VoiceConfig {
+                tts: VoiceTtsConfig {
+                    mode,
+                    ..Default::default()
+                },
+                guidance: VoiceGuidanceConfig {
+                    audio_tag_rules: "音频标签规则".into(),
+                    auto_guidance,
+                    guidance_rules: "自然语言指导规则".into(),
+                },
+                ..Default::default()
+            },
             ..Settings::default()
         })
     }

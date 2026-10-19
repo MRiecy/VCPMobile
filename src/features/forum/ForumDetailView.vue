@@ -57,7 +57,7 @@ const replyContent = ref('');
 const isReplyComposing = ref(false);
 
 onMounted(() => {
-  replyMaid.value = settingsStore.settings?.userName ?? '';
+  replyMaid.value = settingsStore.settings?.identity.userName ?? '';
 });
 
 const canReply = computed(

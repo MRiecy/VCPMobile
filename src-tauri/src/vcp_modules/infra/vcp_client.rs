@@ -214,16 +214,16 @@ pub fn freeze_chat_connection(
     settings: &Settings,
     purpose: ChatRequestPurpose,
 ) -> Result<ChatConnectionSnapshot, String> {
-    if settings.vcp_server_url.is_empty() {
+    if settings.server.url.is_empty() {
         return Err("VCP Server URL is not configured.".to_string());
     }
     Ok(ChatConnectionSnapshot {
         endpoint_url: resolve_chat_endpoint(
-            &settings.vcp_server_url,
-            settings.chat_endpoint_mode,
+            &settings.server.url,
+            settings.server.endpoint_mode,
             purpose,
         )?,
-        api_key: settings.vcp_api_key.clone(),
+        api_key: settings.server.api_key.clone(),
     })
 }
 

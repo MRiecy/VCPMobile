@@ -13,7 +13,7 @@
 //!   发送前需先把它们改写为带空格的变体保护。
 
 use crate::vcp_modules::infra::admin_api;
-use crate::vcp_modules::settings_manager::{read_settings, Settings, SettingsState};
+use crate::vcp_modules::settings_manager::{read_config, Settings, SettingsState};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::Value;
 use std::time::Duration;
@@ -122,8 +122,8 @@ async fn send_json_with_status(
 async fn settings_of<R: Runtime>(
     app_handle: AppHandle<R>,
     settings_state: State<'_, SettingsState>,
-) -> Result<Settings, String> {
-    let settings = read_settings(app_handle, settings_state).await?;
+) -> Result<std::sync::Arc<Settings>, String> {
+    let settings = read_config(app_handle, settings_state).await?;
     admin_api::ensure_admin_config(&settings, "VCP 论坛")?;
     Ok(settings)
 }
@@ -310,18 +310,18 @@ pub async fn forum_create_post<R: Runtime>(
     }
 
     // 2) 404（服务器未打补丁）→ human/tool 回退
-    if settings.vcp_api_key.trim().is_empty() {
+    if settings.server.api_key.trim().is_empty() {
         return Err(
             "服务器缺少 REST 发帖端点，且未配置 VCP API Key 作为回退通道，请在 设置 中填写"
                 .to_string(),
         );
     }
-    let mut url = admin_api::normalize_server_base(&settings.vcp_server_url)?;
+    let mut url = admin_api::normalize_server_base(&settings.server.url)?;
     admin_api::append_url_segments(&mut url, &["v1", "human", "tool"])?;
 
     let tool_body = build_create_post_body(maid, board, title, &content);
     let request = admin_api::client_request(&settings, Method::POST, url.as_str())?
-        .bearer_auth(settings.vcp_api_key.trim())
+        .bearer_auth(settings.server.api_key.trim())
         .header(reqwest::header::CONTENT_TYPE, "text/plain;charset=UTF-8")
         .body(tool_body);
 

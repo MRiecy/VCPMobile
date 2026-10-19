@@ -1135,7 +1135,7 @@ mod tests {
 
         run_migrations(&pool).await.expect("run migrations");
 
-        // 1..=8 与 baseline 已 seed，101/102 必须实际执行而不能被 seed 跳过。
+        // 1..=8 与 baseline 已 seed，后续迁移必须实际执行而不能被 seed 跳过。
         let versions: Vec<i64> =
             sqlx::query_scalar("SELECT version FROM _sqlx_migrations ORDER BY version")
                 .fetch_all(&pool)
@@ -1145,6 +1145,7 @@ mod tests {
         expected.push(BASELINE_VERSION);
         expected.push(101);
         expected.push(102);
+        expected.push(103);
         assert_eq!(versions, expected);
 
         // FTS 直接是 trigram 终态
@@ -1162,6 +1163,9 @@ mod tests {
             "active_generations",
             "render_cache",
             "current_share",
+            "config_domains",
+            "config_recovery",
+            "config_metadata",
         ] {
             let exists: bool =
                 sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = ?)")

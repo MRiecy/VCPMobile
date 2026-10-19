@@ -5,6 +5,8 @@ import { useNotificationStore } from "@/core/stores/notification";
 import { useSettingsStore } from "@/core/stores/settings";
 import { invokeMock, mockInvoke } from "@/tests/mocks/tauri";
 import { mountWithPinia } from "@/tests/utils/mount";
+import type { ConfigSaveResult, ConfigUpdate } from "@/core/config/generated/config";
+import { applyConfigRequest, configRequestChanges, makeConfigSnapshot, makeSettings } from "@/tests/helpers/config";
 
 const testPlatform = vi.hoisted(() => ({ value: 'android' as 'android' | 'ios' }));
 vi.mock("@/core/utils/platform", () => ({
@@ -43,32 +45,25 @@ const disconnectedStatus = {
 };
 
 function installBaseMocks(tools: ToolFixture[]) {
-  mockInvoke("read_settings", () => ({
-    userName: "tester",
-    vcpServerUrl: "https://legacy.invalid",
-    vcpApiKey: "legacy-api-key",
-    vcpLogUrl: "wss://log.invalid",
-    vcpLogKey: "legacy-log-key",
-    syncServerUrl: "",
-    syncHttpUrl: "",
-    syncToken: "",
-    topicSummaryModel: "",
-    syncLogLevel: "info",
-    agentOrder: [],
-    groupOrder: [],
-    distributedWsUrl: "wss://distributed.example/ws",
-    distributedVcpKey: "distributed-key",
-    distributedDeviceName: "Phone",
+  const snapshot = makeConfigSnapshot(makeSettings({
+    "identity.userName": "tester",
+    "server.url": "https://legacy.invalid",
+    "server.apiKey": "legacy-api-key",
+    "log.url": "wss://log.invalid",
+    "log.key": "legacy-log-key",
+    "conversation.topicSummaryModel": "",
+    "distributed.wsUrl": "wss://distributed.example/ws",
+    "distributed.vcpKey": "distributed-key",
+    "distributed.deviceName": "Phone",
   }));
-  mockInvoke("get_settings_recovery_status", () => ({
-    recoveredCorrupt: false,
-  }));
+  mockInvoke("read_settings", () => snapshot);
   mockInvoke("get_distributed_status", () => disconnectedStatus);
   mockInvoke("get_registered_tools_metadata", () => tools);
   mockInvoke("get_distributed_tool_config_status", () => ({
     state: "ready",
     message: null,
   }));
+  return snapshot;
 }
 
 async function mountOpenView() {
@@ -125,13 +120,13 @@ describe("DistributedView explicit tool authorization", () => {
   it("waits for loaded connection fields and enables the iOS node in one save", async () => {
     testPlatform.value = 'ios';
     installBaseMocks([]);
-    const loaded = {
-      distributedDeviceName: 'Tablet',
-      distributedWsUrl: 'wss://configured.example/ws',
-      distributedVcpKey: 'configured-key',
-    };
+    const loaded = makeConfigSnapshot(makeSettings({
+      'distributed.deviceName': 'Tablet',
+      'distributed.wsUrl': 'wss://configured.example/ws',
+      'distributed.vcpKey': 'configured-key',
+    }));
     const read = deferred<typeof loaded>();
-    const save = deferred<typeof loaded>();
+    const save = deferred<ConfigSaveResult>();
     mockInvoke('read_settings', () => read.promise);
     mockInvoke('update_settings', () => save.promise);
     const wrapper = mountWithPinia(DistributedView, { props: { isOpen: true } });
@@ -150,9 +145,20 @@ describe("DistributedView explicit tool authorization", () => {
       expect(button.attributes()).toHaveProperty('disabled');
       await button.trigger('click');
       const writes = invokeMock.mock.calls.filter(([command]) => command === 'update_settings');
-      expect(writes).toEqual([['update_settings', { updates: { ...loaded, distributedEnabled: true } }]]);
+      expect(writes).toHaveLength(1);
+      const request = writes[0][1]?.request as ConfigUpdate;
+      expect(configRequestChanges(request)).toEqual({
+        'distributed.deviceName': 'Tablet',
+        'distributed.wsUrl': 'wss://configured.example/ws',
+        'distributed.vcpKey': 'configured-key',
+        'distributed.enabled': true,
+      });
+      expect(request.patches).toEqual([expect.objectContaining({
+        domain: 'distributed', expectedRevision: '1', repair: false,
+        baseValues: { deviceName: 'Tablet', wsUrl: 'wss://configured.example/ws', vcpKey: 'configured-key', enabled: false },
+      })]);
 
-      save.resolve(loaded);
+      save.resolve({ status: 'saved', snapshot: applyConfigRequest(loaded, request) });
       await flushPromises();
       expect(useNotificationStore().activeToasts.filter(notice => notice.type === 'success')).toHaveLength(1);
       expect(button.attributes()).not.toHaveProperty('disabled');
@@ -165,16 +171,18 @@ describe("DistributedView explicit tool authorization", () => {
     testPlatform.value = 'ios';
     installBaseMocks([]);
     vi.spyOn(console, 'error').mockImplementation(() => {});
-    const fresh = {
-      distributedDeviceName: 'Reloaded tablet',
-      distributedWsUrl: 'wss://reloaded.example/ws',
-      distributedVcpKey: 'reloaded-key',
-    };
-    mockInvoke('update_settings', () => fresh);
+    const fresh = makeConfigSnapshot(makeSettings({
+      'distributed.deviceName': 'Reloaded tablet',
+      'distributed.wsUrl': 'wss://reloaded.example/ws',
+      'distributed.vcpKey': 'reloaded-key',
+    }), '2');
+    mockInvoke('update_settings', args => ({
+      status: 'saved', snapshot: applyConfigRequest(fresh, args?.request as ConfigUpdate),
+    }));
     const wrapper = mountWithPinia(DistributedView, { props: { isOpen: true } });
     try {
       await flushPromises();
-      expect(useSettingsStore().settings?.distributedDeviceName).toBe('Phone');
+      expect(useSettingsStore().settings?.distributed.deviceName).toBe('Phone');
       await wrapper.setProps({ isOpen: false });
       mockInvoke('read_settings', async () => { throw new Error('read unavailable'); });
       await wrapper.setProps({ isOpen: true });
@@ -192,7 +200,88 @@ describe("DistributedView explicit tool authorization", () => {
       expect(saveButton.attributes()).not.toHaveProperty('disabled');
       await saveButton.trigger('click');
       await flushPromises();
-      expect(invokeMock).toHaveBeenCalledWith('update_settings', { updates: { ...fresh, distributedEnabled: true } });
+      expect(invokeMock).toHaveBeenCalledWith('update_settings', { request: { patches: [{
+        domain: 'distributed', expectedRevision: '2', repair: false,
+        changes: { deviceName: 'Reloaded tablet', wsUrl: 'wss://reloaded.example/ws', vcpKey: 'reloaded-key', enabled: true },
+        baseValues: { deviceName: 'Reloaded tablet', wsUrl: 'wss://reloaded.example/ws', vcpKey: 'reloaded-key', enabled: false },
+      }] } });
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("retries a disconnected enabled node after an unchanged save completes", async () => {
+    const snapshot = installBaseMocks([]);
+    snapshot.data.distributed.enabled = true;
+    const save = deferred<ConfigSaveResult>();
+    mockInvoke('update_settings', () => save.promise);
+    mockInvoke('reconcile_distributed_node_cmd', () => undefined);
+    const wrapper = mountWithPinia(DistributedView, { props: { isOpen: true } });
+    try {
+      await flushPromises();
+      const button = wrapper.findAll('button').find(item => item.text() === '连接')!;
+      await button.trigger('click');
+      await flushPromises();
+      expect(invokeMock).toHaveBeenCalledWith('update_settings', { request: { patches: [{
+        domain: 'distributed', expectedRevision: '1', repair: false,
+        changes: { wsUrl: 'wss://distributed.example/ws', vcpKey: 'distributed-key', deviceName: 'Phone', enabled: true },
+        baseValues: { wsUrl: 'wss://distributed.example/ws', vcpKey: 'distributed-key', deviceName: 'Phone', enabled: true },
+      }] } });
+      expect(invokeMock).not.toHaveBeenCalledWith('reconcile_distributed_node_cmd');
+
+      // An unchanged successful commit does not increment the domain revision.
+      save.resolve({ status: 'saved', snapshot });
+      await flushPromises();
+      expect(useSettingsStore().snapshot?.domains.distributed.revision).toBe('1');
+      expect(invokeMock.mock.calls.filter(([command]) => command === 'reconcile_distributed_node_cmd')).toHaveLength(1);
+      expect(button.attributes()).not.toHaveProperty('disabled');
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("does not start a connection when its configuration is rejected", async () => {
+    installBaseMocks([]);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockInvoke('update_settings', () => ({ status: 'rejected', issues: [{
+      domain: 'distributed', field: 'wsUrl', code: 'invalid_url', message: '连接地址格式无效',
+    }] }));
+    const wrapper = mountWithPinia(DistributedView, { props: { isOpen: true } });
+    try {
+      await flushPromises();
+      const button = wrapper.findAll('button').find(item => item.text() === '连接')!;
+      await button.trigger('click');
+      await flushPromises();
+      expect(invokeMock).not.toHaveBeenCalledWith('reconcile_distributed_node_cmd');
+      expect(useSettingsStore().settings?.distributed.enabled).toBe(false);
+      expect(useNotificationStore().activeToasts).toEqual([expect.objectContaining({
+        type: 'error', title: '连接设置保存失败', message: expect.stringContaining('连接地址格式无效'),
+      })]);
+      expect(button.attributes()).not.toHaveProperty('disabled');
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("reports startup failure separately after the connection configuration was saved", async () => {
+    const snapshot = installBaseMocks([]);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockInvoke('update_settings', args => ({
+      status: 'saved', snapshot: applyConfigRequest(snapshot, args?.request as ConfigUpdate),
+    }));
+    mockInvoke('reconcile_distributed_node_cmd', () => Promise.reject(new Error('runtime unavailable')));
+    const wrapper = mountWithPinia(DistributedView, { props: { isOpen: true } });
+    try {
+      await flushPromises();
+      const button = wrapper.findAll('button').find(item => item.text() === '连接')!;
+      await button.trigger('click');
+      await flushPromises();
+      expect(useSettingsStore().settings?.distributed.enabled).toBe(true);
+      expect(useSettingsStore().snapshot?.domains.distributed.revision).toBe('2');
+      expect(useNotificationStore().activeToasts.filter(notice => notice.type === 'error')).toEqual([
+        expect.objectContaining({ title: '设置已保存，连接未能启动' }),
+      ]);
+      expect(button.attributes()).not.toHaveProperty('disabled');
     } finally {
       wrapper.unmount();
     }
@@ -497,15 +586,21 @@ describe("DistributedView explicit tool authorization", () => {
 
   it("can stop an iOS node while the socket is still connecting", async () => {
     testPlatform.value = 'ios';
-    installBaseMocks([]);
+    const snapshot = installBaseMocks([]);
+    snapshot.data.distributed.enabled = true;
     mockInvoke('get_distributed_status', () => ({ ...disconnectedStatus, state: 'connecting' }));
-    mockInvoke('update_settings', () => ({ distributedEnabled: false }));
+    mockInvoke('update_settings', args => ({
+      status: 'saved', snapshot: applyConfigRequest(snapshot, args?.request as ConfigUpdate),
+    }));
     const wrapper = mountWithPinia(DistributedView, { props: { isOpen: true } });
     try {
       await flushPromises();
       await wrapper.findAll('button').find(button => button.text() === '断开连接')!.trigger('click');
       await flushPromises();
-      expect(invokeMock).toHaveBeenCalledWith('update_settings', { updates: { distributedEnabled: false } });
+      expect(invokeMock).toHaveBeenCalledWith('update_settings', { request: { patches: [{
+        domain: 'distributed', expectedRevision: '1', repair: false,
+        changes: { enabled: false }, baseValues: { enabled: true },
+      }] } });
     } finally {
       wrapper.unmount();
     }

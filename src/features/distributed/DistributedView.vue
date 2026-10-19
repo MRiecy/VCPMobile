@@ -3,6 +3,8 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import type { PermissionStatusDto } from "../../core/types/native";
 import { useSettingsStore } from "../../core/stores/settings";
+import type { ConfigSnapshot } from '../../core/config/generated/config';
+import { buildSettingsUpdate, cloneConfig } from '../../core/config/fields';
 import { useNotificationStore } from "../../core/stores/notification";
 import { isAndroid, isIOS } from "../../core/utils/platform";
 import { useDistributed } from "./composables/useDistributed";
@@ -44,6 +46,7 @@ const connectionSettingsLoading = ref(false);
 const connectionSettingsReady = ref(false);
 const connectionSettingsError = ref("");
 const connectionSaving = ref(false);
+let connectionBaseline: ConfigSnapshot | null = null;
 const connectionFieldsDisabled = computed(() =>
   !connectionSettingsReady.value || connectionSettingsLoading.value ||
   connectionSaving.value || status.value.state !== "disconnected",
@@ -468,9 +471,10 @@ const loadSettings = async (view = viewGeneration) => {
     if (!isCurrentView(view)) return;
     const settings = settingsStore.settings;
     if (!settings) throw new Error("连接配置为空");
-    wsUrl.value = settings.distributedWsUrl || "";
-    vcpKey.value = settings.distributedVcpKey || "";
-    deviceName.value = settings.distributedDeviceName ?? "VCPMobile";
+    connectionBaseline = cloneConfig(settingsStore.snapshot!);
+    wsUrl.value = settings.distributed.wsUrl || "";
+    vcpKey.value = settings.distributed.vcpKey || "";
+    deviceName.value = settings.distributed.deviceName ?? "VCPMobile";
     connectionSettingsReady.value = true;
   } catch (e) {
     console.error("[DistributedView] Failed to load settings:", e);
@@ -489,20 +493,31 @@ const handleConnect = async () => {
   if (!canSaveConnection.value) return;
   const view = viewGeneration;
   connectionSaving.value = true;
+  let configurationSaved = false;
   try {
-    await settingsStore.updateSettings({
-      distributedWsUrl: wsUrl.value,
-      distributedVcpKey: vcpKey.value,
-      distributedDeviceName: deviceName.value,
-      distributedEnabled: true,
-    });
+    if (!connectionBaseline) throw new Error('连接配置尚未加载');
+    const result = await settingsStore.updateSettings(buildSettingsUpdate(connectionBaseline, {
+      'distributed.wsUrl': wsUrl.value,
+      'distributed.vcpKey': vcpKey.value,
+      'distributed.deviceName': deviceName.value,
+      'distributed.enabled': true,
+    }));
+    if (result.status === 'conflict') {
+      connectionBaseline = cloneConfig(result.snapshot);
+      throw new Error('连接配置已被其他操作修改。草稿已保留，请检查后再次连接。');
+    }
+    if (result.status === 'rejected') throw new Error(result.issues.map(issue => issue.message).join('；'));
+    connectionBaseline = cloneConfig(result.snapshot);
+    configurationSaved = true;
+    // Explicit Connect is also a retry when an unchanged, enabled node is offline.
+    await invoke('reconcile_distributed_node_cmd');
   } catch (e: any) {
     console.error("[DistributedView] Connection start failed:", e);
     if (isCurrentView(view)) {
       notificationStore.addNotification({
         type: "error",
-        title: "连接设置保存失败",
-        message: String(e),
+        title: configurationSaved ? '设置已保存，连接未能启动' : '连接设置保存失败',
+        message: configurationSaved ? '请检查网络与服务器状态后重试连接。' : String(e),
         toastOnly: true,
       });
     }
@@ -516,7 +531,7 @@ const handleDisconnect = async () => {
   connectionSaving.value = true;
   try {
     if (settingsStore.settings) {
-      await settingsStore.updateSettings({ distributedEnabled: false });
+      await settingsStore.updateFields({ 'distributed.enabled': false });
     }
   } catch (e: any) {
     console.error("[DistributedView] Connection stop failed:", e);

@@ -51,6 +51,7 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `tauri-plugin-os` | `2.4.0` | 按平台信息需求检查 | crates.io | 与前端绑定配套，提供启动时注入的平台身份 |
 | `serde` | `1` | 仅安全补丁 | crates.io | 序列化基石，极稳定 |
 | `serde_json` | `1` | 仅安全补丁 | crates.io | — |
+| `ts-rs` | `12.0.1` | 配置契约工具变更时检查 | crates.io | 可选 `config-export` feature；仅供 host 开发工具从 Rust 配置类型生成 TypeScript，移动端默认不启用 |
 | `tokio` | `1` | 仅安全补丁 | crates.io | 异步运行时 |
 | `reqwest` | `0.12` | 每季度检查 | crates.io | HTTP 客户端，注意 `rustls-tls` feature |
 | `sqlx` | `0.8.6` | 每季度检查 | crates.io | SQLite 异步 ORM |
@@ -87,6 +88,8 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `encoding_rs` | `0.8` | 仅安全补丁 | crates.io | 编码转换 |
 | `chardetng` | `0.1` | 每半年检查 | crates.io | 编码检测 |
 | `jni` | `0.21` | 每季度检查 | crates.io | Android JNI 绑定 |
+
+配置契约导出工具位于 `src-tauri/crates/config-export/`，直接编译生产配置类型与规则。修改这些定义后运行 `pnpm config:generate` 更新已提交的 `src/core/config/generated/`；`pnpm config:check` 只检查生成结果，不写文件，也不读取设备配置或凭据。`pnpm check` 会先执行这一只读检查，再检查 TypeScript 和 Rust。普通手机构建不执行导出。
 
 ### 2.2 前端层 (`package.json`)
 

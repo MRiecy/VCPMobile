@@ -5,7 +5,7 @@
 //! `src/features/logcenter/logCenterStore.ts`），本模块不持有任何会话状态。
 
 use crate::vcp_modules::infra::admin_api;
-use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
+use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -80,7 +80,7 @@ pub async fn logcenter_fetch<R: Runtime>(
     incremental: bool,
     offset: u64,
 ) -> Result<LogFetchResult, String> {
-    let settings = read_settings(app_handle, settings_state).await?;
+    let settings = read_config(app_handle, settings_state).await?;
     admin_api::ensure_admin_config(&settings, "日志中心")?;
 
     let mut request = admin_api::admin_request(&settings, Method::GET, &["server-log"])?;
@@ -134,7 +134,7 @@ pub async fn logcenter_clear_server<R: Runtime>(
     app_handle: AppHandle<R>,
     settings_state: State<'_, SettingsState>,
 ) -> Result<String, String> {
-    let settings = read_settings(app_handle, settings_state).await?;
+    let settings = read_config(app_handle, settings_state).await?;
     admin_api::ensure_admin_config(&settings, "日志中心")?;
 
     let resp = admin_api::admin_request(&settings, Method::POST, &["server-log", "clear"])?

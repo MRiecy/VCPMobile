@@ -16,7 +16,7 @@ export function resolveForumAuthor(author: string): AvatarTarget | null {
   if (!name) return null;
 
   const settingsStore = useSettingsStore();
-  if (settingsStore.settings?.userName?.trim() === name) {
+  if (settingsStore.settings?.identity.userName?.trim() === name) {
     return { type: 'user', id: 'user_avatar', name };
   }
 

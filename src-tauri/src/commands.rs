@@ -106,7 +106,7 @@ macro_rules! app_command_handler {
             toggle_favorite_model,
         };
         use crate::vcp_modules::settings_manager::{
-            get_settings_recovery_status, parse_config_backup, read_settings, set_theme, update_settings,
+            export_config_domains, parse_config_backup, read_settings, update_settings,
         };
         use crate::vcp_modules::infra::share_inbox::{
             accept_android_share, bind_current_share, commit_share_message, discard_current_share,
@@ -253,10 +253,9 @@ macro_rules! app_command_handler {
                 save_tarven_rule,
                 toggle_rule_enabled,
                 // ── 设置（settings_manager）──
-                get_settings_recovery_status,
+                export_config_domains,
                 parse_config_backup,
                 read_settings,
-                set_theme,
                 update_settings,
                 // ── 日记（diary）──
                 diary_cancel_search,

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import UserProfileSection from '../components/UserProfileSection.vue';
+import SettingsDomainIssues from '../editing/SettingsDomainIssues.vue';
 import { IDENTITY_FIELDS, type IdentityFields } from '../editing/fieldSets';
 import { useSettingsPageSession } from '../editing/useSettingsPageSession';
 
@@ -20,6 +21,8 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
 
 <template>
   <div class="flex flex-col gap-4">
+    <SettingsDomainIssues :domains="session.domainIssues.value" :errors="session.fieldErrors.value" :fields="IDENTITY_FIELDS"
+      :disabled="disabled || session.saving.value" :repair="session.repairDomain" @reset="session.resetField" />
     <p v-if="error" role="alert" class="text-sm text-red-500 break-words">
       {{ error }}
       <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading" @click="reload">重试</button>

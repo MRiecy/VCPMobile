@@ -4,7 +4,6 @@ import { exportConfigBackup } from '../../../features/settings/useConfigBackup';
 import { cancelFileOperation } from '../../../core/utils/nativeFilePicker';
 import { useThemeStore } from '../../../core/stores/theme';
 import { useChatPreferencesStore } from '../../../features/chat/preferences/store';
-import type { AppSettings } from '../../../core/stores/settings';
 import { invokeMock, mockInvoke } from '../../mocks/tauri';
 
 vi.mock('../../../core/utils/platform', () => ({ isAndroid: false, isIOS: true }));
@@ -30,7 +29,7 @@ describe('iOS 配置导出沿用文件操作接纳与取消', () => {
   it('页面在 prepare 返回前关闭，不启动文件保存并释放迟到的 reservation', async () => {
     const prepared = deferred<{ reservationToken: string }>();
     mockInvoke('plugin:vcp-mobile|prepare_file_operation', () => prepared.promise);
-    const exporting = exportConfigBackup({} as AppSettings, 'export-cancelled-before-start');
+    const exporting = exportConfigBackup({}, 'export-cancelled-before-start');
     const rejected = expect(exporting).rejects.toThrow('cancelled');
     await cancelFileOperation('export-cancelled-before-start');
     prepared.resolve({ reservationToken: 'reservation-1' });
@@ -44,7 +43,7 @@ describe('iOS 配置导出沿用文件操作接纳与取消', () => {
     const started = deferred<void>();
     mockInvoke('plugin:vcp-mobile|prepare_file_operation', () => ({ reservationToken: 'reservation-2' }));
     mockInvoke('plugin:vcp-mobile|save_to_downloads', () => { started.resolve(); return saving.promise; });
-    const exporting = exportConfigBackup({} as AppSettings, 'export-started');
+    const exporting = exportConfigBackup({}, 'export-started');
     const rejected = expect(exporting).rejects.toThrow('cancelled');
     await started.promise;
     expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|save_to_downloads', expect.objectContaining({

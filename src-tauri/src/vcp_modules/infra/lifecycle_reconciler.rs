@@ -1,4 +1,4 @@
-use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
+use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use tauri::{AppHandle, Manager};
 
 /// 根据设置决定启动或停止分布式节点连接
@@ -15,7 +15,7 @@ pub async fn reconcile_distributed_node(app_handle: &AppHandle, force_reconnect:
 
     // 读取全局 settings，获取连接参数
     let settings_state = app_handle.state::<SettingsState>();
-    let settings = match read_settings(app_handle.clone(), settings_state).await {
+    let settings = match read_config(app_handle.clone(), settings_state).await {
         Ok(s) => s,
         Err(e) => {
             log::error!(
@@ -28,7 +28,7 @@ pub async fn reconcile_distributed_node(app_handle: &AppHandle, force_reconnect:
 
     // iOS owns no background execution resource for this node. Background
     // settings writes must not recreate a session after lifecycle suspension.
-    let distributed_enabled = settings.distributed_enabled
+    let distributed_enabled = settings.distributed.enabled
         && (!cfg!(target_os = "ios")
             || crate::vcp_modules::infra::lifecycle_manager::is_app_in_foreground(app_handle));
 
@@ -47,12 +47,12 @@ pub async fn reconcile_distributed_node(app_handle: &AppHandle, force_reconnect:
                 );
                 return;
             }
-            let ws_url = settings.distributed_ws_url;
-            let vcp_key = settings.distributed_vcp_key;
-            let device_name = if settings.distributed_device_name.is_empty() {
+            let ws_url = settings.distributed.ws_url.clone();
+            let vcp_key = settings.distributed.vcp_key.clone();
+            let device_name = if settings.distributed.device_name.is_empty() {
                 "VCPMobile".to_string()
             } else {
-                settings.distributed_device_name
+                settings.distributed.device_name.clone()
             };
             log::info!(
                 "[Lifecycle] distributedEnabled=true, starting distributed node connection..."

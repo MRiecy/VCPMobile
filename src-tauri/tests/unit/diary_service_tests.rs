@@ -29,10 +29,13 @@ async fn spawn_test_server(router: Router) -> (String, tokio::task::JoinHandle<(
 
 fn test_settings(base: &str) -> Settings {
     Settings {
-        vcp_server_url: format!("{base}/proxy/v1/chat/completions"),
-        vcp_api_key: "test-bearer".to_string(),
-        admin_username: "user".to_string(),
-        admin_password: "pass".to_string(),
+        server: crate::vcp_modules::settings_manager::ServerConfig {
+            url: format!("{base}/proxy/v1/chat/completions"),
+            api_key: "test-bearer".to_string(),
+            admin_username: "user".to_string(),
+            admin_password: "pass".to_string(),
+            ..Default::default()
+        },
         ..Settings::default()
     }
 }
@@ -102,8 +105,8 @@ fn folds_lightmemo_chunks_into_openable_file_hits() {
 async fn text_search_fails_closed_before_sending_empty_admin_credentials() {
     let service = DiaryServiceState::new().expect("service");
     let mut settings = test_settings("http://127.0.0.1:9/proxy");
-    settings.admin_username.clear();
-    settings.admin_password.clear();
+    settings.server.admin_username.clear();
+    settings.server.admin_password.clear();
 
     let error = service
         .search(

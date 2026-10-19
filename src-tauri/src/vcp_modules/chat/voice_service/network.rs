@@ -832,7 +832,7 @@ mod tests {
         };
         for mode in [VoiceTtsMode::Builtin, VoiceTtsMode::Clone] {
             let mut config = VoiceServiceConfig::from_settings(
-                crate::vcp_modules::settings_manager::Settings::default(),
+                &crate::vcp_modules::settings_manager::Settings::default(),
             );
             config.tts_mode = mode;
             config.tts_style_prompt = "轻声慢说".into();

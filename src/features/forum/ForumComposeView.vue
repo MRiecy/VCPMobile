@@ -23,7 +23,7 @@ const title = ref('');
 const content = ref('');
 
 onMounted(() => {
-  maid.value = settingsStore.settings?.userName ?? '';
+  maid.value = settingsStore.settings?.identity.userName ?? '';
 });
 
 const validationError = computed(() => {

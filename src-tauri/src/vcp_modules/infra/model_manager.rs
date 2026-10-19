@@ -1,5 +1,5 @@
 use crate::vcp_modules::db_manager::DbState;
-use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
+use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use crate::vcp_modules::vcp_client::{
     freeze_chat_connection, resolve_model_discovery_endpoint, ChatRequestPurpose,
     MODEL_DISCOVERY_UNAVAILABLE,
@@ -103,17 +103,17 @@ pub async fn refresh_models<R: Runtime>(
     settings_state: State<'_, SettingsState>,
 ) -> Result<Vec<ModelInfo>, String> {
     let _refresh_guard = state.refresh_lifecycle.lock().await;
-    let settings = read_settings(app.clone(), settings_state).await?;
+    let settings = read_config(app.clone(), settings_state).await?;
     let models_url = resolve_model_discovery_endpoint(
-        &settings.vcp_server_url,
-        settings.chat_endpoint_mode,
+        &settings.server.url,
+        settings.server.endpoint_mode,
     )?
     .ok_or_else(|| {
         format!(
             "{MODEL_DISCOVERY_UNAVAILABLE}: 原始 URL 无法安全推导 /v1/models；主聊天仍可直接使用该地址"
         )
     })?;
-    let vcp_api_key = settings.vcp_api_key;
+    let vcp_api_key = &settings.server.api_key;
 
     let client = state.http_client.clone();
 
@@ -331,7 +331,7 @@ pub async fn test_model_connectivity<R: Runtime>(
     settings_state: State<'_, SettingsState>,
     model_id: String,
 ) -> Result<u64, String> {
-    let settings = read_settings(app, settings_state).await?;
+    let settings = read_config(app, settings_state).await?;
     let connection = freeze_chat_connection(&settings, ChatRequestPurpose::Interactive)?;
 
     let start = std::time::Instant::now();
@@ -369,7 +369,7 @@ pub async fn start_batch_model_test<R: Runtime>(
     let _lifecycle_guard = state.batch_lifecycle.lock().await;
 
     // 1. 在主线程同步读取一次设置，规避生命周期逃逸问题，同时实现零冗余开销
-    let settings = read_settings(app, settings_state).await?;
+    let settings = read_config(app, settings_state).await?;
     let connection = freeze_chat_connection(&settings, ChatRequestPurpose::Interactive)?;
     let endpoint_url = connection.endpoint_url;
     let vcp_api_key = connection.api_key;

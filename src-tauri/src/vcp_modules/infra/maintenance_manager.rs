@@ -7,13 +7,44 @@ use crate::vcp_modules::file_manager::{
     get_multimodal_cache_dir, get_thumbnails_root_dir,
 };
 use crate::vcp_modules::infra::utils::{is_valid_cas_hash, now_secs, YieldCounter};
-use crate::vcp_modules::settings_manager::{read_settings, update_settings, SettingsState};
 use std::collections::HashSet;
 use tauri::{AppHandle, Manager, State};
 
 struct AttachmentGcSnapshot {
     live_hashes: HashSet<String>,
     indexed_attachments: Vec<(String, String)>,
+}
+
+const LAST_AUTOMATIC_MAINTENANCE_KEY: &str = "last_automatic_maintenance";
+
+async fn last_automatic_maintenance(pool: &sqlx::SqlitePool) -> Result<i64, String> {
+    let value: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
+        .bind(LAST_AUTOMATIC_MAINTENANCE_KEY)
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| format!("读取自动维护时间失败: {error}"))?;
+    value.map_or(Ok(0), |value| {
+        value
+            .parse::<i64>()
+            .map_err(|_| "自动维护时间格式无效".to_string())
+    })
+}
+
+async fn record_automatic_maintenance(db_state: &DbState, time: i64) -> Result<(), String> {
+    let mut tx = db_state
+        .write_transaction("maintenance.record-completion")
+        .await?;
+    sqlx::query(
+        "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) \
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    )
+    .bind(LAST_AUTOMATIC_MAINTENANCE_KEY)
+    .bind(time.to_string())
+    .bind(time)
+    .execute(&mut *tx)
+    .await
+    .map_err(|error| format!("记录自动维护时间失败: {error}"))?;
+    tx.commit().await
 }
 
 #[derive(Debug, Default)]
@@ -398,19 +429,14 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
         }
     });
 
-    let settings_state = app.state::<SettingsState>();
-
-    // 获取当前设置
-    let settings = match read_settings(app.clone(), settings_state.clone()).await {
-        Ok(s) => s,
-        Err(_) => return,
+    let db_state = app.state::<DbState>();
+    let last_maintenance = match last_automatic_maintenance(&db_state.pool).await {
+        Ok(time) => time,
+        Err(error) => {
+            log::warn!("[Maintenance] Scheduled maintenance state unavailable: {error}");
+            return;
+        }
     };
-
-    let last_maintenance = settings
-        .extra
-        .get("lastAutomaticMaintenance")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
 
     let now = now_secs();
 
@@ -420,7 +446,6 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
         log::info!("[Maintenance] Triggering scheduled SQLite maintenance...");
 
         // 1. SQLite 物理空间回收与查询规划器优化
-        let db_state = app.state::<DbState>();
         let _ = db_state.run_incremental_vacuum_optimize(100).await;
 
         // 2. 自动清除已删除消息的多余附件关联
@@ -447,17 +472,57 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
         }
 
         // 3. 更新时间戳
-        let updates = serde_json::json!({
-            "lastAutomaticMaintenance": now
-        });
-        let _ = update_settings(app.clone(), settings_state, updates).await;
+        if let Err(error) = record_automatic_maintenance(&db_state, now).await {
+            log::warn!("[Maintenance] Failed to record maintenance completion: {error}");
+        }
         log::info!("[Maintenance] Scheduled maintenance complete.");
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::load_attachment_gc_snapshot;
+    use super::{
+        last_automatic_maintenance, load_attachment_gc_snapshot, record_automatic_maintenance,
+    };
+
+    #[tokio::test]
+    async fn maintenance_completion_uses_its_own_record_without_rewriting_configuration() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("open test database");
+        sqlx::raw_sql(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at BIGINT NOT NULL);\
+             CREATE TABLE config_domains (domain TEXT PRIMARY KEY, revision BIGINT, value TEXT);\
+             INSERT INTO config_domains VALUES ('voice', 9, 'preserve raw value');\
+             INSERT INTO settings VALUES ('cached_models', 'preserve cache', 1);",
+        )
+        .execute(&pool)
+        .await
+        .expect("create storage records");
+        let db = crate::vcp_modules::db_manager::DbState::new(pool, Default::default());
+        assert_eq!(last_automatic_maintenance(&db.pool).await.unwrap(), 0);
+        record_automatic_maintenance(&db, 100).await.unwrap();
+        record_automatic_maintenance(&db, 200).await.unwrap();
+        assert_eq!(last_automatic_maintenance(&db.pool).await.unwrap(), 200);
+        let domain: (i64, String) =
+            sqlx::query_as("SELECT revision, value FROM config_domains WHERE domain = 'voice'")
+                .fetch_one(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(domain, (9, "preserve raw value".into()));
+        let cache: String = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'cached_models'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(cache, "preserve cache");
+        let global: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM settings WHERE key = 'global'")
+            .fetch_one(&db.pool)
+            .await
+            .unwrap();
+        assert_eq!(global, 0);
+    }
 
     async fn create_live_set_tables(pool: &sqlx::SqlitePool) {
         sqlx::query(

@@ -72,25 +72,25 @@ const rebuildEmoticonLibrary = async () => {
 <template>
   <div class="space-y-5 px-1">
     <SettingsTextField
-      :model-value="settings.syncHttpUrl"
+      :model-value="settings['sync.httpUrl']"
       :disabled="disabled"
-      @update:model-value="emit('edit', { syncHttpUrl: $event })"
+      @update:model-value="emit('edit', { 'sync.httpUrl': $event })"
       label="HTTP 服务 URL"
       placeholder="http://192.168.x.x:5974"
       mono
     />
     <SettingsTextField
-      :model-value="settings.syncServerUrl"
+      :model-value="settings['sync.serverUrl']"
       :disabled="disabled"
-      @update:model-value="emit('edit', { syncServerUrl: $event })"
+      @update:model-value="emit('edit', { 'sync.serverUrl': $event })"
       label="WebSocket 服务 URL"
       placeholder="ws://192.168.x.x:5975"
       mono
     />
     <SettingsTextField
-      :model-value="settings.syncToken"
+      :model-value="settings['sync.token']"
       :disabled="disabled"
-      @update:model-value="emit('edit', { syncToken: $event })"
+      @update:model-value="emit('edit', { 'sync.token': $event })"
       is-secure
       label="Mobile Sync Token"
       placeholder="输入桌面端 config.env 中的 Token"
@@ -99,9 +99,9 @@ const rebuildEmoticonLibrary = async () => {
 
     <div class="border-t border-black/5 dark:border-white/5 pt-2 space-y-4">
       <SettingsTextField
-        :model-value="settings.fileKey"
+        :model-value="settings['server.fileKey']"
         :disabled="disabled"
-        @update:model-value="emit('edit', { fileKey: $event })"
+        @update:model-value="emit('edit', { 'server.fileKey': $event })"
         is-secure
         label="表情包图床密钥 (fileKey)"
         placeholder="用于构造表情包 URL 的密码"

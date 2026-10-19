@@ -11,7 +11,7 @@
 //! - 标读唯一途径是读详情时带 markRead=true；垃圾箱为软删除。
 
 use crate::vcp_modules::infra::admin_api;
-use crate::vcp_modules::settings_manager::{read_settings, Settings, SettingsState};
+use crate::vcp_modules::settings_manager::{read_config, Settings, SettingsState};
 use futures_util::TryStreamExt;
 use reqwest::{RequestBuilder, StatusCode};
 use serde_json::Value;
@@ -116,8 +116,8 @@ async fn send_json(
 async fn settings_of<R: Runtime>(
     app_handle: AppHandle<R>,
     settings_state: State<'_, SettingsState>,
-) -> Result<Settings, String> {
-    let settings = read_settings(app_handle, settings_state).await?;
+) -> Result<std::sync::Arc<Settings>, String> {
+    let settings = read_config(app_handle, settings_state).await?;
     admin_api::ensure_admin_config(&settings, "邮箱")?;
     Ok(settings)
 }

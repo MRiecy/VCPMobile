@@ -8,7 +8,11 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [workspace]
-members = [".", "plugins/vcp-mobile", "crates/voice-mp3"]
+members = [".", "plugins/vcp-mobile", "crates/voice-mp3", "crates/config-export"]
+
+[features]
+# Explicit host development tooling, never enabled by mobile builds.
+config-export = ["dep:ts-rs", "tauri-plugin-vcp-mobile/config-export"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -84,6 +88,9 @@ htmd = "0.5.5"
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21"
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+ts-rs = { version = "=12.0.1", optional = true, features = ["serde-json-impl"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6.4"

@@ -16,6 +16,7 @@ import {
   mockInvoke,
 } from "@/tests/mocks/tauri";
 import { flushPromises } from "@/tests/utils/flush";
+import { makeConfigSnapshot, makeSettings } from "@/tests/helpers/config";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -493,11 +494,11 @@ describe("chat conversation concurrency guards", () => {
     const session = useChatSessionStore();
     const history = useChatHistoryStore();
     const settings = useSettingsStore();
-    settings.settings = {
-      userName: "User",
-      vcpServerUrl: "https://example.invalid",
-      vcpApiKey: "key",
-    } as any;
+    settings.snapshot = makeConfigSnapshot(makeSettings({
+      "identity.userName": "User",
+      "server.url": "https://example.invalid",
+      "server.apiKey": "key",
+    }));
     mockInvoke("load_chat_history", () => []);
 
     session.setConversation({ id: "agent-a", type: "agent" }, "topic-a");

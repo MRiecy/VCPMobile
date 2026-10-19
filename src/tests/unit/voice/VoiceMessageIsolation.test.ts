@@ -8,6 +8,7 @@ import { useAttachmentStore } from '../../../core/stores/attachmentStore';
 import { useSettingsStore } from '../../../core/stores/settings';
 import { useShareStore } from '../../../core/stores/shareStore';
 import { invokeMock, mockInvoke } from '../../mocks/tauri';
+import { makeConfigSnapshot, makeSettings } from '../../helpers/config';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -29,7 +30,7 @@ afterEach(() => disposePinia(pinia));
 async function setup() {
   const session = useChatSessionStore();
   session.setConversation({ id: 'agent', type: 'agent' }, 'topic');
-  useSettingsStore().settings = { userName: 'User' } as never;
+  useSettingsStore().snapshot = makeConfigSnapshot(makeSettings({ 'identity.userName': 'User' }));
   const history = useChatHistoryStore();
   await history.loadHistoryPaginated('agent', 'agent', 'topic');
   return { session, history, key: { ...session.currentConversationKey! } };

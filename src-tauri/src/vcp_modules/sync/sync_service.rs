@@ -7,7 +7,7 @@ use super::sync_version::{
 };
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::db_write_queue::DbWriteQueue;
-use crate::vcp_modules::settings_manager::{read_settings, Settings, SettingsState};
+use crate::vcp_modules::settings_manager::{read_config, Settings, SettingsState};
 use crate::vcp_modules::sync_error::{
     build_local_error_payload, build_wire_error_payload, decode_wire_sync_error,
     encode_wire_sync_error, is_attempt_restart_code, SyncErrorPayload, WireSyncError,
@@ -1377,10 +1377,10 @@ fn build_sync_session_config(
     is_mobile: bool,
 ) -> Result<SyncSessionConfig, SyncConfigValidationError> {
     let mut ws_endpoint =
-        parse_sync_endpoint(&settings.sync_server_url, "WebSocket URL", &["ws", "wss"])?;
+        parse_sync_endpoint(&settings.sync.server_url, "WebSocket URL", &["ws", "wss"])?;
     let http_endpoint =
-        parse_sync_endpoint(&settings.sync_http_url, "HTTP URL", &["http", "https"])?;
-    if settings.sync_token.trim().is_empty() {
+        parse_sync_endpoint(&settings.sync.http_url, "HTTP URL", &["http", "https"])?;
+    if settings.sync.token.trim().is_empty() {
         return Err(SyncConfigValidationError::new(
             "SYNC_TOKEN_MISSING",
             "sync token is empty",
@@ -1407,14 +1407,14 @@ fn build_sync_session_config(
     ws_endpoint.set_query(None);
     ws_endpoint
         .query_pairs_mut()
-        .append_pair("token", &settings.sync_token);
+        .append_pair("token", &settings.sync.token);
 
     Ok(SyncSessionConfig {
         ws_url: ws_endpoint.to_string(),
         http_url: http_endpoint.as_str().trim_end_matches('/').to_string(),
-        sync_token: settings.sync_token.clone(),
-        sync_prerender_enabled: settings.sync_prerender_enabled,
-        sync_log_level: settings.sync_log_level.clone(),
+        sync_token: settings.sync.token.clone(),
+        sync_prerender_enabled: settings.sync.prerender_enabled,
+        sync_log_level: settings.sync.log_level.clone(),
     })
 }
 
@@ -3473,7 +3473,7 @@ pub async fn start_manual_sync(
     }
 
     let settings_state = handle.state::<SettingsState>();
-    let settings = read_settings(handle.clone(), settings_state)
+    let settings = read_config(handle.clone(), settings_state)
         .await
         .map_err(|error| {
             encode_sync_command_error(
@@ -4120,11 +4120,13 @@ mod tests {
 
     fn valid_sync_settings() -> Settings {
         Settings {
-            sync_server_url: "wss://192.168.1.10:5975/ws-sync".to_string(),
-            sync_http_url: "https://192.168.1.10:5974".to_string(),
-            sync_token: "sync-token".to_string(),
-            sync_log_level: "DEBUG".to_string(),
-            sync_prerender_enabled: true,
+            sync: crate::vcp_modules::settings_manager::SyncConfig {
+                server_url: "wss://192.168.1.10:5975/ws-sync".to_string(),
+                http_url: "https://192.168.1.10:5974".to_string(),
+                token: "sync-token".to_string(),
+                log_level: "DEBUG".to_string(),
+                prerender_enabled: true,
+            },
             ..Settings::default()
         }
     }
@@ -4139,15 +4141,15 @@ mod tests {
     #[test]
     fn session_config_snapshot_is_validated_normalized_and_frozen() {
         let mut settings = valid_sync_settings();
-        settings.sync_server_url =
+        settings.sync.server_url =
             "wss://192.168.1.10:5975/ws-sync?token=stale&mode=legacy".to_string();
-        settings.sync_http_url = "https://192.168.1.10:5974/base/".to_string();
-        settings.sync_token = "token +/?".to_string();
+        settings.sync.http_url = "https://192.168.1.10:5974/base/".to_string();
+        settings.sync.token = "token +/?".to_string();
 
         let config = build_sync_session_config(&settings, true)
             .unwrap_or_else(|error| panic!("valid sync configuration rejected: {}", error.detail));
-        settings.sync_server_url = "ws://changed.invalid".to_string();
-        settings.sync_token = "changed".to_string();
+        settings.sync.server_url = "ws://changed.invalid".to_string();
+        settings.sync.token = "changed".to_string();
 
         let ws_url = url::Url::parse(&config.ws_url).expect("validated WebSocket URL");
         let query = ws_url.query_pairs().collect::<Vec<_>>();
@@ -4164,29 +4166,41 @@ mod tests {
             (
                 "WebSocket localhost",
                 Settings {
-                    sync_server_url: "ws://localhost:5975".to_string(),
-                    ..valid_sync_settings()
+                    sync: crate::vcp_modules::settings_manager::SyncConfig {
+                        server_url: "ws://localhost:5975".to_string(),
+                        ..valid_sync_settings().sync
+                    },
+                    ..Default::default()
                 },
             ),
             (
                 "WebSocket IPv4 loopback range",
                 Settings {
-                    sync_server_url: "ws://127.0.0.2:5975".to_string(),
-                    ..valid_sync_settings()
+                    sync: crate::vcp_modules::settings_manager::SyncConfig {
+                        server_url: "ws://127.0.0.2:5975".to_string(),
+                        ..valid_sync_settings().sync
+                    },
+                    ..Default::default()
                 },
             ),
             (
                 "HTTP absolute localhost name",
                 Settings {
-                    sync_http_url: "http://LOCALHOST.:5974".to_string(),
-                    ..valid_sync_settings()
+                    sync: crate::vcp_modules::settings_manager::SyncConfig {
+                        http_url: "http://LOCALHOST.:5974".to_string(),
+                        ..valid_sync_settings().sync
+                    },
+                    ..Default::default()
                 },
             ),
             (
                 "HTTP IPv6 loopback",
                 Settings {
-                    sync_http_url: "http://[::1]:5974".to_string(),
-                    ..valid_sync_settings()
+                    sync: crate::vcp_modules::settings_manager::SyncConfig {
+                        http_url: "http://[::1]:5974".to_string(),
+                        ..valid_sync_settings().sync
+                    },
+                    ..Default::default()
                 },
             ),
         ] {
@@ -4195,9 +4209,12 @@ mod tests {
         }
 
         let settings = Settings {
-            sync_server_url: "ws://localhost:5975".to_string(),
-            sync_http_url: "http://127.0.0.2:5974".to_string(),
-            ..valid_sync_settings()
+            sync: crate::vcp_modules::settings_manager::SyncConfig {
+                server_url: "ws://localhost:5975".to_string(),
+                http_url: "http://127.0.0.2:5974".to_string(),
+                ..valid_sync_settings().sync
+            },
+            ..Default::default()
         };
         assert!(build_sync_session_config(&settings, false).is_ok());
     }

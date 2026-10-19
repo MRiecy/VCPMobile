@@ -6,7 +6,10 @@ use super::{
     VoiceReplyPolicy, VoiceServiceConfig, VoiceServiceStart,
 };
 use crate::vcp_modules::{
-    settings_manager::{Settings, VoiceTtsMode},
+    settings_manager::{
+        Settings, VoiceConfig, VoiceConnectionConfig, VoiceGuidanceConfig, VoiceTtsConfig,
+        VoiceTtsMode,
+    },
     vcp_client::StreamEvent,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -132,7 +135,7 @@ pub(super) async fn prepare_narration<R: Runtime>(
 ) -> Result<PreparedNarration, String> {
     let snapshot = samples::snapshot_voice_settings(app, cancel).await?;
     Ok(PreparedNarration {
-        policy: Arc::new(VoiceReplyPolicy::from_settings(snapshot.settings)),
+        policy: Arc::new(VoiceReplyPolicy::from_settings(&snapshot.settings)),
         sample: snapshot.sample,
     })
 }
@@ -146,26 +149,22 @@ enum NarrationSource {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TtsPreviewSettings {
-    voice_api_base_url: String,
-    voice_api_key: String,
-    voice_tts_mode: VoiceTtsMode,
-    voice_tts_voice: String,
-    voice_tts_stream: bool,
-    voice_tts_style_prompt: String,
-    voice_tts_clone_sample_id: String,
+    connection: VoiceConnectionConfig,
+    tts: VoiceTtsConfig,
 }
 
 impl TtsPreviewSettings {
     fn into_policy(self) -> Arc<VoiceReplyPolicy> {
-        Arc::new(VoiceReplyPolicy::from_settings(Settings {
-            voice_api_base_url: self.voice_api_base_url,
-            voice_api_key: self.voice_api_key,
-            voice_tts_mode: self.voice_tts_mode,
-            voice_tts_voice: self.voice_tts_voice,
-            voice_tts_stream: self.voice_tts_stream,
-            voice_tts_style_prompt: self.voice_tts_style_prompt,
-            voice_tts_clone_sample_id: self.voice_tts_clone_sample_id,
-            voice_auto_guidance: false,
+        Arc::new(VoiceReplyPolicy::from_settings(&Settings {
+            voice: VoiceConfig {
+                connection: self.connection,
+                tts: self.tts,
+                guidance: VoiceGuidanceConfig {
+                    auto_guidance: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             ..Settings::default()
         }))
     }
@@ -847,10 +846,19 @@ mod tests {
     async fn failed_clone_preparation_releases_the_slot_for_a_later_reply() {
         let app = tauri::test::mock_app();
         app.manage(TtsServiceState::default());
-        let policy = Arc::new(VoiceReplyPolicy::from_settings(Settings {
-            voice_api_key: "fixture-only-key".into(),
-            voice_tts_mode: VoiceTtsMode::Clone,
-            voice_tts_clone_sample_id: "missing-reference".into(),
+        let policy = Arc::new(VoiceReplyPolicy::from_settings(&Settings {
+            voice: VoiceConfig {
+                connection: VoiceConnectionConfig {
+                    api_key: "fixture-only-key".into(),
+                    ..Default::default()
+                },
+                tts: VoiceTtsConfig {
+                    mode: VoiceTtsMode::Clone,
+                    clone_sample_id: "missing-reference".into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
             ..Settings::default()
         }));
         let prepared = PreparedNarration {

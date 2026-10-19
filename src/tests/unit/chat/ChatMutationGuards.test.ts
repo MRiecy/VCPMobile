@@ -11,6 +11,7 @@ import { useNotificationStore } from "@/core/stores/notification";
 import { chatMutationBlockReason } from "@/features/chat/chatMutationPolicy";
 import GroupStopAllButton from "@/features/chat/components/GroupStopAllButton.vue";
 import { invokeMock, mockInvoke } from "@/tests/mocks/tauri";
+import { makeConfigSnapshot, makeSettings } from "@/tests/helpers/config";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -119,7 +120,9 @@ describe("chat mutations during generation", () => {
 
   it.each([true, false])("reports one failure from the real global channel or an unreported preflight rejection (pending: %s)", async recoveryPending => {
     const history = loadedHistory();
-    useSettingsStore().settings = { vcpServerUrl: "http://vcp.test", vcpApiKey: "key" } as any;
+    useSettingsStore().snapshot = makeConfigSnapshot(makeSettings({
+      "server.url": "http://vcp.test", "server.apiKey": "key",
+    }));
     mockInvoke("append_single_message", () => ({ blocks: [], topicUpdatedAt: 1 }));
     mockInvoke("handle_agent_chat_message", () => {
       if (!recoveryPending) return Promise.reject(new Error("invalid configuration"));

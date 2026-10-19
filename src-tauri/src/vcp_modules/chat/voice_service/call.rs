@@ -7,7 +7,7 @@ use super::{
 use crate::vcp_modules::{
     chat::voice_submission::prepare_voice_submission, chat_manager::ChatMessage,
     message_service::MessageWriteResultDto, topic_types::TopicKey,
-    settings_manager::{read_settings, SettingsState},
+    settings_manager::{read_config, SettingsState},
 };
 use serde::Serialize;
 use std::{
@@ -312,7 +312,7 @@ pub async fn begin_voice_conversation(
         // call. Repeated begin/microphone intents keep the same VAD snapshot.
         tts::stop_preview(&app).await?;
         current.vad_config.get_or_try_init(|| async {
-            let config = read_settings(app.clone(), app.state::<SettingsState>()).await?.voice_vad_config();
+            let config = read_config(app.clone(), app.state::<SettingsState>()).await?.voice_vad_config();
             config.validate()?;
             Ok::<_, String>(config)
         }).await?;
@@ -860,10 +860,10 @@ mod tests {
         };
         assert!(call.input_vad_config().is_err());
         let mut settings = crate::vcp_modules::settings_manager::Settings::default();
-        settings.voice_vad_end_silence_ms = 777;
+        settings.voice.vad.end_silence_ms = 777;
         call.vad_config.set(settings.voice_vad_config()).unwrap();
         assert_eq!(call.input_vad_config().unwrap().end_silence_ms, 777);
-        settings.voice_vad_end_silence_ms = 1200;
+        settings.voice.vad.end_silence_ms = 1200;
         call.inner.lock().unwrap().snapshot.mic_state = "closed";
         assert_eq!(call.input_vad_config().unwrap().end_silence_ms, 777);
         call.inner.lock().unwrap().snapshot.mic_state = "listening";

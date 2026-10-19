@@ -15,7 +15,10 @@ import type { SettingsPageProps } from '../../settings/contracts';
 import { VOICE_FIELDS } from '../../settings/editing/fieldSets';
 import { useSettingsPageSession } from '../../settings/editing/useSettingsPageSession';
 import { useVoiceCallStore } from './voiceCallStore';
-import { DEFAULT_VOICE_SETTINGS, MIMO_TTS_MODES, MIMO_VOICES, type VoiceServiceSettings } from './settings';
+import { SETTINGS_DEFAULTS, MIMO_TTS_MODES, MIMO_VOICES, settingDescriptor, settingOptions } from './settings';
+import type { VoiceConfig } from '../../../core/config/generated/config';
+import { applySettingsFields, type SettingsFieldValues } from '../../../core/config/fields';
+import SettingsDomainIssues from '../../settings/editing/SettingsDomainIssues.vue';
 import VoiceTextArea from './VoiceTextArea.vue';
 import VoiceCloneSample from './VoiceCloneSample.vue';
 import VoiceTtsPreview from './VoiceTtsPreview.vue';
@@ -30,44 +33,43 @@ const { draft, saving, leaving } = session;
 const openingStyleGuidance = ref(false);
 const preview = ref<InstanceType<typeof VoiceTtsPreview> | null>(null);
 const cloneSample = ref<InstanceType<typeof VoiceCloneSample> | null>(null);
-const previewSettings = computed<VoiceServiceSettings>(() => {
-  const source = { ...DEFAULT_VOICE_SETTINGS, ...settingsStore.settings, ...draft.value };
-  return Object.fromEntries(Object.keys(DEFAULT_VOICE_SETTINGS).map(key => [key, source[key as keyof VoiceServiceSettings]])) as unknown as VoiceServiceSettings;
-});
-const ttsModel = computed(() => MIMO_TTS_MODES.find(mode => mode.value === draft.value?.voiceTtsMode)?.model ?? MIMO_TTS_MODES[0].model);
+const previewSettings = computed<VoiceConfig>(() =>
+  applySettingsFields(settingsStore.settings ?? SETTINGS_DEFAULTS, draft.value ?? {}).voice,
+);
+const ttsModel = computed(() => MIMO_TTS_MODES.find(mode => mode.value === draft.value?.['voice.tts.mode'])?.model ?? MIMO_TTS_MODES[0].model);
 const disabled = computed(() => !props.active || leaving.value || openingStyleGuidance.value);
-type DurationField = 'voiceVadEndSilenceMs' | 'voiceVadPlaybackOnsetMs';
-type SelectionField = 'voiceLanguage' | 'voiceInputEncoding' | 'voiceTtsVoice' | 'voiceTtsMode' | 'voiceVadSensitivity' | DurationField;
+type DurationField = 'voice.vad.endSilenceMs' | 'voice.vad.playbackOnsetMs';
+type SelectionField = 'voice.asr.language' | 'voice.asr.inputEncoding' | 'voice.tts.voice' | 'voice.tts.mode' | 'voice.vad.sensitivity' | DurationField;
 const durationSettings = {
-  voiceVadEndSilenceMs: { min: 32, max: 5000, presets: [320, 512, 800, 1200, 1600] },
-  voiceVadPlaybackOnsetMs: { min: 32, max: 2000, presets: [128, 192, 320] },
+  'voice.vad.endSilenceMs': { min: settingDescriptor('voice.vad.endSilenceMs').min!, max: settingDescriptor('voice.vad.endSilenceMs').max!, presets: [320, 512, 800, 1200, 1600] },
+  'voice.vad.playbackOnsetMs': { min: settingDescriptor('voice.vad.playbackOnsetMs').min!, max: settingDescriptor('voice.vad.playbackOnsetMs').max!, presets: [128, 192, 320] },
 } as const;
 const durationOptions = (field: DurationField) => durationSettings[field].presets.map(value => ({ value, label: `${value} ms` }));
 const selections = {
-  voiceLanguage: {
+  'voice.asr.language': {
     title: '识别语言',
-    options: [{ value: 'auto', label: '自动识别' }, { value: 'zh', label: '中文' }, { value: 'en', label: '英文' }],
+    options: settingOptions('voice.asr.language', { auto: '自动识别', zh: '中文', en: '英文' }),
   },
-  voiceInputEncoding: {
+  'voice.asr.inputEncoding': {
     title: '语音输入编码',
-    options: [{ value: 'wav', label: 'WAV 无损' }, { value: 'mp3_64', label: 'MP3 64 kbps' }],
+    options: settingOptions('voice.asr.inputEncoding', { wav: 'WAV 无损', mp3_64: 'MP3 64 kbps' }),
   },
-  voiceTtsVoice: { title: '朗读音色', options: MIMO_VOICES },
-  voiceTtsMode: { title: '音色模式', options: MIMO_TTS_MODES },
-  voiceVadSensitivity: {
+  'voice.tts.voice': { title: '朗读音色', options: MIMO_VOICES },
+  'voice.tts.mode': { title: '音色模式', options: MIMO_TTS_MODES },
+  'voice.vad.sensitivity': {
     title: '人声检测灵敏度',
-    options: [{ value: 'low', label: '较低' }, { value: 'standard', label: '标准' }, { value: 'high', label: '较高' }],
+    options: settingOptions('voice.vad.sensitivity', { low: '较低', standard: '标准', high: '较高' }),
   },
-  voiceVadEndSilenceMs: { title: '说完等待时间', options: durationOptions('voiceVadEndSilenceMs') },
-  voiceVadPlaybackOnsetMs: { title: '朗读时插话确认', options: durationOptions('voiceVadPlaybackOnsetMs') },
+  'voice.vad.endSilenceMs': { title: '说完等待时间', options: durationOptions('voice.vad.endSilenceMs') },
+  'voice.vad.playbackOnsetMs': { title: '朗读时插话确认', options: durationOptions('voice.vad.playbackOnsetMs') },
 } as const satisfies {
-  [K in SelectionField]: { title: string; options: ReadonlyArray<{ value: VoiceServiceSettings[K]; label: string }> };
+  [K in SelectionField]: { title: string; options: ReadonlyArray<{ value: SettingsFieldValues[K]; label: string }> };
 };
-const recognitionFields = ['voiceLanguage', 'voiceInputEncoding'] as const;
+const recognitionFields = ['voice.asr.language', 'voice.asr.inputEncoding'] as const;
 const advancedFields = [
-  { field: 'voiceVadSensitivity', description: '较高更容易接纳轻声，也更容易误触。' },
-  { field: 'voiceVadEndSilenceMs', description: '停顿达到此时长后结束当前录音。' },
-  { field: 'voiceVadPlaybackOnsetMs', description: '朗读期间持续检测到人声多久后确认插话。' },
+  { field: 'voice.vad.sensitivity', description: '较高更容易接纳轻声，也更容易误触。' },
+  { field: 'voice.vad.endSilenceMs', description: '停顿达到此时长后结束当前录音。' },
+  { field: 'voice.vad.playbackOnsetMs', description: '朗读期间持续检测到人声多久后确认插话。' },
 ] as const;
 const isDurationField = (field: SelectionField): field is DurationField => field in durationSettings;
 let selectionMenu: ContextMenuConfig | null = null;
@@ -191,8 +193,10 @@ defineExpose({ beforeLeave });
 
 <template>
   <SettingsCanvas viewport :inert="!active">
+        <SettingsDomainIssues :domains="session.domainIssues.value" :errors="session.fieldErrors.value" :fields="VOICE_FIELDS"
+          :disabled="disabled || saving" :repair="session.repairDomain" @reset="session.resetField" />
         <p v-if="error" role="alert" class="m-0 text-sm text-red-500">
-          {{ draft ? '语音设置保存失败，修改已保留，请再次返回重试。' : '语音设置加载失败，请重试。' }}
+          {{ error }}
           <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading || !active" @click="reload">重试</button>
         </p>
         <p v-else-if="!draft && loading" class="m-0 text-sm opacity-60" role="status">正在加载设置…</p>
@@ -202,16 +206,16 @@ defineExpose({ beforeLeave });
           <h2 :id="providerTitleId" class="settings-canvas-title">MiMo 语音服务</h2>
           <SettingsSection title="服务器连接">
             <div class="voice-connection-fields">
-              <SettingsTextField :model-value="draft.voiceApiBaseUrl" :disabled="disabled"
-                label="API 地址" :placeholder="DEFAULT_VOICE_SETTINGS.voiceApiBaseUrl" mono
-                @update:model-value="session.edit('voiceApiBaseUrl', $event)" />
-              <SettingsTextField :model-value="draft.voiceApiKey" :disabled="disabled"
+              <SettingsTextField :model-value="draft['voice.connection.apiBaseUrl']" :disabled="disabled"
+                label="API 地址" :placeholder="SETTINGS_DEFAULTS.voice.connection.apiBaseUrl" mono
+                @update:model-value="session.edit('voice.connection.apiBaseUrl', $event)" />
+              <SettingsTextField :model-value="draft['voice.connection.apiKey']" :disabled="disabled"
                 label="语音 API Key" placeholder="输入 MiMo API Key" is-secure
-                @update:model-value="session.edit('voiceApiKey', $event)" />
+                @update:model-value="session.edit('voice.connection.apiKey', $event)" />
             </div>
             <template #footer>
               <p class="m-0">
-                {{ draft.voiceApiKey.trim() ? '返回时自动保存，重新开启麦克风或开始新的朗读时生效。' : '填写 API Key 后返回会自动保存；配置在下次开麦或新朗读时生效。' }}
+                {{ draft['voice.connection.apiKey'].trim() ? '返回时自动保存，重新开启麦克风或开始新的朗读时生效。' : '填写 API Key 后返回会自动保存；配置在下次开麦或新朗读时生效。' }}
               </p>
             </template>
           </SettingsSection>
@@ -220,14 +224,14 @@ defineExpose({ beforeLeave });
             <template #description>模型：<code class="font-mono">mimo-v2.5-asr</code></template>
             <div>
               <SettingsRow v-for="field in recognitionFields" :key="field" :title="selections[field].title"
-                :description="field === 'voiceInputEncoding' ? 'MP3 约节省 75% 上传流量' : undefined"
+                :description="field === 'voice.asr.inputEncoding' ? 'MP3 约节省 75% 上传流量' : undefined"
                 :value="selectedLabel(field)" clickable :disabled="disabled"
                 :aria-label="selections[field].title" aria-haspopup="dialog" :aria-expanded="selectionOpen(field)"
                 @click="openSelection(field, $event)" />
               <SettingsRow title="流式识别结果" description="说完后整段上传，再逐步返回转写文本。">
                 <template #action>
-                  <SettingsSwitch :model-value="draft.voiceAsrStream" :disabled="disabled" aria-label="流式识别结果"
-                    @update:model-value="session.edit('voiceAsrStream', $event)" />
+                  <SettingsSwitch :model-value="draft['voice.asr.stream']" :disabled="disabled" aria-label="流式识别结果"
+                    @update:model-value="session.edit('voice.asr.stream', $event)" />
                 </template>
               </SettingsRow>
             </div>
@@ -236,31 +240,31 @@ defineExpose({ beforeLeave });
           <SettingsSection title="语音朗读 TTS">
             <template #description>模型：<code class="font-mono">{{ ttsModel }}</code></template>
             <div>
-              <SettingsRow title="音色模式" :value="selectedLabel('voiceTtsMode')" clickable
+              <SettingsRow title="音色模式" :value="selectedLabel('voice.tts.mode')" clickable
                 :disabled="disabled" aria-label="音色模式" aria-haspopup="dialog"
-                :aria-expanded="selectionOpen('voiceTtsMode')" @click="openSelection('voiceTtsMode', $event)" />
-              <SettingsRow v-if="draft.voiceTtsMode === 'builtin'" title="朗读音色" :value="selectedLabel('voiceTtsVoice')" clickable
+                :aria-expanded="selectionOpen('voice.tts.mode')" @click="openSelection('voice.tts.mode', $event)" />
+              <SettingsRow v-if="draft['voice.tts.mode'] === 'builtin'" title="朗读音色" :value="selectedLabel('voice.tts.voice')" clickable
                 :disabled="disabled" aria-label="朗读音色" aria-haspopup="dialog"
-                :aria-expanded="selectionOpen('voiceTtsVoice')" @click="openSelection('voiceTtsVoice', $event)" />
-              <SettingsRow v-if="draft.voiceTtsMode === 'builtin'" title="流式朗读" description="收到音频片段后开始播放；关闭则等待完整合成。">
+                :aria-expanded="selectionOpen('voice.tts.voice')" @click="openSelection('voice.tts.voice', $event)" />
+              <SettingsRow v-if="draft['voice.tts.mode'] === 'builtin'" title="流式朗读" description="收到音频片段后开始播放；关闭则等待完整合成。">
                 <template #action>
-                  <SettingsSwitch :model-value="draft.voiceTtsStream" :disabled="disabled" aria-label="流式朗读"
-                    @update:model-value="session.edit('voiceTtsStream', $event)" />
+                  <SettingsSwitch :model-value="draft['voice.tts.stream']" :disabled="disabled" aria-label="流式朗读"
+                    @update:model-value="session.edit('voice.tts.stream', $event)" />
                 </template>
               </SettingsRow>
             </div>
-            <VoiceCloneSample v-show="draft.voiceTtsMode === 'clone'" ref="cloneSample"
-              :model-value="draft.voiceTtsCloneSampleId" :active="active" :disabled="disabled || preview?.busy"
+            <VoiceCloneSample v-show="draft['voice.tts.mode'] === 'clone'" ref="cloneSample"
+              :model-value="draft['voice.tts.cloneSampleId']" :active="active" :disabled="disabled || preview?.busy"
               :settle-before-discard="session.settlePending"
-              @update:model-value="session.edit('voiceTtsCloneSampleId', $event)" />
+              @update:model-value="session.edit('voice.tts.cloneSampleId', $event)" />
             <SettingsDisclosure title="默认演绎指导" :disabled="disabled"
-              :description="draft.voiceTtsStylePrompt.trim() ? '已填写 · 自动指导关闭或缺失时使用' : '可选 · 自动指导关闭或缺失时使用'">
-              <VoiceTextArea label="默认演绎指导" :disabled="disabled" :max-length="2000"
-                :model-value="draft.voiceTtsStylePrompt" placeholder="例如：语气轻松自然，语速稍慢。"
+              :description="draft['voice.tts.stylePrompt'].trim() ? '已填写 · 自动指导关闭或缺失时使用' : '可选 · 自动指导关闭或缺失时使用'">
+              <VoiceTextArea label="默认演绎指导" :disabled="disabled" :max-length="settingDescriptor('voice.tts.stylePrompt').maxChars"
+                :model-value="draft['voice.tts.stylePrompt']" placeholder="例如：语气轻松自然，语速稍慢。"
                 description="保留所选音色，控制情绪、语气与节奏；留空则自然朗读。"
-                @update:model-value="session.edit('voiceTtsStylePrompt', $event)" />
+                @update:model-value="session.edit('voice.tts.stylePrompt', $event)" />
             </SettingsDisclosure>
-            <p v-if="draft.voiceTtsMode !== 'builtin'" class="m-0 text-xs leading-relaxed text-[var(--secondary-text)]">
+            <p v-if="draft['voice.tts.mode'] !== 'builtin'" class="m-0 text-xs leading-relaxed text-[var(--secondary-text)]">
               每个文本分段合成完成后返回音频；模型回复仍会逐段提交朗读。
             </p>
             <VoiceTtsPreview ref="preview" :settings="previewSettings" :active="active" :disabled="disabled || cloneSample?.importing" />

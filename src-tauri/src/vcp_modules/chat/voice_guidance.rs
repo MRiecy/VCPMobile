@@ -13,7 +13,7 @@ use std::{ops::Range, sync::LazyLock};
 
 pub const GUIDANCE_START: &str = "<<<[VOICE_GUIDANCE]>>>";
 pub const GUIDANCE_END: &str = "<<<[END_VOICE_GUIDANCE]>>>";
-pub const MAX_GUIDANCE_CHARS: usize = 2000;
+pub const MAX_GUIDANCE_CHARS: usize = crate::vcp_modules::settings_manager::VOICE_GUIDANCE_MAX_CHARS;
 // A conforming response has one block. Bound recovery work for deliberately
 // repeated blocks whose contents try to open scopes over following text.
 const MAX_SCOPE_RESCANS: usize = 16;

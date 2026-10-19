@@ -6,6 +6,7 @@ import { useChatStreamStore } from '@/core/stores/chatStreamStore';
 import { useSettingsStore } from '@/core/stores/settings';
 import { useChatPreferencesStore } from '@/features/chat/preferences/store';
 import { invokeMock, mockInvoke } from '@/tests/mocks/tauri';
+import { makeConfigSnapshot, makeSettings } from '@/tests/helpers/config';
 
 const hapticEffects = () => invokeMock.mock.calls
   .filter(([command]) => command === 'plugin:vcp-mobile|trigger_haptic_feedback')
@@ -31,7 +32,9 @@ describe('message haptics preference at the send and completion owners', () => {
     session.setConversation({ id: 'agent-a', type: 'agent' }, 'topic-a');
     const history = useChatHistoryStore();
     history.loadedConversationKey = session.currentConversationKey;
-    useSettingsStore().settings = { vcpServerUrl: 'http://vcp.test', vcpApiKey: 'key' } as any;
+    useSettingsStore().snapshot = makeConfigSnapshot(makeSettings({
+      'server.url': 'http://vcp.test', 'server.apiKey': 'key',
+    }));
     mockInvoke('append_single_message', () => ({ blocks: [], topicUpdatedAt: 1 }));
     mockInvoke('handle_agent_chat_message', () => undefined);
     mockInvoke('plugin:vcp-mobile|trigger_haptic_feedback', () => ({ submitted: true }));

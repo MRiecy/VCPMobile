@@ -15,7 +15,7 @@ use crate::vcp_modules::group_chat_application_service::{
 };
 use crate::vcp_modules::group_service::GroupManagerState;
 use crate::vcp_modules::message_service::{self, MessageWriteResultDto};
-use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
+use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use crate::vcp_modules::topic_types::TopicKey;
 use crate::vcp_modules::vcp_client::{
     freeze_chat_connection, ActiveGroupTurnLease, ActiveGroupTurns, ActiveRequests,
@@ -109,8 +109,8 @@ impl PreparedVoiceSubmission {
         if cancellation.is_cancelled() {
             return Ok(json!({ "status": "cancelled" }));
         }
-        let settings = read_settings(app.clone(), app.state::<SettingsState>()).await?;
-        message.name = Some(settings.user_name.clone());
+        let settings = read_config(app.clone(), app.state::<SettingsState>()).await?;
+        message.name = Some(settings.identity.user_name.clone());
         if !persist_voice_message(&app, &target, &mut message, &cancellation, on_persisted).await? {
             return Ok(json!({ "status": "cancelled" }));
         }

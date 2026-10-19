@@ -24,7 +24,7 @@ export const firstAgentId = (): string | null => {
   const settingsStore = useSettingsStore();
   const sorted = sortByOrder(
     assistantStore.agents,
-    settingsStore.settings?.agentOrder ?? [],
+    settingsStore.settings?.navigation.agentOrder ?? [],
   );
   return sorted[0]?.id ?? null;
 };

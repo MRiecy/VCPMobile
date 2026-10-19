@@ -5,7 +5,7 @@
 //! 配置/状态 JSON 以 Value 透传（契约解释权在前端 Store 的归一化层）。
 
 use crate::vcp_modules::infra::admin_api;
-use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
+use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::Value;
 use std::time::Duration;
@@ -90,8 +90,8 @@ async fn send_json(request: RequestBuilder, timeout: Duration) -> Result<Value, 
 async fn settings_of<R: Runtime>(
     app_handle: AppHandle<R>,
     settings_state: State<'_, SettingsState>,
-) -> Result<crate::vcp_modules::settings_manager::Settings, String> {
-    let settings = read_settings(app_handle, settings_state).await?;
+) -> Result<std::sync::Arc<crate::vcp_modules::settings_manager::Settings>, String> {
+    let settings = read_config(app_handle, settings_state).await?;
     admin_api::ensure_admin_config(&settings, "任务调度中心")?;
     Ok(settings)
 }

@@ -28,6 +28,40 @@ struct SampleFiles {
 }
 
 impl SampleFiles {
+    async fn recover_from_snapshot(
+        &mut self,
+        root: &Path,
+        snapshot: &settings_manager::ConfigSnapshot,
+    ) -> Result<(), String> {
+        match selected_sample_id(snapshot) {
+            Some(selected) => self.recover(root, selected).await,
+            None => {
+                // The original persisted reference is unknown. Leave existing
+                // files alone for this process, including any drafts imported
+                // to repair the configuration before its next successful read.
+                self.recovered_roots.insert(root.to_owned());
+                Ok(())
+            }
+        }
+    }
+
+    async fn discard_from_snapshot(
+        &mut self,
+        root: &Path,
+        id: &str,
+        snapshot: &settings_manager::ConfigSnapshot,
+    ) -> Result<(), String> {
+        let path = sample_path(root, id)?;
+        self.recover_from_snapshot(root, snapshot).await?;
+        let Some(selected) = selected_sample_id(snapshot) else {
+            return Ok(());
+        };
+        if selected == id {
+            return Ok(());
+        }
+        remove_sample_files(&path).await
+    }
+
     async fn recover(&mut self, root: &Path, selected: &str) -> Result<(), String> {
         if self.recovered_roots.contains(root) {
             return Ok(());
@@ -80,10 +114,31 @@ impl SampleFiles {
         if self.recovered_roots.contains(root) {
             return Ok(());
         }
-        let settings = settings_manager::read_settings(app.clone(), app.state()).await?;
-        self.recover(root, &settings.voice_tts_clone_sample_id)
-            .await
+        let snapshot = settings_manager::read_config_snapshot(app.clone(), app.state()).await?;
+        self.recover_from_snapshot(root, &snapshot).await
     }
+}
+
+/// None means that the effective default cannot establish which file the raw
+/// persisted configuration still owns. An empty but healthy ID means no owner.
+fn selected_sample_id(snapshot: &settings_manager::ConfigSnapshot) -> Option<&str> {
+    use settings_manager::{ConfigDomain, DomainHealth};
+    let status = snapshot.domains.get(&ConfigDomain::Voice)?;
+    if status.health == DomainHealth::Unavailable
+        || status.issues.iter().any(|issue| {
+            issue.field.is_empty()
+                || issue.field == "tts"
+                || issue.field == "tts.cloneSampleId"
+                || issue.field.starts_with("tts.cloneSampleId.")
+        })
+    {
+        return None;
+    }
+    let selected = snapshot.data.voice.tts.clone_sample_id.as_str();
+    if !selected.is_empty() && sample_path(Path::new(""), selected).is_err() {
+        return None;
+    }
+    Some(selected)
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -117,7 +172,7 @@ pub(super) struct PreparedCloneSample {
 }
 
 pub(super) struct VoiceSettingsSnapshot {
-    pub settings: settings_manager::Settings,
+    pub settings: Arc<settings_manager::Settings>,
     /// Only narration is affected by missing/corrupt reference audio. The chat
     /// request can keep using its settings and continue normally.
     pub sample: Result<Option<PreparedCloneSample>, String>,
@@ -456,16 +511,11 @@ pub async fn discard_voice_clone_sample<R: Runtime>(
         return Ok(());
     }
     let root = sample_root(&app)?;
-    let path = sample_path(&root, &sample_id)?;
     let mut guard = SAMPLE_FILES.lock().await;
-    let settings = settings_manager::read_settings(app.clone(), app.state()).await?;
+    let snapshot = settings_manager::read_config_snapshot(app.clone(), app.state()).await?;
     guard
-        .recover(&root, &settings.voice_tts_clone_sample_id)
-        .await?;
-    if settings.voice_tts_clone_sample_id == sample_id {
-        return Ok(());
-    }
-    remove_sample_files(&path).await
+        .discard_from_snapshot(&root, &sample_id, &snapshot)
+        .await
 }
 
 fn encode_sample(
@@ -550,33 +600,34 @@ pub(super) async fn snapshot_voice_settings<R: Runtime>(
     cancel: &CancellationToken,
 ) -> Result<VoiceSettingsSnapshot, String> {
     // Lock ordering is sample files -> settings. Settings writers run reference
-    // cleanup only after releasing SettingsState.lock. A replacement may commit
+    // cleanup only after publishing the committed configuration. A replacement may commit
     // while this snapshot reads, but its cleanup cannot remove the captured file.
     let mut guard = tokio::select! {
         biased;
         _ = cancel.cancelled() => return Err(super::network::CANCELLED.into()),
         guard = SAMPLE_FILES.lock() => guard,
     };
-    let settings = tokio::select! {
+    let snapshot = tokio::select! {
         biased;
         _ = cancel.cancelled() => return Err(super::network::CANCELLED.into()),
-        result = settings_manager::read_settings(app.clone(), app.state()) => result?,
+        result = settings_manager::read_config_snapshot(app.clone(), app.state()) => result?,
     };
     let root = sample_root(app);
     if let Ok(root) = &root {
         tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(super::network::CANCELLED.into()),
-            result = guard.recover(root, &settings.voice_tts_clone_sample_id) => {
+            result = guard.recover_from_snapshot(root, &snapshot) => {
                 // Recovery is best-effort maintenance. A failure must not stop
                 // chat or narration that does not need a sample.
                 if let Err(error) = result { log::warn!("[VoiceSample] cleanup unavailable: {error}"); }
             },
         }
     }
-    let audio = if settings.voice_tts_mode == settings_manager::VoiceTtsMode::Clone
-        && !settings.voice_api_key.trim().is_empty() {
-        let read = async { read_sample(&root?, &settings.voice_tts_clone_sample_id).await };
+    let settings = Arc::new(snapshot.data);
+    let audio = if settings.voice.tts.mode == settings_manager::VoiceTtsMode::Clone
+        && !settings.voice.connection.api_key.trim().is_empty() {
+        let read = async { read_sample(&root?, &settings.voice.tts.clone_sample_id).await };
         Some(tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(super::network::CANCELLED.into()),
@@ -600,6 +651,23 @@ pub(super) async fn snapshot_voice_settings<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn selection_snapshot(selected: &str) -> settings_manager::ConfigSnapshot {
+        let mut data = settings_manager::Settings::default();
+        data.voice.tts.clone_sample_id = selected.into();
+        settings_manager::ConfigSnapshot {
+            data,
+            domains: std::collections::BTreeMap::from([(
+                settings_manager::ConfigDomain::Voice,
+                settings_manager::DomainStatus {
+                    revision: "1".into(),
+                    schema_version: 1,
+                    issues: Vec::new(),
+                    health: settings_manager::DomainHealth::Ready,
+                },
+            )]),
+        }
+    }
 
     fn wav() -> Vec<u8> {
         let mut bytes = b"RIFF\x28\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0".to_vec();
@@ -725,7 +793,8 @@ mod tests {
             .await
             .unwrap();
         let mut files = SampleFiles::default();
-        files.recover(&root, &selected.id).await.unwrap();
+        let snapshot = selection_snapshot(&selected.id);
+        files.recover_from_snapshot(&root, &snapshot).await.unwrap();
         assert!(read_metadata(&root, &selected.id).await.unwrap().is_some());
         assert!(read_metadata(&root, &abandoned.id).await.unwrap().is_none());
         assert!(!pending.exists());
@@ -738,18 +807,71 @@ mod tests {
 
         let draft_one = import_picked(&root, &source, None).await.unwrap();
         let draft_two = import_picked(&root, &source, None).await.unwrap();
-        files.recover(&root, &selected.id).await.unwrap();
+        files.recover_from_snapshot(&root, &snapshot).await.unwrap();
         assert!(read_metadata(&root, &draft_one.id).await.unwrap().is_some());
+        assert!(read_metadata(&root, &draft_two.id).await.unwrap().is_some());
+        files.discard_from_snapshot(&root, &selected.id, &snapshot).await.unwrap();
+        assert!(read_metadata(&root, &selected.id).await.unwrap().is_some());
+        files.discard_from_snapshot(&root, &draft_one.id, &snapshot).await.unwrap();
+        assert!(read_metadata(&root, &draft_one.id).await.unwrap().is_none());
         assert!(read_metadata(&root, &draft_two.id).await.unwrap().is_some());
 
         // Test applications use distinct storage roots in one process. Their
         // recovery state must not be conflated with the first application.
         let other_root = temp.path().join("second-app");
         let other = import_picked(&other_root, &source, None).await.unwrap();
-        files.recover(&other_root, "").await.unwrap();
+        files.recover_from_snapshot(&other_root, &selection_snapshot("")).await.unwrap();
         assert!(read_metadata(&other_root, &other.id)
             .await
             .unwrap()
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn damaged_or_future_configuration_preserves_unknown_references_and_repair_drafts() {
+        use settings_manager::{ConfigDomain, DomainHealth};
+        let mut snapshots = Vec::new();
+        for raw in [
+            serde_json::json!({ "tts": { "cloneSampleId": 42 } }),
+            serde_json::json!({ "tts": false }),
+            serde_json::json!(false),
+            serde_json::json!({ "tts": { "cloneSampleId": "malformed-id" } }),
+        ] {
+            let (effective, issues) = settings_manager::schema::project_domain(ConfigDomain::Voice, &raw);
+            let mut snapshot = selection_snapshot("");
+            snapshot.data.voice = serde_json::from_value(effective).unwrap();
+            let status = snapshot.domains.get_mut(&ConfigDomain::Voice).unwrap();
+            status.health = if issues.is_empty() { DomainHealth::Ready } else { DomainHealth::Recovered };
+            status.issues = issues;
+            snapshots.push(snapshot);
+        }
+        let mut future = selection_snapshot("");
+        let status = future.domains.get_mut(&ConfigDomain::Voice).unwrap();
+        status.schema_version = 99;
+        status.health = DomainHealth::Unavailable;
+        snapshots.push(future);
+
+        for snapshot in snapshots {
+            let temp = tempfile::tempdir_in(".").unwrap();
+            let root = temp.path().join("voice-samples");
+            let source = temp.path().join("spoken.wav");
+            tokio::fs::write(&source, wav()).await.unwrap();
+            let existing = import_picked(&root, &source, None).await.unwrap();
+            let mut files = SampleFiles::default();
+            files.recover_from_snapshot(&root, &snapshot).await.unwrap();
+            files.discard_from_snapshot(&root, &existing.id, &snapshot).await.unwrap();
+            assert!(read_metadata(&root, &existing.id).await.unwrap().is_some());
+
+            // The user can still import a replacement while the persisted
+            // reference is unknown. Repairing it later must not let a delayed
+            // startup sweep erase this process's unsaved sample.
+            let draft = import_picked(&root, &source, None).await.unwrap();
+            let repaired = selection_snapshot(&existing.id);
+            files.recover_from_snapshot(&root, &repaired).await.unwrap();
+            assert!(read_metadata(&root, &draft.id).await.unwrap().is_some());
+            files.discard_from_snapshot(&root, &draft.id, &repaired).await.unwrap();
+            assert!(read_metadata(&root, &draft.id).await.unwrap().is_none());
+            assert!(read_metadata(&root, &existing.id).await.unwrap().is_some());
+        }
     }
 }

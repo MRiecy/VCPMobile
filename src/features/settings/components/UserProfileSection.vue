@@ -134,7 +134,7 @@ onUnmounted(deactivate);
         <VcpAvatar 
           owner-type="user" 
           owner-id="user_avatar" 
-          :fallback-name="settings.userName"
+          :fallback-name="settings['identity.userName']"
           size="w-16 h-16"
           rounded="rounded-full"
           dominant-color="var(--primary)"
@@ -144,8 +144,8 @@ onUnmounted(deactivate);
         </div>
       </div>
       <div class="flex-1 min-w-0">
-        <SettingsTextField :model-value="settings.userName" :disabled="disabled" label="用户名" placeholder="输入你的名字..."
-          @update:model-value="emit('edit', { userName: $event })" />
+        <SettingsTextField :model-value="settings['identity.userName']" :disabled="disabled" label="用户名" placeholder="输入你的名字..."
+          @update:model-value="emit('edit', { 'identity.userName': $event })" />
       </div>
     </div>
     
@@ -153,9 +153,9 @@ onUnmounted(deactivate);
       <div class="flex gap-4">
         <div class="flex-1">
           <SettingsTextField 
-            :model-value="settings.adminUsername"
+            :model-value="settings['server.adminUsername']"
             :disabled="disabled"
-            @update:model-value="emit('edit', { adminUsername: $event })"
+            @update:model-value="emit('edit', { 'server.adminUsername': $event })"
             label="管理员账号" 
             placeholder="VCP 管理员用户名" 
             mono
@@ -163,9 +163,9 @@ onUnmounted(deactivate);
         </div>
         <div class="flex-1">
           <SettingsTextField 
-            :model-value="settings.adminPassword"
+            :model-value="settings['server.adminPassword']"
             :disabled="disabled"
-            @update:model-value="emit('edit', { adminPassword: $event })"
+            @update:model-value="emit('edit', { 'server.adminPassword': $event })"
             label="管理员密码" 
             placeholder="鉴权密码" 
             is-secure 

@@ -3,7 +3,7 @@ use crate::vcp_modules::chat::voice_service::VoiceReplyPolicy;
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::message_service;
-use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
+use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use crate::vcp_modules::vcp_client::{
     freeze_chat_connection, message_transport_request_id, perform_vcp_request_registered,
@@ -72,7 +72,7 @@ pub async fn handle_agent_chat_message(
         Some(stream_channel.clone()),
         CancellationToken::new(),
     )?;
-    let settings = read_settings(app_handle.clone(), settings_state).await?;
+    let settings = read_config(app_handle.clone(), settings_state).await?;
     let connection = freeze_chat_connection(&settings, ChatRequestPurpose::Interactive)?;
     process_prepared_agent_chat_message(
         app_handle,

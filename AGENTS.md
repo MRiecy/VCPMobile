@@ -84,6 +84,7 @@ VCPMobile/
 │   ├── Cargo.toml              # Rust 依赖与构建配置
 │   ├── tauri.conf.json         # Tauri 配置
 │   ├── crates/voice-mp3/       # 双端共享的裁剪 LAME 编码核心（Rust/C）
+│   ├── crates/config-export/   # host 开发期配置契约导出，生成 Vue 类型/默认值/字段规则
 │   └── plugins/
 │       └── vcp-mobile/         # Android 原生实现与分期接入的 iOS Swift 插件
 │           └── AGENTS.md       # 插件局部代码地图与修改闭环
@@ -137,8 +138,12 @@ VCPMobile/
 ## 3. 构建与开发命令
 
 ```powershell
-# 完整静态检查（TypeScript + Rust）
-pnpm check                  # 等价于 vue-tsc --noEmit && cd src-tauri && cargo check --locked
+# 完整静态检查（生成契约 + TypeScript + Rust）
+pnpm check                  # tools/check.mjs 顺序执行 config:check、vue-tsc 与 cargo check --locked
+
+# Rust 配置契约的显式生成与只读一致性检查
+pnpm config:generate
+pnpm config:check
 
 # Android 真机调试 — USB 模式（纯数据线、ADB reverse、Agent 限流输出）
 pnpm android:debug:doctor -- --json
@@ -303,6 +308,8 @@ CI 与 Release 的当前行为由 `.github/workflows/ci.yml`、`.github/workflow
 | ------------------------------------------------ | ------------------------------------------------------------ |
 | `package.json`                                   | 前端依赖、pnpm 脚本                                          |
 | `src-tauri/Cargo.toml`                           | Rust 依赖、Android 构建目标、Release 优化                    |
+| `src-tauri/src/vcp_modules/infra/settings_manager/` | SQLite 配置领域类型、规则、存储、一次搬运与备份边界         |
+| `src/core/config/generated/`                    | Rust 显式生成的配置类型、默认值和字段元数据，勿手动编辑      |
 | `src-tauri/tauri.conf.json`                      | Tauri 窗口、安全、Bundle、beforeDevCommand/beforeBuildCommand |
 | `vite.config.ts`                                 | Vite 插件与 Tauri 开发、构建配置                             |
 | `uno.config.ts`                                  | UnoCSS 预设、主题色、快捷类、断点                            |

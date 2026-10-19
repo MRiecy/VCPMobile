@@ -8,7 +8,7 @@ use crate::vcp_modules::emoticon_manager::{
     internal_load_library, refresh_emoticon_library_internal, EmoticonManagerState,
 };
 use crate::vcp_modules::model_manager::{init_model_manager, ModelManagerState};
-use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
+use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use crate::vcp_modules::sync_service::init_sync_service;
 use crate::vcp_modules::vcp_log_service::init_vcp_log_connection_internal;
 
@@ -104,7 +104,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     // 3. 配置预加载 (P1 - 前端强依赖)
     // 将配置读取前置，确保前端 Ready 后 fetchSettings 必然成功
     let settings_state = handle.state::<SettingsState>();
-    let settings = match read_settings(handle.clone(), settings_state).await {
+    let settings = match read_config(handle.clone(), settings_state).await {
         Ok(s) => s,
         Err(e) => {
             let err_msg = format!("基础配置读取失败: {}", e);
@@ -145,7 +145,7 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
 
     // 3.6 根据设置决定是否启动分布式节点 (自动重连)
     {
-        let enable_dist = settings.distributed_enabled;
+        let enable_dist = settings.distributed.enabled;
         log::info!(
             "[Lifecycle] distributedEnabled={}, reconciling distributed node...",
             enable_dist
@@ -185,20 +185,20 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             // 后台任务用旧快照覆盖用户刚保存的新连接参数。
             let settings_state = h.state::<SettingsState>();
             let _runtime_guard = settings_state.lock_runtime_reconcile().await;
-            if let Ok(latest) = read_settings(h.clone(), h.state()).await {
-                if !latest.vcp_log_url.is_empty() && !latest.vcp_log_key.is_empty() {
+            if let Ok(latest) = read_config(h.clone(), h.state()).await {
+                if !latest.log.url.is_empty() && !latest.log.key.is_empty() {
                     info!("[Lifecycle] Auto-connecting VCP Log...");
                     let _ = init_vcp_log_connection_internal(
                         h.clone(),
-                        latest.vcp_log_url.clone(),
-                        latest.vcp_log_key.clone(),
+                        latest.log.url.clone(),
+                        latest.log.key.clone(),
                     )
                     .await;
                     info!("[Lifecycle] Auto-connecting VCP Info...");
                     let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection(
                         h.clone(),
-                        latest.vcp_log_url,
-                        latest.vcp_log_key,
+                        latest.log.url.clone(),
+                        latest.log.key.clone(),
                     )
                     .await;
                 }
@@ -415,15 +415,27 @@ pub async fn get_system_snapshot(
 pub async fn reconcile_distributed_node_cmd(app_handle: AppHandle) -> Result<bool, String> {
     let settings_state = app_handle.state::<SettingsState>();
     let _runtime_guard = settings_state.lock_runtime_reconcile().await;
-    let settings = read_settings(app_handle.clone(), app_handle.state())
+    let settings = read_config(app_handle.clone(), app_handle.state())
         .await
         .map_err(|e| e.to_string())?;
     log::info!(
         "[Lifecycle] reconcile_distributed_node_cmd called: enable={}",
-        settings.distributed_enabled
+        settings.distributed.enabled
     );
-    reconcile_distributed_node(&app_handle, true).await;
-    Ok(settings.distributed_enabled)
+    // A changed configuration already schedules its own replacement. Explicit
+    // Connect also admits an unchanged offline node without restarting a fresh
+    // connection that the post-commit owner has just created.
+    reconcile_distributed_node(&app_handle, false).await;
+    if settings.distributed.enabled {
+        if let Some(distributed) = app_handle.try_state::<crate::distributed::DistributedState>() {
+            let client = distributed.client.read().await;
+            let status = client.get_status().await;
+            if !status.connected && status.last_error.is_some() {
+                client.trigger_reconnect().await;
+            }
+        }
+    }
+    Ok(settings.distributed.enabled)
 }
 
 #[tauri::command]

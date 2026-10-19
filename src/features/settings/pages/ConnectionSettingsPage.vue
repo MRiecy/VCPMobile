@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { useSettingsStore, type AppSettings } from '../../../core/stores/settings';
+import { useSettingsStore } from '../../../core/stores/settings';
+import { buildSettingsUpdate } from '../../../core/config/fields';
 import SettingsSection from '../../../components/settings/SettingsSection.vue';
 import VcpCoreSettingsSection from '../components/VcpCoreSettingsSection.vue';
 import SyncSettingsSection from '../components/SyncSettingsSection.vue';
 import ConfigBackupSection from '../components/ConfigBackupSection.vue';
 import { CONNECTION_FIELDS, type ConnectionFields } from '../editing/fieldSets';
 import { useSettingsPageSession } from '../editing/useSettingsPageSession';
+import SettingsDomainIssues from '../editing/SettingsDomainIssues.vue';
 import type { SettingsSaveResult } from '../editing/useSettingsEditSession';
 import { applyConfigBackup, type BackupImportResult, type ParsedConfigBackup } from '../useConfigBackup';
 
@@ -45,10 +47,16 @@ const applyImport = async (backup: ParsedConfigBackup): Promise<BackupImportResu
     const settled = await session.settlePending();
     if (!settled.ok) throw new Error(settled.error);
     if (!props.active) throw new Error('设置页面已关闭');
-    return await applyConfigBackup(backup, async (patch: Partial<AppSettings>) => {
-      await settingsStore.updateSettings(patch);
+    return await applyConfigBackup(backup, async (changes) => {
+      const snapshot = settingsStore.snapshot;
+      if (!snapshot) throw new Error('配置尚未加载');
+      const result = await settingsStore.updateSettings(buildSettingsUpdate(snapshot, changes));
+      if (result.status !== 'saved') {
+        const issues = result.status === 'rejected' ? result.issues : result.conflicts;
+        throw new Error(issues.map(issue => `${issue.domain}.${issue.field}: ${issue.message}`).join('\n'));
+      }
       if (props.active) {
-        session.acceptImport(CONNECTION_FIELDS.filter((key) => Object.prototype.hasOwnProperty.call(patch, key)));
+        session.acceptImport(CONNECTION_FIELDS.filter((key) => Object.prototype.hasOwnProperty.call(changes, key)));
       }
     });
   } finally {
@@ -68,6 +76,7 @@ defineExpose({
       <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading" @click="reload">重试</button>
     </p>
     <template v-if="draft">
+      <SettingsDomainIssues :domains="session.domainIssues.value" :errors="session.fieldErrors.value" :fields="CONNECTION_FIELDS" :disabled="disabled" :repair="session.repairDomain" @reset="session.resetField" />
       <SettingsSection title="核心连接">
         <VcpCoreSettingsSection :settings="draft" :active="active" :disabled="disabled" :commit="commitForAction" @edit="edit" />
       </SettingsSection>

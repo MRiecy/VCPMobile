@@ -253,11 +253,11 @@ async fn convert_history_rows(
     };
 
     let settings =
-        crate::vcp_modules::settings_manager::read_settings(app_handle.clone(), app_handle.state())
+        crate::vcp_modules::settings_manager::read_config(app_handle.clone(), app_handle.state())
             .await
             .ok();
     let user_name = settings
-        .map(|s| s.user_name)
+        .map(|s| s.identity.user_name.clone())
         .unwrap_or_else(|| "User".to_string());
 
     let user_avatar_color: Option<String> = sqlx::query_scalar(

@@ -36,13 +36,13 @@ const agentListRef = ref<HTMLElement | null>(null);
 
 const orderedGroups = computed(() => {
   const groups = assistantStore.groups;
-  const order = settingsStore.settings?.groupOrder || [];
+  const order = settingsStore.settings?.navigation.groupOrder || [];
   return sortByOrder(groups, order);
 });
 
 const orderedAgents = computed(() => {
   const agents = assistantStore.agents;
-  const order = settingsStore.settings?.agentOrder || [];
+  const order = settingsStore.settings?.navigation.agentOrder || [];
   return sortByOrder(agents, order);
 });
 
@@ -106,10 +106,10 @@ const createSortable = (
     const [movedItem] = newOrder.splice(evt.oldIndex, 1);
     if (!movedItem) return;
     newOrder.splice(evt.newIndex, 0, movedItem);
-    void settingsStore.updateSettings(
+    void settingsStore.updateFields(
       ownerType === "group"
-        ? { groupOrder: newOrder }
-        : { agentOrder: newOrder },
+        ? { 'navigation.groupOrder': newOrder }
+        : { 'navigation.agentOrder': newOrder },
     ).catch((error) => {
       console.error(`[AgentList] Failed to persist ${ownerType} order:`, error);
     });

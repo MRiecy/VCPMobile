@@ -1,5 +1,5 @@
 use crate::vcp_modules::infra::lifecycle_state::{LifecycleSnapshot, LifecycleState};
-use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
+use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 #[cfg(any(not(target_os = "ios"), test))]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -168,12 +168,12 @@ async fn reconcile_ios_foreground_services(app: &AppHandle, is_foreground: bool)
     crate::vcp_modules::vcp_log_service::flush_background_logs(app);
     let settings_state = app.state::<SettingsState>();
     let _runtime_guard = settings_state.lock_runtime_reconcile().await;
-    match read_settings(app.clone(), app.state()).await {
+    match read_config(app.clone(), app.state()).await {
         Ok(settings) => {
             crate::vcp_modules::vcp_log_service::reconnect_log_connections(
                 app,
-                settings.vcp_log_url,
-                settings.vcp_log_key,
+                settings.log.url.clone(),
+                settings.log.key.clone(),
             )
             .await;
             crate::vcp_modules::infra::lifecycle_reconciler::reconcile_distributed_node(app, false)
@@ -269,8 +269,8 @@ async fn reconcile_foreground_services(
 
         // 1.3 开启 Distributed (5分钟保活冷却任务)
         let settings_state = app.state::<SettingsState>();
-        if let Ok(settings) = read_settings(app.clone(), settings_state).await {
-            if settings.distributed_enabled {
+        if let Ok(settings) = read_config(app.clone(), settings_state).await {
+            if settings.distributed.enabled {
                 let is_running = if let Some(dist_state) =
                     app.try_state::<crate::distributed::DistributedState>()
                 {
@@ -365,10 +365,10 @@ async fn reconcile_foreground_services(
 
         let settings_state = app.state::<SettingsState>();
         let _runtime_guard = settings_state.lock_runtime_reconcile().await;
-        if let Ok(settings) = read_settings(app.clone(), app.state()).await {
+        if let Ok(settings) = read_config(app.clone(), app.state()).await {
             if was_log_disconnected {
-                let log_url = settings.vcp_log_url;
-                let log_key = settings.vcp_log_key;
+                let log_url = settings.log.url.clone();
+                let log_key = settings.log.key.clone();
                 if !log_url.trim().is_empty() && !log_key.trim().is_empty() {
                     log::info!("[Lifecycle] App returned to foreground. Reconnecting VCPLog/Info.");
                     let _ = crate::vcp_modules::infra::vcp_log_service::reconnect_log_connections(
@@ -381,7 +381,7 @@ async fn reconcile_foreground_services(
                 crate::vcp_modules::infra::vcp_log_service::flush_background_logs(app);
             }
 
-            if was_dist_disconnected && settings.distributed_enabled {
+            if was_dist_disconnected && settings.distributed.enabled {
                 log::info!(
                     "[Lifecycle] App returned to foreground. Reconnecting distributed client."
                 );

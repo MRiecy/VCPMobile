@@ -1,49 +1,41 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { computed, shallowRef, ref, onScopeDispose } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useNotificationStore } from "./notification";
-import type { VoiceServiceSettings } from "../../features/chat/voice/settings";
-
-export type ChatEndpointMode = "standard" | "vcpTools" | "raw";
-
-export interface AppSettings extends VoiceServiceSettings {
-  userName: string;
-  vcpServerUrl: string;
-  chatEndpointMode: ChatEndpointMode;
-  vcpApiKey: string;
-  vcpLogUrl: string;
-  vcpLogKey: string;
-  syncServerUrl: string;
-  syncHttpUrl: string;
-  syncToken: string;
-  adminUsername: string;
-  adminPassword: string;
-  fileKey: string;
-  topicSummaryModel: string;
-  syncLogLevel: string;
-  agentOrder: string[];
-  groupOrder: string[];
-  currentThemeMode: string | null;
-  syncPrerenderEnabled: boolean;
-  distributedEnabled: boolean;
-  distributedWsUrl: string;
-  distributedVcpKey: string;
-  distributedDeviceName: string;
-  [key: string]: unknown;
-}
-
-interface SettingsRecoveryStatus {
-  recoveredCorrupt: boolean;
-  backupKey: string | null;
-  message: string | null;
-}
+import type { ConfigSnapshot, ConfigUpdate, ConfigSaveResult, Settings } from "../config/generated/config";
+import { buildSettingsUpdate, cloneConfig, type SettingsFieldValues } from "../config/fields";
+export type { ChatEndpointMode } from "../config/generated/config";
+export type AppSettings = Settings;
 
 export const useSettingsStore = defineStore("settings", () => {
-  const settings = ref<AppSettings | null>(null);
+  const snapshot = shallowRef<ConfigSnapshot | null>(null);
+  const settings = computed(() => snapshot.value?.data ?? null);
   const loading = ref(false);
   const error = ref<string | null>(null);
-  const recoveryNotified = ref(false);
+  const notifiedIssues = new Set<string>();
   const notificationStore = useNotificationStore();
+  let disposed = false;
+  let unlisten: UnlistenFn | undefined;
+  let installingListener: Promise<void> | null = null;
+  const acceptSnapshot = (incoming: ConfigSnapshot) => {
+    if (disposed) return;
+    if (!snapshot.value) { snapshot.value = incoming; return; }
+    const next = cloneConfig(snapshot.value);
+    for (const domain of Object.keys(incoming.domains) as (keyof ConfigSnapshot['domains'])[]) {
+      if (BigInt(incoming.domains[domain].revision) < BigInt(next.domains[domain].revision)) continue;
+      next.domains[domain] = incoming.domains[domain];
+      Object.assign(next.data, { [domain]: incoming.data[domain] });
+    }
+    snapshot.value = next;
+  };
+  const ensureListener = () => {
+    if (!installingListener) installingListener = listen<ConfigSnapshot>('vcp-config-changed', event => acceptSnapshot(event.payload))
+      .then(stop => { if (disposed) stop(); else unlisten = stop; })
+      .catch(() => { installingListener = null; });
+    return installingListener;
+  };
+  onScopeDispose(() => { disposed = true; unlisten?.(); });
   let activeOperations = 0;
   let operationTail: Promise<void> = Promise.resolve();
   const enqueueOperation = <T>(operation: () => Promise<T>): Promise<T> => {
@@ -63,16 +55,17 @@ export const useSettingsStore = defineStore("settings", () => {
   const fetchSettings = () => enqueueOperation(async () => {
     error.value = null;
     try {
-      const fetchedSettings = await invoke<AppSettings>("read_settings");
-      settings.value = fetchedSettings;
-      const recovery = await invoke<SettingsRecoveryStatus>("get_settings_recovery_status");
-      if (recovery.recoveredCorrupt && !recoveryNotified.value) {
-        recoveryNotified.value = true;
+      await ensureListener();
+      const fetched = await invoke<ConfigSnapshot>("read_settings");
+      acceptSnapshot(fetched);
+      for (const [domain, status] of Object.entries(fetched.domains)) {
+        if (!status.issues.length) continue;
+        const signature = `${domain}:${status.revision}`;
+        if (notifiedIssues.has(signature)) continue;
+        notifiedIssues.add(signature);
         notificationStore.addNotification({
-          type: "warning",
-          title: "设置已从损坏数据恢复",
-          message: recovery.message || "原始设置已在数据库中备份，当前使用默认设置。",
-          toastOnly: true,
+          type: "warning", title: "部分配置需要检查",
+          message: status.issues[0].message, toastOnly: true,
         });
       }
     } catch (e: any) {
@@ -82,41 +75,42 @@ export const useSettingsStore = defineStore("settings", () => {
     }
   });
 
-  const updateSettings = async (updates: Partial<AppSettings>): Promise<AppSettings> => {
-    // Capture at intent time: queued writes must not observe later draft/array edits.
-    const capturedUpdates = JSON.parse(JSON.stringify(updates)) as Partial<AppSettings>;
+  const updateSettings = (request: ConfigUpdate): Promise<ConfigSaveResult> => {
+    const captured = cloneConfig(request);
     return enqueueOperation(async () => {
       error.value = null;
       try {
-        const updated = await invoke<AppSettings>("update_settings", { updates: capturedUpdates });
-        settings.value = updated;
-
-        notificationStore.addNotification({
-          type: "success",
-          title: "设置已保存",
-          message: "配置变更已保存",
-          toastOnly: true,
-        });
-        return updated;
-      } catch (e: any) {
-        // Voice credentials must not be reflected by an IPC/transport error.
-        if (Object.keys(capturedUpdates).some(key => key.startsWith("voice"))) {
-          error.value = "语音设置保存失败，请重试";
-          console.error("[SettingsStore] Failed to update voice settings");
-          throw new Error(error.value);
+        const result = await invoke<ConfigSaveResult>("update_settings", { request: captured });
+        if (result.status === "saved" || result.status === "conflict") acceptSnapshot(result.snapshot);
+        if (result.status === "saved") {
+          notificationStore.addNotification({ type: "success", title: "设置已保存", message: "配置变更已保存", toastOnly: true });
+        } else {
+          const issues = result.status === "rejected" ? result.issues : result.conflicts;
+          error.value = issues.map(issue => issue.message).join("；");
         }
-        error.value = e.toString();
-        console.error("[SettingsStore] Failed to update settings:", e);
-        throw e;
+        return result;
+      } catch {
+        error.value = "设置保存失败，请重试";
+        throw new Error(error.value);
       }
+    });
+  };
+
+  const updateFields = (changes: Partial<SettingsFieldValues>): Promise<ConfigSaveResult> => {
+    if (!snapshot.value) return Promise.reject(new Error("设置尚未加载"));
+    return updateSettings(buildSettingsUpdate(snapshot.value, changes)).then(result => {
+      if (result.status !== 'saved') throw new Error(error.value || '配置已变化，请检查后重试');
+      return result;
     });
   };
 
   return {
     settings,
+    snapshot,
     loading,
     error,
     fetchSettings,
     updateSettings,
+    updateFields,
   };
 });

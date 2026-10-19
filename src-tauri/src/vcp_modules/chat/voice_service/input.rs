@@ -7,7 +7,7 @@ use super::{
     segmentation::{CaptureWindow, SegmentWindow},
     workers, VoiceServiceConfig, VoiceServiceStart,
 };
-use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
+use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use std::{
     collections::{HashMap, VecDeque},
     sync::{
@@ -496,10 +496,10 @@ async fn start_voice_service(
         .lock()
         .map_err(|error| error.to_string())?
         .reserve(session_id.clone(), call_id.clone())?;
-    let result = read_settings(app.clone(), app.state::<SettingsState>())
+    let result = read_config(app.clone(), app.state::<SettingsState>())
         .await
         .and_then(|settings| {
-            let config = VoiceServiceConfig::from_settings(settings);
+            let config = VoiceServiceConfig::from_settings(&settings);
             config.validate_asr()?;
             Ok(config)
         });
