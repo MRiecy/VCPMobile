@@ -23,14 +23,15 @@ const canvas = inject<boolean>('vcp-settings-canvas', false);
   <component :is="canvas && clickable ? 'button' : 'div'" :type="canvas && clickable ? 'button' : undefined"
     :disabled="canvas && clickable ? disabled : undefined"
     class="settings-row flex items-center justify-between py-3.5 px-1 transition-all duration-200" :class="[
+    { 'settings-row--described': !!description },
     clickable && !disabled ? 'cursor-pointer active:scale-[0.98] active:bg-black/5 dark:active:bg-white/5 rounded-xl' : '',
     disabled ? 'opacity-40 pointer-events-none' : ''
   ]" @click="clickable && !disabled && emit('click', $event)">
-    <div class="flex items-center gap-3 min-w-0 flex-1">
-      <div v-if="icon" class="shrink-0 opacity-60">
+    <div class="settings-row-leading flex items-center gap-3 min-w-0 flex-1">
+      <div v-if="icon" class="settings-row-icon shrink-0 opacity-60">
         <component :is="icon" :size="18" />
       </div>
-      <div class="flex flex-col min-w-0">
+      <div class="settings-row-copy flex flex-col min-w-0">
         <span class="settings-row-title text-[14px] font-semibold truncate inline-flex items-center gap-1.5" :class="danger ? 'text-red-500' : 'text-primary-text'">
           {{ title }}
           <slot name="title-suffix" />

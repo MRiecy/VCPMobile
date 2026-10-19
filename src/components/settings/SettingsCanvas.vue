@@ -62,13 +62,17 @@ provide('vcp-settings-canvas', true);
 .settings-canvas :deep(.settings-section-description),
 .settings-canvas :deep(.settings-section-footer) { color: var(--secondary-text); font-size: 12px; line-height: 18px; }
 .settings-canvas :deep(.settings-section-footer) { padding: 0; }
-.settings-canvas :deep(.settings-row) { width: 100%; min-height: 52px; padding: 4px 0; border: 0; border-radius: 0; background: transparent; text-align: left; transition: opacity 120ms ease; }
+.settings-canvas :deep(.settings-row) { width: 100%; min-height: 44px; padding: 0; align-items: flex-start; border: 0; border-radius: 0; background: transparent; text-align: left; transition: opacity 120ms ease; }
 .settings-canvas :deep(.settings-row + .settings-row) { border-top: 1px solid var(--settings-row-divider); }
 .settings-canvas :deep(.settings-row:active) { transform: none; }
 .settings-canvas :deep(button.settings-row:active) { opacity: 0.65; }
+.settings-canvas :deep(.settings-row-leading) { align-items: flex-start; }
+.settings-canvas :deep(.settings-row-icon) { margin-top: 13px; }
+.settings-canvas :deep(.settings-row-copy) { padding-block: 12px; }
+.settings-canvas :deep(.settings-row--described .settings-row-copy) { padding-bottom: 4px; }
 .settings-canvas :deep(.settings-row-title) { font-size: 14px; line-height: 20px; font-weight: 500; white-space: normal; }
-.settings-canvas :deep(.settings-row-description) { color: var(--secondary-text); font-size: 12px; line-height: 18px; opacity: 1; margin-top: 3px; }
-.settings-canvas :deep(.settings-row-action) { min-width: 0; max-width: 55%; flex-shrink: 1; }
+.settings-canvas :deep(.settings-row-description) { color: var(--secondary-text); font-size: 12px; line-height: 18px; opacity: 1; margin-top: 2px; }
+.settings-canvas :deep(.settings-row-action) { min-width: 0; min-height: 44px; max-width: 55%; flex-shrink: 1; }
 .settings-canvas :deep(.settings-row-value) { min-width: 0; color: var(--secondary-text); font-size: 14px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-canvas :deep(.settings-field-label) { padding: 0; font-size: 12px; line-height: 18px; font-weight: 500; color: var(--secondary-text); opacity: 1; text-transform: none; letter-spacing: 0; }
 .settings-canvas :deep(.settings-field-input) { min-height: 44px; padding: 8px 12px; font-size: var(--settings-input-font-size); line-height: 22px; border-radius: 8px; }
