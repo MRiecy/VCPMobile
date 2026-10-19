@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, useId } from 'vue';
 
 const props = defineProps<{
   modelValue: string | number | undefined | null;
@@ -15,6 +15,7 @@ const props = defineProps<{
 
 const isMasked = ref(true);
 const isFocused = ref(false);
+const inputId = useId();
 
 const inputType = computed(() => {
   if (props.isSecure) {
@@ -56,22 +57,22 @@ const toggleMask = () => {
 
 <template>
   <div class="settings-field flex flex-col gap-1.5 w-full">
-    <label v-if="label" class="text-[10px] uppercase font-bold opacity-40 tracking-wider px-1">
+    <label v-if="label" :for="inputId" class="settings-field-label text-[10px] uppercase font-bold opacity-40 tracking-wider px-1">
       {{ label }}
     </label>
     <div class="relative group">
-      <input :type="inputType" :value="modelValue ?? ''" :placeholder="placeholder" :disabled="disabled"
+      <input :id="inputId" :type="inputType" :value="modelValue ?? ''" :placeholder="placeholder" :disabled="disabled"
         autocomplete="off" autocapitalize="off" spellcheck="false"
-        class="w-full bg-black/5 dark:bg-white/5 p-3.5 rounded-2xl outline-none border transition-all duration-200" :class="[
+        class="settings-field-input w-full bg-black/5 dark:bg-white/5 p-3.5 rounded-2xl outline-none border transition-all duration-200" :class="[
           mono || isSecure ? 'font-mono text-sm' : 'text-[14px]',
           center ? 'text-center' : '',
           error ? 'border-red-500/50 bg-red-500/5' : 'border-black/5 dark:border-white/5 focus:border-blue-500/50 focus:bg-black/10 dark:focus:bg-white/10',
           disabled ? 'opacity-40 cursor-not-allowed' : '',
-          isSecure ? 'pr-12' : '',
+          isSecure ? 'settings-field-input--secure pr-12' : '',
           isActuallyMasked ? 'masked-input' : ''
         ]" @input="onInput" @blur="onBlur" @focus="onFocus" />
 
-      <button v-if="isSecure" type="button" @click="toggleMask"
+      <button v-if="isSecure" type="button" :disabled="disabled" :aria-label="isMasked ? '显示密钥' : '隐藏密钥'" @click="toggleMask"
         class="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 opacity-30 hover:opacity-100 transition-opacity active:scale-95">
         <svg v-if="isMasked" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor"
           stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">

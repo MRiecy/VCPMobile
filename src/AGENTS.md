@@ -121,6 +121,8 @@ Markdown、代码、KaTeX、Mermaid、SVG/MathML、受控 raw HTML、Tool、Thou
 
 ### 5.2 样式与层级
 
+`components/settings/SettingsCanvas.vue` 是显式启用的自然画布设置模板；当前样板为语音设置，其他页面未迁移。它限定排版样式，并通过 `viewport` 模式承接内容滚动、底部操作槽与现有 Insets。普通 list 宿主不传 `viewport`。Section 在画布内默认无卡，Row 选择项继续使用统一底部菜单；业务页仍拥有草稿、保存和离开语义。组合规范见 `docs/vue_docs/components/21_设置原子组件与主题系统.md`。
+
 Vue 组件使用 `<script setup>`；状态 Store 延续 Composition API。样式优先复用 UnoCSS、主题变量和现有共享类，复杂的消息块或交互动画可留在对应生产样式文件。
 
 `appStyles.ts` 中 reset、UnoCSS 与主题样式的顺序具有实际级联含义。全局覆盖层使用 `core/constants/layers.ts` 定义的语义层级；局部 stacking context 可以使用局部数值。遇到遮挡先检查 Teleport、父级 stacking context 与实际挂载位置，不用更大的魔法数字覆盖问题。

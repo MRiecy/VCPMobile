@@ -70,8 +70,10 @@ onBeforeUnmount(() => { mounted = false; });
         </button>
         <h2 class="m-0 text-base font-semibold">{{ title }}</h2>
       </header>
-      <div class="flex-1 min-h-0 overflow-y-auto no-rubber-band px-4 pt-6 pb-[calc(var(--vcp-safe-bottom,0px)+24px)]">
-        <p v-if="navigationError" class="text-sm text-red-500" role="alert">{{ navigationError }}</p>
+      <div class="flex-1 min-h-0" :class="mode === 'settings'
+        ? 'overflow-hidden flex flex-col'
+        : 'overflow-y-auto no-rubber-band px-4 pt-6 pb-[calc(var(--vcp-safe-bottom,0px)+24px)]'">
+        <p v-if="navigationError" class="shrink-0 px-4 py-2 text-sm text-red-500" role="alert">{{ navigationError }}</p>
         <VoiceSettingsPage v-if="mode === 'settings'" :key="visit" ref="pageHandle" :active="pageActive" />
         <VoicePresetsPage v-else :active="pageActive" />
       </div>

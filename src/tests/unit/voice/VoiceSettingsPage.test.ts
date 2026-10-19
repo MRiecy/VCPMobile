@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, disposePinia, setActivePinia, type Pinia } from 'pinia';
 import { reactive } from 'vue';
-import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
+import { DOMWrapper, flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import VoiceSettingsPage from '../../../features/chat/voice/VoiceSettingsPage.vue';
 import VoiceOptionsView from '../../../features/chat/voice/VoiceOptionsView.vue';
 import SettingsTextField from '../../../components/settings/SettingsTextField.vue';
+import GlobalOverlayManager from '../../../components/GlobalOverlayManager.vue';
+import { useOverlayStore } from '../../../core/stores/overlay';
 import { DEFAULT_VOICE_SETTINGS } from '../../../features/chat/voice/settings';
 import { useSettingsStore, type AppSettings } from '../../../core/stores/settings';
 import { useModalHistory } from '../../../core/composables/useModalHistory';
@@ -18,7 +20,6 @@ const context = vi.hoisted(() => ({
     setProbe: ReturnType<typeof vi.fn>;
   },
 }));
-vi.mock('../../../core/stores/overlay', () => ({ useOverlayStore: () => ({ openVoicePresets: context.openPresets }) }));
 vi.mock('../../../core/stores/notification', () => ({ useNotificationStore: () => ({ addNotification: vi.fn() }) }));
 vi.mock('../../../features/chat/voice/voiceCallStore', () => ({ useVoiceCallStore: () => context.voice }));
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn().mockResolvedValue(undefined) }));
@@ -50,6 +51,7 @@ beforeEach(() => {
   setActivePinia(pinia);
   database = snapshot();
   context.openPresets.mockReset();
+  vi.spyOn(useOverlayStore(), 'openVoicePresets').mockImplementation(context.openPresets);
   context.voice = reactive({
     active: true, microphoneState: 'on', playbackActive: false, probeActive: false, probePending: false,
     aecState: 'enabled', speechActive: false, route: 'speaker', probeError: '',
@@ -66,17 +68,25 @@ beforeEach(() => {
     window.history.replaceState({ vcpRoot: true, vcpMain: true }, '');
     window.dispatchEvent(new PopStateEvent('popstate', { state: window.history.state }));
   });
+  wrappers.push(mount(GlobalOverlayManager, {
+    attachTo: document.body,
+    global: {
+      stubs: { Transition: true, ToastManager: true, RenderedImageViewer: true },
+      directives: { guide: {} },
+    },
+  }));
 });
 
 afterEach(() => {
-  wrappers.splice(0).forEach(wrapper => wrapper.unmount());
+  wrappers.splice(0).reverse().forEach(wrapper => wrapper.unmount());
+  useOverlayStore().closeContextMenu();
   modals.unregisterModal('Page:voiceSettings:');
   disposePinia(pinia);
   vi.restoreAllMocks();
 });
 
 async function renderPage() {
-  const wrapper = mount(VoiceSettingsPage, { props: { active: true } });
+  const wrapper = mount(VoiceSettingsPage, { props: { active: true }, attachTo: document.body });
   wrappers.push(wrapper);
   await flushPromises();
   return wrapper;
@@ -86,6 +96,7 @@ async function renderOverlay() {
   const fallbackClose = vi.fn();
   modals.registerModal('Page:voiceSettings:', fallbackClose);
   const wrapper = mount(VoiceOptionsView, {
+    attachTo: document.body,
     props: { mode: 'settings', isOpen: true, active: true, zIndex: 40 },
     global: { stubs: { SlidePage: { template: '<div><slot /></div>' } } },
   });
@@ -107,10 +118,30 @@ function saveButton(wrapper: VueWrapper) {
 }
 const updates = () => invokeMock.mock.calls.filter(([command]) => command === 'update_settings');
 
+async function openSelection(wrapper: VueWrapper, label: string) {
+  await wrapper.get(`button[aria-label="${label}"]`).trigger('click');
+  await flushPromises();
+  const surface = document.querySelector<HTMLElement>(`[role="dialog"][aria-label="${label}"]`);
+  if (!surface) throw new Error(`Missing selection menu: ${label}`);
+  return new DOMWrapper(surface);
+}
+
+async function choose(wrapper: VueWrapper, label: string, option: string) {
+  const menu = await openSelection(wrapper, label);
+  const item = menu.findAll('[role="radio"]').find(candidate => candidate.text() === option);
+  if (!item) throw new Error(`Missing option: ${option}`);
+  await item.trigger('click');
+  await flushPromises();
+  expect(useOverlayStore().contextMenuConfig).toBeNull();
+}
+
 describe('local voice diagnostics', () => {
   it('requires active capture, exposes sample attribution and does not infer AEC effectiveness', async () => {
     context.voice.microphoneState = 'off';
     const wrapper = await renderPage();
+    expect(wrapper.get('.settings-disclosure-toggle').attributes('aria-expanded')).toBe('false');
+    expect(wrapper.find('.voice-probe-button').exists()).toBe(false);
+    await wrapper.get('.settings-disclosure-toggle').trigger('click');
     const button = wrapper.get('.voice-probe-button');
     expect(button.attributes('disabled')).toBeDefined();
     await button.trigger('click');
@@ -123,6 +154,7 @@ describe('local voice diagnostics', () => {
 
   it('allows stopping playback setup and stops the sample when its settings page becomes inactive', async () => {
     const wrapper = await renderPage();
+    await wrapper.get('.settings-disclosure-toggle').trigger('click');
     const button = wrapper.get('.voice-probe-button');
     await button.trigger('click');
     expect(context.voice.setProbe).toHaveBeenLastCalledWith(true);
@@ -150,6 +182,7 @@ describe('local voice diagnostics', () => {
   it('distinguishes TTS playback from the local diagnostic sample', async () => {
     context.voice.playbackActive = true;
     const wrapper = await renderPage();
+    await wrapper.get('.settings-disclosure-toggle').trigger('click');
     const button = wrapper.get('.voice-probe-button');
     expect(button.text()).toBe('播放本地样本');
     await button.trigger('click');
@@ -157,29 +190,40 @@ describe('local voice diagnostics', () => {
     context.voice.probeActive = true;
     await wrapper.vm.$nextTick();
     expect(button.text()).toBe('停止样本');
+    await wrapper.get('.settings-disclosure-toggle').trigger('click');
+    expect(wrapper.find('.voice-probe-button').exists()).toBe(false);
+    expect(wrapper.get('.settings-disclosure-toggle').text()).toContain('本地样本播放中');
+    expect(context.voice.setProbe).toHaveBeenCalledExactlyOnceWith(true);
   });
 });
 
 describe('语音设置使用正式设置快照', () => {
   it('默认选择 WAV，编码随本页草稿保存并可切回，不改变朗读配置', async () => {
     const { wrapper } = await renderOverlay();
-    const encoding = wrapper.get('select[aria-label="语音输入编码"]');
-    expect((encoding.element as HTMLSelectElement).value).toBe('wav');
-    expect(encoding.findAll('option').map(option => option.text())).toEqual(['WAV 无损', 'MP3 64 kbps']);
-    await encoding.setValue('mp3_64');
+    expect(wrapper.find('select').exists()).toBe(false);
+    expect(wrapper.get('button[aria-label="语音输入编码"]').text()).toContain('WAV 无损');
+    const menu = await openSelection(wrapper, '语音输入编码');
+    expect(menu.findAll('[role="radio"]').map(option => option.text())).toEqual(['WAV 无损', 'MP3 64 kbps']);
+    expect(menu.get('[aria-checked="true"]').text()).toBe('WAV 无损');
+    await menu.get('[aria-checked="false"]').trigger('click');
+    await flushPromises();
+    expect(useOverlayStore().contextMenuConfig).toBeNull();
     expect(updates()).toHaveLength(0);
     expect(useSettingsStore().settings?.voiceInputEncoding).toBe('wav');
+    expect(wrapper.get('footer').text()).toContain('有未保存修改');
     await saveButton(wrapper).trigger('click');
     await flushPromises();
     expect(updates()[0]?.[1]?.updates).toEqual({ voiceInputEncoding: 'mp3_64' });
     expect(database.voiceInputEncoding).toBe('mp3_64');
     expect(database.voiceTtsStream).toBe(true);
     expect(database.voiceTtsVoice).toBe('mimo_default');
+    expect(wrapper.get('footer').text()).toContain('暂无修改');
+    expect(wrapper.get('footer button').attributes('disabled')).toBeDefined();
     await wrapper.setProps({ active: false });
     await wrapper.setProps({ active: true });
     await flushPromises();
-    expect((wrapper.get('select[aria-label="语音输入编码"]').element as HTMLSelectElement).value).toBe('mp3_64');
-    await wrapper.get('select[aria-label="语音输入编码"]').setValue('wav');
+    expect(wrapper.get('button[aria-label="语音输入编码"]').text()).toContain('MP3 64 kbps');
+    await choose(wrapper, '语音输入编码', 'WAV 无损');
     await saveButton(wrapper).trigger('click');
     await flushPromises();
     expect(updates()[1]?.[1]?.updates).toEqual({ voiceInputEncoding: 'wav' });
@@ -189,8 +233,8 @@ describe('语音设置使用正式设置快照', () => {
   it('只提交本页dirty字段，两个流式开关互不改变，中文音色ID原样保存', async () => {
     const wrapper = await renderPage();
     await field(wrapper, '语音 API Key').setValue('voice-secret');
-    await wrapper.get('select[aria-label="识别语言"]').setValue('zh');
-    await wrapper.get('select[aria-label="朗读音色"]').setValue('白桦');
+    await choose(wrapper, '识别语言', '中文');
+    await choose(wrapper, '朗读音色', '白桦 · 中文男声');
     await wrapper.get('[role="switch"][aria-label="流式识别结果"]').trigger('click');
     expect(updates()).toHaveLength(0);
     expect(useSettingsStore().settings?.voiceApiKey).toBe('');
@@ -213,16 +257,22 @@ describe('语音设置使用正式设置快照', () => {
   it('失活只丢弃未提交草稿，不暗中保存API Key与输入编码', async () => {
     const { wrapper } = await renderOverlay();
     await field(wrapper, '语音 API Key').setValue('unsubmitted-secret');
-    await wrapper.get('select[aria-label="语音输入编码"]').setValue('mp3_64');
+    await choose(wrapper, '语音输入编码', 'MP3 64 kbps');
+    await openSelection(wrapper, '识别语言');
+    const staleAction = useOverlayStore().contextMenuConfig!.actions[1];
     await wrapper.setProps({ active: false });
     await flushPromises();
+    expect(useOverlayStore().contextMenuConfig).toBeNull();
     expect(updates()).toHaveLength(0);
     expect(database.voiceApiKey).toBe('');
     expect(database.voiceInputEncoding).toBe('wav');
     expect(context.voice.setProbe).toHaveBeenCalledWith(false);
     await wrapper.setProps({ active: true });
     await flushPromises();
-    expect((wrapper.get('select[aria-label="语音输入编码"]').element as HTMLSelectElement).value).toBe('wav');
+    staleAction.handler();
+    await flushPromises();
+    expect(wrapper.get('button[aria-label="语音输入编码"]').text()).toContain('WAV 无损');
+    expect(wrapper.get('button[aria-label="识别语言"]').text()).toContain('自动识别');
   });
 
   it('保存失败不回显或记录密钥，保留草稿供重试', async () => {
@@ -259,6 +309,14 @@ describe('语音设置使用正式设置快照', () => {
     const { wrapper, fallbackClose } = await renderOverlay();
     expect(modals.modalStackLength()).toBe(1);
     await field(wrapper, '语音 API Key').setValue('back-key');
+    await openSelection(wrapper, '朗读音色');
+    expect(modals.modalStackLength()).toBe(2);
+    modals.closeTopModal();
+    await flushPromises();
+    expect(useOverlayStore().contextMenuConfig).toBeNull();
+    expect(updates()).toHaveLength(0);
+    expect(wrapper.emitted('close')).toBeUndefined();
+    expect(modals.modalStackLength()).toBe(1);
     modals.closeTopModal();
     await flushPromises();
     expect(fallbackClose).not.toHaveBeenCalled();
@@ -280,6 +338,19 @@ describe('语音设置使用正式设置快照', () => {
     await saveButton(wrapper).trigger('click');
     await flushPromises();
     expect(database.voiceApiKey).toBe('new-draft');
+    expect(modals.modalStackLength()).toBe(1);
+  });
+
+  it('页面卸载只关闭自己仍持有的菜单，不关闭后续其他入口的菜单', async () => {
+    const wrapper = await renderPage();
+    await openSelection(wrapper, '朗读音色');
+    const overlay = useOverlayStore();
+    overlay.openContextMenu([{ label: '其他操作', handler: vi.fn() }], '其他菜单');
+    const replacement = overlay.contextMenuConfig;
+    wrappers.splice(wrappers.indexOf(wrapper), 1);
+    wrapper.unmount();
+    await flushPromises();
+    expect(overlay.contextMenuConfig).toBe(replacement);
     expect(modals.modalStackLength()).toBe(1);
   });
 });
