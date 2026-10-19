@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tauri::{AppHandle, Manager, Runtime, State};
+use tauri_plugin_vcp_mobile::voice::{VoiceVadConfig, VoiceVadSensitivity};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Mutex;
 
@@ -140,9 +141,23 @@ fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
         ("voiceLanguage", VOICE_LANGUAGES),
         ("voiceTtsVoice", VOICE_TTS_VOICES),
         ("voiceInputEncoding", &["wav", "mp3_64"][..]),
+        ("voiceVadSensitivity", &["low", "standard", "high"][..]),
     ] {
         if let Some(value) = source.get(key).filter(|value| !value.is_null()) {
             if !value.as_str().is_some_and(|value| allowed.contains(&value)) {
+                return Err(format!("备份字段 {key} 值不正确"));
+            }
+            settings.insert(key.into(), value.clone());
+        }
+    }
+    for (key, maximum) in [
+        ("voiceVadEndSilenceMs", VoiceVadConfig::MAX_END_SILENCE_MS),
+        ("voiceVadPlaybackOnsetMs", VoiceVadConfig::MAX_PLAYBACK_ONSET_MS),
+    ] {
+        if let Some(value) = source.get(key).filter(|value| !value.is_null()) {
+            if !value.as_u64().is_some_and(|value| {
+                (u64::from(VoiceVadConfig::MIN_DURATION_MS)..=u64::from(maximum)).contains(&value)
+            }) {
                 return Err(format!("备份字段 {key} 值不正确"));
             }
             settings.insert(key.into(), value.clone());
@@ -224,6 +239,12 @@ fn default_voice_language() -> String {
 }
 fn default_voice_tts_voice() -> String {
     "mimo_default".into()
+}
+fn default_voice_vad_end_silence_ms() -> u32 {
+    VoiceVadConfig::DEFAULT_END_SILENCE_MS
+}
+fn default_voice_vad_playback_onset_ms() -> u32 {
+    VoiceVadConfig::DEFAULT_PLAYBACK_ONSET_MS
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -310,6 +331,14 @@ pub struct Settings {
     #[serde(default = "default_voice_tts_voice")]
     pub voice_tts_voice: String,
 
+    // 本地人声判定配置，独立于网络语音服务，每次开始通话时取快照。
+    #[serde(default)]
+    pub voice_vad_sensitivity: VoiceVadSensitivity,
+    #[serde(default = "default_voice_vad_end_silence_ms")]
+    pub voice_vad_end_silence_ms: u32,
+    #[serde(default = "default_voice_vad_playback_onset_ms")]
+    pub voice_vad_playback_onset_ms: u32,
+
     // 同步日志配置
     #[serde(default = "default_sync_log_level")]
     pub sync_log_level: String,
@@ -336,6 +365,16 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         create_default_settings()
+    }
+}
+
+impl Settings {
+    pub fn voice_vad_config(&self) -> VoiceVadConfig {
+        VoiceVadConfig {
+            sensitivity: self.voice_vad_sensitivity,
+            end_silence_ms: self.voice_vad_end_silence_ms,
+            playback_onset_ms: self.voice_vad_playback_onset_ms,
+        }
     }
 }
 
@@ -432,6 +471,9 @@ pub fn create_default_settings() -> Settings {
         voice_tts_stream: true,
         voice_language: default_voice_language(),
         voice_tts_voice: default_voice_tts_voice(),
+        voice_vad_sensitivity: VoiceVadSensitivity::default(),
+        voice_vad_end_silence_ms: default_voice_vad_end_silence_ms(),
+        voice_vad_playback_onset_ms: default_voice_vad_playback_onset_ms(),
         sync_log_level: "INFO".to_string(),
         sync_prerender_enabled: false,
         agent_order: vec![],
@@ -644,6 +686,7 @@ async fn internal_write_settings<R: Runtime>(
     state: &SettingsState,
     settings: &Settings,
 ) -> Result<bool, String> {
+    settings.voice_vad_config().validate()?;
     let db_state = app_handle.state::<DbState>();
 
     let content = serde_json::to_string_pretty(settings).map_err(|e| e.to_string())?;
@@ -750,6 +793,7 @@ mod tests {
         assert_eq!(settings.voice_input_encoding, VoiceInputEncoding::Wav);
         assert_eq!(settings.voice_language, "auto");
         assert_eq!(settings.voice_tts_voice, "mimo_default");
+        assert_eq!(settings.voice_vad_config(), VoiceVadConfig::default());
         assert!(Settings::default().voice_asr_stream);
     }
 
@@ -761,6 +805,9 @@ mod tests {
         settings.voice_input_encoding = VoiceInputEncoding::Mp3;
         settings.voice_tts_stream = true;
         settings.voice_tts_voice = "白桦".into();
+        settings.voice_vad_sensitivity = VoiceVadSensitivity::High;
+        settings.voice_vad_end_silence_ms = 777;
+        settings.voice_vad_playback_onset_ms = 1001;
         let serialized = serde_json::to_string(&settings).unwrap();
         let (restored, _) = deserialize_persisted_settings(&serialized).unwrap();
         assert_eq!(restored.voice_api_key, "test-voice-key");
@@ -768,6 +815,8 @@ mod tests {
         assert_eq!(restored.voice_input_encoding, VoiceInputEncoding::Mp3);
         assert!(restored.extra.get("voiceInputEncoding").is_none());
         assert_eq!(restored.voice_tts_voice, "白桦");
+        assert_eq!(restored.voice_vad_config(), settings.voice_vad_config());
+        assert!(restored.extra.get("voiceVadEndSilenceMs").is_none());
         assert!(restored.extra.get("voiceApiKey").is_none());
     }
 
@@ -815,6 +864,33 @@ mod tests {
             settings["voiceInputEncoding"] = value;
             assert!(serde_json::from_value::<Settings>(settings).is_err());
         }
+    }
+
+    #[test]
+    fn vad_backup_keeps_numeric_custom_values_and_rejects_invalid_durations() {
+        let backup = |settings: serde_json::Value| serde_json::to_vec(&serde_json::json!({
+            "app": "vcp-mobile", "kind": "vcp-mobile-settings-backup", "version": 2,
+            "settings": settings,
+        })).unwrap();
+        let imported = parse_backup_bytes(&backup(serde_json::json!({
+            "voiceVadSensitivity": "low", "voiceVadEndSilenceMs": 777,
+            "voiceVadPlaybackOnsetMs": 1001,
+        }))).unwrap();
+        assert_eq!(imported.settings["voiceVadEndSilenceMs"], 777);
+        assert_eq!(imported.settings["voiceVadPlaybackOnsetMs"], 1001);
+        assert_eq!(imported.settings.len(), 3);
+        for (key, limit) in [("voiceVadEndSilenceMs", 5000), ("voiceVadPlaybackOnsetMs", 2000)] {
+            for value in [serde_json::json!(31), serde_json::json!(limit + 1),
+                serde_json::json!(-1), serde_json::json!(100.5), serde_json::json!("777")] {
+                assert!(parse_backup_bytes(&backup(serde_json::json!({(key): value}))).is_err());
+            }
+            for value in [32, limit] {
+                assert!(parse_backup_bytes(&backup(serde_json::json!({(key): value}))).is_ok());
+            }
+        }
+        assert!(parse_backup_bytes(&backup(serde_json::json!({"voiceVadSensitivity": "unknown"}))).is_err());
+        let old = parse_backup_bytes(&backup(serde_json::json!({"vcpApiKey": "old-key"}))).unwrap();
+        assert!(!old.settings.contains_key("voiceVadEndSilenceMs"));
     }
 
     #[tokio::test]

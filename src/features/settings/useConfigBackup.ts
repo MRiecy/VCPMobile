@@ -48,11 +48,14 @@ export const BACKUP_SETTINGS_KEYS = [
   "voiceTtsStream",
   "voiceLanguage",
   "voiceTtsVoice",
+  "voiceVadSensitivity",
+  "voiceVadEndSilenceMs",
+  "voiceVadPlaybackOnsetMs",
 ] as const;
 
 export type BackupSettingsKey = (typeof BACKUP_SETTINGS_KEYS)[number];
 
-/** 布尔字段；白名单内其余字段均为字符串 */
+/** 布尔字段单独归一化，其余白名单字段保留字符串或数值类型。 */
 const BOOLEAN_BACKUP_KEYS: ReadonlySet<string> = new Set(["distributedEnabled", "voiceAsrStream", "voiceTtsStream"]);
 const CHAT_ENDPOINT_MODES = new Set(["standard", "vcpTools", "raw"]);
 
@@ -82,7 +85,7 @@ const SETTINGS_SCOPES = [
   { label: '服务器与同步连接', keys: ['vcpServerUrl', 'chatEndpointMode', 'vcpApiKey', 'vcpLogUrl', 'vcpLogKey', 'syncHttpUrl', 'syncServerUrl', 'syncToken', 'fileKey'] },
   { label: '分布式系统', keys: ['distributedEnabled', 'distributedWsUrl', 'distributedVcpKey', 'distributedDeviceName'] },
   { label: '话题总结模型', keys: ['topicSummaryModel'] },
-  { label: '语音服务', keys: ['voiceApiBaseUrl', 'voiceApiKey', 'voiceInputEncoding', 'voiceAsrStream', 'voiceTtsStream', 'voiceLanguage', 'voiceTtsVoice'] },
+  { label: '语音服务', keys: ['voiceApiBaseUrl', 'voiceApiKey', 'voiceInputEncoding', 'voiceAsrStream', 'voiceTtsStream', 'voiceLanguage', 'voiceTtsVoice', 'voiceVadSensitivity', 'voiceVadEndSilenceMs', 'voiceVadPlaybackOnsetMs'] },
 ] as const;
 
 const hasFields = (value: object | undefined): boolean => Boolean(value && Object.keys(value).length);
@@ -179,7 +182,7 @@ export async function applyConfigBackup(
 
 /** 按白名单从完整设置中提取备份字段 */
 export function pickBackupSettings(settings: AppSettings): Partial<AppSettings> {
-  const picked: Record<string, string | boolean> = {};
+  const picked: Record<string, string | boolean | number> = {};
   for (const key of BACKUP_SETTINGS_KEYS) {
     const value = settings[key];
     if (key === "chatEndpointMode") {
@@ -188,7 +191,7 @@ export function pickBackupSettings(settings: AppSettings): Partial<AppSettings> 
         : "standard";
     } else if (BOOLEAN_BACKUP_KEYS.has(key)) {
       picked[key] = value === true;
-    } else if (typeof value === "string") {
+    } else if (typeof value === "string" || typeof value === "number") {
       picked[key] = value;
     } else {
       picked[key] = "";

@@ -1,5 +1,6 @@
 export type VoiceLanguage = 'auto' | 'zh' | 'en';
 export type VoiceInputEncoding = 'wav' | 'mp3_64';
+export type VoiceVadSensitivity = 'low' | 'standard' | 'high';
 export type VoiceTtsVoice = 'mimo_default' | '冰糖' | '茉莉' | '苏打' | '白桦' | 'Mia' | 'Chloe' | 'Milo' | 'Dean';
 
 /** These fields belong to the committed AppSettings snapshot in SQLite. */
@@ -11,6 +12,9 @@ export interface VoiceServiceSettings {
   voiceTtsStream: boolean;
   voiceLanguage: VoiceLanguage;
   voiceTtsVoice: VoiceTtsVoice;
+  voiceVadSensitivity: VoiceVadSensitivity;
+  voiceVadEndSilenceMs: number;
+  voiceVadPlaybackOnsetMs: number;
 }
 
 export const DEFAULT_VOICE_SETTINGS: Readonly<VoiceServiceSettings> = {
@@ -21,6 +25,9 @@ export const DEFAULT_VOICE_SETTINGS: Readonly<VoiceServiceSettings> = {
   voiceTtsStream: true,
   voiceLanguage: 'auto',
   voiceTtsVoice: 'mimo_default',
+  voiceVadSensitivity: 'standard',
+  voiceVadEndSilenceMs: 512,
+  voiceVadPlaybackOnsetMs: 192,
 };
 
 // IDs are the official API values, including the four Chinese voice IDs.

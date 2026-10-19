@@ -5,6 +5,7 @@ mod vad;
 mod native_audio;
 
 pub use native_audio::{append_playback, export_segment, finish_playback, release_segments, start_playback, stop_playback, ExportedVoiceSegment};
+pub use vad::{VoiceVadConfig, VoiceVadSensitivity};
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -110,7 +111,7 @@ struct Sessions {
 }
 
 impl Sessions {
-    fn begin(&mut self, id: String) -> Result<u64, String> {
+    fn begin(&mut self, id: String, vad_config: VoiceVadConfig) -> Result<u64, String> {
         if self.cancelled.contains(&id) {
             return Err("cancelled: voice audio session was already stopped".into());
         }
@@ -121,11 +122,12 @@ impl Sessions {
                 "voice_session_busy: stop the active microphone before starting another".into(),
             );
         }
+        vad_config.validate()?;
         self.generation = self.generation.wrapping_add(1);
         self.current = Some(ActiveSession {
             id,
             generation: self.generation,
-            detector: VadDetector::default(),
+            detector: VadDetector::new(vad_config),
             probe_revision: 0,
             probe_enabled: false,
         });
@@ -315,6 +317,7 @@ pub async fn start_voice_audio<R: Runtime>(
     app: AppHandle<R>,
     session_id: String,
     call_id: String,
+    vad_config: VoiceVadConfig,
 ) -> Result<(), String> {
     validate_session(&session_id)?;
     validate_session(&call_id)?;
@@ -323,7 +326,7 @@ pub async fn start_voice_audio<R: Runtime>(
         .0
         .lock()
         .map_err(|error| error.to_string())?
-        .begin(session_id.clone())?;
+        .begin(session_id.clone(), vad_config)?;
     let result = native_call(
         app.clone(),
         "startVoiceAudio",

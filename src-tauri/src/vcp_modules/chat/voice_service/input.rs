@@ -16,7 +16,7 @@ use std::{
     },
 };
 use tauri::{AppHandle, Manager};
-use tauri_plugin_vcp_mobile::voice::{SpeechTransition, VoiceAudioEvent};
+use tauri_plugin_vcp_mobile::voice::{SpeechTransition, VoiceAudioEvent, VoiceVadConfig};
 use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
@@ -63,6 +63,7 @@ struct AudioResources {
 pub(super) struct VoiceSession {
     pub id: String,
     pub config: VoiceServiceConfig,
+    pub vad_config: VoiceVadConfig,
     pub cancel: CancellationToken,
     pub call: Arc<CallInput>,
     inner: Mutex<SessionInner>,
@@ -481,14 +482,14 @@ fn seal(app: &AppHandle, session: &Arc<VoiceSession>, epoch: Option<u32>, sample
     cleanup_closed(app, session);
 }
 
-pub async fn start_voice_service(
+async fn start_voice_service(
     app: AppHandle,
     session_id: String,
     call_id: String,
-) -> Result<VoiceServiceStart, String> {
+) -> Result<Arc<VoiceSession>, String> {
     validate_id(&session_id)?;
     validate_id(&call_id)?;
-    call::validate_input(&app, &call_id)?;
+    let vad_config = call::input_vad_config(&app, &call_id)?;
     let (cancel, call) = app
         .state::<VoiceServiceState>()
         .registry
@@ -497,8 +498,8 @@ pub async fn start_voice_service(
         .reserve(session_id.clone(), call_id.clone())?;
     let result = read_settings(app.clone(), app.state::<SettingsState>())
         .await
-        .map(VoiceServiceConfig::from_settings)
-        .and_then(|config| {
+        .and_then(|settings| {
+            let config = VoiceServiceConfig::from_settings(settings);
             config.validate()?;
             Ok(config)
         });
@@ -521,6 +522,7 @@ pub async fn start_voice_service(
     let input = Arc::new(VoiceSession {
         id: session_id.clone(),
         config,
+        vad_config,
         call,
         cancel: cancel.clone(),
         inner: Mutex::new(SessionInner::default()),
@@ -538,7 +540,7 @@ pub async fn start_voice_service(
             .get_mut(&session_id)
             .filter(|slot| !slot.closed && !cancel.is_cancelled())
             .ok_or_else(|| network::CANCELLED.to_string())?;
-        slot.session = Some(input);
+        slot.session = Some(input.clone());
     }
     call::input_status(
         &app,
@@ -548,7 +550,7 @@ pub async fn start_voice_service(
         None,
         None,
     );
-    Ok(VoiceServiceStart { configured })
+    Ok(input)
 }
 
 #[tauri::command]
@@ -604,6 +606,7 @@ pub async fn start_voice_microphone(
         app.clone(),
         session_id.clone(),
         call_id.clone(),
+        started.vad_config,
     )
     .await
     {
@@ -628,7 +631,7 @@ pub async fn start_voice_microphone(
         call::input_stopped(&app, &call_id, &session_id, &error, true);
         return Err(error);
     }
-    Ok(started)
+    Ok(VoiceServiceStart { configured: started.config.configured() })
 }
 
 #[tauri::command]
@@ -838,6 +841,10 @@ pub fn handle_audio_event(app: &AppHandle, event: &VoiceAudioEvent) {
                             frame.audio_epoch,
                             frame.sample_index,
                             inner.allowed_after,
+                            // Playback may end during a long confirmation and
+                            // switch VAD to its shorter ordinary onset. Keep
+                            // the whole session's possible leading speech.
+                            input.vad_config.onset_samples(true).max(input.vad_config.onset_samples(false)),
                         ),
                     });
                     inner.utterances.insert(turn.id.clone(), turn.clone());
@@ -860,6 +867,9 @@ pub fn handle_audio_event(app: &AppHandle, event: &VoiceAudioEvent) {
                     input
                         .call
                         .end_speech(&capture.turn.batch_id, capture.turn.sequence);
+                    // Custom short pauses and long onset confirmation must not
+                    // let the next utterance export already-submitted audio.
+                    inner.allowed_after = frame.sample_index;
                 }
             }
             input
@@ -897,6 +907,7 @@ mod tests {
             id: id.into(),
             call,
             cancel,
+            vad_config: VoiceVadConfig::default(),
             config: VoiceServiceConfig {
                 base_url: "https://example.invalid/v1".into(),
                 api_key: "test".into(),

@@ -17,6 +17,8 @@ export interface PromptConfig {
   title: string;
   initialValue: string;
   placeholder: string;
+  inputMode?: 'text' | 'numeric';
+  validate?: (value: string) => string | null;
   onConfirm: (val: string) => void;
 }
 

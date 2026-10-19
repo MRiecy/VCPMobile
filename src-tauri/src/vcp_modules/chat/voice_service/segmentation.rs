@@ -1,7 +1,8 @@
 use super::network::MAX_TEXT_BYTES;
 
 pub(super) const SAMPLE_RATE: u64 = 16000;
-pub(super) const PRE_ROLL_SAMPLES: u64 = SAMPLE_RATE / 2;
+const PRE_ROLL_SAMPLES: u64 = SAMPLE_RATE / 2;
+const LEADING_PAD_SAMPLES: u64 = SAMPLE_RATE * 300 / 1000;
 const CUT_SAMPLES: u64 = SAMPLE_RATE * 25;
 
 #[derive(Debug, Clone, Copy)]
@@ -21,11 +22,14 @@ pub(super) struct CaptureWindow {
 }
 
 impl CaptureWindow {
-    pub(super) fn new(epoch: u32, confirmed_start: u64, allowed_after: u64) -> Self {
+    pub(super) fn new(epoch: u32, confirmed_start: u64, allowed_after: u64, onset_samples: u64) -> Self {
+        // Keep the original half-second for normal settings. Longer custom
+        // confirmation includes every onset frame and a short leading margin.
+        let pre_roll = PRE_ROLL_SAMPLES.max(onset_samples.div_ceil(512) * 512 + LEADING_PAD_SAMPLES);
         Self {
             epoch,
             cursor: confirmed_start
-                .saturating_sub(PRE_ROLL_SAMPLES)
+                .saturating_sub(pre_roll)
                 .max(allowed_after),
             next_cut: confirmed_start.saturating_add(CUT_SAMPLES),
             sequence: 0,
@@ -145,7 +149,7 @@ mod tests {
 
     #[test]
     fn preroll_respects_local_probe_floor_and_long_speech_has_contiguous_cuts() {
-        let mut window = CaptureWindow::new(3, 16000, 12000);
+        let mut window = CaptureWindow::new(3, 16000, 12000, 192 * 16);
         assert!(window.advance(415999, false).is_empty());
         let first = window.advance(416000, false)[0];
         assert_eq!(
@@ -156,6 +160,47 @@ mod tests {
         let last = window.advance(420000, true)[0];
         assert_eq!((last.start, last.end, last.sequence), (416000, 420000, 1));
         assert!(last.final_segment);
+    }
+
+    #[test]
+    fn long_confirmation_keeps_the_onset_and_stays_within_native_export_budget() {
+        let confirmed = SAMPLE_RATE * 3;
+        let mut window = CaptureWindow::new(1, confirmed, 0, 2000 * 16);
+        let first = window.advance(confirmed + CUT_SAMPLES, false)[0];
+        // 2000 ms requires 63 frames (2016 ms), with 300 ms of leading audio.
+        assert_eq!(first.start, confirmed - (63 * 512 + LEADING_PAD_SAMPLES));
+        assert!(first.end - first.start < SAMPLE_RATE * 30);
+        let last = window.advance(first.end + 512, true)[0];
+        assert_eq!(last.start, first.end);
+    }
+
+    #[test]
+    fn playback_ending_during_confirmation_does_not_discard_the_earlier_speech() {
+        let config = tauri_plugin_vcp_mobile::voice::VoiceVadConfig {
+            playback_onset_ms: 2000,
+            ..Default::default()
+        };
+        // 1.8 s of speech while playback was active, then ordinary VAD
+        // confirms 96 ms after playback ends. The full prefix still belongs
+        // to this utterance, despite its final frame being output-inactive.
+        let speech_start = SAMPLE_RATE;
+        let confirmed = speech_start + 30_720;
+        let mut window = CaptureWindow::new(1, confirmed, 0,
+            config.onset_samples(true).max(config.onset_samples(false)));
+        let segment = window.advance(confirmed + SAMPLE_RATE, true)[0];
+        assert!(segment.start <= speech_start);
+    }
+
+    #[test]
+    fn short_pause_or_long_confirmation_never_reexports_a_previous_segment() {
+        let mut previous = CaptureWindow::new(1, 16000, 0, 96 * 16);
+        let previous_end = 32000;
+        let first = previous.advance(previous_end, true)[0];
+        for onset in [96 * 16, 2000 * 16] {
+            let mut next = CaptureWindow::new(1, previous_end + 3 * 512, first.end, onset);
+            let second = next.advance(previous_end + 8 * 512, true)[0];
+            assert_eq!(second.start, first.end);
+        }
     }
 
     #[test]

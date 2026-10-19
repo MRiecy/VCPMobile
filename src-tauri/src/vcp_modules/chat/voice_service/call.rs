@@ -7,6 +7,7 @@ use super::{
 use crate::vcp_modules::{
     chat::voice_submission::prepare_voice_submission, chat_manager::ChatMessage,
     message_service::MessageWriteResultDto, topic_types::TopicKey,
+    settings_manager::{read_settings, SettingsState},
 };
 use serde::Serialize;
 use std::{
@@ -18,6 +19,8 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tauri_plugin_vcp_mobile::stream::{ForegroundLease, ForegroundTask};
+use tauri_plugin_vcp_mobile::voice::VoiceVadConfig;
+use tokio::sync::OnceCell;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Serialize)]
@@ -189,6 +192,17 @@ struct Call {
     id: String,
     input: Arc<CallInput>,
     inner: Mutex<CallInner>,
+    vad_config: OnceCell<VoiceVadConfig>,
+}
+
+impl Call {
+    fn input_vad_config(&self) -> Result<VoiceVadConfig, String> {
+        let inner = self.inner.lock().map_err(|error| error.to_string())?;
+        if !inner.snapshot.active || self.input.cancel.is_cancelled() {
+            return Err(network::CANCELLED.into());
+        }
+        self.vad_config.get().copied().ok_or_else(|| "语音通话仍在准备中。".into())
+    }
 }
 #[derive(Default)]
 struct Registry {
@@ -280,6 +294,7 @@ fn reserve_conversation(
         id: call_id,
         input,
         inner: Mutex::new(inner),
+        vad_config: OnceCell::new(),
     }));
     Ok(snapshot)
 }
@@ -291,9 +306,19 @@ pub async fn begin_voice_conversation(
     target: TopicKey,
 ) -> Result<VoiceCallSnapshot, String> {
     reserve_conversation(app.clone(), call_id.clone(), target)?;
-    if let Err(error) =
+    let current = call(&app, &call_id).ok_or_else(|| network::CANCELLED.to_string())?;
+    let result = async {
+        // Reserve before the first await so hangup can revoke an initializing
+        // call. Repeated begin/microphone intents keep the same VAD snapshot.
+        current.vad_config.get_or_try_init(|| async {
+            let config = read_settings(app.clone(), app.state::<SettingsState>()).await?.voice_vad_config();
+            config.validate()?;
+            Ok::<_, String>(config)
+        }).await?;
+        validate_input(&app, &call_id)?;
         tauri_plugin_vcp_mobile::voice::begin_voice_call(app.clone(), call_id.clone()).await
-    {
+    }.await;
+    if let Err(error) = result {
         let _ = end_voice_conversation(app.clone(), call_id.clone()).await;
         if let Some(call) = call(&app, &call_id) {
             if let Ok(mut inner) = call.inner.lock() {
@@ -392,13 +417,12 @@ pub async fn end_voice_conversation(app: AppHandle, call_id: String) -> Result<(
 
 /// Must precede any native capture/ASR setup, including retries after mute.
 pub(super) fn validate_input<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
+    input_vad_config(app, id).map(|_| ())
+}
+
+pub(super) fn input_vad_config<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<VoiceVadConfig, String> {
     let call = call(app, id).ok_or_else(|| "语音通话已结束。".to_string())?;
-    let inner = call.inner.lock().map_err(|error| error.to_string())?;
-    if inner.snapshot.active && !call.input.cancel.is_cancelled() {
-        Ok(())
-    } else {
-        Err(network::CANCELLED.into())
-    }
+    call.input_vad_config()
 }
 
 pub(super) fn input_work(app: &AppHandle, id: &str) -> Option<Arc<WorkLease>> {
@@ -807,6 +831,29 @@ mod tests {
             offer_id: offer.offer_id.clone(),
             reply: reply.clone(),
         });
+    }
+
+    #[test]
+    fn input_requires_a_ready_call_and_reuses_its_vad_policy_until_hangup() {
+        let call = Call {
+            id: "call".into(),
+            input: Arc::new(CallInput::new("call".into())),
+            inner: Mutex::new(inner()),
+            vad_config: OnceCell::new(),
+        };
+        assert!(call.input_vad_config().is_err());
+        let mut settings = crate::vcp_modules::settings_manager::Settings::default();
+        settings.voice_vad_end_silence_ms = 777;
+        call.vad_config.set(settings.voice_vad_config()).unwrap();
+        assert_eq!(call.input_vad_config().unwrap().end_silence_ms, 777);
+        settings.voice_vad_end_silence_ms = 1200;
+        call.inner.lock().unwrap().snapshot.mic_state = "closed";
+        assert_eq!(call.input_vad_config().unwrap().end_silence_ms, 777);
+        call.inner.lock().unwrap().snapshot.mic_state = "listening";
+        assert!(call.vad_config.set(settings.voice_vad_config()).is_err());
+        assert_eq!(call.input_vad_config().unwrap().end_silence_ms, 777);
+        call.input.cancel.cancel();
+        assert!(call.input_vad_config().is_err());
     }
 
     #[test]

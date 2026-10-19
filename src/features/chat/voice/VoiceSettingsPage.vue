@@ -3,7 +3,7 @@ import { computed, onBeforeUnmount, ref, useId, watch } from 'vue';
 import { ListChecks, Play, Square } from 'lucide-vue-next';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { useOverlayStore } from '../../../core/stores/overlay';
-import type { ContextMenuConfig, OverlayActionItem } from '../../../core/types/overlay';
+import type { ContextMenuConfig, OverlayActionItem, PromptConfig } from '../../../core/types/overlay';
 import SettingsSection from '../../../components/settings/SettingsSection.vue';
 import SettingsCanvas from '../../../components/settings/SettingsCanvas.vue';
 import SettingsDisclosure from '../../../components/settings/SettingsDisclosure.vue';
@@ -24,7 +24,13 @@ const { session, loading, error, reload } = useSettingsPageSession(VOICE_FIELDS,
 const { draft, saving, leaving } = session;
 const openingPresets = ref(false);
 const disabled = computed(() => !props.active || leaving.value || openingPresets.value);
-type SelectionField = 'voiceLanguage' | 'voiceInputEncoding' | 'voiceTtsVoice';
+type DurationField = 'voiceVadEndSilenceMs' | 'voiceVadPlaybackOnsetMs';
+type SelectionField = 'voiceLanguage' | 'voiceInputEncoding' | 'voiceTtsVoice' | 'voiceVadSensitivity' | DurationField;
+const durationSettings = {
+  voiceVadEndSilenceMs: { min: 32, max: 5000, presets: [320, 512, 800, 1200, 1600] },
+  voiceVadPlaybackOnsetMs: { min: 32, max: 2000, presets: [128, 192, 320] },
+} as const;
+const durationOptions = (field: DurationField) => durationSettings[field].presets.map(value => ({ value, label: `${value} ms` }));
 const selections = {
   voiceLanguage: {
     title: '识别语言',
@@ -35,20 +41,61 @@ const selections = {
     options: [{ value: 'wav', label: 'WAV 无损' }, { value: 'mp3_64', label: 'MP3 64 kbps' }],
   },
   voiceTtsVoice: { title: '朗读音色', options: MIMO_VOICES },
+  voiceVadSensitivity: {
+    title: '人声检测灵敏度',
+    options: [{ value: 'low', label: '较低' }, { value: 'standard', label: '标准' }, { value: 'high', label: '较高' }],
+  },
+  voiceVadEndSilenceMs: { title: '说完等待时间', options: durationOptions('voiceVadEndSilenceMs') },
+  voiceVadPlaybackOnsetMs: { title: '朗读时插话确认', options: durationOptions('voiceVadPlaybackOnsetMs') },
 } as const satisfies {
   [K in SelectionField]: { title: string; options: ReadonlyArray<{ value: VoiceServiceSettings[K]; label: string }> };
 };
 const recognitionFields = ['voiceLanguage', 'voiceInputEncoding'] as const;
+const advancedFields = [
+  { field: 'voiceVadSensitivity', description: '较高更容易接纳轻声，也更容易误触。' },
+  { field: 'voiceVadEndSilenceMs', description: '停顿达到此时长后结束当前录音。' },
+  { field: 'voiceVadPlaybackOnsetMs', description: '朗读期间持续检测到人声多久后确认插话。' },
+] as const;
+const isDurationField = (field: SelectionField): field is DurationField => field in durationSettings;
 let selectionMenu: ContextMenuConfig | null = null;
+let durationPrompt: PromptConfig | null = null;
 
 const selectedLabel = (field: SelectionField) =>
-  selections[field].options.find(option => option.value === draft.value?.[field])?.label ?? '';
+  isDurationField(field) ? `${draft.value?.[field]} ms`
+    : selections[field].options.find(option => option.value === draft.value?.[field])?.label ?? '';
 const selectionOpen = (field: SelectionField) =>
   !!selectionMenu && overlayStore.contextMenuConfig === selectionMenu && selectionMenu.title === selections[field].title;
 const closeSelection = () => {
   // A later menu belongs to its own caller, even if this settings visit ends.
   if (selectionMenu && overlayStore.contextMenuConfig === selectionMenu) overlayStore.closeContextMenu();
   selectionMenu = null;
+};
+const closeDurationPrompt = () => {
+  if (durationPrompt && overlayStore.promptConfig === durationPrompt) overlayStore.closePrompt();
+  durationPrompt = null;
+};
+const openDurationPrompt = (field: DurationField) => {
+  if (disabled.value || !draft.value) return;
+  const { min, max } = durationSettings[field];
+  const validate = (raw: string) => {
+    const value = raw.trim();
+    return /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) >= min && Number(value) <= max
+      ? null : `请输入 ${min}–${max} ms 之间的整数`;
+  };
+  const config: PromptConfig = {
+    title: `自定义${selections[field].title}（ms）`,
+    initialValue: String(draft.value[field]),
+    placeholder: `${min}–${max} ms`,
+    inputMode: 'numeric',
+    validate,
+    onConfirm: value => {
+      if (disabled.value || overlayStore.promptConfig !== durationPrompt
+        || durationPrompt?.onConfirm !== config.onConfirm || validate(value)) return;
+      session.edit(field, Number(value.trim()));
+    },
+  };
+  overlayStore.openPrompt(config);
+  durationPrompt = overlayStore.promptConfig;
 };
 const openSelection = (field: SelectionField, event: Event) => {
   if (disabled.value || !draft.value) return;
@@ -61,10 +108,25 @@ const openSelection = (field: SelectionField, event: Event) => {
       session.edit(field, option.value);
     },
   }));
+  if (isDurationField(field)) {
+    actions.push({
+      label: '自定义…',
+      selected: !selections[field].options.some(option => option.value === draft.value?.[field]),
+      handler: () => {
+        if (disabled.value || overlayStore.contextMenuConfig?.actions !== actions) return;
+        openDurationPrompt(field);
+      },
+    });
+  }
   overlayStore.openContextMenu(actions, selections[field].title);
   selectionMenu = overlayStore.contextMenuConfig;
 };
-watch(disabled, value => { if (value) closeSelection(); }, { flush: 'sync' });
+watch(disabled, value => {
+  if (value) {
+    closeSelection();
+    closeDurationPrompt();
+  }
+}, { flush: 'sync' });
 const canProbe = computed(() => props.active && voiceCall.active && voiceCall.microphoneState === 'on');
 const probeBusy = computed(() => voiceCall.probeActive || voiceCall.probePending);
 const aecLabel = computed(() => {
@@ -81,6 +143,7 @@ watch(() => props.active, (active, wasActive) => {
 }, { flush: 'sync' });
 onBeforeUnmount(() => {
   closeSelection();
+  closeDurationPrompt();
   if (props.active) void voiceCall.setProbe(false);
 });
 
@@ -166,6 +229,16 @@ defineExpose({ beforeLeave: () => openingPresets.value ? Promise.resolve(false) 
 
         <SettingsRow title="语音预设" description="回复风格与提示词" :icon="ListChecks" clickable
           :disabled="disabled" class="voice-preset-entry" @click="openPresets" />
+
+        <SettingsDisclosure v-if="draft" title="高级参数" description="本地人声检测与插话" :disabled="disabled">
+          <div>
+            <SettingsRow v-for="item in advancedFields" :key="item.field" :title="selections[item.field].title"
+              :description="item.description" :value="selectedLabel(item.field)" clickable :disabled="disabled"
+              :aria-label="selections[item.field].title" aria-haspopup="dialog" :aria-expanded="selectionOpen(item.field)"
+              @click="openSelection(item.field, $event)" />
+          </div>
+          <p class="m-0 text-xs leading-relaxed text-[var(--secondary-text)]">返回时自动保存，下次通话生效。</p>
+        </SettingsDisclosure>
 
         <SettingsDisclosure title="本地诊断" :disabled="disabled"
           :description="voiceCall.probeError || (probeBusy ? '本地样本播放中' : '回声消除与打断检查')">

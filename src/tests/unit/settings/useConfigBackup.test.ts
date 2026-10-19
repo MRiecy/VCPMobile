@@ -82,6 +82,17 @@ describe('配置恢复的真实领域状态与失败边界', () => {
     expect(result).toEqual({ applied: ['语音服务'], skipped: [], failed: [] });
   });
 
+  it('自定义VAD毫秒值以数字导出，独立恢复时保留未提供的语音配置', async () => {
+    const vad = { voiceVadSensitivity: 'high' as const, voiceVadEndSilenceMs: 777, voiceVadPlaybackOnsetMs: 1001 };
+    const payload = buildBackupPayload({ ...makeSettings(), ...vad }, captureBackupPreferences());
+    expect(payload.settings).toMatchObject(vad);
+    const backup = { settings: vad, exportedAt: '' };
+    expect(configBackupScopes(backup)).toEqual(['语音服务']);
+    const applySettings = vi.fn(async () => {});
+    await applyConfigBackup(backup, applySettings);
+    expect(applySettings).toHaveBeenCalledExactlyOnceWith(vad);
+  });
+
   it('捕获已应用的主题与聊天偏好，不使用 SQLite 中未消费的主题字段', async () => {
     const theme = useThemeStore();
     await theme.restorePreferences({ themeKey: 'themes-simple-bw.ts', mode: 'system' });

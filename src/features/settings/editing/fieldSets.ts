@@ -22,6 +22,7 @@ export const SUMMARY_FIELDS = ["topicSummaryModel"] as const;
 
 export const VOICE_FIELDS = [
   "voiceApiBaseUrl", "voiceApiKey", "voiceInputEncoding", "voiceAsrStream", "voiceTtsStream", "voiceLanguage", "voiceTtsVoice",
+  "voiceVadSensitivity", "voiceVadEndSilenceMs", "voiceVadPlaybackOnsetMs",
 ] as const;
 
 export type SettingsEditableKey =

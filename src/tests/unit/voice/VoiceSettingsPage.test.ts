@@ -80,6 +80,7 @@ beforeEach(() => {
 afterEach(() => {
   wrappers.splice(0).reverse().forEach(wrapper => wrapper.unmount());
   useOverlayStore().closeContextMenu();
+  useOverlayStore().closePrompt();
   modals.unregisterModal('Page:voiceSettings:');
   disposePinia(pinia);
   vi.restoreAllMocks();
@@ -134,13 +135,31 @@ async function choose(wrapper: VueWrapper, label: string, option: string) {
   expect(useOverlayStore().contextMenuConfig).toBeNull();
 }
 
+function disclosure(wrapper: VueWrapper, title: string) {
+  const button = wrapper.findAll('.settings-disclosure-toggle').find(candidate => candidate.text().startsWith(title));
+  if (!button) throw new Error(`Missing disclosure: ${title}`);
+  return button;
+}
+
+async function openCustomDuration(wrapper: VueWrapper, title: string) {
+  await choose(wrapper, title, '自定义…');
+  const surface = document.querySelector<HTMLElement>(`[role="dialog"][aria-label="自定义${title}（ms）"]`);
+  if (!surface) throw new Error(`Missing custom duration prompt: ${title}`);
+  return new DOMWrapper(surface);
+}
+
+async function confirmPrompt(prompt: DOMWrapper<Element>) {
+  await prompt.findAll('button').find(button => button.text() === '确认')!.trigger('click');
+  await flushPromises();
+}
+
 describe('local voice diagnostics', () => {
   it('requires active capture, exposes sample attribution and does not infer AEC effectiveness', async () => {
     context.voice.microphoneState = 'off';
     const wrapper = await renderPage();
-    expect(wrapper.get('.settings-disclosure-toggle').attributes('aria-expanded')).toBe('false');
+    expect(disclosure(wrapper, '本地诊断').attributes('aria-expanded')).toBe('false');
     expect(wrapper.find('.voice-probe-button').exists()).toBe(false);
-    await wrapper.get('.settings-disclosure-toggle').trigger('click');
+    await disclosure(wrapper, '本地诊断').trigger('click');
     const button = wrapper.get('.voice-probe-button');
     expect(button.attributes('disabled')).toBeDefined();
     await button.trigger('click');
@@ -153,7 +172,7 @@ describe('local voice diagnostics', () => {
 
   it('allows stopping playback setup and stops the sample when its settings page becomes inactive', async () => {
     const wrapper = await renderPage();
-    await wrapper.get('.settings-disclosure-toggle').trigger('click');
+    await disclosure(wrapper, '本地诊断').trigger('click');
     const button = wrapper.get('.voice-probe-button');
     await button.trigger('click');
     expect(context.voice.setProbe).toHaveBeenLastCalledWith(true);
@@ -181,7 +200,7 @@ describe('local voice diagnostics', () => {
   it('distinguishes TTS playback from the local diagnostic sample', async () => {
     context.voice.playbackActive = true;
     const wrapper = await renderPage();
-    await wrapper.get('.settings-disclosure-toggle').trigger('click');
+    await disclosure(wrapper, '本地诊断').trigger('click');
     const button = wrapper.get('.voice-probe-button');
     expect(button.text()).toBe('播放本地样本');
     await button.trigger('click');
@@ -189,14 +208,117 @@ describe('local voice diagnostics', () => {
     context.voice.probeActive = true;
     await wrapper.vm.$nextTick();
     expect(button.text()).toBe('停止样本');
-    await wrapper.get('.settings-disclosure-toggle').trigger('click');
+    await disclosure(wrapper, '本地诊断').trigger('click');
     expect(wrapper.find('.voice-probe-button').exists()).toBe(false);
-    expect(wrapper.get('.settings-disclosure-toggle').text()).toContain('本地样本播放中');
+    expect(disclosure(wrapper, '本地诊断').text()).toContain('本地样本播放中');
     expect(context.voice.setProbe).toHaveBeenCalledExactlyOnceWith(true);
   });
 });
 
 describe('语音设置使用正式设置快照', () => {
+  it('高级参数在语音预设之后默认折叠，预设时长使用 ms 并在返回时保存', async () => {
+    const { wrapper } = await renderOverlay();
+    const advanced = disclosure(wrapper, '高级参数');
+    expect(advanced.attributes('aria-expanded')).toBe('false');
+    expect(wrapper.find('button[aria-label="人声检测灵敏度"]').exists()).toBe(false);
+    expect(wrapper.text().indexOf('语音预设')).toBeLessThan(wrapper.text().indexOf('高级参数'));
+    expect(wrapper.text().indexOf('高级参数')).toBeLessThan(wrapper.text().indexOf('本地诊断'));
+    await advanced.trigger('click');
+    expect(wrapper.get('button[aria-label="人声检测灵敏度"]').text()).toContain('标准');
+    expect(wrapper.get('button[aria-label="说完等待时间"]').text()).toContain('512 ms');
+    expect(wrapper.get('button[aria-label="朗读时插话确认"]').text()).toContain('192 ms');
+    const silenceMenu = await openSelection(wrapper, '说完等待时间');
+    expect(silenceMenu.findAll('[role="radio"]').map(item => item.text())).toEqual([
+      '320 ms', '512 ms', '800 ms', '1200 ms', '1600 ms', '自定义…',
+    ]);
+    useOverlayStore().closeContextMenu();
+    await flushPromises();
+    const onsetMenu = await openSelection(wrapper, '朗读时插话确认');
+    expect(onsetMenu.findAll('[role="radio"]').map(item => item.text())).toEqual(['128 ms', '192 ms', '320 ms', '自定义…']);
+    useOverlayStore().closeContextMenu();
+    await flushPromises();
+    await choose(wrapper, '人声检测灵敏度', '较高');
+    await choose(wrapper, '说完等待时间', '800 ms');
+    await choose(wrapper, '朗读时插话确认', '128 ms');
+    expect(updates()).toHaveLength(0);
+    await leaveVoiceSettings(wrapper);
+    expect(updates()[0]?.[1]?.updates).toEqual({
+      voiceVadSensitivity: 'high', voiceVadEndSilenceMs: 800, voiceVadPlaybackOnsetMs: 128,
+    });
+  });
+
+  it('自定义时长保留整数原值、校验范围，非法输入留在弹窗且取消不改草稿', async () => {
+    const { wrapper } = await renderOverlay();
+    await disclosure(wrapper, '高级参数').trigger('click');
+    const silencePrompt = await openCustomDuration(wrapper, '说完等待时间');
+    expect(silencePrompt.get('input').attributes('inputmode')).toBe('numeric');
+    expect((silencePrompt.get('input').element as HTMLInputElement).value).toBe('512');
+    for (const invalid of ['', '31', '5001', '100.5', '1e3', '-1']) {
+      await silencePrompt.get('input').setValue(invalid);
+      await confirmPrompt(silencePrompt);
+      expect(useOverlayStore().promptConfig).not.toBeNull();
+      expect(silencePrompt.get('[role="alert"]').text()).toContain('32–5000 ms');
+      expect(wrapper.get('button[aria-label="说完等待时间"]').text()).toContain('512 ms');
+    }
+    await silencePrompt.get('input').setValue('777');
+    await confirmPrompt(silencePrompt);
+    expect(useOverlayStore().promptConfig).toBeNull();
+    expect(wrapper.get('button[aria-label="说完等待时间"]').text()).toContain('777 ms');
+    const customMenu = await openSelection(wrapper, '说完等待时间');
+    expect(customMenu.get('[aria-checked="true"]').text()).toBe('自定义…');
+    useOverlayStore().closeContextMenu();
+    await flushPromises();
+    const onsetPrompt = await openCustomDuration(wrapper, '朗读时插话确认');
+    await onsetPrompt.get('input').setValue('2001');
+    await confirmPrompt(onsetPrompt);
+    expect(onsetPrompt.get('[role="alert"]').text()).toContain('32–2000 ms');
+    await onsetPrompt.get('input').setValue('241');
+    await onsetPrompt.findAll('button').find(button => button.text() === '取消')!.trigger('click');
+    await flushPromises();
+    expect(useOverlayStore().promptConfig).toBeNull();
+    expect(wrapper.get('button[aria-label="朗读时插话确认"]').text()).toContain('192 ms');
+    await leaveVoiceSettings(wrapper);
+    expect(updates()[0]?.[1]?.updates).toEqual({ voiceVadEndSilenceMs: 777 });
+  });
+
+  it('自定义输入随访问失活关闭，迟到确认不能改写新访问，系统返回先关闭输入', async () => {
+    const { wrapper } = await renderOverlay();
+    await disclosure(wrapper, '高级参数').trigger('click');
+    await openCustomDuration(wrapper, '朗读时插话确认');
+    const stalePrompt = useOverlayStore().promptConfig!;
+    expect(modals.modalStackLength()).toBe(2);
+    await wrapper.setProps({ active: false });
+    expect(useOverlayStore().promptConfig).toBeNull();
+    await wrapper.setProps({ active: true });
+    await flushPromises();
+    await disclosure(wrapper, '高级参数').trigger('click');
+    await openCustomDuration(wrapper, '朗读时插话确认');
+    stalePrompt.onConfirm('1000');
+    expect(wrapper.get('button[aria-label="朗读时插话确认"]').text()).toContain('192 ms');
+    modals.closeTopModal();
+    await flushPromises();
+    expect(useOverlayStore().promptConfig).toBeNull();
+    expect(wrapper.emitted('close')).toBeUndefined();
+    expect(modals.modalStackLength()).toBe(1);
+    expect(updates()).toHaveLength(0);
+  });
+
+  it('卸载不关闭其他入口替换的自定义输入弹窗', async () => {
+    const wrapper = await renderPage();
+    await disclosure(wrapper, '高级参数').trigger('click');
+    await openCustomDuration(wrapper, '说完等待时间');
+    const overlay = useOverlayStore();
+    const stalePrompt = overlay.promptConfig!;
+    overlay.openPrompt({ title: '其他输入', initialValue: '', placeholder: '', onConfirm: vi.fn() });
+    const replacement = overlay.promptConfig;
+    stalePrompt.onConfirm('900');
+    expect(wrapper.get('button[aria-label="说完等待时间"]').text()).toContain('512 ms');
+    wrappers.splice(wrappers.indexOf(wrapper), 1);
+    wrapper.unmount();
+    await flushPromises();
+    expect(overlay.promptConfig).toBe(replacement);
+  });
+
   it('默认选择 WAV，编码随本页草稿保存并可切回，不改变朗读配置', async () => {
     const { wrapper } = await renderOverlay();
     expect(wrapper.find('select').exists()).toBe(false);
