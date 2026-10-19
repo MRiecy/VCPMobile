@@ -374,6 +374,8 @@ export interface AuroraRecoverySnapshot {
 }
 
 export interface StreamContextDto {
+  /** User message that owns this live request/relay, independent of output Channel. */
+  originUserMessageId?: string;
   topicId?: string;
   isGroupMessage?: boolean;
   groupId?: string;

@@ -20,6 +20,8 @@ internal class VoiceFrameResampler(private val sourceRate: Int) {
     private var inputIndex = -1L
     private var outputIndex = 0L
     private var frameSize = 0
+    private var receivedSamples = 0L
+    private var finished = false
     val hasPartialFrame: Boolean get() = frameSize != 0
     private val cutoff = min(1.0, 16_000.0 / sourceRate) * 0.90
     init { require(sourceRate in setOf(8_000, 16_000, 44_100, 48_000)) { "Unsupported microphone sample rate" } }
@@ -40,16 +42,23 @@ internal class VoiceFrameResampler(private val sourceRate: Int) {
 
     fun push(samples: ShortArray, count: Int, consume: (FloatArray) -> Unit) {
         require(count in 0..samples.size)
+        check(!finished) { "voice_resampler_finished" }
+        receivedSamples += count
         for (index in 0 until count) {
             val sample = samples[index] / 32768f
             if (sourceRate == 16_000) {
                 append(sample, consume)
                 continue
             }
-            inputIndex += 1
-            history[(inputIndex % history.size).toInt()] = sample
-            var numerator = outputIndex * sourceRate
-            while (numerator / 16_000 + 16 <= inputIndex) {
+            pushFiltered(sample, Long.MAX_VALUE, consume)
+        }
+    }
+
+    private fun pushFiltered(sample: Float, limit: Long, consume: (FloatArray) -> Unit) {
+        inputIndex += 1
+        history[(inputIndex % history.size).toInt()] = sample
+        var numerator = outputIndex * sourceRate
+        while (numerator / 16_000 + 16 <= inputIndex && outputIndex < limit) {
                 val center = numerator / 16_000
                 val weights = coefficients[(numerator % 16_000 / divisor).toInt()]
                 var weighted = 0.0
@@ -61,15 +70,25 @@ internal class VoiceFrameResampler(private val sourceRate: Int) {
                 append(weighted.toFloat().coerceIn(-1f, 1f), consume)
                 outputIndex += 1
                 numerator = outputIndex * sourceRate
-            }
         }
+    }
+
+    /** Flush already-read input only; no further microphone acquisition is performed. */
+    fun finish(consume: (FloatArray) -> Unit): FloatArray {
+        if (finished) return FloatArray(0)
+        finished = true
+        if (sourceRate != 16_000) {
+            val limit = receivedSamples * 16_000 / sourceRate
+            repeat(16) { pushFiltered(0f, limit, consume) }
+        }
+        return frame.copyOf(frameSize).also { frameSize = 0 }
     }
 
     private fun append(sample: Float, consume: (FloatArray) -> Unit) {
         frame[frameSize++] = sample
         if (frameSize == frame.size) {
-            consume(frame) // Borrowed only until this synchronous callback returns.
             frameSize = 0
+            consume(frame) // Borrowed only until this synchronous callback returns.
         }
     }
 

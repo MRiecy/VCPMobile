@@ -59,6 +59,8 @@ import com.vcp.mobile.sharing.ShareIntentHandler
 import com.vcp.mobile.sharing.SharedFileIngestor
 import com.vcp.mobile.updater.NativeUpdater
 import com.vcp.mobile.voice.NativeVoiceAudio
+import com.vcp.mobile.voice.NativeVoiceOutput
+import com.vcp.mobile.voice.VoiceAudioSession
 import com.vcp.mobile.webview.CompleteWebViewResumeArgs
 import com.vcp.mobile.webview.ConnectWebViewResumeArgs
 import com.vcp.mobile.webview.KeyboardInsetsManager
@@ -129,7 +131,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val gpuStatusManager = GpuStatusManager(activity)
     private val sensorStatusManager = SensorStatusManager(activity)
     private val nativeEvents = NativeEvents(activity, runtime, networkStatusManager, lifecycleBridge::snapshot)
-    private val voiceAudio = NativeVoiceAudio(activity, ::requestPermissionForAlias, nativeEvents::isReady, nativeEvents::tryEmitVoiceAudio)
+    private val voiceAudioSession = VoiceAudioSession(activity)
+    private val voiceOutput: NativeVoiceOutput = NativeVoiceOutput(voiceAudioSession) { voiceAudio.isProbeBusy() }
+    private val voiceAudio: NativeVoiceAudio = NativeVoiceAudio(activity, ::requestPermissionForAlias, nativeEvents::isReady, nativeEvents::tryEmitVoiceAudio, voiceAudioSession, voiceOutput)
     private val permissions = AndroidPermissions(activity, ::requestPermissionForAlias, ::startActivityForResult, ::emitWebViewEvent)
     private val filePicker = NativeFilePicker(activity, runtime, ::startActivityForResult, ::requestPermissionForAlias, ::emitWebViewEvent)
     private val fileExports = NativeFileExports(activity, runtime, ::requestPermissionForAlias)
@@ -257,6 +261,12 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     fun onVoiceAudioPermissionResult(invoke: Invoke) = voiceAudio.onPermissionResult(invoke)
 
     @Command
+    fun beginVoiceCall(invoke: Invoke) = voiceAudio.beginVoiceCall(invoke)
+
+    @Command
+    fun endVoiceCall(invoke: Invoke) = voiceAudio.endVoiceCall(invoke)
+
+    @Command
     fun startVoiceAudio(invoke: Invoke) = voiceAudio.startVoiceAudio(invoke)
 
     @Command
@@ -264,6 +274,24 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun setVoiceProbe(invoke: Invoke) = voiceAudio.setVoiceProbe(invoke)
+
+    @Command
+    fun exportVoiceSegment(invoke: Invoke) = voiceAudio.exportVoiceSegment(invoke)
+
+    @Command
+    fun releaseVoiceSegments(invoke: Invoke) = voiceAudio.releaseVoiceSegments(invoke)
+
+    @Command
+    fun startVoicePlayback(invoke: Invoke) = voiceOutput.startVoicePlayback(invoke)
+
+    @Command
+    fun appendVoicePlayback(invoke: Invoke) = voiceOutput.appendVoicePlayback(invoke)
+
+    @Command
+    fun finishVoicePlayback(invoke: Invoke) = voiceOutput.finishVoicePlayback(invoke)
+
+    @Command
+    fun stopVoicePlayback(invoke: Invoke) = voiceOutput.stopVoicePlayback(invoke)
 
     @ActivityCallback
     fun onBatteryOptimizationResult(invoke: Invoke, result: ActivityResult) = permissions.onBatteryOptimizationResult(invoke, result)
@@ -580,6 +608,8 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         release("window snapshot", windowSnapshot::destroy)
         release("media", mediaProcessor::destroy)
         release("voice audio", voiceAudio::destroy)
+        release("voice output", voiceOutput::destroy)
+        release("voice routing", voiceAudioSession::destroy)
         release("file picker", filePicker::destroy)
         release("share inbox", shareIntentHandler::destroy)
         release("file exports", fileExports::destroy)

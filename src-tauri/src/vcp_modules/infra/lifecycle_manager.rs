@@ -342,7 +342,9 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
                             );
                         }
                         NativeEvent::VoiceAudio(event) => {
-                            tauri_plugin_vcp_mobile::voice::handle_native_event(&event_handle, event);
+                            if let Some(event) = tauri_plugin_vcp_mobile::voice::handle_native_event(&event_handle, event) {
+                                crate::vcp_modules::chat::voice_service::handle_audio_event(&event_handle, &event);
+                            }
                         }
                         NativeEvent::Other {} => {}
                     }

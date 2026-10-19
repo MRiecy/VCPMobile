@@ -9,6 +9,7 @@ import {
 import type { AppSettings } from "../../../core/stores/settings";
 import { useThemeStore } from '../../../core/stores/theme';
 import { useChatPreferencesStore } from '../../../features/chat/preferences/store';
+import { DEFAULT_VOICE_SETTINGS } from '../../../features/chat/voice/settings';
 
 
 beforeEach(() => {
@@ -32,6 +33,7 @@ afterEach(() => {
 
 function makeSettings(): AppSettings {
   return {
+    ...DEFAULT_VOICE_SETTINGS,
     userName: "测试用户",
     vcpServerUrl: "https://vcp.example.com",
     chatEndpointMode: "vcpTools",
@@ -60,6 +62,17 @@ function makeSettings(): AppSettings {
 
 
 describe('配置恢复的真实领域状态与失败边界', () => {
+  it('导出语音连接及两个独立流式选项，恢复继续走SQLite设置owner', async () => {
+    const settings = { ...makeSettings(), voiceApiKey: 'voice-key', voiceAsrStream: false, voiceTtsStream: true, voiceTtsVoice: '冰糖' as const };
+    const payload = buildBackupPayload(settings, captureBackupPreferences());
+    expect(payload.settings).toMatchObject({ voiceApiKey: 'voice-key', voiceAsrStream: false, voiceTtsStream: true, voiceTtsVoice: '冰糖' });
+    const patch = { voiceApiKey: 'restored-key', voiceLanguage: 'en' as const };
+    const applySettings = vi.fn(async () => {});
+    const result = await applyConfigBackup({ settings: patch, exportedAt: '' }, applySettings);
+    expect(applySettings).toHaveBeenCalledExactlyOnceWith(patch);
+    expect(result.applied).toEqual(['语音服务']);
+  });
+
   it('捕获已应用的主题与聊天偏好，不使用 SQLite 中未消费的主题字段', async () => {
     const theme = useThemeStore();
     await theme.restorePreferences({ themeKey: 'themes-simple-bw.ts', mode: 'system' });

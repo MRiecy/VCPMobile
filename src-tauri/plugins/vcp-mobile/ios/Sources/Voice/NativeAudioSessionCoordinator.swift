@@ -1,9 +1,9 @@
 import AVFoundation
 import Foundation
 
-/// Main-queue ownership of the app's shared audio session. Voice reservations
-/// cover setup and teardown too, when neither engine.isRunning nor a category
-/// check can identify the operation that is entitled to configure the session.
+/// Main-queue ownership of the app's shared audio session. The real renderer
+/// (VP call or output-only speech) takes priority over silent keepalive, including
+/// setup/teardown when engine.isRunning cannot identify the current owner.
 final class NativeAudioSessionCoordinator {
     static let shared = NativeAudioSessionCoordinator()
     let session = AVAudioSession.sharedInstance()
@@ -15,14 +15,18 @@ final class NativeAudioSessionCoordinator {
             && session.categoryOptions.contains(.mixWithOthers)
     }
 
-    func acquireVoice(_ owner: UUID) throws {
+    func acquireVoice(_ owner: UUID, recording: Bool = true) throws {
         dispatchPrecondition(condition: .onQueue(.main))
-        guard voiceOwner == nil else { throw voiceAudioFailure("audio_session_busy") }
+        guard voiceOwner == nil || voiceOwner == owner else { throw voiceAudioFailure("audio_session_busy") }
         voiceOwner = owner
         NativeBackgroundExecution.shared.yieldToVoice()
         keepaliveActivated = false
         do {
-            try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker])
+            if recording {
+                try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.defaultToSpeaker, .allowBluetoothHFP])
+            } else {
+                try session.setCategory(.playback, mode: .default, options: [])
+            }
             try session.setActive(true)
         } catch {
             voiceOwner = nil
@@ -36,7 +40,7 @@ final class NativeAudioSessionCoordinator {
         guard voiceOwner == owner else { return }
         // The caller has already stopped input and output before relinquishing
         // its reservation. Never deactivate a session configured by another user.
-        if session.category == .playAndRecord && session.mode == .voiceChat {
+        if session.category == .playAndRecord || session.category == .playback {
             do { try session.setActive(false, options: [.notifyOthersOnDeactivation]) }
             catch { NSLog("[VcpVoice] Session deactivation: %@", error.localizedDescription) }
         }

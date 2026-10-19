@@ -101,6 +101,32 @@ Denies the acquire_wake_lock command without any pre-configured scope.
 <tr>
 <td>
 
+`vcp-mobile:allow-begin-voice-call`
+
+</td>
+<td>
+
+Enables the begin_voice_call command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:deny-begin-voice-call`
+
+</td>
+<td>
+
+Denies the begin_voice_call command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `vcp-mobile:allow-can-install-packages`
 
 </td>
@@ -406,6 +432,32 @@ Enables the delete_temp_file command without any pre-configured scope.
 <td>
 
 Denies the delete_temp_file command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:allow-end-voice-call`
+
+</td>
+<td>
+
+Enables the end_voice_call command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:deny-end-voice-call`
+
+</td>
+<td>
+
+Denies the end_voice_call command without any pre-configured scope.
 
 </td>
 </tr>

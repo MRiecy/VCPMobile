@@ -12,3 +12,4 @@ pub mod stream_block_parser;
 pub mod topic_service;
 pub mod topic_summary_service;
 pub mod topic_types;
+pub mod voice_service;

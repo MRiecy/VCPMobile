@@ -20,11 +20,17 @@ export const CONNECTION_FIELDS = [
 
 export const SUMMARY_FIELDS = ["topicSummaryModel"] as const;
 
+export const VOICE_FIELDS = [
+  "voiceApiBaseUrl", "voiceApiKey", "voiceAsrStream", "voiceTtsStream", "voiceLanguage", "voiceTtsVoice",
+] as const;
+
 export type SettingsEditableKey =
   | (typeof IDENTITY_FIELDS)[number]
   | (typeof CONNECTION_FIELDS)[number]
-  | (typeof SUMMARY_FIELDS)[number];
+  | (typeof SUMMARY_FIELDS)[number]
+  | (typeof VOICE_FIELDS)[number];
 
 export type IdentityFields = Pick<AppSettings, (typeof IDENTITY_FIELDS)[number]>;
 export type ConnectionFields = Pick<AppSettings, (typeof CONNECTION_FIELDS)[number]>;
 export type SummaryFields = Pick<AppSettings, (typeof SUMMARY_FIELDS)[number]>;
+export type VoiceFields = Pick<AppSettings, (typeof VOICE_FIELDS)[number]>;

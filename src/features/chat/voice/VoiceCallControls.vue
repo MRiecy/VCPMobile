@@ -7,6 +7,9 @@ const props = defineProps<{
   level: number;
   bands: readonly number[];
   speechActive?: boolean;
+  serviceState?: string;
+  serviceMessage?: string;
+  partialText?: string;
   errorMessage?: string;
 }>();
 
@@ -23,7 +26,10 @@ const inputLevel = computed(() => microphoneOn.value && Number.isFinite(props.le
 const microphoneStatus = computed(() => {
   switch (props.microphoneState) {
     case 'requesting': return '正在开启麦克风';
-    case 'on': return props.speechActive ? '检测到说话' : '正在聆听';
+    case 'on': return props.speechActive ? '检测到说话'
+      : props.serviceState === 'recognizing' ? '正在识别'
+        : props.serviceState === 'thinking' ? '正在回复'
+          : props.serviceState === 'speaking' ? '正在朗读' : '正在聆听';
     case 'error': return props.errorMessage?.trim() || '麦克风暂不可用，请重试';
     default: return '麦克风已关闭';
   }
@@ -57,7 +63,7 @@ const bars = computed(() => Array.from({ length: 32 }, (_, index) => {
       <p class="voice-microphone-status" :class="{ 'voice-microphone-error': microphoneState === 'error' }">
         {{ microphoneStatus }}
       </p>
-      <p class="voice-service-status">语音识别与朗读尚未接入</p>
+      <p class="voice-service-status">{{ partialText || serviceMessage || '开启麦克风后即可开始说话' }}</p>
     </div>
 
     <div class="voice-control-actions">
@@ -149,6 +155,10 @@ const bars = computed(() => Array.from({ length: 32 }, (_, index) => {
   font-size: 11px;
   line-height: 16px;
   opacity: 0.6;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .voice-control-actions {

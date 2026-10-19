@@ -199,6 +199,9 @@ async fn run_group_speaker_turn<R: Runtime>(
         request_key.clone(),
         params.group_turn.child_token(),
     )?;
+    if let Some(origin) = params.group_turn.origin_user_message() {
+        _request_lease.set_origin_user_message(&origin)?;
+    }
     let db_state = app_handle.state::<DbState>();
     message_service::begin_stream_message(
         &db_state,
@@ -356,6 +359,7 @@ pub async fn internal_process_group_chat_message(
     let connection = params.connection;
     let topic_key = TopicKey::new("group", &group_id, &topic_id);
     let group_turn = active_group_turns.try_acquire(topic_key.clone())?;
+    group_turn.set_origin_user_message(&user_message.id)?;
     if let Some(channel) = stream_channel.clone() {
         group_turn.bind_output(&app_handle, channel)?;
     }
@@ -674,6 +678,8 @@ pub struct GroupInvitePayload {
     pub group_id: String,
     pub topic_id: String,
     pub agent_ids: Vec<String>,
+    #[serde(default)]
+    pub origin_user_message_id: Option<String>,
 }
 
 /// 按邀请顺序让指定成员在同一群聊回合内发言。
@@ -702,6 +708,9 @@ pub async fn invite_group_member_to_speak(
     );
     let topic_key = TopicKey::new("group", &payload.group_id, &payload.topic_id);
     let group_turn = active_group_turns.try_acquire(topic_key.clone())?;
+    if let Some(origin) = &payload.origin_user_message_id {
+        group_turn.set_origin_user_message(origin)?;
+    }
     group_turn.bind_output(&app_handle, stream_channel.clone())?;
     let settings = read_settings(app_handle.clone(), settings_state).await?;
     let connection = freeze_chat_connection(&settings, ChatRequestPurpose::Interactive)?;

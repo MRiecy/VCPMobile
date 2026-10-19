@@ -27,6 +27,8 @@ const BACKUP_STRING_KEYS: &[&str] = &[
     "distributedVcpKey",
     "distributedDeviceName",
     "topicSummaryModel",
+    "voiceApiBaseUrl",
+    "voiceApiKey",
 ];
 
 #[derive(Debug, Serialize)]
@@ -126,14 +128,24 @@ fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
             settings.insert((*key).to_string(), value.clone());
         }
     }
-    if let Some(value) = source
-        .get("distributedEnabled")
-        .filter(|value| !value.is_null())
-    {
-        if !value.is_boolean() {
-            return Err("备份字段 distributedEnabled 类型不正确".into());
+    for key in ["distributedEnabled", "voiceAsrStream", "voiceTtsStream"] {
+        if let Some(value) = source.get(key).filter(|value| !value.is_null()) {
+            if !value.is_boolean() {
+                return Err(format!("备份字段 {key} 类型不正确"));
+            }
+            settings.insert(key.into(), value.clone());
         }
-        settings.insert("distributedEnabled".into(), value.clone());
+    }
+    for (key, allowed) in [
+        ("voiceLanguage", VOICE_LANGUAGES),
+        ("voiceTtsVoice", VOICE_TTS_VOICES),
+    ] {
+        if let Some(value) = source.get(key).filter(|value| !value.is_null()) {
+            if !value.as_str().is_some_and(|value| allowed.contains(&value)) {
+                return Err(format!("备份字段 {key} 值不正确"));
+            }
+            settings.insert(key.into(), value.clone());
+        }
     }
     if let Some(value) = source
         .get("chatEndpointMode")
@@ -188,6 +200,23 @@ fn default_sync_log_level() -> String {
     "INFO".to_string()
 }
 
+const VOICE_LANGUAGES: &[&str] = &["auto", "zh", "en"];
+const VOICE_TTS_VOICES: &[&str] = &[
+    "mimo_default", "冰糖", "茉莉", "苏打", "白桦", "Mia", "Chloe", "Milo", "Dean",
+];
+fn default_voice_api_base_url() -> String {
+    "https://api.xiaomimimo.com/v1".into()
+}
+fn default_voice_stream() -> bool {
+    true
+}
+fn default_voice_language() -> String {
+    "auto".into()
+}
+fn default_voice_tts_voice() -> String {
+    "mimo_default".into()
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub enum ChatEndpointMode {
@@ -197,7 +226,7 @@ pub enum ChatEndpointMode {
     Raw,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
     #[serde(default)]
@@ -247,6 +276,20 @@ pub struct Settings {
     #[serde(default)]
     pub topic_summary_model: String,
 
+    // MiMo 语音连接：与其他服务密钥共用全局设置 SQLite 原子快照。
+    #[serde(default = "default_voice_api_base_url")]
+    pub voice_api_base_url: String,
+    #[serde(default)]
+    pub voice_api_key: String,
+    #[serde(default = "default_voice_stream")]
+    pub voice_asr_stream: bool,
+    #[serde(default = "default_voice_stream")]
+    pub voice_tts_stream: bool,
+    #[serde(default = "default_voice_language")]
+    pub voice_language: String,
+    #[serde(default = "default_voice_tts_voice")]
+    pub voice_tts_voice: String,
+
     // 同步日志配置
     #[serde(default = "default_sync_log_level")]
     pub sync_log_level: String,
@@ -268,6 +311,12 @@ pub struct Settings {
     #[serde(flatten)]
     #[serde(default)]
     pub extra: serde_json::Value,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        create_default_settings()
+    }
 }
 
 pub struct SettingsState {
@@ -356,6 +405,12 @@ pub fn create_default_settings() -> Settings {
         admin_password: "".to_string(),
         file_key: "".to_string(),
         topic_summary_model: "gemini-3.1-flash-lite".to_string(),
+        voice_api_base_url: default_voice_api_base_url(),
+        voice_api_key: String::new(),
+        voice_asr_stream: true,
+        voice_tts_stream: true,
+        voice_language: default_voice_language(),
+        voice_tts_voice: default_voice_tts_voice(),
         sync_log_level: "INFO".to_string(),
         sync_prerender_enabled: false,
         agent_order: vec![],
@@ -550,7 +605,14 @@ pub async fn update_settings<R: Runtime>(
         }
     }
 
-    let new_settings: Settings = serde_json::from_value(current_val).map_err(|e| e.to_string())?;
+    let new_settings: Settings = serde_json::from_value(current_val)
+        .map_err(|_| "设置字段类型不正确".to_string())?;
+    if !VOICE_LANGUAGES.contains(&new_settings.voice_language.as_str()) {
+        return Err("语音识别语言不受支持".into());
+    }
+    if !VOICE_TTS_VOICES.contains(&new_settings.voice_tts_voice.as_str()) {
+        return Err("语音合成音色不受支持".into());
+    }
     internal_write_settings(&app_handle, &state, &new_settings).await?;
 
     Ok(new_settings)
@@ -653,6 +715,56 @@ mod tests {
     use super::*;
 
     use sqlx::Row;
+
+    #[test]
+    fn legacy_settings_receive_voice_defaults_without_losing_connections() {
+        let (settings, _) = deserialize_persisted_settings(
+            r#"{"userName":"legacy","chatEndpointMode":"standard","vcpApiKey":"old-chat-key"}"#,
+        ).unwrap();
+        assert_eq!(settings.vcp_api_key, "old-chat-key");
+        assert_eq!(settings.voice_api_base_url, "https://api.xiaomimimo.com/v1");
+        assert!(settings.voice_api_key.is_empty());
+        assert!(settings.voice_asr_stream && settings.voice_tts_stream);
+        assert_eq!(settings.voice_language, "auto");
+        assert_eq!(settings.voice_tts_voice, "mimo_default");
+        assert!(Settings::default().voice_asr_stream);
+    }
+
+    #[test]
+    fn voice_settings_round_trip_preserves_false_flags_and_chinese_voice_ids() {
+        let mut settings = create_default_settings();
+        settings.voice_api_key = "test-voice-key".into();
+        settings.voice_asr_stream = false;
+        settings.voice_tts_stream = true;
+        settings.voice_tts_voice = "白桦".into();
+        let serialized = serde_json::to_string(&settings).unwrap();
+        let (restored, _) = deserialize_persisted_settings(&serialized).unwrap();
+        assert_eq!(restored.voice_api_key, "test-voice-key");
+        assert!(!restored.voice_asr_stream && restored.voice_tts_stream);
+        assert_eq!(restored.voice_tts_voice, "白桦");
+        assert!(restored.extra.get("voiceApiKey").is_none());
+    }
+
+    #[test]
+    fn voice_backup_imports_present_fields_only_and_rejects_values_without_echoing_them() {
+        let backup = |settings: serde_json::Value| serde_json::to_vec(&serde_json::json!({
+            "app": "vcp-mobile", "kind": "vcp-mobile-settings-backup", "version": 2, "settings": settings,
+        })).unwrap();
+        let imported = parse_backup_bytes(&backup(serde_json::json!({
+            "voiceApiBaseUrl": "https://api.xiaomimimo.com/v1", "voiceApiKey": "sample-key",
+            "voiceAsrStream": false, "voiceTtsStream": true, "voiceLanguage": "zh", "voiceTtsVoice": "冰糖",
+        }))).unwrap();
+        assert_eq!(imported.settings.len(), 6);
+        assert_eq!(imported.settings["voiceAsrStream"], false);
+        assert_eq!(imported.settings["voiceTtsVoice"], "冰糖");
+        let old = parse_backup_bytes(&backup(serde_json::json!({"vcpApiKey": "old-key"}))).unwrap();
+        assert!(!old.settings.contains_key("voiceApiKey"));
+        for key in ["voiceLanguage", "voiceTtsVoice", "voiceAsrStream", "voiceTtsStream"] {
+            let error = parse_backup_bytes(&backup(serde_json::json!({(key): "private-token"}))).unwrap_err();
+            assert!(!error.contains("private-token"));
+            assert!(error.contains(key));
+        }
+    }
 
     #[tokio::test]
     async fn newer_runtime_generation_supersedes_waiting_reconciler() {

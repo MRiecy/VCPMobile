@@ -8,6 +8,7 @@ import {
 } from "@/features/settings/editing/fieldSets";
 import { useSettingsEditSession } from "@/features/settings/editing/useSettingsEditSession";
 import { mockInvoke } from "../../mocks/tauri";
+import { DEFAULT_VOICE_SETTINGS } from "@/features/chat/voice/settings";
 
 const { notify } = vi.hoisted(() => ({ notify: vi.fn() }));
 vi.mock("@/core/stores/notification", () => ({
@@ -15,6 +16,7 @@ vi.mock("@/core/stores/notification", () => ({
 }));
 
 const initialSettings = (): AppSettings => ({
+  ...DEFAULT_VOICE_SETTINGS,
   userName: "original",
   vcpServerUrl: "https://vcp.example",
   chatEndpointMode: "standard",

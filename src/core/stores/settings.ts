@@ -2,10 +2,11 @@ import { defineStore } from "pinia";
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useNotificationStore } from "./notification";
+import type { VoiceServiceSettings } from "../../features/chat/voice/settings";
 
 export type ChatEndpointMode = "standard" | "vcpTools" | "raw";
 
-export interface AppSettings {
+export interface AppSettings extends VoiceServiceSettings {
   userName: string;
   vcpServerUrl: string;
   chatEndpointMode: ChatEndpointMode;
@@ -98,6 +99,12 @@ export const useSettingsStore = defineStore("settings", () => {
         });
         return updated;
       } catch (e: any) {
+        // Voice credentials must not be reflected by an IPC/transport error.
+        if (Object.keys(capturedUpdates).some(key => key.startsWith("voice"))) {
+          error.value = "语音设置保存失败，请重试";
+          console.error("[SettingsStore] Failed to update voice settings");
+          throw new Error(error.value);
+        }
         error.value = e.toString();
         console.error("[SettingsStore] Failed to update settings:", e);
         throw e;

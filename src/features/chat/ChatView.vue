@@ -434,6 +434,7 @@ onUnmounted(() => {
         <VoiceCallControls v-if="voiceCall.active"
           :microphone-state="voiceCall.microphoneState" :level="voiceCall.level" :bands="voiceCall.bands"
           :speech-active="voiceCall.speechActive" :error-message="voiceCall.errorMessage"
+          :service-state="voiceCall.serviceState" :service-message="voiceCall.serviceMessage" :partial-text="voiceCall.partialText"
           @toggle-microphone="voiceCall.toggleMicrophone" @hangup="voiceCall.end" />
       </Transition>
       <div class="no-swipe pointer-events-none" :style="{ height: voiceCall.active

@@ -40,6 +40,20 @@ class VoiceAudioDspTest {
         output.forEachIndexed { index, sample -> assertEquals(input[index] / 32768f, sample, 0f) }
     }
 
+    @Test fun sealIncludesThePartialVadWindowAndAlreadyReadResamplingTail() {
+        for (rate in listOf(8_000, 16_000, 44_100, 48_000)) {
+            val input = ShortArray(rate / 3 + 7) { (it % 8_000 - 4_000).toShort() }
+            val converter = VoiceFrameResampler(rate)
+            val output = mutableListOf<Float>()
+            converter.push(input, input.size) { output.addAll(it.asIterable()) }
+            val partial = converter.finish { output.addAll(it.asIterable()) }
+            output.addAll(partial.asIterable())
+            assertEquals(input.size.toLong() * 16_000 / rate, output.size.toLong())
+            assertTrue(partial.size < 512)
+            assertTrue(converter.finish {}.isEmpty())
+        }
+    }
+
     @Test fun downsamplingRejectsOutOfBandEnergyInsteadOfAliasingItIntoSpeech() {
         fun tone(frequency: Int) = ShortArray(48_000) { (20_000 * sin(2 * PI * frequency * it / 48_000)).toInt().toShort() }
         fun rms(samples: FloatArray): Double = sqrt(samples.drop(512).sumOf { it.toDouble() * it } / (samples.size - 512))

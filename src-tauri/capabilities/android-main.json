@@ -33,6 +33,8 @@
     "vcp-mobile:allow-launch-root-manager",
     "vcp-mobile:allow-open-unknown-sources-settings",
     "vcp-mobile:allow-trigger-haptic-feedback",
+    "vcp-mobile:allow-begin-voice-call",
+    "vcp-mobile:allow-end-voice-call",
     "vcp-mobile:allow-start-voice-audio",
     "vcp-mobile:allow-stop-voice-audio",
     "vcp-mobile:allow-set-voice-probe"

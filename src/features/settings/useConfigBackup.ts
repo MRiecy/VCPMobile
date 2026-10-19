@@ -1,5 +1,5 @@
 // useConfigBackup: 「服务器连接」页配置备份（导出/导入）
-// 导出范围：用户身份、应用连接、总结模型与已应用的主题/聊天偏好。
+// 导出范围：用户身份、应用/语音连接、总结模型与已应用的主题/聊天偏好。
 // 头像不在导出范围：头像属于数据同步职责，重装后由同步带回
 // 评估与决策记录见 plan/Settings_Import_Export_Evaluation_2026-08-18.md
 import { invoke } from "@tauri-apps/api/core";
@@ -41,12 +41,18 @@ export const BACKUP_SETTINGS_KEYS = [
   "distributedVcpKey",
   "distributedDeviceName",
   "topicSummaryModel",
+  "voiceApiBaseUrl",
+  "voiceApiKey",
+  "voiceAsrStream",
+  "voiceTtsStream",
+  "voiceLanguage",
+  "voiceTtsVoice",
 ] as const;
 
 export type BackupSettingsKey = (typeof BACKUP_SETTINGS_KEYS)[number];
 
 /** 布尔字段；白名单内其余字段均为字符串 */
-const BOOLEAN_BACKUP_KEYS: ReadonlySet<string> = new Set(["distributedEnabled"]);
+const BOOLEAN_BACKUP_KEYS: ReadonlySet<string> = new Set(["distributedEnabled", "voiceAsrStream", "voiceTtsStream"]);
 const CHAT_ENDPOINT_MODES = new Set(["standard", "vcpTools", "raw"]);
 
 export interface ConfigBackupFile {
@@ -75,6 +81,7 @@ const SETTINGS_SCOPES = [
   { label: '服务器与同步连接', keys: ['vcpServerUrl', 'chatEndpointMode', 'vcpApiKey', 'vcpLogUrl', 'vcpLogKey', 'syncHttpUrl', 'syncServerUrl', 'syncToken', 'fileKey'] },
   { label: '分布式系统', keys: ['distributedEnabled', 'distributedWsUrl', 'distributedVcpKey', 'distributedDeviceName'] },
   { label: '话题总结模型', keys: ['topicSummaryModel'] },
+  { label: '语音服务', keys: ['voiceApiBaseUrl', 'voiceApiKey', 'voiceAsrStream', 'voiceTtsStream', 'voiceLanguage', 'voiceTtsVoice'] },
 ] as const;
 
 const hasFields = (value: object | undefined): boolean => Boolean(value && Object.keys(value).length);

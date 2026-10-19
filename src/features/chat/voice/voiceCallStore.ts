@@ -3,6 +3,9 @@ import { onScopeDispose, ref, shallowRef, watch } from 'vue';
 import { useChatSessionStore, type ConversationKey } from '../../../core/stores/chatSessionStore';
 import { useAppLifecycleStore } from '../../../core/stores/appLifecycle';
 import { createMicrophoneMonitor, type VoiceAudioFrame } from './microphoneMonitor';
+import { createVoiceConversation, type VoiceServiceView } from './voiceConversation';
+import { useChatHistoryStore } from '../../../core/stores/chatHistoryStore';
+import { useChatStreamStore } from '../../../core/stores/chatStreamStore';
 
 export type MicrophoneState = 'off' | 'requesting' | 'on' | 'error';
 
@@ -25,6 +28,11 @@ const AUDIO_ERRORS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\b(microphone_format_unavailable|audio_format_unavailable|audio_converter_unavailable)\b/, '当前音频设备的采集格式不可用，请切换设备后重试。'],
   [/\b(audio_input_discontinuity|audio_conversion_failed|audio_sample_invalid|audio_event_backpressure)\b/, '音频处理已中断，请重新开启麦克风。'],
   [/\bvoice_probe_busy\b/, '本地样本正在准备，请稍后重试。'],
+  [/\bvoice_playback_busy\b/, '正在朗读，请等待结束或重新开麦后播放本地样本。'],
+  [/\bvoice_call_not_active\b/, '通话会话已结束，请重新进入语音模式。'],
+  [/\bvoice_call_busy\b/, '上一通话正在结束，请稍后重试。'],
+  [/\bvoice_segment_retention_busy\b/, '前面的语音仍在识别，请稍后再开启麦克风。'],
+  [/\baudio_conversion_drain_failed\b/, '末尾音频处理失败，请重新说一遍。'],
   [/\b(voice_probe_missing|voice_probe_invalid)\b/, '本地诊断样本不可用，请检查应用安装。'],
   [/\b(voice_start_failed|audio_start_failed)\b/, '麦克风启动失败，请检查音频设备后重试。'],
   [/\bvoice_capture_failed\b/, '音频采集已中断，点击麦克风重新开启。'],
@@ -53,9 +61,13 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   const aecState = ref<VoiceAudioFrame['aecState'] | null>(null);
   const route = ref('');
   const playbackActive = ref(false);
+  const probeActive = ref(false);
   const probePending = ref(false);
   const probeError = ref('');
   const errorMessage = ref('');
+  const serviceState = ref<VoiceServiceView['state']>('off');
+  const serviceMessage = ref('');
+  const partialText = ref('');
   let microphoneGeneration = 0;
   let probeGeneration = 0;
 
@@ -64,10 +76,23 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
     aecState.value = null;
     route.value = '';
     playbackActive.value = false;
+    probeActive.value = false;
     probePending.value = false;
     probeError.value = '';
     probeGeneration += 1;
   };
+
+  const voiceConversation = createVoiceConversation({
+    conversation: () => conversation.value,
+    isConversationCurrent: key => active.value && session.isConversationCurrent(key),
+    observeChat: listener => useChatStreamStore().observeEvents(listener),
+    sendMessage: (text, key, scope) => useChatHistoryStore().sendVoiceMessage(text, key, scope),
+    onView: view => {
+      serviceState.value = view.state;
+      serviceMessage.value = view.message;
+      partialText.value = view.partialText;
+    },
+  });
 
   const monitor = createMicrophoneMonitor(
     (value, spectrum) => { level.value = value; bands.value = spectrum; },
@@ -89,7 +114,9 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
       aecState.value = frame.aecState;
       route.value = frame.route;
       playbackActive.value = frame.playbackActive;
+      probeActive.value = frame.playbackActive && !frame.playbackId;
     },
+    { beforeStart: voiceConversation.start, onStop: voiceConversation.closeInput },
   );
 
   const stopMicrophone = () => {
@@ -122,10 +149,12 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
     if (active.value || !session.currentConversationKey) return;
     conversation.value = { ...session.currentConversationKey };
     active.value = true;
+    voiceConversation.begin();
     void enableMicrophone();
   };
 
   const end = () => {
+    voiceConversation.stop();
     stopMicrophone();
     active.value = false;
     conversation.value = null;
@@ -169,6 +198,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
 
   return {
     active, microphoneState, level, bands, speechActive, aecState, route,
-    playbackActive, probePending, probeError, errorMessage, start, end, toggleMicrophone, setProbe,
+    playbackActive, probeActive, probePending, probeError, errorMessage, serviceState, serviceMessage, partialText,
+    start, end, toggleMicrophone, setProbe,
   };
 });

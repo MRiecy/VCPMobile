@@ -47,8 +47,8 @@ Rust 核心内部调用 ─> Rust 公开入口 ─┼─> PluginHandle / JNI
 | `src/stream.rs` | 请求独立的前台保活租约与 helper service 的 Rust 边界 |
 | `src/system.rs` | 承接权限、文件、设备状态、更新与系统能力调用 |
 | `src/webview.rs`、`android/src/main/.../webview/NativeWebViewResume.kt`、`ios/Sources/WebView/NativeWebViewResume.swift` | 双端视觉恢复握手；原生持有单份旧画面遮罩并等待绘制提交，Vue 只确认当前文档布局就绪，不改变业务生命周期或主题底色 |
-| `src/voice.rs`、`src/voice/` | 原生语音控制、session/epoch 隔离及按音频样本时间统一的人声起止判定；消费已有长期事件桥，不传 PCM 到 Vue |
-| `android/src/main/.../voice/`、`ios/Sources/Voice/` | 单一原生采集/播放 owner、系统 AEC、Silero 推理、有界音频缓冲与本地样本诊断；iOS 音频会话协调器使静音保活向通话退让 |
+| `src/voice.rs`、`src/voice/` | 原生语音控制、session/epoch 隔离及按音频样本时间统一的人声起止判定；`native_audio.rs` 供应用语音服务导出 WAV、串行提交 PCM 与精准停止播放，不传 PCM 到 Vue |
+| `android/src/main/.../voice/`、`ios/Sources/Voice/` | 采集与独立播放 owner、系统 AEC、Silero、32 秒录音环和短期 WAV 导出；关闭输入先封存，`releaseVoiceSegments` 另释放已接纳片段。callId 维持通话音频路由，普通开关麦不重建输出；iOS renderer 协调固定 VP 图、独立无输入播放与静音保活 |
 | `../../runtime-assets/voice/` | 固定 Silero 模型、算子/类型裁剪输入、双端 ONNX Runtime 构建与校验、本地诊断音频及来源声明 |
 | `src/cli.rs` | 承接 Rust 核心到 Android CLI process / PTY 的异步桥接 |
 | `android/src/main/.../VcpMobilePlugin.kt` | Kotlin 命令入口与插件 attach/destroy 编排 |

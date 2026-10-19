@@ -12,6 +12,7 @@ export interface VoiceAudioFrame {
   aecState: 'enabled' | 'unavailable' | 'failed';
   route: string;
   playbackActive: boolean;
+  playbackId?: string | null;
   probeRevision: number;
   speechActive: boolean;
   speechTransition: 'start' | 'end' | null;
@@ -23,6 +24,12 @@ export interface VoiceAudioEnd {
   sessionId: string;
   audioEpoch: number;
   reason: string;
+  sampleIndex?: number;
+}
+
+export interface CaptureStopReceipt {
+  audioEpoch: number;
+  sampleIndex: number;
 }
 
 interface CaptureRequest {
@@ -44,34 +51,44 @@ export function createMicrophoneMonitor(
   onLevel: (level: number, bands: readonly number[]) => void,
   onEnded: (event: VoiceAudioEnd) => void,
   onFrame: (frame: VoiceAudioFrame) => void,
+  lifecycle: { beforeStart: (sessionId: string) => Promise<string>; onStop: (sessionId: string, receipt?: CaptureStopReceipt) => void },
 ) {
   let current: CaptureRequest | null = null;
-  let pendingStop: Promise<void> | null = null;
+  let pendingStop: Promise<CaptureStopReceipt> | null = null;
 
   const stopNative = (request: CaptureRequest, beforeNextStart = true) => {
     // Never await start or its permission dialog before submitting cancellation.
-    const stopping = invoke<void>('plugin:vcp-mobile|stop_voice_audio', { sessionId: request.sessionId });
+    const stopping = invoke<CaptureStopReceipt>('plugin:vcp-mobile|stop_voice_audio', { sessionId: request.sessionId });
     if (beforeNextStart) pendingStop = stopping;
     void stopping.finally(() => {
       if (pendingStop === stopping) pendingStop = null;
     }).catch(error => console.warn('[VoiceAudio] Failed to stop native capture:', String(error).slice(0, 512)));
+    return stopping;
   };
 
-  const release = (request: CaptureRequest, cancel = true) => {
+  const release = (request: CaptureRequest, cancel = true, inputStopped = true, receipt?: CaptureStopReceipt) => {
     if (current === request) current = null;
     if (cancel) request.cancel();
     clearTimeout(request.heartbeat);
     request.heartbeat = undefined;
     request.unlisten?.();
     request.unlisten = undefined;
+    if (inputStopped) lifecycle.onStop(request.sessionId, receipt);
+  };
+
+  const haltInput = (request: CaptureRequest, cancel = true) => {
+    release(request, cancel, false);
+    if (request.startSubmitted) {
+      // Seal native PCM before asking ASR to drain the already-recorded input.
+      // UI cancellation remains immediate; accepted recognition is independent.
+      void stopNative(request).then(receipt => lifecycle.onStop(request.sessionId, receipt),
+        () => lifecycle.onStop(request.sessionId)).catch(() => {});
+    } else lifecycle.onStop(request.sessionId);
   };
 
   const stop = () => {
     const request = current;
-    if (request) {
-      release(request);
-      if (request.startSubmitted) stopNative(request);
-    }
+    if (request) haltInput(request);
     onLevel(0, SILENT_BANDS);
   };
 
@@ -79,8 +96,7 @@ export function createMicrophoneMonitor(
     clearTimeout(request.heartbeat);
     request.heartbeat = setTimeout(() => {
       if (current !== request) return;
-      release(request);
-      stopNative(request);
+      haltInput(request);
       onLevel(0, SILENT_BANDS);
       onEnded({ kind: 'error', sessionId: request.sessionId, audioEpoch: Math.max(0, request.epoch), reason: 'voice_events_timeout' });
     }, 3000);
@@ -121,7 +137,8 @@ export function createMicrophoneMonitor(
             onLevel(frame.level, frame.bands);
             onFrame(frame);
           } else if (payload.kind === 'stopped' || payload.kind === 'error') {
-            release(request);
+            release(request, true, true, typeof payload.sampleIndex === 'number'
+              ? { audioEpoch: payload.audioEpoch, sampleIndex: payload.sampleIndex } : undefined);
             onLevel(0, SILENT_BANDS);
             onEnded(payload);
           }
@@ -136,8 +153,10 @@ export function createMicrophoneMonitor(
         // new UUID after the old owner has actually been revoked.
         if (previousStop) await previousStop;
         if (current !== request) return false;
+        const callId = await lifecycle.beforeStart(request.sessionId);
+        if (current !== request) return false;
         request.startSubmitted = true;
-        await invoke('plugin:vcp-mobile|start_voice_audio', { sessionId: request.sessionId });
+        await invoke('plugin:vcp-mobile|start_voice_audio', { sessionId: request.sessionId, callId });
         if (current !== request) {
           // Native also guards late start completion; target this old UUID only.
           stopNative(request, false);
@@ -152,9 +171,8 @@ export function createMicrophoneMonitor(
         if (current !== request) return false;
         // Preserve a failed start as a rejection instead of resolving its
         // cancellation race before the real permission/runtime error arrives.
-        release(request, false);
+        haltInput(request, false);
         onLevel(0, SILENT_BANDS);
-        if (request.startSubmitted) stopNative(request);
         throw error;
       }
     })();

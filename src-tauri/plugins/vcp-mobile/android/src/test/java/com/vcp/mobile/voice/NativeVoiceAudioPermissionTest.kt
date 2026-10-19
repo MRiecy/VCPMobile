@@ -24,10 +24,14 @@ class NativeVoiceAudioPermissionTest {
     private val permissionRequests = mutableListOf<Invoke>()
     private val events = mutableListOf<JSObject>()
     private var eventsReady = true
+    private val audioSession = mockk<VoiceAudioSession>(relaxed = true)
+    private val output = mockk<NativeVoiceOutput>(relaxed = true)
 
     @Before fun setUp() {
         val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
         shadowOf(activity.application).denyPermissions(Manifest.permission.RECORD_AUDIO)
+        every { audioSession.hasCall("call-one") } returns true
+        every { output.snapshot() } returns NativeVoiceOutput.Snapshot()
         owner = NativeVoiceAudio(activity, { alias, invoke, callback ->
             assertEquals("microphone", alias)
             assertEquals("onVoiceAudioPermissionResult", callback)
@@ -35,13 +39,13 @@ class NativeVoiceAudioPermissionTest {
         }, { eventsReady }, { payload ->
             events.add(payload)
             true
-        })
+        }, audioSession, output)
     }
 
     @After fun tearDown() { owner.destroy() }
 
     private fun start(id: String): Invoke = mockk<Invoke>(relaxed = true).also { invoke ->
-        every { invoke.parseArgs(StartVoiceAudioArgs::class.java) } returns StartVoiceAudioArgs().apply { sessionId = id }
+        every { invoke.parseArgs(StartVoiceAudioArgs::class.java) } returns StartVoiceAudioArgs().apply { sessionId = id; callId = "call-one" }
     }
     private fun stop(id: String): Invoke = mockk<Invoke>(relaxed = true).also { invoke ->
         every { invoke.parseArgs(StopVoiceAudioArgs::class.java) } returns StopVoiceAudioArgs().apply { sessionId = id }
@@ -50,6 +54,25 @@ class NativeVoiceAudioPermissionTest {
         every { invoke.parseArgs(SetVoiceProbeArgs::class.java) } returns SetVoiceProbeArgs().apply {
             sessionId = id; probeRevision = revision; this.enabled = enabled
         }
+    }
+    private fun release(id: String): Invoke = mockk<Invoke>(relaxed = true).also { invoke ->
+        every { invoke.parseArgs(ReleaseVoiceSegmentsArgs::class.java) } returns ReleaseVoiceSegmentsArgs().apply { sessionId = id }
+    }
+
+    @Test fun releaseBeforeStopIsFinalForThatCaptureAndDoesNotTouchTheNextSession() {
+        val old = start("old-segments")
+        owner.startVoiceAudio(old)
+        owner.releaseVoiceSegments(release("old-segments"))
+        owner.stopVoiceAudio(stop("old-segments"))
+        owner.onPermissionResult(old)
+        val next = start("next-segments")
+        owner.startVoiceAudio(next)
+        owner.releaseVoiceSegments(release("old-segments"))
+        verify(exactly = 0) { next.reject(any<String>()) }
+        val late = start("old-segments")
+        owner.startVoiceAudio(late)
+        verify(exactly = 1) { late.reject("cancelled:voice_session_inactive") }
+        assertEquals(2, permissionRequests.size)
     }
 
     @Test fun absentEventChannelDoesNotRequestPermissionOrAcknowledgeCapture() {
@@ -84,7 +107,7 @@ class NativeVoiceAudioPermissionTest {
         owner.onPermissionResult(start)
         owner.onPermissionResult(start)
         verify(exactly = 1) { start.reject("cancelled:cancelled") }
-        verify(exactly = 1) { stop.resolve() }
+        verify(exactly = 1) { stop.resolve(match<JSObject> { it.getLong("sampleIndex") == 0L && it.getLong("audioEpoch") == 1L }) }
         verify(exactly = 0) { start.resolve() }
         assertEquals(1, events.size)
         assertEquals("stopped", events.single().getString("kind"))
@@ -109,6 +132,8 @@ class NativeVoiceAudioPermissionTest {
         verify(exactly = 0) { start.resolve() }
         assertEquals(1, permissionRequests.size)
         assertEquals("background", events.single().getString("reason"))
+        verify(exactly = 0) { audioSession.endCall(any()) }
+        verify(exactly = 0) { output.endCall(any()) }
     }
 
     @Test fun destructionRejectsNewRequestsAndIgnoresOldPermissionDelivery() {

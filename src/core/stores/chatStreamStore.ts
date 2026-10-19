@@ -122,6 +122,17 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   let receiptEventMessages: Set<string> | null = null;
   let receiptRequestKeys: Set<string> | null = null;
   let disposed = false;
+  const eventObservers = new Set<(event: StreamEventDto) => void>();
+  const observeEvents = (observer: (event: StreamEventDto) => void) => {
+    eventObservers.add(observer);
+    return () => { eventObservers.delete(observer); };
+  };
+  const notifyEventObservers = (event: StreamEventDto) => {
+    for (const observer of eventObservers) {
+      try { observer(event); }
+      catch (error) { console.warn('[ChatStreamStore] Event observer failed:', error); }
+    }
+  };
 
   function isStreamDebugEnabled(): boolean {
     return Boolean(import.meta.env.DEV && (window as any).__VCP_STREAM_DEBUG__);
@@ -847,6 +858,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       const previousRevision = requestConsumerRevisions.get(requestKey) ?? 0;
       if (event.consumerRevision < previousRevision) return;
       requestConsumerRevisions.set(requestKey, event.consumerRevision);
+      notifyEventObservers(event);
       receiptRequestKeys?.add(requestKey);
       const activity = event.chunk as { active?: boolean } | null;
       if (activity?.active === true) {
@@ -873,6 +885,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       if (event.consumerRevision < previousRevision) return;
       receiptEventConversations?.add(conversationKey);
       groupConsumerRevisions.set(conversationKey, event.consumerRevision);
+      notifyEventObservers(event);
       const activity = event.chunk as { active?: boolean } | null;
       if (activity?.active === true) activeGroupTurns.set(conversationKey, ctx.turnId);
       else if (activity?.active === false && activeGroupTurns.get(conversationKey) === ctx.turnId) {
@@ -1320,6 +1333,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         removeSessionStream(ownerId, ownerType, topicId, actualMessageId);
       }
     }
+    notifyEventObservers(event);
   };
 
   /**
@@ -1395,6 +1409,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
 
   onScopeDispose(() => {
     disposed = true;
+    eventObservers.clear();
     connectionEpoch += 1;
     reconnectChannel = null;
     receiptEventConversations = null;
@@ -1625,6 +1640,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     forgetDeletedMessage,
     requestAuroraSnapshot,
     processStreamEvent,
+    observeEvents,
     stopMessage,
     stopGroupTurn,
     checkAndRecoverInterruptedStreams,

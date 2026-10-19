@@ -473,6 +473,9 @@ struct RequestOutputState {
     closed: bool,
     consumer_revision: u64,
     owner_released: bool,
+    origin_user_message_id: Option<String>,
+    chat_feed: Option<Arc<dyn Fn(&StreamEvent) + Send + Sync>>,
+    has_chat_listener: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
 }
 
 static NEXT_CONSUMER_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -503,6 +506,17 @@ struct HelperHandoff {
 }
 
 impl RequestOutput {
+    fn bind_chat_feed<R: Runtime>(&self, app: &AppHandle<R>) {
+        if let Ok(mut state) = self.state.lock() {
+            if state.chat_feed.is_none() {
+                let feed_app = app.clone();
+                let check_app = app.clone();
+                state.chat_feed = Some(Arc::new(move |event| crate::vcp_modules::chat::voice_service::feed_chat_event(&feed_app, event)));
+                state.has_chat_listener = Some(Arc::new(move |origin| crate::vcp_modules::chat::voice_service::has_chat_listener(&check_app, origin)));
+            }
+        }
+    }
+
     fn send_activity(&self, key: &MessageKey, request_id: uuid::Uuid, active: bool) -> bool {
         let Ok(mut state) = self.state.lock() else { return false; };
         if state.owner_released {
@@ -609,6 +623,13 @@ impl RequestOutput {
 
     fn send_locked(state: &RequestOutputState, mut event: StreamEvent) -> bool {
         event.consumer_revision = state.consumer_revision;
+        if let Some(origin) = &state.origin_user_message_id {
+            let context = event.context.get_or_insert_with(|| json!({}));
+            if let Some(context) = context.as_object_mut() {
+                context.insert("originUserMessageId".into(), json!(origin));
+            }
+        }
+        if let Some(feed) = &state.chat_feed { feed(&event); }
         match &state.channel {
             Some(channel) => channel
                 .send(event)
@@ -634,7 +655,9 @@ impl RequestOutput {
         if state.closed {
             return;
         }
-        if state.channel.is_none() {
+        let feeds_tts = state.origin_user_message_id.as_ref().is_some_and(|origin|
+            state.has_chat_listener.as_ref().is_some_and(|listener| listener(origin)));
+        if state.channel.is_none() && !feeds_tts {
             buffer.discard_pending_delivery();
             state.snapshot_pending = true;
             return;
@@ -681,6 +704,7 @@ fn request_output<R: Runtime>(
         .try_state::<ActiveRequests>()
         .and_then(|requests| requests.0.get(key).map(|entry| entry.output.clone()))
         .unwrap_or_default();
+    output.bind_chat_feed(app);
     let group = app
         .try_state::<ActiveGroupTurns>()
         .and_then(|turns| turns.0.get(&key.topic).map(|entry| entry.value().clone()));
@@ -856,6 +880,12 @@ pub struct ActiveRequestLease {
 }
 
 impl ActiveRequestLease {
+    pub(crate) fn set_origin_user_message(&self, id: &str) -> Result<(), String> {
+        self.entry.output.state.lock().map_err(|error| error.to_string())?
+            .origin_user_message_id = Some(id.to_string());
+        Ok(())
+    }
+
     pub(crate) fn bind_output<R: Runtime>(
         &self,
         app: &AppHandle<R>,
@@ -923,6 +953,8 @@ struct ActiveGroupTurnEntry {
     turn_id: uuid::Uuid,
     cancellation_token: CancellationToken,
     channel: std::sync::Mutex<Option<Channel<StreamEvent>>>,
+    origin_user_message_id: std::sync::Mutex<Option<String>>,
+    chat_feed: std::sync::Mutex<Option<Arc<dyn Fn(&StreamEvent) + Send + Sync>>>,
 }
 
 type ActiveGroupTurnMap = Arc<DashMap<TopicKey, Arc<ActiveGroupTurnEntry>>>;
@@ -947,6 +979,8 @@ impl ActiveGroupTurns {
                     turn_id: uuid::Uuid::new_v4(),
                     cancellation_token: cancellation_token.clone(),
                     channel: std::sync::Mutex::new(None),
+                    origin_user_message_id: std::sync::Mutex::new(None),
+                    chat_feed: std::sync::Mutex::new(None),
                 }));
                 Ok(ActiveGroupTurnLease {
                     turns: self.0.clone(),
@@ -988,7 +1022,9 @@ impl ActiveGroupTurns {
         {
             request.output.attach(channel.clone())?;
         }
-        let _ = channel.send(group_turn_event(key, &turn, true));
+        let event = group_turn_event(key, &turn, true);
+        if let Ok(feed) = turn.chat_feed.lock() { if let Some(feed) = feed.as_ref() { feed(&event); } }
+        let _ = channel.send(event);
         Ok(Some(json!({
             "ownerType": key.owner_type, "ownerId": key.owner_id,
             "topicId": key.topic_id, "turnId": turn.turn_id,
@@ -1003,6 +1039,17 @@ pub(crate) struct ActiveGroupTurnLease {
 }
 
 impl ActiveGroupTurnLease {
+    pub(crate) fn set_origin_user_message(&self, id: &str) -> Result<(), String> {
+        if let Some(turn) = self.turns.get(&self.key) {
+            *turn.origin_user_message_id.lock().map_err(|error| error.to_string())? = Some(id.to_string());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn origin_user_message(&self) -> Option<String> {
+        self.turns.get(&self.key).and_then(|turn| turn.origin_user_message_id.lock().ok()?.clone())
+    }
+
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancellation_token.is_cancelled()
     }
@@ -1024,9 +1071,14 @@ impl ActiveGroupTurnLease {
         let connection = requests.1.lock().map_err(|error| error.to_string())?;
         let channel = connection.as_ref().map(|connection| connection.channel.clone()).unwrap_or(channel);
         if let Some(turn) = self.turns.get(&self.key) {
+            let feed_app = app.clone();
+            *turn.chat_feed.lock().map_err(|error| error.to_string())? = Some(Arc::new(move |event|
+                crate::vcp_modules::chat::voice_service::feed_chat_event(&feed_app, event)));
             let mut current = turn.channel.lock().map_err(|error| error.to_string())?;
             *current = Some(channel.clone());
-            let _ = channel.send(group_turn_event(&self.key, &turn, true));
+            let event = group_turn_event(&self.key, &turn, true);
+            if let Ok(feed) = turn.chat_feed.lock() { if let Some(feed) = feed.as_ref() { feed(&event); } }
+            let _ = channel.send(event);
         }
         Ok(())
     }
@@ -1035,9 +1087,11 @@ impl ActiveGroupTurnLease {
 impl Drop for ActiveGroupTurnLease {
     fn drop(&mut self) {
         if let Some((_, turn)) = self.turns.remove(&self.key) {
+            let event = group_turn_event(&self.key, &turn, false);
+            if let Ok(feed) = turn.chat_feed.lock() { if let Some(feed) = feed.as_ref() { feed(&event); } }
             if let Ok(channel) = turn.channel.lock() {
                 if let Some(channel) = channel.as_ref() {
-                    let _ = channel.send(group_turn_event(&self.key, &turn, false));
+                    let _ = channel.send(event);
                 }
             }
         }
@@ -1050,6 +1104,7 @@ fn group_turn_event(key: &TopicKey, turn: &ActiveGroupTurnEntry, active: bool) -
         context: Some(json!({
             "ownerType": key.owner_type, "ownerId": key.owner_id,
             "topicId": key.topic_id, "turnId": turn.turn_id,
+            "originUserMessageId": turn.origin_user_message_id.lock().ok().and_then(|id| id.clone()),
         })),
         chunk: Some(json!({ "active": active })),
         consumer_revision: next_consumer_revision(),
@@ -1072,6 +1127,15 @@ pub async fn interruptGroupTurn(
         topic_id
     );
     let key = TopicKey::new(owner_type, owner_id, topic_id);
+    let origin = state.0.get(&key).and_then(|turn| turn.origin_user_message_id.lock().ok()?.clone());
+    if let Some(origin) = origin {
+        let speech_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = crate::vcp_modules::chat::voice_service::stop_chat_reply_by_origin(&speech_app, &origin).await {
+                log::warn!("[VCPClient] Could not stop reply speech: {error}");
+            }
+        });
+    }
     let db = app.state::<DbState>();
     let pending = sqlx::query_scalar::<_, String>(
         "UPDATE active_generations SET stop_requested = 1
@@ -2356,6 +2420,58 @@ async fn handle_non_streaming_request(
     })
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChatAttemptKind {
+    Request,
+    Group,
+}
+
+fn cancel_exact_chat_attempt(
+    requests: &ActiveRequests,
+    turns: &ActiveGroupTurns,
+    topic: &TopicKey,
+    attempt_id: uuid::Uuid,
+    kind: ChatAttemptKind,
+) -> bool {
+    match kind {
+        ChatAttemptKind::Request => {
+            for entry in requests.0.iter() {
+                if &entry.key().topic == topic && entry.attempt_id == attempt_id {
+                    entry.cancellation_token.cancel();
+                    return true;
+                }
+            }
+            false
+        }
+        ChatAttemptKind::Group => {
+            let Some(entry) = turns.0.get(topic) else { return false; };
+            if entry.turn_id != attempt_id { return false; }
+            entry.cancellation_token.cancel();
+            true
+        }
+    }
+}
+
+/// Voice interruption targets an accepted output owner, including preparation
+/// before the first assistant message. A stale attempt cannot stop its successor.
+/// The existing request owner remains responsible for durable finalization.
+#[tauri::command]
+pub async fn interrupt_chat_attempt(
+    requests: tauri::State<'_, ActiveRequests>,
+    turns: tauri::State<'_, ActiveGroupTurns>,
+    owner_id: String,
+    owner_type: String,
+    topic_id: String,
+    attempt_id: String,
+    kind: ChatAttemptKind,
+) -> Result<Value, String> {
+    let attempt_id = uuid::Uuid::parse_str(&attempt_id).map_err(|_| "Invalid chat attempt ID".to_string())?;
+    let topic = TopicKey::new(owner_type, owner_id, topic_id);
+    let matched = cancel_exact_chat_attempt(&requests, &turns, &topic, attempt_id, kind);
+    Ok(json!({ "matched": matched }))
+}
+
 /// 中止请求 Command: interruptRequest
 /// 通过完整消息身份立即取消对应 outer request 的共享取消域
 #[tauri::command]
@@ -2372,6 +2488,15 @@ pub async fn interruptRequest(
         TopicKey::new(owner_type, owner_id, topic_id),
         message_id.clone(),
     );
+    let origin = state.0.get(&key).and_then(|entry| entry.output.state.lock().ok()?.origin_user_message_id.clone());
+    if let Some(origin) = origin {
+        let speech_app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = crate::vcp_modules::chat::voice_service::stop_chat_reply_by_origin(&speech_app, &origin).await {
+                log::warn!("[VCPClient] Could not stop reply speech: {error}");
+            }
+        });
+    }
     log::info!(
         "[VCPClient] interruptRequest called for messageId: {}. Active requests: {}",
         message_id,
@@ -3533,6 +3658,58 @@ mod offline_completed_tests {
         assert!(events.try_recv().is_err(), "preparation must not create a chat bubble");
     }
 
+    #[test]
+    fn only_a_matching_live_tts_listener_keeps_aurora_delivery_without_a_webview() {
+        let output = RequestOutput::default();
+        let events = Arc::new(std::sync::Mutex::new(Vec::<serde_json::Value>::new()));
+        {
+            let captured = events.clone();
+            let mut state = output.state.lock().unwrap();
+            state.origin_user_message_id = Some("voice-user".into());
+            state.chat_feed = Some(Arc::new(move |event| captured.lock().unwrap().push(serde_json::to_value(event).unwrap())));
+            state.has_chat_listener = Some(Arc::new(|origin| origin == "voice-user"));
+        }
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk("后台朗读正文。");
+        buffer.process_queue();
+        output.send_aurora(&mut buffer, "reply", &None, None, false);
+        assert_eq!(events.lock().unwrap().len(), 1);
+        assert_eq!(events.lock().unwrap()[0]["context"]["originUserMessageId"], "voice-user");
+        output.state.lock().unwrap().has_chat_listener = Some(Arc::new(|_| false));
+        buffer.append_chunk("没有朗读消费者时不构建交付。");
+        buffer.process_queue();
+        output.send_aurora(&mut buffer, "reply", &None, None, false);
+        assert_eq!(events.lock().unwrap().len(), 1);
+        assert!(output.state.lock().unwrap().snapshot_pending);
+    }
+
+    #[tokio::test]
+    async fn voice_origin_follows_the_real_output_owner_not_the_fallback_channel() {
+        let app = tauri::test::mock_app();
+        app.manage(ActiveRequests::default());
+        app.manage(ActiveGroupTurns::default());
+        let (connected, mut events) = channel();
+        *app.state::<ActiveRequests>().1.lock().unwrap() = Some(ChatOutputConnection {
+            id: "connected".into(), channel: connected,
+        });
+        let (fallback, mut unused) = channel();
+        let key = MessageKey::new(TopicKey::new("agent", "owner", "topic"), "reply");
+        let (lease, _) = ActiveRequestLease::try_acquire(app.state::<ActiveRequests>().0.clone(), key.clone()).unwrap();
+        lease.set_origin_user_message("voice-user").unwrap();
+        lease.bind_output(app.handle(), fallback.clone()).unwrap();
+        let activity = events.recv().await.unwrap();
+        assert_eq!(activity["context"]["originUserMessageId"], "voice-user");
+        deliver_request_event(app.handle(), &key, Some(fallback), StreamEvent::thinking(
+            key.msg_id.clone(), Some(json!({ "ownerId": "owner", "ownerType": "agent", "topicId": "topic", "agentName": "Agent" })),
+        ));
+        let thinking = events.recv().await.unwrap();
+        assert_eq!(thinking["context"]["originUserMessageId"], "voice-user");
+        assert_eq!(thinking["context"]["agentName"], "Agent");
+        assert!(unused.try_recv().is_err());
+        drop(lease);
+        assert_eq!(events.recv().await.unwrap()["context"]["originUserMessageId"], "voice-user");
+    }
+
     #[tokio::test]
     async fn stale_webview_with_the_same_label_cannot_replace_the_current_connection() {
         let previous_app = tauri::test::mock_app();
@@ -4396,6 +4573,42 @@ mod active_request_tests {
 
         drop(lease);
         assert!(!requests.0.contains_key(&key));
+    }
+
+    #[test]
+    fn voice_attempt_cancel_is_scoped_and_does_not_stop_another_request() {
+        let requests = ActiveRequests::default();
+        let turns = ActiveGroupTurns::default();
+        let key = message_key("voice-message");
+        let other = message_key("typed-message");
+        let (voice, voice_token) = ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).unwrap();
+        let (_typed, typed_token) = ActiveRequestLease::try_acquire(requests.0.clone(), other).unwrap();
+        let id = voice.entry.attempt_id;
+        let different_topic = TopicKey::new("agent", "other-owner", &key.topic.topic_id);
+        assert!(!cancel_exact_chat_attempt(&requests, &turns, &different_topic, id, ChatAttemptKind::Request));
+        assert!(!voice_token.is_cancelled());
+        assert!(cancel_exact_chat_attempt(&requests, &turns, &key.topic, id, ChatAttemptKind::Request));
+        assert!(voice_token.is_cancelled());
+        assert!(!typed_token.is_cancelled());
+        drop(voice);
+        let (_successor, successor_token) = ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).unwrap();
+        assert!(!cancel_exact_chat_attempt(&requests, &turns, &key.topic, id, ChatAttemptKind::Request));
+        assert!(!successor_token.is_cancelled());
+    }
+
+    #[test]
+    fn voice_group_cancel_does_not_stop_a_later_turn_in_the_same_topic() {
+        let requests = ActiveRequests::default();
+        let turns = ActiveGroupTurns::default();
+        let topic = TopicKey::new("group", "voice-group", "topic-a");
+        let old = turns.try_acquire(topic.clone()).unwrap();
+        let id = turns.0.get(&topic).unwrap().turn_id;
+        assert!(cancel_exact_chat_attempt(&requests, &turns, &topic, id, ChatAttemptKind::Group));
+        assert!(old.is_cancelled());
+        drop(old);
+        let next = turns.try_acquire(topic.clone()).unwrap();
+        assert!(!cancel_exact_chat_attempt(&requests, &turns, &topic, id, ChatAttemptKind::Group));
+        assert!(!next.is_cancelled());
     }
 
     #[test]

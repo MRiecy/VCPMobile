@@ -14,6 +14,7 @@ import SettingsActionWithStatus from '../../../components/settings/SettingsActio
 import SettingsTextField from '../../../components/settings/SettingsTextField.vue';
 import VcpConfirm from '../../../components/ui/VcpConfirm.vue';
 import { invokeMock, mockInvoke } from '../../mocks/tauri';
+import { DEFAULT_VOICE_SETTINGS } from '../../../features/chat/voice/settings';
 
 const harness = vi.hoisted(() => ({
   modals: new Set<string>(),
@@ -34,6 +35,7 @@ vi.mock('../../../core/composables/useModalHistory', () => ({
 
 function makeSettings(overrides: Partial<AppSettings> = {}): AppSettings {
   return {
+    ...DEFAULT_VOICE_SETTINGS,
     userName: '用户', adminUsername: 'admin', adminPassword: 'password',
     vcpServerUrl: 'https://draft.example', chatEndpointMode: 'standard', vcpApiKey: 'draft-key',
     vcpLogUrl: '', vcpLogKey: '', syncServerUrl: '', syncHttpUrl: '', syncToken: '', fileKey: '',

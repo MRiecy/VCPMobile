@@ -22,13 +22,14 @@ internal class VoiceAudioRouting(
     context: Context,
     private val changed: (String) -> Unit,
     private val interrupted: (String) -> Unit,
+    private val communication: Boolean = true,
 ) : AutoCloseable {
     private val context = context.applicationContext
     private val manager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val main = Handler(Looper.getMainLooper())
     private val closed = AtomicBoolean(false)
     private val ready = CountDownLatch(1)
-    private var communication: CommunicationRoute? = null
+    private var communicationRoute: CommunicationRoute? = null
     private var deviceRegistered = false
     private var recordingRegistered = false
     private var scoRegistered = false
@@ -37,8 +38,8 @@ internal class VoiceAudioRouting(
     private var focusGranted = false
     private var lastRouteIdentity: String? = null
     @Volatile private var captureSession = -1
-    private val focus = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
-        .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+    private val focus = AudioFocusRequest.Builder(if (communication) AudioManager.AUDIOFOCUS_GAIN_TRANSIENT else AudioManager.AUDIOFOCUS_GAIN)
+        .setAudioAttributes(AudioAttributes.Builder().setUsage(if (communication) AudioAttributes.USAGE_VOICE_COMMUNICATION else AudioAttributes.USAGE_MEDIA)
             .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
         .setOnAudioFocusChangeListener({ value ->
             if (!closed.get() && value != AudioManager.AUDIOFOCUS_GAIN) interrupted("audio_focus_lost")
@@ -72,6 +73,11 @@ internal class VoiceAudioRouting(
         check(Looper.myLooper() == Looper.getMainLooper())
         check(manager.requestAudioFocus(focus) == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) { "audio_focus_unavailable" }
         focusGranted = true
+        if (!communication) {
+            reportRoute("media", "media")
+            ready.countDown()
+            return
+        }
         manager.mode = AudioManager.MODE_IN_COMMUNICATION
         modeRequested = true
         manager.registerAudioDeviceCallback(devices, main)
@@ -79,8 +85,8 @@ internal class VoiceAudioRouting(
         manager.registerAudioRecordingCallback(recording, main)
         recordingRegistered = true
         if (Build.VERSION.SDK_INT >= 31) {
-            communication = Api31CommunicationRoute(context, manager, ::reportRoute, ready::countDown)
-            communication?.open()
+            communicationRoute = Api31CommunicationRoute(context, manager, ::reportRoute, ready::countDown)
+            communicationRoute?.open()
         } else {
             @Suppress("DEPRECATION")
             val hasSco = manager.getDevices(AudioManager.GET_DEVICES_ALL).any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
@@ -128,8 +134,8 @@ internal class VoiceAudioRouting(
 
     private fun reconcileDevices() {
         if (closed.get()) return
-        if (communication != null) {
-            communication?.reconcile()
+        if (communicationRoute != null) {
+            communicationRoute?.reconcile()
         } else {
             // Old SCO can change the supported recording format. A new user
             // activation starts a new recorder rather than retaining old PCM.
@@ -153,7 +159,7 @@ internal class VoiceAudioRouting(
         ready.countDown()
         if (deviceRegistered) runCatching { manager.unregisterAudioDeviceCallback(devices) }
         if (recordingRegistered) runCatching { manager.unregisterAudioRecordingCallback(recording) }
-        runCatching { communication?.close() }
+        runCatching { communicationRoute?.close() }
         if (Build.VERSION.SDK_INT < 31) {
             if (scoRequested) runCatching { @Suppress("DEPRECATION") manager.stopBluetoothSco() }
             if (scoRegistered) runCatching { context.unregisterReceiver(scoReceiver) }

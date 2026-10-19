@@ -25,6 +25,8 @@
     "vcp-mobile:allow-save-to-downloads",
     "vcp-mobile:allow-write-temp-file",
     "vcp-mobile:allow-delete-temp-file",
+    "vcp-mobile:allow-begin-voice-call",
+    "vcp-mobile:allow-end-voice-call",
     "vcp-mobile:allow-start-voice-audio",
     "vcp-mobile:allow-stop-voice-audio",
     "vcp-mobile:allow-set-voice-probe"

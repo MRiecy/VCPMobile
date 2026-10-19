@@ -11,6 +11,7 @@ fn frame(index: u64, probability: f32, playback: bool) -> VoiceFrame {
         aec_state: AecState::Enabled,
         route: "speaker".into(),
         playback_active: playback,
+        playback_id: None,
         probe_revision: 0,
     }
 }
@@ -19,7 +20,25 @@ fn notice(id: &str, epoch: u32) -> VoiceNotice {
     VoiceNotice {
         session_id: id.into(),
         audio_epoch: epoch,
+        sample_index: None,
         reason: "background".into(),
+    }
+}
+
+#[test]
+fn tts_barge_in_is_not_mistaken_for_a_probe_control() {
+    let mut sessions = Sessions::default();
+    sessions.begin("call-a".into()).unwrap();
+    for step in 1..=6 {
+        let mut input = frame(step * 512, 0.9, true);
+        input.playback_id = Some("tts-turn-a".into());
+        let (event, stop_probe) = sessions.consume_frame(input).unwrap();
+        assert!(stop_probe.is_none());
+        if step == 6 {
+            let VoiceAudioEvent::Frame(frame) = event else { panic!("expected voice frame") };
+            assert_eq!(frame.speech_transition, Some(SpeechTransition::Start));
+            assert_eq!(frame.frame.playback_id.as_deref(), Some("tts-turn-a"));
+        }
     }
 }
 

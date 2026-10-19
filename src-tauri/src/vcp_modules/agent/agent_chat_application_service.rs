@@ -44,6 +44,7 @@ impl PreparedAgentRequest {
         );
         let (lease, cancellation_token) =
             ActiveRequestLease::try_acquire(requests.0.clone(), key.clone())?;
+        lease.set_origin_user_message(&payload.user_message.id)?;
         lease.bind_output(app, channel)?;
         Ok(Self { key, lease, cancellation_token })
     }

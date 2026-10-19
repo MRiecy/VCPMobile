@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { flushPromises } from '@vue/test-utils';
-import { createMicrophoneMonitor, type VoiceAudioFrame } from '../../../features/chat/voice/microphoneMonitor';
+import { createMicrophoneMonitor as createNativeMicrophoneMonitor, type VoiceAudioFrame } from '../../../features/chat/voice/microphoneMonitor';
 import { emitTauriEvent, invokeMock, listenMock, mockInvoke } from '../../mocks/tauri';
 
 function deferred<T>() {
@@ -9,6 +9,12 @@ function deferred<T>() {
   const promise = new Promise<T>((finish, fail) => { resolve = finish; reject = fail; });
   return { promise, resolve, reject };
 }
+
+const createMicrophoneMonitor = (...callbacks: [
+  Parameters<typeof createNativeMicrophoneMonitor>[0],
+  Parameters<typeof createNativeMicrophoneMonitor>[1],
+  Parameters<typeof createNativeMicrophoneMonitor>[2],
+]) => createNativeMicrophoneMonitor(...callbacks, { beforeStart: async () => 'call-1', onStop: vi.fn() });
 
 let monitor: ReturnType<typeof createMicrophoneMonitor> | undefined;
 const startCommand = 'plugin:vcp-mobile|start_voice_audio';
@@ -49,7 +55,7 @@ describe('native microphone client', () => {
     installed.resolve(unlisten);
     await expect(started).resolves.toBe(true);
     expect(currentSession()).toMatch(/^[0-9a-f-]{36}$/);
-    expect(invokeMock).toHaveBeenCalledExactlyOnceWith(startCommand, { sessionId: currentSession() });
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith(startCommand, { sessionId: currentSession(), callId: 'call-1' });
 
     monitor.stop();
     expect(unlisten).toHaveBeenCalledOnce();
@@ -287,5 +293,32 @@ describe('native microphone client', () => {
     expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(6000);
     expect(onEnded).toHaveBeenCalledOnce();
+  });
+
+  it('forwards the final native PCM position only after stop acknowledges sealing the input', async () => {
+    const stopped = deferred<{ audioEpoch: number; sampleIndex: number }>();
+    mockInvoke(stopCommand, () => stopped.promise);
+    const onStop = vi.fn();
+    monitor = createNativeMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn(), {
+      beforeStart: async () => 'call-1', onStop,
+    });
+    await monitor.start();
+    const id = currentSession();
+    monitor.stop();
+    expect(onStop).not.toHaveBeenCalled();
+    stopped.resolve({ audioEpoch: 3, sampleIndex: 731 });
+    await flushPromises();
+    expect(onStop).toHaveBeenCalledExactlyOnceWith(id, { audioEpoch: 3, sampleIndex: 731 });
+  });
+
+  it('passes a native background terminal position through to input draining', async () => {
+    const onStop = vi.fn();
+    monitor = createNativeMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn(), {
+      beforeStart: async () => 'call-1', onStop,
+    });
+    await monitor.start();
+    const id = currentSession();
+    emitTauriEvent(audioEvent, { kind: 'stopped', sessionId: id, audioEpoch: 2, sampleIndex: 999, reason: 'background' });
+    expect(onStop).toHaveBeenCalledExactlyOnceWith(id, { audioEpoch: 2, sampleIndex: 999 });
   });
 });

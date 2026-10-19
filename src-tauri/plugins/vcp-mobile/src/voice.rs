@@ -2,6 +2,9 @@
 //! native capture owner; this module receives bounded frame summaries only.
 
 mod vad;
+mod native_audio;
+
+pub use native_audio::{append_playback, export_segment, finish_playback, release_segments, start_playback, stop_playback, ExportedVoiceSegment};
 
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -34,6 +37,9 @@ pub struct VoiceFrame {
     pub aec_state: AecState,
     pub route: String,
     pub playback_active: bool,
+    /// TTS output identity; probes have no TTS playback identity.
+    #[serde(default)]
+    pub playback_id: Option<String>,
     /// Latest playback intent accepted by native when this frame was captured.
     pub probe_revision: u64,
 }
@@ -43,7 +49,16 @@ pub struct VoiceFrame {
 pub struct VoiceNotice {
     pub session_id: String,
     pub audio_epoch: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_index: Option<u64>,
     pub reason: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureStopReceipt {
+    pub audio_epoch: u32,
+    pub sample_index: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,10 +80,10 @@ pub enum SpeechTransition {
 #[serde(rename_all = "camelCase")]
 pub struct SpeechFrame {
     #[serde(flatten)]
-    frame: VoiceFrame,
-    speech_active: bool,
-    speech_transition: Option<SpeechTransition>,
-    discontinuity: bool,
+    pub frame: VoiceFrame,
+    pub speech_active: bool,
+    pub speech_transition: Option<SpeechTransition>,
+    pub discontinuity: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -183,6 +198,7 @@ impl Sessions {
         }
         let result = session.detector.process(frame)?;
         let stop_probe = if result.frame.playback_active
+            && result.frame.playback_id.is_none()
             && result.frame.probe_revision == session.probe_revision
             && result.speech_transition == Some(SpeechTransition::Start)
         {
@@ -238,6 +254,17 @@ async fn native_call<R: Runtime>(
     args: serde_json::Value,
     expected: Option<(String, u64, Option<u64>)>,
 ) -> Result<(), String> {
+    native_result_call::<R, serde_json::Value>(app, operation, args, expected)
+        .await
+        .map(|_| ())
+}
+
+async fn native_result_call<R: Runtime, T: serde::de::DeserializeOwned + Send + 'static>(
+    app: AppHandle<R>,
+    operation: &'static str,
+    args: serde_json::Value,
+    expected: Option<(String, u64, Option<u64>)>,
+) -> Result<T, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
         let handle = app
@@ -260,8 +287,7 @@ async fn native_call<R: Runtime>(
                 return Err("cancelled: voice audio session is no longer active".into());
             }
             handle
-                .run_mobile_plugin::<serde_json::Value>(operation, args)
-                .map(|_| ())
+                .run_mobile_plugin::<T>(operation, args)
                 .map_err(|error| format!("voice_audio: {operation}: {error}"))
         })
         .await
@@ -275,11 +301,25 @@ async fn native_call<R: Runtime>(
 }
 
 #[tauri::command]
+pub async fn begin_voice_call<R: Runtime>(app: AppHandle<R>, call_id: String) -> Result<(), String> {
+    validate_session(&call_id)?;
+    native_call(app, "beginVoiceCall", serde_json::json!({ "callId": call_id }), None).await
+}
+
+#[tauri::command]
+pub async fn end_voice_call<R: Runtime>(app: AppHandle<R>, call_id: String) -> Result<(), String> {
+    validate_session(&call_id)?;
+    native_call(app, "endVoiceCall", serde_json::json!({ "callId": call_id }), None).await
+}
+
+#[tauri::command]
 pub async fn start_voice_audio<R: Runtime>(
     app: AppHandle<R>,
     session_id: String,
+    call_id: String,
 ) -> Result<(), String> {
     validate_session(&session_id)?;
+    validate_session(&call_id)?;
     let generation = app
         .state::<VoiceAudioState>()
         .0
@@ -289,7 +329,7 @@ pub async fn start_voice_audio<R: Runtime>(
     let result = native_call(
         app.clone(),
         "startVoiceAudio",
-        serde_json::json!({ "sessionId": session_id }),
+        serde_json::json!({ "sessionId": session_id, "callId": call_id }),
         Some((session_id.clone(), generation, None)),
     )
     .await;
@@ -318,6 +358,7 @@ pub async fn start_voice_audio<R: Runtime>(
                 VoiceAudioEvent::Error(VoiceNotice {
                     session_id,
                     audio_epoch,
+                    sample_index: None,
                     reason: error.clone(),
                 }),
             );
@@ -330,7 +371,7 @@ pub async fn start_voice_audio<R: Runtime>(
 pub async fn stop_voice_audio<R: Runtime>(
     app: AppHandle<R>,
     session_id: String,
-) -> Result<(), String> {
+) -> Result<CaptureStopReceipt, String> {
     validate_session(&session_id)?;
     // Revoke acceptance before awaiting native cleanup, including during start.
     let epoch = app
@@ -339,24 +380,25 @@ pub async fn stop_voice_audio<R: Runtime>(
         .lock()
         .map_err(|error| error.to_string())?
         .cancel(&session_id, None);
-    native_call(
+    let receipt: CaptureStopReceipt = native_result_call(
         app.clone(),
         "stopVoiceAudio",
         serde_json::json!({ "sessionId": session_id }),
         None,
     )
     .await?;
-    if let Some(audio_epoch) = epoch {
+    if epoch.is_some() {
         let _ = app.emit(
             VOICE_AUDIO_EVENT,
             VoiceAudioEvent::Stopped(VoiceNotice {
                 session_id,
-                audio_epoch,
+                audio_epoch: receipt.audio_epoch,
+                sample_index: Some(receipt.sample_index),
                 reason: "requested".into(),
             }),
         );
     }
-    Ok(())
+    Ok(receipt)
 }
 
 #[tauri::command]
@@ -406,11 +448,11 @@ pub async fn set_voice_probe<R: Runtime>(
 
 /// Called by the existing process-wide native event subscription. No PCM enters
 /// this boundary, and no native invocation is made synchronously on its thread.
-pub fn handle_native_event<R: Runtime>(app: &AppHandle<R>, event: NativeVoiceAudioEvent) {
+pub fn handle_native_event<R: Runtime>(app: &AppHandle<R>, event: NativeVoiceAudioEvent) -> Option<VoiceAudioEvent> {
     let result = {
         let state = app.state::<VoiceAudioState>();
         let Ok(mut sessions) = state.0.lock() else {
-            return;
+            return None;
         };
         match event {
             NativeVoiceAudioEvent::Stopped(notice) => sessions
@@ -423,7 +465,7 @@ pub fn handle_native_event<R: Runtime>(app: &AppHandle<R>, event: NativeVoiceAud
         }
     };
     let Some((event, stop_probe)) = result else {
-        return;
+        return None;
     };
     if let (VoiceAudioEvent::Frame(frame), Some((generation, probe_revision))) =
         (&event, stop_probe)
@@ -446,7 +488,8 @@ pub fn handle_native_event<R: Runtime>(app: &AppHandle<R>, event: NativeVoiceAud
             }
         });
     }
-    let _ = app.emit(VOICE_AUDIO_EVENT, event);
+    let _ = app.emit(VOICE_AUDIO_EVENT, &event);
+    Some(event)
 }
 
 #[cfg(test)]

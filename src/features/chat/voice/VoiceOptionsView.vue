@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { ArrowLeft } from 'lucide-vue-next';
 import SlidePage from '../../../components/ui/SlidePage.vue';
 import VoicePresetsPage from './VoicePresetsPage.vue';
 import VoiceSettingsPage from './VoiceSettingsPage.vue';
+import { useModalHistory } from '../../../core/composables/useModalHistory';
+import type { SettingsPageHandle } from '../../settings/contracts';
 
 const props = defineProps<{
   mode: 'settings' | 'presets';
@@ -15,7 +17,46 @@ const props = defineProps<{
 const emit = defineEmits<{ close: [] }>();
 const title = computed(() => props.mode === 'settings' ? '语音设置' : '语音预设');
 const pageActive = computed(() => props.isOpen && props.active);
-const close = () => { if (pageActive.value) emit('close'); };
+const pageHandle = ref<SettingsPageHandle | null>(null);
+const visit = ref(0);
+const navigationError = ref('');
+const { registerModal } = useModalHistory();
+let mounted = true;
+let closing: Promise<void> | null = null;
+
+// ModalHistory callbacks are synchronous. Retain its existing page entry while
+// the settings session commits; emit close only after a confirmed save.
+const close = (): boolean => {
+  if (!mounted) return true;
+  if (!pageActive.value || closing) return false;
+  if (props.mode === 'presets') {
+    emit('close');
+    return true;
+  }
+  const serial = visit.value;
+  navigationError.value = '';
+  const operation = nextTick().then(() => mounted && pageActive.value && visit.value === serial
+    ? pageHandle.value?.beforeLeave?.() ?? true : false)
+    .then(allowed => { if (allowed && mounted && pageActive.value && visit.value === serial) emit('close'); })
+    .catch(() => { if (mounted && pageActive.value && visit.value === serial) navigationError.value = '设置保存失败，请重试。'; })
+    .finally(() => { if (closing === operation) closing = null; });
+  closing = operation;
+  return false;
+};
+
+watch(pageActive, active => {
+  closing = null;
+  if (active) {
+    visit.value += 1;
+    navigationError.value = '';
+    if (props.mode === 'settings') {
+      // OverlayStore already owns this ID. registerModal only updates canDismiss
+      // on an existing entry, without adding another history level.
+      registerModal('Page:voiceSettings:', close, undefined, close);
+    }
+  }
+}, { immediate: true, flush: 'sync' });
+onBeforeUnmount(() => { mounted = false; });
 </script>
 
 <template>
@@ -30,7 +71,8 @@ const close = () => { if (pageActive.value) emit('close'); };
         <h2 class="m-0 text-base font-semibold">{{ title }}</h2>
       </header>
       <div class="flex-1 min-h-0 overflow-y-auto no-rubber-band px-4 pt-6 pb-[calc(var(--vcp-safe-bottom,0px)+24px)]">
-        <VoiceSettingsPage v-if="mode === 'settings'" :active="pageActive" />
+        <p v-if="navigationError" class="text-sm text-red-500" role="alert">{{ navigationError }}</p>
+        <VoiceSettingsPage v-if="mode === 'settings'" :key="visit" ref="pageHandle" :active="pageActive" />
         <VoicePresetsPage v-else :active="pageActive" />
       </div>
     </div>

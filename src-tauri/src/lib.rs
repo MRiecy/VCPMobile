@@ -32,6 +32,8 @@ pub fn run() {
             app.manage(ActiveRequests::default());
             app.manage(ActiveGroupTurns::default());
             app.manage(ContextSanitizer::default());
+            app.manage(vcp_modules::chat::voice_service::VoiceServiceState::default());
+            app.manage(vcp_modules::chat::voice_service::TtsServiceState::default());
             app.manage(distributed::DistributedState::new());
 
             // 提前注册纯内存状态，防范前端在 bootstrap 完成前调用 command 导致 state() panic

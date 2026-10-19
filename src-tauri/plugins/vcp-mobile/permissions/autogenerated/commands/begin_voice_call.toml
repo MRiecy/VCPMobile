@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-begin-voice-call"
+description = "Enables the begin_voice_call command without any pre-configured scope."
+commands.allow = ["begin_voice_call"]
+
+[[permission]]
+identifier = "deny-begin-voice-call"
+description = "Denies the begin_voice_call command without any pre-configured scope."
+commands.deny = ["begin_voice_call"]

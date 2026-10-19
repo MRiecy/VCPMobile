@@ -47,6 +47,15 @@ interface EditingMessageIntent {
   initialContent: string;
 }
 
+export interface VoiceMessageScope {
+  messageId: string;
+  isCurrent: () => boolean;
+}
+
+interface VoiceGenerationScope extends VoiceMessageScope {
+  onPersisted: (result: MessageWriteResultDto) => void;
+}
+
 export const MAX_HISTORY_MESSAGES = 500;
 
 const compareMessages = (a: ChatMessage, b: ChatMessage) => {
@@ -512,9 +521,9 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   /**
    * 同一次邀约由 Rust 的同一个群轮 owner 顺序执行，停止会覆盖剩余成员。
    */
-  const inviteGroupMembers = async (agentIds: string[], frozenKey?: ConversationKey) => {
+  const inviteGroupMembers = async (agentIds: string[], frozenKey?: ConversationKey, voice?: VoiceMessageScope) => {
     const key = frozenKey || captureLoadedConversation();
-    if (!key || key.ownerType !== "group" || agentIds.length === 0) return;
+    if (!key || key.ownerType !== "group" || agentIds.length === 0 || (voice && !voice.isCurrent())) return;
     const releaseOperation = streamStore.beginConversationOperation(key.ownerId, key.ownerType, key.topicId);
     try {
       const settings = settingsStore.settings;
@@ -526,10 +535,12 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
           groupId: key.ownerId,
           topicId: key.topicId,
           agentIds,
+          ...(voice ? { originUserMessageId: voice.messageId } : {}),
         },
         streamChannel,
       });
     } catch (e) {
+      if (voice) throw e;
       console.error("[ChatHistoryStore] Invite failed:", e);
       notificationStore.addNotification({
         type: "error",
@@ -553,9 +564,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     userMsg: ChatMessage,
     frozenKey?: ConversationKey,
     shareIdentity?: ShareIdentity,
+    voice?: VoiceGenerationScope,
   ): Promise<number | null> => {
     const key = frozenKey || captureLoadedConversation();
-    if (!key) return null;
+    if (!key || (voice && !voice.isCurrent())) return null;
     const releaseOperation = streamStore.beginConversationOperation(key.ownerId, key.ownerType, key.topicId);
     let topicUpdatedAt: number;
     let alreadySent = false;
@@ -583,6 +595,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         };
       }
       topicUpdatedAt = persisted.topicUpdatedAt;
+      voice?.onPersisted(persisted);
       topicStore.setTopicUpdatedAt(
         key.ownerId,
         key.ownerType,
@@ -590,6 +603,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         topicUpdatedAt,
       );
     } catch (e) {
+      if (voice) {
+        releaseOperation();
+        throw e;
+      }
       console.error("[ChatHistoryStore] Message persistence failed:", e);
       notificationStore.addNotification({
         type: "error",
@@ -602,7 +619,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       return null;
     }
 
-    if (alreadySent) {
+    if (alreadySent || (voice && !voice.isCurrent())) {
       releaseOperation();
       return topicUpdatedAt;
     }
@@ -638,7 +655,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
                 )
               : [];
             if (mentionedIds.length > 0) {
-              await inviteGroupMembers(mentionedIds, key);
+              await inviteGroupMembers(mentionedIds, key, voice);
             } else {
               notificationStore.addNotification({
                 type: "info",
@@ -672,6 +689,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         });
       }
     } catch (e) {
+      if (voice) throw e;
       console.error("[ChatHistoryStore] Generation failed:", e);
       notificationStore.addNotification({
         type: "error",
@@ -799,6 +817,35 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       }
       topicStore.decrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId);
     }
+  };
+
+  /** Voice submission owns only its recognized text, never composer state. */
+  const sendVoiceMessage = async (content: string, key: ConversationKey, scope: VoiceMessageScope) => {
+    const current = () => scope.isCurrent() && canCommitConversation(key);
+    if (!content.trim() || !current()) return;
+    if (hasEvictedNewer.value) {
+      const latest = await returnToLatest();
+      if (latest.error || latest.aborted || hasEvictedNewer.value || !current()) return;
+    }
+    const now = Date.now();
+    const name = settingsStore.settings?.userName || 'User';
+    const userMsg: ChatMessage = {
+      id: scope.messageId, role: 'user', name, content: content.trim(), timestamp: now,
+      shell: streamStore.computeShell({ role: 'user', name }),
+      blocks: [{ type: 'markdown', content: content.trim() }],
+    };
+    // Staged attachments, share delivery and edit-resend intent are deliberately
+    // absent from this path. The frozen key still guards every visible commit.
+    await triggerGeneration(userMsg, key, undefined, {
+      ...scope, isCurrent: current,
+      onPersisted: result => {
+        topicStore.incrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId);
+        if (current()) {
+          currentChatHistory.value = mergeHistoryWindow(currentChatHistory.value, [{ ...userMsg, blocks: result.blocks }], false);
+          if (chatPreferences.messageHapticsEnabled) triggerMessageHaptic('send');
+        }
+      },
+    });
   };
 
   /**
@@ -1078,6 +1125,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     returnToLatest,
     resetHistoryForConversation,
     sendMessage,
+    sendVoiceMessage,
     deleteMessage,
     deleteAttachment,
     triggerGeneration,

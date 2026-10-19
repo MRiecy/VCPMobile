@@ -23,6 +23,9 @@ const context = vi.hoisted(() => ({
 
 vi.mock('../../../core/stores/chatSessionStore', () => ({ useChatSessionStore: () => context.session }));
 vi.mock('../../../core/stores/appLifecycle', () => ({ useAppLifecycleStore: () => context.lifecycle }));
+vi.mock('../../../features/chat/voice/voiceConversation', () => ({
+  createVoiceConversation: () => ({ begin: vi.fn(), start: vi.fn().mockResolvedValue('call'), closeInput: vi.fn(), stop: vi.fn() }),
+}));
 vi.mock('../../../features/chat/voice/microphoneMonitor', () => ({
   createMicrophoneMonitor: (onLevel: (level: number, bands: readonly number[]) => void,
     onEnded: (event: VoiceAudioEnd) => void, onFrame: (frame: VoiceAudioFrame) => void) => {

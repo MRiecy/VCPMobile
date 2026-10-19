@@ -62,6 +62,7 @@ src-tauri/src/
 ### 3.2 领域 owner
 
 - `vcp_modules/<domain>/` 持有对应业务状态、输入校验、生命周期和副作用。
+- `chat/voice_service/` 分开持有输入/ASR 与独立 TTS job，按 callId 合并未发送的转写；关麦封口排空，挂断取消未发送内容。录音文件和 PCM 播放走插件内部接口，不经 Vue。最终文本仍由现有聊天 owner 发送；真实 RequestOutput/群轮输出以 `originUserMessageId` 供 Rust 唯一朗读消费者，WebView 暂停不主动终止它。`interrupt_chat_attempt` 精准撤销请求/群轮，手动模型中断同步停其朗读；普通 ASR/TTS 取消、失败不使用模型共享父 token。
 - `persistence/` 持有数据库写入与读取边界，调用领域不复制第二套持久化状态。
 - `infra/` 提供被多个领域共享的生命周期和基础能力，不反向拥有各业务领域结果。
 - `infra/file_manager/operations.rs` 裁定文件取消与 CAS 提交，`resources.rs` 管理用途派生、文本预览和临时导出；`infra/share_inbox.rs` 持有当前分享记录与跨进程槽位，发送经现有消息仓储同事务落盘。启动附件回收同时读取当前分享持有的 hash。
