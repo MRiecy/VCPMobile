@@ -83,6 +83,7 @@ VCPMobile/
 │   │       └── tools/          # 设备能力工具
 │   ├── Cargo.toml              # Rust 依赖与构建配置
 │   ├── tauri.conf.json         # Tauri 配置
+│   ├── crates/voice-mp3/       # 双端共享的裁剪 LAME 编码核心（Rust/C）
 │   └── plugins/
 │       └── vcp-mobile/         # Android 原生实现与分期接入的 iOS Swift 插件
 │           └── AGENTS.md       # 插件局部代码地图与修改闭环

@@ -1,10 +1,12 @@
 export type VoiceLanguage = 'auto' | 'zh' | 'en';
+export type VoiceInputEncoding = 'wav' | 'mp3_64';
 export type VoiceTtsVoice = 'mimo_default' | '冰糖' | '茉莉' | '苏打' | '白桦' | 'Mia' | 'Chloe' | 'Milo' | 'Dean';
 
 /** These fields belong to the committed AppSettings snapshot in SQLite. */
 export interface VoiceServiceSettings {
   voiceApiBaseUrl: string;
   voiceApiKey: string;
+  voiceInputEncoding: VoiceInputEncoding;
   voiceAsrStream: boolean;
   voiceTtsStream: boolean;
   voiceLanguage: VoiceLanguage;
@@ -14,6 +16,7 @@ export interface VoiceServiceSettings {
 export const DEFAULT_VOICE_SETTINGS: Readonly<VoiceServiceSettings> = {
   voiceApiBaseUrl: 'https://api.xiaomimimo.com/v1',
   voiceApiKey: '',
+  voiceInputEncoding: 'wav',
   voiceAsrStream: true,
   voiceTtsStream: true,
   voiceLanguage: 'auto',

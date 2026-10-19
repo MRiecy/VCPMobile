@@ -62,15 +62,24 @@ function makeSettings(): AppSettings {
 
 
 describe('配置恢复的真实领域状态与失败边界', () => {
-  it('导出语音连接及两个独立流式选项，恢复继续走SQLite设置owner', async () => {
-    const settings = { ...makeSettings(), voiceApiKey: 'voice-key', voiceAsrStream: false, voiceTtsStream: true, voiceTtsVoice: '冰糖' as const };
+  it('导出语音连接、输入编码及独立流式选项，恢复继续走SQLite设置owner', async () => {
+    const settings = { ...makeSettings(), voiceApiKey: 'voice-key', voiceInputEncoding: 'mp3_64' as const, voiceAsrStream: false, voiceTtsStream: true, voiceTtsVoice: '冰糖' as const };
     const payload = buildBackupPayload(settings, captureBackupPreferences());
-    expect(payload.settings).toMatchObject({ voiceApiKey: 'voice-key', voiceAsrStream: false, voiceTtsStream: true, voiceTtsVoice: '冰糖' });
-    const patch = { voiceApiKey: 'restored-key', voiceLanguage: 'en' as const };
+    expect(payload.settings).toMatchObject({ voiceApiKey: 'voice-key', voiceInputEncoding: 'mp3_64', voiceAsrStream: false, voiceTtsStream: true, voiceTtsVoice: '冰糖' });
+    const patch = { voiceApiKey: 'restored-key', voiceInputEncoding: 'wav' as const, voiceLanguage: 'en' as const };
     const applySettings = vi.fn(async () => {});
     const result = await applyConfigBackup({ settings: patch, exportedAt: '' }, applySettings);
     expect(applySettings).toHaveBeenCalledExactlyOnceWith(patch);
     expect(result.applied).toEqual(['语音服务']);
+  });
+
+  it('仅含输入编码的备份仍识别为语音服务并交给设置owner恢复', async () => {
+    const backup = { settings: { voiceInputEncoding: 'mp3_64' as const }, exportedAt: '' };
+    const applySettings = vi.fn(async () => {});
+    expect(configBackupScopes(backup)).toEqual(['语音服务']);
+    const result = await applyConfigBackup(backup, applySettings);
+    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ voiceInputEncoding: 'mp3_64' });
+    expect(result).toEqual({ applied: ['语音服务'], skipped: [], failed: [] });
   });
 
   it('捕获已应用的主题与聊天偏好，不使用 SQLite 中未消费的主题字段', async () => {

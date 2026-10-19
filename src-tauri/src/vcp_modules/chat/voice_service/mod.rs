@@ -30,7 +30,7 @@ pub use tts::{
     submit_tts_text, TtsServiceState,
 };
 
-use crate::vcp_modules::settings_manager::Settings;
+use crate::vcp_modules::settings_manager::{Settings, VoiceInputEncoding};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -39,9 +39,17 @@ pub struct VoiceServiceConfig {
     pub base_url: String,
     pub api_key: String,
     pub asr_stream: bool,
+    #[serde(default)]
+    pub input_encoding: VoiceInputEncoding,
     pub tts_stream: bool,
     pub language: String,
     pub voice: String,
+}
+
+/// The payload carries its actual format independently of later settings edits.
+pub(super) struct InputAudio {
+    pub bytes: Vec<u8>,
+    pub encoding: VoiceInputEncoding,
 }
 
 impl VoiceServiceConfig {
@@ -50,6 +58,7 @@ impl VoiceServiceConfig {
             base_url: settings.voice_api_base_url,
             api_key: settings.voice_api_key.trim().to_string(),
             asr_stream: settings.voice_asr_stream,
+            input_encoding: settings.voice_input_encoding,
             tts_stream: settings.voice_tts_stream,
             language: settings.voice_language,
             voice: settings.voice_tts_voice,

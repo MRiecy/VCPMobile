@@ -139,6 +139,7 @@ fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
     for (key, allowed) in [
         ("voiceLanguage", VOICE_LANGUAGES),
         ("voiceTtsVoice", VOICE_TTS_VOICES),
+        ("voiceInputEncoding", &["wav", "mp3_64"][..]),
     ] {
         if let Some(value) = source.get(key).filter(|value| !value.is_null()) {
             if !value.as_str().is_some_and(|value| allowed.contains(&value)) {
@@ -202,7 +203,15 @@ fn default_sync_log_level() -> String {
 
 const VOICE_LANGUAGES: &[&str] = &["auto", "zh", "en"];
 const VOICE_TTS_VOICES: &[&str] = &[
-    "mimo_default", "冰糖", "茉莉", "苏打", "白桦", "Mia", "Chloe", "Milo", "Dean",
+    "mimo_default",
+    "冰糖",
+    "茉莉",
+    "苏打",
+    "白桦",
+    "Mia",
+    "Chloe",
+    "Milo",
+    "Dean",
 ];
 fn default_voice_api_base_url() -> String {
     "https://api.xiaomimimo.com/v1".into()
@@ -224,6 +233,15 @@ pub enum ChatEndpointMode {
     Standard,
     VcpTools,
     Raw,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VoiceInputEncoding {
+    #[default]
+    #[serde(rename = "wav")]
+    Wav,
+    #[serde(rename = "mp3_64")]
+    Mp3,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -283,6 +301,8 @@ pub struct Settings {
     pub voice_api_key: String,
     #[serde(default = "default_voice_stream")]
     pub voice_asr_stream: bool,
+    #[serde(default)]
+    pub voice_input_encoding: VoiceInputEncoding,
     #[serde(default = "default_voice_stream")]
     pub voice_tts_stream: bool,
     #[serde(default = "default_voice_language")]
@@ -408,6 +428,7 @@ pub fn create_default_settings() -> Settings {
         voice_api_base_url: default_voice_api_base_url(),
         voice_api_key: String::new(),
         voice_asr_stream: true,
+        voice_input_encoding: VoiceInputEncoding::Wav,
         voice_tts_stream: true,
         voice_language: default_voice_language(),
         voice_tts_voice: default_voice_tts_voice(),
@@ -605,8 +626,8 @@ pub async fn update_settings<R: Runtime>(
         }
     }
 
-    let new_settings: Settings = serde_json::from_value(current_val)
-        .map_err(|_| "设置字段类型不正确".to_string())?;
+    let new_settings: Settings =
+        serde_json::from_value(current_val).map_err(|_| "设置字段类型不正确".to_string())?;
     if !VOICE_LANGUAGES.contains(&new_settings.voice_language.as_str()) {
         return Err("语音识别语言不受支持".into());
     }
@@ -720,11 +741,13 @@ mod tests {
     fn legacy_settings_receive_voice_defaults_without_losing_connections() {
         let (settings, _) = deserialize_persisted_settings(
             r#"{"userName":"legacy","chatEndpointMode":"standard","vcpApiKey":"old-chat-key"}"#,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(settings.vcp_api_key, "old-chat-key");
         assert_eq!(settings.voice_api_base_url, "https://api.xiaomimimo.com/v1");
         assert!(settings.voice_api_key.is_empty());
         assert!(settings.voice_asr_stream && settings.voice_tts_stream);
+        assert_eq!(settings.voice_input_encoding, VoiceInputEncoding::Wav);
         assert_eq!(settings.voice_language, "auto");
         assert_eq!(settings.voice_tts_voice, "mimo_default");
         assert!(Settings::default().voice_asr_stream);
@@ -735,34 +758,62 @@ mod tests {
         let mut settings = create_default_settings();
         settings.voice_api_key = "test-voice-key".into();
         settings.voice_asr_stream = false;
+        settings.voice_input_encoding = VoiceInputEncoding::Mp3;
         settings.voice_tts_stream = true;
         settings.voice_tts_voice = "白桦".into();
         let serialized = serde_json::to_string(&settings).unwrap();
         let (restored, _) = deserialize_persisted_settings(&serialized).unwrap();
         assert_eq!(restored.voice_api_key, "test-voice-key");
         assert!(!restored.voice_asr_stream && restored.voice_tts_stream);
+        assert_eq!(restored.voice_input_encoding, VoiceInputEncoding::Mp3);
+        assert!(restored.extra.get("voiceInputEncoding").is_none());
         assert_eq!(restored.voice_tts_voice, "白桦");
         assert!(restored.extra.get("voiceApiKey").is_none());
     }
 
     #[test]
     fn voice_backup_imports_present_fields_only_and_rejects_values_without_echoing_them() {
-        let backup = |settings: serde_json::Value| serde_json::to_vec(&serde_json::json!({
+        let backup = |settings: serde_json::Value| {
+            serde_json::to_vec(&serde_json::json!({
             "app": "vcp-mobile", "kind": "vcp-mobile-settings-backup", "version": 2, "settings": settings,
-        })).unwrap();
+        })).unwrap()
+        };
         let imported = parse_backup_bytes(&backup(serde_json::json!({
             "voiceApiBaseUrl": "https://api.xiaomimimo.com/v1", "voiceApiKey": "sample-key",
             "voiceAsrStream": false, "voiceTtsStream": true, "voiceLanguage": "zh", "voiceTtsVoice": "冰糖",
+            "voiceInputEncoding": "mp3_64",
         }))).unwrap();
-        assert_eq!(imported.settings.len(), 6);
+        assert_eq!(imported.settings.len(), 7);
+        assert_eq!(imported.settings["voiceInputEncoding"], "mp3_64");
         assert_eq!(imported.settings["voiceAsrStream"], false);
         assert_eq!(imported.settings["voiceTtsVoice"], "冰糖");
         let old = parse_backup_bytes(&backup(serde_json::json!({"vcpApiKey": "old-key"}))).unwrap();
         assert!(!old.settings.contains_key("voiceApiKey"));
-        for key in ["voiceLanguage", "voiceTtsVoice", "voiceAsrStream", "voiceTtsStream"] {
-            let error = parse_backup_bytes(&backup(serde_json::json!({(key): "private-token"}))).unwrap_err();
+        assert!(!old.settings.contains_key("voiceInputEncoding"));
+        for key in [
+            "voiceLanguage",
+            "voiceTtsVoice",
+            "voiceAsrStream",
+            "voiceTtsStream",
+            "voiceInputEncoding",
+        ] {
+            let error = parse_backup_bytes(&backup(serde_json::json!({(key): "private-token"})))
+                .unwrap_err();
             assert!(!error.contains("private-token"));
             assert!(error.contains(key));
+        }
+    }
+
+    #[test]
+    fn unsupported_voice_input_encoding_cannot_enter_the_settings_snapshot() {
+        for value in [
+            serde_json::json!("aac"),
+            serde_json::json!(64),
+            serde_json::Value::Null,
+        ] {
+            let mut settings = serde_json::to_value(create_default_settings()).unwrap();
+            settings["voiceInputEncoding"] = value;
+            assert!(serde_json::from_value::<Settings>(settings).is_err());
         }
     }
 

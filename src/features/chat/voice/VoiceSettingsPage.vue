@@ -11,7 +11,7 @@ import type { SettingsPageProps } from '../../settings/contracts';
 import { VOICE_FIELDS } from '../../settings/editing/fieldSets';
 import { useSettingsPageSession } from '../../settings/editing/useSettingsPageSession';
 import { useVoiceCallStore } from './voiceCallStore';
-import { DEFAULT_VOICE_SETTINGS, MIMO_VOICES, type VoiceLanguage, type VoiceTtsVoice } from './settings';
+import { DEFAULT_VOICE_SETTINGS, MIMO_VOICES, type VoiceInputEncoding, type VoiceLanguage, type VoiceTtsVoice } from './settings';
 
 const props = defineProps<SettingsPageProps>();
 const overlayStore = useOverlayStore();
@@ -23,6 +23,9 @@ const disabled = computed(() => !props.active || leaving.value || openingPresets
 const save = () => { if (!disabled.value) void session.save(); };
 const editLanguage = (event: Event) => {
   if (!disabled.value) session.edit('voiceLanguage', (event.target as HTMLSelectElement).value as VoiceLanguage);
+};
+const editInputEncoding = (event: Event) => {
+  if (!disabled.value) session.edit('voiceInputEncoding', (event.target as HTMLSelectElement).value as VoiceInputEncoding);
 };
 const editVoice = (event: Event) => {
   if (!disabled.value) session.edit('voiceTtsVoice', (event.target as HTMLSelectElement).value as VoiceTtsVoice);
@@ -99,6 +102,16 @@ defineExpose({ beforeLeave: () => openingPresets.value ? Promise.resolve(false) 
               <option value="en">英文</option>
             </select>
           </label>
+          <label class="voice-select-row">
+            <span class="text-sm font-semibold">语音输入编码</span>
+            <select :value="draft.voiceInputEncoding" :disabled="disabled" aria-label="语音输入编码" @change="editInputEncoding">
+              <option value="wav">WAV 无损</option>
+              <option value="mp3_64">MP3 64 kbps</option>
+            </select>
+          </label>
+          <p class="m-0 px-1 text-xs leading-relaxed opacity-60">
+            MP3 约节省 75% 上传流量，仅用于语音识别输入；保存后重新开启麦克风生效。
+          </p>
           <SettingsRow title="流式识别结果" description="说完后整段上传，再逐步返回转写文本。">
             <template #action>
               <SettingsSwitch :model-value="draft.voiceAsrStream" :disabled="disabled" aria-label="流式识别结果"

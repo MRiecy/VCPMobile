@@ -27,7 +27,7 @@ const CANCELLED_IDS: usize = 128;
 pub(super) struct PreparedSegment {
     pub sequence: u32,
     pub final_segment: bool,
-    pub wav: Vec<u8>,
+    pub audio: super::InputAudio,
     pub _slot: OwnedSemaphorePermit,
 }
 
@@ -901,6 +901,7 @@ mod tests {
                 base_url: "https://example.invalid/v1".into(),
                 api_key: "test".into(),
                 asr_stream: true,
+                input_encoding: Default::default(),
                 tts_stream: true,
                 language: "auto".into(),
                 voice: "mimo_default".into(),

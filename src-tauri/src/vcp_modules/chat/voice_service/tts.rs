@@ -593,6 +593,7 @@ mod tests {
                 base_url: "https://example.invalid/v1".into(),
                 api_key: "test".into(),
                 asr_stream: true,
+                input_encoding: Default::default(),
                 tts_stream: true,
                 language: "auto".into(),
                 voice: "mimo_default".into(),

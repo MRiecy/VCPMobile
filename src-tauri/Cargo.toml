@@ -8,7 +8,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [workspace]
-members = [".", "plugins/vcp-mobile"]
+members = [".", "plugins/vcp-mobile", "crates/voice-mp3"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -58,6 +58,7 @@ semver = "1"
 infer = "0.15"
 tauri-plugin-log = "2.9.0"
 tauri-plugin-vcp-mobile = { path = "./plugins/vcp-mobile" }
+vcp-voice-mp3 = { path = "crates/voice-mp3" }
 base64 = "0.22"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 pdf_oxide = { version = "0.3.77", default-features = false }

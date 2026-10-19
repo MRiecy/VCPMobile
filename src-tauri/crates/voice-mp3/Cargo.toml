@@ -1,0 +1,10 @@
+[package]
+name = "vcp-voice-mp3"
+version = "0.1.0"
+edition = "2021"
+publish = false
+links = "vcp_voice_mp3_lame"
+description = "Bounded PCM16 voice encoding using the shared mobile LAME core"
+
+[build-dependencies]
+cc = "1.2.63"

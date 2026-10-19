@@ -161,6 +161,31 @@ describe('local voice diagnostics', () => {
 });
 
 describe('语音设置使用正式设置快照', () => {
+  it('默认选择 WAV，编码随本页草稿保存并可切回，不改变朗读配置', async () => {
+    const { wrapper } = await renderOverlay();
+    const encoding = wrapper.get('select[aria-label="语音输入编码"]');
+    expect((encoding.element as HTMLSelectElement).value).toBe('wav');
+    expect(encoding.findAll('option').map(option => option.text())).toEqual(['WAV 无损', 'MP3 64 kbps']);
+    await encoding.setValue('mp3_64');
+    expect(updates()).toHaveLength(0);
+    expect(useSettingsStore().settings?.voiceInputEncoding).toBe('wav');
+    await saveButton(wrapper).trigger('click');
+    await flushPromises();
+    expect(updates()[0]?.[1]?.updates).toEqual({ voiceInputEncoding: 'mp3_64' });
+    expect(database.voiceInputEncoding).toBe('mp3_64');
+    expect(database.voiceTtsStream).toBe(true);
+    expect(database.voiceTtsVoice).toBe('mimo_default');
+    await wrapper.setProps({ active: false });
+    await wrapper.setProps({ active: true });
+    await flushPromises();
+    expect((wrapper.get('select[aria-label="语音输入编码"]').element as HTMLSelectElement).value).toBe('mp3_64');
+    await wrapper.get('select[aria-label="语音输入编码"]').setValue('wav');
+    await saveButton(wrapper).trigger('click');
+    await flushPromises();
+    expect(updates()[1]?.[1]?.updates).toEqual({ voiceInputEncoding: 'wav' });
+    expect(database.voiceInputEncoding).toBe('wav');
+  });
+
   it('只提交本页dirty字段，两个流式开关互不改变，中文音色ID原样保存', async () => {
     const wrapper = await renderPage();
     await field(wrapper, '语音 API Key').setValue('voice-secret');
@@ -185,14 +210,19 @@ describe('语音设置使用正式设置快照', () => {
     expect(wrapper.text()).toContain('重新开启麦克风');
   });
 
-  it('失活只丢弃未提交草稿，不暗中保存API Key', async () => {
-    const wrapper = await renderPage();
+  it('失活只丢弃未提交草稿，不暗中保存API Key与输入编码', async () => {
+    const { wrapper } = await renderOverlay();
     await field(wrapper, '语音 API Key').setValue('unsubmitted-secret');
+    await wrapper.get('select[aria-label="语音输入编码"]').setValue('mp3_64');
     await wrapper.setProps({ active: false });
     await flushPromises();
     expect(updates()).toHaveLength(0);
     expect(database.voiceApiKey).toBe('');
+    expect(database.voiceInputEncoding).toBe('wav');
     expect(context.voice.setProbe).toHaveBeenCalledWith(false);
+    await wrapper.setProps({ active: true });
+    await flushPromises();
+    expect((wrapper.get('select[aria-label="语音输入编码"]').element as HTMLSelectElement).value).toBe('wav');
   });
 
   it('保存失败不回显或记录密钥，保留草稿供重试', async () => {

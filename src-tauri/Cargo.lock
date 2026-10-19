@@ -6304,8 +6304,16 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
+ "vcp-voice-mp3",
  "zip",
  "zstd",
+]
+
+[[package]]
+name = "vcp-voice-mp3"
+version = "0.1.0"
+dependencies = [
+ "cc",
 ]
 
 [[package]]

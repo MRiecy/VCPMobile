@@ -1,4 +1,4 @@
-use super::{sse::SseDecoder, wav, VoiceServiceConfig};
+use super::{sse::SseDecoder, wav, InputAudio, VoiceServiceConfig};
 use crate::vcp_modules::infra::http_clients::{client, HttpProfile};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use futures_util::StreamExt;
@@ -129,14 +129,18 @@ where
 
 pub(super) async fn recognize<F: FnMut(&str)>(
     config: &VoiceServiceConfig,
-    audio: &[u8],
+    audio: &InputAudio,
     cancel: &CancellationToken,
     mut partial: F,
 ) -> Result<String, String> {
+    let mime = match audio.encoding {
+        super::VoiceInputEncoding::Wav => "audio/wav",
+        super::VoiceInputEncoding::Mp3 => "audio/mpeg",
+    };
     let body = json!({
         "model": "mimo-v2.5-asr", "stream": config.asr_stream,
         "messages": [{ "role": "user", "content": [{ "type": "input_audio", "input_audio": {
-            "data": format!("data:audio/wav;base64,{}", STANDARD.encode(audio))
+            "data": format!("data:{mime};base64,{}", STANDARD.encode(&audio.bytes))
         }}]}],
         "asr_options": { "language": config.language },
     });
@@ -345,6 +349,7 @@ mod tests {
             base_url: format!("http://{address}/v1/"),
             api_key: FAKE_KEY.into(),
             asr_stream: true,
+            input_encoding: Default::default(),
             tts_stream: true,
             language: "zh".into(),
             voice: "白桦".into(),
@@ -440,7 +445,7 @@ mod tests {
         assert!(headers.contains("content-type: application/json"));
     }
 
-    fn assert_asr_request(request: &CapturedRequest, streaming: bool, wav: &[u8]) {
+    fn assert_asr_request(request: &CapturedRequest, streaming: bool, mime: &str, audio: &[u8]) {
         assert_request_headers(request);
         assert_eq!(request.body["model"], "mimo-v2.5-asr");
         assert_eq!(request.body["stream"], streaming);
@@ -457,9 +462,9 @@ mod tests {
             .as_str()
             .expect("ASR Data URL");
         let encoded = data
-            .strip_prefix("data:audio/wav;base64,")
-            .expect("WAV Data URL prefix");
-        assert_eq!(STANDARD.decode(encoded).expect("audio base64"), wav);
+            .strip_prefix(&format!("data:{mime};base64,"))
+            .expect("actual audio Data URL prefix");
+        assert_eq!(STANDARD.decode(encoded).expect("audio base64"), audio);
     }
 
     fn assert_tts_request(request: &CapturedRequest, streaming: bool, text: &str) {
@@ -497,11 +502,14 @@ mod tests {
             false,
         )
         .await;
-        let wav = wav_with_padding(16000, &[1, 2, 3, 4]);
+        let audio = InputAudio {
+            bytes: wav_with_padding(16000, &[1, 2, 3, 4]),
+            encoding: super::super::VoiceInputEncoding::Wav,
+        };
         let mut partials = Vec::new();
         let text = timeout(
             Duration::from_secs(4),
-            recognize(&config, &wav, &CancellationToken::new(), |part| {
+            recognize(&config, &audio, &CancellationToken::new(), |part| {
                 partials.push(part.to_string())
             }),
         )
@@ -510,7 +518,12 @@ mod tests {
         .expect("ASR succeeds");
         assert_eq!(text, "你好，世界。");
         assert_eq!(partials, ["你好，", "你好，世界。"]);
-        assert_asr_request(&server.await.expect("fixture completed"), true, &wav);
+        assert_asr_request(
+            &server.await.expect("fixture completed"),
+            true,
+            "audio/wav",
+            &audio.bytes,
+        );
     }
 
     #[tokio::test]
@@ -518,11 +531,14 @@ mod tests {
         let HttpFixture { mut config, server } = http_fixture(200, "application/json",
             json_fragments(json!({"choices":[{"message":{"role":"assistant","content":"完整识别结果。"},"finish_reason":"stop"}]})), false).await;
         config.asr_stream = false;
-        let wav = wav_with_padding(16000, &[5, 6, 7, 8]);
+        let audio = InputAudio {
+            bytes: wav_with_padding(16000, &[5, 6, 7, 8]),
+            encoding: super::super::VoiceInputEncoding::Wav,
+        };
         let mut partials = Vec::new();
         let text = timeout(
             Duration::from_secs(4),
-            recognize(&config, &wav, &CancellationToken::new(), |part| {
+            recognize(&config, &audio, &CancellationToken::new(), |part| {
                 partials.push(part.to_string())
             }),
         )
@@ -531,7 +547,71 @@ mod tests {
         .expect("ASR succeeds");
         assert_eq!(text, "完整识别结果。");
         assert!(partials.is_empty());
-        assert_asr_request(&server.await.expect("fixture completed"), false, &wav);
+        assert_asr_request(
+            &server.await.expect("fixture completed"),
+            false,
+            "audio/wav",
+            &audio.bytes,
+        );
+    }
+
+    #[tokio::test]
+    async fn encoded_mp3_is_uploaded_with_its_actual_mime_in_both_asr_modes() {
+        use super::super::{workers::prepare_audio, VoiceInputEncoding};
+        let pcm: Vec<u8> = (0..16000)
+            .flat_map(|sample| (((sample % 160) as i16 - 80) * 150).to_le_bytes())
+            .collect();
+        let cancellation = CancellationToken::new();
+        let audio = prepare_audio(
+            wav_with_padding(16000, &pcm),
+            16000,
+            VoiceInputEncoding::Mp3,
+            &cancellation,
+        )
+        .await
+        .expect("real native LAME encoding succeeds");
+        assert_eq!(&audio.bytes[..2], &[0xff, 0xf3]);
+        assert!(audio.bytes.len() < pcm.len() / 2);
+        for streaming in [false, true] {
+            let fragments = if streaming {
+                let mut response = sse(
+                    json!({"choices":[{"delta":{"content":"识别完成。"},"finish_reason":"stop"}]}),
+                );
+                response.extend_from_slice(b"data: [DONE]\n\n");
+                response.chunks(7).map(<[u8]>::to_vec).collect()
+            } else {
+                json_fragments(json!({"choices":[{"message":{"content":"识别完成。"}}]}))
+            };
+            let HttpFixture { mut config, server } = http_fixture(
+                200,
+                if streaming {
+                    "text/event-stream"
+                } else {
+                    "application/json"
+                },
+                fragments,
+                false,
+            )
+            .await;
+            config.asr_stream = streaming;
+            // MIME follows the already encoded payload, even if other settings
+            // describe a different input format by the time networking begins.
+            config.input_encoding = VoiceInputEncoding::Wav;
+            let text = timeout(
+                Duration::from_secs(4),
+                recognize(&config, &audio, &cancellation, |_| {}),
+            )
+            .await
+            .expect("ASR finishes")
+            .expect("ASR succeeds");
+            assert_eq!(text, "识别完成。");
+            assert_asr_request(
+                &server.await.expect("fixture completed"),
+                streaming,
+                "audio/mpeg",
+                &audio.bytes,
+            );
+        }
     }
 
     #[tokio::test]
@@ -679,7 +759,15 @@ mod tests {
             config.asr_stream = streaming;
             let error = timeout(
                 Duration::from_secs(4),
-                recognize(&config, &[0, 1], &CancellationToken::new(), |_| {}),
+                recognize(
+                    &config,
+                    &InputAudio {
+                        bytes: vec![0, 1],
+                        encoding: Default::default(),
+                    },
+                    &CancellationToken::new(),
+                    |_| {},
+                ),
             )
             .await
             .expect("error completes")
@@ -709,11 +797,19 @@ mod tests {
         let (progress, first_partial) = tokio::sync::oneshot::channel();
         let operation = tokio::spawn(async move {
             let mut progress = Some(progress);
-            recognize(&config, &[0, 1], &request_cancellation, |text| {
-                if let Some(progress) = progress.take() {
-                    let _ = progress.send(text.to_string());
-                }
-            })
+            recognize(
+                &config,
+                &InputAudio {
+                    bytes: vec![0, 1],
+                    encoding: Default::default(),
+                },
+                &request_cancellation,
+                |text| {
+                    if let Some(progress) = progress.take() {
+                        let _ = progress.send(text.to_string());
+                    }
+                },
+            )
             .await
         });
         assert_eq!(
