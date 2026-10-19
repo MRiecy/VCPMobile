@@ -58,6 +58,7 @@ import com.vcp.mobile.service.ReleaseForegroundArgs
 import com.vcp.mobile.sharing.ShareIntentHandler
 import com.vcp.mobile.sharing.SharedFileIngestor
 import com.vcp.mobile.updater.NativeUpdater
+import com.vcp.mobile.voice.NativeVoiceAudio
 import com.vcp.mobile.webview.CompleteWebViewResumeArgs
 import com.vcp.mobile.webview.ConnectWebViewResumeArgs
 import com.vcp.mobile.webview.KeyboardInsetsManager
@@ -82,6 +83,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             if (a === activity) {
                 ScreenKeepOnArbiter.setAppInForeground(activity, true)
                 webViewResume.onResumed()
+                voiceAudio.onForeground()
             }
         }
         override fun onActivityPaused(a: Activity) {
@@ -97,7 +99,10 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
             if (a === activity) webViewResume.onStarted()
         }
         override fun onActivityStopped(a: Activity) {
-            if (a === activity) webViewResume.onStopped()
+            if (a === activity) {
+                voiceAudio.onBackground()
+                webViewResume.onStopped()
+            }
         }
         override fun onActivitySaveInstanceState(a: Activity, outState: android.os.Bundle) {}
         override fun onActivityDestroyed(a: Activity) {
@@ -124,6 +129,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val gpuStatusManager = GpuStatusManager(activity)
     private val sensorStatusManager = SensorStatusManager(activity)
     private val nativeEvents = NativeEvents(activity, runtime, networkStatusManager, lifecycleBridge::snapshot)
+    private val voiceAudio = NativeVoiceAudio(activity, ::requestPermissionForAlias, nativeEvents::isReady, nativeEvents::tryEmitVoiceAudio)
     private val permissions = AndroidPermissions(activity, ::requestPermissionForAlias, ::startActivityForResult, ::emitWebViewEvent)
     private val filePicker = NativeFilePicker(activity, runtime, ::startActivityForResult, ::requestPermissionForAlias, ::emitWebViewEvent)
     private val fileExports = NativeFileExports(activity, runtime, ::requestPermissionForAlias)
@@ -246,6 +252,18 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     // ==================================================================
     @PermissionCallback
     fun onPermissionResult(invoke: Invoke) = permissions.onPermissionResult(invoke)
+
+    @PermissionCallback
+    fun onVoiceAudioPermissionResult(invoke: Invoke) = voiceAudio.onPermissionResult(invoke)
+
+    @Command
+    fun startVoiceAudio(invoke: Invoke) = voiceAudio.startVoiceAudio(invoke)
+
+    @Command
+    fun stopVoiceAudio(invoke: Invoke) = voiceAudio.stopVoiceAudio(invoke)
+
+    @Command
+    fun setVoiceProbe(invoke: Invoke) = voiceAudio.setVoiceProbe(invoke)
 
     @ActivityCallback
     fun onBatteryOptimizationResult(invoke: Invoke, result: ActivityResult) = permissions.onBatteryOptimizationResult(invoke, result)
@@ -561,6 +579,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         release("WebView resume", webViewResume::destroy)
         release("window snapshot", windowSnapshot::destroy)
         release("media", mediaProcessor::destroy)
+        release("voice audio", voiceAudio::destroy)
         release("file picker", filePicker::destroy)
         release("share inbox", shareIntentHandler::destroy)
         release("file exports", fileExports::destroy)

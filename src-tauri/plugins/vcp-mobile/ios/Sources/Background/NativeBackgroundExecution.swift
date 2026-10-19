@@ -25,11 +25,11 @@ final class NativeBackgroundExecution: NSObject, AVAudioPlayerDelegate {
         let screenKeepOn: Bool
     }
 
-    private let session = AVAudioSession.sharedInstance()
+    private let audioSession = NativeAudioSessionCoordinator.shared
+    private var session: AVAudioSession { audioSession.session }
     private weak var webKit: NativeWebKit?
     private var leases: [String: Lease] = [:]
     private var player: AVAudioPlayer?
-    private var ownsAudioActivation = false
     private var interrupted = false
     private var mediaServicesUnavailable = false
     private var requiresNewForegroundTask = false
@@ -73,6 +73,18 @@ final class NativeBackgroundExecution: NSObject, AVAudioPlayerDelegate {
         self.webKit = webKit
     }
 
+    func yieldToVoice() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        try? stopPlayback(deactivate: false)
+    }
+
+    func voiceDidReleaseSession() {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard needsAudio, !interrupted, !mediaServicesUnavailable,
+              !requiresNewForegroundTask else { return }
+        resumePlayback()
+    }
+
     func acquire(tag: String, audioRequired: Bool, screenKeepOn: Bool) throws {
         dispatchPrecondition(condition: .onQueue(.main))
         guard !tag.isEmpty else { throw failure("background_resource_invalid_tag") }
@@ -113,8 +125,7 @@ final class NativeBackgroundExecution: NSObject, AVAudioPlayerDelegate {
     private var needsAudio: Bool { leases.values.contains { $0.audioRequired } }
 
     private var ownsSessionConfiguration: Bool {
-        session.category == .playback && session.mode == .default
-            && session.categoryOptions.contains(.mixWithOthers)
+        audioSession.ownsKeepaliveConfiguration
     }
 
     private func updateScreen(active: Bool? = nil) {
@@ -125,6 +136,10 @@ final class NativeBackgroundExecution: NSObject, AVAudioPlayerDelegate {
     private func startPlayback(newForegroundTask: Bool = false) throws {
         dispatchPrecondition(condition: .onQueue(.main))
         guard needsAudio else { return }
+        if audioSession.voiceOwner != nil {
+            try stopPlayback(deactivate: false)
+            return
+        }
         let captureState = webKit?.microphoneCaptureState ?? .none
         if captureState == .active || captureState == .muted {
             // Read the attached WebView's actual capture state. Its audio session
@@ -143,9 +158,7 @@ final class NativeBackgroundExecution: NSObject, AVAudioPlayerDelegate {
         do {
             // Only Stream leases request audio. Sync and Prerender never borrow
             // this resource, and no recording category/microphone is requested.
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
-            try session.setActive(true)
-            ownsAudioActivation = true
+            guard try audioSession.activateKeepalive() else { return }
             let next = try AVAudioPlayer(data: Self.silentWave, fileTypeHint: AVFileType.wav.rawValue)
             next.numberOfLoops = -1
             next.delegate = self
@@ -171,13 +184,7 @@ final class NativeBackgroundExecution: NSObject, AVAudioPlayerDelegate {
         // System interruption/media reset or another in-app category owner has
         // already taken activation away from us. Otherwise retain ownership if
         // deactivation throws, so a later real cleanup can still release it.
-        guard deactivate && ownsSessionConfiguration else {
-            ownsAudioActivation = false
-            return
-        }
-        guard ownsAudioActivation else { return }
-        try session.setActive(false, options: [.notifyOthersOnDeactivation])
-        ownsAudioActivation = false
+        try audioSession.releaseKeepalive(deactivate: deactivate)
     }
 
     private func handleInterruption(_ notification: Notification) {
@@ -186,7 +193,7 @@ final class NativeBackgroundExecution: NSObject, AVAudioPlayerDelegate {
         switch type {
         case .began:
             interrupted = true
-            ownsAudioActivation = false
+            try? audioSession.releaseKeepalive(deactivate: false)
             player?.pause()
             NSLog("[VcpBackgroundExecution] Audio interrupted; existing tasks retain their own lifecycle")
         case .ended:
@@ -206,6 +213,9 @@ final class NativeBackgroundExecution: NSObject, AVAudioPlayerDelegate {
 
     private func handleRouteChange(_ notification: Notification) {
         guard needsAudio else { return }
+        // The native voice owner deliberately changes category/routes. Its
+        // reservation, not a retained category, decides when we may resume.
+        if audioSession.voiceOwner != nil { return }
         if !ownsSessionConfiguration {
             // Another in-app audio use changed the shared session. Do not fight
             // it by continually resetting its category or deactivating its audio.

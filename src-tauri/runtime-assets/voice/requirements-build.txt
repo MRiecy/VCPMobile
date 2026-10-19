@@ -1,0 +1,5 @@
+# Build host only. No Python dependency is shipped in the app.
+onnxruntime==1.24.2
+onnx==1.20.1
+numpy==2.2.6
+flatbuffers==25.12.19

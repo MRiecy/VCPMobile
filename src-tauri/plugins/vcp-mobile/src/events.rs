@@ -15,6 +15,8 @@ pub enum NativeEvent {
     /// A native resource failure does not finish or restart a Chat request.
     #[serde(rename = "backgroundExecutionFailure")]
     BackgroundExecutionFailure { reason: String },
+    #[serde(rename = "voiceAudio")]
+    VoiceAudio(crate::voice::NativeVoiceAudioEvent),
     // Configuration/memory notifications do not describe an app phase.
     #[serde(rename = "configuration", alias = "memory-pressure")]
     Other {},

@@ -167,6 +167,24 @@ def icon_entries():
     return entries
 
 
+def voice_assets():
+    assets = ROOT / "runtime-assets" / "voice" / "assets" / "voice"
+    for name in ("silero_vad.ort", "voice-probe.wav", "voice-probe.json"):
+        require((assets / name).is_file(), f"Local voice resource is missing: {name}")
+    return sorted(path for path in assets.iterdir() if path.is_file())
+
+
+def verify_voice_resources(app):
+    records = []
+    for source in voice_assets():
+        resource = app / "voice" / source.name
+        require(resource.is_file(), f"{app.name}: voice/{source.name} is not embedded")
+        checksum = digest(source)
+        require(digest(resource) == checksum, f"{app.name}: voice/{source.name} differs from the build input")
+        records.append({"file": f"voice/{source.name}", "bytes": resource.stat().st_size, "sha256": checksum})
+    return records
+
+
 def overlay(project_dir=APPLE):
     """Emit an additive XcodeGen spec; never rewrite the CLI-owned project.yml."""
     project_dir = Path(project_dir).resolve()
@@ -180,6 +198,12 @@ def overlay(project_dir=APPLE):
     privacy = project_dir / "VCPResources" / "PrivacyInfo.xcprivacy"
     privacy.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(IOS / "PrivacyInfo.xcprivacy", privacy)
+    # swift-rs links SwiftPM's static product, but does not embed its resource
+    # bundles. The app owns these files explicitly; native code uses Bundle.main.
+    voice_dir = project_dir / "VCPResources" / "voice"
+    voice_dir.mkdir(parents=True, exist_ok=True)
+    for asset in voice_assets():
+        shutil.copyfile(asset, voice_dir / asset.name)
     icon_dir = project_dir / "Assets.xcassets" / "AppIcon.appiconset"
     icon_dir.mkdir(parents=True, exist_ok=True)
     entries = icon_entries()
@@ -202,7 +226,10 @@ def overlay(project_dir=APPLE):
     write_json(output, {
         "include": ["project.yml"],
         "targets": {f"{name}_iOS": {
-            "sources": [{"path": "VCPResources/PrivacyInfo.xcprivacy", "buildPhase": "resources"}],
+            "sources": [
+                {"path": "VCPResources/PrivacyInfo.xcprivacy", "buildPhase": "resources"},
+                {"path": "VCPResources/voice", "type": "folder", "buildPhase": "resources"},
+            ],
             "dependencies": [{"target": "VCPShare", "embed": True}],
             "settings": {"base": {
                 "TARGETED_DEVICE_FAMILY": "1,2",
@@ -281,6 +308,7 @@ def collect_archives(evidence, manifest, env):
                 if privacy.is_file():
                     shutil.copyfile(privacy, details / privacy.name)
                 info = plistlib.loads((app / "Info.plist").read_bytes())
+                write_json(details / "voice-resources.json", verify_voice_resources(app))
                 extension = app / "PlugIns" / "VCPShare.appex"
                 require(extension.is_dir(), f"{app.name}: Share Extension is not embedded")
                 extension_info = plistlib.loads((extension / "Info.plist").read_bytes())
@@ -351,6 +379,17 @@ def build():
             manifest["swiftVersion"] = run(["xcrun", "swift", "--version"], env=env)
         with stage(evidence, manifest, "rust-target"):
             run(["rustup", "target", "add", "aarch64-apple-ios"], env=env, log=evidence / "rust-target.log")
+        with stage(evidence, manifest, "voice-runtime"):
+            # SwiftPM consumes our model-specific CPU runtime, not a full ORT
+            # download. Prepare it before Tauri resolves the local binary target.
+            runtime = ROOT / "runtime-assets" / "voice"
+            runtime_venv = evidence / "voice-runtime-venv"
+            run([sys.executable, "-m", "venv", str(runtime_venv)], env=env, log=evidence / "voice-runtime-venv.log")
+            runtime_python = runtime_venv / "bin" / "python3"
+            runtime_env = dict(env)
+            runtime_env["PATH"] = str(runtime_venv / "bin") + os.pathsep + env["PATH"]
+            run([str(runtime_python), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(runtime / "requirements-build.txt")], env=runtime_env, log=evidence / "voice-runtime-dependencies.log")
+            run([str(runtime_python), str(runtime / "build_runtime.py"), "ios", "--cache-dir", str(evidence / "voice-runtime-cache")], env=runtime_env, log=evidence / "voice-runtime.log")
         with stage(evidence, manifest, "project-init"):
             require(not APPLE.exists(), "Diagnostics require a fresh checkout without gen/apple; no automatic deletion is performed")
             run(["pnpm", "tauri", "ios", "init", "--ci", "--skip-targets-install"], env=env, log=evidence / "init.log")

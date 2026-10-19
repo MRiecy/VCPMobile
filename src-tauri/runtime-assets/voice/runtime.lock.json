@@ -1,0 +1,13 @@
+{
+  "sileroVersion": "6.2.2",
+  "sileroCommit": "60b7ffa243625ebdc1070275a29f18c87843786a",
+  "modelSha256": "7ed98ddbad84ccac4cd0aeb3099049280713df825c610a8ed34543318f1b2c49",
+  "ortModelSha256": "8f7f66bd57462e7212c61a86ed4dca1559838f01cf2a47947f60cffcc2ab2520",
+  "operatorsSha256": "f84a943a3e406e93bc5057c97acf32d6fa8c8fc83e38a2f9ead4c345680afb68",
+  "ortVersion": "1.24.2",
+  "ortCommit": "058787ceead760166e3c50a0a4cba8a833a6f53f",
+  "officialAarSha256": "bc461499a735653dff285a6a3477d28b9cfd119a09c7753eaf003426b577f223",
+  "androidNdk": "29.0.14206865",
+  "androidApi": 26,
+  "iosDeploymentTarget": "26.0"
+}

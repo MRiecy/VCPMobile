@@ -829,6 +829,18 @@
           "markdownDescription": "Denies the set_keep_screen_on command without any pre-configured scope."
         },
         {
+          "description": "Enables the set_voice_probe command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-set-voice-probe",
+          "markdownDescription": "Enables the set_voice_probe command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the set_voice_probe command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-set-voice-probe",
+          "markdownDescription": "Denies the set_voice_probe command without any pre-configured scope."
+        },
+        {
           "description": "Enables the start_download_notification command without any pre-configured scope.",
           "type": "string",
           "const": "allow-start-download-notification",
@@ -863,6 +875,30 @@
           "type": "string",
           "const": "deny-start-network-monitoring",
           "markdownDescription": "Denies the start_network_monitoring command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the start_voice_audio command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-start-voice-audio",
+          "markdownDescription": "Enables the start_voice_audio command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the start_voice_audio command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-start-voice-audio",
+          "markdownDescription": "Denies the start_voice_audio command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the stop_voice_audio command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-stop-voice-audio",
+          "markdownDescription": "Enables the stop_voice_audio command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the stop_voice_audio command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-stop-voice-audio",
+          "markdownDescription": "Denies the stop_voice_audio command without any pre-configured scope."
         },
         {
           "description": "Enables the trigger_haptic_feedback command without any pre-configured scope.",

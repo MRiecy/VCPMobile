@@ -1,0 +1,67 @@
+{
+  "title": "Local echo probe: spoken digits zero through nine",
+  "attribution": "Free Spoken Digit Dataset (FSDD), Jakobovski and contributors; speaker jackson",
+  "license": "CC-BY-SA-4.0",
+  "license_url": "https://creativecommons.org/licenses/by-sa/4.0/",
+  "source_license": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/README.md",
+  "revision": "26eb9aaf76e81b692f806f9140c2d2777410d7a1",
+  "changes": "Resampled 8kHz to 16kHz, peak-normalized, concatenated with brief pauses. This derived audio remains CC-BY-SA-4.0.",
+  "sample_rate": 16000,
+  "channels": 1,
+  "sample_format": "PCM signed 16-bit little-endian",
+  "frames": 104694,
+  "duration_seconds": 6.543375,
+  "sha256": "0463fe2147595f8f81584c9e60ba5887aa04e8533e08761e600a2216cec014cf",
+  "sources": [
+    {
+      "file": "0_jackson_0.wav",
+      "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/0_jackson_0.wav",
+      "sha256": "eea86018ce1730baaf7f5dd6ec88c1f727dd90203521a9115b489310a248ea05"
+    },
+    {
+      "file": "1_jackson_0.wav",
+      "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/1_jackson_0.wav",
+      "sha256": "b3739400f793620875bb7849bfd8629dc6b2966ed6bda8276aa14178a612f13a"
+    },
+    {
+      "file": "2_jackson_0.wav",
+      "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/2_jackson_0.wav",
+      "sha256": "214bac0c813b584410e3cb8cace2673d256b3fd735810bd516b2bfd0c2298620"
+    },
+    {
+      "file": "3_jackson_0.wav",
+      "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/3_jackson_0.wav",
+      "sha256": "5152a17feb7dba43cfabdb4284262004da3038d5c02a6a5282e851b7ad2bb2e2"
+    },
+    {
+      "file": "4_jackson_0.wav",
+      "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/4_jackson_0.wav",
+      "sha256": "e0febd48e7cf7cfdca949d0d07769e0fc708fb2e8e7648691fa7e6ed7a5b1ded"
+    },
+    {
+      "file": "5_jackson_0.wav",
+      "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/5_jackson_0.wav",
+      "sha256": "070af5213084191c4de1156125bb792c28cea2728798043283e3def0dadd55b4"
+    },
+    {
+      "file": "6_jackson_0.wav",
+      "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/6_jackson_0.wav",
+      "sha256": "fe7705fdfaddc378d72c479664ab8aacd53fa78a99c3d130ad74b1ff40212595"
+    },
+    {
+      "file": "7_jackson_0.wav",
+      "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/7_jackson_0.wav",
+      "sha256": "bd4f5fa8db9a8a8d14a88236da314cd38fce2370cc406181b2485e03437d55d3"
+    },
+    {
+      "file": "8_jackson_0.wav",
+      "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/8_jackson_0.wav",
+      "sha256": "25172d71c574ee504094d4b704efa478a253d29ee7da562ce6ec4800ffdb6eaf"
+    },
+    {
+      "file": "9_jackson_0.wav",
+      "url": "https://raw.githubusercontent.com/Jakobovski/free-spoken-digit-dataset/26eb9aaf76e81b692f806f9140c2d2777410d7a1/recordings/9_jackson_0.wav",
+      "sha256": "6b25bbf21f65cf5a6c9713ecf05b5d34641bbcfaac56b9d4d694f65758e12ff0"
+    }
+  ]
+}

@@ -1,12 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { flushPromises } from '@vue/test-utils';
-import { createMicrophoneMonitor } from '../../../features/chat/voice/microphoneMonitor';
-import { invokeMock, mockInvoke } from '../../mocks/tauri';
-
-const platform = vi.hoisted(() => ({ android: false }));
-vi.mock('../../../core/utils/platform', () => ({
-  get isAndroid() { return platform.android; },
-}));
+import { createMicrophoneMonitor, type VoiceAudioFrame } from '../../../features/chat/voice/microphoneMonitor';
+import { emitTauriEvent, invokeMock, listenMock, mockInvoke } from '../../mocks/tauri';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -15,369 +10,282 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function makeStream() {
-  const track = {
-    readyState: 'live',
-    muted: false,
-    onended: null as (() => void) | null,
-    onmute: null as (() => void) | null,
-    stop: vi.fn(),
-  };
-  return {
-    track,
-    stream: { getTracks: () => [track], getAudioTracks: () => [track] } as unknown as MediaStream,
-  };
-}
-
-const contexts: MockAudioContext[] = [];
-const resumePlans: Array<(context: MockAudioContext) => Promise<void>> = [];
-class MockAudioContext {
-  state = 'suspended';
-  sampleRate = 48000;
-  onstatechange: (() => void) | null = null;
-  destination = {};
-  meter = {
-    fftSize: 0,
-    get frequencyBinCount() { return this.fftSize / 2; },
-    disconnect: vi.fn(),
-    getFloatTimeDomainData: vi.fn((samples: Float32Array) => samples.fill(0.2)),
-    getByteFrequencyData: vi.fn((spectrum: Uint8Array) => spectrum.fill(128)),
-  };
-  source = { connect: vi.fn(), disconnect: vi.fn() };
-  resume = vi.fn(async () => {
-    const plan = resumePlans.shift();
-    if (plan) await plan(this);
-    else this.setState('running');
-  });
-  close = vi.fn(async () => { this.setState('closed'); });
-  createMediaStreamSource = vi.fn(() => this.source);
-  createAnalyser = vi.fn(() => this.meter);
-  constructor() { contexts.push(this); }
-  setState(state: string) {
-    this.state = state;
-    this.onstatechange?.();
-  }
-}
-
-const frames = new Map<number, FrameRequestCallback>();
-let nextFrame = 0;
-const getUserMedia = vi.fn<() => Promise<MediaStream>>();
-const network = vi.fn();
-const blob = vi.fn();
-const recorder = vi.fn();
-const socket = vi.fn();
-let oldMediaDevices: PropertyDescriptor | undefined;
 let monitor: ReturnType<typeof createMicrophoneMonitor> | undefined;
+const startCommand = 'plugin:vcp-mobile|start_voice_audio';
+const stopCommand = 'plugin:vcp-mobile|stop_voice_audio';
+const probeCommand = 'plugin:vcp-mobile|set_voice_probe';
+const audioEvent = 'vcp-voice-audio';
 
-const runFrame = (time: number) => {
-  const pending = [...frames.values()];
-  frames.clear();
-  pending.forEach(callback => callback(time));
-};
+function currentSession() {
+  const calls = invokeMock.mock.calls.filter(([command]) => command === startCommand);
+  return calls[calls.length - 1][1]!.sessionId as string;
+}
 
-beforeEach(() => {
-  platform.android = false;
-  contexts.length = 0;
-  resumePlans.length = 0;
-  frames.clear();
-  nextFrame = 0;
-  getUserMedia.mockReset();
-  oldMediaDevices = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices');
-  Object.defineProperty(navigator, 'mediaDevices', {
-    configurable: true, value: { getUserMedia },
-  });
-  vi.stubGlobal('AudioContext', MockAudioContext);
-  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
-    const id = ++nextFrame;
-    frames.set(id, callback);
-    return id;
-  });
-  vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id));
-  vi.stubGlobal('fetch', network);
-  vi.stubGlobal('WebSocket', socket);
-  vi.stubGlobal('Blob', blob);
-  vi.stubGlobal('MediaRecorder', recorder);
-  mockInvoke('plugin:vcp-mobile|request_android_permission', () => undefined);
-  mockInvoke('plugin:vcp-mobile|check_all_permissions', () => ({ microphone: true }));
-});
+function emitFrame(sessionId: string, overrides: Partial<VoiceAudioFrame> = {}) {
+  emitTauriEvent(audioEvent, {
+    kind: 'frame', sessionId, audioEpoch: 1, sampleIndex: 512, probability: 0.8,
+    level: 0.7, bands: Array(32).fill(0.5), aecState: 'enabled', route: 'speaker',
+    playbackActive: false, probeRevision: 0, speechActive: true, speechTransition: 'start', discontinuity: false,
+    ...overrides,
+  } satisfies VoiceAudioFrame);
+}
 
 afterEach(() => {
   monitor?.stop();
   monitor = undefined;
-  vi.unstubAllGlobals();
-  if (oldMediaDevices) Object.defineProperty(navigator, 'mediaDevices', oldMediaDevices);
-  else Reflect.deleteProperty(navigator, 'mediaDevices');
+  vi.useRealTimers();
 });
 
-describe('microphone input metering', () => {
-  it('releases the audio context when browser microphone permission is denied', async () => {
-    const error = new DOMException('Denied', 'NotAllowedError');
-    getUserMedia.mockRejectedValue(error);
+describe('native microphone client', () => {
+  it('installs the event listener before starting native audio and uses one session UUID', async () => {
+    const installed = deferred<() => void>();
+    const unlisten = vi.fn();
+    listenMock.mockImplementationOnce(() => installed.promise);
+    monitor = createMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn());
+    const started = monitor.start();
+    expect(listenMock).toHaveBeenCalledWith(audioEvent, expect.any(Function));
+    expect(invokeMock).not.toHaveBeenCalled();
+
+    installed.resolve(unlisten);
+    await expect(started).resolves.toBe(true);
+    expect(currentSession()).toMatch(/^[0-9a-f-]{36}$/);
+    expect(invokeMock).toHaveBeenCalledExactlyOnceWith(startCommand, { sessionId: currentSession() });
+
+    monitor.stop();
+    expect(unlisten).toHaveBeenCalledOnce();
+    expect(invokeMock).toHaveBeenLastCalledWith(stopCommand, { sessionId: currentSession() });
+  });
+
+  it('reports the native permission failure and releases its installed listener', async () => {
+    mockInvoke(startCommand, () => Promise.reject('麦克风权限未开启'));
     const onEnded = vi.fn();
-    monitor = createMicrophoneMonitor(vi.fn(), onEnded);
-
-    await expect(monitor.start()).rejects.toBe(error);
-
-    expect(contexts[0].close).toHaveBeenCalledOnce();
-    expect(contexts[0].createMediaStreamSource).not.toHaveBeenCalled();
-    expect(frames.size).toBe(0);
+    const onFrame = vi.fn();
+    monitor = createMicrophoneMonitor(vi.fn(), onEnded, onFrame);
+    await expect(monitor.start()).rejects.toBe('麦克风权限未开启');
+    emitFrame(currentSession());
+    expect(onFrame).not.toHaveBeenCalled();
     expect(onEnded).not.toHaveBeenCalled();
-    expect(network).not.toHaveBeenCalled();
+    expect(invokeMock).toHaveBeenCalledWith(stopCommand, { sessionId: currentSession() });
+  });
+
+  it('cancels immediately during listener installation and releases the late listener without starting audio', async () => {
+    const installed = deferred<() => void>();
+    const unlisten = vi.fn();
+    listenMock.mockImplementationOnce(() => installed.promise);
+    monitor = createMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn());
+    const started = monitor.start();
+    monitor.stop();
+    await expect(started).resolves.toBe(false);
+    expect(invokeMock).not.toHaveBeenCalled();
+
+    installed.resolve(unlisten);
+    await flushPromises();
+    expect(unlisten).toHaveBeenCalledOnce();
     expect(invokeMock).not.toHaveBeenCalled();
   });
 
-  it('does not acquire a browser stream after Android denies microphone permission', async () => {
-    platform.android = true;
-    mockInvoke('plugin:vcp-mobile|check_all_permissions', () => ({ microphone: false }));
-    monitor = createMicrophoneMonitor(vi.fn(), vi.fn());
-
-    await expect(monitor.start()).rejects.toMatchObject({ name: 'NotAllowedError' });
-
-    expect(invokeMock).toHaveBeenCalledWith('plugin:vcp-mobile|request_android_permission', { pType: 'microphone' });
-    expect(getUserMedia).not.toHaveBeenCalled();
-    expect(contexts[0].close).toHaveBeenCalledOnce();
-  });
-
-  it('stops a stream delivered after cancellation without installing a meter', async () => {
-    const request = deferred<MediaStream>();
-    const acquired = makeStream();
-    getUserMedia.mockReturnValue(request.promise);
-    monitor = createMicrophoneMonitor(vi.fn(), vi.fn());
-    const started = monitor.start();
-
-    monitor.stop();
-    request.resolve(acquired.stream);
-
-    await expect(started).resolves.toBe(false);
-    expect(acquired.track.stop).toHaveBeenCalledOnce();
-    expect(contexts[0].close).toHaveBeenCalledOnce();
-    expect(contexts[0].createMediaStreamSource).not.toHaveBeenCalled();
-    expect(frames.size).toBe(0);
-  });
-
-  it('keeps a new start separate from an older unresolved permission request', async () => {
-    const firstRequest = deferred<MediaStream>();
-    const oldStream = makeStream();
-    const newStream = makeStream();
-    getUserMedia.mockReturnValueOnce(firstRequest.promise).mockResolvedValueOnce(newStream.stream);
-    monitor = createMicrophoneMonitor(vi.fn(), vi.fn());
-    const first = monitor.start();
-    monitor.stop();
-    const second = monitor.start();
-    expect(getUserMedia).toHaveBeenCalledTimes(1);
-    // The new user gesture must unlock its AudioContext immediately, even
-    // while browser acquisition waits for the previous permission result.
-    expect(contexts).toHaveLength(2);
-    expect(contexts[1].resume).toHaveBeenCalledOnce();
-
-    firstRequest.resolve(oldStream.stream);
-    await expect(first).resolves.toBe(false);
-    await expect(second).resolves.toBe(true);
-
-    expect(oldStream.track.stop).toHaveBeenCalledOnce();
-    expect(newStream.track.stop).not.toHaveBeenCalled();
-    expect(contexts[0].createMediaStreamSource).not.toHaveBeenCalled();
-    expect(contexts[1].createMediaStreamSource).toHaveBeenCalledWith(newStream.stream);
-    monitor.stop();
-    expect(newStream.track.stop).toHaveBeenCalledOnce();
-  });
-
-  it('lets a new start proceed after stop cancels an unresolved AudioContext resume', async () => {
-    const resume = deferred<void>();
-    resumePlans.push(() => resume.promise);
-    const oldStream = makeStream();
-    const newStream = makeStream();
-    getUserMedia.mockResolvedValueOnce(oldStream.stream).mockResolvedValueOnce(newStream.stream);
-    monitor = createMicrophoneMonitor(vi.fn(), vi.fn());
+  it.each(['resolve', 'reject'] as const)('cancels pending native permission without blocking a new start after late %s', async outcome => {
+    const pending = deferred<void>();
+    mockInvoke(startCommand, () => pending.promise);
+    const onFrame = vi.fn();
+    monitor = createMicrophoneMonitor(vi.fn(), vi.fn(), onFrame);
     const first = monitor.start();
     await flushPromises();
-    expect(contexts[0].state).toBe('suspended');
-    expect(oldStream.track.stop).not.toHaveBeenCalled();
-
+    const oldId = currentSession();
     monitor.stop();
-    const second = monitor.start();
-
     await expect(first).resolves.toBe(false);
-    await expect(second).resolves.toBe(true);
-    expect(oldStream.track.stop).toHaveBeenCalledOnce();
-    expect(contexts[0].close).toHaveBeenCalledOnce();
-    expect(newStream.track.stop).not.toHaveBeenCalled();
-    expect(contexts[1].state).toBe('running');
+    expect(invokeMock).toHaveBeenCalledWith(stopCommand, { sessionId: oldId });
 
-    resume.reject(new Error('late resume failure'));
-    await flushPromises();
-    expect(newStream.track.stop).not.toHaveBeenCalled();
-    expect(contexts[1].close).not.toHaveBeenCalled();
-  });
-
-  it.each(['suspended-context', 'muted-track'] as const)('does not announce a running monitor with %s', async condition => {
-    const acquired = makeStream();
-    if (condition === 'suspended-context') resumePlans.push(async () => {});
-    else acquired.track.muted = true;
-    getUserMedia.mockResolvedValue(acquired.stream);
-    const onEnded = vi.fn();
-    monitor = createMicrophoneMonitor(vi.fn(), onEnded);
-
-    await expect(monitor.start()).rejects.toThrow();
-
-    expect(acquired.track.stop).toHaveBeenCalledOnce();
-    expect(contexts[0].close).toHaveBeenCalledOnce();
-    expect(contexts[0].createMediaStreamSource).not.toHaveBeenCalled();
-    expect(frames.size).toBe(0);
-    expect(onEnded).not.toHaveBeenCalled();
-  });
-
-  it('does not acquire audio if cancelled while an Android permission dialog is pending', async () => {
-    platform.android = true;
-    const permission = deferred<void>();
-    mockInvoke('plugin:vcp-mobile|request_android_permission', () => permission.promise);
-    monitor = createMicrophoneMonitor(vi.fn(), vi.fn());
-    const started = monitor.start();
-    monitor.stop();
-    permission.resolve();
-
-    await expect(started).resolves.toBe(false);
-    expect(getUserMedia).not.toHaveBeenCalled();
-    expect(contexts[0].close).toHaveBeenCalledOnce();
-  });
-
-  it('samples at a bounded rate into one reusable buffer without recording or sending audio', async () => {
-    const acquired = makeStream();
-    getUserMedia.mockResolvedValue(acquired.stream);
-    const onLevel = vi.fn();
-    monitor = createMicrophoneMonitor(onLevel, vi.fn());
+    mockInvoke(startCommand, () => undefined);
     await expect(monitor.start()).resolves.toBe(true);
-    onLevel.mockClear();
+    const nextId = currentSession();
+    expect(nextId).not.toBe(oldId);
+    emitFrame(oldId);
+    expect(onFrame).not.toHaveBeenCalled();
+    emitFrame(nextId);
+    expect(onFrame).toHaveBeenCalledOnce();
 
-    for (let time = 10; time <= 1000; time += 10) runFrame(time);
-
-    const samples = contexts[0].meter.getFloatTimeDomainData.mock.calls.map(([buffer]) => buffer);
-    expect(samples.length).toBeGreaterThan(20);
-    expect(samples.length).toBeLessThanOrEqual(32);
-    expect(new Set(samples).size).toBe(1);
-    expect(samples[0].byteLength).toBeLessThanOrEqual(8192);
-    const spectra = contexts[0].meter.getByteFrequencyData.mock.calls.map(([buffer]) => buffer);
-    expect(new Set(spectra).size).toBe(1);
-    expect(spectra[0].byteLength).toBeLessThanOrEqual(2048);
-    expect(onLevel.mock.calls.every(([value]) => value >= 0 && value <= 1)).toBe(true);
-    expect(onLevel.mock.calls.some(([value]) => value > 0)).toBe(true);
-    expect(contexts[0].source.connect).toHaveBeenCalledExactlyOnceWith(contexts[0].meter);
-    expect(network).not.toHaveBeenCalled();
-    expect(socket).not.toHaveBeenCalled();
-    expect(blob).not.toHaveBeenCalled();
-    expect(recorder).not.toHaveBeenCalled();
-    expect(invokeMock).not.toHaveBeenCalled();
-
-    monitor.stop();
-    const callsAfterStop = onLevel.mock.calls.length;
-    runFrame(1100);
-    expect(onLevel).toHaveBeenCalledTimes(callsAfterStop);
-    expect(onLevel).toHaveBeenLastCalledWith(0, Array(32).fill(0));
-    expect(frames.size).toBe(0);
-    expect(acquired.track.stop).toHaveBeenCalledOnce();
+    if (outcome === 'resolve') pending.resolve();
+    else pending.reject('old permission denied');
+    await flushPromises();
+    emitFrame(nextId, { sampleIndex: 1024 });
+    expect(onFrame).toHaveBeenCalledTimes(2);
+    expect(invokeMock.mock.calls.filter(([command, args]) => command === stopCommand && args?.sessionId === nextId)).toHaveLength(0);
   });
 
-  it('moves the dominant bars with the measured frequencies instead of pulsing one envelope', async () => {
-    getUserMedia.mockResolvedValue(makeStream().stream);
+  it('accepts only current, ordered audio frames and a new epoch can restart its sample counter', async () => {
+    const onFrame = vi.fn();
+    monitor = createMicrophoneMonitor(vi.fn(), vi.fn(), onFrame);
+    await monitor.start();
+    const id = currentSession();
+    emitFrame(id);
+    emitFrame(id);
+    emitFrame(id, { sampleIndex: 256 });
+    emitFrame(id, { audioEpoch: 0, sampleIndex: 2048 });
+    emitFrame('another-session');
+    expect(onFrame).toHaveBeenCalledOnce();
+
+    emitFrame(id, { audioEpoch: 2, sampleIndex: 0, discontinuity: true });
+    emitFrame(id, { audioEpoch: 1, sampleIndex: 4096 });
+    expect(onFrame).toHaveBeenCalledTimes(2);
+    expect(onFrame).toHaveBeenLastCalledWith(expect.objectContaining({ audioEpoch: 2, sampleIndex: 0, discontinuity: true }));
+  });
+
+  it.each([false, true])('waits for stop acknowledgement without waiting for old permission, cancelled next start=%s', async cancelNext => {
+    const oldStart = deferred<void>();
+    const stopped = deferred<void>();
+    mockInvoke(startCommand, () => oldStart.promise);
+    mockInvoke(stopCommand, () => stopped.promise);
+    monitor = createMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn());
+    const first = monitor.start();
+    await flushPromises();
+    const firstId = currentSession();
+
+    monitor.stop();
+    await expect(first).resolves.toBe(false);
+    expect(invokeMock).toHaveBeenCalledWith(stopCommand, { sessionId: firstId });
+    mockInvoke(startCommand, () => undefined);
+    const next = monitor.start();
+    await flushPromises();
+    expect(invokeMock.mock.calls.filter(([command]) => command === startCommand)).toHaveLength(1);
+
+    if (cancelNext) {
+      monitor.stop();
+      await expect(next).resolves.toBe(false);
+    }
+    stopped.resolve();
+    await expect(next).resolves.toBe(!cancelNext);
+    await flushPromises();
+    expect(invokeMock.mock.calls.filter(([command]) => command === startCommand)).toHaveLength(cancelNext ? 1 : 2);
+    if (!cancelNext) expect(currentSession()).not.toBe(firstId);
+
+    oldStart.resolve();
+    await flushPromises();
+    expect(invokeMock.mock.calls.filter(([command]) => command === startCommand)).toHaveLength(cancelNext ? 1 : 2);
+  });
+
+  it('bounds display values and discards malformed frequency frames', async () => {
     const onLevel = vi.fn();
-    monitor = createMicrophoneMonitor(onLevel, vi.fn());
+    const onFrame = vi.fn();
+    monitor = createMicrophoneMonitor(onLevel, vi.fn(), onFrame);
     await monitor.start();
-    const meter = contexts[0].meter;
-    meter.getFloatTimeDomainData.mockImplementation(samples => samples.fill(0.025));
-    let peakBin = 20;
-    meter.getByteFrequencyData.mockImplementation(spectrum => {
-      spectrum.fill(0);
-      spectrum[peakBin] = 200;
-      return spectrum;
-    });
-    runFrame(40);
-    const lowBands = onLevel.mock.calls[onLevel.mock.calls.length - 1][1] as number[];
-    const lowPeak = lowBands.indexOf(Math.max(...lowBands));
-    expect(Math.max(...lowBands)).toBeGreaterThan(0);
-    expect(lowBands.some(value => value === 0)).toBe(true);
+    emitFrame(currentSession(), { level: 2, probability: -1, bands: Array(32).fill(3) });
+    expect(onLevel).toHaveBeenLastCalledWith(1, Array(32).fill(1));
+    expect(onFrame).toHaveBeenLastCalledWith(expect.objectContaining({ probability: 0 }));
 
-    peakBin = 120;
-    runFrame(80);
-    runFrame(120);
-    const highBands = onLevel.mock.calls[onLevel.mock.calls.length - 1][1] as number[];
-    const highPeak = highBands.indexOf(Math.max(...highBands));
-    expect(highPeak).toBeGreaterThan(lowPeak);
-    expect(highBands[lowPeak]).toBeLessThan(lowBands[lowPeak]);
-    expect(highBands).not.toBe(lowBands);
-    expect(highBands.every(value => Number.isFinite(value) && value >= 0 && value <= 1)).toBe(true);
-
-    meter.getFloatTimeDomainData.mockImplementation(samples => samples.fill(0));
-    for (let time = 160; time <= 1160; time += 40) runFrame(time);
-    const quietBands = onLevel.mock.calls[onLevel.mock.calls.length - 1][1] as number[];
-    expect(quietBands.every(value => value < 0.001)).toBe(true);
+    emitFrame(currentSession(), { sampleIndex: 1024, bands: [0.5] });
+    emitFrame(currentSession(), { sampleIndex: 1536, level: Number.NaN });
+    emitFrame(currentSession(), { audioEpoch: -1, sampleIndex: 2048 });
+    emitFrame(currentSession(), { probeRevision: -1, sampleIndex: 2560 });
+    expect(onFrame).toHaveBeenCalledOnce();
   });
 
-  it('releases live resources and reports an unexpected track end once', async () => {
-    const acquired = makeStream();
-    getUserMedia.mockResolvedValue(acquired.stream);
+  it.each(['stopped', 'error'] as const)('handles a native %s before start acknowledgement without restoring the microphone', async kind => {
+    const pending = deferred<void>();
+    mockInvoke(startCommand, () => pending.promise);
     const onEnded = vi.fn();
-    monitor = createMicrophoneMonitor(vi.fn(), onEnded);
-    await monitor.start();
-    const end = acquired.track.onended!;
+    const onLevel = vi.fn();
+    monitor = createMicrophoneMonitor(onLevel, onEnded, vi.fn());
+    const started = monitor.start();
+    await flushPromises();
+    const ended = { kind, sessionId: currentSession(), audioEpoch: 1, reason: 'background' };
+    emitTauriEvent(audioEvent, ended);
+    emitTauriEvent(audioEvent, ended);
+    await expect(started).resolves.toBe(false);
+    expect(onEnded).toHaveBeenCalledExactlyOnceWith(ended);
+    expect(onLevel).toHaveBeenLastCalledWith(0, Array(32).fill(0));
 
-    end();
-    end();
-
+    pending.resolve();
+    await flushPromises();
     expect(onEnded).toHaveBeenCalledOnce();
-    expect(acquired.track.stop).toHaveBeenCalledOnce();
-    expect(acquired.track.onended).toBeNull();
-    expect(contexts[0].source.disconnect).toHaveBeenCalledOnce();
-    expect(contexts[0].meter.disconnect).toHaveBeenCalledOnce();
-    expect(contexts[0].close).toHaveBeenCalledOnce();
-    expect(frames.size).toBe(0);
   });
 
-  it.each(['track-mute', 'context-suspended', 'context-closed', 'context-interrupted'] as const)(
-    'stops metering and reports a runtime %s interruption once', async interruption => {
-      const acquired = makeStream();
-      getUserMedia.mockResolvedValue(acquired.stream);
-      const onEnded = vi.fn();
-      monitor = createMicrophoneMonitor(vi.fn(), onEnded);
-      await monitor.start();
-      const mute = acquired.track.onmute!;
-      const stateChanged = contexts[0].onstatechange!;
-
-      if (interruption === 'track-mute') {
-        acquired.track.muted = true;
-        mute();
-        mute();
-      } else {
-        contexts[0].setState(interruption.replace('context-', ''));
-        stateChanged();
-      }
-
-      expect(onEnded).toHaveBeenCalledOnce();
-      expect(acquired.track.stop).toHaveBeenCalledOnce();
-      expect(acquired.track.onended).toBeNull();
-      expect(acquired.track.onmute).toBeNull();
-      expect(contexts[0].onstatechange).toBeNull();
-      expect(contexts[0].source.disconnect).toHaveBeenCalledOnce();
-      expect(contexts[0].meter.disconnect).toHaveBeenCalledOnce();
-      expect(frames.size).toBe(0);
-    },
-  );
-
-  it('clears hardware listeners before intentional close so hangup is not reported as interruption', async () => {
-    const acquired = makeStream();
-    getUserMedia.mockResolvedValue(acquired.stream);
+  it('ignores terminal events from an old epoch and removes its listener after an intentional stop', async () => {
     const onEnded = vi.fn();
-    monitor = createMicrophoneMonitor(vi.fn(), onEnded);
+    const onFrame = vi.fn();
+    monitor = createMicrophoneMonitor(vi.fn(), onEnded, onFrame);
     await monitor.start();
-    expect(contexts[0].onstatechange).toBeTypeOf('function');
-    expect(acquired.track.onmute).toBeTypeOf('function');
+    const id = currentSession();
+    emitFrame(id, { audioEpoch: 2 });
+    emitTauriEvent(audioEvent, { kind: 'error', sessionId: id, audioEpoch: 1, reason: 'old route' });
+    expect(onEnded).not.toHaveBeenCalled();
 
     monitor.stop();
-
-    expect(contexts[0].close).toHaveBeenCalledOnce();
-    expect(contexts[0].state).toBe('closed');
-    expect(contexts[0].onstatechange).toBeNull();
-    expect(acquired.track.onended).toBeNull();
-    expect(acquired.track.onmute).toBeNull();
+    monitor.stop();
+    emitFrame(id, { audioEpoch: 2, sampleIndex: 1024 });
+    emitTauriEvent(audioEvent, { kind: 'stopped', sessionId: id, audioEpoch: 2, reason: 'requested' });
     expect(onEnded).not.toHaveBeenCalled();
+    expect(onFrame).toHaveBeenCalledOnce();
+    expect(invokeMock.mock.calls.filter(([command]) => command === stopCommand)).toHaveLength(1);
+  });
+
+  it('runs the local probe only for running capture and does not create a new intent after a late start acknowledgement', async () => {
+    monitor = createMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn());
+    await expect(monitor.setProbe(true)).resolves.toBe(false);
+    expect(invokeMock).not.toHaveBeenCalled();
+    await monitor.start();
+    const pending = deferred<void>();
+    mockInvoke(probeCommand, args => args?.enabled ? pending.promise : undefined);
+    const enabled = monitor.setProbe(true);
+    await monitor.setProbe(false);
+    expect(invokeMock).toHaveBeenLastCalledWith(probeCommand, { sessionId: currentSession(), enabled: false });
+
+    pending.resolve();
+    await expect(enabled).resolves.toBe(true);
+    expect(invokeMock.mock.calls.filter(([command]) => command === probeCommand)).toEqual([
+      [probeCommand, { sessionId: currentSession(), enabled: true }],
+      [probeCommand, { sessionId: currentSession(), enabled: false }],
+    ]);
+  });
+
+  it('settles a pending probe when microphone capture stops and cannot affect a newer session', async () => {
+    monitor = createMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn());
+    await monitor.start();
+    const oldId = currentSession();
+    const pending = deferred<void>();
+    mockInvoke(probeCommand, () => pending.promise);
+    const enabled = monitor.setProbe(true);
+    monitor.stop();
+    await expect(enabled).resolves.toBe(false);
+    await monitor.start();
+    pending.resolve();
+    await flushPromises();
+    expect(invokeMock.mock.calls.filter(([command, args]) => command === probeCommand && args?.sessionId !== oldId)).toHaveLength(0);
+  });
+
+  it('times out missing frames only after start acknowledgement, accepts silence and clears timers on stop', async () => {
+    vi.useFakeTimers();
+    const pending = deferred<void>();
+    mockInvoke(startCommand, () => pending.promise);
+    const onEnded = vi.fn();
+    const onLevel = vi.fn();
+    monitor = createMicrophoneMonitor(onLevel, onEnded, vi.fn());
+    const started = monitor.start();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(onEnded).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+
+    pending.resolve();
+    await expect(started).resolves.toBe(true);
+    const id = currentSession();
+    await vi.advanceTimersByTimeAsync(2999);
+    emitFrame(id, { level: 0, probability: 0, bands: Array(32).fill(0) });
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(onEnded).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(onEnded).toHaveBeenCalledExactlyOnceWith({
+      kind: 'error', sessionId: id, audioEpoch: 1, reason: 'voice_events_timeout',
+    });
+    expect(invokeMock).toHaveBeenCalledWith(stopCommand, { sessionId: id });
+    expect(onLevel).toHaveBeenLastCalledWith(0, Array(32).fill(0));
+    expect(vi.getTimerCount()).toBe(0);
+
+    mockInvoke(startCommand, () => undefined);
+    await monitor.start();
+    expect(vi.getTimerCount()).toBe(1);
+    monitor.stop();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(onEnded).toHaveBeenCalledOnce();
   });
 });

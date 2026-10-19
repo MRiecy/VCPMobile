@@ -1,0 +1,4 @@
+*.config text eol=lf
+*.ort binary
+*.aar binary
+*.wav binary

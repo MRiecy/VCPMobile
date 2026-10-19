@@ -1167,6 +1167,32 @@ Denies the set_keep_screen_on command without any pre-configured scope.
 <tr>
 <td>
 
+`vcp-mobile:allow-set-voice-probe`
+
+</td>
+<td>
+
+Enables the set_voice_probe command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:deny-set-voice-probe`
+
+</td>
+<td>
+
+Denies the set_voice_probe command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `vcp-mobile:allow-start-download-notification`
 
 </td>
@@ -1238,6 +1264,58 @@ Enables the start_network_monitoring command without any pre-configured scope.
 <td>
 
 Denies the start_network_monitoring command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:allow-start-voice-audio`
+
+</td>
+<td>
+
+Enables the start_voice_audio command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:deny-start-voice-audio`
+
+</td>
+<td>
+
+Denies the start_voice_audio command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:allow-stop-voice-audio`
+
+</td>
+<td>
+
+Enables the stop_voice_audio command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`vcp-mobile:deny-stop-voice-audio`
+
+</td>
+<td>
+
+Denies the stop_voice_audio command without any pre-configured scope.
 
 </td>
 </tr>

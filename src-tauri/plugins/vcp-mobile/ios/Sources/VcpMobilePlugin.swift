@@ -8,6 +8,7 @@ final class VcpMobilePlugin: Plugin {
     let webKit = NativeWebKit()
     let media = NativeMedia()
     let haptics = NativeHaptics()
+    let voice = NativeVoiceAudio()
 
     private let nativeEvents = NativeEventSubscription()
 
@@ -17,6 +18,8 @@ final class VcpMobilePlugin: Plugin {
             self?.nativeEvents.sendNotificationClick(click)
         }
         notifications.install()
+        voice.eventsReady = { [weak self] in self?.nativeEvents.canSendVoiceAudio ?? false }
+        voice.onEvent = { [weak self] payload in self?.nativeEvents.sendVoiceAudio(payload) ?? false }
     }
 
     @objc override func load(webview: WKWebView) {
@@ -26,6 +29,7 @@ final class VcpMobilePlugin: Plugin {
             self.presentation.attach(webview)
             self.webKit.attach(webview)
             self.haptics.attach(webview)
+            self.voice.attach(webview)
             NativeShareInbox.configure(webView: webview)
             self.nativeEvents.refreshSubscription()
         }
@@ -40,6 +44,7 @@ final class VcpMobilePlugin: Plugin {
     }
 
     deinit {
+        voice.shutdown()
         media.shutdown()
     }
 }

@@ -1,0 +1,13 @@
+# Automatically generated - DO NOT EDIT!
+
+"$schema" = "../../schemas/schema.json"
+
+[[permission]]
+identifier = "allow-set-voice-probe"
+description = "Enables the set_voice_probe command without any pre-configured scope."
+commands.allow = ["set_voice_probe"]
+
+[[permission]]
+identifier = "deny-set-voice-probe"
+description = "Denies the set_voice_probe command without any pre-configured scope."
+commands.deny = ["set_voice_probe"]

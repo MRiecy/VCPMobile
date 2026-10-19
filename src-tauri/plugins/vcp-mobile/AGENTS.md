@@ -29,7 +29,7 @@ Rust 核心内部调用 ─> Rust 公开入口 ─┼─> PluginHandle / JNI
 | `src/lib.rs` | 组合插件、注册前端可调用命令、注入 `VcpMobileState` |
 | `src/events.rs` | Rust 原生 Channel 订阅、生命周期/网络事件类型、后台服务失败通知与快照收集；真实 Events 注册失败保留至进程结束，Guardian/Helper 取走 |
 | `src/ios.rs` | Swift 调用与事件注册；原生 receiver 持有至最终结果。授权等长等待和工具查询由调用者移入 blocking worker，事件订阅使用独立异步接收任务 |
-| `ios/Package.swift`、`ios/Sources/VcpMobilePlugin.swift` | 单一 SwiftPM target、初始化符号、同步通知安装和 WebView attach 的组合入口 |
+| `ios/Package.swift`、`ios/Sources/VcpMobilePlugin.swift` | 主插件 SwiftPM target、裁剪 ORT binary/ObjC binding、初始化符号、同步通知安装和 WebView attach 的组合入口 |
 | `ios/Sources/Lifecycle/NativeEventSubscription.swift` | 唯一长期 Channel、主队列 App/Scene 观察、NWPathMonitor、进程序列和订阅 generation；不拥有业务状态 |
 | `ios/Sources/Notifications/NativeNotifications.swift`、`NativeNotificationSceneBridge.swift` | 真实通知授权、发送、前台展示和点击快照；在插件初始化时接入锁定 Tao Scene 入口并完整转发原窗口实现 |
 | `ios/Sources/Device/` | 设备/电量/空间快照、按次网络查询和单 owner 有界传感器采样；缺失字段保留原因，退后台停止采样 |
@@ -47,6 +47,9 @@ Rust 核心内部调用 ─> Rust 公开入口 ─┼─> PluginHandle / JNI
 | `src/stream.rs` | 请求独立的前台保活租约与 helper service 的 Rust 边界 |
 | `src/system.rs` | 承接权限、文件、设备状态、更新与系统能力调用 |
 | `src/webview.rs`、`android/src/main/.../webview/NativeWebViewResume.kt`、`ios/Sources/WebView/NativeWebViewResume.swift` | 双端视觉恢复握手；原生持有单份旧画面遮罩并等待绘制提交，Vue 只确认当前文档布局就绪，不改变业务生命周期或主题底色 |
+| `src/voice.rs`、`src/voice/` | 原生语音控制、session/epoch 隔离及按音频样本时间统一的人声起止判定；消费已有长期事件桥，不传 PCM 到 Vue |
+| `android/src/main/.../voice/`、`ios/Sources/Voice/` | 单一原生采集/播放 owner、系统 AEC、Silero 推理、有界音频缓冲与本地样本诊断；iOS 音频会话协调器使静音保活向通话退让 |
+| `../../runtime-assets/voice/` | 固定 Silero 模型、算子/类型裁剪输入、双端 ONNX Runtime 构建与校验、本地诊断音频及来源声明 |
 | `src/cli.rs` | 承接 Rust 核心到 Android CLI process / PTY 的异步桥接 |
 | `android/src/main/.../VcpMobilePlugin.kt` | Kotlin 命令入口与插件 attach/destroy 编排 |
 | `android/src/main/.../{service,cli}/` 与各 Manager | 执行独立的原生生命周期、后台服务和平台操作 |
@@ -55,7 +58,7 @@ Rust 核心内部调用 ─> Rust 公开入口 ─┼─> PluginHandle / JNI
 
 ### 1.3 Android 功能分包
 
-Android 保留单一 Gradle 插件模块，`com.vcp.mobile` 内按真实职责分包；目录与 Kotlin package 一致。根包保留 `VcpMobilePlugin` 的框架入口和 JNI 固定符号 `ScreenKeepOnArbiter`。功能实现归 `files/`、`sharing/`、`permissions/`、`device/`、`media/`、`webview/`、`lifecycle/`、`runtime/`、`notifications/`、`haptics/`、`clipboard/`、`root/`、`updater/`、`cli/`、`sse/`；Manifest 声明的组件继续位于 `service/`。
+Android 保留单一 Gradle 插件模块，`com.vcp.mobile` 内按真实职责分包；目录与 Kotlin package 一致。根包保留 `VcpMobilePlugin` 的框架入口和 JNI 固定符号 `ScreenKeepOnArbiter`。功能实现归 `files/`、`sharing/`、`permissions/`、`device/`、`media/`、`voice/`、`webview/`、`lifecycle/`、`runtime/`、`notifications/`、`haptics/`、`clipboard/`、`root/`、`updater/`、`cli/`、`sse/`；Manifest 声明的组件继续位于 `service/`。
 
 `@Command`、`@ActivityCallback`、`@PermissionCallback` 留在插件的薄入口，组合对象不由 Tauri 自动扫描。参数类随功能共置。操作的权限等待、取消、终态与清理属于同一资源所有者，不能因分包复制状态或建立通用任务总线。原生 Channel 与 WebView CustomEvent 保持各自实际消费者。
 
@@ -63,7 +66,7 @@ Android 保留单一 Gradle 插件模块，`com.vcp.mobile` 内按真实职责�
 
 ### 1.4 iOS 功能目录与扩展边界
 
-主插件保留单一 SwiftPM product/target，`Sources/` 下按 `Lifecycle/`、`Files/`、`Media/`、`Device/`、`WebView/`、`Notifications/`、`Background/`、`Sharing/`、`Clipboard/`、`Haptics/` 组织。目录只提供职责导航；封装仍由类型和访问级别表达。功能文件中的 `VcpMobilePlugin` extension 保留 `@objc` selector，普通资源对象不直接成为 Tauri 命令入口。各命令参数随入口保持私有，仅真实共享结果类型使用 target 内部可见性。
+主插件保留一个公开 SwiftPM product，`Sources/` 下按 `Lifecycle/`、`Files/`、`Media/`、`Voice/`、`Device/`、`WebView/`、`Notifications/`、`Background/`、`Sharing/`、`Clipboard/`、`Haptics/` 组织；裁剪 ORT binary 与 Objective-C binding 使用内部 target。目录只提供职责导航；封装仍由类型和访问级别表达。功能文件中的 `VcpMobilePlugin` extension 保留 `@objc` selector，普通资源对象不直接成为 Tauri 命令入口。各命令参数随入口保持私有，仅真实共享结果类型使用 target 内部可见性。
 
 `NativeEventSubscription` 整体持有 Channel、观察者、网络监听及 generation，进程序列不会随 WebView attach 重置。文件选择、相机和导出共用一个呈现 owner；操作保存初始 Scene 身份，取消仍等待系统读写的真实终态。媒体预约、取消和交付继续归 `NativeMedia`，后台音频及常亮继续归进程级租约 owner。
 

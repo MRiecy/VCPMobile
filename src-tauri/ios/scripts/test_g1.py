@@ -35,8 +35,25 @@ class EngineeringFileTests(unittest.TestCase):
             self.assertEqual((project / "project.yml").read_text(encoding="utf-8"), source)
             overlay = json.loads(first)
             self.assertEqual(overlay["include"], ["project.yml"])
-            self.assertEqual(len(overlay["targets"]["vcp-mobile_iOS"]["sources"]), 1)
+            self.assertEqual(len(overlay["targets"]["vcp-mobile_iOS"]["sources"]), 2)
             self.assertEqual(g1.digest(project / "VCPResources" / "PrivacyInfo.xcprivacy"), g1.digest(g1.IOS / "PrivacyInfo.xcprivacy"))
+            voice = g1.verify_voice_resources(project / "VCPResources")
+            self.assertIn("voice/silero_vad.ort", {entry["file"] for entry in voice})
+            self.assertIn({"path": "VCPResources/voice", "type": "folder", "buildPhase": "resources"}, overlay["targets"]["vcp-mobile_iOS"]["sources"])
+
+    def test_archive_voice_resources_reject_missing_and_changed_model(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as temporary:
+            app = Path(temporary) / "App.app"
+            (app / "voice").mkdir(parents=True)
+            with self.assertRaisesRegex(RuntimeError, "not embedded"):
+                g1.verify_voice_resources(app)
+            for source in g1.voice_assets():
+                (app / "voice" / source.name).write_bytes(source.read_bytes())
+            g1.verify_voice_resources(app)
+            with (app / "voice" / "silero_vad.ort").open("r+b") as model:
+                model.write(b"bad")
+            with self.assertRaisesRegex(RuntimeError, "differs from the build input"):
+                g1.verify_voice_resources(app)
 
     def test_overlay_copies_share_sources_into_the_extension_only(self):
         with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as temporary:

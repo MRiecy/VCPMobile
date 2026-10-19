@@ -1,0 +1,65 @@
+{
+  "ortVersion": "1.24.2",
+  "ortCommit": "058787ceead760166e3c50a0a4cba8a833a6f53f",
+  "modelBytes": 1852912,
+  "modelSha256": "8f7f66bd57462e7212c61a86ed4dca1559838f01cf2a47947f60cffcc2ab2520",
+  "operatorsSha256": "f84a943a3e406e93bc5057c97acf32d6fa8c8fc83e38a2f9ead4c345680afb68",
+  "libraryBytes": 2228096,
+  "librarySha256": "06b7aeea5b15f96e6dd0a0a805c1d134149c456c73ae93dc7227c55c0896acf2",
+  "aarBytes": 1055953,
+  "aarSha256": "17093efc4965369c097016382260c5a7361203eae5b3e82cbd74b2b3408f52ad",
+  "jniBytes": 60640,
+  "jniSha256": "c32efb19b1ff154c279682df13f66a0ed7f25138f37ef054b0df7d55ee6ec2b9",
+  "elf": {
+    "loadAlignments": {
+      "libonnxruntime.so": [
+        16384,
+        16384,
+        16384
+      ],
+      "libonnxruntime4j_jni.so": [
+        16384,
+        16384
+      ]
+    },
+    "neededLibraries": {
+      "libonnxruntime.so": [
+        "libdl.so",
+        "liblog.so",
+        "libm.so",
+        "libc.so"
+      ],
+      "libonnxruntime4j_jni.so": [
+        "libonnxruntime.so",
+        "libdl.so",
+        "liblog.so",
+        "libm.so",
+        "libc.so"
+      ]
+    },
+    "jniRequiredOrtSymbols": [
+      "OrtGetApiBase",
+      "OrtSessionOptionsAppendExecutionProvider_CPU"
+    ]
+  },
+  "buildFlags": [
+    "--minimal_build",
+    "--disable_ml_ops",
+    "--disable_rtti",
+    "--enable_reduced_operator_type_support",
+    "--enable_lto",
+    "--no_kleidiai",
+    "--no_sve",
+    "--skip_tests",
+    "--skip_submodule_sync",
+    "onnxruntime_BUILD_UNIT_TESTS=OFF",
+    "onnxruntime_DISABLE_FLOAT8_TYPES=ON",
+    "onnxruntime_DISABLE_FLOAT4_TYPES=ON",
+    "onnxruntime_DISABLE_SPARSE_TENSORS=ON",
+    "onnxruntime_DISABLE_OPTIONAL_TYPE=ON",
+    "onnxruntime_USE_KLEIDIAI=OFF",
+    "onnxruntime_USE_SVE=OFF"
+  ],
+  "androidApi": 26,
+  "ndk": "29.0.14206865"
+}

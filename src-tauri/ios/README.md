@@ -37,7 +37,7 @@ gh workflow run ios-g1.yml --ref main -f phase=phase-3 -f profile=debug
 | `scripts/g1.py` | 初始化证据、重放工程、真实 device 构建、归档收集及结果摘要 |
 | [`share/`](share/README.md) | 独立 Share Extension 源码、Info、双 target App Group entitlement 和 Phase 6 重签输入 |
 
-Swift plugin 的源文件仍归 `../plugins/vcp-mobile/ios/`。构建直接使用 Tauri/SwiftPM 的正常依赖流程，不拦截 `swift`，不维护构建包白名单，不向 registry 预置或改写 lock。Cargo/pnpm 的正常锁文件和 VCP Swift manifest 的依赖约束继续生效。
+Swift plugin 的源文件仍归 `../plugins/vcp-mobile/ios/`。本地语音依赖 `../runtime-assets/voice/` 固定模型与算子清单生成的裁剪 ONNX Runtime：`voice-runtime` 阶段先在独立 Python 环境构建 device arm64 XCFramework、准备 Objective-C binding，再交由正常 Tauri/SwiftPM 流程消费；插件 Rust build 显式链接裁剪静态核心。模型、诊断样本及许可证由 overlay 复制到 `VCPResources/voice`，以 folder resource 随主 App 打包，Swift 使用 `Bundle.main/voice`，不依赖 swift-rs 自动复制 SwiftPM 资源包。归档收集核对实际文件哈希，结果写入 `voice-resources.json`。裁剪失败不会切换到完整运行库。不拦截 `swift`，不向 registry 预置或改写 lock；Cargo/pnpm 的正常锁文件和 VCP Swift manifest 的依赖约束继续生效。
 
 最低运行版本由用户确定为 26.0；本项目 Swift manifest 同步使用 `.iOS("26.0")`，保留原有 Swift tools 版本。G1 的 `IPHONEOS_DEPLOYMENT_TARGET` 直接读取 Tauri 配置，Xcode 仍由 `g1-inputs.json` 单独选择；提高最低版本不等于已经取得 Apple 构建结果。
 
@@ -56,7 +56,7 @@ manifest 的 `status=built` 仅表示构建和归档收集成功，产物内容�
 ## 诊断结果怎么读
 
 1. 先看 Actions Summary：checkout commit、阶段/profile、Xcode/SDK、失败步骤，以及失败时最后一份日志的末尾摘要。
-2. 下载 `ios-<phase>-<profile>-<sha>-<run>-<attempt>` artifact，读取 `ios-build-manifest.json` 和完整日志。`toolchain`、`rust-target`、`project-init`、`project-overlay`、`device-build`、`archive-collection` 分别记录结果；Swift、Rust、前端或链接的具体失败仍看真实 `build.log`。
+2. 下载 `ios-<phase>-<profile>-<sha>-<run>-<attempt>` artifact，读取 `ios-build-manifest.json` 和完整日志。`toolchain`、`rust-target`、`voice-runtime`、`project-init`、`project-overlay`、`device-build`、`archive-collection` 分别记录结果；裁剪运行库的具体失败看 `voice-runtime.log`，Swift、Rust、前端或链接的具体失败仍看真实 `build.log`。
 3. 依赖安装在 Apple 构建之前失败时，仍有 `pnpm-setup.log` / `dependencies.log` 和 workflow step 结果。构建超时或被终止时，已落盘的 running 阶段在摘要中标记 interrupted；摘要/上传采用 `always()` 尽力收集，runner 丢失或整体 job 强制终止仍可能无法上传。
 4. `generated-project/` 保存已生成的 XcodeGen spec、pbxproj、plist、配置、scheme 和解析锁等输入；成功归档另有 zip、SHA-256 和 bundle 诊断。文件采集只提供事实，不建立手写预期值门禁。
 5. 将真实失败修回对应 owner，再对同一阶段集中复验；在该阶段记录 run URL、commit、工具版本和结论。编译通过不证明通知点击、权限回调或 SSE 后台持续运行已在设备上验证。

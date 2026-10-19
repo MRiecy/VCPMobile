@@ -26,6 +26,23 @@ internal class NativeEvents(
     private var isNetworkMonitoringStarted = false
     private var nativeEventChannel: Channel? = null
 
+    internal fun isReady(): Boolean = !runtime.isDestroying && nativeEventChannel != null
+
+    /** Voice probabilities must never be acknowledged while the native transport is absent. */
+    internal fun tryEmitVoiceAudio(payload: JSObject): Boolean {
+        check(Looper.myLooper() == Looper.getMainLooper())
+        if (runtime.isDestroying) return false
+        val channel = nativeEventChannel ?: return false
+        return try {
+            channel.send(JSObject().apply { put("event", "voiceAudio"); put("payload", payload) })
+            true
+        } catch (error: Exception) {
+            Log.e(TAG, "Voice event channel failed", error)
+            nativeEventChannel = null
+            false
+        }
+    }
+
     internal fun emitNativeEvent(event: String, payload: JSObject) {
         activity.runOnUiThread {
             if (runtime.isDestroying) return@runOnUiThread

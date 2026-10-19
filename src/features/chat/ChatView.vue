@@ -277,7 +277,7 @@ onUnmounted(() => {
       <div class="flex items-center gap-3 min-w-0 flex-1">
         <!-- 侧边栏按钮 (使用内联 SVG 确保 100% 可见) -->
         <button @click="voiceCall.active ? overlayStore.openVoicePresets() : layoutStore.toggleLeftDrawer()"
-          class="w-11 h-11 shrink-0 flex items-center justify-center rounded-xl bg-black/5 dark:bg-white/10 active:opacity-60 transition-opacity border border-black/5 dark:border-white/5"
+          class="w-10 h-10 shrink-0 flex items-center justify-center rounded-xl bg-black/5 dark:bg-white/10 active:opacity-60 transition-opacity border border-black/5 dark:border-white/5"
           :class="{ 'vcp-left-drawer-trigger': !voiceCall.active }"
           :aria-label="voiceCall.active ? '语音预设' : '打开助手与话题侧栏'"
           :aria-controls="voiceCall.active ? undefined : 'agent-sidebar'"
@@ -342,7 +342,7 @@ onUnmounted(() => {
         </button>
         <!-- 通知中心按钮 -->
         <button @click="voiceCall.active ? overlayStore.openVoiceSettings() : layoutStore.toggleRightDrawer()"
-          class="w-11 h-11 flex items-center justify-center rounded-xl bg-black/5 dark:bg-white/10 active:opacity-60 transition-opacity border border-black/5 dark:border-white/5 relative"
+          class="w-10 h-10 flex items-center justify-center rounded-xl bg-black/5 dark:bg-white/10 active:opacity-60 transition-opacity border border-black/5 dark:border-white/5 relative"
           :class="{ 'vcp-right-drawer-trigger': !voiceCall.active }"
           :aria-label="voiceCall.active ? '语音设置' : '打开通知与工具侧栏'"
           :aria-controls="voiceCall.active ? undefined : 'notification-sidebar'"
@@ -432,7 +432,8 @@ onUnmounted(() => {
       </Transition>
       <Transition name="voice-fade">
         <VoiceCallControls v-if="voiceCall.active"
-          :microphone-state="voiceCall.microphoneState" :level="voiceCall.level" :bands="voiceCall.bands" :error-message="voiceCall.errorMessage"
+          :microphone-state="voiceCall.microphoneState" :level="voiceCall.level" :bands="voiceCall.bands"
+          :speech-active="voiceCall.speechActive" :error-message="voiceCall.errorMessage"
           @toggle-microphone="voiceCall.toggleMicrophone" @hangup="voiceCall.end" />
       </Transition>
       <div class="no-swipe pointer-events-none" :style="{ height: voiceCall.active

@@ -341,6 +341,9 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
                                 &event_handle, "guardian", &reason,
                             );
                         }
+                        NativeEvent::VoiceAudio(event) => {
+                            tauri_plugin_vcp_mobile::voice::handle_native_event(&event_handle, event);
+                        }
                         NativeEvent::Other {} => {}
                     }
                 })

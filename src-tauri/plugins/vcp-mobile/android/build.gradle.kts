@@ -5,6 +5,19 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Unpack the small custom AAR into this library's own inputs. AGP does not allow
+// a direct local AAR dependency when packaging a library AAR.
+val sileroRuntimeDirectory = layout.buildDirectory.dir("generated/silero-runtime")
+val prepareSileroRuntime by tasks.registering(Sync::class) {
+    from(zipTree(file("../../../runtime-assets/voice/android/onnxruntime-silero-1.24.2.aar"))) {
+        include("classes.jar", "jni/arm64-v8a/*.so")
+    }
+    into(sileroRuntimeDirectory)
+}
+val sileroRuntimeClasses = files(sileroRuntimeDirectory.map { it.file("classes.jar") })
+    .builtBy(prepareSileroRuntime)
+tasks.named("preBuild").configure { dependsOn(prepareSileroRuntime) }
+
 android {
     namespace = "com.vcp.mobile"
     compileSdk = 36
@@ -12,6 +25,8 @@ android {
 
     defaultConfig {
         minSdk = 26
+        // JNI calls into Java by class/member name, including result/value constructors.
+        consumerProguardFiles("../../../runtime-assets/voice/android/silero-consumer-rules.pro")
         ndk {
             abiFilters += "arm64-v8a"
         }
@@ -36,7 +51,9 @@ android {
     sourceSets {
         getByName("main") {
             jniLibs.srcDirs("src/main/jniLibs")
+            jniLibs.srcDir(sileroRuntimeDirectory.map { it.dir("jni") })
             assets.srcDirs("../../../runtime-assets/vcp-cli/android-assets")
+            assets.srcDirs("../../../runtime-assets/voice/assets")
         }
     }
 
@@ -58,6 +75,8 @@ kotlin {
 }
 
 dependencies {
+    // CPU-only ORT built for Silero's exact operators/types. No Maven full-runtime fallback.
+    implementation(sileroRuntimeClasses)
     implementation(project(":tauri-android"))
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("androidx.core:core-ktx:1.12.0")
