@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, disposePinia, setActivePinia, type Pinia } from 'pinia';
-import { flushPromises } from '@vue/test-utils';
-import { useChatHistoryStore } from '../../../core/stores/chatHistoryStore';
+import { MAX_HISTORY_MESSAGES, useChatHistoryStore } from '../../../core/stores/chatHistoryStore';
+import { useTopicStore } from '../../../core/stores/topicListManager';
+import type { ChatMessage } from '../../../core/types/chat';
 import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
-import { useChatStreamStore } from '../../../core/stores/chatStreamStore';
 import { useAttachmentStore } from '../../../core/stores/attachmentStore';
 import { useSettingsStore } from '../../../core/stores/settings';
 import { useShareStore } from '../../../core/stores/shareStore';
-import { invokeMock, mockInvoke, type MockChannel } from '../../mocks/tauri';
+import { invokeMock, mockInvoke } from '../../mocks/tauri';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -35,8 +35,8 @@ async function setup() {
   return { session, history, key: { ...session.currentConversationKey! } };
 }
 
-describe('voice submission isolation', () => {
-  it('persists only recognized text and preserves staged uploads, share draft and edit-resend intent', async () => {
+describe('persisted voice message projection', () => {
+  it('merges persisted text and preserves staged uploads, share draft and edit-resend intent', async () => {
     const { history, key } = await setup();
     const attachments = useAttachmentStore();
     attachments.stagedAttachments = [{ id: 'upload', type: 'file', name: 'pending.pdf', size: 123, src: 'pending', status: 'loading' }];
@@ -47,11 +47,16 @@ describe('voice submission isolation', () => {
     };
     const editing = { key: { conversation: key, messageId: 'original' }, initialContent: '正在编辑' };
     history.editingMessage = editing;
-    await history.sendVoiceMessage('语音文字', key, { messageId: 'voice-user', isCurrent: () => true });
+    const increment = vi.spyOn(useTopicStore(), 'incrementTopicMsgCount');
+    const message: ChatMessage = { id: 'voice-user', role: 'user', content: '语音文字', timestamp: 1 };
+    history.mergePersistedVoiceMessage(key, message, 1);
+    history.mergePersistedVoiceMessage(key, message, 1);
 
-    const append = invokeMock.mock.calls.find(([command]) => command === 'append_single_message')!;
-    expect(append[1]).toMatchObject({ ownerId: 'agent', ownerType: 'agent', topicId: 'topic', message: { id: 'voice-user', content: '语音文字' } });
-    expect((append[1]?.message as Record<string, unknown>).attachments).toBeUndefined();
+    expect(history.currentChatHistory).toHaveLength(1);
+    expect(history.currentChatHistory[0]).toMatchObject(message);
+    expect(increment).not.toHaveBeenCalled();
+    expect(invokeMock.mock.calls.some(([command]) => command === 'append_single_message'
+      || command === 'handle_agent_chat_message' || command.includes('haptic') || command.includes('tts'))).toBe(false);
     expect(attachments.stagedAttachments[0].id).toBe('upload');
     expect(share.activeDraft?.text).toBe('未发送草稿');
     expect(share.sending).toBe(false);
@@ -59,42 +64,77 @@ describe('voice submission isolation', () => {
     expect(invokeMock.mock.calls.some(([command]) => command === 'truncate_history_after_message' || command.includes('commit_share'))).toBe(false);
   });
 
-  it('does not dispatch a generation or insert a late visible message after its frozen conversation changes', async () => {
+  it('does not insert a late message or dispatch generation after its frozen conversation changes', async () => {
     const { history, session, key } = await setup();
-    const saved = deferred<{ blocks: []; topicUpdatedAt: number }>();
-    mockInvoke('append_single_message', () => saved.promise);
-    const sending = history.sendVoiceMessage('旧会话语音', key, { messageId: 'old-voice', isCurrent: () => true });
-    await flushPromises();
     session.setConversation({ id: 'other', type: 'agent' }, 'other-topic');
     await history.loadHistoryPaginated('other', 'agent', 'other-topic');
-    saved.resolve({ blocks: [], topicUpdatedAt: 2 });
-    await sending;
+    history.mergePersistedVoiceMessage(key, { id: 'old-voice', role: 'user', content: '旧会话语音', timestamp: 2 }, 2);
     expect(history.currentChatHistory).toEqual([]);
     expect(invokeMock.mock.calls.some(([command]) => command === 'handle_agent_chat_message')).toBe(false);
   });
 
-  it('observes origin identity from the registered reconnect output while preserving normal chat rendering', async () => {
-    const { history } = await setup();
-    let output: MockChannel<unknown> | undefined;
-    mockInvoke('reconnect_chat_streams', args => {
-      output = args?.channel as MockChannel<unknown>;
-      return { generations: [], activeRequests: [], groupTurns: [] };
-    });
-    const streams = useChatStreamStore();
-    const observed = vi.fn();
-    const release = streams.observeEvents(observed);
-    await streams.checkAndRecoverInterruptedStreams();
-    output!.emit({
-      type: 'request_activity', messageId: '', consumerRevision: 1, chunk: { active: true },
-      context: { ownerId: 'agent', ownerType: 'agent', topicId: 'topic', requestId: 'attempt', originUserMessageId: 'voice-user' },
-    });
-    output!.emit({
-      type: 'end', messageId: 'reply', consumerRevision: 2, content: '正常回复', blocks: [], finishReason: 'stop',
-      context: { ownerId: 'agent', ownerType: 'agent', topicId: 'topic', originUserMessageId: 'voice-user' },
-    });
-    await flushPromises();
-    expect(observed).toHaveBeenCalledWith(expect.objectContaining({ type: 'request_activity', context: expect.objectContaining({ originUserMessageId: 'voice-user' }) }));
-    expect(history.currentChatHistory.some(message => message.id === 'reply' && message.content === '正常回复')).toBe(true);
-    release();
+
+  it('keeps a deep history window while merging corrections and showing the latest-message affordance', async () => {
+    const { history, key } = await setup();
+    history.currentChatHistory = [{ id: 'anchor', role: 'assistant', content: '旧内容', timestamp: 1 }];
+    history.hasEvictedNewer = true;
+    history.mergePersistedVoiceMessage(key, { id: 'voice-user', role: 'user', timestamp: 9 }, 9);
+    mockInvoke('load_chat_history', () => [
+      { id: 'anchor', role: 'assistant', content: '已保存内容', timestamp: 1 },
+      { id: 'voice-user', role: 'user', timestamp: 9 },
+    ]);
+    await history.reconcileVoiceHistory(key);
+    expect(history.currentChatHistory.map(message => message.id)).toEqual(['anchor']);
+    expect(history.currentChatHistory[0].content).toBe('已保存内容');
+    expect(history.hasEvictedNewer).toBe(true);
+  });
+
+  it('does not trim the visible oldest row when an automatic voice message fills the window', async () => {
+    const { history, key } = await setup();
+    history.currentChatHistory = Array.from({ length: MAX_HISTORY_MESSAGES }, (_, index) => ({
+      id: 'existing-' + index, role: 'user', timestamp: index,
+    }));
+    history.mergePersistedVoiceMessage(key, { id: 'new-voice', role: 'user', timestamp: 1000 }, 1000);
+    expect(history.currentChatHistory).toHaveLength(MAX_HISTORY_MESSAGES);
+    expect(history.currentChatHistory[0].id).toBe('existing-0');
+    expect(history.hasEvictedNewer).toBe(true);
+  });
+
+  it('reconciles missed user and reply rows by ID without loading older rows or replaying sends', async () => {
+    const { history, key } = await setup();
+    history.currentChatHistory = [{ id: 'anchor', role: 'assistant', timestamp: 10 }];
+    mockInvoke('load_chat_history', () => [
+      { id: 'older', role: 'user', timestamp: 1 },
+      { id: 'anchor', role: 'assistant', timestamp: 10 },
+      { id: 'voice-user', role: 'user', timestamp: 11 },
+      { id: 'voice-reply', role: 'assistant', timestamp: 12 },
+    ]);
+    await history.reconcileVoiceHistory(key);
+    await history.reconcileVoiceHistory(key);
+    expect(history.currentChatHistory.map(message => message.id)).toEqual(['anchor', 'voice-user', 'voice-reply']);
+    expect(invokeMock.mock.calls.some(([name]) => ['append_single_message', 'start_tts_session', 'handle_agent_chat_message'].includes(name))).toBe(false);
+  });
+
+  it('keeps an old anchor when the latest DB page no longer overlaps the current window', async () => {
+    const { history, key } = await setup();
+    history.currentChatHistory = [{ id: 'anchor', role: 'assistant', timestamp: 1 }];
+    mockInvoke('load_chat_history', () => Array.from({ length: MAX_HISTORY_MESSAGES }, (_, index) => ({
+      id: 'newer-' + index, role: 'user', timestamp: index + 100,
+    })));
+    await history.reconcileVoiceHistory(key);
+    expect(history.currentChatHistory.map(message => message.id)).toEqual(['anchor']);
+    expect(history.hasEvictedNewer).toBe(true);
+  });
+
+  it('ignores a DB reconciliation response after the visible conversation epoch changes', async () => {
+    const { history, session, key } = await setup();
+    const loaded = deferred<ChatMessage[]>();
+    mockInvoke('load_chat_history', () => loaded.promise);
+    const reconciliation = history.reconcileVoiceHistory(key);
+    session.setConversation({ id: 'other', type: 'agent' }, 'other-topic');
+    history.resetHistoryForConversation();
+    loaded.resolve([{ id: 'late-voice', role: 'user', timestamp: 11 }]);
+    await reconciliation;
+    expect(history.currentChatHistory).toEqual([]);
   });
 });

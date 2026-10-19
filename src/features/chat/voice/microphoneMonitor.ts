@@ -36,10 +36,10 @@ interface CaptureRequest {
   sessionId: string;
   epoch: number;
   sampleIndex: number;
+  expectedLifecycleEpoch?: number | null;
   startSubmitted: boolean;
   running: boolean;
   unlisten?: UnlistenFn;
-  heartbeat?: ReturnType<typeof setTimeout>;
   cancel: () => void;
   cancelled: Promise<false>;
 }
@@ -51,14 +51,18 @@ export function createMicrophoneMonitor(
   onLevel: (level: number, bands: readonly number[]) => void,
   onEnded: (event: VoiceAudioEnd) => void,
   onFrame: (frame: VoiceAudioFrame) => void,
-  lifecycle: { beforeStart: (sessionId: string) => Promise<string>; onStop: (sessionId: string, receipt?: CaptureStopReceipt) => void },
+  lifecycle: {
+    beforeStart: (sessionId: string) => Promise<string>;
+    currentLifecycleEpoch?: () => number | null;
+    onConfigured?: (configured: boolean) => void;
+  },
 ) {
   let current: CaptureRequest | null = null;
   let pendingStop: Promise<CaptureStopReceipt> | null = null;
 
   const stopNative = (request: CaptureRequest, beforeNextStart = true) => {
     // Never await start or its permission dialog before submitting cancellation.
-    const stopping = invoke<CaptureStopReceipt>('plugin:vcp-mobile|stop_voice_audio', { sessionId: request.sessionId });
+    const stopping = invoke<CaptureStopReceipt>('close_voice_microphone', { sessionId: request.sessionId });
     if (beforeNextStart) pendingStop = stopping;
     void stopping.finally(() => {
       if (pendingStop === stopping) pendingStop = null;
@@ -66,24 +70,18 @@ export function createMicrophoneMonitor(
     return stopping;
   };
 
-  const release = (request: CaptureRequest, cancel = true, inputStopped = true, receipt?: CaptureStopReceipt) => {
+  const release = (request: CaptureRequest, cancel = true) => {
     if (current === request) current = null;
     if (cancel) request.cancel();
-    clearTimeout(request.heartbeat);
-    request.heartbeat = undefined;
     request.unlisten?.();
     request.unlisten = undefined;
-    if (inputStopped) lifecycle.onStop(request.sessionId, receipt);
   };
 
   const haltInput = (request: CaptureRequest, cancel = true) => {
-    release(request, cancel, false);
-    if (request.startSubmitted) {
-      // Seal native PCM before asking ASR to drain the already-recorded input.
-      // UI cancellation remains immediate; accepted recognition is independent.
-      void stopNative(request).then(receipt => lifecycle.onStop(request.sessionId, receipt),
-        () => lifecycle.onStop(request.sessionId)).catch(() => {});
-    } else lifecycle.onStop(request.sessionId);
+    release(request, cancel);
+    // Rust closes capture and seals ASR in one intent even if this WebView
+    // suspends before the acknowledgement. No second JS completion is needed.
+    if (request.startSubmitted) void stopNative(request).catch(() => {});
   };
 
   const stop = () => {
@@ -92,14 +90,9 @@ export function createMicrophoneMonitor(
     onLevel(0, SILENT_BANDS);
   };
 
-  const armHeartbeat = (request: CaptureRequest) => {
-    clearTimeout(request.heartbeat);
-    request.heartbeat = setTimeout(() => {
-      if (current !== request) return;
-      haltInput(request);
-      onLevel(0, SILENT_BANDS);
-      onEnded({ kind: 'error', sessionId: request.sessionId, audioEpoch: Math.max(0, request.epoch), reason: 'voice_events_timeout' });
-    }, 3000);
+  const detach = () => {
+    if (current) release(current);
+    onLevel(0, SILENT_BANDS);
   };
 
   const start = (): Promise<boolean> => {
@@ -109,6 +102,7 @@ export function createMicrophoneMonitor(
     const cancelled = new Promise<false>(resolve => { cancel = () => resolve(false); });
     const request: CaptureRequest = {
       sessionId: crypto.randomUUID(), epoch: -1, sampleIndex: -1,
+      expectedLifecycleEpoch: lifecycle.currentLifecycleEpoch?.(),
       startSubmitted: false, running: false, cancel, cancelled,
     };
     current = request;
@@ -126,7 +120,6 @@ export function createMicrophoneMonitor(
               || !payload.bands.every(Number.isFinite)) return;
             request.epoch = payload.audioEpoch;
             request.sampleIndex = payload.sampleIndex;
-            if (request.running) armHeartbeat(request);
             // Bound values at the UI boundary; neither raw PCM nor full-session
             // history is copied across the native event channel.
             const frame = {
@@ -137,8 +130,9 @@ export function createMicrophoneMonitor(
             onLevel(frame.level, frame.bands);
             onFrame(frame);
           } else if (payload.kind === 'stopped' || payload.kind === 'error') {
-            release(request, true, true, typeof payload.sampleIndex === 'number'
-              ? { audioEpoch: payload.audioEpoch, sampleIndex: payload.sampleIndex } : undefined);
+            // Native background/error terminals already seal input in Rust.
+            // The event is display data, never a second business completion.
+            release(request);
             onLevel(0, SILENT_BANDS);
             onEnded(payload);
           }
@@ -156,16 +150,19 @@ export function createMicrophoneMonitor(
         const callId = await lifecycle.beforeStart(request.sessionId);
         if (current !== request) return false;
         request.startSubmitted = true;
-        await invoke('plugin:vcp-mobile|start_voice_audio', { sessionId: request.sessionId, callId });
+        const result = await invoke<{ configured: boolean }>('start_voice_microphone', {
+          sessionId: request.sessionId, callId,
+          ...(request.expectedLifecycleEpoch === undefined ? {} : { expectedLifecycleEpoch: request.expectedLifecycleEpoch }),
+        });
         if (current !== request) {
           // Native also guards late start completion; target this old UUID only.
           stopNative(request, false);
           return false;
         }
         request.running = true;
-        // Silence still produces frames. Only a running capture with no valid
-        // frames times out; permission/startup waits have no heartbeat timer.
-        armHeartbeat(request);
+        lifecycle.onConfigured?.(result.configured);
+        // A WebView can suspend event delivery while Rust continues the call.
+        // Native capture owns health and terminal detection; JS has no timeout.
         return true;
       } catch (error) {
         if (current !== request) return false;
@@ -191,5 +188,5 @@ export function createMicrophoneMonitor(
     return Promise.race([work, request.cancelled]);
   };
 
-  return { start, stop, setProbe };
+  return { start, stop, setProbe, detach };
 }

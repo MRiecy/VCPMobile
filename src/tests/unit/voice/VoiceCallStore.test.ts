@@ -5,6 +5,7 @@ import { flushPromises } from '@vue/test-utils';
 import { useVoiceCallStore } from '../../../features/chat/voice/voiceCallStore';
 import type { ConversationKey } from '../../../core/stores/chatSessionStore';
 import type { VoiceAudioEnd, VoiceAudioFrame } from '../../../features/chat/voice/microphoneMonitor';
+import type { VoiceCallSnapshot } from '../../../features/chat/voice/voiceConversation';
 import { invokeMock } from '../../mocks/tauri';
 
 const context = vi.hoisted(() => ({
@@ -15,6 +16,11 @@ const context = vi.hoisted(() => ({
   lifecycle: {} as { isBackground: boolean },
   start: vi.fn<() => Promise<boolean>>(),
   stop: vi.fn(),
+  detach: vi.fn(),
+  endCall: vi.fn(),
+  disposeConversation: vi.fn(),
+  recover: vi.fn(),
+  onSnapshot: undefined as ((snapshot: VoiceCallSnapshot | null) => void) | undefined,
   setProbe: vi.fn<(enabled: boolean) => Promise<boolean>>(),
   onLevel: undefined as ((level: number, bands: readonly number[]) => void) | undefined,
   onEnded: undefined as ((event: VoiceAudioEnd) => void) | undefined,
@@ -24,7 +30,11 @@ const context = vi.hoisted(() => ({
 vi.mock('../../../core/stores/chatSessionStore', () => ({ useChatSessionStore: () => context.session }));
 vi.mock('../../../core/stores/appLifecycle', () => ({ useAppLifecycleStore: () => context.lifecycle }));
 vi.mock('../../../features/chat/voice/voiceConversation', () => ({
-  createVoiceConversation: () => ({ begin: vi.fn(), start: vi.fn().mockResolvedValue('call'), closeInput: vi.fn(), stop: vi.fn() }),
+  createVoiceConversation: (options: { onSnapshot: (snapshot: VoiceCallSnapshot | null) => void }) => {
+    context.onSnapshot = options.onSnapshot;
+    return { begin: vi.fn(), start: vi.fn().mockResolvedValue('call'), stop: context.endCall,
+      recover: context.recover, dispose: context.disposeConversation };
+  },
 }));
 vi.mock('../../../features/chat/voice/microphoneMonitor', () => ({
   createMicrophoneMonitor: (onLevel: (level: number, bands: readonly number[]) => void,
@@ -32,7 +42,7 @@ vi.mock('../../../features/chat/voice/microphoneMonitor', () => ({
     context.onLevel = onLevel;
     context.onEnded = onEnded;
     context.onFrame = onFrame;
-    return { start: context.start, stop: context.stop, setProbe: context.setProbe };
+    return { start: context.start, stop: context.stop, setProbe: context.setProbe, detach: context.detach };
   },
 }));
 
@@ -58,6 +68,10 @@ beforeEach(() => {
   context.lifecycle = reactive({ isBackground: false });
   context.start.mockReset().mockResolvedValue(true);
   context.stop.mockReset().mockImplementation(() => context.onLevel?.(0, []));
+  context.detach.mockReset();
+  context.endCall.mockReset();
+  context.disposeConversation.mockReset();
+  context.recover.mockReset().mockResolvedValue(null);
   context.setProbe.mockReset().mockResolvedValue(true);
   context.onLevel = undefined;
   context.onEnded = undefined;
@@ -113,7 +127,7 @@ describe('voice call lifecycle', () => {
     request.resolve(true);
     await flushPromises();
 
-    expect(context.stop).toHaveBeenCalledOnce();
+    expect(action === 'mute' ? context.stop : context.detach).toHaveBeenCalledOnce();
     expect(store.active).toBe(action === 'mute');
     expect(store.microphoneState).toBe('off');
     expect(store.level).toBe(0);
@@ -173,7 +187,9 @@ describe('voice call lifecycle', () => {
 
     context.session.currentConversationKey = { ...context.session.currentConversationKey!, epoch: 2 };
 
-    expect(context.stop).toHaveBeenCalledOnce();
+    expect(context.detach).toHaveBeenCalledOnce();
+    expect(context.stop).not.toHaveBeenCalled();
+    expect(context.endCall).toHaveBeenCalledOnce();
     expect(store.active).toBe(false);
     expect(store.microphoneState).toBe('off');
   });
@@ -188,8 +204,10 @@ describe('voice call lifecycle', () => {
     expect(store.errorMessage).toContain('系统中断');
 
     store.$dispose();
-    expect(context.stop).toHaveBeenCalledOnce();
-    expect(store.active).toBe(false);
+    expect(context.stop).not.toHaveBeenCalled();
+    expect(context.detach).toHaveBeenCalledOnce();
+    expect(context.disposeConversation).toHaveBeenCalledOnce();
+    expect(context.endCall).not.toHaveBeenCalled();
   });
 
   it('presents speech, route and playback from native frames and clears them when the mic closes', async () => {
@@ -284,5 +302,27 @@ describe('voice call lifecycle', () => {
     expect(store.errorMessage).toBe('麦克风启动失败，请重试。');
     expect(warning.mock.calls[0][1]).toHaveLength(512);
     warning.mockRestore();
+  });
+
+  it('restores closed input and ongoing playback as independent state without reacquiring the microphone', async () => {
+    const store = useVoiceCallStore();
+    const snapshot: VoiceCallSnapshot = {
+      callId: 'restored', target: { ownerId: 'agent', ownerType: 'agent', topicId: 'topic' },
+      revision: 8, active: true, micState: 'closed', inputState: 'transcribing',
+      replyState: 'finished', ttsState: 'speaking', partial: '已录内容', error: null, notice: null,
+      inputSessionId: null, originUserMessageId: 'msg_voice_user', ttsId: 'tts', lastPersistedMessageId: null,
+    };
+    context.recover.mockImplementation(async () => { context.onSnapshot!(snapshot); return snapshot; });
+    await store.recover();
+    expect(store.active).toBe(true);
+    expect(store.microphoneState).toBe('off');
+    expect(store.inputState).toBe('transcribing');
+    expect(store.replyState).toBe('finished');
+    expect(store.ttsState).toBe('speaking');
+    expect(store.playbackActive).toBe(true);
+    expect(context.start).not.toHaveBeenCalled();
+    context.lifecycle.isBackground = true;
+    expect(store.playbackActive).toBe(true);
+    expect(context.endCall).not.toHaveBeenCalled();
   });
 });

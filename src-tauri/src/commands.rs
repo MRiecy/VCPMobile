@@ -38,10 +38,10 @@ macro_rules! app_command_handler {
             load_chat_history_streamed, patch_single_message, truncate_history_after_message,
         };
         use crate::vcp_modules::chat::voice_service::{
-            claim_voice_transcript, close_voice_input, start_voice_service, stop_voice_call_inputs, stop_voice_service,
-            finish_tts_chat, start_tts_session, stop_tts, submit_tts_text,
+            begin_voice_conversation, end_voice_conversation, get_voice_conversation_snapshot,
+            start_voice_microphone, close_voice_microphone,
+            start_tts_session, stop_tts, submit_tts_text,
         };
-        use crate::vcp_modules::vcp_client::interrupt_chat_attempt;
         use crate::vcp_modules::cli::{
             close_vcp_mobile_cli_terminal, commit_vcp_mobile_cli_skill_import,
             discard_vcp_mobile_cli_skill_import, execute_vcp_mobile_cli_action,
@@ -193,20 +193,18 @@ macro_rules! app_command_handler {
                 search_messages_fts,
                 truncate_history_after_message,
                 // ── 实时语音交互（仅当前语音拥有的识别、朗读与请求）──
-                claim_voice_transcript,
-                close_voice_input,
-                start_voice_service,
-                stop_voice_call_inputs,
-                stop_voice_service,
+                begin_voice_conversation,
+                end_voice_conversation,
+                get_voice_conversation_snapshot,
+                close_voice_microphone,
+                start_voice_microphone,
                 start_tts_session,
-                finish_tts_chat,
                 stop_tts,
                 submit_tts_text,
                 // ── VCP 连接与生成控制（vcp_client）──
                 reconnect_chat_streams,
                 interruptGroupTurn,
                 interruptRequest,
-                interrupt_chat_attempt,
                 preview_chat_endpoint,
                 test_vcp_connection,
                 // ── 话题（topic_service）──

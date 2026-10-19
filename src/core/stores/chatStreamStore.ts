@@ -10,6 +10,7 @@ import { useChatHistoryStore } from "./chatHistoryStore";
 import { useNotificationStore } from "./notification";
 import { useChatPreferencesStore } from "../../features/chat/preferences/store";
 import { triggerMessageHaptic } from "../utils/nativeHaptics";
+import { useVoiceCallStore } from "../../features/chat/voice/voiceCallStore";
 import type {
   ActiveGenerationDto,
   AuroraRecoverySnapshot,
@@ -122,17 +123,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
   let receiptEventMessages: Set<string> | null = null;
   let receiptRequestKeys: Set<string> | null = null;
   let disposed = false;
-  const eventObservers = new Set<(event: StreamEventDto) => void>();
-  const observeEvents = (observer: (event: StreamEventDto) => void) => {
-    eventObservers.add(observer);
-    return () => { eventObservers.delete(observer); };
-  };
-  const notifyEventObservers = (event: StreamEventDto) => {
-    for (const observer of eventObservers) {
-      try { observer(event); }
-      catch (error) { console.warn('[ChatStreamStore] Event observer failed:', error); }
-    }
-  };
 
   function isStreamDebugEnabled(): boolean {
     return Boolean(import.meta.env.DEV && (window as any).__VCP_STREAM_DEBUG__);
@@ -858,7 +848,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       const previousRevision = requestConsumerRevisions.get(requestKey) ?? 0;
       if (event.consumerRevision < previousRevision) return;
       requestConsumerRevisions.set(requestKey, event.consumerRevision);
-      notifyEventObservers(event);
       receiptRequestKeys?.add(requestKey);
       const activity = event.chunk as { active?: boolean } | null;
       if (activity?.active === true) {
@@ -885,7 +874,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       if (event.consumerRevision < previousRevision) return;
       receiptEventConversations?.add(conversationKey);
       groupConsumerRevisions.set(conversationKey, event.consumerRevision);
-      notifyEventObservers(event);
       const activity = event.chunk as { active?: boolean } | null;
       if (activity?.active === true) activeGroupTurns.set(conversationKey, ctx.turnId);
       else if (activity?.active === false && activeGroupTurns.get(conversationKey) === ctx.turnId) {
@@ -1333,7 +1321,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         removeSessionStream(ownerId, ownerType, topicId, actualMessageId);
       }
     }
-    notifyEventObservers(event);
   };
 
   /**
@@ -1409,7 +1396,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
 
   onScopeDispose(() => {
     disposed = true;
-    eventObservers.clear();
     connectionEpoch += 1;
     reconnectChannel = null;
     receiptEventConversations = null;
@@ -1551,7 +1537,9 @@ export const useChatStreamStore = defineStore("chatStream", () => {
         }
         const current = sessionStore.currentConversationKey;
         if (reloadCurrentHistory && current) {
-          await useChatHistoryStore().loadHistory(current.ownerId, current.ownerType, current.topicId);
+          const history = useChatHistoryStore();
+          if (useVoiceCallStore().active) await history.reconcileVoiceHistory(current);
+          else await history.loadHistory(current.ownerId, current.ownerType, current.topicId);
         }
       } catch (error) {
         if (disposed || epoch !== connectionEpoch) return;
@@ -1604,7 +1592,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     if (generation.createdAt > 0) message.timestamp = generation.createdAt;
     message.shell = computeShell({ role: message.role, agentId: message.agentId, name: message.name ?? undefined });
     activeStreamMessages.set(messageKey, message);
-    if (isLoaded && !history.currentChatHistory.some(item => item.id === msgId)) {
+    if (isLoaded && !history.hasEvictedNewer && !history.currentChatHistory.some(item => item.id === msgId)) {
       history.currentChatHistory.push(message);
       history.currentChatHistory.sort((left, right) =>
         left.timestamp - right.timestamp || left.id.localeCompare(right.id));
@@ -1640,7 +1628,6 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     forgetDeletedMessage,
     requestAuroraSnapshot,
     processStreamEvent,
-    observeEvents,
     stopMessage,
     stopGroupTurn,
     checkAndRecoverInterruptedStreams,

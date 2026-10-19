@@ -1,5 +1,5 @@
 use super::input::{
-    emit_current, export_admission, fail_turn, record_transcript, ExportCompletion,
+    export_admission, fail_turn, record_transcript, update_input, ExportCompletion,
     PreparedSegment, Utterance, VoiceSession,
 };
 use super::segmentation::SegmentWindow;
@@ -9,6 +9,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use tauri::AppHandle;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, OwnedSemaphorePermit};
 
@@ -37,13 +38,13 @@ async fn read_export(path: &str) -> Result<Vec<u8>, String> {
     Ok(data)
 }
 
-pub(super) async fn export<R: Runtime>(
-    app: AppHandle<R>,
+pub(super) async fn export(
+    app: AppHandle,
     session: Arc<VoiceSession>,
     turn: Arc<Utterance>,
     window: SegmentWindow,
     slot: OwnedSemaphorePermit,
-    _completion: ExportCompletion<R>,
+    _completion: ExportCompletion,
 ) {
     if turn.cancel.is_cancelled() {
         return;
@@ -124,8 +125,8 @@ pub(super) async fn export<R: Runtime>(
     }
 }
 
-pub(super) async fn recognize<R: Runtime>(
-    app: AppHandle<R>,
+pub(super) async fn recognize(
+    app: AppHandle,
     session: Arc<VoiceSession>,
     turn: Arc<Utterance>,
     mut receiver: mpsc::Receiver<PreparedSegment>,
@@ -164,7 +165,7 @@ pub(super) async fn recognize<R: Runtime>(
             }
             segment
         };
-        emit_current(&app, &session, &turn, "status", Some("recognizing"), None);
+        update_input(&app, &session, &turn, "recognizing", None);
         let mut last_partial = None::<Instant>;
         let result = if segment.wav.is_empty() {
             Ok(String::new())
@@ -180,14 +181,7 @@ pub(super) async fn recognize<R: Runtime>(
                         } else {
                             format!("{transcript} {partial}")
                         };
-                        emit_current(
-                            &app,
-                            &session,
-                            &turn,
-                            "asr-partial",
-                            Some("recognizing"),
-                            Some(text),
-                        );
+                        update_input(&app, &session, &turn, "recognizing", Some(text));
                     }
                 }
             })
@@ -230,14 +224,7 @@ pub(super) async fn recognize<R: Runtime>(
             return;
         }
         if !transcript.is_empty() {
-            emit_current(
-                &app,
-                &session,
-                &turn,
-                "asr-partial",
-                Some("recording"),
-                Some(transcript.clone()),
-            );
+            update_input(&app, &session, &turn, "recording", Some(transcript.clone()));
         }
         sequence = sequence.saturating_add(1);
         // Dropping segment releases the shared audio slot only after recognition.

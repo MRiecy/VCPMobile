@@ -25,25 +25,28 @@ pub struct AgentChatPayload {
 
 /// Register the real request before preparation awaits, without creating a
 /// pending database message until configuration and context are ready.
-struct PreparedAgentRequest {
+pub(crate) struct PreparedAgentRequest {
     key: MessageKey,
     lease: ActiveRequestLease,
     cancellation_token: CancellationToken,
 }
 
 impl PreparedAgentRequest {
-    fn acquire(
+    pub(crate) fn acquire(
         app: &AppHandle,
         requests: &ActiveRequests,
         payload: &AgentChatPayload,
-        channel: Channel<StreamEvent>,
+        channel: Option<Channel<StreamEvent>>,
+        cancellation_token: CancellationToken,
     ) -> Result<Self, String> {
         let key = MessageKey::new(
             TopicKey::new("agent", &payload.agent_id, &payload.topic_id),
             format!("msg_{}", uuid::Uuid::new_v4()),
         );
         let (lease, cancellation_token) =
-            ActiveRequestLease::try_acquire(requests.0.clone(), key.clone())?;
+            ActiveRequestLease::try_acquire_with_cancellation(
+                requests.0.clone(), key.clone(), cancellation_token,
+            )?;
         lease.set_origin_user_message(&payload.user_message.id)?;
         lease.bind_output(app, channel)?;
         Ok(Self { key, lease, cancellation_token })
@@ -64,7 +67,8 @@ pub async fn handle_agent_chat_message(
         &app_handle,
         &active_requests,
         &payload,
-        stream_channel.clone(),
+        Some(stream_channel.clone()),
+        CancellationToken::new(),
     )?;
     let settings = read_settings(app_handle.clone(), settings_state).await?;
     let connection = freeze_chat_connection(&settings, ChatRequestPurpose::Interactive)?;
@@ -75,7 +79,7 @@ pub async fn handle_agent_chat_message(
         request,
         payload,
         connection,
-        stream_channel,
+        Some(stream_channel),
         false, // append_user_msg
     )
     .await
@@ -96,7 +100,8 @@ pub async fn internal_process_agent_chat_message(
         &app_handle,
         &active_requests,
         &payload,
-        stream_channel.clone(),
+        Some(stream_channel.clone()),
+        CancellationToken::new(),
     )?;
     process_prepared_agent_chat_message(
         app_handle,
@@ -105,21 +110,21 @@ pub async fn internal_process_agent_chat_message(
         request,
         payload,
         connection,
-        stream_channel,
+        Some(stream_channel),
         append_user_msg,
     )
     .await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn process_prepared_agent_chat_message(
+pub(crate) async fn process_prepared_agent_chat_message(
     app_handle: AppHandle,
     agent_state: State<'_, AgentConfigState>,
     db_state: State<'_, DbState>,
     request: PreparedAgentRequest,
     payload: AgentChatPayload,
     connection: ChatConnectionSnapshot,
-    stream_channel: Channel<StreamEvent>,
+    stream_channel: Option<Channel<StreamEvent>>,
     append_user_msg: bool,
 ) -> Result<Value, String> {
     let agent_id = payload.agent_id;
@@ -130,12 +135,19 @@ async fn process_prepared_agent_chat_message(
     let PreparedAgentRequest { key: request_key, lease: _request_lease, cancellation_token } = request;
     let thinking_id = request_key.msg_id.clone();
 
+    if cancellation_token.is_cancelled() {
+        return Ok(json!({ "status": "cancelled", "messageId": thinking_id }));
+    }
+
     // 1. 读取 Agent 配置
     let agent_config =
         read_agent_config_internal(&app_handle, &agent_state, &agent_id, Some(true)).await?;
 
     // 2. 只有在需要时才将用户消息追加到数据库 (重新生成时设为 false)
     if append_user_msg {
+        if cancellation_token.is_cancelled() {
+            return Ok(json!({ "status": "cancelled", "messageId": thinking_id }));
+        }
         message_service::append_single_message(
             app_handle.clone(),
             &db_state.pool,
@@ -214,7 +226,7 @@ async fn process_prepared_agent_chat_message(
     crate::vcp_modules::vcp_client::deliver_request_event(
         &app_handle,
         &request_key,
-        Some(stream_channel.clone()),
+        stream_channel.clone(),
         StreamEvent::thinking(thinking_id.clone(), context.clone()),
     );
 
@@ -232,7 +244,7 @@ async fn process_prepared_agent_chat_message(
     let result = perform_vcp_request_registered(
         &app_handle,
         request_payload,
-        Some(stream_channel.clone()),
+        stream_channel.clone(),
         cancellation_token,
     )
     .await;
@@ -248,7 +260,7 @@ async fn process_prepared_agent_chat_message(
                 response.full_content,
                 response.is_aborted,
                 response.finish_reason,
-                Some(stream_channel),
+                stream_channel,
                 Some(agent_id.clone()),
             )
             .await
@@ -269,7 +281,7 @@ async fn process_prepared_agent_chat_message(
                 crate::vcp_modules::vcp_client::deliver_request_event(
                     &app_handle,
                     &request_key,
-                    Some(stream_channel),
+                    stream_channel,
                     StreamEvent {
                         r#type: "stopping".to_string(),
                         message_id: thinking_id.clone(),
@@ -287,7 +299,7 @@ async fn process_prepared_agent_chat_message(
                 crate::vcp_modules::vcp_client::deliver_request_event(
                     &app_handle,
                     &request_key,
-                    Some(stream_channel),
+                    stream_channel,
                     event,
                 );
                 return Ok(json!({ "status": "recovery_pending", "messageId": thinking_id }));
@@ -298,7 +310,7 @@ async fn process_prepared_agent_chat_message(
                 &request_key,
                 partial_content.unwrap_or_default(),
                 error,
-                Some(stream_channel),
+                stream_channel,
             )
             .await
             .is_err()

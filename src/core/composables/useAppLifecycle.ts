@@ -4,10 +4,12 @@ import { useAppLifecycleStore } from '../stores/appLifecycle';
 import { useChatStreamStore } from '../stores/chatStreamStore';
 import { isIOS } from '../utils/platform';
 import type { LifecycleSnapshotDto } from '../types/lifecycle';
+import { createVoiceHistorySync } from '../../features/chat/voice/voiceHistorySync';
 
 export function useAppLifecycle() {
   const lifecycleStore = useAppLifecycleStore();
   const streamStore = useChatStreamStore();
+  const voiceHistory = createVoiceHistorySync();
   let unlisten: UnlistenFn | null = null;
   let unlistenNetwork: UnlistenFn | null = null;
   let recoveryPromise: Promise<void> | null = null;
@@ -22,7 +24,16 @@ export function useAppLifecycle() {
     if (phase && phase !== 'active') return;
     if (recoveryPromise) return recoveryPromise;
     console.log(`[useAppLifecycle] ${source}. Triggering stream recovery.`);
-    recoveryPromise = streamStore.checkAndRecoverInterruptedStreams()
+    recoveryPromise = Promise.allSettled([
+      streamStore.checkAndRecoverInterruptedStreams(),
+      voiceHistory.reconcile(),
+    ]).then(results => {
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          console.error(`[useAppLifecycle] Recovery failed (${source}):`, result.reason);
+        }
+      }
+    })
       .catch(err => {
         console.error(`[useAppLifecycle] Failed to recover streams (${source}):`, err);
       })
@@ -105,6 +116,7 @@ export function useAppLifecycle() {
 
   onUnmounted(() => {
     disposed = true;
+    voiceHistory.dispose();
     if (typeof window !== 'undefined') {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
       window.removeEventListener("online", handleOnline);

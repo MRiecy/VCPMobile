@@ -50,10 +50,6 @@ const COMMANDS: &[&str] = &[
     "acquire_ota_keepalive",
     "release_ota_keepalive",
     "trigger_haptic_feedback",
-    "begin_voice_call",
-    "end_voice_call",
-    "start_voice_audio",
-    "stop_voice_audio",
     "set_voice_probe",
 ];
 

@@ -35,7 +35,7 @@ vi.mock('@/core/composables/useAudioRecorder', async () => {
     startRecording: audio.startRecording, stopRecording: audio.stopRecording, cancelRecording: audio.cancelRecording }) };
 });
 vi.mock('@/features/chat/voice/microphoneMonitor', () => ({
-  createMicrophoneMonitor: () => ({ start: audio.startMonitor, stop: audio.stopMonitor }),
+  createMicrophoneMonitor: () => ({ start: audio.startMonitor, stop: audio.stopMonitor, detach: vi.fn() }),
 }));
 vi.mock('@/core/composables/useKeyboardInsets', async () => {
   const { ref } = await import('vue');

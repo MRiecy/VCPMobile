@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushPromises } from '@vue/test-utils';
 import { createMicrophoneMonitor as createNativeMicrophoneMonitor, type VoiceAudioFrame } from '../../../features/chat/voice/microphoneMonitor';
 import { emitTauriEvent, invokeMock, listenMock, mockInvoke } from '../../mocks/tauri';
@@ -14,13 +14,15 @@ const createMicrophoneMonitor = (...callbacks: [
   Parameters<typeof createNativeMicrophoneMonitor>[0],
   Parameters<typeof createNativeMicrophoneMonitor>[1],
   Parameters<typeof createNativeMicrophoneMonitor>[2],
-]) => createNativeMicrophoneMonitor(...callbacks, { beforeStart: async () => 'call-1', onStop: vi.fn() });
+]) => createNativeMicrophoneMonitor(...callbacks, { beforeStart: async () => 'call-1' });
 
 let monitor: ReturnType<typeof createMicrophoneMonitor> | undefined;
-const startCommand = 'plugin:vcp-mobile|start_voice_audio';
-const stopCommand = 'plugin:vcp-mobile|stop_voice_audio';
+const startCommand = 'start_voice_microphone';
+const stopCommand = 'close_voice_microphone';
 const probeCommand = 'plugin:vcp-mobile|set_voice_probe';
 const audioEvent = 'vcp-voice-audio';
+
+beforeEach(() => mockInvoke(startCommand, () => ({ configured: true })));
 
 function currentSession() {
   const calls = invokeMock.mock.calls.filter(([command]) => command === startCommand);
@@ -259,7 +261,7 @@ describe('native microphone client', () => {
     expect(invokeMock.mock.calls.filter(([command, args]) => command === probeCommand && args?.sessionId !== oldId)).toHaveLength(0);
   });
 
-  it('times out missing frames only after start acknowledgement, accepts silence and clears timers on stop', async () => {
+  it('does not interpret suspended WebView frames as a native capture failure', async () => {
     vi.useFakeTimers();
     const pending = deferred<void>();
     mockInvoke(startCommand, () => pending.promise);
@@ -279,46 +281,73 @@ describe('native microphone client', () => {
     await vi.advanceTimersByTimeAsync(2999);
     expect(onEnded).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
-    expect(onEnded).toHaveBeenCalledExactlyOnceWith({
-      kind: 'error', sessionId: id, audioEpoch: 1, reason: 'voice_events_timeout',
-    });
-    expect(invokeMock).toHaveBeenCalledWith(stopCommand, { sessionId: id });
-    expect(onLevel).toHaveBeenLastCalledWith(0, Array(32).fill(0));
+    expect(onEnded).not.toHaveBeenCalled();
+    expect(invokeMock.mock.calls.some(([name]) => name === stopCommand)).toBe(false);
     expect(vi.getTimerCount()).toBe(0);
 
     mockInvoke(startCommand, () => undefined);
     await monitor.start();
-    expect(vi.getTimerCount()).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
     monitor.stop();
     expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(6000);
-    expect(onEnded).toHaveBeenCalledOnce();
+    expect(onEnded).not.toHaveBeenCalled();
   });
 
-  it('forwards the final native PCM position only after stop acknowledges sealing the input', async () => {
+  it('submits one Rust close intent without a JS acknowledgement-dependent seal', async () => {
     const stopped = deferred<{ audioEpoch: number; sampleIndex: number }>();
     mockInvoke(stopCommand, () => stopped.promise);
-    const onStop = vi.fn();
     monitor = createNativeMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn(), {
-      beforeStart: async () => 'call-1', onStop,
+      beforeStart: async () => 'call-1',
     });
     await monitor.start();
     const id = currentSession();
     monitor.stop();
-    expect(onStop).not.toHaveBeenCalled();
+    expect(invokeMock).toHaveBeenLastCalledWith(stopCommand, { sessionId: id });
     stopped.resolve({ audioEpoch: 3, sampleIndex: 731 });
     await flushPromises();
-    expect(onStop).toHaveBeenCalledExactlyOnceWith(id, { audioEpoch: 3, sampleIndex: 731 });
+    expect(invokeMock.mock.calls.some(([name]) => name === 'close_voice_input')).toBe(false);
   });
 
-  it('passes a native background terminal position through to input draining', async () => {
-    const onStop = vi.fn();
-    monitor = createNativeMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn(), {
-      beforeStart: async () => 'call-1', onStop,
+  it('projects native background termination without issuing a second seal or stop', async () => {
+    const onEnded = vi.fn();
+    monitor = createNativeMicrophoneMonitor(vi.fn(), onEnded, vi.fn(), {
+      beforeStart: async () => 'call-1',
     });
     await monitor.start();
     const id = currentSession();
     emitTauriEvent(audioEvent, { kind: 'stopped', sessionId: id, audioEpoch: 2, sampleIndex: 999, reason: 'background' });
-    expect(onStop).toHaveBeenCalledExactlyOnceWith(id, { audioEpoch: 2, sampleIndex: 999 });
+    expect(onEnded).toHaveBeenCalledWith(expect.objectContaining({ reason: 'background' }));
+    expect(invokeMock.mock.calls.some(([name]) => name === 'close_voice_input' || name === stopCommand)).toBe(false);
+  });
+
+  it('freezes the native lifecycle epoch at the tap before awaiting call readiness', async () => {
+    let epoch = 3;
+    const ready = deferred<string>();
+    monitor = createNativeMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn(), {
+      beforeStart: () => ready.promise, currentLifecycleEpoch: () => epoch,
+    });
+    const starting = monitor.start();
+    await flushPromises();
+    // The native lifecycle advanced while JS was suspended. Rust must receive
+    // the old intent epoch and reject it, rather than treating resume as a tap.
+    epoch = 5;
+    mockInvoke(startCommand, args => args?.expectedLifecycleEpoch === epoch
+      ? { configured: true } : Promise.reject('voice_requires_foreground'));
+    ready.resolve('call-1');
+    await expect(starting).rejects.toBe('voice_requires_foreground');
+    expect(invokeMock).toHaveBeenCalledWith(startCommand, expect.objectContaining({ expectedLifecycleEpoch: 3 }));
+  });
+
+  it('cancels an input intent awaiting call readiness without starting or closing native capture', async () => {
+    const ready = deferred<string>();
+    monitor = createNativeMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn(), { beforeStart: () => ready.promise });
+    const starting = monitor.start();
+    await flushPromises();
+    monitor.stop();
+    ready.resolve('call-1');
+    await expect(starting).resolves.toBe(false);
+    await flushPromises();
+    expect(invokeMock).not.toHaveBeenCalled();
   });
 });

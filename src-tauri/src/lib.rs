@@ -33,6 +33,7 @@ pub fn run() {
             app.manage(ActiveGroupTurns::default());
             app.manage(ContextSanitizer::default());
             app.manage(vcp_modules::chat::voice_service::VoiceServiceState::default());
+            app.manage(vcp_modules::chat::voice_service::VoiceCallState::default());
             app.manage(vcp_modules::chat::voice_service::TtsServiceState::default());
             app.manage(distributed::DistributedState::new());
 

@@ -62,7 +62,7 @@ src-tauri/src/
 ### 3.2 领域 owner
 
 - `vcp_modules/<domain>/` 持有对应业务状态、输入校验、生命周期和副作用。
-- `chat/voice_service/` 分开持有输入/ASR 与独立 TTS job，按 callId 合并未发送的转写；关麦封口排空，挂断取消未发送内容。录音文件和 PCM 播放走插件内部接口，不经 Vue。最终文本仍由现有聊天 owner 发送；真实 RequestOutput/群轮输出以 `originUserMessageId` 供 Rust 唯一朗读消费者，WebView 暂停不主动终止它。`interrupt_chat_attempt` 精准撤销请求/群轮，手动模型中断同步停其朗读；普通 ASR/TTS 取消、失败不使用模型共享父 token。
+- `chat/voice_service/` 的 `call.rs` 持有固定目标、转写提交接纳、精确回复关联与通话快照；原生 VAD 直接触发 Rust 插话取消，ASR 完成直接提交，无需 WebView 消费事件。`voice_submission.rs` 先注册真实聊天 owner，保存用户消息后复用 Agent/Group 应用服务，UI Channel 可缺席；不复制上下文或模型网络实现。关麦在 Rust 内停止原生采集并封存尾音，已接纳 ASR 继续；后台不取消后续发送与朗读，挂断才取消本通话未发送内容及对应回复。输入、模型和 TTS 取消状态独立，有限工作租约覆盖 ASR 至实际播放收尾。统一 RequestOutput/群轮按 `originUserMessageId` 供给 TTS，前端恢复只读取快照和已持久化消息，不重放业务动作。
 - `persistence/` 持有数据库写入与读取边界，调用领域不复制第二套持久化状态。
 - `infra/` 提供被多个领域共享的生命周期和基础能力，不反向拥有各业务领域结果。
 - `infra/file_manager/operations.rs` 裁定文件取消与 CAS 提交，`resources.rs` 管理用途派生、文本预览和临时导出；`infra/share_inbox.rs` 持有当前分享记录与跨进程槽位，发送经现有消息仓储同事务落盘。启动附件回收同时读取当前分享持有的 hash。

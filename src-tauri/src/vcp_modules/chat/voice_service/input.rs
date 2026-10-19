@@ -2,10 +2,10 @@
 //! cancellation discards it. Neither path owns model generation or TTS.
 
 use super::{
-    batch::{BatchCompletion, CallInput, ClaimedTranscript},
-    emit, network,
+    batch::{BatchCompletion, CallInput},
+    call, network,
     segmentation::{CaptureWindow, SegmentWindow},
-    workers, VoiceServiceConfig, VoiceServiceEvent, VoiceServiceStart, SERVICE_EVENT,
+    workers, VoiceServiceConfig, VoiceServiceStart,
 };
 use crate::vcp_modules::settings_manager::{read_settings, SettingsState};
 use std::{
@@ -15,7 +15,7 @@ use std::{
         Arc, Mutex,
     },
 };
-use tauri::{AppHandle, Emitter, Manager, Runtime};
+use tauri::{AppHandle, Manager};
 use tauri_plugin_vcp_mobile::voice::{SpeechTransition, VoiceAudioEvent};
 use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
@@ -37,6 +37,7 @@ pub(super) struct Utterance {
     pub sequence: u64,
     pub cancel: CancellationToken,
     pub segments: mpsc::Sender<PreparedSegment>,
+    pub _work: Option<Arc<call::WorkLease>>,
 }
 
 struct ActiveCapture {
@@ -70,7 +71,7 @@ pub(super) struct VoiceSession {
     pending_exports: AtomicUsize,
     export_done: Notify,
     segments_released: AtomicBool,
-    closed_event_sent: AtomicBool,
+    retired: AtomicBool,
 }
 
 struct SessionSlot {
@@ -196,6 +197,16 @@ impl Default for VoiceServiceState {
     }
 }
 
+pub(super) fn register_call(app: &AppHandle, call: Arc<CallInput>) -> Result<(), String> {
+    app.state::<VoiceServiceState>()
+        .registry
+        .lock()
+        .map_err(|error| error.to_string())?
+        .calls
+        .insert(call.id.clone(), call);
+    Ok(())
+}
+
 fn validate_id(id: &str) -> Result<(), String> {
     if id.is_empty() || id.len() > 128 {
         Err("语音会话标识无效。".into())
@@ -204,7 +215,7 @@ fn validate_id(id: &str) -> Result<(), String> {
     }
 }
 
-fn session<R: Runtime>(app: &AppHandle<R>, id: &str) -> Option<Arc<VoiceSession>> {
+fn session(app: &AppHandle, id: &str) -> Option<Arc<VoiceSession>> {
     app.state::<VoiceServiceState>()
         .registry
         .lock()
@@ -215,12 +226,11 @@ fn session<R: Runtime>(app: &AppHandle<R>, id: &str) -> Option<Arc<VoiceSession>
         .clone()
 }
 
-pub(super) fn emit_current<R: Runtime>(
-    app: &AppHandle<R>,
+pub(super) fn update_input(
+    app: &AppHandle,
     session: &VoiceSession,
     turn: &Arc<Utterance>,
-    kind: &'static str,
-    stage: Option<&'static str>,
+    stage: &'static str,
     text: Option<String>,
 ) {
     let Ok(inner) = session.inner.lock() else {
@@ -232,7 +242,7 @@ pub(super) fn emit_current<R: Runtime>(
             .get(&turn.id)
             .is_some_and(|current| Arc::ptr_eq(current, turn))
     {
-        if kind == "asr-partial" {
+        if text.is_some() {
             if let Some(text) = text.and_then(|text| {
                 session
                     .call
@@ -240,38 +250,16 @@ pub(super) fn emit_current<R: Runtime>(
                     .ok()
                     .flatten()
             }) {
-                let _ = app.emit(
-                    SERVICE_EVENT,
-                    VoiceServiceEvent {
-                        session_id: session.id.clone(),
-                        call_id: session.call.id.clone(),
-                        kind,
-                        turn_id: Some(turn.batch_id.clone()),
-                        batch_id: Some(turn.batch_id.clone()),
-                        offer_id: None,
-                        text: Some(text),
-                        stage,
-                        message: None,
-                    },
-                );
+                call::input_status(app, &session.call.id, &session.id, "asr", Some(&text), None);
             }
         } else {
-            emit(
-                app,
-                &session.id,
-                &session.call.id,
-                Some(&turn.id),
-                kind,
-                stage,
-                text,
-                None,
-            );
+            call::input_status(app, &session.call.id, &session.id, stage, None, None);
         }
     }
 }
 
-pub(super) fn record_transcript<R: Runtime>(
-    app: &AppHandle<R>,
+pub(super) fn record_transcript(
+    app: &AppHandle,
     session: &Arc<VoiceSession>,
     turn: &Arc<Utterance>,
     text: String,
@@ -281,23 +269,10 @@ pub(super) fn record_transcript<R: Runtime>(
     }
     match session.call.complete(&turn.batch_id, turn.sequence, text) {
         Ok(BatchCompletion::Offered(offer)) => {
-            let _ = app.emit(
-                SERVICE_EVENT,
-                VoiceServiceEvent {
-                    session_id: offer.session_id,
-                    call_id: offer.call_id,
-                    kind: "transcript",
-                    turn_id: Some(offer.offer_id.clone()),
-                    batch_id: Some(offer.batch_id),
-                    offer_id: Some(offer.offer_id),
-                    text: Some(offer.text),
-                    stage: Some("ready"),
-                    message: None,
-                },
-            );
+            call::offer(app, offer);
         }
         Ok(BatchCompletion::Empty) => {
-            emit_current(app, session, turn, "status", Some("listening"), None)
+            call::input_status(app, &session.call.id, &session.id, "empty", None, None);
         }
         Ok(BatchCompletion::Pending) => {}
         Err(error) => {
@@ -308,11 +283,7 @@ pub(super) fn record_transcript<R: Runtime>(
     complete_turn(app, session, turn);
 }
 
-pub(super) fn complete_turn<R: Runtime>(
-    app: &AppHandle<R>,
-    session: &Arc<VoiceSession>,
-    turn: &Arc<Utterance>,
-) {
+pub(super) fn complete_turn(app: &AppHandle, session: &Arc<VoiceSession>, turn: &Arc<Utterance>) {
     if let Ok(mut inner) = session.inner.lock() {
         if inner
             .utterances
@@ -325,8 +296,8 @@ pub(super) fn complete_turn<R: Runtime>(
     cleanup_closed(app, session);
 }
 
-pub(super) fn fail_turn<R: Runtime>(
-    app: &AppHandle<R>,
+pub(super) fn fail_turn(
+    app: &AppHandle,
     session: &Arc<VoiceSession>,
     turn: &Arc<Utterance>,
     stage: &'static str,
@@ -354,21 +325,19 @@ pub(super) fn fail_turn<R: Runtime>(
         {
             inner.capture = None;
         }
-        emit(
+        call::input_status(
             app,
-            &session.id,
             &session.call.id,
-            Some(&turn.id),
-            "error",
-            Some(stage),
+            &session.id,
+            stage,
             None,
-            Some(message),
+            Some(&message),
         );
     }
     cleanup_closed(app, session);
 }
 
-fn cleanup_closed<R: Runtime>(app: &AppHandle<R>, session: &Arc<VoiceSession>) {
+fn cleanup_closed(app: &AppHandle, session: &Arc<VoiceSession>) {
     if !session.input_closed.load(Ordering::Acquire)
         || session.pending_exports.load(Ordering::Acquire) != 0
     {
@@ -390,7 +359,7 @@ fn cleanup_closed<R: Runtime>(app: &AppHandle<R>, session: &Arc<VoiceSession>) {
         .inner
         .lock()
         .is_ok_and(|inner| inner.utterances.is_empty());
-    if empty && !session.closed_event_sent.swap(true, Ordering::AcqRel) {
+    if empty && !session.retired.swap(true, Ordering::AcqRel) {
         let state = app.state::<VoiceServiceState>();
         if let Ok(mut registry) = state.registry.lock() {
             if registry
@@ -402,25 +371,15 @@ fn cleanup_closed<R: Runtime>(app: &AppHandle<R>, session: &Arc<VoiceSession>) {
                 registry.inputs.remove(&session.id);
                 registry.remember_cancelled(&session.id);
             }
-        }
-        emit(
-            app,
-            &session.id,
-            &session.call.id,
-            None,
-            "status",
-            Some("closed"),
-            None,
-            None,
-        );
+        };
     }
 }
 
-pub(super) struct ExportCompletion<R: Runtime> {
-    app: AppHandle<R>,
+pub(super) struct ExportCompletion {
+    app: AppHandle,
     session: Arc<VoiceSession>,
 }
-impl<R: Runtime> Drop for ExportCompletion<R> {
+impl Drop for ExportCompletion {
     fn drop(&mut self) {
         if self.session.pending_exports.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.session.export_done.notify_waiters();
@@ -438,11 +397,7 @@ pub(super) async fn export_admission<'a>(
 
 type ExportJob = (Arc<Utterance>, SegmentWindow);
 
-fn dispatch_exports<R: Runtime>(
-    app: &AppHandle<R>,
-    session: &Arc<VoiceSession>,
-    jobs: Vec<ExportJob>,
-) {
+fn dispatch_exports(app: &AppHandle, session: &Arc<VoiceSession>, jobs: Vec<ExportJob>) {
     for (turn, window) in jobs {
         let completion = ExportCompletion {
             app: app.clone(),
@@ -477,12 +432,7 @@ fn dispatch_exports<R: Runtime>(
     }
 }
 
-fn seal<R: Runtime>(
-    app: &AppHandle<R>,
-    session: &Arc<VoiceSession>,
-    epoch: Option<u32>,
-    sample: Option<u64>,
-) {
+fn seal(app: &AppHandle, session: &Arc<VoiceSession>, epoch: Option<u32>, sample: Option<u64>) {
     let mut failed = None;
     let jobs = {
         let Ok(mut inner) = session.inner.lock() else {
@@ -527,17 +477,18 @@ fn seal<R: Runtime>(
         );
     }
     dispatch_exports(app, session, jobs);
+    call::input_status(app, &session.call.id, &session.id, "closed", None, None);
     cleanup_closed(app, session);
 }
 
-#[tauri::command]
-pub async fn start_voice_service<R: Runtime>(
-    app: AppHandle<R>,
+pub async fn start_voice_service(
+    app: AppHandle,
     session_id: String,
     call_id: String,
 ) -> Result<VoiceServiceStart, String> {
     validate_id(&session_id)?;
     validate_id(&call_id)?;
+    call::validate_input(&app, &call_id)?;
     let (cancel, call) = app
         .state::<VoiceServiceState>()
         .registry
@@ -578,7 +529,7 @@ pub async fn start_voice_service<R: Runtime>(
         pending_exports: AtomicUsize::new(0),
         export_done: Notify::new(),
         segments_released: AtomicBool::new(false),
-        closed_event_sent: AtomicBool::new(false),
+        retired: AtomicBool::new(false),
     });
     {
         let mut registry = state.registry.lock().map_err(|error| error.to_string())?;
@@ -589,17 +540,11 @@ pub async fn start_voice_service<R: Runtime>(
             .ok_or_else(|| network::CANCELLED.to_string())?;
         slot.session = Some(input);
     }
-    emit(
+    call::input_status(
         &app,
-        &session_id,
         &call_id,
-        None,
-        "status",
-        Some(if configured {
-            "listening"
-        } else {
-            "local-only"
-        }),
+        &session_id,
+        if configured { "ready" } else { "local-only" },
         None,
         None,
     );
@@ -607,8 +552,124 @@ pub async fn start_voice_service<R: Runtime>(
 }
 
 #[tauri::command]
-pub async fn close_voice_input<R: Runtime>(
-    app: AppHandle<R>,
+pub async fn start_voice_microphone(
+    app: AppHandle,
+    session_id: String,
+    call_id: String,
+    expected_lifecycle_epoch: Option<u64>,
+) -> Result<VoiceServiceStart, String> {
+    use crate::vcp_modules::infra::{
+        lifecycle_controller::is_app_in_foreground, lifecycle_state::LifecycleState,
+    };
+    if !is_app_in_foreground(&app) {
+        return Err("voice_requires_foreground".into());
+    }
+    let before = if let Some(state) = app.try_state::<LifecycleState>() {
+        state
+            .lifecycle_snapshot
+            .read()
+            .await
+            .as_ref()
+            .map(|snapshot| snapshot.transition_epoch)
+    } else {
+        None
+    };
+    if expected_lifecycle_epoch.is_some() && expected_lifecycle_epoch != before {
+        return Err("cancelled: microphone intent crossed a lifecycle transition".into());
+    }
+    let started = match start_voice_service(app.clone(), session_id.clone(), call_id.clone()).await
+    {
+        Ok(started) => started,
+        Err(error) => {
+            call::input_stopped(&app, &call_id, &session_id, &error, true);
+            return Err(error);
+        }
+    };
+    let after = if let Some(state) = app.try_state::<LifecycleState>() {
+        state
+            .lifecycle_snapshot
+            .read()
+            .await
+            .as_ref()
+            .map(|snapshot| snapshot.transition_epoch)
+    } else {
+        None
+    };
+    if !is_app_in_foreground(&app) || before != after {
+        stop_voice_service(app.clone(), session_id.clone()).await?;
+        call::input_stopped(&app, &call_id, &session_id, "background", false);
+        return Err("cancelled: microphone start crossed a lifecycle transition".into());
+    }
+    if let Err(error) = tauri_plugin_vcp_mobile::voice::start_voice_audio(
+        app.clone(),
+        session_id.clone(),
+        call_id.clone(),
+    )
+    .await
+    {
+        // A failed native start may still have sealed a partial capture. Await
+        // its real receipt before deciding the ASR tail; never leave that to JS.
+        match tauri_plugin_vcp_mobile::voice::stop_voice_audio(app.clone(), session_id.clone())
+            .await
+        {
+            Ok(receipt) => {
+                close_voice_input(
+                    app.clone(),
+                    session_id.clone(),
+                    Some(receipt.audio_epoch),
+                    Some(receipt.sample_index),
+                )
+                .await?;
+            }
+            Err(_) => {
+                stop_voice_service(app.clone(), session_id.clone()).await?;
+            }
+        }
+        call::input_stopped(&app, &call_id, &session_id, &error, true);
+        return Err(error);
+    }
+    Ok(started)
+}
+
+#[tauri::command]
+pub async fn close_voice_microphone(
+    app: AppHandle,
+    session_id: String,
+) -> Result<tauri_plugin_vcp_mobile::voice::CaptureStopReceipt, String> {
+    let receipt =
+        match tauri_plugin_vcp_mobile::voice::stop_voice_audio(app.clone(), session_id.clone())
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                if let Some(input) = session(&app, &session_id) {
+                    call::input_status(
+                        &app,
+                        &input.call.id,
+                        &input.id,
+                        "microphone",
+                        None,
+                        Some(&error),
+                    );
+                }
+                return Err(error);
+            }
+        };
+    if let Some(input) = session(&app, &session_id) {
+        call::input_stopped(&app, &input.call.id, &input.id, "requested", false);
+    }
+    close_voice_input(
+        app,
+        session_id,
+        Some(receipt.audio_epoch),
+        Some(receipt.sample_index),
+    )
+    .await?;
+    Ok(receipt)
+}
+
+pub async fn close_voice_input(
+    app: AppHandle,
     session_id: String,
     audio_epoch: Option<u32>,
     sample_index: Option<u64>,
@@ -636,11 +697,7 @@ pub async fn close_voice_input<R: Runtime>(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn stop_voice_service<R: Runtime>(
-    app: AppHandle<R>,
-    session_id: String,
-) -> Result<(), String> {
+pub async fn stop_voice_service(app: AppHandle, session_id: String) -> Result<(), String> {
     validate_id(&session_id)?;
     let input = app
         .state::<VoiceServiceState>()
@@ -658,15 +715,12 @@ pub async fn stop_voice_service<R: Runtime>(
             inner.utterances.clear();
         }
         cleanup_closed(&app, &input);
+        call::input_status(&app, &input.call.id, &input.id, "closed", None, None);
     }
     Ok(())
 }
 
-#[tauri::command]
-pub async fn stop_voice_call_inputs<R: Runtime>(
-    app: AppHandle<R>,
-    call_id: String,
-) -> Result<(), String> {
+pub async fn stop_voice_call_inputs(app: AppHandle, call_id: String) -> Result<(), String> {
     validate_id(&call_id)?;
     let sessions = {
         let state = app.state::<VoiceServiceState>();
@@ -679,28 +733,7 @@ pub async fn stop_voice_call_inputs<R: Runtime>(
     Ok(())
 }
 
-#[tauri::command]
-pub fn claim_voice_transcript<R: Runtime>(
-    app: AppHandle<R>,
-    call_id: String,
-    offer_id: String,
-) -> Result<ClaimedTranscript, String> {
-    let call = app
-        .state::<VoiceServiceState>()
-        .registry
-        .lock()
-        .map_err(|error| error.to_string())?
-        .calls
-        .get(&call_id)
-        .cloned();
-    if let Some(call) = call {
-        call.claim(&offer_id)
-    } else {
-        Ok(ClaimedTranscript::rejected())
-    }
-}
-
-pub fn handle_audio_event<R: Runtime>(app: &AppHandle<R>, event: &VoiceAudioEvent) {
+pub fn handle_audio_event(app: &AppHandle, event: &VoiceAudioEvent) {
     let id = match event {
         VoiceAudioEvent::Frame(event) => &event.frame.session_id,
         VoiceAudioEvent::Stopped(event) | VoiceAudioEvent::Error(event) => &event.session_id,
@@ -711,6 +744,13 @@ pub fn handle_audio_event<R: Runtime>(app: &AppHandle<R>, event: &VoiceAudioEven
     let event = match event {
         VoiceAudioEvent::Frame(event) => event,
         VoiceAudioEvent::Stopped(notice) | VoiceAudioEvent::Error(notice) => {
+            call::input_stopped(
+                app,
+                &input.call.id,
+                &input.id,
+                &notice.reason,
+                matches!(event, VoiceAudioEvent::Error(_)),
+            );
             if let Ok(mut registry) = app.state::<VoiceServiceState>().registry.lock() {
                 registry.close(id);
             }
@@ -721,6 +761,7 @@ pub fn handle_audio_event<R: Runtime>(app: &AppHandle<R>, event: &VoiceAudioEven
     if input.cancel.is_cancelled() || input.input_closed.load(Ordering::Acquire) {
         return;
     }
+    call::input_status(app, &input.call.id, &input.id, "listening", None, None);
     let frame = &event.frame;
     let mut failed = None;
     let mut created = None;
@@ -768,34 +809,20 @@ pub fn handle_audio_event<R: Runtime>(app: &AppHandle<R>, event: &VoiceAudioEven
                 // Only this source announces a barge-in. Input close and ASR
                 // failures never cancel or signal cancellation of a reply job.
                 if input.config.configured() {
-                    let began = match input.call.begin(&input.id) {
+                    let began = match call::begin_speech(app, &input.call) {
                         Ok(began) => began,
                         Err(error) => {
-                            emit(
+                            call::input_status(
                                 app,
-                                &input.id,
                                 &input.call.id,
+                                &input.id,
+                                "asr",
                                 None,
-                                "error",
-                                Some("asr"),
-                                None,
-                                Some(error),
+                                Some(&error),
                             );
                             return;
                         }
                     };
-                    if let Some(old_turn) = began.barge {
-                        emit(
-                            app,
-                            &input.id,
-                            &input.call.id,
-                            Some(&old_turn),
-                            "barge-in",
-                            None,
-                            None,
-                            None,
-                        );
-                    }
                     let (sender, receiver) = mpsc::channel(AUDIO_SLOTS);
                     let turn = Arc::new(Utterance {
                         id: uuid::Uuid::new_v4().to_string(),
@@ -803,6 +830,7 @@ pub fn handle_audio_event<R: Runtime>(app: &AppHandle<R>, event: &VoiceAudioEven
                         sequence: began.sequence,
                         cancel: input.cancel.child_token(),
                         segments: sender,
+                        _work: call::input_work(app, &input.call.id),
                     });
                     inner.capture = Some(ActiveCapture {
                         turn: turn.clone(),
@@ -814,17 +842,8 @@ pub fn handle_audio_event<R: Runtime>(app: &AppHandle<R>, event: &VoiceAudioEven
                     });
                     inner.utterances.insert(turn.id.clone(), turn.clone());
                     created = Some((turn, receiver));
-                } else if let Some(old_turn) = input.call.sent_turn() {
-                    emit(
-                        app,
-                        &input.id,
-                        &input.call.id,
-                        Some(&old_turn),
-                        "barge-in",
-                        None,
-                        None,
-                        None,
-                    );
+                } else if input.call.sent_turn().is_some() {
+                    call::interrupt_reply(app, &input.call.id);
                 }
             }
             let finished = event.speech_transition == Some(SpeechTransition::End);
@@ -858,7 +877,7 @@ pub fn handle_audio_event<R: Runtime>(app: &AppHandle<R>, event: &VoiceAudioEven
         );
     }
     if let Some((turn, receiver)) = created {
-        emit_current(app, &input, &turn, "status", Some("recording"), None);
+        update_input(app, &input, &turn, "recording", None);
         tauri::async_runtime::spawn(workers::recognize(
             app.clone(),
             input.clone(),
@@ -892,7 +911,7 @@ mod tests {
             pending_exports: AtomicUsize::new(0),
             export_done: Notify::new(),
             segments_released: AtomicBool::new(false),
-            closed_event_sent: AtomicBool::new(false),
+            retired: AtomicBool::new(false),
         });
         registry.inputs.get_mut(id).unwrap().session = Some(input.clone());
         input

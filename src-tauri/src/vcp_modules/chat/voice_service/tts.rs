@@ -37,6 +37,7 @@ struct TtsJob {
     player_started: AtomicBool,
     terminal: AtomicBool,
     stop_lock: tokio::sync::Mutex<()>,
+    work: Mutex<Option<Arc<super::call::WorkLease>>>,
 }
 
 struct Slot {
@@ -132,6 +133,7 @@ fn emit<R: Runtime>(
     stage: &'static str,
     message: Option<String>,
 ) {
+    super::call::tts_status(app, &job.id, stage, message.as_deref());
     let _ = app.emit(
         TTS_EVENT,
         TtsEvent {
@@ -178,6 +180,43 @@ fn retire<R: Runtime>(app: &AppHandle<R>, job: &TtsJob) {
     if let Ok(mut registry) = state.0.lock() {
         registry.complete(&job.id);
     };
+    if let Ok(mut work) = job.work.lock() {
+        work.take();
+    }
+}
+
+pub(super) fn attach_work<R: Runtime>(
+    app: &AppHandle<R>,
+    id: &str,
+    work: Arc<super::call::WorkLease>,
+) {
+    if let Some(job) = job(app, id) {
+        if let Ok(mut held) = job.work.lock() {
+            *held = Some(work);
+        }
+    }
+}
+
+/// Revoke admission immediately; native stop acknowledgement runs off the
+/// native event callback and never blocks confirmed speech processing.
+pub(super) fn request_stop<R: Runtime>(app: &AppHandle<R>, id: &str) {
+    let narration = app
+        .state::<TtsServiceState>()
+        .0
+        .lock()
+        .ok()
+        .and_then(|mut registry| registry.stop(id));
+    if let Some(narration) = narration {
+        if !narration.terminal.swap(true, Ordering::AcqRel) {
+            emit(app, &narration, "stopped", "cancelled", None);
+        }
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            if flush_player(&app, &narration).await.is_ok() {
+                retire(&app, &narration);
+            }
+        });
+    }
 }
 
 async fn flush_player<R: Runtime>(app: &AppHandle<R>, job: &TtsJob) -> Result<(), String> {
@@ -274,6 +313,11 @@ pub async fn start_tts_session<R: Runtime>(
     }
     let narration = Arc::new(TtsJob {
         id: tts_id.clone(),
+        work: Mutex::new(
+            origin_user_message_id
+                .is_none()
+                .then(|| super::call::WorkLease::acquire(&app)),
+        ),
         origin: origin_user_message_id,
         config,
         cancel: cancel.clone(),
@@ -345,7 +389,6 @@ pub async fn stop_tts<R: Runtime>(app: AppHandle<R>, tts_id: String) -> Result<(
 
 /// Seal an empty chat attempt or a composed invite-only workflow without
 /// replacing the cumulative text supplied by the real Rust output owner.
-#[tauri::command]
 pub async fn finish_tts_chat<R: Runtime>(app: AppHandle<R>, tts_id: String) -> Result<(), String> {
     let Some(narration) = job(&app, &tts_id).filter(|job| !job.cancel.is_cancelled()) else {
         return Ok(());
@@ -562,6 +605,7 @@ mod tests {
             player_started: AtomicBool::new(false),
             terminal: AtomicBool::new(false),
             stop_lock: tokio::sync::Mutex::new(()),
+            work: Mutex::new(None),
         });
         registry.current.as_mut().unwrap().job = Some(job.clone());
         job

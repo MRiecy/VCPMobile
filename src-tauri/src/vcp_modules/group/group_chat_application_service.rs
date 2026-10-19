@@ -352,16 +352,42 @@ pub async fn internal_process_group_chat_message(
     params: GroupChatParams,
     append_user_msg: bool,
 ) -> Result<Value, String> {
+    let topic_key = TopicKey::new("group", &params.group_id, &params.topic_id);
+    let group_turn = active_group_turns.try_acquire(topic_key)?;
+    group_turn.set_origin_user_message(&params.user_message.id)?;
+    group_turn.bind_optional_output(&app_handle, params.stream_channel.clone())?;
+    process_prepared_group_chat_message(
+        app_handle,
+        group_state,
+        agent_state,
+        db_state,
+        active_requests,
+        group_turn,
+        params,
+        append_user_msg,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn process_prepared_group_chat_message(
+    app_handle: AppHandle,
+    group_state: State<'_, GroupManagerState>,
+    agent_state: State<'_, AgentConfigState>,
+    db_state: State<'_, DbState>,
+    active_requests: State<'_, ActiveRequests>,
+    group_turn: ActiveGroupTurnLease,
+    params: GroupChatParams,
+    append_user_msg: bool,
+) -> Result<Value, String> {
     let stream_channel = params.stream_channel;
     let group_id = params.group_id;
     let topic_id = params.topic_id;
     let user_message = params.user_message;
     let connection = params.connection;
     let topic_key = TopicKey::new("group", &group_id, &topic_id);
-    let group_turn = active_group_turns.try_acquire(topic_key.clone())?;
-    group_turn.set_origin_user_message(&user_message.id)?;
-    if let Some(channel) = stream_channel.clone() {
-        group_turn.bind_output(&app_handle, channel)?;
+    if group_turn.is_cancelled() {
+        return Ok(json!({ "status": "cancelled" }));
     }
 
     log::info!(
@@ -385,6 +411,9 @@ pub async fn internal_process_group_chat_message(
 
     // 3. 异步追加用户消息 (重新生成时设为 false)
     if append_user_msg {
+        if group_turn.is_cancelled() {
+            return Ok(json!({ "status": "cancelled" }));
+        }
         message_service::append_single_message(
             app_handle.clone(),
             &db_state.pool,
@@ -394,6 +423,10 @@ pub async fn internal_process_group_chat_message(
             user_message.clone(),
         )
         .await?;
+    }
+
+    if group_turn.is_cancelled() {
+        return Ok(json!({ "status": "cancelled" }));
     }
 
     // 为了给 AI 决策提供上下文，我们只轻量读取最新的 8 条纯文本和附件（不加载任何 UI 渲染数据）

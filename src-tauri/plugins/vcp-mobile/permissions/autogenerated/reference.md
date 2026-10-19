@@ -101,32 +101,6 @@ Denies the acquire_wake_lock command without any pre-configured scope.
 <tr>
 <td>
 
-`vcp-mobile:allow-begin-voice-call`
-
-</td>
-<td>
-
-Enables the begin_voice_call command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`vcp-mobile:deny-begin-voice-call`
-
-</td>
-<td>
-
-Denies the begin_voice_call command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
 `vcp-mobile:allow-can-install-packages`
 
 </td>
@@ -432,32 +406,6 @@ Enables the delete_temp_file command without any pre-configured scope.
 <td>
 
 Denies the delete_temp_file command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`vcp-mobile:allow-end-voice-call`
-
-</td>
-<td>
-
-Enables the end_voice_call command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`vcp-mobile:deny-end-voice-call`
-
-</td>
-<td>
-
-Denies the end_voice_call command without any pre-configured scope.
 
 </td>
 </tr>
@@ -1316,58 +1264,6 @@ Enables the start_network_monitoring command without any pre-configured scope.
 <td>
 
 Denies the start_network_monitoring command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`vcp-mobile:allow-start-voice-audio`
-
-</td>
-<td>
-
-Enables the start_voice_audio command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`vcp-mobile:deny-start-voice-audio`
-
-</td>
-<td>
-
-Denies the start_voice_audio command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`vcp-mobile:allow-stop-voice-audio`
-
-</td>
-<td>
-
-Enables the stop_voice_audio command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`vcp-mobile:deny-stop-voice-audio`
-
-</td>
-<td>
-
-Denies the stop_voice_audio command without any pre-configured scope.
 
 </td>
 </tr>

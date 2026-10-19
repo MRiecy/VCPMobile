@@ -1,7 +1,6 @@
 //! Call-scoped, pre-send ASR aggregation. An offer is not a sent chat message;
 //! only a successful claim crosses that boundary.
 use super::network::MAX_TEXT_BYTES;
-use serde::Serialize;
 use std::{collections::BTreeMap, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 
@@ -15,7 +14,6 @@ struct Batch {
     parts: BTreeMap<u64, Part>,
     offer: Option<Offer>,
     needs_retry: bool,
-    last_session: String,
 }
 #[derive(Default)]
 struct BatchState {
@@ -33,8 +31,6 @@ pub(super) struct CallInput {
 #[derive(Clone)]
 pub(super) struct Offer {
     pub call_id: String,
-    pub session_id: String,
-    pub batch_id: String,
     pub offer_id: String,
     pub text: String,
 }
@@ -51,26 +47,6 @@ pub(super) enum BatchCompletion {
     Offered(Offer),
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaimedTranscript {
-    accepted: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    turn_id: Option<String>,
-}
-
-impl ClaimedTranscript {
-    pub(super) fn rejected() -> Self {
-        Self {
-            accepted: false,
-            text: None,
-            turn_id: None,
-        }
-    }
-}
-
 impl CallInput {
     pub fn new(id: String) -> Self {
         Self {
@@ -80,7 +56,7 @@ impl CallInput {
         }
     }
 
-    pub fn begin(&self, session_id: &str) -> Result<Began, String> {
+    pub fn begin(&self) -> Result<Began, String> {
         if self.cancel.is_cancelled() {
             return Err(super::network::CANCELLED.into());
         }
@@ -96,7 +72,6 @@ impl CallInput {
                 parts: BTreeMap::new(),
                 offer: None,
                 needs_retry: false,
-                last_session: session_id.into(),
             });
         }
         let sequence = state.next_sequence;
@@ -111,7 +86,6 @@ impl CallInput {
             return Err("连续语音片段过多，请结束当前输入后重试。".into());
         }
         batch.needs_retry = false;
-        batch.last_session = session_id.into();
         batch.parts.insert(
             sequence,
             Part {
@@ -221,8 +195,6 @@ impl CallInput {
         }
         let offer = Offer {
             call_id: self.id.clone(),
-            session_id: batch.last_session.clone(),
-            batch_id: batch.id.clone(),
             offer_id: uuid::Uuid::new_v4().to_string(),
             text,
         };
@@ -242,7 +214,18 @@ impl CallInput {
         }
     }
 
-    pub fn claim(&self, offer_id: &str) -> Result<ClaimedTranscript, String> {
+    pub fn has_offer(&self, offer_id: &str) -> bool {
+        self.state.lock().is_ok_and(|state| {
+            state
+                .current
+                .as_ref()
+                .and_then(|batch| batch.offer.as_ref())
+                .is_some_and(|offer| offer.offer_id == offer_id && !self.cancel.is_cancelled())
+        })
+    }
+
+    /// Only the call coordinator uses this, while holding its admission lock.
+    pub fn claim(&self, offer_id: &str) -> Result<bool, String> {
         let mut state = self.state.lock().map_err(|error| error.to_string())?;
         let current = state
             .current
@@ -253,17 +236,9 @@ impl CallInput {
         if let Some(offer) = current {
             state.current = None;
             state.last_claimed = Some(offer.offer_id.clone());
-            Ok(ClaimedTranscript {
-                accepted: true,
-                text: Some(offer.text),
-                turn_id: Some(offer.offer_id),
-            })
+            Ok(true)
         } else {
-            Ok(ClaimedTranscript {
-                accepted: false,
-                text: None,
-                turn_id: None,
-            })
+            Ok(false)
         }
     }
 }
@@ -290,9 +265,9 @@ mod tests {
     #[test]
     fn out_of_order_recognition_merges_in_recording_order_and_claim_is_unique() {
         let call = CallInput::new("call".into());
-        let first = call.begin("mic-a").unwrap();
+        let first = call.begin().unwrap();
         call.end_speech(&first.batch_id, first.sequence);
-        let second = call.begin("mic-b").unwrap();
+        let second = call.begin().unwrap();
         call.end_speech(&second.batch_id, second.sequence);
         assert!(second.barge.is_none());
         assert!(matches!(
@@ -305,21 +280,21 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(offer.text, "第一句 第二句");
-        assert!(call.claim(&offer.offer_id).unwrap().accepted);
-        assert!(!call.claim(&offer.offer_id).unwrap().accepted);
-        assert_eq!(call.begin("mic-c").unwrap().barge, Some(offer.offer_id));
+        assert!(call.claim(&offer.offer_id).unwrap());
+        assert!(!call.claim(&offer.offer_id).unwrap());
+        assert_eq!(call.begin().unwrap().barge, Some(offer.offer_id));
     }
     #[test]
     fn speech_before_claim_invalidates_offer_without_losing_its_text() {
         let call = CallInput::new("call".into());
-        let first = call.begin("mic-a").unwrap();
+        let first = call.begin().unwrap();
         let old = offered(
             call.complete(&first.batch_id, first.sequence, "前半句".into())
                 .unwrap(),
         );
-        let more = call.begin("mic-a").unwrap();
+        let more = call.begin().unwrap();
         assert!(more.barge.is_none());
-        assert!(!call.claim(&old.offer_id).unwrap().accepted);
+        assert!(!call.claim(&old.offer_id).unwrap());
         let new = offered(
             call.complete(&more.batch_id, more.sequence, "后半句".into())
                 .unwrap(),
@@ -332,14 +307,14 @@ mod tests {
     fn completed_empty_recognition_does_not_fill_up_future_batches() {
         let call = CallInput::new("call".into());
         for _ in 0..100 {
-            let speech = call.begin("mic").unwrap();
+            let speech = call.begin().unwrap();
             assert!(matches!(
                 call.complete(&speech.batch_id, speech.sequence, "  ".into())
                     .unwrap(),
                 BatchCompletion::Empty
             ));
         }
-        let speech = call.begin("mic").unwrap();
+        let speech = call.begin().unwrap();
         let offer = offered(
             call.complete(&speech.batch_id, speech.sequence, "真正的下一句".into())
                 .unwrap(),

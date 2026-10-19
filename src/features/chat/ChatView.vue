@@ -254,7 +254,6 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  voiceCall.end();
   footerObserver?.disconnect();
   viewDisposed = true;
   contentGeneration += 1;

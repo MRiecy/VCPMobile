@@ -13,3 +13,4 @@ pub mod topic_service;
 pub mod topic_summary_service;
 pub mod topic_types;
 pub mod voice_service;
+pub(crate) mod voice_submission;

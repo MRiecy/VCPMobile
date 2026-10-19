@@ -889,9 +889,9 @@ impl ActiveRequestLease {
     pub(crate) fn bind_output<R: Runtime>(
         &self,
         app: &AppHandle<R>,
-        channel: Channel<StreamEvent>,
+        channel: Option<Channel<StreamEvent>>,
     ) -> Result<(), String> {
-        let output = request_output(app, &self.key, Some(channel));
+        let output = request_output(app, &self.key, channel);
         output.send_activity(&self.key, self.entry.attempt_id, true);
         Ok(())
     }
@@ -971,7 +971,14 @@ impl Default for ActiveGroupTurns {
 
 impl ActiveGroupTurns {
     pub(crate) fn try_acquire(&self, key: TopicKey) -> Result<ActiveGroupTurnLease, String> {
-        let cancellation_token = CancellationToken::new();
+        self.try_acquire_with_cancellation(key, CancellationToken::new())
+    }
+
+    pub(crate) fn try_acquire_with_cancellation(
+        &self,
+        key: TopicKey,
+        cancellation_token: CancellationToken,
+    ) -> Result<ActiveGroupTurnLease, String> {
 
         match self.0.entry(key.clone()) {
             Entry::Vacant(slot) => {
@@ -1067,18 +1074,28 @@ impl ActiveGroupTurnLease {
         app: &AppHandle<R>,
         channel: Channel<StreamEvent>,
     ) -> Result<(), String> {
+        self.bind_optional_output(app, Some(channel))
+    }
+
+    pub(crate) fn bind_optional_output<R: Runtime>(
+        &self,
+        app: &AppHandle<R>,
+        channel: Option<Channel<StreamEvent>>,
+    ) -> Result<(), String> {
         let requests = app.state::<ActiveRequests>();
         let connection = requests.1.lock().map_err(|error| error.to_string())?;
-        let channel = connection.as_ref().map(|connection| connection.channel.clone()).unwrap_or(channel);
+        let channel = connection.as_ref().map(|connection| connection.channel.clone()).or(channel);
         if let Some(turn) = self.turns.get(&self.key) {
             let feed_app = app.clone();
             *turn.chat_feed.lock().map_err(|error| error.to_string())? = Some(Arc::new(move |event|
                 crate::vcp_modules::chat::voice_service::feed_chat_event(&feed_app, event)));
             let mut current = turn.channel.lock().map_err(|error| error.to_string())?;
-            *current = Some(channel.clone());
+            *current = channel.clone();
             let event = group_turn_event(&self.key, &turn, true);
             if let Ok(feed) = turn.chat_feed.lock() { if let Some(feed) = feed.as_ref() { feed(&event); } }
-            let _ = channel.send(event);
+            if let Some(channel) = channel {
+                let _ = channel.send(event);
+            }
         }
         Ok(())
     }
@@ -2420,58 +2437,6 @@ async fn handle_non_streaming_request(
     })
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ChatAttemptKind {
-    Request,
-    Group,
-}
-
-fn cancel_exact_chat_attempt(
-    requests: &ActiveRequests,
-    turns: &ActiveGroupTurns,
-    topic: &TopicKey,
-    attempt_id: uuid::Uuid,
-    kind: ChatAttemptKind,
-) -> bool {
-    match kind {
-        ChatAttemptKind::Request => {
-            for entry in requests.0.iter() {
-                if &entry.key().topic == topic && entry.attempt_id == attempt_id {
-                    entry.cancellation_token.cancel();
-                    return true;
-                }
-            }
-            false
-        }
-        ChatAttemptKind::Group => {
-            let Some(entry) = turns.0.get(topic) else { return false; };
-            if entry.turn_id != attempt_id { return false; }
-            entry.cancellation_token.cancel();
-            true
-        }
-    }
-}
-
-/// Voice interruption targets an accepted output owner, including preparation
-/// before the first assistant message. A stale attempt cannot stop its successor.
-/// The existing request owner remains responsible for durable finalization.
-#[tauri::command]
-pub async fn interrupt_chat_attempt(
-    requests: tauri::State<'_, ActiveRequests>,
-    turns: tauri::State<'_, ActiveGroupTurns>,
-    owner_id: String,
-    owner_type: String,
-    topic_id: String,
-    attempt_id: String,
-    kind: ChatAttemptKind,
-) -> Result<Value, String> {
-    let attempt_id = uuid::Uuid::parse_str(&attempt_id).map_err(|_| "Invalid chat attempt ID".to_string())?;
-    let topic = TopicKey::new(owner_type, owner_id, topic_id);
-    let matched = cancel_exact_chat_attempt(&requests, &turns, &topic, attempt_id, kind);
-    Ok(json!({ "matched": matched }))
-}
-
 /// 中止请求 Command: interruptRequest
 /// 通过完整消息身份立即取消对应 outer request 的共享取消域
 #[tauri::command]
@@ -3639,7 +3604,7 @@ mod offline_completed_tests {
         app.manage(ActiveGroupTurns::default());
         let requests = app.state::<ActiveRequests>();
         let (lease, _) = ActiveRequestLease::try_acquire(requests.0.clone(), key).unwrap();
-        lease.bind_output(app.handle(), channel().0).unwrap();
+        lease.bind_output(app.handle(), Some(channel().0)).unwrap();
         let (replacement, mut events) = channel();
         let receipt = reconnect_chat_output(app.handle().clone(), "preparing-interface".into(), Some(replacement))
             .await.unwrap();
@@ -3696,7 +3661,7 @@ mod offline_completed_tests {
         let key = MessageKey::new(TopicKey::new("agent", "owner", "topic"), "reply");
         let (lease, _) = ActiveRequestLease::try_acquire(app.state::<ActiveRequests>().0.clone(), key.clone()).unwrap();
         lease.set_origin_user_message("voice-user").unwrap();
-        lease.bind_output(app.handle(), fallback.clone()).unwrap();
+        lease.bind_output(app.handle(), Some(fallback.clone())).unwrap();
         let activity = events.recv().await.unwrap();
         assert_eq!(activity["context"]["originUserMessageId"], "voice-user");
         deliver_request_event(app.handle(), &key, Some(fallback), StreamEvent::thinking(
@@ -4575,40 +4540,81 @@ mod active_request_tests {
         assert!(!requests.0.contains_key(&key));
     }
 
-    #[test]
-    fn voice_attempt_cancel_is_scoped_and_does_not_stop_another_request() {
-        let requests = ActiveRequests::default();
-        let turns = ActiveGroupTurns::default();
-        let key = message_key("voice-message");
-        let other = message_key("typed-message");
-        let (voice, voice_token) = ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).unwrap();
-        let (_typed, typed_token) = ActiveRequestLease::try_acquire(requests.0.clone(), other).unwrap();
-        let id = voice.entry.attempt_id;
-        let different_topic = TopicKey::new("agent", "other-owner", &key.topic.topic_id);
-        assert!(!cancel_exact_chat_attempt(&requests, &turns, &different_topic, id, ChatAttemptKind::Request));
-        assert!(!voice_token.is_cancelled());
-        assert!(cancel_exact_chat_attempt(&requests, &turns, &key.topic, id, ChatAttemptKind::Request));
-        assert!(voice_token.is_cancelled());
-        assert!(!typed_token.is_cancelled());
-        drop(voice);
-        let (_successor, successor_token) = ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).unwrap();
-        assert!(!cancel_exact_chat_attempt(&requests, &turns, &key.topic, id, ChatAttemptKind::Request));
-        assert!(!successor_token.is_cancelled());
+    #[tokio::test]
+    async fn cancelled_voice_admission_cannot_start_http_after_late_registration() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let app = tauri::test::mock_app();
+        app.manage(ActiveRequests::default());
+        let requests = app.state::<ActiveRequests>();
+        let key = message_key("late-voice-reply");
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let (lease, token) = ActiveRequestLease::try_acquire_with_cancellation(
+            requests.0.clone(), key.clone(), cancellation,
+        ).unwrap();
+        lease.set_origin_user_message("voice-origin").unwrap();
+        lease.bind_output(app.handle(), None).unwrap();
+        {
+            let output = lease.entry.output.state.lock().unwrap();
+            assert!(output.channel.is_none());
+            assert!(output.chat_feed.is_some(), "Rust feed binds without a WebView");
+        }
+        let result = perform_vcp_request_registered(
+            app.handle(),
+            VcpRequestPayload {
+                vcp_url: endpoint,
+                vcp_api_key: String::new(),
+                messages: vec![json!({"role": "user", "content": "voice"})],
+                model_config: json!({"stream": true}),
+                message_id: key.msg_id.clone(),
+                context: Some(json!({
+                    "ownerType": key.topic.owner_type,
+                    "ownerId": key.topic.owner_id,
+                    "topicId": key.topic.topic_id,
+                })),
+                transport_request_id: None,
+            },
+            None,
+            token,
+        ).await.unwrap();
+        assert!(result.is_aborted);
+        assert!(tokio::time::timeout(Duration::from_millis(30), listener.accept()).await.is_err());
     }
 
     #[test]
-    fn voice_group_cancel_does_not_stop_a_later_turn_in_the_same_topic() {
-        let requests = ActiveRequests::default();
-        let turns = ActiveGroupTurns::default();
-        let topic = TopicKey::new("group", "voice-group", "topic-a");
-        let old = turns.try_acquire(topic.clone()).unwrap();
-        let id = turns.0.get(&topic).unwrap().turn_id;
-        assert!(cancel_exact_chat_attempt(&requests, &turns, &topic, id, ChatAttemptKind::Group));
-        assert!(old.is_cancelled());
-        drop(old);
-        let next = turns.try_acquire(topic.clone()).unwrap();
-        assert!(!cancel_exact_chat_attempt(&requests, &turns, &topic, id, ChatAttemptKind::Group));
-        assert!(!next.is_cancelled());
+    fn voice_group_without_webview_keeps_the_feed_and_exact_call_cancellation() {
+        let app = tauri::test::mock_app();
+        app.manage(ActiveRequests::default());
+        app.manage(ActiveGroupTurns::default());
+        let turns = app.state::<ActiveGroupTurns>();
+        let topic = TopicKey::new("group", "voice-group", "voice-topic");
+        let cancellation = CancellationToken::new();
+        let turn = turns.try_acquire_with_cancellation(topic.clone(), cancellation.clone()).unwrap();
+        turn.set_origin_user_message("voice-origin").unwrap();
+        turn.bind_optional_output(app.handle(), None).unwrap();
+        let events = Arc::new(std::sync::Mutex::new(Vec::<StreamEvent>::new()));
+        {
+            let entry = turns.0.get(&topic).unwrap();
+            assert!(entry.channel.lock().unwrap().is_none());
+            assert!(entry.chat_feed.lock().unwrap().is_some());
+            let captured = events.clone();
+            *entry.chat_feed.lock().unwrap() = Some(Arc::new(move |event| {
+                captured.lock().unwrap().push(event.clone());
+            }));
+        }
+        let speaker = turn.child_token();
+        cancellation.cancel();
+        assert!(turn.is_cancelled());
+        assert!(speaker.is_cancelled());
+        drop(turn);
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].r#type, "group_turn");
+        assert_eq!(events[0].chunk.as_ref().unwrap()["active"], false);
+        assert_eq!(events[0].context.as_ref().unwrap()["originUserMessageId"], "voice-origin");
+        let later = turns.try_acquire(topic).unwrap();
+        assert!(!later.is_cancelled(), "a later unrelated group turn owns another token");
     }
 
     #[test]

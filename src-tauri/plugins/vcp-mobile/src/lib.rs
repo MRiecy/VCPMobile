@@ -107,10 +107,6 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             system::acquire_ota_keepalive,
             system::release_ota_keepalive,
             system::trigger_haptic_feedback,
-            voice::begin_voice_call,
-            voice::end_voice_call,
-            voice::start_voice_audio,
-            voice::stop_voice_audio,
             voice::set_voice_probe,
         ])
         .setup(|app, _api| {

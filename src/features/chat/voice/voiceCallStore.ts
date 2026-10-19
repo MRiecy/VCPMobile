@@ -3,9 +3,7 @@ import { onScopeDispose, ref, shallowRef, watch } from 'vue';
 import { useChatSessionStore, type ConversationKey } from '../../../core/stores/chatSessionStore';
 import { useAppLifecycleStore } from '../../../core/stores/appLifecycle';
 import { createMicrophoneMonitor, type VoiceAudioFrame } from './microphoneMonitor';
-import { createVoiceConversation, type VoiceServiceView } from './voiceConversation';
-import { useChatHistoryStore } from '../../../core/stores/chatHistoryStore';
-import { useChatStreamStore } from '../../../core/stores/chatStreamStore';
+import { createVoiceConversation, type VoiceCallSnapshot, type VoiceServiceView } from './voiceConversation';
 
 export type MicrophoneState = 'off' | 'requesting' | 'on' | 'error';
 
@@ -23,7 +21,6 @@ const AUDIO_ERRORS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bmicrophone_not_ready\b/, '麦克风尚未就绪，请先重新开启麦克风。'],
   [/\bvoice_requires_foreground\b/, '请保持应用在前台，再开启麦克风。'],
   [/\bvoice_events_unavailable\b/, '语音事件连接暂不可用，请重新打开应用。'],
-  [/\bvoice_events_timeout\b/, '语音输入连接已中断，请重新开启麦克风。'],
   [/\b(voice_processing_failed|voice_processing_unavailable)\b/, '系统语音处理暂不可用，请检查音频设备后重试。'],
   [/\b(microphone_format_unavailable|audio_format_unavailable|audio_converter_unavailable)\b/, '当前音频设备的采集格式不可用，请切换设备后重试。'],
   [/\b(audio_input_discontinuity|audio_conversion_failed|audio_sample_invalid|audio_event_backpressure)\b/, '音频处理已中断，请重新开启麦克风。'],
@@ -68,6 +65,9 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   const serviceState = ref<VoiceServiceView['state']>('off');
   const serviceMessage = ref('');
   const partialText = ref('');
+  const inputState = ref<VoiceCallSnapshot['inputState']>('idle');
+  const replyState = ref<VoiceCallSnapshot['replyState']>('idle');
+  const ttsState = ref<VoiceCallSnapshot['ttsState']>('idle');
   let microphoneGeneration = 0;
   let probeGeneration = 0;
 
@@ -75,7 +75,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
     speechActive.value = false;
     aecState.value = null;
     route.value = '';
-    playbackActive.value = false;
+    playbackActive.value = ttsState.value === 'speaking';
     probeActive.value = false;
     probePending.value = false;
     probeError.value = '';
@@ -83,14 +83,30 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   };
 
   const voiceConversation = createVoiceConversation({
-    conversation: () => conversation.value,
-    isConversationCurrent: key => active.value && session.isConversationCurrent(key),
-    observeChat: listener => useChatStreamStore().observeEvents(listener),
-    sendMessage: (text, key, scope) => useChatHistoryStore().sendVoiceMessage(text, key, scope),
+    conversation: () => conversation.value ?? session.currentConversationKey,
+    isConversationCurrent: key => session.isConversationCurrent(key),
     onView: view => {
       serviceState.value = view.state;
       serviceMessage.value = view.message;
       partialText.value = view.partialText;
+    },
+    onSnapshot: snapshot => {
+      active.value = snapshot?.active ?? false;
+      conversation.value = snapshot?.active && session.currentConversationKey
+        ? { ...session.currentConversationKey } : null;
+      inputState.value = snapshot?.inputState ?? 'idle';
+      replyState.value = snapshot?.replyState ?? 'idle';
+      ttsState.value = snapshot?.ttsState ?? 'idle';
+      if (!snapshot?.active || snapshot.micState === 'closed') {
+        // The start intent owns the permission-prompt display until it settles.
+        if (microphoneState.value !== 'requesting' || !snapshot?.active) {
+          microphoneState.value = 'off';
+          level.value = 0;
+          bands.value = [];
+          resetAnalysis();
+        }
+      } else if (microphoneState.value !== 'requesting') microphoneState.value = 'on';
+      playbackActive.value = snapshot?.ttsState === 'speaking';
     },
   });
 
@@ -116,7 +132,16 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
       playbackActive.value = frame.playbackActive;
       probeActive.value = frame.playbackActive && !frame.playbackId;
     },
-    { beforeStart: voiceConversation.start, onStop: voiceConversation.closeInput },
+    {
+      beforeStart: voiceConversation.start,
+      currentLifecycleEpoch: () => lifecycle.lifecycleSnapshot?.transitionEpoch ?? null,
+      onConfigured: configured => {
+        if (!configured && !['recognizing', 'thinking', 'speaking'].includes(serviceState.value)) {
+          serviceState.value = 'local';
+          serviceMessage.value = '配置语音服务并重新开麦后，即可识别与朗读。';
+        }
+      },
+    },
   );
 
   const stopMicrophone = () => {
@@ -155,10 +180,18 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
 
   const end = () => {
     voiceConversation.stop();
-    stopMicrophone();
+    // Hangup has one Rust owner. Do not race it with a separate mute/drain
+    // command that could admit an unsent transcript while hangup cancels it.
+    microphoneGeneration += 1;
+    monitor.detach();
+    resetAnalysis();
+    microphoneState.value = 'off';
+    errorMessage.value = '';
     active.value = false;
     conversation.value = null;
   };
+
+  const recover = () => voiceConversation.recover();
 
   const toggleMicrophone = () => {
     if (!active.value) return;
@@ -189,16 +222,21 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   watch(() => session.currentConversationKey, () => {
     if (active.value && !session.isConversationCurrent(conversation.value)) end();
   }, { flush: 'sync' });
-  // Keep the scene when backgrounded, but release hardware. Resuming requires
+  // Keep the scene when backgrounded, but stop accepting microphone audio. Resuming requires
   // an explicit microphone tap; no hidden re-acquisition or permission prompt.
   watch(() => lifecycle.isBackground, background => {
     if (background && active.value) stopMicrophone();
   }, { flush: 'sync' });
-  onScopeDispose(end);
+  onScopeDispose(() => {
+    microphoneGeneration += 1;
+    monitor.detach();
+    voiceConversation.dispose();
+  });
 
   return {
     active, microphoneState, level, bands, speechActive, aecState, route,
     playbackActive, probeActive, probePending, probeError, errorMessage, serviceState, serviceMessage, partialText,
-    start, end, toggleMicrophone, setProbe,
+    inputState, replyState, ttsState,
+    start, end, toggleMicrophone, setProbe, recover,
   };
 });

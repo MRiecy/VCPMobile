@@ -7,6 +7,7 @@
 )]
 
 mod batch;
+mod call;
 mod chat_feed;
 mod input;
 mod network;
@@ -17,22 +18,20 @@ mod tts;
 mod wav;
 mod workers;
 
+pub use call::{
+    begin_voice_conversation, end_voice_conversation, get_voice_conversation_snapshot,
+    VoiceCallState,
+};
 #[cfg(any(target_os = "android", target_os = "ios", test))]
 pub use input::handle_audio_event;
-pub use input::{
-    claim_voice_transcript, close_voice_input, start_voice_service, stop_voice_call_inputs,
-    stop_voice_service, VoiceServiceState,
-};
+pub use input::{close_voice_microphone, start_voice_microphone, VoiceServiceState};
 pub use tts::{
-    feed_chat_event, finish_tts_chat, has_chat_listener, start_tts_session,
-    stop_chat_reply_by_origin, stop_tts, submit_tts_text, TtsServiceState,
+    feed_chat_event, has_chat_listener, start_tts_session, stop_chat_reply_by_origin, stop_tts,
+    submit_tts_text, TtsServiceState,
 };
 
 use crate::vcp_modules::settings_manager::Settings;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Runtime};
-
-const SERVICE_EVENT: &str = "vcp-voice-service";
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -86,53 +85,7 @@ impl VoiceServiceConfig {
     }
 }
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct VoiceServiceEvent {
-    session_id: String,
-    call_id: String,
-    kind: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    turn_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    batch_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    offer_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stage: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    message: Option<String>,
-}
-
 #[derive(Serialize)]
 pub struct VoiceServiceStart {
     configured: bool,
-}
-
-fn emit<R: Runtime>(
-    app: &AppHandle<R>,
-    session_id: &str,
-    call_id: &str,
-    turn_id: Option<&str>,
-    kind: &'static str,
-    stage: Option<&'static str>,
-    text: Option<String>,
-    message: Option<String>,
-) {
-    let _ = app.emit(
-        SERVICE_EVENT,
-        VoiceServiceEvent {
-            session_id: session_id.into(),
-            call_id: call_id.into(),
-            turn_id: turn_id.map(str::to_string),
-            batch_id: None,
-            offer_id: None,
-            kind,
-            stage,
-            text,
-            message,
-        },
-    );
 }

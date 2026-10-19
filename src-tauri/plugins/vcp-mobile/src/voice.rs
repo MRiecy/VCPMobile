@@ -300,19 +300,17 @@ async fn native_result_call<R: Runtime, T: serde::de::DeserializeOwned + Send + 
     }
 }
 
-#[tauri::command]
+/// Rust call coordination owns admission; this is not a frontend command.
 pub async fn begin_voice_call<R: Runtime>(app: AppHandle<R>, call_id: String) -> Result<(), String> {
     validate_session(&call_id)?;
     native_call(app, "beginVoiceCall", serde_json::json!({ "callId": call_id }), None).await
 }
 
-#[tauri::command]
 pub async fn end_voice_call<R: Runtime>(app: AppHandle<R>, call_id: String) -> Result<(), String> {
     validate_session(&call_id)?;
     native_call(app, "endVoiceCall", serde_json::json!({ "callId": call_id }), None).await
 }
 
-#[tauri::command]
 pub async fn start_voice_audio<R: Runtime>(
     app: AppHandle<R>,
     session_id: String,
@@ -343,7 +341,12 @@ pub async fn start_voice_audio<R: Runtime>(
             None,
         )
         .await;
-        return Err("cancelled: voice audio session was replaced or stopped".into());
+        // A native failure can publish its terminal event before the start
+        // receiver settles. Keep that concrete failure for the call owner;
+        // losing the capture slot alone must not turn it into cancellation.
+        return result.and(Err(
+            "cancelled: voice audio session was replaced or stopped".into(),
+        ));
     }
     if let Err(error) = &result {
         let epoch = app
@@ -367,7 +370,6 @@ pub async fn start_voice_audio<R: Runtime>(
     result
 }
 
-#[tauri::command]
 pub async fn stop_voice_audio<R: Runtime>(
     app: AppHandle<R>,
     session_id: String,

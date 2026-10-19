@@ -6,6 +6,8 @@ import type { LifecycleSnapshotDto } from '../../../core/types/lifecycle';
 import { emitTauriEvent, listenMock } from '../../mocks/tauri';
 
 const recover = vi.fn<() => Promise<void>>();
+const voiceRecover = vi.fn<() => Promise<void>>();
+const voiceDispose = vi.fn();
 let lifecycle: {
   state: string;
   lifecycleSnapshot: LifecycleSnapshotDto | null;
@@ -18,6 +20,9 @@ vi.mock('../../../core/stores/appLifecycle', () => ({
 }));
 vi.mock('../../../core/stores/chatStreamStore', () => ({
   useChatStreamStore: () => ({ checkAndRecoverInterruptedStreams: recover }),
+}));
+vi.mock('../../../features/chat/voice/voiceHistorySync', () => ({
+  createVoiceHistorySync: () => ({ reconcile: voiceRecover, dispose: voiceDispose }),
 }));
 vi.mock('../../../core/utils/platform', () => ({
   nativePlatform: 'ios',
@@ -36,6 +41,8 @@ describe('native network recovery', () => {
 
   beforeEach(() => {
     recover.mockReset().mockResolvedValue(undefined);
+    voiceRecover.mockReset().mockResolvedValue(undefined);
+    voiceDispose.mockReset();
     vi.spyOn(document, 'hidden', 'get').mockReturnValue(false);
     lifecycle = reactive({
       state: 'READY',
@@ -66,6 +73,7 @@ describe('native network recovery', () => {
     window.dispatchEvent(new Event('online'));
     emitTauriEvent('vcp-network-changed', { connected: true });
     expect(recover).toHaveBeenCalledTimes(1);
+    expect(voiceRecover).toHaveBeenCalledTimes(1);
 
     finish();
     await flushPromises();
