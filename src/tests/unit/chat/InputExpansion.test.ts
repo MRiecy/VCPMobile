@@ -188,9 +188,11 @@ describe('chat input expansion', () => {
     expect(disconnect).toHaveBeenCalledOnce();
   });
 
-  it('returns to the small composer when opening attachments, retaining the draft', async () => {
+  it('makes attachments available after collapsing the editor, retaining the draft', async () => {
     await expand();
     const draft = textarea.value;
+    expect(wrapper.find('[aria-label="添加附件"]').exists()).toBe(false);
+    await wrapper.get('[aria-label="缩小输入框"]').trigger('click');
     await wrapper.get('[aria-label="添加附件"]').trigger('click');
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
     expect(textarea.value).toBe(draft);

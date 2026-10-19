@@ -823,7 +823,7 @@ onUnmounted(() => {
         
         <!-- 左侧：语音/键盘切换及长按附件录制按钮 -->
         <button
-          v-if="isAndroid || isIOS"
+          v-if="!isExpanded && (isAndroid || isIOS)"
           @touchstart.prevent="handleIconTouchStart"
           @touchmove="handleIconTouchMove"
           @touchend="handleIconTouchEnd"
@@ -980,10 +980,11 @@ onUnmounted(() => {
           </div>
         </div>
 
-        <!-- 右侧动态操作区 (始终正常、平静地保留，保证视觉绝无抖动！) -->
+        <!-- 右侧操作区：展开编辑时仅保留发送/中止按钮。 -->
         <div class="input-actions flex items-center shrink-0 mb-0.5 relative gap-1.5">
           <!-- 展开附件按钮 -->
           <button
+            v-if="!isExpanded"
             v-longpress="openTarvenSelector"
             v-guide="'chat-plus-button'"
             @click="handleAttachToggle"
@@ -1177,10 +1178,6 @@ onUnmounted(() => {
   overscroll-behavior: contain;
 }
 
-.input-expanded .input-voice {
-  grid-area: 3 / 1;
-}
-
 .input-expanded .input-actions {
   grid-area: 3 / 2;
   justify-self: end;
@@ -1204,9 +1201,6 @@ onUnmounted(() => {
   .input-expanded .input-writing-area {
     grid-area: 1 / 1 / 2 / -1;
     margin-right: 44px;
-  }
-  .input-expanded .input-voice {
-    grid-row: 2;
   }
   .input-expanded .input-actions {
     grid-row: 2;
