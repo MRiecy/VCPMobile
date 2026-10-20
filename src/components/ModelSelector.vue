@@ -13,7 +13,7 @@ import {
   Zap,
   Loader2,
   Square
-} from 'lucide-vue-next';
+} from '@lucide/vue';
 import RefreshButton from './ui/RefreshButton.vue';
 
 const props = defineProps<{

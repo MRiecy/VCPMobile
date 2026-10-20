@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { ChevronLeft, MoreHorizontal, Pencil } from "lucide-vue-next";
+import { ChevronLeft, MoreHorizontal, Pencil } from "@lucide/vue";
 import RefreshButton from "../../../components/ui/RefreshButton.vue";
 import type { DiaryDocument, DiaryUiError } from "../types";
 import { parseDiaryFileName } from "../types";
@@ -95,10 +95,12 @@ const renderedContent = computed(() =>
           </span>
           <span class="diary-document-file">{{ document.key.file }}</span>
         </div>
+        <!-- eslint-disable vue/no-v-html -- diaryMarkdown owns the product's trusted server-body boundary; search highlights modify text nodes only. -->
         <article
           class="diary-reader-content vcp-markdown-block text-[16px] leading-[1.68]"
           v-html="renderedContent"
         />
+        <!-- eslint-enable vue/no-v-html -->
       </div>
     </div>
 

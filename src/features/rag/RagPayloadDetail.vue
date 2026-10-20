@@ -38,5 +38,6 @@ const renderedHtml = computed(() => {
 </script>
 
 <template>
+  <!-- eslint-disable-next-line vue/no-v-html -- Both marked output and its error fallback pass through filterTrustedRichHtml. -->
   <div v-html="renderedHtml"></div>
 </template>

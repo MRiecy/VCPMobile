@@ -94,6 +94,8 @@ export const resolveThemeWallpaperUrl = (value: unknown): string | null => {
     candidate.includes(':') ||
     candidate.includes('?') ||
     candidate.includes('#') ||
+    // Bundled wallpaper names cannot contain ASCII control characters.
+    // eslint-disable-next-line no-control-regex
     /[\u0000-\u001f\u007f]/.test(candidate)
   ) {
     return null;

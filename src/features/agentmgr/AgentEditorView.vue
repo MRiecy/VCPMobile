@@ -8,7 +8,7 @@
  * 改名/删除前扫描任务调度中心的引用并列出受影响任务（引用完整性，08 篇 §6）。
  */
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
-import { ArrowLeft, Plus, Search, Trash2, X } from 'lucide-vue-next';
+import { ArrowLeft, Plus, Search, Trash2, X } from '@lucide/vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { useAgentMgrStore } from './agentMgrStore';

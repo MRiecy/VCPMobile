@@ -6,7 +6,7 @@
  * 「全局设置」Tab 编辑 7 个顶层字段。改名/删除前的任务引用扫描在编辑器内完成。
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
-import { ArrowLeft, Bot, ChevronRight, Plus } from 'lucide-vue-next';
+import { ArrowLeft, Bot, ChevronRight, Plus } from '@lucide/vue';
 import SlidePage from '../../components/ui/SlidePage.vue';
 import RefreshButton from '../../components/ui/RefreshButton.vue';
 import AgentEditorView from './AgentEditorView.vue';

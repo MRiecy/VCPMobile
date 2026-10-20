@@ -191,8 +191,10 @@ onUnmounted(() => {
                   ? 'bg-[#0d1117] text-[#c9d1d9]' 
                   : 'bg-[#f6f8fa] text-[#24292e]'
               ]">
+              <!-- eslint-disable vue/no-v-html -- Code view accepts Rust syntect-generated markup or HTML-escaped source; executable preview stays in its iframe. -->
               <div v-if="highlightedContent" class="vcp-html-highlighted-wrapper" v-html="highlightedCode"></div>
               <pre v-else><code class="hljs" v-html="highlightedCode"></code></pre>
+              <!-- eslint-enable vue/no-v-html -->
             </div>
             <iframe 
               v-if="fullScreenTab === 'preview'"
@@ -256,8 +258,10 @@ onUnmounted(() => {
             : 'bg-[#f6f8fa] text-[#24292e]'
         ]">
         <slot name="code">
+          <!-- eslint-disable vue/no-v-html -- Code view accepts Rust syntect-generated markup or HTML-escaped source; executable preview stays in its iframe. -->
           <div v-if="highlightedContent" class="vcp-html-highlighted-wrapper" v-html="highlightedCode"></div>
           <pre v-else class="w-full min-w-max"><code class="hljs" v-html="highlightedCode"></code></pre>
+          <!-- eslint-enable vue/no-v-html -->
         </slot>
       </div>
 

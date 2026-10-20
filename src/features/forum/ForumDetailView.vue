@@ -6,7 +6,7 @@
  * UID/楼层号 Monospace；回复署名默认取设置中的用户名。
  */
 import { computed, onMounted, ref, watch } from 'vue';
-import { ArrowLeft, Send, Trash2 } from 'lucide-vue-next';
+import { ArrowLeft, Send, Trash2 } from '@lucide/vue';
 import RefreshButton from '../../components/ui/RefreshButton.vue';
 import { useForumStore } from './forumStore';
 import { useSettingsStore } from '../../core/stores/settings';
@@ -155,7 +155,7 @@ async function deletePost(): Promise<void> {
               <span class="fd-time">{{ relativeTime(postMeta.timestampMs) }}</span>
             </div>
           </div>
-          <!-- eslint-disable-next-line vue/no-v-html -->
+          <!-- eslint-disable-next-line vue/no-v-html -- renderForumMarkdown filters the parsed post body through filterTrustedRichHtml. -->
           <div class="fd-body markdown-body" v-html="renderForumMarkdown(detail.mainBody)" />
         </article>
 
@@ -188,7 +188,7 @@ async function deletePost(): Promise<void> {
               <Trash2 :size="13" />
             </button>
           </div>
-          <!-- eslint-disable-next-line vue/no-v-html -->
+          <!-- eslint-disable-next-line vue/no-v-html -- Replies use the same guarded renderForumMarkdown boundary as the main post. -->
           <div class="fd-body markdown-body" v-html="renderForumMarkdown(floor.body)" />
         </article>
       </template>

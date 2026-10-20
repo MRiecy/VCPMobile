@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch, nextTick } from 'vue';
-import { X, Play, RotateCcw, Copy, Check } from 'lucide-vue-next';
+import { X, Play, RotateCcw, Copy, Check } from '@lucide/vue';
 import SlidePage from '../../components/ui/SlidePage.vue';
 import SyncLogBrowserCore from '../../features/settings/components/SyncLogBrowserCore.vue';
 import { useSyncSessionStore } from '../../core/stores/syncSession';

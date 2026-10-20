@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import { X, Play } from 'lucide-vue-next';
+import { X, Play } from '@lucide/vue';
 import SlidePage from '../../../components/ui/SlidePage.vue';
 import { useRebuildSessionStore } from '../../../core/stores/rebuildSession';
 import { useOverlayStore } from '../../../core/stores/overlay';

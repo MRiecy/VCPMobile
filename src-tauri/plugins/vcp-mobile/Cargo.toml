@@ -29,4 +29,4 @@ tokio = { version = "1", default-features = false, features = ["sync", "time"] }
 tokio = { version = "1", default-features = false, features = ["macros", "rt", "sync", "time"] }
 
 [build-dependencies]
-tauri-plugin = { version = "2.7.1", features = ["build"] }
+tauri-plugin = { version = "2.7.2", features = ["build"] }

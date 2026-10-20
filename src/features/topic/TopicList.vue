@@ -9,7 +9,7 @@ import { useOverlayStore } from "../../core/stores/overlay";
 import { useNotificationStore } from "../../core/stores/notification";
 import { allowChatMutation, chatMutationBlockReason } from "../chat/chatMutationPolicy";
 import type { OverlayActionItem } from "../../core/types/overlay";
-import { Edit3, Lock, LockOpen, CheckCircle, Trash2, Copy, Pin, PinOff } from "lucide-vue-next";
+import { Edit3, Lock, LockOpen, CheckCircle, Trash2, Copy, Pin, PinOff } from "@lucide/vue";
 
 const emit = defineEmits<{
   (e: "select-topic"): void;

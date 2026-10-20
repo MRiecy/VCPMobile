@@ -108,7 +108,9 @@ const handlePointerDown = (e: PointerEvent) => {
   
   try {
     fullscreenViewportRef.value.setPointerCapture(e.pointerId);
-  } catch (err) {}
+  } catch {
+    // The pointer may already have ended; viewport events still handle the gesture.
+  }
   
   activePointers.set(e.pointerId, { clientX: e.clientX, clientY: e.clientY });
   const pointerList = Array.from(activePointers.values());
@@ -154,7 +156,9 @@ const handlePointerUp = (e: PointerEvent) => {
   if (fullscreenViewportRef.value) {
     try {
       fullscreenViewportRef.value.releasePointerCapture(e.pointerId);
-    } catch (err) {}
+    } catch {
+      // Capture may already be released by the browser or pointer cancellation.
+    }
   }
   
   activePointers.delete(e.pointerId);
@@ -339,6 +343,7 @@ const exportToGallery = async () => {
           @wheel="handleWheel"
           @dblclick="handleDblClick"
         >
+          <!-- eslint-disable vue/no-v-html -- SVG comes from strict-mode Mermaid or guarded message HTML; instanceSvg only rebases identifiers. -->
           <div 
             ref="fullscreenCanvasRef"
             class="inline-flex items-center justify-center min-w-full min-h-full p-8 box-border origin-center"
@@ -348,6 +353,7 @@ const exportToGallery = async () => {
             }"
             v-html="instanceSvg"
           ></div>
+          <!-- eslint-enable vue/no-v-html -->
         </div>
         
         <!-- Floating Control Bar (No Backdrop Blur, Solid background) -->

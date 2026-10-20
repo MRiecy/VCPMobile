@@ -8,7 +8,7 @@ import { useChatStreamStore } from '../../core/stores/chatStreamStore';
 import { useAttachmentStore } from '../../core/stores/attachmentStore';
 import { useNotificationStore } from '../../core/stores/notification';
 import { useOverlayStore } from '../../core/stores/overlay';
-import { Phone } from 'lucide-vue-next';
+import { Phone } from '@lucide/vue';
 import { useTarvenStore } from '../../core/stores/tarvenStore';
 import { isAndroid, isIOS } from '../../core/utils/platform';
 import { useLongTextPaste } from './composables/useLongTextPaste';
@@ -307,7 +307,7 @@ const handleIconTouchStart = (e: TouchEvent) => {
     try {
       await startRecording();
       if (generation !== voiceInputGeneration) cancelRecording();
-    } catch (err: any) {
+    } catch {
       if (generation !== voiceInputGeneration) return;
       isLongPressRecording.value = false;
       isIconLongPress = false;

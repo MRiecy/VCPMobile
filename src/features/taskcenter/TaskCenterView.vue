@@ -12,7 +12,7 @@ import {
   CircleAlert,
   Play,
   Plus,
-} from 'lucide-vue-next';
+} from '@lucide/vue';
 import SlidePage from '../../components/ui/SlidePage.vue';
 import RefreshButton from '../../components/ui/RefreshButton.vue';
 import SettingsSwitch from '../../components/settings/SettingsSwitch.vue';

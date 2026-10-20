@@ -1,10 +1,10 @@
 import { ref, onScopeDispose } from 'vue';
-import { Copy, Check } from 'lucide-vue-next';
+import { Copy, Check } from '@lucide/vue';
 import type { VcpNotification } from '../../../core/stores/notification';
 
 export const useNotificationClipboard = () => {
   const copiedId = ref<string | null>(null);
-  let copyTimer: ReturnType<typeof setTimeout> | null = null;
+  let copyTimer: ReturnType<Window['setTimeout']> | null = null;
 
   const buildCopyText = (item: VcpNotification) => {
     return item.rawPayload
@@ -17,7 +17,7 @@ export const useNotificationClipboard = () => {
       await navigator.clipboard.writeText(buildCopyText(item));
       copiedId.value = item.id;
 
-      if (copyTimer) clearTimeout(copyTimer);
+      if (copyTimer) window.clearTimeout(copyTimer);
       copyTimer = window.setTimeout(() => {
         if (copiedId.value === item.id) {
           copiedId.value = null;
@@ -30,7 +30,7 @@ export const useNotificationClipboard = () => {
   };
 
   onScopeDispose(() => {
-    if (copyTimer) clearTimeout(copyTimer);
+    if (copyTimer) window.clearTimeout(copyTimer);
   });
 
   const getCopyIcon = (itemId: string) => copiedId.value === itemId ? Check : Copy;

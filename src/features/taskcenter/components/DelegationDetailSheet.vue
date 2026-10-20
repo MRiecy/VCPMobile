@@ -4,7 +4,7 @@
  * 与 HistoryDetailSheet 同构；活跃委托可在详情内请求取消。
  */
 import { onBeforeUnmount, watch } from 'vue';
-import { X } from 'lucide-vue-next';
+import { X } from '@lucide/vue';
 import { useModalHistory } from '../../../core/composables/useModalHistory';
 import { useOverlayStore } from '../../../core/stores/overlay';
 import { useTaskCenterStore } from '../taskCenterStore';

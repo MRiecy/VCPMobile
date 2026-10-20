@@ -2,7 +2,7 @@ import {
   defineConfig,
   presetAttributify,
   presetIcons,
-  presetUno,
+  presetWind3,
   presetTypography,
   transformerDirectives,
   transformerVariantGroup,
@@ -16,7 +16,7 @@ export default defineConfig({
     ['card', 'p-4 rounded-2xl bg-white/5 border border-white/10 shadow-xl'],
   ],
   presets: [
-    presetUno(),
+    presetWind3(),
     presetAttributify(),
     presetIcons({
       scale: 1.2,

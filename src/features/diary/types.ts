@@ -189,6 +189,7 @@ export function isValidDiaryFileName(file: string): boolean {
       value !== ".." &&
       !value.includes("/") &&
       !value.includes("\\") &&
+      // eslint-disable-next-line no-control-regex -- File names must reject C0 and DEL control characters.
       !/[\u0000-\u001f\u007f]/.test(value),
   );
 }

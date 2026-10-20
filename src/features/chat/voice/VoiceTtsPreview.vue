@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import { Play, Square } from 'lucide-vue-next';
+import { Play, Square } from '@lucide/vue';
 import SettingsDisclosure from '../../../components/settings/SettingsDisclosure.vue';
 import VoiceTextArea from './VoiceTextArea.vue';
 import { useVoiceCallStore } from './voiceCallStore';

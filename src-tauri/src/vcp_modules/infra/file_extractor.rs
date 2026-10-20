@@ -418,11 +418,13 @@ fn extract_pptx_text(path: &std::path::Path) -> Option<String> {
     let mut archive = zip::ZipArchive::new(file).ok()?;
     let mut text = String::new();
 
-    let mut slide_names: Vec<String> = archive
-        .file_names()
-        .filter(|name| name.starts_with("ppt/slides/slide") && name.ends_with(".xml"))
-        .map(|name| name.to_string())
-        .collect();
+    let mut slide_names = Vec::new();
+    for name in archive.file_names() {
+        let name = name.ok()?;
+        if name.starts_with("ppt/slides/slide") && name.ends_with(".xml") {
+            slide_names.push(name.into_owned());
+        }
+    }
 
     slide_names.sort_by_key(|name| {
         let num_str: String = name.chars().filter(|c| c.is_ascii_digit()).collect();
@@ -593,11 +595,13 @@ fn extract_xlsx_text(path: &std::path::Path) -> Option<String> {
     }
 
     // 3. 扫描并收集所有的 worksheets/sheet*.xml 并按照编号排序
-    let mut sheet_names: Vec<String> = archive
-        .file_names()
-        .filter(|name| name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml"))
-        .map(|name| name.to_string())
-        .collect();
+    let mut sheet_names = Vec::new();
+    for name in archive.file_names() {
+        let name = name.ok()?;
+        if name.starts_with("xl/worksheets/sheet") && name.ends_with(".xml") {
+            sheet_names.push(name.into_owned());
+        }
+    }
 
     sheet_names.sort_by_key(|name| {
         let num_str: String = name.chars().filter(|c| c.is_ascii_digit()).collect();

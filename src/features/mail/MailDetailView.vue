@@ -15,7 +15,7 @@ import {
   Reply,
   Trash2,
   Undo2,
-} from 'lucide-vue-next';
+} from '@lucide/vue';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { isAndroid } from '../../core/utils/platform';
 import { filterTrustedRichHtml } from '../../core/utils/astRenderer';
@@ -152,7 +152,7 @@ async function download(partId: string, filename: string): Promise<void> {
       <template v-else-if="store.detail">
         <!-- 正文：html/markdown 走护栏渲染；纯文本预格式化展示 -->
         <pre v-if="body?.kind === 'text'" class="md-text">{{ body.text }}</pre>
-        <!-- eslint-disable-next-line vue/no-v-html -->
+        <!-- eslint-disable-next-line vue/no-v-html -- renderMailMarkdown owns the shared trusted-rich-HTML filtering boundary. -->
         <div v-else-if="renderedBody" class="md-body markdown-body" v-html="renderedBody" />
         <div v-else class="md-status">这封邮件没有可显示的正文。</div>
 

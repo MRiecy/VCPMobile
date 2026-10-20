@@ -2,7 +2,7 @@
 import { computed, watch, ref } from "vue";
 import { useModalHistory } from "../../../core/composables/useModalHistory";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
-import { X, ExternalLink, Download, Share2, FileDown } from "lucide-vue-next";
+import { X, ExternalLink, Download, Share2, FileDown } from "@lucide/vue";
 import { saveImageFromPath } from "tauri-plugin-vcp-mobile";
 import { useNotificationStore } from "../../../core/stores/notification";
 import { isAndroid, isIOS } from "../../../core/utils/platform";

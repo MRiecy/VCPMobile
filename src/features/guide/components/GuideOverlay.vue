@@ -253,8 +253,8 @@ const positionCard = (r: SpotRect | null) => {
     chosen = best;
   }
 
-  let top = 0;
-  let left = 0;
+  let top: number;
+  let left: number;
   if (chosen === 'bottom') {
     top = r.bottom + CARD_GAP;
     left = clampX(r.left + r.width / 2 - cardW / 2, cardW, insets);
@@ -334,7 +334,7 @@ const startStabilitySampling = (token: number, s: GuideStep) => {
 const pollTarget = (token: number, id: string, s: GuideStep) => {
   if (token !== stepToken) return;
   if (s.waitFor) {
-    let gateOk = false;
+    let gateOk: boolean;
     try {
       gateOk = s.waitFor() === true;
     } catch {

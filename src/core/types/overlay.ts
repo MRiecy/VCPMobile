@@ -1,6 +1,6 @@
 export interface OverlayActionItem {
   label: string;
-  icon?: any; // lucide-vue-next component
+  icon?: any; // @lucide/vue component
   danger?: boolean;
   disabled?: boolean;
   selected?: boolean;

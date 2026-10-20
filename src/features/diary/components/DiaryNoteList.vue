@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
 import { useVirtualList } from "@vueuse/core";
-import { Check, FileText } from "lucide-vue-next";
+import { Check, FileText } from "@lucide/vue";
 import type { DiaryNoteKey, DiaryNoteSummary, DiarySearchMode } from "../types";
 import {
   formatDiaryTimestamp,

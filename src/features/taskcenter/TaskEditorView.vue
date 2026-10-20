@@ -7,7 +7,7 @@
  * 占位符 chips 点击插入光标处（解决软键盘输入 {{...}} 的痛苦）。
  */
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
-import { ArrowLeft, Bot, Plus, Search, Trash2, X } from 'lucide-vue-next';
+import { ArrowLeft, Bot, Plus, Search, Trash2, X } from '@lucide/vue';
 import SettingsSwitch from '../../components/settings/SettingsSwitch.vue';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 import { useOverlayStore } from '../../core/stores/overlay';

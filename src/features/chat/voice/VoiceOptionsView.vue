@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
-import { ArrowLeft } from 'lucide-vue-next';
+import { ArrowLeft } from '@lucide/vue';
 import SlidePage from '../../../components/ui/SlidePage.vue';
 import VoiceStyleGuidancePage from './VoiceStyleGuidancePage.vue';
 import VoiceSettingsPage from './VoiceSettingsPage.vue';

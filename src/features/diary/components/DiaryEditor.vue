@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { ChevronLeft, Copy, Eye, FileEdit, RefreshCw, Save } from "lucide-vue-next";
+import { ChevronLeft, Copy, Eye, FileEdit, RefreshCw, Save } from "@lucide/vue";
 import type { DiaryDocument, DiarySaveState, DiaryUiError } from "../types";
 import { parseDiaryFileName } from "../types";
 import { renderDiaryMarkdown } from "../diaryMarkdown";
@@ -68,10 +68,12 @@ function handleInput(event: Event): void {
           <span>{{ presentation.extension || "FILE" }}</span>
           <span class="truncate">{{ document.key.folder }} / {{ document.key.file }}</span>
         </div>
+        <!-- eslint-disable vue/no-v-html -- diaryMarkdown renders user-edited trusted diary bodies under the same contract as the reader. -->
         <article
           class="diary-editor-preview vcp-markdown-block text-[16px] leading-[1.68]"
           v-html="renderedDraft"
         />
+        <!-- eslint-enable vue/no-v-html -->
       </div>
     </div>
     <div v-else class="diary-editor-stage flex-1 min-h-0">

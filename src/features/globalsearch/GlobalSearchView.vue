@@ -8,7 +8,7 @@
  * 结果项点击 → 关闭搜索页 → 验证锚点 → 成功后切换会话并定位。
  */
 import { computed, nextTick, ref, watch } from 'vue';
-import { ArrowLeft, ArrowUpDown, ChevronDown, Clock, Search, SlidersHorizontal, X } from 'lucide-vue-next';
+import { ArrowLeft, ArrowUpDown, ChevronDown, Clock, Search, SlidersHorizontal, X } from '@lucide/vue';
 import SlidePage from '../../components/ui/SlidePage.vue';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { useChatSessionStore } from '../../core/stores/chatSessionStore';

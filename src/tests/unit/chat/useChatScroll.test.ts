@@ -1,3 +1,4 @@
+import process from "node:process";
 import { computed, nextTick, ref } from "vue";
 import { describe, expect, it, vi } from "vitest";
 import { useChatScroll } from "@/core/composables/useChatScroll";
@@ -14,13 +15,11 @@ const settleInitialRendering = async () => {
 
 function installControllableResizeObserver() {
   const original = window.ResizeObserver;
-  let callback: ResizeObserverCallback | null = null;
-  let observer: ResizeObserver | null = null;
+  let notify: (() => void) | null = null;
 
   class TestResizeObserver implements ResizeObserver {
     constructor(nextCallback: ResizeObserverCallback) {
-      callback = nextCallback;
-      observer = this;
+      notify = () => nextCallback([], this);
     }
 
     observe() {}
@@ -32,10 +31,10 @@ function installControllableResizeObserver() {
 
   return {
     trigger: () => {
-      if (!callback || !observer) {
+      if (!notify) {
         throw new Error("ResizeObserver has not been initialized");
       }
-      callback([], observer);
+      notify();
     },
     restore: () => {
       window.ResizeObserver = original;
@@ -62,6 +61,70 @@ function scrollTopArgument(
 }
 
 describe("useChatScroll pagination completion", () => {
+  it("preserves a stale pagination rejection without finishing a newer request", async () => {
+    const list = document.createElement("div");
+    Object.defineProperties(list, {
+      scrollHeight: { configurable: true, value: 1000 },
+      clientHeight: { configurable: true, value: 100 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+    });
+    list.scrollTo = vi.fn();
+    const messageListRef = ref<HTMLElement | null>(null);
+    let rejectOld!: (reason: unknown) => void;
+    let finishCurrent!: (value: { addedCount: number }) => void;
+    const oldPage = new Promise<{ addedCount: number }>((_resolve, reject) => {
+      rejectOld = reject;
+    });
+    const currentPage = new Promise<{ addedCount: number }>((resolve) => {
+      finishCurrent = resolve;
+    });
+    const onLoadMore = vi.fn()
+      .mockReturnValueOnce(oldPage)
+      .mockReturnValueOnce(currentPage);
+    const scroll = useChatScroll({
+      messageListRef,
+      messageCount: computed(() => 0),
+      hasMoreHistory: ref(true),
+      isLoadingHistory: ref(false),
+      onLoadMore,
+    });
+    const failure = new Error("unexpected history callback failure");
+    const propagated: unknown[] = [];
+    // Pagination is launched by a DOM event without a returned promise. Observe
+    // the same unhandled-rejection boundary used by the app's error reporter.
+    const recordRejection = (reason: unknown) => { propagated.push(reason); };
+    process.on("unhandledRejection", recordRejection);
+    try {
+      messageListRef.value = list;
+      await nextTick();
+      list.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
+      expect(onLoadMore).toHaveBeenCalledTimes(1);
+
+      scroll.reset();
+      list.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
+      expect(onLoadMore).toHaveBeenCalledTimes(2);
+      vi.mocked(list.scrollTo).mockClear();
+
+      rejectOld(failure);
+      await flushFrames();
+      expect(propagated).toEqual([failure]);
+      expect(list.scrollTo).not.toHaveBeenCalled();
+      list.dispatchEvent(new WheelEvent("wheel", { deltaY: -1 }));
+      expect(onLoadMore).toHaveBeenCalledTimes(2);
+
+      finishCurrent({ addedCount: 0 });
+      await flushFrames();
+      expect(list.scrollTo).toHaveBeenCalledTimes(1);
+      expect(propagated).toEqual([failure]);
+    } finally {
+      // Keep rejected fixtures observed and release pending work even on failure.
+      void oldPage.catch(() => {});
+      finishCurrent({ addedCount: 0 });
+      scroll.dispose();
+      process.off("unhandledRejection", recordRejection);
+    }
+  });
+
   it("leaves loading-top after a zero-result page and permits retry", async () => {
     const list = document.createElement("div");
     Object.defineProperties(list, {

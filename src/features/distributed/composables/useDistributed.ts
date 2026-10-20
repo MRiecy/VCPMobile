@@ -58,7 +58,6 @@ async function setupListener(generation: number) {
         status.value = event.payload;
       },
     );
-    let owner!: { generation: number; promise: Promise<void> };
     const promise = registration
       .then((resolvedUnlisten) => {
         if (listenerCount <= 0 || generation !== listenerGeneration) {
@@ -78,7 +77,7 @@ async function setupListener(generation: number) {
           pendingListener = null;
         }
       });
-    owner = { generation, promise };
+    const owner = { generation, promise };
     pendingListener = owner;
   }
 

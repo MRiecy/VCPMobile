@@ -17,7 +17,7 @@ import InputEnhancer from "./InputEnhancer.vue";
 import TarvenSelector from "./components/TarvenSelector.vue";
 import VcpAvatar from "../../components/ui/VcpAvatar.vue";
 import CoreStatusIndicator from "../../components/ui/CoreStatusIndicator.vue";
-import { ArrowDown, ListChecks, SlidersHorizontal } from "lucide-vue-next";
+import { ArrowDown, ListChecks, SlidersHorizontal } from "@lucide/vue";
 import VoiceCallControls from "./voice/VoiceCallControls.vue";
 import { useVoiceCallStore } from "./voice/voiceCallStore";
 import { useAttachmentStore } from "../../core/stores/attachmentStore";
@@ -191,7 +191,8 @@ const handleVcpButtonClick = (e: any) => {
 
 
 watch(isStreamingActive, (active) => {
-  active ? startAutoScroll() : stopAutoScroll();
+  if (active) startAutoScroll();
+  else stopAutoScroll();
 });
 
 // Share attachments have their own draft; replacement never destroys normal staged files.

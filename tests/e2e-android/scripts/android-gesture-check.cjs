@@ -1,5 +1,8 @@
 'use strict';
 
+// These names are used only by functions serialized into the Debug WebView.
+/* global location, document, window, Element, getComputedStyle, innerWidth, innerHeight, MouseEvent, PointerEvent */
+
 // This deliberately has no arbitrary selector, expression, URL, package or input API.
 // CDP supplies browser-engine touch events, not evidence of physical finger motion.
 const { spawnSync } = require('child_process');

@@ -4,7 +4,7 @@
  * 展示一次运行的完整信息：状态、时间、耗时、触发来源、目标/失败 Agent、完整消息。
  */
 import { onBeforeUnmount, watch } from 'vue';
-import { X } from 'lucide-vue-next';
+import { X } from '@lucide/vue';
 import { useModalHistory } from '../../../core/composables/useModalHistory';
 import {
   RUN_STATUS_LABEL,

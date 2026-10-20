@@ -1,7 +1,8 @@
 # VCP Mobile 依赖管理宪章
 
-> 本文档为 VCP Mobile 项目依赖更新的唯一权威参考。任何涉及依赖版本变更的操作，必须先阅读本文件对应章节。
+> 本文档维护当前依赖清单、兼容约束与更新流程；具体版本和解析结果以 manifest 与锁文件为准。涉及依赖版本变更时，先阅读对应章节。
 > 适用范围：Rust 后端、Vue 3 前端、Android Gradle 构建、CI/CD 环境。
+> 维护时原位更新相应条目，不追加按日期排列的升级经过、测试成绩或临时报告路径。
 
 ---
 
@@ -42,33 +43,39 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 
 ### 2.1 Rust 后端层 (`src-tauri/Cargo.toml`)
 
-| 包名 | 当前锁定版本 | 更新频率建议 | 最新版本来源 | 备注 |
+下表区分 manifest 声明范围与锁文件解析；仅传递依赖在备注中注明，不为记录版本新增直接依赖。
+
+| 包名 | 当前声明或锁定版本 | 更新频率建议 | 最新版本来源 | 备注 |
 |------|-------------|-------------|-------------|------|
-| `tauri` | `2.12.1` | 跟随官方 Release Note | crates.io | 核心运行时，**必须与 CLI/API 对齐** |
-| `tauri-build` | `2.7.1` | 与 `tauri` 同步检查 | crates.io | Build script 依赖，版本独立于 tauri core |
-| `tauri-plugin-log` | `2.9.0` | 每季度检查 | crates.io | 日志插件 |
-| `tauri-plugin-opener` | `2.5.4` | 每季度检查 | crates.io | 系统打开器插件 |
+| `tauri` | `2.12.4` | 跟随官方 Release Note | crates.io | 核心运行时，**必须与 CLI/API 对齐** |
+| `tauri-build` | `2.7.3` | 与 `tauri` 同步检查 | crates.io | Build script 依赖，版本独立于 tauri core |
+| `tauri-plugin-log` | `2.10.1` | 每季度检查 | crates.io | 日志插件 |
+| `tauri-plugin-opener` | `2.7.2` | 每季度检查 | crates.io | 系统打开器插件 |
 | `tauri-plugin-os` | `2.4.0` | 按平台信息需求检查 | crates.io | 与前端绑定配套，提供启动时注入的平台身份 |
 | `serde` | `1` | 仅安全补丁 | crates.io | 序列化基石，极稳定 |
 | `serde_json` | `1` | 仅安全补丁 | crates.io | — |
 | `ts-rs` | `12.0.1` | 配置契约工具变更时检查 | crates.io | 可选 `config-export` feature；仅供 host 开发工具从 Rust 配置类型生成 TypeScript，移动端默认不启用 |
 | `tokio` | `1` | 仅安全补丁 | crates.io | 异步运行时 |
-| `reqwest` | `0.12` | 每季度检查 | crates.io | HTTP 客户端，注意 `rustls-tls` feature |
-| `sqlx` | `0.8.6` | 每季度检查 | crates.io | SQLite 异步 ORM |
-| `rusqlite` | `0.32.1` | 每季度检查 | crates.io | 同步 SQLite，启用 `bundled` |
-| `tokio-tungstenite` | `0.26` | 每季度检查 | crates.io | WebSocket 客户端 |
+| `reqwest` | `0.12` | 每季度检查 | crates.io | HTTP 客户端，使用 `rustls-tls`；升级约束见 §4.6 |
+| `sqlx` | `=0.9.0` | 每季度检查 | crates.io | SQLite 异步 ORM；与 rusqlite 共用 `libsqlite3-sys 0.37.0` |
+| `rusqlite` | `=0.39.0` | 每季度检查 | crates.io | 同步 SQLite，启用 `bundled`；保留当前精确约束，不能单独升级到不兼容的 SQLite links 版本 |
+| `tokio-tungstenite` | `0.30` | 每季度检查 | crates.io | WebSocket 客户端，保留 `rustls-tls-webpki-roots` |
+| `axum` | `0.8.9` | 每季度检查 | crates.io | 仅作为 dev-dependency 提供 HTTP 测试服务，不启用 `ws` feature |
 | `syntect` | `5.3.0` | 每半年检查 | crates.io | 语法高亮，体积敏感 |
 | `pulldown-cmark` | `0.13.3` | 每半年检查 | crates.io | Markdown 解析 |
-| `scraper` | `0.19` | 每半年检查 | crates.io | HTML 解析 |
-| `fancy-regex` | `0.16.2` | 每半年检查 | crates.io | manifest 下限 `0.16`，实际版本由 Cargo.lock 冻结 |
+| `html5ever` / `markup5ever_rcdom` | `0.38` / `0.38` | 每半年检查 | crates.io | HTML 解析直接依赖 |
+| `htmd` | `0.5.5` | 每半年检查 | crates.io | HTML 转 Markdown |
+| `fancy-regex` | `0.16.2` | 每半年检查 | crates.io | 传递依赖，实际版本由 Cargo.lock 冻结 |
 | `zstd` | `0.13` | 每半年检查 | crates.io | 压缩 |
-| `zip` | `8.6.0` | 每半年检查 | crates.io | ZIP 处理，禁用默认 feature，仅启用 deflate |
+| `zip` | `9.0.5` | 每半年检查 | crates.io | ZIP 处理，禁用默认 feature，仅启用 deflate |
+| `office_oxide` | `0.1.15` | 每季度检查 | crates.io | 文档解析传递依赖，与 zip 9 共同检查 |
+| `quinn-proto` | `0.11.19` | 仅安全补丁 | crates.io | 网络栈传递依赖，记录 Cargo.lock 解析结果 |
 | `dashmap` | `6` | 每季度检查 | crates.io | 并发 HashMap |
-| `lru` | `0.16.4` | 每半年检查 | crates.io | LRU 缓存；清单安全下限 `0.16.3` |
+| `lru` | `0.19.0` | 每半年检查 | crates.io | LRU 缓存 |
 | `uuid` | `1` | 仅安全补丁 | crates.io | UUID 生成 |
 | `chrono` | `0.4` | 仅安全补丁 | crates.io | 日期时间 |
 | `base64` | `0.22` | 仅安全补丁 | crates.io | Base64 编解码 |
-| `sha2` | `0.10` | 仅安全补丁 | crates.io | SHA-256 |
+| `sha2` | `0.11` | 仅安全补丁 | crates.io | SHA-256；锁文件另保留传递依赖所需的 0.10.9 |
 | `hex` | `0.4` | 仅安全补丁 | crates.io | 十六进制 |
 | `log` | `0.4` | 仅安全补丁 | crates.io | 日志 facade |
 | `lazy_static` | `1.4` | 仅安全补丁 | crates.io | 懒加载静态变量 |
@@ -80,7 +87,6 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `regex` | `1` | 仅安全补丁 | crates.io | 标准正则 |
 | `rand` | `0.8` | 仅安全补丁 | crates.io | 随机数 |
 | `semver` | `1` | 仅安全补丁 | crates.io | 语义版本 |
-| `ego-tree` | `0.6` | 每半年检查 | crates.io | DOM 树操作 |
 | `async-trait` | `0.1` | 仅安全补丁 | crates.io | 异步 trait |
 | `libc` | `0.2` | 仅安全补丁 | crates.io | FFI C 库绑定 |
 | `memmap2` | `0.9.11` | 仅安全补丁 | crates.io | 内存映射 |
@@ -89,54 +95,65 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `chardetng` | `0.1` | 每半年检查 | crates.io | 编码检测 |
 | `jni` | `0.21` | 每季度检查 | crates.io | Android JNI 绑定 |
 
-配置契约导出工具位于 `src-tauri/crates/config-export/`，直接编译生产配置类型与规则。修改这些定义后运行 `pnpm config:generate` 更新已提交的 `src/core/config/generated/`；`pnpm config:check` 只检查生成结果，不写文件，也不读取设备配置或凭据。`pnpm check` 会先执行这一只读检查，再检查 TypeScript 和 Rust。普通手机构建不执行导出。
+配置契约导出工具位于 `src-tauri/crates/config-export/`，直接编译生产配置类型与规则。修改这些定义后运行 `pnpm config:generate` 更新已提交的 `src/core/config/generated/`；`pnpm config:check` 只检查生成结果，不写文件，也不读取设备配置或凭据。`pnpm check` 当前按 `config:check → lint → vue-tsc --noEmit → tsc --noEmit --project tsconfig.node.json → cargo check --locked` 顺序执行，其中 Node 配置项目覆盖 `vite.config.ts`、`vitest.config.ts` 与 `uno.config.ts`。普通手机构建不执行导出。
 
 ### 2.2 前端层 (`package.json`)
 
-#### Runtime Dependencies
+#### Runtime 与前端构建生态
 
-| 包名 | 当前锁定版本 | 更新频率建议 | 最新版本来源 | 备注 |
+| 包名 | 当前 manifest 声明 | 更新频率建议 | 最新版本来源 | 备注 |
 |------|-------------|-------------|-------------|------|
-| `@tauri-apps/api` | `2.12.1` | 与 `tauri` crate 同步 | npm | 根应用与本地插件必须保持一致 |
-| `@tauri-apps/plugin-opener` | `2.5.4` | 与 `tauri-plugin-opener` 同步 | npm | 插件前端绑定 |
+| `@tauri-apps/api` | `2.12.4` | 与 `tauri` crate 同步 | npm | 根应用与本地插件必须保持一致 |
+| `@tauri-apps/plugin-opener` | `2.7.2` | 与 `tauri-plugin-opener` 同步 | npm | 插件前端绑定 |
 | `@tauri-apps/plugin-os` | `2.4.0` | 与 `tauri-plugin-os` 同步 | npm | 仅由统一平台入口消费同步 `platform()` |
-| `vue` | `^3.5.41` | 每月检查 | npm | 核心框架 |
-| `vue-router` | `^5.0.6` | 每月检查 | npm | 路由 |
-| `pinia` | `^3.0.4` | 每月检查 | npm | 状态管理 |
+| `vue` | `^3.5.44` | 每月检查 | npm | 核心框架 |
+| `vue-router` | `^5.4.0` | 每月检查 | npm | 路由 |
+| `pinia` | `^3.0.4` | 每月检查 | npm | 状态管理；主版本受 WebView 运行时 API 支持约束，见 §4.6 |
 | `pinia-plugin-persistedstate` | `^4.7.1` | 每季度检查 | npm | 状态持久化 |
-| `@vueuse/core` | `^14.2.1` | 每月检查 | npm | 组合式工具库 |
-| `vite` | `^6.4.3` | 每月检查 | npm | 构建工具；6.x 安全补丁线，Vite 8 需独立迁移 |
-| `@vitejs/plugin-vue` | `^5.2.4` | 与 `vite` 同步 | npm | Vue Vite 插件 |
-| `unocss` | `^66.6.8` | 每季度检查 | npm | 原子 CSS |
-| `@unocss/*` | `^66.6.8` | 与 `unocss` 同步 | npm | UnoCSS 生态 |
-| `dompurify` | `^3.4.13` | 每季度检查 | npm | XSS 净化 |
-| `katex` | `^0.16.45` | 每半年检查 | npm | LaTeX 渲染 |
-| `mermaid` | `^11.16.1` | 每季度检查 | npm | 图表渲染；处理不可信模型内容 |
-| `marked` | `^18.0.4` | 每季度检查 | npm | Markdown 解析 |
+| `@vueuse/core` | `^15.0.0` | 每月检查 | npm | 组合式工具库 |
+| `vite` | `^8.3.4` | 每月检查 | npm | 使用 Rolldown/Oxc，显式配置移动端构建目标 |
+| `@vitejs/plugin-vue` | `^6.0.10` | 与 `vite` 同步 | npm | Vue Vite 插件 |
+| `unocss` | `^66.11.0` | 每季度检查 | npm | 原子 CSS |
+| `@unocss/*` | `^66.11.0` | 与 `unocss` 同步 | npm | 使用 `preset-wind3`，生态包统一版本 |
+| `dompurify` | `^3.4.17` | 每季度检查 | npm | XSS 净化 |
+| `katex` | `^0.16.47` | 每半年检查 | npm | LaTeX 渲染；当前条件性 low 审计项保留可见，不配置忽略 |
+| `mermaid` | `^11.17.2` | 每季度检查 | npm | 图表渲染；主版本受 WebView 兼容边界约束，见 §4.6 |
+| `marked` | `^18.1.1` | 每季度检查 | npm | Markdown 解析 |
 | `morphdom` | `^2.7.8` | 每半年检查 | npm | 增量 DOM 更新 |
-| `lucide-vue-next` | `^0.576.0` | 每月检查 | npm | 图标库 |
+| `@lucide/vue` | `^1.59.0` | 每月检查 | npm | Vue 图标组件 |
+| `@xterm/xterm` / `@xterm/addon-fit` | `6.0.0` / `0.11.0` | 配套检查 | npm | 终端渲染与窗口适配 |
 | `sortablejs` | `^1.15.7` | 每半年检查 | npm | 拖拽排序 |
 | `vue-cropper` | `^1.1.4` | 每半年检查 | npm | 图像裁剪 |
-| `date-fns` | `^4.1.0` | 每季度检查 | npm | 日期工具 |
+| `date-fns` | `^4.4.0` | 每季度检查 | npm | 日期工具 |
 
 #### Dev Dependencies
 
-| 包名 | 当前锁定版本 | 更新频率建议 | 最新版本来源 | 备注 |
+| 包名 | 当前 manifest 声明 | 更新频率建议 | 最新版本来源 | 备注 |
 |------|-------------|-------------|-------------|------|
-| `@tauri-apps/cli` | `2.12.1` | 与 `tauri` crate 同步 | npm | **必须与 Rust tauri 版本对齐** |
-| `typescript` | `~5.6.3` | 每季度检查 | npm | TS 编译器 |
-| `vue-tsc` | `^2.2.12` | 与 `vue`/`typescript` 同步 | npm | Vue 类型检查 |
-| `eslint` | `^10.8.1` | 每季度检查 | npm | 代码检查 |
-| `@typescript-eslint/*` | `^8.66.0` | 与 `eslint`/`typescript` 同步 | npm | TS ESLint 规则 |
-| `eslint-plugin-vue` | `^10.9.0` | 与 `eslint`/`vue` 同步 | npm | Vue ESLint 规则 |
-| `prettier` | `^3.8.3` | 每季度检查 | npm | 代码格式化 |
+| `@tauri-apps/cli` | `2.12.3` | 与 `tauri` crate 同步 | npm | **必须与 Rust tauri 版本对齐** |
+| `typescript` | `~6.0.3` | 每季度检查 | npm | TS 编译器；当前共享源码/测试项目显式声明 Vite 与 Node 类型 |
+| `vue-tsc` | `^3.3.13` | 与 `vue`/`typescript` 同步 | npm | Vue 类型检查 |
+| `eslint` | `^10.13.0` | 每季度检查 | npm | `eslint.config.mjs` flat config，由 `pnpm check` 调用 |
+| `@eslint/js` | `^10.0.1` | 与 `eslint` 同步 | npm | JavaScript 推荐规则 |
+| `@typescript-eslint/*` | `^8.71.2` | 与 `eslint`/`typescript` 同步 | npm | TS ESLint 规则与 parser |
+| `eslint-plugin-vue` | `^10.11.1` | 与 `eslint`/`vue` 同步 | npm | Vue ESLint 规则 |
+| `vue-eslint-parser` | `^10.4.1` | 与 `eslint-plugin-vue` 同步 | npm | Vue SFC 外层 parser，脚本交给 TS parser |
+| `globals` | `^17.13.0` | 每季度检查 | npm | 分别声明浏览器与 Node 执行环境 |
+| `prettier` | `^3.9.10` | 每季度检查 | npm | 代码格式化 |
 | `eslint-config-prettier` | `^10.1.8` | 与 `prettier`/`eslint` 同步 | npm | Prettier 兼容配置 |
-| `eslint-plugin-prettier` | `^5.5.5` | 与 `prettier`/`eslint` 同步 | npm | Prettier ESLint 插件 |
+| `eslint-plugin-prettier` | `^5.5.7` | 与 `prettier`/`eslint` 同步 | npm | 当前 lint 不启用 prettier/prettier 格式规则 |
+| `@types/node` | `^24.19.2` | 与 Node 主版本同步 | npm | 工具与测试使用的 Node 类型 |
+| `vitest` / `@vitest/coverage-v8` | `^5.0.5` / `^5.0.5` | 同步检查 | npm | 前端测试与覆盖率 |
+| `happy-dom` | `^21.0.3` | 与测试环境同步检查 | npm | DOM 测试环境；iframe fixture 明确使用无网络 `srcdoc` |
+| `@vue/test-utils` | `^2.5.1` | 与 Vue 测试同步检查 | npm | Vue 组件测试 |
+| `@pinia/testing` | `^1.0.3` | 与 Pinia 同步检查 | npm | 保留与 Pinia 3 配套的当前版本 |
 | `@types/katex` | `^0.16.8` | 与 `katex` 同步 | npm | 类型定义 |
 | `@types/sortablejs` | `^1.15.9` | 与 `sortablejs` 同步 | npm | 类型定义 |
 | `@iconify-json/ph` | `^1.2.2` | 每季度检查 | npm | Iconify 图标数据 |
 
 > **注意**：前端非 Tauri 生态依赖使用 `^`/`~` 是当前 manifest 策略；可复现性由 committed `pnpm-lock.yaml` 与 frozen install 保证。不要只改前缀而不审查 lockfile 实际解析。
+
+`pnpm lint` 执行 `eslint . --max-warnings 0`，覆盖 Vue/TypeScript、插件 guest-js 和受控工具脚本；忽略明确的生成树、本地报告及缓存。当前启用 JS/TS/Vue 推荐正确性规则，未启用需类型信息的运行型规则及显式 `any` 规则；隐式 `any` 由 TypeScript `strict` 检查。Prettier 仅通过兼容配置避开格式冲突；富文本与控制字符处理保留逐处说明，不全局关闭对应检查。
 
 ### 2.3 Android Gradle 层
 
@@ -161,9 +178,9 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 
 | 工具 | 当前版本 | 更新频率建议 | 来源 | 备注 |
 |------|---------|-------------|------|------|
-| Node.js | `24.14.1` (LTS) | 每年 major / 每季度 minor | nodejs.org | CI、Android Release 与 iOS 阶段诊断共享 `.github/toolchain.env`，与本地验证版本一致 |
+| Node.js | `24.14.1` (LTS) | 每年 major / 每季度 minor | nodejs.org | CI、Android Release 与 iOS 阶段诊断共享 `.github/toolchain.env` |
 | pnpm | `12.6.0` | 每季度检查 | pnpm.io | 三条 workflow 共享 `.github/toolchain.env`，解析由 lockfile 冻结 |
-| Rust Toolchain | `1.97.1` | 每季度检查 | rustup | CI/Release 固定完整版本并与本地验证环境一致 |
+| Rust Toolchain | `1.97.1` | 每季度检查 | rustup | 由 `rust-toolchain.toml` 固定完整版本 |
 | Java (Temurin) | `17.0.20+8` | 每年 LTS | adoptium.net | CI/Release 固定完整版本，Android 构建必需 |
 | Android command-line tools | `12266719` | 跟随 Android SDK 升级 | Android SDK | CI/Release 固定下载版本 |
 | Gradle (Wrapper) | `8.14.3` | 跟随 AGP | Gradle 官方 | 官方分发 URL + `distributionSha256Sum` |
@@ -204,7 +221,7 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 # 1. 更新 pnpm lockfile
 pnpm install
 
-# 2. 前端类型检查 + Rust 编译检查
+# 2. 配置契约 + ESLint + 前端类型 + Rust 编译检查
 pnpm check
 
 # 3. Android USB Debug 热重载（Agent 安全入口）
@@ -306,24 +323,26 @@ pnpm tauri android build --apk --target aarch64
 
 | Rust Crate | 当前版本 | npm 包 | 当前版本 | 对齐规则 |
 |-----------|---------|--------|---------|---------|
-| `tauri` | `2.12.1` | `@tauri-apps/cli` | `2.12.1` | 主.次版本必须一致（`2.12.x`） |
-| `tauri` | `2.12.1` | `@tauri-apps/api` | `2.12.1` | 主.次版本必须一致（`2.12.x`） |
-| `tauri-build` | `2.7.1` | — | — | 独立版本，需与 `tauri` 兼容；本地插件 build helper 同为 2.7.1 |
+| `tauri` | `2.12.4` | `@tauri-apps/cli` | `2.12.3` | 主.次版本必须一致（`2.12.x`） |
+| `tauri` | `2.12.4` | `@tauri-apps/api` | `2.12.4` | 主.次版本必须一致（`2.12.x`） |
+| `tauri-build` | `2.7.3` | — | — | 独立版本，需与 `tauri` 兼容；本地插件 build helper `tauri-plugin` 为 2.7.2 |
+
+iOS 插件的 SwiftPM `SwiftRs` 精确固定为 `1.0.9`，与 Cargo.lock 中 `swift-rs 1.0.9` 对齐；Cargo 锁文件本身不会约束 SwiftPM 解析。
 
 ### 4.2 Tauri 插件跨层对齐
 
 | Rust 插件 | 当前版本 | npm 插件 | 当前版本 | 对齐规则 |
 |----------|---------|---------|---------|---------|
-| `tauri-plugin-opener` | `2.5.4` | `@tauri-apps/plugin-opener` | `2.5.4` | 版本号应完全一致 |
-| `tauri-plugin-log` | `2.9.0` | — | — | 无前端包，Rust 单独升级 |
+| `tauri-plugin-opener` | `2.7.2` | `@tauri-apps/plugin-opener` | `2.7.2` | 版本号应完全一致 |
+| `tauri-plugin-log` | `2.10.1` | — | — | 无前端包，Rust 单独升级 |
 
 ### 4.3 Rust 工具链与 MSRV
 
 | 项目 | 当前值 | 约束来源 |
 |------|--------|---------|
 | Rust Toolchain | `1.97.1` | CI、Release 与本地开发环境 |
-| Tauri MSRV | `1.90` | Tauri 2.12.1 的官方 `rust-version`；本地插件声明同步 |
-| 依赖图 MSRV | 逐次按实际锁文件检查 | 不把某两个依赖的下限当作全图最高值；本轮用锁定工具链 1.97.1 验证 |
+| Tauri MSRV | `1.90` | 本地插件 `rust-version` 保持此下限；随 Tauri 升级核对 |
+| 依赖图 MSRV | 逐次按实际锁文件检查 | 使用仓库锁定工具链验证完整依赖图，不以单个依赖的下限代替 |
 | Cargo Edition | `2021` | `src-tauri/Cargo.toml` |
 
 > **检查方法**：运行 `rustc --version`，确认不低于 Tauri 官方要求的 MSRV。若 Tauri 升级后提高 MSRV，必须同步更新 CI（`release.yml`、`ci.yml`）中的 Rust 安装步骤。
@@ -339,13 +358,26 @@ pnpm tauri android build --apk --target aarch64
 
 **对齐规则**：`compileSdk == targetSdk`，且 `minSdk` 在 Gradle 与 `tauri.conf.json` 中双写一致。
 
-### 4.5 RustSec 审计基线与例外
+### 4.5 安全审计
 
-2026-08-11 供应链整理后的原始 `cargo audit` 结果为：`1 vulnerability / 21 warnings`。门禁命令统一使用 `pnpm audit:rust`，它只忽略以下已核实例外，任何新增 vulnerability 仍会使命令失败：
+`pnpm audit:rust` 执行 `cargo audit --file src-tauri/Cargo.lock`，需要本机先安装 `cargo-audit`；npm 侧使用 `pnpm audit --audit-level=high`。当前命令不配置漏洞忽略参数。
 
-- `RUSTSEC-2023-0071` / `rsa 0.9.10`：RustSec 尚无已修版本；该包仅来自 `sqlx-mysql` 的可选依赖。本项目对 `sqlx` 使用 `default-features = false` 且只启用 SQLite，默认与 `aarch64-linux-android` 编译图均不包含 `rsa`。
+审计结果以当次公告数据库与锁文件为准。沿目标平台、启用的 feature 和实际调用路径判断影响，分别处理漏洞、维护状态、内存安全和撤回版本警告；已解决项随依赖调整移除，不保留失效例外。
 
-21 条 warning 包含 19 条 unmaintained、Linux GTK3 链上的 1 条 `glib` unsound，以及 SQLx SQLite 链上的 1 条 yanked `spin`。它们是公开的上游维护债，不得表述为“已清零”；升级 SQLx、启用 MySQL/全数据库 feature 或 RustSec 出现 RSA 修复版本时，必须立即撤销例外并重新评估。
+KaTeX 0.16.47 存在要求先发生原型污染的 [low 级公告](https://github.com/KaTeX/KaTeX/security/advisories/GHSA-238p-pmpm-9mq7)。处理该项时需同时核对 Mermaid 的依赖范围与数学公式样式，不用强制版本覆盖或审计忽略掩盖兼容问题。
+
+### 4.6 兼容约束与验证要求
+
+| 范围 | 当前约束 |
+|------|----------|
+| WebView | 保留 `chrome87` 与 `safari26.0` 构建目标。Mermaid 使用 11.x，Pinia 使用 3.x；升级主版本前核对生产路径中的运行时 API，语法转译不能补齐 `Object.hasOwn` 等内建 API。 |
+| HTTP / TLS | 应用 HTTP 客户端保持 reqwest 0.12 的 TLS 提供方与信任根语义；调整前核对 Android 原生初始化需求及双端 HTTPS/WSS 行为。 |
+| SQLite | SQLx 与 rusqlite 共享 `libsqlite3-sys` 的原生 links 约束，必须成组评估版本兼容性。 |
+| 语音 runtime | 维持现有裁剪方案；需要升级时，联合评估模型、算子清单、运行库及 Android/iOS 制品。 |
+
+验证按改动涉及的层次选择。host 静态检查、Android 目标编译、插件 AAR、签名 APK、Apple 构建和设备运行分别提供证据；插件库构建不能替代完整应用 Release 验证，源码核查不能替代 Apple 编译与链接。
+
+图表升级需检查真实 SVG、双实例 ID、主题和图片导出，留意 C4 长关系文字重叠与暗色对比限制。终端升级需检查尺寸调整、输入与 OSC52 拦截；host 浏览器及合成 DOM 事件不替代旧版 WebView、手机 IME、真实 PTY 和触摸验证。
 
 ---
 
@@ -485,7 +517,7 @@ npm view @tauri-apps/cli version
 # 查询 pnpm 过时的依赖
 pnpm outdated
 
-# Rust 安全审计（包含已核实的具名例外）
+# Rust 安全审计（当前无漏洞忽略参数，warning 保持可见）
 pnpm audit:rust
 
 # npm 安全审计门禁
@@ -512,5 +544,5 @@ sdkmanager --list_installed | findstr ndk
 ---
 
 *文档版本：1.0*  
-*最后更新：2026-05-18*  
+*最后更新：2026-10-20*\
 *维护者：全体贡献者（修改前必读第 5 节红线）*

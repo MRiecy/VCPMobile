@@ -157,7 +157,11 @@ function printPayload(options, payload) {
 
 function stripAnsi(value) {
   return value
+    // ANSI OSC sequences deliberately contain ESC and BEL control characters.
+    // eslint-disable-next-line no-control-regex
     .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, '')
+    // ANSI CSI sequences deliberately begin with ESC.
+    // eslint-disable-next-line no-control-regex
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, '')
     .replace(/\r/g, '\n');
 }
@@ -522,7 +526,7 @@ async function commandDatabaseBackup(options) {
     if (!fs.existsSync(manifestPath)) {
       fs.writeFileSync(manifestPath, `${JSON.stringify(manifest('partial'), null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
     }
-    throw new Error(`Database backup incomplete; preserved copies at ${directory}: ${error.message}`);
+    throw new Error(`Database backup incomplete; preserved copies at ${directory}: ${error.message}`, { cause: error });
   }
 }
 

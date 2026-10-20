@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { useSwipe } from '@vueuse/core';
-import { Info, CheckCircle, AlertTriangle, X, Cpu, User } from 'lucide-vue-next';
+import { Info, CheckCircle, AlertTriangle, X, Cpu, User } from '@lucide/vue';
 import { useNotificationStore, type VcpNotification } from '../../core/stores/notification';
 
 const props = defineProps<{

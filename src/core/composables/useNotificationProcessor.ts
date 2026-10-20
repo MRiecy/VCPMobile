@@ -221,10 +221,10 @@ export function useNotificationProcessor() {
       return { silent: true };
     }
 
-    let title = 'VCP 通知';
-    let message = '';
+    let title: string;
+    let message: string;
     let type: VcpNotification['type'] = 'info';
-    let isPreformatted = false;
+    let isPreformatted: boolean;
     let duration = 7000;
     let actions: VcpNotification['actions'] = [];
     let notificationId: string | undefined = undefined;
@@ -252,7 +252,7 @@ export function useNotificationProcessor() {
         const statusText = vcpData.status === 'success' ? '执行成功' : vcpData.status === 'error' ? '执行失败' : vcpData.status;
         title = `${vcpData.tool_name} ${statusText}`;
 
-        let rawContent = typeof vcpData.content === 'string'
+        const rawContent = typeof vcpData.content === 'string'
           ? vcpData.content
           : (vcpData.content ? JSON.stringify(vcpData.content) : '');
         message = rawContent;

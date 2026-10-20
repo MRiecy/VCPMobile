@@ -1,7 +1,7 @@
 <script setup lang="ts">
 defineOptions({ inheritAttrs: false });
 import { computed, ref, onUnmounted, watch } from "vue";
-import { ArrowDown, ArrowLeft, ArrowUp, HelpCircle } from "lucide-vue-next";
+import { ArrowDown, ArrowLeft, ArrowUp, HelpCircle } from "@lucide/vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { deleteTempFile } from "tauri-plugin-vcp-mobile";
 import { cancelFileOperation, pickFile } from "../../core/utils/nativeFilePicker";

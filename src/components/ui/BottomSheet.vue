@@ -4,7 +4,7 @@ import { useModalHistory } from '../../core/composables/useModalHistory';
 
 export interface ActionItem {
   label: string;
-  icon?: any; // lucide-vue-next component
+  icon?: any; // @lucide/vue component
   danger?: boolean;
   disabled?: boolean;
   handler: () => void;

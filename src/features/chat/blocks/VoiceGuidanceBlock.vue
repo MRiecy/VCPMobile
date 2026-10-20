@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, useId } from "vue";
-import { ChevronDown, AudioLines } from "lucide-vue-next";
+import { ChevronDown, AudioLines } from "@lucide/vue";
 import type { ContentBlock } from "../../../core/types/chat";
 
 defineProps<{

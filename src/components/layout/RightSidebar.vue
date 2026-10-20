@@ -16,7 +16,7 @@ import {
   Bot,
   MessageSquareText,
   Mail,
-} from 'lucide-vue-next';
+} from '@lucide/vue';
 import { useNotificationStore } from '../../core/stores/notification';
 import { useNotificationProcessor } from '../../core/composables/useNotificationProcessor';
 import { useSidebarSwipe } from '../../core/composables/useSidebarSwipe';

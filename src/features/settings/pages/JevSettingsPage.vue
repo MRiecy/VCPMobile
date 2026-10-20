@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, useId, watch } from 'vue';
+import { computed, onBeforeUnmount, shallowRef, useId, watch } from 'vue';
 import { useOverlayStore } from '../../../core/stores/overlay';
 import type { ContextMenuConfig, OverlayActionItem, PromptConfig } from '../../../core/types/overlay';
 import type { JevProvider } from '../../../core/config/generated/config';
@@ -37,12 +37,12 @@ const numbers = [
   { field: 'jev.retryBaseDelayMs', title: '重试等待时间', unit: 'ms', description: '首次重试前的等待时间，之后逐次延长。' },
 ] as const;
 type NumberOption = typeof numbers[number];
-let menu: ContextMenuConfig | null = null;
+const menu = shallowRef<ContextMenuConfig | null>(null);
 let prompt: PromptConfig | null = null;
 const closeOverlays = () => {
-  if (menu && overlay.contextMenuConfig === menu) overlay.closeContextMenu();
+  if (menu.value && overlay.contextMenuConfig === menu.value) overlay.closeContextMenu();
   if (prompt && overlay.promptConfig === prompt) overlay.closePrompt();
-  menu = null;
+  menu.value = null;
   prompt = null;
 };
 const selectProvider = () => {
@@ -54,7 +54,7 @@ const selectProvider = () => {
     },
   }));
   overlay.openContextMenu(actions, '服务提供商');
-  menu = overlay.contextMenuConfig;
+  menu.value = overlay.contextMenuConfig;
 };
 const editNumber = (item: NumberOption) => {
   if (disabled.value || !draft.value) return;

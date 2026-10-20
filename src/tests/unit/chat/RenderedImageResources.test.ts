@@ -54,6 +54,7 @@ describe('rendered-image file lifetimes', () => {
 
   it('rejects messages from a mismatched opaque-frame nonce and iframe-owned Blob URLs', async () => {
     const frame = document.createElement('iframe');
+    frame.srcdoc = '';
     frame.dataset.vcpImageNonce = 'current';
     document.body.append(frame);
     window.dispatchEvent(new MessageEvent('message', { origin: 'null', source: frame.contentWindow, data: { source: 'vcp-mobile', type: 'rendered-image-click', nonce: 'old', image: { src: 'https://example.com/stale.png' } } }));
@@ -66,6 +67,7 @@ describe('rendered-image file lifetimes', () => {
   it('grants only one opaque-document pixel operation until its owner completes', async () => {
     const makeFrame = (nonce: string) => {
       const frame = document.createElement('iframe');
+      frame.srcdoc = '';
       frame.dataset.vcpImageNonce = nonce;
       document.body.append(frame);
       return { frame, send: vi.spyOn(frame.contentWindow!, 'postMessage') };

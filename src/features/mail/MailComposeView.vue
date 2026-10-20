@@ -6,7 +6,7 @@
  * （服务端自动带原邮件上下文并标读原邮件）。
  */
 import { computed, reactive, ref } from 'vue';
-import { ArrowLeft, Plus } from 'lucide-vue-next';
+import { ArrowLeft, Plus } from '@lucide/vue';
 import { useMailStore } from './mailStore';
 import { useKeyboardInsets } from '../../core/composables/useKeyboardInsets';
 import type { MailSummary } from './mailTypes';

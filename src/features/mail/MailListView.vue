@@ -16,7 +16,7 @@ import {
   PenLine,
   Search,
   X,
-} from 'lucide-vue-next';
+} from '@lucide/vue';
 import SlidePage from '../../components/ui/SlidePage.vue';
 import RefreshButton from '../../components/ui/RefreshButton.vue';
 import MailDetailView from './MailDetailView.vue';

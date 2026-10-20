@@ -22,7 +22,7 @@ pinia.use(piniaPluginPersistedstate);
 // === 全局错误捕获与日志输出 ===
 function formatAndLogError(type: string, error: any, context?: string) {
   const time = new Date().toISOString();
-  let message = '';
+  let message: string;
   let stack = '';
 
   if (error instanceof Error) {

@@ -105,7 +105,7 @@ export async function readBoundedImageBlob(src: string, signal?: AbortSignal): P
   if (length > IMAGE_EXPORT_MAX_BYTES) { await response.body?.cancel(); throw new Error('图片数据超过 8 MiB'); }
   const reader = response.body?.getReader();
   if (!reader) throw new Error('图片来源不支持有界读取');
-  const chunks: Uint8Array[] = [];
+  const chunks: Uint8Array<ArrayBuffer>[] = [];
   let size = 0;
   try {
     while (true) {

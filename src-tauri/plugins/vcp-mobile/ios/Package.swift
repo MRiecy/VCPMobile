@@ -13,12 +13,12 @@ let package = Package(
     ],
     dependencies: [
         .package(name: "Tauri", path: "../.tauri/tauri-api"),
-        // Cargo.lock does not constrain the Swift package resolver. Rust swift-rs
-        // 1.0.8 keeps the Swift sources from the published SwiftPM 1.0.7 tag.
+        // Cargo.lock does not constrain the Swift package resolver. Keep the
+        // published Swift sources aligned with Tauri's swift-rs 1.0.9 dependency.
         .package(
             name: "SwiftRs",
             url: "https://github.com/Brendonovich/swift-rs",
-            .exact("1.0.7")
+            .exact("1.0.9")
         )
     ],
     targets: [

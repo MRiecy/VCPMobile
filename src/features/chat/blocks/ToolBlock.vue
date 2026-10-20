@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch, onUnmounted } from 'vue';
-import { ChevronDown, ChevronUp, Settings, Maximize2, Copy, X } from 'lucide-vue-next';
+import { ChevronDown, ChevronUp, Settings, Maximize2, Copy, X } from '@lucide/vue';
 import type { ContentBlock } from '../../../core/types/chat';
 import { marked } from 'marked';
 import { useNotificationStore } from '../../../core/stores/notification';
@@ -35,7 +35,7 @@ const renderMarkdown = (text: string): string => {
     return rendered;
   } catch (e) {
     console.error('[ToolBlock] marked parse failed:', e);
-    return text;
+    return filterTrustedRichHtml(text);
   }
 };
 
@@ -201,9 +201,11 @@ const isImageValue = (key: string, value: string): boolean => {
                   <img :src="item.value" class="max-w-full rounded-lg" loading="lazy" alt="Generated Image" />
                 </a>
               </template>
+              <!-- eslint-disable-next-line vue/no-v-html -- renderMarkdown filters both parsed output and parse-error fallback through filterTrustedRichHtml. -->
               <div v-else class="text-xs opacity-90 vcp-markdown-block compact-markdown select-text" v-html="renderMarkdown(item.value || '')"></div>
             </div>
           </div>
+          <!-- eslint-disable-next-line vue/no-v-html -- Footer uses the same guarded renderMarkdown boundary as tool details. -->
           <div v-if="block.footer" data-message-content class="mt-2.5 pt-2.5 border-t border-black/10 dark:border-white/10 text-xs opacity-70 vcp-markdown-block compact-markdown select-text" v-html="renderMarkdown(block.footer)"></div>
         </div>
       </template>
@@ -269,10 +271,12 @@ const isImageValue = (key: string, value: string): boolean => {
                   <img :src="item.value" class="max-w-full rounded-lg" loading="lazy" alt="Generated Image" />
                 </a>
               </template>
+              <!-- eslint-disable-next-line vue/no-v-html -- Full-screen details retain the same guarded renderMarkdown boundary. -->
               <div v-else class="text-sm opacity-95 vcp-markdown-block select-text" v-html="renderMarkdown(item.value || '')"></div>
             </div>
           </div>
           
+          <!-- eslint-disable-next-line vue/no-v-html -- Full-screen footer retains the same guarded renderMarkdown boundary. -->
           <div v-if="block.footer" class="mt-4 pt-4 border-t border-black/10 dark:border-white/10 text-xs opacity-70 vcp-markdown-block select-text" v-html="renderMarkdown(block.footer)"></div>
         </div>
       </div>

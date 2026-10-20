@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronLeft, ChevronRight, FilePenLine, FolderInput, Trash2 } from "lucide-vue-next";
+import { ChevronLeft, ChevronRight, FilePenLine, FolderInput, Trash2 } from "@lucide/vue";
 
 export interface DiarySheetAction {
   id: string;

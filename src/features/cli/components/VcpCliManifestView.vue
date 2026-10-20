@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
-import { ChevronLeft, Info, SquareTerminal } from "lucide-vue-next";
+import { ChevronLeft, Info, SquareTerminal } from "@lucide/vue";
 import SlidePage from "../../../components/ui/SlidePage.vue";
 import { useKeyboardInsets } from "../../../core/composables/useKeyboardInsets";
 import { useModalHistory } from "../../../core/composables/useModalHistory";

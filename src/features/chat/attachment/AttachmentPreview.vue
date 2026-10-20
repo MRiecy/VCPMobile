@@ -2,7 +2,7 @@
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { shareFileNative, type NativeFileActionResult } from "tauri-plugin-vcp-mobile";
-import { X } from "lucide-vue-next";
+import { X } from "@lucide/vue";
 import AttachmentViewer from "./AttachmentViewer.vue";
 import AttachmentRenderer from './AttachmentRenderer.vue';
 

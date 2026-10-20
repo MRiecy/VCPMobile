@@ -36,6 +36,8 @@ const HOST_CAPABILITY_IN_HANDLER = /(?:__TAURI(?:_INTERNALS__)?|\binvoke\s*\(|\b
 function compactScheme(value: string): string {
   return value
     .trim()
+    // URL schemes may hide active prefixes with control characters or whitespace.
+    // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u0020\u007f-\u009f\u00a0\u1680\u180e\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/g, "")
     .toLowerCase();
 }
@@ -233,9 +235,10 @@ function renderNode(node: MarkdownNode, messageId: string): string {
     case 'paragraph':
       return `<p>${node.children.map(renderInline).join('')}</p>`;
     
-    case 'heading':
+    case 'heading': {
       const level = node.level || 1;
       return `<h${level}>${node.children.map(renderInline).join('')}</h${level}>`;
+    }
     
     case 'code_block': {
       if (node.lang === 'mermaid') {
@@ -260,20 +263,22 @@ function renderNode(node: MarkdownNode, messageId: string): string {
     case 'blockquote':
       return `<blockquote>${node.children.map((n) => renderNode(n, messageId)).join('')}</blockquote>`;
     
-    case 'list':
+    case 'list': {
       const tag = node.ordered ? 'ol' : 'ul';
       const itemsHtml = node.items.map(itemNodes =>
         `<li>${itemNodes.map(n => renderNode(n, messageId)).join('')}</li>`
       ).join('');
       return `<${tag}>${itemsHtml}</${tag}>`;
+    }
     
-    case 'table':
+    case 'table': {
       const headerHtml = `<tr>${node.header.map(cell => `<th>${cell.map(renderInline).join('')}</th>`).join('')}</tr>`;
       const bodyHtml = node.rows.map(row =>
         `<tr>${row.map(cell => `<td>${cell.map(renderInline).join('')}</td>`).join('')}</tr>`
       ).join('');
       const wrapper = node.wrapper_class || 'vcp-table-wrapper';
       return `<div class="${wrapper}"><table><thead>${headerHtml}</thead><tbody>${bodyHtml}</tbody></table></div>`;
+    }
     
     case 'thematic_break':
       return '<hr/>';

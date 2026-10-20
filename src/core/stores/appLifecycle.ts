@@ -252,6 +252,8 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
     await new Promise<void>((resolve, reject) => {
       let settled = false;
       let timeoutId: ReturnType<typeof setTimeout> | undefined;
+      // Keep the binding initialized before watch's immediate callback can use cleanup.
+      // eslint-disable-next-line prefer-const
       let unwatch: (() => void);
 
       const cleanup = () => {

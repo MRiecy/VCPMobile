@@ -327,7 +327,10 @@ const parseCommandError = (
         JSON.parse(raw.slice(markerIndex + marker.length)),
       );
       if (parsed) return parsed;
-    } catch {}
+    } catch {
+      // A malformed structured suffix still belongs to the original command error.
+      // Fall back to that complete message below instead of losing the failure.
+    }
   }
   return localTerminalError(fallbackCode, raw);
 };

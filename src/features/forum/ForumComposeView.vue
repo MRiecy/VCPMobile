@@ -6,7 +6,7 @@
  * （后端无板块实体，从列表去重得出）。署名默认取设置中的用户名。
  */
 import { computed, onMounted, ref } from 'vue';
-import { ArrowLeft } from 'lucide-vue-next';
+import { ArrowLeft } from '@lucide/vue';
 import { useForumStore } from './forumStore';
 import { useKeyboardInsets } from '../../core/composables/useKeyboardInsets';
 import { useSettingsStore } from '../../core/stores/settings';

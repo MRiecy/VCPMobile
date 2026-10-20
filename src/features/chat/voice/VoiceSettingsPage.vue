@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, useId, watch } from 'vue';
-import { ListChecks, Play, Square } from 'lucide-vue-next';
+import { ListChecks, Play, Square } from '@lucide/vue';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { useOverlayStore } from '../../../core/stores/overlay';
 import { useSettingsStore } from '../../../core/stores/settings';

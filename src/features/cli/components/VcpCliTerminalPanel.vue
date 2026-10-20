@@ -4,7 +4,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Keyboard, Power, RotateCcw } from "lucide-vue-next";
+import { Keyboard, Power, RotateCcw } from "@lucide/vue";
 import { useOverlayStore } from "../../../core/stores/overlay";
 
 const props = defineProps<{ keyboardHeight: number }>();

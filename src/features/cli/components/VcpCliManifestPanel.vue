@@ -7,7 +7,7 @@ import {
   FileOutput,
   RefreshCw,
   Share2,
-} from "lucide-vue-next";
+} from "@lucide/vue";
 import RefreshButton from "../../../components/ui/RefreshButton.vue";
 import {
   VCP_CLI_MANIFEST_COMMAND,

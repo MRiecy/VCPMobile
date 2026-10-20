@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { onClickOutside } from '@vueuse/core';
-import { ArrowUpDown, CalendarDays, Check, RefreshCw } from 'lucide-vue-next';
+import { ArrowUpDown, CalendarDays, Check, RefreshCw } from '@lucide/vue';
 import type { TopicSortMode } from '../../core/stores/topicListManager';
 
 const props = defineProps<{

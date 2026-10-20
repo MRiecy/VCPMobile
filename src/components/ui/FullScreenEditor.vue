@@ -3,7 +3,7 @@ defineOptions({
   inheritAttrs: false
 });
 import { ref, watch, nextTick, onUnmounted } from 'vue';
-import { X, Check, Loader2 } from 'lucide-vue-next';
+import { X, Check, Loader2 } from '@lucide/vue';
 import { useKeyboardInsets } from '../../core/composables/useKeyboardInsets';
 import { useModalHistory } from '../../core/composables/useModalHistory';
 

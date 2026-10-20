@@ -8,7 +8,7 @@ import {
   Search,
   Sparkles,
   X,
-} from "lucide-vue-next";
+} from "@lucide/vue";
 import SlidePage from "../../components/ui/SlidePage.vue";
 import RefreshButton from "../../components/ui/RefreshButton.vue";
 import { useKeyboardInsets } from "../../core/composables/useKeyboardInsets";

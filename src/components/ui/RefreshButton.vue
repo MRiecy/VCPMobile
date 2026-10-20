@@ -12,7 +12,7 @@
  * bare 模式不附带按钮外壳，供自带按钮样式的场景（diary-icon-button 等）复用动画。
  */
 import { ref, watch } from 'vue';
-import { RefreshCw } from 'lucide-vue-next';
+import { RefreshCw } from '@lucide/vue';
 
 const props = withDefaults(
   defineProps<{

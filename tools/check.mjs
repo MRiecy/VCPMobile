@@ -22,5 +22,7 @@ function pnpm(args) {
 }
 
 pnpm(['config:check']);
+pnpm(['lint']);
 pnpm(['exec', 'vue-tsc', '--noEmit']);
+pnpm(['exec', 'tsc', '--noEmit', '--project', 'tsconfig.node.json']);
 run('cargo', ['check', '--locked'], backend);

@@ -28,14 +28,14 @@ const exportStatus = ref<Status>({ type: null, message: "" });
 const importStatus = ref<Status>({ type: null, message: "" });
 
 let disposed = false;
-let importOperationId: string | null = null;
+const importOperationId = ref<string | null>(null);
 let exportOperationId: string | null = null;
 
 // ------------------------------------------------------------------
 // 导出
 // ------------------------------------------------------------------
 const onExport = async () => {
-  if (disposed || !props.active || props.disabled || importOperationId || importing.value || showImportConfirm.value || exportStatus.value.type === "loading") return;
+  if (disposed || !props.active || props.disabled || importOperationId.value || importing.value || showImportConfirm.value || exportStatus.value.type === "loading") return;
   exportStatus.value = { type: "loading", message: "正在生成备份文件..." };
   try {
     const saved = await props.commit();
@@ -76,26 +76,26 @@ const importConfirmation = computed(() => {
 });
 
 const triggerImport = async () => {
-  if (disposed || !props.active || props.disabled || exportStatus.value.type === "loading" || importOperationId || importing.value || showImportConfirm.value) return;
+  if (disposed || !props.active || props.disabled || exportStatus.value.type === "loading" || importOperationId.value || importing.value || showImportConfirm.value) return;
   const operationId = `config_${crypto.randomUUID()}`;
-  importOperationId = operationId;
+  importOperationId.value = operationId;
   importStatus.value = { type: "loading", message: "正在选取并解析备份文件..." };
   try {
     const parsed = await pickConfigBackup(operationId);
-    if (disposed || importOperationId !== operationId) return;
+    if (disposed || importOperationId.value !== operationId) return;
     if (!configBackupScopes(parsed).length) throw new Error('备份未包含可恢复的配置');
     pendingImport.value = parsed;
     showImportConfirm.value = true;
     importStatus.value = { type: null, message: "" };
   } catch (e: any) {
-    if (disposed || importOperationId !== operationId) return;
+    if (disposed || importOperationId.value !== operationId) return;
     if (String(e).toLowerCase().includes("cancel")) {
       importStatus.value = { type: null, message: "" };
       return;
     }
     importStatus.value = { type: "error", message: `导入失败: ${e?.message ?? e}` };
   } finally {
-    if (importOperationId === operationId) importOperationId = null;
+    if (importOperationId.value === operationId) importOperationId.value = null;
   }
 };
 
@@ -112,9 +112,9 @@ const deactivate = () => {
     exportOperationId = null;
     void cancelFileOperation(operationId).catch(console.warn);
   }
-  if (importOperationId) {
-    const operationId = importOperationId;
-    importOperationId = null;
+  if (importOperationId.value) {
+    const operationId = importOperationId.value;
+    importOperationId.value = null;
     void cancelFileOperation(operationId).catch(console.warn);
   }
 };

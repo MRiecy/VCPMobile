@@ -166,11 +166,9 @@ const handlePopState = (event: PopStateEvent) => {
 };
 
 let popstateHandler: ((e: PopStateEvent) => void) | null = null;
-let listenerRegistered = false;
 
-// Initialize the popstate listener only once
-if (typeof window !== 'undefined' && !listenerRegistered) {
-  listenerRegistered = true;
+// Module initialization runs once; the handler reference owns later cleanup.
+if (typeof window !== 'undefined') {
   popstateHandler = handlePopState;
   window.addEventListener('popstate', popstateHandler);
   window.addEventListener('keydown', handleModalKeydown, true);
@@ -185,7 +183,6 @@ export function cleanupModalHistory() {
     window.removeEventListener('popstate', popstateHandler);
     window.removeEventListener('keydown', handleModalKeydown, true);
     popstateHandler = null;
-    listenerRegistered = false;
   }
 }
 

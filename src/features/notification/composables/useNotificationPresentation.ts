@@ -1,5 +1,5 @@
 import { computed } from 'vue';
-import { Info, CheckCircle, AlertTriangle, X, Cpu, User } from 'lucide-vue-next';
+import { Info, CheckCircle, AlertTriangle, X, Cpu, User } from '@lucide/vue';
 import type { VcpNotification } from '../../../core/stores/notification';
 
 export function useNotificationPresentation() {

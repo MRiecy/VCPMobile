@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
 import { createPinia, setActivePinia } from 'pinia';
+import { marked } from 'marked';
 import ToolBlock from '@/features/chat/blocks/ToolBlock.vue';
 import HtmlPreviewBlock from '@/features/chat/blocks/HtmlPreviewBlock.vue';
 import RagPayloadDetail from '@/features/rag/RagPayloadDetail.vue';
@@ -195,6 +196,38 @@ describe('trusted-circle rich HTML active-content guard', () => {
     expect(rendered.querySelector('[onerror]')).toBeNull();
     expect(rendered.querySelector('script')).toBeNull();
     expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it('keeps the tool HTML guard when Markdown parsing fails', () => {
+    const parse = vi.spyOn(marked, 'parse').mockImplementation(() => {
+      throw new Error('Markdown parser failed');
+    });
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const block: ContentBlock = {
+      type: 'tool-result',
+      tool_name: 'ParseFailure',
+      status: 'success',
+      details: [{
+        key: 'result',
+        value: `<section data-parse-fallback onclick="this.hidden=true"><b>kept on parse failure</b><img src="x" onerror="${HOST_HANDLER}"><script>${HOST_HANDLER}</script></section>`,
+      }],
+      footer: '',
+    };
+    let wrapper: ReturnType<typeof mount> | undefined;
+    try {
+      wrapper = mount(ToolBlock, {
+        props: { type: 'tool-result', block, defaultExpanded: true },
+      });
+      const rendered = wrapper.get('.vcp-markdown-block').element;
+      expect(parse).toHaveBeenCalled();
+      expect(rendered.querySelector('b')?.textContent).toBe('kept on parse failure');
+      expect(rendered.querySelector('[data-parse-fallback]')?.getAttribute('onclick')).toBe('this.hidden=true');
+      expectHostCapabilityBlocked(rendered);
+    } finally {
+      wrapper?.unmount();
+      parse.mockRestore();
+      log.mockRestore();
+    }
   });
 
   it('applies the rich-HTML guard to RAG details', () => {

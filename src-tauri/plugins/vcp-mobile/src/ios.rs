@@ -59,8 +59,8 @@ impl Drop for CallSlot {
     }
 }
 
-/// The caller may stop waiting, but Tauri's native response receiver must stay
-/// alive: Tauri 2.12.1 still unwraps its callback send. Never abort this spawned task.
+/// The caller may stop waiting, but the registration slot stays occupied until
+/// Swift's final acknowledgement. Keep its receiver alive to preserve that boundary.
 async fn receive_native<T, F>(
     busy: Arc<AtomicBool>,
     operation: &'static str,

@@ -50,6 +50,6 @@ final class VcpMobilePlugin: Plugin {
 }
 
 @_cdecl("init_plugin_vcp_mobile")
-func initPlugin() -> Plugin {
+public func initPlugin() -> Plugin {
     VcpMobilePlugin()
 }

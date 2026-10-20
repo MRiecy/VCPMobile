@@ -4,7 +4,7 @@ import {
   X, Trash2, ChevronDown, ChevronUp, Copy, Loader2, Sparkles, Check,
   Brain, Clock, BookOpen, Moon, ShieldAlert, Calendar,
   Share2, MessageSquare, History, Search, Bookmark
-} from 'lucide-vue-next';
+} from '@lucide/vue';
 import SlidePage from '../../components/ui/SlidePage.vue';
 import { useRagObserverStore } from '../../core/stores/ragObserver';
 import { useThemeStore } from '../../core/stores/theme';
@@ -21,6 +21,21 @@ const props = defineProps<Props>();
 const emit = defineEmits(['close']);
 
 const store = useRagObserverStore();
+
+// Array shapes emitted by the RAG and meta-thinking VCPInfo broadcasts.
+interface RecallResult {
+  text: string;
+  score?: number;
+  originalScore?: number;
+  source?: string;
+  matchedTags?: string[];
+}
+interface ThinkingStage {
+  stage: number;
+  clusterName: string;
+  resultCount?: number;
+  results: RecallResult[];
+}
 
 const activeFilter = ref<'all' | 'rag' | 'chain' | 'chat' | 'memo' | 'dream'>('all');
 const expandedCardIds = ref<Set<string>>(new Set());
@@ -277,7 +292,7 @@ const toggleCard = async (id: string) => {
       try {
         const payload = await store.fetchPayload(id);
         payloadCache.value[id] = payload;
-      } catch (err) {
+      } catch {
         console.error('Failed to load payload for item:', id);
       } finally {
         payloadLoading.value[id] = false;
@@ -689,7 +704,7 @@ const drawSpectrum = (settleImmediately = false) => {
 
                   <div class="space-y-2">
                     <div
-                      v-for="(res, idx) in payloadCache[item.id].results"
+                      v-for="(res, idx) in (payloadCache[item.id].results as RecallResult[])"
                       :key="idx"
                       class="p-2 rounded border space-y-1.5 transition-all"
                       :class="themeStore.isDarkResolved ? 'bg-white/5 border-white/5' : 'bg-[#f1f3f5] border-gray-350/50 shadow-sm text-slate-800'"
@@ -755,7 +770,7 @@ const drawSpectrum = (settleImmediately = false) => {
                       <Sparkles :size="10" /> 思考流脉络:
                     </div>
                     <div class="flex flex-wrap items-center gap-1 leading-normal">
-                      <template v-for="(stage, idx) in payloadCache[item.id].stages" :key="stage.stage">
+                      <template v-for="(stage, idx) in (payloadCache[item.id].stages as ThinkingStage[])" :key="stage.stage">
                         <span class="px-1 py-0.5 rounded" :class="themeStore.isDarkResolved ? 'bg-purple-500/20' : 'bg-purple-100/60'">{{ stage.clusterName }}</span>
                         <span v-if="idx < payloadCache[item.id].stages.length - 1" :class="themeStore.isDarkResolved ? 'text-white/20' : 'text-gray-300'">➜</span>
                       </template>
@@ -807,7 +822,7 @@ const drawSpectrum = (settleImmediately = false) => {
                   
                   <div class="space-y-2.5">
                     <div
-                      v-for="stage in payloadCache[item.id].stages"
+                      v-for="stage in (payloadCache[item.id].stages as ThinkingStage[])"
                       :key="stage.stage"
                       class="border-l-2 border-purple-500/40 pl-2.5 space-y-1.5"
                     >

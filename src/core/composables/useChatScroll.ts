@@ -233,16 +233,17 @@ export function useChatScroll(options: UseChatScrollOptions) {
       await onLoadMore();
     } finally {
       await nextTick();
-      if (generation !== loadRequestGeneration) return;
-      if (hadAnchor) {
-        restoreScrollByAnchor();
-        scrollScene.value = "free";
-      } else {
-        loadAnchor = null;
-        scrollToBottom(false);
-        scrollScene.value = "following";
+      if (generation === loadRequestGeneration) {
+        if (hadAnchor) {
+          restoreScrollByAnchor();
+          scrollScene.value = "free";
+        } else {
+          loadAnchor = null;
+          scrollToBottom(false);
+          scrollScene.value = "following";
+        }
+        loadInFlight = false;
       }
-      loadInFlight = false;
     }
   };
 

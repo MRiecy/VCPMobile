@@ -118,7 +118,7 @@ describe('theme and chat presentation store contracts', () => {
     expect(resolveThemeWallpaperUrl('../secret.webp')).toBeNull();
     expect(resolveThemeWallpaperUrl('https://example.com/remote.webp')).toBeNull();
     expect(resolveThemeWallpaperUrl('javascript:alert.webp')).toBeNull();
-    expect(resolveThemeWallpaperUrl('theme\").webp')).toBeNull();
+    expect(resolveThemeWallpaperUrl('theme").webp')).toBeNull();
   });
 
   it('validates before applying and persists only a canonical TS theme key', async () => {

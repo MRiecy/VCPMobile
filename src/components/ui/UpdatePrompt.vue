@@ -165,10 +165,12 @@ const cancelDownload = () => {
             >
               更新内容
             </div>
+            <!-- eslint-disable vue/no-v-html -- releaseNotesHtml sanitizes the parsed release notes with DOMPurify. -->
             <div
               class="vcp-markdown-block text-xs text-gray-700 dark:text-gray-300 max-h-[32vh] overflow-y-auto leading-relaxed p-3 bg-black/5 dark:bg-white/5 rounded border border-black/5 dark:border-white/5 custom-scrollbar"
               v-html="releaseNotesHtml"
             ></div>
+            <!-- eslint-enable vue/no-v-html -->
           </div>
 
           <!-- 错误信息反馈 -->

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
-import { ChevronLeft, Send } from "lucide-vue-next";
+import { ChevronLeft, Send } from "@lucide/vue";
 import type { DiaryComposerDraft, DiaryUiError } from "../types";
 
 const props = defineProps<{

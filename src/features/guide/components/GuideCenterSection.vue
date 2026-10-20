@@ -7,7 +7,7 @@
  * 视觉采用设置页一致的高密度线性列表风格。
  */
 import { computed } from 'vue';
-import { CircleCheck, Circle, Play, RotateCcw } from 'lucide-vue-next';
+import { CircleCheck, Circle, Play, RotateCcw } from '@lucide/vue';
 import { allGuides } from '../registry';
 import { useGuideStore } from '../stores/guideStore';
 import { useOverlayStore } from '../../../core/stores/overlay';

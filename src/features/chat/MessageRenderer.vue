@@ -26,7 +26,7 @@ import {
   supportsStreamRevealMotion,
 } from "../../core/utils/streamTextFade";
 import { useMessageStyleInjector } from "../../core/composables/useMessageStyleInjector";
-import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from "lucide-vue-next";
+import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from "@lucide/vue";
 import { useMessageTailRenderer } from './composables/useMessageTailRenderer';
 import { separateMessageStyles, stableMessageStyles, standaloneStyleSource } from './utils/messageStyles';
 import { instantiateMermaidSvg, renderMermaidTemplate } from './utils/mermaidRenderer';
@@ -377,7 +377,7 @@ function renderBlockHtml(block: ContentBlock): string {
       }
       return `<div class="vcp-markdown-block"><p>${escapeHtml(block.content || "")}</p></div>`;
     
-    case "role-divider":
+    case "role-divider": {
       const role = block.role || "unknown";
       const roleDisplay = role.charAt(0).toUpperCase() + role.slice(1);
       const actionText = block.is_end ? "[结束]" : "[起始]";
@@ -389,7 +389,7 @@ function renderBlockHtml(block: ContentBlock): string {
           <span class="divider-text">角色分界: ${roleDisplay} ${actionText}</span>
         </div>
       `;
-
+    }
     case "button-click": {
       const escapedContent = escapeHtml(block.content || "");
       const finalText = `[[点击按钮:${block.content || ""}]]`;
@@ -987,6 +987,7 @@ onUnmounted(() => {
           <div class="vcp-content-blocks space-y-2 min-w-0 w-full overflow-hidden">
             <template v-if="bubble.blocks && bubble.blocks.length > 0">
                 <!-- memo 与循环位于同一节点，按列表项缓存；保留所有实际展示输入。 -->
+                <!-- eslint-disable vue/valid-v-memo -- The rule tracks the outer bubble loop; Vue compiles memo on this inner v-for into renderList's per-item cache. -->
                 <div
                   v-for="(block, index) in bubble.blocks"
                   :key="getBlockKey(block, index, bubble.id)"
@@ -996,17 +997,20 @@ onUnmounted(() => {
                   @animationend.self="finishStableBlockReveal($event, block)"
                   @animationcancel.self="finishStableBlockReveal($event, block)"
                 >
+                  <!-- eslint-enable vue/valid-v-memo -->
                   <DiaryBlock
                     v-if="block.type === 'diary' || block.type === 'diary-update'"
                     :block="block"
                     :message-id="message.id"
                   />
 
+                  <!-- eslint-disable vue/no-v-html -- AST output uses filterTrustedRichHtml; generated divider/button markup uses parser roles and escaped text. -->
                   <div
                     v-else-if="isInlineHtmlBlock(block.type)"
                     data-message-content
                     v-html="renderBlockHtml(block)"
                   />
+                  <!-- eslint-enable vue/no-v-html -->
 
                   <ToolBlock
                     v-else-if="block.type === 'tool-use' || block.type === 'tool-result'"

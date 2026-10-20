@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { saveImageToGallery } from 'tauri-plugin-vcp-mobile';
 import { exportSvg, IMAGE_EXPORT_MAX_BYTES, readBoundedImageBlob, withImageExportQueue } from '../../core/utils/renderedImageExport';
-import { Download, Minus, Plus, RotateCcw, X } from "lucide-vue-next";
+import { Download, Minus, Plus, RotateCcw, X } from "@lucide/vue";
 import { useModalHistory } from "../../core/composables/useModalHistory";
 import { useNotificationStore } from "../../core/stores/notification";
 import {
@@ -434,6 +434,7 @@ function handleTouchEnd(event: TouchEvent): void {
 }
 
 function normalizeFileName(raw: string): string {
+  // eslint-disable-next-line no-control-regex -- Replace control characters that cannot belong in exported file names.
   const name = raw.trim().replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_");
   return name || "vcp-image";
 }

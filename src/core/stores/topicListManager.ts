@@ -295,7 +295,9 @@ export const useTopicStore = defineStore("topic", () => {
     topics.value = [];
 
     const requestTopics = new Map<string, Topic>();
+    // The IIFE can reach finally before its first await if Channel/IPC setup throws.
     let request!: Promise<void>;
+    // eslint-disable-next-line prefer-const
     request = (async () => {
       try {
       // 1. 创建 Channel 用于接收流式数据

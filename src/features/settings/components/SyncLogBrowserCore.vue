@@ -3,7 +3,7 @@ import { ref, onMounted } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { shareFileNative } from 'tauri-plugin-vcp-mobile';
 import { isAndroid, isIOS } from '../../../core/utils/platform';
-import { FileText, Trash2, Copy, Share2, ChevronLeft, ChevronRight } from 'lucide-vue-next';
+import { FileText, Trash2, Copy, Share2, ChevronLeft, ChevronRight } from '@lucide/vue';
 import { useOverlayStore } from '../../../core/stores/overlay';
 import { useNotificationStore } from '../../../core/stores/notification';
 

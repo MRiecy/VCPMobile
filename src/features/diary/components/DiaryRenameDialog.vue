@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import { FilePenLine } from "lucide-vue-next";
+import { FilePenLine } from "@lucide/vue";
 import { isValidDiaryFileName } from "../types";
 
 const props = defineProps<{

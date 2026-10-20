@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue';
-import { Mic, MicOff, PhoneOff } from 'lucide-vue-next';
+import { Mic, MicOff, PhoneOff } from '@lucide/vue';
 
 const props = defineProps<{
   microphoneState: 'off' | 'requesting' | 'on' | 'error';

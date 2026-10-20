@@ -11,7 +11,7 @@ import {
   GripVertical,
   Search,
   Trash2,
-} from "lucide-vue-next";
+} from "@lucide/vue";
 import type { DiaryFolderCategory } from "../types";
 import { diaryFolderCategory } from "../types";
 

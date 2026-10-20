@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 import { useChatSessionStore } from '../../../core/stores/chatSessionStore';
 import { useChatStreamStore } from '../../../core/stores/chatStreamStore';
-import { Octagon } from 'lucide-vue-next';
+import { Octagon } from '@lucide/vue';
 
 const sessionStore = useChatSessionStore();
 const streamStore = useChatStreamStore();

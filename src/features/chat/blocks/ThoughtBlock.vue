@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { ChevronDown, ChevronUp } from "lucide-vue-next";
+import { ChevronDown, ChevronUp } from "@lucide/vue";
 import { renderMarkdownNodes } from "../../../core/utils/astRenderer";
 import type { ContentBlock } from "../../../core/types/chat";
 
@@ -53,6 +53,7 @@ function escapeHtml(text: string): string {
       class="vcp-thought-content"
     >
       <slot>
+        <!-- eslint-disable vue/no-v-html -- AST rendering uses filterTrustedRichHtml; the plain-content fallback is HTML-escaped. -->
         <div
           class="thought-body"
           data-message-content
@@ -62,6 +63,7 @@ function escapeHtml(text: string): string {
               : escapeHtml(block.content || '')
           "
         />
+        <!-- eslint-enable vue/no-v-html -->
       </slot>
     </div>
   </div>
