@@ -1148,8 +1148,6 @@ mod local_settings_tests {
         }))
         .expect("read old shared group with no local fields");
         assert_eq!(group.effective_mode(), GroupChatMode::Sequential);
-        assert_eq!(group.local_settings.context_message_window_size, 100);
-        assert_eq!(group.local_settings.mode_settings.jev.history_window, 12);
         let before = serde_json::to_value(GroupSyncDTO::from(&group)).expect("sync before");
         let hash_before = HashAggregator::compute_group_config_hash(&GroupSyncDTO::from(&group));
         group.local_settings.chat_mode = GroupChatMode::InviteOnly;

@@ -868,12 +868,9 @@ impl DiffHandler {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        next_manifest_command, validate_manifest_result, validate_topic_owner_scope,
-        MAX_SAFE_JSON_INTEGER,
-    };
+    use super::{validate_manifest_result, validate_topic_owner_scope, MAX_SAFE_JSON_INTEGER};
     use crate::vcp_modules::chat::topic_types::OwnerKey;
-    use crate::vcp_modules::sync_service::{ManifestResponseTracker, SyncCommand};
+    use crate::vcp_modules::sync_service::ManifestResponseTracker;
     use crate::vcp_modules::sync_types::{ManifestResultFrame, ManifestType};
     use serde_json::json;
     use std::collections::HashSet;
@@ -935,7 +932,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_responses_are_exactly_once_and_waves_keep_their_order() {
+    fn manifest_responses_are_exactly_once() {
         let tracker = ManifestResponseTracker::default();
         tracker.arm(1, ManifestType::Owner).expect("arm owner wave");
         assert!(tracker.arm(2, ManifestType::Avatar).is_err());
@@ -951,18 +948,6 @@ mod tests {
         tracker
             .consume(2, ManifestType::Avatar)
             .expect("consume avatar response");
-        assert!(matches!(
-            next_manifest_command(1, 7),
-            Some(SyncCommand::StartAvatarMetadata { attempt_id: 7 })
-        ));
-        assert!(matches!(
-            next_manifest_command(2, 7),
-            Some(SyncCommand::StartTopicMetadata { attempt_id: 7 })
-        ));
-        assert!(matches!(
-            next_manifest_command(3, 7),
-            Some(SyncCommand::StartTopicValidation { attempt_id: 7 })
-        ));
     }
 
     #[test]

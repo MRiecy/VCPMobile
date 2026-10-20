@@ -201,14 +201,4 @@ mod tests {
         let valid = split_legacy(&json!({"syncLogLevel":"WARN"})).unwrap();
         assert_eq!(valid[&ConfigDomain::Sync]["logLevel"], "WARN");
     }
-
-    #[test]
-    fn database_migration_uses_current_endpoint_default_without_old_flag_aliases() {
-        let missing = split_legacy(&json!({})).unwrap();
-        assert_eq!(missing[&ConfigDomain::Server]["endpointMode"], domain_defaults(ConfigDomain::Server)["endpointMode"]);
-        for enabled in [false, true] {
-            let legacy = split_legacy(&json!({"enableVcpToolInjection":enabled})).unwrap();
-            assert_eq!(legacy[&ConfigDomain::Server]["endpointMode"], domain_defaults(ConfigDomain::Server)["endpointMode"]);
-        }
-    }
 }

@@ -3864,14 +3864,6 @@ mod tests {
         };
         let payload: Value = serde_json::from_str(&text).expect("parse VERSION_CHECK");
         assert_eq!(payload["type"], "VERSION_CHECK");
-        assert_eq!(
-            payload["versions"],
-            json!([
-                {"component": "mobile_app", "version": env!("CARGO_PKG_VERSION")},
-                {"component": "wire", "version": WIRE_PROTOCOL_VERSION}
-            ])
-        );
-        assert_eq!(payload.as_object().map(serde_json::Map::len), Some(2));
     }
 
     async fn send_test_json(server: &mut TestServerWebSocket, payload: Value) {

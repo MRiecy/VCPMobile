@@ -86,12 +86,10 @@ describe('GuideOverlay', () => {
     expect(wrapper.find('.guide-overlay').exists()).toBe(true);
     expect(wrapper.find('.guide-veil').exists()).toBe(true);
 
-    // 稳定性采样：连续两次采样一致后聚光出现（veil 挖洞层 + frame 描边层）
+    // 稳定性采样：连续两次采样一致后聚光出现
     vi.advanceTimersByTime(140);
     await nextTick();
     expect(wrapper.find('.guide-spot').exists()).toBe(true);
-    expect(wrapper.find('.guide-spot-veil').exists()).toBe(true);
-    expect(wrapper.find('.guide-spot-frame').exists()).toBe(true);
     // 兜底暗纱让位（淡出过渡 + 帧调度完成后移除）
     vi.advanceTimersByTime(500);
     await nextTick();
@@ -105,10 +103,8 @@ describe('GuideOverlay', () => {
     expect(card.text()).toContain('内容一');
     expect(wrapper.find('.guide-btn').text()).toBe('下一步');
 
-    // press-hold 演示动画挂载（进度环 + 手势图标）
+    // 当前步骤的演示随步骤推进切换
     expect(wrapper.find('.guide-demo').exists()).toBe(true);
-    expect(wrapper.find('.demo-ring-progress').exists()).toBe(true);
-    expect(wrapper.find('.demo-icon-glyph').exists()).toBe(true);
 
     // 推进到第二步：纯说明步骤无演示动画
     await wrapper.find('.guide-btn').trigger('click');

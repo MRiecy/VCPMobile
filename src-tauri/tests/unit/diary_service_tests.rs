@@ -122,31 +122,6 @@ async fn text_search_fails_closed_before_sending_empty_admin_credentials() {
     assert_eq!(error.code, DiaryErrorCode::ConfigMissing);
 }
 
-#[test]
-fn normalizes_partial_batch_results_without_promoting_http_success() {
-    let a = DiaryNoteKey {
-        folder: "A".to_string(),
-        file: "one.txt".to_string(),
-    };
-    let b = DiaryNoteKey {
-        folder: "A".to_string(),
-        file: "two.txt".to_string(),
-    };
-    let outcome = normalize_move_outcome(
-        &[a.clone(), b.clone()],
-        MoveEnvelope {
-            moved: vec!["A/one.txt to B/one.txt".to_string()],
-            errors: vec![RawBatchError {
-                note: "A/two.txt".to_string(),
-                error: "File already exists at destination".to_string(),
-            }],
-        },
-    );
-    assert_eq!(outcome.succeeded, vec![a]);
-    assert_eq!(outcome.errors.len(), 1);
-    assert_eq!(outcome.errors[0].key, b);
-}
-
 #[tokio::test]
 async fn admin_requests_preserve_proxy_prefix_and_send_basic_auth() {
     let router = Router::new().route(

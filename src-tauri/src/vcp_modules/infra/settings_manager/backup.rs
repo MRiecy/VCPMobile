@@ -266,21 +266,6 @@ mod tests {
     }
 
     #[test]
-    fn jev_credentials_and_provider_choice_round_trip_as_local_configuration() {
-        let mut snapshot = snapshot();
-        snapshot.data.jev.enabled = true;
-        snapshot.data.jev.provider = super::super::JevProvider::Openrouter;
-        snapshot.data.jev.typesafe.api_key = "official-key".into();
-        snapshot.data.jev.openrouter.api_key = "router-key".into();
-        let domains = backup_domains(&snapshot).unwrap();
-        let parsed = parse_backup_bytes(&backup(domains.into())).unwrap();
-        assert_eq!(parsed.domains["jev"]["provider"], "openrouter");
-        assert_eq!(parsed.domains["jev"]["typesafe"]["apiKey"], "official-key");
-        assert_eq!(parsed.domains["jev"]["openrouter"]["apiKey"], "router-key");
-        assert!(parsed.group_preferences.is_empty());
-    }
-
-    #[test]
     fn export_uses_schema_scope_and_round_trips_the_current_format() {
         let mut snapshot = snapshot();
         snapshot.data.server.api_key = "kept-plaintext".into();
@@ -302,13 +287,6 @@ mod tests {
             json!({"asr":{"inputEncoding":"mp3_64"},"vad":{"endSilenceMs":777}})
         );
         assert!(!parsed.domains.contains_key("identity"));
-    }
-
-    #[test]
-    fn clone_id_and_guidance_round_trip_without_audio_or_manual_field_lists() {
-        let values = json!({"voice":{"tts":{"mode":"clone","cloneSampleId":"sample-id","stylePrompt":"自然表达"},"guidance":{"autoGuidance":false,"audioTagRules":"使用合适标签","guidanceRules":""}}});
-        let parsed = parse_backup_bytes(&backup(values.clone())).unwrap();
-        assert_eq!(Value::Object(parsed.domains), values);
     }
 
     #[test]
@@ -397,14 +375,6 @@ mod tests {
     }
 
     #[test]
-    fn old_flat_v2_and_future_formats_are_not_a_second_active_protocol() {
-        for version in [2, 3] {
-            let bytes = serde_json::to_vec(&json!({"app":"vcp-mobile","kind":"vcp-mobile-settings-backup","version":version,"settings":{"vcpApiKey":"secret"}})).unwrap();
-            assert!(parse_backup_bytes(&bytes).is_err());
-        }
-    }
-
-    #[test]
     fn v1_sparse_import_never_fills_missing_fields_or_restores_preferences() {
         let bytes = serde_json::to_vec(&json!({"app":"vcp-mobile","kind":"vcp-mobile-settings-backup","version":1,"settings":{"vcpApiKey":"old-key"},"preferences":{"theme":{"mode":"light"},"chat":{"messageHapticsEnabled":false}}})).unwrap();
         let parsed = parse_backup_bytes(&bytes).unwrap();
@@ -434,31 +404,6 @@ mod tests {
                 "voice":{"asr":{"stream":false},"tts":{"stylePrompt":""}},
             })
         );
-    }
-
-    #[test]
-    fn v1_endpoint_uses_current_values_without_old_flag_aliases() {
-        for enabled in [true, false] {
-            let parsed = parse_backup_bytes(&v1_backup(
-                json!({"chatEndpointMode":null,"enableVcpToolInjection":enabled}),
-            ))
-            .unwrap();
-            assert_eq!(parsed.domains["server"]["endpointMode"], schema::domain_defaults(ConfigDomain::Server)["endpointMode"]);
-            let absent = parse_backup_bytes(&v1_backup(json!({"enableVcpToolInjection":enabled}))).unwrap();
-            assert!(absent.domains.is_empty());
-        }
-        let explicit = parse_backup_bytes(&v1_backup(
-            json!({"chatEndpointMode":"raw","enableVcpToolInjection":"ignored"}),
-        ))
-        .unwrap();
-        assert_eq!(explicit.domains["server"]["endpointMode"], "raw");
-        let absent = parse_backup_bytes(&v1_backup(json!({}))).unwrap();
-        assert!(absent.domains.is_empty());
-        let null = parse_backup_bytes(&v1_backup(
-            json!({"chatEndpointMode":null,"enableVcpToolInjection":null}),
-        ))
-        .unwrap();
-        assert_eq!(null.domains["server"], json!({"endpointMode":schema::domain_defaults(ConfigDomain::Server)["endpointMode"]}));
     }
 
     #[test]

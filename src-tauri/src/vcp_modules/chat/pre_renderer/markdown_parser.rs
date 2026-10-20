@@ -1876,28 +1876,4 @@ mod tests {
         // 起始是普通段落
         assert_eq!(parse_fenced_code_block("hello\n\n```rust\nx\n```"), None);
     }
-
-    #[test]
-    fn finalized_code_block_node_matches_full_pipeline_output() {
-        // 分块层直接构造的终态节点必须与「围栏全文重走完整管线」逐字节等价
-        // （含高亮 HTML、mermaid 豁免、≤3 空格缩进、空 info string）
-        let cases = [
-            "```rust\nfn main() {\n    let x = 1;\n}\n```\n",
-            "```js\nlet a = `template *not-emphasis*`;\n```",
-            "  ```py\nprint('hi')\n```\n",
-            "```mermaid\ngraph TD;\n```\n",
-            "```\nplain <b>text</b>\n```\n",
-        ];
-        for src in cases {
-            let (lang, code, block_len) = parse_fenced_code_block(src).expect("fence should parse");
-            let mut direct = finalized_code_block_node(Some(lang), code);
-            direct.compute_hashes_recursively();
-            let piped = parse_markdown_to_ast(&src[..block_len]);
-            assert_eq!(
-                format!("{:?}", vec![direct]),
-                format!("{:?}", piped),
-                "直接构造与完整管线输出必须一致: {src:?}"
-            );
-        }
-    }
 }

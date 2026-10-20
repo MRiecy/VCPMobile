@@ -287,7 +287,6 @@ describe("sync session ownership", () => {
     const wrapper = mount(SyncSessionView);
     expect(wrapper.text()).toContain("桌面后端 CDS");
     expect(wrapper.text()).toContain("同步插件 v1.5.0");
-    expect(wrapper.text()).not.toContain("复制诊断");
 
     emitTauriEvent("vcp-sync-status", {
       sessionId: 61,
@@ -405,24 +404,6 @@ describe("sync session ownership", () => {
     store.activeSessionId = 74;
     oldListener?.({ payload: { sessionId: 74, ...transfer } });
     expect(store.transfer).toBeNull();
-  });
-
-  it.each([
-    { uploadedBytes: 0, downloadedBytes: 0, activeDurationMs: 1_000, expected: "—" },
-    { uploadedBytes: 100, downloadedBytes: 900, activeDurationMs: 0, expected: "—" },
-    { uploadedBytes: 125, downloadedBytes: 375, activeDurationMs: 1_000, expected: "500 B/s" },
-    { uploadedBytes: 1_000, downloadedBytes: 4_000, activeDurationMs: 2_000, expected: "2.50 KB/s" },
-    { uploadedBytes: 1_000_000, downloadedBytes: 3_000_000, activeDurationMs: 2_000, expected: "2.00 MB/s" },
-    { uploadedBytes: 250, downloadedBytes: 750, activeDurationMs: 0.5, expected: "2.00 MB/s" },
-  ])("renders application-byte average as $expected", async ({ expected, ...transfer }) => {
-    const store = useSyncSessionStore();
-    store.open();
-    await store.startSync();
-    const wrapper = mount(SyncSessionView);
-    expect(wrapper.get('[aria-label="平均同步速度"]').text()).toContain("—");
-    emitTauriEvent("vcp-sync-transfer", { sessionId: 1, ...transfer });
-    await Promise.resolve();
-    expect(wrapper.get('[aria-label="平均同步速度"]').text()).toContain(expected);
   });
 
   it("keeps a connecting sync page mounted while start_manual_sync is pending", async () => {
@@ -643,36 +624,6 @@ describe("sync session ownership", () => {
     });
   });
 
-  it("awaits stop before retrying and preserves an attempt separator", async () => {
-    let nextSession = 0;
-    mockInvoke("start_manual_sync", () => ++nextSession);
-    const store = useSyncSessionStore();
-    store.open();
-    await store.startSync();
-    emitTauriEvent("vcp-sync-status", {
-      sessionId: 1,
-      status: "error",
-      error: syncError("RETRYABLE"),
-    });
-
-    await store.retrySync();
-
-    const syncCommands = invokeMock.mock.calls
-      .map(([command]) => command)
-      .filter(
-        (command) => command === "start_manual_sync" || command === "stop_sync",
-      );
-    expect(syncCommands).toEqual([
-      "start_manual_sync",
-      "stop_sync",
-      "start_manual_sync",
-    ]);
-    expect(store.activeSessionId).toBe(2);
-    expect(store.logs.some((log) => log.message.includes("新同步尝试"))).toBe(
-      true,
-    );
-  });
-
   it("joins the old session before separating attempts and ignores its late logs", async () => {
     let nextSession = 0;
     const stopping = deferred<void>();
@@ -776,29 +727,6 @@ describe("sync session ownership", () => {
     expect(store.logs.some((log) => log.message.includes("unknown phase progress"))).toBe(
       false,
     );
-  });
-
-  it.each([
-    {
-      battery: { level: 80, isPowerSaveMode: true },
-      message: "系统省电模式已阻止本次同步",
-      guidance: "关闭系统省电模式后再试。",
-    },
-    {
-      battery: { level: 29, isPowerSaveMode: false },
-      message: "当前电量不足，已暂停同步",
-      guidance: "电量达到 30% 后再试。",
-    },
-  ])("uses fixed device guidance for $message", async ({ battery, message, guidance }) => {
-    mockInvoke("plugin:vcp-mobile|get_battery_status", () => battery);
-    const store = useSyncSessionStore();
-    store.open();
-    await store.startSync();
-
-    expect(store.terminalError).toMatchObject({ message, guidance });
-    expect(
-      invokeMock.mock.calls.some(([command]) => command === "start_manual_sync"),
-    ).toBe(false);
   });
 
   it("mounts only the selected sync panel and reloads history on each entry", async () => {

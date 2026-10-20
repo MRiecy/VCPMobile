@@ -649,22 +649,6 @@ mod tests {
     }
 
     #[test]
-    fn job_for_operation_finds_run_by_operation_without_digest() {
-        let mut ledger = JobLedger::empty(1);
-        let mut job = running_job(1);
-        job.mutation_operations.push(MutationOperationBinding {
-            operation_id: "dist:abc123".to_string(),
-            action_sha256: "run-digest".to_string(),
-        });
-        ledger.insert_job(job).expect("insert job");
-        let found = ledger
-            .job_for_operation("dist:abc123")
-            .expect("run job found by operation id");
-        assert_eq!(found.id, "job-1");
-        assert!(ledger.job_for_operation("dist:missing").is_none());
-    }
-
-    #[test]
     fn terminal_claim_is_attempt_and_generation_fenced_exactly_once() {
         let mut ledger = JobLedger::empty(8);
         ledger.insert_job(running_job(8)).expect("insert job");

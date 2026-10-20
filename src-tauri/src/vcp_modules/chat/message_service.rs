@@ -2285,7 +2285,7 @@ mod stream_lifecycle_tests {
             .await
             .expect("tombstone topic");
 
-        let error = begin_stream_message(
+        begin_stream_message(
             &db_state,
             &message_key("message-after-delete"),
             Some("agent-1"),
@@ -2293,7 +2293,6 @@ mod stream_lifecycle_tests {
         )
         .await
         .expect_err("atomic skeleton insert must observe the tombstone");
-        assert!(error.contains("live agent"));
         let message_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM messages WHERE msg_id = 'message-after-delete'",
         )

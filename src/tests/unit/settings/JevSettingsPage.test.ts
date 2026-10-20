@@ -66,20 +66,15 @@ describe('JEV 设置由同一领域编辑会话保存', () => {
   it('切换服务商分别保留地址、密钥和模型，返回时一次提交', async () => {
     const wrapper = await renderPage();
     expect(field(wrapper, 'API 地址').element).toHaveProperty('value', '');
-    expect(field(wrapper, 'API 地址').attributes('placeholder')).toBe('https://api.typesafe.ai/v1/systemone');
     expect(field(wrapper, '决策模型').element).toHaveProperty('value', '');
-    expect(field(wrapper, '决策模型').attributes('placeholder')).toBe('jev-latest');
     await field(wrapper, 'API 地址').setValue('https://official.example/decision');
     await field(wrapper, '决策模型').setValue('custom-official-model');
     await field(wrapper, 'API Key（支持多个）').setValue('official-one，official-two');
     await choose(wrapper, 'OpenRouter');
     expect(field(wrapper, 'API 地址').element).toHaveProperty('value', '');
-    expect(field(wrapper, 'API 地址').attributes('placeholder')).toBe('https://openrouter.ai/api/alpha/decisions');
     expect(field(wrapper, '决策模型').element).toHaveProperty('value', '');
-    expect(field(wrapper, '决策模型').attributes('placeholder')).toBe('~typesafe/jev-latest');
     await openAppInfo(wrapper);
     expect(field(wrapper, '应用名称').element).toHaveProperty('value', '');
-    expect(field(wrapper, '应用名称').attributes('placeholder')).toBe('VCPMobile');
     await field(wrapper, 'API Key（支持多个）').setValue('router-key');
     await field(wrapper, 'API 地址').setValue('https://router.example/decisions');
     await choose(wrapper, 'TypeSafe 官方');

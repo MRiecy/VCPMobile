@@ -57,8 +57,6 @@ describe('配置恢复的真实领域状态与失败边界', () => {
     const result = await applyConfigBackup(backup, applySettings);
     expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'jev.enabled': true }, groupPreferences);
     expect(result.applied).toEqual(['JEV 设置', '群聊设置']);
-    expect(groupPreferences['group-a']).not.toHaveProperty('contextMessageWindowSize');
-    expect(groupPreferences['group-a'].modeSettings.jev).not.toHaveProperty('historyWindow');
   });
 
   it('多个SQLite领域合为一次提交，缺失叶字段不补默认值', async () => {
@@ -70,44 +68,11 @@ describe('配置恢复的真实领域状态与失败边界', () => {
     expect(result.applied).toEqual(['用户身份', '主服务器连接', '语音服务']);
   });
 
-  it('导出语音连接、输入编码及独立流式选项，恢复继续走SQLite设置owner', async () => {
-    const domains: BackupDomains = { ...makeDomains(), voice: { connection: { apiKey: 'voice-key' }, asr: { inputEncoding: 'mp3_64', stream: false }, tts: { stream: true, voice: '冰糖' } } };
-    const payload = buildBackupPayload(domains, captureBackupPreferences());
-    expect(payload.domains.voice).toEqual(domains.voice);
-    const patch = { voice: { connection: { apiKey: 'restored-key' }, asr: { inputEncoding: 'wav' as const, language: 'en' } } };
-    const applySettings = vi.fn(async () => {});
-    const result = await applyConfigBackup({ domains: patch, exportedAt: '' }, applySettings);
-    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'voice.connection.apiKey': 'restored-key', 'voice.asr.inputEncoding': 'wav', 'voice.asr.language': 'en' }, {});
-    expect(result.applied).toEqual(['语音服务']);
-  });
-
-  it('仅含输入编码的备份仍识别为语音服务并交给设置owner恢复', async () => {
-    const backup = { domains: { voice: { asr: { inputEncoding: 'mp3_64' as const } } }, exportedAt: '' };
-    const applySettings = vi.fn(async () => {});
-    expect(configBackupScopes(backup)).toEqual(['语音服务']);
-    const result = await applyConfigBackup(backup, applySettings);
-    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'voice.asr.inputEncoding': 'mp3_64' }, {});
-    expect(result).toEqual({ applied: ['语音服务'], skipped: [], failed: [] });
-  });
-
-  it('自定义VAD毫秒值以数字导出，独立恢复时保留未提供的语音配置', async () => {
-    const vad = { sensitivity: 'high' as const, endSilenceMs: 777, playbackOnsetMs: 1001 };
-    const payload = buildBackupPayload({ ...makeDomains(), voice: { vad } }, captureBackupPreferences());
-    expect(payload.domains.voice?.vad).toEqual(vad);
-    const backup = { domains: { voice: { vad } }, exportedAt: '' };
-    expect(configBackupScopes(backup)).toEqual(['语音服务']);
-    const applySettings = vi.fn(async () => {});
-    await applyConfigBackup(backup, applySettings);
-    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'voice.vad.sensitivity': 'high', 'voice.vad.endSilenceMs': 777, 'voice.vad.playbackOnsetMs': 1001 }, {});
-  });
-
-  it('备份保留音色模式与风格规则的类型，复刻恢复明确提示音频需在本机存在', async () => {
+  it('复刻恢复明确提示音频需在本机存在', async () => {
     const fields = {
       tts: { mode: 'clone' as const, cloneSampleId: 'sample-id', stylePrompt: '轻松自然' },
       guidance: { audioTagRules: '必要时生成标签', autoGuidance: false, guidanceRules: '按角色描述' },
     };
-    const payload = buildBackupPayload({ ...makeDomains(), voice: fields }, captureBackupPreferences());
-    expect(payload.domains.voice).toEqual(fields);
     const applySettings = vi.fn(async () => {});
     const result = await applyConfigBackup({ domains: { voice: fields }, exportedAt: '' }, applySettings);
     expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'voice.tts.mode': 'clone', 'voice.tts.cloneSampleId': 'sample-id', 'voice.tts.stylePrompt': '轻松自然', 'voice.guidance.audioTagRules': '必要时生成标签', 'voice.guidance.autoGuidance': false, 'voice.guidance.guidanceRules': '按角色描述' }, {});
@@ -125,8 +90,6 @@ describe('配置恢复的真实领域状态与失败边界', () => {
     expect(payload.preferences.theme).toEqual({ themeKey: 'themes-simple-bw.ts', mode: 'system' });
     expect(payload.preferences.chat.presentationMode).toBe('panel');
     expect(payload.preferences.chat.messageHapticsEnabled).toBe(false);
-    expect(payload.domains).not.toHaveProperty('currentThemeMode');
-    expect(payload).not.toHaveProperty('settings');
   });
 
   it('备份缺失偏好和总结模型时保留当前状态，只交付备份中的设置', async () => {

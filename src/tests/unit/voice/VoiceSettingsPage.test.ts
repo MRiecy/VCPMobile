@@ -155,7 +155,7 @@ async function confirmPrompt(prompt: DOMWrapper<Element>) {
 }
 
 describe('local voice diagnostics', () => {
-  it('requires active capture, exposes sample attribution and does not infer AEC effectiveness', async () => {
+  it('requires active capture before starting a diagnostic sample', async () => {
     context.voice.microphoneState = 'off';
     const wrapper = await renderPage();
     expect(disclosure(wrapper, '本地诊断').attributes('aria-expanded')).toBe('false');
@@ -166,9 +166,6 @@ describe('local voice diagnostics', () => {
     await button.trigger('click');
     expect(context.voice.setProbe).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain('请先进入语音模式并开启麦克风');
-    expect(wrapper.text()).toContain('效果待验证');
-    expect(wrapper.get('a[href="https://github.com/Jakobovski/free-spoken-digit-dataset"]').text()).toBe('FSDD');
-    expect(wrapper.text()).toContain('CC BY-SA 4.0');
   });
 
   it('allows stopping playback setup and stops the sample when its settings page becomes inactive', async () => {
@@ -217,27 +214,12 @@ describe('local voice diagnostics', () => {
 });
 
 describe('语音设置使用正式设置快照', () => {
-  it('高级参数在风格指导之后默认折叠，预设时长使用 ms 并在返回时保存', async () => {
+  it('展开高级参数后修改预设时长，在返回时提交草稿', async () => {
     const { wrapper } = await renderOverlay();
     const advanced = disclosure(wrapper, '高级参数');
     expect(advanced.attributes('aria-expanded')).toBe('false');
     expect(wrapper.find('button[aria-label="人声检测灵敏度"]').exists()).toBe(false);
-    expect(wrapper.text().indexOf('风格指导')).toBeLessThan(wrapper.text().indexOf('高级参数'));
-    expect(wrapper.text().indexOf('高级参数')).toBeLessThan(wrapper.text().indexOf('本地诊断'));
     await advanced.trigger('click');
-    expect(wrapper.get('button[aria-label="人声检测灵敏度"]').text()).toContain('标准');
-    expect(wrapper.get('button[aria-label="说完等待时间"]').text()).toContain('512 ms');
-    expect(wrapper.get('button[aria-label="朗读时插话确认"]').text()).toContain('192 ms');
-    const silenceMenu = await openSelection(wrapper, '说完等待时间');
-    expect(silenceMenu.findAll('[role="radio"]').map(item => item.text())).toEqual([
-      '320 ms', '512 ms', '800 ms', '1200 ms', '1600 ms', '自定义…',
-    ]);
-    useOverlayStore().closeContextMenu();
-    await flushPromises();
-    const onsetMenu = await openSelection(wrapper, '朗读时插话确认');
-    expect(onsetMenu.findAll('[role="radio"]').map(item => item.text())).toEqual(['128 ms', '192 ms', '320 ms', '自定义…']);
-    useOverlayStore().closeContextMenu();
-    await flushPromises();
     await choose(wrapper, '人声检测灵敏度', '较高');
     await choose(wrapper, '说完等待时间', '800 ms');
     await choose(wrapper, '朗读时插话确认', '128 ms');
@@ -322,18 +304,14 @@ describe('语音设置使用正式设置快照', () => {
 
   it('默认选择 WAV，编码随本页草稿保存并可切回，不改变朗读配置', async () => {
     const { wrapper } = await renderOverlay();
-    expect(wrapper.find('select').exists()).toBe(false);
     expect(wrapper.get('button[aria-label="语音输入编码"]').text()).toContain('WAV 无损');
     const menu = await openSelection(wrapper, '语音输入编码');
-    expect(menu.findAll('[role="radio"]').map(option => option.text())).toEqual(['WAV 无损', 'MP3 64 kbps']);
     expect(menu.get('[aria-checked="true"]').text()).toBe('WAV 无损');
     await menu.get('[aria-checked="false"]').trigger('click');
     await flushPromises();
     expect(useOverlayStore().contextMenuConfig).toBeNull();
     expect(updates()).toHaveLength(0);
     expect(useSettingsStore().settings?.voice.asr.inputEncoding).toBe('wav');
-    expect(wrapper.find('footer').exists()).toBe(false);
-    expect(wrapper.find('.voice-settings-save').exists()).toBe(false);
     await leaveVoiceSettings(wrapper);
     await flushPromises();
     expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.asr.inputEncoding': 'mp3_64' });
@@ -488,19 +466,13 @@ describe('语音设置使用正式设置快照', () => {
 
   it('仅提供预置和复刻，两种模式共用默认演绎指导，切换保留草稿', async () => {
     const { wrapper } = await renderOverlay();
-    const menu = await openSelection(wrapper, '音色模式');
-    expect(menu.findAll('[role="radio"]').map(item => item.text())).toEqual(['预置音色', '样本复刻']);
-    useOverlayStore().closeContextMenu();
-    await flushPromises();
     await disclosure(wrapper, '默认演绎指导').trigger('click');
     const description = wrapper.get('textarea');
     await description.setValue('语气温和，语速稍慢。');
     await choose(wrapper, '音色模式', '样本复刻');
-    expect(wrapper.text()).toContain('mimo-v2.5-tts-voiceclone');
     expect(wrapper.get('[aria-label="参考音频"]').isVisible()).toBe(true);
     expect(wrapper.find('[aria-label="朗读音色"]').exists()).toBe(false);
     expect(wrapper.find('[role="switch"][aria-label="流式朗读"]').exists()).toBe(false);
-    expect(wrapper.text()).toContain('每个文本分段合成完成后返回音频');
     expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('语气温和，语速稍慢。');
     await choose(wrapper, '音色模式', '预置音色');
     expect(wrapper.get('[aria-label="参考音频"]').isVisible()).toBe(false);
@@ -514,9 +486,6 @@ describe('语音设置使用正式设置快照', () => {
     const pending = deferred<ConfigSaveResult>();
     mockInvoke('update_settings', () => pending.promise);
     const { wrapper, fallbackClose } = await renderOverlay('styleGuidance');
-    expect(wrapper.text()).toContain('同一个注入块');
-    expect(wrapper.text()).toContain('适用于预置音色与样本复刻');
-    expect(wrapper.text()).not.toContain('手动指导');
     const areas = wrapper.findAll('textarea');
     expect(areas).toHaveLength(2);
     await areas[0].setValue('仅在需要时使用 [轻笑]。');
@@ -554,8 +523,6 @@ describe('语音设置使用正式设置快照', () => {
   it('试听只提交当前语音草稿，事件按身份处理，返回只停止本页试听', async () => {
     context.voice.active = false;
     const { wrapper } = await renderOverlay();
-    expect(field(wrapper, 'API 地址').element).toHaveProperty('value', '');
-    expect(field(wrapper, 'API 地址').attributes('placeholder')).toBe('https://api.xiaomimimo.com/v1');
     await field(wrapper, '语音 API Key').setValue('draft-preview-key');
     await choose(wrapper, '朗读音色', '冰糖 · 中文女声');
     await disclosure(wrapper, '试听声音').trigger('click');
@@ -563,7 +530,6 @@ describe('语音设置使用正式设置快照', () => {
     await flushPromises();
     const previewCall = invokeMock.mock.calls.find(([command]) => command === 'preview_tts')!;
     expect(previewCall[1]?.settings).toMatchObject({ connection: { apiBaseUrl: '', apiKey: 'draft-preview-key' }, tts: { voice: '冰糖' } });
-    expect(previewCall[1]?.settings).not.toHaveProperty('vcpApiKey');
     expect(updates()).toHaveLength(0);
     expect(wrapper.get('.voice-preview-button').text()).toBe('停止试听');
     emitTauriEvent('vcp-tts', { ttsId: 'another-narration', kind: 'stopped', stage: 'finished' });

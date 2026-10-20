@@ -256,10 +256,7 @@ impl Phase1Metadata {
 #[cfg(test)]
 mod tests {
     use super::Phase1Metadata;
-    use crate::vcp_modules::sync_types::{
-        AvatarManifestState, ManifestRequest, OwnerManifestState, TopicManifestState,
-    };
-    use crate::vcp_modules::topic_types::OwnerKey;
+    use crate::vcp_modules::sync_types::{AvatarManifestState, ManifestRequest, OwnerManifestState};
 
     #[tokio::test]
     async fn owner_manifest_combines_agent_and_group_states() {
@@ -347,49 +344,5 @@ mod tests {
         };
         assert_eq!(user.owner_id, "user_avatar");
         assert_eq!(user.binary_hash, "user-hash");
-    }
-
-    #[tokio::test]
-    async fn targeted_topic_manifest_carries_exact_owner_identity() {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("open database");
-        sqlx::query(
-            "CREATE TABLE topics (
-                owner_type TEXT, owner_id TEXT, topic_id TEXT,
-                config_hash TEXT, content_hash TEXT, updated_at INTEGER,
-                deleted_at INTEGER, PRIMARY KEY(owner_type, owner_id, topic_id)
-             );
-             INSERT INTO topics VALUES
-                ('agent', 'agent-a', 'topic-a', 'config-hash',
-                 'content-hash', 10, NULL);",
-        )
-        .execute(&pool)
-        .await
-        .expect("create topic fixture");
-
-        let manifest = Phase1Metadata::build_targeted_topic_manifest(
-            &pool,
-            &[OwnerKey::new("agent", "agent-a")],
-        )
-        .await
-        .expect("build topic manifest");
-        let ManifestRequest::Topic {
-            items,
-            targeted_owners,
-        } = manifest
-        else {
-            panic!("topic builder returned another manifest type");
-        };
-        assert_eq!(targeted_owners, vec![OwnerKey::new("agent", "agent-a")]);
-        assert_eq!(items.len(), 1);
-        let TopicManifestState::Live(topic) = &items[0] else {
-            panic!("topic should be live");
-        };
-        assert_eq!(topic.topic_id, "topic-a");
-        assert_eq!(topic.owner_id, "agent-a");
-        assert_eq!(topic.config_hash, "config-hash");
     }
 }

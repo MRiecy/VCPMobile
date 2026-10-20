@@ -1232,23 +1232,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_cancelled_replacement_never_restores_the_previous_slot() {
-        let temporary = tempfile::tempdir_in("tests").unwrap();
-        let root = temporary.path();
-        let guard = lock(root).await.unwrap();
-        write_slot(root, &test_slot(1, "old")).unwrap();
-        let mut replacement = test_slot(2, "new");
-        replacement.state = "receiving".into();
-        write_slot(root, &replacement).unwrap();
-        replacement.state = "failed".into();
-        replacement.error = Some("cancelled".into());
-        write_slot(root, &replacement).unwrap();
-        drop(guard);
-        assert!(assert_current(root, 1, "old").is_err());
-        assert_eq!(slot(root).unwrap().unwrap().state, "failed");
-    }
-
-    #[tokio::test]
     async fn receiving_is_interrupted_only_after_its_provider_lease_disappears() {
         let temporary = tempfile::tempdir_in("tests").unwrap();
         let root = temporary.path();

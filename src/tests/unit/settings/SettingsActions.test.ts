@@ -174,7 +174,7 @@ describe('依赖配置提交的设置动作', () => {
     }]]);
   });
 
-  it('导出编码保存成功的快照和正式偏好，并排除非备份字段', async () => {
+  it('提交完成后才读取并编码导出快照', async () => {
     const pending = deferred<SettingsSaveResult>();
     const wrapper = render(ConfigBackupSection, { active: true, disabled: false, commit: () => pending.promise, applyImport: vi.fn() });
     await action(wrapper, '导出').get('button').trigger('click');
@@ -189,10 +189,6 @@ describe('依赖配置提交的设置动作', () => {
     expect(callsFor('export_config_domains')).toHaveLength(1);
     expect(payload.domains.identity.userName).toBe('已提交用户');
     expect(payload.domains.server.apiKey).toBe('saved-key');
-    expect(payload.domains.conversation.topicSummaryModel).toBe('summary-model');
-    expect(payload.preferences.theme.themeKey).toBeTruthy();
-    expect(payload.preferences.chat).toHaveProperty('messageHapticsEnabled');
-    expect(payload.domains).not.toHaveProperty('navigation');
   });
 
   it('领域导出快照读取期间隐藏页面，迟到结果不会启动原生保存', async () => {
@@ -356,8 +352,6 @@ describe('连接设置页与真实编辑会话的集成', () => {
     await flushPromises();
     await action(wrapper, '导入').get('button').trigger('click');
     await flushPromises();
-    expect(wrapper.get('[role="dialog"]').text()).toContain('未包含的设置保持当前值');
-    expect(wrapper.get('[role="dialog"]').text()).not.toContain('整组恢复');
     await confirmImport(wrapper);
     await flushPromises();
     expect(callsFor('import_settings_backup')).toEqual([

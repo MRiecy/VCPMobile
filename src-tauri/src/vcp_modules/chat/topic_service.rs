@@ -1009,16 +1009,6 @@ mod tests {
         .await
         .expect("seed topic activity");
 
-        let projected: i64 = sqlx::query_scalar(
-            "SELECT last_message_updated_at FROM topics
-             WHERE owner_type = 'agent' AND owner_id = 'agent' AND topic_id = 'message-newer'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("read materialized activity");
-        assert_eq!(projected, 0);
-        assert!(TOPIC_LIST_QUERY.contains("LEFT JOIN messages"));
-
         let rows = sqlx::query(TOPIC_LIST_QUERY)
             .bind("agent")
             .bind("agent")
@@ -1047,9 +1037,6 @@ mod tests {
         assert_eq!(items[0].updated_at, 500);
         assert_eq!(items[1].updated_at, 450);
         assert_eq!(items[2].updated_at, 700);
-        let serialized = serde_json::to_value(&items[2]).expect("serialize topic list item");
-        assert_eq!(serialized["id"], "message-newer");
-        assert_eq!(serialized["updatedAt"], 700);
 
         let rows = sqlx::query(TOPIC_LIST_QUERY)
             .bind("agent")

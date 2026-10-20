@@ -2811,7 +2811,6 @@ mod tests {
 
     #[test]
     fn monitor_deadline_is_absolute_and_never_extended_by_foreground_wait() {
-        let mut job = JobLedger::empty(1);
         let record = JobRecord {
             id: "job-deadline".to_string(),
             attempt_id: "attempt-deadline".to_string(),
@@ -2846,7 +2845,6 @@ mod tests {
         let mut other_attempt = record.clone();
         other_attempt.attempt_id.push_str("-other");
         assert_ne!(artifact_id, output_artifact_id(&other_attempt));
-        job.insert_job(record.clone()).expect("insert deadline job");
         assert_eq!(
             monitor_decision(&record, 1_099),
             MonitorDecision::Inspect { sleep_ms: 1 }

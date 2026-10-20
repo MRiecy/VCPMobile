@@ -477,10 +477,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn current_defaults_round_trip_through_every_domain() {
-        let defaults = Settings::default();
-        let domains = settings_to_domains(&defaults).unwrap();
-        assert_eq!(settings_from_domains(&domains).unwrap(), defaults);
+    fn missing_domain_values_default_but_empty_patches_stay_empty() {
         for domain in ConfigDomain::ALL {
             assert_eq!(
                 normalize_domain(domain, &Value::Null),

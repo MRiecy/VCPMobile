@@ -98,16 +98,11 @@ describe('GroupSettingsView editing and return saving', () => {
 
   const changes = () => invokeMock.mock.calls.filter(([command]) => command === 'update_group_config');
 
-  it('uses the independent chat mode with exactly four choices', async () => {
+  it('uses the independent chat mode without saving an untouched draft', async () => {
     persisted.mode = 'jev';
     const view = await open();
     expect(view.get('[aria-label="群聊模式"]').text()).toContain('顺序发言');
     expect(view.find('button[aria-label="下移 Nova"]').exists()).toBe(true);
-    await view.get('[aria-label="群聊模式"]').trigger('click');
-    expect(useOverlayStore().contextMenuConfig?.actions.map(action => [action.label, action.selected])).toEqual([
-      ['顺序发言', true], ['自然随机', false], ['邀请发言', false], ['JEV 智能群聊', false],
-    ]);
-    useOverlayStore().closeContextMenu();
     await view.get('button[aria-label="返回并保存群组设置"]').trigger('click');
     await flushPromises();
     expect(changes()).toHaveLength(0);

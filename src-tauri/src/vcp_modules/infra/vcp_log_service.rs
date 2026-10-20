@@ -660,11 +660,6 @@ mod tests {
         cache.push(serde_json::json!({ "data": "x".repeat(MAX_BACKGROUND_LOG_BYTES) }));
         assert_eq!(cache.bytes, old_bytes);
         assert_eq!(cache.dropped, 4);
-
-        let drained = std::mem::take(&mut cache);
-        assert_eq!(drained.entries.len(), MAX_BACKGROUND_LOGS);
-        assert!(cache.entries.is_empty());
-        assert_eq!(cache.bytes, 0);
     }
 
     #[test]

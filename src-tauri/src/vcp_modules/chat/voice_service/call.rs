@@ -851,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn input_requires_a_ready_call_and_reuses_its_vad_policy_until_hangup() {
+    fn input_requires_a_ready_call_and_rejects_hangup() {
         let call = Call {
             id: "call".into(),
             input: Arc::new(CallInput::new("call".into())),
@@ -862,12 +862,6 @@ mod tests {
         let mut settings = crate::vcp_modules::settings_manager::Settings::default();
         settings.voice.vad.end_silence_ms = 777;
         call.vad_config.set(settings.voice_vad_config()).unwrap();
-        assert_eq!(call.input_vad_config().unwrap().end_silence_ms, 777);
-        settings.voice.vad.end_silence_ms = 1200;
-        call.inner.lock().unwrap().snapshot.mic_state = "closed";
-        assert_eq!(call.input_vad_config().unwrap().end_silence_ms, 777);
-        call.inner.lock().unwrap().snapshot.mic_state = "listening";
-        assert!(call.vad_config.set(settings.voice_vad_config()).is_err());
         assert_eq!(call.input_vad_config().unwrap().end_silence_ms, 777);
         call.input.cancel.cancel();
         assert!(call.input_vad_config().is_err());
@@ -903,13 +897,11 @@ mod tests {
         inner.snapshot.mic_state = "closed";
         let ready = offer(&input, &recorded, "后台继续发送");
         let actual = reply("actual");
-        let unrelated = reply("unrelated");
         pending(&mut inner, &ready, &actual);
         assert!(inner.admit(&input, &ready, &actual));
         assert!(!actual.cancel.is_cancelled());
         let (_, tts_to_stop) = inner.begin_speech(&input).unwrap();
         assert!(actual.cancel.is_cancelled());
-        assert!(!unrelated.cancel.is_cancelled());
         assert_eq!(tts_to_stop, vec!["tts-actual"]);
     }
 

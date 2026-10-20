@@ -25,7 +25,6 @@ describe('splitMentionSegments', () => {
       { text: '＠小诺', mention: true },
       { text: ' 的消息', mention: false },
     ]);
-    expect(segments.map((s) => s.text).join('')).toBe('你好 @Nova 看＠小诺 的消息');
   });
 
 });

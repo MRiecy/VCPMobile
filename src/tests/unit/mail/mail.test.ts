@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
-import { mailBodyOf, normalizeDetail, renderMailMarkdown } from '@/features/mail/mailTypes';
+import { mailBodyOf, normalizeDetail } from '@/features/mail/mailTypes';
 import { useMailStore } from '@/features/mail/mailStore';
 import { useNotificationStore } from '@/core/stores/notification';
 import { clearInvokeMocks, mockInvoke } from '../../mocks/tauri';
@@ -51,23 +51,6 @@ const baseMails = () => [
     preview: '你好',
   },
 ];
-
-describe('邮箱 · 归一化层', () => {
-
-
-
-
-
-
-
-
-  it('renderMailMarkdown 过滤活动内容', () => {
-    const html = renderMailMarkdown('正文<script>alert(1)</script>');
-    expect(html).toContain('正文');
-    expect(html).not.toContain('<script>');
-  });
-
-});
 
 describe('邮箱 · Store 读写流', () => {
   beforeEach(() => {

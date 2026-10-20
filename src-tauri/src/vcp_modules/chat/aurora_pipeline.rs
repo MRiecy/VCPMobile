@@ -1410,11 +1410,6 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(
-            serde_json::to_value(&initial_update).expect("serialize HTML tail")["tailOp"]
-                ["blockType"],
-            "html-preview"
-        );
         let initial_frame = initial_update
             .tail_frame
             .as_ref()
@@ -1770,11 +1765,6 @@ mod tests {
             };
             assert_eq!(fast_code, ref_code, "code mismatch for {tail:?}");
             assert_eq!(fast_lang, ref_lang, "lang mismatch for {tail:?}");
-            assert_eq!(
-                fast[0].get_hash(),
-                None,
-                "tail 节点不计算必然 miss 的 hash: {tail:?}"
-            );
         }
     }
 

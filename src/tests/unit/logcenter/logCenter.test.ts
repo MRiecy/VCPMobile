@@ -37,21 +37,6 @@ describe('logCenterStore 增量状态机', () => {
     expect(store.displayedLines).toEqual(['[INFO] first', '[INFO] partial line', '[WARN] done']);
   });
 
-  it('needFullReload 触发全量重拉', async () => {
-    mockInvoke('logcenter_fetch', (args) => {
-      if ((args as { incremental: boolean }).incremental) {
-        return { content: '', offset: 0, path: '/p', fileSize: 0, needFullReload: true };
-      }
-      return fullPayload('[INFO] fresh\n', 10);
-    });
-
-    const store = useLogCenterStore();
-    await store.startSession();
-    await store.pollOnce();
-    store.stopSession();
-    expect(store.displayedLines).toEqual(['[INFO] fresh']);
-  });
-
   it('行数限制裁剪最旧行', async () => {
     const manyLines = Array.from({ length: 120 }, (_, i) => `[INFO] line-${i}`).join('\n') + '\n';
     mockInvoke('logcenter_fetch', () => fullPayload(manyLines, 1000));

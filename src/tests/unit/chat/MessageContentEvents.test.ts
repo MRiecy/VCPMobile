@@ -60,7 +60,6 @@ describe('message content event ownership', () => {
     await copy.get('svg').trigger('click');
     await flushPromises();
     expect(navigator.clipboard.writeText).toHaveBeenCalledWith(value);
-    expect(copy.text()).toBe('复制');
     expect(copy.attributes('disabled')).toBeUndefined();
     expect(send).not.toHaveBeenCalled();
     expect(findImage).not.toHaveBeenCalled();

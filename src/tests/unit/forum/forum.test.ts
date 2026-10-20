@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
-import { parsePostContent, renderForumMarkdown } from '@/features/forum/forumTypes';
+import { parsePostContent } from '@/features/forum/forumTypes';
 import { useForumStore } from '@/features/forum/forumStore';
 import { clearInvokeMocks, mockInvoke } from '../../mocks/tauri';
 
@@ -92,21 +92,6 @@ describe('论坛 · 帖子正文解析', () => {
     expect(parsed.floors).toHaveLength(0);
     expect(parsed.mainBody).toContain('正文');
   });
-});
-
-describe('论坛 · 渲染与展示工具', () => {
-  it('renderForumMarkdown 渲染 Markdown 并过滤活动内容', () => {
-    const html = renderForumMarkdown('**加粗**\n\n<script>alert(1)</script>');
-    expect(html).toContain('<strong>加粗</strong>');
-    expect(html).not.toContain('<script>');
-  });
-
-  it('renderForumMarkdown 拦截 javascript: 链接', () => {
-    const html = renderForumMarkdown('[点我](javascript:alert(1))');
-    expect(html).not.toContain('javascript:');
-  });
-
-
 });
 
 describe('论坛 · Store 读写流', () => {

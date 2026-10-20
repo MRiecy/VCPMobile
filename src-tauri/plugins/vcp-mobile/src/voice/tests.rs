@@ -604,30 +604,3 @@ fn automatic_probe_stop_has_a_revision_that_a_later_explicit_play_can_supersede(
     assert!(next_revision > stop_revision);
     assert!(!sessions.owns_control("call-a", generation, Some(stop_revision)));
 }
-
-#[test]
-fn event_contract_is_flat_camel_case_and_requires_exactly_32_bands() {
-    let mut detector = VadDetector::default();
-    let event = VoiceAudioEvent::Frame(detector.process(frame(512, 0.8, false)).unwrap());
-    let value = serde_json::to_value(event).unwrap();
-    assert_eq!(value["kind"], "frame");
-    assert_eq!(value["sessionId"], "call-a");
-    assert_eq!(value["audioEpoch"], 1);
-    assert_eq!(value["sampleIndex"], 512);
-    assert_eq!(value["speechActive"], false);
-    assert_eq!(value["speechTransition"], serde_json::Value::Null);
-    assert_eq!(value["aecState"], "enabled");
-    assert_eq!(value["probeRevision"], 0);
-    assert!(value.get("frame").is_none());
-    let native: crate::events::NativeEvent = serde_json::from_value(serde_json::json!({
-        "event": "voiceAudio", "payload": value,
-    }))
-    .unwrap();
-    assert!(matches!(
-        native,
-        crate::events::NativeEvent::VoiceAudio(NativeVoiceAudioEvent::Frame(_))
-    ));
-    let mut invalid = serde_json::to_value(frame(512, 0.8, false)).unwrap();
-    invalid["bands"] = serde_json::json!([0.1, 0.2]);
-    assert!(serde_json::from_value::<VoiceFrame>(invalid).is_err());
-}

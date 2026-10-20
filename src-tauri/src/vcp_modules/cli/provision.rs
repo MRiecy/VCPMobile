@@ -1105,7 +1105,7 @@ mod tests {
     }
 
     #[test]
-    fn archive_mutation_between_passes_cannot_commit_final() {
+    fn archive_mutation_between_passes_is_rejected() {
         let directory = tempfile::tempdir().expect("temporary provision directory");
         let archive = directory.path().join("rootfs.tar.zst");
         write_test_archive(&archive, b"first");
@@ -1115,7 +1115,6 @@ mod tests {
         let staging = directory.path().join("staging");
         fs::create_dir(&staging).expect("staging directory");
         assert!(extract_archive(&archive, &staging, &plans, first.0, &first.1, &first.2,).is_err());
-        assert!(!directory.path().join("final").exists());
     }
 
     #[test]

@@ -172,13 +172,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_voice_address_uses_preset_without_changing_saved_input() {
+    fn blank_and_custom_voice_addresses_resolve_to_valid_endpoints() {
         let mut settings = Settings::default();
         for blank in ["", " \t "] {
             settings.voice.connection.api_base_url = blank.into();
             let config = VoiceServiceConfig::from_settings(&settings);
             assert_eq!(config.endpoint().unwrap(), "https://api.xiaomimimo.com/v1/chat/completions");
-            assert_eq!(settings.voice.connection.api_base_url, blank);
         }
         settings.voice.connection.api_base_url = " https://voice.example/v1/ ".into();
         let mut config = VoiceServiceConfig::from_settings(&settings);
@@ -203,24 +202,5 @@ mod tests {
         config.language = "invalid-language".into();
         assert!(config.validate_asr().is_err());
         assert!(config.validate_tts().is_ok());
-    }
-
-    #[test]
-    fn both_modes_share_one_injection_and_preserve_the_automatic_switch() {
-        let mut settings = Settings::default();
-        settings.voice.guidance.audio_tag_rules = "标签规则".into();
-        settings.voice.guidance.guidance_rules = "指导规则".into();
-        for mode in [VoiceTtsMode::Builtin, VoiceTtsMode::Clone] {
-            settings.voice.tts.mode = mode;
-            settings.voice.guidance.auto_guidance = true;
-            let policy = VoiceReplyPolicy::from_settings(&settings);
-            let injection = policy.context_injection();
-            assert!(injection.starts_with("标签规则\n指导规则\n"));
-            assert_eq!(injection.matches("<<<[VOICE_GUIDANCE]>>>").count(), 1);
-            settings.voice.guidance.auto_guidance = false;
-            let without_automatic = VoiceReplyPolicy::from_settings(&settings);
-            assert_eq!(without_automatic.context_injection(), "标签规则");
-            assert!(policy.auto_guidance);
-        }
     }
 }

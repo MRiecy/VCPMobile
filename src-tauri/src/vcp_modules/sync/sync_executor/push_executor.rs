@@ -1276,15 +1276,7 @@ mod tests {
     }
 
     #[test]
-    fn bounded_writer_emits_valid_ndjson_and_rejects_overflow() {
-        let mut line = BoundedJsonLine::new(64);
-        line.write_all(br#"{"topicId":"#).unwrap();
-        serde_json::to_writer(&mut line, "topic").unwrap();
-        line.write_all(b",\"messages\":[]}\n").unwrap();
-        let bytes = line.into_bytes();
-        serde_json::from_slice::<serde_json::Value>(&bytes[..bytes.len() - 1])
-            .expect("bounded line must remain valid JSON");
-
+    fn bounded_writer_rejects_overflow_without_partial_write() {
         let mut tiny = BoundedJsonLine::new(3);
         assert!(tiny.write_all(b"four").is_err());
         assert!(tiny.bytes.is_empty());

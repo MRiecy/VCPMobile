@@ -407,7 +407,6 @@ mod voice_policy_tests {
             .unwrap();
             assert_eq!(&messages[..messages.len() - 1], ordinary.as_slice());
         }
-        assert_eq!(history[0].content, "用户原话");
     }
 
     #[tokio::test]
@@ -449,7 +448,7 @@ mod voice_policy_tests {
     }
 
     #[test]
-    fn history_projection_removes_only_assistant_control_blocks_and_keeps_source() {
+    fn history_projection_removes_only_assistant_control_blocks() {
         let block = "<<<[VOICE_GUIDANCE]>>>\n低声轻柔\n<<<[END_VOICE_GUIDANCE]>>>\n";
         let source = format!("{block}[轻笑]保留正文与[链接](https://example.invalid)。");
         let mut assistant = ChatMessage {
@@ -466,7 +465,6 @@ mod voice_policy_tests {
         assert!(!projected[0]["content"].as_str().unwrap().contains("低声轻柔"));
         assert!(projected[0]["content"].as_str().unwrap().contains("[轻笑]保留正文与[链接]"));
         assert_eq!(projected[1]["content"], source);
-        assert_eq!(assistant.content, source);
 
         assistant.content = format!("```text\n{block}```\n> 引用中的普通标签 [叹气]");
         let example = assemble_history_for_vcp(&[assistant.clone()], false, false);

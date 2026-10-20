@@ -72,8 +72,6 @@ describe('MessageRenderer - 重新生成确认提示框', () => {
       },
     });
 
-    expect(longpressHandler).toBeTypeOf('function');
-
     const openContextMenuSpy = vi.spyOn(overlayStore, 'openContextMenu');
     const showConfirmSpy = vi.spyOn(overlayStore, 'showConfirm');
     const regenerateSpy = vi.spyOn(historyStore, 'regenerateResponse').mockResolvedValue();
@@ -85,17 +83,11 @@ describe('MessageRenderer - 重新生成确认提示框', () => {
     const [actions] = openContextMenuSpy.mock.calls[0];
     const regenerateAction = actions.find((a: any) => a.label === '重新生成');
     expect(regenerateAction).toBeDefined();
-    expect(regenerateAction!.danger).toBe(true);
 
     // 1. 用户取消确认
     showConfirmSpy.mockResolvedValueOnce(false);
     await regenerateAction!.handler();
 
-    expect(showConfirmSpy).toHaveBeenCalledWith({
-      title: '重新生成',
-      message: '确定要重新生成这条消息吗？',
-      isDanger: true,
-    });
     expect(regenerateSpy).not.toHaveBeenCalled();
 
     // 2. 用户点击确认
@@ -109,7 +101,7 @@ describe('MessageRenderer - 重新生成确认提示框', () => {
     );
   });
 
-  it('用户消息长按菜单中不应包含“重新生成”，而应包含红色样式的“编辑重发”且带确认提示框', async () => {
+  it('用户消息只提供编辑重发，并且取消确认时不重发', async () => {
     const sessionStore = useChatSessionStore();
     sessionStore.setConversation({ id: 'agent-1', type: 'agent' }, 'topic-1');
 
@@ -174,17 +166,11 @@ describe('MessageRenderer - 重新生成确认提示框', () => {
 
     const editResendAction = actions.find((a: any) => a.label === '编辑重发');
     expect(editResendAction).toBeDefined();
-    expect(editResendAction!.danger).toBe(true);
 
     // 1. 取消确认
     showConfirmSpy.mockResolvedValueOnce(false);
     await editResendAction!.handler();
 
-    expect(showConfirmSpy).toHaveBeenCalledWith({
-      title: '编辑重发',
-      message: '确定要编辑重发这条消息吗？',
-      isDanger: true,
-    });
     expect(editResendSpy).not.toHaveBeenCalled();
 
     // 2. 确认

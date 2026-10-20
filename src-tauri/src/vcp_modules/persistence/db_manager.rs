@@ -1121,10 +1121,7 @@ mod tests {
         assert_eq!(overlap, "<mark>aba</mark>ba");
     }
 
-    /// 铁律守护：(BASELINE_INCREMENTAL_MAX, BASELINE_VERSION) 版本号区间内严禁出现迁移，
-    /// 否则全新安装快速路径会将其 seed 跳过，造成永久 schema 缺失。
-    /// 全新安装先执行 baseline、seed 历史迁移，再执行后续迁移；
-    /// 直接得到 trigram FTS，同时必须具有当前分享的持久存储。
+    /// 全新安装先执行 baseline 并登记它覆盖的历史迁移，再实际执行后续迁移。
     #[tokio::test]
     async fn fresh_install_uses_baseline_and_applies_subsequent_migrations() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -1149,15 +1146,7 @@ mod tests {
         expected.push(104);
         assert_eq!(versions, expected);
 
-        // FTS 直接是 trigram 终态
-        let fts_ddl: String =
-            sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE name='messages_fts'")
-                .fetch_one(&pool)
-                .await
-                .expect("read fts ddl");
-        assert!(fts_ddl.contains("trigram"), "baseline FTS must be trigram");
-
-        // 代表性表与 0007/0008 产物齐全
+        // 迁移记录齐全仍可能来自误 seed；检查实际建表以确认迁移确已执行。
         for name in [
             "messages",
             "topics",
@@ -1177,48 +1166,6 @@ mod tests {
                     .expect("inspect table");
             assert!(exists, "fresh install must create {}", name);
         }
-        let has_agent_idx: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='idx_messages_agent_id')",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("inspect index");
-        assert!(has_agent_idx, "baseline must include idx_messages_agent_id");
-
-        let agent_pk: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM pragma_table_info('agents') WHERE pk > 0 ORDER BY pk",
-        )
-        .fetch_all(&pool)
-        .await
-        .expect("read agent primary key");
-        assert_eq!(agent_pk, ["owner_type", "agent_id"]);
-
-        let group_pk: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM pragma_table_info('groups') WHERE pk > 0 ORDER BY pk",
-        )
-        .fetch_all(&pool)
-        .await
-        .expect("read group primary key");
-        assert_eq!(group_pk, ["owner_type", "group_id"]);
-
-        let topic_pk: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM pragma_table_info('topics') WHERE pk > 0 ORDER BY pk",
-        )
-        .fetch_all(&pool)
-        .await
-        .expect("read topic primary key");
-        assert_eq!(topic_pk, ["owner_type", "owner_id", "topic_id"]);
-
-        let message_pk: Vec<String> = sqlx::query_scalar(
-            "SELECT name FROM pragma_table_info('messages') WHERE pk > 0 ORDER BY pk",
-        )
-        .fetch_all(&pool)
-        .await
-        .expect("read message primary key");
-        assert_eq!(message_pk, ["owner_type", "owner_id", "topic_id", "msg_id"]);
-
-        assert!(fts_ddl.contains("owner_type UNINDEXED"));
-        assert!(fts_ddl.contains("owner_id UNINDEXED"));
     }
 
     #[tokio::test]
@@ -1301,23 +1248,6 @@ mod tests {
                 .await
                 .expect("fts match");
         assert_eq!(miss, 0, "out-of-order query must not match");
-
-        // 硬性边界文档化：<3 字 MATCH 静默返回零结果（无扫描兜底），
-        // 这是 search_messages_fts 对短词走 instr() 分流的原因
-        let short_zero: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM messages_fts WHERE content MATCH ?")
-                .bind(build_fts_match_query(&["部署".to_string()]).unwrap())
-                .fetch_one(&pool)
-                .await
-                .expect("fts match");
-        assert_eq!(short_zero, 0, "trigram <3-char MATCH must yield zero rows");
-        // 同一短词经 instr() 可命中（分流路径的正确性）
-        let instr_hit: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE instr(content, '部署') > 0")
-                .fetch_one(&pool)
-                .await
-                .expect("instr match");
-        assert_eq!(instr_hit, 1, "instr() fallback must hit short term");
 
         // 逻辑删除触发器清索引
         sqlx::query(

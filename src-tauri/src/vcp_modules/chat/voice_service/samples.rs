@@ -705,7 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn chunked_encoding_preserves_the_whole_file_and_is_shared() {
+    fn chunked_encoding_preserves_the_whole_file() {
         let bytes: Vec<_> = (0..100_001).map(|n| (n % 251) as u8).collect();
         let prepared = encode_sample(
             bytes.clone(),
@@ -718,7 +718,6 @@ mod tests {
             .strip_prefix("data:audio/mpeg;base64,")
             .unwrap();
         assert_eq!(STANDARD.decode(encoded).unwrap(), bytes);
-        assert!(Arc::ptr_eq(&prepared.data_url, &prepared.clone().data_url));
     }
 
     #[tokio::test]

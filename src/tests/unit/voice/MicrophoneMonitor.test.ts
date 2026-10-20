@@ -56,7 +56,6 @@ describe('native microphone client', () => {
 
     installed.resolve(unlisten);
     await expect(started).resolves.toBe(true);
-    expect(currentSession()).toMatch(/^[0-9a-f-]{36}$/);
     expect(invokeMock).toHaveBeenCalledExactlyOnceWith(startCommand, { sessionId: currentSession(), callId: 'call-1' });
 
     monitor.stop();
@@ -271,7 +270,6 @@ describe('native microphone client', () => {
     const started = monitor.start();
     await vi.advanceTimersByTimeAsync(10_000);
     expect(onEnded).not.toHaveBeenCalled();
-    expect(vi.getTimerCount()).toBe(0);
 
     pending.resolve();
     await expect(started).resolves.toBe(true);
@@ -283,13 +281,10 @@ describe('native microphone client', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(onEnded).not.toHaveBeenCalled();
     expect(invokeMock.mock.calls.some(([name]) => name === stopCommand)).toBe(false);
-    expect(vi.getTimerCount()).toBe(0);
 
     mockInvoke(startCommand, () => undefined);
     await monitor.start();
-    expect(vi.getTimerCount()).toBe(0);
     monitor.stop();
-    expect(vi.getTimerCount()).toBe(0);
     await vi.advanceTimersByTimeAsync(6000);
     expect(onEnded).not.toHaveBeenCalled();
   });

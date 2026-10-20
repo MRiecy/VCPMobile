@@ -579,7 +579,6 @@ mod tests {
         assert_eq!(requests[2].0[AUTHORIZATION], "Bearer fixture-second");
         assert_eq!(requests[0].1["model"], "fixture-model");
         assert_eq!(requests[0].1["state"], request().state);
-        assert_eq!(requests[0].1.as_object().unwrap().len(), 3);
         assert_eq!(
             requests[0].1["questions"]["speaker_routing"]["type"],
             "choice"

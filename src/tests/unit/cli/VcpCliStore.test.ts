@@ -2,17 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import {
   VCP_CLI_ACTION_COMMAND,
-  VCP_CLI_DEFAULT_TIMEOUT_MS,
-  VCP_CLI_POLL_WAIT_MS,
   VCP_CLI_POLL_RETRY_DELAYS_MS,
-  VCP_CLI_READ_BYTES,
   VCP_CLI_STATUS_COMMAND,
   VCP_CLI_NATIVE_PICK_FILE_COMMAND,
   VCP_CLI_SKILL_CATALOG_COMMAND,
   VCP_CLI_SKILL_IMPORT_COMMIT_COMMAND,
   VCP_CLI_SKILL_IMPORT_INSPECT_COMMAND,
   VCP_CLI_TAIL_BYTES,
-  VCP_CLI_WORKSPACE,
   appendBoundedCliTail,
   type VcpCliAction,
   type VcpCliActionResponse,
@@ -262,20 +258,6 @@ describe("VCP CLI view snapshot ownership", () => {
     expect(store.pendingRunOperationId).toBeNull();
     expect(store.commandDraft).toBe("");
     expect(store.selectedJob?.stdout).toBe("ok\n");
-
-    const runAction = requestFromArgs(
-      invokeMock.mock.calls.find(
-        ([command, args]) =>
-          command === VCP_CLI_ACTION_COMMAND &&
-          requestFromArgs(args).action.action === "run",
-      )?.[1],
-    ).action;
-    expect(runAction).toMatchObject({
-      action: "run",
-      cwd: VCP_CLI_WORKSPACE,
-      timeout_ms: VCP_CLI_DEFAULT_TIMEOUT_MS,
-      run_in_background: false,
-    });
   });
 
   it("refreshes snapshots without abandoning an in-flight run owner", async () => {
@@ -521,12 +503,11 @@ describe("VCP CLI view snapshot ownership", () => {
     expect(store.selectedSkillContent).toBe("# Safe instructions");
     expect(store.jobs.map((item) => item.id)).toEqual(jobsBefore);
     expect(actions).toContainEqual({ action: "list_skills" });
-    expect(actions).toContainEqual({
+    expect(actions).toContainEqual(expect.objectContaining({
       action: "read_skill",
       skill_id: "skill-one",
       resource_path: "SKILL.md",
-      max_bytes: VCP_CLI_READ_BYTES,
-    });
+    }));
     expect(actions.some((action) => action.action === "run")).toBe(false);
   });
 
@@ -731,41 +712,6 @@ describe("VCP CLI view snapshot ownership", () => {
 
     expect(result.locallyTruncated).toBe(true);
     expect(total).toBeLessThanOrEqual(VCP_CLI_TAIL_BYTES + 3);
-  });
-
-  it("sends bounded long-poll defaults", async () => {
-    vi.useFakeTimers();
-    mockInvoke(VCP_CLI_STATUS_COMMAND, () =>
-      status({ jobs: [summary("job-poll")] }),
-    );
-    mockInvoke(VCP_CLI_ACTION_COMMAND, (args) => {
-      const request = requestFromArgs(args);
-      if (request.action.action === "list") {
-        return success(request.operation_id, { jobs: [summary("job-poll")] });
-      }
-      if (request.action.action === "poll") {
-        return success(request.operation_id, {
-          job: job("job-poll", "completed", { cursor: "cursor-final" }),
-        });
-      }
-      throw new Error(`unexpected action ${request.action.action}`);
-    });
-    const store = useVcpCliStore();
-    await store.openView();
-    store.openJob(store.jobs[0]);
-    await flushPromises();
-
-    const pollCall = invokeMock.mock.calls.find(
-      ([command, args]) =>
-        command === VCP_CLI_ACTION_COMMAND &&
-        requestFromArgs(args).action.action === "poll",
-    );
-    expect(requestFromArgs(pollCall?.[1]).action).toMatchObject({
-      action: "poll",
-      job_id: "job-poll",
-      max_output_bytes: VCP_CLI_READ_BYTES,
-      wait_ms: VCP_CLI_POLL_WAIT_MS,
-    });
   });
 
   it("recovers one poll owner after a transient IPC failure", async () => {

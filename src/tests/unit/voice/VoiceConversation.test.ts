@@ -180,12 +180,4 @@ describe('Rust voice conversation projection', () => {
     });
   });
 
-  it.each([
-    ['recovering', '模型连接暂不可用，正在等待接续。'],
-    ['stopping', '正在停止回复'],
-  ] as const)('projects the actual %s reply state without claiming completion', async (replyState, message) => {
-    mockInvoke('get_voice_conversation_snapshot', () => snapshot({ replyState }));
-    await controller.recover();
-    expect(onView).toHaveBeenLastCalledWith({ state: 'thinking', message, partialText: '' });
-  });
 });

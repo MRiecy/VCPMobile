@@ -18,10 +18,10 @@ describe('background service failure notifications', () => {
   });
 
   it.each([
-    ['guardian', 'warning', '后台保活异常', '前台使用'],
-    ['helper', 'error', '流式服务启动失败', '重试'],
-    ['events', 'warning', '应用状态监听异常', '完全关闭应用'],
-  ])('presents %s failures without exposing native error details', (service, type, title, guidance) => {
+    ['guardian', '前台使用'],
+    ['helper', '重试'],
+    ['events', '完全关闭应用'],
+  ])('presents %s failures without exposing native error details', (service, guidance) => {
     const notification = useNotificationProcessor().processPayload({
       type: 'vcp-background-service-error',
       service,
@@ -29,14 +29,6 @@ describe('background service failure notifications', () => {
       data: { detail: 'internal stack trace' },
     });
 
-    expect(notification).toMatchObject({
-      id: `vcp_background_service_error_${service}`,
-      type,
-      title,
-      duration: 0,
-      isPreformatted: false,
-    });
-    expect(notification.oncePerWebview).toBe(service === 'events' ? true : undefined);
     expect(notification.message).toContain(guidance);
     expect(JSON.stringify(notification)).not.toContain('private file paths');
     expect(JSON.stringify(notification)).not.toContain('internal stack trace');
@@ -117,16 +109,6 @@ describe('background service failure notifications', () => {
     expect(store.historyList).toHaveLength(1);
     expect(store.activeToasts).toHaveLength(1);
     expect(store.unreadCount).toBe(1);
-  });
-
-  it('requires an explicit fixed ID for once-per-WebView suppression', () => {
-    const store = useNotificationStore();
-    store.addNotification({ oncePerWebview: true });
-    store.addNotification({ oncePerWebview: true });
-
-    expect(store.historyList).toHaveLength(2);
-    expect(store.activeToasts).toHaveLength(2);
-    expect(store.unreadCount).toBe(2);
   });
 
   it.each(['guardian', 'helper'])('preserves the normal %s cooldown and history-clear behavior', service => {

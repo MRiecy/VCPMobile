@@ -1118,7 +1118,6 @@ mod tests {
             padding
         );
         let (blocks_1, tail_1, tail_type_1) = parser.process(&frame_1);
-        println!("Frame 1 - Blocks: {}, Tail: {:?}", blocks_1.len(), tail_1);
         // 应该成功沉淀出前面的两个 Markdown 块（因 \n\n 物理分段），且 tail 只包含 ```rust
         assert_eq!(blocks_1.len(), 2);
         assert_eq!(tail_1, "```rust");
@@ -1130,7 +1129,6 @@ mod tests {
             padding
         );
         let (blocks_2, tail_2, tail_type_2) = parser.process(&frame_2);
-        println!("Frame 2 - Blocks: {}, Tail: {:?}", blocks_2.len(), tail_2);
         // 应该没有任何新的 blocks（因为前段已经沉淀，后段未闭合），且 tail 应该是增量代码块且去掉了前段
         assert_eq!(blocks_2.len(), 0);
         assert_eq!(tail_2, "```rust\nuse tokio;\n");
@@ -1142,7 +1140,6 @@ mod tests {
             padding
         );
         let (blocks_3, tail_3, tail_type_3) = parser.process(&frame_3);
-        println!("Frame 3 - Blocks: {}, Tail: {:?}", blocks_3.len(), tail_3);
         // 应该成功闭合代码块并将其沉淀，且 tail 为空
         assert_eq!(blocks_3.len(), 1);
         assert!(tail_3.is_empty());

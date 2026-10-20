@@ -929,14 +929,13 @@ mod tests {
         let listed = list_skills_v2(directory.path()).expect("list catalog");
         assert_eq!(listed.skills.len(), 1);
         assert_eq!(listed.skills[0].id, BUILTIN_SKILL_ID);
-        let (skill, content) = read_skill_v2(
+        let (skill, _) = read_skill_v2(
             directory.path(),
             BUILTIN_SKILL_ID,
             "SKILL.md",
             MAX_SKILL_BYTES,
         )
         .expect("read built-in");
-        assert!(content.contains("/workspace"));
         assert_eq!(skill.skill_root, "vcp-skill://vcp-mobile-cli-basics");
         assert!(skill.materialized_path.is_none());
     }
@@ -970,12 +969,8 @@ mod tests {
         fs::create_dir(&skills).expect("create skills");
         fs::create_dir(&workspace).expect("create workspace");
         ensure_skill_catalog(&skills, 10).expect("create catalog");
-        let (result, guest_path) =
+        let (_, guest_path) =
             materialize_skill(&skills, &workspace, BUILTIN_SKILL_ID).expect("materialize Skill");
-        assert_eq!(
-            result.materialized_path.as_deref(),
-            Some(guest_path.as_str())
-        );
         let relative = guest_path
             .strip_prefix("/workspace/")
             .expect("guest prefix");

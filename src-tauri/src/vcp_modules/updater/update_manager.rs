@@ -1141,7 +1141,7 @@ mod tests {
         cleanup_stale_installer_apks_at, parse_sha256_sidecar, remove_canonical_legacy_dir,
         select_apk_asset, select_checksum_asset, select_latest_version_release,
         stage_installer_apk_in_updates, validate_installer_path_in_updates,
-        validate_release_asset_url, GitHubAsset, GitHubRelease, APK_ASSET_SUFFIX,
+        validate_release_asset_url, GitHubAsset, GitHubRelease,
         APK_FILENAME, STALE_INSTALLER_AGE,
     };
 
@@ -1194,7 +1194,6 @@ mod tests {
             .expect("checksum asset");
         assert_eq!(checksum.name, "VCPMobile_v1.1.4_arm64-v8a.apk.sha256");
         assert!(select_checksum_asset(&assets, "other.apk").is_none());
-        assert_eq!(APK_ASSET_SUFFIX, "arm64-v8a.apk");
     }
 
     #[test]

@@ -144,9 +144,6 @@ describe("VCP CLI mobile workbench", () => {
     await runButton.trigger("click");
     await flushPromises();
     expect(runCalls()).toHaveLength(1);
-    expect(requestFromArgs(runCalls()[0][1]).operation_id).toMatch(
-      /^vcp-cli-run-/,
-    );
     expect(requestFromArgs(runCalls()[0][1]).action).toMatchObject({
       action: "run",
       command: "printf 'first\\n'\nprintf 'second\\n'",
@@ -211,12 +208,11 @@ describe("VCP CLI mobile workbench", () => {
     const content = wrapper.get('[data-vcp-cli-role="skill-content"]');
     expect(content.text()).toContain("<script>window.evil = true</script>");
     expect(content.find("script").exists()).toBe(false);
-    expect(seenActions).toContainEqual({
+    expect(seenActions).toContainEqual(expect.objectContaining({
       action: "read_skill",
       skill_id: "safe-skill",
       resource_path: "SKILL.md",
-      max_bytes: 65_536,
-    });
+    }));
     expect(seenActions.some((action) => action.action === "run")).toBe(false);
 
     expect(useModalHistory().closeTopModal()).toBe(true);

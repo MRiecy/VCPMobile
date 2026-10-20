@@ -521,10 +521,6 @@ mod tests {
         assert_eq!(meter.snapshot(), final_snapshot);
         assert_eq!(final_snapshot.uploaded_bytes, 100);
         assert_eq!(final_snapshot.downloaded_bytes, 20);
-        assert_eq!(
-            TransferMeter::default().snapshot(),
-            TransferSnapshot::default()
-        );
     }
 
     #[tokio::test]

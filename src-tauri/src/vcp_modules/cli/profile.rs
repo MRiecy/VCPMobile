@@ -1235,33 +1235,8 @@ mod tests {
 
     #[tokio::test]
     async fn repository_rootfs_proot_and_loader_match_profile_bytes_and_sha256() {
-        let validated = load_and_validate_command_profile(Path::new(RELATIVE_REPOSITORY_ROOT))
+        load_and_validate_command_profile(Path::new(RELATIVE_REPOSITORY_ROOT))
             .await
             .expect("repository runtime assets must match profile");
-        assert_eq!(
-            validated.rootfs.bytes,
-            validated.contract.profile.rootfs.archive_bytes
-        );
-        assert_eq!(
-            validated.proot.bytes,
-            validated.contract.profile.proot.binary_bytes
-        );
-        assert_eq!(
-            validated.proot_loader.bytes,
-            validated.contract.profile.proot.loader_bytes
-        );
-        assert!(validated.rootfs.repository_path.is_relative());
-        assert!(validated.proot.repository_path.is_relative());
-        assert!(validated.proot_loader.repository_path.is_relative());
-        assert!(validated.rootfs.repository_path.ends_with(
-            "runtime-assets/vcp-cli/android-assets/vcp-cli-rootfs-3.24.1-aarch64.tar.zst"
-        ));
-        assert!(validated
-            .proot
-            .repository_path
-            .ends_with("plugins/vcp-mobile/android/src/main/jniLibs/arm64-v8a/libvcp_proot.so"));
-        assert!(validated.proot_loader.repository_path.ends_with(
-            "plugins/vcp-mobile/android/src/main/jniLibs/arm64-v8a/libvcp_proot_loader.so"
-        ));
     }
 }

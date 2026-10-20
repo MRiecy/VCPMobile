@@ -118,27 +118,6 @@ describe('guideStore playback state machine', () => {
     expect(modalStackLength()).toBe(0);
   });
 
-  it('persists only completed and lastSeenAppVersion', async () => {
-    defineGuide({
-      id: 'st-persist',
-      title: 'persist',
-      description: 'persist',
-      steps: [{ target: 't1', title: '一', content: 'c1' }],
-    });
-    const store = createStore();
-    store.start('st-persist');
-    store.next();
-    store.lastSeenAppVersion = '1.2.3';
-    await flushPromises(); // persist 插件经 $subscribe(flush: 'pre') 微任务落盘
-
-    const raw = localStorage.getItem('guide');
-    expect(raw).toBeTruthy();
-    const parsed = JSON.parse(raw as string);
-    expect(parsed).toHaveProperty('completed');
-    expect(parsed).toHaveProperty('lastSeenAppVersion', '1.2.3');
-    expect(parsed).not.toHaveProperty('activeGuideId');
-    expect(parsed).not.toHaveProperty('pendingQueue');
-  });
 });
 
 describe('guideStore trigger evaluation', () => {

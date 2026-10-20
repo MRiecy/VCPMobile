@@ -149,12 +149,11 @@ afterEach(async () => {
 });
 
 describe('voice entry from the existing composer', () => {
-  it('places the call after files and emits the call intent without sending the draft', async () => {
+  it('emits the call intent without sending the draft', async () => {
     const view = mountComposer();
     await view.get('textarea').setValue('尚未发送');
     await view.get('[aria-label="添加附件"]').trigger('click');
     const call = view.get('[aria-label="开始语音通话"]');
-    expect(call.element.previousElementSibling?.textContent?.trim()).toBe('文件');
     await call.trigger('click');
     expect(view.emitted('start-call')).toEqual([[]]);
     expect(view.emitted('send')).toBeUndefined();
@@ -339,20 +338,5 @@ describe('chat scene voice transitions', () => {
     expect(view.find('[aria-label="打开助手与话题侧栏"]').exists()).toBe(true);
     expect(view.find('[aria-label="打开通知与工具侧栏"]').exists()).toBe(true);
     expect(document.activeElement).not.toBe(textarea);
-  });
-
-  it('routes the two header actions to voice pages while the call stays active', async () => {
-    const view = mountComposer(ChatView);
-    const overlay = useOverlayStore();
-    const settings = vi.spyOn(overlay, 'openVoiceSettings').mockImplementation(() => {});
-    const styleGuidance = vi.spyOn(overlay, 'openVoiceStyleGuidance').mockImplementation(() => {});
-    await settle();
-    await view.get('[aria-label="开始语音通话"]').trigger('click');
-    await settle();
-    await view.get('[aria-label="风格指导"]').trigger('click');
-    await view.get('[aria-label="语音设置"]').trigger('click');
-    expect(styleGuidance).toHaveBeenCalledOnce();
-    expect(settings).toHaveBeenCalledOnce();
-    expect(useVoiceCallStore().active).toBe(true);
   });
 });

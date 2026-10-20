@@ -1390,7 +1390,6 @@ mod tests {
     fn test_pre_txt_16_parsing() {
         let text = "### 16. 代码块内包含围栏\n\n````markdown\n```python\n# This is code inside markdown inside code\nprint(\"nested\")\n```\n````";
         let blocks = parse_content(text);
-        println!("BLOCKS: {:#?}", blocks);
         assert_eq!(blocks.len(), 2);
 
         // 第一个块应该是 Heading
@@ -1582,7 +1581,7 @@ mod tests {
     }
 
     #[test]
-    fn guidance_projection_keeps_audio_tags_and_canonical_source() {
+    fn guidance_projection_keeps_audio_tags_and_hides_control_markers() {
         let raw = "<<<[VOICE_GUIDANCE]>>>\n清亮、自然的声音。\n<<<[END_VOICE_GUIDANCE]>>>\n[轻笑]你好。";
         let blocks = parse_content(raw);
         assert!(matches!(blocks.first(), Some(ContentBlock::VoiceGuidance {
@@ -1591,7 +1590,6 @@ mod tests {
         let rendered = serde_json::to_string(&blocks).unwrap();
         assert!(rendered.contains("[轻笑]你好。"));
         assert!(!rendered.contains("<<<["));
-        assert!(raw.contains("<<<[VOICE_GUIDANCE]>>>"));
     }
 
     #[test]

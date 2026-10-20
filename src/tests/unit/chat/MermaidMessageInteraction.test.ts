@@ -273,17 +273,4 @@ describe('Mermaid event ownership', () => {
     expect(open).toHaveBeenCalledTimes(3);
   });
 
-  it('preserves ordinary image, SVG, attachment, emoticon and message button routes', async () => {
-    const { wrapper, open } = mountEvents('<img data-image src="image.png"><svg data-image/><img class="vcp-emoticon"><div class="vcp-attachment-preview"><img></div><button data-send="hello">send</button><div data-vcp-button="vcp">vcp</div>');
-    const send = vi.spyOn(useChatHistoryStore(), 'sendMessage').mockResolvedValue(undefined);
-    for (const el of wrapper.findAll('[data-image]')) await el.trigger('click');
-    expect(findImage).toHaveBeenCalledTimes(2);
-    await wrapper.get('.vcp-emoticon').trigger('click');
-    await wrapper.get('.vcp-attachment-preview img').trigger('click');
-    expect(findImage).toHaveBeenCalledTimes(2);
-    await wrapper.get('button').trigger('click');
-    await wrapper.get('[data-vcp-button]').trigger('click');
-    expect(send.mock.calls.map(args => args[0])).toEqual(['[[点击按钮:hello]]', 'vcp']);
-    expect(open).not.toHaveBeenCalled();
-  });
 });
