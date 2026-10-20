@@ -401,20 +401,20 @@ const handleDelete = async () => {
 };
 
 const modeOptions = [
-  { value: "sequential", label: "顺序发言", desc: "每次发送后，成员按下方次序依次回复" },
-  { value: "naturerandom", label: "自然随机", desc: "基于标签和 @提及智能选择发言者" },
-  { value: "invite_only", label: "邀请发言", desc: "由用户手动点击或提示词邀约" },
-  { value: "jev", label: "JEV 智能群聊", desc: "由 JEV 决定谁继续发言，以及何时自然结束" },
+  { value: "sequential", label: "顺序发言", desc: "成员按设定次序依次回复" },
+  { value: "naturerandom", label: "自然随机", desc: "根据 @提及、标签和随机机会选择成员" },
+  { value: "invite_only", label: "邀请发言", desc: "点击成员或发送 @名字，邀请其回复" },
+  { value: "jev", label: "JEV 智能群聊", desc: "根据话题选择成员，讨论结束后自动停下" },
 ] satisfies { value: GroupMode; label: string; desc: string }[];
 
 const tagModeOptions = [
-  { value: "strict", label: "严格模式", desc: "原始行为，严格匹配标签" },
-  { value: "natural", label: "自然模式", desc: "区分 Tag 来源，避免循环触发" },
+  { value: "strict", label: "严格模式" },
+  { value: "natural", label: "自然模式" },
 ];
 
-const modeName = (mode: string) => modeOptions.find(option => option.value === mode)?.label ?? `未知模式：${mode}`;
-const effectiveMode = computed(() => groupConfig.value?.modeOverride ?? groupConfig.value?.mode ?? "");
-const modeDescription = computed(() => modeOptions.find(option => option.value === effectiveMode.value)?.desc ?? "请选择本机使用的群聊模式。");
+const modeName = (mode: string) => modeOptions.find(option => option.value === mode)?.label ?? modeOptions[0].label;
+const effectiveMode = computed(() => groupConfig.value?.chatMode ?? "sequential");
+const modeDescription = computed(() => modeOptions.find(option => option.value === effectiveMode.value)?.desc ?? "选择成员的发言方式。");
 const availableMembers = computed(() => {
   const knownIds = new Set(allAgents.value.map(agent => agent.id));
   return [
@@ -454,19 +454,15 @@ const openModeSelection = (event: MouseEvent) => {
   if (disabled.value || !group) return;
   const epoch = editorEpoch;
   (event.currentTarget as HTMLElement).focus({ preventScroll: true });
-  const options = [
-    { value: null, label: `跟随群组（${modeName(group.mode)}）` },
-    ...modeOptions,
-  ];
-  const actions: OverlayActionItem[] = options.map(option => ({
+  const actions: OverlayActionItem[] = modeOptions.map(option => ({
     label: option.label,
-    selected: group.modeOverride === option.value,
+    selected: effectiveMode.value === option.value,
     handler: () => {
       if (disabled.value || !isOpenEditorCurrent(epoch, group.id) || overlayStore.contextMenuConfig?.actions !== actions) return;
-      group.modeOverride = option.value;
+      group.chatMode = option.value;
     },
   }));
-  overlayStore.openContextMenu(actions, "本机群聊模式");
+  overlayStore.openContextMenu(actions, "群聊模式");
   selectionMenu = overlayStore.contextMenuConfig;
 };
 const openTagSelection = (event: MouseEvent) => {
@@ -482,18 +478,18 @@ const openTagSelection = (event: MouseEvent) => {
       group.tagMatchMode = option.value;
     },
   }));
-  overlayStore.openContextMenu(actions, "Tag 匹配模式");
+  overlayStore.openContextMenu(actions, "标签匹配");
   selectionMenu = overlayStore.contextMenuConfig;
 };
 
 const jevNumericFields = [
-  { key: "maxSpeakersPerRound", title: "每轮最多发言人数", description: "一次裁决入选的成员数 K", min: 1, max: 32, step: 1 },
-  { key: "maxAutonomousRounds", title: "最多自治裁决轮数", description: "达到上限后结束本次自动讨论", min: 1, max: 100, step: 1 },
-  { key: "speakerThreshold", title: "发言权重阈值", description: "低于阈值的成员不进入本轮队列", min: 0, max: 1, step: 0.01 },
-  { key: "continueThreshold", title: "继续讨论阈值", description: "继续讨论的概率低于此值时结束", min: 0, max: 1, step: 0.01 },
-  { key: "stopThreshold", title: "结束选项阈值", description: "结束权重最高且达到此值时结束", min: 0, max: 1, step: 0.01 },
-  { key: "historyWindow", title: "JEV 裁决历史", description: "裁判读取的最近消息数，与成员模型上下文独立", min: 1, max: 200, step: 1 },
-  { key: "continueDebounceMs", title: "继续群聊防抖", description: "重复继续操作的间隔，单位 ms", min: 0, max: 10000, step: 100 },
+  { key: "maxSpeakersPerRound", title: "每轮发言人数上限", description: "一轮最多安排多少位成员", min: 1, max: 32, step: 1 },
+  { key: "maxAutonomousRounds", title: "讨论轮数上限", description: "达到上限后停止自动讨论", min: 1, max: 100, step: 1 },
+  { key: "speakerThreshold", title: "发言门槛", description: "越高，参与发言的成员越少", min: 0, max: 1, step: 0.01 },
+  { key: "continueThreshold", title: "继续讨论门槛", description: "越高，越容易结束讨论", min: 0, max: 1, step: 0.01 },
+  { key: "stopThreshold", title: "结束讨论门槛", description: "越高，越不容易主动结束", min: 0, max: 1, step: 0.01 },
+  { key: "historyWindow", title: "JEV 参考消息数", description: "选择发言成员时参考的最近消息", min: 1, max: 200, step: 1 },
+  { key: "continueDebounceMs", title: "继续操作间隔（ms）", description: "避免连续点击重复发起讨论", min: 0, max: 10000, step: 100 },
 ] as const;
 const validateDraft = (draft: EditableGroupConfig): string | null => {
   if (!draft.name.trim()) return "请填写群组名称。";
@@ -505,7 +501,7 @@ const validateDraft = (draft: EditableGroupConfig): string | null => {
     }
   }
   if (!Number.isInteger(draft.contextMessageWindowSize) || draft.contextMessageWindowSize < 1 || draft.contextMessageWindowSize > 10000) {
-    return "成员模型上下文窗口需填写 1–10000 之间的整数。";
+    return "回复参考消息数需填写 1–10000 之间的整数。";
   }
   return null;
 };
@@ -571,12 +567,11 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                 <HelpCircle :size="18" aria-hidden="true" />
               </button>
             </template>
-            <SettingsRow title="本机发言模式" :value="modeName(effectiveMode)" :description="modeDescription" clickable :disabled="disabled"
-              aria-haspopup="dialog" @click="openModeSelection" />
-            <p class="group-note">{{ groupConfig.modeOverride === null ? '当前跟随群组模式。在本机选择其他模式后，不会改变其他设备的发言方式。' : '已为本机单独选择模式；可在模式菜单中恢复跟随群组。' }}</p>
+            <SettingsRow title="发言方式" :value="modeName(effectiveMode)" :description="modeDescription" clickable :disabled="disabled"
+              aria-label="群聊模式" aria-haspopup="dialog" @click="openModeSelection" />
 
             <div v-if="effectiveMode === 'sequential'">
-              <p class="group-note mb-2">按以下次序依次发言，新加入的成员排在末尾。</p>
+              <p class="group-note mb-2">用上下箭头调整发言次序。</p>
               <div v-for="(agent, index) in orderedMembers" :key="agent.id" class="group-member-row">
                 <span class="w-5 shrink-0 font-mono text-xs text-[var(--secondary-text)]">{{ index + 1 }}</span>
                 <span class="flex-1 min-w-0 break-words text-sm" :class="{ 'font-mono': !agent.available }">{{ agent.name }}</span>
@@ -591,19 +586,19 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
             </div>
 
             <div v-else-if="effectiveMode === 'naturerandom'" class="flex flex-col gap-3">
-              <SettingsRow title="Tag 匹配模式" :value="tagModeOptions.find(option => option.value === groupConfig?.tagMatchMode)?.label"
-                description="自然模式区分 Tag 来源，减少历史引用导致的重复触发。" clickable :disabled="disabled" aria-haspopup="dialog" @click="openTagSelection" />
+              <SettingsRow title="标签匹配" :value="tagModeOptions.find(option => option.value === groupConfig?.tagMatchMode)?.label"
+                description="自然模式减少引用历史消息造成的重复回应。" clickable :disabled="disabled" aria-haspopup="dialog" @click="openTagSelection" />
               <SettingsTextField v-for="agent in selectedMembers" :key="agent.id" v-model="groupConfig.memberTags[agent.id]"
                 :label="`${agent.name} 的触发标签`" placeholder="多个标签用逗号分隔" :disabled="disabled" />
             </div>
 
             <div v-else-if="effectiveMode === 'jev'" class="flex flex-col gap-4">
-              <GroupSettingsTextArea v-model="groupConfig.modeSettings.jev.navigatorPrompt" label="JEV 导航员提示词" :disabled="disabled" :rows="5"
-                description="指导裁判安排成员发言和结束讨论；留空恢复内置规则。" />
-              <SettingsDisclosure title="成员发言风格" description="告诉 JEV 每位成员适合在什么话题或情境下回应" :disabled="disabled">
+              <GroupSettingsTextArea v-model="groupConfig.modeSettings.jev.navigatorPrompt" label="讨论规则" :disabled="disabled" :rows="5"
+                description="决定谁发言、何时结束。留空使用默认规则。" />
+              <SettingsDisclosure title="成员发言风格" description="各成员适合回应的话题与时机" :disabled="disabled">
                 <div class="flex flex-col gap-4">
                   <GroupSettingsTextArea v-for="agent in selectedMembers" :key="agent.id" :model-value="groupConfig.modeSettings.jev.memberStyles[agent.id] ?? ''"
-                    :label="agent.name" :rows="3" :disabled="disabled" placeholder="例如：熟悉技术细节，能补充新信息或被点名时积极回应，避免重复结论。"
+                    :label="agent.name" :rows="3" :disabled="disabled" placeholder="例如：熟悉技术问题，适合补充细节。"
                     @update:model-value="groupConfig.modeSettings.jev.memberStyles[agent.id] = $event" />
                   <p v-if="!selectedMembers.length" class="group-note">加入成员后可填写发言风格。</p>
                 </div>
@@ -616,7 +611,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                   </template>
                 </SettingsRow>
               </div>
-              <SettingsDisclosure title="JEV 高级参数" description="裁决阈值、历史消息数与继续防抖" :disabled="disabled">
+              <SettingsDisclosure title="高级设置" description="发言门槛与参考消息范围" :disabled="disabled">
                 <SettingsRow v-for="field in jevNumericFields.slice(2)" :key="field.key" :title="field.title" :description="field.description">
                   <template #action>
                     <input v-model.number="groupConfig.modeSettings.jev[field.key]" type="number" :inputmode="field.step < 1 ? 'decimal' : 'numeric'"
@@ -624,24 +619,24 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                   </template>
                 </SettingsRow>
               </SettingsDisclosure>
-              <p class="group-note">JEV 连接与密钥在全局设置的「JEV 决策」中配置。本群的发言策略只保存在本机。</p>
+              <p class="group-note">服务连接请在「JEV 设置」中配置。</p>
             </div>
           </SettingsSection>
 
           <SettingsSection title="成员模型">
             <div>
-              <SettingsRow title="启用群组统一模型" description="所有成员使用同一聊天模型；JEV 裁判使用独立的服务配置。">
+              <SettingsRow title="启用群组统一模型" description="所有成员使用同一模型回复。">
                 <template #action><SettingsSwitch v-model="groupConfig.useUnifiedModel" :disabled="disabled" aria-label="启用群组统一模型" /></template>
               </SettingsRow>
               <SettingsRow v-if="groupConfig.useUnifiedModel" title="统一模型" :value="groupConfig.unifiedModel || '请选择'" clickable :disabled="disabled"
                 @click="showModelSelector = true" />
-              <SettingsRow title="限制成员模型上下文" description="仅发送最近的消息，完整聊天记录仍会保存和显示。此项只在本机生效。">
-                <template #action><SettingsSwitch v-model="groupConfig.enableContextMessageWindow" :disabled="disabled" aria-label="限制成员模型上下文" /></template>
+              <SettingsRow title="限制参考消息" description="回复时只参考最近的消息，不删除聊天记录。">
+                <template #action><SettingsSwitch v-model="groupConfig.enableContextMessageWindow" :disabled="disabled" aria-label="限制参考消息" /></template>
               </SettingsRow>
-              <SettingsRow v-if="groupConfig.enableContextMessageWindow" title="最近消息数" description="包括用户与成员消息，与 JEV 裁决历史独立。">
+              <SettingsRow v-if="groupConfig.enableContextMessageWindow" title="回复参考消息数" description="成员回复时使用，与 JEV 的参考范围分开设置。">
                 <template #action>
                   <input v-model.number="groupConfig.contextMessageWindowSize" type="number" inputmode="numeric" min="1" max="10000" step="1"
-                    :disabled="disabled" aria-label="成员模型上下文消息数" class="group-number-input" />
+                    :disabled="disabled" aria-label="回复参考消息数" class="group-number-input" />
                 </template>
               </SettingsRow>
             </div>
@@ -649,11 +644,11 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
 
           <SettingsSection title="提示词">
             <GroupSettingsTextArea v-model="groupConfig.groupPrompt" label="群组提示词" placeholder="群组背景与整体对话要求" :disabled="disabled" />
-            <GroupSettingsTextArea v-model="groupConfig.invitePrompt" label="邀请提示词" placeholder="轮到成员发言时发送的提示语" :disabled="disabled" :rows="3" />
-            <template #footer><span v-pre>使用 {{VCPChatAgentName}} 作为被邀请成员的名字。</span></template>
+            <GroupSettingsTextArea v-model="groupConfig.invitePrompt" label="邀请提示词" placeholder="轮到成员发言时发送的提示语"
+              description="{{VCPChatAgentName}} 代表成员名字" :disabled="disabled" :rows="3" />
           </SettingsSection>
 
-          <p class="group-note">返回时自动保存。切换模式会保留其他模式的设置。</p>
+          <p class="group-note">返回时自动保存。</p>
           <SettingsRow title="删除此群组" :description="deleteBlockReason ?? undefined" clickable danger
             :disabled="disabled || deleteBlockReason !== null" @click="handleDelete" />
         </template>

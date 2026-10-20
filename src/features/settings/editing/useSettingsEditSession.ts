@@ -8,7 +8,7 @@ import {
   watch,
 } from "vue";
 import { useSettingsStore, type AppSettings } from "../../../core/stores/settings";
-import { useOverlayStore } from "../../../core/stores/overlay";
+import { configIssueLabel } from './configLabels';
 import type { SettingsEditableKey } from "./fieldSets";
 import type { ConfigDomain, FieldIssue } from "../../../core/config/generated/config";
 import { buildSettingsUpdate, cloneConfig, readSetting, sameConfigValue, type SettingsFieldValues } from "../../../core/config/fields";
@@ -20,7 +20,7 @@ export type SettingsSaveResult =
       dirty: boolean;
       snapshot: Readonly<AppSettings>;
     }
-  | { ok: false; error: string; issues?: FieldIssue[] };
+  | { ok: false; error: string };
 
 /** One visit's draft. The settings Store remains the only committed snapshot. */
 export function useSettingsEditSession<const Keys extends readonly SettingsEditableKey[]>(
@@ -30,7 +30,6 @@ export function useSettingsEditSession<const Keys extends readonly SettingsEdita
   type Fields = Pick<SettingsFieldValues, Key>;
 
   const settingsStore = useSettingsStore();
-  const overlay = useOverlayStore();
   const keys = [...fieldKeys];
   const keySet = new Set<Key>(keys);
   const base = shallowRef<Fields | null>(null);
@@ -43,10 +42,6 @@ export function useSettingsEditSession<const Keys extends readonly SettingsEdita
   const domainRevisions: Partial<Record<ConfigDomain, string>> = {};
   const fieldErrors = shallowRef<FieldIssue[]>([]);
   const domains = [...new Set(keys.map(key => key.split('.')[0] as ConfigDomain))];
-  const domainIssues = computed(() => domains.flatMap(domain => {
-    const status = settingsStore.snapshot?.domains[domain];
-    return status ? [{ domain, ...status }] : [];
-  }).filter(status => status.issues.length > 0));
   let pending: Map<Key, number> | null = null;
   let saveRequested = false;
   let activeSave: Promise<SettingsSaveResult> | null = null;
@@ -108,7 +103,7 @@ export function useSettingsEditSession<const Keys extends readonly SettingsEdita
 
   const failure = (message: string, issues: FieldIssue[] = []): SettingsSaveResult => {
     if (!disposed.value) { errorState.value = message; fieldErrors.value = issues; }
-    return { ok: false, error: message, issues };
+    return { ok: false, error: message };
   };
 
   const currentResult = (changed = false): SettingsSaveResult => {
@@ -162,7 +157,7 @@ export function useSettingsEditSession<const Keys extends readonly SettingsEdita
         if (result.status !== 'saved') {
           saveRequested = false;
           const issues = result.status === 'rejected' ? result.issues : result.conflicts;
-          return failure(issues.map(issue => issue.message).join('；') || '配置已变化，请检查后重试', issues);
+          return failure(issues.map(issue => `${configIssueLabel(issue)}：${issue.message}`).join('；') || '配置已变化，请检查后重试', issues);
         }
 
         changed = true;
@@ -219,22 +214,8 @@ export function useSettingsEditSession<const Keys extends readonly SettingsEdita
     leavingState.value = true;
     // A load failure must not trap a page that never had an editable draft.
     if (!draftState.value) return Promise.resolve(true);
-    activeLeave = save().then(async (result) => {
+    activeLeave = save().then((result) => {
       if (disposed.value) return false;
-      if (!result.ok && result.issues?.some(issue => issue.code === 'requiresReset')) {
-        const accepted = await overlay.showConfirm({
-          title: '放弃本页未保存修改并返回？',
-          message: '部分配置需要在设置首页整组恢复默认值。本页未保存的修改将被放弃。',
-        });
-        if (disposed.value) return false;
-        if (accepted) {
-          dispose();
-          // A rejected write can be the first evidence of damaged stored data.
-          // Refresh the home notice; a read failure remains visible in the Store.
-          try { await settingsStore.fetchSettings(); } catch { /* Return remains available. */ }
-          return true;
-        }
-      }
       const canLeave = result.ok && !dirty.value;
       if (!canLeave) leavingState.value = false;
       return canLeave;
@@ -278,8 +259,6 @@ export function useSettingsEditSession<const Keys extends readonly SettingsEdita
     saving,
     leaving,
     error,
-    fieldErrors,
-    domainIssues,
     edit,
     save,
     settlePending,

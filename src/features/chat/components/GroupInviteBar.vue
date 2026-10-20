@@ -51,11 +51,11 @@ const statusLabel = computed(() => {
   const turn = streamStore.currentGroupTurn;
   const currentName = members.value.find(member => member.id === turn?.currentAgentId)?.name;
   switch (turn?.phase) {
-    case 'deciding': return '正在决定下一位发言者';
+    case 'deciding': return '正在安排发言';
     case 'speaking': return currentName ? `${currentName} 正在发言` : '成员正在发言';
-    case 'waiting': return '等待下一轮';
-    case 'stopping': return '正在中断';
-    default: return isGenerating.value ? '群聊进行中' : 'JEV 自然群聊';
+    case 'waiting': return '准备下一轮';
+    case 'stopping': return '正在停止';
+    default: return isGenerating.value ? '群聊进行中' : 'JEV 群聊';
   }
 });
 
@@ -87,26 +87,26 @@ const controlSession = (action: 'start' | 'continue') => {
         第 {{ streamStore.currentGroupTurn.autonomousRounds }} 轮
       </span>
       <template v-if="!isGenerating">
-        <button class="shrink-0 min-h-9 px-2 disabled:opacity-40 active:opacity-60" :disabled="controlsDisabled" @click="controlSession('start')">发起</button>
+        <button class="shrink-0 min-h-9 px-2 disabled:opacity-40 active:opacity-60" :disabled="controlsDisabled" @click="controlSession('start')">开始</button>
         <button class="shrink-0 min-h-9 px-2 disabled:opacity-40 active:opacity-60" :disabled="controlsDisabled" @click="controlSession('continue')">继续</button>
       </template>
     </div>
     <div class="flex items-center gap-1.5 overflow-x-auto scrollbar-hide">
       <span class="text-[10px] font-bold text-primary-text opacity-40 shrink-0 pr-1 select-none">
-        {{ isJev && isGenerating ? '排入发言' : '邀其发言' }}
+        邀请发言
       </span>
       <button
         v-for="member in members"
         :key="member.id"
         class="flex items-center gap-1.5 pl-1 pr-2.5 py-1 min-h-9 shrink-0 rounded-lg border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 active:bg-blue-500/10 active:border-blue-500/30 disabled:opacity-40 transition-colors"
         :disabled="controlsDisabled || (!isJev && isGenerating) || queuedMembers.has(member.id) || currentSpeaker === member.id"
-        :aria-label="`${member.name}${currentSpeaker === member.id ? '发言中' : queuedMembers.has(member.id) ? '已排队' : isJev && isGenerating ? '排入发言' : '发言'}`"
+        :aria-label="currentSpeaker === member.id ? `${member.name}正在发言` : queuedMembers.has(member.id) ? `${member.name}等待发言` : `邀请${member.name}发言`"
         @click="invite(member.id)"
       >
         <VcpAvatar owner-type="agent" :owner-id="member.id" :fallback-name="member.name" size="w-5 h-5" rounded="rounded-full" />
         <span class="text-xs font-semibold text-primary-text whitespace-nowrap">{{ member.name }}</span>
         <span v-if="currentSpeaker === member.id" class="text-[10px] text-primary-text opacity-50">发言中</span>
-        <span v-else-if="queuedMembers.has(member.id)" class="text-[10px] text-primary-text opacity-50">待发言 <span class="font-mono">{{ queuedMembers.get(member.id) }}</span></span>
+        <span v-else-if="queuedMembers.has(member.id)" class="text-[10px] text-primary-text opacity-50">等待 <span class="font-mono">{{ queuedMembers.get(member.id) }}</span></span>
       </button>
     </div>
   </div>

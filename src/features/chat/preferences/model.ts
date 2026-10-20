@@ -51,3 +51,22 @@ export function normalizeChatPresentationMode(value: unknown): ChatPresentationM
 export function normalizeChatBoolean(raw: string | null, fallback: boolean): boolean {
   return raw === 'true' ? true : raw === 'false' ? false : fallback;
 }
+
+/** JSON 导入只接受真实布尔值；localStorage 的字符串解码仍归 storage。 */
+export function normalizeChatPreferencePatch(value: unknown): Partial<ChatPreferences> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return { ...CHAT_PREFERENCE_DEFAULTS };
+  }
+  const source = value as Record<string, unknown>;
+  const patch: { -readonly [K in keyof ChatPreferences]?: ChatPreferences[K] } = {};
+  for (const key of Object.keys(CHAT_PREFERENCE_DEFAULTS) as (keyof ChatPreferences)[]) {
+    if (!Object.prototype.hasOwnProperty.call(source, key)) continue;
+    if (key === 'presentationMode') {
+      patch.presentationMode = normalizeChatPresentationMode(source[key]);
+    } else {
+      const candidate = source[key];
+      patch[key] = typeof candidate === 'boolean' ? candidate : CHAT_PREFERENCE_DEFAULTS[key];
+    }
+  }
+  return patch;
+}

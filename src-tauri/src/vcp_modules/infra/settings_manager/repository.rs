@@ -1,17 +1,17 @@
 //! Domain configuration storage and the commit/publication boundary.
 //!
-//! Reads project damaged fields without mutating their originals. Updates merge
-//! into the stored JSON, not the projected defaults, so an unrelated edit cannot
-//! accidentally reset an unresolved value. Database and cache publication have
+//! Reads and saves persist the current typed defaults for invalid fields while
+//! retaining valid siblings. Field-base conflict checks still protect concurrent
+//! edits. Database and cache publication have
 //! one durable owner even when the caller disappears while COMMIT is pending.
 
 use super::migration::ensure_migrated;
 use super::schema::{
-    affected_fields, domain_defaults, domain_fields, project_domain, set_value_at_path,
-    settings_from_domains, validate_domain, value_at_path,
+    domain_defaults, domain_fields, normalize_changes, normalize_domain,
+    set_value_at_path, settings_from_domains, value_at_path,
 };
 use super::types::{
-    ConfigDomain, ConfigReset, ConfigSaveResult, ConfigSnapshot, ConfigUpdate, DomainHealth,
+    ConfigDomain, ConfigSaveResult, ConfigSnapshot, ConfigUpdate,
     DomainStatus, FieldIssue, Settings,
 };
 use crate::vcp_modules::db_manager::DbState;
@@ -47,13 +47,12 @@ struct LoadedConfig {
 struct DomainRecord {
     schema_version: u32,
     revision: i64,
-    original: String,
+    value: Value,
 }
 
 enum ConfigMutation {
     Update(ConfigUpdate),
     Import(ConfigUpdate, BTreeMap<String, GroupLocalSettingsPatch>),
-    Reset(ConfigReset),
 }
 
 impl Default for SettingsState {
@@ -115,9 +114,11 @@ impl SettingsState {
         tokio::spawn(async move {
             let _guard = guard;
             ensure_migrated(&db).await?;
-            let mut connection = db.pool.acquire().await.map_err(storage_error)?;
-            let records = read_records(&mut connection).await?;
+            let mut transaction = db.write_transaction("settings.normalize").await?;
+            let mut records = read_records(&mut transaction).await?;
+            normalize_records(&mut transaction, &mut records).await?;
             let loaded = Arc::new(project_records(&records)?);
+            transaction.commit().await?;
             *state.inner.cache.write().await = Some(loaded.clone());
             Ok(loaded)
         })
@@ -135,19 +136,6 @@ impl SettingsState {
         F: FnOnce(Arc<Settings>, Arc<ConfigSnapshot>) + Send + 'static,
     {
         self.mutate(db, ConfigMutation::Update(request), on_committed)
-            .await
-    }
-
-    pub(crate) async fn reset<F>(
-        &self,
-        db: &DbState,
-        request: ConfigReset,
-        on_committed: F,
-    ) -> Result<ConfigSaveResult, String>
-    where
-        F: FnOnce(Arc<Settings>, Arc<ConfigSnapshot>) + Send + 'static,
-    {
-        self.mutate(db, ConfigMutation::Reset(request), on_committed)
             .await
     }
 
@@ -196,7 +184,9 @@ impl SettingsState {
         let mut transaction = db.write_transaction("settings.save-domains").await?;
         // Read under the same physical transaction as writes. Revision conflict
         // detection cannot rely only on an earlier in-memory snapshot.
-        let records = read_records(&mut transaction).await?;
+        let previous_settings = self.inner.cache.read().await.as_ref().map(|loaded| loaded.settings.clone());
+        let mut records = read_records(&mut transaction).await?;
+        let normalized = normalize_records(&mut transaction, &mut records).await?;
         let current = Arc::new(project_records(&records)?);
         let (prepared, group_preferences) = match request {
             ConfigMutation::Update(request) => (
@@ -207,18 +197,24 @@ impl SettingsState {
                 prepare_update(&records, &current.snapshot, request)?,
                 preferences,
             ),
-            ConfigMutation::Reset(request) => (
-                prepare_reset(&records, &current.snapshot, request)?,
-                BTreeMap::new(),
-            ),
         };
         let writes = match prepared {
             PreparedUpdate::Rejected(issues) => {
+                transaction.commit().await?;
                 *self.inner.cache.write().await = Some(current.clone());
+                drop(guard);
+                if normalized {
+                    on_committed(previous_settings.unwrap_or_else(|| current.settings.clone()), current.snapshot.clone());
+                }
                 return Ok(ConfigSaveResult::Rejected { issues });
             }
             PreparedUpdate::Conflict(conflicts) => {
+                transaction.commit().await?;
                 *self.inner.cache.write().await = Some(current.clone());
+                drop(guard);
+                if normalized {
+                    on_committed(previous_settings.unwrap_or_else(|| current.settings.clone()), current.snapshot.clone());
+                }
                 return Ok(ConfigSaveResult::Conflict {
                     snapshot: current.snapshot.as_ref().clone(),
                     conflicts,
@@ -227,7 +223,12 @@ impl SettingsState {
             PreparedUpdate::Ready(writes) => writes,
         };
         if writes.is_empty() && group_preferences.is_empty() {
+            transaction.commit().await?;
             *self.inner.cache.write().await = Some(current.clone());
+            drop(guard);
+            if normalized {
+                on_committed(previous_settings.unwrap_or_else(|| current.settings.clone()), current.snapshot.clone());
+            }
             return Ok(ConfigSaveResult::Saved {
                 snapshot: current.snapshot.as_ref().clone(),
             });
@@ -243,23 +244,9 @@ impl SettingsState {
             .await?;
         }
 
-        let now = crate::vcp_modules::infra::utils::now_millis();
         let mut next_records = records;
         for write in writes {
-            sqlx::query(
-                "INSERT INTO config_domains (domain, schema_version, revision, value, updated_at) \
-                 VALUES (?, ?, ?, ?, ?) ON CONFLICT(domain) DO UPDATE SET \
-                 schema_version = excluded.schema_version, revision = excluded.revision, \
-                 value = excluded.value, updated_at = excluded.updated_at",
-            )
-            .bind(write.domain.as_str())
-            .bind(i64::from(write.record.schema_version))
-            .bind(write.record.revision)
-            .bind(&write.record.original)
-            .bind(now)
-            .execute(&mut *transaction)
-            .await
-            .map_err(storage_error)?;
+            persist_record(&mut transaction, write.domain, &write.record).await?;
             next_records.insert(write.domain, write.record);
         }
         // Projection is fallible; finish it before committing so an internal
@@ -270,7 +257,7 @@ impl SettingsState {
         drop(guard);
         // This synchronous hook only schedules domain side effects. It is inside
         // the durable owner and must run even if the IPC JoinHandle is dropped.
-        on_committed(current.settings.clone(), next.snapshot.clone());
+        on_committed(previous_settings.unwrap_or_else(|| current.settings.clone()), next.snapshot.clone());
         Ok(ConfigSaveResult::Saved {
             snapshot: next.snapshot.as_ref().clone(),
         })
@@ -281,11 +268,65 @@ fn storage_error(error: sqlx::Error) -> String {
     format!("配置数据库操作失败: {error}")
 }
 
+async fn persist_record(
+    connection: &mut SqliteConnection,
+    domain: ConfigDomain,
+    record: &DomainRecord,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO config_domains (domain, schema_version, revision, value, updated_at)
+         VALUES (?, ?, ?, ?, ?) ON CONFLICT(domain) DO UPDATE SET
+         schema_version = excluded.schema_version, revision = excluded.revision,
+         value = excluded.value, updated_at = excluded.updated_at",
+    )
+    .bind(domain.as_str())
+    .bind(i64::from(record.schema_version))
+    .bind(record.revision)
+    .bind(record.value.to_string())
+    .bind(crate::vcp_modules::infra::utils::now_millis())
+    .execute(connection)
+    .await
+    .map_err(storage_error)?;
+    Ok(())
+}
+
+async fn normalize_records(
+    connection: &mut SqliteConnection,
+    records: &mut BTreeMap<ConfigDomain, DomainRecord>,
+) -> Result<bool, String> {
+    let mut changed = false;
+    for domain in ConfigDomain::ALL {
+        let existing = records.get(&domain);
+        let value = normalize_domain(
+            domain,
+            existing.map(|record| &record.value).unwrap_or(&Value::Null),
+        );
+        if existing.is_some_and(|record| {
+            record.schema_version == domain.schema_version() && record.value == value
+        }) {
+            continue;
+        }
+        let revision = existing
+            .map_or(0, |record| record.revision)
+            .checked_add(1)
+            .ok_or_else(|| "配置版本号已达到上限".to_string())?;
+        let record = DomainRecord {
+            schema_version: domain.schema_version(),
+            revision,
+            value,
+        };
+        persist_record(connection, domain, &record).await?;
+        records.insert(domain, record);
+        changed = true;
+    }
+    Ok(changed)
+}
+
 async fn read_records(
     connection: &mut SqliteConnection,
 ) -> Result<BTreeMap<ConfigDomain, DomainRecord>, String> {
     let rows = sqlx::query("SELECT domain, schema_version, revision, value FROM config_domains")
-        .fetch_all(connection)
+        .fetch_all(&mut *connection)
         .await
         .map_err(storage_error)?;
     let mut records = BTreeMap::new();
@@ -295,7 +336,11 @@ async fn read_records(
             .into_iter()
             .find(|domain| domain.as_str() == name)
         else {
-            // Domains written by another app version remain preserved on disk.
+            sqlx::query("DELETE FROM config_domains WHERE domain = ?")
+                .bind(name)
+                .execute(&mut *connection)
+                .await
+                .map_err(storage_error)?;
             continue;
         };
         let version: i64 = row.try_get("schema_version").map_err(storage_error)?;
@@ -305,7 +350,10 @@ async fn read_records(
             DomainRecord {
                 schema_version,
                 revision: row.try_get("revision").map_err(storage_error)?,
-                original: row.try_get("value").map_err(storage_error)?,
+                value: serde_json::from_str(
+                    &row.try_get::<String, _>("value").map_err(storage_error)?,
+                )
+                .unwrap_or(Value::Null),
             },
         );
     }
@@ -316,67 +364,20 @@ fn project_records(records: &BTreeMap<ConfigDomain, DomainRecord>) -> Result<Loa
     let mut values = BTreeMap::new();
     let mut domains = BTreeMap::new();
     for domain in ConfigDomain::ALL {
-        let (effective, status) = match records.get(&domain) {
-            None => (
-                domain_defaults(domain),
-                DomainStatus {
-                    revision: "0".into(),
-                    schema_version: domain.schema_version(),
-                    issues: Vec::new(),
-                    health: DomainHealth::Ready,
-                },
-            ),
-            Some(record) => {
-                let (effective, issues, unavailable) =
-                    if record.schema_version != domain.schema_version() {
-                        (
-                            domain_defaults(domain),
-                            vec![issue(
-                                domain,
-                                "",
-                                "unsupportedSchema",
-                                "此配置领域的数据版本暂不支持，请更新应用或明确重置该领域。",
-                            )],
-                            true,
-                        )
-                    } else {
-                        match serde_json::from_str::<Value>(&record.original) {
-                            Ok(value) => {
-                                let (effective, issues) = project_domain(domain, &value);
-                                (effective, issues, !value.is_object())
-                            }
-                            Err(_) => (
-                                domain_defaults(domain),
-                                vec![issue(
-                                    domain,
-                                    "",
-                                    "invalidJson",
-                                    "此配置领域的数据无法解析，原始数据已保留。",
-                                )],
-                                true,
-                            ),
-                        }
-                    };
-                let health = if unavailable {
-                    DomainHealth::Unavailable
-                } else if issues.is_empty() {
-                    DomainHealth::Ready
-                } else {
-                    DomainHealth::Recovered
-                };
-                (
-                    effective,
-                    DomainStatus {
-                        revision: record.revision.to_string(),
-                        schema_version: record.schema_version,
-                        issues,
-                        health,
-                    },
-                )
-            }
-        };
-        values.insert(domain, effective);
-        domains.insert(domain, status);
+        let record = records.get(&domain);
+        values.insert(
+            domain,
+            record
+                .map(|record| record.value.clone())
+                .unwrap_or_else(|| domain_defaults(domain)),
+        );
+        domains.insert(
+            domain,
+            DomainStatus {
+                revision: record.map_or(0, |record| record.revision).to_string(),
+                schema_version: domain.schema_version(),
+            },
+        );
     }
     let settings = settings_from_domains(&values)?;
     Ok(LoadedConfig {
@@ -399,39 +400,6 @@ enum PreparedUpdate {
     Conflict(Vec<FieldIssue>),
 }
 
-fn prepare_reset(
-    records: &BTreeMap<ConfigDomain, DomainRecord>,
-    snapshot: &ConfigSnapshot,
-    request: ConfigReset,
-) -> Result<PreparedUpdate, String> {
-    let domain = request.domain;
-    let status = snapshot
-        .domains
-        .get(&domain)
-        .ok_or_else(|| "配置领域状态缺失".to_string())?;
-    if request.expected_revision != status.revision {
-        return Ok(PreparedUpdate::Conflict(vec![issue(
-            domain,
-            "",
-            "revisionConflict",
-            "该配置领域已被其他操作修改，请重新确认重置范围。",
-        )]));
-    }
-    let revision = records
-        .get(&domain)
-        .map_or(0, |record| record.revision)
-        .checked_add(1)
-        .ok_or_else(|| "配置版本号已达到上限".to_string())?;
-    Ok(PreparedUpdate::Ready(vec![DomainWrite {
-        domain,
-        record: DomainRecord {
-            schema_version: domain.schema_version(),
-            revision,
-            original: domain_defaults(domain).to_string(),
-        },
-    }]))
-}
-
 fn prepare_update(
     records: &BTreeMap<ConfigDomain, DomainRecord>,
     snapshot: &ConfigSnapshot,
@@ -441,7 +409,7 @@ fn prepare_update(
     let mut issues = Vec::new();
     let mut conflicts = Vec::new();
     let mut writes = Vec::new();
-    for patch in request.patches {
+    for mut patch in request.patches {
         let domain = patch.domain;
         if !seen.insert(domain) {
             issues.push(issue(
@@ -466,34 +434,18 @@ fn prepare_update(
             );
             continue;
         }
+        patch.changes = normalize_changes(domain, &patch.changes);
         let Some(status) = snapshot.domains.get(&domain) else {
             return Err("配置领域状态缺失".into());
         };
         let existing = records.get(&domain);
-        let parsed =
-            existing.and_then(|record| serde_json::from_str::<Value>(&record.original).ok());
-        let raw = match existing {
-            None => domain_defaults(domain),
-            Some(_) => parsed.unwrap_or(Value::Null),
-        };
-        let structural = !raw.is_object()
-            || existing.is_some_and(|record| record.schema_version != domain.schema_version());
-        if structural {
-            issues.push(issue(
-                domain,
-                "",
-                "requiresReset",
-                "此配置领域无法正常编辑，请到设置首页重置该领域。",
-            ));
-            continue;
-        }
+        let current_value = existing
+            .map(|record| record.value.clone())
+            .unwrap_or_else(|| domain_defaults(domain));
         let revision_changed = patch.expected_revision != status.revision;
         if revision_changed {
-            let effective = project_domain(domain, &raw).0;
             for (path, value) in &patch.changes {
-                // The editing baseline is the usable snapshot, never the raw
-                // damaged value hidden behind recovery.
-                let current = value_at_path(&effective, path);
+                let current = value_at_path(&current_value, path);
                 // A repeated request that already reached the desired value is
                 // idempotent. Otherwise only the edited field's base matters.
                 if current != Some(value) && current != patch.base_values.get(path) {
@@ -509,41 +461,12 @@ fn prepare_update(
                 continue;
             }
         }
-        let mut next = raw.clone();
-        let mut needs_reset = false;
+        let mut next = current_value.clone();
         for (path, value) in &patch.changes {
-            if has_invalid_parent(&raw, path) {
-                issues.push(issue(
-                    domain,
-                    path,
-                    "requiresReset",
-                    "该选项所在配置结构已损坏，请到设置首页重置该领域后再编辑。",
-                ));
-                needs_reset = true;
-                continue;
-            }
             set_value_at_path(&mut next, path, value.clone())?;
         }
-        if needs_reset {
-            continue;
-        }
-        let changed: Vec<&str> = patch.changes.keys().map(String::as_str).collect();
-        let affected = affected_fields(domain, &changed);
-        let old_issues = validate_domain(domain, &raw);
-        let invalid: Vec<_> = validate_domain(domain, &next)
-            .into_iter()
-            .filter(|candidate| {
-                affected.contains(&candidate.field)
-                    || !old_issues
-                        .iter()
-                        .any(|old| old.field == candidate.field && old.code == candidate.code)
-            })
-            .collect();
-        if !invalid.is_empty() {
-            issues.extend(invalid);
-            continue;
-        }
-        if raw == next {
+        let next = normalize_domain(domain, &next);
+        if current_value == next {
             continue;
         }
         let revision = existing
@@ -555,7 +478,7 @@ fn prepare_update(
             record: DomainRecord {
                 schema_version: domain.schema_version(),
                 revision,
-                original: next.to_string(),
+                value: next,
             },
         });
     }
@@ -566,19 +489,6 @@ fn prepare_update(
     } else {
         Ok(PreparedUpdate::Ready(writes))
     }
-}
-
-fn has_invalid_parent(raw: &Value, path: &str) -> bool {
-    let mut current = raw;
-    let segments: Vec<_> = path.split('.').collect();
-    for segment in &segments[..segments.len().saturating_sub(1)] {
-        match current.get(*segment) {
-            Some(value) if value.is_object() => current = value,
-            Some(_) => return true,
-            None => return false,
-        }
-    }
-    false
 }
 
 fn issue(domain: ConfigDomain, field: &str, code: &str, message: &str) -> FieldIssue {
@@ -650,10 +560,6 @@ mod tests {
             .apply(db, ConfigUpdate { patches }, |_, _| {})
             .await
             .unwrap()
-    }
-
-    async fn reset(state: &SettingsState, db: &DbState, request: ConfigReset) -> ConfigSaveResult {
-        state.reset(db, request, |_, _| {}).await.unwrap()
     }
 
     fn saved(result: ConfigSaveResult) -> ConfigSnapshot {
@@ -787,120 +693,100 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn malformed_legacy_stays_visible_and_explicit_reset_is_domain_local() {
+    async fn malformed_initial_configuration_is_persisted_as_current_defaults_and_editable() {
         let db = database(Some("{broken-original")).await;
         let state = SettingsState::new();
         let before = state.read_snapshot(&db).await.unwrap();
-        for (domain, status) in &before.domains {
-            let had_legacy_fields = super::super::migration::legacy_fields()
-                .iter()
-                .any(|(owner, _, _)| owner == domain);
-            assert_eq!(status.health, if had_legacy_fields { DomainHealth::Unavailable } else { DomainHealth::Ready });
+        assert_eq!(before.data, Settings::default());
+        for domain in ConfigDomain::ALL {
+            let stored: Value = serde_json::from_str(&raw_domain(&db, domain).await).unwrap();
+            assert_eq!(stored, domain_defaults(domain));
+            assert_eq!(before.domains[&domain].schema_version, domain.schema_version());
         }
-        assert_eq!(before.data.jev, Settings::default().jev);
-        assert_eq!(before.domains[&ConfigDomain::Jev].health, DomainHealth::Ready);
-        let ordinary = patch(
-            &before,
-            ConfigDomain::Identity,
-            json!({"userName":"新名字"}),
-        );
-        assert!(matches!(
-            save(&state, &db, vec![ordinary]).await,
-            ConfigSaveResult::Rejected { .. }
-        ));
-        let after = saved(
-            reset(
-                &state,
-                &db,
-                ConfigReset {
-                    domain: ConfigDomain::Identity,
-                    expected_revision: before.domains[&ConfigDomain::Identity].revision.clone(),
-                },
-            )
-            .await,
-        );
-        assert_eq!(after.data.identity, Settings::default().identity);
-        assert_eq!(
-            after.domains[&ConfigDomain::Identity].health,
-            DomainHealth::Ready
-        );
-        assert_eq!(
-            after.domains[&ConfigDomain::Server].health,
-            DomainHealth::Unavailable
-        );
-        assert_eq!(raw_domain(&db, ConfigDomain::Server).await, "null");
-        let archived: String =
-            sqlx::query_scalar("SELECT value FROM config_recovery WHERE domain='legacy.global'")
-                .fetch_one(&db.pool)
-                .await
-                .unwrap();
-        assert_eq!(archived, "{broken-original");
+        let after = saved(save(&state, &db, vec![patch(
+            &before, ConfigDomain::Identity, json!({"userName":"新名字"}),
+        )]).await);
+        assert_eq!(after.data.identity.user_name, "新名字");
+        assert_eq!(after.data.server, before.data.server);
     }
 
     #[tokio::test]
-    async fn invalid_leaf_is_not_written_back_by_reads_or_unrelated_edits() {
-        let db = database(Some(
-            r#"{"vcpApiKey":"keep","voiceTtsMode":"broken-mode","voiceTtsStylePrompt":"保留"}"#,
-        ))
-        .await;
+    async fn invalid_leaf_is_persisted_as_default_without_losing_valid_siblings() {
+        let db = database(None).await;
+        let initial = SettingsState::new().read_snapshot(&db).await.unwrap();
+        let mut voice = json!(initial.data.voice);
+        voice["tts"]["voice"] = json!("broken-voice");
+        voice["tts"]["stylePrompt"] = json!("保留");
+        voice["connection"]["apiKey"] = json!("keep-key");
+        voice["unknown"] = json!("discard");
+        sqlx::query("UPDATE config_domains SET value=?,revision=7 WHERE domain='voice'")
+            .bind(voice.to_string()).execute(&db.pool).await.unwrap();
         let state = SettingsState::new();
         let before = state.read_snapshot(&db).await.unwrap();
-        assert_eq!(before.data.server.api_key, "keep");
-        assert_eq!(
-            before.domains[&ConfigDomain::Server].health,
-            DomainHealth::Ready
-        );
-        assert_eq!(
-            before.domains[&ConfigDomain::Voice].health,
-            DomainHealth::Recovered
-        );
-        assert_eq!(
-            before.domains[&ConfigDomain::Voice].issues[0].field,
-            "tts.mode"
-        );
-        let raw_before = raw_domain(&db, ConfigDomain::Voice).await;
-        assert!(raw_before.contains("broken-mode"));
-        let _ = state.read_config(&db).await.unwrap();
-        assert_eq!(raw_domain(&db, ConfigDomain::Voice).await, raw_before);
-        let after = saved(
-            save(
-                &state,
-                &db,
-                vec![patch(
-                    &before,
-                    ConfigDomain::Voice,
-                    json!({"connection.apiKey":"new-key"}),
-                )],
-            )
-            .await,
-        );
-        let stored: Value =
-            serde_json::from_str(&raw_domain(&db, ConfigDomain::Voice).await).unwrap();
-        assert_eq!(stored["tts"]["mode"], "broken-mode");
-        assert_eq!(stored["tts"]["stylePrompt"], "保留");
-        assert_eq!(stored["connection"]["apiKey"], "new-key");
-        let repaired = saved(
-            save(
-                &state,
-                &db,
-                vec![patch(
-                    &after,
-                    ConfigDomain::Voice,
-                    json!({"tts.mode":"clone"}),
-                )],
-            )
-            .await,
-        );
-        assert_eq!(
-            repaired.domains[&ConfigDomain::Voice].health,
-            DomainHealth::Ready
-        );
-        let archive_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM config_recovery WHERE domain='voice'")
-                .fetch_one(&db.pool)
-                .await
-                .unwrap();
-        assert_eq!(archive_count, 0);
+        assert_eq!(before.data.voice.tts.voice, Settings::default().voice.tts.voice);
+        assert_eq!(before.data.voice.tts.style_prompt, "保留");
+        assert_eq!(before.data.voice.connection.api_key, "keep-key");
+        assert_eq!(before.domains[&ConfigDomain::Voice].revision, "8");
+        let stored: Value = serde_json::from_str(&raw_domain(&db, ConfigDomain::Voice).await).unwrap();
+        assert_eq!(stored["tts"]["voice"], Settings::default().voice.tts.voice);
+        assert!(stored.get("unknown").is_none());
+        let after = saved(save(&state, &db, vec![patch(
+            &before, ConfigDomain::Voice, json!({"asr.language":"en"}),
+        )]).await);
+        assert_eq!(after.data.voice.tts.style_prompt, "保留");
+        assert_eq!(after.data.voice.connection.api_key, "keep-key");
+        assert_eq!(after.data.voice.asr.language, "en");
+        assert_eq!(SettingsState::new().read_snapshot(&db).await.unwrap(), after);
+    }
+
+    #[tokio::test]
+    async fn cold_load_normalizes_once_and_keeps_other_valid_saved_values() {
+        for mode in [Some(json!("unavailable-mode")), Some(Value::Null), None] {
+            let db = database(None).await;
+            let initial = SettingsState::new().read_snapshot(&db).await.unwrap();
+            let server_before = raw_domain(&db, ConfigDomain::Server).await;
+            let mut voice = json!(initial.data.voice);
+            voice["connection"]["apiKey"] = json!("retained-key");
+            voice["tts"]["voice"] = json!("Mia");
+            voice["tts"]["stream"] = json!(false);
+            voice["tts"]["stylePrompt"] = json!("保留演绎指导");
+            voice["tts"]["cloneSampleId"] = json!("retained-sample");
+            voice["futureField"] = json!({"keep":true});
+            match mode {
+                Some(mode) => voice["tts"]["mode"] = mode,
+                None => { voice["tts"].as_object_mut().unwrap().remove("mode"); }
+            }
+            sqlx::query("UPDATE config_domains SET value=?,revision=7 WHERE domain='voice'")
+                .bind(voice.to_string()).execute(&db.pool).await.unwrap();
+            let loaded = SettingsState::new().read_snapshot(&db).await.unwrap();
+            assert_eq!(loaded.data.voice.tts.mode, super::super::VoiceTtsMode::Builtin);
+            assert_eq!(loaded.domains[&ConfigDomain::Voice].revision, "8");
+            voice["tts"]["mode"] = json!("builtin");
+            voice.as_object_mut().unwrap().remove("futureField");
+            let stored: Value = serde_json::from_str(&raw_domain(&db, ConfigDomain::Voice).await).unwrap();
+            assert_eq!(stored, voice, "normalization preserves valid siblings and removes unknown fields");
+            assert_eq!(raw_domain(&db, ConfigDomain::Server).await, server_before);
+            let reopened = SettingsState::new().read_snapshot(&db).await.unwrap();
+            assert_eq!(reopened.domains[&ConfigDomain::Voice].revision, "8");
+        }
+    }
+
+    #[tokio::test]
+    async fn saving_an_invalid_voice_mode_uses_default_without_resetting_voice_settings() {
+        let db = database(None).await;
+        let state = SettingsState::new();
+        let initial = state.read_snapshot(&db).await.unwrap();
+        let selected = saved(save(&state, &db, vec![patch(&initial, ConfigDomain::Voice,
+            json!({"tts.mode":"clone", "tts.stylePrompt":"保留", "tts.cloneSampleId":"sample", "connection.apiKey":"voice-key"}))]).await);
+        assert_eq!(selected.data.voice.tts.mode, super::super::VoiceTtsMode::Clone);
+        let restored = saved(save(&state, &db, vec![patch(&selected, ConfigDomain::Voice,
+            json!({"tts.mode":false}))]).await);
+        assert_eq!(restored.data.voice.tts.mode, super::super::VoiceTtsMode::Builtin);
+        assert_eq!(restored.data.voice.tts.style_prompt, "保留");
+        assert_eq!(restored.data.voice.tts.clone_sample_id, "sample");
+        assert_eq!(restored.data.voice.connection.api_key, "voice-key");
+        let raw: Value = serde_json::from_str(&raw_domain(&db, ConfigDomain::Voice).await).unwrap();
+        assert_eq!(raw["tts"]["mode"], "builtin");
     }
 
     #[tokio::test]
@@ -997,9 +883,9 @@ mod tests {
             .execute(&db.pool).await.unwrap();
         let state = SettingsState::new();
         let base = state.read_snapshot(&db).await.unwrap();
-        let local = GroupLocalSettings { mode_override: Some("jev".into()), ..Default::default() };
+        let local = GroupLocalSettings { chat_mode: crate::vcp_modules::group_types::GroupChatMode::Jev, ..Default::default() };
         let preferences = group_service::parse_group_local_settings_backup(&json!({
-            "pending-group": { "modeOverride": "jev" }
+            "pending-group": { "chatMode": "jev" }
         })).unwrap();
         let update = ConfigUpdate { patches: vec![patch(&base, ConfigDomain::Jev, json!({"enabled":true,"openrouter.apiKey":"backup-key"}))] };
         sqlx::raw_sql("CREATE TRIGGER fail_jev_restore BEFORE UPDATE ON config_domains WHEN NEW.domain='jev' BEGIN SELECT RAISE(ABORT,'fixture failure'); END;")
@@ -1014,7 +900,7 @@ mod tests {
         let result = saved(state.import_backup(&db, update, preferences, |_, _| {}).await.unwrap());
         assert!(result.data.jev.enabled);
         assert_eq!(result.data.jev.openrouter.api_key, "backup-key");
-        let restored = crate::vcp_modules::group::group_service::export_group_local_settings(&db.pool).await.unwrap();
+        let restored = crate::vcp_modules::group::group_service::export_group_local_settings(&db).await.unwrap();
         assert_eq!(restored["pending-group"], local);
         assert_eq!(state.read_snapshot(&db).await.unwrap(), result);
     }
@@ -1029,7 +915,7 @@ mod tests {
             .execute(&db.pool).await.unwrap();
         let state = SettingsState::new();
         let mut original = GroupLocalSettings {
-            mode_override: Some("jev".into()),
+            chat_mode: crate::vcp_modules::group_types::GroupChatMode::Jev,
             enable_context_message_window: true,
             context_message_window_size: 48,
             ..Default::default()
@@ -1043,7 +929,7 @@ mod tests {
             "new-device": {"modeSettings":{"jev":{"speakerThreshold":0.25}}}
         })).unwrap();
         saved(state.import_backup(&db, ConfigUpdate::default(), patches, |_, _| {}).await.unwrap());
-        let restored = group_service::export_group_local_settings(&db.pool).await.unwrap();
+        let restored = group_service::export_group_local_settings(&db).await.unwrap();
         original.mode_settings.jev.speaker_threshold = 0.25;
         assert_eq!(restored["existing"], original, "omitted local fields must survive backup import");
         let mut fresh = GroupLocalSettings::default();
@@ -1079,20 +965,6 @@ mod tests {
         assert_eq!(raw_domain(&db, ConfigDomain::Server).await, server_before);
         assert_eq!(state.read_snapshot(&db).await.unwrap(), base);
 
-        let voice_before = raw_domain(&db, ConfigDomain::Voice).await;
-        let result = state
-            .reset(
-                &db,
-                ConfigReset {
-                    domain: ConfigDomain::Voice,
-                    expected_revision: base.domains[&ConfigDomain::Voice].revision.clone(),
-                },
-                |_, _| panic!("failed reset must not publish effects"),
-            )
-            .await;
-        assert!(result.is_err());
-        assert_eq!(raw_domain(&db, ConfigDomain::Voice).await, voice_before);
-        assert_eq!(state.read_snapshot(&db).await.unwrap(), base);
     }
 
     #[tokio::test]
@@ -1101,7 +973,9 @@ mod tests {
         let state = SettingsState::new();
         let base = state.read_snapshot(&db).await.unwrap();
         let mut metrics = db.subscribe_write_metrics();
-        let cache_guard = state.inner.cache.write().await;
+        // Allow the save to capture the previous settings, while blocking only
+        // its post-commit cache publication.
+        let cache_guard = state.inner.cache.read().await;
         let request = ConfigUpdate {
             patches: vec![patch(
                 &base,
@@ -1193,163 +1067,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn damaged_group_and_future_schema_require_exact_domain_reset() {
+    async fn invalid_groups_and_schema_differences_normalize_known_values_without_gates() {
         let db = database(None).await;
-        let initial = SettingsState::new();
-        initial.read_snapshot(&db).await.unwrap();
-        sqlx::query("UPDATE config_domains SET value=? WHERE domain='voice'")
+        SettingsState::new().read_snapshot(&db).await.unwrap();
+        sqlx::query("UPDATE config_domains SET value=?,revision=9 WHERE domain='voice'")
             .bind(r#"{"connection":{"apiBaseUrl":"https://voice.example/v1","apiKey":"retained-key"},"tts":"invalid-group","asr":{"language":"en","stream":false}}"#)
-            .execute(&db.pool)
-            .await
-            .unwrap();
-        sqlx::query("UPDATE config_domains SET schema_version=9,value=? WHERE domain='server'")
-            .bind(r#"{"url":"future-value"}"#)
-            .execute(&db.pool)
-            .await
-            .unwrap();
+            .execute(&db.pool).await.unwrap();
+        sqlx::query("UPDATE config_domains SET schema_version=99,value=?,revision=4 WHERE domain='server'")
+            .bind(r#"{"url":"https://future.example/v1","apiKey":"keep","unknownFuture":17}"#)
+            .execute(&db.pool).await.unwrap();
         let state = SettingsState::new();
         let base = state.read_snapshot(&db).await.unwrap();
         assert_eq!(base.data.voice.asr.language, "en");
-        assert_eq!(
-            base.domains[&ConfigDomain::Server].health,
-            DomainHealth::Unavailable
-        );
-        assert!(matches!(
-            save(
-                &state,
-                &db,
-                vec![patch(
-                    &base,
-                    ConfigDomain::Voice,
-                    json!({"tts.voice":"白桦"})
-                )]
-            )
-            .await,
-            ConfigSaveResult::Rejected { .. }
-        ));
-        let mut request = ConfigReset {
-            domain: ConfigDomain::Server,
-            expected_revision: "0".into(),
-        };
-        assert!(matches!(
-            reset(&state, &db, request.clone()).await,
-            ConfigSaveResult::Conflict { .. }
-        ));
-        request.expected_revision = base.domains[&ConfigDomain::Server].revision.clone();
-        let after = saved(reset(&state, &db, request).await);
-        assert_eq!(
-            after.domains[&ConfigDomain::Server].health,
-            DomainHealth::Ready
-        );
-        assert_eq!(after.data.server, Settings::default().server);
-        assert_eq!(
-            after.domains[&ConfigDomain::Server].schema_version,
-            ConfigDomain::Server.schema_version()
-        );
-        assert_eq!(after.domains[&ConfigDomain::Server].revision, "2");
-        assert!(raw_domain(&db, ConfigDomain::Voice)
-            .await
-            .contains("invalid-group"));
-
-        let restored = saved(
-            reset(
-                &state,
-                &db,
-                ConfigReset {
-                    domain: ConfigDomain::Voice,
-                    expected_revision: after.domains[&ConfigDomain::Voice].revision.clone(),
-                },
-            )
-            .await,
-        );
-        assert_eq!(restored.data.voice, Settings::default().voice);
-        assert_eq!(
-            restored.domains[&ConfigDomain::Voice].health,
-            DomainHealth::Ready
-        );
-        assert_eq!(restored.domains[&ConfigDomain::Voice].revision, "2");
-        for domain in ConfigDomain::ALL {
-            if domain != ConfigDomain::Voice {
-                assert_eq!(restored.domains[&domain], after.domains[&domain]);
-            }
-        }
-        let archive_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM config_recovery")
-            .fetch_one(&db.pool)
-            .await
-            .unwrap();
-        assert_eq!(archive_count, 0);
-
-        // An explicit reset has its own revision even when defaults already match.
-        let reset_again = ConfigReset {
-            domain: ConfigDomain::Voice,
-            expected_revision: restored.domains[&ConfigDomain::Voice].revision.clone(),
-        };
-        let next = saved(reset(&state, &db, reset_again.clone()).await);
-        assert_eq!(next.data, restored.data);
-        assert_eq!(next.domains[&ConfigDomain::Voice].revision, "3");
-        assert!(matches!(
-            reset(&state, &db, reset_again).await,
-            ConfigSaveResult::Conflict { .. }
-        ));
+        assert!(!base.data.voice.asr.stream);
+        assert_eq!(base.data.voice.connection.api_key, "retained-key");
+        assert_eq!(base.data.voice.tts, Settings::default().voice.tts);
+        assert_eq!(base.data.server.url, "https://future.example/v1");
+        assert_eq!(base.data.server.api_key, "keep");
+        assert_eq!(base.domains[&ConfigDomain::Server].schema_version, ConfigDomain::Server.schema_version());
+        assert_eq!(base.domains[&ConfigDomain::Server].revision, "5");
+        let stored: Value = serde_json::from_str(&raw_domain(&db, ConfigDomain::Server).await).unwrap();
+        assert!(stored.get("unknownFuture").is_none());
+        let after = saved(save(&state, &db, vec![patch(
+            &base, ConfigDomain::Voice, json!({"tts.voice":"白桦"}),
+        )]).await);
+        assert_eq!(after.data.voice.tts.voice, "白桦");
+        assert_eq!(after.data.voice.connection.api_key, "retained-key");
     }
 
     #[tokio::test]
-    async fn group_validation_and_unknown_fields_reject_whole_batch_without_echoing_secrets() {
+    async fn invalid_known_values_default_but_unknown_paths_reject_without_partial_edits() {
         let db = database(None).await;
         let state = SettingsState::new();
         let base = state.read_snapshot(&db).await.unwrap();
-        let disabled = saved(
-            save(
-                &state,
-                &db,
-                vec![patch(
-                    &base,
-                    ConfigDomain::Voice,
-                    json!({"guidance.autoGuidance":false,"guidance.guidanceRules":""}),
-                )],
-            )
-            .await,
-        );
-        let result = save(
-            &state,
-            &db,
-            vec![
-                patch(
-                    &disabled,
-                    ConfigDomain::Server,
-                    json!({"apiKey":"secret-not-written"}),
-                ),
-                patch(
-                    &disabled,
-                    ConfigDomain::Voice,
-                    json!({"guidance.autoGuidance":true}),
-                ),
-            ],
-        )
-        .await;
-        assert!(matches!(result, ConfigSaveResult::Rejected { .. }));
-        assert!(!serde_json::to_string(&result)
-            .unwrap()
-            .contains("secret-not-written"));
-        assert_eq!(state.read_snapshot(&db).await.unwrap(), disabled);
+        let after = saved(save(&state, &db, vec![patch(
+            &base, ConfigDomain::Voice,
+            json!({"asr.stream":"bad-type","tts.stylePrompt":"valid sibling"}),
+        )]).await);
+        assert_eq!(after.data.voice.asr.stream, Settings::default().voice.asr.stream);
+        assert_eq!(after.data.voice.tts.style_prompt, "valid sibling");
         let invalid = DomainPatch {
             domain: ConfigDomain::Server,
-            expected_revision: disabled.domains[&ConfigDomain::Server].revision.clone(),
-            changes: json!({"arbitrary":"private-input"})
-                .as_object()
-                .unwrap()
-                .clone(),
+            expected_revision: after.domains[&ConfigDomain::Server].revision.clone(),
+            changes: json!({"arbitrary":"private-input"}).as_object().unwrap().clone(),
             base_values: Map::new(),
         };
-        let result = save(&state, &db, vec![invalid]).await;
+        let result = save(&state, &db, vec![
+            invalid,
+            patch(&after, ConfigDomain::Identity, json!({"userName":"must-not-commit"})),
+        ]).await;
         assert!(matches!(result, ConfigSaveResult::Rejected { .. }));
-        assert!(!serde_json::to_string(&result)
-            .unwrap()
-            .contains("private-input"));
+        assert!(!serde_json::to_string(&result).unwrap().contains("private-input"));
+        assert_eq!(state.read_snapshot(&db).await.unwrap(), after);
     }
 
     #[tokio::test]
-    async fn damaged_field_reset_uses_visible_baseline_after_unrelated_revision_change() {
+    async fn normalized_field_uses_visible_baseline_after_unrelated_revision_change() {
         let db = database(Some(r#"{"voiceVadEndSilenceMs":1}"#)).await;
         let state = SettingsState::new();
         let base = state.read_snapshot(&db).await.unwrap();
@@ -1380,10 +1153,6 @@ mod tests {
         let restored = saved(save(&state, &db, vec![reset]).await);
         assert_eq!(restored.data.voice.vad.end_silence_ms, default_wait);
         assert_eq!(restored.data.voice.tts.style_prompt, "后来保存的指导");
-        assert_eq!(
-            restored.domains[&ConfigDomain::Voice].health,
-            DomainHealth::Ready
-        );
         let stored: Value =
             serde_json::from_str(&raw_domain(&db, ConfigDomain::Voice).await).unwrap();
         assert_eq!(stored["vad"]["endSilenceMs"], default_wait);
@@ -1396,113 +1165,101 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_update_refreshes_persisted_health_without_writing_defaults() {
+    async fn rejected_patch_still_commits_and_publishes_normalized_current_storage() {
         let db = database(None).await;
         let state = SettingsState::new();
         let base = state.read_snapshot(&db).await.unwrap();
-        let original = "{broken-original";
-        sqlx::query("UPDATE config_domains SET value=?, revision=revision+1 WHERE domain='voice'")
-            .bind(original)
-            .execute(&db.pool)
-            .await
-            .unwrap();
-        assert_eq!(state.read_snapshot(&db).await.unwrap(), base);
-
-        let result = state
-            .apply(
-                &db,
-                ConfigUpdate {
-                    patches: vec![
-                        patch(
-                            &base,
-                            ConfigDomain::Identity,
-                            json!({"userName":"must-not-commit"}),
-                        ),
-                        patch(&base, ConfigDomain::Voice, json!({"tts.voice":"白桦"})),
-                    ],
-                },
-                |_, _| panic!("rejected update must not publish effects"),
-            )
-            .await
-            .unwrap();
-        match result {
-            ConfigSaveResult::Rejected { issues } => {
-                assert_eq!(issues.len(), 1);
-                assert_eq!(issues[0].code, "requiresReset");
-            }
-            other => panic!("expected reset requirement, got {other:?}"),
-        }
-
+        sqlx::query("UPDATE config_domains SET value='{broken-original', revision=revision+1 WHERE domain='voice'")
+            .execute(&db.pool).await.unwrap();
+        let invalid = DomainPatch {
+            domain: ConfigDomain::Voice,
+            expected_revision: base.domains[&ConfigDomain::Voice].revision.clone(),
+            changes: json!({"unknown":"private-input"}).as_object().unwrap().clone(),
+            base_values: Map::new(),
+        };
+        let published = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observer = published.clone();
+        let result = state.apply(&db, ConfigUpdate {
+            patches: vec![patch(&base, ConfigDomain::Identity, json!({"userName":"must-not-commit"})), invalid],
+        }, move |_, _| { observer.fetch_add(1, Ordering::SeqCst); }).await.unwrap();
+        assert!(matches!(result, ConfigSaveResult::Rejected { .. }));
+        assert_eq!(published.load(Ordering::SeqCst), 1);
         let refreshed = state.read_snapshot(&db).await.unwrap();
-        assert_eq!(
-            refreshed.domains[&ConfigDomain::Voice].health,
-            DomainHealth::Unavailable
-        );
-        assert_eq!(refreshed.domains[&ConfigDomain::Voice].revision, "2");
-        assert_eq!(
-            refreshed.domains[&ConfigDomain::Voice].issues[0].code,
-            "invalidJson"
-        );
+        assert_eq!(refreshed.domains[&ConfigDomain::Voice].revision, "3");
         assert_eq!(refreshed.data.identity, base.data.identity);
-        assert_eq!(raw_domain(&db, ConfigDomain::Voice).await, original);
-        assert_eq!(
-            SettingsState::new().read_snapshot(&db).await.unwrap(),
-            refreshed
-        );
+        let stored: Value = serde_json::from_str(&raw_domain(&db, ConfigDomain::Voice).await).unwrap();
+        assert_eq!(stored, domain_defaults(ConfigDomain::Voice));
+        assert_eq!(SettingsState::new().read_snapshot(&db).await.unwrap(), refreshed);
     }
 
     #[tokio::test]
-    async fn reset_confirmation_cannot_overwrite_a_newer_persisted_revision() {
+    async fn normalization_database_failure_does_not_publish_defaults() {
+        let db = database(None).await;
+        let state = SettingsState::new();
+        let base = state.read_snapshot(&db).await.unwrap();
+        sqlx::query("UPDATE config_domains SET value='{broken-original' WHERE domain='voice'")
+            .execute(&db.pool).await.unwrap();
+        sqlx::raw_sql("CREATE TRIGGER fail_normalization BEFORE UPDATE ON config_domains WHEN NEW.domain='voice' BEGIN SELECT RAISE(ABORT,'fixture storage failure'); END;")
+            .execute(&db.pool).await.unwrap();
+        let result = state.apply(&db, ConfigUpdate { patches: vec![] },
+            |_, _| panic!("a failed database commit cannot publish")).await;
+        assert!(result.is_err());
+        assert_eq!(state.read_snapshot(&db).await.unwrap(), base);
+        assert_eq!(raw_domain(&db, ConfigDomain::Voice).await, "{broken-original");
+        assert!(SettingsState::new().read_snapshot(&db).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn conflicting_patch_does_not_rollback_normalization_of_other_current_values() {
+        let db = database(None).await;
+        let state = SettingsState::new();
+        let base = state.read_snapshot(&db).await.unwrap();
+        let request = patch(&base, ConfigDomain::Identity, json!({"userName":"stale draft"}));
+        sqlx::query("UPDATE config_domains SET value=?,revision=revision+1 WHERE domain='identity'")
+            .bind(json!({"userName":"newer writer"}).to_string()).execute(&db.pool).await.unwrap();
+        sqlx::query("UPDATE config_domains SET value='{broken-original',revision=revision+1 WHERE domain='voice'")
+            .execute(&db.pool).await.unwrap();
+        let result = state.apply(&db, ConfigUpdate { patches: vec![request] }, |_, _| {}).await.unwrap();
+        let current = match result {
+            ConfigSaveResult::Conflict { snapshot, conflicts } => {
+                assert_eq!(conflicts[0].field, "userName");
+                snapshot
+            }
+            other => panic!("expected conflict, got {other:?}"),
+        };
+        assert_eq!(current.data.identity.user_name, "newer writer");
+        assert_eq!(current.domains[&ConfigDomain::Voice].revision, "3");
+        let stored: Value = serde_json::from_str(&raw_domain(&db, ConfigDomain::Voice).await).unwrap();
+        assert_eq!(stored, domain_defaults(ConfigDomain::Voice));
+        assert_eq!(state.read_snapshot(&db).await.unwrap(), current);
+    }
+
+    #[tokio::test]
+    async fn normalized_configuration_still_protects_newer_edits_from_stale_writers() {
         let db = database(None).await;
         SettingsState::new().read_snapshot(&db).await.unwrap();
         sqlx::query("UPDATE config_domains SET value=? WHERE domain='voice'")
             .bind(r#"{"vad":"broken-group","tts":{"stylePrompt":"原来的指导"}}"#)
-            .execute(&db.pool)
-            .await
-            .unwrap();
+            .execute(&db.pool).await.unwrap();
         let state = SettingsState::new();
         let base = state.read_snapshot(&db).await.unwrap();
-        let request = ConfigReset {
-            domain: ConfigDomain::Voice,
-            expected_revision: base.domains[&ConfigDomain::Voice].revision.clone(),
-        };
+        let request = patch(&base, ConfigDomain::Voice, json!({"tts.stylePrompt":"stale draft"}));
         let other_writer = SettingsState::new();
-        let newer = saved(
-            save(
-                &other_writer,
-                &db,
-                vec![patch(
-                    &base,
-                    ConfigDomain::Voice,
-                    json!({"tts.stylePrompt":"另一个操作保存的指导"}),
-                )],
-            )
-            .await,
-        );
-
-        // This state's cache is stale: the transaction must check actual storage.
+        let newer = saved(save(&other_writer, &db, vec![patch(
+            &base, ConfigDomain::Voice, json!({"tts.stylePrompt":"另一个操作保存的指导"}),
+        )]).await);
         assert_eq!(state.read_snapshot(&db).await.unwrap(), base);
         let before = raw_domain(&db, ConfigDomain::Voice).await;
-        let result = reset(&state, &db, request).await;
-        match result {
-            ConfigSaveResult::Conflict {
-                snapshot,
-                conflicts,
-            } => {
+        match save(&state, &db, vec![request]).await {
+            ConfigSaveResult::Conflict { snapshot, conflicts } => {
                 assert_eq!(conflicts.len(), 1);
-                assert_eq!(conflicts[0].field, "");
-                assert_eq!(conflicts[0].code, "revisionConflict");
+                assert_eq!(conflicts[0].field, "tts.stylePrompt");
+                assert_eq!(conflicts[0].code, "fieldConflict");
                 assert_eq!(snapshot, newer);
             }
-            other => panic!("expected reset revision conflict, got {other:?}"),
+            other => panic!("expected field conflict, got {other:?}"),
         }
         assert_eq!(raw_domain(&db, ConfigDomain::Voice).await, before);
         assert_eq!(state.read_snapshot(&db).await.unwrap(), newer);
-        let archived: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM config_recovery WHERE domain='voice'")
-                .fetch_one(&db.pool)
-                .await
-                .unwrap();
-        assert_eq!(archived, 0);
     }
 }

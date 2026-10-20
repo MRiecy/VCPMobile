@@ -10,7 +10,7 @@ export function makeConfigSnapshot(data: Settings = makeSettings(), revision = '
   return {
     data: cloneConfig(data),
     domains: Object.fromEntries(Object.keys(data).map(domain => [domain, {
-      revision, schemaVersion: 1, health: 'ready', issues: [],
+      revision, schemaVersion: 1,
     }])) as unknown as ConfigSnapshot['domains'],
   };
 }

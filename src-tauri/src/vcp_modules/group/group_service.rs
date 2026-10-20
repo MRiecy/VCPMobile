@@ -13,7 +13,7 @@ use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
 use crate::vcp_modules::sync_types::{DeleteTarget, OwnerType, SYNC_TOMBSTONE_HASH};
 use crate::vcp_modules::topic_types::{MessageKey, Topic, TopicKey};
 use dashmap::DashMap;
-use sqlx::{Row, SqliteConnection, SqlitePool};
+use sqlx::{Row, SqliteConnection};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as CacheCommitMutex};
@@ -74,10 +74,48 @@ impl GroupManagerState {
     }
 }
 
+fn canonical_local_settings_json(raw: &str) -> Result<String, String> {
+    serde_json::to_string(&parse_group_local_settings(Some(raw))).map_err(|error| error.to_string())
+}
+
+// Read again under the writer transaction. A normalization never writes the
+// earlier read snapshot over a settings import or a local editor's commit.
+async fn normalize_stored_group_local_settings(connection: &mut SqliteConnection) -> Result<bool, String> {
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT group_id,settings_json FROM group_local_settings")
+        .fetch_all(&mut *connection).await.map_err(|error| error.to_string())?;
+    let mut changed = false;
+    for (group_id, raw) in rows {
+        let canonical = canonical_local_settings_json(&raw)?;
+        if canonical == raw { continue; }
+        let result = sqlx::query("UPDATE group_local_settings SET settings_json=? WHERE group_id=? AND settings_json=?")
+            .bind(canonical).bind(group_id).bind(raw).execute(&mut *connection).await.map_err(|error| error.to_string())?;
+        changed |= result.rows_affected() > 0;
+    }
+    Ok(changed)
+}
+
+/// Config decoding persists typed defaults without changing business timestamps
+/// or shared sync data. Actual database errors still reach the caller.
+pub(crate) async fn normalize_group_local_settings(db: &DbState) -> Result<(), String> {
+    let rows: Vec<String> = sqlx::query_scalar("SELECT settings_json FROM group_local_settings")
+        .fetch_all(&db.pool).await.map_err(|error| error.to_string())?;
+    let mut needed = false;
+    for raw in rows {
+        if canonical_local_settings_json(&raw)? != raw { needed = true; break; }
+    }
+    if needed {
+        let mut transaction = db.write_transaction("identity.group.normalize_settings").await?;
+        normalize_stored_group_local_settings(&mut transaction).await?;
+        transaction.commit().await.map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 /// 显式配置备份包含已经保存的本机群偏好，也保留尚未同步绑定的群 ID。
 pub async fn export_group_local_settings(
-    pool: &SqlitePool,
+    db: &DbState,
 ) -> Result<BTreeMap<String, GroupLocalSettings>, String> {
+    normalize_group_local_settings(db).await?;
     let rows = sqlx::query(
         "SELECT l.group_id, l.settings_json FROM group_local_settings l
          WHERE NOT EXISTS (
@@ -85,31 +123,25 @@ pub async fn export_group_local_settings(
                AND g.group_id = l.group_id AND g.deleted_at IS NOT NULL
          ) ORDER BY l.group_id",
     )
-    .fetch_all(pool)
+    .fetch_all(&db.pool)
     .await
     .map_err(|error| error.to_string())?;
-    rows.into_iter()
+    Ok(rows.into_iter()
         .map(|row| {
             let group_id: String = row.get("group_id");
             let json: String = row.get("settings_json");
-            parse_group_local_settings(Some(&json))
-                .map(|settings| (group_id.clone(), settings))
-                .map_err(|error| format!("Group {group_id} local settings: {error}"))
+            (group_id, parse_group_local_settings(Some(&json)))
         })
-        .collect()
+        .collect())
 }
 
 pub fn parse_group_local_settings_backup(
     value: &serde_json::Value,
 ) -> Result<BTreeMap<String, GroupLocalSettingsPatch>, String> {
-    let source = value
-        .as_object()
-        .ok_or_else(|| "备份 groupPreferences 必须为群 ID 到本机设置的映射".to_string())?;
     let mut preferences = BTreeMap::new();
+    let Some(source) = value.as_object() else { return Ok(preferences); };
     for (group_id, value) in source {
-        if group_id.trim().is_empty() {
-            return Err("备份群 ID 不能为空".into());
-        }
+        if group_id.trim().is_empty() { continue; }
         let patch = GroupLocalSettingsPatch::parse(value)?;
         if !patch.is_empty() {
             preferences.insert(group_id.clone(), patch);
@@ -121,7 +153,7 @@ pub fn parse_group_local_settings_backup(
 fn is_local_settings_field(field: &str) -> bool {
     matches!(
         field,
-        "modeOverride" | "modeSettings" | "enableContextMessageWindow" | "contextMessageWindowSize"
+        "chatMode" | "modeSettings" | "enableContextMessageWindow" | "contextMessageWindowSize"
     )
 }
 
@@ -145,22 +177,9 @@ async fn update_group_local_settings(
             .fetch_optional(&mut *connection)
             .await
             .map_err(|error| error.to_string())?;
-    let settings = parse_group_local_settings(raw.as_deref())?;
-    let mut value = serde_json::to_value(settings).map_err(|error| error.to_string())?;
-    if let Some(object) = value.as_object_mut() {
-        object.extend(updates.clone());
-    }
-    let mut settings: GroupLocalSettings =
-        serde_json::from_value(value).map_err(|error| error.to_string())?;
-    let members: Vec<String> = sqlx::query_scalar(
-        "SELECT agent_id FROM group_members WHERE group_id=? ORDER BY sort_order ASC",
-    )
-    .bind(group_id)
-    .fetch_all(&mut *connection)
-    .await
-    .map_err(|error| error.to_string())?;
-    settings.mode_settings.sequential.speaker_order =
-        settings.mode_settings.sequential.ordered_members(&members);
+    let current = parse_group_local_settings(raw.as_deref());
+    let settings = GroupLocalSettingsPatch::parse(&serde_json::Value::Object(updates.clone()))?
+        .apply(&current)?;
     write_group_local_settings(connection, group_id, &settings).await
 }
 
@@ -170,13 +189,8 @@ pub async fn import_group_local_settings(
     connection: &mut SqliteConnection,
     preferences: &BTreeMap<String, GroupLocalSettingsPatch>,
 ) -> Result<(), String> {
-    for group_id in preferences.keys() {
-        if group_id.trim().is_empty() {
-            return Err("群 ID 不能为空".into());
-        }
-    }
     for (group_id, patch) in preferences {
-        if patch.is_empty() {
+        if group_id.trim().is_empty() || patch.is_empty() {
             continue;
         }
         let raw: Option<String> =
@@ -185,7 +199,7 @@ pub async fn import_group_local_settings(
                 .fetch_optional(&mut *connection)
                 .await
                 .map_err(|error| error.to_string())?;
-        let current = parse_group_local_settings(raw.as_deref())?;
+        let current = parse_group_local_settings(raw.as_deref());
         let restored = patch.apply(&current)?;
         write_group_local_settings(connection, group_id, &restored).await?;
     }
@@ -197,8 +211,9 @@ async fn write_group_local_settings(
     group_id: &str,
     settings: &GroupLocalSettings,
 ) -> Result<bool, String> {
-    settings.validate()?;
-    let json = serde_json::to_string(settings).map_err(|error| error.to_string())?;
+    let mut settings = settings.clone();
+    settings.normalize();
+    let json = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
     let result = sqlx::query(
         "INSERT INTO group_local_settings (group_id, settings_json, updated_at)
          SELECT ?, ?, ? WHERE NOT EXISTS (
@@ -248,6 +263,7 @@ async fn read_group_config_locked<R: Runtime>(
     let cache_generation = state.current_cache_generation();
 
     let db_state = app_handle.state::<DbState>();
+    normalize_group_local_settings(&db_state).await?;
     let pool = &db_state.pool;
 
     let group_row: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
@@ -307,12 +323,8 @@ async fn read_group_config_locked<R: Runtime>(
             });
         }
 
-        let mut local_settings =
-            parse_group_local_settings(row.get::<Option<String>, _>("settings_json").as_deref())?;
-        local_settings.mode_settings.sequential.speaker_order = local_settings
-            .mode_settings
-            .sequential
-            .ordered_members(&members);
+        let local_settings =
+            parse_group_local_settings(row.get::<Option<String>, _>("settings_json").as_deref());
         let config = GroupConfig {
             id: group_id.to_string(),
             name: row.get("name"),
@@ -352,7 +364,7 @@ pub async fn save_group_config(
     let mutex = state.acquire_lock(&group_id).await;
     let _lock = mutex.lock().await;
 
-    internal_write_group_config(&app_handle, &state, &group_id, &group).await
+    internal_write_group_config(&app_handle, &state, &group_id, &group, None).await
 }
 
 #[tauri::command]
@@ -362,6 +374,7 @@ pub async fn get_groups(
 ) -> Result<Vec<GroupConfig>, String> {
     let start_total = std::time::Instant::now();
     let db_state = app_handle.state::<DbState>();
+    normalize_group_local_settings(&db_state).await?;
     let pool = &db_state.pool;
 
     let start_groups = std::time::Instant::now();
@@ -424,12 +437,8 @@ pub async fn get_groups(
         let member_tags = parse_member_tags(&member_tags_raw)
             .map_err(|error| format!("Group {group_id} memberTags decode failed: {error}"))?;
 
-        let mut local_settings =
-            parse_group_local_settings(row.get::<Option<String>, _>("settings_json").as_deref())?;
-        local_settings.mode_settings.sequential.speaker_order = local_settings
-            .mode_settings
-            .sequential
-            .ordered_members(&members);
+        let local_settings =
+            parse_group_local_settings(row.get::<Option<String>, _>("settings_json").as_deref());
         let config = GroupConfig {
             id: group_id.clone(),
             name: row.get("name"),
@@ -512,7 +521,11 @@ pub async fn update_group_config(
 
     let new_config: GroupConfig = serde_json::from_value(config_val).map_err(|e| e.to_string())?;
 
-    internal_write_group_config(&app_handle, &state, &group_id, &new_config).await
+    let local_updates = updates_obj.iter()
+        .filter(|(key, _)| is_local_settings_field(key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    internal_write_group_config(&app_handle, &state, &group_id, &new_config, Some(&local_updates)).await
 }
 
 #[tauri::command]
@@ -621,6 +634,7 @@ async fn internal_write_group_config<R: Runtime>(
     state: &GroupManagerState,
     group_id: &str,
     config: &GroupConfig,
+    local_updates: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<GroupConfig, String> {
     let cache_generation = state.current_cache_generation();
     let db_state = app_handle.state::<DbState>();
@@ -647,6 +661,19 @@ async fn internal_write_group_config<R: Runtime>(
     // 同步阶段允许 Group 比新 Agent 更早落库，因此只排除“明确已有墓碑”的成员；
     // 完全缺失的 Agent 仍作为前向引用保留，避免依赖 Phase 1 到达顺序。
     let mut canonical_config = config.clone();
+    if let Some(updates) = local_updates {
+        let raw: Option<String> = sqlx::query_scalar(
+            "SELECT settings_json FROM group_local_settings WHERE group_id=?"
+        )
+        .bind(group_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| error.to_string())?;
+        let current = parse_group_local_settings(raw.as_deref());
+        canonical_config.local_settings = GroupLocalSettingsPatch::parse(
+            &serde_json::Value::Object(updates.clone())
+        )?.apply(&current)?;
+    }
     let mut live_members = Vec::with_capacity(config.members.len());
     for agent_id in &config.members {
         let deleted_at = sqlx::query_scalar::<_, Option<i64>>(
@@ -661,17 +688,7 @@ async fn internal_write_group_config<R: Runtime>(
         }
     }
     canonical_config.members = live_members;
-    canonical_config.local_settings.validate()?;
-    canonical_config
-        .local_settings
-        .mode_settings
-        .sequential
-        .speaker_order = canonical_config
-        .local_settings
-        .mode_settings
-        .sequential
-        .ordered_members(&canonical_config.members);
-
+    canonical_config.local_settings.normalize();
     let dto = GroupSyncDTO::from(&canonical_config);
     let config_hash = HashAggregator::compute_group_config_hash(&dto);
     let member_tags = serialize_member_tags(canonical_config.member_tags.as_ref())
@@ -745,8 +762,11 @@ async fn internal_write_group_config<R: Runtime>(
             .map_err(|e| e.to_string())?;
         }
     }
-    let local_changed =
-        write_group_local_settings(&mut tx, group_id, &canonical_config.local_settings).await?;
+    let local_changed = if local_updates.is_none_or(|updates| !updates.is_empty()) {
+        write_group_local_settings(&mut tx, group_id, &canonical_config.local_settings).await?
+    } else {
+        false
+    };
 
     tx.commit().await.map_err(|e| e.to_string())?;
     state.insert_cache_if_current(
@@ -945,6 +965,7 @@ pub async fn delete_group_internal<R: Runtime>(
 #[cfg(test)]
 mod local_settings_tests {
     use super::*;
+    use crate::vcp_modules::group_types::{GroupChatMode, JevFallbackPolicy, JevModeSettings};
     use sqlx::Connection;
 
     async fn database() -> SqliteConnection {
@@ -965,21 +986,177 @@ mod local_settings_tests {
     }
 
     #[test]
+    fn chat_mode_is_independent_and_invalid_values_are_canonical() {
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"chatMode":null}),
+            serde_json::json!({"chatMode":""}),
+            serde_json::json!({"chatMode":"unknown"}),
+            serde_json::json!({"chatMode":false}),
+            serde_json::json!({"chatMode":42}),
+            serde_json::json!({"chatMode":[]}),
+            serde_json::json!({"chatMode":{}}),
+        ] {
+            let settings: GroupLocalSettings = serde_json::from_value(value).expect("normalize mode");
+            assert_eq!(settings.effective_mode(), GroupChatMode::Sequential);
+            assert_eq!(serde_json::to_value(settings).unwrap()["chatMode"], "sequential");
+        }
+        let current = GroupLocalSettings { chat_mode: GroupChatMode::Jev, ..Default::default() };
+        let missing = GroupLocalSettingsPatch::parse(&serde_json::json!({"contextMessageWindowSize":19})).unwrap();
+        assert_eq!(missing.apply(&current).unwrap().chat_mode, GroupChatMode::Jev);
+        let invalid = GroupLocalSettingsPatch::parse(&serde_json::json!({"chatMode":false})).unwrap();
+        assert_eq!(serde_json::to_value(&invalid).unwrap()["chatMode"], "sequential");
+        assert_eq!(invalid.apply(&current).unwrap().chat_mode, GroupChatMode::Sequential);
+    }
+
+    #[test]
+    fn local_decode_recovers_only_damaged_fields_and_keeps_typed_modes() {
+        let settings: GroupLocalSettings = serde_json::from_value(serde_json::json!({
+            "chatMode":"jev", "modeOverride":"invite_only", "unknown":true,
+            "enableContextMessageWindow":"yes", "contextMessageWindowSize":17,
+            "modeSettings": {
+                "sequential":{"speakerOrder":["b",null,"",7,"a","b"," "]},
+                "jev": {
+                    "historyWindow":0, "maxSpeakersPerRound":"three", "speakerThreshold":-0.1,
+                    "continueThreshold":0.23, "stopThreshold":true, "maxAutonomousRounds":71,
+                    "continueDebounceMs":99999, "navigatorPrompt":false, "fallbackPolicy":"top_speaker",
+                    "memberStyles":{"a":"kept","b":12," ":"discarded"}, "unknown":"discarded"
+                }
+            }
+        })).unwrap();
+        let defaults = JevModeSettings::default();
+        assert_eq!(settings.chat_mode, GroupChatMode::Jev);
+        assert!(!settings.enable_context_message_window);
+        assert_eq!(settings.context_message_window_size, 17);
+        assert_eq!(settings.mode_settings.sequential.speaker_order, vec!["b", "a"]);
+        let jev = &settings.mode_settings.jev;
+        assert_eq!(jev.history_window, defaults.history_window);
+        assert_eq!(jev.max_speakers_per_round, defaults.max_speakers_per_round);
+        assert_eq!(jev.speaker_threshold, defaults.speaker_threshold);
+        assert_eq!(jev.continue_threshold, 0.23);
+        assert_eq!(jev.stop_threshold, defaults.stop_threshold);
+        assert_eq!(jev.max_autonomous_rounds, 71);
+        assert_eq!(jev.continue_debounce_ms, defaults.continue_debounce_ms);
+        assert_eq!(jev.navigator_prompt, defaults.navigator_prompt);
+        assert_eq!(jev.fallback_policy, JevFallbackPolicy::TopSpeaker);
+        assert_eq!(jev.member_styles, BTreeMap::from([("a".into(), "kept".into()), ("b".into(), "".into())]));
+        let canonical = serde_json::to_value(&settings).unwrap();
+        assert!(canonical.get("modeOverride").is_none());
+        assert!(canonical.get("unknown").is_none());
+        assert!(canonical["modeSettings"]["jev"].get("unknown").is_none());
+        assert_eq!(serde_json::from_value::<GroupLocalSettings>(canonical).unwrap(), settings);
+        for raw in ["not-json", "null", "false", "[]", "12"] {
+            assert_eq!(parse_group_local_settings(Some(raw)), GroupLocalSettings::default());
+        }
+    }
+
+    #[tokio::test]
+    async fn normalization_persists_typed_defaults_from_current_values_without_touching_timestamps() {
+        let mut connection = database().await;
+        sqlx::query("INSERT INTO group_local_settings VALUES ('bad', ?, 77), ('valid', ?, 88), ('broken', 'false', 99)")
+            .bind(r#"{"chatMode":null,"contextMessageWindowSize":100,"modeSettings":{"jev":{"memberStyles":{"a":"keep"}}}}"#)
+            .bind(r#"{"chatMode":"jev","contextMessageWindowSize":222}"#)
+            .execute(&mut connection).await.unwrap();
+        // A different local field changes after a caller's earlier read.
+        sqlx::query("UPDATE group_local_settings SET settings_json=json_set(settings_json,'$.contextMessageWindowSize',321) WHERE group_id='bad'")
+            .execute(&mut connection).await.unwrap();
+        assert!(normalize_stored_group_local_settings(&mut connection).await.unwrap());
+        let (raw, time): (String, i64) = sqlx::query_as("SELECT settings_json,updated_at FROM group_local_settings WHERE group_id='bad'")
+            .fetch_one(&mut connection).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["chatMode"], "sequential");
+        assert_eq!(value["contextMessageWindowSize"], 321);
+        assert_eq!(value["modeSettings"]["jev"]["memberStyles"]["a"], "keep");
+        assert_eq!(time, 77);
+        let valid: String = sqlx::query_scalar("SELECT settings_json FROM group_local_settings WHERE group_id='valid'")
+            .fetch_one(&mut connection).await.unwrap();
+        let valid = parse_group_local_settings(Some(&valid));
+        assert_eq!(valid.chat_mode, GroupChatMode::Jev);
+        assert_eq!(valid.context_message_window_size, 222);
+        let (broken, time): (String, i64) = sqlx::query_as("SELECT settings_json,updated_at FROM group_local_settings WHERE group_id='broken'")
+            .fetch_one(&mut connection).await.unwrap();
+        assert_eq!(serde_json::from_str::<GroupLocalSettings>(&broken).unwrap(), GroupLocalSettings::default());
+        assert_eq!(time, 99);
+        assert!(!normalize_stored_group_local_settings(&mut connection).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn local_normalization_keeps_real_database_failures_visible() {
+        let mut connection = database().await;
+        sqlx::query("DROP TABLE group_local_settings").execute(&mut connection).await.unwrap();
+        assert!(normalize_stored_group_local_settings(&mut connection).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn export_persists_default_mode_without_changing_shared_configuration() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(include_str!("../../../migrations/0100_baseline_v2.sql")).execute(&pool).await.unwrap();
+        sqlx::raw_sql(include_str!("../../../migrations/0104_group_local_settings.sql")).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO groups(owner_type,group_id,name,mode,config_hash,updated_at) VALUES ('group','group','Group','jev','shared-hash',41)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO group_local_settings VALUES ('group', '{\"contextMessageWindowSize\":222}', 42)")
+            .execute(&pool).await.unwrap();
+        let db = DbState::new(pool.clone(), std::path::PathBuf::new());
+        let exported = export_group_local_settings(&db).await.unwrap();
+        assert_eq!(exported["group"].chat_mode, GroupChatMode::Sequential);
+        let saved_mode: String = sqlx::query_scalar("SELECT json_extract(settings_json,'$.chatMode') FROM group_local_settings WHERE group_id='group'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(saved_mode, "sequential");
+        let shared: (String, String, i64) = sqlx::query_as("SELECT mode,config_hash,updated_at FROM groups WHERE group_id='group'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(shared, ("jev".into(), "shared-hash".into(), 41));
+    }
+
+    #[tokio::test]
+    async fn incremental_shared_save_uses_current_local_fields_and_only_applies_supplied_changes() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(include_str!("../../../migrations/0100_baseline_v2.sql")).execute(&pool).await.unwrap();
+        sqlx::raw_sql(include_str!("../../../migrations/0104_group_local_settings.sql")).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO groups(owner_type,group_id,name,mode,updated_at) VALUES ('group','group','Original','invite_only',1)")
+            .execute(&pool).await.unwrap();
+        let mut earlier: GroupConfig = serde_json::from_value(serde_json::json!({
+            "id":"group", "name":"Renamed", "mode":"invite_only", "chatMode":"sequential"
+        })).unwrap();
+        // A backup commit lands after the incremental editor read this object.
+        let latest = r#"{"chatMode":"jev","contextMessageWindowSize":888,"modeSettings":{"jev":{"memberStyles":{"a":"latest style"}}}}"#;
+        sqlx::query("INSERT INTO group_local_settings VALUES('group',?,7)")
+            .bind(latest).execute(&pool).await.unwrap();
+        let app = tauri::test::mock_app();
+        app.manage(DbState::new(pool.clone(), std::path::PathBuf::new()));
+        let state = GroupManagerState::new();
+        let shared_only = serde_json::Map::new();
+        let saved = internal_write_group_config(app.handle(), &state, "group", &earlier, Some(&shared_only)).await.unwrap();
+        assert_eq!(saved.local_settings.chat_mode, GroupChatMode::Jev);
+        let (raw, time): (String, i64) = sqlx::query_as("SELECT settings_json,updated_at FROM group_local_settings WHERE group_id='group'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(raw, latest);
+        assert_eq!(time, 7);
+        let mixed = serde_json::json!({"contextMessageWindowSize":222}).as_object().unwrap().clone();
+        earlier.name = "Renamed again".into();
+        let saved = internal_write_group_config(app.handle(), &state, "group", &earlier, Some(&mixed)).await.unwrap();
+        assert_eq!(saved.local_settings.chat_mode, GroupChatMode::Jev);
+        assert_eq!(saved.local_settings.context_message_window_size, 222);
+        assert_eq!(saved.local_settings.mode_settings.jev.member_styles["a"], "latest style");
+        let saved = internal_write_group_config(app.handle(), &state, "group", &earlier, None).await.unwrap();
+        assert_eq!(saved.local_settings.chat_mode, GroupChatMode::Sequential, "explicit full save keeps replacement semantics");
+    }
+
+    #[test]
     fn old_group_defaults_are_local_and_do_not_enter_the_sync_projection() {
         let mut group: GroupConfig = serde_json::from_value(serde_json::json!({
             "id": "group", "mode": "jev", "members": ["a", "b"]
         }))
         .expect("read old shared group with no local fields");
-        assert_eq!(group.effective_mode(), "jev");
+        assert_eq!(group.effective_mode(), GroupChatMode::Sequential);
         assert_eq!(group.local_settings.context_message_window_size, 100);
         assert_eq!(group.local_settings.mode_settings.jev.history_window, 12);
         let before = serde_json::to_value(GroupSyncDTO::from(&group)).expect("sync before");
         let hash_before = HashAggregator::compute_group_config_hash(&GroupSyncDTO::from(&group));
-        group.local_settings.mode_override = Some("sequential".into());
+        group.local_settings.chat_mode = GroupChatMode::InviteOnly;
         group.local_settings.mode_settings.sequential.speaker_order = vec!["b".into(), "a".into()];
         group.local_settings.mode_settings.jev.speaker_threshold = 0.73;
         group.local_settings.enable_context_message_window = true;
-        assert_eq!(group.effective_mode(), "sequential");
+        assert_eq!(group.effective_mode(), GroupChatMode::InviteOnly);
         assert_eq!(
             serde_json::to_value(GroupSyncDTO::from(&group)).expect("sync after"),
             before
@@ -990,7 +1167,7 @@ mod local_settings_tests {
         );
         let ipc = serde_json::to_value(&group).expect("IPC group");
         assert_eq!(ipc["mode"], "jev");
-        assert_eq!(ipc["modeOverride"], "sequential");
+        assert_eq!(ipc["chatMode"], "invite_only");
         assert_eq!(
             ipc["modeSettings"]["sequential"]["speakerOrder"],
             serde_json::json!(["b", "a"])
@@ -1001,7 +1178,7 @@ mod local_settings_tests {
     fn backup_preserves_presence_and_replaces_member_maps_and_arrays() {
         let supplied = serde_json::json!({
             "group": {
-                "modeOverride": null,
+                "chatMode": null,
                 "modeSettings": {
                     "sequential": {"speakerOrder":["b"]},
                     "jev": {"historyWindow":19,"memberStyles":{"b":"new style"}}
@@ -1009,12 +1186,14 @@ mod local_settings_tests {
             }
         });
         let parsed = parse_group_local_settings_backup(&supplied).expect("parse partial backup");
+        let mut normalized = supplied.clone();
+        normalized["group"]["chatMode"] = serde_json::json!("sequential");
         assert_eq!(
             serde_json::to_value(&parsed).expect("serialize patch"),
-            supplied
+            normalized
         );
         let mut current = GroupLocalSettings::default();
-        current.mode_override = Some("jev".into());
+        current.chat_mode = GroupChatMode::Jev;
         current.context_message_window_size = 321;
         current.mode_settings.sequential.speaker_order = vec!["a".into(), "b".into()];
         current.mode_settings.jev.navigator_prompt = "keep current navigator".into();
@@ -1027,7 +1206,7 @@ mod local_settings_tests {
         let restored = parsed["group"]
             .apply(&current)
             .expect("merge partial backup");
-        assert_eq!(restored.mode_override, None);
+        assert_eq!(restored.chat_mode, GroupChatMode::Sequential);
         assert_eq!(restored.context_message_window_size, 321);
         assert_eq!(
             restored.mode_settings.jev.navigator_prompt,
@@ -1051,22 +1230,37 @@ mod local_settings_tests {
     }
 
     #[test]
-    fn backup_rejects_unknown_or_invalid_values_and_prunes_empty_structures() {
-        for invalid in [
-            serde_json::json!({"modeSettings":{"jev":{"unknown":1}}}),
-            serde_json::json!({"unknown":true}),
-            serde_json::json!({"modeSettings":null}),
-            serde_json::json!({"modeSettings":{"jev":{"historyWindow":0}}}),
-            serde_json::json!({"modeSettings":{"jev":{"memberStyles":{"a":null}}}}),
-            serde_json::json!({"enableContextMessageWindow":null}),
-        ] {
-            assert!(
-                GroupLocalSettingsPatch::parse(&invalid).is_err(),
-                "must reject {invalid}"
-            );
-        }
+    fn backup_defaults_invalid_fields_and_discards_unknown_fields_without_resetting_siblings() {
+        let mut current = GroupLocalSettings::default();
+        current.chat_mode = GroupChatMode::Jev;
+        current.enable_context_message_window = true;
+        current.context_message_window_size = 321;
+        current.mode_settings.jev.history_window = 19;
+        current.mode_settings.jev.max_autonomous_rounds = 71;
+        let patch = GroupLocalSettingsPatch::parse(&serde_json::json!({
+            "unknown":true, "modeOverride":"invite_only", "enableContextMessageWindow":null,
+            "modeSettings": {"jev": {"historyWindow":0, "fallbackPolicy":"invalid", "unknown":1,
+                "speakerThreshold":0.7,"memberStyles":{"a":null,"b":"keep"," ":"drop"}}}
+        })).unwrap();
+        let restored = patch.apply(&current).unwrap();
+        assert_eq!(restored.chat_mode, GroupChatMode::Jev);
+        assert!(!restored.enable_context_message_window);
+        assert_eq!(restored.context_message_window_size, 321);
+        assert_eq!(restored.mode_settings.jev.history_window, JevModeSettings::default().history_window);
+        assert_eq!(restored.mode_settings.jev.max_autonomous_rounds, 71);
+        assert_eq!(restored.mode_settings.jev.speaker_threshold, 0.7);
+        assert_eq!(restored.mode_settings.jev.fallback_policy, JevFallbackPolicy::Stop);
+        assert_eq!(restored.mode_settings.jev.member_styles, BTreeMap::from([("a".into(), "".into()), ("b".into(), "keep".into())]));
+        let encoded = serde_json::to_value(&patch).unwrap();
+        assert!(encoded.get("unknown").is_none());
+        assert!(encoded.get("modeOverride").is_none());
+        assert_eq!(encoded["modeSettings"]["jev"]["historyWindow"], 12);
+        let reset_jev = GroupLocalSettingsPatch::parse(&serde_json::json!({"modeSettings":{"jev":false}})).unwrap().apply(&current).unwrap();
+        assert_eq!(reset_jev.mode_settings.jev, JevModeSettings::default());
+        assert_eq!(reset_jev.chat_mode, GroupChatMode::Jev);
+        assert_eq!(reset_jev.context_message_window_size, 321);
         let parsed = parse_group_local_settings_backup(&serde_json::json!({
-            "group": {"modeSettings":{"sequential":{},"jev":{}}},
+            "group": {"modeSettings":{"sequential":{},"jev":{"unknown":1}}},
             "another": {}
         }))
         .expect("parse empty structures");
@@ -1084,7 +1278,7 @@ mod local_settings_tests {
         .execute(&mut connection)
         .await
         .expect("seed committed remote state");
-        let updates = serde_json::json!({"modeOverride":"jev","contextMessageWindowSize":17});
+        let updates = serde_json::json!({"chatMode":"jev","contextMessageWindowSize":17});
         let mut transaction = connection.begin().await.expect("begin local patch");
         assert!(update_group_local_settings(
             &mut transaction,
@@ -1121,8 +1315,8 @@ mod local_settings_tests {
         .fetch_one(&mut connection)
         .await
         .expect("read local state");
-        let local = parse_group_local_settings(Some(&raw)).expect("decode local state");
-        assert_eq!(local.effective_mode("invite_only"), "jev");
+        let local = parse_group_local_settings(Some(&raw));
+        assert_eq!(local.effective_mode(), GroupChatMode::Jev);
         assert_eq!(local.context_message_window_size, 17);
         assert!(!update_group_local_settings(
             &mut connection,
@@ -1131,17 +1325,29 @@ mod local_settings_tests {
         )
         .await
         .expect("repeat no-op patch"));
+        let mut with_overrides = local;
+        with_overrides.mode_settings.sequential.speaker_order = vec!["a".into()];
+        with_overrides.mode_settings.jev.member_styles.insert("a".into(), "style".into());
+        write_group_local_settings(&mut connection, "group", &with_overrides).await.unwrap();
+        let clear = serde_json::json!({"modeSettings":{"sequential":{"speakerOrder":[]},"jev":{"memberStyles":{}}}});
+        update_group_local_settings(&mut connection, "group", clear.as_object().unwrap()).await.unwrap();
+        let raw: String = sqlx::query_scalar("SELECT settings_json FROM group_local_settings WHERE group_id='group'")
+            .fetch_one(&mut connection).await.unwrap();
+        let cleared = parse_group_local_settings(Some(&raw));
+        assert!(cleared.mode_settings.sequential.speaker_order.is_empty(), "clearing the override must not persist the shared member list");
+        assert!(cleared.mode_settings.jev.member_styles.is_empty());
+        assert_eq!(cleared.context_message_window_size, 17);
     }
 
     #[tokio::test]
     async fn imported_unbound_preferences_survive_binding_but_not_owner_deletion() {
         let mut connection = database().await;
         let settings = GroupLocalSettings {
-            mode_override: Some("jev".into()),
+            chat_mode: GroupChatMode::Jev,
             ..GroupLocalSettings::default()
         };
         let preferences = parse_group_local_settings_backup(&serde_json::json!({
-            "future-group":{"modeOverride":"jev"}
+            "future-group":{"chatMode":"jev"}
         }))
         .expect("parse pending group patch");
         let mut transaction = connection.begin().await.expect("begin backup import");
@@ -1166,7 +1372,7 @@ mod local_settings_tests {
         .await
         .expect("pending preferences survived");
         assert_eq!(
-            parse_group_local_settings(Some(&raw)).expect("decode restored settings"),
+            parse_group_local_settings(Some(&raw)),
             settings
         );
         sqlx::query("UPDATE groups SET deleted_at=2 WHERE group_id='future-group'")
@@ -1209,7 +1415,7 @@ mod local_settings_tests {
         .fetch_one(&mut connection)
         .await
         .expect("read restored local settings");
-        let restored = parse_group_local_settings(Some(&raw)).expect("decode restored settings");
+        let restored = parse_group_local_settings(Some(&raw));
         assert_eq!(restored.mode_settings.jev.history_window, 9);
         assert_eq!(
             restored.mode_settings.jev.navigator_prompt,

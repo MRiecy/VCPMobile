@@ -11,10 +11,6 @@ import { settingsPages } from "./catalog";
 import { useSettingsNavigation } from "./useSettingsNavigation";
 import { useDeveloperSettingsStore } from './developer/store';
 import { useSettingsStore } from '../../core/stores/settings';
-import { useOverlayStore } from '../../core/stores/overlay';
-import type { ConfigDomain } from '../../core/config/generated/config';
-import { CONFIG_DOMAIN_LABELS, CONFIG_DOMAIN_RESET_SCOPE } from './editing/configLabels';
-import SettingsDomainIssues from './editing/SettingsDomainIssues.vue';
 
 const props = withDefaults(
   defineProps<{
@@ -49,38 +45,10 @@ const displayedPage = computed(() => settingsPages.find((page) => page.id === di
 const subPageTitle = computed(() => settingsPages.find((page) => page.id === activeVisit.value?.id)?.title || "");
 const pageActive = computed(() => props.isOpen && activeVisit.value === displayedVisit.value && !!activeVisit.value);
 const settingsStore = useSettingsStore();
-const overlay = useOverlayStore();
-const domainIssues = computed(() => settingsStore.snapshot
-  ? (Object.keys(settingsStore.snapshot.domains) as ConfigDomain[]).flatMap(domain => {
-    const status = settingsStore.snapshot!.domains[domain];
-    return status.issues.length ? [{ domain, ...status }] : [];
-  }) : []);
-const resetting = ref(false);
 const homeActive = computed(() => props.isOpen && !displayedVisit.value);
 const reloadSettings = async () => {
-  if (!homeActive.value || resetting.value || settingsStore.loading) return;
+  if (!homeActive.value || settingsStore.loading) return;
   try { await settingsStore.fetchSettings(); } catch { /* The Store owns the displayed read error. */ }
-};
-let resetGeneration = 0;
-watch([() => props.isOpen, activeVisit], () => { resetGeneration += 1; }, { flush: 'sync' });
-onScopeDispose(() => { resetGeneration += 1; });
-const resetDomain = async (domain: ConfigDomain, expectedRevision: string) => {
-  if (!homeActive.value || resetting.value) return;
-  const generation = resetGeneration;
-  resetting.value = true;
-  try {
-    const accepted = await overlay.showConfirm({
-      title: `将${CONFIG_DOMAIN_LABELS[domain]}整组恢复默认值？`,
-      message: `将重置该组全部设置：${CONFIG_DOMAIN_RESET_SCOPE[domain]}。其他配置组不受影响。`,
-      isDanger: true,
-    });
-    if (!accepted || !homeActive.value || generation !== resetGeneration) return;
-    await settingsStore.resetDomain({ domain, expectedRevision });
-  } catch {
-    // The Store keeps reset failures beside the current domain notices.
-  } finally {
-    resetting.value = false;
-  }
 };
 // Outer close retains the current picture; its own after-leave releases the child.
 const pageVisible = computed(() => !!activeVisit.value || !props.isOpen);
@@ -203,11 +171,9 @@ onScopeDispose(() => fluidBgRef.value?.setActive(false));
         <!-- 主页 -->
         <div :inert="!!displayedVisit || !props.isOpen"
           class="h-full overflow-y-auto px-3 pt-8 pb-safe flex flex-col no-rubber-band">
-          <SettingsDomainIssues class="mb-4" :domains="domainIssues" :errors="[]"
-            :disabled="!homeActive || resetting" :reset="resetDomain" />
           <p v-if="settingsStore.error" role="alert" class="text-sm text-red-500">
             {{ settingsStore.error }}
-            <button type="button" class="ml-2 underline" :disabled="!homeActive || resetting || settingsStore.loading" @click="reloadSettings">重新加载</button>
+            <button type="button" class="ml-2 underline" :disabled="!homeActive || settingsStore.loading" @click="reloadSettings">重新加载</button>
           </p>
           <SettingsCard>
             <div class="divide-y divide-black/5 dark:divide-white/5">

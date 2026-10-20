@@ -70,7 +70,7 @@ describe('JEV group controls', () => {
     await mountGroup();
     const assistant = useAssistantStore();
     const baseline: GroupConfigDto = {
-      id: 'g1', name: '编辑器打开时的名称', members: ['a1'], mode: 'sequential', modeOverride: null,
+      id: 'g1', name: '编辑器打开时的名称', members: ['a1'], mode: 'sequential', chatMode: 'sequential',
       avatarCalculatedColor: null, memberTags: {}, groupPrompt: '旧群提示词', invitePrompt: '旧邀请提示词',
       useUnifiedModel: false, unifiedModel: null, tagMatchMode: 'strict', topics: [], createdAt: 1,
       enableContextMessageWindow: false, contextMessageWindowSize: 100,
@@ -84,10 +84,10 @@ describe('JEV group controls', () => {
     // 同步在设置页打开之后已经更新共享字段，保存本机选择不能把旧草稿回写。
     const current = { ...baseline, name: '同步后的名称', members: ['a1', 'a2'], mode: 'invite_only', groupPrompt: '同步后的提示词' };
     mockInvoke('update_group_config', args => ({ ...current, ...(args?.updates as object) }));
-    const result = await assistant.saveGroup({ ...baseline, modeOverride: 'jev' }, baseline);
-    expect(invokeMock).toHaveBeenCalledWith('update_group_config', { groupId: 'g1', updates: { modeOverride: 'jev' } });
+    const result = await assistant.saveGroup({ ...baseline, chatMode: 'jev' }, baseline);
+    expect(invokeMock).toHaveBeenCalledWith('update_group_config', { groupId: 'g1', updates: { chatMode: 'jev' } });
     expect(invokeMock.mock.calls.some(([command]) => command === 'save_group_config')).toBe(false);
-    expect(result).toMatchObject({ name: '同步后的名称', mode: 'invite_only', modeOverride: 'jev', groupPrompt: '同步后的提示词' });
+    expect(result).toMatchObject({ name: '同步后的名称', mode: 'invite_only', chatMode: 'jev', groupPrompt: '同步后的提示词' });
     expect(assistant.groups.find(group => group.id === 'g1')).toMatchObject({ name: '同步后的名称', members: ['a1', 'a2'], mode: 'jev' });
   });
 
@@ -104,8 +104,8 @@ describe('JEV group controls', () => {
     resolveReceipt({ generations: [], activeRequests: [], groupTurns: [turn] });
     await connecting;
     await nextTick();
-    expect(view.get('[role="status"]').text()).toBe('正在决定下一位发言者');
-    expect(view.get('[aria-label="Luna已排队"]').attributes('disabled')).toBeDefined();
+    expect(view.get('[role="status"]').text()).toBe('正在安排发言');
+    expect(view.get('[aria-label="Luna等待发言"]').attributes('disabled')).toBeDefined();
     expect(stream.activeStreamMessages.size).toBe(0);
     expect(stream.isGroupGenerating).toBe(true);
     emitTurn({ ...turn, revision: 2, queuedAgentIds: [] });
@@ -124,7 +124,7 @@ describe('JEV group controls', () => {
     await useChatStreamStore().checkAndRecoverInterruptedStreams();
     await nextTick();
     expect(view.get('[role="status"]').text()).toBe('Nova 正在发言');
-    expect(view.get('[aria-label="Luna已排队"]').attributes('disabled')).toBeDefined();
+    expect(view.get('[aria-label="Luna等待发言"]').attributes('disabled')).toBeDefined();
   });
 
   it('reports the actual session failure once, keeping normal stops quiet', async () => {
@@ -145,7 +145,7 @@ describe('JEV group controls', () => {
   it('submits start and continue to the Rust owner without inventing a user message', async () => {
     mockInvoke('control_group_session', () => ({ status: 'accepted' }));
     const view = await mountGroup();
-    for (const action of [{ label: '发起', value: 'start' }, { label: '继续', value: 'continue' }]) {
+    for (const action of [{ label: '开始', value: 'start' }, { label: '继续', value: 'continue' }]) {
       await view.findAll('button').find(button => button.text() === action.label)!.trigger('click');
       await flushPromises();
       expect(invokeMock).toHaveBeenCalledWith('control_group_session', expect.objectContaining({
@@ -161,15 +161,15 @@ describe('JEV group controls', () => {
     await useChatStreamStore().checkAndRecoverInterruptedStreams();
     emitTurn(turn);
     await nextTick();
-    await view.get('[aria-label="Nova排入发言"]').trigger('click');
+    await view.get('[aria-label="邀请Nova发言"]').trigger('click');
     await flushPromises();
     expect(invokeMock).toHaveBeenCalledWith('invite_group_member_to_speak', expect.objectContaining({
       payload: { groupId: 'g1', topicId: 't1', agentIds: ['a1'] },
     }));
-    expect(view.find('[aria-label="Nova已排队"]').exists()).toBe(false);
+    expect(view.find('[aria-label="Nova等待发言"]').exists()).toBe(false);
     emitTurn({ ...turn, revision: 2, queuedAgentIds: ['a1'] });
     await nextTick();
-    expect(view.get('[aria-label="Nova已排队"]').attributes('disabled')).toBeDefined();
+    expect(view.get('[aria-label="Nova等待发言"]').attributes('disabled')).toBeDefined();
   });
 
   it('sends a new draft during arbitration and keeps empty-draft stop as an interrupt of the whole group', async () => {

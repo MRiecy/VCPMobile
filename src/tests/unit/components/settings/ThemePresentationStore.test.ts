@@ -2,9 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
 import {
   resolveThemeWallpaperUrl,
+  normalizeThemePreferencePatch,
+  THEME_PREFERENCE_DEFAULTS,
   useThemeStore,
 } from '@/core/stores/theme';
 import { useChatPreferencesStore } from '@/features/chat/preferences/store';
+import { CHAT_PREFERENCE_DEFAULTS, normalizeChatPreferencePatch } from '@/features/chat/preferences/model';
 
 describe('theme and chat presentation store contracts', () => {
   afterEach(() => {
@@ -128,13 +131,33 @@ describe('theme and chat presentation store contracts', () => {
     expect(store.currentTheme).toBe(initialTheme);
     expect(document.documentElement.style.cssText).toBe(initialCss);
 
-    const result = await store.applyThemeFile('themes-simple-bw.css');
+    const result = await store.applyThemeFile('themes-simple-bw.ts');
     expect(result).toEqual({ ok: true, themeKey: 'themes-simple-bw.ts' });
     expect(store.currentTheme).toBe('themes-simple-bw.ts');
     expect(store.currentThemeInfo?.fileName).toBe('themes-simple-bw.ts');
     expect(localStorage.getItem('vcp-theme-name')).toBe('themes-simple-bw.ts');
     // 默认模式为 light（星渊雪境亮色默认主题）：注入的是 simple-bw 的亮色变量
     expect(document.documentElement.style.getPropertyValue('--primary-bg')).toBe('#f4f6f8');
+    store.$dispose();
+  });
+
+  it('uses owner defaults for invalid imported leaves while preserving present siblings and absent fields', async () => {
+    expect(normalizeThemePreferencePatch({ themeKey: 'themes黑白简约.css', mode: 'dark', ignored: true }))
+      .toEqual({ themeKey: THEME_PREFERENCE_DEFAULTS.themeKey, mode: 'dark' });
+    expect(normalizeThemePreferencePatch({ mode: 'sepia' }))
+      .toEqual({ mode: THEME_PREFERENCE_DEFAULTS.mode });
+    expect(normalizeChatPreferencePatch({ presentationMode: 'magazine', messageHapticsEnabled: false, smoothStreamingEnabled: 'true' }))
+      .toEqual({ presentationMode: 'bubble', messageHapticsEnabled: false, smoothStreamingEnabled: false });
+    expect(normalizeChatPreferencePatch({ ignored: true })).toEqual({});
+    expect(normalizeChatPreferencePatch(null)).toEqual(CHAT_PREFERENCE_DEFAULTS);
+
+    const store = useThemeStore();
+    await store.restorePreferences({ themeKey: 'themes-simple-bw.ts', mode: 'dark' });
+    await store.restorePreferences({ mode: 'invalid' });
+    expect(store.currentTheme).toBe('themes-simple-bw.ts');
+    expect(store.mode).toBe(THEME_PREFERENCE_DEFAULTS.mode);
+    await store.restorePreferences({ themeKey: 'themes-simple-bw.css' });
+    expect(store.currentTheme).toBe(THEME_PREFERENCE_DEFAULTS.themeKey);
     store.$dispose();
   });
 

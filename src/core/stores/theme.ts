@@ -26,20 +26,9 @@ export interface ThemeInfo {
 const DEFAULT_THEME = 'themes-star-abyss.ts';
 const THEME_NAME_STORAGE_KEY = 'vcp-theme-name';
 
-const LEGACY_THEME_MAP: Record<string, string> = {
-  'themes冰火魔歌.css': 'themes-ice-fire.css',
-  'themes瓷与锦.css': 'themes-porcelain-brocade.css',
-  'themes绯红天穹.css': 'themes-crimson-sky.css',
-  'themes黑白简约.css': 'themes-simple-bw.css',
-  'themes静谧森岭.css': 'themes-quiet-forest.css',
-  'themes卡提西亚.css': 'themes-cartethyia.css',
-  'themes霓虹咖啡.css': 'themes-neon-coffee.css',
-  'themes童趣梦境.css': 'themes-childhood-dream.css',
-  'themes星咏与狼嗥.css': 'themes-star-wolf.css',
-  'themes星渊雪境.css': 'themes-star-abyss.css',
-  'themes熊熊假日.css': 'themes-bear-holiday.css',
-  'themes雪境晨昏.css': 'themes-snow-morning.css',
-  'themes夜樱猫语.css': 'themes-night-sakura-cat.css'
+export const THEME_PREFERENCE_DEFAULTS: Readonly<ThemePreferences> = {
+  themeKey: DEFAULT_THEME,
+  mode: 'light',
 };
 
 interface ThemeModule {
@@ -58,19 +47,28 @@ for (const [path, mod] of Object.entries(themeModules)) {
 }
 
 export const normalizeThemeModuleKey = (value: unknown): string | null => {
-  if (typeof value !== 'string') return null;
-  const input = value.trim();
-  if (!input || input.includes('/') || input.includes('\\') || input.includes('\0')) {
-    return null;
+  return typeof value === 'string' && themeModulesByKey.has(value) ? value : null;
+};
+
+export const normalizeThemeMode = (value: unknown): ThemeMode =>
+  value === 'light' || value === 'dark' || value === 'system'
+    ? value
+    : THEME_PREFERENCE_DEFAULTS.mode;
+
+/** 已提供的坏值回退；缺失字段不进入补丁，避免覆盖当前偏好。 */
+export const normalizeThemePreferencePatch = (value: unknown): Partial<ThemePreferences> => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return { ...THEME_PREFERENCE_DEFAULTS };
   }
-
-  const legacyMapped = LEGACY_THEME_MAP[input] || input;
-  const key = legacyMapped.endsWith('.css')
-    ? `${legacyMapped.slice(0, -4)}.ts`
-    : legacyMapped;
-
-  if (!key.endsWith('.ts') || !themeModulesByKey.has(key)) return null;
-  return key;
+  const source = value as Record<string, unknown>;
+  const patch: Partial<ThemePreferences> = {};
+  if (Object.prototype.hasOwnProperty.call(source, 'themeKey')) {
+    patch.themeKey = normalizeThemeModuleKey(source.themeKey) ?? THEME_PREFERENCE_DEFAULTS.themeKey;
+  }
+  if (Object.prototype.hasOwnProperty.call(source, 'mode')) {
+    patch.mode = normalizeThemeMode(source.mode);
+  }
+  return patch;
 };
 
 export const resolveThemeWallpaperUrl = (value: unknown): string | null => {
@@ -130,11 +128,8 @@ export const useThemeStore = defineStore('theme', () => {
   };
 
   const storedMode = readStoredValue('vcp-theme-mode');
-  // 默认主题「星渊雪境」以亮色示人：无本地偏好时默认 light；
-  // 已存储 dark / system 偏好的老用户完全不受影响。
-  const initialMode: ThemeMode = storedMode === 'dark' || storedMode === 'system'
-    ? storedMode
-    : 'light';
+  // 缺失或异常模式使用主题所属领域的默认值。
+  const initialMode = normalizeThemeMode(storedMode);
   const mode = ref<ThemeMode>(initialMode);
   // 初值与默认模式（light）保持一致；store 创建时 mode 的 immediate watch
   // 会同步执行 applyTheme 将其纠正为真实值。
@@ -361,10 +356,9 @@ export const useThemeStore = defineStore('theme', () => {
   const applyThemeFile = (fileName: string) => applyThemeSelection(fileName);
 
   // Backup restore is a persisted operation, independent of tap debouncing.
-  const restorePreferences = (preferences: Partial<ThemePreferences>): Promise<ThemeApplyResult> => {
-    if (preferences.mode !== undefined && !['light', 'dark', 'system'].includes(preferences.mode)) {
-      return Promise.resolve({ ok: false, themeKey: null, error: '主题深浅模式无效' });
-    }
+  const restorePreferences = (candidate: unknown): Promise<ThemeApplyResult> => {
+    const preferences = normalizeThemePreferencePatch(candidate);
+    if (!Object.keys(preferences).length) return Promise.resolve({ ok: true, themeKey: currentTheme.value });
     return applyThemeSelection(preferences.themeKey ?? currentTheme.value, preferences.mode);
   };
 

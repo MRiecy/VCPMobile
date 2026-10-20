@@ -1,4 +1,4 @@
-//! Shared field policy for persistence, edits, recovery, backup and TS export.
+//! Typed field normalization for persistence, edits, backup and TS export.
 //! The field inventory is derived from typed defaults, not a parallel key list.
 
 use super::types::*;
@@ -75,7 +75,10 @@ fn collect_fields(
                 | (ConfigDomain::Sync, "token")
                 | (ConfigDomain::Distributed, "vcpKey")
                 | (ConfigDomain::Voice, "connection.apiKey")
-                | (ConfigDomain::Jev, "typesafe.apiKey" | "openrouter.apiKey" | "proxyUrl")
+                | (
+                    ConfigDomain::Jev,
+                    "typesafe.apiKey" | "openrouter.apiKey" | "proxyUrl"
+                )
         ),
         validation_group: prefix.into(),
         effect: match domain {
@@ -189,20 +192,6 @@ fn collect_fields(
     fields.push(field);
 }
 
-pub fn affected_fields(domain: ConfigDomain, changed: &[&str]) -> Vec<String> {
-    let fields = domain_fields(domain);
-    let groups: BTreeSet<_> = fields
-        .iter()
-        .filter(|field| changed.contains(&field.path.as_str()))
-        .map(|field| field.validation_group.as_str())
-        .collect();
-    fields
-        .iter()
-        .filter(|field| groups.contains(field.validation_group.as_str()))
-        .map(|field| field.path.clone())
-        .collect()
-}
-
 pub fn value_at_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
     if path.is_empty() {
         return Some(value);
@@ -235,16 +224,7 @@ pub fn set_value_at_path(value: &mut Value, path: &str, replacement: Value) -> R
     Err("配置字段路径无效".into())
 }
 
-fn issue(domain: ConfigDomain, field: &str, code: &str, message: impl Into<String>) -> FieldIssue {
-    FieldIssue {
-        domain,
-        field: field.into(),
-        code: code.into(),
-        message: message.into(),
-    }
-}
-
-fn validate_descriptor(field: &FieldDescriptor, value: &Value) -> Vec<FieldIssue> {
+fn descriptor_accepts(field: &FieldDescriptor, value: &Value) -> bool {
     let valid_type = match field.kind {
         FieldKind::String => value.is_string(),
         FieldKind::Boolean => value.is_boolean(),
@@ -255,50 +235,81 @@ fn validate_descriptor(field: &FieldDescriptor, value: &Value) -> Vec<FieldIssue
             .as_array()
             .is_some_and(|items| items.iter().all(Value::is_string)),
     };
-    let error = |code, message| vec![issue(field.domain, &field.path, code, message)];
     if !valid_type {
-        return error("invalidType", "配置值的类型不正确".to_string());
+        return false;
     }
     if let Some(text) = value.as_str() {
-        if !field.options.is_empty() && !field.options.iter().any(|choice| choice == text) {
-            return error("invalidOption", "请选择受支持的配置选项".to_string());
-        }
-        if field.required && text.trim().is_empty() {
-            return error("required", "请填写此项配置".to_string());
-        }
-        if let Some(limit) = field.max_chars {
-            if text.chars().count() > limit {
-                return error("tooLong", format!("此项配置不能超过 {limit} 字"));
-            }
+        if (!field.options.is_empty() && !field.options.iter().any(|choice| choice == text))
+            || (field.required && text.trim().is_empty())
+            || field
+                .max_chars
+                .is_some_and(|limit| text.chars().count() > limit)
+        {
+            return false;
         }
     }
     if let Some(number) = value.as_u64() {
         if field.min.is_some_and(|min| number < u64::from(min))
             || field.max.is_some_and(|max| number > u64::from(max))
         {
-            return error(
-                "outOfRange",
-                format!(
-                    "请输入 {}–{} 范围内的整数",
-                    field.min.unwrap_or(0),
-                    field.max.unwrap_or(u32::MAX)
-                ),
-            );
+            return false;
         }
     }
-    Vec::new()
+    true
 }
 
-/// Validates a supplied leaf without inventing values for absent peers. Backup
-/// import uses this; cross-field rules run against the actual merged commit.
-pub fn validate_field(domain: ConfigDomain, path: &str, value: &Value) -> Vec<FieldIssue> {
-    match FIELDS
+/// Normalize a known leaf. Callers that receive requests validate path identity
+/// first; full/partial tree normalization drops unknown keys altogether.
+pub fn normalize_field_value(domain: ConfigDomain, path: &str, value: &Value) -> Value {
+    let Some(field) = FIELDS
         .get(&domain)
         .and_then(|fields| fields.iter().find(|field| field.path == path))
-    {
-        Some(field) => validate_descriptor(field, value),
-        None => vec![issue(domain, path, "unknownField", "此配置字段不存在")],
+    else {
+        return Value::Null;
+    };
+    if descriptor_accepts(field, value) {
+        value.clone()
+    } else {
+        value_at_path(&DEFAULT_DOMAINS[domain.as_str()], path)
+            .cloned()
+            .unwrap_or(Value::Null)
     }
+}
+
+fn normalize_tree(
+    domain: ConfigDomain,
+    raw: &Value,
+    default: &Value,
+    path: &str,
+    partial: bool,
+) -> Value {
+    let Some(fields) = default.as_object() else {
+        return normalize_field_value(domain, path, raw);
+    };
+    let Some(source) = raw.as_object() else {
+        return default.clone();
+    };
+    let mut normalized = Map::new();
+    for (key, default) in fields {
+        let next_path = if path.is_empty() {
+            key.clone()
+        } else {
+            format!("{path}.{key}")
+        };
+        match source.get(key) {
+            Some(value) => {
+                normalized.insert(
+                    key.clone(),
+                    normalize_tree(domain, value, default, &next_path, partial),
+                );
+            }
+            None if !partial => {
+                normalized.insert(key.clone(), default.clone());
+            }
+            None => {}
+        }
+    }
+    Value::Object(normalized)
 }
 
 fn source_leaf<'a>(raw: &'a Value, path: &str) -> Result<Option<&'a Value>, ()> {
@@ -313,96 +324,115 @@ fn source_leaf<'a>(raw: &'a Value, path: &str) -> Result<Option<&'a Value>, ()> 
     Ok(Some(current))
 }
 
-/// Returns an in-memory usable view and local diagnostics. The repository keeps
-/// the original raw JSON; this function never serializes repairs back to disk.
-pub fn project_domain(domain: ConfigDomain, raw: &Value) -> (Value, Vec<FieldIssue>) {
-    let defaults = domain_defaults(domain);
-    let mut effective = defaults.clone();
-    if !raw.is_object() {
-        return (
-            effective,
-            vec![issue(domain, "", "invalidDomain", "此领域配置不是有效对象")],
-        );
-    }
-    let mut issues = Vec::new();
-    for field in domain_fields(domain) {
-        match source_leaf(raw, &field.path) {
-            Ok(Some(value)) => {
-                let errors = validate_descriptor(&field, value);
-                if errors.is_empty() {
-                    // The descriptor came from this exact typed default tree.
-                    if set_value_at_path(&mut effective, &field.path, value.clone()).is_err() {
-                        issues.push(issue(
-                            domain,
-                            &field.path,
-                            "invalidPath",
-                            "配置字段路径无效",
-                        ));
-                    }
-                } else {
-                    issues.extend(errors);
-                }
-            }
-            Ok(None) => {} // Missing newly introduced fields use the same Default.
-            Err(()) => issues.push(issue(
-                domain,
-                &field.path,
-                "invalidGroup",
-                "所属配置分组的类型不正确",
-            )),
-        }
-    }
-    // An endpoint and its credentials form one recovery unit. In particular,
-    // never send a saved third-party key to the default MiMo endpoint after a
-    // malformed URL was replaced. Administrative auth stays separate from chat.
+fn is_connection_group(group: &str) -> bool {
+    matches!(
+        group,
+        "connection" | "adminCredentials" | "typesafeConnection" | "openrouterConnection"
+    )
+}
+
+fn is_connection_endpoint(field: &FieldDescriptor) -> bool {
+    matches!(
+        field.path.as_str(),
+        "url"
+            | "serverUrl"
+            | "httpUrl"
+            | "wsUrl"
+            | "connection.apiBaseUrl"
+            | "typesafe.apiUrl"
+            | "openrouter.apiUrl"
+    )
+}
+
+fn has_nonempty_default_endpoint(domain: ConfigDomain, field: &FieldDescriptor) -> bool {
+    is_connection_endpoint(field)
+        && value_at_path(&DEFAULT_DOMAINS[domain.as_str()], &field.path)
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty())
+}
+
+fn normalize_dependencies(
+    domain: ConfigDomain,
+    raw: &Value,
+    normalized: &mut Value,
+    partial: bool,
+) {
     let fields = domain_fields(domain);
-    let broken_connections: BTreeSet<_> = fields
+    let invalid_connections: BTreeSet<_> = fields
         .iter()
+        .filter(|field| is_connection_group(&field.validation_group))
         .filter(|field| {
-            matches!(
-                field.validation_group.as_str(),
-                "connection" | "adminCredentials" | "typesafeConnection" | "openrouterConnection"
-            ) && issues.iter().any(|issue| issue.field == field.path)
+            is_connection_endpoint(field)
+                || (field.validation_group == "adminCredentials" && field.path == "adminUsername")
+        })
+        .filter(|field| match source_leaf(raw, &field.path) {
+            Ok(Some(value)) => !descriptor_accepts(field, value),
+            // An absent endpoint in complete stored data must not redirect a
+            // retained Key to a nonempty default endpoint. A partial Key edit
+            // keeps its absent endpoint absent until merged with current data.
+            Ok(None) => !partial && has_nonempty_default_endpoint(domain, field),
+            // A malformed containing object already defaults as a whole tree.
+            Err(()) => false,
         })
         .map(|field| field.validation_group.as_str())
         .collect();
-    for field in fields
-        .iter()
-        .filter(|field| broken_connections.contains(field.validation_group.as_str()))
-    {
-        if let Some(default) = value_at_path(&defaults, &field.path) {
-            let _ = set_value_at_path(&mut effective, &field.path, default.clone());
-        }
-        if !issues.iter().any(|issue| issue.field == field.path) {
-            issues.push(issue(
-                domain,
-                &field.path,
-                "dependentRecovery",
-                "关联连接配置有误，此项暂不应用；原始值仍已保留",
-            ));
+    for field in fields.iter().filter(|field| {
+        field.secret && invalid_connections.contains(field.validation_group.as_str())
+    }) {
+        if let Some(default) = value_at_path(&DEFAULT_DOMAINS[domain.as_str()], &field.path) {
+            let _ = set_value_at_path(normalized, &field.path, default.clone());
         }
     }
     if domain == ConfigDomain::Voice
-        && value_at_path(&effective, "guidance.autoGuidance").and_then(Value::as_bool) == Some(true)
-        && value_at_path(&effective, "guidance.guidanceRules")
+        && value_at_path(normalized, "guidance.autoGuidance").and_then(Value::as_bool) == Some(true)
+        && value_at_path(normalized, "guidance.guidanceRules")
             .and_then(Value::as_str)
-            .is_some_and(|text| text.trim().is_empty())
+            .is_some_and(|value| value.trim().is_empty())
     {
-        issues.push(issue(
-            domain,
-            "guidance.guidanceRules",
-            "required",
-            "开启自动风格指导时，请填写生成规则",
-        ));
-        if let Some(default) = value_at_path(&defaults, "guidance.guidanceRules") {
-            let _ = set_value_at_path(&mut effective, "guidance.guidanceRules", default.clone());
+        if let Some(default) =
+            value_at_path(&DEFAULT_DOMAINS[domain.as_str()], "guidance.guidanceRules")
+        {
+            let _ = set_value_at_path(normalized, "guidance.guidanceRules", default.clone());
         }
     }
-    (effective, issues)
 }
 
-pub fn validate_domain(domain: ConfigDomain, value: &Value) -> Vec<FieldIssue> {
-    project_domain(domain, value).1
+/// Produce the complete current typed domain. Invalid/missing leaves default,
+/// invalid groups default as a group, and unknown keys are not retained.
+pub fn normalize_domain(domain: ConfigDomain, raw: &Value) -> Value {
+    let mut normalized = normalize_tree(domain, raw, &DEFAULT_DOMAINS[domain.as_str()], "", false);
+    normalize_dependencies(domain, raw, &mut normalized, false);
+    normalized
+}
+
+/// Preserve partial presence. An explicitly supplied invalid group becomes its
+/// default group; absent peers remain absent except credentials paired with an
+/// invalid endpoint or administrative identity.
+pub fn normalize_domain_patch(domain: ConfigDomain, raw: &Value) -> Value {
+    let mut normalized = normalize_tree(domain, raw, &DEFAULT_DOMAINS[domain.as_str()], "", true);
+    normalize_dependencies(domain, raw, &mut normalized, true);
+    normalized
+}
+
+/// Flat command fields use the same partial policy, including coupled endpoint
+/// and credential defaults. Other valid fields in that group remain unchanged.
+/// Unknown request paths must be rejected before this.
+pub fn normalize_changes(domain: ConfigDomain, changes: &Map<String, Value>) -> Map<String, Value> {
+    let mut nested = Value::Object(Map::new());
+    for field in domain_fields(domain) {
+        if let Some(value) = changes.get(&field.path) {
+            let _ = set_value_at_path(&mut nested, &field.path, value.clone());
+        }
+    }
+    let normalized = normalize_domain_patch(domain, &nested);
+    domain_fields(domain)
+        .into_iter()
+        .filter_map(|field| {
+            value_at_path(&normalized, &field.path)
+                .cloned()
+                .map(|value| (field.path, value))
+        })
+        .collect()
 }
 
 pub fn settings_to_domains(settings: &Settings) -> Result<BTreeMap<ConfigDomain, Value>, String> {
@@ -412,8 +442,7 @@ pub fn settings_to_domains(settings: &Settings) -> Result<BTreeMap<ConfigDomain,
         .map(|domain| {
             serialized
                 .get(domain.as_str())
-                .cloned()
-                .map(|value| (domain, value))
+                .map(|value| (domain, normalize_domain(domain, value)))
                 .ok_or_else(|| "配置领域定义不完整".to_string())
         })
         .collect()
@@ -425,10 +454,7 @@ pub fn settings_from_domains(domains: &BTreeMap<ConfigDomain, Value>) -> Result<
         .map(|domain| {
             (
                 domain.as_str().into(),
-                domains
-                    .get(&domain)
-                    .cloned()
-                    .unwrap_or_else(|| domain_defaults(domain)),
+                normalize_domain(domain, domains.get(&domain).unwrap_or(&Value::Null)),
             )
         })
         .collect();
@@ -439,126 +465,231 @@ pub fn settings_from_domains(domains: &BTreeMap<ConfigDomain, Value>) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
-    fn typed_defaults_and_missing_fields_share_one_source() {
+    fn current_defaults_round_trip_through_every_domain() {
         let defaults = Settings::default();
-        let missing: Settings = serde_json::from_str("{}").unwrap();
-        assert_eq!(defaults, missing);
         let domains = settings_to_domains(&defaults).unwrap();
         assert_eq!(settings_from_domains(&domains).unwrap(), defaults);
         for domain in ConfigDomain::ALL {
-            assert!(validate_domain(domain, &domain_defaults(domain)).is_empty());
             assert_eq!(
-                project_domain(domain, &serde_json::json!({})).0,
+                normalize_domain(domain, &Value::Null),
                 domain_defaults(domain)
             );
+            assert_eq!(
+                normalize_domain(domain, &json!({})),
+                domain_defaults(domain)
+            );
+            assert_eq!(normalize_domain_patch(domain, &json!({})), json!({}));
         }
     }
 
     #[test]
-    fn jev_provider_recovery_keeps_credentials_bound_to_their_endpoint() {
-        let raw = serde_json::json!({
-            "provider":"openrouter",
-            "typesafe":{"apiKey":"official-secret"},
-            "openrouter":{"apiUrl":false,"apiKey":"router-secret"},
-            "maxRetries":0,
+    fn invalid_leaves_groups_and_unknown_keys_do_not_discard_valid_siblings() {
+        let raw = json!({
+            "asr":{"language":"en","stream":false,"inputEncoding":"unsupported","unknown":42},
+            "tts":false,
+            "vad":{"endSilenceMs":1,"playbackOnsetMs":100},
+            "unknownRoot":{"keep":false}
         });
-        let (effective, issues) = project_domain(ConfigDomain::Jev, &raw);
-        assert_eq!(effective["typesafe"]["apiKey"], "official-secret");
-        assert_eq!(effective["openrouter"], domain_defaults(ConfigDomain::Jev)["openrouter"]);
-        assert_eq!(effective["maxRetries"], 0);
-        assert_eq!(effective["provider"], "openrouter");
-        assert!(!serde_json::to_string(&issues).unwrap().contains("secret"));
-        assert!(validate_field(ConfigDomain::Jev, "timeoutMs", &serde_json::json!(999)).iter().any(|issue| issue.code == "outOfRange"));
-        assert!(validate_field(ConfigDomain::Jev, "maxRetries", &serde_json::json!(11)).iter().any(|issue| issue.code == "outOfRange"));
+        let voice = normalize_domain(ConfigDomain::Voice, &raw);
+        assert_eq!(voice["asr"]["language"], "en");
+        assert_eq!(voice["asr"]["stream"], false);
+        assert_eq!(voice["asr"]["inputEncoding"], "wav");
+        assert_eq!(voice["tts"], domain_defaults(ConfigDomain::Voice)["tts"]);
+        assert_eq!(
+            voice["vad"]["endSilenceMs"],
+            domain_defaults(ConfigDomain::Voice)["vad"]["endSilenceMs"]
+        );
+        assert!(voice.get("unknownRoot").is_none());
+        assert!(voice["asr"].get("unknown").is_none());
+        let typed: VoiceConfig = serde_json::from_value(voice).unwrap();
+        assert_eq!(typed.asr.language, "en");
     }
 
     #[test]
-    fn bad_fields_do_not_discard_valid_siblings_or_mutate_input() {
-        let raw = serde_json::json!({"connection":{"apiKey":"secret"}, "tts":{"mode":"design", "stylePrompt":"轻快"}, "vad":{"endSilenceMs":1}});
-        let original = raw.clone();
-        let (effective, issues) = project_domain(ConfigDomain::Voice, &raw);
-        assert_eq!(effective["connection"]["apiKey"], "secret");
-        assert_eq!(effective["tts"]["stylePrompt"], "轻快");
-        assert_eq!(effective["tts"]["mode"], "builtin");
-        assert_eq!(issues.len(), 2);
-        assert_eq!(raw, original);
-        assert!(!serde_json::to_string(&issues).unwrap().contains("secret"));
+    fn malformed_field_matrix_always_deserializes_into_current_rust_types() {
+        for domain in ConfigDomain::ALL {
+            for field in domain_fields(domain) {
+                let bad = match field.kind {
+                    FieldKind::Boolean => json!("true"),
+                    FieldKind::Integer => json!(u64::MAX),
+                    FieldKind::String => json!(false),
+                    FieldKind::StringArray => json!([false]),
+                };
+                let mut raw = domain_defaults(domain);
+                set_value_at_path(&mut raw, &field.path, bad).unwrap();
+                let normalized = normalize_domain(domain, &raw);
+                assert_eq!(
+                    value_at_path(&normalized, &field.path),
+                    value_at_path(&domain_defaults(domain), &field.path)
+                );
+                let mut domains = settings_to_domains(&Settings::default()).unwrap();
+                domains.insert(domain, normalized);
+                assert!(settings_from_domains(&domains).is_ok());
+            }
+        }
     }
 
     #[test]
-    fn invalid_nested_group_recovers_only_its_leaves() {
-        let (effective, issues) = project_domain(
-            ConfigDomain::Voice,
-            &serde_json::json!({"connection":false,"asr":{"language":"en"}}),
-        );
-        assert_eq!(effective["asr"]["language"], "en");
-        assert_eq!(issues.len(), 2);
-        assert!(issues
-            .iter()
-            .all(|issue| issue.field.starts_with("connection.")));
-        assert!(issues.iter().all(|issue| issue.code == "invalidGroup"));
-    }
-
-    #[test]
-    fn dependent_rule_validation_is_local_and_uses_unicode_lengths() {
-        let disabled = serde_json::json!({"guidance":{"autoGuidance":false,"guidanceRules":""}});
-        assert!(validate_domain(ConfigDomain::Voice, &disabled).is_empty());
-        let enabled = serde_json::json!({"guidance":{"autoGuidance":true,"guidanceRules":""}});
+    fn endpoint_defaulting_also_defaults_its_paired_credentials() {
+        let raw = json!({"connection":{"apiBaseUrl":false,"apiKey":"third-party-key"},"tts":{"voice":"Mia"}});
+        let voice = normalize_domain(ConfigDomain::Voice, &raw);
         assert_eq!(
-            validate_domain(ConfigDomain::Voice, &enabled)[0].field,
-            "guidance.guidanceRules"
-        );
-        assert_eq!(
-            affected_fields(ConfigDomain::Voice, &["guidance.autoGuidance"]),
-            vec!["guidance.autoGuidance", "guidance.guidanceRules"]
-        );
-        assert!(validate_field(
-            ConfigDomain::Voice,
-            "tts.stylePrompt",
-            &Value::String("字".repeat(VOICE_GUIDANCE_MAX_CHARS))
-        )
-        .is_empty());
-        assert_eq!(
-            validate_field(
-                ConfigDomain::Voice,
-                "tts.stylePrompt",
-                &Value::String("字".repeat(VOICE_GUIDANCE_MAX_CHARS + 1))
-            )[0]
-            .code,
-            "tooLong"
-        );
-    }
-
-    #[test]
-    fn a_bad_voice_endpoint_never_reuses_the_key_at_the_default_provider() {
-        let raw = serde_json::json!({"connection":{"apiBaseUrl":5,"apiKey":"third-party-secret"}, "tts":{"stylePrompt":"轻快"}});
-        let (effective, issues) = project_domain(ConfigDomain::Voice, &raw);
-        assert_eq!(
-            effective["connection"],
+            voice["connection"],
             domain_defaults(ConfigDomain::Voice)["connection"]
         );
-        assert_eq!(effective["connection"]["apiKey"], "");
-        assert_eq!(effective["tts"]["stylePrompt"], "轻快");
-        assert_eq!(issues.len(), 2);
-        assert_eq!(raw["connection"]["apiKey"], "third-party-secret");
+        assert_eq!(voice["tts"]["voice"], "Mia");
+        let missing_endpoint = normalize_domain(
+            ConfigDomain::Voice,
+            &json!({"connection":{"apiKey":"third-party-key"}}),
+        );
+        assert_eq!(missing_endpoint["connection"]["apiKey"], "");
+        let invalid_provider = normalize_domain_patch(
+            ConfigDomain::Jev,
+            &json!({"openrouter":{"apiUrl":42,"apiKey":"router-key","model":"chosen-model"}}),
+        );
+        assert_eq!(
+            invalid_provider["openrouter"]["apiUrl"],
+            domain_defaults(ConfigDomain::Jev)["openrouter"]["apiUrl"]
+        );
+        assert_eq!(invalid_provider["openrouter"]["apiKey"], "");
+        assert_eq!(invalid_provider["openrouter"]["model"], "chosen-model");
+        assert!(invalid_provider.get("typesafe").is_none());
+        assert_eq!(
+            normalize_domain_patch(
+                ConfigDomain::Voice,
+                &json!({"connection":{"apiKey":"new-key"}})
+            ),
+            json!({"connection":{"apiKey":"new-key"}})
+        );
     }
 
     #[test]
-    fn connection_recovery_does_not_turn_off_unrelated_server_capabilities() {
-        let raw = serde_json::json!({"url":"https://example.test", "apiKey":"chat-secret", "adminUsername":"admin", "adminPassword":false});
-        let (effective, issues) = project_domain(ConfigDomain::Server, &raw);
-        assert_eq!(effective["url"], "https://example.test");
-        assert_eq!(effective["apiKey"], "chat-secret");
-        assert_eq!(effective["adminUsername"], "");
-        assert_eq!(effective["adminPassword"], "");
-        assert_eq!(issues.len(), 2);
-        let (distributed, _) = project_domain(
-            ConfigDomain::Distributed,
-            &serde_json::json!({"enabled":true,"wsUrl":[],"vcpKey":"secret"}),
+    fn invalid_model_or_device_name_preserves_valid_connection_siblings() {
+        let jev = normalize_domain(
+            ConfigDomain::Jev,
+            &json!({
+                "openrouter":{"apiUrl":"https://custom.example/decisions","apiKey":"keep-key","model":false}
+            }),
         );
-        assert_eq!(distributed["enabled"], false);
-        assert_eq!(distributed["vcpKey"], "");
+        assert_eq!(
+            jev["openrouter"]["apiUrl"],
+            "https://custom.example/decisions"
+        );
+        assert_eq!(jev["openrouter"]["apiKey"], "keep-key");
+        assert_eq!(
+            jev["openrouter"]["model"],
+            domain_defaults(ConfigDomain::Jev)["openrouter"]["model"]
+        );
+        let changes = json!({"openrouter.model":false})
+            .as_object()
+            .unwrap()
+            .clone();
+        let normalized = normalize_changes(ConfigDomain::Jev, &changes);
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(
+            normalized["openrouter.model"],
+            domain_defaults(ConfigDomain::Jev)["openrouter"]["model"]
+        );
+
+        let distributed = normalize_domain(
+            ConfigDomain::Distributed,
+            &json!({
+                "enabled":true,"wsUrl":"wss://custom.example/ws","vcpKey":"keep-key","deviceName":false
+            }),
+        );
+        assert_eq!(distributed["enabled"], true);
+        assert_eq!(distributed["wsUrl"], "wss://custom.example/ws");
+        assert_eq!(distributed["vcpKey"], "keep-key");
+        assert_eq!(distributed["deviceName"], "VCPMobile");
+    }
+
+    #[test]
+    fn invalid_credentials_do_not_reset_valid_targets_or_admin_names() {
+        let voice = normalize_domain(
+            ConfigDomain::Voice,
+            &json!({
+                "connection":{"apiBaseUrl":"https://custom.example/v1","apiKey":false}
+            }),
+        );
+        assert_eq!(
+            voice["connection"]["apiBaseUrl"],
+            "https://custom.example/v1"
+        );
+        assert_eq!(voice["connection"]["apiKey"], "");
+        let invalid_password = normalize_domain_patch(
+            ConfigDomain::Server,
+            &json!({
+                "adminUsername":"keep-user","adminPassword":false
+            }),
+        );
+        assert_eq!(
+            invalid_password,
+            json!({"adminUsername":"keep-user","adminPassword":""})
+        );
+        let invalid_username = normalize_domain_patch(
+            ConfigDomain::Server,
+            &json!({
+                "adminUsername":false,"adminPassword":"old-password"
+            }),
+        );
+        assert_eq!(
+            invalid_username,
+            json!({"adminUsername":"","adminPassword":""})
+        );
+    }
+
+    #[test]
+    fn partial_normalization_keeps_absence_and_defaults_only_supplied_invalid_groups() {
+        let partial = normalize_domain_patch(
+            ConfigDomain::Voice,
+            &json!({"asr":{"stream":null,"language":"en"},"tts":false,"unknown":1}),
+        );
+        assert_eq!(partial["asr"], json!({"stream":true,"language":"en"}));
+        assert_eq!(partial["tts"], domain_defaults(ConfigDomain::Voice)["tts"]);
+        assert!(partial.get("connection").is_none());
+        assert!(partial.get("guidance").is_none());
+        assert_eq!(
+            normalize_domain_patch(
+                ConfigDomain::Voice,
+                &json!({"guidance":{"guidanceRules":""}})
+            ),
+            json!({"guidance":{"guidanceRules":""}})
+        );
+        let enabled = normalize_domain(
+            ConfigDomain::Voice,
+            &json!({"guidance":{"autoGuidance":true,"guidanceRules":""}}),
+        );
+        assert_eq!(
+            enabled["guidance"]["guidanceRules"],
+            DEFAULT_VOICE_GUIDANCE_RULES
+        );
+        let disabled = normalize_domain(
+            ConfigDomain::Voice,
+            &json!({"guidance":{"autoGuidance":false,"guidanceRules":""}}),
+        );
+        assert_eq!(disabled["guidance"]["guidanceRules"], "");
+    }
+
+    #[test]
+    fn flat_changes_keep_connection_reset_intent_and_partial_presence() {
+        let changes = json!({"connection.apiBaseUrl":false,"tts.stylePrompt":"保留"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let normalized = normalize_changes(ConfigDomain::Voice, &changes);
+        assert_eq!(normalized["connection.apiKey"], "");
+        assert_eq!(
+            normalized["connection.apiBaseUrl"],
+            VoiceConnectionConfig::default().api_base_url
+        );
+        assert_eq!(normalized["tts.stylePrompt"], "保留");
+        assert!(!normalized.contains_key("tts.mode"));
+        assert_eq!(
+            normalize_domain(ConfigDomain::Voice, &json!({"tts":{"mode":false}}))["tts"]["mode"],
+            "builtin"
+        );
     }
 }

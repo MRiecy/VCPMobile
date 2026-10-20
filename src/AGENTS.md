@@ -80,17 +80,17 @@ src/
 
 ### 3.4 设置与领域偏好
 
-群设置采用语音同款 `SettingsCanvas`。完整群配置保留共享 `mode`，本机 `modeOverride` 只在手机生效；列表快照的 `mode` 则已是本机有效值。`assistant.saveGroup` 按表单 baseline 只提交真正改变的字段，避免本地参数编辑回写同步前的共享值。JEV 聊天入口通过现有 `group_turn` 和重连快照呈现阶段、成员队列和错误，前端不调度成员；运行中有草稿可继续发送，群停止立即中断全部。
+群设置采用语音同款 `SettingsCanvas`。群聊模式 `chatMode` 独立保存、默认顺序发言，不继承同步 `mode`；列表快照的 `mode` 是实际使用的模式。界面不提供跟随选项，也不暴露本机覆盖或同步实现说明。`assistant.saveGroup` 按表单 baseline 只提交真正改变的字段，避免参数编辑回写同步前的共享值。JEV 聊天入口通过现有 `group_turn` 和重连快照呈现阶段、成员队列和错误，前端不调度成员；运行中有草稿可继续发送，群停止立即中断全部。
 
 `features/chat/voice/voiceCallStore.ts` 与 `voiceConversation.ts` 提交通话操作并按 revision 呈现 Rust 快照，不再认领转写、提交消息或协调生成取消。`microphoneMonitor.ts` 接收 `vcp-voice-audio` 的有界频带；开关麦通过 Rust 单次命令完成准备、原生调用与封存，开麦意图携点击时的生命周期 epoch，防止后台恢复后执行旧意图。PCM、AEC、Silero、缓存和播放归移动插件。关麦及后台停止新采集，已录内容由 Rust 继续识别、发送和朗读；回前台不自动开麦。`voiceHistorySync.ts` 订阅已落盘消息并在应用恢复时对账，历史窗口按 ID 合并，深翻历史保留锚点；恢复不会重发转写、重播 TTS 或消费草稿、附件和编辑态。通用监听卸载只脱离视图，主动切换聊天和挂断仍结束通话。插话、挂断、手动停止模型会停止对应生成与朗读；TTS 独立停止或失败不取消模型。配置复用全局 Settings；`VoiceStyleGuidancePage` 编辑预置音色和样本复刻共用的两项全局 LLM 注入规则及自动指导开关，`VoiceSettingsPage` 管理这两种音色模式与可选的默认演绎指导，均返回保存；没有手动预设库，气泡朗读入口尚未接入。`VoiceTtsPreview` 使用草稿与独立任务 ID，`VoiceCloneSample` 通过原生 picker 导入持久样本引用。`VoiceGuidanceBlock` 默认折叠指导，正文音频标签不改展示。语音按纯文本进入现有群聊发言模式，不扩展手动 `@` 邀请。本地诊断不进入 ASR，系统 AEC 启用不代表效果已验证。
 
-`features/settings/catalog.ts` 组织稳定页面 ID、懒加载组件与布局；`SettingsView` / `useSettingsNavigation` 拥有当前访问、退场画面和返回桥接。身份、连接、总结与语音页面通过 `editing/useSettingsPageSession` 建立叶路径字段会话；正式 `ConfigSnapshot` 始终归 `core/stores/settings.ts`，按领域 revision 接纳 IPC 与 `vcp-config-changed`，迟到结果不能覆盖新快照。`core/config/generated/` 的类型、默认值与字段策略由 Rust 显式生成，`core/config/fields.ts` 只处理类型化叶路径与批量 patch。修改字段走显式 edit；提交携本次编辑的 base values，冲突或校验失败保留草稿，旧 ACK 不覆盖后续输入。`SettingsDomainIssues` 在子页提示相关异常，在设置首页提供经确认的独立整组重置；首页不持有全量编辑草稿，重置不合并页面输入。不可写结构导致返回保存失败时，可明确放弃未保存修改并返回首页；不新增自动备份。
+`features/settings/catalog.ts` 组织稳定页面 ID、懒加载组件与布局；`SettingsView` / `useSettingsNavigation` 拥有当前访问、退场画面和返回桥接。身份、连接、总结、语音与 JEV 页面通过 `editing/useSettingsPageSession` 建立叶路径字段会话；正式 `ConfigSnapshot` 归 `core/stores/settings.ts`，按领域 revision 接纳 IPC 与 `vcp-config-changed`，迟到结果不能覆盖新快照。`core/config/generated/` 由 Rust 显式生成，`core/config/fields.ts` 提供类型化叶路径与批量 patch。各领域使用当前类型/default 规范坏叶与坏组、保留合法兄弟并丢弃未知内容，不保留 health/issues 或手动修复入口。修改字段走显式 edit，提交携 base values；请求错误、冲突或真实 IO 失败保留草稿，旧 ACK 不覆盖后续输入，不新增自动备份。
 
 依赖保存的诊断、重建与导出等待 commit 的确定结果；导入由连接页冻结并 settlePending 后提交，只接受覆盖字段。`active=false` 立即释放本次会话并关闭局部 ModelSelector、裁剪和导入确认，未交付 picker 沿既有 helper 取消；隐藏不启动保存，已提交任务继续归原 owner。
 
 `features/chat/preferences/` 拥有消息呈现、平滑动效、消息震动和流式工具折叠的类型、存储及只读 Store；`features/chat/settings/ChatPreferencesPage.vue` 只是一个入口，聊天消费者不依赖它挂载。主题草稿/确认仍归 ThemePicker 与 themeStore；自动检查更新偏好归 updateStore。聊天与更新共用 `core/preferences/localPreference.ts` 的异常捕获 IO，领域各自保留 key、编码和默认值。新增偏好应在所属领域接通 UI 与真实消费者，不把设置中心或主题 Store 扩为业务总容器。
 
-`features/settings/developer/` 持有本机开发者模式和显式触感试听。关于页六连击解锁后，经同一设置导航进入；返回开发者页的父级仍保留 SettingsSubPage 的 modal 所有权。解锁状态与试听参数不进入备份。配置备份 v2 由 `useConfigBackup` 协调 Rust 导出的 domains 与 theme、chatPreferences；SQLite 部分一次批量事务提交，缺失字段保留当前值，界面偏好仍由原 localStorage owner 保存并分别报告结果。v1 文件只在导入边界单向转为领域补丁，不保留开发期旧 flat v2 格式兼容。
+`features/settings/developer/` 持有本机开发者模式和显式触感试听。关于页六连击解锁后，经同一设置导航进入；返回开发者页的父级仍保留 SettingsSubPage 的 modal 所有权。解锁状态与试听参数不进入备份。配置备份 v2 由 `useConfigBackup` 协调 domains、groupPreferences 与 theme/chat；`normalize_domain_patch` 保留缺项，显式坏值采用当前默认，SQLite 部分同事务提交。界面偏好经 `normalizeThemePreferencePatch` / `normalizeChatPreferencePatch` 交原 localStorage owner 保存并分别报告结果。保留 v1 文件结构转换，不保留旧值别名或开发期旧 flat v2；文件损坏、格式不支持和 IO 失败仍报错。
 
 ---
 

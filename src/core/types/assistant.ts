@@ -56,7 +56,7 @@ export interface GroupModeSettings {
 }
 
 export interface GroupLocalSettings {
-  modeOverride: GroupMode | null;
+  chatMode: GroupMode;
   modeSettings: GroupModeSettings;
   enableContextMessageWindow: boolean;
   contextMessageWindowSize: number;

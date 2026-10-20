@@ -478,12 +478,7 @@ export interface InterruptRequestDto {
 
 export type GroupChatResultDto =
   | { status: "accepted" | "completed" | "cancelled" | "stopping" | "discarded" | "recovery_pending" }
-  | { status: "no_ai_response"; reason: "invite_only" | "no_speakers" }
-  | {
-      status: "no_ai_response";
-      reason: "mode_not_implemented";
-      mode: string;
-    };
+  | { status: "no_ai_response"; reason: "invite_only" | "no_speakers" };
 
 export interface RegenerateTopicResultDto {
   generation: unknown;

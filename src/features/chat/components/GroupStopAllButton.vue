@@ -29,11 +29,11 @@ const handleStopAll = () => {
          class="absolute -top-12 left-1/2 -translate-x-1/2 z-local">
       <button 
         @click="handleStopAll"
-        aria-label="中断全部群聊发言"
+        aria-label="停止所有成员回复"
         class="flex items-center gap-2 min-h-9 px-3.5 py-1.5 bg-zinc-900 dark:bg-black border border-red-500/30 rounded text-red-400 text-xs font-semibold tracking-wide active:opacity-60 transition-opacity duration-200"
       >
         <Octagon :size="12" class="text-red-500" />
-        <span class="tracking-wider font-medium">中断群聊</span>
+        <span class="tracking-wider font-medium">停止群聊</span>
         <span v-if="activeCount > 0" class="px-1.5 py-0.5 rounded bg-red-950/60 text-[10px] font-mono border border-red-900/50 text-red-300 leading-none">{{ activeCount }}</span>
       </button>
     </div>

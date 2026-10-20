@@ -2,6 +2,7 @@
 // 职责: 完全面向 SQLite 数据库的话题管理，不依赖本地文件系统
 
 use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::group_types::GroupChatMode;
 use crate::vcp_modules::settings_manager::SettingsState;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
@@ -868,11 +869,11 @@ pub async fn regenerate_topic_response(
             )
             .await?;
             match group_config.effective_mode() {
-                "sequential" | "naturerandom" => {}
-                "invite_only" => {
+                GroupChatMode::Sequential | GroupChatMode::NaturalRandom => {}
+                GroupChatMode::InviteOnly => {
                     return Err("邀请发言群组不能使用自动重新生成，请直接邀请成员发言".to_string())
                 }
-                mode => return Err(format!("群组发言模式 {mode} 暂不支持重新生成")),
+                GroupChatMode::Jev => return Err("JEV 群聊暂不支持重新生成，请继续群聊或邀请成员发言".into()),
             }
 
             let has_live_member: bool = sqlx::query_scalar(

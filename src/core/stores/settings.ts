@@ -3,7 +3,7 @@ import { computed, shallowRef, ref, onScopeDispose } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useNotificationStore } from "./notification";
-import type { ConfigSnapshot, ConfigUpdate, ConfigReset, ConfigSaveResult, Settings } from "../config/generated/config";
+import type { ConfigSnapshot, ConfigUpdate, ConfigSaveResult, Settings } from "../config/generated/config";
 import { buildSettingsUpdate, cloneConfig, type SettingsFieldValues } from "../config/fields";
 import type { GroupLocalSettingsPatch } from '../types/assistant';
 export type { ChatEndpointMode } from "../config/generated/config";
@@ -14,7 +14,6 @@ export const useSettingsStore = defineStore("settings", () => {
   const settings = computed(() => snapshot.value?.data ?? null);
   const loading = ref(false);
   const error = ref<string | null>(null);
-  const notifiedIssues = new Set<string>();
   const notificationStore = useNotificationStore();
   let disposed = false;
   let unlisten: UnlistenFn | undefined;
@@ -59,16 +58,6 @@ export const useSettingsStore = defineStore("settings", () => {
       await ensureListener();
       const fetched = await invoke<ConfigSnapshot>("read_settings");
       acceptSnapshot(fetched);
-      for (const [domain, status] of Object.entries(fetched.domains)) {
-        if (!status.issues.length) continue;
-        const signature = `${domain}:${status.revision}`;
-        if (notifiedIssues.has(signature)) continue;
-        notifiedIssues.add(signature);
-        notificationStore.addNotification({
-          type: "warning", title: "部分配置需要检查",
-          message: status.issues[0].message, toastOnly: true,
-        });
-      }
     } catch (e: any) {
       error.value = e.toString();
       console.error("[SettingsStore] Failed to fetch settings:", e);
@@ -77,8 +66,8 @@ export const useSettingsStore = defineStore("settings", () => {
   });
 
   const submitSettingsChange = (
-    command: 'update_settings' | 'reset_settings_domain' | 'import_settings_backup',
-    request: ConfigUpdate | ConfigReset,
+    command: 'update_settings' | 'import_settings_backup',
+    request: ConfigUpdate,
     groupPreferences?: Record<string, GroupLocalSettingsPatch>,
   ): Promise<ConfigSaveResult> => {
     const captured = cloneConfig(request);
@@ -94,8 +83,8 @@ export const useSettingsStore = defineStore("settings", () => {
         if (result.status === "saved") {
           notificationStore.addNotification({
             type: "success", toastOnly: true,
-            title: command === 'reset_settings_domain' ? '配置已恢复默认' : '设置已保存',
-            message: command === 'reset_settings_domain' ? '该组配置已恢复默认值' : '配置变更已保存',
+            title: '设置已保存',
+            message: '配置变更已保存',
           });
         } else {
           const issues = result.status === "rejected" ? result.issues : result.conflicts;
@@ -103,14 +92,13 @@ export const useSettingsStore = defineStore("settings", () => {
         }
         return result;
       } catch {
-        error.value = command === 'reset_settings_domain' ? '配置重置失败，请重试' : '设置保存失败，请重试';
+        error.value = '设置保存失败，请重试';
         throw new Error(error.value);
       }
     });
   };
 
   const updateSettings = (request: ConfigUpdate) => submitSettingsChange('update_settings', request);
-  const resetDomain = (request: ConfigReset) => submitSettingsChange('reset_settings_domain', request);
   const importBackup = (request: ConfigUpdate, groupPreferences: Record<string, GroupLocalSettingsPatch>) =>
     submitSettingsChange('import_settings_backup', request, groupPreferences);
 
@@ -129,7 +117,6 @@ export const useSettingsStore = defineStore("settings", () => {
     error,
     fetchSettings,
     updateSettings,
-    resetDomain,
     importBackup,
     updateFields,
   };

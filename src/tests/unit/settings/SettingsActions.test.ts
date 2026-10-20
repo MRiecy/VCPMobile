@@ -4,6 +4,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import type { Component } from 'vue';
 import { deleteTempFile } from 'tauri-plugin-vcp-mobile';
 import { useSettingsStore, type AppSettings } from '../../../core/stores/settings';
+import { THEME_PREFERENCE_DEFAULTS } from '../../../core/stores/theme';
 import type { SettingsSaveResult } from '../../../features/settings/editing/useSettingsEditSession';
 import ConfigBackupSection from '../../../features/settings/components/ConfigBackupSection.vue';
 import VcpCoreSettingsSection from '../../../features/settings/components/VcpCoreSettingsSection.vue';
@@ -45,7 +46,7 @@ function makeSettings(overrides: Partial<SettingsFieldValues> = {}): AppSettings
 }
 
 function snapshot(data = makeSettings(), revision = '1'): ConfigSnapshot {
-  return { data, domains: Object.fromEntries(Object.keys(data).map(domain => [domain, { revision, schemaVersion: 1, issues: [], health: 'ready' }])) as unknown as ConfigSnapshot['domains'] };
+  return { data, domains: Object.fromEntries(Object.keys(data).map(domain => [domain, { revision, schemaVersion: 1 }])) as unknown as ConfigSnapshot['domains'] };
 }
 
 function connectionDraft(data = makeSettings()) {
@@ -279,6 +280,31 @@ describe('配置导入的原生选择与局部覆盖层生命周期', () => {
     expect(commit).not.toHaveBeenCalled();
     expect(deleteTempFile).toHaveBeenCalledWith(filePath);
   });
+
+  it('原生解析交付的坏偏好在确认前回退默认，不跳过合法兄弟字段', async () => {
+    mockInvoke('plugin:vcp-mobile|pick_file', () => ({ path: filePath }));
+    mockInvoke('parse_config_backup', () => ({
+      domains: {}, exportedAt: '', preferences: {
+        theme: { themeKey: 'removed-theme.ts', mode: 'dark' },
+        chat: { smoothStreamingEnabled: 'true', messageHapticsEnabled: false },
+      },
+    }));
+    const applyImport = vi.fn(async () => ({ applied: ['主题与深浅模式', '聊天偏好'], skipped: [], failed: [] }));
+    const wrapper = render(ConfigBackupSection, { active: true, disabled: false, commit: async () => saved(), applyImport });
+    await action(wrapper, '导入').get('button').trigger('click');
+    await flushPromises();
+    expect(wrapper.findComponent(VcpConfirm).props('message')).toContain('主题与深浅模式、聊天偏好');
+    expect(wrapper.findComponent(VcpConfirm).props('message')).not.toContain('不可用');
+    await confirmImport(wrapper);
+    await flushPromises();
+    expect(applyImport).toHaveBeenCalledExactlyOnceWith({
+      domains: {}, exportedAt: '', preferences: {
+        theme: { themeKey: THEME_PREFERENCE_DEFAULTS.themeKey, mode: 'dark' },
+        chat: { smoothStreamingEnabled: false, messageHapticsEnabled: false },
+      },
+    });
+    expect(deleteTempFile).toHaveBeenCalledWith(filePath);
+  });
 });
 
 describe('连接设置页与真实编辑会话的集成', () => {
@@ -321,7 +347,7 @@ describe('连接设置页与真实编辑会话的集成', () => {
     expect(updates[updates.length - 1]).toEqual(['update_settings', { request: { patches: [{ domain: 'sync', expectedRevision: '1', changes: { token: 'unsubmitted-token' }, baseValues: { token: '' } }] } }]);
   });
 
-  it('群本机设置按字段恢复，确认后原样提交部分字段并刷新群列表', async () => {
+  it('群聊设置按字段恢复，确认后原样提交部分字段并刷新群列表', async () => {
     const groupPreferences = { 'group-a': { modeSettings: { jev: { historyWindow: 25 } } } };
     mockInvoke('plugin:vcp-mobile|pick_file', () => ({ path: 'tests/fixtures/group-partial.vcpcfg' }));
     mockInvoke('parse_config_backup', () => ({ domains: {}, groupPreferences, exportedAt: '' }));
@@ -330,7 +356,7 @@ describe('连接设置页与真实编辑会话的集成', () => {
     await flushPromises();
     await action(wrapper, '导入').get('button').trigger('click');
     await flushPromises();
-    expect(wrapper.get('[role="dialog"]').text()).toContain('按字段恢复，缺项保留当前值');
+    expect(wrapper.get('[role="dialog"]').text()).toContain('未包含的设置保持当前值');
     expect(wrapper.get('[role="dialog"]').text()).not.toContain('整组恢复');
     await confirmImport(wrapper);
     await flushPromises();

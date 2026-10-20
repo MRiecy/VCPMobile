@@ -1,5 +1,5 @@
 use super::schema;
-use super::{read_config_snapshot, ConfigDomain, ConfigSnapshot, DomainHealth, SettingsState};
+use super::{read_config_snapshot, ConfigDomain, ConfigSnapshot, SettingsState};
 use serde::Serialize;
 use serde_json::{Map, Value};
 use tauri::{AppHandle, Manager, Runtime, State};
@@ -21,150 +21,49 @@ pub struct ParsedConfigBackup {
     exported_at: String,
 }
 
-// Preferences keep their existing localStorage owners. Their shape is separate
-// from the SQLite domain schema and they are not part of its transaction.
+// Preferences keep their frontend owners. Preserve supplied values for their
+// typed normalization without inventing a second default table in Rust.
 fn parse_backup_preferences(raw: Option<&Value>) -> Result<Map<String, Value>, String> {
     let mut preferences = Map::new();
     let Some(raw) = raw else {
         return Ok(preferences);
     };
-    let source = raw
-        .as_object()
-        .ok_or_else(|| "备份字段 preferences 类型不正确".to_string())?;
-    if source
-        .keys()
-        .any(|key| !matches!(key.as_str(), "theme" | "chat"))
-    {
-        return Err("备份 preferences 包含未知偏好领域".into());
-    }
-    if let Some(theme) = source.get("theme") {
-        let source = theme
-            .as_object()
-            .ok_or_else(|| "备份字段 preferences.theme 类型不正确".to_string())?;
-        if source
-            .keys()
-            .any(|key| !matches!(key.as_str(), "themeKey" | "mode"))
-        {
-            return Err("备份 preferences.theme 包含未知字段".into());
-        }
-        let mut theme = Map::new();
-        if let Some(key) = source.get("themeKey") {
-            if !key.is_string() {
-                return Err("备份字段 preferences.theme.themeKey 类型不正确".into());
+    let Some(source) = raw.as_object() else {
+        preferences.insert("theme".into(), Value::Null);
+        preferences.insert("chat".into(), Value::Null);
+        return Ok(preferences);
+    };
+    for (group, fields) in [
+        ("theme", &["themeKey", "mode"][..]),
+        ("chat", &[
+            "presentationMode", "smoothStreamingEnabled",
+            "messageHapticsEnabled", "collapseToolsWhileStreaming",
+        ][..]),
+    ] {
+        let Some(value) = source.get(group) else { continue; };
+        if let Some(object) = value.as_object() {
+            let filtered: Map<String, Value> = fields.iter()
+                .filter_map(|key| object.get(*key).map(|value| ((*key).into(), value.clone())))
+                .collect();
+            if !filtered.is_empty() {
+                preferences.insert(group.into(), filtered.into());
             }
-            // Availability belongs to the bundled frontend theme registry.
-            theme.insert("themeKey".into(), key.clone());
-        }
-        if let Some(mode) = source.get("mode") {
-            if !matches!(mode.as_str(), Some("light" | "dark" | "system")) {
-                return Err("备份字段 preferences.theme.mode 类型不正确".into());
-            }
-            theme.insert("mode".into(), mode.clone());
-        }
-        if !theme.is_empty() {
-            preferences.insert("theme".into(), theme.into());
-        }
-    }
-    if let Some(chat) = source.get("chat") {
-        let source = chat
-            .as_object()
-            .ok_or_else(|| "备份字段 preferences.chat 类型不正确".to_string())?;
-        if source.keys().any(|key| {
-            !matches!(
-                key.as_str(),
-                "presentationMode"
-                    | "smoothStreamingEnabled"
-                    | "messageHapticsEnabled"
-                    | "collapseToolsWhileStreaming"
-            )
-        }) {
-            return Err("备份 preferences.chat 包含未知字段".into());
-        }
-        let mut chat = Map::new();
-        if let Some(mode) = source.get("presentationMode") {
-            if !matches!(mode.as_str(), Some("bubble" | "panel" | "immersive")) {
-                return Err("备份字段 preferences.chat.presentationMode 类型不正确".into());
-            }
-            chat.insert("presentationMode".into(), mode.clone());
-        }
-        for key in [
-            "smoothStreamingEnabled",
-            "messageHapticsEnabled",
-            "collapseToolsWhileStreaming",
-        ] {
-            if let Some(value) = source.get(key) {
-                if !value.is_boolean() {
-                    return Err(format!("备份字段 preferences.chat.{key} 类型不正确"));
-                }
-                chat.insert(key.into(), value.clone());
-            }
-        }
-        if !chat.is_empty() {
-            preferences.insert("chat".into(), chat.into());
+        } else {
+            preferences.insert(group.into(), value.clone());
         }
     }
     Ok(preferences)
 }
 
-fn parse_domain_fields(domain: ConfigDomain, raw: &Value, prefix: &str) -> Result<Value, String> {
-    let source = raw.as_object().ok_or_else(|| {
-        format!(
-            "备份字段 {}{} 类型不正确",
-            domain.as_str(),
-            if prefix.is_empty() {
-                String::new()
-            } else {
-                format!(".{prefix}")
-            }
-        )
-    })?;
-    let descriptors = schema::domain_fields(domain);
-    let mut parsed = Map::new();
-    for (key, value) in source {
-        let path = if prefix.is_empty() {
-            key.clone()
-        } else {
-            format!("{prefix}.{key}")
-        };
-        if let Some(field) = descriptors.iter().find(|field| field.path == path) {
-            if !field.backup {
-                return Err(format!(
-                    "备份字段 {}.{} 不属于可恢复配置",
-                    domain.as_str(),
-                    field.path
-                ));
-            }
-            let issues = schema::validate_field(domain, &path, value);
-            if !issues.is_empty() {
-                return Err(issues
-                    .into_iter()
-                    .map(|issue| format!("{}.{}: {}", domain.as_str(), issue.field, issue.message))
-                    .collect::<Vec<_>>()
-                    .join("\n"));
-            }
-            parsed.insert(key.clone(), value.clone());
-        } else if descriptors
-            .iter()
-            .any(|field| field.path.starts_with(&format!("{path}.")))
-        {
-            let nested = parse_domain_fields(domain, value, &path)?;
-            if nested.as_object().is_some_and(|object| !object.is_empty()) {
-                parsed.insert(key.clone(), nested);
-            }
-        } else {
-            // Never echo arbitrary unknown keys or values from an imported file.
-            return Err(format!(
-                "备份 {}{} 包含未知字段",
-                domain.as_str(),
-                if prefix.is_empty() {
-                    String::new()
-                } else {
-                    format!(".{prefix}")
-                }
-            ));
+fn parse_domain_fields(domain: ConfigDomain, raw: &Value) -> Result<Value, String> {
+    let normalized = schema::normalize_domain_patch(domain, raw);
+    let mut parsed = Value::Object(Map::new());
+    for field in schema::domain_fields(domain).into_iter().filter(|field| field.backup) {
+        if let Some(value) = schema::value_at_path(&normalized, &field.path) {
+            schema::set_value_at_path(&mut parsed, &field.path, value.clone())?;
         }
     }
-    Ok(parsed.into())
+    Ok(parsed)
 }
 
 /// One-way v1 import keeps only explicitly provided portable fields. Unlike
@@ -175,7 +74,7 @@ fn parse_v1_backup(raw: &Value) -> Result<ParsedConfigBackup, String> {
         .ok_or_else(|| "备份文件缺少 settings 配置内容".to_string())?;
     let mut domains = Map::new();
     for (domain, old_name, path) in super::migration::legacy_fields() {
-        let Some(value) = source.get(*old_name).filter(|value| !value.is_null()) else {
+        let Some(value) = source.get(*old_name) else {
             continue;
         };
         if !schema::domain_fields(*domain)
@@ -184,35 +83,14 @@ fn parse_v1_backup(raw: &Value) -> Result<ParsedConfigBackup, String> {
         {
             continue;
         }
-        let issues = schema::validate_field(*domain, path, value);
-        if !issues.is_empty() {
-            return Err(issues
-                .into_iter()
-                .map(|issue| format!("{}.{}: {}", domain.as_str(), issue.field, issue.message))
-                .collect::<Vec<_>>()
-                .join("\n"));
-        }
         let target = domains
             .entry(domain.as_str().to_owned())
             .or_insert_with(|| Value::Object(Map::new()));
         schema::set_value_at_path(target, path, value.clone())?;
     }
-    if source.get("chatEndpointMode").is_none_or(Value::is_null) {
-        if let Some(value) = source
-            .get("enableVcpToolInjection")
-            .filter(|value| !value.is_null())
-        {
-            let enabled = value
-                .as_bool()
-                .ok_or_else(|| "备份字段 enableVcpToolInjection 类型不正确".to_string())?;
-            let server = domains
-                .entry(ConfigDomain::Server.as_str().to_owned())
-                .or_insert_with(|| Value::Object(Map::new()));
-            schema::set_value_at_path(
-                server,
-                "endpointMode",
-                if enabled { "vcpTools" } else { "standard" }.into(),
-            )?;
+    for domain in ConfigDomain::ALL {
+        if let Some(value) = domains.get_mut(domain.as_str()) {
+            *value = parse_domain_fields(domain, value)?;
         }
     }
     Ok(ParsedConfigBackup {
@@ -238,16 +116,6 @@ fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
         Some(2) => {}
         _ => return Err("不支持的备份版本".into()),
     }
-    if raw.as_object().is_some_and(|object| {
-        object.keys().any(|key| {
-            !matches!(
-                key.as_str(),
-                "app" | "kind" | "version" | "exportedAt" | "domains" | "preferences" | "groupPreferences"
-            )
-        })
-    }) {
-        return Err("备份文件包含未知顶层字段".into());
-    }
     if raw
         .get("exportedAt")
         .is_some_and(|value| !value.is_string())
@@ -259,11 +127,11 @@ fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
         .ok_or_else(|| "备份文件缺少 domains 配置内容".to_string())?;
     let mut domains = Map::new();
     for (name, raw_domain) in source {
-        let domain = ConfigDomain::ALL
+        let Some(domain) = ConfigDomain::ALL
             .into_iter()
             .find(|domain| domain.as_str() == name)
-            .ok_or_else(|| "备份 domains 包含未知配置领域".to_string())?;
-        let parsed = parse_domain_fields(domain, raw_domain, "")?;
+        else { continue; };
+        let parsed = parse_domain_fields(domain, raw_domain)?;
         if parsed.as_object().is_some_and(|object| !object.is_empty()) {
             domains.insert(name.clone(), parsed);
         }
@@ -300,8 +168,7 @@ pub async fn parse_config_backup(path: String) -> Result<ParsedConfigBackup, Str
     parse_backup_bytes(&bytes)
 }
 
-/// Portable fields are projected from one committed snapshot. Recovered defaults
-/// are not exported as if they were the user's saved configuration.
+/// Portable fields come from one committed, typed configuration snapshot.
 #[tauri::command]
 pub async fn export_config_domains<R: Runtime>(
     app: AppHandle<R>,
@@ -322,25 +189,6 @@ fn backup_domains(snapshot: &ConfigSnapshot) -> Result<Map<String, Value>, Strin
         if fields.is_empty() {
             continue;
         }
-        if let Some(status) = snapshot.domains.get(&domain) {
-            if matches!(status.health, DomainHealth::Unavailable) {
-                return Err(format!("{} 配置需要修复后再导出", domain.as_str()));
-            }
-            for issue in &status.issues {
-                if fields.iter().any(|field| {
-                    issue.field.is_empty()
-                        || field.path == issue.field
-                        || field.path.starts_with(&format!("{}.", issue.field))
-                }) {
-                    return Err(format!(
-                        "{}.{}: {}；修复后再导出",
-                        domain.as_str(),
-                        issue.field,
-                        issue.message
-                    ));
-                }
-            }
-        }
         let value = values
             .get(&domain)
             .ok_or_else(|| "配置快照缺少领域".to_string())?;
@@ -359,12 +207,12 @@ fn backup_domains(snapshot: &ConfigSnapshot) -> Result<Map<String, Value>, Strin
 pub async fn export_group_preferences<R: Runtime>(
     app: AppHandle<R>,
 ) -> Result<BTreeMap<String, GroupLocalSettings>, String> {
-    group_service::export_group_local_settings(&app.state::<crate::vcp_modules::db_manager::DbState>().pool).await
+    group_service::export_group_local_settings(&app.state::<crate::vcp_modules::db_manager::DbState>()).await
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::{DomainStatus, FieldIssue, Settings};
+    use super::super::{DomainStatus, Settings};
     use super::*;
     use serde_json::json;
 
@@ -387,8 +235,6 @@ mod tests {
                         DomainStatus {
                             revision: "1".into(),
                             schema_version: domain.schema_version(),
-                            issues: Vec::new(),
-                            health: DomainHealth::Ready,
                         },
                     )
                 })
@@ -400,7 +246,7 @@ mod tests {
     fn group_backup_parser_preserves_only_supplied_nested_fields_and_explicit_empty_values() {
         let patches = json!({
             "group-a": {
-                "modeOverride":null,
+                "chatMode":null,
                 "enableContextMessageWindow":false,
                 "modeSettings":{
                     "sequential":{"speakerOrder":[]},
@@ -413,7 +259,9 @@ mod tests {
             "domains":{}, "groupPreferences":patches,
         })).unwrap();
         let parsed = parse_backup_bytes(&bytes).unwrap();
-        assert_eq!(serde_json::to_value(parsed.group_preferences).unwrap(), patches);
+        let mut normalized = patches;
+        normalized["group-a"]["chatMode"] = json!("sequential");
+        assert_eq!(serde_json::to_value(parsed.group_preferences).unwrap(), normalized);
         assert!(parsed.domains.is_empty());
     }
 
@@ -446,30 +294,6 @@ mod tests {
     }
 
     #[test]
-    fn export_refuses_recovered_portable_values_but_ignores_unrelated_local_issues() {
-        let mut snapshot = snapshot();
-        let sync = snapshot.domains.get_mut(&ConfigDomain::Sync).unwrap();
-        sync.health = DomainHealth::Recovered;
-        sync.issues.push(FieldIssue {
-            domain: ConfigDomain::Sync,
-            field: "logLevel".into(),
-            code: "invalid".into(),
-            message: "日志等级无效".into(),
-        });
-        assert!(backup_domains(&snapshot).is_ok());
-        let voice = snapshot.domains.get_mut(&ConfigDomain::Voice).unwrap();
-        voice.health = DomainHealth::Recovered;
-        voice.issues.push(FieldIssue {
-            domain: ConfigDomain::Voice,
-            field: "tts.mode".into(),
-            code: "invalid".into(),
-            message: "音色模式无效".into(),
-        });
-        let error = backup_domains(&snapshot).unwrap_err();
-        assert!(error.contains("voice.tts.mode"));
-    }
-
-    #[test]
     fn partial_domains_keep_only_present_leaves_and_keep_plaintext_credentials() {
         let parsed = parse_backup_bytes(&backup(json!({"server":{"apiKey":"secret"},"voice":{"asr":{"inputEncoding":"mp3_64"},"vad":{"endSilenceMs":777}}}))).unwrap();
         assert_eq!(parsed.domains["server"], json!({"apiKey":"secret"}));
@@ -488,31 +312,60 @@ mod tests {
     }
 
     #[test]
-    fn invalid_known_fields_report_path_without_echoing_values() {
-        for values in [
-            json!({"voice":{"asr":{"inputEncoding":"private-token"}}}),
-            json!({"voice":{"tts":{"mode":"private-token"}}}),
-            json!({"voice":{"vad":{"endSilenceMs":"private-token"}}}),
-            json!({"server":{"apiKey":42}}),
-        ] {
-            let error = parse_backup_bytes(&backup(values)).unwrap_err();
-            assert!(!error.contains("private-token"));
-            assert!(error.contains("voice.") || error.contains("server."));
+    fn voice_mode_import_defaults_only_when_the_field_is_present_and_invalid() {
+        for mode in [json!("unknown-mode"), json!(""), Value::Null, json!(false), json!(42), json!({})] {
+            let parsed = parse_backup_bytes(&backup(json!({"voice":{"tts":{"mode":mode,"stylePrompt":"保留"}}}))).unwrap();
+            assert_eq!(parsed.domains["voice"], json!({"tts":{"mode":"builtin","stylePrompt":"保留"}}));
+            let legacy = parse_backup_bytes(&v1_backup(json!({"voiceTtsMode":mode,"voiceTtsStylePrompt":"保留"}))).unwrap();
+            assert_eq!(legacy.domains["voice"], json!({"tts":{"mode":"builtin","stylePrompt":"保留"}}));
         }
+        for mode in ["builtin", "clone"] {
+            let parsed = parse_backup_bytes(&backup(json!({"voice":{"tts":{"mode":mode}}}))).unwrap();
+            assert_eq!(parsed.domains["voice"]["tts"]["mode"], mode);
+        }
+        let partial = parse_backup_bytes(&backup(json!({"voice":{"tts":{"stylePrompt":"保留"}}}))).unwrap();
+        assert_eq!(partial.domains["voice"], json!({"tts":{"stylePrompt":"保留"}}));
+        let legacy_partial = parse_backup_bytes(&v1_backup(json!({"voiceTtsStylePrompt":"保留"}))).unwrap();
+        assert_eq!(legacy_partial.domains["voice"], json!({"tts":{"stylePrompt":"保留"}}));
     }
 
     #[test]
-    fn unknown_nonportable_and_wrong_shape_data_are_not_silently_discarded() {
-        for values in [
-            json!({"private-token":{}}),
-            json!({"voice":{"private-token":true}}),
-            json!({"voice":{"tts":null}}),
-            json!({"navigation":{"agentOrder":[]}}),
-            json!({"sync":{"logLevel":"DEBUG"}}),
-        ] {
-            let error = parse_backup_bytes(&backup(values)).unwrap_err();
-            assert!(!error.contains("private-token"));
-        }
+    fn invalid_fields_use_current_defaults_and_keep_valid_siblings() {
+        let parsed = parse_backup_bytes(&backup(json!({
+            "voice":{
+                "asr":{"inputEncoding":"private-token","language":"en"},
+                "tts":{"voice":"private-token","stylePrompt":"保留"},
+                "vad":{"endSilenceMs":"private-token"}
+            },
+            "server":{"url":"https://saved.example","apiKey":42}
+        }))).unwrap();
+        let voice = schema::domain_defaults(ConfigDomain::Voice);
+        assert_eq!(parsed.domains["voice"], json!({
+            "asr":{"inputEncoding":voice["asr"]["inputEncoding"],"language":"en"},
+            "tts":{"voice":voice["tts"]["voice"],"stylePrompt":"保留"},
+            "vad":{"endSilenceMs":voice["vad"]["endSilenceMs"]}
+        }));
+        assert_eq!(parsed.domains["server"], json!({"url":"https://saved.example","apiKey":""}));
+        assert!(!serde_json::to_string(&parsed).unwrap().contains("private-token"));
+    }
+
+    #[test]
+    fn unknown_and_nonportable_fields_are_dropped_while_bad_provided_groups_default() {
+        let parsed = parse_backup_bytes(&backup(json!({
+            "unknown-domain":{"private-token":true},
+            "voice":{"unknown-field":true,"tts":null,"asr":{"language":"en"}},
+            "navigation":{"agentOrder":["not-imported"]},
+            "sync":{"logLevel":"DEBUG","token":"keep-token"}
+        }))).unwrap();
+        assert_eq!(parsed.domains["voice"], json!({
+            "tts":schema::domain_defaults(ConfigDomain::Voice)["tts"],
+            "asr":{"language":"en"}
+        }));
+        assert_eq!(parsed.domains["sync"], json!({"token":"keep-token"}));
+        assert!(!parsed.domains.contains_key("navigation"));
+        assert!(!parsed.domains.contains_key("unknown-domain"));
+        let invalid_domain = parse_backup_bytes(&backup(json!({"server":false}))).unwrap();
+        assert_eq!(invalid_domain.domains["server"], schema::domain_defaults(ConfigDomain::Server));
     }
 
     #[test]
@@ -524,6 +377,23 @@ mod tests {
             parsed.domains["voice"],
             json!({"guidance":{"autoGuidance":true}})
         );
+    }
+
+    #[test]
+    fn malformed_files_and_unknown_formats_still_fail_before_field_normalization() {
+        assert!(parse_backup_bytes(b"{broken-json").is_err());
+        for raw in [
+            json!({"app":"other-app","kind":"vcp-mobile-settings-backup","version":2,"domains":{}}),
+            json!({"app":"vcp-mobile","kind":"unknown-format","version":2,"domains":{}}),
+            json!({"app":"vcp-mobile","kind":"vcp-mobile-settings-backup","version":999,"domains":{}}),
+            json!({"app":"vcp-mobile","kind":"vcp-mobile-settings-backup","version":2,"domains":false}),
+        ] {
+            assert!(parse_backup_bytes(&serde_json::to_vec(&raw).unwrap()).is_err());
+        }
+        let known = json!({"app":"vcp-mobile","kind":"vcp-mobile-settings-backup","version":2,
+            "unknownMetadata":true,"domains":{"identity":{"userName":"保留"}}});
+        let parsed = parse_backup_bytes(&serde_json::to_vec(&known).unwrap()).unwrap();
+        assert_eq!(parsed.domains["identity"], json!({"userName":"保留"}));
     }
 
     #[test]
@@ -549,7 +419,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_keeps_false_and_empty_values_while_skipping_null_and_unknown_fields() {
+    fn v1_keeps_false_and_empty_values_and_defaults_explicit_invalid_fields() {
         let parsed = parse_backup_bytes(&v1_backup(json!({
             "vcpApiKey":"", "userName":null, "distributedEnabled":false,
             "voiceAsrStream":false, "voiceTtsStylePrompt":"", "unknownField":"ignored",
@@ -559,6 +429,7 @@ mod tests {
         assert_eq!(
             Value::Object(parsed.domains),
             json!({
+                "identity":{"userName":schema::domain_defaults(ConfigDomain::Identity)["userName"]},
                 "server":{"apiKey":""}, "distributed":{"enabled":false},
                 "voice":{"asr":{"stream":false},"tts":{"stylePrompt":""}},
             })
@@ -566,13 +437,15 @@ mod tests {
     }
 
     #[test]
-    fn v1_legacy_endpoint_flag_is_used_only_without_a_present_mode() {
-        for (enabled, expected) in [(true, "vcpTools"), (false, "standard")] {
+    fn v1_endpoint_uses_current_values_without_old_flag_aliases() {
+        for enabled in [true, false] {
             let parsed = parse_backup_bytes(&v1_backup(
                 json!({"chatEndpointMode":null,"enableVcpToolInjection":enabled}),
             ))
             .unwrap();
-            assert_eq!(parsed.domains["server"]["endpointMode"], expected);
+            assert_eq!(parsed.domains["server"]["endpointMode"], schema::domain_defaults(ConfigDomain::Server)["endpointMode"]);
+            let absent = parse_backup_bytes(&v1_backup(json!({"enableVcpToolInjection":enabled}))).unwrap();
+            assert!(absent.domains.is_empty());
         }
         let explicit = parse_backup_bytes(&v1_backup(
             json!({"chatEndpointMode":"raw","enableVcpToolInjection":"ignored"}),
@@ -585,23 +458,50 @@ mod tests {
             json!({"chatEndpointMode":null,"enableVcpToolInjection":null}),
         ))
         .unwrap();
-        assert!(null.domains.is_empty());
+        assert_eq!(null.domains["server"], json!({"endpointMode":schema::domain_defaults(ConfigDomain::Server)["endpointMode"]}));
     }
 
     #[test]
-    fn v1_invalid_known_values_fail_without_echoing_private_input() {
-        for fields in [
-            json!({"chatEndpointMode":"private-token","enableVcpToolInjection":true}),
-            json!({"chatEndpointMode":false,"enableVcpToolInjection":true}),
-            json!({"vcpApiKey":{"secret":"private-token"}}),
-            json!({"distributedEnabled":"private-token"}),
-            json!({"voiceLanguage":"private-token"}),
-            json!({"enableVcpToolInjection":"private-token"}),
-        ] {
-            let error = parse_backup_bytes(&v1_backup(fields)).unwrap_err();
-            assert!(!error.contains("private-token"));
-            assert!(!error.is_empty());
+    fn v1_invalid_values_default_without_losing_valid_credentials_or_other_fields() {
+        let parsed = parse_backup_bytes(&v1_backup(json!({
+            "chatEndpointMode":"private-token", "vcpApiKey":"retained-key",
+            "distributedEnabled":"private-token", "voiceLanguage":"private-token",
+            "voiceTtsStylePrompt":"保留", "enableVcpToolInjection":true,
+        }))).unwrap();
+        assert_eq!(parsed.domains["server"], json!({"endpointMode":"standard","apiKey":"retained-key"}));
+        assert_eq!(parsed.domains["distributed"], json!({"enabled":false}));
+        assert_eq!(parsed.domains["voice"], json!({"asr":{"language":"auto"},"tts":{"stylePrompt":"保留"}}));
+        assert!(!serde_json::to_string(&parsed).unwrap().contains("private-token"));
+    }
+
+    #[test]
+    fn absent_preferences_stay_absent_but_a_bad_root_defaults_both_frontend_owners() {
+        let missing = parse_backup_bytes(&backup(json!({}))).unwrap();
+        assert!(missing.preferences.is_empty());
+        for preferences in [Value::Null, json!(false), json!([]), json!("invalid")] {
+            let bytes = serde_json::to_vec(&json!({
+                "app":"vcp-mobile", "kind":"vcp-mobile-settings-backup", "version":2,
+                "domains":{}, "preferences":preferences,
+            })).unwrap();
+            let parsed = parse_backup_bytes(&bytes).unwrap();
+            assert_eq!(Value::Object(parsed.preferences), json!({"theme":null,"chat":null}));
         }
+    }
+
+    #[test]
+    fn preference_values_keep_presence_for_their_frontend_default_owner() {
+        let bytes = serde_json::to_vec(&json!({
+            "app":"vcp-mobile", "kind":"vcp-mobile-settings-backup", "version":2, "domains":{},
+            "preferences":{
+                "theme":null,
+                "chat":{"messageHapticsEnabled":"invalid","unknownField":true},
+                "unknownGroup":{"anything":true}
+            }
+        })).unwrap();
+        let parsed = parse_backup_bytes(&bytes).unwrap();
+        assert_eq!(Value::Object(parsed.preferences), json!({
+            "theme":null,"chat":{"messageHapticsEnabled":"invalid"}
+        }));
     }
 
     #[test]

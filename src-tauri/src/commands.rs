@@ -107,7 +107,7 @@ macro_rules! app_command_handler {
         };
         use crate::vcp_modules::settings_manager::{
             export_config_domains, export_group_preferences, import_settings_backup,
-            parse_config_backup, read_settings, reset_settings_domain,
+            parse_config_backup, read_settings,
             update_settings,
         };
         use crate::vcp_modules::infra::share_inbox::{
@@ -262,7 +262,6 @@ macro_rules! app_command_handler {
                 parse_config_backup,
                 read_settings,
                 update_settings,
-                reset_settings_domain,
                 // ── 日记（diary）──
                 diary_cancel_search,
                 diary_cancel_semantic_search,

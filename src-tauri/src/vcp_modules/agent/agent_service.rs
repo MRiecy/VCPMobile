@@ -724,6 +724,7 @@ pub async fn get_assistants_snapshot(
     _group_state: State<'_, GroupManagerState>,
     db_state: State<'_, DbState>,
 ) -> Result<AssistantsSnapshot, String> {
+    crate::vcp_modules::group_service::normalize_group_local_settings(&db_state).await?;
     build_assistants_snapshot(&db_state.pool).await
 }
 
@@ -762,7 +763,7 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
     // 2. 获取 groups，同样只生成列表快照而不预热实体缓存。
     // 列表只暴露本机有效模式，实体与同步仍保留 groups.mode 的共享值。
     let group_rows = sqlx::query(
-        "SELECT g.group_id, g.name, COALESCE(g.mode, 'sequential') AS mode, av.dominant_color, local.settings_json
+        "SELECT g.group_id, g.name, av.dominant_color, local.settings_json
          FROM groups g
          LEFT JOIN avatars av ON av.owner_id = g.group_id AND av.owner_type = 'group' AND av.deleted_at IS NULL
          LEFT JOIN group_local_settings local ON local.group_id = g.group_id
@@ -800,12 +801,11 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
         let avatar_calculated_color: Option<String> = row.get("dominant_color");
         let name: String = row.get("name");
 
-        let shared_mode: String = row.get("mode");
         let settings_json: Option<String> = row.get("settings_json");
         let local_settings = crate::vcp_modules::group_types::parse_group_local_settings(
             settings_json.as_deref(),
-        )?;
-        let mode = local_settings.effective_mode(&shared_mode).to_string();
+        );
+        let mode = local_settings.effective_mode();
         let members = group_members.remove(&group_id).unwrap_or_default();
         groups_list.push(GroupListItem {
             id: group_id,
@@ -893,10 +893,10 @@ mod cache_generation_tests {
         assert!(state.caches.contains_key("agent-current"));
     }
 
-    /// 回归契约：列表快照必须携带 groups.mode——前端邀约横条/@选择器的
-    /// 模式判定只读快照，DTO 丢字段曾导致 invite_only 群重启后永不识别。
+    /// 列表快照只呈现本机模式；共享 mode 的取值与后续变化不影响手机执行。
     #[tokio::test]
     async fn snapshot_groups_carry_speaking_mode() {
+        use crate::vcp_modules::group_types::GroupChatMode;
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -929,24 +929,28 @@ mod cache_generation_tests {
         let snapshot = build_assistants_snapshot(&pool).await.expect("snapshot");
 
         let g1 = snapshot.groups.iter().find(|g| g.id == "g1").expect("g1");
-        assert_eq!(g1.mode, "invite_only");
+        assert_eq!(g1.mode, GroupChatMode::Sequential);
         assert_eq!(g1.members, vec!["a1".to_string()]);
 
-        // 历史数据 mode 可能为 NULL：必须回退 sequential 而非查询失败
+        // 没有本机设置的群使用手机默认，不读取共享 mode。
         let g2 = snapshot.groups.iter().find(|g| g.id == "g2").expect("g2");
-        assert_eq!(g2.mode, "sequential");
+        assert_eq!(g2.mode, GroupChatMode::Sequential);
 
         sqlx::query("INSERT INTO group_local_settings VALUES ('g1', ?, 1)")
-            .bind(r#"{"modeOverride":"jev"}"#)
+            .bind(r#"{"chatMode":"jev"}"#)
             .execute(&pool)
             .await
             .expect("set mobile mode");
         let snapshot = build_assistants_snapshot(&pool).await.expect("local snapshot");
-        assert_eq!(snapshot.groups.iter().find(|g| g.id == "g1").expect("g1").mode, "jev");
+        assert_eq!(snapshot.groups.iter().find(|g| g.id == "g1").expect("g1").mode, GroupChatMode::Jev);
         let shared_mode: String = sqlx::query_scalar("SELECT mode FROM groups WHERE group_id = 'g1'")
             .fetch_one(&pool)
             .await
             .expect("shared mode");
         assert_eq!(shared_mode, "invite_only");
+        sqlx::query("UPDATE groups SET mode = 'naturerandom' WHERE group_id = 'g1'")
+            .execute(&pool).await.expect("change shared mode");
+        let snapshot = build_assistants_snapshot(&pool).await.expect("snapshot after remote edit");
+        assert_eq!(snapshot.groups.iter().find(|group| group.id == "g1").expect("g1").mode, GroupChatMode::Jev);
     }
 }

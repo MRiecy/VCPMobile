@@ -4,19 +4,7 @@ import type { SettingsFieldPath } from '../../../core/config/fields';
 export const CONFIG_DOMAIN_LABELS: Record<ConfigDomain, string> = {
   identity: '用户身份', server: '主服务器', log: '日志连接', sync: '数据同步',
   distributed: '分布式', conversation: '对话辅助', voice: '语音', navigation: '侧栏排序',
-  jev: 'JEV 决策',
-};
-
-export const CONFIG_DOMAIN_RESET_SCOPE: Record<ConfigDomain, string> = {
-  identity: '用户名',
-  server: 'Chat 连接地址、请求入口和 API Key、管理员账号密码、图床密钥',
-  log: '日志连接地址和鉴权 Key',
-  sync: '同步 HTTP 与 WebSocket 地址、Token、日志级别和预渲染设置',
-  distributed: '分布式连接开关、服务器地址、鉴权 Key 和设备名称',
-  conversation: '话题总结模型',
-  voice: '语音连接与 API Key、识别、朗读、音色、风格指导和人声检测设置',
-  navigation: '智能体和群组排序',
-  jev: 'JEV 开关、服务商连接与 API Key、模型、超时重试和应用标识',
+  jev: 'JEV',
 };
 
 const FIELD_LABELS: Record<SettingsFieldPath, string> = {
@@ -38,11 +26,11 @@ const FIELD_LABELS: Record<SettingsFieldPath, string> = {
   'voice.vad.sensitivity': '人声检测灵敏度', 'voice.vad.endSilenceMs': '说完等待时间',
   'voice.vad.playbackOnsetMs': '朗读时插话确认',
   'navigation.agentOrder': '智能体排序', 'navigation.groupOrder': '群组排序',
-  'jev.enabled': '启用 JEV', 'jev.provider': 'JEV 服务商',
-  'jev.typesafe.apiUrl': 'TypeSafe API URL', 'jev.typesafe.apiKey': 'TypeSafe API Key', 'jev.typesafe.model': 'TypeSafe 模型',
-  'jev.openrouter.apiUrl': 'OpenRouter API URL', 'jev.openrouter.apiKey': 'OpenRouter API Key', 'jev.openrouter.model': 'OpenRouter 模型',
-  'jev.timeoutMs': '决策请求超时', 'jev.maxRetries': '最大重试次数', 'jev.retryBaseDelayMs': '重试基础延迟',
-  'jev.proxyUrl': 'JEV 代理 URL', 'jev.httpReferer': 'HTTP Referer', 'jev.appTitle': '应用标题',
+  'jev.enabled': '启用 JEV', 'jev.provider': '服务提供商',
+  'jev.typesafe.apiUrl': 'TypeSafe API 地址', 'jev.typesafe.apiKey': 'TypeSafe API Key', 'jev.typesafe.model': 'TypeSafe 模型',
+  'jev.openrouter.apiUrl': 'OpenRouter API 地址', 'jev.openrouter.apiKey': 'OpenRouter API Key', 'jev.openrouter.model': 'OpenRouter 模型',
+  'jev.timeoutMs': '响应超时', 'jev.maxRetries': '最大重试次数', 'jev.retryBaseDelayMs': '重试等待时间',
+  'jev.proxyUrl': '代理地址', 'jev.httpReferer': '应用网址', 'jev.appTitle': '应用名称',
 };
 
 export function configIssueLabel(issue: FieldIssue): string {

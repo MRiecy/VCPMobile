@@ -10,14 +10,13 @@ import { useSettingsEditSession } from "@/features/settings/editing/useSettingsE
 import { invokeMock, mockInvoke } from "../../mocks/tauri";
 import { makeSettings, makeConfigSnapshot, configRequestChanges } from '../../helpers/config';
 import { applySettingsFields, type SettingsFieldValues } from '@/core/config/fields';
-import type { ConfigUpdate, ConfigReset, ConfigSaveResult } from '@/core/config/generated/config';
+import type { ConfigUpdate, ConfigSaveResult } from '@/core/config/generated/config';
 import { emitTauriEvent } from '../../mocks/tauri';
 
-const { notify, confirm } = vi.hoisted(() => ({ notify: vi.fn(), confirm: vi.fn() }));
+const { notify } = vi.hoisted(() => ({ notify: vi.fn() }));
 vi.mock("@/core/stores/notification", () => ({
   useNotificationStore: () => ({ addNotification: notify }),
 }));
-vi.mock('@/core/stores/overlay', () => ({ useOverlayStore: () => ({ showConfirm: confirm }) }));
 
 const initialSettings = (): AppSettings => makeSettings({
   'identity.userName': 'original', 'server.url': 'https://vcp.example', 'server.apiKey': 'key',
@@ -70,8 +69,6 @@ function session<const Keys extends readonly SettingsEditableKey[]>(keys: Keys) 
 beforeEach(() => {
   setActivePinia(createPinia());
   notify.mockClear();
-  confirm.mockReset();
-  confirm.mockResolvedValue(false);
 });
 
 afterEach(() => {
@@ -273,42 +270,9 @@ describe("settings edit session", () => {
     expect(editor.dirty.value).toBe(true);
     editor.edit("identity.userName", "corrected-name");
     expect(editor.draft.value?.["identity.userName"]).toBe("corrected-name");
-    expect(confirm).not.toHaveBeenCalled();
   });
 
-  it.each([false, true])('only discards a reset-blocked draft after explicit confirmation: %s', async (accepted) => {
-    const server = backend();
-    const store = useSettingsStore();
-    await store.fetchSettings();
-    const editor = session(IDENTITY_FIELDS);
-    editor.edit('identity.userName', 'unsaved');
-    const damaged = makeConfigSnapshot(initialSettings(), '2');
-    damaged.domains.identity.health = 'unavailable';
-    damaged.domains.identity.issues = [{ domain: 'identity', field: '', code: 'invalidJson', message: '身份配置无法解析' }];
-    mockInvoke('read_settings', () => damaged);
-    confirm.mockResolvedValueOnce(accepted);
-
-    const leaving = editor.prepareLeave();
-    (await server.write(0)).respond({ status: 'rejected', issues: [
-      { domain: 'identity', field: '', code: 'requiresReset', message: '请在设置首页重置用户身份配置' },
-    ] });
-
-    expect(await leaving).toBe(accepted);
-    expect(confirm).toHaveBeenCalledWith(expect.objectContaining({ title: '放弃本页未保存修改并返回？' }));
-    expect(editor.ready.value).toBe(!accepted);
-    expect(editor.dirty.value).toBe(!accepted);
-    expect(editor.draft.value?.['identity.userName']).toBe('unsaved');
-    expect(invokeMock.mock.calls.filter(([command]) => command === 'read_settings')).toHaveLength(accepted ? 2 : 1);
-    expect(server.writes).toHaveLength(1);
-    if (accepted) expect(store.snapshot?.domains.identity.issues).toEqual(damaged.domains.identity.issues);
-    else {
-      expect(editor.leaving.value).toBe(false);
-      editor.edit('identity.userName', 'kept-editing');
-      expect(editor.draft.value?.['identity.userName']).toBe('kept-editing');
-    }
-  });
-
-  it('keeps normal validation failures editable without prompting or refreshing', async () => {
+  it('keeps validation failures editable and identifies the affected field', async () => {
     const server = backend();
     await useSettingsStore().fetchSettings();
     const editor = session(IDENTITY_FIELDS);
@@ -318,53 +282,10 @@ describe("settings edit session", () => {
       { domain: 'identity', field: 'userName', code: 'tooLong', message: '用户名过长' },
     ] });
     expect(await leaving).toBe(false);
-    expect(confirm).not.toHaveBeenCalled();
     expect(invokeMock.mock.calls.filter(([command]) => command === 'read_settings')).toHaveLength(1);
     expect(editor.ready.value).toBe(true);
     expect(editor.dirty.value).toBe(true);
-    expect(editor.fieldErrors.value[0].code).toBe('tooLong');
-  });
-
-  it('does not trap an explicitly discarded draft when refreshing the home notice fails', async () => {
-    const server = backend();
-    const store = useSettingsStore();
-    await store.fetchSettings();
-    const editor = session(IDENTITY_FIELDS);
-    editor.edit('identity.userName', 'unsaved');
-    confirm.mockResolvedValueOnce(true);
-    mockInvoke('read_settings', () => { throw new Error('read unavailable'); });
-    vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    const leaving = editor.prepareLeave();
-    (await server.write(0)).respond({ status: 'rejected', issues: [
-      { domain: 'identity', field: '', code: 'requiresReset', message: '需要重置' },
-    ] });
-    expect(await leaving).toBe(true);
-    expect(store.error).toContain('read unavailable');
-    expect(editor.ready.value).toBe(false);
-    expect(server.writes).toHaveLength(1);
-  });
-
-  it('does not prompt to discard on an explicit save or revive a disposed leave confirmation', async () => {
-    const server = backend();
-    await useSettingsStore().fetchSettings();
-    const editor = session(IDENTITY_FIELDS);
-    editor.edit('identity.userName', 'unsaved');
-    const rejection: ConfigSaveResult = { status: 'rejected', issues: [
-      { domain: 'identity', field: '', code: 'requiresReset', message: '需要重置' },
-    ] };
-    const saving = editor.save();
-    (await server.write(0)).respond(rejection);
-    expect(await saving).toMatchObject({ ok: false });
-    expect(confirm).not.toHaveBeenCalled();
-    let accept!: (value: boolean) => void;
-    confirm.mockImplementationOnce(() => new Promise<boolean>(resolve => { accept = resolve; }));
-    const leaving = editor.prepareLeave();
-    (await server.write(1)).respond(rejection);
-    await vi.waitFor(() => expect(confirm).toHaveBeenCalledOnce());
-    editor.dispose();
-    accept(true);
-    expect(await leaving).toBe(false);
-    expect(invokeMock.mock.calls.filter(([command]) => command === 'read_settings')).toHaveLength(1);
+    expect(editor.error.value).toBe('用户身份 · 用户名：用户名过长');
   });
 
   it("ends an old visit without cancelling its submitted write or changing a new draft", async () => {
@@ -422,22 +343,6 @@ describe("settings edit session", () => {
 });
 
 describe("settings Store queue", () => {
-  it('does not retry a domain reset or refresh its captured revision after a conflict', async () => {
-    const server = backend();
-    const store = useSettingsStore();
-    await store.fetchSettings();
-    const newer = makeConfigSnapshot(makeSettings({ 'identity.userName': 'changed-while-confirming' }), '2');
-    emitTauriEvent('vcp-config-changed', newer);
-    const reset = vi.fn((): ConfigSaveResult => ({ status: 'conflict', snapshot: newer, conflicts: [
-      { domain: 'identity', field: '', code: 'revisionConflict', message: '请重新确认重置范围' },
-    ] }));
-    mockInvoke('reset_settings_domain', reset);
-    expect(await store.resetDomain({ domain: 'identity', expectedRevision: '1' })).toMatchObject({ status: 'conflict' });
-    expect(reset).toHaveBeenCalledExactlyOnceWith({ request: { domain: 'identity', expectedRevision: '1' } });
-    expect(store.settings?.identity.userName).toBe('changed-while-confirming');
-    expect(server.writes).toHaveLength(0);
-  });
-
   it('keeps an older edit baseline through an external update and exposes a real field conflict', async () => {
     const server = backend();
     const store = useSettingsStore();
@@ -452,7 +357,7 @@ describe("settings Store queue", () => {
     expect(write.request.patches[0]).toMatchObject({ expectedRevision: '1', baseValues: { userName: 'original' } });
     write.respond({ status: 'conflict', snapshot: remote, conflicts: [{ domain: 'identity', field: 'userName', code: 'conflict', message: '用户名已被其他操作修改' }] });
     expect(await saving).toMatchObject({ ok: false });
-    expect(editor.fieldErrors.value[0].field).toBe('userName');
+    expect(editor.error.value).toBe('用户身份 · 用户名：用户名已被其他操作修改');
     expect(editor.draft.value?.['identity.userName']).toBe('local');
     editor.edit('identity.userName', 'explicit-new-intent');
     const retry = editor.save();
@@ -478,26 +383,6 @@ describe("settings Store queue", () => {
     await save;
     expect(store.settings?.identity.userName).toBe('remote');
     expect(store.settings?.server.apiKey).toBe('new-key');
-  });
-
-  it('queues a captured domain reset behind a save and accepts its committed snapshot', async () => {
-    const server = backend();
-    const store = useSettingsStore();
-    await store.fetchSettings();
-    const saving = store.updateFields({ 'server.apiKey': 'submitted-key' });
-    const write = await server.write(0);
-    const committed = makeConfigSnapshot(makeSettings({ 'server.apiKey': 'submitted-key' }), '3');
-    const reset = vi.fn((): ConfigSaveResult => ({ status: 'saved', snapshot: committed }));
-    mockInvoke('reset_settings_domain', reset);
-    const request: ConfigReset = { domain: 'identity', expectedRevision: '1' };
-    const resetting = store.resetDomain(request);
-    request.expectedRevision = '999';
-    expect(reset).not.toHaveBeenCalled();
-    write.commit();
-    await saving;
-    expect(await resetting).toMatchObject({ status: 'saved' });
-    expect(reset).toHaveBeenCalledExactlyOnceWith({ request: { domain: 'identity', expectedRevision: '1' } });
-    expect(store.settings).toEqual(committed.data);
   });
 
   it("captures patch arrays at enqueue time and describes only configuration persistence", async () => {

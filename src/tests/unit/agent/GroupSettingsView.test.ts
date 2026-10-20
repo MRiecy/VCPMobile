@@ -17,7 +17,7 @@ vi.mock('@/features/chat/chatMutationPolicy', () => ({
 const copy = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
 const makeGroup = (): GroupConfigDto => ({
   id: 'g1', name: '研究讨论', avatarCalculatedColor: null,
-  members: ['a1', 'a2', 'a3'], mode: 'sequential', modeOverride: null,
+  members: ['a1', 'a2', 'a3'], mode: 'sequential', chatMode: 'sequential',
   memberTags: { a1: '物理', a2: '文学' }, tagMatchMode: 'strict',
   groupPrompt: '原有群背景', invitePrompt: '', useUnifiedModel: false, unifiedModel: null,
   topics: [], createdAt: 1,
@@ -87,7 +87,7 @@ describe('GroupSettingsView editing and return saving', () => {
   }
 
   async function chooseMode(label: string) {
-    await wrapper!.findAll('button').find(button => button.text().includes('本机发言模式'))!.trigger('click');
+    await wrapper!.get('[aria-label="群聊模式"]').trigger('click');
     const overlay = useOverlayStore();
     const action = overlay.contextMenuConfig?.actions.find(item => item.label === label);
     if (!action) throw new Error(`Missing mode: ${label}`);
@@ -98,11 +98,26 @@ describe('GroupSettingsView editing and return saving', () => {
 
   const changes = () => invokeMock.mock.calls.filter(([command]) => command === 'update_group_config');
 
+  it('uses the independent chat mode with exactly four choices', async () => {
+    persisted.mode = 'jev';
+    const view = await open();
+    expect(view.get('[aria-label="群聊模式"]').text()).toContain('顺序发言');
+    expect(view.find('button[aria-label="下移 Nova"]').exists()).toBe(true);
+    await view.get('[aria-label="群聊模式"]').trigger('click');
+    expect(useOverlayStore().contextMenuConfig?.actions.map(action => [action.label, action.selected])).toEqual([
+      ['顺序发言', true], ['自然随机', false], ['邀请发言', false], ['JEV 智能群聊', false],
+    ]);
+    useOverlayStore().closeContextMenu();
+    await view.get('button[aria-label="返回并保存群组设置"]').trigger('click');
+    await flushPromises();
+    expect(changes()).toHaveLength(0);
+  });
+
   it('retains each mode draft and explicit speaker order across repeated mode changes', async () => {
     const view = await open();
     await view.get('button[aria-label="下移 Nova"]').trigger('click');
     await chooseMode('JEV 智能群聊');
-    await control('JEV 导航员提示词').setValue('有新证据时再发言');
+    await control('讨论规则').setValue('有新证据时再发言');
     await view.findAll('button').find(button => button.text().includes('成员发言风格'))!.trigger('click');
     await control('Luna').setValue('先辨认隐含前提');
     await chooseMode('自然随机');
@@ -111,7 +126,7 @@ describe('GroupSettingsView editing and return saving', () => {
     expect(view.findAll('button[aria-label^="上移 "]').map(button => button.attributes('aria-label')))
       .toEqual(['上移 Luna', '上移 Nova', '上移 Mira']);
     await chooseMode('JEV 智能群聊');
-    expect((control('JEV 导航员提示词').element as HTMLTextAreaElement).value).toBe('有新证据时再发言');
+    expect((control('讨论规则').element as HTMLTextAreaElement).value).toBe('有新证据时再发言');
     await view.findAll('button').find(button => button.text().includes('成员发言风格'))!.trigger('click');
     expect((control('Luna').element as HTMLTextAreaElement).value).toBe('先辨认隐含前提');
     expect(changes()).toHaveLength(0);
@@ -122,7 +137,7 @@ describe('GroupSettingsView editing and return saving', () => {
     expect(persisted.modeSettings.jev.memberStyles.a2).toBe('先辨认隐含前提');
     expect(persisted.memberTags?.a1).toBe('量子,数学');
     expect(persisted.mode).toBe('sequential');
-    expect(persisted.modeOverride).toBe('jev');
+    expect(persisted.chatMode).toBe('jev');
   });
 
   it('retains the page and draft after system-back save failure, then retries the same edit', async () => {
@@ -162,8 +177,8 @@ describe('GroupSettingsView editing and return saving', () => {
     expect(changes()).toHaveLength(1);
     const payload = changes()[0][1] as { groupId: string; updates: Record<string, unknown> };
     expect(payload.groupId).toBe('g1');
-    expect(Object.keys(payload.updates).sort()).toEqual(['modeOverride', 'modeSettings']);
-    expect(payload.updates.modeOverride).toBe('jev');
+    expect(Object.keys(payload.updates).sort()).toEqual(['chatMode', 'modeSettings']);
+    expect(payload.updates.chatMode).toBe('jev');
     expect(persisted.name).toBe('桌面刚同步的名字');
     expect(persisted.groupPrompt).toBe('更新后的群背景');
     expect(persisted.mode).toBe('naturerandom');

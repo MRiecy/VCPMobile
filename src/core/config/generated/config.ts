@@ -47,19 +47,15 @@ export type Settings = { identity: IdentityConfig, server: ServerConfig, log: Lo
 
 export type ConfigDomain = "identity" | "server" | "log" | "sync" | "distributed" | "conversation" | "voice" | "jev" | "navigation";
 
-export type DomainHealth = "ready" | "recovered" | "unavailable";
-
 export type FieldIssue = { domain: ConfigDomain, field: string, code: string, message: string, };
 
-export type DomainStatus = { revision: string, schemaVersion: number, issues: Array<FieldIssue>, health: DomainHealth, };
+export type DomainStatus = { revision: string, schemaVersion: number, };
 
 export type ConfigSnapshot = { data: Settings, domains: { [key in ConfigDomain]: DomainStatus }, };
 
 export type DomainPatch = { domain: ConfigDomain, expectedRevision: string, changes: { [key in string]: JsonValue }, baseValues: { [key in string]: JsonValue }, };
 
 export type ConfigUpdate = { patches: Array<DomainPatch>, };
-
-export type ConfigReset = { domain: ConfigDomain, expectedRevision: string, };
 
 export type ConfigSaveResult = { "status": "saved", snapshot: ConfigSnapshot, } | { "status": "rejected", issues: Array<FieldIssue>, } | { "status": "conflict", snapshot: ConfigSnapshot, conflicts: Array<FieldIssue>, };
 

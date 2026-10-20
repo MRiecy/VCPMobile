@@ -4,8 +4,8 @@
 //! global share one SQLite transaction. Once committed, runtime never reads or
 //! writes the old representation again.
 
-use super::schema::{domain_defaults, set_value_at_path};
-use super::types::{ConfigDomain, SYNC_LOG_LEVELS};
+use super::schema::{domain_defaults, normalize_domain, set_value_at_path};
+use super::types::ConfigDomain;
 use crate::vcp_modules::db_manager::DbState;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -50,20 +50,9 @@ pub(super) async fn ensure_migrated(db: &DbState) -> Result<(), String> {
         None => default_domains(),
         Some(_) => match parsed.as_ref().filter(|value| value.is_object()) {
             Some(value) => split_legacy(value)?,
-            // A malformed original is archived intact. Only domains that
-            // actually owned legacy fields remain unavailable until repaired.
-            // Newly introduced domains have no damaged predecessor to inherit.
-            None => ConfigDomain::ALL
-                .into_iter()
-                .map(|domain| {
-                    let value = if legacy_fields().iter().any(|(owner, _, _)| *owner == domain) {
-                        Value::Null
-                    } else {
-                        domain_defaults(domain)
-                    };
-                    (domain, value)
-                })
-                .collect(),
+            // The original remains in the one-time archive. An unreadable
+            // value contributes no fields to the current typed defaults.
+            None => default_domains(),
         },
     };
 
@@ -173,43 +162,14 @@ pub(super) fn legacy_fields() -> &'static [(ConfigDomain, &'static str, &'static
 }
 
 fn split_legacy(legacy: &Value) -> Result<BTreeMap<ConfigDomain, Value>, String> {
-    use ConfigDomain::*;
     let mut values = default_domains();
     for (domain, old_name, path) in legacy_fields() {
         if let (Some(value), Some(target)) = (legacy.get(*old_name), values.get_mut(domain)) {
             set_value_at_path(target, path, value.clone())?;
         }
     }
-    if let Some(level) = legacy.get("syncLogLevel").and_then(Value::as_str) {
-        // The former logger accepted case/whitespace and WARNING. Preserve that
-        // meaning only at the migration boundary; new data uses canonical IDs.
-        let normalized = level.trim().to_ascii_uppercase();
-        let normalized = if normalized == "WARNING" {
-            "WARN"
-        } else {
-            &normalized
-        };
-        if SYNC_LOG_LEVELS.contains(&normalized) {
-            if let Some(sync) = values.get_mut(&Sync) {
-                set_value_at_path(sync, "logLevel", Value::String(normalized.into()))?;
-            }
-        }
-    }
-    if legacy.get("chatEndpointMode").is_none() {
-        // Preserve the actual historical endpoint behavior only while moving
-        // existing data; new installations use the single Rust default.
-        let endpoint = if legacy
-            .get("enableVcpToolInjection")
-            .and_then(Value::as_bool)
-            == Some(false)
-        {
-            "standard"
-        } else {
-            "vcpTools"
-        };
-        if let Some(server) = values.get_mut(&Server) {
-            set_value_at_path(server, "endpointMode", Value::String(endpoint.into()))?;
-        }
+    for (domain, value) in &mut values {
+        *value = normalize_domain(*domain, value);
     }
     Ok(values)
 }
@@ -220,24 +180,35 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn legacy_log_levels_keep_existing_meaning_without_hiding_invalid_input() {
-        for (old, canonical) in [
-            (" debug ", "DEBUG"),
-            ("WARNING", "WARN"),
-            ("trace", "TRACE"),
-        ] {
-            let domains = split_legacy(&json!({"syncLogLevel":old})).unwrap();
-            assert_eq!(domains[&ConfigDomain::Sync]["logLevel"], canonical);
-        }
-        let invalid = split_legacy(&json!({"syncLogLevel":" custom "})).unwrap();
-        assert_eq!(invalid[&ConfigDomain::Sync]["logLevel"], " custom ");
+    fn voice_mode_migration_uses_default_for_invalid_input_without_changing_other_voice_fields() {
+        let domains = split_legacy(&json!({
+            "voiceTtsMode":"unavailable-mode", "voiceTtsVoice":"Mia",
+            "voiceTtsStylePrompt":"保留", "voiceApiKey":"retained-key",
+        })).unwrap();
+        let voice = &domains[&ConfigDomain::Voice];
+        assert_eq!(voice["tts"]["mode"], "builtin");
+        assert_eq!(voice["tts"]["voice"], "Mia");
+        assert_eq!(voice["tts"]["stylePrompt"], "保留");
+        assert_eq!(voice["connection"]["apiKey"], "retained-key");
     }
 
     #[test]
-    fn database_migration_keeps_its_historical_missing_endpoint_policy() {
+    fn legacy_log_levels_follow_current_values_and_defaults() {
+        for old in [" debug ", "WARNING", "trace", " custom "] {
+            let domains = split_legacy(&json!({"syncLogLevel":old})).unwrap();
+            assert_eq!(domains[&ConfigDomain::Sync]["logLevel"], domain_defaults(ConfigDomain::Sync)["logLevel"]);
+        }
+        let valid = split_legacy(&json!({"syncLogLevel":"WARN"})).unwrap();
+        assert_eq!(valid[&ConfigDomain::Sync]["logLevel"], "WARN");
+    }
+
+    #[test]
+    fn database_migration_uses_current_endpoint_default_without_old_flag_aliases() {
         let missing = split_legacy(&json!({})).unwrap();
-        assert_eq!(missing[&ConfigDomain::Server]["endpointMode"], "vcpTools");
-        let disabled = split_legacy(&json!({"enableVcpToolInjection":false})).unwrap();
-        assert_eq!(disabled[&ConfigDomain::Server]["endpointMode"], "standard");
+        assert_eq!(missing[&ConfigDomain::Server]["endpointMode"], domain_defaults(ConfigDomain::Server)["endpointMode"]);
+        for enabled in [false, true] {
+            let legacy = split_legacy(&json!({"enableVcpToolInjection":enabled})).unwrap();
+            assert_eq!(legacy[&ConfigDomain::Server]["endpointMode"], domain_defaults(ConfigDomain::Server)["endpointMode"]);
+        }
     }
 }

@@ -137,7 +137,7 @@ export const useAssistantStore = defineStore("assistant", () => {
       invalidateSnapshotLoads();
       notificationStore.addNotification({
         type: "success",
-        title: "Group 创建成功",
+        title: "群组已创建",
         message: `群组 "${name}" 已创建`,
         toastOnly: true,
       });
@@ -160,7 +160,7 @@ export const useAssistantStore = defineStore("assistant", () => {
       groups.value = groups.value.filter((g) => g.id !== id);
       notificationStore.addNotification({
         type: "success",
-        title: "Group 删除成功",
+        title: "群组已解散",
         message: "群组已解散",
         toastOnly: true,
       });
@@ -207,7 +207,7 @@ export const useAssistantStore = defineStore("assistant", () => {
       // a concurrent sync. Send only the fields this editor actually changed.
       const editableFields = [
         "name", "members", "memberTags", "groupPrompt", "invitePrompt",
-        "useUnifiedModel", "unifiedModel", "tagMatchMode", "modeOverride",
+        "useUnifiedModel", "unifiedModel", "tagMatchMode", "chatMode",
         "modeSettings", "enableContextMessageWindow", "contextMessageWindowSize",
       ] as const;
       const updates = baseline ? Object.fromEntries(editableFields
@@ -226,8 +226,8 @@ export const useAssistantStore = defineStore("assistant", () => {
           ...updated[index],
           name: canonical.name,
           members: canonical.members,
-          // 列表与运行使用本机有效模式，共享原值仅留在完整配置中。
-          mode: canonical.modeOverride ?? canonical.mode,
+          // 群聊模式独立保存，同步的 mode 不参与运行或列表呈现。
+          mode: canonical.chatMode,
           avatarCalculatedColor: canonical.avatarCalculatedColor || updated[index].avatarCalculatedColor,
         };
         groups.value = updated;
@@ -235,7 +235,7 @@ export const useAssistantStore = defineStore("assistant", () => {
 
       notificationStore.addNotification({
         type: "success",
-        title: "Group 配置保存成功",
+        title: "群组设置已保存",
         message: "群组设置已更新",
         toastOnly: true,
       });
@@ -256,7 +256,7 @@ export const useAssistantStore = defineStore("assistant", () => {
       });
       await avatarStore.refreshAvatar(ownerType, ownerId, hash);
       
-      const label = ownerType === 'agent' ? 'Agent' : ownerType === 'group' ? 'Group' : '用户';
+      const label = ownerType === 'agent' ? 'Agent' : ownerType === 'group' ? '群组' : '用户';
       notificationStore.addNotification({
         type: "success",
         title: `${label} 头像更新成功`,
@@ -267,7 +267,7 @@ export const useAssistantStore = defineStore("assistant", () => {
       return hash;
     } catch (e: any) {
       console.error(`[AssistantStore] Failed to save avatar for ${ownerType}:`, e);
-      const label = ownerType === 'agent' ? 'Agent' : ownerType === 'group' ? 'Group' : '用户';
+      const label = ownerType === 'agent' ? 'Agent' : ownerType === 'group' ? '群组' : '用户';
       notificationStore.addNotification({
         type: "error",
         title: `${label} 头像更新失败`,

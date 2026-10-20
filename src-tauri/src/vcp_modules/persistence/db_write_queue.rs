@@ -797,7 +797,7 @@ mod tests {
             ))
             .expect("create local settings schema");
         let mut local = crate::vcp_modules::group_types::GroupLocalSettings::default();
-        local.mode_override = Some("jev".into());
+        local.chat_mode = crate::vcp_modules::group_types::GroupChatMode::Jev;
         local.mode_settings.sequential.speaker_order = vec!["b".into(), "a".into()];
         local.mode_settings.jev.history_window = 23;
         let raw = serde_json::to_string(&local).expect("encode local settings");

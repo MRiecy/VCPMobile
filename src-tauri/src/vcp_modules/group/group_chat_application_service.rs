@@ -7,6 +7,7 @@ use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_context_assembler::assemble_group_context;
 use crate::vcp_modules::group_service::{read_group_config, GroupManagerState};
+use crate::vcp_modules::group_types::GroupChatMode;
 use crate::vcp_modules::group_speaking_policy::{
     build_jev_request, determine_naturerandom_speakers, determine_sequential_speakers,
     parse_jev_decision, GroupMemberHistoryStats,
@@ -454,51 +455,27 @@ pub(crate) async fn process_prepared_group_chat_message(
         return Ok(json!({ "status": "cancelled" }));
     }
 
-    if group_config.effective_mode() == "jev" {
-        let session = group_turn.start_session("user_message", false)?;
-        let reservation = session.reserve()?;
-        let scope = submit_group_session_input(&app_handle, reservation, &user_message, reply_policy.clone(), voice_cancellation.unwrap_or_else(|| group_turn.child_token())).await?;
-        spawn_jev_session(app_handle.clone(), group_turn, session, group_id, topic_id, connection);
-        if reply_policy.is_some() { return scope.wait().await; }
-        return Ok(json!({"status":"accepted"}));
-    }
-
-    // 为了给 AI 决策提供上下文，我们只轻量读取最新的 8 条纯文本和附件（不加载任何 UI 渲染数据）
-    let recent_history_for_decision = message_service::load_chat_text_history_for_context(
-        &app_handle,
-        &topic_key,
-        Some(9), // 八条历史和当前用户消息
-        None,
-        false, // include_extracted_text: 决策发言者不需要大体积的提取文本内容
-    )
-    .await?;
-
-    // 4. 决策引擎：谁该说话？
-    let speakers = if group_config.effective_mode() == "sequential" {
-        determine_sequential_speakers(&active_member_configs, &group_config)
-    } else if group_config.effective_mode() == "naturerandom" {
-        determine_naturerandom_speakers(
-            &active_member_configs,
-            &recent_history_for_decision,
-            &group_config,
-            &user_message,
-        )
-    } else if group_config.effective_mode() == "invite_only" {
-        // 邀请发言：用户消息不触发自动回复，发言由 invite_group_member_to_speak 显式驱动
-        return Ok(json!({
-            "status": "no_ai_response",
-            "reason": "invite_only",
-        }));
-    } else {
-        log::warn!(
-            "[GroupChatAppService] Mode {} not implemented, ignoring.",
-            group_config.mode
-        );
-        return Ok(json!({
-            "status": "no_ai_response",
-            "reason": "mode_not_implemented",
-            "mode": group_config.mode,
-        }));
+    // 强类型模式在配置边界已经规范化，不再保留未知模式的静默分支。
+    let speakers = match group_config.effective_mode() {
+        GroupChatMode::Jev => {
+            let session = group_turn.start_session("user_message", false)?;
+            let reservation = session.reserve()?;
+            let scope = submit_group_session_input(&app_handle, reservation, &user_message, reply_policy.clone(), voice_cancellation.unwrap_or_else(|| group_turn.child_token())).await?;
+            spawn_jev_session(app_handle.clone(), group_turn, session, group_id, topic_id, connection);
+            if reply_policy.is_some() { return scope.wait().await; }
+            return Ok(json!({"status":"accepted"}));
+        }
+        GroupChatMode::Sequential => determine_sequential_speakers(&active_member_configs, &group_config),
+        GroupChatMode::NaturalRandom => {
+            // 八条历史和当前用户消息，不加载 UI 渲染块或大体积提取文本。
+            let recent_history_for_decision = message_service::load_chat_text_history_for_context(
+                &app_handle, &topic_key, Some(9), None, false,
+            ).await?;
+            determine_naturerandom_speakers(&active_member_configs, &recent_history_for_decision, &group_config, &user_message)
+        }
+        GroupChatMode::InviteOnly => {
+            return Ok(json!({"status":"no_ai_response", "reason":"invite_only"}));
+        }
     };
 
     if speakers.is_empty() {
@@ -729,7 +706,7 @@ async fn run_jev_session(
             group_id.into(),
         )
         .await?;
-        if config.effective_mode() != "jev" {
+        if config.effective_mode() != GroupChatMode::Jev {
             if session.close_if_current(input_revision, "mode_changed")? {
                 return Ok(());
             }
@@ -902,7 +879,7 @@ pub async fn control_group_session(
         payload.group_id.clone(),
     )
     .await?;
-    if config.effective_mode() != "jev" {
+    if config.effective_mode() != GroupChatMode::Jev {
         return Err("当前群组未启用 JEV 模式".into());
     }
     let key = TopicKey::new("group", &payload.group_id, &payload.topic_id);
@@ -1080,7 +1057,7 @@ mod group_turn_tests {
                 socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", response.len(), response).as_bytes()).await.unwrap();
             }
         });
-        let group: GroupConfig = serde_json::from_value(json!({"id":"group","members":["member"],"modeOverride":"jev"})).unwrap();
+        let group: GroupConfig = serde_json::from_value(json!({"id":"group","members":["member"],"chatMode":"jev"})).unwrap();
         let members: Vec<AgentConfig> = serde_json::from_value(json!([{"id":"member","name":"Member","model":"test","streamOutput":false}])).unwrap();
         let session = GroupSession::new("fixture".into(), CancellationToken::new(), "user_message", false);
         let runtime = session.decision_context(0).unwrap().unwrap();
@@ -1192,7 +1169,7 @@ mod group_turn_tests {
         ]))
         .expect("speaker configurations");
         let group: GroupConfig = serde_json::from_value(json!({
-            "id": "group", "members": ["first", "second"], "mode": "invite_only"
+            "id": "group", "members": ["first", "second"], "chatMode": "invite_only"
         }))
         .expect("group configuration");
         let connection = ChatConnectionSnapshot {
@@ -1346,7 +1323,7 @@ pub async fn invite_group_member_to_speak(
     );
     let topic_key = TopicKey::new("group", &payload.group_id, &payload.topic_id);
     let group_config = read_group_config(app_handle.clone(), group_state.clone(), payload.group_id.clone()).await?;
-    if group_config.effective_mode() == "jev" {
+    if group_config.effective_mode() == GroupChatMode::Jev {
         if payload.agent_ids.is_empty() || payload.agent_ids.iter().any(|id| !group_config.members.contains(id)) {
             return Err("请选择当前群组中的成员".into());
         }

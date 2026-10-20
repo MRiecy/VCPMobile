@@ -5,10 +5,12 @@ import {
   applyConfigBackup,
   captureBackupPreferences,
   configBackupScopes,
+  normalizeParsedConfigBackup,
   type BackupDomains,
 } from "../../../features/settings/useConfigBackup";
-import { useThemeStore } from '../../../core/stores/theme';
+import { THEME_PREFERENCE_DEFAULTS, useThemeStore } from '../../../core/stores/theme';
 import { useChatPreferencesStore } from '../../../features/chat/preferences/store';
+import { CHAT_PREFERENCE_DEFAULTS } from '../../../features/chat/preferences/model';
 
 
 beforeEach(() => {
@@ -46,15 +48,15 @@ function makeDomains(): BackupDomains {
 describe('配置恢复的真实领域状态与失败边界', () => {
   it('群设置只传递已提供的嵌套字段，显式空值仍保留给同一次数据库提交', async () => {
     const groupPreferences = {
-      'group-a': { modeOverride: null, modeSettings: { jev: { speakerThreshold: 0.25, memberStyles: {} } } },
+      'group-a': { chatMode: 'sequential' as const, modeSettings: { jev: { speakerThreshold: 0.25, memberStyles: {} } } },
       'group-b': { enableContextMessageWindow: false, modeSettings: { sequential: { speakerOrder: [] } } },
     };
     const backup = { domains: { jev: { enabled: true } }, groupPreferences, exportedAt: '' };
     const applySettings = vi.fn(async () => {});
-    expect(configBackupScopes(backup)).toEqual(['JEV 决策服务', '群聊本机设置']);
+    expect(configBackupScopes(backup)).toEqual(['JEV 设置', '群聊设置']);
     const result = await applyConfigBackup(backup, applySettings);
     expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'jev.enabled': true }, groupPreferences);
-    expect(result.applied).toEqual(['JEV 决策服务', '群聊本机设置']);
+    expect(result.applied).toEqual(['JEV 设置', '群聊设置']);
     expect(groupPreferences['group-a']).not.toHaveProperty('contextMessageWindowSize');
     expect(groupPreferences['group-a'].modeSettings.jev).not.toHaveProperty('historyWindow');
   });
@@ -141,9 +143,9 @@ describe('配置恢复的真实领域状态与失败边界', () => {
     expect(result).toEqual({ applied: ['主服务器连接'], skipped: [], failed: [] });
   });
 
-  it('不可用主题保持原样，其他偏好和空总结模型仍可恢复', async () => {
+  it('不可用主题回退默认，合法深浅模式和其他偏好仍独立恢复', async () => {
     const theme = useThemeStore();
-    await theme.restorePreferences({ mode: 'dark' });
+    await theme.restorePreferences({ themeKey: 'themes-simple-bw.ts', mode: 'dark' });
     const applySettings = vi.fn(async () => {});
     const backup = {
       domains: { conversation: { topicSummaryModel: '' } }, exportedAt: '',
@@ -152,11 +154,54 @@ describe('配置恢复的真实领域状态与失败边界', () => {
     expect(configBackupScopes(backup)).toEqual(['话题总结模型', '主题与深浅模式', '聊天偏好']);
     const result = await applyConfigBackup(backup, applySettings);
     expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'conversation.topicSummaryModel': '' }, {});
-    expect(theme.mode).toBe('dark');
-    expect(theme.currentTheme).toBe('themes-star-abyss.ts');
+    expect(theme.mode).toBe('light');
+    expect(theme.currentTheme).toBe(THEME_PREFERENCE_DEFAULTS.themeKey);
     expect(useChatPreferencesStore().messageHapticsEnabled).toBe(false);
-    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped).toEqual([]);
     expect(result.failed).toEqual([]);
+  });
+
+  it('导入确认前按各偏好owner规范化坏值，缺项不补而合法兄弟保留', async () => {
+    const theme = useThemeStore();
+    await theme.restorePreferences({ themeKey: 'themes-bear-holiday.ts', mode: 'dark' });
+    const chat = useChatPreferencesStore();
+    chat.setCollapseToolsWhileStreaming(true);
+    const normalized = normalizeParsedConfigBackup({
+      domains: {}, exportedAt: '', preferences: {
+        theme: { mode: null, ignored: true },
+        chat: { presentationMode: 'future-mode', smoothStreamingEnabled: 'true', messageHapticsEnabled: false },
+        unknown: { enabled: true },
+      },
+    });
+    expect(normalized.preferences).toEqual({
+      theme: { mode: THEME_PREFERENCE_DEFAULTS.mode },
+      chat: { presentationMode: CHAT_PREFERENCE_DEFAULTS.presentationMode, smoothStreamingEnabled: false, messageHapticsEnabled: false },
+    });
+    expect(configBackupScopes(normalized)).toEqual(['主题与深浅模式', '聊天偏好']);
+    const applySettings = vi.fn(async () => {});
+    const result = await applyConfigBackup(normalized, applySettings);
+    expect(applySettings).not.toHaveBeenCalled();
+    expect(result.failed).toEqual([]);
+    expect(theme.currentTheme).toBe('themes-bear-holiday.ts');
+    expect(theme.mode).toBe('light');
+    expect(chat.presentationMode).toBe('bubble');
+    expect(chat.smoothStreamingEnabled).toBe(false);
+    expect(chat.messageHapticsEnabled).toBe(false);
+    expect(chat.collapseToolsWhileStreaming).toBe(true);
+  });
+
+  it('坏偏好组回退该owner默认，缺失或仅含未知字段不生成恢复项', () => {
+    expect(normalizeParsedConfigBackup({ domains: {}, exportedAt: '', preferences: { theme: false } }).preferences)
+      .toEqual({ theme: THEME_PREFERENCE_DEFAULTS });
+    expect(normalizeParsedConfigBackup({ domains: {}, exportedAt: '', preferences: { chat: null } }).preferences)
+      .toEqual({ chat: CHAT_PREFERENCE_DEFAULTS });
+    expect(normalizeParsedConfigBackup({ domains: {}, exportedAt: '', preferences: null }).preferences)
+      .toEqual({ theme: THEME_PREFERENCE_DEFAULTS, chat: CHAT_PREFERENCE_DEFAULTS });
+    const missing = { domains: {}, exportedAt: '' };
+    expect(normalizeParsedConfigBackup(missing)).toEqual(missing);
+    expect(configBackupScopes(normalizeParsedConfigBackup({
+      domains: {}, exportedAt: '', preferences: { theme: { unknown: true }, chat: {}, unknown: false },
+    }))).toEqual([]);
   });
 
   it('局部存储失败如实返回已恢复/未恢复范围，并能从实际存储重新读取成功项', async () => {

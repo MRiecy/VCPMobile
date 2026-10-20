@@ -7,9 +7,9 @@ import { deleteTempFile } from "tauri-plugin-vcp-mobile";
 import { pickFile, withNativeFileOperation } from "../../core/utils/nativeFilePicker";
 import type { AppSettings } from "../../core/stores/settings";
 import type { SettingsFieldValues } from "../../core/config/fields";
-import { normalizeThemeModuleKey, useThemeStore, type ThemePreferences } from "../../core/stores/theme";
+import { normalizeThemePreferencePatch, useThemeStore, type ThemePreferences } from "../../core/stores/theme";
 import { useChatPreferencesStore } from "../chat/preferences/store";
-import type { ChatPreferences } from "../chat/preferences/model";
+import { normalizeChatPreferencePatch, type ChatPreferences } from "../chat/preferences/model";
 import type { DownloadsSaveResultDto } from "../../core/types/native";
 import type { GroupLocalSettings, GroupLocalSettingsPatch } from '../../core/types/assistant';
 import { isAndroid, isIOS } from "../../core/utils/platform";
@@ -21,7 +21,7 @@ export const CONFIG_BACKUP_EXTENSION = ".vcpcfg.json";
 export const MAX_BACKUP_FILE_BYTES = 1024 * 1024;
 
 type PartialConfig<T> = { [K in keyof T]?: T[K] extends readonly unknown[] ? T[K] : T[K] extends object ? PartialConfig<T[K]> : T[K] };
-/** Rust schema owns export eligibility and import validation; no second field whitelist. */
+/** Rust owns domain normalization and export eligibility; preferences keep their frontend owners. */
 export type BackupDomains = PartialConfig<AppSettings>;
 
 export interface ConfigBackupFile {
@@ -41,6 +41,31 @@ export interface ParsedConfigBackup {
   exportedAt: string;
 }
 
+/** Rust 只识别偏好字段，偏好值及默认规则由各自的前端 owner 解释。 */
+export type RawParsedConfigBackup = Omit<ParsedConfigBackup, 'preferences'> & { preferences?: unknown };
+
+export function normalizeParsedConfigBackup(backup: RawParsedConfigBackup): ParsedConfigBackup {
+  if (backup.preferences === undefined) return backup as ParsedConfigBackup;
+  const raw = backup.preferences;
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ...backup, preferences: {
+      theme: normalizeThemePreferencePatch(null),
+      chat: normalizeChatPreferencePatch(null),
+    } };
+  }
+  const source = raw as Record<string, unknown>;
+  const preferences: NonNullable<ParsedConfigBackup['preferences']> = {};
+  if (Object.prototype.hasOwnProperty.call(source, 'theme')) {
+    const theme = normalizeThemePreferencePatch(source.theme);
+    if (Object.keys(theme).length) preferences.theme = theme;
+  }
+  if (Object.prototype.hasOwnProperty.call(source, 'chat')) {
+    const chat = normalizeChatPreferencePatch(source.chat);
+    if (Object.keys(chat).length) preferences.chat = chat;
+  }
+  return { ...backup, preferences };
+}
+
 export interface BackupImportResult {
   applied: string[];
   skipped: string[];
@@ -50,7 +75,7 @@ export interface BackupImportResult {
 const DOMAIN_LABELS: Record<keyof AppSettings, string> = {
   identity: '用户身份', server: '主服务器连接', log: '日志连接', sync: '数据同步',
   distributed: '分布式系统', conversation: '话题总结模型', voice: '语音服务', navigation: '侧栏排序',
-  jev: 'JEV 决策服务',
+  jev: 'JEV 设置',
 };
 
 const hasFields = (value: object | undefined): boolean => Boolean(value && Object.keys(value).length);
@@ -73,17 +98,13 @@ export function backupFieldChanges(domains: BackupDomains): Partial<SettingsFiel
 }
 
 export function configBackupScopes(backup: ParsedConfigBackup): string[] {
+  backup = normalizeParsedConfigBackup(backup);
   return [
     ...settingsScopes(backup.domains),
     ...(hasFields(backup.preferences?.theme) ? ['主题与深浅模式'] : []),
     ...(hasFields(backup.preferences?.chat) ? ['聊天偏好'] : []),
-    ...(hasFields(backup.groupPreferences) ? ['群聊本机设置'] : []),
+    ...(hasFields(backup.groupPreferences) ? ['群聊设置'] : []),
   ];
-}
-
-export function unavailableBackupTheme(backup: ParsedConfigBackup): string | null {
-  const key = backup.preferences?.theme?.themeKey;
-  return key !== undefined && !normalizeThemeModuleKey(key) ? key : null;
 }
 
 export function captureBackupPreferences(): ConfigBackupFile['preferences'] {
@@ -100,17 +121,18 @@ export function captureBackupPreferences(): ConfigBackupFile['preferences'] {
   };
 }
 
-/** Apply only validated, present fields through their existing persistence owners. */
+/** Apply present, normalized fields through their existing persistence owners. */
 export async function applyConfigBackup(
   backup: ParsedConfigBackup,
   applySettings: (changes: Partial<SettingsFieldValues>, groupPreferences: Record<string, GroupLocalSettingsPatch>) => Promise<void>,
 ): Promise<BackupImportResult> {
+  backup = normalizeParsedConfigBackup(backup);
   const result: BackupImportResult = { applied: [], skipped: [], failed: [] };
   if (backup.domains.voice?.tts?.mode === 'clone' || backup.domains.voice?.tts?.cloneSampleId) {
     result.skipped.push('复刻参考音频不包含在配置备份中；请在语音设置中确认或重新导入本机样本');
   }
   const databaseScopes = settingsScopes(backup.domains);
-  if (hasFields(backup.groupPreferences)) databaseScopes.push('群聊本机设置');
+  if (hasFields(backup.groupPreferences)) databaseScopes.push('群聊设置');
   if (databaseScopes.length) {
     try {
       await applySettings(backupFieldChanges(backup.domains), backup.groupPreferences ?? {});
@@ -122,17 +144,12 @@ export async function applyConfigBackup(
 
   const theme = backup.preferences?.theme;
   if (hasFields(theme)) {
-    const missing = unavailableBackupTheme(backup);
-    if (missing !== null) {
-      result.skipped.push(`主题 ${missing} 在当前版本不可用，已保留当前主题与深浅模式`);
-    } else {
-      try {
-        const applied = await useThemeStore().restorePreferences(theme!);
-        if (applied.ok) result.applied.push('主题与深浅模式');
-        else result.failed.push({ scope: '主题与深浅模式', message: applied.error || '主题应用失败' });
-      } catch (error) {
-        result.failed.push({ scope: '主题与深浅模式', message: String(error) });
-      }
+    try {
+      const applied = await useThemeStore().restorePreferences(theme!);
+      if (applied.ok) result.applied.push('主题与深浅模式');
+      else result.failed.push({ scope: '主题与深浅模式', message: applied.error || '主题应用失败' });
+    } catch (error) {
+      result.failed.push({ scope: '主题与深浅模式', message: String(error) });
     }
   }
 
@@ -281,7 +298,8 @@ export async function pickConfigBackup(operationId: string): Promise<ParsedConfi
   }
   const picked = await pickFile('config', { operationId, maxBytes: MAX_BACKUP_FILE_BYTES });
   try {
-    return await invoke<ParsedConfigBackup>('parse_config_backup', { path: picked.path });
+    const parsed = await invoke<RawParsedConfigBackup>('parse_config_backup', { path: picked.path });
+    return normalizeParsedConfigBackup(parsed);
   } finally {
     await deleteTempFile(picked.path).catch(console.warn);
   }

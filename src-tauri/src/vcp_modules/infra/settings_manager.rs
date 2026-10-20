@@ -88,22 +88,6 @@ pub async fn import_settings_backup<R: Runtime>(
         .await
 }
 
-#[tauri::command]
-pub async fn reset_settings_domain<R: Runtime>(
-    app_handle: AppHandle<R>,
-    state: State<'_, SettingsState>,
-    request: ConfigReset,
-) -> Result<ConfigSaveResult, String> {
-    let app = app_handle.clone();
-    state
-        .reset(
-            app_handle.state::<DbState>().inner(),
-            request,
-            move |old, snapshot| settings_committed(app, old, snapshot),
-        )
-        .await
-}
-
 fn settings_committed<R: Runtime>(
     app: AppHandle<R>,
     old: Arc<Settings>,

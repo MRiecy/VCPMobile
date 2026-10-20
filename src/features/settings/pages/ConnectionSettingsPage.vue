@@ -10,7 +10,6 @@ import SyncSettingsSection from '../components/SyncSettingsSection.vue';
 import ConfigBackupSection from '../components/ConfigBackupSection.vue';
 import { CONNECTION_FIELDS, type ConnectionFields } from '../editing/fieldSets';
 import { useSettingsPageSession } from '../editing/useSettingsPageSession';
-import SettingsDomainIssues from '../editing/SettingsDomainIssues.vue';
 import type { SettingsSaveResult } from '../editing/useSettingsEditSession';
 import { applyConfigBackup, type BackupImportResult, type ParsedConfigBackup } from '../useConfigBackup';
 
@@ -66,7 +65,7 @@ const applyImport = async (backup: ParsedConfigBackup): Promise<BackupImportResu
         } catch {
           useNotificationStore().addNotification({
             type: 'warning', title: '配置已导入',
-            message: '群聊本机设置已保存，列表暂未刷新；请重新打开群聊。', toastOnly: true,
+            message: '群聊设置已保存，请重新打开群聊查看。', toastOnly: true,
           });
         }
       }
@@ -88,7 +87,6 @@ defineExpose({
       <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading" @click="reload">重试</button>
     </p>
     <template v-if="draft">
-      <SettingsDomainIssues :domains="session.domainIssues.value" :errors="session.fieldErrors.value" :fields="CONNECTION_FIELDS" />
       <SettingsSection title="核心连接">
         <VcpCoreSettingsSection :settings="draft" :active="active" :disabled="disabled" :commit="commitForAction" @edit="edit" />
       </SettingsSection>

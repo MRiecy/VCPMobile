@@ -104,7 +104,7 @@ impl JevProviderConfig {
 }
 
 // Serde's struct-level default uses exactly the same source as new installs and
-// field recovery; there are no separate per-field deserialization defaults.
+// field normalization; there are no separate per-field defaults.
 macro_rules! config_struct {
     ($name:ident { $($field:ident: $ty:ty = $default:expr),* $(,)? }) => {
         #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -283,15 +283,6 @@ impl std::str::FromStr for ConfigDomain {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(feature = "config-export", derive(ts_rs::TS))]
-#[serde(rename_all = "camelCase")]
-pub enum DomainHealth {
-    Ready,
-    Recovered,
-    Unavailable,
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "config-export", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
@@ -308,8 +299,6 @@ pub struct FieldIssue {
 pub struct DomainStatus {
     pub revision: String,
     pub schema_version: u32,
-    pub issues: Vec<FieldIssue>,
-    pub health: DomainHealth,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -340,14 +329,6 @@ pub struct DomainPatch {
 #[serde(rename_all = "camelCase")]
 pub struct ConfigUpdate {
     pub patches: Vec<DomainPatch>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "config-export", derive(ts_rs::TS))]
-#[serde(rename_all = "camelCase")]
-pub struct ConfigReset {
-    pub domain: ConfigDomain,
-    pub expected_revision: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]

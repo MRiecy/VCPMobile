@@ -678,13 +678,10 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
               });
             }
           } else {
-            const message = result.reason === "mode_not_implemented"
-              ? "当前发言模式尚未实现，请在群组设置中改为「顺序发言」或「自然随机」。"
-              : "没有成员满足发言条件，可尝试 @提及 成员或调整发言模式。";
             notificationStore.addNotification({
               type: "info",
               title: "群组未产生回复",
-              message,
+              message: "没有成员满足发言条件，可尝试 @提及 成员或调整发言模式。",
               toastOnly: true,
               duration: 6000,
             });

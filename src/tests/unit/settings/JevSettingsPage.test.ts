@@ -61,13 +61,13 @@ async function choose(wrapper: VueWrapper, provider: string) {
 describe('JEV 设置由同一领域编辑会话保存', () => {
   it('切换服务商分别保留地址、密钥和模型，返回时一次提交', async () => {
     const wrapper = await renderPage();
-    expect(field(wrapper, 'API URL').element).toHaveProperty('value', 'https://api.typesafe.ai/v1/systemone');
+    expect(field(wrapper, 'API 地址').element).toHaveProperty('value', 'https://api.typesafe.ai/v1/systemone');
     await field(wrapper, 'API Key（支持多个）').setValue('official-one，official-two');
     await choose(wrapper, 'OpenRouter');
-    expect(field(wrapper, 'API URL').element).toHaveProperty('value', 'https://openrouter.ai/api/alpha/decisions');
+    expect(field(wrapper, 'API 地址').element).toHaveProperty('value', 'https://openrouter.ai/api/alpha/decisions');
     expect(field(wrapper, '决策模型').element).toHaveProperty('value', '~typesafe/jev-latest');
     await field(wrapper, 'API Key（支持多个）').setValue('router-key');
-    await field(wrapper, 'API URL').setValue('https://router.example/decisions');
+    await field(wrapper, 'API 地址').setValue('https://router.example/decisions');
     await choose(wrapper, 'TypeSafe 官方');
     expect(field(wrapper, 'API Key（支持多个）').element).toHaveProperty('value', 'official-one，official-two');
     expect(invokeMock.mock.calls.filter(([command]) => command === 'update_settings')).toHaveLength(0);
@@ -94,5 +94,30 @@ describe('JEV 设置由同一领域编辑会话保存', () => {
     await flushPromises();
     expect(useSettingsStore().settings?.jev.provider).toBe('typesafe');
     expect(invokeMock.mock.calls.filter(([command]) => command === 'update_settings')).toHaveLength(0);
+  });
+
+  it('保存被拒绝时只显示实际字段错误，保留输入并允许修改后重试', async () => {
+    const wrapper = await renderPage();
+    await field(wrapper, 'API 地址').setValue('broken-address');
+    mockInvoke('update_settings', () => ({ status: 'rejected', issues: [
+      { domain: 'jev', field: 'typesafe.apiUrl', code: 'invalidUrl', message: '请填写有效地址。' },
+    ] }));
+    const page = wrapper.vm as unknown as { beforeLeave(): Promise<boolean> };
+    expect(await page.beforeLeave()).toBe(false);
+    await flushPromises();
+    expect(wrapper.findAll('[role="alert"]')).toHaveLength(1);
+    expect(wrapper.get('[role="alert"]').text()).toBe('JEV · TypeSafe API 地址：请填写有效地址。');
+    expect(field(wrapper, 'API 地址').element).toHaveProperty('value', 'broken-address');
+    expect(field(wrapper, 'API 地址').attributes('disabled')).toBeUndefined();
+
+    await field(wrapper, 'API 地址').setValue('https://decision.example/v1');
+    mockInvoke('update_settings', args => ({
+      status: 'saved',
+      snapshot: makeConfigSnapshot(applySettingsFields(useSettingsStore().settings!, configRequestChanges(args?.request as ConfigUpdate)), '2'),
+    }));
+    expect(await page.beforeLeave()).toBe(true);
+    await flushPromises();
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+    expect(useSettingsStore().settings?.jev.typesafe.apiUrl).toBe('https://decision.example/v1');
   });
 });

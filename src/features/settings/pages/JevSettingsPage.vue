@@ -14,7 +14,6 @@ import SettingsSwitch from '../../../components/settings/SettingsSwitch.vue';
 import type { SettingsPageProps } from '../contracts';
 import { JEV_FIELDS } from '../editing/fieldSets';
 import { useSettingsPageSession } from '../editing/useSettingsPageSession';
-import SettingsDomainIssues from '../editing/SettingsDomainIssues.vue';
 
 const props = defineProps<SettingsPageProps>();
 const titleId = useId();
@@ -33,9 +32,9 @@ const connectionFields = computed(() => ({
   model: `jev.${provider.value}.model` as const,
 }));
 const numbers = [
-  { field: 'jev.timeoutMs', title: '请求超时', unit: 'ms', description: '单次决策请求的最长等待时间。' },
-  { field: 'jev.maxRetries', title: '最大重试次数', unit: '次', description: '仅对限流、服务过载和网络错误重试。' },
-  { field: 'jev.retryBaseDelayMs', title: '重试基础延迟', unit: 'ms', description: '指数退避的初始等待时间。' },
+  { field: 'jev.timeoutMs', title: '响应超时', unit: 'ms', description: '每次决策最多等待多久。' },
+  { field: 'jev.maxRetries', title: '最大重试次数', unit: '次', description: '服务繁忙或网络异常时重试；设为 0 可关闭。' },
+  { field: 'jev.retryBaseDelayMs', title: '重试等待时间', unit: 'ms', description: '首次重试前的等待时间，之后逐次延长。' },
 ] as const;
 type NumberOption = typeof numbers[number];
 let menu: ContextMenuConfig | null = null;
@@ -82,7 +81,6 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
 
 <template>
   <SettingsCanvas viewport :inert="!active">
-    <SettingsDomainIssues :domains="session.domainIssues.value" :errors="session.fieldErrors.value" :fields="JEV_FIELDS" />
     <p v-if="error" role="alert" class="m-0 text-sm text-red-500">
       {{ error }}
       <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading || !active" @click="reload">重试</button>
@@ -92,9 +90,9 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
 
     <section v-if="draft" class="flex flex-col gap-5" :aria-labelledby="titleId">
       <h2 :id="titleId" class="settings-canvas-title">JEV 决策服务</h2>
-      <SettingsSection title="服务器连接">
+      <SettingsSection title="服务连接">
         <div>
-          <SettingsRow title="启用 JEV" description="为使用 JEV 模式的群聊决定发言人和是否继续。">
+          <SettingsRow title="启用 JEV" description="根据对话选择发言人，让群成员自然接话。">
             <template #action>
               <SettingsSwitch :model-value="draft['jev.enabled']" :disabled="disabled" aria-label="启用 JEV"
                 @update:model-value="session.edit('jev.enabled', $event)" />
@@ -104,14 +102,14 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
             aria-label="服务提供商" :aria-expanded="overlay.contextMenuConfig !== null && overlay.contextMenuConfig === menu" @click="selectProvider" />
         </div>
         <div class="jev-fields">
-          <SettingsTextField :model-value="draft[connectionFields.url]" label="API URL" mono :disabled="disabled"
+          <SettingsTextField :model-value="draft[connectionFields.url]" label="API 地址" mono :disabled="disabled"
             :placeholder="SETTINGS_DEFAULTS.jev[provider].apiUrl" @update:model-value="session.edit(connectionFields.url, $event)" />
           <SettingsTextField :model-value="draft[connectionFields.key]" label="API Key（支持多个）" is-secure :disabled="disabled"
-            placeholder="多个 Key 使用逗号、中文逗号或 | 分隔" @update:model-value="session.edit(connectionFields.key, $event)" />
+            placeholder="多个 Key 用逗号或 | 分隔" @update:model-value="session.edit(connectionFields.key, $event)" />
           <SettingsTextField :model-value="draft[connectionFields.model]" label="决策模型" mono :disabled="disabled"
             :placeholder="SETTINGS_DEFAULTS.jev[provider].model" @update:model-value="session.edit(connectionFields.model, $event)" />
         </div>
-        <template #footer>两个服务商分别保留连接设置。返回时自动保存，下一次决策请求生效；同一次请求重试时保持使用同一个 Key。</template>
+        <template #footer>返回时自动保存。切换服务商会保留各自的设置。</template>
       </SettingsSection>
 
       <SettingsDisclosure title="高级参数" description="超时、重试与代理" :disabled="disabled">
@@ -119,15 +117,15 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
           <SettingsRow v-for="item in numbers" :key="item.field" :title="item.title" :description="item.description"
             :value="`${draft[item.field]} ${item.unit}`" clickable :disabled="disabled" aria-haspopup="dialog" @click="editNumber(item)" />
         </div>
-        <SettingsTextField :model-value="draft['jev.proxyUrl']" label="HTTPS 代理 URL（可选）" mono :disabled="disabled"
+        <SettingsTextField :model-value="draft['jev.proxyUrl']" label="代理地址（可选）" mono :disabled="disabled"
           placeholder="http://127.0.0.1:7890" @update:model-value="session.edit('jev.proxyUrl', $event)" />
       </SettingsDisclosure>
 
-      <SettingsDisclosure v-if="provider === 'openrouter'" title="应用标识" description="OpenRouter 可选请求标识" :disabled="disabled">
+      <SettingsDisclosure v-if="provider === 'openrouter'" title="应用信息" description="可选，用于 OpenRouter 识别应用" :disabled="disabled">
         <div class="jev-fields">
-          <SettingsTextField :model-value="draft['jev.httpReferer']" label="HTTP Referer（可选）" mono :disabled="disabled"
+          <SettingsTextField :model-value="draft['jev.httpReferer']" label="应用网址（HTTP Referer）" mono :disabled="disabled"
             placeholder="https://your-site.example" @update:model-value="session.edit('jev.httpReferer', $event)" />
-          <SettingsTextField :model-value="draft['jev.appTitle']" label="应用标题" :disabled="disabled"
+          <SettingsTextField :model-value="draft['jev.appTitle']" label="应用名称" :disabled="disabled"
             placeholder="VCPMobile" @update:model-value="session.edit('jev.appTitle', $event)" />
         </div>
       </SettingsDisclosure>

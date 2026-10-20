@@ -1,6 +1,6 @@
 use crate::vcp_modules::agent_types::AgentConfig;
 use crate::vcp_modules::chat_manager::ChatMessage;
-use crate::vcp_modules::group_types::GroupConfig;
+use crate::vcp_modules::group_types::{GroupConfig, JevFallbackPolicy};
 use rand::Rng;
 use regex::Regex;
 use crate::vcp_modules::group::{
@@ -146,7 +146,7 @@ pub(crate) fn parse_jev_decision(
         .take(settings.max_speakers_per_round as usize)
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
-    if selected.is_empty() && (force_continue || settings.fallback_policy == "top_speaker") {
+    if selected.is_empty() && (force_continue || settings.fallback_policy == JevFallbackPolicy::TopSpeaker) {
         if let Some((id, _)) = ranked.first() {
             selected.push(id.clone());
         }

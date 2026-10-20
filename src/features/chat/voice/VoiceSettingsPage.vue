@@ -18,7 +18,6 @@ import { useVoiceCallStore } from './voiceCallStore';
 import { SETTINGS_DEFAULTS, MIMO_TTS_MODES, MIMO_VOICES, settingDescriptor, settingOptions } from './settings';
 import type { VoiceConfig } from '../../../core/config/generated/config';
 import { applySettingsFields, type SettingsFieldValues } from '../../../core/config/fields';
-import SettingsDomainIssues from '../../settings/editing/SettingsDomainIssues.vue';
 import VoiceTextArea from './VoiceTextArea.vue';
 import VoiceCloneSample from './VoiceCloneSample.vue';
 import VoiceTtsPreview from './VoiceTtsPreview.vue';
@@ -193,7 +192,6 @@ defineExpose({ beforeLeave });
 
 <template>
   <SettingsCanvas viewport :inert="!active">
-        <SettingsDomainIssues :domains="session.domainIssues.value" :errors="session.fieldErrors.value" :fields="VOICE_FIELDS" />
         <p v-if="error" role="alert" class="m-0 text-sm text-red-500">
           {{ error }}
           <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading || !active" @click="reload">重试</button>

@@ -36,9 +36,8 @@ impl SampleFiles {
         match selected_sample_id(snapshot) {
             Some(selected) => self.recover(root, selected).await,
             None => {
-                // The original persisted reference is unknown. Leave existing
-                // files alone for this process, including any drafts imported
-                // to repair the configuration before its next successful read.
+                // An invalid file identifier cannot establish a filesystem
+                // target. Leave this process's files untouched.
                 self.recovered_roots.insert(root.to_owned());
                 Ok(())
             }
@@ -119,21 +118,9 @@ impl SampleFiles {
     }
 }
 
-/// None means that the effective default cannot establish which file the raw
-/// persisted configuration still owns. An empty but healthy ID means no owner.
+/// Settings already contain canonical values. File identifiers are checked
+/// independently before using them as filesystem targets.
 fn selected_sample_id(snapshot: &settings_manager::ConfigSnapshot) -> Option<&str> {
-    use settings_manager::{ConfigDomain, DomainHealth};
-    let status = snapshot.domains.get(&ConfigDomain::Voice)?;
-    if status.health == DomainHealth::Unavailable
-        || status.issues.iter().any(|issue| {
-            issue.field.is_empty()
-                || issue.field == "tts"
-                || issue.field == "tts.cloneSampleId"
-                || issue.field.starts_with("tts.cloneSampleId.")
-        })
-    {
-        return None;
-    }
     let selected = snapshot.data.voice.tts.clone_sample_id.as_str();
     if !selected.is_empty() && sample_path(Path::new(""), selected).is_err() {
         return None;
@@ -662,8 +649,6 @@ mod tests {
                 settings_manager::DomainStatus {
                     revision: "1".into(),
                     schema_version: 1,
-                    issues: Vec::new(),
-                    health: settings_manager::DomainHealth::Ready,
                 },
             )]),
         }
@@ -828,50 +813,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn damaged_or_future_configuration_preserves_unknown_references_and_repair_drafts() {
-        use settings_manager::{ConfigDomain, DomainHealth};
-        let mut snapshots = Vec::new();
-        for raw in [
-            serde_json::json!({ "tts": { "cloneSampleId": 42 } }),
-            serde_json::json!({ "tts": false }),
-            serde_json::json!(false),
-            serde_json::json!({ "tts": { "cloneSampleId": "malformed-id" } }),
-        ] {
-            let (effective, issues) = settings_manager::schema::project_domain(ConfigDomain::Voice, &raw);
-            let mut snapshot = selection_snapshot("");
-            snapshot.data.voice = serde_json::from_value(effective).unwrap();
-            let status = snapshot.domains.get_mut(&ConfigDomain::Voice).unwrap();
-            status.health = if issues.is_empty() { DomainHealth::Ready } else { DomainHealth::Recovered };
-            status.issues = issues;
-            snapshots.push(snapshot);
-        }
-        let mut future = selection_snapshot("");
-        let status = future.domains.get_mut(&ConfigDomain::Voice).unwrap();
-        status.schema_version = 99;
-        status.health = DomainHealth::Unavailable;
-        snapshots.push(future);
+    async fn invalid_file_identifier_preserves_files_and_current_import_drafts() {
+        let snapshot = selection_snapshot("malformed-id");
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let root = temp.path().join("voice-samples");
+        let source = temp.path().join("spoken.wav");
+        tokio::fs::write(&source, wav()).await.unwrap();
+        let existing = import_picked(&root, &source, None).await.unwrap();
+        let mut files = SampleFiles::default();
+        files.recover_from_snapshot(&root, &snapshot).await.unwrap();
+        files.discard_from_snapshot(&root, &existing.id, &snapshot).await.unwrap();
+        assert!(read_metadata(&root, &existing.id).await.unwrap().is_some());
 
-        for snapshot in snapshots {
-            let temp = tempfile::tempdir_in(".").unwrap();
-            let root = temp.path().join("voice-samples");
-            let source = temp.path().join("spoken.wav");
-            tokio::fs::write(&source, wav()).await.unwrap();
-            let existing = import_picked(&root, &source, None).await.unwrap();
-            let mut files = SampleFiles::default();
-            files.recover_from_snapshot(&root, &snapshot).await.unwrap();
-            files.discard_from_snapshot(&root, &existing.id, &snapshot).await.unwrap();
-            assert!(read_metadata(&root, &existing.id).await.unwrap().is_some());
-
-            // The user can still import a replacement while the persisted
-            // reference is unknown. Repairing it later must not let a delayed
-            // startup sweep erase this process's unsaved sample.
-            let draft = import_picked(&root, &source, None).await.unwrap();
-            let repaired = selection_snapshot(&existing.id);
-            files.recover_from_snapshot(&root, &repaired).await.unwrap();
-            assert!(read_metadata(&root, &draft.id).await.unwrap().is_some());
-            files.discard_from_snapshot(&root, &draft.id, &repaired).await.unwrap();
-            assert!(read_metadata(&root, &draft.id).await.unwrap().is_none());
-            assert!(read_metadata(&root, &existing.id).await.unwrap().is_some());
-        }
+        // A later valid selection must not sweep away this process's
+        // unsaved sample imports.
+        let draft = import_picked(&root, &source, None).await.unwrap();
+        let selected = selection_snapshot(&existing.id);
+        files.recover_from_snapshot(&root, &selected).await.unwrap();
+        assert!(read_metadata(&root, &draft.id).await.unwrap().is_some());
+        files.discard_from_snapshot(&root, &draft.id, &selected).await.unwrap();
+        assert!(read_metadata(&root, &draft.id).await.unwrap().is_none());
+        assert!(read_metadata(&root, &existing.id).await.unwrap().is_some());
     }
 }

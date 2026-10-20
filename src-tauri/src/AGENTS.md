@@ -67,13 +67,13 @@ src-tauri/src/
 - `chat/voice_service/workers.rs` 在原生 WAV 读入并回收文件后，按每次开麦时的配置生成 WAV 或 MP3 输入；`../crates/voice-mp3/` 提供双端共享的有界 LAME 64 kbps CBR 编码，运行于 blocking worker。编码保留音频槽及后台租约，取消等待真实收尾；网络 MIME 来自已准备载荷，TTS 不受输入编码设置影响。
 - `chat/voice_service/` 的 `VoiceReplyPolicy` 为一次通话回复固定 TTS 配置和 LLM 风格规则，预置音色与样本复刻共用指导；`voice_submission` 经 Agent/Group 将其交给 `context_assembler`，在 Tavern 后拼接唯一末尾注入节点。`chat/voice_guidance.rs` 共享控制块识别，供历史、渲染与逐消息朗读投影使用，原始消息不变。`samples.rs` 管理复刻音频文件与一次朗读共享的编码数据；样本快照与回收按同一锁序处理，设置写入完成并释放锁后才清理旧引用。复刻网络结果转换到现有 PCM 播放链，试听使用同一 TTS owner 的独立身份。
 - `infra/` 提供被多个领域共享的生命周期和基础能力，不反向拥有各业务领域结果。
-- `infra/settings_manager.rs` 汇合配置 IPC 与提交后副作用；`settings_manager/types.rs` / `schema.rs` 定义九个配置领域（含 JEV）、默认值、校验和备份规则，`repository.rs` 通过 DbState 事务提交领域 JSON 并发布一致快照。`migration.rs` 只在首次搬运旧 `settings/global` 时使用平铺字段，完成后只读写新结构；`backup.rs` 接收嵌套 domains 的 v2，并将 v1 文件单向转为领域补丁；旧平铺 v2 不兼容。读取异常不写回默认值；独立 `reset_settings_domain` 以确认的 revision 整组恢复默认，与普通更新复用事务及提交后副作用，不混入草稿。`config_recovery` 仅保留一次性搬运归档。冷加载与已接纳提交由持久任务完成提交和缓存发布，运行时重连使用独立 pending/generation/锁，不阻塞保存。`crates/config-export/` 显式生成前端配置契约；localStorage 界面偏好不归此 owner，不新增自动备份。
+- `infra/settings_manager.rs` 汇合配置 IPC 与提交后副作用；`settings_manager/types.rs` / `schema.rs` 定义九领域（含 JEV）的当前类型、默认值和备份规则。`normalize_domain` 规范完整配置，`normalize_domain_patch` / `normalize_changes` 保留部分输入的缺项；坏叶/坏组使用默认，合法兄弟保留，未知内容丢弃，连接凭据按关联组处理。`repository.rs` 冷加载和保存均在 DbState 事务内规范并持久化，实际变化才递增 revision，提交后发布一致快照；无 health/issues 或手动 reset，协议错误、并发冲突及数据库 IO 失败仍真实返回。`migration.rs` 保留旧 `settings/global` 的一次结构搬运与原文归档；`backup.rs` 保留 v1 文件结构转换，不保留旧值别名或旧平铺 v2。备份缺项保留，显式异常采用当前默认，文件损坏/格式未知仍报错。持久任务拥有提交与缓存发布，运行时重连使用独立 pending/generation/锁，不阻塞保存。`crates/config-export/` 显式生成前端契约，localStorage 偏好由原前端 owner 规范和保存，不新增自动备份。
 - `infra/file_manager/operations.rs` 裁定文件取消与 CAS 提交，`resources.rs` 管理用途派生、文本预览和临时导出；`infra/share_inbox.rs` 持有当前分享记录与跨进程槽位，发送经现有消息仓储同事务落盘。启动附件回收同时读取当前分享持有的 hash。
 - `distributed/` 的 client、registry 与 telemetry 由 `DistributedState` 汇合；设备工具保持自包含，不复制 CLI 或其他领域已有的运行时。
 
 新增全局状态前先确定唯一 owner、建立时点、替换条件和释放路径。`app.manage` 只是状态注入机制，不等于状态所有权可以分散到多个调用者。
 
-`group/group_session.rs` 的 JEV 状态附着于 `ActiveGroupTurns` 现有话题租约，决策客户端独立于成员生成。新消息、邀请、裁决 revision、语音回复作用域、硬停止与恢复由该单一 owner 协调。`group_local_settings` 只存手机模式覆盖、顺序、JEV 参数和成员上下文窗口，不进入同步 DTO/hash；配置备份的 `groupPreferences` 与全局配置共用导入事务。
+`group/group_session.rs` 的 JEV 状态附着于 `ActiveGroupTurns` 现有话题租约，决策客户端独立于成员生成。新消息、邀请、裁决 revision、语音回复作用域、硬停止与恢复由该单一 owner 协调。`group_local_settings` 独立保存群聊模式 `chatMode`、顺序、JEV 参数和成员上下文窗口，不进入同步 DTO/hash；模式缺失或异常时保存为默认顺序发言，运行不读取共享 `mode`。配置备份的 `groupPreferences` 与全局配置共用导入事务，补丁未包含的字段保留当前值。
 
 ---
 
