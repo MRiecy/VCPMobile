@@ -272,7 +272,8 @@ export const SETTINGS_FIELDS: FieldDescriptor[] = [
     "validationGroup": "connection",
     "effect": "nextVoiceTask",
     "options": [],
-    "required": false
+    "required": false,
+    "preset": "https://api.xiaomimimo.com/v1"
   },
   {
     "domain": "voice",
@@ -440,6 +441,7 @@ export const SETTINGS_FIELDS: FieldDescriptor[] = [
     "effect": "nextRequest",
     "options": [],
     "required": false,
+    "preset": "VCPMobile",
     "maxChars": 2048
   },
   {
@@ -499,7 +501,8 @@ export const SETTINGS_FIELDS: FieldDescriptor[] = [
     "validationGroup": "openrouterConnection",
     "effect": "nextRequest",
     "options": [],
-    "required": true,
+    "required": false,
+    "preset": "https://openrouter.ai/api/alpha/decisions",
     "maxChars": 2048
   },
   {
@@ -511,7 +514,8 @@ export const SETTINGS_FIELDS: FieldDescriptor[] = [
     "validationGroup": "openrouterConnection",
     "effect": "nextRequest",
     "options": [],
-    "required": true,
+    "required": false,
+    "preset": "~typesafe/jev-latest",
     "maxChars": 2048
   },
   {
@@ -587,7 +591,8 @@ export const SETTINGS_FIELDS: FieldDescriptor[] = [
     "validationGroup": "typesafeConnection",
     "effect": "nextRequest",
     "options": [],
-    "required": true,
+    "required": false,
+    "preset": "https://api.typesafe.ai/v1/systemone",
     "maxChars": 2048
   },
   {
@@ -599,7 +604,8 @@ export const SETTINGS_FIELDS: FieldDescriptor[] = [
     "validationGroup": "typesafeConnection",
     "effect": "nextRequest",
     "options": [],
-    "required": true,
+    "required": false,
+    "preset": "jev-latest",
     "maxChars": 2048
   },
   {

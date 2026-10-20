@@ -554,13 +554,15 @@ describe('语音设置使用正式设置快照', () => {
   it('试听只提交当前语音草稿，事件按身份处理，返回只停止本页试听', async () => {
     context.voice.active = false;
     const { wrapper } = await renderOverlay();
+    expect(field(wrapper, 'API 地址').element).toHaveProperty('value', '');
+    expect(field(wrapper, 'API 地址').attributes('placeholder')).toBe('https://api.xiaomimimo.com/v1');
     await field(wrapper, '语音 API Key').setValue('draft-preview-key');
     await choose(wrapper, '朗读音色', '冰糖 · 中文女声');
     await disclosure(wrapper, '试听声音').trigger('click');
     await wrapper.get('.voice-preview-button').trigger('click');
     await flushPromises();
     const previewCall = invokeMock.mock.calls.find(([command]) => command === 'preview_tts')!;
-    expect(previewCall[1]?.settings).toMatchObject({ connection: { apiKey: 'draft-preview-key' }, tts: { voice: '冰糖' } });
+    expect(previewCall[1]?.settings).toMatchObject({ connection: { apiBaseUrl: '', apiKey: 'draft-preview-key' }, tts: { voice: '冰糖' } });
     expect(previewCall[1]?.settings).not.toHaveProperty('vcpApiKey');
     expect(updates()).toHaveLength(0);
     expect(wrapper.get('.voice-preview-button').text()).toBe('停止试听');

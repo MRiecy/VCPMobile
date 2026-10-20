@@ -33,8 +33,8 @@ pub use tts::{
 pub use samples::{discard_voice_clone_sample, get_voice_clone_sample, import_voice_clone_sample};
 
 use crate::vcp_modules::settings_manager::{
-    Settings, VoiceInputEncoding, VoiceTtsMode, DEFAULT_VOICE_AUDIO_TAG_RULES,
-    DEFAULT_VOICE_GUIDANCE_RULES, VOICE_LANGUAGES, VOICE_TTS_VOICES,
+    value_or_preset, Settings, VoiceInputEncoding, VoiceTtsMode, DEFAULT_VOICE_AUDIO_TAG_RULES,
+    DEFAULT_VOICE_GUIDANCE_RULES, VOICE_API_BASE_URL_PRESET, VOICE_LANGUAGES, VOICE_TTS_VOICES,
 };
 use serde::{Deserialize, Serialize};
 
@@ -122,7 +122,7 @@ impl VoiceServiceConfig {
         !self.api_key.is_empty()
     }
     fn endpoint(&self) -> Result<String, String> {
-        let base = self.base_url.trim().trim_end_matches('/');
+        let base = value_or_preset(&self.base_url, VOICE_API_BASE_URL_PRESET).trim_end_matches('/');
         let endpoint = format!("{base}/chat/completions");
         let parsed = url::Url::parse(&endpoint).map_err(|_| "语音 API 地址无效。")?;
         if !matches!(parsed.scheme(), "https" | "http") || parsed.host_str().is_none() {
@@ -170,6 +170,22 @@ pub struct VoiceServiceStart {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_voice_address_uses_preset_without_changing_saved_input() {
+        let mut settings = Settings::default();
+        for blank in ["", " \t "] {
+            settings.voice.connection.api_base_url = blank.into();
+            let config = VoiceServiceConfig::from_settings(&settings);
+            assert_eq!(config.endpoint().unwrap(), "https://api.xiaomimimo.com/v1/chat/completions");
+            assert_eq!(settings.voice.connection.api_base_url, blank);
+        }
+        settings.voice.connection.api_base_url = " https://voice.example/v1/ ".into();
+        let mut config = VoiceServiceConfig::from_settings(&settings);
+        assert_eq!(config.endpoint().unwrap(), "https://voice.example/v1/chat/completions");
+        config.base_url = "broken-address".into();
+        assert!(config.endpoint().is_err());
+    }
 
     #[test]
     fn narration_misconfiguration_cannot_block_asr() {

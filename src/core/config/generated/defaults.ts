@@ -37,7 +37,7 @@ export const SETTINGS_DEFAULTS: Settings = {
   },
   "voice": {
     "connection": {
-      "apiBaseUrl": "https://api.xiaomimimo.com/v1",
+      "apiBaseUrl": "",
       "apiKey": ""
     },
     "asr": {
@@ -67,21 +67,21 @@ export const SETTINGS_DEFAULTS: Settings = {
     "enabled": false,
     "provider": "typesafe",
     "typesafe": {
-      "apiUrl": "https://api.typesafe.ai/v1/systemone",
+      "apiUrl": "",
       "apiKey": "",
-      "model": "jev-latest"
+      "model": ""
     },
     "openrouter": {
-      "apiUrl": "https://openrouter.ai/api/alpha/decisions",
+      "apiUrl": "",
       "apiKey": "",
-      "model": "~typesafe/jev-latest"
+      "model": ""
     },
     "timeoutMs": 30000,
     "maxRetries": 2,
     "retryBaseDelayMs": 500,
     "proxyUrl": "",
     "httpReferer": "",
-    "appTitle": "VCPMobile"
+    "appTitle": ""
   },
   "navigation": {
     "agentOrder": [],

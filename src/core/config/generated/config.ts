@@ -63,4 +63,4 @@ export type FieldKind = "string" | "boolean" | "integer" | "stringArray";
 
 export type ConfigEffect = "immediate" | "nextRequest" | "nextInput" | "nextNarration" | "nextVoiceTask" | "nextCall" | "nextSync" | "reconnect";
 
-export type FieldDescriptor = { domain: ConfigDomain, path: string, kind: FieldKind, backup: boolean, secret: boolean, validationGroup: string, effect: ConfigEffect, options: Array<string>, required: boolean, min?: number, max?: number, maxChars?: number, };
+export type FieldDescriptor = { domain: ConfigDomain, path: string, kind: FieldKind, backup: boolean, secret: boolean, validationGroup: string, effect: ConfigEffect, options: Array<string>, required: boolean, preset?: string, min?: number, max?: number, maxChars?: number, };

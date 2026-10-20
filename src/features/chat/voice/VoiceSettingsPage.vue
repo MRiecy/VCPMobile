@@ -204,13 +204,14 @@ defineExpose({ beforeLeave });
           <SettingsSection title="服务器连接">
             <div class="voice-connection-fields">
               <SettingsTextField :model-value="draft['voice.connection.apiBaseUrl']" :disabled="disabled"
-                label="API 地址" :placeholder="SETTINGS_DEFAULTS.voice.connection.apiBaseUrl" mono
+                label="API 地址" :placeholder="settingDescriptor('voice.connection.apiBaseUrl').preset" mono
                 @update:model-value="session.edit('voice.connection.apiBaseUrl', $event)" />
               <SettingsTextField :model-value="draft['voice.connection.apiKey']" :disabled="disabled"
                 label="语音 API Key" placeholder="输入 MiMo API Key" is-secure
                 @update:model-value="session.edit('voice.connection.apiKey', $event)" />
             </div>
             <template #footer>
+              <p class="m-0">地址留空使用 MiMo 官方服务。</p>
               <p class="m-0">
                 {{ draft['voice.connection.apiKey'].trim() ? '返回时自动保存，重新开启麦克风或开始新的朗读时生效。' : '填写 API Key 后返回会自动保存；配置在下次开麦或新朗读时生效。' }}
               </p>

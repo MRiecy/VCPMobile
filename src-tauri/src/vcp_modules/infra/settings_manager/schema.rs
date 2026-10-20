@@ -96,6 +96,15 @@ fn collect_fields(
         },
         options: Vec::new(),
         required: false,
+        preset: match (domain, prefix) {
+            (ConfigDomain::Voice, "connection.apiBaseUrl") => Some(VOICE_API_BASE_URL_PRESET),
+            (ConfigDomain::Jev, "typesafe.apiUrl") => Some(JevProvider::Typesafe.api_url_preset()),
+            (ConfigDomain::Jev, "typesafe.model") => Some(JevProvider::Typesafe.model_preset()),
+            (ConfigDomain::Jev, "openrouter.apiUrl") => Some(JevProvider::Openrouter.api_url_preset()),
+            (ConfigDomain::Jev, "openrouter.model") => Some(JevProvider::Openrouter.model_preset()),
+            (ConfigDomain::Jev, "appTitle") => Some(JEV_APP_TITLE_PRESET),
+            _ => None,
+        }.map(str::to_owned),
         min: None,
         max: None,
         max_chars: None,
@@ -118,7 +127,6 @@ fn collect_fields(
             ConfigDomain::Jev,
             "typesafe.apiUrl" | "openrouter.apiUrl" | "typesafe.model" | "openrouter.model",
         ) => {
-            field.required = true;
             field.max_chars = Some(2_048);
         }
         (ConfigDomain::Jev, "typesafe.apiKey" | "openrouter.apiKey") => {
@@ -346,9 +354,10 @@ fn is_connection_endpoint(field: &FieldDescriptor) -> bool {
 
 fn has_nonempty_default_endpoint(domain: ConfigDomain, field: &FieldDescriptor) -> bool {
     is_connection_endpoint(field)
-        && value_at_path(&DEFAULT_DOMAINS[domain.as_str()], &field.path)
+        && (field.preset.as_deref().is_some_and(|value| !value.is_empty())
+            || value_at_path(&DEFAULT_DOMAINS[domain.as_str()], &field.path)
             .and_then(Value::as_str)
-            .is_some_and(|value| !value.is_empty())
+            .is_some_and(|value| !value.is_empty()))
 }
 
 fn normalize_dependencies(
@@ -691,5 +700,37 @@ mod tests {
             normalize_domain(ConfigDomain::Voice, &json!({"tts":{"mode":false}}))["tts"]["mode"],
             "builtin"
         );
+    }
+
+    #[test]
+    fn empty_defaults_preserve_explicit_connection_values() {
+        for domain in [ConfigDomain::Voice, ConfigDomain::Jev] {
+            for field in domain_fields(domain).into_iter().filter(|field| field.preset.is_some()) {
+                let preset = field.preset.as_deref().unwrap();
+                assert_eq!(normalize_field_value(domain, &field.path, &json!(preset)), preset);
+                assert_eq!(normalize_field_value(domain, &field.path, &json!("custom-value")), "custom-value");
+                assert_eq!(value_at_path(&domain_defaults(domain), &field.path).unwrap(), "");
+                if !is_connection_endpoint(&field) { continue; }
+                let key_path = match field.path.as_str() {
+                    "connection.apiBaseUrl" => "connection.apiKey",
+                    "typesafe.apiUrl" => "typesafe.apiKey",
+                    "openrouter.apiUrl" => "openrouter.apiKey",
+                    _ => unreachable!(),
+                };
+                for input in ["", " \t ", preset, "https://custom.example/api"] {
+                    let mut raw = json!({});
+                    set_value_at_path(&mut raw, &field.path, json!(input)).unwrap();
+                    set_value_at_path(&mut raw, key_path, json!("retained-key")).unwrap();
+                    let normalized = normalize_domain(domain, &raw);
+                    assert_eq!(value_at_path(&normalized, key_path).unwrap(), "retained-key");
+                    assert_eq!(value_at_path(&normalized, &field.path).unwrap(), input);
+                }
+                let mut missing = json!({});
+                set_value_at_path(&mut missing, key_path, json!("retained-key")).unwrap();
+                assert_eq!(value_at_path(&normalize_domain(domain, &missing), key_path).unwrap(), "");
+                set_value_at_path(&mut missing, &field.path, json!(false)).unwrap();
+                assert_eq!(value_at_path(&normalize_domain(domain, &missing), key_path).unwrap(), "");
+            }
+        }
     }
 }

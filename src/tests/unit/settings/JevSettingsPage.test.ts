@@ -4,6 +4,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import JevSettingsPage from '../../../features/settings/pages/JevSettingsPage.vue';
 import SettingsRow from '../../../components/settings/SettingsRow.vue';
 import SettingsTextField from '../../../components/settings/SettingsTextField.vue';
+import SettingsDisclosure from '../../../components/settings/SettingsDisclosure.vue';
 import { useOverlayStore } from '../../../core/stores/overlay';
 import { useSettingsStore } from '../../../core/stores/settings';
 import { applySettingsFields } from '../../../core/config/fields';
@@ -57,18 +58,33 @@ async function choose(wrapper: VueWrapper, provider: string) {
   useOverlayStore().closeContextMenu();
   await flushPromises();
 }
+async function openAppInfo(wrapper: VueWrapper) {
+  await wrapper.findAllComponents(SettingsDisclosure).find(item => item.props('title') === '应用信息')!.get('button').trigger('click');
+}
 
 describe('JEV 设置由同一领域编辑会话保存', () => {
   it('切换服务商分别保留地址、密钥和模型，返回时一次提交', async () => {
     const wrapper = await renderPage();
-    expect(field(wrapper, 'API 地址').element).toHaveProperty('value', 'https://api.typesafe.ai/v1/systemone');
+    expect(field(wrapper, 'API 地址').element).toHaveProperty('value', '');
+    expect(field(wrapper, 'API 地址').attributes('placeholder')).toBe('https://api.typesafe.ai/v1/systemone');
+    expect(field(wrapper, '决策模型').element).toHaveProperty('value', '');
+    expect(field(wrapper, '决策模型').attributes('placeholder')).toBe('jev-latest');
+    await field(wrapper, 'API 地址').setValue('https://official.example/decision');
+    await field(wrapper, '决策模型').setValue('custom-official-model');
     await field(wrapper, 'API Key（支持多个）').setValue('official-one，official-two');
     await choose(wrapper, 'OpenRouter');
-    expect(field(wrapper, 'API 地址').element).toHaveProperty('value', 'https://openrouter.ai/api/alpha/decisions');
-    expect(field(wrapper, '决策模型').element).toHaveProperty('value', '~typesafe/jev-latest');
+    expect(field(wrapper, 'API 地址').element).toHaveProperty('value', '');
+    expect(field(wrapper, 'API 地址').attributes('placeholder')).toBe('https://openrouter.ai/api/alpha/decisions');
+    expect(field(wrapper, '决策模型').element).toHaveProperty('value', '');
+    expect(field(wrapper, '决策模型').attributes('placeholder')).toBe('~typesafe/jev-latest');
+    await openAppInfo(wrapper);
+    expect(field(wrapper, '应用名称').element).toHaveProperty('value', '');
+    expect(field(wrapper, '应用名称').attributes('placeholder')).toBe('VCPMobile');
     await field(wrapper, 'API Key（支持多个）').setValue('router-key');
     await field(wrapper, 'API 地址').setValue('https://router.example/decisions');
     await choose(wrapper, 'TypeSafe 官方');
+    expect(field(wrapper, 'API 地址').element).toHaveProperty('value', 'https://official.example/decision');
+    expect(field(wrapper, '决策模型').element).toHaveProperty('value', 'custom-official-model');
     expect(field(wrapper, 'API Key（支持多个）').element).toHaveProperty('value', 'official-one，official-two');
     expect(invokeMock.mock.calls.filter(([command]) => command === 'update_settings')).toHaveLength(0);
 
@@ -77,11 +93,46 @@ describe('JEV 设置由同一领域编辑会话保存', () => {
     expect(calls).toHaveLength(1);
     expect(configRequestChanges(calls[0][1]!.request as ConfigUpdate)).toEqual({
       'jev.typesafe.apiKey': 'official-one，official-two',
+      'jev.typesafe.apiUrl': 'https://official.example/decision',
+      'jev.typesafe.model': 'custom-official-model',
       'jev.openrouter.apiKey': 'router-key',
       'jev.openrouter.apiUrl': 'https://router.example/decisions',
     });
     expect(useSettingsStore().settings?.jev.openrouter.apiKey).toBe('router-key');
     expect(useSettingsStore().settings?.jev.typesafe.apiKey).toBe('official-one，official-two');
+  });
+
+  it('清空已有地址、模型和应用名称后保存空值，切换不会填回预设', async () => {
+    let settings = makeSettings({
+      'jev.openrouter.apiUrl': 'https://custom.example/api',
+      'jev.openrouter.apiKey': 'keep-key',
+      'jev.openrouter.model': 'custom-model',
+      'jev.appTitle': 'Custom App',
+    });
+    mockInvoke('read_settings', () => makeConfigSnapshot(settings));
+    mockInvoke('update_settings', args => {
+      settings = applySettingsFields(settings, configRequestChanges(args?.request as ConfigUpdate));
+      return { status: 'saved', snapshot: makeConfigSnapshot(settings, '2') };
+    });
+    const wrapper = await renderPage();
+    await choose(wrapper, 'OpenRouter');
+    await field(wrapper, 'API 地址').setValue('');
+    await field(wrapper, '决策模型').setValue('');
+    await openAppInfo(wrapper);
+    await field(wrapper, '应用名称').setValue('');
+    await choose(wrapper, 'TypeSafe 官方');
+    await choose(wrapper, 'OpenRouter');
+    expect(field(wrapper, 'API 地址').element).toHaveProperty('value', '');
+    expect(field(wrapper, '决策模型').element).toHaveProperty('value', '');
+    expect(field(wrapper, 'API Key（支持多个）').element).toHaveProperty('value', 'keep-key');
+    expect(await (wrapper.vm as unknown as { beforeLeave(): Promise<boolean> }).beforeLeave()).toBe(true);
+    const call = invokeMock.mock.calls.find(([command]) => command === 'update_settings')!;
+    expect(configRequestChanges(call[1]!.request as ConfigUpdate)).toEqual({
+      'jev.provider': 'openrouter',
+      'jev.openrouter.apiUrl': '',
+      'jev.openrouter.model': '',
+      'jev.appTitle': '',
+    });
   });
 
   it('页面隐藏关闭自己的菜单，迟到选择不保存或改变正式配置', async () => {

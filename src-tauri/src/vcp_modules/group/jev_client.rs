@@ -1,7 +1,9 @@
 //! Shared, cancellable JEV transport. It does not own group queues or messages.
 
 use super::jev_protocol::{JevDecisionRequest, JevDecisionResponse};
-use crate::vcp_modules::infra::settings_manager::types::{JevConfig, JevProvider};
+use crate::vcp_modules::infra::settings_manager::types::{
+    value_or_preset, JevConfig, JevProvider, JEV_APP_TITLE_PRESET,
+};
 use bytes::Bytes;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE, RETRY_AFTER};
 use reqwest::{Client, Url};
@@ -203,18 +205,18 @@ impl JevClient {
             ));
         }
         let provider = config.active_provider();
-        let url = endpoint(&provider.api_url)?;
-        let model = provider.model.trim();
+        let url = endpoint(config)?;
+        let model = value_or_preset(&provider.model, config.provider.model_preset());
         let keys: Vec<_> = provider
             .api_key
             .split([',', '，', '|'])
             .map(str::trim)
             .filter(|key| !key.is_empty())
             .collect();
-        if model.is_empty() || keys.is_empty() {
+        if keys.is_empty() {
             return Err(JevClientError::new(
                 "JEV_NOT_CONFIGURED",
-                "请配置当前 Jev 服务的 API Key 和模型。",
+                "请配置当前 Jev 服务的 API Key。",
             ));
         }
         let body = Bytes::from(encode_body(model, request)?);
@@ -224,7 +226,7 @@ impl JevClient {
         if config.provider == JevProvider::Openrouter {
             for (name, value) in [
                 ("http-referer", config.http_referer.trim()),
-                ("x-openrouter-title", config.app_title.trim()),
+                ("x-openrouter-title", value_or_preset(&config.app_title, JEV_APP_TITLE_PRESET)),
             ] {
                 if !value.is_empty() {
                     headers.insert(
@@ -291,7 +293,8 @@ impl JevClient {
     }
 }
 
-fn endpoint(value: &str) -> Result<Url, JevClientError> {
+fn endpoint(config: &JevConfig) -> Result<Url, JevClientError> {
+    let value = value_or_preset(&config.active_provider().api_url, config.provider.api_url_preset());
     let error = || {
         JevClientError::new(
             "JEV_INVALID_URL",
@@ -719,12 +722,47 @@ mod tests {
             encode_body("model", &request).unwrap_err().code,
             "JEV_INVALID_REQUEST"
         );
-        assert!(endpoint("/alpha/decisions").is_err());
+        assert!(endpoint(&config("/alpha/decisions")).is_err());
         assert_eq!(
-            endpoint("https://example.invalid/custom/decision?version=1")
+            endpoint(&config("https://example.invalid/custom/decision?version=1"))
                 .unwrap()
                 .as_str(),
             "https://example.invalid/custom/decision?version=1"
         );
+    }
+
+    #[tokio::test]
+    async fn empty_overrides_follow_provider_presets_in_requests() {
+        for (provider, expected_url, expected_model) in [
+            (JevProvider::Typesafe, "https://api.typesafe.ai/v1/systemone", "jev-latest"),
+            (JevProvider::Openrouter, "https://openrouter.ai/api/alpha/decisions", "~typesafe/jev-latest"),
+        ] {
+            let mut config = JevConfig::default();
+            config.enabled = true;
+            config.provider = provider;
+            for blank in ["", " \t "] {
+                config.typesafe.api_url = blank.into();
+                config.openrouter.api_url = blank.into();
+                assert_eq!(endpoint(&config).unwrap().as_str(), expected_url);
+            }
+            // Capture real transport bodies and headers without calling providers.
+            let fixture = fixture(vec![Reply::ok()]).await;
+            let active = match provider {
+                JevProvider::Typesafe => &mut config.typesafe,
+                JevProvider::Openrouter => &mut config.openrouter,
+            };
+            active.api_url = fixture.url.clone();
+            active.api_key = "fixture-key".into();
+            active.model = " \t ".into();
+            config.app_title = " \t ".into();
+            JevClient::default().decide(&config, &request(), CancellationToken::new()).await.unwrap();
+            let requests = fixture.state.requests.lock().unwrap();
+            assert_eq!(requests[0].1["model"], expected_model);
+            if provider == JevProvider::Openrouter {
+                assert_eq!(requests[0].0["x-openrouter-title"], "VCPMobile");
+            } else {
+                assert!(!requests[0].0.contains_key("x-openrouter-title"));
+            }
+        }
     }
 }

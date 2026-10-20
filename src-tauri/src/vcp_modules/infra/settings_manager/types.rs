@@ -6,6 +6,18 @@ pub use tauri_plugin_vcp_mobile::voice::{VoiceVadConfig, VoiceVadSensitivity};
 
 pub const VOICE_RULE_MAX_CHARS: usize = 8000;
 pub const VOICE_GUIDANCE_MAX_CHARS: usize = 2000;
+pub const VOICE_API_BASE_URL_PRESET: &str = "https://api.xiaomimimo.com/v1";
+pub const JEV_APP_TITLE_PRESET: &str = "VCPMobile";
+
+/// Empty persisted overrides select a preset only when consumed.
+pub fn value_or_preset<'a>(value: &'a str, preset: &'a str) -> &'a str {
+    let value = value.trim();
+    if value.is_empty() {
+        preset
+    } else {
+        value
+    }
+}
 pub const VOICE_LANGUAGES: &[&str] = &["auto", "zh", "en"];
 pub const VOICE_TTS_VOICES: &[&str] = &[
     "mimo_default",
@@ -74,33 +86,29 @@ pub enum JevProvider {
 
 impl JevProvider {
     pub const ALL: [Self; 2] = [Self::Typesafe, Self::Openrouter];
+
+    pub const fn api_url_preset(self) -> &'static str {
+        match self {
+            Self::Typesafe => "https://api.typesafe.ai/v1/systemone",
+            Self::Openrouter => "https://openrouter.ai/api/alpha/decisions",
+        }
+    }
+
+    pub const fn model_preset(self) -> &'static str {
+        match self {
+            Self::Typesafe => "jev-latest",
+            Self::Openrouter => "~typesafe/jev-latest",
+        }
+    }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "config-export", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct JevProviderConfig {
     pub api_url: String,
     pub api_key: String,
     pub model: String,
-}
-
-impl JevProviderConfig {
-    fn typesafe() -> Self {
-        Self {
-            api_url: "https://api.typesafe.ai/v1/systemone".into(),
-            api_key: String::new(),
-            model: "jev-latest".into(),
-        }
-    }
-
-    fn openrouter() -> Self {
-        Self {
-            api_url: "https://openrouter.ai/api/alpha/decisions".into(),
-            api_key: String::new(),
-            model: "~typesafe/jev-latest".into(),
-        }
-    }
 }
 
 // Serde's struct-level default uses exactly the same source as new installs and
@@ -149,7 +157,7 @@ config_struct!(ConversationConfig {
     topic_summary_model: String = "gemini-3.1-flash-lite".into()
 });
 config_struct!(VoiceConnectionConfig {
-    api_base_url: String = "https://api.xiaomimimo.com/v1".into(),
+    api_base_url: String = String::new(),
     api_key: String = String::new(),
 });
 config_struct!(VoiceAsrConfig {
@@ -183,14 +191,14 @@ config_struct!(NavigationConfig {
 config_struct!(JevConfig {
     enabled: bool = false,
     provider: JevProvider = JevProvider::default(),
-    typesafe: JevProviderConfig = JevProviderConfig::typesafe(),
-    openrouter: JevProviderConfig = JevProviderConfig::openrouter(),
+    typesafe: JevProviderConfig = JevProviderConfig::default(),
+    openrouter: JevProviderConfig = JevProviderConfig::default(),
     timeout_ms: u32 = 30_000,
     max_retries: u32 = 2,
     retry_base_delay_ms: u32 = 500,
     proxy_url: String = String::new(),
     http_referer: String = String::new(),
-    app_title: String = "VCPMobile".into(),
+    app_title: String = String::new(),
 });
 
 impl JevConfig {
@@ -384,6 +392,10 @@ pub struct FieldDescriptor {
     pub effect: ConfigEffect,
     pub options: Vec<String>,
     pub required: bool,
+    // Runtime fallback, also shown as the editor placeholder. Not stored input.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "config-export", ts(optional))]
+    pub preset: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "config-export", ts(optional))]
     pub min: Option<u32>,
