@@ -27,6 +27,7 @@ const WAIT_POLL_MS = 100;
 const STABILITY_GAP_MS = 120;
 const CARD_GAP = 12;
 const CARD_MAX_WIDTH = 320;
+const NOTICE_MAX_WIDTH = 440;
 const SAFE_MARGIN = 8;
 
 interface SpotRect {
@@ -42,6 +43,7 @@ const guideStore = useGuideStore();
 
 const isActive = computed(() => guideStore.activeGuideId !== null);
 const step = computed(() => guideStore.activeStep);
+const isNotice = computed(() => step.value?.target === null);
 const stepKey = computed(
   () => `${guideStore.activeGuideId ?? 'none'}:${guideStore.activeStepIndex}`,
 );
@@ -210,13 +212,16 @@ const positionCard = (r: SpotRect | null) => {
   const cardW =
     measuredW > 0
       ? measuredW
-      : Math.min(CARD_MAX_WIDTH, Math.max(120, vw - insets.left - insets.right - SAFE_MARGIN * 2));
+      : Math.min(isNotice.value ? NOTICE_MAX_WIDTH : CARD_MAX_WIDTH, Math.max(120, vw - insets.left - insets.right - SAFE_MARGIN * 2));
   const cardH = measuredH > 0 ? measuredH : 140;
 
   if (!r) {
     cardStyle.value = {
-      top: `${Math.max(insets.top + SAFE_MARGIN, (vh - cardH) / 2)}px`,
+      top: `${clampY((vh - cardH) / 2, cardH, insets)}px`,
       left: `${clampX((vw - cardW) / 2, cardW, insets)}px`,
+      ...(isNotice.value ? {
+        maxHeight: `${Math.max(0, vh - insets.top - insets.bottom - SAFE_MARGIN * 2)}px`,
+      } : {}),
     };
     return;
   }
@@ -371,6 +376,13 @@ const beginStep = () => {
     return;
   }
 
+  if (s.target === null) {
+    // 纯说明没有等待中的靶点，不启动超时跳过，也不沿用上一教学步骤的聚光。
+    spotRect.value = null;
+    positionCard(null);
+    return;
+  }
+
   const id = targetIdOf();
   if (!id) {
     skipStep(token);
@@ -382,6 +394,10 @@ const beginStep = () => {
 };
 
 const restartMeasure = () => {
+  if (isNotice.value) {
+    positionCard(null);
+    return;
+  }
   if (!step.value || !targetEl) return;
   const s = step.value;
   const token = stepToken;
@@ -406,6 +422,8 @@ const bindCardRef = (el: unknown) => {
     });
     observer.observe(node);
     cardObserver = observer;
+  }
+  if (node) {
     // 挂载后立即定位一次（消除初始 -9999px 占位），随后启用位置过渡。
     positionCard(spotRect.value);
     cardPlaced.value = true;
@@ -469,6 +487,7 @@ onBeforeUnmount(() => {
       v-if="isActive"
       ref="surfaceRef"
       class="vcp-viewport-surface guide-overlay fixed inset-0 z-guide select-none"
+      :class="{ 'guide-overlay--notice': isNotice }"
       @click.prevent
       @contextmenu.prevent
       @wheel.prevent
@@ -508,16 +527,17 @@ onBeforeUnmount(() => {
         key="guide-card"
         :ref="bindCardRef"
         class="guide-card pointer-events-auto"
-        :class="{ 'guide-card--placed': cardPlaced }"
+        :class="{ 'guide-card--placed': cardPlaced, 'guide-card--notice': isNotice }"
         :style="cardStyle"
         @click.stop
+        @wheel.stop
         @touchstart.stop
         @touchmove.stop
         @touchend.stop
         @touchcancel.stop
       >
         <div class="guide-card-head">
-          <span class="guide-card-step">[{{ guideStore.activeStepIndex + 1 }}/{{ guideStore.activeGuide?.steps.length }}]</span>
+          <span v-if="!isNotice || (guideStore.activeGuide?.steps.length ?? 0) > 1" class="guide-card-step">[{{ guideStore.activeStepIndex + 1 }}/{{ guideStore.activeGuide?.steps.length }}]</span>
           <span class="guide-card-title">{{ step.title }}</span>
         </div>
         <p class="guide-card-content">{{ step.content }}</p>
@@ -534,6 +554,10 @@ onBeforeUnmount(() => {
 .guide-overlay {
   touch-action: none;
   overscroll-behavior: contain;
+}
+
+.guide-overlay--notice {
+  touch-action: pan-y;
 }
 
 .guide-spot {
@@ -623,6 +647,36 @@ onBeforeUnmount(() => {
   transition:
     top 0.26s cubic-bezier(0.4, 0, 0.2, 1),
     left 0.26s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.guide-card--notice {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: min(440px, calc(100% - var(--vcp-safe-left, 0px) - var(--vcp-safe-right, 0px) - 16px));
+  overflow: hidden;
+}
+
+.guide-card--notice .guide-card-head,
+.guide-card--notice .guide-card-actions {
+  flex-shrink: 0;
+}
+
+.guide-card--notice .guide-card-content {
+  min-height: 0;
+  font-size: 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  white-space: pre-line;
+}
+
+.guide-card--notice .guide-card-title {
+  font-size: 14px;
+}
+
+.guide-card--notice .guide-btn {
+  min-height: 44px;
 }
 
 @keyframes guide-card-in {

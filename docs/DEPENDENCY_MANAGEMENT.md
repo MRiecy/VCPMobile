@@ -108,7 +108,7 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `@tauri-apps/plugin-os` | `2.4.0` | 与 `tauri-plugin-os` 同步 | npm | 仅由统一平台入口消费同步 `platform()` |
 | `vue` | `^3.5.44` | 每月检查 | npm | 核心框架 |
 | `vue-router` | `^5.4.0` | 每月检查 | npm | 路由 |
-| `pinia` | `^3.0.4` | 每月检查 | npm | 状态管理；主版本受 WebView 运行时 API 支持约束，见 §4.6 |
+| `pinia` | `^4.1.0` | 每月检查 | npm | 状态管理；运行时 API 按 WebView 117 / WKWebView 26 基线核对 |
 | `pinia-plugin-persistedstate` | `^4.7.1` | 每季度检查 | npm | 状态持久化 |
 | `@vueuse/core` | `^15.0.0` | 每月检查 | npm | 组合式工具库 |
 | `vite` | `^8.3.4` | 每月检查 | npm | 使用 Rolldown/Oxc，显式配置移动端构建目标 |
@@ -116,8 +116,8 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `unocss` | `^66.11.0` | 每季度检查 | npm | 原子 CSS |
 | `@unocss/*` | `^66.11.0` | 与 `unocss` 同步 | npm | 使用 `preset-wind3`，生态包统一版本 |
 | `dompurify` | `^3.4.17` | 每季度检查 | npm | XSS 净化 |
-| `katex` | `^0.16.47` | 每半年检查 | npm | LaTeX 渲染；当前条件性 low 审计项保留可见，不配置忽略 |
-| `mermaid` | `^11.17.2` | 每季度检查 | npm | 图表渲染；主版本受 WebView 兼容边界约束，见 §4.6 |
+| `katex` | `^0.18.10` | 每半年检查 | npm | LaTeX 渲染，与 Mermaid 的 0.18 范围配套；使用包内类型 |
+| `mermaid` | `^12.2.0` | 每季度检查 | npm | 图表渲染；主版本受 WebView 兼容边界约束，见 §4.6 |
 | `marked` | `^18.1.1` | 每季度检查 | npm | Markdown 解析 |
 | `morphdom` | `^2.7.8` | 每半年检查 | npm | 增量 DOM 更新 |
 | `@lucide/vue` | `^1.59.0` | 每月检查 | npm | Vue 图标组件 |
@@ -146,8 +146,8 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `vitest` / `@vitest/coverage-v8` | `^5.0.5` / `^5.0.5` | 同步检查 | npm | 前端测试与覆盖率 |
 | `happy-dom` | `^21.0.3` | 与测试环境同步检查 | npm | DOM 测试环境；iframe fixture 明确使用无网络 `srcdoc` |
 | `@vue/test-utils` | `^2.5.1` | 与 Vue 测试同步检查 | npm | Vue 组件测试 |
-| `@pinia/testing` | `^1.0.3` | 与 Pinia 同步检查 | npm | 保留与 Pinia 3 配套的当前版本 |
-| `@types/katex` | `^0.16.8` | 与 `katex` 同步 | npm | 类型定义 |
+| `@pinia/testing` | `^2.0.2` | 与 Pinia 同步检查 | npm | 与 Pinia 4 配套 |
+| `@vue/devtools-api` | `^8.2.1` | 与 Pinia 同步检查 | npm | 显式满足 Pinia 的开发工具 peer 依赖 |
 | `@types/sortablejs` | `^1.15.9` | 与 `sortablejs` 同步 | npm | 类型定义 |
 | `@iconify-json/ph` | `^1.2.2` | 每季度检查 | npm | Iconify 图标数据 |
 
@@ -364,20 +364,22 @@ iOS 插件的 SwiftPM `SwiftRs` 精确固定为 `1.0.9`，与 Cargo.lock 中 `sw
 
 审计结果以当次公告数据库与锁文件为准。沿目标平台、启用的 feature 和实际调用路径判断影响，分别处理漏洞、维护状态、内存安全和撤回版本警告；已解决项随依赖调整移除，不保留失效例外。
 
-KaTeX 0.16.47 存在要求先发生原型污染的 [low 级公告](https://github.com/KaTeX/KaTeX/security/advisories/GHSA-238p-pmpm-9mq7)。处理该项时需同时核对 Mermaid 的依赖范围与数学公式样式，不用强制版本覆盖或审计忽略掩盖兼容问题。
+KaTeX 与 Mermaid 使用兼容的 0.18 范围，根依赖为 0.18.10；KaTeX 自带类型，不再安装旧 `@types/katex`。调整数学渲染依赖时同时核对 Mermaid 的范围、锁文件中的重复版本与公式样式，不用强制版本覆盖或审计忽略掩盖兼容问题；漏洞结论仍以实际审计结果为准。
 
 ### 4.6 兼容约束与验证要求
 
 | 范围 | 当前约束 |
 |------|----------|
-| WebView | 保留 `chrome87` 与 `safari26.0` 构建目标。Mermaid 使用 11.x，Pinia 使用 3.x；升级主版本前核对生产路径中的运行时 API，语法转译不能补齐 `Object.hasOwn` 等内建 API。 |
+| WebView | Android WebView / Chromium 最低 117，Android minSdk 26 保持不变；共享包的 JS/CSS 构建目标同步为 `chrome117` 与 `safari26.0`。Mermaid 12、Pinia 4 按此基线评估；语法转译不能补齐运行时内建 API，新依赖仍须核对实际生产路径。 |
 | HTTP / TLS | 应用 HTTP 客户端保持 reqwest 0.12 的 TLS 提供方与信任根语义；调整前核对 Android 原生初始化需求及双端 HTTPS/WSS 行为。 |
 | SQLite | SQLx 与 rusqlite 共享 `libsqlite3-sys` 的原生 links 约束，必须成组评估版本兼容性。 |
 | 语音 runtime | 维持现有裁剪方案；需要升级时，联合评估模型、算子清单、运行库及 Android/iOS 制品。 |
 
 验证按改动涉及的层次选择。host 静态检查、Android 目标编译、插件 AAR、签名 APK、Apple 构建和设备运行分别提供证据；插件库构建不能替代完整应用 Release 验证，源码核查不能替代 Apple 编译与链接。
 
-图表升级需检查真实 SVG、双实例 ID、主题和图片导出，留意 C4 长关系文字重叠与暗色对比限制。终端升级需检查尺寸调整、输入与 OSC52 拦截；host 浏览器及合成 DOM 事件不替代旧版 WebView、手机 IME、真实 PTY 和触摸验证。
+图表升级需检查真实 SVG、双实例 ID、主题和图片导出，留意 C4 长关系文字重叠与暗色对比限制。终端升级需检查尺寸调整、输入与 OSC52 拦截；host 浏览器及合成 DOM 事件不替代最低支持的 WebView 117、手机 IME、真实 PTY 和触摸验证。
+
+兼容基线与 CSS 规则以 [移动端 UI 兼容性规范](./MOBILE_UI_COMPATIBILITY.md) 为准。基线内已支持的 `color-mix()` 不再承担低于 WebView 117 的适配义务；现有主题回退无需批量移除。启动兼容说明复用“帮助与指引”，依赖应用运行时可用，不能作为低版本内核在模块加载失败前仍能显示的保障。
 
 ---
 

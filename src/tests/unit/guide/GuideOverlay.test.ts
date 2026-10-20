@@ -57,6 +57,54 @@ afterEach(() => {
 });
 
 describe('GuideOverlay', () => {
+  it('keeps a targetless notice visible until acknowledged and reflows within the safe viewport', async () => {
+    vi.useFakeTimers();
+    defineGuide({
+      id: 'ov-notice',
+      title: '兼容说明',
+      description: '纯说明',
+      steps: [{ target: null, title: 'WebView 117+', content: '第一段\n\n第二段' }],
+    });
+    const store = useGuideStore();
+    const wrapper = mount(GuideOverlay);
+    store.start('ov-notice');
+    await nextTick();
+
+    expect(wrapper.find('.guide-overlay--notice').exists()).toBe(true);
+    expect(wrapper.find('.guide-card--notice').exists()).toBe(true);
+    expect(wrapper.find('.guide-spot').exists()).toBe(false);
+    expect(wrapper.find('.guide-demo').exists()).toBe(false);
+    expect(wrapper.find('.guide-card-step').exists()).toBe(false);
+    vi.advanceTimersByTime(10_000);
+    await nextTick();
+    expect(store.activeGuideId).toBe('ov-notice');
+    expect(store.isCompleted('ov-notice')).toBe(false);
+
+    const height = window.innerHeight;
+    try {
+      window.innerHeight = 240;
+      document.documentElement.style.setProperty('--vcp-safe-top', '24px');
+      document.documentElement.style.setProperty('--vcp-safe-bottom', '20px');
+      window.dispatchEvent(new Event('resize'));
+      await nextTick();
+      const card = wrapper.get('.guide-card').element as HTMLElement;
+      expect(card.style.maxHeight).toBe('180px');
+      expect(Number.parseFloat(card.style.top)).toBeGreaterThanOrEqual(32);
+      const wheel = new Event('wheel', { bubbles: true, cancelable: true });
+      card.querySelector('.guide-card-content')!.dispatchEvent(wheel);
+      expect(wheel.defaultPrevented).toBe(false);
+    } finally {
+      window.innerHeight = height;
+      document.documentElement.style.removeProperty('--vcp-safe-top');
+      document.documentElement.style.removeProperty('--vcp-safe-bottom');
+    }
+
+    await wrapper.get('.guide-btn').trigger('click');
+    expect(store.isCompleted('ov-notice')).toBe(true);
+    expect(store.activeGuideId).toBeNull();
+    wrapper.unmount();
+  });
+
   it('shows veil → spot + card + demo, advances by button, exits on 我知道了', async () => {
     vi.useFakeTimers();
     defineGuide({

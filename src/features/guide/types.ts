@@ -15,8 +15,8 @@ export type GuidePlacement = 'top' | 'bottom' | 'left' | 'right';
 export type GuideDemo = 'press-hold' | 'tap' | 'swipe-right' | 'drag-vertical';
 
 export interface GuideStep {
-  /** 目标元素注册表 id；支持函数动态求值（如 sidebar 的「第一个 Agent 行」）。 */
-  target: string | (() => string);
+  /** 目标元素注册表 id；函数可动态求值；null 为无需靶点的居中说明。 */
+  target: string | (() => string) | null;
   title: string;
   content: string;
   /** 卡片首选方位，默认 'bottom'。 */

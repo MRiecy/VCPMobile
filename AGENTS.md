@@ -23,6 +23,8 @@
 
 **平台边界（强约束）**：不支持 Windows/macOS/Linux 桌面端、Android TV 或其他 Android ABI；桌面用户使用 VCPChat。Vite 预览、host Rust 编译与 Tauri desktop scaffold 仅用于开发/测试，不是产品入口；现有非 Android fallback 不代表 iOS 已实现。不得为“桌面兼容”增加业务分支，也不得删除移动端子命令仍依赖的通用 `pnpm tauri` 脚本。完整 UI 契约见 `docs/MOBILE_UI_COMPATIBILITY.md`。
 
+**Android WebView 最低版本**：设备当前使用的 WebView / Chromium 内核须为 117 或更新版本，与 Android minSdk 26 分别管理；共享前端 JS/CSS 目标为 `chrome117` / `safari26.0`。启动后的兼容说明复用“帮助与指引”，不承担旧内核启动失败前的检测或兜底。
+
 **iOS 实施边界**：沿用 `plan/vcpmobile-ios-compatibility-research/09-Magi综合裁决与待决策清单.md` 的 D1–D19；各阶段在对应 `phase-0/` 至 `phase-6/` 子目录维护子规划、审计与结果。Windows 日常源码审计，Apple 构建通过阶段性手动 GitHub Actions；2026-10-16 用户明确允许每阶段按需诊断，复用 `ios-g1.yml` 的 device archive 链，G1 接入、G2 集成/打包仍分别验收。现在及后续均不建设项目 iOS 实机测试体系，正式签名与付费 Team 不在范围内。Android 正式链路继续保留；源码审计、host 检查和 Apple 构建结果分别记录，不宣称互相替代。
 
 后续功能范围与入口表达以用户最新逐项决定为准；2026-10-09 审批见 [Phase 2 功能权限与提示审议表](plan/vcpmobile-ios-compatibility-research/phase-2/09-功能权限与提示审议表.md)，其中新增意见优先于旧延期和隐藏建议。跨平台实现遵循 [跨平台开发规范](docs/CROSS_PLATFORM_DEVELOPMENT.md)。

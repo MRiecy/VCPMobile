@@ -14,7 +14,7 @@
   <p>
     <img src="https://img.shields.io/badge/Tauri%202.11%20%7C%20Vue%203.5-6366f1?logo=tauri&logoColor=white" alt="framework">
     <img src="https://img.shields.io/badge/Rust%20%7C%20Tokio-1f2937?logo=rust" alt="backend">
-    <img src="https://img.shields.io/badge/UnoCSS%20%7C%20Pinia%203-8b5cf6" alt="ui">
+    <img src="https://img.shields.io/badge/UnoCSS%20%7C%20Pinia%204-8b5cf6" alt="ui">
     <img src="https://img.shields.io/badge/docs-93%20files-d946ef" alt="docs">
     <img src="https://img.shields.io/badge/device%20tools-14-2dd4bf" alt="device tools">
   </p>
@@ -46,7 +46,7 @@
 - **零依赖增量同步** — WebSocket + HTTP 双通道直连桌面端，SHA-256 哈希差异比对，不经过任何第三方云
 - **Cyber-Physical 节点** — 14 项原生设备能力工具，让手机成为 AI 可直接调用的分布式计算节点
 
-> **支持范围**：当前生产平台为 Android `arm64-v8a` 触控手机、平板与按窗口宽度响应的折叠屏（minSdk 26）。iPhone/iPad 兼容已进入 [Phase 0–6 分期实施](plan/vcpmobile-ios-compatibility-research/08-分期实施路线图与验收门禁.md)，目标为复用 Vue/Rust 核心的实验性用户自签产物，尚未交付 iOS 构建。不支持桌面端、Android TV 或其他 Android ABI；桌面用户请使用 VCPChat。Vite 预览、host Rust 编译与现有非 Android fallback 不构成 iOS 实现或桌面产品入口。完整规范见 [`docs/MOBILE_UI_COMPATIBILITY.md`](docs/MOBILE_UI_COMPATIBILITY.md)。当前 Web 构建仍为 `chrome87`，WebKit 构建与交互适配按阶段推进。
+> **支持范围**：当前生产平台为 Android `arm64-v8a` 触控手机、平板与按窗口宽度响应的折叠屏（minSdk 26），要求设备当前使用的 Android WebView 为 Chromium 117 或更新版本。系统版本不等于 WebView 版本；应用启动后的“指引帮助”提供兼容说明。iPhone/iPad 兼容已进入 [Phase 0–6 分期实施](plan/vcpmobile-ios-compatibility-research/08-分期实施路线图与验收门禁.md)，目标为复用 Vue/Rust 核心的实验性用户自签产物，尚未交付 iOS 构建。不支持桌面端、Android TV 或其他 Android ABI；桌面用户请使用 VCPChat。Vite 预览、host Rust 编译与现有非 Android fallback 不构成 iOS 实现或桌面产品入口。完整规范见 [`docs/MOBILE_UI_COMPATIBILITY.md`](docs/MOBILE_UI_COMPATIBILITY.md)。共享前端构建目标为 `chrome117` / `safari26.0`，WebKit 交互适配按阶段推进。
 
 <div align="center">
   <img src=".github/assets/aurora-line.svg" width="100%" height="6" alt="" />
@@ -88,7 +88,7 @@ Aurora 之外，v1.1.6 的另一面是沉默的稳定性：同步协议归一化
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
-│  Rendering Layer —— Vue 3.5 · Pinia 3 · UnoCSS                 │
+│  Rendering Layer —— Vue 3.5 · Pinia 4 · UnoCSS                 │
 │  src/ —— 18 个领域模块 · 20 Stores · 15 Composables            │
 ├────────────────────────────────────────────────────────────────┤
 │  IPC Bridge Layer —— Tauri v2 · invoke / listen / Channel      │

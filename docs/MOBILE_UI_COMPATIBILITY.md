@@ -1,7 +1,7 @@
 # 移动端 UI 兼容性规范（Android / iOS）
 
 > 文档类型：产品支持与工程规范
-> 修订日期：2026-10-09
+> 修订日期：2026-10-20
 
 Vue 运行时平台分支、原生编译隔离、权限与用户提示见 [跨平台开发规范](./CROSS_PLATFORM_DEVELOPMENT.md)。本文件负责窗口、布局、CSS、Insets 和触控契约；阶段进度与验证结果留在对应计划记录中。
 
@@ -12,6 +12,8 @@ VCP Mobile 当前 Android 生产运行、构建与发布覆盖以下目标：
 - Android `arm64-v8a` 触控手机；
 - Android `arm64-v8a` 触控平板；
 - Android `arm64-v8a` 折叠屏，按**当前应用窗口的可用 CSS 宽度**响应，不按设备名称或物理形态分叉。
+
+Android 安装下限仍为 API 26；应用使用的 **Android WebView / Chromium 内核最低版本为 117**。两者分别约束系统安装条件与 Web 运行能力：较新的 Android 系统不保证实际 WebView provider 已更新，较旧的 Android 系统也不能单凭系统版本判定内核能力。低于 WebView 117 不在当前支持范围内。
 
 iPhone/iPad 原生客户端的目标为同一 Vue/Rust 核心加 Swift adapter、单 Scene、当前窗口宽度响应，以及供用户自行签名的实验性 device 产物。最低支持 iOS/iPadOS 26.0（2026-10-09 用户决定）；高于该基线的 API 按 availability 分层。SDK 版本与最低运行版本分别管理，不随系统年度发布自动抬高最低版本。
 
@@ -45,19 +47,23 @@ Android 手机/平板/折叠屏与 iPhone/iPad 必须共用同一份 Vue 组件�
 
 ## 3. WebView / WKWebView 与 CSS 契约
 
-`minSdk` 只规定 Android API 安装下限，不代表 WebView 特性下限。`vite.config.ts` 显式冻结 `build.target = "chrome87"` 与 `cssTarget = "chrome87"`，用于防止依赖升级静默抬高生成 JS/CSS 语法门槛；它不是 Android/WebView 产品支持声明，也不能替代 fallback 和设备验收。设备证据必须记录 Android API、WebView provider/version、viewport、density 与字体缩放；不能通过系统版本或 UA 猜测 WebView 能力。
+`minSdk` 只规定 Android API 安装下限，不代表 WebView 特性下限。共享移动包的 `vite.config.ts` 必须将 `build.target` 与 `cssTarget` 同步指定为 `["chrome117", "safari26.0"]`，分别对应 Android WebView 117 与最低 iOS/iPadOS 26.0。构建目标限制生成 JS/CSS 的语法，不会自动补齐运行时内建 API，也不能替代设备验收。依赖升级时核对实际执行路径使用的 API，而非只看包声明的 ECMAScript 年份。
 
-iOS 使用 WKWebView；当前 `chrome87` 构建配置不构成 Safari 兼容结论。WebKit 构建目标与 fallback 按 minimum 和实际 DOM/生成 CSS/JS 确定，保留以下三层 CSS 契约。iPhone/iPad 输入控件目标字号至少 16 CSS px，触控命中区至少 44×44 CSS px（可用 hit slop 保持视觉密度）；文本选择优先于祖先长按手势。
+设备证据必须记录 Android API、WebView provider/version、viewport、density 与字体缩放。系统版本、UA 或单次 feature probe 各自只说明已取得的信息，不能推导未验证的完整兼容结论。
+
+iOS 使用 WKWebView，Chromium 版本要求不适用于 iOS。`safari26.0` 构建目标也不构成 WebKit 交互验收；仍需沿实际 DOM、生成 CSS/JS 与平台 Insets 核对。iPhone/iPad 输入控件目标字号至少 16 CSS px，触控命中区至少 44×44 CSS px（可用 hit slop 保持视觉密度）；文本选择优先于祖先长按手势。
+
+Android 兼容说明归现有“帮助与指引”入口，Android 启动后在指引可呈现的首个时机自动显示一次，完成后可从帮助入口重看；不依赖用户先打开设置或进入某个聊天。说明告知 WebView 117+ 要求，并指导用户更新设备实际使用的 WebView provider；iOS 不注册或显示这条 Android 指引。该说明依赖 Vue 与指引运行时已成功加载；低版本内核若在模块解析或启动执行时失败，应用内说明可能无法出现。不得把它描述为启动前兼容检测、强制门禁或旧内核白屏保障。
 
 CSS 按影响分为三层：
 
 1. **结构层**：display、定位、尺寸、overflow、滚动、z-index、安全区与键盘避让。必须在支持基线内可用，或有等价 fallback。
-2. **语义视觉层**：背景、边框、选中/错误/禁用状态和对比度。先提供稳定实色或主题 token，再以现代语法增强。
-3. **装饰/性能增强层**：`color-mix()`、`content-visibility`、mask、轻微 blur、动画。缺失时只能少一点装饰或速度，不能丢内容、交互或状态语义。
+2. **语义视觉层**：背景、边框、选中/错误/禁用状态和对比度。使用主题 token 与受支持基线内的颜色语法，保持状态可辨认。
+3. **装饰/性能增强层**：`content-visibility`、mask、轻微 blur、动画等。超出支持基线的能力须可降级，缺失时不能丢内容、交互或状态语义。
 
 具体规则：
 
-- 关键 `color-mix()` 前必须有同属性稳定 fallback；动态 inline style 使用 feature probe 或预计算 token；
+- 常用 `color-mix()` 已包含在当前 WebView 117 / WKWebView 26 基线内，可用于主题与语义颜色，不要求为低于基线的内核重复添加同属性 fallback；现有实色 token、`@supports` 与预计算颜色继续按其实际用途保留，无需因提高基线重写全部 CSS。新增高于基线的语法仍须 feature probe 或等价 fallback；[浏览器支持参考](https://developer.chrome.com/docs/css-ui/css-color-mix)。
 - `content-visibility` 只能优化离屏工作，不能控制内容是否存在；
 - 结构性 shorthand 与 UnoCSS 生成结果必须检查生产 CSS，不能只看 Vue 源码；
 - 内容区域禁止 backdrop blur；fixed/sticky 单例元素最多轻度 blur（不超过 12px）；
@@ -108,7 +114,7 @@ interface NativeInsetsSnapshot {
 
 兼容性修复不得：
 
-- 对窄屏、旧 WebView 或平板隐藏复杂块、改成摘要或纯文本；
+- 对窄屏、支持基线内的 WebView 或平板隐藏复杂块、改成摘要或纯文本；
 - 破坏 Tool/Thought 展开、Diary 操作、代码复制、Mermaid 全屏、附件查看、文本选择、焦点或 scroll anchor；
 - 绕过富 HTML 过滤或扩大 active content；
 - 把异步资源移出平台应用包（Android APK / iOS app bundle），导致离线首次使用失败。
@@ -136,7 +142,7 @@ Vitest + happy-dom 可以证明状态、DOM 契约和生成物静态约束，但
 | 平板 portrait | overlay 或 single-pane 与窗口宽度一致 |
 | 平板 landscape | single-pane / dual-pane 切换，主区不被两侧栏挤没 |
 | 折叠屏折叠/展开与分屏 | 不重启业务状态；按新 viewport 重新布局 |
-| 最低支持 WebView 锚点 | L0 启动、L1 核心交互、L2 强渲染全部通过 |
+| 最低支持 WebView 117 锚点 | L0 启动、L1 核心交互、L2 强渲染全部通过 |
 | 现代 WebView 对照机 | 防止兼容 fallback 破坏增强路径 |
 
 每个状态同时检查浅色/深色、字体 1.0×/1.5×、长内容、四边安全区、键盘开合与 Android 返回手势。模拟 viewport 只能作为前置筛查，不能替代目标 Android WebView 的截图与触控验证。

@@ -99,9 +99,9 @@ export default defineConfig(async () => ({
   build: {
     // Shared mobile bundle: Android WebView and the minimum iOS WKWebView.
     // Syntax targets do not replace runtime API or native interaction checks.
-    target: ["chrome87", "safari26.0"],
-    cssTarget: ["chrome87", "safari26.0"],
-    // Mermaid 的冷门图表包按需加载，原始体积偏大但不进入首屏；其余常驻依赖显式拆包，
+    target: ["chrome117", "safari26.0"],
+    cssTarget: ["chrome117", "safari26.0"],
+    // Mermaid 图表与 ELK 布局引擎按需加载，原始体积偏大但不进入首屏；其余常驻依赖显式拆包，
     // 让主应用 chunk 保持在配置的 700KB 门槛以内。
     chunkSizeWarningLimit: 700,
     rolldownOptions: {
