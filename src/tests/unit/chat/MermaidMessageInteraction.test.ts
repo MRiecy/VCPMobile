@@ -12,13 +12,13 @@ import type { ChatMessage, ContentBlock, MarkdownNode, StreamBlock } from '@/cor
 import { mockInvoke } from '@/tests/mocks/tauri';
 
 const { render, findImage } = vi.hoisted(() => ({
-  render: vi.fn<(id: string, source: string) => Promise<{ svg: string }>>(),
+  render: vi.fn<(source: string) => { svg: string }>(),
   findImage: vi.fn(async () => null),
 }));
-vi.mock('mermaid', () => ({ default: { initialize: vi.fn(), render } }));
+vi.mock('pele', () => ({ render }));
 vi.mock('@/core/utils/renderedImage', () => ({ findRenderedImagePayload: findImage }));
 
-const svg = (label: string) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><text>${label}</text></svg>`;
+const svg = (label: string) => `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10" style="--_fg:var(--pele-fg,#1f1f1f)"><text>${label}</text></svg>`;
 const Viewer = defineComponent({
   props: ['visible', 'svgHtml', 'sourceCode'],
   emits: ['close'],
@@ -31,7 +31,7 @@ let sequence = 0;
 beforeEach(() => {
   pinia = createPinia();
   setActivePinia(pinia);
-  render.mockReset().mockResolvedValue({ svg: svg('ready') });
+  render.mockReset().mockReturnValue({ svg: svg('ready') });
   useThemeStore().isDarkResolved = false;
 });
 
@@ -41,11 +41,6 @@ afterEach(async () => {
   await flushPromises();
 });
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>(done => { resolve = done; });
-  return { promise, resolve };
-}
 
 function code(source: string): MarkdownNode {
   return { type: 'code_block', lang: 'mermaid', code: source, highlighted_html: null, theme: null };
@@ -118,19 +113,17 @@ describe('Mermaid message rendering and delegation', () => {
     ['before', false], ['before', true], ['after', false], ['after', true],
   ] as const)('opens on the first click when compilation finishes %s the terminal AST (same hash=%s)', async (timing, sameHash) => {
     const source = `graph TD; ${timing}${sameHash}-->end`;
-    const completion = deferred<{ svg: string }>();
-    render.mockReturnValue(completion.promise);
+    render.mockReturnValue({ svg: svg(timing) });
     const stream = await startStream([markdown(source, `${timing}-stable`)]);
     const wrapper = mountMessage(stream.message);
     const send = vi.spyOn(useChatHistoryStore(), 'sendMessage').mockResolvedValue(undefined);
     await vi.waitFor(() => expect(render).toHaveBeenCalled());
     if (timing === 'before') {
-      completion.resolve({ svg: svg(timing) });
       await vi.waitFor(() => expect(wrapper.find('[data-message-render-region="stable"] svg').exists()).toBe(true));
     }
     await stream.end([markdown(source, sameHash ? `${timing}-stable` : `${timing}-final`)]);
-    completion.resolve({ svg: svg(timing) });
     await vi.waitFor(() => expect(wrapper.find('.vcp-mermaid-wrapper svg').exists()).toBe(true));
+    expect(wrapper.get('.vcp-mermaid-wrapper svg').attributes('style')).toContain('--pele-fg');
     await wrapper.get('.vcp-mermaid-wrapper svg text').trigger('click');
     expect(wrapper.getComponent(Viewer).props()).toMatchObject({ visible: true, sourceCode: source });
     wrapper.getComponent(Viewer).vm.$emit('close');
@@ -159,39 +152,31 @@ describe('Mermaid message rendering and delegation', () => {
     expect(findImage).not.toHaveBeenCalled();
   });
 
-  it.each(['replace', 'unmount'] as const)('discards an outstanding SVG after %s', async action => {
-    const completion = deferred<{ svg: string }>();
-    render.mockReturnValueOnce(completion.promise);
+  it.each(['replace', 'unmount'] as const)('cleans up diagram host after %s', async action => {
     const message = staticMessage([markdown(`graph TD; abandoned${action}-->X`, 'old')]);
     const wrapper = mountMessage(message);
-    await vi.waitFor(() => expect(render).toHaveBeenCalled());
-    const oldNode = wrapper.get('.mermaid-placeholder').element;
+    await vi.waitFor(() => expect(wrapper.find('.mermaid svg').exists()).toBe(true));
     if (action === 'unmount') wrapper.unmount();
     else {
       message.blocks = [{ type: 'markdown', hash: 'replacement', nodes: [{ type: 'paragraph', children: [{ type: 'text', value: 'replacement' }] }] }];
       await nextTick();
+      await flushPromises();
+      expect(wrapper.find('.mermaid').exists()).toBe(false);
+      expect(wrapper.text()).toContain('replacement');
     }
-    completion.resolve({ svg: svg('obsolete') });
-    await flushPromises();
-    expect(oldNode.querySelector('svg')).toBeNull();
-    if (action === 'replace') expect(wrapper.text()).toContain('replacement');
   });
 
-  it('keeps the current theme when an older theme finishes late', async () => {
-    const source = 'graph TD; themeRace-->X';
-    const wrapper = mountMessage(staticMessage([markdown(source, 'theme') ]));
+  it('preserves CSS variable-driven SVG without re-rendering when theme switches', async () => {
+    const source = 'graph TD; themeCssVars-->X';
+    const wrapper = mountMessage(staticMessage([markdown(source, 'theme')]));
     await vi.waitFor(() => expect(wrapper.find('.mermaid svg').exists()).toBe(true));
-    const dark = deferred<{ svg: string }>();
-    render.mockReturnValueOnce(dark.promise);
+    const callsAfterMount = render.mock.calls.length;
     useThemeStore().isDarkResolved = true;
-    await vi.waitFor(() => expect(render).toHaveBeenCalledTimes(2));
-    useThemeStore().isDarkResolved = false;
-    await vi.waitFor(() => expect(wrapper.find('.mermaid svg').exists()).toBe(true));
-    dark.resolve({ svg: svg('obsolete dark') });
     await flushPromises();
-    await wrapper.get('.mermaid svg').trigger('click');
-    expect(wrapper.getComponent(Viewer).props('sourceCode')).toBe(source);
-    expect(wrapper.getComponent(Viewer).props('svgHtml')).not.toContain('obsolete dark');
+    useThemeStore().isDarkResolved = false;
+    await flushPromises();
+    expect(render.mock.calls.length).toBe(callsAfterMount);
+    expect(wrapper.get('.mermaid svg').attributes('style')).toContain('--pele-fg');
   });
 
   it.each(['markdown', 'thought'] as const)('leaves the %s AST tail untouched until stable content takes over', async tailType => {

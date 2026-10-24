@@ -10,15 +10,13 @@ import { useChatPreferencesStore } from '@/features/chat/preferences/store';
 import { invokeMock, mockInvoke } from '@/tests/mocks/tauri';
 
 const { mermaidRenderMock } = vi.hoisted(() => ({
-  mermaidRenderMock: vi.fn(async () => ({ svg: '<svg viewBox="0 0 10 10"></svg>' })),
+  mermaidRenderMock: vi.fn(() => ({ svg: '<svg viewBox="0 0 10 10"></svg>' })),
 }));
 
-vi.mock('mermaid', () => ({
-  default: {
-    initialize: vi.fn(),
-    render: mermaidRenderMock,
-  },
+vi.mock('pele', () => ({
+  render: mermaidRenderMock,
 }));
+
 
 const markerStub = (marker: string) => defineComponent({
   template: `<div data-strong-block="${marker}">${marker}</div>`,

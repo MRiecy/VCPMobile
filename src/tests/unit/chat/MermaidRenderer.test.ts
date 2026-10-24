@@ -2,8 +2,8 @@ import { flushPromises } from '@vue/test-utils';
 import { describe, expect, it, vi } from 'vitest';
 import { instantiateMermaidSvg, renderMermaidTemplate } from '@/features/chat/utils/mermaidRenderer';
 
-const { render, initialize } = vi.hoisted(() => ({ render: vi.fn(), initialize: vi.fn() }));
-vi.mock('mermaid', () => ({ default: { render, initialize } }));
+const { render } = vi.hoisted(() => ({ render: vi.fn() }));
+vi.mock('pele', () => ({ render }));
 
 describe('Mermaid resource ownership', () => {
   it('gives repeated SVG instances independent IDs and rewrites their internal references', () => {
@@ -22,40 +22,32 @@ describe('Mermaid resource ownership', () => {
     expect(first.querySelector('path')?.getAttribute('marker-end')).toBe(`url(#${first.querySelector('marker')?.id})`);
   });
 
-  it('merges subscribers, serializes themes, and skips a queued operation with no consumers', async () => {
-    const completions: Array<(result: { svg: string }) => void> = [];
-    render.mockImplementation(() => new Promise(resolve => completions.push(resolve)));
+  it('reuses cached Pele templates across calls and rejects aborted requests immediately', async () => {
+    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>';
+    render.mockReturnValue({ svg, width: 10, height: 10, links: [], type: 'flowchart', mermaidType: 'flowchart-v2' });
     const source = 'graph TD; queueA-->queueB';
     const owner = new AbortController();
     const duplicate = new AbortController();
     const cancelled = new AbortController();
-    const first = renderMermaidTemplate(source, false, owner.signal);
-    const shared = renderMermaidTemplate(source, false, duplicate.signal);
-    const nextTheme = renderMermaidTemplate(source, true, new AbortController().signal);
-    const abandoned = renderMermaidTemplate('graph TD; gone-->forever', false, cancelled.signal).catch(error => error.name);
     cancelled.abort();
+    const abandoned = renderMermaidTemplate('graph TD; gone-->forever', cancelled.signal).catch(error => error.name);
+    const first = renderMermaidTemplate(source, owner.signal);
+    const shared = renderMermaidTemplate(source, duplicate.signal);
     await flushPromises();
-    expect(render).toHaveBeenCalledTimes(1);
-    const svg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"/>';
-    completions.shift()!({ svg });
     await expect(first).resolves.toBe(svg);
     await expect(shared).resolves.toBe(svg);
-    await flushPromises();
-    expect(render).toHaveBeenCalledTimes(2);
-    expect(initialize.mock.calls.map(args => args[0].theme)).toEqual(['default', 'dark']);
-    completions.shift()!({ svg });
-    await nextTheme;
     expect(await abandoned).toBe('AbortError');
-    await expect(renderMermaidTemplate(source, false, new AbortController().signal)).resolves.toBe(svg);
-    expect(render).toHaveBeenCalledTimes(2);
+    expect(render).toHaveBeenCalledTimes(1);
+    await expect(renderMermaidTemplate(source, new AbortController().signal)).resolves.toBe(svg);
+    expect(render).toHaveBeenCalledTimes(1);
   });
 
   it('does not retain an oversized SVG in the reusable cache', async () => {
     const svg = `<svg xmlns="http://www.w3.org/2000/svg"><text>${'x'.repeat(300000)}</text></svg>`;
-    render.mockResolvedValue({ svg });
+    render.mockReturnValue({ svg, width: 10, height: 10, links: [], type: 'flowchart', mermaidType: 'flowchart-v2' });
     const before = render.mock.calls.length;
-    await renderMermaidTemplate('oversized-cache-entry', false, new AbortController().signal);
-    await renderMermaidTemplate('oversized-cache-entry', false, new AbortController().signal);
+    await renderMermaidTemplate('oversized-cache-entry', new AbortController().signal);
+    await renderMermaidTemplate('oversized-cache-entry', new AbortController().signal);
     expect(render.mock.calls.length - before).toBe(2);
   });
 });

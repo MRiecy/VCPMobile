@@ -1,33 +1,23 @@
-/** Shared message-domain renderer: one Mermaid execution, bounded reusable templates. */
+/** Shared message-domain renderer: one Pele module load, bounded reusable templates. */
 const MAX_CACHE_BYTES = 4 * 1024 * 1024;
 const MAX_ENTRY_BYTES = 512 * 1024;
-const OPTIONS = { startOnLoad: false, securityLevel: 'strict' as const };
 const cache = new Map<string, { svg: string; bytes: number }>();
 let cacheBytes = 0;
 let serial = 0;
-let running = false;
-
-interface Subscriber {
-  resolve: (svg: string) => void;
-  reject: (error: unknown) => void;
-  detach: () => void;
-}
-interface Task {
-  key: string;
-  source: string;
-  theme: 'dark' | 'default';
-  subscribers: Set<Subscriber>;
-  started: boolean;
-}
-const pending = new Map<string, Task>();
-const queue: Task[] = [];
+type PeleModule = typeof import('pele');
+let peleModule: PeleModule | null = null;
+let loadingPele: Promise<PeleModule> | null = null;
 
 function abortError() { return new DOMException('图表渲染已取消', 'AbortError'); }
 
 function remember(key: string, svg: string) {
-  // UTF-16 storage estimate includes both source/options key and rendered SVG.
+  // UTF-16 storage estimate includes both source key and rendered SVG.
   const bytes = (key.length + svg.length) * 2;
   if (bytes > MAX_ENTRY_BYTES) return;
+  if (cache.has(key)) {
+    cacheBytes -= cache.get(key)!.bytes;
+    cache.delete(key);
+  }
   while (cacheBytes + bytes > MAX_CACHE_BYTES && cache.size) {
     const oldest = cache.keys().next().value!;
     cacheBytes -= cache.get(oldest)!.bytes;
@@ -37,66 +27,53 @@ function remember(key: string, svg: string) {
   cacheBytes += bytes;
 }
 
-async function drain() {
-  if (running) return;
-  running = true;
-  try {
-    while (queue.length) {
-      const task = queue.shift()!;
-      task.started = true;
-      if (!task.subscribers.size) { pending.delete(task.key); continue; }
-      try {
-        const mermaid = (await import('mermaid')).default;
-        if (!task.subscribers.size) continue;
-        mermaid.initialize({ ...OPTIONS, theme: task.theme });
-        const { svg } = await mermaid.render(`vcp-mermaid-template-${++serial}`, task.source);
-        // A completed library operation has no owner after the last consumer leaves.
-        if (task.subscribers.size) remember(task.key, svg);
-        for (const subscriber of task.subscribers) { subscriber.detach(); subscriber.resolve(svg); }
-      } catch (error) {
-        for (const subscriber of task.subscribers) { subscriber.detach(); subscriber.reject(error); }
-      } finally {
-        pending.delete(task.key);
-        task.subscribers.clear();
-      }
-    }
-  } finally { running = false; }
+function loadPele(): Promise<PeleModule> {
+  if (peleModule) return Promise.resolve(peleModule);
+  if (!loadingPele) {
+    loadingPele = import('pele')
+      .then(mod => {
+        peleModule = mod;
+        return mod;
+      })
+      .finally(() => {
+        loadingPele = null;
+      });
+  }
+  return loadingPele;
 }
 
-export function renderMermaidTemplate(source: string, dark: boolean, signal: AbortSignal): Promise<string> {
-  if (signal.aborted) return Promise.reject(abortError());
-  const theme = dark ? 'dark' : 'default';
-  const key = JSON.stringify([source, theme, OPTIONS]);
-  const hit = cache.get(key);
+export async function renderMermaidTemplate(source: string, signal: AbortSignal): Promise<string> {
+  if (signal.aborted) throw abortError();
+  const hit = cache.get(source);
   if (hit) {
-    cache.delete(key);
-    cache.set(key, hit);
-    return Promise.resolve(hit.svg);
+    cache.delete(source);
+    cache.set(source, hit);
+    return hit.svg;
   }
-  let task = pending.get(key);
-  if (!task) {
-    task = { key, source, theme, subscribers: new Set(), started: false };
-    pending.set(key, task);
-    queue.push(task);
-  }
-  const owner = task;
-  const result = new Promise<string>((resolve, reject) => {
-    const subscriber: Subscriber = { resolve, reject, detach: () => signal.removeEventListener('abort', abort) };
-    const abort = () => {
-      owner.subscribers.delete(subscriber);
-      subscriber.detach();
-      if (!owner.started && !owner.subscribers.size) {
-        const position = queue.indexOf(owner);
-        if (position !== -1) queue.splice(position, 1);
-        pending.delete(owner.key);
-      }
-      reject(abortError());
-    };
-    owner.subscribers.add(subscriber);
-    signal.addEventListener('abort', abort, { once: true });
+  const pele = peleModule ?? await new Promise<PeleModule>((resolve, reject) => {
+    const onAbort = () => reject(abortError());
+    signal.addEventListener('abort', onAbort, { once: true });
+    loadPele().then(
+      mod => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(mod);
+      },
+      err => {
+        signal.removeEventListener('abort', onAbort);
+        reject(err);
+      },
+    );
   });
-  void drain();
-  return result;
+  if (signal.aborted) throw abortError();
+  const cachedAfterLoad = cache.get(source);
+  if (cachedAfterLoad) {
+    cache.delete(source);
+    cache.set(source, cachedAfterLoad);
+    return cachedAfterLoad.svg;
+  }
+  const { svg } = pele.render(source, { idPrefix: `vcp-mermaid-template-${++serial}` });
+  remember(source, svg);
+  return svg;
 }
 
 function escapeRegExp(value: string) { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }

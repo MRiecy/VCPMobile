@@ -4,6 +4,48 @@ export const IMAGE_EXPORT_MAX_PIXELS = 2048 * 2048;
 export const IMAGE_EXPORT_MAX_BYTES = 8 * 1024 * 1024;
 let exportTail: Promise<unknown> = Promise.resolve();
 
+const PELE_THEME_VARS = [
+  '--pele-bg',
+  '--pele-fg',
+  '--pele-muted',
+  '--pele-line',
+  '--pele-surface',
+  '--pele-surface-alt',
+  '--pele-border',
+  '--pele-accent',
+  '--pele-critical',
+  '--pele-error',
+  '--pele-radius',
+  '--pele-font',
+  '--pele-font-mono',
+  '--pele-series-1',
+  '--pele-series-2',
+  '--pele-series-3',
+  '--pele-series-4',
+  '--pele-series-5',
+  '--pele-series-6',
+  '--pele-series-7',
+  '--pele-series-8',
+] as const;
+
+export function cloneSvgWithThemeVariables(source: SVGSVGElement): SVGSVGElement {
+  const svg = source.cloneNode(true) as SVGSVGElement;
+  svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+  const view = source.ownerDocument?.defaultView;
+  if (view && source.isConnected) {
+    const computed = view.getComputedStyle(source);
+    for (const variable of PELE_THEME_VARS) {
+      const value = computed.getPropertyValue(variable).trim();
+      if (value) svg.style.setProperty(variable, value);
+    }
+  }
+  return svg;
+}
+
+export function serializeSvgWithTheme(source: SVGSVGElement): string {
+  return new XMLSerializer().serializeToString(cloneSvgWithThemeVariables(source));
+}
+
 export function ensureExportActive(signal?: AbortSignal) {
   if (signal?.aborted) throw new DOMException('图片操作已取消', 'AbortError');
 }
@@ -55,8 +97,7 @@ export function exportSvg(source: SVGSVGElement, signal?: AbortSignal, options: 
     const width = bounds?.width || source.clientWidth || Number(source.getAttribute('width')) || 600;
     const height = bounds?.height || source.clientHeight || Number(source.getAttribute('height')) || 400;
     const size = boundedImageSize(width, height, options.preferredScale ?? 1);
-    const svg = source.cloneNode(true) as SVGSVGElement;
-    svg.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+    const svg = cloneSvgWithThemeVariables(source);
     if (!viewBox?.width || !viewBox?.height) svg.setAttribute('viewBox', `${bounds?.x || 0} ${bounds?.y || 0} ${width} ${height}`);
     svg.setAttribute('width', String(size.width));
     svg.setAttribute('height', String(size.height));

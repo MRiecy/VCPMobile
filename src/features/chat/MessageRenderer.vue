@@ -11,7 +11,6 @@ import { useOverlayStore } from "../../core/stores/overlay";
 import { useChatHistoryStore } from "../../core/stores/chatHistoryStore";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useChatStreamStore } from "../../core/stores/chatStreamStore";
-import { useThemeStore } from "../../core/stores/theme";
 import { useChatPreferencesStore } from "./preferences/store";
 import { useNotificationStore } from "../../core/stores/notification";
 import { useMessageEvents } from "../../core/composables/useMessageEvents";
@@ -65,7 +64,6 @@ const notificationStore = useNotificationStore();
 const historyStore = useChatHistoryStore();
 const sessionStore = useChatSessionStore();
 const streamStore = useChatStreamStore();
-const themeStore = useThemeStore();
 const chatPreferences = useChatPreferencesStore();
 
 let rendererDisposed = false;
@@ -513,7 +511,7 @@ function decorateMermaid(el: HTMLElement) {
   if (svg.parentElement?.classList.contains('vcp-mermaid-wrapper')) return;
   
   // 给 SVG 设置基础样式，使其自适应显示
-  svg.removeAttribute('style');
+  // 保留 Pele 根节点内联的 --_* 主题变量声明，仅设置自适应尺寸样式
   svg.style.maxWidth = '100%';
   svg.style.height = 'auto';
   svg.style.display = 'block';
@@ -537,14 +535,15 @@ function decorateMermaid(el: HTMLElement) {
 }
 
 // === Heavy Content Rendering (KaTeX inline math + Mermaid) ===
-const renderHeavyContent = async (refreshMermaid: boolean) => {
+const renderHeavyContent = async (refreshMermaid = false) => {
   heavyController?.abort();
   const controller = new AbortController();
   heavyController = controller;
+
+
   const messageId = props.message.id;
-  const dark = themeStore.isDarkResolved;
   const host = messageContentRef.value;
-  const isCurrent = () => !rendererDisposed && !controller.signal.aborted && props.message.id === messageId && messageContentRef.value === host && themeStore.isDarkResolved === dark;
+  const isCurrent = () => !rendererDisposed && !controller.signal.aborted && props.message.id === messageId && messageContentRef.value === host;
   if (!host || !isCurrent()) return;
 
   // 稳定块包含正文、Thought、Diary、Tool；活动 AST/morphdom 尾部不在这些区域内。
@@ -605,7 +604,7 @@ const renderHeavyContent = async (refreshMermaid: boolean) => {
         placeholder.dataset.mermaidSource = sourceCode;
         const canCommit = () => isCurrent() && host.contains(placeholder) && placeholder.dataset.mermaidSource === sourceCode;
         try {
-          const renderedSvg = await renderMermaidTemplate(sourceCode, dark, controller.signal);
+          const renderedSvg = await renderMermaidTemplate(sourceCode, controller.signal);
           if (!canCommit()) continue;
           placeholder.innerHTML = instantiateMermaidSvg(renderedSvg);
           placeholder.classList.remove('mermaid-placeholder');
@@ -684,9 +683,9 @@ watch(
 
 // DOM patch 后统一处理内容、主题和终态变化；同一轮更新不重复取消/启动渲染。
 watch(
-  [messageContentRef, () => props.message.blocks, isMessageInActiveStream, () => themeStore.isDarkResolved],
-  ([_host, _blocks, _active, dark], previous) => {
-    void renderHeavyContent(dark !== previous[3]);
+  [messageContentRef, () => props.message.blocks, isMessageInActiveStream],
+  () => {
+    void renderHeavyContent();
   },
   { flush: 'post' },
 );

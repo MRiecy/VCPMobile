@@ -25,6 +25,24 @@
   /* 抽屉边缘阴影由常驻渐变层绘制，只动画 opacity。 */
   --vcp-drawer-shadow-width: 32px;
   --vcp-drawer-shadow-color: rgba(0, 0, 0, 0.3);
+  --pele-bg: var(--secondary-bg, #ffffff);
+  --pele-fg: var(--primary-text, #1f1f1f);
+  --pele-muted: var(--secondary-text, #6e6e6e);
+  --pele-line: #4a4a52;
+  --pele-surface: var(--tertiary-bg, #f3f3f3);
+  --pele-surface-alt: var(--accent-bg, #e6e6e6);
+  --pele-border: #8a8a94;
+  --pele-accent: #3b82f6;
+  --pele-radius: 6px;
+}
+
+html.dark {
+  --pele-line: #a0a0ab;
+  --pele-border: #6e6e7a;
+  --pele-accent: #60a5fa;
+}
+
+:root {
 
   /* === VCP 全局层级系统 ===
    * 用途：统一管理 z-index，消除魔法数字
@@ -56,6 +74,15 @@
     --vcp-highlight-border-40: color-mix(in srgb, var(--highlight-text) 40%, transparent);
     --vcp-border-subtle: color-mix(in srgb, var(--border-color) 15%, transparent);
     --vcp-highlight-shadow: color-mix(in srgb, var(--highlight-text) 8%, transparent);
+    --pele-surface: color-mix(in srgb, var(--primary-text) 5%, var(--secondary-bg));
+    --pele-surface-alt: color-mix(in srgb, var(--primary-text) 9%, var(--secondary-bg));
+    --pele-border: color-mix(in srgb, var(--primary-text) 22%, var(--secondary-bg));
+  }
+
+  html.dark {
+    --pele-surface: color-mix(in srgb, var(--primary-text) 8%, var(--secondary-bg));
+    --pele-surface-alt: color-mix(in srgb, var(--primary-text) 13%, var(--secondary-bg));
+    --pele-border: color-mix(in srgb, var(--primary-text) 24%, var(--secondary-bg));
   }
 }
 

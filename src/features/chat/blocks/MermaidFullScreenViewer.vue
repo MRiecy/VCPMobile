@@ -5,7 +5,7 @@ import { useNotificationStore } from '../../../core/stores/notification';
 import { useThemeStore } from '../../../core/stores/theme';
 import { isAndroid, isIOS } from '../../../core/utils/platform';
 import { saveBlobToGallery } from '../../../core/utils/temporaryExport';
-import { exportSvg } from '../../../core/utils/renderedImageExport';
+import { exportSvg, serializeSvgWithTheme } from '../../../core/utils/renderedImageExport';
 import { instantiateMermaidSvg } from '../utils/mermaidRenderer';
 
 const props = defineProps<{
@@ -209,7 +209,8 @@ const copySource = async () => {
 
 const copySvg = async () => {
   try {
-    await navigator.clipboard.writeText(props.svgHtml);
+    const svg = fullscreenCanvasRef.value?.querySelector('svg');
+    await navigator.clipboard.writeText(svg ? serializeSvgWithTheme(svg) : props.svgHtml);
     notificationStore.addNotification({
       type: 'success',
       title: '复制成功',
