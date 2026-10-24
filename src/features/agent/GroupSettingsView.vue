@@ -69,6 +69,37 @@ const normalizeGroupConfig = (config: GroupConfigDto): EditableGroupConfig => ({
   unifiedModel: config.unifiedModel || "",
   tagMatchMode: config.tagMatchMode || "strict",
 });
+
+const jevNumericFields = [
+  { key: "maxSpeakersPerRound", title: "每轮发言人数上限", description: "一轮最多安排多少位成员", min: 1, max: 32, step: 1, default: 3, unit: "位" },
+  { key: "maxAutonomousRounds", title: "讨论轮数上限", description: "达到上限后停止自动讨论", min: 1, max: 100, step: 1, default: 12, unit: "轮" },
+  { key: "speakerThreshold", title: "发言门槛", description: "越高，参与发言的成员越少", min: 0, max: 1, step: 0.01, default: 0.16, unit: "" },
+  { key: "continueThreshold", title: "继续讨论门槛", description: "越高，越容易结束讨论", min: 0, max: 1, step: 0.01, default: 0.45, unit: "" },
+  { key: "stopThreshold", title: "结束讨论门槛", description: "越高，越不容易主动结束", min: 0, max: 1, step: 0.01, default: 0.55, unit: "" },
+  { key: "historyWindow", title: "JEV 参考消息数", description: "选择发言成员时参考的最近消息", min: 1, max: 200, step: 1, default: 12, unit: "条" },
+  { key: "continueDebounceMs", title: "继续操作间隔（ms）", description: "避免连续点击重复发起讨论", min: 0, max: 10000, step: 100, default: 800, unit: " ms" },
+] as const;
+
+type JevNumericField = (typeof jevNumericFields)[number];
+
+const sanitizeNumericInput = (
+  value: unknown,
+  min: number,
+  max: number,
+  step: number,
+  defaultValue: number,
+): number => {
+  if (typeof value !== "number" && typeof value !== "string") return defaultValue;
+  const trimmed = typeof value === "string" ? value.trim() : String(value);
+  if (!trimmed) return defaultValue;
+  const num = Number(trimmed);
+  if (!Number.isFinite(num) || num < min || num > max) return defaultValue;
+  if (step >= 1) {
+    if (!Number.isInteger(num)) return defaultValue;
+    return Math.trunc(num);
+  }
+  return Math.round(num * 100) / 100;
+};
 const groupConfig = ref<EditableGroupConfig | null>(null);
 const deleteBlockReason = computed(() => groupConfig.value ? chatMutationBlockReason({
   ownerId: groupConfig.value.id, ownerType: "group",
@@ -218,7 +249,7 @@ const fetchGroupConfig = async (epoch: number, groupId: string) => {
     }
     const retained = retainedDrafts.get(groupId);
     if (retained) {
-      groupConfig.value = cloneConfig(retained.draft);
+      groupConfig.value = normalizeGroupConfig(retained.draft);
       originalConfig.value = cloneConfig(retained.baseline);
       saveError.value = "已恢复未保存的修改，请重试保存。";
       return;
@@ -240,17 +271,23 @@ const cloneConfig = (config: EditableGroupConfig): EditableGroupConfig => JSON.p
 const hasChanges = computed(() => !!groupConfig.value && !!originalConfig.value &&
   JSON.stringify(groupConfig.value) !== JSON.stringify(originalConfig.value));
 const retainDraft = () => {
-  if (hasChanges.value && groupConfig.value && originalConfig.value) {
-    retainedDrafts.set(groupConfig.value.id, {
-      draft: cloneConfig(groupConfig.value),
-      baseline: cloneConfig(originalConfig.value),
-    });
+  if (groupConfig.value && originalConfig.value) {
+    if (hasChanges.value) {
+      retainedDrafts.set(groupConfig.value.id, {
+        draft: cloneConfig(groupConfig.value),
+        baseline: cloneConfig(originalConfig.value),
+      });
+    }
   }
 };
 
 const saveChanges = async (): Promise<boolean> => {
   if (isSaving.value || isLoading.value) return false;
-  if (!groupConfig.value || !originalConfig.value || !hasChanges.value) return true;
+  if (!groupConfig.value || !originalConfig.value) return true;
+  if (!hasChanges.value) {
+    retainedDrafts.delete(groupConfig.value.id);
+    return true;
+  }
   const validation = validateDraft(groupConfig.value);
   if (validation) {
     saveError.value = validation;
@@ -622,27 +659,8 @@ const openTagSelection = (event: MouseEvent) => {
   selectionMenu = overlayStore.contextMenuConfig;
 };
 
-const jevNumericFields = [
-  { key: "maxSpeakersPerRound", title: "每轮发言人数上限", description: "一轮最多安排多少位成员", min: 1, max: 32, step: 1, unit: "位" },
-  { key: "maxAutonomousRounds", title: "讨论轮数上限", description: "达到上限后停止自动讨论", min: 1, max: 100, step: 1, unit: "轮" },
-  { key: "speakerThreshold", title: "发言门槛", description: "越高，参与发言的成员越少", min: 0, max: 1, step: 0.01, unit: "" },
-  { key: "continueThreshold", title: "继续讨论门槛", description: "越高，越容易结束讨论", min: 0, max: 1, step: 0.01, unit: "" },
-  { key: "stopThreshold", title: "结束讨论门槛", description: "越高，越不容易主动结束", min: 0, max: 1, step: 0.01, unit: "" },
-  { key: "historyWindow", title: "JEV 参考消息数", description: "选择发言成员时参考的最近消息", min: 1, max: 200, step: 1, unit: "条" },
-  { key: "continueDebounceMs", title: "继续操作间隔（ms）", description: "避免连续点击重复发起讨论", min: 0, max: 10000, step: 100, unit: " ms" },
-] as const;
-
-type JevNumericField = (typeof jevNumericFields)[number];
-
-const formatJevNumericValue = (field: JevNumericField, value: number) => `${value}${field.unit}`;
-
-const parseNumericPromptValue = (raw: string, min: number, max: number, integerOnly: boolean) => {
-  const trimmed = raw.trim();
-  if (!trimmed) return null;
-  const num = Number(trimmed);
-  if (!Number.isFinite(num) || num < min || num > max || (integerOnly && !Number.isInteger(num))) return null;
-  return integerOnly ? Math.trunc(num) : Math.round(num * 100) / 100;
-};
+const formatJevNumericValue = (field: JevNumericField, value: unknown) =>
+  `${typeof value === "number" && Number.isFinite(value) ? value : field.default}${field.unit}`;
 
 const openJevNumericPrompt = (field: JevNumericField, event?: MouseEvent) => {
   const group = groupConfig.value;
@@ -651,21 +669,24 @@ const openJevNumericPrompt = (field: JevNumericField, event?: MouseEvent) => {
   const groupId = group.id;
   (event?.currentTarget as HTMLElement | null)?.focus?.({ preventScroll: true });
   const integerOnly = field.step >= 1;
+  const currentVal = group.modeSettings.jev[field.key];
+  const initialNum = sanitizeNumericInput(currentVal, field.min, field.max, field.step, field.default);
   const config: PromptConfig = {
     title: `${field.title}（${field.min}–${field.max}）`,
-    initialValue: String(group.modeSettings.jev[field.key]),
+    initialValue: String(initialNum),
     placeholder: `${field.description}（${field.min}–${field.max}）`,
     inputMode: integerOnly ? "numeric" : "text",
-    validate: val =>
-      parseNumericPromptValue(val, field.min, field.max, integerOnly) === null
-        ? `${field.title}需填写 ${field.min}–${field.max} 之间的${integerOnly ? "整数" : "数值"}。`
-        : null,
     onConfirm: val => {
       if (numericPrompt === config) numericPrompt = null;
       if (disabled.value || !isOpenEditorCurrent(epoch, groupId)) return;
-      const parsed = parseNumericPromptValue(val, field.min, field.max, integerOnly);
-      if (parsed !== null && groupConfig.value) {
-        groupConfig.value.modeSettings.jev[field.key] = parsed;
+      if (groupConfig.value) {
+        groupConfig.value.modeSettings.jev[field.key] = sanitizeNumericInput(
+          val,
+          field.min,
+          field.max,
+          field.step,
+          field.default,
+        );
       }
     },
   };
@@ -679,21 +700,24 @@ const openContextWindowPrompt = (event?: MouseEvent) => {
   const epoch = editorEpoch;
   const groupId = group.id;
   (event?.currentTarget as HTMLElement | null)?.focus?.({ preventScroll: true });
+  const currentVal = group.contextMessageWindowSize;
+  const initialNum = sanitizeNumericInput(currentVal, 1, 10000, 1, 100);
   const config: PromptConfig = {
     title: "回复参考消息数（1–10000）",
-    initialValue: String(group.contextMessageWindowSize),
+    initialValue: String(initialNum),
     placeholder: "成员回复时参考的最近消息条数（1–10000）",
     inputMode: "numeric",
-    validate: val =>
-      parseNumericPromptValue(val, 1, 10000, true) === null
-        ? "回复参考消息数需填写 1–10000 之间的整数。"
-        : null,
     onConfirm: val => {
       if (numericPrompt === config) numericPrompt = null;
       if (disabled.value || !isOpenEditorCurrent(epoch, groupId)) return;
-      const parsed = parseNumericPromptValue(val, 1, 10000, true);
-      if (parsed !== null && groupConfig.value) {
-        groupConfig.value.contextMessageWindowSize = parsed;
+      if (groupConfig.value) {
+        groupConfig.value.contextMessageWindowSize = sanitizeNumericInput(
+          val,
+          1,
+          10000,
+          1,
+          100,
+        );
       }
     },
   };
@@ -704,15 +728,6 @@ const openContextWindowPrompt = (event?: MouseEvent) => {
 const validateDraft = (draft: EditableGroupConfig): string | null => {
   if (!draft.name.trim()) return "请填写群组名称。";
   if (draft.useUnifiedModel && !draft.unifiedModel.trim()) return "启用群组统一模型后，请选择一个模型。";
-  for (const field of jevNumericFields) {
-    const value = draft.modeSettings.jev[field.key];
-    if (!Number.isFinite(value) || value < field.min || value > field.max || (field.step >= 1 && !Number.isInteger(value))) {
-      return `${field.title}需填写 ${field.min}–${field.max} 之间的${field.step >= 1 ? "整数" : "数值"}。`;
-    }
-  }
-  if (!Number.isInteger(draft.contextMessageWindowSize) || draft.contextMessageWindowSize < 1 || draft.contextMessageWindowSize > 10000) {
-    return "回复参考消息数需填写 1–10000 之间的整数。";
-  }
   return null;
 };
 

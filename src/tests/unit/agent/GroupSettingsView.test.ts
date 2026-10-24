@@ -247,4 +247,87 @@ describe('GroupSettingsView editing and return saving', () => {
     await nextTick();
     expect(windowChip.text()).toContain('36条');
   });
+
+  it('saves defaults silently without alert popups when invalid values are entered via prompt dialogs', async () => {
+    const view = await open();
+    await chooseMode('JEV 智能群聊');
+    const maxSpeakersRow = view.findAll('button.settings-row').find(btn => btn.text().includes('每轮发言人数上限'))!;
+    await maxSpeakersRow.trigger('click');
+    const overlay = useOverlayStore();
+    overlay.promptConfig?.onConfirm('abc'); // 非法字符
+    await nextTick();
+
+    await view.get('button[role="switch"][aria-label="限制参考消息"]').trigger('click');
+    const windowChip = view.get('button[aria-label="回复参考消息数"]');
+    await windowChip.trigger('click');
+    overlay.promptConfig?.onConfirm('999999'); // 严重超界
+    await nextTick();
+
+    await view.get('button[aria-label="编辑群组名称"]').trigger('click');
+    const nameInput = control('群组名称');
+    await nameInput.setValue('静默默认测试');
+    await view.get('button[aria-label="返回并保存群组设置"]').trigger('click');
+    await flushPromises();
+
+    expect(view.emitted('close')).toHaveLength(1);
+    expect(view.find('[role="alert"]').exists()).toBe(false);
+    expect(persisted.name).toBe('静默默认测试');
+    expect(persisted.modeSettings.jev.maxSpeakersPerRound).toBe(3);
+    expect(persisted.contextMessageWindowSize).toBe(100);
+  });
+
+  it('normalizes prompt input to defaults when confirming invalid values directly', async () => {
+    const view = await open();
+    await chooseMode('JEV 智能群聊');
+    const maxSpeakersRow = view.findAll('button.settings-row').find(btn => btn.text().includes('每轮发言人数上限'))!;
+    await maxSpeakersRow.trigger('click');
+    const overlay = useOverlayStore();
+    overlay.promptConfig?.onConfirm('999'); // out of range 1-32
+    await nextTick();
+    expect(maxSpeakersRow.text()).toContain('3位'); // fallback to default 3
+
+    await view.get('button[role="switch"][aria-label="限制参考消息"]').trigger('click');
+    const windowChip = view.get('button[aria-label="回复参考消息数"]');
+    await windowChip.trigger('click');
+    overlay.promptConfig?.onConfirm('-50'); // out of range 1-10000
+    await nextTick();
+    expect(windowChip.text()).toContain('100条'); // fallback to default 100
+  });
+
+  it('still enforces mandatory UI guard when group name is empty', async () => {
+    const view = await open();
+    await view.get('button[aria-label="编辑群组名称"]').trigger('click');
+    const nameInput = control('群组名称');
+    await nameInput.setValue('   ');
+    // Call requestClose directly
+    await view.get('button[aria-label="返回并保存群组设置"]').trigger('click');
+    await flushPromises();
+
+    expect(view.emitted('close')).toBeUndefined();
+    expect(view.get('[role="alert"]').text()).toContain('请填写群组名称。');
+  });
+
+  it('still enforces mandatory UI guard when unified model is enabled without a selected model', async () => {
+    const view = await open();
+    await view.get('button[role="switch"][aria-label="启用群组统一模型"]').trigger('click');
+    const vm = view.vm as any;
+    vm.groupConfig.unifiedModel = '';
+    await view.get('button[aria-label="返回并保存群组设置"]').trigger('click');
+    await flushPromises();
+
+    expect(view.emitted('close')).toBeUndefined();
+    expect(view.get('[role="alert"]').text()).toContain('启用群组统一模型后，请选择一个模型。');
+  });
+
+  it('provides safe initialValue in prompt even if underlying field was abnormal', async () => {
+    const view = await open();
+    await chooseMode('JEV 智能群聊');
+    const vm = view.vm as any;
+    vm.groupConfig.modeSettings.jev.maxSpeakersPerRound = NaN;
+    const maxSpeakersRow = view.findAll('button.settings-row').find(btn => btn.text().includes('每轮发言人数上限'))!;
+    await maxSpeakersRow.trigger('click');
+    const overlay = useOverlayStore();
+    // initialValue must be normalized '3', not 'NaN' or 'undefined'
+    expect(overlay.promptConfig?.initialValue).toBe('3');
+  });
 });
