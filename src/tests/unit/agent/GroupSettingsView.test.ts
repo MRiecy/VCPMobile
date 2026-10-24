@@ -215,4 +215,36 @@ describe('GroupSettingsView editing and return saving', () => {
     expect(persisted.mode).toBe('naturerandom');
     expect(useAssistantStore().groups[0].name).toBe('桌面刚同步的名字');
   });
+
+  it('auto-saves inline group name on blur and updates JEV numeric parameters via direct prompt dialog', async () => {
+    const view = await open();
+    await view.get('button[aria-label="编辑群组名称"]').trigger('click');
+    const nameInput = control('群组名称');
+    await nameInput.setValue('量子前沿讨论组');
+    await nameInput.trigger('blur');
+    await flushPromises();
+
+    expect(changes()).toHaveLength(1);
+    expect(persisted.name).toBe('量子前沿讨论组');
+
+    await chooseMode('JEV 智能群聊');
+    const maxSpeakersRow = view.findAll('button.settings-row').find(btn => btn.text().includes('每轮发言人数上限'))!;
+    await maxSpeakersRow.trigger('click');
+    const overlay = useOverlayStore();
+    expect(overlay.contextMenuConfig).toBeNull();
+    expect(overlay.promptConfig?.title).toBe('每轮发言人数上限（1–32）');
+    expect(overlay.promptConfig?.initialValue).toBe('3');
+    overlay.promptConfig?.onConfirm('4');
+    await nextTick();
+    expect(maxSpeakersRow.text()).toContain('4位');
+
+    await view.get('button[role="switch"][aria-label="限制参考消息"]').trigger('click');
+    const windowChip = view.get('button[aria-label="回复参考消息数"]');
+    expect(windowChip.text()).toContain('100条');
+    await windowChip.trigger('click');
+    expect(overlay.promptConfig?.title).toBe('回复参考消息数（1–10000）');
+    overlay.promptConfig?.onConfirm('36');
+    await nextTick();
+    expect(windowChip.text()).toContain('36条');
+  });
 });

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 defineOptions({ inheritAttrs: false });
-import { computed, ref, onUnmounted, watch } from "vue";
-import { ArrowDown, ArrowLeft, ArrowUp, ChevronDown, HelpCircle, Plus, Search, X } from "@lucide/vue";
+import { computed, nextTick, ref, onUnmounted, useId, watch } from "vue";
+import { ArrowDown, ArrowLeft, ArrowUp, ChevronDown, HelpCircle, Pencil, Plus, Search, X } from "@lucide/vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { deleteTempFile } from "tauri-plugin-vcp-mobile";
 import { cancelFileOperation, pickFile } from "../../core/utils/nativeFilePicker";
@@ -9,6 +9,7 @@ import { useAssistantStore } from "../../core/stores/assistant";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useNotificationStore } from "../../core/stores/notification";
 import { useOverlayStore } from "../../core/stores/overlay";
+import { useKeyboardInsets } from "../../core/composables/useKeyboardInsets";
 import { useModalHistory } from "../../core/composables/useModalHistory";
 import { LAYER_PAGE_BASE } from "../../core/constants/layers";
 import { isAndroid, isIOS } from "../../core/utils/platform";
@@ -30,7 +31,7 @@ import type {
   GroupConfigDto,
   GroupMode,
 } from "../../core/types/assistant";
-import type { ContextMenuConfig, OverlayActionItem } from "../../core/types/overlay";
+import type { ContextMenuConfig, OverlayActionItem, PromptConfig } from "../../core/types/overlay";
 
 type EditableGroupConfig = Omit<
   GroupConfigDto,
@@ -337,6 +338,41 @@ const rosterSearchQuery = ref("");
 const rosterSheetRef = ref<HTMLElement | null>(null);
 const activeMemberId = ref<string | null>(null);
 const memberSheetRef = ref<HTMLElement | null>(null);
+const { keyboardHeight, isKeyboardOpen } = useKeyboardInsets();
+
+watch(keyboardHeight, (nextHeight) => {
+  if (nextHeight <= 0) return;
+  const activeElement = document.activeElement;
+  if (!(activeElement instanceof HTMLElement)) return;
+  if (memberSheetRef.value?.contains(activeElement) || rosterSheetRef.value?.contains(activeElement)) {
+    activeElement.scrollIntoView({ block: "nearest" });
+  }
+});
+
+const isEditingName = ref(false);
+const nameInputRef = ref<HTMLInputElement | null>(null);
+const nameInputId = useId();
+const startEditingName = async () => {
+  if (disabled.value || !groupConfig.value) return;
+  isEditingName.value = true;
+  await nextTick();
+  nameInputRef.value?.focus();
+  nameInputRef.value?.select();
+};
+const finishEditingName = () => {
+  if (!isEditingName.value) return;
+  isEditingName.value = false;
+  if (!groupConfig.value) return;
+  const trimmed = groupConfig.value.name.trim();
+  if (!trimmed && originalConfig.value?.name) {
+    groupConfig.value.name = originalConfig.value.name;
+    return;
+  }
+  groupConfig.value.name = trimmed;
+  if (groupConfig.value.name !== originalConfig.value?.name) {
+    void saveChanges();
+  }
+};
 
 const closeRosterSheet = () => {
   if (!showRosterSheet.value) return;
@@ -394,6 +430,7 @@ const updateEditor = (isOpen: boolean, id: string) => {
   isDeleting.value = false;
   isPickingAvatar.value = false;
   isCropping.value = false;
+  isEditingName.value = false;
   showModelSelector.value = false;
   showModeHelp.value = false;
   openPrompts.value = { groupPrompt: false, invitePrompt: false, jevNavigator: false };
@@ -560,21 +597,25 @@ const moveMember = (index: number, offset: number) => {
 };
 
 let selectionMenu: ContextMenuConfig | null = null;
+let numericPrompt: PromptConfig | null = null;
 const closeSelection = () => {
   if (selectionMenu && overlayStore.contextMenuConfig === selectionMenu) overlayStore.closeContextMenu();
   selectionMenu = null;
+  if (numericPrompt && overlayStore.promptConfig === numericPrompt) overlayStore.closePrompt();
+  numericPrompt = null;
 };
 const openTagSelection = (event: MouseEvent) => {
   const group = groupConfig.value;
   if (disabled.value || !group) return;
   const epoch = editorEpoch;
+  const groupId = group.id;
   (event.currentTarget as HTMLElement).focus({ preventScroll: true });
   const actions: OverlayActionItem[] = tagModeOptions.map(option => ({
     label: option.label,
     selected: group.tagMatchMode === option.value,
     handler: () => {
-      if (disabled.value || !isOpenEditorCurrent(epoch, group.id) || overlayStore.contextMenuConfig?.actions !== actions) return;
-      group.tagMatchMode = option.value;
+      if (disabled.value || !isOpenEditorCurrent(epoch, groupId) || !groupConfig.value) return;
+      groupConfig.value.tagMatchMode = option.value;
     },
   }));
   overlayStore.openContextMenu(actions, "标签匹配");
@@ -582,14 +623,84 @@ const openTagSelection = (event: MouseEvent) => {
 };
 
 const jevNumericFields = [
-  { key: "maxSpeakersPerRound", title: "每轮发言人数上限", description: "一轮最多安排多少位成员", min: 1, max: 32, step: 1 },
-  { key: "maxAutonomousRounds", title: "讨论轮数上限", description: "达到上限后停止自动讨论", min: 1, max: 100, step: 1 },
-  { key: "speakerThreshold", title: "发言门槛", description: "越高，参与发言的成员越少", min: 0, max: 1, step: 0.01 },
-  { key: "continueThreshold", title: "继续讨论门槛", description: "越高，越容易结束讨论", min: 0, max: 1, step: 0.01 },
-  { key: "stopThreshold", title: "结束讨论门槛", description: "越高，越不容易主动结束", min: 0, max: 1, step: 0.01 },
-  { key: "historyWindow", title: "JEV 参考消息数", description: "选择发言成员时参考的最近消息", min: 1, max: 200, step: 1 },
-  { key: "continueDebounceMs", title: "继续操作间隔（ms）", description: "避免连续点击重复发起讨论", min: 0, max: 10000, step: 100 },
+  { key: "maxSpeakersPerRound", title: "每轮发言人数上限", description: "一轮最多安排多少位成员", min: 1, max: 32, step: 1, unit: "位" },
+  { key: "maxAutonomousRounds", title: "讨论轮数上限", description: "达到上限后停止自动讨论", min: 1, max: 100, step: 1, unit: "轮" },
+  { key: "speakerThreshold", title: "发言门槛", description: "越高，参与发言的成员越少", min: 0, max: 1, step: 0.01, unit: "" },
+  { key: "continueThreshold", title: "继续讨论门槛", description: "越高，越容易结束讨论", min: 0, max: 1, step: 0.01, unit: "" },
+  { key: "stopThreshold", title: "结束讨论门槛", description: "越高，越不容易主动结束", min: 0, max: 1, step: 0.01, unit: "" },
+  { key: "historyWindow", title: "JEV 参考消息数", description: "选择发言成员时参考的最近消息", min: 1, max: 200, step: 1, unit: "条" },
+  { key: "continueDebounceMs", title: "继续操作间隔（ms）", description: "避免连续点击重复发起讨论", min: 0, max: 10000, step: 100, unit: " ms" },
 ] as const;
+
+type JevNumericField = (typeof jevNumericFields)[number];
+
+const formatJevNumericValue = (field: JevNumericField, value: number) => `${value}${field.unit}`;
+
+const parseNumericPromptValue = (raw: string, min: number, max: number, integerOnly: boolean) => {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const num = Number(trimmed);
+  if (!Number.isFinite(num) || num < min || num > max || (integerOnly && !Number.isInteger(num))) return null;
+  return integerOnly ? Math.trunc(num) : Math.round(num * 100) / 100;
+};
+
+const openJevNumericPrompt = (field: JevNumericField, event?: MouseEvent) => {
+  const group = groupConfig.value;
+  if (disabled.value || !group) return;
+  const epoch = editorEpoch;
+  const groupId = group.id;
+  (event?.currentTarget as HTMLElement | null)?.focus?.({ preventScroll: true });
+  const integerOnly = field.step >= 1;
+  const config: PromptConfig = {
+    title: `${field.title}（${field.min}–${field.max}）`,
+    initialValue: String(group.modeSettings.jev[field.key]),
+    placeholder: `${field.description}（${field.min}–${field.max}）`,
+    inputMode: integerOnly ? "numeric" : "text",
+    validate: val =>
+      parseNumericPromptValue(val, field.min, field.max, integerOnly) === null
+        ? `${field.title}需填写 ${field.min}–${field.max} 之间的${integerOnly ? "整数" : "数值"}。`
+        : null,
+    onConfirm: val => {
+      if (numericPrompt === config) numericPrompt = null;
+      if (disabled.value || !isOpenEditorCurrent(epoch, groupId)) return;
+      const parsed = parseNumericPromptValue(val, field.min, field.max, integerOnly);
+      if (parsed !== null && groupConfig.value) {
+        groupConfig.value.modeSettings.jev[field.key] = parsed;
+      }
+    },
+  };
+  numericPrompt = config;
+  overlayStore.openPrompt(config);
+};
+
+const openContextWindowPrompt = (event?: MouseEvent) => {
+  const group = groupConfig.value;
+  if (disabled.value || !group) return;
+  const epoch = editorEpoch;
+  const groupId = group.id;
+  (event?.currentTarget as HTMLElement | null)?.focus?.({ preventScroll: true });
+  const config: PromptConfig = {
+    title: "回复参考消息数（1–10000）",
+    initialValue: String(group.contextMessageWindowSize),
+    placeholder: "成员回复时参考的最近消息条数（1–10000）",
+    inputMode: "numeric",
+    validate: val =>
+      parseNumericPromptValue(val, 1, 10000, true) === null
+        ? "回复参考消息数需填写 1–10000 之间的整数。"
+        : null,
+    onConfirm: val => {
+      if (numericPrompt === config) numericPrompt = null;
+      if (disabled.value || !isOpenEditorCurrent(epoch, groupId)) return;
+      const parsed = parseNumericPromptValue(val, 1, 10000, true);
+      if (parsed !== null && groupConfig.value) {
+        groupConfig.value.contextMessageWindowSize = parsed;
+      }
+    },
+  };
+  numericPrompt = config;
+  overlayStore.openPrompt(config);
+};
+
 const validateDraft = (draft: EditableGroupConfig): string | null => {
   if (!draft.name.trim()) return "请填写群组名称。";
   if (draft.useUnifiedModel && !draft.unifiedModel.trim()) return "启用群组统一模型后，请选择一个模型。";
@@ -640,18 +751,35 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
           <!-- 1. 紧凑群身份横幅 -->
           <section class="group-identity-banner" aria-label="基础信息">
             <button type="button" class="group-avatar-button" :disabled="disabled || isPickingAvatar" aria-label="更换群组头像" @click="triggerFileInput">
-              <div class="relative">
-                <VcpAvatar owner-type="group" :owner-id="props.id" :fallback-name="groupConfig.name"
-                  size="w-14 h-14" rounded="rounded-xl" :dominant-color="groupConfig.avatarCalculatedColor" />
-                <span class="group-avatar-badge font-mono">{{ isPickingAvatar ? '…' : '改' }}</span>
-              </div>
+              <VcpAvatar owner-type="group" :owner-id="props.id" :fallback-name="groupConfig.name"
+                size="w-14 h-14" rounded="rounded-full" :dominant-color="groupConfig.avatarCalculatedColor" />
             </button>
-            <div class="flex-1 min-w-0 flex flex-col gap-1.5">
-              <div class="flex items-center gap-2 flex-wrap">
-                <span class="text-xs font-mono text-[var(--secondary-text)] truncate max-w-[11rem]">{{ groupConfig.id }}</span>
-                <span class="group-meta-pill font-mono">{{ groupConfig.members.length }} AGENTS · {{ currentModeMeta.code }}</span>
-              </div>
-              <SettingsTextField v-model="groupConfig.name" label="群组名称" placeholder="填写群组名称" :disabled="disabled" />
+            <div class="flex-1 min-w-0 flex flex-col gap-1">
+              <label :for="nameInputId" class="sr-only">群组名称</label>
+              <button
+                v-if="!isEditingName"
+                type="button"
+                class="group-name-display"
+                :disabled="disabled"
+                aria-label="编辑群组名称"
+                @click="startEditingName"
+              >
+                <span class="group-name-text">{{ groupConfig.name || '未命名群组' }}</span>
+                <Pencil :size="15" class="group-name-edit-icon" aria-hidden="true" />
+              </button>
+              <input
+                v-show="isEditingName"
+                :id="nameInputId"
+                ref="nameInputRef"
+                v-model="groupConfig.name"
+                type="text"
+                placeholder="填写群组名称"
+                :disabled="disabled"
+                class="group-name-inline-input"
+                @blur="finishEditingName"
+                @keydown.enter.prevent="($event.currentTarget as HTMLInputElement).blur()"
+              />
+              <span class="text-xs font-mono text-[var(--secondary-text)] truncate">{{ groupConfig.id }}</span>
             </div>
           </section>
 
@@ -682,10 +810,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
           </SettingsSection>
 
           <!-- 3. 随模式变形的合一成员席位 -->
-          <SettingsSection title="当前群席位">
-            <template #description>
-              <span class="font-mono">{{ orderedMembers.length }} 位成员</span> · {{ rosterHint }}
-            </template>
+          <SettingsSection title="群组成员" :description="rosterHint">
             <template #action>
               <button type="button" class="group-roster-action-btn" :disabled="disabled" aria-label="增减成员" @click="openRosterSheet">
                 <Plus :size="14" aria-hidden="true" />
@@ -711,7 +836,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                   </div>
 
                   <div v-if="effectiveMode === 'sequential'" class="group-member-sub font-mono">
-                    顺位 #{{ index + 1 }}<template v-if="agent.model"> · {{ agent.model }}</template>
+                    {{ agent.model || agent.id }}
                   </div>
                   <div v-else-if="effectiveMode === 'naturerandom'" class="group-member-tags">
                     <template v-if="memberTagList(agent.id).length">
@@ -753,12 +878,17 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
 
             <div v-else-if="effectiveMode === 'jev'" class="group-mode-extension flex flex-col gap-3">
               <div>
-                <SettingsRow v-for="field in jevNumericFields.slice(0, 2)" :key="field.key" :title="field.title" :description="field.description">
-                  <template #action>
-                    <input v-model.number="groupConfig.modeSettings.jev[field.key]" type="number" inputmode="numeric" :min="field.min" :max="field.max" :step="field.step"
-                      :disabled="disabled" :aria-label="field.title" class="group-number-input" />
-                  </template>
-                </SettingsRow>
+                <SettingsRow
+                  v-for="field in jevNumericFields.slice(0, 2)"
+                  :key="field.key"
+                  :title="field.title"
+                  :description="field.description"
+                  :value="formatJevNumericValue(field, groupConfig.modeSettings.jev[field.key])"
+                  clickable
+                  :disabled="disabled"
+                  aria-haspopup="dialog"
+                  @click="openJevNumericPrompt(field, $event)"
+                />
                 <div class="group-prompt-collapse">
                   <button type="button" class="group-prompt-trigger" :disabled="disabled" :aria-expanded="openPrompts.jevNavigator" @click="togglePromptSection('jevNavigator')">
                     <div class="min-w-0 flex-1 pr-3">
@@ -773,40 +903,78 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                     </span>
                   </button>
                   <div v-if="openPrompts.jevNavigator" class="pt-2 pb-1">
-                    <GroupSettingsTextArea v-model="groupConfig.modeSettings.jev.navigatorPrompt" label="讨论规则" :disabled="disabled" :rows="5"
+                    <GroupSettingsTextArea v-model="groupConfig.modeSettings.jev.navigatorPrompt" label="讨论规则" hide-label :disabled="disabled" :rows="5"
                       description="决定谁发言、何时结束。留空使用默认规则。" />
                   </div>
                 </div>
               </div>
               <SettingsDisclosure title="高级设置" description="发言门槛与参考消息范围" :disabled="disabled">
-                <SettingsRow v-for="field in jevNumericFields.slice(2)" :key="field.key" :title="field.title" :description="field.description">
-                  <template #action>
-                    <input v-model.number="groupConfig.modeSettings.jev[field.key]" type="number" :inputmode="field.step < 1 ? 'decimal' : 'numeric'"
-                      :min="field.min" :max="field.max" :step="field.step" :disabled="disabled" :aria-label="field.title" class="group-number-input" />
-                  </template>
-                </SettingsRow>
+                <SettingsRow
+                  v-for="field in jevNumericFields.slice(2)"
+                  :key="field.key"
+                  :title="field.title"
+                  :description="field.description"
+                  :value="formatJevNumericValue(field, groupConfig.modeSettings.jev[field.key])"
+                  clickable
+                  :disabled="disabled"
+                  aria-haspopup="dialog"
+                  @click="openJevNumericPrompt(field, $event)"
+                />
               </SettingsDisclosure>
-              <p class="group-note">服务连接请在「JEV 设置」中配置。</p>
+              <blockquote class="group-note">服务连接请在「JEV 设置」中配置。</blockquote>
             </div>
           </SettingsSection>
 
           <!-- 4. 上下文与提示词 (手风琴收纳) -->
           <SettingsSection title="上下文与提示词">
             <div class="group-context-list">
-              <SettingsRow title="启用群组统一模型" description="所有成员使用同一模型回复。">
-                <template #action><SettingsSwitch v-model="groupConfig.useUnifiedModel" :disabled="disabled" aria-label="启用群组统一模型" /></template>
-              </SettingsRow>
-              <SettingsRow v-if="groupConfig.useUnifiedModel" title="统一模型" :value="groupConfig.unifiedModel || '请选择'" clickable :disabled="disabled"
-                @click="showModelSelector = true" />
-              <SettingsRow title="限制参考消息" description="回复时只参考最近的消息，不删除聊天记录。">
-                <template #action><SettingsSwitch v-model="groupConfig.enableContextMessageWindow" :disabled="disabled" aria-label="限制参考消息" /></template>
-              </SettingsRow>
-              <SettingsRow v-if="groupConfig.enableContextMessageWindow" title="回复参考消息数" description="成员回复时使用，与 JEV 的参考范围分开设置。">
-                <template #action>
-                  <input v-model.number="groupConfig.contextMessageWindowSize" type="number" inputmode="numeric" min="1" max="10000" step="1"
-                    :disabled="disabled" aria-label="回复参考消息数" class="group-number-input" />
-                </template>
-              </SettingsRow>
+              <div class="group-inline-switch-row">
+                <div class="min-w-0 flex-1">
+                  <div class="text-sm font-medium text-primary-text">启用群组统一模型</div>
+                  <div class="text-xs text-[var(--secondary-text)] mt-0.5">所有成员使用同一模型回复。</div>
+                  <div v-if="groupConfig.useUnifiedModel" class="mt-2">
+                    <button
+                      type="button"
+                      class="group-inline-value-chip font-mono"
+                      :disabled="disabled"
+                      aria-label="选择群组统一模型"
+                      aria-haspopup="dialog"
+                      @click="showModelSelector = true"
+                    >
+                      <span class="text-[var(--secondary-text)] shrink-0">模型:</span>
+                      <span class="truncate font-medium text-primary-text">{{ groupConfig.unifiedModel || '请选择' }}</span>
+                      <span class="text-[var(--secondary-text)] shrink-0" aria-hidden="true">›</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="shrink-0 pt-0.5">
+                  <SettingsSwitch v-model="groupConfig.useUnifiedModel" :disabled="disabled" aria-label="启用群组统一模型" />
+                </div>
+              </div>
+
+              <div class="group-inline-switch-row">
+                <div class="min-w-0 flex-1">
+                  <div class="text-sm font-medium text-primary-text">限制参考消息</div>
+                  <div class="text-xs text-[var(--secondary-text)] mt-0.5">回复时只参考最近的消息，不删除聊天记录。</div>
+                  <div v-if="groupConfig.enableContextMessageWindow" class="mt-2">
+                    <button
+                      type="button"
+                      class="group-inline-value-chip font-mono"
+                      :disabled="disabled"
+                      aria-label="回复参考消息数"
+                      aria-haspopup="dialog"
+                      @click="openContextWindowPrompt"
+                    >
+                      <span class="text-[var(--secondary-text)] shrink-0">回复参考消息数:</span>
+                      <span class="font-medium text-primary-text">{{ groupConfig.contextMessageWindowSize }}条</span>
+                      <span class="text-[var(--secondary-text)] shrink-0" aria-hidden="true">›</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="shrink-0 pt-0.5">
+                  <SettingsSwitch v-model="groupConfig.enableContextMessageWindow" :disabled="disabled" aria-label="限制参考消息" />
+                </div>
+              </div>
 
               <div class="group-prompt-collapse">
                 <button type="button" class="group-prompt-trigger" :disabled="disabled" :aria-expanded="openPrompts.groupPrompt" @click="togglePromptSection('groupPrompt')">
@@ -822,7 +990,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                   </span>
                 </button>
                 <div v-if="openPrompts.groupPrompt" class="pt-2 pb-1">
-                  <GroupSettingsTextArea v-model="groupConfig.groupPrompt" label="群组提示词" placeholder="群组背景与整体对话要求" :disabled="disabled" />
+                  <GroupSettingsTextArea v-model="groupConfig.groupPrompt" label="群组提示词" hide-label placeholder="群组背景与整体对话要求" :disabled="disabled" />
                 </div>
               </div>
 
@@ -840,14 +1008,13 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                   </span>
                 </button>
                 <div v-if="openPrompts.invitePrompt" class="pt-2 pb-1">
-                  <GroupSettingsTextArea v-model="groupConfig.invitePrompt" label="邀请提示词" placeholder="轮到成员发言时发送的提示语"
+                  <GroupSettingsTextArea v-model="groupConfig.invitePrompt" label="邀请提示词" hide-label placeholder="轮到成员发言时发送的提示语"
                     description="{{VCPChatAgentName}} 代表成员名字" :disabled="disabled" :rows="3" />
                 </div>
               </div>
             </div>
           </SettingsSection>
 
-          <p class="group-note">返回时自动保存。</p>
           <SettingsRow title="删除此群组" :description="deleteBlockReason ?? undefined" clickable danger
             :disabled="disabled || deleteBlockReason !== null" @click="handleDelete" />
         </template>
@@ -865,7 +1032,8 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
         >
           <div
             ref="rosterSheetRef"
-            class="group-bottom-sheet vcp-viewport-bottom"
+            class="group-bottom-sheet"
+            :style="{ paddingBottom: isKeyboardOpen ? '8px' : 'calc(var(--vcp-safe-bottom, 24px) + 8px)' }"
             role="dialog"
             aria-modal="true"
             aria-label="增减群组成员"
@@ -873,9 +1041,6 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
             <div class="group-sheet-header">
               <div class="min-w-0">
                 <h3 class="m-0 text-sm font-semibold text-primary-text">增减群组成员</h3>
-                <p class="m-0 text-xs text-[var(--secondary-text)] mt-0.5">
-                  已入群 <span class="font-mono">{{ groupConfig.members.length }}</span> 位 · 勾选顺序入栈，取消直接抽离
-                </p>
               </div>
               <button type="button" class="group-sheet-done-btn" @click="closeRosterSheet">完成</button>
             </div>
@@ -921,7 +1086,8 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
         >
           <div
             ref="memberSheetRef"
-            class="group-bottom-sheet vcp-viewport-bottom"
+            class="group-bottom-sheet"
+            :style="{ paddingBottom: isKeyboardOpen ? '8px' : 'calc(var(--vcp-safe-bottom, 24px) + 8px)' }"
             role="dialog"
             aria-modal="true"
             :aria-label="`${activeMember.name} 群内配置`"
@@ -966,9 +1132,6 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                 <button type="button" class="group-remove-member-btn" :disabled="disabled" @click="toggleMember(activeMember.id)">
                   移出本群
                 </button>
-                <span class="text-xs font-mono text-[var(--secondary-text)]">
-                  SLOT #{{ String(activeMemberOrderIndex + 1).padStart(2, '0') }}
-                </span>
               </div>
             </div>
           </div>
@@ -1009,29 +1172,52 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
   flex-shrink: 0;
   padding: 0;
   border: 0;
+  border-radius: 9999px;
   background: transparent;
   touch-action: manipulation;
 }
 .group-avatar-button:disabled { opacity: 0.5; }
-.group-avatar-badge {
-  position: absolute;
-  right: -4px;
-  bottom: -4px;
-  padding: 1px 5px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: var(--secondary-bg, var(--primary-bg));
-  color: var(--secondary-text);
-  font-size: 12px;
-  line-height: 1.3;
+.group-name-display {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 32px;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  color: var(--primary-text);
+  text-align: left;
+  touch-action: manipulation;
+  transition: opacity 120ms ease;
 }
-.group-meta-pill {
-  padding: 1px 6px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
+.group-name-display:active { opacity: 0.65; }
+.group-name-display:disabled { opacity: 0.5; }
+.group-name-text {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.group-name-edit-icon {
+  flex-shrink: 0;
   color: var(--secondary-text);
-  font-size: 12px;
-  line-height: 1.4;
+}
+.group-name-inline-input {
+  width: 100%;
+  min-height: 32px;
+  padding: 2px 0;
+  border: 0;
+  border-bottom: 1.5px solid var(--highlight-text, #3b82f6);
+  border-radius: 0;
+  background: transparent;
+  color: var(--primary-text);
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.35;
+  outline: none;
 }
 
 /* 2. 四宫格模式选择器 */
@@ -1172,7 +1358,41 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
   margin-top: 4px;
 }
 
-/* 4. 手风琴折叠提示词行 */
+/* 4. 行内下挂胶囊开关行 & 手风琴折叠提示词行 */
+.group-inline-switch-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+}
+.group-inline-switch-row + .group-inline-switch-row {
+  border-top: 1px solid var(--settings-row-divider, var(--border-color));
+}
+.group-inline-value-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 30px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--secondary-bg, transparent);
+  color: var(--primary-text);
+  font-size: 12px;
+  line-height: 1.4;
+  touch-action: manipulation;
+  transition: border-color 120ms ease, opacity 120ms ease;
+}
+@supports (color: color-mix(in srgb, black, white)) {
+  .group-inline-value-chip {
+    background: color-mix(in srgb, var(--primary-text) 6%, transparent);
+    border-color: color-mix(in srgb, var(--primary-text) 14%, transparent);
+  }
+}
+.group-inline-value-chip:active { opacity: 0.65; }
+.group-inline-value-chip:disabled { opacity: 0.4; }
 .group-prompt-collapse {
   border-top: 1px solid var(--settings-row-divider, var(--border-color));
 }
@@ -1211,12 +1431,17 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
+  padding-top: calc(var(--vcp-safe-top, 24px) + 12px);
+  padding-bottom: var(--vcp-ime-offset, 0px);
+  box-sizing: border-box;
   background: rgba(0, 0, 0, 0.5);
+  transition: padding-bottom 120ms ease;
 }
 .group-bottom-sheet {
   width: 100%;
   max-width: 48rem;
-  max-height: 80vh;
+  max-height: min(82vh, 100%);
+  min-height: 0;
   margin-inline: auto;
   display: flex;
   flex-direction: column;
@@ -1297,27 +1522,38 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
 }
 .group-sheet-footer {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
   padding-top: 12px;
   border-top: 1px solid var(--settings-row-divider, var(--border-color));
 }
 .group-remove-member-btn {
-  min-height: 36px;
-  padding: 6px 0;
-  border: 0;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: 8px;
   background: transparent;
   color: #ef4444;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 500;
   touch-action: manipulation;
+  transition: opacity 120ms ease;
 }
 .group-remove-member-btn:active { opacity: 0.65; }
+.group-remove-member-btn:disabled { opacity: 0.4; }
 
-.group-note { margin: 0; font-size: 12px; line-height: 1.6; color: var(--secondary-text); }
+.group-note {
+  margin: 0;
+  padding: 2px 0 2px 8px;
+  border-left: 2px solid var(--border-color);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--secondary-text);
+  opacity: 0.78;
+}
 .group-text-button { align-self: flex-start; min-height: 44px; padding: 6px 0; border: 0; background: transparent; color: var(--secondary-text); font-size: 12px; text-decoration: underline; touch-action: manipulation; }
 .group-text-button:disabled { opacity: 0.5; }
-.group-number-input { width: 88px; max-width: 100%; min-height: 44px; padding: 8px; border: 1px solid var(--border-color); border-radius: 8px; background: var(--input-bg, transparent); color: var(--primary-text); font-family: monospace; font-size: var(--settings-input-font-size, 16px); text-align: right; }
-.group-number-input:disabled { opacity: 0.5; }
-.group-number-input:focus-visible, .group-icon-button:focus-visible, .group-mode-pill:focus-visible, .group-member-main:focus-visible, .group-prompt-trigger:focus-visible { outline: 2px solid var(--highlight-text, var(--primary-text)); outline-offset: 2px; }
+.group-icon-button:focus-visible, .group-name-display:focus-visible, .group-mode-pill:focus-visible, .group-member-main:focus-visible, .group-inline-value-chip:focus-visible, .group-prompt-trigger:focus-visible { outline: 2px solid var(--highlight-text, var(--primary-text)); outline-offset: 2px; }
 </style>

@@ -4,22 +4,23 @@ import { useId } from 'vue';
 withDefaults(defineProps<{
   modelValue: string;
   label: string;
+  hideLabel?: boolean;
   description?: string;
   placeholder?: string;
   disabled?: boolean;
   rows?: number;
-}>(), { rows: 4 });
+}>(), { rows: 4, hideLabel: false });
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>();
 const id = useId();
 </script>
 
 <template>
   <div class="group-text-field">
-    <label :for="id" class="text-xs text-[var(--secondary-text)]">{{ label }}</label>
+    <label :for="id" :class="hideLabel ? 'sr-only' : 'text-xs text-[var(--secondary-text)]'">{{ label }}</label>
     <textarea :id="id" :value="modelValue" :disabled="disabled" :rows="rows" :placeholder="placeholder"
       :aria-describedby="description ? `${id}-help` : undefined" class="group-text-input vcp-scrollable"
       @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)" />
-    <p v-if="description" :id="`${id}-help`" class="m-0 text-xs leading-relaxed text-[var(--secondary-text)]">{{ description }}</p>
+    <blockquote v-if="description" :id="`${id}-help`" class="group-text-comment">{{ description }}</blockquote>
   </div>
 </template>
 
@@ -33,4 +34,13 @@ const id = useId();
 }
 .group-text-input:focus-visible { outline: 2px solid var(--highlight-text, var(--primary-text)); outline-offset: 2px; }
 .group-text-input:disabled { opacity: 0.5; }
+.group-text-comment {
+  margin: 2px 0 0;
+  padding: 2px 0 2px 8px;
+  border-left: 2px solid var(--border-color);
+  color: var(--secondary-text);
+  font-size: 12px;
+  line-height: 1.5;
+  opacity: 0.78;
+}
 </style>
