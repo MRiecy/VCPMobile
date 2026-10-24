@@ -409,12 +409,13 @@ function renderBlockHtml(block: ContentBlock): string {
   }
 }
 
-type ToolContentBlock = Extract<ContentBlock, { type: "tool-use" | "tool-result" }>;
+type ToolContentBlock = Extract<ContentBlock, { type: "tool-use" | "jev-tool-use" | "tool-result" }>;
 
 function sameToolContent(previous: ToolContentBlock, current: ToolContentBlock): boolean {
   if (previous === current) return true;
+  if (previous.type !== current.type) return false;
   if (previous.tool_name !== current.tool_name) return false;
-  if (previous.type === "tool-use" && current.type === "tool-use") {
+  if (previous.type !== "tool-result" && current.type !== "tool-result") {
     return previous.content === current.content;
   }
   if (previous.type === "tool-result" && current.type === "tool-result") {
@@ -441,7 +442,7 @@ const toolBlockKeys = computed(() => {
   const currentKeys: string[] = [];
   const keys = new Map<ContentBlock, string>();
   for (const block of props.message.blocks ?? []) {
-    if (block.type !== "tool-use" && block.type !== "tool-result") continue;
+    if (block.type !== "tool-use" && block.type !== "jev-tool-use" && block.type !== "tool-result") continue;
     const index = currentBlocks.length;
     const previous = previousToolBlocks[index];
     const key = previousToolMessageId === props.message.id && previous && sameToolContent(previous, block)
@@ -1013,7 +1014,7 @@ onUnmounted(() => {
                   <!-- eslint-enable vue/no-v-html -->
 
                   <ToolBlock
-                    v-else-if="block.type === 'tool-use' || block.type === 'tool-result'"
+                    v-else-if="block.type === 'tool-use' || block.type === 'jev-tool-use' || block.type === 'tool-result'"
                     :type="block.type"
                     :content="block.content"
                     :block="block"

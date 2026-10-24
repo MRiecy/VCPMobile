@@ -102,10 +102,10 @@ interface RenderBlockFields {
 export type ContentBlock =
   | (RenderBlockFields & { type: "markdown" })
   | (RenderBlockFields & {
-      type: "tool-use";
+      type: "tool-use" | "jev-tool-use";
       tool_name: string;
       content: string;
-      // StreamBlock 的 tool-use 没有此字段，持久化终态会补齐。
+      // 两种请求的 StreamBlock 均没有此字段，持久化终态会补齐。
       is_complete?: boolean;
     })
   | (RenderBlockFields & {
@@ -295,7 +295,7 @@ export type StreamBlock =
       is_complete: boolean;
     })
   | (StreamBlockFields & {
-      type: "tool-use";
+      type: "tool-use" | "jev-tool-use";
       tool_name: string;
       content: string;
     })

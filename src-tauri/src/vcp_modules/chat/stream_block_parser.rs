@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::vcp_modules::content_parser::{
-    extract_tool_name, find_tool_request_end, parse_daily_note_tool_request,
+    extract_tool_name, find_tool_request_end, parse_daily_note_tool_request, parse_jev_tool_request,
     parse_legacy_daily_note, BlockType, ParsedDailyNote, ToolCallSummaryItem, ToolResultDetail,
     BUTTON_CLICK, DIARY_END, DIARY_START, GENERIC_CODE_FENCE_START, HTML_DOC_END, HTML_DOC_START,
     KV_REGEX, ROLE_DIVIDER, STYLE_TAG_END, STYLE_TAG_START, THINK_END, THINK_START, THOUGHT_END,
@@ -32,6 +32,12 @@ pub enum StreamBlock {
     },
     #[serde(rename = "tool-use")]
     Tool {
+        tool_name: String,
+        content: String,
+        hash: String,
+    },
+    #[serde(rename = "jev-tool-use")]
+    JevToolUse {
         tool_name: String,
         content: String,
         hash: String,
@@ -785,10 +791,19 @@ fn build_stream_block(
 ) -> StreamBlock {
     match block_type {
         BlockType::Tool => {
-            let tool_name = extract_tool_name(inner_content);
             if let Some(note) = parse_daily_note_tool_request(inner_content) {
                 build_daily_note_stream_block(note)
+            } else if let Some(tool_name) = parse_jev_tool_request(inner_content) {
+                let hash = HashAggregator::compute_content_hash(&format!(
+                    "jev-tool-use:{}:{}", tool_name, inner_content
+                ));
+                StreamBlock::JevToolUse {
+                    tool_name,
+                    content: inner_content.to_string(),
+                    hash,
+                }
             } else {
+                let tool_name = extract_tool_name(inner_content);
                 let hash = HashAggregator::compute_content_hash(&format!(
                     "{}:{}",
                     tool_name, inner_content
@@ -1105,6 +1120,43 @@ mod tests {
         strip_hash(&mut full_json);
         strip_hash(&mut stream_json);
         assert_eq!(full_json, stream_json);
+    }
+
+    #[test]
+    fn jev_stream_precipitates_once_and_matches_full_content() {
+        let inner = "tool_name:「始」Example「末」\n\
+            content:「始ESCAPE」JEV:「始」'示例'「末」\n\
+            <<<[END_TOOL_REQUEST]>>>\n「末ESCAPE」\n\
+            JEV:「始」使用 &#039;B站获取&#039; 查询 {视频}「末」";
+        let request = tool_request(inner);
+        let raw = format!("{request}\n后文");
+        let mut parser = StreamBlockParser::new();
+        let mut stable = Vec::new();
+        let mut tail = String::new();
+        for (index, ch) in raw.char_indices() {
+            let end = index + ch.len_utf8();
+            let (blocks, remaining, _) = parser.process(&raw[..end]);
+            stable.extend(blocks);
+            tail = remaining;
+            let count = stable.iter().filter(|block| matches!(block, StreamBlock::JevToolUse { .. })).count();
+            assert_eq!(count, usize::from(end >= request.len()), "prefix length {end}");
+        }
+        assert!(tail.contains("后文"));
+        let full = crate::vcp_modules::content_parser::parse_content(&request);
+        let full = full.iter().find(|block| matches!(block,
+            crate::vcp_modules::content_parser::ContentBlock::JevToolUse { .. })).unwrap();
+        let stream = stable.iter().find(|block| matches!(block, StreamBlock::JevToolUse { .. })).unwrap();
+        let mut full_json = serde_json::to_value(full).unwrap();
+        let mut stream_json = serde_json::to_value(stream).unwrap();
+        full_json.as_object_mut().unwrap().remove("is_complete");
+        strip_hash(&mut full_json);
+        strip_hash(&mut stream_json);
+        assert_eq!(stream_json, full_json);
+        assert_eq!(stream_json["tool_name"], "B站获取");
+
+        let partial = &request[..request.find("\n<<<[END_TOOL_REQUEST]>>>\n「末ESCAPE」").unwrap()];
+        let stopped = StreamBlockParser::new().finalize(partial);
+        assert!(matches!(stopped.as_slice(), [StreamBlock::Markdown { content, .. }] if content == partial));
     }
 
     #[test]

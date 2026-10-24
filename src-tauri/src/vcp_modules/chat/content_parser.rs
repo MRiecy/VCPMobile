@@ -25,6 +25,15 @@ pub enum ContentBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         hash: Option<u64>,
     },
+    #[serde(rename = "jev-tool-use")]
+    JevToolUse {
+        // 展示名可以是工具名、能力名或空字符串，不参与执行协议。
+        tool_name: String,
+        content: String,
+        is_complete: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hash: Option<u64>,
+    },
     #[serde(rename = "tool-result")]
     ToolResult {
         tool_name: String,
@@ -277,6 +286,7 @@ impl ContentBlock {
         match self {
             ContentBlock::Markdown { hash, .. } => *hash = Some(h),
             ContentBlock::ToolUse { hash, .. } => *hash = Some(h),
+            ContentBlock::JevToolUse { hash, .. } => *hash = Some(h),
             ContentBlock::ToolResult { hash, .. } => *hash = Some(h),
             ContentBlock::Diary { hash, .. } => *hash = Some(h),
             ContentBlock::DiaryUpdate { hash, .. } => *hash = Some(h),
@@ -345,6 +355,15 @@ lazy_static! {
     pub(crate) static ref TOOL_NAME_XML: Regex = Regex::new(r"(?is)<tool_name>(.*?)</tool_name>").unwrap();
     static ref MARKED_FIELD_START: Regex = Regex::new(r"(?i)[「{]始(?:escape|exp)?[」}]").unwrap();
     static ref MARKED_FIELD_END: Regex = Regex::new(r"(?i)[「{]末(?:escape|exp)?[」}]").unwrap();
+    static ref JEV_FIELD_LABEL: Regex = Regex::new(r"(?i)(?:^|[^a-z0-9_])JEV:\s*$").unwrap();
+    static ref JEV_QUOTE_ENTITY: Regex = Regex::new(r"&#0*39;").unwrap();
+    static ref JEV_TOOL_NAMES: [Regex; 4] = [
+        r"'([^'\r\n]+)'",
+        r"`([^`\r\n]+)`",
+        r"‘([^’\r\n]+)’",
+        r"“([^”\r\n]+)”",
+    ].map(|pattern| Regex::new(pattern).unwrap());
+    static ref JEV_CAPABILITY: Regex = Regex::new(r"\{([^{}\r\n]+)\}").unwrap();
 
     pub(crate) static ref THOUGHT_START: Regex = Regex::new(r"(?im)^[ \t]*\[--- VCP元思考链(?::\s*([^\]]*?))?\s*---\]").unwrap();
     pub(crate) static ref THOUGHT_END: Regex = Regex::new(r"(?im)^[ \t]*\[--- 元思考链结束 ---\]").unwrap();
@@ -747,11 +766,21 @@ fn parse_ordinary_content(raw_text: &str) -> Vec<ContentBlock> {
             // 3. 解析具体的块内容
             let block = match block_type {
                 BlockType::Tool => {
-                    let tool_name = extract_tool_name(inner_content);
                     if let Some(note) = parse_daily_note_tool_request(inner_content) {
                         content_block_from_daily_note(note)
+                    } else if let Some(tool_name) = parse_jev_tool_request(inner_content) {
+                        ContentBlock::JevToolUse {
+                            tool_name,
+                            content: inner_content.to_string(),
+                            is_complete,
+                            hash: None,
+                        }
                     } else {
-                        ContentBlock::tool_use(tool_name, inner_content.to_string(), is_complete)
+                        ContentBlock::tool_use(
+                            extract_tool_name(inner_content),
+                            inner_content.to_string(),
+                            is_complete,
+                        )
                     }
                 }
                 BlockType::Thought => {
@@ -1047,6 +1076,41 @@ pub(crate) fn find_tool_request_end(source: &str) -> Option<(usize, usize)> {
     }
 }
 
+/// 只分类 ToolRequest 自身的 JEV 字段；其他字段中的协议示例必须跳过。
+/// None 表示没有非空 JEV，Some("") 表示无展示名的自然语言请求。
+pub(crate) fn parse_jev_tool_request(source: &str) -> Option<String> {
+    let mut cursor = 0;
+    while let Some(start) = MARKED_FIELD_START.find_at(source, cursor) {
+        let is_jev = JEV_FIELD_LABEL.is_match(&source[cursor..start.start()]);
+        let (content_end, field_end) =
+            find_marked_field_end(source, start.end(), marked_field_mode(start.as_str()))?;
+        if is_jev {
+            let raw = source[start.end()..content_end].trim();
+            if raw.is_empty() {
+                return None;
+            }
+            // 仅为名称识别规范化单引号实体，返回的块正文仍是原始请求体。
+            let parse_source = JEV_QUOTE_ENTITY.replace_all(raw, "'");
+            let explicit_name = JEV_TOOL_NAMES.iter().find_map(|pattern| {
+                pattern.captures(&parse_source)
+                    .and_then(|captures| captures.get(1))
+                    .map(|matched| matched.as_str().trim())
+            }).unwrap_or_default();
+            let display_name = if explicit_name.is_empty() {
+                JEV_CAPABILITY.captures(&parse_source)
+                    .and_then(|captures| captures.get(1))
+                    .map(|matched| matched.as_str().trim())
+                    .unwrap_or_default()
+            } else {
+                explicit_name
+            };
+            return Some(display_name.to_string());
+        }
+        cursor = field_end;
+    }
+    None
+}
+
 fn extract_tool_name_value(content: &str) -> Option<String> {
     let mut name = extract_marked_field(content, &["tool_name"]).or_else(|| {
         TOOL_NAME_XML
@@ -1321,6 +1385,81 @@ mod tests {
             .iter()
             .find(|block| !matches!(block, ContentBlock::Markdown { .. }))
             .expect("expected a semantic content block")
+    }
+
+    #[test]
+    fn jev_display_names_follow_desktop_priority_without_rewriting_content() {
+        for (value, name) in [
+            ("使用 'B站获取'", "B站获取"),
+            ("使用 &#039;B站获取&#039;", "B站获取"),
+            ("使用 &#39;B站获取&#00039;", "B站获取"),
+            ("使用 `GPT生图`", "GPT生图"),
+            ("使用 ‘联网搜索’", "联网搜索"),
+            ("使用 “图片生成”", "图片生成"),
+            ("用 {联网搜索} 查天气", "联网搜索"),
+            ("{能力} “双引号” ‘单引号’ `代码` '显式工具'", "显式工具"),
+            ("{能力} “双引号” ‘单引号’ `代码`", "代码"),
+            ("{能力} “双引号” ‘单引号’", "单引号"),
+            ("我要睡10分钟", ""),
+            ("使用 &apos;不支持的实体&apos;", ""),
+            ("使用 \"不支持的引号\"", ""),
+            ("{跨\n行} '跨\n行'", ""),
+        ] {
+            let inner = format!("JEV:「始」{value}「末」");
+            let blocks = parse_content(&tool_request(&inner));
+            let ContentBlock::JevToolUse { tool_name, content, is_complete, .. } =
+                first_non_markdown(&blocks)
+            else {
+                panic!("expected JEV for {value}");
+            };
+            assert_eq!(tool_name, name, "{value}");
+            assert_eq!(content, &format!("\n{inner}\n"));
+            assert!(is_complete);
+        }
+    }
+
+    #[test]
+    fn jev_only_reads_top_level_fields_and_preserves_existing_classification() {
+        let quoted_example = "tool_name:「始」Example「末」\n\
+            content:「始ESCAPE」示例 JEV:「始」'错误工具'「末」\n\
+            <<<[END_TOOL_REQUEST]>>>\n正文「末ESCAPE」";
+        for inner in [
+            quoted_example.to_string(),
+            "tool_name:「始」Example「末」\nJEV:「始」  「末」".to_string(),
+            "<tool_name>Example</tool_name>\nother_JEV:「始」'错误工具'「末」".to_string(),
+        ] {
+            assert!(matches!(first_non_markdown(&parse_content(&tool_request(&inner))),
+                ContentBlock::ToolUse { tool_name, .. } if tool_name == "Example"));
+        }
+        let inner = format!("{quoted_example}\nJEV:「始」{{联网搜索}}「末」");
+        assert!(matches!(first_non_markdown(&parse_content(&tool_request(&inner))),
+            ContentBlock::JevToolUse { tool_name, .. } if tool_name == "联网搜索"));
+
+        for (fields, update) in [
+            ("command:「始」create「末」\nContent:「始」日记「末」", false),
+            ("command:「始」update「末」\ntarget:「始」旧「末」\nreplace:「始」新「末」", true),
+        ] {
+            let inner = format!("tool_name:「始」DailyNote「末」\n{fields}\nJEV:「始」'工具'「末」");
+            let blocks = parse_content(&tool_request(&inner));
+            assert!(if update {
+                matches!(first_non_markdown(&blocks), ContentBlock::DiaryUpdate { .. })
+            } else {
+                matches!(first_non_markdown(&blocks), ContentBlock::Diary { .. })
+            });
+        }
+    }
+
+    #[test]
+    fn jev_examples_and_unclosed_requests_remain_text() {
+        let field = "JEV:「始」'B站获取'「末」";
+        for raw in [
+            field.to_string(),
+            format!("```text\n{}\n```", tool_request(field)),
+            format!("<<<[TOOL_REQUEST]>>>\n{field}"),
+            "<<<[TOOL_REQUEST]>>>\nJEV:「始」未闭合\n<<<[END_TOOL_REQUEST]>>>".to_string(),
+        ] {
+            assert!(parse_content(&raw).iter().all(|block| matches!(block, ContentBlock::Markdown { .. })), "{raw}");
+        }
     }
 
     #[test]

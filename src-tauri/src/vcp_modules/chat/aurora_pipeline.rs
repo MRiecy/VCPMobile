@@ -1143,6 +1143,22 @@ mod tests {
     }
 
     #[test]
+    fn jev_recovery_keeps_unclosed_text_and_closed_stable_card() {
+        let partial = "<<<[TOOL_REQUEST]>>>\nJEV:「始」我要睡10分钟「末」";
+        let snapshot = AuroraBuffer::compile_recovery_snapshot(partial.to_string());
+        assert!(snapshot.stable_blocks.is_empty());
+        assert!(matches!(snapshot.tail_block,
+            Some(StreamBlock::Markdown { ref content, .. }) if content == partial));
+
+        let complete = format!("{partial}\n<<<[END_TOOL_REQUEST]>>>\n后文");
+        let snapshot = AuroraBuffer::compile_recovery_snapshot(complete);
+        assert!(matches!(snapshot.stable_blocks.as_slice(),
+            [StreamBlock::JevToolUse { tool_name, .. }] if tool_name.is_empty()));
+        assert!(matches!(snapshot.tail_block,
+            Some(StreamBlock::Markdown { ref content, .. }) if content.contains("后文")));
+    }
+
+    #[test]
     fn completing_a_partial_think_opener_replaces_and_resets_the_tail() {
         let mut buffer = AuroraBuffer::new();
         buffer.append_chunk("<thi");

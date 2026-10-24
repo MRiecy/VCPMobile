@@ -218,7 +218,7 @@ describe('MessageRenderer presentation shell', () => {
     wrapper.unmount();
   });
 
-  it('keeps manual tool expansion across preference changes and terminal recompilation', async () => {
+  it.each(['tool-use', 'jev-tool-use'] as const)('keeps manual tool expansion across preference changes and terminal recompilation (%s)', async requestType => {
     const pinia = createPinia();
     setActivePinia(pinia);
     const preferences = useChatPreferencesStore();
@@ -233,7 +233,7 @@ describe('MessageRenderer presentation shell', () => {
     const stableBlocks: StreamBlock[] = [
       { type: 'markdown', content: 'first', hash: 'text-a' },
       { type: 'markdown', content: 'second', hash: 'text-b' },
-      { type: 'tool-use', tool_name: 'Search', content: 'query: example', hash: 'tool-a' },
+      { type: requestType, tool_name: 'Search', content: 'query: example', hash: 'tool-a' },
       { type: 'tool-use', tool_name: 'Search', content: 'query: example', hash: 'tool-a' },
       { type: 'tool-result', tool_name: 'Search', status: 'success', details: [{ key: 'answer', value: 'found' }], footer: '', hash: 'result-a' },
       { type: 'thought', theme: 'reasoning', content: 'thinking', is_complete: true, hash: 'thought-a' },
@@ -273,7 +273,7 @@ describe('MessageRenderer presentation shell', () => {
       ...base, type: 'end', finishReason: 'completed', aurora: null,
       blocks: [
         { type: 'markdown', content: 'first\nsecond', hash: 100 },
-        { type: 'tool-use', tool_name: 'Search', content: 'query: example', is_complete: true, hash: 101 },
+        { type: requestType, tool_name: 'Search', content: 'query: example', is_complete: true, hash: 101 },
         { type: 'tool-use', tool_name: 'Search', content: 'query: example', is_complete: true, hash: 101 },
         { type: 'tool-result', tool_name: 'Search', status: 'success', details: [{ key: 'answer', value: 'found' }], footer: '', hash: 102 },
         { type: 'thought', theme: 'reasoning', content: 'thinking', is_complete: true, hash: 103 },
@@ -286,6 +286,60 @@ describe('MessageRenderer presentation shell', () => {
     const remounted = mountTools();
     expect(remounted.findAll<HTMLElement>('.vcp-tool-block .tool-content-scrollable').every(content => content.element.style.display === 'none')).toBe(true);
     remounted.unmount();
+  });
+
+  it('renders named and unnamed JEV requests as literal text', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const raw = "JEV:「始」使用 &#039;B站获取&#039;\n<img src=x onerror=alert(1)>「末」";
+    const { ToolBlock: _toolStub, ...stubs } = streamRendererStubs;
+    const wrapper = mount(MessageRenderer, {
+      props: {
+        message: {
+          id: 'jev-presentation', role: 'assistant', timestamp: 1,
+          shell: { avatarColor: '#64748b', displayName: 'Agent', isUser: false },
+          blocks: [
+            { type: 'jev-tool-use', tool_name: 'B站获取', content: raw, hash: 1 },
+            { type: 'jev-tool-use', tool_name: '', content: 'JEV:「始」我要睡10分钟「末」', hash: 2 },
+          ],
+        },
+      },
+      global: { plugins: [pinia], directives: { longpress: {} }, stubs },
+    });
+    const cards = wrapper.findAll('.is-jev-tool-use');
+    expect(cards).toHaveLength(2);
+    expect(cards[0].get('.tool-label').text()).toBe('JEVToolUse');
+    expect(cards[0].get('.tool-name').text()).toBe('B站获取');
+    expect(cards[0].get('pre').element.textContent).toBe(raw);
+    expect(cards[0].find('img').exists()).toBe(false);
+    expect(cards[1].get('.tool-label').text()).toBe('JEVToolUse');
+    expect(cards[1].find('.tool-name').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain('Unknown Tool');
+    await cards[1].get('.tool-header-content').trigger('click');
+    expect(cards[1].get('.tool-content-scrollable').isVisible()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it('resets tool interaction identity when the request protocol changes', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const message = reactive<ChatMessage>({
+      id: 'protocol-change', role: 'assistant', timestamp: 1,
+      shell: { avatarColor: '#64748b', displayName: 'Agent', isUser: false },
+      blocks: [{ type: 'tool-use', tool_name: 'Search', content: 'request', hash: 1 }],
+    });
+    const { ToolBlock: _toolStub, ...stubs } = streamRendererStubs;
+    const wrapper = mount(MessageRenderer, {
+      props: { message },
+      global: { plugins: [pinia], directives: { longpress: {} }, stubs },
+    });
+    await wrapper.get('.tool-header-content').trigger('click');
+    const oldElement = wrapper.get('.vcp-tool-block').element;
+    message.blocks = [{ type: 'jev-tool-use', tool_name: 'Search', content: 'request', hash: 1 }];
+    await nextTick();
+    expect(wrapper.get('.vcp-tool-block').element).not.toBe(oldElement);
+    expect(wrapper.get<HTMLElement>('.tool-content-scrollable').element.style.display).toBe('none');
+    wrapper.unmount();
   });
 
   it('preserves the default streaming behavior and treats changed tool content as a new block', async () => {

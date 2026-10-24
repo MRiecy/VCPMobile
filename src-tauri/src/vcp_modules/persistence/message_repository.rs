@@ -9,9 +9,9 @@ use sqlx::Row;
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 
-// v2 derives dedicated voice-guidance blocks from canonical text. Invalidate
+// v3 derives dedicated JEV tool-use blocks from canonical text. Invalidate
 // only local render caches; message content and sync hashes stay unchanged.
-pub const RENDERER_SCHEMA_VERSION: i64 = 2;
+pub const RENDERER_SCHEMA_VERSION: i64 = 3;
 const MAX_SAFE_JSON_INTEGER: u64 = (1_u64 << 53) - 1;
 
 pub(crate) fn resolve_message_updated_at(

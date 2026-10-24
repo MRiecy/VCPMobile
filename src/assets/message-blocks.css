@@ -978,26 +978,6 @@ html.dark .vcp-thought-block {
   border: none !important;
 }
 
-/* ToolUse 专属：静态渐变描边。 */
-.vcp-tool-block.is-tool-use::after {
-  content: "";
-  position: absolute;
-  box-sizing: border-box;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  border-radius: inherit;
-  padding: 2px;
-  background: linear-gradient(60deg, #76c4f7, #00d2ff, #3a7bd5, #ffffff, #3a7bd5, #00d2ff, #76c4f7);
-  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  z-index: 0;
-  pointer-events: none;
-}
-
 /* ToolResult 状态：亮色模式下作为默认基础样式呈现 */
 .vcp-tool-block.is-tool-result {
   background: linear-gradient(145deg, #f9f9fb, #f2f2f7);
@@ -1010,12 +990,6 @@ html.dark .vcp-tool-block.is-tool-result {
   background: linear-gradient(145deg, #1c1c1e, #2c2c2e);
   border: 1px solid rgba(255, 255, 255, 0.08);
   color: #f2f2f7;
-}
-
-/* 头部内容控制，用于使内容置于流动描边之上 */
-.vcp-tool-block .tool-header-content {
-  position: relative;
-  z-index: 1;
 }
 
 /* 工具图标与执行状态均保持静态。 */
@@ -1037,6 +1011,30 @@ html.dark .vcp-tool-block.is-tool-result {
   color: #f0f0f0;
   border-radius: 6px;
   padding: 10px;
+}
+
+/* JEV 协议展示：静态紫蓝表面，沿用工具块的一次性交互动效。 */
+.vcp-tool-block.is-tool-use.is-jev-tool-use {
+  background: linear-gradient(145deg, #6254d9 0%, #298bd6 100%) !important;
+  color: #ffffff !important;
+  border: 1px solid rgba(190, 180, 255, 0.62) !important;
+}
+
+.vcp-tool-block.is-jev-tool-use .tool-label,
+.vcp-tool-block.is-jev-tool-use .tool-name,
+.vcp-tool-block.is-jev-tool-use .tool-icon-container {
+  color: inherit !important;
+}
+
+html:not(.dark) .vcp-tool-block.is-tool-use.is-jev-tool-use {
+  background: linear-gradient(145deg, #eee9ff 0%, #ccecff 100%) !important;
+  color: #293056 !important;
+  border-color: rgba(99, 102, 241, 0.32) !important;
+}
+
+html:not(.dark) .vcp-tool-block.is-jev-tool-use pre {
+  background-color: rgba(30, 100, 160, 0.08);
+  color: #173b57;
 }
 
 .vcp-tool-block.is-tool-result .tool-label {

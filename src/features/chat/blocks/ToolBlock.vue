@@ -41,7 +41,7 @@ const renderMarkdown = (text: string): string => {
 
 const props = withDefaults(
   defineProps<{
-    type: 'tool-use' | 'tool-result';
+    type: 'tool-use' | 'jev-tool-use' | 'tool-result';
     content?: string;
     block: ContentBlock;
     defaultExpanded?: boolean;
@@ -135,28 +135,30 @@ const isImageValue = (key: string, value: string): boolean => {
 
 <template>
   <div class="vcp-tool-block my-2 rounded-xl transition-all duration-300 overflow-hidden" :class="[
-    type === 'tool-use' ? 'is-tool-use' : 'is-tool-result tool-bubble',
+    type === 'tool-result' ? 'is-tool-result tool-bubble' : 'is-tool-use',
+    { 'is-jev-tool-use': type === 'jev-tool-use' },
     isExpanded ? 'shadow-md' : 'shadow-sm'
   ]">
     <!-- Header -->
     <div class="tool-header-content flex items-center justify-between p-3 cursor-pointer select-none" data-longpress-native
       @click="toggleExpand">
-      <div class="flex items-center gap-2">
-        <div class="tool-icon-container p-1.5 rounded-lg">
-          <Settings v-if="type === 'tool-use'" :size="14" />
+      <div class="flex items-center gap-2 min-w-0">
+        <div class="tool-icon-container p-1.5 rounded-lg shrink-0">
+          <Settings v-if="type !== 'tool-result'" :size="14" />
           <span v-else class="text-lg leading-none">📊</span>
         </div>
-        <div>
-          <span class="tool-label text-[10px] font-bold block leading-none mb-1 flex items-center gap-1">
-            {{ type === 'tool-use' ? 'VCP-ToolUse' : 'VCP-ToolResult' }}
+        <div class="min-w-0">
+          <span class="tool-label text-[10px] font-bold block leading-none flex items-center gap-1"
+            :class="{ 'mb-1': type !== 'jev-tool-use' || block.tool_name }">
+            {{ type === 'jev-tool-use' ? 'JEVToolUse' : type === 'tool-use' ? 'VCP-ToolUse' : 'VCP-ToolResult' }}
           </span>
-          <span class="tool-name text-xs font-bold font-mono">
+          <span v-if="type !== 'jev-tool-use' || block.tool_name" class="tool-name text-xs font-bold font-mono break-words [overflow-wrap:anywhere]">
             {{ block.tool_name || 'Unknown Tool' }}
           </span>
         </div>
       </div>
 
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-2 shrink-0">
         <span v-if="block.status" class="tool-status text-[10px] px-1.5 py-0.5 rounded font-bold">
           {{ block.status }}
         </span>
@@ -174,8 +176,8 @@ const isImageValue = (key: string, value: string): boolean => {
     <!-- Content -->
     <div v-show="isExpanded"
       class="tool-header-content border-t border-black/10 dark:border-white/10 p-3 animate-slide-down tool-content-scrollable vcp-scrollable">
-      <template v-if="type === 'tool-use'">
-        <pre class="text-[11px] font-mono whitespace-pre-wrap break-words">{{ content }}</pre>
+      <template v-if="type !== 'tool-result'">
+        <pre class="text-[11px] font-mono whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ content }}</pre>
       </template>
       <template v-else>
         <div class="space-y-3">

@@ -2468,6 +2468,37 @@ mod stream_lifecycle_tests {
     }
 
     #[tokio::test]
+    async fn jev_cache_recompilation_replaces_old_tool_projection_without_editing_message() {
+        let pool = test_pool().await;
+        let db_state = DbState::new(pool.clone(), std::path::PathBuf::new());
+        let key = message_key("jev-cache");
+        begin_stream_message(&db_state, &key, Some("agent-1"), Some("Agent"))
+            .await.expect("begin generation");
+        let raw = "<<<[TOOL_REQUEST]>>>\nJEV:「始」使用 'B站获取'「末」\n<<<[END_TOOL_REQUEST]>>>";
+        let hash = crate::vcp_modules::sync_hash::HashAggregator::compute_content_hash(raw);
+        sqlx::query("UPDATE messages SET content = ?, content_hash = ? WHERE msg_id = 'jev-cache'")
+            .bind(raw).bind(&hash).execute(&pool).await.unwrap();
+        let old_blocks = vec![ContentBlock::tool_use("Processing...".to_string(),
+            "\nJEV:「始」使用 'B站获取'「末」\n".to_string(), true)];
+        let old_cache = serialize_render_async(old_blocks).await.unwrap();
+        assert!(decode_valid_render_cache(Some(old_cache), Some(hash.clone()), Some(2), &hash)
+            .await.is_none());
+
+        let (_, new_cache) = compile_and_serialize_render_async(raw.to_string()).await.unwrap();
+        assert!(write_render_cache_cas(&db_state, &key, &hash, &new_cache).await.unwrap());
+        let row = sqlx::query("SELECT m.content, m.content_hash, r.render_content, r.renderer_schema_version \
+            FROM messages m JOIN render_cache r USING (owner_type, owner_id, topic_id, msg_id) WHERE m.msg_id = 'jev-cache'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(row.get::<String, _>("content"), raw);
+        assert_eq!(row.get::<String, _>("content_hash"), hash);
+        let decoded = decode_valid_render_cache(Some(row.get("render_content")), Some(hash.clone()),
+            Some(row.get("renderer_schema_version")), &hash).await.unwrap();
+        assert_eq!(decoded[0]["type"], "jev-tool-use");
+        assert_eq!(decoded[0]["tool_name"], "B站获取");
+        assert_eq!(decoded[0]["content"], "\nJEV:「始」使用 'B站获取'「末」\n");
+    }
+
+    #[tokio::test]
     async fn render_cache_rejects_stale_hash_and_invalid_identity() {
         let pool = test_pool().await;
         let db_state = DbState::new(pool.clone(), std::path::PathBuf::new());
