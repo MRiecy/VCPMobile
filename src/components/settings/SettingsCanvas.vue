@@ -31,8 +31,8 @@ provide('vcp-settings-canvas', true);
 }
 @supports (color: color-mix(in srgb, black, white)) {
   .settings-canvas {
-    --settings-divider: color-mix(in srgb, var(--primary-text) 22%, var(--primary-bg));
-    --settings-row-divider: color-mix(in srgb, var(--primary-text) 14%, var(--primary-bg));
+    --settings-divider: color-mix(in srgb, var(--primary-text) 24%, var(--primary-bg));
+    --settings-row-divider: color-mix(in srgb, var(--primary-text) 12%, var(--primary-bg));
   }
 }
 :global(html[data-vcp-platform="ios"] .settings-canvas) { --settings-input-font-size: 16px; }
@@ -56,9 +56,28 @@ provide('vcp-settings-canvas', true);
 .settings-canvas-actions-content { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; padding: 8px 16px; }
 
 .settings-canvas :deep(.settings-section) { gap: 8px; }
+.settings-canvas :deep(.settings-section--ruled) {
+  position: relative;
+  padding-top: 16px;
+  border-top: 1.5px solid var(--settings-divider);
+}
+.settings-canvas :deep(.settings-section--ruled::before) {
+  content: "";
+  position: absolute;
+  top: -1.5px;
+  left: 0;
+  width: 28px;
+  height: 2px;
+  background: var(--highlight-text, var(--primary-text));
+}
+.settings-canvas :deep(.settings-canvas-divider-block) {
+  padding-top: 12px;
+  border-top: 1.5px solid var(--settings-divider);
+}
 .settings-canvas :deep(.settings-canvas-title) { margin: 0; font-size: 16px; line-height: 24px; font-weight: 600; }
 .settings-canvas :deep(.settings-section-header) { padding: 0; flex-wrap: wrap; }
-.settings-canvas :deep(.settings-section-title) { color: var(--primary-text); font-size: 15px; line-height: 22px; font-weight: 600; }
+.settings-canvas :deep(.settings-section-index) { color: var(--highlight-text, var(--primary-text)); font-size: 12px; line-height: 18px; font-weight: 700; letter-spacing: 0.05em; }
+.settings-canvas :deep(.settings-section-title) { color: var(--primary-text); font-size: 15px; line-height: 22px; font-weight: 700; }
 .settings-canvas :deep(.settings-section-description),
 .settings-canvas :deep(.settings-section-footer) { color: var(--secondary-text); font-size: 12px; line-height: 18px; }
 .settings-canvas :deep(.settings-section-footer) { padding: 0; }

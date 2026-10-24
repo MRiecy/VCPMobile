@@ -23,6 +23,7 @@ import SettingsDisclosure from "../../components/settings/SettingsDisclosure.vue
 import SettingsTextField from "../../components/settings/SettingsTextField.vue";
 import SettingsRow from "../../components/settings/SettingsRow.vue";
 import SettingsSwitch from "../../components/settings/SettingsSwitch.vue";
+import SettingsNote from "../../components/settings/SettingsNote.vue";
 import GroupModeHelpDialog from "./GroupModeHelpDialog.vue";
 import GroupSettingsTextArea from "./GroupSettingsTextArea.vue";
 import { allowChatMutation, chatMutationBlockReason } from "../chat/chatMutationPolicy";
@@ -799,7 +800,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
           </section>
 
           <!-- 2. 四宫格发言调度模式 -->
-          <SettingsSection title="发言调度模式" :description="modeDescription">
+          <SettingsSection index="01" title="发言调度模式" :description="modeDescription">
             <template #action>
               <button type="button" class="group-icon-button" aria-label="发言模式说明" @click="showModeHelp = true">
                 <HelpCircle :size="18" aria-hidden="true" />
@@ -825,7 +826,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
           </SettingsSection>
 
           <!-- 3. 随模式变形的合一成员席位 -->
-          <SettingsSection title="群组成员" :description="rosterHint">
+          <SettingsSection index="02" title="群组成员" :description="rosterHint">
             <template #action>
               <button type="button" class="group-roster-action-btn" :disabled="disabled" aria-label="增减成员" @click="openRosterSheet">
                 <Plus :size="14" aria-hidden="true" />
@@ -936,12 +937,12 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                   @click="openJevNumericPrompt(field, $event)"
                 />
               </SettingsDisclosure>
-              <blockquote class="group-note">服务连接请在「JEV 设置」中配置。</blockquote>
+              <SettingsNote>服务连接请在「JEV 设置」中配置。</SettingsNote>
             </div>
           </SettingsSection>
 
           <!-- 4. 上下文与提示词 (手风琴收纳) -->
-          <SettingsSection title="上下文与提示词">
+          <SettingsSection index="03" title="上下文与提示词">
             <div class="group-context-list">
               <div class="group-inline-switch-row">
                 <div class="min-w-0 flex-1">
@@ -1030,8 +1031,10 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
             </div>
           </SettingsSection>
 
-          <SettingsRow title="删除此群组" :description="deleteBlockReason ?? undefined" clickable danger
-            :disabled="disabled || deleteBlockReason !== null" @click="handleDelete" />
+          <div class="settings-canvas-divider-block">
+            <SettingsRow title="删除此群组" :description="deleteBlockReason ?? undefined" clickable danger
+              :disabled="disabled || deleteBlockReason !== null" @click="handleDelete" />
+          </div>
         </template>
       </SettingsCanvas>
 
@@ -1177,8 +1180,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
   display: flex;
   align-items: center;
   gap: 14px;
-  padding-bottom: 16px;
-  border-bottom: 1px solid var(--settings-row-divider, var(--border-color));
+  padding-bottom: 4px;
 }
 .group-avatar-button {
   display: flex;
@@ -1291,7 +1293,6 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
 .group-roster-action-btn:disabled { opacity: 0.4; }
 
 .group-roster-list {
-  border-top: 1px solid var(--settings-row-divider, var(--border-color));
   border-bottom: 1px solid var(--settings-row-divider, var(--border-color));
 }
 .group-member-row {

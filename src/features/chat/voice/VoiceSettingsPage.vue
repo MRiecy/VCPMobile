@@ -179,7 +179,7 @@ defineExpose({ beforeLeave });
 
         <section v-if="draft" class="voice-provider-section" :aria-labelledby="providerTitleId">
           <h2 :id="providerTitleId" class="settings-canvas-title">MiMo 语音服务</h2>
-          <SettingsSection title="服务器连接">
+          <SettingsSection index="01" title="服务器连接">
             <div class="voice-connection-fields">
               <SettingsTextField :model-value="draft['voice.connection.apiBaseUrl']" :disabled="disabled"
                 label="API 地址" :placeholder="settingDescriptor('voice.connection.apiBaseUrl').preset" mono
@@ -193,7 +193,7 @@ defineExpose({ beforeLeave });
             </template>
           </SettingsSection>
 
-          <SettingsSection title="语音识别 ASR">
+          <SettingsSection index="02" title="语音识别 ASR">
             <template #description>模型：<code class="font-mono">mimo-v2.5-asr</code></template>
             <div>
               <SettingsRow v-for="field in recognitionFields" :key="field" :title="selections[field].title"
@@ -210,7 +210,7 @@ defineExpose({ beforeLeave });
             </div>
           </SettingsSection>
 
-          <SettingsSection title="语音朗读 TTS">
+          <SettingsSection index="03" title="语音朗读 TTS">
             <template #description>模型：<code class="font-mono">{{ ttsModel }}</code></template>
             <div>
               <SettingsRow title="音色模式" :value="selectedLabel('voice.tts.mode')" clickable
@@ -234,17 +234,21 @@ defineExpose({ beforeLeave });
           </SettingsSection>
         </section>
 
-        <SettingsRow title="风格指导" description="通话回复的风格指导规则" :icon="ListChecks" clickable
-          :disabled="disabled" class="voice-style-guidance-entry" @click="openStyleGuidance" />
+        <div class="settings-canvas-divider-block">
+          <SettingsRow title="风格指导" description="通话回复的风格指导规则" :icon="ListChecks" clickable
+            :disabled="disabled" class="voice-style-guidance-entry" @click="openStyleGuidance" />
+        </div>
 
-        <SettingsDisclosure v-if="draft" title="高级参数" description="本地人声检测与插话" :disabled="disabled">
-          <div>
-            <SettingsRow v-for="item in advancedFields" :key="item.field" :title="selections[item.field].title"
-              :description="item.description" :value="selectedLabel(item.field)" clickable :disabled="disabled"
-              :aria-label="selections[item.field].title" aria-haspopup="dialog" :aria-expanded="selectionOpen(item.field)"
-              @click="openSelection(item.field, $event)" />
-          </div>
-        </SettingsDisclosure>
+        <div v-if="draft" class="settings-canvas-divider-block">
+          <SettingsDisclosure title="高级参数" description="本地人声检测与插话" :disabled="disabled">
+            <div>
+              <SettingsRow v-for="item in advancedFields" :key="item.field" :title="selections[item.field].title"
+                :description="item.description" :value="selectedLabel(item.field)" clickable :disabled="disabled"
+                :aria-label="selections[item.field].title" aria-haspopup="dialog" :aria-expanded="selectionOpen(item.field)"
+                @click="openSelection(item.field, $event)" />
+            </div>
+          </SettingsDisclosure>
+        </div>
 
   </SettingsCanvas>
 </template>

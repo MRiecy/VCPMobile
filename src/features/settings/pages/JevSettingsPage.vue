@@ -89,7 +89,7 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
     <p v-if="saving || leaving" role="status" class="m-0 text-xs text-[var(--secondary-text)]">正在保存 JEV 设置…</p>
 
     <div v-if="draft" class="flex flex-col gap-5">
-      <SettingsSection title="服务连接">
+      <SettingsSection index="01" title="服务连接" :divider="false">
         <div>
           <SettingsRow title="启用 JEV" description="全局 JEV 开关">
             <template #action>
@@ -113,23 +113,27 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
         </template>
       </SettingsSection>
 
-      <SettingsDisclosure title="高级参数" description="超时、重试与代理" :disabled="disabled">
-        <div>
-          <SettingsRow v-for="item in numbers" :key="item.field" :title="item.title" :description="item.description"
-            :value="draft ? `${draft[item.field]} ${item.unit}` : ''" clickable :disabled="disabled" aria-haspopup="dialog" @click="editNumber(item)" />
-        </div>
-        <SettingsTextField :model-value="draft?.['jev.proxyUrl']" label="代理地址（可选）" mono :disabled="disabled"
-          placeholder="http://127.0.0.1:7890" @update:model-value="session.edit('jev.proxyUrl', $event)" />
-      </SettingsDisclosure>
+      <div class="settings-canvas-divider-block">
+        <SettingsDisclosure title="高级参数" description="超时、重试与代理" :disabled="disabled">
+          <div>
+            <SettingsRow v-for="item in numbers" :key="item.field" :title="item.title" :description="item.description"
+              :value="draft ? `${draft[item.field]} ${item.unit}` : ''" clickable :disabled="disabled" aria-haspopup="dialog" @click="editNumber(item)" />
+          </div>
+          <SettingsTextField :model-value="draft?.['jev.proxyUrl']" label="代理地址（可选）" mono :disabled="disabled"
+            placeholder="http://127.0.0.1:7890" @update:model-value="session.edit('jev.proxyUrl', $event)" />
+        </SettingsDisclosure>
+      </div>
 
-      <SettingsDisclosure v-if="provider === 'openrouter'" title="应用信息" description="可选，用于 OpenRouter 识别应用" :disabled="disabled">
-        <div class="jev-fields">
-          <SettingsTextField :model-value="draft?.['jev.httpReferer']" label="应用网址（HTTP Referer）" mono :disabled="disabled"
-            placeholder="https://your-site.example" @update:model-value="session.edit('jev.httpReferer', $event)" />
-          <SettingsTextField :model-value="draft?.['jev.appTitle']" label="应用名称" :disabled="disabled"
-            :placeholder="preset('jev.appTitle')" @update:model-value="session.edit('jev.appTitle', $event)" />
-        </div>
-      </SettingsDisclosure>
+      <div v-if="provider === 'openrouter'" class="settings-canvas-divider-block">
+        <SettingsDisclosure title="应用信息" description="可选，用于 OpenRouter 识别应用" :disabled="disabled">
+          <div class="jev-fields">
+            <SettingsTextField :model-value="draft?.['jev.httpReferer']" label="应用网址（HTTP Referer）" mono :disabled="disabled"
+              placeholder="https://your-site.example" @update:model-value="session.edit('jev.httpReferer', $event)" />
+            <SettingsTextField :model-value="draft?.['jev.appTitle']" label="应用名称" :disabled="disabled"
+              :placeholder="preset('jev.appTitle')" @update:model-value="session.edit('jev.appTitle', $event)" />
+          </div>
+        </SettingsDisclosure>
+      </div>
     </div>
   </SettingsCanvas>
 </template>
