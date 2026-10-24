@@ -20,22 +20,10 @@ import { mountWithPinia } from '@/tests/utils/mount';
 import { emitTauriEvent, mockInvoke } from '@/tests/mocks/tauri';
 
 const audio = vi.hoisted(() => ({
-  startListening: vi.fn(), stopListening: vi.fn(), cancelListening: vi.fn(),
-  startRecording: vi.fn(), stopRecording: vi.fn(), cancelRecording: vi.fn(),
   startMonitor: vi.fn(), stopMonitor: vi.fn(),
 }));
 
 vi.mock('@/core/utils/platform', () => ({ isAndroid: true, isIOS: false }));
-vi.mock('@/core/composables/useSpeechRecognition', async () => {
-  const { ref } = await import('vue');
-  return { useSpeechRecognition: () => ({ transcriptionResult: ref(''),
-    startListening: audio.startListening, stopListening: audio.stopListening, cancelListening: audio.cancelListening }) };
-});
-vi.mock('@/core/composables/useAudioRecorder', async () => {
-  const { ref } = await import('vue');
-  return { useAudioRecorder: () => ({ recordingDuration: ref(0),
-    startRecording: audio.startRecording, stopRecording: audio.stopRecording, cancelRecording: audio.cancelRecording }) };
-});
 vi.mock('@/features/chat/voice/microphoneMonitor', () => ({
   createMicrophoneMonitor: () => ({ start: audio.startMonitor, stop: audio.stopMonitor, detach: vi.fn() }),
 }));
@@ -60,7 +48,6 @@ const MessageStub = defineComponent({
 let wrapper: VueWrapper | undefined;
 let overlayWrapper: VueWrapper | undefined;
 const modals = useModalHistory();
-const touch = { touches: [{ clientY: 200 }], changedTouches: [{ clientY: 200 }] };
 
 async function settle() {
   await Promise.resolve();
@@ -96,8 +83,8 @@ function mountComposer(component: Component = InputEnhancer) {
   return wrapper;
 }
 
-function prepareForVoice() {
-  (wrapper!.getComponent(InputEnhancer).vm as unknown as { prepareForVoice: () => void }).prepareForVoice();
+function suspendComposer() {
+  (wrapper!.getComponent(InputEnhancer).vm as unknown as { suspendComposer: () => void }).suspendComposer();
 }
 
 function mountEditorOverlay() {
@@ -125,10 +112,6 @@ function editorSurface() {
 beforeEach(() => {
   attachMenuOpen.value = false;
   for (const mock of Object.values(audio)) mock.mockReset();
-  audio.startListening.mockResolvedValue(undefined);
-  audio.stopListening.mockResolvedValue('');
-  audio.startRecording.mockResolvedValue(undefined);
-  audio.stopRecording.mockResolvedValue(null);
   audio.startMonitor.mockResolvedValue(true);
   window.history.replaceState({ vcpRoot: true, vcpMain: true }, '', '#/chat');
   vi.spyOn(window.history, 'back').mockImplementation(() => {
@@ -175,7 +158,7 @@ describe('voice entry from the existing composer', () => {
     await view.get('[aria-label="展开输入框"]').trigger('click');
     expect(modals.modalStackLength()).toBe(1);
     textarea.focus();
-    prepareForVoice();
+    suspendComposer();
     await view.setProps({ suspended: true });
     expect(modals.modalStackLength()).toBe(0);
     expect(document.activeElement).not.toBe(textarea);
@@ -186,44 +169,9 @@ describe('voice entry from the existing composer', () => {
     expect(useAttachmentStore().stagedAttachments.map(item => item.id)).toEqual(['kept-file']);
     await view.get('[aria-label="添加附件"]').trigger('click');
     expect(attachMenuOpen.value).toBe(true);
-    prepareForVoice();
+    suspendComposer();
     await settle();
     expect(attachMenuOpen.value).toBe(false);
-    expect(view.emitted('send')).toBeUndefined();
-  });
-
-  it('cancels a late old recording start after the composer is suspended', async () => {
-    vi.useFakeTimers();
-    const pending = deferred<void>();
-    audio.startRecording.mockReturnValueOnce(pending.promise);
-    const view = mountComposer();
-    await view.get('.input-voice').trigger('touchstart', touch);
-    vi.advanceTimersByTime(350);
-    await settle();
-    expect(audio.startRecording).toHaveBeenCalledOnce();
-    await view.setProps({ suspended: true });
-    const cancelCount = audio.cancelRecording.mock.calls.length;
-    pending.resolve();
-    await settle();
-    expect(audio.cancelRecording.mock.calls.length).toBe(cancelCount + 1);
-    await view.get('.input-voice').trigger('touchend', touch);
-    expect(audio.stopRecording).not.toHaveBeenCalled();
-    expect(view.emitted('send')).toBeUndefined();
-  });
-
-  it('ignores the old finger release after entering voice mode', async () => {
-    vi.useFakeTimers();
-    const view = mountComposer();
-    await view.get('textarea').setValue('保留键盘输入态');
-    const textarea = view.get('textarea').element;
-    await view.get('.input-voice').trigger('touchstart', touch);
-    vi.advanceTimersByTime(100);
-    await view.setProps({ suspended: true });
-    await view.get('.input-voice').trigger('touchend', touch);
-    await view.setProps({ suspended: false });
-    expect(view.find('textarea').exists()).toBe(true);
-    expect(view.get('textarea').element).toBe(textarea);
-    expect(audio.startRecording).not.toHaveBeenCalled();
     expect(view.emitted('send')).toBeUndefined();
   });
 

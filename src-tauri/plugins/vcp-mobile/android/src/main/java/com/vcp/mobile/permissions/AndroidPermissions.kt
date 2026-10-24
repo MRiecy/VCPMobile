@@ -93,9 +93,6 @@ internal class AndroidPermissions(
                     requestPermission("storageLegacy", invoke, "onPermissionResult")
                 }
             }
-            "microphone" -> {
-                requestPermission("microphone", invoke, "onPermissionResult")
-            }
             "camera" -> {
                 requestPermission("camera", invoke, "onPermissionResult")
             }

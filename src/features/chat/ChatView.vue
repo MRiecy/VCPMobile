@@ -112,7 +112,7 @@ watch(() => voiceCall.active, () => {
 
 const startVoiceCall = () => {
   if (!isConversationReady.value || voiceCall.active) return;
-  inputRef.value?.prepareForVoice();
+  inputRef.value?.suspendComposer();
   layoutStore.setLeftDrawer(false);
   layoutStore.setRightDrawer(false);
   voiceCall.start();

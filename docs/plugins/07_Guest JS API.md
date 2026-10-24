@@ -213,7 +213,7 @@ await shareFileNative(localCachePath); // ACTION_SEND + 系统分享面板
 | 命令 | 参数 | 返回类型 | 说明 |
 |------|------|----------|------|
 | `plugin:vcp-mobile\|check_all_permissions` | 无 | `{ notification: boolean, storage: boolean, battery: boolean, microphone: boolean }` | 检查四项权限状态 |
-| `plugin:vcp-mobile\|request_android_permission` | `{ p_type: string }` | `void` | 请求指定权限（`notification` / `storage` / `microphone` 等） |
+| `plugin:vcp-mobile\|request_android_permission` | `{ p_type: string }` | `void` | 请求指定权限（`notification` / `storage` / `camera` / `location` / `battery`）；通话麦克风由原生采集 owner 申请 |
 | `plugin:vcp-mobile\|move_task_to_back` | 无 | `void` | 将应用移至后台 |
 | `plugin:vcp-mobile\|get_battery_status` | 无 | `{ level: number, isPowerSaveMode: boolean }` | 获取电池电量与省电模式状态 |
 

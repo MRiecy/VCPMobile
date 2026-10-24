@@ -24,7 +24,7 @@ VCP Mobile 采用**单一自定义插件** `tauri-plugin-vcp-mobile` 统一管�
 | 键盘 Insets | — | `KeyboardInsetsManager.kt` | `evaluateJavascript` 注入 CustomEvent |
 | 返回键拦截 | — | `MainActivity.onWebViewCreate()` | `OnBackPressedDispatcher` |
 | 生命周期事件 | `src/events.rs` | `lifecycle/LifecycleBridge.kt`、`lifecycle/NativeEvents.kt` | 原生 Channel → Rust 生命周期 owner → Tauri Event |
-| 麦克风权限 | `src/system.rs` | `VcpMobilePlugin.kt` | `requestPermissionForAlias("microphone")`（Tauri 别名机制） |
+| 通话麦克风权限 | `src/voice.rs` | `voice/NativeVoiceAudio.kt` | `requestPermissionForAlias("microphone")`，通过独立 `onVoiceAudioPermissionResult` 回到采集 owner |
 | 通知栏监听 | `src/system.rs` | `service/VcpNotificationListenerService.kt` | 跳转 `ACTION_NOTIFICATION_LISTENER_SETTINGS` |
 | 自启动/电源管理 | `src/system.rs` | `VcpMobilePlugin.kt` | 厂商 Intent 链 + 设置页兜底 |
 
