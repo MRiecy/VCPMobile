@@ -688,6 +688,53 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     return false;
   }
 
+  // 侧栏生成活动汇总：按 ownerType:ownerId 跨话题归并真实生成态。
+  // 与 isOwnerBusy 不同：未确认活动清单时不假定活动，且等待重试（waiting_retry）的可恢复中断不显示为正在生成。
+  const generatingOwnerKeys = computed(() => {
+    const owners = new Set<string>();
+    const addOwnerFromConversationKey = (conversationKey: string) => {
+      const [type, id] = JSON.parse(conversationKey) as [
+        ConversationOwnerType,
+        string,
+        string,
+      ];
+      if ((type === "agent" || type === "group") && id) {
+        owners.add(`${type}:${id}`);
+      }
+    };
+
+    for (const key of conversationOperations.keys()) {
+      addOwnerFromConversationKey(key);
+    }
+    for (const key of activeGroupTurns.keys()) {
+      addOwnerFromConversationKey(key);
+    }
+    for (const [key, requests] of activeRequests.entries()) {
+      if (requests.size > 0) {
+        addOwnerFromConversationKey(key);
+      }
+    }
+    for (const [key, messageIds] of Object.entries(sessionActiveStreams.value)) {
+      const hasGeneratingStream = messageIds.some((messageId) => {
+        const msg = activeStreamMessages.get(
+          streamMessageMapKeyFromConversation(key, messageId),
+        );
+        return msg?.streamRecoveryState !== "waiting_retry";
+      });
+      if (hasGeneratingStream) {
+        addOwnerFromConversationKey(key);
+      }
+    }
+    return owners;
+  });
+
+  function isOwnerGenerating(
+    ownerId: string,
+    ownerType: ConversationOwnerType,
+  ): boolean {
+    return generatingOwnerKeys.value.has(`${ownerType}:${ownerId}`);
+  }
+
   function getActiveStreamMessage(
     ownerId: string,
     ownerType: ConversationOwnerType,
@@ -1646,6 +1693,8 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     isConversationBusy,
     isConversationPreparing,
     isOwnerBusy,
+    generatingOwnerKeys,
+    isOwnerGenerating,
     activityInventoryKnown,
     connectionError,
     computeShell,

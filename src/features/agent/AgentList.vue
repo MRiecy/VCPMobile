@@ -3,6 +3,7 @@ import { ref, computed, onUnmounted, watch } from "vue";
 import Sortable from "sortablejs";
 import { useAssistantStore } from "../../core/stores/assistant";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
+import { useChatStreamStore } from "../../core/stores/chatStreamStore";
 import { useLayoutStore } from "../../core/stores/layout";
 import { useSettingsStore } from "../../core/stores/settings";
 import { useOverlayStore } from "../../core/stores/overlay";
@@ -26,6 +27,7 @@ const emit = defineEmits<{
 
 const assistantStore = useAssistantStore();
 const sessionStore = useChatSessionStore();
+const streamStore = useChatStreamStore();
 const layoutStore = useLayoutStore();
 const settingsStore = useSettingsStore();
 const overlayStore = useOverlayStore();
@@ -370,9 +372,31 @@ const filteredCombinedItems = computed<AssistantListItem[]>(() => {
               ]" :style="{
                 transform: `translateX(${activeSwipeId === ownerSwipeKey('group', group.id) ? currentSwipeX : 0}px)`,
               }">
-            <VcpAvatar owner-type="group" :owner-id="group.id" :fallback-name="group.name" size="w-10 h-10"
-              rounded="rounded-full" dominant-color="var(--highlight-text)" />
-            <div class="flex flex-col overflow-hidden flex-1">
+            <div
+              class="vcp-sidebar-avatar-slot relative w-10 h-10 shrink-0 rounded-full pointer-events-none"
+              :class="{ 'is-generating': streamStore.isOwnerGenerating(group.id, 'group') }"
+              :data-generating="streamStore.isOwnerGenerating(group.id, 'group') ? 'true' : 'false'"
+            >
+              <VcpAvatar owner-type="group" :owner-id="group.id" :fallback-name="group.name" size="w-10 h-10"
+                rounded="rounded-full" class="vcp-sidebar-avatar-surface pointer-events-none" dominant-color="var(--highlight-text)" />
+              <div
+                class="vcp-sidebar-avatar-indicator absolute inset-0 rounded-full overflow-hidden flex items-center justify-center pointer-events-none"
+                aria-hidden="true"
+              >
+                <div class="vignette-mask absolute inset-0"></div>
+                <svg class="relative z-10 w-6 h-6" viewBox="0 0 24 24" fill="none">
+                  <line class="axis-line" x1="2.5" y1="12" x2="21.5" y2="12" stroke="rgba(255,255,255,0.34)" stroke-width="0.9" stroke-linecap="round" />
+                  <g transform="rotate(7 12 12)">
+                    <rect class="interlace-up st-2" x="4.8" y="9.2" width="1.65" height="5.6" rx="0.82" fill="rgba(255,255,255,0.68)" />
+                    <rect class="interlace-down st-1" x="8.1" y="6.0" width="1.85" height="12.0" rx="0.92" fill="rgba(255,255,255,0.9)" />
+                    <rect class="interlace-up st-0" x="11.6" y="3.4" width="2.0" height="17.2" rx="1.0" fill="#ffffff" />
+                    <rect class="interlace-down st-1" x="15.3" y="7.4" width="1.8" height="9.2" rx="0.9" fill="rgba(255,255,255,0.85)" />
+                    <circle class="interlace-dot st-2" cx="19.3" cy="12" r="1.25" fill="rgba(255,255,255,0.72)" />
+                  </g>
+                </svg>
+              </div>
+            </div>
+            <div class="flex flex-col overflow-hidden flex-1 pointer-events-none">
               <span class="font-bold text-sm truncate text-primary-text">{{
                 group.name
               }}</span>
@@ -434,15 +458,37 @@ const filteredCombinedItems = computed<AssistantListItem[]>(() => {
             " class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-white dark:border-gray-900 z-10 shadow-sm shrink-0"
               style="background: #ff6b6b"></div>
 
-            <VcpAvatar
-              owner-type="agent"
-              :owner-id="agent.id"
-              :fallback-name="agent.name"
-              size="w-10 h-10"
-              rounded="rounded-full"
-              class="pointer-events-none"
-              dominant-color="var(--highlight-text)"
-            />
+            <div
+              class="vcp-sidebar-avatar-slot relative w-10 h-10 shrink-0 rounded-full pointer-events-none"
+              :class="{ 'is-generating': streamStore.isOwnerGenerating(agent.id, 'agent') }"
+              :data-generating="streamStore.isOwnerGenerating(agent.id, 'agent') ? 'true' : 'false'"
+            >
+              <VcpAvatar
+                owner-type="agent"
+                :owner-id="agent.id"
+                :fallback-name="agent.name"
+                size="w-10 h-10"
+                rounded="rounded-full"
+                class="vcp-sidebar-avatar-surface pointer-events-none"
+                dominant-color="var(--highlight-text)"
+              />
+              <div
+                class="vcp-sidebar-avatar-indicator absolute inset-0 rounded-full overflow-hidden flex items-center justify-center pointer-events-none"
+                aria-hidden="true"
+              >
+                <div class="vignette-mask absolute inset-0"></div>
+                <svg class="relative z-10 w-6 h-6" viewBox="0 0 24 24" fill="none">
+                  <line class="axis-line" x1="2.5" y1="12" x2="21.5" y2="12" stroke="rgba(255,255,255,0.34)" stroke-width="0.9" stroke-linecap="round" />
+                  <g transform="rotate(7 12 12)">
+                    <rect class="interlace-up st-2" x="4.8" y="9.2" width="1.65" height="5.6" rx="0.82" fill="rgba(255,255,255,0.68)" />
+                    <rect class="interlace-down st-1" x="8.1" y="6.0" width="1.85" height="12.0" rx="0.92" fill="rgba(255,255,255,0.9)" />
+                    <rect class="interlace-up st-0" x="11.6" y="3.4" width="2.0" height="17.2" rx="1.0" fill="#ffffff" />
+                    <rect class="interlace-down st-1" x="15.3" y="7.4" width="1.8" height="9.2" rx="0.9" fill="rgba(255,255,255,0.85)" />
+                    <circle class="interlace-dot st-2" cx="19.3" cy="12" r="1.25" fill="rgba(255,255,255,0.72)" />
+                  </g>
+                </svg>
+              </div>
+            </div>
             <div class="flex flex-col overflow-hidden flex-1 pointer-events-none">
               <span class="font-bold text-sm truncate text-primary-text">{{
                 agent.name
@@ -457,3 +503,106 @@ const filteredCombinedItems = computed<AssistantListItem[]>(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.vcp-sidebar-avatar-surface {
+  transition:
+    transform 0.44s cubic-bezier(0.22, 1, 0.36, 1),
+    filter 0.44s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.vcp-sidebar-avatar-slot.is-generating .vcp-sidebar-avatar-surface {
+  filter: brightness(0.63) saturate(0.82) contrast(1.06);
+  transform: scale(0.96);
+}
+
+.vignette-mask {
+  opacity: 0;
+  background: radial-gradient(
+    circle at 50% 50%,
+    rgba(0, 0, 0, 0.6) 0%,
+    rgba(0, 0, 0, 0.24) 64%,
+    transparent 100%
+  );
+  transition: opacity 0.38s ease;
+}
+
+.vcp-sidebar-avatar-slot.is-generating .vignette-mask {
+  opacity: 1;
+}
+
+.axis-line {
+  transform-origin: 55% 50%;
+  transform: scaleX(0);
+  opacity: 0;
+  transition:
+    transform 0.42s cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 0.3s ease;
+}
+
+.vcp-sidebar-avatar-slot.is-generating .axis-line {
+  transform: scaleX(1);
+  opacity: 1;
+}
+
+.interlace-up {
+  transform-origin: center center;
+  transform: translateY(6.5px) scaleY(0.18);
+  opacity: 0;
+  transition:
+    transform 0.46s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.32s ease;
+}
+
+.interlace-down {
+  transform-origin: center center;
+  transform: translateY(-6.5px) scaleY(0.18);
+  opacity: 0;
+  transition:
+    transform 0.46s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.32s ease;
+}
+
+.interlace-dot {
+  transform-origin: center center;
+  transform: translateY(4.5px) scale(0.2);
+  opacity: 0;
+  transition:
+    transform 0.46s cubic-bezier(0.34, 1.56, 0.64, 1),
+    opacity 0.32s ease;
+}
+
+.vcp-sidebar-avatar-slot.is-generating .interlace-up,
+.vcp-sidebar-avatar-slot.is-generating .interlace-down {
+  transform: translateY(0) scaleY(1);
+  opacity: 1;
+}
+
+.vcp-sidebar-avatar-slot.is-generating .interlace-dot {
+  transform: translateY(0) scale(1);
+  opacity: 1;
+}
+
+.st-0 {
+  transition-delay: 0s;
+}
+
+.st-1 {
+  transition-delay: 0.04s;
+}
+
+.st-2 {
+  transition-delay: 0.085s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vcp-sidebar-avatar-surface,
+  .vignette-mask,
+  .axis-line,
+  .interlace-up,
+  .interlace-down,
+  .interlace-dot {
+    transition: none !important;
+  }
+}
+</style>
