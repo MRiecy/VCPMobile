@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { deleteTempFile, type PickedFile } from 'tauri-plugin-vcp-mobile';
 import { cancelFileOperation, pickFile } from '../../../core/utils/nativeFilePicker';
 import SettingsRow from '../../../components/settings/SettingsRow.vue';
+import SettingsNote from '../../../components/settings/SettingsNote.vue';
 
 interface CloneSample { id: string; fileName: string; format: 'mp3' | 'wav'; bytes: number }
 const props = defineProps<{
@@ -111,9 +112,9 @@ defineExpose({ cancelPending, importing });
     </div>
     <p v-if="error" class="m-0 text-xs leading-relaxed text-red-500" role="alert">{{ error }}</p>
     <p v-else-if="modelValue && !loading && !sample" class="m-0 text-xs leading-relaxed text-red-500" role="alert">样本文件缺失，请重新导入。</p>
-    <p class="m-0 text-xs leading-relaxed text-[var(--secondary-text)]">
+    <SettingsNote>
       建议使用简短、清晰的单人录音，每个朗读分段都会上传该样本。样本保存在本机，配置备份不包含音频文件。
-    </p>
+    </SettingsNote>
   </div>
 </template>
 

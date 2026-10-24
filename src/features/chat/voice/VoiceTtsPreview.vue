@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { Play, Square } from '@lucide/vue';
 import SettingsDisclosure from '../../../components/settings/SettingsDisclosure.vue';
+import SettingsNote from '../../../components/settings/SettingsNote.vue';
 import VoiceTextArea from './VoiceTextArea.vue';
 import { useVoiceCallStore } from './voiceCallStore';
 import type { VoiceConfig } from '../../../core/config/generated/config';
@@ -75,9 +76,9 @@ defineExpose({ stop, busy });
   <SettingsDisclosure title="试听声音" :description="unavailable" :disabled="disabled">
     <div class="flex flex-col gap-3">
       <VoiceTextArea v-model="text" label="试听文本" :rows="3" :max-length="500" :disabled="disabled" />
-      <p class="m-0 text-xs leading-relaxed text-[var(--secondary-text)]">
+      <SettingsNote>
         试听使用默认演绎指导，不调用聊天模型生成指导。
-      </p>
+      </SettingsNote>
       <button type="button" class="voice-preview-button" :disabled="!active || (!busy && !canStart)" @click="toggle">
         <Square v-if="busy" :size="16" aria-hidden="true" /><Play v-else :size="16" aria-hidden="true" />
         {{ busy ? '停止试听' : '试听当前设置' }}

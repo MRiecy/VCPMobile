@@ -10,6 +10,7 @@ import SettingsDisclosure from '../../../components/settings/SettingsDisclosure.
 import SettingsTextField from '../../../components/settings/SettingsTextField.vue';
 import SettingsRow from '../../../components/settings/SettingsRow.vue';
 import SettingsSwitch from '../../../components/settings/SettingsSwitch.vue';
+import SettingsNote from '../../../components/settings/SettingsNote.vue';
 import type { SettingsPageProps } from '../contracts';
 import { JEV_FIELDS } from '../editing/fieldSets';
 import { useSettingsPageSession } from '../editing/useSettingsPageSession';
@@ -107,7 +108,9 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
           <SettingsTextField :model-value="draft?.[connectionFields.model]" label="决策模型" mono :disabled="disabled"
             :placeholder="preset(connectionFields.model)" @update:model-value="session.edit(connectionFields.model, $event)" />
         </div>
-        <template #footer>地址和模型留空使用当前服务商预设。</template>
+        <template #footer>
+          <SettingsNote>地址和模型留空使用当前服务商预设。</SettingsNote>
+        </template>
       </SettingsSection>
 
       <SettingsDisclosure title="高级参数" description="超时、重试与代理" :disabled="disabled">

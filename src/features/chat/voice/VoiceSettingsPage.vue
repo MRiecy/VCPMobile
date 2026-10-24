@@ -10,6 +10,7 @@ import SettingsDisclosure from '../../../components/settings/SettingsDisclosure.
 import SettingsTextField from '../../../components/settings/SettingsTextField.vue';
 import SettingsRow from '../../../components/settings/SettingsRow.vue';
 import SettingsSwitch from '../../../components/settings/SettingsSwitch.vue';
+import SettingsNote from '../../../components/settings/SettingsNote.vue';
 import type { SettingsPageProps } from '../../settings/contracts';
 import { VOICE_FIELDS } from '../../settings/editing/fieldSets';
 import { useSettingsPageSession } from '../../settings/editing/useSettingsPageSession';
@@ -189,7 +190,7 @@ defineExpose({ beforeLeave });
                 @update:model-value="session.edit('voice.connection.apiKey', $event)" />
             </div>
             <template #footer>
-              <p class="m-0">地址留空使用 MiMo 官方服务。</p>
+              <SettingsNote>地址留空使用 MiMo 官方服务。</SettingsNote>
             </template>
           </SettingsSection>
 
@@ -237,11 +238,11 @@ defineExpose({ beforeLeave });
                 description="保留所选音色，控制情绪、语气与节奏；留空则自然朗读。"
                 @update:model-value="session.edit('voice.tts.stylePrompt', $event)" />
             </SettingsDisclosure>
-            <p v-if="draft['voice.tts.mode'] !== 'builtin'" class="m-0 text-xs leading-relaxed text-[var(--secondary-text)]">
+            <SettingsNote v-if="draft['voice.tts.mode'] !== 'builtin'">
               每个文本分段合成完成后返回音频；模型回复仍会逐段提交朗读。
-            </p>
+            </SettingsNote>
             <VoiceTtsPreview ref="preview" :settings="previewSettings" :active="active" :disabled="disabled || cloneSample?.importing" />
-            <template #footer>返回时自动保存，下一次朗读生效。</template>
+            <template #footer><SettingsNote>返回时自动保存，下一次朗读生效。</SettingsNote></template>
           </SettingsSection>
         </section>
 
@@ -255,7 +256,7 @@ defineExpose({ beforeLeave });
               :aria-label="selections[item.field].title" aria-haspopup="dialog" :aria-expanded="selectionOpen(item.field)"
               @click="openSelection(item.field, $event)" />
           </div>
-          <p class="m-0 text-xs leading-relaxed text-[var(--secondary-text)]">返回时自动保存，下次通话生效。</p>
+          <SettingsNote>返回时自动保存，下次通话生效。</SettingsNote>
         </SettingsDisclosure>
 
   </SettingsCanvas>

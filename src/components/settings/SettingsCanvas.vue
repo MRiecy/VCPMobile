@@ -62,6 +62,16 @@ provide('vcp-settings-canvas', true);
 .settings-canvas :deep(.settings-section-description),
 .settings-canvas :deep(.settings-section-footer) { color: var(--secondary-text); font-size: 12px; line-height: 18px; }
 .settings-canvas :deep(.settings-section-footer) { padding: 0; }
+.settings-canvas :deep(.settings-note),
+.settings-canvas :deep(blockquote.settings-note) {
+  margin: 0;
+  padding: 2px 0 2px 8px;
+  border-left: 2px solid var(--border-color);
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--secondary-text);
+  opacity: 0.78;
+}
 .settings-canvas :deep(.settings-row) { width: 100%; min-height: 44px; padding: 0; align-items: flex-start; border: 0; border-radius: 0; background: transparent; text-align: left; transition: opacity 120ms ease; }
 .settings-canvas :deep(.settings-row + .settings-row) { border-top: 1px solid var(--settings-row-divider); }
 .settings-canvas :deep(.settings-row:active) { transform: none; }

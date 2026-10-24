@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useId } from 'vue';
+import SettingsNote from '../../../components/settings/SettingsNote.vue';
 
 const props = withDefaults(defineProps<{
   modelValue: string;
@@ -27,7 +28,7 @@ const onInput = (event: Event) => {
       :placeholder="placeholder" :aria-describedby="description ? `${id}-help` : undefined"
       class="voice-text-input vcp-scrollable"
       @input="onInput" />
-    <p v-if="description" :id="`${id}-help`" class="m-0 text-xs leading-relaxed text-[var(--secondary-text)]">{{ description }}</p>
+    <SettingsNote v-if="description" :id="`${id}-help`">{{ description }}</SettingsNote>
   </div>
 </template>
 

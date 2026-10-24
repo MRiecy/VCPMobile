@@ -4,6 +4,7 @@ import SettingsCanvas from '../../../components/settings/SettingsCanvas.vue';
 import SettingsSection from '../../../components/settings/SettingsSection.vue';
 import SettingsRow from '../../../components/settings/SettingsRow.vue';
 import SettingsSwitch from '../../../components/settings/SettingsSwitch.vue';
+import SettingsNote from '../../../components/settings/SettingsNote.vue';
 import VoiceTextArea from './VoiceTextArea.vue';
 import { SETTINGS_DEFAULTS, settingDescriptor } from './settings';
 import { VOICE_STYLE_GUIDANCE_FIELDS } from '../../settings/editing/fieldSets';
@@ -28,9 +29,9 @@ defineExpose({ beforeLeave });
     <p v-if="saving || leaving" role="status" class="m-0 text-xs text-[var(--secondary-text)]">正在保存风格指导…</p>
 
     <template v-if="draft">
-      <p class="m-0 text-xs leading-relaxed text-[var(--secondary-text)]">
+      <SettingsNote>
         适用于预置音色与样本复刻的通话回复。两项规则换行拼接为同一个注入块，固定放在上下文末尾。
-      </p>
+      </SettingsNote>
       <SettingsSection title="LLM 音频标签指导" description="通话时自动注入，让聊天模型在正文中生成音频标签。">
         <VoiceTextArea label="音频标签生成规则" :model-value="draft['voice.guidance.audioTagRules']" :max-length="settingDescriptor('voice.guidance.audioTagRules').maxChars" :disabled="disabled" :rows="7"
           @update:model-value="session.edit('voice.guidance.audioTagRules', $event)" />
@@ -53,7 +54,7 @@ defineExpose({ beforeLeave });
         </template>
         <template #footer>自动指导关闭或缺失时，使用语音设置中的默认演绎指导；留空则按音色自然朗读。</template>
       </SettingsSection>
-      <p class="m-0 text-xs leading-relaxed text-[var(--secondary-text)]">返回时自动保存，下一次回复生效。</p>
+      <SettingsNote>返回时自动保存，下一次回复生效。</SettingsNote>
     </template>
   </SettingsCanvas>
 </template>
