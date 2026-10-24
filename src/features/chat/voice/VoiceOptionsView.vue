@@ -66,8 +66,8 @@ onBeforeUnmount(() => { mounted = false; });
       </header>
       <div class="flex-1 min-h-0 overflow-hidden flex flex-col">
         <p v-if="navigationError" class="shrink-0 px-4 py-2 text-sm text-red-500" role="alert">{{ navigationError }}</p>
-        <VoiceSettingsPage v-if="mode === 'settings'" :key="visit" ref="pageHandle" :active="pageActive" />
-        <VoiceStyleGuidancePage v-else :key="visit" ref="pageHandle" :active="pageActive" />
+        <VoiceSettingsPage v-if="mode === 'settings'" :key="`settings-${visit}`" ref="pageHandle" :active="pageActive" />
+        <VoiceStyleGuidancePage v-else :key="`style-guidance-${visit}`" ref="pageHandle" :active="pageActive" />
       </div>
     </div>
   </SlidePage>
