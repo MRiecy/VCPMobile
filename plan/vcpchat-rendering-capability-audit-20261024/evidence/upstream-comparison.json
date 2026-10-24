@@ -1,0 +1,1192 @@
+{
+  "auditDate": "2026-10-24",
+  "mobileHead": "4c54cba3c3ac4eb90a309acc4b7e17e3354d27e4",
+  "desktopLocalHead": "60f87010ec306967472f6026ba03eec42852828e",
+  "upstreamBase": "8f1562ea8fb851d0e370449a66ba24700d93faf9",
+  "upstreamHead": "2ba1af33a6d7f13a6d0597f9e1493521b51aecf8",
+  "status": "ahead",
+  "aheadBy": 53,
+  "behindBy": 0,
+  "commits": [
+    {
+      "sha": "0cc86c28e4d1798d2f1a7561c6449fdca31eadf1",
+      "date": "2026-10-20T06:10:29Z",
+      "title": "fix: preserve composer model switches during pending saves"
+    },
+    {
+      "sha": "176e23b5bf4642c1ccd7d9c2d4953585db3cd600",
+      "date": "2026-10-20T06:30:17Z",
+      "title": "test(terminal): align command-run-watch store path on non-win32 platforms"
+    },
+    {
+      "sha": "994ef1930e93239fdda2e33d4f6b5dd23950e171",
+      "date": "2026-10-20T06:41:55Z",
+      "title": "Merge pull request #254 from Cimo-Yu/fix/composer-model-switch-queue"
+    },
+    {
+      "sha": "3dcaa967dac2accbd3ce6f98d18d055177b4470f",
+      "date": "2026-10-20T07:33:05Z",
+      "title": "fix(projectforge): isolate component script ranges and PowerShell syntax"
+    },
+    {
+      "sha": "8d7e5e9512a12a54d7e9daf6b494b93916e986b4",
+      "date": "2026-10-20T07:33:05Z",
+      "title": "fix(audio): serialize EQ changes and restore persisted DSP state"
+    },
+    {
+      "sha": "5c903b71bea1034b4dc99593b58646ea17d2fba7",
+      "date": "2026-10-20T07:44:17Z",
+      "title": "fix(projectforge): consume opaque Svelte shorthand attributes"
+    },
+    {
+      "sha": "13f8bd7d220336ac629616eb3e09ffffdf52bd09",
+      "date": "2026-10-20T07:57:25Z",
+      "title": "fix(projectforge): keep Svelte-only syntax out of Vue containers"
+    },
+    {
+      "sha": "0342e8c602427ccbd73717517869d0e03c20f270",
+      "date": "2026-10-20T09:52:16Z",
+      "title": "fix(projectforge): distinguish postfix updates from regex literals"
+    },
+    {
+      "sha": "95ac17b34421da308e196bbcd1414edac6da714b",
+      "date": "2026-10-20T10:57:05Z",
+      "title": "fix(projectforge): respect member tokens and Vue text braces"
+    },
+    {
+      "sha": "1ded44e1e148a05a7f1535f37fcbc6ea38a37b81",
+      "date": "2026-10-21T01:18:11Z",
+      "title": "fix(sync,ipc): 消除只读历史创建空目录副作用，修复已删除话题被空目录反向恢复的问题"
+    },
+    {
+      "sha": "cef0fbed3ab1906c715b2fed2f695b73d6c9130d",
+      "date": "2026-10-21T01:20:09Z",
+      "title": "Merge pull request #256 from infinite-vector/fix/topic-delete-empty-dir-ghost-resurrection"
+    },
+    {
+      "sha": "3f4885a9795847cc9000ab57de1bd47693159174",
+      "date": "2026-10-21T09:22:06Z",
+      "title": "新增通知栏可以显示PS指令"
+    },
+    {
+      "sha": "d9b45966b00bb2b786bf03524520979cb4fbf11b",
+      "date": "2026-10-21T09:25:35Z",
+      "title": "Merge branch 'main' of https://github.com/lioensky/VCPChat"
+    },
+    {
+      "sha": "efbfb15f974fb146dc986dd6637aa03d5631385c",
+      "date": "2026-10-21T09:26:34Z",
+      "title": "fix(projectforge): 修复搜索覆盖层残留与工程页刷新"
+    },
+    {
+      "sha": "c417510f1b998c4e50fb3b22ae9be3643d25aee0",
+      "date": "2026-10-21T12:45:38Z",
+      "title": "Merge pull request #255 from JENN2046/codex/upstream-runtime-fixes-20261020"
+    },
+    {
+      "sha": "55cd3677ac00c389a7fad880620205ca4e662d05",
+      "date": "2026-10-21T12:57:52Z",
+      "title": "更新2个编译产物"
+    },
+    {
+      "sha": "e63e953543fdaf5356596c997230fe7ce9d836ea",
+      "date": "2026-10-21T17:18:06Z",
+      "title": "Music capsule: scope its styles under .vcp-ui-scope and register its upstream fallbacks with the UI-system gate"
+    },
+    {
+      "sha": "6f26cc66bd557d0e6c764c85d70af213d25d2c33",
+      "date": "2026-10-21T17:23:45Z",
+      "title": "Main process: record launch marks, main-window responsiveness and a stability log; add a one-shot diagnostics export"
+    },
+    {
+      "sha": "69a5ed055ef6ea4ee635290e08460c27d16abed6",
+      "date": "2026-10-21T17:23:46Z",
+      "title": "Stop disabling Chromium background throttling app-wide; let the stream loop handle hidden pages itself"
+    },
+    {
+      "sha": "47075f78f45236c1a22979318ce7ef3bccdecf0c",
+      "date": "2026-10-21T17:23:47Z",
+      "title": "Tool bubbles: pause off-screen shimmer, and add a \"气泡流光\" setting with once / steady / full"
+    },
+    {
+      "sha": "76302eb0832a11eb186e591cdad0371f829c31cb",
+      "date": "2026-10-21T17:23:48Z",
+      "title": "Gates: register the new tests, re-review the touched baselines and refresh the chat event contracts"
+    },
+    {
+      "sha": "f3b26aa488a75c8cc67fec96a2d330ceaa21de95",
+      "date": "2026-10-21T18:45:08Z",
+      "title": "Merge pull request #258 from RoxyAsahi/feat/terminal-host"
+    },
+    {
+      "sha": "5c324cb50d6c257b7bd4f5311c08fba7f75046a4",
+      "date": "2026-10-21T19:31:08Z",
+      "title": "弱化默认工具调用卡片显示"
+    },
+    {
+      "sha": "05ec5dff8517a34d7a27afed1b2cbb0263f796d9",
+      "date": "2026-10-21T21:36:45Z",
+      "title": "上架多功能上下文压缩"
+    },
+    {
+      "sha": "69fe07585d8c686adf427c61e21817c052cb7c24",
+      "date": "2026-10-21T21:45:26Z",
+      "title": "优化菜单自动排布"
+    },
+    {
+      "sha": "54bd49aadcdf200305ece952dddcbc36af6fc780",
+      "date": "2026-10-21T21:50:44Z",
+      "title": "新增中止总结功能"
+    },
+    {
+      "sha": "e4685610b8b678abaf40e9e4a5d2b7bd7746823e",
+      "date": "2026-10-21T22:19:38Z",
+      "title": "fix"
+    },
+    {
+      "sha": "bd0b79f0ea2de32e8b6699ca9aa568fa78b742dc",
+      "date": "2026-10-21T23:47:05Z",
+      "title": "fix"
+    },
+    {
+      "sha": "ecd885c19c403f92a88789706fec90589b501738",
+      "date": "2026-10-22T01:13:13Z",
+      "title": "feat(chat): host-owned fidelity and continuity audits for context checkpoints"
+    },
+    {
+      "sha": "e8c038398fde3723d656326af20903b83b226134",
+      "date": "2026-10-22T03:32:24Z",
+      "title": "Merge pull request #262 from Lutra23/feat/context-compaction-fidelity-audit"
+    },
+    {
+      "sha": "be26d9c44a437b616fd5bf1b15a0313465b902e1",
+      "date": "2026-10-22T05:38:09Z",
+      "title": "Merge branch 'main' into fix/projectforge-embedded-visibility-20261021"
+    },
+    {
+      "sha": "1b8689442974d55faa62d2ffa5871e21759b493e",
+      "date": "2026-10-22T10:59:03Z",
+      "title": "Merge pull request #257 from riirxx/fix/projectforge-embedded-visibility-20261021"
+    },
+    {
+      "sha": "7bf6b9c6775d37bfac3f8f864faef6f5a50969d3",
+      "date": "2026-10-22T11:30:37Z",
+      "title": "fix(tests): align assertions with modern runtime & fix node 24 reporter parsing (Fixes #259, Fixes #260)"
+    },
+    {
+      "sha": "e8f2ed4f5f31979bfa130e3d8013085e95508ec3",
+      "date": "2026-10-22T11:31:42Z",
+      "title": "Merge pull request #263 from infinite-vector/fix/test-suite-assertions-and-node24"
+    },
+    {
+      "sha": "8ef1f6db937711d570a5da45b87cf803471e7d1a",
+      "date": "2026-10-22T15:31:47Z",
+      "title": "优化心流锁默认说明易用性"
+    },
+    {
+      "sha": "98b8faeed0844adf5e58d4651fe3c9ebefaa9458",
+      "date": "2026-10-23T10:10:48Z",
+      "title": "test: 提升测试套件鲁棒性并修复 ESM eval、规则解耦、死引用及路径归一化 (Fixes #264, Fixes #265, Fixes #266, Fixes #267)"
+    },
+    {
+      "sha": "c1d721f27cf7b59e9cf1f861d9210005bb3aaefb",
+      "date": "2026-10-23T10:19:29Z",
+      "title": "Merge pull request #268 from infinite-vector/fix/test-suite-resilience-and-guards"
+    },
+    {
+      "sha": "35cb289f3b4ad9e91592acfa8c20e87a5cac15a9",
+      "date": "2026-10-23T11:45:24Z",
+      "title": "fix一个缓存丢失问题"
+    },
+    {
+      "sha": "020cb539ad848290b784653e0f9067f6f7aa430f",
+      "date": "2026-10-23T11:45:26Z",
+      "title": "Merge branch 'main' of https://github.com/lioensky/VCPChat"
+    },
+    {
+      "sha": "6e3b79a24b2046ee032e1b5493c10a204c79293f",
+      "date": "2026-10-23T11:59:08Z",
+      "title": "Appearance Studio: side pane tab, two presets, messenger bubbles, group avatar collage"
+    },
+    {
+      "sha": "34847ba5ec0843bd75ccd17a08b6e20b143ef5c5",
+      "date": "2026-10-23T12:25:15Z",
+      "title": "Merge pull request #270 from RoxyAsahi/feat/appearance-studio-port-20261023"
+    },
+    {
+      "sha": "fa7db8cbdad399a853c9537f960af57fb3a09672",
+      "date": "2026-10-23T12:27:09Z",
+      "title": "修复就绪探针在窄终端下因 ConPTY 折行插入 CRLF 而永不命中"
+    },
+    {
+      "sha": "2a44910ed87dfc96055acaebfeff0d3235fcc5b3",
+      "date": "2026-10-23T12:33:01Z",
+      "title": "fix"
+    },
+    {
+      "sha": "d068f8d3317244f308dec56cd6f58dac38f8b31c",
+      "date": "2026-10-23T12:34:51Z",
+      "title": "Merge pull request #271 from Wooden-Gear/feat"
+    },
+    {
+      "sha": "cc5b54c4bbd2edb1938b076b53d85ca9c8b2dea7",
+      "date": "2026-10-23T12:50:32Z",
+      "title": "Capsule title: restyle, side pane glide, dark mode; keep composer backdrop in sync on theme switch"
+    },
+    {
+      "sha": "8cf3e908d9c5334be186c22e788d034e214ac4cb",
+      "date": "2026-10-23T13:00:05Z",
+      "title": "side-pane-appearance-provider test: the launcher entry was removed from the tab type, assert the opener routing instead"
+    },
+    {
+      "sha": "7e8e47cc3d246d1b06ae4e2b49947d497d00a02f",
+      "date": "2026-10-23T13:36:16Z",
+      "title": "Merge pull request #272 from RoxyAsahi/feat/capsule-motion-composer-sync-20261023"
+    },
+    {
+      "sha": "14d6bec64969b0248cf59c53897dfcc53a6cc274",
+      "date": "2026-10-23T16:25:04Z",
+      "title": "test(tavern): 将出厂基础能力断言改为对称白名单探测 (Fixes #274)"
+    },
+    {
+      "sha": "040593e0deb297e81330153692a32d257eaf2491",
+      "date": "2026-10-24T02:42:24Z",
+      "title": "fix(settings): 补齐类型化设置自动保存向主窗口内存状态源的热重载同步"
+    },
+    {
+      "sha": "5e570a489b2c0b287c2b00c8b54eaf52eccd2ea3",
+      "date": "2026-10-24T02:44:25Z",
+      "title": "Merge pull request #276 from infinite-vector/fix/typed-settings-autosave-hot-reload"
+    },
+    {
+      "sha": "f6df1f175a09cec467e7d62d22f3173fb798db83",
+      "date": "2026-10-24T03:07:55Z",
+      "title": "fix(ui-system): 增加输入框背景过渡动画帧存在性防御并在单测开启视觉模拟 (Fixes #275)"
+    },
+    {
+      "sha": "c2481a9783820380f3f1b82719ba74fc95ac7157",
+      "date": "2026-10-24T06:36:47Z",
+      "title": "pele换芯mermaid"
+    },
+    {
+      "sha": "2ba1af33a6d7f13a6d0597f9e1493521b51aecf8",
+      "date": "2026-10-24T07:59:38Z",
+      "title": "新增v图表v2"
+    }
+  ],
+  "changedFiles": [
+    {
+      "path": "Chartmodules/README.md",
+      "status": "modified",
+      "additions": 35,
+      "deletions": 1
+    },
+    {
+      "path": "Chartmodules/chart-sandbox.js",
+      "status": "modified",
+      "additions": 109,
+      "deletions": 18
+    },
+    {
+      "path": "Flowlockmodules/flowlock-integration.js",
+      "status": "modified",
+      "additions": 19,
+      "deletions": 2
+    },
+    {
+      "path": "Flowlockmodules/flowlock.js",
+      "status": "modified",
+      "additions": 57,
+      "deletions": 3
+    },
+    {
+      "path": "Groupmodules/groupchat.js",
+      "status": "modified",
+      "additions": 0,
+      "deletions": 1
+    },
+    {
+      "path": "Musicmodules/music-effects.js",
+      "status": "modified",
+      "additions": 27,
+      "deletions": 14
+    },
+    {
+      "path": "Notemodules/notes.css",
+      "status": "modified",
+      "additions": 14,
+      "deletions": 4
+    },
+    {
+      "path": "Notemodules/notes.html",
+      "status": "modified",
+      "additions": 2,
+      "deletions": 2
+    },
+    {
+      "path": "Notemodules/notes.js",
+      "status": "modified",
+      "additions": 26,
+      "deletions": 52
+    },
+    {
+      "path": "ProjectForgemodules/projectforge.js",
+      "status": "modified",
+      "additions": 9,
+      "deletions": 4
+    },
+    {
+      "path": "ScriptoriumModules/scriptorium-render-primitives.js",
+      "status": "modified",
+      "additions": 13,
+      "deletions": 16
+    },
+    {
+      "path": "ScriptoriumModules/scriptorium.html",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1
+    },
+    {
+      "path": "VCPDistributedServer/Plugin/ChartController/plugin-manifest.json",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1
+    },
+    {
+      "path": "VCPDistributedServer/Plugin/PowerShellExecutor/PowerShellExecutor.js",
+      "status": "modified",
+      "additions": 28,
+      "deletions": 5
+    },
+    {
+      "path": "VCPDistributedServer/Plugin/ProjectForge/ProjectForgeService.js",
+      "status": "modified",
+      "additions": 3,
+      "deletions": 1
+    },
+    {
+      "path": "VCPDistributedServer/Plugin/ProjectForge/bin/win32-x64/projectforge_indexer.exe",
+      "status": "modified",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "VCPDistributedServer/Plugin/VCPMobileSync/sync/entity.js",
+      "status": "modified",
+      "additions": 10,
+      "deletions": 3
+    },
+    {
+      "path": "VCPHumanToolBox/renderer_modules/config.js",
+      "status": "modified",
+      "additions": 5,
+      "deletions": 4
+    },
+    {
+      "path": "audio_engine/audio_server.exe",
+      "status": "modified",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "docs/contracts/chat-contracts.json",
+      "status": "modified",
+      "additions": 6,
+      "deletions": 6
+    },
+    {
+      "path": "docs/contracts/generated/chat-event-graph.json",
+      "status": "modified",
+      "additions": 1933,
+      "deletions": 1317
+    },
+    {
+      "path": "main.html",
+      "status": "modified",
+      "additions": 3,
+      "deletions": 2
+    },
+    {
+      "path": "main.js",
+      "status": "modified",
+      "additions": 126,
+      "deletions": 23
+    },
+    {
+      "path": "modules/chat/chartEmbedTransform.js",
+      "status": "added",
+      "additions": 30,
+      "deletions": 0
+    },
+    {
+      "path": "modules/chat/contextCompactionContinuity.js",
+      "status": "added",
+      "additions": 101,
+      "deletions": 0
+    },
+    {
+      "path": "modules/chat/contextCompactionFidelity.js",
+      "status": "added",
+      "additions": 133,
+      "deletions": 0
+    },
+    {
+      "path": "modules/chat/contextCompactionPrompts.js",
+      "status": "added",
+      "additions": 154,
+      "deletions": 0
+    },
+    {
+      "path": "modules/chat/contextCompactionService.js",
+      "status": "added",
+      "additions": 180,
+      "deletions": 0
+    },
+    {
+      "path": "modules/chat/contextCompactionState.js",
+      "status": "added",
+      "additions": 234,
+      "deletions": 0
+    },
+    {
+      "path": "modules/chat/singleChatRequestOrchestrator.js",
+      "status": "modified",
+      "additions": 9,
+      "deletions": 5
+    },
+    {
+      "path": "modules/chatManager.js",
+      "status": "modified",
+      "additions": 220,
+      "deletions": 5
+    },
+    {
+      "path": "modules/diagnosticsSnapshot.js",
+      "status": "added",
+      "additions": 173,
+      "deletions": 0
+    },
+    {
+      "path": "modules/event-listeners.js",
+      "status": "modified",
+      "additions": 26,
+      "deletions": 4
+    },
+    {
+      "path": "modules/ipc/chartHandlers.js",
+      "status": "modified",
+      "additions": 81,
+      "deletions": 0
+    },
+    {
+      "path": "modules/ipc/chatHandlers.js",
+      "status": "modified",
+      "additions": 26,
+      "deletions": 10
+    },
+    {
+      "path": "modules/ipc/terminalHandlers.js",
+      "status": "modified",
+      "additions": 10,
+      "deletions": 1
+    },
+    {
+      "path": "modules/itemListManager.js",
+      "status": "modified",
+      "additions": 49,
+      "deletions": 2
+    },
+    {
+      "path": "modules/launchMarks.js",
+      "status": "added",
+      "additions": 55,
+      "deletions": 0
+    },
+    {
+      "path": "modules/messageRenderer.js",
+      "status": "modified",
+      "additions": 76,
+      "deletions": 16
+    },
+    {
+      "path": "modules/notificationRenderer.js",
+      "status": "modified",
+      "additions": 41,
+      "deletions": 0
+    },
+    {
+      "path": "modules/renderer/chartEmbedHost.js",
+      "status": "added",
+      "additions": 373,
+      "deletions": 0
+    },
+    {
+      "path": "modules/renderer/chat-header-style.js",
+      "status": "modified",
+      "additions": 45,
+      "deletions": 0
+    },
+    {
+      "path": "modules/renderer/composerModelSelect.js",
+      "status": "modified",
+      "additions": 48,
+      "deletions": 27
+    },
+    {
+      "path": "modules/renderer/contentProcessor.js",
+      "status": "modified",
+      "additions": 3,
+      "deletions": 2
+    },
+    {
+      "path": "modules/renderer/mainChatSendOwner.js",
+      "status": "modified",
+      "additions": 22,
+      "deletions": 0
+    },
+    {
+      "path": "modules/renderer/mainChatSettingsOwner.js",
+      "status": "modified",
+      "additions": 14,
+      "deletions": 0
+    },
+    {
+      "path": "modules/renderer/mainChatStreamConsumer.js",
+      "status": "modified",
+      "additions": 15,
+      "deletions": 1
+    },
+    {
+      "path": "modules/renderer/mainChatSurfaceAdapter.js",
+      "status": "modified",
+      "additions": 6,
+      "deletions": 0
+    },
+    {
+      "path": "modules/renderer/messageContextMenu.js",
+      "status": "modified",
+      "additions": 50,
+      "deletions": 1
+    },
+    {
+      "path": "modules/renderer/sidePaneWiring.js",
+      "status": "modified",
+      "additions": 4,
+      "deletions": 1
+    },
+    {
+      "path": "modules/renderer/streamManager.js",
+      "status": "modified",
+      "additions": 65,
+      "deletions": 12
+    },
+    {
+      "path": "modules/renderer/toolRequestScanner.js",
+      "status": "modified",
+      "additions": 4,
+      "deletions": 3
+    },
+    {
+      "path": "modules/searchManager.js",
+      "status": "modified",
+      "additions": 3,
+      "deletions": 5
+    },
+    {
+      "path": "modules/services/chartEmbedProtocol.js",
+      "status": "added",
+      "additions": 52,
+      "deletions": 0
+    },
+    {
+      "path": "modules/services/chatDataService/bin/win32-x64/vcp_chat_data_service.exe",
+      "status": "modified",
+      "additions": 0,
+      "deletions": 0
+    },
+    {
+      "path": "modules/services/embeddedAppSessionManager.js",
+      "status": "modified",
+      "additions": 14,
+      "deletions": 5
+    },
+    {
+      "path": "modules/settings/schema/advanced-features.js",
+      "status": "modified",
+      "additions": 34,
+      "deletions": 1
+    },
+    {
+      "path": "modules/settings/schema/appearance-settings.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 0
+    },
+    {
+      "path": "modules/settings/schema/quick-actions.js",
+      "status": "modified",
+      "additions": 6,
+      "deletions": 6
+    },
+    {
+      "path": "modules/stabilityLog.js",
+      "status": "added",
+      "additions": 227,
+      "deletions": 0
+    },
+    {
+      "path": "modules/text-viewer.html",
+      "status": "modified",
+      "additions": 21,
+      "deletions": 5
+    },
+    {
+      "path": "modules/text-viewer.js",
+      "status": "modified",
+      "additions": 31,
+      "deletions": 25
+    },
+    {
+      "path": "modules/ui-system/appearance-engine.js",
+      "status": "modified",
+      "additions": 4,
+      "deletions": 0
+    },
+    {
+      "path": "modules/ui-system/appearance-studio.js",
+      "status": "modified",
+      "additions": 521,
+      "deletions": 740
+    },
+    {
+      "path": "modules/ui-system/chat-composer-inset.js",
+      "status": "modified",
+      "additions": 37,
+      "deletions": 1
+    },
+    {
+      "path": "modules/ui-system/lifecycle-inspector.js",
+      "status": "modified",
+      "additions": 11,
+      "deletions": 1
+    },
+    {
+      "path": "modules/ui-system/next-shell/next-shell-controller.js",
+      "status": "modified",
+      "additions": 3,
+      "deletions": 0
+    },
+    {
+      "path": "modules/ui-system/next-shell/overlay-coordinator.js",
+      "status": "modified",
+      "additions": 30,
+      "deletions": 1
+    },
+    {
+      "path": "modules/ui-system/side-pane/appearanceSideProvider.js",
+      "status": "added",
+      "additions": 52,
+      "deletions": 0
+    },
+    {
+      "path": "modules/ui-system/side-pane/planDetailSideProvider.js",
+      "status": "modified",
+      "additions": 22,
+      "deletions": 5
+    },
+    {
+      "path": "modules/ui-system/side-pane/tab-types/appearance.js",
+      "status": "added",
+      "additions": 21,
+      "deletions": 0
+    },
+    {
+      "path": "modules/ui-system/typed-field-owners.js",
+      "status": "modified",
+      "additions": 33,
+      "deletions": 1
+    },
+    {
+      "path": "modules/utils/appSettingsManager.js",
+      "status": "modified",
+      "additions": 7,
+      "deletions": 0
+    },
+    {
+      "path": "modules/voice/chatVoiceComposer.js",
+      "status": "modified",
+      "additions": 12,
+      "deletions": 0
+    },
+    {
+      "path": "package.json",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1
+    },
+    {
+      "path": "preloads/api/chartEmbed.js",
+      "status": "added",
+      "additions": 16,
+      "deletions": 0
+    },
+    {
+      "path": "preloads/api/embeddedApps.js",
+      "status": "modified",
+      "additions": 6,
+      "deletions": 2
+    },
+    {
+      "path": "renderer.js",
+      "status": "modified",
+      "additions": 18,
+      "deletions": 0
+    },
+    {
+      "path": "rust_audio_engine/src/processor/dynamic_loudness/tests.rs",
+      "status": "modified",
+      "additions": 7,
+      "deletions": 5
+    },
+    {
+      "path": "rust_audio_engine/src/server.rs",
+      "status": "modified",
+      "additions": 47,
+      "deletions": 1
+    },
+    {
+      "path": "rust_audio_engine/src/settings.rs",
+      "status": "modified",
+      "additions": 58,
+      "deletions": 7
+    },
+    {
+      "path": "rust_chat_data_service/src/ingest.rs",
+      "status": "modified",
+      "additions": 10,
+      "deletions": 0
+    },
+    {
+      "path": "rust_projectforge_indexer/examples/geo_probe.rs",
+      "status": "modified",
+      "additions": 5,
+      "deletions": 1
+    },
+    {
+      "path": "rust_projectforge_indexer/src/component.rs",
+      "status": "added",
+      "additions": 461,
+      "deletions": 0
+    },
+    {
+      "path": "rust_projectforge_indexer/src/geo.rs",
+      "status": "modified",
+      "additions": 135,
+      "deletions": 4
+    },
+    {
+      "path": "rust_projectforge_indexer/src/main.rs",
+      "status": "modified",
+      "additions": 2,
+      "deletions": 1
+    },
+    {
+      "path": "rust_projectforge_indexer/tests/fixtures/broken_syntax.rs",
+      "status": "renamed",
+      "additions": 1,
+      "deletions": 1
+    },
+    {
+      "path": "scripts/PROJECT_STRUCTURE.md",
+      "status": "modified",
+      "additions": 100,
+      "deletions": 16
+    },
+    {
+      "path": "scripts/check-ui-system.mjs",
+      "status": "modified",
+      "additions": 3,
+      "deletions": 4
+    },
+    {
+      "path": "scripts/next-delta-shared-baseline.json",
+      "status": "modified",
+      "additions": 10,
+      "deletions": 10
+    },
+    {
+      "path": "scripts/run-all-tests.mjs",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1
+    },
+    {
+      "path": "scripts/test-appearance-engine.mjs",
+      "status": "modified",
+      "additions": 4,
+      "deletions": 0
+    },
+    {
+      "path": "scripts/test-appearance-studio.mjs",
+      "status": "modified",
+      "additions": 385,
+      "deletions": 299
+    },
+    {
+      "path": "scripts/test-electron-lifecycle-stress.mjs",
+      "status": "modified",
+      "additions": 16,
+      "deletions": 23
+    },
+    {
+      "path": "scripts/test-ui-motion-contract.mjs",
+      "status": "modified",
+      "additions": 0,
+      "deletions": 1
+    },
+    {
+      "path": "scripts/test-ui-system.mjs",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1
+    },
+    {
+      "path": "styles/chat-messenger.css",
+      "status": "modified",
+      "additions": 19,
+      "deletions": 24
+    },
+    {
+      "path": "styles/components.css",
+      "status": "modified",
+      "additions": 68,
+      "deletions": 0
+    },
+    {
+      "path": "styles/messageRenderer.css",
+      "status": "modified",
+      "additions": 415,
+      "deletions": 642
+    },
+    {
+      "path": "styles/notifications.css",
+      "status": "modified",
+      "additions": 48,
+      "deletions": 0
+    },
+    {
+      "path": "styles/ui-next.css",
+      "status": "modified",
+      "additions": 18,
+      "deletions": 18
+    },
+    {
+      "path": "styles/ui-system/appearance-settings.css",
+      "status": "added",
+      "additions": 214,
+      "deletions": 0
+    },
+    {
+      "path": "styles/ui-system/appearance-studio.css",
+      "status": "removed",
+      "additions": 0,
+      "deletions": 1318
+    },
+    {
+      "path": "styles/ui-system/index.css",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1
+    },
+    {
+      "path": "styles/ui-system/music-capsule.css",
+      "status": "modified",
+      "additions": 17,
+      "deletions": 16
+    },
+    {
+      "path": "styles/ui-system/side-pane-appearance.css",
+      "status": "added",
+      "additions": 391,
+      "deletions": 0
+    },
+    {
+      "path": "styles/ui-system/side-pane-shell.css",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1
+    },
+    {
+      "path": "tests/chart-embed-electron.cjs",
+      "status": "added",
+      "additions": 147,
+      "deletions": 0
+    },
+    {
+      "path": "tests/chart-embed-handlers.test.cjs",
+      "status": "added",
+      "additions": 82,
+      "deletions": 0
+    },
+    {
+      "path": "tests/chart-embed.test.mjs",
+      "status": "added",
+      "additions": 113,
+      "deletions": 0
+    },
+    {
+      "path": "tests/chat-composer-inset.test.mjs",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1
+    },
+    {
+      "path": "tests/chat-manager-selection-race.test.js",
+      "status": "modified",
+      "additions": 153,
+      "deletions": 1
+    },
+    {
+      "path": "tests/chat-tool-material-smoke.cjs",
+      "status": "added",
+      "additions": 80,
+      "deletions": 0
+    },
+    {
+      "path": "tests/composer-model-select.test.mjs",
+      "status": "modified",
+      "additions": 97,
+      "deletions": 0
+    },
+    {
+      "path": "tests/context-compaction-continuity.test.mjs",
+      "status": "added",
+      "additions": 146,
+      "deletions": 0
+    },
+    {
+      "path": "tests/context-compaction-fidelity.test.mjs",
+      "status": "added",
+      "additions": 102,
+      "deletions": 0
+    },
+    {
+      "path": "tests/context-compaction-followup.test.mjs",
+      "status": "added",
+      "additions": 115,
+      "deletions": 0
+    },
+    {
+      "path": "tests/context-compaction-service.test.mjs",
+      "status": "added",
+      "additions": 241,
+      "deletions": 0
+    },
+    {
+      "path": "tests/context-compaction-state.test.mjs",
+      "status": "added",
+      "additions": 124,
+      "deletions": 0
+    },
+    {
+      "path": "tests/context-compaction-stream.test.mjs",
+      "status": "added",
+      "additions": 103,
+      "deletions": 0
+    },
+    {
+      "path": "tests/diagnostics-snapshot.test.js",
+      "status": "added",
+      "additions": 103,
+      "deletions": 0
+    },
+    {
+      "path": "tests/embedded-app-security.test.js",
+      "status": "modified",
+      "additions": 22,
+      "deletions": 3
+    },
+    {
+      "path": "tests/flowlock-timestamp-bindings.test.js",
+      "status": "modified",
+      "additions": 15,
+      "deletions": 2
+    },
+    {
+      "path": "tests/flowlock-upstream-error.test.mjs",
+      "status": "modified",
+      "additions": 77,
+      "deletions": 0
+    },
+    {
+      "path": "tests/git-mutation-outcome.test.js",
+      "status": "modified",
+      "additions": 9,
+      "deletions": 2
+    },
+    {
+      "path": "tests/jev-tool-use-rendering.test.js",
+      "status": "modified",
+      "additions": 1,
+      "deletions": 1
+    },
+    {
+      "path": "tests/launch-marks.test.js",
+      "status": "added",
+      "additions": 78,
+      "deletions": 0
+    },
+    {
+      "path": "tests/main-chat-response-body.test.mjs",
+      "status": "modified",
+      "additions": 23,
+      "deletions": 1
+    },
+    {
+      "path": "tests/main-chat-send-owner.test.mjs",
+      "status": "modified",
+      "additions": 29,
+      "deletions": 0
+    },
+    {
+      "path": "tests/main-window-background-throttling.test.mjs",
+      "status": "added",
+      "additions": 41,
+      "deletions": 0
+    },
+    {
+      "path": "tests/message-edit-watcher-failure.test.js",
+      "status": "modified",
+      "additions": 114,
+      "deletions": 81
+    },
+    {
+      "path": "tests/message-regeneration-stream-animation.test.js",
+      "status": "modified",
+      "additions": 2,
+      "deletions": 0
+    },
+    {
+      "path": "tests/message-renderer-tool-cards.test.mjs",
+      "status": "modified",
+      "additions": 31,
+      "deletions": 0
+    },
+    {
+      "path": "tests/mobile-sync-sqlite-delete.test.js",
+      "status": "modified",
+      "additions": 90,
+      "deletions": 0
+    },
+    {
+      "path": "tests/music-eq-settings.test.cjs",
+      "status": "added",
+      "additions": 135,
+      "deletions": 0
+    },
+    {
+      "path": "tests/notification-ps-preview.test.js",
+      "status": "added",
+      "additions": 78,
+      "deletions": 0
+    },
+    {
+      "path": "tests/overlay-coordinator.test.js",
+      "status": "modified",
+      "additions": 63,
+      "deletions": 0
+    },
+    {
+      "path": "tests/project-forge.test.js",
+      "status": "modified",
+      "additions": 22,
+      "deletions": 0
+    },
+    {
+      "path": "tests/search-manager-modal.test.mjs",
+      "status": "added",
+      "additions": 140,
+      "deletions": 0
+    },
+    {
+      "path": "tests/settings-autosave-electron.test.mjs",
+      "status": "modified",
+      "additions": 33,
+      "deletions": 0
+    },
+    {
+      "path": "tests/settings-schema-render.test.mjs",
+      "status": "modified",
+      "additions": 6,
+      "deletions": 4
+    },
+    {
+      "path": "tests/settings-value-golden.test.mjs",
+      "status": "modified",
+      "additions": 23,
+      "deletions": 2
+    },
+    {
+      "path": "tests/side-chat-deleted-child.test.mjs",
+      "status": "modified",
+      "additions": 2,
+      "deletions": 2
+    },
+    {
+      "path": "tests/side-pane-appearance-provider.test.mjs",
+      "status": "added",
+      "additions": 96,
+      "deletions": 0
+    },
+    {
+      "path": "tests/side-pane-plan-detail.test.mjs",
+      "status": "modified",
+      "additions": 128,
+      "deletions": 0
+    },
+    {
+      "path": "tests/single-chat-request-orchestrator.test.js",
+      "status": "modified",
+      "additions": 32,
+      "deletions": 0
+    },
+    {
+      "path": "tests/stability-log.test.js",
+      "status": "added",
+      "additions": 239,
+      "deletions": 0
+    },
+    {
+      "path": "tests/stream-hidden-document-frames.test.mjs",
+      "status": "added",
+      "additions": 173,
+      "deletions": 0
+    },
+    {
+      "path": "tests/tavern-rules-engine.test.js",
+      "status": "modified",
+      "additions": 21,
+      "deletions": 9
+    },
+    {
+      "path": "tests/temp_chart_embed_probe.cjs",
+      "status": "added",
+      "additions": 114,
+      "deletions": 0
+    },
+    {
+      "path": "tests/terminal-command-run-watch.test.js",
+      "status": "modified",
+      "additions": 7,
+      "deletions": 2
+    },
+    {
+      "path": "vendor/pele.global.js",
+      "status": "added",
+      "additions": 147,
+      "deletions": 0
+    }
+  ],
+  "compareUrl": "https://github.com/lioensky/VCPChat/compare/8f1562ea8fb851d0e370449a66ba24700d93faf9...2ba1af33a6d7f13a6d0597f9e1493521b51aecf8"
+}
