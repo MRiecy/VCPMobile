@@ -17,14 +17,11 @@ import { emitTauriEvent, invokeMock, listenMock, mockInvoke } from '../../mocks/
 const context = vi.hoisted(() => ({
   openStyleGuidance: vi.fn(),
   voice: {} as {
-    active: boolean; microphoneState: string; playbackActive: boolean; probeActive: boolean; probePending: boolean;
-    speechActive: boolean; aecState: string | null; route: string; probeError: string;
-    setProbe: ReturnType<typeof vi.fn>;
+    active: boolean; playbackActive: boolean;
   },
 }));
 vi.mock('../../../core/stores/notification', () => ({ useNotificationStore: () => ({ addNotification: vi.fn() }) }));
 vi.mock('../../../features/chat/voice/voiceCallStore', () => ({ useVoiceCallStore: () => context.voice }));
-vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn().mockResolvedValue(undefined) }));
 
 function snapshot(): AppSettings {
   return makeSettings({ 'identity.userName': 'user', 'server.url': 'https://chat.example', 'server.apiKey': 'chat-key' });
@@ -55,9 +52,7 @@ beforeEach(() => {
   context.openStyleGuidance.mockReset();
   vi.spyOn(useOverlayStore(), 'openVoiceStyleGuidance').mockImplementation(context.openStyleGuidance);
   context.voice = reactive({
-    active: true, microphoneState: 'on', playbackActive: false, probeActive: false, probePending: false,
-    aecState: 'enabled', speechActive: false, route: 'speaker', probeError: '',
-    setProbe: vi.fn().mockResolvedValue(true),
+    active: true, playbackActive: false,
   });
   mockInvoke('read_settings', () => makeConfigSnapshot(database, String(revision)));
   mockInvoke('update_settings', args => {
@@ -153,65 +148,6 @@ async function confirmPrompt(prompt: DOMWrapper<Element>) {
   await prompt.findAll('button').find(button => button.text() === '确认')!.trigger('click');
   await flushPromises();
 }
-
-describe('local voice diagnostics', () => {
-  it('requires active capture before starting a diagnostic sample', async () => {
-    context.voice.microphoneState = 'off';
-    const wrapper = await renderPage();
-    expect(disclosure(wrapper, '本地诊断').attributes('aria-expanded')).toBe('false');
-    expect(wrapper.find('.voice-probe-button').exists()).toBe(false);
-    await disclosure(wrapper, '本地诊断').trigger('click');
-    const button = wrapper.get('.voice-probe-button');
-    expect(button.attributes('disabled')).toBeDefined();
-    await button.trigger('click');
-    expect(context.voice.setProbe).not.toHaveBeenCalled();
-    expect(wrapper.text()).toContain('请先进入语音模式并开启麦克风');
-  });
-
-  it('allows stopping playback setup and stops the sample when its settings page becomes inactive', async () => {
-    const wrapper = await renderPage();
-    await disclosure(wrapper, '本地诊断').trigger('click');
-    const button = wrapper.get('.voice-probe-button');
-    await button.trigger('click');
-    expect(context.voice.setProbe).toHaveBeenLastCalledWith(true);
-    context.voice.probePending = true;
-    await wrapper.vm.$nextTick();
-    expect(button.text()).toBe('停止样本');
-    await button.trigger('click');
-    expect(context.voice.setProbe).toHaveBeenLastCalledWith(false);
-    context.voice.setProbe.mockClear();
-    await wrapper.setProps({ active: false });
-    expect(context.voice.setProbe).toHaveBeenCalledExactlyOnceWith(false);
-    expect(button.attributes('disabled')).toBeDefined();
-    wrappers.splice(wrappers.indexOf(wrapper), 1);
-    wrapper.unmount();
-    expect(context.voice.setProbe).toHaveBeenCalledOnce();
-  });
-
-  it('stops a sample when the active page is unmounted', async () => {
-    const wrapper = await renderPage();
-    wrappers.splice(wrappers.indexOf(wrapper), 1);
-    wrapper.unmount();
-    expect(context.voice.setProbe).toHaveBeenCalledExactlyOnceWith(false);
-  });
-
-  it('distinguishes TTS playback from the local diagnostic sample', async () => {
-    context.voice.playbackActive = true;
-    const wrapper = await renderPage();
-    await disclosure(wrapper, '本地诊断').trigger('click');
-    const button = wrapper.get('.voice-probe-button');
-    expect(button.text()).toBe('播放本地样本');
-    await button.trigger('click');
-    expect(context.voice.setProbe).toHaveBeenLastCalledWith(true);
-    context.voice.probeActive = true;
-    await wrapper.vm.$nextTick();
-    expect(button.text()).toBe('停止样本');
-    await disclosure(wrapper, '本地诊断').trigger('click');
-    expect(wrapper.find('.voice-probe-button').exists()).toBe(false);
-    expect(disclosure(wrapper, '本地诊断').text()).toContain('本地样本播放中');
-    expect(context.voice.setProbe).toHaveBeenCalledExactlyOnceWith(true);
-  });
-});
 
 describe('语音设置使用正式设置快照', () => {
   it('展开高级参数后修改预设时长，在返回时提交草稿', async () => {
@@ -354,7 +290,6 @@ describe('语音设置使用正式设置快照', () => {
     expect(configRequestChanges(updates()[1]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.tts.stream': false });
     expect(database.voice.asr.stream).toBe(false);
     expect(wrapper.text()).toContain('整段上传');
-    expect(wrapper.text()).toContain('重新开启麦克风');
   });
 
   it('失活只丢弃未提交草稿，不暗中保存API Key与输入编码', async () => {
@@ -369,7 +304,6 @@ describe('语音设置使用正式设置快照', () => {
     expect(updates()).toHaveLength(0);
     expect(database.voice.connection.apiKey).toBe('');
     expect(database.voice.asr.inputEncoding).toBe('wav');
-    expect(context.voice.setProbe).toHaveBeenCalledWith(false);
     await wrapper.setProps({ active: true });
     await flushPromises();
     staleAction.handler();

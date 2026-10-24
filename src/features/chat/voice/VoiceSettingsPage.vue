@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, useId, watch } from 'vue';
-import { ListChecks, Play, Square } from '@lucide/vue';
-import { openUrl } from '@tauri-apps/plugin-opener';
+import { ListChecks } from '@lucide/vue';
 import { useOverlayStore } from '../../../core/stores/overlay';
 import { useSettingsStore } from '../../../core/stores/settings';
 import type { ContextMenuConfig, OverlayActionItem, PromptConfig } from '../../../core/types/overlay';
@@ -14,7 +13,6 @@ import SettingsSwitch from '../../../components/settings/SettingsSwitch.vue';
 import type { SettingsPageProps } from '../../settings/contracts';
 import { VOICE_FIELDS } from '../../settings/editing/fieldSets';
 import { useSettingsPageSession } from '../../settings/editing/useSettingsPageSession';
-import { useVoiceCallStore } from './voiceCallStore';
 import { SETTINGS_DEFAULTS, MIMO_TTS_MODES, MIMO_VOICES, settingDescriptor, settingOptions } from './settings';
 import type { VoiceConfig } from '../../../core/config/generated/config';
 import { applySettingsFields, type SettingsFieldValues } from '../../../core/config/fields';
@@ -25,7 +23,6 @@ import VoiceTtsPreview from './VoiceTtsPreview.vue';
 const props = defineProps<SettingsPageProps>();
 const providerTitleId = useId();
 const overlayStore = useOverlayStore();
-const voiceCall = useVoiceCallStore();
 const settingsStore = useSettingsStore();
 const { session, loading, error, reload } = useSettingsPageSession(VOICE_FIELDS, () => props.active);
 const { draft, saving, leaving } = session;
@@ -141,24 +138,9 @@ watch(disabled, value => {
     closeDurationPrompt();
   }
 }, { flush: 'sync' });
-const canProbe = computed(() => props.active && voiceCall.active && voiceCall.microphoneState === 'on');
-const probeBusy = computed(() => voiceCall.probeActive || voiceCall.probePending);
-const aecLabel = computed(() => {
-  switch (voiceCall.aecState) {
-    case 'enabled': return '系统回声消除已启用（效果待验证）';
-    case 'unavailable': return '当前设备或音频路线未提供系统回声消除';
-    case 'failed': return '系统回声消除启用失败';
-    default: return '开启麦克风后显示回声消除状态';
-  }
-});
-
-watch(() => props.active, (active, wasActive) => {
-  if (!active && wasActive) void voiceCall.setProbe(false);
-}, { flush: 'sync' });
 onBeforeUnmount(() => {
   closeSelection();
   closeDurationPrompt();
-  if (props.active) void voiceCall.setProbe(false);
 });
 
 const openStyleGuidance = async () => {
@@ -181,10 +163,6 @@ const beforeLeave = async () => {
   cloneSample.value?.cancelPending();
   await preview.value?.stop();
   return session.prepareLeave();
-};
-
-const openSource = (url: string) => {
-  if (props.active) void openUrl(url).catch(error => console.warn('[VoiceAudio] Cannot open attribution:', error));
 };
 
 defineExpose({ beforeLeave });
@@ -280,34 +258,6 @@ defineExpose({ beforeLeave });
           <p class="m-0 text-xs leading-relaxed text-[var(--secondary-text)]">返回时自动保存，下次通话生效。</p>
         </SettingsDisclosure>
 
-        <SettingsDisclosure title="本地诊断" :disabled="disabled"
-          :description="voiceCall.probeError || (probeBusy ? '本地样本播放中' : '回声消除与打断检查')">
-          <div class="flex flex-col gap-3">
-            <p class="m-0 text-xs leading-relaxed text-[var(--secondary-text)]">{{ aecLabel }}</p>
-            <p class="m-0 text-sm leading-relaxed opacity-70">
-              播放本地数字语音；播放时开口可检查误触与打断。样本长约 6.5 秒，播放一次后停止，不经过网络。
-            </p>
-            <div v-if="canProbe" class="flex flex-col gap-1 text-xs" role="status" aria-live="polite">
-              <span>{{ voiceCall.speechActive ? '检测到说话' : '正在聆听' }}</span>
-              <span v-if="voiceCall.route" class="opacity-60">音频路线：{{ voiceCall.route }}</span>
-            </div>
-            <p v-else class="m-0 text-xs leading-relaxed opacity-60">请先进入语音模式并开启麦克风。</p>
-            <button type="button" class="voice-probe-button" :disabled="!canProbe"
-              @click="voiceCall.setProbe(!probeBusy)">
-              <Square v-if="probeBusy" :size="16" aria-hidden="true" />
-              <Play v-else :size="16" aria-hidden="true" />
-              {{ probeBusy ? '停止样本' : '播放本地样本' }}
-            </button>
-            <p v-if="voiceCall.probeError" class="m-0 text-xs leading-relaxed text-red-500" role="alert">{{ voiceCall.probeError }}</p>
-            <p class="m-0 text-xs leading-relaxed opacity-60">
-              样本来源：<a href="https://github.com/Jakobovski/free-spoken-digit-dataset" class="underline"
-                @click.prevent="openSource('https://github.com/Jakobovski/free-spoken-digit-dataset')">FSDD</a>
-              · <a href="https://creativecommons.org/licenses/by-sa/4.0/" class="underline"
-                @click.prevent="openSource('https://creativecommons.org/licenses/by-sa/4.0/')">CC BY-SA 4.0</a>
-            </p>
-          </div>
-        </SettingsDisclosure>
-
   </SettingsCanvas>
 </template>
 
@@ -319,25 +269,6 @@ defineExpose({ beforeLeave });
   grid-template-columns: minmax(0, 1fr);
   gap: 14px;
 }
-
-.voice-probe-button {
-  display: inline-flex;
-  align-items: center;
-  align-self: flex-start;
-  justify-content: center;
-  gap: 8px;
-  min-height: 44px;
-  padding: 8px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: transparent;
-  color: inherit;
-  font-size: 13px;
-  cursor: pointer;
-  touch-action: manipulation;
-}
-
-.voice-probe-button:disabled { opacity: 0.4; cursor: default; }
 
 @media (min-width: 768px) {
   .voice-connection-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }

@@ -260,7 +260,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preroll_respects_local_probe_floor_and_long_speech_has_contiguous_cuts() {
+    fn preroll_respects_capture_floor_and_long_speech_has_contiguous_cuts() {
         let mut window = CaptureWindow::new(3, 16000, 12000, 192 * 16);
         assert!(window.advance(415999, false).is_empty());
         let first = window.advance(416000, false)[0];

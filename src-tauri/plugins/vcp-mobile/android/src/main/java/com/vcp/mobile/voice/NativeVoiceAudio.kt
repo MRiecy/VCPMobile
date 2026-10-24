@@ -41,8 +41,6 @@ class VoiceCallArgs { var callId: String = "" }
 @InvokeArg
 class StopVoiceAudioArgs { var sessionId: String = "" }
 @InvokeArg
-class SetVoiceProbeArgs { var sessionId: String = ""; var enabled: Boolean = false; var probeRevision: Long = 0 }
-@InvokeArg
 class ExportVoiceSegmentArgs {
     var sessionId: String = ""; var audioEpoch: Long = 0; var startSample: Long = 0; var endSample: Long = 0
 }
@@ -64,8 +62,6 @@ internal class NativeVoiceAudio(
         fun resolve(value: JSObject): Boolean = settled.compareAndSet(false, true) && invoke.deliverResult(value)
         fun reject(reason: String) { if (settled.compareAndSet(false, true)) invoke.deliverError(reason) }
     }
-    private data class ProbeState(val revision: Long = 0, val playing: Boolean = false)
-    private data class OutputSnapshot(val probeRevision: Long, val playbackId: String?, val playing: Boolean)
     private data class SegmentPosition(val epoch: Long = 1, val sampleIndex: Long = 0)
     private class Session(val id: String, val callId: String, val invoke: Invoke) {
         val reply = Reply(invoke)
@@ -74,9 +70,6 @@ internal class NativeVoiceAudio(
         val eventBackpressure = AtomicBoolean(false)
         val epoch = AtomicLong(1)
         val route = AtomicReference("unknown")
-        val probeState = AtomicReference(ProbeState())
-        val probe = AtomicReference<VoiceProbePlayback?>(null)
-        val probeReply = AtomicReference<Reply?>(null)
         val segments = VoiceSegmentStore(1)
         val segmentReplies = ConcurrentHashMap.newKeySet<Reply>()
         val segmentsReleased = AtomicBoolean(false)
@@ -114,8 +107,6 @@ internal class NativeVoiceAudio(
     }
     private fun isCurrent(session: Session) = current.get() === session && !session.stopped.get() && !session.eventBackpressure.get()
     private fun validId(id: String) = id.matches(Regex("[A-Za-z0-9_-]{1,128}"))
-
-    fun isProbeBusy(): Boolean = current.get()?.probe?.get() != null
 
     fun beginVoiceCall(invoke: Invoke) = onMain {
         val args = try { invoke.parseArgs(VoiceCallArgs::class.java) }
@@ -183,49 +174,6 @@ internal class NativeVoiceAudio(
             if (session.sealed.get()) reply.resolve(segmentEnd(session))
             else { session.stopReplies.add(reply); finish(session, "stopped", "cancelled") }
         }
-    }
-
-    fun setVoiceProbe(invoke: Invoke) = onMain {
-        val args = try { invoke.parseArgs(SetVoiceProbeArgs::class.java) }
-        catch (error: Exception) { invoke.deliverError("invalid_voice_request:${error.message}"); return@onMain }
-        val session = current.get()?.takeIf { it.id == args.sessionId && !it.stopped.get() }
-        if (session == null) { invoke.deliverError("voice_session_inactive"); return@onMain }
-        if (args.probeRevision <= 0) { invoke.deliverError("invalid_probe_revision"); return@onMain }
-        val previousRevision = session.probeState.get().revision
-        if (args.probeRevision < previousRevision) { invoke.deliverError("cancelled:stale_probe_revision"); return@onMain }
-        if (args.probeRevision == previousRevision) { invoke.deliverResult(); return@onMain }
-        if (args.enabled && voiceOutput.isBusy()) { invoke.deliverError("voice_playback_busy"); return@onMain }
-        stopProbe(session)
-        session.probeState.set(ProbeState(args.probeRevision))
-        if (!args.enabled) {
-            invoke.deliverResult()
-            return@onMain
-        }
-        if (!session.started.get()) { invoke.deliverError("microphone_not_ready"); return@onMain }
-        val reply = Reply(invoke)
-        session.probeReply.set(reply)
-        lateinit var player: VoiceProbePlayback
-        player = VoiceProbePlayback(activity.assets, began = {
-            onMain {
-                if (isCurrent(session) && session.probe.get() === player && session.probeState.get().revision == args.probeRevision) {
-                    session.probeState.set(ProbeState(args.probeRevision, true))
-                    reply.resolve()
-                } else reply.reject("cancelled:voice_probe")
-            }
-        }, ended = { error ->
-            onMain {
-                if (session.probe.compareAndSet(player, null)) {
-                    session.probeState.updateAndGet { it.copy(playing = false) }
-                    session.probeReply.compareAndSet(reply, null)
-                    if (error != null) {
-                        reply.reject("voice_probe_failed:${error.message}")
-                        if (isCurrent(session)) finish(session, "error", "voice_probe_failed:${error.message}")
-                    } else reply.reject("cancelled:voice_probe")
-                }
-            }
-        })
-        session.probe.set(player)
-        player.start()
     }
 
     fun exportVoiceSegment(invoke: Invoke) = onMain {
@@ -386,7 +334,7 @@ internal class NativeVoiceAudio(
             var resampler = VoiceFrameResampler(input.sampleRate)
             pendingPcm = resampler
             sampleEpoch = epoch
-            var frameOutput = outputSnapshot(session)
+            var frameOutput = voiceOutput.snapshot()
             val meter = VoiceAudioMeter()
             val samples = ShortArray(maxOf(160, input.sampleRate / 100))
             var lastData = android.os.SystemClock.elapsedRealtime()
@@ -403,7 +351,7 @@ internal class NativeVoiceAudio(
                     input.startRecording()
                     lastData = android.os.SystemClock.elapsedRealtime()
                 }
-                val outputAtRead = outputSnapshot(session)
+                val outputAtRead = voiceOutput.snapshot()
                 val count = input.read(samples, 0, samples.size, AudioRecord.READ_NON_BLOCKING)
                 check(count >= 0) { "microphone_read_failed:$count" }
                 if (count == 0) {
@@ -418,7 +366,7 @@ internal class NativeVoiceAudio(
                     }
                 }
                 if (!resampler.hasPartialFrame) frameOutput = outputAtRead
-                else if (frameOutput.probeRevision != outputAtRead.probeRevision || frameOutput.playbackId != outputAtRead.playbackId || !outputAtRead.playing) {
+                else if (frameOutput.playbackId != outputAtRead.playbackId || !outputAtRead.playing) {
                     frameOutput = frameOutput.copy(playing = false)
                 }
                 resampler.push(samples, count) { frame ->
@@ -499,14 +447,14 @@ internal class NativeVoiceAudio(
         return state
     }
 
-    private fun publishFrame(session: Session, epoch: Long, sampleIndex: Long, probability: Double, reading: VoiceAudioMeter.Reading, aecState: String, output: OutputSnapshot) {
+    private fun publishFrame(session: Session, epoch: Long, sampleIndex: Long, probability: Double, reading: VoiceAudioMeter.Reading, aecState: String, output: NativeVoiceOutput.Snapshot) {
         if (!isCurrent(session) || session.epoch.get() != epoch) return
         val payload = JSObject().apply {
             put("kind", "frame"); put("sessionId", session.id); put("audioEpoch", epoch)
             put("sampleIndex", sampleIndex); put("probability", probability); put("level", reading.level)
             put("bands", JSArray().apply { reading.bands.forEach { put(it) } })
             put("aecState", aecState); put("route", session.route.get()); put("playbackActive", output.playing)
-            put("probeRevision", output.probeRevision); put("playbackId", output.playbackId.takeIf { output.playing } ?: org.json.JSONObject.NULL)
+            put("playbackId", output.playbackId.takeIf { output.playing } ?: org.json.JSONObject.NULL)
         }
         if (!pendingFrames.offer(Frame(session, epoch, payload))) {
             if (session.eventBackpressure.compareAndSet(false, true)) onMain { finish(session, "error", "audio_event_backpressure") }
@@ -528,19 +476,6 @@ internal class NativeVoiceAudio(
             if (pendingFrames.isNotEmpty()) scheduleFrame()
         }
     }
-
-    private fun stopProbe(session: Session) {
-        session.probeState.updateAndGet { it.copy(playing = false) }
-        session.probe.getAndSet(null)?.stop()
-        session.probeReply.getAndSet(null)?.reject("cancelled:voice_probe")
-    }
-
-    private fun outputSnapshot(session: Session): OutputSnapshot {
-        val playback = voiceOutput.snapshot()
-        val probe = session.probeState.get()
-        return OutputSnapshot(probe.revision, playback.playbackId.takeIf { playback.playing }, playback.playing || probe.playing)
-    }
-
 
     private fun resetAudioEpoch(session: Session) {
         val epoch = session.epoch.incrementAndGet()
@@ -575,7 +510,6 @@ internal class NativeVoiceAudio(
         if (!session.segmentsReleased.get() && !releasedSegmentIds.contains(session.id)) retainedCaptures[session.id] = session
         rememberCancelled(session.id)
         pendingFrames.removeAll { it.session === session }
-        stopProbe(session)
         session.worker?.interrupt()
         // Capture finally releases its recorder before posting route cleanup.
         session.reply.reject(if (kind == "stopped") "cancelled:$reason" else reason)

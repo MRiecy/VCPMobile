@@ -53,5 +53,4 @@ commands.allow = [
     "acquire_ota_keepalive",
     "release_ota_keepalive",
     "trigger_haptic_feedback",
-    "set_voice_probe",
 ]

@@ -132,7 +132,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val sensorStatusManager = SensorStatusManager(activity)
     private val nativeEvents = NativeEvents(activity, runtime, networkStatusManager, lifecycleBridge::snapshot)
     private val voiceAudioSession = VoiceAudioSession(activity)
-    private val voiceOutput: NativeVoiceOutput = NativeVoiceOutput(voiceAudioSession) { voiceAudio.isProbeBusy() }
+    private val voiceOutput = NativeVoiceOutput(voiceAudioSession)
     private val voiceAudio: NativeVoiceAudio = NativeVoiceAudio(activity, ::requestPermissionForAlias, nativeEvents::isReady, nativeEvents::tryEmitVoiceAudio, voiceAudioSession, voiceOutput)
     private val permissions = AndroidPermissions(activity, ::requestPermissionForAlias, ::startActivityForResult, ::emitWebViewEvent)
     private val filePicker = NativeFilePicker(activity, runtime, ::startActivityForResult, ::requestPermissionForAlias, ::emitWebViewEvent)
@@ -271,9 +271,6 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun stopVoiceAudio(invoke: Invoke) = voiceAudio.stopVoiceAudio(invoke)
-
-    @Command
-    fun setVoiceProbe(invoke: Invoke) = voiceAudio.setVoiceProbe(invoke)
 
     @Command
     fun exportVoiceSegment(invoke: Invoke) = voiceAudio.exportVoiceSegment(invoke)

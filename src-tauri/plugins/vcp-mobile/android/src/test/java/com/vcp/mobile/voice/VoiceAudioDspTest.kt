@@ -1,8 +1,6 @@
 package com.vcp.mobile.voice
 
 import java.io.ByteArrayInputStream
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import kotlin.math.PI
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -77,18 +75,7 @@ class VoiceAudioDspTest {
         assertTrue(peak(3_000) in 24..26)
     }
 
-    @Test fun probeParserAcceptsOnlyBoundedMonoPcmAndRejectsTruncatedData() {
-        val payload = ByteBuffer.allocate(44 + 16).order(ByteOrder.LITTLE_ENDIAN)
-        payload.put("RIFF".toByteArray()).putInt(52).put("WAVEfmt ".toByteArray()).putInt(16)
-            .putShort(1).putShort(1).putInt(16_000).putInt(32_000).putShort(2).putShort(16)
-            .put("data".toByteArray()).putInt(16)
-        repeat(8) { payload.putShort((it * 100).toShort()) }
-        val decoded = readVoiceProbe(ByteArrayInputStream(payload.array()))
-        assertEquals(16_000, decoded.sampleRate)
-        assertArrayEquals(ShortArray(8) { (it * 100).toShort() }, decoded.samples)
-        assertTrue(runCatching { readVoiceProbe(ByteArrayInputStream(payload.array().copyOf(48))) }.isFailure)
+    @Test fun voiceAssetReaderRejectsBytesBeyondItsBound() {
         assertTrue(runCatching { readBoundedVoiceAsset(ByteArrayInputStream(ByteArray(65)), 64) }.isFailure)
-        payload.putShort(22, 2)
-        assertTrue(runCatching { readVoiceProbe(ByteArrayInputStream(payload.array())) }.isFailure)
     }
 }

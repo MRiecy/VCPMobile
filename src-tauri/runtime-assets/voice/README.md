@@ -40,17 +40,11 @@ python3 -m pip install -r src-tauri/runtime-assets/voice/requirements-build.txt
 python3 src-tauri/runtime-assets/voice/build_runtime.py ios --cache-dir /tmp/vcpmobile-silero-runtime --jobs 6
 ```
 
-项目 G1 可重放工程入口先执行此步骤。`Runtime/`、`OrtObjC/` 是可再生成的本地构建输入，已按精确路径忽略；原始模型派生产物、配置、probe、许可证和构建入口在此目录维护。SwiftPM 的 C++17 与 `SPM_BUILD` 配置沿用官方绑定要求。成功后另写 `ios/build-report.json` 记录实际 arm64 静态库与 XCFramework 大小/哈希；Windows 不生成虚假 Apple 构建报告。
+项目 G1 可重放工程入口先执行此步骤。`Runtime/`、`OrtObjC/` 是可再生成的本地构建输入，已按精确路径忽略；原始模型派生产物、配置、许可证和构建入口在此目录维护。SwiftPM 的 C++17 与 `SPM_BUILD` 配置沿用官方绑定要求。成功后另写 `ios/build-report.json` 记录实际 arm64 静态库与 XCFramework 大小/哈希；Windows 不生成虚假 Apple 构建报告。
 
 已有锁定源码/构建目录可传 `--source-dir`、`--build-dir` 复用。`apple-inputs` 只复制 Apple 源码与资源，供 Windows 源码审计，**不产生 Apple 编译/链接证据**。
 
 ## 模型与产物验证
-
-```powershell
-python src-tauri/runtime-assets/voice/verify_model.py --cache-dir /tmp/vcpmobile-silero-runtime
-```
-
-`model-verification.json` 是 host CPU 上原 ONNX 对派生 ORT 的连续状态比较：真实数字语音及前后静默、弱音量人声、噪声和削波，比较每帧概率、完整 recurrent state 和起止端点。探针来源、SHA 与许可证见 `assets/voice/voice-probe.json`；它是受控开发播放素材，不是生产识别数据。
 
 ORT 序列化可能重排等价图数据，重新导出的文件不保证逐字节稳定。因此日常构建使用已校验、锁定的 `.ort` 与算子配置。`--regenerate-model` 若得到不同字节会保留 cache 中候选并失败，不覆盖已验收资产；升级模型时应审查候选、重新验数，再显式更新资产与哈希，不能只改版本字符串。
 
@@ -58,7 +52,7 @@ host 等价、Android 交叉编译、Apple 编译与设备音频效果是四种�
 
 ## 来源与许可证
 
-Silero 与 ONNX Runtime 均保留上游 MIT 许可。`assets/voice/` 同时包含完整许可及 ONNX Runtime 上游第三方声明，随两端资源一起分发。探针保留独立 CC BY-SA 4.0 来源说明。
+Silero 与 ONNX Runtime 均保留上游 MIT 许可。`assets/voice/` 同时包含完整许可及 ONNX Runtime 上游第三方声明，随两端资源一起分发。
 
 - [Silero 固定源码](https://github.com/snakers4/silero-vad/tree/60b7ffa243625ebdc1070275a29f18c87843786a)
 - [ONNX Runtime 固定源码](https://github.com/microsoft/onnxruntime/tree/058787ceead760166e3c50a0a4cba8a833a6f53f)

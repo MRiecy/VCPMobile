@@ -38,11 +38,9 @@ pub struct VoiceFrame {
     pub aec_state: AecState,
     pub route: String,
     pub playback_active: bool,
-    /// TTS output identity; probes have no TTS playback identity.
+    /// TTS output identity at capture time.
     #[serde(default)]
     pub playback_id: Option<String>,
-    /// Latest playback intent accepted by native when this frame was captured.
-    pub probe_revision: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -99,8 +97,6 @@ struct ActiveSession {
     id: String,
     generation: u64,
     detector: VadDetector,
-    probe_revision: u64,
-    probe_enabled: bool,
 }
 
 #[derive(Default)]
@@ -128,8 +124,6 @@ impl Sessions {
             id,
             generation: self.generation,
             detector: VadDetector::new(vad_config),
-            probe_revision: 0,
-            probe_enabled: false,
         });
         Ok(self.generation)
     }
@@ -150,33 +144,6 @@ impl Sessions {
             .is_some_and(|session| session.id == id && session.generation == generation)
     }
 
-    #[cfg(any(target_os = "android", target_os = "ios", test))]
-    fn owns_control(&self, id: &str, generation: u64, probe_revision: Option<u64>) -> bool {
-        self.current.as_ref().is_some_and(|session| {
-            session.id == id
-                && session.generation == generation
-                && probe_revision.is_none_or(|revision| session.probe_revision == revision)
-        })
-    }
-
-    fn probe_intent(&mut self, id: &str, enabled: bool) -> Result<(u64, u64), String> {
-        let session = self
-            .current
-            .as_mut()
-            .filter(|session| session.id == id)
-            .ok_or_else(|| "cancelled: voice audio session is no longer active".to_string())?;
-        session.probe_revision = session.probe_revision.wrapping_add(1);
-        session.probe_enabled = enabled;
-        Ok((session.generation, session.probe_revision))
-    }
-
-    fn latest_probe(&self, id: &str, generation: u64) -> Option<(u64, bool)> {
-        self.current
-            .as_ref()
-            .filter(|session| session.id == id && session.generation == generation)
-            .map(|session| (session.probe_revision, session.probe_enabled))
-    }
-
     fn cancel(&mut self, id: &str, generation: Option<u64>) -> Option<u32> {
         // Cancellation can reach Rust before the matching start future is polled.
         // Remember it even when no capture (or a different one) currently owns us.
@@ -193,24 +160,13 @@ impl Sessions {
     fn consume_frame(
         &mut self,
         frame: VoiceFrame,
-    ) -> Option<(VoiceAudioEvent, Option<(u64, u64)>)> {
+    ) -> Option<VoiceAudioEvent> {
         let session = self.current.as_mut()?;
         if session.id != frame.session_id {
             return None;
         }
         let result = session.detector.process(frame)?;
-        let stop_probe = if result.frame.playback_active
-            && result.frame.playback_id.is_none()
-            && result.frame.probe_revision == session.probe_revision
-            && result.speech_transition == Some(SpeechTransition::Start)
-        {
-            session.probe_revision = session.probe_revision.wrapping_add(1);
-            session.probe_enabled = false;
-            Some((session.generation, session.probe_revision))
-        } else {
-            None
-        };
-        Some((VoiceAudioEvent::Frame(result), stop_probe))
+        Some(VoiceAudioEvent::Frame(result))
     }
 
     fn consume_terminal(&mut self, notice: VoiceNotice, error: bool) -> Option<VoiceAudioEvent> {
@@ -254,7 +210,7 @@ async fn native_call<R: Runtime>(
     app: AppHandle<R>,
     operation: &'static str,
     args: serde_json::Value,
-    expected: Option<(String, u64, Option<u64>)>,
+    expected: Option<(String, u64)>,
 ) -> Result<(), String> {
     native_result_call::<R, serde_json::Value>(app, operation, args, expected)
         .await
@@ -265,7 +221,7 @@ async fn native_result_call<R: Runtime, T: serde::de::DeserializeOwned + Send + 
     app: AppHandle<R>,
     operation: &'static str,
     args: serde_json::Value,
-    expected: Option<(String, u64, Option<u64>)>,
+    expected: Option<(String, u64)>,
 ) -> Result<T, String> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
@@ -277,13 +233,11 @@ async fn native_result_call<R: Runtime, T: serde::de::DeserializeOwned + Send + 
         tauri::async_runtime::spawn_blocking(move || {
             let allowed = expected
                 .as_ref()
-                .is_none_or(|(id, generation, probe_revision)| {
+                .is_none_or(|(id, generation)| {
                     app.state::<VoiceAudioState>()
                         .0
                         .lock()
-                        .is_ok_and(|sessions| {
-                            sessions.owns_control(id, *generation, *probe_revision)
-                        })
+                        .is_ok_and(|sessions| sessions.owns(id, *generation))
                 });
             if !allowed {
                 return Err("cancelled: voice audio session is no longer active".into());
@@ -331,7 +285,7 @@ pub async fn start_voice_audio<R: Runtime>(
         app.clone(),
         "startVoiceAudio",
         serde_json::json!({ "sessionId": session_id, "callId": call_id }),
-        Some((session_id.clone(), generation, None)),
+        Some((session_id.clone(), generation)),
     )
     .await;
     if !owns(&app, &session_id, generation) {
@@ -406,93 +360,20 @@ pub async fn stop_voice_audio<R: Runtime>(
     Ok(receipt)
 }
 
-#[tauri::command]
-pub async fn set_voice_probe<R: Runtime>(
-    app: AppHandle<R>,
-    session_id: String,
-    enabled: bool,
-) -> Result<(), String> {
-    validate_session(&session_id)?;
-    let (generation, revision) = {
-        let state = app.state::<VoiceAudioState>();
-        let mut sessions = state.0.lock().map_err(|error| error.to_string())?;
-        sessions.probe_intent(&session_id, enabled)?
-    };
-    let result = native_call(
-        app.clone(),
-        "setVoiceProbe",
-        serde_json::json!({ "sessionId": session_id, "enabled": enabled, "probeRevision": revision }),
-        Some((session_id.clone(), generation, Some(revision))),
-    )
-    .await;
-    let latest = app
-        .state::<VoiceAudioState>()
-        .0
-        .lock()
-        .map_err(|error| error.to_string())?
-        .latest_probe(&session_id, generation);
-    let Some((latest_revision, latest_enabled)) = latest else {
-        return Err("cancelled: voice audio session is no longer active".into());
-    };
-    if latest_revision != revision {
-        if enabled && !latest_enabled {
-            // Native also owns a playback generation. Compensate a late enable
-            // acknowledgement only while this exact disable intent still owns it.
-            let _ = native_call(
-                app,
-                "setVoiceProbe",
-                serde_json::json!({ "sessionId": session_id, "enabled": false, "probeRevision": latest_revision }),
-                Some((session_id, generation, Some(latest_revision))),
-            )
-            .await;
-        }
-        return Err("cancelled: playback probe intent was superseded".into());
-    }
-    result
-}
-
 /// Called by the existing process-wide native event subscription. No PCM enters
 /// this boundary, and no native invocation is made synchronously on its thread.
 pub fn handle_native_event<R: Runtime>(app: &AppHandle<R>, event: NativeVoiceAudioEvent) -> Option<VoiceAudioEvent> {
-    let result = {
+    let event = {
         let state = app.state::<VoiceAudioState>();
         let Ok(mut sessions) = state.0.lock() else {
             return None;
         };
         match event {
-            NativeVoiceAudioEvent::Stopped(notice) => sessions
-                .consume_terminal(notice, false)
-                .map(|event| (event, None)),
-            NativeVoiceAudioEvent::Error(notice) => sessions
-                .consume_terminal(notice, true)
-                .map(|event| (event, None)),
+            NativeVoiceAudioEvent::Stopped(notice) => sessions.consume_terminal(notice, false),
+            NativeVoiceAudioEvent::Error(notice) => sessions.consume_terminal(notice, true),
             NativeVoiceAudioEvent::Frame(frame) => sessions.consume_frame(frame),
         }
-    };
-    let Some((event, stop_probe)) = result else {
-        return None;
-    };
-    if let (VoiceAudioEvent::Frame(frame), Some((generation, probe_revision))) =
-        (&event, stop_probe)
-    {
-        let app = app.clone();
-        let session_id = frame.frame.session_id.clone();
-        tauri::async_runtime::spawn(async move {
-            if !owns(&app, &session_id, generation) {
-                return;
-            }
-            if let Err(error) = native_call(
-                app,
-                "setVoiceProbe",
-                serde_json::json!({ "sessionId": session_id, "enabled": false, "probeRevision": probe_revision }),
-                Some((session_id, generation, Some(probe_revision))),
-            )
-            .await
-            {
-                log::warn!("[VoiceAudio] Could not stop playback probe: {error}");
-            }
-        });
-    }
+    }?;
     let _ = app.emit(VOICE_AUDIO_EVENT, &event);
     Some(event)
 }

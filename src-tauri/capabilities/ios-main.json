@@ -24,7 +24,6 @@
     "vcp-mobile:allow-save-image-from-path",
     "vcp-mobile:allow-save-to-downloads",
     "vcp-mobile:allow-write-temp-file",
-    "vcp-mobile:allow-delete-temp-file",
-    "vcp-mobile:allow-set-voice-probe"
+    "vcp-mobile:allow-delete-temp-file"
   ]
 }

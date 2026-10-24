@@ -2,7 +2,7 @@ import { defineStore } from 'pinia';
 import { onScopeDispose, ref, shallowRef, watch } from 'vue';
 import { useChatSessionStore, type ConversationKey } from '../../../core/stores/chatSessionStore';
 import { useAppLifecycleStore } from '../../../core/stores/appLifecycle';
-import { createMicrophoneMonitor, type VoiceAudioFrame } from './microphoneMonitor';
+import { createMicrophoneMonitor } from './microphoneMonitor';
 import { createVoiceConversation, type VoiceCallSnapshot, type VoiceServiceView } from './voiceConversation';
 
 export type MicrophoneState = 'off' | 'requesting' | 'on' | 'error';
@@ -24,16 +24,13 @@ const AUDIO_ERRORS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\b(voice_processing_failed|voice_processing_unavailable)\b/, '系统语音处理暂不可用，请检查音频设备后重试。'],
   [/\b(microphone_format_unavailable|audio_format_unavailable|audio_converter_unavailable)\b/, '当前音频设备的采集格式不可用，请切换设备后重试。'],
   [/\b(audio_input_discontinuity|audio_conversion_failed|audio_sample_invalid|audio_event_backpressure)\b/, '音频处理已中断，请重新开启麦克风。'],
-  [/\bvoice_probe_busy\b/, '本地样本正在准备，请稍后重试。'],
-  [/\bvoice_playback_busy\b/, '正在朗读，请等待结束或重新开麦后播放本地样本。'],
+  [/\bvoice_playback_busy\b/, '正在朗读，请等待结束后重试。'],
   [/\bvoice_call_not_active\b/, '通话会话已结束，请重新进入语音模式。'],
   [/\bvoice_call_busy\b/, '上一通话正在结束，请稍后重试。'],
   [/\bvoice_segment_retention_busy\b/, '前面的语音仍在识别，请稍后再开启麦克风。'],
   [/\baudio_conversion_drain_failed\b/, '末尾音频处理失败，请重新说一遍。'],
-  [/\b(voice_probe_missing|voice_probe_invalid)\b/, '本地诊断样本不可用，请检查应用安装。'],
   [/\b(voice_start_failed|audio_start_failed)\b/, '麦克风启动失败，请检查音频设备后重试。'],
   [/\bvoice_capture_failed\b/, '音频采集已中断，点击麦克风重新开启。'],
-  [/\bvoice_probe_failed\b/, '本地样本播放失败，请重试。'],
   [/\bunsupported\b/, '当前环境不支持原生语音，请在 Android 或 iOS 客户端使用。'],
 ];
 
@@ -54,13 +51,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   const microphoneState = ref<MicrophoneState>('off');
   const level = ref(0);
   const bands = shallowRef<readonly number[]>([]);
-  const speechActive = ref(false);
-  const aecState = ref<VoiceAudioFrame['aecState'] | null>(null);
-  const route = ref('');
   const playbackActive = ref(false);
-  const probeActive = ref(false);
-  const probePending = ref(false);
-  const probeError = ref('');
   const errorMessage = ref('');
   const serviceState = ref<VoiceServiceView['state']>('off');
   const serviceMessage = ref('');
@@ -69,17 +60,9 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   const replyState = ref<VoiceCallSnapshot['replyState']>('idle');
   const ttsState = ref<VoiceCallSnapshot['ttsState']>('idle');
   let microphoneGeneration = 0;
-  let probeGeneration = 0;
 
-  const resetAnalysis = () => {
-    speechActive.value = false;
-    aecState.value = null;
-    route.value = '';
+  const syncPlaybackState = () => {
     playbackActive.value = ttsState.value === 'speaking';
-    probeActive.value = false;
-    probePending.value = false;
-    probeError.value = '';
-    probeGeneration += 1;
   };
 
   const voiceConversation = createVoiceConversation({
@@ -103,7 +86,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
           microphoneState.value = 'off';
           level.value = 0;
           bands.value = [];
-          resetAnalysis();
+          syncPlaybackState();
         }
       } else if (microphoneState.value !== 'requesting') microphoneState.value = 'on';
       playbackActive.value = snapshot?.ttsState === 'speaking';
@@ -114,7 +97,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
     (value, spectrum) => { level.value = value; bands.value = spectrum; },
     event => {
       microphoneGeneration += 1;
-      resetAnalysis();
+      syncPlaybackState();
       if (!active.value) return;
       if (event.kind === 'stopped' && (event.reason === 'background' || event.reason === 'requested')) {
         microphoneState.value = 'off';
@@ -126,11 +109,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
       }
     },
     frame => {
-      speechActive.value = frame.speechActive;
-      aecState.value = frame.aecState;
-      route.value = frame.route;
       playbackActive.value = frame.playbackActive;
-      probeActive.value = frame.playbackActive && !frame.playbackId;
     },
     {
       beforeStart: voiceConversation.start,
@@ -147,7 +126,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   const stopMicrophone = () => {
     microphoneGeneration += 1;
     monitor.stop();
-    resetAnalysis();
+    syncPlaybackState();
     microphoneState.value = 'off';
     errorMessage.value = '';
   };
@@ -155,7 +134,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   const enableMicrophone = async () => {
     if (!active.value || lifecycle.isBackground) return;
     const generation = ++microphoneGeneration;
-    resetAnalysis();
+    syncPlaybackState();
     microphoneState.value = 'requesting';
     errorMessage.value = '';
     try {
@@ -164,7 +143,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
       microphoneState.value = started ? 'on' : 'off';
     } catch (error) {
       if (generation !== microphoneGeneration || !active.value) return;
-      resetAnalysis();
+      syncPlaybackState();
       microphoneState.value = 'error';
       errorMessage.value = audioErrorMessage(error, '麦克风启动失败，请重试。');
     }
@@ -184,7 +163,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
     // command that could admit an unsent transcript while hangup cancels it.
     microphoneGeneration += 1;
     monitor.detach();
-    resetAnalysis();
+    syncPlaybackState();
     microphoneState.value = 'off';
     errorMessage.value = '';
     active.value = false;
@@ -197,26 +176,6 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
     if (!active.value) return;
     if (microphoneState.value === 'on' || microphoneState.value === 'requesting') stopMicrophone();
     else void enableMicrophone();
-  };
-
-  const setProbe = async (enabled: boolean) => {
-    if (enabled && (!active.value || microphoneState.value !== 'on' || lifecycle.isBackground)) return;
-    const generation = ++probeGeneration;
-    const micGeneration = microphoneGeneration;
-    probePending.value = true;
-    probeError.value = '';
-    try {
-      await monitor.setProbe(enabled);
-    } catch (error) {
-      if (generation !== probeGeneration || micGeneration !== microphoneGeneration) return;
-      // Native VAD may cancel a pending playback request when speech starts.
-      // That is a successful interruption, not a capture or playback failure.
-      if (!/\bcancelled\b/.test(errorDetail(error))) {
-        probeError.value = audioErrorMessage(error, '本地样本播放失败，请重试。');
-      }
-    } finally {
-      if (generation === probeGeneration && micGeneration === microphoneGeneration) probePending.value = false;
-    }
   };
 
   watch(() => session.currentConversationKey, () => {
@@ -234,9 +193,9 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   });
 
   return {
-    active, microphoneState, level, bands, speechActive, aecState, route,
-    playbackActive, probeActive, probePending, probeError, errorMessage, serviceState, serviceMessage, partialText,
+    active, microphoneState, level, bands,
+    playbackActive, errorMessage, serviceState, serviceMessage, partialText,
     inputState, replyState, ttsState,
-    start, end, toggleMicrophone, setProbe, recover,
+    start, end, toggleMicrophone, recover,
   };
 });

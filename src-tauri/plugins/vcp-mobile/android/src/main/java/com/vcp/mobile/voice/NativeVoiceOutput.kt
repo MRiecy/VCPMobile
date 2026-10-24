@@ -24,7 +24,6 @@ class AppendVoicePlaybackArgs { var playbackId: String = ""; var pcmBase64: Stri
 /** Plugin-scoped output; it never requests microphone permission or reads capture state. */
 internal class NativeVoiceOutput(
     private val audioSession: VoiceAudioSession,
-    private val probeBusy: () -> Boolean,
 ) {
     data class Snapshot(val playbackId: String? = null, val playing: Boolean = false)
     private class Reply(private val invoke: Invoke) {
@@ -51,14 +50,12 @@ internal class NativeVoiceOutput(
     }
 
     fun snapshot(): Snapshot = state.get()
-    fun isBusy(): Boolean = current.get() != null
 
     fun startVoicePlayback(invoke: Invoke) = onMain {
         val args = try { invoke.parseArgs(VoicePlaybackArgs::class.java) }
         catch (_: Exception) { invoke.deliverError("invalid_voice_playback_request"); return@onMain }
         if (!validId(args.playbackId)) { invoke.deliverError("invalid_voice_playback_id"); return@onMain }
         if (destroyed || cancelled.contains(args.playbackId)) { invoke.deliverError("cancelled:voice_playback"); return@onMain }
-        if (probeBusy()) { invoke.deliverError("voice_probe_busy"); return@onMain }
         if (current.get()?.id == args.playbackId) { invoke.deliverError("voice_playback_already_started"); return@onMain }
         if (current.get() != null) { invoke.deliverError("voice_playback_busy"); return@onMain }
         val reply = Reply(invoke)

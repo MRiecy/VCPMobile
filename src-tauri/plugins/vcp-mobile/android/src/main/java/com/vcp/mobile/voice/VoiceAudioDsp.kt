@@ -1,8 +1,6 @@
 package com.vcp.mobile.voice
 
 import java.io.InputStream
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.floor
@@ -166,38 +164,6 @@ internal class VoiceAudioMeter {
         }
         return Reading(level, bands)
     }
-}
-
-internal data class VoiceProbePcm(val sampleRate: Int, val samples: ShortArray)
-
-internal fun readVoiceProbe(input: InputStream): VoiceProbePcm {
-    val bytes = readBoundedVoiceAsset(input, 3 * 1024 * 1024)
-    require(bytes.size >= 44) { "Voice probe WAV is incomplete" }
-    val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-    fun tag(offset: Int) = String(bytes, offset, 4, Charsets.US_ASCII)
-    require(tag(0) == "RIFF" && tag(8) == "WAVE") { "Voice probe must be a WAV file" }
-    var rate = 0
-    var dataOffset = -1
-    var dataSize = 0
-    var position = 12
-    while (position + 8 <= bytes.size) {
-        val size = buffer.getInt(position + 4)
-        require(size >= 0 && size <= bytes.size - position - 8) { "Invalid voice probe chunk" }
-        val start = position + 8
-        when (tag(position)) {
-            "fmt " -> {
-                require(size >= 16 && buffer.getShort(start).toInt() == 1 && buffer.getShort(start + 2).toInt() == 1 && buffer.getShort(start + 14).toInt() == 16) { "Voice probe requires mono PCM16" }
-                rate = buffer.getInt(start + 4)
-            }
-            "data" -> { dataOffset = start; dataSize = size }
-        }
-        position = start + size + size % 2
-    }
-    require(rate in 8_000..48_000 && dataOffset >= 0 && dataSize > 0 && dataSize % 2 == 0 && dataSize / 2 <= rate * 30) { "Invalid voice probe format or duration" }
-    val samples = ShortArray(dataSize / 2)
-    buffer.position(dataOffset)
-    buffer.asShortBuffer().get(samples)
-    return VoiceProbePcm(rate, samples)
 }
 
 internal fun readBoundedVoiceAsset(input: InputStream, maximum: Int): ByteArray {

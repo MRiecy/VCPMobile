@@ -107,7 +107,6 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             system::acquire_ota_keepalive,
             system::release_ota_keepalive,
             system::trigger_haptic_feedback,
-            voice::set_voice_probe,
         ])
         .setup(|app, _api| {
             app.manage(events::ServiceFailureNotices::default());

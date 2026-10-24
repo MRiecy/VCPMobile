@@ -50,7 +50,6 @@ const COMMANDS: &[&str] = &[
     "acquire_ota_keepalive",
     "release_ota_keepalive",
     "trigger_haptic_feedback",
-    "set_voice_probe",
 ];
 
 fn main() {

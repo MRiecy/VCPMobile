@@ -7,21 +7,15 @@ struct VoiceAnalysisFrame {
     let probability: Float
     let level: Float
     let bands: [Float]
-    let probeRevision: UInt64
     let playbackActive: Bool
     let playbackMarker: UInt64
 }
 
-/// Main publishes intent before altering playback; the tap only takes atomic
+/// Main publishes playback state; the tap only takes atomic
 /// snapshots. PCM keeps its original stamp through resampling and inference.
-final class VoiceProbeCaptureState {
-    let revision = Atomic<UInt64>(0)
+final class VoicePlaybackCaptureState {
     let playing = Atomic<Bool>(false)
     let playbackMarker = Atomic<UInt64>(0)
-    func replaceIntent(_ revision: UInt64) {
-        playing.store(false, ordering: .releasing)
-        self.revision.store(revision, ordering: .releasing)
-    }
 }
 
 /// A single-producer (audio tap), single-consumer (inference queue) ring.
@@ -33,8 +27,7 @@ final class VoiceAudioPipe {
     private static let maxFrames = 8192
     private let samples: UnsafeMutablePointer<Float>
     private let lengths: UnsafeMutablePointer<Int>
-    private let probeRevisions: UnsafeMutablePointer<UInt64>
-    private let probePlaying: UnsafeMutablePointer<Bool>
+    private let playbackActive: UnsafeMutablePointer<Bool>
     private let playbackMarkers: UnsafeMutablePointer<UInt64>
     private let readIndex = Atomic<UInt64>(0)
     private let writeIndex = Atomic<UInt64>(0)
@@ -49,20 +42,19 @@ final class VoiceAudioPipe {
     private let outputBuffer: AVAudioPCMBuffer
     private let converter: AVAudioConverter?
     private var model: SileroVoiceModel?
-    private let probeState: VoiceProbeCaptureState
+    private let playbackState: VoicePlaybackCaptureState
     private let onFrame: (VoiceAnalysisFrame) -> Bool
     private let onError: (String) -> Void
     private let frame: UnsafeMutablePointer<Float>
     private var frameCount = 0
     private var sampleIndex: UInt64 = 0
     private var processingFailure: String?
-    private var frameProbeRevision: UInt64 = 0
     private var framePlaybackActive = false
     private var framePlaybackMarker: UInt64 = 0
     private let meter = VoiceAudioMeter()
     private let segments = VoiceSegmentCache()
 
-    init(inputRate: Double, model: SileroVoiceModel, probeState: VoiceProbeCaptureState, queue: DispatchQueue,
+    init(inputRate: Double, model: SileroVoiceModel, playbackState: VoicePlaybackCaptureState, queue: DispatchQueue,
          onFrame: @escaping (VoiceAnalysisFrame) -> Bool, onError: @escaping (String) -> Void) throws {
         guard inputRate.isFinite, inputRate >= 8_000, inputRate <= 192_000,
               let inputFormat = AVAudioFormat(standardFormatWithSampleRate: inputRate, channels: 1),
@@ -77,19 +69,17 @@ final class VoiceAudioPipe {
         converter = inputRate == 16_000 ? nil : AVAudioConverter(from: inputFormat, to: outputFormat)
         if inputRate != 16_000 && converter == nil { throw voiceAudioFailure("audio_converter_unavailable") }
         self.model = model
-        self.probeState = probeState
+        self.playbackState = playbackState
         self.onFrame = onFrame
         self.onError = onError
         samples = .allocate(capacity: Self.capacity * Self.maxFrames)
         lengths = .allocate(capacity: Self.capacity)
-        probeRevisions = .allocate(capacity: Self.capacity)
-        probePlaying = .allocate(capacity: Self.capacity)
+        playbackActive = .allocate(capacity: Self.capacity)
         playbackMarkers = .allocate(capacity: Self.capacity)
         frame = .allocate(capacity: 512)
         samples.initialize(repeating: 0, count: Self.capacity * Self.maxFrames)
         lengths.initialize(repeating: 0, count: Self.capacity)
-        probeRevisions.initialize(repeating: 0, count: Self.capacity)
-        probePlaying.initialize(repeating: false, count: Self.capacity)
+        playbackActive.initialize(repeating: false, count: Self.capacity)
         playbackMarkers.initialize(repeating: 0, count: Self.capacity)
         frame.initialize(repeating: 0, count: 512)
         signal = DispatchSource.makeUserDataAddSource(queue: queue)
@@ -102,9 +92,8 @@ final class VoiceAudioPipe {
         callbacks.wrappingAdd(1, ordering: .acquiringAndReleasing)
         defer { callbacks.wrappingSubtract(1, ordering: .acquiringAndReleasing) }
         if !accepting.load(ordering: .acquiring) || cancelled.load(ordering: .acquiring) { return }
-        let probeRevision = probeState.revision.load(ordering: .acquiring)
-        let playbackMarker = probeState.playbackMarker.load(ordering: .acquiring)
-        let playbackActive = probeState.playing.load(ordering: .acquiring)
+        let playbackMarker = playbackState.playbackMarker.load(ordering: .acquiring)
+        let playing = playbackState.playing.load(ordering: .acquiring)
         let count = Int(buffer.frameLength)
         let channels = Int(buffer.format.channelCount)
         guard count > 0 else { return }
@@ -130,8 +119,7 @@ final class VoiceAudioPipe {
             target[index] = value / Float(channels)
         }
         lengths[slot] = count
-        probeRevisions[slot] = probeRevision
-        probePlaying[slot] = playbackActive
+        playbackActive[slot] = playing
         playbackMarkers[slot] = playbackMarker
         writeIndex.store(write + 1, ordering: .releasing)
         signal.add(data: 1)
@@ -170,7 +158,7 @@ final class VoiceAudioPipe {
                     }
                     if status == .error { throw error ?? voiceAudioFailure("audio_conversion_failed") }
                     guard let samples = outputBuffer.floatChannelData?[0] else { throw voiceAudioFailure("audio_output_buffer_missing") }
-                    try consume(samples, count: Int(outputBuffer.frameLength), probeRevision: frameProbeRevision,
+                    try consume(samples, count: Int(outputBuffer.frameLength),
                                 playbackActive: framePlaybackActive, playbackMarker: framePlaybackMarker, publish: false)
                     if status == .endOfStream { ended = true; break }
                 }
@@ -203,8 +191,7 @@ final class VoiceAudioPipe {
                 if read == writeIndex.load(ordering: .acquiring) { return }
                 let slot = Int(read % UInt64(Self.capacity))
                 let count = lengths[slot]
-                let probeRevision = probeRevisions[slot]
-                let playbackActive = probePlaying[slot]
+                let playing = playbackActive[slot]
                 let playbackMarker = playbackMarkers[slot]
                 inputBuffer.frameLength = AVAudioFrameCount(count)
                 guard let target = inputBuffer.floatChannelData?[0] else { throw voiceAudioFailure("audio_input_buffer_missing") }
@@ -225,9 +212,9 @@ final class VoiceAudioPipe {
                     }
                     if status == .error { throw error ?? voiceAudioFailure("audio_conversion_failed") }
                     guard let converted = outputBuffer.floatChannelData?[0] else { throw voiceAudioFailure("audio_output_buffer_missing") }
-                    try consume(converted, count: Int(outputBuffer.frameLength), probeRevision: probeRevision, playbackActive: playbackActive, playbackMarker: playbackMarker, publish: publish)
+                    try consume(converted, count: Int(outputBuffer.frameLength), playbackActive: playing, playbackMarker: playbackMarker, publish: publish)
                 } else {
-                    try consume(target, count: count, probeRevision: probeRevision, playbackActive: playbackActive, playbackMarker: playbackMarker, publish: publish)
+                    try consume(target, count: count, playbackActive: playing, playbackMarker: playbackMarker, publish: publish)
                 }
             }
         } catch {
@@ -239,12 +226,11 @@ final class VoiceAudioPipe {
         }
     }
 
-    private func consume(_ input: UnsafePointer<Float>, count: Int, probeRevision: UInt64, playbackActive: Bool, playbackMarker: UInt64, publish: Bool) throws {
+    private func consume(_ input: UnsafePointer<Float>, count: Int, playbackActive: Bool, playbackMarker: UInt64, publish: Bool) throws {
         for index in 0..<count {
             if cancelled.load(ordering: .relaxed) { return }
             guard input[index].isFinite else { throw voiceAudioFailure("audio_sample_invalid") }
             if frameCount == 0 {
-                frameProbeRevision = probeRevision
                 framePlaybackActive = playbackActive
                 framePlaybackMarker = playbackMarker
             }
@@ -260,7 +246,7 @@ final class VoiceAudioPipe {
             let reading = meter.measure(UnsafePointer(frame))
             if accepting.load(ordering: .acquiring) && !cancelled.load(ordering: .acquiring) {
                 guard onFrame(VoiceAnalysisFrame(sampleIndex: sampleIndex, probability: probability, level: reading.level, bands: reading.bands,
-                                                probeRevision: frameProbeRevision, playbackActive: framePlaybackActive, playbackMarker: framePlaybackMarker)) else {
+                                                playbackActive: framePlaybackActive, playbackMarker: framePlaybackMarker)) else {
                     throw voiceAudioFailure("audio_event_backpressure")
                 }
             }
@@ -271,14 +257,12 @@ final class VoiceAudioPipe {
         signal.cancel()
         samples.deinitialize(count: Self.capacity * Self.maxFrames)
         lengths.deinitialize(count: Self.capacity)
-        probeRevisions.deinitialize(count: Self.capacity)
-        probePlaying.deinitialize(count: Self.capacity)
+        playbackActive.deinitialize(count: Self.capacity)
         playbackMarkers.deinitialize(count: Self.capacity)
         frame.deinitialize(count: 512)
         samples.deallocate()
         lengths.deallocate()
-        probeRevisions.deallocate()
-        probePlaying.deallocate()
+        playbackActive.deallocate()
         playbackMarkers.deallocate()
         frame.deallocate()
     }

@@ -1167,32 +1167,6 @@ Denies the set_keep_screen_on command without any pre-configured scope.
 <tr>
 <td>
 
-`vcp-mobile:allow-set-voice-probe`
-
-</td>
-<td>
-
-Enables the set_voice_probe command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`vcp-mobile:deny-set-voice-probe`
-
-</td>
-<td>
-
-Denies the set_voice_probe command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
 `vcp-mobile:allow-start-download-notification`
 
 </td>

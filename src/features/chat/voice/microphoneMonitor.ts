@@ -13,7 +13,6 @@ export interface VoiceAudioFrame {
   route: string;
   playbackActive: boolean;
   playbackId?: string | null;
-  probeRevision: number;
   speechActive: boolean;
   speechTransition: 'start' | 'end' | null;
   discontinuity: boolean;
@@ -38,7 +37,6 @@ interface CaptureRequest {
   sampleIndex: number;
   expectedLifecycleEpoch?: number | null;
   startSubmitted: boolean;
-  running: boolean;
   unlisten?: UnlistenFn;
   cancel: () => void;
   cancelled: Promise<false>;
@@ -103,7 +101,7 @@ export function createMicrophoneMonitor(
     const request: CaptureRequest = {
       sessionId: crypto.randomUUID(), epoch: -1, sampleIndex: -1,
       expectedLifecycleEpoch: lifecycle.currentLifecycleEpoch?.(),
-      startSubmitted: false, running: false, cancel, cancelled,
+      startSubmitted: false, cancel, cancelled,
     };
     current = request;
     const work = (async () => {
@@ -112,7 +110,6 @@ export function createMicrophoneMonitor(
           if (current !== request || !request.startSubmitted || payload.sessionId !== request.sessionId) return;
           if (!Number.isSafeInteger(payload.audioEpoch) || payload.audioEpoch < 0 || payload.audioEpoch < request.epoch) return;
           if (payload.kind === 'frame') {
-            if (!Number.isSafeInteger(payload.probeRevision) || payload.probeRevision < 0) return;
             if (!Number.isSafeInteger(payload.sampleIndex) || payload.sampleIndex < 0
               || (payload.audioEpoch === request.epoch && payload.sampleIndex <= request.sampleIndex)) return;
             if (!Number.isFinite(payload.level) || !Number.isFinite(payload.probability)
@@ -159,7 +156,6 @@ export function createMicrophoneMonitor(
           stopNative(request, false);
           return false;
         }
-        request.running = true;
         lifecycle.onConfigured?.(result.configured);
         // A WebView can suspend event delivery while Rust continues the call.
         // Native capture owns health and terminal detection; JS has no timeout.
@@ -176,17 +172,5 @@ export function createMicrophoneMonitor(
     return Promise.race([work, cancelled]);
   };
 
-  const setProbe = async (enabled: boolean): Promise<boolean> => {
-    const request = current;
-    if (!request?.running) return false;
-    const work = (async () => {
-      await invoke('plugin:vcp-mobile|set_voice_probe', { sessionId: request.sessionId, enabled });
-      // Rust/native probe revisions own ordering. A late acknowledgement must
-      // never become a new playback intent that overrides a later user action.
-      return current === request;
-    })();
-    return Promise.race([work, request.cancelled]);
-  };
-
-  return { start, stop, setProbe, detach };
+  return { start, stop, detach };
 }

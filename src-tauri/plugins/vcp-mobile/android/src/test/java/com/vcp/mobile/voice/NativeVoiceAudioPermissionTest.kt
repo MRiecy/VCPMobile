@@ -50,11 +50,6 @@ class NativeVoiceAudioPermissionTest {
     private fun stop(id: String): Invoke = mockk<Invoke>(relaxed = true).also { invoke ->
         every { invoke.parseArgs(StopVoiceAudioArgs::class.java) } returns StopVoiceAudioArgs().apply { sessionId = id }
     }
-    private fun probe(id: String, revision: Long, enabled: Boolean): Invoke = mockk<Invoke>(relaxed = true).also { invoke ->
-        every { invoke.parseArgs(SetVoiceProbeArgs::class.java) } returns SetVoiceProbeArgs().apply {
-            sessionId = id; probeRevision = revision; this.enabled = enabled
-        }
-    }
     private fun release(id: String): Invoke = mockk<Invoke>(relaxed = true).also { invoke ->
         every { invoke.parseArgs(ReleaseVoiceSegmentsArgs::class.java) } returns ReleaseVoiceSegmentsArgs().apply { sessionId = id }
     }
@@ -82,20 +77,6 @@ class NativeVoiceAudioPermissionTest {
         verify(exactly = 1) { start.reject("voice_events_unavailable") }
         verify(exactly = 0) { start.resolve() }
         assertEquals(0, permissionRequests.size)
-    }
-
-    @Test fun oldProbeIntentCannotOverrideANewerRevisionAndRepeatedRevisionIsIdempotent() {
-        owner.startVoiceAudio(start("probe-order"))
-        val newer = probe("probe-order", 2, false)
-        owner.setVoiceProbe(newer)
-        val stale = probe("probe-order", 1, true)
-        owner.setVoiceProbe(stale)
-        val repeated = probe("probe-order", 2, false)
-        owner.setVoiceProbe(repeated)
-        verify(exactly = 1) { newer.resolve() }
-        verify(exactly = 1) { stale.reject("cancelled:stale_probe_revision") }
-        verify(exactly = 1) { repeated.resolve() }
-        assertEquals(1, permissionRequests.size)
     }
 
     @Test fun cancellingPermissionWaitSettlesOnceAndCannotStartFromTheLateCallback() {

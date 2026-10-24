@@ -18,7 +18,6 @@ struct NativeVoiceAudioEvent: Encodable {
     var route: String?
     var playbackActive: Bool?
     var playbackId: String?
-    var probeRevision: UInt64?
     var reason: String?
 }
 
@@ -30,7 +29,6 @@ private struct VoiceCaptureStopReceipt: Encodable {
 private struct VoiceStartArgs: Decodable { let sessionId: String; let callId: String }
 private struct VoiceSessionArgs: Decodable { let sessionId: String }
 private struct VoiceCallArgs: Decodable { let callId: String }
-private struct VoiceProbeArgs: Decodable { let sessionId: String; let enabled: Bool; let probeRevision: UInt64 }
 private struct VoiceSegmentArgs: Decodable {
     let sessionId: String; let audioEpoch: UInt64; let startSample: UInt64; let endSample: UInt64
 }
@@ -53,18 +51,13 @@ final class NativeVoiceAudio {
         let deliverySlots = DispatchSemaphore(value: 8)
         let cancelled = Atomic<Bool>(false)
         let released = Atomic<Bool>(false)
-        let probeCaptureState = VoiceProbeCaptureState()
+        let playbackCaptureState = VoicePlaybackCaptureState()
         var startInvoke: Invoke?
         var engine: AVAudioEngine?
         var pipe: VoiceAudioPipe?
-        var player: AVAudioPlayerNode?
-        var probe: AVAudioPCMBuffer?
         var tapped = false
         var aecState = "unavailable"
         var route = "unknown"
-        var playbackActive = false
-        var probeGeneration: UInt64 = 0
-        var probeRevision: UInt64 = 0
         var exportPending = false
         var releaseRequested = false
         var finalSampleIndex: UInt64?
@@ -233,10 +226,8 @@ final class NativeVoiceAudio {
                 do {
                     let model = try SileroVoiceModel()
                     guard !run.cancelled.load(ordering: .acquiring) else { return }
-                    stage = "voice_probe_invalid"
-                    let probe = try self.loadProbe()
                     stage = "audio_processing_failed"
-                    let pipe = try VoiceAudioPipe(inputRate: sampleRate, model: model, probeState: run.probeCaptureState, queue: self.worker,
+                    let pipe = try VoiceAudioPipe(inputRate: sampleRate, model: model, playbackState: run.playbackCaptureState, queue: self.worker,
                         onFrame: { [weak self, weak run] frame in
                             guard let self = self, let run = run else { return false }
                             return self.post(frame, run: run)
@@ -252,7 +243,7 @@ final class NativeVoiceAudio {
                             processingQueue.async { pipe.stop() }
                             return
                         }
-                        self.startEngine(run, pipe: pipe, probe: probe)
+                        self.startEngine(run, pipe: pipe)
                     }
                 } catch {
                     let reason = voiceAudioReason(error, fallback: stage)
@@ -269,7 +260,7 @@ final class NativeVoiceAudio {
         }
     }
 
-    private func startEngine(_ run: Run, pipe: VoiceAudioPipe, probe: AVAudioPCMBuffer) {
+    private func startEngine(_ run: Run, pipe: VoiceAudioPipe) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let engine = run.engine, UIApplication.shared.applicationState != .background else {
             pipe.stop()
@@ -277,11 +268,9 @@ final class NativeVoiceAudio {
             return
         }
         run.pipe = pipe
-        run.probe = probe
-        run.player = renderer.probePlayer
         publishOutputStatus(outputId, playing: outputPlaying)
         // The input is tapped after Voice Processing. It is never connected to
-        // the output mixer: only the fixture or independent TTS is rendered.
+        // the output mixer: only independent TTS is rendered.
         engine.inputNode.installTap(onBus: 0, bufferSize: 1024, format: nil) { [pipe] buffer, _ in
             pipe.accept(buffer)
         }
@@ -306,8 +295,7 @@ final class NativeVoiceAudio {
                 kind: "frame", sessionId: run.sessionId, audioEpoch: run.epoch,
                 sampleIndex: frame.sampleIndex, probability: frame.probability,
                 level: frame.level, bands: frame.bands, aecState: run.aecState,
-                route: run.route, playbackActive: frame.playbackActive && playbackKnown, playbackId: playbackId,
-                probeRevision: frame.probeRevision
+                route: run.route, playbackActive: frame.playbackActive && playbackKnown, playbackId: playbackId
             )) ?? false
             if !delivered { self.finish(reason: "voice_events_unavailable", error: true) }
         }
@@ -335,46 +323,6 @@ final class NativeVoiceAudio {
         } catch { invoke.reject("invalid_voice_stop_args: \(error.localizedDescription)") }
     }
 
-    func setProbe(_ invoke: Invoke) {
-        do {
-            let args = try invoke.parseArgs(VoiceProbeArgs.self)
-            DispatchQueue.main.async { [self] in
-                guard let run = active, run.sessionId == args.sessionId, run.engine?.isRunning == true,
-                      let player = run.player, let probe = run.probe else {
-                    invoke.reject("voice_audio_not_running"); return
-                }
-                guard args.probeRevision >= run.probeRevision else {
-                    invoke.reject("cancelled:stale_probe_revision"); return
-                }
-                if args.probeRevision == run.probeRevision { invoke.resolve(); return }
-                if args.enabled, playback?.ownsPlayback == true {
-                    invoke.reject("voice_playback_busy"); return
-                }
-                run.probeRevision = args.probeRevision
-                run.probeCaptureState.replaceIntent(args.probeRevision)
-                run.probeGeneration += 1
-                let probeGeneration = run.probeGeneration
-                player.stop() // stop clears every scheduled buffer immediately
-                if args.enabled {
-                    player.scheduleBuffer(probe, at: nil, options: [], completionCallbackType: .dataPlayedBack) {
-                        [weak self, weak run] _ in
-                        DispatchQueue.main.async {
-                            guard let self = self, let run = run, self.active === run,
-                                  run.probeGeneration == probeGeneration else { return }
-                            guard run.probeRevision == args.probeRevision else { return }
-                            run.playbackActive = false
-                            self.updatePlaybackSnapshot(run)
-                        }
-                    }
-                    player.play()
-                }
-                run.playbackActive = args.enabled && player.isPlaying
-                updatePlaybackSnapshot(run)
-                invoke.resolve()
-            }
-        } catch { invoke.reject("invalid_voice_probe_args: \(error.localizedDescription)") }
-    }
-
     private func finish(reason: String, error: Bool) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard let run = active else { return }
@@ -384,16 +332,11 @@ final class NativeVoiceAudio {
         run.cancelled.store(true, ordering: .releasing)
         run.pipe?.stopAccepting()
         renderer.mute()
-        run.probeGeneration += 1
-        run.probeCaptureState.playing.store(false, ordering: .releasing)
-        run.player?.stop()
-        run.playbackActive = false
+        run.playbackCaptureState.playing.store(false, ordering: .releasing)
         if run.tapped { run.engine?.inputNode.removeTap(onBus: 0); run.tapped = false }
         for token in run.observations { NotificationCenter.default.removeObserver(token) }
         run.observations.removeAll()
         run.engine = nil
-        run.player = nil
-        run.probe = nil
         let pipe = run.pipe
         worker.async { [self, pipe, run] in
             let completed: (UInt64, String?) -> Void = { [self, run] sampleIndex, sealFailure in
@@ -418,9 +361,9 @@ final class NativeVoiceAudio {
     }
 
     private func updatePlaybackSnapshot(_ run: Run) {
-        run.probeCaptureState.playing.store(false, ordering: .releasing)
-        run.probeCaptureState.playbackMarker.store(run.ttsPlaybackId == nil ? 0 : run.ttsPlaybackMarker, ordering: .releasing)
-        run.probeCaptureState.playing.store(run.ttsPlaybackId == nil ? run.playbackActive : run.ttsPlaying, ordering: .releasing)
+        run.playbackCaptureState.playing.store(false, ordering: .releasing)
+        run.playbackCaptureState.playbackMarker.store(run.ttsPlaybackId == nil ? 0 : run.ttsPlaybackMarker, ordering: .releasing)
+        run.playbackCaptureState.playing.store(run.ttsPlaying, ordering: .releasing)
     }
 
     func exportSegment(_ invoke: Invoke) {
@@ -504,7 +447,6 @@ final class NativeVoiceAudio {
             DispatchQueue.main.async { [self] in
                 guard validIdentity(args.playbackId) else { invoke.reject("invalid_voice_playback_id"); return }
                 guard !disposed else { invoke.reject("cancelled:voice_playback"); return }
-                guard active?.playbackActive != true else { invoke.reject("voice_probe_busy"); return }
                 do {
                     let playback = try ensurePlayback()
                     guard playback.canStart(args.playbackId) else { invoke.reject("cancelled:voice_playback"); return }
@@ -642,20 +584,6 @@ final class NativeVoiceAudio {
         }
     }
 
-    private func loadProbe() throws -> AVAudioPCMBuffer {
-        guard let url = Bundle.main.url(forResource: "voice-probe", withExtension: "wav", subdirectory: "voice") else {
-            throw voiceAudioFailure("voice_probe_missing")
-        }
-        let file = try AVAudioFile(forReading: url)
-        let byteCount = Double(file.length) * Double(file.processingFormat.channelCount) * 4
-        guard file.length > 0, file.length <= Int64(UInt32.max), byteCount <= 4 * 1024 * 1024,
-              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)) else {
-            throw voiceAudioFailure("voice_probe_invalid")
-        }
-        try file.read(into: buffer)
-        return buffer
-    }
-
     func shutdown() {
         DispatchQueue.main.async { [self] in
             disposed = true
@@ -682,7 +610,6 @@ extension VcpMobilePlugin {
     @objc public func endVoiceCall(_ invoke: Invoke) { voice.endCall(invoke) }
     @objc public func startVoiceAudio(_ invoke: Invoke) { voice.start(invoke) }
     @objc public func stopVoiceAudio(_ invoke: Invoke) { voice.stop(invoke) }
-    @objc public func setVoiceProbe(_ invoke: Invoke) { voice.setProbe(invoke) }
     @objc public func exportVoiceSegment(_ invoke: Invoke) { voice.exportSegment(invoke) }
     @objc public func releaseVoiceSegments(_ invoke: Invoke) { voice.releaseSegments(invoke) }
     @objc public func startVoicePlayback(_ invoke: Invoke) { voice.startPlayback(invoke) }

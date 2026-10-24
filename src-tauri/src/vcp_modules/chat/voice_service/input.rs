@@ -52,7 +52,6 @@ struct SessionInner {
     audio_epoch: Option<u32>,
     last_sample: u64,
     allowed_after: u64,
-    local_probe_blocked: bool,
 }
 
 struct AudioResources {
@@ -794,88 +793,73 @@ pub fn handle_audio_event(app: &AppHandle, event: &VoiceAudioEvent) {
         }
         inner.audio_epoch = Some(frame.audio_epoch);
         inner.last_sample = frame.sample_index;
-        let probe = frame.playback_active && frame.playback_id.is_none();
-        if probe {
-            if failed.is_none() {
-                failed = inner.capture.take().map(|capture| capture.turn);
+        if event.speech_transition == Some(SpeechTransition::Start) {
+            // Only this source announces a barge-in. Input close and ASR
+            // failures never cancel or signal cancellation of a reply job.
+            if input.config.configured() {
+                let began = match call::begin_speech(app, &input.call) {
+                    Ok(began) => began,
+                    Err(error) => {
+                        call::input_status(
+                            app,
+                            &input.call.id,
+                            &input.id,
+                            "asr",
+                            None,
+                            Some(&error),
+                        );
+                        return;
+                    }
+                };
+                let (sender, receiver) = mpsc::channel(AUDIO_SLOTS);
+                let turn = Arc::new(Utterance {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    batch_id: began.batch_id,
+                    sequence: began.sequence,
+                    cancel: input.cancel.child_token(),
+                    segments: sender,
+                    _work: call::input_work(app, &input.call.id),
+                });
+                inner.capture = Some(ActiveCapture {
+                    turn: turn.clone(),
+                    window: CaptureWindow::new(
+                        frame.audio_epoch,
+                        frame.sample_index,
+                        inner.allowed_after,
+                        // Playback may end during a long confirmation and
+                        // switch VAD to its shorter ordinary onset. Keep
+                        // the whole session's possible leading speech.
+                        input.vad_config.onset_samples(true).max(input.vad_config.onset_samples(false)),
+                    ),
+                });
+                inner.utterances.insert(turn.id.clone(), turn.clone());
+                created = Some((turn, receiver));
+            } else if input.call.sent_turn().is_some() {
+                call::interrupt_reply(app, &input.call.id);
             }
-            inner.local_probe_blocked = true;
-            inner.allowed_after = frame.sample_index;
         }
-        if inner.local_probe_blocked {
-            if !probe && !event.speech_active {
-                inner.local_probe_blocked = false;
+        let finished = event.speech_transition == Some(SpeechTransition::End);
+        if let Some(capture) = inner.capture.as_mut() {
+            jobs = capture
+                .window
+                .advance(frame.sample_index, finished)
+                .into_iter()
+                .map(|window| (capture.turn.clone(), window))
+                .collect();
+        }
+        if finished {
+            if let Some(capture) = inner.capture.take() {
+                input
+                    .call
+                    .end_speech(&capture.turn.batch_id, capture.turn.sequence);
+                // Custom short pauses and long onset confirmation must not
+                // let the next utterance export already-submitted audio.
                 inner.allowed_after = frame.sample_index;
             }
-        } else {
-            if event.speech_transition == Some(SpeechTransition::Start) {
-                // Only this source announces a barge-in. Input close and ASR
-                // failures never cancel or signal cancellation of a reply job.
-                if input.config.configured() {
-                    let began = match call::begin_speech(app, &input.call) {
-                        Ok(began) => began,
-                        Err(error) => {
-                            call::input_status(
-                                app,
-                                &input.call.id,
-                                &input.id,
-                                "asr",
-                                None,
-                                Some(&error),
-                            );
-                            return;
-                        }
-                    };
-                    let (sender, receiver) = mpsc::channel(AUDIO_SLOTS);
-                    let turn = Arc::new(Utterance {
-                        id: uuid::Uuid::new_v4().to_string(),
-                        batch_id: began.batch_id,
-                        sequence: began.sequence,
-                        cancel: input.cancel.child_token(),
-                        segments: sender,
-                        _work: call::input_work(app, &input.call.id),
-                    });
-                    inner.capture = Some(ActiveCapture {
-                        turn: turn.clone(),
-                        window: CaptureWindow::new(
-                            frame.audio_epoch,
-                            frame.sample_index,
-                            inner.allowed_after,
-                            // Playback may end during a long confirmation and
-                            // switch VAD to its shorter ordinary onset. Keep
-                            // the whole session's possible leading speech.
-                            input.vad_config.onset_samples(true).max(input.vad_config.onset_samples(false)),
-                        ),
-                    });
-                    inner.utterances.insert(turn.id.clone(), turn.clone());
-                    created = Some((turn, receiver));
-                } else if input.call.sent_turn().is_some() {
-                    call::interrupt_reply(app, &input.call.id);
-                }
-            }
-            let finished = event.speech_transition == Some(SpeechTransition::End);
-            if let Some(capture) = inner.capture.as_mut() {
-                jobs = capture
-                    .window
-                    .advance(frame.sample_index, finished)
-                    .into_iter()
-                    .map(|window| (capture.turn.clone(), window))
-                    .collect();
-            }
-            if finished {
-                if let Some(capture) = inner.capture.take() {
-                    input
-                        .call
-                        .end_speech(&capture.turn.batch_id, capture.turn.sequence);
-                    // Custom short pauses and long onset confirmation must not
-                    // let the next utterance export already-submitted audio.
-                    inner.allowed_after = frame.sample_index;
-                }
-            }
-            input
-                .pending_exports
-                .fetch_add(jobs.len(), Ordering::AcqRel);
         }
+        input
+            .pending_exports
+            .fetch_add(jobs.len(), Ordering::AcqRel);
     }
     if let Some(turn) = failed {
         fail_turn(
@@ -883,7 +867,7 @@ pub fn handle_audio_event(app: &AppHandle, event: &VoiceAudioEvent) {
             &input,
             &turn,
             "asr",
-            "音频输入中断或进入本地诊断，这段语音已取消识别。".into(),
+            "音频输入中断，这段语音已取消识别。".into(),
         );
     }
     if let Some((turn, receiver)) = created {

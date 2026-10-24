@@ -19,7 +19,6 @@ const createMicrophoneMonitor = (...callbacks: [
 let monitor: ReturnType<typeof createMicrophoneMonitor> | undefined;
 const startCommand = 'start_voice_microphone';
 const stopCommand = 'close_voice_microphone';
-const probeCommand = 'plugin:vcp-mobile|set_voice_probe';
 const audioEvent = 'vcp-voice-audio';
 
 beforeEach(() => mockInvoke(startCommand, () => ({ configured: true })));
@@ -33,7 +32,7 @@ function emitFrame(sessionId: string, overrides: Partial<VoiceAudioFrame> = {}) 
   emitTauriEvent(audioEvent, {
     kind: 'frame', sessionId, audioEpoch: 1, sampleIndex: 512, probability: 0.8,
     level: 0.7, bands: Array(32).fill(0.5), aecState: 'enabled', route: 'speaker',
-    playbackActive: false, probeRevision: 0, speechActive: true, speechTransition: 'start', discontinuity: false,
+    playbackActive: false, speechActive: true, speechTransition: 'start', discontinuity: false,
     ...overrides,
   } satisfies VoiceAudioFrame);
 }
@@ -183,7 +182,6 @@ describe('native microphone client', () => {
     emitFrame(currentSession(), { sampleIndex: 1024, bands: [0.5] });
     emitFrame(currentSession(), { sampleIndex: 1536, level: Number.NaN });
     emitFrame(currentSession(), { audioEpoch: -1, sampleIndex: 2048 });
-    emitFrame(currentSession(), { probeRevision: -1, sampleIndex: 2560 });
     expect(onFrame).toHaveBeenCalledOnce();
   });
 
@@ -224,40 +222,6 @@ describe('native microphone client', () => {
     expect(onEnded).not.toHaveBeenCalled();
     expect(onFrame).toHaveBeenCalledOnce();
     expect(invokeMock.mock.calls.filter(([command]) => command === stopCommand)).toHaveLength(1);
-  });
-
-  it('runs the local probe only for running capture and does not create a new intent after a late start acknowledgement', async () => {
-    monitor = createMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn());
-    await expect(monitor.setProbe(true)).resolves.toBe(false);
-    expect(invokeMock).not.toHaveBeenCalled();
-    await monitor.start();
-    const pending = deferred<void>();
-    mockInvoke(probeCommand, args => args?.enabled ? pending.promise : undefined);
-    const enabled = monitor.setProbe(true);
-    await monitor.setProbe(false);
-    expect(invokeMock).toHaveBeenLastCalledWith(probeCommand, { sessionId: currentSession(), enabled: false });
-
-    pending.resolve();
-    await expect(enabled).resolves.toBe(true);
-    expect(invokeMock.mock.calls.filter(([command]) => command === probeCommand)).toEqual([
-      [probeCommand, { sessionId: currentSession(), enabled: true }],
-      [probeCommand, { sessionId: currentSession(), enabled: false }],
-    ]);
-  });
-
-  it('settles a pending probe when microphone capture stops and cannot affect a newer session', async () => {
-    monitor = createMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn());
-    await monitor.start();
-    const oldId = currentSession();
-    const pending = deferred<void>();
-    mockInvoke(probeCommand, () => pending.promise);
-    const enabled = monitor.setProbe(true);
-    monitor.stop();
-    await expect(enabled).resolves.toBe(false);
-    await monitor.start();
-    pending.resolve();
-    await flushPromises();
-    expect(invokeMock.mock.calls.filter(([command, args]) => command === probeCommand && args?.sessionId !== oldId)).toHaveLength(0);
   });
 
   it('does not interpret suspended WebView frames as a native capture failure', async () => {

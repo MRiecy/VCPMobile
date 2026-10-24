@@ -11,8 +11,7 @@ fn frame(index: u64, probability: f32, playback: bool) -> VoiceFrame {
         aec_state: AecState::Enabled,
         route: "speaker".into(),
         playback_active: playback,
-        playback_id: None,
-        probe_revision: 0,
+        playback_id: playback.then(|| "tts-turn-a".into()),
     }
 }
 
@@ -26,14 +25,13 @@ fn notice(id: &str, epoch: u32) -> VoiceNotice {
 }
 
 #[test]
-fn tts_barge_in_is_not_mistaken_for_a_probe_control() {
+fn tts_barge_in_preserves_the_playback_identity() {
     let mut sessions = Sessions::default();
     sessions.begin("call-a".into(), VoiceVadConfig::default()).unwrap();
     for step in 1..=6 {
         let mut input = frame(step * 512, 0.9, true);
         input.playback_id = Some("tts-turn-a".into());
-        let (event, stop_probe) = sessions.consume_frame(input).unwrap();
-        assert!(stop_probe.is_none());
+        let event = sessions.consume_frame(input).unwrap();
         if step == 6 {
             let VoiceAudioEvent::Frame(frame) = event else { panic!("expected voice frame") };
             assert_eq!(frame.speech_transition, Some(SpeechTransition::Start));
@@ -289,7 +287,7 @@ fn a_new_capture_uses_its_own_configuration_snapshot() {
     sessions.begin("call-a".into(), config).unwrap();
     config.sensitivity = VoiceVadSensitivity::Low;
     for step in 1..=3 {
-        let (VoiceAudioEvent::Frame(sample), _) = sessions
+        let VoiceAudioEvent::Frame(sample) = sessions
             .consume_frame(frame(step * 512, 0.5, false))
             .unwrap()
         else {
@@ -302,7 +300,7 @@ fn a_new_capture_uses_its_own_configuration_snapshot() {
     for step in 1..=6 {
         let mut input = frame(step * 512, 0.69, false);
         input.session_id = "call-b".into();
-        let (VoiceAudioEvent::Frame(sample), _) = sessions.consume_frame(input).unwrap() else {
+        let VoiceAudioEvent::Frame(sample) = sessions.consume_frame(input).unwrap() else {
             panic!("expected voice frame");
         };
         assert!(!sample.speech_active);
@@ -456,7 +454,7 @@ fn stop_before_start_tombstone_keeps_a_later_active_capture_intact() {
     sample.sample_index = 1024;
     sessions.consume_frame(sample.clone()).unwrap();
     sample.sample_index = 1536;
-    let (event, _) = sessions.consume_frame(sample).unwrap();
+    let event = sessions.consume_frame(sample).unwrap();
     assert!(matches!(
         event,
         VoiceAudioEvent::Frame(SpeechFrame {
@@ -521,86 +519,4 @@ fn native_terminal_closes_only_the_current_audio_epoch() {
         Some(VoiceAudioEvent::Error(_))
     ));
     assert!(sessions.consume_frame(frame(1024, 0.9, false)).is_none());
-}
-
-#[test]
-fn probe_stop_is_requested_once_on_confirmed_speech_during_playback() {
-    let mut sessions = Sessions::default();
-    let generation = sessions.begin("call-a".into(), VoiceVadConfig::default()).unwrap();
-    for step in 1..=5 {
-        assert!(sessions
-            .consume_frame(frame(step * 512, 0.8, true))
-            .unwrap()
-            .1
-            .is_none());
-    }
-    assert_eq!(
-        sessions.consume_frame(frame(3072, 0.8, true)).unwrap().1,
-        Some((generation, 1))
-    );
-    assert!(sessions
-        .consume_frame(frame(3584, 0.8, true))
-        .unwrap()
-        .1
-        .is_none());
-}
-
-#[test]
-fn a_new_probe_intent_invalidates_late_setup_without_changing_the_capture_owner() {
-    let mut sessions = Sessions::default();
-    let generation = sessions.begin("call-a".into(), VoiceVadConfig::default()).unwrap();
-    let (_, enable_revision) = sessions.probe_intent("call-a", true).unwrap();
-    let (_, disable_revision) = sessions.probe_intent("call-a", false).unwrap();
-    assert!(!sessions.owns_control("call-a", generation, Some(enable_revision)));
-    assert!(sessions.owns_control("call-a", generation, Some(disable_revision)));
-    assert_eq!(
-        sessions.latest_probe("call-a", generation),
-        Some((disable_revision, false))
-    );
-    assert!(sessions.owns("call-a", generation));
-    sessions.cancel("call-a", None);
-    sessions.begin("call-b".into(), VoiceVadConfig::default()).unwrap();
-    assert!(sessions.latest_probe("call-a", generation).is_none());
-    assert!(sessions.probe_intent("call-a", false).is_err());
-}
-
-#[test]
-fn frames_from_an_older_probe_do_not_cancel_a_newer_playback_intent() {
-    let mut sessions = Sessions::default();
-    let generation = sessions.begin("call-a".into(), VoiceVadConfig::default()).unwrap();
-    let (_, old_probe) = sessions.probe_intent("call-a", true).unwrap();
-    sessions.probe_intent("call-a", false).unwrap();
-    let (_, new_probe) = sessions.probe_intent("call-a", true).unwrap();
-    for step in 1..=6 {
-        let mut old_frame = frame(step * 512, 0.9, true);
-        old_frame.probe_revision = old_probe;
-        assert!(sessions.consume_frame(old_frame).unwrap().1.is_none());
-    }
-    assert_eq!(
-        sessions.latest_probe("call-a", generation),
-        Some((new_probe, true))
-    );
-}
-
-#[test]
-fn automatic_probe_stop_has_a_revision_that_a_later_explicit_play_can_supersede() {
-    let mut sessions = Sessions::default();
-    let generation = sessions.begin("call-a".into(), VoiceVadConfig::default()).unwrap();
-    let (_, playing_revision) = sessions.probe_intent("call-a", true).unwrap();
-    let mut stop = None;
-    for step in 1..=6 {
-        let mut current_frame = frame(step * 512, 0.9, true);
-        current_frame.probe_revision = playing_revision;
-        stop = sessions.consume_frame(current_frame).unwrap().1;
-    }
-    let (stop_generation, stop_revision) = stop.unwrap();
-    assert_eq!(stop_generation, generation);
-    assert!(stop_revision > playing_revision);
-    assert_eq!(
-        sessions.latest_probe("call-a", generation),
-        Some((stop_revision, false))
-    );
-    let (_, next_revision) = sessions.probe_intent("call-a", true).unwrap();
-    assert!(next_revision > stop_revision);
-    assert!(!sessions.owns_control("call-a", generation, Some(stop_revision)));
 }

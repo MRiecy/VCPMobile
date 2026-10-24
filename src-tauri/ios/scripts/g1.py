@@ -169,7 +169,7 @@ def icon_entries():
 
 def voice_assets():
     assets = ROOT / "runtime-assets" / "voice" / "assets" / "voice"
-    for name in ("silero_vad.ort", "voice-probe.wav", "voice-probe.json"):
+    for name in ("silero_vad.ort",):
         require((assets / name).is_file(), f"Local voice resource is missing: {name}")
     return sorted(path for path in assets.iterdir() if path.is_file())
 

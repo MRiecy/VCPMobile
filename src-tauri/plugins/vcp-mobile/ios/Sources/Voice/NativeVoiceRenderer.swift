@@ -7,7 +7,6 @@ import Foundation
 final class NativeVoiceRenderer {
     private let token = UUID()
     private(set) var engine: AVAudioEngine?
-    private(set) var probePlayer: AVAudioPlayerNode?
     private(set) var speechPlayer: AVAudioPlayerNode?
     private(set) var isVoice = false
     private var observations: [NSObjectProtocol] = []
@@ -34,20 +33,13 @@ final class NativeVoiceRenderer {
                 engine.inputNode.voiceProcessingOtherAudioDuckingConfiguration = .init(
                     enableAdvancedDucking: false, duckingLevel: .min)
             }
-            guard let speechFormat = AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1),
-                  let probeFormat = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1) else {
+            guard let speechFormat = AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1) else {
                 throw voiceAudioFailure("voice_playback_format_unavailable")
             }
             let speech = AVAudioPlayerNode()
             speechPlayer = speech
             engine.attach(speech)
             engine.connect(speech, to: engine.mainMixerNode, format: speechFormat)
-            if voice {
-                let probe = AVAudioPlayerNode()
-                probePlayer = probe
-                engine.attach(probe)
-                engine.connect(probe, to: engine.mainMixerNode, format: probeFormat)
-            }
             engine.prepare()
             try engine.start()
             guard engine.isRunning else { throw voiceAudioFailure("audio_engine_not_running") }
@@ -69,8 +61,6 @@ final class NativeVoiceRenderer {
         observations.forEach { NotificationCenter.default.removeObserver($0) }
         observations.removeAll()
         onPlayer?(nil)
-        probePlayer?.stop()
-        probePlayer = nil
         speechPlayer = nil
         engine?.stop()
         engine?.reset()

@@ -294,9 +294,6 @@ describe('chat scene voice transitions', () => {
     pending.resolve(true);
     await flushPromises();
     expectStatus('正在聆听');
-    voice.speechActive = true;
-    await nextTick();
-    expectStatus('正在聆听');
     await view.get('[aria-label="关闭麦克风"]').trigger('click');
     expectStatus('');
 

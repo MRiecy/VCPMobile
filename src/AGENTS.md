@@ -51,19 +51,13 @@ src/
 
 `main.ts` 装配主应用；`App.vue` 持有进程级前端启动、原生窗口事件、分享与通知入口、Insets 桥、返回链和主工作区。`core/stores/shareStore.ts` 管理当前一次分享、草稿 revision 和消息提交，App 只转交入口事件；新分享覆盖未发送内容，已提交消息归聊天。全局监听必须在对应生命周期建立，并在卸载路径释放；不得由普通 Feature 重复注册第二套根监听。
 
-浮动助手的独立 WebView、页面、Store 与设置入口已移除；`core/stores/assistant.ts` 仍是主应用的智能体/群组列表所有者。
+`core/stores/assistant.ts` 是智能体/群组列表 owner。前端从 [core/utils/platform.ts](core/utils/platform.ts) 同步取得平台身份，普通差异在共享 Vue 中运行时分支，约定见 [跨平台开发规范](../docs/CROSS_PLATFORM_DEVELOPMENT.md)；`appLifecycle.bootstrap` 拥有启动编排，权限与任务状态由各自操作取得。
 
-前端从 [core/utils/platform.ts](core/utils/platform.ts) 同步取得 OS 插件提供的平台身份，普通差异由共享 Vue 中的运行时分支处理。`appLifecycle.bootstrap` 继续拥有启动编排；实际权限、生命周期和任务状态由各自操作取得，平台识别不再等待能力查询。具体约定见 [跨平台开发规范](../docs/CROSS_PLATFORM_DEVELOPMENT.md)。
-
-`useAppLifecycle` 将 iOS 原生 network online 与既有浏览器 online 汇入同一个流恢复 owner；iOS 在首次真实 active snapshot 前不发起恢复。卸载释放两条原生监听，迟到安装立即释放；网络路径可用只表示可以尝试对账，不表示服务端已可达。
-
-`useWebViewResume` 只向原生快照遮罩报告当前文档的可展示状态；按恢复 token、文档身份、首屏历史与壁纸解码配对，原生继续等待实际绘制提交。它不重跑 bootstrap、不接管 SSE、不以持续流式内容稳定作为揭幕条件。
-
-`useIOSWindowGeometry` 在根部配对原生 bounds/键盘与 visualViewport，同一可用矩形供根、全屏和底部 sheet 消费。内部组件不重复加 iOS 键盘 padding；浮动键盘只影响当前编辑区。`attachmentStore` 的 operation ID 贯穿原生选择与 Rust 登记，外部文件没有 HTML/XHR 入口；`temporaryExport` 只接 WebView 内存产物。
-
-`core/utils/nativeFilePicker.ts` 统一附件、头像、配置的 iOS 原生选择接纳：prepare 返回前保留取消意图，取得 reservation 后才启动 picker，结束后撤销剩余登记。Android 继续原单次选择。这个短期调用记录不替代 `attachmentStore` 的导入/CAS owner；已交付文件仍由实际消费者释放。
-
-`useNotificationProcessor` 将实时事件和系统快照中的原生事件注册失败归为同一固定 ID 告知；`notification` Store 私有的 `oncePerWebview` 接受记忆先于原 30 秒去重，关闭 Toast、清除或淘汰历史不会重置。新 WebView 的新 Pinia 可再次接受 Rust 保留的真实注册失败；guardian/helper 继续原有通知语义。
+- `useAppLifecycle`：唯一的流恢复 owner，汇入浏览器与 iOS 原生 online；网络可用只表示可尝试对账。
+- `useWebViewResume`：只向原生快照遮罩报告当前文档可展示，不重跑 bootstrap、不接管 SSE。
+- `useIOSWindowGeometry`：根部提供唯一可用矩形，供根、全屏和底部 sheet 消费；内部组件不重复处理键盘 padding。
+- `core/utils/nativeFilePicker.ts`：iOS 原生选择的预约与取消接纳；导入与 CAS 仍归 `attachmentStore`，外部文件不走 HTML/XHR，`temporaryExport` 只接 WebView 内存产物。
+- `useNotificationProcessor`：原生事件注册失败以固定 ID 在每个 WebView 内只告知一次。
 
 ### 3.2 Store、Composable 与组件
 
@@ -80,17 +74,14 @@ src/
 
 ### 3.4 设置与领域偏好
 
-群设置采用语音同款 `SettingsCanvas`。群聊模式 `chatMode` 独立保存、默认顺序发言，不继承同步 `mode`；列表快照的 `mode` 是实际使用的模式。界面不提供跟随选项，也不暴露本机覆盖或同步实现说明。`assistant.saveGroup` 按表单 baseline 只提交真正改变的字段，避免参数编辑回写同步前的共享值。JEV 聊天入口通过现有 `group_turn` 和重连快照呈现阶段、成员队列和错误，前端不调度成员；运行中有草稿可继续发送，群停止立即中断全部。
+设置中心只提供导航与编辑会话骨架，字段和偏好归各自领域。新增设置项在所属领域接通 UI 与真实消费者，不把设置中心或主题 Store 扩为业务总容器。
 
-`features/chat/voice/voiceCallStore.ts` 与 `voiceConversation.ts` 提交通话操作并按 revision 呈现 Rust 快照，不再认领转写、提交消息或协调生成取消。`microphoneMonitor.ts` 接收 `vcp-voice-audio` 的有界频带；开关麦通过 Rust 单次命令完成准备、原生调用与封存，开麦意图携点击时的生命周期 epoch，防止后台恢复后执行旧意图。PCM、AEC、Silero、缓存和播放归移动插件。关麦及后台停止新采集，已录内容由 Rust 继续识别、发送和朗读；回前台不自动开麦。`voiceHistorySync.ts` 订阅已落盘消息并在应用恢复时对账，历史窗口按 ID 合并，深翻历史保留锚点；恢复不会重发转写、重播 TTS 或消费草稿、附件和编辑态。通用监听卸载只脱离视图，主动切换聊天和挂断仍结束通话。插话、挂断、手动停止模型会停止对应生成与朗读；TTS 独立停止或失败不取消模型。配置复用全局 Settings；`VoiceStyleGuidancePage` 编辑预置音色和样本复刻共用的两项全局 LLM 注入规则及自动指导开关，`VoiceSettingsPage` 管理这两种音色模式与可选的默认演绎指导，均返回保存；没有手动预设库，气泡朗读入口尚未接入。`VoiceTtsPreview` 使用草稿与独立任务 ID，`VoiceCloneSample` 通过原生 picker 导入持久样本引用。`VoiceGuidanceBlock` 默认折叠指导，正文音频标签不改展示。语音按纯文本进入现有群聊发言模式，不扩展手动 `@` 邀请。本地诊断不进入 ASR，系统 AEC 启用不代表效果已验证。
-
-`features/settings/catalog.ts` 组织稳定页面 ID、懒加载组件与布局；`SettingsView` / `useSettingsNavigation` 拥有当前访问、退场画面和返回桥接。身份、连接、总结、语音与 JEV 页面通过 `editing/useSettingsPageSession` 建立叶路径字段会话；正式 `ConfigSnapshot` 归 `core/stores/settings.ts`，按领域 revision 接纳 IPC 与 `vcp-config-changed`，迟到结果不能覆盖新快照。`core/config/generated/` 由 Rust 显式生成，`core/config/fields.ts` 提供类型化叶路径与批量 patch。各领域使用当前类型/default 规范坏叶与坏组、保留合法兄弟并丢弃未知内容，不保留 health/issues 或手动修复入口。修改字段走显式 edit，提交携 base values；请求错误、冲突或真实 IO 失败保留草稿，旧 ACK 不覆盖后续输入，不新增自动备份。
-
-依赖保存的诊断、重建与导出等待 commit 的确定结果；导入由连接页冻结并 settlePending 后提交，只接受覆盖字段。`active=false` 立即释放本次会话并关闭局部 ModelSelector、裁剪和导入确认，未交付 picker 沿既有 helper 取消；隐藏不启动保存，已提交任务继续归原 owner。
-
-`features/chat/preferences/` 拥有消息呈现、平滑动效、消息震动和流式工具折叠的类型、存储及只读 Store；`features/chat/settings/ChatPreferencesPage.vue` 只是一个入口，聊天消费者不依赖它挂载。主题草稿/确认仍归 ThemePicker 与 themeStore；自动检查更新偏好归 updateStore。聊天与更新共用 `core/preferences/localPreference.ts` 的异常捕获 IO，领域各自保留 key、编码和默认值。新增偏好应在所属领域接通 UI 与真实消费者，不把设置中心或主题 Store 扩为业务总容器。
-
-`features/settings/developer/` 持有本机开发者模式和显式触感试听。关于页六连击解锁后，经同一设置导航进入；返回开发者页的父级仍保留 SettingsSubPage 的 modal 所有权。解锁状态与试听参数不进入备份。配置备份 v2 由 `useConfigBackup` 协调 domains、groupPreferences 与 theme/chat；`normalize_domain_patch` 保留缺项，显式坏值采用当前默认，SQLite 部分同事务提交。界面偏好经 `normalizeThemePreferencePatch` / `normalizeChatPreferencePatch` 交原 localStorage owner 保存并分别报告结果。保留 v1 文件结构转换，不保留旧值别名或开发期旧 flat v2；文件损坏、格式不支持和 IO 失败仍报错。
+- **导航与编辑会话**：`features/settings/catalog.ts` 定义页面 ID、懒加载与布局；`SettingsView` / `useSettingsNavigation` 持有访问、退场画面与返回桥接。配置页经 `editing/useSettingsPageSession` 建立叶路径会话，正式 `ConfigSnapshot` 归 `core/stores/settings.ts`，按领域 revision 接纳 IPC 与 `vcp-config-changed`。提交携 base values；失败或冲突保留草稿，迟到结果与旧 ACK 不覆盖新状态，不新增自动备份。依赖保存的诊断、导出与导入先等待提交结果。`active=false` 立即释放会话与局部弹层，已提交任务仍归原 owner。`core/config/generated/` 由 Rust 生成，坏值规范化在 Rust，前端不提供修复入口。
+- **配置备份**：`useConfigBackup` 协调 v2 的 domains、groupPreferences 与 theme/chat 偏好；SQLite 部分同事务提交，界面偏好交回原 localStorage owner 并分别报告结果。只保留 v1 文件结构转换，不保留旧值别名。
+- **群设置**：使用 `SettingsCanvas`。`chatMode` 独立于同步 `mode` 保存、默认顺序发言，列表快照的 `mode` 才是实际模式；界面不提供跟随选项或同步实现说明。`assistant.saveGroup` 按表单 baseline 只提交变更字段。JEV 运行状态来自 `group_turn` 与重连快照，前端不调度成员。
+- **语音通话**：通话、转写、消息提交与生成取消归 Rust。`voiceCallStore` / `voiceConversation` 只提交操作并按 revision 呈现快照；`microphoneMonitor` 消费 `vcp-voice-audio` 有界频带，开麦意图携生命周期 epoch；`voiceHistorySync` 对账已落盘消息，恢复不重发、不重播、不消费草稿。PCM、AEC、Silero 与播放归移动插件。后台只停止新采集，回前台不自动开麦；主动切换聊天或挂断结束通话，通用卸载只脱离视图。TTS 停止或失败不取消模型；语音按纯文本进入现有群聊发言模式，不扩展手动 `@`。
+- **语音设置**：`VoiceSettingsPage`（音色模式、默认演绎指导）与 `VoiceStyleGuidancePage`（全局 LLM 注入规则、自动指导开关）复用全局 Settings，返回时保存。`VoiceTtsPreview` 使用草稿与独立任务 ID，`VoiceCloneSample` 经原生 picker 导入样本引用。
+- **本机偏好**：`features/chat/preferences/` 拥有消息呈现、动效、震动与工具折叠偏好，`ChatPreferencesPage` 只是入口；主题归 ThemePicker / themeStore，自动更新归 updateStore。三者共用 `core/preferences/localPreference.ts` 的 IO，各自保留 key、编码与默认值。`features/settings/developer/` 持有开发者模式与触感试听，不进入备份。
 
 ---
 

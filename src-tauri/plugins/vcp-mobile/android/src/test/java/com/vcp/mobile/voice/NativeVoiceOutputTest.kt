@@ -24,7 +24,7 @@ class NativeVoiceOutputTest {
         val session = mockk<VoiceAudioSession>(relaxed = true)
         val lease = mockk<VoiceAudioSession.OutputLease>(relaxed = true)
         every { session.acquireOutput(any()) } returns lease
-        val output = NativeVoiceOutput(session) { false }
+        val output = NativeVoiceOutput(session)
         val executor = NativeVoiceOutput::class.java.getDeclaredField("worker").apply { isAccessible = true }.get(output) as ThreadPoolExecutor
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)
@@ -35,7 +35,6 @@ class NativeVoiceOutputTest {
             val current = request("current")
             output.startVoicePlayback(current)
             verify(exactly = 1) { session.acquireOutput(any()) }
-            assertTrue(output.isBusy())
             assertFalse(output.snapshot().playing)
             val competing = request("competing")
             output.startVoicePlayback(competing)
@@ -44,21 +43,11 @@ class NativeVoiceOutputTest {
             output.startVoicePlayback(stale)
             verify(exactly = 1) { stale.reject("cancelled:voice_playback") }
             output.stopVoicePlayback(request("old"))
-            assertTrue(output.isBusy())
+            verify(exactly = 0) { current.reject(any<String>()) }
+            verify(exactly = 0) { lease.close() }
             output.stopVoicePlayback(request("current"))
             verify(exactly = 1) { current.reject("cancelled:voice_playback") }
-            assertFalse(output.isBusy())
+            verify(exactly = 1) { lease.close() }
         } finally { output.destroy(); release.countDown(); executor.awaitTermination(2, TimeUnit.SECONDS) }
-    }
-
-    @Test fun probeOwnerRejectsTtsWithoutAcquiringAnotherRoute() {
-        val session = mockk<VoiceAudioSession>(relaxed = true)
-        val output = NativeVoiceOutput(session) { true }
-        try {
-            val request = request("while-probe")
-            output.startVoicePlayback(request)
-            verify(exactly = 1) { request.reject("voice_probe_busy") }
-            verify(exactly = 0) { session.acquireOutput(any()) }
-        } finally { output.destroy() }
     }
 }

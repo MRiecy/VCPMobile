@@ -32,7 +32,6 @@
     "vcp-mobile:allow-check-root-access",
     "vcp-mobile:allow-launch-root-manager",
     "vcp-mobile:allow-open-unknown-sources-settings",
-    "vcp-mobile:allow-trigger-haptic-feedback",
-    "vcp-mobile:allow-set-voice-probe"
+    "vcp-mobile:allow-trigger-haptic-feedback"
   ]
 }
