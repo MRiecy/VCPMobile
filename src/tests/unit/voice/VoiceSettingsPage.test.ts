@@ -543,6 +543,7 @@ describe('语音设置使用正式设置快照', () => {
     await choose(wrapper, '音色模式', '样本复刻');
     await wrapper.get('button[aria-label="参考音频"]').trigger('click');
     await flushPromises();
+    expect(invokeMock.mock.calls.find(([command]) => command === 'plugin:vcp-mobile|pick_file')?.[1]).toMatchObject({ mode: 'file', maxBytes: 7_000_000 });
     expect(invokeMock.mock.calls.find(([command]) => command === 'import_voice_clone_sample')?.[1]).toEqual({ path: '/native/staging/voice.wav', name: 'voice.wav' });
     expect(wrapper.get('button[aria-label="参考音频"]').text()).toContain('voice.wav');
     await choose(wrapper, '音色模式', '预置音色');

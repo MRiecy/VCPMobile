@@ -71,7 +71,7 @@ const importSample = async () => {
   error.value = '';
   let picked: PickedFile | null = null;
   try {
-    picked = await pickFile('file', { operationId, maxBytes: 7_500_000 });
+    picked = await pickFile('file', { operationId, maxBytes: 7_000_000 });
     if (serial !== generation || !props.active) return;
     const result = await invoke<CloneSample>('import_voice_clone_sample', { path: picked.path, name: picked.name });
     imported.add(result.id);
@@ -81,7 +81,7 @@ const importSample = async () => {
     if (previous !== result.id && imported.has(previous)) void discard(previous);
   } catch (cause) {
     if (serial === generation && props.active && !/cancelled|canceled|取消/i.test(String(cause))) {
-      error.value = '导入失败，请选择有效的 MP3 / WAV，文件不能超过 7.5 MB。';
+      error.value = '导入失败，请选择有效的 MP3 / WAV，文件不能超过 7 MB。';
     }
   } finally {
     if (picked) {
@@ -113,7 +113,7 @@ defineExpose({ cancelPending, importing });
     <p v-if="error" class="m-0 text-xs leading-relaxed text-red-500" role="alert">{{ error }}</p>
     <p v-else-if="modelValue && !loading && !sample" class="m-0 text-xs leading-relaxed text-red-500" role="alert">样本文件缺失，请重新导入。</p>
     <SettingsNote>
-      建议使用简短、清晰的单人录音，文件大小≤7MB
+      建议使用简短、清晰的单人录音，文件大小 ≤ 7MB
     </SettingsNote>
   </div>
 </template>

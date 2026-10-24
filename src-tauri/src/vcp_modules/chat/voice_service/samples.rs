@@ -16,7 +16,7 @@ use tokio::{io::AsyncReadExt, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 
 const MAX_BASE64_BYTES: usize = 10_000_000;
-pub(super) const MAX_SAMPLE_BYTES: u64 = 7_500_000;
+pub(super) const MAX_SAMPLE_BYTES: u64 = 7_000_000;
 const MAX_METADATA_BYTES: u64 = 4096;
 const MAX_RECOVERY_ENTRIES: usize = 256;
 static SAMPLE_FILES: LazyLock<Mutex<SampleFiles>> =
@@ -209,8 +209,11 @@ async fn bounded_read(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
         .await
         .map_err(|e| format!("读取声音样本失败：{e}"))?;
     let metadata = file.metadata().await.map_err(|e| e.to_string())?;
-    if !metadata.is_file() || metadata.len() > limit {
-        return Err("声音样本过大，Base64 编码后不能超过 10 MB。".into());
+    if !metadata.is_file() {
+        return Err("选择的声音样本不是文件。".into());
+    }
+    if metadata.len() > limit {
+        return Err(format!("声音样本文件超过读取上限（{limit} 字节）。"));
     }
     let mut data = Vec::with_capacity(metadata.len() as usize);
     file.take(limit + 1)
@@ -218,7 +221,7 @@ async fn bounded_read(path: &Path, limit: u64) -> Result<Vec<u8>, String> {
         .await
         .map_err(|e| format!("读取声音样本失败：{e}"))?;
     if data.len() as u64 > limit {
-        return Err("声音样本过大，Base64 编码后不能超过 10 MB。".into());
+        return Err(format!("声音样本文件超过读取上限（{limit} 字节）。"));
     }
     Ok(data)
 }
@@ -465,8 +468,11 @@ async fn read_metadata(root: &Path, id: &str) -> Result<Option<VoiceCloneSample>
     let bytes = bounded_read(&path.join("metadata.json"), MAX_METADATA_BYTES).await?;
     let metadata: VoiceCloneSample =
         serde_json::from_slice(&bytes).map_err(|_| "声音样本信息损坏，请重新导入。")?;
-    if metadata.id != id || metadata.bytes == 0 || metadata.bytes > MAX_SAMPLE_BYTES {
+    if metadata.id != id || metadata.bytes == 0 {
         return Err("声音样本信息损坏，请重新导入。".into());
+    }
+    if metadata.bytes > MAX_SAMPLE_BYTES {
+        return Err("声音样本过大，文件不能超过 7 MB，请重新导入。".into());
     }
     match tokio::fs::metadata(path.join("audio")).await {
         Ok(file) if file.is_file() && file.len() == metadata.bytes => Ok(Some(metadata)),
@@ -695,7 +701,7 @@ mod tests {
     #[test]
     fn base64_budget_and_cancel_apply_before_submission() {
         let mut bytes = mp3();
-        bytes.resize(MAX_SAMPLE_BYTES as usize, 0);
+        bytes.resize(MAX_BASE64_BYTES / 4 * 3, 0);
         assert!(detect_format(&bytes).is_ok());
         bytes.push(0);
         assert!(detect_format(&bytes).is_err());
@@ -718,6 +724,43 @@ mod tests {
             .strip_prefix("data:audio/mpeg;base64,")
             .unwrap();
         assert_eq!(STANDARD.decode(encoded).unwrap(), bytes);
+    }
+
+    #[tokio::test]
+    async fn import_and_read_enforce_seven_decimal_megabytes() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let root = temp.path().join("voice-samples");
+        let source = temp.path().join("reference.wav");
+        let mut bytes = wav();
+        bytes.resize(7_000_000, 0);
+        bytes[4..8].copy_from_slice(&6_999_992u32.to_le_bytes());
+        bytes[40..44].copy_from_slice(&6_999_956u32.to_le_bytes());
+        tokio::fs::write(&source, &bytes).await.unwrap();
+
+        let mut sample = import_picked(&root, &source, None).await.unwrap();
+        let (read, format) = read_sample(&root, &sample.id).await.unwrap();
+        assert_eq!(read, bytes);
+        assert_eq!(format, CloneSampleFormat::Wav);
+
+        bytes.push(0);
+        tokio::fs::write(&source, &bytes).await.unwrap();
+        assert!(import_picked(&root, &source, None).await.is_err());
+
+        let directory = sample_path(&root, &sample.id).unwrap();
+        tokio::fs::write(directory.join("audio"), &bytes).await.unwrap();
+        assert!(read_sample(&root, &sample.id).await.is_err());
+
+        // Persisted references from before the limit change also pass through
+        // the current cap before a preview or narration can encode them.
+        sample.bytes = bytes.len() as u64;
+        tokio::fs::write(
+            directory.join("metadata.json"),
+            serde_json::to_vec(&sample).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(read_metadata(&root, &sample.id).await.is_err());
+        assert!(read_sample(&root, &sample.id).await.is_err());
     }
 
     #[tokio::test]
