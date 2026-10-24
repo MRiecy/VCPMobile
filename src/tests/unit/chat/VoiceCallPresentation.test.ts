@@ -134,13 +134,22 @@ afterEach(async () => {
 });
 
 describe('voice entry from the existing composer', () => {
-  it('emits the call intent without sending the draft', async () => {
+  it('shows the inline voice call button when empty, morphs to send with content, and keeps the attach-menu call entry', async () => {
     const view = mountComposer();
+    const primaryBtn = view.get('.primary-action-btn');
+    expect(primaryBtn.attributes('aria-label')).toBe('开始语音通话');
+    expect(primaryBtn.classes()).toContain('is-voice');
+    await primaryBtn.trigger('click');
+    expect(view.emitted('start-call')).toEqual([[]]);
+
     await view.get('textarea').setValue('尚未发送');
+    expect(primaryBtn.attributes('aria-label')).toBe('发送消息');
+    expect(primaryBtn.classes()).toContain('is-send');
+
     await view.get('[aria-label="添加附件"]').trigger('click');
     const call = view.get('[aria-label="开始语音通话"]');
     await call.trigger('click');
-    expect(view.emitted('start-call')).toEqual([[]]);
+    expect(view.emitted('start-call')).toEqual([[], []]);
     expect(view.emitted('send')).toBeUndefined();
     expect((view.get('textarea').element as HTMLTextAreaElement).value).toBe('尚未发送');
   });

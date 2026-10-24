@@ -157,6 +157,7 @@ const attachmentsReady = computed(() =>
   attachmentStore.stagedAttachments.every(attachment => attachment.status === 'done'),
 );
 const canSend = computed(() => hasContent.value && attachmentsReady.value && !props.disabled && !props.suspended && !shareStore.sending && !isPreparing.value);
+const actionIsVoiceCall = computed(() => !hasContent.value && !isGenerating.value && !isPreparing.value && !isExpanded.value);
 
 // 编辑重发意图与原会话绑定；切换会话取消意图时同时清理注入内容。
 let voiceResendEditor: typeof overlayStore.editorConfig = null;
@@ -252,6 +253,15 @@ const handleAction = () => {
   } else {
     handleSend();
   }
+};
+
+const handlePrimaryButtonClick = () => {
+  if (props.disabled || props.suspended) return;
+  if (actionIsVoiceCall.value) {
+    emit('start-call');
+    return;
+  }
+  handleAction();
 };
 
 // ----------------------------------------------------
@@ -598,20 +608,49 @@ onUnmounted(() => {
             </div>
           </button>
 
-          <Transition name="pop-slide">
-            <!-- 发送/中止按钮 -->
-            <button v-if="hasContent || isGenerating || isPreparing || isExpanded"
-              @click="handleAction"
-              :aria-label="actionIsStop ? '停止生成' : isPreparing ? '正在准备消息' : '发送消息'"
-              :disabled="!actionIsStop && !canSend"
-              class="w-8 h-8 flex items-center justify-center rounded-full shadow-sm active:scale-95 transition-all bg-blue-500 text-white"
-              :class="{ 'bg-red-500': actionIsStop, 'opacity-40': !actionIsStop && !canSend }"
+          <!-- 通话 / 发送 / 中止 形态切换主按钮 -->
+          <button
+            type="button"
+            @click="handlePrimaryButtonClick"
+            :aria-label="actionIsVoiceCall ? '开始语音通话' : actionIsStop ? '停止生成' : isPreparing ? '正在准备消息' : '发送消息'"
+            :disabled="actionIsVoiceCall ? (disabled || suspended) : (!actionIsStop && !canSend)"
+            class="primary-action-btn w-8 h-8 flex items-center justify-center rounded-full shadow-sm active:scale-95 relative overflow-hidden shrink-0"
+            :class="{
+              'is-voice': actionIsVoiceCall,
+              'is-stop': actionIsStop,
+              'is-send': !actionIsVoiceCall && !actionIsStop,
+              'opacity-40': actionIsVoiceCall ? (disabled || suspended) : (!actionIsStop && !canSend),
+            }"
+          >
+            <span class="primary-action-fill" aria-hidden="true"></span>
+
+            <!-- 语音通话声波 SVG（4 柱圆角声波） -->
+            <svg
+              class="primary-action-icon voice-wave-svg"
+              :class="{ 'is-active': actionIsVoiceCall }"
+              width="20"
+              height="20"
+              viewBox="0 0 24 24"
+              fill="none"
+              aria-hidden="true"
             >
-              <div v-if="actionIsStop" class="i-heroicons-stop-16-solid text-lg"></div>
-              <div v-else-if="isPreparing" class="i-heroicons-ellipsis-horizontal text-lg"></div>
-              <div v-else class="i-heroicons-paper-airplane text-[15px] -rotate-45 translate-x-0.2 -translate-y-0.2"></div>
-            </button>
-          </Transition>
+              <rect class="voice-wave-bar bar-1" x="5.8" y="8.8" width="2.2" height="6.4" rx="1.1" fill="currentColor" />
+              <rect class="voice-wave-bar bar-2" x="9.2" y="5.2" width="2.2" height="13.6" rx="1.1" fill="currentColor" />
+              <rect class="voice-wave-bar bar-3" x="12.6" y="7.2" width="2.2" height="9.6" rx="1.1" fill="currentColor" />
+              <rect class="voice-wave-bar bar-4" x="16.0" y="9.4" width="2.2" height="5.2" rx="1.1" fill="currentColor" />
+            </svg>
+
+            <!-- 发送 / 准备 / 停止 图标层 -->
+            <span
+              class="primary-action-icon send-state-icon"
+              :class="{ 'is-active': !actionIsVoiceCall }"
+              aria-hidden="true"
+            >
+              <span v-if="actionIsStop" class="i-heroicons-stop-16-solid text-lg block"></span>
+              <span v-else-if="isPreparing" class="i-heroicons-ellipsis-horizontal text-lg block"></span>
+              <span v-else class="i-heroicons-paper-airplane text-[15px] block -rotate-45 translate-x-0.2 -translate-y-0.2"></span>
+            </span>
+          </button>
         </div>
       </div>
     </div>
@@ -807,25 +846,104 @@ onUnmounted(() => {
   }
 }
 
-/* 气泡弹出/切换动画 */
-.pop-slide-enter-active,
-.pop-slide-leave-active {
-  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-  overflow: hidden;
-  white-space: nowrap;
+/* 通话 / 发送 / 停止 常驻主按钮：高对比底色 + 同心圆充能过渡 */
+.primary-action-btn {
+  background-color: var(--primary-text);
+  color: var(--secondary-bg);
+  transition: transform 150ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease;
 }
 
-.pop-slide-enter-from {
+.primary-action-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background-color: #3b82f6;
+  transform: scale(0.2);
   opacity: 0;
-  transform: scale(0.4) translateX(20px);
-  width: 0;
+  pointer-events: none;
+  transition:
+    transform 200ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 150ms ease,
+    background-color 180ms ease;
 }
 
-.pop-slide-leave-to {
+.primary-action-btn.is-send .primary-action-fill {
+  transform: scale(1);
+  opacity: 1;
+  background-color: #3b82f6;
+}
+
+.primary-action-btn.is-stop .primary-action-fill {
+  transform: scale(1);
+  opacity: 1;
+  background-color: #ef4444;
+}
+
+.primary-action-icon {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition:
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 140ms ease;
+}
+
+.voice-wave-svg {
+  color: var(--secondary-bg);
+}
+
+.voice-wave-svg:not(.is-active) {
   opacity: 0;
-  transform: scale(0.4) translateX(10px);
-  width: 0;
-  margin-left: -6px;
+  transform: scale(0.6);
+  pointer-events: none;
+}
+
+.voice-wave-svg.is-active {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.voice-wave-bar {
+  transform-origin: center 12px;
+  transition: transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.voice-wave-svg:not(.is-active) .voice-wave-bar {
+  transform: scaleY(0.28);
+}
+
+.voice-wave-svg.is-active .bar-1 { transition-delay: 0ms; }
+.voice-wave-svg.is-active .bar-2 { transition-delay: 18ms; }
+.voice-wave-svg.is-active .bar-3 { transition-delay: 36ms; }
+.voice-wave-svg.is-active .bar-4 { transition-delay: 54ms; }
+
+.send-state-icon {
+  position: absolute;
+  inset: 0;
+  color: #ffffff;
+}
+
+.send-state-icon:not(.is-active) {
+  opacity: 0;
+  transform: translate(-2px, 2px) scale(0.55);
+  pointer-events: none;
+}
+
+.send-state-icon.is-active {
+  opacity: 1;
+  transform: translate(0, 0) scale(1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .primary-action-btn,
+  .primary-action-fill,
+  .primary-action-icon,
+  .voice-wave-bar {
+    transition-duration: 0ms !important;
+    transition-delay: 0ms !important;
+  }
 }
 
 </style>
