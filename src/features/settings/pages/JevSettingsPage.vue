@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, shallowRef, useId, watch } from 'vue';
+import { computed, onBeforeUnmount, shallowRef, watch } from 'vue';
 import { useOverlayStore } from '../../../core/stores/overlay';
 import type { ContextMenuConfig, OverlayActionItem, PromptConfig } from '../../../core/types/overlay';
 import type { JevProvider } from '../../../core/config/generated/config';
@@ -15,7 +15,6 @@ import { JEV_FIELDS } from '../editing/fieldSets';
 import { useSettingsPageSession } from '../editing/useSettingsPageSession';
 
 const props = defineProps<SettingsPageProps>();
-const titleId = useId();
 const overlay = useOverlayStore();
 const { session, loading, error, reload } = useSettingsPageSession(JEV_FIELDS, () => props.active);
 const { draft, saving, leaving } = session;
@@ -33,8 +32,8 @@ const connectionFields = computed(() => ({
 const preset = (path: string) => SETTINGS_FIELDS.find(field => `jev.${field.path}` === path && field.domain === 'jev')?.preset;
 const numbers = [
   { field: 'jev.timeoutMs', title: '响应超时', unit: 'ms', description: '每次决策最多等待多久。' },
-  { field: 'jev.maxRetries', title: '最大重试次数', unit: '次', description: '服务繁忙或网络异常时重试；设为 0 可关闭。' },
-  { field: 'jev.retryBaseDelayMs', title: '重试等待时间', unit: 'ms', description: '首次重试前的等待时间，之后逐次延长。' },
+  { field: 'jev.maxRetries', title: '最大重试次数', unit: '次', description: '服务繁忙或网络异常时重试。' },
+  { field: 'jev.retryBaseDelayMs', title: '重试等待时间', unit: 'ms', description: '指数退避首次重试前的等待时间。' },
 ] as const;
 type NumberOption = typeof numbers[number];
 const menu = shallowRef<ContextMenuConfig | null>(null);
@@ -88,8 +87,7 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
     <p v-else-if="!draft && loading" role="status" class="m-0 text-sm opacity-60">正在加载设置…</p>
     <p v-if="saving || leaving" role="status" class="m-0 text-xs text-[var(--secondary-text)]">正在保存 JEV 设置…</p>
 
-    <section v-if="draft" class="flex flex-col gap-5" :aria-labelledby="titleId">
-      <h2 :id="titleId" class="settings-canvas-title">JEV 决策服务</h2>
+    <div v-if="draft" class="flex flex-col gap-5">
       <SettingsSection title="服务连接">
         <div>
           <SettingsRow title="启用 JEV" description="全局 JEV 开关">
@@ -109,7 +107,7 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
           <SettingsTextField :model-value="draft?.[connectionFields.model]" label="决策模型" mono :disabled="disabled"
             :placeholder="preset(connectionFields.model)" @update:model-value="session.edit(connectionFields.model, $event)" />
         </div>
-        <template #footer>地址和模型留空使用当前服务商预设。返回时自动保存，切换服务商会保留各自的设置。</template>
+        <template #footer>地址和模型留空使用当前服务商预设。</template>
       </SettingsSection>
 
       <SettingsDisclosure title="高级参数" description="超时、重试与代理" :disabled="disabled">
@@ -128,9 +126,8 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
           <SettingsTextField :model-value="draft?.['jev.appTitle']" label="应用名称" :disabled="disabled"
             :placeholder="preset('jev.appTitle')" @update:model-value="session.edit('jev.appTitle', $event)" />
         </div>
-        <p class="m-0 text-xs text-[var(--secondary-text)]">应用名称留空使用 {{ preset('jev.appTitle') }}。</p>
       </SettingsDisclosure>
-    </section>
+    </div>
   </SettingsCanvas>
 </template>
 

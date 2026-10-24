@@ -4,7 +4,6 @@ import { useThemeStore } from "../../core/stores/theme";
 import { LAYER_PAGE_BASE } from "../../core/constants/layers";
 import SlidePage from "../../components/ui/SlidePage.vue";
 
-import SettingsCard from "../../components/settings/SettingsCard.vue";
 import SettingsRow from "../../components/settings/SettingsRow.vue";
 import FluidBackground from "../../components/ui/WebGLFluidBackground.vue";
 import { settingsPages } from "./catalog";
@@ -127,56 +126,59 @@ onScopeDispose(() => fluidBgRef.value?.setActive(false));
       <!-- Header -->
       <header
         :inert="aboutDisplayed || !props.isOpen"
-        class="px-4 py-3 flex items-center justify-between border-b border-white/10 pt-[calc(var(--vcp-safe-top,24px)+12px)] pb-3 shrink-0"
+        class="border-b border-white/10 pt-[calc(var(--vcp-safe-top,24px)+12px)] pb-3 shrink-0"
       >
-        <h2 class="text-xl font-bold">{{ activeVisit ? subPageTitle : '全局设置' }}</h2>
-        <button
-          type="button"
-          :aria-label="activeVisit?.id === 'developer' ? '返回关于' : activeVisit ? '返回设置首页' : '关闭设置'"
-          @click="requestLeave"
-          class="min-h-11 min-w-11 p-2 transition-opacity flex items-center justify-center opacity-70 active:opacity-100"
-        >
-          <svg
-            v-if="activeVisit"
-            width="22"
-            height="22"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.5"
-            stroke-linecap="round"
-            stroke-linejoin="round"
+        <div class="flex items-center justify-between w-full min-w-0"
+          :class="activeVisit ? 'px-4' : 'mx-auto max-w-3xl px-4 sm:px-6'">
+          <h2 class="text-xl font-bold">{{ activeVisit ? subPageTitle : '全局设置' }}</h2>
+          <button
+            type="button"
+            :aria-label="activeVisit?.id === 'developer' ? '返回关于' : activeVisit ? '返回设置首页' : '关闭设置'"
+            @click="requestLeave"
+            class="min-h-11 min-w-11 p-2 transition-opacity flex items-center justify-center opacity-70 active:opacity-100"
           >
-            <path d="m15 18-6-6 6-6"/>
-          </svg>
-          <svg
-            v-else
-            width="22"
-            height="22"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.5"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <line x1="18" y1="6" x2="6" y2="18"></line>
-            <line x1="6" y1="6" x2="18" y2="18"></line>
-          </svg>
-        </button>
+            <svg
+              v-if="activeVisit"
+              width="22"
+              height="22"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="m15 18-6-6 6-6"/>
+            </svg>
+            <svg
+              v-else
+              width="22"
+              height="22"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2.5"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <line x1="18" y1="6" x2="6" y2="18"></line>
+              <line x1="6" y1="6" x2="18" y2="18"></line>
+            </svg>
+          </button>
+        </div>
       </header>
 
       <!-- Scrollable Area -->
       <div class="flex-1 min-h-0 relative overflow-hidden">
         <!-- 主页 -->
         <div :inert="!!displayedVisit || !props.isOpen"
-          class="h-full overflow-y-auto px-3 pt-8 pb-safe flex flex-col no-rubber-band">
-          <p v-if="settingsStore.error" role="alert" class="text-sm text-red-500">
-            {{ settingsStore.error }}
-            <button type="button" class="ml-2 underline" :disabled="!homeActive || settingsStore.loading" @click="reloadSettings">重新加载</button>
-          </p>
-          <SettingsCard>
-            <div class="divide-y divide-black/5 dark:divide-white/5">
+          class="h-full overflow-y-auto no-rubber-band">
+          <div class="mx-auto flex min-h-full w-full max-w-3xl min-w-0 flex-col px-3 pt-3 pb-[calc(16px+var(--vcp-safe-bottom,0px))] sm:px-5">
+            <p v-if="settingsStore.error" role="alert" class="shrink-0 px-1 text-sm text-red-500 break-words">
+              {{ settingsStore.error }}
+              <button type="button" class="ml-2 underline" :disabled="!homeActive || settingsStore.loading" @click="reloadSettings">重新加载</button>
+            </p>
+            <div class="shrink-0 divide-y divide-black/5 dark:divide-white/5">
               <SettingsRow
                 v-for="cat in rootPages"
                 :key="cat.id"
@@ -186,11 +188,11 @@ onScopeDispose(() => fluidBgRef.value?.setActive(false));
                 @click="openPage(cat.id)"
               />
             </div>
-          </SettingsCard>
 
-          <!-- Footer -->
-          <div class="mt-auto text-center opacity-15 text-[8px] py-8 pb-12 font-mono uppercase tracking-[0.25em] select-none">
-            VCP MOBILE // PROJECT AVATAR // 2026.04.07
+            <!-- Footer -->
+            <div class="mt-auto shrink-0 px-1 pt-6 text-center break-words opacity-15 text-[8px] font-mono uppercase tracking-[0.25em] select-none">
+              VCP MOBILE // PROJECT AVATAR // 2026.04.07
+            </div>
           </div>
         </div>
 

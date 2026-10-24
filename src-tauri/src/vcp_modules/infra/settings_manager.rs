@@ -132,7 +132,9 @@ fn classify_runtime_settings_changes(
         let enabled_changed = old.distributed.enabled != settings.distributed.enabled;
         let params_changed = old.distributed.ws_url != settings.distributed.ws_url
             || old.distributed.vcp_key != settings.distributed.vcp_key
-            || old.distributed.device_name != settings.distributed.device_name;
+            || old.distributed.device_name != settings.distributed.device_name
+            || old.log.url != settings.log.url
+            || old.log.key != settings.log.key;
         enabled_changed || (params_changed && settings.distributed.enabled)
     });
     RuntimeSettingsChanges {

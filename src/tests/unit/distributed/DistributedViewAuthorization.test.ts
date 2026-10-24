@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import DistributedView from "@/features/distributed/DistributedView.vue";
 import { useNotificationStore } from "@/core/stores/notification";
 import { useSettingsStore } from "@/core/stores/settings";
-import { invokeMock, mockInvoke } from "@/tests/mocks/tauri";
+import { emitTauriEvent, invokeMock, mockInvoke } from "@/tests/mocks/tauri";
 import { mountWithPinia } from "@/tests/utils/mount";
 import type { ConfigSaveResult, ConfigUpdate } from "@/core/config/generated/config";
 import { applyConfigRequest, configRequestChanges, makeConfigSnapshot, makeSettings } from "@/tests/helpers/config";
@@ -52,9 +52,9 @@ function installBaseMocks(tools: ToolFixture[]) {
     "log.url": "wss://log.invalid",
     "log.key": "legacy-log-key",
     "conversation.topicSummaryModel": "",
-    "distributed.wsUrl": "wss://distributed.example/ws",
-    "distributed.vcpKey": "distributed-key",
-    "distributed.deviceName": "Phone",
+    "distributed.wsUrl": "wss://log.invalid",
+    "distributed.vcpKey": "legacy-log-key",
+    "distributed.deviceName": "VCPMobile",
   }));
   mockInvoke("read_settings", () => snapshot);
   mockInvoke("get_distributed_status", () => disconnectedStatus);
@@ -121,7 +121,9 @@ describe("DistributedView explicit tool authorization", () => {
     testPlatform.value = 'ios';
     installBaseMocks([]);
     const loaded = makeConfigSnapshot(makeSettings({
-      'distributed.deviceName': 'Tablet',
+      'log.url': 'wss://configured.example/ws',
+      'log.key': 'configured-key',
+      'distributed.deviceName': 'VCPMobile',
       'distributed.wsUrl': 'wss://configured.example/ws',
       'distributed.vcpKey': 'configured-key',
     }));
@@ -148,14 +150,14 @@ describe("DistributedView explicit tool authorization", () => {
       expect(writes).toHaveLength(1);
       const request = writes[0][1]?.request as ConfigUpdate;
       expect(configRequestChanges(request)).toEqual({
-        'distributed.deviceName': 'Tablet',
+        'distributed.deviceName': 'VCPMobile',
         'distributed.wsUrl': 'wss://configured.example/ws',
         'distributed.vcpKey': 'configured-key',
         'distributed.enabled': true,
       });
       expect(request.patches).toEqual([expect.objectContaining({
         domain: 'distributed', expectedRevision: '1',
-        baseValues: { deviceName: 'Tablet', wsUrl: 'wss://configured.example/ws', vcpKey: 'configured-key', enabled: false },
+        baseValues: { deviceName: 'VCPMobile', wsUrl: 'wss://configured.example/ws', vcpKey: 'configured-key', enabled: false },
       })]);
 
       save.resolve({ status: 'saved', snapshot: applyConfigRequest(loaded, request) });
@@ -172,7 +174,9 @@ describe("DistributedView explicit tool authorization", () => {
     installBaseMocks([]);
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const fresh = makeConfigSnapshot(makeSettings({
-      'distributed.deviceName': 'Reloaded tablet',
+      'log.url': 'wss://reloaded.example/ws',
+      'log.key': 'reloaded-key',
+      'distributed.deviceName': 'VCPMobile',
       'distributed.wsUrl': 'wss://reloaded.example/ws',
       'distributed.vcpKey': 'reloaded-key',
     }), '2');
@@ -182,7 +186,7 @@ describe("DistributedView explicit tool authorization", () => {
     const wrapper = mountWithPinia(DistributedView, { props: { isOpen: true } });
     try {
       await flushPromises();
-      expect(useSettingsStore().settings?.distributed.deviceName).toBe('Phone');
+      expect(useSettingsStore().settings?.distributed.deviceName).toBe('VCPMobile');
       await wrapper.setProps({ isOpen: false });
       mockInvoke('read_settings', async () => { throw new Error('read unavailable'); });
       await wrapper.setProps({ isOpen: true });
@@ -202,8 +206,8 @@ describe("DistributedView explicit tool authorization", () => {
       await flushPromises();
       expect(invokeMock).toHaveBeenCalledWith('update_settings', { request: { patches: [{
         domain: 'distributed', expectedRevision: '2',
-        changes: { deviceName: 'Reloaded tablet', wsUrl: 'wss://reloaded.example/ws', vcpKey: 'reloaded-key', enabled: true },
-        baseValues: { deviceName: 'Reloaded tablet', wsUrl: 'wss://reloaded.example/ws', vcpKey: 'reloaded-key', enabled: false },
+        changes: { deviceName: 'VCPMobile', wsUrl: 'wss://reloaded.example/ws', vcpKey: 'reloaded-key', enabled: true },
+        baseValues: { deviceName: 'VCPMobile', wsUrl: 'wss://reloaded.example/ws', vcpKey: 'reloaded-key', enabled: false },
       }] } });
     } finally {
       wrapper.unmount();
@@ -224,8 +228,8 @@ describe("DistributedView explicit tool authorization", () => {
       await flushPromises();
       expect(invokeMock).toHaveBeenCalledWith('update_settings', { request: { patches: [{
         domain: 'distributed', expectedRevision: '1',
-        changes: { wsUrl: 'wss://distributed.example/ws', vcpKey: 'distributed-key', deviceName: 'Phone', enabled: true },
-        baseValues: { wsUrl: 'wss://distributed.example/ws', vcpKey: 'distributed-key', deviceName: 'Phone', enabled: true },
+        changes: { wsUrl: 'wss://log.invalid', vcpKey: 'legacy-log-key', deviceName: 'VCPMobile', enabled: true },
+        baseValues: { wsUrl: 'wss://log.invalid', vcpKey: 'legacy-log-key', deviceName: 'VCPMobile', enabled: true },
       }] } });
       expect(invokeMock).not.toHaveBeenCalledWith('reconcile_distributed_node_cmd');
 
@@ -582,6 +586,53 @@ describe("DistributedView explicit tool authorization", () => {
     ).toBe("false");
 
     wrapper.unmount();
+  });
+
+  it.each([false, true])("uses the acknowledged disconnect as the next connection's base without rebasing other fields (concurrent edit: %s)", async (concurrentEdit) => {
+    let snapshot = installBaseMocks([]);
+    snapshot.data.distributed.enabled = true;
+    mockInvoke('get_distributed_status', () => ({ ...disconnectedStatus, state: 'connected', connected: true }));
+    mockInvoke('update_settings', args => {
+      const request = args?.request as ConfigUpdate;
+      if (concurrentEdit && configRequestChanges(request)['distributed.enabled'] === false) {
+        snapshot = makeConfigSnapshot(makeSettings({
+          'distributed.enabled': true,
+          'distributed.deviceName': 'Changed elsewhere',
+          'distributed.wsUrl': 'wss://distributed.example/ws',
+          'distributed.vcpKey': 'distributed-key',
+        }), '2');
+      }
+      snapshot = applyConfigRequest(snapshot, request);
+      return { status: 'saved', snapshot };
+    });
+    const wrapper = mountWithPinia(DistributedView, { props: { isOpen: true } });
+    try {
+      await flushPromises();
+      await wrapper.findAll('button').find(button => button.text() === '断开连接')!.trigger('click');
+      await flushPromises();
+      emitTauriEvent('vcp-distributed-status', disconnectedStatus);
+      await flushPromises();
+
+      const nameInput = wrapper.get('input[placeholder="固定为 VCPMobile"]');
+      expect(nameInput.attributes()).toHaveProperty('disabled');
+
+      await wrapper.findAll('button').find(button => button.text() === '连接')!.trigger('click');
+      await flushPromises();
+
+      const writes = invokeMock.mock.calls.filter(([command]) => command === 'update_settings');
+      expect(writes).toHaveLength(2);
+      const request = writes[1][1]?.request as ConfigUpdate;
+      expect(request.patches).toEqual([expect.objectContaining({
+        domain: 'distributed', expectedRevision: '1',
+        changes: expect.objectContaining({ enabled: true, deviceName: 'VCPMobile' }),
+        baseValues: {
+          enabled: false, deviceName: 'VCPMobile',
+          wsUrl: 'wss://log.invalid', vcpKey: 'legacy-log-key',
+        },
+      })]);
+    } finally {
+      wrapper.unmount();
+    }
   });
 
   it("can stop an iOS node while the socket is still connecting", async () => {

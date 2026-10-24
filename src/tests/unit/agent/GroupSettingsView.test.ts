@@ -87,12 +87,19 @@ describe('GroupSettingsView editing and return saving', () => {
   }
 
   async function chooseMode(label: string) {
-    await wrapper!.get('[aria-label="群聊模式"]').trigger('click');
-    const overlay = useOverlayStore();
-    const action = overlay.contextMenuConfig?.actions.find(item => item.label === label);
-    if (!action) throw new Error(`Missing mode: ${label}`);
-    action.handler();
-    overlay.closeContextMenu();
+    await wrapper!.get(`button[role="radio"][aria-label="${label}"]`).trigger('click');
+    await nextTick();
+  }
+
+  async function openMemberConfig(name: string) {
+    await wrapper!.get(`button[aria-label="配置 ${name}"]`).trigger('click');
+    await nextTick();
+  }
+
+  async function togglePrompt(title: string) {
+    const trigger = wrapper!.findAll('button.group-prompt-trigger').find(btn => btn.text().includes(title));
+    if (!trigger) throw new Error(`Missing prompt trigger: ${title}`);
+    await trigger.trigger('click');
     await nextTick();
   }
 
@@ -101,7 +108,7 @@ describe('GroupSettingsView editing and return saving', () => {
   it('uses the independent chat mode without saving an untouched draft', async () => {
     persisted.mode = 'jev';
     const view = await open();
-    expect(view.get('[aria-label="群聊模式"]').text()).toContain('顺序发言');
+    expect(view.get('button[role="radio"][aria-label="顺序发言"]').attributes('aria-checked')).toBe('true');
     expect(view.find('button[aria-label="下移 Nova"]').exists()).toBe(true);
     await view.get('button[aria-label="返回并保存群组设置"]').trigger('click');
     await flushPromises();
@@ -112,18 +119,23 @@ describe('GroupSettingsView editing and return saving', () => {
     const view = await open();
     await view.get('button[aria-label="下移 Nova"]').trigger('click');
     await chooseMode('JEV 智能群聊');
+    await togglePrompt('讨论规则');
     await control('讨论规则').setValue('有新证据时再发言');
-    await view.findAll('button').find(button => button.text().includes('成员发言风格'))!.trigger('click');
-    await control('Luna').setValue('先辨认隐含前提');
+    await openMemberConfig('Luna');
+    await control('Luna 的发言风格').setValue('先辨认隐含前提');
+    await view.get('[aria-label="Luna 群内配置"] .group-sheet-done-btn').trigger('click');
     await chooseMode('自然随机');
+    await openMemberConfig('Nova');
     await control('Nova 的触发标签').setValue('量子,数学');
+    await view.get('[aria-label="Nova 群内配置"] .group-sheet-done-btn').trigger('click');
     await chooseMode('顺序发言');
     expect(view.findAll('button[aria-label^="上移 "]').map(button => button.attributes('aria-label')))
       .toEqual(['上移 Luna', '上移 Nova', '上移 Mira']);
     await chooseMode('JEV 智能群聊');
     expect((control('讨论规则').element as HTMLTextAreaElement).value).toBe('有新证据时再发言');
-    await view.findAll('button').find(button => button.text().includes('成员发言风格'))!.trigger('click');
-    expect((control('Luna').element as HTMLTextAreaElement).value).toBe('先辨认隐含前提');
+    await openMemberConfig('Luna');
+    expect((control('Luna 的发言风格').element as HTMLTextAreaElement).value).toBe('先辨认隐含前提');
+    await view.get('[aria-label="Luna 群内配置"] .group-sheet-done-btn').trigger('click');
     expect(changes()).toHaveLength(0);
 
     await view.get('button[aria-label="返回并保存群组设置"]').trigger('click');
@@ -133,6 +145,30 @@ describe('GroupSettingsView editing and return saving', () => {
     expect(persisted.memberTags?.a1).toBe('量子,数学');
     expect(persisted.mode).toBe('sequential');
     expect(persisted.chatMode).toBe('jev');
+  });
+
+  it('pushes checked members to the end of the stack and extracts unchecked members directly', async () => {
+    const view = await open();
+    await view.get('button[aria-label="增减成员"]').trigger('click');
+    const dialog = view.get('[aria-label="增减群组成员"]');
+    const rowFor = (name: string) =>
+      dialog.findAll('label.group-sheet-member-row').find(item => item.text().includes(name))!;
+
+    // 直接抽离中间成员 Luna (a2)，其余成员保持 a1, a3 次序
+    await rowFor('Luna').get('input[type="checkbox"]').trigger('change');
+    expect(view.findAll('button[aria-label^="配置 "]').map(btn => btn.attributes('aria-label')))
+      .toEqual(['配置 Nova', '配置 Mira']);
+
+    // 重新勾选 Luna (a2)：按勾选顺序入栈到队尾 -> a1, a3, a2
+    await rowFor('Luna').get('input[type="checkbox"]').trigger('change');
+    expect(view.findAll('button[aria-label^="配置 "]').map(btn => btn.attributes('aria-label')))
+      .toEqual(['配置 Nova', '配置 Mira', '配置 Luna']);
+
+    await dialog.get('.group-sheet-done-btn').trigger('click');
+    await view.get('button[aria-label="返回并保存群组设置"]').trigger('click');
+    await flushPromises();
+    expect(persisted.members).toEqual(['a1', 'a3', 'a2']);
+    expect(persisted.modeSettings.sequential.speakerOrder).toEqual(['a1', 'a3', 'a2']);
   });
 
   it('retains the page and draft after system-back save failure, then retries the same edit', async () => {

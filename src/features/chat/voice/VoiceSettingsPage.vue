@@ -212,9 +212,6 @@ defineExpose({ beforeLeave });
             </div>
             <template #footer>
               <p class="m-0">地址留空使用 MiMo 官方服务。</p>
-              <p class="m-0">
-                {{ draft['voice.connection.apiKey'].trim() ? '返回时自动保存，重新开启麦克风或开始新的朗读时生效。' : '填写 API Key 后返回会自动保存；配置在下次开麦或新朗读时生效。' }}
-              </p>
             </template>
           </SettingsSection>
 
@@ -226,7 +223,7 @@ defineExpose({ beforeLeave });
                 :value="selectedLabel(field)" clickable :disabled="disabled"
                 :aria-label="selections[field].title" aria-haspopup="dialog" :aria-expanded="selectionOpen(field)"
                 @click="openSelection(field, $event)" />
-              <SettingsRow title="流式识别结果" description="说完后整段上传，再逐步返回转写文本。">
+              <SettingsRow title="流式识别结果" description="说完后整段上传，并流式返回转写文本。">
                 <template #action>
                   <SettingsSwitch :model-value="draft['voice.asr.stream']" :disabled="disabled" aria-label="流式识别结果"
                     @update:model-value="session.edit('voice.asr.stream', $event)" />

@@ -47,13 +47,17 @@ pub async fn reconcile_distributed_node(app_handle: &AppHandle, force_reconnect:
                 );
                 return;
             }
-            let ws_url = settings.distributed.ws_url.clone();
-            let vcp_key = settings.distributed.vcp_key.clone();
-            let device_name = if settings.distributed.device_name.is_empty() {
-                "VCPMobile".to_string()
+            let ws_url = if !settings.log.url.is_empty() {
+                settings.log.url.clone()
             } else {
-                settings.distributed.device_name.clone()
+                settings.distributed.ws_url.clone()
             };
+            let vcp_key = if !settings.log.key.is_empty() {
+                settings.log.key.clone()
+            } else {
+                settings.distributed.vcp_key.clone()
+            };
+            let device_name = "VCPMobile".to_string();
             log::info!(
                 "[Lifecycle] distributedEnabled=true, starting distributed node connection..."
             );

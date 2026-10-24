@@ -472,9 +472,9 @@ const loadSettings = async (view = viewGeneration) => {
     const settings = settingsStore.settings;
     if (!settings) throw new Error("连接配置为空");
     connectionBaseline = cloneConfig(settingsStore.snapshot!);
-    wsUrl.value = settings.distributed.wsUrl || "";
-    vcpKey.value = settings.distributed.vcpKey || "";
-    deviceName.value = settings.distributed.deviceName ?? "VCPMobile";
+    wsUrl.value = settings.log.url || "";
+    vcpKey.value = settings.log.key || "";
+    deviceName.value = "VCPMobile";
     connectionSettingsReady.value = true;
   } catch (e) {
     console.error("[DistributedView] Failed to load settings:", e);
@@ -528,10 +528,16 @@ const handleConnect = async () => {
 
 const handleDisconnect = async () => {
   if (connectionSaving.value) return;
+  const view = viewGeneration;
   connectionSaving.value = true;
   try {
     if (settingsStore.settings) {
-      await settingsStore.updateFields({ 'distributed.enabled': false });
+      const result = await settingsStore.updateFields({ 'distributed.enabled': false });
+      if (result.status === 'saved' && isCurrentView(view) && connectionBaseline) {
+        // Accept our own disconnect, retaining the original revision and field
+        // bases so concurrent edits to the connection details still conflict.
+        connectionBaseline.data.distributed.enabled = result.snapshot.data.distributed.enabled;
+      }
     }
   } catch (e: any) {
     console.error("[DistributedView] Connection stop failed:", e);
@@ -949,22 +955,22 @@ onBeforeUnmount(() => {
               <SettingsTextField
                 v-model="deviceName"
                 label="节点名称 / Device Name"
-                placeholder="例如 VCPMobile"
-                :disabled="connectionFieldsDisabled"
+                placeholder="固定为 VCPMobile"
+                :disabled="true"
               />
               <SettingsTextField
                 v-model="wsUrl"
                 label="WS 服务地址 / WebSocket URL"
-                placeholder="ws://192.168.x.x:port"
+                placeholder="读取自服务器连接"
                 mono
-                :disabled="connectionFieldsDisabled"
+                :disabled="true"
               />
               <SettingsTextField
                 v-model="vcpKey"
                 label="VCP 鉴权密钥 / VCP API Key"
-                placeholder="授权校验密钥"
+                placeholder="读取自服务器连接"
                 is-secure
-                :disabled="connectionFieldsDisabled"
+                :disabled="true"
               />
             </div>
           </SettingsCard>
