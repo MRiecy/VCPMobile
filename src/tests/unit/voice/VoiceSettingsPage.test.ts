@@ -401,7 +401,7 @@ describe('语音设置使用正式设置快照', () => {
   it('仅提供预置和复刻，切换保留音色草稿', async () => {
     const { wrapper } = await renderOverlay();
     await choose(wrapper, '朗读音色', '冰糖 · 中文女声');
-    await choose(wrapper, '音色模式', '样本复刻');
+    await choose(wrapper, '音色模式', '音色复刻');
     expect(wrapper.get('[aria-label="参考音频"]').isVisible()).toBe(true);
     expect(wrapper.find('[aria-label="朗读音色"]').exists()).toBe(false);
     expect(wrapper.find('[role="switch"][aria-label="流式朗读"]').exists()).toBe(false);
@@ -540,7 +540,7 @@ describe('语音设置使用正式设置快照', () => {
     mockInvoke('import_voice_clone_sample', () => asset);
     mockInvoke('get_voice_clone_sample', () => asset);
     const { wrapper } = await renderOverlay();
-    await choose(wrapper, '音色模式', '样本复刻');
+    await choose(wrapper, '音色模式', '音色复刻');
     await wrapper.get('button[aria-label="参考音频"]').trigger('click');
     await flushPromises();
     expect(invokeMock.mock.calls.find(([command]) => command === 'plugin:vcp-mobile|pick_file')?.[1]).toMatchObject({ mode: 'file', maxBytes: 7_000_000 });
@@ -548,7 +548,7 @@ describe('语音设置使用正式设置快照', () => {
     expect(wrapper.get('button[aria-label="参考音频"]').text()).toContain('voice.wav');
     await choose(wrapper, '音色模式', '预置音色');
     expect(invokeMock.mock.calls.filter(([command]) => command === 'discard_voice_clone_sample')).toHaveLength(0);
-    await choose(wrapper, '音色模式', '样本复刻');
+    await choose(wrapper, '音色模式', '音色复刻');
     await leaveVoiceSettings(wrapper);
     expect(database.voice.tts.cloneSampleId).toBe('new-sample');
     expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.tts.mode': 'clone', 'voice.tts.cloneSampleId': 'new-sample' });
@@ -559,7 +559,7 @@ describe('语音设置使用正式设置快照', () => {
     mockInvoke('plugin:vcp-mobile|pick_file', () => ({ path: '/native/staging/late.mp3', name: 'late.mp3', size: 1000, mime: 'audio/mpeg', hash: 'late-hash' }));
     mockInvoke('import_voice_clone_sample', () => pending.promise);
     const { wrapper } = await renderOverlay();
-    await choose(wrapper, '音色模式', '样本复刻');
+    await choose(wrapper, '音色模式', '音色复刻');
     await wrapper.get('button[aria-label="参考音频"]').trigger('click');
     await flushPromises();
     await wrapper.setProps({ active: false });
@@ -578,7 +578,7 @@ describe('语音设置使用正式设置快照', () => {
     mockInvoke('get_voice_clone_sample', () => asset);
     mockInvoke('update_settings', () => pending.promise);
     const { wrapper } = await renderOverlay();
-    await choose(wrapper, '音色模式', '样本复刻');
+    await choose(wrapper, '音色模式', '音色复刻');
     await wrapper.get('button[aria-label="参考音频"]').trigger('click');
     await flushPromises();
     await leaveVoiceSettings(wrapper);

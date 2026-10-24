@@ -14,7 +14,7 @@ export const settingOptions = <P extends SettingsFieldPath>(path: P, labels: Rec
 
 export const MIMO_TTS_MODES = [
   { value: 'builtin', label: '预置音色', model: 'mimo-v2.5-tts' },
-  { value: 'clone', label: '样本复刻', model: 'mimo-v2.5-tts-voiceclone' },
+  { value: 'clone', label: '音色复刻', model: 'mimo-v2.5-tts-voiceclone' },
 ] as const;
 
 // IDs are the official API values, including the four Chinese voice IDs.
