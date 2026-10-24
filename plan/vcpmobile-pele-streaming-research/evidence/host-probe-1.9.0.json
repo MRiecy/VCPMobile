@@ -1,0 +1,367 @@
+{
+  "runAt": "2026-10-24T08:08:52.980Z",
+  "researchDate": "2026-10-24",
+  "runtime": {
+    "node": "v24.14.1",
+    "platform": "win32",
+    "arch": "x64",
+    "cpu": "13th Gen Intel(R) Core(TM) i7-13700H"
+  },
+  "artifact": {
+    "version": "1.9.0",
+    "metadataUrl": "https://registry.npmjs.org/pele/1.9.0",
+    "tarball": "https://registry.npmjs.org/pele/-/pele-1.9.0.tgz",
+    "integrity": "sha512-KUmBt7P5JduVKQaP6FKfXiRgH3LBVIKsmdgPJZU7jD3ye6F+Z8fbms+OjivE7rWY09Qx+5X65VKe/9ywKFJ9Sw==",
+    "sha256": "d9dd5bc81e8d4d5747a2af07d54e2b8b9e897bff49cc4af7612d219c3d70ba33",
+    "license": "MIT",
+    "dependencies": {},
+    "scratch": "C:\\Users\\32595\\AppData\\Local\\Temp\\vcp-pele-research-vEHoaT"
+  },
+  "scope": "Host Node SVG string render only. No browser DOM, layout, font loading, sanitizer, IPC, Android/iOS, or Mermaid comparison.",
+  "cases": [
+    {
+      "name": "empty",
+      "source": "",
+      "supported": false,
+      "detected": null,
+      "result": {
+        "ok": false,
+        "code": "unsupported-diagram",
+        "message": "No diagram type detected for the given text.",
+        "ms": 0.1815999999998894
+      }
+    },
+    {
+      "name": "partial-keyword",
+      "source": "flowch",
+      "supported": false,
+      "detected": null,
+      "result": {
+        "ok": false,
+        "code": "unsupported-diagram",
+        "message": "No diagram type detected for the given text.",
+        "ms": 0.013399999999819556
+      }
+    },
+    {
+      "name": "header-only",
+      "source": "flowchart LR",
+      "supported": true,
+      "detected": "flowchart",
+      "result": {
+        "ok": true,
+        "type": "flowchart",
+        "width": 16,
+        "height": 16,
+        "svgChars": 705,
+        "svgHash": "d38134b014562d003e550a6ea731e0a9becab2ccdd32bdc1266cc9d23674d396",
+        "ms": 3.5609999999996944
+      }
+    },
+    {
+      "name": "node-open",
+      "source": "flowchart LR\nA[",
+      "supported": true,
+      "detected": "flowchart",
+      "result": {
+        "ok": false,
+        "code": "syntax",
+        "message": "Parse error on line 3:\n\n^\nExpecting 'SQE', 'UNICODE_TEXT', 'TEXT', 'TAGSTART', got '$end'",
+        "ms": 0.4938999999999396
+      }
+    },
+    {
+      "name": "node-label-open",
+      "source": "flowchart LR\nA[hello",
+      "supported": true,
+      "detected": "flowchart",
+      "result": {
+        "ok": false,
+        "code": "syntax",
+        "message": "Parse error on line 3:\n\n^\nExpecting 'SQE', 'UNICODE_TEXT', 'TEXT', 'TAGSTART', got '$end'",
+        "ms": 0.0522000000000844
+      }
+    },
+    {
+      "name": "node-complete",
+      "source": "flowchart LR\nA[hello]",
+      "supported": true,
+      "detected": "flowchart",
+      "result": {
+        "ok": true,
+        "type": "flowchart",
+        "width": 86,
+        "height": 64,
+        "svgChars": 997,
+        "svgHash": "71c78bb0d11104d5a2697998182a21dfb21799b651b2007f67f89121646e3ece",
+        "ms": 1.6304000000000087
+      }
+    },
+    {
+      "name": "edge-open",
+      "source": "flowchart LR\nA[hello] -->",
+      "supported": true,
+      "detected": "flowchart",
+      "result": {
+        "ok": false,
+        "code": "syntax",
+        "message": "Parse error on line 3:\n\n^\nExpecting 'NODE_STRING', got 'EOF'",
+        "ms": 0.1732999999999265
+      }
+    },
+    {
+      "name": "edge-target-open",
+      "source": "flowchart LR\nA[hello] --> B[wor",
+      "supported": true,
+      "detected": "flowchart",
+      "result": {
+        "ok": false,
+        "code": "syntax",
+        "message": "Parse error on line 3:\n\n^\nExpecting 'SQE', 'UNICODE_TEXT', 'TEXT', 'TAGSTART', got '$end'",
+        "ms": 0.07729999999992287
+      }
+    },
+    {
+      "name": "edge-complete-no-newline",
+      "source": "flowchart LR\nA[hello] --> B[world]",
+      "supported": true,
+      "detected": "flowchart",
+      "result": {
+        "ok": true,
+        "type": "flowchart",
+        "width": 209,
+        "height": 64,
+        "svgChars": 1519,
+        "svgHash": "578f78b9c838e5f9d788dfa22dcd8030112fc97f53830de63fe1c2e17a1ccfff",
+        "ms": 2.5401999999999134
+      }
+    },
+    {
+      "name": "edge-complete-newline",
+      "source": "flowchart LR\nA[hello] --> B[world]\n",
+      "supported": true,
+      "detected": "flowchart",
+      "result": {
+        "ok": true,
+        "type": "flowchart",
+        "width": 209,
+        "height": 64,
+        "svgChars": 1519,
+        "svgHash": "578f78b9c838e5f9d788dfa22dcd8030112fc97f53830de63fe1c2e17a1ccfff",
+        "ms": 0.3888000000001739
+      }
+    },
+    {
+      "name": "subgraph-open",
+      "source": "flowchart TD\nsubgraph group\nA --> B",
+      "supported": true,
+      "detected": "flowchart",
+      "result": {
+        "ok": false,
+        "code": "syntax",
+        "message": "Parse error on line 4:\n\n^\nExpecting 'end', got '$end'",
+        "ms": 0.1588000000001557
+      }
+    },
+    {
+      "name": "subgraph-complete",
+      "source": "flowchart TD\nsubgraph group\nA --> B\nend",
+      "supported": true,
+      "detected": "flowchart",
+      "result": {
+        "ok": true,
+        "type": "flowchart",
+        "width": 104,
+        "height": 220,
+        "svgChars": 1777,
+        "svgHash": "07d0adf38142ceaf9035d7f1425a4543841c1a5c4ec7cf33258cc7ddf39fae7a",
+        "ms": 0.6536999999998443
+      }
+    },
+    {
+      "name": "sequence-message-open",
+      "source": "sequenceDiagram\nAlice->>Bob: hel",
+      "supported": true,
+      "detected": "sequence",
+      "result": {
+        "ok": true,
+        "type": "sequence",
+        "width": 187,
+        "height": 167,
+        "svgChars": 2410,
+        "svgHash": "6f755b33ec39c6bbacc1ca5ccae72fb73317d05f8a6c09f4ba4a988b58b87c2e",
+        "ms": 2.2593000000001666
+      }
+    },
+    {
+      "name": "sequence-loop-open",
+      "source": "sequenceDiagram\nloop retry\nAlice->>Bob: hello",
+      "supported": true,
+      "detected": "sequence",
+      "result": {
+        "ok": false,
+        "code": "syntax",
+        "message": "Parse error on line 4:\n\n^\nExpecting 'end', got '$end'",
+        "ms": 0.14179999999987558
+      }
+    },
+    {
+      "name": "sequence-loop-complete",
+      "source": "sequenceDiagram\nloop retry\nAlice->>Bob: hello\nend",
+      "supported": true,
+      "detected": "sequence",
+      "result": {
+        "ok": true,
+        "type": "sequence",
+        "width": 187,
+        "height": 214,
+        "svgChars": 2994,
+        "svgHash": "40a839543ebfcfc16b1dac280a63e5586faa3462f0b9382701c6f18c167295ab",
+        "ms": 0.33650000000034197
+      }
+    },
+    {
+      "name": "chinese-flow",
+      "source": "flowchart LR\nA[开始] --> B[完成]",
+      "supported": true,
+      "detected": "flowchart",
+      "result": {
+        "ok": true,
+        "type": "flowchart",
+        "width": 200,
+        "height": 64,
+        "svgChars": 1483,
+        "svgHash": "18eaf5db2ed4110e2d1e5f7510403c60d76e6dae346a5f727eeabcc60b459cbf",
+        "ms": 0.5320999999999003
+      }
+    },
+    {
+      "name": "math-without-resolver",
+      "source": "flowchart LR\nA[\"$$x^2$$\"] --> B[done]",
+      "supported": true,
+      "detected": "flowchart",
+      "result": {
+        "ok": true,
+        "type": "flowchart",
+        "width": 232,
+        "height": 64,
+        "svgChars": 1524,
+        "svgHash": "dedce190e4387fe4a074859dd980a50944c4e8a11c4d174113c80cda826df273",
+        "ms": 0.3682999999996355
+      }
+    }
+  ],
+  "streams": [
+    {
+      "chunkChars": 1,
+      "sourceChars": 334,
+      "successes": 104,
+      "failures": 230,
+      "lastGoodAt": 334,
+      "errorCodes": {
+        "unsupported-diagram": 8,
+        "syntax": 222
+      },
+      "totalMs": 36.00709999999981
+    },
+    {
+      "chunkChars": 8,
+      "sourceChars": 334,
+      "successes": 14,
+      "failures": 28,
+      "lastGoodAt": 334,
+      "errorCodes": {
+        "unsupported-diagram": 1,
+        "syntax": 27
+      },
+      "totalMs": 3.359100000000126
+    },
+    {
+      "chunkChars": 32,
+      "sourceChars": 334,
+      "successes": 5,
+      "failures": 6,
+      "lastGoodAt": 334,
+      "errorCodes": {
+        "syntax": 6
+      },
+      "totalMs": 1.6613999999999578
+    },
+    {
+      "chunkChars": 128,
+      "sourceChars": 334,
+      "successes": 2,
+      "failures": 1,
+      "lastGoodAt": 334,
+      "errorCodes": {
+        "syntax": 1
+      },
+      "totalMs": 0.3667000000000371
+    }
+  ],
+  "warmRender": [
+    {
+      "nodes": 20,
+      "sourceChars": 544,
+      "samples": 20,
+      "successes": 20,
+      "p50Ms": 0.28860000000031505,
+      "p95Ms": 0.8420999999998457,
+      "maxMs": 1.4953999999997905,
+      "svgChars": 9650
+    },
+    {
+      "nodes": 100,
+      "sourceChars": 2944,
+      "samples": 20,
+      "successes": 20,
+      "p50Ms": 0.7517000000002554,
+      "p95Ms": 1.083599999999933,
+      "maxMs": 1.7163000000000466,
+      "svgChars": 46179
+    },
+    {
+      "nodes": 300,
+      "sourceChars": 9742,
+      "samples": 20,
+      "successes": 20,
+      "p50Ms": 2.2566000000001623,
+      "p95Ms": 3.556300000000192,
+      "maxMs": 4.449100000000271,
+      "svgChars": 139420
+    }
+  ],
+  "limits": [
+    {
+      "name": "source-default-50001",
+      "result": {
+        "ok": false,
+        "code": "limit",
+        "message": "Diagram source is longer than the limit of 50000 characters.",
+        "ms": 0.026199999999789725
+      }
+    },
+    {
+      "name": "edge-limit-2",
+      "result": {
+        "ok": false,
+        "code": "limit",
+        "message": "Edge limit exceeded. 2 edges found, but the limit is 2.",
+        "ms": 0.1202000000002954
+      }
+    },
+    {
+      "name": "output-limit-100",
+      "result": {
+        "ok": false,
+        "code": "limit",
+        "message": "Diagram output is longer than the limit of 100 characters.",
+        "ms": 0.14919999999983702
+      }
+    }
+  ],
+  "parsedModel": {
+    "type": "flowchart",
+    "svgEqualsDirect": true
+  }
+}
