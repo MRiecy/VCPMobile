@@ -716,7 +716,7 @@ mod tests {
         let initial = SettingsState::new().read_snapshot(&db).await.unwrap();
         let mut voice = json!(initial.data.voice);
         voice["tts"]["voice"] = json!("broken-voice");
-        voice["tts"]["stylePrompt"] = json!("保留");
+        voice["guidance"]["rules"] = json!("保留");
         voice["connection"]["apiKey"] = json!("keep-key");
         voice["unknown"] = json!("discard");
         sqlx::query("UPDATE config_domains SET value=?,revision=7 WHERE domain='voice'")
@@ -724,7 +724,7 @@ mod tests {
         let state = SettingsState::new();
         let before = state.read_snapshot(&db).await.unwrap();
         assert_eq!(before.data.voice.tts.voice, Settings::default().voice.tts.voice);
-        assert_eq!(before.data.voice.tts.style_prompt, "保留");
+        assert_eq!(before.data.voice.guidance.rules, "保留");
         assert_eq!(before.data.voice.connection.api_key, "keep-key");
         assert_eq!(before.domains[&ConfigDomain::Voice].revision, "8");
         let stored: Value = serde_json::from_str(&raw_domain(&db, ConfigDomain::Voice).await).unwrap();
@@ -733,7 +733,7 @@ mod tests {
         let after = saved(save(&state, &db, vec![patch(
             &before, ConfigDomain::Voice, json!({"asr.language":"en"}),
         )]).await);
-        assert_eq!(after.data.voice.tts.style_prompt, "保留");
+        assert_eq!(after.data.voice.guidance.rules, "保留");
         assert_eq!(after.data.voice.connection.api_key, "keep-key");
         assert_eq!(after.data.voice.asr.language, "en");
         assert_eq!(SettingsState::new().read_snapshot(&db).await.unwrap(), after);
@@ -749,7 +749,7 @@ mod tests {
             voice["connection"]["apiKey"] = json!("retained-key");
             voice["tts"]["voice"] = json!("Mia");
             voice["tts"]["stream"] = json!(false);
-            voice["tts"]["stylePrompt"] = json!("保留演绎指导");
+            voice["guidance"]["rules"] = json!("保留风格规则");
             voice["tts"]["cloneSampleId"] = json!("retained-sample");
             voice["futureField"] = json!({"keep":true});
             match mode {
@@ -777,12 +777,12 @@ mod tests {
         let state = SettingsState::new();
         let initial = state.read_snapshot(&db).await.unwrap();
         let selected = saved(save(&state, &db, vec![patch(&initial, ConfigDomain::Voice,
-            json!({"tts.mode":"clone", "tts.stylePrompt":"保留", "tts.cloneSampleId":"sample", "connection.apiKey":"voice-key"}))]).await);
+            json!({"tts.mode":"clone", "guidance.rules":"保留", "tts.cloneSampleId":"sample", "connection.apiKey":"voice-key"}))]).await);
         assert_eq!(selected.data.voice.tts.mode, super::super::VoiceTtsMode::Clone);
         let restored = saved(save(&state, &db, vec![patch(&selected, ConfigDomain::Voice,
             json!({"tts.mode":false}))]).await);
         assert_eq!(restored.data.voice.tts.mode, super::super::VoiceTtsMode::Builtin);
-        assert_eq!(restored.data.voice.tts.style_prompt, "保留");
+        assert_eq!(restored.data.voice.guidance.rules, "保留");
         assert_eq!(restored.data.voice.tts.clone_sample_id, "sample");
         assert_eq!(restored.data.voice.connection.api_key, "voice-key");
         let raw: Value = serde_json::from_str(&raw_domain(&db, ConfigDomain::Voice).await).unwrap();
@@ -1057,13 +1057,13 @@ mod tests {
                 vec![patch(
                     &base,
                     ConfigDomain::Voice,
-                    json!({"tts.stylePrompt":"低声"}),
+                    json!({"guidance.rules":"低声"}),
                 )],
             ),
         )
         .await
         .unwrap();
-        assert_eq!(saved(result).data.voice.tts.style_prompt, "低声");
+        assert_eq!(saved(result).data.voice.guidance.rules, "低声");
     }
 
     #[tokio::test]
@@ -1102,10 +1102,10 @@ mod tests {
         let base = state.read_snapshot(&db).await.unwrap();
         let after = saved(save(&state, &db, vec![patch(
             &base, ConfigDomain::Voice,
-            json!({"asr.stream":"bad-type","tts.stylePrompt":"valid sibling"}),
+            json!({"asr.stream":"bad-type","guidance.rules":"valid sibling"}),
         )]).await);
         assert_eq!(after.data.voice.asr.stream, Settings::default().voice.asr.stream);
-        assert_eq!(after.data.voice.tts.style_prompt, "valid sibling");
+        assert_eq!(after.data.voice.guidance.rules, "valid sibling");
         let invalid = DomainPatch {
             domain: ConfigDomain::Server,
             expected_revision: after.domains[&ConfigDomain::Server].revision.clone(),
@@ -1140,7 +1140,7 @@ mod tests {
                 vec![patch(
                     &base,
                     ConfigDomain::Voice,
-                    json!({"tts.stylePrompt":"后来保存的指导"}),
+                    json!({"guidance.rules":"后来保存的规则"}),
                 )],
             )
             .await,
@@ -1152,7 +1152,7 @@ mod tests {
 
         let restored = saved(save(&state, &db, vec![reset]).await);
         assert_eq!(restored.data.voice.vad.end_silence_ms, default_wait);
-        assert_eq!(restored.data.voice.tts.style_prompt, "后来保存的指导");
+        assert_eq!(restored.data.voice.guidance.rules, "后来保存的规则");
         let stored: Value =
             serde_json::from_str(&raw_domain(&db, ConfigDomain::Voice).await).unwrap();
         assert_eq!(stored["vad"]["endSilenceMs"], default_wait);
@@ -1239,21 +1239,21 @@ mod tests {
         let db = database(None).await;
         SettingsState::new().read_snapshot(&db).await.unwrap();
         sqlx::query("UPDATE config_domains SET value=? WHERE domain='voice'")
-            .bind(r#"{"vad":"broken-group","tts":{"stylePrompt":"原来的指导"}}"#)
+            .bind(r#"{"vad":"broken-group","guidance":{"rules":"原来的规则"}}"#)
             .execute(&db.pool).await.unwrap();
         let state = SettingsState::new();
         let base = state.read_snapshot(&db).await.unwrap();
-        let request = patch(&base, ConfigDomain::Voice, json!({"tts.stylePrompt":"stale draft"}));
+        let request = patch(&base, ConfigDomain::Voice, json!({"guidance.rules":"stale draft"}));
         let other_writer = SettingsState::new();
         let newer = saved(save(&other_writer, &db, vec![patch(
-            &base, ConfigDomain::Voice, json!({"tts.stylePrompt":"另一个操作保存的指导"}),
+            &base, ConfigDomain::Voice, json!({"guidance.rules":"另一个操作保存的规则"}),
         )]).await);
         assert_eq!(state.read_snapshot(&db).await.unwrap(), base);
         let before = raw_domain(&db, ConfigDomain::Voice).await;
         match save(&state, &db, vec![request]).await {
             ConfigSaveResult::Conflict { snapshot, conflicts } => {
                 assert_eq!(conflicts.len(), 1);
-                assert_eq!(conflicts[0].field, "tts.stylePrompt");
+                assert_eq!(conflicts[0].field, "guidance.rules");
                 assert_eq!(conflicts[0].code, "fieldConflict");
                 assert_eq!(snapshot, newer);
             }

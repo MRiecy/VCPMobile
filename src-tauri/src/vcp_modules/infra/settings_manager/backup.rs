@@ -292,19 +292,19 @@ mod tests {
     #[test]
     fn voice_mode_import_defaults_only_when_the_field_is_present_and_invalid() {
         for mode in [json!("unknown-mode"), json!(""), Value::Null, json!(false), json!(42), json!({})] {
-            let parsed = parse_backup_bytes(&backup(json!({"voice":{"tts":{"mode":mode,"stylePrompt":"保留"}}}))).unwrap();
-            assert_eq!(parsed.domains["voice"], json!({"tts":{"mode":"builtin","stylePrompt":"保留"}}));
-            let legacy = parse_backup_bytes(&v1_backup(json!({"voiceTtsMode":mode,"voiceTtsStylePrompt":"保留"}))).unwrap();
-            assert_eq!(legacy.domains["voice"], json!({"tts":{"mode":"builtin","stylePrompt":"保留"}}));
+            let parsed = parse_backup_bytes(&backup(json!({"voice":{"tts":{"mode":mode,"stream":false}}}))).unwrap();
+            assert_eq!(parsed.domains["voice"], json!({"tts":{"mode":"builtin","stream":false}}));
+            let legacy = parse_backup_bytes(&v1_backup(json!({"voiceTtsMode":mode,"voiceTtsStream":false}))).unwrap();
+            assert_eq!(legacy.domains["voice"], json!({"tts":{"mode":"builtin","stream":false}}));
         }
         for mode in ["builtin", "clone"] {
             let parsed = parse_backup_bytes(&backup(json!({"voice":{"tts":{"mode":mode}}}))).unwrap();
             assert_eq!(parsed.domains["voice"]["tts"]["mode"], mode);
         }
-        let partial = parse_backup_bytes(&backup(json!({"voice":{"tts":{"stylePrompt":"保留"}}}))).unwrap();
-        assert_eq!(partial.domains["voice"], json!({"tts":{"stylePrompt":"保留"}}));
-        let legacy_partial = parse_backup_bytes(&v1_backup(json!({"voiceTtsStylePrompt":"保留"}))).unwrap();
-        assert_eq!(legacy_partial.domains["voice"], json!({"tts":{"stylePrompt":"保留"}}));
+        let partial = parse_backup_bytes(&backup(json!({"voice":{"tts":{"stream":false}}}))).unwrap();
+        assert_eq!(partial.domains["voice"], json!({"tts":{"stream":false}}));
+        let legacy_partial = parse_backup_bytes(&v1_backup(json!({"voiceTtsStream":false}))).unwrap();
+        assert_eq!(legacy_partial.domains["voice"], json!({"tts":{"stream":false}}));
     }
 
     #[test]
@@ -312,7 +312,7 @@ mod tests {
         let parsed = parse_backup_bytes(&backup(json!({
             "voice":{
                 "asr":{"inputEncoding":"private-token","language":"en"},
-                "tts":{"voice":"private-token","stylePrompt":"保留"},
+                "tts":{"voice":"private-token","stream":false},
                 "vad":{"endSilenceMs":"private-token"}
             },
             "server":{"url":"https://saved.example","apiKey":42}
@@ -320,7 +320,7 @@ mod tests {
         let voice = schema::domain_defaults(ConfigDomain::Voice);
         assert_eq!(parsed.domains["voice"], json!({
             "asr":{"inputEncoding":voice["asr"]["inputEncoding"],"language":"en"},
-            "tts":{"voice":voice["tts"]["voice"],"stylePrompt":"保留"},
+            "tts":{"voice":voice["tts"]["voice"],"stream":false},
             "vad":{"endSilenceMs":voice["vad"]["endSilenceMs"]}
         }));
         assert_eq!(parsed.domains["server"], json!({"url":"https://saved.example","apiKey":""}));
@@ -347,14 +347,13 @@ mod tests {
     }
 
     #[test]
-    fn partial_rule_import_defers_cross_field_checks_to_committed_state() {
-        let parsed =
-            parse_backup_bytes(&backup(json!({"voice":{"guidance":{"autoGuidance":true}}})))
-                .unwrap();
-        assert_eq!(
-            parsed.domains["voice"],
-            json!({"guidance":{"autoGuidance":true}})
-        );
+    fn partial_rule_import_preserves_explicit_empty_and_custom_rules() {
+        for rules in ["", "  \n ", "自定义风格规则"] {
+            let parsed =
+                parse_backup_bytes(&backup(json!({"voice":{"guidance":{"rules":rules}}})))
+                    .unwrap();
+            assert_eq!(parsed.domains["voice"], json!({"guidance":{"rules":rules}}));
+        }
     }
 
     #[test]
@@ -392,7 +391,7 @@ mod tests {
     fn v1_keeps_false_and_empty_values_and_defaults_explicit_invalid_fields() {
         let parsed = parse_backup_bytes(&v1_backup(json!({
             "vcpApiKey":"", "userName":null, "distributedEnabled":false,
-            "voiceAsrStream":false, "voiceTtsStylePrompt":"", "unknownField":"ignored",
+            "voiceAsrStream":false, "voiceTtsCloneSampleId":"", "unknownField":"ignored",
             "syncLogLevel":"not-imported", "agentOrder":["not-imported"],
         })))
         .unwrap();
@@ -401,7 +400,7 @@ mod tests {
             json!({
                 "identity":{"userName":schema::domain_defaults(ConfigDomain::Identity)["userName"]},
                 "server":{"apiKey":""}, "distributed":{"enabled":false},
-                "voice":{"asr":{"stream":false},"tts":{"stylePrompt":""}},
+                "voice":{"asr":{"stream":false},"tts":{"cloneSampleId":""}},
             })
         );
     }
@@ -411,11 +410,11 @@ mod tests {
         let parsed = parse_backup_bytes(&v1_backup(json!({
             "chatEndpointMode":"private-token", "vcpApiKey":"retained-key",
             "distributedEnabled":"private-token", "voiceLanguage":"private-token",
-            "voiceTtsStylePrompt":"保留", "enableVcpToolInjection":true,
+            "voiceTtsVoice":"Mia", "enableVcpToolInjection":true,
         }))).unwrap();
         assert_eq!(parsed.domains["server"], json!({"endpointMode":"standard","apiKey":"retained-key"}));
         assert_eq!(parsed.domains["distributed"], json!({"enabled":false}));
-        assert_eq!(parsed.domains["voice"], json!({"asr":{"language":"auto"},"tts":{"stylePrompt":"保留"}}));
+        assert_eq!(parsed.domains["voice"], json!({"asr":{"language":"auto"},"tts":{"voice":"Mia"}}));
         assert!(!serde_json::to_string(&parsed).unwrap().contains("private-token"));
     }
 

@@ -80,7 +80,7 @@ src/
 - **配置备份**：`useConfigBackup` 协调 v2 的 domains、groupPreferences 与 theme/chat 偏好；SQLite 部分同事务提交，界面偏好交回原 localStorage owner 并分别报告结果。只保留 v1 文件结构转换，不保留旧值别名。
 - **群设置**：使用 `SettingsCanvas`。`chatMode` 独立于同步 `mode` 保存、默认顺序发言，列表快照的 `mode` 才是实际模式；界面不提供跟随选项或同步实现说明。`assistant.saveGroup` 按表单 baseline 只提交变更字段。JEV 运行状态来自 `group_turn` 与重连快照，前端不调度成员。
 - **语音通话**：通话、转写、消息提交与生成取消归 Rust。`voiceCallStore` / `voiceConversation` 只提交操作并按 revision 呈现快照；`microphoneMonitor` 消费 `vcp-voice-audio` 有界频带，开麦意图携生命周期 epoch；`voiceHistorySync` 对账已落盘消息，恢复不重发、不重播、不消费草稿。PCM、AEC、Silero 与播放归移动插件。后台只停止新采集，回前台不自动开麦；主动切换聊天或挂断结束通话，通用卸载只脱离视图。TTS 停止或失败不取消模型；语音按纯文本进入现有群聊发言模式，不扩展手动 `@`。
-- **语音设置**：`VoiceSettingsPage`（音色模式、默认演绎指导）与 `VoiceStyleGuidancePage`（全局 LLM 注入规则、自动指导开关）复用全局 Settings，返回时保存。`VoiceTtsPreview` 使用草稿与独立任务 ID，`VoiceCloneSample` 经原生 picker 导入样本引用。
+- **语音设置**：`VoiceSettingsPage`（音色模式与试听）与 `VoiceStyleGuidancePage`（统一风格指导规则）复用全局 Settings，返回时保存；通话将规则原样注入聊天上下文，不追加生成要求。`VoiceTtsPreview` 使用草稿与独立任务 ID，直接朗读试听文本；`VoiceCloneSample` 经原生 picker 导入样本引用。
 - **本机偏好**：`features/chat/preferences/` 拥有消息呈现、动效、震动与工具折叠偏好，`ChatPreferencesPage` 只是入口；主题归 ThemePicker / themeStore，自动更新归 updateStore。三者共用 `core/preferences/localPreference.ts` 的 IO，各自保留 key、编码与默认值。`features/settings/developer/` 持有开发者模式与触感试听，不进入备份。
 
 ---

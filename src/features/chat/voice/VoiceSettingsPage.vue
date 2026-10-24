@@ -17,7 +17,6 @@ import { useSettingsPageSession } from '../../settings/editing/useSettingsPageSe
 import { SETTINGS_DEFAULTS, MIMO_TTS_MODES, MIMO_VOICES, settingDescriptor, settingOptions } from './settings';
 import type { VoiceConfig } from '../../../core/config/generated/config';
 import { applySettingsFields, type SettingsFieldValues } from '../../../core/config/fields';
-import VoiceTextArea from './VoiceTextArea.vue';
 import VoiceCloneSample from './VoiceCloneSample.vue';
 import VoiceTtsPreview from './VoiceTtsPreview.vue';
 
@@ -231,13 +230,6 @@ defineExpose({ beforeLeave });
               :model-value="draft['voice.tts.cloneSampleId']" :active="active" :disabled="disabled || preview?.busy"
               :settle-before-discard="session.settlePending"
               @update:model-value="session.edit('voice.tts.cloneSampleId', $event)" />
-            <SettingsDisclosure title="默认演绎指导" :disabled="disabled"
-              :description="draft['voice.tts.stylePrompt'].trim() ? '已填写 · 自动指导关闭或缺失时使用' : '可选 · 自动指导关闭或缺失时使用'">
-              <VoiceTextArea label="默认演绎指导" :disabled="disabled" :max-length="settingDescriptor('voice.tts.stylePrompt').maxChars"
-                :model-value="draft['voice.tts.stylePrompt']" placeholder="例如：语气轻松自然，语速稍慢。"
-                description="保留所选音色，控制情绪、语气与节奏；留空则自然朗读。"
-                @update:model-value="session.edit('voice.tts.stylePrompt', $event)" />
-            </SettingsDisclosure>
             <SettingsNote v-if="draft['voice.tts.mode'] !== 'builtin'">
               每个文本分段合成完成后返回音频；模型回复仍会逐段提交朗读。
             </SettingsNote>
@@ -246,7 +238,7 @@ defineExpose({ beforeLeave });
           </SettingsSection>
         </section>
 
-        <SettingsRow title="风格指导" description="LLM 音频标签与自然语言指导规则" :icon="ListChecks" clickable
+        <SettingsRow title="风格指导" description="通话回复的风格指导规则" :icon="ListChecks" clickable
           :disabled="disabled" class="voice-style-guidance-entry" @click="openStyleGuidance" />
 
         <SettingsDisclosure v-if="draft" title="高级参数" description="本地人声检测与插话" :disabled="disabled">

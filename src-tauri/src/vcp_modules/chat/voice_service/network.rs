@@ -233,10 +233,7 @@ fn synthesis_request(
             "mimo-v2.5-tts-voiceclone"
         }
     };
-    let prompt = guidance
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(&config.tts_style_prompt)
-        .trim();
+    let prompt = guidance.unwrap_or_default().trim();
     if text.len() > MAX_TEXT_BYTES || prompt.chars().count() > VOICE_GUIDANCE_MAX_CHARS {
         return Err("单段语音正文或指导过长。".into());
     }
@@ -394,7 +391,6 @@ mod tests {
             language: "zh".into(),
             voice: "白桦".into(),
             tts_mode: VoiceTtsMode::Builtin,
-            tts_style_prompt: String::new(),
             clone_sample_id: String::new(),
         };
         let server = tokio::spawn(async move {
@@ -797,7 +793,6 @@ mod tests {
             config.tts_mode = mode;
             // A saved builtin preference cannot turn clone compatibility SSE on.
             config.tts_stream = mode == VoiceTtsMode::Clone;
-            config.tts_style_prompt = "轻声慢说".into();
             let sample = PreparedCloneSample {
                 data_url: std::sync::Arc::from("data:audio/wav;base64,AQIDBA=="),
             };
@@ -826,7 +821,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_style_overrides_optional_fallback_in_both_modes() {
+    fn missing_model_guidance_sends_only_the_body_in_both_modes() {
         let sample = PreparedCloneSample {
             data_url: std::sync::Arc::from("data:audio/wav;base64,AQIDBA=="),
         };
@@ -835,17 +830,15 @@ mod tests {
                 &crate::vcp_modules::settings_manager::Settings::default(),
             );
             config.tts_mode = mode;
-            config.tts_style_prompt = "轻声慢说".into();
             for guidance in [None, Some(" \n")] {
                 let body = synthesis_request(&config, "正文", guidance, Some(&sample)).unwrap();
-                assert_eq!(body["messages"][0]["content"], "轻声慢说");
+                assert_eq!(body["messages"], json!([{"role":"assistant", "content":"正文"}]));
             }
             let body = synthesis_request(&config, "正文", Some("本条指导"), Some(&sample)).unwrap();
-            assert_eq!(body["messages"][0]["content"], "本条指导");
-            config.tts_style_prompt.clear();
-            let body = synthesis_request(&config, "正文", None, Some(&sample)).unwrap();
-            assert_eq!(body["messages"], json!([{"role":"assistant", "content":"正文"}]));
-            assert!(synthesis_request(&config, "正文", Some("本条指导"), Some(&sample)).is_ok());
+            assert_eq!(body["messages"], json!([
+                {"role":"user", "content":"本条指导"},
+                {"role":"assistant", "content":"正文"}
+            ]));
             if mode == VoiceTtsMode::Clone {
                 assert!(synthesis_request(&config, "正文", Some("本条指导"), None).is_err());
             }

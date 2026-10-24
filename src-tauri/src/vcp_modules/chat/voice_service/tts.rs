@@ -7,7 +7,7 @@ use super::{
 };
 use crate::vcp_modules::{
     settings_manager::{
-        Settings, VoiceConfig, VoiceConnectionConfig, VoiceGuidanceConfig, VoiceTtsConfig,
+        Settings, VoiceConfig, VoiceConnectionConfig, VoiceTtsConfig,
         VoiceTtsMode,
     },
     vcp_client::StreamEvent,
@@ -159,10 +159,6 @@ impl TtsPreviewSettings {
             voice: VoiceConfig {
                 connection: self.connection,
                 tts: self.tts,
-                guidance: VoiceGuidanceConfig {
-                    auto_guidance: false,
-                    ..Default::default()
-                },
                 ..Default::default()
             },
             ..Settings::default()
@@ -466,7 +462,7 @@ async fn start_narration<R: Runtime>(
         id: tts_id.clone(),
         work: Mutex::new(work),
         origin: origin_user_message_id,
-        chat: Mutex::new(ChatFeed::new(policy.auto_guidance, true)),
+        chat: Mutex::new(ChatFeed::new(true)),
         config,
         sample,
         cancel: cancel.clone(),
@@ -769,7 +765,6 @@ mod tests {
                 language: "auto".into(),
                 voice: "mimo_default".into(),
                 tts_mode: VoiceTtsMode::Builtin,
-                tts_style_prompt: String::new(),
                 clone_sample_id: String::new(),
             },
             sample: None,

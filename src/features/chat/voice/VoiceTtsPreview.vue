@@ -77,7 +77,7 @@ defineExpose({ stop, busy });
     <div class="flex flex-col gap-3">
       <VoiceTextArea v-model="text" label="试听文本" :rows="3" :max-length="500" :disabled="disabled" />
       <SettingsNote>
-        试听使用默认演绎指导，不调用聊天模型生成指导。
+        直接朗读试听文本，不调用聊天模型生成指导。
       </SettingsNote>
       <button type="button" class="voice-preview-button" :disabled="!active || (!busy && !canStart)" @click="toggle">
         <Square v-if="busy" :size="16" aria-hidden="true" /><Play v-else :size="16" aria-hidden="true" />

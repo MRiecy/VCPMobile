@@ -147,11 +147,7 @@ pub(super) fn legacy_fields() -> &'static [(ConfigDomain, &'static str, &'static
         (Voice, "voiceTtsStream", "tts.stream"),
         (Voice, "voiceTtsVoice", "tts.voice"),
         (Voice, "voiceTtsMode", "tts.mode"),
-        (Voice, "voiceTtsStylePrompt", "tts.stylePrompt"),
         (Voice, "voiceTtsCloneSampleId", "tts.cloneSampleId"),
-        (Voice, "voiceAudioTagRules", "guidance.audioTagRules"),
-        (Voice, "voiceAutoGuidance", "guidance.autoGuidance"),
-        (Voice, "voiceGuidanceRules", "guidance.guidanceRules"),
         (Voice, "voiceVadSensitivity", "vad.sensitivity"),
         (Voice, "voiceVadEndSilenceMs", "vad.endSilenceMs"),
         (Voice, "voiceVadPlaybackOnsetMs", "vad.playbackOnsetMs"),
@@ -183,12 +179,12 @@ mod tests {
     fn voice_mode_migration_uses_default_for_invalid_input_without_changing_other_voice_fields() {
         let domains = split_legacy(&json!({
             "voiceTtsMode":"unavailable-mode", "voiceTtsVoice":"Mia",
-            "voiceTtsStylePrompt":"保留", "voiceApiKey":"retained-key",
+            "voiceTtsStream":false, "voiceApiKey":"retained-key",
         })).unwrap();
         let voice = &domains[&ConfigDomain::Voice];
         assert_eq!(voice["tts"]["mode"], "builtin");
         assert_eq!(voice["tts"]["voice"], "Mia");
-        assert_eq!(voice["tts"]["stylePrompt"], "保留");
+        assert_eq!(voice["tts"]["stream"], false);
         assert_eq!(voice["connection"]["apiKey"], "retained-key");
     }
 

@@ -29,9 +29,9 @@ export type VoiceConnectionConfig = { apiBaseUrl: string, apiKey: string, };
 
 export type VoiceAsrConfig = { stream: boolean, inputEncoding: VoiceInputEncoding, language: string, };
 
-export type VoiceTtsConfig = { stream: boolean, voice: string, mode: VoiceTtsMode, stylePrompt: string, cloneSampleId: string, };
+export type VoiceTtsConfig = { stream: boolean, voice: string, mode: VoiceTtsMode, cloneSampleId: string, };
 
-export type VoiceGuidanceConfig = { audioTagRules: string, autoGuidance: boolean, guidanceRules: string, };
+export type VoiceGuidanceConfig = { rules: string, };
 
 export type VoiceConfig = { connection: VoiceConnectionConfig, asr: VoiceAsrConfig, tts: VoiceTtsConfig, guidance: VoiceGuidanceConfig, vad: VoiceVadConfig, };
 

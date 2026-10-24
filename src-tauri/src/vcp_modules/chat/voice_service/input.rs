@@ -901,7 +901,6 @@ mod tests {
                 language: "auto".into(),
                 voice: "mimo_default".into(),
                 tts_mode: Default::default(),
-                tts_style_prompt: String::new(),
                 clone_sample_id: String::new(),
             },
             inner: Mutex::new(SessionInner::default()),

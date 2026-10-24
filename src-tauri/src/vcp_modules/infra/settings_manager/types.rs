@@ -31,8 +31,7 @@ pub const VOICE_TTS_VOICES: &[&str] = &[
     "Dean",
 ];
 pub const SYNC_LOG_LEVELS: &[&str] = &["TRACE", "DEBUG", "INFO", "WARN", "ERROR"];
-pub const DEFAULT_VOICE_AUDIO_TAG_RULES: &str = "回复将用于语音通话。保持当前角色和正常对话内容，保留已选音色，只控制情绪、语气和节奏；只在确有表达需要时添加简短音频标签。整体风格写在正文开头的半角圆括号内，例如（温柔 平静）应写为 (温柔 平静)；局部声音或情绪写在对应文字前的方括号内，例如 [轻笑]、[叹气]、[低声]。标签使用自然语言，完整闭合，不解释标签，不使用唱歌模式，不把整句正文放入标签。";
-pub const DEFAULT_VOICE_GUIDANCE_RULES: &str = "在每条助手回复的正文之前，为本条回复生成一份自然语言风格指导。依据当前角色、对话场景和情绪，描述语气、语速与必要的停顿；保留已选预置音色或参考样本的声线，不重新设计声音。用一至四句清晰描述，避免互相矛盾的要求，不要求混响、回声等后期效果。指导只描述如何说，不重复待朗读的正文。";
+pub const DEFAULT_VOICE_GUIDANCE_RULES: &str = "占位中";
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "config-export", derive(ts_rs::TS))]
@@ -169,13 +168,10 @@ config_struct!(VoiceTtsConfig {
     stream: bool = true,
     voice: String = "mimo_default".into(),
     mode: VoiceTtsMode = VoiceTtsMode::default(),
-    style_prompt: String = String::new(),
     clone_sample_id: String = String::new(),
 });
 config_struct!(VoiceGuidanceConfig {
-    audio_tag_rules: String = DEFAULT_VOICE_AUDIO_TAG_RULES.into(),
-    auto_guidance: bool = true,
-    guidance_rules: String = DEFAULT_VOICE_GUIDANCE_RULES.into(),
+    rules: String = DEFAULT_VOICE_GUIDANCE_RULES.into(),
 });
 config_struct!(VoiceConfig {
     connection: VoiceConnectionConfig = VoiceConnectionConfig::default(),

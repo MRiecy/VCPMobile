@@ -162,19 +162,8 @@ fn collect_fields(
             field.min = Some(VoiceVadConfig::MIN_DURATION_MS);
             field.max = Some(VoiceVadConfig::MAX_PLAYBACK_ONSET_MS);
         }
-        (ConfigDomain::Voice, "guidance.audioTagRules") => {
+        (ConfigDomain::Voice, "guidance.rules") => {
             field.max_chars = Some(VOICE_RULE_MAX_CHARS);
-            field.required = true;
-        }
-        (ConfigDomain::Voice, "guidance.guidanceRules") => {
-            field.max_chars = Some(VOICE_RULE_MAX_CHARS);
-            field.validation_group = "automaticGuidance".into();
-        }
-        (ConfigDomain::Voice, "guidance.autoGuidance") => {
-            field.validation_group = "automaticGuidance".into()
-        }
-        (ConfigDomain::Voice, "tts.stylePrompt") => {
-            field.max_chars = Some(VOICE_GUIDANCE_MAX_CHARS)
         }
         _ => {}
     }
@@ -390,18 +379,6 @@ fn normalize_dependencies(
     }) {
         if let Some(default) = value_at_path(&DEFAULT_DOMAINS[domain.as_str()], &field.path) {
             let _ = set_value_at_path(normalized, &field.path, default.clone());
-        }
-    }
-    if domain == ConfigDomain::Voice
-        && value_at_path(normalized, "guidance.autoGuidance").and_then(Value::as_bool) == Some(true)
-        && value_at_path(normalized, "guidance.guidanceRules")
-            .and_then(Value::as_str)
-            .is_some_and(|value| value.trim().is_empty())
-    {
-        if let Some(default) =
-            value_at_path(&DEFAULT_DOMAINS[domain.as_str()], "guidance.guidanceRules")
-        {
-            let _ = set_value_at_path(normalized, "guidance.guidanceRules", default.clone());
         }
     }
 }
@@ -660,28 +637,24 @@ mod tests {
         assert_eq!(
             normalize_domain_patch(
                 ConfigDomain::Voice,
-                &json!({"guidance":{"guidanceRules":""}})
+                &json!({"guidance":{"rules":""}})
             ),
-            json!({"guidance":{"guidanceRules":""}})
+            json!({"guidance":{"rules":""}})
         );
-        let enabled = normalize_domain(
-            ConfigDomain::Voice,
-            &json!({"guidance":{"autoGuidance":true,"guidanceRules":""}}),
-        );
-        assert_eq!(
-            enabled["guidance"]["guidanceRules"],
-            DEFAULT_VOICE_GUIDANCE_RULES
-        );
-        let disabled = normalize_domain(
-            ConfigDomain::Voice,
-            &json!({"guidance":{"autoGuidance":false,"guidanceRules":""}}),
-        );
-        assert_eq!(disabled["guidance"]["guidanceRules"], "");
+        for rules in ["", "  \n ", "自定义风格规则"] {
+            let normalized = normalize_domain(
+                ConfigDomain::Voice,
+                &json!({"guidance":{"rules":rules}}),
+            );
+            assert_eq!(normalized["guidance"]["rules"], rules);
+        }
+        let missing = normalize_domain(ConfigDomain::Voice, &json!({}));
+        assert_eq!(missing["guidance"]["rules"], "占位中");
     }
 
     #[test]
     fn flat_changes_keep_connection_reset_intent_and_partial_presence() {
-        let changes = json!({"connection.apiBaseUrl":false,"tts.stylePrompt":"保留"})
+        let changes = json!({"connection.apiBaseUrl":false,"guidance.rules":"保留"})
             .as_object()
             .unwrap()
             .clone();
@@ -691,7 +664,7 @@ mod tests {
             normalized["connection.apiBaseUrl"],
             VoiceConnectionConfig::default().api_base_url
         );
-        assert_eq!(normalized["tts.stylePrompt"], "保留");
+        assert_eq!(normalized["guidance.rules"], "保留");
         assert!(!normalized.contains_key("tts.mode"));
         assert_eq!(
             normalize_domain(ConfigDomain::Voice, &json!({"tts":{"mode":false}}))["tts"]["mode"],

@@ -398,59 +398,60 @@ describe('语音设置使用正式设置快照', () => {
     expect(modals.modalStackLength()).toBe(1);
   });
 
-  it('仅提供预置和复刻，两种模式共用默认演绎指导，切换保留草稿', async () => {
+  it('仅提供预置和复刻，切换保留音色草稿', async () => {
     const { wrapper } = await renderOverlay();
-    await disclosure(wrapper, '默认演绎指导').trigger('click');
-    const description = wrapper.get('textarea');
-    await description.setValue('语气温和，语速稍慢。');
+    await choose(wrapper, '朗读音色', '冰糖 · 中文女声');
     await choose(wrapper, '音色模式', '样本复刻');
     expect(wrapper.get('[aria-label="参考音频"]').isVisible()).toBe(true);
     expect(wrapper.find('[aria-label="朗读音色"]').exists()).toBe(false);
     expect(wrapper.find('[role="switch"][aria-label="流式朗读"]').exists()).toBe(false);
-    expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('语气温和，语速稍慢。');
     await choose(wrapper, '音色模式', '预置音色');
     expect(wrapper.get('[aria-label="参考音频"]').isVisible()).toBe(false);
     expect(wrapper.find('[aria-label="朗读音色"]').exists()).toBe(true);
+    expect(wrapper.get('[aria-label="朗读音色"]').text()).toContain('冰糖');
     await leaveVoiceSettings(wrapper);
-    expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.tts.stylePrompt': '语气温和，语速稍慢。' });
+    expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.tts.voice': '冰糖' });
     expect(database.voice.tts.stream).toBe(true);
   });
 
-  it('风格指导两规则共用同一保存会话，自动关闭保留规则且系统返回等待保存', async () => {
+  it('风格指导只编辑一项规则，保留原文且系统返回等待保存', async () => {
     const pending = deferred<ConfigSaveResult>();
     mockInvoke('update_settings', () => pending.promise);
     const { wrapper, fallbackClose } = await renderOverlay('styleGuidance');
     const areas = wrapper.findAll('textarea');
-    expect(areas).toHaveLength(2);
-    await areas[0].setValue('仅在需要时使用 [轻笑]。');
-    await areas[1].setValue('依据当前角色生成声音描述。');
-    await wrapper.get('[role="switch"][aria-label="模型自动生成指导"]').trigger('click');
-    expect(wrapper.findAll('textarea')).toHaveLength(1);
+    expect(areas).toHaveLength(1);
+    expect(wrapper.find('[role="switch"]').exists()).toBe(false);
+    const rules = '  依据当前角色生成声音描述。\n仅在需要时使用 [轻笑]。  ';
+    await areas[0].setValue(rules);
     modals.closeTopModal();
     await flushPromises();
     expect(fallbackClose).not.toHaveBeenCalled();
     expect(wrapper.emitted('close')).toBeUndefined();
-    expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.guidance.audioTagRules': '仅在需要时使用 [轻笑]。', 'voice.guidance.autoGuidance': false, 'voice.guidance.guidanceRules': '依据当前角色生成声音描述。' });
-    pending.resolve(saved({ 'voice.guidance.audioTagRules': '仅在需要时使用 [轻笑]。', 'voice.guidance.autoGuidance': false, 'voice.guidance.guidanceRules': '依据当前角色生成声音描述。' }));
+    expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.guidance.rules': rules });
+    pending.resolve(saved({ 'voice.guidance.rules': rules }));
     await flushPromises();
     expect(wrapper.emitted('close')).toHaveLength(1);
     expect(modals.modalStackLength()).toBe(1);
   });
 
-  it('风格指导必需规则留空时保留编辑页，可恢复默认再返回', async () => {
-    mockInvoke('update_settings', () => ({ status: 'rejected', issues: [{
-      domain: 'voice', field: 'guidance.audioTagRules', code: 'required', message: '请填写音频标签规则',
-    }] }));
+  it.each(['', ' \n '])('风格指导允许空规则并按原文保存（%j）', async rules => {
     const { wrapper } = await renderOverlay('styleGuidance');
-    await wrapper.findAll('textarea')[0].setValue(' ');
+    await wrapper.get('textarea').setValue(rules);
     await wrapper.get('button[aria-label="返回，关闭风格指导"]').trigger('click');
     await flushPromises();
-    expect(updates()).toHaveLength(1);
-    expect(wrapper.emitted('close')).toBeUndefined();
-    expect(wrapper.get('[role="alert"]').text()).toContain('请填写音频标签规则');
-    await wrapper.findAll('button').find(button => button.text() === '恢复默认标签规则')!.trigger('click');
+    expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.guidance.rules': rules });
+    expect(database.voice.guidance.rules).toBe(rules);
+    expect(wrapper.emitted('close')).toHaveLength(1);
+  });
+
+  it('风格指导可恢复默认占位规则后返回', async () => {
+    const { wrapper } = await renderOverlay('styleGuidance');
+    await wrapper.get('textarea').setValue('自定义规则');
+    await wrapper.findAll('button').find(button => button.text() === '恢复默认规则')!.trigger('click');
+    expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('占位中');
     await wrapper.get('button[aria-label="返回，关闭风格指导"]').trigger('click');
     await flushPromises();
+    expect(updates()).toHaveLength(0);
     expect(wrapper.emitted('close')).toHaveLength(1);
   });
 

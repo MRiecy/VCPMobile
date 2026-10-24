@@ -17,16 +17,8 @@ struct MessageText {
 }
 
 impl MessageText {
-    fn lock_guidance(
-        &mut self,
-        auto_guidance: bool,
-        projection: &voice_guidance::GuidanceProjection,
-    ) {
+    fn lock_guidance(&mut self, projection: &voice_guidance::GuidanceProjection) {
         if self.guidance_locked {
-            return;
-        }
-        if !auto_guidance {
-            self.guidance_locked = true;
             return;
         }
         let mut prefix = String::new();
@@ -69,15 +61,13 @@ pub(super) struct ChatFeed {
     agent_request: Option<String>,
     finished: bool,
     dirty: bool,
-    auto_guidance: bool,
     inherit_global_style: bool,
     cursor: usize,
 }
 
 impl ChatFeed {
-    pub(super) fn new(auto_guidance: bool, inherit_global_style: bool) -> Self {
+    pub(super) fn new(inherit_global_style: bool) -> Self {
         Self {
-            auto_guidance,
             inherit_global_style,
             ..Default::default()
         }
@@ -242,7 +232,7 @@ impl ChatFeed {
             // Lock on output admission, not when the playback worker happens
             // to be free. Network latency must not choose a later instruction.
             let projection = voice_guidance::scan(&message.text, message.finished);
-            message.lock_guidance(self.auto_guidance, &projection);
+            message.lock_guidance(&projection);
         }
         if normal_end && !self.group {
             self.finished = true;
@@ -268,7 +258,7 @@ impl ChatFeed {
                 return Err("语音指导格式过于复杂，已停止本次朗读；聊天正文已保留。".into());
             }
             let text = readable::project(&projection.body, message.finished)?;
-            message.lock_guidance(self.auto_guidance, &projection);
+            message.lock_guidance(&projection);
             message.reply.update(text, message.finished)?;
         }
         let mut pieces = Vec::new();
@@ -474,7 +464,7 @@ mod tests {
 
     #[test]
     fn each_group_message_owns_its_guidance_style_and_unpunctuated_tail() {
-        let mut feed = ChatFeed::new(true, true);
+        let mut feed = ChatFeed::new(true);
         feed.accept(&member(
             "a",
             &format!("{}(温柔)[轻笑]第一句。第一位尾音", guidance("清亮自然")),
@@ -496,7 +486,7 @@ mod tests {
 
     #[test]
     fn partial_guidance_is_never_spoken_and_the_first_valid_instruction_stays_fixed() {
-        let mut feed = ChatFeed::new(true, true);
+        let mut feed = ChatFeed::new(true);
         feed.accept(&update("a", "<<<[VOICE_GUID", false)).unwrap();
         assert!(feed.take_update().unwrap().unwrap().pieces.is_empty());
         let raw = format!("{}第一句。", guidance("首个指导"));
@@ -514,33 +504,27 @@ mod tests {
     }
 
     #[test]
-    fn missing_late_invalid_or_disabled_guidance_yields_none_for_the_configured_fallback() {
+    fn missing_late_or_invalid_guidance_leaves_plain_speech_without_instruction() {
         let cases = [
-            (true, "普通正文。".to_owned()),
-            (true, format!("正文。\n{}", guidance("迟到"))),
-            (true, format!("{}正文。", guidance(""))),
-            (
-                true,
-                format!(
-                    "{}正文。",
-                    guidance(&"字".repeat(voice_guidance::MAX_GUIDANCE_CHARS + 1))
-                ),
+            "正文。".to_owned(),
+            format!("正文。\n{}", guidance("迟到")),
+            format!("{}正文。", guidance("")),
+            format!(
+                "{}正文。",
+                guidance(&"字".repeat(voice_guidance::MAX_GUIDANCE_CHARS + 1))
             ),
-            (false, format!("{}正文。", guidance("自动开关已关闭"))),
         ];
-        for (enabled, raw) in cases {
-            let mut feed = ChatFeed::new(enabled, true);
+        for raw in cases {
+            let mut feed = ChatFeed::new(true);
             feed.accept(&member("a", &raw)).unwrap();
             let pieces = feed.take_update().unwrap().unwrap().pieces;
-            assert_eq!(pieces.len(), 1);
-            assert!(pieces[0].instruction.is_none());
-            assert!(!pieces[0].text.contains("VOICE_GUIDANCE"));
+            assert_eq!(pieces, vec![piece("a", "正文。", None)]);
         }
     }
 
     #[test]
     fn opaque_prefix_does_not_count_as_the_start_of_spoken_prose() {
-        let mut feed = ChatFeed::new(true, true);
+        let mut feed = ChatFeed::new(true);
         let raw = format!(
             "<think>私密推理</think>\n```text\n示例代码\n```\n{}正文。",
             guidance("有效指导")
@@ -554,7 +538,7 @@ mod tests {
 
     #[test]
     fn group_messages_cannot_interleave_or_rewrite_a_spoken_prefix() {
-        let mut feed = ChatFeed::new(true, true);
+        let mut feed = ChatFeed::new(true);
         feed.accept(&update(
             "a",
             &format!("{}第一句。等尾句", guidance("第一位")),
@@ -585,7 +569,7 @@ mod tests {
 
     #[test]
     fn first_body_locks_even_while_the_playback_worker_has_not_consumed_a_frame() {
-        let mut feed = ChatFeed::new(true, true);
+        let mut feed = ChatFeed::new(true);
         feed.accept(&update("a", "正文已经开始", false)).unwrap();
         // A later snapshot can replace an unspoken tail, but cannot change
         // which guidance this response fixed when its body first arrived.
@@ -611,7 +595,7 @@ mod tests {
             "{first}<<<[TOOL_REQUEST]>>>\n{}<<<[END_TOOL_REQUEST]>>>\n正文。",
             guidance("工具内示例")
         );
-        let mut feed = ChatFeed::new(true, true);
+        let mut feed = ChatFeed::new(true);
         feed.accept(&member("a", &raw)).unwrap();
         assert_eq!(
             feed.take_update().unwrap().unwrap().pieces,
@@ -622,7 +606,7 @@ mod tests {
     #[test]
     fn recovery_budget_failure_stops_speech_without_changing_stored_text() {
         let raw = format!("{}正常正文。", guidance("自然\n<think>").repeat(18));
-        let mut feed = ChatFeed::new(true, true);
+        let mut feed = ChatFeed::new(true);
         feed.accept(&member("a", &raw)).unwrap();
         assert!(feed
             .take_update()
@@ -641,7 +625,7 @@ mod tests {
             "<<<[TOOL_REQUEST]>>>\ncontent:「始」\n```\n示例\n「末」\n<<<[END_TOOL_REQUEST]>>>\n",
         ] {
             let raw = format!("{prefix}{}正文。", guidance("真正指导"));
-            let mut feed = ChatFeed::new(true, true);
+            let mut feed = ChatFeed::new(true);
             feed.accept(&member("a", &raw)).unwrap();
             assert_eq!(
                 feed.take_update().unwrap().unwrap().pieces,

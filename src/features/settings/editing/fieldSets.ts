@@ -23,10 +23,10 @@ export const SUMMARY_FIELDS = ["conversation.topicSummaryModel"] as const;
 export const VOICE_FIELDS = [
   "voice.connection.apiBaseUrl", "voice.connection.apiKey", "voice.asr.inputEncoding", "voice.asr.stream", "voice.tts.stream", "voice.asr.language", "voice.tts.voice",
   "voice.vad.sensitivity", "voice.vad.endSilenceMs", "voice.vad.playbackOnsetMs",
-  "voice.tts.mode", "voice.tts.stylePrompt", "voice.tts.cloneSampleId",
+  "voice.tts.mode", "voice.tts.cloneSampleId",
 ] as const;
 
-export const VOICE_STYLE_GUIDANCE_FIELDS = ["voice.guidance.audioTagRules", "voice.guidance.autoGuidance", "voice.guidance.guidanceRules"] as const;
+export const VOICE_STYLE_GUIDANCE_FIELDS = ["voice.guidance.rules"] as const;
 
 export const JEV_FIELDS = [
   'jev.enabled', 'jev.provider', 'jev.typesafe.apiUrl', 'jev.typesafe.apiKey', 'jev.typesafe.model',

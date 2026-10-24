@@ -72,9 +72,9 @@ pub(crate) async fn orchestrate_chat_context(
     .await?;
 
     // A call owns this request's immutable policy. Append after every Tavern
-    // rule so the two voice instructions share one final, non-persisted node.
-    if let Some(content) = reply_policy.map(VoiceReplyPolicy::context_injection) {
-        messages.push(json!({ "role": "user", "content": content }));
+    // rule. The user's rules are the entire final, non-persisted node, even blank.
+    if let Some(policy) = reply_policy {
+        messages.push(json!({ "role": "user", "content": policy.guidance_rules }));
     }
 
     Ok(messages)
@@ -339,7 +339,7 @@ mod voice_policy_tests {
         pool
     }
 
-    fn policy(mode: VoiceTtsMode, auto_guidance: bool) -> VoiceReplyPolicy {
+    fn policy(mode: VoiceTtsMode, rules: &str) -> VoiceReplyPolicy {
         VoiceReplyPolicy::from_settings(&Settings {
             voice: VoiceConfig {
                 tts: VoiceTtsConfig {
@@ -347,9 +347,7 @@ mod voice_policy_tests {
                     ..Default::default()
                 },
                 guidance: VoiceGuidanceConfig {
-                    audio_tag_rules: "音频标签规则".into(),
-                    auto_guidance,
-                    guidance_rules: "自然语言指导规则".into(),
+                    rules: rules.into(),
                 },
                 ..Default::default()
             },
@@ -358,7 +356,7 @@ mod voice_policy_tests {
     }
 
     #[tokio::test]
-    async fn voice_rules_share_one_request_only_node_after_tavern_and_group_invite() {
+    async fn voice_rules_are_the_exact_request_only_node_after_tavern_and_group_invite() {
         let pool = pool_with_tail_rule().await;
         let history = vec![ChatMessage {
             id: "origin".into(),
@@ -372,7 +370,8 @@ mod voice_policy_tests {
             (VoiceTtsMode::Clone, "agent", None),
             (VoiceTtsMode::Clone, "group", Some("请成员发言".into())),
         ] {
-            let reply_policy = policy(mode, true);
+            let rules = "  用户自定义风格规则\n只回答正文，不生成标签。\n";
+            let reply_policy = policy(mode, rules);
             let topic = TopicKey::new(scope, "owner", "topic");
             let messages = orchestrate_chat_context(
                 &pool,
@@ -389,7 +388,7 @@ mod voice_policy_tests {
             let last = messages.last().unwrap();
             assert_eq!(last["role"], "user");
             let content = last["content"].as_str().unwrap();
-            assert!(content.contains("音频标签规则\n自然语言指导规则"));
+            assert_eq!(content, rules);
             assert_eq!(messages[messages.len() - 2]["content"], "Tavern tail");
             assert!(last.get("__vcpchatTimestampMeta").is_none());
 
@@ -410,27 +409,9 @@ mod voice_policy_tests {
     }
 
     #[tokio::test]
-    async fn disabling_automatic_guidance_keeps_tags_without_affecting_ordinary_chat() {
+    async fn blank_voice_rules_are_injected_without_defaults_or_protocol_instructions() {
         let pool = pool_with_tail_rule().await;
         let topic = TopicKey::new("agent", "owner", "topic");
-        let tags_only = policy(VoiceTtsMode::Builtin, false);
-        let tagged = orchestrate_chat_context(
-            &pool,
-            &[],
-            &topic,
-            "成员",
-            "agent",
-            String::new(),
-            None,
-            Some(&tags_only),
-        )
-        .await
-        .unwrap();
-        let content = tagged.last().unwrap()["content"].as_str().unwrap();
-        assert!(content.contains("音频标签规则"));
-        assert!(!content.contains("自然语言指导规则"));
-        assert!(!content.contains("<<<[VOICE_GUIDANCE]>>>"));
-
         let ordinary = orchestrate_chat_context(
             &pool,
             &[],
@@ -443,8 +424,24 @@ mod voice_policy_tests {
         )
         .await
         .unwrap();
-        assert_eq!(ordinary.len() + 1, tagged.len());
         assert_eq!(ordinary.last().unwrap()["content"], "Tavern tail");
+        for rules in ["", " \n\t", "占位中"] {
+            let reply_policy = policy(VoiceTtsMode::Builtin, rules);
+            let messages = orchestrate_chat_context(
+                &pool,
+                &[],
+                &topic,
+                "成员",
+                "agent",
+                String::new(),
+                None,
+                Some(&reply_policy),
+            )
+            .await
+            .unwrap();
+            assert_eq!(&messages[..messages.len() - 1], ordinary.as_slice());
+            assert_eq!(messages.last().unwrap(), &json!({"role":"user", "content":rules}));
+        }
     }
 
     #[test]

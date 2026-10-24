@@ -288,34 +288,11 @@ export const SETTINGS_FIELDS: FieldDescriptor[] = [
   },
   {
     "domain": "voice",
-    "path": "guidance.audioTagRules",
+    "path": "guidance.rules",
     "kind": "string",
     "backup": true,
     "secret": false,
-    "validationGroup": "guidance.audioTagRules",
-    "effect": "nextNarration",
-    "options": [],
-    "required": true,
-    "maxChars": 8000
-  },
-  {
-    "domain": "voice",
-    "path": "guidance.autoGuidance",
-    "kind": "boolean",
-    "backup": true,
-    "secret": false,
-    "validationGroup": "automaticGuidance",
-    "effect": "nextNarration",
-    "options": [],
-    "required": false
-  },
-  {
-    "domain": "voice",
-    "path": "guidance.guidanceRules",
-    "kind": "string",
-    "backup": true,
-    "secret": false,
-    "validationGroup": "automaticGuidance",
+    "validationGroup": "guidance.rules",
     "effect": "nextNarration",
     "options": [],
     "required": false,
@@ -356,18 +333,6 @@ export const SETTINGS_FIELDS: FieldDescriptor[] = [
     "effect": "nextNarration",
     "options": [],
     "required": false
-  },
-  {
-    "domain": "voice",
-    "path": "tts.stylePrompt",
-    "kind": "string",
-    "backup": true,
-    "secret": false,
-    "validationGroup": "tts.stylePrompt",
-    "effect": "nextNarration",
-    "options": [],
-    "required": false,
-    "maxChars": 2000
   },
   {
     "domain": "voice",

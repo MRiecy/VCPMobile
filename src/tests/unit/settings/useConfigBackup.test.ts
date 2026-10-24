@@ -62,20 +62,20 @@ describe('配置恢复的真实领域状态与失败边界', () => {
   it('多个SQLite领域合为一次提交，缺失叶字段不补默认值', async () => {
     const applySettings = vi.fn(async () => {});
     const result = await applyConfigBackup({
-      domains: { identity: { userName: '新用户名' }, server: { apiKey: 'new-key' }, voice: { guidance: { autoGuidance: false } } }, exportedAt: '',
+      domains: { identity: { userName: '新用户名' }, server: { apiKey: 'new-key' }, voice: { guidance: { rules: '' } } }, exportedAt: '',
     }, applySettings);
-    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'identity.userName': '新用户名', 'server.apiKey': 'new-key', 'voice.guidance.autoGuidance': false }, {});
+    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'identity.userName': '新用户名', 'server.apiKey': 'new-key', 'voice.guidance.rules': '' }, {});
     expect(result.applied).toEqual(['用户身份', '主服务器连接', '语音服务']);
   });
 
   it('复刻恢复明确提示音频需在本机存在', async () => {
     const fields = {
-      tts: { mode: 'clone' as const, cloneSampleId: 'sample-id', stylePrompt: '轻松自然' },
-      guidance: { audioTagRules: '必要时生成标签', autoGuidance: false, guidanceRules: '按角色描述' },
+      tts: { mode: 'clone' as const, cloneSampleId: 'sample-id' },
+      guidance: { rules: '按角色描述，必要时生成标签' },
     };
     const applySettings = vi.fn(async () => {});
     const result = await applyConfigBackup({ domains: { voice: fields }, exportedAt: '' }, applySettings);
-    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'voice.tts.mode': 'clone', 'voice.tts.cloneSampleId': 'sample-id', 'voice.tts.stylePrompt': '轻松自然', 'voice.guidance.audioTagRules': '必要时生成标签', 'voice.guidance.autoGuidance': false, 'voice.guidance.guidanceRules': '按角色描述' }, {});
+    expect(applySettings).toHaveBeenCalledExactlyOnceWith({ 'voice.tts.mode': 'clone', 'voice.tts.cloneSampleId': 'sample-id', 'voice.guidance.rules': '按角色描述，必要时生成标签' }, {});
     expect(result.applied).toEqual(['语音服务']);
     expect(result.skipped).toEqual([expect.stringContaining('参考音频不包含在配置备份中')]);
   });

@@ -33,8 +33,8 @@ pub use tts::{
 pub use samples::{discard_voice_clone_sample, get_voice_clone_sample, import_voice_clone_sample};
 
 use crate::vcp_modules::settings_manager::{
-    value_or_preset, Settings, VoiceInputEncoding, VoiceTtsMode, DEFAULT_VOICE_AUDIO_TAG_RULES,
-    DEFAULT_VOICE_GUIDANCE_RULES, VOICE_API_BASE_URL_PRESET, VOICE_LANGUAGES, VOICE_TTS_VOICES,
+    value_or_preset, Settings, VoiceInputEncoding, VoiceTtsMode, VOICE_API_BASE_URL_PRESET,
+    VOICE_LANGUAGES, VOICE_TTS_VOICES,
 };
 use serde::{Deserialize, Serialize};
 
@@ -52,8 +52,6 @@ pub struct VoiceServiceConfig {
     #[serde(default)]
     pub tts_mode: VoiceTtsMode,
     #[serde(default)]
-    pub tts_style_prompt: String,
-    #[serde(default)]
     pub clone_sample_id: String,
 }
 
@@ -62,38 +60,15 @@ pub struct VoiceServiceConfig {
 #[derive(Clone)]
 pub(crate) struct VoiceReplyPolicy {
     pub(crate) config: VoiceServiceConfig,
-    pub(crate) audio_tag_rules: String,
-    pub(crate) auto_guidance: bool,
     pub(crate) guidance_rules: String,
 }
 
 impl VoiceReplyPolicy {
     pub(crate) fn from_settings(settings: &Settings) -> Self {
         Self {
-            audio_tag_rules: settings.voice.guidance.audio_tag_rules.clone(),
-            auto_guidance: settings.voice.guidance.auto_guidance,
-            guidance_rules: settings.voice.guidance.guidance_rules.clone(),
+            guidance_rules: settings.voice.guidance.rules.clone(),
             config: VoiceServiceConfig::from_settings(settings),
         }
-    }
-
-    pub(crate) fn context_injection(&self) -> String {
-        let tags = self.audio_tag_rules.trim();
-        let tags = if tags.is_empty() {
-            DEFAULT_VOICE_AUDIO_TAG_RULES
-        } else {
-            tags
-        };
-        if !self.auto_guidance {
-            return tags.to_string();
-        }
-        let guidance = self.guidance_rules.trim();
-        let guidance = if guidance.is_empty() {
-            DEFAULT_VOICE_GUIDANCE_RULES
-        } else {
-            guidance
-        };
-        format!("{tags}\n{guidance}\n风格指导输出格式：在每条助手消息的可朗读正文之前，只输出一次以下控制块。起止标记必须独占一行，内部只放本条回复的完整自然语言指导，不嵌套、不放进代码块、不等待工具回执。控制块之后再输出带音频标签的正常正文。\n<<<[VOICE_GUIDANCE]>>>\n本条回复的风格指导\n<<<[END_VOICE_GUIDANCE]>>>")
     }
 }
 
@@ -114,7 +89,6 @@ impl VoiceServiceConfig {
             language: settings.voice.asr.language.clone(),
             voice: settings.voice.tts.voice.clone(),
             tts_mode: settings.voice.tts.mode,
-            tts_style_prompt: settings.voice.tts.style_prompt.clone(),
             clone_sample_id: settings.voice.tts.clone_sample_id.clone(),
         }
     }
