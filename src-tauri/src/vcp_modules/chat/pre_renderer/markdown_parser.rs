@@ -7,7 +7,7 @@ use std::borrow::Cow;
 
 lazy_static! {
     static ref FENCE_RE: Regex =
-        Regex::new(r"(?m)^[ \t]*(`{3,})[a-zA-Z0-9-]*[ \t]*\r?$").unwrap();
+        Regex::new(r"(?m)^[ \t]*(`{3,}|~{3,})[a-zA-Z0-9-]*[ \t]*\r?$").unwrap();
 
     // 合并 LaTeX 匹配：[ ... ] 和 ( ... )
     static ref MATH_RE: Regex = Regex::new(r"(?s)\\\[(?P<display>.*?)\\\]|\\\((?P<inline>.*?)\\\)").unwrap();
@@ -27,6 +27,14 @@ lazy_static! {
     // 匹配行首 ≥4 空格/Tab 缩进后紧跟 $$ 的模式（块级公式被误判为缩进代码块的根因）
     static ref INDENTED_DOLLAR_RE: Regex =
         Regex::new(r"(?m)^[ \t]{4,}(\$\$)").unwrap();
+
+    // 匹配公式内部独占一行、可能触发 CommonMark Setext H1 标题的纯等号行
+    static ref SETEXT_EQUALS_LINE_RE: Regex =
+        Regex::new(r"(?m)^([ \t]{0,3})(=+[ \t]*)$").unwrap();
+
+    // 匹配不跨物理空行的块级展示公式 $$ ... $$（空行为段落硬边界）
+    static ref DISPLAY_MATH_PAIR_RE: Regex =
+        Regex::new(r"(?s)\$\$(?:[^\r\n]*|\r?\n(?:[^\r\n]*\S[^\r\n]*\r?\n)*?[^\r\n]*?)\$\$").unwrap();
 }
 
 // pulldown-cmark 本身使用堆上的事件栈，但本模块随后会递归遍历生成的 AST。
@@ -56,20 +64,22 @@ fn is_punctuation(c: char) -> bool {
 
 fn get_fence_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
     let mut ranges = Vec::new();
-    let mut current_start: Option<(usize, usize)> = None;
+    let mut current_start: Option<(usize, usize, char)> = None;
 
     for cap in FENCE_RE.captures_iter(text) {
         let (Some(m), Some(fence)) = (cap.get(0), cap.get(1)) else {
             continue;
         };
-        let backticks = fence.as_str().len();
+        let fence_str = fence.as_str();
+        let fence_char = fence_str.chars().next().unwrap_or('`');
+        let fence_len = fence_str.len();
 
         match current_start {
             None => {
-                current_start = Some((m.start(), backticks));
+                current_start = Some((m.start(), fence_len, fence_char));
             }
-            Some((start_pos, start_backticks)) => {
-                if backticks >= start_backticks {
+            Some((start_pos, start_len, start_char)) => {
+                if fence_char == start_char && fence_len >= start_len {
                     ranges.push(start_pos..m.end());
                     current_start = None;
                 }
@@ -77,7 +87,7 @@ fn get_fence_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
         }
     }
 
-    if let Some((start_pos, _)) = current_start {
+    if let Some((start_pos, _, _)) = current_start {
         ranges.push(start_pos..text.len());
     }
 
@@ -825,6 +835,82 @@ fn replace_container_placeholders(
     }
 }
 
+/// 在块级展示公式 $$ ... $$ 内部中和独占一行的纯等号，避免被 CommonMark 误识别为 Setext H1 标题。
+/// 仅针对不跨物理空行的闭合公式段；代码围栏内部不予处理。
+fn neutralize_display_math_setext_heading(text: &str) -> Cow<'_, str> {
+    if !text.contains("$$") || !text.contains('=') {
+        return Cow::Borrowed(text);
+    }
+
+    let ranges = get_fence_ranges(text);
+    let mut result = String::with_capacity(text.len());
+    let mut last_end = 0;
+    let mut modified = false;
+
+    for range in &ranges {
+        let segment = &text[last_end..range.start];
+        if segment.contains("$$") && segment.contains('=') {
+            let replaced = neutralize_segment_math_equals(segment);
+            if let Cow::Owned(_) = &replaced {
+                modified = true;
+            }
+            result.push_str(replaced.as_ref());
+        } else {
+            result.push_str(segment);
+        }
+        result.push_str(&text[range.start..range.end]);
+        last_end = range.end;
+    }
+
+    let tail = &text[last_end..];
+    if tail.contains("$$") && tail.contains('=') {
+        let replaced = neutralize_segment_math_equals(tail);
+        if let Cow::Owned(_) = &replaced {
+            modified = true;
+        }
+        result.push_str(replaced.as_ref());
+    } else {
+        result.push_str(tail);
+    }
+
+    if modified {
+        Cow::Owned(result)
+    } else {
+        Cow::Borrowed(text)
+    }
+}
+
+fn neutralize_segment_math_equals(segment: &str) -> Cow<'_, str> {
+    if !segment.contains("$$") || !segment.contains('=') {
+        return Cow::Borrowed(segment);
+    }
+
+    let mut result = String::new();
+    let mut last_end = 0;
+    let mut has_match = false;
+
+    for mat in DISPLAY_MATH_PAIR_RE.find_iter(segment) {
+        let math_chunk = mat.as_str();
+        if SETEXT_EQUALS_LINE_RE.is_match(math_chunk) {
+            if !has_match {
+                result.reserve(segment.len() + 8);
+                has_match = true;
+            }
+            result.push_str(&segment[last_end..mat.start()]);
+            let neutralized = SETEXT_EQUALS_LINE_RE.replace_all(math_chunk, "${1}{}${2}");
+            result.push_str(&neutralized);
+            last_end = mat.end();
+        }
+    }
+
+    if has_match {
+        result.push_str(&segment[last_end..]);
+        Cow::Owned(result)
+    } else {
+        Cow::Borrowed(segment)
+    }
+}
+
 pub fn parse_markdown_to_ast(text: &str) -> Vec<MarkdownNode> {
     parse_markdown_to_ast_opt(text, false)
 }
@@ -855,6 +941,7 @@ fn parse_markdown_to_ast_impl(
     let text = preprocess_latex_math(&text_fixed);
     let text = strip_display_math_indent(text.as_ref());
     let (text, containers) = extract_html_containers(text.as_ref(), is_streaming, container_depth);
+    let text = neutralize_display_math_setext_heading(text.as_ref());
 
     let mut nodes = Vec::new();
     let parser = Parser::new_ext(
@@ -1625,6 +1712,65 @@ fn apply_quote_merging(node: &mut MarkdownNode) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closed_display_matrix_keeps_equals_as_formula_content() {
+        let latex = r"\begin{bmatrix}
+\cos\theta & -\sin\theta \\
+\sin\theta & \cos\theta
+\end{bmatrix}
+\begin{bmatrix}
+x \\ y
+\end{bmatrix}
+=
+\begin{bmatrix}
+x' \\ y'
+\end{bmatrix}";
+        // 验证：= 被安全中和为 {}=，绝不提升为 Setext H1 大标题，且作为合法 DisplayMath 解析
+        let nodes = parse_markdown_to_ast(&format!("矩阵变换：\n\n$$\n{latex}\n$$"));
+        assert_eq!(nodes.len(), 2);
+        assert!(matches!(&nodes[0], MarkdownNode::Paragraph { children, .. }
+            if children == &[InlineNode::text("矩阵变换：".into())]));
+        assert!(matches!(&nodes[1], MarkdownNode::Paragraph { children, .. }
+            if matches!(children.as_slice(), [InlineNode::InlineMath { content, display_mode: true, .. }]
+                if content.contains("{}=\n"))));
+
+        // 验证行内紧贴场景下同样不被撕裂成标题，保持在单段落中
+        let nodes_inline = parse_markdown_to_ast(&format!("矩阵变换：\n$$\n{latex}\n$$"));
+        assert_eq!(nodes_inline.len(), 1);
+        assert!(matches!(&nodes_inline[0], MarkdownNode::Paragraph { children, .. }
+            if children.len() == 3
+                && matches!(&children[0], InlineNode::Text { value, .. } if value == "矩阵变换：")
+                && matches!(&children[1], InlineNode::Break)
+                && matches!(&children[2], InlineNode::InlineMath { display_mode: true, .. })));
+    }
+
+    #[test]
+    fn display_math_does_not_join_blank_lines_or_complete_missing_delimiters() {
+        for input in ["$$\nx\n\ny\n$$", "$$\nx\n="] {
+            let nodes = parse_markdown_to_ast(input);
+            let serialized = serde_json::to_string(&nodes).unwrap();
+            assert!(!serialized.contains("\"inline_math\""), "{input}");
+            assert!(!serialized.contains("\"code_block\""), "{input}");
+        }
+    }
+
+    #[test]
+    fn display_math_protection_preserves_code_and_regular_markdown() {
+        let source = "$$\nx\n=\ny\n$$\n";
+        for fence in ["```", "~~~"] {
+            let nodes = parse_markdown_to_ast(&format!("{fence}text\n{source}{fence}"));
+            assert!(matches!(nodes.as_slice(), [MarkdownNode::CodeBlock { code, .. }] if code == source));
+        }
+        let nodes = parse_markdown_to_ast("标题\n=\n\n$x$\n\n$$y=z$$");
+        assert!(matches!(nodes[0], MarkdownNode::Heading { level: 1, .. }));
+        assert!(matches!(&nodes[1], MarkdownNode::Paragraph { children, .. }
+            if matches!(children.as_slice(), [InlineNode::InlineMath { content, display_mode: false, .. }] if content == "x")));
+        assert!(matches!(&nodes[2], MarkdownNode::Paragraph { children, .. }
+            if matches!(children.as_slice(), [InlineNode::InlineMath { content, display_mode: true, .. }] if content == "y=z")));
+        let list = parse_markdown_to_ast("- before\n  $$x$$\n  after");
+        assert!(matches!(list.as_slice(), [MarkdownNode::List { items, .. }] if items.len() == 1));
+    }
 
     #[test]
     fn excessive_markdown_nesting_falls_back_to_literal_text() {
