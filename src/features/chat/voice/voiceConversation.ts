@@ -58,8 +58,7 @@ const projectView = (snapshot: VoiceCallSnapshot): VoiceServiceView => {
     return { state: 'recognizing', message: '正在识别', partialText };
   }
   if (snapshot.error) return { state: 'error', message: snapshot.error.slice(0, 200), partialText };
-  return { state: 'listening', message: snapshot.notice?.slice(0, 200)
-    || (snapshot.micState === 'listening' ? '正在聆听' : '麦克风已关闭'), partialText };
+  return { state: 'listening', message: snapshot.notice?.slice(0, 200) || '', partialText };
 };
 
 /** Vue sends user intents and projects Rust snapshots; it never owns a reply job. */

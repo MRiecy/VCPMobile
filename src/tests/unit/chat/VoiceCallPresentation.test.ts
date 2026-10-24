@@ -1,13 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { disposePinia, getActivePinia } from 'pinia';
 import { defineComponent, nextTick, ref, type Component } from 'vue';
-import { DOMWrapper, mount, type VueWrapper } from '@vue/test-utils';
+import { DOMWrapper, flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import InputEnhancer from '@/features/chat/InputEnhancer.vue';
 import ChatView from '@/features/chat/ChatView.vue';
 import GlobalOverlayManager from '@/components/GlobalOverlayManager.vue';
 import FullScreenEditor from '@/components/ui/FullScreenEditor.vue';
 import { attachMenuOpen } from '@/features/chat/attachMenuController';
 import { useVoiceCallStore } from '@/features/chat/voice/voiceCallStore';
+import type { VoiceCallSnapshot } from '@/features/chat/voice/voiceConversation';
 import { useChatSessionStore } from '@/core/stores/chatSessionStore';
 import { useChatHistoryStore } from '@/core/stores/chatHistoryStore';
 import { useAttachmentStore } from '@/core/stores/attachmentStore';
@@ -16,6 +17,7 @@ import { useTopicStore } from '@/core/stores/topicListManager';
 import { useOverlayStore } from '@/core/stores/overlay';
 import { useModalHistory } from '@/core/composables/useModalHistory';
 import { mountWithPinia } from '@/tests/utils/mount';
+import { emitTauriEvent, mockInvoke } from '@/tests/mocks/tauri';
 
 const audio = vi.hoisted(() => ({
   startListening: vi.fn(), stopListening: vi.fn(), cancelListening: vi.fn(),
@@ -305,6 +307,65 @@ describe('voice entry from the existing composer', () => {
 });
 
 describe('chat scene voice transitions', () => {
+  it('keeps one status node through pending capture, mute and continuing service work', async () => {
+    const pending = deferred<boolean>();
+    audio.startMonitor.mockReturnValueOnce(pending.promise);
+    const snapshot: VoiceCallSnapshot = {
+      callId: '', target: { ownerId: 'voice-agent', ownerType: 'agent', topicId: 'voice-topic' },
+      revision: 1, active: true, micState: 'closed', inputState: 'idle',
+      replyState: 'idle', ttsState: 'idle', partial: '', error: null, notice: null,
+      inputSessionId: null, originUserMessageId: null, ttsId: null, lastPersistedMessageId: null,
+    };
+    mockInvoke('begin_voice_conversation', args => {
+      snapshot.callId = args!.callId as string;
+      return { ...snapshot };
+    });
+    const view = mountComposer(ChatView);
+    const voice = useVoiceCallStore();
+    voice.start();
+    await flushPromises();
+    const status = view.get('.voice-control-status');
+    const line = status.get('p').element;
+    const expectStatus = (text: string) => {
+      expect(status.findAll('p')).toHaveLength(1);
+      expect(status.get('p').element).toBe(line);
+      expect(status.text()).toBe(text);
+    };
+
+    expect(voice.microphoneState).toBe('requesting');
+    expectStatus('');
+    pending.resolve(true);
+    await flushPromises();
+    expectStatus('正在聆听');
+    voice.speechActive = true;
+    await nextTick();
+    expectStatus('正在聆听');
+    await view.get('[aria-label="关闭麦克风"]').trigger('click');
+    expectStatus('');
+
+    const updates: Array<[Partial<VoiceCallSnapshot>, string]> = [
+      [{ inputState: 'transcribing' }, '正在识别'],
+      [{ inputState: 'transcribing', partial: '已录好的语音内容' }, '已录好的语音内容'],
+      [{ replyState: 'generating' }, '正在回复'],
+      [{ replyState: 'finished', ttsState: 'speaking' }, '正在朗读'],
+      [{ inputState: 'error', error: '识别失败，请重试', partial: '旧转写' }, '识别失败，请重试'],
+    ];
+    for (const [update, text] of updates) {
+      snapshot.revision += 1;
+      emitTauriEvent('vcp-voice-call', { ...snapshot, ...update });
+      await nextTick();
+      expect(voice.microphoneState).toBe('off');
+      expectStatus(text);
+    }
+    expect(status.get('p').classes()).toContain('is-error');
+
+    audio.startMonitor.mockRejectedValueOnce('microphone_permission_denied');
+    await view.get('[aria-label="开启麦克风"]').trigger('click');
+    await flushPromises();
+    expectStatus('麦克风权限未开启，请在系统设置中允许后重试。');
+    expect(status.get('p').classes()).toContain('is-error');
+  });
+
   it('keeps the composer and interactive message nodes through call entry and hangup', async () => {
     const view = mountComposer(ChatView);
     await settle();

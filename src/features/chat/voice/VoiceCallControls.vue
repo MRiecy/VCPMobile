@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { Mic, MicOff, PhoneOff } from '@lucide/vue';
+import type { VoiceServiceView } from './voiceConversation';
 
 const props = defineProps<{
   microphoneState: 'off' | 'requesting' | 'on' | 'error';
   level: number;
   bands: readonly number[];
-  speechActive?: boolean;
-  serviceState?: string;
+  serviceState?: VoiceServiceView['state'];
   serviceMessage?: string;
   partialText?: string;
   errorMessage?: string;
@@ -23,13 +23,19 @@ const requestingMicrophone = computed(() => props.microphoneState === 'requestin
 const inputLevel = computed(() => microphoneOn.value && Number.isFinite(props.level)
   ? Math.min(1, Math.max(0, props.level))
   : 0);
-const microphoneStatus = computed(() => {
-  switch (props.microphoneState) {
-    case 'requesting': return '正在开启麦克风';
-    case 'on': return props.speechActive ? '检测到说话' : '正在聆听';
-    case 'error': return props.errorMessage?.trim() || '麦克风暂不可用，请重试';
-    default: return '麦克风已关闭';
+const status = computed(() => {
+  // One presentation owner: errors stay visible, then transcript/service progress.
+  // Capture transitions and VAD frames only affect the controls and waveform.
+  if (props.microphoneState === 'error') {
+    return { text: props.errorMessage?.trim() || '麦克风暂不可用，请重试', error: true };
   }
+  if (props.serviceState === 'error') {
+    return { text: props.serviceMessage?.trim() || '语音服务暂不可用，请重试', error: true };
+  }
+  return {
+    text: props.partialText || props.serviceMessage?.trim() || (microphoneOn.value ? '正在聆听' : ''),
+    error: false,
+  };
 });
 const microphoneLabel = computed(() => requestingMicrophone.value
   ? '取消麦克风开启'
@@ -57,10 +63,9 @@ const bars = computed(() => Array.from({ length: 32 }, (_, index) => {
     </div>
 
     <div class="voice-control-status" role="status" aria-live="polite" aria-atomic="true">
-      <p class="voice-microphone-status" :class="{ 'voice-microphone-error': microphoneState === 'error' }">
-        {{ microphoneStatus }}
+      <p class="voice-service-status" :class="{ 'is-error': status.error }" :title="status.text">
+        {{ status.text }}
       </p>
-      <p class="voice-service-status">{{ partialText || serviceMessage || '开启麦克风后即可开始说话' }}</p>
     </div>
 
     <div class="voice-control-actions">
@@ -132,30 +137,20 @@ const bars = computed(() => Array.from({ length: 32 }, (_, index) => {
   text-align: center;
 }
 
-.voice-microphone-status,
 .voice-service-status {
   margin: 0;
-  overflow-wrap: anywhere;
-}
-
-.voice-microphone-status {
-  font-size: 12px;
-  line-height: 18px;
-}
-
-.voice-microphone-error {
-  color: #ef4444;
-}
-
-.voice-service-status {
-  margin-top: 2px;
+  height: 16px;
   font-size: 11px;
   line-height: 16px;
   opacity: 0.6;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+  white-space: nowrap;
+  text-overflow: ellipsis;
   overflow: hidden;
+}
+
+.voice-service-status.is-error {
+  color: #ef4444;
+  opacity: 1;
 }
 
 .voice-control-actions {
