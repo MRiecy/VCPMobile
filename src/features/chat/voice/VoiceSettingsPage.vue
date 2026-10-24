@@ -230,11 +230,7 @@ defineExpose({ beforeLeave });
               :model-value="draft['voice.tts.cloneSampleId']" :active="active" :disabled="disabled || preview?.busy"
               :settle-before-discard="session.settlePending"
               @update:model-value="session.edit('voice.tts.cloneSampleId', $event)" />
-            <SettingsNote v-if="draft['voice.tts.mode'] !== 'builtin'">
-              每个文本分段合成完成后返回音频；模型回复仍会逐段提交朗读。
-            </SettingsNote>
             <VoiceTtsPreview ref="preview" :settings="previewSettings" :active="active" :disabled="disabled || cloneSample?.importing" />
-            <template #footer><SettingsNote>返回时自动保存，下一次朗读生效。</SettingsNote></template>
           </SettingsSection>
         </section>
 
@@ -248,7 +244,6 @@ defineExpose({ beforeLeave });
               :aria-label="selections[item.field].title" aria-haspopup="dialog" :aria-expanded="selectionOpen(item.field)"
               @click="openSelection(item.field, $event)" />
           </div>
-          <SettingsNote>返回时自动保存，下次通话生效。</SettingsNote>
         </SettingsDisclosure>
 
   </SettingsCanvas>

@@ -36,7 +36,6 @@ defineExpose({ beforeLeave });
         <button type="button" class="voice-rule-reset" :disabled="disabled"
           @click="session.edit('voice.guidance.rules', SETTINGS_DEFAULTS.voice.guidance.rules)">恢复默认规则</button>
       </SettingsSection>
-      <SettingsNote>返回时自动保存，下一次回复生效。</SettingsNote>
     </template>
   </SettingsCanvas>
 </template>

@@ -4,7 +4,6 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { Play, Square } from '@lucide/vue';
 import SettingsDisclosure from '../../../components/settings/SettingsDisclosure.vue';
-import SettingsNote from '../../../components/settings/SettingsNote.vue';
 import VoiceTextArea from './VoiceTextArea.vue';
 import { useVoiceCallStore } from './voiceCallStore';
 import type { VoiceConfig } from '../../../core/config/generated/config';
@@ -12,12 +11,12 @@ import { cloneConfig } from '../../../core/config/fields';
 
 const props = defineProps<{ settings: VoiceConfig; active: boolean; disabled?: boolean }>();
 const voiceCall = useVoiceCallStore();
-const text = ref('你好，很高兴和你聊天。我们慢慢说，一起把事情理清楚。');
+const text = ref('(慵懒)再让我睡五分钟……就五分钟，真的，最后一次。');
 const busy = ref(false);
 const feedback = ref('');
 let task: { id: string; submitted: boolean; unlisten?: UnlistenFn } | null = null;
 const unavailable = computed(() => voiceCall.active ? '通话结束后可试听。'
-  : voiceCall.playbackActive ? '请等待当前朗读结束后再试听。' : '使用当前草稿试听，不会保存设置。');
+  : voiceCall.playbackActive ? '请等待当前朗读结束后再试听。' : undefined);
 const canStart = computed(() => props.active && !props.disabled && !voiceCall.active && !voiceCall.playbackActive && !!text.value.trim());
 
 const stop = async () => {
@@ -75,10 +74,7 @@ defineExpose({ stop, busy });
 <template>
   <SettingsDisclosure title="试听声音" :description="unavailable" :disabled="disabled">
     <div class="flex flex-col gap-3">
-      <VoiceTextArea v-model="text" label="试听文本" :rows="3" :max-length="500" :disabled="disabled" />
-      <SettingsNote>
-        直接朗读试听文本，不调用聊天模型生成指导。
-      </SettingsNote>
+      <VoiceTextArea v-model="text" label="试听文本" hide-label :rows="3" :max-length="500" :disabled="disabled" />
       <button type="button" class="voice-preview-button" :disabled="!active || (!busy && !canStart)" @click="toggle">
         <Square v-if="busy" :size="16" aria-hidden="true" /><Play v-else :size="16" aria-hidden="true" />
         {{ busy ? '停止试听' : '试听当前设置' }}

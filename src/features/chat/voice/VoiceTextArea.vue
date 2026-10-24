@@ -5,6 +5,7 @@ import SettingsNote from '../../../components/settings/SettingsNote.vue';
 const props = withDefaults(defineProps<{
   modelValue: string;
   label: string;
+  hideLabel?: boolean;
   description?: string;
   placeholder?: string;
   disabled?: boolean;
@@ -23,8 +24,9 @@ const onInput = (event: Event) => {
 
 <template>
   <div class="voice-text-field">
-    <label :for="id" class="text-xs text-[var(--secondary-text)]">{{ label }}</label>
+    <label v-if="!hideLabel" :for="id" class="text-xs text-[var(--secondary-text)]">{{ label }}</label>
     <textarea :id="id" :value="modelValue" :disabled="disabled" :rows="rows"
+      :aria-label="hideLabel ? label : undefined"
       :placeholder="placeholder" :aria-describedby="description ? `${id}-help` : undefined"
       class="voice-text-input vcp-scrollable"
       @input="onInput" />

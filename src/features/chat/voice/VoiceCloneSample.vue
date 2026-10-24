@@ -113,7 +113,7 @@ defineExpose({ cancelPending, importing });
     <p v-if="error" class="m-0 text-xs leading-relaxed text-red-500" role="alert">{{ error }}</p>
     <p v-else-if="modelValue && !loading && !sample" class="m-0 text-xs leading-relaxed text-red-500" role="alert">样本文件缺失，请重新导入。</p>
     <SettingsNote>
-      建议使用简短、清晰的单人录音，每个朗读分段都会上传该样本。样本保存在本机，配置备份不包含音频文件。
+      建议使用简短、清晰的单人录音，音频文件大小不得超过7MB
     </SettingsNote>
   </div>
 </template>
