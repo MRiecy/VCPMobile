@@ -401,5 +401,5 @@ html[data-vcp-platform="ios"] :is(button, a, input, textarea, select, [tabindex]
 ::view-transition-old(root),
 ::view-transition-new(root) {
   animation-duration: 160ms;
-  animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  animation-timing-function: linear;
 }

@@ -593,8 +593,8 @@ onUnmounted(() => {
     <Transition name="bg-fade">
       <div :key="backgroundStyle.backgroundImage" class="vcp-background-layer" :style="backgroundStyle"></div>
     </Transition>
-    <div class="vcp-background-overlay absolute inset-0 pointer-events-none transition-colors" style="transition-duration: 350ms;"
-      :class="themeStore.isDarkResolved ? 'bg-black/12' : 'bg-transparent'"></div>
+    <div class="vcp-background-overlay absolute inset-0 pointer-events-none"
+      :class="themeStore.isDarkResolved ? 'opacity-100' : 'opacity-0'"></div>
 
     <!-- 2. 单一横向工作区：CSS 按可用宽度决定抽屉、单栏或双栏呈现 -->
     <div
@@ -740,6 +740,11 @@ body,
   transition: none;
 }
 
+.vcp-background-overlay {
+  background-color: rgba(0, 0, 0, 0.12);
+  transition: opacity 350ms ease-in-out;
+}
+
 /* Transitions */
 .fade-enter-active,
 .fade-leave-active {
@@ -753,7 +758,7 @@ body,
 
 .bg-fade-enter-active,
 .bg-fade-leave-active {
-  transition: opacity 0.35s ease-in-out;
+  transition: opacity 350ms ease-in-out;
 }
 
 .bg-fade-enter-from,
