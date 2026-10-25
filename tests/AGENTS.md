@@ -4,76 +4,63 @@
 
 ---
 
-## 1. 子系统定位
+## 1. 定位
 
-`tests/` 提供面向指定 Android Debug 设备和本地构建产物的受控验证工具。脚本选择明确的输入，调用 ADB、Cargo 或本机归档工具，并把有限终端输出或报告写入允许的位置；结果只说明本次实际采集到的状态。
-
-### 1.1 正常执行链
+`tests/` 提供面向指定 Android Debug 设备和本地构建产物的受控验证工具。脚本选择明确的输入，调用 ADB、Cargo 或本机归档工具，把有限的终端输出或报告写入允许的位置。
 
 ```text
 `pnpm android:debug:*` ──> android-debug-agent.cjs ──> adb-env.cjs
-                                  |                        |
-                                  v                        v
-                         Debug 会话与有界输出        指定设备 / 固定 Debug 包
+                                   |                        |
+                                   v                        v
+                          Debug 会话与有界输出        指定设备 / 固定 Debug 包
 
 `pnpm perf:*` ──> 对应采集脚本 ──> ADB / APK / Cargo 输出 ──> 本地报告
 ```
 
----
+## 2. 地图
 
-## 2. 代码结构
+| 路径 | 唯一职责 |
+| ---- | -------- |
+| `e2e-android/scripts/adb-env.cjs` | ADB 定位、设备选择、Debug 包常量 |
+| `e2e-android/scripts/android-debug-agent.cjs` | `doctor/dev/status/logs/snapshot/database-backup` 等统一入口 |
+| `e2e-android/scripts/android-gesture-check.cjs` | 固定 Debug WebView 目标的触屏检查 |
+| `perf/scripts/` | APK 体积、冷启动、同步期资源、系统快照与 Criterion 的采集或归档 |
 
-```
-tests/
-├── e2e-android/scripts/
-│   ├── adb-env.cjs                 # ADB 定位、设备选择与 Debug 包常量
-│   ├── android-debug-agent.cjs     # doctor/dev/status/logs/snapshot/database-backup 等统一入口
-│   └── android-gesture-check.cjs   # gesture-check：固定 Debug WebView 目标的触屏检查与有界事件回放
-└── perf/scripts/
-    ├── measure_apk_size.cjs        # APK 文件与可读取 section 的体积报告
-    ├── measure_startup_adb.cjs     # adb am start -W 冷启动采样
-    ├── measure_sync_pipeline.cjs   # Debug PID 的同步期资源与有限日志采样
-    ├── collect_android_dumpsys.cjs # 显式全量 Android 系统快照
-    └── run_rust_bench.cjs          # 运行或归档现有 Criterion 输出
-```
+脚本的行为以这些 JavaScript 入口为准；README、历史报告和旧采样值只是材料。
 
-脚本当前行为必须从上述 JavaScript 入口恢复。历史报告、README、测试名称和旧采样值只能作为材料，不能决定新的产品阈值或实现方向。
+## 3. 不变量
 
----
+### 3.1 设备与会话
 
-## 3. Android Debug 安全边界
+| # | 不变量 | 锚点 | 破坏后果 |
+| - | ------ | ---- | -------- |
+| T1 | 设备写操作只作用于 `com.vcp.avatar.debug`；不提供包名覆盖、Release 模式或任何操作 `com.vcp.avatar` 的路径 | `adb-env.cjs` | 损坏用户的 Release 数据 |
+| T2 | 多设备必须显式选择 serial；选择不唯一、设备状态异常、Dev 使用网络 ADB 一律失败，不猜测目标 | `adb-env.cjs` | 操作到错误的设备 |
+| T3 | 安装前读取 APK application id，仅 Debug 包可继续；清除 Debug 数据必须带显式参数 | `android-debug-agent.cjs` | 覆盖 Release 或误清数据 |
+| T4 | `dev` 只建立并清理自己拥有的 reverse，同值映射可复用但不冒领，冲突映射不覆盖；`stop` 禁止 `adb reverse --remove-all` | `android-debug-agent.cjs` | 破坏用户的其他 adb 会话 |
+| T5 | 日志只读当前 Debug 主进程 PID 并限行数；进程不存在时不回退全局 logcat，任何路径都不清空设备日志 | `android-debug-agent.cjs` | 读到无关日志或毁掉他人现场 |
+| T6 | `gesture-check` 只连接指定 USB 设备的 Debug PID socket，使用本次分配的临时 forward；目标仅限固定主题按钮与普通正文，不接受任意选择器、脚本、包名或页面 URL | `android-gesture-check.cjs` | 退化为任意页面的远程执行入口 |
+| T7 | 截图只由用户命令或显式参数触发，一次一张，输出限于仓库或系统临时目录 | `android-debug-agent.cjs` | 批量采集个人内容 |
+| T8 | `collect_android_dumpsys.cjs` 只在用户明确要求全量诊断时运行 | `perf/scripts/collect_android_dumpsys.cjs` | 日常采集大体量系统信息 |
+| T9 | 同步采样绑定当前 Debug PID 与指定设备；进程、serial、包任一不匹配即停止 | `perf/scripts/measure_sync_pipeline.cjs` | 报告混入其他进程的数据 |
 
-### 3.1 设备与包
+### 3.2 证据语义
 
-- 所有设备写操作固定作用于 `com.vcp.avatar.debug`；不得增加包名覆盖、Release 模式或任何操作 `com.vcp.avatar` 的路径。
-- 多设备时必须显式选择 serial；选择不唯一、设备状态异常或 Dev 使用网络 ADB 时直接失败，不猜测目标。
-- 安装前先读取 APK application id，只有匹配 Debug 包才允许继续；清除 Debug 数据仍需显式参数。
+| 来源 | 只能说明 |
+| ---- | -------- |
+| `status` / `logs` / `snapshot` / 截图 | 脚本实际读取的字段，不等于完整 E2E 或发布验收 |
+| `gesture-check` | CDP 输入与观测序列的回放，输出绑定实际加载的指令与文档身份；不等于手指实测 |
+| `measure_startup_adb.cjs` | Android `am start -W`，不是业务就绪时间 |
+| `measure_apk_size.cjs` | 文件字节总是可得；内部 section 依赖本机归档工具，缺失即保持缺失，不推算 |
+| Criterion、历史基线、已有报告 | 某次运行的产物；新结论须重新绑定当前代码、输入、环境与实际采样 |
 
-### 3.2 ADB 与会话所有权
+## 4. 修改与验证
 
-- `dev` 只建立并清理本次 supervisor 实际拥有的 reverse；已有同值映射可以复用但不能冒领，冲突映射不能覆盖。
-- `stop` 只收敛当前 supervisor 和自有映射；禁止执行全局 `adb reverse --remove-all`。
-- 日志只读取当前 Debug 主进程 PID，并保持行数上限；进程不存在时不回退到全局 logcat，任何路径都不得清空设备日志。
-- `gesture-check` 只连接指定 USB 设备的 Debug PID socket，使用本次分配的临时 forward；固定主题按钮和普通正文两种目标，不接受任意选择器、脚本、包名或页面 URL。输出绑定实际加载的指令与文档身份，CDP 输入和观测序列回放明确区别于手指实测。
-- 截图必须由用户命令或显式参数触发，一次只采集一张；输出只允许位于仓库或系统临时目录。
+修改脚本时，从 `package.json` 的命令入口追踪参数解析、设备选择、副作用目标、输出限制与清理路径。新增写设备能力必须同时满足 Debug-only、目标可判定、失败闭合、所有权可回收。
 
----
+| 改动 | 验证 |
+| ---- | ---- |
+| 脚本语法、纯解析 | 对应 Node 入口的有界检查 |
+| 需要 ADB、安装、重载、截图、性能采集 | 先取得用户对该操作的明确指令 |
 
-## 4. 性能与证据语义
-
-- `status`、`logs`、`snapshot` 和 screenshot 各自只报告脚本实际读取的字段，不自动升级为完整 E2E 或发布验收。
-- 启动采样当前测量的是 Android `am start -W`，不是应用业务就绪时间。
-- APK 报告始终可以说明文件字节；内部 section 取决于本机可用归档工具，缺失时保持缺失而不是推算。
-- `collect_android_dumpsys.cjs` 会收集大体量系统信息，只在用户明确要求全量诊断时运行，不作为日常 Agent 命令。
-- 同步采样绑定当前 Debug PID 与指定设备；进程、serial 或包不匹配时停止，不把其他进程数据并入报告。
-- Criterion、历史基线和已有性能报告都是某次运行产物；新的性能结论必须重新绑定当前代码、输入、环境与实际采样。
-
----
-
-## 5. 修改与完成边界
-
-修改脚本时，从 `package.json` 的实际命令入口追踪参数解析、设备选择、副作用目标、输出限制和清理路径。新增写设备能力必须保持 Debug-only、目标可判定、失败闭合和所有权可回收；不得为采集方便扩大输出、扫描无关设备状态或读取个人 Release。
-
-脚本语法和纯解析变化可使用对应 Node 入口做有界检查；需要 ADB、安装、重载、截图或性能采集时，先取得用户对该操作的明确指令。执行结果只作为本次工具证据，不要求生产代码迎合脚本。
-
-**完成**：命令入口、目标设备、Debug 包、副作用所有者、输出预算与清理路径保持一致，并明确报告实际执行了什么、生成了什么以及哪些设备或产品结论仍未取得。
+**完成**：命令入口、目标设备、Debug 包、副作用所有者、输出预算与清理路径一致，并报告实际执行了什么、生成了什么、哪些设备或产品结论仍未取得。
