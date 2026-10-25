@@ -9,6 +9,7 @@ defineProps<{
   nameStyle?: Record<string, string>;
   avatarUrl?: string | null;
   avatarDominantColor?: string;
+  isNarrating?: boolean;
 }>();
 </script>
 
@@ -21,6 +22,7 @@ defineProps<{
       :fallback-text="displayName || '?'"
       :is-user="isUser"
       :dominant-color="avatarDominantColor"
+      :is-narrating="isNarrating"
     />
 
     <div v-if="displayName" class="text-[11px] font-bold tracking-widest opacity-80" :style="nameStyle">

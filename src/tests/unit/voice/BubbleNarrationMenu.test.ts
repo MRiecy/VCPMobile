@@ -56,10 +56,14 @@ describe('bubble narration message menu', () => {
   it('reads the entire message and survives ordinary renderer unmount', async () => {
     const original = '<voice_guidance>轻快</voice_guidance>\n第一段<brk>第二段';
     const { wrapper } = await render([message('a', 'assistant', 1, original)]);
-    await action('朗读气泡').handler();
+    const startAction = action('朗读气泡');
+    expect(startAction.danger).toBeFalsy();
+    await startAction.handler();
     expect(calls('submit_tts_text')[0][1]?.text).toBe(original);
     await wrapper.trigger('test-menu');
-    expect(action('停止朗读')).toBeDefined();
+    const stopAction = action('停止朗读');
+    expect(stopAction).toBeDefined();
+    expect(stopAction.danger).toBe(true);
     wrappers.splice(wrappers.indexOf(wrapper), 1);
     wrapper.unmount();
     await flushPromises();

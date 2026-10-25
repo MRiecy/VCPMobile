@@ -123,6 +123,16 @@ const activeMermaidSource = ref("");
 // === Shell Properties (Pre-computed in Rust) ===
 const shell = computed(() => props.message.shell);
 
+const isNarratingCurrentMessage = computed(() => {
+  const activeKey = bubbleNarration.activeMessageKey;
+  if (!activeKey || activeKey.messageId !== props.message.id) return false;
+  const currentConv = sessionStore.currentConversationKey;
+  if (!currentConv) return false;
+  return activeKey.conversation.ownerId === currentConv.ownerId &&
+    activeKey.conversation.ownerType === currentConv.ownerType &&
+    activeKey.conversation.topicId === currentConv.topicId;
+});
+
 // === Streaming State ===
 
 // 数据层面：消息是否处于当前完整会话的活跃流中。
@@ -846,6 +856,7 @@ const showMessageContextMenu = async () => {
     actions.push({
       label: capturedTtsId ? '停止朗读' : '朗读气泡',
       icon: capturedTtsId ? Square : Volume2,
+      danger: Boolean(capturedTtsId),
       handler: async () => {
         if (capturedTtsId) {
           await bubbleNarration.stopMessage(messageKey, capturedTtsId);
@@ -996,6 +1007,7 @@ onUnmounted(() => {
           :owner-type="shell.isUser ? 'user' : 'agent'"
           :owner-id="shell.isUser ? 'user_avatar' : (message.agentId || agentId)"
           :avatar-dominant-color="shell.avatarColor"
+          :is-narrating="isNarratingCurrentMessage"
         />
 
         <ChatBubble 

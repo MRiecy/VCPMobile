@@ -18,6 +18,8 @@ import GroupInviteBar from './components/GroupInviteBar.vue';
 import VcpAvatar from '../../components/ui/VcpAvatar.vue';
 import { useMentionSelector, MENTION_ALL_ID, type MentionMember } from './composables/useMentionSelector';
 import { splitMentionSegments } from '../../core/utils/mention';
+import NarrationWave from './components/NarrationWave.vue';
+import { useBubbleNarration } from './voice/useBubbleNarration';
 
 const tarvenStore = useTarvenStore();
 
@@ -50,6 +52,8 @@ const shareStore = useShareStore();
 const streamStore = useChatStreamStore();
 const attachmentStore = useAttachmentStore();
 const overlayStore = useOverlayStore();
+const bubbleNarration = useBubbleNarration();
+const isNarrating = computed(() => Boolean(bubbleNarration.activeTtsId));
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 const rootRef = ref<HTMLElement | null>(null);
 const isExpanded = ref(false);
@@ -157,7 +161,12 @@ const attachmentsReady = computed(() =>
   attachmentStore.stagedAttachments.every(attachment => attachment.status === 'done'),
 );
 const canSend = computed(() => hasContent.value && attachmentsReady.value && !props.disabled && !props.suspended && !shareStore.sending && !isPreparing.value);
-const actionIsVoiceCall = computed(() => !hasContent.value && !isGenerating.value && !isPreparing.value && !isExpanded.value);
+const actionIsStopNarration = computed(() =>
+  !isGenerating.value && isNarrating.value && !hasContent.value && !isPreparing.value && !isExpanded.value
+);
+const actionIsVoiceCall = computed(() =>
+  !hasContent.value && !isGenerating.value && !isPreparing.value && !isExpanded.value && !actionIsStopNarration.value
+);
 
 // 编辑重发意图与原会话绑定；切换会话取消意图时同时清理注入内容。
 let voiceResendEditor: typeof overlayStore.editorConfig = null;
@@ -240,6 +249,10 @@ const handleSend = async () => {
 const handleAction = () => {
   if (props.disabled || props.suspended) return;
   if (actionIsStop.value) {
+    if (actionIsStopNarration.value) {
+      void bubbleNarration.stopBubbleNarration();
+      return;
+    }
     const activeIds = Array.from(streamStore.activeStreamingIds);
     const key = sessionStore.currentConversationKey;
     if (!key) return;
@@ -278,9 +291,13 @@ const {
 } = useMentionSelector(input);
 
 // JEV 持续会话允许在成员发言/仲裁时追加消息；无草稿时仍可一键中断全部。
-const actionIsStop = computed(() => isGenerating.value
-  && !((streamStore.currentGroupTurn?.mode ?? mentionGroupMode.value) === 'jev'
-    && hasContent.value && !historyStore.editingMessage));
+const actionIsStop = computed(() => {
+  if (isGenerating.value) {
+    return !((streamStore.currentGroupTurn?.mode ?? mentionGroupMode.value) === 'jev'
+      && hasContent.value && !historyStore.editingMessage);
+  }
+  return actionIsStopNarration.value;
+});
 
 // 输入法组合态（拼音上屏前）：v-model 此时尚未更新，覆盖层必须全部让位，
 // 否则富文本提示/高亮背板会盖住正在组合的拼音串
@@ -612,7 +629,7 @@ onUnmounted(() => {
           <button
             type="button"
             @click="handlePrimaryButtonClick"
-            :aria-label="actionIsVoiceCall ? '开始语音通话' : actionIsStop ? '停止生成' : isPreparing ? '正在准备消息' : '发送消息'"
+            :aria-label="actionIsVoiceCall ? '开始语音通话' : actionIsStopNarration ? '停止朗读' : actionIsStop ? '停止生成' : isPreparing ? '正在准备消息' : '发送消息'"
             :disabled="actionIsVoiceCall ? (disabled || suspended) : (!actionIsStop && !canSend)"
             class="primary-action-btn w-8 h-8 flex items-center justify-center rounded-full shadow-sm active:scale-95 relative overflow-hidden shrink-0"
             :class="{
@@ -652,6 +669,16 @@ onUnmounted(() => {
             </span>
           </button>
         </div>
+
+        <!-- 朗读时的彩虹音波跃动效果 -->
+        <Transition name="wave-flow">
+          <div
+            v-if="isNarrating"
+            class="absolute left-3 right-3 bottom-0 h-[5px] pointer-events-none z-10 overflow-hidden"
+          >
+            <NarrationWave :active="isNarrating" />
+          </div>
+        </Transition>
       </div>
     </div>
 
@@ -711,6 +738,18 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* 朗读彩虹音波淡入淡出 */
+.wave-flow-enter-active,
+.wave-flow-leave-active {
+  transition: opacity 0.28s cubic-bezier(0.22, 1, 0.36, 1), transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.wave-flow-enter-from,
+.wave-flow-leave-to {
+  opacity: 0;
+  transform: translateY(2px) scaleY(0.7);
+}
+
 /* 隐藏滚动条 */
 .overflow-x-auto {
   scrollbar-width: none;

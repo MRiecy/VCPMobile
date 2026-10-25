@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import VcpAvatar from "../../../components/ui/VcpAvatar.vue";
+import AvatarWaveSlot from "../../../components/ui/AvatarWaveSlot.vue";
 import { computed } from "vue";
 
 const props = defineProps<{
@@ -9,6 +10,7 @@ const props = defineProps<{
   fallbackText: string;
   isUser: boolean;
   dominantColor?: string;
+  isNarrating?: boolean;
 }>();
 
 const ownerInfo = computed(() => {
@@ -33,27 +35,37 @@ const ownerInfo = computed(() => {
 </script>
 
 <template>
-  <div class="vcp-message-avatar flex-shrink-0 w-9 h-9">
-    <VcpAvatar
-      v-if="ownerInfo"
-      :owner-type="ownerInfo.type"
-      :owner-id="ownerInfo.id"
-      :fallback-name="fallbackText"
-      size="w-10 h-10"
-      rounded="rounded-full"
-      :dominant-color="dominantColor"
-    />
-    <div v-else class="w-full h-full rounded-full overflow-hidden border transition-all duration-500 shadow-sm flex items-center justify-center text-xs font-bold text-white"
-      :class="isUser ? 'bg-primary border-primary' : 'bg-white dark:bg-gray-800'"
-      :style="[
-        !isUser && dominantColor ? { borderColor: dominantColor } : {},
-        {
-          backgroundColor: isUser
-            ? 'var(--primary)'
-            : '#374151',
-        }
-      ]">
-      {{ fallbackText.charAt(0).toUpperCase() }}
-    </div>
+  <div
+    class="vcp-message-avatar flex-shrink-0 w-9 h-9 relative rounded-full"
+    :class="{ 'is-narrating': isNarrating && !isUser }"
+    :data-narrating="isNarrating && !isUser ? 'true' : 'false'"
+  >
+    <AvatarWaveSlot
+      class="w-full h-full pointer-events-none"
+      :active="isNarrating && !isUser"
+      :disabled="isUser"
+    >
+      <VcpAvatar
+        v-if="ownerInfo"
+        :owner-type="ownerInfo.type"
+        :owner-id="ownerInfo.id"
+        :fallback-name="fallbackText"
+        size="w-9 h-9"
+        rounded="rounded-full"
+        :dominant-color="dominantColor"
+      />
+      <div v-else class="w-full h-full rounded-full overflow-hidden border transition-all duration-500 shadow-sm flex items-center justify-center text-xs font-bold text-white"
+        :class="isUser ? 'bg-primary border-primary' : 'bg-white dark:bg-gray-800'"
+        :style="[
+          !isUser && dominantColor ? { borderColor: dominantColor } : {},
+          {
+            backgroundColor: isUser
+              ? 'var(--primary)'
+              : '#374151',
+          }
+        ]">
+        {{ fallbackText.charAt(0).toUpperCase() }}
+      </div>
+    </AvatarWaveSlot>
   </div>
 </template>
