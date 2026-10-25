@@ -74,7 +74,6 @@ pub(super) struct ReplyBuffer {
     global_style: Option<String>,
     style_decided: bool,
     inherit_global_style: bool,
-    streaming_tts: bool,
     emitted_segments: usize,
     quotes: QuoteState,
 }
@@ -105,23 +104,19 @@ pub(super) enum ReplyPiece {
 }
 
 impl ReplyBuffer {
-    pub(super) fn new_with_mode(inherit_global_style: bool, streaming_tts: bool) -> Self {
+    pub(super) fn new(inherit_global_style: bool) -> Self {
         Self {
             inherit_global_style,
-            streaming_tts,
             ..Default::default()
         }
     }
 
     fn policy(&self) -> ChunkPolicy {
-        let (min_sentence_chars, clause_cut_chars, max_chars) =
-            match (self.emitted_segments, self.streaming_tts) {
-                (0, _) => (10, 24, 60),
-                (1, true) => (28, 64, 140),
-                (_, true) => (40, 90, 160),
-                (1, false) => (60, 100, 150),
-                (_, false) => (120, 160, 220),
-            };
+        let (min_sentence_chars, clause_cut_chars, max_chars) = match self.emitted_segments {
+            0 => (10, 24, 60),
+            1 => (40, 80, 150),
+            _ => (80, 120, 180),
+        };
         ChunkPolicy {
             min_sentence_chars,
             clause_cut_chars,
@@ -486,7 +481,7 @@ mod tests {
 
     #[test]
     fn cumulative_unicode_updates_emit_each_sentence_once_and_allow_unspoken_tail_edits() {
-        let mut reply = ReplyBuffer::new_with_mode(false, false);
+        let mut reply = ReplyBuffer::new(false);
         reply
             .update("你好，我们现在开始吧。接下".into(), false)
             .unwrap();
@@ -504,7 +499,7 @@ mod tests {
 
     #[test]
     fn decimal_and_an_unfinished_tail_wait_for_more_text() {
-        let mut reply = ReplyBuffer::new_with_mode(false, false);
+        let mut reply = ReplyBuffer::new(false);
         reply.update("The value is 3.14".into(), false).unwrap();
         assert!(matches!(reply.next(), ReplyPiece::Wait));
         reply
@@ -515,7 +510,7 @@ mod tests {
 
     #[test]
     fn long_unpunctuated_text_is_bounded_and_oversize_is_an_explicit_error() {
-        let mut reply = ReplyBuffer::new_with_mode(false, false);
+        let mut reply = ReplyBuffer::new(false);
         reply.update("字".repeat(200), false).unwrap();
         assert!(matches!(reply.next(), ReplyPiece::Text(text) if text.chars().count() == 60));
         assert!(reply.update("字".repeat(MAX_TEXT_BYTES), true).is_err());
@@ -523,7 +518,7 @@ mod tests {
 
     #[test]
     fn tags_are_never_cut_and_global_style_repeats_without_repeating_local_actions() {
-        let mut reply = ReplyBuffer::new_with_mode(true, false);
+        let mut reply = ReplyBuffer::new(true);
         reply
             .update(
                 "(温柔、轻松)[轻笑]这是接下来要说的第一句。[叹气]第二句。".into(),
@@ -536,7 +531,7 @@ mod tests {
         assert!(
             matches!(reply.next(), ReplyPiece::Text(text) if text == "(温柔、轻松)[叹气]第二句。")
         );
-        let mut reply = ReplyBuffer::new_with_mode(false, false);
+        let mut reply = ReplyBuffer::new(false);
         reply
             .update(format!("{}[轻声，说得慢一点]尾句。", "字".repeat(55)), true)
             .unwrap();
@@ -544,7 +539,7 @@ mod tests {
             matches!(reply.next(), ReplyPiece::Text(text) if text == format!("{}[轻声，说得慢一点]尾句。", "字".repeat(55)))
         );
         assert!(matches!(reply.next(), ReplyPiece::Finished));
-        let mut boundary = ReplyBuffer::new_with_mode(false, false);
+        let mut boundary = ReplyBuffer::new(false);
         boundary
             .update(format!("{}[轻声][慢一点]尾句。", "字".repeat(60)), true)
             .unwrap();
@@ -552,7 +547,7 @@ mod tests {
         assert!(
             matches!(boundary.next(), ReplyPiece::Text(text) if text == "[轻声][慢一点]尾句。")
         );
-        let mut spacing = ReplyBuffer::new_with_mode(false, false);
+        let mut spacing = ReplyBuffer::new(false);
         spacing
             .update(format!("{} [低声][轻笑] 尾句。", "字".repeat(59)), true)
             .unwrap();
@@ -562,7 +557,7 @@ mod tests {
 
     #[test]
     fn complete_global_style_has_a_bound_and_does_not_inherit_a_new_message() {
-        let mut reply = ReplyBuffer::new_with_mode(true, false);
+        let mut reply = ReplyBuffer::new(true);
         reply.update("（温柔".into(), false).unwrap();
         assert!(matches!(reply.next(), ReplyPiece::Wait));
         reply
@@ -572,10 +567,10 @@ mod tests {
             matches!(reply.next(), ReplyPiece::Text(text) if text == "（温柔）这是接下来要说的第一句。")
         );
         assert!(matches!(reply.next(), ReplyPiece::Text(text) if text == "（温柔）第二句。"));
-        let mut next = ReplyBuffer::new_with_mode(true, false);
+        let mut next = ReplyBuffer::new(true);
         next.update("[轻笑]不同消息。".into(), true).unwrap();
         assert!(matches!(next.next(), ReplyPiece::Text(text) if text == "[轻笑]不同消息。"));
-        let mut unclosed = ReplyBuffer::new_with_mode(true, false);
+        let mut unclosed = ReplyBuffer::new(true);
         unclosed
             .update(format!("({}", "字".repeat(200)), false)
             .unwrap();
@@ -584,7 +579,7 @@ mod tests {
 
     #[test]
     fn standalone_parenthetical_prose_is_not_repeated_as_global_style() {
-        let mut reply = ReplyBuffer::new_with_mode(false, false);
+        let mut reply = ReplyBuffer::new(false);
         reply
             .update("(注：这是一段说明)第一句。第二句。".into(), true)
             .unwrap();
@@ -600,11 +595,11 @@ mod tests {
             format!("[{}", "字".repeat(300)),
             format!("[{}]结尾。", "字".repeat(300)),
         ] {
-            let mut reply = ReplyBuffer::new_with_mode(false, false);
+            let mut reply = ReplyBuffer::new(false);
             reply.update(text, false).unwrap();
             assert!(matches!(reply.next(), ReplyPiece::Text(text) if text.chars().count() == 60));
         }
-        let mut reply = ReplyBuffer::new_with_mode(false, false);
+        let mut reply = ReplyBuffer::new(false);
         reply.update("[轻声，".into(), false).unwrap();
         assert!(matches!(reply.next(), ReplyPiece::Wait));
         reply
@@ -617,7 +612,7 @@ mod tests {
 
     #[test]
     fn short_sentences_merge_and_finalization_releases_the_last_short_piece() {
-        let mut reply = ReplyBuffer::new_with_mode(true, true);
+        let mut reply = ReplyBuffer::new(true);
         reply.update("嗯。好的。".into(), false).unwrap();
         assert!(matches!(reply.next(), ReplyPiece::Wait));
         reply
@@ -633,60 +628,89 @@ mod tests {
     }
 
     #[test]
-    fn streaming_and_non_streaming_use_their_respective_staircase_windows() {
-        for (streaming, sizes) in [(true, [60, 140, 160]), (false, [60, 150, 220])] {
-            let mut reply = ReplyBuffer::new_with_mode(false, streaming);
-            reply.update("字".repeat(500), false).unwrap();
-            for expected in sizes {
-                assert!(
-                    matches!(reply.next(), ReplyPiece::Text(text) if text.chars().count() == expected)
-                );
-            }
-            assert!(matches!(reply.next(), ReplyPiece::Wait));
-            reply.update("字".repeat(500), true).unwrap();
+    fn all_transport_modes_share_one_staircase_window() {
+        let sizes = [60, 150, 180];
+        let mut reply = ReplyBuffer::new(false);
+        reply.update("字".repeat(500), false).unwrap();
+        for expected in sizes {
             assert!(
-                matches!(reply.next(), ReplyPiece::Text(text) if text.chars().count() == 500 - sizes.iter().sum::<usize>())
+                matches!(reply.next(), ReplyPiece::Text(text) if text.chars().count() == expected)
             );
-            assert!(matches!(reply.next(), ReplyPiece::Finished));
         }
+        assert!(matches!(reply.next(), ReplyPiece::Wait));
+        reply.update("字".repeat(500), true).unwrap();
+        assert!(
+            matches!(reply.next(), ReplyPiece::Text(text) if text.chars().count() == 500 - sizes.iter().sum::<usize>())
+        );
+        assert!(matches!(reply.next(), ReplyPiece::Finished));
     }
 
     #[test]
     fn sentence_and_clause_thresholds_advance_only_after_a_spoken_piece() {
-        for (streaming, sentence_sizes, clause_sizes) in [
-            (true, [10, 28, 40], [24, 64, 90]),
-            (false, [10, 60, 120], [24, 100, 160]),
-        ] {
-            for (sizes, punctuation) in [(sentence_sizes, '。'), (clause_sizes, '，')] {
-                let mut reply = ReplyBuffer::new_with_mode(true, streaming);
-                let mut cumulative = "(轻松)[轻笑]".to_string();
+        for (sizes, punctuation) in [([10, 40, 80], '。'), ([24, 80, 120], '，')] {
+            let mut reply = ReplyBuffer::new(true);
+            let mut cumulative = "(轻松)[轻笑]".to_string();
+            reply.update(cumulative.clone(), false).unwrap();
+            assert!(matches!(reply.next(), ReplyPiece::Wait));
+            assert_eq!(reply.emitted_segments, 0);
+            for expected in sizes {
+                let body = format!("{}{}", "字".repeat(expected - 1), punctuation);
+                cumulative.push_str(&body);
                 reply.update(cumulative.clone(), false).unwrap();
+                assert!(matches!(reply.next(), ReplyPiece::Text(text) if text.ends_with(&body)));
                 assert!(matches!(reply.next(), ReplyPiece::Wait));
-                assert_eq!(reply.emitted_segments, 0);
-                for expected in sizes {
-                    let body = format!("{}{}", "字".repeat(expected - 1), punctuation);
-                    cumulative.push_str(&body);
-                    reply.update(cumulative.clone(), false).unwrap();
-                    assert!(
-                        matches!(reply.next(), ReplyPiece::Text(text) if text.ends_with(&body))
-                    );
-                    assert!(matches!(reply.next(), ReplyPiece::Wait));
-                }
-                assert_eq!(reply.emitted_segments, 3);
             }
+            assert_eq!(reply.emitted_segments, 3);
         }
+    }
+
+    #[test]
+    fn consuming_completed_paragraphs_matches_the_full_readable_input() {
+        let paragraphs = [
+            format!("(温柔)[轻笑]“{}？！”", "字".repeat(58)),
+            format!("{}，{}。", "次".repeat(79), "文".repeat(39)),
+            format!("[轻声]{}", "后".repeat(181)),
+            "Use config.json for version 3.14. 最后的短句。".to_owned(),
+        ];
+        let drain = |reply: &mut ReplyBuffer| {
+            let mut pieces = Vec::new();
+            while let ReplyPiece::Text(text) = reply.next() {
+                pieces.push(text);
+            }
+            pieces
+        };
+        let text = paragraphs.join("\n");
+        let mut complete = ReplyBuffer::new(true);
+        complete.update(text.clone(), true).unwrap();
+        let expected = drain(&mut complete);
+        let mut incremental = ReplyBuffer::new(true);
+        let mut actual = Vec::new();
+        let mut stable = String::new();
+        for paragraph in paragraphs {
+            if !stable.is_empty() {
+                stable.push('\n');
+            }
+            stable.push_str(&paragraph);
+            incremental.update(stable.clone(), false).unwrap();
+            actual.extend(drain(&mut incremental));
+        }
+        assert!(!actual.is_empty());
+        incremental.update(text, true).unwrap();
+        actual.extend(drain(&mut incremental));
+        assert_eq!(actual, expected);
+        assert!(matches!(incremental.next(), ReplyPiece::Finished));
     }
 
     #[test]
     fn style_and_actions_never_become_standalone_requests() {
         for input in ["(温柔)", "[轻笑][低声]", "(温柔)[轻笑]\n ", " \n "] {
-            let mut reply = ReplyBuffer::new_with_mode(true, true);
+            let mut reply = ReplyBuffer::new(true);
             reply.update(input.into(), true).unwrap();
             assert!(!reply.has_spoken_body());
             assert!(matches!(reply.next(), ReplyPiece::Finished));
             assert_eq!(reply.emitted_segments, 0);
         }
-        let mut reply = ReplyBuffer::new_with_mode(true, false);
+        let mut reply = ReplyBuffer::new(true);
         reply
             .update("(温柔)这里是足够长的第一句。[轻笑]".into(), true)
             .unwrap();
@@ -714,11 +738,11 @@ mod tests {
                 "\"This first sentence is enough!\"",
             ),
         ] {
-            let mut reply = ReplyBuffer::new_with_mode(false, true);
+            let mut reply = ReplyBuffer::new(false);
             reply.update(input.into(), true).unwrap();
             assert!(matches!(reply.next(), ReplyPiece::Text(text) if text == expected));
         }
-        let mut bounded = ReplyBuffer::new_with_mode(false, false);
+        let mut bounded = ReplyBuffer::new(false);
         bounded
             .update(format!("{}？！”", "字".repeat(59)), true)
             .unwrap();
@@ -728,7 +752,7 @@ mod tests {
 
     #[test]
     fn english_periods_preserve_decimal_and_identifier_boundaries() {
-        let mut reply = ReplyBuffer::new_with_mode(false, false);
+        let mut reply = ReplyBuffer::new(false);
         let sentence = "Use config.json for version 3.14.";
         reply.update(sentence.into(), false).unwrap();
         assert!(matches!(reply.next(), ReplyPiece::Text(text) if text == sentence));
@@ -738,7 +762,7 @@ mod tests {
     #[test]
     fn punctuation_longer_than_a_segment_keeps_the_hard_limit() {
         for punctuation_chars in [59, 60, 20_000] {
-            let mut reply = ReplyBuffer::new_with_mode(false, false);
+            let mut reply = ReplyBuffer::new(false);
             reply
                 .update(
                     format!("{}{}后文", "字".repeat(59), ".".repeat(punctuation_chars)),
@@ -756,7 +780,7 @@ mod tests {
 
     #[test]
     fn internal_newlines_add_pauses_without_changing_the_emitted_source_prefix() {
-        let mut reply = ReplyBuffer::new_with_mode(false, false);
+        let mut reply = ReplyBuffer::new(false);
         let first = "第一段已经有足够多的文字\n";
         let text = format!("{first}标题\n第一项。\n第二项\n第三项");
         reply.update(text.clone(), true).unwrap();

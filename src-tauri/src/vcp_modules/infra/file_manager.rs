@@ -157,6 +157,13 @@ pub fn get_data_root_dir<R: tauri::Runtime>(
     }
 }
 
+/// 语音合成的持久缓存；随应用数据保留，不放入系统可回收的缓存目录。
+pub fn get_tts_cache_root_dir<R: tauri::Runtime>(
+    app_handle: &tauri::AppHandle<R>,
+) -> Result<PathBuf, String> {
+    Ok(get_data_root_dir(app_handle)?.join("tts_cache"))
+}
+
 /// 可丢弃缓存的根目录。iOS 由 Tauri 解析为 Library/Caches/<实际 identifier>。
 pub fn get_cache_root_dir<R: tauri::Runtime>(
     app_handle: &tauri::AppHandle<R>,

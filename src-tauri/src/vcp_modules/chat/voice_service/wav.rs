@@ -1,4 +1,4 @@
-//! Strict PCM16 mono RIFF reader for the native ASR export and non-streaming TTS.
+//! Strict PCM16 mono RIFF reader for the native ASR export.
 
 pub(super) fn pcm16_mono(bytes: &[u8], sample_rate: u32) -> Result<Vec<u8>, String> {
     let invalid = || "语音服务返回的 WAV 音频格式无效。".to_string();

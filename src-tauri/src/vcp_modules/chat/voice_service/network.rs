@@ -1,9 +1,14 @@
 use super::{
-    samples::PreparedCloneSample, sse::SseDecoder, wav, InputAudio, VoiceServiceConfig, VoiceTtsMode,
+    audio_codec::{self, ContainerFormat, MAX_AUDIO_FILE_BYTES, MAX_PCM_BYTES, PCM_PACKET_BYTES},
+    cache::TtsCacheIdentity,
+    samples::PreparedCloneSample,
+    sse::SseDecoder,
+    InputAudio, VoiceServiceConfig, VoiceTtsMode,
 };
 use crate::vcp_modules::infra::http_clients::{client, HttpProfile};
 use crate::vcp_modules::settings_manager::VOICE_GUIDANCE_MAX_CHARS;
 use base64::{engine::general_purpose::STANDARD, Engine};
+use bytes::Bytes;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::{future::Future, time::Duration};
@@ -12,9 +17,27 @@ use tokio_util::sync::CancellationToken;
 pub(super) const MAX_TEXT_BYTES: usize = 64 * 1024;
 const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
 const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
-const MAX_PCM_BYTES: usize = 8 * 1024 * 1024;
-pub(super) const PCM_PACKET_BYTES: usize = 32768;
 pub(super) const CANCELLED: &str = "voice_cancelled";
+// JSON carries base64 plus the provider's message envelope. This bound is
+// independent of ASR's smaller text-only response limit.
+const MAX_TTS_JSON_BYTES: usize = MAX_AUDIO_FILE_BYTES.div_ceil(3) * 4 + 64 * 1024;
+
+pub(super) struct SynthesisRequest {
+    pub identity: TtsCacheIdentity,
+    body: Value,
+    stream: bool,
+}
+
+#[derive(Debug)]
+pub(super) enum SynthesizedAudio {
+    Encoded {
+        format: ContainerFormat,
+        bytes: Bytes,
+    },
+    /// The output owner already holds every PCM byte. Returning only completion
+    /// avoids retaining a second full segment, including during direct preview.
+    StreamedPcm,
+}
 
 async fn request(
     config: &VoiceServiceConfig,
@@ -214,12 +237,16 @@ impl PcmPackets {
     }
 }
 
-fn synthesis_request(
+pub(super) fn prepare_synthesis(
     config: &VoiceServiceConfig,
     text: &str,
     guidance: Option<&str>,
     sample: Option<&PreparedCloneSample>,
-) -> Result<Value, String> {
+) -> Result<SynthesisRequest, String> {
+    let endpoint = config.endpoint()?;
+    let endpoint = url::Url::parse(&endpoint)
+        .map_err(|_| String::from("语音 API 地址无效。"))?
+        .to_string();
     let stream = config.tts_streaming();
     let mut audio = json!({"format": if stream { "pcm16" } else { "wav" }});
     let model = match config.tts_mode {
@@ -228,21 +255,34 @@ fn synthesis_request(
             "mimo-v2.5-tts"
         }
         VoiceTtsMode::Clone => {
-            let sample = sample.ok_or("音色复刻参考音频未准备完成。")?;
+            let sample = sample.ok_or_else(|| String::from("音色复刻参考音频未准备完成。"))?;
             audio["voice"] = json!(sample.data_url.as_ref());
             "mimo-v2.5-tts-voiceclone"
         }
     };
     let prompt = guidance.unwrap_or_default().trim();
     if text.len() > MAX_TEXT_BYTES || prompt.chars().count() > VOICE_GUIDANCE_MAX_CHARS {
-        return Err("单段语音正文或指导过长。".into());
+        return Err(String::from("单段语音正文或指导过长。"));
     }
     let mut messages = Vec::with_capacity(2);
     if !prompt.is_empty() {
         messages.push(json!({"role": "user", "content": prompt}));
     }
     messages.push(json!({"role": "assistant", "content": text}));
-    Ok(json!({ "model": model, "stream": stream, "messages": messages, "audio": audio }))
+    Ok(SynthesisRequest {
+        identity: TtsCacheIdentity {
+            endpoint,
+            mode: config.tts_mode,
+            model: Some(model.to_string()),
+            voice: (config.tts_mode == VoiceTtsMode::Builtin).then(|| config.voice.clone()),
+            clone_sample_id: (config.tts_mode == VoiceTtsMode::Clone)
+                .then(|| config.clone_sample_id.trim().to_string()),
+            guidance: (!prompt.is_empty()).then(|| prompt.to_string()),
+            text: text.to_string(),
+        },
+        body: json!({ "model": model, "stream": stream, "messages": messages, "audio": audio }),
+        stream,
+    })
 }
 
 pub(super) async fn synthesize<F, Fut>(
@@ -251,61 +291,243 @@ pub(super) async fn synthesize<F, Fut>(
     guidance: Option<&str>,
     sample: Option<&PreparedCloneSample>,
     cancel: &CancellationToken,
-    mut output: F,
+    output: F,
+) -> Result<SynthesizedAudio, String>
+where
+    F: FnMut(Vec<u8>) -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    if cancel.is_cancelled() {
+        return Err(String::from(CANCELLED));
+    }
+    let request = prepare_synthesis(config, text, guidance, sample)?;
+    synthesize_prepared(config, &request, cancel, output).await
+}
+
+fn transport_error(error: reqwest::Error) -> String {
+    if error.is_timeout() {
+        String::from("语音服务请求超时，请重试。")
+    } else if error.is_connect() || error.is_request() || error.is_body() {
+        String::from("语音服务连接或响应传输失败。")
+    } else {
+        String::from("语音服务请求无效，请检查连接配置。")
+    }
+}
+
+async fn request_synthesis(
+    config: &VoiceServiceConfig,
+    prepared: &SynthesisRequest,
+    cancel: &CancellationToken,
+) -> Result<reqwest::Response, String> {
+    let request = client(HttpProfile::ChatStream)
+        .post(&prepared.identity.endpoint)
+        .bearer_auth(&config.api_key)
+        .timeout(Duration::from_secs(120))
+        .json(&prepared.body)
+        .send();
+    let response = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(String::from(CANCELLED)),
+        result = request => result.map_err(transport_error)?,
+    };
+    let status = response.status();
+    if !status.is_success() {
+        // Provider bodies can echo credentials or submitted audio.
+        return Err(format!(
+            "语音服务返回 HTTP {}，请检查连接和 API 配置。",
+            status.as_u16()
+        ));
+    }
+    Ok(response)
+}
+
+async fn read_synthesis_body(
+    response: reqwest::Response,
+    limit: usize,
+    cancel: &CancellationToken,
+) -> Result<Vec<u8>, String> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(String::from("语音服务响应过大。"));
+    }
+    let mut stream = response.bytes_stream();
+    let mut body = Vec::new();
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(String::from(CANCELLED)),
+            next = stream.next() => next,
+        };
+        let Some(chunk) = chunk else {
+            return Ok(body);
+        };
+        let chunk = chunk.map_err(|_| String::from("语音服务响应传输失败。"))?;
+        if body.len().saturating_add(chunk.len()) > limit {
+            return Err(String::from("语音服务响应过大。"));
+        }
+        body.extend_from_slice(&chunk);
+    }
+}
+
+async fn emit_packet<F, Fut>(
+    output: &mut F,
+    packet: Vec<u8>,
+    cancel: &CancellationToken,
 ) -> Result<(), String>
 where
     F: FnMut(Vec<u8>) -> Fut,
     Fut: Future<Output = Result<(), String>>,
 {
     if cancel.is_cancelled() {
-        return Err(CANCELLED.into());
+        return Err(String::from(CANCELLED));
     }
-    let body = synthesis_request(config, text, guidance, sample)?;
-    let response = request(config, &body, cancel).await?;
-    drop(body);
-    let mut packets = PcmPackets::default();
-    if !config.tts_streaming() {
-        let value = read_json(response, cancel).await?;
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => Err(String::from(CANCELLED)),
+        result = output(packet) => result,
+    }
+}
+
+pub(super) async fn synthesize_prepared<F, Fut>(
+    config: &VoiceServiceConfig,
+    prepared: &SynthesisRequest,
+    cancel: &CancellationToken,
+    mut output: F,
+) -> Result<SynthesizedAudio, String>
+where
+    F: FnMut(Vec<u8>) -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    let response = request_synthesis(config, prepared, cancel).await?;
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if prepared.stream {
+        if content_type != "text/event-stream" {
+            return Err(String::from("语音服务未返回 PCM16 流式响应。"));
+        }
+        return synthesize_pcm_stream(response, cancel, output).await;
+    }
+
+    let bytes = if matches!(content_type.as_str(), "audio/wav" | "audio/mpeg") {
+        read_synthesis_body(response, MAX_AUDIO_FILE_BYTES, cancel).await?
+    } else {
+        let body = read_synthesis_body(response, MAX_TTS_JSON_BYTES, cancel).await?;
+        let value: Value =
+            serde_json::from_slice(&body).map_err(|_| String::from("语音服务返回了无效 JSON。"))?;
+        check_provider_error(&value)?;
         let encoded = value
             .pointer("/choices/0/message/audio/data")
             .and_then(Value::as_str)
-            .ok_or_else(|| "语音合成未返回音频。".to_string())?;
-        let bytes = STANDARD
-            .decode(encoded)
-            .map_err(|_| "语音合成返回了无效的音频编码。")?;
-        let pcm = wav::pcm16_mono(&bytes, 24000)?;
-        for packet in packets.push(&pcm)? {
-            output(packet).await?;
+            .ok_or_else(|| String::from("语音合成未返回音频。"))?;
+        if encoded.len() > MAX_AUDIO_FILE_BYTES.div_ceil(3) * 4 {
+            return Err(String::from("单段语音合成结果过大。"));
         }
-    } else {
-        // Events are bounded individually; each audio.data is an independent
-        // base64 payload. PCM sample alignment is retained across those events.
-        read_events(response, cancel, |value| {
-            let chunks = value
+        STANDARD
+            .decode(encoded)
+            .map_err(|_| String::from("语音合成返回了无效的音频编码。"))?
+    };
+    // The codec validates and bounds decoded PCM as it grows, including when
+    // the source is compressed or requires resampling. It owns its worker until
+    // completion, so cancellation does not leave an orphaned decode task.
+    // Bytes shares the original allocation with the blocking decoder and cache.
+    let bytes = Bytes::from(bytes);
+    let decoded = audio_codec::decode(bytes.clone(), cancel)
+        .await
+        .map_err(|error| error.to_string())?;
+    // Complete PCM transfers ownership once. Only the playback boundary splits
+    // it into native-sized packets; the segment buffer must not reassemble them.
+    emit_packet(&mut output, decoded.pcm_24k_mono, cancel).await?;
+    if cancel.is_cancelled() {
+        return Err(String::from(CANCELLED));
+    }
+    Ok(SynthesizedAudio::Encoded {
+        format: decoded.format,
+        bytes,
+    })
+}
+
+async fn synthesize_pcm_stream<F, Fut>(
+    response: reqwest::Response,
+    cancel: &CancellationToken,
+    mut output: F,
+) -> Result<SynthesizedAudio, String>
+where
+    F: FnMut(Vec<u8>) -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    let mut stream = response.bytes_stream();
+    let mut decoder = SseDecoder::default();
+    let mut packets = PcmPackets::default();
+    let mut total = 0usize;
+    let mut complete = false;
+    let mut done_marker = false;
+    'response: loop {
+        let next = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(String::from(CANCELLED)),
+            next = stream.next() => next,
+        };
+        let Some(chunk) = next else {
+            break;
+        };
+        let chunk = chunk.map_err(|_| String::from("语音服务流式响应中断。"))?;
+        total = total.saturating_add(chunk.len());
+        if total > MAX_STREAM_BYTES {
+            return Err(String::from("语音服务流式响应超过大小限制。"));
+        }
+        for data in decoder.push(&chunk)? {
+            if cancel.is_cancelled() {
+                return Err(String::from(CANCELLED));
+            }
+            if data.trim() == "[DONE]" {
+                complete = true;
+                done_marker = true;
+                break 'response;
+            }
+            if data.trim().is_empty() {
+                continue;
+            }
+            let value: Value = serde_json::from_str(&data)
+                .map_err(|_| String::from("语音服务返回了无效流式 JSON。"))?;
+            check_provider_error(&value)?;
+            complete |= value
+                .pointer("/choices/0/finish_reason")
+                .is_some_and(|reason| !reason.is_null());
+            if let Some(encoded) = value
                 .pointer("/choices/0/delta/audio/data")
                 .and_then(Value::as_str)
-                .map(|encoded| {
-                    STANDARD
-                        .decode(encoded)
-                        .map_err(|_| "语音合成返回了无效的音频编码。".to_string())
-                })
-                .transpose()
-                .and_then(|audio| {
-                    audio.map_or_else(|| Ok(Vec::new()), |audio| packets.push(&audio))
-                });
-            // Consume one bounded event before reading the next network chunk.
-            let outputs =
-                chunks.map(|chunks| chunks.into_iter().map(&mut output).collect::<Vec<_>>());
-            async move {
-                for result in outputs? {
-                    result.await?;
+            {
+                let audio = STANDARD
+                    .decode(encoded)
+                    .map_err(|_| String::from("语音合成返回了无效的音频编码。"))?;
+                let chunks = packets.push(&audio)?;
+                for packet in chunks {
+                    // The output contract is the segment buffer, not the native
+                    // player. Each SSE event can advance independently of playback.
+                    emit_packet(&mut output, packet, cancel).await?;
                 }
-                Ok(())
             }
-        })
-        .await?;
+        }
     }
-    packets.finish()
+    if !complete {
+        return Err(String::from("语音服务在完成响应前断开连接。"));
+    }
+    if !done_marker {
+        decoder.finish()?;
+    }
+    packets.finish()?;
+    if cancel.is_cancelled() {
+        return Err(String::from(CANCELLED));
+    }
+    Ok(SynthesizedAudio::StreamedPcm)
 }
 
 #[cfg(test)]
@@ -672,7 +894,7 @@ mod tests {
         )
         .await;
         let mut output = Vec::new();
-        timeout(
+        let synthesized = timeout(
             Duration::from_secs(4),
             synthesize(
                 &config,
@@ -689,6 +911,7 @@ mod tests {
         .await
         .expect("TTS finishes")
         .expect("TTS succeeds");
+        assert!(matches!(synthesized, SynthesizedAudio::StreamedPcm));
         assert_eq!(output.concat(), pcm);
         assert!(output
             .iter()
@@ -735,8 +958,12 @@ mod tests {
         .await
         .expect("TTS finishes")
         .expect("TTS succeeds");
-        assert_eq!(output.len(), 2);
-        assert_eq!(output[0].len(), PCM_PACKET_BYTES);
+        assert_eq!(
+            output.len(),
+            1,
+            "complete PCM is transferred without packet copies"
+        );
+        assert_eq!(output[0].len(), pcm.len());
         assert_eq!(output.concat(), pcm);
         assert_tts_request(
             &server.await.expect("fixture completed"),
@@ -746,13 +973,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tts_nonstream_rejects_a_wav_sample_rate_other_than_the_24khz_playback_contract() {
-        let wav = wav_with_padding(16000, &[1, 2, 3, 4]);
+    async fn tts_nonstream_resamples_wav_and_preserves_original_file_for_cache() {
+        let pcm: Vec<u8> = (0..1600)
+            .flat_map(|index| ((index % 100) as i16 * 100).to_le_bytes())
+            .collect();
+        let wav = wav_with_padding(16000, &pcm);
         let HttpFixture { mut config, server } = http_fixture(
             200,
             "application/json",
             json_fragments(
-                json!({"choices":[{"message":{"audio":{"data":STANDARD.encode(wav)}}}]}),
+                json!({"choices":[{"message":{"audio":{"data":STANDARD.encode(&wav)}}}]}),
             ),
             false,
         )
@@ -774,10 +1004,279 @@ mod tests {
             ),
         )
         .await
-        .expect("invalid TTS ends");
-        assert!(result.is_err());
-        assert!(output.is_empty());
+        .expect("TTS finishes")
+        .expect("16kHz WAV is normalized");
+        let SynthesizedAudio::Encoded { format, bytes } = result else {
+            panic!("non-streaming response retains its container");
+        };
+        assert_eq!(bytes, wav);
+        assert!(matches!(format, ContainerFormat::Wav));
+        assert_eq!(output.concat().len(), 2400 * 2);
         server.await.expect("fixture completed without retries");
+    }
+
+    #[tokio::test]
+    async fn tts_accepts_direct_wav_and_both_mp3_envelopes_without_changing_request_protocol() {
+        let pcm: Vec<u8> = (0..1600)
+            .flat_map(|index| (((index % 160) as i16 - 80) * 150).to_le_bytes())
+            .collect();
+        let mp3 = tokio::task::spawn_blocking(move || {
+            vcp_voice_mp3::encode_pcm16_mono(&pcm, || false).unwrap()
+        })
+        .await
+        .unwrap();
+        let wav = wav_with_padding(24000, &[1, 2, 3, 4, 5, 6]);
+        for (content_type, bytes, json_envelope) in [
+            ("audio/wav", wav, false),
+            ("audio/mpeg", mp3.clone(), false),
+            ("application/json", mp3, true),
+        ] {
+            let fragments = if json_envelope {
+                json_fragments(
+                    json!({"choices":[{"message":{"audio":{"data":STANDARD.encode(&bytes)}}}]}),
+                )
+            } else {
+                bytes.chunks(31).map(<[u8]>::to_vec).collect()
+            };
+            let HttpFixture { mut config, server } =
+                http_fixture(200, content_type, fragments, false).await;
+            config.tts_stream = false;
+            let mut output = Vec::new();
+            let audio = synthesize(
+                &config,
+                "完整音频。",
+                None,
+                None,
+                &CancellationToken::new(),
+                |packet| {
+                    output.push(packet);
+                    std::future::ready(Ok(()))
+                },
+            )
+            .await
+            .expect("complete WAV/MP3 is decoded");
+            let SynthesizedAudio::Encoded {
+                format,
+                bytes: encoded,
+            } = audio
+            else {
+                panic!("non-streaming response retains its container");
+            };
+            assert_eq!(encoded, bytes, "cache keeps original container bytes");
+            assert_eq!(
+                matches!(format, ContainerFormat::Mp3),
+                content_type != "audio/wav"
+            );
+            assert!(!output.is_empty());
+            assert!(output.iter().all(|packet| !packet.is_empty()
+                && packet.len() % 2 == 0
+                && packet.len() <= PCM_PACKET_BYTES));
+            if content_type == "audio/wav" {
+                assert_eq!(output.concat(), [1, 2, 3, 4, 5, 6]);
+            } else {
+                assert!(output.concat().len() >= 2400 * 2);
+            }
+            assert_tts_request(&server.await.expect("one request"), false, "完整音频。");
+        }
+    }
+
+    #[test]
+    fn prepared_identity_uses_the_exact_effective_request_fields() {
+        let mut config = VoiceServiceConfig::from_settings(
+            &crate::vcp_modules::settings_manager::Settings::default(),
+        );
+        config.base_url = " https://VOICE.example:443/v1/ ".into();
+        let text = "  原样正文。\n";
+        let request = prepare_synthesis(&config, text, Some("  轻声\n"), None).unwrap();
+        assert_eq!(
+            request.identity.endpoint,
+            "https://voice.example/v1/chat/completions"
+        );
+        assert_eq!(request.identity.text, text);
+        assert_eq!(
+            request.body["messages"][1]["content"],
+            request.identity.text
+        );
+        assert_eq!(
+            request.body["messages"][0]["content"],
+            request.identity.guidance.as_deref().unwrap()
+        );
+        assert_eq!(
+            request.body["model"],
+            request.identity.model.as_deref().unwrap()
+        );
+        assert_eq!(
+            request.body["audio"]["voice"],
+            request.identity.voice.as_deref().unwrap()
+        );
+        assert!(request.identity.clone_sample_id.is_none());
+        let streaming_key = super::super::cache::segment_key(&request.identity);
+        config.tts_stream = !config.tts_stream;
+        let other = prepare_synthesis(&config, text, Some("轻声"), None).unwrap();
+        assert_eq!(
+            streaming_key,
+            super::super::cache::segment_key(&other.identity)
+        );
+
+        config.tts_mode = VoiceTtsMode::Clone;
+        config.clone_sample_id = "sample-identity".into();
+        let sample = PreparedCloneSample {
+            data_url: std::sync::Arc::from("data:audio/wav;base64,AQIDBA=="),
+        };
+        let clone = prepare_synthesis(&config, text, None, Some(&sample)).unwrap();
+        assert_eq!(
+            clone.identity.clone_sample_id.as_deref(),
+            Some("sample-identity")
+        );
+        assert!(clone.identity.voice.is_none());
+        assert_eq!(clone.body["audio"]["voice"], sample.data_url.as_ref());
+        assert_eq!(
+            clone.identity.model.as_deref(),
+            Some("mimo-v2.5-tts-voiceclone")
+        );
+        assert!(!clone.stream);
+    }
+
+    #[tokio::test]
+    async fn tts_http_failures_end_after_one_request() {
+        for status in [400, 401, 403, 408, 429, 500, 503] {
+            let HttpFixture { config, server } = http_fixture(
+                status,
+                "application/json",
+                json_fragments(
+                    json!({"error":{"message":format!("{FAKE_KEY}; {PROVIDER_SECRET}")}}),
+                ),
+                false,
+            )
+            .await;
+            let error = synthesize(
+                &config,
+                "错误分类。",
+                None,
+                None,
+                &CancellationToken::new(),
+                |_| std::future::ready(Ok(())),
+            )
+            .await
+            .unwrap_err();
+            assert!(error.as_str().contains(&status.to_string()));
+            assert!(!error.as_str().contains(FAKE_KEY));
+            assert!(!error.as_str().contains(PROVIDER_SECRET));
+            server.await.expect("one attempt only");
+        }
+    }
+
+    #[tokio::test]
+    async fn interrupted_sse_ends_without_a_complete_cache_file() {
+        let HttpFixture { config, server } = http_fixture(200, "text/event-stream",
+            vec![sse(json!({"choices":[{"delta":{"audio":{"data":STANDARD.encode([1,2,3,4])}},"finish_reason":null}]}))], false).await;
+        let mut output = Vec::new();
+        let error = synthesize(
+            &config,
+            "未完成切片。",
+            None,
+            None,
+            &CancellationToken::new(),
+            |packet| {
+                output.extend(packet);
+                std::future::ready(Ok(()))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("完成响应前断开"));
+        assert_eq!(output, [1, 2, 3, 4]);
+        server.await.expect("no local retry");
+    }
+
+    #[tokio::test]
+    async fn malformed_audio_and_output_failures_end_the_request() {
+        for encoded in ["not-base64", "AQ=="] {
+            let mut response =
+                sse(json!({"choices":[{"delta":{"audio":{"data":encoded}},"finish_reason":null}]}));
+            response.extend_from_slice(b"data: [DONE]\n\n");
+            let HttpFixture { config, server } =
+                http_fixture(200, "text/event-stream", vec![response], false).await;
+            let error = synthesize(
+                &config,
+                "坏音频。",
+                None,
+                None,
+                &CancellationToken::new(),
+                |_| std::future::ready(Ok(())),
+            )
+            .await
+            .unwrap_err();
+            assert!(!error.is_empty());
+            server.await.unwrap();
+        }
+        let mut response =
+            sse(json!({"choices":[{"delta":{"audio":{"data":"AQIDBA=="}},"finish_reason":null}]}));
+        response.extend_from_slice(b"data: [DONE]\n\n");
+        let HttpFixture { config, server } =
+            http_fixture(200, "text/event-stream", vec![response], false).await;
+        let error = synthesize(
+            &config,
+            "输出失败。",
+            None,
+            None,
+            &CancellationToken::new(),
+            |_| std::future::ready(Err("consumer stopped".into())),
+        )
+        .await
+        .unwrap_err();
+        assert!(!error.is_empty());
+        assert_eq!(error.as_str(), "consumer stopped");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_tts_stream_discards_partial_file_and_closes_http() {
+        let HttpFixture { config, server } = http_fixture(
+            200,
+            "text/event-stream",
+            vec![sse(
+                json!({"choices":[{"delta":{"audio":{"data":"AQIDBA=="}},"finish_reason":null}]}),
+            )],
+            true,
+        )
+        .await;
+        let cancellation = CancellationToken::new();
+        let request_cancel = cancellation.clone();
+        let (sent, arrived) = tokio::sync::oneshot::channel();
+        let operation = tokio::spawn(async move {
+            let mut sent = Some(sent);
+            synthesize(
+                &config,
+                "停止当前切片。",
+                None,
+                None,
+                &request_cancel,
+                |packet| {
+                    if let Some(sent) = sent.take() {
+                        let _ = sent.send(packet);
+                    }
+                    std::future::ready(Ok(()))
+                },
+            )
+            .await
+        });
+        assert_eq!(
+            timeout(Duration::from_secs(3), arrived)
+                .await
+                .unwrap()
+                .unwrap(),
+            [1, 2, 3, 4]
+        );
+        cancellation.cancel();
+        let error = timeout(Duration::from_secs(2), operation)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.as_str(), CANCELLED);
+        assert!(!error.is_empty());
+        server.await.expect("cancel closes response");
     }
 
     #[tokio::test]
@@ -797,19 +1296,35 @@ mod tests {
                 data_url: std::sync::Arc::from("data:audio/wav;base64,AQIDBA=="),
             };
             let mut output = Vec::new();
-            synthesize(&config, "[轻笑]你好。", Some("本条自动指导"), Some(&sample),
-                &CancellationToken::new(), |part| {
+            synthesize(
+                &config,
+                "[轻笑]你好。",
+                Some("本条自动指导"),
+                Some(&sample),
+                &CancellationToken::new(),
+                |part| {
                     output.extend(part);
                     std::future::ready(Ok(()))
-                }).await.expect("synthetic provider WAV is decoded");
+                },
+            )
+            .await
+            .expect("synthetic provider WAV is decoded");
             assert_eq!(output, pcm);
             let captured = server.await.expect("one request without retry");
             assert_request_headers(&captured);
             assert_eq!(captured.body["stream"], false);
             assert_eq!(captured.body["audio"]["format"], "wav");
-            assert_eq!(captured.body["messages"][1], json!({"role":"assistant","content":"[轻笑]你好。"}));
-            assert_eq!(captured.body["messages"][0], json!({"role":"user","content":"本条自动指导"}));
-            assert!(captured.body["audio"].get("optimize_text_preview").is_none());
+            assert_eq!(
+                captured.body["messages"][1],
+                json!({"role":"assistant","content":"[轻笑]你好。"})
+            );
+            assert_eq!(
+                captured.body["messages"][0],
+                json!({"role":"user","content":"本条自动指导"})
+            );
+            assert!(captured.body["audio"]
+                .get("optimize_text_preview")
+                .is_none());
             if mode == VoiceTtsMode::Builtin {
                 assert_eq!(captured.body["model"], "mimo-v2.5-tts");
                 assert_eq!(captured.body["audio"]["voice"], config.voice);
@@ -831,16 +1346,24 @@ mod tests {
             );
             config.tts_mode = mode;
             for guidance in [None, Some(" \n")] {
-                let body = synthesis_request(&config, "正文", guidance, Some(&sample)).unwrap();
-                assert_eq!(body["messages"], json!([{"role":"assistant", "content":"正文"}]));
+                let request = prepare_synthesis(&config, "正文", guidance, Some(&sample)).unwrap();
+                assert_eq!(
+                    request.body["messages"],
+                    json!([{"role":"assistant", "content":"正文"}])
+                );
+                assert_eq!(request.identity.guidance, None);
             }
-            let body = synthesis_request(&config, "正文", Some("本条指导"), Some(&sample)).unwrap();
-            assert_eq!(body["messages"], json!([
-                {"role":"user", "content":"本条指导"},
-                {"role":"assistant", "content":"正文"}
-            ]));
+            let request =
+                prepare_synthesis(&config, "正文", Some("本条指导"), Some(&sample)).unwrap();
+            assert_eq!(
+                request.body["messages"],
+                json!([
+                    {"role":"user", "content":"本条指导"},
+                    {"role":"assistant", "content":"正文"}
+                ])
+            );
             if mode == VoiceTtsMode::Clone {
-                assert!(synthesis_request(&config, "正文", Some("本条指导"), None).is_err());
+                assert!(prepare_synthesis(&config, "正文", Some("本条指导"), None).is_err());
             }
         }
     }

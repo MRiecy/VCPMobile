@@ -1,7 +1,9 @@
 //! Independent narration job. There is no microphone or chat cancellation parent.
 use super::{
+    audio_codec::PCM_PACKET_BYTES,
+    cache::{self, TtsCache},
     chat_feed::{ChatFeed, MessageSpeech, SpeechPiece},
-    network, samples,
+    network, pipeline::{self, PacketConsumer, SegmentBuffer, SegmentSource}, samples,
     segmentation::{ReplyBuffer, ReplyPiece},
     VoiceReplyPolicy, VoiceServiceConfig, VoiceServiceStart,
 };
@@ -364,9 +366,9 @@ fn retire<R: Runtime>(app: &AppHandle<R>, job: &TtsJob) {
     if let Ok(mut registry) = state.0.lock() {
         registry.complete(&job.id);
     };
-    if let Ok(mut work) = job.work.lock() {
-        work.take();
-    }
+    // The job owns its lease until its final Arc is dropped. The registry holds
+    // it through native stop acknowledgement; the worker holds it through IO
+    // and decode cleanup. Neither can release the other's outstanding work.
 }
 
 pub(super) fn attach_work<R: Runtime>(
@@ -559,9 +561,9 @@ async fn start_narration<R: Runtime>(
         work: Mutex::new(work),
         origin: origin_user_message_id,
         input: Mutex::new(match kind {
-            NarrationKind::Chat => NarrationInput::Chat(ChatFeed::new(config.tts_streaming())),
-            NarrationKind::Bubble(_) => NarrationInput::Bubble(MessageSpeech::new(config.tts_streaming())),
-            NarrationKind::Preview => NarrationInput::Preview(ReplyBuffer::new_with_mode(false, config.tts_streaming())),
+            NarrationKind::Chat => NarrationInput::Chat(ChatFeed::new()),
+            NarrationKind::Bubble(_) => NarrationInput::Bubble(MessageSpeech::new()),
+            NarrationKind::Preview => NarrationInput::Preview(ReplyBuffer::new(false)),
         }),
         config,
         sample,
@@ -745,7 +747,7 @@ async fn playback_call<F: Future<Output = Result<(), String>>>(
     cancel: &CancellationToken,
     call: F,
 ) -> Result<(), String> {
-    tokio::select! { _=cancel.cancelled()=>Err(network::CANCELLED.into()), result=call=>result.map_err(|_|"语音播放失败，请重新发起朗读。".into()) }
+    tokio::select! { biased; _=cancel.cancelled()=>Err(network::CANCELLED.into()), result=call=>result.map_err(|_|"语音播放失败，请重新发起朗读。".into()) }
 }
 
 async fn speak<R: Runtime>(app: AppHandle<R>, narration: Arc<TtsJob>) {
@@ -769,104 +771,193 @@ async fn speak_inner<R: Runtime>(
     app: &AppHandle<R>,
     narration: &Arc<TtsJob>,
 ) -> Result<(), String> {
-    let mut started = false;
-    let first_audio = Arc::new(AtomicBool::new(true));
-    let mut speech_queue = VecDeque::<SpeechPiece>::new();
-    let mut chat_finished = false;
-    loop {
-        if narration.cancel.is_cancelled() {
-            return Err(network::CANCELLED.into());
-        }
-        let notified = narration.ready.notified();
-        let (piece, guidance) = {
-            let mut input = narration.input.lock().map_err(|error| error.to_string())?;
-            match &mut *input {
-                NarrationInput::Chat(feed) => {
-                    if let Some(update) = feed.take_update()? {
-                        speech_queue.extend(update.pieces);
-                        chat_finished = update.finished;
-                    }
-                    if let Some(piece) = speech_queue.pop_front() {
-                        log::debug!("[VoiceTts] synthesizing message={}", piece.message_id);
-                        (ReplyPiece::Text(piece.text), piece.instruction)
-                    } else if chat_finished {
-                        (ReplyPiece::Finished, None)
-                    } else {
-                        (ReplyPiece::Wait, None)
-                    }
-                }
-                NarrationInput::Bubble(message) => message.next(),
-                NarrationInput::Preview(reply) => (reply.next(), None),
+    if narration.cancel.is_cancelled() || narration.terminal.load(Ordering::Acquire) {
+        return Err(network::CANCELLED.into());
+    }
+    let preview = matches!(*narration.input.lock().map_err(|error| error.to_string())?, NarrationInput::Preview(_));
+    let mut source = NarrationReader { narration, speech_queue: VecDeque::new(), chat_finished: false };
+    let mut player = NativeConsumer { app, narration, started: false, first_audio: true };
+    let mut synthesis_announced = false;
+    if preview {
+        // Preview is literal input and deliberately never opens the cache or
+        // enters the prefetch scheduler.
+        while let Some(piece) = source.next(&narration.cancel).await? {
+            if !synthesis_announced {
+                synthesis_announced = true;
+                emit(app, narration, "status", "synthesizing", None);
             }
+            // The output closure cannot lend its mutable consumer across calls;
+            // the mutex only serializes this one direct synthesize callback.
+            let player = tokio::sync::Mutex::new(&mut player);
+            network::synthesize(
+                &narration.config, &piece.text, None, narration.sample.as_ref(),
+                &narration.cancel, |pcm| {
+                    let player = &player;
+                    async move { player.lock().await.append(pcm, &narration.cancel).await }
+                },
+            ).await?;
+        }
+    } else {
+        let cache = match crate::vcp_modules::file_manager::get_tts_cache_root_dir(app) {
+            Ok(root) => match TtsCache::open(root).await {
+                Ok(cache) => Some(cache),
+                Err(error) => { log::warn!("[VoiceTts] cache unavailable: {error}"); None }
+            },
+            Err(error) => { log::warn!("[VoiceTts] cache path unavailable: {error}"); None }
         };
-        match piece {
-            ReplyPiece::Wait => {
-                tokio::select! {_=narration.cancel.cancelled()=>return Err(network::CANCELLED.into()), _=notified=>{}}
+        pipeline::run(&narration.cancel, source, |piece, segment, cancel| {
+            // Waiting for stable text is not synthesis. Announce only the
+            // first actual piece; later prefetch must not overwrite speaking.
+            if !synthesis_announced {
+                synthesis_announced = true;
+                emit(app, narration, "status", "synthesizing", None);
             }
-            ReplyPiece::Finished => {
-                if started {
-                    playback_call(
-                        &narration.cancel,
-                        tauri_plugin_vcp_mobile::voice::finish_playback(
-                            app.clone(),
-                            narration.id.clone(),
-                        ),
-                    )
-                    .await?;
-                    narration.player_started.store(false, Ordering::Release);
-                }
-                return Ok(());
-            }
-            ReplyPiece::Text(text) => {
-                if !started {
-                    // Mark before the async native admission; stop can create its
-                    // tombstone even if native start has not been dispatched yet.
-                    {
-                        let state = app.state::<TtsServiceState>();
-                        let registry = state.0.lock().map_err(|error| error.to_string())?;
-                        registry.admit_player(narration)?;
-                    }
-                    playback_call(
-                        &narration.cancel,
-                        tauri_plugin_vcp_mobile::voice::start_playback(
-                            app.clone(),
-                            narration.id.clone(),
-                        ),
-                    )
-                    .await?;
-                    started = true;
-                    emit(app, narration, "status", "synthesizing", None);
-                }
-                network::synthesize(
-                    &narration.config,
-                    &text,
-                    guidance.as_deref(),
-                    narration.sample.as_ref(),
-                    &narration.cancel,
-                    |pcm| {
-                        let app = app.clone();
-                        let narration = narration.clone();
-                        let first_audio = first_audio.clone();
-                        async move {
-                            playback_call(
-                                &narration.cancel,
-                                tauri_plugin_vcp_mobile::voice::append_playback(
-                                    app.clone(),
-                                    narration.id.clone(),
-                                    STANDARD.encode(pcm),
-                                ),
-                            )
-                            .await?;
-                            if first_audio.swap(false, Ordering::AcqRel) {
-                                emit(&app, &narration, "status", "speaking", None);
-                            }
-                            Ok(())
+            prepare_segment(narration, cache.as_ref(), piece, segment, cancel)
+        }, &mut player).await?;
+    }
+    player.finish().await
+}
+
+struct NarrationPiece {
+    text: String,
+    guidance: Option<Arc<str>>,
+}
+
+struct NarrationReader<'a> {
+    narration: &'a Arc<TtsJob>,
+    speech_queue: VecDeque<SpeechPiece>,
+    chat_finished: bool,
+}
+
+impl SegmentSource for NarrationReader<'_> {
+    type Piece = NarrationPiece;
+
+    async fn next(&mut self, cancel: &CancellationToken) -> Result<Option<NarrationPiece>, String> {
+        loop {
+            if cancel.is_cancelled() { return Err(network::CANCELLED.into()); }
+            let notified = self.narration.ready.notified();
+            let (piece, guidance) = {
+                let mut input = self.narration.input.lock().map_err(|error| error.to_string())?;
+                match &mut *input {
+                    NarrationInput::Chat(feed) => {
+                        if let Some(update) = feed.take_update()? {
+                            self.speech_queue.extend(update.pieces);
+                            self.chat_finished = update.finished;
                         }
-                    },
-                )
-                .await?;
+                        if let Some(piece) = self.speech_queue.pop_front() {
+                            log::debug!("[VoiceTts] synthesizing message={}", piece.message_id);
+                            (ReplyPiece::Text(piece.text), piece.instruction)
+                        } else if self.chat_finished {
+                            (ReplyPiece::Finished, None)
+                        } else { (ReplyPiece::Wait, None) }
+                    }
+                    NarrationInput::Bubble(message) => message.next(),
+                    NarrationInput::Preview(reply) => (reply.next(), None),
+                }
+            };
+            match piece {
+                ReplyPiece::Text(text) => return Ok(Some(NarrationPiece { text, guidance })),
+                ReplyPiece::Finished => return Ok(None),
+                ReplyPiece::Wait => tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => return Err(network::CANCELLED.into()),
+                    _ = notified => {},
+                },
             }
         }
+    }
+}
+
+async fn prepare_segment(
+    narration: &TtsJob,
+    cache: Option<&TtsCache>,
+    piece: NarrationPiece,
+    segment: Arc<SegmentBuffer>,
+    cancel: CancellationToken,
+) -> Result<(), String> {
+    let request = network::prepare_synthesis(&narration.config, &piece.text,
+        piece.guidance.as_deref(), narration.sample.as_ref())?;
+    let key = cache::segment_key(&request.identity);
+    if let Some(cache) = cache {
+        match cache.lookup(&key, &cancel).await {
+            Ok(Some(pcm)) => {
+                segment.push(pcm)?;
+                return segment.finish();
+            }
+            Ok(None) => {},
+            Err(_) if cancel.is_cancelled() => return Err(network::CANCELLED.into()),
+            Err(error) => log::warn!("[VoiceTts] cache lookup failed: {error}"),
+        }
+    }
+    let audio = network::synthesize_prepared(&narration.config, &request, &cancel, |pcm| {
+        std::future::ready(if cancel.is_cancelled() {
+            Err(network::CANCELLED.into())
+        } else { segment.push(pcm) })
+    }).await?;
+    // The consumer can hand over the segment as soon as its last PCM packet is
+    // accepted; cache publication is owned and awaited separately by producer.
+    segment.finish()?;
+    if let Some(cache) = cache {
+        let encoded = match audio {
+            network::SynthesizedAudio::Encoded { format, bytes } => Ok((format, bytes)),
+            network::SynthesizedAudio::StreamedPcm => segment.wav(&cancel).await
+                .map(|bytes| (super::audio_codec::ContainerFormat::Wav, bytes.into())),
+        };
+        let committed = match encoded {
+            Ok((format, bytes)) => cache.commit(&key, format, &bytes, &cancel).await,
+            Err(error) => Err(error),
+        };
+        if let Err(error) = committed {
+            if cancel.is_cancelled() { return Err(network::CANCELLED.into()); }
+            log::warn!("[VoiceTts] segment cache write failed; playback continues: {error}");
+        }
+    }
+    Ok(())
+}
+
+struct NativeConsumer<'a, R: Runtime> {
+    app: &'a AppHandle<R>,
+    narration: &'a Arc<TtsJob>,
+    started: bool,
+    first_audio: bool,
+}
+
+impl<R: Runtime> PacketConsumer for NativeConsumer<'_, R> {
+    async fn append(&mut self, pcm: Vec<u8>, cancel: &CancellationToken) -> Result<(), String> {
+        if !self.started {
+            // Mark before async admission so stop can install its native
+            // tombstone even when native start has not been dispatched yet.
+            {
+                let state = self.app.state::<TtsServiceState>();
+                let registry = state.0.lock().map_err(|error| error.to_string())?;
+                registry.admit_player(self.narration)?;
+            }
+            playback_call(cancel, tauri_plugin_vcp_mobile::voice::start_playback(
+                self.app.clone(), self.narration.id.clone())).await?;
+            self.started = true;
+        }
+        // Preview may deliver a complete decoded response here. Bound each
+        // native handoff without splitting and rebuilding the PCM upstream.
+        for packet in pcm.chunks(PCM_PACKET_BYTES) {
+            playback_call(cancel, tauri_plugin_vcp_mobile::voice::append_playback(
+                self.app.clone(), self.narration.id.clone(), STANDARD.encode(packet))).await?;
+            if self.first_audio {
+                self.first_audio = false;
+                emit(self.app, self.narration, "status", "speaking", None);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<R: Runtime> NativeConsumer<'_, R> {
+    async fn finish(&mut self) -> Result<(), String> {
+        if self.started {
+            playback_call(&self.narration.cancel, tauri_plugin_vcp_mobile::voice::finish_playback(
+                self.app.clone(), self.narration.id.clone())).await?;
+            self.narration.player_started.store(false, Ordering::Release);
+        }
+        Ok(())
     }
 }
 
@@ -898,9 +989,9 @@ mod tests {
             sample: None,
             cancel,
             input: Mutex::new(match kind {
-                NarrationKind::Chat => NarrationInput::Chat(ChatFeed::new(true)),
-                NarrationKind::Bubble(_) => NarrationInput::Bubble(MessageSpeech::new(true)),
-                NarrationKind::Preview => NarrationInput::Preview(ReplyBuffer::new_with_mode(false, true)),
+                NarrationKind::Chat => NarrationInput::Chat(ChatFeed::new()),
+                NarrationKind::Bubble(_) => NarrationInput::Bubble(MessageSpeech::new()),
+                NarrationKind::Preview => NarrationInput::Preview(ReplyBuffer::new(false)),
             }),
             ready: Notify::new(),
             worker_started: AtomicBool::new(false),
@@ -939,6 +1030,208 @@ mod tests {
         assert!(pending.is_cancelled());
         registry.reserve("next".into(), NarrationKind::Chat).unwrap();
         assert!(registry.reserve("unconfigured".into(), NarrationKind::Chat).is_err());
+    }
+
+    #[test]
+    fn native_stop_can_retire_admission_without_releasing_a_running_workers_lease() {
+        let app = tauri::test::mock_app();
+        app.manage(TtsServiceState::default());
+        let state = app.state::<TtsServiceState>();
+        let job = install(&mut state.0.lock().unwrap(), "running");
+        let lease = Arc::new(super::super::call::WorkLease::default());
+        *job.work.lock().unwrap() = Some(lease.clone());
+        job.worker_started.store(true, Ordering::Release);
+        state.0.lock().unwrap().admit_player(&job).unwrap();
+        state.0.lock().unwrap().stop("running");
+        let worker = job.clone();
+        drop(job);
+        // A pending or failed native stop leaves the registry and lease alive.
+        assert!(state.0.lock().unwrap().current.is_some());
+        assert_eq!(Arc::strong_count(&lease), 2);
+        // Once native stop acknowledges, outstanding worker cleanup still owns
+        // the same job. Retiring admission must not take its lease.
+        retire(app.handle(), &worker);
+        assert!(state.0.lock().unwrap().current.is_none());
+        assert_eq!(Arc::strong_count(&lease), 2);
+        // Once its joined worker exits, the same job no longer holds the lease.
+        drop(worker);
+        assert_eq!(Arc::strong_count(&lease), 1);
+
+        let pending = install(&mut state.0.lock().unwrap(), "pending");
+        *pending.work.lock().unwrap() = Some(lease.clone());
+        retire(app.handle(), &pending);
+        assert_eq!(Arc::strong_count(&lease), 2);
+        drop(pending);
+        assert_eq!(Arc::strong_count(&lease), 1);
+    }
+
+    #[tokio::test]
+    async fn worker_scheduled_after_stop_does_not_emit_synthesizing_or_open_resources() {
+        use tauri::Listener;
+        let app = tauri::test::mock_app();
+        app.manage(TtsServiceState::default());
+        let state = app.state::<TtsServiceState>();
+        let job = install(&mut state.0.lock().unwrap(), "late-worker");
+        let events = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed = events.clone();
+        app.listen(TTS_EVENT, move |_| { observed.fetch_add(1, Ordering::SeqCst); });
+        job.cancel.cancel();
+        assert_eq!(speak_inner(app.handle(), &job).await.unwrap_err(), network::CANCELLED);
+        assert_eq!(events.load(Ordering::SeqCst), 0);
+    }
+
+    struct SegmentHttpFixture {
+        base_url: String,
+        requests: Arc<Mutex<Vec<serde_json::Value>>>,
+        shutdown: CancellationToken,
+        server: tokio::task::JoinHandle<()>,
+    }
+
+    impl SegmentHttpFixture {
+        async fn start(pcm: &[u8], fail_first: bool) -> Self {
+            use axum::{http::StatusCode, routing::post, Json, Router};
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}/v1/", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let captured = requests.clone();
+            let audio = serde_json::json!({"choices": [{"delta": {"audio": {
+                "data": STANDARD.encode(pcm)
+            }}, "finish_reason": null}]});
+            let body = format!("data: {audio}\n\ndata: [DONE]\n\n");
+            let router = Router::new().route("/v1/chat/completions", post(
+                move |Json(request): Json<serde_json::Value>| {
+                    let captured = captured.clone();
+                    let body = body.clone();
+                    async move {
+                        let attempt = {
+                            let mut requests = captured.lock().unwrap();
+                            requests.push(request);
+                            requests.len()
+                        };
+                        if fail_first && attempt == 1 {
+                            (StatusCode::SERVICE_UNAVAILABLE,
+                                [("content-type", "application/json")], "{}".to_owned())
+                        } else {
+                            (StatusCode::OK, [("content-type", "text/event-stream")], body)
+                        }
+                    }
+                },
+            ));
+            let shutdown = CancellationToken::new();
+            let stopped = shutdown.clone();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, router)
+                    .with_graceful_shutdown(stopped.cancelled_owned())
+                    .await.unwrap();
+            });
+            Self { base_url, requests, shutdown, server }
+        }
+
+        async fn stop(&mut self) {
+            self.shutdown.cancel();
+            tokio::time::timeout(std::time::Duration::from_secs(3), &mut self.server)
+                .await.expect("fixture server stops").unwrap();
+        }
+    }
+
+    impl Drop for SegmentHttpFixture {
+        fn drop(&mut self) { self.shutdown.cancel(); }
+    }
+
+    fn segment_fixture_job(base_url: &str) -> Arc<TtsJob> {
+        let mut registry = Registry::default();
+        let mut job = install(&mut registry, "segment-fixture");
+        registry.complete("segment-fixture");
+        let job_mut = Arc::get_mut(&mut job).unwrap();
+        job_mut.config.base_url = base_url.into();
+        job_mut.config.voice = "白桦".into();
+        job
+    }
+
+    fn fixture_piece() -> NarrationPiece {
+        NarrationPiece { text: "这是同一句待合成的文本。".into(), guidance: Some(Arc::from("轻声")) }
+    }
+
+    async fn buffered_pcm(segment: &Arc<SegmentBuffer>, cancel: &CancellationToken) -> Vec<u8> {
+        super::super::wav::pcm16_mono(&segment.wav(cancel).await.unwrap(), 24000).unwrap()
+    }
+
+    #[tokio::test]
+    async fn real_segment_http_error_is_requested_once_and_does_not_publish_cache() {
+        let pcm = vec![1, 0, 2, 0, 3, 0, 4, 0];
+        let mut server = SegmentHttpFixture::start(&pcm, true).await;
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = TtsCache::open(temporary.path().to_path_buf()).await.unwrap();
+        let job = segment_fixture_job(&server.base_url);
+        let segment = Arc::new(SegmentBuffer::default());
+        let error = prepare_segment(&job, Some(&cache), fixture_piece(), segment.clone(), job.cancel.clone())
+            .await.unwrap_err();
+        assert!(error.contains("503"));
+        assert_eq!(server.requests.lock().unwrap().len(), 1, "a network error ends this segment immediately");
+        assert!(segment.wav(&job.cancel).await.is_err(), "failed preparation must not mark audio complete");
+        assert!(tokio::fs::read_dir(temporary.path()).await.unwrap().next_entry().await.unwrap().is_none());
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn real_segment_reuses_stream_cache_offline_in_nonstream_mode() {
+        let pcm = vec![1, 0, 2, 0, 3, 0, 4, 0];
+        let mut server = SegmentHttpFixture::start(&pcm, false).await;
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = TtsCache::open(temporary.path().to_path_buf()).await.unwrap();
+        let mut job = segment_fixture_job(&server.base_url);
+        let first = Arc::new(SegmentBuffer::default());
+        prepare_segment(&job, Some(&cache), fixture_piece(), first.clone(), job.cancel.clone())
+            .await.unwrap();
+        assert_eq!(buffered_pcm(&first, &job.cancel).await, pcm);
+        let request = network::prepare_synthesis(&job.config, &fixture_piece().text,
+            fixture_piece().guidance.as_deref(), None).unwrap();
+        let key = cache::segment_key(&request.identity);
+        let file = temporary.path().join(format!("{key}.wav"));
+        assert_eq!(super::super::wav::pcm16_mono(&tokio::fs::read(file).await.unwrap(), 24000).unwrap(), pcm);
+        {
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(requests.iter().all(|request| request["stream"] == true));
+            assert!(requests.iter().all(|request| request["audio"]["format"] == "pcm16"));
+        }
+        server.stop().await;
+        Arc::get_mut(&mut job).unwrap().config.tts_stream = false;
+        let second = Arc::new(SegmentBuffer::default());
+        tokio::time::timeout(std::time::Duration::from_secs(1), prepare_segment(
+            &job, Some(&cache), fixture_piece(), second.clone(), job.cancel.clone(),
+        )).await.expect("cache hit must not attempt offline HTTP").unwrap();
+        assert_eq!(buffered_pcm(&second, &job.cancel).await, pcm);
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn real_segment_keeps_audio_when_cache_lookup_and_atomic_publish_fail() {
+        let pcm = vec![10, 0, 20, 0, 30, 0, 40, 0];
+        let mut server = SegmentHttpFixture::start(&pcm, false).await;
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = TtsCache::open(temporary.path().to_path_buf()).await.unwrap();
+        let job = segment_fixture_job(&server.base_url);
+        let request = network::prepare_synthesis(&job.config, &fixture_piece().text,
+            fixture_piece().guidance.as_deref(), None).unwrap();
+        let key = cache::segment_key(&request.identity);
+        // A directory at the final filename causes both real lookup and real
+        // rename to fail, regardless of platform file permission conventions.
+        let blocked = temporary.path().join(format!("{key}.wav"));
+        tokio::fs::create_dir(&blocked).await.unwrap();
+        let segment = Arc::new(SegmentBuffer::default());
+        prepare_segment(&job, Some(&cache), fixture_piece(), segment.clone(), job.cancel.clone())
+            .await.expect("cache failures must not interrupt valid synthesis");
+        assert_eq!(buffered_pcm(&segment, &job.cancel).await, pcm);
+        assert!(tokio::fs::metadata(&blocked).await.unwrap().is_dir());
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+        let mut entries = tokio::fs::read_dir(temporary.path()).await.unwrap();
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            names.push(entry.file_name().to_string_lossy().into_owned());
+        }
+        assert_eq!(names, [format!("{key}.wav")], "failed commit removes its pending file");
+        server.stop().await;
     }
 
     #[tokio::test]
@@ -1007,7 +1300,7 @@ mod tests {
 
     #[test]
     fn bubble_input_projects_once_and_keeps_guidance_with_each_piece() {
-        let mut input = NarrationInput::Bubble(MessageSpeech::new(false));
+        let mut input = NarrationInput::Bubble(MessageSpeech::new());
         let raw = format!("<voice_guidance>轻声</voice_guidance>\n(慵懒){}", "这是一句需要朗读的正文。".repeat(35));
         input.submit_bubble(&raw, true).unwrap();
         let NarrationInput::Bubble(message) = &mut input else { unreachable!() };
@@ -1030,7 +1323,7 @@ mod tests {
 
     #[test]
     fn preview_reads_literal_input_and_never_uses_the_bubble_projection() {
-        let mut input = NarrationInput::Preview(ReplyBuffer::new_with_mode(false, true));
+        let mut input = NarrationInput::Preview(ReplyBuffer::new(false));
         let raw = "<voice_guidance>轻声</voice_guidance>照读";
         input.submit_preview(raw.into()).unwrap();
         assert!(input.submit_bubble(raw, true).is_err());
@@ -1040,9 +1333,9 @@ mod tests {
 
     #[test]
     fn completed_empty_bubble_is_rejected_but_unclosed_content_is_read() {
-        let mut input = NarrationInput::Bubble(MessageSpeech::new(true));
+        let mut input = NarrationInput::Bubble(MessageSpeech::new());
         assert!(input.submit_bubble("<think>不读</think>", true).is_err());
-        let mut input = NarrationInput::Bubble(MessageSpeech::new(true));
+        let mut input = NarrationInput::Bubble(MessageSpeech::new());
         input.submit_bubble("<think>模型忘记闭合，这段内容仍然需要朗读。", true).unwrap();
         let NarrationInput::Bubble(message) = &mut input else { unreachable!() };
         assert!(matches!(message.next(), (ReplyPiece::Text(text), None) if text.contains("模型忘记闭合")));

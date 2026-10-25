@@ -6,11 +6,14 @@
     allow(dead_code)
 )]
 
+mod audio_codec;
 mod batch;
+mod cache;
 mod call;
 mod chat_feed;
 mod input;
 mod network;
+mod pipeline;
 mod readable;
 mod samples;
 mod segmentation;

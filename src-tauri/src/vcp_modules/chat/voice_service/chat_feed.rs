@@ -23,12 +23,12 @@ pub(super) struct MessageSpeech {
 }
 
 impl MessageSpeech {
-    pub(super) fn new(streaming_tts: bool) -> Self {
+    pub(super) fn new() -> Self {
         Self {
             text: String::new(),
             parser: StreamBlockParser::new(),
             stable_spoken: String::new(),
-            reply: ReplyBuffer::new_with_mode(true, streaming_tts),
+            reply: ReplyBuffer::new(true),
             instruction: None,
             guidance_locked: false,
             finished: false,
@@ -137,16 +137,12 @@ pub(super) struct ChatFeed {
     agent_request: Option<String>,
     finished: bool,
     dirty: bool,
-    streaming_tts: bool,
     cursor: usize,
 }
 
 impl ChatFeed {
-    pub(super) fn new(streaming_tts: bool) -> Self {
-        Self {
-            streaming_tts,
-            ..Default::default()
-        }
+    pub(super) fn new() -> Self {
+        Self::default()
     }
 
     pub(super) fn accept(&mut self, event: &StreamEvent) -> Result<bool, String> {
@@ -272,7 +268,7 @@ impl ChatFeed {
             let index = index.unwrap_or_else(|| {
                 self.messages.push(MessageText {
                     id: event.message_id.clone(),
-                    speech: MessageSpeech::new(self.streaming_tts),
+                    speech: MessageSpeech::new(),
                 });
                 self.messages.len() - 1
             });
@@ -383,6 +379,14 @@ mod tests {
 
     fn guidance(text: &str) -> String {
         format!("<voice_guidance>\n{text}\n</voice_guidance>\n")
+    }
+
+    fn drain_speech(speech: &mut MessageSpeech) -> Vec<(String, Option<Arc<str>>)> {
+        let mut pieces = Vec::new();
+        while let (ReplyPiece::Text(text), instruction) = speech.next() {
+            pieces.push((text, instruction));
+        }
+        pieces
     }
 
     #[test]
@@ -514,7 +518,7 @@ mod tests {
 
     #[test]
     fn each_group_message_owns_its_guidance_style_and_unpunctuated_tail() {
-        let mut feed = ChatFeed::new(true);
+        let mut feed = ChatFeed::new();
         feed.accept(&member(
             "a",
             &format!("{}(温柔)[轻笑]第一句。第一位尾音", guidance("清亮自然")),
@@ -535,7 +539,7 @@ mod tests {
 
     #[test]
     fn only_stable_text_is_accepted_before_message_completion() {
-        let mut feed = ChatFeed::new(true);
+        let mut feed = ChatFeed::new();
         feed.accept(&update("a", "<voice_guid", false)).unwrap();
         assert!(feed.take_update().unwrap().unwrap().pieces.is_empty());
         let raw = format!("{}第一句话还没有形成稳定段落。", guidance("首个指导"));
@@ -566,7 +570,7 @@ mod tests {
             ),
         ];
         for raw in cases {
-            let mut feed = ChatFeed::new(true);
+            let mut feed = ChatFeed::new();
             feed.accept(&member("a", &raw)).unwrap();
             let pieces = feed.take_update().unwrap().unwrap().pieces;
             assert_eq!(pieces, vec![piece("a", "正文。", None)]);
@@ -575,7 +579,7 @@ mod tests {
 
     #[test]
     fn a_thought_prefix_does_not_promote_later_guidance_to_the_first_line() {
-        let mut feed = ChatFeed::new(true);
+        let mut feed = ChatFeed::new();
         let raw = format!(
             "<think>私密推理</think>\n```text\n示例代码\n```\n{}正文。",
             guidance("有效指导")
@@ -589,7 +593,7 @@ mod tests {
 
     #[test]
     fn group_messages_cannot_interleave_or_rewrite_a_spoken_prefix() {
-        let mut feed = ChatFeed::new(true);
+        let mut feed = ChatFeed::new();
         feed.accept(&update(
             "a",
             &format!("{}这是第一位已经稳定的句子。\n\n等尾句", guidance("第一位")),
@@ -622,7 +626,7 @@ mod tests {
 
     #[test]
     fn first_body_locks_even_while_the_playback_worker_has_not_consumed_a_frame() {
-        let mut feed = ChatFeed::new(true);
+        let mut feed = ChatFeed::new();
         feed.accept(&update("a", "正文已经形成稳定段落。\n\n", false))
             .unwrap();
         // A later snapshot can replace an unspoken tail, but cannot change
@@ -649,7 +653,7 @@ mod tests {
             "{first}<<<[TOOL_REQUEST]>>>\n{}<<<[END_TOOL_REQUEST]>>>\n正文。",
             guidance("工具内示例")
         );
-        let mut feed = ChatFeed::new(true);
+        let mut feed = ChatFeed::new();
         feed.accept(&member("a", &raw)).unwrap();
         assert_eq!(
             feed.take_update().unwrap().unwrap().pieces,
@@ -666,7 +670,7 @@ mod tests {
             "<<<[TOOL_REQUEST]>>>\ncontent:「始」\n```\n示例\n「末」\n<<<[END_TOOL_REQUEST]>>>\n",
         ] {
             let raw = format!("{prefix}{}正文。", guidance("真正指导"));
-            let mut feed = ChatFeed::new(true);
+            let mut feed = ChatFeed::new();
             feed.accept(&member("a", &raw)).unwrap();
             assert_eq!(
                 feed.take_update().unwrap().unwrap().pieces,
@@ -681,19 +685,75 @@ mod tests {
             "{}### 标题\n\n正文含 `true`。\n\n<think>闭合推理</think>\n最后一段。",
             guidance("自然清晰")
         );
-        let mut complete = MessageSpeech::new(true);
+        let mut complete = MessageSpeech::new();
         complete.update(&raw, true).unwrap();
-        let mut incremental = MessageSpeech::new(true);
+        let complete_pieces = drain_speech(&mut complete);
+        let mut incremental = MessageSpeech::new();
+        let mut incremental_pieces = Vec::new();
         for (offset, ch) in raw.char_indices() {
             incremental
                 .update(&raw[..offset + ch.len_utf8()], false)
                 .unwrap();
+            incremental_pieces.extend(drain_speech(&mut incremental));
         }
+        assert!(!incremental_pieces.is_empty());
         incremental.update(&raw, true).unwrap();
+        incremental_pieces.extend(drain_speech(&mut incremental));
+        assert_eq!(incremental_pieces, complete_pieces);
         assert_eq!(incremental.stable_spoken, complete.stable_spoken);
         assert_eq!(incremental.instruction, complete.instruction);
         assert_eq!(complete.instruction.as_deref(), Some("自然清晰"));
         assert_eq!(complete.stable_spoken, "标题\n正文含 true。\n最后一段。");
+    }
+
+    #[test]
+    fn consuming_each_stable_update_matches_complete_message_segments() {
+        let cases = [
+            format!(
+                "{}(温柔)[轻笑]{}。\n\n{}。\n\n[轻声]{}。\n\n结束。",
+                guidance("自然清晰"),
+                "字".repeat(9),
+                "次".repeat(39),
+                "后".repeat(79),
+            ),
+            format!(
+                "(轻松){}，\n\n{}，\n\n{}，\n\n末尾没有标点",
+                "字".repeat(23),
+                "次".repeat(79),
+                "后".repeat(119),
+            ),
+            format!(
+                "（平静）“{}？！”\n\n\"{}!\"\n\n[低声]{}\n\n末尾。",
+                "字".repeat(58),
+                "next ".repeat(34),
+                "后".repeat(181),
+            ),
+            format!(
+                "{}(清晰)Use **config.json** for version `3.14`.\n\n<think>不朗读</think>\n{}\n\n~~~text\n忽略代码。\n~~~\n\n最后一句。",
+                guidance("从容"),
+                "第二段包含多个短句。".repeat(20),
+            ),
+        ];
+        for raw in cases {
+            let mut complete = MessageSpeech::new();
+            complete.update(&raw, true).unwrap();
+            let expected = drain_speech(&mut complete);
+            let mut incremental = MessageSpeech::new();
+            let mut actual = Vec::new();
+            // Consume after every update, as the live ChatFeed does; merely
+            // comparing the final projection would miss emitted-boundary drift.
+            for (offset, ch) in raw.char_indices() {
+                incremental
+                    .update(&raw[..offset + ch.len_utf8()], false)
+                    .unwrap();
+                actual.extend(drain_speech(&mut incremental));
+            }
+            assert!(!actual.is_empty(), "no live speech for {raw}");
+            incremental.update(&raw, true).unwrap();
+            actual.extend(drain_speech(&mut incremental));
+            assert_eq!(actual, expected, "{raw}");
+            assert!(matches!(incremental.next().0, ReplyPiece::Finished));
+        }
     }
 
     #[test]
@@ -706,7 +766,7 @@ mod tests {
             "~~~text\n模型漏写闭合后的正文。",
             "<div><p>模型漏写闭合后的正文。</p>",
         ] {
-            let mut speech = MessageSpeech::new(true);
+            let mut speech = MessageSpeech::new();
             speech.update(raw, false).unwrap();
             assert!(!speech.has_spoken_text(), "{raw}");
             assert!(matches!(speech.next().0, ReplyPiece::Wait));
@@ -721,7 +781,7 @@ mod tests {
 
     #[test]
     fn guidance_style_and_audio_tags_alone_are_not_speakable_body() {
-        let mut speech = MessageSpeech::new(true);
+        let mut speech = MessageSpeech::new();
         speech
             .update(&format!("{}(温柔)[轻笑]", guidance("自然")), true)
             .unwrap();
@@ -731,7 +791,7 @@ mod tests {
 
     #[test]
     fn replacement_rebuilds_unspoken_cache_but_keeps_guidance_and_sent_prefix() {
-        let mut speech = MessageSpeech::new(true);
+        let mut speech = MessageSpeech::new();
         let prefix = "这段已经稳定并且将要朗读。";
         speech
             .update(
@@ -749,7 +809,7 @@ mod tests {
         assert_eq!(speech.instruction.as_deref(), Some("最初指导"));
         assert!(matches!(speech.next().0, ReplyPiece::Text(text) if text == "修改剩余正文。"));
 
-        let mut speech = MessageSpeech::new(true);
+        let mut speech = MessageSpeech::new();
         speech.update(&format!("{prefix}\n\n"), false).unwrap();
         assert!(matches!(speech.next().0, ReplyPiece::Text(_)));
         assert!(speech

@@ -56,6 +56,8 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `serde_json` | `1` | 仅安全补丁 | crates.io | — |
 | `ts-rs` | `12.0.1` | 配置契约工具变更时检查 | crates.io | 可选 `config-export` feature；仅供 host 开发工具从 Rust 配置类型生成 TypeScript，移动端默认不启用 |
 | `tokio` | `1` | 仅安全补丁 | crates.io | 异步运行时 |
+| `symphonia` | `0.6.1` | 音频解码需求变更时检查 | crates.io / 官方文档 | 纯 Rust TTS 完整 WAV / MP3 解码；关闭默认特性，仅启用 `mp3`、`pcm`、`wav` 与 ID3 元数据；按文件元数据处理 gapless，不猜测裁剪静音 |
+| `rubato` | `5.0.1` | 重采样需求变更时检查 | crates.io / 官方文档 | 纯 Rust FFT 抗混叠重采样至 24kHz，关闭默认特性并显式启用 `fft_resampler`；解码与重采样统一在可协作取消的 blocking worker 内执行 |
 | `reqwest` | `0.12` | 每季度检查 | crates.io | HTTP 客户端，使用 `rustls-tls`；升级约束见 §4.6 |
 | `sqlx` | `=0.9.0` | 每季度检查 | crates.io | SQLite 异步 ORM；与 rusqlite 共用 `libsqlite3-sys 0.37.0` |
 | `rusqlite` | `=0.39.0` | 每季度检查 | crates.io | 同步 SQLite，启用 `bundled`；保留当前精确约束，不能单独升级到不兼容的 SQLite links 版本 |
