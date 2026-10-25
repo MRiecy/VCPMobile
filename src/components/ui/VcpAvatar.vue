@@ -126,7 +126,7 @@ const handleImgError = () => {
   <div :class="[
     size || 'w-10 h-10', 
     rounded || 'rounded-xl',
-    'relative overflow-hidden flex-shrink-0 flex items-center justify-center shadow-inner transition-all duration-500',
+    'relative overflow-hidden flex-shrink-0 flex items-center justify-center shadow-inner',
     resolvedColor ? 'border' : 'border border-black/15 dark:border-white/20'
   ]" :style="borderStyle"
     v-intersection-observer="{ rootMargin: '300px 0px', threshold: 0.01 }"
@@ -147,7 +147,7 @@ const handleImgError = () => {
       :src="avatarUrl" 
       draggable="false"
       @error="handleImgError" 
-      class="relative w-full h-full object-cover transition-opacity duration-300"
+      class="relative w-full h-full object-cover"
     />
   </div>
 </template>

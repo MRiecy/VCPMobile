@@ -378,31 +378,28 @@ html[data-vcp-platform="ios"] :is(button, a, input, textarea, select, [tabindex]
   }
 }
 
-/* 主题切换期间禁用所有 DOM 节点的 CSS transition，避免逐帧重绘与不同步；
-   交由 View Transitions API 的 GPU 整屏纹理快照做统一交叉溶解。 */
+/* 常规元素交由整屏快照溶解；壁纸与背景遮罩保留自己的 350ms 过渡。 */
 .theme-switching,
-.theme-switching *,
+.theme-switching *:not(.vcp-background-layer):not(.vcp-background-overlay),
 .theme-switching *::before,
 .theme-switching *::after {
   transition: none !important;
 }
 
-/* 确保 View Transition 采样新快照时，新壁纸立即以不透明态进入快照，旧壁纸不残留重叠 */
-.theme-switching .bg-fade-enter-from,
-.theme-switching .bg-fade-enter-active {
-  opacity: 1 !important;
-}
-
-.theme-switching .bg-fade-leave-active {
-  display: none !important;
+@media (prefers-reduced-motion: reduce) {
+  .vcp-background-layer,
+  .vcp-background-overlay {
+    transition: none !important;
+  }
 }
 
 ::view-transition {
   pointer-events: none;
 }
 
+::view-transition-group(root),
 ::view-transition-old(root),
 ::view-transition-new(root) {
-  animation-duration: 200ms;
+  animation-duration: 160ms;
   animation-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
 }

@@ -160,23 +160,33 @@ export const useThemeStore = defineStore('theme', () => {
     startViewTransition?: (updateCallback: () => Promise<void> | void) => ViewTransitionLike;
   };
 
-  let switchCleanupTimer: ReturnType<typeof setTimeout> | null = null;
+  let themeSwitchOwner: symbol | null = null;
   let pendingTransitionCommit: (() => void) | null = null;
   let activeViewTransition: ViewTransitionLike | null = null;
 
-  const triggerThemeSwitchTransition = () => {
-    if (isInitializing) return;
-    if (switchCleanupTimer !== null) {
-      clearTimeout(switchCleanupTimer);
-      switchCleanupTimer = null;
-    }
-    document.documentElement.classList.add('theme-switching');
-    switchCleanupTimer = setTimeout(() => {
-      switchCleanupTimer = null;
-      if (!activeViewTransition) {
-        document.documentElement.classList.remove('theme-switching');
+  const beginThemeSwitch = (): symbol => {
+    const owner = Symbol('theme-switch');
+    themeSwitchOwner = owner;
+    if (!isInitializing) document.documentElement.classList.add('theme-switching');
+    return owner;
+  };
+
+  const finishThemeSwitch = (owner: symbol | null) => {
+    if (owner === null || themeSwitchOwner !== owner) return;
+    themeSwitchOwner = null;
+    document.documentElement.classList.remove('theme-switching');
+  };
+
+  const settleThemeWithoutSnapshot = async (owner: symbol | null) => {
+    try {
+      await nextTick();
+      if (owner !== null && themeSwitchOwner === owner) {
+        // 先让禁用局部过渡的最终样式落地，再撤掉标记；隐藏页面也不依赖 rAF。
+        document.documentElement.getBoundingClientRect();
       }
-    }, 80);
+    } finally {
+      finishThemeSwitch(owner);
+    }
   };
 
   const canUseViewTransition = (): boolean => {
@@ -212,31 +222,40 @@ export const useThemeStore = defineStore('theme', () => {
     }
   };
 
-  const runWithThemeViewTransition = <T>(commit: () => T): Promise<T> => {
+  const runWithThemeViewTransition = <T>(commit: () => T, animate = true): Promise<T> => {
     flushPendingViewTransition();
 
-    if (!canUseViewTransition()) {
-      triggerThemeSwitchTransition();
-      return Promise.resolve(commit());
-    }
+    let owner: symbol | null = null;
+    let outcome: { value: T } | { error: unknown } | undefined;
+    const executeCommit = (): T => {
+      if (!outcome) {
+        pendingTransitionCommit = null;
+        owner = beginThemeSwitch();
+        try {
+          outcome = { value: commit() };
+        } catch (error) {
+          outcome = { error };
+        }
+      }
+      if ('error' in outcome) throw outcome.error;
+      return outcome.value;
+    };
+
+    const commitWithoutSnapshot = async (): Promise<T> => {
+      try {
+        return executeCommit();
+      } finally {
+        await settleThemeWithoutSnapshot(owner);
+      }
+    };
+
+    if (!animate || !canUseViewTransition()) return commitWithoutSnapshot();
 
     const doc = document as DocumentWithViewTransition;
     return new Promise<T>((resolve, reject) => {
-      let result!: T;
-      let committed = false;
-
-      const executeCommit = () => {
-        if (committed) return;
-        committed = true;
-        pendingTransitionCommit = null;
-        document.documentElement.classList.add('theme-switching');
-        result = commit();
-      };
-
       pendingTransitionCommit = () => {
         try {
-          executeCommit();
-          resolve(result);
+          resolve(executeCommit());
         } catch (err) {
           reject(err);
         }
@@ -248,14 +267,15 @@ export const useThemeStore = defineStore('theme', () => {
           await nextTick();
         });
         activeViewTransition = transition;
+        // 主动跳过时 ready 会拒绝，清理仍统一由 finished 承接。
+        void transition.ready.catch(() => {});
 
         transition.updateCallbackDone.then(
-          () => resolve(result),
+          () => resolve(executeCommit()),
           (err) => {
-            if (!committed) {
+            if (!outcome) {
               try {
-                executeCommit();
-                resolve(result);
+                resolve(executeCommit());
               } catch (commitErr) {
                 reject(commitErr);
               }
@@ -268,17 +288,12 @@ export const useThemeStore = defineStore('theme', () => {
         transition.finished.catch(() => {}).finally(() => {
           if (activeViewTransition === transition) {
             activeViewTransition = null;
-            document.documentElement.classList.remove('theme-switching');
           }
+          finishThemeSwitch(owner);
         });
       } catch {
         pendingTransitionCommit = null;
-        triggerThemeSwitchTransition();
-        try {
-          resolve(commit());
-        } catch (err) {
-          reject(err);
-        }
+        void commitWithoutSnapshot().then(resolve, reject);
       }
     });
   };
@@ -390,7 +405,6 @@ export const useThemeStore = defineStore('theme', () => {
       let modePersisted = false;
 
       try {
-        triggerThemeSwitchTransition();
         console.log('[themeStore] Loaded module for', themeKey, mod.meta.name);
 
         injectVariables(nextVars);
@@ -483,10 +497,7 @@ export const useThemeStore = defineStore('theme', () => {
       }
     };
 
-    if (restoredMode !== undefined || !canUseViewTransition()) {
-      return commitSelection();
-    }
-    return runWithThemeViewTransition(commitSelection);
+    return runWithThemeViewTransition(commitSelection, restoredMode === undefined);
   };
 
   const applyThemeFile = (fileName: string) => applyThemeSelection(fileName);
@@ -519,7 +530,6 @@ export const useThemeStore = defineStore('theme', () => {
   };
 
   const applyTheme = (newMode: ThemeMode) => {
-    triggerThemeSwitchTransition();
     const isDark =
       newMode === 'dark' ||
       (newMode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
@@ -576,10 +586,7 @@ export const useThemeStore = defineStore('theme', () => {
 
   onScopeDispose(() => {
     flushPendingViewTransition();
-    if (switchCleanupTimer !== null) {
-      clearTimeout(switchCleanupTimer);
-      switchCleanupTimer = null;
-    }
+    finishThemeSwitch(themeSwitchOwner);
     mediaQuery.removeEventListener('change', handleMediaChange);
   });
 
@@ -592,7 +599,9 @@ export const useThemeStore = defineStore('theme', () => {
       setTimeout(() => {
         console.log('[themeStore] HMR reload triggered, re-applying theme:', currentTheme.value);
         if (currentTheme.value) {
-          void applyThemeFile(currentTheme.value);
+          void applyThemeFile(currentTheme.value).finally(() => {
+            isInitializing = false;
+          });
         }
       }, 100);
     }

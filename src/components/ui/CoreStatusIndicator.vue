@@ -49,7 +49,7 @@ const statusConfig = computed(() => {
 
 <template>
   <div
-    class="flex items-center gap-1.5 transition-all duration-300 select-none"
+    class="flex items-center gap-1.5 select-none"
     :title="notificationStore.vcpCoreStatus.message"
     :aria-label="statusConfig.text"
   >
