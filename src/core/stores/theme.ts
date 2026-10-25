@@ -1,5 +1,5 @@
 import { defineStore, acceptHMRUpdate } from 'pinia';
-import { onScopeDispose, ref, watch } from 'vue';
+import { nextTick, onScopeDispose, ref, watch } from 'vue';
 
 export type ThemeMode = 'light' | 'dark' | 'system';
 
@@ -137,7 +137,7 @@ export const useThemeStore = defineStore('theme', () => {
   // 会同步执行 applyTheme 将其纠正为真实值。
   const isDarkResolved = ref(false);
   const lastModeSwitchAt = ref(0);
-  const MODE_SWITCH_DEBOUNCE_MS = 420;
+  const MODE_SWITCH_DEBOUNCE_MS = 260;
 
   const initialTheme = normalizeThemeModuleKey(readStoredValue(THEME_NAME_STORAGE_KEY)) || DEFAULT_THEME;
   const currentTheme = ref(initialTheme);
@@ -150,12 +150,137 @@ export const useThemeStore = defineStore('theme', () => {
   let isInitializing = true;
   let restoringMode = false;
 
+  interface ViewTransitionLike {
+    ready: Promise<void>;
+    updateCallbackDone: Promise<void>;
+    finished: Promise<void>;
+    skipTransition: () => void;
+  }
+  type DocumentWithViewTransition = Document & {
+    startViewTransition?: (updateCallback: () => Promise<void> | void) => ViewTransitionLike;
+  };
+
+  let switchCleanupTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingTransitionCommit: (() => void) | null = null;
+  let activeViewTransition: ViewTransitionLike | null = null;
+
   const triggerThemeSwitchTransition = () => {
     if (isInitializing) return;
+    if (switchCleanupTimer !== null) {
+      clearTimeout(switchCleanupTimer);
+      switchCleanupTimer = null;
+    }
     document.documentElement.classList.add('theme-switching');
-    setTimeout(() => {
-      document.documentElement.classList.remove('theme-switching');
-    }, 400);
+    switchCleanupTimer = setTimeout(() => {
+      switchCleanupTimer = null;
+      if (!activeViewTransition) {
+        document.documentElement.classList.remove('theme-switching');
+      }
+    }, 80);
+  };
+
+  const canUseViewTransition = (): boolean => {
+    if (isInitializing || typeof document === 'undefined' || typeof window === 'undefined') {
+      return false;
+    }
+    const doc = document as DocumentWithViewTransition;
+    if (typeof doc.startViewTransition !== 'function') {
+      return false;
+    }
+    if (document.visibilityState === 'hidden') {
+      return false;
+    }
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      return false;
+    }
+    return true;
+  };
+
+  const flushPendingViewTransition = () => {
+    if (pendingTransitionCommit) {
+      const commit = pendingTransitionCommit;
+      pendingTransitionCommit = null;
+      commit();
+    }
+    if (activeViewTransition) {
+      try {
+        activeViewTransition.skipTransition();
+      } catch {
+        // Ignore if transition already finished
+      }
+      activeViewTransition = null;
+    }
+  };
+
+  const runWithThemeViewTransition = <T>(commit: () => T): Promise<T> => {
+    flushPendingViewTransition();
+
+    if (!canUseViewTransition()) {
+      triggerThemeSwitchTransition();
+      return Promise.resolve(commit());
+    }
+
+    const doc = document as DocumentWithViewTransition;
+    return new Promise<T>((resolve, reject) => {
+      let result!: T;
+      let committed = false;
+
+      const executeCommit = () => {
+        if (committed) return;
+        committed = true;
+        pendingTransitionCommit = null;
+        document.documentElement.classList.add('theme-switching');
+        result = commit();
+      };
+
+      pendingTransitionCommit = () => {
+        try {
+          executeCommit();
+          resolve(result);
+        } catch (err) {
+          reject(err);
+        }
+      };
+
+      try {
+        const transition = doc.startViewTransition!(async () => {
+          executeCommit();
+          await nextTick();
+        });
+        activeViewTransition = transition;
+
+        transition.updateCallbackDone.then(
+          () => resolve(result),
+          (err) => {
+            if (!committed) {
+              try {
+                executeCommit();
+                resolve(result);
+              } catch (commitErr) {
+                reject(commitErr);
+              }
+            } else {
+              reject(err);
+            }
+          },
+        );
+
+        transition.finished.catch(() => {}).finally(() => {
+          if (activeViewTransition === transition) {
+            activeViewTransition = null;
+            document.documentElement.classList.remove('theme-switching');
+          }
+        });
+      } catch {
+        pendingTransitionCommit = null;
+        triggerThemeSwitchTransition();
+        try {
+          resolve(commit());
+        } catch (err) {
+          reject(err);
+        }
+      }
+    });
   };
 
 
@@ -205,6 +330,8 @@ export const useThemeStore = defineStore('theme', () => {
   };
 
   const applyThemeSelection = async (fileName: string, restoredMode?: ThemeMode): Promise<ThemeApplyResult> => {
+    flushPendingViewTransition();
+
     const resolved = findThemeModule(fileName);
     if (!resolved) {
       const error = `Theme module not found: ${String(fileName)}`;
@@ -238,121 +365,128 @@ export const useThemeStore = defineStore('theme', () => {
       };
     }
 
-    const previousTheme = currentTheme.value;
-    const previousThemeInfo = currentThemeInfo.value;
-    const previousThemeModule = currentThemeModule;
-    const previousMode = mode.value;
-    const previousDark = isDarkResolved.value;
-    const previousDarkClass = document.documentElement.classList.contains('dark');
-    const previousLightClass = document.body.classList.contains('light-theme');
-    const previousVarKeys = [...lastAppliedVarKeys.value];
-    const nextDark = restoredMode === undefined ? previousDark : restoredMode === 'dark'
-      || (restoredMode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    const nextVars = nextDark ? mod.variables.dark : mod.variables.light;
-    const affectedVarKeys = Array.from(new Set([...previousVarKeys, ...Object.keys(nextVars)]));
-    const previousRootVariables = affectedVarKeys.map((property) => ({
-      property,
-      value: document.documentElement.style.getPropertyValue(property),
-      priority: document.documentElement.style.getPropertyPriority(property),
-    }));
-    const existingStyleTag = document.getElementById('vcp-custom-theme');
-    const previousStyleText = existingStyleTag?.textContent ?? '';
-    let createdStyleTag = false;
-    let themePersisted = false;
-    let modePersisted = false;
+    const commitSelection = (): ThemeApplyResult => {
+      const previousTheme = currentTheme.value;
+      const previousThemeInfo = currentThemeInfo.value;
+      const previousThemeModule = currentThemeModule;
+      const previousMode = mode.value;
+      const previousDark = isDarkResolved.value;
+      const previousDarkClass = document.documentElement.classList.contains('dark');
+      const previousLightClass = document.body.classList.contains('light-theme');
+      const previousVarKeys = [...lastAppliedVarKeys.value];
+      const nextDark = restoredMode === undefined ? previousDark : restoredMode === 'dark'
+        || (restoredMode === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      const nextVars = nextDark ? mod.variables.dark : mod.variables.light;
+      const affectedVarKeys = Array.from(new Set([...previousVarKeys, ...Object.keys(nextVars)]));
+      const previousRootVariables = affectedVarKeys.map((property) => ({
+        property,
+        value: document.documentElement.style.getPropertyValue(property),
+        priority: document.documentElement.style.getPropertyPriority(property),
+      }));
+      const existingStyleTag = document.getElementById('vcp-custom-theme');
+      const previousStyleText = existingStyleTag?.textContent ?? '';
+      let createdStyleTag = false;
+      let themePersisted = false;
+      let modePersisted = false;
 
-    try {
-      triggerThemeSwitchTransition();
-      console.log('[themeStore] Loaded module for', themeKey, mod.meta.name);
-
-      injectVariables(nextVars);
-      if (restoredMode !== undefined) {
-        isDarkResolved.value = nextDark;
-        document.documentElement.classList.toggle('dark', nextDark);
-        document.body.classList.toggle('light-theme', !nextDark);
-      }
-
-      currentThemeModule = mod;
-      currentThemeInfo.value = {
-        fileName: themeKey,
-        name: mod.meta.name,
-        variables: mod.variables,
-      };
-      currentTheme.value = themeKey;
-
-      // Inject extra CSS rules (non-variable styles like .tool-bubble)
-      let styleTag = document.getElementById('vcp-custom-theme');
-      if (!styleTag) {
-        styleTag = document.createElement('style');
-        styleTag.id = 'vcp-custom-theme';
-        document.head.appendChild(styleTag);
-        createdStyleTag = true;
-      }
-      styleTag.textContent = mod.extraCss || '';
-
-      // Persist only after the complete visual state has been prepared. A storage
-      // failure rolls the DOM and refs back to the previously applied theme.
-      localStorage.setItem(THEME_NAME_STORAGE_KEY, themeKey);
-      themePersisted = true;
-      if (restoredMode !== undefined) {
-        localStorage.setItem('vcp-theme-mode', restoredMode);
-        modePersisted = true;
-        restoringMode = true;
-        try { mode.value = restoredMode; } finally { restoringMode = false; }
-      }
-      return { ok: true, themeKey };
-    } catch (error) {
-      console.error('Failed to apply theme file:', error);
-
-      for (const snapshot of previousRootVariables) {
-        if (snapshot.value) {
-          document.documentElement.style.setProperty(
-            snapshot.property,
-            snapshot.value,
-            snapshot.priority,
-          );
-        } else {
-          document.documentElement.style.removeProperty(snapshot.property);
-        }
-      }
-      lastAppliedVarKeys.value = previousVarKeys;
-      currentTheme.value = previousTheme;
-      currentThemeInfo.value = previousThemeInfo;
-      currentThemeModule = previousThemeModule;
-      isDarkResolved.value = previousDark;
-      document.documentElement.classList.toggle('dark', previousDarkClass);
-      document.body.classList.toggle('light-theme', previousLightClass);
-      restoringMode = true;
-      try { mode.value = previousMode; } finally { restoringMode = false; }
-
-      const styleTag = document.getElementById('vcp-custom-theme');
-      if (createdStyleTag) {
-        styleTag?.remove();
-      } else if (styleTag) {
-        styleTag.textContent = previousStyleText;
-      }
-
-      let rollbackFailure = '';
       try {
-        if (themePersisted) {
-          if (previousStoredTheme === null) localStorage.removeItem(THEME_NAME_STORAGE_KEY);
-          else localStorage.setItem(THEME_NAME_STORAGE_KEY, previousStoredTheme);
-        }
-        if (modePersisted) {
-          if (previousStoredMode === null) localStorage.removeItem('vcp-theme-mode');
-          else localStorage.setItem('vcp-theme-mode', previousStoredMode);
-        }
-      } catch (rollbackError) {
-        console.error('[themeStore] Failed to restore persisted theme:', rollbackError);
-        rollbackFailure = `；恢复原主题存储失败：${errorMessage(rollbackError)}`;
-      }
+        triggerThemeSwitchTransition();
+        console.log('[themeStore] Loaded module for', themeKey, mod.meta.name);
 
-      return {
-        ok: false,
-        themeKey: null,
-        error: `主题应用失败：${errorMessage(error)}${rollbackFailure}`,
-      };
+        injectVariables(nextVars);
+        if (restoredMode !== undefined) {
+          isDarkResolved.value = nextDark;
+          document.documentElement.classList.toggle('dark', nextDark);
+          document.body.classList.toggle('light-theme', !nextDark);
+        }
+
+        currentThemeModule = mod;
+        currentThemeInfo.value = {
+          fileName: themeKey,
+          name: mod.meta.name,
+          variables: mod.variables,
+        };
+        currentTheme.value = themeKey;
+
+        // Inject extra CSS rules (non-variable styles like .tool-bubble)
+        let styleTag = document.getElementById('vcp-custom-theme');
+        if (!styleTag) {
+          styleTag = document.createElement('style');
+          styleTag.id = 'vcp-custom-theme';
+          document.head.appendChild(styleTag);
+          createdStyleTag = true;
+        }
+        styleTag.textContent = mod.extraCss || '';
+
+        // Persist only after the complete visual state has been prepared. A storage
+        // failure rolls the DOM and refs back to the previously applied theme.
+        localStorage.setItem(THEME_NAME_STORAGE_KEY, themeKey);
+        themePersisted = true;
+        if (restoredMode !== undefined) {
+          localStorage.setItem('vcp-theme-mode', restoredMode);
+          modePersisted = true;
+          restoringMode = true;
+          try { mode.value = restoredMode; } finally { restoringMode = false; }
+        }
+        return { ok: true, themeKey };
+      } catch (error) {
+        console.error('Failed to apply theme file:', error);
+
+        for (const snapshot of previousRootVariables) {
+          if (snapshot.value) {
+            document.documentElement.style.setProperty(
+              snapshot.property,
+              snapshot.value,
+              snapshot.priority,
+            );
+          } else {
+            document.documentElement.style.removeProperty(snapshot.property);
+          }
+        }
+        lastAppliedVarKeys.value = previousVarKeys;
+        currentTheme.value = previousTheme;
+        currentThemeInfo.value = previousThemeInfo;
+        currentThemeModule = previousThemeModule;
+        isDarkResolved.value = previousDark;
+        document.documentElement.classList.toggle('dark', previousDarkClass);
+        document.body.classList.toggle('light-theme', previousLightClass);
+        restoringMode = true;
+        try { mode.value = previousMode; } finally { restoringMode = false; }
+
+        const styleTag = document.getElementById('vcp-custom-theme');
+        if (createdStyleTag) {
+          styleTag?.remove();
+        } else if (styleTag) {
+          styleTag.textContent = previousStyleText;
+        }
+
+        let rollbackFailure = '';
+        try {
+          if (themePersisted) {
+            if (previousStoredTheme === null) localStorage.removeItem(THEME_NAME_STORAGE_KEY);
+            else localStorage.setItem(THEME_NAME_STORAGE_KEY, previousStoredTheme);
+          }
+          if (modePersisted) {
+            if (previousStoredMode === null) localStorage.removeItem('vcp-theme-mode');
+            else localStorage.setItem('vcp-theme-mode', previousStoredMode);
+          }
+        } catch (rollbackError) {
+          console.error('[themeStore] Failed to restore persisted theme:', rollbackError);
+          rollbackFailure = `；恢复原主题存储失败：${errorMessage(rollbackError)}`;
+        }
+
+        return {
+          ok: false,
+          themeKey: null,
+          error: `主题应用失败：${errorMessage(error)}${rollbackFailure}`,
+        };
+      }
+    };
+
+    if (restoredMode !== undefined || !canUseViewTransition()) {
+      return commitSelection();
     }
+    return runWithThemeViewTransition(commitSelection);
   };
 
   const applyThemeFile = (fileName: string) => applyThemeSelection(fileName);
@@ -410,7 +544,9 @@ export const useThemeStore = defineStore('theme', () => {
   const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
   const handleMediaChange = () => {
     if (mode.value === 'system') {
-      applyTheme('system');
+      void runWithThemeViewTransition(() => {
+        applyTheme('system');
+      });
     }
   };
   mediaQuery.addEventListener('change', handleMediaChange);
@@ -426,7 +562,9 @@ export const useThemeStore = defineStore('theme', () => {
     }
 
     lastModeSwitchAt.value = now;
-    mode.value = newMode;
+    void runWithThemeViewTransition(() => {
+      mode.value = newMode;
+    });
   };
 
   const toggleTheme = () => {
@@ -437,6 +575,11 @@ export const useThemeStore = defineStore('theme', () => {
   };
 
   onScopeDispose(() => {
+    flushPendingViewTransition();
+    if (switchCleanupTimer !== null) {
+      clearTimeout(switchCleanupTimer);
+      switchCleanupTimer = null;
+    }
     mediaQuery.removeEventListener('change', handleMediaChange);
   });
 
