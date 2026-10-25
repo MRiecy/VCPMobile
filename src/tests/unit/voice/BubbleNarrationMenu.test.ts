@@ -111,6 +111,11 @@ describe('bubble narration message menu', () => {
     expect(action('朗读气泡')).toBeUndefined();
   });
 
+  it('does not expose narration for user messages', async () => {
+    await render([message('user-1', 'user', 1, '用户发送的消息')]);
+    expect(useOverlayStore().contextMenuConfig!.actions.find(item => item.label === '朗读气泡')).toBeUndefined();
+  });
+
   it('regeneration stops a later affected message, even when it is not the clicked message', async () => {
     const messages = [message('user', 'user', 1), message('a', 'assistant', 2), message('b', 'assistant', 3)];
     const { history } = await render(messages, messages[1]);

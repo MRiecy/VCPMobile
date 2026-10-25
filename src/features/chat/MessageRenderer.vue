@@ -124,6 +124,7 @@ const activeMermaidSource = ref("");
 const shell = computed(() => props.message.shell);
 
 const isNarratingCurrentMessage = computed(() => {
+  if (shell.value?.isUser) return false;
   const activeKey = bubbleNarration.activeMessageKey;
   if (!activeKey || activeKey.messageId !== props.message.id) return false;
   const currentConv = sessionStore.currentConversationKey;
@@ -852,23 +853,25 @@ const showMessageContextMenu = async () => {
 
   // 3. 其他非流式操作
   if (!isStreaming.value) {
-    const capturedTtsId = bubbleNarration.isNarrating(messageKey) ? bubbleNarration.activeTtsId : null;
-    actions.push({
-      label: capturedTtsId ? '停止朗读' : '朗读气泡',
-      icon: capturedTtsId ? Square : Volume2,
-      danger: Boolean(capturedTtsId),
-      handler: async () => {
-        if (capturedTtsId) {
-          await bubbleNarration.stopMessage(messageKey, capturedTtsId);
-          return;
-        }
-        const key = messageKey.conversation;
-        await bubbleNarration.startBubbleNarration(messageKey, getFullText, () =>
-          historyStore.isMessageActionCurrent(messageKey)
-          && !streamStore.isMessageActiveInSession(key.ownerId, key.ownerType, key.topicId, messageKey.messageId),
-        );
-      },
-    });
+    if (!shell.value?.isUser) {
+      const capturedTtsId = bubbleNarration.isNarrating(messageKey) ? bubbleNarration.activeTtsId : null;
+      actions.push({
+        label: capturedTtsId ? '停止朗读' : '朗读气泡',
+        icon: capturedTtsId ? Square : Volume2,
+        danger: Boolean(capturedTtsId),
+        handler: async () => {
+          if (capturedTtsId) {
+            await bubbleNarration.stopMessage(messageKey, capturedTtsId);
+            return;
+          }
+          const key = messageKey.conversation;
+          await bubbleNarration.startBubbleNarration(messageKey, getFullText, () =>
+            historyStore.isMessageActionCurrent(messageKey)
+            && !streamStore.isMessageActiveInSession(key.ownerId, key.ownerType, key.topicId, messageKey.messageId),
+          );
+        },
+      });
+    }
     actions.push({
       label: "重新渲染",
       icon: RotateCcw,
