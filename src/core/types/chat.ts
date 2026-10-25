@@ -333,7 +333,7 @@ export type StreamBlock =
     });
 
 export type TailRenderMode = "ast" | "plain";
-export type TailBlockType = "markdown" | "html-preview" | "thought";
+export type TailBlockType = "markdown" | "html-preview" | "thought" | "voice-guidance";
 
 export interface StableAppend {
   baseCount: number;

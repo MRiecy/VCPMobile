@@ -59,6 +59,9 @@ function buildTailBlockFromOp(
   if (op.blockType === "html-preview") {
     return { ...shared, type: "html-preview" };
   }
+  if (op.blockType === "voice-guidance") {
+    return { ...shared, type: "voice-guidance", is_complete: false };
+  }
   return { ...shared, type: "markdown" };
 }
 
@@ -70,7 +73,7 @@ function buildTailSnapshotOp(block: StreamBlock | null, mode: TailRenderMode): T
     content: block.content ?? "",
     hash: block.hash,
     mode,
-    blockType: block.type === "thought" || block.type === "html-preview" ? block.type : "markdown",
+    blockType: block.type === "thought" || block.type === "html-preview" || block.type === "voice-guidance" ? block.type : "markdown",
     thoughtTheme: block.type === "thought" ? block.theme : undefined,
   };
 }

@@ -25,7 +25,8 @@ import {
   supportsStreamRevealMotion,
 } from "../../core/utils/streamTextFade";
 import { useMessageStyleInjector } from "../../core/composables/useMessageStyleInjector";
-import { Copy, Edit2, RotateCcw, Trash2, StopCircle } from "@lucide/vue";
+import { Copy, Edit2, RotateCcw, Trash2, StopCircle, Square, Volume2 } from "@lucide/vue";
+import { useBubbleNarration } from './voice/useBubbleNarration';
 import { useMessageTailRenderer } from './composables/useMessageTailRenderer';
 import { separateMessageStyles, stableMessageStyles, standaloneStyleSource } from './utils/messageStyles';
 import { instantiateMermaidSvg, renderMermaidTemplate } from './utils/mermaidRenderer';
@@ -65,6 +66,7 @@ const historyStore = useChatHistoryStore();
 const sessionStore = useChatSessionStore();
 const streamStore = useChatStreamStore();
 const chatPreferences = useChatPreferencesStore();
+const bubbleNarration = useBubbleNarration();
 
 let rendererDisposed = false;
 const {
@@ -73,6 +75,7 @@ const {
   thoughtTailSandboxRef,
   isPlainTailFallback,
   thoughtTailBlock,
+  voiceGuidanceTailBlock,
   useAstForCurrentTail,
   isAstRecoveryPending,
   finishTailMotion,
@@ -456,10 +459,18 @@ const toolBlockKeys = computed(() => {
   return keys;
 });
 
+// 尾部与稳定区属于不同组件位置，展开意图随当前消息保留，闭合时按指导次序交接。
+const guidanceExpansion = ref<Record<string, boolean>>({});
+const guidanceKey = (ordinal: number) => `${props.message.id}-voice-guidance-${ordinal}`;
+const tailGuidanceKey = computed(() => guidanceKey(
+  props.message.blocks?.filter(block => block.type === "voice-guidance").length ?? 0,
+));
+watch(() => props.message.id, () => { guidanceExpansion.value = {}; });
+
 function getBlockKey(block: ContentBlock, index: number, bubbleId: string): string {
   if (block.type === "voice-guidance") {
     const ordinal = props.message.blocks?.filter(candidate => candidate.type === "voice-guidance").indexOf(block) ?? index;
-    return `${props.message.id}-voice-guidance-${ordinal}`;
+    return guidanceKey(ordinal);
   }
   const toolKey = toolBlockKeys.value.get(block);
   if (toolKey !== undefined) return toolKey;
@@ -831,6 +842,22 @@ const showMessageContextMenu = async () => {
 
   // 3. 其他非流式操作
   if (!isStreaming.value) {
+    const capturedTtsId = bubbleNarration.isNarrating(messageKey) ? bubbleNarration.activeTtsId : null;
+    actions.push({
+      label: capturedTtsId ? '停止朗读' : '朗读气泡',
+      icon: capturedTtsId ? Square : Volume2,
+      handler: async () => {
+        if (capturedTtsId) {
+          await bubbleNarration.stopMessage(messageKey, capturedTtsId);
+          return;
+        }
+        const key = messageKey.conversation;
+        await bubbleNarration.startBubbleNarration(messageKey, getFullText, () =>
+          historyStore.isMessageActionCurrent(messageKey)
+          && !streamStore.isMessageActiveInSession(key.ownerId, key.ownerType, key.topicId, messageKey.messageId),
+        );
+      },
+    });
     actions.push({
       label: "重新渲染",
       icon: RotateCcw,
@@ -991,7 +1018,7 @@ onUnmounted(() => {
                 <div
                   v-for="(block, index) in bubble.blocks"
                   :key="getBlockKey(block, index, bubble.id)"
-                  v-memo="[getBlockKey(block, index, bubble.id), block, isStreaming, isMessageInActiveStream, expandToolsByDefault, shouldRevealStableBlock(block)]"
+                  v-memo="[getBlockKey(block, index, bubble.id), block, isStreaming, isMessageInActiveStream, expandToolsByDefault, shouldRevealStableBlock(block), guidanceExpansion[getBlockKey(block, index, bubble.id)]]"
                   data-message-render-region="stable"
                   :class="{ [STREAM_ELEMENT_REVEAL_CLASS]: shouldRevealStableBlock(block) }"
                   @animationend.self="finishStableBlockReveal($event, block)"
@@ -1030,6 +1057,7 @@ onUnmounted(() => {
                   <VoiceGuidanceBlock
                     v-else-if="block.type === 'voice-guidance'"
                     :block="block"
+                    v-model:expanded="guidanceExpansion[getBlockKey(block, index, bubble.id)]"
                   />
 
                   <HtmlPreviewBlock
@@ -1052,9 +1080,18 @@ onUnmounted(() => {
               </div>
             </template>
 
+            <VoiceGuidanceBlock
+              v-if="showMessageTail && (bubbleIndex === messageBubbles.length - 1) && voiceGuidanceTailBlock"
+              :key="tailGuidanceKey"
+              data-message-render-region="tail"
+              :block="voiceGuidanceTailBlock"
+              :is-streaming="isStreaming"
+              v-model:expanded="guidanceExpansion[tailGuidanceKey]"
+            />
+
             <!-- 思维链尾部复用同一 AST 沙箱；终态解析失败时保留已有展示。 -->
             <ThoughtBlock
-              v-if="showMessageTail && (bubbleIndex === messageBubbles.length - 1) && thoughtTailBlock"
+              v-else-if="showMessageTail && (bubbleIndex === messageBubbles.length - 1) && thoughtTailBlock"
               data-message-render-region="tail"
               :block="thoughtTailBlock"
               :message-id="message.id"
@@ -1112,7 +1149,7 @@ onUnmounted(() => {
                 class="vcp-markdown-block"
               />
             </div>
-            <div v-if="showMessageTail && (bubbleIndex === messageBubbles.length - 1) && message.tailContent && message.blocks && message.blocks.length > 0 && (!message.tailBlock || (!isInlineHtmlBlock(message.tailBlock.type) && message.tailBlock.type !== 'html-preview' && message.tailBlock.type !== 'thought'))" class="opacity-70 italic">
+            <div v-if="showMessageTail && (bubbleIndex === messageBubbles.length - 1) && message.tailContent && message.blocks && message.blocks.length > 0 && (!message.tailBlock || (!isInlineHtmlBlock(message.tailBlock.type) && message.tailBlock.type !== 'html-preview' && message.tailBlock.type !== 'thought' && message.tailBlock.type !== 'voice-guidance'))" class="opacity-70 italic">
               {{ message.tailContent }}
             </div>
           </div>

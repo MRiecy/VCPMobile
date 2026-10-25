@@ -791,8 +791,8 @@ pub async fn append_single_message<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-pub async fn fetch_raw_message_content(
-    app_handle: tauri::AppHandle,
+pub async fn fetch_raw_message_content<R: tauri::Runtime>(
+    app_handle: tauri::AppHandle<R>,
     owner_id: String,
     owner_type: String,
     topic_id: String,
@@ -804,7 +804,8 @@ pub async fn fetch_raw_message_content(
 
     let row = sqlx::query(
         "SELECT content FROM messages
-         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
+           AND deleted_at IS NULL",
     )
     .bind(&key.topic.owner_type)
     .bind(&key.topic.owner_id)

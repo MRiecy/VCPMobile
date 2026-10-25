@@ -533,6 +533,13 @@ fn preprocess_latex_math(text: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
+/// Speech uses the same math delimiters as the renderer, without building an AST.
+pub(crate) fn normalize_math_for_speech(text: &str) -> String {
+    let text = preprocess_latex_math(text);
+    let text = strip_display_math_indent(text.as_ref());
+    neutralize_display_math_setext_heading(text.as_ref()).into_owned()
+}
+
 /// 辅助函数：将含有 LaTeX 的片段高效推送到结果缓冲区，不产生中间 String
 fn push_math_replaced(dest: &mut String, segment: &str) {
     let mut last_match_end = 0;

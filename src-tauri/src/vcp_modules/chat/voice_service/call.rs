@@ -310,7 +310,7 @@ pub async fn begin_voice_conversation(
     let result = async {
         // Reserve before the first await so hangup can revoke an initializing
         // call. Repeated begin/microphone intents keep the same VAD snapshot.
-        tts::stop_preview(&app).await?;
+        tts::stop_bubble_narration(&app).await?;
         current.vad_config.get_or_try_init(|| async {
             let config = read_config(app.clone(), app.state::<SettingsState>()).await?.voice_vad_config();
             config.validate()?;

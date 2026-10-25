@@ -490,11 +490,11 @@ describe('语音设置使用正式设置快照', () => {
     pending.resolve({ configured: true });
     await flushPromises();
     expect(invokeMock.mock.calls.filter(([command]) => command === 'stop_tts').every(([, args]) => args?.ttsId === id)).toBe(true);
-    expect(invokeMock.mock.calls.filter(([command]) => command === 'stop_tts')).toHaveLength(2);
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'stop_tts')).toHaveLength(1);
     expect(updates()).toHaveLength(0);
   });
 
-  it.each(['old-first', 'new-first'] as const)('取消旧试听后重新开始，迟到监听不得停止新试听（%s）', async order => {
+  it('取消尚在注册监听的试听，等待清理后才允许再次开始', async () => {
     const previousListen = deferred<() => void>();
     const currentListen = deferred<() => void>();
     const unlistenPrevious = vi.fn();
@@ -506,21 +506,13 @@ describe('语音设置使用正式设置快照', () => {
 
     await wrapper.get('.voice-preview-button').trigger('click');
     await wrapper.get('.voice-preview-button').trigger('click');
-    await wrapper.get('.voice-preview-button').trigger('click');
     expect(wrapper.get('.voice-preview-button').text()).toBe('停止试听');
-
-    if (order === 'old-first') {
-      previousListen.resolve(unlistenPrevious);
-      await flushPromises();
-      expect(wrapper.get('.voice-preview-button').text()).toBe('停止试听');
-      expect(invokeMock.mock.calls.filter(([command]) => command === 'preview_tts')).toHaveLength(0);
-      currentListen.resolve(unlistenCurrent);
-    } else {
-      currentListen.resolve(unlistenCurrent);
-      await flushPromises();
-      expect(invokeMock.mock.calls.filter(([command]) => command === 'preview_tts')).toHaveLength(1);
-      previousListen.resolve(unlistenPrevious);
-    }
+    previousListen.resolve(unlistenPrevious);
+    await flushPromises();
+    expect(wrapper.get('.voice-preview-button').text()).toBe('试听当前设置');
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'preview_tts')).toHaveLength(0);
+    await wrapper.get('.voice-preview-button').trigger('click');
+    currentListen.resolve(unlistenCurrent);
     await flushPromises();
 
     expect(unlistenPrevious).toHaveBeenCalledOnce();
@@ -532,6 +524,34 @@ describe('语音设置使用正式设置快照', () => {
     await wrapper.get('.voice-preview-button').trigger('click');
     await flushPromises();
     expect(invokeMock.mock.calls.filter(([command]) => command === 'stop_tts').map(([, args]) => args?.ttsId)).toEqual([currentId]);
+  });
+
+  it.each(['返回', '风格指导'])('离开前等待迟到试听启动与原生停止确认（%s）', async destination => {
+    context.voice.active = false;
+    const starting = deferred<unknown>();
+    const stopping = deferred<unknown>();
+    mockInvoke('preview_tts', () => starting.promise);
+    mockInvoke('stop_tts', () => stopping.promise);
+    const { wrapper } = await renderOverlay();
+    await disclosure(wrapper, '试听声音').trigger('click');
+    await wrapper.get('.voice-preview-button').trigger('click');
+    await flushPromises();
+    if (destination === '返回') await wrapper.get('button[aria-label="返回，关闭语音设置"]').trigger('click');
+    else await wrapper.get('.voice-style-guidance-entry').trigger('click');
+    await flushPromises();
+    expect(wrapper.emitted('close')).toBeUndefined();
+    expect(context.openStyleGuidance).not.toHaveBeenCalled();
+    expect(wrapper.get('.voice-preview-button').attributes('disabled')).toBeDefined();
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'stop_tts')).toHaveLength(0);
+    starting.resolve({ configured: true });
+    await flushPromises();
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'stop_tts')).toHaveLength(1);
+    expect(wrapper.emitted('close')).toBeUndefined();
+    expect(context.openStyleGuidance).not.toHaveBeenCalled();
+    stopping.resolve(undefined);
+    await flushPromises();
+    if (destination === '返回') expect(wrapper.emitted('close')).toHaveLength(1);
+    else expect(context.openStyleGuidance).toHaveBeenCalledOnce();
   });
 
   it('复刻导入只携路径，切模式保留未保存样本，保存后的清理交给Rust判断', async () => {

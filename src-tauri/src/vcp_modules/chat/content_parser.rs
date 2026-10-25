@@ -311,6 +311,7 @@ pub(crate) enum BlockType {
     Tool,
     Thought,
     Think,
+    VoiceGuidance,
     ToolResult,
     Diary,
     HtmlDoc,
@@ -371,6 +372,9 @@ lazy_static! {
     pub(crate) static ref THINK_START: Regex = Regex::new(r"(?im)^[ \t]*<think(?:ing)?>").unwrap();
     pub(crate) static ref THINK_END: Regex = Regex::new(r"(?i)</think(?:ing)?>").unwrap();
 
+    pub(crate) static ref VOICE_GUIDANCE_START: Regex = Regex::new(r"(?i)\A[ \t]*<voice_guidance>").unwrap();
+    pub(crate) static ref VOICE_GUIDANCE_END: Regex = Regex::new(r"(?i)</voice_guidance>").unwrap();
+
     pub(crate) static ref TOOL_RESULT_START: Regex = Regex::new(r"(?im)^[ \t]*\[\[VCP调用结果信息汇总:").unwrap();
     pub(crate) static ref TOOL_RESULT_END: Regex = Regex::new(r"(?im)^[ \t]*VCP调用结果结束\]\]").unwrap();
 
@@ -394,9 +398,9 @@ lazy_static! {
     pub(crate) static ref TOOL_CALL_SUMMARY_START: Regex = Regex::new(r"(?im)^[ \t]*\[本轮工具调用摘要:\]").unwrap();
     pub(crate) static ref TOOL_CALL_SUMMARY_END: Regex = Regex::new(r"(?im)^[ \t]*\[本轮工具调用摘要结束\]").unwrap();
 
-    // 起始标记兼容 ≥3 反引号（CommonMark 允许任意长度围栏）；结束配对必须 ≥ 开围栏数，
+    // 起始标记支持 ≥3 个反引号或波浪号；结束配对必须同字符且 ≥ 开围栏数，
     // 由 find_matching_fence_end 按起始标记动态计数，不再使用固定三反引号的结束正则。
-    pub(crate) static ref GENERIC_CODE_FENCE_START: Regex = Regex::new(r"(?im)^[ \t]*`{3,}[a-zA-Z0-9-]*[ \t]*\r?$").unwrap();
+    pub(crate) static ref GENERIC_CODE_FENCE_START: Regex = Regex::new(r"(?im)^ {0,3}(?:`{3,}|~{3,})[a-zA-Z0-9-]*[ \t]*\r?$").unwrap();
 
 
     static ref LIST_REGEX: Regex = Regex::new(r"^[ \t]*([-*]|\d+\.)[ \t]+").unwrap();
@@ -442,14 +446,16 @@ pub fn de_indent_misinterpreted_code_blocks(text: &str) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let num_lines = lines.len();
     let mut is_inside_fence = vec![false; num_lines];
-    let mut temp_in_fence = false;
+    let mut open_fence: Option<(char, usize)> = None;
 
     for i in 0..num_lines {
-        let trimmed = lines[i].trim_start();
-        if trimmed.starts_with("```") {
-            temp_in_fence = !temp_in_fence;
+        if let Some(marker) = open_fence {
             is_inside_fence[i] = true; // 围栏行本身也算作围栏内
-        } else if temp_in_fence {
+            if is_matching_fence_close(lines[i], marker) {
+                open_fence = None;
+            }
+        } else if GENERIC_CODE_FENCE_START.is_match(lines[i]) {
+            open_fence = fence_marker(lines[i].trim_start_matches(' '));
             is_inside_fence[i] = true;
         }
     }
@@ -491,23 +497,40 @@ pub fn de_indent_misinterpreted_code_blocks(text: &str) -> String {
     result
 }
 
+fn fence_marker(text: &str) -> Option<(char, usize)> {
+    let fence_char = text.chars().next()?;
+    if !matches!(fence_char, '`' | '~') {
+        return None;
+    }
+    let count = text.chars().take_while(|&ch| ch == fence_char).count();
+    (count >= 3).then_some((fence_char, count))
+}
+
+fn is_matching_fence_close(line: &str, (fence_char, count): (char, usize)) -> bool {
+    let trimmed = line.trim_start_matches(' ');
+    if line.len() - trimmed.len() > 3 {
+        return false;
+    }
+    let closing_count = trimmed.bytes().take_while(|&ch| ch == fence_char as u8).count();
+    closing_count >= count
+        && trimmed[closing_count..]
+            .strip_suffix('\r')
+            .unwrap_or(&trimmed[closing_count..])
+            .bytes()
+            .all(|ch| ch == b' ' || ch == b'\t')
+}
+
 pub(crate) fn find_matching_fence_end(
     search_area: &str,
     start_marker_text: &str,
     from: usize,
 ) -> (Option<usize>, Option<usize>, bool) {
     let trimmed = start_marker_text.trim_start();
-    let fence_char = match trimmed.chars().next() {
-        Some(c) if c == '`' => c,
-        _ => return (None, None, false),
-    };
-    let count = trimmed.chars().take_while(|&c| c == fence_char).count();
-    if count < 3 {
+    let Some((fence_char, count)) = fence_marker(trimmed) else {
         return (None, None, false);
-    }
+    };
 
-    // 手写行扫描，与原正则 `(?m)^[ \t]{0,3}\`{count,}[ \t]*\r?$` 语义等价：
-    // 结束围栏 = 行首至多 3 个空格/制表符 + 不少于开围栏数的反引号 + 仅空白收尾。
+    // 结束围栏 = 行首至多 3 个空格 + 不少于开围栏数的同字符 + 仅水平空白收尾。
     // 原实现每次调用都现编译一个新 Regex，而本函数处于流式热路径（未闭合代码块的每一帧
     // 都会调一次），正则编译开销远超扫描本身。
     // `from` 为游标续扫起点：其所在行的行首之前的行已由调用方确认无匹配，跳过。
@@ -522,27 +545,8 @@ pub(crate) fn find_matching_fence_end(
     let mut line_start = from;
     for line in search_area[from..].split_inclusive('\n') {
         let content = line.strip_suffix('\n').unwrap_or(line);
-        let bytes = content.as_bytes();
-
-        let mut i = 0;
-        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
-            i += 1;
-        }
-        if i > 3 {
-            line_start += line.len();
-            continue;
-        }
-
-        let backticks = bytes[i..].iter().take_while(|&&b| b == b'`').count();
-        if backticks >= count {
-            let rest = &bytes[i + backticks..];
-            let rest = match rest.last() {
-                Some(b'\r') => &rest[..rest.len() - 1],
-                _ => rest,
-            };
-            if rest.iter().all(|&b| b == b' ' || b == b'\t') {
-                return (Some(line_start), Some(line_start + content.len()), true);
-            }
+        if is_matching_fence_close(content, (fence_char, count)) {
+            return (Some(line_start), Some(line_start + content.len()), true);
         }
 
         line_start += line.len();
@@ -553,30 +557,8 @@ pub(crate) fn find_matching_fence_end(
 
 /// 核心解析函数：将原始 Markdown 文本解析为 AST 块数组
 pub fn parse_content(raw_text: &str) -> Vec<ContentBlock> {
-    // 指导协议必须先在原始文本中定界；普通 Markdown 的容错去缩进不能把代码
-    // 示例变成可执行的指导。这里只派生显示块，原文和同步哈希保持不变。
-    let guidance = crate::vcp_modules::chat::voice_guidance::blocks(raw_text, true);
-    if guidance.is_empty() {
-        return parse_ordinary_content(raw_text);
-    }
-    let mut blocks = Vec::new();
-    let mut cursor = 0;
-    for block in guidance {
-        blocks.extend(parse_ordinary_content(&raw_text[cursor..block.range.start]));
-        let mut display = ContentBlock::VoiceGuidance {
-            content: block.content,
-            is_complete: block.complete,
-            hash: None,
-        };
-        display.compute_hashes_recursively();
-        blocks.push(display);
-        cursor = block.range.end;
-    }
-    blocks.extend(parse_ordinary_content(&raw_text[cursor..]));
-    blocks
-}
-
-fn parse_ordinary_content(raw_text: &str) -> Vec<ContentBlock> {
+    // 首行资格来自原文，不能由去缩进或后续 remaining 切片重新授予。
+    let starts_with_guidance = VOICE_GUIDANCE_START.is_match(raw_text);
     let deindented_text = de_indent_misinterpreted_code_blocks(raw_text);
     let text = deindented_text.as_str();
 
@@ -585,7 +567,7 @@ fn parse_ordinary_content(raw_text: &str) -> Vec<ContentBlock> {
 
     // 预编译主匹配正则（包含所有特种块起始标记，利用捕获组编号识别类型）
     // html 围栏不再是特例：与普通代码围栏共用组 9 命中，由 CodeFence 分支统一走 pulldown 识别
-    // 1: TOOL, 2: THOUGHT, 3: THINK, 4: TOOL_RESULT, 5: DIARY, 6: HTML_DOC, 7: ROLE_DIVIDER, 8: STYLE, 9: CODE_FENCE, 10: HTML_CONTAINER, 12: TOOL_CALL_SUMMARY
+    // 1: TOOL, 2: THOUGHT, 3: THINK, 4: TOOL_RESULT, 5: DIARY, 6: HTML_DOC, 7: ROLE_DIVIDER, 8: STYLE, 9: CODE_FENCE, 10: HTML_CONTAINER, 12: TOOL_CALL_SUMMARY, 13: VOICE_GUIDANCE
     lazy_static! {
         static ref MASTER_START: Regex = Regex::new(concat!(
             r"(?im)",
@@ -597,16 +579,19 @@ fn parse_ordinary_content(raw_text: &str) -> Vec<ContentBlock> {
             r"(^[ \t]*(?:<!doctype html>|<html[\s>]))|",               // 6
             r"(^[ \t]*<<<\[(?:END_)?ROLE_DIVIDE_(?:SYSTEM|ASSISTANT|USER)\]>>>)|", // 7
             r"(^[ \t]*<style\b[^>]*>)|",                                      // 8
-            r"(^[ \t]*`{3,}[a-zA-Z0-9-]*[ \t]*$)|",                    // 9
+            r"(^ {0,3}(?:`{3,}|~{3,})[a-zA-Z0-9-]*[ \t]*\r?$)|",    // 9
             r"(^[ \t]*<(div|section|article|header|footer|main|aside|figure|figcaption)\b[^>]*>)|", // 10
-            r"(^[ \t]*\[本轮工具调用摘要:\])"                          // 12
+            r"(^[ \t]*\[本轮工具调用摘要:\])|",                         // 12
+            r"(\A[ \t]*<voice_guidance>)"                            // 13
         )).unwrap();
     }
 
     while current_pos < text.len() {
         let remaining = &text[current_pos..];
 
-        if let Some(caps) = MASTER_START.captures(remaining) {
+        if let Some(caps) = MASTER_START.captures_iter(remaining).find(|caps| {
+            caps.get(13).is_none() || (current_pos == 0 && starts_with_guidance)
+        }) {
             let m = caps.get(0).unwrap();
             let start_idx = m.start();
             let end_idx = m.end();
@@ -648,6 +633,8 @@ fn parse_ordinary_content(raw_text: &str) -> Vec<ContentBlock> {
                 BlockType::CodeFence
             } else if caps.get(12).is_some() {
                 BlockType::ToolCallSummary
+            } else if caps.get(13).is_some() {
+                BlockType::VoiceGuidance
             } else {
                 container_tag = caps.get(11).unwrap().as_str().to_lowercase();
                 BlockType::HtmlContainer
@@ -679,8 +666,7 @@ fn parse_ordinary_content(raw_text: &str) -> Vec<ContentBlock> {
                     current_pos += start_idx + block_len;
                     continue;
                 }
-                // pulldown 不认可的起始（如缩进 ≥4，规范上属于缩进代码块）：
-                // 回落到下方旧正则定界路径，保持历史行为。
+                // 若 pulldown 未产生围栏节点，继续由下方标准块定界处理。
             }
 
             // 2. 寻找对应的结束标记
@@ -699,6 +685,11 @@ fn parse_ordinary_content(raw_text: &str) -> Vec<ContentBlock> {
                         (Some(m.start()), Some(m.end()), true)
                     }),
                 BlockType::Think => THINK_END
+                    .find(search_area)
+                    .map_or((None, None, false), |m| {
+                        (Some(m.start()), Some(m.end()), true)
+                    }),
+                BlockType::VoiceGuidance => VOICE_GUIDANCE_END
                     .find(search_area)
                     .map_or((None, None, false), |m| {
                         (Some(m.start()), Some(m.end()), true)
@@ -810,6 +801,11 @@ fn parse_ordinary_content(raw_text: &str) -> Vec<ContentBlock> {
                         Some(nodes),
                     )
                 }
+                BlockType::VoiceGuidance => ContentBlock::VoiceGuidance {
+                    content: inner_content.trim().to_string(),
+                    is_complete: true,
+                    hash: None,
+                },
                 BlockType::ToolResult => {
                     let (tool_name, status, details, footer) = parse_tool_result(inner_content);
                     ContentBlock::tool_result(tool_name, status, details, footer)
@@ -1721,30 +1717,56 @@ mod tests {
 
     #[test]
     fn guidance_projection_keeps_audio_tags_and_hides_control_markers() {
-        let raw = "<<<[VOICE_GUIDANCE]>>>\n清亮、自然的声音。\n<<<[END_VOICE_GUIDANCE]>>>\n[轻笑]你好。";
+        let raw = " \t<VOICE_GUIDANCE>\n清亮、自然的声音。\n</voice_guidance>\n[轻笑]你好。";
         let blocks = parse_content(raw);
         assert!(matches!(blocks.first(), Some(ContentBlock::VoiceGuidance {
             content, is_complete: true, hash: Some(_),
         }) if content == "清亮、自然的声音。"));
         let rendered = serde_json::to_string(&blocks).unwrap();
         assert!(rendered.contains("[轻笑]你好。"));
-        assert!(!rendered.contains("<<<["));
+        assert!(!rendered.contains("voice_guidance"));
     }
 
     #[test]
-    fn guidance_examples_stay_literal_and_unfinished_controls_stay_foldable() {
-        let block = "<<<[VOICE_GUIDANCE]>>>\n示例\n<<<[END_VOICE_GUIDANCE]>>>";
+    fn guidance_requires_the_original_first_line_and_unclosed_display_keeps_raw_text() {
+        let block = "<voice_guidance>\n示例\n</voice_guidance>";
         for example in [
+            format!("\n{block}"),
+            format!("正文\n{block}"),
+            format!("正文\n\n{block}"),
+            format!("<think>思考</think>{block}"),
+            format!("<think>思考</think>\n{block}"),
+            format!("\u{3000}{block}"),
             format!("~~~text\n{block}\n~~~"),
-            block.lines().map(|line| format!("    {line}\n")).collect(),
             block.lines().map(|line| format!("> {line}\n")).collect(),
             format!("<think>\n{block}\n</think>"),
             format!("<<<[TOOL_REQUEST]>>>\n{block}\n<<<[END_TOOL_REQUEST]>>>"),
+            "<<<[VOICE_GUIDANCE]>>>\n旧协议\n<<<[END_VOICE_GUIDANCE]>>>".to_string(),
         ] {
             assert!(!parse_content(&example).iter().any(|block| matches!(block, ContentBlock::VoiceGuidance { .. })), "{example}");
         }
-        assert!(matches!(parse_content("<<<[VOICE_GUIDANCE]>>>\n尚未完成").as_slice(),
-            [ContentBlock::VoiceGuidance { content, is_complete: false, .. }] if content == "尚未完成"));
+        // 同一首行的水平空白属于协议允许范围，不能按旧缩进代码保护语义拒绝。
+        assert!(matches!(parse_content(&format!("    {block}")).first(),
+            Some(ContentBlock::VoiceGuidance { is_complete: true, .. })));
+        assert!(parse_content("<voice_guidance>\n尚未完成").iter()
+            .all(|block| matches!(block, ContentBlock::Markdown { .. })));
+    }
+
+    #[test]
+    fn tilde_fences_share_character_length_and_indentation_pairing() {
+        let raw = "  ~~~~text\r\n    中文保留缩进\r\n```\r\n~~~\r\n    ~~~~\r\n  ~~~~~\r\n正文";
+        let blocks = parse_content(raw);
+        assert_eq!(blocks.len(), 2);
+        let wire = serde_json::to_string(&blocks[0]).unwrap();
+        assert!(wire.contains("中文保留缩进"));
+        assert!(wire.contains("```"));
+        assert!(wire.contains("  ~~~~"));
+        let deindented = de_indent_misinterpreted_code_blocks(raw);
+        assert!(deindented.contains("    中文保留缩进"));
+        assert_eq!(find_matching_fence_end("```\n~~~\n  ~~~~~\n", "~~~~text", 0),
+            (Some(8), Some(15), true));
+        assert_eq!(find_matching_fence_end("\t~~~~\n", "~~~~text", 0),
+            (None, None, false));
     }
 
     #[test]

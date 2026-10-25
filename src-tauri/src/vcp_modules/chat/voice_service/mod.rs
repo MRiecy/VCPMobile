@@ -30,6 +30,7 @@ pub use tts::{
     feed_chat_event, has_chat_listener, preview_tts, start_tts_session, stop_chat_reply_by_origin, stop_tts,
     submit_tts_text, TtsServiceState,
 };
+pub(crate) use tts::stop_bubble_for_messages;
 pub use samples::{discard_voice_clone_sample, get_voice_clone_sample, import_voice_clone_sample};
 
 use crate::vcp_modules::settings_manager::{

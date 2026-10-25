@@ -903,6 +903,15 @@ pub async fn regenerate_topic_response(
         &target_user_msg_id,
     )
     .await?;
+    if let Err(error) = crate::vcp_modules::chat::voice_service::stop_bubble_for_messages(
+        &app_handle,
+        &key,
+        &deletion.deleted_ids,
+    )
+    .await
+    {
+        log::warn!("[TopicService] Regeneration truncation committed; narration cleanup failed: {error}");
+    }
     for msg_id in &deletion.active_ids {
         crate::vcp_modules::vcp_client::discard_deleted_generation(
             &app_handle,

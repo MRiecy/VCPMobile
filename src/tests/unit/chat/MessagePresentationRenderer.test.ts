@@ -185,7 +185,7 @@ async function seedRemountTail(
 }
 
 describe('MessageRenderer presentation shell', () => {
-  it('keeps a pending guidance marker private and preserves its expansion across final hashes', async () => {
+  it('renders guidance as plain tail and preserves expansion through closure and final hashes', async () => {
     const pinia = createPinia();
     setActivePinia(pinia);
     useChatSessionStore().setConversation({ id: 'agent-a', type: 'agent' }, 'topic-a');
@@ -193,18 +193,23 @@ describe('MessageRenderer presentation shell', () => {
     stream.addSessionStream('agent-a', 'agent', 'topic-a', 'voice-guidance');
     const message = reactive<ChatMessage>({
       id: 'voice-guidance', role: 'assistant', timestamp: 1,
-      content: '<<<[VOICE_GUIDANCE]>>>\n生成中的指导', blocks: [],
+      content: '<voice_guidance>\n自然轻快', blocks: [],
+      tailContent: '自然轻快',
+      tailBlock: { type: 'voice-guidance', content: '自然轻快', is_complete: false, hash: 'tail', render_mode: 'plain' },
       shell: { isUser: false, displayName: 'Agent', avatarColor: '#888' },
     });
     const wrapper = mountStreamRenderer(message, pinia);
-    expect(wrapper.text()).not.toContain('<<<[');
-    expect(wrapper.text()).not.toContain('生成中的指导');
-
-    message.blocks = [{ type: 'voice-guidance', content: '自然轻快', is_complete: true, hash: 'stream-hash' }];
-    await nextTick();
+    expect(wrapper.text()).not.toContain('<voice_guidance>');
+    expect(wrapper.find('.vcp-ast-sandbox').exists()).toBe(false);
     const toggle = wrapper.get('.voice-guidance-toggle');
     expect(toggle.attributes('aria-expanded')).toBe('false');
     await toggle.trigger('click');
+    message.blocks = [{ type: 'voice-guidance', content: '自然轻快', is_complete: true, hash: 'stream-hash' }];
+    message.tailBlock = undefined;
+    message.tailContent = '';
+    await nextTick();
+    expect(wrapper.findAll('.voice-guidance-toggle')).toHaveLength(1);
+    expect(wrapper.get('.voice-guidance-toggle').attributes('aria-expanded')).toBe('true');
     message.blocks = [
       { type: 'voice-guidance', content: '自然轻快', is_complete: true, hash: 123456 },
       { type: 'markdown', content: '[轻笑]你好。', hash: 7654321 },
@@ -212,7 +217,49 @@ describe('MessageRenderer presentation shell', () => {
     await nextTick();
     expect(wrapper.get('.voice-guidance-toggle').attributes('aria-expanded')).toBe('true');
     expect(wrapper.text()).toContain('[轻笑]你好。');
-    expect(wrapper.text()).not.toContain('<<<[');
+    expect(wrapper.text()).not.toContain('<voice_guidance>');
+    wrapper.unmount();
+  });
+
+  it('recovers a plain guidance snapshot and appends without creating a Markdown sandbox', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    useChatSessionStore().setConversation({ id: 'agent-a', type: 'agent' }, 'topic-a');
+    const stream = useChatStreamStore();
+    const context = { ownerId: 'agent-a', ownerType: 'agent' as const, topicId: 'topic-a', agentId: 'agent-a' };
+    const base = {
+      consumerRevision: 1, messageId: 'guidance-snapshot', context, chunk: null,
+      finishReason: null, error: null, blocks: null, timestamp: null, topicUpdatedAt: null,
+    };
+    await stream.processStreamEvent({ ...base, type: 'thinking', aurora: null });
+    await stream.processStreamEvent({ ...base, type: 'aurora', aurora: {
+      kind: 'snapshot', streamId: 31, content: '<voice_guidance>自然', stableBlocks: [],
+      tailBlock: { type: 'voice-guidance', content: '自然', is_complete: false, hash: 'g1' }, tailMode: 'plain',
+    } });
+    const message = stream.getActiveStreamMessage('agent-a', 'agent', 'topic-a', 'guidance-snapshot')!;
+    const wrapper = mountStreamRenderer(message, pinia);
+    await vi.waitFor(() => expect(wrapper.find('.voice-guidance-toggle').exists()).toBe(true));
+    await wrapper.get('.voice-guidance-toggle').trigger('click');
+    expect(message.tailOp).toMatchObject({ blockType: 'voice-guidance', mode: 'plain' });
+    await stream.processStreamEvent({ ...base, type: 'aurora', aurora: {
+      kind: 'delta', streamId: 31, chunk: '轻快',
+      tailOp: { op: 'append', content: '轻快', hash: 'g2', previousHash: 'g1', mode: 'plain', blockType: 'voice-guidance' },
+    } });
+    await vi.waitFor(() => expect(wrapper.get('.voice-guidance-content').text()).toBe('自然轻快'));
+    expect(wrapper.find('.vcp-ast-sandbox').exists()).toBe(false);
+    expect(wrapper.findAll('.voice-guidance-content')).toHaveLength(1);
+    await stream.processStreamEvent({ ...base, type: 'aurora', aurora: {
+      kind: 'delta', streamId: 31, chunk: '</voice_guidance>\n正文',
+      stableAppend: { baseCount: 0, blocks: [{ type: 'voice-guidance', content: '自然轻快', is_complete: true, hash: 'stable-guidance' }] },
+      tailOp: { op: 'replace', content: '正文', hash: 'body', mode: 'ast', blockType: 'markdown' },
+      tailFrame: {
+        streamId: 31, epoch: 1, revision: 1, frameSeq: 1, reset: true, mutations: [],
+        snapshot: [{ type: 'paragraph', children: [{ type: 'text', value: '正文' }] }],
+      },
+    } });
+    await vi.waitFor(() => expect(wrapper.get('.vcp-ast-sandbox').text()).toBe('正文'));
+    expect(wrapper.findAll('.voice-guidance-toggle')).toHaveLength(1);
+    expect(wrapper.get('.voice-guidance-toggle').attributes('aria-expanded')).toBe('true');
     wrapper.unmount();
   });
 

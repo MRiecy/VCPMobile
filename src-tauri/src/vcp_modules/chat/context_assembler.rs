@@ -1,4 +1,4 @@
-use crate::vcp_modules::chat::{voice_guidance, voice_service::VoiceReplyPolicy};
+use crate::vcp_modules::chat::voice_service::VoiceReplyPolicy;
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::topic_types::TopicKey;
 use serde_json::{json, Value};
@@ -162,11 +162,7 @@ pub fn assemble_history_for_vcp(
         }
 
         // 3. 核心消息正文
-        if msg.role == "assistant" {
-            combined_text.push_str(&voice_guidance::strip_guidance_for_history(&msg.content));
-        } else {
-            combined_text.push_str(&msg.content);
-        }
+        combined_text.push_str(&msg.content);
 
         let mut content_parts = Vec::new();
 
@@ -445,8 +441,8 @@ mod voice_policy_tests {
     }
 
     #[test]
-    fn history_projection_removes_only_assistant_control_blocks() {
-        let block = "<<<[VOICE_GUIDANCE]>>>\n低声轻柔\n<<<[END_VOICE_GUIDANCE]>>>\n";
+    fn history_preserves_guidance_and_body_verbatim_for_both_roles() {
+        let block = "<voice_guidance>\n低声轻柔\n</voice_guidance>\n";
         let source = format!("{block}[轻笑]保留正文与[链接](https://example.invalid)。");
         let mut assistant = ChatMessage {
             role: "assistant".into(),
@@ -459,8 +455,7 @@ mod voice_policy_tests {
             ..Default::default()
         };
         let projected = assemble_history_for_vcp(&[assistant.clone(), user], false, false);
-        assert!(!projected[0]["content"].as_str().unwrap().contains("低声轻柔"));
-        assert!(projected[0]["content"].as_str().unwrap().contains("[轻笑]保留正文与[链接]"));
+        assert_eq!(projected[0]["content"], source);
         assert_eq!(projected[1]["content"], source);
 
         assistant.content = format!("```text\n{block}```\n> 引用中的普通标签 [叹气]");

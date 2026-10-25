@@ -81,6 +81,7 @@ src/
 - **群设置**：使用 `SettingsCanvas`。`chatMode` 独立于同步 `mode` 保存、默认顺序发言，列表快照的 `mode` 才是实际模式；界面不提供跟随选项或同步实现说明。`assistant.saveGroup` 按表单 baseline 只提交变更字段。JEV 运行状态来自 `group_turn` 与重连快照，前端不调度成员。
 - **语音通话**：通话、转写、消息提交与生成取消归 Rust。`voiceCallStore` / `voiceConversation` 只提交操作并按 revision 呈现快照；`microphoneMonitor` 消费 `vcp-voice-audio` 有界频带，开麦意图携生命周期 epoch；`voiceHistorySync` 对账已落盘消息，恢复不重发、不重播、不消费草稿。PCM、AEC、Silero 与播放归移动插件。后台只停止新采集，回前台不自动开麦；主动切换聊天或挂断结束通话，通用卸载只脱离视图。TTS 停止或失败不取消模型；语音按纯文本进入现有群聊发言模式，不扩展手动 `@`。
 - **语音设置**：`VoiceSettingsPage`（音色模式与试听）与 `VoiceStyleGuidancePage`（统一风格指导规则）复用全局 Settings，返回时保存；通话将规则原样注入聊天上下文，不追加生成要求。`VoiceTtsPreview` 使用草稿与独立任务 ID，直接朗读试听文本；`VoiceCloneSample` 经原生 picker 导入样本引用。
+- **气泡朗读与试听生命周期**：`voice/useBubbleNarration` 为应用作用域的气泡朗读 owner，按完整 `MessageActionKey` 和 `ttsId` 处理启动、停止与迟到结果；“气泡”指完整消息对象。切换会话、源消息变更或进入通话停止，后台/锁屏及普通消息组件卸载不停止。消息实际变更在 Rust 按权威受影响 ID 收尾。试听归设置页本次访问，直接文本独立于消息清洗入口，离页流程等待停止确认后退场。
 - **本机偏好**：`features/chat/preferences/` 拥有消息呈现、动效、震动与工具折叠偏好，`ChatPreferencesPage` 只是入口；主题归 ThemePicker / themeStore，自动更新归 updateStore。三者共用 `core/preferences/localPreference.ts` 的 IO，各自保留 key、编码与默认值。`features/settings/developer/` 持有开发者模式与触感试听，不进入备份。
 
 ---
@@ -90,6 +91,8 @@ src/
 `MessageRenderer.vue` 消费当前消息、AST snapshot 与 TailFrame；`core/utils/astExecutor.ts`、`core/dom-engine/` 和各 Rich Block 承接局部更新及交互。修改任一环节时沿实际数据形态追踪生成者、缓存身份、DOM owner、恢复路径和卸载清理，不能用全量重渲染掩盖增量链错误。
 
 `features/chat/composables/useMessageTailRenderer.ts` 随消息实例持有尾部 refs、DOM 已应用帧、恢复与清理；气泡移动不重置这份生命周期。稳定气泡投影与尾部更新分开计算。`features/chat/utils/messageStyles.ts` 纯计算原有作用域样式输入，消息级样式实例一次提交有序合集。`data-message-content` 仅标记生成内容的交互范围，不能用包含组件控件的 stable/tail 外壳替代。流式期间增量展示，终态完整结果一次接管；两阶段分块与 hash 不要求统一。
+
+首行 `<voice_guidance>` 的活跃尾部使用 `voice-guidance` / Plain 投影，不进入 Markdown AST 沙箱；`VoiceGuidanceBlock` 直接显示指导文本。消息组件持有本次展开状态，尾部闭合转稳定块时延续；终态未闭合则按 Rust 显示投影处理。原始指导与正文均保留在历史中。
 
 Markdown、代码、KaTeX、Mermaid、SVG/MathML、受控 raw HTML、Tool、Thought、Diary、附件和流式收敛共同构成现有消息能力。兼容或安全修改必须保留结构、样式、媒体与交互；隔离能够触达宿主或外部状态的主动执行面，不采用整块转义、纯文本降级或禁用全部脚本来替代边界设计。
 

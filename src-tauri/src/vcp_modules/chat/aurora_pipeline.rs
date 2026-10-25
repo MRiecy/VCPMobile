@@ -9,7 +9,7 @@ use crate::vcp_modules::content_parser::BlockType;
 use crate::vcp_modules::pre_renderer::code_highlighter::IncrementalCodeHighlighter;
 use crate::vcp_modules::pre_renderer::markdown_ast::MarkdownNode;
 use crate::vcp_modules::stream_block_parser::{
-    speculative_thought_tail, StreamBlock, StreamBlockParser,
+    speculative_thought_tail, speculative_voice_guidance_tail, StreamBlock, StreamBlockParser,
 };
 
 /// 推测渲染的 tail 字节上限：超过此阈值跳过 AST 解析，降级为纯文本尾部。
@@ -19,7 +19,7 @@ use crate::vcp_modules::stream_block_parser::{
 ///   已豁免本上限。
 /// - 协议块（Tool/ToolResult/ToolCallSummary）tail 封印为 plaintext 代码节点走同一增量
 ///   路径，且工具结果必定闭合到达、不存在长期未闭合 tail，已豁免本上限。
-/// - 思维链 tail 走 Thought 外壳 + 纯文本增量投影（Plain 模式），根本不做 md AST 解析，
+/// - 思维链与语音指导 tail 走各自外壳 + 纯文本增量投影（Plain 模式），不做 md AST 解析，
 ///   与本上限无关。
 /// - RawHtml 容器 tail 走 html5ever 树权威 PatchRawHtml 路径（冻结段 + 活跃子树），
 ///   IPC/前端均 O(增量)，已豁免本上限。
@@ -67,6 +67,7 @@ pub enum TailBlockType {
     Markdown,
     HtmlPreview,
     Thought,
+    VoiceGuidance,
 }
 
 #[derive(Debug, Serialize, Clone, Deserialize)]
@@ -123,7 +124,7 @@ pub struct AuroraUpdate {
     pub tail_block: Option<StreamBlock>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tail_mode: Option<TailRenderMode>,
-    /// Delta 中对 tail 显示投影的追加、替换或清空操作；Thought 起始标记不进入该正文。
+    /// Delta 中对 tail 显示投影的操作；思维链与语音指导起始标记不进入该正文。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tail_op: Option<TailTextOp>,
     /// 流式 AST 单帧补丁。每个 frame 是独立发送批次，前端不得累计全历史 mutations。
@@ -221,22 +222,42 @@ fn code_fence_tail_nodes(tail: &str) -> Vec<MarkdownNode> {
         Some(nl) => (&tail[..nl], &tail[nl + 1..]),
         None => (tail, ""),
     };
-    let opener = opener
-        .trim_end_matches('\r')
-        .trim_start_matches([' ', '\t']);
-    let backticks = opener.bytes().take_while(|&b| b == b'`').count();
-    if backticks < 3 {
+    let indent = opener.bytes().take_while(|&ch| ch == b' ').count();
+    let opener = opener.trim_end_matches('\r').trim_start_matches(' ');
+    let marker = opener.as_bytes().first().copied().unwrap_or_default();
+    let fence_len = opener.bytes().take_while(|&b| b == marker).count();
+    if !matches!(marker, b'`' | b'~') || fence_len < 3 || indent > 3 {
         // 防御：stream 层已判定 CodeFence，理论上不可达；回退完整管线保持正确性
         return crate::vcp_modules::pre_renderer::parse_markdown_to_ast_streaming(tail);
     }
     // 与 pulldown 的 info string 语义严格对齐：去首尾空白，且恒为 Some（空 info 即 Some("")）
-    let info = opener[backticks..].trim();
+    let info = opener[fence_len..].trim();
     // 与 pulldown 的行尾规范化对齐：CRLF / 孤 CR 统一为 LF
-    let code = if code.contains('\r') {
+    let mut code = if code.contains('\r') {
         code.replace("\r\n", "\n").replace('\r', "\n")
     } else {
         code.to_string()
     };
+    if indent > 0 {
+        // CommonMark 围栏内容每行最多移除开围栏的缩进列数；Tab 按四列制表位展开。
+        let mut unindented = String::with_capacity(code.len());
+        for line in code.split_inclusive('\n') {
+            let mut byte_offset = 0;
+            let mut columns = 0;
+            for ch in line.bytes() {
+                if columns >= indent || !matches!(ch, b' ' | b'\t') {
+                    break;
+                }
+                columns += if ch == b'\t' { 4 - columns % 4 } else { 1 };
+                byte_offset += 1;
+            }
+            for _ in indent..columns {
+                unindented.push(' ');
+            }
+            unindented.push_str(&line[byte_offset..]);
+        }
+        code = unindented;
+    }
     vec![MarkdownNode::code_block(Some(info.to_string()), code)]
 }
 
@@ -453,6 +474,11 @@ impl AuroraBuffer {
                 None,
                 hash,
             ),
+            TailBlockType::VoiceGuidance => StreamBlock::VoiceGuidance {
+                content,
+                is_complete: false,
+                hash,
+            },
         })
     }
 
@@ -704,13 +730,23 @@ impl AuroraBuffer {
         let (new_blocks, raw_new_tail, raw_tail_type) = self.parser.process(&self.full_text);
         let raw_new_tail_start = self.parser.tail_start();
         let speculative_thought = speculative_thought_tail(&raw_new_tail, raw_tail_type);
-        let (new_tail, new_tail_start, next_thought_theme) = match speculative_thought {
+        let speculative_guidance = speculative_voice_guidance_tail(&raw_new_tail, raw_tail_type);
+        let (new_tail, new_tail_start, next_thought_theme, next_plain_block_type) = match speculative_thought {
             Some(projection) => (
                 projection.content.to_string(),
                 raw_new_tail_start.saturating_add(projection.content_offset),
                 Some(projection.theme),
+                Some(TailBlockType::Thought),
             ),
-            None => (raw_new_tail, raw_new_tail_start, None),
+            None => match speculative_guidance {
+                Some((content, offset)) => (
+                    content.to_string(),
+                    raw_new_tail_start.saturating_add(offset),
+                    None,
+                    Some(TailBlockType::VoiceGuidance),
+                ),
+                None => (raw_new_tail, raw_new_tail_start, None, None),
+            },
         };
         let previous_tail_block_type = self
             .tail_projection
@@ -720,7 +756,9 @@ impl AuroraBuffer {
             .tail_projection
             .as_ref()
             .and_then(|projection| projection.thought_theme.as_deref());
-        let was_thought_tail = previous_tail_block_type == Some(TailBlockType::Thought);
+        let previous_plain_block_type = previous_tail_block_type.filter(|block_type| {
+            matches!(block_type, TailBlockType::Thought | TailBlockType::VoiceGuidance)
+        });
         // O(1) tail 等价判定：full_text 严格只增不减（next_tail_fingerprint 内有
         // debug_assert 守护该不变量），同一 tail 起点 + 同一长度即同一内容，
         // 无需 O(tail) memcmp；theme 状态变化单独检查。
@@ -732,9 +770,9 @@ impl AuroraBuffer {
             None => !new_tail.is_empty(),
         };
         let tail_changed = tail_text_changed
-            || was_thought_tail != next_thought_theme.is_some()
+            || previous_plain_block_type != next_plain_block_type
             || previous_thought_theme != next_thought_theme.as_deref();
-        let next_fingerprint = (!new_tail.is_empty() || next_thought_theme.is_some())
+        let next_fingerprint = (!new_tail.is_empty() || next_plain_block_type.is_some())
             .then(|| self.next_tail_fingerprint(&new_tail, new_tail_start));
 
         if !new_blocks.is_empty() {
@@ -751,13 +789,13 @@ impl AuroraBuffer {
         self.tail_content = new_tail;
 
         // 2. 推测渲染 (Speculative Rendering)：普通 tail 使用 Markdown AST；
-        //    已识别的未闭合思维链保留 Thought 外壳，但正文走纯文本增量投影（Plain
+        //    未闭合思维链与语音指导保留专用外壳，正文走纯文本增量投影（Plain
         //    模式），不做 md 解析——未闭合思维链会把 processed_len 钉在起始标记上、
         //    tail 可涨至全流级别，md AST 在此意味着每帧 O(全流) 解析。
         //    当普通 tail 显示正文超过 MAX_SPECULATIVE_TAIL_AST_BYTES 时同样跳过 AST
         //    解析降级纯文本，避免在流式热路径上产生性能悬崖
-        if !self.tail_content.is_empty() || next_thought_theme.is_some() {
-            if raw_tail_type == Some(BlockType::HtmlContainer) && next_thought_theme.is_none() {
+        if !self.tail_content.is_empty() || next_plain_block_type.is_some() {
+            if raw_tail_type == Some(BlockType::HtmlContainer) {
                 // === HtmlContainer 树权威 patch 路径（全程增量，不受投机上限约束）===
                 // 后端 html5ever 规范级解析切出「新闭合根子节点 / 活跃子树」；前端对
                 // 冻结段只 parse 一次并永久挂载，morphdom 只收敛活跃子树。
@@ -868,8 +906,8 @@ impl AuroraBuffer {
                             | BlockType::ToolCallSummary
                     )
                 );
-                let nodes = if next_thought_theme.is_some() {
-                    // 思维链 tail：Thought 外壳 + 纯文本增量（TailRenderMode::Plain）。
+                let nodes = if next_plain_block_type.is_some() {
+                    // 思维链与语音指导：专用外壳 + 纯文本增量（TailRenderMode::Plain）。
                     // 未闭合思维链会把 processed_len 钉在起始标记上、tail 可涨至全流
                     // 级别；走 md AST 意味着每帧 O(全流) 解析，且越涨越慢。改为纯文本
                     // 投影后每帧 O(Δ)，闭合时仍由 stream 层沉淀为正式 Thought 卡片。
@@ -910,10 +948,7 @@ impl AuroraBuffer {
                     )
                 };
                 let (mode, block_type) = if let Some(new_nodes) = nodes {
-                    let block_type = next_thought_theme.as_ref().map_or_else(
-                        || classify_tail_block(&new_nodes),
-                        |_| TailBlockType::Thought,
-                    );
+                    let block_type = classify_tail_block(&new_nodes);
                     if previous_tail_block_type.is_some()
                         && previous_tail_block_type != Some(block_type)
                         && !self.tail_reset_pending
@@ -957,9 +992,7 @@ impl AuroraBuffer {
                     }
                     (
                         TailRenderMode::Plain,
-                        next_thought_theme
-                            .as_ref()
-                            .map_or(TailBlockType::Markdown, |_| TailBlockType::Thought),
+                        next_plain_block_type.unwrap_or(TailBlockType::Markdown),
                     )
                 };
 
@@ -1140,6 +1173,71 @@ mod tests {
             }) if content == "**分析中**" && theme == "思维链"
         ));
         assert!(buffer.prev_tail_ast.is_empty());
+    }
+
+    #[test]
+    fn guidance_tail_resets_partial_marker_appends_plain_and_hands_off_to_stable() {
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk("<voice_gui");
+        buffer.process_queue();
+        let (_, commit) = buffer.prepare_delta_update().unwrap();
+        buffer.commit_delivery(commit);
+
+        buffer.append_chunk("dance>\n");
+        assert_eq!(buffer.process_queue(), (false, true));
+        let (opener, commit) = buffer.prepare_delta_update().unwrap();
+        assert!(matches!(opener.tail_op, Some(TailTextOp::Replace {
+            ref content, mode: TailRenderMode::Plain,
+            block_type: TailBlockType::VoiceGuidance, thought_theme: None, ..
+        }) if content.is_empty()));
+        assert!(matches!(opener.tail_frame, Some(TailFrame {
+            reset: true, snapshot: Some(ref nodes), ..
+        }) if nodes.is_empty()));
+        buffer.commit_delivery(commit);
+
+        buffer.append_chunk("**轻声**");
+        buffer.process_queue();
+        let (body, commit) = buffer.prepare_delta_update().unwrap();
+        assert!(matches!(body.tail_op, Some(TailTextOp::Append {
+            ref content, mode: TailRenderMode::Plain,
+            block_type: TailBlockType::VoiceGuidance, thought_theme: None, ..
+        }) if content == "**轻声**"));
+        assert!(buffer.prev_tail_ast.is_empty());
+        assert!(matches!(buffer.current_tail_wire_block(), Some(StreamBlock::VoiceGuidance {
+            ref content, is_complete: false, ..
+        }) if content == "**轻声**"));
+        buffer.commit_delivery(commit);
+
+        buffer.append_chunk("</voice_guidance>\n正文");
+        assert_eq!(buffer.process_queue(), (true, true));
+        let (closed, _) = buffer.prepare_delta_update().unwrap();
+        assert!(matches!(closed.stable_append, Some(StableAppend { ref blocks, .. })
+            if matches!(blocks.as_slice(), [StreamBlock::VoiceGuidance {
+                content, is_complete: true, ..
+            }] if content == "**轻声**")));
+        assert!(matches!(closed.tail_op, Some(TailTextOp::Replace {
+            block_type: TailBlockType::Markdown, mode: TailRenderMode::Ast, ..
+        })));
+    }
+
+    #[test]
+    fn guidance_recovery_is_plain_but_unclosed_terminal_keeps_raw_markdown() {
+        let raw = "<VOICE_GUIDANCE>\r\n轻声 **慢读**";
+        let snapshot = AuroraBuffer::compile_recovery_snapshot(raw.to_string());
+        assert!(snapshot.stable_blocks.is_empty());
+        assert_eq!(snapshot.tail_mode, Some(TailRenderMode::Plain));
+        assert!(snapshot.tail_snapshot.is_empty());
+        assert!(matches!(snapshot.tail_block, Some(StreamBlock::VoiceGuidance {
+            ref content, is_complete: false, ..
+        }) if content == "轻声 **慢读**"));
+
+        let mut buffer = AuroraBuffer::new();
+        buffer.append_chunk(raw);
+        buffer.process_queue();
+        buffer.finalize();
+        assert!(matches!(buffer.stable_blocks.as_slice(),
+            [StreamBlock::Markdown { content, .. }] if content == raw));
+        assert!(buffer.current_tail_wire_block().is_none());
     }
 
     #[test]
@@ -1760,6 +1858,10 @@ mod tests {
             "```html",
             "```html\n",
             "```js\r\nlet a = 1;\r\n",
+            "~~~text\n<voice_guidance>literal</voice_guidance>\n",
+            "~~~~markdown\n~~~nested~~~\n",
+            "  ~~~~text\n    indented\n\twith tab\n plain\n",
+            "   ```rust\n \tlet x = 1;\n    y\n",
         ];
         for tail in cases {
             let fast = code_fence_tail_nodes(tail);

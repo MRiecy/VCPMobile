@@ -3,40 +3,116 @@ use super::{
     readable,
     segmentation::{ReplyBuffer, ReplyPiece},
 };
-use crate::vcp_modules::{chat::voice_guidance, vcp_client::StreamEvent};
+use crate::vcp_modules::{
+    chat::stream_block_parser::{StreamBlock, StreamBlockParser},
+    settings_manager::VOICE_GUIDANCE_MAX_CHARS,
+    vcp_client::StreamEvent,
+};
 use std::sync::Arc;
 
-struct MessageText {
-    id: String,
+/// One message owns its parser, accepted guidance, readable text and emission
+/// position. Both call replies and complete bubble narration use this state.
+pub(super) struct MessageSpeech {
     text: String,
+    parser: StreamBlockParser,
+    stable_spoken: String,
     reply: ReplyBuffer,
     instruction: Option<Arc<str>>,
     guidance_locked: bool,
     finished: bool,
-    dirty: bool,
 }
 
-impl MessageText {
-    fn lock_guidance(&mut self, projection: &voice_guidance::GuidanceProjection) {
-        if self.guidance_locked {
-            return;
+impl MessageSpeech {
+    pub(super) fn new(streaming_tts: bool) -> Self {
+        Self {
+            text: String::new(),
+            parser: StreamBlockParser::new(),
+            stable_spoken: String::new(),
+            reply: ReplyBuffer::new_with_mode(true, streaming_tts),
+            instruction: None,
+            guidance_locked: false,
+            finished: false,
         }
-        let mut prefix = String::new();
-        let mut previous = 0;
-        for block in &projection.blocks {
-            prefix.push_str(&self.text[previous..block.range.start]);
-            previous = block.range.end;
-            if !readable::text(&prefix).is_empty() {
-                break;
-            }
-            if block.valid {
-                self.instruction = Some(Arc::from(block.content.as_str()));
-                self.guidance_locked = true;
-                break;
-            }
-        }
-        self.guidance_locked |= !readable::text(&projection.body).is_empty() || self.finished;
     }
+
+    pub(super) fn update(&mut self, text: &str, finished: bool) -> Result<(), String> {
+        if text.len() > MAX_TEXT_BYTES {
+            return Err("模型回复超过语音朗读大小限制，已停止朗读。".into());
+        }
+        if self.finished {
+            return if text == self.text && finished {
+                Ok(())
+            } else {
+                Err("已结束的语音回复不能继续追加。".into())
+            };
+        }
+        if !text.starts_with(&self.text) {
+            // Rebuild only parsing/projection caches. Guidance and the already
+            // emitted prefix remain owned by this message and cannot rewind.
+            self.parser.reset();
+            self.stable_spoken.clear();
+        }
+        self.text = text.to_owned();
+        if finished {
+            let (blocks, terminal) = self.parser.finish_for_speech(text);
+            self.accept_blocks(blocks);
+            if let Some(terminal) = terminal {
+                let readable = if terminal.unclosed_block.is_some() {
+                    readable::project_terminal_contents(&terminal.content)
+                } else {
+                    readable::project_markdown_block(&terminal.content)
+                };
+                self.append_readable(&readable);
+            }
+            self.guidance_locked = true;
+        } else {
+            let (blocks, _, _) = self.parser.process(text);
+            self.accept_blocks(blocks);
+        }
+        self.reply.update(self.stable_spoken.clone(), finished)?;
+        self.finished = finished;
+        Ok(())
+    }
+
+    fn accept_blocks(&mut self, blocks: Vec<StreamBlock>) {
+        for block in blocks {
+            if !self.guidance_locked {
+                if let StreamBlock::VoiceGuidance { content, .. } = &block {
+                    if !content.is_empty() && content.chars().count() <= VOICE_GUIDANCE_MAX_CHARS {
+                        self.instruction = Some(Arc::from(content.as_str()));
+                    }
+                }
+                // The parser alone decides whether a block is first-line
+                // guidance. No later block gets another chance to supply it.
+                self.guidance_locked = true;
+            }
+            if let StreamBlock::Markdown { content, .. } = block {
+                self.append_readable(&readable::project_markdown_block(&content));
+            }
+        }
+    }
+
+    fn append_readable(&mut self, text: &str) {
+        if !text.is_empty() {
+            if !self.stable_spoken.is_empty() {
+                self.stable_spoken.push('\n');
+            }
+            self.stable_spoken.push_str(text);
+        }
+    }
+
+    pub(super) fn next(&mut self) -> (ReplyPiece, Option<Arc<str>>) {
+        (self.reply.next(), self.instruction.clone())
+    }
+
+    pub(super) fn has_spoken_text(&self) -> bool {
+        self.reply.has_spoken_body()
+    }
+}
+
+struct MessageText {
+    id: String,
+    speech: MessageSpeech,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -61,14 +137,14 @@ pub(super) struct ChatFeed {
     agent_request: Option<String>,
     finished: bool,
     dirty: bool,
-    inherit_global_style: bool,
+    streaming_tts: bool,
     cursor: usize,
 }
 
 impl ChatFeed {
-    pub(super) fn new(inherit_global_style: bool) -> Self {
+    pub(super) fn new(streaming_tts: bool) -> Self {
         Self {
-            inherit_global_style,
+            streaming_tts,
             ..Default::default()
         }
     }
@@ -177,7 +253,7 @@ impl ChatFeed {
                 .iter()
                 .position(|message| message.id == event.message_id);
             let previous = index
-                .map(|index| self.messages[index].text.len())
+                .map(|index| self.messages[index].speech.text.len())
                 .unwrap_or(0);
             let next_size = replacement
                 .map(str::len)
@@ -185,7 +261,7 @@ impl ChatFeed {
             if self
                 .messages
                 .iter()
-                .map(|message| message.text.len())
+                .map(|message| message.speech.text.len())
                 .sum::<usize>()
                 .saturating_sub(previous)
                 .saturating_add(next_size)
@@ -196,21 +272,18 @@ impl ChatFeed {
             let index = index.unwrap_or_else(|| {
                 self.messages.push(MessageText {
                     id: event.message_id.clone(),
-                    text: String::new(),
-                    reply: ReplyBuffer::new(self.inherit_global_style),
-                    instruction: None,
-                    guidance_locked: false,
-                    finished: false,
-                    dirty: true,
+                    speech: MessageSpeech::new(self.streaming_tts),
                 });
                 self.messages.len() - 1
             });
-            if let Some(text) = replacement {
-                self.messages[index].text = text.into();
+            let text = if let Some(text) = replacement {
+                text.to_owned()
             } else if let Some(text) = delta {
-                self.messages[index].text.push_str(text);
-            }
-            self.messages[index].dirty = true;
+                format!("{}{text}", self.messages[index].speech.text)
+            } else {
+                unreachable!("replacement or delta was present")
+            };
+            self.messages[index].speech.update(&text, normal_end)?;
             self.dirty = true;
         }
         if normal_end {
@@ -219,20 +292,10 @@ impl ChatFeed {
                 .iter_mut()
                 .find(|message| message.id == event.message_id)
             {
-                message.finished = true;
-                message.dirty = true;
+                let text = message.speech.text.clone();
+                message.speech.update(&text, true)?;
             }
             self.dirty = true;
-        }
-        if let Some(message) = self
-            .messages
-            .iter_mut()
-            .find(|message| message.id == event.message_id && !message.guidance_locked)
-        {
-            // Lock on output admission, not when the playback worker happens
-            // to be free. Network latency must not choose a later instruction.
-            let projection = voice_guidance::scan(&message.text, message.finished);
-            message.lock_guidance(&projection);
         }
         if normal_end && !self.group {
             self.finished = true;
@@ -246,30 +309,21 @@ impl ChatFeed {
             return Ok(None);
         }
         for message in &mut self.messages {
-            if self.finished && !message.finished {
-                message.finished = true;
-                message.dirty = true;
+            if self.finished && !message.speech.finished {
+                let text = message.speech.text.clone();
+                message.speech.update(&text, true)?;
             }
-            if !std::mem::take(&mut message.dirty) {
-                continue;
-            }
-            let projection = voice_guidance::scan(&message.text, message.finished);
-            if projection.exhausted {
-                return Err("语音指导格式过于复杂，已停止本次朗读；聊天正文已保留。".into());
-            }
-            let text = readable::project(&projection.body, message.finished)?;
-            message.lock_guidance(&projection);
-            message.reply.update(text, message.finished)?;
         }
         let mut pieces = Vec::new();
         // A member's unfinished tail must not be prepended to the next member,
         // nor may later members interleave with that member's speech.
         while let Some(message) = self.messages.get_mut(self.cursor) {
-            match message.reply.next() {
+            let (piece, instruction) = message.speech.next();
+            match piece {
                 ReplyPiece::Text(text) => pieces.push(SpeechPiece {
                     message_id: message.id.clone(),
                     text,
-                    instruction: message.instruction.clone(),
+                    instruction,
                 }),
                 ReplyPiece::Wait => break,
                 ReplyPiece::Finished => self.cursor += 1,
@@ -328,11 +382,7 @@ mod tests {
     }
 
     fn guidance(text: &str) -> String {
-        format!(
-            "{}\n{text}\n{}\n",
-            voice_guidance::GUIDANCE_START,
-            voice_guidance::GUIDANCE_END
-        )
+        format!("<voice_guidance>\n{text}\n</voice_guidance>\n")
     }
 
     #[test]
@@ -476,8 +526,7 @@ mod tests {
         assert_eq!(
             result.pieces,
             vec![
-                piece("a", "(温柔)[轻笑]第一句。", Some("清亮自然")),
-                piece("a", "(温柔)第一位尾音", Some("清亮自然")),
+                piece("a", "(温柔)[轻笑]第一句。第一位尾音", Some("清亮自然")),
                 piece("b", "第二位。", Some("沉稳缓慢")),
             ]
         );
@@ -485,21 +534,23 @@ mod tests {
     }
 
     #[test]
-    fn partial_guidance_is_never_spoken_and_the_first_valid_instruction_stays_fixed() {
+    fn only_stable_text_is_accepted_before_message_completion() {
         let mut feed = ChatFeed::new(true);
-        feed.accept(&update("a", "<<<[VOICE_GUID", false)).unwrap();
+        feed.accept(&update("a", "<voice_guid", false)).unwrap();
         assert!(feed.take_update().unwrap().unwrap().pieces.is_empty());
-        let raw = format!("{}第一句。", guidance("首个指导"));
+        let raw = format!("{}第一句话还没有形成稳定段落。", guidance("首个指导"));
+        feed.accept(&update("a", &raw, false)).unwrap();
+        assert!(feed.take_update().unwrap().unwrap().pieces.is_empty());
+        let raw = format!("{raw}\n\n剩余正文");
         feed.accept(&update("a", &raw, false)).unwrap();
         assert_eq!(
             feed.take_update().unwrap().unwrap().pieces,
-            vec![piece("a", "第一句。", Some("首个指导"))]
+            vec![piece("a", "第一句话还没有形成稳定段落。", Some("首个指导"))]
         );
-        let raw = format!("{raw}\n{}第二句。", guidance("迟到指导"));
-        feed.accept(&update("a", &raw, false)).unwrap();
+        feed.accept(&member("a", &raw)).unwrap();
         assert_eq!(
             feed.take_update().unwrap().unwrap().pieces,
-            vec![piece("a", "第二句。", Some("首个指导"))]
+            vec![piece("a", "剩余正文", Some("首个指导"))]
         );
     }
 
@@ -511,7 +562,7 @@ mod tests {
             format!("{}正文。", guidance("")),
             format!(
                 "{}正文。",
-                guidance(&"字".repeat(voice_guidance::MAX_GUIDANCE_CHARS + 1))
+                guidance(&"字".repeat(VOICE_GUIDANCE_MAX_CHARS + 1))
             ),
         ];
         for raw in cases {
@@ -523,7 +574,7 @@ mod tests {
     }
 
     #[test]
-    fn opaque_prefix_does_not_count_as_the_start_of_spoken_prose() {
+    fn a_thought_prefix_does_not_promote_later_guidance_to_the_first_line() {
         let mut feed = ChatFeed::new(true);
         let raw = format!(
             "<think>私密推理</think>\n```text\n示例代码\n```\n{}正文。",
@@ -532,7 +583,7 @@ mod tests {
         feed.accept(&member("a", &raw)).unwrap();
         assert_eq!(
             feed.take_update().unwrap().unwrap().pieces,
-            vec![piece("a", "正文。", Some("有效指导"))]
+            vec![piece("a", "正文。", None)]
         );
     }
 
@@ -541,7 +592,7 @@ mod tests {
         let mut feed = ChatFeed::new(true);
         feed.accept(&update(
             "a",
-            &format!("{}第一句。等尾句", guidance("第一位")),
+            &format!("{}这是第一位已经稳定的句子。\n\n等尾句", guidance("第一位")),
             true,
         ))
         .unwrap();
@@ -549,11 +600,14 @@ mod tests {
             .unwrap();
         assert_eq!(
             feed.take_update().unwrap().unwrap().pieces,
-            vec![piece("a", "第一句。", Some("第一位"))]
+            vec![piece("a", "这是第一位已经稳定的句子。", Some("第一位"))]
         );
         feed.accept(&member(
             "a",
-            &format!("{}第一句。等尾句完成。", guidance("第一位")),
+            &format!(
+                "{}这是第一位已经稳定的句子。\n\n等尾句完成。",
+                guidance("第一位")
+            ),
         ))
         .unwrap();
         assert_eq!(
@@ -563,25 +617,25 @@ mod tests {
                 piece("b", "第二位。", Some("第二位")),
             ]
         );
-        feed.accept(&member("a", "改写已播内容。")).unwrap();
-        assert!(feed.take_update().is_err());
+        assert!(feed.accept(&member("a", "改写已播内容。")).is_err());
     }
 
     #[test]
     fn first_body_locks_even_while_the_playback_worker_has_not_consumed_a_frame() {
         let mut feed = ChatFeed::new(true);
-        feed.accept(&update("a", "正文已经开始", false)).unwrap();
+        feed.accept(&update("a", "正文已经形成稳定段落。\n\n", false))
+            .unwrap();
         // A later snapshot can replace an unspoken tail, but cannot change
         // which guidance this response fixed when its body first arrived.
         feed.accept(&update(
             "a",
-            &format!("{}正文已经开始。", guidance("后来补写")),
+            &format!("{}正文已经形成稳定段落。\n\n", guidance("后来补写")),
             false,
         ))
         .unwrap();
         assert_eq!(
             feed.take_update().unwrap().unwrap().pieces,
-            vec![piece("a", "正文已经开始。", None)]
+            vec![piece("a", "正文已经形成稳定段落。", None)]
         );
     }
 
@@ -589,7 +643,7 @@ mod tests {
     fn invalid_guidance_cannot_promote_a_subsequent_tool_example() {
         let first = guidance(&format!(
             "{}\n<<<[TOOL_REQUEST]>>>",
-            "字".repeat(voice_guidance::MAX_GUIDANCE_CHARS + 1)
+            "字".repeat(VOICE_GUIDANCE_MAX_CHARS + 1)
         ));
         let raw = format!(
             "{first}<<<[TOOL_REQUEST]>>>\n{}<<<[END_TOOL_REQUEST]>>>\n正文。",
@@ -604,20 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_budget_failure_stops_speech_without_changing_stored_text() {
-        let raw = format!("{}正常正文。", guidance("自然\n<think>").repeat(18));
-        let mut feed = ChatFeed::new(true);
-        feed.accept(&member("a", &raw)).unwrap();
-        assert!(feed
-            .take_update()
-            .unwrap_err()
-            .contains("语音指导格式过于复杂"));
-        assert_eq!(feed.messages[0].text, raw);
-        assert!(voice_guidance::strip_guidance_for_history(&raw).ends_with("正常正文。"));
-    }
-
-    #[test]
-    fn opaque_examples_neither_hide_real_guidance_nor_swallow_following_speech() {
+    fn closed_examples_are_skipped_without_changing_later_guidance_eligibility() {
         for prefix in [
             "<<<[TOOL_REQUEST]>>>\ncontent:「始」<think>「末」\n<<<[END_TOOL_REQUEST]>>>\n",
             "<think>\n<<<[TOOL_REQUEST]>>>\n</think>\n",
@@ -629,8 +670,90 @@ mod tests {
             feed.accept(&member("a", &raw)).unwrap();
             assert_eq!(
                 feed.take_update().unwrap().unwrap().pieces,
-                vec![piece("a", "正文。", Some("真正指导"))]
+                vec![piece("a", "正文。", None)]
             );
         }
+    }
+
+    #[test]
+    fn complete_and_incremental_input_share_projection_and_instruction() {
+        let raw = format!(
+            "{}### 标题\n\n正文含 `true`。\n\n<think>闭合推理</think>\n最后一段。",
+            guidance("自然清晰")
+        );
+        let mut complete = MessageSpeech::new(true);
+        complete.update(&raw, true).unwrap();
+        let mut incremental = MessageSpeech::new(true);
+        for (offset, ch) in raw.char_indices() {
+            incremental
+                .update(&raw[..offset + ch.len_utf8()], false)
+                .unwrap();
+        }
+        incremental.update(&raw, true).unwrap();
+        assert_eq!(incremental.stable_spoken, complete.stable_spoken);
+        assert_eq!(incremental.instruction, complete.instruction);
+        assert_eq!(complete.instruction.as_deref(), Some("自然清晰"));
+        assert_eq!(complete.stable_spoken, "标题\n正文含 true。\n最后一段。");
+    }
+
+    #[test]
+    fn terminal_unclosed_blocks_are_released_once_without_becoming_guidance() {
+        for raw in [
+            "<voice_guidance>模型漏写闭合后的正文。",
+            "<think>模型漏写闭合后的正文。",
+            "<<<[TOOL_REQUEST]>>>\n模型漏写闭合后的正文。",
+            "```text\n模型漏写闭合后的正文。",
+            "~~~text\n模型漏写闭合后的正文。",
+            "<div><p>模型漏写闭合后的正文。</p>",
+        ] {
+            let mut speech = MessageSpeech::new(true);
+            speech.update(raw, false).unwrap();
+            assert!(!speech.has_spoken_text(), "{raw}");
+            assert!(matches!(speech.next().0, ReplyPiece::Wait));
+            speech.update(raw, true).unwrap();
+            assert_eq!(speech.stable_spoken, "模型漏写闭合后的正文。", "{raw}");
+            assert!(speech.instruction.is_none());
+            assert!(matches!(speech.next().0, ReplyPiece::Text(_)));
+            speech.update(raw, true).unwrap();
+            assert!(matches!(speech.next().0, ReplyPiece::Finished));
+        }
+    }
+
+    #[test]
+    fn guidance_style_and_audio_tags_alone_are_not_speakable_body() {
+        let mut speech = MessageSpeech::new(true);
+        speech
+            .update(&format!("{}(温柔)[轻笑]", guidance("自然")), true)
+            .unwrap();
+        assert!(!speech.has_spoken_text());
+        assert!(matches!(speech.next().0, ReplyPiece::Finished));
+    }
+
+    #[test]
+    fn replacement_rebuilds_unspoken_cache_but_keeps_guidance_and_sent_prefix() {
+        let mut speech = MessageSpeech::new(true);
+        let prefix = "这段已经稳定并且将要朗读。";
+        speech
+            .update(
+                &format!("{}{prefix}\n\n尚未完成", guidance("最初指导")),
+                false,
+            )
+            .unwrap();
+        assert!(matches!(speech.next().0, ReplyPiece::Text(text) if text == prefix));
+        speech
+            .update(
+                &format!("{}{prefix}\n\n修改剩余正文。", guidance("替换指导")),
+                true,
+            )
+            .unwrap();
+        assert_eq!(speech.instruction.as_deref(), Some("最初指导"));
+        assert!(matches!(speech.next().0, ReplyPiece::Text(text) if text == "修改剩余正文。"));
+
+        let mut speech = MessageSpeech::new(true);
+        speech.update(&format!("{prefix}\n\n"), false).unwrap();
+        assert!(matches!(speech.next().0, ReplyPiece::Text(_)));
+        assert!(speech
+            .update("改写已经播放的稳定正文。\n\n", false)
+            .is_err());
     }
 }

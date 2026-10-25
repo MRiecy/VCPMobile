@@ -27,13 +27,15 @@ const settingsStore = useSettingsStore();
 const { session, loading, error, reload } = useSettingsPageSession(VOICE_FIELDS, () => props.active);
 const { draft, saving, leaving } = session;
 const openingStyleGuidance = ref(false);
+const stoppingPreview = ref(false);
+const previewStopError = ref('');
 const preview = ref<InstanceType<typeof VoiceTtsPreview> | null>(null);
 const cloneSample = ref<InstanceType<typeof VoiceCloneSample> | null>(null);
 const previewSettings = computed<VoiceConfig>(() =>
   applySettingsFields(settingsStore.settings ?? SETTINGS_DEFAULTS, draft.value ?? {}).voice,
 );
 const ttsModel = computed(() => MIMO_TTS_MODES.find(mode => mode.value === draft.value?.['voice.tts.mode'])?.model ?? MIMO_TTS_MODES[0].model);
-const disabled = computed(() => !props.active || leaving.value || openingStyleGuidance.value);
+const disabled = computed(() => !props.active || leaving.value || openingStyleGuidance.value || stoppingPreview.value);
 type DurationField = 'voice.vad.endSilenceMs' | 'voice.vad.playbackOnsetMs';
 type SelectionField = 'voice.asr.language' | 'voice.asr.inputEncoding' | 'voice.tts.voice' | 'voice.tts.mode' | 'voice.vad.sensitivity' | DurationField;
 const durationSettings = {
@@ -146,6 +148,7 @@ onBeforeUnmount(() => {
 const openStyleGuidance = async () => {
   if (disabled.value) return;
   openingStyleGuidance.value = true;
+  previewStopError.value = '';
   try {
     cloneSample.value?.cancelPending();
     await preview.value?.stop();
@@ -153,16 +156,23 @@ const openStyleGuidance = async () => {
     // draft before navigating, just like leaving the global settings page.
     if (draft.value && !(await session.save()).ok) return;
     if (props.active) overlayStore.openVoiceStyleGuidance();
+  } catch {
+    previewStopError.value = '停止试听或保存设置失败，请重试。';
   } finally {
     openingStyleGuidance.value = false;
   }
 };
 
 const beforeLeave = async () => {
-  if (openingStyleGuidance.value) return false;
-  cloneSample.value?.cancelPending();
-  await preview.value?.stop();
-  return session.prepareLeave();
+  if (openingStyleGuidance.value || stoppingPreview.value) return false;
+  stoppingPreview.value = true;
+  try {
+    cloneSample.value?.cancelPending();
+    await preview.value?.stop();
+    return await session.prepareLeave();
+  } finally {
+    stoppingPreview.value = false;
+  }
 };
 
 defineExpose({ beforeLeave });
@@ -170,6 +180,7 @@ defineExpose({ beforeLeave });
 
 <template>
   <SettingsCanvas viewport :inert="!active">
+        <p v-if="previewStopError" role="alert" class="m-0 text-sm text-red-500">{{ previewStopError }}</p>
         <p v-if="error" role="alert" class="m-0 text-sm text-red-500">
           {{ error }}
           <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading || !active" @click="reload">重试</button>

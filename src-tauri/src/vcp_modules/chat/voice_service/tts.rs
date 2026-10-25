@@ -1,6 +1,6 @@
 //! Independent narration job. There is no microphone or chat cancellation parent.
 use super::{
-    chat_feed::{ChatFeed, SpeechPiece},
+    chat_feed::{ChatFeed, MessageSpeech, SpeechPiece},
     network, samples,
     segmentation::{ReplyBuffer, ReplyPiece},
     VoiceReplyPolicy, VoiceServiceConfig, VoiceServiceStart,
@@ -10,6 +10,7 @@ use crate::vcp_modules::{
         Settings, VoiceConfig, VoiceConnectionConfig, VoiceTtsConfig,
         VoiceTtsMode,
     },
+    topic_types::TopicKey,
     vcp_client::StreamEvent,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -34,8 +35,7 @@ struct TtsJob {
     config: VoiceServiceConfig,
     sample: Option<samples::PreparedCloneSample>,
     cancel: CancellationToken,
-    reply: Mutex<ReplyBuffer>,
-    chat: Mutex<ChatFeed>,
+    input: Mutex<NarrationInput>,
     ready: Notify,
     worker_started: AtomicBool,
     player_started: AtomicBool,
@@ -44,11 +44,75 @@ struct TtsJob {
     work: Mutex<Option<Arc<super::call::WorkLease>>>,
 }
 
+enum NarrationInput {
+    Chat(ChatFeed),
+    Bubble(MessageSpeech),
+    Preview(ReplyBuffer),
+}
+
+impl NarrationInput {
+    fn submit_bubble(&mut self, text: &str, finished: bool) -> Result<(), String> {
+        let Self::Bubble(message) = self else {
+            return Err("此任务不接收气泡朗读文本。".into());
+        };
+        message.update(text, finished)?;
+        if finished && !message.has_spoken_text() {
+            return Err("此消息没有可朗读的正文内容。".into());
+        }
+        Ok(())
+    }
+
+    fn submit_preview(&mut self, text: String) -> Result<(), String> {
+        let Self::Preview(reply) = self else {
+            return Err("此任务不是试听。".into());
+        };
+        reply.update(text, true)
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BubbleSource {
+    topic: TopicKey,
+    message_id: String,
+}
+
+impl BubbleSource {
+    async fn read<R: Runtime>(&self, app: &AppHandle<R>) -> Result<String, String> {
+        crate::vcp_modules::message_service::fetch_raw_message_content(
+            app.clone(),
+            self.topic.owner_id.clone(),
+            self.topic.owner_type.clone(),
+            self.topic.topic_id.clone(),
+            self.message_id.clone(),
+        ).await
+    }
+}
+
+#[derive(Clone)]
+enum NarrationKind {
+    Chat,
+    Bubble(BubbleSource),
+    Preview,
+}
+
+impl NarrationKind {
+    fn validate_admission(&self, call_active: bool) -> Result<(), String> {
+        match self {
+            Self::Bubble(_) if call_active => {
+                Err("语音通话进行中，请先结束通话再单独朗读气泡。".into())
+            }
+            Self::Preview if call_active => Err("通话结束后可试听声音。".into()),
+            _ => Ok(()),
+        }
+    }
+}
+
 struct Slot {
     id: String,
     cancel: CancellationToken,
     job: Option<Arc<TtsJob>>,
-    preview: bool,
+    kind: NarrationKind,
 }
 #[derive(Default)]
 struct Registry {
@@ -59,7 +123,7 @@ struct Registry {
 pub struct TtsServiceState(Mutex<Registry>);
 
 impl Registry {
-    fn reserve(&mut self, id: String, preview: bool) -> Result<CancellationToken, String> {
+    fn reserve(&mut self, id: String, kind: NarrationKind) -> Result<CancellationToken, String> {
         if self.retired.contains(&id) {
             return Err(network::CANCELLED.into());
         }
@@ -71,7 +135,7 @@ impl Registry {
             id,
             cancel: cancel.clone(),
             job: None,
-            preview,
+            kind,
         });
         Ok(cancel)
     }
@@ -182,6 +246,7 @@ pub async fn preview_tts<R: Runtime>(
         tts_id.clone(),
         None,
         NarrationSource::Preview(settings.into_policy()),
+        None,
     )
     .await?;
     if !started.configured {
@@ -191,15 +256,15 @@ pub async fn preview_tts<R: Runtime>(
         stop_tts(app, tts_id).await?;
         return Err("通话结束后可试听声音。".into());
     }
-    if let Err(error) = submit_tts_text(app.clone(), tts_id.clone(), text.to_string(), true).await {
+    if let Err(error) = submit_preview_text(&app, &tts_id, text.to_string()) {
         let _ = stop_tts(app, tts_id).await;
         return Err(error);
     }
     Ok(started)
 }
 
-/// A new call only retires a settings preview, never independent narration.
-pub(super) async fn stop_preview<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
+/// Calls retire only independent message narration. Preview belongs to its page.
+pub(super) async fn stop_bubble_narration<R: Runtime>(app: &AppHandle<R>) -> Result<(), String> {
     let id = app
         .state::<TtsServiceState>()
         .0
@@ -207,7 +272,27 @@ pub(super) async fn stop_preview<R: Runtime>(app: &AppHandle<R>) -> Result<(), S
         .map_err(|e| e.to_string())?
         .current
         .as_ref()
-        .filter(|slot| slot.preview)
+        .filter(|slot| matches!(&slot.kind, NarrationKind::Bubble(_)))
+        .map(|slot| slot.id.clone());
+    if let Some(id) = id {
+        stop_tts(app.clone(), id).await?;
+    }
+    Ok(())
+}
+
+/// Mutation owners pass the committed affected IDs, including off-screen messages.
+pub(crate) async fn stop_bubble_for_messages<R: Runtime>(
+    app: &AppHandle<R>,
+    topic: &TopicKey,
+    message_ids: &[String],
+) -> Result<(), String> {
+    let Some(state) = app.try_state::<TtsServiceState>() else {
+        return Ok(());
+    };
+    let id = state.0.lock().map_err(|error| error.to_string())?
+        .current.as_ref().filter(|slot| matches!(&slot.kind,
+            NarrationKind::Bubble(source) if &source.topic == topic
+                && message_ids.contains(&source.message_id)))
         .map(|slot| slot.id.clone());
     if let Some(id) = id {
         stop_tts(app.clone(), id).await?;
@@ -360,8 +445,9 @@ pub async fn start_tts_session<R: Runtime>(
     app: AppHandle<R>,
     tts_id: String,
     origin_user_message_id: Option<String>,
+    bubble_source: Option<BubbleSource>,
 ) -> Result<VoiceServiceStart, String> {
-    start_narration(app, tts_id, origin_user_message_id, NarrationSource::Stored).await
+    start_narration(app, tts_id, origin_user_message_id, NarrationSource::Stored, bubble_source).await
 }
 
 pub(super) async fn start_prepared_narration<R: Runtime>(
@@ -375,6 +461,7 @@ pub(super) async fn start_prepared_narration<R: Runtime>(
         tts_id,
         Some(origin_user_message_id),
         NarrationSource::Prepared(prepared),
+        None,
     )
     .await
 }
@@ -384,6 +471,7 @@ async fn start_narration<R: Runtime>(
     tts_id: String,
     origin_user_message_id: Option<String>,
     source: NarrationSource,
+    bubble_source: Option<BubbleSource>,
 ) -> Result<VoiceServiceStart, String> {
     if tts_id.is_empty()
         || tts_id.len() > 128
@@ -399,14 +487,24 @@ async fn start_narration<R: Runtime>(
     {
         return Err("朗读来源标识无效。".into());
     }
-    let preview = matches!(&source, NarrationSource::Preview(_));
-    if preview && super::call::is_active(&app)? {
-        return Err("通话结束后可试听声音。".into());
-    }
+    let kind = if matches!(&source, NarrationSource::Preview(_)) {
+        NarrationKind::Preview
+    } else if origin_user_message_id.is_some() {
+        NarrationKind::Chat
+    } else {
+        let source = bubble_source.filter(|source| source.topic.is_valid()
+            && !source.message_id.is_empty() && source.message_id.len() <= 128)
+            .ok_or("朗读来源消息无效。")?;
+        source.read(&app).await?;
+        NarrationKind::Bubble(source)
+    };
     let cancel = {
         let state = app.state::<TtsServiceState>();
         let mut registry = state.0.lock().map_err(|error| error.to_string())?;
-        registry.reserve(tts_id.clone(), preview)?
+        // A call reserves itself before stopping the current bubble. Holding
+        // the TTS slot lock around this check closes the opposite admission order.
+        kind.validate_admission(super::call::is_active(&app)?)?;
+        registry.reserve(tts_id.clone(), kind.clone())?
     };
     let work = origin_user_message_id
         .is_none()
@@ -428,9 +526,7 @@ async fn start_narration<R: Runtime>(
     };
     let prepared = prepared.and_then(|prepared| {
         prepared.policy.config.validate_tts()?;
-        if preview && super::call::is_active(&app)? {
-            return Err("通话结束后可试听声音。".into());
-        }
+        kind.validate_admission(super::call::is_active(&app)?)?;
         let sample = prepared.sample?;
         Ok((prepared.policy, sample))
     });
@@ -462,11 +558,14 @@ async fn start_narration<R: Runtime>(
         id: tts_id.clone(),
         work: Mutex::new(work),
         origin: origin_user_message_id,
-        chat: Mutex::new(ChatFeed::new(true)),
+        input: Mutex::new(match kind {
+            NarrationKind::Chat => NarrationInput::Chat(ChatFeed::new(config.tts_streaming())),
+            NarrationKind::Bubble(_) => NarrationInput::Bubble(MessageSpeech::new(config.tts_streaming())),
+            NarrationKind::Preview => NarrationInput::Preview(ReplyBuffer::new_with_mode(false, config.tts_streaming())),
+        }),
         config,
         sample,
         cancel: cancel.clone(),
-        reply: Mutex::new(ReplyBuffer::default()),
         ready: Notify::new(),
         worker_started: AtomicBool::new(false),
         player_started: AtomicBool::new(false),
@@ -500,19 +599,46 @@ pub async fn submit_tts_text<R: Runtime>(
     if !narration.config.configured() {
         return Err("请先配置语音 API Key。".into());
     }
-    if narration.origin.is_some() {
-        return Err("聊天朗读由对应的模型回复提供内容。".into());
-    }
-    let updated = narration
-        .reply
-        .lock()
-        .map_err(|error| error.to_string())?
-        .update(text, finished);
+    let source = {
+        let state = app.state::<TtsServiceState>();
+        let registry = state.0.lock().map_err(|error| error.to_string())?;
+        registry.current.as_ref().filter(|slot| slot.id == tts_id)
+            .and_then(|slot| match &slot.kind {
+                NarrationKind::Bubble(source) => Some(source.clone()),
+                _ => None,
+            }).ok_or("此任务不接收气泡朗读文本。")?
+    };
+    let updated = async {
+        // Reading may finish after an edit/delete. Only the persisted source
+        // snapshot selected by this bubble can be admitted for playback.
+        if source.read(&app).await? != text {
+            return Err("消息内容已变化，请重新发起朗读。".into());
+        }
+        if narration.cancel.is_cancelled() {
+            return Err(network::CANCELLED.into());
+        }
+        narration.input.lock().map_err(|error| error.to_string())?
+            .submit_bubble(&text, finished)
+    }.await;
     if let Err(error) = updated {
         fail(&app, &narration, error.clone());
+        stop_tts(app, tts_id).await?;
         return Err(error);
     }
     wake(&app, &narration);
+    Ok(())
+}
+
+fn submit_preview_text<R: Runtime>(
+    app: &AppHandle<R>,
+    tts_id: &str,
+    text: String,
+) -> Result<(), String> {
+    let narration = job(app, tts_id)
+        .filter(|job| !job.cancel.is_cancelled())
+        .ok_or_else(|| network::CANCELLED.to_string())?;
+    narration.input.lock().map_err(|error| error.to_string())?.submit_preview(text)?;
+    wake(app, &narration);
     Ok(())
 }
 
@@ -543,11 +669,13 @@ pub async fn finish_tts_chat<R: Runtime>(app: AppHandle<R>, tts_id: String) -> R
     if narration.origin.is_none() {
         return Err("这不是聊天朗读任务。".into());
     }
-    narration
-        .chat
-        .lock()
-        .map_err(|error| error.to_string())?
-        .finish_submission();
+    {
+        let mut input = narration.input.lock().map_err(|error| error.to_string())?;
+        let NarrationInput::Chat(feed) = &mut *input else {
+            return Err("这不是聊天朗读任务。".into());
+        };
+        feed.finish_submission();
+    }
     wake(&app, &narration);
     Ok(())
 }
@@ -600,11 +728,12 @@ pub fn feed_chat_event<R: Runtime>(app: &AppHandle<R>, event: &StreamEvent) {
     let Some(narration) = narration else {
         return;
     };
-    let result = narration
-        .chat
-        .lock()
+    let result = narration.input.lock()
         .map_err(|_| "朗读状态已失效。".to_string())
-        .and_then(|mut feed| feed.accept(event));
+        .and_then(|mut input| match &mut *input {
+            NarrationInput::Chat(feed) => feed.accept(event),
+            _ => Ok(false),
+        });
     match result {
         Ok(true) => wake(app, &narration),
         Ok(false) => {}
@@ -649,33 +778,26 @@ async fn speak_inner<R: Runtime>(
             return Err(network::CANCELLED.into());
         }
         let notified = narration.ready.notified();
-        let (piece, guidance) = if narration.origin.is_some() {
-            if let Some(update) = narration
-                .chat
-                .lock()
-                .map_err(|error| error.to_string())?
-                .take_update()?
-            {
-                speech_queue.extend(update.pieces);
-                chat_finished = update.finished;
+        let (piece, guidance) = {
+            let mut input = narration.input.lock().map_err(|error| error.to_string())?;
+            match &mut *input {
+                NarrationInput::Chat(feed) => {
+                    if let Some(update) = feed.take_update()? {
+                        speech_queue.extend(update.pieces);
+                        chat_finished = update.finished;
+                    }
+                    if let Some(piece) = speech_queue.pop_front() {
+                        log::debug!("[VoiceTts] synthesizing message={}", piece.message_id);
+                        (ReplyPiece::Text(piece.text), piece.instruction)
+                    } else if chat_finished {
+                        (ReplyPiece::Finished, None)
+                    } else {
+                        (ReplyPiece::Wait, None)
+                    }
+                }
+                NarrationInput::Bubble(message) => message.next(),
+                NarrationInput::Preview(reply) => (reply.next(), None),
             }
-            if let Some(piece) = speech_queue.pop_front() {
-                log::debug!("[VoiceTts] synthesizing message={}", piece.message_id);
-                (ReplyPiece::Text(piece.text), piece.instruction)
-            } else if chat_finished {
-                (ReplyPiece::Finished, None)
-            } else {
-                (ReplyPiece::Wait, None)
-            }
-        } else {
-            (
-                narration
-                    .reply
-                    .lock()
-                    .map_err(|error| error.to_string())?
-                    .next(),
-                None,
-            )
         };
         match piece {
             ReplyPiece::Wait => {
@@ -752,7 +874,13 @@ async fn speak_inner<R: Runtime>(
 mod tests {
     use super::*;
     fn install(registry: &mut Registry, id: &str) -> Arc<TtsJob> {
-        let cancel = registry.reserve(id.into(), false).unwrap();
+        install_kind(registry, id, NarrationKind::Chat)
+    }
+    fn bubble_source() -> BubbleSource {
+        BubbleSource { topic: TopicKey::new("agent", "a", "t"), message_id: "message".into() }
+    }
+    fn install_kind(registry: &mut Registry, id: &str, kind: NarrationKind) -> Arc<TtsJob> {
+        let cancel = registry.reserve(id.into(), kind.clone()).unwrap();
         let job = Arc::new(TtsJob {
             id: id.into(),
             origin: Some("origin".into()),
@@ -769,8 +897,11 @@ mod tests {
             },
             sample: None,
             cancel,
-            reply: Mutex::new(ReplyBuffer::default()),
-            chat: Mutex::new(ChatFeed::default()),
+            input: Mutex::new(match kind {
+                NarrationKind::Chat => NarrationInput::Chat(ChatFeed::new(true)),
+                NarrationKind::Bubble(_) => NarrationInput::Bubble(MessageSpeech::new(true)),
+                NarrationKind::Preview => NarrationInput::Preview(ReplyBuffer::new_with_mode(false, true)),
+            }),
             ready: Notify::new(),
             worker_started: AtomicBool::new(false),
             player_started: AtomicBool::new(false),
@@ -789,7 +920,7 @@ mod tests {
         assert!(old.player_started.load(Ordering::Acquire));
         registry.stop("old").unwrap();
         assert!(old.cancel.is_cancelled());
-        assert!(registry.reserve("new".into(), false).is_err());
+        assert!(registry.reserve("new".into(), NarrationKind::Chat).is_err());
         assert!(registry.admit_player(&old).is_err());
         // Production completes this phase only after flush_player acknowledges.
         registry.complete("old");
@@ -803,33 +934,33 @@ mod tests {
     #[test]
     fn unconfigured_or_cancelled_pending_setup_does_not_keep_a_busy_slot() {
         let mut registry = Registry::default();
-        let pending = registry.reserve("unconfigured".into(), false).unwrap();
+        let pending = registry.reserve("unconfigured".into(), NarrationKind::Chat).unwrap();
         assert!(registry.stop("unconfigured").is_none());
         assert!(pending.is_cancelled());
-        registry.reserve("next".into(), false).unwrap();
-        assert!(registry.reserve("unconfigured".into(), false).is_err());
+        registry.reserve("next".into(), NarrationKind::Chat).unwrap();
+        assert!(registry.reserve("unconfigured".into(), NarrationKind::Chat).is_err());
     }
 
     #[tokio::test]
-    async fn opening_a_call_cancels_pending_preview_but_leaves_independent_narration() {
+    async fn opening_a_call_cancels_pending_bubble_but_leaves_its_chat_narration() {
         let app = tauri::test::mock_app();
         app.manage(TtsServiceState::default());
         let state = app.state::<TtsServiceState>();
-        let preview = state
+        let bubble = state
             .0
             .lock()
             .unwrap()
-            .reserve("preview".into(), true)
+            .reserve("bubble".into(), NarrationKind::Bubble(bubble_source()))
             .unwrap();
-        stop_preview(app.handle()).await.unwrap();
-        assert!(preview.is_cancelled());
+        stop_bubble_narration(app.handle()).await.unwrap();
+        assert!(bubble.is_cancelled());
         let independent = {
             let mut registry = state.0.lock().unwrap();
             assert!(registry.current.is_none());
             let job = install(&mut registry, "independent");
             job.cancel.clone()
         };
-        stop_preview(app.handle()).await.unwrap();
+        stop_bubble_narration(app.handle()).await.unwrap();
         assert!(!independent.is_cancelled());
         assert_eq!(
             state.0.lock().unwrap().current.as_ref().unwrap().id,
@@ -871,6 +1002,91 @@ mod tests {
         let state = app.state::<TtsServiceState>();
         let mut registry = state.0.lock().unwrap();
         assert!(registry.current.is_none());
-        assert!(registry.reserve("next-reply".into(), false).is_ok());
+        assert!(registry.reserve("next-reply".into(), NarrationKind::Chat).is_ok());
+    }
+
+    #[test]
+    fn bubble_input_projects_once_and_keeps_guidance_with_each_piece() {
+        let mut input = NarrationInput::Bubble(MessageSpeech::new(false));
+        let raw = format!("<voice_guidance>轻声</voice_guidance>\n(慵懒){}", "这是一句需要朗读的正文。".repeat(35));
+        input.submit_bubble(&raw, true).unwrap();
+        let NarrationInput::Bubble(message) = &mut input else { unreachable!() };
+        let mut count = 0;
+        loop {
+            let (piece, instruction) = message.next();
+            match piece {
+                ReplyPiece::Text(text) => {
+                    assert_eq!(instruction.as_deref(), Some("轻声"));
+                    assert!(text.starts_with("(慵懒)"));
+                    assert!(!text.contains("voice_guidance"));
+                    count += 1;
+                }
+                ReplyPiece::Finished => break,
+                ReplyPiece::Wait => panic!("complete bubble must drain"),
+            }
+        }
+        assert!(count > 2);
+    }
+
+    #[test]
+    fn preview_reads_literal_input_and_never_uses_the_bubble_projection() {
+        let mut input = NarrationInput::Preview(ReplyBuffer::new_with_mode(false, true));
+        let raw = "<voice_guidance>轻声</voice_guidance>照读";
+        input.submit_preview(raw.into()).unwrap();
+        assert!(input.submit_bubble(raw, true).is_err());
+        let NarrationInput::Preview(reply) = &mut input else { unreachable!() };
+        assert!(matches!(reply.next(), ReplyPiece::Text(text) if text == raw));
+    }
+
+    #[test]
+    fn completed_empty_bubble_is_rejected_but_unclosed_content_is_read() {
+        let mut input = NarrationInput::Bubble(MessageSpeech::new(true));
+        assert!(input.submit_bubble("<think>不读</think>", true).is_err());
+        let mut input = NarrationInput::Bubble(MessageSpeech::new(true));
+        input.submit_bubble("<think>模型忘记闭合，这段内容仍然需要朗读。", true).unwrap();
+        let NarrationInput::Bubble(message) = &mut input else { unreachable!() };
+        assert!(matches!(message.next(), (ReplyPiece::Text(text), None) if text.contains("模型忘记闭合")));
+    }
+
+    #[test]
+    fn active_call_rejects_bubble_admission_but_accepts_its_own_reply() {
+        assert!(NarrationKind::Bubble(bubble_source()).validate_admission(true).is_err());
+        assert!(NarrationKind::Bubble(bubble_source()).validate_admission(false).is_ok());
+        assert!(NarrationKind::Chat.validate_admission(true).is_ok());
+    }
+
+    #[tokio::test]
+    async fn mutations_stop_only_the_bubble_in_the_affected_topic_and_ids() {
+        let app = tauri::test::mock_app();
+        app.manage(TtsServiceState::default());
+        let state = app.state::<TtsServiceState>();
+        let source = bubble_source();
+        let narration = install_kind(&mut state.0.lock().unwrap(), "bubble", NarrationKind::Bubble(source.clone()));
+        stop_bubble_for_messages(app.handle(), &TopicKey::new("agent", "a", "other"), &[source.message_id.clone()]).await.unwrap();
+        stop_bubble_for_messages(app.handle(), &source.topic, &["unrelated".into()]).await.unwrap();
+        assert!(!narration.cancel.is_cancelled());
+        stop_bubble_for_messages(app.handle(), &source.topic, &[source.message_id.clone()]).await.unwrap();
+        assert!(narration.cancel.is_cancelled());
+        assert!(state.0.lock().unwrap().current.is_none());
+    }
+
+    #[tokio::test]
+    async fn deleted_source_cannot_start_after_mutation_missed_a_pending_frontend_read() {
+        let app = tauri::test::mock_app();
+        app.manage(TtsServiceState::default());
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE messages (owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT, content TEXT, deleted_at INTEGER);
+            INSERT INTO messages VALUES ('agent', 'a', 't', 'message', '原文保留在软删除行', NULL);")
+            .execute(&pool).await.unwrap();
+        app.manage(crate::vcp_modules::db_manager::DbState::new(pool.clone(), Default::default()));
+        let source = bubble_source();
+        assert_eq!(source.read(app.handle()).await.unwrap(), "原文保留在软删除行");
+        // The frontend has read the source, but no TTS slot exists yet.
+        sqlx::query("UPDATE messages SET deleted_at = 1 WHERE msg_id = 'message'")
+            .execute(&pool).await.unwrap();
+        stop_bubble_for_messages(app.handle(), &source.topic, &[source.message_id.clone()]).await.unwrap();
+        assert!(start_tts_session(app.handle().clone(), "late".into(), None, Some(source)).await.is_err());
+        assert!(app.state::<TtsServiceState>().0.lock().unwrap().current.is_none());
     }
 }

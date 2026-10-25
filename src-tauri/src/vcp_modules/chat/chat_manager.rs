@@ -215,6 +215,7 @@ pub async fn patch_single_message(
     message: ChatMessage,
 ) -> Result<message_service::MessageWriteResultDto, String> {
     let key = TopicKey::new(&owner_type, &owner_id, &topic_id);
+    let edited_message_id = message.id.clone();
     let result = message_service::patch_single_message(
         app_handle.clone(),
         &db_state.pool,
@@ -225,6 +226,16 @@ pub async fn patch_single_message(
         false,
     )
     .await?;
+    // The committed identity also covers narration admitted during rendering.
+    if let Err(error) = crate::vcp_modules::chat::voice_service::stop_bubble_for_messages(
+        &app_handle,
+        &key,
+        std::slice::from_ref(&edited_message_id),
+    )
+    .await
+    {
+        log::warn!("[ChatManager] Message edit committed; narration cleanup failed: {error}");
+    }
     if let Some(turns) = app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>() {
         turns.notify_history_changed(&key);
     }
@@ -242,6 +253,15 @@ pub async fn delete_messages(
 ) -> Result<TopicActivityDto, String> {
     let key = TopicKey::new(owner_type, owner_id, &topic_id);
     let result = message_service::delete_messages(&db_state, &key, msg_ids, None).await?;
+    if let Err(error) = crate::vcp_modules::chat::voice_service::stop_bubble_for_messages(
+        &app_handle,
+        &key,
+        &result.deleted_ids,
+    )
+    .await
+    {
+        log::warn!("[ChatManager] Deleted messages committed; narration cleanup failed: {error}");
+    }
     if !result.deleted_ids.is_empty() {
         if let Some(turns) = app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>() {
             turns.notify_history_changed(&key);
@@ -289,6 +309,15 @@ pub async fn truncate_history_after_message(
     let deletion =
         message_service::truncate_history_after_message(&db_state, &key, &anchor_message_id)
             .await?;
+    if let Err(error) = crate::vcp_modules::chat::voice_service::stop_bubble_for_messages(
+        &app_handle,
+        &key,
+        &deletion.deleted_ids,
+    )
+    .await
+    {
+        log::warn!("[ChatManager] History truncation committed; narration cleanup failed: {error}");
+    }
     if !deletion.deleted_ids.is_empty() {
         if let Some(turns) = app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>() {
             turns.cancel(&key);

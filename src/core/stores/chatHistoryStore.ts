@@ -14,6 +14,7 @@ import { extractMentionedMemberIds } from "../utils/mention";
 import { triggerMessageHaptic } from "../utils/nativeHaptics";
 import { allowChatMutation } from "../../features/chat/chatMutationPolicy";
 import { useChatPreferencesStore } from "../../features/chat/preferences/store";
+import { useBubbleNarration } from "../../features/chat/voice/useBubbleNarration";
 
 import type {
   ChatMessage,
@@ -744,6 +745,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       };
       const releaseOperation = streamStore.beginConversationOperation(key.ownerId, key.ownerType, key.topicId);
       try {
+        await useBubbleNarration().stopMessage(intent.key);
+        if (!isMessageActionCurrent(intent.key)) return;
         const activity = await invoke<TopicActivityDto>("truncate_history_after_message", {
           ownerId: key.ownerId,
           ownerType: key.ownerType,
@@ -889,6 +892,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     if (targetIndex === -1) return;
 
     try {
+      await useBubbleNarration().stopMessage(messageKey);
+      if (!isMessageActionCurrent(messageKey)) return;
       const activity = await invoke<TopicActivityDto>("delete_messages", {
         ownerId: key.ownerId,
         ownerType: key.ownerType,
@@ -970,6 +975,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     const msg = { ...currentChatHistory.value[targetIndex] };
 
     try {
+      await useBubbleNarration().stopMessage(messageKey);
+      if (!isMessageActionCurrent(messageKey)) return;
       const persisted = await invoke<MessageWriteResultDto>("patch_single_message", {
         ownerId: key.ownerId,
         ownerType: key.ownerType,
@@ -1025,6 +1032,19 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       lastUserMsgIndex--;
     }
     const didOptimisticTruncate = lastUserMsgIndex >= 0;
+    const narration = useBubbleNarration();
+    const narratedKey = narration.activeMessageKey;
+    if (narratedKey && sameConversation(narratedKey.conversation, key)
+      && currentChatHistory.value.slice(lastUserMsgIndex + 1).some(message => message.id === narratedKey.messageId)) {
+      try {
+        await narration.stopMessage(narratedKey);
+      } catch (error) {
+        releaseOperation();
+        notificationStore.addNotification({ type: 'error', title: '停止朗读失败', message: errorMessage(error), toastOnly: true });
+        return;
+      }
+      if (!isMessageActionCurrent(messageKey)) { releaseOperation(); return; }
+    }
     if (didOptimisticTruncate) {
       const countToDelete = currentChatHistory.value.length - (lastUserMsgIndex + 1);
       currentChatHistory.value = currentChatHistory.value.slice(0, lastUserMsgIndex + 1);

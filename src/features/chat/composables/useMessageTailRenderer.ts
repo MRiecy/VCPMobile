@@ -49,8 +49,12 @@ export function useMessageTailRenderer(options: MessageTailRendererOptions) {
     const block = options.getMessage().tailBlock;
     return block?.type === "thought" ? block : null;
   });
+  const voiceGuidanceTailBlock = computed(() => {
+    const block = options.getMessage().tailBlock;
+    return block?.type === "voice-guidance" ? block : null;
+  });
   const useAstForCurrentTail = computed(() => {
-    if (!enableAstDiff.value || isAstRecoveryPending.value || isPlainTailFallback.value) return false;
+    if (!enableAstDiff.value || isAstRecoveryPending.value || isPlainTailFallback.value || voiceGuidanceTailBlock.value) return false;
     const message = options.getMessage();
     return !!message.tailFrame || !!message.tailBlock?.nodes || !!message.tailSnapshot;
   });
@@ -271,6 +275,7 @@ export function useMessageTailRenderer(options: MessageTailRendererOptions) {
     thoughtTailSandboxRef,
     isPlainTailFallback,
     thoughtTailBlock,
+    voiceGuidanceTailBlock,
     useAstForCurrentTail,
     isAstRecoveryPending,
     finishTailMotion,

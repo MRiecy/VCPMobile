@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { ref, useId } from "vue";
+import { useId } from "vue";
 import { ChevronDown, AudioLines } from "@lucide/vue";
 import type { ContentBlock } from "../../../core/types/chat";
 
 defineProps<{
   block: Extract<ContentBlock, { type: "voice-guidance" }>;
+  isStreaming?: boolean;
 }>();
 
-const expanded = ref(false);
+const expanded = defineModel<boolean>("expanded", { default: false });
 const contentId = useId();
 </script>
 
@@ -23,7 +24,7 @@ const contentId = useId();
     >
       <AudioLines :size="15" aria-hidden="true" />
       <span>风格指导</span>
-      <span v-if="!block.is_complete" class="voice-guidance-status">未完成</span>
+      <span v-if="!block.is_complete" class="voice-guidance-status">{{ isStreaming ? '生成中' : '未完成' }}</span>
       <ChevronDown
         :size="14"
         class="voice-guidance-chevron"
@@ -37,7 +38,7 @@ const contentId = useId();
       class="voice-guidance-content"
       data-message-content
       data-longpress-native
-    >{{ block.content || '未生成指导内容' }}</div>
+    >{{ block.content || (isStreaming ? '正在生成指导…' : '未生成指导内容') }}</div>
   </div>
 </template>
 
