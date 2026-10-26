@@ -20,7 +20,7 @@ let controller: ReturnType<typeof createVoiceConversation>;
 function snapshot(overrides: Partial<VoiceCallSnapshot> = {}): VoiceCallSnapshot {
   return {
     callId: 'restored-call', target: { ownerId: 'agent', ownerType: 'agent', topicId: 'topic' },
-    revision: 1, active: true, micState: 'closed', inputState: 'idle',
+    revision: 1, active: true, micState: 'closed', micStopReason: null, inputState: 'idle',
     replyState: 'idle', ttsState: 'idle', partial: '', error: null, notice: null,
     inputSessionId: null, originUserMessageId: null, ttsId: null, lastPersistedMessageId: null,
     ...overrides,

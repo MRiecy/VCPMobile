@@ -258,7 +258,7 @@ describe('voice call lifecycle', () => {
     const store = useVoiceCallStore();
     const snapshot: VoiceCallSnapshot = {
       callId: 'restored', target: { ownerId: 'agent', ownerType: 'agent', topicId: 'topic' },
-      revision: 8, active: true, micState: 'closed', inputState: 'transcribing',
+      revision: 8, active: true, micState: 'closed', micStopReason: null, inputState: 'transcribing',
       replyState: 'finished', ttsState: 'speaking', partial: '已录内容', error: null, notice: null,
       inputSessionId: null, originUserMessageId: 'msg_voice_user', ttsId: 'tts', lastPersistedMessageId: null,
     };
@@ -274,5 +274,30 @@ describe('voice call lifecycle', () => {
     context.lifecycle.isBackground = true;
     expect(store.playbackActive).toBe(true);
     expect(context.endCall).not.toHaveBeenCalled();
+  });
+
+  it('restores an interruption from the authoritative snapshot and keeps normal closure silent', () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const store = useVoiceCallStore();
+    const snapshot: VoiceCallSnapshot = {
+      callId: 'restored', target: { ownerId: 'agent', ownerType: 'agent', topicId: 'topic' },
+      revision: 1, active: true, micState: 'closed', micStopReason: 'audio_focus_lost', inputState: 'idle',
+      replyState: 'idle', ttsState: 'idle', partial: '', error: null, notice: null,
+      inputSessionId: null, originUserMessageId: null, ttsId: null, lastPersistedMessageId: null,
+    };
+    context.onSnapshot!(snapshot);
+    expect(store.microphoneState).toBe('error');
+    expect(store.errorMessage).toContain('音频已被其他应用接管');
+    expect(context.start).not.toHaveBeenCalled();
+    expect(warning).not.toHaveBeenCalled();
+
+    for (const micStopReason of ['requested', 'background', 'voice_cancelled', 'cancelled: stopped', null]) {
+      context.onSnapshot!({ ...snapshot, micStopReason });
+      expect(store.microphoneState).toBe('off');
+      expect(store.errorMessage).toBe('');
+    }
+    context.onSnapshot!({ ...snapshot, active: false });
+    expect(store.microphoneState).toBe('off');
+    expect(store.errorMessage).toBe('');
   });
 });

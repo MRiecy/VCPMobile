@@ -238,8 +238,8 @@ fn publish<R: Runtime>(app: &AppHandle<R>, inner: &mut CallInner) {
     let _ = app.emit("vcp-voice-call", &inner.snapshot);
 }
 
-fn reserve_conversation(
-    app: AppHandle,
+fn reserve_conversation<R: Runtime>(
+    app: AppHandle<R>,
     call_id: String,
     target: TopicKey,
 ) -> Result<VoiceCallSnapshot, String> {
@@ -297,6 +297,23 @@ fn reserve_conversation(
         vad_config: OnceCell::new(),
     }));
     Ok(snapshot)
+}
+
+fn retire_conversation<R: Runtime>(
+    app: &AppHandle<R>,
+    call_id: &str,
+) -> Result<Option<Arc<Call>>, String> {
+    let state = app.state::<VoiceCallState>();
+    let mut registry = state.registry.lock().map_err(|error| error.to_string())?;
+    // End can run before begin is polled. Record it under the same admission
+    // lock as reserve, even when no matching call has been registered yet.
+    if !registry.retired.iter().any(|id| id == call_id) {
+        if registry.retired.len() == 128 {
+            registry.retired.pop_front();
+        }
+        registry.retired.push_back(call_id.into());
+    }
+    Ok(registry.current.as_ref().filter(|call| call.id == call_id).cloned())
 }
 
 #[tauri::command]
@@ -367,7 +384,7 @@ pub fn get_voice_conversation_snapshot(
 
 #[tauri::command]
 pub async fn end_voice_conversation(app: AppHandle, call_id: String) -> Result<(), String> {
-    let Some(call) = call(&app, &call_id) else {
+    let Some(call) = retire_conversation(&app, &call_id)? else {
         return Ok(());
     };
     let ids = {
@@ -391,16 +408,6 @@ pub async fn end_voice_conversation(app: AppHandle, call_id: String) -> Result<(
         publish(&app, &mut inner);
         ids
     };
-    {
-        let state = app.state::<VoiceCallState>();
-        let mut registry = state.registry.lock().map_err(|error| error.to_string())?;
-        if !registry.retired.contains(&call_id) {
-            if registry.retired.len() == 128 {
-                registry.retired.pop_front();
-            }
-            registry.retired.push_back(call_id.clone());
-        }
-    }
     for id in &ids {
         tts::request_stop(&app, id);
     }
@@ -865,6 +872,28 @@ mod tests {
         assert_eq!(call.input_vad_config().unwrap().end_silence_ms, 777);
         call.input.cancel.cancel();
         assert!(call.input_vad_config().is_err());
+    }
+
+    #[test]
+    fn hangup_before_registration_rejects_late_begin_without_blocking_the_next_call() {
+        let app = tauri::test::mock_app();
+        app.manage(VoiceCallState::default());
+        app.manage(super::super::VoiceServiceState::default());
+        let target = TopicKey::new("agent", "a", "t");
+
+        // This is the synchronous admission step used by the end command.
+        assert!(retire_conversation(app.handle(), "cancelled").unwrap().is_none());
+        let late = reserve_conversation(app.handle().clone(), "cancelled".into(), target.clone());
+        assert!(matches!(late, Err(error) if error == network::CANCELLED));
+
+        let next = reserve_conversation(app.handle().clone(), "next".into(), target.clone()).unwrap();
+        assert!(next.active);
+        assert!(retire_conversation(app.handle(), "cancelled").unwrap().is_none());
+        let current = call(app.handle(), "next").unwrap();
+        assert!(!current.input.cancel.is_cancelled());
+        assert!(current.inner.lock().unwrap().snapshot.active);
+        assert!(reserve_conversation(app.handle().clone(), "next".into(), target).is_ok());
+        assert_eq!(app.state::<VoiceCallState>().registry.lock().unwrap().retired.len(), 1);
     }
 
     #[test]

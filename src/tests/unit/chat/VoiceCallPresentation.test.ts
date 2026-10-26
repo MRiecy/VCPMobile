@@ -9,6 +9,7 @@ import FullScreenEditor from '@/components/ui/FullScreenEditor.vue';
 import { attachMenuOpen } from '@/features/chat/attachMenuController';
 import { useVoiceCallStore } from '@/features/chat/voice/voiceCallStore';
 import type { VoiceCallSnapshot } from '@/features/chat/voice/voiceConversation';
+import type { VoiceAudioEnd } from '@/features/chat/voice/microphoneMonitor';
 import { useChatSessionStore } from '@/core/stores/chatSessionStore';
 import { useChatHistoryStore } from '@/core/stores/chatHistoryStore';
 import { useAttachmentStore } from '@/core/stores/attachmentStore';
@@ -20,12 +21,15 @@ import { mountWithPinia } from '@/tests/utils/mount';
 import { emitTauriEvent, mockInvoke } from '@/tests/mocks/tauri';
 
 const audio = vi.hoisted(() => ({
-  startMonitor: vi.fn(), stopMonitor: vi.fn(),
+  startMonitor: vi.fn(), stopMonitor: vi.fn(), emitEnded: vi.fn<(event: VoiceAudioEnd) => void>(),
 }));
 
 vi.mock('@/core/utils/platform', () => ({ isAndroid: true, isIOS: false }));
 vi.mock('@/features/chat/voice/microphoneMonitor', () => ({
-  createMicrophoneMonitor: () => ({ start: audio.startMonitor, stop: audio.stopMonitor, detach: vi.fn() }),
+  createMicrophoneMonitor: (_onLevel: unknown, onEnded: (event: VoiceAudioEnd) => void) => {
+    audio.emitEnded.mockImplementation(onEnded);
+    return { start: audio.startMonitor, stop: audio.stopMonitor, detach: vi.fn() };
+  },
 }));
 vi.mock('@/core/composables/useKeyboardInsets', async () => {
   const { ref } = await import('vue');
@@ -264,12 +268,60 @@ describe('voice entry from the existing composer', () => {
 });
 
 describe('chat scene voice transitions', () => {
+  it('keeps the native interruption visible through closed snapshots and clears it when the mic restarts', async () => {
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const snapshot: VoiceCallSnapshot = {
+      callId: '', target: { ownerId: 'voice-agent', ownerType: 'agent', topicId: 'voice-topic' },
+      revision: 1, active: true, micState: 'closed', micStopReason: null, inputState: 'idle',
+      replyState: 'idle', ttsState: 'idle', partial: '', error: null, notice: null,
+      inputSessionId: null, originUserMessageId: null, ttsId: null, lastPersistedMessageId: null,
+    };
+    mockInvoke('begin_voice_conversation', args => {
+      snapshot.callId = args!.callId as string;
+      return { ...snapshot };
+    });
+    const view = mountComposer(ChatView);
+    const voice = useVoiceCallStore();
+    voice.start();
+    await flushPromises();
+
+    const message = '音频已被其他应用接管，点击麦克风重新开启。';
+    audio.emitEnded({ kind: 'stopped', sessionId: 'capture', audioEpoch: 1, reason: 'audio_focus_lost' });
+    await nextTick();
+    expect(view.get('.voice-control-status').text()).toBe(message);
+
+    snapshot.micStopReason = 'audio_focus_lost';
+    for (let index = 0; index < 2; index += 1) {
+      snapshot.revision += 1;
+      emitTauriEvent('vcp-voice-call', { ...snapshot });
+      await nextTick();
+      expect(voice.microphoneState).toBe('error');
+      expect(view.get('.voice-control-status').text()).toBe(message);
+    }
+    expect(warning.mock.calls.filter(([label]) => label === '[VoiceAudio]')).toHaveLength(1);
+
+    voice.toggleMicrophone();
+    snapshot.revision += 1;
+    emitTauriEvent('vcp-voice-call', { ...snapshot });
+    expect(voice.microphoneState).toBe('requesting');
+    expect(voice.errorMessage).toBe('');
+    await flushPromises();
+    snapshot.revision += 1;
+    snapshot.micState = 'listening';
+    snapshot.micStopReason = null;
+    snapshot.inputSessionId = 'next-capture';
+    emitTauriEvent('vcp-voice-call', { ...snapshot });
+    await nextTick();
+    expect(voice.microphoneState).toBe('on');
+    expect(view.get('.voice-control-status').text()).toBe('正在聆听');
+  });
+
   it('keeps one status node through pending capture, mute and continuing service work', async () => {
     const pending = deferred<boolean>();
     audio.startMonitor.mockReturnValueOnce(pending.promise);
     const snapshot: VoiceCallSnapshot = {
       callId: '', target: { ownerId: 'voice-agent', ownerType: 'agent', topicId: 'voice-topic' },
-      revision: 1, active: true, micState: 'closed', inputState: 'idle',
+      revision: 1, active: true, micState: 'closed', micStopReason: null, inputState: 'idle',
       replyState: 'idle', ttsState: 'idle', partial: '', error: null, notice: null,
       inputSessionId: null, originUserMessageId: null, ttsId: null, lastPersistedMessageId: null,
     };

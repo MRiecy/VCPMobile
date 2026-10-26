@@ -10,6 +10,7 @@ export interface VoiceCallSnapshot {
   revision: number;
   active: boolean;
   micState: 'closed' | 'listening';
+  micStopReason: string | null;
   inputState: 'idle' | 'recording' | 'transcribing' | 'submitting' | 'error';
   replyState: 'idle' | 'generating' | 'recovering' | 'stopping' | 'finished' | 'cancelled' | 'error';
   ttsState: 'idle' | 'ready' | 'synthesizing' | 'speaking' | 'finished' | 'cancelled' | 'error';

@@ -197,7 +197,7 @@ impl Default for VoiceServiceState {
     }
 }
 
-pub(super) fn register_call(app: &AppHandle, call: Arc<CallInput>) -> Result<(), String> {
+pub(super) fn register_call<R: tauri::Runtime>(app: &AppHandle<R>, call: Arc<CallInput>) -> Result<(), String> {
     app.state::<VoiceServiceState>()
         .registry
         .lock()

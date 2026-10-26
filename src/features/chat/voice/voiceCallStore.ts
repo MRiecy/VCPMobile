@@ -35,12 +35,14 @@ const AUDIO_ERRORS: ReadonlyArray<readonly [RegExp, string]> = [
 ];
 
 const errorDetail = (error: unknown) => error instanceof Error ? error.message : String(error);
+const audioErrorText = (detail: string, fallback: string) =>
+  AUDIO_ERRORS.find(([code]) => code.test(detail))?.[1] ?? fallback;
 const audioErrorMessage = (error: unknown, fallback: string) => {
   const detail = errorDetail(error);
   // Native details can contain ORT/NSError stacks. Keep a bounded diagnostic
   // in the console and expose only stable, actionable messages in the product.
   console.warn('[VoiceAudio]', detail.slice(0, 512));
-  return AUDIO_ERRORS.find(([code]) => code.test(detail))?.[1] ?? fallback;
+  return audioErrorText(detail, fallback);
 };
 
 export const useVoiceCallStore = defineStore('voiceCall', () => {
@@ -83,12 +85,21 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
       if (!snapshot?.active || snapshot.micState === 'closed') {
         // The start intent owns the permission-prompt display until it settles.
         if (microphoneState.value !== 'requesting' || !snapshot?.active) {
-          microphoneState.value = 'off';
+          const reason = snapshot?.active ? snapshot.micStopReason : null;
+          // The snapshot retains the cause after the one-off native terminal,
+          // including on view recovery and later reply/playback updates.
+          errorMessage.value = reason && reason !== 'requested' && reason !== 'background'
+            && reason !== 'voice_cancelled' && !reason.startsWith('cancelled')
+            ? audioErrorText(reason, '麦克风已被系统中断，点击麦克风重试。') : '';
+          microphoneState.value = errorMessage.value ? 'error' : 'off';
           level.value = 0;
           bands.value = [];
           syncPlaybackState();
         }
-      } else if (microphoneState.value !== 'requesting') microphoneState.value = 'on';
+      } else if (microphoneState.value !== 'requesting') {
+        microphoneState.value = 'on';
+        errorMessage.value = '';
+      }
       playbackActive.value = snapshot?.ttsState === 'speaking';
     },
   });
