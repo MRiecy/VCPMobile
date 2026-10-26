@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { mount } from "@vue/test-utils";
 import { useChatHistoryStore } from "@/core/stores/chatHistoryStore";
@@ -8,6 +8,7 @@ import { useAssistantStore } from "@/core/stores/assistant";
 import { useTopicStore } from "@/core/stores/topicListManager";
 import { useSettingsStore } from "@/core/stores/settings";
 import { useNotificationStore } from "@/core/stores/notification";
+import { useAttachmentStore } from "@/core/stores/attachmentStore";
 import { chatMutationBlockReason } from "@/features/chat/chatMutationPolicy";
 import GroupStopAllButton from "@/features/chat/components/GroupStopAllButton.vue";
 import { invokeMock, mockInvoke } from "@/tests/mocks/tauri";
@@ -41,6 +42,68 @@ describe("chat mutations during generation", () => {
     });
     await useChatStreamStore().checkAndRecoverInterruptedStreams();
     invokeMock.mockClear();
+  });
+
+  it('keeps ordinary attachments and the composer receipt untouched when persistence fails', async () => {
+    const history = loadedHistory();
+    const attachments = useAttachmentStore();
+    attachments.stagedAttachments = [{ id: 'draft-file', name: 'draft.txt', type: 'text/plain', src: '', size: 4, status: 'done' }];
+    const acknowledge = vi.fn();
+    mockInvoke('append_single_message', () => Promise.reject(new Error('CAS unavailable')));
+    await history.sendMessage('retryable draft', acknowledge);
+    expect(acknowledge).not.toHaveBeenCalled();
+    expect(attachments.stagedAttachments.map(item => item.id)).toEqual(['draft-file']);
+    expect(history.currentChatHistory.map(item => item.id)).toEqual(['old']);
+    expect(history.isSubmitting).toBe(false);
+  });
+
+  it('consumes only the committed draft before generation finishes and rejects double submission', async () => {
+    const history = loadedHistory();
+    useSettingsStore().snapshot = makeConfigSnapshot(makeSettings());
+    const attachments = useAttachmentStore();
+    attachments.stagedAttachments = [{ id: 'sent-file', name: 'sent.txt', type: 'text/plain', src: '', size: 4, status: 'done' }];
+    const append = deferred<{ blocks: []; topicUpdatedAt: number }>();
+    const generation = deferred<never>();
+    mockInvoke('append_single_message', () => append.promise);
+    mockInvoke('handle_agent_chat_message', () => generation.promise);
+    const acknowledge = vi.fn();
+    const sending = history.sendMessage('submitted text', acknowledge);
+    await history.sendMessage('duplicate click', acknowledge);
+    expect(invokeMock.mock.calls.filter(([name]) => name === 'append_single_message')).toHaveLength(1);
+    expect(history.isSubmitting).toBe(true);
+    attachments.stagedAttachments.push({ id: 'later-file', name: 'later.txt', type: 'text/plain', src: '', size: 5, status: 'done' });
+    append.resolve({ blocks: [], topicUpdatedAt: 2 });
+    await vi.waitFor(() => expect(acknowledge).toHaveBeenCalledTimes(1));
+    expect(history.isSubmitting).toBe(false);
+    expect(attachments.stagedAttachments.map(item => item.id)).toEqual(['later-file']);
+    generation.reject(new Error('model unavailable'));
+    await sending;
+    expect(acknowledge).toHaveBeenCalledTimes(1);
+    expect(history.currentChatHistory[history.currentChatHistory.length - 1]?.content).toBe('submitted text');
+    expect(attachments.stagedAttachments.map(item => item.id)).toEqual(['later-file']);
+  });
+
+  it('keeps the edit intent and history until the atomic edit receipt succeeds', async () => {
+    const history = loadedHistory();
+    history.currentChatHistory.push({ id: 'later', role: 'assistant', content: 'keep on failure', timestamp: 2, blocks: [] });
+    await history.beginEditResend(history.captureMessageActionKey('old')!);
+    const intent = history.editingMessage;
+    const acknowledge = vi.fn();
+    mockInvoke('edit_resend_message', () => Promise.reject(new Error('write failed')));
+    await history.sendMessage('edited body', acknowledge);
+    expect(history.editingMessage).toBe(intent);
+    expect(history.currentChatHistory.map(item => item.content)).toEqual(['original', 'keep on failure']);
+    expect(acknowledge).not.toHaveBeenCalled();
+    expect(invokeMock.mock.calls.some(([name]) => name === 'truncate_history_after_message')).toBe(false);
+    expect(invokeMock.mock.calls.some(([name]) => name === 'append_single_message')).toBe(false);
+
+    useSettingsStore().snapshot = makeConfigSnapshot(makeSettings());
+    mockInvoke('edit_resend_message', () => ({ blocks: [{ type: 'markdown', content: 'edited body' }], topicUpdatedAt: 3, msgCount: 1 }));
+    await history.sendMessage('edited body', acknowledge);
+    expect(acknowledge).toHaveBeenCalledTimes(1);
+    expect(history.editingMessage).toBeNull();
+    expect(history.currentChatHistory.map(item => item.content)).toEqual(['edited body']);
+    expect(invokeMock.mock.calls.some(([name]) => name === 'append_single_message')).toBe(false);
   });
 
   it("rejects message, topic and owner removal while a send is still preparing, then unlocks after failure", async () => {

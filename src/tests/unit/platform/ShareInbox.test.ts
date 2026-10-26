@@ -80,12 +80,31 @@ describe('one current share', () => {
     const store = useShareStore();
     await store.refresh();
     store.closeSelector();
-    store.receiveAndroid({ intentId: 'share-4', state: 'ready', text: 'new native share', files: [] });
+    store.receiveAndroid({ intentId: 'share-4', payloadRevision: 2, state: 'ready', text: 'new native share', files: [] });
     await flushPromises();
 
     expect(store.current?.deliveryId).toBe('share-4');
     expect(store.current?.state).toBe('prepared');
     expect(store.selectorOpen).toBe(true);
+  });
+
+  it('pulls a missed cold-start snapshot and coalesces repeated ready delivery', async () => {
+    const pending = deferred<CurrentShare>();
+    const payload = { intentId: 'share-6', payloadRevision: 2, state: 'ready', text: 'cold start', files: [] };
+    mockInvoke('read_android_share', () => payload);
+    mockInvoke('accept_android_share', () => share(6, 'receiving'));
+    mockInvoke('finish_android_share', () => pending.promise);
+    mockInvoke('prepare_current_share', () => share(6, 'prepared'));
+    const store = useShareStore();
+    await store.pollAndroid();
+    await store.pollAndroid();
+    expect(invokeMock.mock.calls.filter(([name]) => name === 'finish_android_share')).toHaveLength(1);
+    expect(invokeMock.mock.calls.find(([name]) => name === 'accept_android_share')?.[1]).toMatchObject({
+      deliveryId: 'share-6', payloadRevision: 2, payloadState: 'ready',
+    });
+    pending.resolve(share(6, 'ready'));
+    await flushPromises();
+    expect(store.current?.state).toBe('prepared');
   });
 
   it('receives B while A imports and ignores the late A result', async () => {

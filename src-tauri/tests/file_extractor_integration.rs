@@ -27,6 +27,171 @@ fn write_fixture(bytes: &[u8], ext: &str) -> NamedTempFile {
     file
 }
 
+fn write_office(parts: &[(&str, &str)], extension: &str) -> NamedTempFile {
+    let file = NamedTempFile::with_suffix(format!(".{extension}")).expect("create Office fixture");
+    let mut archive = zip::ZipWriter::new(file.reopen().expect("open Office fixture"));
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for (name, content) in parts {
+        archive.start_file(*name, options).expect("start XML part");
+        archive
+            .write_all(content.as_bytes())
+            .expect("write XML part");
+    }
+    archive.finish().expect("finish Office fixture");
+    file
+}
+
+#[test]
+fn xlsx_inline_strings_keep_labels_and_sparse_columns() {
+    let file = write_office(
+        &[(
+            "xl/worksheets/sheet1.xml",
+            r#"<worksheet><sheetData><row>
+        <c r="A1" t="inlineStr"><is><r><t xml:space="preserve">Invoice </t></r><r><t>total</t></r></is></c>
+        <c r="C1"><v>123</v></c>
+        </row></sheetData></worksheet>"#,
+        )],
+        "xlsx",
+    );
+    let text = try_extract_text(
+        file.path(),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    .unwrap();
+    assert!(text.contains("Invoice total\t\t123\n"), "{text}");
+}
+
+#[test]
+fn xlsx_shared_rich_text_is_one_item_including_empty_items() {
+    let file = write_office(
+        &[
+            (
+                "xl/sharedStrings.xml",
+                r#"<sst>
+            <si><r><t xml:space="preserve">Invoice </t></r><r><t>total</t></r><rPh><t>annotation</t></rPh></si>
+            <si/><si><t>Second cell &amp; &#x4E2D;</t></si>
+            </sst>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<worksheet><sheetData><row>
+            <c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c>
+            </row></sheetData></worksheet>"#,
+            ),
+        ],
+        "xlsx",
+    );
+    let text = try_extract_text(
+        file.path(),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    .unwrap();
+    assert!(
+        text.contains("Invoice total\t\tSecond cell & 中\n"),
+        "{text}"
+    );
+    assert!(!text.contains("annotation"));
+}
+
+#[test]
+fn xlsx_invalid_shared_index_reports_incomplete_extraction() {
+    let file = write_office(
+        &[(
+            "xl/worksheets/sheet1.xml",
+            r#"<worksheet><sheetData><row><c r="A1" t="s"><v>123</v></c></row></sheetData></worksheet>"#,
+        )],
+        "xlsx",
+    );
+    let text = try_extract_text(
+        file.path(),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+    .unwrap();
+    assert!(text.contains("共享字符串索引越界"), "{text}");
+    assert!(!text.contains("--- Sheet"));
+}
+
+#[test]
+fn docx_preserves_headings_lists_bold_and_tables() {
+    let file = write_office(
+        &[(
+            "word/document.xml",
+            r#"<w:document xmlns:w="urn:word"><w:body>
+        <w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Heading</w:t></w:r></w:p>
+        <w:p><w:pPr><w:numPr/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>Bold</w:t></w:r><w:r><w:t xml:space="preserve"> plain</w:t></w:r></w:p>
+        <w:tbl><w:tr><w:tc><w:p><w:r><w:t>First</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Second</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+        </w:body></w:document>"#,
+        )],
+        "docx",
+    );
+    let text = try_extract_text(
+        file.path(),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    .unwrap();
+    assert!(text.contains("## Heading\n"), "{text}");
+    assert!(text.contains("- **Bold** plain\n"), "{text}");
+    assert!(
+        text.contains("| First | Second |\n| --- | --- |\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn pptx_reads_slides_in_numeric_order() {
+    let file = write_office(
+        &[
+            (
+                "ppt/slides/slide10.xml",
+                "<slide><p><t>Tenth</t></p></slide>",
+            ),
+            (
+                "ppt/slides/slide2.xml",
+                "<slide><p><t>Second</t></p></slide>",
+            ),
+        ],
+        "pptx",
+    );
+    let text = try_extract_text(
+        file.path(),
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
+    .unwrap();
+    assert!(text.find("Second").unwrap() < text.find("Tenth").unwrap());
+}
+
+#[test]
+fn compressed_docx_with_oversized_xml_event_stops_and_next_document_still_works() {
+    let xml = format!(
+        "<document><p><t>{}</t></p></document>",
+        "x".repeat(9 * 1024 * 1024)
+    );
+    let file = write_office(&[("word/document.xml", &xml)], "docx");
+    assert!(file.as_file().metadata().unwrap().len() < 100_000);
+    let text = try_extract_text(
+        file.path(),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    .unwrap();
+    assert!(text.contains("超过提取预算"), "{text}");
+    let normal = write_office(
+        &[(
+            "word/document.xml",
+            "<document><p><t>Still readable</t></p></document>",
+        )],
+        "docx",
+    );
+    assert_eq!(
+        try_extract_text(
+            normal.path(),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+        .as_deref(),
+        Some("Still readable\n")
+    );
+}
+
 #[test]
 fn test_extract_docx_returns_expected_text() {
     let docx_bytes = include_bytes!("fixtures/file_extractor/sample.docx");

@@ -296,6 +296,30 @@ pub fn notify_message_deletions<R: tauri::Runtime>(
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditResendResultDto {
+    #[serde(flatten)]
+    persisted: message_service::MessageWriteResultDto,
+    msg_count: i32,
+}
+
+#[tauri::command]
+pub async fn edit_resend_message(
+    app_handle: tauri::AppHandle,
+    db_state: tauri::State<'_, crate::vcp_modules::db_manager::DbState>,
+    owner_id: String,
+    owner_type: String,
+    topic_id: String,
+    message: ChatMessage,
+) -> Result<EditResendResultDto, String> {
+    let key = TopicKey::new(owner_type, owner_id, topic_id);
+    let (persisted, deletion) =
+        message_service::edit_resend_message(&app_handle, &db_state, &key, message).await?;
+    finish_history_truncation(&app_handle, &key, &deletion).await;
+    Ok(EditResendResultDto { persisted, msg_count: deletion.msg_count })
+}
+
 #[tauri::command]
 pub async fn truncate_history_after_message(
     app_handle: tauri::AppHandle,
@@ -309,9 +333,21 @@ pub async fn truncate_history_after_message(
     let deletion =
         message_service::truncate_history_after_message(&db_state, &key, &anchor_message_id)
             .await?;
+    finish_history_truncation(&app_handle, &key, &deletion).await;
+    Ok(TopicActivityDto {
+        msg_count: deletion.msg_count,
+        updated_at: deletion.topic_updated_at,
+    })
+}
+
+async fn finish_history_truncation(
+    app_handle: &tauri::AppHandle,
+    key: &TopicKey,
+    deletion: &message_service::MessageDeletionResult,
+) {
     if let Err(error) = crate::vcp_modules::chat::voice_service::stop_bubble_for_messages(
-        &app_handle,
-        &key,
+        app_handle,
+        key,
         &deletion.deleted_ids,
     )
     .await
@@ -320,21 +356,17 @@ pub async fn truncate_history_after_message(
     }
     if !deletion.deleted_ids.is_empty() {
         if let Some(turns) = app_handle.try_state::<crate::vcp_modules::vcp_client::ActiveGroupTurns>() {
-            turns.cancel(&key);
+            turns.cancel(key);
         }
     }
     for msg_id in &deletion.active_ids {
         crate::vcp_modules::vcp_client::discard_deleted_generation(
-            &app_handle,
+            app_handle,
             &MessageKey::new(key.clone(), msg_id),
         )
         .await;
     }
-    notify_message_deletions(&app_handle, &key, &deletion);
-    Ok(TopicActivityDto {
-        msg_count: deletion.msg_count,
-        updated_at: deletion.topic_updated_at,
-    })
+    notify_message_deletions(app_handle, key, deletion);
 }
 
 // --- 增量同步逻辑 (Delta Sync) (Moved to sync_manager.rs) ---

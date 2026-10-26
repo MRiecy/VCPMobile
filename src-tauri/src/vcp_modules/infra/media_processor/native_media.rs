@@ -45,18 +45,34 @@ pub(super) async fn read_cache<R: Runtime, T: DeserializeOwned + Send + 'static>
     max_cache_bytes: u64,
 ) -> Option<T> {
     let path = cache_path(app, source)?;
-    tokio::task::spawn_blocking(move || {
-        let file = std::fs::File::open(path).ok()?;
-        if file.metadata().ok()?.len() > max_cache_bytes {
-            return None;
-        }
-        let cached: CachedMedia<T> = serde_json::from_reader(BufReader::new(file)).ok()?;
-        (cached.schema_version == CACHE_SCHEMA_VERSION && cached.kind == kind)
-            .then_some(cached.payload)
-    })
-    .await
-    .ok()
-    .flatten()
+    tokio::task::spawn_blocking(move || read_cache_file(&path, kind, max_cache_bytes))
+        .await
+        .ok()
+        .flatten()
+}
+
+/// Used by image preparation, whose entire native operation already runs on a blocking worker.
+pub(super) fn read_cache_blocking<R: Runtime, T: DeserializeOwned>(
+    app: &AppHandle<R>,
+    source: &Path,
+    kind: &str,
+    max_cache_bytes: u64,
+) -> Option<T> {
+    read_cache_file(&cache_path(app, source)?, kind, max_cache_bytes)
+}
+
+fn read_cache_file<T: DeserializeOwned>(
+    path: &Path,
+    kind: &str,
+    max_cache_bytes: u64,
+) -> Option<T> {
+    let file = std::fs::File::open(path).ok()?;
+    if file.metadata().ok()?.len() > max_cache_bytes {
+        return None;
+    }
+    let cached: CachedMedia<T> =
+        serde_json::from_reader(BufReader::new(file.take(max_cache_bytes))).ok()?;
+    (cached.schema_version == CACHE_SCHEMA_VERSION && cached.kind == kind).then_some(cached.payload)
 }
 
 pub(super) async fn write_cache<R: Runtime, T: Serialize + Send + 'static>(
@@ -65,42 +81,79 @@ pub(super) async fn write_cache<R: Runtime, T: Serialize + Send + 'static>(
     kind: &'static str,
     payload: T,
 ) -> Result<T, String> {
-    let path = cache_path(app, source);
     let app = app.clone();
-    tokio::task::spawn_blocking(move || {
-        let cached = CachedMedia {
-            schema_version: CACHE_SCHEMA_VERSION,
-            kind: kind.to_string(),
-            payload,
-        };
-        if let Some(path) = path {
-            let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
-            let write_result = (|| -> Result<(), String> {
-                let parent = path.parent().ok_or("媒体缓存目录不可用")?;
-                std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-                let mut writer = BufWriter::new(
-                    std::fs::File::create(&temporary).map_err(|error| error.to_string())?,
-                );
-                serde_json::to_writer(&mut writer, &cached).map_err(|error| error.to_string())?;
-                writer.flush().map_err(|error| error.to_string())?;
-                drop(writer);
-                std::fs::rename(&temporary, &path).map_err(|error| error.to_string())
-            })();
-            if let Err(error) = write_result {
-                let _ = std::fs::remove_file(&temporary);
-                log::warn!("[MediaProcessor] Could not cache {kind} result: {error}");
-            } else {
-                crate::vcp_modules::infra::file_manager::evict_multimodal_cache_if_needed(
-                    &app,
-                    300 * 1024 * 1024,
-                    150 * 1024 * 1024,
-                );
-            }
+    let source = source.to_path_buf();
+    tokio::task::spawn_blocking(move || write_cache_blocking(&app, &source, kind, payload))
+        .await
+        .map_err(|error| format!("媒体缓存任务失败：{error}"))
+}
+
+pub(super) fn write_cache_blocking<R: Runtime, T: Serialize>(
+    app: &AppHandle<R>,
+    source: &Path,
+    kind: &str,
+    payload: T,
+) -> T {
+    let cached = CachedMedia {
+        schema_version: CACHE_SCHEMA_VERSION,
+        kind: kind.to_string(),
+        payload,
+    };
+    if let Some(path) = cache_path(app, source) {
+        let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+        let write_result = (|| -> Result<(), String> {
+            let parent = path.parent().ok_or("媒体缓存目录不可用")?;
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+            let mut writer = BufWriter::new(
+                std::fs::File::create(&temporary).map_err(|error| error.to_string())?,
+            );
+            serde_json::to_writer(&mut writer, &cached).map_err(|error| error.to_string())?;
+            writer.flush().map_err(|error| error.to_string())?;
+            drop(writer);
+            std::fs::rename(&temporary, &path).map_err(|error| error.to_string())
+        })();
+        if let Err(error) = write_result {
+            let _ = std::fs::remove_file(&temporary);
+            log::warn!("[MediaProcessor] Could not cache {kind} result: {error}");
+        } else {
+            crate::vcp_modules::infra::file_manager::evict_multimodal_cache_if_needed(
+                app,
+                300 * 1024 * 1024,
+                150 * 1024 * 1024,
+            );
         }
-        cached.payload
-    })
-    .await
-    .map_err(|error| format!("媒体缓存任务失败：{error}"))
+    }
+    cached.payload
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[test]
+    fn cache_read_checks_kind_schema_and_file_budget() {
+        let directory = tempfile::tempdir_in("tests").unwrap();
+        let path = directory.path().join("cached.json");
+        let value = serde_json::json!({
+            "schemaVersion": CACHE_SCHEMA_VERSION,
+            "kind": "video-jpeg",
+            "payload": ["first", "duplicate"]
+        });
+        let bytes = serde_json::to_vec(&value).unwrap();
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(read_cache_file::<Vec<String>>(&path, "video-jpeg-dedup-v1", 1024).is_none());
+        assert_eq!(
+            read_cache_file::<Vec<String>>(&path, "video-jpeg", bytes.len() as u64),
+            Some(vec!["first".into(), "duplicate".into()]),
+        );
+        assert!(
+            read_cache_file::<Vec<String>>(&path, "video-jpeg", bytes.len() as u64 - 1).is_none()
+        );
+        let mut old_schema = value;
+        old_schema["schemaVersion"] = serde_json::json!(CACHE_SCHEMA_VERSION - 1);
+        std::fs::write(&path, serde_json::to_vec(&old_schema).unwrap()).unwrap();
+        assert!(read_cache_file::<Vec<String>>(&path, "video-jpeg", 1024).is_none());
+    }
 }
 
 pub(super) fn read_output_file(

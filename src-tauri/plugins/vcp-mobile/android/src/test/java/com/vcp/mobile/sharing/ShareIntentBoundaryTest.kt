@@ -3,6 +3,7 @@ package com.vcp.mobile.sharing
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.Rule
@@ -71,13 +72,12 @@ class ShareIntentBoundaryTest {
         assertTrue(payload.publish(first, "A"))
 
         val second = payload.begin()
-        val delivered = mutableListOf<String>()
-        assertFalse(payload.consumeCurrent(delivered::add))
+        assertNull(payload.peek())
         assertFalse(payload.publish(first, "late-A"))
 
         assertTrue(payload.publish(second, "B"))
-        assertTrue(payload.consumeCurrent(delivered::add))
-        assertEquals(listOf("B"), delivered)
+        assertEquals("B", payload.peek()?.value)
+        assertEquals("B", payload.peek()?.value)
     }
 
     @Test
@@ -88,7 +88,41 @@ class ShareIntentBoundaryTest {
         payload.clear()
         assertFalse(payload.isCurrent(owner))
         assertFalse(payload.publish(owner, "late"))
-        assertFalse(payload.consumeCurrent { error("Destroyed payload must not be delivered") })
+        assertNull(payload.peek())
+    }
+
+    @Test
+    fun acknowledgingReceivingCannotConsumeReadyOrInvalidateItsOwner() {
+        val payload = LatestSharePayload<String>()
+        val first = payload.begin()
+        payload.publish(first, "receiving")
+        val receiving = requireNotNull(payload.peek())
+        payload.publish(first, "ready")
+        val ready = requireNotNull(payload.peek())
+        assertFalse(payload.acknowledge(first, receiving.revision))
+        assertEquals(ready, payload.peek())
+        assertTrue(payload.acknowledge(first, ready.revision))
+        assertNull(payload.peek())
+        assertTrue(payload.isCurrent(first))
+        val second = payload.begin()
+        payload.publish(second, "new share")
+        assertFalse(payload.acknowledge(first, ready.revision))
+        assertEquals("new share", payload.peek()?.value)
+    }
+
+    @Test
+    fun physicalNamesStayBoundedRegardlessOfUnicodeDisplayNameOrExtension() {
+        val owner = UUID.randomUUID().toString()
+        val ticket = UUID.randomUUID().toString()
+        val displayName = "汉".repeat(60) + ".pdf"
+        assertEquals(displayName, sanitizeSharedFileName(displayName))
+        val source = shareSourceStagingName(owner, ticket)
+        val upload = shareUploadStagingName(owner, ticket, "a".repeat(64))
+        assertTrue(source.toByteArray(Charsets.UTF_8).size < 255)
+        assertTrue(upload.toByteArray(Charsets.UTF_8).size < 255)
+        assertTrue(source.all { it.code < 128 })
+        assertFalse(upload.contains(displayName))
+        temporary.newFolder("unicode-names").resolve(source).writeText(displayName)
     }
 
     @Test
@@ -100,10 +134,10 @@ class ShareIntentBoundaryTest {
             val secondTicket = UUID.randomUUID().toString()
             val hash = "a".repeat(64)
             val first = root.resolve(
-                shareUploadStagingName(ownerId, firstTicket, hash, ".bin"),
+                shareUploadStagingName(ownerId, firstTicket, hash),
             )
             val second = root.resolve(
-                shareUploadStagingName(ownerId, secondTicket, hash, ".bin"),
+                shareUploadStagingName(ownerId, secondTicket, hash),
             )
 
             assertNotEquals(first, second)

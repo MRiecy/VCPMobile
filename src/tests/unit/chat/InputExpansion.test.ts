@@ -7,6 +7,7 @@ import { useModalHistory } from '@/core/composables/useModalHistory';
 import { useChatHistoryStore } from '@/core/stores/chatHistoryStore';
 import { useChatSessionStore } from '@/core/stores/chatSessionStore';
 import { useShareStore } from '@/core/stores/shareStore';
+import { useAttachmentStore } from '@/core/stores/attachmentStore';
 import { mountWithPinia } from '@/tests/utils/mount';
 
 let wrapper: VueWrapper;
@@ -148,12 +149,18 @@ describe('chat input expansion', () => {
     expect(wrapper.emitted('send')?.[0]?.[0]).toContain('拼音');
   });
 
-  it('sends through the original action, clears ordinary input and collapses', async () => {
+  it('keeps ordinary input until persistence acknowledges the send and collapses immediately', async () => {
     await expand();
     const draft = textarea.value;
     await wrapper.get('[aria-label="发送消息"]').trigger('click');
     await settle();
-    expect(wrapper.emitted('send')).toEqual([[draft]]);
+    expect(wrapper.emitted('send')).toEqual([[draft, expect.any(Function)]]);
+    expect(textarea.value).toBe(draft);
+    const acknowledge = wrapper.emitted('send')![0][1] as () => void;
+    // The real composer has a selected conversation before send is enabled.
+    vi.spyOn(useChatSessionStore(), 'isConversationCurrent').mockReturnValue(true);
+    acknowledge();
+    await settle();
     expect(textarea.value).toBe('');
     expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
   });
@@ -170,6 +177,61 @@ describe('chat input expansion', () => {
     await wrapper.get('[aria-label="发送消息"]').trigger('click');
     expect(send).toHaveBeenCalledWith(draft);
     expect(wrapper.emitted('send')).toBeUndefined();
+  });
+
+  it('does not clear a newer input when the previous send is acknowledged', async () => {
+    await wrapper.get('textarea').setValue('sent draft');
+    await wrapper.get('[aria-label="发送消息"]').trigger('click');
+    const acknowledge = wrapper.emitted('send')![0][1] as () => void;
+    await wrapper.get('textarea').setValue('new draft');
+    acknowledge();
+    await settle();
+    expect(textarea.value).toBe('new draft');
+  });
+
+  it('consumes a parked ordinary draft without clearing a newly received share', async () => {
+    const session = useChatSessionStore();
+    session.setConversation({ id: 'agent-a', type: 'agent' }, 'topic-a');
+    const attachments = useAttachmentStore();
+    attachments.stagedAttachments = [{ id: 'ordinary-file', name: 'ordinary.txt', type: 'text/plain', src: '', size: 4, status: 'done' }];
+    await wrapper.get('textarea').setValue('ordinary draft');
+    await wrapper.get('[aria-label="发送消息"]').trigger('click');
+    const acknowledge = wrapper.emitted('send')![0][1] as () => void;
+    const share = useShareStore();
+    share.current = {
+      generation: 1, deliveryId: 'incoming', revision: 1, state: 'draft',
+      agentId: 'agent-a', topicId: 'topic-a', text: 'new share', items: [],
+      attachments: [{ id: 'incoming-file', name: 'incoming.txt', type: 'text/plain', src: '', size: 3, status: 'done' }],
+    };
+    await settle();
+    acknowledge();
+    await settle();
+    expect(textarea.value).toBe('new share');
+    expect(attachments.stagedAttachments.map(item => item.name)).toEqual(['incoming.txt']);
+    share.current = { ...share.current, state: 'discarded' };
+    await settle();
+    expect(textarea.value).toBe('');
+    expect(attachments.stagedAttachments).toEqual([]);
+  });
+
+  it('keeps long edit and share refills as text without staging TXT attachments', async () => {
+    const session = useChatSessionStore();
+    session.setConversation({ id: 'agent-a', type: 'agent' }, 'topic-a');
+    const history = useChatHistoryStore();
+    const text = '长消息正文'.repeat(300);
+    history.editingMessage = { key: { conversation: session.currentConversationKey!, messageId: 'old' }, initialContent: text };
+    await settle();
+    expect(textarea.value).toBe(text);
+    expect(useAttachmentStore().stagedAttachments).toEqual([]);
+    history.editingMessage = null;
+    await settle();
+    useShareStore().current = {
+      generation: 1, deliveryId: 'incoming-long', revision: 1, state: 'draft',
+      agentId: 'agent-a', topicId: 'topic-a', text, items: [], attachments: [],
+    };
+    await settle();
+    expect(textarea.value).toBe(text);
+    expect(useAttachmentStore().stagedAttachments).toEqual([]);
   });
 
   it('collapses on disabled or conversation changes and releases observation on unmount', async () => {

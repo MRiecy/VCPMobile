@@ -6440,6 +6440,7 @@ dependencies = [
  "pdf_oxide",
  "percent-encoding",
  "pulldown-cmark",
+ "quick-xml 0.42.0",
  "rand 0.8.6",
  "regex",
  "reqwest 0.12.28",

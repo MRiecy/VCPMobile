@@ -69,18 +69,13 @@ const { initRootHistory } = useModalHistory();
 
 // One recoverable share; native acquisition and message commits are owned by Rust.
 const shareStore = useShareStore();
-let pendingAndroidShare: unknown = null;
-const handleShareIntent = (event: Event) => {
-  const detail = (event as CustomEvent<unknown>).detail;
-  if (lifecycleStore.state !== "READY") pendingAndroidShare = detail;
-  else shareStore.receiveAndroid(detail);
+const handleShareIntent = () => {
+  if (lifecycleStore.state === "READY") void shareStore.pollAndroid().catch(shareStore.notify);
 };
 const refreshShare = () => {
   if (lifecycleStore.state !== "READY" || (!isAndroid && !isIOS)) return;
-  if (pendingAndroidShare) {
-    shareStore.receiveAndroid(pendingAndroidShare);
-    pendingAndroidShare = null;
-  } else void shareStore.refresh().catch(shareStore.notify);
+  const pending = isAndroid ? shareStore.pollAndroid() : Promise.resolve();
+  void pending.then(() => shareStore.refresh()).catch(shareStore.notify);
 };
 watch(() => lifecycleStore.state, state => { if (state === "READY") refreshShare(); });
 watch(() => lifecycleStore.lifecycleSnapshot?.phase, (phase, previous) => {
@@ -520,6 +515,7 @@ onMounted(async () => {
   }
   if (isIOS) void subscribeNativeNotifications();
   if (isIOS) window.addEventListener("vcp-share-inbox-changed", refreshShare);
+  refreshShare();
   leftSidebarPersistent.addEventListener("change", reconcileDrawerPresentation);
   rightSidebarPersistent.addEventListener("change", reconcileDrawerPresentation);
   reconcileDrawerPresentation();

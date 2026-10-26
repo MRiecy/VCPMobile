@@ -82,6 +82,33 @@ afterEach(() => {
 });
 
 describe('long text paste resource and input ownership', () => {
+  it('excludes explicit programmatic replacements and immediately detects the next unknown input', async () => {
+    const { input, setProgrammaticInput } = setup();
+    setProgrammaticInput(longText);
+    setProgrammaticInput('restored draft ' + longText);
+    expect(input.value).toBe('restored draft ' + longText);
+    expect(attachments.stagedAttachments).toEqual([]);
+    expect(invokeMock).not.toHaveBeenCalled();
+
+    input.value += longText;
+    expect(input.value).toBe('restored draft ' + longText);
+    await vi.waitFor(() => expect(attachments.stagedAttachments[0]?.status).toBe('done'));
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    const bytes = invokeMock.mock.calls[0][1]?.fileBytes as Uint8Array;
+    expect(new TextDecoder().decode(bytes)).toBe(longText);
+  });
+
+  it('updates the synchronous baseline after conversion rollback', async () => {
+    const { input } = setup('prefix ');
+    input.value += longText;
+    await vi.waitFor(() => expect(attachments.stagedAttachments[0]?.status).toBe('done'));
+    input.value += longText;
+    await vi.waitFor(() => expect(attachments.stagedAttachments).toHaveLength(2));
+    expect(input.value).toBe('prefix ');
+    await vi.waitFor(() => expect(attachments.stagedAttachments.every(item => item.status === 'done')).toBe(true));
+    expect(invokeMock).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     ['ASCII', 'a'.repeat(MAX_BYTES)],
     ['Chinese', '中'.repeat(Math.floor(MAX_BYTES / 3)) + 'ab'],

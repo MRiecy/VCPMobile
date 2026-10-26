@@ -29,14 +29,27 @@ function fitsTextFileBudget(text: string): boolean {
   return true;
 }
 
-export function useLongTextPaste(input: Ref<string>) {
+export function useLongTextPaste(input: Ref<string>, canConvert: () => boolean = () => true) {
   const sessionStore = useChatSessionStore();
   const attachmentStore = useAttachmentStore();
   const notificationStore = useNotificationStore();
   const isProcessing = ref(false);
   let disposed = false;
   let activeAttachmentId: string | null = null;
-  let restoredInput: string | null = null;
+  let programmaticDepth = 0;
+  let inputBaseline = input.value;
+
+  // Only known application writes bypass detection. Sync delivery keeps the
+  // source scope alive for the watcher, including nested conversion rollback.
+  const setProgrammaticInput = (value: string) => {
+    programmaticDepth++;
+    try {
+      input.value = value;
+      inputBaseline = value;
+    } finally {
+      programmaticDepth--;
+    }
+  };
 
   const removeActiveAttachment = () => {
     const index = attachmentStore.stagedAttachments.findIndex(a => a.id === activeAttachmentId);
@@ -75,7 +88,7 @@ export function useLongTextPaste(input: Ref<string>) {
     recoveryInput?: string,
   ) => {
     // paste / beforeinput / watch 共享同一次占用；忙碌时保留普通文本输入。
-    if (disposed || isProcessing.value || !assertTopicSelected()) return;
+    if (disposed || isProcessing.value || !canConvert() || !assertTopicSelected()) return;
     if (!fitsTextFileBudget(text)) {
       notificationStore.addNotification({
         type: 'warning',
@@ -154,8 +167,7 @@ export function useLongTextPaste(input: Ref<string>) {
       if (removed && String(err).toLowerCase().includes('cancel')) return;
       if (consumed) {
         // 保留处理中用户继续输入的内容；恢复操作不能再触发自动转附件。
-        restoredInput = input.value === retainedInput ? recoveryText : input.value + text;
-        input.value = restoredInput;
+        setProgrammaticInput(input.value === retainedInput ? recoveryText : input.value + text);
       }
       notificationStore.addNotification({
         type: 'error',
@@ -215,10 +227,10 @@ export function useLongTextPaste(input: Ref<string>) {
   /**
    * Layer 3: watch 突变检测（覆盖不标准输入法的 paste）
    */
-  watch(input, (newVal, oldVal) => {
-    const isRestored = newVal === restoredInput;
-    restoredInput = null;
-    if (isRestored || isProcessing.value) return;
+  watch(input, (newVal) => {
+    const oldVal = inputBaseline;
+    inputBaseline = newVal;
+    if (programmaticDepth || isProcessing.value || !canConvert()) return;
     const delta = newVal.length - oldVal.length;
     if (delta > LONG_TEXT_THRESHOLD) {
       let pastedText = newVal;
@@ -227,13 +239,14 @@ export function useLongTextPaste(input: Ref<string>) {
       }
 
       // 超限或没有话题时保留已经进入输入框的文本。
-      void stageTextAsFile(pastedText, () => { input.value = oldVal; }, newVal);
+      void stageTextAsFile(pastedText, () => setProgrammaticInput(oldVal), newVal);
     }
-  });
+  }, { flush: 'sync' });
 
   return {
     handlePaste,
     handleBeforeInput,
+    setProgrammaticInput,
     isProcessing,
     LONG_TEXT_THRESHOLD,
   };

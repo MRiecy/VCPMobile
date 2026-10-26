@@ -2,8 +2,6 @@
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from "vue";
 import { useChatSessionStore, type ConversationKey } from "../../core/stores/chatSessionStore";
 import { useChatHistoryStore } from "../../core/stores/chatHistoryStore";
-import { useShareStore } from "../../core/stores/shareStore";
-import type { Attachment } from "../../core/types/chat";
 import { useChatStreamStore } from "../../core/stores/chatStreamStore";
 import { useTopicStore } from "../../core/stores/topicListManager";
 import { useThemeStore } from "../../core/stores/theme";
@@ -20,7 +18,6 @@ import CoreStatusIndicator from "../../components/ui/CoreStatusIndicator.vue";
 import { ArrowDown, ListChecks, SlidersHorizontal } from "@lucide/vue";
 import VoiceCallControls from "./voice/VoiceCallControls.vue";
 import { useVoiceCallStore } from "./voice/voiceCallStore";
-import { useAttachmentStore } from "../../core/stores/attachmentStore";
 import { useKeyboardInsets } from "../../core/composables/useKeyboardInsets";
 import { useChatScroll } from "../../core/composables/useChatScroll";
 import { openPresentationMenu } from "./presentationMenu";
@@ -33,11 +30,9 @@ let contentGeneration = 0;
 let viewDisposed = false;
 
 const sessionStore = useChatSessionStore();
-const shareStore = useShareStore();
 const historyStore = useChatHistoryStore();
 const topicStore = useTopicStore();
 const streamStore = useChatStreamStore();
-const attachmentStore = useAttachmentStore();
 const themeStore = useThemeStore();
 const chatPreferences = useChatPreferencesStore();
 const lifecycleStore = useAppLifecycleStore();
@@ -194,28 +189,6 @@ watch(isStreamingActive, (active) => {
   if (active) startAutoScroll();
   else stopAutoScroll();
 });
-
-// Share attachments have their own draft; replacement never destroys normal staged files.
-let ordinaryAttachments: Attachment[] | null = null;
-watch(
-  () => shareStore.activeDraft?.deliveryId,
-  (deliveryId, previous) => {
-    if (deliveryId) {
-      if (!previous) {
-        const unfinished = attachmentStore.stagedAttachments.some(item => item.status !== 'done');
-        ordinaryAttachments = attachmentStore.stagedAttachments.filter(item => item.status === 'done').map(item => ({ ...item }));
-        if (unfinished) notificationStore.addNotification({ type: 'info', message: '已取消原输入中尚未完成的附件，已完成附件会在结束分享后保留。', toastOnly: true });
-      }
-      attachmentStore.clearStaged();
-      attachmentStore.stagedAttachments = (shareStore.activeDraft?.attachments ?? []).map((item, index) => ({ ...item, id: `share_${deliveryId}_${index}` }));
-    } else if (previous) {
-      attachmentStore.clearStaged();
-      attachmentStore.stagedAttachments = ordinaryAttachments ?? [];
-      ordinaryAttachments = null;
-    }
-  },
-  { immediate: true },
-);
 
 // --- Keyboard Offset & Inset Handler ---
 watch(keyboardHeight, (height) => {

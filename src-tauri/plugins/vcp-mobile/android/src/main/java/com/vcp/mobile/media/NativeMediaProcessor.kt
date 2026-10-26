@@ -32,11 +32,29 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.io.OutputStream
 import java.nio.ByteBuffer
+import java.security.MessageDigest
 import java.util.ArrayDeque
 import java.util.concurrent.CancellationException
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.min
+
+/** Fingerprints exact ARGB pixels row by row, without another whole-frame allocation. */
+internal fun videoFrameFingerprint(bitmap: Bitmap, checkCancelled: () -> Unit): ByteArray {
+    val digest = MessageDigest.getInstance("SHA-256")
+    digest.update(ByteBuffer.allocate(8).putInt(bitmap.width).putInt(bitmap.height).array())
+    val pixels = IntArray(bitmap.width)
+    val row = ByteBuffer.allocate(bitmap.width * 4)
+    val rowPixels = row.asIntBuffer()
+    for (y in 0 until bitmap.height) {
+        checkCancelled()
+        bitmap.getPixels(pixels, 0, bitmap.width, 0, y, bitmap.width, 1)
+        rowPixels.clear()
+        rowPixels.put(pixels)
+        digest.update(row.array())
+    }
+    return digest.digest()
+}
 
 /**
  * Owns native attachment work until its process callback has settled. Rust owns the
@@ -394,6 +412,7 @@ internal class NativeMediaProcessor(context: Context) {
             val count = min(candidateCount, 300).toInt()
             val paths = ArrayList<String>(count)
             var totalBytes = 0L
+            var previousFingerprint: ByteArray? = null
             for (index in 0 until count) {
                 checkCancelled(operation)
                 val candidateIndex = index.toLong() * candidateCount / count
@@ -412,10 +431,13 @@ internal class NativeMediaProcessor(context: Context) {
                         decoded, (decoded.width * scale).toInt().coerceAtLeast(1),
                         (decoded.height * scale).toInt().coerceAtLeast(1), true,
                     ) else decoded
+                    val encodedFrame = checkNotNull(scaled)
+                    val fingerprint = videoFrameFingerprint(encodedFrame) { checkCancelled(operation) }
+                    // Only adjacent equal pictures are redundant: an A -> B -> A return remains.
+                    if (previousFingerprint?.contentEquals(fingerprint) == true) continue
                     val frameFile = File(directory, "frame_%04d.jpg".format(index + 1))
                     check(!frameFile.exists()) { "Video frame output already exists" }
                     operation.files.add(frameFile)
-                    val encodedFrame = checkNotNull(scaled)
                     FileOutputStream(frameFile).use { output ->
                         val limited = BudgetOutputStream(output, maxBytes - totalBytes, operation)
                         val encoded = encodedFrame.compress(Bitmap.CompressFormat.JPEG, 90, limited)
@@ -426,6 +448,7 @@ internal class NativeMediaProcessor(context: Context) {
                     }
                     check(frameFile.length() > 0) { "Encoded video frame is empty" }
                     paths.add(frameFile.absolutePath)
+                    previousFingerprint = fingerprint
                 } finally {
                     if (scaled !== frame) scaled?.recycle()
                     frame?.recycle()

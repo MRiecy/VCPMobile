@@ -3,6 +3,7 @@ package com.vcp.mobile.files
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -12,10 +13,49 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.nio.ByteBuffer
 
 class FileExportTest {
     @get:Rule
     val temporaryFolder = TemporaryFolder(java.io.File("build").apply { mkdirs() })
+
+    private fun fileTypeBox(major: String, vararg compatible: String): ByteArray {
+        val bytes = ByteBuffer.allocate(16 + compatible.size * 4)
+        bytes.putInt(bytes.capacity()).put("ftyp".toByteArray(Charsets.US_ASCII))
+            .put(major.toByteArray(Charsets.US_ASCII)).putInt(0)
+        compatible.forEach { bytes.put(it.toByteArray(Charsets.US_ASCII)) }
+        return bytes.array()
+    }
+
+    @Test
+    fun heifAndAvifBrandsUseTheirOriginalContainerMime() {
+        assertEquals("image/heic", sniffBmffImageMime(fileTypeBox("heic", "mif1")))
+        assertEquals("image/heic", sniffBmffImageMime(fileTypeBox("mif1", "heix")))
+        assertEquals("image/heif", sniffBmffImageMime(fileTypeBox("mif1")))
+        assertEquals("image/avif", sniffBmffImageMime(fileTypeBox("mif1", "avif")))
+        assertEquals("image/avif", sniffBmffImageMime(fileTypeBox("avis", "msf1")))
+        assertEquals("image/heic-sequence", sniffBmffImageMime(fileTypeBox("hevc", "msf1")))
+    }
+
+    @Test
+    fun brandsMustBeInsideACompleteFileTypeBox() {
+        val avif = fileTypeBox("avif", "mif1")
+        assertNull(sniffBmffImageMime(avif.copyOf(avif.size - 1)))
+        assertNull(sniffBmffImageMime(fileTypeBox("mp42") + "avif".toByteArray()))
+        assertNull(sniffBmffImageMime("ftypavif is only text".toByteArray()))
+        val invalid = avif.copyOf()
+        ByteBuffer.wrap(invalid).putInt(Int.MAX_VALUE)
+        assertNull(sniffBmffImageMime(invalid))
+    }
+
+    @Test
+    fun extendedSizeFileTypeBoxIsReadWithoutUsingVersionAsABrand() {
+        val box = ByteBuffer.allocate(28)
+            .putInt(1).put("ftyp".toByteArray()).putLong(28)
+            .put("mif1".toByteArray()).put("avif".toByteArray()).put("heic".toByteArray())
+            .array()
+        assertEquals("image/heic", sniffBmffImageMime(box))
+    }
 
     @Test
     fun shortReadsAreCopiedWithoutDroppingBytesAtTheLimit() {

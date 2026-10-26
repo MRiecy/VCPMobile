@@ -17,6 +17,7 @@ internal class StreamSession(
     @Volatile var terminalError: String? = null,
     var activeConnection: ClientConnection? = null,
     val contextJson: JSONObject? = null,
+    var requestBody: RequestBodyFile? = null,
 ) {
     @Volatile var handoffWakeDeadlineMs: Long = 0
     var handoffJob: Job? = null

@@ -53,6 +53,8 @@ Android 保留 `tauri-plugin-vcp-mobile` 一个 Gradle library。所有 Kotlin �
 
 线程域与原有预算保持在实际操作附近。文件队列保持有界和串行；Root 或 OOM 调度不能占住文件执行器。权限工具不再维护另一套 pending Invoke。
 
+Android 分享事件只唤醒读取最新快照；READY/回前台也主动拉取，Rust 持久化相应阶段后按 owner 与 payload revision 确认。物理 staging 名只包含有界机器标识，展示名独立保存。Rust 接手 uploads 后负责失败原件与部分目标清理，已发布 ready 的文件不随迟到错误删除。相册和下载共用 legacy 写权限等待器，API 26–28 授权后继续原保存操作；相册以有界 `ftyp` 品牌识别 HEIC/HEIF/AVIF，并按实际编码保存原始字节和后缀。
+
 ## 4. CLI 进程闭环
 
 `CliProcessHost` 持有 prepared runtime、generation、进程注册表、控制/查询/取消执行器，以及进程终态。`CliPtyHost` 通过 Host 的 `terminalLaunchSpec` 取得同一运行时，不建立第二份准备状态。
@@ -73,6 +75,7 @@ Android 保留 `tauri-plugin-vcp-mobile` 一个 Gradle library。所有 Kotlin �
 - `StreamSession` 持有正文、generation、当前消费者、上游、终态及交接任务。
 - `SseProtocol` 负责 framing、正文切块与有限通知预览。
 - `CompletedMailbox` 负责原子提交离线结果，不自行调度重试。
+- `RequestBodyFile` 原子认领 Rust 准备的请求正文，分块上传并在已进入的写入结束后释放；请求正文不再嵌入控制 JSON。最终 HTTP 请求预算为 128 MiB，控制/响应帧的限额独立管理。
 - `SseNotifications`、`SsePowerLocks` 处理原生资源，不维护会话副本。
 
 恢复时替换消费者并排入快照与实时追加保持同一个 session monitor。ACK、落盘与移除保持既有序列；端口发布、停止接纳与关闭使用同一生命周期 owner。

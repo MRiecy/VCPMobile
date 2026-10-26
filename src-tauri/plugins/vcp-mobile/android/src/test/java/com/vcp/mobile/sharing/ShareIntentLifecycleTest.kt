@@ -89,8 +89,7 @@ class ShareIntentLifecycleTest {
         drain()
         shadowOf(Looper.getMainLooper()).idle()
         assertEquals(owner, handler.currentOwnerId())
-        assertTrue(scripts.last().contains("new contents"))
-        assertFalse(scripts.any { it.contains("old contents") })
+        assertEquals("new contents", handler.readPendingPayload()?.getString("text"))
     }
 
     @Test fun destroyInvalidatesAnExtractionAlreadyQueuedForUiPublication() {
@@ -111,8 +110,29 @@ class ShareIntentLifecycleTest {
         executor.shutdownNow()
         handler.handleShareIntent(textIntent("cannot queue"))
         assertEquals(2, scripts.size)
-        assertTrue(scripts.first().contains("receiving"))
-        assertTrue(scripts.last().contains("failed"))
+        assertEquals("failed", handler.readPendingPayload()?.getString("state"))
+    }
+
+    @Test fun ignoredColdStartNotificationsDoNotConsumeTheReadyPayload() {
+        handler.handleShareIntent(textIntent("cold start"))
+        val receiving = requireNotNull(handler.readPendingPayload())
+        drain()
+        shadowOf(Looper.getMainLooper()).idle()
+        val ready = requireNotNull(handler.readPendingPayload())
+        assertEquals("ready", ready.getString("state"))
+        assertEquals("cold start", ready.getString("text"))
+        handler.acknowledgePayload(AcknowledgeSharePayloadArgs().apply {
+            ownerId = receiving.getString("intentId")
+            payloadRevision = receiving.getLong("payloadRevision")
+        })
+        assertEquals(ready.toString(), handler.readPendingPayload()?.toString())
+        handler.acknowledgePayload(AcknowledgeSharePayloadArgs().apply {
+            ownerId = ready.getString("intentId")
+            payloadRevision = ready.getLong("payloadRevision")
+            settled = true
+        })
+        assertNull(handler.readPendingPayload())
+        assertTrue(handler.isCurrentOwner(ready.getString("intentId")))
     }
 
     @Test fun replacementHandlerDoesNotDeleteAFileAlreadyClaimedByAnEarlierWorker() {

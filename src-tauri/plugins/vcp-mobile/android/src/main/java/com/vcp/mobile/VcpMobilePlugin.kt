@@ -56,6 +56,7 @@ import com.vcp.mobile.runtime.PluginTaskRuntime
 import com.vcp.mobile.service.AcquireForegroundArgs
 import com.vcp.mobile.service.ReleaseForegroundArgs
 import com.vcp.mobile.sharing.ShareIntentHandler
+import com.vcp.mobile.sharing.AcknowledgeSharePayloadArgs
 import com.vcp.mobile.sharing.SharedFileIngestor
 import com.vcp.mobile.updater.NativeUpdater
 import com.vcp.mobile.voice.NativeVoiceAudio
@@ -671,6 +672,20 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
         invoke.resolve(JSObject().apply { put("deliveryId", shareIntentHandler.currentOwnerId()) })
     }
 
+    @Command
+    fun readShareInboxPayload(invoke: Invoke) {
+        invoke.resolve(JSObject().apply { put("payload", shareIntentHandler.readPendingPayload()) })
+    }
+
+    @Command
+    fun acknowledgeShareInboxPayload(invoke: Invoke) {
+        val args = invoke.parseArgs(AcknowledgeSharePayloadArgs::class.java)
+        runtime.execute(runtime.domains.fileIoExecutor, invoke, "acknowledgeShareInboxPayload") {
+            shareIntentHandler.acknowledgePayload(args)
+            invoke.resolve()
+        }
+    }
+
     private fun escapeJsonForJsString(json: String): String {
         return json
             .replace("\\", "\\\\")
@@ -749,7 +764,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     fun saveFileToDownloads(invoke: Invoke) = fileExports.saveFileToDownloads(invoke)
 
     @PermissionCallback
-    fun onDownloadsWritePermissionResult(invoke: Invoke) = fileExports.onDownloadsWritePermissionResult(invoke)
+    fun onLegacyWritePermissionResult(invoke: Invoke) = fileExports.onLegacyWritePermissionResult(invoke)
 
     // ==================================================================
     // Webview High Performance Capture

@@ -42,9 +42,13 @@ final class ShareAcquisition {
         queue.async { self.begin(providers, initialText: initialText) }
     }
 
-    private func checkCurrent() throws {
+    private func checkLocalCancellation() throws {
         stateLock.lock(); let stopped = cancelled || phase != .acquiring; stateLock.unlock()
         if stopped { throw failure("分享已取消") }
+    }
+
+    private func checkCurrent() throws {
+        try checkLocalCancellation()
         try storage.checkCurrent()
     }
 
@@ -155,7 +159,10 @@ final class ShareAcquisition {
                 defer { try? output.close() }
                 var hash = SHA256(); var size: Int64 = 0
                 while let bytes = try input.read(upToCount: 64 * 1024), !bytes.isEmpty {
-                    try checkCurrent()
+                    // Cross-process identity is checked at file boundaries and
+                    // again under the slot lock at publication. Each block only
+                    // needs prompt local cancellation and resource accounting.
+                    try checkLocalCancellation()
                     size += Int64(bytes.count)
                     guard totalBytes + size <= maxBytes else { throw failure("单次分享总大小不能超过 512 MiB") }
                     guard retainedBytes + totalBytes + size <= 1024 * 1024 * 1024 else { throw failure("分享暂存超过 1 GiB，请等待上一操作结束后重试") }
@@ -163,6 +170,7 @@ final class ShareAcquisition {
                     guard free > 64 * 1024 * 1024 else { throw failure("可用空间不足，至少需要保留 64 MiB") }
                     try output.write(contentsOf: bytes); hash.update(data: bytes)
                 }
+                try checkCurrent()
                 try output.synchronize()
                 totalBytes += size
                 return ["itemId": itemId, "fileName": readable.lastPathComponent, "mimeType": type.preferredMIMEType ?? "application/octet-stream", "size": size, "sha256": hash.finalize().map { String(format: "%02x", $0) }.joined()]

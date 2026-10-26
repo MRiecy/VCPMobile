@@ -34,7 +34,7 @@ macro_rules! app_command_handler {
         };
         use crate::vcp_modules::aurora_pipeline::rebuild_aurora_snapshot;
         use crate::vcp_modules::chat_manager::{
-            append_single_message, delete_messages, load_chat_history, load_chat_history_around,
+            append_single_message, delete_messages, edit_resend_message, load_chat_history, load_chat_history_around,
             load_chat_history_streamed, patch_single_message, truncate_history_after_message,
         };
         use crate::vcp_modules::chat::voice_service::{
@@ -112,7 +112,8 @@ macro_rules! app_command_handler {
         };
         use crate::vcp_modules::infra::share_inbox::{
             accept_android_share, bind_current_share, commit_share_message, discard_current_share,
-            finish_android_share, prepare_current_share, read_current_share, update_share_draft,
+            finish_android_share, prepare_current_share, read_android_share, read_current_share,
+            update_share_draft,
         };
         use crate::vcp_modules::sync_service::{
             clear_old_sync_logs, list_sync_log_files, prepare_sync_log_share_file,
@@ -183,6 +184,7 @@ macro_rules! app_command_handler {
                 chat_strip_thought_chains,
                 delete_message_attachment,
                 delete_messages,
+                edit_resend_message,
                 fetch_raw_message_content,
                 handle_agent_chat_message,
                 load_chat_history,
@@ -345,6 +347,7 @@ macro_rules! app_command_handler {
                 store_temporary_export,
                 // ── 当前一次分享（share_inbox）──
                 accept_android_share,
+                read_android_share,
                 bind_current_share,
                 commit_share_message,
                 discard_current_share,

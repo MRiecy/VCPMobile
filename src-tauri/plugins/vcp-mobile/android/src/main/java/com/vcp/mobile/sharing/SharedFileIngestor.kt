@@ -49,7 +49,7 @@ internal class SharedFileIngestor(
                 val context = activity
                 val sharedRoot = java.io.File(context.cacheDir, "shared").apply { mkdirs() }.canonicalFile
                 val sourceFile = java.io.File(cachePath).canonicalFile
-                val expectedName = "shared_${ownerId}_${stagingTicket}_$originalName"
+                val expectedName = shareSourceStagingName(ownerId, stagingTicket)
                 if (sourceFile.parentFile != sharedRoot || sourceFile.name != expectedName || !sourceFile.isFile) {
                     invoke.deliverError("拒绝处理不属于当前 intent ticket 的分享 staging 文件")
                     return@fileTask
@@ -71,7 +71,7 @@ internal class SharedFileIngestor(
                 }
                 var mimeType = rawMimeType
                 if (mimeType.isNullOrBlank()) {
-                    val ext = sourceFile.extension.lowercase()
+                    val ext = java.io.File(originalName).extension.lowercase()
                     mimeType = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "application/octet-stream"
                 }
 
@@ -101,12 +101,9 @@ internal class SharedFileIngestor(
 
                 // uploads 只是交给 Rust ingest 的临时交接区。永久 CAS 去重由 Rust 负责；
                 // owner/ticket 保证同内容的多个分享消费者不会争用同一个临时文件。
-                val fileExtension = java.io.File(originalName).extension.let {
-                    if (it.isEmpty()) "" else ".$it"
-                }
                 val finalTempFile = java.io.File(
                     uploadsDir,
-                    shareUploadStagingName(ownerId, stagingTicket, hash, fileExtension),
+                    shareUploadStagingName(ownerId, stagingTicket, hash),
                 )
 
                 if (finalTempFile.exists()) {

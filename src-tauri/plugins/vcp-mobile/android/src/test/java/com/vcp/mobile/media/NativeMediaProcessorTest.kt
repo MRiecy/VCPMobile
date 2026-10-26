@@ -1,6 +1,7 @@
 package com.vcp.mobile.media
 
 import android.content.Context
+import android.graphics.Bitmap
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -24,6 +25,40 @@ import java.util.concurrent.atomic.AtomicReference
 class NativeMediaProcessorTest {
     @get:Rule
     val temporaryFolder = TemporaryFolder(File("build").apply { mkdirs() })
+
+    @Test
+    fun videoFingerprintTracksExactPixelsAndDimensions() {
+        val a = Bitmap.createBitmap(intArrayOf(0xff010203.toInt(), 0xff040506.toInt()), 2, 1, Bitmap.Config.ARGB_8888)
+        val duplicate = a.copy(Bitmap.Config.ARGB_8888, true)
+        val changed = a.copy(Bitmap.Config.ARGB_8888, true).apply { setPixel(1, 0, 0xff040507.toInt()) }
+        val rotated = Bitmap.createBitmap(intArrayOf(0xff010203.toInt(), 0xff040506.toInt()), 1, 2, Bitmap.Config.ARGB_8888)
+        try {
+            val first = videoFrameFingerprint(a) { }
+            assertTrue(first.contentEquals(videoFrameFingerprint(duplicate) { }))
+            assertFalse(first.contentEquals(videoFrameFingerprint(changed) { }))
+            assertFalse(first.contentEquals(videoFrameFingerprint(rotated) { }))
+        } finally {
+            listOf(a, duplicate, changed, rotated).forEach { it.recycle() }
+        }
+    }
+
+    @Test
+    fun videoFingerprintObservesCancellationBetweenRows() {
+        val bitmap = Bitmap.createBitmap(2, 3, Bitmap.Config.ARGB_8888)
+        var checks = 0
+        try {
+            val error = runCatching {
+                videoFrameFingerprint(bitmap) {
+                    checks += 1
+                    if (checks == 2) throw CancellationException("cancelled")
+                }
+            }.exceptionOrNull()
+            assertTrue(error is CancellationException)
+            assertEquals(2, checks)
+        } finally {
+            bitmap.recycle()
+        }
+    }
 
     @Test
     fun cancellationBeforeProcessRejectsTheLateAudioInvocation() {

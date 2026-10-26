@@ -22,43 +22,91 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-/** Main-thread owner for the one downloads export waiting on legacy storage permission. */
-internal class DownloadsWritePermissionWait {
-    private var pending: Invoke? = null
+private const val GALLERY_HEADER_BYTES = 256
 
-    fun request(invoke: Invoke, launch: () -> Unit) {
+/** Only inspect complete boxes within the bounded header read by the gallery exporter. */
+internal fun sniffBmffImageMime(bytes: ByteArray): String? {
+    val limit = minOf(bytes.size, GALLERY_HEADER_BYTES)
+    fun uint32(offset: Int): Long {
+        var value = 0L
+        for (index in offset until offset + 4) value = (value shl 8) or (bytes[index].toLong() and 0xff)
+        return value
+    }
+    fun type(offset: Int) = String(bytes, offset, 4, Charsets.US_ASCII)
+
+    var offset = 0
+    while (limit - offset >= 8) {
+        var boxSize = uint32(offset)
+        var headerSize = 8
+        if (boxSize == 1L) {
+            if (limit - offset < 16 || uint32(offset + 8) != 0L) return null
+            boxSize = uint32(offset + 12)
+            headerSize = 16
+        }
+        // A zero-size box extends to EOF, which a header sniff cannot establish.
+        if (boxSize < headerSize || boxSize > limit - offset) return null
+        val end = offset + boxSize.toInt()
+        if (type(offset + 4) == "ftyp") {
+            if (boxSize < headerSize + 8 || (boxSize - headerSize - 8) % 4 != 0L) return null
+            val brands = mutableSetOf(type(offset + headerSize))
+            for (position in offset + headerSize + 8 until end step 4) brands.add(type(position))
+            return when {
+                brands.any { it == "avif" || it == "avis" } -> "image/avif"
+                brands.any { it in setOf("heic", "heix", "heim", "heis") } -> "image/heic"
+                brands.any { it in setOf("hevc", "hevx", "hevm", "hevs") } -> "image/heic-sequence"
+                brands.any { it == "mif1" || it == "mif2" } -> "image/heif"
+                "msf1" in brands -> "image/heif-sequence"
+                else -> null
+            }
+        }
+        offset = end
+    }
+    return null
+}
+
+/** Main-thread owner for the one file export waiting on legacy storage permission. */
+internal class LegacyWritePermissionWait {
+    private data class Pending(val invoke: Invoke, val save: () -> Unit)
+    private var pending: Pending? = null
+
+    fun request(invoke: Invoke, save: () -> Unit, launch: () -> Unit) {
         if (pending != null) {
-            invoke.deliverError("已有下载导出正在等待储存空间权限")
+            invoke.deliverError("已有文件保存正在等待储存空间权限")
             return
         }
-        pending = invoke
+        pending = Pending(invoke, save)
         try {
             launch()
         } catch (error: Exception) {
-            if (take(invoke)) invoke.deliverError("无法申请下载目录写入权限: ${error.message}")
+            if (take(invoke) != null) invoke.deliverError("无法申请储存空间权限: ${error.message}")
         }
     }
 
-    fun complete(invoke: Invoke, granted: Boolean, save: () -> Unit) {
-        if (!take(invoke)) return
+    fun complete(invoke: Invoke, granted: Boolean) {
+        val request = take(invoke) ?: return
         if (granted) {
             // Ownership transfers to the file executor; destroy must not release its source early.
-            save()
+            try {
+                request.save()
+            } catch (error: Exception) {
+                invoke.deliverError("保存文件失败: ${error.message}")
+            }
         } else {
-            invoke.deliverError("保存到下载目录需要储存空间权限")
+            invoke.deliverError("保存文件需要储存空间权限")
         }
     }
 
     fun destroy() {
-        val invoke = pending ?: return
+        val request = pending ?: return
         pending = null
-        invoke.deliverError("saveFileToDownloads unavailable: plugin was destroyed")
+        request.invoke.deliverError("file export unavailable: plugin was destroyed")
     }
 
-    private fun take(invoke: Invoke): Boolean {
-        if (pending !== invoke) return false
+    private fun take(invoke: Invoke): Pending? {
+        val request = pending ?: return null
+        if (request.invoke !== invoke) return null
         pending = null
-        return true
+        return request
     }
 }
 
@@ -74,26 +122,19 @@ internal class NativeFileExports(
         const val MAX_GALLERY_EXPORT_BYTES = 50 * 1024 * 1024
     }
     private val writer = PublicFileWriter(activity)
-    private val downloadsWritePermissionWait = DownloadsWritePermissionWait()
+    private val legacyWritePermissionWait = LegacyWritePermissionWait()
     private data class LoadedImage(val bytes: ByteArray, val mimeType: String)
 
     fun saveImageToGallery(invoke: Invoke) {
+        if (waitForLegacyWritePermission(invoke) { saveImageToGallery(invoke) }) return
         val args = invoke.parseArgs(SaveImageArgs::class.java)
         if (args.sourceUrl.isBlank()) {
             invoke.deliverError("图片地址为空")
             return
         }
 
-        runtime.execute(runtime.domains.fileIoExecutor, invoke, "saveImageToGallery", fileTask@{
+        runtime.execute(runtime.domains.fileIoExecutor, invoke, "saveImageToGallery", {
             try {
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-                    val writeGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-                    if (!writeGranted) {
-                        invoke.deliverError("保存到相册需要储存空间权限")
-                        return@fileTask
-                    }
-                }
-
                 invoke.deliverResult(saveImageSource(args.sourceUrl, args.fileName))
             } catch (e: Throwable) {
                 Log.e(TAG, "saveImageToGallery failed", e)
@@ -103,22 +144,15 @@ internal class NativeFileExports(
     }
 
     fun saveImageFromPath(invoke: Invoke) {
+        if (waitForLegacyWritePermission(invoke) { saveImageFromPath(invoke) }) return
         val args = invoke.parseArgs(SaveImageFromPathArgs::class.java)
         if (args.imagePath.isBlank()) {
             invoke.deliverError("物理文件路径为空")
             return
         }
 
-        runtime.execute(runtime.domains.fileIoExecutor, invoke, "saveImageFromPath", fileTask@{
+        runtime.execute(runtime.domains.fileIoExecutor, invoke, "saveImageFromPath", {
             try {
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-                    val writeGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-                    if (!writeGranted) {
-                        invoke.deliverError("保存到相册需要储存空间权限")
-                        return@fileTask
-                    }
-                }
-
                 val file = checkedExportFile(args.imagePath, Int.MAX_VALUE.toLong())
                 file.inputStream().use { input ->
                     invoke.deliverResult(saveImageStream(input, args.fileName, file.name, file.name, true, Int.MAX_VALUE.toLong()))
@@ -131,6 +165,7 @@ internal class NativeFileExports(
     }
 
     fun saveToDownloads(invoke: Invoke) {
+        if (waitForLegacyWritePermission(invoke) { saveToDownloads(invoke) }) return
         val args = invoke.parseArgs(SaveToDownloadsArgs::class.java)
         if (args.fileName.isBlank()) {
             invoke.deliverError("文件名为空")
@@ -147,14 +182,6 @@ internal class NativeFileExports(
 
         runtime.execute(runtime.domains.fileIoExecutor, invoke, "saveToDownloads", fileTask@{
             try {
-                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-                    val writeGranted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-                    if (!writeGranted) {
-                        invoke.deliverError("保存到下载目录需要储存空间权限")
-                        return@fileTask
-                    }
-                }
-
                 val bytes = try {
                     android.util.Base64.decode(args.contentBase64, android.util.Base64.DEFAULT)
                 } catch (e: IllegalArgumentException) {
@@ -193,24 +220,7 @@ internal class NativeFileExports(
     }
 
     fun saveFileToDownloads(invoke: Invoke) {
-        if (runtime.isDestroying) {
-            invoke.deliverError("plugin is shutting down")
-            return
-        }
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
-            ContextCompat.checkSelfPermission(activity, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
-        ) {
-            activity.runOnUiThread {
-                if (runtime.isDestroying) {
-                    invoke.deliverError("plugin is shutting down")
-                } else {
-                    downloadsWritePermissionWait.request(invoke) {
-                        requestPermission("storageLegacy", invoke, "onDownloadsWritePermissionResult")
-                    }
-                }
-            }
-            return
-        }
+        if (waitForLegacyWritePermission(invoke) { saveFileToDownloads(invoke) }) return
         val args = try {
             invoke.parseArgs(SaveFileToDownloadsArgs::class.java)
         } catch (error: Exception) {
@@ -238,10 +248,32 @@ internal class NativeFileExports(
         })
     }
 
-    fun onDownloadsWritePermissionResult(invoke: Invoke) {
+    private fun waitForLegacyWritePermission(invoke: Invoke, save: () -> Unit): Boolean {
+        if (runtime.isDestroying) {
+            invoke.deliverError("plugin is shutting down")
+            return true
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+            ContextCompat.checkSelfPermission(activity, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+        ) {
+            activity.runOnUiThread {
+                if (runtime.isDestroying) {
+                    invoke.deliverError("plugin is shutting down")
+                } else {
+                    legacyWritePermissionWait.request(invoke, save) {
+                        requestPermission("storageLegacy", invoke, "onLegacyWritePermissionResult")
+                    }
+                }
+            }
+            return true
+        }
+        return false
+    }
+
+    fun onLegacyWritePermissionResult(invoke: Invoke) {
         activity.runOnUiThread {
             val granted = ContextCompat.checkSelfPermission(activity, android.Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-            downloadsWritePermissionWait.complete(invoke, granted) { saveFileToDownloads(invoke) }
+            legacyWritePermissionWait.complete(invoke, granted)
         }
     }
 
@@ -336,8 +368,8 @@ internal class NativeFileExports(
         maxBytes: Long = MAX_GALLERY_EXPORT_BYTES.toLong(),
     ): JSObject {
         val buffered = input.buffered(64 * 1024)
-        buffered.mark(256)
-        val header = ByteArray(256)
+        buffered.mark(GALLERY_HEADER_BYTES)
+        val header = ByteArray(GALLERY_HEADER_BYTES)
         var length = 0
         while (length < header.size) {
             val count = buffered.read(header, length, header.size - length)
@@ -370,6 +402,7 @@ internal class NativeFileExports(
         if (bytes.size >= 6 && String(bytes, 0, 6, Charsets.US_ASCII).startsWith("GIF")) return "image/gif"
         if (bytes.size >= 12 && String(bytes, 0, 4, Charsets.US_ASCII) == "RIFF" && String(bytes, 8, 4, Charsets.US_ASCII) == "WEBP") return "image/webp"
         if (bytes.size >= 2 && bytes[0] == 0x42.toByte() && bytes[1] == 0x4D.toByte()) return "image/bmp"
+        sniffBmffImageMime(bytes)?.let { return it }
 
         val sample = bytes.take(256).toByteArray().toString(Charsets.UTF_8).trimStart()
         if (sample.startsWith("<svg", ignoreCase = true) || sample.startsWith("<?xml", ignoreCase = true)) return "image/svg+xml"
@@ -392,7 +425,8 @@ internal class NativeFileExports(
             "svg" -> "image/svg+xml"
             "bmp" -> "image/bmp"
             "avif" -> "image/avif"
-            "heic", "heif" -> "image/heic"
+            "heic" -> "image/heic"
+            "heif" -> "image/heif"
             else -> "application/octet-stream"
         }
     }
@@ -406,8 +440,8 @@ internal class NativeFileExports(
             "image/svg+xml" -> "svg"
             "image/bmp" -> "bmp"
             "image/avif" -> "avif"
-            "image/heic" -> "heic"
-            "image/heif" -> "heif"
+            "image/heic", "image/heic-sequence" -> "heic"
+            "image/heif", "image/heif-sequence" -> "heif"
             else -> "png"
         }
     }
@@ -427,12 +461,12 @@ internal class NativeFileExports(
         val rawName = providedName?.takeIf { it.isNotBlank() } ?: fromUrl ?: "vcp_image_$timestamp"
         val sanitized = rawName.replace(Regex("[\\\\/:*?\"<>|\\u0000-\\u001F]"), "_").trim().ifBlank { "vcp_image_$timestamp" }
         val base = sanitized.substringBeforeLast('.', sanitized).take(96).ifBlank { "vcp_image_$timestamp" }
-        val ext = sanitized.substringAfterLast('.', "").lowercase(Locale.US).takeIf { it.isNotBlank() } ?: extensionForMime(mimeType)
+        val ext = extensionForMime(mimeType)
         return "$base.$ext"
     }
 
     fun destroy() {
-        activity.runOnUiThread { downloadsWritePermissionWait.destroy() }
+        activity.runOnUiThread { legacyWritePermissionWait.destroy() }
     }
 }
 

@@ -5,6 +5,8 @@ import { useChatSessionStore } from '../../core/stores/chatSessionStore';
 import { useShareStore } from '../../core/stores/shareStore';
 import { useChatStreamStore } from '../../core/stores/chatStreamStore';
 import { useAttachmentStore } from '../../core/stores/attachmentStore';
+import { useNotificationStore } from '../../core/stores/notification';
+import type { Attachment } from '../../core/types/chat';
 import { useOverlayStore } from '../../core/stores/overlay';
 import { Phone } from '@lucide/vue';
 import { useTarvenStore } from '../../core/stores/tarvenStore';
@@ -34,7 +36,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  (e: 'send', content: string): void;
+  (e: 'send', content: string, onCommitted: () => void): void;
   (e: 'attach'): void;
   (e: 'toggle-menu', visible: boolean): void;
   (e: 'focus-input'): void;
@@ -51,6 +53,12 @@ const sessionStore = useChatSessionStore();
 const shareStore = useShareStore();
 const streamStore = useChatStreamStore();
 const attachmentStore = useAttachmentStore();
+const notificationStore = useNotificationStore();
+const { handlePaste, handleBeforeInput, setProgrammaticInput } = useLongTextPaste(
+  input, () => !historyStore.editingMessage && !historyStore.isSubmitting,
+);
+let inputRevision = 0;
+watch(input, () => { inputRevision++; }, { flush: 'sync' });
 const overlayStore = useOverlayStore();
 const bubbleNarration = useBubbleNarration();
 const isNarrating = computed(() => Boolean(bubbleNarration.activeTtsId));
@@ -80,7 +88,7 @@ const toggleEditor = () => {
 };
 
 const handleAttachToggle = () => {
-  if (props.suspended) return;
+  if (props.suspended || historyStore.editingMessage || historyStore.isSubmitting) return;
   // 附件选择沿原输入区展开，避免 112px 菜单挤掉键盘上方的编辑/发送区域。
   collapseEditor();
   toggleAttachMenu();
@@ -160,7 +168,7 @@ const hasContent = computed(() => input.value.trim() !== '' || attachmentStore.s
 const attachmentsReady = computed(() =>
   attachmentStore.stagedAttachments.every(attachment => attachment.status === 'done'),
 );
-const canSend = computed(() => hasContent.value && attachmentsReady.value && !props.disabled && !props.suspended && !shareStore.sending && !isPreparing.value);
+const canSend = computed(() => hasContent.value && attachmentsReady.value && !props.disabled && !props.suspended && !shareStore.sending && !historyStore.isSubmitting && !isPreparing.value);
 const actionIsStopNarration = computed(() =>
   !isGenerating.value && isNarrating.value && !hasContent.value && !isPreparing.value && !isExpanded.value
 );
@@ -171,6 +179,7 @@ const actionIsVoiceCall = computed(() =>
 // 编辑重发意图与原会话绑定；切换会话取消意图时同时清理注入内容。
 let voiceResendEditor: typeof overlayStore.editorConfig = null;
 let voiceResendIntent: typeof historyStore.editingMessage = null;
+let inputEditingIntent: typeof historyStore.editingMessage = null;
 watch(() => overlayStore.editorConfig, current => {
   if (!voiceResendEditor || current === voiceResendEditor) return;
   voiceResendEditor = null;
@@ -202,31 +211,49 @@ watch(() => historyStore.editingMessage, async (intent, previousIntent) => {
     return;
   }
   if (intent) {
-    input.value = intent.initialContent;
+    attachMenuOpen.value = false;
+    inputEditingIntent = intent;
+    setProgrammaticInput(intent.initialContent);
     await nextTick();
     if (textareaRef.value && !props.suspended) {
       textareaRef.value.focus();
       textareaRef.value.dispatchEvent(new Event('input', { bubbles: true }));
     }
-  } else if (previousIntent) {
-    input.value = '';
+  } else if (previousIntent && inputEditingIntent === previousIntent) {
+    inputEditingIntent = null;
+    setProgrammaticInput('');
   }
 });
 
-// Keep ordinary input separate from the one replaceable share draft.
-let ordinaryInput: string | null = null;
+// Park text and attachments together so a late commit can consume the original
+// draft even when a newly received share is now displayed in the composer.
+let ordinaryDraft: { text: string; attachments: Attachment[]; revision: number } | null = null;
 watch(() => shareStore.activeDraft?.deliveryId, async (deliveryId, previous) => {
   if (deliveryId) {
-    if (!previous) ordinaryInput = input.value;
-    input.value = shareStore.activeDraft?.text ?? '';
+    if (!previous) {
+      ordinaryDraft = {
+        text: input.value,
+        attachments: attachmentStore.stagedAttachments.filter(item => item.status === 'done').map(item => ({ ...item })),
+        revision: inputRevision,
+      };
+      if (attachmentStore.stagedAttachments.some(item => item.status !== 'done')) {
+        notificationStore.addNotification({ type: 'info', message: '已取消原输入中尚未完成的附件，已完成附件会在结束分享后保留。', toastOnly: true });
+      }
+    }
+    inputEditingIntent = null;
+    attachmentStore.clearStaged();
+    attachmentStore.stagedAttachments = (shareStore.activeDraft?.attachments ?? []).map((item, index) => ({ ...item, id: `share_${deliveryId}_${index}` }));
+    setProgrammaticInput(shareStore.activeDraft?.text ?? '');
     await nextTick();
     if (textareaRef.value && !props.suspended) {
       textareaRef.value.focus();
       textareaRef.value.dispatchEvent(new Event('input', { bubbles: true }));
     }
   } else if (previous) {
-    input.value = ordinaryInput ?? '';
-    ordinaryInput = null;
+    attachmentStore.clearStaged();
+    attachmentStore.stagedAttachments = ordinaryDraft?.attachments ?? [];
+    setProgrammaticInput(ordinaryDraft?.text ?? '');
+    ordinaryDraft = null;
   }
 }, { immediate: true });
 watch([input, () => attachmentStore.stagedAttachments], () => {
@@ -239,8 +266,17 @@ const handleSend = async () => {
     if (shareStore.activeDraft) {
       await historyStore.sendMessage(input.value);
     } else {
-      emit('send', input.value);
-      input.value = '';
+      const revision = inputRevision;
+      const conversation = sessionStore.currentConversationKey;
+      const attachmentIds = new Set(attachmentStore.stagedAttachments.map(item => item.id));
+      emit('send', input.value, () => {
+        if (ordinaryDraft) {
+          if (ordinaryDraft.revision === revision) ordinaryDraft.text = '';
+          ordinaryDraft.attachments = ordinaryDraft.attachments.filter(item => !attachmentIds.has(item.id));
+        } else if (inputRevision === revision && sessionStore.isConversationCurrent(conversation)) {
+          setProgrammaticInput('');
+        }
+      });
     }
     attachMenuOpen.value = false;
   }
@@ -384,7 +420,7 @@ const handleMentionSelect = (member: MentionMember) => {
 
   // 全模式统一插入 @名字 文本；invite_only 下发送时由 store 自动邀约被提及成员
   const insertText = `@${member.name} `;
-  input.value = input.value.slice(0, target.start) + insertText + input.value.slice(target.end);
+  setProgrammaticInput(input.value.slice(0, target.start) + insertText + input.value.slice(target.end));
   dismissMention();
   nextTick(() => {
     const el = textareaRef.value;
@@ -412,14 +448,13 @@ const handleKeydown = (e: KeyboardEvent) => {
 };
 
 const triggerFilePick = async (mode: 'camera' | 'gallery' | 'file') => {
-  if (props.disabled) return;
+  if (props.disabled || historyStore.editingMessage || historyStore.isSubmitting) return;
   emit('attach');
   await attachmentStore.handleAttachment(mode);
 };
 
-const { handlePaste, handleBeforeInput } = useLongTextPaste(input);
-
 const removeStagedAttachment = (index: number) => {
+  if (historyStore.isSubmitting || historyStore.editingMessage) return;
   attachmentStore.removeStaged(index);
 };
 
@@ -592,7 +627,7 @@ onUnmounted(() => {
             :class="highlightActive ? 'text-transparent [caret-color:var(--primary-text)]' : 'text-[var(--primary-text)]'"
             aria-label="消息内容"
             :placeholder="inputPlaceholder"
-            :disabled="disabled"
+            :disabled="disabled || historyStore.isSubmitting"
           ></textarea>
           
           <div v-if="!isExpanded" class="absolute top-0 left-0 right-0 h-4 pointer-events-none bg-[var(--secondary-bg)] opacity-90"
@@ -611,7 +646,7 @@ onUnmounted(() => {
         <div class="input-actions flex items-center shrink-0 mb-0.5 relative gap-1.5">
           <!-- 展开附件按钮 -->
           <button
-            v-if="!isExpanded"
+            v-if="!isExpanded && !historyStore.editingMessage"
             v-longpress="openTarvenSelector"
             v-guide="'chat-plus-button'"
             @click="handleAttachToggle"

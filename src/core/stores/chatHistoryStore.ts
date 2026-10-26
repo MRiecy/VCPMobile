@@ -96,6 +96,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
 
   // “编辑重发”意图必须绑定完整会话身份，避免异步读取后误落到其他话题。
   const editingMessage = ref<EditingMessageIntent | null>(null);
+  const isSubmitting = ref(false);
 
   // 用于防止并发加载与话题切换导致竞态的消息拉取中止控制器 (AbortController)
   let currentLoadAbortController: AbortController | null = null;
@@ -583,6 +584,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     userMsg: ChatMessage,
     frozenKey?: ConversationKey,
     shareIdentity?: ShareIdentity,
+    commit: { persisted?: MessageWriteResultDto; onCommitted?: () => void } = {},
   ): Promise<number | null> => {
     const key = frozenKey || captureLoadedConversation();
     if (!key) return null;
@@ -595,7 +597,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
         Object.assign(userMsg, shareResult.message);
         alreadySent = shareResult.alreadySent;
       }
-      const persisted = shareResult?.persisted ?? await invoke<MessageWriteResultDto>("append_single_message", {
+      const persisted = commit.persisted ?? shareResult?.persisted ?? await invoke<MessageWriteResultDto>("append_single_message", {
         ownerId: key.ownerId,
         ownerType: key.ownerType,
         topicId: key.topicId,
@@ -632,6 +634,8 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       return null;
     }
 
+    // This receipt belongs to persistence, independently of the model request.
+    commit.onCommitted?.();
     if (alreadySent) {
       releaseOperation();
       return topicUpdatedAt;
@@ -716,117 +720,138 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
   /**
    * 发送消息
    */
-  const sendMessage = async (content: string) => {
-    const shareAtSend = shareStore.activeDraft ? {
-      generation: shareStore.activeDraft.generation,
-      deliveryId: shareStore.activeDraft.deliveryId,
-    } : undefined;
-    if (hasEvictedNewer.value && !editingMessage.value) {
-      const latest = await returnToLatest();
-      if (latest.error || latest.aborted || hasEvictedNewer.value) return;
-    }
+  const sendMessage = async (content: string, onCommitted?: () => void) => {
+    if (isSubmitting.value) return;
     const key = captureLoadedConversation();
     if (!key || (!content.trim() && attachmentStore.stagedAttachments.length === 0)) return;
     if (attachmentStore.stagedAttachments.some(attachment => attachment.status !== "done")) return;
+    const intentAtSend = editingMessage.value;
+    const stagedAtSend = [...attachmentStore.stagedAttachments];
+    const currentStaged = stagedAtSend.map((attachment, attachmentOrder) => ({ ...attachment, attachmentOrder }));
+    let awaitingCommit = true;
+    const committed = () => {
+      awaitingCommit = false;
+      isSubmitting.value = false;
+      onCommitted?.();
+    };
+    isSubmitting.value = true;
+    try {
+      const shareAtSend = shareStore.activeDraft ? {
+        generation: shareStore.activeDraft.generation,
+        deliveryId: shareStore.activeDraft.deliveryId,
+      } : undefined;
+      if (hasEvictedNewer.value && !editingMessage.value) {
+        const latest = await returnToLatest();
+        if (latest.error || latest.aborted || hasEvictedNewer.value) return;
+      }
+      if (!canCommitConversation(key) || editingMessage.value !== intentAtSend
+        || shareStore.activeDraft?.deliveryId !== shareAtSend?.deliveryId) return;
 
-    if (editingMessage.value) {
-      const intent = editingMessage.value;
-      if (!sameConversation(intent.key.conversation, key)) return;
-      if (!allowChatMutation(key)) return;
-      editingMessage.value = null;
-      const originalId = intent.key.messageId;
-      const targetIndex = currentChatHistory.value.findIndex(m => m.id === originalId);
-      if (targetIndex === -1) return;
+      if (editingMessage.value) {
+        const intent = editingMessage.value;
+        if (!sameConversation(intent.key.conversation, key)) return;
+        if (!allowChatMutation(key)) return;
+        const originalId = intent.key.messageId;
+        const targetIndex = currentChatHistory.value.findIndex(m => m.id === originalId);
+        if (targetIndex === -1) return;
+        if (chatPreferences.messageHapticsEnabled) triggerMessageHaptic('send');
+        const targetMsg = {
+          ...currentChatHistory.value[targetIndex],
+          content,
+          blocks: [{ type: "markdown" as const, content }],
+        };
+        const releaseOperation = streamStore.beginConversationOperation(key.ownerId, key.ownerType, key.topicId);
+        try {
+          await useBubbleNarration().stopMessage(intent.key);
+          if (!isMessageActionCurrent(intent.key)) return;
+          const persisted = await invoke<MessageWriteResultDto & { msgCount: number }>("edit_resend_message", {
+            ownerId: key.ownerId,
+            ownerType: key.ownerType,
+            topicId: key.topicId,
+            message: { ...targetMsg, blocks: undefined },
+          });
+          topicStore.setTopicMsgCount(
+            key.ownerId,
+            key.ownerType,
+            key.topicId,
+            persisted.msgCount,
+          );
+          topicStore.setTopicUpdatedAt(
+            key.ownerId,
+            key.ownerType,
+            key.topicId,
+            persisted.topicUpdatedAt,
+          );
+          if (canCommitConversation(key)) {
+            const currentIndex = currentChatHistory.value.findIndex(message => message.id === originalId);
+            if (currentIndex !== -1) {
+              currentChatHistory.value[currentIndex] = { ...targetMsg, blocks: persisted.blocks };
+              currentChatHistory.value = currentChatHistory.value.slice(0, currentIndex + 1);
+            }
+          }
+          if (editingMessage.value === intent) editingMessage.value = null;
+          await triggerGeneration(targetMsg, key, undefined, { persisted, onCommitted: committed });
+        } catch (e) {
+          notificationStore.addNotification({
+            type: "error",
+            title: "编辑重发失败",
+            message: errorMessage(e),
+            toastOnly: true,
+            duration: 6000,
+          });
+        } finally {
+          releaseOperation();
+        }
+        return;
+      }
+
+      const shareIdentity = shareAtSend;
+      if (shareIdentity && shareStore.sending) return;
       if (chatPreferences.messageHapticsEnabled) triggerMessageHaptic('send');
-      const targetMsg = {
-        ...currentChatHistory.value[targetIndex],
+      if (shareIdentity) shareStore.sending = true;
+
+      const now = Date.now();
+      const userName = settingsStore.settings?.identity.userName || "User";
+      const userMsg: ChatMessage = {
+        id: shareIdentity ? `msg_share_${shareIdentity.deliveryId}` : `msg_${now}_user_${Math.random().toString(36).substring(2, 9)}`,
+        role: "user",
+        name: userName,
         content,
+        timestamp: now,
+        attachments: currentStaged.length > 0 ? currentStaged : undefined,
+        shell: streamStore.computeShell({ role: "user", name: userName }),
         blocks: [{ type: "markdown" as const, content }],
       };
-      const releaseOperation = streamStore.beginConversationOperation(key.ownerId, key.ownerType, key.topicId);
-      try {
-        await useBubbleNarration().stopMessage(intent.key);
-        if (!isMessageActionCurrent(intent.key)) return;
-        const activity = await invoke<TopicActivityDto>("truncate_history_after_message", {
-          ownerId: key.ownerId,
-          ownerType: key.ownerType,
-          topicId: key.topicId,
-          anchorMessageId: originalId,
-        });
-        topicStore.setTopicMsgCount(
-          key.ownerId,
-          key.ownerType,
-          key.topicId,
-          activity.msgCount,
-        );
-        topicStore.setTopicUpdatedAt(
-          key.ownerId,
-          key.ownerType,
-          key.topicId,
-          activity.updatedAt,
-        );
-        if (canCommitConversation(key)) {
-          const currentIndex = currentChatHistory.value.findIndex(message => message.id === originalId);
-          if (currentIndex !== -1) {
-            currentChatHistory.value[currentIndex] = targetMsg;
-            currentChatHistory.value = currentChatHistory.value.slice(0, currentIndex + 1);
-          }
-        }
-        await triggerGeneration(targetMsg, key);
-      } catch (e) {
-        if (canCommitConversation(key)) editingMessage.value = intent;
-        notificationStore.addNotification({
-          type: "error",
-          title: "编辑重发失败",
-          message: errorMessage(e),
-          toastOnly: true,
-          duration: 6000,
-        });
-      } finally {
-        releaseOperation();
-      }
-      return;
-    }
 
-    const currentStaged = attachmentStore.stagedAttachments.map((attachment, attachmentOrder) => ({
-      ...attachment,
-      attachmentOrder,
-    }));
-    const shareIdentity = shareAtSend;
-    if (shareIdentity && shareStore.sending) return;
-    if (chatPreferences.messageHapticsEnabled) triggerMessageHaptic('send');
-    if (shareIdentity) shareStore.sending = true;
-    else attachmentStore.clearStaged();
-
-    const now = Date.now();
-    const userName = settingsStore.settings?.identity.userName || "User";
-    const userMsg: ChatMessage = {
-      id: shareIdentity ? `msg_share_${shareIdentity.deliveryId}` : `msg_${now}_user_${Math.random().toString(36).substring(2, 9)}`,
-      role: "user",
-      name: userName,
-      content,
-      timestamp: now,
-      attachments: currentStaged.length > 0 ? currentStaged : undefined,
-      shell: streamStore.computeShell({ role: "user", name: userName }),
-      blocks: [{ type: "markdown" as const, content }],
-    };
-
-    if (canCommitConversation(key)) {
-      currentChatHistory.value = mergeHistoryWindow(
-        currentChatHistory.value,
-        [userMsg],
-        false,
-      );
-    }
-    topicStore.incrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId);
-    const topicUpdatedAt = await triggerGeneration(userMsg, key, shareIdentity);
-    if (topicUpdatedAt === null) {
       if (canCommitConversation(key)) {
-        currentChatHistory.value = currentChatHistory.value.filter(
-          message => message.id !== userMsg.id,
+        currentChatHistory.value = mergeHistoryWindow(
+          currentChatHistory.value,
+          [userMsg],
+          false,
         );
       }
-      topicStore.decrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId);
+      topicStore.incrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId);
+      const topicUpdatedAt = await triggerGeneration(userMsg, key, shareIdentity, {
+        onCommitted: () => {
+          if (!shareIdentity) {
+            attachmentStore.stagedAttachments = attachmentStore.stagedAttachments.filter(item =>
+              !stagedAtSend.some(sent => sent.id ? sent.id === item.id : sent === item),
+            );
+          }
+          committed();
+        },
+      });
+      if (topicUpdatedAt === null) {
+        if (canCommitConversation(key)) {
+          currentChatHistory.value = currentChatHistory.value.filter(
+            message => message.id !== userMsg.id,
+          );
+        }
+        topicStore.decrementTopicMsgCount(key.ownerId, key.ownerType, key.topicId);
+      }
+    } finally {
+      // A previous model call can finish after the next submission has started.
+      if (awaitingCommit) isSubmitting.value = false;
     }
   };
 
@@ -1173,6 +1198,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
     returnToLatest,
     resetHistoryForConversation,
     sendMessage,
+    isSubmitting,
     controlGroupSession,
     mergePersistedVoiceMessage,
     reconcileVoiceHistory,

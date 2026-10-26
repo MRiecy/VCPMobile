@@ -180,12 +180,12 @@ describe('JEV group controls', () => {
     await nextTick();
     await view.get('textarea').setValue('补充一个问题');
     await view.get('[aria-label="发送消息"]').trigger('click');
-    expect(view.emitted('send')).toEqual([['补充一个问题']]);
+    expect(view.emitted('send')).toEqual([['补充一个问题', expect.any(Function)]]);
     expect(invokeMock.mock.calls.some(([command]) => command === 'interruptGroupTurn')).toBe(false);
     await view.get('textarea').setValue('通话开始前的草稿');
     await view.setProps({ suspended: true });
     await view.get('textarea').trigger('keydown', { key: 'Enter', ctrlKey: true });
-    expect(view.emitted('send')).toEqual([['补充一个问题']]);
+    expect(view.emitted('send')).toEqual([['补充一个问题', expect.any(Function)]]);
     expect(invokeMock.mock.calls.some(([command]) => command === 'interruptGroupTurn')).toBe(false);
     expect((view.get('textarea').element as HTMLTextAreaElement).value).toBe('通话开始前的草稿');
     await view.setProps({ suspended: false });

@@ -272,8 +272,11 @@ class SseProxyProtocolTest {
         val metadata = JSONObject().put("ownerType", "agent").put("ownerId", "agent-1")
             .put("topicId", "topic-1").put("messageId", "message-1")
         val (initial, _) = connection()
+        val bodyToken = UUID.randomUUID().toString()
+        val prepared = java.io.File(context.cacheDir, "request-bodies/prepared").apply { mkdirs() }
+        java.io.File(prepared, "$bodyToken.body").writeText("{}")
         return requireNotNull(coordinator.handleStartStream(
-            requestId, "https://example.invalid", "{}", "", metadata, initial,
+            requestId, "https://example.invalid", "{}", bodyToken, 2, metadata, initial,
         )).also {
             it.detachConnection(initial)
             initial.close()
@@ -633,7 +636,7 @@ class SseProxyProtocolTest {
     @Test
     fun invalidStartIsRejectedBeforeAStartedFrameOrSessionExists() {
         val (stream, output) = connection()
-        assertNull(coordinator.handleStartStream("bad-url", "not a URL", "{}", "", null, stream))
+        assertNull(coordinator.handleStartStream("bad-url", "not a URL", "{}", "", 0, null, stream))
         val events = frames(stream, output)
         assertEquals(listOf("error"), events.map { it.getString("eventType") })
         assertEquals("invalid_request", events.single().getString("code"))
@@ -645,7 +648,7 @@ class SseProxyProtocolTest {
         coordinator.stopIfIdle(false)
         assertFalse(coordinator.isRunning)
         val (stream, output) = connection()
-        assertNull(coordinator.handleStartStream("late-start", "https://example.invalid", "{}", "", null, stream))
+        assertNull(coordinator.handleStartStream("late-start", "https://example.invalid", "{}", "", 0, null, stream))
         assertEquals("service_stopping", frames(stream, output).single().getString("code"))
         assertTrue(coordinator.isIdle)
     }

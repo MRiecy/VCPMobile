@@ -67,6 +67,7 @@ symphonia = { version = "0.6.1", default-features = false, features = ["mp3", "p
 rubato = { version = "5.0.1", default-features = false, features = ["fft_resampler"] }
 base64 = "0.22"
 zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
+quick-xml = "=0.42.0"
 pdf_oxide = { version = "0.3.77", default-features = false }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 async-trait = "0.1"

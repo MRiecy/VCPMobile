@@ -27,6 +27,8 @@ related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_ap
 - 通过 `tokio::sync::oneshot` 实现全链路**请求中止机制**（含深层轮询捕获）
 - 向前端推送标准化的 `StreamEvent` 事件序列
 
+请求准备由一个可取消工作槽覆盖多模态处理与最终序列化，完成后释放，不占用整轮网络时长。音频 24 MiB、视觉 16 MiB 均按编码后的 data URL 字节计数；完整 HTTP JSON 通过有界 writer 写入私有文件，最终上限为 128 MiB。Android 控制帧只发送正文 token 与长度，Helper 原子认领文件并分块上传；Rust 直连传输以只读文件映射提供可重放正文，保留 307/308 重定向语义，不另建完整字符串或字节数组副本。正文文件随实际上传 owner 结束清理，与响应帧/离线结果的生命周期分开。
+
 ### 1.2 职责边界
 
 | 职责领域 | 具体行为 | 对应源码位置 |

@@ -12,7 +12,7 @@
 
 用户从系统分享中保存内容，再自行打开 VCPMobile 选择助手。扩展不尝试通过私有路径唤起主 App。接受分享时即覆盖旧槽位，新分享失败或取消也不会恢复旧分享。一次可包含 16 项，文件总量 512 MiB、文本 UTF-8 1 MiB、共享暂存总量 1 GiB，复制保留至少 64 MiB 可用空间；这些是本轮资源预算，可在实测后调整。复制每次只读取 64 KiB，不解码图片。
 
-主 App 与扩展共享 `ShareInbox/current.json` 和 `current.lock`。`flock` 只保护身份裁定与短提交；文件复制在锁外。每个 delivery 目录以 `lease.lock` 保护在途 provider 或 Rust 导入。当前 ready manifest 记录相对 itemId、原名、MIME、长度和 SHA-256。主 App 验证后复制到 CAS；SQLite `current_share` 只保存一条记录。分享首条用户消息、附件关系与 sent 状态在现有消息仓储的同一写事务提交。
+主 App 与扩展共享 `ShareInbox/current.json` 和 `current.lock`。`flock` 只保护身份裁定与短提交；文件复制在锁外。每个文件开始和结束时检查共享身份，64 KiB 读取循环仅检查本地取消与资源预算，不逐块加跨进程锁或解析槽位 JSON；最终发布仍在槽锁内核验身份。每个 delivery 目录以 `lease.lock` 保护在途 provider 或 Rust 导入。当前 ready manifest 记录相对 itemId、原名、MIME、长度和 SHA-256。主 App 验证后复制到 CAS；SQLite `current_share` 只保存一条记录。分享首条用户消息、附件关系与 sent 状态在现有消息仓储的同一写事务提交。
 
 Darwin 通知只提示重新读取当前槽位；启动/READY/回前台也会对账。进程终止后，未被持有的 receiving lease 表示获取已中断，显示失败；ready/draft 从本次原件恢复。终态先于文件校验处理，重复发送返回原 message ID。旧目录是待清理副本，不是分享队列。
 

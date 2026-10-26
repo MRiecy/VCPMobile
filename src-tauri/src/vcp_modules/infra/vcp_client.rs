@@ -4,7 +4,7 @@ use dashmap::DashMap;
 use futures_util::StreamExt;
 #[cfg(not(target_os = "android"))]
 use futures_util::TryStreamExt;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -27,6 +27,9 @@ use crate::vcp_modules::settings_manager::{
     ChatEndpointMode, Settings,
 };
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
+
+mod request_body;
+use request_body::PreparedBody;
 
 #[cfg(target_os = "android")]
 const HELPER_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -1371,6 +1374,12 @@ pub async fn perform_vcp_request_registered<R: Runtime>(
     if cancellation_token.is_cancelled() {
         return Ok(VcpResponse::cancelled());
     }
+    let preparation_permit = tokio::select! {
+        biased;
+        _ = cancellation_token.cancelled() => return Ok(VcpResponse::cancelled()),
+        permit = request_body::PREPARATION_SLOT.acquire() =>
+            permit.map_err(|error| VcpRequestFailure::preparation(error.to_string()))?,
+    };
     let prepared = preprocess_multimodal_messages(app, payload.messages, &cancellation_token).await;
     // Cancellation wins a simultaneous native failure, and no request reaches
     // either transport after the user stopped during attachment preparation.
@@ -1393,9 +1402,9 @@ pub async fn perform_vcp_request_registered<R: Runtime>(
 
     // === 5. 准备请求体 ===
     let is_stream = payload.model_config["stream"].as_bool().unwrap_or(false);
-    let mut request_body = payload.model_config.clone();
+    let mut request_body = payload.model_config;
     if let Some(obj) = request_body.as_object_mut() {
-        obj.insert("messages".to_string(), json!(messages));
+        obj.insert("messages".to_string(), Value::Array(messages));
         obj.insert("requestId".to_string(), json!(transport_request_id.clone()));
         obj.insert("stream".to_string(), json!(is_stream));
         if !timestamp_bindings.is_empty() {
@@ -1410,6 +1419,17 @@ pub async fn perform_vcp_request_registered<R: Runtime>(
         }
     }
 
+    let prepared_body = request_body::prepare(
+        app.path().app_cache_dir().map_err(|error| VcpRequestFailure::preparation(error.to_string()))?,
+        request_body,
+        cancellation_token.clone(),
+        preparation_permit,
+    ).await;
+    if cancellation_token.is_cancelled() {
+        return Ok(VcpResponse::cancelled());
+    }
+    let request_body = prepared_body.map_err(VcpRequestFailure::preparation)?;
+
     // === 6. 配置网络请求（共享 ChatStream 画像 Client，克隆仅复制 Arc 句柄、共享连接池） ===
     let client = super::http_clients::client(super::http_clients::HttpProfile::ChatStream).clone();
 
@@ -1423,7 +1443,7 @@ pub async fn perform_vcp_request_registered<R: Runtime>(
             client,
             &final_url,
             &payload.vcp_api_key,
-            request_body,
+            Some(request_body),
             message_id,
             transport_request_id,
             context,
@@ -1500,19 +1520,19 @@ async fn preprocess_multimodal_messages<R: Runtime>(
     let mut messages: Vec<Value> = Vec::new();
     let mut image_data_bytes = 0usize;
     let mut audio_data_bytes = 0usize;
-    for msg_val in raw_messages.into_iter() {
+    for mut msg in raw_messages {
         crate::vcp_modules::media_processor::check_media_cancelled(cancellation)?;
-        if !msg_val.is_object() {
+        if !msg.is_object() {
             messages.push(json!({"role": "system", "content": "[Invalid message]"}));
             continue;
         }
 
-        let mut msg = msg_val.clone();
         remove_internal_local_attachment_metadata(&mut msg);
-        let content = msg.get("content").cloned().unwrap_or(Value::Null);
+        let had_content = msg.get("content").is_some();
+        let content = msg.get_mut("content").map(Value::take).unwrap_or(Value::Null);
 
         // 处理多模态或复杂内容数组
-        if let Some(content_array) = content.as_array() {
+        if let Value::Array(content_array) = content {
             let mut new_parts = Vec::new();
             for part in content_array {
                 crate::vcp_modules::media_processor::check_media_cancelled(cancellation)?;
@@ -1657,21 +1677,23 @@ async fn preprocess_multimodal_messages<R: Runtime>(
                                 }
                             }
                         }
-                        new_parts.push(part.clone());
+                        new_parts.push(part);
                     }
                 } else {
-                    new_parts.push(part.clone());
+                    new_parts.push(part);
                 }
             }
-            msg["content"] = json!(new_parts);
-        } else if content.is_object() {
-            if let Some(text) = content.get("text") {
-                msg["content"] = text.clone();
+            msg["content"] = Value::Array(new_parts);
+        } else if let Value::Object(mut object) = content {
+            if let Some(text) = object.remove("text") {
+                msg["content"] = text;
             } else {
-                msg["content"] = json!(content.to_string());
+                msg["content"] = json!(Value::Object(object).to_string());
             }
         } else if !content.is_string() && !content.is_null() {
             msg["content"] = json!(content.to_string());
+        } else if had_content {
+            msg["content"] = content;
         }
 
         messages.push(msg);
@@ -1835,10 +1857,10 @@ async fn send_command_to_stream(
         "action": action,
         "requestId": msg_id
     });
-    if let Some(params) = extra_params {
-        if let (Some(obj), Some(params)) = (cmd.as_object_mut(), params.as_object()) {
+    if let Some(Value::Object(params)) = extra_params {
+        if let Some(obj) = cmd.as_object_mut() {
             for (k, v) in params {
-                obj.insert(k.clone(), v.clone());
+                obj.insert(k, v);
             }
         }
     }
@@ -2098,7 +2120,7 @@ async fn handle_streaming_request<R: Runtime>(
     client: Client,
     final_url: &str,
     api_key: &str,
-    request_body: Value,
+    request_body: Option<PreparedBody>,
     message_id: String,
     transport_request_id: String,
     context: Option<Value>,
@@ -2124,6 +2146,8 @@ async fn handle_streaming_request<R: Runtime>(
         let (action, params) = if is_resume {
             ("resume", None)
         } else {
+            let body = request_body.as_ref().ok_or_else(||
+                VcpRequestFailure::preparation("模型请求正文未准备".into()))?;
             let mut helper_context = context.clone().unwrap_or_else(|| json!({}));
             helper_context["messageId"] = json!(message_id);
             (
@@ -2134,7 +2158,8 @@ async fn handle_streaming_request<R: Runtime>(
                         "Authorization": format!("Bearer {api_key}"),
                         "Content-Type": "application/json",
                     }).to_string(),
-                    "body": request_body.to_string(),
+                    "bodyToken": body.token,
+                    "bodyLength": body.length,
                     "context": helper_context,
                 })),
             )
@@ -2169,6 +2194,10 @@ async fn handle_streaming_request<R: Runtime>(
                 .to_string()
                 .into());
         }
+        let body = request_body.ok_or_else(||
+            VcpRequestFailure::preparation("模型请求正文未准备".into()))?;
+        let length = body.length;
+        let upload = body.into_http_body().await.map_err(VcpRequestFailure::preparation)?;
         let response = tokio::select! {
             biased;
             _ = cancellation_token.cancelled() => {
@@ -2177,7 +2206,8 @@ async fn handle_streaming_request<R: Runtime>(
             response = client.post(final_url)
                 .header(AUTHORIZATION, format!("Bearer {api_key}"))
                 .header(CONTENT_TYPE, "application/json")
-                .json(&request_body)
+                .header(CONTENT_LENGTH, length)
+                .body(upload)
                 .send() => response.map_err(|error| error.to_string())?,
         };
         if !response.status().is_success() {
@@ -2430,7 +2460,7 @@ async fn handle_non_streaming_request(
     client: Client,
     final_url: &str,
     api_key: &str,
-    request_body: Value,
+    request_body: PreparedBody,
     message_id: String,
     context: Option<Value>,
     cancellation_token: CancellationToken,
@@ -2442,11 +2472,14 @@ async fn handle_non_streaming_request(
     let send_stream_event = |event: StreamEvent| {
         output.send(event);
     };
+    let length = request_body.length;
+    let upload = request_body.into_http_body().await?;
     let request_future = client
         .post(final_url)
         .header(AUTHORIZATION, format!("Bearer {}", api_key))
         .header(CONTENT_TYPE, "application/json")
-        .json(&request_body)
+        .header(CONTENT_LENGTH, length)
+        .body(upload)
         .send();
 
     let response = tokio::select! {
@@ -3570,7 +3603,7 @@ async fn resume_claimed_generation<R: Runtime>(
         client,
         "",
         "",
-        Value::Null,
+        None,
         msg_id.clone(),
         transport_request_id,
         Some(context.clone()),
@@ -4161,6 +4194,15 @@ mod active_request_tests {
         assert!(buffer.pending_mutations.is_empty());
     }
 
+    async fn empty_request_body() -> Option<PreparedBody> {
+        Some(request_body::prepare(
+            std::path::PathBuf::from("target/test-fixtures/http-bodies"),
+            json!({}),
+            CancellationToken::new(),
+            request_body::PREPARATION_SLOT.acquire().await.unwrap(),
+        ).await.unwrap())
+    }
+
     #[tokio::test]
     #[cfg(not(target_os = "android"))]
     async fn sse_http_eof_flushes_multiline_rounds_without_a_done_marker() {
@@ -4191,7 +4233,7 @@ mod active_request_tests {
             Client::new(),
             &endpoint,
             "",
-            json!({}),
+            empty_request_body().await,
             "message".into(),
             "transport".into(),
             None,
@@ -4244,7 +4286,7 @@ mod active_request_tests {
             Client::new(),
             &endpoint,
             "",
-            json!({}),
+            empty_request_body().await,
             "message".into(),
             "transport".into(),
             None,
@@ -4297,7 +4339,7 @@ mod active_request_tests {
                 Client::new(),
                 &endpoint,
                 "",
-                json!({}),
+                empty_request_body().await,
                 "message".to_string(),
                 "transport".to_string(),
                 None,
@@ -4430,7 +4472,7 @@ mod active_request_tests {
             let output = Arc::new(RequestOutput::default());
             output.bind_initial(Some(channel));
             let response = handle_non_streaming_request(
-                Client::new(), &endpoint, "", json!({}), "message".into(),
+                Client::new(), &endpoint, "", empty_request_body().await.unwrap(), "message".into(),
                 Some(json!({ "topicId": "topic" })), CancellationToken::new(), output,
             ).await.unwrap();
             assert_eq!(response.full_content, "正文 🦀\n\"quote\"\\tail");
@@ -4442,6 +4484,101 @@ mod active_request_tests {
             assert!(events.try_recv().is_err(), "the application finalizer owns the terminal event");
         }
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_streaming_upload_preserves_prepared_utf8_json_bytes() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        let value = json!({"messages": [{"role": "user", "content": "中文\n\"😀".repeat(4096)}]});
+        let expected = serde_json::to_vec(&value).unwrap();
+        let body = request_body::prepare(
+            std::path::PathBuf::from("target/test-fixtures/http-bodies"),
+            value,
+            CancellationToken::new(),
+            request_body::PREPARATION_SLOT.acquire().await.unwrap(),
+        ).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut reader = tokio::io::BufReader::new(socket);
+            let mut length = None;
+            loop {
+                let mut line = String::new();
+                assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                if line == "\r\n" { break; }
+                if let Some((name, value)) = line.split_once(':') {
+                    if name.eq_ignore_ascii_case("content-length") {
+                        length = Some(value.trim().parse::<usize>().unwrap());
+                    }
+                }
+            }
+            assert_eq!(length, Some(expected.len()));
+            let mut received = vec![0; expected.len()];
+            reader.read_exact(&mut received).await.unwrap();
+            assert_eq!(received, expected);
+            let response = r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#;
+            reader.get_mut().write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                response.len(),
+            ).as_bytes()).await.unwrap();
+        });
+        let response = handle_non_streaming_request(
+            Client::new(), &endpoint, "", body, "message".into(), None,
+            CancellationToken::new(), Arc::default(),
+        ).await.unwrap();
+        assert_eq!(response.full_content, "ok");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prepared_upload_replays_the_same_body_after_307_and_308() {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        for status in [307, 308] {
+            let value = json!({"messages": [{"role": "user", "content": "正文\n😀".repeat(2048)}]});
+            let expected = serde_json::to_vec(&value).unwrap();
+            let body = request_body::prepare(
+                std::path::PathBuf::from("target/test-fixtures/http-bodies"), value,
+                CancellationToken::new(), request_body::PREPARATION_SLOT.acquire().await.unwrap(),
+            ).await.unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let server = tokio::spawn(async move {
+                for redirect in [true, false] {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let mut reader = tokio::io::BufReader::new(socket);
+                    let mut length = None;
+                    loop {
+                        let mut line = String::new();
+                        assert!(reader.read_line(&mut line).await.unwrap() > 0);
+                        if line == "\r\n" { break; }
+                        if let Some((name, value)) = line.split_once(':') {
+                            if name.eq_ignore_ascii_case("content-length") {
+                                length = Some(value.trim().parse::<usize>().unwrap());
+                            }
+                        }
+                    }
+                    assert_eq!(length, Some(expected.len()));
+                    let mut received = vec![0; expected.len()];
+                    reader.read_exact(&mut received).await.unwrap();
+                    assert_eq!(received, expected);
+                    let reply = if redirect {
+                        format!("HTTP/1.1 {status} Redirect\r\nLocation: /destination\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    } else {
+                        let content = r#"{"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}"#;
+                        format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{content}", content.len())
+                    };
+                    reader.get_mut().write_all(reply.as_bytes()).await.unwrap();
+                }
+            });
+            let result = tokio::time::timeout(Duration::from_secs(5), handle_non_streaming_request(
+                Client::new(), &endpoint, "", body, "message".into(), None,
+                CancellationToken::new(), Arc::default(),
+            )).await;
+            if !matches!(&result, Ok(Ok(_))) { server.abort(); }
+            assert_eq!(result.unwrap().unwrap().full_content, "ok", "HTTP {status}");
+            server.await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -4468,7 +4605,7 @@ mod active_request_tests {
                 Client::new(),
                 &endpoint,
                 "",
-                json!({}),
+                empty_request_body().await.unwrap(),
                 "message".into(),
                 None,
                 request_cancel,

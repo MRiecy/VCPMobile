@@ -41,7 +41,7 @@ vi.mock('../../../features/chat/voice/voiceCallStore', () => ({ useVoiceCallStor
 vi.mock('../../../core/stores/assistant', () => ({ useAssistantStore: () => ({}) }));
 vi.mock('../../../core/stores/shareStore', () => ({ useShareStore: () => ({
   current: null, failures: [], selectorOpen: false, busy: false,
-  refresh: async () => {}, receiveAndroid: () => {}, notify: () => {},
+  refresh: async () => {}, receiveAndroid: () => {}, pollAndroid: async () => {}, notify: () => {},
 }) }));
 vi.mock('../../../features/cli/vcpCliStore', () => ({ useVcpCliStore: () => ({}) }));
 vi.mock('vue-router', () => ({ useRouter: () => ({ isReady: async () => {}, afterEach: () => () => {} }) }));

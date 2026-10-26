@@ -46,7 +46,8 @@ internal fun readLengthPrefixed(inputStream: InputStream): String? {
         bytesRead += read
     }
     val length = java.nio.ByteBuffer.wrap(lengthBuffer).int
-    if (length <= 0 || length > 10 * 1024 * 1024) { // Limit to 10MB to prevent OOM
+    // Control metadata only; the HTTP body is a bounded, helper-owned file.
+    if (length <= 0 || length > 10 * 1024 * 1024) {
         return null
     }
     val dataBuffer = ByteArray(length)

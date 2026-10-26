@@ -21,6 +21,14 @@ import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.atomic.AtomicBoolean
 import androidx.core.content.IntentCompat
+import app.tauri.annotation.InvokeArg
+
+@InvokeArg
+class AcknowledgeSharePayloadArgs {
+    lateinit var ownerId: String
+    var payloadRevision: Long = 0
+    var settled: Boolean = false
+}
 
 internal fun sanitizeSharedFileName(rawName: String): String {
     val leaf = rawName.replace('\\', '/').substringAfterLast('/').trim()
@@ -41,8 +49,10 @@ internal fun shareUploadStagingName(
     ownerId: String,
     stagingTicket: String,
     hash: String,
-    fileExtension: String,
-): String = "${shareUploadStagingStem(ownerId, stagingTicket, hash)}$fileExtension"
+): String = shareUploadStagingStem(ownerId, stagingTicket, hash)
+
+internal fun shareSourceStagingName(ownerId: String, stagingTicket: String): String =
+    "shared_${ownerId}_$stagingTicket"
 
 internal class ShareIntentOwner {
     private val current = AtomicReference<String?>(null)
@@ -53,16 +63,18 @@ internal class ShareIntentOwner {
     fun invalidate() { current.set(null) }
 }
 
-internal data class PendingSharePayload<T>(val ownerId: String, val value: T)
+internal data class PendingSharePayload<T>(val ownerId: String, val revision: Long, val value: T)
 
 internal class LatestSharePayload<T> {
     private val owner = ShareIntentOwner()
     private var pending: PendingSharePayload<T>? = null
+    private var revision = 0L
 
     @Synchronized
     fun begin(): String {
         val ownerId = owner.begin()
         pending = null
+        revision = 0L
         return ownerId
     }
 
@@ -78,19 +90,18 @@ internal class LatestSharePayload<T> {
     @Synchronized
     fun publish(ownerId: String, value: T): Boolean {
         if (!owner.isCurrent(ownerId)) return false
-        pending = PendingSharePayload(ownerId, value)
+        pending = PendingSharePayload(ownerId, ++revision, value)
         return true
     }
 
     @Synchronized
-    fun consumeCurrent(consumer: (T) -> Unit): Boolean {
-        val snapshot = pending ?: return false
-        if (!owner.isCurrent(snapshot.ownerId)) {
-            pending = null
-            return false
-        }
-        consumer(snapshot.value)
-        if (pending === snapshot) pending = null
+    fun peek(): PendingSharePayload<T>? = pending?.takeIf { owner.isCurrent(it.ownerId) }
+
+    @Synchronized
+    fun acknowledge(ownerId: String, revision: Long): Boolean {
+        val snapshot = peek() ?: return false
+        if (snapshot.ownerId != ownerId || snapshot.revision != revision) return false
+        pending = null
         return true
     }
 }
@@ -201,6 +212,20 @@ class ShareIntentHandler(
 
     fun isCurrentOwner(ownerId: String): Boolean = sharePayload.isCurrent(ownerId)
     fun currentOwnerId(): String? = sharePayload.currentId()
+
+    fun readPendingPayload(): JSObject? {
+        val snapshot = sharePayload.peek() ?: return null
+        return JSObject().apply {
+            snapshot.value.keys().forEach { key -> put(key, snapshot.value.get(key)) }
+            put("payloadRevision", snapshot.revision)
+        }
+    }
+
+    fun acknowledgePayload(args: AcknowledgeSharePayloadArgs) {
+        if (sharePayload.acknowledge(args.ownerId, args.payloadRevision) && args.settled) {
+            cleanupOwnerStaging(args.ownerId)
+        }
+    }
 
     fun claimStagedFile(ownerId: String, file: File): Boolean {
         if (!sharePayload.isCurrent(ownerId)) return false
@@ -433,7 +458,7 @@ class ShareIntentHandler(
                 throw IllegalStateException("分享 staging 可用空间不足")
             }
             val ticket = UUID.randomUUID().toString()
-            val outputFile = File(sharedDir, "shared_${ownerId}_${ticket}_$fileName")
+            val outputFile = File(sharedDir, shareSourceStagingName(ownerId, ticket))
 
             try {
                 val descriptor = contentResolver.openAssetFileDescriptor(uri, "r", cancellation)
@@ -517,38 +542,17 @@ class ShareIntentHandler(
     }
 
     /**
-     * 通过 evaluateJavascript 注入 WebView
+     * 通知只唤醒前端拉取；快照直到 Rust 持久化后精确确认才消费。
      */
     fun injectShareData(webView: WebView?) {
         if (webView == null || destroyed.get()) return
 
         try {
-            val delivered = sharePayload.consumeCurrent { data ->
-                @Suppress("DEPRECATION")
-                val dataJson = data.toString()
-                val safeJson = escapeJsonForJsString(dataJson)
-                val script = "window.dispatchEvent(new CustomEvent('vcp-share-intent', { detail: JSON.parse(\"$safeJson\") }))"
-                webView.evaluateJavascript(script, null)
-            }
-            if (delivered) {
-                Log.i(TAG, "[injectShareData] Share data injected into WebView successfully")
-            } else {
-                Log.d(TAG, "[injectShareData] No pending share data")
-            }
+            if (sharePayload.peek() == null) return
+            webView.evaluateJavascript("window.dispatchEvent(new Event('vcp-share-intent'))", null)
         } catch (e: Exception) {
             Log.e(TAG, "[injectShareData] Failed to inject share data", e)
         }
     }
 
-    /**
-     * JSON 字符串转义，安全嵌入 JavaScript 字符串
-     */
-    private fun escapeJsonForJsString(json: String): String {
-        return json
-            .replace("\\", "\\\\")
-            .replace("\"", "\\\"")
-            .replace("'", "\\'")
-            .replace("\n", "\\n")
-            .replace("\r", "\\r")
-    }
 }

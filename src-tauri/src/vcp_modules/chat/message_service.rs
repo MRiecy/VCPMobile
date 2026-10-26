@@ -790,6 +790,31 @@ pub async fn append_single_message<R: tauri::Runtime>(
     })
 }
 
+/// Editing a sent message and discarding its following history are one commit.
+/// Attachment validation and compilation happen before any history is changed.
+pub async fn edit_resend_message<R: tauri::Runtime>(
+    app_handle: &AppHandle<R>,
+    db_state: &DbState,
+    key: &TopicKey,
+    mut message: ChatMessage,
+) -> Result<(MessageWriteResultDto, MessageDeletionResult), String> {
+    normalize_attachments_from_local_cas(app_handle, &db_state.pool, &mut message).await?;
+    let (blocks, render_bytes) = compile_and_serialize_render_async(message.content.clone()).await?;
+    let mut tx = db_state.write_transaction("message.edit_resend").await?;
+    let mut deletion = truncate_history_after_message_in_tx(&mut tx, key, &message.id).await?;
+    let activity = MessageRepository::upsert_message(&mut tx, &message, key, &render_bytes, false)
+        .await?;
+    if let Some(activity) = activity {
+        deletion.msg_count = activity.msg_count;
+        deletion.topic_updated_at = activity.updated_at;
+    }
+    tx.commit().await.map_err(|error| error.to_string())?;
+    Ok((MessageWriteResultDto {
+        blocks,
+        topic_updated_at: deletion.topic_updated_at,
+    }, deletion))
+}
+
 #[tauri::command]
 pub async fn fetch_raw_message_content<R: tauri::Runtime>(
     app_handle: tauri::AppHandle<R>,
@@ -1209,6 +1234,16 @@ pub async fn truncate_history_after_message(
     anchor_message_id: &str,
 ) -> Result<MessageDeletionResult, String> {
     let mut tx = db_state.write_transaction("message.truncate").await?;
+    let result = truncate_history_after_message_in_tx(&mut tx, key, anchor_message_id).await?;
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(result)
+}
+
+async fn truncate_history_after_message_in_tx(
+    tx: &mut sqlx::SqliteConnection,
+    key: &TopicKey,
+    anchor_message_id: &str,
+) -> Result<MessageDeletionResult, String> {
     let anchor_timestamp: i64 = sqlx::query_scalar(
         "SELECT timestamp FROM messages
          WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
@@ -1349,8 +1384,7 @@ pub async fn truncate_history_after_message(
         ));
     }
     // FTS 由 after_messages_logical_delete 触发器在同一事务中清理。
-    let activity = HashAggregator::bubble_from_topic(&mut tx, key).await?;
-    tx.commit().await.map_err(|e| e.to_string())?;
+    let activity = HashAggregator::bubble_from_topic(tx, key).await?;
     Ok(MessageDeletionResult {
         deleted_ids,
         active_ids,
@@ -1966,6 +2000,52 @@ mod stream_lifecycle_tests {
         .await
         .expect("topic fixture");
         pool
+    }
+
+    #[tokio::test]
+    async fn edit_resend_rolls_back_truncation_when_the_message_write_fails() {
+        let pool = test_pool().await;
+        let app = tauri::test::mock_app();
+        app.manage(DbState::new(pool.clone(), std::path::PathBuf::new()));
+        let anchor = ChatMessage {
+            id: "anchor".into(), role: "user".into(), content: "original".into(),
+            timestamp: 1, ..Default::default()
+        };
+        let following = ChatMessage {
+            id: "following".into(), role: "assistant".into(), content: "following reply".into(),
+            timestamp: 2, ..Default::default()
+        };
+        for message in [anchor.clone(), following] {
+            append_single_message(app.handle().clone(), &pool, "agent-1", "agent", "topic-1".into(), message)
+                .await.expect("seed history");
+        }
+        sqlx::raw_sql(
+            "CREATE TRIGGER reject_edited_body BEFORE UPDATE OF content ON messages
+             WHEN NEW.msg_id = 'anchor' AND NEW.content = 'edited'
+             BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;",
+        ).execute(&pool).await.expect("inject write failure");
+        let edited = ChatMessage { content: "edited".into(), ..anchor };
+        let db = app.state::<DbState>();
+        let error = edit_resend_message(app.handle(), &db, &topic_key(), edited.clone()).await
+            .err().expect("the edit must fail after attempted truncation");
+        assert!(error.contains("injected write failure"));
+        let rows: Vec<(String, String, Option<i64>)> = sqlx::query_as(
+            "SELECT msg_id, content, deleted_at FROM messages ORDER BY timestamp",
+        ).fetch_all(&pool).await.expect("history after rollback");
+        assert_eq!(rows, vec![
+            ("anchor".into(), "original".into(), None),
+            ("following".into(), "following reply".into(), None),
+        ]);
+        sqlx::query("DROP TRIGGER reject_edited_body").execute(&pool).await.expect("remove injected failure");
+        let (persisted, deletion) = edit_resend_message(app.handle(), &db, &topic_key(), edited).await
+            .expect("retry edit");
+        assert!(!persisted.blocks.is_empty());
+        assert_eq!(deletion.deleted_ids, vec!["following"]);
+        assert_eq!(deletion.msg_count, 1);
+        let visible: Vec<(String, String)> = sqlx::query_as(
+            "SELECT msg_id, content FROM messages WHERE deleted_at IS NULL",
+        ).fetch_all(&pool).await.expect("committed history");
+        assert_eq!(visible, vec![("anchor".into(), "edited".into())]);
     }
 
     #[tokio::test]

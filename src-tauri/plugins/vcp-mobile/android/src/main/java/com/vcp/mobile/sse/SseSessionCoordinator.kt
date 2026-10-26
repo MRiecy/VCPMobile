@@ -12,10 +12,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSourceListener
@@ -109,6 +107,7 @@ internal class SseSessionCoordinator(
                 session.handoffJob?.cancel()
                 session.handoffJob = null
                 if (!session.isCompleted) activeSessions.remove(session.requestId, session)
+                session.requestBody?.close()
                 Pair(session.takeEventSource(), session.takeConnection())
             }
             detached.first?.cancel()
@@ -127,6 +126,7 @@ internal class SseSessionCoordinator(
     fun startListening() {
         serviceScope.launch(Dispatchers.IO) {
             try {
+                RequestBodyFile.cleanPreviousProcess(context.cacheDir)
                 val server = ServerSocket(0, 50, InetAddress.getByName("127.0.0.1"))
                 val port = server.localPort
                 val published = synchronized(this@SseSessionCoordinator) {
@@ -214,9 +214,10 @@ internal class SseSessionCoordinator(
                     "start" -> {
                         val url = request.getString("url")
                         val headersJson = request.optString("headers", "{}")
-                        val body = request.optString("body", "")
+                        val bodyToken = request.getString("bodyToken")
+                        val bodyLength = request.getLong("bodyLength")
                         val contextJson = request.optJSONObject("context")
-                        boundSession = handleStartStream(requestId, url, headersJson, body, contextJson, connection)
+                        boundSession = handleStartStream(requestId, url, headersJson, bodyToken, bodyLength, contextJson, connection)
                         if (boundSession != null) {
                             socket.soTimeout = 0
                             readSocketUntilClose(inputStream)
@@ -279,11 +280,12 @@ internal class SseSessionCoordinator(
         requestId: String,
         url: String,
         headersJson: String,
-        body: String,
+        bodyToken: String,
+        bodyLength: Long,
         contextJson: JSONObject?,
         connection: ClientConnection
     ): StreamSession? {
-        val request = try {
+        val builder = try {
             val builder = Request.Builder().url(url)
             val headers = JSONObject(headersJson)
             val keys = headers.keys()
@@ -291,10 +293,7 @@ internal class SseSessionCoordinator(
                 val key = keys.next()
                 builder.header(key, headers.getString(key))
             }
-            if (body.isNotEmpty()) {
-                builder.post(body.toRequestBody("application/json; charset=utf-8".toMediaType()))
-            }
-            builder.build()
+            builder
         } catch (error: Exception) {
             sendProtocolError(connection, requestId, "Invalid helper request: ${error.message}", "invalid_request")
             return null
@@ -323,6 +322,21 @@ internal class SseSessionCoordinator(
             sendProtocolError(connection, requestId, rejection.second, rejection.first)
             return null
         }
+        val request = try {
+            synchronized(session) {
+                check(isRunning && isCurrentSession(session) && !session.isCompleted) { "Helper service is shutting down" }
+                val body = RequestBodyFile.claim(context.cacheDir, bodyToken, bodyLength, session.generation)
+                session.requestBody = body
+                builder.post(body).build()
+            }
+        } catch (error: Exception) {
+            synchronized(session) {
+                session.requestBody?.close()
+                removeSession(session)
+            }
+            sendProtocolError(connection, requestId, "Invalid request body: ${error.message}", "invalid_request")
+            return null
+        }
         synchronized(session) {
             if (!connection.enqueue(sessionEvent(session, "started").toString())) {
                 session.detachConnection(connection)
@@ -332,6 +346,9 @@ internal class SseSessionCoordinator(
         try {
             val listener = object : EventSourceListener() {
                 override fun onOpen(eventSource: EventSource, response: Response) {
+                    // Final response headers mean redirects/authentication have
+                    // settled and OkHttp will no longer upload this body.
+                    session.requestBody?.close()
                     if (!isCurrentSession(session)) return
                     Log.i(TAG, "SSE Connected: id=$requestId")
                 }
@@ -342,6 +359,7 @@ internal class SseSessionCoordinator(
                 }
 
                 override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
+                    session.requestBody?.close()
                     if (!isCurrentSession(session)) return
                     val errorMsg = t?.message ?: response?.message ?: "Unknown network error"
                     Log.w(TAG, "SSE Failed: id=$requestId, error=$errorMsg")
@@ -349,6 +367,7 @@ internal class SseSessionCoordinator(
                 }
 
                 override fun onClosed(eventSource: EventSource) {
+                    session.requestBody?.close()
                     if (!isCurrentSession(session)) return
                     Log.i(TAG, "SSE Closed: id=$requestId")
                     completeSession(session, session.lastFinishReason ?: "completed")
@@ -481,6 +500,7 @@ internal class SseSessionCoordinator(
                 if (action == "ack_committed" && !session.isCompleted) return@synchronized null
                 if (!removeSession(session)) return@synchronized null
                 accepted = true
+                session.requestBody?.close()
                 Pair(session.takeEventSource(), session.takeConnection())
             }
             if (action == "cancel" && accepted) {
@@ -567,6 +587,7 @@ internal class SseSessionCoordinator(
                 // factory returns later, its completed check cancels that source
                 // instead of restoring a network owner to this terminal session.
                 finishedSource = session.takeEventSource()
+                session.requestBody?.close()
                 session.handoffWakeDeadlineMs = SystemClock.elapsedRealtime() + TERMINAL_ACK_TIMEOUT_MS
                 session.activeConnection?.let { connection ->
                     val event = sessionEvent(session, "terminal").apply {

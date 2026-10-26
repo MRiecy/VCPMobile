@@ -7,6 +7,7 @@ use tauri::{AppHandle, Runtime};
 use tokio_util::sync::CancellationToken;
 
 const FRAME_DATA_PREFIX: &str = "data:image/jpeg;base64,";
+const VIDEO_CACHE_KIND: &str = "video-jpeg-dedup-v1";
 
 #[derive(serde::Deserialize)]
 struct ProcessVideoResult {
@@ -22,7 +23,7 @@ pub async fn process_video_for_multimodal<R: Runtime>(
 ) -> Result<Vec<String>, String> {
     check_cancelled(cancellation)?;
     if let Some(cached) =
-        read_cache::<_, Vec<String>>(app, path, "video-jpeg", 17 * 1024 * 1024).await
+        read_cache::<_, Vec<String>>(app, path, VIDEO_CACHE_KIND, 17 * 1024 * 1024).await
     {
         check_cancelled(cancellation)?;
         if !cached.is_empty()
@@ -75,7 +76,7 @@ pub async fn process_video_for_multimodal<R: Runtime>(
     )
     .await?;
     check_cancelled(cancellation)?;
-    let frames = write_cache(app, path, "video-jpeg", frames).await?;
+    let frames = write_cache(app, path, VIDEO_CACHE_KIND, frames).await?;
     check_cancelled(cancellation)?;
     Ok(frames)
 }

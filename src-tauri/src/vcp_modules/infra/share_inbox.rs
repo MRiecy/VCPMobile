@@ -662,14 +662,76 @@ pub async fn prepare_current_share(
 }
 
 #[tauri::command]
+pub async fn read_android_share(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
+    #[cfg(target_os = "android")]
+    {
+        #[derive(Deserialize)]
+        struct Pending {
+            payload: Option<serde_json::Value>,
+        }
+        let pending: Pending = tokio::task::spawn_blocking(move || {
+            app.state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>()
+                .mobile_plugin_handle()?
+                .run_mobile_plugin("readShareInboxPayload", serde_json::json!({}))
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+        Ok(pending.payload)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = app;
+        Err("Android 分享快照仅在 Android 中可用".into())
+    }
+}
+
+async fn acknowledge_android_payload(
+    app: &AppHandle,
+    delivery_id: &str,
+    payload_revision: u64,
+    settled: bool,
+) {
+    #[cfg(target_os = "android")]
+    {
+        let app = app.clone();
+        let delivery_id = delivery_id.to_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            app.state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>()
+                .mobile_plugin_handle()?
+                .run_mobile_plugin::<serde_json::Value>("acknowledgeShareInboxPayload", serde_json::json!({
+                    "ownerId": delivery_id, "payloadRevision": payload_revision, "settled": settled,
+                }))
+                .map_err(|error| error.to_string())
+        })
+        .await;
+        // The durable record already owns the result. Retaining a pending native
+        // snapshot on ACK failure is safe: the next pull sees the committed phase.
+        if !matches!(result, Ok(Ok(_))) {
+            log::warn!("Android share acknowledgement failed: {result:?}");
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = (app, delivery_id, payload_revision, settled);
+}
+
+#[tauri::command]
 pub async fn accept_android_share(
     app: AppHandle,
     db: State<'_, DbState>,
     delivery_id: String,
     text: String,
     error: Option<String>,
+    payload_revision: u64,
+    payload_state: String,
 ) -> Result<CurrentShare, String> {
     leaf(&delivery_id)?;
+    if payload_revision == 0 || !["receiving", "ready", "failed"].contains(&payload_state.as_str())
+    {
+        return Err("分享快照身份或状态无效".into());
+    }
+    let acknowledge = payload_state != "ready";
+    let settled = payload_state == "failed";
     if text.len() > MAX_TEXT {
         return Err("分享文字超过 1 MiB".into());
     }
@@ -693,8 +755,13 @@ pub async fn accept_android_share(
                         };
                         write_slot(&root, &source)?;
                         save(&mut tx, &current).await?;
-                        tx.commit().await.map_err(|e| e.to_string())?;
                     }
+                }
+                tx.commit().await.map_err(|e| e.to_string())?;
+                drop(guard);
+                if acknowledge {
+                    acknowledge_android_payload(&app, &delivery_id, payload_revision, settled)
+                        .await;
                 }
                 return Ok(current);
             }
@@ -702,7 +769,7 @@ pub async fn accept_android_share(
     }
     let slot = Slot {
         generation: old.map_or(1, |s| s.generation + 1),
-        delivery_id,
+        delivery_id: delivery_id.clone(),
         state: if error.is_some() {
             "failed"
         } else {
@@ -726,6 +793,9 @@ pub async fn accept_android_share(
             .await;
         }
     }
+    if acknowledge {
+        acknowledge_android_payload(&app, &delivery_id, payload_revision, settled).await;
+    }
     Ok(share)
 }
 
@@ -737,6 +807,7 @@ pub async fn finish_android_share(
     delivery_id: String,
     text: String,
     files: Vec<tauri_plugin_vcp_mobile::system::SharedFileItem>,
+    payload_revision: u64,
 ) -> Result<CurrentShare, String> {
     let result = finish_android_share_inner(
         app.clone(),
@@ -747,22 +818,45 @@ pub async fn finish_android_share(
         files,
     )
     .await;
-    if let Err(error) = &result {
+    if result
+        .as_ref()
+        .is_ok_and(|share| share.state != "receiving")
+    {
+        acknowledge_android_payload(&app, &delivery_id, payload_revision, true).await;
+    } else if let Err(error) = &result {
         // Native acquisition may still remember this owner. Persist the actual failed handoff,
         // so a copy/disk/DB error cannot remain a permanently invisible receiving slot.
         if let Ok(root) = root(&app).await {
-            if let Ok(_guard) = lock(&root).await {
-                if let Ok(mut current) = assert_current(&root, generation, &delivery_id) {
-                    current.state = "failed".into();
-                    current.error = Some(error.clone());
-                    if let Err(failure) = write_slot(&root, &current) {
-                        log::warn!("Cannot persist share acquisition failure: {failure}");
-                    }
-                }
+            if mark_android_share_failed(&root, generation, &delivery_id, error).await {
+                acknowledge_android_payload(&app, &delivery_id, payload_revision, true).await;
             }
         }
     }
     result
+}
+
+async fn mark_android_share_failed(
+    root: &Path,
+    generation: u64,
+    delivery_id: &str,
+    error: &str,
+) -> bool {
+    let Ok(_guard) = lock(root).await else {
+        return false;
+    };
+    let Ok(mut current) = assert_current(root, generation, delivery_id) else {
+        return false;
+    };
+    // Ready files remain recoverable even if the subsequent SQLite commit failed.
+    if current.state == "receiving" {
+        current.state = "failed".into();
+        current.error = Some(error.to_owned());
+        if let Err(failure) = write_slot(root, &current) {
+            log::warn!("Cannot persist share acquisition failure: {failure}");
+            return false;
+        }
+    }
+    current.state == "failed"
 }
 
 async fn finish_android_share_inner(
@@ -781,8 +875,17 @@ async fn finish_android_share_inner(
     leaf(&delivery_id)?;
     let mut tx = db.write_transaction("share.android.acquire").await?;
     let guard = lock(&root).await?;
-    assert_current(&root, generation, &delivery_id)?;
-    let existing = load(&mut tx).await?.ok_or("分享记录丢失")?;
+    let source = assert_current(&root, generation, &delivery_id)?;
+    let mut existing = load(&mut tx).await?.ok_or("分享记录丢失")?;
+    if source.state != "receiving" && existing.state == "receiving" {
+        // Publication succeeded but the previous call could not commit SQLite.
+        // Reconcile without claiming the already consumed native file tickets.
+        existing.state = source.state;
+        existing.error = source.error;
+        save(&mut tx, &existing).await?;
+        tx.commit().await.map_err(|e| e.to_string())?;
+        return Ok(existing);
+    }
     if existing.state != "receiving" {
         return Ok(existing);
     }
@@ -798,79 +901,155 @@ async fn finish_android_share_inner(
         .map_err(|e| e.to_string())?;
     match try_lock_file(&lease) {
         Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => return Ok(existing),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            // A reloaded WebView may request the same snapshot while its old
+            // command still owns the copy. Wait without holding the DB/slot locks.
+            tx.commit().await.map_err(|error| error.to_string())?;
+            drop(guard);
+            let _lease = tokio::task::spawn_blocking(move || {
+                lock_file(&lease).map_err(|error| error.to_string())?;
+                Ok::<_, String>(lease)
+            })
+            .await
+            .map_err(|error| error.to_string())??;
+            let mut tx = db.write_transaction("share.android.join").await?;
+            let _guard = lock(&root).await?;
+            let source = assert_current(&root, generation, &delivery_id)?;
+            let mut share = load(&mut tx).await?.ok_or("分享记录丢失")?;
+            if share.state == "receiving" {
+                share.state = source.state;
+                share.error = source.error;
+                save(&mut tx, &share).await?;
+            }
+            tx.commit().await.map_err(|error| error.to_string())?;
+            return Ok(share);
+        }
         Err(error) => return Err(error.to_string()),
     }
     tx.commit().await.map_err(|e| e.to_string())?;
     drop(guard);
-    let mut items = vec![];
-    let mut total_bytes = 0_u64;
-    for file in files {
-        let name = file.file_name.clone();
-        let id = uuid::Uuid::new_v4().to_string();
-        let app = app.clone();
-        let owner = delivery_id.clone();
-        let registered = tokio::task::spawn_blocking(move || {
-            tauri_plugin_vcp_mobile::system::register_shared_files(app, owner, vec![file])
-        })
+    let mut created = Vec::<PathBuf>::new();
+    let mut published = false;
+    let result = async {
+        let mut items = vec![];
+        let mut total_bytes = 0_u64;
+        for file in files {
+            let name = file.file_name.clone();
+            let id = uuid::Uuid::new_v4().to_string();
+            let app = app.clone();
+            let owner = delivery_id.clone();
+            let registered = tokio::task::spawn_blocking(move || {
+                tauri_plugin_vcp_mobile::system::register_shared_files(app, owner, vec![file])
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            match registered {
+                Ok(mut result) if !result.is_empty() => {
+                    let file = result.remove(0);
+                    let target = folder.join(&id);
+                    created.push(target.clone());
+                    copy_android_share_file(
+                        Path::new(&file.path),
+                        &target,
+                        &mut total_bytes,
+                        file.size,
+                    )
+                    .await?;
+                    items.push(ShareItem {
+                        item_id: id,
+                        file_name: file.name,
+                        mime_type: file.mime,
+                        size: file.size,
+                        sha256: file.hash,
+                        error: None,
+                        attachment: None,
+                    });
+                }
+                result => items.push(ShareItem {
+                    item_id: id,
+                    file_name: name,
+                    mime_type: String::new(),
+                    size: 0,
+                    sha256: String::new(),
+                    error: Some(result.err().unwrap_or_else(|| "提供方未返回文件".into())),
+                    attachment: None,
+                }),
+            }
+        }
+        let manifest = serde_json::json!({"text": text, "items": items});
+        created.push(folder.join("manifest.json"));
+        tokio::fs::write(
+            folder.join("manifest.json"),
+            serde_json::to_vec(&manifest).map_err(|e| e.to_string())?,
+        )
         .await
         .map_err(|e| e.to_string())?;
-        match registered {
-            Ok(mut result) if !result.is_empty() => {
-                let file = result.remove(0);
-                total_bytes = total_bytes
-                    .checked_add(file.size)
-                    .ok_or("分享文件大小溢出")?;
-                if total_bytes > 512 * 1024 * 1024 {
-                    return Err("分享超过 512 MiB".into());
-                }
-                tokio::fs::copy(&file.path, folder.join(&id))
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let _ = tokio::fs::remove_file(&file.path).await;
-                items.push(ShareItem {
-                    item_id: id,
-                    file_name: file.name,
-                    mime_type: file.mime,
-                    size: file.size,
-                    sha256: file.hash,
-                    error: None,
-                    attachment: None,
-                });
-            }
-            result => items.push(ShareItem {
-                item_id: id,
-                file_name: name,
-                mime_type: String::new(),
-                size: 0,
-                sha256: String::new(),
-                error: Some(result.err().unwrap_or_else(|| "提供方未返回文件".into())),
-                attachment: None,
-            }),
+        let mut tx = db.write_transaction("share.android.ready").await?;
+        let guard = lock(&root).await?;
+        let mut source = assert_current(&root, generation, &delivery_id)?;
+        let mut share = load(&mut tx).await?.ok_or("分享记录丢失")?;
+        if terminal(&share) {
+            return Ok(share);
+        }
+        source.state = "ready".into();
+        write_slot(&root, &source)?;
+        published = true;
+        share.state = "ready".into();
+        save(&mut tx, &share).await?;
+        tx.commit().await.map_err(|e| e.to_string())?;
+        drop(guard);
+        Ok::<_, String>(share)
+    }
+    .await;
+    // A published manifest remains recoverable if SQLite failed afterwards.
+    // All other paths belong exclusively to this lease, including partial copies.
+    if !published {
+        for path in created {
+            remove_handoff_file(&path).await;
         }
     }
-    let manifest = serde_json::json!({"text": text, "items": items});
-    tokio::fs::write(
-        folder.join("manifest.json"),
-        serde_json::to_vec(&manifest).map_err(|e| e.to_string())?,
-    )
-    .await
-    .map_err(|e| e.to_string())?;
-    let mut tx = db.write_transaction("share.android.ready").await?;
-    let guard = lock(&root).await?;
-    let mut source = assert_current(&root, generation, &delivery_id)?;
-    let mut share = load(&mut tx).await?.ok_or("分享记录丢失")?;
-    if terminal(&share) {
-        return Ok(share);
+    if let Err(error) = &result {
+        mark_android_share_failed(&root, generation, &delivery_id, error).await;
     }
-    source.state = "ready".into();
-    write_slot(&root, &source)?;
-    share.state = "ready".into();
-    save(&mut tx, &share).await?;
-    tx.commit().await.map_err(|e| e.to_string())?;
-    drop(guard);
     drop(lease);
-    Ok(share)
+    result
+}
+
+async fn copy_android_share_file(
+    source: &Path,
+    target: &Path,
+    total_bytes: &mut u64,
+    size: u64,
+) -> Result<(), String> {
+    // Once native registration returns, Rust owns this upload on every exit,
+    // including a size rejection before the destination is opened.
+    let result = async {
+        *total_bytes = total_bytes.checked_add(size).ok_or("分享文件大小溢出")?;
+        if *total_bytes > 512 * 1024 * 1024 {
+            return Err("分享超过 512 MiB".into());
+        }
+        tokio::fs::copy(source, target)
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+    .await;
+    remove_handoff_file(source).await;
+    if result.is_err() {
+        remove_handoff_file(target).await;
+    }
+    result
+}
+
+async fn remove_handoff_file(path: &Path) {
+    if let Err(error) = tokio::fs::remove_file(path).await {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            log::warn!(
+                "Cannot remove share handoff file {}: {error}",
+                path.display()
+            );
+        }
+    }
 }
 
 #[tauri::command]
@@ -1119,6 +1298,64 @@ mod tests {
     use super::*;
     use sqlx::Connection;
 
+    #[tokio::test]
+    async fn android_copy_consumes_upload_on_success_and_budget_rejection() {
+        let temporary = tempfile::tempdir_in("tests").unwrap();
+        let source = temporary.path().join("upload");
+        let target = temporary.path().join("item");
+        tokio::fs::write(&source, b"complete").await.unwrap();
+        let mut total = 0;
+        copy_android_share_file(&source, &target, &mut total, 8)
+            .await
+            .unwrap();
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"complete");
+        assert!(!source.exists());
+        assert_eq!(total, 8);
+
+        tokio::fs::write(&source, b"over budget").await.unwrap();
+        let rejected = temporary.path().join("rejected-item");
+        total = 512 * 1024 * 1024;
+        assert!(copy_android_share_file(&source, &rejected, &mut total, 1)
+            .await
+            .is_err());
+        assert!(!source.exists());
+        assert!(!rejected.exists());
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"complete");
+    }
+
+    #[tokio::test]
+    async fn android_copy_failure_removes_upload_and_owned_partial_target() {
+        let temporary = tempfile::tempdir_in("tests").unwrap();
+        let source = temporary.path().join("upload");
+        tokio::fs::write(&source, b"original").await.unwrap();
+        let mut total = 0;
+        // Opening the destination fails, as it does when storage cannot accept a copy.
+        let unavailable = temporary.path().join("missing-parent/item");
+        assert!(
+            copy_android_share_file(&source, &unavailable, &mut total, 8)
+                .await
+                .is_err()
+        );
+        assert!(!source.exists());
+        let partial = temporary.path().join("partial-item");
+        tokio::fs::write(&partial, b"partial").await.unwrap();
+        assert!(copy_android_share_file(&source, &partial, &mut total, 8)
+            .await
+            .is_err());
+        assert!(!partial.exists());
+    }
+
+    #[tokio::test]
+    async fn late_android_failure_cannot_revoke_published_or_replaced_files() {
+        let temporary = tempfile::tempdir_in("tests").unwrap();
+        let root = temporary.path();
+        write_slot(root, &test_slot(1, "published")).unwrap();
+        assert!(!mark_android_share_failed(root, 1, "published", "late database error").await);
+        assert_eq!(slot(root).unwrap().unwrap().state, "ready");
+        write_slot(root, &test_slot(2, "newer")).unwrap();
+        assert!(!mark_android_share_failed(root, 1, "published", "late failure").await);
+        assert_eq!(slot(root).unwrap().unwrap().delivery_id, "newer");
+    }
     fn test_slot(generation: u64, id: &str) -> Slot {
         Slot {
             generation,

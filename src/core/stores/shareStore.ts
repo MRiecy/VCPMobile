@@ -35,6 +35,7 @@ export const useShareStore = defineStore('share', () => {
   let readAgain = false;
   let preparingId: string | null = null;
   let androidQueue = Promise.resolve();
+  const androidInFlight = new Set<string>();
   let pendingEdit: { identity: ShareIdentity; text: string; attachments: Attachment[] } | null = null;
   let writing: Promise<void> | null = null;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -97,26 +98,35 @@ export const useShareStore = defineStore('share', () => {
     return readCurrent();
   };
   const receiveAndroid = (detail: unknown) => {
-    if (!detail || typeof detail !== 'object') return;
+    if (!detail || typeof detail !== 'object') return Promise.resolve();
     const source = detail as Record<string, unknown>;
-    if (typeof source.intentId !== 'string' || !source.intentId) return;
+    if (typeof source.intentId !== 'string' || !source.intentId
+      || !Number.isSafeInteger(source.payloadRevision) || Number(source.payloadRevision) <= 0
+      || !['receiving', 'ready', 'failed'].includes(String(source.state))) return Promise.resolve();
+    const snapshotId = `${source.intentId}:${source.payloadRevision}`;
+    if (androidInFlight.has(snapshotId)) return androidQueue;
+    androidInFlight.add(snapshotId);
     // Preserve native acceptance order even when IPC scheduling is concurrent.
     androidQueue = androidQueue.catch(() => {}).then(async () => {
       const value = await invoke<CurrentShare>('accept_android_share', {
         deliveryId: source.intentId, text: typeof source.text === 'string' ? source.text : '',
         error: typeof source.error === 'string' ? source.error : null,
+        payloadRevision: source.payloadRevision, payloadState: source.state,
       });
       apply(value);
       if (source.error) showSelector();
-      if (source.state === 'receiving' || source.error || ['sent', 'draft', 'discarded'].includes(value.state)) return;
+      if (source.state !== 'ready') { androidInFlight.delete(snapshotId); return; }
       // Ready processing is detached from acceptance; a later share can immediately invalidate it.
       void invoke<CurrentShare>('finish_android_share', {
         ...identity(value), text: typeof source.text === 'string' ? source.text : '', files: Array.isArray(source.files) ? source.files : [],
+        payloadRevision: source.payloadRevision,
       }).then(async result => { if (isCurrent(value)) { apply(result); await prepare(); } }).catch(error => {
         if (isCurrent(value)) { notify(error); void readCurrent().catch(notify); }
-      });
-    }).catch(notify);
+      }).finally(() => androidInFlight.delete(snapshotId));
+    }).catch(error => { androidInFlight.delete(snapshotId); notify(error); });
+    return androidQueue;
   };
+  const pollAndroid = async () => receiveAndroid(await invoke<unknown>('read_android_share'));
   const openDraft = async (agentId: string, allowPartial = false) => {
     const share = current.value;
     if (!share || busy.value) return;
@@ -177,5 +187,5 @@ export const useShareStore = defineStore('share', () => {
       if (isCurrent(share) && current.value) { current.value = { ...current.value, state: 'discarded' }; selectorOpen.value = false; }
     } catch (error) { notify(error); }
   };
-  return { current, activeDraft, failures, selectorOpen, busy, sending, refresh, prepare, receiveAndroid, openDraft, editDraft, flushDraft, commit, discard, closeSelector, notify };
+  return { current, activeDraft, failures, selectorOpen, busy, sending, refresh, prepare, receiveAndroid, pollAndroid, openDraft, editDraft, flushDraft, commit, discard, closeSelector, notify };
 });
