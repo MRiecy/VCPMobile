@@ -649,7 +649,7 @@ mod tests {
             assert_eq!(normalized["guidance"]["rules"], rules);
         }
         let missing = normalize_domain(ConfigDomain::Voice, &json!({}));
-        assert_eq!(missing["guidance"]["rules"], "占位中");
+        assert_eq!(missing["guidance"]["rules"], DEFAULT_VOICE_GUIDANCE_RULES);
     }
 
     #[test]

@@ -3,19 +3,25 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
 import { ArrowLeft } from '@lucide/vue';
 import SlidePage from '../../../components/ui/SlidePage.vue';
 import VoiceStyleGuidancePage from './VoiceStyleGuidancePage.vue';
+import VoiceRuleDetailsPage from './VoiceRuleDetailsPage.vue';
 import VoiceSettingsPage from './VoiceSettingsPage.vue';
 import { useModalHistory } from '../../../core/composables/useModalHistory';
 import type { SettingsPageHandle } from '../../settings/contracts';
 
 const props = defineProps<{
-  mode: 'settings' | 'styleGuidance';
+  mode: 'settings' | 'styleGuidance' | 'ruleDetails';
   isOpen: boolean;
   active: boolean;
   zIndex: number;
 }>();
 
 const emit = defineEmits<{ close: [] }>();
-const title = computed(() => props.mode === 'settings' ? '语音设置' : '风格指导');
+const pages = {
+  settings: { title: '语音设置', modalId: 'Page:voiceSettings:' },
+  styleGuidance: { title: '风格指导', modalId: 'Page:voiceStyleGuidance:' },
+  ruleDetails: { title: '规则细节', modalId: 'Page:voiceRuleDetails:' },
+} as const;
+const title = computed(() => pages[props.mode].title);
 const pageActive = computed(() => props.isOpen && props.active);
 const pageHandle = ref<SettingsPageHandle | null>(null);
 const visit = ref(0);
@@ -29,6 +35,10 @@ let closing: Promise<void> | null = null;
 const close = (): boolean => {
   if (!mounted) return true;
   if (!pageActive.value || closing) return false;
+  if (props.mode === 'ruleDetails') {
+    emit('close');
+    return true;
+  }
   const serial = visit.value;
   navigationError.value = '';
   const operation = nextTick().then(() => mounted && pageActive.value && visit.value === serial
@@ -46,8 +56,8 @@ watch(pageActive, active => {
     visit.value += 1;
     navigationError.value = '';
     // OverlayStore already owns this ID. Update its dismissal guard without
-    // adding another history level, for either editable voice page.
-    registerModal(props.mode === 'settings' ? 'Page:voiceSettings:' : 'Page:voiceStyleGuidance:', close, undefined, close);
+    // adding another history level.
+    registerModal(pages[props.mode].modalId, close, undefined, props.mode === 'ruleDetails' ? undefined : close);
   }
 }, { immediate: true, flush: 'sync' });
 onBeforeUnmount(() => { mounted = false; });
@@ -67,7 +77,8 @@ onBeforeUnmount(() => { mounted = false; });
       <div class="flex-1 min-h-0 overflow-hidden flex flex-col">
         <p v-if="navigationError" class="shrink-0 px-4 py-2 text-sm text-red-500" role="alert">{{ navigationError }}</p>
         <VoiceSettingsPage v-if="mode === 'settings'" :key="`settings-${visit}`" ref="pageHandle" :active="pageActive" />
-        <VoiceStyleGuidancePage v-else :key="`style-guidance-${visit}`" ref="pageHandle" :active="pageActive" />
+        <VoiceStyleGuidancePage v-else-if="mode === 'styleGuidance'" :key="`style-guidance-${visit}`" ref="pageHandle" :active="pageActive" />
+        <VoiceRuleDetailsPage v-else :key="`rule-details-${visit}`" :active="pageActive" />
       </div>
     </div>
   </SlidePage>

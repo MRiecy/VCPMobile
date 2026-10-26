@@ -16,6 +16,7 @@ export type OverlayPageType =
   | 'tarvenSettings'
   | 'voiceSettings'
   | 'voiceStyleGuidance'
+  | 'voiceRuleDetails'
   | 'distributed'
   | 'ragObserver'
   | 'diaryCenter'
@@ -60,6 +61,7 @@ export const useOverlayStore = defineStore('overlay', () => {
   const isTarvenSettingsOpen = computed(() => pageStack.value.some(p => p.type === 'tarvenSettings'));
   const isVoiceSettingsOpen = computed(() => pageStack.value.some(p => p.type === 'voiceSettings'));
   const isVoiceStyleGuidanceOpen = computed(() => pageStack.value.some(p => p.type === 'voiceStyleGuidance'));
+  const isVoiceRuleDetailsOpen = computed(() => pageStack.value.some(p => p.type === 'voiceRuleDetails'));
   const isDistributedOpen = computed(() => pageStack.value.some(p => p.type === 'distributed'));
   const isRagObserverOpen = computed(() => pageStack.value.some(p => p.type === 'ragObserver'));
   const isDiaryCenterOpen = computed(() => pageStack.value.some(p => p.type === 'diaryCenter'));
@@ -226,6 +228,16 @@ export const useOverlayStore = defineStore('overlay', () => {
 
   const closeVoiceStyleGuidance = () => {
     if (pageStackTop.value?.type !== 'voiceStyleGuidance') return;
+    popPage();
+  };
+
+  const openVoiceRuleDetails = () => {
+    if (isVoiceRuleDetailsOpen.value) return;
+    pushPage('voiceRuleDetails');
+  };
+
+  const closeVoiceRuleDetails = () => {
+    if (pageStackTop.value?.type !== 'voiceRuleDetails') return;
     popPage();
   };
 
@@ -422,6 +434,7 @@ export const useOverlayStore = defineStore('overlay', () => {
     isTarvenSettingsOpen,
     isVoiceSettingsOpen,
     isVoiceStyleGuidanceOpen,
+    isVoiceRuleDetailsOpen,
     isDistributedOpen,
     isRagObserverOpen,
     isDiaryCenterOpen,
@@ -450,6 +463,8 @@ export const useOverlayStore = defineStore('overlay', () => {
     closeVoiceSettings,
     openVoiceStyleGuidance,
     closeVoiceStyleGuidance,
+    openVoiceRuleDetails,
+    closeVoiceRuleDetails,
     openDistributed,
     closeDistributed,
     openRagObserver,

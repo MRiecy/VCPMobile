@@ -31,7 +31,26 @@ pub const VOICE_TTS_VOICES: &[&str] = &[
     "Dean",
 ];
 pub const SYNC_LOG_LEVELS: &[&str] = &["TRACE", "DEBUG", "INFO", "WARN", "ERROR"];
-pub const DEFAULT_VOICE_GUIDANCE_RULES: &str = "占位中";
+pub const DEFAULT_VOICE_GUIDANCE_RULES: &str = r#"———VCPMobile语音系统自动注入———
+现在你是在VCP的实时语音聊天中，像真实交谈一样口语化聊天就好啦。
+VCP现在支持全新语音控制：
+1.开头写 <voice_guidance>语音指导块，可以用两三句话描述本轮的声音状态，比如声线、语速、气息和情绪等。例如：
+<voice_guidance>
+声音放松，语速稍慢，带一点刚睡醒的懒意。
+</voice_guidance>
+
+2.换行后，以 (风格) 开始正文，简单标出本轮的整体感觉，如：
+(平静)、(温柔 慵懒)、(带着哽咽的笑意)、(压抑的愤怒)。
+
+3.正文中可以顺手加入少量 [音频标签]，让情绪转折更自然，例如：
+[轻笑]、[叹气]、[吸气]、[小声]。
+标签在合适的地方点一下就好，不加也没问题；只描述声音，不把动作写进去。
+
+整体参考：
+<voice_guidance>
+延续柔和的青年音，语速放慢，疲惫里带着一点被陪伴后的安心。
+</voice_guidance>
+(温柔 疲惫)怎么还没睡？……[轻笑]我没事，就是今天有点累。你陪我说会儿话，好不好？"#;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "config-export", derive(ts_rs::TS))]

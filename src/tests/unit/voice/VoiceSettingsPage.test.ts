@@ -11,6 +11,7 @@ import { makeSettings, makeConfigSnapshot, configRequestChanges } from '../../he
 import { applySettingsFields, type SettingsFieldValues } from '../../../core/config/fields';
 import type { ConfigUpdate, ConfigSaveResult } from '../../../core/config/generated/config';
 import { useSettingsStore, type AppSettings } from '../../../core/stores/settings';
+import { SETTINGS_DEFAULTS } from '../../../core/config/generated/defaults';
 import { useModalHistory } from '../../../core/composables/useModalHistory';
 import { emitTauriEvent, invokeMock, listenMock, mockInvoke } from '../../mocks/tauri';
 
@@ -78,6 +79,7 @@ afterEach(() => {
   useOverlayStore().closePrompt();
   modals.unregisterModal('Page:voiceSettings:');
   modals.unregisterModal('Page:voiceStyleGuidance:');
+  modals.unregisterModal('Page:voiceRuleDetails:');
   disposePinia(pinia);
   vi.restoreAllMocks();
 });
@@ -444,15 +446,71 @@ describe('语音设置使用正式设置快照', () => {
     expect(wrapper.emitted('close')).toHaveLength(1);
   });
 
-  it('风格指导可恢复默认占位规则后返回', async () => {
+  it('风格指导可恢复默认规则后返回', async () => {
     const { wrapper } = await renderOverlay('styleGuidance');
     await wrapper.get('textarea').setValue('自定义规则');
     await wrapper.findAll('button').find(button => button.text() === '恢复默认规则')!.trigger('click');
-    expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('占位中');
+    expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe(SETTINGS_DEFAULTS.voice.guidance.rules);
     await wrapper.get('button[aria-label="返回，关闭风格指导"]').trigger('click');
     await flushPromises();
     expect(updates()).toHaveLength(0);
     expect(wrapper.emitted('close')).toHaveLength(1);
+  });
+
+  it.each(['页面返回', '系统返回'])('规则细节等待草稿保存，%s后继续编辑已保存规则', async destination => {
+    const pending = deferred<ConfigSaveResult>();
+    mockInvoke('update_settings', () => pending.promise);
+    const overlay = useOverlayStore();
+    overlay.pushPage('voiceStyleGuidance');
+    const { wrapper } = await renderOverlay('styleGuidance');
+    const rules = '  声音轻柔。\n保留我的自定义规则。  ';
+    await wrapper.get('textarea').setValue(rules);
+    await wrapper.get('button[aria-label="规则细节"]').trigger('click');
+    await flushPromises();
+    expect(overlay.pageStackTop?.type).toBe('voiceStyleGuidance');
+    expect(wrapper.get('textarea').attributes('disabled')).toBeDefined();
+    modals.closeTopModal();
+    await flushPromises();
+    expect(wrapper.emitted('close')).toBeUndefined();
+
+    pending.resolve(saved({ 'voice.guidance.rules': rules }));
+    await flushPromises();
+    expect(overlay.pageStack.map(page => page.type)).toEqual(['voiceStyleGuidance', 'voiceRuleDetails']);
+    expect(overlay.getPageZIndex('voiceRuleDetails')).toBeGreaterThan(overlay.getPageZIndex('voiceStyleGuidance'));
+    await wrapper.setProps({ active: false });
+    const details = mount(VoiceOptionsView, {
+      props: { mode: 'ruleDetails', isOpen: true, active: true,
+        zIndex: overlay.getPageZIndex('voiceRuleDetails'), onClose: overlay.closeVoiceRuleDetails },
+      global: { stubs: { SlidePage: { template: '<div><slot /></div>' } } },
+    });
+    wrappers.push(details);
+    expect(details.get('article h1').text()).toBe('MiMo 语音风格控制');
+    expect(details.findAll('article table')).toHaveLength(2);
+    expect(details.find('textarea').exists()).toBe(false);
+    expect(details.get('article').text()).toContain('<voice_guidance>');
+    if (destination === '页面返回') await details.get('button[aria-label="返回，关闭规则细节"]').trigger('click');
+    else modals.closeTopModal();
+    await flushPromises();
+    expect(overlay.pageStackTop?.type).toBe('voiceStyleGuidance');
+    expect(modals.modalStackLength()).toBe(1);
+    await details.setProps({ isOpen: false, active: false });
+    await wrapper.setProps({ active: true });
+    await flushPromises();
+    expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe(rules);
+    expect(updates()).toHaveLength(1);
+    overlay.popToRoot();
+  });
+
+  it('打开规则细节时保存失败，留在编辑页保留草稿并允许重试', async () => {
+    mockInvoke('update_settings', () => { throw new Error('保存失败'); });
+    const { wrapper } = await renderOverlay('styleGuidance');
+    await wrapper.get('textarea').setValue('尚未保存的规则');
+    await wrapper.get('button[aria-label="规则细节"]').trigger('click');
+    await flushPromises();
+    expect(useOverlayStore().isVoiceRuleDetailsOpen).toBe(false);
+    expect(wrapper.get('[role="alert"]').text()).toContain('保存失败');
+    expect((wrapper.get('textarea').element as HTMLTextAreaElement).value).toBe('尚未保存的规则');
+    expect(wrapper.get('button[aria-label="规则细节"]').attributes('disabled')).toBeUndefined();
   });
 
   it('试听只提交当前语音草稿，事件按身份处理，返回只停止本页试听', async () => {

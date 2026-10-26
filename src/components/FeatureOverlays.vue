@@ -59,6 +59,7 @@ const groupSettingsMounted = createFirstOpenLatch(() => overlayStore.isGroupSett
 const tarvenSettingsMounted = createFirstOpenLatch(() => overlayStore.isTarvenSettingsOpen);
 const voiceSettingsMounted = createFirstOpenLatch(() => overlayStore.isVoiceSettingsOpen);
 const voiceStyleGuidanceMounted = createFirstOpenLatch(() => overlayStore.isVoiceStyleGuidanceOpen);
+const voiceRuleDetailsMounted = createFirstOpenLatch(() => overlayStore.isVoiceRuleDetailsOpen);
 const distributedMounted = createFirstOpenLatch(() => overlayStore.isDistributedOpen);
 const ragObserverMounted = createFirstOpenLatch(() => overlayStore.isRagObserverOpen);
 const diaryMounted = createFirstOpenLatch(() => overlayStore.isDiaryCenterOpen);
@@ -129,6 +130,15 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
       :active="overlayStore.pageStackTop?.type === 'voiceStyleGuidance'"
       :z-index="overlayStore.getPageZIndex('voiceStyleGuidance')"
       @close="overlayStore.closeVoiceStyleGuidance()"
+    />
+    <VoiceOptionsView
+      v-if="voiceRuleDetailsMounted"
+      :data-vcp-modal-id="pageModalId('voiceRuleDetails')"
+      mode="ruleDetails"
+      :is-open="overlayStore.isVoiceRuleDetailsOpen"
+      :active="overlayStore.pageStackTop?.type === 'voiceRuleDetails'"
+      :z-index="overlayStore.getPageZIndex('voiceRuleDetails')"
+      @close="overlayStore.closeVoiceRuleDetails()"
     />
     <RebuildSessionView
       :data-vcp-modal-id="pageModalId('rebuildSession')"
