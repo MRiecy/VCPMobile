@@ -1,3 +1,4 @@
+use crate::vcp_modules::infra::vcp_endpoint::resolve_distributed_connection;
 use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use tauri::{AppHandle, Manager};
 
@@ -47,16 +48,7 @@ pub async fn reconcile_distributed_node(app_handle: &AppHandle, force_reconnect:
                 );
                 return;
             }
-            let ws_url = if !settings.log.url.is_empty() {
-                settings.log.url.clone()
-            } else {
-                settings.distributed.ws_url.clone()
-            };
-            let vcp_key = if !settings.log.key.is_empty() {
-                settings.log.key.clone()
-            } else {
-                settings.distributed.vcp_key.clone()
-            };
+            let connection = resolve_distributed_connection(&settings);
             let device_name = "VCPMobile".to_string();
             log::info!(
                 "[Lifecycle] distributedEnabled=true, starting distributed node connection..."
@@ -64,8 +56,9 @@ pub async fn reconcile_distributed_node(app_handle: &AppHandle, force_reconnect:
             if let Err(e) = client
                 .start(
                     app_handle.clone(),
-                    ws_url,
-                    vcp_key,
+                    connection.url.to_string(),
+                    connection.key.to_string(),
+                    connection.base_kind(),
                     device_name,
                     distributed_state.registry.clone(),
                 )

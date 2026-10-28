@@ -12,6 +12,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
+use super::vcp_endpoint::{compile_log_connection, endpoint_log_label, log_connection_attempts};
+
 type ConnectionIntent = (u64, Option<Url>);
 
 static HEARTBEAT_INTERVAL_MS: std::sync::atomic::AtomicU64 =
@@ -102,23 +104,64 @@ pub async fn handle_foreground_state_change(_app: &AppHandle, is_foreground: boo
 }
 
 pub async fn disconnect_log_connections(app: &AppHandle) {
-    let _ = init_vcp_log_connection_internal(app.clone(), "".to_string(), "".to_string()).await;
-    let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection_internal(
-        app.clone(),
-        "".to_string(),
-        "".to_string(),
-    )
-    .await;
+    apply_log_endpoint(app, None);
+    super::vcp_info_service::apply_info_endpoint(app, None);
 }
 
-pub async fn reconnect_log_connections(app: &AppHandle, log_url: String, log_key: String) {
-    let _ = init_vcp_log_connection_internal(app.clone(), log_url.clone(), log_key.clone()).await;
-    let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection_internal(
-        app.clone(),
-        log_url,
-        log_key,
-    )
-    .await;
+pub async fn reconnect_log_connections<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    log_url: String,
+    log_key: String,
+) -> Result<(), String> {
+    #[cfg(target_os = "ios")]
+    if !crate::vcp_modules::lifecycle_manager::is_app_in_foreground(app) {
+        apply_log_endpoint(app, None);
+        super::vcp_info_service::apply_info_endpoint(app, None);
+        return Ok(());
+    }
+
+    // Prepare both channels before publishing either intent. Settings validation,
+    // startup and lifecycle restoration use the same endpoint compiler.
+    match compile_log_connection(&log_url, &log_key) {
+        Ok(endpoints) => {
+            let (log, info) = endpoints
+                .map(|endpoints| (Some(endpoints.log), Some(endpoints.info)))
+                .unwrap_or((None, None));
+            apply_log_endpoint(app, log);
+            super::vcp_info_service::apply_info_endpoint(app, info);
+            Ok(())
+        }
+        Err(issue) => {
+            apply_log_endpoint(app, None);
+            super::vcp_info_service::apply_info_endpoint(app, None);
+            let message = issue.to_string();
+            report_connection_configuration_error(app, "VCPLog / VCPInfo", &message);
+            Err(message)
+        }
+    }
+}
+
+pub(super) fn report_connection_configuration_error<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    source: &str,
+    message: &str,
+) {
+    // Keep the stopped state as `closed`. A separate notification retains the
+    // cause when the listener acknowledges None, and cannot overwrite a later
+    // connection's status. There is no await between stopping and reporting.
+    emit_log_event(
+        app,
+        serde_json::json!({
+            "type": "vcp-log-message",
+            "data": {
+                "id": "vcp_connection_configuration_error",
+                "status": "error",
+                "tool_name": format!("{source} 配置错误"),
+                "content": format!("连接已停止：{message} 请在设置中修正 WebSocket 地址或 Key。"),
+                "source": source
+            }
+        }),
+    );
 }
 
 fn emit_log_event<R: tauri::Runtime>(app: &AppHandle<R>, payload: serde_json::Value) {
@@ -187,40 +230,6 @@ pub async fn send_vcp_log_message(payload: serde_json::Value) -> Result<(), Stri
     }
 }
 
-fn parse_log_url(url: &str, key: &str) -> Result<Url, String> {
-    let mut base_url = url.trim_end_matches('/').to_string();
-    if !base_url.contains("/VCPlog") {
-        base_url.push_str("/VCPlog");
-    }
-
-    let url_with_key = if base_url.contains("VCP_Key=") {
-        base_url
-    } else {
-        if !base_url.ends_with('/') {
-            base_url.push('/');
-        }
-        format!("{}VCP_Key={}", base_url, key)
-    };
-
-    Url::parse(&url_with_key).map_err(|e| format!("Invalid URL: {}", e))
-}
-
-fn append_device_name(url: &Url, device_name: &str) -> Url {
-    let mut new_url = url.clone();
-    let query = new_url.query();
-
-    let has_device_name = query.is_some_and(|q| q.contains("deviceName="));
-    if !has_device_name {
-        let encoded_device_name = urlencoding::encode(device_name);
-        let new_query = match query {
-            Some(q) if !q.is_empty() => format!("{}&deviceName={}", q, encoded_device_name),
-            _ => format!("deviceName={}", encoded_device_name),
-        };
-        new_url.set_query(Some(&new_query));
-    }
-    new_url
-}
-
 #[tauri::command]
 pub async fn init_vcp_log_connection(
     app: AppHandle,
@@ -240,27 +249,35 @@ pub async fn init_vcp_log_connection_internal<R: tauri::Runtime>(
         set_log_url(None);
         return Ok(());
     }
-    // 如果 URL 或 Key 为空，发送 None 以停止现有连接并进入静默等待
-    if url.trim().is_empty() || key.trim().is_empty() {
-        set_log_url(None);
-        return Ok(());
+    match compile_log_connection(&url, &key) {
+        Ok(endpoints) => {
+            apply_log_endpoint(&app, endpoints.map(|endpoints| endpoints.log));
+            Ok(())
+        }
+        Err(issue) => {
+            apply_log_endpoint(&app, None);
+            let message = issue.to_string();
+            report_connection_configuration_error(&app, "VCPLog", &message);
+            Err(message)
+        }
+    }
+}
+
+fn apply_log_endpoint<R: tauri::Runtime>(app: &AppHandle<R>, endpoint: Option<Url>) {
+    let configured = endpoint.is_some();
+    set_log_url(endpoint);
+    if !configured {
+        return;
     }
 
-    let ws_url = parse_log_url(&url, &key)?;
-
-    // Always send the new URL to the watch channel
-    set_log_url(Some(ws_url));
-
     if LOG_CONNECTION_ACTIVE.swap(true, Ordering::SeqCst) {
-        return Ok(());
+        return;
     }
 
     let h = app.clone();
     tauri::async_runtime::spawn(async move {
         start_vcp_log_listener(h).await;
     });
-
-    Ok(())
 }
 
 async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
@@ -274,7 +291,23 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             match val {
                 (revision, Some(url)) => (revision, url),
                 (_, None) => {
-                    *CURRENT_LOG_STATUS.write().await = "closed".to_string();
+                    let status_changed = {
+                        let mut status = CURRENT_LOG_STATUS.write().await;
+                        let changed = status.as_str() != "closed";
+                        *status = "closed".to_string();
+                        changed
+                    };
+                    if status_changed {
+                        emit_log_event(
+                            &app_handle,
+                            serde_json::json!({
+                                "type": "vcp-log-status",
+                                "status": "closed",
+                                "message": "连接已停止",
+                                "source": "VCPLog"
+                            }),
+                        );
+                    }
                     if url_rx.changed().await.is_err() {
                         break;
                     }
@@ -283,7 +316,10 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             }
         };
 
-        log::info!("[VCPLog] Attempting to connect to {}...", ws_url);
+        log::info!(
+            "[VCPLog] Attempting to connect to {}...",
+            endpoint_log_label(&ws_url)
+        );
 
         {
             *CURRENT_LOG_STATUS.write().await = "connecting".to_string();
@@ -299,14 +335,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             }),
         );
 
-        let new_url = append_device_name(&ws_url, "VCPChat-Mobile");
-        let old_url = ws_url.clone();
-
-        let urls_to_try = if new_url == old_url {
-            vec![new_url]
-        } else {
-            vec![new_url, old_url]
-        };
+        let urls_to_try = log_connection_attempts(&ws_url);
 
         let mut connection_succeeded = false;
         let mut ws_stream_opt = None;
@@ -319,7 +348,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                 "[VCPLog] Attempting connection trial {}/{}: {}...",
                 i + 1,
                 urls_to_try.len(),
-                trial_url
+                endpoint_log_label(trial_url)
             );
 
             let mut request = match trial_url.as_str().into_client_request() {
@@ -328,7 +357,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     log::error!(
                         "[VCPLog] Failed to build request for trial {} ({}): {}",
                         i + 1,
-                        trial_url,
+                        endpoint_log_label(trial_url),
                         e
                     );
                     connection_error = Some(tokio_tungstenite::tungstenite::Error::Io(
@@ -388,7 +417,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                             log::warn!(
                                 "[VCPLog] Connection failed for trial {} ({}): {}",
                                 i + 1,
-                                trial_url,
+                                endpoint_log_label(trial_url),
                                 e
                             );
                             connection_error = Some(e);
@@ -397,7 +426,7 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                             log::warn!(
                                 "[VCPLog] Connection timed out (5s) for trial {} ({})",
                                 i + 1,
-                                trial_url
+                                endpoint_log_label(trial_url)
                             );
                             connection_error = Some(tokio_tungstenite::tungstenite::Error::Io(
                                 std::io::Error::new(std::io::ErrorKind::TimedOut, "Connection timed out (5s)")
@@ -447,7 +476,10 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     *CURRENT_LOG_STATUS.write().await = "connected".to_string();
                 }
 
-                log::info!("[VCPLog] Connected successfully to {}", final_ws_url);
+                log::info!(
+                    "[VCPLog] Connected successfully to {}",
+                    endpoint_log_label(&final_ws_url)
+                );
 
                 let (mut ws_write, mut ws_read) = ws_stream.split();
 
@@ -567,7 +599,10 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     *tx_lock = None;
                 }
 
-                log::info!("[VCPLog] Disconnected from {}.", final_ws_url);
+                log::info!(
+                    "[VCPLog] Disconnected from {}.",
+                    endpoint_log_label(&final_ws_url)
+                );
                 {
                     *CURRENT_LOG_STATUS.write().await = "closed".to_string();
                 }
@@ -641,6 +676,221 @@ async fn start_vcp_log_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn invalid_runtime_configuration_closes_both_channels_and_allows_recovery() {
+        use tauri::Listener;
+        use tokio::io::AsyncReadExt;
+        use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
+
+        // This is the only test that starts these process-wide listeners. Keep
+        // all transitions in one test and leave both intents stopped at the end.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = format!("ws://{}", listener.local_addr().unwrap());
+        let (socket_tx, mut socket_rx) = mpsc::channel(8);
+        let server = tokio::spawn(async move {
+            let mut sockets = tokio::task::JoinSet::new();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let events = socket_tx.clone();
+                sockets.spawn(async move {
+                    let mut path = String::new();
+                    let mut socket = tokio_tungstenite::accept_hdr_async(
+                        stream,
+                        |request: &Request, response: Response| {
+                            path = request.uri().path().to_owned();
+                            Ok(response)
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    events.send((path.clone(), true)).await.unwrap();
+                    while let Some(message) = socket.next().await {
+                        if message.is_err() || matches!(message, Ok(Message::Close(_))) {
+                            break;
+                        }
+                    }
+                    events.send((path, false)).await.unwrap();
+                });
+            }
+        });
+
+        let app = tauri::test::mock_app();
+        let (notification_tx, mut notification_rx) = mpsc::channel(4);
+        let (status_tx, mut status_rx) = mpsc::channel(16);
+        let log_status_tx = status_tx.clone();
+        let event_id = app.listen("vcp-system-event", move |event| {
+            let payload: Value = serde_json::from_str(event.payload()).unwrap();
+            if payload["data"]["id"] == "vcp_connection_configuration_error" {
+                notification_tx.try_send(payload).unwrap();
+            } else if payload["type"] == "vcp-log-status" && payload["status"] == "closed" {
+                log_status_tx.try_send("log").unwrap();
+            }
+        });
+        let info_event_id = app.listen("vcp-info-event", move |event| {
+            let payload: Value = serde_json::from_str(event.payload()).unwrap();
+            if payload["type"] == "vcp-info-status" && payload["status"] == "closed" {
+                status_tx.try_send("info").unwrap();
+            }
+        });
+
+        async fn next_socket(receiver: &mut mpsc::Receiver<(String, bool)>) -> (String, bool) {
+            tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        }
+
+        async fn expect_pair(receiver: &mut mpsc::Receiver<(String, bool)>, connected: bool) {
+            let mut paths = Vec::new();
+            for _ in 0..2 {
+                let (path, state) = next_socket(receiver).await;
+                assert_eq!(state, connected);
+                paths.push(path);
+            }
+            paths.sort();
+            assert_eq!(
+                paths,
+                ["/VCPlog/VCP_Key=runtime-test", "/vcpinfo/VCP_Key=runtime-test"]
+            );
+        }
+
+        async fn expect_status(log: &str, info: &str) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if get_vcp_log_status_internal().await == log
+                        && super::super::vcp_info_service::get_vcp_info_connection_status()
+                            .await
+                            .unwrap()
+                            == info
+                    {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+        }
+
+        reconnect_log_connections(app.handle(), address.clone(), "runtime-test".into())
+            .await
+            .unwrap();
+        expect_pair(&mut socket_rx, true).await;
+        expect_status("connected", "connected").await;
+
+        let error = reconnect_log_connections(
+            app.handle(),
+            "example.invalid".into(),
+            "runtime-test".into(),
+        )
+        .await
+        .unwrap_err();
+        assert!(!error.contains("runtime-test"));
+        let notification = tokio::time::timeout(Duration::from_secs(5), notification_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(notification["data"]["status"], "error");
+        assert!(notification["data"]["content"]
+            .as_str()
+            .unwrap()
+            .contains(&error));
+        expect_pair(&mut socket_rx, false).await;
+        expect_status("closed", "closed").await;
+        assert!(send_vcp_log_message(serde_json::json!({ "test": true }))
+            .await
+            .is_err());
+
+        reconnect_log_connections(app.handle(), address.clone(), "runtime-test".into())
+            .await
+            .unwrap();
+        expect_pair(&mut socket_rx, true).await;
+        expect_status("connected", "connected").await;
+
+        // A syntactically valid replacement B must close A even if B never
+        // finishes its handshake. Clearing the configuration must then cancel
+        // both pending handshakes and publish closed to the WebView.
+        let pending_server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let pending_address = format!("ws://{}", pending_server.local_addr().unwrap());
+        reconnect_log_connections(app.handle(), pending_address, "runtime-test".into())
+            .await
+            .unwrap();
+        expect_pair(&mut socket_rx, false).await;
+        let mut pending_sockets = Vec::new();
+        for _ in 0..2 {
+            let (socket, _) = tokio::time::timeout(Duration::from_secs(5), pending_server.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            pending_sockets.push(socket);
+        }
+        expect_status("connecting", "connecting").await;
+        while status_rx.try_recv().is_ok() {}
+        reconnect_log_connections(app.handle(), String::new(), String::new())
+            .await
+            .unwrap();
+        for mut socket in pending_sockets {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut buffer = [0; 1024];
+                while let Ok(size) = socket.read(&mut buffer).await {
+                    if size == 0 {
+                        break;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+        }
+        let mut stopped = Vec::new();
+        for _ in 0..2 {
+            stopped.push(tokio::time::timeout(Duration::from_secs(5), status_rx.recv())
+                .await
+                .unwrap()
+                .unwrap());
+        }
+        stopped.sort();
+        assert_eq!(stopped, ["info", "log"]);
+        expect_status("closed", "closed").await;
+
+        reconnect_log_connections(app.handle(), address, "runtime-test".into())
+            .await
+            .unwrap();
+        expect_pair(&mut socket_rx, true).await;
+        expect_status("connected", "connected").await;
+
+        assert!(init_vcp_log_connection_internal(
+            app.handle().clone(),
+            "example.invalid".into(),
+            "runtime-test".into(),
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            next_socket(&mut socket_rx).await,
+            ("/VCPlog/VCP_Key=runtime-test".into(), false)
+        );
+        expect_status("closed", "connected").await;
+        assert!(super::super::vcp_info_service::init_vcp_info_connection_internal(
+            app.handle().clone(),
+            "example.invalid".into(),
+            "runtime-test".into(),
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            next_socket(&mut socket_rx).await,
+            ("/vcpinfo/VCP_Key=runtime-test".into(), false)
+        );
+        expect_status("closed", "closed").await;
+
+        reconnect_log_connections(app.handle(), String::new(), String::new())
+            .await
+            .unwrap();
+        app.unlisten(event_id);
+        app.unlisten(info_event_id);
+        server.abort();
+    }
 
     #[test]
     fn background_log_cache_discards_old_entries_and_rejects_an_oversized_payload() {

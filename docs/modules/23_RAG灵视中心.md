@@ -144,14 +144,16 @@ lazy_static! {
 
 ### 3.2 连接建立与重连策略
 
-`init_vcp_info_connection(url, key)` 是连接入口：
+启动、配置提交和前台恢复使用 `reconnect_log_connections` 联合入口；`init_vcp_info_connection(url, key)` 保留单路 IPC 入口，二者共用同一构造器：
 
 ```
-1. parse_info_url(): 将 VCP Server URL 转为 ws://host/vcpinfo/VCP_Key=xxx
+1. compile_log_connection(): 校验服务器基址及 Key，一起构造 Log / Info 地址
 2. 写入 WS_INFO_URL_CHANNEL，通知监听器线程
 3. 若 INFO_CONNECTION_ACTIVE 已为 true，跳过（防重复）
 4. spawn start_vcp_info_listener() 异步任务
 ```
+
+非法配置在保存前通过字段错误拒绝；运行时读取到历史无效值时，停止旧连接意图并发送配置错误通知。不会静默删除任意路径、查询或 fragment，也不会自动编码改变 Key。
 
 `start_vcp_info_listener()` 是持久化监听循环：
 

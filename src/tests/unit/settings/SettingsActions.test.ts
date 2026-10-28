@@ -4,6 +4,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import type { Component } from 'vue';
 import { deleteTempFile } from 'tauri-plugin-vcp-mobile';
 import { useSettingsStore, type AppSettings } from '../../../core/stores/settings';
+import { useNotificationStore } from '../../../core/stores/notification';
 import { THEME_PREFERENCE_DEFAULTS } from '../../../core/stores/theme';
 import type { SettingsSaveResult } from '../../../features/settings/editing/useSettingsEditSession';
 import ConfigBackupSection from '../../../features/settings/components/ConfigBackupSection.vue';
@@ -318,6 +319,85 @@ describe('连接设置页与真实编辑会话的集成', () => {
     });
     return render(ConnectionSettingsPage, { active: true });
   }
+
+  it('离页保存被拒绝时聚焦字段错误并保留草稿与已保存配置，修正后可保存离开', async () => {
+    const initial = makeSettings({ 'log.url': 'wss://old.example', 'log.key': 'saved-key' });
+    const wrapper = renderPage(initial);
+    document.body.append(wrapper.element);
+    await flushPromises();
+    const scroll = vi.spyOn(HTMLElement.prototype, 'scrollIntoView').mockImplementation(() => {});
+    const store = useSettingsStore();
+    const committed = cloneConfig(store.snapshot!);
+    const rejected: ConfigSaveResult = {
+      status: 'rejected', issues: [{
+        domain: 'log', field: 'url', code: 'invalidScheme',
+        message: 'WebSocket 地址必须以 ws:// 或 wss:// 开头',
+      }],
+    };
+    let rejectNext = true;
+    mockInvoke('update_settings', (args) => {
+      if (rejectNext) {
+        rejectNext = false;
+        return rejected;
+      }
+      return { status: 'saved', snapshot: applyRequest(committed, args?.request as ConfigUpdate) };
+    });
+    await field(wrapper, 'VCP WebSocket 服务器 URL').setValue('example.invalid');
+    const footerAction = action(wrapper, '导出').get('button').element as HTMLButtonElement;
+    footerAction.focus();
+    expect(document.activeElement).toBe(footerAction);
+
+    const page = wrapper.vm as unknown as { beforeLeave(): Promise<boolean> };
+    expect(await page.beforeLeave()).toBe(false);
+    await flushPromises();
+
+    const summary = wrapper.get('[role="alert"]');
+    expect(summary.text()).toBe('日志连接 · 日志服务器地址：WebSocket 地址必须以 ws:// 或 wss:// 开头');
+    expect(summary.attributes('tabindex')).toBe('-1');
+    expect(document.activeElement).toBe(summary.element);
+    expect(scroll.mock.contexts).toContain(summary.element);
+    expect(scroll).toHaveBeenCalledWith({ block: 'nearest' });
+    expect(wrapper.attributes()).not.toHaveProperty('inert');
+    expect((field(wrapper, 'VCP WebSocket 服务器 URL').element as HTMLInputElement).value).toBe('example.invalid');
+    expect(store.snapshot).toEqual(committed);
+    expect(useNotificationStore().activeToasts.some(notice => notice.title === '设置已保存')).toBe(false);
+
+    await field(wrapper, 'VCP WebSocket 服务器 URL').setValue('wss://new.example:8443');
+    expect(await page.beforeLeave()).toBe(true);
+    await flushPromises();
+
+    expect(store.settings?.log).toEqual({ url: 'wss://new.example:8443', key: 'saved-key' });
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+    expect(callsFor('update_settings')).toHaveLength(2);
+    expect(callsFor('update_settings')[1]?.[1]).toEqual({ request: { patches: [{
+      domain: 'log', expectedRevision: '1', changes: { url: 'wss://new.example:8443' },
+      baseValues: { url: 'wss://old.example' },
+    }] } });
+  });
+
+  it('连接页的字段拒绝阻止模型诊断，并在动作解锁后呈现可访问错误', async () => {
+    const wrapper = renderPage(makeSettings({ 'log.url': 'wss://old.example', 'log.key': 'saved-key' }));
+    document.body.append(wrapper.element);
+    await flushPromises();
+    const committed = cloneConfig(useSettingsStore().snapshot!);
+    mockInvoke('update_settings', () => ({
+      status: 'rejected', issues: [{
+        domain: 'log', field: 'url', code: 'fragmentNotAllowed',
+        message: 'WebSocket 地址不能包含 #fragment',
+      }],
+    }));
+    await field(wrapper, 'VCP WebSocket 服务器 URL').setValue('wss://new.example#fragment');
+    await action(wrapper, '检查模型发现').get('button').trigger('click');
+    await flushPromises();
+
+    expect(callsFor('test_vcp_connection')).toHaveLength(0);
+    expect(callsFor('update_settings')).toHaveLength(1);
+    expect(useSettingsStore().snapshot).toEqual(committed);
+    expect((field(wrapper, 'VCP WebSocket 服务器 URL').element as HTMLInputElement).value).toBe('wss://new.example#fragment');
+    expect(wrapper.attributes()).not.toHaveProperty('inert');
+    expect(document.activeElement).toBe(wrapper.get('[role="alert"]').element);
+    expect(wrapper.get('[role="alert"]').text()).toContain('日志服务器地址：WebSocket 地址不能包含 #fragment');
+  });
 
   it('导入只提交备份patch并接受覆盖字段；其他未保存草稿保留到离开时提交', async () => {
     mockInvoke('plugin:vcp-mobile|pick_file', () => ({ path: 'tests/fixtures/connection.vcpcfg' }));

@@ -16,6 +16,10 @@ use super::types::{
 };
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group::group_types::GroupLocalSettingsPatch;
+use crate::vcp_modules::infra::vcp_endpoint::{
+    compile_distributed_connection, compile_log_connection, resolve_distributed_connection,
+    BaseKind, EndpointField,
+};
 use serde_json::Value;
 use sqlx::{Row, SqliteConnection};
 use std::collections::{BTreeMap, BTreeSet};
@@ -426,6 +430,57 @@ enum PreparedUpdate {
     Conflict(Vec<FieldIssue>),
 }
 
+#[derive(Default)]
+struct ConnectionEdits {
+    log: bool,
+    distributed: bool,
+    distributed_enabled: bool,
+}
+
+fn connection_issues(settings: &Settings, edits: &ConnectionEdits) -> Vec<FieldIssue> {
+    let mut issues = Vec::new();
+    if edits.log {
+        if let Err(error) = compile_log_connection(&settings.log.url, &settings.log.key) {
+            let field = match error.field {
+                EndpointField::Url => "url",
+                EndpointField::Key => "key",
+            };
+            issues.push(issue(ConfigDomain::Log, field, error.code, error.message));
+        }
+    }
+    if edits.distributed {
+        if let Err(error) = compile_distributed_connection(
+            &settings.distributed.ws_url,
+            &settings.distributed.vcp_key,
+            BaseKind::Distributed,
+        ) {
+            let field = match error.field {
+                EndpointField::Url => "wsUrl",
+                EndpointField::Key => "vcpKey",
+            };
+            issues.push(issue(ConfigDomain::Distributed, field, error.code, error.message));
+        }
+    }
+    if settings.distributed.enabled
+        && (edits.log || edits.distributed || edits.distributed_enabled)
+    {
+        let input = resolve_distributed_connection(settings);
+        if let Err(error) = compile_distributed_connection(input.url, input.key, input.base_kind()) {
+            let (domain, field) = match error.field {
+                EndpointField::Url if input.url_from_log => (ConfigDomain::Log, "url"),
+                EndpointField::Url => (ConfigDomain::Distributed, "wsUrl"),
+                EndpointField::Key if input.key_from_log => (ConfigDomain::Log, "key"),
+                EndpointField::Key => (ConfigDomain::Distributed, "vcpKey"),
+            };
+            let issue = issue(domain, field, error.code, error.message);
+            if !issues.contains(&issue) {
+                issues.push(issue);
+            }
+        }
+    }
+    issues
+}
+
 fn prepare_update(
     records: &BTreeMap<ConfigDomain, DomainRecord>,
     snapshot: &ConfigSnapshot,
@@ -434,7 +489,8 @@ fn prepare_update(
     let mut seen = BTreeSet::new();
     let mut issues = Vec::new();
     let mut conflicts = Vec::new();
-    let mut writes = Vec::new();
+    let mut candidates = BTreeMap::new();
+    let mut connection_edits = ConnectionEdits::default();
     for mut patch in request.patches {
         let domain = patch.domain;
         if !seen.insert(domain) {
@@ -459,6 +515,20 @@ fn prepare_update(
                     .map(|path| issue(domain, path, "unknownField", "该配置字段不存在。")),
             );
             continue;
+        }
+        // Presence expresses the submitted group, even if normalization or an
+        // idempotent replay later makes its values equal to the stored values.
+        match domain {
+            ConfigDomain::Log => {
+                connection_edits.log = patch.changes.contains_key("url")
+                    || patch.changes.contains_key("key");
+            }
+            ConfigDomain::Distributed => {
+                connection_edits.distributed = patch.changes.contains_key("wsUrl")
+                    || patch.changes.contains_key("vcpKey");
+                connection_edits.distributed_enabled = patch.changes.contains_key("enabled");
+            }
+            _ => {}
         }
         patch.changes = normalize_changes(domain, &patch.changes);
         let Some(status) = snapshot.domains.get(&domain) else {
@@ -492,9 +562,41 @@ fn prepare_update(
             set_value_at_path(&mut next, path, value.clone())?;
         }
         let next = normalize_domain(domain, &next);
+        candidates.insert(domain, (current_value, next));
+    }
+    if !issues.is_empty() {
+        return Ok(PreparedUpdate::Rejected(issues));
+    }
+    if !conflicts.is_empty() {
+        return Ok(PreparedUpdate::Conflict(conflicts));
+    }
+
+    // Resolve cross-domain consumers only after every patch has contributed to
+    // the candidate. Import order must not select a stale URL or credential.
+    if connection_edits.log
+        || connection_edits.distributed
+        || connection_edits.distributed_enabled
+    {
+        let mut values: BTreeMap<_, _> = records
+            .iter()
+            .map(|(domain, record)| (*domain, record.value.clone()))
+            .collect();
+        for (domain, (_, next)) in &candidates {
+            values.insert(*domain, next.clone());
+        }
+        let settings = settings_from_domains(&values)?;
+        let issues = connection_issues(&settings, &connection_edits);
+        if !issues.is_empty() {
+            return Ok(PreparedUpdate::Rejected(issues));
+        }
+    }
+
+    let mut writes = Vec::new();
+    for (domain, (current_value, next)) in candidates {
         if current_value == next {
             continue;
         }
+        let existing = records.get(&domain);
         let revision = existing
             .map_or(0, |record| record.revision)
             .checked_add(1)
@@ -508,13 +610,7 @@ fn prepare_update(
             },
         });
     }
-    if !issues.is_empty() {
-        Ok(PreparedUpdate::Rejected(issues))
-    } else if !conflicts.is_empty() {
-        Ok(PreparedUpdate::Conflict(conflicts))
-    } else {
-        Ok(PreparedUpdate::Ready(writes))
-    }
+    Ok(PreparedUpdate::Ready(writes))
 }
 
 fn issue(domain: ConfigDomain, field: &str, code: &str, message: &str) -> FieldIssue {
@@ -601,6 +697,227 @@ mod tests {
             .fetch_one(&db.pool)
             .await
             .unwrap()
+    }
+
+    fn rejected_fields(result: ConfigSaveResult) -> Vec<(ConfigDomain, String)> {
+        match result {
+            ConfigSaveResult::Rejected { issues } => issues
+                .into_iter()
+                .map(|issue| (issue.domain, issue.field))
+                .collect(),
+            other => panic!("expected rejection, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_rejection_preserves_all_domains_revisions_and_publication() {
+        let db = database(None).await;
+        let state = SettingsState::new();
+        let initial = state.read_snapshot(&db).await.unwrap();
+        // An unreachable host is valid configuration; saving does not probe DNS.
+        let base = saved(save(&state, &db, vec![
+            patch(&initial, ConfigDomain::Log, json!({
+                "url":"wss://example.invalid:5876", "key":"retained-secret"
+            })),
+            patch(&initial, ConfigDomain::Distributed, json!({"enabled":true})),
+        ]).await);
+        let raw_before = raw_domain(&db, ConfigDomain::Log).await;
+        let result = state.apply(&db, ConfigUpdate { patches: vec![
+            patch(&base, ConfigDomain::Identity, json!({"userName":"must-not-commit"})),
+            patch(&base, ConfigDomain::Log, json!({"url":"example.invalid"})),
+        ] }, |_, _| panic!("rejected connection changes must not publish")).await.unwrap();
+        assert!(!serde_json::to_string(&result).unwrap().contains("retained-secret"));
+        // Log and the dependent distributed connection report the same field once.
+        assert_eq!(rejected_fields(result), vec![(ConfigDomain::Log, "url".into())]);
+        assert_eq!(state.read_snapshot(&db).await.unwrap(), base);
+        assert_eq!(raw_domain(&db, ConfigDomain::Log).await, raw_before);
+        assert_eq!(SettingsState::new().read_snapshot(&db).await.unwrap(), base);
+    }
+
+    #[tokio::test]
+    async fn websocket_key_edits_validate_against_current_url_and_can_clear_configuration() {
+        let db = database(Some(r#"{"vcpLogUrl":"example.invalid","vcpLogKey":"old-key"}"#)).await;
+        let state = SettingsState::new();
+        let base = state.read_snapshot(&db).await.unwrap();
+        assert_eq!(rejected_fields(save(&state, &db, vec![patch(
+            &base, ConfigDomain::Log, json!({"key":"new-key"}),
+        )]).await), vec![(ConfigDomain::Log, "url".into())]);
+        // Explicitly resubmitting an unchanged invalid value is still validated.
+        assert_eq!(rejected_fields(save(&state, &db, vec![patch(
+            &base, ConfigDomain::Log, json!({"url":"example.invalid"}),
+        )]).await), vec![(ConfigDomain::Log, "url".into())]);
+        let cleared = saved(save(&state, &db, vec![patch(
+            &base, ConfigDomain::Log, json!({"key":""}),
+        )]).await);
+        assert_eq!(cleared.data.log.url, "example.invalid");
+        assert!(cleared.data.log.key.is_empty());
+
+        let valid = saved(save(&state, &db, vec![patch(
+            &cleared, ConfigDomain::Log, json!({"url":"ws://example.invalid", "key":"valid-key"}),
+        )]).await);
+        assert_eq!(rejected_fields(save(&state, &db, vec![patch(
+            &valid, ConfigDomain::Log, json!({"key":"invalid#secret"}),
+        )]).await), vec![(ConfigDomain::Log, "key".into())]);
+        assert_eq!(state.read_snapshot(&db).await.unwrap(), valid);
+        let cleared_url = saved(save(&state, &db, vec![patch(
+            &valid, ConfigDomain::Log, json!({"url":""}),
+        )]).await);
+        assert!(cleared_url.data.log.url.is_empty());
+        assert_eq!(cleared_url.data.log.key, "valid-key");
+    }
+
+    #[tokio::test]
+    async fn unrelated_edits_and_disabling_do_not_gate_on_legacy_websocket_values() {
+        let db = database(Some(r#"{"vcpLogUrl":"example.invalid","vcpLogKey":"retained-key","distributedEnabled":true,"distributedWsUrl":"also-invalid","distributedVcpKey":"retained-node-key"}"#)).await;
+        let state = SettingsState::new();
+        let base = state.read_snapshot(&db).await.unwrap();
+        let renamed = saved(save(&state, &db, vec![
+            patch(&base, ConfigDomain::Identity, json!({"userName":"updated"})),
+            patch(&base, ConfigDomain::Distributed, json!({"deviceName":"renamed"})),
+        ]).await);
+        assert_eq!(renamed.data.log, base.data.log);
+        assert_eq!(renamed.data.distributed.ws_url, base.data.distributed.ws_url);
+        assert_eq!(renamed.data.distributed.vcp_key, base.data.distributed.vcp_key);
+        assert!(renamed.data.distributed.enabled);
+        let disabled = saved(save(&state, &db, vec![patch(
+            &renamed, ConfigDomain::Distributed, json!({"enabled":false}),
+        )]).await);
+        assert!(!disabled.data.distributed.enabled);
+        assert_eq!(disabled.data.log, base.data.log);
+        assert_eq!(rejected_fields(save(&state, &db, vec![patch(
+            &disabled, ConfigDomain::Distributed, json!({"enabled":true}),
+        )]).await), vec![(ConfigDomain::Log, "url".into())]);
+    }
+
+    #[tokio::test]
+    async fn websocket_candidates_merge_across_domains_before_validation_in_either_order() {
+        for reverse in [false, true] {
+            let db = database(Some(r#"{"vcpLogKey":"old#invalid","distributedEnabled":true,"distributedWsUrl":"old-invalid"}"#)).await;
+            let state = SettingsState::new();
+            let base = state.read_snapshot(&db).await.unwrap();
+            let mut patches = vec![
+                patch(&base, ConfigDomain::Log, json!({"key":""})),
+                patch(&base, ConfigDomain::Distributed, json!({
+                    "wsUrl":"wss://example.invalid/proxy", "vcpKey":"new-key"
+                })),
+            ];
+            if reverse { patches.reverse(); }
+            let result = saved(save(&state, &db, patches).await);
+            assert!(result.data.log.key.is_empty());
+            assert_eq!(result.data.distributed.ws_url, "wss://example.invalid/proxy");
+            assert_eq!(result.data.distributed.vcp_key, "new-key");
+        }
+    }
+
+    #[tokio::test]
+    async fn effective_distributed_issues_follow_each_selected_field_source() {
+        for (log_url, log_key, node_url, node_key, domain, field) in [
+            ("ws://example.invalid", "", "", "bad#key", ConfigDomain::Distributed, "vcpKey"),
+            ("", "bad#key", "ws://example.invalid", "node-key", ConfigDomain::Log, "key"),
+            ("invalid-log", "", "ws://example.invalid", "node-key", ConfigDomain::Log, "url"),
+            ("", "log-key", "invalid-node", "", ConfigDomain::Distributed, "wsUrl"),
+        ] {
+            let legacy = json!({
+                "vcpLogUrl":log_url, "vcpLogKey":log_key,
+                "distributedWsUrl":node_url, "distributedVcpKey":node_key,
+            }).to_string();
+            let db = database(Some(&legacy)).await;
+            let state = SettingsState::new();
+            let base = state.read_snapshot(&db).await.unwrap();
+            assert_eq!(rejected_fields(save(&state, &db, vec![patch(
+                &base, ConfigDomain::Distributed, json!({"enabled":true}),
+            )]).await), vec![(domain, field.into())]);
+            assert_eq!(state.read_snapshot(&db).await.unwrap(), base);
+        }
+    }
+
+    #[tokio::test]
+    async fn clearing_log_fields_validates_the_newly_selected_distributed_source() {
+        for (changes, node_url, node_key, field) in [
+            (json!({"url":""}), "invalid-node", "node-key", "wsUrl"),
+            (json!({"key":""}), "ws://node.invalid", "bad#key", "vcpKey"),
+        ] {
+            let legacy = json!({
+                "vcpLogUrl":"ws://log.invalid", "vcpLogKey":"log-key",
+                "distributedEnabled":true, "distributedWsUrl":node_url,
+                "distributedVcpKey":node_key,
+            }).to_string();
+            let db = database(Some(&legacy)).await;
+            let state = SettingsState::new();
+            let base = state.read_snapshot(&db).await.unwrap();
+            assert_eq!(rejected_fields(save(&state, &db, vec![patch(
+                &base, ConfigDomain::Log, changes,
+            )]).await), vec![(ConfigDomain::Distributed, field.into())]);
+            assert_eq!(state.read_snapshot(&db).await.unwrap(), base);
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_distributed_edits_validate_even_when_disabled_or_overridden() {
+        for enabled in [false, true] {
+            let db = database(None).await;
+            let state = SettingsState::new();
+            let initial = state.read_snapshot(&db).await.unwrap();
+            let base = saved(save(&state, &db, vec![
+                patch(&initial, ConfigDomain::Log, json!({"url":"ws://example.invalid", "key":"log-key"})),
+                patch(&initial, ConfigDomain::Distributed, json!({"enabled":enabled})),
+            ]).await);
+            assert_eq!(rejected_fields(save(&state, &db, vec![patch(
+                &base, ConfigDomain::Distributed, json!({"wsUrl":"invalid-node", "vcpKey":"node-key"}),
+            )]).await), vec![(ConfigDomain::Distributed, "wsUrl".into())]);
+            assert_eq!(state.read_snapshot(&db).await.unwrap(), base);
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_conflicts_precede_semantic_validation() {
+        let db = database(None).await;
+        let state = SettingsState::new();
+        let initial = state.read_snapshot(&db).await.unwrap();
+        let base = saved(save(&state, &db, vec![patch(
+            &initial, ConfigDomain::Log, json!({"url":"ws://first.invalid", "key":"valid-key"}),
+        )]).await);
+        let latest = saved(save(&state, &db, vec![patch(
+            &base, ConfigDomain::Log, json!({"url":"ws://second.invalid"}),
+        )]).await);
+        let result = save(&state, &db, vec![
+            patch(&base, ConfigDomain::Log, json!({"url":"invalid-url"})),
+            patch(&base, ConfigDomain::Distributed, json!({"wsUrl":"invalid-node", "vcpKey":"node-key"})),
+        ]).await;
+        match result {
+            ConfigSaveResult::Conflict { snapshot, conflicts } => {
+                assert_eq!(snapshot, latest);
+                assert_eq!(conflicts.len(), 1);
+                assert_eq!(conflicts[0].domain, ConfigDomain::Log);
+                assert_eq!(conflicts[0].field, "url");
+            }
+            other => panic!("expected conflict before URL validation, got {other:?}"),
+        }
+        assert_eq!(state.read_snapshot(&db).await.unwrap(), latest);
+    }
+
+    #[tokio::test]
+    async fn invalid_websocket_backup_rejects_configuration_and_group_preferences_together() {
+        use crate::vcp_modules::group::group_service;
+        let db = database(None).await;
+        sqlx::query("CREATE TABLE groups (owner_type TEXT NOT NULL, group_id TEXT NOT NULL, deleted_at BIGINT, PRIMARY KEY(owner_type,group_id))")
+            .execute(&db.pool).await.unwrap();
+        sqlx::raw_sql(include_str!("../../../../migrations/0104_group_local_settings.sql"))
+            .execute(&db.pool).await.unwrap();
+        let state = SettingsState::new();
+        let base = state.read_snapshot(&db).await.unwrap();
+        let preferences = group_service::parse_group_local_settings_backup(&json!({
+            "pending-group": { "chatMode": "jev" }
+        })).unwrap();
+        let result = state.import_backup(&db, ConfigUpdate { patches: vec![
+            patch(&base, ConfigDomain::Log, json!({"url":"invalid-url", "key":"valid-key"})),
+            patch(&base, ConfigDomain::Identity, json!({"userName":"must-not-import"})),
+        ] }, preferences, |_, _| panic!("rejected import must not publish")).await.unwrap();
+        assert_eq!(rejected_fields(result), vec![(ConfigDomain::Log, "url".into())]);
+        assert_eq!(state.read_snapshot(&db).await.unwrap(), base);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_local_settings")
+            .fetch_one(&db.pool).await.unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]

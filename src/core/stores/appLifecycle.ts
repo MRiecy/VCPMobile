@@ -37,11 +37,18 @@ interface SystemSnapshotDto {
   core: 'initializing' | 'optimizing' | 'ready' | 'error';
   message: string;
   log: Extract<VcpStatus['status'], 'closed' | 'connecting' | 'connected' | 'error'>;
+  logConfigurationError: string | null;
   sync: string;
   databaseRecovery: DatabaseRecoveryNotice | null;
   backgroundServiceFailures: Array<'guardian' | 'helper' | 'events'>;
 }
 
+const LOG_STATUS_MESSAGES: Record<SystemSnapshotDto['log'], string> = {
+  closed: '未连接',
+  connecting: '正在连接...',
+  connected: '已连接',
+  error: '连接错误',
+};
 
 
 const CONNECT_TIMEOUT_MS = 15000;
@@ -331,9 +338,24 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         });
       }
 
+      if (snapshot.logConfigurationError) {
+        notificationStore.addNotification(processPayload({
+          type: 'vcp-log-message',
+          data: {
+            id: 'vcp_connection_configuration_error',
+            status: 'error',
+            tool_name: 'VCPLog / VCPInfo 配置错误',
+            content: `连接已停止：${snapshot.logConfigurationError} 请在设置中修正 WebSocket 地址或 Key。`,
+            source: 'VCPLog / VCPInfo',
+          },
+        }));
+      }
+
       notificationStore.updateStatus({
         status: snapshot.log,
-        message: snapshot.log === 'connected' ? '已连接' : '正在连接...',
+        message: snapshot.log === 'closed' && snapshot.logConfigurationError
+          ? `连接已停止：${snapshot.logConfigurationError}`
+          : LOG_STATUS_MESSAGES[snapshot.log],
         source: 'VCPLog'
       });
 

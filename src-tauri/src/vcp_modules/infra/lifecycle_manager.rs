@@ -10,7 +10,7 @@ use crate::vcp_modules::emoticon_manager::{
 use crate::vcp_modules::model_manager::{init_model_manager, ModelManagerState};
 use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use crate::vcp_modules::sync_service::init_sync_service;
-use crate::vcp_modules::vcp_log_service::init_vcp_log_connection_internal;
+use crate::vcp_modules::vcp_log_service::reconnect_log_connections;
 
 // Re-export submodules to preserve public API compatibility
 pub use crate::vcp_modules::infra::lifecycle_controller::is_app_in_foreground;
@@ -186,21 +186,14 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
             let settings_state = h.state::<SettingsState>();
             let _runtime_guard = settings_state.lock_runtime_reconcile().await;
             if let Ok(latest) = read_config(h.clone(), h.state()).await {
-                if !latest.log.url.is_empty() && !latest.log.key.is_empty() {
-                    info!("[Lifecycle] Auto-connecting VCP Log...");
-                    let _ = init_vcp_log_connection_internal(
-                        h.clone(),
-                        latest.log.url.clone(),
-                        latest.log.key.clone(),
-                    )
-                    .await;
-                    info!("[Lifecycle] Auto-connecting VCP Info...");
-                    let _ = crate::vcp_modules::vcp_info_service::init_vcp_info_connection(
-                        h.clone(),
-                        latest.log.url.clone(),
-                        latest.log.key.clone(),
-                    )
-                    .await;
+                if let Err(error) = reconnect_log_connections(
+                    &h,
+                    latest.log.url.clone(),
+                    latest.log.key.clone(),
+                )
+                .await
+                {
+                    log::warn!("[Lifecycle] Cannot restore VCPLog/Info connections: {error}");
                 }
             }
         });
@@ -368,6 +361,8 @@ pub struct SystemSnapshot {
     pub core: CoreStatus,
     pub message: String,
     pub log: String,
+    #[serde(rename = "logConfigurationError")]
+    pub log_configuration_error: Option<String>,
     pub sync: String,
     pub lifecycle: Option<crate::vcp_modules::infra::lifecycle_state::LifecycleSnapshot>,
     #[serde(rename = "databaseRecovery")]
@@ -388,6 +383,23 @@ pub async fn get_system_snapshot(
 
     // 获取 VCPLog 状态
     let log = crate::vcp_modules::vcp_log_service::get_vcp_log_status_internal().await;
+    // Startup can finish before the WebView subscribes to events. Diagnose
+    // persisted endpoint errors in its existing hydration snapshot as well.
+    // Earlier phases must not touch configuration before database registration.
+    let log_configuration_error = if core == CoreStatus::Ready {
+        let settings_state = app
+            .try_state::<SettingsState>()
+            .ok_or_else(|| "核心已就绪但配置状态尚未注册".to_string())?;
+        let db_state = app
+            .try_state::<DbState>()
+            .ok_or_else(|| "核心已就绪但数据库状态尚未注册".to_string())?;
+        let settings = settings_state.read_config(db_state.inner()).await?;
+        super::vcp_endpoint::compile_log_connection(&settings.log.url, &settings.log.key)
+            .err()
+            .map(|issue| issue.to_string())
+    } else {
+        None
+    };
 
     // 获取 Sync 状态
     let sync = match app.try_state::<crate::vcp_modules::sync_service::SyncState>() {
@@ -399,6 +411,7 @@ pub async fn get_system_snapshot(
         core,
         message,
         log,
+        log_configuration_error,
         sync,
         lifecycle: state
             .lifecycle_snapshot

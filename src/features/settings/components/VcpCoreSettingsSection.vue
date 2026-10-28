@@ -188,12 +188,18 @@ const testVcpConnection = async () => {
 
     <div class="border-t border-black/5 dark:border-white/5 pt-2"></div>
 
-    <SettingsTextField :model-value="settings['log.url']" :disabled="disabled"
-      @update:model-value="emit('edit', { 'log.url': $event })" label="VCP WebSocket 服务器 URL" placeholder="ws://localhost:6005"
-      mono />
-    <SettingsTextField :model-value="settings['log.key']" :disabled="disabled"
-      @update:model-value="emit('edit', { 'log.key': $event })" is-secure label="VCP WebSocket 鉴权 Key"
-      placeholder="输入 WebSocket Key" mono />
+    <div class="space-y-1.5">
+      <SettingsTextField :model-value="settings['log.url']" :disabled="disabled"
+        @update:model-value="emit('edit', { 'log.url': $event })" label="VCP WebSocket 服务器 URL" placeholder="ws://localhost:6005"
+        mono />
+      <p class="px-1 text-[11px] leading-4 opacity-60">使用 ws:// 或 wss:// 服务器基础地址，鉴权 Key 在下方单独填写。</p>
+    </div>
+    <div class="space-y-1.5">
+      <SettingsTextField :model-value="settings['log.key']" :disabled="disabled"
+        @update:model-value="emit('edit', { 'log.key': $event })" is-secure label="VCP WebSocket 鉴权 Key"
+        placeholder="输入 WebSocket Key" mono />
+      <p class="px-1 text-[11px] leading-4 opacity-60">Key 使用无空白的可打印 ASCII 字符；不支持会改变地址含义的特殊符号。</p>
+    </div>
 
     <SettingsActionWithStatus
       button-variant="primary"

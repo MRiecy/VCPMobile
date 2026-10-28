@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useSettingsStore } from '../../../core/stores/settings';
 import { useAssistantStore } from '../../../core/stores/assistant';
 import { useNotificationStore } from '../../../core/stores/notification';
@@ -19,6 +19,14 @@ const { session, loading, error, reload } = useSettingsPageSession(CONNECTION_FI
 const { draft, leaving } = session;
 const actionBusy = ref(false);
 const disabled = computed(() => !props.active || leaving.value);
+const errorSummary = ref<HTMLElement | null>(null);
+
+watch([error, disabled, actionBusy], ([message, isDisabled, busy]) => {
+  // Wait for the save/leave lock to lift before focusing an element in this page.
+  if (!message || isDisabled || busy) return;
+  errorSummary.value?.focus({ preventScroll: true });
+  errorSummary.value?.scrollIntoView({ block: 'nearest' });
+}, { flush: 'post' });
 
 const edit = (patch: Partial<ConnectionFields>) => {
   if (disabled.value || actionBusy.value) return;
@@ -82,7 +90,7 @@ defineExpose({
 
 <template>
   <div class="flex flex-col gap-6" :class="{ 'settings-page--leaving': leaving }" :inert="disabled || actionBusy">
-    <p v-if="error" role="alert" class="text-sm text-red-500 break-words">
+    <p v-if="error" ref="errorSummary" role="alert" tabindex="-1" class="text-sm text-red-500 break-words">
       {{ error }}
       <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading" @click="reload">重试</button>
     </p>

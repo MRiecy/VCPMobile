@@ -11,6 +11,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
+use super::vcp_endpoint::{compile_log_connection, endpoint_log_label};
+
 type ConnectionIntent = (u64, Option<Url>);
 
 lazy_static::lazy_static! {
@@ -42,23 +44,6 @@ fn emit_info_event<R: tauri::Runtime>(app: &AppHandle<R>, payload: serde_json::V
 fn next_id_counter() -> u64 {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     COUNTER.fetch_add(1, Ordering::Relaxed)
-}
-
-fn parse_info_url(url: &str, key: &str) -> Result<Url, String> {
-    let base_url_trimmed = url.trim().trim_end_matches('/');
-    let mut ws_url = Url::parse(base_url_trimmed).map_err(|e| format!("Invalid URL: {}", e))?;
-
-    // 将路径替换为 /vcpinfo
-    ws_url.set_path("/vcpinfo");
-    let url_str = ws_url.to_string();
-
-    let url_with_key = if url_str.contains("VCP_Key=") {
-        url_str
-    } else {
-        format!("{}/VCP_Key={}", url_str.trim_end_matches('/'), key)
-    };
-
-    Url::parse(&url_with_key).map_err(|e| format!("Invalid URL with Key: {}", e))
 }
 
 fn compress_payload(payload_str: &str) -> Result<Vec<u8>, String> {
@@ -130,26 +115,39 @@ pub async fn init_vcp_info_connection_internal<R: tauri::Runtime>(
         set_info_url(None);
         return Ok(());
     }
-    if url.trim().is_empty() || key.trim().is_empty() {
-        set_info_url(None);
-        return Ok(());
+    match compile_log_connection(&url, &key) {
+        Ok(endpoints) => {
+            apply_info_endpoint(&app, endpoints.map(|endpoints| endpoints.info));
+            Ok(())
+        }
+        Err(issue) => {
+            apply_info_endpoint(&app, None);
+            let message = issue.to_string();
+            super::vcp_log_service::report_connection_configuration_error(
+                &app,
+                "VCPInfo",
+                &message,
+            );
+            Err(message)
+        }
+    }
+}
+
+pub(super) fn apply_info_endpoint<R: tauri::Runtime>(app: &AppHandle<R>, endpoint: Option<Url>) {
+    let configured = endpoint.is_some();
+    set_info_url(endpoint);
+    if !configured {
+        return;
     }
 
-    let ws_url = parse_info_url(&url, &key)?;
-
-    // 存入 watch channel 供监听器线程消费
-    set_info_url(Some(ws_url));
-
     if INFO_CONNECTION_ACTIVE.swap(true, Ordering::SeqCst) {
-        return Ok(());
+        return;
     }
 
     let h = app.clone();
     tauri::async_runtime::spawn(async move {
         start_vcp_info_listener(h).await;
     });
-
-    Ok(())
 }
 
 async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
@@ -162,7 +160,23 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             match val {
                 (revision, Some(url)) => (revision, url),
                 (_, None) => {
-                    *CURRENT_INFO_STATUS.write().await = "closed".to_string();
+                    let status_changed = {
+                        let mut status = CURRENT_INFO_STATUS.write().await;
+                        let changed = status.as_str() != "closed";
+                        *status = "closed".to_string();
+                        changed
+                    };
+                    if status_changed {
+                        emit_info_event(
+                            &app_handle,
+                            serde_json::json!({
+                                "type": "vcp-info-status",
+                                "status": "closed",
+                                "message": "连接已停止",
+                                "source": "VCPInfo"
+                            }),
+                        );
+                    }
                     if url_rx.changed().await.is_err() {
                         break;
                     }
@@ -171,7 +185,10 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
             }
         };
 
-        log::info!("[VCPInfo] Attempting to connect to {}...", ws_url);
+        log::info!(
+            "[VCPInfo] Attempting to connect to {}...",
+            endpoint_log_label(&ws_url)
+        );
 
         {
             *CURRENT_INFO_STATUS.write().await = "connecting".to_string();
@@ -310,7 +327,10 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                 {
                     *CURRENT_INFO_STATUS.write().await = "connected".to_string();
                 }
-                log::info!("[VCPInfo] Connected successfully to {}", ws_url);
+                log::info!(
+                    "[VCPInfo] Connected successfully to {}",
+                    endpoint_log_label(&ws_url)
+                );
 
                 let (mut ws_write, mut ws_read) = ws_stream.split();
 
@@ -373,7 +393,10 @@ async fn start_vcp_info_listener<R: tauri::Runtime>(app_handle: AppHandle<R>) {
                     }
                 }
 
-                log::info!("[VCPInfo] Disconnected from {}.", ws_url);
+                log::info!(
+                    "[VCPInfo] Disconnected from {}.",
+                    endpoint_log_label(&ws_url)
+                );
                 {
                     *CURRENT_INFO_STATUS.write().await = "closed".to_string();
                 }

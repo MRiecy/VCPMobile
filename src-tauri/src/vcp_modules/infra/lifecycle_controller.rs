@@ -170,12 +170,15 @@ async fn reconcile_ios_foreground_services(app: &AppHandle, is_foreground: bool)
     let _runtime_guard = settings_state.lock_runtime_reconcile().await;
     match read_config(app.clone(), app.state()).await {
         Ok(settings) => {
-            crate::vcp_modules::vcp_log_service::reconnect_log_connections(
+            if let Err(error) = crate::vcp_modules::vcp_log_service::reconnect_log_connections(
                 app,
                 settings.log.url.clone(),
                 settings.log.key.clone(),
             )
-            .await;
+            .await
+            {
+                log::warn!("[Lifecycle] Cannot restore VCPLog/Info connections: {error}");
+            }
             crate::vcp_modules::infra::lifecycle_reconciler::reconcile_distributed_node(app, false)
                 .await;
         }
@@ -367,14 +370,15 @@ async fn reconcile_foreground_services(
         let _runtime_guard = settings_state.lock_runtime_reconcile().await;
         if let Ok(settings) = read_config(app.clone(), app.state()).await {
             if was_log_disconnected {
-                let log_url = settings.log.url.clone();
-                let log_key = settings.log.key.clone();
-                if !log_url.trim().is_empty() && !log_key.trim().is_empty() {
-                    log::info!("[Lifecycle] App returned to foreground. Reconnecting VCPLog/Info.");
-                    let _ = crate::vcp_modules::infra::vcp_log_service::reconnect_log_connections(
-                        app, log_url, log_key,
-                    )
-                    .await;
+                log::info!("[Lifecycle] App returned to foreground. Reconciling VCPLog/Info.");
+                if let Err(error) = crate::vcp_modules::infra::vcp_log_service::reconnect_log_connections(
+                    app,
+                    settings.log.url.clone(),
+                    settings.log.key.clone(),
+                )
+                .await
+                {
+                    log::warn!("[Lifecycle] Cannot restore VCPLog/Info connections: {error}");
                 }
             } else {
                 // 如果连接没有断开，则冲刷后台缓存的日志消息到前端 WebView

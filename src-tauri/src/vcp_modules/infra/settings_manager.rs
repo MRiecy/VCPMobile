@@ -158,23 +158,14 @@ async fn reconcile_current_runtime_settings(app_handle: AppHandle, generation: u
     };
 
     if changes & 1 != 0 {
-        if let Err(error) = crate::vcp_modules::vcp_log_service::init_vcp_log_connection_internal(
-            app_handle.clone(),
+        if let Err(error) = crate::vcp_modules::vcp_log_service::reconnect_log_connections(
+            &app_handle,
             settings.log.url.clone(),
             settings.log.key.clone(),
         )
         .await
         {
-            log::error!("[Settings] VCPLog runtime reconciliation failed: {error}");
-        }
-        if let Err(error) = crate::vcp_modules::vcp_info_service::init_vcp_info_connection_internal(
-            app_handle.clone(),
-            settings.log.url.clone(),
-            settings.log.key.clone(),
-        )
-        .await
-        {
-            log::error!("[Settings] VCPInfo runtime reconciliation failed: {error}");
+            log::error!("[Settings] VCPLog/Info runtime reconciliation failed: {error}");
         }
     }
     if changes & 2 != 0 {

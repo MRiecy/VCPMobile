@@ -25,6 +25,9 @@ use super::tool_registry::{SessionToolPlan, ToolExecutionContext, ToolRegistry};
 use super::tools::distributed_operation_id;
 use super::types::*;
 use crate::vcp_modules::cli::runtime::MobileCliRuntimeState;
+use crate::vcp_modules::infra::vcp_endpoint::{
+    compile_distributed_connection, endpoint_log_label, BaseKind,
+};
 
 const WS_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 const WS_OUTBOUND_CAPACITY: usize = 64;
@@ -297,25 +300,8 @@ where
     future.await
 }
 
-fn normalize_remote_ws_url(raw_url: &str) -> Result<String, String> {
-    let mut url = url::Url::parse(raw_url.trim())
-        .map_err(|error| format!("invalid distributed WebSocket URL: {error}"))?;
-    if !matches!(url.scheme(), "ws" | "wss") {
-        return Err("distributed URL must use ws:// or wss://".to_string());
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("distributed URL must not contain userinfo".to_string());
-    }
-    if url.query().is_some() || url.fragment().is_some() {
-        return Err("distributed URL must not contain query or fragment".to_string());
-    }
-    let normalized_path = url.path().trim_end_matches('/').to_string();
-    url.set_path(&normalized_path);
-    Ok(url.as_str().trim_end_matches('/').to_string())
-}
-
-fn stable_remote_identity(ws_url: &str, device_name: &str) -> Result<String, String> {
-    let normalized_url = normalize_remote_ws_url(ws_url)?;
+fn stable_remote_identity(base_url: &url::Url, device_name: &str) -> Result<String, String> {
+    let normalized_url = base_url.as_str().trim_end_matches('/');
     let normalized_device = device_name.trim();
     if normalized_device.is_empty() {
         return Err("distributed device name must not be empty".to_string());
@@ -329,8 +315,7 @@ fn stable_remote_identity(ws_url: &str, device_name: &str) -> Result<String, Str
 
 /// Immutable configuration for a single connection lifecycle.
 struct ConnectionConfig {
-    ws_url: String,
-    vcp_key: String,
+    url: url::Url,
     device_name: String,
     remote_identity: String,
 }
@@ -386,27 +371,28 @@ impl DistributedClient {
     /// Start the distributed node connection.
     /// `ws_url`: base URL of the main server, e.g. "ws://192.168.1.100:5800"
     /// `vcp_key`: authentication key
+    /// `base_kind`: whether the address comes from Log settings or the node's own prefix.
     /// `device_name`: node name (maps to VCPChat's `serverName` / config.env `ServerName`)
-    pub async fn start(
+    pub(crate) async fn start(
         &self,
         app: AppHandle,
         ws_url: String,
         vcp_key: String,
+        base_kind: BaseKind,
         device_name: String,
         registry: Arc<ToolRegistry>,
     ) -> Result<(), String> {
         let _lifecycle_guard = self.lifecycle.lock().await;
-        let validated = if vcp_key.trim().is_empty() {
-            Err("distributed authentication key must not be empty".to_string())
-        } else {
-            normalize_remote_ws_url(&ws_url).and_then(|url| {
-                stable_remote_identity(&url, &device_name).map(|identity| (url, identity))
-            })
-        };
-        let (ws_url, remote_identity) = match validated {
-            Ok(config) => config,
+        let config = match self
+            .prepare_start(&ws_url, &vcp_key, base_kind, device_name)
+            .await
+        {
+            Ok(Some(config)) => config,
+            Ok(None) => {
+                Self::emit_status(&app, &self.status).await;
+                return Ok(());
+            }
             Err(error) => {
-                self.status.write().await.last_error = Some(error.clone());
                 Self::emit_status(&app, &self.status).await;
                 return Err(error);
             }
@@ -456,12 +442,6 @@ impl DistributedClient {
 
         Self::emit_status(&app, &status).await;
 
-        let config = ConnectionConfig {
-            ws_url,
-            vcp_key,
-            device_name,
-            remote_identity,
-        };
         let ctx = SessionContext {
             status,
             registry,
@@ -494,10 +474,46 @@ impl DistributedClient {
         Ok(())
     }
 
+    /// Caller holds `lifecycle`; an invalid or unconfigured replacement must
+    /// retire the previous session before publishing its inactive status.
+    async fn prepare_start(
+        &self,
+        ws_url: &str,
+        vcp_key: &str,
+        base_kind: BaseKind,
+        device_name: String,
+    ) -> Result<Option<ConnectionConfig>, String> {
+        let prepared = compile_distributed_connection(ws_url, vcp_key, base_kind)
+            .map_err(|error| error.to_string())
+            .and_then(|endpoint| {
+                endpoint
+                    .map(|endpoint| {
+                        stable_remote_identity(&endpoint.base, &device_name).map(|remote_identity| {
+                            ConnectionConfig {
+                                url: endpoint.url,
+                                device_name,
+                                remote_identity,
+                            }
+                        })
+                    })
+                    .transpose()
+            });
+        if !matches!(&prepared, Ok(Some(_))) {
+            self.stop_session().await;
+            self.status.write().await.last_error = prepared.as_ref().err().cloned();
+        }
+        prepared
+    }
+
     /// Stop the distributed node.
     pub async fn stop(&self, app: &AppHandle) {
         let _lifecycle_guard = self.lifecycle.lock().await;
+        self.stop_session().await;
+        Self::emit_status(app, &self.status).await;
+    }
 
+    /// Caller holds `lifecycle`; do not acquire it again while replacing a session.
+    async fn stop_session(&self) {
         let stop_generation = {
             let mut s = self.status.write().await;
             let was_running = s.state != ConnectionState::Disconnected || s.connected;
@@ -537,7 +553,6 @@ impl DistributedClient {
                 s.registered_tools = 0;
             }
         }
-        Self::emit_status(app, &self.status).await;
     }
 
     /// Get current status snapshot.
@@ -588,16 +603,9 @@ impl DistributedClient {
                 break;
             }
 
-            // Build connection URL: ws://host:port/vcp-distributed-server/VCP_Key=<key>
-            let connection_url = format!(
-                "{}/vcp-distributed-server/VCP_Key={}",
-                config.ws_url.trim_end_matches('/'),
-                config.vcp_key
-            );
-
             log::info!(
                 "[Distributed] Connecting to main server: {}",
-                connection_url.replace(&config.vcp_key, "***")
+                endpoint_log_label(&config.url)
             );
 
             // Connect with cancellation support — avoids blocking on TCP timeout during shutdown.
@@ -606,7 +614,7 @@ impl DistributedClient {
                 async {
                     tokio::select! {
                         result = tokio_tungstenite::connect_async_with_config(
-                            &connection_url,
+                            config.url.as_str(),
                             Some(inbound_websocket_config()),
                             false,
                         ) => Some(result),
@@ -1589,13 +1597,111 @@ mod tests {
 
     #[test]
     fn remote_identity_normalizes_endpoint_and_excludes_connection_epoch() {
-        let first =
-            stable_remote_identity("WS://Example.COM:80/vcp/", " Mobile ").expect("first identity");
-        let second =
-            stable_remote_identity("ws://example.com/vcp", "Mobile").expect("second identity");
-        assert_eq!(first, second);
-        assert!(normalize_remote_ws_url("https://example.com").is_err());
-        assert!(normalize_remote_ws_url("ws://example.com/path?node=other").is_err());
+        let first = compile_distributed_connection(
+            "WS://Example.COM:80/vcp/",
+            "first-key",
+            BaseKind::Distributed,
+        )
+        .expect("first endpoint")
+        .expect("configured endpoint");
+        let second = compile_distributed_connection(
+            "ws://example.com/vcp",
+            "rotated-key",
+            BaseKind::Distributed,
+        )
+        .expect("second endpoint")
+        .expect("configured endpoint");
+        assert_ne!(first.url, second.url);
+        assert_eq!(
+            stable_remote_identity(&first.base, " Mobile ").expect("first identity"),
+            stable_remote_identity(&second.base, "Mobile").expect("second identity"),
+        );
+    }
+
+    #[tokio::test]
+    async fn inactive_start_retires_existing_session_and_replaces_its_error() {
+        for (url, key, should_fail) in [
+            ("example.invalid", "configured-key", true),
+            ("", "configured-key", false),
+            ("ws://example.invalid", "", false),
+        ] {
+            let client = DistributedClient::new();
+            *client.status.write().await = DistributedStatus {
+                state: ConnectionState::Connected,
+                connected: true,
+                server_id: Some("old-server".to_string()),
+                client_id: Some("old-client".to_string()),
+                registered_tools: 3,
+                session_id: 7,
+                last_error: Some("previous connection failure".to_string()),
+                ..DistributedStatus::default()
+            };
+            let cancel_token = CancellationToken::new();
+            let session_token = cancel_token.clone();
+            let (finished_tx, finished_rx) = oneshot::channel();
+            let task_handle = tokio::spawn(async move {
+                session_token.cancelled().await;
+                let _ = finished_tx.send(());
+            });
+            let (reconfigure_tx, _reconfigure_rx) = mpsc::channel(1);
+            let (reconnect_tx, _reconnect_rx) = mpsc::channel(1);
+            *client.session.lock().await = Some(ConnectionSession {
+                cancel_token: cancel_token.clone(),
+                reconfigure_tx,
+                reconnect_tx,
+                task_handle,
+            });
+
+            let _lifecycle_guard = client.lifecycle.lock().await;
+            let prepared = time::timeout(
+                Duration::from_secs(1),
+                client.prepare_start(url, key, BaseKind::Distributed, "Mobile".to_string()),
+            )
+            .await
+            .expect("inactive replacement must not acquire the lifecycle lock twice");
+            let error = match prepared {
+                Err(error) => Some(error),
+                Ok(None) => None,
+                Ok(Some(_)) => panic!("invalid or empty input must not create a connection"),
+            };
+            assert_eq!(error.is_some(), should_fail);
+            assert!(cancel_token.is_cancelled());
+            finished_rx.await.expect("old session must finish");
+            assert!(client.session.lock().await.is_none());
+            let status = client.get_status().await;
+            assert_eq!(status.state, ConnectionState::Disconnected);
+            assert!(!status.connected);
+            assert_eq!(status.server_id, None);
+            assert_eq!(status.client_id, None);
+            assert_eq!(status.registered_tools, 0);
+            assert_eq!(status.session_id, 8);
+            assert_eq!(status.last_error, error);
+        }
+    }
+
+    #[tokio::test]
+    async fn start_uses_compiled_channel_and_preserves_distributed_prefix() {
+        let client = DistributedClient::new();
+        for (base_kind, address, expected) in [
+            (
+                BaseKind::Log,
+                "ws://example.invalid/VCPlog/",
+                "ws://example.invalid/vcp-distributed-server/VCP_Key=key",
+            ),
+            (
+                BaseKind::Distributed,
+                "ws://example.invalid/proxy/",
+                "ws://example.invalid/proxy/vcp-distributed-server/VCP_Key=key",
+            ),
+        ] {
+            let _lifecycle_guard = client.lifecycle.lock().await;
+            let config = client
+                .prepare_start(address, "key", base_kind, "Mobile".to_string())
+                .await
+                .expect("valid connection")
+                .expect("configured connection");
+            assert_eq!(config.url.as_str(), expected);
+        }
     }
 
     #[test]

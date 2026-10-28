@@ -46,6 +46,8 @@ vi.mock('../../../core/utils/bootTrace', () => ({
 describe('platform-aware bootstrap', () => {
   let pinia: Pinia;
   let backgroundServiceFailures: Array<'guardian' | 'helper' | 'events'>;
+  let logStatus: 'closed' | 'connecting' | 'connected' | 'error';
+  let logConfigurationError: string | null;
 
   beforeEach(() => {
     testPlatform.value = null;
@@ -53,11 +55,14 @@ describe('platform-aware bootstrap', () => {
     pinia = createPinia();
     setActivePinia(pinia);
     backgroundServiceFailures = [];
+    logStatus = 'connected';
+    logConfigurationError = null;
     mockInvoke('get_system_snapshot', () => ({
       lifecycle: null,
       core: 'ready',
       message: 'ready',
-      log: 'connected',
+      log: logStatus,
+      logConfigurationError,
       sync: 'disconnected',
       databaseRecovery: null,
       backgroundServiceFailures,
@@ -67,6 +72,54 @@ describe('platform-aware bootstrap', () => {
   afterEach(() => {
     disposePinia(pinia);
     vi.useRealTimers();
+  });
+
+  it.each(['snapshot', 'realtime'])('shows a saved connection configuration error when %s arrives first without blocking startup', async first => {
+    logStatus = 'closed';
+    logConfigurationError = 'WebSocket 地址必须明确使用 ws:// 或 wss://。';
+    const lifecycle = useAppLifecycleStore();
+    const store = useNotificationStore();
+    const { processPayload } = useNotificationProcessor();
+    const content = `连接已停止：${logConfigurationError} 请在设置中修正 WebSocket 地址或 Key。`;
+    const deliverRealtime = () => store.addNotification(processPayload({
+      type: 'vcp-log-message',
+      data: {
+        id: 'vcp_connection_configuration_error',
+        status: 'error',
+        tool_name: 'VCPLog / VCPInfo 配置错误',
+        content,
+        source: 'VCPLog / VCPInfo',
+      },
+    }));
+
+    if (first === 'realtime') deliverRealtime();
+    await lifecycle.bootstrap();
+
+    expect(lifecycle.state).toBe('READY');
+    expect(store.vcpStatus).toEqual({
+      status: 'closed', message: `连接已停止：${logConfigurationError}`, source: 'VCPLog',
+    });
+    expect(store.historyList).toHaveLength(1);
+    expect(store.activeToasts).toHaveLength(1);
+    expect(store.activeToasts[0]).toMatchObject({
+      id: 'vcp_connection_configuration_error', type: 'error', message: content,
+    });
+
+    if (first === 'snapshot') deliverRealtime();
+    expect(store.historyList).toHaveLength(1);
+    expect(store.activeToasts).toHaveLength(1);
+    expect(store.unreadCount).toBe(1);
+  });
+
+  it('shows an unconfigured closed connection as not connected without inventing a startup error', async () => {
+    logStatus = 'closed';
+    await useAppLifecycleStore().bootstrap();
+
+    expect(useAppLifecycleStore().state).toBe('READY');
+    const store = useNotificationStore();
+    expect(store.vcpStatus).toEqual({ status: 'closed', message: '未连接', source: 'VCPLog' });
+    expect(store.historyList).toHaveLength(0);
+    expect(store.activeToasts).toHaveLength(0);
   });
 
   it.each(['realtime', 'snapshot'])('accepts a retained events failure once when %s arrives first', async first => {
