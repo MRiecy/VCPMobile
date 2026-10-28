@@ -195,7 +195,7 @@ defineExpose({ cancelPending, stop, busy });
 
 <template>
   <div class="voice-library-control" :class="{ 'voice-library-control--regular': !compact }">
-    <VoiceSelectionRow title="当前音色" :value="library.loading ? '正在读取…' : currentLabel" :compact="compact" :disabled="blocked" :expanded="pickerOpen" @click="openSelection" />
+    <VoiceSelectionRow title="当前音色" :value="currentLabel" :compact="compact" :disabled="blocked" :expanded="pickerOpen" @click="openSelection" />
     <VoiceSelectionRow title="音色管理" :value="`${library.samples.length} 个音色`" :compact="compact" :disabled="blocked" :expanded="managerOpen" @click="openManager" />
     <p v-if="library.error" role="alert" class="voice-library-feedback">{{ library.error }} <button type="button" class="underline" :disabled="blocked || library.loading" @click="refresh">重试</button></p>
   </div>
