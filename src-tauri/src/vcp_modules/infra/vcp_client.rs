@@ -18,11 +18,13 @@ use tokio_util::codec::LengthDelimitedCodec;
 #[cfg(not(target_os = "android"))]
 use tokio_util::io::StreamReader;
 use tokio_util::sync::CancellationToken;
-use url::Url;
 
 use crate::vcp_modules::aurora_pipeline::{AuroraBuffer, AuroraUpdate, AuroraUpdateKind};
 use crate::vcp_modules::content_parser::ContentBlock;
 use crate::vcp_modules::db_manager::DbState;
+use super::vcp_http_endpoint::{
+    resolve_chat_endpoint, resolve_model_discovery_endpoint, ChatRequestPurpose,
+};
 use crate::vcp_modules::settings_manager::{
     ChatEndpointMode, Settings,
 };
@@ -84,17 +86,6 @@ pub struct VcpRequestPayload {
     pub transport_request_id: Option<String>,
 }
 
-const STANDARD_CHAT_SUFFIX: &str = "/v1/chat/completions";
-const VCP_TOOLS_CHAT_SUFFIX: &str = "/v1/chatvcp/completions";
-const MODELS_SUFFIX: &str = "/v1/models";
-pub const MODEL_DISCOVERY_UNAVAILABLE: &str = "MODEL_DISCOVERY_UNAVAILABLE";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChatRequestPurpose {
-    Interactive,
-    Auxiliary,
-}
-
 #[derive(Debug, Clone)]
 pub struct ChatConnectionSnapshot {
     pub endpoint_url: String,
@@ -108,110 +99,6 @@ pub struct ChatEndpointPreview {
     pub model_discovery_url: Option<String>,
 }
 
-struct ValidatedHttpEndpoint {
-    url: Url,
-    explicit_default_port: Option<u16>,
-}
-
-fn explicit_port_from_raw(raw_url: &str) -> Option<u16> {
-    let (_, after_scheme) = raw_url.split_once("://")?;
-    let authority = after_scheme
-        .split(['/', '?', '#'])
-        .next()
-        .unwrap_or_default();
-    let port = if authority.starts_with('[') {
-        let closing_bracket = authority.find(']')?;
-        authority.get(closing_bracket + 1..)?.strip_prefix(':')?
-    } else {
-        authority.rsplit_once(':')?.1
-    };
-    port.parse().ok()
-}
-
-fn validate_http_endpoint(raw_url: &str) -> Result<ValidatedHttpEndpoint, String> {
-    if raw_url.chars().any(char::is_control) {
-        return Err("URL 不能包含控制字符".to_string());
-    }
-
-    let url = Url::parse(raw_url).map_err(|error| format!("URL 解析失败: {error}"))?;
-    if url.scheme() != "http" && url.scheme() != "https" {
-        return Err("URL 仅支持 HTTP 或 HTTPS".to_string());
-    }
-    if url.host_str().is_none() {
-        return Err("URL 必须包含主机名".to_string());
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err("URL 不能包含用户名或密码".to_string());
-    }
-    if url.fragment().is_some() {
-        return Err("URL 不能包含 fragment".to_string());
-    }
-    let explicit_default_port = explicit_port_from_raw(raw_url)
-        .filter(|port| url.port().is_none() && url.port_or_known_default() == Some(*port));
-    Ok(ValidatedHttpEndpoint {
-        url,
-        explicit_default_port,
-    })
-}
-
-fn strip_known_chat_suffix(path: &str) -> Option<&str> {
-    let path = path.trim_end_matches('/');
-    [STANDARD_CHAT_SUFFIX, VCP_TOOLS_CHAT_SUFFIX]
-        .into_iter()
-        .find_map(|suffix| path.strip_suffix(suffix))
-}
-
-fn derive_known_api_endpoint(endpoint: ValidatedHttpEndpoint, suffix: &str) -> String {
-    let ValidatedHttpEndpoint {
-        mut url,
-        explicit_default_port,
-    } = endpoint;
-    let path = url.path().trim_end_matches('/');
-    let prefix = strip_known_chat_suffix(path)
-        .or_else(|| path.strip_suffix("/v1"))
-        .unwrap_or(path)
-        .trim_end_matches('/');
-    url.set_path(&format!("{prefix}{suffix}"));
-    let mut derived = url.to_string();
-    if let Some(port) = explicit_default_port {
-        if let Some(after_scheme) = derived.find("://").map(|index| index + 3) {
-            let authority_len = derived[after_scheme..]
-                .find(['/', '?', '#'])
-                .unwrap_or(derived.len() - after_scheme);
-            derived.insert_str(after_scheme + authority_len, &format!(":{port}"));
-        }
-    }
-    derived
-}
-
-pub fn resolve_chat_endpoint(
-    raw_url: &str,
-    mode: ChatEndpointMode,
-    purpose: ChatRequestPurpose,
-) -> Result<String, String> {
-    let endpoint = validate_http_endpoint(raw_url)?;
-    if mode == ChatEndpointMode::Raw {
-        // Raw 模式只做安全校验，正式请求必须逐字复用用户输入。
-        return Ok(raw_url.to_string());
-    }
-
-    let suffix = match (mode, purpose) {
-        (ChatEndpointMode::VcpTools, ChatRequestPurpose::Interactive) => VCP_TOOLS_CHAT_SUFFIX,
-        _ => STANDARD_CHAT_SUFFIX,
-    };
-    Ok(derive_known_api_endpoint(endpoint, suffix))
-}
-
-pub fn resolve_model_discovery_endpoint(
-    raw_url: &str,
-    mode: ChatEndpointMode,
-) -> Result<Option<String>, String> {
-    let endpoint = validate_http_endpoint(raw_url)?;
-    if mode == ChatEndpointMode::Raw && strip_known_chat_suffix(endpoint.url.path()).is_none() {
-        return Ok(None);
-    }
-    Ok(Some(derive_known_api_endpoint(endpoint, MODELS_SUFFIX)))
-}
 
 pub fn freeze_chat_connection(
     settings: &Settings,
@@ -4634,117 +4521,6 @@ mod active_request_tests {
         MessageKey::new(TopicKey::new("agent", "agent-a", "topic-a"), message_id)
     }
 
-    #[test]
-    fn endpoint_modes_cover_base_full_prefix_port_and_query_urls() {
-        let cases = [
-            (
-                "https://example.invalid",
-                "https://example.invalid/v1/chat/completions",
-                "https://example.invalid/v1/chatvcp/completions",
-            ),
-            (
-                "https://example.invalid/v1/chat/completions",
-                "https://example.invalid/v1/chat/completions",
-                "https://example.invalid/v1/chatvcp/completions",
-            ),
-            (
-                "http://example.invalid:6005/proxy?tenant=mobile",
-                "http://example.invalid:6005/proxy/v1/chat/completions?tenant=mobile",
-                "http://example.invalid:6005/proxy/v1/chatvcp/completions?tenant=mobile",
-            ),
-            (
-                "https://example.invalid:443/proxy",
-                "https://example.invalid:443/proxy/v1/chat/completions",
-                "https://example.invalid:443/proxy/v1/chatvcp/completions",
-            ),
-            (
-                "https://example.invalid/proxy%20space?tenant=mobile",
-                "https://example.invalid/proxy%20space/v1/chat/completions?tenant=mobile",
-                "https://example.invalid/proxy%20space/v1/chatvcp/completions?tenant=mobile",
-            ),
-            (
-                "https://example.invalid/proxy/v1",
-                "https://example.invalid/proxy/v1/chat/completions",
-                "https://example.invalid/proxy/v1/chatvcp/completions",
-            ),
-            (
-                "https://example.invalid/proxy/v1/chatvcp/completions/?key=value",
-                "https://example.invalid/proxy/v1/chat/completions?key=value",
-                "https://example.invalid/proxy/v1/chatvcp/completions?key=value",
-            ),
-        ];
-
-        for (raw, standard, vcp_tools) in cases {
-            assert_eq!(
-                resolve_chat_endpoint(
-                    raw,
-                    ChatEndpointMode::Standard,
-                    ChatRequestPurpose::Interactive,
-                )
-                .expect("standard endpoint"),
-                standard
-            );
-            assert_eq!(
-                resolve_chat_endpoint(
-                    raw,
-                    ChatEndpointMode::VcpTools,
-                    ChatRequestPurpose::Interactive,
-                )
-                .expect("VCP tools endpoint"),
-                vcp_tools
-            );
-            assert_eq!(
-                resolve_chat_endpoint(raw, ChatEndpointMode::Raw, ChatRequestPurpose::Interactive,)
-                    .expect("raw endpoint"),
-                raw
-            );
-        }
-    }
-
-    #[test]
-    fn model_discovery_is_prefix_aware_and_conservative_in_raw_mode() {
-        assert_eq!(
-            resolve_model_discovery_endpoint(
-                "https://example.invalid/proxy?tenant=mobile",
-                ChatEndpointMode::VcpTools,
-            )
-            .expect("derived discovery"),
-            Some("https://example.invalid/proxy/v1/models?tenant=mobile".to_string())
-        );
-        assert_eq!(
-            resolve_model_discovery_endpoint(
-                "https://example.invalid/proxy/v1/chat/completions?tenant=mobile",
-                ChatEndpointMode::Raw,
-            )
-            .expect("safe raw discovery"),
-            Some("https://example.invalid/proxy/v1/models?tenant=mobile".to_string())
-        );
-        assert_eq!(
-            resolve_model_discovery_endpoint(
-                "https://example.invalid/custom/gateway",
-                ChatEndpointMode::Raw,
-            )
-            .expect("unsafe raw discovery"),
-            None
-        );
-    }
-
-    #[test]
-    fn endpoint_validation_rejects_unsafe_or_non_http_urls() {
-        for raw in [
-            "ftp://example.invalid/v1/chat/completions",
-            "https://user:secret@example.invalid/v1/chat/completions",
-            "https://example.invalid/v1/chat/completions#fragment",
-            "https://example.invalid/v1/chat/completions\n",
-            "https://",
-        ] {
-            assert!(
-                resolve_chat_endpoint(raw, ChatEndpointMode::Raw, ChatRequestPurpose::Interactive,)
-                    .is_err(),
-                "unexpectedly accepted {raw}"
-            );
-        }
-    }
 
     #[tokio::test]
     async fn duplicate_attempt_is_rejected_and_cancel_reaches_every_step_clone() {

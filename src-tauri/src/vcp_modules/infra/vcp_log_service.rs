@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use url::Url;
 
-use super::vcp_endpoint::{compile_log_connection, endpoint_log_label, log_connection_attempts};
+use super::vcp_ws_endpoint::{compile_log_connection, endpoint_log_label, log_connection_attempts};
 
 type ConnectionIntent = (u64, Option<Url>);
 

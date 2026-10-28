@@ -10,6 +10,7 @@ use crate::vcp_modules::agent_service::AgentConfigState;
 use crate::vcp_modules::chat::voice_service::VoiceReplyPolicy;
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::infra::vcp_http_endpoint::ChatRequestPurpose;
 use crate::vcp_modules::group_chat_application_service::{
     process_prepared_group_chat_message, submit_group_session_input, GroupChatParams,
 };
@@ -20,7 +21,6 @@ use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use crate::vcp_modules::topic_types::TopicKey;
 use crate::vcp_modules::vcp_client::{
     freeze_chat_connection, ActiveGroupTurnLease, ActiveGroupTurns, ActiveRequests,
-    ChatRequestPurpose,
 };
 use serde_json::{json, Value};
 use std::sync::Arc;

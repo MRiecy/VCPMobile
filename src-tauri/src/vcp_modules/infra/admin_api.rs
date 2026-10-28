@@ -1,75 +1,32 @@
-//! admin_api 共享助手（供 logcenter / taskcenter 等新模块使用）。
+//! VCP 管理接口的共享请求构造。
 //!
-//! 约定来自 diary_service 的同款实现（本期按 S0 裁决 diary 模块不迁移，
-//! 两处实现暂时并存；新模块一律使用本模块，不要再复制第三份）：
-//! - Base URL 规范化：剥掉 `/v1/chat/completions` 后缀、拒绝内嵌凭据；
+//! - 地址解析与路由派生由 `vcp_http_endpoint` 统一处理；
 //! - 认证：HTTP Basic（admin_username / admin_password）；
 //! - Client：统一走 `http_clients::HttpProfile::AdminApi` 共享画像。
 
 use super::http_clients::{client, HttpProfile};
+use super::vcp_http_endpoint::{append_url_segments, resolve_service_base};
 use crate::vcp_modules::settings_manager::Settings;
 use reqwest::{Method, RequestBuilder, Url};
 
 /// 校验 admin_api 所需的配置齐备（Server URL + 管理员凭据）。
 pub fn ensure_admin_config(settings: &Settings, feature_label: &str) -> Result<(), String> {
-    normalize_server_base(&settings.server.url)?;
+    resolve_service_base(&settings.server.url, settings.server.endpoint_mode)
+        .map_err(|error| error.to_string())?;
     if settings.server.admin_username.trim().is_empty() || settings.server.admin_password.is_empty() {
         return Err(format!(
-            "{feature_label}需要管理员用户名与密码，请在 设置 → 用户档案 或 设置 → 数据同步 中填写"
+            "{feature_label}需要管理员用户名与密码，请在 设置 → 用户身份 中填写"
         ));
-    }
-    Ok(())
-}
-
-/// 规范化 VCP Server URL 为服务根地址（以 `/` 结尾）。
-pub fn normalize_server_base(raw: &str) -> Result<Url, String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err("尚未配置 VCP Server URL".to_string());
-    }
-    if trimmed.chars().any(char::is_control) {
-        return Err("VCP Server URL 含控制字符".to_string());
-    }
-
-    let mut url = Url::parse(trimmed).map_err(|_| "VCP Server URL 格式无效".to_string())?;
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
-        || !url.username().is_empty()
-        || url.password().is_some()
-    {
-        return Err("VCP Server URL 必须是无内嵌凭据的 HTTP(S) 地址".to_string());
-    }
-    url.set_query(None);
-    url.set_fragment(None);
-
-    let path = url.path().trim_end_matches('/');
-    let base_path = path.strip_suffix("/v1/chat/completions").unwrap_or(path);
-    let normalized_path = if base_path.is_empty() {
-        "/".to_string()
-    } else {
-        format!("{}/", base_path.trim_end_matches('/'))
-    };
-    url.set_path(&normalized_path);
-    Ok(url)
-}
-
-/// 在服务根地址上拼接路径段（每段自动百分号编码）。
-pub fn append_url_segments(url: &mut Url, segments: &[&str]) -> Result<(), String> {
-    let mut path = url
-        .path_segments_mut()
-        .map_err(|_| "VCP Server URL 不能作为分层 HTTP 地址".to_string())?;
-    path.pop_if_empty();
-    for segment in segments {
-        path.push(segment);
     }
     Ok(())
 }
 
 /// 构造指向 `/admin_api/<suffix...>` 的 URL。
 pub fn admin_url(settings: &Settings, suffix: &[&str]) -> Result<Url, String> {
-    let mut url = normalize_server_base(&settings.server.url)?;
-    append_url_segments(&mut url, &["admin_api"])?;
-    append_url_segments(&mut url, suffix)?;
+    let mut url = resolve_service_base(&settings.server.url, settings.server.endpoint_mode)
+        .map_err(|error| error.to_string())?;
+    append_url_segments(&mut url, &["admin_api"]).map_err(|error| error.to_string())?;
+    append_url_segments(&mut url, suffix).map_err(|error| error.to_string())?;
     Ok(url)
 }
 
@@ -112,4 +69,61 @@ pub fn client_post_json(
     body: &serde_json::Value,
 ) -> Result<RequestBuilder, String> {
     Ok(client_request(settings, Method::POST, url)?.json(body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vcp_modules::settings_manager::{ChatEndpointMode, ServerConfig};
+    use axum::http::{HeaderMap, Uri};
+    use axum::{Json, Router};
+    use serde_json::{json, Value};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn admin_request_sends_one_basic_header_and_preserves_only_operation_query() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = Router::new().fallback(|uri: Uri, headers: HeaderMap| async move {
+            let authorization: Vec<_> = headers
+                .get_all(reqwest::header::AUTHORIZATION)
+                .iter()
+                .map(|value| value.to_str().unwrap().to_owned())
+                .collect();
+            Json(json!({ "uri": uri.to_string(), "authorization": authorization }))
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let settings = Settings {
+            server: ServerConfig {
+                url: format!("http://{address}/proxy/v1/chatvcp/completions?chatOnly=secret"),
+                endpoint_mode: ChatEndpointMode::VcpTools,
+                api_key: "unused-bearer".into(),
+                admin_username: "user".into(),
+                admin_password: "pass".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let response: Value = admin_request(
+            &settings,
+            Method::GET,
+            &["forum", "post", "topic/with space"],
+        )
+        .unwrap()
+        .query(&[("cursor", "next/part")])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+        server.abort();
+
+        assert_eq!(
+            response["uri"],
+            "/proxy/admin_api/forum/post/topic%2Fwith%20space?cursor=next%2Fpart"
+        );
+        assert_eq!(response["authorization"], json!(["Basic dXNlcjpwYXNz"]));
+    }
 }

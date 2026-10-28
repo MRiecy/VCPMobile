@@ -394,7 +394,7 @@ pub async fn get_system_snapshot(
             .try_state::<DbState>()
             .ok_or_else(|| "核心已就绪但数据库状态尚未注册".to_string())?;
         let settings = settings_state.read_config(db_state.inner()).await?;
-        super::vcp_endpoint::compile_log_connection(&settings.log.url, &settings.log.key)
+        super::vcp_ws_endpoint::compile_log_connection(&settings.log.url, &settings.log.key)
             .err()
             .map(|issue| issue.to_string())
     } else {

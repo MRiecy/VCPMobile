@@ -250,7 +250,11 @@ pub struct ActiveGroupTurns(Arc<DashMap<TopicKey, CancellationToken>>);
 | `vcpTools` | 补全或替换为 `/v1/chatvcp/completions` | 标准 Chat |
 | `raw` | 完整 URL 原样使用 | 完整 URL 原样使用 |
 
-resolver 仅接受带 host 的 HTTP/HTTPS，拒绝用户信息、控制字符与 fragment；保留端口、query 和反向代理路径前缀。`/v1` 被视为 API 基址，已知 Chat 末尾只替换末尾段。正式请求、重试与 Android SSE Helper 均复用 turn 起点冻结的同一最终 URL。
+resolver 位于 `infra/vcp_http_endpoint.rs`，仅接受带 host 的 HTTP/HTTPS，拒绝用户信息、控制字符与 fragment；保留端口、query 和反向代理路径前缀。`/v1` 被视为 API 基址，已知 Chat 末尾只替换末尾段。正式请求、重试与 Android SSE Helper 均复用 turn 起点冻结的同一最终 URL。
+
+该纯模块也拥有 `resolve_service_base`、`resolve_http_origin` 和 `append_url_segments`。管理 API 与日记从同一基址规则剥离 `/v1`、标准或增强聊天后缀，保留部署前缀，但不继承 Chat 配置中的 query；各操作继续自行添加查询参数。Raw 根地址、`/v1` 或已知聊天端点可推导管理基址，未知 Raw 路径明确返回不可推导，主聊天仍按原地址请求。Raw 模型发现继续遵守原有更窄的规则，只从已知完整聊天端点派生。
+
+表情服务显式使用 `resolve_http_origin`，列表与图片均位于服务器根路径，不扩展子路径部署。路径段 API 接收原始值并编码一次，拒绝会被静默跳过的 `.` / `..` 段。HTTP 鉴权与请求执行留在各消费者：管理 Basic、Human Tool Bearer、图片 `pw=` 路径凭证；WebSocket 独立使用 `vcp_ws_endpoint.rs` 的协议规则。
 
 > **v1.1.3 变更说明**：历史版本中 `vcp_client.rs` 曾直接读取 `music_state.json` / `songlist.json` 并向 System Message 注入音乐状态与 UI 规范。当前代码中该逻辑已移除，所有上下文注入（System Prompt、Tavern 规则、历史消息压缩等）由 `context_assembler.rs` 在调用 `perform_vcp_request` 之前完成。`vcp_client.rs` 仅负责将已组装好的 `messages` 数组原样序列化并发送。
 

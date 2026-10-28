@@ -1,24 +1,15 @@
 use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::infra::vcp_http_endpoint::{
+    append_url_segments, resolve_http_origin, HttpEndpointError,
+};
 use crate::vcp_modules::settings_manager::{read_config, SettingsState};
-use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
+use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
 use url::Url;
-
-// 模拟 JS 的 encodeURIComponent 排除集
-const VCP_ENCODE_SET: &AsciiSet = &NON_ALPHANUMERIC
-    .remove(b'-')
-    .remove(b'_')
-    .remove(b'.')
-    .remove(b'!')
-    .remove(b'~')
-    .remove(b'*')
-    .remove(b'\'')
-    .remove(b'(')
-    .remove(b')');
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct EmoticonItem {
@@ -141,6 +132,22 @@ struct EmojiListResponse {
     data: std::collections::HashMap<String, Vec<String>>,
 }
 
+fn build_emoticon_image_url(
+    origin: &Url,
+    file_key: &str,
+    category: &str,
+    filename: &str,
+) -> Result<Url, HttpEndpointError> {
+    let mut url = origin.clone();
+    // Express decodes this route parameter once; each original value must be
+    // encoded as a path segment, including any literal percent signs in the Key.
+    append_url_segments(
+        &mut url,
+        &[&format!("pw={file_key}"), "images", category, filename],
+    )?;
+    Ok(url)
+}
+
 /// Internal (non-Tauri-command) version callable from lifecycle/bootstrap.
 pub async fn refresh_emoticon_library_internal<R: Runtime>(
     app_handle: &AppHandle<R>,
@@ -192,36 +199,24 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
     let admin_pass = &settings.server.admin_password;
     let file_key = &settings.server.file_key;
 
-    if vcp_server_url.is_empty() {
-        return Err("VCP Server URL is empty in settings".to_string());
-    }
+    // 表情服务固定部署在服务根地址，不继承聊天端点路径和查询参数。
+    let origin = resolve_http_origin(vcp_server_url).map_err(|error| error.to_string())?;
     if admin_user.is_empty() || admin_pass.is_empty() {
-        return Err("管理员账号或密码未配置，请在 设置 → 用户档案 或 设置 → 数据同步 中填写管理员账号和密码".to_string());
+        return Err("管理员账号或密码未配置，请在 设置 → 用户身份 中填写管理员账号和密码".to_string());
     }
     if file_key.is_empty() {
-        return Err("表情包图床密钥 (fileKey) 未配置，请在 设置 → 数据同步 中填写".to_string());
+        return Err("表情包图床密钥 (fileKey) 未配置，请在 设置 → 服务器连接 中填写".to_string());
     }
 
-    // 2. 构造基础 URL (去除末尾斜杠并规范化)
-    let base_url = if let Ok(u) = Url::parse(vcp_server_url) {
-        let scheme = u.scheme();
-        let host = u.host_str().unwrap_or("");
-        if let Some(port) = u.port() {
-            format!("{}://{}:{}", scheme, host, port)
-        } else {
-            format!("{}://{}", scheme, host)
-        }
-    } else {
-        return Err("Invalid VCP Server URL".to_string());
-    };
-
-    // 3. 请求远程接口（共享 AdminApi 画像 Client，见 infra/http_clients.rs）
+    // 2. 请求远程接口（共享 AdminApi 画像 Client，见 infra/http_clients.rs）
     let client = crate::vcp_modules::infra::http_clients::client(
         crate::vcp_modules::infra::http_clients::HttpProfile::AdminApi,
     );
-    let api_url = format!("{}/admin_api/emojis/list", base_url);
+    let mut api_url = origin.clone();
+    append_url_segments(&mut api_url, &["admin_api", "emojis", "list"])
+        .map_err(|error| error.to_string())?;
 
-    let mut req = client.get(&api_url);
+    let mut req = client.get(api_url.clone());
     if !admin_user.is_empty() && !admin_pass.is_empty() {
         req = req.basic_auth(admin_user, Some(admin_pass));
     }
@@ -239,18 +234,12 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
         .await
         .map_err(|e| format!("Failed to parse emoji JSON: {}", e))?;
 
-    // 4. Build the new library before entering the write gate.
+    // 3. Build the new library before entering the write gate.
     let mut library = Vec::new();
     for (category, filenames) in payload.data {
         for filename in filenames {
-            let encoded_filename = utf8_percent_encode(&filename, VCP_ENCODE_SET).to_string();
-            let encoded_category = utf8_percent_encode(&category, VCP_ENCODE_SET).to_string();
-
-            // 构造完整 URL: baseUrl/pw=fileKey/images/category/filename
-            let full_url = format!(
-                "{}/pw={}/images/{}/{}",
-                base_url, file_key, encoded_category, encoded_filename
-            );
+            let full_url = build_emoticon_image_url(&origin, file_key, &category, &filename)
+                .map_err(|error| error.to_string())?;
 
             let search_key = format!("{}/{}", category.to_lowercase(), filename.to_lowercase());
 
@@ -258,7 +247,7 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
                 id: None,
                 category: category.clone(),
                 filename,
-                url: full_url,
+                url: full_url.into(),
                 search_key,
             });
         }
@@ -430,4 +419,187 @@ pub async fn fix_emoticon_url<R: Runtime>(
     }
 
     Ok(original_src)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vcp_modules::settings_manager::{
+        ConfigDomain, ConfigSaveResult, ConfigUpdate, DomainPatch,
+    };
+    use axum::{
+        http::{HeaderMap, StatusCode, Uri},
+        response::IntoResponse,
+        Json, Router,
+    };
+    use serde_json::json;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    fn decoded_segments(url: &Url) -> Vec<String> {
+        url.path_segments()
+            .unwrap()
+            .map(|segment| percent_decode_str(segment).decode_utf8().unwrap().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn image_key_and_names_are_encoded_once_as_independent_segments() {
+        let origin = resolve_http_origin("https://example.invalid/v1/chatvcp/completions").unwrap();
+        let category = "角色 #?%25 表情包";
+        let filename = "你好 #?%23.png";
+        for key in ["a#b", "a?b", "a/b", "a%23b", "a%b", "中文 +/=", "a'b"] {
+            let url = build_emoticon_image_url(&origin, key, category, filename).unwrap();
+            assert!(url.path().starts_with("/pw="));
+            assert!(url.query().is_none());
+            assert!(url.fragment().is_none());
+            assert_eq!(
+                decoded_segments(&url),
+                [format!("pw={key}"), "images".into(), category.into(), filename.into()],
+            );
+        }
+        let url = build_emoticon_image_url(&origin, "a%23b", "a%2Fb", "c%25.png").unwrap();
+        assert_eq!(url.path(), "/pw=a%2523b/images/a%252Fb/c%2525.png");
+    }
+
+    #[test]
+    fn emoticon_service_uses_origin_with_ports_and_ipv6() {
+        for address in [
+            "https://example.invalid:8443/v1/chat/completions?tenant=unused",
+            "https://example.invalid:8443/v1/chatvcp/completions",
+            "https://example.invalid:8443/raw/custom/endpoint",
+            "https://example.invalid:8443/",
+            "http://[2001:db8::1]:6005/v1/chatvcp/completions",
+        ] {
+            let original = Url::parse(address).unwrap();
+            let origin = resolve_http_origin(address).unwrap();
+            let image = build_emoticon_image_url(&origin, "key", "category", "image.png").unwrap();
+            assert_eq!(image.origin(), original.origin());
+            assert_eq!(image.path(), "/pw=key/images/category/image.png");
+            assert!(image.query().is_none());
+        }
+    }
+
+    struct FixtureServer(tokio::task::JoinHandle<()>);
+
+    impl Drop for FixtureServer {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn forced_refresh_persists_encoded_urls_and_failed_refresh_preserves_library() {
+        let fail_listing = Arc::new(AtomicBool::new(false));
+        let failures = fail_listing.clone();
+        let (request_tx, mut request_rx) = tokio::sync::mpsc::channel(4);
+        let category = "分类 #%25 表情包";
+        let filename = "图片 ?%23.png";
+        let router = Router::new().fallback(move |uri: Uri, headers: HeaderMap| {
+            let failures = failures.clone();
+            let request_tx = request_tx.clone();
+            async move {
+                request_tx.send((uri.clone(), headers)).await.unwrap();
+                if uri.path() == "/admin_api/emojis/list" {
+                    if failures.load(Ordering::SeqCst) {
+                        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+                    }
+                    return Json(json!({ "data": { (category): [filename] } })).into_response();
+                }
+                // ImageServer receives one decoded Express route parameter for
+                // pw=<Key>; decoding each wire segment once models that boundary.
+                let segments: Vec<_> = uri.path().split('/').skip(1)
+                    .map(|segment| percent_decode_str(segment).decode_utf8().unwrap().into_owned())
+                    .collect();
+                Json(json!({ "segments": segments })).into_response()
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let _server = FixtureServer(tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        }));
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../../../migrations/0100_baseline_v2.sql"))
+            .execute(&pool).await.unwrap();
+        sqlx::raw_sql(include_str!("../../../migrations/0103_config_domains.sql"))
+            .execute(&pool).await.unwrap();
+        let db = DbState::new(pool, std::path::PathBuf::new());
+        let settings = SettingsState::new();
+        let initial = settings.read_snapshot(&db).await.unwrap();
+        let file_key = "密钥#?/%23+=";
+        let changes = json!({
+            "url": format!("http://{address}/raw/custom/chat?unused=query"),
+            "endpointMode": "raw",
+            "adminUsername": "admin",
+            "adminPassword": "password",
+            "fileKey": file_key,
+        }).as_object().unwrap().clone();
+        let old_server = serde_json::to_value(&initial.data.server).unwrap();
+        let base_values = changes.keys()
+            .map(|field| (field.clone(), old_server[field].clone()))
+            .collect();
+        let saved = settings.apply(&db, ConfigUpdate {
+            patches: vec![DomainPatch {
+                domain: ConfigDomain::Server,
+                expected_revision: initial.domains[&ConfigDomain::Server].revision.clone(),
+                changes,
+                base_values,
+            }],
+        }, |_, _| {}).await.unwrap();
+        assert!(matches!(saved, ConfigSaveResult::Saved { .. }));
+
+        sqlx::query("INSERT INTO emoticon_library (category, filename, url, search_key) VALUES ('old', 'old.png', 'https://old.invalid/old.png', 'old')")
+            .execute(&db.pool).await.unwrap();
+        let now = crate::vcp_modules::infra::utils::now_millis();
+        sqlx::query("INSERT INTO settings (key, value, updated_at) VALUES ('emoticon_last_sync', ?, ?)")
+            .bind(now.to_string()).bind(now).execute(&db.pool).await.unwrap();
+        let app = tauri::test::mock_app();
+        app.manage(db.clone());
+        app.manage(settings);
+        app.manage(EmoticonManagerState::default());
+
+        assert_eq!(refresh_emoticon_library_internal(app.handle(), false).await.unwrap(), 1);
+        assert!(request_rx.try_recv().is_err(), "fresh cache should avoid a request");
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(5), refresh_emoticon_library_internal(app.handle(), true))
+                .await.unwrap().unwrap(),
+            1,
+        );
+        let (list_uri, list_headers) = request_rx.recv().await.unwrap();
+        assert_eq!(list_uri.to_string(), "/admin_api/emojis/list");
+        assert_eq!(list_headers["authorization"], "Basic YWRtaW46cGFzc3dvcmQ=");
+        let persisted = internal_load_library(app.handle()).await.unwrap();
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].category, category);
+        assert_eq!(persisted[0].filename, filename);
+        assert_ne!(persisted[0].url, "https://old.invalid/old.png");
+        assert_eq!(
+            app.state::<EmoticonManagerState>().library.lock().await[0].url,
+            persisted[0].url,
+        );
+
+        let response: serde_json::Value = reqwest::Client::new()
+            .get(&persisted[0].url).send().await.unwrap().json().await.unwrap();
+        assert_eq!(response["segments"], json!([format!("pw={file_key}"), "images", category, filename]));
+        let (image_uri, _) = request_rx.recv().await.unwrap();
+        assert!(image_uri.query().is_none());
+        assert!(image_uri.path().starts_with("/pw="));
+
+        let before_sync: String = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'emoticon_last_sync'")
+            .fetch_one(&db.pool).await.unwrap();
+        fail_listing.store(true, Ordering::SeqCst);
+        assert!(tokio::time::timeout(Duration::from_secs(5), refresh_emoticon_library_internal(app.handle(), true))
+            .await.unwrap().is_err());
+        assert_eq!(internal_load_library(app.handle()).await.unwrap()[0].url, persisted[0].url);
+        assert_eq!(app.state::<EmoticonManagerState>().library.lock().await[0].url, persisted[0].url);
+        let after_sync: String = sqlx::query_scalar("SELECT value FROM settings WHERE key = 'emoticon_last_sync'")
+            .fetch_one(&db.pool).await.unwrap();
+        assert_eq!(after_sync, before_sync);
+    }
 }

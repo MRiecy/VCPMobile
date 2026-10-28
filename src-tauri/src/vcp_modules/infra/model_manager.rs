@@ -1,9 +1,10 @@
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::settings_manager::{read_config, SettingsState};
-use crate::vcp_modules::vcp_client::{
-    freeze_chat_connection, resolve_model_discovery_endpoint, ChatRequestPurpose,
+use super::vcp_http_endpoint::{
+    resolve_model_discovery_endpoint, ChatRequestPurpose,
     MODEL_DISCOVERY_UNAVAILABLE,
 };
+use crate::vcp_modules::vcp_client::freeze_chat_connection;
 use futures_util::future::join_all;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};

@@ -16,7 +16,7 @@ use super::types::{
 };
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group::group_types::GroupLocalSettingsPatch;
-use crate::vcp_modules::infra::vcp_endpoint::{
+use crate::vcp_modules::infra::vcp_ws_endpoint::{
     compile_distributed_connection, compile_log_connection, resolve_distributed_connection,
     BaseKind, EndpointField,
 };

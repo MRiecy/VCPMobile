@@ -4,15 +4,16 @@
 //! （ESCAPE 定界符，对齐服务端 modules/vcpLoop/toolCallParser.js 的还原语义）。
 //! 帖子 JSON 以 Value 透传（契约解释权在前端 Store 的归一化层）。
 //!
-//! 上游事实（详见 plan/vcpmobile-more-tools-research/09 篇）：
-//! - 浏览/回帖走 admin Basic Auth；**发帖无 REST 端点**，需走 `/v1/human/tool`
-//!   （Bearer 主 API Key + TOOL_REQUEST 私有文本协议）；
+//! - 浏览、回帖与 REST 发帖走 admin Basic Auth；仅 REST 发帖返回 404 时
+//!   回退 `/v1/human/tool`（Bearer 主 API Key + TOOL_REQUEST 私有文本协议）；
 //! - 发帖/回帖内容用 `「始ESCAPE」…「末ESCAPE」` 定界——服务端解析器只认
 //!   `「末ESCAPE」` 为字段结束，plain `「末」` 在内容中安全；
 //! - 内容中的字面 ESCAPE 标记会被服务端 `_restoreEscapedLiterals` 折叠还原，
 //!   发送前需先把它们改写为带空格的变体保护。
 
 use crate::vcp_modules::infra::admin_api;
+use crate::vcp_modules::infra::http_clients::{client, HttpProfile};
+use crate::vcp_modules::infra::vcp_http_endpoint::{append_url_segments, resolve_service_base};
 use crate::vcp_modules::settings_manager::{read_config, Settings, SettingsState};
 use reqwest::{Method, RequestBuilder, StatusCode};
 use serde_json::Value;
@@ -274,7 +275,16 @@ pub async fn forum_create_post<R: Runtime>(
     content: String,
 ) -> Result<Value, String> {
     let settings = settings_of(app_handle, settings_state).await?;
+    create_post(&settings, &maid, &board, &title, &content).await
+}
 
+async fn create_post(
+    settings: &Settings,
+    maid: &str,
+    board: &str,
+    title: &str,
+    content: &str,
+) -> Result<Value, String> {
     let maid = maid.trim();
     let board = board.trim();
     let title = title.trim();
@@ -286,13 +296,13 @@ pub async fn forum_create_post<R: Runtime>(
     if content.trim().is_empty() {
         return Err("正文不能为空".to_string());
     }
-    validate_length("正文", &content, MAX_CONTENT_CHARS)?;
+    validate_length("正文", content, MAX_CONTENT_CHARS)?;
 
     // 1) REST 优先
-    let rest_url = build_url(&settings, &["forum", "posts"])?;
+    let rest_url = build_url(settings, &["forum", "posts"])?;
     let (status, body) = send_json_with_status(
         admin_api::client_post_json(
-            &settings,
+            settings,
             &rest_url,
             &serde_json::json!({
                 "maid": maid,
@@ -312,18 +322,151 @@ pub async fn forum_create_post<R: Runtime>(
     // 2) 404（服务器未打补丁）→ human/tool 回退
     if settings.server.api_key.trim().is_empty() {
         return Err(
-            "服务器缺少 REST 发帖端点，且未配置 VCP API Key 作为回退通道，请在 设置 中填写"
+            "服务器缺少 REST 发帖端点，且未配置 VCP API Key 作为回退通道，请在 设置 → 服务器连接 中填写"
                 .to_string(),
         );
     }
-    let mut url = admin_api::normalize_server_base(&settings.server.url)?;
-    admin_api::append_url_segments(&mut url, &["v1", "human", "tool"])?;
+    let mut url = resolve_service_base(&settings.server.url, settings.server.endpoint_mode)
+        .map_err(|error| error.to_string())?;
+    append_url_segments(&mut url, &["v1", "human", "tool"])
+        .map_err(|error| error.to_string())?;
 
-    let tool_body = build_create_post_body(maid, board, title, &content);
-    let request = admin_api::client_request(&settings, Method::POST, url.as_str())?
+    let tool_body = build_create_post_body(maid, board, title, content);
+    let request = client(HttpProfile::AdminApi)
+        .post(url)
         .bearer_auth(settings.server.api_key.trim())
+        .header(reqwest::header::ACCEPT, "application/json")
         .header(reqwest::header::CONTENT_TYPE, "text/plain;charset=UTF-8")
         .body(tool_body);
 
     send_json(request, DEFAULT_TIMEOUT, MAX_DETAIL_BYTES).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::vcp_modules::settings_manager::{ChatEndpointMode, ServerConfig};
+    use axum::http::{HeaderMap, Uri};
+    use axum::{Json, Router};
+    use std::sync::Arc;
+    use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
+
+    #[derive(Debug)]
+    struct RecordedRequest {
+        uri: String,
+        authorization: Vec<String>,
+        content_type: String,
+        body: String,
+    }
+
+    async fn test_server(
+        rest_status: StatusCode,
+    ) -> (
+        Settings,
+        Arc<Mutex<Vec<RecordedRequest>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured = requests.clone();
+        let router = Router::new().fallback(move |uri: Uri, headers: HeaderMap, body: String| {
+            let captured = captured.clone();
+            async move {
+                let is_rest = uri.path().ends_with("/admin_api/forum/posts");
+                captured.lock().await.push(RecordedRequest {
+                    uri: uri.to_string(),
+                    authorization: headers
+                        .get_all(reqwest::header::AUTHORIZATION)
+                        .iter()
+                        .map(|value| value.to_str().unwrap().to_owned())
+                        .collect(),
+                    content_type: headers
+                        .get(reqwest::header::CONTENT_TYPE)
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .to_owned(),
+                    body,
+                });
+                if is_rest {
+                    (
+                        rest_status,
+                        Json(serde_json::json!({ "source": "rest", "error": "REST unavailable" })),
+                    )
+                } else {
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({ "source": "human" })),
+                    )
+                }
+            }
+        });
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let settings = Settings {
+            server: ServerConfig {
+                url: format!("http://{address}/proxy/v1/chatvcp/completions?chatOnly=secret"),
+                endpoint_mode: ChatEndpointMode::Raw,
+                api_key: "forum-bearer".into(),
+                admin_username: "user".into(),
+                admin_password: "pass".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        (settings, requests, server)
+    }
+
+    #[tokio::test]
+    async fn rest_404_falls_back_with_only_bearer_and_shared_service_prefix() {
+        let (settings, requests, server) = test_server(StatusCode::NOT_FOUND).await;
+        let result = create_post(&settings, "Maid", "Board", "Title", "Body").await;
+        server.abort();
+
+        assert_eq!(result.unwrap()["source"], "human");
+        let requests = requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].uri, "/proxy/admin_api/forum/posts");
+        assert_eq!(requests[0].authorization, ["Basic dXNlcjpwYXNz"]);
+        assert_eq!(requests[0].content_type, "application/json");
+        let rest_body: Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(
+            rest_body,
+            serde_json::json!({
+                "maid": "Maid", "board": "Board", "title": "Title", "content": "Body",
+            })
+        );
+        assert_eq!(requests[1].uri, "/proxy/v1/human/tool");
+        assert_eq!(requests[1].authorization, ["Bearer forum-bearer"]);
+        assert_eq!(requests[1].content_type, "text/plain;charset=UTF-8");
+        assert!(requests[1].body.starts_with("<<<[TOOL_REQUEST]>>>\n"));
+        assert!(requests[1].body.contains("command:「始ESCAPE」CreatePost「末ESCAPE」"));
+        assert!(requests[1].body.contains("content:「始ESCAPE」Body「末ESCAPE」"));
+        assert!(requests[1].body.ends_with("\n<<<[END_TOOL_REQUEST]>>>"));
+    }
+
+    #[tokio::test]
+    async fn rest_success_or_non_404_failure_never_sends_human_tool_request() {
+        for status in [
+            StatusCode::OK,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            let (settings, requests, server) = test_server(status).await;
+            let result = create_post(&settings, "Maid", "Board", "Title", "Body").await;
+            server.abort();
+
+            if status.is_success() {
+                assert_eq!(result.unwrap()["source"], "rest");
+            } else {
+                assert!(result.is_err(), "REST {status} must remain an error");
+            }
+            let requests = requests.lock().await;
+            assert_eq!(requests.len(), 1, "REST {status} must not trigger fallback");
+            assert_eq!(requests[0].uri, "/proxy/admin_api/forum/posts");
+            assert_eq!(requests[0].authorization, ["Basic dXNlcjpwYXNz"]);
+        }
+    }
 }

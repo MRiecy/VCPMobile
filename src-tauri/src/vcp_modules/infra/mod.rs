@@ -17,6 +17,7 @@ pub mod settings_manager;
 pub mod share_inbox;
 pub mod utils;
 pub mod vcp_client;
-pub(crate) mod vcp_endpoint;
+pub mod vcp_http_endpoint;
 pub mod vcp_info_service;
 pub mod vcp_log_service;
+pub(crate) mod vcp_ws_endpoint;

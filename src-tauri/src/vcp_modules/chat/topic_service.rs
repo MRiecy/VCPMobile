@@ -3,6 +3,7 @@
 
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::group_types::GroupChatMode;
+use crate::vcp_modules::infra::vcp_http_endpoint::ChatRequestPurpose;
 use crate::vcp_modules::settings_manager::SettingsState;
 use crate::vcp_modules::sync_hash::HashAggregator;
 use crate::vcp_modules::sync_service::{SyncCommand, SyncState};
@@ -848,7 +849,7 @@ pub async fn regenerate_topic_response(
             .await?;
     let connection = crate::vcp_modules::vcp_client::freeze_chat_connection(
         &settings,
-        crate::vcp_modules::vcp_client::ChatRequestPurpose::Interactive,
+        ChatRequestPurpose::Interactive,
     )?;
 
     match owner_type.as_str() {

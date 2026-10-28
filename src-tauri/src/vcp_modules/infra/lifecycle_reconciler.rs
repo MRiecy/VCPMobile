@@ -1,4 +1,4 @@
-use crate::vcp_modules::infra::vcp_endpoint::resolve_distributed_connection;
+use crate::vcp_modules::infra::vcp_ws_endpoint::resolve_distributed_connection;
 use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use tauri::{AppHandle, Manager};
 

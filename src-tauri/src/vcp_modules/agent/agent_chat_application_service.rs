@@ -2,12 +2,13 @@ use crate::vcp_modules::agent_service::{read_agent_config_internal, AgentConfigS
 use crate::vcp_modules::chat::voice_service::VoiceReplyPolicy;
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::infra::vcp_http_endpoint::ChatRequestPurpose;
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use crate::vcp_modules::vcp_client::{
     freeze_chat_connection, message_transport_request_id, perform_vcp_request_registered,
-    ActiveRequestLease, ActiveRequests, ChatConnectionSnapshot, ChatRequestPurpose, StreamEvent,
+    ActiveRequestLease, ActiveRequests, ChatConnectionSnapshot, StreamEvent,
     VcpRequestPayload,
 };
 use serde::Deserialize;

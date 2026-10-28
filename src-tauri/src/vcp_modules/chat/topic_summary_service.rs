@@ -1,6 +1,6 @@
 use crate::vcp_modules::message_service;
 use crate::vcp_modules::settings_manager::{read_config, ConversationConfig, SettingsState};
-use crate::vcp_modules::vcp_client::{resolve_chat_endpoint, ChatRequestPurpose};
+use crate::vcp_modules::infra::vcp_http_endpoint::{resolve_chat_endpoint, ChatRequestPurpose};
 use serde_json::{json, Value};
 use std::time::Duration;
 use tauri::{AppHandle, State};

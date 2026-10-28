@@ -25,7 +25,7 @@ use super::tool_registry::{SessionToolPlan, ToolExecutionContext, ToolRegistry};
 use super::tools::distributed_operation_id;
 use super::types::*;
 use crate::vcp_modules::cli::runtime::MobileCliRuntimeState;
-use crate::vcp_modules::infra::vcp_endpoint::{
+use crate::vcp_modules::infra::vcp_ws_endpoint::{
     compile_distributed_connection, endpoint_log_label, BaseKind,
 };
 

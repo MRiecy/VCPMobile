@@ -1,7 +1,7 @@
 use super::*;
 use axum::body::Body;
 use axum::extract::{Query, State as AxumState};
-use axum::http::{HeaderMap, Response as HttpResponse};
+use axum::http::{HeaderMap, Response as HttpResponse, Uri};
 use axum::response::Redirect;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -38,6 +38,29 @@ fn test_settings(base: &str) -> Settings {
         },
         ..Settings::default()
     }
+}
+
+fn service_endpoint_settings(base: &str) -> Vec<(Settings, &'static str)> {
+    use crate::vcp_modules::settings_manager::ChatEndpointMode::{Raw, Standard, VcpTools};
+    [
+        ("", Standard, ""),
+        ("/", Raw, ""),
+        ("/proxy", Standard, "/proxy"),
+        ("/proxy/", VcpTools, "/proxy"),
+        ("/proxy/v1", Standard, "/proxy"),
+        ("/proxy/v1/chat/completions", Standard, "/proxy"),
+        ("/proxy/v1/chatvcp/completions/", VcpTools, "/proxy"),
+        ("/proxy/v1", Raw, "/proxy"),
+        ("/proxy/v1/chatvcp/completions", Raw, "/proxy"),
+    ]
+    .into_iter()
+    .map(|(path, mode, expected_prefix)| {
+        let mut settings = test_settings(base);
+        settings.server.url = format!("{base}{path}?chat=not-a-service-query");
+        settings.server.endpoint_mode = mode;
+        (settings, expected_prefix)
+    })
+    .collect()
 }
 
 #[test]
@@ -124,13 +147,18 @@ async fn text_search_fails_closed_before_sending_empty_admin_credentials() {
 
 #[tokio::test]
 async fn admin_requests_preserve_proxy_prefix_and_send_basic_auth() {
-    let router = Router::new().route(
-        "/proxy/admin_api/dailynotes/folders",
-        get(|headers: HeaderMap| async move {
+    let captured_paths = Arc::new(StdMutex::new(Vec::new()));
+    let paths_for_route = captured_paths.clone();
+    let folders_route = get(move |uri: Uri, headers: HeaderMap| {
+        let paths = paths_for_route.clone();
+        async move {
+            paths.lock().expect("capture path").push(uri.path().to_string());
             let authorized = headers
                 .get(reqwest::header::AUTHORIZATION)
                 .and_then(|value| value.to_str().ok())
-                == Some("Basic dXNlcjpwYXNz");
+                == Some("Basic dXNlcjpwYXNz")
+                && headers.get_all(reqwest::header::AUTHORIZATION).iter().count() == 1
+                && uri.query().is_none();
             if authorized {
                 (
                     StatusCode::OK,
@@ -142,15 +170,22 @@ async fn admin_requests_preserve_proxy_prefix_and_send_basic_auth() {
                     Json(json!({"error": "missing auth"})),
                 )
             }
-        }),
-    );
+        }
+    });
+    let router = Router::new()
+        .route("/admin_api/dailynotes/folders", folders_route.clone())
+        .route("/proxy/admin_api/dailynotes/folders", folders_route);
     let (base, server) = spawn_test_server(router).await;
     let service = DiaryServiceState::new().expect("service");
-    let folders = service
-        .list_folders(&test_settings(&base))
-        .await
-        .expect("authorized folders");
-    assert_eq!(folders.folders, vec!["Nova 的知识", "项目簇"]);
+    for (settings, expected_prefix) in service_endpoint_settings(&base) {
+        let folders = service
+            .list_folders(&settings)
+            .await
+            .unwrap_or_else(|error| panic!("{}: {error}", settings.server.url));
+        assert_eq!(folders.folders, vec!["Nova 的知识", "项目簇"]);
+        assert_eq!(captured_paths.lock().expect("captured paths").pop(),
+            Some(format!("{expected_prefix}/admin_api/dailynotes/folders")));
+    }
     server.abort();
 }
 
@@ -158,56 +193,106 @@ async fn admin_requests_preserve_proxy_prefix_and_send_basic_auth() {
 async fn human_tool_uses_bearer_and_official_escape_fields() {
     let captured_body = Arc::new(StdMutex::new(String::new()));
     let body_for_route = captured_body.clone();
-    let router = Router::new().route(
-            "/proxy/v1/human/tool",
-            post(move |headers: HeaderMap, body: String| {
-                let captured_body = body_for_route.clone();
-                async move {
-                    *captured_body.lock().expect("capture body") = body;
-                    let authorized = headers
-                        .get(reqwest::header::AUTHORIZATION)
-                        .and_then(|value| value.to_str().ok())
-                        == Some("Bearer test-bearer");
-                    if authorized {
-                        (
-                            StatusCode::OK,
-                            Json(json!({
-                                "result": {
-                                    "content": "--- (来源: Nova 的知识, 相关性: 90%)\n[路径: file:///tmp/Nova%20%E7%9A%84%E7%9F%A5%E8%AF%86/a.txt]\n命中正文"
-                                }
-                            })),
-                        )
-                    } else {
-                        (
-                            StatusCode::UNAUTHORIZED,
-                            Json(json!({"error": "missing bearer"})),
-                        )
-                    }
-                }
-            }),
-        );
+    let captured_path = Arc::new(StdMutex::new(String::new()));
+    let path_for_route = captured_path.clone();
+    let tool_route = post(move |uri: Uri, headers: HeaderMap, body: String| {
+        let captured_body = body_for_route.clone();
+        let captured_path = path_for_route.clone();
+        async move {
+            *captured_body.lock().expect("capture body") = body;
+            *captured_path.lock().expect("capture path") = uri.path().to_string();
+            let authorized = headers
+                .get(reqwest::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                == Some("Bearer test-bearer")
+                && headers.get_all(reqwest::header::AUTHORIZATION).iter().count() == 1
+                && uri.query().is_none();
+            if authorized {
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "result": {
+                            "content": "--- (来源: Nova 的知识, 相关性: 90%)\n[路径: file:///tmp/Nova%20%E7%9A%84%E7%9F%A5%E8%AF%86/a.txt]\n命中正文"
+                        }
+                    })),
+                )
+            } else {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    Json(json!({"error": "missing bearer"})),
+                )
+            }
+        }
+    });
+    let router = Router::new()
+        .route("/v1/human/tool", tool_route.clone())
+        .route("/proxy/v1/human/tool", tool_route);
     let (base, server) = spawn_test_server(router).await;
     let service = DiaryServiceState::new().expect("service");
-    let response = service
-        .semantic_search(
-            &test_settings(&base),
-            &DiarySemanticSearchRequest {
-                request_id: "semantic-test".to_string(),
-                query: "温柔".to_string(),
-                folder: Some("Nova 的知识".to_string()),
-                search_all: false,
-                k: 5,
-            },
-        )
-        .await
-        .expect("semantic response");
-    assert_eq!(response.hits.len(), 1);
-    assert_eq!(response.hits[0].key.file, "a.txt");
-    let request_body = captured_body.lock().expect("captured body");
-    assert!(request_body.starts_with(TOOL_REQUEST_START));
-    assert!(request_body.contains("tool_name:「始ESCAPE」LightMemo「末ESCAPE」"));
-    assert!(request_body.contains("folder:「始ESCAPE」Nova 的知识「末ESCAPE」"));
+    for (settings, expected_prefix) in service_endpoint_settings(&base) {
+        let response = service
+            .semantic_search(
+                &settings,
+                &DiarySemanticSearchRequest {
+                    request_id: "semantic-test".to_string(),
+                    query: "温柔".to_string(),
+                    folder: Some("Nova 的知识".to_string()),
+                    search_all: false,
+                    k: 5,
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{}: {error}", settings.server.url));
+        assert_eq!(response.hits.len(), 1);
+        assert_eq!(response.hits[0].key.file, "a.txt");
+        assert_eq!(*captured_path.lock().expect("captured path"),
+            format!("{expected_prefix}/v1/human/tool"));
+        let request_body = captured_body.lock().expect("captured body");
+        assert!(request_body.starts_with(TOOL_REQUEST_START));
+        assert!(request_body.contains("tool_name:「始ESCAPE」LightMemo「末ESCAPE」"));
+        assert!(request_body.contains("folder:「始ESCAPE」Nova 的知识「末ESCAPE」"));
+    }
     server.abort();
+}
+
+#[tokio::test]
+async fn unknown_raw_service_address_is_rejected_before_any_http_request() {
+    let requests = Arc::new(AtomicUsize::new(0));
+    let captured_requests = requests.clone();
+    let router = Router::new().fallback(move || {
+        let captured_requests = captured_requests.clone();
+        async move {
+            captured_requests.fetch_add(1, AtomicOrdering::SeqCst);
+            Json(json!({"folders": []}))
+        }
+    });
+    let (base, server) = spawn_test_server(router).await;
+    let service = DiaryServiceState::new().expect("service");
+    let mut settings = test_settings(&base);
+    settings.server.url = format!("{base}/custom-chat-endpoint");
+    settings.server.endpoint_mode = crate::vcp_modules::settings_manager::ChatEndpointMode::Raw;
+    let admin_error = service.list_folders(&settings).await.expect_err("opaque Raw endpoint");
+    assert_eq!(admin_error.code, DiaryErrorCode::InvalidRequest);
+    let tool_error = service.request_human_tool(&settings, "test body".into(), None)
+        .await.expect_err("opaque Raw endpoint");
+    assert_eq!(tool_error.code, DiaryErrorCode::InvalidRequest);
+    assert_eq!(requests.load(AtomicOrdering::SeqCst), 0);
+    server.abort();
+}
+
+#[test]
+fn shared_endpoint_errors_keep_diary_error_categories() {
+    for (address, code) in [
+        ("", DiaryErrorCode::ConfigMissing),
+        ("example.invalid", DiaryErrorCode::InvalidRequest),
+        ("https://example.invalid/v1#section", DiaryErrorCode::InvalidRequest),
+        ("https://example.invalid/v1\n", DiaryErrorCode::InvalidRequest),
+    ] {
+        let mut settings = test_settings("https://example.invalid");
+        settings.server.url = address.into();
+        assert_eq!(ensure_admin_config(&settings).unwrap_err().code, code);
+        assert_eq!(ensure_bearer_config(&settings).unwrap_err().code, code);
+    }
 }
 
 #[tokio::test]

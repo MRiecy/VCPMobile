@@ -5,6 +5,7 @@ use crate::vcp_modules::agent_service::{read_agent_config_internal, AgentConfigS
 use crate::vcp_modules::chat::voice_service::VoiceReplyPolicy;
 use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::infra::vcp_http_endpoint::ChatRequestPurpose;
 use crate::vcp_modules::group_context_assembler::assemble_group_context;
 use crate::vcp_modules::group_service::{read_group_config, GroupManagerState};
 use crate::vcp_modules::group_types::GroupChatMode;
@@ -19,7 +20,7 @@ use crate::vcp_modules::topic_types::{MessageKey, TopicKey};
 use crate::vcp_modules::vcp_client::{
     freeze_chat_connection, message_transport_request_id, perform_vcp_request_registered,
     ActiveGroupTurnLease, ActiveGroupTurns, ActiveRequestLease, ActiveRequests,
-    ChatConnectionSnapshot, ChatRequestPurpose, StreamEvent, VcpRequestPayload, VcpResponse,
+    ChatConnectionSnapshot, StreamEvent, VcpRequestPayload, VcpResponse,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};

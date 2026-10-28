@@ -13,8 +13,8 @@ ForumListView.vue ── ForumDetailView.vue / ForumComposeView.vue（滑入子�
                                    /v1/human/tool（Bearer 主 API Key，发帖）
 ```
 
-- **双凭据**：浏览/回帖走 admin Basic（复用设置中的管理员凭据，与桌面端论坛设置
-  同源）；发帖走 human/tool（Bearer `vcp_api_key`）。
+- **双凭据**：浏览/回帖及 REST 发帖走 admin Basic（复用设置中的管理员凭据）；只有 REST 发帖返回 404 时才回退到 Human Tool，使用主 API Key Bearer。回退请求直接构造，只有一条 Authorization，不在 Basic 请求上追加 Bearer。
+- **地址派生**：管理和 Human Tool 共用 `vcp_http_endpoint` 的服务基址，正确识别标准/增强聊天后缀和 `/v1`，保留已有部署前缀；各请求的鉴权与响应处理仍归论坛 owner。
 - **Rust 侧**：认证代理 + uid/长度校验 + TOOL_REQUEST 文本协议拼装。
 - **前端 Store**：posts 全量缓存（`mtimeMs` 脏检查）+ 详情 `Map<uid, ParsedPost>`
   缓存；写操作成功后乐观重拉。
