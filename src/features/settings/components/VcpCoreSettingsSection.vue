@@ -47,9 +47,12 @@ const scheduleEndpointPreview = () => {
   const generation = ++previewGeneration;
   const vcpUrl = props.settings['server.url'];
   const chatEndpointMode = props.settings['server.endpointMode'];
-  endpointPreview.value = null;
+  if (!props.active || disposed) return;
   endpointPreviewError.value = '';
-  if (!vcpUrl || !props.active || disposed) return;
+  if (!vcpUrl) {
+    endpointPreview.value = null;
+    return;
+  }
 
   previewTimer = setTimeout(async () => {
     try {
@@ -61,6 +64,7 @@ const scheduleEndpointPreview = () => {
       endpointPreview.value = preview;
     } catch (error) {
       if (generation !== previewGeneration) return;
+      endpointPreview.value = null;
       endpointPreviewError.value = String(error);
     }
   }, 120);

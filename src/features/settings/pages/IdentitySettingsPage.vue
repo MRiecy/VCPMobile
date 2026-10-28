@@ -19,13 +19,16 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
 </script>
 
 <template>
-  <div class="flex flex-col gap-4">
+  <div class="flex flex-col gap-4" :class="{ 'settings-page--leaving': leaving }" :inert="disabled">
     <p v-if="error" role="alert" class="text-sm text-red-500 break-words">
       {{ error }}
       <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading" @click="reload">重试</button>
     </p>
     <UserProfileSection v-if="draft" :settings="draft" :active="active" :disabled="disabled" @edit="edit" />
     <p v-else-if="loading" class="text-sm opacity-60">正在加载设置...</p>
-    <p v-if="leaving" role="status" class="text-xs opacity-60">正在保存设置...</p>
   </div>
 </template>
+
+<style scoped>
+.settings-page--leaving :deep(.settings-field-input:disabled) { opacity: 1; }
+</style>

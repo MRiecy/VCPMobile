@@ -786,6 +786,39 @@ describe("VCP CLI view snapshot ownership", () => {
     ).toBe(false);
   });
 
+  it("only reports generation reconciliation after an acknowledged generation change", async () => {
+    let runtimeGeneration = 1;
+    let pendingStatus: ReturnType<typeof deferred<VcpCliRuntimeStatus>> | null = null;
+    mockInvoke(VCP_CLI_STATUS_COMMAND, () =>
+      pendingStatus?.promise ?? status({ runtime_generation: runtimeGeneration }),
+    );
+    mockInvoke(VCP_CLI_ACTION_COMMAND, (args) => {
+      const request = requestFromArgs(args);
+      return success(request.operation_id, { jobs: [], skills: [] }, runtimeGeneration);
+    });
+    const store = useVcpCliStore();
+    await store.openView();
+
+    pendingStatus = deferred<VcpCliRuntimeStatus>();
+    const ordinaryRefresh = store.refreshStatus();
+    expect(store.runtimeLoading).toBe(true);
+    expect(store.runtimeGenerationRefreshing).toBe(false);
+    pendingStatus.resolve(status());
+    await ordinaryRefresh;
+
+    runtimeGeneration = 2;
+    pendingStatus = deferred<VcpCliRuntimeStatus>();
+    await store.loadSkills();
+    expect(store.runtimeGeneration).toBe(2);
+    expect(store.runtimeGenerationRefreshing).toBe(true);
+    expect(store.runtimeStatus).toBeNull();
+
+    pendingStatus.resolve(status({ runtime_generation: 2 }));
+    await vi.waitFor(() => expect(store.runtimeGenerationRefreshing).toBe(false));
+    expect(store.runtimeStatus?.runtime_generation).toBe(2);
+    store.closeView();
+  });
+
   it("refreshes status on a higher runtime generation and rejects old generation revival", async () => {
     const statuses = [
       status({ runtime_generation: 1, jobs: [summary("old-job")] }),

@@ -139,7 +139,7 @@ onBeforeUnmount(() => {
   <section class="flex min-h-0 flex-1 flex-col" aria-label="VCP CLI Manifest">
     <div class="min-h-0 flex-1 overflow-y-auto px-3 py-3 no-rubber-band">
       <div
-        v-if="loading"
+        v-if="loading && !manifestDocument"
         class="flex min-h-48 items-center justify-center gap-2 text-[12px] font-semibold opacity-55"
         role="status"
       >

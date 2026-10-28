@@ -645,7 +645,7 @@ describe('语音设置使用正式设置快照', () => {
     await wrapper.get('button[aria-label="规则细节"]').trigger('click');
     await flushPromises();
     expect(overlay.pageStackTop?.type).toBe('voiceStyleGuidance');
-    expect(wrapper.get('textarea').attributes('disabled')).toBeDefined();
+    expect(wrapper.get('.voice-style-guidance-page').attributes('inert')).toBeDefined();
     modals.closeTopModal();
     await flushPromises();
     expect(wrapper.emitted('close')).toBeUndefined();

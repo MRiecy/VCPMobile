@@ -24,7 +24,8 @@ const systemPermission = useSystemNotificationPermission();
         <p class="mt-1 text-xs opacity-60 leading-relaxed" role="status">{{ systemPermission.description.value }}</p>
       </div>
       <button class="shrink-0 px-3 py-2 text-xs border border-[var(--border-color)] rounded-lg disabled:opacity-50"
-        :disabled="systemPermission.busy.value || systemPermission.openingSettings.value"
+        :inert="systemPermission.busy.value || systemPermission.openingSettings.value"
+        :disabled="systemPermission.actionBusy.value"
         @click="systemPermission.act">
         {{ systemPermission.actionLabel.value }}
       </button>

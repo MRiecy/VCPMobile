@@ -47,6 +47,9 @@ const connectionSettingsReady = ref(false);
 const connectionSettingsError = ref("");
 const connectionSaving = ref(false);
 let connectionBaseline: ConfigSnapshot | null = null;
+const connectionSettingsRefreshing = computed(() =>
+  connectionSettingsLoading.value && connectionBaseline !== null,
+);
 const connectionFieldsDisabled = computed(() =>
   !connectionSettingsReady.value || connectionSettingsLoading.value ||
   connectionSaving.value || status.value.state !== "disconnected",
@@ -54,6 +57,10 @@ const connectionFieldsDisabled = computed(() =>
 const canSaveConnection = computed(() =>
   props.isOpen && !connectionFieldsDisabled.value &&
   Boolean(wsUrl.value.trim() && vcpKey.value.trim()),
+);
+const connectionButtonDimmed = computed(() =>
+  connectionSaving.value || !wsUrl.value.trim() || !vcpKey.value.trim() ||
+  (!connectionSettingsReady.value && !connectionSettingsRefreshing.value),
 );
 
 // Interface types
@@ -122,16 +129,22 @@ const authorizationMutationPending = computed(
 const authorizationConfigReady = computed(
   () =>
     toolConfigStatus.value !== null &&
-    !toolConfigStatusLoading.value &&
     toolConfigStatus.value.state !== "uninitialized" &&
     !toolConfigStatusError.value,
 );
 const authorizationSwitchesDisabled = computed(
   () =>
     catalogLoading.value ||
+    toolConfigStatusLoading.value ||
     Boolean(catalogError.value) ||
     authorizationMutationPending.value ||
     !authorizationConfigReady.value,
+);
+const authorizationSwitchesDimmed = computed(
+  () => Boolean(catalogError.value) || authorizationMutationPending.value || !authorizationConfigReady.value,
+);
+const showToolConfigLoading = computed(
+  () => toolConfigStatusLoading.value && toolConfigStatus.value === null,
 );
 
 const isCurrentView = (generation: number) =>
@@ -275,7 +288,6 @@ const loadPluginsMetadata = async (view = viewGeneration) => {
   if (!isCurrentView(view)) return;
   catalogLoading.value = true;
   catalogError.value = "";
-  toolConfigStatus.value = null;
   toolConfigStatusLoading.value = true;
   toolConfigStatusError.value = "";
 
@@ -859,7 +871,8 @@ onBeforeUnmount(() => {
                 v-else
                 @click="handleConnect"
                 :disabled="!canSaveConnection"
-                class="px-4 py-1.5 text-white text-xs font-bold rounded-xl active:scale-95 transition-all disabled:opacity-50"
+                class="px-4 py-1.5 text-white text-xs font-bold rounded-xl active:scale-95 transition-all"
+                :class="{ 'opacity-50': connectionButtonDimmed }"
                 style="background-color: var(--highlight-text)"
               >
                 {{ connectionSaving ? '保存中...' : '连接' }}
@@ -938,7 +951,7 @@ onBeforeUnmount(() => {
           <!-- Configuration Fields -->
           <SettingsCard>
             <div class="space-y-4 py-1">
-              <p v-if="connectionSettingsLoading" class="text-xs opacity-60" role="status">
+              <p v-if="connectionSettingsLoading && !connectionSettingsRefreshing" class="text-xs opacity-60" role="status">
                 正在读取连接配置...
               </p>
               <div v-else-if="connectionSettingsError" class="flex items-center justify-between gap-3 text-xs">
@@ -1064,12 +1077,12 @@ onBeforeUnmount(() => {
             {{ catalogError }}
           </div>
           <div
-            v-if="toolConfigStatusLoading || toolConfigStatusError || toolConfigStatus?.state === 'uninitialized' || toolConfigStatus?.state === 'recovered_disabled' || toolConfigStatus?.state === 'persistence_error'"
+            v-if="showToolConfigLoading || toolConfigStatusError || toolConfigStatus?.state === 'uninitialized' || toolConfigStatus?.state === 'recovered_disabled' || toolConfigStatus?.state === 'persistence_error'"
             data-tool-config-status
-            :role="toolConfigStatusLoading ? 'status' : 'alert'"
+            :role="showToolConfigLoading ? 'status' : 'alert'"
             class="mx-4 mt-2 border-l-2 border-amber-500 pl-2 text-[9px] leading-relaxed opacity-75"
           >
-            {{ toolConfigStatusLoading ? '正在读取授权策略；目录可独立浏览。' : toolConfigStatusError || (toolConfigStatus?.state === 'uninitialized'
+            {{ showToolConfigLoading ? '正在读取授权策略；目录可独立浏览。' : toolConfigStatusError || (toolConfigStatus?.state === 'uninitialized'
               ? '授权策略仍在加载；当前仅可浏览目录。'
               : '授权策略已安全恢复为全关，请逐项重新确认。') }}
           </div>
@@ -1184,8 +1197,8 @@ onBeforeUnmount(() => {
                     :aria-checked="plugin.enabled"
                     :aria-busy="authorizationMutationOwner?.toolId === plugin.id"
                     :disabled="authorizationSwitchesDisabled"
-                    class="w-9 h-5 rounded-full p-0.5 transition-colors duration-200 flex items-center shrink-0 disabled:cursor-not-allowed disabled:opacity-35"
-                    :class="plugin.enabled ? 'bg-blue-500/55 border border-blue-500/30' : 'bg-black/15 dark:bg-white/15 border border-black/5 dark:border-white/5'"
+                    class="w-9 h-5 rounded-full p-0.5 transition-colors duration-200 flex items-center shrink-0 disabled:cursor-not-allowed"
+                    :class="[plugin.enabled ? 'bg-blue-500/55 border border-blue-500/30' : 'bg-black/15 dark:bg-white/15 border border-black/5 dark:border-white/5', { 'opacity-35': authorizationSwitchesDimmed }]"
                     @click.stop="toggleToolEnabled(plugin)"
                   >
                     <span

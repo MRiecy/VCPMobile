@@ -51,7 +51,7 @@ defineExpose({ stop, cancelPending: close });
 </script>
 
 <template>
-  <VoiceSelectionRow :title="title" :value="value" :compact="compact" :disabled="disabled || !active" :expanded="open" @click="show" />
+  <VoiceSelectionRow :title="title" :value="value" :compact="compact" :disabled="disabled" :inert="!active" :expanded="open" @click="show" />
   <Teleport to="#vcp-feature-overlays">
     <div v-if="open && active" class="vcp-viewport-surface fixed inset-0 z-sheet bg-black/50 pointer-events-auto" @click.self="close">
       <section ref="surface" class="voice-picker-panel vcp-safe-inline" role="dialog" aria-modal="true" aria-label="选择预制音色">

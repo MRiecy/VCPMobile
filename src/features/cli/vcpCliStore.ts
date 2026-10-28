@@ -318,6 +318,7 @@ export const useVcpCliStore = defineStore("vcpCli", () => {
 
   const runtimeStatus = ref<VcpCliRuntimeStatus | null>(null);
   const runtimeLoading = ref(false);
+  const runtimeGenerationRefreshing = ref(false);
   const runtimeError = ref<VcpCliUiError | null>(null);
   const jobs = ref<VcpCliJobSummary[]>([]);
   const jobsLoading = ref(false);
@@ -496,6 +497,7 @@ export const useVcpCliStore = defineStore("vcpCli", () => {
     if (!adoptRuntimeGeneration(next)) return false;
     if (current === null || current === next) return true;
     runtimeLoading.value = true;
+    runtimeGenerationRefreshing.value = true;
     if (!generationRefreshPromise && viewVisible.value) {
       const generation = viewGeneration.value;
       const owner = ++generationRefreshOwner;
@@ -503,7 +505,10 @@ export const useVcpCliStore = defineStore("vcpCli", () => {
         const ready = await refreshStatus(generation);
         if (ready && isCurrentView(generation)) await refreshJobs(generation);
       })().finally(() => {
-        if (owner === generationRefreshOwner) generationRefreshPromise = null;
+        if (owner === generationRefreshOwner) {
+          generationRefreshPromise = null;
+          runtimeGenerationRefreshing.value = false;
+        }
       });
       generationRefreshPromise = refresh;
     }
@@ -612,6 +617,7 @@ export const useVcpCliStore = defineStore("vcpCli", () => {
     resetJobDetail();
     resetSkillDetail();
     runtimeLoading.value = false;
+    runtimeGenerationRefreshing.value = false;
     jobsLoading.value = false;
     skillsLoading.value = false;
     runBusy.value = false;
@@ -1223,6 +1229,7 @@ export const useVcpCliStore = defineStore("vcpCli", () => {
     pollGeneration,
     runtimeStatus,
     runtimeLoading,
+    runtimeGenerationRefreshing,
     runtimeError,
     jobs,
     jobsLoading,

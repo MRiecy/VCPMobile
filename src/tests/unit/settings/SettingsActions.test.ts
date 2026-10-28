@@ -374,13 +374,13 @@ describe('连接设置页与真实编辑会话的集成', () => {
     await confirmImport(wrapper);
     await flushPromises();
 
-    expect(field(wrapper, 'API Key').attributes()).toHaveProperty('disabled');
+    expect(wrapper.attributes()).toHaveProperty('inert');
     expect(await (wrapper.vm as unknown as { beforeLeave(): Promise<boolean> }).beforeLeave()).toBe(false);
     expect(callsFor('import_settings_backup')).toHaveLength(1);
     updating.reject(new Error('导入写入失败'));
     await flushPromises();
 
-    expect(field(wrapper, 'API Key').attributes()).not.toHaveProperty('disabled');
+    expect(wrapper.attributes()).not.toHaveProperty('inert');
     expect((field(wrapper, 'API Key').element as HTMLInputElement).value).toBe('unsubmitted-key');
     expect(wrapper.text()).toContain('设置保存失败');
   });
@@ -396,12 +396,12 @@ describe('连接设置页与真实编辑会话的集成', () => {
 
     await action(wrapper, '导出').get('button').trigger('click');
     await flushPromises();
-    expect(field(wrapper, 'API Key').attributes()).toHaveProperty('disabled');
+    expect(wrapper.attributes()).toHaveProperty('inert');
     expect(callsFor('plugin:vcp-mobile|save_to_downloads')).toHaveLength(0);
     mockInvoke('export_config_domains', () => ({ server: { apiKey: 'export-this-key' } }));
     updating.resolve({ status: 'saved', snapshot: snapshot(makeSettings({ 'server.apiKey': 'export-this-key' }), '2') });
     await flushPromises();
-    expect(field(wrapper, 'API Key').attributes()).not.toHaveProperty('disabled');
+    expect(wrapper.attributes()).not.toHaveProperty('inert');
     await field(wrapper, 'API Key').setValue('edit-after-export-started');
 
     const args = callsFor('plugin:vcp-mobile|save_to_downloads')[0]?.[1];

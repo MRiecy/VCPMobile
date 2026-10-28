@@ -26,7 +26,7 @@ const providerTitleId = useId();
 const overlayStore = useOverlayStore();
 const settingsStore = useSettingsStore();
 const { session, loading, error, reload } = useSettingsPageSession(VOICE_FIELDS, () => props.active);
-const { draft, saving, leaving } = session;
+const { draft, leaving } = session;
 const openingStyleGuidance = ref(false);
 const stoppingPreview = ref(false);
 const previewStopError = ref('');
@@ -38,6 +38,8 @@ const previewSettings = computed<VoiceConfig>(() =>
 );
 const ttsModel = computed(() => MIMO_TTS_MODES.find(mode => mode.value === draft.value?.['voice.tts.mode'])?.model ?? '');
 const disabled = computed(() => !props.active || leaving.value || openingStyleGuidance.value || stoppingPreview.value);
+const controlsDisabled = computed(() => (openingStyleGuidance.value || stoppingPreview.value)
+  && !!(preview.value?.busy || cloneSample.value?.busy));
 type DurationField = 'voice.vad.endSilenceMs' | 'voice.vad.playbackOnsetMs';
 type SelectionField = 'voice.asr.language' | 'voice.asr.inputEncoding' | 'voice.tts.mode' | 'voice.vad.sensitivity' | DurationField;
 const durationSettings = {
@@ -184,23 +186,22 @@ defineExpose({ beforeLeave });
 </script>
 
 <template>
-  <SettingsCanvas viewport :inert="!active">
+  <SettingsCanvas viewport :inert="disabled">
         <p v-if="previewStopError" role="alert" class="m-0 text-sm text-red-500">{{ previewStopError }}</p>
         <p v-if="error" role="alert" class="m-0 text-sm text-red-500">
           {{ error }}
           <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading || !active" @click="reload">重试</button>
         </p>
         <p v-else-if="!draft && loading" class="m-0 text-sm opacity-60" role="status">正在加载设置…</p>
-        <p v-if="saving || leaving" class="m-0 text-xs text-[var(--secondary-text)]" role="status">正在保存语音设置…</p>
 
         <section v-if="draft" class="voice-provider-section" :aria-labelledby="providerTitleId">
           <h2 :id="providerTitleId" class="settings-canvas-title">MiMo 语音服务</h2>
           <SettingsSection index="01" title="服务器连接">
             <div class="voice-connection-fields">
-              <SettingsTextField :model-value="draft['voice.connection.apiBaseUrl']" :disabled="disabled"
+              <SettingsTextField :model-value="draft['voice.connection.apiBaseUrl']" :disabled="controlsDisabled"
                 label="API 地址" :placeholder="settingDescriptor('voice.connection.apiBaseUrl').preset" mono
                 @update:model-value="session.edit('voice.connection.apiBaseUrl', $event)" />
-              <SettingsTextField :model-value="draft['voice.connection.apiKey']" :disabled="disabled"
+              <SettingsTextField :model-value="draft['voice.connection.apiKey']" :disabled="controlsDisabled"
                 label="语音 API Key" placeholder="输入 MiMo API Key" is-secure
                 @update:model-value="session.edit('voice.connection.apiKey', $event)" />
             </div>
@@ -214,12 +215,12 @@ defineExpose({ beforeLeave });
             <div>
               <SettingsRow v-for="field in recognitionFields" :key="field" :title="selections[field].title"
                 :description="field === 'voice.asr.inputEncoding' ? 'MP3 约节省 75% 上传流量' : undefined"
-                :value="selectedLabel(field)" clickable :disabled="disabled"
+                :value="selectedLabel(field)" clickable :disabled="controlsDisabled"
                 :aria-label="selections[field].title" aria-haspopup="dialog" :aria-expanded="selectionOpen(field)"
                 @click="openSelection(field, $event)" />
               <SettingsRow title="流式识别结果" description="说完后整段上传，并流式返回转写文本。">
                 <template #action>
-                  <SettingsSwitch :model-value="draft['voice.asr.stream']" :disabled="disabled" aria-label="流式识别结果"
+                  <SettingsSwitch :model-value="draft['voice.asr.stream']" :disabled="controlsDisabled" aria-label="流式识别结果"
                     @update:model-value="session.edit('voice.asr.stream', $event)" />
                 </template>
               </SettingsRow>
@@ -230,37 +231,38 @@ defineExpose({ beforeLeave });
             <template #description><template v-if="ttsModel">模型：<code class="font-mono">{{ ttsModel }}</code></template><span v-else>未选择音色</span></template>
             <div>
               <SettingsRow title="音色模式" :value="selectedLabel('voice.tts.mode')" clickable
-                :disabled="disabled" aria-label="音色模式" aria-haspopup="dialog"
+                :disabled="controlsDisabled" aria-label="音色模式" aria-haspopup="dialog"
                 :aria-expanded="selectionOpen('voice.tts.mode')" @click="openSelection('voice.tts.mode', $event)" />
               <VoicePresetPicker v-if="draft['voice.tts.mode'] === 'builtin'" ref="preset"
-                :model-value="draft['voice.tts.voice']" :active="active" :disabled="disabled"
+                :model-value="draft['voice.tts.voice']" :active="active" :disabled="controlsDisabled"
                 @update:model-value="session.edit('voice.tts.voice', $event)" />
               <SettingsRow v-if="draft['voice.tts.mode'] === 'builtin'" title="流式朗读" description="收到音频片段后开始播放；关闭则等待完整合成。">
                 <template #action>
-                  <SettingsSwitch :model-value="draft['voice.tts.stream']" :disabled="disabled" aria-label="流式朗读"
+                  <SettingsSwitch :model-value="draft['voice.tts.stream']" :disabled="controlsDisabled" aria-label="流式朗读"
                     @update:model-value="session.edit('voice.tts.stream', $event)" />
                 </template>
               </SettingsRow>
               <div v-show="draft['voice.tts.mode'] === 'clone'">
                 <VoiceLibraryControl ref="cloneSample"
-                  :model-value="draft['voice.tts.cloneSampleId']" :active="active && draft['voice.tts.mode'] === 'clone'" :disabled="disabled || preview?.busy"
+                  :model-value="draft['voice.tts.cloneSampleId']" :active="active && draft['voice.tts.mode'] === 'clone'" :disabled="controlsDisabled || preview?.busy"
                   @update:model-value="session.edit('voice.tts.cloneSampleId', $event)" />
               </div>
             </div>
-            <VoiceTtsPreview ref="preview" :settings="previewSettings" :active="active" :disabled="disabled || cloneSample?.busy" />
+            <VoiceTtsPreview ref="preview" :settings="previewSettings" :active="active" :locked="disabled || cloneSample?.locked"
+              :disabled="controlsDisabled || cloneSample?.busy" />
           </SettingsSection>
         </section>
 
         <div class="settings-canvas-divider-block">
           <SettingsRow title="风格指导" description="通话回复的风格指导规则" :icon="ListChecks" clickable
-            :disabled="disabled" class="voice-style-guidance-entry" @click="openStyleGuidance" />
+            :disabled="controlsDisabled" class="voice-style-guidance-entry" @click="openStyleGuidance" />
         </div>
 
         <div v-if="draft" class="settings-canvas-divider-block">
-          <SettingsDisclosure title="高级参数" description="本地人声检测与插话" :disabled="disabled">
+          <SettingsDisclosure title="高级参数" description="本地人声检测与插话" :disabled="controlsDisabled">
             <div>
               <SettingsRow v-for="item in advancedFields" :key="item.field" :title="selections[item.field].title"
-                :description="item.description" :value="selectedLabel(item.field)" clickable :disabled="disabled"
+                :description="item.description" :value="selectedLabel(item.field)" clickable :disabled="controlsDisabled"
                 :aria-label="selections[item.field].title" aria-haspopup="dialog" :aria-expanded="selectionOpen(item.field)"
                 @click="openSelection(item.field, $event)" />
             </div>

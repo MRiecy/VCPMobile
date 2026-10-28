@@ -18,7 +18,7 @@ import { useSettingsPageSession } from '../editing/useSettingsPageSession';
 const props = defineProps<SettingsPageProps>();
 const overlay = useOverlayStore();
 const { session, loading, error, reload } = useSettingsPageSession(JEV_FIELDS, () => props.active);
-const { draft, saving, leaving } = session;
+const { draft, leaving } = session;
 const disabled = computed(() => !props.active || leaving.value);
 const providers: { value: JevProvider; label: string }[] = [
   { value: 'typesafe', label: 'TypeSafe 官方' }, { value: 'openrouter', label: 'OpenRouter' },
@@ -80,13 +80,12 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
 </script>
 
 <template>
-  <SettingsCanvas viewport :inert="!active">
+  <SettingsCanvas viewport :class="{ 'settings-page--leaving': leaving }" :inert="disabled">
     <p v-if="error" role="alert" class="m-0 text-sm text-red-500">
       {{ error }}
       <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading || !active" @click="reload">重试</button>
     </p>
     <p v-else-if="!draft && loading" role="status" class="m-0 text-sm opacity-60">正在加载设置…</p>
-    <p v-if="saving || leaving" role="status" class="m-0 text-xs text-[var(--secondary-text)]">正在保存 JEV 设置…</p>
 
     <div v-if="draft" class="flex flex-col gap-5">
       <SettingsSection index="01" title="服务连接" :divider="false">
@@ -139,6 +138,9 @@ defineExpose({ beforeLeave: () => session.prepareLeave() });
 </template>
 
 <style scoped>
+.settings-page--leaving :deep(.settings-field-input:disabled),
+.settings-page--leaving :deep(.settings-switch:disabled),
+.settings-page--leaving :deep(.settings-row:disabled) { opacity: 1; }
 .jev-fields { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
 @media (min-width: 768px) { .jev-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 </style>

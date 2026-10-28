@@ -117,13 +117,14 @@ defineExpose({ stop });
             @update:model-value="update('stream', $event)" />
         </div>
         <div class="voice-preview-area">
-          <p v-if="connectionLoading" class="m-0 text-xs opacity-60" role="status">正在读取语音连接设置…</p>
+          <p v-if="connectionLoading && !previewSettings" class="m-0 text-xs opacity-60" role="status">正在读取语音连接设置…</p>
           <p v-if="connectionError" class="m-0 text-xs text-red-500" role="alert">
             {{ connectionError }}
             <button type="button" :disabled="voiceDisabled || connectionLoading" class="min-h-11 px-2 underline" @click="loadConnection">重试</button>
           </p>
           <VoiceTtsPreview v-if="previewSettings" ref="preview" compact :settings="previewSettings"
-            :active="active && modelValue.enabled" :disabled="voiceDisabled || connectionLoading || !!connectionError || library?.busy" />
+            :active="active && modelValue.enabled" :locked="connectionLoading || library?.locked"
+            :disabled="voiceDisabled || !!connectionError || library?.busy" />
         </div>
       </div>
     </div>

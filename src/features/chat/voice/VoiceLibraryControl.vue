@@ -34,8 +34,10 @@ const operationError = ref('');
 const playingId = ref('');
 const preview = useVoicePreviewTask(() => props.active && (managerOpen.value || pickerOpen.value), () => !!props.disabled || deleting.value || !!upload.value?.busy);
 const { busy: previewBusy, feedback: previewError, unavailable } = preview;
-const busy = computed(() => deleting.value || stopping.value || previewBusy.value || !!upload.value?.busy);
-const blocked = computed(() => !props.active || !!props.disabled || deleting.value || stopping.value || !!upload.value?.busy);
+const busy = computed(() => deleting.value || previewBusy.value || !!upload.value?.busy);
+const locked = computed(() => busy.value || stopping.value);
+const disabled = computed(() => !!props.disabled || deleting.value || !!upload.value?.busy);
+const blocked = computed(() => !props.active || disabled.value || stopping.value);
 const current = computed(() => library.samples.find(sample => sample.id === props.modelValue));
 const currentLabel = computed(() => current.value?.name ?? '无');
 const matches = (sample: VoiceCloneModelDto, query: string) => `${sample.name} ${sample.fileName} ${sample.format}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase());
@@ -190,65 +192,63 @@ onBeforeUnmount(() => {
   unregisterModal(managerId);
   unregisterModal(pickerId);
 });
-defineExpose({ cancelPending, stop, busy });
+defineExpose({ cancelPending, stop, busy, locked });
 </script>
 
 <template>
-  <div class="voice-library-control" :class="{ 'voice-library-control--regular': !compact }">
-    <VoiceSelectionRow title="当前音色" :value="currentLabel" :compact="compact" :disabled="blocked" :expanded="pickerOpen" @click="openSelection" />
-    <VoiceSelectionRow title="音色管理" :value="`${library.samples.length} 个音色`" :compact="compact" :disabled="blocked" :expanded="managerOpen" @click="openManager" />
-    <p v-if="library.error" role="alert" class="voice-library-feedback">{{ library.error }} <button type="button" class="underline" :disabled="blocked || library.loading" @click="refresh">重试</button></p>
+  <div class="voice-library-control" :class="{ 'voice-library-control--regular': !compact }" :inert="!active || stopping">
+    <VoiceSelectionRow title="当前音色" :value="currentLabel" :compact="compact" :disabled="disabled" :expanded="pickerOpen" @click="openSelection" />
+    <VoiceSelectionRow title="音色管理" :value="`${library.samples.length} 个音色`" :compact="compact" :disabled="disabled" :expanded="managerOpen" @click="openManager" />
+    <p v-if="library.error" role="alert" class="voice-library-feedback">{{ library.error }} <button type="button" class="underline" :disabled="disabled || library.loading" @click="refresh">重试</button></p>
   </div>
   <Teleport to="#vcp-feature-overlays">
-    <div v-if="pickerOpen && active" class="vcp-viewport-surface fixed inset-0 z-sheet bg-black/50 pointer-events-auto" :inert="managerOpen" @click.self="requestClosePicker">
+    <div v-if="pickerOpen && active" class="vcp-viewport-surface fixed inset-0 z-sheet bg-black/50 pointer-events-auto" :inert="managerOpen || stopping" @click.self="requestClosePicker">
       <section ref="pickerSurface" class="voice-clone-picker vcp-safe-inline" role="dialog" aria-modal="true" aria-label="选择复刻音色">
         <div class="voice-library-handle" aria-hidden="true"></div>
         <header class="voice-library-header">
           <h3>选择复刻音色</h3>
-          <button ref="pickerCloseButton" type="button" class="voice-library-close" :disabled="stopping" aria-label="关闭复刻音色选择" @click="requestClosePicker"><X :size="18" /></button>
+          <button ref="pickerCloseButton" type="button" class="voice-library-close" :disabled="stopping && previewBusy" aria-label="关闭复刻音色选择" @click="requestClosePicker"><X :size="18" /></button>
         </header>
         <label class="voice-library-search">
           <Search :size="16" aria-hidden="true" /><input v-model="pickerQuery" type="search" aria-label="搜索复刻音色" placeholder="搜索音色" />
         </label>
         <div class="voice-library-list vcp-scrollable" role="radiogroup" aria-label="复刻音色">
           <div v-if="showNone" class="voice-library-choice" :class="{ selected: !current }">
-            <button type="button" class="voice-library-select" role="radio" :aria-checked="!current" :disabled="blocked" @click="select('', 'picker')">
+            <button type="button" class="voice-library-select" role="radio" :aria-checked="!current" :disabled="disabled" @click="select('', 'picker')">
               <span class="voice-library-copy"><span class="voice-library-name">无</span></span><Check v-if="!current" :size="20" aria-hidden="true" /><Circle v-else :size="14" aria-hidden="true" />
             </button>
             <span class="voice-library-play" aria-hidden="true"></span>
           </div>
           <div v-for="sample in pickerSamples" :key="sample.id" class="voice-library-choice" :class="{ selected: sample.id === modelValue }">
-            <button type="button" class="voice-library-select" role="radio" :aria-checked="sample.id === modelValue" :disabled="blocked" @click="select(sample.id, 'picker')">
+            <button type="button" class="voice-library-select" role="radio" :aria-checked="sample.id === modelValue" :disabled="disabled" @click="select(sample.id, 'picker')">
               <span class="voice-library-copy"><span class="voice-library-name">{{ sample.name }}</span><span class="voice-library-meta">{{ voiceSampleDetail(sample) }}</span></span>
               <Check v-if="sample.id === modelValue" :size="20" aria-hidden="true" /><Circle v-else :size="14" aria-hidden="true" />
             </button>
             <button type="button" class="voice-library-play" :aria-label="`${previewBusy && playingId === sample.id ? '停止原声' : '试听原声'}：${sample.name}`"
-              :disabled="previewBusy && playingId === sample.id ? stopping : blocked || !preview.canStart.value" @click="toggleOriginal(sample)">
+              :disabled="previewBusy && playingId === sample.id ? stopping : disabled || !preview.canStart.value" @click="toggleOriginal(sample)">
               <Square v-if="previewBusy && playingId === sample.id" :size="17" aria-hidden="true" /><Play v-else :size="18" aria-hidden="true" />
             </button>
           </div>
-          <p v-if="library.loading" class="voice-library-empty" role="status">正在读取声音库…</p>
-          <p v-else-if="!pickerSamples.length" class="voice-library-empty">{{ pickerQuery ? '没有匹配的音色' : '暂无复刻音色，可在音色管理中新增。' }}</p>
+          <p v-if="!library.loading && !pickerSamples.length" class="voice-library-empty">{{ pickerQuery ? '没有匹配的音色' : '暂无复刻音色，可在音色管理中新增。' }}</p>
         </div>
         <p v-if="operationError || previewError || library.error" role="alert" class="voice-library-feedback">{{ operationError || previewError || library.error }}</p>
         <footer class="voice-library-picker-footer">
-          <span>{{ library.samples.length }} 个音色</span><button type="button" :disabled="blocked" @click="openManager">音色管理</button>
+          <span>{{ library.samples.length }} 个音色</span><button type="button" :disabled="disabled" @click="openManager">音色管理</button>
         </footer>
       </section>
     </div>
     <div v-if="managerOpen && active" class="vcp-viewport-surface fixed inset-0 z-sheet pointer-events-auto">
-      <section ref="managerSurface" class="voice-library-manager vcp-safe-inline" role="dialog" aria-modal="true" aria-label="音色管理" :inert="uploadOpen || !!confirmation">
+      <section ref="managerSurface" class="voice-library-manager vcp-safe-inline" role="dialog" aria-modal="true" aria-label="音色管理" :inert="uploadOpen || !!confirmation || stopping">
         <header class="voice-library-header">
           <h3>音色管理</h3>
-          <button ref="closeButton" type="button" class="voice-library-close" :disabled="stopping" aria-label="关闭音色管理" @click="requestCloseManager"><X :size="18" /></button>
+          <button ref="closeButton" type="button" class="voice-library-close" :disabled="stopping && previewBusy" aria-label="关闭音色管理" @click="requestCloseManager"><X :size="18" /></button>
         </header>
         <div class="voice-library-toolbar">
           <label class="voice-library-search"><Search :size="16" aria-hidden="true" /><input v-model="managerQuery" type="search" aria-label="搜索声音库" placeholder="搜索音色" /></label>
-          <button type="button" class="voice-library-add" :disabled="blocked" aria-label="上传新音色" @click="openUpload"><Plus :size="15" aria-hidden="true" />新增</button>
+          <button type="button" class="voice-library-add" :disabled="disabled" aria-label="上传新音色" @click="openUpload"><Plus :size="15" aria-hidden="true" />新增</button>
         </div>
         <div class="voice-library-list vcp-scrollable">
-          <p v-if="library.loading" role="status" class="voice-library-empty">正在读取声音库…</p>
-          <p v-else-if="!managerSamples.length && !library.error" class="voice-library-empty">{{ managerQuery ? '没有匹配的音色' : '暂无音色，上传一段参考音频即可创建。' }}</p>
+          <p v-if="!library.loading && !managerSamples.length && !library.error" class="voice-library-empty">{{ managerQuery ? '没有匹配的音色' : '暂无音色，上传一段参考音频即可创建。' }}</p>
           <article v-for="sample in managerSamples" :key="sample.id" class="voice-library-item" :class="{ selected: sample.id === modelValue }">
             <button type="button" class="voice-library-detail-toggle" :aria-label="`音色详情：${sample.name}`" :aria-expanded="detailId === sample.id" @click="detailId = detailId === sample.id ? '' : sample.id">
               <span class="voice-library-copy"><span class="voice-library-name">{{ sample.name }}</span><span class="voice-library-meta">{{ voiceSampleDetail(sample) }}</span></span>
@@ -258,12 +258,12 @@ defineExpose({ cancelPending, stop, busy });
               <p class="voice-library-file">{{ sample.fileName }}</p>
               <div class="voice-library-detail-actions">
                 <button type="button" class="voice-library-action inline-flex items-center gap-1.5"
-                  :disabled="previewBusy && playingId === sample.id ? stopping : blocked || !preview.canStart.value" @click="toggleOriginal(sample)">
+                  :disabled="previewBusy && playingId === sample.id ? stopping : disabled || !preview.canStart.value" @click="toggleOriginal(sample)">
                   <Square v-if="previewBusy && playingId === sample.id" :size="15" aria-hidden="true" /><Play v-else :size="15" aria-hidden="true" />
                   {{ previewBusy && playingId === sample.id ? '停止原声' : '试听原声' }}
                 </button>
-                <button type="button" class="voice-library-action text-blue-500" :disabled="blocked" @click="select(sample.id, 'manager')">选用</button>
-                <button type="button" class="voice-library-action text-red-500" :disabled="blocked" @click="remove(sample)">删除</button>
+                <button type="button" class="voice-library-action text-blue-500" :disabled="disabled" @click="select(sample.id, 'manager')">选用</button>
+                <button type="button" class="voice-library-action text-red-500" :disabled="disabled" @click="remove(sample)">删除</button>
               </div>
             </div>
           </article>

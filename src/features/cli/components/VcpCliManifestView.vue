@@ -27,7 +27,7 @@ const {
   hasInternalDetail,
   selectedJobId,
   selectedSkillId,
-  runtimeLoading,
+  runtimeGenerationRefreshing,
   runtimeError,
 } = storeToRefs(store);
 const { keyboardHeight } = useKeyboardInsets();
@@ -192,7 +192,7 @@ onBeforeUnmount(() => {
       </header>
 
       <div
-        v-if="activeTab !== 'jobs' && runtimeLoading"
+        v-if="activeTab !== 'jobs' && runtimeGenerationRefreshing"
         class="shrink-0 border-b border-blue-500/15 px-3 py-1.5 font-mono text-[9px] text-blue-600 dark:text-blue-400"
         role="status"
       >

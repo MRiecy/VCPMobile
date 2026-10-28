@@ -8,14 +8,16 @@ import { useVoicePreviewTask } from './useVoicePreviewTask';
 import type { VoiceConfig } from '../../../core/config/generated/config';
 import { cloneConfig } from '../../../core/config/fields';
 
-const props = defineProps<{ settings: VoiceConfig; active: boolean; disabled?: boolean; compact?: boolean }>();
+const props = defineProps<{ settings: VoiceConfig; active: boolean; disabled?: boolean; locked?: boolean; compact?: boolean }>();
 const inputId = useId();
 const text = ref(props.compact ? '你好，我是当前助手的音色。' : '你好，很高兴认识你。');
 const { busy, feedback, unavailable, canStart: previewAvailable, start, stop } = useVoicePreviewTask(
-  () => props.active, () => !!props.disabled,
+  () => props.active, () => !!props.disabled || !!props.locked,
 );
 const canStart = computed(() => previewAvailable.value && !!text.value.trim());
+const buttonDisabled = computed(() => !!props.disabled || (!busy.value && (!!unavailable.value || !text.value.trim())));
 const toggle = async () => {
+  if (!props.active || props.locked) return;
   if (busy.value) { await stop().catch(() => undefined); return; }
   if (!canStart.value) return;
   // Freeze the visible draft before any asynchronous admission.
@@ -27,22 +29,22 @@ defineExpose({ stop, busy });
 </script>
 
 <template>
-  <div v-if="compact" class="voice-preview-compact">
+  <div v-if="compact" class="voice-preview-compact" :inert="!active || locked">
     <label :for="inputId" class="voice-preview-label">音色试听</label>
     <div class="voice-preview-inline">
       <label :for="inputId" class="voice-preview-input-target">
         <input :id="inputId" v-model="text" type="text" maxlength="500" :disabled="disabled" aria-label="试听文本" class="voice-preview-input" />
       </label>
       <button type="button" class="voice-preview-button voice-preview-button--compact"
-        :disabled="!active || disabled || (!busy && !canStart)" @click="toggle">{{ busy ? '停止' : '试听' }}</button>
+        :disabled="buttonDisabled" @click="toggle">{{ busy ? '停止' : '试听' }}</button>
     </div>
     <p v-if="unavailable" class="m-0 mt-2 text-xs text-[var(--secondary-text)]">{{ unavailable }}</p>
     <p v-if="feedback" role="alert" class="m-0 mt-2 text-xs leading-relaxed text-red-500">{{ feedback }}</p>
   </div>
-  <SettingsDisclosure v-else title="试听声音" :description="unavailable" :disabled="disabled">
+  <SettingsDisclosure v-else title="试听声音" :description="unavailable" :disabled="disabled" :inert="!active || locked">
     <div class="flex flex-col gap-3">
       <VoiceTextArea v-model="text" label="试听文本" hide-label :rows="3" :max-length="500" :disabled="disabled" />
-      <button type="button" class="voice-preview-button" :disabled="!active || disabled || (!busy && !canStart)" @click="toggle">
+      <button type="button" class="voice-preview-button" :disabled="buttonDisabled" @click="toggle">
         <Square v-if="busy" :size="16" aria-hidden="true" /><Play v-else :size="16" aria-hidden="true" />
         {{ busy ? '停止试听' : '试听当前设置' }}
       </button>

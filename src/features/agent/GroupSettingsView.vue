@@ -121,6 +121,7 @@ const isLeaving = ref(false);
 const loadError = ref("");
 const saveError = ref("");
 const disabled = computed(() => !props.isOpen || isLoading.value || isSaving.value || isDeleting.value || isLeaving.value);
+const controlsDisabled = computed(() => isLoading.value || isDeleting.value || (isSaving.value && !isLeaving.value));
 
 // 原始配置快照，用于判断用户是否真正修改了内容
 const originalConfig = ref<EditableGroupConfig | null>(null);
@@ -738,15 +739,14 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
 </script>
 
 <template>
-  <SlidePage v-bind="$attrs" :is-open="props.isOpen" :z-index="props.zIndex" :inert="!props.isOpen"
+  <SlidePage v-bind="$attrs" :is-open="props.isOpen" :z-index="props.zIndex" :inert="!props.isOpen || isLeaving"
     :aria-hidden="!props.isOpen" aria-label="群组设置" role="dialog" :aria-modal="props.isOpen ? 'true' : undefined">
     <div class="group-settings-view flex flex-col h-full w-full min-w-0 text-primary-text">
       <header class="group-settings-header flex items-center gap-3 shrink-0 px-3 border-b border-[var(--border-color)]">
-        <button type="button" class="group-icon-button" :disabled="isSaving || isDeleting || isLeaving" aria-label="返回并保存群组设置" @click="requestClose">
+        <button type="button" class="group-icon-button" :disabled="(isSaving && !isLeaving) || isDeleting" aria-label="返回并保存群组设置" @click="requestClose">
           <ArrowLeft :size="22" :stroke-width="1.8" aria-hidden="true" />
         </button>
         <h2 class="m-0 text-base font-semibold flex-1">群组设置</h2>
-        <span v-if="isSaving || isLeaving" role="status" class="text-xs text-[var(--secondary-text)]">保存中…</span>
       </header>
 
       <SettingsCanvas viewport>
@@ -758,15 +758,15 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
         <div v-if="saveError" role="alert" class="flex flex-col gap-2">
           <p class="m-0 text-sm text-red-500">{{ saveError }}</p>
           <div class="flex gap-4">
-            <button type="button" class="group-text-button" :disabled="disabled" @click="saveChanges">重试保存</button>
-            <button type="button" class="group-text-button" :disabled="disabled" @click="discardAndClose">放弃修改并返回</button>
+            <button type="button" class="group-text-button" :disabled="controlsDisabled" @click="saveChanges">重试保存</button>
+            <button type="button" class="group-text-button" :disabled="controlsDisabled" @click="discardAndClose">放弃修改并返回</button>
           </div>
         </div>
 
         <template v-if="groupConfig">
           <!-- 1. 紧凑群身份横幅 -->
           <section class="group-identity-banner" aria-label="基础信息">
-            <button type="button" class="group-avatar-button" :disabled="disabled || isPickingAvatar" aria-label="更换群组头像" @click="triggerFileInput">
+            <button type="button" class="group-avatar-button" :disabled="controlsDisabled || isPickingAvatar" aria-label="更换群组头像" @click="triggerFileInput">
               <VcpAvatar owner-type="group" :owner-id="props.id" :fallback-name="groupConfig.name"
                 size="w-14 h-14" rounded="rounded-full" :dominant-color="groupConfig.avatarCalculatedColor" />
             </button>
@@ -776,7 +776,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                 v-if="!isEditingName"
                 type="button"
                 class="group-name-display"
-                :disabled="disabled"
+                :disabled="controlsDisabled"
                 aria-label="编辑群组名称"
                 @click="startEditingName"
               >
@@ -790,7 +790,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                 v-model="groupConfig.name"
                 type="text"
                 placeholder="填写群组名称"
-                :disabled="disabled"
+                :disabled="controlsDisabled"
                 class="group-name-inline-input"
                 @blur="finishEditingName"
                 @keydown.enter.prevent="($event.currentTarget as HTMLInputElement).blur()"
@@ -814,7 +814,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                 role="radio"
                 :aria-checked="effectiveMode === option.value"
                 :aria-label="option.label"
-                :disabled="disabled"
+                :disabled="controlsDisabled"
                 class="group-mode-pill"
                 :class="{ 'is-active': effectiveMode === option.value }"
                 @click="selectMode(option.value)"
@@ -828,7 +828,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
           <!-- 3. 随模式变形的合一成员席位 -->
           <SettingsSection index="02" title="群组成员" :description="rosterHint">
             <template #action>
-              <button type="button" class="group-roster-action-btn" :disabled="disabled" aria-label="增减成员" @click="openRosterSheet">
+              <button type="button" class="group-roster-action-btn" :disabled="controlsDisabled" aria-label="增减成员" @click="openRosterSheet">
                 <Plus :size="14" aria-hidden="true" />
                 <span>增减成员</span>
               </button>
@@ -842,7 +842,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                 <button
                   type="button"
                   class="group-member-main"
-                  :disabled="disabled"
+                  :disabled="controlsDisabled"
                   :aria-label="`配置 ${agent.name}`"
                   @click="openMemberSheet(agent.id)"
                 >
@@ -869,27 +869,27 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                 </button>
 
                 <div v-if="effectiveMode === 'sequential'" class="flex items-center gap-0.5 shrink-0">
-                  <button type="button" class="group-icon-button" :disabled="disabled || index === 0" :aria-label="`上移 ${agent.name}`" @click="moveMember(index, -1)">
+                  <button type="button" class="group-icon-button" :disabled="controlsDisabled || index === 0" :aria-label="`上移 ${agent.name}`" @click="moveMember(index, -1)">
                     <ArrowUp :size="18" aria-hidden="true" />
                   </button>
-                  <button type="button" class="group-icon-button" :disabled="disabled || index === orderedMembers.length - 1" :aria-label="`下移 ${agent.name}`" @click="moveMember(index, 1)">
+                  <button type="button" class="group-icon-button" :disabled="controlsDisabled || index === orderedMembers.length - 1" :aria-label="`下移 ${agent.name}`" @click="moveMember(index, 1)">
                     <ArrowDown :size="18" aria-hidden="true" />
                   </button>
                 </div>
-                <button v-else type="button" class="group-member-config-btn font-mono" :disabled="disabled" @click="openMemberSheet(agent.id)">
+                <button v-else type="button" class="group-member-config-btn font-mono" :disabled="controlsDisabled" @click="openMemberSheet(agent.id)">
                   配置 ›
                 </button>
               </div>
             </div>
 
-            <button v-else type="button" class="group-empty-roster-btn" :disabled="disabled" @click="openRosterSheet">
+            <button v-else type="button" class="group-empty-roster-btn" :disabled="controlsDisabled" @click="openRosterSheet">
               {{ availableMembers.length ? '暂无入群成员 · 点击「+ 增减成员」按顺序添加助手' : '暂无可用助手，请先创建助手再加入群组' }}
             </button>
 
             <!-- 模式专属内联扩展区 -->
             <div v-if="effectiveMode === 'naturerandom'" class="group-mode-extension">
               <SettingsRow title="标签匹配" :value="tagModeOptions.find(option => option.value === groupConfig?.tagMatchMode)?.label"
-                description="自然模式减少引用历史消息造成的重复回应。" clickable :disabled="disabled" aria-haspopup="dialog" @click="openTagSelection" />
+                description="自然模式减少引用历史消息造成的重复回应。" clickable :disabled="controlsDisabled" aria-haspopup="dialog" @click="openTagSelection" />
             </div>
 
             <div v-else-if="effectiveMode === 'jev'" class="group-mode-extension flex flex-col gap-3">
@@ -901,12 +901,12 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                   :description="field.description"
                   :value="formatJevNumericValue(field, groupConfig.modeSettings.jev[field.key])"
                   clickable
-                  :disabled="disabled"
+                  :disabled="controlsDisabled"
                   aria-haspopup="dialog"
                   @click="openJevNumericPrompt(field, $event)"
                 />
                 <div class="group-prompt-collapse">
-                  <button type="button" class="group-prompt-trigger" :disabled="disabled" :aria-expanded="openPrompts.jevNavigator" @click="togglePromptSection('jevNavigator')">
+                  <button type="button" class="group-prompt-trigger" :disabled="controlsDisabled" :aria-expanded="openPrompts.jevNavigator" @click="togglePromptSection('jevNavigator')">
                     <div class="min-w-0 flex-1 pr-3">
                       <div class="text-sm font-medium text-primary-text">讨论规则</div>
                       <div class="text-xs text-[var(--secondary-text)] truncate mt-0.5">
@@ -919,12 +919,12 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                     </span>
                   </button>
                   <div v-if="openPrompts.jevNavigator" class="pt-2 pb-1">
-                    <GroupSettingsTextArea v-model="groupConfig.modeSettings.jev.navigatorPrompt" label="讨论规则" hide-label :disabled="disabled" :rows="5"
+                    <GroupSettingsTextArea v-model="groupConfig.modeSettings.jev.navigatorPrompt" label="讨论规则" hide-label :disabled="controlsDisabled" :rows="5"
                       description="决定谁发言、何时结束。留空使用默认规则。" />
                   </div>
                 </div>
               </div>
-              <SettingsDisclosure title="高级设置" description="发言门槛与参考消息范围" :disabled="disabled">
+              <SettingsDisclosure title="高级设置" description="发言门槛与参考消息范围" :disabled="controlsDisabled">
                 <SettingsRow
                   v-for="field in jevNumericFields.slice(2)"
                   :key="field.key"
@@ -932,7 +932,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                   :description="field.description"
                   :value="formatJevNumericValue(field, groupConfig.modeSettings.jev[field.key])"
                   clickable
-                  :disabled="disabled"
+                  :disabled="controlsDisabled"
                   aria-haspopup="dialog"
                   @click="openJevNumericPrompt(field, $event)"
                 />
@@ -952,7 +952,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                     <button
                       type="button"
                       class="group-inline-value-chip font-mono"
-                      :disabled="disabled"
+                      :disabled="controlsDisabled"
                       aria-label="选择群组统一模型"
                       aria-haspopup="dialog"
                       @click="showModelSelector = true"
@@ -964,7 +964,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                   </div>
                 </div>
                 <div class="shrink-0 pt-0.5">
-                  <SettingsSwitch v-model="groupConfig.useUnifiedModel" :disabled="disabled" aria-label="启用群组统一模型" />
+                  <SettingsSwitch v-model="groupConfig.useUnifiedModel" :disabled="controlsDisabled" aria-label="启用群组统一模型" />
                 </div>
               </div>
 
@@ -976,7 +976,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                     <button
                       type="button"
                       class="group-inline-value-chip font-mono"
-                      :disabled="disabled"
+                      :disabled="controlsDisabled"
                       aria-label="回复参考消息数"
                       aria-haspopup="dialog"
                       @click="openContextWindowPrompt"
@@ -988,12 +988,12 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                   </div>
                 </div>
                 <div class="shrink-0 pt-0.5">
-                  <SettingsSwitch v-model="groupConfig.enableContextMessageWindow" :disabled="disabled" aria-label="限制参考消息" />
+                  <SettingsSwitch v-model="groupConfig.enableContextMessageWindow" :disabled="controlsDisabled" aria-label="限制参考消息" />
                 </div>
               </div>
 
               <div class="group-prompt-collapse">
-                <button type="button" class="group-prompt-trigger" :disabled="disabled" :aria-expanded="openPrompts.groupPrompt" @click="togglePromptSection('groupPrompt')">
+                <button type="button" class="group-prompt-trigger" :disabled="controlsDisabled" :aria-expanded="openPrompts.groupPrompt" @click="togglePromptSection('groupPrompt')">
                   <div class="min-w-0 flex-1 pr-3">
                     <div class="text-sm font-medium text-primary-text">群组提示词</div>
                     <div class="text-xs text-[var(--secondary-text)] truncate mt-0.5">
@@ -1006,12 +1006,12 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                   </span>
                 </button>
                 <div v-if="openPrompts.groupPrompt" class="pt-2 pb-1">
-                  <GroupSettingsTextArea v-model="groupConfig.groupPrompt" label="群组提示词" hide-label placeholder="群组背景与整体对话要求" :disabled="disabled" />
+                  <GroupSettingsTextArea v-model="groupConfig.groupPrompt" label="群组提示词" hide-label placeholder="群组背景与整体对话要求" :disabled="controlsDisabled" />
                 </div>
               </div>
 
               <div class="group-prompt-collapse">
-                <button type="button" class="group-prompt-trigger" :disabled="disabled" :aria-expanded="openPrompts.invitePrompt" @click="togglePromptSection('invitePrompt')">
+                <button type="button" class="group-prompt-trigger" :disabled="controlsDisabled" :aria-expanded="openPrompts.invitePrompt" @click="togglePromptSection('invitePrompt')">
                   <div class="min-w-0 flex-1 pr-3">
                     <div class="text-sm font-medium text-primary-text">邀请提示词</div>
                     <div class="text-xs text-[var(--secondary-text)] font-mono truncate mt-0.5">
@@ -1025,7 +1025,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                 </button>
                 <div v-if="openPrompts.invitePrompt" class="pt-2 pb-1">
                   <GroupSettingsTextArea v-model="groupConfig.invitePrompt" label="邀请提示词" hide-label placeholder="轮到成员发言时发送的提示语"
-                    description="{{VCPChatAgentName}} 代表成员名字" :disabled="disabled" :rows="3" />
+                    description="{{VCPChatAgentName}} 代表成员名字" :disabled="controlsDisabled" :rows="3" />
                 </div>
               </div>
             </div>
@@ -1033,7 +1033,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
 
           <div class="settings-canvas-divider-block">
             <SettingsRow title="删除此群组" :description="deleteBlockReason ?? undefined" clickable danger
-              :disabled="disabled || deleteBlockReason !== null" @click="handleDelete" />
+              :disabled="controlsDisabled || deleteBlockReason !== null" @click="handleDelete" />
           </div>
         </template>
       </SettingsCanvas>
@@ -1075,7 +1075,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
 
             <div class="group-sheet-body vcp-scrollable">
               <label v-for="agent in filteredAvailableMembers" :key="agent.id" class="group-sheet-member-row">
-                <input type="checkbox" :checked="isMember(agent.id)" :disabled="disabled" class="w-5 h-5 shrink-0 accent-blue-500" @change="toggleMember(agent.id)" />
+                <input type="checkbox" :checked="isMember(agent.id)" :disabled="controlsDisabled" class="w-5 h-5 shrink-0 accent-blue-500" @change="toggleMember(agent.id)" />
                 <VcpAvatar owner-type="agent" :owner-id="agent.id" :fallback-name="agent.name" size="w-8 h-8" rounded="rounded-full" />
                 <div class="flex-1 min-w-0">
                   <div class="text-sm font-medium truncate" :class="{ 'font-mono': !agent.available }">{{ agent.name }}</div>
@@ -1133,21 +1133,21 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
                 :model-value="groupConfig.memberTags[activeMember.id] ?? ''"
                 :label="`${activeMember.name} 的触发标签`"
                 placeholder="多个标签用逗号分隔"
-                :disabled="disabled"
+                :disabled="controlsDisabled"
                 @update:model-value="groupConfig.memberTags[activeMember.id] = $event"
               />
               <GroupSettingsTextArea
                 :model-value="groupConfig.modeSettings.jev.memberStyles[activeMember.id] ?? ''"
                 :label="`${activeMember.name} 的发言风格`"
                 :rows="3"
-                :disabled="disabled"
+                :disabled="controlsDisabled"
                 placeholder="例如：熟悉技术问题，适合补充细节。"
                 description="JEV 智能群聊中，决定该成员适合回应的话题与时机。"
                 @update:model-value="groupConfig.modeSettings.jev.memberStyles[activeMember.id] = $event"
               />
 
               <div class="group-sheet-footer">
-                <button type="button" class="group-remove-member-btn" :disabled="disabled" @click="toggleMember(activeMember.id)">
+                <button type="button" class="group-remove-member-btn" :disabled="controlsDisabled" @click="toggleMember(activeMember.id)">
                   移出本群
                 </button>
               </div>

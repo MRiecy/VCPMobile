@@ -14,6 +14,7 @@ export function useSystemNotificationPermission() {
   const lifecycle = useAppLifecycleStore();
   const permission = shallowRef<NotificationPermission | null>(null);
   const busy = ref(false);
+  const acting = ref(false);
   const openingSettings = ref(false);
   const error = ref('');
   let pending: Promise<void> | null = null;
@@ -22,6 +23,7 @@ export function useSystemNotificationPermission() {
   let refreshAfterPending = false;
 
   const allowed = computed(() => permission.value !== null && isNotificationAuthorized(permission.value));
+  const actionBusy = computed(() => openingSettings.value || (busy.value && (acting.value || permission.value === null)));
   const description = computed(() => {
     if (error.value) return error.value;
     switch (permission.value?.authorization) {
@@ -35,7 +37,7 @@ export function useSystemNotificationPermission() {
     }
   });
   const actionLabel = computed(() => {
-    if (busy.value || openingSettings.value) return '处理中…';
+    if (actionBusy.value) return '处理中…';
     if (error.value || !permission.value || permission.value.authorization === 'unknown') return '重新读取';
     return permission.value.authorization === 'notDetermined' ? '开启通知' : '系统设置';
   });
@@ -87,12 +89,17 @@ export function useSystemNotificationPermission() {
 
   const act = async () => {
     if (disposed || busy.value || openingSettings.value) return;
-    if (error.value || !permission.value || permission.value.authorization === 'unknown') {
-      await refresh();
-    } else if (permission.value.authorization === 'notDetermined') {
-      await request();
-    } else {
-      await openSettings();
+    acting.value = true;
+    try {
+      if (error.value || !permission.value || permission.value.authorization === 'unknown') {
+        await refresh();
+      } else if (permission.value.authorization === 'notDetermined') {
+        await request();
+      } else {
+        await openSettings();
+      }
+    } finally {
+      acting.value = false;
     }
   };
 
@@ -112,5 +119,5 @@ export function useSystemNotificationPermission() {
     document.removeEventListener('visibilitychange', onVisible);
   });
 
-  return { permission, allowed, busy, openingSettings, error, description, actionLabel, refresh, act };
+  return { permission, allowed, busy, actionBusy, openingSettings, error, description, actionLabel, refresh, act };
 }

@@ -18,10 +18,10 @@ const settingsStore = useSettingsStore();
 const { session, loading, error, reload } = useSettingsPageSession(CONNECTION_FIELDS, () => props.active);
 const { draft, leaving } = session;
 const actionBusy = ref(false);
-const disabled = computed(() => !props.active || leaving.value || actionBusy.value);
+const disabled = computed(() => !props.active || leaving.value);
 
 const edit = (patch: Partial<ConnectionFields>) => {
-  if (disabled.value) return;
+  if (disabled.value || actionBusy.value) return;
   for (const key of CONNECTION_FIELDS) {
     const value = patch[key];
     if (value !== undefined) session.edit(key, value);
@@ -30,7 +30,7 @@ const edit = (patch: Partial<ConnectionFields>) => {
 
 // Freeze only until the confirmed snapshot has been captured, not throughout file/network IO.
 const commitForAction = async (): Promise<SettingsSaveResult> => {
-  if (disabled.value) return { ok: false, error: '设置页面当前不可操作' };
+  if (disabled.value || actionBusy.value) return { ok: false, error: '设置页面当前不可操作' };
   actionBusy.value = true;
   try {
     const result = await session.save();
@@ -42,7 +42,7 @@ const commitForAction = async (): Promise<SettingsSaveResult> => {
 };
 
 const applyImport = async (backup: ParsedConfigBackup): Promise<BackupImportResult> => {
-  if (disabled.value) throw new Error('设置页面当前不可操作');
+  if (disabled.value || actionBusy.value) throw new Error('设置页面当前不可操作');
   actionBusy.value = true;
   try {
     const settled = await session.settlePending();
@@ -81,7 +81,7 @@ defineExpose({
 </script>
 
 <template>
-  <div class="flex flex-col gap-6">
+  <div class="flex flex-col gap-6" :class="{ 'settings-page--leaving': leaving }" :inert="disabled || actionBusy">
     <p v-if="error" role="alert" class="text-sm text-red-500 break-words">
       {{ error }}
       <button v-if="!draft" type="button" class="ml-2 underline" :disabled="loading" @click="reload">重试</button>
@@ -98,6 +98,10 @@ defineExpose({
       </SettingsSection>
     </template>
     <p v-else-if="loading" class="text-sm opacity-60">正在加载设置...</p>
-    <p v-if="leaving" role="status" class="text-xs opacity-60">正在保存设置...</p>
   </div>
 </template>
+
+<style scoped>
+.settings-page--leaving :deep(.settings-field-input:disabled),
+.settings-page--leaving :deep(.settings-button:disabled:not(.opacity-60):not(:has(.animate-spin))) { opacity: 1; }
+</style>
