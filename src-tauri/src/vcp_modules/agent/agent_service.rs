@@ -79,17 +79,7 @@ pub fn create_default_config(agent_id: &str) -> AgentConfig {
     AgentConfig {
         id: agent_id.to_string(),
         name: "New Agent".to_string(),
-        system_prompt: "".to_string(),
-        mobile_system_prompt: "".to_string(),
-        model: "gemini-2.5-flash".to_string(),
-        temperature: 1.0,
-        context_token_limit: 1000000,
-        max_output_tokens: 64000,
-        stream_output: true,
-        use_temperature: false,
-        voice: Default::default(),
-        avatar_calculated_color: None,
-        topics: vec![],
+        ..AgentConfig::default()
     }
 }
 
@@ -131,9 +121,12 @@ async fn read_agent_config_locked<R: Runtime>(
     if let Some(cached) = state.caches.get(agent_id) {
         return Ok(cached.value().clone());
     }
-    let cache_generation = state.current_cache_generation();
-
     let db_state = app_handle.state::<DbState>();
+    let repair_app = app_handle.clone();
+    agent_repository::normalize_agent_configs(&db_state, Some(agent_id), move || {
+        repair_app.state::<AgentConfigState>().invalidate_cache();
+    }).await?;
+    let cache_generation = state.current_cache_generation();
     let pool = &db_state.pool;
 
     let agent_row = sqlx::query(
@@ -149,8 +142,6 @@ async fn read_agent_config_locked<R: Runtime>(
 
     if let Some(row) = agent_row {
         use sqlx::Row;
-        let avatar_calculated_color: Option<String> = row.get("dominant_color");
-
         let topic_rows = sqlx::query(
             "SELECT topic_id, title, created_at, locked, unread, unread_count, msg_count 
              FROM topics WHERE owner_type = 'agent' AND owner_id = ? AND deleted_at IS NULL ORDER BY updated_at DESC"
@@ -175,21 +166,8 @@ async fn read_agent_config_locked<R: Runtime>(
             });
         }
 
-        let config = AgentConfig {
-            id: agent_id.to_string(),
-            name: row.get("name"),
-            system_prompt: row.get("system_prompt"),
-            mobile_system_prompt: row.get("mobile_system_prompt"),
-            model: row.get("model"),
-            temperature: row.get("temperature"),
-            context_token_limit: row.get("context_token_limit"),
-            max_output_tokens: row.get("max_output_tokens"),
-            stream_output: row.get::<i32, _>("stream_output") != 0,
-            use_temperature: row.get::<i32, _>("use_temperature") != 0,
-            voice: agent_repository::decode_voice_config(row.get("voice_config"))?,
-            avatar_calculated_color,
-            topics,
-        };
+        let mut config = agent_repository::decode_agent_row(&row, agent_id)?.config;
+        config.topics = topics;
 
         state.insert_cache_if_current(agent_id.to_string(), config.clone(), cache_generation);
         return Ok(config);
@@ -233,6 +211,10 @@ pub async fn get_agents(
 ) -> Result<Vec<AgentConfig>, String> {
     let start_total = std::time::Instant::now();
     let db_state = app_handle.state::<DbState>();
+    let repair_app = app_handle.clone();
+    agent_repository::normalize_agent_configs(&db_state, None, move || {
+        repair_app.state::<AgentConfigState>().invalidate_cache();
+    }).await?;
     let pool = &db_state.pool;
 
     let start_agents = std::time::Instant::now();
@@ -261,24 +243,8 @@ pub async fn get_agents(
     let mut agents = Vec::new();
     for row in agent_rows {
         use sqlx::Row;
-        let agent_id: String = row.get("agent_id");
-        let avatar_calculated_color: Option<String> = row.get("dominant_color");
-
-        let config = AgentConfig {
-            id: agent_id.clone(),
-            name: row.get("name"),
-            system_prompt: row.get("system_prompt"),
-            mobile_system_prompt: row.get("mobile_system_prompt"),
-            model: row.get("model"),
-            temperature: row.get("temperature"),
-            context_token_limit: row.get("context_token_limit"),
-            max_output_tokens: row.get("max_output_tokens"),
-            stream_output: row.get::<i32, _>("stream_output") != 0,
-            use_temperature: row.get::<i32, _>("use_temperature") != 0,
-            voice: agent_repository::decode_voice_config(row.get("voice_config"))?,
-            avatar_calculated_color,
-            topics: vec![], // 优化：不加载 topics 列表，改由前端点击时流式按需懒加载
-        };
+        let agent_id: String = row.try_get("agent_id").map_err(|error| error.to_string())?;
+        let config = agent_repository::decode_agent_row(&row, &agent_id)?.config;
 
         agents.push(config);
     }
@@ -545,14 +511,6 @@ pub async fn create_agent(
         name: name.clone(),
         system_prompt: format!("你是 {}。", name),
         mobile_system_prompt: format!("你是 {}。", name),
-        model: "gemini-2.5-flash".to_string(),
-        temperature: 0.7,
-        context_token_limit: 1000000,
-        max_output_tokens: 60000,
-        stream_output: true,
-        use_temperature: false,
-        voice: Default::default(),
-        avatar_calculated_color: None,
         topics: vec![Topic {
             id: default_topic_id.clone(),
             name: "主要对话".to_string(),
@@ -564,6 +522,7 @@ pub async fn create_agent(
             owner_id: agent_id.clone(),
             owner_type: "agent".to_string(),
         }],
+        ..AgentConfig::default()
     };
 
     log::info!("[AgentService] Creating agent '{}' atomically.", agent_id);
@@ -630,11 +589,19 @@ pub struct AssistantsSnapshot {
 
 #[tauri::command]
 pub async fn get_assistants_snapshot(
+    app_handle: AppHandle,
     _agent_state: State<'_, AgentConfigState>,
     _group_state: State<'_, GroupManagerState>,
     db_state: State<'_, DbState>,
 ) -> Result<AssistantsSnapshot, String> {
-    crate::vcp_modules::group_service::normalize_group_local_settings(&db_state).await?;
+    let repair_app = app_handle.clone();
+    agent_repository::normalize_agent_configs(&db_state, None, move || {
+        repair_app.state::<AgentConfigState>().invalidate_cache();
+    }).await?;
+    let repair_app = app_handle.clone();
+    crate::vcp_modules::group_service::normalize_group_configurations(&db_state, move || {
+        repair_app.state::<GroupManagerState>().invalidate_cache();
+    }).await?;
     build_assistants_snapshot(&db_state.pool).await
 }
 
@@ -657,10 +624,11 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
     let mut agents_list = Vec::new();
     for row in agent_rows {
         use sqlx::Row;
-        let agent_id: String = row.get("agent_id");
-        let avatar_calculated_color: Option<String> = row.get("dominant_color");
-        let model: String = row.get("model");
-        let name: String = row.get("name");
+        let agent_id: String = row.try_get("agent_id").map_err(|error| error.to_string())?;
+        let defaults = AgentConfig::default();
+        let avatar_calculated_color = row.try_get::<Option<String>, _>("dominant_color").ok().flatten();
+        let model = row.try_get::<Option<String>, _>("model").ok().flatten().unwrap_or(defaults.model);
+        let name = row.try_get::<Option<String>, _>("name").ok().flatten().unwrap_or(defaults.name);
 
         agents_list.push(AgentListItem {
             id: agent_id,
@@ -695,8 +663,8 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
     let mut group_members: HashMap<String, Vec<String>> = HashMap::new();
     for mr in member_rows {
         use sqlx::Row;
-        let gid: String = mr.get("group_id");
-        let aid: String = mr.get("agent_id");
+        let gid: String = mr.try_get("group_id").map_err(|error| error.to_string())?;
+        let aid: String = mr.try_get("agent_id").map_err(|error| error.to_string())?;
 
         group_members
             .entry(gid.clone())
@@ -707,11 +675,19 @@ async fn build_assistants_snapshot(pool: &sqlx::SqlitePool) -> Result<Assistants
     let mut groups_list = Vec::new();
     for row in group_rows {
         use sqlx::Row;
-        let group_id: String = row.get("group_id");
-        let avatar_calculated_color: Option<String> = row.get("dominant_color");
-        let name: String = row.get("name");
+        let group_id: String = row.try_get("group_id").map_err(|error| error.to_string())?;
+        let avatar_calculated_color = row.try_get::<Option<String>, _>("dominant_color").ok().flatten();
+        let name = match row.try_get::<Option<String>, _>("name") {
+            Ok(Some(value)) => value,
+            Ok(None) | Err(sqlx::Error::ColumnDecode { .. }) => crate::vcp_modules::group_types::GroupConfig::default().name,
+            Err(error) => return Err(error.to_string()),
+        };
 
-        let settings_json: Option<String> = row.get("settings_json");
+        let settings_json = match row.try_get::<Option<String>, _>("settings_json") {
+            Ok(value) => value,
+            Err(sqlx::Error::ColumnDecode { .. }) => None,
+            Err(error) => return Err(error.to_string()),
+        };
         let local_settings = crate::vcp_modules::group_types::parse_group_local_settings(
             settings_json.as_deref(),
         );

@@ -27,6 +27,25 @@ pub fn domain_fields(domain: ConfigDomain) -> Vec<FieldDescriptor> {
     FIELDS.get(&domain).cloned().unwrap_or_default()
 }
 
+/// Decode stored configuration without letting one unrepresentable JSON number
+/// discard its valid siblings. Object depth follows the current typed defaults;
+/// ordinary leaf decoding stays strict and never coerces a value's type.
+pub(crate) fn parse_config_json(raw: &str, defaults: &Value) -> Value {
+    let Some(defaults) = defaults.as_object() else {
+        return serde_json::from_str(raw).unwrap_or(Value::Null);
+    };
+    let Ok(fields) = serde_json::from_str::<BTreeMap<String, &serde_json::value::RawValue>>(raw) else {
+        return Value::Null;
+    };
+    Value::Object(fields.into_iter().map(|(key, raw)| {
+        let value = match defaults.get(&key) {
+            Some(default) => parse_config_json(raw.get(), default),
+            None => serde_json::from_str(raw.get()).unwrap_or(Value::Null),
+        };
+        (key, value)
+    }).collect())
+}
+
 fn serialized_options<T: Serialize>(values: &[T]) -> Vec<String> {
     values
         .iter()
@@ -452,6 +471,42 @@ pub fn settings_from_domains(domains: &BTreeMap<ConfigDomain, Value>) -> Result<
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn stored_json_number_overflow_defaults_only_the_affected_field() {
+        let defaults = domain_defaults(ConfigDomain::Voice);
+        let raw = parse_config_json(r#"{
+            "connection":{"apiBaseUrl":"https://voice.example/v1","apiKey":"keep-key"},
+            "vad":{"endSilenceMs":1e400,"playbackOnsetMs":100},
+            "asr":{"stream":false,"language":"en"},
+            "tts":{"voice":"Mia"},"guidance":{"rules":"1e400 is literal text"}
+        }"#, &defaults);
+        let voice = normalize_domain(ConfigDomain::Voice, &raw);
+        assert_eq!(voice["vad"]["endSilenceMs"], defaults["vad"]["endSilenceMs"]);
+        assert_eq!(voice["vad"]["playbackOnsetMs"], 100);
+        assert_eq!(voice["asr"]["stream"], false);
+        assert_eq!(voice["asr"]["language"], "en");
+        assert_eq!(voice["connection"]["apiKey"], "keep-key");
+        assert_eq!(voice["tts"]["voice"], "Mia");
+        assert_eq!(voice["guidance"]["rules"], "1e400 is literal text");
+        assert_eq!(parse_config_json(r#"{"asr":{"language":"en"},"vad":broken}"#, &defaults), Value::Null);
+    }
+
+    #[test]
+    fn stored_json_arrays_and_numbers_are_not_coerced() {
+        let defaults = domain_defaults(ConfigDomain::Navigation);
+        let parsed = parse_config_json(r#"{"agentOrder":["a",1e400],"groupOrder":["b","1"]}"#, &defaults);
+        let navigation = normalize_domain(ConfigDomain::Navigation, &parsed);
+        assert_eq!(navigation["agentOrder"], defaults["agentOrder"]);
+        assert_eq!(navigation["groupOrder"], json!(["b", "1"]));
+        let defaults = domain_defaults(ConfigDomain::Jev);
+        for number in ["-1", "1.5", "1000.0", "\"1000\"", "4294967296", "1e400"] {
+            let parsed = parse_config_json(&format!(r#"{{"timeoutMs":{number},"maxRetries":3}}"#), &defaults);
+            let jev = normalize_domain(ConfigDomain::Jev, &parsed);
+            assert_eq!(jev["timeoutMs"], defaults["timeoutMs"], "{number}");
+            assert_eq!(jev["maxRetries"], 3);
+        }
+    }
 
     #[test]
     fn missing_domain_values_default_but_empty_patches_stay_empty() {

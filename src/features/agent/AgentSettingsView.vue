@@ -48,7 +48,7 @@ const createEmptyConfig = (id = ""): AgentConfigDto => ({
   model: "gemini-3-flash-preview",
   temperature: 1.0,
   contextTokenLimit: 1000000,
-  maxOutputTokens: 32000,
+  maxOutputTokens: 64000,
   streamOutput: true,
   useTemperature: false,
   avatarCalculatedColor: null,

@@ -7,7 +7,7 @@
 
 use super::migration::ensure_migrated;
 use super::schema::{
-    domain_defaults, domain_fields, normalize_changes, normalize_domain,
+    domain_defaults, domain_fields, normalize_changes, normalize_domain, parse_config_json,
     set_value_at_path, settings_from_domains, value_at_path,
 };
 use super::types::{
@@ -325,7 +325,11 @@ async fn normalize_records(
 async fn read_records(
     connection: &mut SqliteConnection,
 ) -> Result<BTreeMap<ConfigDomain, DomainRecord>, String> {
-    let rows = sqlx::query("SELECT domain, schema_version, revision, value FROM config_domains")
+    let rows = sqlx::query(
+        "SELECT domain, schema_version, revision, value,
+                typeof(schema_version) AS schema_type, typeof(revision) AS revision_type,
+                typeof(value) AS value_type FROM config_domains",
+    )
         .fetch_all(&mut *connection)
         .await
         .map_err(storage_error)?;
@@ -343,17 +347,39 @@ async fn read_records(
                 .map_err(storage_error)?;
             continue;
         };
-        let version: i64 = row.try_get("schema_version").map_err(storage_error)?;
-        let schema_version = u32::try_from(version).unwrap_or(u32::MAX);
+        // SQLite affinity is not a type constraint. A bad schema marker can be
+        // repaired without discarding otherwise valid configuration values.
+        let schema_version = if row.try_get::<String, _>("schema_type").map_err(storage_error)? == "integer" {
+            let version: i64 = row.try_get("schema_version").map_err(storage_error)?;
+            u32::try_from(version).unwrap_or(0)
+        } else {
+            0
+        };
+        // Revision is an optimistic-concurrency token, not a user preference.
+        // Resetting it to a default could admit an old request with the same token.
+        if row.try_get::<String, _>("revision_type").map_err(storage_error)? != "integer" {
+            return Err(format!("配置领域 {domain} 的版本号类型无效，已保留原记录"));
+        }
+        let revision: i64 = row.try_get("revision").map_err(storage_error)?;
+        if revision < 1 || revision == i64::MAX {
+            return Err(format!("配置领域 {domain} 的版本号无效或已达到上限，已保留原记录"));
+        }
+        let value = if row.try_get::<String, _>("value_type").map_err(storage_error)? == "text" {
+            match row.try_get::<String, _>("value") {
+                Ok(raw) => parse_config_json(&raw, &domain_defaults(domain)),
+                // Invalid UTF-8 is corrupted stored content, not an IO failure.
+                Err(sqlx::Error::ColumnDecode { .. }) => Value::Null,
+                Err(error) => return Err(storage_error(error)),
+            }
+        } else {
+            Value::Null
+        };
         records.insert(
             domain,
             DomainRecord {
                 schema_version,
-                revision: row.try_get("revision").map_err(storage_error)?,
-                value: serde_json::from_str(
-                    &row.try_get::<String, _>("value").map_err(storage_error)?,
-                )
-                .unwrap_or(Value::Null),
+                revision,
+                value,
             },
         );
     }
@@ -708,6 +734,94 @@ mod tests {
         )]).await);
         assert_eq!(after.data.identity.user_name, "新名字");
         assert_eq!(after.data.server, before.data.server);
+    }
+
+    #[tokio::test]
+    async fn non_text_stored_domain_defaults_without_decoding_or_losing_other_domains() {
+        let db = database(None).await;
+        let initial = SettingsState::new().read_snapshot(&db).await.unwrap();
+        let server_before = raw_domain(&db, ConfigDomain::Server).await;
+        // Even valid UTF-8 JSON in a BLOB is the wrong persisted type.
+        sqlx::query("UPDATE config_domains SET value=?,revision=7 WHERE domain='voice'")
+            .bind(br#"{"tts":{"voice":"Mia"}}"#.as_slice())
+            .execute(&db.pool).await.unwrap();
+        let state = SettingsState::new();
+        let repaired = state.read_snapshot(&db).await.unwrap();
+        assert_eq!(repaired.data.voice, Settings::default().voice);
+        assert_eq!(repaired.data.server, initial.data.server);
+        assert_eq!(raw_domain(&db, ConfigDomain::Server).await, server_before);
+        assert_eq!(repaired.domains[&ConfigDomain::Voice].revision, "8");
+        let stored_type: String = sqlx::query_scalar("SELECT typeof(value) FROM config_domains WHERE domain='voice'")
+            .fetch_one(&db.pool).await.unwrap();
+        assert_eq!(stored_type, "text");
+        assert_eq!(SettingsState::new().read_snapshot(&db).await.unwrap(), repaired);
+    }
+
+    #[tokio::test]
+    async fn unreadable_utf8_content_defaults_only_its_domain() {
+        let db = database(None).await;
+        let initial = SettingsState::new().read_snapshot(&db).await.unwrap();
+        sqlx::query("UPDATE config_domains SET value=CAST(x'FF' AS TEXT),revision=7 WHERE domain='voice'")
+            .execute(&db.pool).await.unwrap();
+        let repaired = SettingsState::new().read_snapshot(&db).await.unwrap();
+        assert_eq!(repaired.data.voice, Settings::default().voice);
+        assert_eq!(repaired.data.server, initial.data.server);
+        assert_eq!(repaired.domains[&ConfigDomain::Voice].revision, "8");
+    }
+
+    #[tokio::test]
+    async fn overflowing_json_number_preserves_and_persists_valid_siblings() {
+        let db = database(None).await;
+        SettingsState::new().read_snapshot(&db).await.unwrap();
+        sqlx::query("UPDATE config_domains SET value=?,revision=7 WHERE domain='jev'")
+            .bind(r#"{"timeoutMs":1e400,"maxRetries":3,"openrouter":{"apiUrl":"https://provider.example/v1","apiKey":"keep-key","model":"keep-model"}}"#)
+            .execute(&db.pool).await.unwrap();
+        let repaired = SettingsState::new().read_snapshot(&db).await.unwrap();
+        assert_eq!(repaired.data.jev.timeout_ms, Settings::default().jev.timeout_ms);
+        assert_eq!(repaired.data.jev.max_retries, 3);
+        assert_eq!(repaired.data.jev.openrouter.api_key, "keep-key");
+        assert_eq!(repaired.data.jev.openrouter.model, "keep-model");
+        assert_eq!(repaired.domains[&ConfigDomain::Jev].revision, "8");
+        let stored: Value = serde_json::from_str(&raw_domain(&db, ConfigDomain::Jev).await).unwrap();
+        assert_eq!(stored["timeoutMs"], Settings::default().jev.timeout_ms);
+        assert_eq!(stored["openrouter"]["apiKey"], "keep-key");
+        assert_eq!(SettingsState::new().read_snapshot(&db).await.unwrap(), repaired);
+    }
+
+    #[tokio::test]
+    async fn malformed_schema_markers_repair_without_discarding_valid_values() {
+        for marker in ["1.5", "'bad'", "4294967296"] {
+            let db = database(None).await;
+            SettingsState::new().read_snapshot(&db).await.unwrap();
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE config_domains SET schema_version={marker},value='{{\"userName\":\"Keep\"}}',revision=7 WHERE domain='identity'",
+            ))).execute(&db.pool).await.unwrap();
+            let repaired = SettingsState::new().read_snapshot(&db).await.unwrap();
+            assert_eq!(repaired.data.identity.user_name, "Keep");
+            assert_eq!(repaired.domains[&ConfigDomain::Identity].schema_version, ConfigDomain::Identity.schema_version());
+            assert_eq!(repaired.domains[&ConfigDomain::Identity].revision, "8");
+            assert_eq!(SettingsState::new().read_snapshot(&db).await.unwrap(), repaired);
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_or_exhausted_revisions_are_not_reset_into_reusable_tokens() {
+        for revision in ["1.5", "'bad'", "9223372036854775807"] {
+            let db = database(None).await;
+            SettingsState::new().read_snapshot(&db).await.unwrap();
+            let before = raw_domain(&db, ConfigDomain::Identity).await;
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "UPDATE config_domains SET revision={revision} WHERE domain='identity'",
+            ))).execute(&db.pool).await.unwrap();
+            let original: String = sqlx::query_scalar("SELECT quote(revision) FROM config_domains WHERE domain='identity'")
+                .fetch_one(&db.pool).await.unwrap();
+            let error = SettingsState::new().read_snapshot(&db).await.err().unwrap();
+            assert!(error.contains("版本号"));
+            let after: String = sqlx::query_scalar("SELECT quote(revision) FROM config_domains WHERE domain='identity'")
+                .fetch_one(&db.pool).await.unwrap();
+            assert_eq!(after, original);
+            assert_eq!(raw_domain(&db, ConfigDomain::Identity).await, before);
+        }
     }
 
     #[tokio::test]

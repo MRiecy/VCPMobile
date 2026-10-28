@@ -114,7 +114,7 @@ date: 2026-07-04
 | `context_token_limit` | `i32` | `default_context_limit` (`1000000`) | 上下文 Token 上限 |
 | `max_output_tokens` | `i32` | `default_max_output` (`64000`) | 单次输出最大 Token 数 |
 | `stream_output` | `bool` | `default_true` (`true`) | 是否启用流式输出 |
-| `use_temperature` | `bool` | `default_true` (`true`) | 是否在请求中发送 `temperature` 参数，关闭可兼容不支持温度的模型 |
+| `use_temperature` | `bool` | `default` (`false`) | 是否在请求中发送 `temperature` 参数，默认关闭 |
 | `avatar_calculated_color` | `Option<String>` | `default` (`None`) | 头像主色调（十六进制），由 `avatars` 表派生 |
 | `topics` | `Vec<Topic>` | `default` (空数组) | 该 Agent 下的话题列表 |
 
@@ -130,7 +130,8 @@ pub struct AgentConfig { ... }
 
 - **`rename_all = "camelCase"`**：Rust 侧使用 `system_prompt`，前端 JSON 使用 `systemPrompt`，无需手动映射。
 - **`#[serde(default)]`**：反序列化时若前端缺失某字段，使用类型默认值（对 `String` 为空串，对 `Vec` 为空数组）。
-- **自定义默认值函数**：`default_temperature`、`default_context_limit` 等函数与 `create_default_config`（位于 `agent_service.rs`）中的显式赋值保持同步，确保反序列化默认值与运行时构造默认值一致。
+- **统一构造默认值**：`AgentConfig::default()` 与 serde 共用领域默认函数；`create_default_config` 和新建入口复用该类型默认，仅覆盖名称、ID、提示词与新建话题。
+- **异常存储读取**：`agent_repository` 逐字段恢复类型错误或非法取值；语音坏叶不会重置合法的 `enabled`、模式、音色、流式等邻字段。损坏 JSON 或非文本语音列恢复当前 `AgentVoiceConfig::default()`。修复在写事务中重读后落盘，本机字段修复不推进共享版本；共享字段修复同步更新配置哈希与时间戳。数据库读写失败仍返回错误。
 
 ### 2.3 与 Topic 类型的关系
 
@@ -236,7 +237,7 @@ pub struct AgentConfigState {
 - **`avatars` 表（LEFT JOIN）**：通过 `owner_id = agent_id AND owner_type = 'agent'` 关联，提取 `dominant_color` 映射到 `avatar_calculated_color`
 - **`topics` 表**：读取该 Agent 下全部未删除话题，按 `updated_at DESC` 排序，反序列化为 `Vec<Topic>`
 
-> 注意：`stream_output` 和 `locked`/`unread` 等布尔字段在 SQLite 中以 `INTEGER`（0/1）存储，读取时通过 `!= 0` 转换为 `bool`。
+> Agent 配置布尔字段在 SQLite 中只接受整数 `0/1`，其他值恢复各自类型默认值；话题元数据由话题读取链路管理。
 
 ### 3.4 保存配置（save_agent_config）
 
@@ -396,7 +397,7 @@ let agent_id = format!("{}_{}", base_id, timestamp);
 | `locked` | `true`（默认锁定，不可删除） |
 | `unread` | `false` |
 
-新 Agent 统一使用默认配置构造：`temperature = 0.7`、`max_output_tokens = 60000`，系统提示词为 `"你是 {name}。"`。
+新 Agent 复用 `AgentConfig::default()`：`temperature = 1.0`、`max_output_tokens = 64000`、`use_temperature = false`，系统提示词为 `"你是 {name}。"`。有效的已保存参数不因默认值变化而被覆盖。
 
 **事务边界**：整个创建过程（agents 表插入 + topics 表插入）包裹在单一事务中，失败时自动回滚。
 

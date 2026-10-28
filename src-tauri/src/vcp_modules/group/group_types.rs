@@ -288,9 +288,7 @@ impl<'de> Deserialize<'de> for SequentialModeSettings {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = serde_json::Value::deserialize(deserializer)?;
         let mut settings = Self {
-            speaker_order: value.get("speakerOrder").and_then(serde_json::Value::as_array)
-                .map(|ids| ids.iter().filter_map(serde_json::Value::as_str).map(str::to_owned).collect())
-                .unwrap_or_default(),
+            speaker_order: local_field(&value, "speakerOrder", Self::default().speaker_order),
         };
         settings.normalize();
         Ok(settings)
@@ -383,7 +381,10 @@ impl<'de> Deserialize<'de> for JevModeSettings {
 }
 
 pub fn parse_group_local_settings(raw: Option<&str>) -> GroupLocalSettings {
-    raw.and_then(|raw| serde_json::from_str(raw).ok()).unwrap_or_default()
+    let defaults = serde_json::json!(GroupLocalSettings::default());
+    raw.and_then(|raw| serde_json::from_value(
+        crate::vcp_modules::settings_manager::schema::parse_config_json(raw, &defaults)
+    ).ok()).unwrap_or_default()
 }
 
 /// 群组完整配置结构 (对齐桌面端 config.json)
@@ -431,6 +432,27 @@ pub struct GroupConfig {
     /// 仅用于本机行为与显式备份，IPC 展平沿用模式参数名称。
     #[serde(flatten)]
     pub local_settings: GroupLocalSettings,
+}
+
+impl Default for GroupConfig {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: default_group_name(),
+            avatar_calculated_color: None,
+            members: Vec::new(),
+            mode: default_group_mode(),
+            member_tags: None,
+            group_prompt: None,
+            invite_prompt: None,
+            use_unified_model: false,
+            unified_model: None,
+            topics: Vec::new(),
+            tag_match_mode: default_tag_match_mode(),
+            created_at: 0,
+            local_settings: GroupLocalSettings::default(),
+        }
+    }
 }
 
 impl GroupConfig {
