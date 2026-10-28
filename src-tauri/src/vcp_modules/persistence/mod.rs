@@ -1,4 +1,5 @@
 pub mod db_manager;
+pub(crate) mod agent_repository;
 mod db_write;
 pub mod db_write_queue;
 pub mod message_repository;

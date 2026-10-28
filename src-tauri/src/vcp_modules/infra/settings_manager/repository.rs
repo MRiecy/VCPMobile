@@ -759,9 +759,9 @@ mod tests {
             sqlx::query("UPDATE config_domains SET value=?,revision=7 WHERE domain='voice'")
                 .bind(voice.to_string()).execute(&db.pool).await.unwrap();
             let loaded = SettingsState::new().read_snapshot(&db).await.unwrap();
-            assert_eq!(loaded.data.voice.tts.mode, super::super::VoiceTtsMode::Builtin);
+            assert_eq!(loaded.data.voice.tts.mode, super::super::VoiceTtsMode::None);
             assert_eq!(loaded.domains[&ConfigDomain::Voice].revision, "8");
-            voice["tts"]["mode"] = json!("builtin");
+            voice["tts"]["mode"] = json!("none");
             voice.as_object_mut().unwrap().remove("futureField");
             let stored: Value = serde_json::from_str(&raw_domain(&db, ConfigDomain::Voice).await).unwrap();
             assert_eq!(stored, voice, "normalization preserves valid siblings and removes unknown fields");
@@ -781,12 +781,12 @@ mod tests {
         assert_eq!(selected.data.voice.tts.mode, super::super::VoiceTtsMode::Clone);
         let restored = saved(save(&state, &db, vec![patch(&selected, ConfigDomain::Voice,
             json!({"tts.mode":false}))]).await);
-        assert_eq!(restored.data.voice.tts.mode, super::super::VoiceTtsMode::Builtin);
+        assert_eq!(restored.data.voice.tts.mode, super::super::VoiceTtsMode::None);
         assert_eq!(restored.data.voice.guidance.rules, "保留");
         assert_eq!(restored.data.voice.tts.clone_sample_id, "sample");
         assert_eq!(restored.data.voice.connection.api_key, "voice-key");
         let raw: Value = serde_json::from_str(&raw_domain(&db, ConfigDomain::Voice).await).unwrap();
-        assert_eq!(raw["tts"]["mode"], "builtin");
+        assert_eq!(raw["tts"]["mode"], "none");
     }
 
     #[tokio::test]

@@ -1,97 +1,27 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, ref } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
-import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { Play, Square } from '@lucide/vue';
 import SettingsDisclosure from '../../../components/settings/SettingsDisclosure.vue';
 import VoiceTextArea from './VoiceTextArea.vue';
-import { useVoiceCallStore } from './voiceCallStore';
+import { useVoicePreviewTask } from './useVoicePreviewTask';
 import type { VoiceConfig } from '../../../core/config/generated/config';
 import { cloneConfig } from '../../../core/config/fields';
 
 const props = defineProps<{ settings: VoiceConfig; active: boolean; disabled?: boolean }>();
-const voiceCall = useVoiceCallStore();
 const text = ref('(慵懒)再让我睡五分钟……就五分钟，真的，最后一次。');
-const busy = ref(false);
-const feedback = ref('');
-interface PreviewTask {
-  id: string;
-  submitted: boolean;
-  cancelled: boolean;
-  ready: Promise<void>;
-  stopping?: Promise<void>;
-  unlisten?: UnlistenFn;
-}
-let task: PreviewTask | null = null;
-let mounted = true;
-const unavailable = computed(() => voiceCall.active ? '通话结束后可试听。'
-  : voiceCall.playbackActive ? '请等待当前朗读结束后再试听。' : undefined);
-const canStart = computed(() => props.active && !props.disabled && !voiceCall.active && !voiceCall.playbackActive && !!text.value.trim());
-
-const stop = (): Promise<void> => {
-  const current = task;
-  if (!current) return Promise.resolve();
-  if (current.stopping) return current.stopping;
-  current.cancelled = true;
-  current.unlisten?.();
-  const operation = current.ready.catch(() => undefined).then(async () => {
-    // The start acknowledgement may arrive after Back. Do not leave until that
-    // particular task has also released the native playback slot.
-    if (current.submitted) await invoke('stop_tts', { ttsId: current.id });
-    if (task === current) {
-      task = null;
-      if (mounted) busy.value = false;
-    }
-  }).catch(error => {
-    current.stopping = undefined;
-    if (mounted && props.active) feedback.value = '停止试听失败，请重试。';
-    throw error;
-  });
-  current.stopping = operation;
-  return operation;
-};
+const { busy, feedback, unavailable, canStart: previewAvailable, start, stop } = useVoicePreviewTask(
+  () => props.active, () => !!props.disabled,
+);
+const canStart = computed(() => previewAvailable.value && !!text.value.trim());
 const toggle = async () => {
   if (busy.value) { await stop().catch(() => undefined); return; }
   if (!canStart.value) return;
-  if (task) {
-    try { await stop(); } catch { return; }
-    if (!canStart.value) return;
-  }
-  const current: PreviewTask = {
-    id: `voice-preview-${crypto.randomUUID()}`, submitted: false, cancelled: false,
-    ready: Promise.resolve(),
-  };
-  task = current;
-  busy.value = true;
-  feedback.value = '';
   // Freeze the visible draft before any asynchronous admission.
   const settings = cloneConfig({ connection: props.settings.connection, tts: props.settings.tts });
   const previewText = text.value.trim();
-  current.ready = (async () => {
-    const unlisten = await listen<{ ttsId: string; kind: string; stage: string; message?: string }>('vcp-tts', event => {
-      if (!mounted || current.cancelled || task !== current || event.payload.ttsId !== current.id) return;
-      if (event.payload.kind === 'error' || event.payload.kind === 'stopped') {
-        feedback.value = event.payload.kind === 'error' ? event.payload.message || '试听失败，请检查语音设置后重试。' : '';
-        busy.value = false;
-        current.unlisten?.();
-      }
-    });
-    current.unlisten = unlisten;
-    if (!mounted || current.cancelled || task !== current || !canStart.value) { unlisten(); return; }
-    current.submitted = true;
-    await invoke('preview_tts', { ttsId: current.id, text: previewText, settings });
-  })();
-  try {
-    await current.ready;
-  } catch {
-    if (mounted && !current.cancelled && task === current) {
-      feedback.value = '试听未能开始，请检查连接、音色或参考音频后重试。';
-      await stop().catch(() => undefined);
-    }
-  }
+  await start(ttsId => invoke('preview_tts', { ttsId, text: previewText, settings }));
 };
-watch(() => props.active, active => { if (!active) void stop().catch(() => undefined); }, { flush: 'sync' });
-onBeforeUnmount(() => { mounted = false; void stop().catch(() => undefined); });
 defineExpose({ stop, busy });
 </script>
 

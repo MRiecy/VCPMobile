@@ -109,9 +109,6 @@ fn settings_committed<R: Runtime>(
             ));
         }
     }
-    tauri::async_runtime::spawn(async move {
-        release_replaced_voice_sample(&app, &old, &snapshot.data).await;
-    });
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,28 +137,6 @@ fn classify_runtime_settings_changes(
     RuntimeSettingsChanges {
         vcp_log_changed,
         distributed_reconcile_required,
-    }
-}
-
-async fn release_replaced_voice_sample<R: Runtime>(
-    app: &AppHandle<R>,
-    old: &Settings,
-    new: &Settings,
-) {
-    if old.voice.tts.clone_sample_id.is_empty()
-        || old.voice.tts.clone_sample_id == new.voice.tts.clone_sample_id
-    {
-        return;
-    }
-    // Commit already succeeded. Cleanup must not turn a successful save into a
-    // reported failure, and discard rechecks the latest selection under its lock.
-    if let Err(error) = crate::vcp_modules::chat::voice_service::discard_voice_clone_sample(
-        app.clone(),
-        old.voice.tts.clone_sample_id.clone(),
-    )
-    .await
-    {
-        log::warn!("[VoiceSample] Replaced reference cleanup failed: {error}");
     }
 }
 

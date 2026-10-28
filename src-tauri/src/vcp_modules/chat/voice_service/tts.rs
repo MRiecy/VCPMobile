@@ -1,6 +1,6 @@
 //! Independent narration job. There is no microphone or chat cancellation parent.
 use super::{
-    audio_codec::PCM_PACKET_BYTES,
+    audio_codec::{self, PCM_PACKET_BYTES},
     cache::{self, TtsCache},
     chat_feed::{ChatFeed, MessageSpeech, SpeechPiece},
     network, pipeline::{self, PacketConsumer, SegmentBuffer, SegmentSource}, samples,
@@ -12,7 +12,7 @@ use crate::vcp_modules::{
         Settings, VoiceConfig, VoiceConnectionConfig, VoiceTtsConfig,
         VoiceTtsMode,
     },
-    topic_types::TopicKey,
+    topic_types::{MessageKey, TopicKey},
     vcp_client::StreamEvent,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -50,6 +50,7 @@ enum NarrationInput {
     Chat(ChatFeed),
     Bubble(MessageSpeech),
     Preview(ReplyBuffer),
+    Sample(Option<Vec<u8>>),
 }
 
 impl NarrationInput {
@@ -80,6 +81,13 @@ pub struct BubbleSource {
 }
 
 impl BubbleSource {
+    async fn author<R: Runtime>(&self, app: &AppHandle<R>) -> Result<Option<String>, String> {
+        let db = app.state::<crate::vcp_modules::db_manager::DbState>();
+        crate::vcp_modules::persistence::message_repository::read_narration_author(
+            &db.pool, &MessageKey::new(self.topic.clone(), self.message_id.clone()),
+        ).await
+    }
+
     async fn read<R: Runtime>(&self, app: &AppHandle<R>) -> Result<String, String> {
         crate::vcp_modules::message_service::fetch_raw_message_content(
             app.clone(),
@@ -96,6 +104,7 @@ enum NarrationKind {
     Chat,
     Bubble(BubbleSource),
     Preview,
+    SamplePreview,
 }
 
 impl NarrationKind {
@@ -104,7 +113,7 @@ impl NarrationKind {
             Self::Bubble(_) if call_active => {
                 Err("语音通话进行中，请先结束通话再单独朗读气泡。".into())
             }
-            Self::Preview if call_active => Err("通话结束后可试听声音。".into()),
+            Self::Preview | Self::SamplePreview if call_active => Err("通话结束后可试听声音。".into()),
             _ => Ok(()),
         }
     }
@@ -193,23 +202,65 @@ pub(super) struct PreparedNarration {
     sample: Result<Option<samples::PreparedCloneSample>, String>,
 }
 
-/// Sample retirement and the settings read share the sample lock. A settings
-/// change cannot delete the sample selected by this immutable reply snapshot.
+/// Freeze the connection, guidance and inherited defaults once per reply.
+/// The actual speaker selects and leases audio only when their message is read.
 pub(super) async fn prepare_narration<R: Runtime>(
     app: &AppHandle<R>,
     cancel: &CancellationToken,
 ) -> Result<PreparedNarration, String> {
-    let snapshot = samples::snapshot_voice_settings(app, cancel).await?;
+    let settings = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(network::CANCELLED.into()),
+        settings = crate::vcp_modules::settings_manager::read_config(app.clone(), app.state()) => settings?,
+    };
     Ok(PreparedNarration {
-        policy: Arc::new(VoiceReplyPolicy::from_settings(&snapshot.settings)),
-        sample: snapshot.sample,
+        policy: Arc::new(VoiceReplyPolicy::from_settings(&settings)),
+        sample: Ok(None),
     })
+}
+
+struct PreparedVoice {
+    config: VoiceServiceConfig,
+    sample: Option<samples::PreparedCloneSample>,
+}
+
+async fn prepare_speaker<R: Runtime>(
+    app: &AppHandle<R>,
+    defaults: &VoiceServiceConfig,
+    agent_id: Option<&str>,
+    cancel: &CancellationToken,
+) -> Result<PreparedVoice, String> {
+    let mut config = if let Some(agent_id) = agent_id {
+        let state = app.state::<crate::vcp_modules::agent_service::AgentConfigState>();
+        let agent = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(network::CANCELLED.into()),
+            agent = crate::vcp_modules::agent_service::read_agent_config_internal(app, &state, agent_id, Some(false)) => agent?,
+        };
+        defaults.with_agent_voice(&agent.voice)
+    } else {
+        defaults.clone()
+    };
+    let sample = if config.configured() && config.tts_mode == VoiceTtsMode::Clone {
+        let sample = if config.clone_sample_id.is_empty() { None } else {
+            samples::prepare_clone_sample(app, &config.clone_sample_id, cancel).await?
+        };
+        if sample.is_none() { config.tts_mode = VoiceTtsMode::None; }
+        sample
+    } else {
+        None
+    };
+    // None is a resolved selection. The consumer decides whether that means a
+    // skipped group member or an explicit error for independent narration.
+    if config.tts_mode != VoiceTtsMode::None { config.validate_tts()?; }
+    Ok(PreparedVoice { config, sample })
 }
 
 enum NarrationSource {
     Stored,
     Prepared(PreparedNarration),
     Preview(Arc<VoiceReplyPolicy>),
+    Sample(String),
 }
 
 #[derive(Deserialize)]
@@ -261,6 +312,25 @@ pub async fn preview_tts<R: Runtime>(
     if let Err(error) = submit_preview_text(&app, &tts_id, text.to_string()) {
         let _ = stop_tts(app, tts_id).await;
         return Err(error);
+    }
+    Ok(started)
+}
+
+#[tauri::command]
+pub async fn preview_voice_clone_sample<R: Runtime>(
+    app: AppHandle<R>,
+    tts_id: String,
+    sample_id: String,
+) -> Result<VoiceServiceStart, String> {
+    let started = start_narration(
+        app.clone(), tts_id.clone(), None, NarrationSource::Sample(sample_id), None,
+    ).await?;
+    if super::call::is_active(&app)? {
+        stop_tts(app, tts_id).await?;
+        return Err("通话结束后可试听声音。".into());
+    }
+    if let Some(narration) = job(&app, &tts_id) {
+        wake(&app, &narration);
     }
     Ok(started)
 }
@@ -489,7 +559,9 @@ async fn start_narration<R: Runtime>(
     {
         return Err("朗读来源标识无效。".into());
     }
-    let kind = if matches!(&source, NarrationSource::Preview(_)) {
+    let kind = if matches!(&source, NarrationSource::Sample(_)) {
+        NarrationKind::SamplePreview
+    } else if matches!(&source, NarrationSource::Preview(_)) {
         NarrationKind::Preview
     } else if origin_user_message_id.is_some() {
         NarrationKind::Chat
@@ -511,23 +583,58 @@ async fn start_narration<R: Runtime>(
     let work = origin_user_message_id
         .is_none()
         .then(|| super::call::WorkLease::acquire(&app));
+    let mut sample_audio = None;
     let prepared = match source {
-        NarrationSource::Stored => prepare_narration(&app, &cancel).await,
+        NarrationSource::Stored => {
+            let prepared = prepare_narration(&app, &cancel).await;
+            match (prepared, &kind) {
+                (Ok(mut prepared), NarrationKind::Bubble(source)) => {
+                    let voice = async {
+                        let agent_id = source.author(&app).await?;
+                        prepare_speaker(&app, &prepared.policy.config, agent_id.as_deref(), &cancel).await
+                    }.await;
+                    match voice {
+                        Ok(voice) => {
+                            Arc::make_mut(&mut prepared.policy).config = voice.config;
+                            prepared.sample = Ok(voice.sample);
+                            Ok(prepared)
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                (prepared, _) => prepared,
+            }
+        }
         NarrationSource::Prepared(prepared) => Ok(prepared),
         NarrationSource::Preview(policy) => {
             let sample =
                 if policy.config.tts_mode == VoiceTtsMode::Clone && policy.config.configured() {
                     samples::prepare_clone_sample(&app, &policy.config.clone_sample_id, &cancel)
                         .await
-                        .map(Some)
+                        .and_then(|sample| sample.map(Some).ok_or_else(|| "当前音色已不存在，请重新选择朗读音色。".into()))
                 } else {
                     Ok(None)
                 };
             Ok(PreparedNarration { policy, sample })
         }
+        NarrationSource::Sample(sample_id) => {
+            match samples::read_clone_sample_audio(&app, &sample_id, &cancel).await {
+                Ok(Some((_, bytes))) => {
+                    sample_audio = Some(bytes);
+                    Ok(PreparedNarration {
+                        policy: Arc::new(VoiceReplyPolicy::from_settings(&Settings::default())),
+                        sample: Ok(None),
+                    })
+                }
+                Ok(None) => Err("该声音模型已不存在，请重新选择。".into()),
+                Err(error) => Err(error),
+            }
+        }
     };
     let prepared = prepared.and_then(|prepared| {
-        prepared.policy.config.validate_tts()?;
+        if !matches!(&kind, NarrationKind::Chat | NarrationKind::SamplePreview) {
+            prepared.policy.config.validate_tts()?;
+        }
         kind.validate_admission(super::call::is_active(&app)?)?;
         let sample = prepared.sample?;
         Ok((prepared.policy, sample))
@@ -547,7 +654,7 @@ async fn start_narration<R: Runtime>(
         }
     };
     let config = policy.config.clone();
-    let configured = config.configured();
+    let configured = matches!(&kind, NarrationKind::SamplePreview) || config.configured();
     if !configured {
         let state = app.state::<TtsServiceState>();
         let mut registry = state.0.lock().map_err(|error| error.to_string())?;
@@ -564,6 +671,7 @@ async fn start_narration<R: Runtime>(
             NarrationKind::Chat => NarrationInput::Chat(ChatFeed::new()),
             NarrationKind::Bubble(_) => NarrationInput::Bubble(MessageSpeech::new()),
             NarrationKind::Preview => NarrationInput::Preview(ReplyBuffer::new(false)),
+            NarrationKind::SamplePreview => NarrationInput::Sample(sample_audio),
         }),
         config,
         sample,
@@ -774,9 +882,22 @@ async fn speak_inner<R: Runtime>(
     if narration.cancel.is_cancelled() || narration.terminal.load(Ordering::Acquire) {
         return Err(network::CANCELLED.into());
     }
-    let preview = matches!(*narration.input.lock().map_err(|error| error.to_string())?, NarrationInput::Preview(_));
-    let mut source = NarrationReader { narration, speech_queue: VecDeque::new(), chat_finished: false };
+    let (preview, sample_audio) = {
+        let mut input = narration.input.lock().map_err(|error| error.to_string())?;
+        match &mut *input {
+            NarrationInput::Sample(audio) => (false, Some(audio.take().ok_or("原声试听已经结束。")?)),
+            NarrationInput::Preview(_) => (true, None),
+            _ => (false, None),
+        }
+    };
+    let mut source = NarrationReader {
+        app, narration, speech_queue: VecDeque::new(), chat_finished: false, current_voice: None,
+    };
     let mut player = NativeConsumer { app, narration, started: false, first_audio: true };
+    if let Some(audio) = sample_audio {
+        audio_codec::decode_stream(audio.into(), &narration.cancel, &mut player).await?;
+        return player.finish().await;
+    }
     let mut synthesis_announced = false;
     if preview {
         // Preview is literal input and deliberately never opens the cache or
@@ -821,21 +942,27 @@ async fn speak_inner<R: Runtime>(
 struct NarrationPiece {
     text: String,
     guidance: Option<Arc<str>>,
+    voice: Option<Arc<PreparedVoice>>,
 }
 
-struct NarrationReader<'a> {
+struct NarrationReader<'a, R: Runtime> {
+    app: &'a AppHandle<R>,
     narration: &'a Arc<TtsJob>,
     speech_queue: VecDeque<SpeechPiece>,
     chat_finished: bool,
+    // Only the current message is retained. Prefetched pieces own their own
+    // Arc lease, so a group turn never accumulates every imported audio file.
+    current_voice: Option<(String, Arc<PreparedVoice>)>,
 }
 
-impl SegmentSource for NarrationReader<'_> {
+impl<R: Runtime> SegmentSource for NarrationReader<'_, R> {
     type Piece = NarrationPiece;
 
     async fn next(&mut self, cancel: &CancellationToken) -> Result<Option<NarrationPiece>, String> {
         loop {
             if cancel.is_cancelled() { return Err(network::CANCELLED.into()); }
             let notified = self.narration.ready.notified();
+            let mut speaker = None;
             let (piece, guidance) = {
                 let mut input = self.narration.input.lock().map_err(|error| error.to_string())?;
                 match &mut *input {
@@ -846,6 +973,7 @@ impl SegmentSource for NarrationReader<'_> {
                         }
                         if let Some(piece) = self.speech_queue.pop_front() {
                             log::debug!("[VoiceTts] synthesizing message={}", piece.message_id);
+                            speaker = Some((piece.message_id, piece.agent_id, feed.is_group()));
                             (ReplyPiece::Text(piece.text), piece.instruction)
                         } else if self.chat_finished {
                             (ReplyPiece::Finished, None)
@@ -853,10 +981,27 @@ impl SegmentSource for NarrationReader<'_> {
                     }
                     NarrationInput::Bubble(message) => message.next(),
                     NarrationInput::Preview(reply) => (reply.next(), None),
+                    NarrationInput::Sample(_) => return Err("原声试听不接受合成文本。".into()),
                 }
             };
             match piece {
-                ReplyPiece::Text(text) => return Ok(Some(NarrationPiece { text, guidance })),
+                ReplyPiece::Text(text) => {
+                    let voice = if let Some((message_id, agent_id, group)) = speaker {
+                        if self.current_voice.as_ref().is_none_or(|(id, _)| id != &message_id) {
+                            let agent_id = agent_id.as_deref().ok_or("无法确定回复的发言者，已停止朗读。")?;
+                            let voice = prepare_speaker(self.app, &self.narration.config, Some(agent_id), cancel).await?;
+                            self.current_voice = Some((message_id, Arc::new(voice)));
+                        }
+                        if self.current_voice.as_ref().is_some_and(|(_, voice)| voice.config.tts_mode == VoiceTtsMode::None) {
+                            if group { continue; }
+                            return Err("当前未选择朗读音色，请先选择音色。".into());
+                        }
+                        self.current_voice.as_ref().map(|(_, voice)| voice.clone())
+                    } else {
+                        None
+                    };
+                    return Ok(Some(NarrationPiece { text, guidance, voice }));
+                }
                 ReplyPiece::Finished => return Ok(None),
                 ReplyPiece::Wait => tokio::select! {
                     biased;
@@ -875,8 +1020,9 @@ async fn prepare_segment(
     segment: Arc<SegmentBuffer>,
     cancel: CancellationToken,
 ) -> Result<(), String> {
-    let request = network::prepare_synthesis(&narration.config, &piece.text,
-        piece.guidance.as_deref(), narration.sample.as_ref())?;
+    let config = piece.voice.as_ref().map_or(&narration.config, |voice| &voice.config);
+    let sample = piece.voice.as_ref().map_or(narration.sample.as_ref(), |voice| voice.sample.as_ref());
+    let request = network::prepare_synthesis(config, &piece.text, piece.guidance.as_deref(), sample)?;
     let key = cache::segment_key(&request.identity);
     if let Some(cache) = cache {
         match cache.lookup(&key, &cancel).await {
@@ -889,7 +1035,7 @@ async fn prepare_segment(
             Err(error) => log::warn!("[VoiceTts] cache lookup failed: {error}"),
         }
     }
-    let audio = network::synthesize_prepared(&narration.config, &request, &cancel, |pcm| {
+    let audio = network::synthesize_prepared(config, &request, &cancel, |pcm| {
         std::future::ready(if cancel.is_cancelled() {
             Err(network::CANCELLED.into())
         } else { segment.push(pcm) })
@@ -992,6 +1138,7 @@ mod tests {
                 NarrationKind::Chat => NarrationInput::Chat(ChatFeed::new()),
                 NarrationKind::Bubble(_) => NarrationInput::Bubble(MessageSpeech::new()),
                 NarrationKind::Preview => NarrationInput::Preview(ReplyBuffer::new(false)),
+                NarrationKind::SamplePreview => NarrationInput::Sample(None),
             }),
             ready: Notify::new(),
             worker_started: AtomicBool::new(false),
@@ -1149,11 +1296,244 @@ mod tests {
     }
 
     fn fixture_piece() -> NarrationPiece {
-        NarrationPiece { text: "这是同一句待合成的文本。".into(), guidance: Some(Arc::from("轻声")) }
+        NarrationPiece { text: "这是同一句待合成的文本。".into(), guidance: Some(Arc::from("轻声")), voice: None }
     }
 
     async fn buffered_pcm(segment: &Arc<SegmentBuffer>, cancel: &CancellationToken) -> Vec<u8> {
         super::super::wav::pcm16_mono(&segment.wav(cancel).await.unwrap(), 24000).unwrap()
+    }
+
+    async fn clone_library_fixture() -> (tauri::App<tauri::test::MockRuntime>, tempfile::TempDir, String) {
+        use sha2::Digest;
+        let directory = tempfile::tempdir_in(".").unwrap();
+        let mut context = tauri::test::mock_context(tauri::test::noop_assets());
+        context.config_mut().app.app_directories_override = Some(
+            tauri::utils::config::AppDirectoriesOverride::Root(directory.path().canonicalize().unwrap()),
+        );
+        let app = tauri::test::mock_builder().build(context).unwrap();
+        let root = app.path().app_data_dir().unwrap().join("voice_library");
+        tokio::fs::create_dir_all(root.join("samples")).await.unwrap();
+        let id = "a".repeat(32);
+        let audio = audio_codec::pcm_wav(&vec![0; 4800]).unwrap();
+        tokio::fs::write(root.join("samples").join(format!("{id}.wav")), &audio).await.unwrap();
+        let sample = samples::VoiceCloneModelDto {
+            id: id.clone(), name: "Reference".into(), file_name: "reference.wav".into(),
+            format: samples::CloneSampleFormat::Wav, file_bytes: audio.len() as u64, duration_ms: 100,
+            file_hash: hex::encode(sha2::Sha256::digest(&audio)), created_at: 1, updated_at: 1,
+        };
+        tokio::fs::write(root.join("registry.json"), serde_json::to_vec(
+            &serde_json::json!({"version":1,"samples":[sample]})).unwrap()).await.unwrap();
+        (app, directory, id)
+    }
+
+    fn group_narration_fixture(
+        app: &tauri::App<tauri::test::MockRuntime>,
+        base_url: &str,
+        voice: crate::vcp_modules::agent_types::AgentVoiceConfig,
+    ) -> Arc<TtsJob> {
+        use crate::vcp_modules::agent_service::{create_default_config, AgentConfigState};
+        let agents = AgentConfigState::new();
+        let mut first = create_default_config("a");
+        first.voice = voice;
+        agents.caches.insert("a".into(), first);
+        let mut second = create_default_config("b");
+        second.voice.enabled = true;
+        second.voice.mode = VoiceTtsMode::Builtin;
+        second.voice.voice = "苏打".into();
+        agents.caches.insert("b".into(), second);
+        app.manage(agents);
+        let mut narration = segment_fixture_job(base_url);
+        Arc::get_mut(&mut narration).unwrap().config.tts_mode = VoiceTtsMode::None;
+        narration.worker_started.store(true, Ordering::Release);
+        app.manage(TtsServiceState(Mutex::new(Registry {
+            current: Some(Slot { id: narration.id.clone(), cancel: narration.cancel.clone(),
+                job: Some(narration.clone()), kind: NarrationKind::Chat }),
+            ..Default::default()
+        })));
+        narration
+    }
+
+    fn feed_member(app: &tauri::App<tauri::test::MockRuntime>, id: &str, agent: &str, text: &str) {
+        feed_chat_event(app.handle(), &StreamEvent::end(
+            id.into(), Some(serde_json::json!({"isGroupMessage":true,"agentId":agent,"originUserMessageId":"origin"})),
+            Some("completed".into()), Some(text.into()), None, None, None,
+        ));
+    }
+
+    #[tokio::test]
+    async fn group_none_or_deleted_clone_skips_only_that_member_before_valid_speaker_http() {
+        use crate::vcp_modules::agent_types::AgentVoiceConfig;
+        let mut server = SegmentHttpFixture::start(&[1, 0, 2, 0], false).await;
+        for deleted_clone in [false, true] {
+            let (app, _directory, id) = clone_library_fixture().await;
+            let voice = if deleted_clone {
+                assert!(samples::delete_voice_clone_sample(app.handle().clone(), id.clone()).await.unwrap());
+                AgentVoiceConfig { enabled: true, mode: VoiceTtsMode::Clone, clone_sample_id: id, ..Default::default() }
+            } else { AgentVoiceConfig::default() };
+            let narration = group_narration_fixture(&app, &server.base_url, voice);
+            feed_member(&app, "first", "a", "第一位没有声音但仍有文字。");
+            feed_member(&app, "second", "b", "第二位继续朗读。");
+            finish_tts_chat(app.handle().clone(), narration.id.clone()).await.unwrap();
+            let mut reader = NarrationReader { app: app.handle(), narration: &narration,
+                speech_queue: VecDeque::new(), chat_finished: false, current_voice: None };
+            let piece = reader.next(&narration.cancel).await.unwrap().unwrap();
+            assert_eq!(piece.text, "第二位继续朗读。");
+            assert_eq!(piece.voice.as_ref().unwrap().config.voice, "苏打");
+            prepare_segment(&narration, None, piece, Arc::new(SegmentBuffer::default()), narration.cancel.clone()).await.unwrap();
+            assert!(reader.next(&narration.cancel).await.unwrap().is_none());
+            assert!(!narration.cancel.is_cancelled());
+            assert!(!narration.terminal.load(Ordering::Acquire));
+        }
+        assert_eq!(server.requests.lock().unwrap().len(), 2);
+        assert!(server.requests.lock().unwrap().iter().all(|request| request["audio"]["voice"] == "苏打"));
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn deleting_a_prepared_group_voice_keeps_its_message_but_skips_its_next_message() {
+        use crate::vcp_modules::agent_types::AgentVoiceConfig;
+        let (app, _directory, id) = clone_library_fixture().await;
+        let narration = group_narration_fixture(&app, "https://example.invalid/v1", AgentVoiceConfig {
+            enabled: true, mode: VoiceTtsMode::Clone, clone_sample_id: id.clone(), ..Default::default()
+        });
+        feed_member(&app, "first", "a", &"第一位的长回复继续使用同一份声音。".repeat(40));
+        let mut reader = NarrationReader { app: app.handle(), narration: &narration,
+            speech_queue: VecDeque::new(), chat_finished: false, current_voice: None };
+        let first = reader.next(&narration.cancel).await.unwrap().unwrap().voice.unwrap();
+        assert!(first.sample.is_some());
+        assert!(samples::delete_voice_clone_sample(app.handle().clone(), id).await.unwrap());
+        let second = reader.next(&narration.cancel).await.unwrap().unwrap().voice.unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(second.sample.as_ref().unwrap().data_url.starts_with("data:audio/wav;base64,"));
+        feed_member(&app, "later", "a", "下一条已经没有音色。");
+        feed_member(&app, "other", "b", "另一位照常朗读。");
+        finish_tts_chat(app.handle().clone(), narration.id.clone()).await.unwrap();
+        let mut saw_other = false;
+        while let Some(piece) = reader.next(&narration.cancel).await.unwrap() {
+            assert_ne!(piece.text, "下一条已经没有音色。");
+            if piece.text == "另一位照常朗读。" { saw_other = true; }
+        }
+        assert!(saw_other);
+    }
+
+    #[tokio::test]
+    async fn durable_nonstream_end_delivers_the_actual_author_to_the_narration_feed() {
+        use crate::vcp_modules::{db_manager::DbState, message_service,
+            vcp_client::{ActiveRequestLease, ActiveRequests}};
+        for (owner_type, owner_id, author) in [("agent", "a", "a"), ("group", "g", "b")] {
+            let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+                .connect("sqlite::memory:").await.unwrap();
+            sqlx::raw_sql(include_str!("../../../../migrations/0100_baseline_v2.sql"))
+                .execute(&pool).await.unwrap();
+            sqlx::raw_sql(include_str!("../../../../migrations/0102_stream_stop_intent.sql"))
+                .execute(&pool).await.unwrap();
+            sqlx::raw_sql("INSERT INTO agents (owner_type,agent_id,name,model,updated_at) VALUES ('agent','a','A','test',1),('agent','b','B','test',1);
+                INSERT INTO groups (owner_type,group_id,name,updated_at) VALUES ('group','g','Group',1);
+                INSERT INTO topics (owner_type,owner_id,topic_id,title,created_at,updated_at) VALUES ('agent','a','t','Topic',1,1),('group','g','t','Topic',1,1);")
+                .execute(&pool).await.unwrap();
+            let app = tauri::test::mock_app();
+            app.manage(DbState::new(pool.clone(), Default::default()));
+            app.manage(ActiveRequests::default());
+            app.manage(TtsServiceState::default());
+            let job = install(&mut app.state::<TtsServiceState>().0.lock().unwrap(), "durable-end");
+            job.worker_started.store(true, Ordering::Release);
+            let key = MessageKey::new(TopicKey::new(owner_type, owner_id, "t"), "reply");
+            let (lease, _) = ActiveRequestLease::try_acquire(app.state::<ActiveRequests>().0.clone(), key.clone()).unwrap();
+            lease.set_origin_user_message("origin").unwrap();
+            message_service::begin_stream_message(&app.state::<DbState>(), &key, Some(author), None).await.unwrap();
+            // No Aurora/thinking event precedes this durable final result.
+            message_service::finalize_stream_message(app.handle().clone(), &pool, &key,
+                "完整回复。".into(), false, Some("completed".into()), None, Some(author.into())).await.unwrap();
+            let mut input = job.input.lock().unwrap();
+            let NarrationInput::Chat(feed) = &mut *input else { unreachable!() };
+            let update = feed.take_update().unwrap().unwrap();
+            assert_eq!(update.pieces.len(), 1);
+            assert_eq!(update.pieces[0].agent_id.as_deref(), Some(author));
+            assert_eq!(update.pieces[0].text, "完整回复。");
+            drop(input);
+            drop(lease);
+        }
+    }
+
+    #[tokio::test]
+    async fn group_message_speakers_select_distinct_voices_before_http_and_cache() {
+        use crate::vcp_modules::agent_service::{create_default_config, AgentConfigState};
+        use serde_json::json;
+        let pcm = vec![1, 0, 2, 0];
+        let mut server = SegmentHttpFixture::start(&pcm, false).await;
+        let app = tauri::test::mock_app();
+        let agents = AgentConfigState::new();
+        for (id, voice) in [("a", "冰糖"), ("b", "苏打")] {
+            let mut agent = create_default_config(id);
+            agent.voice.enabled = true;
+            agent.voice.mode = VoiceTtsMode::Builtin;
+            agent.voice.voice = voice.into();
+            agents.caches.insert(id.into(), agent);
+        }
+        app.manage(agents);
+        let mut job = segment_fixture_job(&server.base_url);
+        // An unusable inherited clone must not block independent built-in voices.
+        Arc::get_mut(&mut job).unwrap().config.tts_mode = VoiceTtsMode::Clone;
+        Arc::get_mut(&mut job).unwrap().config.clone_sample_id.clear();
+        {
+            let mut input = job.input.lock().unwrap();
+            let NarrationInput::Chat(feed) = &mut *input else { unreachable!() };
+            for id in ["a", "b"] {
+                feed.accept(&StreamEvent::end(
+                    format!("message-{id}"), Some(json!({"isGroupMessage":true,"agentId":id})),
+                    Some("completed".into()), Some("相同的正文。".into()), None, None, None,
+                )).unwrap();
+            }
+            feed.finish_submission();
+        }
+        let temporary = tempfile::tempdir().unwrap();
+        let cache = TtsCache::open(temporary.path().into()).await.unwrap();
+        let mut reader = NarrationReader {
+            app: app.handle(), narration: &job, speech_queue: VecDeque::new(),
+            chat_finished: false, current_voice: None,
+        };
+        while let Some(piece) = reader.next(&job.cancel).await.unwrap() {
+            let segment = Arc::new(SegmentBuffer::default());
+            prepare_segment(&job, Some(&cache), piece, segment.clone(), job.cancel.clone()).await.unwrap();
+            assert_eq!(buffered_pcm(&segment, &job.cancel).await, pcm);
+        }
+        let voices: Vec<_> = server.requests.lock().unwrap().iter()
+            .map(|request| request["audio"]["voice"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(voices, ["冰糖", "苏打"], "identical text must not reuse another speaker's cache");
+        server.stop().await;
+    }
+
+    #[tokio::test]
+    async fn later_segments_keep_the_message_voice_when_agent_settings_change() {
+        use crate::vcp_modules::agent_service::{create_default_config, AgentConfigState};
+        let app = tauri::test::mock_app();
+        let agents = AgentConfigState::new();
+        let mut agent = create_default_config("a");
+        agent.voice.enabled = true;
+        agent.voice.mode = VoiceTtsMode::Builtin;
+        agent.voice.voice = "冰糖".into();
+        agents.caches.insert("a".into(), agent);
+        app.manage(agents);
+        let job = segment_fixture_job("https://example.invalid/v1");
+        {
+            let mut input = job.input.lock().unwrap();
+            let NarrationInput::Chat(feed) = &mut *input else { unreachable!() };
+            feed.accept(&StreamEvent::end(
+                "message".into(), Some(serde_json::json!({"agentId":"a"})),
+                Some("completed".into()), Some("这是一段足够长的语音正文。".repeat(50)), None, None, None,
+            )).unwrap();
+        }
+        let mut reader = NarrationReader {
+            app: app.handle(), narration: &job, speech_queue: VecDeque::new(),
+            chat_finished: false, current_voice: None,
+        };
+        let first = reader.next(&job.cancel).await.unwrap().unwrap();
+        app.state::<AgentConfigState>().caches.get_mut("a").unwrap().voice.voice = "苏打".into();
+        let second = reader.next(&job.cancel).await.unwrap().unwrap();
+        let first_voice = first.voice.unwrap();
+        let second_voice = second.voice.unwrap();
+        assert!(Arc::ptr_eq(&first_voice, &second_voice));
+        assert_eq!(second_voice.config.voice, "冰糖");
     }
 
     #[tokio::test]
@@ -1346,6 +1726,8 @@ mod tests {
         assert!(NarrationKind::Bubble(bubble_source()).validate_admission(true).is_err());
         assert!(NarrationKind::Bubble(bubble_source()).validate_admission(false).is_ok());
         assert!(NarrationKind::Chat.validate_admission(true).is_ok());
+        assert!(NarrationKind::SamplePreview.validate_admission(true).is_err());
+        assert!(NarrationKind::SamplePreview.validate_admission(false).is_ok());
     }
 
     #[tokio::test]

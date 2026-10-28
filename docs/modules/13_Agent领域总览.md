@@ -8,6 +8,8 @@ date: 2026-07-04
 
 # 13. Agent 服务与类型系统
 
+2026-10-28：`AgentConfig.voice` 为必有结构，默认继承全局，独立模式默认“无”。`0105_agent_voice_config.sql` 添加本机 JSON 字段，设备同步 DTO 不携带 voice。`save_agent_config(agent, baseline)` 通过 `persistence/agent_repository.rs` 在同一 SQLite 写事务内读取最新配置、比较并合并实际编辑字段；voice 整体比较，隐藏的共享提示词仍由数据库持有，成功返回最新 AgentConfig。声音文件归 `chat/voice_service/samples`，删除不触碰 Agent。下文历史整对象写入示例不代表当前保存接口。
+
 ## 1. 概述
 
 ### 1.1 领域定位
@@ -760,7 +762,7 @@ agent_chat_application_service → agent_service / message_service / vcp_client 
 | 函数签名 | 所属模块 | 输入 | 输出 | 前端调用场景 |
 |----------|----------|------|------|-------------|
 | `read_agent_config(app_handle, state, agent_id, allow_default) -> Result<AgentConfig, String>` | `agent_service` | `AppHandle`, `AgentConfigState`, `String`, `Option<bool>` | 完整配置对象 | Agent 设置面板加载、聊天前读取模型参数 |
-| `save_agent_config(app_handle, state, agent) -> Result<bool, String>` | `agent_service` | `AppHandle`, `AgentConfigState`, `AgentConfig` | `true` | 保存 Agent 设置 |
+| `save_agent_config(app_handle, agent, baseline) -> Result<AgentConfig, String>` | `agent_service` | `AppHandle`、草稿与基准 | 最新 `AgentConfig` | 原子保存实际编辑字段 |
 | `get_agents(app_handle, state) -> Result<Vec<AgentConfig>, String>` | `agent_service` | `AppHandle`, `AgentConfigState` | 全部 Agent 列表 | Agent 侧边栏初始化 |
 | `update_agent_config(app_handle, state, agent_id, updates) -> Result<AgentConfig, String>` | `agent_service` | `AppHandle`, `AgentConfigState`, `String`, `serde_json::Value` | 更新后的配置对象 | 快速修改单个字段（如切换模型） |
 | `delete_agent(app_handle, state, agent_id) -> Result<bool, String>` | `agent_service` | `AppHandle`, `AgentConfigState`, `String` | `true` | 删除 Agent |

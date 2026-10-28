@@ -14,6 +14,74 @@ use tokio::sync::mpsc;
 pub const RENDERER_SCHEMA_VERSION: i64 = 3;
 const MAX_SAFE_JSON_INTEGER: u64 = (1_u64 << 53) - 1;
 
+/// Resolve a stored message's author from its complete identity. A group
+/// assistant message uses its actual speaker, never the currently selected UI owner.
+pub(crate) async fn read_narration_author(
+    pool: &sqlx::SqlitePool,
+    key: &MessageKey,
+) -> Result<Option<String>, String> {
+    if !key.topic.is_valid() || key.msg_id.is_empty() {
+        return Err("朗读消息标识不完整".into());
+    }
+    let row = sqlx::query(
+        "SELECT role, agent_id FROM messages
+         WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
+           AND deleted_at IS NULL",
+    )
+    .bind(&key.topic.owner_type)
+    .bind(&key.topic.owner_id)
+    .bind(&key.topic.topic_id)
+    .bind(&key.msg_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|error| error.to_string())?
+    .ok_or_else(|| "朗读消息已不存在".to_string())?;
+    if row.get::<String, _>("role") != "assistant" {
+        return Ok(None);
+    }
+    if key.topic.owner_type == "agent" {
+        return Ok(Some(key.topic.owner_id.clone()));
+    }
+    let author = row.get::<Option<String>, _>("agent_id")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "群聊消息缺少发言助手，无法确定朗读音色".to_string())?;
+    Ok(Some(author))
+}
+
+#[cfg(test)]
+mod narration_author_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn narration_uses_persisted_speaker_and_complete_message_identity() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.expect("database");
+        sqlx::query(
+            "CREATE TABLE messages (owner_type TEXT, owner_id TEXT, topic_id TEXT,
+                msg_id TEXT, role TEXT, agent_id TEXT, deleted_at INTEGER);
+             INSERT INTO messages VALUES
+                ('agent','solo','topic','same','assistant',NULL,NULL),
+                ('group','room','topic','same','assistant','speaker-b',NULL),
+                ('group','room','topic','user','user','ignored',NULL),
+                ('group','room','topic','unknown','assistant',NULL,NULL),
+                ('group','room','topic','gone','assistant','speaker-b',1);",
+        ).execute(&pool).await.expect("seed messages");
+        let group = TopicKey::new("group", "room", "topic");
+        assert_eq!(read_narration_author(&pool, &MessageKey::new(group.clone(), "same"))
+            .await.expect("group speaker"), Some("speaker-b".into()));
+        assert_eq!(read_narration_author(&pool, &MessageKey::new(TopicKey::new("agent", "solo", "topic"), "same"))
+            .await.expect("solo speaker"), Some("solo".into()));
+        assert_eq!(read_narration_author(&pool, &MessageKey::new(group.clone(), "user"))
+            .await.expect("user"), None);
+        assert!(read_narration_author(&pool, &MessageKey::new(group.clone(), "unknown"))
+            .await.expect_err("missing speaker").contains("发言助手"));
+        for id in ["gone", "missing"] {
+            assert!(read_narration_author(&pool, &MessageKey::new(group.clone(), id))
+                .await.expect_err("missing message").contains("不存在"));
+        }
+    }
+}
+
 pub(crate) fn resolve_message_updated_at(
     explicit_updated_at: Option<u64>,
     message_timestamp: u64,

@@ -30,11 +30,11 @@ pub use call::{
 pub use input::handle_audio_event;
 pub use input::{close_voice_microphone, start_voice_microphone, VoiceServiceState};
 pub use tts::{
-    feed_chat_event, has_chat_listener, preview_tts, start_tts_session, stop_chat_reply_by_origin, stop_tts,
+    feed_chat_event, has_chat_listener, preview_tts, preview_voice_clone_sample, start_tts_session, stop_chat_reply_by_origin, stop_tts,
     submit_tts_text, TtsServiceState,
 };
 pub(crate) use tts::stop_bubble_for_messages;
-pub use samples::{discard_voice_clone_sample, get_voice_clone_sample, import_voice_clone_sample};
+pub use samples::{delete_voice_clone_sample, get_voice_clone_sample, import_voice_clone_sample, list_voice_clone_samples};
 
 use crate::vcp_modules::settings_manager::{
     value_or_preset, Settings, VoiceInputEncoding, VoiceTtsMode, VOICE_API_BASE_URL_PRESET,
@@ -59,8 +59,8 @@ pub struct VoiceServiceConfig {
     pub clone_sample_id: String,
 }
 
-/// One immutable preparation snapshot is shared by context injection and every
-/// narration in this reply. Imported sample bytes have their own narration lease.
+/// One immutable global snapshot supplies connection, guidance and inherited
+/// defaults for a reply. Each message owns its resolved speaker voice and audio.
 #[derive(Clone)]
 pub(crate) struct VoiceReplyPolicy {
     pub(crate) config: VoiceServiceConfig,
@@ -83,6 +83,17 @@ pub(super) struct InputAudio {
 }
 
 impl VoiceServiceConfig {
+    fn with_agent_voice(&self, voice: &crate::vcp_modules::agent_types::AgentVoiceConfig) -> Self {
+        let mut config = self.clone();
+        if voice.enabled {
+            config.tts_mode = voice.mode;
+            config.voice = voice.voice.clone();
+            config.clone_sample_id = voice.clone_sample_id.clone();
+            config.tts_stream = voice.stream;
+        }
+        config
+    }
+
     pub(crate) fn from_settings(settings: &Settings) -> Self {
         Self {
             base_url: settings.voice.connection.api_base_url.clone(),
@@ -124,6 +135,9 @@ impl VoiceServiceConfig {
             return Ok(());
         }
         self.endpoint()?;
+        if self.tts_mode == VoiceTtsMode::None {
+            return Err("当前未选择朗读音色，请先选择音色。".into());
+        }
         if self.tts_mode == VoiceTtsMode::Builtin
             && !VOICE_TTS_VOICES.contains(&self.voice.as_str())
         {
@@ -168,10 +182,14 @@ mod tests {
     fn narration_misconfiguration_cannot_block_asr() {
         let mut settings = Settings::default();
         settings.voice.connection.api_key = "fixture-key".into();
+        settings.voice.tts.mode = VoiceTtsMode::Builtin;
         settings.voice.tts.voice = "invalid-voice".into();
         let mut config = VoiceServiceConfig::from_settings(&settings);
         assert!(config.validate_asr().is_ok());
         assert!(config.validate_tts().is_err());
+        config.tts_mode = VoiceTtsMode::None;
+        assert!(config.validate_asr().is_ok());
+        assert!(config.validate_tts().unwrap_err().contains("未选择朗读音色"));
         config.tts_mode = VoiceTtsMode::Clone;
         assert!(config.validate_asr().is_ok());
         assert!(config.validate_tts().is_err());

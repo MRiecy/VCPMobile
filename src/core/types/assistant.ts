@@ -1,3 +1,5 @@
+import type { VoiceTtsMode } from "../config/generated/config";
+
 export type OwnerType = "agent" | "group";
 
 export interface TopicDto {
@@ -24,8 +26,17 @@ export interface AgentConfigDto {
   maxOutputTokens: number;
   streamOutput: boolean;
   useTemperature: boolean;
+  voice: AgentVoiceConfigDto;
   avatarCalculatedColor: string | null;
   topics: TopicDto[];
+}
+
+export interface AgentVoiceConfigDto {
+  enabled: boolean;
+  mode: VoiceTtsMode;
+  voice: string;
+  cloneSampleId: string;
+  stream: boolean;
 }
 
 export interface AgentListItemDto {

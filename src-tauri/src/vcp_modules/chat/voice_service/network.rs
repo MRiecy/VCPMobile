@@ -250,6 +250,7 @@ pub(super) fn prepare_synthesis(
     let stream = config.tts_streaming();
     let mut audio = json!({"format": if stream { "pcm16" } else { "wav" }});
     let model = match config.tts_mode {
+        VoiceTtsMode::None => return Err("当前未选择朗读音色，请先选择音色。".into()),
         VoiceTtsMode::Builtin => {
             audio["voice"] = json!(config.voice);
             "mimo-v2.5-tts"
@@ -1086,6 +1087,7 @@ mod tests {
             &crate::vcp_modules::settings_manager::Settings::default(),
         );
         config.base_url = " https://VOICE.example:443/v1/ ".into();
+        config.tts_mode = VoiceTtsMode::Builtin;
         let text = "  原样正文。\n";
         let request = prepare_synthesis(&config, text, Some("  轻声\n"), None).unwrap();
         assert_eq!(

@@ -76,7 +76,7 @@ const handleHeaderAction = () => {
             </button>
           </div>
           <div class="context-menu-scroll vcp-scrollable p-2 min-h-0 overflow-y-auto overscroll-contain" :role="isSelectionMenu ? 'radiogroup' : undefined" :aria-label="isSelectionMenu ? title : undefined">
-            <button v-for="action in actions" :key="action.label" @click="handleAction(action)"
+            <button v-for="action in actions" :key="action.id ?? action.label" @click="handleAction(action)"
               :disabled="action.disabled"
               :role="isSelectionMenu ? 'radio' : undefined"
               :aria-checked="isSelectionMenu ? action.selected === true : undefined"

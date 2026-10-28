@@ -1144,7 +1144,12 @@ mod tests {
         expected.push(102);
         expected.push(103);
         expected.push(104);
+        expected.push(105);
         assert_eq!(versions, expected);
+        let voice_column: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agents') WHERE name = 'voice_config')",
+        ).fetch_one(&pool).await.expect("inspect Agent voice column");
+        assert!(voice_column, "fresh install must apply the Agent voice migration");
 
         // 迁移记录齐全仍可能来自误 seed；检查实际建表以确认迁移确已执行。
         for name in [

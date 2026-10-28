@@ -112,12 +112,14 @@ impl MessageSpeech {
 
 struct MessageText {
     id: String,
+    agent_id: Option<String>,
     speech: MessageSpeech,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct SpeechPiece {
     pub message_id: String,
+    pub agent_id: Option<String>,
     pub text: String,
     pub instruction: Option<Arc<str>>,
 }
@@ -143,6 +145,10 @@ pub(super) struct ChatFeed {
 impl ChatFeed {
     pub(super) fn new() -> Self {
         Self::default()
+    }
+
+    pub(super) fn is_group(&self) -> bool {
+        self.group
     }
 
     pub(super) fn accept(&mut self, event: &StreamEvent) -> Result<bool, String> {
@@ -244,10 +250,17 @@ impl ChatFeed {
             .as_ref()
             .and_then(|update| update.chunk.as_deref());
         if replacement.is_some() || delta.is_some() {
+            let agent_id = context.and_then(|value| value["agentId"].as_str())
+                .filter(|id| !id.is_empty()).map(str::to_owned);
             let index = self
                 .messages
                 .iter()
                 .position(|message| message.id == event.message_id);
+            if let Some(index) = index {
+                if agent_id.is_some() && self.messages[index].agent_id != agent_id {
+                    return Err("朗读消息的发言者发生变化，已停止朗读。".into());
+                }
+            }
             let previous = index
                 .map(|index| self.messages[index].speech.text.len())
                 .unwrap_or(0);
@@ -268,6 +281,7 @@ impl ChatFeed {
             let index = index.unwrap_or_else(|| {
                 self.messages.push(MessageText {
                     id: event.message_id.clone(),
+                    agent_id,
                     speech: MessageSpeech::new(),
                 });
                 self.messages.len() - 1
@@ -318,6 +332,7 @@ impl ChatFeed {
             match piece {
                 ReplyPiece::Text(text) => pieces.push(SpeechPiece {
                     message_id: message.id.clone(),
+                    agent_id: message.agent_id.clone(),
                     text,
                     instruction,
                 }),
@@ -345,6 +360,7 @@ mod tests {
     fn piece(id: &str, text: &str, instruction: Option<&str>) -> SpeechPiece {
         SpeechPiece {
             message_id: id.into(),
+            agent_id: None,
             text: text.into(),
             instruction: instruction.map(Arc::from),
         }
@@ -379,6 +395,20 @@ mod tests {
 
     fn guidance(text: &str) -> String {
         format!("<voice_guidance>\n{text}\n</voice_guidance>\n")
+    }
+
+    #[test]
+    fn message_author_is_carried_with_every_piece_and_cannot_change_midstream() {
+        let mut feed = ChatFeed::new();
+        let mut first = update("message", &"这是第一位成员正在说的话。\n\n".repeat(30), true);
+        first.context = Some(json!({"isGroupMessage":true,"agentId":"first"}));
+        feed.accept(&first).unwrap();
+        let pieces = feed.take_update().unwrap().unwrap().pieces;
+        assert!(!pieces.is_empty());
+        assert!(pieces.iter().all(|piece| piece.agent_id.as_deref() == Some("first")));
+        let mut changed = member("message", "替换后的正文。");
+        changed.context = Some(json!({"isGroupMessage":true,"agentId":"second"}));
+        assert!(feed.accept(&changed).unwrap_err().contains("发言者"));
     }
 
     fn drain_speech(speech: &mut MessageSpeech) -> Vec<(String, Option<Arc<str>>)> {

@@ -1,8 +1,33 @@
 use crate::vcp_modules::topic_types::Topic;
+use crate::vcp_modules::settings_manager::{VoiceTtsConfig, VoiceTtsMode};
 use serde::{Deserialize, Serialize};
 
 fn default_true() -> bool {
     true
+}
+
+/// Device-local voice identity; never included in AgentSyncDTO or its hash.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
+pub struct AgentVoiceConfig {
+    pub enabled: bool,
+    pub mode: VoiceTtsMode,
+    pub voice: String,
+    pub clone_sample_id: String,
+    pub stream: bool,
+}
+
+impl Default for AgentVoiceConfig {
+    fn default() -> Self {
+        let tts = VoiceTtsConfig::default();
+        Self {
+            enabled: false,
+            mode: tts.mode,
+            voice: tts.voice,
+            clone_sample_id: tts.clone_sample_id,
+            stream: tts.stream,
+        }
+    }
 }
 
 /// 智能体(Agent)的完整配置结构
@@ -40,6 +65,10 @@ pub struct AgentConfig {
     /// 是否在请求中发送 temperature 参数（关闭可兼容不支持温度的模型）
     #[serde(default = "default_true")]
     pub use_temperature: bool,
+
+    /// 本机独立音色；关闭时继承全局默认配置。
+    #[serde(default)]
+    pub voice: AgentVoiceConfig,
 
     // avatars 表派生字段
     #[serde(default)]

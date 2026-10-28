@@ -14,6 +14,8 @@ import { useSettingsStore, type AppSettings } from '../../../core/stores/setting
 import { SETTINGS_DEFAULTS } from '../../../core/config/generated/defaults';
 import { useModalHistory } from '../../../core/composables/useModalHistory';
 import { emitTauriEvent, invokeMock, listenMock, mockInvoke } from '../../mocks/tauri';
+import { deleteTempFile } from 'tauri-plugin-vcp-mobile';
+import { useVoiceLibraryStore, type VoiceCloneModelDto } from '../../../features/chat/voice/voiceLibraryStore';
 
 const context = vi.hoisted(() => ({
   openStyleGuidance: vi.fn(),
@@ -25,7 +27,7 @@ vi.mock('../../../core/stores/notification', () => ({ useNotificationStore: () =
 vi.mock('../../../features/chat/voice/voiceCallStore', () => ({ useVoiceCallStore: () => context.voice }));
 
 function snapshot(): AppSettings {
-  return makeSettings({ 'identity.userName': 'user', 'server.url': 'https://chat.example', 'server.apiKey': 'chat-key' });
+  return makeSettings({ 'identity.userName': 'user', 'server.url': 'https://chat.example', 'server.apiKey': 'chat-key', 'voice.tts.mode': 'builtin' });
 }
 function saved(changes: Partial<SettingsFieldValues> = {}): ConfigSaveResult {
   database = applySettingsFields(database, changes);
@@ -56,6 +58,7 @@ beforeEach(() => {
     active: true, playbackActive: false,
   });
   mockInvoke('read_settings', () => makeConfigSnapshot(database, String(revision)));
+  mockInvoke('list_voice_clone_samples', () => []);
   mockInvoke('update_settings', args => {
     return saved(configRequestChanges(args?.request as ConfigUpdate));
   });
@@ -151,7 +154,45 @@ async function confirmPrompt(prompt: DOMWrapper<Element>) {
   await flushPromises();
 }
 
+function cloneAsset(id: string, fileName = 'voice.wav'): VoiceCloneModelDto {
+  return {
+    id, name: 'My voice', fileName, format: 'wav', fileBytes: 96000, durationMs: 2000,
+    fileHash: `hash-${id}`, createdAt: 100, updatedAt: 100,
+  };
+}
+
+async function openCloneUpload(wrapper: VueWrapper) {
+  await wrapper.get('button[aria-label="音色管理"]').trigger('click');
+  await flushPromises();
+  const manager = new DOMWrapper(document.querySelector('[role="dialog"][aria-label="音色管理"]')!);
+  await manager.findAll('button').find(button => button.text() === '上传新音色')!.trigger('click');
+  await flushPromises();
+  const upload = new DOMWrapper(document.querySelector('[role="dialog"][aria-label="上传新音色"]')!);
+  await upload.get('.voice-file').trigger('click');
+  await flushPromises();
+  return upload;
+}
+
+async function closeCloneManager() {
+  await new DOMWrapper(document.querySelector('button[aria-label="关闭音色管理"]')!).trigger('click');
+  await flushPromises();
+}
+
 describe('语音设置使用正式设置快照', () => {
+  it('默认无音色时保留语音输入设置，不提供朗读试听或隐式选择音色', async () => {
+    database.voice.tts = { ...SETTINGS_DEFAULTS.voice.tts };
+    const { wrapper } = await renderOverlay();
+    expect(wrapper.get('[aria-label="音色模式"]').text()).toContain('无');
+    expect(wrapper.find('.voice-preview-button').exists()).toBe(false);
+    expect(wrapper.find('[aria-label="朗读音色"]').exists()).toBe(false);
+    expect(wrapper.get('[aria-label="语音输入编码"]').isVisible()).toBe(true);
+    await field(wrapper, '语音 API Key').setValue('asr-key');
+    await leaveVoiceSettings(wrapper);
+    expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.connection.apiKey': 'asr-key' });
+    expect(database.voice.tts.mode).toBe('none');
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'preview_tts')).toHaveLength(0);
+  });
+
   it('展开高级参数后修改预设时长，在返回时提交草稿', async () => {
     const { wrapper } = await renderOverlay();
     const advanced = disclosure(wrapper, '高级参数');
@@ -400,15 +441,15 @@ describe('语音设置使用正式设置快照', () => {
     expect(modals.modalStackLength()).toBe(1);
   });
 
-  it('仅提供预置和复刻，切换保留音色草稿', async () => {
+  it('预置与复刻切换保留音色草稿', async () => {
     const { wrapper } = await renderOverlay();
     await choose(wrapper, '朗读音色', '冰糖 · 中文女声');
     await choose(wrapper, '音色模式', '音色复刻');
-    expect(wrapper.get('[aria-label="参考音频"]').isVisible()).toBe(true);
+    expect(wrapper.get('[aria-label="当前音色"]').isVisible()).toBe(true);
     expect(wrapper.find('[aria-label="朗读音色"]').exists()).toBe(false);
     expect(wrapper.find('[role="switch"][aria-label="流式朗读"]').exists()).toBe(false);
     await choose(wrapper, '音色模式', '预置音色');
-    expect(wrapper.get('[aria-label="参考音频"]').isVisible()).toBe(false);
+    expect(wrapper.find('[aria-label="当前音色"]').exists() && wrapper.get('[aria-label="当前音色"]').isVisible()).toBe(false);
     expect(wrapper.find('[aria-label="朗读音色"]').exists()).toBe(true);
     expect(wrapper.get('[aria-label="朗读音色"]').text()).toContain('冰糖');
     await leaveVoiceSettings(wrapper);
@@ -612,18 +653,24 @@ describe('语音设置使用正式设置快照', () => {
     else expect(context.openStyleGuidance).toHaveBeenCalledOnce();
   });
 
-  it('复刻导入只携路径，切模式保留未保存样本，保存后的清理交给Rust判断', async () => {
-    const asset = { id: 'new-sample', fileName: 'voice.wav', format: 'wav', bytes: 96000 };
+  it('导入正式声音库后切模式保留资产，返回只提交全局绑定', async () => {
+    const asset = cloneAsset('new-sample');
     mockInvoke('plugin:vcp-mobile|pick_file', () => ({ path: '/native/staging/voice.wav', name: 'voice.wav', size: 96000, mime: 'audio/wav', hash: 'file-hash' }));
-    mockInvoke('import_voice_clone_sample', () => asset);
-    mockInvoke('get_voice_clone_sample', () => asset);
+    mockInvoke('import_voice_clone_sample', () => {
+      mockInvoke('list_voice_clone_samples', () => [asset]);
+      return asset;
+    });
     const { wrapper } = await renderOverlay();
     await choose(wrapper, '音色模式', '音色复刻');
-    await wrapper.get('button[aria-label="参考音频"]').trigger('click');
+    const upload = await openCloneUpload(wrapper);
+    await upload.get('input').setValue('My voice');
+    await upload.trigger('submit');
     await flushPromises();
     expect(invokeMock.mock.calls.find(([command]) => command === 'plugin:vcp-mobile|pick_file')?.[1]).toMatchObject({ mode: 'file', maxBytes: 7_000_000 });
-    expect(invokeMock.mock.calls.find(([command]) => command === 'import_voice_clone_sample')?.[1]).toEqual({ path: '/native/staging/voice.wav', name: 'voice.wav' });
-    expect(wrapper.get('button[aria-label="参考音频"]').text()).toContain('voice.wav');
+    expect(invokeMock.mock.calls.find(([command]) => command === 'import_voice_clone_sample')?.[1]).toEqual({ path: '/native/staging/voice.wav', name: 'My voice', fileName: 'voice.wav' });
+    expect(wrapper.get('button[aria-label="当前音色"]').text()).toContain(asset.name);
+    expect(deleteTempFile).toHaveBeenCalledWith('/native/staging/voice.wav');
+    await closeCloneManager();
     await choose(wrapper, '音色模式', '预置音色');
     expect(invokeMock.mock.calls.filter(([command]) => command === 'discard_voice_clone_sample')).toHaveLength(0);
     await choose(wrapper, '音色模式', '音色复刻');
@@ -632,33 +679,110 @@ describe('语音设置使用正式设置快照', () => {
     expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.tts.mode': 'clone', 'voice.tts.cloneSampleId': 'new-sample' });
   });
 
-  it('失活后的迟到复刻导入不更新设置，释放新资产', async () => {
+  it('删除当前克隆音色后显示无，不级联改写已保存的全局引用', async () => {
+    const asset = cloneAsset('selected-sample');
+    database.voice.tts.mode = 'clone';
+    database.voice.tts.cloneSampleId = asset.id;
+    let registered = [asset];
+    mockInvoke('list_voice_clone_samples', () => registered);
+    mockInvoke('delete_voice_clone_sample', () => { registered = []; return true; });
+    const { wrapper } = await renderOverlay();
+    await wrapper.get('button[aria-label="音色管理"]').trigger('click');
+    await flushPromises();
+    const manager = new DOMWrapper(document.querySelector('[role="dialog"][aria-label="音色管理"]')!);
+    await manager.findAll('button').find(button => button.text() === '删除')!.trigger('click');
+    await flushPromises();
+    const confirmation = new DOMWrapper(document.querySelector('[role="dialog"][aria-label="删除克隆音色"]')!);
+    await confirmation.findAll('button').find(button => button.text() === '确认')!.trigger('click');
+    await flushPromises();
+    expect(invokeMock).toHaveBeenCalledWith('delete_voice_clone_sample', { sampleId: asset.id });
+    expect(useVoiceLibraryStore().samples).toEqual([]);
+    expect(wrapper.get('[aria-label="当前音色"]').text()).toContain('无');
+    await closeCloneManager();
+    await leaveVoiceSettings(wrapper);
+    expect(updates()).toHaveLength(0);
+    expect(database.voice.tts.cloneSampleId).toBe(asset.id);
+  });
+
+  it('原声试听使用同一任务事件，关闭管理等待迟到启动和停止确认', async () => {
+    context.voice.active = false;
+    const asset = cloneAsset('original-sample');
+    const starting = deferred<unknown>();
+    const stopping = deferred<unknown>();
+    mockInvoke('list_voice_clone_samples', () => [asset]);
+    mockInvoke('preview_voice_clone_sample', () => starting.promise);
+    mockInvoke('stop_tts', () => stopping.promise);
+    const { wrapper } = await renderOverlay();
+    await choose(wrapper, '音色模式', '音色复刻');
+    await wrapper.get('button[aria-label="音色管理"]').trigger('click');
+    await flushPromises();
+    const manager = new DOMWrapper(document.querySelector('[role="dialog"][aria-label="音色管理"]')!);
+    await manager.findAll('button').find(button => button.text() === '试听原声')!.trigger('click');
+    await flushPromises();
+    const submitted = invokeMock.mock.calls.find(([command]) => command === 'preview_voice_clone_sample')?.[1];
+    expect(submitted).toMatchObject({ sampleId: asset.id, ttsId: expect.any(String) });
+    emitTauriEvent('vcp-tts', { ttsId: 'unrelated-task', kind: 'stopped' });
+    await flushPromises();
+    expect(manager.text()).toContain('停止原声');
+    await closeCloneManager();
+    expect(document.querySelector('[role="dialog"][aria-label="音色管理"]')).not.toBeNull();
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'stop_tts')).toHaveLength(0);
+    starting.resolve({ configured: true });
+    await flushPromises();
+    expect(invokeMock).toHaveBeenCalledWith('stop_tts', { ttsId: submitted?.ttsId });
+    expect(document.querySelector('[role="dialog"][aria-label="音色管理"]')).not.toBeNull();
+    stopping.resolve(undefined);
+    await flushPromises();
+    expect(document.querySelector('[role="dialog"][aria-label="音色管理"]')).toBeNull();
+  });
+
+  it('关闭上传后迟到的原生文件选择只清理副本，不导入资产', async () => {
+    const picking = deferred<unknown>();
+    mockInvoke('plugin:vcp-mobile|pick_file', () => picking.promise);
+    const { wrapper } = await renderOverlay();
+    await choose(wrapper, '音色模式', '音色复刻');
+    const upload = await openCloneUpload(wrapper);
+    await upload.get('button[aria-label="关闭上传"]').trigger('click');
+    picking.resolve({ path: '/native/staging/cancelled.wav', name: 'cancelled.wav', size: 96000, mime: 'audio/wav', hash: 'cancelled-hash' });
+    await flushPromises();
+    expect(deleteTempFile).toHaveBeenCalledWith('/native/staging/cancelled.wav');
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'import_voice_clone_sample')).toHaveLength(0);
+    expect(useVoiceLibraryStore().samples).toEqual([]);
+  });
+
+  it('失活后的迟到入库仍保留资产，但不改旧页面草稿并释放选择器副本', async () => {
     const pending = deferred<unknown>();
     mockInvoke('plugin:vcp-mobile|pick_file', () => ({ path: '/native/staging/late.mp3', name: 'late.mp3', size: 1000, mime: 'audio/mpeg', hash: 'late-hash' }));
     mockInvoke('import_voice_clone_sample', () => pending.promise);
     const { wrapper } = await renderOverlay();
     await choose(wrapper, '音色模式', '音色复刻');
-    await wrapper.get('button[aria-label="参考音频"]').trigger('click');
+    const upload = await openCloneUpload(wrapper);
+    await upload.trigger('submit');
     await flushPromises();
     await wrapper.setProps({ active: false });
-    pending.resolve({ id: 'late-sample', fileName: 'late.mp3', format: 'mp3', bytes: 1000 });
+    expect(deleteTempFile).not.toHaveBeenCalledWith('/native/staging/late.mp3');
+    const asset = { ...cloneAsset('late-sample', 'late.mp3'), format: 'mp3' as const };
+    pending.resolve(asset);
     await flushPromises();
-    expect(invokeMock).toHaveBeenCalledWith('discard_voice_clone_sample', { sampleId: 'late-sample' });
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'discard_voice_clone_sample' || command === 'delete_voice_clone_sample')).toHaveLength(0);
+    expect(useVoiceLibraryStore().samples).toEqual([asset]);
+    expect(deleteTempFile).toHaveBeenCalledWith('/native/staging/late.mp3');
     expect(updates()).toHaveLength(0);
     expect(database.voice.tts.cloneSampleId).toBe('');
   });
 
-  it('样本草稿已提交保存时，失活清理等待真实保存完成', async () => {
+  it('全局绑定保存途中离开不删除已注册声音资产', async () => {
     const pending = deferred<ConfigSaveResult>();
-    const asset = { id: 'saving-sample', fileName: 'saving.wav', format: 'wav', bytes: 96000 };
+    const asset = cloneAsset('saving-sample', 'saving.wav');
     mockInvoke('plugin:vcp-mobile|pick_file', () => ({ path: '/native/staging/saving.wav', name: 'saving.wav', size: 96000, mime: 'audio/wav', hash: 'saving-hash' }));
     mockInvoke('import_voice_clone_sample', () => asset);
-    mockInvoke('get_voice_clone_sample', () => asset);
     mockInvoke('update_settings', () => pending.promise);
     const { wrapper } = await renderOverlay();
     await choose(wrapper, '音色模式', '音色复刻');
-    await wrapper.get('button[aria-label="参考音频"]').trigger('click');
+    const upload = await openCloneUpload(wrapper);
+    await upload.trigger('submit');
     await flushPromises();
+    await closeCloneManager();
     await leaveVoiceSettings(wrapper);
     expect(updates()).toHaveLength(1);
     await wrapper.setProps({ active: false });
@@ -666,7 +790,8 @@ describe('语音设置使用正式设置快照', () => {
     expect(invokeMock.mock.calls.filter(([command]) => command === 'discard_voice_clone_sample')).toHaveLength(0);
     pending.resolve(saved({ 'voice.tts.mode': 'clone', 'voice.tts.cloneSampleId': asset.id }));
     await flushPromises();
-    expect(invokeMock).toHaveBeenCalledWith('discard_voice_clone_sample', { sampleId: asset.id });
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'discard_voice_clone_sample' || command === 'delete_voice_clone_sample')).toHaveLength(0);
+    expect(useVoiceLibraryStore().samples).toEqual([asset]);
     expect(useSettingsStore().settings?.voice.tts.cloneSampleId).toBe(asset.id);
   });
 });

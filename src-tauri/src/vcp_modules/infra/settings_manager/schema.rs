@@ -668,7 +668,7 @@ mod tests {
         assert!(!normalized.contains_key("tts.mode"));
         assert_eq!(
             normalize_domain(ConfigDomain::Voice, &json!({"tts":{"mode":false}}))["tts"]["mode"],
-            "builtin"
+            "none"
         );
     }
 

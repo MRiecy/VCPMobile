@@ -12,10 +12,12 @@ export const settingDescriptor = (path: SettingsFieldPath) => {
 export const settingOptions = <P extends SettingsFieldPath>(path: P, labels: Record<string, string>) =>
   (settingDescriptor(path).options ?? []).map(value => ({ value: value as SettingsFieldValue<P>, label: labels[value] ?? value }));
 
-export const MIMO_TTS_MODES = [
-  { value: 'builtin', label: '预置音色', model: 'mimo-v2.5-tts' },
-  { value: 'clone', label: '音色复刻', model: 'mimo-v2.5-tts-voiceclone' },
-] as const;
+const ttsModels: Record<string, string> = {
+  none: '', builtin: 'mimo-v2.5-tts', clone: 'mimo-v2.5-tts-voiceclone',
+};
+export const MIMO_TTS_MODES = settingOptions('voice.tts.mode', {
+  none: '无', builtin: '预置音色', clone: '音色复刻',
+}).map(option => ({ ...option, model: ttsModels[option.value] }));
 
 // IDs are the official API values, including the four Chinese voice IDs.
 const voiceLabels: Record<string, string> = {

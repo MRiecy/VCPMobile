@@ -8,6 +8,8 @@ date: 2026-07-04
 
 # 13. Agent与群组设置面板
 
+2026-10-28 Agent 设置更新：`AgentSettingsView` 使用外置章节头与 8px 台面，`AgentVoiceSettings` 编辑随 Agent 保存的独立音色，声音库管理与试听复用 voice 领域组件。`saveAgent(draft, baseline)` 在 Rust 事务内比较实际编辑字段并返回最新配置；返回等待保存及试听停止，失败留页，迟到响应不得覆盖其他 Agent。原模型参数和删除拦截保持。音色支持“无”，删除资产不级联改写 Agent。下文历史代码示例须以当前实现及[实施决策](../../../../plan/vcpmobile-agent-voice-and-settings-refactor/05-实施决策与验证记录.md)核对。
+
 2026-10-19 群设置更新：`GroupSettingsView` 使用语音同款 `SettingsCanvas`，提供独立群聊模式、顺序上下调整、模式专属 JEV/标签编辑，以及成员模型上下文窗口。`chatMode` 默认顺序发言，不继承共享 `mode`；界面不提供跟随选项，不展示本机覆盖或同步实现说明。返回先保存，失败留页并保留草稿；`saveGroup(draft, baseline)` 只提交实际改动的字段，接纳后端返回的最新共享资料。JEV 连接设置在全局「JEV 设置」页面，群页面管理讨论行为。
 
 ## 1. 概述
@@ -77,7 +79,7 @@ date: 2026-07-04
 | 原则 | 说明 |
 |------|------|
 | **SlidePage 导航** | 设置面板不使用路由跳转，而是通过 `SlidePage` 组件从右侧滑入，保持主聊天视图的 DOM 活性 |
-| **全量保存，防抖触发** | 单个字段变更不调用 `update_agent_config`，而是触发防抖后的 `save_agent_config` 全量写入，简化前端逻辑 |
+| **携基准保存** | 离开页面时提交草稿与 baseline，由 Rust 原子合并实际编辑字段；冲突不覆盖后来的设置 |
 | **快照比对** | 通过 `originalConfig` 深拷贝快照，仅当用户真正修改内容后才发起后端调用，避免无意义 IO |
 | **Store 化 IPC** | 所有 IPC 调用封装在 `assistant.ts` Pinia Store 中，视图层不直接 `invoke`，便于统一通知与错误处理 |
 | **头像缓存所有权** | 头像上传成功后由 `avatarStore.refreshAvatar()` 统一失效、提升 generation 并重读，视图不维护版本戳 |
@@ -600,7 +602,7 @@ Rust: 读取 avatars 表 → 返回 { mime_type, image_data, dominant_color }
 | Command | 调用方 | 参数 | 返回值 | 说明 |
 |---------|--------|------|--------|------|
 | `read_agent_config` | `AgentSettingsView.loadConfig` | `{ agentId, allowDefault }` | `AgentConfig` | 读取单个 Agent 配置，含话题列表 |
-| `save_agent_config` | `assistant.saveAgent` | `{ agent }` | `boolean` | 全量写入 Agent 配置（事务化） |
+| `save_agent_config` | `assistant.saveAgent` | `{ agent, baseline }` | `AgentConfigDto` | 事务内比较基准并保存实际编辑字段，返回权威配置 |
 | `update_agent_config` | *(前端未直接调用)* | `{ agentId, updates }` | `AgentConfig` | JSON Patch 风格增量更新，保留供外部使用 |
 | `read_group_config` | `GroupSettingsView.fetchGroupConfig` | `{ groupId }` | `GroupConfig` | 读取群组配置 |
 | `save_group_config` | `assistant.saveGroup` | `{ group }` | `boolean` | 全量写入群组配置 |

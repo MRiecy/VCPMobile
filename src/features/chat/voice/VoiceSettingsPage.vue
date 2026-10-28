@@ -17,7 +17,7 @@ import { useSettingsPageSession } from '../../settings/editing/useSettingsPageSe
 import { SETTINGS_DEFAULTS, MIMO_TTS_MODES, MIMO_VOICES, settingDescriptor, settingOptions } from './settings';
 import type { VoiceConfig } from '../../../core/config/generated/config';
 import { applySettingsFields, type SettingsFieldValues } from '../../../core/config/fields';
-import VoiceCloneSample from './VoiceCloneSample.vue';
+import VoiceLibraryControl from './VoiceLibraryControl.vue';
 import VoiceTtsPreview from './VoiceTtsPreview.vue';
 
 const props = defineProps<SettingsPageProps>();
@@ -30,11 +30,11 @@ const openingStyleGuidance = ref(false);
 const stoppingPreview = ref(false);
 const previewStopError = ref('');
 const preview = ref<InstanceType<typeof VoiceTtsPreview> | null>(null);
-const cloneSample = ref<InstanceType<typeof VoiceCloneSample> | null>(null);
+const cloneSample = ref<InstanceType<typeof VoiceLibraryControl> | null>(null);
 const previewSettings = computed<VoiceConfig>(() =>
   applySettingsFields(settingsStore.settings ?? SETTINGS_DEFAULTS, draft.value ?? {}).voice,
 );
-const ttsModel = computed(() => MIMO_TTS_MODES.find(mode => mode.value === draft.value?.['voice.tts.mode'])?.model ?? MIMO_TTS_MODES[0].model);
+const ttsModel = computed(() => MIMO_TTS_MODES.find(mode => mode.value === draft.value?.['voice.tts.mode'])?.model ?? '');
 const disabled = computed(() => !props.active || leaving.value || openingStyleGuidance.value || stoppingPreview.value);
 type DurationField = 'voice.vad.endSilenceMs' | 'voice.vad.playbackOnsetMs';
 type SelectionField = 'voice.asr.language' | 'voice.asr.inputEncoding' | 'voice.tts.voice' | 'voice.tts.mode' | 'voice.vad.sensitivity' | DurationField;
@@ -151,6 +151,7 @@ const openStyleGuidance = async () => {
   previewStopError.value = '';
   try {
     cloneSample.value?.cancelPending();
+    await cloneSample.value?.stop();
     await preview.value?.stop();
     // A covering page ends this visit in the voice overlay. Commit the visible
     // draft before navigating, just like leaving the global settings page.
@@ -168,6 +169,7 @@ const beforeLeave = async () => {
   stoppingPreview.value = true;
   try {
     cloneSample.value?.cancelPending();
+    await cloneSample.value?.stop();
     await preview.value?.stop();
     return await session.prepareLeave();
   } finally {
@@ -222,7 +224,7 @@ defineExpose({ beforeLeave });
           </SettingsSection>
 
           <SettingsSection index="03" title="语音朗读 TTS">
-            <template #description>模型：<code class="font-mono">{{ ttsModel }}</code></template>
+            <template #description><template v-if="ttsModel">模型：<code class="font-mono">{{ ttsModel }}</code></template><span v-else>未选择音色</span></template>
             <div>
               <SettingsRow title="音色模式" :value="selectedLabel('voice.tts.mode')" clickable
                 :disabled="disabled" aria-label="音色模式" aria-haspopup="dialog"
@@ -237,11 +239,12 @@ defineExpose({ beforeLeave });
                 </template>
               </SettingsRow>
             </div>
-            <VoiceCloneSample v-show="draft['voice.tts.mode'] === 'clone'" ref="cloneSample"
-              :model-value="draft['voice.tts.cloneSampleId']" :active="active" :disabled="disabled || preview?.busy"
-              :settle-before-discard="session.settlePending"
-              @update:model-value="session.edit('voice.tts.cloneSampleId', $event)" />
-            <VoiceTtsPreview ref="preview" :settings="previewSettings" :active="active" :disabled="disabled || cloneSample?.importing" />
+            <div v-show="draft['voice.tts.mode'] === 'clone'">
+              <VoiceLibraryControl ref="cloneSample"
+                :model-value="draft['voice.tts.cloneSampleId']" :active="active && draft['voice.tts.mode'] === 'clone'" :disabled="disabled || preview?.busy"
+                @update:model-value="session.edit('voice.tts.cloneSampleId', $event)" />
+            </div>
+            <VoiceTtsPreview v-if="draft['voice.tts.mode'] !== 'none'" ref="preview" :settings="previewSettings" :active="active" :disabled="disabled || cloneSample?.busy" />
           </SettingsSection>
         </section>
 

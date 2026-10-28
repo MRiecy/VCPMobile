@@ -1,4 +1,5 @@
 export interface OverlayActionItem {
+  id?: string;
   label: string;
   icon?: any; // @lucide/vue component
   danger?: boolean;

@@ -245,6 +245,7 @@ async fn convert_history_rows(
                     max_output_tokens: 0,
                     stream_output: false,
                     use_temperature: false,
+                    voice: Default::default(),
                     topics: vec![],
                 }
             })
@@ -1530,6 +1531,7 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
             "ownerId": owner_id,
             "ownerType": owner_type,
             "groupId": owner_id,
+            "agentId": final_agent_id,
             "topicId": topic_id,
             "isGroupMessage": true,
         }))

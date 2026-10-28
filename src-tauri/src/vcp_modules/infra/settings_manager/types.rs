@@ -85,12 +85,13 @@ impl VoiceInputEncoding {
 #[serde(rename_all = "lowercase")]
 pub enum VoiceTtsMode {
     #[default]
+    None,
     Builtin,
     Clone,
 }
 
 impl VoiceTtsMode {
-    pub const ALL: [Self; 2] = [Self::Builtin, Self::Clone];
+    pub const ALL: [Self; 3] = [Self::None, Self::Builtin, Self::Clone];
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]

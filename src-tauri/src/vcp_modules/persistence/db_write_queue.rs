@@ -836,6 +836,36 @@ mod tests {
     }
 
     #[test]
+    fn sync_agent_upsert_preserves_device_voice_and_excludes_it_from_the_dto() {
+        let mut connection = rusqlite::Connection::open_in_memory().expect("database");
+        connection.execute_batch(include_str!("../../../migrations/0100_baseline_v2.sql"))
+            .expect("shared schema");
+        connection.execute_batch(include_str!("../../../migrations/0105_agent_voice_config.sql"))
+            .expect("local voice schema");
+        let mut agent = crate::vcp_modules::agent_service::create_default_config("a");
+        agent.voice.enabled = true;
+        agent.voice.clone_sample_id = "local-sample".into();
+        let voice = serde_json::to_string(&agent.voice).expect("encode voice");
+        connection.execute(
+            "INSERT INTO agents(owner_type,agent_id,name,model,voice_config,updated_at) VALUES('agent','a','old','old',?,1)",
+            [&voice],
+        ).expect("seed local voice");
+        agent.name = "remote name".into();
+        agent.model = "remote model".into();
+        let dto = AgentSyncDTO::from(&agent);
+        assert!(serde_json::to_value(&dto).expect("DTO").get("voice").is_none());
+        let tx = connection.transaction().expect("transaction");
+        DbWriteQueue::rusqlite_upsert_agent(&tx, "a", &dto).expect("production sync writer");
+        tx.commit().expect("commit");
+        let (stored, name): (String, String) = connection.query_row(
+            "SELECT voice_config,name FROM agents WHERE agent_id='a'", [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).expect("read");
+        assert_eq!(stored, voice);
+        assert_eq!(name, "remote name");
+    }
+
+    #[test]
     fn sync_entity_upserts_never_rewrite_tombstones_or_children() {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open test database");
         conn.execute_batch(include_str!("../../../migrations/0100_baseline_v2.sql"))

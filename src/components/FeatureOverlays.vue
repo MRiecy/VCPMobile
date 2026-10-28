@@ -86,6 +86,7 @@ const globalSearchMounted = createFirstOpenLatch(() => overlayStore.isGlobalSear
       :data-vcp-modal-id="pageModalId('agentSettings')"
       v-if="agentSettingsMounted"
       :is-open="overlayStore.isAgentSettingsOpen"
+      :active="overlayStore.pageStackTop?.type === 'agentSettings' && overlayStore.pageStackTop?.id === overlayStore.agentSettingsId"
       :id="overlayStore.agentSettingsId"
       :z-index="overlayStore.getPageZIndex('agentSettings')"
       @close="overlayStore.closeAgentSettings()"

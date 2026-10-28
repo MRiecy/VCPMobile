@@ -2,130 +2,33 @@
 //! native picker's temporary copy. A narration reads and encodes its reference
 //! once; subsequent segments share the resulting data URL even after replacement.
 
-use crate::vcp_modules::settings_manager;
+mod registry;
+
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
-    collections::HashSet,
-    io::ErrorKind,
     path::{Path, PathBuf},
     sync::{Arc, LazyLock},
 };
 use tauri::{AppHandle, Manager, Runtime};
-use tokio::{io::AsyncReadExt, sync::Mutex};
+use tokio::{io::AsyncReadExt, sync::{Mutex, OwnedMutexGuard}};
 use tokio_util::sync::CancellationToken;
 
 const MAX_BASE64_BYTES: usize = 10_000_000;
 pub(super) const MAX_SAMPLE_BYTES: u64 = 7_000_000;
-const MAX_METADATA_BYTES: u64 = 4096;
-const MAX_RECOVERY_ENTRIES: usize = 256;
-static SAMPLE_FILES: LazyLock<Mutex<SampleFiles>> =
-    LazyLock::new(|| Mutex::new(SampleFiles::default()));
+static SAMPLE_FILES: LazyLock<Arc<Mutex<()>>> = LazyLock::new(|| Arc::new(Mutex::new(())));
 
-#[derive(Default)]
-struct SampleFiles {
-    recovered_roots: HashSet<PathBuf>,
+/// Serializes publication, reads and explicit deletion of local audio assets.
+struct VoiceLibraryGuard {
+    root: PathBuf,
+    _guard: OwnedMutexGuard<()>,
 }
 
-impl SampleFiles {
-    async fn recover_from_snapshot(
-        &mut self,
-        root: &Path,
-        snapshot: &settings_manager::ConfigSnapshot,
-    ) -> Result<(), String> {
-        match selected_sample_id(snapshot) {
-            Some(selected) => self.recover(root, selected).await,
-            None => {
-                // An invalid file identifier cannot establish a filesystem
-                // target. Leave this process's files untouched.
-                self.recovered_roots.insert(root.to_owned());
-                Ok(())
-            }
-        }
-    }
-
-    async fn discard_from_snapshot(
-        &mut self,
-        root: &Path,
-        id: &str,
-        snapshot: &settings_manager::ConfigSnapshot,
-    ) -> Result<(), String> {
-        let path = sample_path(root, id)?;
-        self.recover_from_snapshot(root, snapshot).await?;
-        let Some(selected) = selected_sample_id(snapshot) else {
-            return Ok(());
-        };
-        if selected == id {
-            return Ok(());
-        }
-        remove_sample_files(&path).await
-    }
-
-    async fn recover(&mut self, root: &Path, selected: &str) -> Result<(), String> {
-        if self.recovered_roots.contains(root) {
-            return Ok(());
-        }
-        let mut entries = match tokio::fs::read_dir(root).await {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == ErrorKind::NotFound => {
-                self.recovered_roots.insert(root.to_owned());
-                return Ok(());
-            }
-            Err(error) => return Err(error.to_string()),
-        };
-        // This runs before the first import/reader for this root. Subsequent
-        // accesses preserve all in-process drafts, even when not selected yet.
-        for _ in 0..MAX_RECOVERY_ENTRIES {
-            let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? else {
-                self.recovered_roots.insert(root.to_owned());
-                return Ok(());
-            };
-            if !entry.file_type().await.map_err(|e| e.to_string())?.is_dir() {
-                continue;
-            }
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            if name == selected {
-                continue;
-            }
-            let id = name.strip_prefix(".pending-").unwrap_or(name);
-            if sample_path(root, id).is_err() {
-                continue;
-            }
-            if let Err(error) = remove_sample_files(&entry.path()).await {
-                log::warn!("[VoiceSample] orphan cleanup skipped: {error}");
-            }
-        }
-        // A pathological directory cannot delay first narration indefinitely.
-        // Any remainder remains eligible on the next process start.
-        log::warn!("[VoiceSample] startup cleanup reached its entry budget");
-        self.recovered_roots.insert(root.to_owned());
-        Ok(())
-    }
-
-    async fn recover_from_settings<R: Runtime>(
-        &mut self,
-        app: &AppHandle<R>,
-        root: &Path,
-    ) -> Result<(), String> {
-        if self.recovered_roots.contains(root) {
-            return Ok(());
-        }
-        let snapshot = settings_manager::read_config_snapshot(app.clone(), app.state()).await?;
-        self.recover_from_snapshot(root, &snapshot).await
-    }
-}
-
-/// Settings already contain canonical values. File identifiers are checked
-/// independently before using them as filesystem targets.
-fn selected_sample_id(snapshot: &settings_manager::ConfigSnapshot) -> Option<&str> {
-    let selected = snapshot.data.voice.tts.clone_sample_id.as_str();
-    if !selected.is_empty() && sample_path(Path::new(""), selected).is_err() {
-        return None;
-    }
-    Some(selected)
+async fn lock_voice_library<R: Runtime>(app: &AppHandle<R>) -> Result<VoiceLibraryGuard, String> {
+    // This acquisition is selected against narration cancellation. It must
+    // remain side-effect free; maintenance belongs to a durable task below.
+    Ok(VoiceLibraryGuard { root: sample_root(app)?, _guard: SAMPLE_FILES.clone().lock_owned().await })
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -136,6 +39,10 @@ pub enum CloneSampleFormat {
 }
 
 impl CloneSampleFormat {
+    fn extension(self) -> &'static str {
+        match self { Self::Mp3 => "mp3", Self::Wav => "wav" }
+    }
+
     fn mime(self) -> &'static str {
         match self {
             Self::Mp3 => "audio/mpeg",
@@ -146,11 +53,16 @@ impl CloneSampleFormat {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct VoiceCloneSample {
+pub struct VoiceCloneModelDto {
     pub id: String,
+    pub name: String,
     pub file_name: String,
     pub format: CloneSampleFormat,
-    pub bytes: u64,
+    pub file_bytes: u64,
+    pub duration_ms: u32,
+    pub file_hash: String,
+    pub created_at: u64,
+    pub updated_at: u64,
 }
 
 #[derive(Clone)]
@@ -158,19 +70,12 @@ pub(super) struct PreparedCloneSample {
     pub data_url: Arc<str>,
 }
 
-pub(super) struct VoiceSettingsSnapshot {
-    pub settings: Arc<settings_manager::Settings>,
-    /// Only narration is affected by missing/corrupt reference audio. The chat
-    /// request can keep using its settings and continue normally.
-    pub sample: Result<Option<PreparedCloneSample>, String>,
-}
-
 fn sample_root<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     Ok(app
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?
-        .join("voice-samples"))
+        .join("voice_library"))
 }
 
 fn sample_path(root: &Path, id: &str) -> Result<PathBuf, String> {
@@ -350,22 +255,25 @@ fn detect_format(data: &[u8]) -> Result<CloneSampleFormat, String> {
     Err("请选择包含有效音频的 MP3 或 WAV 文件。".into())
 }
 
-async fn remove_sample_files(directory: &Path) -> Result<(), String> {
-    // Only these two application-owned files are removed. Unexpected contents
-    // are never recursively deleted.
-    for file in ["audio", "metadata.json"] {
-        if let Err(error) = tokio::fs::remove_file(directory.join(file)).await {
-            if error.kind() != ErrorKind::NotFound {
-                return Err(error.to_string());
-            }
+fn duration_ms(bytes: &[u8]) -> Result<u32, String> {
+    use std::io::Cursor;
+    use symphonia::core::{formats::{probe::Hint, TrackType}, io::MediaSourceStream};
+    let stream = MediaSourceStream::new(Box::new(Cursor::new(bytes.to_vec())), Default::default());
+    let mut reader = symphonia::default::get_probe()
+        .probe(&Hint::new(), stream, Default::default(), Default::default())
+        .map_err(|_| "无法读取参考音频时长。".to_string())?;
+    let track = reader.default_track(TrackType::Audio).ok_or("参考音频没有音轨。")?;
+    let track_id = track.id;
+    let time_base = track.time_base.ok_or("参考音频缺少时间基准。")?;
+    let mut ticks = 0u64;
+    while let Some(packet) = reader.next_packet().map_err(|_| "参考音频数据损坏，无法读取时长。")? {
+        if packet.track_id == track_id {
+            ticks = ticks.checked_add(packet.dur.get()).ok_or("参考音频时长超出范围。")?;
         }
     }
-    if let Err(error) = tokio::fs::remove_dir(directory).await {
-        if error.kind() != ErrorKind::NotFound {
-            return Err(error.to_string());
-        }
-    }
-    Ok(())
+    let millis = (u128::from(ticks) * u128::from(time_base.numer.get()) * 1000)
+        .div_ceil(u128::from(time_base.denom.get()));
+    u32::try_from(millis).ok().filter(|value| *value > 0).ok_or_else(|| "参考音频时长无效。".into())
 }
 
 fn display_name(name: Option<&str>, format: CloneSampleFormat) -> String {
@@ -394,121 +302,109 @@ fn display_name(name: Option<&str>, format: CloneSampleFormat) -> String {
 async fn import_picked(
     root: &Path,
     source: &Path,
-    name: Option<&str>,
-) -> Result<VoiceCloneSample, String> {
+    name: &str,
+    file_name: Option<&str>,
+) -> Result<VoiceCloneModelDto, String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+        return Err("音色名称需要包含 1–80 个字符，不能包含控制字符。".into());
+    }
     let bytes = bounded_read(source, MAX_SAMPLE_BYTES).await?;
-    let format = detect_format(&bytes)?;
-    tokio::fs::create_dir_all(root)
-        .await
-        .map_err(|e| e.to_string())?;
+    let (bytes, format, duration_ms, file_hash) = tokio::task::spawn_blocking(move || {
+        let format = detect_format(&bytes)?;
+        let duration_ms = duration_ms(&bytes)?;
+        let file_hash = hex::encode(Sha256::digest(&bytes));
+        Ok::<_, String>((bytes, format, duration_ms, file_hash))
+    }).await.map_err(|_| "参考音频检查任务异常结束。".to_string())??;
     let id = uuid::Uuid::new_v4().simple().to_string();
-    let sample = VoiceCloneSample {
-        id: id.clone(),
-        file_name: display_name(name, format),
+    let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let sample = VoiceCloneModelDto {
+        id,
+        name: name.into(),
+        file_name: display_name(file_name, format),
         format,
-        bytes: bytes.len() as u64,
+        file_bytes: bytes.len() as u64,
+        duration_ms,
+        file_hash,
+        created_at: now,
+        updated_at: now,
     };
-    let destination = sample_path(root, &id)?;
-    let pending = root.join(format!(".pending-{id}"));
-    tokio::fs::create_dir(&pending)
-        .await
-        .map_err(|e| e.to_string())?;
-    let result = async {
-        tokio::fs::write(pending.join("audio"), bytes)
-            .await
-            .map_err(|e| e.to_string())?;
-        let metadata = serde_json::to_vec(&sample).map_err(|e| e.to_string())?;
-        tokio::fs::write(pending.join("metadata.json"), metadata)
-            .await
-            .map_err(|e| e.to_string())?;
-        tokio::fs::rename(&pending, &destination)
-            .await
-            .map_err(|e| e.to_string())?;
-        Ok(sample)
-    }
-    .await;
-    if result.is_err() {
-        let _ = remove_sample_files(&pending).await;
-    }
-    result
+    registry::publish(root, sample, &bytes).await
 }
 
 #[tauri::command]
 pub async fn import_voice_clone_sample<R: Runtime>(
     app: AppHandle<R>,
     path: String,
-    name: Option<String>,
-) -> Result<VoiceCloneSample, String> {
+    name: String,
+    file_name: Option<String>,
+) -> Result<VoiceCloneModelDto, String> {
     let staging = app
         .path()
         .app_cache_dir()
         .map_err(|e| e.to_string())?
         .join("uploads");
     let source = picked_path(&staging, Path::new(&path)).await?;
-    let result = async {
-        let root = sample_root(&app)?;
-        let mut guard = SAMPLE_FILES.lock().await;
-        guard.recover_from_settings(&app, &root).await?;
-        import_picked(&root, &source, name.as_deref()).await
-    }
-    .await;
-    // Once admitted, this owner consumes the selected temporary copy regardless
-    // of format, size or persistence failure. The original external file is untouched.
-    let _ = tokio::fs::remove_file(source).await;
-    result
+    let guard = lock_voice_library(&app).await?;
+    // Publication and cleanup remain owned even if the requesting page leaves.
+    tokio::spawn(async move {
+        let guard = guard;
+        let result = async {
+            registry::finish_deletions(&guard.root).await?;
+            registry::cleanup_pending(&guard.root).await?;
+            import_picked(&guard.root, &source, &name, file_name.as_deref()).await
+        }.await;
+        let _ = tokio::fs::remove_file(source).await;
+        result
+    }).await.map_err(|_| "声音模型导入任务异常结束。".to_string())?
 }
 
-async fn read_metadata(root: &Path, id: &str) -> Result<Option<VoiceCloneSample>, String> {
-    let path = sample_path(root, id)?;
-    match tokio::fs::metadata(path.join("metadata.json")).await {
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(error.to_string()),
-        Ok(_) => {}
+async fn read_metadata(root: &Path, id: &str) -> Result<Option<VoiceCloneModelDto>, String> {
+    sample_path(root, id)?;
+    let Some(sample) = registry::load(root).await?.samples.into_iter().find(|sample| sample.id == id) else { return Ok(None); };
+    let file = tokio::fs::metadata(registry::audio_path(root, &sample)?).await
+        .map_err(|_| "声音模型音频在本机缺失，请重新导入。".to_string())?;
+    if !file.is_file() || file.len() != sample.file_bytes {
+        return Err("声音模型音频已损坏，请重新导入。".into());
     }
-    let bytes = bounded_read(&path.join("metadata.json"), MAX_METADATA_BYTES).await?;
-    let metadata: VoiceCloneSample =
-        serde_json::from_slice(&bytes).map_err(|_| "声音样本信息损坏，请重新导入。")?;
-    if metadata.id != id || metadata.bytes == 0 {
-        return Err("声音样本信息损坏，请重新导入。".into());
-    }
-    if metadata.bytes > MAX_SAMPLE_BYTES {
-        return Err("声音样本过大，文件不能超过 7 MB，请重新导入。".into());
-    }
-    match tokio::fs::metadata(path.join("audio")).await {
-        Ok(file) if file.is_file() && file.len() == metadata.bytes => Ok(Some(metadata)),
-        Err(error) if error.kind() != ErrorKind::NotFound => Err(error.to_string()),
-        _ => Ok(None),
-    }
+    Ok(Some(sample))
 }
 
 #[tauri::command]
 pub async fn get_voice_clone_sample<R: Runtime>(
     app: AppHandle<R>,
     sample_id: String,
-) -> Result<Option<VoiceCloneSample>, String> {
+) -> Result<Option<VoiceCloneModelDto>, String> {
     if sample_id.is_empty() {
         return Ok(None);
     }
-    let root = sample_root(&app)?;
-    let mut guard = SAMPLE_FILES.lock().await;
-    guard.recover_from_settings(&app, &root).await?;
-    read_metadata(&root, &sample_id).await
+    let guard = lock_voice_library(&app).await?;
+    read_metadata(&guard.root, &sample_id).await
 }
 
 #[tauri::command]
-pub async fn discard_voice_clone_sample<R: Runtime>(
+pub async fn list_voice_clone_samples<R: Runtime>(
     app: AppHandle<R>,
-    sample_id: String,
-) -> Result<(), String> {
-    if sample_id.is_empty() {
-        return Ok(());
-    }
-    let root = sample_root(&app)?;
-    let mut guard = SAMPLE_FILES.lock().await;
-    let snapshot = settings_manager::read_config_snapshot(app.clone(), app.state()).await?;
-    guard
-        .discard_from_snapshot(&root, &sample_id, &snapshot)
-        .await
+) -> Result<Vec<VoiceCloneModelDto>, String> {
+    let guard = lock_voice_library(&app).await?;
+    tokio::spawn(async move {
+        let guard = guard;
+        registry::finish_deletions(&guard.root).await?;
+        registry::cleanup_pending(&guard.root).await?;
+        let mut samples = registry::load(&guard.root).await?.samples;
+        samples.sort_by(|left, right| right.created_at.cmp(&left.created_at).then_with(|| left.id.cmp(&right.id)));
+        Ok(samples)
+    }).await.map_err(|_| "声音库读取任务异常结束。".to_string())?
+}
+
+#[tauri::command]
+pub async fn delete_voice_clone_sample<R: Runtime>(app: AppHandle<R>, sample_id: String) -> Result<bool, String> {
+    let guard = lock_voice_library(&app).await?;
+    sample_path(&guard.root, &sample_id)?;
+    tokio::spawn(async move {
+        let guard = guard;
+        registry::delete(&guard.root, &sample_id).await
+    }).await.map_err(|_| "声音模型删除任务异常结束。".to_string())?
 }
 
 fn encode_sample(
@@ -536,19 +432,19 @@ fn encode_sample(
     })
 }
 
-async fn read_sample(root: &Path, id: &str) -> Result<(Vec<u8>, CloneSampleFormat), String> {
+async fn read_sample(root: &Path, id: &str) -> Result<Option<(VoiceCloneModelDto, Vec<u8>)>, String> {
     if id.is_empty() {
-        return Err("请先导入声音复刻的参考音频。".into());
+        return Ok(None);
     }
-    let path = sample_path(root, id)?;
-    let metadata = read_metadata(root, id)
-        .await?
-        .ok_or("声音样本在本机不存在，请重新导入。")?;
-    let bytes = bounded_read(&path.join("audio"), MAX_SAMPLE_BYTES).await?;
-    if detect_format(&bytes)? != metadata.format || bytes.len() as u64 != metadata.bytes {
-        return Err("声音样本文件已损坏，请重新导入。".into());
-    }
-    Ok((bytes, metadata.format))
+    let Some(metadata) = read_metadata(root, id).await? else { return Ok(None); };
+    let bytes = bounded_read(&registry::audio_path(root, &metadata)?, MAX_SAMPLE_BYTES).await?;
+    tokio::task::spawn_blocking(move || {
+        if detect_format(&bytes)? != metadata.format || bytes.len() as u64 != metadata.file_bytes
+            || hex::encode(Sha256::digest(&bytes)) != metadata.file_hash {
+            return Err("声音样本文件已损坏，请重新导入。".into());
+        }
+        Ok(Some((metadata, bytes)))
+    }).await.map_err(|_| "声音模型校验任务异常结束。".to_string())?
 }
 
 async fn encode_prepared(
@@ -567,98 +463,33 @@ pub(super) async fn prepare_clone_sample<R: Runtime>(
     app: &AppHandle<R>,
     id: &str,
     cancel: &CancellationToken,
-) -> Result<PreparedCloneSample, String> {
-    let root = sample_root(app)?;
-    let mut guard = tokio::select! {
-        biased;
-        _ = cancel.cancelled() => return Err(super::network::CANCELLED.into()),
-        guard = SAMPLE_FILES.lock() => guard,
-    };
-    tokio::select! {
-        biased;
-        _ = cancel.cancelled() => return Err(super::network::CANCELLED.into()),
-        result = guard.recover_from_settings(app, &root) => result?,
-    };
-    let (bytes, format) = tokio::select! {
-        biased;
-        _ = cancel.cancelled() => return Err(super::network::CANCELLED.into()),
-        result = read_sample(&root, id) => result?,
-    };
-    drop(guard);
-    encode_prepared(bytes, format, cancel).await
+) -> Result<Option<PreparedCloneSample>, String> {
+    let Some((metadata, bytes)) = read_clone_sample_audio(app, id, cancel).await? else { return Ok(None); };
+    encode_prepared(bytes, metadata.format, cancel).await.map(Some)
 }
 
-pub(super) async fn snapshot_voice_settings<R: Runtime>(
+pub(super) async fn read_clone_sample_audio<R: Runtime>(
     app: &AppHandle<R>,
+    id: &str,
     cancel: &CancellationToken,
-) -> Result<VoiceSettingsSnapshot, String> {
-    // Lock ordering is sample files -> settings. Settings writers run reference
-    // cleanup only after publishing the committed configuration. A replacement may commit
-    // while this snapshot reads, but its cleanup cannot remove the captured file.
-    let mut guard = tokio::select! {
+) -> Result<Option<(VoiceCloneModelDto, Vec<u8>)>, String> {
+    let guard = tokio::select! {
         biased;
         _ = cancel.cancelled() => return Err(super::network::CANCELLED.into()),
-        guard = SAMPLE_FILES.lock() => guard,
+        guard = lock_voice_library(app) => guard?,
     };
-    let snapshot = tokio::select! {
-        biased;
-        _ = cancel.cancelled() => return Err(super::network::CANCELLED.into()),
-        result = settings_manager::read_config_snapshot(app.clone(), app.state()) => result?,
-    };
-    let root = sample_root(app);
-    if let Ok(root) = &root {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Err(super::network::CANCELLED.into()),
-            result = guard.recover_from_snapshot(root, &snapshot) => {
-                // Recovery is best-effort maintenance. A failure must not stop
-                // chat or narration that does not need a sample.
-                if let Err(error) = result { log::warn!("[VoiceSample] cleanup unavailable: {error}"); }
-            },
-        }
-    }
-    let settings = Arc::new(snapshot.data);
-    let audio = if settings.voice.tts.mode == settings_manager::VoiceTtsMode::Clone
-        && !settings.voice.connection.api_key.trim().is_empty() {
-        let read = async { read_sample(&root?, &settings.voice.tts.clone_sample_id).await };
-        Some(tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Err(super::network::CANCELLED.into()),
-            result = read => result,
-        })
-    } else {
-        None
-    };
-    drop(guard);
-    let sample = match audio {
-        None => Ok(None),
-        Some(Err(error)) => Err(error),
-        Some(Ok((bytes, format))) => encode_prepared(bytes, format, cancel).await.map(Some),
-    };
+    // Await the real read/hash owner before releasing the library lock. A token
+    // cancels admission and subsequent work, never abandons a running IO owner.
+    let result = read_sample(&guard.root, id).await;
     if cancel.is_cancelled() {
         return Err(super::network::CANCELLED.into());
     }
-    Ok(VoiceSettingsSnapshot { settings, sample })
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn selection_snapshot(selected: &str) -> settings_manager::ConfigSnapshot {
-        let mut data = settings_manager::Settings::default();
-        data.voice.tts.clone_sample_id = selected.into();
-        settings_manager::ConfigSnapshot {
-            data,
-            domains: std::collections::BTreeMap::from([(
-                settings_manager::ConfigDomain::Voice,
-                settings_manager::DomainStatus {
-                    revision: "1".into(),
-                    schema_version: 1,
-                },
-            )]),
-        }
-    }
 
     fn wav() -> Vec<u8> {
         let mut bytes = b"RIFF\x28\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0".to_vec();
@@ -685,6 +516,21 @@ mod tests {
         assert!(detect_format(&mp3()[..416]).is_err());
         assert!(detect_format(&wav()[..47]).is_err());
         assert!(detect_format(b"not an audio file.mp3").is_err());
+    }
+
+    #[test]
+    fn measures_pcm_frames_and_real_mp3_packets_instead_of_file_size() {
+        let mut pcm_wav = wav();
+        pcm_wav.resize(44 + 32_000, 0);
+        pcm_wav[4..8].copy_from_slice(&(36u32 + 32_000).to_le_bytes());
+        pcm_wav[40..44].copy_from_slice(&32_000u32.to_le_bytes());
+        assert_eq!(duration_ms(&pcm_wav).unwrap(), 1000);
+        let encoded = vcp_voice_mp3::encode_pcm16_mono(&vec![0; 16_000], || false).unwrap();
+        assert_eq!(detect_format(&encoded).unwrap(), CloneSampleFormat::Mp3);
+        // This encoder omits LAME/Xing metadata, so measured packets retain the
+        // actual encoder delay/padding instead of inventing a trim interval.
+        let duration = duration_ms(&encoded).unwrap();
+        assert!((500..670).contains(&duration), "duration={duration}");
     }
 
     #[test]
@@ -737,29 +583,16 @@ mod tests {
         bytes[40..44].copy_from_slice(&6_999_956u32.to_le_bytes());
         tokio::fs::write(&source, &bytes).await.unwrap();
 
-        let mut sample = import_picked(&root, &source, None).await.unwrap();
-        let (read, format) = read_sample(&root, &sample.id).await.unwrap();
+        let sample = import_picked(&root, &source, "声音", None).await.unwrap();
+        let (metadata, read) = read_sample(&root, &sample.id).await.unwrap().unwrap();
         assert_eq!(read, bytes);
-        assert_eq!(format, CloneSampleFormat::Wav);
+        assert_eq!(metadata.format, CloneSampleFormat::Wav);
 
         bytes.push(0);
         tokio::fs::write(&source, &bytes).await.unwrap();
-        assert!(import_picked(&root, &source, None).await.is_err());
+        assert!(import_picked(&root, &source, "声音", None).await.is_err());
 
-        let directory = sample_path(&root, &sample.id).unwrap();
-        tokio::fs::write(directory.join("audio"), &bytes).await.unwrap();
-        assert!(read_sample(&root, &sample.id).await.is_err());
-
-        // Persisted references from before the limit change also pass through
-        // the current cap before a preview or narration can encode them.
-        sample.bytes = bytes.len() as u64;
-        tokio::fs::write(
-            directory.join("metadata.json"),
-            serde_json::to_vec(&sample).unwrap(),
-        )
-        .await
-        .unwrap();
-        assert!(read_metadata(&root, &sample.id).await.is_err());
+        tokio::fs::write(registry::audio_path(&root, &sample).unwrap(), &bytes).await.unwrap();
         assert!(read_sample(&root, &sample.id).await.is_err());
     }
 
@@ -772,10 +605,10 @@ mod tests {
         let source = uploads.join("picked");
         tokio::fs::write(&source, wav()).await.unwrap();
         let source = picked_path(&uploads, &source).await.unwrap();
-        let sample = import_picked(&root, &source, Some("spoken.wav"))
+        let sample = import_picked(&root, &source, "声音", Some("spoken.wav"))
             .await
             .unwrap();
-        let directory = sample_path(&root, &sample.id).unwrap();
+        let audio = registry::audio_path(&root, &sample).unwrap();
         assert_eq!(
             read_metadata(&root, &sample.id)
                 .await
@@ -785,7 +618,7 @@ mod tests {
             "spoken.wav"
         );
         let prepared = encode_sample(
-            bounded_read(&directory.join("audio"), MAX_SAMPLE_BYTES)
+            bounded_read(&audio, MAX_SAMPLE_BYTES)
                 .await
                 .unwrap(),
             sample.format,
@@ -794,87 +627,71 @@ mod tests {
         .unwrap();
         let unrelated = root.join("unrelated");
         tokio::fs::write(&unrelated, "keep").await.unwrap();
-        remove_sample_files(&directory).await.unwrap();
-        assert!(read_metadata(&root, &sample.id).await.unwrap().is_none());
+        tokio::fs::remove_file(audio).await.unwrap();
+        assert!(read_metadata(&root, &sample.id).await.is_err());
         assert!(prepared.data_url.starts_with("data:audio/wav;base64,"));
         assert_eq!(tokio::fs::read(&unrelated).await.unwrap(), b"keep");
         assert!(picked_path(&uploads, &unrelated).await.is_err());
     }
 
     #[tokio::test]
-    async fn first_access_recovers_only_unselected_owned_files_and_keeps_live_drafts() {
+    async fn registry_reload_preserves_all_registered_assets_and_unknown_files() {
         let temp = tempfile::tempdir_in(".").unwrap();
         let root = temp.path().join("voice-samples");
         let source = temp.path().join("spoken.wav");
         tokio::fs::write(&source, wav()).await.unwrap();
-        let selected = import_picked(&root, &source, None).await.unwrap();
-        let abandoned = import_picked(&root, &source, None).await.unwrap();
-        let pending = root.join(format!(".pending-{}", uuid::Uuid::new_v4().simple()));
-        tokio::fs::create_dir(&pending).await.unwrap();
-        tokio::fs::write(pending.join("audio"), wav())
-            .await
-            .unwrap();
+        let first = import_picked(&root, &source, "第一", None).await.unwrap();
+        let second = import_picked(&root, &source, "第二", None).await.unwrap();
+        let third = import_picked(&root, &source, "第三", None).await.unwrap();
         let unknown = root.join(uuid::Uuid::new_v4().simple().to_string());
         tokio::fs::create_dir(&unknown).await.unwrap();
         tokio::fs::write(unknown.join("do-not-delete"), b"keep")
             .await
             .unwrap();
-        let mut files = SampleFiles::default();
-        let snapshot = selection_snapshot(&selected.id);
-        files.recover_from_snapshot(&root, &snapshot).await.unwrap();
-        assert!(read_metadata(&root, &selected.id).await.unwrap().is_some());
-        assert!(read_metadata(&root, &abandoned.id).await.unwrap().is_none());
-        assert!(!pending.exists());
+        let reopened = registry::load(&root).await.unwrap();
+        assert_eq!(reopened.samples.len(), 3);
+        for sample in [&first, &second, &third] {
+            assert_eq!(read_sample(&root, &sample.id).await.unwrap().unwrap().1, wav());
+        }
         assert_eq!(
             tokio::fs::read(unknown.join("do-not-delete"))
                 .await
                 .unwrap(),
             b"keep"
         );
-
-        let draft_one = import_picked(&root, &source, None).await.unwrap();
-        let draft_two = import_picked(&root, &source, None).await.unwrap();
-        files.recover_from_snapshot(&root, &snapshot).await.unwrap();
-        assert!(read_metadata(&root, &draft_one.id).await.unwrap().is_some());
-        assert!(read_metadata(&root, &draft_two.id).await.unwrap().is_some());
-        files.discard_from_snapshot(&root, &selected.id, &snapshot).await.unwrap();
-        assert!(read_metadata(&root, &selected.id).await.unwrap().is_some());
-        files.discard_from_snapshot(&root, &draft_one.id, &snapshot).await.unwrap();
-        assert!(read_metadata(&root, &draft_one.id).await.unwrap().is_none());
-        assert!(read_metadata(&root, &draft_two.id).await.unwrap().is_some());
-
-        // Test applications use distinct storage roots in one process. Their
-        // recovery state must not be conflated with the first application.
-        let other_root = temp.path().join("second-app");
-        let other = import_picked(&other_root, &source, None).await.unwrap();
-        files.recover_from_snapshot(&other_root, &selection_snapshot("")).await.unwrap();
-        assert!(read_metadata(&other_root, &other.id)
-            .await
-            .unwrap()
-            .is_none());
     }
 
     #[tokio::test]
-    async fn invalid_file_identifier_preserves_files_and_current_import_drafts() {
-        let snapshot = selection_snapshot("malformed-id");
+    async fn corrupt_registry_or_audio_never_erases_other_assets() {
         let temp = tempfile::tempdir_in(".").unwrap();
         let root = temp.path().join("voice-samples");
         let source = temp.path().join("spoken.wav");
         tokio::fs::write(&source, wav()).await.unwrap();
-        let existing = import_picked(&root, &source, None).await.unwrap();
-        let mut files = SampleFiles::default();
-        files.recover_from_snapshot(&root, &snapshot).await.unwrap();
-        files.discard_from_snapshot(&root, &existing.id, &snapshot).await.unwrap();
-        assert!(read_metadata(&root, &existing.id).await.unwrap().is_some());
+        let existing = import_picked(&root, &source, "声音", None).await.unwrap();
+        let audio = registry::audio_path(&root, &existing).unwrap();
+        let mut corrupt = wav();
+        corrupt[47] ^= 1;
+        tokio::fs::write(&audio, &corrupt).await.unwrap();
+        assert!(read_sample(&root, &existing.id).await.is_err());
+        tokio::fs::write(root.join("registry.json"), b"{broken").await.unwrap();
+        assert!(registry::load(&root).await.is_err());
+        assert!(import_picked(&root, &source, "新声音", None).await.is_err());
+        assert_eq!(tokio::fs::read(audio).await.unwrap(), corrupt);
+    }
 
-        // A later valid selection must not sweep away this process's
-        // unsaved sample imports.
-        let draft = import_picked(&root, &source, None).await.unwrap();
-        let selected = selection_snapshot(&existing.id);
-        files.recover_from_snapshot(&root, &selected).await.unwrap();
-        assert!(read_metadata(&root, &draft.id).await.unwrap().is_some());
-        files.discard_from_snapshot(&root, &draft.id, &selected).await.unwrap();
-        assert!(read_metadata(&root, &draft.id).await.unwrap().is_none());
-        assert!(read_metadata(&root, &existing.id).await.unwrap().is_some());
+    #[tokio::test]
+    async fn deleted_asset_resolves_to_none_and_prepared_audio_remains_owned() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let root = temp.path().join("library");
+        let source = temp.path().join("spoken.wav");
+        tokio::fs::write(&source, wav()).await.unwrap();
+        let sample = import_picked(&root, &source, "声音", Some("spoken.wav")).await.unwrap();
+        let (metadata, bytes) = read_sample(&root, &sample.id).await.unwrap().unwrap();
+        assert_eq!(metadata.duration_ms, 1);
+        let prepared = encode_prepared(bytes, metadata.format, &CancellationToken::new()).await.unwrap();
+        assert!(registry::delete(&root, &sample.id).await.unwrap());
+        assert!(read_sample(&root, &sample.id).await.unwrap().is_none());
+        assert!(!registry::delete(&root, &sample.id).await.unwrap());
+        assert_eq!(STANDARD.decode(prepared.data_url.split_once(',').unwrap().1).unwrap(), wav());
     }
 }

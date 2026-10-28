@@ -171,9 +171,9 @@ export const useAssistantStore = defineStore("assistant", () => {
     }
   };
 
-  const saveAgent = async (agent: AgentConfigDto) => {
+  const saveAgent = async (agent: AgentConfigDto, baseline: AgentConfigDto): Promise<AgentConfigDto> => {
     try {
-      await invoke("save_agent_config", { agent });
+      const canonical = await invoke<AgentConfigDto>("save_agent_config", { agent, baseline });
       invalidateSnapshotLoads();
       
       // 点对点局部更新（仅更新轻量列表渲染字段，防止大提示词等字段污染全局列表轻量缓存）
@@ -182,9 +182,9 @@ export const useAssistantStore = defineStore("assistant", () => {
         const updated = [...agents.value];
         updated[index] = {
           ...updated[index],
-          name: agent.name,
-          model: agent.model,
-          avatarCalculatedColor: agent.avatarCalculatedColor || updated[index].avatarCalculatedColor,
+          name: canonical.name,
+          model: canonical.model,
+          avatarCalculatedColor: canonical.avatarCalculatedColor,
         };
         agents.value = updated;
       }
@@ -195,6 +195,7 @@ export const useAssistantStore = defineStore("assistant", () => {
         message: "助手的最新设置已同步到核心",
         toastOnly: true,
       });
+      return canonical;
     } catch (e: any) {
       error.value = e.toString();
       throw e;

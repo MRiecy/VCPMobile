@@ -3,6 +3,7 @@
 
 use crate::vcp_modules::agent_types::{AgentConfig, AgentListItem};
 use crate::vcp_modules::db_manager::DbState;
+use crate::vcp_modules::persistence::agent_repository;
 use crate::vcp_modules::group::group_service::GroupManagerState;
 use crate::vcp_modules::group::group_types::GroupListItem;
 use crate::vcp_modules::infra::utils::desktop_compatible_id_base;
@@ -86,6 +87,7 @@ pub fn create_default_config(agent_id: &str) -> AgentConfig {
         max_output_tokens: 64000,
         stream_output: true,
         use_temperature: false,
+        voice: Default::default(),
         avatar_calculated_color: None,
         topics: vec![],
     }
@@ -135,7 +137,7 @@ async fn read_agent_config_locked<R: Runtime>(
     let pool = &db_state.pool;
 
     let agent_row = sqlx::query(
-        "SELECT a.name, a.system_prompt, a.mobile_system_prompt, a.model, a.temperature, a.context_token_limit, a.max_output_tokens, a.stream_output, a.use_temperature, av.dominant_color 
+        "SELECT a.name, a.system_prompt, a.mobile_system_prompt, a.model, a.temperature, a.context_token_limit, a.max_output_tokens, a.stream_output, a.use_temperature, a.voice_config, av.dominant_color
          FROM agents a
          LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent' AND av.deleted_at IS NULL
          WHERE a.owner_type = 'agent' AND a.agent_id = ? AND a.deleted_at IS NULL"
@@ -184,6 +186,7 @@ async fn read_agent_config_locked<R: Runtime>(
             max_output_tokens: row.get("max_output_tokens"),
             stream_output: row.get::<i32, _>("stream_output") != 0,
             use_temperature: row.get::<i32, _>("use_temperature") != 0,
+            voice: agent_repository::decode_voice_config(row.get("voice_config"))?,
             avatar_calculated_color,
             topics,
         };
@@ -202,30 +205,25 @@ async fn read_agent_config_locked<R: Runtime>(
 #[tauri::command]
 pub async fn save_agent_config(
     app_handle: AppHandle,
-    state: State<'_, AgentConfigState>,
-    mut agent: AgentConfig,
-) -> Result<bool, String> {
-    let agent_id = if agent.id.is_empty() {
-        return Err("Agent ID cannot be empty".to_string());
-    } else {
-        agent.id.clone()
-    };
-
-    let mutex = state.acquire_lock(&agent_id).await;
-    let _lock = mutex.lock().await;
-
-    // 🛡️ 防擦除合并：从内存缓存或数据库中加载原有的 system_prompt 以防空值覆写
-    if let Some(cached) = state.caches.get(&agent_id) {
-        agent.system_prompt = cached.value().system_prompt.clone();
-    } else {
-        if let Ok(db_config) =
-            read_agent_config_locked(&app_handle, &state, &agent_id, Some(false)).await
-        {
-            agent.system_prompt = db_config.system_prompt;
-        }
+    agent: AgentConfig,
+    baseline: AgentConfig,
+) -> Result<AgentConfig, String> {
+    if agent.id.is_empty() || agent.id != baseline.id {
+        return Err("助手设置保存目标与编辑基准不一致".into());
     }
-
-    internal_write_agent_config(&app_handle, &state, &agent_id, &agent).await
+    // This durable task owns the Agent lock through the physical commit and
+    // cache refresh, even if the invoking WebView leaves.
+    tokio::spawn(async move {
+        let state = app_handle.state::<AgentConfigState>();
+        let mutex = state.acquire_lock(&agent.id).await;
+        let _lock = mutex.lock().await;
+        let db = app_handle.state::<DbState>();
+        agent_repository::save_agent_edit(&db, &agent, &baseline).await?;
+        state.caches.remove(&agent.id);
+        let mut canonical = read_agent_config_locked(&app_handle, &state, &agent.id, Some(false)).await?;
+        canonical.system_prompt.clear();
+        Ok(canonical)
+    }).await.map_err(|error| format!("助手设置保存任务异常：{error}"))?
 }
 
 #[tauri::command]
@@ -240,7 +238,7 @@ pub async fn get_agents(
     let start_agents = std::time::Instant::now();
     // 1. 一次性查询所有未删除的 agents 基础配置 (包括 avatars 主色)
     let agent_rows = sqlx::query(
-        "SELECT a.agent_id, a.name, a.system_prompt, a.mobile_system_prompt, a.model, a.temperature, a.context_token_limit, a.max_output_tokens, a.stream_output, a.use_temperature, av.dominant_color 
+        "SELECT a.agent_id, a.name, a.system_prompt, a.mobile_system_prompt, a.model, a.temperature, a.context_token_limit, a.max_output_tokens, a.stream_output, a.use_temperature, a.voice_config, av.dominant_color
          FROM agents a
          LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent' AND av.deleted_at IS NULL
          WHERE a.owner_type = 'agent' AND a.deleted_at IS NULL"
@@ -277,6 +275,7 @@ pub async fn get_agents(
             max_output_tokens: row.get("max_output_tokens"),
             stream_output: row.get::<i32, _>("stream_output") != 0,
             use_temperature: row.get::<i32, _>("use_temperature") != 0,
+            voice: agent_repository::decode_voice_config(row.get("voice_config"))?,
             avatar_calculated_color,
             topics: vec![], // 优化：不加载 topics 列表，改由前端点击时流式按需懒加载
         };
@@ -298,124 +297,34 @@ pub async fn get_agents(
 #[tauri::command]
 pub async fn update_agent_config<R: Runtime>(
     app_handle: AppHandle<R>,
-    state: State<'_, AgentConfigState>,
     agent_id: String,
     updates: serde_json::Value,
 ) -> Result<AgentConfig, String> {
-    let mutex = state.acquire_lock(&agent_id).await;
-    let _lock = mutex.lock().await;
-
-    // 1. 读取当前配置
-    let mut config = read_agent_config_locked(&app_handle, &state, &agent_id, Some(true)).await?;
-    config.system_prompt.clear();
-
-    // 2. 将更新合并到当前配置 (JSON 层级合并)
-    let mut config_val = serde_json::to_value(&config).map_err(|e| e.to_string())?;
-    if let Some(updates_obj) = updates.as_object() {
-        if let Some(config_obj) = config_val.as_object_mut() {
-            for (k, v) in updates_obj {
-                config_obj.insert(k.clone(), v.clone());
+    let updates = updates.as_object().cloned()
+        .ok_or_else(|| "助手配置补丁必须为对象".to_string())?;
+    tokio::spawn(async move {
+        let state = app_handle.state::<AgentConfigState>();
+        let mutex = state.acquire_lock(&agent_id).await;
+        let _lock = mutex.lock().await;
+        state.caches.remove(&agent_id);
+        let baseline = read_agent_config_locked(&app_handle, &state, &agent_id, Some(false)).await?;
+        let mut value = serde_json::to_value(&baseline).map_err(|error| error.to_string())?;
+        let object = value.as_object_mut().ok_or("助手配置序列化失败")?;
+        for (field, value) in updates {
+            if !matches!(field.as_str(), "name" | "mobileSystemPrompt" | "model" | "temperature"
+                | "contextTokenLimit" | "maxOutputTokens" | "streamOutput" | "useTemperature" | "voice")
+            {
+                return Err(format!("此助手字段不可编辑：{field}"));
             }
+            object.insert(field, value);
         }
-    }
-
-    let new_config: AgentConfig = serde_json::from_value(config_val).map_err(|e| e.to_string())?;
-
-    // 3. 写入数据库 (原子化更新)
-    internal_write_agent_config(&app_handle, &state, &agent_id, &new_config).await?;
-
-    Ok(new_config)
-}
-async fn internal_write_agent_config<R: Runtime>(
-    app_handle: &AppHandle<R>,
-    state: &AgentConfigState,
-    agent_id: &str,
-    new_config: &AgentConfig,
-) -> Result<bool, String> {
-    let cache_generation = state.current_cache_generation();
-    let db_state = app_handle.state::<DbState>();
-    let now = crate::vcp_modules::infra::utils::now_millis();
-    let mut tx = db_state.write_transaction("identity.agent.save").await?;
-
-    // 🛡️ 防擦除防线：如果前端发回的对象提示词为空，从 caches 或 SQLite 数据库提取原有 system_prompt 兜底
-    let mut final_config = new_config.clone();
-    if final_config.system_prompt.is_empty() {
-        if let Some(cached) = state.caches.get(agent_id) {
-            final_config.system_prompt = cached.value().system_prompt.clone();
-        } else {
-            let row = sqlx::query(
-                "SELECT system_prompt FROM agents
-                 WHERE owner_type = 'agent' AND agent_id = ? AND deleted_at IS NULL",
-            )
-            .bind(agent_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(|e| e.to_string())?;
-            if let Some(r) = row {
-                use sqlx::Row;
-                final_config.system_prompt = r.get("system_prompt");
-            }
-        }
-    }
-
-    let deleted_at = sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT deleted_at FROM agents WHERE owner_type = 'agent' AND agent_id = ?",
-    )
-    .bind(agent_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
-    if matches!(deleted_at, Some(Some(_))) {
-        tx.commit().await.map_err(|e| e.to_string())?;
-        return Err(format!("Agent {agent_id} has been deleted"));
-    }
-
-    // 计算基于 DTO 的决定性哈希
-    let dto = AgentSyncDTO::from(&final_config);
-    let config_hash = HashAggregator::compute_agent_config_hash(&dto);
-
-    sqlx::query(
-        "INSERT INTO agents (
-            owner_type, agent_id, name, system_prompt, mobile_system_prompt, model, temperature,
-            context_token_limit, max_output_tokens, 
-            stream_output, use_temperature, config_hash, updated_at
-        ) VALUES ('agent', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT(owner_type, agent_id) DO UPDATE SET
-            name = excluded.name, 
-            system_prompt = excluded.system_prompt,
-            mobile_system_prompt = excluded.mobile_system_prompt,
-            model = excluded.model, 
-            temperature = excluded.temperature, 
-            context_token_limit = excluded.context_token_limit, 
-            max_output_tokens = excluded.max_output_tokens, 
-            stream_output = excluded.stream_output, 
-            use_temperature = excluded.use_temperature,
-            updated_at = CASE
-                WHEN agents.config_hash IS NOT excluded.config_hash THEN excluded.updated_at
-                ELSE agents.updated_at
-            END,
-            config_hash = excluded.config_hash",
-    )
-    .bind(agent_id)
-    .bind(&final_config.name)
-    .bind(&final_config.system_prompt)
-    .bind(&final_config.mobile_system_prompt)
-    .bind(&final_config.model)
-    .bind(final_config.temperature)
-    .bind(final_config.context_token_limit)
-    .bind(final_config.max_output_tokens)
-    .bind(if final_config.stream_output { 1 } else { 0 })
-    .bind(if final_config.use_temperature { 1 } else { 0 })
-    .bind(&config_hash)
-    .bind(now)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    tx.commit().await.map_err(|e| e.to_string())?;
-    state.insert_cache_if_current(agent_id.to_string(), final_config.clone(), cache_generation);
-
-    Ok(true)
+        let draft: AgentConfig = serde_json::from_value(value).map_err(|error| error.to_string())?;
+        agent_repository::save_agent_edit(&app_handle.state::<DbState>(), &draft, &baseline).await?;
+        state.caches.remove(&agent_id);
+        let mut canonical = read_agent_config_locked(&app_handle, &state, &agent_id, Some(false)).await?;
+        canonical.system_prompt.clear();
+        Ok(canonical)
+    }).await.map_err(|error| format!("助手设置保存任务异常：{error}"))?
 }
 
 /// 删除 Agent
@@ -642,6 +551,7 @@ pub async fn create_agent(
         max_output_tokens: 60000,
         stream_output: true,
         use_temperature: false,
+        voice: Default::default(),
         avatar_calculated_color: None,
         topics: vec![Topic {
             id: default_topic_id.clone(),
