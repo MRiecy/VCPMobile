@@ -141,6 +141,8 @@ pub struct TarvenRule {
 
 **Serde 映射策略**：`#[serde(rename_all = "camelCase")]` 使 Rust 的 `rule_type` / `sort_order` / `is_enabled` 自动映射到前端的 `ruleType` / `sortOrder` / `isEnabled`，零成本互操作。
 
+**默认值与异常读取**：普通规则的 `Default` 为 system_suffix/global、启用、包裹内容、user/深度 0/append。内置规则按固定 ID 共用各自初始默认，其中系统元数据默认开启、时间线感知默认关闭。列表和真实注入共用 `read_tarven_rules`：SQL 类型错误、非法枚举、非 0/1 开关与负深度逐字段恢复，在 `DbState` 写事务内重读并持久化；有效空值、显式关闭和可空专用字段保留。规则 ID、数据库查询及写入故障仍报错，不能生成空身份或把故障当成没有规则。
+
 ### 2.2 与前端 TarvenRule TS 接口的映射
 
 > 前端接口位置：`src/core/stores/tarvenStore.ts` 第 6–23 行

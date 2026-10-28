@@ -16,6 +16,7 @@ import { useOverlayStore } from '../../../core/stores/overlay';
 import { useNotificationStore } from '../../../core/stores/notification';
 import { allGuides, getGuide } from '../registry';
 import type { GuideDefinition } from '../types';
+import { parseLocalPreferenceObject } from '../../../core/preferences/localPreference';
 
 export const DEFAULT_SETTLE_MS = 600;
 export const QUEUE_RESUME_DELAY_MS = 250;
@@ -281,5 +282,17 @@ export const useGuideStore = defineStore('guide', () => {
 }, {
   persist: {
     pick: ['completed', 'lastSeenAppVersion'],
+    serializer: {
+      serialize: JSON.stringify,
+      deserialize(raw) {
+        const value = parseLocalPreferenceObject(raw);
+        return {
+          completed: Array.isArray(value.completed) && value.completed.every(id => typeof id === 'string')
+            ? value.completed : [],
+          lastSeenAppVersion: typeof value.lastSeenAppVersion === 'string' ? value.lastSeenAppVersion : null,
+        };
+      },
+    },
+    afterHydrate: ({ store }) => store.$persist(),
   },
 });

@@ -6,6 +6,7 @@ import { useChatStreamStore } from "./chatStreamStore";
 import { useAttachmentStore } from "./attachmentStore";
 import { useAssistantStore } from "./assistant";
 import { useSettingsStore } from "./settings";
+import { SETTINGS_DEFAULTS } from "../config/generated/defaults";
 import { useTopicStore } from "./topicListManager";
 import { useNotificationStore } from "./notification";
 import { useShareStore, type ShareIdentity } from "./shareStore";
@@ -811,7 +812,7 @@ export const useChatHistoryStore = defineStore("chatHistory", () => {
       if (shareIdentity) shareStore.sending = true;
 
       const now = Date.now();
-      const userName = settingsStore.settings?.identity.userName || "User";
+      const userName = settingsStore.settings?.identity.userName ?? SETTINGS_DEFAULTS.identity.userName;
       const userMsg: ChatMessage = {
         id: shareIdentity ? `msg_share_${shareIdentity.deliveryId}` : `msg_${now}_user_${Math.random().toString(36).substring(2, 9)}`,
         role: "user",

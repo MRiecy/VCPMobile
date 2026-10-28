@@ -33,6 +33,12 @@ enum LoadedToolConfig {
     },
 }
 
+#[derive(Debug)]
+enum ToolConfigLoadError {
+    Invalid(String),
+    Persistence(String),
+}
+
 struct ResolvedToolConfig {
     enabled: HashSet<String>,
     rewrite_empty: bool,
@@ -551,7 +557,7 @@ impl ToolRegistry {
             load_tool_config_file(&load_path, &load_known)
         })
         .await
-        .map_err(|error| format!("分布式工具配置读取任务失败: {error}"))
+        .map_err(|error| ToolConfigLoadError::Persistence(format!("分布式工具配置读取任务失败: {error}")))
         .and_then(|result| result);
 
         let resolved = resolve_tool_config(loaded);
@@ -596,7 +602,7 @@ fn generic_registration_manifest(entry: &ToolEntry) -> Result<Box<RawValue>, Str
         .map_err(|error| format!("cannot build raw tool registration manifest: {error}"))
 }
 
-fn resolve_tool_config(loaded: Result<LoadedToolConfig, String>) -> ResolvedToolConfig {
+fn resolve_tool_config(loaded: Result<LoadedToolConfig, ToolConfigLoadError>) -> ResolvedToolConfig {
     match loaded {
         Ok(LoadedToolConfig::Missing) => ResolvedToolConfig {
             enabled: HashSet::new(),
@@ -625,11 +631,18 @@ fn resolve_tool_config(loaded: Result<LoadedToolConfig, String>) -> ResolvedTool
                 status,
             }
         }
-        Err(error) => ResolvedToolConfig {
+        Err(ToolConfigLoadError::Invalid(error)) => ResolvedToolConfig {
             enabled: HashSet::new(),
             rewrite_empty: true,
             status: ToolConfigStatus::recovered(format!(
                 "{error}；配置已失效，未授权任何分布式工具。"
+            )),
+        },
+        Err(ToolConfigLoadError::Persistence(error)) => ResolvedToolConfig {
+            enabled: HashSet::new(),
+            rewrite_empty: false,
+            status: ToolConfigStatus::persistence_error(format!(
+                "{error}；全部工具保持禁用，原配置未覆盖。"
             )),
         },
     }
@@ -638,63 +651,70 @@ fn resolve_tool_config(loaded: Result<LoadedToolConfig, String>) -> ResolvedTool
 fn load_tool_config_file(
     config_path: &Path,
     known_names: &HashSet<String>,
-) -> Result<LoadedToolConfig, String> {
+) -> Result<LoadedToolConfig, ToolConfigLoadError> {
     let metadata = match std::fs::metadata(config_path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(LoadedToolConfig::Missing);
         }
         Err(error) => {
-            return Err(format!("读取分布式工具配置元数据失败: {error}"));
+            return Err(ToolConfigLoadError::Persistence(format!("读取分布式工具配置元数据失败: {error}")));
         }
     };
     if !metadata.is_file() {
-        return Err("分布式工具配置不是普通文件".to_string());
+        return Err(ToolConfigLoadError::Persistence("分布式工具配置不是普通文件".to_string()));
     }
     if metadata.len() > MAX_TOOL_CONFIG_BYTES {
-        return Err(format!(
+        return Err(ToolConfigLoadError::Invalid(format!(
             "分布式工具配置超过 {} 字节上限",
             MAX_TOOL_CONFIG_BYTES
-        ));
+        )));
     }
 
     let mut file =
-        File::open(config_path).map_err(|error| format!("打开分布式工具配置失败: {error}"))?;
+        File::open(config_path).map_err(|error| ToolConfigLoadError::Persistence(format!("打开分布式工具配置失败: {error}")))?;
     let mut content = String::with_capacity(metadata.len() as usize);
     file.read_to_string(&mut content)
-        .map_err(|error| format!("读取分布式工具配置失败: {error}"))?;
+        .map_err(|error| {
+            let message = format!("读取分布式工具配置失败: {error}");
+            if error.kind() == std::io::ErrorKind::InvalidData {
+                ToolConfigLoadError::Invalid(message)
+            } else {
+                ToolConfigLoadError::Persistence(message)
+            }
+        })?;
     let value: Value = serde_json::from_str(&content)
-        .map_err(|error| format!("解析分布式工具配置失败: {error}"))?;
+        .map_err(|error| ToolConfigLoadError::Invalid(format!("解析分布式工具配置失败: {error}")))?;
 
     if value.is_array() {
         serde_json::from_value::<Vec<String>>(value)
-            .map_err(|error| format!("解析旧版 disabled-name 工具配置失败: {error}"))?;
+            .map_err(|error| ToolConfigLoadError::Invalid(format!("解析旧版 disabled-name 工具配置失败: {error}")))?;
         return Ok(LoadedToolConfig::LegacyDisabledNames);
     }
 
     let object = value
         .as_object()
-        .ok_or_else(|| "分布式工具授权配置必须是 JSON 对象".to_string())?;
+        .ok_or_else(|| ToolConfigLoadError::Invalid("分布式工具授权配置必须是 JSON 对象".to_string()))?;
     let schema_version = object
         .get("schemaVersion")
         .and_then(Value::as_u64)
-        .ok_or_else(|| "分布式工具授权配置缺少有效 schemaVersion".to_string())?;
+        .ok_or_else(|| ToolConfigLoadError::Invalid("分布式工具授权配置缺少有效 schemaVersion".to_string()))?;
     if schema_version != u64::from(TOOL_CONFIG_SCHEMA_VERSION) {
-        return Err(format!("不支持的分布式工具配置版本: {}", schema_version));
+        return Err(ToolConfigLoadError::Invalid(format!("不支持的分布式工具配置版本: {}", schema_version)));
     }
     let names = object
         .get("enabledTools")
         .cloned()
-        .ok_or_else(|| "分布式工具授权配置缺少 enabledTools".to_string())?;
+        .ok_or_else(|| ToolConfigLoadError::Invalid("分布式工具授权配置缺少 enabledTools".to_string()))?;
     let names: Vec<String> = serde_json::from_value(names)
-        .map_err(|error| format!("解析 enabledTools 失败: {error}"))?;
+        .map_err(|error| ToolConfigLoadError::Invalid(format!("解析 enabledTools 失败: {error}")))?;
 
     let mut seen = HashSet::with_capacity(names.len());
     let mut enabled = HashSet::with_capacity(names.len());
     let mut orphaned = Vec::new();
     for name in names {
         if !seen.insert(name.clone()) {
-            return Err(format!("授权配置包含重复的分布式工具名称: {name}"));
+            return Err(ToolConfigLoadError::Invalid(format!("授权配置包含重复的分布式工具名称: {name}")));
         }
         if known_names.contains(&name) {
             enabled.insert(name);
@@ -868,6 +888,47 @@ mod tests {
         let resolved = resolve_tool_config(load_tool_config_file(&path, &known_names()));
         assert!(resolved.enabled.is_empty());
         assert_eq!(resolved.status.state, ToolConfigState::RecoveredDisabled);
+    }
+
+    #[test]
+    fn storage_failure_does_not_request_default_policy_overwrite() {
+        let resolved = resolve_tool_config(Err(ToolConfigLoadError::Persistence(
+            "temporary read failure".into(),
+        )));
+        assert!(resolved.enabled.is_empty());
+        assert!(!resolved.rewrite_empty);
+        assert_eq!(resolved.status.state, ToolConfigState::PersistenceError);
+    }
+
+    #[tokio::test]
+    async fn unreadable_config_location_is_preserved_instead_of_treated_as_bad_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(TOOL_CONFIG_FILE);
+        std::fs::create_dir(&path).unwrap();
+        let original = path.join("unrelated-data");
+        std::fs::write(&original, b"keep").unwrap();
+        let resolved = resolve_tool_config(load_tool_config_file(&path, &known_names()));
+        assert!(!resolved.rewrite_empty);
+        assert_eq!(resolved.status.state, ToolConfigState::PersistenceError);
+        let registry = test_registry();
+        let status = registry.ensure_enabled_config_loaded_from_path(Ok(path.clone())).await;
+        assert_eq!(status.state, ToolConfigState::PersistenceError);
+        assert!(!registry.is_enabled("Clipboard"));
+        assert_eq!(std::fs::read(original).unwrap(), b"keep");
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn malformed_utf8_policy_still_recovers_to_current_empty_default() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join(TOOL_CONFIG_FILE);
+        std::fs::write(&path, [0xff]).unwrap();
+        let registry = test_registry();
+        let status = registry.ensure_enabled_config_loaded_from_path(Ok(path.clone())).await;
+        assert_eq!(status.state, ToolConfigState::RecoveredDisabled);
+        assert_eq!(load_tool_config_file(&path, &known_names()).unwrap(), LoadedToolConfig::Current {
+            enabled: HashSet::new(), orphaned: Vec::new(),
+        });
     }
 
     #[test]

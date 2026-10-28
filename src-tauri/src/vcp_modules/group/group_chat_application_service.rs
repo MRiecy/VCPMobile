@@ -169,7 +169,7 @@ async fn run_group_speaker_turn<R: Runtime>(
 
     let history_start = group_context_limit(group_config_inner).map(|limit| full_history_for_context.len().saturating_sub(limit)).unwrap_or(0);
     let messages = crate::vcp_modules::context_assembler::orchestrate_chat_context(
-        db_pool,
+        app_handle.state::<DbState>().inner(),
         &full_history_for_context[history_start..],
         &topic_key,
         &agent_name,
@@ -947,6 +947,25 @@ mod group_turn_tests {
     use crate::vcp_modules::group_types::GroupConfig;
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn blank_jev_navigator_uses_default_in_request_without_overwriting_saved_value() {
+        let members = vec![AgentConfig { id: "a".into(), name: "A".into(), ..Default::default() }];
+        let mut group = GroupConfig::default();
+        let session = GroupSession::new("navigator".into(), CancellationToken::new(), "user_message", false);
+        let runtime = session.decision_context(0).unwrap().unwrap();
+        for saved in ["", " \t\n", "  Custom routing instructions  "] {
+            group.local_settings.mode_settings.jev.navigator_prompt = saved.into();
+            let request = build_jev_request(&members, &[], &group, &runtime, &BTreeMap::new());
+            assert!(request.validate().is_ok());
+            let body = serde_json::to_value(request).unwrap();
+            let expected = if saved.trim().is_empty() {
+                crate::vcp_modules::group_types::JevModeSettings::default().navigator_prompt
+            } else { saved.to_owned() };
+            assert_eq!(body["questions"]["speaker_routing"]["instructions"], expected);
+            assert_eq!(group.local_settings.mode_settings.jev.navigator_prompt, saved);
+        }
+    }
 
     #[tokio::test]
     async fn jev_member_stats_count_full_committed_history_in_stable_order() {

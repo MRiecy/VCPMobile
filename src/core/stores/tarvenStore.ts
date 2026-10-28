@@ -6,7 +6,7 @@ import { invoke } from '@tauri-apps/api/core';
 export interface TarvenRule {
   id: string;
   name: string;
-  ruleType: 'system_suffix' | 'user_suffix' | 'context_inject';
+  ruleType: 'system_suffix' | 'user_suffix' | 'context_inject' | 'system_meta_injection' | 'time_anchoring_v2';
   isEnabled: boolean;
   content: string;
   scope: 'global' | 'agent' | 'group';

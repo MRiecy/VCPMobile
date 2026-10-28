@@ -68,6 +68,12 @@ describe('update store', () => {
     expect(store.autoCheckEnabled).toBe(true);
   });
 
+  it('repairs an unknown persisted switch value to its current default', () => {
+    localStorage.setItem('vcp_auto_update_check', 'false');
+    expect(useUpdateStore().autoCheckEnabled).toBe(true);
+    expect(localStorage.getItem('vcp_auto_update_check')).toBe('on');
+  });
+
 
   it('init pulls the current snapshot once and then follows broadcast events', async () => {
     mockInvoke('get_update_status', () => idle);

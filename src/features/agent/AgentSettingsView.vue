@@ -45,7 +45,7 @@ const createEmptyConfig = (id = ""): AgentConfigDto => ({
   name: "",
   systemPrompt: "",
   mobileSystemPrompt: "",
-  model: "gemini-3-flash-preview",
+  model: "",
   temperature: 1.0,
   contextTokenLimit: 1000000,
   maxOutputTokens: 64000,

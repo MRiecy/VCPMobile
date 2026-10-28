@@ -26,7 +26,9 @@ async fn last_automatic_maintenance(pool: &sqlx::SqlitePool) -> Result<i64, Stri
     value.map_or(Ok(0), |value| {
         value
             .parse::<i64>()
-            .map_err(|_| "自动维护时间格式无效".to_string())
+            .ok()
+            .filter(|time| *time >= 0)
+            .ok_or_else(|| "自动维护时间格式无效".to_string())
     })
 }
 
@@ -442,7 +444,7 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
 
     let three_days_secs = 3 * 24 * 60 * 60;
 
-    if now - last_maintenance > three_days_secs {
+    if now.saturating_sub(last_maintenance) > three_days_secs {
         log::info!("[Maintenance] Triggering scheduled SQLite maintenance...");
 
         // 1. SQLite 物理空间回收与查询规划器优化
@@ -522,6 +524,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(global, 0);
+        for value in ["-1", "-9223372036854775808", "not-a-time", "9223372036854775808"] {
+            sqlx::query("UPDATE settings SET value=? WHERE key='last_automatic_maintenance'")
+                .bind(value).execute(&db.pool).await.unwrap();
+            assert!(last_automatic_maintenance(&db.pool).await.is_err(), "{value}");
+            let stored: String = sqlx::query_scalar("SELECT value FROM settings WHERE key='last_automatic_maintenance'")
+                .fetch_one(&db.pool).await.unwrap();
+            assert_eq!(stored, value, "invalid completion evidence must not become a zero/default schedule");
+        }
+        sqlx::query("UPDATE settings SET value=? WHERE key='last_automatic_maintenance'")
+            .bind(i64::MAX.to_string()).execute(&db.pool).await.unwrap();
+        assert_eq!(last_automatic_maintenance(&db.pool).await.unwrap(), i64::MAX);
     }
 
     async fn create_live_set_tables(pool: &sqlx::SqlitePool) {

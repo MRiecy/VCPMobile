@@ -108,6 +108,30 @@ describe('theme and chat presentation store contracts', () => {
     store.$dispose();
   });
 
+  it('initializes the default theme visually without rewriting unreadable preferences', async () => {
+    vi.spyOn(localStorage, 'getItem').mockImplementation(() => { throw new Error('access denied'); });
+    const write = vi.spyOn(localStorage, 'setItem');
+    const store = useThemeStore();
+    await store.initTheme();
+    expect(store.mode).toBe(THEME_PREFERENCE_DEFAULTS.mode);
+    expect(store.currentThemeInfo?.fileName).toBe(THEME_PREFERENCE_DEFAULTS.themeKey);
+    expect(write).not.toHaveBeenCalled();
+    store.$dispose();
+  });
+
+  it('keeps a valid theme visible when repair of an invalid mode cannot be persisted', async () => {
+    localStorage.setItem('vcp-theme-name', 'themes-simple-bw.ts');
+    localStorage.setItem('vcp-theme-mode', 'invalid-mode');
+    vi.spyOn(localStorage, 'setItem').mockImplementation(() => { throw new Error('quota exceeded'); });
+    const store = useThemeStore();
+    await store.initTheme();
+    expect(store.mode).toBe(THEME_PREFERENCE_DEFAULTS.mode);
+    expect(store.currentThemeInfo?.fileName).toBe('themes-simple-bw.ts');
+    expect(localStorage.getItem('vcp-theme-mode')).toBe('invalid-mode');
+    expect(localStorage.getItem('vcp-theme-name')).toBe('themes-simple-bw.ts');
+    store.$dispose();
+  });
+
 
   it('accepts only bundled wallpaper basenames and maps them to WebP', () => {
     expect(resolveThemeWallpaperUrl("'forest_night.webp'")).toBe('/wallpaper/forest_night.webp');

@@ -63,6 +63,22 @@ impl ModelManagerState {
     }
 }
 
+async fn read_cached_models(pool: &sqlx::SqlitePool) -> Result<Vec<ModelInfo>, String> {
+    use sqlx::Row;
+    let row = sqlx::query("SELECT value FROM settings WHERE key = 'cached_models'")
+        .fetch_optional(pool)
+        .await
+        .map_err(|error| error.to_string())?;
+    let Some(row) = row else { return Ok(Vec::new()); };
+    // A disposable discovery cache can miss, but a storage failure is not a miss.
+    let raw: Option<String> = match row.try_get("value") {
+        Ok(value) => value,
+        Err(sqlx::Error::ColumnDecode { .. }) => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok(raw.and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default())
+}
+
 #[tauri::command]
 pub async fn get_cached_models<R: Runtime>(
     app: AppHandle<R>,
@@ -76,24 +92,10 @@ pub async fn get_cached_models<R: Runtime>(
 
     // 2. 内存缺失时尝试从数据库 (settings 表) 读取
     let db_state = app.state::<DbState>();
-    let pool = &db_state.pool;
-
-    let row = sqlx::query("SELECT value FROM settings WHERE key = 'cached_models'")
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if let Some(r) = row {
-        use sqlx::Row;
-        let json_str: String = r.get("value");
-        if let Ok(models) = serde_json::from_str::<Vec<ModelInfo>>(&json_str) {
-            // 回写到内存防止下次重复读取 DB
-            *state.cached_models.write().await = models.clone();
-            return Ok(models);
-        }
-    }
-
-    Ok(Vec::new())
+    let models = read_cached_models(&db_state.pool).await?;
+    // 回写到内存防止下次重复读取 DB。
+    *state.cached_models.write().await = models.clone();
+    Ok(models)
 }
 
 #[tauri::command]
@@ -141,7 +143,7 @@ pub async fn refresh_models<R: Runtime>(
 
             // 2. 持久化到数据库 (settings 表)
             let db_state = app.state::<DbState>();
-            let json_str = serde_json::to_string(&models).unwrap_or_default();
+            let json_str = serde_json::to_string(&models).map_err(|error| error.to_string())?;
             let now = crate::vcp_modules::infra::utils::now_millis();
 
             let persist_result = async {
@@ -180,10 +182,11 @@ pub async fn get_hot_models<R: Runtime>(
 ) -> Result<Vec<String>, String> {
     let db_state = app.state::<DbState>();
     let pool = &db_state.pool;
+    let limit = i64::try_from(limit).map_err(|_| "模型数量超出查询范围".to_string())?;
 
     let rows =
         sqlx::query("SELECT model_id FROM model_usage_stats ORDER BY usage_count DESC LIMIT ?")
-            .bind(limit as i64)
+            .bind(limit)
             .fetch_all(pool)
             .await
             .map_err(|e| e.to_string())?;
@@ -191,7 +194,7 @@ pub async fn get_hot_models<R: Runtime>(
     let mut models = Vec::new();
     for row in rows {
         use sqlx::Row;
-        models.push(row.get("model_id"));
+        models.push(row.try_get("model_id").map_err(|error| error.to_string())?);
     }
 
     Ok(models)
@@ -213,7 +216,7 @@ pub async fn get_favorite_models<R: Runtime>(
     let mut models = Vec::new();
     for row in rows {
         use sqlx::Row;
-        models.push(row.get("model_id"));
+        models.push(row.try_get("model_id").map_err(|error| error.to_string())?);
     }
 
     Ok(models)
@@ -508,4 +511,43 @@ pub async fn stop_all_model_tests(state: State<'_, ModelManagerState>) -> Result
 // 初始化加载
 pub async fn init_model_manager<R: Runtime>(_app: &AppHandle<R>, _state: &ModelManagerState) {
     // 数据库架构下无需在启动时将全量收藏与使用数据加载至内存
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn malformed_discovery_cache_is_a_miss_but_database_failures_are_not() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        sqlx::query("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)")
+            .execute(&pool).await.unwrap();
+        assert!(read_cached_models(&pool).await.unwrap().is_empty());
+        sqlx::query("INSERT INTO settings VALUES ('cached_models', ?)")
+            .bind(r#"[{"id":"valid-model"}]"#).execute(&pool).await.unwrap();
+        let cached = read_cached_models(&pool).await.unwrap();
+        assert_eq!(cached.len(), 1);
+        assert_eq!(cached[0].id, "valid-model");
+        assert_eq!(cached[0].created, 0);
+        assert_eq!(cached[0].object, "");
+        assert_eq!(cached[0].owned_by, "");
+        for raw in ["{", "null", "{}", "[false]", r#"[{"id":"model","created":"wrong"}]"#] {
+            sqlx::query("UPDATE settings SET value=? WHERE key='cached_models'")
+                .bind(raw).execute(&pool).await.unwrap();
+            assert!(read_cached_models(&pool).await.unwrap().is_empty(), "{raw}");
+        }
+        sqlx::query("UPDATE settings SET value=? WHERE key='cached_models'")
+            .bind(br#"[{"id":"not-a-text-cache"}]"#.as_slice()).execute(&pool).await.unwrap();
+        assert!(read_cached_models(&pool).await.unwrap().is_empty());
+        for statement in [
+            "UPDATE settings SET value=NULL WHERE key='cached_models'",
+            "UPDATE settings SET value=CAST(x'ff' AS TEXT) WHERE key='cached_models'",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+            assert!(read_cached_models(&pool).await.unwrap().is_empty());
+        }
+        sqlx::query("DROP TABLE settings").execute(&pool).await.unwrap();
+        assert!(read_cached_models(&pool).await.is_err());
+    }
 }

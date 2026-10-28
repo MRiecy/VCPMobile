@@ -55,6 +55,15 @@ describe('AboutSection page animation lifetime', () => {
     expect(wrapper!.emitted('open-developer')).toHaveLength(1);
   });
 
+  it('repairs only malformed stored developer-mode values to the disabled default', () => {
+    localStorage.setItem('vcp-developer-mode', 'yes');
+    expect(useDeveloperSettingsStore(createPinia()).enabled).toBe(false);
+    expect(localStorage.getItem('vcp-developer-mode')).toBe('false');
+    localStorage.setItem('vcp-developer-mode', 'true');
+    expect(useDeveloperSettingsStore(createPinia()).enabled).toBe(true);
+    expect(localStorage.getItem('vcp-developer-mode')).toBe('true');
+  });
+
   it('resets a slow sequence and accepts successive taps up to 1.2 seconds apart', async () => {
     const developer = useDeveloperSettingsStore();
     await tapFeatures(5, 0);

@@ -56,6 +56,7 @@ describe('automatic update scheduling with the shared preference', () => {
     scope.stop();
     disposePinia(pinia);
     vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
   const ready = async () => {
@@ -118,6 +119,33 @@ describe('automatic update scheduling with the shared preference', () => {
     expect(checkCalls()).toHaveLength(1);
     expect(useUpdateStore().isPromptOpen).toBe(false);
     expect(useUpdateStore().autoCheckEnabled).toBe(true);
+  });
+
+  it.each(['not-a-date', '123suffix', '-1', '1.5', 'Infinity', '9007199254740992', '9999999999999'])('treats invalid check time %s as never checked', async value => {
+    localStorage.setItem('vcp_last_update_check', value);
+    scope.run(() => useAutoUpdate());
+    await ready();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(checkCalls()).toHaveLength(1);
+    expect(useUpdateStore().isPromptOpen).toBe(true);
+    expect(localStorage.getItem('vcp_last_update_check')).toBe(String(Date.now()));
+  });
+
+  it('checks only once and can show the result when preference storage is unavailable', async () => {
+    const failedWrite = vi.fn(() => { throw new Error('quota exceeded'); });
+    vi.stubGlobal('localStorage', { getItem: () => { throw new Error('access denied'); }, setItem: failedWrite });
+    scope.run(() => useAutoUpdate());
+    await ready();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(checkCalls()).toHaveLength(1);
+    expect(useUpdateStore().isPromptOpen).toBe(true);
+    expect(failedWrite).toHaveBeenCalledTimes(1);
+    useAppLifecycleStore().state = 'CONNECTING';
+    await nextTick();
+    await ready();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(checkCalls()).toHaveLength(1);
+    expect(failedWrite).toHaveBeenCalledTimes(1);
   });
 
   it('does not consume the cooldown after a failed check', async () => {

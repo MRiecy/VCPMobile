@@ -839,7 +839,16 @@ export const useXxxStore = defineStore('storeId', () => {
 
 ### 4.2 持久化策略（pinia-plugin-persistedstate）
 
-项目中仅 **`chatSessionStore`** 使用 `pinia-plugin-persistedstate` 进行自动持久化：
+四个 Store 使用 `pinia-plugin-persistedstate` 保存各自的小型偏好：
+
+| Store | 持久字段 |
+|-------|---------|
+| `chatSessionStore` | 当前会话选择、当前话题 ID、各会话上次话题 |
+| `topicListManager` | 排序方式、置顶话题键 |
+| `diaryStore` | 隐藏文件夹、折叠分类、文件夹顺序 |
+| `guideStore` | 已完成引导、上次看到的应用版本 |
+
+各 owner 的 serializer 在恢复时按字段类型采用当前默认值，保留合法邻字段和引用 ID；随后写回规范结果。存储读取失败不触发默认覆写。`chatSessionStore` 的字段选择示例：
 
 ```typescript
 {
@@ -849,14 +858,14 @@ export const useXxxStore = defineStore('storeId', () => {
 }
 ```
 
-**为何只有 chatSessionStore 需要持久化？**
+**业务数据与临时状态仍不放入 localStorage：**
 
 | Store | 不持久化的原因 |
 |-------|---------------|
 | `chatHistoryStore` | 消息数据量可能很大，不适合 `localStorage`；后端 SQLite 是持久源 |
 | `chatStreamStore` | 流状态是瞬时的，页面刷新后必然重置 |
 | `assistant` | Agent/Group 列表由后端托管，前端仅做缓存 |
-| `topicListManager` | 话题列表按需加载，持久化无意义 |
+| `topicListManager` 的话题列表 | 列表按需读取 Rust；本机排序和置顶偏好独立保留 |
 | `notification` | Toast 和通知历史是易失的会话级信息 |
 | `settings` | 后端 `settings_manager` 已将配置写入 SQLite，前端仅做镜像 |
 | `floatingAssistant` | 浮动窗口为临时会话（不持久化）；主应用模式为增强便利性复用的迂回通道，非持久化源 |
@@ -864,9 +873,9 @@ export const useXxxStore = defineStore('storeId', () => {
 `themeStore` 不使用 Pinia 持久化插件，而是直接操作 `localStorage`，原因是：
 - 主题需要在 HTML `<html>` 标签渲染前即生效（防止 FOUC——Flash of Unstyled Content）
 - Vite HMR 场景下需要更精细的持久化/恢复控制
-- `LEGACY_THEME_MAP` 需要在读取时进行文件名迁移
+- 主题名必须匹配当前内置模块；坏值使用主题默认，存储失败仍可完成初始呈现
 
-聊天偏好和自动检查更新同样手动持久化，但由各自领域 Store 管理；共享 `localPreference` 只返回原始读取/写入成功或失败，不合并业务状态，也不替代备份与同步范围。
+聊天、更新、开发者模式和日志偏好由各自领域 Store 手动持久化；异常编码按现有默认恢复。共享 `localPreference` 只处理存储 IO 和 JSON 对象容器解析，不持有业务字段或默认表。更新检查时间格式异常视为尚未检查，成功检查后才记录完成时间。
 
 ### 4.3 跨 Store 通信模式
 
@@ -1076,7 +1085,7 @@ await invoke('get_topics_streamed', {
 
 ### 6.2 哪些 Store 需要持久化、哪些不需要？
 
-持久化由真实消费者决定。chatSessionStore 使用插件保留少量会话选择；themeStore、chatPreferences 和 updateStore 的自动检查项使用领域本地偏好。settingsStore 只镜像 Rust 正式配置，消息、Agent 与话题业务数据继续由后端管理。
+持久化由真实消费者决定。chatSession、topic、diary、guide 使用插件保留表中偏好；主题、聊天、更新、开发者和日志偏好由各自领域 owner 管理。settingsStore 只镜像 Rust 正式配置，消息、Agent 与话题业务数据继续由后端管理。
 
 配置编辑草稿、pending 批次、页面访问序号和工具块手动展开属于当前交互生命周期，不进入长期偏好或配置备份。聊天/更新共享存储 IO 不意味着共享领域、备份范围或跨设备同步策略。
 

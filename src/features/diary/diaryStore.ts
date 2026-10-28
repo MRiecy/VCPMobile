@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
+import { parseLocalPreferenceObject } from "../../core/preferences/localPreference";
 import type {
   DiaryBatchOutcome,
   DiaryComposerDraft,
@@ -1002,5 +1003,21 @@ export const useDiaryStore = defineStore("diary", () => {
 }, {
   persist: {
     pick: ["hiddenFolders", "collapsedCategories", "folderOrder"],
+    serializer: {
+      serialize: JSON.stringify,
+      deserialize(raw) {
+        const value = parseLocalPreferenceObject(raw);
+        const strings = (candidate: unknown): string[] =>
+          Array.isArray(candidate) && candidate.every(item => typeof item === "string") ? candidate : [];
+        return {
+          hiddenFolders: strings(value.hiddenFolders),
+          folderOrder: strings(value.folderOrder),
+          collapsedCategories: Array.isArray(value.collapsedCategories)
+            && value.collapsedCategories.every(item => item === "diary" || item === "cluster")
+            ? value.collapsedCategories : [],
+        };
+      },
+    },
+    afterHydrate: ({ store }) => store.$persist(),
   },
 });

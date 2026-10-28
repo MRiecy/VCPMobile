@@ -13,6 +13,13 @@ use crate::distributed::types::InvocationCommand;
 
 pub struct ClipboardTool;
 
+#[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+#[serde(tag = "action", rename_all = "lowercase")]
+enum ClipboardArgs {
+    Read,
+    Write { content: String },
+}
+
 #[async_trait]
 impl OneShotTool for ClipboardTool {
     fn manifest(&self) -> ToolManifest {
@@ -41,19 +48,10 @@ content:「始」需要写入的内容「末」\n\
     }
 
     async fn execute(&self, args: Value, app: &AppHandle) -> Result<Value, String> {
-        let action = args
-            .get("action")
-            .and_then(|v| v.as_str())
-            .unwrap_or("read");
-
-        match action {
-            "write" => {
-                let content = args
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-
+        let args: ClipboardArgs = serde_json::from_value(args)
+            .map_err(|error| format!("Invalid clipboard arguments: {error}"))?;
+        match args {
+            ClipboardArgs::Write { content } => {
                 let native_app = app.clone();
                 tauri::async_runtime::spawn_blocking(move || {
                     tauri_plugin_vcp_mobile::system::write_clipboard_native(native_app, content)
@@ -67,7 +65,7 @@ content:「始」需要写入的内容「末」\n\
                     "message": "Content written to clipboard."
                 }))
             }
-            "read" => {
+            ClipboardArgs::Read => {
                 let native_app = app.clone();
                 let content = tauri::async_runtime::spawn_blocking(move || {
                     tauri_plugin_vcp_mobile::system::read_clipboard_native(native_app)
@@ -81,7 +79,24 @@ content:「始」需要写入的内容「末」\n\
                     "content": content
                 }))
             }
-            _ => Err(format!("Unknown clipboard action: '{}'", action)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn required_clipboard_intent_is_not_replaced_by_read_or_empty_write() {
+        for args in [
+            json!({}), json!({"action":null}), json!({"action":false}),
+            json!({"action":"unknown"}), json!({"action":"write"}),
+            json!({"action":"write","content":null}), json!({"action":"write","content":123}),
+        ] {
+            assert!(serde_json::from_value::<ClipboardArgs>(args).is_err());
+        }
+        assert_eq!(serde_json::from_value::<ClipboardArgs>(json!({"action":"read"})).unwrap(), ClipboardArgs::Read);
+        assert_eq!(serde_json::from_value::<ClipboardArgs>(json!({"action":"write","content":""})).unwrap(), ClipboardArgs::Write { content: String::new() });
     }
 }

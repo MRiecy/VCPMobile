@@ -703,6 +703,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn sync_message_batch_rejects_overflow_before_writing_any_rows() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../../../migrations/0100_baseline_v2.sql")).unwrap();
+        conn.execute_batch("INSERT INTO agents(owner_type,agent_id,name,model,updated_at) VALUES ('agent','owner','Owner','',1); INSERT INTO topics(owner_type,owner_id,topic_id,title,created_at,updated_at) VALUES ('agent','owner','topic','Topic',1,1);").unwrap();
+        for bad_timestamp in [false, true] {
+            let DbWriteTask::TopicMessages { key, mut writes } = rich_message_task("topic", 0, 2) else { unreachable!() };
+            if bad_timestamp { writes[1].message.timestamp = u64::MAX; }
+            else { writes[1].message.attachments.as_mut().unwrap()[0].size = u64::MAX; }
+            let tx = conn.transaction().unwrap();
+            let error = DbWriteQueue::rusqlite_upsert_messages_batch(&tx, &key, writes, std::path::Path::new("attachments")).unwrap_err();
+            assert!(error.to_string().contains("SQLite integer range"));
+            // All metadata is checked before the batch can mutate any side table.
+            tx.commit().unwrap();
+            for table in ["messages", "attachments", "message_attachments", "render_cache", "messages_fts"] {
+                let count: i64 = conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap();
+                assert_eq!(count, 0, "{table}");
+            }
+        }
+    }
+
     fn assert_queued_owner_root_includes_default(owner_type: &str) {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open owner root database");
         conn.execute_batch(
@@ -1942,6 +1963,14 @@ impl DbWriteQueue {
         }
 
         for write in &writes {
+            i64::try_from(write.message.timestamp).map_err(|_| Self::sync_contract_error(format!(
+                "Message {}/{} timestamp exceeds the SQLite integer range", key.topic_id, write.message.id,
+            )))?;
+            for attachment in write.message.attachments.iter().flatten() {
+                i64::try_from(attachment.size).map_err(|_| Self::sync_contract_error(format!(
+                    "Attachment on message {}/{} exceeds the SQLite integer range", key.topic_id, write.message.id,
+                )))?;
+            }
             let updated_at = write.message.updated_at.unwrap_or(write.message.timestamp);
             if updated_at > (1_u64 << 53) - 1 {
                 return Err(Self::sync_contract_error(format!(
@@ -2448,6 +2477,8 @@ impl DbWriteQueue {
         att: &crate::vcp_modules::chat_manager::Attachment,
         timestamp: i64,
     ) -> rusqlite::Result<()> {
+        let size = i64::try_from(att.size)
+            .map_err(|_| Self::sync_contract_error("Attachment size exceeds the SQLite integer range"))?;
         let image_frames = att
             .image_frames
             .as_ref()
@@ -2478,7 +2509,7 @@ impl DbWriteQueue {
             rusqlite::params![
                 hash,
                 &att.r#type,
-                att.size as i64,
+                size,
                 &att.internal_path,
                 &att.extracted_text,
                 image_frames,

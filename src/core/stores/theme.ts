@@ -1,5 +1,6 @@
 import { defineStore, acceptHMRUpdate } from 'pinia';
 import { nextTick, onScopeDispose, ref, watch } from 'vue';
+import { readLocalPreference, writeLocalPreference } from '../preferences/localPreference';
 
 export type ThemeMode = 'light' | 'dark' | 'system';
 
@@ -129,9 +130,10 @@ export const useThemeStore = defineStore('theme', () => {
     }
   };
 
-  const storedMode = readStoredValue('vcp-theme-mode');
+  const storedMode = readLocalPreference('vcp-theme-mode');
+  if (!storedMode.ok) console.warn('[themeStore] Failed to read mode:', storedMode.error);
   // 缺失或异常模式使用主题所属领域的默认值。
-  const initialMode = normalizeThemeMode(storedMode);
+  const initialMode = normalizeThemeMode(storedMode.ok ? storedMode.raw : null);
   const mode = ref<ThemeMode>(initialMode);
   // 初值与默认模式（light）保持一致；store 创建时 mode 的 immediate watch
   // 会同步执行 applyTheme 将其纠正为真实值。
@@ -344,7 +346,7 @@ export const useThemeStore = defineStore('theme', () => {
     themeThumbnails.value = thumbs;
   };
 
-  const applyThemeSelection = async (fileName: string, restoredMode?: ThemeMode): Promise<ThemeApplyResult> => {
+  const applyThemeSelection = async (fileName: string, restoredMode?: ThemeMode, persist = true): Promise<ThemeApplyResult> => {
     flushPendingViewTransition();
 
     const resolved = findThemeModule(fileName);
@@ -367,11 +369,13 @@ export const useThemeStore = defineStore('theme', () => {
       return { ok: false, themeKey: null, error };
     }
 
-    let previousStoredTheme: string | null;
+    let previousStoredTheme: string | null = null;
     let previousStoredMode: string | null = null;
     try {
-      previousStoredTheme = localStorage.getItem(THEME_NAME_STORAGE_KEY);
-      if (restoredMode !== undefined) previousStoredMode = localStorage.getItem('vcp-theme-mode');
+      if (persist) {
+        previousStoredTheme = localStorage.getItem(THEME_NAME_STORAGE_KEY);
+        if (restoredMode !== undefined) previousStoredMode = localStorage.getItem('vcp-theme-mode');
+      }
     } catch (error) {
       return {
         ok: false,
@@ -434,11 +438,15 @@ export const useThemeStore = defineStore('theme', () => {
 
         // Persist only after the complete visual state has been prepared. A storage
         // failure rolls the DOM and refs back to the previously applied theme.
-        localStorage.setItem(THEME_NAME_STORAGE_KEY, themeKey);
-        themePersisted = true;
+        if (persist) {
+          localStorage.setItem(THEME_NAME_STORAGE_KEY, themeKey);
+          themePersisted = true;
+        }
         if (restoredMode !== undefined) {
-          localStorage.setItem('vcp-theme-mode', restoredMode);
-          modePersisted = true;
+          if (persist) {
+            localStorage.setItem('vcp-theme-mode', restoredMode);
+            modePersisted = true;
+          }
           restoringMode = true;
           try { mode.value = restoredMode; } finally { restoringMode = false; }
         }
@@ -510,13 +518,19 @@ export const useThemeStore = defineStore('theme', () => {
   };
 
   const initTheme = async () => {
-    const savedTheme = normalizeThemeModuleKey(readStoredValue(THEME_NAME_STORAGE_KEY)) || DEFAULT_THEME;
+    const stored = readLocalPreference(THEME_NAME_STORAGE_KEY);
+    if (!stored.ok) console.warn('[themeStore] Failed to read theme:', stored.error);
+    const savedTheme = normalizeThemeModuleKey(stored.ok ? stored.raw : null) ?? DEFAULT_THEME;
 
     try {
       // 1. 优先只加载当前主题，确保背景和基础样式瞬间呈现
-      const result = await applyThemeFile(savedTheme);
+      const result = await applyThemeSelection(savedTheme, undefined, false);
+      if (result.ok && stored.ok && stored.raw !== null && stored.raw !== savedTheme) {
+        const repair = writeLocalPreference(THEME_NAME_STORAGE_KEY, savedTheme);
+        if (!repair.ok) console.warn('[themeStore] Failed to repair theme:', repair.error);
+      }
       if (!result.ok && savedTheme !== DEFAULT_THEME) {
-        await applyThemeFile(DEFAULT_THEME);
+        await applyThemeSelection(DEFAULT_THEME, undefined, false);
       }
 
       // 2. 优雅地在浏览器空闲时再扫描全量主题元数据
@@ -537,7 +551,10 @@ export const useThemeStore = defineStore('theme', () => {
     isDarkResolved.value = isDark;
     document.documentElement.classList.toggle('dark', isDark);
     document.body.classList.toggle('light-theme', !isDark);
-    localStorage.setItem('vcp-theme-mode', newMode);
+    if (!isInitializing || (storedMode.ok && storedMode.raw !== null && storedMode.raw !== newMode)) {
+      const saved = writeLocalPreference('vcp-theme-mode', newMode);
+      if (!saved.ok) console.warn('[themeStore] Failed to save mode:', saved.error);
+    }
 
     // Re-inject variables for the new mode if a theme is already loaded
     if (currentThemeModule) {

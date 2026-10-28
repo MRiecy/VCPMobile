@@ -3,10 +3,10 @@ use crate::vcp_modules::topic_types::TopicKey;
 use chrono::{Local, TimeZone};
 use log::warn;
 use serde::{Deserialize, Serialize};
-use sqlx::{Pool, Sqlite};
+use sqlx::{sqlite::SqliteRow, Pool, Row, Sqlite};
 use tauri::State;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TarvenRule {
     pub id: String,
@@ -25,6 +25,118 @@ pub struct TarvenRule {
     pub position: Option<String>, // 'prepend' | 'append'
 
     pub sort_order: i32,
+}
+
+impl Default for TarvenRule {
+    fn default() -> Self {
+        Self {
+            id: String::new(), name: String::new(), rule_type: "system_suffix".into(),
+            is_enabled: true, content: String::new(), scope: "global".into(), wrap: true,
+            role: Some("user".into()), depth: Some(0), position: Some("append".into()), sort_order: 0,
+        }
+    }
+}
+
+impl TarvenRule {
+    fn defaults_for_id(id: &str) -> Self {
+        let mut rule = Self { id: id.into(), ..Self::default() };
+        let preset = match id {
+            "system_meta_injection" => Some(("系统元数据注入", true,
+                "包含当前系统时间、运行环境及话题创建时间元数据注入系统提示词。")),
+            "time_anchoring_v2" => Some(("消息时间线感知 V2", false,
+                "为上下文中每条消息注入伪系统发送时间戳，使大模型具备精确的时间线感知，防止其对物理时间产生幻觉。")),
+            _ => None,
+        };
+        if let Some((name, enabled, content)) = preset {
+            rule.name = name.into();
+            rule.rule_type = id.into();
+            rule.is_enabled = enabled;
+            rule.content = content.into();
+            rule.wrap = false;
+            rule.role = None;
+            rule.depth = None;
+            rule.position = None;
+            rule.sort_order = -100;
+        }
+        rule
+    }
+
+    fn normalize(&mut self) {
+        let defaults = Self::defaults_for_id(&self.id);
+        if !matches!(self.rule_type.as_str(), "system_suffix" | "user_suffix" | "context_inject" | "system_meta_injection" | "time_anchoring_v2") {
+            self.rule_type = defaults.rule_type;
+        }
+        if !matches!(self.scope.as_str(), "global" | "agent" | "group") { self.scope = defaults.scope; }
+        if !matches!(self.role.as_deref(), None | Some("user" | "assistant")) { self.role = defaults.role; }
+        if !matches!(self.position.as_deref(), None | Some("prepend" | "append")) { self.position = defaults.position; }
+        if self.depth.is_some_and(|depth| depth < 0) { self.depth = defaults.depth; }
+    }
+}
+
+fn stored_rule_field<T>(row: &SqliteRow, key: &str, default: T, changed: &mut bool) -> Result<T, String>
+where T: for<'r> sqlx::Decode<'r, Sqlite> + sqlx::Type<Sqlite> {
+    match row.try_get(key) {
+        Ok(value) => Ok(value),
+        Err(sqlx::Error::ColumnDecode { .. }) => { *changed = true; Ok(default) }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn decode_rule(row: &SqliteRow) -> Result<(TarvenRule, bool), String> {
+    let id: String = row.try_get("id").map_err(|error| error.to_string())?;
+    if id.is_empty() { return Err("注入规则缺少标识，无法恢复配置".into()); }
+    let defaults = TarvenRule::defaults_for_id(&id);
+    let mut changed = false;
+    let mut boolean = |key, default| -> Result<bool, String> {
+        let value: i64 = stored_rule_field(row, key, i64::from(default), &mut changed)?;
+        match value { 0 => Ok(false), 1 => Ok(true), _ => { changed = true; Ok(default) } }
+    };
+    let is_enabled = boolean("is_enabled", defaults.is_enabled)?;
+    let wrap = boolean("wrap", defaults.wrap)?;
+    let mut rule = TarvenRule {
+        id, is_enabled, wrap,
+        name: stored_rule_field(row, "name", defaults.name, &mut changed)?,
+        rule_type: stored_rule_field(row, "rule_type", defaults.rule_type, &mut changed)?,
+        content: stored_rule_field(row, "content", defaults.content, &mut changed)?,
+        scope: stored_rule_field(row, "scope", defaults.scope, &mut changed)?,
+        role: stored_rule_field(row, "role", defaults.role, &mut changed)?,
+        depth: stored_rule_field(row, "depth", defaults.depth, &mut changed)?,
+        position: stored_rule_field(row, "position", defaults.position, &mut changed)?,
+        sort_order: stored_rule_field(row, "sort_order", defaults.sort_order, &mut changed)?,
+    };
+    let before = rule.clone();
+    rule.normalize();
+    changed |= rule != before;
+    Ok((rule, changed))
+}
+
+const RULE_QUERY: &str = "SELECT id,name,rule_type,is_enabled,content,scope,wrap,role,depth,position,sort_order FROM tarven_rules ORDER BY sort_order ASC";
+
+async fn read_tarven_rules(db: &DbState) -> Result<Vec<TarvenRule>, String> {
+    let rows = sqlx::query(RULE_QUERY).fetch_all(&db.pool).await.map_err(|error| error.to_string())?;
+    let decoded = rows.iter().map(decode_rule).collect::<Result<Vec<_>, _>>()?;
+    if !decoded.iter().any(|(_, changed)| *changed) {
+        return Ok(decoded.into_iter().map(|(rule, _)| rule).collect());
+    }
+    let db = db.clone();
+    tokio::spawn(async move {
+        let mut tx = db.write_transaction("context.rule.normalize").await?;
+        let rows = sqlx::query(RULE_QUERY).fetch_all(&mut *tx).await.map_err(|error| error.to_string())?;
+        let mut rules = Vec::with_capacity(rows.len());
+        for row in rows {
+            let (rule, changed) = decode_rule(&row)?;
+            if changed {
+                sqlx::query("UPDATE tarven_rules SET name=?,rule_type=?,is_enabled=?,content=?,scope=?,wrap=?,role=?,depth=?,position=?,sort_order=? WHERE id=?")
+                    .bind(&rule.name).bind(&rule.rule_type).bind(rule.is_enabled).bind(&rule.content)
+                    .bind(&rule.scope).bind(rule.wrap).bind(&rule.role).bind(rule.depth).bind(&rule.position)
+                    .bind(rule.sort_order).bind(&rule.id).execute(&mut *tx).await.map_err(|error| error.to_string())?;
+            }
+            rules.push(rule);
+        }
+        tx.commit().await.map_err(|error| error.to_string())?;
+        rules.sort_by_key(|rule| rule.sort_order);
+        Ok(rules)
+    }).await.map_err(|error| format!("注入规则修复任务失败：{error}"))?
 }
 
 // ---------------------------------------------------------
@@ -102,38 +214,11 @@ fn apply_user_suffix_rules(messages: &mut [serde_json::Value], rules: &[&TarvenR
 }
 
 pub async fn fetch_active_rules(
-    pool: &Pool<Sqlite>,
+    db: &DbState,
     scope: &str,
 ) -> Result<Vec<TarvenRule>, String> {
-    let rows = sqlx::query(
-        "SELECT id, name, rule_type, is_enabled, content, scope, wrap, role, depth, position, sort_order 
-         FROM tarven_rules 
-         WHERE is_enabled = 1 AND (scope = 'global' OR scope = ?)
-         ORDER BY sort_order ASC"
-    )
-    .bind(scope)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to fetch active rules: {}", e))?;
-
-    let mut rules = Vec::new();
-    for row in rows {
-        use sqlx::Row;
-        rules.push(TarvenRule {
-            id: row.get("id"),
-            name: row.get("name"),
-            rule_type: row.get("rule_type"),
-            is_enabled: row.get::<i32, _>("is_enabled") != 0,
-            content: row.get("content"),
-            scope: row.get("scope"),
-            wrap: row.get::<i32, _>("wrap") != 0,
-            role: row.get("role"),
-            depth: row.get("depth"),
-            position: row.get("position"),
-            sort_order: row.get("sort_order"),
-        });
-    }
-    Ok(rules)
+    Ok(read_tarven_rules(db).await?.into_iter()
+        .filter(|rule| rule.is_enabled && (rule.scope == "global" || rule.scope == scope)).collect())
 }
 
 fn format_system_metadata(now_str: &str, created_at_str: Option<&str>, system_prompt: &mut String) {
@@ -197,12 +282,9 @@ pub async fn apply_tarven_pipeline(
     pool: &Pool<Sqlite>,
     topic: &TopicKey,
     agent_name: &str,
-    scope: &str, // 'agent' | 'group'
+    rules: &[TarvenRule],
     messages: &mut Vec<serde_json::Value>,
 ) -> Result<(), String> {
-    // 1. 获取所有激活的规则
-    let rules = fetch_active_rules(pool, scope).await?;
-
     // 2. 处理 System Prompt 注入
     let system_index = messages
         .iter()
@@ -340,40 +422,15 @@ pub async fn apply_tarven_pipeline(
 
 #[tauri::command]
 pub async fn get_tarven_rules(db_state: State<'_, DbState>) -> Result<Vec<TarvenRule>, String> {
-    let rows = sqlx::query(
-        "SELECT id, name, rule_type, is_enabled, content, scope, wrap, role, depth, position, sort_order 
-         FROM tarven_rules 
-         ORDER BY sort_order ASC"
-    )
-    .fetch_all(&db_state.pool)
-    .await
-    .map_err(|e| format!("Database error: {}", e))?;
-
-    let mut rules = Vec::new();
-    for row in rows {
-        use sqlx::Row;
-        rules.push(TarvenRule {
-            id: row.get("id"),
-            name: row.get("name"),
-            rule_type: row.get("rule_type"),
-            is_enabled: row.get::<i32, _>("is_enabled") != 0,
-            content: row.get("content"),
-            scope: row.get("scope"),
-            wrap: row.get::<i32, _>("wrap") != 0,
-            role: row.get("role"),
-            depth: row.get("depth"),
-            position: row.get("position"),
-            sort_order: row.get("sort_order"),
-        });
-    }
-    Ok(rules)
+    read_tarven_rules(&db_state).await
 }
 
 #[tauri::command]
 pub async fn save_tarven_rule(
     db_state: State<'_, DbState>,
-    rule: TarvenRule,
+    mut rule: TarvenRule,
 ) -> Result<(), String> {
+    rule.normalize();
     let now = Local::now().timestamp_millis();
     let is_enabled_int = if rule.is_enabled { 1 } else { 0 };
     let wrap_int = if rule.wrap { 1 } else { 0 };
@@ -477,9 +534,10 @@ pub async fn reorder_rules(
 
 #[tauri::command]
 pub async fn preview_tarven_injection(
-    rules: Vec<TarvenRule>,
+    mut rules: Vec<TarvenRule>,
     mock_messages: Option<Vec<serde_json::Value>>,
 ) -> Result<Vec<serde_json::Value>, String> {
+    for rule in &mut rules { rule.normalize(); }
     let mut messages = mock_messages.unwrap_or_else(|| {
         vec![
             serde_json::json!({ "role": "system", "content": "你是一个智能助手。" }),
@@ -618,41 +676,25 @@ pub async fn preview_tarven_injection(
 
 pub async fn sync_system_preset_rules(pool: &Pool<Sqlite>) -> Result<(), String> {
     let now = chrono::Local::now().timestamp_millis();
-    let presets = vec![
-        (
-            "system_meta_injection",
-            "系统元数据注入",
-            "system_meta_injection",
-            1, // 默认开启
-            "包含当前系统时间、运行环境及话题创建时间元数据注入系统提示词。",
-        ),
-        (
-            "time_anchoring_v2",
-            "消息时间线感知 V2",
-            "time_anchoring_v2",
-            0, // 默认关闭
-            "为上下文中每条消息注入伪系统发送时间戳，使大模型具备精确的时间线感知，防止其对物理时间产生幻觉。",
-        )
-    ];
-
-    for (id, name, rule_type, default_enabled, content) in presets {
-        let exists: Option<(i32,)> =
-            sqlx::query_as("SELECT is_enabled FROM tarven_rules WHERE id = ?")
+    for id in ["system_meta_injection", "time_anchoring_v2"] {
+        let preset = TarvenRule::defaults_for_id(id);
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM tarven_rules WHERE id = ?)")
                 .bind(id)
-                .fetch_optional(pool)
+                .fetch_one(pool)
                 .await
                 .map_err(|e| format!("Failed to query tarven_rules existence: {}", e))?;
 
-        if let Some((_is_enabled,)) = exists {
+        if exists {
             // 已存在，只热覆盖更新内容、名称、规则类型等，但不篡改用户的 is_enabled 状态
             sqlx::query(
                 "UPDATE tarven_rules 
                  SET name = ?, rule_type = ?, content = ?, updated_at = ? 
                  WHERE id = ?",
             )
-            .bind(name)
-            .bind(rule_type)
-            .bind(content)
+            .bind(&preset.name)
+            .bind(&preset.rule_type)
+            .bind(&preset.content)
             .bind(now)
             .bind(id)
             .execute(pool)
@@ -665,10 +707,10 @@ pub async fn sync_system_preset_rules(pool: &Pool<Sqlite>) -> Result<(), String>
                  VALUES (?, ?, ?, ?, ?, 'global', 0, -100, ?, ?)"
             )
             .bind(id)
-            .bind(name)
-            .bind(rule_type)
-            .bind(default_enabled)
-            .bind(content)
+            .bind(&preset.name)
+            .bind(&preset.rule_type)
+            .bind(preset.is_enabled)
+            .bind(&preset.content)
             .bind(now)
             .bind(now)
             .execute(pool)
@@ -678,4 +720,96 @@ pub async fn sync_system_preset_rules(pool: &Pool<Sqlite>) -> Result<(), String>
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod default_recovery_tests {
+    use super::*;
+
+    async fn database() -> DbState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(include_str!("../../../migrations/0100_baseline_v2.sql"))
+            .execute(&pool).await.unwrap();
+        DbState::new(pool, std::path::PathBuf::new())
+    }
+
+    #[tokio::test]
+    async fn rules_restore_only_invalid_fields_and_persist_before_filtering() {
+        let db = database().await;
+        sqlx::query("INSERT INTO tarven_rules(id,name,rule_type,is_enabled,content,scope,wrap,role,depth,position,sort_order,created_at,updated_at) VALUES ('bad',x'ff','context_inject','true','keep text','bad-scope',2,'system',-3,'before',7,12,34),('kept','Kept','user_suffix',0,'','agent',0,NULL,NULL,NULL,-4,12,35)")
+            .execute(&db.pool).await.unwrap();
+        let rules = read_tarven_rules(&db).await.unwrap();
+        let bad = rules.iter().find(|rule| rule.id == "bad").unwrap();
+        let defaults = TarvenRule::default();
+        assert_eq!(bad.name, defaults.name);
+        assert_eq!(bad.rule_type, "context_inject");
+        assert_eq!(bad.content, "keep text");
+        assert_eq!(bad.is_enabled, defaults.is_enabled);
+        assert_eq!(bad.wrap, defaults.wrap);
+        assert_eq!(bad.scope, defaults.scope);
+        assert_eq!(bad.role, defaults.role);
+        assert_eq!(bad.depth, defaults.depth);
+        assert_eq!(bad.position, defaults.position);
+        assert_eq!(bad.sort_order, 7);
+        let kept = rules.iter().find(|rule| rule.id == "kept").unwrap();
+        assert!(!kept.is_enabled);
+        assert!(!kept.wrap);
+        assert_eq!(kept.content, "");
+        assert_eq!((kept.role.clone(), kept.depth, kept.position.clone()), (None, None, None));
+        let stored: (String, i64, i64) = sqlx::query_as("SELECT typeof(is_enabled),depth,updated_at FROM tarven_rules WHERE id='bad'")
+            .fetch_one(&db.pool).await.unwrap();
+        assert_eq!(stored, ("integer".into(), 0, 34));
+        assert_eq!(read_tarven_rules(&db).await.unwrap(), rules);
+        let active = fetch_active_rules(&db, "group").await.unwrap();
+        assert_eq!(active.iter().map(|rule| rule.id.as_str()).collect::<Vec<_>>(), vec!["bad"]);
+    }
+
+    #[tokio::test]
+    async fn builtin_rules_use_their_own_defaults_and_keep_valid_user_toggles() {
+        let db = database().await;
+        sync_system_preset_rules(&db.pool).await.unwrap();
+        sqlx::query("UPDATE tarven_rules SET is_enabled=x'ff'").execute(&db.pool).await.unwrap();
+        // Existence checking must not decode a possibly damaged toggle at boot.
+        sync_system_preset_rules(&db.pool).await.unwrap();
+        let rules = read_tarven_rules(&db).await.unwrap();
+        let system = rules.iter().find(|rule| rule.id == "system_meta_injection").unwrap();
+        let time = rules.iter().find(|rule| rule.id == "time_anchoring_v2").unwrap();
+        assert!(system.is_enabled);
+        assert!(!time.is_enabled);
+        sqlx::query("UPDATE tarven_rules SET is_enabled=CASE id WHEN 'time_anchoring_v2' THEN 1 ELSE 0 END").execute(&db.pool).await.unwrap();
+        sync_system_preset_rules(&db.pool).await.unwrap();
+        let rules = read_tarven_rules(&db).await.unwrap();
+        assert!(!rules.iter().find(|rule| rule.id == "system_meta_injection").unwrap().is_enabled);
+        assert!(rules.iter().find(|rule| rule.id == "time_anchoring_v2").unwrap().is_enabled);
+    }
+
+    #[tokio::test]
+    async fn rule_write_failures_are_errors_and_identity_is_not_defaulted() {
+        let db = database().await;
+        sync_system_preset_rules(&db.pool).await.unwrap();
+        sqlx::query("UPDATE tarven_rules SET is_enabled='broken'").execute(&db.pool).await.unwrap();
+        sqlx::raw_sql("CREATE TRIGGER reject_rule_repair BEFORE UPDATE ON tarven_rules BEGIN SELECT RAISE(ABORT,'write failed'); END;")
+            .execute(&db.pool).await.unwrap();
+        assert!(read_tarven_rules(&db).await.unwrap_err().contains("write failed"));
+        sqlx::query("DROP TRIGGER reject_rule_repair").execute(&db.pool).await.unwrap();
+        sqlx::query("UPDATE tarven_rules SET id=NULL WHERE id='time_anchoring_v2'").execute(&db.pool).await.unwrap();
+        assert!(read_tarven_rules(&db).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn preview_uses_default_role_and_depth_without_limiting_valid_large_depths() {
+        let rule = TarvenRule {
+            id: "context".into(), rule_type: "context_inject".into(), content: "inserted".into(),
+            role: Some("invalid".into()), depth: Some(-1), wrap: false, ..TarvenRule::default()
+        };
+        let messages = preview_tarven_injection(vec![rule.clone()], Some(vec![
+            serde_json::json!({"role":"user","content":"original"})
+        ])).await.unwrap();
+        assert_eq!(messages.last().unwrap()["role"], "user");
+        assert_eq!(messages.last().unwrap()["content"], "inserted");
+        let mut deep = TarvenRule { depth: Some(100), ..rule };
+        deep.normalize();
+        assert_eq!(deep.depth, Some(100));
+    }
 }

@@ -57,6 +57,17 @@ describe("chat mutations during generation", () => {
     expect(history.isSubmitting).toBe(false);
   });
 
+  it.each(['', null])('uses the saved username %s or the generated default only when settings are absent', async userName => {
+    const history = loadedHistory();
+    useSettingsStore().snapshot = userName === null ? null : makeConfigSnapshot(makeSettings({ 'identity.userName': userName }));
+    mockInvoke('append_single_message', () => ({ blocks: [], topicUpdatedAt: 2 }));
+    mockInvoke('handle_agent_chat_message', () => undefined);
+    await history.sendMessage('name boundary');
+    expect(invokeMock).toHaveBeenCalledWith('append_single_message', expect.objectContaining({
+      message: expect.objectContaining({ name: userName ?? makeSettings().identity.userName }),
+    }));
+  });
+
   it('consumes only the committed draft before generation finishes and rejects double submission', async () => {
     const history = loadedHistory();
     useSettingsStore().snapshot = makeConfigSnapshot(makeSettings());

@@ -25,6 +25,29 @@ pub struct MessageWriteResultDto {
     pub topic_updated_at: i64,
 }
 
+fn project_shell_agent(row: sqlx::sqlite::SqliteRow) -> Result<crate::vcp_modules::agent_types::AgentConfig, String> {
+    use crate::vcp_modules::agent_types::AgentConfig;
+    let name = match row.try_get::<Option<String>, _>("name") {
+        Ok(Some(name)) => name,
+        Ok(None) | Err(sqlx::Error::ColumnDecode { .. }) => AgentConfig::default().name,
+        Err(error) => return Err(error.to_string()),
+    };
+    let avatar_calculated_color = match row.try_get("dominant_color") {
+        Ok(color) => color,
+        Err(sqlx::Error::ColumnDecode { .. }) => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    // Only identity and presentation fields are consumed by precompute_shell;
+    // these placeholders are never saved or used as an Agent configuration.
+    Ok(AgentConfig {
+        id: row.try_get("agent_id").map_err(|error| error.to_string())?,
+        name, avatar_calculated_color,
+        system_prompt: String::new(), mobile_system_prompt: String::new(), model: String::new(),
+        temperature: 0.0, context_token_limit: 0, max_output_tokens: 0,
+        stream_output: false, use_temperature: false, voice: Default::default(), topics: vec![],
+    })
+}
+
 async fn project_history_attachment(
     app: &AppHandle,
     db: &DbState,
@@ -220,7 +243,7 @@ async fn convert_history_rows(
     }
 
     // 预计算外壳属性所需的全局数据（避免调用 get_agents 触发昂贵的多余 topics 联表查询）
-    let agents = match sqlx::query(
+    let agents = sqlx::query(
         "SELECT a.agent_id, a.name, av.dominant_color
          FROM agents a
          LEFT JOIN avatars av ON av.owner_id = a.agent_id AND av.owner_type = 'agent' AND av.deleted_at IS NULL
@@ -228,47 +251,25 @@ async fn convert_history_rows(
     )
     .fetch_all(pool)
     .await
-    {
-        Ok(rows) => rows
-            .into_iter()
-            .map(|row| {
-                use sqlx::Row;
-                crate::vcp_modules::agent_types::AgentConfig {
-                    id: row.get("agent_id"),
-                    name: row.get("name"),
-                    avatar_calculated_color: row.get("dominant_color"),
-                    system_prompt: String::new(),
-                    mobile_system_prompt: String::new(),
-                    model: String::new(),
-                    temperature: 0.0,
-                    context_token_limit: 0,
-                    max_output_tokens: 0,
-                    stream_output: false,
-                    use_temperature: false,
-                    voice: Default::default(),
-                    topics: vec![],
-                }
-            })
-            .collect::<Vec<_>>(),
-        Err(_) => Vec::new(),
-    };
+    .map_err(|error| error.to_string())?
+    .into_iter().map(project_shell_agent).collect::<Result<Vec<_>, _>>()?;
 
     let settings =
         crate::vcp_modules::settings_manager::read_config(app_handle.clone(), app_handle.state())
-            .await
-            .ok();
-    let user_name = settings
-        .map(|s| s.identity.user_name.clone())
-        .unwrap_or_else(|| "User".to_string());
+            .await?;
+    let user_name = settings.identity.user_name.clone();
 
-    let user_avatar_color: Option<String> = sqlx::query_scalar(
+    let user_avatar_color: Option<String> = match sqlx::query_scalar::<_, Option<String>>(
         "SELECT dominant_color FROM avatars
          WHERE owner_type = 'user' AND owner_id = 'user_avatar' AND deleted_at IS NULL",
     )
     .fetch_optional(pool)
     .await
-    .ok()
-    .flatten();
+    {
+        Ok(color) => color.flatten(),
+        Err(sqlx::Error::ColumnDecode { .. }) => None,
+        Err(error) => return Err(error.to_string()),
+    };
 
     let mut history = Vec::new();
     for row in rows {
@@ -1964,6 +1965,26 @@ async fn delete_message_attachment_in_db(
 mod stream_lifecycle_tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
+
+    #[tokio::test]
+    async fn shell_presentation_defaults_bad_values_without_fabricating_identity() {
+        let pool = SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        let broken = sqlx::query("SELECT 'agent' AS agent_id,x'ff' AS name,x'ff' AS dominant_color")
+            .fetch_one(&pool).await.unwrap();
+        let agent = project_shell_agent(broken).unwrap();
+        assert_eq!(agent.id, "agent");
+        assert_eq!(agent.name, crate::vcp_modules::agent_types::AgentConfig::default().name);
+        assert_eq!(agent.avatar_calculated_color, None);
+        let empty = sqlx::query("SELECT 'agent' AS agent_id,'' AS name,NULL AS dominant_color")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(project_shell_agent(empty).unwrap().name, "");
+        let identity = sqlx::query("SELECT x'ff' AS agent_id,'Keep' AS name,NULL AS dominant_color")
+            .fetch_one(&pool).await.unwrap();
+        assert!(project_shell_agent(identity).is_err());
+        let missing_column = sqlx::query("SELECT 'agent' AS agent_id,NULL AS dominant_color")
+            .fetch_one(&pool).await.unwrap();
+        assert!(project_shell_agent(missing_column).is_err());
+    }
 
     fn topic_key() -> TopicKey {
         TopicKey::new("agent", "agent-1", "topic-1")

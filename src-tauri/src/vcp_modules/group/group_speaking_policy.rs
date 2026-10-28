@@ -1,6 +1,6 @@
 use crate::vcp_modules::agent_types::AgentConfig;
 use crate::vcp_modules::chat_manager::ChatMessage;
-use crate::vcp_modules::group_types::{GroupConfig, JevFallbackPolicy};
+use crate::vcp_modules::group_types::{GroupConfig, JevFallbackPolicy, JevModeSettings};
 use rand::Rng;
 use regex::Regex;
 use crate::vcp_modules::group::{
@@ -58,7 +58,11 @@ pub(crate) fn build_jev_request(
     questions.insert(
         "speaker_routing".into(),
         JevQuestion::Choice {
-            instructions: settings.navigator_prompt.clone(),
+            instructions: if settings.navigator_prompt.trim().is_empty() {
+                JevModeSettings::default().navigator_prompt
+            } else {
+                settings.navigator_prompt.clone()
+            },
             criteria,
         },
     );

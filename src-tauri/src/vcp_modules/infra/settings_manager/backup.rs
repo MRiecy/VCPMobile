@@ -106,8 +106,37 @@ fn parse_backup_bytes(bytes: &[u8]) -> Result<ParsedConfigBackup, String> {
     if bytes.len() as u64 > MAX_CONFIG_BACKUP_BYTES {
         return Err("备份文件过大（超过 1 MiB），已拒绝导入".into());
     }
-    let raw: Value =
+    // Validate the envelope separately from configuration content: one numeric
+    // overflow in a preference must not discard unrelated, valid settings.
+    let source: BTreeMap<String, &serde_json::value::RawValue> =
         serde_json::from_slice(bytes).map_err(|_| "备份文件不是合法的 JSON".to_string())?;
+    let mut raw = Map::new();
+    for key in ["app", "kind", "version", "exportedAt"] {
+        if let Some(value) = source.get(key) {
+            raw.insert(key.into(), serde_json::from_str(value.get())
+                .map_err(|_| format!("备份字段 {key} 类型不正确"))?);
+        }
+    }
+    for (key, shape) in [
+        ("domains", serde_json::json!(super::Settings::default())),
+        ("settings", serde_json::json!({})),
+        // Only the shape belongs here; defaults remain with the frontend owner.
+        ("preferences", serde_json::json!({"theme":{},"chat":{}})),
+    ] {
+        if let Some(value) = source.get(key) {
+            raw.insert(key.into(), schema::parse_config_json(value.get(), &shape));
+        }
+    }
+    if let Some(value) = source.get("groupPreferences") {
+        let groups = serde_json::from_str::<BTreeMap<String, &serde_json::value::RawValue>>(value.get());
+        let shape = serde_json::json!(GroupLocalSettings::default());
+        raw.insert("groupPreferences".into(), match groups {
+            Ok(groups) => Value::Object(groups.into_iter().map(|(id, value)|
+                (id, schema::parse_config_json(value.get(), &shape))).collect()),
+            Err(_) => Value::Null,
+        });
+    }
+    let raw = Value::Object(raw);
     if raw["app"] != "vcp-mobile" || raw["kind"] != "vcp-mobile-settings-backup" {
         return Err("这不是 VCP Mobile 的配置备份文件".into());
     }
@@ -287,6 +316,53 @@ mod tests {
             json!({"asr":{"inputEncoding":"mp3_64"},"vad":{"endSilenceMs":777}})
         );
         assert!(!parsed.domains.contains_key("identity"));
+    }
+
+    #[test]
+    fn overflowing_backup_numbers_recover_only_their_configuration_fields() {
+        let parsed = parse_backup_bytes(br#"{
+            "app":"vcp-mobile","kind":"vcp-mobile-settings-backup","version":2,
+            "domains":{"jev":{"timeoutMs":1e400,"maxRetries":0},"voice":{"tts":{"stream":false,"voice":"Mia"}}},
+            "preferences":{"chat":{"messageHapticsEnabled":1e400,"smoothStreamingEnabled":false}},
+            "groupPreferences":{"g":{"chatMode":"jev","modeSettings":{"jev":{"maxSpeakersPerRound":1e400,"continueThreshold":0.7,"memberStyles":{"a":"keep","b":1e400}}}}}
+        }"#).unwrap();
+        assert_eq!(parsed.domains["jev"], json!({"timeoutMs":Settings::default().jev.timeout_ms,"maxRetries":0}));
+        assert_eq!(parsed.domains["voice"], json!({"tts":{"stream":false,"voice":"Mia"}}));
+        assert_eq!(parsed.preferences["chat"], json!({"messageHapticsEnabled":null,"smoothStreamingEnabled":false}));
+        let groups = serde_json::to_value(parsed.group_preferences).unwrap();
+        assert_eq!(groups["g"]["chatMode"], "jev");
+        let defaults = GroupLocalSettings::default();
+        assert_eq!(groups["g"]["modeSettings"]["jev"], json!({
+            "maxSpeakersPerRound":defaults.mode_settings.jev.max_speakers_per_round,
+            "continueThreshold":0.7,"memberStyles":{"a":"keep","b":""}
+        }));
+        assert!(!parsed.domains.contains_key("server"));
+    }
+
+    #[test]
+    fn overflow_in_v1_configuration_does_not_reset_valid_present_values() {
+        let parsed = parse_backup_bytes(br#"{
+            "app":"vcp-mobile","kind":"vcp-mobile-settings-backup","version":1,
+            "settings":{"voiceVadEndSilenceMs":1e400,"voiceTtsStream":false,"vcpApiKey":"keep"}
+        }"#).unwrap();
+        assert_eq!(parsed.domains["voice"], json!({
+            "vad":{"endSilenceMs":Settings::default().voice.vad.end_silence_ms},
+            "tts":{"stream":false}
+        }));
+        assert_eq!(parsed.domains["server"], json!({"apiKey":"keep"}));
+        assert!(!parsed.domains.contains_key("identity"));
+    }
+
+    #[test]
+    fn envelope_errors_never_acquire_default_metadata() {
+        for raw in [
+            r#"{"app":"vcp-mobile","kind":"vcp-mobile-settings-backup","version":1e400,"domains":{}}"#,
+            r#"{"app":"vcp-mobile","kind":"vcp-mobile-settings-backup","version":2,"domains":{},"exportedAt":1e400}"#,
+            r#"{"app":"vcp-mobile","kind":"vcp-mobile-settings-backup","version":2,"domains":{"voice":{"tts":broken}}}"#,
+        ] { assert!(parse_backup_bytes(raw.as_bytes()).is_err()); }
+        let parsed = parse_backup_bytes(br#"{"app":"vcp-mobile","kind":"vcp-mobile-settings-backup","version":2,"domains":{},"unknownMetadata":1e400}"#).unwrap();
+        assert!(parsed.domains.is_empty());
+        assert!(parsed.exported_at.is_empty());
     }
 
     #[test]

@@ -182,7 +182,7 @@ pub(crate) async fn process_prepared_agent_chat_message(
     };
 
     let messages = crate::vcp_modules::context_assembler::orchestrate_chat_context(
-        &db_state.pool,
+        &db_state,
         &history,
         &topic_key,
         &agent_config.name,

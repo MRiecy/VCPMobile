@@ -119,19 +119,19 @@ pub enum IncomingMessage {
 
 impl IncomingEnvelope {
     /// Parse the raw envelope into a typed message.
-    pub fn parse(self) -> IncomingMessage {
-        match self.msg_type.as_str() {
+    pub fn parse(self) -> Result<IncomingMessage, String> {
+        Ok(match self.msg_type.as_str() {
             "connection_ack" => {
                 let data = self.data.unwrap_or_default();
                 let server_id = data
                     .get("serverId")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
+                    .ok_or_else(|| "connection_ack requires a string serverId".to_string())?
                     .to_string();
                 let client_id = data
                     .get("clientId")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
+                    .ok_or_else(|| "connection_ack requires a string clientId".to_string())?
                     .to_string();
                 IncomingMessage::ConnectionAck {
                     server_id,
@@ -172,7 +172,7 @@ impl IncomingEnvelope {
                 IncomingMessage::CancelTool { request_id }
             }
             other => IncomingMessage::Unknown(other.to_string()),
-        }
+        })
     }
 }
 
@@ -320,6 +320,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ack_identity_fields_do_not_default_but_unknown_messages_remain_ignored() {
+        for data in [serde_json::json!(null), serde_json::json!({}),
+            serde_json::json!({"serverId":1,"clientId":"client"}),
+            serde_json::json!({"serverId":"server","clientId":false})] {
+            let envelope: IncomingEnvelope = serde_json::from_value(serde_json::json!({"type":"connection_ack","data":data})).unwrap();
+            assert!(envelope.parse().is_err());
+        }
+        let valid: IncomingEnvelope = serde_json::from_value(serde_json::json!({
+            "type":"connection_ack","data":{"serverId":"server","clientId":"client"}
+        })).unwrap();
+        assert!(matches!(valid.parse().unwrap(), IncomingMessage::ConnectionAck { server_id, client_id }
+            if server_id == "server" && client_id == "client"));
+        let unknown: IncomingEnvelope = serde_json::from_value(serde_json::json!({"type":"future_event"})).unwrap();
+        assert!(matches!(unknown.parse().unwrap(), IncomingMessage::Unknown(name) if name == "future_event"));
+    }
+
+    #[test]
     fn execute_tool_keeps_trusted_context_at_envelope_level() {
         let envelope: IncomingEnvelope = serde_json::from_value(serde_json::json!({
             "type": "execute_tool",
@@ -335,7 +352,7 @@ mod tests {
         }))
         .expect("parse execute_tool envelope");
 
-        match envelope.parse() {
+        match envelope.parse().expect("parse valid execute_tool fields") {
             IncomingMessage::ExecuteTool {
                 tool_args,
                 vcp_context,

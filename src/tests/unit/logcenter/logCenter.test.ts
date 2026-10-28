@@ -18,6 +18,18 @@ describe('logCenterStore 增量状态机', () => {
     needFullReload: false,
   });
 
+  it.each(['49', '5001', '1.5', '-1', 'Infinity', 'bad'])('restores malformed saved line limit %s without replacing valid toggles', raw => {
+    localStorage.setItem('vcp_log_limit', raw);
+    localStorage.setItem('vcp_log_reverse', '1');
+    localStorage.setItem('vcp_log_autoscroll', '0');
+    const store = useLogCenterStore();
+    expect(store.lineLimit).toBe(500);
+    expect(store.isReverse).toBe(true);
+    expect(store.autoScroll).toBe(false);
+    expect(localStorage.getItem('vcp_log_limit')).toBe('500');
+    expect(localStorage.getItem('vcp_log_autoscroll')).toBe('0');
+  });
+
 
   it('增量拉取携带 offset，半行在下一次增量原位补全', async () => {
     let call = 0;

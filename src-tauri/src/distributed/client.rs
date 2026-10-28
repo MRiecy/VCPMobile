@@ -798,7 +798,7 @@ impl DistributedClient {
                 msg = ws_rx.next() => {
                     match msg {
                         Some(Ok(Message::Text(text))) => {
-                            Self::handle_incoming(
+                            if let Err(error) = Self::handle_incoming(
                                 app,
                                 &text,
                                 device_name,
@@ -810,7 +810,11 @@ impl DistributedClient {
                                 &child_tracker,
                                 &mut streaming_started,
                                 session_id,
-                            ).await;
+                            ).await {
+                                log::warn!("[Distributed] Invalid connection acknowledgement: {error}");
+                                exit_reason = error;
+                                break;
+                            }
                         }
                         Some(Ok(Message::Ping(data))) => {
                             if let Err(error) = Self::send_ws_frame(&ws_tx, Message::Pong(data)).await {
@@ -909,23 +913,23 @@ impl DistributedClient {
         child_tracker: &Arc<SessionTaskTracker>,
         streaming_started: &mut bool,
         session_id: u64,
-    ) {
+    ) -> Result<(), String> {
         if text.len() > MAX_INCOMING_MESSAGE_BYTES {
             log::warn!(
                 "[Distributed] Incoming message exceeds {} byte budget; ignored.",
                 MAX_INCOMING_MESSAGE_BYTES
             );
-            return;
+            return Ok(());
         }
         let envelope: IncomingEnvelope = match serde_json::from_str(text) {
             Ok(e) => e,
             Err(e) => {
                 log::warn!("[Distributed] Failed to parse message: {}", e);
-                return;
+                return Ok(());
             }
         };
 
-        match envelope.parse() {
+        match envelope.parse()? {
             IncomingMessage::ConnectionAck {
                 server_id,
                 client_id,
@@ -944,14 +948,14 @@ impl DistributedClient {
                         session_id,
                         server_id.clone(),
                         client_id.clone(),
-                    )
+                    )?
                 };
                 if !accepted {
                     log::info!(
                         "[Distributed] Ignoring stale connection ACK for session {}.",
                         session_id
                     );
-                    return;
+                    return Ok(());
                 }
                 Self::emit_status_with_app(app, status).await;
 
@@ -1016,7 +1020,7 @@ impl DistributedClient {
             } => {
                 if let Err(error) = validate_vcp_context(vcp_context.as_ref()) {
                     Self::send_tool_rejection(ws_tx, &request_id, error).await;
-                    return;
+                    return Ok(());
                 }
                 let execution_context = {
                     let current = status.read().await;
@@ -1031,7 +1035,7 @@ impl DistributedClient {
                         Err(error) => {
                             drop(current);
                             Self::send_tool_rejection(ws_tx, &request_id, error).await;
-                            return;
+                            return Ok(());
                         }
                     }
                 };
@@ -1048,7 +1052,7 @@ impl DistributedClient {
                     Ok(permit) => permit,
                     Err(error) => {
                         Self::send_tool_rejection(ws_tx, &request_id, error).await;
-                        return;
+                        return Ok(());
                     }
                 };
 
@@ -1098,7 +1102,7 @@ impl DistributedClient {
                             }
                         })
                         .await;
-                    return;
+                    return Ok(());
                 }
 
                 child_tracker
@@ -1147,6 +1151,7 @@ impl DistributedClient {
                 log::debug!("[Distributed] Unknown message type: {}", msg_type);
             }
         }
+        Ok(())
     }
 
     // ================================================================
@@ -1324,9 +1329,12 @@ impl DistributedClient {
         session_id: u64,
         server_id: String,
         client_id: String,
-    ) -> bool {
+    ) -> Result<bool, String> {
         if status.session_id != session_id {
-            return false;
+            return Ok(false);
+        }
+        if server_id.is_empty() || client_id.is_empty() {
+            return Err("connection_ack requires non-empty serverId and clientId".to_string());
         }
 
         status.state = ConnectionState::Connected;
@@ -1334,7 +1342,7 @@ impl DistributedClient {
         status.server_id = Some(server_id);
         status.client_id = Some(client_id);
         status.last_error = None;
-        true
+        Ok(true)
     }
 
     /// Serialize and send a message over WebSocket.
@@ -1444,10 +1452,36 @@ mod tests {
             1,
             "old-server".to_string(),
             "old-client".to_string(),
-        ));
+        ).unwrap());
         assert_eq!(status.state, ConnectionState::Disconnecting);
         assert!(!status.connected);
         assert_eq!(status.session_id, 2);
+    }
+
+    #[test]
+    fn malformed_ack_cannot_commit_connection_or_admit_registration() {
+        let mut status = DistributedStatus {
+            state: ConnectionState::Connecting,
+            session_id: 3,
+            ..DistributedStatus::default()
+        };
+        for (server_id, client_id) in [("", "client"), ("server", ""), ("", "")] {
+            assert!(DistributedClient::commit_connection_ack(
+                &mut status, 3, server_id.to_string(), client_id.to_string(),
+            ).is_err());
+            assert_eq!(status.state, ConnectionState::Connecting);
+            assert!(!status.connected);
+            assert_eq!(status.server_id, None);
+            assert_eq!(status.client_id, None);
+            assert_eq!(status.registered_tools, 0);
+        }
+        assert!(DistributedClient::commit_connection_ack(
+            &mut status, 3, "server".into(), "client".into(),
+        ).unwrap());
+        assert_eq!(status.state, ConnectionState::Connected);
+        assert!(status.connected);
+        assert_eq!(status.server_id.as_deref(), Some("server"));
+        assert_eq!(status.client_id.as_deref(), Some("client"));
     }
 
     #[tokio::test]

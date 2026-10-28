@@ -4,10 +4,11 @@
 //! global share one SQLite transaction. Once committed, runtime never reads or
 //! writes the old representation again.
 
-use super::schema::{domain_defaults, normalize_domain, set_value_at_path};
+use super::schema::{domain_defaults, normalize_domain, parse_config_json, set_value_at_path};
 use super::types::ConfigDomain;
 use crate::vcp_modules::db_manager::DbState;
 use serde_json::Value;
+use sqlx::Row;
 use std::collections::BTreeMap;
 
 const MIGRATION_KEY: &str = "global_domains_v1";
@@ -37,15 +38,18 @@ pub(super) async fn ensure_migrated(db: &DbState) -> Result<(), String> {
         return Ok(());
     }
 
-    let legacy: Option<String> =
-        sqlx::query_scalar("SELECT value FROM settings WHERE key = 'global'")
+    let legacy =
+        sqlx::query("SELECT value FROM settings WHERE key = 'global'")
             .fetch_optional(&mut *transaction)
             .await
             .map_err(|error| format!("读取原有配置失败: {error}"))?;
     let now = crate::vcp_modules::infra::utils::now_millis();
-    let parsed = legacy
-        .as_deref()
-        .and_then(|raw| serde_json::from_str::<Value>(raw).ok());
+    let raw = match legacy.as_ref().map(|row| row.try_get::<String, _>("value")) {
+        Some(Ok(value)) => Some(value),
+        Some(Err(sqlx::Error::ColumnDecode { .. })) | None => None,
+        Some(Err(error)) => return Err(format!("读取原有配置失败: {error}")),
+    };
+    let parsed = raw.as_deref().map(|raw| parse_config_json(raw, &serde_json::json!({})));
     let domains = match legacy.as_ref() {
         None => default_domains(),
         Some(_) => match parsed.as_ref().filter(|value| value.is_object()) {
@@ -56,12 +60,13 @@ pub(super) async fn ensure_migrated(db: &DbState) -> Result<(), String> {
         },
     };
 
-    if let Some(original) = legacy.as_ref() {
+    if legacy.is_some() {
         sqlx::query(
             "INSERT INTO config_recovery (domain, schema_version, revision, value, reason, created_at) \
-             VALUES ('legacy.global', 0, 0, ?, 'global-migration', ?)",
+             SELECT 'legacy.global', 0, 0, value, 'global-migration', ? FROM settings WHERE key='global'",
         )
-        .bind(original)
+        // SQLite copies the original storage value byte-for-byte, including
+        // non-text data or invalid UTF-8 that cannot be represented as String.
         .bind(now)
         .execute(&mut *transaction)
         .await

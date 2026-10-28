@@ -27,16 +27,13 @@ pub struct LogFetchResult {
     #[serde(default)]
     pub content: String,
     /// 新的字节偏移（= 当前 fileSize）。
-    #[serde(default)]
     pub offset: u64,
     /// 服务器端日志文件绝对路径（仅用于展示）。
-    #[serde(default)]
     pub path: String,
     /// 服务器端日志文件大小。
     #[serde(default)]
     pub file_size: u64,
     /// true 表示检测到日志轮转/截断，前端必须丢弃本地缓冲并全量重拉。
-    #[serde(default)]
     pub need_full_reload: bool,
 }
 
@@ -149,4 +146,37 @@ pub async fn logcenter_clear_server<R: Runtime>(
         return Err(format!("清空服务器日志失败: HTTP {}", resp.status()));
     }
     Ok("服务器日志已清空".to_string())
+}
+
+#[cfg(test)]
+mod response_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn empty_logs_and_rotation_keep_their_distinct_protocol_meanings() {
+        let empty: LogFetchResult = serde_json::from_value(json!({
+            "content":"","offset":0,"path":"/logs/server.log","fileSize":0,"needFullReload":false
+        })).unwrap();
+        assert!(empty.content.is_empty());
+        assert_eq!(empty.offset, 0);
+        assert!(!empty.need_full_reload);
+        let rotation: LogFetchResult = serde_json::from_value(json!({
+            "offset":0,"path":"/logs/server.log","needFullReload":true
+        })).unwrap();
+        assert!(rotation.need_full_reload);
+        assert!(rotation.content.is_empty());
+        assert_eq!(rotation.file_size, 0);
+    }
+
+    #[test]
+    fn missing_cursor_fields_do_not_become_successful_empty_logs() {
+        let valid = json!({"content":"new\n","offset":50,"path":"/logs/server.log","fileSize":50,"needFullReload":false});
+        assert!(serde_json::from_value::<LogFetchResult>(json!({})).is_err());
+        for key in ["offset", "path", "needFullReload"] {
+            let mut missing = valid.clone();
+            missing.as_object_mut().unwrap().remove(key);
+            assert!(serde_json::from_value::<LogFetchResult>(missing).is_err(), "{key}");
+        }
+    }
 }

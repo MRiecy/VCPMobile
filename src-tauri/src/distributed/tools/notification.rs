@@ -13,6 +13,12 @@ use crate::distributed::types::InvocationCommand;
 
 pub struct NotificationTool;
 
+#[derive(Debug, serde::Deserialize)]
+struct NotificationArgs {
+    title: String,
+    body: String,
+}
+
 #[async_trait]
 impl OneShotTool for NotificationTool {
     fn manifest(&self) -> ToolManifest {
@@ -41,16 +47,8 @@ body:「始」通知内容「末」\n\
     }
 
     async fn execute(&self, args: Value, app: &AppHandle) -> Result<Value, String> {
-        let title = args
-            .get("title")
-            .and_then(|v| v.as_str())
-            .unwrap_or("VCP 通知")
-            .to_string();
-        let body = args
-            .get("body")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let NotificationArgs { title, body } = serde_json::from_value(args)
+            .map_err(|error| format!("Invalid notification arguments: {error}"))?;
 
         let native_app = app.clone();
         let native_title = title.clone();
@@ -69,5 +67,21 @@ body:「始」通知内容「末」\n\
             "status": "success",
             "message": format!("Notification accepted by the system: {}", title)
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notification_content_has_no_synthetic_default() {
+        for args in [json!({}), json!({"title":"present"}), json!({"body":"present"}),
+            json!({"title":false,"body":"present"}), json!({"title":"present","body":42})] {
+            assert!(serde_json::from_value::<NotificationArgs>(args).is_err());
+        }
+        let args: NotificationArgs = serde_json::from_value(json!({"title":"","body":""})).unwrap();
+        assert_eq!(args.title, "");
+        assert_eq!(args.body, "");
     }
 }

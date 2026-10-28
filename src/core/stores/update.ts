@@ -19,6 +19,7 @@ const IDLE_STATUS: UpdateStatus = {
 };
 
 const AUTO_CHECK_KEY = 'vcp_auto_update_check';
+const AUTO_CHECK_DEFAULT = true;
 
 export type AutoCheckPreferenceResult =
   | { ok: true; changed: boolean; enabled: boolean }
@@ -28,9 +29,13 @@ const readAutoCheckEnabled = (): boolean => {
   const result = readLocalPreference(AUTO_CHECK_KEY);
   if (!result.ok) {
     console.warn('[UpdateStore] Failed to read auto-check preference:', result.error);
-    return true;
+    return AUTO_CHECK_DEFAULT;
   }
-  return result.raw !== 'off';
+  if (result.raw === 'off') return false;
+  if (result.raw === 'on' || result.raw === null) return AUTO_CHECK_DEFAULT;
+  const repaired = writeLocalPreference(AUTO_CHECK_KEY, AUTO_CHECK_DEFAULT ? 'on' : 'off');
+  if (!repaired.ok) console.warn('[UpdateStore] Failed to repair auto-check preference:', repaired.error);
+  return AUTO_CHECK_DEFAULT;
 };
 
 /**

@@ -1,8 +1,8 @@
 use crate::vcp_modules::chat::voice_service::VoiceReplyPolicy;
 use crate::vcp_modules::chat_manager::ChatMessage;
+use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::topic_types::TopicKey;
 use serde_json::{json, Value};
-use sqlx::{Pool, Sqlite};
 
 // =================================================================
 // vcp_modules/chat/context_assembler.rs - 上下文级联装配中枢
@@ -16,7 +16,7 @@ use sqlx::{Pool, Sqlite};
 
 /// 统一上下文级联装配外观入口 (Facade Orchestrator)
 pub(crate) async fn orchestrate_chat_context(
-    pool: &Pool<Sqlite>,
+    db: &DbState,
     history: &[ChatMessage],
     topic: &TopicKey,
     agent_name: &str,
@@ -25,16 +25,9 @@ pub(crate) async fn orchestrate_chat_context(
     invite_prompt: Option<String>,
     reply_policy: Option<&VoiceReplyPolicy>,
 ) -> Result<Vec<Value>, String> {
-    // 1. 快速查询会话内时间锚定机制 V2 的启用状态
-    let enable_time_anchoring = match sqlx::query_scalar::<_, i32>(
-        "SELECT is_enabled FROM tarven_rules WHERE id = 'time_anchoring_v2'",
-    )
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(Some(val)) => val != 0,
-        _ => false,
-    };
+    // One normalized snapshot drives both time anchoring and rule injection.
+    let rules = crate::vcp_modules::chat::context_injection::fetch_active_rules(db, scope).await?;
+    let enable_time_anchoring = rules.iter().any(|rule| rule.id == "time_anchoring_v2");
 
     // 2. 第一阶段：微观编织。进行强类型的发言人前缀及物理 Token 换行符时间隔离注入
     let is_group = scope == "group";
@@ -63,10 +56,10 @@ pub(crate) async fn orchestrate_chat_context(
 
     // 5. 第二阶段：宏观拦截。调用 Tavern 拦截器流水线进行环境真理及 System/User 规则的终极拼装
     crate::vcp_modules::chat::context_injection::apply_tarven_pipeline(
-        pool,
+        &db.pool,
         topic,
         agent_name,
-        scope,
+        &rules,
         &mut messages,
     )
     .await?;
@@ -312,7 +305,7 @@ mod voice_policy_tests {
         Settings, VoiceConfig, VoiceGuidanceConfig, VoiceTtsConfig, VoiceTtsMode,
     };
 
-    async fn pool_with_tail_rule() -> Pool<Sqlite> {
+    async fn pool_with_tail_rule() -> DbState {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -332,7 +325,7 @@ mod voice_policy_tests {
         .execute(&pool)
         .await
         .unwrap();
-        pool
+        DbState::new(pool, std::path::PathBuf::new())
     }
 
     fn policy(mode: VoiceTtsMode, rules: &str) -> VoiceReplyPolicy {

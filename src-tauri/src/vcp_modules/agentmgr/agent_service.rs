@@ -129,6 +129,10 @@ fn merge_top_level(base: &Value, incoming: &Value) -> Result<Value, String> {
     let incoming_obj = incoming
         .as_object()
         .ok_or_else(|| "提交的配置必须是 JSON 对象".to_string())?;
+    if let Some(agents) = incoming_obj.get("agents") {
+        let agents = agents.as_array().ok_or_else(|| "agents 必须是数组，已中止保存".to_string())?;
+        validate_agents(agents)?;
+    }
     for (key, value) in incoming_obj {
         merged.insert(key.clone(), value.clone());
     }
@@ -158,10 +162,6 @@ pub async fn agentmgr_save_config<R: Runtime>(
 ) -> Result<Value, String> {
     let settings = settings_of(app_handle, settings_state).await?;
     let url = build_url(&settings, &["agent-assistant", "config"])?;
-
-    if let Some(agents) = config.get("agents").and_then(|a| a.as_array()) {
-        validate_agents(agents)?;
-    }
 
     let latest = send_json(admin_api::client_get(&settings, &url)?, DEFAULT_TIMEOUT).await?;
     let merged = merge_top_level(&latest, &config)?;
@@ -195,4 +195,26 @@ pub async fn agentmgr_list_models<R: Runtime>(
         })
         .unwrap_or_default();
     Ok(Value::Array(ids))
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn agent_list_type_errors_cannot_replace_remote_agents() {
+        let base = json!({"agents":[{"chineseName":"保留","modelId":"model"}],"maxHistoryRounds":7,"extra":"keep"});
+        for invalid in [Value::Null, json!(false), json!(0), json!(""), json!({})] {
+            assert!(merge_top_level(&base, &json!({"agents":invalid})).is_err());
+        }
+        assert!(merge_top_level(&base, &json!({"agents":[{"chineseName":"missing model"}]})).is_err());
+        let updated = merge_top_level(&base, &json!({"maxHistoryRounds":12})).unwrap();
+        assert_eq!(updated["agents"], base["agents"]);
+        assert_eq!(updated["extra"], "keep");
+        assert_eq!(updated["maxHistoryRounds"], 12);
+        let cleared = merge_top_level(&base, &json!({"agents":[]})).unwrap();
+        assert_eq!(cleared["agents"], json!([]), "an explicit empty list keeps its existing meaning");
+        assert_eq!(cleared["extra"], "keep");
+    }
 }

@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 import { ref, computed } from "vue";
 import { useAssistantStore } from "./assistant";
 import { useTopicStore } from "./topicListManager";
+import { parseLocalPreferenceObject } from "../preferences/localPreference";
 import type {
   ConversationOwnerItem,
   OwnerType,
@@ -267,5 +268,35 @@ export const useChatSessionStore = defineStore("chatSession", () => {
 }, {
   persist: {
     pick: ['currentSelectedItem', 'currentTopicId', 'lastActiveTopicMap'],
+    serializer: {
+      serialize: JSON.stringify,
+      deserialize(raw) {
+        const value = parseLocalPreferenceObject(raw);
+        const item = value.currentSelectedItem;
+        let currentSelectedItem: ConversationOwnerItem | null = null;
+        if (item !== null && typeof item === "object" && !Array.isArray(item)
+          && "id" in item && typeof item.id === "string"
+          && "type" in item && (item.type === "agent" || item.type === "group")) {
+          currentSelectedItem = {
+            id: item.id,
+            type: item.type,
+            name: "name" in item && typeof item.name === "string" ? item.name : undefined,
+            avatarCalculatedColor: "avatarCalculatedColor" in item && typeof item.avatarCalculatedColor === "string"
+              ? item.avatarCalculatedColor : null,
+          };
+        }
+        const remembered = value.lastActiveTopicMap;
+        const lastActiveTopicMap = remembered !== null && typeof remembered === "object" && !Array.isArray(remembered)
+          ? Object.fromEntries(Object.entries(remembered).filter(([owner, topic]) =>
+            /^(agent|group):/.test(owner) && typeof topic === "string"))
+          : {};
+        return {
+          currentSelectedItem,
+          currentTopicId: typeof value.currentTopicId === "string" ? value.currentTopicId : null,
+          lastActiveTopicMap,
+        };
+      },
+    },
+    afterHydrate: ({ store }) => store.$persist(),
   },
 });

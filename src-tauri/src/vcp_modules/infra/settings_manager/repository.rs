@@ -770,6 +770,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn first_load_archives_binary_or_invalid_utf8_global_without_coercion() {
+        for value in ["x'7B22757365724E616D65223A22426C6F62227D'", "CAST(x'FF' AS TEXT)"] {
+            let db = database(Some("{}")).await;
+            sqlx::query(sqlx::AssertSqlSafe(format!("UPDATE settings SET value={value} WHERE key='global'")))
+                .execute(&db.pool).await.unwrap();
+            let original: (String, String) = sqlx::query_as("SELECT typeof(value),hex(value) FROM settings WHERE key='global'")
+                .fetch_one(&db.pool).await.unwrap();
+            let first = SettingsState::new().read_snapshot(&db).await.unwrap();
+            assert_eq!(first.data, Settings::default());
+            let archived: (String, String) = sqlx::query_as("SELECT typeof(value),hex(value) FROM config_recovery WHERE domain='legacy.global'")
+                .fetch_one(&db.pool).await.unwrap();
+            assert_eq!(archived, original);
+            assert_eq!(SettingsState::new().read_snapshot(&db).await.unwrap(), first);
+            let archives: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM config_recovery WHERE domain='legacy.global'")
+                .fetch_one(&db.pool).await.unwrap();
+            assert_eq!(archives, 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn first_load_overflow_only_defaults_its_legacy_leaf_and_archives_original_text() {
+        let raw = r#"{"userName":"keep","voiceVadEndSilenceMs":1e400,"voiceTtsStream":false,"voiceTtsVoice":"Mia"}"#;
+        let db = database(Some(raw)).await;
+        let first = SettingsState::new().read_snapshot(&db).await.unwrap();
+        assert_eq!(first.data.identity.user_name, "keep");
+        assert_eq!(first.data.voice.vad.end_silence_ms, Settings::default().voice.vad.end_silence_ms);
+        assert!(!first.data.voice.tts.stream);
+        assert_eq!(first.data.voice.tts.voice, "Mia");
+        let archived: String = sqlx::query_scalar("SELECT value FROM config_recovery WHERE domain='legacy.global'")
+            .fetch_one(&db.pool).await.unwrap();
+        assert_eq!(archived, raw);
+        assert_eq!(SettingsState::new().read_snapshot(&db).await.unwrap(), first);
+    }
+
+    #[tokio::test]
     async fn overflowing_json_number_preserves_and_persists_valid_siblings() {
         let db = database(None).await;
         SettingsState::new().read_snapshot(&db).await.unwrap();

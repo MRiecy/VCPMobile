@@ -5,6 +5,8 @@ import piniaPluginPersistedstate from 'pinia-plugin-persistedstate';
 import { useAssistantStore } from '@/core/stores/assistant';
 import { useChatSessionStore } from '@/core/stores/chatSessionStore';
 import { useTopicStore, type Topic } from '@/core/stores/topicListManager';
+import { useGuideStore } from '@/features/guide/stores/guideStore';
+import { useDiaryStore } from '@/features/diary/diaryStore';
 import type { AssistantsSnapshotDto, TopicDto } from '@/core/types/assistant';
 import { invokeMock, mockInvoke, type MockChannel } from '@/tests/mocks/tauri';
 
@@ -66,6 +68,50 @@ afterEach(() => {
 });
 
 describe('real Pinia persisted-state conversation restoration', () => {
+  it('repairs malformed preference leaves before consumers run and preserves valid references', () => {
+    const pinned = JSON.stringify(['group', ownerId, 'saved-topic']);
+    localStorage.setItem('chatSession', JSON.stringify({
+      currentSelectedItem: { id: ownerId, type: 'group', name: false },
+      currentTopicId: 'saved-topic',
+      lastActiveTopicMap: { [`group:${ownerId}`]: 'saved-topic', 'agent:bad': null },
+    }));
+    localStorage.setItem('topic', JSON.stringify({ sortMode: false, pinnedTopicKeys: [pinned] }));
+    localStorage.setItem('guide', JSON.stringify({ completed: null, lastSeenAppVersion: '1.1.6' }));
+    localStorage.setItem('diary', JSON.stringify({ hiddenFolders: ['kept'], collapsedCategories: ['unknown'], folderOrder: 4 }));
+    const restored = startFrontend();
+    const guide = useGuideStore(restored.pinia);
+    const diary = useDiaryStore(restored.pinia);
+    expect(restored.session.currentConversationKey?.topicId).toBe('saved-topic');
+    expect(restored.session.lastActiveTopicMap).toEqual({ [`group:${ownerId}`]: 'saved-topic' });
+    expect(restored.topics.sortMode).toBe('created');
+    expect(restored.topics.pinnedTopicKeys).toEqual([pinned]);
+    expect(guide.isCompleted('anything')).toBe(false);
+    expect(guide.lastSeenAppVersion).toBe('1.1.6');
+    expect(diary.visibleFolders).toEqual([]);
+    expect(diary.hiddenFolders).toEqual(['kept']);
+    expect(diary.collapsedCategories).toEqual([]);
+    expect(diary.folderOrder).toEqual([]);
+    expect(JSON.parse(localStorage.getItem('guide')!)).toEqual({ completed: [], lastSeenAppVersion: '1.1.6' });
+    expect(JSON.parse(localStorage.getItem('diary')!)).toEqual({ hiddenFolders: ['kept'], collapsedCategories: [], folderOrder: [] });
+  });
+
+  it('persists current defaults for damaged JSON without persisting runtime or draft fields', () => {
+    for (const owner of ['chatSession', 'topic', 'guide', 'diary']) localStorage.setItem(owner, '{broken');
+    const restored = startFrontend();
+    const guide = useGuideStore(restored.pinia);
+    const diary = useDiaryStore(restored.pinia);
+    expect(restored.session.currentSelectedItem).toBeNull();
+    expect(restored.session.currentTopicId).toBeNull();
+    expect(restored.session.lastActiveTopicMap).toEqual({});
+    expect(restored.topics.sortMode).toBe('created');
+    expect(restored.topics.pinnedTopicKeys).toEqual([]);
+    expect(guide.completed).toEqual([]);
+    expect(guide.lastSeenAppVersion).toBeNull();
+    expect(diary.visibleFolders).toEqual([]);
+    expect(Object.keys(JSON.parse(localStorage.getItem('chatSession')!))).toEqual(['currentSelectedItem', 'currentTopicId', 'lastActiveTopicMap']);
+    expect(Object.keys(JSON.parse(localStorage.getItem('diary')!))).toEqual(['hiddenFolders', 'collapsedCategories', 'folderOrder']);
+  });
+
   it('restores owner-scoped selection and preferences, then reconciles with fresh server data', async () => {
     const first = startFrontend();
     await first.assistants.fetchAgentsAndGroups();

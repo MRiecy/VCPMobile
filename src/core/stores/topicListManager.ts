@@ -7,6 +7,7 @@ import {
 } from "./chatSessionStore";
 import { useAssistantStore } from "./assistant";
 import type { TopicDto } from "../types/assistant";
+import { parseLocalPreferenceObject } from "../preferences/localPreference";
 
 import { useNotificationStore } from "./notification";
 import { allowChatMutation } from "../../features/chat/chatMutationPolicy";
@@ -765,5 +766,17 @@ export const useTopicStore = defineStore("topic", () => {
 }, {
   persist: {
     pick: ["sortMode", "pinnedTopicKeys"],
+    serializer: {
+      serialize: JSON.stringify,
+      deserialize(raw) {
+        const value = parseLocalPreferenceObject(raw);
+        return {
+          sortMode: normalizeSortMode(value.sortMode),
+          pinnedTopicKeys: Array.isArray(value.pinnedTopicKeys) && value.pinnedTopicKeys.every(key => typeof key === "string")
+            ? value.pinnedTopicKeys : [],
+        };
+      },
+    },
+    afterHydrate: ({ store }) => store.$persist(),
   },
 });

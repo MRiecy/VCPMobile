@@ -13,6 +13,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { useAppLifecycleStore } from '../../core/stores/appLifecycle';
 import {
   LINE_LIMIT_DEFAULT,
+  LINE_LIMIT_MIN,
+  LINE_LIMIT_MAX,
   clampLineLimit,
   splitLogChunk,
   stripAnsi,
@@ -51,6 +53,14 @@ function writeStorage(key: string, value: string): void {
   }
 }
 
+function restorePreference<T>(key: string, decode: (raw: string | null) => T, encode: (value: T) => string): T {
+  const raw = readStorage(key);
+  const value = decode(raw);
+  const canonical = encode(value);
+  if (raw !== null && raw !== canonical) writeStorage(key, canonical);
+  return value;
+}
+
 export const useLogCenterStore = defineStore('logCenter', () => {
   // ---------- 原始缓冲 ----------
   const lines = ref<string[]>([]);
@@ -69,9 +79,13 @@ export const useLogCenterStore = defineStore('logCenter', () => {
   let fetchInFlight = false;
 
   // ---------- 偏好（持久化） ----------
-  const lineLimit = ref(clampLineLimit(Number(readStorage(STORAGE_KEYS.lineLimit)) || LINE_LIMIT_DEFAULT));
-  const isReverse = ref(readStorage(STORAGE_KEYS.isReverse) === '1');
-  const autoScroll = ref(readStorage(STORAGE_KEYS.autoScroll) !== '0');
+  const lineLimit = ref(restorePreference(STORAGE_KEYS.lineLimit, raw => {
+    const value = Number(raw);
+    return raw !== null && /^\d+$/.test(raw) && Number.isInteger(value)
+      && value >= LINE_LIMIT_MIN && value <= LINE_LIMIT_MAX ? value : LINE_LIMIT_DEFAULT;
+  }, String));
+  const isReverse = ref(restorePreference(STORAGE_KEYS.isReverse, raw => raw === '1', value => value ? '1' : '0'));
+  const autoScroll = ref(restorePreference(STORAGE_KEYS.autoScroll, raw => raw !== '0', value => value ? '1' : '0'));
 
   // ---------- 筛选 ----------
   const filterText = ref('');

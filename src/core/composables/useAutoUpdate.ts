@@ -3,6 +3,7 @@ import { useAppLifecycleStore } from '../stores/appLifecycle';
 import { useUpdateDownloader } from './useUpdateDownloader';
 import { useUpdateStore } from '../stores/update';
 import { isAndroid } from '../utils/platform';
+import { readLocalPreference, writeLocalPreference } from '../preferences/localPreference';
 
 const LAST_CHECK_KEY = 'vcp_last_update_check';
 const SKIPPED_VERSION_KEY = 'vcp_update_skipped_version';
@@ -28,9 +29,18 @@ export function useAutoUpdate() {
   const hasCheckedThisSession = ref(false);
 
   const shouldCheck = () => {
-    const last = localStorage.getItem(LAST_CHECK_KEY);
-    if (!last) return true;
-    return Date.now() - parseInt(last, 10) > COOLDOWN_MS;
+    const last = readLocalPreference(LAST_CHECK_KEY);
+    if (!last.ok) {
+      console.warn('[AutoUpdate] Failed to read last check:', last.error);
+      return true;
+    }
+    if (last.raw === null) return true;
+    const timestamp = Number(last.raw);
+    if (!/^\d+$/.test(last.raw) || !Number.isSafeInteger(timestamp) || timestamp > Date.now()) {
+      // Invalid metadata means no successful check, never a fabricated recent one.
+      return true;
+    }
+    return Date.now() - timestamp > COOLDOWN_MS;
   };
 
   const performCheck = async () => {
@@ -45,13 +55,16 @@ export function useAutoUpdate() {
     try {
       const status = await updateStore.check();
       // 冷却时间戳只在检查成功时写入，失败允许下次冷启动重试
-      localStorage.setItem(LAST_CHECK_KEY, Date.now().toString());
+      const saved = writeLocalPreference(LAST_CHECK_KEY, Date.now().toString());
+      if (!saved.ok) console.warn('[AutoUpdate] Failed to save last check:', saved.error);
 
       const latest = status.info?.latestVersion;
       const hasUpdate =
         status.info?.hasUpdate &&
         (status.state === 'available' || status.state === 'readyToInstall');
-      if (hasUpdate && latest && latest !== localStorage.getItem(SKIPPED_VERSION_KEY)) {
+      const skipped = readLocalPreference(SKIPPED_VERSION_KEY);
+      if (!skipped.ok) console.warn('[AutoUpdate] Failed to read skipped version:', skipped.error);
+      if (hasUpdate && latest && latest !== (skipped.ok ? skipped.raw : null)) {
         updateStore.openPrompt();
       }
     } catch (e) {
@@ -112,7 +125,8 @@ export function useAutoUpdate() {
   const handleSkipVersion = () => {
     const latest = updateStore.info?.latestVersion;
     if (latest) {
-      localStorage.setItem(SKIPPED_VERSION_KEY, latest);
+      const saved = writeLocalPreference(SKIPPED_VERSION_KEY, latest);
+      if (!saved.ok) console.warn('[AutoUpdate] Failed to save skipped version:', saved.error);
     }
     updateStore.closePrompt();
   };

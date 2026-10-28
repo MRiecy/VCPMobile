@@ -36,13 +36,13 @@ pub(crate) async fn read_narration_author(
     .await
     .map_err(|error| error.to_string())?
     .ok_or_else(|| "朗读消息已不存在".to_string())?;
-    if row.get::<String, _>("role") != "assistant" {
+    if row.try_get::<String, _>("role").map_err(|error| error.to_string())? != "assistant" {
         return Ok(None);
     }
     if key.topic.owner_type == "agent" {
         return Ok(Some(key.topic.owner_id.clone()));
     }
-    let author = row.get::<Option<String>, _>("agent_id")
+    let author = row.try_get::<Option<String>, _>("agent_id").map_err(|error| error.to_string())?
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "群聊消息缺少发言助手，无法确定朗读音色".to_string())?;
     Ok(Some(author))
@@ -64,6 +64,8 @@ mod narration_author_tests {
                 ('group','room','topic','same','assistant','speaker-b',NULL),
                 ('group','room','topic','user','user','ignored',NULL),
                 ('group','room','topic','unknown','assistant',NULL,NULL),
+                ('group','room','topic','bad-role',x'ff',NULL,NULL),
+                ('group','room','topic','bad-author','assistant',x'ff',NULL),
                 ('group','room','topic','gone','assistant','speaker-b',1);",
         ).execute(&pool).await.expect("seed messages");
         let group = TopicKey::new("group", "room", "topic");
@@ -75,6 +77,9 @@ mod narration_author_tests {
             .await.expect("user"), None);
         assert!(read_narration_author(&pool, &MessageKey::new(group.clone(), "unknown"))
             .await.expect_err("missing speaker").contains("发言助手"));
+        for id in ["bad-role", "bad-author"] {
+            assert!(read_narration_author(&pool, &MessageKey::new(group.clone(), id)).await.is_err());
+        }
         for id in ["gone", "missing"] {
             assert!(read_narration_author(&pool, &MessageKey::new(group.clone(), id))
                 .await.expect_err("missing message").contains("不存在"));
@@ -89,6 +94,8 @@ pub(crate) fn resolve_message_updated_at(
     existing: Option<(&str, i64)>,
     now: i64,
 ) -> Result<i64, String> {
+    i64::try_from(message_timestamp)
+        .map_err(|_| "message timestamp exceeds the SQLite integer range".to_string())?;
     if let Some((previous_hash, previous_updated_at)) = existing {
         let resolved = if previous_hash == content_hash {
             previous_updated_at
@@ -495,6 +502,9 @@ mod rebuild_cache_tests {
             resolve_message_updated_at(None, 100, "new", None, 400).expect("new message timestamp"),
             100
         );
+        for (explicit, existing) in [(None, None), (Some(1), None), (Some(1), Some(("same", 1)))] {
+            assert!(resolve_message_updated_at(explicit, u64::MAX, "same", existing, 400).is_err());
+        }
     }
 
     #[test]
@@ -802,6 +812,12 @@ impl MessageRepository {
         render_content: &[u8],
         skip_bubble: bool,
     ) -> Result<Option<TopicActivityDto>, String> {
+        let message_timestamp = i64::try_from(message.timestamp)
+            .map_err(|_| "message timestamp exceeds the SQLite integer range".to_string())?;
+        for attachment in message.attachments.iter().flatten() {
+            i64::try_from(attachment.size)
+                .map_err(|_| "attachment size exceeds the SQLite integer range".to_string())?;
+        }
         // 1. 计算核心内容指纹 (通过 HashAggregator)
         let attachment_hashes: Vec<String> = message
             .attachments
@@ -835,7 +851,6 @@ impl MessageRepository {
         )
         .map_err(|error| format!("message {} {error}", message.id))?;
         let is_group_message = message.is_group_message.unwrap_or(false);
-        let message_timestamp = message.timestamp as i64;
         let fingerprint_changed = existing
             .as_ref()
             .is_none_or(|state| state.content_hash != content_hash);
@@ -962,7 +977,7 @@ impl MessageRepository {
                 tx,
                 key,
                 &message.id,
-                message.timestamp as i64,
+                message_timestamp,
                 attachments,
             )
             .await?;
@@ -997,6 +1012,8 @@ impl MessageRepository {
     ) -> Result<(), String> {
         for (i, att) in attachments.iter().enumerate() {
             let hash = Self::attachment_hash(att)?;
+            let size = i64::try_from(att.size)
+                .map_err(|_| "attachment size exceeds the SQLite integer range".to_string())?;
 
             let image_frames = att
                 .image_frames
@@ -1028,7 +1045,7 @@ impl MessageRepository {
             )
             .bind(hash)
             .bind(&att.r#type)
-            .bind(att.size as i64)
+            .bind(size)
             .bind(&att.internal_path)
             .bind(&att.extracted_text)
             .bind(image_frames)
@@ -1101,6 +1118,37 @@ mod tombstone_tests {
             .connect("sqlite::memory:")
             .await
             .expect("open test database")
+    }
+
+    #[tokio::test]
+    async fn overflowing_message_metadata_rolls_back_the_sqlx_write() {
+        use crate::vcp_modules::chat_manager::{Attachment, ChatMessage};
+        let pool = test_pool().await;
+        sqlx::raw_sql(include_str!("../../../migrations/0100_baseline_v2.sql")).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO agents(owner_type,agent_id,name,model,updated_at) VALUES ('agent','owner','Owner','',1); INSERT INTO topics(owner_type,owner_id,topic_id,title,created_at,updated_at) VALUES ('agent','owner','topic','Topic',1,1)")
+            .execute(&pool).await.unwrap();
+        let key = TopicKey::new("agent", "owner", "topic");
+        for bad_timestamp in [false, true] {
+            let valid = ChatMessage { id: "valid".into(), role: "user".into(), content: "keep".into(), timestamp: 1, updated_at: Some(1), ..Default::default() };
+            let invalid = ChatMessage {
+                id: "invalid".into(), role: "user".into(), content: "invalid".into(),
+                timestamp: if bad_timestamp { u64::MAX } else { 1 }, updated_at: Some(1),
+                attachments: (!bad_timestamp).then(|| vec![Attachment { size: u64::MAX, hash: Some("a".repeat(64)), ..Default::default() }]),
+                ..Default::default()
+            };
+            let result: Result<(), String> = async {
+                let mut tx = pool.begin().await.map_err(|error| error.to_string())?;
+                MessageRepository::upsert_message(&mut tx, &valid, &key, &[], true).await?;
+                MessageRepository::upsert_message(&mut tx, &invalid, &key, &[], true).await?;
+                tx.commit().await.map_err(|error| error.to_string())
+            }.await;
+            assert!(result.unwrap_err().contains("SQLite integer range"));
+            for table in ["messages", "attachments", "message_attachments", "render_cache", "messages_fts"] {
+                let count: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}")))
+                    .fetch_one(&pool).await.unwrap();
+                assert_eq!(count, 0, "{table}");
+            }
+        }
     }
 
     #[tokio::test]
