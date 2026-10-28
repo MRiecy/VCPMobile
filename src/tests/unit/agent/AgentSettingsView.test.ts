@@ -154,7 +154,6 @@ describe('Agent settings authoritative voice draft', () => {
 
   it('keeps all six model controls and the temperature enable relationship', async () => {
     const wrapper = await render();
-    await button(wrapper, '模型参数配置').trigger('click');
     const temperature = inputFor(wrapper, 'Temperature (0-2):');
     expect(temperature.attributes('disabled')).toBeDefined();
     const switches = wrapper.findAll('input[type="checkbox"]');

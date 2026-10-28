@@ -66,15 +66,6 @@ const isEpochCurrent = (epoch: number) => editorEpoch === epoch;
 const isOpenEditorCurrent = (epoch: number, id: string) =>
   isEpochCurrent(epoch) && props.isOpen && props.id === id;
 
-// UI State
-const sections = ref({
-  params: false,
-});
-
-const toggleSection = (section: keyof typeof sections.value) => {
-  sections.value[section] = !sections.value[section];
-};
-
 // Avatar Upload Logic
 const isCropping = ref(false);
 const isPickingAvatar = ref(false);
@@ -494,26 +485,14 @@ const handleDelete = async () => {
           </div>
         </section>
 
-        <AgentVoiceSettings v-if="originalConfig" :key="agentConfig.id" ref="voiceSettings" v-model="agentConfig.voice"
-          :active="pageActive" :disabled="loading || isSaving || isLeaving" />
-
-        <!-- 4. 模型参数配置 (完全保持原有所有选项与逻辑) -->
+        <!-- 3. 模型参数配置 -->
         <section class="space-y-1.5">
-          <button @click="toggleSection('params')" class="w-full flex items-center justify-between px-0.5 py-1">
-            <div class="flex items-center gap-1.5">
-              <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
-              <h3 class="text-xs font-bold text-primary-text">
-                模型参数配置
-              </h3>
-            </div>
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
-              stroke-linecap="round" stroke-linejoin="round" class="transition-transform duration-300 opacity-50"
-              :class="{ 'rotate-180': sections.params }">
-              <polyline points="6 9 12 15 18 9"></polyline>
-            </svg>
-          </button>
+          <div class="flex items-center gap-1.5 px-0.5">
+            <span class="w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+            <h3 class="text-xs font-bold text-primary-text">模型参数配置</h3>
+          </div>
 
-          <div v-if="sections.params" class="plate-container p-4 space-y-5 animate-in fade-in slide-in-from-top-2 duration-300">
+          <div class="plate-container p-4 space-y-5">
             <div>
               <label class="text-[10px] uppercase font-bold opacity-40 mb-2 block">模型名称</label>
               <div class="flex gap-2">
@@ -570,6 +549,10 @@ const handleDelete = async () => {
             </div>
           </div>
         </section>
+
+        <!-- 4. 语音设置 -->
+        <AgentVoiceSettings v-if="originalConfig" :key="agentConfig.id" ref="voiceSettings" v-model="agentConfig.voice"
+          :active="pageActive" :disabled="loading || isSaving || isLeaving" />
 
         </fieldset>
 
