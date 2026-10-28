@@ -57,12 +57,13 @@ defineExpose({ stop, busy });
 .voice-preview-button { display: inline-flex; align-self: flex-start; align-items: center; justify-content: center; gap: 8px; min-height: 44px; padding: 8px 12px; border: 1px solid var(--border-color); border-radius: 8px; background: transparent; color: inherit; font-size: 13px; touch-action: manipulation; }
 .voice-preview-button:disabled { opacity: 0.4; }
 .voice-preview-compact { min-width: 0; }
-.voice-preview-label { display: block; color: var(--secondary-text); font-size: 11px; line-height: 16px; }
+.voice-preview-label { display: block; margin-bottom: 4px; color: var(--secondary-text); font-size: 12px; line-height: 20px; }
 .voice-preview-inline { display: flex; align-items: center; gap: 8px; }
 .voice-preview-input-target { display: flex; flex: 1; align-items: center; min-width: 0; min-height: 44px; }
-.voice-preview-input { width: 100%; min-width: 0; min-height: 28px; padding: 4px 8px; border: 1px solid var(--border-color); border-radius: 4px; background: rgb(0 0 0 / 0.1); color: var(--primary-text); font: inherit; font-size: 11px; line-height: 18px; }
-.voice-preview-button--compact { position: relative; align-self: center; flex-shrink: 0; min-width: 48px; min-height: 28px; padding: 4px 10px; border: 0; border-radius: 4px; background: #2563eb; color: white; font-size: 11px; line-height: 18px; }
-.voice-preview-button--compact::after { content: ''; position: absolute; inset: -8px 0; }
-.voice-preview-input:focus-visible, .voice-preview-button:focus-visible { outline: 2px solid var(--highlight-text); outline-offset: 2px; }
-:global(html[data-vcp-platform="ios"]) .voice-preview-input { font-size: 16px; }
+.voice-preview-input { width: 100%; min-width: 0; min-height: 32px; padding: 5px 10px; border: 1px solid var(--voice-control-border, var(--border-color)); border-radius: 6px; background: var(--voice-control-bg, transparent); color: var(--primary-text); font: inherit; font-size: 12px; line-height: 20px; }
+.voice-preview-button--compact { position: relative; align-self: center; flex-shrink: 0; min-width: 52px; min-height: 32px; padding: 6px 12px; border: 0; border-radius: 6px; background: var(--voice-control-accent, #2563eb); color: white; font-size: 12px; line-height: 20px; }
+.voice-preview-button--compact::after { content: ''; position: absolute; inset: -6px 0; }
+.voice-preview-button--compact:enabled:active { opacity: 0.75; }
+.voice-preview-input:focus-visible, .voice-preview-button:focus-visible { outline: 2px solid var(--voice-control-link, var(--highlight-text)); outline-offset: 2px; }
+html[data-vcp-platform="ios"] .voice-preview-input { font-size: 16px; }
 </style>
