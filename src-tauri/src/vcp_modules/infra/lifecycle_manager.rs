@@ -180,7 +180,14 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
                 ),
                 Err(e) => info!("[Lifecycle] Emoticon auto-refresh skipped: {}", e),
             }
+        });
+    }
 
+    // 通知连接独立启动，表情库的网络刷新不能延迟实时通道。
+    {
+        let h = handle.clone();
+
+        tokio::spawn(async move {
             // 自动连接 VCP Log。执行前在 Settings runtime owner 下重读，避免启动
             // 后台任务用旧快照覆盖用户刚保存的新连接参数。
             let settings_state = h.state::<SettingsState>();

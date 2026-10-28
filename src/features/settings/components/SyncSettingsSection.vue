@@ -20,6 +20,7 @@ const overlayStore = useOverlayStore();
 
 const emit = defineEmits<{
   (e: "edit", patch: Partial<ConnectionFields>): void;
+  (e: "blur"): void;
 }>();
 
 const emoticonStatus = ref<{
@@ -27,9 +28,19 @@ const emoticonStatus = ref<{
   message: string;
 }>({ type: null, message: "" });
 
-const startManualSync = () => {
-  if (!props.active || props.disabled) return;
-  overlayStore.openSyncSession();
+const openingSync = ref(false);
+const startManualSync = async () => {
+  if (disposed || !props.active || props.disabled || openingSync.value) return;
+  const request = generation;
+  openingSync.value = true;
+  try {
+    // A blur save may still be pending when this click arrives.
+    const saved = await props.commit();
+    if (disposed || !props.active || request !== generation || !saved.ok) return;
+    overlayStore.openSyncSession();
+  } finally {
+    openingSync.value = false;
+  }
 };
 
 let disposed = false;
@@ -75,6 +86,7 @@ const rebuildEmoticonLibrary = async () => {
       :model-value="settings['sync.httpUrl']"
       :disabled="disabled"
       @update:model-value="emit('edit', { 'sync.httpUrl': $event })"
+      @blur="emit('blur')"
       label="HTTP 服务 URL"
       placeholder="http://192.168.x.x:5974"
       mono
@@ -83,6 +95,7 @@ const rebuildEmoticonLibrary = async () => {
       :model-value="settings['sync.serverUrl']"
       :disabled="disabled"
       @update:model-value="emit('edit', { 'sync.serverUrl': $event })"
+      @blur="emit('blur')"
       label="WebSocket 服务 URL"
       placeholder="ws://192.168.x.x:5975"
       mono
@@ -91,6 +104,7 @@ const rebuildEmoticonLibrary = async () => {
       :model-value="settings['sync.token']"
       :disabled="disabled"
       @update:model-value="emit('edit', { 'sync.token': $event })"
+      @blur="emit('blur')"
       is-secure
       label="Mobile Sync Token"
       placeholder="输入桌面端 config.env 中的 Token"
@@ -102,6 +116,7 @@ const rebuildEmoticonLibrary = async () => {
         :model-value="settings['server.fileKey']"
         :disabled="disabled"
         @update:model-value="emit('edit', { 'server.fileKey': $event })"
+        @blur="emit('blur')"
         is-secure
         label="表情包图床密钥 (fileKey)"
         placeholder="用于构造表情包 URL 的密码"
@@ -130,6 +145,7 @@ const rebuildEmoticonLibrary = async () => {
             variant="secondary"
             size="sm"
             :disabled="disabled"
+            :loading="openingSync"
             @click="startManualSync"
           >
             OPEN PANEL

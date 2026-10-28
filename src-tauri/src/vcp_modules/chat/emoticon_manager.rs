@@ -6,7 +6,7 @@ use crate::vcp_modules::settings_manager::{read_config, SettingsState};
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tauri::{AppHandle, Manager, Runtime, State};
 use tokio::sync::Mutex;
 use url::Url;
@@ -216,7 +216,10 @@ pub async fn refresh_emoticon_library_internal<R: Runtime>(
     append_url_segments(&mut api_url, &["admin_api", "emojis", "list"])
         .map_err(|error| error.to_string())?;
 
-    let mut req = client.get(api_url.clone());
+    // 包括等待响应头和完整响应体；失败发生在写库前，保留已有表情库。
+    let mut req = client
+        .get(api_url.clone())
+        .timeout(Duration::from_secs(30));
     if !admin_user.is_empty() && !admin_pass.is_empty() {
         req = req.basic_auth(admin_user, Some(admin_pass));
     }

@@ -205,15 +205,33 @@ describe('依赖配置提交的设置动作', () => {
     expect(callsFor('plugin:vcp-mobile|save_to_downloads')).toHaveLength(0);
   });
 
-  it('打开同步面板不提交与该操作无关的表单', async () => {
-    const commit = vi.fn(async () => saved());
+  it('打开同步面板等待连接保存，等待期间重复点击不重复打开', async () => {
+    const pending = deferred<SettingsSaveResult>();
+    const commit = vi.fn(() => pending.promise);
     const wrapper = render(SyncSettingsSection, { settings: connectionDraft(), active: true, disabled: false, commit });
     const button = wrapper.findAll('button').find(candidate => candidate.text() === 'OPEN PANEL');
     expect(button).toBeDefined();
     await button!.trigger('click');
+    await button!.trigger('click');
 
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(harness.openSyncSession).not.toHaveBeenCalled();
+    pending.resolve(saved());
+    await flushPromises();
     expect(harness.openSyncSession).toHaveBeenCalledTimes(1);
-    expect(commit).not.toHaveBeenCalled();
+  });
+
+  it('同步面板等待保存时页面失活，迟到成功不会打开面板', async () => {
+    const pending = deferred<SettingsSaveResult>();
+    const wrapper = render(SyncSettingsSection, {
+      settings: connectionDraft(), active: true, disabled: false, commit: () => pending.promise,
+    });
+    const button = wrapper.findAll('button').find(candidate => candidate.text() === 'OPEN PANEL')!;
+    await button.trigger('click');
+    await wrapper.setProps({ active: false });
+    pending.resolve(saved());
+    await flushPromises();
+    expect(harness.openSyncSession).not.toHaveBeenCalled();
   });
 });
 
@@ -319,6 +337,116 @@ describe('连接设置页与真实编辑会话的集成', () => {
     });
     return render(ConnectionSettingsPage, { active: true });
   }
+
+  it.each([
+    ['Chat 服务器 URL (HTTP/HTTPS)', 'server.url'],
+    ['HTTP 服务 URL', 'sync.httpUrl'],
+  ] as const)('%s 失焦即保存；未改变的再次失焦不重复写入', async (label, path) => {
+    const wrapper = renderPage();
+    await flushPromises();
+    await field(wrapper, label).setValue('https://new.example');
+    expect(callsFor('update_settings')).toHaveLength(0);
+    await field(wrapper, label).trigger('blur');
+    await flushPromises();
+
+    expect(readSetting(useSettingsStore().settings!, path)).toBe('https://new.example');
+    expect(callsFor('update_settings')).toHaveLength(1);
+    await field(wrapper, label).trigger('blur');
+    await flushPromises();
+    expect(callsFor('update_settings')).toHaveLength(1);
+  });
+
+  it('失焦保存期间继续编辑，单次打开面板等待最后一批连接配置保存', async () => {
+    const wrapper = renderPage();
+    await flushPromises();
+    const store = useSettingsStore();
+    let committed = cloneConfig(store.snapshot!);
+    const firstSave = deferred<ConfigSaveResult>();
+    const secondSave = deferred<ConfigSaveResult>();
+    let nextSave = firstSave;
+    mockInvoke('update_settings', () => {
+      const current = nextSave;
+      nextSave = secondSave;
+      return current.promise;
+    });
+    let openedWith: AppSettings | undefined;
+    harness.openSyncSession.mockImplementation(() => { openedWith = cloneConfig(store.settings!); });
+
+    await field(wrapper, 'HTTP 服务 URL').setValue('https://sync.example');
+    await field(wrapper, 'HTTP 服务 URL').trigger('blur');
+    await flushPromises();
+    expect(callsFor('update_settings')).toHaveLength(1);
+    expect(wrapper.attributes()).not.toHaveProperty('inert');
+
+    await field(wrapper, 'WebSocket 服务 URL').setValue('wss://sync.example');
+    await field(wrapper, 'WebSocket 服务 URL').trigger('blur');
+    await field(wrapper, 'Mobile Sync Token').setValue('new-token');
+    await wrapper.findAll('[role="radio"]').find(button => button.text().includes('VCP 增强 Chat'))!.trigger('click');
+    await wrapper.findAll('button').find(button => button.text() === 'OPEN PANEL')!.trigger('click');
+    await flushPromises();
+    expect(wrapper.attributes()).toHaveProperty('inert');
+    expect(harness.openSyncSession).not.toHaveBeenCalled();
+    expect(callsFor('update_settings')).toHaveLength(1);
+
+    committed = applyRequest(committed, callsFor('update_settings')[0]![1]!.request as ConfigUpdate);
+    firstSave.resolve({ status: 'saved', snapshot: committed });
+    await flushPromises();
+    expect(callsFor('update_settings')).toHaveLength(2);
+    expect(harness.openSyncSession).not.toHaveBeenCalled();
+    committed = applyRequest(committed, callsFor('update_settings')[1]![1]!.request as ConfigUpdate);
+    secondSave.resolve({ status: 'saved', snapshot: committed });
+    await flushPromises();
+
+    expect(harness.openSyncSession).toHaveBeenCalledTimes(1);
+    expect(openedWith?.sync).toMatchObject({ httpUrl: 'https://sync.example', serverUrl: 'wss://sync.example', token: 'new-token' });
+    expect(openedWith?.server.endpointMode).toBe('vcpTools');
+    expect(wrapper.attributes()).not.toHaveProperty('inert');
+  });
+
+  it('失焦保存被拒绝时保留下一输入的焦点；打开同步面板也不能沿用旧配置', async () => {
+    const wrapper = renderPage(makeSettings({ 'log.url': 'wss://old.example', 'log.key': 'saved-key' }));
+    document.body.append(wrapper.element);
+    await flushPromises();
+    const store = useSettingsStore();
+    const committed = cloneConfig(store.snapshot!);
+    const rejected: ConfigSaveResult = {
+      status: 'rejected', issues: [{
+        domain: 'log', field: 'url', code: 'invalidScheme',
+        message: 'WebSocket 地址必须以 ws:// 或 wss:// 开头',
+      }],
+    };
+    const pending = deferred<ConfigSaveResult>();
+    mockInvoke('update_settings', () => pending.promise);
+    const url = field(wrapper, 'VCP WebSocket 服务器 URL');
+    const nextInput = field(wrapper, 'Mobile Sync Token').element as HTMLInputElement;
+    (url.element as HTMLInputElement).focus();
+    await url.setValue('example.invalid');
+    nextInput.focus();
+    await flushPromises();
+    expect(callsFor('update_settings')).toHaveLength(1);
+    pending.resolve(rejected);
+    await flushPromises();
+
+    expect(wrapper.get('[role="alert"]').text()).toContain('WebSocket 地址必须以 ws:// 或 wss:// 开头');
+    expect(document.activeElement).toBe(nextInput);
+    expect(callsFor('update_settings')).toHaveLength(1);
+    expect(store.snapshot).toEqual(committed);
+    await wrapper.findAll('button').find(button => button.text() === 'OPEN PANEL')!.trigger('click');
+    await flushPromises();
+    expect(harness.openSyncSession).not.toHaveBeenCalled();
+    expect(document.activeElement).toBe(wrapper.get('[role="alert"]').element);
+    expect((url.element as HTMLInputElement).value).toBe('example.invalid');
+    expect(wrapper.attributes()).not.toHaveProperty('inert');
+  });
+
+  it('无连接草稿时打开同步面板查看历史，不产生配置写入', async () => {
+    const wrapper = renderPage();
+    await flushPromises();
+    await wrapper.findAll('button').find(button => button.text() === 'OPEN PANEL')!.trigger('click');
+    await flushPromises();
+    expect(harness.openSyncSession).toHaveBeenCalledTimes(1);
+    expect(callsFor('update_settings')).toHaveLength(0);
+  });
 
   it('离页保存被拒绝时聚焦字段错误并保留草稿与已保存配置，修正后可保存离开', async () => {
     const initial = makeSettings({ 'log.url': 'wss://old.example', 'log.key': 'saved-key' });

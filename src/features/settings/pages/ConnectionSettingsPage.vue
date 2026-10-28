@@ -20,12 +20,19 @@ const { draft, leaving } = session;
 const actionBusy = ref(false);
 const disabled = computed(() => !props.active || leaving.value);
 const errorSummary = ref<HTMLElement | null>(null);
+let focusSaveError = true;
+let focusingError = false;
 
 watch([error, disabled, actionBusy], ([message, isDisabled, busy]) => {
   // Wait for the save/leave lock to lift before focusing an element in this page.
-  if (!message || isDisabled || busy) return;
-  errorSummary.value?.focus({ preventScroll: true });
-  errorSummary.value?.scrollIntoView({ block: 'nearest' });
+  if (!message || isDisabled || busy || !focusSaveError) return;
+  focusingError = true;
+  try {
+    errorSummary.value?.focus({ preventScroll: true });
+    errorSummary.value?.scrollIntoView({ block: 'nearest' });
+  } finally {
+    focusingError = false;
+  }
 }, { flush: 'post' });
 
 const edit = (patch: Partial<ConnectionFields>) => {
@@ -36,9 +43,18 @@ const edit = (patch: Partial<ConnectionFields>) => {
   }
 };
 
+const saveOnBlur = () => {
+  if (disabled.value || actionBusy.value || focusingError) return;
+  // Keep the next field/click usable while the edit session serializes this save.
+  // A rejected background save stays visible without taking focus from the next input.
+  focusSaveError = false;
+  void session.save();
+};
+
 // Freeze only until the confirmed snapshot has been captured, not throughout file/network IO.
 const commitForAction = async (): Promise<SettingsSaveResult> => {
   if (disabled.value || actionBusy.value) return { ok: false, error: '设置页面当前不可操作' };
+  focusSaveError = true;
   actionBusy.value = true;
   try {
     const result = await session.save();
@@ -51,6 +67,7 @@ const commitForAction = async (): Promise<SettingsSaveResult> => {
 
 const applyImport = async (backup: ParsedConfigBackup): Promise<BackupImportResult> => {
   if (disabled.value || actionBusy.value) throw new Error('设置页面当前不可操作');
+  focusSaveError = true;
   actionBusy.value = true;
   try {
     const settled = await session.settlePending();
@@ -84,7 +101,11 @@ const applyImport = async (backup: ParsedConfigBackup): Promise<BackupImportResu
 };
 
 defineExpose({
-  beforeLeave: () => actionBusy.value ? Promise.resolve(false) : session.prepareLeave(),
+  beforeLeave: () => {
+    if (actionBusy.value) return Promise.resolve(false);
+    focusSaveError = true;
+    return session.prepareLeave();
+  },
 });
 </script>
 
@@ -96,10 +117,10 @@ defineExpose({
     </p>
     <template v-if="draft">
       <SettingsSection title="核心连接">
-        <VcpCoreSettingsSection :settings="draft" :active="active" :disabled="disabled" :commit="commitForAction" @edit="edit" />
+        <VcpCoreSettingsSection :settings="draft" :active="active" :disabled="disabled" :commit="commitForAction" @edit="edit" @blur="saveOnBlur" />
       </SettingsSection>
       <SettingsSection title="数据同步">
-        <SyncSettingsSection :settings="draft" :active="active" :disabled="disabled" :commit="commitForAction" @edit="edit" />
+        <SyncSettingsSection :settings="draft" :active="active" :disabled="disabled" :commit="commitForAction" @edit="edit" @blur="saveOnBlur" />
       </SettingsSection>
       <SettingsSection title="配置备份">
         <ConfigBackupSection :active="active" :disabled="disabled" :commit="commitForAction" :apply-import="applyImport" />

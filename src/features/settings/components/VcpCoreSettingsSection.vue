@@ -16,6 +16,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (e: 'edit', patch: Partial<ConnectionFields>): void;
+  (e: 'blur'): void;
 }>();
 
 const vcpPingStatus = ref<{ type: 'success' | 'error' | 'loading' | 'info' | null; message: string }>({ type: null, message: '' });
@@ -138,6 +139,7 @@ const testVcpConnection = async () => {
   <div class="space-y-5 px-1">
     <SettingsTextField :model-value="settings['server.url']" :disabled="disabled"
       @update:model-value="emit('edit', { 'server.url': $event })" label="Chat 服务器 URL (HTTP/HTTPS)"
+      @blur="emit('blur')"
       placeholder="https://vcp-endpoint.com" />
 
     <fieldset class="border-t border-black/5 dark:border-white/5 pt-3">
@@ -152,6 +154,7 @@ const testVcpConnection = async () => {
           :aria-checked="settings['server.endpointMode'] === option.value"
           class="relative w-full py-3 pl-3 pr-2 text-left transition-colors active:bg-black/5 dark:active:bg-white/5"
           @click="emit('edit', { 'server.endpointMode': option.value })"
+          @blur="emit('blur')"
         >
           <span class="absolute left-0 top-2 bottom-2 w-0.5 bg-blue-500 transition-opacity"
             :class="settings['server.endpointMode'] === option.value ? 'opacity-100' : 'opacity-0'"></span>
@@ -184,18 +187,21 @@ const testVcpConnection = async () => {
     </div>
 
     <SettingsTextField :model-value="settings['server.apiKey']" :disabled="disabled"
+      @blur="emit('blur')"
       @update:model-value="emit('edit', { 'server.apiKey': $event })" is-secure label="API Key" placeholder="输入 API Key" />
 
     <div class="border-t border-black/5 dark:border-white/5 pt-2"></div>
 
     <div class="space-y-1.5">
       <SettingsTextField :model-value="settings['log.url']" :disabled="disabled"
+        @blur="emit('blur')"
         @update:model-value="emit('edit', { 'log.url': $event })" label="VCP WebSocket 服务器 URL" placeholder="ws://localhost:6005"
         mono />
       <p class="px-1 text-[11px] leading-4 opacity-60">使用 ws:// 或 wss:// 服务器基础地址，鉴权 Key 在下方单独填写。</p>
     </div>
     <div class="space-y-1.5">
       <SettingsTextField :model-value="settings['log.key']" :disabled="disabled"
+        @blur="emit('blur')"
         @update:model-value="emit('edit', { 'log.key': $event })" is-secure label="VCP WebSocket 鉴权 Key"
         placeholder="输入 WebSocket Key" mono />
       <p class="px-1 text-[11px] leading-4 opacity-60">Key 使用无空白的可打印 ASCII 字符；不支持会改变地址含义的特殊符号。</p>
