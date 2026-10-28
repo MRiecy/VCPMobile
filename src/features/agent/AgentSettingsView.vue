@@ -53,7 +53,7 @@ const createEmptyConfig = (id = ""): AgentConfigDto => ({
   useTemperature: false,
   avatarCalculatedColor: null,
   topics: [],
-  voice: { enabled: false, ...SETTINGS_DEFAULTS.voice.tts },
+  voice: { enabled: true, ...SETTINGS_DEFAULTS.voice.tts },
 });
 const agentConfig = ref<AgentConfigDto>(createEmptyConfig(props.id));
 const deleteBlockReason = computed(() => chatMutationBlockReason({

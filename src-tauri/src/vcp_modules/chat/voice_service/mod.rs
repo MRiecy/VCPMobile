@@ -110,6 +110,12 @@ impl VoiceServiceConfig {
     fn configured(&self) -> bool {
         !self.api_key.is_empty()
     }
+    fn has_selected_voice(&self) -> bool {
+        match self.tts_mode {
+            VoiceTtsMode::Builtin => true,
+            VoiceTtsMode::Clone => !self.clone_sample_id.is_empty(),
+        }
+    }
     fn endpoint(&self) -> Result<String, String> {
         let base = value_or_preset(&self.base_url, VOICE_API_BASE_URL_PRESET).trim_end_matches('/');
         let endpoint = format!("{base}/chat/completions");
@@ -131,11 +137,7 @@ impl VoiceServiceConfig {
     }
 
     pub(crate) fn validate_tts(&self) -> Result<(), String> {
-        if !self.configured() {
-            return Ok(());
-        }
-        self.endpoint()?;
-        if self.tts_mode == VoiceTtsMode::None {
+        if !self.has_selected_voice() {
             return Err("当前未选择朗读音色，请先选择音色。".into());
         }
         if self.tts_mode == VoiceTtsMode::Builtin
@@ -143,9 +145,10 @@ impl VoiceServiceConfig {
         {
             return Err("语音合成音色配置无效。".into());
         }
-        if self.tts_mode == VoiceTtsMode::Clone && self.clone_sample_id.trim().is_empty() {
-            return Err("请先导入音色复刻参考音频。".into());
+        if !self.configured() {
+            return Ok(());
         }
+        self.endpoint()?;
         Ok(())
     }
 
@@ -187,9 +190,10 @@ mod tests {
         let mut config = VoiceServiceConfig::from_settings(&settings);
         assert!(config.validate_asr().is_ok());
         assert!(config.validate_tts().is_err());
-        config.tts_mode = VoiceTtsMode::None;
+        config.voice = "none".into();
         assert!(config.validate_asr().is_ok());
-        assert!(config.validate_tts().unwrap_err().contains("未选择朗读音色"));
+        assert!(config.has_selected_voice());
+        assert!(config.validate_tts().unwrap_err().contains("音色配置无效"));
         config.tts_mode = VoiceTtsMode::Clone;
         assert!(config.validate_asr().is_ok());
         assert!(config.validate_tts().is_err());
@@ -198,5 +202,24 @@ mod tests {
         config.language = "invalid-language".into();
         assert!(config.validate_asr().is_err());
         assert!(config.validate_tts().is_ok());
+    }
+
+    #[test]
+    fn only_clone_can_have_an_empty_selection() {
+        assert!(serde_json::from_str::<VoiceTtsMode>("\"none\"").is_err());
+        let mut config = VoiceServiceConfig::from_settings(&Settings::default());
+        assert_eq!(config.tts_mode, VoiceTtsMode::Builtin);
+        assert_eq!(config.voice, "冰糖");
+        assert!(config.has_selected_voice());
+        assert!(config.validate_tts().is_ok());
+        config.voice = "none".into();
+        assert!(config.has_selected_voice());
+        assert!(config.validate_tts().unwrap_err().contains("音色配置无效"));
+        config.tts_mode = VoiceTtsMode::Clone;
+        assert!(!config.has_selected_voice());
+        assert!(config.validate_tts().unwrap_err().contains("未选择朗读音色"));
+        config.clone_sample_id = "0123456789abcdef0123456789abcdef".into();
+        assert!(config.has_selected_voice());
+        assert_eq!(config.tts_mode, VoiceTtsMode::Clone);
     }
 }

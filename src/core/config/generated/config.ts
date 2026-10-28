@@ -7,7 +7,7 @@ export type ChatEndpointMode = "standard" | "vcpTools" | "raw";
 
 export type VoiceInputEncoding = "wav" | "mp3_64";
 
-export type VoiceTtsMode = "none" | "builtin" | "clone";
+export type VoiceTtsMode = "builtin" | "clone";
 
 export type VoiceVadSensitivity = "low" | "standard" | "high";
 

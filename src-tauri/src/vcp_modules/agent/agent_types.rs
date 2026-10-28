@@ -21,7 +21,7 @@ impl Default for AgentVoiceConfig {
     fn default() -> Self {
         let tts = VoiceTtsConfig::default();
         Self {
-            enabled: false,
+            enabled: true,
             mode: tts.mode,
             voice: tts.voice,
             clone_sample_id: tts.clone_sample_id,

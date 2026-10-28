@@ -8,7 +8,7 @@ date: 2026-07-04
 
 # 13. Agent 服务与类型系统
 
-2026-10-28：`AgentConfig.voice` 为必有结构，默认继承全局，独立模式默认“无”。`0105_agent_voice_config.sql` 添加本机 JSON 字段，设备同步 DTO 不携带 voice。`save_agent_config(agent, baseline)` 通过 `persistence/agent_repository.rs` 在同一 SQLite 写事务内读取最新配置、比较并合并实际编辑字段；voice 整体比较，隐藏的共享提示词仍由数据库持有，成功返回最新 AgentConfig。声音文件归 `chat/voice_service/samples`，删除不触碰 Agent。下文历史整对象写入示例不代表当前保存接口。
+2026-10-28：`AgentConfig.voice` 为必有结构，默认启用独立音色：`enabled: true`、`mode: builtin`、`voice: 冰糖`、`stream: true`；用户关闭独立音色后才继承当前已保存的全局配置。预制音色只包含官方选项，“无”仅供复刻音色使用，模式只有 `builtin/clone`。`0105_agent_voice_config.sql` 添加本机 JSON 字段，设备同步 DTO 不携带 voice。`save_agent_config(agent, baseline)` 通过 `persistence/agent_repository.rs` 在同一 SQLite 写事务内读取最新配置、比较并合并实际编辑字段；voice 整体比较，隐藏的共享提示词仍由数据库持有，成功返回最新 AgentConfig。声音文件归 `chat/voice_service/samples`，删除不触碰 Agent。下文历史整对象写入示例不代表当前保存接口。
 
 ## 1. 概述
 

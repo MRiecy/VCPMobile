@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn voice_migration_preserves_existing_agents_with_inherited_defaults() {
+    async fn voice_migration_preserves_existing_agents_with_independent_defaults() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
             .connect("sqlite::memory:").await.expect("database");
         sqlx::raw_sql(include_str!("../../../migrations/0100_baseline_v2.sql"))
@@ -178,8 +178,15 @@ mod tests {
         assert_eq!(row.get::<i64, _>("updated_at"), 91);
         let voice = decode_voice_config(row.get("voice_config")).expect("default config");
         assert_eq!(voice, AgentVoiceConfig::default());
-        assert!(!voice.enabled);
-        assert_eq!(voice.mode, crate::vcp_modules::settings_manager::VoiceTtsMode::None);
+        assert!(voice.enabled);
+        assert_eq!(voice.mode, crate::vcp_modules::settings_manager::VoiceTtsMode::Builtin);
+        assert_eq!(voice.voice, "冰糖");
+        assert!(voice.stream);
+        let saved = decode_voice_config(r#"{"enabled":false,"voice":"苏打","stream":false}"#)
+            .expect("explicit settings");
+        assert!(!saved.enabled);
+        assert_eq!(saved.voice, "苏打");
+        assert!(!saved.stream);
         assert!(sqlx::query("UPDATE agents SET voice_config='invalid-json'")
             .execute(&pool).await.is_err());
     }
@@ -218,11 +225,11 @@ mod tests {
             .execute(&db.pool).await.expect("concurrent edit");
         let mut draft = baseline.clone();
         draft.model = "my editor".into();
-        draft.voice.enabled = true;
+        draft.voice.enabled = false;
         assert!(save_agent_edit(&db, &draft, &baseline).await.expect_err("conflict").contains("模型"));
         let voice: String = sqlx::query_scalar("SELECT voice_config FROM agents WHERE agent_id='a'")
             .fetch_one(&db.pool).await.expect("voice unchanged");
-        assert!(!decode_voice_config(&voice).expect("voice").enabled);
+        assert_eq!(decode_voice_config(&voice).expect("voice"), baseline.voice);
         sqlx::query("UPDATE agents SET deleted_at=1 WHERE agent_id='a'")
             .execute(&db.pool).await.expect("tombstone");
         assert!(save_agent_edit(&db, &draft, &baseline).await.expect_err("deleted").contains("不存在"));

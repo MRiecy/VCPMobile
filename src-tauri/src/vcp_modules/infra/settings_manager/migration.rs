@@ -182,7 +182,7 @@ mod tests {
             "voiceTtsStream":false, "voiceApiKey":"retained-key",
         })).unwrap();
         let voice = &domains[&ConfigDomain::Voice];
-        assert_eq!(voice["tts"]["mode"], "none");
+        assert_eq!(voice["tts"]["mode"], "builtin");
         assert_eq!(voice["tts"]["voice"], "Mia");
         assert_eq!(voice["tts"]["stream"], false);
         assert_eq!(voice["connection"]["apiKey"], "retained-key");

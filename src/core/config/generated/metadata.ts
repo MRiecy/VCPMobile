@@ -318,7 +318,6 @@ export const SETTINGS_FIELDS: FieldDescriptor[] = [
     "validationGroup": "tts.mode",
     "effect": "nextNarration",
     "options": [
-      "none",
       "builtin",
       "clone"
     ],

@@ -243,6 +243,7 @@ pub(super) fn prepare_synthesis(
     guidance: Option<&str>,
     sample: Option<&PreparedCloneSample>,
 ) -> Result<SynthesisRequest, String> {
+    config.validate_tts()?;
     let endpoint = config.endpoint()?;
     let endpoint = url::Url::parse(&endpoint)
         .map_err(|_| String::from("语音 API 地址无效。"))?
@@ -250,7 +251,6 @@ pub(super) fn prepare_synthesis(
     let stream = config.tts_streaming();
     let mut audio = json!({"format": if stream { "pcm16" } else { "wav" }});
     let model = match config.tts_mode {
-        VoiceTtsMode::None => return Err("当前未选择朗读音色，请先选择音色。".into()),
         VoiceTtsMode::Builtin => {
             audio["voice"] = json!(config.voice);
             "mimo-v2.5-tts"
@@ -1082,12 +1082,28 @@ mod tests {
     }
 
     #[test]
+    fn invalid_builtin_and_unselected_clone_are_rejected_before_request_building() {
+        let mut config = VoiceServiceConfig::from_settings(
+            &crate::vcp_modules::settings_manager::Settings::default(),
+        );
+        for invalid in ["none", "", "unknown-preset"] {
+            config.voice = invalid.into();
+            assert!(prepare_synthesis(&config, "正文", None, None)
+                .err().expect("invalid builtin").contains("音色配置无效"));
+        }
+        config.tts_mode = VoiceTtsMode::Clone;
+        assert!(prepare_synthesis(&config, "正文", None, None)
+            .err().expect("unselected clone").contains("未选择朗读音色"));
+    }
+
+    #[test]
     fn prepared_identity_uses_the_exact_effective_request_fields() {
         let mut config = VoiceServiceConfig::from_settings(
             &crate::vcp_modules::settings_manager::Settings::default(),
         );
         config.base_url = " https://VOICE.example:443/v1/ ".into();
         config.tts_mode = VoiceTtsMode::Builtin;
+        config.voice = "mimo_default".into();
         let text = "  原样正文。\n";
         let request = prepare_synthesis(&config, text, Some("  轻声\n"), None).unwrap();
         assert_eq!(
@@ -1293,6 +1309,7 @@ mod tests {
             ).await;
             config.tts_mode = mode;
             // A saved builtin preference cannot turn clone compatibility SSE on.
+            config.clone_sample_id = "sample-identity".into();
             config.tts_stream = mode == VoiceTtsMode::Clone;
             let sample = PreparedCloneSample {
                 data_url: std::sync::Arc::from("data:audio/wav;base64,AQIDBA=="),
@@ -1347,6 +1364,8 @@ mod tests {
                 &crate::vcp_modules::settings_manager::Settings::default(),
             );
             config.tts_mode = mode;
+            config.voice = "mimo_default".into();
+            config.clone_sample_id = "sample-identity".into();
             for guidance in [None, Some(" \n")] {
                 let request = prepare_synthesis(&config, "正文", guidance, Some(&sample)).unwrap();
                 assert_eq!(

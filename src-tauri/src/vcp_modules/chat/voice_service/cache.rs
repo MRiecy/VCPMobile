@@ -57,7 +57,6 @@ pub(super) fn segment_key(identity: &TtsCacheIdentity) -> String {
         &mut hash,
         2,
         Some(match identity.mode {
-            VoiceTtsMode::None => "none",
             VoiceTtsMode::Builtin => "builtin",
             VoiceTtsMode::Clone => "clone",
         }),

@@ -47,8 +47,8 @@ export const SETTINGS_DEFAULTS: Settings = {
     },
     "tts": {
       "stream": true,
-      "voice": "mimo_default",
-      "mode": "none",
+      "voice": "冰糖",
+      "mode": "builtin",
       "cloneSampleId": ""
     },
     "guidance": {

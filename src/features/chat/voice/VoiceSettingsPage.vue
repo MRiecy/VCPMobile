@@ -14,11 +14,12 @@ import SettingsNote from '../../../components/settings/SettingsNote.vue';
 import type { SettingsPageProps } from '../../settings/contracts';
 import { VOICE_FIELDS } from '../../settings/editing/fieldSets';
 import { useSettingsPageSession } from '../../settings/editing/useSettingsPageSession';
-import { SETTINGS_DEFAULTS, MIMO_TTS_MODES, MIMO_VOICES, settingDescriptor, settingOptions } from './settings';
+import { SETTINGS_DEFAULTS, MIMO_TTS_MODES, settingDescriptor, settingOptions } from './settings';
 import type { VoiceConfig } from '../../../core/config/generated/config';
 import { applySettingsFields, type SettingsFieldValues } from '../../../core/config/fields';
 import VoiceLibraryControl from './VoiceLibraryControl.vue';
 import VoiceTtsPreview from './VoiceTtsPreview.vue';
+import VoicePresetPicker from './VoicePresetPicker.vue';
 
 const props = defineProps<SettingsPageProps>();
 const providerTitleId = useId();
@@ -31,13 +32,14 @@ const stoppingPreview = ref(false);
 const previewStopError = ref('');
 const preview = ref<InstanceType<typeof VoiceTtsPreview> | null>(null);
 const cloneSample = ref<InstanceType<typeof VoiceLibraryControl> | null>(null);
+const preset = ref<InstanceType<typeof VoicePresetPicker> | null>(null);
 const previewSettings = computed<VoiceConfig>(() =>
   applySettingsFields(settingsStore.settings ?? SETTINGS_DEFAULTS, draft.value ?? {}).voice,
 );
 const ttsModel = computed(() => MIMO_TTS_MODES.find(mode => mode.value === draft.value?.['voice.tts.mode'])?.model ?? '');
 const disabled = computed(() => !props.active || leaving.value || openingStyleGuidance.value || stoppingPreview.value);
 type DurationField = 'voice.vad.endSilenceMs' | 'voice.vad.playbackOnsetMs';
-type SelectionField = 'voice.asr.language' | 'voice.asr.inputEncoding' | 'voice.tts.voice' | 'voice.tts.mode' | 'voice.vad.sensitivity' | DurationField;
+type SelectionField = 'voice.asr.language' | 'voice.asr.inputEncoding' | 'voice.tts.mode' | 'voice.vad.sensitivity' | DurationField;
 const durationSettings = {
   'voice.vad.endSilenceMs': { min: settingDescriptor('voice.vad.endSilenceMs').min!, max: settingDescriptor('voice.vad.endSilenceMs').max!, presets: [320, 512, 800, 1200, 1600] },
   'voice.vad.playbackOnsetMs': { min: settingDescriptor('voice.vad.playbackOnsetMs').min!, max: settingDescriptor('voice.vad.playbackOnsetMs').max!, presets: [128, 192, 320] },
@@ -52,7 +54,6 @@ const selections = {
     title: '语音输入编码',
     options: settingOptions('voice.asr.inputEncoding', { wav: 'WAV 无损', mp3_64: 'MP3 64 kbps' }),
   },
-  'voice.tts.voice': { title: '朗读音色', options: MIMO_VOICES },
   'voice.tts.mode': { title: '音色模式', options: MIMO_TTS_MODES },
   'voice.vad.sensitivity': {
     title: '人声检测灵敏度',
@@ -150,6 +151,7 @@ const openStyleGuidance = async () => {
   openingStyleGuidance.value = true;
   previewStopError.value = '';
   try {
+    await preset.value?.stop();
     cloneSample.value?.cancelPending();
     await cloneSample.value?.stop();
     await preview.value?.stop();
@@ -168,6 +170,7 @@ const beforeLeave = async () => {
   if (openingStyleGuidance.value || stoppingPreview.value) return false;
   stoppingPreview.value = true;
   try {
+    await preset.value?.stop();
     cloneSample.value?.cancelPending();
     await cloneSample.value?.stop();
     await preview.value?.stop();
@@ -229,22 +232,22 @@ defineExpose({ beforeLeave });
               <SettingsRow title="音色模式" :value="selectedLabel('voice.tts.mode')" clickable
                 :disabled="disabled" aria-label="音色模式" aria-haspopup="dialog"
                 :aria-expanded="selectionOpen('voice.tts.mode')" @click="openSelection('voice.tts.mode', $event)" />
-              <SettingsRow v-if="draft['voice.tts.mode'] === 'builtin'" title="朗读音色" :value="selectedLabel('voice.tts.voice')" clickable
-                :disabled="disabled" aria-label="朗读音色" aria-haspopup="dialog"
-                :aria-expanded="selectionOpen('voice.tts.voice')" @click="openSelection('voice.tts.voice', $event)" />
+              <VoicePresetPicker v-if="draft['voice.tts.mode'] === 'builtin'" ref="preset"
+                :model-value="draft['voice.tts.voice']" :active="active" :disabled="disabled"
+                @update:model-value="session.edit('voice.tts.voice', $event)" />
               <SettingsRow v-if="draft['voice.tts.mode'] === 'builtin'" title="流式朗读" description="收到音频片段后开始播放；关闭则等待完整合成。">
                 <template #action>
                   <SettingsSwitch :model-value="draft['voice.tts.stream']" :disabled="disabled" aria-label="流式朗读"
                     @update:model-value="session.edit('voice.tts.stream', $event)" />
                 </template>
               </SettingsRow>
+              <div v-show="draft['voice.tts.mode'] === 'clone'">
+                <VoiceLibraryControl ref="cloneSample"
+                  :model-value="draft['voice.tts.cloneSampleId']" :active="active && draft['voice.tts.mode'] === 'clone'" :disabled="disabled || preview?.busy"
+                  @update:model-value="session.edit('voice.tts.cloneSampleId', $event)" />
+              </div>
             </div>
-            <div v-show="draft['voice.tts.mode'] === 'clone'">
-              <VoiceLibraryControl ref="cloneSample"
-                :model-value="draft['voice.tts.cloneSampleId']" :active="active && draft['voice.tts.mode'] === 'clone'" :disabled="disabled || preview?.busy"
-                @update:model-value="session.edit('voice.tts.cloneSampleId', $event)" />
-            </div>
-            <VoiceTtsPreview v-if="draft['voice.tts.mode'] !== 'none'" ref="preview" :settings="previewSettings" :active="active" :disabled="disabled || cloneSample?.busy" />
+            <VoiceTtsPreview ref="preview" :settings="previewSettings" :active="active" :disabled="disabled || cloneSample?.busy" />
           </SettingsSection>
         </section>
 

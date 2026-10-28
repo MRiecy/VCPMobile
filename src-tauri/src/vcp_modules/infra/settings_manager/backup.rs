@@ -293,11 +293,11 @@ mod tests {
     fn voice_mode_import_defaults_only_when_the_field_is_present_and_invalid() {
         for mode in [json!("unknown-mode"), json!(""), Value::Null, json!(false), json!(42), json!({})] {
             let parsed = parse_backup_bytes(&backup(json!({"voice":{"tts":{"mode":mode,"stream":false}}}))).unwrap();
-            assert_eq!(parsed.domains["voice"], json!({"tts":{"mode":"none","stream":false}}));
+            assert_eq!(parsed.domains["voice"], json!({"tts":{"mode":"builtin","stream":false}}));
             let legacy = parse_backup_bytes(&v1_backup(json!({"voiceTtsMode":mode,"voiceTtsStream":false}))).unwrap();
-            assert_eq!(legacy.domains["voice"], json!({"tts":{"mode":"none","stream":false}}));
+            assert_eq!(legacy.domains["voice"], json!({"tts":{"mode":"builtin","stream":false}}));
         }
-        for mode in ["none", "builtin", "clone"] {
+        for mode in ["builtin", "clone"] {
             let parsed = parse_backup_bytes(&backup(json!({"voice":{"tts":{"mode":mode}}}))).unwrap();
             assert_eq!(parsed.domains["voice"]["tts"]["mode"], mode);
         }

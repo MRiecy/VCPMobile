@@ -27,7 +27,7 @@ vi.mock('../../../core/stores/notification', () => ({ useNotificationStore: () =
 vi.mock('../../../features/chat/voice/voiceCallStore', () => ({ useVoiceCallStore: () => context.voice }));
 
 function snapshot(): AppSettings {
-  return makeSettings({ 'identity.userName': 'user', 'server.url': 'https://chat.example', 'server.apiKey': 'chat-key', 'voice.tts.mode': 'builtin' });
+  return makeSettings({ 'identity.userName': 'user', 'server.url': 'https://chat.example', 'server.apiKey': 'chat-key', 'voice.tts.mode': 'builtin', 'voice.tts.voice': 'mimo_default' });
 }
 function saved(changes: Partial<SettingsFieldValues> = {}): ConfigSaveResult {
   database = applySettingsFields(database, changes);
@@ -122,14 +122,16 @@ const updates = () => invokeMock.mock.calls.filter(([command]) => command === 'u
 async function openSelection(wrapper: VueWrapper, label: string) {
   await wrapper.get(`button[aria-label="${label}"]`).trigger('click');
   await flushPromises();
-  const surface = document.querySelector<HTMLElement>(`[role="dialog"][aria-label="${label}"]`);
+  const title = label === '当前音色' ? '选择预制音色' : label;
+  const surface = document.querySelector<HTMLElement>(`[role="dialog"][aria-label="${title}"]`);
   if (!surface) throw new Error(`Missing selection menu: ${label}`);
   return new DOMWrapper(surface);
 }
 
 async function choose(wrapper: VueWrapper, label: string, option: string) {
   const menu = await openSelection(wrapper, label);
-  const item = menu.findAll('[role="radio"]').find(candidate => candidate.text() === option);
+  const item = menu.findAll('[role="radio"]').find(candidate =>
+    (candidate.find('.voice-picker-name').exists() ? candidate.get('.voice-picker-name').text() : candidate.text()) === option);
   if (!item) throw new Error(`Missing option: ${option}`);
   await item.trigger('click');
   await flushPromises();
@@ -165,7 +167,7 @@ async function openCloneUpload(wrapper: VueWrapper) {
   await wrapper.get('button[aria-label="音色管理"]').trigger('click');
   await flushPromises();
   const manager = new DOMWrapper(document.querySelector('[role="dialog"][aria-label="音色管理"]')!);
-  await manager.findAll('button').find(button => button.text() === '上传新音色')!.trigger('click');
+  await manager.get('button[aria-label="上传新音色"]').trigger('click');
   await flushPromises();
   const upload = new DOMWrapper(document.querySelector('[role="dialog"][aria-label="上传新音色"]')!);
   await upload.get('.voice-file').trigger('click');
@@ -179,17 +181,19 @@ async function closeCloneManager() {
 }
 
 describe('语音设置使用正式设置快照', () => {
-  it('默认无音色时保留语音输入设置，不提供朗读试听或隐式选择音色', async () => {
+  it('默认预制冰糖显示完整表单，修改连接不隐式更换音色', async () => {
     database.voice.tts = { ...SETTINGS_DEFAULTS.voice.tts };
     const { wrapper } = await renderOverlay();
-    expect(wrapper.get('[aria-label="音色模式"]').text()).toContain('无');
-    expect(wrapper.find('.voice-preview-button').exists()).toBe(false);
-    expect(wrapper.find('[aria-label="朗读音色"]').exists()).toBe(false);
+    expect(wrapper.get('[aria-label="音色模式"]').text()).toContain('预制音色');
+    expect(wrapper.get('[aria-label="当前音色"]').text()).toContain('冰糖');
+    expect(wrapper.get('[role="switch"][aria-label="流式朗读"]').isVisible()).toBe(true);
+    expect(disclosure(wrapper, '试听声音').exists()).toBe(true);
     expect(wrapper.get('[aria-label="语音输入编码"]').isVisible()).toBe(true);
     await field(wrapper, '语音 API Key').setValue('asr-key');
     await leaveVoiceSettings(wrapper);
     expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.connection.apiKey': 'asr-key' });
-    expect(database.voice.tts.mode).toBe('none');
+    expect(database.voice.tts.mode).toBe('builtin');
+    expect(database.voice.tts.voice).toBe('冰糖');
     expect(invokeMock.mock.calls.filter(([command]) => command === 'preview_tts')).toHaveLength(0);
   });
 
@@ -313,7 +317,7 @@ describe('语音设置使用正式设置快照', () => {
     const { wrapper } = await renderOverlay();
     await field(wrapper, '语音 API Key').setValue('voice-secret');
     await choose(wrapper, '识别语言', '中文');
-    await choose(wrapper, '朗读音色', '白桦 · 中文男声');
+    await choose(wrapper, '当前音色', '白桦');
     await wrapper.get('[role="switch"][aria-label="流式识别结果"]').trigger('click');
     expect(updates()).toHaveLength(0);
     expect(useSettingsStore().settings?.voice.connection.apiKey).toBe('');
@@ -396,7 +400,7 @@ describe('语音设置使用正式设置快照', () => {
     const { wrapper, fallbackClose } = await renderOverlay();
     expect(modals.modalStackLength()).toBe(1);
     await field(wrapper, '语音 API Key').setValue('back-key');
-    await openSelection(wrapper, '朗读音色');
+    await openSelection(wrapper, '当前音色');
     expect(modals.modalStackLength()).toBe(2);
     modals.closeTopModal();
     await flushPromises();
@@ -430,7 +434,7 @@ describe('语音设置使用正式设置快照', () => {
 
   it('页面卸载只关闭自己仍持有的菜单，不关闭后续其他入口的菜单', async () => {
     const wrapper = await renderPage();
-    await openSelection(wrapper, '朗读音色');
+    await openSelection(wrapper, '当前音色');
     const overlay = useOverlayStore();
     overlay.openContextMenu([{ label: '其他操作', handler: vi.fn() }], '其他菜单');
     const replacement = overlay.contextMenuConfig;
@@ -443,18 +447,150 @@ describe('语音设置使用正式设置快照', () => {
 
   it('预置与复刻切换保留音色草稿', async () => {
     const { wrapper } = await renderOverlay();
-    await choose(wrapper, '朗读音色', '冰糖 · 中文女声');
+    await choose(wrapper, '当前音色', '冰糖');
     await choose(wrapper, '音色模式', '音色复刻');
     expect(wrapper.get('[aria-label="当前音色"]').isVisible()).toBe(true);
-    expect(wrapper.find('[aria-label="朗读音色"]').exists()).toBe(false);
+    expect(wrapper.get('[aria-label="音色管理"]').isVisible()).toBe(true);
     expect(wrapper.find('[role="switch"][aria-label="流式朗读"]').exists()).toBe(false);
-    await choose(wrapper, '音色模式', '预置音色');
-    expect(wrapper.find('[aria-label="当前音色"]').exists() && wrapper.get('[aria-label="当前音色"]').isVisible()).toBe(false);
-    expect(wrapper.find('[aria-label="朗读音色"]').exists()).toBe(true);
-    expect(wrapper.get('[aria-label="朗读音色"]').text()).toContain('冰糖');
+    await choose(wrapper, '音色模式', '预制音色');
+    expect(wrapper.get('[aria-label="当前音色"]').isVisible()).toBe(true);
+    expect(wrapper.get('[aria-label="音色管理"]').isVisible()).toBe(false);
+    expect(wrapper.get('[aria-label="当前音色"]').text()).toContain('冰糖');
     await leaveVoiceSettings(wrapper);
     expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.tts.voice': '冰糖' });
     expect(database.voice.tts.stream).toBe(true);
+  });
+
+  it('预制列表不提供无，搜索和选择只修改具体音色而不切换模式', async () => {
+    const { wrapper } = await renderOverlay();
+    const menu = await openSelection(wrapper, '当前音色');
+    expect(menu.findAll('[role="radio"]').map(item => item.get('.voice-picker-name').text())).not.toContain('无');
+    await menu.get('input[aria-label="搜索预制音色"]').setValue('中文女声');
+    expect(menu.findAll('[role="radio"]').map(item => item.get('.voice-picker-name').text())).toEqual(['冰糖', '茉莉']);
+    await menu.get('input[aria-label="搜索预制音色"]').setValue('不存在的音色');
+    expect(menu.findAll('[role="radio"]')).toHaveLength(0);
+    expect(menu.text()).toContain('没有匹配的音色');
+    await menu.get('input[aria-label="搜索预制音色"]').setValue('冰糖');
+    await menu.get('[role="radio"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.get('[aria-label="当前音色"]').text()).toContain('冰糖');
+    await choose(wrapper, '当前音色', '苏打');
+    expect(wrapper.get('[aria-label="音色模式"]').text()).toContain('预制音色');
+    expect(wrapper.get('[aria-label="流式朗读"]').isVisible()).toBe(true);
+    expect(disclosure(wrapper, '试听声音').exists()).toBe(true);
+    await leaveVoiceSettings(wrapper);
+    expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.tts.voice': '苏打' });
+    expect(database.voice.tts.mode).toBe('builtin');
+  });
+
+  it('复刻选择搜索与无选择只修改当前模式的音色，不清除预制音色草稿', async () => {
+    const qingxue = { ...cloneAsset('qingxue'), name: '晴雪' };
+    const sage = { ...cloneAsset('sage'), name: '智者' };
+    mockInvoke('list_voice_clone_samples', () => [qingxue, sage]);
+    const { wrapper } = await renderOverlay();
+    await choose(wrapper, '当前音色', '冰糖');
+    await choose(wrapper, '音色模式', '音色复刻');
+    await wrapper.get('[aria-label="当前音色"]').trigger('click');
+    await flushPromises();
+    const picker = new DOMWrapper(document.querySelector('[role="dialog"][aria-label="选择复刻音色"]')!);
+    await picker.get('input[aria-label="搜索复刻音色"]').setValue('晴雪');
+    expect(picker.findAll('[role="radio"]')).toHaveLength(1);
+    expect(picker.get('[role="radio"]').text()).toContain('晴雪');
+    await picker.get('[role="radio"]').trigger('click');
+    await flushPromises();
+    expect(wrapper.get('[aria-label="当前音色"]').text()).toContain('晴雪');
+    await wrapper.get('[aria-label="当前音色"]').trigger('click');
+    await flushPromises();
+    const nextPicker = new DOMWrapper(document.querySelector('[role="dialog"][aria-label="选择复刻音色"]')!);
+    expect((nextPicker.get('input[aria-label="搜索复刻音色"]').element as HTMLInputElement).value).toBe('');
+    await nextPicker.findAll('[role="radio"]').find(item => item.get('.voice-library-name').text() === '无')!.trigger('click');
+    await flushPromises();
+    expect(wrapper.get('[aria-label="音色模式"]').text()).toContain('音色复刻');
+    expect(wrapper.get('[aria-label="当前音色"]').text()).toContain('无');
+    await leaveVoiceSettings(wrapper);
+    expect(configRequestChanges(updates()[0]?.[1]?.request as ConfigUpdate)).toEqual({ 'voice.tts.mode': 'clone', 'voice.tts.voice': '冰糖' });
+    expect(database.voice.tts.cloneSampleId).toBe('');
+  });
+
+  it('离开页面关闭预制选择器，迟到点击不修改已失活草稿', async () => {
+    const { wrapper } = await renderOverlay();
+    const picker = await openSelection(wrapper, '当前音色');
+    const staleOption = picker.findAll('[role="radio"]').find(item => item.get('.voice-picker-name').text() === '冰糖')!;
+    await wrapper.setProps({ active: false });
+    await staleOption.trigger('click');
+    await flushPromises();
+    expect(document.querySelector('[role="dialog"][aria-label="选择预制音色"]')).toBeNull();
+    expect(updates()).toHaveLength(0);
+    await wrapper.setProps({ active: true });
+    await flushPromises();
+    expect(wrapper.get('[aria-label="当前音色"]').text()).toContain('MiMo 默认');
+  });
+
+  it('从复刻选择进入管理后系统返回逐层关闭，不退出设置或改动音色', async () => {
+    const { wrapper } = await renderOverlay();
+    await choose(wrapper, '音色模式', '音色复刻');
+    await wrapper.get('[aria-label="当前音色"]').trigger('click');
+    await flushPromises();
+    const picker = new DOMWrapper(document.querySelector('[role="dialog"][aria-label="选择复刻音色"]')!);
+    await picker.findAll('button').find(button => button.text() === '音色管理')!.trigger('click');
+    await flushPromises();
+    expect(modals.modalStackLength()).toBe(3);
+    modals.closeTopModal();
+    await flushPromises();
+    expect(document.querySelector('[role="dialog"][aria-label="音色管理"]')).toBeNull();
+    expect(document.querySelector('[role="dialog"][aria-label="选择复刻音色"]')).not.toBeNull();
+    expect(modals.modalStackLength()).toBe(2);
+    modals.closeTopModal();
+    await flushPromises();
+    expect(document.querySelector('[role="dialog"][aria-label="选择复刻音色"]')).toBeNull();
+    expect(modals.modalStackLength()).toBe(1);
+    expect(wrapper.emitted('close')).toBeUndefined();
+    expect(updates()).toHaveLength(0);
+  });
+
+  it.each(['返回关闭', '进入管理'])('等待原声停止期间%s会撤销尚未完成的音色选择', async destination => {
+    context.voice.active = false;
+    const original = { ...cloneAsset('original'), name: '原音色' };
+    const target = { ...cloneAsset('target'), name: '新音色' };
+    const stopping = deferred<unknown>();
+    database.voice.tts.mode = 'clone';
+    database.voice.tts.cloneSampleId = original.id;
+    mockInvoke('list_voice_clone_samples', () => [original, target]);
+    mockInvoke('preview_voice_clone_sample', () => ({ configured: true }));
+    mockInvoke('stop_tts', () => stopping.promise);
+    const { wrapper } = await renderOverlay();
+    await wrapper.get('[aria-label="当前音色"]').trigger('click');
+    await flushPromises();
+    const picker = new DOMWrapper(document.querySelector('[role="dialog"][aria-label="选择复刻音色"]')!);
+    await picker.get('button[aria-label="试听原声：原音色"]').trigger('click');
+    await flushPromises();
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'preview_voice_clone_sample')).toHaveLength(1);
+    await picker.findAll('[role="radio"]').find(item => item.get('.voice-library-name').text() === target.name)!.trigger('click');
+    await flushPromises();
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'stop_tts')).toHaveLength(1);
+    expect(wrapper.get('[aria-label="当前音色"]').text()).toContain(original.name);
+    if (destination === '返回关闭') {
+      await picker.get('button[aria-label="关闭复刻音色选择"]').trigger('click');
+    } else {
+      await picker.findAll('button').find(button => button.text() === '音色管理')!.trigger('click');
+    }
+    await flushPromises();
+    stopping.resolve(undefined);
+    await flushPromises();
+    expect(wrapper.get('[aria-label="当前音色"]').text()).toContain(original.name);
+    if (destination === '返回关闭') {
+      expect(document.querySelector('[role="dialog"][aria-label="选择复刻音色"]')).toBeNull();
+    } else {
+      expect(document.querySelector('[role="dialog"][aria-label="音色管理"]')).not.toBeNull();
+      await closeCloneManager();
+      const returnedPicker = new DOMWrapper(document.querySelector('[role="dialog"][aria-label="选择复刻音色"]')!);
+      expect(returnedPicker.get('[role="radio"][aria-checked="true"]').text()).toContain(original.name);
+      await returnedPicker.get('button[aria-label="关闭复刻音色选择"]').trigger('click');
+      await flushPromises();
+    }
+    await leaveVoiceSettings(wrapper);
+    expect(updates()).toHaveLength(0);
+    expect(database.voice.tts.cloneSampleId).toBe(original.id);
   });
 
   it('风格指导只编辑一项规则，保留原文且系统返回等待保存', async () => {
@@ -558,7 +694,7 @@ describe('语音设置使用正式设置快照', () => {
     context.voice.active = false;
     const { wrapper } = await renderOverlay();
     await field(wrapper, '语音 API Key').setValue('draft-preview-key');
-    await choose(wrapper, '朗读音色', '冰糖 · 中文女声');
+    await choose(wrapper, '当前音色', '冰糖');
     await disclosure(wrapper, '试听声音').trigger('click');
     await wrapper.get('.voice-preview-button').trigger('click');
     await flushPromises();
@@ -671,7 +807,7 @@ describe('语音设置使用正式设置快照', () => {
     expect(wrapper.get('button[aria-label="当前音色"]').text()).toContain(asset.name);
     expect(deleteTempFile).toHaveBeenCalledWith('/native/staging/voice.wav');
     await closeCloneManager();
-    await choose(wrapper, '音色模式', '预置音色');
+    await choose(wrapper, '音色模式', '预制音色');
     expect(invokeMock.mock.calls.filter(([command]) => command === 'discard_voice_clone_sample')).toHaveLength(0);
     await choose(wrapper, '音色模式', '音色复刻');
     await leaveVoiceSettings(wrapper);
@@ -690,6 +826,7 @@ describe('语音设置使用正式设置快照', () => {
     await wrapper.get('button[aria-label="音色管理"]').trigger('click');
     await flushPromises();
     const manager = new DOMWrapper(document.querySelector('[role="dialog"][aria-label="音色管理"]')!);
+    await manager.get(`button[aria-label="音色详情：${asset.name}"]`).trigger('click');
     await manager.findAll('button').find(button => button.text() === '删除')!.trigger('click');
     await flushPromises();
     const confirmation = new DOMWrapper(document.querySelector('[role="dialog"][aria-label="删除克隆音色"]')!);
@@ -717,6 +854,7 @@ describe('语音设置使用正式设置快照', () => {
     await wrapper.get('button[aria-label="音色管理"]').trigger('click');
     await flushPromises();
     const manager = new DOMWrapper(document.querySelector('[role="dialog"][aria-label="音色管理"]')!);
+    await manager.get(`button[aria-label="音色详情：${asset.name}"]`).trigger('click');
     await manager.findAll('button').find(button => button.text() === '试听原声')!.trigger('click');
     await flushPromises();
     const submitted = invokeMock.mock.calls.find(([command]) => command === 'preview_voice_clone_sample')?.[1];

@@ -85,13 +85,12 @@ impl VoiceInputEncoding {
 #[serde(rename_all = "lowercase")]
 pub enum VoiceTtsMode {
     #[default]
-    None,
     Builtin,
     Clone,
 }
 
 impl VoiceTtsMode {
-    pub const ALL: [Self; 3] = [Self::None, Self::Builtin, Self::Clone];
+    pub const ALL: [Self; 2] = [Self::Builtin, Self::Clone];
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -186,7 +185,7 @@ config_struct!(VoiceAsrConfig {
 });
 config_struct!(VoiceTtsConfig {
     stream: bool = true,
-    voice: String = "mimo_default".into(),
+    voice: String = "冰糖".into(),
     mode: VoiceTtsMode = VoiceTtsMode::default(),
     clone_sample_id: String = String::new(),
 });

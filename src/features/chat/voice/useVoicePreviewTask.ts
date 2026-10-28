@@ -78,9 +78,9 @@ export function useVoicePreviewTask(active: () => boolean, disabled: () => boole
     })();
     try {
       await current.ready;
-    } catch {
+    } catch (cause) {
       if (mounted && !current.cancelled && task === current) {
-        feedback.value = '试听未能开始，请检查连接、音色或参考音频后重试。';
+        feedback.value = cause instanceof Error ? cause.message : String(cause);
         await stop().catch(() => undefined);
       }
     }

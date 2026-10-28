@@ -230,7 +230,7 @@ async fn prepare_speaker<R: Runtime>(
     agent_id: Option<&str>,
     cancel: &CancellationToken,
 ) -> Result<PreparedVoice, String> {
-    let mut config = if let Some(agent_id) = agent_id {
+    let config = if let Some(agent_id) = agent_id {
         let state = app.state::<crate::vcp_modules::agent_service::AgentConfigState>();
         let agent = tokio::select! {
             biased;
@@ -241,18 +241,28 @@ async fn prepare_speaker<R: Runtime>(
     } else {
         defaults.clone()
     };
-    let sample = if config.configured() && config.tts_mode == VoiceTtsMode::Clone {
+    prepare_voice(app, config, cancel).await
+}
+
+async fn prepare_voice<R: Runtime>(
+    app: &AppHandle<R>,
+    mut config: VoiceServiceConfig,
+    cancel: &CancellationToken,
+) -> Result<PreparedVoice, String> {
+    let sample = if config.tts_mode == VoiceTtsMode::Clone {
         let sample = if config.clone_sample_id.is_empty() { None } else {
             samples::prepare_clone_sample(app, &config.clone_sample_id, cancel).await?
         };
-        if sample.is_none() { config.tts_mode = VoiceTtsMode::None; }
+        // A missing local asset resolves to an empty selection in this job only.
+        // The clone model mode and the persisted Agent/global handle stay intact.
+        if sample.is_none() { config.clone_sample_id.clear(); }
         sample
     } else {
         None
     };
-    // None is a resolved selection. The consumer decides whether that means a
+    // An empty selection leaves the model mode intact. The consumer decides on a
     // skipped group member or an explicit error for independent narration.
-    if config.tts_mode != VoiceTtsMode::None { config.validate_tts()?; }
+    if config.has_selected_voice() { config.validate_tts()?; }
     Ok(PreparedVoice { config, sample })
 }
 
@@ -606,16 +616,14 @@ async fn start_narration<R: Runtime>(
             }
         }
         NarrationSource::Prepared(prepared) => Ok(prepared),
-        NarrationSource::Preview(policy) => {
-            let sample =
-                if policy.config.tts_mode == VoiceTtsMode::Clone && policy.config.configured() {
-                    samples::prepare_clone_sample(&app, &policy.config.clone_sample_id, &cancel)
-                        .await
-                        .and_then(|sample| sample.map(Some).ok_or_else(|| "当前音色已不存在，请重新选择朗读音色。".into()))
-                } else {
-                    Ok(None)
-                };
-            Ok(PreparedNarration { policy, sample })
+        NarrationSource::Preview(mut policy) => {
+            match prepare_voice(&app, policy.config.clone(), &cancel).await {
+                Ok(voice) => {
+                    Arc::make_mut(&mut policy).config = voice.config;
+                    Ok(PreparedNarration { policy, sample: Ok(voice.sample) })
+                }
+                Err(error) => Err(error),
+            }
         }
         NarrationSource::Sample(sample_id) => {
             match samples::read_clone_sample_audio(&app, &sample_id, &cancel).await {
@@ -992,7 +1000,7 @@ impl<R: Runtime> SegmentSource for NarrationReader<'_, R> {
                             let voice = prepare_speaker(self.app, &self.narration.config, Some(agent_id), cancel).await?;
                             self.current_voice = Some((message_id, Arc::new(voice)));
                         }
-                        if self.current_voice.as_ref().is_some_and(|(_, voice)| voice.config.tts_mode == VoiceTtsMode::None) {
+                        if self.current_voice.as_ref().is_some_and(|(_, voice)| !voice.config.has_selected_voice()) {
                             if group { continue; }
                             return Err("当前未选择朗读音色，请先选择音色。".into());
                         }
@@ -1343,7 +1351,8 @@ mod tests {
         agents.caches.insert("b".into(), second);
         app.manage(agents);
         let mut narration = segment_fixture_job(base_url);
-        Arc::get_mut(&mut narration).unwrap().config.tts_mode = VoiceTtsMode::None;
+        Arc::get_mut(&mut narration).unwrap().config.tts_mode = VoiceTtsMode::Clone;
+        Arc::get_mut(&mut narration).unwrap().config.clone_sample_id.clear();
         narration.worker_started.store(true, Ordering::Release);
         app.manage(TtsServiceState(Mutex::new(Registry {
             current: Some(Slot { id: narration.id.clone(), cancel: narration.cancel.clone(),
@@ -1361,7 +1370,138 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn group_none_or_deleted_clone_skips_only_that_member_before_valid_speaker_http() {
+    async fn disabled_agent_voice_inherits_the_current_committed_global_voice() {
+        use crate::vcp_modules::{
+            agent_service::{create_default_config, AgentConfigState},
+            db_manager::DbState,
+            settings_manager::{ConfigDomain, ConfigSaveResult, ConfigUpdate, DomainPatch, SettingsState},
+        };
+        async fn save_global(state: &SettingsState, db: &DbState, voice: &str, stream: bool) {
+            let baseline = state.read_snapshot(db).await.unwrap();
+            let result = state.apply(db, ConfigUpdate { patches: vec![DomainPatch {
+                domain: ConfigDomain::Voice,
+                expected_revision: baseline.domains[&ConfigDomain::Voice].revision.clone(),
+                changes: serde_json::json!({
+                    "tts.voice":voice,"tts.stream":stream,"connection.apiKey":"fixture-key"
+                }).as_object().unwrap().clone(),
+                base_values: serde_json::json!({
+                    "tts.voice":baseline.data.voice.tts.voice,
+                    "tts.stream":baseline.data.voice.tts.stream,
+                    "connection.apiKey":baseline.data.voice.connection.api_key,
+                }).as_object().unwrap().clone(),
+            }] }, |_, _| {}).await.unwrap();
+            assert!(matches!(result, ConfigSaveResult::Saved { .. }));
+        }
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        for migration in [
+            include_str!("../../../../migrations/0100_baseline_v2.sql"),
+            include_str!("../../../../migrations/0103_config_domains.sql"),
+        ] {
+            sqlx::raw_sql(migration).execute(&pool).await.unwrap();
+        }
+        let db = DbState::new(pool, "voice-global-test.sqlite".into());
+        let settings = SettingsState::new();
+        let app = tauri::test::mock_app();
+        app.manage(db.clone());
+        app.manage(settings.clone());
+        let agents = AgentConfigState::new();
+        let agent = create_default_config("a");
+        assert!(agent.voice.enabled);
+        assert_eq!(agent.voice.voice, "冰糖");
+        assert!(agent.voice.stream);
+        agents.caches.insert("a".into(), agent);
+        app.manage(agents);
+        let cancel = CancellationToken::new();
+
+        save_global(&settings, &db, "茉莉", false).await;
+        let first = prepare_narration(app.handle(), &cancel).await.unwrap();
+        let independent = prepare_speaker(app.handle(), &first.policy.config, Some("a"), &cancel).await.unwrap();
+        assert_eq!(independent.config.voice, "冰糖");
+        assert!(independent.config.tts_stream);
+        {
+            let state = app.state::<AgentConfigState>();
+            state.caches.get_mut("a").unwrap().voice.enabled = false;
+        }
+        let inherited = prepare_speaker(app.handle(), &first.policy.config, Some("a"), &cancel).await.unwrap();
+        assert_eq!(inherited.config.voice, "茉莉");
+        assert!(!inherited.config.tts_stream);
+
+        save_global(&settings, &db, "苏打", true).await;
+        let next = prepare_narration(app.handle(), &cancel).await.unwrap();
+        let inherited = prepare_speaker(app.handle(), &next.policy.config, Some("a"), &cancel).await.unwrap();
+        assert_eq!(inherited.config.voice, "苏打");
+        assert!(inherited.config.tts_stream);
+        assert_eq!(first.policy.config.voice, "茉莉", "an admitted reply keeps its immutable snapshot");
+
+        {
+            let state = app.state::<AgentConfigState>();
+            let mut agent = state.caches.get_mut("a").unwrap();
+            agent.voice.enabled = true;
+            agent.voice.voice = "白桦".into();
+        }
+        let independent = prepare_speaker(app.handle(), &next.policy.config, Some("a"), &cancel).await.unwrap();
+        assert_eq!(independent.config.voice, "白桦");
+        assert_eq!(independent.config.api_key, "fixture-key");
+    }
+
+    #[tokio::test]
+    async fn deleted_clone_resolves_an_empty_selection_without_changing_mode_or_agent_handle() {
+        use crate::vcp_modules::agent_service::{create_default_config, AgentConfigState};
+        let (app, _directory, id) = clone_library_fixture().await;
+        let agents = AgentConfigState::new();
+        let mut agent = create_default_config("a");
+        agent.voice.enabled = true;
+        agent.voice.mode = VoiceTtsMode::Clone;
+        agent.voice.clone_sample_id = id.clone();
+        agents.caches.insert("a".into(), agent);
+        app.manage(agents);
+        assert!(samples::delete_voice_clone_sample(app.handle().clone(), id.clone()).await.unwrap());
+        let defaults = segment_fixture_job("https://example.invalid/v1").config.clone();
+        let prepared = prepare_speaker(app.handle(), &defaults, Some("a"), &CancellationToken::new()).await.unwrap();
+        assert_eq!(prepared.config.tts_mode, VoiceTtsMode::Clone);
+        assert!(prepared.config.clone_sample_id.is_empty());
+        assert!(!prepared.config.has_selected_voice());
+        assert!(prepared.sample.is_none());
+        assert_eq!(app.state::<AgentConfigState>().caches.get("a").unwrap().voice.clone_sample_id, id);
+        let mut without_credentials = defaults;
+        without_credentials.api_key.clear();
+        let prepared = prepare_speaker(app.handle(), &without_credentials, Some("a"), &CancellationToken::new()).await.unwrap();
+        assert_eq!(prepared.config.tts_mode, VoiceTtsMode::Clone);
+        assert!(!prepared.config.has_selected_voice(), "local asset availability does not depend on API credentials");
+    }
+
+    #[tokio::test]
+    async fn clone_registry_errors_are_not_treated_as_an_empty_selection() {
+        let (app, _directory, id) = clone_library_fixture().await;
+        let root = app.path().app_data_dir().unwrap().join("voice_library");
+        tokio::fs::write(root.join("registry.json"), b"invalid registry").await.unwrap();
+        let mut config = segment_fixture_job("https://example.invalid/v1").config.clone();
+        config.tts_mode = VoiceTtsMode::Clone;
+        config.clone_sample_id = id;
+        let error = prepare_voice(app.handle(), config, &CancellationToken::new()).await.err().unwrap();
+        assert!(error.contains("索引损坏"));
+    }
+
+    #[tokio::test]
+    async fn invalid_builtin_and_unselected_clone_previews_release_their_slots() {
+        let app = tauri::test::mock_app();
+        app.manage(TtsServiceState::default());
+        for (id, mode, voice, expected_error) in [
+            ("builtin-invalid", VoiceTtsMode::Builtin, "none", "音色配置无效"),
+            ("clone-empty", VoiceTtsMode::Clone, "冰糖", "未选择朗读音色"),
+        ] {
+            let error = preview_tts(app.handle().clone(), id.into(), "试听正文".into(), TtsPreviewSettings {
+                connection: VoiceConnectionConfig { api_key: "fixture-key".into(), ..Default::default() },
+                tts: VoiceTtsConfig { mode, voice: voice.into(), ..Default::default() },
+            }).await.err().unwrap();
+            assert!(error.contains(expected_error));
+            assert!(app.state::<TtsServiceState>().0.lock().unwrap().current.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn group_empty_or_deleted_clone_skips_only_that_member_before_valid_speaker_http() {
         use crate::vcp_modules::agent_types::AgentVoiceConfig;
         let mut server = SegmentHttpFixture::start(&[1, 0, 2, 0], false).await;
         for deleted_clone in [false, true] {
@@ -1369,7 +1509,7 @@ mod tests {
             let voice = if deleted_clone {
                 assert!(samples::delete_voice_clone_sample(app.handle().clone(), id.clone()).await.unwrap());
                 AgentVoiceConfig { enabled: true, mode: VoiceTtsMode::Clone, clone_sample_id: id, ..Default::default() }
-            } else { AgentVoiceConfig::default() };
+            } else { AgentVoiceConfig { enabled: false, ..Default::default() } };
             let narration = group_narration_fixture(&app, &server.base_url, voice);
             feed_member(&app, "first", "a", "第一位没有声音但仍有文字。");
             feed_member(&app, "second", "b", "第二位继续朗读。");

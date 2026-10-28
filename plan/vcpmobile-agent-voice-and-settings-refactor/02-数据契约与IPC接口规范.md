@@ -2,7 +2,7 @@
 
 > 本文档规范 SQLite 数据库 Schema 变更、Rust 核心领域模型、Vue 前端 DTO 契约及新增的 Tauri IPC 命令。
 
-> **契约以实施稿为准**：迁移编号为 `0105`；voice 为必有结构，mode 包含默认 `none`；无 `refText`；保存携 baseline 并返回权威配置。完整接口见 [05-实施决策与验证记录](05-实施决策与验证记录.md)，以下代码为初稿示意。
+> **契约以实施稿为准**：迁移编号为 `0105`；voice 为必有结构，mode 仅为 `builtin` / `clone`，默认 `builtin`，默认预制音色为 `voice: "冰糖"`，“无”仅由复刻空/失效 `cloneSampleId` 表达；无 `refText`；保存携 baseline 并返回权威配置。完整接口见 [05-实施决策与验证记录](05-实施决策与验证记录.md)，以下代码为初稿示意。
 
 ---
 
