@@ -98,7 +98,7 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `chardetng` | `0.1` | 每半年检查 | crates.io | 编码检测 |
 | `jni` | `0.21` | 每季度检查 | crates.io | Android JNI 绑定 |
 
-配置契约导出工具位于 `src-tauri/crates/config-export/`，直接编译生产配置类型与规则。修改这些定义后运行 `pnpm config:generate` 更新已提交的 `src/core/config/generated/`；`pnpm config:check` 只检查生成结果，不写文件，也不读取设备配置或凭据。`pnpm check` 当前按 `config:check → lint → vue-tsc --noEmit → tsc --noEmit --project tsconfig.node.json → cargo check --locked` 顺序执行，其中 Node 配置项目覆盖 `vite.config.ts`、`vitest.config.ts` 与 `uno.config.ts`。普通手机构建不执行导出。
+配置契约导出工具位于 `src-tauri/crates/config-export/`，直接编译生产配置类型与规则。修改这些定义后运行 `pnpm config:generate` 更新已提交的 `src/core/config/generated/`；`pnpm config:check` 只检查生成结果，不写文件，也不读取设备配置或凭据。`pnpm check` 先执行 `config:check`，通过后并行执行 `lint`、`vue-tsc --noEmit --incremental`、`tsc --noEmit --project tsconfig.node.json` 与 `cargo check --locked`，等待全部检查结束后汇总退出状态，并输出各阶段及总耗时。其中 Node 配置项目覆盖 `vite.config.ts`、`vitest.config.ts` 与 `uno.config.ts`。ESLint 使用内容缓存 `node_modules/.cache/eslint`，Vue 类型检查使用 `node_modules/.cache/vue-tsc.tsbuildinfo`；两者均为本地缓存，不提交 Git。升级 lint 规则或工具后应清理 ESLint 缓存；排查缓存问题时可运行 `pnpm exec eslint . --max-warnings 0 --no-cache` 和 `pnpm exec vue-tsc --noEmit` 作无缓存复查。普通手机构建不执行导出。
 
 ### 2.2 前端层 (`package.json`)
 

@@ -139,7 +139,7 @@ VCPMobile/
 
 ```powershell
 # 完整静态检查（生成契约 + ESLint + TypeScript + Rust）
-pnpm check                  # tools/check.mjs 顺序执行 config:check、lint、vue-tsc、构建配置 tsc 与 cargo check --locked
+pnpm check                  # tools/check.mjs 先执行 config:check，再并行执行缓存 lint、增量 vue-tsc、构建配置 tsc 与 cargo check --locked
 
 # Rust 配置契约的显式生成与只读一致性检查
 pnpm config:generate
