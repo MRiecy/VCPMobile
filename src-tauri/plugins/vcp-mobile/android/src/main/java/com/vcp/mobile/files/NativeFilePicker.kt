@@ -1,6 +1,7 @@
 package com.vcp.mobile.files
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -134,17 +135,27 @@ internal class NativeFilePicker(
                     } else { launchCameraIntent(invoke) }
                 }
                 "gallery", "avatar" -> {
-                    // AndroidX otherwise silently falls back to the document picker.
-                    check(PickVisualMedia.isPhotoPickerAvailable(activity)) {
-                        "当前设备没有可用的系统照片选择器，请更新系统后重试"
-                    }
+                    // AndroidX uses the document picker when no Photo Picker is available.
                     val request = PickVisualMediaRequest(PickVisualMedia.ImageOnly)
                     val intent = if (args.selectionLimit > 1) {
                         PickMultipleVisualMedia(args.selectionLimit).createIntent(activity, request)
                     } else {
                         PickVisualMedia().createIntent(activity, request)
                     }
-                    launchActivity(invoke, intent, "onPickFileResult")
+                    try {
+                        launchActivity(invoke, intent, "onPickFileResult")
+                    } catch (error: RuntimeException) {
+                        // An advertised photo provider can still be missing or inaccessible.
+                        // Retry only launch failures, and never retry the document picker itself.
+                        if (intent.action == Intent.ACTION_OPEN_DOCUMENT ||
+                            (error !is ActivityNotFoundException && error !is SecurityException)) throw error
+                        val fallback = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+                            type = "image/*"
+                            addCategory(Intent.CATEGORY_OPENABLE)
+                            putExtra(Intent.EXTRA_ALLOW_MULTIPLE, args.selectionLimit > 1)
+                        }
+                        launchActivity(invoke, fallback, "onPickFileResult")
+                    }
                 }
                 else -> {
                     val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {

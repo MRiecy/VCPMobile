@@ -1,6 +1,7 @@
 package com.vcp.mobile.files
 
 import android.app.Activity
+import android.content.ActivityNotFoundException
 import android.content.ClipData
 import android.content.Intent
 import android.content.pm.ActivityInfo
@@ -49,6 +50,9 @@ class FilePickerBatchTest {
     private lateinit var runtime: PluginTaskRuntime
     private lateinit var uploads: File
     private lateinit var launched: Intent
+    private val launchAttempts = mutableListOf<Intent>()
+    private var photoLaunchError: RuntimeException? = null
+    private var documentLaunchError: RuntimeException? = null
 
     @Before fun setUp() {
         val cache = temporary.newFolder("cache")
@@ -70,7 +74,12 @@ class FilePickerBatchTest {
         picker = NativeFilePicker(
             activity,
             runtime,
-            launchActivity = { _, intent, _ -> launched = intent },
+            launchActivity = { _, intent, _ ->
+                launchAttempts.add(intent)
+                val error = if (intent.action == Intent.ACTION_OPEN_DOCUMENT) documentLaunchError else photoLaunchError
+                if (error != null) throw error
+                launched = intent
+            },
             requestPermission = { _, _, _ -> error("Unexpected permission request") },
             emitEvent = { _, _ -> },
             openSource = { uri, _ -> activity.contentResolver.openInputStream(uri) },
@@ -159,18 +168,71 @@ class FilePickerBatchTest {
         assertFalse(launched.hasExtra(PickVisualMedia.EXTRA_SYSTEM_FALLBACK_PICK_IMAGES_MAX))
     }
 
-    @Test fun missingPhotoPickerReportsAnErrorWithoutOpeningDocumentsAndReleasesTheSlot() {
+    @Test fun missingPhotoPickerUsesImageDocumentsWithGalleryMultipleAndAvatarSingleSelection() {
         shadowOf(activity.packageManager).removeResolveInfosForIntent(
             Intent(PickVisualMedia.ACTION_SYSTEM_FALLBACK_PICK_IMAGES), "com.example.systemphotopicker",
         )
-        for (mode in listOf("gallery", "avatar")) {
-            val invoke = start(mode = mode)
-            verify(exactly = 1) { invoke.reject(match<String> { it.contains("没有可用的系统照片选择器") }) }
-            assertFalse(::launched.isInitialized)
-        }
-        val file = start()
+        val gallery = start(mode = "gallery")
         assertEquals(Intent.ACTION_OPEN_DOCUMENT, launched.action)
-        verify(exactly = 0) { file.reject(any<String>()) }
+        assertEquals("image/*", launched.type)
+        assertTrue(launched.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false))
+        val response = slot<JSObject>()
+        every { gallery.resolve(capture(response)) } just Runs
+        deliver(gallery, source("first-image", byteArrayOf(1)), source("second-image", byteArrayOf(2)))
+        drain()
+        assertEquals(2, response.captured.getJSONArray("files").length())
+        verify(exactly = 0) { gallery.reject(any<String>()) }
+
+        val avatar = start(mode = "avatar")
+        assertEquals(Intent.ACTION_OPEN_DOCUMENT, launched.action)
+        assertEquals("image/*", launched.type)
+        assertFalse(launched.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false))
+        picker.onPickFileResult(avatar, ActivityResult(Activity.RESULT_CANCELED, null))
+        verify(exactly = 1) { avatar.reject("cancelled: file picker") }
+        assertEquals(2, launchAttempts.size)
+
+        launchAttempts.clear()
+        documentLaunchError = ActivityNotFoundException("missing document picker")
+        val failed = start(mode = "gallery")
+        assertEquals(listOf(Intent.ACTION_OPEN_DOCUMENT), launchAttempts.map { it.action })
+        verify(exactly = 1) { failed.reject("native_picker: missing document picker") }
+    }
+
+    @Test @Config(sdk = [34])
+    fun photoPickerLaunchFailuresFallBackOnceAndCancellationDoesNotLaunchAgain() {
+        for (error in listOf(ActivityNotFoundException("missing photo picker"), SecurityException("photo picker denied"))) {
+            photoLaunchError = error
+            for (mode in listOf("gallery", "avatar")) {
+                launchAttempts.clear()
+                val invoke = start(mode = mode)
+                assertEquals(listOf(PICK_IMAGES, Intent.ACTION_OPEN_DOCUMENT), launchAttempts.map { it.action })
+                assertEquals("image/*", launched.type)
+                assertTrue(launched.hasCategory(Intent.CATEGORY_OPENABLE))
+                assertEquals(mode == "gallery", launched.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false))
+                verify(exactly = 0) { invoke.reject(any<String>()) }
+                picker.onPickFileResult(invoke, ActivityResult(Activity.RESULT_CANCELED, null))
+                verify(exactly = 1) { invoke.reject("cancelled: file picker") }
+                assertEquals(2, launchAttempts.size)
+            }
+        }
+    }
+
+    @Test @Config(sdk = [34])
+    fun failedDocumentFallbackSettlesOnceWithoutRetryAndReleasesItsSlot() {
+        photoLaunchError = ActivityNotFoundException("missing photo picker")
+        documentLaunchError = ActivityNotFoundException("missing document picker")
+        val gallery = start(mode = "gallery")
+        assertEquals(2, launchAttempts.size)
+        verify(exactly = 1) { gallery.reject("native_picker: missing document picker") }
+
+        launchAttempts.clear()
+        val file = start()
+        assertEquals(listOf(Intent.ACTION_OPEN_DOCUMENT), launchAttempts.map { it.action })
+        verify(exactly = 1) { file.reject("native_picker: missing document picker") }
+
+        documentLaunchError = null
+        val next = start()
+        verify(exactly = 0) { next.reject(any<String>()) }
     }
 
     @Test fun middleCopyFailureKeepsSuccessesAndRemovesPartialFile() {
