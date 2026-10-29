@@ -79,92 +79,51 @@ const controlSession = (action: 'start' | 'continue') => {
 <template>
   <div
     v-if="(isInviteOnly || isJev) && members.length > 0"
-    class="flex flex-col gap-1 px-2 pt-0.5 pb-1 select-none"
+    class="flex flex-col gap-1 px-2 select-none"
   >
-    <div v-if="isJev" class="flex items-center justify-between gap-2 min-w-0 h-6.5">
-      <div class="flex items-center gap-1.5 min-w-0 flex-1">
-        <span
-          class="w-1.5 h-1.5 rounded-full shrink-0 transition-all duration-300"
-          :class="{
-            'bg-amber-500 animate-pulse': streamStore.currentGroupTurn?.phase === 'deciding',
-            'bg-emerald-500': streamStore.currentGroupTurn?.phase === 'speaking',
-            'bg-[var(--primary-text)] opacity-25': streamStore.currentGroupTurn?.phase !== 'deciding' && streamStore.currentGroupTurn?.phase !== 'speaking'
-          }"
-          aria-hidden="true"
-        />
-        <span class="text-[11px] font-medium text-[var(--primary-text)] opacity-70 truncate" role="status" aria-live="polite">
-          {{ statusLabel }}
-        </span>
-        <span
-          v-if="streamStore.currentGroupTurn?.autonomousRounds"
-          class="shrink-0 font-mono text-[10px] px-1 py-0.5 rounded bg-black/5 dark:bg-white/8 text-[var(--primary-text)] opacity-50"
-        >
-          第 {{ streamStore.currentGroupTurn.autonomousRounds }} 轮
-        </span>
-      </div>
+    <div v-if="isJev" class="flex items-center gap-2 min-w-0 text-xs text-primary-text">
+      <span class="min-w-0 flex-1 truncate opacity-60" role="status" aria-live="polite">{{ statusLabel }}</span>
+      <span v-if="streamStore.currentGroupTurn?.autonomousRounds" class="shrink-0 font-mono opacity-40">
+        第 {{ streamStore.currentGroupTurn.autonomousRounds }} 轮
+      </span>
       <template v-if="!isGenerating">
-        <div class="flex items-center gap-1.5 shrink-0">
-          <button
-            type="button"
-            class="h-6 px-2 rounded-md border border-[var(--border-color)] bg-[var(--secondary-bg)] hover:bg-[var(--primary-bg)] active:bg-blue-500/10 active:border-blue-500/30 text-[11px] font-medium text-[var(--primary-text)] disabled:opacity-40 transition-colors flex items-center gap-1 shrink-0"
-            :disabled="controlsDisabled"
-            aria-label="发起群聊"
-            @click="controlSession('start')"
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="opacity-70 shrink-0" aria-hidden="true">
-              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-            </svg>
-            <span>发起群聊</span>
-          </button>
-          <button
-            type="button"
-            class="h-6 px-2 rounded-md border border-[var(--border-color)] bg-[var(--secondary-bg)] hover:bg-[var(--primary-bg)] active:bg-blue-500/10 active:border-blue-500/30 text-[11px] font-medium text-[var(--primary-text)] disabled:opacity-40 transition-colors flex items-center gap-1 shrink-0"
-            :disabled="controlsDisabled"
-            aria-label="继续群聊"
-            @click="controlSession('continue')"
-          >
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="opacity-70 shrink-0" aria-hidden="true">
-              <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
-            </svg>
-            <span>继续群聊</span>
-          </button>
-        </div>
+        <button
+          type="button"
+          class="shrink-0 px-2.5 py-1 rounded-lg border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 active:bg-blue-500/10 active:border-blue-500/30 text-xs font-semibold text-primary-text disabled:opacity-40 transition-colors"
+          :disabled="controlsDisabled"
+          aria-label="发起群聊"
+          @click="controlSession('start')"
+        >
+          发起群聊
+        </button>
+        <button
+          type="button"
+          class="shrink-0 px-2.5 py-1 rounded-lg border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 active:bg-blue-500/10 active:border-blue-500/30 text-xs font-semibold text-primary-text disabled:opacity-40 transition-colors"
+          :disabled="controlsDisabled"
+          aria-label="继续群聊"
+          @click="controlSession('continue')"
+        >
+          继续群聊
+        </button>
       </template>
     </div>
-    <div class="flex items-center gap-1.5 overflow-x-auto scrollbar-hide py-0.5">
-      <span class="text-[10px] font-bold text-[var(--primary-text)] opacity-40 shrink-0 pr-0.5 select-none tracking-wider">
-        {{ isJev && isGenerating ? '排入发言' : '邀请发言' }}
+    <div class="flex items-center gap-1.5 overflow-x-auto scrollbar-hide">
+      <span class="text-[10px] font-bold text-primary-text opacity-40 shrink-0 pr-1 select-none">
+        {{ isJev && isGenerating ? '排入发言' : '邀其发言' }}
       </span>
       <button
         v-for="member in members"
         :key="member.id"
         type="button"
-        class="flex items-center gap-1.5 pl-1 pr-2.5 h-7 shrink-0 rounded-md border text-xs transition-colors"
-        :class="{
-          'border-blue-500/50 bg-blue-500/12 dark:bg-blue-500/20 text-blue-600 dark:text-blue-400 font-medium': currentSpeaker === member.id,
-          'border-amber-500/40 bg-amber-500/8 text-[var(--primary-text)]': queuedMembers.has(member.id),
-          'border-[var(--border-color)] bg-[var(--secondary-bg)] text-[var(--primary-text)] active:bg-blue-500/10 active:border-blue-500/30': currentSpeaker !== member.id && !queuedMembers.has(member.id),
-          'opacity-40 pointer-events-none': controlsDisabled || (!isJev && isGenerating) || queuedMembers.has(member.id) || currentSpeaker === member.id
-        }"
+        class="flex items-center gap-1.5 pl-1 pr-2.5 py-1 shrink-0 rounded-lg border border-black/10 dark:border-white/10 bg-black/5 dark:bg-white/5 active:bg-blue-500/10 active:border-blue-500/30 disabled:opacity-40 transition-colors"
         :disabled="controlsDisabled || (!isJev && isGenerating) || queuedMembers.has(member.id) || currentSpeaker === member.id"
         :aria-label="currentSpeaker === member.id ? `${member.name}正在发言` : queuedMembers.has(member.id) ? `${member.name}等待发言` : `邀请${member.name}发言`"
         @click="invite(member.id)"
       >
-        <VcpAvatar
-          owner-type="agent"
-          :owner-id="member.id"
-          :fallback-name="member.name"
-          size="w-5 h-5"
-          rounded="rounded"
-        />
-        <span class="font-medium whitespace-nowrap">{{ member.name }}</span>
-        <span v-if="currentSpeaker === member.id" class="text-[10px] text-blue-500 dark:text-blue-400 opacity-80 flex items-center gap-0.5">
-          <span class="w-1 h-1 rounded-full bg-blue-500 inline-block animate-pulse" />
-          发言中
-        </span>
-        <span v-else-if="queuedMembers.has(member.id)" class="text-[10px] text-[var(--secondary-text)]">
-          等待 <span class="font-mono font-semibold text-amber-500/90">{{ queuedMembers.get(member.id) }}</span>
-        </span>
+        <VcpAvatar owner-type="agent" :owner-id="member.id" :fallback-name="member.name" size="w-5 h-5" rounded="rounded-md" />
+        <span class="text-xs font-semibold text-primary-text whitespace-nowrap">{{ member.name }}</span>
+        <span v-if="currentSpeaker === member.id" class="text-[10px] text-primary-text opacity-50">发言中</span>
+        <span v-else-if="queuedMembers.has(member.id)" class="text-[10px] text-primary-text opacity-50">待发言 <span class="font-mono">{{ queuedMembers.get(member.id) }}</span></span>
       </button>
     </div>
   </div>
