@@ -1,6 +1,20 @@
 //! Strict PCM16 mono RIFF reader for the native ASR export.
 
 pub(super) fn pcm16_mono(bytes: &[u8], sample_rate: u32) -> Result<Vec<u8>, String> {
+    let mut pcm = Vec::new();
+    read_pcm16_mono(bytes, sample_rate, |chunk| pcm.extend_from_slice(chunk))?;
+    Ok(pcm)
+}
+
+pub(super) fn pcm16_mono_sample_count(bytes: &[u8], sample_rate: u32) -> Result<usize, String> {
+    read_pcm16_mono(bytes, sample_rate, |_| {})
+}
+
+fn read_pcm16_mono(
+    bytes: &[u8],
+    sample_rate: u32,
+    mut consume: impl FnMut(&[u8]),
+) -> Result<usize, String> {
     let invalid = || "语音服务返回的 WAV 音频格式无效。".to_string();
     if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
         return Err(invalid());
@@ -15,7 +29,7 @@ pub(super) fn pcm16_mono(bytes: &[u8], sample_rate: u32) -> Result<Vec<u8>, Stri
     }
     let mut position = 12usize;
     let mut format_found = false;
-    let mut pcm = Vec::new();
+    let mut sample_count = 0;
     while position < end {
         if end - position < 8 {
             return Err(invalid());
@@ -45,17 +59,18 @@ pub(super) fn pcm16_mono(bytes: &[u8], sample_rate: u32) -> Result<Vec<u8>, Stri
             if size % 2 != 0 {
                 return Err(invalid());
             }
-            pcm.extend_from_slice(&bytes[start..chunk_end]);
+            sample_count += size / 2;
+            consume(&bytes[start..chunk_end]);
         }
         position = chunk_end
             .checked_add(size % 2)
             .filter(|value| *value <= end)
             .ok_or_else(invalid)?;
     }
-    if !format_found || pcm.is_empty() {
+    if !format_found || sample_count == 0 {
         return Err(invalid());
     }
-    Ok(pcm)
+    Ok(sample_count)
 }
 
 #[cfg(test)]
@@ -77,6 +92,35 @@ mod tests {
     #[test]
     fn finds_pcm_after_unknown_odd_sized_chunk_and_padding() {
         assert_eq!(pcm16_mono(&wav_fixture(), 24000).unwrap(), [1, 2, 3, 4]);
+        assert_eq!(pcm16_mono_sample_count(&wav_fixture(), 24000).unwrap(), 2);
+    }
+
+    #[test]
+    fn counts_and_collects_all_data_chunks_even_before_the_format_chunk() {
+        let mut bytes = wav_fixture();
+        let data = bytes.split_off(bytes.len() - 12);
+        bytes.splice(12..12, data);
+        bytes.extend_from_slice(b"JUNK\x01\0\0\0x\0data\x04\0\0\0\x05\x06\x07\x08");
+        let size = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&size.to_le_bytes());
+        assert_eq!(pcm16_mono_sample_count(&bytes, 24000).unwrap(), 4);
+        assert_eq!(pcm16_mono(&bytes, 24000).unwrap(), [1, 2, 3, 4, 5, 6, 7, 8]);
+    }
+
+    #[test]
+    fn sample_count_validates_the_complete_container_after_valid_audio() {
+        for tail in [
+            &b"JUNK\x08\0\0\0"[..],
+            &b"JUNK\x01\0\0\0x"[..],
+            &b"data\x01\0\0\0x\0"[..],
+        ] {
+            let mut bytes = wav_fixture();
+            bytes.extend_from_slice(tail);
+            let size = (bytes.len() - 8) as u32;
+            bytes[4..8].copy_from_slice(&size.to_le_bytes());
+            assert!(pcm16_mono_sample_count(&bytes, 24000).is_err());
+            assert!(pcm16_mono(&bytes, 24000).is_err());
+        }
     }
 
     #[test]
@@ -84,5 +128,7 @@ mod tests {
         let bytes = wav_fixture();
         assert!(pcm16_mono(&bytes[..bytes.len() - 1], 24000).is_err());
         assert!(pcm16_mono(&bytes, 16000).is_err());
+        assert!(pcm16_mono_sample_count(&bytes[..bytes.len() - 1], 24000).is_err());
+        assert!(pcm16_mono_sample_count(&bytes, 16000).is_err());
     }
 }

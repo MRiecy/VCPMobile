@@ -35,13 +35,21 @@ pub(super) async fn prepare_audio(
     if sample_count == 0 || sample_count > 30 * 16_000 || data.len() as u64 > MAX_WAV_BYTES {
         return Err("导出的语音片段范围无效，请重试。".into());
     }
-    let pcm = wav::pcm16_mono(&data, 16000)?;
-    if pcm.len() as u64 / 2 != sample_count {
-        return Err("语音片段样本数量不匹配。".into());
-    }
+    let check_samples = |actual: usize| {
+        if actual as u64 == sample_count {
+            Ok(())
+        } else {
+            Err("语音片段样本数量不匹配。".to_string())
+        }
+    };
     let bytes = match encoding {
-        VoiceInputEncoding::Wav => data,
+        VoiceInputEncoding::Wav => {
+            check_samples(wav::pcm16_mono_sample_count(&data, 16000)?)?;
+            data
+        }
         VoiceInputEncoding::Mp3 => {
+            let pcm = wav::pcm16_mono(&data, 16000)?;
+            check_samples(pcm.len() / 2)?;
             drop(data);
             let cancellation = cancel.clone();
             // Keep awaiting the real worker on cancellation. The caller retains
@@ -323,6 +331,35 @@ mod tests {
             let mismatch =
                 prepare_audio(data.clone(), 3, encoding, &CancellationToken::new()).await;
             assert!(matches!(mismatch, Err(error) if error.contains("样本数量不匹配")));
+        }
+    }
+
+    #[tokio::test]
+    async fn both_upload_formats_preserve_samples_across_riff_chunks() {
+        let mut data = exported_wav();
+        data.extend_from_slice(b"JUNK\x03\0\0\0abc\0data\x04\0\0\0\x05\x06\x07\x08");
+        let size = (data.len() - 8) as u32;
+        data[4..8].copy_from_slice(&size.to_le_bytes());
+        let cancel = CancellationToken::new();
+        let wav = prepare_audio(data.clone(), 4, VoiceInputEncoding::Wav, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(wav.bytes, data);
+        let mp3 = prepare_audio(data.clone(), 4, VoiceInputEncoding::Mp3, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(mp3.encoding, VoiceInputEncoding::Mp3);
+        assert_eq!(
+            mp3.bytes,
+            vcp_voice_mp3::encode_pcm16_mono(&[1, 2, 3, 4, 5, 6, 7, 8], || false).unwrap()
+        );
+
+        // An exact sample count does not excuse a malformed later RIFF chunk.
+        data.extend_from_slice(b"JUNK\x08\0\0\0");
+        let size = (data.len() - 8) as u32;
+        data[4..8].copy_from_slice(&size.to_le_bytes());
+        for encoding in [VoiceInputEncoding::Wav, VoiceInputEncoding::Mp3] {
+            assert!(prepare_audio(data.clone(), 4, encoding, &cancel).await.is_err());
         }
     }
 
