@@ -26,14 +26,11 @@ export function attachIOSWindowGeometry(onGeometry: (geometry: WindowGeometry) =
   let sequence = -1;
   let geometry: WindowGeometry;
   let lastViewport: ViewportSample | null = null;
-  let constrainedEditor: { element: HTMLTextAreaElement; maxHeight: string; marginTop: string } | null = null;
+  let clearEditorConstraint: (() => void) | null = null;
 
   const restoreEditor = () => {
-    if (!constrainedEditor) return;
-    const { element, maxHeight, marginTop } = constrainedEditor;
-    element.style.maxHeight = maxHeight;
-    element.style.marginTop = marginTop;
-    constrainedEditor = null;
+    clearEditorConstraint?.();
+    clearEditorConstraint = null;
   };
 
   const readViewport = (): ViewportSample => {
@@ -62,7 +59,7 @@ export function attachIOSWindowGeometry(onGeometry: (geometry: WindowGeometry) =
 
   // Only scroll the active editor's own scroll owner. Never move the document/root
   // in response to a floating keyboard, which would change every visible panel.
-  const revealEditor = () => {
+  const updateEditor = () => {
     restoreEditor();
     const active = document.activeElement;
     const obstacle = geometry?.floatingRect;
@@ -78,23 +75,63 @@ export function attachIOSWindowGeometry(onGeometry: (geometry: WindowGeometry) =
     const overlap = intersectRects(target, obstacle);
     if (overlap.width === 0 || overlap.height === 0) return;
     if (active instanceof HTMLTextAreaElement) {
-      // Full-screen textareas may have no scrollable ancestor. Constrain only
-      // this editor's visible box to the larger unobscured vertical segment;
-      // its own scrolling continues to reveal the caret. The surface stays full.
-      const above = obstacle.y - bounds.y - 8;
-      const belowTop = obstacle.y + obstacle.height + 8;
-      const below = geometry.usableRect.y + geometry.usableRect.height - belowTop;
-      const lineHeight = parseFloat(getComputedStyle(active).lineHeight) || 24;
-      if (Math.max(above, below) >= Math.max(44, lineHeight * 2)) {
-        constrainedEditor = { element: active, maxHeight: active.style.maxHeight, marginTop: active.style.marginTop };
-        if (above >= below) {
-          active.style.maxHeight = `${Math.min(bounds.height, above)}px`;
-        } else {
-          const margin = parseFloat(getComputedStyle(active).marginTop) || 0;
-          active.style.marginTop = `${margin + Math.max(0, belowTop - bounds.y)}px`;
-          active.style.maxHeight = `${Math.min(bounds.height, below)}px`;
+      const group = active.closest<HTMLElement>('[data-vcp-keyboard-editor]');
+      if (group) {
+        // The composer draws its text in a sibling highlight layer. Keep that
+        // entire editor in one rectangle, preserving its original flex/grid slot.
+        const box = group.getBoundingClientRect();
+        const top = Math.max(box.top, geometry.usableRect.y);
+        const bottom = Math.min(box.bottom, geometry.usableRect.y + geometry.usableRect.height);
+        const above = Math.max(0, Math.min(bottom, obstacle.y - 8) - top);
+        const belowTop = Math.max(top, obstacle.y + obstacle.height + 8);
+        const below = Math.max(0, bottom - belowTop);
+        const lineHeight = parseFloat(getComputedStyle(active).lineHeight) || 24;
+        const height = Math.max(above, below);
+        if (height >= Math.max(44, lineHeight * 2)) {
+          const before = (above >= below ? top : belowTop) - box.top;
+          const properties = {
+            '--vcp-editor-before': `${before}px`,
+            '--vcp-editor-height': `${height}px`,
+            '--vcp-editor-after': `${Math.max(0, box.height - before - height)}px`,
+          };
+          const previous = Object.keys(properties).map(name => [name,
+            group.style.getPropertyValue(name), group.style.getPropertyPriority(name)] as const);
+          clearEditorConstraint = () => {
+            group.removeAttribute('data-vcp-floating-editor');
+            for (const [name, value, priority] of previous) {
+              if (value) group.style.setProperty(name, value, priority);
+              else group.style.removeProperty(name);
+            }
+          };
+          for (const [name, value] of Object.entries(properties)) group.style.setProperty(name, value);
+          group.setAttribute('data-vcp-floating-editor', '');
+          return;
         }
-        return;
+        // If this editor has no usable segment, scroll its existing owner below;
+        // never fall back to moving only the transparent textarea.
+      } else {
+        // Full-screen textareas may have no scrollable ancestor. Constrain only
+        // this editor's visible box to the larger unobscured vertical segment;
+        // its own scrolling continues to reveal the caret. The surface stays full.
+        const above = obstacle.y - bounds.y - 8;
+        const belowTop = obstacle.y + obstacle.height + 8;
+        const below = geometry.usableRect.y + geometry.usableRect.height - belowTop;
+        const lineHeight = parseFloat(getComputedStyle(active).lineHeight) || 24;
+        if (Math.max(above, below) >= Math.max(44, lineHeight * 2)) {
+          const { maxHeight, marginTop } = active.style;
+          clearEditorConstraint = () => {
+            active.style.maxHeight = maxHeight;
+            active.style.marginTop = marginTop;
+          };
+          if (above >= below) {
+            active.style.maxHeight = `${Math.min(bounds.height, above)}px`;
+          } else {
+            const margin = parseFloat(getComputedStyle(active).marginTop) || 0;
+            active.style.marginTop = `${margin + Math.max(0, belowTop - bounds.y)}px`;
+            active.style.maxHeight = `${Math.min(bounds.height, below)}px`;
+          }
+          return;
+        }
       }
     }
     // Textareas have no DOM caret rect: the visible input bounds are conservative.
@@ -109,6 +146,16 @@ export function attachIOSWindowGeometry(onGeometry: (geometry: WindowGeometry) =
         return;
       }
       owner = owner.parentElement;
+    }
+  };
+  const revealEditor = () => {
+    const active = document.activeElement;
+    const scrollTop = active instanceof HTMLTextAreaElement ? active.scrollTop : null;
+    try { updateEditor(); }
+    finally {
+      // Measuring the original slot briefly restores its height. Do not let that
+      // intermediate layout reset the editor's current scroll position.
+      if (active instanceof HTMLTextAreaElement && scrollTop !== null) active.scrollTop = scrollTop;
     }
   };
 

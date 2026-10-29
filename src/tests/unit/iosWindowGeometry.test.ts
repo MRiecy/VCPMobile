@@ -95,4 +95,86 @@ describe('iOS window sample ownership', () => {
     expect(editor.style.maxHeight).toBe('600px');
     expect(editor.style.marginTop).toBe('');
   });
+
+  it.each([
+    { keyboardY: 400, expectedTop: 100, expectedHeight: 292 },
+    { keyboardY: 140, expectedTop: 368, expectedHeight: 332 },
+  ])('keeps a grouped editor inside its slot around keyboard y=$keyboardY', async ({ keyboardY, expectedTop, expectedHeight }) => {
+    mockInvoke('plugin:vcp-mobile|get_webview_geometry', args => ({
+      ...snapshot(Number(args?.sampleId), Number(args?.viewportRevision)), dockedTopPoints: null,
+      floatingRectPoints: { x: 100, y: keyboardY, width: 230, height: 220 },
+    }));
+    const group = document.createElement('div');
+    group.setAttribute('data-vcp-keyboard-editor', '');
+    const editor = document.createElement('textarea');
+    const highlight = document.createElement('div');
+    group.append(highlight, editor);
+    document.body.append(group);
+    const bounds = { x: 10, y: 100, left: 10, top: 100, width: 350, height: 600,
+      right: 360, bottom: 700, toJSON: () => ({}) };
+    vi.spyOn(group, 'getBoundingClientRect').mockReturnValue(bounds);
+    vi.spyOn(editor, 'getBoundingClientRect').mockReturnValue(bounds);
+    editor.value = '保持当前选区和滚动位置';
+    editor.focus();
+    editor.setSelectionRange(2, 5);
+    editor.scrollTop = 80;
+    release = attachIOSWindowGeometry(vi.fn());
+    await vi.advanceTimersByTimeAsync(20);
+
+    const before = parseFloat(group.style.getPropertyValue('--vcp-editor-before'));
+    const height = parseFloat(group.style.getPropertyValue('--vcp-editor-height'));
+    const after = parseFloat(group.style.getPropertyValue('--vcp-editor-after'));
+    expect(bounds.top + before).toBe(expectedTop);
+    expect(height).toBe(expectedHeight);
+    expect(before + height + after).toBe(bounds.height);
+    expect(expectedTop + height <= keyboardY - 8 || expectedTop >= keyboardY + 220 + 8).toBe(true);
+    expect(group.hasAttribute('data-vcp-floating-editor')).toBe(true);
+    expect(editor.parentElement).toBe(highlight.parentElement);
+    expect(editor.style.maxHeight).toBe('');
+    expect(editor.style.marginTop).toBe('');
+    expect([editor.selectionStart, editor.selectionEnd, editor.scrollTop]).toEqual([2, 5, 80]);
+
+    editor.blur();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(group.hasAttribute('data-vcp-floating-editor')).toBe(false);
+    expect(group.style.getPropertyValue('--vcp-editor-height')).toBe('');
+  });
+
+  it('retires the grouped editor constraint on docked keyboard and disposal', async () => {
+    let floating = true;
+    mockInvoke('plugin:vcp-mobile|get_webview_geometry', args => ({
+      ...snapshot(Number(args?.sampleId), Number(args?.viewportRevision)),
+      dockedTopPoints: floating ? null : 520,
+      floatingRectPoints: floating ? { x: 100, y: 400, width: 230, height: 220 } : null,
+    }));
+    const group = document.createElement('div');
+    group.setAttribute('data-vcp-keyboard-editor', '');
+    const editor = document.createElement('textarea');
+    group.append(editor);
+    document.body.append(group);
+    const bounds = { x: 10, y: 100, left: 10, top: 100, width: 350, height: 600,
+      right: 360, bottom: 700, toJSON: () => ({}) };
+    vi.spyOn(group, 'getBoundingClientRect').mockReturnValue(bounds);
+    vi.spyOn(editor, 'getBoundingClientRect').mockReturnValue(bounds);
+    editor.focus();
+    release = attachIOSWindowGeometry(vi.fn());
+    await vi.advanceTimersByTimeAsync(20);
+    expect(group.hasAttribute('data-vcp-floating-editor')).toBe(true);
+
+    floating = false;
+    window.dispatchEvent(new CustomEvent('vcp-webview-geometry-changed'));
+    await vi.advanceTimersByTimeAsync(20);
+    expect(group.hasAttribute('data-vcp-floating-editor')).toBe(false);
+    expect(group.style.getPropertyValue('--vcp-editor-height')).toBe('');
+
+    floating = true;
+    window.dispatchEvent(new CustomEvent('vcp-webview-geometry-changed'));
+    await vi.advanceTimersByTimeAsync(20);
+    expect(group.hasAttribute('data-vcp-floating-editor')).toBe(true);
+    release();
+    release = undefined;
+    expect(group.hasAttribute('data-vcp-floating-editor')).toBe(false);
+    expect(group.style.getPropertyValue('--vcp-editor-before')).toBe('');
+    expect(group.style.getPropertyValue('--vcp-editor-after')).toBe('');
+  });
 });

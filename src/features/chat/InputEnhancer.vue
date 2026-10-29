@@ -13,6 +13,7 @@ import { useTarvenStore } from '../../core/stores/tarvenStore';
 import { isAndroid, isIOS } from '../../core/utils/platform';
 import { useLongTextPaste } from './composables/useLongTextPaste';
 import { useModalHistory } from '../../core/composables/useModalHistory';
+import { refreshIOSWindowGeometry } from '../../core/composables/useIOSWindowGeometry';
 import { attachMenuOpen, toggleAttachMenu } from './attachMenuController';
 import StagedAttachmentPreview from './StagedAttachmentPreview.vue';
 import GroupStopAllButton from './components/GroupStopAllButton.vue';
@@ -154,6 +155,9 @@ watch([input, isExpanded], () => {
     autoResize();
     syncHighlightScroll();
   });
+});
+watch(isExpanded, () => {
+  if (isIOS) void nextTick(refreshIOSWindowGeometry);
 });
 
 // 是否正在生成中
@@ -469,6 +473,8 @@ let textareaObserver: ResizeObserver | null = null;
 let measuredWidth = -1;
 let measuredHeight = -1;
 let measuredLineHeight = '';
+let measuredBoxWidth = -1;
+let measuredBoxHeight = -1;
 watch(textareaRef, (el, previous) => {
   if (previous) textareaObserver?.unobserve(previous);
   measuredWidth = -1;
@@ -485,6 +491,16 @@ onMounted(() => {
     textareaObserver = new ResizeObserver(() => {
       const el = textareaRef.value;
       if (!el) return;
+      if (isIOS) {
+        // Observe the composer slot, not the constrained editor height. Keyboard
+        // avoidance preserves this slot; attachments/expansion may resize it.
+        const box = el.closest<HTMLElement>('.input-box');
+        if (box && (box.clientWidth !== measuredBoxWidth || box.clientHeight !== measuredBoxHeight)) {
+          measuredBoxWidth = box.clientWidth;
+          measuredBoxHeight = box.clientHeight;
+          refreshIOSWindowGeometry();
+        }
+      }
       const width = el.clientWidth;
       const height = el.clientHeight;
       const lineHeight = getComputedStyle(el).lineHeight;
@@ -499,6 +515,10 @@ onMounted(() => {
       syncHighlightScroll();
     });
     if (textareaRef.value) textareaObserver.observe(textareaRef.value);
+    if (isIOS) {
+      const box = textareaRef.value?.closest('.input-box');
+      if (box) textareaObserver.observe(box);
+    }
   }
   autoResize();
 });
@@ -557,7 +577,7 @@ onUnmounted(() => {
         </button>
         
         <!-- 文字输入与提及交互区 -->
-        <div class="input-writing-area flex-1 min-w-0 flex flex-col justify-end relative min-h-[36px] py-[1px] overflow-visible">
+        <div data-vcp-keyboard-editor class="input-writing-area flex-1 min-w-0 flex flex-col justify-end relative min-h-[36px] py-[1px] overflow-visible">
 
           <!-- @提及 成员选择浮层（锚定于输入框上方，z-local 局部悬浮） -->
           <Transition name="fade">
@@ -889,6 +909,25 @@ onUnmounted(() => {
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+/* The geometry owner keeps before + height + after equal to this grid/flex
+ * slot. Text, selection, highlight and editor decorations move together. */
+.input-writing-area[data-vcp-floating-editor] {
+  box-sizing: border-box;
+  height: var(--vcp-editor-height);
+  min-height: 0;
+  max-height: var(--vcp-editor-height);
+  margin-top: var(--vcp-editor-before);
+  margin-bottom: var(--vcp-editor-after);
+  justify-content: flex-start;
+}
+
+.input-writing-area[data-vcp-floating-editor] .vcp-textarea {
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+  max-height: 100%;
 }
 
 .input-expanded .input-actions {

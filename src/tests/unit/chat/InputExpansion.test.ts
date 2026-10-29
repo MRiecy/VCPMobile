@@ -8,6 +8,9 @@ import { useChatHistoryStore } from '@/core/stores/chatHistoryStore';
 import { useChatSessionStore } from '@/core/stores/chatSessionStore';
 import { useShareStore } from '@/core/stores/shareStore';
 import { useAttachmentStore } from '@/core/stores/attachmentStore';
+import { useAssistantStore } from '@/core/stores/assistant';
+import { attachIOSWindowGeometry } from '@/core/composables/useIOSWindowGeometry';
+import { mockInvoke } from '@/tests/mocks/tauri';
 import { mountWithPinia } from '@/tests/utils/mount';
 
 let wrapper: VueWrapper;
@@ -147,6 +150,69 @@ describe('chat input expansion', () => {
     await wrapper.get('textarea').trigger('compositionend');
     await wrapper.get('[aria-label="发送消息"]').trigger('click');
     expect(wrapper.emitted('send')?.[0]?.[0]).toContain('拼音');
+  });
+
+  it('keeps mention text and its live editor in one floating-keyboard rectangle through composition', async () => {
+    const assistant = useAssistantStore();
+    assistant.agents = [{ id: 'nova', name: 'Nova', model: 'm' }] as any;
+    assistant.groups = [{ id: 'group', name: '群聊', members: ['nova'], mode: 'invite_only' }] as any;
+    useChatSessionStore().setConversation({ id: 'group', type: 'group' }, 'topic');
+    await expand('@Nova\n第二行\n第三行\n第四行\n第五行');
+    const group = wrapper.get('[data-vcp-keyboard-editor]').element as HTMLElement;
+    const highlight = wrapper.get('.vcp-input-text-metrics').element;
+    expect(textarea.parentElement).toBe(group);
+    expect(highlight.parentElement).toBe(group);
+    const bounds = { x: 10, y: 100, left: 10, top: 100, width: 350, height: 600,
+      right: 360, bottom: 700, toJSON: () => ({}) };
+    vi.spyOn(group, 'getBoundingClientRect').mockReturnValue(bounds);
+    vi.spyOn(textarea, 'getBoundingClientRect').mockReturnValue(bounds);
+    const originalWidth = Object.getOwnPropertyDescriptor(document.documentElement, 'clientWidth');
+    const originalViewport = Object.getOwnPropertyDescriptor(window, 'visualViewport');
+    Object.defineProperty(document.documentElement, 'clientWidth', { configurable: true, value: 390 });
+    Object.defineProperty(window, 'visualViewport', { configurable: true, value: {
+      width: 390, height: 844, offsetLeft: 0, offsetTop: 0, scale: 1,
+      addEventListener() {}, removeEventListener() {},
+    } });
+    mockInvoke('plugin:vcp-mobile|get_webview_geometry', args => ({
+      ...args, webViewGeneration: 1, geometrySequence: Number(args?.sampleId),
+      boundsPoints: { x: 0, y: 0, width: 390, height: 844 }, keyboardVisible: true,
+      dockedTopPoints: null, floatingRectPoints: { x: 100, y: 140, width: 230, height: 220 },
+    }));
+    textarea.focus();
+    textarea.setSelectionRange(2, 5);
+    textarea.scrollTop = 80;
+    vi.useFakeTimers();
+    const detach = attachIOSWindowGeometry(vi.fn());
+    try {
+      await vi.advanceTimersByTimeAsync(20);
+      expect(group.hasAttribute('data-vcp-floating-editor')).toBe(true);
+      expect(group.style.getPropertyValue('--vcp-editor-before')).toBe('268px');
+      expect(textarea.style.marginTop).toBe('');
+      expect([textarea.selectionStart, textarea.selectionEnd, textarea.scrollTop]).toEqual([2, 5, 80]);
+      await wrapper.get('textarea').trigger('compositionstart');
+      textarea.value += '拼音';
+      textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      window.dispatchEvent(new CustomEvent('vcp-webview-geometry-changed'));
+      await vi.advanceTimersByTimeAsync(20);
+      expect(wrapper.get('textarea').element).toBe(textarea);
+      expect(textarea.parentElement).toBe(group);
+      expect(document.activeElement).toBe(textarea);
+      expect(textarea.value).toContain('拼音');
+      expect((textarea as HTMLTextAreaElement & { composing?: boolean }).composing).toBe(true);
+      await wrapper.get('textarea').trigger('compositionend');
+      await settle();
+      expect(wrapper.get('.vcp-input-text-metrics').element.parentElement).toBe(group);
+      expect(wrapper.get('.vcp-input-text-metrics').text()).toContain('拼音');
+    } finally {
+      detach();
+      document.documentElement.removeAttribute('style');
+      delete document.documentElement.dataset.vcpPlatform;
+      if (originalWidth) Object.defineProperty(document.documentElement, 'clientWidth', originalWidth);
+      else Reflect.deleteProperty(document.documentElement, 'clientWidth');
+      if (originalViewport) Object.defineProperty(window, 'visualViewport', originalViewport);
+      else Reflect.deleteProperty(window, 'visualViewport');
+      vi.useRealTimers();
+    }
   });
 
   it('keeps ordinary input until persistence acknowledges the send and collapses immediately', async () => {
