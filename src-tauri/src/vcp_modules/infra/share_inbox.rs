@@ -289,9 +289,28 @@ fn terminal(share: &CurrentShare) -> bool {
     share.state == "sent" || share.state == "discarded"
 }
 
-fn acquisition_interrupted(root: &Path, slot: &Slot, android_owner: Option<&str>) -> bool {
-    if slot.state != "receiving" || android_owner == Some(slot.delivery_id.as_str()) {
+struct AndroidOwnerSnapshot {
+    observed_slot: Option<Slot>,
+    owner_id: Option<String>,
+}
+
+fn acquisition_interrupted(
+    root: &Path,
+    slot: &Slot,
+    android_owner: Option<&AndroidOwnerSnapshot>,
+) -> bool {
+    if slot.state != "receiving" {
         return false;
+    }
+    if let Some(snapshot) = android_owner {
+        // The native query runs without the DB/slot locks. Its answer can only
+        // establish liveness for the identity observed before that query.
+        if !snapshot.observed_slot.as_ref().is_some_and(|observed| {
+            observed.generation == slot.generation && observed.delivery_id == slot.delivery_id
+        }) || snapshot.owner_id.as_deref() == Some(slot.delivery_id.as_str())
+        {
+            return false;
+        }
     }
     match File::options()
         .read(true)
@@ -383,6 +402,10 @@ pub async fn read_current_share(
     let root = root(&app).await?;
     #[cfg(target_os = "android")]
     let android_owner = {
+        let observed_slot = {
+            let _guard = lock(&root).await?;
+            slot(&root)?
+        };
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Owner {
@@ -397,16 +420,19 @@ pub async fn read_current_share(
         })
         .await
         .map_err(|e| e.to_string())??;
-        result.delivery_id
+        Some(AndroidOwnerSnapshot {
+            observed_slot,
+            owner_id: result.delivery_id,
+        })
     };
     #[cfg(not(target_os = "android"))]
-    let android_owner: Option<String> = None;
+    let android_owner: Option<AndroidOwnerSnapshot> = None;
     let mut tx = db.write_transaction("share.reconcile").await?;
     let guard = lock(&root).await?;
     let Some(mut slot) = slot(&root)? else {
         return Ok(None);
     };
-    if acquisition_interrupted(&root, &slot, android_owner.as_deref()) {
+    if acquisition_interrupted(&root, &slot, android_owner.as_ref()) {
         slot.state = "failed".into();
         slot.error = Some("分享获取已中断，请从来源应用重新分享".into());
         write_slot(&root, &slot)?;
@@ -1480,8 +1506,65 @@ mod tests {
         drop(lease);
         assert!(acquisition_interrupted(root, &source, None));
         // Android provider IO lives in the native process before the app-folder copy begins.
-        assert!(!acquisition_interrupted(root, &source, Some("receiving")));
-        assert!(acquisition_interrupted(root, &source, Some("newer")));
+        let mut android = AndroidOwnerSnapshot {
+            observed_slot: Some(source.clone()),
+            owner_id: Some("receiving".into()),
+        };
+        assert!(!acquisition_interrupted(root, &source, Some(&android)));
+        android.owner_id = None;
+        assert!(acquisition_interrupted(root, &source, Some(&android)));
+    }
+
+    #[tokio::test]
+    async fn stale_android_owner_cannot_fail_a_share_accepted_during_the_native_query() {
+        let temporary = tempfile::tempdir_in("tests").unwrap();
+        let root = temporary.path();
+        let mut first = test_slot(1, "first");
+        first.state = "receiving".into();
+        let guard = lock(root).await.unwrap();
+        write_slot(root, &first).unwrap();
+        let observed_slot = slot(root).unwrap();
+        drop(guard);
+
+        // The old read is awaiting its native owner response. A new acceptance
+        // can acquire the slot and publish B before that response is reconciled.
+        let guard = lock(root).await.unwrap();
+        let mut second = test_slot(2, "second");
+        second.state = "receiving".into();
+        write_slot(root, &second).unwrap();
+        drop(guard);
+        let stale = AndroidOwnerSnapshot {
+            observed_slot,
+            owner_id: Some("first".into()),
+        };
+
+        let guard = lock(root).await.unwrap();
+        let current = slot(root).unwrap().unwrap();
+        assert!(!root.join("second/lease.lock").exists());
+        assert!(!acquisition_interrupted(root, &current, Some(&stale)));
+        // The same protection applies when the old read started before any
+        // share existed; absence is not owner evidence for a later acceptance.
+        let before_first_share = AndroidOwnerSnapshot {
+            observed_slot: None,
+            owner_id: None,
+        };
+        assert!(!acquisition_interrupted(root, &current, Some(&before_first_share)));
+        // A fresh observation of the same receiving slot can still detect a
+        // crashed native provider, without requiring another lease or polling.
+        let crashed = AndroidOwnerSnapshot {
+            observed_slot: Some(current.clone()),
+            owner_id: None,
+        };
+        assert!(acquisition_interrupted(root, &current, Some(&crashed)));
+        drop(guard);
+
+        // B's provider handoff remains able to publish its normal ready state.
+        let guard = lock(root).await.unwrap();
+        let mut ready = assert_current(root, 2, "second").unwrap();
+        ready.state = "ready".into();
+        write_slot(root, &ready).unwrap();
+        assert_eq!(slot(root).unwrap().unwrap().state, "ready");
+        drop(guard);
     }
 
     async fn database() -> sqlx::SqliteConnection {
