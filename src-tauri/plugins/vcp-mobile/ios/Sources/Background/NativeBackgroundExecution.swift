@@ -102,6 +102,7 @@ final class NativeBackgroundExecution: NSObject, AVAudioPlayerDelegate {
             leases[tag] = previous
             updateScreen()
             if !needsAudio {
+                interrupted = false
                 do { try stopPlayback(deactivate: true) }
                 catch { NSLog("[VcpBackgroundExecution] Acquisition cleanup: %@", error.localizedDescription) }
             }
@@ -150,7 +151,10 @@ final class NativeBackgroundExecution: NSObject, AVAudioPlayerDelegate {
             return
         }
         guard !mediaServicesUnavailable else { throw failure("background_audio_media_services_unavailable") }
-        guard !interrupted else { throw failure("background_audio_interrupted") }
+        // A fresh foreground owner may attempt real activation even if the
+        // system never ended an earlier interruption. Existing/background
+        // owners still wait; only successful playback clears the old state.
+        guard !interrupted || newForegroundTask else { throw failure("background_audio_interrupted") }
         if requiresNewForegroundTask && !newForegroundTask {
             throw failure("background_audio_waiting_for_foreground_task")
         }
@@ -192,11 +196,18 @@ final class NativeBackgroundExecution: NSObject, AVAudioPlayerDelegate {
               let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
         switch type {
         case .began:
+            // Voice owns the session even during silent microphone monitoring.
+            // Its interruptions must not taint a later independent Stream task.
+            // Keep waiting Stream leases covered while they yield to voice,
+            // although their silent player has already been discarded.
+            guard needsAudio else { return }
             interrupted = true
             try? audioSession.releaseKeepalive(deactivate: false)
             player?.pause()
             NSLog("[VcpBackgroundExecution] Audio interrupted; existing tasks retain their own lifecycle")
         case .ended:
+            // An end event can belong to voice or to a lease already released.
+            guard interrupted else { return }
             interrupted = false
             let options = AVAudioSession.InterruptionOptions(
                 rawValue: notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
