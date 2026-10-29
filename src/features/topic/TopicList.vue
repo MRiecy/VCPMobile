@@ -213,20 +213,53 @@ watch(
   { immediate: true },
 );
 
+let selectionRevision = 0;
+let selectionFrame = 0;
+let finishPaintWait: ((ready: boolean) => void) | null = null;
+
+const cancelPendingSelection = () => {
+  selectionRevision++;
+  cancelAnimationFrame(selectionFrame);
+  selectionFrame = 0;
+  finishPaintWait?.(false);
+  finishPaintWait = null;
+};
+
+const waitForDrawerPaint = () => new Promise<boolean>((resolve) => {
+  finishPaintWait = resolve;
+  // rAF 在绘制前执行；跨两帧给关闭 class 一次实际绘制机会。
+  selectionFrame = requestAnimationFrame(() => {
+    selectionFrame = requestAnimationFrame(() => {
+      selectionFrame = 0;
+      finishPaintWait = null;
+      resolve(true);
+    });
+  });
+});
+
 const selectTopic = async (
   itemId: string,
   ownerType: "agent" | "group",
   topicId: string,
 ) => {
+  cancelPendingSelection();
+  const revision = selectionRevision;
+  const epoch = sessionStore.sessionEpoch;
+  const isCurrent = () => revision === selectionRevision && epoch === sessionStore.sessionEpoch;
+  const closingDrawer = layoutStore.leftDrawerOpen && !window.matchMedia('(min-width: 1024px)').matches;
+  layoutStore.setLeftDrawer(false);
+  if (closingDrawer) {
+    await nextTick();
+    if (!isCurrent() || !await waitForDrawerPaint()) return;
+  }
+  if (!isCurrent()) return;
+
   if (router.currentRoute.value.path !== "/chat") {
     await router.push("/chat");
+    if (!isCurrent()) return;
   }
 
   await sessionStore.selectTopicById(itemId, ownerType, topicId);
-
-  // 在移动端，选择话题后自动关闭侧边栏
-  layoutStore.setLeftDrawer(false);
-
   emit("select-topic");
 };
 
@@ -246,6 +279,7 @@ watch(
 );
 
 onUnmounted(() => {
+  cancelPendingSelection();
   topicListStore.searchTerm = "";
 });
 </script>

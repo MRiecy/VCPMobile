@@ -599,20 +599,17 @@ onUnmounted(() => {
       :class="{ 'is-voice-call': voiceCallStore.active }"
     >
       <!-- 对应侧栏仍为 drawer 时显示遮罩；DOM 置于侧栏前，确保侧栏稳定位于其上 -->
-      <Transition name="fade">
-        <div
-          v-if="layoutStore.leftDrawerOpen || layoutStore.rightDrawerOpen"
-          class="vcp-drawer-overlay absolute inset-0 z-drawer bg-black/12"
-          :class="{
-            'is-left-open': layoutStore.leftDrawerOpen,
-            'is-right-open': layoutStore.rightDrawerOpen,
-          }"
-          @click.self="
-            layoutStore.setLeftDrawer(false);
-            layoutStore.setRightDrawer(false);
-          "
-        ></div>
-      </Transition>
+      <div
+        class="vcp-drawer-overlay absolute inset-0 z-drawer bg-black/12"
+        :class="{
+          'is-left-open': layoutStore.leftDrawerOpen,
+          'is-right-open': layoutStore.rightDrawerOpen,
+        }"
+        @click.self="
+          layoutStore.setLeftDrawer(false);
+          layoutStore.setRightDrawer(false);
+        "
+      ></div>
 
       <AgentSidebar v-show="!voiceCallStore.active" class="vcp-workspace-left" />
 
@@ -701,13 +698,38 @@ body,
   padding-right: var(--vcp-workspace-safe-right);
 }
 
+.vcp-drawer-overlay {
+  opacity: 0;
+  visibility: hidden;
+  /* 退场期间继续拦截点击，visibility 完成隐藏后再释放命中区域。 */
+  pointer-events: auto;
+  will-change: opacity;
+  transition:
+    opacity var(--vcp-drawer-close-duration) var(--vcp-drawer-close-easing),
+    visibility 0s linear var(--vcp-drawer-close-duration);
+}
+
+@media (width < 1024px) {
+  .vcp-drawer-overlay:is(.is-left-open, .is-right-open) {
+    opacity: 1;
+    visibility: visible;
+    transition:
+      opacity var(--vcp-drawer-open-duration) var(--vcp-drawer-open-easing),
+      visibility 0s;
+  }
+}
+
 @media (min-width: 1024px) {
   .vcp-workspace-main {
     padding-left: 0;
   }
 
-  .vcp-drawer-overlay:not(.is-right-open) {
-    display: none;
+  .vcp-drawer-overlay.is-right-open {
+    opacity: 1;
+    visibility: visible;
+    transition:
+      opacity var(--vcp-drawer-open-duration) var(--vcp-drawer-open-easing),
+      visibility 0s;
   }
 }
 
@@ -718,7 +740,12 @@ body,
 
   .vcp-drawer-overlay {
     display: none;
+    will-change: auto;
   }
+}
+
+.vcp-drawer-overlay.is-dragging {
+  transition: none;
 }
 
 /* 沉浸通话收起常驻侧栏后，由聊天区重新承接两侧安全区。 */

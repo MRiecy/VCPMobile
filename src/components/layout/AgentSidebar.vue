@@ -164,24 +164,35 @@ const openGlobalSearch = () => {
   visibility: hidden;
   pointer-events: none;
   background-color: var(--vcp-panel-bg-97, var(--secondary-bg));
+  will-change: transform;
   transition:
-    transform 0.4s cubic-bezier(0.16, 1, 0.3, 1),
-    visibility 0s linear 0.4s;
+    transform var(--vcp-drawer-close-duration) var(--vcp-drawer-close-easing),
+    visibility 0s linear var(--vcp-drawer-close-duration);
   z-index: var(--layer-drawer);
+}
+
+.vcp-drawer-surface {
+  contain: layout paint;
 }
 
 .vcp-drawer-left {
   left: 0;
   padding-left: var(--vcp-workspace-safe-left, 0px);
-  transform: translateX(-100%);
+  transform: translate3d(-100%, 0, 0);
   border-right: 1px solid transparent;
 }
 
 .vcp-drawer-left.is-open {
   visibility: visible;
   pointer-events: auto;
-  transform: translateX(0);
-  transition-delay: 0s;
+  transform: translate3d(0, 0, 0);
+  transition:
+    transform var(--vcp-drawer-open-duration) var(--vcp-drawer-open-easing),
+    visibility 0s;
+}
+
+.vcp-drawer.is-dragging {
+  transition: none;
 }
 
 .vcp-drawer-header {
@@ -189,22 +200,29 @@ const openGlobalSearch = () => {
 }
 
 @media (min-width: 1024px) {
-  .vcp-drawer {
+  .vcp-drawer,
+  .vcp-drawer.is-open {
     position: relative;
     top: auto;
     bottom: auto;
     left: auto;
     flex: 0 0 280px;
-    transform: translateX(0) !important;
+    transform: none !important;
     width: 280px;
     max-width: 280px;
     visibility: visible;
     pointer-events: auto;
     z-index: var(--layer-local);
+    will-change: auto;
     transition: none;
   }
 
-  .vcp-drawer::after {
+  .vcp-drawer-surface {
+    contain: none;
+  }
+
+  .vcp-drawer::after,
+  .vcp-drawer.is-open::after {
     opacity: 1;
     transition: none;
   }

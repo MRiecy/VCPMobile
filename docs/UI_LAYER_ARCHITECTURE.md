@@ -366,11 +366,12 @@ const getPageZIndex = (type: string) => {
 | 模式 | 行为 | 适用组件 |
 |------|------|---------|
 | `global` | 右滑打开左抽屉，左滑打开右抽屉（当抽屉关闭时） | `App.vue` |
-| `left` | 左滑关闭左抽屉，右滑触发 `onTabSwitch` | `AgentSidebar.vue` |
-| `right` | 右滑关闭右抽屉 | `RightSidebar.vue` |
+| `left` | 左滑跟手，释放后关闭或回弹；右滑超过 50px 触发 `onTabSwitch` | `AgentSidebar.vue` |
+| `right` | 右滑跟手，释放后关闭或回弹 | `RightSidebar.vue` |
 
-- **角度阈值**：`absY / absX < 0.577`（约 30°），防止垂直滚动误触发；
-- **排除区**：`.no-swipe` 和 `.vcp-scrollable` 类内的触摸事件被忽略；
+- **方向与阈值**：global 保留 `>60px` 松手打开；局部手势在 10px 后锁定方向，水平需 `absY / absX < 0.577`（约 30°），纵向一旦获胜不再接管。局部关闭需达到宽度 25%，或关闭方向位移至少 20px、最近速度 `>=0.5px/ms` 且末次移动后停顿不超过 100ms；
+- **排除区与所有权**：`.no-swipe`、输入/编辑控件与横向滚动区域不接管；`.vcp-scrollable` 仅排除 global 打开，抽屉内纵向列表仍支持横向关闭。局部使用冒泡 touch，尊重 Agent 行设置、Sortable 排序与通知卡删除；
+- **临时呈现**：跟手期间仅以 DOM 样式和 `requestAnimationFrame` 更新抽屉位移、遮罩透明度，释放后才写 Store；CSS 展开 280ms、收起 220ms，遮罩退场结束前持续拦截点击。取消或生命周期变化清理临时样式，常驻栏不接管关闭手势；
 - **层级影响**：`layoutStore` 的抽屉开关不依赖任何 viewport 宽度门控，`setLeftDrawer(true)` 和 `setRightDrawer(true)` 始终维护模态历史。CSS 再按 `<1024` overlay、`1024–1279` 左常驻/右抽屉、`>=1280` 双常驻决定呈现；这里的大宽度模式仍是触控平板/折叠屏，不建立桌面端支持。
 
 ### 11.3 WebGLFluidBackground — 流体极光背景

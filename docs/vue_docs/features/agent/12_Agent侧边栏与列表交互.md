@@ -39,7 +39,7 @@ date: 2026-08-13
 | `src/features/agent/SidebarTabs.vue` | 28 | 标签切换器：Agent/Topic 两态切换按钮组 |
 | `src/features/agent/SidebarSearch.vue` | 29 | 搜索输入框：v-model 双向绑定、动态占位符 |
 | `src/features/agent/AgentsCreator.vue` | 107 | 底部创建区：Agent / Group 新建按钮与 Prompt 弹窗流程 |
-| `src/core/composables/useSidebarSwipe.ts` | 73 | 全局滑动手势：侧边栏从屏幕边缘滑出/滑入的触控识别 |
+| `src/core/composables/useSidebarSwipe.ts` | — | 全局松手打开侧栏、抽屉内跟手关闭与 Tab 手势 |
 
 ### 1.3 在整体架构中的位置
 
@@ -148,40 +148,46 @@ date: 2026-08-13
 
 ### 2.3 打开/关闭动画
 
-侧边栏使用纯 CSS `transform` 实现硬件加速动画：
+侧边栏的展开、收起与回弹使用 CSS `transform`，跟手过程由手势直接更新位移：
 
 ```css
 .vcp-drawer {
-  transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+  transition:
+    transform var(--vcp-drawer-close-duration) var(--vcp-drawer-close-easing),
+    visibility 0s linear var(--vcp-drawer-close-duration);
+  will-change: transform;
   z-index: var(--layer-drawer);   /* 20 */
 }
 
 .vcp-drawer-left {
-  transform: translateX(-100%);
+  transform: translate3d(-100%, 0, 0);
 }
 
 .vcp-drawer-left.is-open {
-  transform: translateX(0);
+  transform: translate3d(0, 0, 0);
+  transition:
+    transform var(--vcp-drawer-open-duration) var(--vcp-drawer-open-easing),
+    visibility 0s;
 }
 ```
 
-> 源码位置：`src/components/layout/AgentSidebar.vue` 第 109–129 行
+> 源码位置：`src/components/layout/AgentSidebar.vue`；共享时序定义于 `src/assets/themes.css`
 
 动画参数：
-- **时长**：400ms
-- **缓动**：`cubic-bezier(0.16, 1, 0.3, 1)` — 带轻微过冲的减速曲线，使滑入更具物理感
-- **属性**：仅 `transform`（GPU 合成层，避免重排）
-- **边缘阴影**：静态渐变层常驻，仅动画 `opacity`；关闭时在 280ms 内淡出，早于 `visibility` 隐藏
+- **展开**：280ms，`cubic-bezier(0.16, 1, 0.3, 1)` 减速停驻
+- **收起**：220ms，`cubic-bezier(0.4, 0, 1, 1)` 加速离场；减少动态效果偏好下两种时长均为 0ms
+- **属性与范围**：外层只改变 `transform`，内部 surface 使用 `contain: layout paint`；`will-change: transform` 限于覆盖式抽屉。实际合成与帧率需设备证据
+- **边缘阴影与遮罩**：静态渐变阴影和 `App.vue` 常驻遮罩仅动画 `opacity`，共享展开/收起时序；遮罩在收起结束后才隐藏，期间继续拦截点击
 - **层级**：语义化 `z-drawer`（`var(--layer-drawer)` = 20），位于 `content`（0）之上、`overlay`（30）之下
 
 **大宽度 Android 窗口常驻**（`@media (min-width: 1024px)`）：
 - 左侧栏改为 `position: relative` 与固定 280px pane，不再覆盖主内容；
-- `visibility/pointer-events` 保持可用，`transform` 归零并禁用过渡；
+- `visibility/pointer-events` 保持可用，`transform` 设为 `none` 并禁用过渡；`will-change` 还原为 `auto`，surface containment 还原为 `none`；
 - 层级从 drawer（20）回到 local（10）；
 - 1024px 是当前由主区可读宽度与侧栏宽度推导的 CSS viewport 阈值，不叫“桌面断点”。分屏或折叠后低于阈值时自动回到 overlay drawer；
 - 右侧栏使用独立的 1280px 常驻阈值，因此 1024–1279px 是左栏常驻、右栏仍为抽屉的 single-pane 模式。
 
-### 2.4 手势滑动打开（useSidebarSwipe）
+### 2.4 打开、跟手关闭与 Tab 手势（useSidebarSwipe）
 
 `AgentSidebar.vue` 内部通过 `useSidebarSwipe` 监听侧边栏容器上的**左滑关闭**与**右滑切 Tab** 手势：
 
@@ -198,18 +204,20 @@ useSidebarSwipe(sidebarRef, {
 
 > 源码位置：`src/components/layout/AgentSidebar.vue` 第 21–31 行
 
-`useSidebarSwipe` 同时被 `App.vue` 以 `type: 'global'` 调用，实现**从屏幕左边缘向右滑动打开侧边栏**的全局能力。两种实例共存，通过 `layoutStore.leftDrawerOpen` 状态互斥避免重复响应。
+`useSidebarSwipe` 同时被 `App.vue` 以 `type: 'global'` 调用，在允许手势的主区右滑松手后打开左栏、左滑松手后打开右栏；当前实现不限定触摸必须从屏幕边缘开始。global 排除抽屉与遮罩，局部实例沿 touch 冒泡尊重 Agent 行自己的滑动与排序。
 
 `useSidebarSwipe` 核心参数（`src/core/composables/useSidebarSwipe.ts`）：
 
 | 参数 | 全局模式 (`global`) | 侧边栏内模式 (`left`) |
 |------|---------------------|----------------------|
-| `threshold` | 30 | 15 |
-| 触发位移 | `absX > 60` | `absX > 50` |
-| 方向判定 | `absY / absX < 0.577`（30°以内） | 同上 |
-| 左边缘过滤 | 避开 `.vcp-scrollable` | 无需过滤 |
+| 起始阈值 | 30px | 10px 方向锁 |
+| 触发位移 | `absX > 60`，松手后打开 | 关闭位移达到宽度 25%，或关闭方向位移至少 20px 且最近速度 `>=0.5px/ms`；右滑切 Tab 仍需 `>50px` |
+| 方向判定 | `absY / absX < 0.577`（30°以内） | 同上；纵向锁定后本轮不再接管 |
+| 滚动区过滤 | 避开 `.vcp-scrollable` 及横向滚动/输入区域 | 放行纵向列表内的横向关闭，排除横向滚动/输入区域与 `.no-swipe` |
 | 左滑行为 | 打开右侧边栏 | 关闭左侧边栏 |
 | 右滑行为 | 打开左侧边栏 | 执行 `onTabSwitch` |
+
+局部关闭手势通过 `requestAnimationFrame` 直接写入抽屉 `translate3d` 与遮罩透明度，释放前不修改 Store 开关。甩手速度使用最近轨迹，末次移动后停顿超过 100ms 不再触发甩手关闭。释放后清理临时样式，由 CSS 完成关闭或回弹；已接管拖动会抑制其后的点击。取消、多指、通话、外部开关、resize 和卸载均清理本次跟踪。右栏采用对称的右滑关闭逻辑，但通知卡自身的右滑删除优先消费 touch 事件。
 
 ---
 
@@ -738,7 +746,7 @@ Rust 后端 `create_agent` 的处理（详见 `docs/modules/13_Agent领域总览
 ### 9.1 打开侧边栏的时序
 
 ```
-用户从屏幕左边缘向右滑动 (>60px)
+用户在允许全局手势的主区向右滑动 (>60px) 后松手
     │
     ▼
 useSidebarSwipe (type: 'global')
@@ -756,10 +764,10 @@ layoutStore.setLeftDrawer(true)
 AgentSidebar.vue :class="{ 'is-open': true }"
     │
     ▼
-CSS transform: translateX(-100%) → translateX(0)
+CSS transform: translate3d(-100%, 0, 0) → translate3d(0, 0, 0)
     │
     ▼
-侧边栏完全展开 (400ms)
+侧边栏完成展开 (280ms；减少动态效果时为 0ms)
 ```
 
 ### 9.2 切换 Agent 的时序
@@ -930,8 +938,8 @@ SortableJS onEnd
 | MAX_SWIPE | — | Swipe 完全展开时的最大位移，80px | `AgentList.vue` |
 | SortableJS | — | 第三方拖拽排序库，用于 Agent/Group 列表的拖拽重排 | `sortablejs` (npm) |
 | drag-handle | — | SortableJS 的拖拽柄 CSS 类，本模块中整个卡片均可作为柄 | `AgentList.vue` |
-| useSidebarSwipe | — | 全局组合式函数，统一处理侧边栏边缘滑动手势 | `useSidebarSwipe.ts` |
-| global / left 模式 | — | `useSidebarSwipe` 的两种工作模式：`global` 从屏幕边缘打开侧边栏；`left` 在侧边栏内滑动关闭或切 Tab | `useSidebarSwipe.ts` |
+| useSidebarSwipe | — | 组合式函数，协调全局打开与抽屉局部跟手关闭 | `useSidebarSwipe.ts` |
+| global / left / right 模式 | — | `global` 在主区松手打开侧栏；`left` 跟手关闭或切 Tab；`right` 跟手关闭 | `useSidebarSwipe.ts` |
 | glass-panel | — | UnoCSS 快捷类，玻璃拟态面板样式（半透明背景 +  backdrop-blur） | `uno.config.ts` |
 | glass-panel-active | — | 选中态的玻璃面板变体，通常表现为边框色或背景提亮 | `src/assets/themes.css` |
 | Modal History | — | `useModalHistory` 提供的模态栈管理，使系统返回键可按层级关闭覆盖层 | `useModalHistory.ts` |

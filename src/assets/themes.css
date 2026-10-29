@@ -25,6 +25,10 @@
   /* 抽屉边缘阴影由常驻渐变层绘制，只动画 opacity。 */
   --vcp-drawer-shadow-width: 32px;
   --vcp-drawer-shadow-color: rgba(0, 0, 0, 0.3);
+  --vcp-drawer-open-duration: 280ms;
+  --vcp-drawer-close-duration: 220ms;
+  --vcp-drawer-open-easing: cubic-bezier(0.16, 1, 0.3, 1);
+  --vcp-drawer-close-easing: cubic-bezier(0.4, 0, 1, 1);
   --pele-bg: var(--secondary-bg, #ffffff);
   --pele-fg: var(--primary-text, #1f1f1f);
   --pele-muted: var(--secondary-text, #6e6e6e);
@@ -173,11 +177,16 @@ html[data-vcp-platform="ios"] :is(button, a, input, textarea, select, [tabindex]
   content: '';
   pointer-events: none;
   opacity: 0;
-  transition: opacity 0.28s ease-out;
+  transition: opacity var(--vcp-drawer-close-duration) var(--vcp-drawer-close-easing);
 }
 
 .vcp-drawer.is-open::after {
   opacity: 1;
+  transition: opacity var(--vcp-drawer-open-duration) var(--vcp-drawer-open-easing);
+}
+
+.vcp-drawer.is-dragging::after {
+  transition: none;
 }
 
 .vcp-drawer-left::after {
@@ -372,6 +381,11 @@ html[data-vcp-platform="ios"] :is(button, a, input, textarea, select, [tabindex]
 }
 
 @media (prefers-reduced-motion: reduce) {
+  :root {
+    --vcp-drawer-open-duration: 0ms;
+    --vcp-drawer-close-duration: 0ms;
+  }
+
   .chat-view-container[data-presentation-mode="panel"] .message-bubble,
   .chat-view-container[data-presentation-mode="immersive"] .message-bubble {
     transition: none;
