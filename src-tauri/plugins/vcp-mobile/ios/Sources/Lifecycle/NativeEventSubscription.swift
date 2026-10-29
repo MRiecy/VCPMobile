@@ -290,6 +290,18 @@ final class NativeEventSubscription {
         }
     }
 
+    func sendVoicePlayback(_ payload: NativeVoicePlaybackEvent) -> Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let channel = channel else { return false }
+        do {
+            try channel.send(NativeEvent(event: "voicePlayback", payload: payload))
+            return true
+        } catch {
+            NSLog("[VcpVoice] Playback event delivery failed: %@", error.localizedDescription)
+            return false
+        }
+    }
+
     private func invalidateSubscription() {
         dispatchPrecondition(condition: .onQueue(.main))
         generation = UUID()

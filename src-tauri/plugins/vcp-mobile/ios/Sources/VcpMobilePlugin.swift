@@ -20,6 +20,7 @@ final class VcpMobilePlugin: Plugin {
         notifications.install()
         voice.eventsReady = { [weak self] in self?.nativeEvents.canSendVoiceAudio ?? false }
         voice.onEvent = { [weak self] payload in self?.nativeEvents.sendVoiceAudio(payload) ?? false }
+        voice.onPlaybackEvent = { [weak self] payload in self?.nativeEvents.sendVoicePlayback(payload) ?? false }
     }
 
     @objc override func load(webview: WKWebView) {

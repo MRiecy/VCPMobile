@@ -19,11 +19,14 @@ import java.util.concurrent.atomic.AtomicReference
 @InvokeArg
 class VoicePlaybackArgs { var playbackId: String = "" }
 @InvokeArg
+class StartVoicePlaybackArgs { var playbackId: String = ""; var startupFrames: Int = 0 }
+@InvokeArg
 class AppendVoicePlaybackArgs { var playbackId: String = ""; var pcmBase64: String = "" }
 
 /** Plugin-scoped output; it never requests microphone permission or reads capture state. */
 internal class NativeVoiceOutput(
     private val audioSession: VoiceAudioSession,
+    private val playbackStarted: (String) -> Unit,
 ) {
     data class Snapshot(val playbackId: String? = null, val playing: Boolean = false)
     private class Reply(private val invoke: Invoke) {
@@ -52,9 +55,10 @@ internal class NativeVoiceOutput(
     fun snapshot(): Snapshot = state.get()
 
     fun startVoicePlayback(invoke: Invoke) = onMain {
-        val args = try { invoke.parseArgs(VoicePlaybackArgs::class.java) }
+        val args = try { invoke.parseArgs(StartVoicePlaybackArgs::class.java) }
         catch (_: Exception) { invoke.deliverError("invalid_voice_playback_request"); return@onMain }
         if (!validId(args.playbackId)) { invoke.deliverError("invalid_voice_playback_id"); return@onMain }
+        if (args.startupFrames !in 1..5_760) { invoke.deliverError("invalid_voice_playback_buffer"); return@onMain }
         if (destroyed || cancelled.contains(args.playbackId)) { invoke.deliverError("cancelled:voice_playback"); return@onMain }
         if (current.get()?.id == args.playbackId) { invoke.deliverError("voice_playback_already_started"); return@onMain }
         if (current.get() != null) { invoke.deliverError("voice_playback_busy"); return@onMain }
@@ -62,7 +66,9 @@ internal class NativeVoiceOutput(
         val lease = try { audioSession.acquireOutput { reason -> onMain { current.get()?.takeIf { it.id == args.playbackId }?.let { stop(it, reason) } } } }
         catch (_: Throwable) { reply.reject("voice_playback_route_unavailable"); return@onMain }
         val output = Output(args.playbackId, lease)
-        output.player = VoiceStreamPlayback(args.playbackId, lease, worker, playingChanged = { playing -> onMain {
+        output.player = VoiceStreamPlayback(args.playbackId, args.startupFrames, lease, worker, started = { onMain {
+            if (current.get() === output && !destroyed) playbackStarted(output.id)
+        } }, playingChanged = { playing -> onMain {
             if (current.get() === output) state.set(Snapshot(output.id.takeIf { playing }, playing))
         } }, ended = { error -> onMain {
             if (current.get() === output) {
@@ -74,6 +80,15 @@ internal class NativeVoiceOutput(
         current.set(output)
         try { output.player.start { error -> complete(output, reply, error) } }
         catch (_: Throwable) { stop(output); reply.reject("voice_playback_start_failed") }
+    }
+
+    fun endVoicePlaybackSegment(invoke: Invoke) = onMain {
+        val args = try { invoke.parseArgs(VoicePlaybackArgs::class.java) }
+        catch (_: Exception) { invoke.deliverError("invalid_voice_playback_request"); return@onMain }
+        val output = current.get()?.takeIf { it.id == args.playbackId }
+        if (output == null) { invoke.deliverError("cancelled:voice_playback"); return@onMain }
+        val reply = Reply(invoke)
+        output.player.endSegment { error -> complete(output, reply, error) }
     }
 
     fun appendVoicePlayback(invoke: Invoke) = onMain {

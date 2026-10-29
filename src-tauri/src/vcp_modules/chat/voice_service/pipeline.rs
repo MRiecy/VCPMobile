@@ -135,6 +135,12 @@ pub(super) trait PacketConsumer {
         pcm: Vec<u8>,
         cancel: &CancellationToken,
     ) -> impl Future<Output = Result<(), String>> + Send;
+
+    /// Confirms the preceding segment is complete, not that it has played.
+    fn end_segment(
+        &mut self,
+        cancel: &CancellationToken,
+    ) -> impl Future<Output = Result<(), String>> + Send;
 }
 
 /// There is one HTTP producer and one native consumer. A permit is acquired
@@ -195,6 +201,7 @@ where
                 while let Some(pcm) = segment.next(&local).await? {
                     consumer.append(pcm, &local).await?;
                 }
+                consumer.end_segment(&local).await?;
             }
         }
         .await;
@@ -247,6 +254,10 @@ mod tests {
                 }
             }
             self.output.extend(pcm);
+            Ok(())
+        }
+
+        async fn end_segment(&mut self, _: &CancellationToken) -> Result<(), String> {
             Ok(())
         }
     }
@@ -360,6 +371,56 @@ mod tests {
         assert_eq!(result.unwrap_err(), "语音分段准备结束，但未确认音频完整。");
     }
 
+    #[tokio::test]
+    async fn complete_short_segment_is_forwarded_while_the_next_speaker_is_still_pending() {
+        struct WaitingSource(bool);
+        impl SegmentSource for WaitingSource {
+            type Piece = ();
+            async fn next(&mut self, cancel: &CancellationToken) -> Result<Option<()>, String> {
+                if std::mem::replace(&mut self.0, false) {
+                    return Ok(Some(()));
+                }
+                cancel.cancelled().await;
+                Err(CANCELLED.into())
+            }
+        }
+        struct BoundaryConsumer {
+            pcm: Vec<u8>,
+            completed: mpsc::Sender<Vec<u8>>,
+        }
+        impl PacketConsumer for BoundaryConsumer {
+            async fn append(&mut self, pcm: Vec<u8>, _: &CancellationToken) -> Result<(), String> {
+                self.pcm.extend(pcm);
+                Ok(())
+            }
+            async fn end_segment(&mut self, _: &CancellationToken) -> Result<(), String> {
+                self.completed.send(std::mem::take(&mut self.pcm)).await.unwrap();
+                Ok(())
+            }
+        }
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        let (completed, mut segments) = mpsc::channel(2);
+        let worker = tokio::spawn(async move {
+            run(
+                &cancel,
+                WaitingSource(true),
+                |(), segment, _| async move {
+                    segment.push(vec![0x12, 0x34])?;
+                    segment.finish()
+                },
+                &mut BoundaryConsumer { pcm: Vec::new(), completed },
+            ).await
+        });
+        let first = tokio::time::timeout(std::time::Duration::from_secs(1), segments.recv())
+            .await.expect("a short segment does not wait for the next speaker or job EOS");
+        assert_eq!(first, Some(vec![0x12, 0x34]));
+        assert!(!worker.is_finished());
+        stop.cancel();
+        assert_eq!(worker.await.unwrap().unwrap_err(), CANCELLED);
+        assert_eq!(segments.recv().await, None, "cancellation is not a completed segment");
+    }
+
     #[test]
     fn complete_pcm_buffer_is_taken_without_copying() {
         let segment = SegmentBuffer::default();
@@ -461,6 +522,10 @@ mod tests {
     impl PacketConsumer for FailedConsumer {
         async fn append(&mut self, _: Vec<u8>, _: &CancellationToken) -> Result<(), String> {
             Err("native playback failure".into())
+        }
+
+        async fn end_segment(&mut self, _: &CancellationToken) -> Result<(), String> {
+            Ok(())
         }
     }
 

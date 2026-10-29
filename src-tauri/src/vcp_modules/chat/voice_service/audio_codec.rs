@@ -764,6 +764,10 @@ mod tests {
             self.largest_packet = self.largest_packet.max(packet.len());
             Ok(())
         }
+
+        async fn end_segment(&mut self, _: &CancellationToken) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     #[tokio::test]
@@ -801,6 +805,10 @@ mod tests {
                 self.0.extend(packet);
                 Ok(())
             }
+
+            async fn end_segment(&mut self, _: &CancellationToken) -> Result<(), String> {
+                Ok(())
+            }
         }
         for rate in [16_000, 24_000, 44_100, 48_000] {
             let reference = Bytes::from(wav(rate, 2, &sine(rate, rate as usize / 5, 440.0, 2)));
@@ -819,6 +827,10 @@ mod tests {
                 if let Some(entered) = self.0.take() { let _ = entered.send(()); }
                 cancel.cancelled().await;
                 Err(CANCELLED.into())
+            }
+
+            async fn end_segment(&mut self, _: &CancellationToken) -> Result<(), String> {
+                Ok(())
             }
         }
         let reference = Bytes::from(wav(16_000, 1, &vec![0; 16_000 * 2 * 200]));

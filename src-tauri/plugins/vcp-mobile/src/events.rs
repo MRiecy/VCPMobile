@@ -17,9 +17,20 @@ pub enum NativeEvent {
     BackgroundExecutionFailure { reason: String },
     #[serde(rename = "voiceAudio")]
     VoiceAudio(crate::voice::NativeVoiceAudioEvent),
+    #[serde(rename = "voicePlayback")]
+    VoicePlayback(NativeVoicePlaybackEvent),
     // Configuration/memory notifications do not describe an app phase.
     #[serde(rename = "configuration", alias = "memory-pressure")]
     Other {},
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum NativeVoicePlaybackEvent {
+    Started {
+        #[serde(rename = "playbackId")]
+        playback_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -140,6 +151,21 @@ pub fn collect_service_failure_notices<R: Runtime>(app: &AppHandle<R>) -> Vec<Se
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_playback_started_keeps_its_exact_output_identity() {
+        let event: NativeEvent = serde_json::from_value(serde_json::json!({
+            "event": "voicePlayback",
+            "payload": { "playbackId": "current-output", "kind": "started" },
+        })).unwrap();
+        assert!(matches!(event, NativeEvent::VoicePlayback(
+            NativeVoicePlaybackEvent::Started { playback_id }
+        ) if playback_id == "current-output"));
+        assert!(serde_json::from_value::<NativeEvent>(serde_json::json!({
+            "event": "voicePlayback",
+            "payload": { "kind": "started" },
+        })).is_err());
+    }
 
     #[test]
     fn snapshots_replay_events_but_consume_guardian_and_helper_notices() {

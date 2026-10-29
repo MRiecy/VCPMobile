@@ -346,6 +346,9 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
                                 crate::vcp_modules::chat::voice_service::handle_audio_event(&event_handle, &event);
                             }
                         }
+                        NativeEvent::VoicePlayback(event) => {
+                            crate::vcp_modules::chat::voice_service::handle_playback_event(&event_handle, event);
+                        }
                         NativeEvent::Other {} => {}
                     }
                 })

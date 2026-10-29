@@ -41,6 +41,8 @@ struct TtsJob {
     ready: Notify,
     worker_started: AtomicBool,
     player_started: AtomicBool,
+    playback_observed: AtomicBool,
+    startup_frames: u32,
     terminal: AtomicBool,
     stop_lock: tokio::sync::Mutex<()>,
     work: Mutex<Option<Arc<super::call::WorkLease>>>,
@@ -108,6 +110,11 @@ enum NarrationKind {
 }
 
 impl NarrationKind {
+    fn startup_frames(&self) -> u32 {
+        // PCM16 mono at 24 kHz: calls reserve 120 ms, media reserves 240 ms.
+        if matches!(self, Self::Chat) { 2_880 } else { 5_760 }
+    }
+
     fn validate_admission(&self, call_active: bool) -> Result<(), String> {
         match self {
             Self::Bubble(_) if call_active => {
@@ -163,6 +170,18 @@ impl Registry {
         }
         job.player_started.store(true, Ordering::Release);
         Ok(())
+    }
+
+    fn observe_playback_started(&self, id: &str) -> Option<&Arc<TtsJob>> {
+        let job = self.current.as_ref().filter(|slot| slot.id == id)?.job.as_ref()?;
+        if !job.player_started.load(Ordering::Acquire)
+            || job.cancel.is_cancelled()
+            || job.terminal.load(Ordering::Acquire)
+            || job.playback_observed.swap(true, Ordering::AcqRel)
+        {
+            return None;
+        }
+        Some(job)
     }
 
     fn complete(&mut self, id: &str) {
@@ -409,6 +428,20 @@ fn emit<R: Runtime>(
             message,
         },
     );
+}
+
+/// Native reports actual playback progress. Serialize publication with stop
+/// admission so a delayed callback cannot restore a cancelled job to speaking.
+pub fn handle_playback_event<R: Runtime>(
+    app: &AppHandle<R>,
+    event: tauri_plugin_vcp_mobile::events::NativeVoicePlaybackEvent,
+) {
+    let Some(state) = app.try_state::<TtsServiceState>() else { return };
+    let Ok(registry) = state.0.lock() else { return };
+    let tauri_plugin_vcp_mobile::events::NativeVoicePlaybackEvent::Started { playback_id } = event;
+    if let Some(job) = registry.observe_playback_started(&playback_id) {
+        emit(app, job, "status", "speaking", None);
+    }
 }
 
 fn job<R: Runtime>(app: &AppHandle<R>, id: &str) -> Option<Arc<TtsJob>> {
@@ -673,6 +706,7 @@ async fn start_narration<R: Runtime>(
     }
     let narration = Arc::new(TtsJob {
         id: tts_id.clone(),
+        startup_frames: kind.startup_frames(),
         work: Mutex::new(work),
         origin: origin_user_message_id,
         input: Mutex::new(match kind {
@@ -687,6 +721,7 @@ async fn start_narration<R: Runtime>(
         ready: Notify::new(),
         worker_started: AtomicBool::new(false),
         player_started: AtomicBool::new(false),
+        playback_observed: AtomicBool::new(false),
         terminal: AtomicBool::new(false),
         stop_lock: tokio::sync::Mutex::new(()),
     });
@@ -901,7 +936,7 @@ async fn speak_inner<R: Runtime>(
     let mut source = NarrationReader {
         app, narration, speech_queue: VecDeque::new(), chat_finished: false, current_voice: None,
     };
-    let mut player = NativeConsumer { app, narration, started: false, first_audio: true };
+    let mut player = NativeConsumer { app, narration, started: false };
     if let Some(audio) = sample_audio {
         audio_codec::decode_stream(audio.into(), &narration.cancel, &mut player).await?;
         return player.finish().await;
@@ -925,6 +960,7 @@ async fn speak_inner<R: Runtime>(
                     async move { player.lock().await.append(pcm, &narration.cancel).await }
                 },
             ).await?;
+            player.lock().await.end_segment(&narration.cancel).await?;
         }
     } else {
         let cache = match crate::vcp_modules::file_manager::get_tts_cache_root_dir(app) {
@@ -1073,7 +1109,6 @@ struct NativeConsumer<'a, R: Runtime> {
     app: &'a AppHandle<R>,
     narration: &'a Arc<TtsJob>,
     started: bool,
-    first_audio: bool,
 }
 
 impl<R: Runtime> PacketConsumer for NativeConsumer<'_, R> {
@@ -1087,7 +1122,7 @@ impl<R: Runtime> PacketConsumer for NativeConsumer<'_, R> {
                 registry.admit_player(self.narration)?;
             }
             playback_call(cancel, tauri_plugin_vcp_mobile::voice::start_playback(
-                self.app.clone(), self.narration.id.clone())).await?;
+                self.app.clone(), self.narration.id.clone(), self.narration.startup_frames)).await?;
             self.started = true;
         }
         // Preview may deliver a complete decoded response here. Bound each
@@ -1095,10 +1130,14 @@ impl<R: Runtime> PacketConsumer for NativeConsumer<'_, R> {
         for packet in pcm.chunks(PCM_PACKET_BYTES) {
             playback_call(cancel, tauri_plugin_vcp_mobile::voice::append_playback(
                 self.app.clone(), self.narration.id.clone(), STANDARD.encode(packet))).await?;
-            if self.first_audio {
-                self.first_audio = false;
-                emit(self.app, self.narration, "status", "speaking", None);
-            }
+        }
+        Ok(())
+    }
+
+    async fn end_segment(&mut self, cancel: &CancellationToken) -> Result<(), String> {
+        if self.started {
+            playback_call(cancel, tauri_plugin_vcp_mobile::voice::end_playback_segment(
+                self.app.clone(), self.narration.id.clone())).await?;
         }
         Ok(())
     }
@@ -1128,6 +1167,7 @@ mod tests {
         let cancel = registry.reserve(id.into(), kind.clone()).unwrap();
         let job = Arc::new(TtsJob {
             id: id.into(),
+            startup_frames: kind.startup_frames(),
             origin: Some("origin".into()),
             config: VoiceServiceConfig {
                 base_url: "https://example.invalid/v1".into(),
@@ -1151,6 +1191,7 @@ mod tests {
             ready: Notify::new(),
             worker_started: AtomicBool::new(false),
             player_started: AtomicBool::new(false),
+            playback_observed: AtomicBool::new(false),
             terminal: AtomicBool::new(false),
             stop_lock: tokio::sync::Mutex::new(()),
             work: Mutex::new(None),
@@ -1185,6 +1226,53 @@ mod tests {
         assert!(pending.is_cancelled());
         registry.reserve("next".into(), NarrationKind::Chat).unwrap();
         assert!(registry.reserve("unconfigured".into(), NarrationKind::Chat).is_err());
+    }
+
+    #[test]
+    fn speaking_requires_current_native_progress_and_never_revives_stopped_output() {
+        use tauri::Listener;
+        use tauri_plugin_vcp_mobile::events::NativeVoicePlaybackEvent;
+        let app = tauri::test::mock_app();
+        app.manage(TtsServiceState::default());
+        let state = app.state::<TtsServiceState>();
+        let old = install(&mut state.0.lock().unwrap(), "old");
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let observed = events.clone();
+        app.listen(TTS_EVENT, move |event| {
+            observed.lock().unwrap().push(serde_json::from_str::<serde_json::Value>(event.payload()).unwrap());
+        });
+        let started = |id: &str| handle_playback_event(app.handle(), NativeVoicePlaybackEvent::Started {
+            playback_id: id.into(),
+        });
+        started("old"); // No native output has been admitted yet.
+        assert!(events.lock().unwrap().is_empty());
+        state.0.lock().unwrap().admit_player(&old).unwrap();
+        assert!(events.lock().unwrap().is_empty()); // Admission is not playback.
+        started("old");
+        started("old");
+        assert_eq!(events.lock().unwrap().len(), 1);
+        assert_eq!(events.lock().unwrap()[0]["stage"], "speaking");
+        state.0.lock().unwrap().stop("old");
+        state.0.lock().unwrap().complete("old");
+        let current = install_kind(&mut state.0.lock().unwrap(), "sample", NarrationKind::SamplePreview);
+        state.0.lock().unwrap().admit_player(&current).unwrap();
+        started("old");
+        started("sample");
+        assert_eq!(events.lock().unwrap().len(), 2);
+        assert_eq!(events.lock().unwrap()[1]["ttsId"], "sample");
+        state.0.lock().unwrap().stop("sample");
+        state.0.lock().unwrap().complete("sample");
+        let cancelled = install(&mut state.0.lock().unwrap(), "cancelled");
+        state.0.lock().unwrap().admit_player(&cancelled).unwrap();
+        state.0.lock().unwrap().stop("cancelled");
+        started("cancelled");
+        assert_eq!(events.lock().unwrap().len(), 2);
+        state.0.lock().unwrap().complete("cancelled");
+        let finishing = install(&mut state.0.lock().unwrap(), "finishing");
+        state.0.lock().unwrap().admit_player(&finishing).unwrap();
+        finishing.terminal.store(true, Ordering::Release);
+        started("finishing");
+        assert_eq!(events.lock().unwrap().len(), 2);
     }
 
     #[test]

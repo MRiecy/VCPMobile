@@ -33,6 +33,8 @@ pub use tts::{
     feed_chat_event, has_chat_listener, preview_tts, preview_voice_clone_sample, start_tts_session, stop_chat_reply_by_origin, stop_tts,
     submit_tts_text, TtsServiceState,
 };
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub use tts::handle_playback_event;
 pub(crate) use tts::stop_bubble_for_messages;
 pub use samples::{delete_voice_clone_sample, get_voice_clone_sample, import_voice_clone_sample, list_voice_clone_samples};
 

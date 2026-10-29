@@ -133,7 +133,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     private val sensorStatusManager = SensorStatusManager(activity)
     private val nativeEvents = NativeEvents(activity, runtime, networkStatusManager, lifecycleBridge::snapshot)
     private val voiceAudioSession = VoiceAudioSession(activity)
-    private val voiceOutput = NativeVoiceOutput(voiceAudioSession)
+    private val voiceOutput = NativeVoiceOutput(voiceAudioSession) { id ->
+        nativeEvents.tryEmitVoicePlayback(JSObject().apply { put("playbackId", id); put("kind", "started") })
+    }
     private val voiceAudio: NativeVoiceAudio = NativeVoiceAudio(activity, ::requestPermissionForAlias, nativeEvents::isReady, nativeEvents::tryEmitVoiceAudio, voiceAudioSession, voiceOutput)
     private val permissions = AndroidPermissions(activity, ::requestPermissionForAlias, ::startActivityForResult, ::emitWebViewEvent)
     private val filePicker = NativeFilePicker(activity, runtime, ::startActivityForResult, ::requestPermissionForAlias, ::emitWebViewEvent)
@@ -284,6 +286,9 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     @Command
     fun appendVoicePlayback(invoke: Invoke) = voiceOutput.appendVoicePlayback(invoke)
+
+    @Command
+    fun endVoicePlaybackSegment(invoke: Invoke) = voiceOutput.endVoicePlaybackSegment(invoke)
 
     @Command
     fun finishVoicePlayback(invoke: Invoke) = voiceOutput.finishVoicePlayback(invoke)

@@ -10,7 +10,7 @@ import org.junit.Test
 
 class VoicePlaybackPcmTest {
     @Test fun fullQueueDefersOneAppendUntilConsumptionAndRejectsAdditionalUnboundedWork() {
-        val queue = VoicePlaybackQueue(1)
+        val queue = VoicePlaybackQueue(capacityFrames = 1, startupFrames = 1)
         val accepted = mutableListOf<String>()
         queue.append(shortArrayOf(1)) { accepted.add("first:$it") }
         queue.append(shortArrayOf(2)) { accepted.add("second:$it") }
@@ -24,7 +24,7 @@ class VoicePlaybackPcmTest {
     }
 
     @Test fun cancellationSettlesThePendingAppendAndWakesAWaitingConsumer() {
-        val queue = VoicePlaybackQueue(1)
+        val queue = VoicePlaybackQueue(capacityFrames = 1, startupFrames = 1)
         val pending = mutableListOf<String?>()
         queue.append(shortArrayOf(1)) {}
         queue.append(shortArrayOf(2)) { pending.add(it) }
@@ -32,13 +32,68 @@ class VoicePlaybackPcmTest {
         queue.cancel("cancelled:again")
         assertEquals(listOf("cancelled:test"), pending)
         assertTrue(runCatching { queue.take() }.exceptionOrNull()?.message == "cancelled:test")
-        val empty = VoicePlaybackQueue()
+        val empty = VoicePlaybackQueue(startupFrames = 5_760)
         val worker = Executors.newSingleThreadExecutor()
         try {
             val read = worker.submit<String> { runCatching { empty.take() }.exceptionOrNull()?.message.orEmpty() }
             empty.cancel("cancelled:empty")
             assertEquals("cancelled:empty", read.get(2, TimeUnit.SECONDS))
         } finally { worker.shutdownNow() }
+    }
+
+    @Test fun thousandsOfSingleFramePacketsReachTheWatermarkWithoutExhaustingPacketSlots() {
+        val queue = VoicePlaybackQueue(startupFrames = 5_760)
+        val expected = ShortArray(5_760) { it.toShort() }
+        expected.forEach { sample -> queue.append(shortArrayOf(sample)) { assertNull(it) } }
+        assertArrayEquals(expected, queue.take().samples)
+        queue.append(shortArrayOf(42)) { assertNull(it) }
+        assertArrayEquals(shortArrayOf(42), queue.take().samples) // the startup gate opens once
+    }
+
+    @Test fun shortCompletedSegmentStartsBeforeTheJobEndsAndEmptySegmentsDoNotOpenTheGate() {
+        val queue = VoicePlaybackQueue(startupFrames = 5_760)
+        queue.endSegment()
+        queue.append(shortArrayOf(11, 22, 33)) { assertNull(it) }
+        assertNull(queue.take(1).samples)
+        queue.endSegment()
+        val first = queue.take()
+        assertArrayEquals(shortArrayOf(11, 22, 33), first.samples)
+        assertTrue(first.segmentEnd)
+        assertFalse(first.finished)
+        queue.append(shortArrayOf(44)) { assertNull(it) }
+        assertArrayEquals(shortArrayOf(44), queue.take().samples)
+    }
+
+    @Test fun ringWrapAndPendingAdmissionPreserveEverySampleAndSegmentOrder() {
+        val queue = VoicePlaybackQueue(capacityFrames = 8, startupFrames = 3)
+        val admitted = mutableListOf<String>()
+        queue.append(shortArrayOf(1, 2, 3, 4, 5, 6)) { admitted.add("a:$it") }
+        queue.append(shortArrayOf(7, 8, 9, 10)) { admitted.add("b:$it") }
+        assertEquals(listOf("a:null"), admitted)
+        assertArrayEquals(shortArrayOf(1, 2, 3, 4, 5, 6), queue.take().samples)
+        assertEquals(listOf("a:null", "b:null"), admitted)
+        queue.endSegment()
+        queue.append(shortArrayOf(11, 12)) { assertNull(it) }
+        val boundary = queue.take()
+        assertArrayEquals(shortArrayOf(7, 8, 9, 10), boundary.samples)
+        assertTrue(boundary.segmentEnd)
+        queue.seal()
+        val last = queue.take()
+        assertArrayEquals(shortArrayOf(11, 12), last.samples)
+        assertTrue(last.finished)
+    }
+
+    @Test fun eosReleasesAShortFirstBufferAndCancellationReleasesAClosedStartupGate() {
+        val queue = VoicePlaybackQueue(startupFrames = 5_760)
+        queue.append(shortArrayOf(123)) { assertNull(it) }
+        queue.seal()
+        val result = queue.take()
+        assertArrayEquals(shortArrayOf(123), result.samples)
+        assertTrue(result.finished)
+        val cancelled = VoicePlaybackQueue(startupFrames = 5_760)
+        cancelled.append(shortArrayOf(456)) { assertNull(it) }
+        cancelled.cancel("cancelled:before_start")
+        assertEquals("cancelled:before_start", runCatching { cancelled.take() }.exceptionOrNull()?.message)
     }
 
     private fun convert(input: ShortArray, chunk: Int): ShortArray {

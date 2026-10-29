@@ -4,7 +4,7 @@
 mod vad;
 mod native_audio;
 
-pub use native_audio::{append_playback, export_segment, finish_playback, release_segments, start_playback, stop_playback, ExportedVoiceSegment};
+pub use native_audio::{append_playback, end_playback_segment, export_segment, finish_playback, release_segments, start_playback, stop_playback, ExportedVoiceSegment};
 pub use vad::{VoiceVadConfig, VoiceVadSensitivity};
 
 use serde::{Deserialize, Serialize};

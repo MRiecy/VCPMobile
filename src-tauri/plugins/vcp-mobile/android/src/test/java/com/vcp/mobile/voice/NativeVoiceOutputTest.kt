@@ -18,13 +18,14 @@ import java.util.concurrent.TimeUnit
 class NativeVoiceOutputTest {
     private fun request(id: String): Invoke = mockk<Invoke>(relaxed = true).also { invoke ->
         every { invoke.parseArgs(VoicePlaybackArgs::class.java) } returns VoicePlaybackArgs().apply { playbackId = id }
+        every { invoke.parseArgs(StartVoicePlaybackArgs::class.java) } returns StartVoicePlaybackArgs().apply { playbackId = id; startupFrames = 5_760 }
     }
 
     @Test fun standaloneOutputHasNoCapturePrerequisiteAndStaleControlsCannotEvictItsOwner() {
         val session = mockk<VoiceAudioSession>(relaxed = true)
         val lease = mockk<VoiceAudioSession.OutputLease>(relaxed = true)
         every { session.acquireOutput(any()) } returns lease
-        val output = NativeVoiceOutput(session)
+        val output = NativeVoiceOutput(session) {}
         val executor = NativeVoiceOutput::class.java.getDeclaredField("worker").apply { isAccessible = true }.get(output) as ThreadPoolExecutor
         val entered = CountDownLatch(1)
         val release = CountDownLatch(1)

@@ -35,11 +35,14 @@ pub async fn release_segments<R: Runtime>(app: AppHandle<R>, session_id: String)
 }
 
 pub async fn start_playback<R: Runtime>(
-    app: AppHandle<R>, playback_id: String,
+    app: AppHandle<R>, playback_id: String, startup_frames: u32,
 ) -> Result<(), String> {
     validate_session(&playback_id)?;
+    if startup_frames == 0 || startup_frames > 5_760 {
+        return Err("voice_playback_startup_invalid".into());
+    }
     native_call(app, "startVoicePlayback", serde_json::json!({
-        "playbackId": playback_id,
+        "playbackId": playback_id, "startupFrames": startup_frames,
     }), None).await
 }
 
@@ -53,6 +56,17 @@ pub async fn append_playback<R: Runtime>(
     }
     native_call(app, "appendVoicePlayback", serde_json::json!({
         "playbackId": playback_id, "pcmBase64": pcm_base64,
+    }), None).await
+}
+
+/// A completed synthesis segment may release a short first utterance without
+/// sealing the narration job, which may still be waiting for later speakers.
+pub async fn end_playback_segment<R: Runtime>(
+    app: AppHandle<R>, playback_id: String,
+) -> Result<(), String> {
+    validate_session(&playback_id)?;
+    native_call(app, "endVoicePlaybackSegment", serde_json::json!({
+        "playbackId": playback_id,
     }), None).await
 }
 

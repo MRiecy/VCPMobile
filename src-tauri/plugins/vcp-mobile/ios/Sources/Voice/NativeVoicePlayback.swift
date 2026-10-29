@@ -2,30 +2,66 @@ import AVFoundation
 import Foundation
 import Tauri
 
-/// Main-queue player control with a separate PCM decode queue. At most two
-/// seconds of scheduled PCM, one waiting append and one decoder
-/// operation are retained. Append applies asynchronous backpressure.
+/// Main owns playback and a two-second frame budget, including scheduled audio.
+/// The decode queue holds at most one bounded append. Tiny transport packets are
+/// coalesced before scheduling, so packet count cannot prevent startup admission.
 final class NativeVoicePlayback {
+    private static let capacityFrames = 48_000
+    private static let chunkFrames = 480
+    private static let scheduledChunkLimit = capacityFrames / chunkFrames
     private struct Chunk {
         let key = UUID()
         let buffer: AVAudioPCMBuffer
-        let bytes: Int
+        var frames: Int { Int(buffer.frameLength) }
+    }
+    private final class PendingFrames {
+        private var samples = [Float](repeating: 0, count: NativeVoicePlayback.capacityFrames)
+        private var head = 0
+        private(set) var count = 0
+
+        func append(_ input: [Float]) {
+            precondition(input.count <= samples.count - count)
+            for (offset, sample) in input.enumerated() {
+                samples[(head + count + offset) % samples.count] = sample
+            }
+            count += input.count
+        }
+
+        func take(_ frames: Int, format: AVAudioFormat) throws -> Chunk {
+            guard frames > 0, frames <= count,
+                  let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(frames)),
+                  let output = buffer.floatChannelData?[0] else {
+                throw voiceAudioFailure("voice_playback_failed")
+            }
+            buffer.frameLength = AVAudioFrameCount(frames)
+            for index in 0..<frames { output[index] = samples[(head + index) % samples.count] }
+            head = (head + frames) % samples.count
+            count -= frames
+            return Chunk(buffer: buffer)
+        }
     }
     private final class Playback {
         let id: String
+        let startupFrames: Int
+        let pending = PendingFrames()
         var queued: [Chunk] = []
-        var queuedBytes = 0
+        var queuedFrames = 0
+        var bufferedFrames: Int { queuedFrames + pending.count }
+        var startupReleased = false
+        var segmentHasAudio = false
+        var flushTail = false
+        var startedReported = false
+        var rendererPlaying = false
         var append: Append?
         var finish: Invoke?
         var finishing = false
-        init(_ id: String) { self.id = id }
+        init(_ id: String, startupFrames: Int) { self.id = id; self.startupFrames = startupFrames }
     }
     private final class Append {
         weak var owner: Playback?
         let encoded: String
         var invoke: Invoke?
-        var chunks: [Chunk]?
-        var bytes = 0
+        var samples: [Float]?
         init(owner: Playback, encoded: String, invoke: Invoke) {
             self.owner = owner; self.encoded = encoded; self.invoke = invoke
         }
@@ -43,6 +79,7 @@ final class NativeVoicePlayback {
     private var waitingDecode: Append?
     private var disposed = false
     var onStatus: ((String?, Bool) -> Void)?
+    var onStarted: ((String) -> Void)?
 
     init(format: AVAudioFormat) {
         self.format = format
@@ -57,8 +94,12 @@ final class NativeVoicePlayback {
         rendererGeneration += 1
         self.player?.stop()
         self.player = player
-        if let current = active, player != nil {
-            for chunk in current.queued { schedule(chunk, current: current) }
+        if let current = active {
+            current.rendererPlaying = false
+            onStatus?(current.id, false)
+            if current.startupReleased, player != nil {
+                for chunk in current.queued { schedule(chunk, current: current) }
+            }
             admit(current)
         }
     }
@@ -70,12 +111,13 @@ final class NativeVoicePlayback {
 
     func canStart(_ id: String) -> Bool { !disposed && !closedIds.contains(id) }
 
-    func start(id: String, invoke: Invoke) {
+    func start(id: String, startupFrames: Int, invoke: Invoke) {
         dispatchPrecondition(condition: .onQueue(.main))
         guard !disposed, !closedIds.contains(id) else { invoke.reject("cancelled:voice_playback"); return }
+        guard (1...5_760).contains(startupFrames) else { invoke.reject("voice_playback_invalid_startup"); return }
         if active?.id == id { invoke.resolve(); return }
         guard active == nil else { invoke.reject("voice_playback_busy"); return }
-        active = Playback(id)
+        active = Playback(id, startupFrames: startupFrames)
         onStatus?(id, false)
         invoke.resolve()
     }
@@ -101,36 +143,22 @@ final class NativeVoicePlayback {
         guard decoding == nil, let request = waitingDecode else { return }
         waitingDecode = nil
         decoding = request
-        let format = self.format
         decoder.async { [weak self, request] in
-            let result: Result<([Chunk], Int), Error>
+            let result: Result<[Float], Error>
             do {
                 guard let data = Data(base64Encoded: request.encoded), !data.isEmpty,
-                      data.count <= 32_768, data.count % 2 == 0,
-                      let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(data.count / 2)),
-                      let output = buffer.floatChannelData?[0] else {
+                      data.count <= 32_768, data.count % 2 == 0 else {
                     throw voiceAudioFailure("voice_playback_invalid_pcm")
                 }
-                buffer.frameLength = AVAudioFrameCount(data.count / 2)
+                var samples = [Float](repeating: 0, count: data.count / 2)
                 data.withUnsafeBytes { raw in
                     let bytes = raw.bindMemory(to: UInt8.self)
                     for index in 0..<(data.count / 2) {
                         let word = UInt16(bytes[index * 2]) | UInt16(bytes[index * 2 + 1]) << 8
-                        output[index] = Float(Int16(bitPattern: word)) / 32_768
+                        samples[index] = Float(Int16(bitPattern: word)) / 32_768
                     }
                 }
-                var chunks: [Chunk] = []
-                var offset = 0
-                while offset < Int(buffer.frameLength) {
-                    let count = min(480, Int(buffer.frameLength) - offset)
-                    guard let part = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count)),
-                          let target = part.floatChannelData?[0] else { throw voiceAudioFailure("voice_playback_failed") }
-                    part.frameLength = AVAudioFrameCount(count)
-                    memcpy(target, output.advanced(by: offset), count * MemoryLayout<Float>.size)
-                    chunks.append(Chunk(buffer: part, bytes: count * 2))
-                    offset += count
-                }
-                result = .success((chunks, data.count))
+                result = .success(samples)
             } catch { result = .failure(error) }
             DispatchQueue.main.async { [weak self, request] in
                 guard let self = self else { request.reject("cancelled:voice_playback"); return }
@@ -142,7 +170,7 @@ final class NativeVoicePlayback {
                 }
                 switch result {
                 case .success(let decoded):
-                    request.chunks = decoded.0; request.bytes = decoded.1
+                    request.samples = decoded
                     self.admit(current)
                 case .failure(let error):
                     let reason = voiceAudioReason(error, fallback: "voice_playback_decode_failed")
@@ -156,21 +184,44 @@ final class NativeVoicePlayback {
 
     private func admit(_ current: Playback) {
         guard active === current else { return }
-        if let append = current.append, let chunks = append.chunks,
-           player != nil, current.queuedBytes + append.bytes <= 96_000,
-           current.queued.count + chunks.count <= 128 {
-            current.queuedBytes += append.bytes
+        if let append = current.append, let samples = append.samples,
+           player != nil, current.bufferedFrames + samples.count <= Self.capacityFrames {
+            current.pending.append(samples)
+            current.segmentHasAudio = true
             current.append = nil
-            append.chunks = nil
-            for chunk in chunks {
-                current.queued.append(chunk)
-                schedule(chunk, current: current)
-            }
+            append.samples = nil
             append.resolve()
         }
-        if !current.queued.isEmpty, let player = player, !player.isPlaying { player.play() }
-        onStatus?(current.id, !current.queued.isEmpty)
-        if current.finishing, current.queued.isEmpty, current.append == nil {
+        if !current.startupReleased,
+           current.bufferedFrames >= current.startupFrames || (current.finishing && current.bufferedFrames > 0) {
+            current.startupReleased = true
+            current.flushTail = true
+        }
+        if current.startupReleased, let player = player {
+            do {
+                // Only full 20 ms blocks are scheduled between boundaries. A
+                // real segment end/EOS flushes its smaller final block.
+                // This bounds AVAudioPCMBuffer objects, not PCM admission. Even
+                // tiny completed segments can wait in the frame ring while an
+                // already-started player releases scheduled blocks.
+                while current.queued.count < Self.scheduledChunkLimit
+                    && (current.pending.count >= Self.chunkFrames
+                        || (current.pending.count > 0 && (current.flushTail || current.finishing))) {
+                    let frames = min(Self.chunkFrames, current.pending.count)
+                    let chunk = try current.pending.take(frames, format: format)
+                    current.queued.append(chunk)
+                    current.queuedFrames += chunk.frames
+                    schedule(chunk, current: current)
+                }
+            } catch {
+                cancelCurrent(reason: voiceAudioReason(error, fallback: "voice_playback_failed"))
+                return
+            }
+            if current.pending.count == 0 { current.flushTail = false }
+            if !current.queued.isEmpty, !player.isPlaying { player.play() }
+        }
+        onStatus?(current.id, current.rendererPlaying && !current.queued.isEmpty)
+        if current.finishing, current.bufferedFrames == 0, current.append == nil {
             let completion = current.finish
             current.finish = nil
             rememberClosed(current.id)
@@ -190,10 +241,33 @@ final class NativeVoicePlayback {
                 guard let self = self, self.rendererGeneration == generation,
                       let current = current, self.active === current,
                       let index = current.queued.firstIndex(where: { $0.key == chunk.key }) else { return }
-                current.queuedBytes -= current.queued.remove(at: index).bytes
+                // This callback confirms actual rendering, unlike append ACK.
+                // Send the fact before admit can complete a very short job.
+                current.rendererPlaying = true
+                if !current.startedReported {
+                    current.startedReported = true
+                    self.onStarted?(current.id)
+                }
+                current.queuedFrames -= current.queued.remove(at: index).frames
                 self.admit(current)
             }
         }
+    }
+
+    func endSegment(id: String, invoke: Invoke) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let current = active, current.id == id, !current.finishing, !disposed else {
+            invoke.reject("cancelled:voice_playback"); return
+        }
+        // Rust submits this only after the preceding append acknowledgement.
+        guard current.append == nil else { invoke.reject("voice_playback_append_pending"); return }
+        if current.segmentHasAudio {
+            current.startupReleased = true
+            current.flushTail = true
+            current.segmentHasAudio = false
+        }
+        invoke.resolve()
+        admit(current)
     }
 
     func finish(id: String, invoke: Invoke) {
@@ -223,7 +297,7 @@ final class NativeVoicePlayback {
         current.finish?.reject(reason)
         current.finish = nil
         current.queued.removeAll()
-        current.queuedBytes = 0
+        current.queuedFrames = 0
         onStatus?(nil, false)
     }
 

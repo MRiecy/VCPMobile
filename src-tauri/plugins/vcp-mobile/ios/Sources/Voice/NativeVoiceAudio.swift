@@ -21,6 +21,11 @@ struct NativeVoiceAudioEvent: Encodable {
     var reason: String?
 }
 
+struct NativeVoicePlaybackEvent: Encodable {
+    let playbackId: String
+    let kind = "started"
+}
+
 private struct VoiceCaptureStopReceipt: Encodable {
     let audioEpoch: UInt64
     let sampleIndex: UInt64
@@ -33,6 +38,7 @@ private struct VoiceSegmentArgs: Decodable {
     let sessionId: String; let audioEpoch: UInt64; let startSample: UInt64; let endSample: UInt64
 }
 private struct VoicePlaybackArgs: Decodable { let playbackId: String }
+private struct VoicePlaybackStartArgs: Decodable { let playbackId: String; let startupFrames: Int }
 private struct VoicePlaybackAppendArgs: Decodable { let playbackId: String; let pcmBase64: String }
 
 private final class VoiceWebViewLifetime {
@@ -96,6 +102,7 @@ final class NativeVoiceAudio {
     private let fileWorker = DispatchQueue(label: "com.vcp.avatar.voice-segment-files", qos: .utility)
     var eventsReady: (() -> Bool)?
     var onEvent: ((NativeVoiceAudioEvent) -> Bool)?
+    var onPlaybackEvent: ((NativeVoicePlaybackEvent) -> Bool)?
 
     init() {
         renderer.onPlayer = { [weak self] player in self?.playback?.bind(player) }
@@ -464,9 +471,10 @@ final class NativeVoiceAudio {
 
     func startPlayback(_ invoke: Invoke) {
         do {
-            let args = try invoke.parseArgs(VoicePlaybackArgs.self)
+            let args = try invoke.parseArgs(VoicePlaybackStartArgs.self)
             DispatchQueue.main.async { [self] in
                 guard validIdentity(args.playbackId) else { invoke.reject("invalid_voice_playback_id"); return }
+                guard (1...5_760).contains(args.startupFrames) else { invoke.reject("voice_playback_invalid_startup"); return }
                 guard !disposed else { invoke.reject("cancelled:voice_playback"); return }
                 do {
                     let playback = try ensurePlayback()
@@ -477,7 +485,7 @@ final class NativeVoiceAudio {
                     // A reserved but never authorized call is still output-only.
                     try renderer.ensure(voice: renderer.isVoice)
                     playback.bind(renderer.speechPlayer)
-                    playback.start(id: args.playbackId, invoke: invoke)
+                    playback.start(id: args.playbackId, startupFrames: args.startupFrames, invoke: invoke)
                 } catch {
                     let reason = voiceAudioReason(error, fallback: "voice_playback_failed")
                     playback?.cancelCurrent(reason: reason)
@@ -511,6 +519,18 @@ final class NativeVoiceAudio {
         } catch { invoke.reject("invalid_voice_playback_args") }
     }
 
+    func endPlaybackSegment(_ invoke: Invoke) {
+        do {
+            let args = try invoke.parseArgs(VoicePlaybackArgs.self)
+            DispatchQueue.main.async { [self] in
+                guard let playback = playback, renderer.engine?.isRunning == true else {
+                    invoke.reject("cancelled:voice_playback"); return
+                }
+                playback.endSegment(id: args.playbackId, invoke: invoke)
+            }
+        } catch { invoke.reject("invalid_voice_playback_args") }
+    }
+
     func stopPlayback(_ invoke: Invoke) {
         do {
             let args = try invoke.parseArgs(VoicePlaybackArgs.self)
@@ -533,6 +553,9 @@ final class NativeVoiceAudio {
         }
         let output = NativeVoicePlayback(format: format)
         playback = output
+        output.onStarted = { [weak self] id in
+            _ = self?.onPlaybackEvent?(NativeVoicePlaybackEvent(playbackId: id))
+        }
         output.onStatus = { [weak self] id, playing in
             guard let self = self else { return }
             self.publishOutputStatus(id, playing: playing)
@@ -635,6 +658,7 @@ extension VcpMobilePlugin {
     @objc public func releaseVoiceSegments(_ invoke: Invoke) { voice.releaseSegments(invoke) }
     @objc public func startVoicePlayback(_ invoke: Invoke) { voice.startPlayback(invoke) }
     @objc public func appendVoicePlayback(_ invoke: Invoke) { voice.appendPlayback(invoke) }
+    @objc public func endVoicePlaybackSegment(_ invoke: Invoke) { voice.endPlaybackSegment(invoke) }
     @objc public func finishVoicePlayback(_ invoke: Invoke) { voice.finishPlayback(invoke) }
     @objc public func stopVoicePlayback(_ invoke: Invoke) { voice.stopPlayback(invoke) }
 }

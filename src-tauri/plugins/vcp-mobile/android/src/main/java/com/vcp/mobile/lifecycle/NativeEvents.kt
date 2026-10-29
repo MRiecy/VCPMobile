@@ -30,11 +30,19 @@ internal class NativeEvents(
 
     /** Voice probabilities must never be acknowledged while the native transport is absent. */
     internal fun tryEmitVoiceAudio(payload: JSObject): Boolean {
+        return tryEmitVoiceEvent("voiceAudio", payload)
+    }
+
+    internal fun tryEmitVoicePlayback(payload: JSObject): Boolean {
+        return tryEmitVoiceEvent("voicePlayback", payload)
+    }
+
+    private fun tryEmitVoiceEvent(event: String, payload: JSObject): Boolean {
         check(Looper.myLooper() == Looper.getMainLooper())
         if (runtime.isDestroying) return false
         val channel = nativeEventChannel ?: return false
         return try {
-            channel.send(JSObject().apply { put("event", "voiceAudio"); put("payload", payload) })
+            channel.send(JSObject().apply { put("event", event); put("payload", payload) })
             true
         } catch (error: Exception) {
             Log.e(TAG, "Voice event channel failed", error)
