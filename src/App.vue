@@ -74,8 +74,10 @@ const handleShareIntent = () => {
 };
 const refreshShare = () => {
   if (lifecycleStore.state !== "READY" || (!isAndroid && !isIOS)) return;
-  const pending = isAndroid ? shareStore.pollAndroid() : Promise.resolve();
-  void pending.then(() => shareStore.refresh()).catch(shareStore.notify);
+  // Renew presentation at this entry, before a slow Android file handoff. Its
+  // eventual completion must not erase a close made while processing the share.
+  const pending = isAndroid ? Promise.all([shareStore.refresh(), shareStore.pollAndroid()]) : shareStore.refresh();
+  void pending.catch(shareStore.notify);
 };
 watch(() => lifecycleStore.state, state => { if (state === "READY") refreshShare(); });
 watch(() => lifecycleStore.lifecycleSnapshot?.phase, (phase, previous) => {

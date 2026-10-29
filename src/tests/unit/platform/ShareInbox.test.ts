@@ -1,11 +1,15 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createPinia, setActivePinia } from 'pinia';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createPinia, disposePinia, setActivePinia, type Pinia } from 'pinia';
 import { flushPromises } from '@vue/test-utils';
 import { reactive } from 'vue';
 import { useShareStore, type CurrentShare } from '../../../core/stores/shareStore';
-import { mockInvoke, invokeMock } from '../../mocks/tauri';
+import { emitTauriEvent, mockInvoke, invokeMock, listenMock } from '../../mocks/tauri';
 
-const context = vi.hoisted(() => ({ session: {} as { currentTopicId: string | null; currentSelectedItem: { id: string } | null }, notices: vi.fn() }));
+const context = vi.hoisted(() => ({ session: {} as {
+  currentTopicId: string | null;
+  currentSelectedItem: { id: string } | null;
+  selectTopicById: (agentId: string, ownerType: string, topicId: string) => Promise<void>;
+}, notices: vi.fn() }));
 vi.mock('../../../core/stores/chatSessionStore', () => ({ useChatSessionStore: () => context.session }));
 vi.mock('../../../core/stores/assistant', () => ({ useAssistantStore: () => ({ agents: [{ id: 'agent' }], fetchAgentsAndGroups: async () => {} }) }));
 vi.mock('../../../core/stores/topicListManager', () => ({ useTopicStore: () => ({ loadTopicList: async () => {} }) }));
@@ -20,11 +24,14 @@ const share = (generation: number, state: CurrentShare['state']): CurrentShare =
   generation, deliveryId: `share-${generation}`, state, text: `text-${generation}`,
   items: [], attachments: [], revision: 0,
 });
+let pinia: Pinia;
 beforeEach(() => {
-  setActivePinia(createPinia());
-  context.session = reactive({ currentTopicId: 'topic', currentSelectedItem: { id: 'agent' } });
+  pinia = createPinia();
+  setActivePinia(pinia);
+  context.session = reactive({ currentTopicId: 'topic', currentSelectedItem: { id: 'agent' }, selectTopicById: vi.fn(async () => {}) });
   context.notices.mockClear();
 });
+afterEach(() => disposePinia(pinia));
 
 describe('one current share', () => {
   it('keeps a dismissed selector closed when preparation finishes and resumes on a fresh entry', async () => {
@@ -73,14 +80,17 @@ describe('one current share', () => {
   });
 
   it('opens a new native share without reviving the dismissed previous share', async () => {
-    mockInvoke('read_current_share', () => share(3, 'prepared'));
-    mockInvoke('accept_android_share', () => share(4, 'receiving'));
-    mockInvoke('finish_android_share', () => share(4, 'ready'));
+    let current = share(3, 'prepared');
+    mockInvoke('read_current_share', () => current);
+    mockInvoke('receive_android_share', () => {
+      current = share(4, 'ready');
+      emitTauriEvent('vcp-share-inbox-changed', null);
+    });
     mockInvoke('prepare_current_share', () => share(4, 'prepared'));
     const store = useShareStore();
     await store.refresh();
     store.closeSelector();
-    store.receiveAndroid({ intentId: 'share-4', payloadRevision: 2, state: 'ready', text: 'new native share', files: [] });
+    await store.pollAndroid();
     await flushPromises();
 
     expect(store.current?.deliveryId).toBe('share-4');
@@ -88,23 +98,120 @@ describe('one current share', () => {
     expect(store.selectorOpen).toBe(true);
   });
 
-  it('pulls a missed cold-start snapshot and coalesces repeated ready delivery', async () => {
-    const pending = deferred<CurrentShare>();
-    const payload = { intentId: 'share-6', payloadRevision: 2, state: 'ready', text: 'cold start', files: [] };
-    mockInvoke('read_android_share', () => payload);
-    mockInvoke('accept_android_share', () => share(6, 'receiving'));
-    mockInvoke('finish_android_share', () => pending.promise);
+  it('observes admission and file publication before a cold-start handoff returns', async () => {
+    const handoff = deferred<void>();
+    let current = share(6, 'receiving');
+    mockInvoke('read_current_share', () => current);
+    mockInvoke('receive_android_share', () => {
+      emitTauriEvent('vcp-share-inbox-changed', null);
+      return handoff.promise;
+    });
     mockInvoke('prepare_current_share', () => share(6, 'prepared'));
     const store = useShareStore();
-    await store.pollAndroid();
-    await store.pollAndroid();
-    expect(invokeMock.mock.calls.filter(([name]) => name === 'finish_android_share')).toHaveLength(1);
-    expect(invokeMock.mock.calls.find(([name]) => name === 'accept_android_share')?.[1]).toMatchObject({
-      deliveryId: 'share-6', payloadRevision: 2, payloadState: 'ready',
-    });
-    pending.resolve(share(6, 'ready'));
+    const polling = store.pollAndroid();
+    await flushPromises();
+    expect(store.current?.state).toBe('receiving');
+    expect(listenMock).toHaveBeenCalledExactlyOnceWith('vcp-share-inbox-changed', expect.any(Function));
+    expect(invokeMock).toHaveBeenCalledWith('receive_android_share');
+    expect(invokeMock.mock.calls.find(([name]) => name === 'receive_android_share')).toHaveLength(1);
+
+    current = share(6, 'ready');
+    emitTauriEvent('vcp-share-inbox-changed', null);
     await flushPromises();
     expect(store.current?.state).toBe('prepared');
+    expect(store.selectorOpen).toBe(true);
+    store.closeSelector();
+    current = share(6, 'prepared');
+    emitTauriEvent('vcp-share-inbox-changed', null);
+    await flushPromises();
+    expect(store.selectorOpen).toBe(false);
+    handoff.resolve();
+    await polling;
+    expect(store.current?.state).toBe('prepared');
+    expect(store.selectorOpen).toBe(false);
+    expect(invokeMock.mock.calls.filter(([name]) => name === 'receive_android_share')).toHaveLength(1);
+    expect(invokeMock.mock.calls.some(([name]) => ['read_android_share', 'accept_android_share', 'finish_android_share'].includes(name))).toBe(false);
+  });
+
+  it('accepts B while A is handing off files and reads B again after A returns', async () => {
+    const oldHandoff = deferred<void>();
+    let current = share(1, 'receiving');
+    let receives = 0;
+    mockInvoke('receive_android_share', () => {
+      current = ++receives === 1 ? share(1, 'receiving') : share(2, 'ready');
+      emitTauriEvent('vcp-share-inbox-changed', null);
+      return receives === 1 ? oldHandoff.promise : undefined;
+    });
+    mockInvoke('read_current_share', () => current);
+    mockInvoke('prepare_current_share', args => {
+      current = share(Number(args?.generation), 'prepared');
+      return current;
+    });
+    const store = useShareStore();
+    const oldPoll = store.pollAndroid();
+    await flushPromises();
+    expect(store.current?.deliveryId).toBe('share-1');
+
+    await store.pollAndroid();
+    await flushPromises();
+    expect(store.current).toEqual(share(2, 'prepared'));
+    expect(store.selectorOpen).toBe(true);
+    oldHandoff.resolve();
+    await oldPoll;
+
+    expect(store.current).toEqual(share(2, 'prepared'));
+    expect(context.notices).not.toHaveBeenCalled();
+    expect(listenMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock.mock.calls.filter(([name]) => name === 'receive_android_share')).toEqual([
+      ['receive_android_share'], ['receive_android_share'],
+    ]);
+  });
+
+  it('releases an installed listener and ignores notifications after store disposal', async () => {
+    const install = listenMock.getMockImplementation()!;
+    const stop = vi.fn();
+    listenMock.mockImplementationOnce(async (event, handler) => {
+      stop.mockImplementation(await install(event, handler));
+      return stop;
+    });
+    mockInvoke('receive_android_share', () => undefined);
+    mockInvoke('read_current_share', () => share(11, 'prepared'));
+    const store = useShareStore();
+    await store.pollAndroid();
+    const reads = invokeMock.mock.calls.filter(([name]) => name === 'read_current_share').length;
+    store.$dispose();
+    expect(stop).toHaveBeenCalledTimes(1);
+    emitTauriEvent('vcp-share-inbox-changed', null);
+    await flushPromises();
+    expect(invokeMock.mock.calls.filter(([name]) => name === 'read_current_share')).toHaveLength(reads);
+  });
+
+  it('releases a late listener installation without starting a native intake', async () => {
+    const installation = deferred<() => void>();
+    const stop = vi.fn();
+    listenMock.mockImplementationOnce(() => installation.promise);
+    const store = useShareStore();
+    const polling = store.pollAndroid();
+    expect(invokeMock).not.toHaveBeenCalled();
+    store.$dispose();
+    installation.resolve(stop);
+    await polling;
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
+  it('does not prepare a read that completes after store disposal', async () => {
+    const pending = deferred<CurrentShare>();
+    mockInvoke('receive_android_share', () => undefined);
+    mockInvoke('read_current_share', () => pending.promise);
+    const store = useShareStore();
+    const polling = store.pollAndroid();
+    await flushPromises();
+    store.$dispose();
+    pending.resolve(share(12, 'ready'));
+    await polling;
+    expect(store.current).toBeNull();
+    expect(invokeMock.mock.calls.some(([name]) => name === 'prepare_current_share')).toBe(false);
   });
 
   it('receives B while A imports and ignores the late A result', async () => {
@@ -137,17 +244,18 @@ describe('one current share', () => {
     expect(store.selectorOpen).toBe(true);
   });
 
-  it('keeps a new Android share when an earlier empty read arrives later', async () => {
+  it('keeps a prepared share when an earlier empty read arrives later', async () => {
     const pending = deferred<CurrentShare | null>();
+    const preparing = deferred<CurrentShare>();
     const prepared = share(10, 'prepared');
-    mockInvoke('read_current_share', () => pending.promise);
-    mockInvoke('accept_android_share', () => share(10, 'receiving'));
-    mockInvoke('finish_android_share', () => share(10, 'ready'));
-    mockInvoke('prepare_current_share', () => prepared);
+    let reads = 0;
+    mockInvoke('read_current_share', () => ++reads === 1 ? share(10, 'ready') : pending.promise);
+    mockInvoke('prepare_current_share', () => preparing.promise);
     const store = useShareStore();
+    await store.refresh();
     const reading = store.refresh();
 
-    await store.receiveAndroid({ intentId: prepared.deliveryId, payloadRevision: 2, state: 'ready', files: [] });
+    preparing.resolve(prepared);
     await flushPromises();
     expect(store.current).toEqual(prepared);
     pending.resolve(null);
@@ -155,6 +263,40 @@ describe('one current share', () => {
 
     expect(store.current).toEqual(prepared);
     expect(store.selectorOpen).toBe(true);
+  });
+
+  it.each([false, true])('preserves a single share through preparation, binding and recovery (attachment=%s)', async withAttachment => {
+    const attachments: CurrentShare['attachments'] = withAttachment
+      ? [{ type: 'image/png', name: 'shared.png', src: 'cas/shared.png', size: 128, hash: 'image-hash', status: 'done' }]
+      : [];
+    let current: CurrentShare = { ...share(13, 'ready'), text: 'shared text' };
+    mockInvoke('receive_android_share', () => { emitTauriEvent('vcp-share-inbox-changed', null); });
+    mockInvoke('read_current_share', () => current);
+    mockInvoke('prepare_current_share', () => {
+      if (current.state === 'ready') current = { ...current, state: 'prepared', attachments };
+      return current;
+    });
+    mockInvoke('bind_current_share', () => {
+      current = { ...current, state: 'draft', agentId: 'agent', topicId: 'topic', revision: 1 };
+      return current;
+    });
+    const store = useShareStore();
+    await store.pollAndroid();
+    await flushPromises();
+    expect(store.current?.text).toBe('shared text');
+    expect(store.current?.attachments).toEqual(attachments);
+    await store.openDraft('agent');
+    expect(store.activeDraft?.text).toBe('shared text');
+    expect(context.session.selectTopicById).toHaveBeenCalledExactlyOnceWith('agent', 'agent', 'topic');
+
+    store.$dispose();
+    const recovered = useShareStore();
+    await recovered.pollAndroid();
+    await flushPromises();
+    expect(recovered.activeDraft).toEqual(current);
+    expect(recovered.activeDraft?.attachments).toEqual(attachments);
+    expect(invokeMock.mock.calls.filter(([name]) => name === 'bind_current_share')).toHaveLength(1);
+    expect(context.notices).not.toHaveBeenCalled();
   });
 
   it('recovers the last acknowledged draft and serializes later edits by revision', async () => {
@@ -265,24 +407,27 @@ describe('one current share', () => {
     expect(store.selectorOpen).toBe(false);
   });
 
-  it('still acknowledges a native ready replay after its stale UI snapshot is rejected', async () => {
+  it('does not revive a sent share when a repeated native wake reads an older draft', async () => {
     const original = { ...share(9, 'draft'), agentId: 'agent', topicId: 'topic', revision: 1 };
     mockInvoke('read_current_share', () => original);
     mockInvoke('prepare_current_share', () => original);
     mockInvoke('commit_share_message', () => ({ message: { id: 'msg_share-9' }, persisted: { blocks: [], topicUpdatedAt: 1 }, alreadySent: false }));
-    mockInvoke('accept_android_share', () => original);
-    const finished = deferred<CurrentShare>();
-    mockInvoke('finish_android_share', () => finished.promise);
+    const finished = deferred<void>();
+    mockInvoke('receive_android_share', () => {
+      emitTauriEvent('vcp-share-inbox-changed', null);
+      return finished.promise;
+    });
     const store = useShareStore();
     await store.refresh();
     await flushPromises();
     await store.commit(original, { id: 'pending', role: 'user', content: 'send', timestamp: 1 });
 
-    await store.receiveAndroid({ intentId: original.deliveryId, payloadRevision: 2, state: 'ready', files: [] });
-    expect(store.current?.state).toBe('sent');
-    expect(invokeMock.mock.calls.filter(([name]) => name === 'finish_android_share')).toHaveLength(1);
-    finished.resolve({ ...original, state: 'sent', text: '' });
+    const polling = store.pollAndroid();
     await flushPromises();
+    expect(store.current?.state).toBe('sent');
+    expect(invokeMock.mock.calls.filter(([name]) => name === 'receive_android_share')).toHaveLength(1);
+    finished.resolve();
+    await polling;
 
     expect(store.current?.state).toBe('sent');
     expect(store.selectorOpen).toBe(false);

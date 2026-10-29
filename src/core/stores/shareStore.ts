@@ -1,6 +1,7 @@
-import { computed, ref } from 'vue';
+import { computed, onScopeDispose, ref } from 'vue';
 import { defineStore } from 'pinia';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { useChatSessionStore } from './chatSessionStore';
 import { useAssistantStore } from './assistant';
 import { useTopicStore } from './topicListManager';
@@ -34,8 +35,9 @@ export const useShareStore = defineStore('share', () => {
   let readInFlight: Promise<void> | null = null;
   let readAgain = false;
   let preparingId: string | null = null;
-  let androidQueue = Promise.resolve();
-  const androidInFlight = new Set<string>();
+  let disposed = false;
+  let listening: Promise<void> | null = null;
+  let unlisten: (() => void) | null = null;
   let pendingEdit: { identity: ShareIdentity; text: string; attachments: Attachment[] } | null = null;
   let writing: Promise<void> | null = null;
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -85,10 +87,12 @@ export const useShareStore = defineStore('share', () => {
     finally { if (preparingId === share.deliveryId) { preparingId = null; busy.value = false; } }
   };
   const readCurrent = (): Promise<void> => {
+    if (disposed) return Promise.resolve();
     if (readInFlight) { readAgain = true; return readInFlight; }
     readInFlight = (async () => {
       const observed = current.value;
       const value = await invoke<CurrentShare | null>('read_current_share');
+      if (disposed) return;
       // An empty read has no generation; it cannot erase a share accepted or
       // settled while this snapshot was in flight.
       if (value === null && current.value !== observed) return;
@@ -97,7 +101,7 @@ export const useShareStore = defineStore('share', () => {
       else if (value && ['draft', 'prepared', 'failed'].includes(value.state) && !activeDraft.value) showSelector();
     })().finally(() => {
       readInFlight = null;
-      if (readAgain) { readAgain = false; void readCurrent().catch(notify); }
+      if (readAgain && !disposed) { readAgain = false; void readCurrent().catch(notify); }
     });
     return readInFlight;
   };
@@ -107,37 +111,27 @@ export const useShareStore = defineStore('share', () => {
     dismissedShare = null;
     return readCurrent();
   };
-  const receiveAndroid = (detail: unknown) => {
-    if (!detail || typeof detail !== 'object') return Promise.resolve();
-    const source = detail as Record<string, unknown>;
-    if (typeof source.intentId !== 'string' || !source.intentId
-      || !Number.isSafeInteger(source.payloadRevision) || Number(source.payloadRevision) <= 0
-      || !['receiving', 'ready', 'failed'].includes(String(source.state))) return Promise.resolve();
-    const snapshotId = `${source.intentId}:${source.payloadRevision}`;
-    if (androidInFlight.has(snapshotId)) return androidQueue;
-    androidInFlight.add(snapshotId);
-    // Preserve native acceptance order even when IPC scheduling is concurrent.
-    androidQueue = androidQueue.catch(() => {}).then(async () => {
-      const value = await invoke<CurrentShare>('accept_android_share', {
-        deliveryId: source.intentId, text: typeof source.text === 'string' ? source.text : '',
-        error: typeof source.error === 'string' ? source.error : null,
-        payloadRevision: source.payloadRevision, payloadState: source.state,
-      });
-      const accepted = apply(value);
-      if (accepted && source.error) showSelector();
-      if (source.state !== 'ready') { androidInFlight.delete(snapshotId); return; }
-      // Ready processing is detached from acceptance; a later share can immediately invalidate it.
-      // Even a stale UI snapshot must finish the native handoff so Rust can ACK its files.
-      void invoke<CurrentShare>('finish_android_share', {
-        ...identity(value), text: typeof source.text === 'string' ? source.text : '', files: Array.isArray(source.files) ? source.files : [],
-        payloadRevision: source.payloadRevision,
-      }).then(async result => { if (isCurrent(value) && apply(result)) await prepare(); }).catch(error => {
-        if (isCurrent(value)) { notify(error); void readCurrent().catch(notify); }
-      }).finally(() => androidInFlight.delete(snapshotId));
-    }).catch(error => { androidInFlight.delete(snapshotId); notify(error); });
-    return androidQueue;
+  const ensureListening = (): Promise<void> => {
+    if (disposed || unlisten) return Promise.resolve();
+    if (listening) return listening;
+    listening = listen('vcp-share-inbox-changed', () => {
+      // Admission and file publication can precede a slow handoff's completion.
+      // Read the durable current share without reopening a dismissed selector.
+      if (!disposed) void readCurrent().catch(notify);
+    }).then(stop => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).finally(() => { listening = null; });
+    return listening;
   };
-  const pollAndroid = async () => receiveAndroid(await invoke<unknown>('read_android_share'));
+  const pollAndroid = async () => {
+    await ensureListening();
+    if (disposed) return;
+    // Rust reads and accepts the native current slot itself; no payload or cached
+    // admission result crosses this call. A later read always sees the owner now.
+    await invoke<void>('receive_android_share');
+    await readCurrent();
+  };
   const openDraft = async (agentId: string, allowPartial = false) => {
     const share = current.value;
     if (!share || busy.value) return;
@@ -197,5 +191,12 @@ export const useShareStore = defineStore('share', () => {
       if (isCurrent(share) && current.value && current.value.state !== 'sent') { current.value = { ...current.value, state: 'discarded' }; selectorOpen.value = false; }
     } catch (error) { notify(error); }
   };
-  return { current, activeDraft, failures, selectorOpen, busy, sending, refresh, prepare, receiveAndroid, pollAndroid, openDraft, editDraft, flushDraft, commit, discard, closeSelector, notify };
+  onScopeDispose(() => {
+    disposed = true;
+    readAgain = false;
+    unlisten?.();
+    unlisten = null;
+    if (saveTimer) clearTimeout(saveTimer);
+  });
+  return { current, activeDraft, failures, selectorOpen, busy, sending, refresh, prepare, pollAndroid, openDraft, editDraft, flushDraft, commit, discard, closeSelector, notify };
 });

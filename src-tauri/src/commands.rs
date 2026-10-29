@@ -114,9 +114,8 @@ macro_rules! app_command_handler {
             update_settings,
         };
         use crate::vcp_modules::infra::share_inbox::{
-            accept_android_share, bind_current_share, commit_share_message, discard_current_share,
-            finish_android_share, prepare_current_share, read_android_share, read_current_share,
-            update_share_draft,
+            bind_current_share, commit_share_message, discard_current_share,
+            prepare_current_share, read_current_share, receive_android_share, update_share_draft,
         };
         use crate::vcp_modules::sync_service::{
             clear_old_sync_logs, list_sync_log_files, prepare_sync_log_share_file,
@@ -353,12 +352,10 @@ macro_rules! app_command_handler {
                 store_file,
                 store_temporary_export,
                 // ── 当前一次分享（share_inbox）──
-                accept_android_share,
-                read_android_share,
+                receive_android_share,
                 bind_current_share,
                 commit_share_message,
                 discard_current_share,
-                finish_android_share,
                 prepare_current_share,
                 read_current_share,
                 update_share_draft,

@@ -16,10 +16,17 @@ use std::{
 };
 #[cfg(any(target_os = "ios", target_os = "android"))]
 use tauri::Manager;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 const MAX_MANIFEST: u64 = 2 * 1024 * 1024;
 const MAX_TEXT: usize = 1024 * 1024;
+
+/// Shared by every WebView document. Only native read and durable acceptance
+/// hold this gate; file handoff, cancellation and ACK keep their existing owners.
+#[derive(Default)]
+pub struct ShareInboxState {
+    intake: tokio::sync::Mutex<()>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -687,13 +694,111 @@ pub async fn prepare_current_share(
     Ok(share)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AndroidSharePayload {
+    intent_id: String,
+    payload_revision: u64,
+    state: String,
+    text: String,
+    error: Option<String>,
+    files: Vec<tauri_plugin_vcp_mobile::system::SharedFileItem>,
+}
+
+fn notify_share_changed(app: &AppHandle) {
+    let _ = app.emit("vcp-share-inbox-changed", ());
+}
+
+/// A document can request a fresh pull, never resubmit a previously read payload.
+/// The command itself owns its continuation after the short intake gate is released.
 #[tauri::command]
-pub async fn read_android_share(app: AppHandle) -> Result<Option<serde_json::Value>, String> {
+pub async fn receive_android_share(
+    app: AppHandle,
+    db: State<'_, DbState>,
+    intake_state: State<'_, ShareInboxState>,
+) -> Result<(), String> {
+    let root = root(&app).await?;
+    let Some((payload, share, old_operations)) =
+        pull_and_accept_android(&intake_state, &root, &db, || {
+            read_android_share(app.clone())
+        })
+        .await?
+    else {
+        return Ok(());
+    };
+    // Publish acceptance before any potentially slow native ACK or file work.
+    // Consumers read the current record; no delayed command returns its old snapshot.
+    notify_share_changed(&app);
+    for operation in old_operations {
+        super::file_manager::cancel_attachment_operation(&operation).await;
+    }
+    if payload.state != "ready" {
+        acknowledge_android_payload(
+            &app,
+            &payload.intent_id,
+            payload.payload_revision,
+            payload.state == "failed",
+        )
+        .await;
+        return Ok(());
+    }
+    let result = finish_android_share(
+        app.clone(),
+        &db,
+        share.generation,
+        payload.intent_id.clone(),
+        payload.text,
+        payload.files,
+        payload.payload_revision,
+    )
+    .await;
+    if let Err(error) = result {
+        // A replacement can invalidate a slow handoff. Its old failure belongs
+        // to that delivery, not to the current share or the replacement document.
+        let still_current = {
+            let _guard = lock(&root).await?;
+            slot(&root)?.is_some_and(|current| {
+                current.generation == share.generation && current.delivery_id == payload.intent_id
+            })
+        };
+        if !still_current {
+            return Ok(());
+        }
+        // The ready file publication may have succeeded before a DB error.
+        // Preserve the old frontend's failure reread, now without a cached payload.
+        notify_share_changed(&app);
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn pull_and_accept_android<F, R>(
+    state: &ShareInboxState,
+    root: &Path,
+    db: &DbState,
+    read: F,
+) -> Result<Option<(AndroidSharePayload, CurrentShare, Vec<String>)>, String>
+where
+    F: FnOnce() -> R,
+    R: std::future::Future<Output = Result<Option<AndroidSharePayload>, String>>,
+{
+    // Construct the native read only after acquiring the process-wide gate.
+    // A second (including replacement-document) request cannot cache an older
+    // payload while a first request is still deciding its durable acceptance.
+    let _intake = state.intake.lock().await;
+    let Some(payload) = read().await? else {
+        return Ok(None);
+    };
+    let (share, old_operations) = accept_android_share(root, db, &payload).await?;
+    Ok(Some((payload, share, old_operations)))
+}
+
+async fn read_android_share(app: AppHandle) -> Result<Option<AndroidSharePayload>, String> {
     #[cfg(target_os = "android")]
     {
         #[derive(Deserialize)]
         struct Pending {
-            payload: Option<serde_json::Value>,
+            payload: Option<AndroidSharePayload>,
         }
         let pending: Pending = tokio::task::spawn_blocking(move || {
             app.state::<tauri_plugin_vcp_mobile::VcpMobileState<tauri::Wry>>()
@@ -741,30 +846,25 @@ async fn acknowledge_android_payload(
     let _ = (app, delivery_id, payload_revision, settled);
 }
 
-#[tauri::command]
-pub async fn accept_android_share(
-    app: AppHandle,
-    db: State<'_, DbState>,
-    delivery_id: String,
-    text: String,
-    error: Option<String>,
-    payload_revision: u64,
-    payload_state: String,
-) -> Result<CurrentShare, String> {
+async fn accept_android_share(
+    root: &Path,
+    db: &DbState,
+    payload: &AndroidSharePayload,
+) -> Result<(CurrentShare, Vec<String>), String> {
+    let delivery_id = payload.intent_id.clone();
+    let error = payload.error.clone();
     leaf(&delivery_id)?;
-    if payload_revision == 0 || !["receiving", "ready", "failed"].contains(&payload_state.as_str())
+    if payload.payload_revision == 0
+        || !["receiving", "ready", "failed"].contains(&payload.state.as_str())
     {
         return Err("分享快照身份或状态无效".into());
     }
-    let acknowledge = payload_state != "ready";
-    let settled = payload_state == "failed";
-    if text.len() > MAX_TEXT {
+    if payload.text.len() > MAX_TEXT {
         return Err("分享文字超过 1 MiB".into());
     }
-    let root = root(&app).await?;
     let mut tx = db.write_transaction("share.android.accept").await?;
-    let guard = lock(&root).await?;
-    let old = slot(&root)?;
+    let guard = lock(root).await?;
+    let old = slot(root)?;
     let old_record = load(&mut tx).await?;
     if old.as_ref().is_some_and(|s| s.delivery_id == delivery_id) {
         if let Some(mut current) = load(&mut tx).await? {
@@ -779,17 +879,13 @@ pub async fn accept_android_share(
                             state: "failed".into(),
                             error: current.error.clone(),
                         };
-                        write_slot(&root, &source)?;
+                        write_slot(root, &source)?;
                         save(&mut tx, &current).await?;
                     }
                 }
                 tx.commit().await.map_err(|e| e.to_string())?;
                 drop(guard);
-                if acknowledge {
-                    acknowledge_android_payload(&app, &delivery_id, payload_revision, settled)
-                        .await;
-                }
-                return Ok(current);
+                return Ok((current, vec![]));
             }
         }
     }
@@ -804,31 +900,27 @@ pub async fn accept_android_share(
         .into(),
         error,
     };
-    write_slot(&root, &slot)?;
+    write_slot(root, &slot)?;
     let mut share = from_slot(&slot);
-    share.text = text;
+    share.text = payload.text.clone();
     save(&mut tx, &share).await?;
     tx.commit().await.map_err(|e| e.to_string())?;
     drop(guard);
-    if let Some(previous) = old_record {
-        for item in previous.items {
-            super::file_manager::cancel_attachment_operation(&format!(
-                "share_{}_{}",
-                previous.delivery_id, item.item_id
-            ))
-            .await;
-        }
-    }
-    if acknowledge {
-        acknowledge_android_payload(&app, &delivery_id, payload_revision, settled).await;
-    }
-    Ok(share)
+    let old_operations = old_record
+        .map(|previous| {
+            previous
+                .items
+                .iter()
+                .map(|item| format!("share_{}_{}", previous.delivery_id, item.item_id))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok((share, old_operations))
 }
 
-#[tauri::command]
-pub async fn finish_android_share(
+async fn finish_android_share(
     app: AppHandle,
-    db: State<'_, DbState>,
+    db: &DbState,
     generation: u64,
     delivery_id: String,
     text: String,
@@ -837,7 +929,7 @@ pub async fn finish_android_share(
 ) -> Result<CurrentShare, String> {
     let result = finish_android_share_inner(
         app.clone(),
-        &db,
+        db,
         generation,
         delivery_id.clone(),
         text,
@@ -848,12 +940,14 @@ pub async fn finish_android_share(
         .as_ref()
         .is_ok_and(|share| share.state != "receiving")
     {
+        notify_share_changed(&app);
         acknowledge_android_payload(&app, &delivery_id, payload_revision, true).await;
     } else if let Err(error) = &result {
         // Native acquisition may still remember this owner. Persist the actual failed handoff,
         // so a copy/disk/DB error cannot remain a permanently invisible receiving slot.
         if let Ok(root) = root(&app).await {
             if mark_android_share_failed(&root, generation, &delivery_id, error).await {
+                notify_share_changed(&app);
                 acknowledge_android_payload(&app, &delivery_id, payload_revision, true).await;
             }
         }
@@ -1323,6 +1417,198 @@ pub async fn commit_share_message(
 mod tests {
     use super::*;
     use sqlx::Connection;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::oneshot;
+
+    fn android_payload(id: &str, state: &str) -> AndroidSharePayload {
+        AndroidSharePayload {
+            intent_id: id.into(),
+            payload_revision: if state == "ready" { 2 } else { 1 },
+            state: state.into(),
+            text: id.into(),
+            error: None,
+            files: vec![],
+        }
+    }
+
+    async fn intake_database() -> DbState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../../../migrations/0101_current_share.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        DbState::new(pool, PathBuf::from("tests/share-intake.sqlite"))
+    }
+
+    #[tokio::test]
+    async fn android_intake_serializes_read_through_commit_across_documents() {
+        let temporary = tempfile::tempdir_in("tests").unwrap();
+        let root = temporary.path().to_owned();
+        let db = Arc::new(intake_database().await);
+        let state = Arc::new(ShareInboxState::default());
+        let mailbox = Arc::new(tokio::sync::Mutex::new("A"));
+        let (read_a, read_a_done) = oneshot::channel();
+        let (release_a, wait_a) = oneshot::channel();
+        let first = {
+            let (state, db, root, mailbox) =
+                (state.clone(), db.clone(), root.clone(), mailbox.clone());
+            tokio::spawn(async move {
+                pull_and_accept_android(&state, &root, &db, || async {
+                    let observed = *mailbox.lock().await;
+                    read_a.send(()).unwrap();
+                    wait_a.await.unwrap();
+                    Ok(Some(android_payload(observed, "receiving")))
+                })
+                .await
+                .unwrap()
+                .unwrap()
+                .1
+            })
+        };
+        read_a_done.await.unwrap();
+        *mailbox.lock().await = "B";
+        let (read_b, mut read_b_done) = oneshot::channel();
+        let second = {
+            let (state, db, root, mailbox) =
+                (state.clone(), db.clone(), root.clone(), mailbox.clone());
+            tokio::spawn(async move {
+                pull_and_accept_android(&state, &root, &db, || async {
+                    read_b.send(()).unwrap();
+                    Ok(Some(android_payload(*mailbox.lock().await, "ready")))
+                })
+                .await
+                .unwrap()
+                .unwrap()
+                .1
+            })
+        };
+        // B must not even capture its native snapshot while A's read is pending.
+        assert!(tokio::time::timeout(Duration::from_millis(50), &mut read_b_done)
+            .await
+            .is_err());
+        release_a.send(()).unwrap();
+        let first = first.await.unwrap();
+        let second = second.await.unwrap();
+        assert_eq!((first.delivery_id.as_str(), first.generation), ("A", 1));
+        assert_eq!((second.delivery_id.as_str(), second.generation), ("B", 2));
+
+        // An old document's delayed wake has no payload argument. It pulls B,
+        // instead of minting a newer generation for the old A snapshot.
+        let (_, repeated, operations) = pull_and_accept_android(&state, &root, &db, || async {
+            Ok(Some(android_payload(*mailbox.lock().await, "ready")))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!((repeated.delivery_id.as_str(), repeated.generation), ("B", 2));
+        assert!(operations.is_empty());
+        let mut connection = db.pool.acquire().await.unwrap();
+        let persisted = load(&mut connection).await.unwrap().unwrap();
+        assert_eq!((persisted.delivery_id.as_str(), persisted.generation), ("B", 2));
+    }
+
+    #[tokio::test]
+    async fn repeated_android_ready_keeps_identity_and_the_existing_handoff_lease() {
+        let temporary = tempfile::tempdir_in("tests").unwrap();
+        let root = temporary.path();
+        let db = intake_database().await;
+        let state = ShareInboxState::default();
+        let (_, first, _) = pull_and_accept_android(&state, root, &db, || async {
+            Ok(Some(android_payload("delivery", "ready")))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        let owner = directory(root, "delivery");
+        lock_file(&owner).unwrap();
+        let (_, replay, operations) = pull_and_accept_android(&state, root, &db, || async {
+            Ok(Some(android_payload("delivery", "ready")))
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches(&replay, first.generation, &first.delivery_id));
+        assert!(operations.is_empty());
+        let contender = File::options()
+            .read(true)
+            .write(true)
+            .open(root.join("delivery/lease.lock"))
+            .unwrap();
+        assert!(matches!(try_lock_file(&contender), Err(std::fs::TryLockError::WouldBlock)));
+        drop(owner);
+        try_lock_file(&contender).unwrap();
+        assert_eq!(slot(root).unwrap().unwrap().generation, first.generation);
+    }
+
+    #[tokio::test]
+    async fn slow_handoff_and_ack_leave_intake_open_and_cannot_publish_old_results() {
+        let temporary = tempfile::tempdir_in("tests").unwrap();
+        let root = temporary.path().to_owned();
+        let db = Arc::new(intake_database().await);
+        let state = Arc::new(ShareInboxState::default());
+        let (handoff_started, wait_handoff_started) = oneshot::channel();
+        let (release_handoff, wait_handoff) = oneshot::channel();
+        let (ack_started, wait_ack_started) = oneshot::channel();
+        let (release_ack, wait_ack) = oneshot::channel();
+        let first = {
+            let (state, db, root) = (state.clone(), db.clone(), root.clone());
+            tokio::spawn(async move {
+                let (_, share, _) = pull_and_accept_android(&state, &root, &db, || async {
+                    Ok(Some(android_payload("A", "ready")))
+                })
+                .await
+                .unwrap()
+                .unwrap();
+                let lease = directory(&root, "A");
+                lock_file(&lease).unwrap();
+                handoff_started.send(()).unwrap();
+                wait_handoff.await.unwrap();
+                {
+                    let _guard = lock(&root).await.unwrap();
+                    assert!(assert_current(&root, share.generation, "A").is_err());
+                }
+                assert!(!mark_android_share_failed(&root, share.generation, "A", "late copy failure").await);
+                drop(lease);
+                ack_started.send(()).unwrap();
+                wait_ack.await.unwrap();
+            })
+        };
+        wait_handoff_started.await.unwrap();
+        let (_, second, _) = tokio::time::timeout(
+            Duration::from_secs(2),
+            pull_and_accept_android(&state, &root, &db, || async {
+                Ok(Some(android_payload("B", "ready")))
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert_eq!((second.delivery_id.as_str(), second.generation), ("B", 2));
+        release_handoff.send(()).unwrap();
+        wait_ack_started.await.unwrap();
+        let (_, third, _) = tokio::time::timeout(
+            Duration::from_secs(2),
+            pull_and_accept_android(&state, &root, &db, || async {
+                Ok(Some(android_payload("C", "receiving")))
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+        assert_eq!((third.delivery_id.as_str(), third.generation), ("C", 3));
+        release_ack.send(()).unwrap();
+        first.await.unwrap();
+        let mut connection = db.pool.acquire().await.unwrap();
+        let persisted = load(&mut connection).await.unwrap().unwrap();
+        assert_eq!((persisted.delivery_id.as_str(), persisted.state.as_str()), ("C", "receiving"));
+    }
 
     #[tokio::test]
     async fn android_copy_consumes_upload_on_success_and_budget_rejection() {

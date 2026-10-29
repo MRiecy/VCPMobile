@@ -13,6 +13,8 @@ const context = vi.hoisted(() => ({
   selectedItem: null as { id: string } | null,
   clearConversation: vi.fn(),
   closeTopModal: vi.fn(() => false),
+  shareRefresh: vi.fn(async () => {}),
+  sharePoll: vi.fn(async () => {}),
 }));
 const native = vi.hoisted(() => ({ ios: true }));
 vi.mock('../../../core/utils/platform', () => ({
@@ -41,7 +43,7 @@ vi.mock('../../../features/chat/voice/voiceCallStore', () => ({ useVoiceCallStor
 vi.mock('../../../core/stores/assistant', () => ({ useAssistantStore: () => ({}) }));
 vi.mock('../../../core/stores/shareStore', () => ({ useShareStore: () => ({
   current: null, failures: [], selectorOpen: false, busy: false,
-  refresh: async () => {}, receiveAndroid: () => {}, pollAndroid: async () => {}, notify: () => {},
+  refresh: context.shareRefresh, pollAndroid: context.sharePoll, notify: () => {},
 }) }));
 vi.mock('../../../features/cli/vcpCliStore', () => ({ useVcpCliStore: () => ({}) }));
 vi.mock('vue-router', () => ({ useRouter: () => ({ isReady: async () => {}, afterEach: () => () => {} }) }));
@@ -74,12 +76,33 @@ beforeEach(() => {
   context.selectedItem = null;
   context.clearConversation.mockClear();
   context.closeTopModal.mockReset().mockReturnValue(false);
+  context.shareRefresh.mockReset().mockResolvedValue(undefined);
+  context.sharePoll.mockReset().mockResolvedValue(undefined);
   mockInvoke('plugin:vcp-mobile|get_pending_notification', () => null);
   mockInvoke('get_topics', () => [{ id: 'old' }, { id: 'new' }]);
 });
 afterEach(() => {
   wrapper?.unmount();
   wrapper = undefined;
+});
+
+describe('root share recovery', () => {
+  it('renews presentation on entry without renewing it after a slow Android handoff', async () => {
+    native.ios = false;
+    context.lifecycle.state = 'READY';
+    const handoff = deferred<void>();
+    context.sharePoll.mockImplementationOnce(() => handoff.promise);
+    mountApp();
+    await flushPromises();
+    expect(context.shareRefresh).toHaveBeenCalledTimes(1);
+    expect(context.sharePoll).toHaveBeenCalledTimes(1);
+
+    // A user may close the selector now. Completing intake must not renew the
+    // entry intent and reopen that retained share a second time.
+    handoff.resolve();
+    await flushPromises();
+    expect(context.shareRefresh).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('root voice call navigation', () => {
