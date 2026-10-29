@@ -236,6 +236,8 @@ VCPMobile/
 
 ### 5.3 Android Debug 与设备证据
 
+用户说“编译 debug”时，默认包含构建 Android Debug 包并安装到真机供用户体验测试；除非用户明确说“不安装”，或设备连接、授权等实际条件阻止安装，不得仅交付 APK 就结束任务。
+
 Agent 对设备的日常操作必须使用 `pnpm android:debug:*`，只允许操作 `com.vcp.avatar.debug`。严禁启动、停止、覆盖、清除或卸载用户的 `com.vcp.avatar` Release；不清空全局 logcat，不批量输出 dumpsys，不自动读取多张截图。
 
 `doctor`、`status`、有限日志或自动化结果只说明各自取得的状态。真机 UI、触控、性能与兼容性结论仍需对应的具名设备证据。

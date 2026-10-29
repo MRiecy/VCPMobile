@@ -1016,7 +1016,7 @@ impl<R: Runtime> SegmentSource for NarrationReader<'_, R> {
                             self.chat_finished = update.finished;
                         }
                         if let Some(piece) = self.speech_queue.pop_front() {
-                            log::debug!("[VoiceTts] synthesizing message={}", piece.message_id);
+                            log::debug!("[VoiceTts] preparing message={}", piece.message_id);
                             speaker = Some((piece.message_id, piece.agent_id, feed.is_group()));
                             (ReplyPiece::Text(piece.text), piece.instruction)
                         } else if self.chat_finished {
@@ -1071,6 +1071,7 @@ async fn prepare_segment(
     if let Some(cache) = cache {
         match cache.lookup(&key, &cancel).await {
             Ok(Some(pcm)) => {
+                log::debug!("[VoiceTts] cache hit job={} key={key} pcm_bytes={}", narration.id, pcm.len());
                 segment.push(pcm)?;
                 return segment.finish();
             }
@@ -1079,6 +1080,7 @@ async fn prepare_segment(
             Err(error) => log::warn!("[VoiceTts] cache lookup failed: {error}"),
         }
     }
+    log::debug!("[VoiceTts] network synthesis job={} key={key} cache_enabled={}", narration.id, cache.is_some());
     let audio = network::synthesize_prepared(config, &request, &cancel, |pcm| {
         std::future::ready(if cancel.is_cancelled() {
             Err(network::CANCELLED.into())
@@ -1100,6 +1102,8 @@ async fn prepare_segment(
         if let Err(error) = committed {
             if cancel.is_cancelled() { return Err(network::CANCELLED.into()); }
             log::warn!("[VoiceTts] segment cache write failed; playback continues: {error}");
+        } else {
+            log::debug!("[VoiceTts] cache stored job={} key={key}", narration.id);
         }
     }
     Ok(())
