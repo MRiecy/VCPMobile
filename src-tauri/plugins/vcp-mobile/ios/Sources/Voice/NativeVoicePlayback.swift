@@ -7,8 +7,10 @@ import Tauri
 /// coalesced before scheduling, so packet count cannot prevent startup admission.
 final class NativeVoicePlayback {
     private static let capacityFrames = 48_000
-    private static let chunkFrames = 480
-    private static let scheduledChunkLimit = capacityFrames / chunkFrames
+    private static let minimumChunkFrames = 480
+    private static let maximumChunkFrames = 2_400
+    private static let scheduledChunkLimit = capacityFrames / minimumChunkFrames
+    private static let stopFadeSeconds = 0.060
     private struct Chunk {
         let key = UUID()
         let buffer: AVAudioPCMBuffer
@@ -68,12 +70,24 @@ final class NativeVoicePlayback {
         func reject(_ reason: String) { let pending = invoke; invoke = nil; pending?.reject(reason) }
         func resolve() { let pending = invoke; invoke = nil; pending?.resolve() }
     }
+    private final class Retirement {
+        let id: String
+        let player: AVAudioPlayerNode
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        let initialVolume: Float
+        var timer: DispatchSourceTimer?
+        var completions: [() -> Void] = []
+        init(id: String, player: AVAudioPlayerNode) {
+            self.id = id; self.player = player; initialVolume = player.volume
+        }
+    }
 
     private var player: AVAudioPlayerNode?
     private var rendererGeneration: UInt64 = 0
     private let format: AVAudioFormat
     private let decoder = DispatchQueue(label: "com.vcp.avatar.voice-playback-decode", qos: .userInitiated)
     private var active: Playback?
+    private var retiring: Retirement?
     private var closedIds: [String] = []
     private var decoding: Append?
     private var waitingDecode: Append?
@@ -86,12 +100,14 @@ final class NativeVoicePlayback {
     }
 
     /// Renderers may change at call entry/exit, never at in-call mic mute.
-    /// Retain unconfirmed 20 ms chunks; stop callbacks from the former node
+    /// Retain unconfirmed chunks; stop callbacks from the former node
     /// cannot acknowledge audio belonging to the replacement node.
     func bind(_ player: AVAudioPlayerNode?) {
         dispatchPrecondition(condition: .onQueue(.main))
         if self.player === player { return }
         rendererGeneration += 1
+        // A renderer replacement cannot carry a fade on the old hardware graph.
+        if let retiring = retiring { completeRetirement(retiring) }
         self.player?.stop()
         self.player = player
         if let current = active {
@@ -106,7 +122,12 @@ final class NativeVoicePlayback {
 
     var ownsPlayback: Bool {
         dispatchPrecondition(condition: .onQueue(.main))
-        return active != nil
+        return active != nil || retiring != nil
+    }
+
+    var isStopping: Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        return retiring != nil
     }
 
     func canStart(_ id: String) -> Bool { !disposed && !closedIds.contains(id) }
@@ -116,7 +137,8 @@ final class NativeVoicePlayback {
         guard !disposed, !closedIds.contains(id) else { invoke.reject("cancelled:voice_playback"); return }
         guard (1...5_760).contains(startupFrames) else { invoke.reject("voice_playback_invalid_startup"); return }
         if active?.id == id { invoke.resolve(); return }
-        guard active == nil else { invoke.reject("voice_playback_busy"); return }
+        guard active == nil, retiring == nil else { invoke.reject("voice_playback_busy"); return }
+        player?.volume = 1
         active = Playback(id, startupFrames: startupFrames)
         onStatus?(id, false)
         invoke.resolve()
@@ -199,15 +221,19 @@ final class NativeVoicePlayback {
         }
         if current.startupReleased, let player = player {
             do {
-                // Only full 20 ms blocks are scheduled between boundaries. A
-                // real segment end/EOS flushes its smaller final block.
+                // Keep the first buffer at most 20 ms for prompt started feedback.
+                // Batch already available audio into up to 100 ms buffers without
+                // waiting beyond the original 20 ms minimum. A real segment
+                // end/EOS flushes its smaller final block.
                 // This bounds AVAudioPCMBuffer objects, not PCM admission. Even
                 // tiny completed segments can wait in the frame ring while an
                 // already-started player releases scheduled blocks.
                 while current.queued.count < Self.scheduledChunkLimit
-                    && (current.pending.count >= Self.chunkFrames
+                    && (current.pending.count >= Self.minimumChunkFrames
                         || (current.pending.count > 0 && (current.flushTail || current.finishing))) {
-                    let frames = min(Self.chunkFrames, current.pending.count)
+                    let chunkFrames = current.startedReported || !current.queued.isEmpty
+                        ? Self.maximumChunkFrames : Self.minimumChunkFrames
+                    let frames = min(chunkFrames, current.pending.count)
                     let chunk = try current.pending.take(frames, format: format)
                     current.queued.append(chunk)
                     current.queuedFrames += chunk.frames
@@ -279,32 +305,76 @@ final class NativeVoicePlayback {
         admit(current)
     }
 
-    func stop(id: String) {
+    func stop(id: String, immediately: Bool = false, completion: @escaping () -> Void) throws {
         dispatchPrecondition(condition: .onQueue(.main))
         rememberClosed(id)
-        if active?.id == id { cancelCurrent(reason: "cancelled:voice_playback") }
+        if active?.id == id { cancelCurrent(reason: "cancelled:voice_playback", immediately: immediately) }
+        if let retiring = retiring, retiring.id == id {
+            if immediately { completeRetirement(retiring); completion(); return }
+            guard retiring.completions.count < 8 else { throw voiceAudioFailure("voice_playback_stop_busy") }
+            retiring.completions.append(completion)
+        } else { completion() }
     }
 
-    func cancelCurrent(reason: String) {
+    func cancelCurrent(reason: String, immediately: Bool = false) {
         dispatchPrecondition(condition: .onQueue(.main))
-        guard let current = active else { return }
+        guard let current = active else {
+            if immediately, let retiring = retiring { completeRetirement(retiring) }
+            return
+        }
         active = nil
         rememberClosed(current.id)
-        player?.stop()
         current.append?.reject(reason)
         if waitingDecode === current.append { waitingDecode = nil }
         current.append = nil
         current.finish?.reject(reason)
         current.finish = nil
+        let hadScheduledAudio = !current.queued.isEmpty
         current.queued.removeAll()
         current.queuedFrames = 0
+        // Revoke logical ownership immediately, but retain the current renderer
+        // until its already-scheduled audio fades. No new PCM is admitted here.
+        if !immediately, hadScheduledAudio, let player = player, player.isPlaying, player.volume > 0 {
+            let retirement = Retirement(id: current.id, player: player)
+            retiring = retirement
+            let timer = DispatchSource.makeTimerSource(queue: .main)
+            retirement.timer = timer
+            timer.schedule(deadline: .now(), repeating: .milliseconds(5), leeway: .milliseconds(1))
+            timer.setEventHandler { [weak self, weak retirement] in
+                guard let self = self, let retirement = retirement, self.retiring === retirement else { return }
+                guard self.player === retirement.player else { self.completeRetirement(retirement); return }
+                let elapsed = Double(DispatchTime.now().uptimeNanoseconds - retirement.startedAt) / 1_000_000_000
+                let remaining = Float(max(0, 1 - elapsed / Self.stopFadeSeconds))
+                // Ease the last steps towards silence before the node is stopped.
+                retirement.player.volume = retirement.initialVolume * remaining * remaining
+                if elapsed >= Self.stopFadeSeconds { self.completeRetirement(retirement) }
+            }
+            timer.resume()
+            return
+        }
+        player?.stop()
+        player?.volume = 1
         onStatus?(nil, false)
+    }
+
+    private func completeRetirement(_ retirement: Retirement) {
+        guard retiring === retirement else { return }
+        retirement.timer?.cancel()
+        retirement.timer = nil
+        retirement.player.volume = 0
+        retirement.player.stop()
+        retirement.player.volume = 1
+        retiring = nil
+        onStatus?(nil, false)
+        let completions = retirement.completions
+        retirement.completions.removeAll()
+        for completion in completions { completion() }
     }
 
     func shutdown() {
         dispatchPrecondition(condition: .onQueue(.main))
         disposed = true
-        cancelCurrent(reason: "cancelled:voice_session_stopped")
+        cancelCurrent(reason: "cancelled:voice_session_stopped", immediately: true)
     }
 
     private func rememberClosed(_ id: String) {

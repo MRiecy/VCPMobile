@@ -2,6 +2,7 @@ package com.vcp.mobile.voice
 
 import android.media.AudioAttributes
 import android.media.AudioTrack
+import android.media.VolumeShaper
 import io.mockk.*
 import org.junit.After
 import org.junit.Assert.*
@@ -13,7 +14,9 @@ import org.robolectric.annotation.Config
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicReference
 
 /** Exercises the real worker/queue against a short-writing driver, not a second playback state machine. */
 @RunWith(RobolectricTestRunner::class)
@@ -26,6 +29,7 @@ class VoiceStreamPlaybackTest {
     private val starts = mutableListOf<Int>()
     private val progressEvents = AtomicInteger()
     private var minimumFrames = 1
+    private var capacityFrames = 96
     private var effectiveFrames = 96
     @Volatile private var playing = false
     @Volatile private var holdHead = false
@@ -41,10 +45,10 @@ class VoiceStreamPlaybackTest {
         every { anyConstructed<AudioTrack.Builder>().setTransferMode(any()) } answers { self as AudioTrack.Builder }
         every { anyConstructed<AudioTrack.Builder>().build() } returns player
         every { player.state } returns AudioTrack.STATE_INITIALIZED
-        every { player.bufferCapacityInFrames } returns 96
+        every { player.bufferCapacityInFrames } answers { capacityFrames }
         every { player.bufferSizeInFrames } answers { effectiveFrames }
         every { player.setBufferSizeInFrames(any()) } answers {
-            effectiveFrames = firstArg<Int>().coerceIn(minimumFrames, 96)
+            effectiveFrames = firstArg<Int>().coerceIn(minimumFrames, capacityFrames)
             effectiveFrames
         }
         every { player.write(any<ShortArray>(), any(), any(), AudioTrack.WRITE_NON_BLOCKING) } answers {
@@ -66,16 +70,16 @@ class VoiceStreamPlaybackTest {
     }
 
     @After fun cleanup() {
-        current?.stop()
+        current?.stop(immediate = true)
         executor.shutdownNow()
         executor.awaitTermination(2, TimeUnit.SECONDS)
         unmockkAll()
     }
 
-    private fun start(startupFrames: Int = 5_760): VoiceStreamPlayback {
+    private fun start(startupFrames: Int = 5_760, onPlaying: (Boolean) -> Unit = {}): VoiceStreamPlayback {
         val ready = CountDownLatch(1)
         val output = VoiceStreamPlayback("test", startupFrames, lease, executor,
-            started = { progressEvents.incrementAndGet() }, playingChanged = {}, ended = {})
+            started = { progressEvents.incrementAndGet() }, playingChanged = onPlaying, ended = {})
         current = output
         output.start { assertNull(it); ready.countDown() }
         assertTrue("start acknowledges resources without PCM", ready.await(2, TimeUnit.SECONDS))
@@ -102,6 +106,54 @@ class VoiceStreamPlaybackTest {
         assertEquals(1, progressEvents.get())
     }
 
+    @Test fun largeDriverCapacityDoesNotDelayChatStartupAndRestoresAfterHeadProgress() {
+        capacityFrames = 9_600
+        effectiveFrames = capacityFrames
+        val output = start(startupFrames = 2_880)
+        val source = ShortArray(12_000) { (it + 1).toShort() }
+        output.append(source) { assertNull(it) }
+        finish(output)
+        assertEquals(source.toList(), pcm)
+        assertEquals(listOf(2_880), starts)
+        assertEquals(capacityFrames, effectiveFrames)
+        verify { anyConstructed<AudioTrack.Builder>().setBufferSizeInBytes(19_200) }
+        verify { player.setBufferSizeInFrames(2_880) }
+        verify { player.setBufferSizeInFrames(9_600) }
+    }
+
+    @Test
+    @Config(sdk = [31])
+    fun modernMediaStartupUsesItsWatermarkAndWritesRangesFromTheSameBuffer() {
+        capacityFrames = 9_600
+        effectiveFrames = capacityFrames
+        var threshold = capacityFrames
+        every { player invoke "setStartThresholdInFrames" withArguments listOf(any<Int>()) } answers {
+            threshold = firstArg<Int>()
+            threshold
+        }
+        every { player invoke "getStartThresholdInFrames" withArguments emptyList() } answers { threshold }
+        var firstBuffer: ShortArray? = null
+        var copiedSlices = false
+        every { player.write(any<ShortArray>(), any(), any(), AudioTrack.WRITE_NON_BLOCKING) } answers {
+            val source = firstArg<ShortArray>()
+            val offset = secondArg<Int>()
+            val count = minOf(thirdArg<Int>(), 73)
+            if (firstBuffer == null) firstBuffer = source
+            else if (firstBuffer !== source) copiedSlices = true
+            synchronized(pcm) { pcm.addAll(source.slice(offset until offset + count)) }
+            count
+        }
+        val output = start()
+        val source = ShortArray(12_000) { (it + 1).toShort() }
+        output.append(source) { assertNull(it) }
+        finish(output)
+        assertEquals(source.toList(), pcm)
+        assertEquals(listOf(5_760), starts)
+        assertEquals(5_760, threshold)
+        assertFalse("20 ms writes reuse the dequeued PCM instead of allocating slices", copiedSlices)
+        verify(exactly = 0) { player.setBufferSizeInFrames(any()) }
+    }
+
     @Test fun clampedLegacyThresholdAddsOnlyTheNecessaryTailAndDrainsIt() {
         minimumFrames = 64
         val output = start()
@@ -125,6 +177,110 @@ class VoiceStreamPlaybackTest {
         verify(exactly = 0) { player.play() }
         assertTrue(pcm.isEmpty())
         assertEquals(0, progressEvents.get())
+        verify(exactly = 0) { player.createVolumeShaper(any()) }
+        verify(exactly = 1) { player.release() }
+    }
+
+    @Test fun gracefulStopCancelsInputImmediatelyAndJoinsOneFadeBeforeReleasingTheRoute() {
+        val shaper = mockk<VolumeShaper>(relaxed = true)
+        val fadeEntered = CountDownLatch(1)
+        val allowFade = CountDownLatch(1)
+        val playingObserved = CountDownLatch(1)
+        val stoppedPlaying = AtomicInteger()
+        val released = CountDownLatch(2)
+        val barrier = CountDownLatch(1)
+        every { player.createVolumeShaper(any()) } returns shaper
+        every { shaper.apply(VolumeShaper.Operation.PLAY) } answers {
+            fadeEntered.countDown()
+            check(allowFade.await(2, TimeUnit.SECONDS))
+        }
+        every { player.playbackHeadPosition } answers { if (playing) 1 else 0 }
+        val output = start(startupFrames = 3) { value ->
+            if (value) playingObserved.countDown() else stoppedPlaying.incrementAndGet()
+        }
+        try {
+            output.append(ShortArray(960) { 100 }) { assertNull(it) }
+            assertTrue(playingObserved.await(2, TimeUnit.SECONDS))
+            output.stop { released.countDown() }
+            assertTrue(fadeEntered.await(2, TimeUnit.SECONDS))
+            output.stop { released.countDown() }
+            output.quiesceForRoute { barrier.countDown() }
+            var rejected: String? = null
+            output.append(shortArrayOf(1)) { rejected = it }
+            assertEquals("cancelled:voice_playback", rejected)
+            assertEquals(2L, released.count)
+            assertEquals(1L, barrier.count)
+            assertEquals(0, stoppedPlaying.get())
+            verify(exactly = 0) { player.release() }
+            verify(exactly = 0) { lease.close() }
+            allowFade.countDown()
+            assertTrue(released.await(2, TimeUnit.SECONDS))
+            assertTrue(barrier.await(2, TimeUnit.SECONDS))
+            verify(exactly = 1) { player.createVolumeShaper(any()) }
+            verify(exactly = 1) { shaper.apply(VolumeShaper.Operation.PLAY) }
+            verifyOrder { player.release(); shaper.close(); lease.close() }
+            assertEquals(1, stoppedPlaying.get())
+        } finally { allowFade.countDown() }
+    }
+
+    @Test fun hardStopCanInterruptAnExistingFadeAndReleaseItsWaiters() {
+        val shaper = mockk<VolumeShaper>(relaxed = true)
+        val fadeEntered = CountDownLatch(1)
+        val playingObserved = CountDownLatch(1)
+        val released = CountDownLatch(2)
+        every { player.createVolumeShaper(any()) } returns shaper
+        every { shaper.apply(VolumeShaper.Operation.PLAY) } answers {
+            fadeEntered.countDown()
+            CountDownLatch(1).await()
+        }
+        every { player.playbackHeadPosition } answers { if (playing) 1 else 0 }
+        val output = start(startupFrames = 3) { if (it) playingObserved.countDown() }
+        output.append(ShortArray(960) { 100 }) { assertNull(it) }
+        assertTrue(playingObserved.await(2, TimeUnit.SECONDS))
+        output.stop { released.countDown() }
+        assertTrue(fadeEntered.await(2, TimeUnit.SECONDS))
+        output.stop(immediate = true) { released.countDown() }
+        assertTrue(released.await(2, TimeUnit.SECONDS))
+        verify(exactly = 1) { player.release() }
+        verifyOrder { player.release(); shaper.close(); lease.close() }
+    }
+
+    @Test fun stopDuringRouteDrainKeepsTheOldTrackAliveUntilItsFadeCompletes() {
+        val shaper = mockk<VolumeShaper>(relaxed = true)
+        val playingObserved = CountDownLatch(1)
+        val drainObserved = CountDownLatch(1)
+        val routePaused = AtomicReference<AtomicBoolean>()
+        val fadeEntered = CountDownLatch(1)
+        val allowFade = CountDownLatch(1)
+        val barrier = CountDownLatch(1)
+        val released = CountDownLatch(1)
+        every { player.createVolumeShaper(any()) } returns shaper
+        every { shaper.apply(VolumeShaper.Operation.PLAY) } answers {
+            fadeEntered.countDown()
+            check(allowFade.await(2, TimeUnit.SECONDS))
+        }
+        every { player.playbackHeadPosition } answers {
+            if (routePaused.get()?.get() == true) drainObserved.countDown()
+            if (playing) 1 else 0
+        }
+        val output = start(startupFrames = 3) { if (it) playingObserved.countDown() }
+        routePaused.set(VoiceStreamPlayback::class.java.getDeclaredField("routePause")
+            .apply { isAccessible = true }.get(output) as AtomicBoolean)
+        try {
+            output.append(ShortArray(960) { 100 }) { assertNull(it) }
+            assertTrue(playingObserved.await(2, TimeUnit.SECONDS))
+            output.quiesceForRoute { barrier.countDown() }
+            assertTrue("the route switch reaches the old track's drain", drainObserved.await(2, TimeUnit.SECONDS))
+            output.stop { released.countDown() }
+            assertTrue(fadeEntered.await(2, TimeUnit.SECONDS))
+            assertEquals(1L, barrier.count)
+            verify(exactly = 0) { player.release() }
+            allowFade.countDown()
+            assertTrue(released.await(2, TimeUnit.SECONDS))
+            assertTrue(barrier.await(2, TimeUnit.SECONDS))
+            verify(exactly = 1) { player.createVolumeShaper(any()) }
+            verify(exactly = 1) { anyConstructed<AudioTrack.Builder>().build() }
+        } finally { allowFade.countDown() }
     }
 
     @Test fun startedEventWaitsForPlaybackHeadInsteadOfAppendOrPlayAcknowledgement() {
@@ -195,6 +351,74 @@ class VoiceStreamPlaybackTest {
         output.quiesceForRoute { quiesced.countDown() }
         assertTrue(quiesced.await(2, TimeUnit.SECONDS))
         verify(exactly = 0) { player.play() }
+    }
+
+    private fun exerciseMidPacketRouteReplacement(sourceFrames: Int, expectedStartupFrames: Int) {
+        capacityFrames = 9_600
+        effectiveFrames = capacityFrames
+        val replacement = mockk<AudioTrack>(relaxed = true)
+        val replacementPcm = mutableListOf<Short>()
+        val replacementStarted = CountDownLatch(1)
+        val barrierReached = AtomicInteger()
+        var replacementPlaying = false
+        var replacementBuffer = capacityFrames
+        var framesAtStart = 0
+        every { anyConstructed<AudioTrack.Builder>().build() } returnsMany listOf(player, replacement)
+        every { replacement.state } returns AudioTrack.STATE_INITIALIZED
+        every { replacement.bufferCapacityInFrames } returns capacityFrames
+        every { replacement.bufferSizeInFrames } answers { replacementBuffer }
+        every { replacement.setBufferSizeInFrames(any()) } answers {
+            replacementBuffer = firstArg<Int>().coerceIn(1, capacityFrames)
+            replacementBuffer
+        }
+        every { replacement.write(any<ShortArray>(), any(), any(), AudioTrack.WRITE_NON_BLOCKING) } answers {
+            val source = firstArg<ShortArray>()
+            val offset = secondArg<Int>()
+            val count = minOf(thirdArg<Int>(), 73)
+            val accepted = source.slice(offset until offset + count)
+            replacementPcm.addAll(accepted)
+            synchronized(pcm) { pcm.addAll(accepted) }
+            count
+        }
+        every { replacement.play() } answers {
+            framesAtStart = replacementPcm.size
+            replacementPlaying = true
+            replacementStarted.countDown()
+        }
+        every { replacement.playbackHeadPosition } answers { if (replacementPlaying) replacementPcm.size else 0 }
+        every { lease.awaitReady(any()) } returnsMany listOf(
+            VoiceOutputProfile(1, AudioAttributes.USAGE_MEDIA, false),
+            VoiceOutputProfile(2, AudioAttributes.USAGE_MEDIA, false),
+        )
+        val output = start(startupFrames = 2_880)
+        every { player.write(any<ShortArray>(), any(), any(), AudioTrack.WRITE_NON_BLOCKING) } answers {
+            val source = firstArg<ShortArray>()
+            val offset = secondArg<Int>()
+            val count = thirdArg<Int>()
+            synchronized(pcm) {
+                pcm.addAll(source.slice(offset until offset + count))
+                if (pcm.size == 4_800) output.quiesceForRoute { barrierReached.incrementAndGet() }
+            }
+            count
+        }
+        val source = ShortArray(sourceFrames) { (it + 1).toShort() }
+        output.append(source) { assertNull(it) }
+        assertTrue("replacement starts from its remaining PCM without waiting for EOS", replacementStarted.await(2, TimeUnit.SECONDS))
+        finish(output)
+        assertEquals(1, barrierReached.get())
+        assertEquals(expectedStartupFrames, framesAtStart)
+        assertEquals(source.toList(), pcm)
+        assertEquals(1, progressEvents.get())
+        verify { replacement.setBufferSizeInFrames(expectedStartupFrames) }
+        verify(exactly = 1) { player.release() }
+    }
+
+    @Test fun midPacketRouteReplacementConfiguresItsOwnStartupWatermark() {
+        exerciseMidPacketRouteReplacement(sourceFrames = 12_000, expectedStartupFrames = 2_880)
+    }
+
+    @Test fun shortRemainderAfterRouteReplacementStartsBeforeEos() {
+        exerciseMidPacketRouteReplacement(sourceFrames = 6_240, expectedStartupFrames = 1_440)
     }
 
     @Test

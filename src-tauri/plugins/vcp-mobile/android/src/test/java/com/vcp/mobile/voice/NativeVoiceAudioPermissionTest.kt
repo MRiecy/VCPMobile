@@ -114,7 +114,23 @@ class NativeVoiceAudioPermissionTest {
         assertEquals(1, permissionRequests.size)
         assertEquals("background", events.single().getString("reason"))
         verify(exactly = 0) { audioSession.endCall(any()) }
-        verify(exactly = 0) { output.endCall(any()) }
+        verify(exactly = 0) { output.endCall(any(), any()) }
+    }
+
+    @Test fun endingACallStopsCaptureNowButKeepsItsRouteUntilOutputRelease() {
+        var outputReleased: (() -> Unit)? = null
+        every { output.endCall("call-one", any()) } answers { outputReleased = secondArg(); Unit }
+        val capture = start("ending-call")
+        owner.startVoiceAudio(capture)
+        val ended = mockk<Invoke>(relaxed = true)
+        every { ended.parseArgs(VoiceCallArgs::class.java) } returns VoiceCallArgs().apply { callId = "call-one" }
+        owner.endVoiceCall(ended)
+        verify(exactly = 1) { capture.reject("cancelled:call_ended") }
+        verify(exactly = 0) { audioSession.endCall(any()) }
+        verify(exactly = 0) { ended.resolve() }
+        checkNotNull(outputReleased).invoke()
+        verify(exactly = 1) { audioSession.endCall("call-one") }
+        verify(exactly = 1) { ended.resolve() }
     }
 
     @Test fun destructionRejectsNewRequestsAndIgnoresOldPermissionDelivery() {

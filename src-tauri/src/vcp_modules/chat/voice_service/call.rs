@@ -411,15 +411,20 @@ pub async fn end_voice_conversation(app: AppHandle, call_id: String) -> Result<(
     for id in &ids {
         tts::request_stop(&app, id);
     }
-    let mut result =
-        tauri_plugin_vcp_mobile::voice::end_voice_call(app.clone(), call_id.clone()).await;
-    if let Err(error) = input::stop_voice_call_inputs(app.clone(), call_id).await {
-        result = Err(error);
-    }
+    // Revoke input work immediately. The native call route stays alive until
+    // playback stop acknowledges its physical fade/cleanup, then capture and
+    // the shared audio session can be torn down together.
+    let mut result = input::stop_voice_call_inputs(app.clone(), call_id.clone()).await;
     for id in ids {
         if let Err(error) = tts::stop_tts(app.clone(), id).await {
             result = Err(error);
         }
+    }
+    let route_result = tauri_plugin_vcp_mobile::voice::end_voice_call(app.clone(), call_id).await;
+    // Always finish native cleanup; retain the existing TTS > input > route
+    // error precedence when more than one owner reports a failure.
+    if result.is_ok() {
+        result = route_result;
     }
     if let Err(error) = &result {
         if let Ok(mut inner) = call.inner.lock() {

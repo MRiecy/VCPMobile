@@ -117,6 +117,22 @@ class VoicePlaybackPcmTest {
         assertArrayEquals(contiguous, fragmented)
     }
 
+    @Test fun legacyScoRangeConversionSkipsSurroundingSamplesAndPreservesFilterContinuity() {
+        val pcm = ShortArray(2_401) { (12_000 * sin(2 * PI * 997 * it / 24_000)).toInt().toShort() }
+        val padded = ShortArray(pcm.size + 18) { Short.MAX_VALUE }
+        pcm.copyInto(padded, 7)
+        val resampler = VoiceLegacyScoResampler()
+        val output = mutableListOf<Short>()
+        var position = 0
+        while (position < pcm.size) {
+            val count = minOf(137, pcm.size - position)
+            output.addAll(resampler.process(padded, 7 + position, count).asIterable())
+            position += count
+        }
+        output.addAll(resampler.finish().asIterable())
+        assertArrayEquals(convert(pcm, pcm.size), output.toShortArray())
+    }
+
     @Test fun legacyScoDownsamplingFiltersFrequenciesAboveItsNyquistLimit() {
         fun tone(frequency: Int) = ShortArray(24_000) { (20_000 * sin(2 * PI * frequency * it / 24_000)).toInt().toShort() }
         fun rms(samples: ShortArray) = sqrt(samples.drop(512).sumOf { it.toDouble() * it } / (samples.size - 512))

@@ -109,7 +109,7 @@ final class NativeVoiceAudio {
         renderer.onFault = { [weak self] reason in
             guard let self = self else { return }
             self.finish(reason: reason, error: true)
-            self.playback?.cancelCurrent(reason: reason)
+            self.playback?.cancelCurrent(reason: reason, immediately: true)
             self.renderer.destroy()
         }
     }
@@ -151,9 +151,22 @@ final class NativeVoiceAudio {
         callId = nil
         // Rust separately stops the playback belonging to this call. An
         // independent output owner keeps its queued PCM across graph demotion.
+        reconcileRenderer()
+    }
+
+    private func reconcileRenderer() {
+        // A logical call exit must not destroy audio that is finishing its fade.
+        // The terminal output status rechecks the latest owners after it stops.
+        guard playback?.isStopping != true else { return }
+        if callId != nil, renderer.isVoice { return }
         if playback?.ownsPlayback == true {
-            do { try renderer.ensure(voice: false) }
-            catch { playback?.cancelCurrent(reason: voiceAudioReason(error, fallback: "voice_playback_failed")); renderer.destroy() }
+            if callId == nil {
+                do { try renderer.ensure(voice: false) }
+                catch {
+                    playback?.cancelCurrent(reason: voiceAudioReason(error, fallback: "voice_playback_failed"), immediately: true)
+                    renderer.destroy()
+                }
+            }
         } else { renderer.destroy() }
     }
 
@@ -284,7 +297,7 @@ final class NativeVoiceAudio {
         } catch {
             let reason = voiceAudioReason(error, fallback: "audio_start_failed")
             finish(reason: reason, error: true)
-            if renderer.engine == nil { playback?.cancelCurrent(reason: reason) }
+            if renderer.engine == nil { playback?.cancelCurrent(reason: reason, immediately: true) }
         }
     }
 
@@ -488,7 +501,7 @@ final class NativeVoiceAudio {
                     playback.start(id: args.playbackId, startupFrames: args.startupFrames, invoke: invoke)
                 } catch {
                     let reason = voiceAudioReason(error, fallback: "voice_playback_failed")
-                    playback?.cancelCurrent(reason: reason)
+                    playback?.cancelCurrent(reason: reason, immediately: true)
                     invoke.reject(reason)
                 }
             }
@@ -511,7 +524,7 @@ final class NativeVoiceAudio {
             DispatchQueue.main.async { [self] in
                 guard let playback = playback else { invoke.reject("cancelled:voice_playback"); return }
                 guard renderer.engine?.isRunning == true else {
-                    playback.cancelCurrent(reason: "audio_engine_not_running")
+                    playback.cancelCurrent(reason: "audio_engine_not_running", immediately: true)
                     invoke.reject("audio_engine_not_running"); return
                 }
                 playback.finish(id: args.playbackId, invoke: invoke)
@@ -536,7 +549,11 @@ final class NativeVoiceAudio {
             let args = try invoke.parseArgs(VoicePlaybackArgs.self)
             DispatchQueue.main.async { [self] in
                 guard validIdentity(args.playbackId) else { invoke.reject("invalid_voice_playback_id"); return }
-                do { try ensurePlayback().stop(id: args.playbackId); invoke.resolve() }
+                do {
+                    try ensurePlayback().stop(id: args.playbackId, immediately: renderer.engine?.isRunning != true) {
+                        invoke.resolve()
+                    }
+                }
                 catch { invoke.reject(voiceAudioReason(error, fallback: "voice_playback_failed")) }
             }
         } catch { invoke.reject("invalid_voice_playback_args") }
@@ -563,8 +580,7 @@ final class NativeVoiceAudio {
             // Recheck ownership on the next control turn before releasing I/O.
             if id == nil {
                 DispatchQueue.main.async { [weak self] in
-                    guard let self = self, self.playback?.ownsPlayback != true, !self.renderer.isVoice else { return }
-                    self.renderer.destroy()
+                    self?.reconcileRenderer()
                 }
             }
         }

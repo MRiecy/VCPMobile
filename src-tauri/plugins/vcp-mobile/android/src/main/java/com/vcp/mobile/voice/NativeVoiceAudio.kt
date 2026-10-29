@@ -122,10 +122,11 @@ internal class NativeVoiceAudio(
         if (!validId(args.callId)) { invoke.deliverError("invalid_voice_call"); return@onMain }
         if (audioSession.hasCall(args.callId)) {
             current.get()?.takeIf { it.callId == args.callId }?.let { finish(it, "stopped", "call_ended") }
-            voiceOutput.endCall(args.callId)
         }
-        audioSession.endCall(args.callId)
-        invoke.deliverResult()
+        voiceOutput.endCall(args.callId) {
+            audioSession.endCall(args.callId)
+            invoke.deliverResult()
+        }
     }
 
     fun startVoiceAudio(invoke: Invoke) = onMain {

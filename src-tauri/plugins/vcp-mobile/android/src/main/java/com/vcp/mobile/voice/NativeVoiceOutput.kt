@@ -40,7 +40,7 @@ internal class NativeVoiceOutput(
     private val main = Handler(Looper.getMainLooper())
     private val current = AtomicReference<Output?>(null)
     private val state = AtomicReference(Snapshot())
-    private val cancelled = LinkedHashSet<String>()
+    private val terminalReasons = LinkedHashMap<String, String>()
     private val worker = ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue(1),
         { task -> Thread(task, "vcp-voice-playback").apply { isDaemon = true } }, ThreadPoolExecutor.AbortPolicy())
     private var destroyed = false
@@ -59,11 +59,12 @@ internal class NativeVoiceOutput(
         catch (_: Exception) { invoke.deliverError("invalid_voice_playback_request"); return@onMain }
         if (!validId(args.playbackId)) { invoke.deliverError("invalid_voice_playback_id"); return@onMain }
         if (args.startupFrames !in 1..5_760) { invoke.deliverError("invalid_voice_playback_buffer"); return@onMain }
-        if (destroyed || cancelled.contains(args.playbackId)) { invoke.deliverError("cancelled:voice_playback"); return@onMain }
+        if (destroyed) { invoke.deliverError("cancelled:voice_playback"); return@onMain }
+        terminalReasons[args.playbackId]?.let { invoke.deliverError(it); return@onMain }
         if (current.get()?.id == args.playbackId) { invoke.deliverError("voice_playback_already_started"); return@onMain }
         if (current.get() != null) { invoke.deliverError("voice_playback_busy"); return@onMain }
         val reply = Reply(invoke)
-        val lease = try { audioSession.acquireOutput { reason -> onMain { current.get()?.takeIf { it.id == args.playbackId }?.let { stop(it, reason) } } } }
+        val lease = try { audioSession.acquireOutput { reason -> onMain { current.get()?.takeIf { it.id == args.playbackId }?.let { stop(it, reason, immediate = true) } } } }
         catch (_: Throwable) { reply.reject("voice_playback_route_unavailable"); return@onMain }
         val output = Output(args.playbackId, lease)
         output.player = VoiceStreamPlayback(args.playbackId, args.startupFrames, lease, worker, started = { onMain {
@@ -71,10 +72,10 @@ internal class NativeVoiceOutput(
         } }, playingChanged = { playing -> onMain {
             if (current.get() === output) state.set(Snapshot(output.id.takeIf { playing }, playing))
         } }, ended = { error -> onMain {
-            if (current.get() === output) {
+            if (current.compareAndSet(output, null)) {
                 state.set(Snapshot())
-                if (error == null) { current.compareAndSet(output, null); remember(output.id) }
-                else Log.w("VcpVoiceOutput", error)
+                remember(output.id, error ?: "cancelled:voice_playback")
+                if (error != null) Log.w("VcpVoiceOutput", error)
             }
         } })
         current.set(output)
@@ -86,7 +87,7 @@ internal class NativeVoiceOutput(
         val args = try { invoke.parseArgs(VoicePlaybackArgs::class.java) }
         catch (_: Exception) { invoke.deliverError("invalid_voice_playback_request"); return@onMain }
         val output = current.get()?.takeIf { it.id == args.playbackId }
-        if (output == null) { invoke.deliverError("cancelled:voice_playback"); return@onMain }
+        if (output == null) { invoke.deliverError(terminalReason(args.playbackId)); return@onMain }
         val reply = Reply(invoke)
         output.player.endSegment { error -> complete(output, reply, error) }
     }
@@ -95,7 +96,7 @@ internal class NativeVoiceOutput(
         val args = try { invoke.parseArgs(AppendVoicePlaybackArgs::class.java) }
         catch (_: Exception) { invoke.deliverError("invalid_voice_playback_request"); return@onMain }
         val output = current.get()?.takeIf { it.id == args.playbackId }
-        if (output == null) { invoke.deliverError("cancelled:voice_playback"); return@onMain }
+        if (output == null) { invoke.deliverError(terminalReason(args.playbackId)); return@onMain }
         val samples = try {
             require(args.pcmBase64.isNotEmpty() && args.pcmBase64.length <= 43_692)
             val bytes = Base64.decode(args.pcmBase64, Base64.DEFAULT)
@@ -110,7 +111,7 @@ internal class NativeVoiceOutput(
         val args = try { invoke.parseArgs(VoicePlaybackArgs::class.java) }
         catch (_: Exception) { invoke.deliverError("invalid_voice_playback_request"); return@onMain }
         val output = current.get()?.takeIf { it.id == args.playbackId }
-        if (output == null) { invoke.deliverError("cancelled:voice_playback"); return@onMain }
+        if (output == null) { invoke.deliverError(terminalReason(args.playbackId)); return@onMain }
         val reply = Reply(invoke)
         output.player.finish { error -> complete(output, reply, error, finished = true) }
     }
@@ -120,16 +121,21 @@ internal class NativeVoiceOutput(
         catch (_: Exception) { invoke.deliverError("invalid_voice_playback_request"); return@onMain }
         if (!validId(args.playbackId)) { invoke.deliverError("invalid_voice_playback_id"); return@onMain }
         remember(args.playbackId)
-        current.get()?.takeIf { it.id == args.playbackId }?.let { stop(it) }
-        invoke.deliverResult()
+        val output = current.get()?.takeIf { it.id == args.playbackId }
+        if (output == null) invoke.deliverResult()
+        else stop(output) { invoke.deliverResult() }
     }
 
-    fun endCall(callId: String) = onMain { current.get()?.takeIf { it.lease.callId == callId }?.let { stop(it) } }
+    fun endCall(callId: String, released: () -> Unit) = onMain {
+        val output = current.get()?.takeIf { it.lease.callId == callId }
+        if (output == null) released() else stop(output, released = released)
+    }
 
     fun destroy() = onMain {
         destroyed = true
-        current.get()?.let { stop(it) }
-        worker.shutdownNow()
+        current.get()?.let { stop(it, immediate = true) }
+        // A queued start must still run its terminal cleanup and settle its stop waiters.
+        worker.shutdown()
     }
 
     private fun complete(output: Output, reply: Reply, error: String?, finished: Boolean = false) = onMain {
@@ -141,14 +147,22 @@ internal class NativeVoiceOutput(
         }
     }
 
-    private fun stop(output: Output, reason: String = "cancelled:voice_playback") {
-        if (!current.compareAndSet(output, null)) return
-        state.set(Snapshot())
-        remember(output.id)
-        output.player.stop(reason)
+    private fun stop(output: Output, reason: String = "cancelled:voice_playback", immediate: Boolean = false,
+        released: (() -> Unit)? = null) {
+        if (current.get() !== output) { released?.invoke(); return }
+        remember(output.id, reason)
+        if (released == null) output.player.stop(reason, immediate)
+        else output.player.stop(reason, immediate) { onMain {
+            if (current.compareAndSet(output, null)) state.set(Snapshot())
+            released()
+        } }
     }
 
-    private fun remember(id: String) { cancelled.add(id); if (cancelled.size > 64) cancelled.remove(cancelled.first()) }
+    private fun terminalReason(id: String) = terminalReasons[id] ?: "cancelled:voice_playback"
+    private fun remember(id: String, reason: String = "cancelled:voice_playback") {
+        terminalReasons.putIfAbsent(id, reason)
+        if (terminalReasons.size > 64) terminalReasons.remove(terminalReasons.keys.first())
+    }
     private fun validId(id: String) = id.matches(Regex("[A-Za-z0-9_-]{1,128}"))
     private fun onMain(action: () -> Unit) { if (Looper.myLooper() == Looper.getMainLooper()) action() else main.post(action) }
 }

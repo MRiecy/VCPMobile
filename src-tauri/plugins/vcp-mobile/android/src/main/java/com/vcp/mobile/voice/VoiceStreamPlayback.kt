@@ -3,6 +3,7 @@ package com.vcp.mobile.voice
 import android.media.AudioAttributes
 import android.media.AudioFormat
 import android.media.AudioTrack
+import android.media.VolumeShaper
 import android.os.Build
 import android.os.SystemClock
 import android.util.Log
@@ -16,7 +17,7 @@ import java.util.concurrent.atomic.AtomicReference
 /** A bounded PCM sink. Every request remains cancellable until its own acknowledgement. */
 internal class VoiceStreamPlayback(
     val id: String,
-    startupFrames: Int,
+    private val startupFrames: Int,
     private val lease: VoiceAudioSession.OutputLease,
     private val executor: Executor,
     private val started: () -> Unit,
@@ -33,6 +34,9 @@ internal class VoiceStreamPlayback(
     private val queue = VoicePlaybackQueue(startupFrames = startupFrames)
     private val stopped = AtomicBoolean(false)
     private val completed = AtomicBoolean(false)
+    private val immediateStop = AtomicBoolean(false)
+    private val terminalLock = Any()
+    private val stopWaiters = mutableListOf<() -> Unit>()
     private val failure = AtomicReference<String?>(null)
     private val track = AtomicReference<AudioTrack?>(null)
     private val finishRequest = AtomicReference<Completion?>(null)
@@ -55,10 +59,9 @@ internal class VoiceStreamPlayback(
         try {
             executor.execute { worker = Thread.currentThread(); runPlayback(ready) }
         } catch (_: RejectedExecutionException) {
-            completed.set(true)
             failure.set("voice_playback_busy")
             ready.complete("voice_playback_busy")
-            ended("voice_playback_busy")
+            terminate("voice_playback_busy", null, drained = false)
         }
     }
 
@@ -89,21 +92,32 @@ internal class VoiceStreamPlayback(
         catch (error: Exception) { completion.complete(error.message ?: "voice_playback_failed") }
     }
 
-    fun stop(reason: String = "cancelled:voice_playback") {
-        failure.compareAndSet(null, reason)
-        stopped.set(true)
-        queue.cancel(reason)
-        requests.toList().forEach { it.complete(reason) }
-        releaseTrack()
-        lease.close()
-        quiesce.getAndSet(null)?.invoke()
-        playingChanged(false)
-        worker?.interrupt()
+    fun stop(reason: String = "cancelled:voice_playback", immediate: Boolean = false, released: (() -> Unit)? = null) {
+        var firstStop = false
+        val alreadyReleased = synchronized(terminalLock) {
+            if (completed.get()) true else {
+                released?.let { stopWaiters.add(it) }
+                failure.compareAndSet(null, reason)
+                if (immediate) immediateStop.set(true)
+                firstStop = stopped.compareAndSet(false, true)
+                // Serialize this wakeup with fade entry so it cannot interrupt the new fade.
+                if (firstStop || immediate) worker?.interrupt()
+                false
+            }
+        }
+        if (alreadyReleased) { released?.invoke(); return }
+        if (firstStop) {
+            queue.cancel(reason)
+            requests.toList().forEach { it.complete(reason) }
+        }
     }
 
     fun quiesceForRoute(ready: () -> Unit) {
-        if (stopped.get() || completed.get() || routePause.get() || track.get() == null) ready()
-        else quiesce.set(ready)
+        val alreadyQuiet = synchronized(terminalLock) {
+            if (completed.get() || (!stopped.get() && (routePause.get() || track.get() == null))) true
+            else { quiesce.set(ready); false }
+        }
+        if (alreadyQuiet) ready()
     }
 
     private fun runPlayback(ready: Completion) {
@@ -111,6 +125,7 @@ internal class VoiceStreamPlayback(
         var sink: Sink? = null
         var converter: VoiceLegacyScoResampler? = null
         var gateReleased = false
+        var drained = false
         try {
             if (stopped.get()) return
             fun ensureOutput() {
@@ -120,6 +135,7 @@ internal class VoiceStreamPlayback(
                     converter?.let { old.write(it.finish()) }
                     old.finishPriming()
                     old.drain()
+                    if (stopped.get()) throw InterruptedException("cancelled:voice_playback")
                     old.close()
                     sink = null
                 }
@@ -146,14 +162,15 @@ internal class VoiceStreamPlayback(
                         gateReleased = true
                         Log.d("VcpVoiceOutput", "gate id=$id elapsed_ms=${SystemClock.elapsedRealtime() - createdAt} frames=${next.samples.size}")
                     }
-                    sink!!.preparePriming(next.samples.size)
                     var position = 0
                     while (!stopped.get() && position < next.samples.size) {
                         ensureOutput()
-                        val end = minOf(position + 480, next.samples.size)
-                        val source = next.samples.copyOfRange(position, end)
-                        sink!!.write(converter?.process(source) ?: source)
-                        position = end
+                        sink!!.preparePriming(next.samples.size - position)
+                        val count = minOf(480, next.samples.size - position)
+                        val converted = converter?.process(next.samples, position, count)
+                        if (converted == null) sink!!.write(next.samples, position, count)
+                        else sink!!.write(converted)
+                        position += count
                     }
                 } else {
                     sink?.idle()
@@ -164,27 +181,46 @@ internal class VoiceStreamPlayback(
                 }
                 if (next.finished) break
             }
-            if (!stopped.get()) converter?.let { sink?.write(it.finish()) }
-            sink?.finishPriming()
-            sink?.drain()
-            if (!stopped.get()) finishRequest.get()?.complete()
+            if (!stopped.get()) {
+                converter?.let { sink?.write(it.finish()) }
+                sink?.finishPriming()
+                sink?.drain()
+                drained = !stopped.get()
+            }
         } catch (error: Throwable) {
             if (!stopped.get()) terminalError = "voice_playback_failed:${error.message ?: error.javaClass.simpleName}"
         } finally {
-            completed.set(true)
-            val reason = terminalError ?: failure.get() ?: "cancelled:voice_playback"
-            failure.compareAndSet(null, reason)
-            queue.cancel(reason)
-            requests.toList().forEach { it.complete(reason) }
-            releaseTrack()
-            routePause.set(true)
-            quiesce.getAndSet(null)?.invoke()
-            lease.close()
-            playingChanged(false)
-            ended(terminalError)
-            worker = null
-            Thread.interrupted()
+            terminate(terminalError, sink, drained)
         }
+    }
+
+    private fun terminate(terminalError: String?, sink: Sink?, drained: Boolean) {
+        // The interrupt only wakes normal writes/route waits. The worker owns the remaining fade.
+        synchronized(terminalLock) { Thread.interrupted() }
+        if (stopped.get() && !immediateStop.get() && terminalError == null) {
+            runCatching { sink?.fadeOut() }
+                .onFailure { Log.w("VcpVoiceOutput", "fade_failed id=$id", it) }
+        }
+        releaseTrack()
+        // Closing a shaper removes its gain; never do that while its track can still sound.
+        sink?.closeFade()
+        routePause.set(true)
+        lease.close()
+        playingChanged(false)
+        val reason = terminalError ?: failure.get() ?: "cancelled:voice_playback"
+        failure.compareAndSet(null, reason)
+        if (drained && !stopped.get()) finishRequest.get()?.complete()
+        queue.cancel(reason)
+        requests.toList().forEach { it.complete(reason) }
+        val (barrier, waiters) = synchronized(terminalLock) {
+            worker = null
+            completed.set(true)
+            quiesce.getAndSet(null) to stopWaiters.toList().also { stopWaiters.clear() }
+        }
+        barrier?.invoke()
+        ended(terminalError)
+        waiters.forEach { it() }
+        Thread.interrupted()
     }
 
     private inner class Sink(val profile: VoiceOutputProfile) : AutoCloseable {
@@ -202,6 +238,7 @@ internal class VoiceStreamPlayback(
         private var restoreBuffer = false
         private var realWritten = 0L
         private var padded = 0L
+        private var stopShaper: VolumeShaper? = null
         val hasStarted: Boolean get() = started
 
         init {
@@ -211,7 +248,8 @@ internal class VoiceStreamPlayback(
                 .setAudioAttributes(AudioAttributes.Builder().setUsage(profile.usage).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
                 .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                     .setSampleRate(rate).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
-                .setBufferSizeInBytes(maxOf(minimum, rate / 25 * 2)).setTransferMode(AudioTrack.MODE_STREAM).build()
+                // Capacity protects against worker scheduling stalls; it is not the startup watermark.
+                .setBufferSizeInBytes(maxOf(minimum, rate * 400 / 1_000 * 2)).setTransferMode(AudioTrack.MODE_STREAM).build()
             var published = false
             try {
                 check(!stopped.get() && player.state == AudioTrack.STATE_INITIALIZED) { "voice_playback_initialization_failed" }
@@ -229,7 +267,7 @@ internal class VoiceStreamPlayback(
         fun preparePriming(inputFrames: Int) {
             if (started || primingConfigured || inputFrames <= 0) return
             primingConfigured = true
-            configureThreshold(maxOf(1, inputFrames * rate / 24_000))
+            configureThreshold(maxOf(1, minOf(inputFrames, startupFrames) * rate / 24_000))
         }
 
         private fun configureThreshold(available: Int) {
@@ -254,15 +292,16 @@ internal class VoiceStreamPlayback(
             Log.d("VcpVoiceOutput", "play id=$id elapsed_ms=${SystemClock.elapsedRealtime() - createdAt} rate=$rate capacity=${player.bufferCapacityInFrames} buffer=${player.bufferSizeInFrames} threshold=$startThreshold real_frames=$realWritten padding_frames=$padded")
         }
 
-        fun write(samples: ShortArray) {
-            writeSamples(samples, padding = false)
+        fun write(samples: ShortArray, offset: Int = 0, count: Int = samples.size - offset) {
+            writeSamples(samples, offset, count, padding = false)
         }
 
-        private fun writeSamples(samples: ShortArray, padding: Boolean) {
-            var position = 0
+        private fun writeSamples(samples: ShortArray, offset: Int, length: Int, padding: Boolean) {
+            var position = offset
+            val end = offset + length
             var lastWrite = SystemClock.elapsedRealtime()
-            while (position < samples.size && !stopped.get()) {
-                val count = player.write(samples, position, minOf(rate / 50, samples.size - position), AudioTrack.WRITE_NON_BLOCKING)
+            while (position < end && !stopped.get()) {
+                val count = player.write(samples, position, minOf(rate / 50, end - position), AudioTrack.WRITE_NON_BLOCKING)
                 check(count >= 0) { "voice_playback_write_failed:$count" }
                 if (count == 0) {
                     // The prefill is bounded by the actual driver capacity, not this packet's size.
@@ -287,7 +326,7 @@ internal class VoiceStreamPlayback(
             primingConfigured = true
             configureThreshold(written.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
             val missing = (startThreshold - written).coerceAtLeast(0).toInt()
-            if (missing > 0) writeSamples(ShortArray(missing), padding = true)
+            if (missing > 0) writeSamples(ShortArray(missing), 0, missing, padding = true)
             play()
         }
 
@@ -313,12 +352,29 @@ internal class VoiceStreamPlayback(
         }
 
         fun idle() { if (played() >= written) report(false) }
+        fun fadeOut() {
+            if (!started || immediateStop.get() || played() >= written) return
+            stopShaper = player.createVolumeShaper(VolumeShaper.Configuration.Builder()
+                .setInterpolatorType(VolumeShaper.Configuration.INTERPOLATOR_TYPE_LINEAR)
+                .setCurve(floatArrayOf(0f, 1f), floatArrayOf(1f, 0f))
+                .setDuration(60L).build())
+            stopShaper!!.apply(VolumeShaper.Operation.PLAY)
+            val deadline = System.nanoTime() + 60_000_000L
+            while (!immediateStop.get()) {
+                val remaining = deadline - System.nanoTime()
+                if (remaining <= 0) break
+                try { Thread.sleep(minOf(remaining / 1_000_000L + 1, 5L)) }
+                catch (_: InterruptedException) { /* A hard stop is checked before waiting again. */ }
+            }
+        }
+        fun closeFade() { stopShaper?.let { runCatching { it.close() } }; stopShaper = null }
         fun drain() {
             progress = SystemClock.elapsedRealtime()
             while (!stopped.get() && played() < written) {
                 check(SystemClock.elapsedRealtime() - progress < 5_000) { "voice_playback_drain_stalled" }
                 Thread.sleep(5)
             }
+            if (stopped.get()) return
             report(false)
             Log.d("VcpVoiceOutput", "drained id=$id real_frames=$realWritten padding_frames=$padded underruns=${player.underrunCount}")
         }

@@ -134,24 +134,25 @@ internal class VoiceLegacyScoResampler {
         }.also { weights -> val sum = weights.sum(); weights.indices.forEach { weights[it] /= sum } }
     }
 
-    fun process(input: ShortArray): ShortArray {
+    fun process(input: ShortArray, offset: Int = 0, count: Int = input.size - offset): ShortArray {
         check(!finished) { "voice_resampler_finished" }
-        inputCount += input.size
-        return convert(input, input.size)
+        require(offset in 0..input.size && count in 0..(input.size - offset))
+        inputCount += count
+        return convert(input, offset, count)
     }
 
     fun finish(): ShortArray {
         check(!finished) { "voice_resampler_finished" }
         finished = true
-        return convert(ShortArray(16), 16)
+        return convert(ShortArray(16), 0, 16)
     }
 
-    private fun convert(input: ShortArray, count: Int): ShortArray {
+    private fun convert(input: ShortArray, offset: Int, count: Int): ShortArray {
         val result = ShortArray(count * 2 / 3 + 32)
         var written = 0
         repeat(count) { index ->
             inputIndex += 1
-            history[(inputIndex % history.size).toInt()] = input[index]
+            history[(inputIndex % history.size).toInt()] = input[offset + index]
             while (outputCount * 3 / 2 + 16 <= inputIndex && outputCount < inputCount * 2 / 3) {
                 val center = outputCount * 3 / 2
                 val weights = phases[(outputCount % 2).toInt()]
