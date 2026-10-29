@@ -17,6 +17,11 @@ pub enum NativeEvent {
     BackgroundExecutionFailure { reason: String },
     #[serde(rename = "voiceAudio")]
     VoiceAudio(crate::voice::NativeVoiceAudioEvent),
+    #[serde(rename = "voiceDocument")]
+    VoiceDocument {
+        #[serde(rename = "documentId")]
+        document_id: String,
+    },
     #[serde(rename = "voicePlayback")]
     VoicePlayback(NativeVoicePlaybackEvent),
     // Configuration/memory notifications do not describe an app phase.
@@ -151,6 +156,17 @@ pub fn collect_service_failure_notices<R: Runtime>(app: &AppHandle<R>) -> Vec<Se
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_document_loss_is_delivered_without_an_audio_session() {
+        let event: NativeEvent = serde_json::from_value(serde_json::json!({
+            "event": "voiceDocument", "payload": { "documentId": "42" },
+        })).unwrap();
+        assert!(matches!(event, NativeEvent::VoiceDocument { document_id } if document_id == "42"));
+        assert!(serde_json::from_value::<NativeEvent>(serde_json::json!({
+            "event": "voiceDocument", "payload": {},
+        })).is_err());
+    }
 
     #[test]
     fn native_playback_started_keeps_its_exact_output_identity() {

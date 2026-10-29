@@ -384,10 +384,12 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         errorMsg.value = null;
         hasBootstrapped.value = false;
 
-        // Retire previous page-owned playback even if this document stops at
-        // the permission guide. This owner needs no database initialization.
-        // The cached connection is never repeated on foreground/online.
-        await useVoiceDocumentStore().connect();
+        // Revoke the previous document's capture and independent playback even
+        // if startup stops at the permission guide. Playback release has its
+        // own admission barrier; the cached voice connection does not await it.
+        void useVoiceDocumentStore().connect().catch(error => {
+          console.warn('[Lifecycle] Voice document connection failed:', error);
+        });
 
         // Android keeps its existing required keepalive setup. iOS notification
         // authorization is optional and is requested only by the user's action.

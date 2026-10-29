@@ -117,7 +117,7 @@ export const useBubbleNarration = defineStore('bubbleNarration', () => {
         if (!rawText.trim()) { notify('此消息没有可朗读的正文内容。', task); return; }
         await ensureListening();
         if (!current()) return;
-        const documentId = await voiceDocument.connect();
+        const documentId = await voiceDocument.connectPlayback();
         if (!current()) return;
         ownedTask = task;
         task.submitted = true;

@@ -9,7 +9,6 @@ import FullScreenEditor from '@/components/ui/FullScreenEditor.vue';
 import { attachMenuOpen } from '@/features/chat/attachMenuController';
 import { useVoiceCallStore } from '@/features/chat/voice/voiceCallStore';
 import type { VoiceCallSnapshot } from '@/features/chat/voice/voiceConversation';
-import type { VoiceAudioEnd } from '@/features/chat/voice/microphoneMonitor';
 import { useChatSessionStore } from '@/core/stores/chatSessionStore';
 import { useChatHistoryStore } from '@/core/stores/chatHistoryStore';
 import { useAttachmentStore } from '@/core/stores/attachmentStore';
@@ -21,16 +20,10 @@ import { mountWithPinia } from '@/tests/utils/mount';
 import { emitTauriEvent, mockInvoke } from '@/tests/mocks/tauri';
 
 const audio = vi.hoisted(() => ({
-  startMonitor: vi.fn(), stopMonitor: vi.fn(), emitEnded: vi.fn<(event: VoiceAudioEnd) => void>(),
+  startCapture: vi.fn(), stopCapture: vi.fn(),
 }));
 
 vi.mock('@/core/utils/platform', () => ({ isAndroid: true, isIOS: false }));
-vi.mock('@/features/chat/voice/microphoneMonitor', () => ({
-  createMicrophoneMonitor: (_onLevel: unknown, onEnded: (event: VoiceAudioEnd) => void) => {
-    audio.emitEnded.mockImplementation(onEnded);
-    return { start: audio.startMonitor, stop: audio.stopMonitor, observe: vi.fn(), detach: vi.fn() };
-  },
-}));
 vi.mock('@/core/composables/useKeyboardInsets', async () => {
   const { ref } = await import('vue');
   return { useKeyboardInsets: () => ({ keyboardHeight: ref(0), forceRecalculate: vi.fn() }) };
@@ -116,8 +109,11 @@ function editorSurface() {
 beforeEach(() => {
   attachMenuOpen.value = false;
   for (const mock of Object.values(audio)) mock.mockReset();
-  audio.startMonitor.mockResolvedValue(true);
-  audio.stopMonitor.mockResolvedValue(undefined);
+  audio.startCapture.mockResolvedValue({ configured: true });
+  audio.stopCapture.mockResolvedValue(undefined);
+  mockInvoke('allocate_voice_document', () => 'document-1');
+  mockInvoke('start_voice_microphone', () => audio.startCapture());
+  mockInvoke('close_voice_microphone', () => audio.stopCapture());
   window.history.replaceState({ vcpRoot: true, vcpMain: true }, '', '#/chat');
   vi.spyOn(window.history, 'back').mockImplementation(() => {
     window.history.replaceState({ vcpRoot: true, vcpMain: true }, '');
@@ -287,7 +283,9 @@ describe('chat scene voice transitions', () => {
     await flushPromises();
 
     const message = '音频已被其他应用接管，点击麦克风重新开启。';
-    audio.emitEnded({ kind: 'stopped', sessionId: 'capture', audioEpoch: 1, reason: 'audio_focus_lost' });
+    snapshot.revision += 1;
+    snapshot.micStopReason = 'audio_focus_lost';
+    emitTauriEvent('vcp-voice-call', { ...snapshot });
     await nextTick();
     expect(view.get('.voice-control-status').text()).toBe(message);
 
@@ -299,7 +297,7 @@ describe('chat scene voice transitions', () => {
       expect(voice.microphoneState).toBe('error');
       expect(view.get('.voice-control-status').text()).toBe(message);
     }
-    expect(warning.mock.calls.filter(([label]) => label === '[VoiceAudio]')).toHaveLength(1);
+    expect(warning.mock.calls.filter(([label]) => label === '[VoiceAudio]')).toHaveLength(0);
 
     voice.toggleMicrophone();
     snapshot.revision += 1;
@@ -318,8 +316,8 @@ describe('chat scene voice transitions', () => {
   });
 
   it('keeps one status node through pending capture, mute and continuing service work', async () => {
-    const pending = deferred<boolean>();
-    audio.startMonitor.mockReturnValueOnce(pending.promise);
+    const pending = deferred<{ configured: boolean }>();
+    audio.startCapture.mockReturnValueOnce(pending.promise);
     const snapshot: VoiceCallSnapshot = {
       callId: '', target: { ownerId: 'voice-agent', ownerType: 'agent', topicId: 'voice-topic' },
       revision: 1, active: true, micState: 'closed', micStopReason: null, inputState: 'idle',
@@ -344,10 +342,17 @@ describe('chat scene voice transitions', () => {
 
     expect(voice.microphoneState).toBe('requesting');
     expectStatus('');
-    pending.resolve(true);
+    snapshot.micState = 'listening';
+    snapshot.revision += 1;
+    emitTauriEvent('vcp-voice-call', { ...snapshot });
+    pending.resolve({ configured: true });
     await flushPromises();
     expectStatus('正在聆听');
     await view.get('[aria-label="关闭麦克风"]').trigger('click');
+    snapshot.micState = 'closed';
+    snapshot.revision += 1;
+    emitTauriEvent('vcp-voice-call', { ...snapshot });
+    await nextTick();
     expectStatus('');
 
     const updates: Array<[Partial<VoiceCallSnapshot>, string]> = [
@@ -366,7 +371,7 @@ describe('chat scene voice transitions', () => {
     }
     expect(status.get('p').classes()).toContain('is-error');
 
-    audio.startMonitor.mockRejectedValueOnce('microphone_permission_denied');
+    audio.startCapture.mockRejectedValueOnce('microphone_permission_denied');
     await view.get('[aria-label="开启麦克风"]').trigger('click');
     await flushPromises();
     expectStatus('麦克风权限未开启，请在系统设置中允许后重试。');

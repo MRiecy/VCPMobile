@@ -27,7 +27,7 @@ beforeEach(() => {
   setActivePinia(pinia);
   context.voice = reactive({ active: false });
   context.notify.mockReset();
-  mockInvoke('allocate_tts_document', () => '42');
+  mockInvoke('allocate_voice_document', () => '42');
   useChatSessionStore().setConversation({ id: 'agent', type: 'agent' }, 'topic');
   mockInvoke('start_tts_session', () => ({ configured: true }));
   mockInvoke('stop_tts', () => undefined);

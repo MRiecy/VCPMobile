@@ -302,6 +302,18 @@ final class NativeEventSubscription {
         }
     }
 
+    func sendVoiceDocument(_ payload: NativeVoiceDocumentEvent) -> Bool {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard let channel = channel else { return false }
+        do {
+            try channel.send(NativeEvent(event: "voiceDocument", payload: payload))
+            return true
+        } catch {
+            NSLog("[VcpVoice] Document invalidation delivery failed: %@", error.localizedDescription)
+            return false
+        }
+    }
+
     private func invalidateSubscription() {
         dispatchPrecondition(condition: .onQueue(.main))
         generation = UUID()

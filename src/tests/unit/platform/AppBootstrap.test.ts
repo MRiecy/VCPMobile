@@ -58,7 +58,7 @@ describe('platform-aware bootstrap', () => {
     backgroundServiceFailures = [];
     logStatus = 'connected';
     logConfigurationError = null;
-    mockInvoke('allocate_tts_document', () => '42');
+    mockInvoke('allocate_voice_document', () => '42');
     mockInvoke('get_system_snapshot', () => ({
       lifecycle: null,
       core: 'ready',
@@ -76,33 +76,34 @@ describe('platform-aware bootstrap', () => {
     vi.useRealTimers();
   });
 
-  it('waits for independent playback release before READY and never reconnects on foreground hydration', async () => {
+  it('starts voice document admission without blocking READY on physical release', async () => {
     let release!: () => void;
-    mockInvoke('connect_tts_document', () => new Promise<void>(resolve => { release = resolve; }));
+    mockInvoke('connect_voice_document', () => new Promise<void>(resolve => { release = resolve; }));
     const lifecycle = useAppLifecycleStore();
     const boot = lifecycle.bootstrap();
     await flushPromises();
-    expect(lifecycle.state).not.toBe('READY');
-    expect(invokeMock).toHaveBeenCalledWith('connect_tts_document', { documentId: '42' });
+    expect(lifecycle.state).toBe('READY');
+    expect(invokeMock).toHaveBeenCalledWith('connect_voice_document', { documentId: '42' });
     release();
     await boot;
     expect(lifecycle.state).toBe('READY');
     await lifecycle.hydrateSystemStatus();
     await lifecycle.bootstrap(true);
-    expect(invokeMock.mock.calls.filter(([command]) => command === 'connect_tts_document')).toHaveLength(1);
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'connect_voice_document')).toHaveLength(1);
+    expect(invokeMock.mock.calls.some(([command]) => command === 'connect_tts_document')).toBe(false);
   });
 
-  it('keeps a failed native release in the startup retry flow using the same document', async () => {
+  it('keeps the UI available after a native release failure and retries with the same document', async () => {
     let failed = true;
-    mockInvoke('connect_tts_document', () => failed ? Promise.reject(new Error('native stop failed')) : undefined);
+    mockInvoke('connect_voice_document', () => failed ? Promise.reject(new Error('native stop failed')) : undefined);
     const lifecycle = useAppLifecycleStore();
-    await expect(lifecycle.bootstrap()).rejects.toThrow('native stop failed');
-    expect(lifecycle.state).toBe('ERROR');
+    await lifecycle.bootstrap();
+    expect(lifecycle.state).toBe('READY');
     failed = false;
     await lifecycle.bootstrap(true);
     expect(lifecycle.state).toBe('READY');
-    expect(invokeMock.mock.calls.filter(([command]) => command === 'allocate_tts_document')).toHaveLength(1);
-    expect(invokeMock.mock.calls.filter(([command]) => command === 'connect_tts_document')
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'allocate_voice_document')).toHaveLength(1);
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'connect_voice_document')
       .map(([, args]) => args?.documentId)).toEqual(['42', '42']);
   });
 
@@ -263,12 +264,12 @@ describe('platform-aware bootstrap', () => {
 
     await lifecycle.bootstrap();
     expect(lifecycle.state).toBe('PERMISSIONS');
-    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual([
-      'allocate_tts_document',
-      'connect_tts_document',
+    expect(invokeMock.mock.calls.map(([command]) => command)).toEqual(expect.arrayContaining([
+      'allocate_voice_document',
+      'connect_voice_document',
       'plugin:vcp-mobile|check_all_permissions',
       'plugin:vcp-mobile|check_notification_listener_permission',
-    ]);
+    ]));
 
     mockInvoke('plugin:vcp-mobile|check_all_permissions', () => ({ notification: true, battery: true }));
     await lifecycle.bootstrap(true);

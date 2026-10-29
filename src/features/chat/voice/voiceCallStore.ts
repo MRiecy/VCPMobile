@@ -1,9 +1,10 @@
 import { defineStore } from 'pinia';
-import { onScopeDispose, ref, shallowRef, watch } from 'vue';
+import { computed, onScopeDispose, ref, shallowRef, watch } from 'vue';
 import { useChatSessionStore, type ConversationKey } from '../../../core/stores/chatSessionStore';
 import { useAppLifecycleStore } from '../../../core/stores/appLifecycle';
 import { createMicrophoneMonitor } from './microphoneMonitor';
 import { createVoiceConversation, type VoiceCallSnapshot, type VoiceServiceView } from './voiceConversation';
+import { useVoiceDocumentStore } from './voiceDocument';
 
 export type MicrophoneState = 'off' | 'requesting' | 'on' | 'error';
 
@@ -48,13 +49,20 @@ const audioErrorMessage = (error: unknown, fallback: string) => {
 export const useVoiceCallStore = defineStore('voiceCall', () => {
   const session = useChatSessionStore();
   const lifecycle = useAppLifecycleStore();
+  const document = useVoiceDocumentStore();
   const active = ref(false);
   const conversation = shallowRef<ConversationKey | null>(null);
-  const microphoneState = ref<MicrophoneState>('off');
+  const captureState = ref<VoiceCallSnapshot['micState']>('closed');
+  const microphonePending = ref(false);
   const level = ref(0);
   const bands = shallowRef<readonly number[]>([]);
   const playbackActive = ref(false);
   const errorMessage = ref('');
+  const microphoneState = computed<MicrophoneState>(() => {
+    if (captureState.value === 'listening') return 'on';
+    if (captureState.value === 'starting' || captureState.value === 'stopping' || microphonePending.value) return 'requesting';
+    return errorMessage.value ? 'error' : 'off';
+  });
   const serviceState = ref<VoiceServiceView['state']>('off');
   const serviceMessage = ref('');
   const partialText = ref('');
@@ -62,6 +70,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   const replyState = ref<VoiceCallSnapshot['replyState']>('idle');
   const ttsState = ref<VoiceCallSnapshot['ttsState']>('idle');
   let microphoneGeneration = 0;
+  let microphoneStopReason: string | null = null;
 
   const syncPlaybackState = () => {
     playbackActive.value = ttsState.value === 'speaking';
@@ -70,80 +79,56 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   const voiceConversation = createVoiceConversation({
     conversation: () => conversation.value ?? session.currentConversationKey,
     isConversationCurrent: key => session.isConversationCurrent(key),
+    connectDocument: document.connect,
     onView: view => {
       serviceState.value = view.state;
       serviceMessage.value = view.message;
       partialText.value = view.partialText;
     },
     onSnapshot: snapshot => {
-      monitor.observe(snapshot?.active && snapshot.micState === 'listening' ? snapshot.inputSessionId : null);
+      monitor.observe(snapshot?.active && snapshot.micState !== 'closed' ? snapshot.inputSessionId : null);
       active.value = snapshot?.active ?? false;
       conversation.value = snapshot?.active && session.currentConversationKey
         ? { ...session.currentConversationKey } : null;
       inputState.value = snapshot?.inputState ?? 'idle';
       replyState.value = snapshot?.replyState ?? 'idle';
       ttsState.value = snapshot?.ttsState ?? 'idle';
+      const reasonChanged = microphoneStopReason !== (snapshot?.micStopReason ?? null);
+      microphoneStopReason = snapshot?.micStopReason ?? null;
+      captureState.value = snapshot?.active ? snapshot.micState : 'closed';
+      if (!snapshot?.active || snapshot.micState !== 'closed' || reasonChanged) microphonePending.value = false;
       if (!snapshot?.active || snapshot.micState === 'closed') {
-        // The start intent owns the permission-prompt display until it settles.
-        if (microphoneState.value !== 'requesting' || !snapshot?.active) {
+        if (!microphonePending.value || !snapshot?.active) {
           const reason = snapshot?.active ? snapshot.micStopReason : null;
           // The snapshot retains the cause after the one-off native terminal,
           // including on view recovery and later reply/playback updates.
           errorMessage.value = reason && reason !== 'requested' && reason !== 'background'
+            && reason !== 'webview_replaced' && reason !== 'webview_destroyed' && reason !== 'document_replaced' && reason !== 'document_left'
             && reason !== 'voice_cancelled' && !reason.startsWith('cancelled')
             ? audioErrorText(reason, '麦克风已被系统中断，点击麦克风重试。') : '';
-          microphoneState.value = errorMessage.value ? 'error' : 'off';
           level.value = 0;
           bands.value = [];
           syncPlaybackState();
         }
-      } else if (microphoneState.value !== 'requesting') {
-        microphoneState.value = 'on';
-        errorMessage.value = '';
-      }
+      } else errorMessage.value = snapshot.micStopReason
+        ? audioErrorText(snapshot.micStopReason, '麦克风操作失败，请重试。') : '';
       playbackActive.value = snapshot?.ttsState === 'speaking';
     },
   });
 
   const monitor = createMicrophoneMonitor(
     (value, spectrum) => { level.value = value; bands.value = spectrum; },
-    event => {
-      microphoneGeneration += 1;
-      syncPlaybackState();
-      if (!active.value) return;
-      if (event.kind === 'stopped' && (event.reason === 'background' || event.reason === 'requested')) {
-        microphoneState.value = 'off';
-        errorMessage.value = '';
-      } else {
-        microphoneState.value = 'error';
-        errorMessage.value = audioErrorMessage(event.reason,
-          event.kind === 'error' ? '麦克风发生错误，请重新开启。' : '麦克风已被系统中断，点击麦克风重试。');
-      }
-    },
+    // Native terminals clean up meters; the versioned call snapshot owns state.
+    syncPlaybackState,
     frame => {
       playbackActive.value = frame.playbackActive;
-    },
-    {
-      beforeStart: voiceConversation.start,
-      closeCurrent: voiceConversation.closeMicrophone,
-      currentLifecycleEpoch: () => lifecycle.lifecycleSnapshot?.transitionEpoch ?? null,
-      onConfigured: configured => {
-        if (!configured && !['recognizing', 'thinking', 'speaking'].includes(serviceState.value)) {
-          serviceState.value = 'local';
-          serviceMessage.value = '配置语音服务并重新开麦后，即可识别与朗读。';
-        }
-      },
     },
   );
 
   const stopMicrophone = () => {
     const generation = ++microphoneGeneration;
-    return monitor.stop().then(() => {
-      if (generation !== microphoneGeneration || !active.value) return;
-      syncPlaybackState();
-      microphoneState.value = 'off';
-      errorMessage.value = '';
-    }).catch(error => {
+    microphonePending.value = false;
+    return voiceConversation.closeMicrophone().catch(error => {
       if (generation !== microphoneGeneration || !active.value) return;
       // Keep the latest native projection and a usable close button. A failed
       // command does not prove that capture stopped, and must remain retryable.
@@ -155,17 +140,21 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
     if (!active.value || lifecycle.isBackground) return;
     const generation = ++microphoneGeneration;
     syncPlaybackState();
-    microphoneState.value = 'requesting';
+    microphonePending.value = true;
     errorMessage.value = '';
     try {
-      const started = await monitor.start();
+      const started = await voiceConversation.openMicrophone(lifecycle.lifecycleSnapshot?.transitionEpoch ?? null);
       if (generation !== microphoneGeneration || !active.value) return;
-      microphoneState.value = started ? 'on' : 'off';
+      if (started && !started.configured && !['recognizing', 'thinking', 'speaking'].includes(serviceState.value)) {
+        serviceState.value = 'local';
+        serviceMessage.value = '配置语音服务并重新开麦后，即可识别与朗读。';
+      }
     } catch (error) {
       if (generation !== microphoneGeneration || !active.value) return;
       syncPlaybackState();
-      microphoneState.value = 'error';
       errorMessage.value = audioErrorMessage(error, '麦克风启动失败，请重试。');
+    } finally {
+      if (generation === microphoneGeneration) microphonePending.value = false;
     }
   };
 
@@ -184,7 +173,8 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
     microphoneGeneration += 1;
     monitor.detach();
     syncPlaybackState();
-    microphoneState.value = 'off';
+    captureState.value = 'closed';
+    microphonePending.value = false;
     errorMessage.value = '';
     active.value = false;
     conversation.value = null;
@@ -201,11 +191,8 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   watch(() => session.currentConversationKey, () => {
     if (active.value && !session.isConversationCurrent(conversation.value)) end();
   }, { flush: 'sync' });
-  // Keep the scene when backgrounded, but stop accepting microphone audio. Resuming requires
-  // an explicit microphone tap; no hidden re-acquisition or permission prompt.
-  watch(() => lifecycle.isBackground, background => {
-    if (background && active.value) stopMicrophone();
-  }, { flush: 'sync' });
+  // Native lifecycle facts stop capture even when this document is suspended.
+  // Foreground recovery only projects the snapshot; it never reopens the mic.
   onScopeDispose(() => {
     microphoneGeneration += 1;
     monitor.detach();

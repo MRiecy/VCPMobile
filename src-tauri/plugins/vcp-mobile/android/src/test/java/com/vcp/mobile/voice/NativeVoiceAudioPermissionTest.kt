@@ -40,12 +40,18 @@ class NativeVoiceAudioPermissionTest {
             events.add(payload)
             true
         }, audioSession, output)
+        owner.connectVoiceDocument(document("1"))
     }
 
     @After fun tearDown() { owner.destroy() }
 
-    private fun start(id: String): Invoke = mockk<Invoke>(relaxed = true).also { invoke ->
-        every { invoke.parseArgs(StartVoiceAudioArgs::class.java) } returns StartVoiceAudioArgs().apply { sessionId = id; callId = "call-one" }
+    private fun start(id: String, document: String = "1"): Invoke = mockk<Invoke>(relaxed = true).also { invoke ->
+        every { invoke.parseArgs(StartVoiceAudioArgs::class.java) } returns StartVoiceAudioArgs().apply {
+            sessionId = id; callId = "call-one"; documentId = document
+        }
+    }
+    private fun document(id: String): Invoke = mockk<Invoke>(relaxed = true).also { invoke ->
+        every { invoke.parseArgs(VoiceDocumentArgs::class.java) } returns VoiceDocumentArgs().apply { documentId = id }
     }
     private fun stop(id: String): Invoke = mockk<Invoke>(relaxed = true).also { invoke ->
         every { invoke.parseArgs(StopVoiceAudioArgs::class.java) } returns StopVoiceAudioArgs().apply { sessionId = id }
@@ -143,5 +149,81 @@ class NativeVoiceAudioPermissionTest {
         verify(exactly = 1) { start.reject("cancelled:destroyed") }
         verify(exactly = 1) { late.reject("cancelled:voice_session_inactive") }
         assertEquals(1, events.size)
+    }
+
+    @Test fun leavingDuringPermissionWaitStopsOnlyCaptureAndTheCallCanOpenOnANewDocument() {
+        val old = start("departing-input")
+        owner.startVoiceAudio(old)
+        owner.invalidateVoiceDocument(document("1"))
+        owner.onPermissionResult(old)
+        verify(exactly = 1) { old.reject("cancelled:document_left") }
+        verify(exactly = 0) { old.resolve() }
+        verify(exactly = 0) { audioSession.endCall(any()) }
+        verify(exactly = 0) { output.endCall(any(), any()) }
+
+        val retired = document("1")
+        owner.connectVoiceDocument(retired)
+        verify(exactly = 1) { retired.reject("cancelled:voice_document") }
+        val late = start("late-old-document")
+        owner.startVoiceAudio(late)
+        verify(exactly = 1) { late.reject("cancelled:voice_document") }
+
+        owner.connectVoiceDocument(document("2"))
+        val next = start("replacement-input", "2")
+        owner.startVoiceAudio(next)
+        owner.invalidateVoiceDocument(document("1"))
+        owner.onPermissionResult(old)
+        verify(exactly = 0) { next.reject(any<String>()) }
+        assertEquals(listOf(old, next), permissionRequests)
+        assertEquals("document_left", events.single().getString("reason"))
+    }
+
+    @Test fun connectingTheSameDocumentIsReadOnlyButANewerDocumentStopsItsPredecessor() {
+        val old = start("still-current")
+        owner.startVoiceAudio(old)
+        owner.connectVoiceDocument(document("1"))
+        verify(exactly = 0) { old.reject(any<String>()) }
+        assertEquals(0, events.size)
+
+        owner.connectVoiceDocument(document("2"))
+        verify(exactly = 1) { old.reject("cancelled:document_replaced") }
+        assertEquals("document_replaced", events.single().getString("reason"))
+        verify(exactly = 0) { audioSession.endCall(any()) }
+        verify(exactly = 0) { output.endCall(any(), any()) }
+    }
+
+    @Test fun invalidationBeforeConnectRetiresTheTicketAndStopsOlderCapture() {
+        val old = start("before-new-connect")
+        owner.startVoiceAudio(old)
+        owner.invalidateVoiceDocument(document("3"))
+        owner.onPermissionResult(old)
+        verify(exactly = 1) { old.reject("cancelled:document_left") }
+        for (id in listOf("1", "2", "3")) {
+            val late = document(id)
+            owner.connectVoiceDocument(late)
+            verify(exactly = 1) { late.reject("cancelled:voice_document") }
+        }
+        owner.connectVoiceDocument(document("4"))
+        val next = start("after-retired-connect", "4")
+        owner.startVoiceAudio(next)
+        verify(exactly = 0) { next.reject(any<String>()) }
+        assertEquals(listOf(old, next), permissionRequests)
+    }
+
+    @Test fun documentComparisonUsesTheFullUnsignedTicketAndRejectsNoncanonicalIds() {
+        for (id in listOf("0", "01", "+1", "-1", "18446744073709551616")) {
+            val malformed = document(id)
+            owner.connectVoiceDocument(malformed)
+            verify(exactly = 1) { malformed.reject("invalid_voice_document_id") }
+        }
+        owner.connectVoiceDocument(document("18446744073709551614"))
+        owner.invalidateVoiceDocument(document("18446744073709551615"))
+        val retired = document("18446744073709551615")
+        owner.connectVoiceDocument(retired)
+        verify(exactly = 1) { retired.reject("cancelled:voice_document") }
+        val late = start("full-width-ticket", "18446744073709551614")
+        owner.startVoiceAudio(late)
+        verify(exactly = 1) { late.reject("cancelled:voice_document") }
+        assertEquals(0, permissionRequests.size)
     }
 }

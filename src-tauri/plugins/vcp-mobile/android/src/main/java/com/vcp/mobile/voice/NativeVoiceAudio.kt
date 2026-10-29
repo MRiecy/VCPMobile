@@ -35,7 +35,9 @@ import java.util.concurrent.Semaphore
 import java.io.File
 
 @InvokeArg
-class StartVoiceAudioArgs { var sessionId: String = ""; var callId: String = "" }
+class StartVoiceAudioArgs { var sessionId: String = ""; var callId: String = ""; var documentId: String = "" }
+@InvokeArg
+class VoiceDocumentArgs { var documentId: String = "" }
 @InvokeArg
 class VoiceCallArgs { var callId: String = "" }
 @InvokeArg
@@ -101,12 +103,47 @@ internal class NativeVoiceAudio(
     private var foreground = true
     private var permissionWaiter: Session? = null
     private val cancelledBeforeStart = LinkedHashSet<String>()
+    private var documentId = 0uL
+    private var documentActive = false
 
     private fun onMain(action: () -> Unit) {
         if (Looper.myLooper() == Looper.getMainLooper()) action() else main.post(action)
     }
     private fun isCurrent(session: Session) = current.get() === session && !session.stopped.get() && !session.eventBackpressure.get()
     private fun validId(id: String) = id.matches(Regex("[A-Za-z0-9_-]{1,128}"))
+
+    private fun parseDocument(value: String): ULong? = value.toULongOrNull()
+        ?.takeIf { it > 0uL && it.toString() == value }
+
+    fun connectVoiceDocument(invoke: Invoke) = onMain {
+        val args = try { invoke.parseArgs(VoiceDocumentArgs::class.java) }
+        catch (_: Exception) { invoke.deliverError("invalid_voice_document_args"); return@onMain }
+        val document = parseDocument(args.documentId)
+        if (document == null) { invoke.deliverError("invalid_voice_document_id"); return@onMain }
+        if (destroyed || document < documentId || (document == documentId && !documentActive)) {
+            invoke.deliverError("cancelled:voice_document"); return@onMain
+        }
+        if (document > documentId) {
+            current.get()?.let { finish(it, "stopped", "document_replaced") }
+            documentId = document
+            documentActive = true
+        }
+        invoke.deliverResult()
+    }
+
+    fun invalidateVoiceDocument(invoke: Invoke) = onMain {
+        val args = try { invoke.parseArgs(VoiceDocumentArgs::class.java) }
+        catch (_: Exception) { invoke.deliverError("invalid_voice_document_args"); return@onMain }
+        val document = parseDocument(args.documentId)
+        if (document == null) { invoke.deliverError("invalid_voice_document_id"); return@onMain }
+        if (document >= documentId) {
+            // A close can arrive before its queued connect; that ticket stays retired.
+            documentId = document
+            documentActive = false
+            current.get()?.let { finish(it, "stopped", "document_left") }
+        }
+        invoke.deliverResult()
+    }
 
     fun beginVoiceCall(invoke: Invoke) = onMain {
         val args = try { invoke.parseArgs(VoiceCallArgs::class.java) }
@@ -135,6 +172,9 @@ internal class NativeVoiceAudio(
         if (!validId(args.sessionId)) { invoke.deliverError("invalid_voice_session"); return@onMain }
         if (destroyed || !foreground || cancelledBeforeStart.contains(args.sessionId) || releasedSegmentIds.contains(args.sessionId)) {
             invoke.deliverError("cancelled:voice_session_inactive"); return@onMain
+        }
+        if (!documentActive || parseDocument(args.documentId) != documentId) {
+            invoke.deliverError("cancelled:voice_document"); return@onMain
         }
         if (!audioSession.hasCall(args.callId)) { invoke.deliverError("cancelled:voice_call"); return@onMain }
         if (!eventsReady()) { invoke.deliverError("voice_events_unavailable"); return@onMain }

@@ -70,7 +70,7 @@ export function useVoicePreviewTask(active: () => boolean, disabled: () => boole
         }
       });
       current.unlisten = unlisten;
-      const documentId = await voiceDocument.connect();
+      const documentId = await voiceDocument.connectPlayback();
       if (!mounted || current.cancelled || task !== current || !canStart.value) {
         unlisten();
         if (task === current) { task = null; busy.value = false; }

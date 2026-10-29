@@ -136,7 +136,6 @@ struct Slot {
 struct Registry {
     current: Option<Slot>,
     retired: VecDeque<String>,
-    issued_document: u64,
     document: u64,
     document_ready: bool,
 }
@@ -227,46 +226,50 @@ impl Registry {
     }
 }
 
-/// Allocation has no playback side effects. An old document that receives a
-/// late reply cannot activate after destruction, while an already-sent connect
-/// always carries a ticket older than the replacement document's allocation.
-#[tauri::command]
-pub fn allocate_tts_document<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
+/// Called while the voice document admission lock is held. Independent audio
+/// belongs to its document; chat narration belongs to its surviving call.
+pub(super) fn adopt_document<R: Runtime>(app: &AppHandle<R>, document_id: &str) -> Result<Option<String>, String> {
+    let document = document_id.parse::<u64>().map_err(|_| "语音页面标识无效。")?;
     let state = app.state::<TtsServiceState>();
     let mut registry = state.0.lock().map_err(|error| error.to_string())?;
-    registry.issued_document = registry.issued_document.checked_add(1)
-        .ok_or("朗读页面标识已耗尽，请重新启动应用。")?;
-    Ok(registry.issued_document.to_string())
+    registry.document = document;
+    registry.document_ready = false;
+    let previous = registry.current.as_ref()
+        .filter(|slot| !matches!(&slot.kind, NarrationKind::Chat))
+        .map(|slot| slot.id.clone());
+    if let Some(id) = &previous { registry.stop(id); }
+    Ok(previous)
 }
 
 #[tauri::command]
 pub async fn connect_tts_document<R: Runtime>(app: AppHandle<R>, document_id: String) -> Result<(), String> {
     let document = document_id.parse::<u64>().map_err(|_| "朗读页面标识无效。")?;
     let state = app.state::<TtsServiceState>();
-    // Repeated bootstrap attempts share the same physical-stop barrier. Neither
-    // this document nor a newer one is ready before the old native sink releases.
+    // Playback has its own physical-stop barrier. It must not delay capture
+    // document adoption or restoration of the call's observable snapshot.
     let _connection = state.1.lock().await;
-    let previous = {
+    let previous = app.state::<super::document::VoiceDocumentState>().with_current(&document_id, || {
         let mut registry = state.0.lock().map_err(|error| error.to_string())?;
-        if document == 0 || document > registry.issued_document {
-            return Err("朗读页面标识无效。".into());
-        }
-        if document < registry.document {
+        if document != registry.document {
             return Err("cancelled: 朗读所属页面已重新加载，请重试。".into());
         }
-        if document == registry.document && registry.document_ready { return Ok(()); }
-        registry.document = document;
-        registry.document_ready = false;
+        if registry.document_ready { return Ok(None); }
         let previous = registry.current.as_ref()
             .filter(|slot| !matches!(&slot.kind, NarrationKind::Chat))
             .map(|slot| slot.id.clone());
         if let Some(id) = &previous { registry.stop(id); }
-        previous
-    };
+        Ok(previous)
+    })?;
     if let Some(id) = previous { stop_tts(app.clone(), id).await?; }
-    // The connection mutex serializes activations; only readiness changes here.
-    state.0.lock().map_err(|error| error.to_string())?.document_ready = true;
-    Ok(())
+    // A replacement may be adopted while this resource cleanup awaits native.
+    app.state::<super::document::VoiceDocumentState>().with_current(&document_id, || {
+        let mut registry = state.0.lock().map_err(|error| error.to_string())?;
+        if registry.document != document {
+            return Err("cancelled: 朗读所属页面已重新加载，请重试。".into());
+        }
+        registry.document_ready = true;
+        Ok(())
+    })
 }
 
 pub(super) struct PreparedNarration {
@@ -674,18 +677,24 @@ async fn start_narration<R: Runtime>(
         source.read(&app).await?;
         NarrationKind::Bubble(source)
     };
-    let cancel = {
+    let reserve = || {
         let state = app.state::<TtsServiceState>();
         let mut registry = state.0.lock().map_err(|error| error.to_string())?;
-        // Check the caller's document under the slot admission lock, including
-        // commands dispatched by a destroyed WebView but only polled now.
         if !matches!(&kind, NarrationKind::Chat) {
             registry.validate_document(document_id.as_deref())?;
         }
         // A call reserves itself before stopping the current bubble. Holding
         // the TTS slot lock around this check closes the opposite admission order.
         kind.validate_admission(super::call::is_active(&app)?)?;
-        registry.reserve(tts_id.clone(), kind.clone())?
+        registry.reserve(tts_id.clone(), kind.clone())
+    };
+    let cancel = if matches!(&kind, NarrationKind::Chat) {
+        reserve()?
+    } else {
+        // Admission and document replacement take locks in the same order.
+        // An old command delayed before polling must not acquire a new slot.
+        let document = document_id.as_deref().ok_or("语音页面标识无效。")?;
+        app.state::<super::document::VoiceDocumentState>().with_current(document, reserve)?
     };
     let work = origin_user_message_id
         .is_none()
@@ -1260,6 +1269,20 @@ impl<R: Runtime> NativeConsumer<'_, R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn allocate_document<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
+        if app.try_state::<super::super::document::VoiceDocumentState>().is_none() {
+            app.manage(super::super::document::VoiceDocumentState::default());
+        }
+        app.state::<super::super::document::VoiceDocumentState>().allocate()
+    }
+
+    async fn connect_playback_document<R: Runtime>(app: AppHandle<R>, document: String) -> Result<(), String> {
+        // Exercise real voice admission and the independent playback barrier;
+        // these tests do not pretend the host has a native microphone bridge.
+        super::super::document::adopt_document(&app, &document)?;
+        connect_tts_document(app, document).await
+    }
     fn install(registry: &mut Registry, id: &str) -> Arc<TtsJob> {
         install_kind(registry, id, NarrationKind::Chat)
     }
@@ -1273,13 +1296,13 @@ mod tests {
             NarrationKind::SamplePreview, NarrationKind::Chat] {
             let app = tauri::test::mock_app();
             app.manage(TtsServiceState::default());
-            let old_document = allocate_tts_document(app.handle().clone()).unwrap();
-            connect_tts_document(app.handle().clone(), old_document.clone()).await.unwrap();
+            let old_document = allocate_document(app.handle().clone()).unwrap();
+            connect_playback_document(app.handle().clone(), old_document.clone()).await.unwrap();
             let state = app.state::<TtsServiceState>();
             let is_chat = matches!(&kind, NarrationKind::Chat);
             let old = install_kind(&mut state.0.lock().unwrap(), "old", kind);
-            let next = allocate_tts_document(app.handle().clone()).unwrap();
-            connect_tts_document(app.handle().clone(), next.clone()).await.unwrap();
+            let next = allocate_document(app.handle().clone()).unwrap();
+            connect_playback_document(app.handle().clone(), next.clone()).await.unwrap();
             assert_eq!(old.cancel.is_cancelled(), !is_chat);
             let registry = state.0.lock().unwrap();
             assert_eq!(registry.current.is_some(), is_chat);
@@ -1292,15 +1315,15 @@ mod tests {
     async fn late_document_registration_and_unpolled_preview_cannot_reopen_old_admission() {
         let app = tauri::test::mock_app();
         app.manage(TtsServiceState::default());
-        let old = allocate_tts_document(app.handle().clone()).unwrap();
-        let current = allocate_tts_document(app.handle().clone()).unwrap();
-        connect_tts_document(app.handle().clone(), current.clone()).await.unwrap();
-        assert!(connect_tts_document(app.handle().clone(), old.clone()).await.is_err());
+        let old = allocate_document(app.handle().clone()).unwrap();
+        let current = allocate_document(app.handle().clone()).unwrap();
+        connect_playback_document(app.handle().clone(), current.clone()).await.unwrap();
+        assert!(connect_playback_document(app.handle().clone(), old.clone()).await.is_err());
         let error = preview_voice_clone_sample(app.handle().clone(), "late-sample".into(), old,
             "sample-that-must-never-be-read".into()).await.err().unwrap();
         assert!(error.starts_with("cancelled:"));
         // A late allocation alone is harmless until its still-live caller connects.
-        let _unused = allocate_tts_document(app.handle().clone()).unwrap();
+        let _unused = allocate_document(app.handle().clone()).unwrap();
         let state = app.state::<TtsServiceState>();
         let registry = state.0.lock().unwrap();
         assert!(registry.validate_document(Some(&current)).is_ok());
@@ -1311,25 +1334,29 @@ mod tests {
     async fn document_registration_waits_for_stop_ack_and_same_document_retry_is_idempotent() {
         let app = tauri::test::mock_app();
         app.manage(TtsServiceState::default());
-        let first = allocate_tts_document(app.handle().clone()).unwrap();
-        connect_tts_document(app.handle().clone(), first).await.unwrap();
+        let first = allocate_document(app.handle().clone()).unwrap();
+        connect_playback_document(app.handle().clone(), first).await.unwrap();
         let state = app.state::<TtsServiceState>();
         let old = install_kind(&mut state.0.lock().unwrap(), "old", NarrationKind::Preview);
         // Hold the same barrier as an existing in-flight native stop.
         let stopping = old.stop_lock.lock().await;
-        let next = allocate_tts_document(app.handle().clone()).unwrap();
-        let connect = connect_tts_document(app.handle().clone(), next.clone());
-        let retry = connect_tts_document(app.handle().clone(), next.clone());
+        let next = allocate_document(app.handle().clone()).unwrap();
+        let connect = connect_playback_document(app.handle().clone(), next.clone());
+        let retry = connect_playback_document(app.handle().clone(), next.clone());
         tokio::pin!(connect, retry);
         assert!(tokio::time::timeout(std::time::Duration::from_millis(10), &mut connect).await.is_err());
         assert!(old.cancel.is_cancelled());
+        // Identity is already usable by the independent capture owner even
+        // while this playback-specific stop receipt remains outstanding.
+        assert!(app.state::<super::super::document::VoiceDocumentState>()
+            .with_current(&next, || Ok(())).is_ok());
         assert!(state.0.lock().unwrap().validate_document(Some(&next)).is_err());
         assert!(tokio::time::timeout(std::time::Duration::from_millis(10), &mut retry).await.is_err());
         drop(stopping);
         connect.await.unwrap();
         retry.await.unwrap();
         let fresh = install_kind(&mut state.0.lock().unwrap(), "fresh", NarrationKind::SamplePreview);
-        connect_tts_document(app.handle().clone(), next).await.unwrap();
+        connect_playback_document(app.handle().clone(), next).await.unwrap();
         assert!(!fresh.cancel.is_cancelled());
         assert_eq!(state.0.lock().unwrap().current.as_ref().unwrap().id, "fresh");
     }
@@ -1339,22 +1366,38 @@ mod tests {
     async fn failed_document_stop_keeps_the_slot_and_requires_a_real_retry() {
         let app = tauri::test::mock_app();
         app.manage(TtsServiceState::default());
-        let first = allocate_tts_document(app.handle().clone()).unwrap();
-        connect_tts_document(app.handle().clone(), first).await.unwrap();
+        let first = allocate_document(app.handle().clone()).unwrap();
+        connect_playback_document(app.handle().clone(), first).await.unwrap();
         let state = app.state::<TtsServiceState>();
         let old = install_kind(&mut state.0.lock().unwrap(), "old", NarrationKind::Preview);
         state.0.lock().unwrap().admit_player(&old).unwrap();
-        let next = allocate_tts_document(app.handle().clone()).unwrap();
+        let next = allocate_document(app.handle().clone()).unwrap();
         // Host has no native sink: both attempts must propagate its real failure,
         // rather than a repeated document connection bypassing the release.
         for _ in 0..2 {
-            assert!(connect_tts_document(app.handle().clone(), next.clone()).await.is_err());
+            assert!(connect_playback_document(app.handle().clone(), next.clone()).await.is_err());
             let registry = state.0.lock().unwrap();
             assert!(registry.validate_document(Some(&next)).is_err());
             assert!(Arc::ptr_eq(registry.current.as_ref().unwrap().job.as_ref().unwrap(), &old));
             assert!(old.cancel.is_cancelled());
             assert!(old.player_started.load(Ordering::Acquire));
         }
+    }
+
+    #[tokio::test]
+    async fn invalidated_document_cannot_use_a_ready_playback_gate_or_reconnect() {
+        let app = tauri::test::mock_app();
+        app.manage(TtsServiceState::default());
+        let document = allocate_document(app.handle().clone()).unwrap();
+        connect_playback_document(app.handle().clone(), document.clone()).await.unwrap();
+        app.state::<super::super::document::VoiceDocumentState>()
+            .invalidate(Some(&document)).unwrap();
+        assert!(connect_tts_document(app.handle().clone(), document.clone()).await.is_err());
+        assert!(connect_playback_document(app.handle().clone(), document.clone()).await.is_err());
+        let error = preview_voice_clone_sample(app.handle().clone(), "late-invalidated".into(), document,
+            "sample-that-must-never-be-read".into()).await.err().unwrap();
+        assert!(error.starts_with("cancelled:"));
+        assert!(app.state::<TtsServiceState>().0.lock().unwrap().current.is_none());
     }
 
     #[tokio::test]
@@ -1836,8 +1879,8 @@ mod tests {
     async fn invalid_builtin_and_unselected_clone_previews_release_their_slots() {
         let app = tauri::test::mock_app();
         app.manage(TtsServiceState::default());
-        let document = allocate_tts_document(app.handle().clone()).unwrap();
-        connect_tts_document(app.handle().clone(), document.clone()).await.unwrap();
+        let document = allocate_document(app.handle().clone()).unwrap();
+        connect_playback_document(app.handle().clone(), document.clone()).await.unwrap();
         for (id, mode, voice, expected_error) in [
             ("builtin-invalid", VoiceTtsMode::Builtin, "none", "音色配置无效"),
             ("clone-empty", VoiceTtsMode::Clone, "冰糖", "未选择朗读音色"),
@@ -2240,8 +2283,8 @@ mod tests {
     async fn deleted_source_cannot_start_after_mutation_missed_a_pending_frontend_read() {
         let app = tauri::test::mock_app();
         app.manage(TtsServiceState::default());
-        let document = allocate_tts_document(app.handle().clone()).unwrap();
-        connect_tts_document(app.handle().clone(), document.clone()).await.unwrap();
+        let document = allocate_document(app.handle().clone()).unwrap();
+        connect_playback_document(app.handle().clone(), document.clone()).await.unwrap();
         let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
             .connect("sqlite::memory:").await.unwrap();
         sqlx::query("CREATE TABLE messages (owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT, content TEXT, deleted_at INTEGER);

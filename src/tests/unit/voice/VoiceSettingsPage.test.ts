@@ -52,7 +52,7 @@ beforeEach(() => {
   setActivePinia(pinia);
   database = snapshot();
   revision = 1;
-  mockInvoke('allocate_tts_document', () => '42');
+  mockInvoke('allocate_voice_document', () => '42');
   context.openStyleGuidance.mockReset();
   vi.spyOn(useOverlayStore(), 'openVoiceStyleGuidance').mockImplementation(context.openStyleGuidance);
   context.voice = reactive({

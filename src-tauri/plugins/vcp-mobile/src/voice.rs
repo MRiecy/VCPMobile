@@ -267,10 +267,20 @@ pub async fn end_voice_call<R: Runtime>(app: AppHandle<R>, call_id: String) -> R
     native_call(app, "endVoiceCall", serde_json::json!({ "callId": call_id }), None).await
 }
 
+/// A document grants capture admission only; it never owns the logical call.
+pub async fn connect_voice_document<R: Runtime>(app: AppHandle<R>, document_id: String) -> Result<(), String> {
+    native_call(app, "connectVoiceDocument", serde_json::json!({ "documentId": document_id }), None).await
+}
+
+pub async fn invalidate_voice_document<R: Runtime>(app: AppHandle<R>, document_id: String) -> Result<(), String> {
+    native_call(app, "invalidateVoiceDocument", serde_json::json!({ "documentId": document_id }), None).await
+}
+
 pub async fn start_voice_audio<R: Runtime>(
     app: AppHandle<R>,
     session_id: String,
     call_id: String,
+    document_id: String,
     vad_config: VoiceVadConfig,
 ) -> Result<(), String> {
     validate_session(&session_id)?;
@@ -284,7 +294,7 @@ pub async fn start_voice_audio<R: Runtime>(
     let result = native_call(
         app.clone(),
         "startVoiceAudio",
-        serde_json::json!({ "sessionId": session_id, "callId": call_id }),
+        serde_json::json!({ "sessionId": session_id, "callId": call_id, "documentId": document_id }),
         Some((session_id.clone(), generation)),
     )
     .await;

@@ -11,6 +11,7 @@ mod batch;
 mod cache;
 mod call;
 mod chat_feed;
+mod document;
 mod input;
 mod network;
 mod pipeline;
@@ -26,11 +27,14 @@ pub use call::{
     begin_voice_conversation, end_voice_conversation, get_voice_conversation_snapshot,
     VoiceCallState,
 };
+pub use document::{allocate_voice_document, connect_voice_document, VoiceDocumentState};
 #[cfg(any(target_os = "android", target_os = "ios", test))]
 pub use input::handle_audio_event;
 pub use input::{close_voice_microphone, start_voice_microphone, VoiceServiceState};
+#[cfg(any(target_os = "android", target_os = "ios"))]
+pub use input::invalidate_document;
 pub use tts::{
-    allocate_tts_document, connect_tts_document,
+    connect_tts_document,
     feed_chat_event, has_chat_listener, preview_tts, preview_voice_clone_sample, start_tts_session, stop_chat_reply_by_origin, stop_tts,
     submit_tts_text, TtsServiceState,
 };

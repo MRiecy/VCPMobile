@@ -40,7 +40,7 @@ macro_rules! app_command_handler {
         use crate::vcp_modules::chat::voice_service::{
             begin_voice_conversation, end_voice_conversation, get_voice_conversation_snapshot,
             start_voice_microphone, close_voice_microphone,
-            allocate_tts_document, connect_tts_document,
+            allocate_voice_document, connect_voice_document, connect_tts_document,
             start_tts_session, stop_tts, submit_tts_text,
             preview_tts, preview_voice_clone_sample,
             import_voice_clone_sample, get_voice_clone_sample,
@@ -205,7 +205,8 @@ macro_rules! app_command_handler {
                 get_voice_conversation_snapshot,
                 close_voice_microphone,
                 start_voice_microphone,
-                allocate_tts_document,
+                allocate_voice_document,
+                connect_voice_document,
                 connect_tts_document,
                 start_tts_session,
                 stop_tts,

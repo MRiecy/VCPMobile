@@ -14,7 +14,7 @@ const context = vi.hoisted(() => ({
     isConversationCurrent: (key: ConversationKey | null) => boolean;
   },
   lifecycle: {} as { isBackground: boolean },
-  start: vi.fn<() => Promise<boolean>>(),
+  start: vi.fn<() => Promise<{ configured: boolean } | null>>(),
   stop: vi.fn(),
   detach: vi.fn(),
   endCall: vi.fn(),
@@ -31,7 +31,7 @@ vi.mock('../../../core/stores/appLifecycle', () => ({ useAppLifecycleStore: () =
 vi.mock('../../../features/chat/voice/voiceConversation', () => ({
   createVoiceConversation: (options: { onSnapshot: (snapshot: VoiceCallSnapshot | null) => void }) => {
     context.onSnapshot = options.onSnapshot;
-    return { begin: vi.fn(), start: vi.fn().mockResolvedValue('call'), stop: context.endCall, closeMicrophone: vi.fn().mockResolvedValue(undefined),
+    return { begin: vi.fn(), openMicrophone: context.start, stop: context.endCall, closeMicrophone: context.stop,
       recover: context.recover, dispose: context.disposeConversation };
   },
 }));
@@ -41,7 +41,7 @@ vi.mock('../../../features/chat/voice/microphoneMonitor', () => ({
     context.onLevel = onLevel;
     context.onEnded = onEnded;
     context.onFrame = onFrame;
-    return { start: context.start, stop: context.stop, observe: vi.fn(), detach: context.detach };
+    return { observe: vi.fn(), detach: context.detach };
   },
 }));
 
@@ -53,6 +53,14 @@ function deferred<T>() {
 }
 
 let pinia: Pinia;
+function publishCapture(micState: VoiceCallSnapshot['micState'], micStopReason: string | null = null) {
+  context.onSnapshot?.({
+    callId: 'call', target: { ownerId: 'agent', ownerType: 'agent', topicId: 'topic' }, revision: 1,
+    active: true, micState, micStopReason, inputState: 'idle', replyState: 'idle', ttsState: 'idle',
+    partial: '', error: null, notice: null, inputSessionId: 'capture', originUserMessageId: null,
+    ttsId: null, lastPersistedMessageId: null,
+  });
+}
 beforeEach(() => {
   pinia = createPinia();
   setActivePinia(pinia);
@@ -65,8 +73,11 @@ beforeEach(() => {
     },
   });
   context.lifecycle = reactive({ isBackground: false });
-  context.start.mockReset().mockResolvedValue(true);
-  context.stop.mockReset().mockImplementation(async () => { context.onLevel?.(0, []); });
+  context.start.mockReset().mockImplementation(async () => {
+    publishCapture('listening');
+    return { configured: true };
+  });
+  context.stop.mockReset().mockImplementation(async () => { publishCapture('closed', 'requested'); });
   context.detach.mockReset();
   context.endCall.mockReset();
   context.disposeConversation.mockReset();
@@ -114,7 +125,7 @@ describe('voice call lifecycle', () => {
   });
 
   it.each(['mute', 'hangup'] as const)('ignores a microphone request that resolves after %s', async action => {
-    const request = deferred<boolean>();
+    const request = deferred<{ configured: boolean }>();
     context.start.mockReturnValueOnce(request.promise);
     const store = useVoiceCallStore();
     store.start();
@@ -122,7 +133,7 @@ describe('voice call lifecycle', () => {
 
     if (action === 'mute') store.toggleMicrophone();
     else store.end();
-    request.resolve(true);
+    request.resolve({ configured: true });
     await flushPromises();
 
     expect(action === 'mute' ? context.stop : context.detach).toHaveBeenCalledOnce();
@@ -132,27 +143,28 @@ describe('voice call lifecycle', () => {
   });
 
   it.each(['resolve', 'reject'] as const)('does not let an older call %s overwrite a new call', async outcome => {
-    const oldRequest = deferred<boolean>();
-    const newRequest = deferred<boolean>();
+    const oldRequest = deferred<{ configured: boolean }>();
+    const newRequest = deferred<{ configured: boolean }>();
     context.start.mockReturnValueOnce(oldRequest.promise).mockReturnValueOnce(newRequest.promise);
     const store = useVoiceCallStore();
     store.start();
     store.end();
     store.start();
 
-    if (outcome === 'resolve') oldRequest.resolve(true);
+    if (outcome === 'resolve') oldRequest.resolve({ configured: true });
     else oldRequest.reject(new DOMException('Old denial', 'NotAllowedError'));
     await flushPromises();
     expect(store.active).toBe(true);
     expect(store.microphoneState).toBe('requesting');
     expect(store.errorMessage).toBe('');
 
-    newRequest.resolve(true);
+    publishCapture('listening');
+    newRequest.resolve({ configured: true });
     await flushPromises();
     expect(store.microphoneState).toBe('on');
   });
 
-  it('releases the microphone on background and requires an explicit tap to resume', async () => {
+  it('projects native background closure and requires an explicit tap to resume', async () => {
     const store = useVoiceCallStore();
     store.start();
     await flushPromises();
@@ -161,8 +173,9 @@ describe('voice call lifecycle', () => {
     expect(store.bands).toEqual([0.2, 0.8, 0.4]);
 
     context.lifecycle.isBackground = true;
+    publishCapture('closed', 'background');
     await flushPromises();
-    expect(context.stop).toHaveBeenCalledOnce();
+    expect(context.stop).not.toHaveBeenCalled();
     expect(store.active).toBe(true);
     expect(store.microphoneState).toBe('off');
     expect(store.level).toBe(0);
@@ -197,7 +210,7 @@ describe('voice call lifecycle', () => {
     const store = useVoiceCallStore();
     store.start();
     await flushPromises();
-    context.onEnded!({ kind: 'stopped', sessionId: 'capture', audioEpoch: 1, reason: 'interrupted' });
+    publishCapture('closed', 'interrupted');
     expect(store.active).toBe(true);
     expect(store.microphoneState).toBe('error');
     expect(store.errorMessage).toContain('系统中断');
@@ -229,7 +242,7 @@ describe('voice call lifecycle', () => {
     const store = useVoiceCallStore();
     store.start();
     await flushPromises();
-    context.onEnded!({ kind: 'stopped', sessionId: 'capture', audioEpoch: 1, reason: 'background' });
+    publishCapture('closed', 'background');
     expect(store.active).toBe(true);
     expect(store.microphoneState).toBe('off');
     expect(store.errorMessage).toBe('');
@@ -239,7 +252,7 @@ describe('voice call lifecycle', () => {
     const store = useVoiceCallStore();
     store.start();
     await flushPromises();
-    context.onEnded!({ kind: 'error', sessionId: 'capture', audioEpoch: 1, reason: 'voice_model_unavailable: ORT_INTERNAL_DETAILS' });
+    publishCapture('closed', 'voice_model_unavailable: ORT_INTERNAL_DETAILS');
     expect(store.microphoneState).toBe('error');
     expect(store.errorMessage).toContain('本地人声检测模型暂不可用');
     expect(store.errorMessage).not.toContain('ORT_INTERNAL_DETAILS');

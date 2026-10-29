@@ -26,12 +26,17 @@ struct NativeVoicePlaybackEvent: Encodable {
     let kind = "started"
 }
 
+struct NativeVoiceDocumentEvent: Encodable {
+    let documentId: String
+}
+
 private struct VoiceCaptureStopReceipt: Encodable {
     let audioEpoch: UInt64
     let sampleIndex: UInt64
 }
 
-private struct VoiceStartArgs: Decodable { let sessionId: String; let callId: String }
+private struct VoiceStartArgs: Decodable { let sessionId: String; let callId: String; let documentId: String }
+private struct VoiceDocumentArgs: Decodable { let documentId: String }
 private struct VoiceSessionArgs: Decodable { let sessionId: String }
 private struct VoiceCallArgs: Decodable { let callId: String }
 private struct VoiceSegmentArgs: Decodable {
@@ -90,6 +95,8 @@ final class NativeVoiceAudio {
     private var active: Run?
     private var callId: String?
     private var closedCalls: [String] = []
+    private var documentId: UInt64 = 0
+    private var documentActive = false
     private let renderer = NativeVoiceRenderer()
     private var playback: NativeVoicePlayback?
     private var outputId: String?
@@ -103,6 +110,7 @@ final class NativeVoiceAudio {
     var eventsReady: (() -> Bool)?
     var onEvent: ((NativeVoiceAudioEvent) -> Bool)?
     var onPlaybackEvent: ((NativeVoicePlaybackEvent) -> Bool)?
+    var onDocumentInvalidated: ((NativeVoiceDocumentEvent) -> Bool)?
 
     init() {
         renderer.onPlayer = { [weak self] player in self?.playback?.bind(player) }
@@ -112,6 +120,58 @@ final class NativeVoiceAudio {
             self.playback?.cancelCurrent(reason: reason, immediately: true)
             self.renderer.destroy()
         }
+    }
+
+    func connectDocument(_ invoke: Invoke) {
+        do {
+            let args = try invoke.parseArgs(VoiceDocumentArgs.self)
+            DispatchQueue.main.async { [self] in
+                guard let document = parseDocument(args.documentId) else { invoke.reject("invalid_voice_document_id"); return }
+                guard !disposed, document > documentId || (document == documentId && documentActive) else {
+                    invoke.reject("cancelled:voice_document"); return
+                }
+                if document > documentId {
+                    finish(reason: "document_replaced", error: false)
+                    documentId = document
+                    documentActive = true
+                }
+                invoke.resolve()
+            }
+        } catch { invoke.reject("invalid_voice_document_args") }
+    }
+
+    func invalidateDocument(_ invoke: Invoke) {
+        do {
+            let args = try invoke.parseArgs(VoiceDocumentArgs.self)
+            DispatchQueue.main.async { [self] in
+                guard let document = parseDocument(args.documentId) else { invoke.reject("invalid_voice_document_id"); return }
+                invalidateDocument(document, reason: "document_left")
+                invoke.resolve()
+            }
+        } catch { invoke.reject("invalid_voice_document_args") }
+    }
+
+    private func parseDocument(_ value: String) -> UInt64? {
+        guard let document = UInt64(value), document > 0, String(document) == value else { return nil }
+        return document
+    }
+
+    private func invalidateDocument(_ document: UInt64, reason: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard document >= documentId else { return }
+        // Remember invalidation even before a queued connect reaches Native.
+        documentId = document
+        documentActive = false
+        finish(reason: reason, error: false)
+    }
+
+    private func documentLeft(reason: String) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        guard documentId > 0, documentActive else { return }
+        let departed = documentId
+        invalidateDocument(departed, reason: reason)
+        // Rust may still be preparing a capture, with no Native Run to stop yet.
+        _ = onDocumentInvalidated?(NativeVoiceDocumentEvent(documentId: String(departed)))
     }
 
     func beginCall(_ invoke: Invoke) {
@@ -174,14 +234,14 @@ final class NativeVoiceAudio {
         dispatchPrecondition(condition: .onQueue(.main))
         guard !disposed else { return }
         guard self.webView !== webView else { return }
-        closeCall(reason: "webview_replaced")
+        documentLeft(reason: "webview_replaced")
         self.webView = webView
         attachment = UUID()
         let currentAttachment = attachment
         objc_setAssociatedObject(webView, &NativeVoiceAudio.lifetimeKey, VoiceWebViewLifetime { [weak self] in
             DispatchQueue.main.async { [weak self] in
                 guard let self = self, self.attachment == currentAttachment else { return }
-                self.closeCall(reason: "webview_destroyed")
+                self.documentLeft(reason: "webview_destroyed")
             }
         }, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
@@ -195,6 +255,9 @@ final class NativeVoiceAudio {
                 }
                 guard !disposed, !cancelledBeforeStart.contains(args.sessionId), !releasedBeforeStart.contains(args.sessionId) else {
                     invoke.reject("voice_start_cancelled"); return
+                }
+                guard documentActive, parseDocument(args.documentId) == documentId else {
+                    invoke.reject("cancelled:voice_document"); return
                 }
                 guard callId == args.callId else { invoke.reject("voice_call_not_active"); return }
                 guard active == nil else { invoke.reject("voice_audio_busy"); return }
@@ -646,6 +709,7 @@ final class NativeVoiceAudio {
 
     func shutdown() {
         DispatchQueue.main.async { [self] in
+            documentLeft(reason: "plugin_destroyed")
             disposed = true
             finish(reason: "plugin_destroyed", error: false)
             callId = nil
@@ -666,6 +730,8 @@ final class NativeVoiceAudio {
 }
 
 extension VcpMobilePlugin {
+    @objc public func connectVoiceDocument(_ invoke: Invoke) { voice.connectDocument(invoke) }
+    @objc public func invalidateVoiceDocument(_ invoke: Invoke) { voice.invalidateDocument(invoke) }
     @objc public func beginVoiceCall(_ invoke: Invoke) { voice.beginCall(invoke) }
     @objc public func endVoiceCall(_ invoke: Invoke) { voice.endCall(invoke) }
     @objc public func startVoiceAudio(_ invoke: Invoke) { voice.start(invoke) }

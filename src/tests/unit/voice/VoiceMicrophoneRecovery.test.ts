@@ -31,6 +31,10 @@ const recovered: VoiceCallSnapshot = {
   originUserMessageId: null, ttsId: null, lastPersistedMessageId: null,
 };
 let pinia: Pinia;
+let revision: number;
+function publishSnapshot(update: Partial<VoiceCallSnapshot>) {
+  emitTauriEvent('vcp-voice-call', { ...recovered, ...update, revision: ++revision });
+}
 beforeEach(() => {
   pinia = createPinia();
   setActivePinia(pinia);
@@ -39,8 +43,11 @@ beforeEach(() => {
     isConversationCurrent: (key: ConversationKey) => key.epoch === context.session.currentConversationKey.epoch,
   });
   context.lifecycle = reactive({ isBackground: false });
+  revision = recovered.revision;
+  mockInvoke('allocate_voice_document', () => 'document-1');
   mockInvoke('get_voice_conversation_snapshot', () => recovered);
   mockInvoke('start_voice_microphone', () => ({ configured: true }));
+  mockInvoke('close_voice_microphone', () => publishSnapshot({ micState: 'closed', micStopReason: 'requested', inputSessionId: null }));
 });
 afterEach(() => disposePinia(pinia));
 
@@ -66,7 +73,10 @@ describe('microphone control after WebView recovery', () => {
     emitTauriEvent('vcp-voice-call', { ...recovered, revision: 9, micState: 'closed', inputSessionId: null });
     emitTauriEvent('vcp-voice-audio', { ...frame, sessionId: 'next-input', sampleIndex: 1024 });
     expect(store.level).toBe(0);
-    expect(invokeMock.mock.calls.map(([name]) => name)).toEqual(['get_voice_conversation_snapshot']);
+    expect(invokeMock.mock.calls.map(([name]) => name)).toEqual(expect.arrayContaining([
+      'allocate_voice_document', 'connect_voice_document', 'get_voice_conversation_snapshot',
+    ]));
+    expect(invokeMock).toHaveBeenCalledTimes(3);
   });
 
   it('closes the Rust call capture without reconstructing or starting a local monitor', async () => {
@@ -76,10 +86,13 @@ describe('microphone control after WebView recovery', () => {
     await store.recover();
     expect(store.microphoneState).toBe('on');
     store.toggleMicrophone();
-    expect(invokeMock).toHaveBeenLastCalledWith('close_voice_microphone', { callId: recovered.callId });
+    await flushPromises();
+    expect(invokeMock).toHaveBeenLastCalledWith('close_voice_microphone', { callId: recovered.callId, documentId: 'document-1' });
     expect(store.microphoneState).toBe('on');
     stopped.resolve();
     await flushPromises();
+    expect(store.microphoneState).toBe('on');
+    publishSnapshot({ micState: 'closed', micStopReason: 'requested' });
     expect(store.microphoneState).toBe('off');
     expect(invokeMock.mock.calls.some(([name]) => name === 'start_voice_microphone' || name === 'begin_voice_conversation')).toBe(false);
   });
@@ -90,6 +103,7 @@ describe('microphone control after WebView recovery', () => {
     const store = useVoiceCallStore();
     await store.recover();
     store.toggleMicrophone();
+    await flushPromises();
     stopped.reject(new Error('native stop failed'));
     await flushPromises();
     expect(store.microphoneState).toBe('on');
@@ -101,7 +115,7 @@ describe('microphone control after WebView recovery', () => {
     expect(controls.get('[role="status"]').text()).toContain('麦克风关闭失败');
     controls.unmount();
 
-    mockInvoke('close_voice_microphone', () => undefined);
+    mockInvoke('close_voice_microphone', () => publishSnapshot({ micState: 'closed', micStopReason: 'requested' }));
     store.toggleMicrophone();
     await flushPromises();
     expect(invokeMock.mock.calls.filter(([name]) => name === 'close_voice_microphone')).toHaveLength(2);
@@ -124,11 +138,62 @@ describe('microphone control after WebView recovery', () => {
     store.toggleMicrophone();
     await flushPromises();
     expect(invokeMock).toHaveBeenLastCalledWith('close_voice_microphone', {
-      callId: recovered.callId, sessionId: request.sessionId,
+      callId: recovered.callId, sessionId: request.sessionId, documentId: 'document-1',
     });
     expect(store.microphoneState).toBe('off');
     started.resolve();
     await flushPromises();
     expect(store.microphoneState).toBe('off');
+  });
+
+  it.each(['starting', 'stopping'] as const)('restores %s from a new view without replaying an open intent', async micState => {
+    mockInvoke('get_voice_conversation_snapshot', () => ({ ...recovered, micState }));
+    const store = useVoiceCallStore();
+    await store.recover();
+    expect(store.microphoneState).toBe('requesting');
+    expect(invokeMock.mock.calls.some(([name]) => name === 'start_voice_microphone' || name === 'begin_voice_conversation')).toBe(false);
+    store.toggleMicrophone();
+    await flushPromises();
+    expect(invokeMock).toHaveBeenLastCalledWith('close_voice_microphone', { callId: recovered.callId, documentId: 'document-1' });
+    expect(store.microphoneState).toBe('off');
+  });
+
+  it('keeps a failed stopping snapshot retryable after recreating the entire view', async () => {
+    disposePinia(pinia);
+    pinia = createPinia();
+    setActivePinia(pinia);
+    mockInvoke('allocate_voice_document', () => 'document-2');
+    mockInvoke('get_voice_conversation_snapshot', () => ({
+      ...recovered, micState: 'stopping', micStopReason: 'native stop failed',
+    }));
+    const store = useVoiceCallStore();
+    await store.recover();
+    expect(store.microphoneState).toBe('requesting');
+    expect(store.errorMessage).toContain('操作失败');
+    store.toggleMicrophone();
+    await flushPromises();
+    expect(invokeMock).toHaveBeenLastCalledWith('close_voice_microphone', { callId: recovered.callId, documentId: 'document-2' });
+    expect(store.microphoneState).toBe('off');
+  });
+
+  it.each([true, false])('keeps authoritative closure silent after a late open rejection, starting observed=%s', async observed => {
+    const started = deferred();
+    mockInvoke('get_voice_conversation_snapshot', () => ({ ...recovered, micState: 'closed', inputSessionId: null }));
+    mockInvoke('start_voice_microphone', args => {
+      if (observed) publishSnapshot({ micState: 'starting', inputSessionId: args!.sessionId as string });
+      return started.promise;
+    });
+    const store = useVoiceCallStore();
+    await store.recover();
+    store.toggleMicrophone();
+    await flushPromises();
+    expect(store.microphoneState).toBe('requesting');
+    publishSnapshot({ micState: 'closed', inputSessionId: null, micStopReason: 'document_left' });
+    expect(store.microphoneState).toBe('off');
+    started.reject('cancelled: document left');
+    await flushPromises();
+    expect(store.microphoneState).toBe('off');
+    expect(store.errorMessage).toBe('');
+    expect(invokeMock.mock.calls.some(([name]) => name === 'close_voice_microphone')).toBe(false);
   });
 });

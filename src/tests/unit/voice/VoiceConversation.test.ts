@@ -16,6 +16,12 @@ let current = true;
 let onView: ReturnType<typeof vi.fn<(view: VoiceServiceView) => void>>;
 let onSnapshot: ReturnType<typeof vi.fn<(snapshot: VoiceCallSnapshot | null) => void>>;
 let controller: ReturnType<typeof createVoiceConversation>;
+let connectDocument: ReturnType<typeof vi.fn<() => Promise<string>>>;
+async function beginCall() {
+  const id = controller.begin();
+  await flushPromises();
+  return id;
+}
 
 function snapshot(overrides: Partial<VoiceCallSnapshot> = {}): VoiceCallSnapshot {
   return {
@@ -31,17 +37,18 @@ beforeEach(() => {
   current = true;
   onView = vi.fn();
   onSnapshot = vi.fn();
+  connectDocument = vi.fn().mockResolvedValue('document-1');
   mockInvoke('get_voice_conversation_snapshot', () => null);
   mockInvoke('begin_voice_conversation', args => snapshot({ callId: args!.callId as string }));
   controller = createVoiceConversation({
-    conversation: () => key, isConversationCurrent: () => current, onView, onSnapshot,
+    conversation: () => key, isConversationCurrent: () => current, connectDocument, onView, onSnapshot,
   });
 });
 afterEach(() => controller.dispose());
 
 describe('Rust voice conversation projection', () => {
   it('binds an explicit start intent to its target without exporting the Vue epoch', async () => {
-    const callId = await controller.start('mic');
+    const callId = await beginCall();
     expect(invokeMock).toHaveBeenCalledWith('begin_voice_conversation', {
       callId, target: { ownerId: 'agent', ownerType: 'agent', topicId: 'topic' },
     });
@@ -96,7 +103,7 @@ describe('Rust voice conversation projection', () => {
   });
 
   it('sends one hangup intent and ignores late active snapshots for that call', async () => {
-    const callId = await controller.start('mic');
+    const callId = await beginCall();
     controller.stop();
     emitTauriEvent('vcp-voice-call', snapshot({ callId, revision: 10, ttsState: 'speaking' }));
     await flushPromises();
@@ -118,7 +125,7 @@ describe('Rust voice conversation projection', () => {
   });
 
   it('does not hang up an established call when its listener is disposed', async () => {
-    await controller.start('mic');
+    await beginCall();
     const count = invokeMock.mock.calls.length;
     controller.dispose();
     emitTauriEvent('vcp-voice-call', snapshot({ revision: 20 }));
@@ -131,7 +138,7 @@ describe('Rust voice conversation projection', () => {
     mockInvoke('get_voice_conversation_snapshot', () => pending.promise);
     const recovering = controller.recover();
     await flushPromises();
-    const newCallId = await controller.start('new-mic');
+    const newCallId = await beginCall();
     pending.resolve(snapshot({ revision: 50, callId: 'old-call' }));
     await expect(recovering).resolves.toBeNull();
     expect(onSnapshot).toHaveBeenLastCalledWith(expect.objectContaining({ callId: newCallId }));
@@ -144,12 +151,13 @@ describe('Rust voice conversation projection', () => {
       callId = args!.callId as string;
       return beginning.promise;
     });
-    const starting = controller.start('mic');
+    const starting = controller.begin();
     await flushPromises();
     await controller.recover();
     expect(onSnapshot).not.toHaveBeenCalled();
     beginning.resolve(snapshot({ callId }));
-    await expect(starting).resolves.toBe(callId);
+    await flushPromises();
+    expect(starting).toBe(callId);
     expect(onSnapshot).toHaveBeenLastCalledWith(expect.objectContaining({ active: true, callId }));
   });
 
@@ -178,6 +186,87 @@ describe('Rust voice conversation projection', () => {
     expect(onView).toHaveBeenLastCalledWith({
       state: 'listening', message: '语音文本已保存；当前群聊为邀请发言模式。', partialText: '',
     });
+  });
+
+  it('subscribes before connecting a document and still reads the call when capture cleanup fails', async () => {
+    connectDocument.mockImplementation(async () => {
+      expect(listenMock).toHaveBeenCalledWith('vcp-voice-call', expect.any(Function));
+      throw new Error('native stop failed');
+    });
+    mockInvoke('get_voice_conversation_snapshot', () => snapshot({ micState: 'stopping', micStopReason: 'native stop failed' }));
+    await expect(controller.recover()).resolves.toMatchObject({ micState: 'stopping' });
+    expect(invokeMock.mock.calls.map(([name]) => name)).toEqual(['get_voice_conversation_snapshot']);
+  });
+
+  it('reads and projects the call while document capture cleanup is still pending', async () => {
+    const cleanup = deferred<string>();
+    connectDocument.mockReturnValueOnce(cleanup.promise);
+    mockInvoke('get_voice_conversation_snapshot', () => snapshot({ micState: 'stopping' }));
+    await expect(controller.recover()).resolves.toMatchObject({ micState: 'stopping' });
+    expect(onSnapshot).toHaveBeenLastCalledWith(expect.objectContaining({ micState: 'stopping' }));
+    cleanup.resolve('document-1');
+  });
+
+  it('freezes the tap lifecycle epoch while document admission is pending', async () => {
+    const connection = deferred<string>();
+    connectDocument.mockReturnValueOnce(connection.promise);
+    mockInvoke('start_voice_microphone', () => ({ configured: true }));
+    const opening = controller.openMicrophone(3);
+    await flushPromises();
+    connection.resolve('document-1');
+    await expect(opening).resolves.toEqual({ configured: true });
+    expect(invokeMock).toHaveBeenLastCalledWith('start_voice_microphone', {
+      callId: expect.any(String), sessionId: expect.any(String), documentId: 'document-1', expectedLifecycleEpoch: 3,
+    });
+  });
+
+  it('cancels an unsubmitted microphone intent without a native start or close', async () => {
+    const beginning = deferred<VoiceCallSnapshot>();
+    let callId = '';
+    mockInvoke('begin_voice_conversation', args => {
+      callId = args!.callId as string;
+      return beginning.promise;
+    });
+    const opening = controller.openMicrophone();
+    await flushPromises();
+    await controller.closeMicrophone();
+    beginning.resolve(snapshot({ callId }));
+    await expect(opening).resolves.toBeNull();
+    expect(invokeMock.mock.calls.map(([name]) => name)).toEqual(['begin_voice_conversation']);
+  });
+
+  it.each(['resolve', 'reject'] as const)('leaves admission ordering and a late %s to Rust after early close', async outcome => {
+    const first = deferred<{ configured: boolean }>();
+    const closing = deferred<void>();
+    mockInvoke('start_voice_microphone', () => first.promise);
+    mockInvoke('close_voice_microphone', () => closing.promise);
+    const opening = controller.openMicrophone();
+    await flushPromises();
+    const original = invokeMock.mock.calls.find(([name]) => name === 'start_voice_microphone')![1]!;
+    const stopping = controller.closeMicrophone();
+    await flushPromises();
+    expect(invokeMock).toHaveBeenLastCalledWith('close_voice_microphone', {
+      callId: original.callId, sessionId: original.sessionId, documentId: 'document-1',
+    });
+    mockInvoke('start_voice_microphone', () => ({ configured: true }));
+    await expect(controller.openMicrophone()).resolves.toEqual({ configured: true });
+    if (outcome === 'resolve') first.resolve({ configured: true });
+    else first.reject('old permission denied');
+    await expect(opening).resolves.toBeNull();
+    expect(invokeMock.mock.calls.filter(([name]) => name === 'close_voice_microphone')).toHaveLength(1);
+    closing.resolve();
+    await stopping;
+  });
+
+  it('does not require old JS to compensate a start that completes after disposal', async () => {
+    const first = deferred<{ configured: boolean }>();
+    mockInvoke('start_voice_microphone', () => first.promise);
+    const opening = controller.openMicrophone();
+    await flushPromises();
+    controller.dispose();
+    first.resolve({ configured: true });
+    await expect(opening).resolves.toBeNull();
+    expect(invokeMock.mock.calls.some(([name]) => name === 'close_voice_microphone')).toBe(false);
   });
 
 });

@@ -449,6 +449,28 @@ pub(super) fn input_work(app: &AppHandle, id: &str) -> Option<Arc<WorkLease>> {
     call(app, id)?.inner.lock().ok()?.work.clone()
 }
 
+pub(super) fn input_starting<R: Runtime>(app: &AppHandle<R>, id: &str, session: &str, cancelled: &CancellationToken) {
+    let Some(call) = call(app, id) else { return; };
+    let Ok(mut inner) = call.inner.lock() else { return; };
+    // Cancellation is checked while holding the projection lock, so a close
+    // accepted before this publication cannot be overwritten by late readiness.
+    if !inner.snapshot.active || cancelled.is_cancelled() { return; }
+    inner.snapshot.input_session_id = Some(session.into());
+    inner.snapshot.mic_state = "starting";
+    inner.snapshot.mic_stop_reason = None;
+    inner.snapshot.error = None;
+    publish(app, &mut inner);
+}
+
+pub(super) fn input_stop_failed<R: Runtime>(app: &AppHandle<R>, id: &str, session: &str, error: &str) {
+    let Some(call) = call(app, id) else { return; };
+    let Ok(mut inner) = call.inner.lock() else { return; };
+    if !inner.snapshot.active || inner.snapshot.input_session_id.as_deref() != Some(session) { return; }
+    inner.snapshot.mic_state = "stopping";
+    inner.snapshot.mic_stop_reason = Some(error.into());
+    publish(app, &mut inner);
+}
+
 pub(super) fn input_status<R: Runtime>(
     app: &AppHandle<R>,
     id: &str,
@@ -468,7 +490,8 @@ pub(super) fn input_status<R: Runtime>(
     }
     match stage {
         "ready" | "local-only" => {
-            inner.snapshot.input_session_id = Some(session.into());
+            if inner.snapshot.input_session_id.as_deref() != Some(session)
+                || inner.snapshot.mic_state != "starting" { return; }
             inner.snapshot.mic_stop_reason = None;
             inner.snapshot.input_state = "idle";
             inner.snapshot.notice = (stage == "local-only")
@@ -476,12 +499,16 @@ pub(super) fn input_status<R: Runtime>(
         }
         "listening" => {
             if inner.snapshot.input_session_id.as_deref() != Some(session)
-                || inner.snapshot.mic_state == "listening"
+                || inner.snapshot.mic_state != "starting"
             {
                 return;
             }
             inner.snapshot.mic_state = "listening";
             inner.snapshot.mic_stop_reason = None;
+        }
+        "stopping" => {
+            if inner.snapshot.input_session_id.as_deref() != Some(session) { return; }
+            inner.snapshot.mic_state = "stopping";
         }
         "closed" => {
             if inner.snapshot.input_session_id.as_deref() == Some(session) {
@@ -510,7 +537,7 @@ pub(super) fn input_status<R: Runtime>(
     publish(app, &mut inner);
 }
 
-pub(super) fn input_stopped(app: &AppHandle, id: &str, session: &str, reason: &str, failed: bool) {
+pub(super) fn input_stopped<R: Runtime>(app: &AppHandle<R>, id: &str, session: &str, reason: &str, failed: bool) {
     let Some(call) = call(app, id) else {
         return;
     };
@@ -899,6 +926,40 @@ mod tests {
         assert!(current.inner.lock().unwrap().snapshot.active);
         assert!(reserve_conversation(app.handle().clone(), "next".into(), target).is_ok());
         assert_eq!(app.state::<VoiceCallState>().registry.lock().unwrap().retired.len(), 1);
+    }
+
+    #[test]
+    fn capture_snapshot_survives_view_loss_and_late_completions_without_ending_the_call() {
+        let app = tauri::test::mock_app();
+        app.manage(VoiceCallState::default());
+        app.manage(super::super::VoiceServiceState::default());
+        reserve_conversation(app.handle().clone(), "call".into(), TopicKey::new("agent", "a", "t")).unwrap();
+        let current = call(app.handle(), "call").unwrap();
+        let snapshot = || current.inner.lock().unwrap().snapshot.clone();
+        let capture = CancellationToken::new();
+        input_starting(app.handle(), "call", "old-input", &capture);
+        assert_eq!(snapshot().mic_state, "starting");
+        input_status(app.handle(), "call", "old-input", "ready", None, None);
+        capture.cancel();
+        input_status(app.handle(), "call", "old-input", "stopping", None, None);
+        input_starting(app.handle(), "call", "old-input", &capture);
+        input_status(app.handle(), "call", "old-input", "listening", None, None);
+        assert_eq!(snapshot().mic_state, "stopping");
+        input_stop_failed(app.handle(), "call", "old-input", "native_stop_failed");
+        assert_eq!(snapshot().mic_stop_reason.as_deref(), Some("native_stop_failed"));
+        assert_eq!(snapshot().input_session_id.as_deref(), Some("old-input"));
+        assert!(snapshot().active);
+        assert!(!current.input.cancel.is_cancelled());
+        input_stopped(app.handle(), "call", "old-input", "document_replaced", false);
+        assert_eq!(snapshot().mic_state, "closed");
+        input_starting(app.handle(), "call", "new-input", &CancellationToken::new());
+        input_status(app.handle(), "call", "new-input", "listening", None, None);
+        let before = snapshot().revision;
+        input_stopped(app.handle(), "call", "old-input", "late_old_error", true);
+        input_stop_failed(app.handle(), "call", "old-input", "late_old_stop");
+        assert_eq!(snapshot().revision, before);
+        assert_eq!(snapshot().mic_state, "listening");
+        assert_eq!(snapshot().call_id, "call");
     }
 
     #[test]

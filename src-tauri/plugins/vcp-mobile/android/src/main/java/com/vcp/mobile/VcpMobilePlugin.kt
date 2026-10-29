@@ -267,6 +267,12 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
     fun beginVoiceCall(invoke: Invoke) = voiceAudio.beginVoiceCall(invoke)
 
     @Command
+    fun connectVoiceDocument(invoke: Invoke) = voiceAudio.connectVoiceDocument(invoke)
+
+    @Command
+    fun invalidateVoiceDocument(invoke: Invoke) = voiceAudio.invalidateVoiceDocument(invoke)
+
+    @Command
     fun endVoiceCall(invoke: Invoke) = voiceAudio.endVoiceCall(invoke)
 
     @Command

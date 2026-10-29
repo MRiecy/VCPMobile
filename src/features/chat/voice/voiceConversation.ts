@@ -9,7 +9,7 @@ export interface VoiceCallSnapshot {
   target: VoiceCallTarget;
   revision: number;
   active: boolean;
-  micState: 'closed' | 'listening';
+  micState: 'closed' | 'starting' | 'listening' | 'stopping';
   micStopReason: string | null;
   inputState: 'idle' | 'recording' | 'transcribing' | 'submitting' | 'error';
   replyState: 'idle' | 'generating' | 'recovering' | 'stopping' | 'finished' | 'cancelled' | 'error';
@@ -39,6 +39,7 @@ interface CallScope {
 interface Options {
   conversation: () => ConversationKey | null;
   isConversationCurrent: (key: ConversationKey) => boolean;
+  connectDocument: () => Promise<string>;
   onView: (view: VoiceServiceView) => void;
   onSnapshot: (snapshot: VoiceCallSnapshot | null) => void;
 }
@@ -72,6 +73,7 @@ export function createVoiceConversation(options: Options) {
   let intentEpoch = 0;
   let endedCallId: string | null = null;
   let projectedSnapshot: VoiceCallSnapshot | null = null;
+  let microphoneIntent: { sessionId: string; submitted: boolean; observed: boolean } | null = null;
   let disposed = false;
   const diagnostic = (error: unknown) => console.warn('[VoiceConversation]', String(error).slice(0, 512));
   const command = (name: string, args: Record<string, unknown>) => invoke<void>(name, args).catch(diagnostic);
@@ -85,6 +87,10 @@ export function createVoiceConversation(options: Options) {
       if (!call) call = { id: snapshot.callId, key: { ...key }, ready: Promise.resolve(), pending: false };
       if (!options.isConversationCurrent(call.key)) return;
     } else call = null;
+    if (microphoneIntent) {
+      if (snapshot.inputSessionId === microphoneIntent.sessionId) microphoneIntent.observed = true;
+      if (!snapshot.active || microphoneIntent.observed && snapshot.micState === 'closed') microphoneIntent = null;
+    }
     revision = snapshot.revision;
     projectedSnapshot = snapshot;
     options.onSnapshot(snapshot);
@@ -111,6 +117,9 @@ export function createVoiceConversation(options: Options) {
     if (disposed) return null;
     const epoch = intentEpoch;
     const before = revision;
+    // New documents revoke old capture through Rust. A cleanup failure must not
+    // hide the surviving call or prevent its authoritative snapshot being read.
+    void options.connectDocument().catch(diagnostic);
     const snapshot = await invoke<VoiceCallSnapshot | null>('get_voice_conversation_snapshot');
     if (disposed || epoch !== intentEpoch) return null;
     if (snapshot) applySnapshot(snapshot);
@@ -151,6 +160,7 @@ export function createVoiceConversation(options: Options) {
 
   const stop = () => {
     intentEpoch += 1;
+    microphoneIntent = null;
     const run = call;
     call = null;
     projectedSnapshot = null;
@@ -168,29 +178,57 @@ export function createVoiceConversation(options: Options) {
     options.onView({ state: 'off', message: '', partialText: '' });
   };
 
-  const start = async (_sessionId: string): Promise<string> => {
+  const openMicrophone = async (expectedLifecycleEpoch?: number | null): Promise<{ configured: boolean } | null> => {
     begin();
     const run = call!;
-    await run.ready;
-    if (disposed || call !== run || !options.isConversationCurrent(run.key)) throw new Error('cancelled');
-    return run.id;
+    // The UUID only correlates an early close with this intent. Rust owns
+    // admission, physical release and any completion after this view is gone.
+    const intent = { sessionId: crypto.randomUUID(), submitted: false, observed: false };
+    microphoneIntent = intent;
+    try {
+      await run.ready;
+      if (disposed || call !== run || microphoneIntent !== intent) return null;
+      const documentId = await options.connectDocument();
+      if (disposed || call !== run || microphoneIntent !== intent || !options.isConversationCurrent(run.key)) return null;
+      intent.submitted = true;
+      const result = await invoke<{ configured: boolean }>('start_voice_microphone', {
+        callId: run.id, sessionId: intent.sessionId, documentId,
+        ...(expectedLifecycleEpoch === undefined ? {} : { expectedLifecycleEpoch }),
+      });
+      return !disposed && call === run && microphoneIntent === intent ? result : null;
+    } catch (error) {
+      if (disposed || microphoneIntent !== intent) return null;
+      const detail = error instanceof Error ? error.message : String(error);
+      if (detail.startsWith('cancelled') && projectedSnapshot?.micState === 'closed' && projectedSnapshot.micStopReason) return null;
+      throw error;
+    } finally {
+      if (microphoneIntent === intent) microphoneIntent = null;
+    }
   };
 
   const closeMicrophone = async (): Promise<void> => {
     const run = call;
     if (disposed || !run) return;
-    // Rust resolves the current capture, including one surviving a document
-    // reload. The view does not need to reconstruct microphone ownership.
-    await invoke<void>('close_voice_microphone', { callId: run.id });
+    const intent = microphoneIntent;
+    microphoneIntent = null;
+    // Cancel a local intent before it reaches IPC. Once submitted, close never
+    // waits for permission/start, and its exact UUID survives early delivery.
+    if (intent && !intent.submitted) return;
+    const documentId = await options.connectDocument();
+    if (disposed || call !== run) return;
+    await invoke<void>('close_voice_microphone', {
+      callId: run.id, documentId, ...(intent ? { sessionId: intent.sessionId } : {}),
+    });
   };
 
   const dispose = () => {
     disposed = true;
     intentEpoch += 1;
+    microphoneIntent = null;
     unlisten?.();
     unlisten = null;
     // Listener disposal has no authority to cancel the Rust call or its work.
   };
 
-  return { begin, start, stop, closeMicrophone, recover, dispose };
+  return { begin, stop, openMicrophone, closeMicrophone, recover, dispose };
 }
