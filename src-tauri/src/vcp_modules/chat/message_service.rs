@@ -475,6 +475,115 @@ pub async fn load_chat_history_around_internal(
     convert_history_rows(app_handle, pool, &key, rows, false, false).await
 }
 
+/// Plain committed text for decision requests. The SQL byte preflight excludes
+/// oversized older messages before their strings cross into Rust. It retains a
+/// contiguous newest suffix; callers account for JSON escaping within the same
+/// budget before constructing the final request. No attachment/cache IO occurs.
+pub(crate) async fn load_chat_plain_text_history_for_context(
+    pool: &sqlx::SqlitePool,
+    key: &TopicKey,
+    limit: usize,
+    byte_budget: usize,
+) -> Result<Vec<ChatMessage>, String> {
+    let limit = i64::try_from(limit).map_err(|error| error.to_string())?;
+    let byte_budget = i64::try_from(byte_budget).map_err(|error| error.to_string())?;
+    let rows = sqlx::query(
+        "WITH candidates AS MATERIALIZED (
+            SELECT m.rowid AS message_rowid, m.timestamp, m.msg_id,
+                   length(CAST(m.msg_id AS BLOB)) + length(CAST(m.role AS BLOB))
+                   + length(CAST(COALESCE(m.name, a.name, CASE WHEN m.role = 'user' THEN '用户' ELSE 'AI' END) AS BLOB))
+                   + COALESCE(length(CAST(m.agent_id AS BLOB)), 0)
+                   + length(CAST(m.content AS BLOB)) AS raw_bytes
+            FROM messages m
+            LEFT JOIN agents a ON a.owner_type = 'agent' AND m.agent_id = a.agent_id
+            WHERE m.owner_type = ? AND m.owner_id = ? AND m.topic_id = ? AND m.deleted_at IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM active_generations ag
+                WHERE ag.owner_type = m.owner_type AND ag.owner_id = m.owner_id
+                  AND ag.topic_id = m.topic_id AND ag.msg_id = m.msg_id
+              )
+            ORDER BY m.timestamp DESC, m.msg_id DESC LIMIT ?
+         ), budgeted AS (
+            SELECT message_rowid,
+                   SUM(raw_bytes) OVER (
+                     ORDER BY timestamp DESC, msg_id DESC ROWS UNBOUNDED PRECEDING
+                   ) AS used_bytes
+            FROM candidates
+         )
+         SELECT m.msg_id, m.role, COALESCE(m.name, a.name) AS name,
+                m.agent_id, m.content, m.timestamp
+         FROM budgeted b
+         JOIN messages m ON m.rowid = b.message_rowid
+         LEFT JOIN agents a ON a.owner_type = 'agent' AND m.agent_id = a.agent_id
+         WHERE b.used_bytes <= ?
+         ORDER BY m.timestamp ASC, m.msg_id ASC",
+    )
+    .bind(&key.owner_type)
+    .bind(&key.owner_id)
+    .bind(&key.topic_id)
+    .bind(limit)
+    .bind(byte_budget)
+    .fetch_all(pool)
+    .await
+    .map_err(|error| error.to_string())?;
+    rows.into_iter().map(|row| {
+        Ok(ChatMessage {
+            id: row.try_get("msg_id").map_err(|error| error.to_string())?,
+            role: row.try_get("role").map_err(|error| error.to_string())?,
+            name: row.try_get("name").map_err(|error| error.to_string())?,
+            agent_id: row.try_get("agent_id").map_err(|error| error.to_string())?,
+            content: row.try_get("content").map_err(|error| error.to_string())?,
+            timestamp: u64::try_from(row.try_get::<i64, _>("timestamp").map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?,
+            ..Default::default()
+        })
+    }).collect()
+}
+
+#[cfg(test)]
+mod plain_text_history_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn text_budget_keeps_a_complete_contiguous_suffix_without_attachment_tables() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect("sqlite::memory:").await.unwrap();
+        // Intentionally no attachments or render_cache tables: this projection
+        // must depend only on committed message text and speaker identity.
+        sqlx::raw_sql(
+            "CREATE TABLE messages (
+                owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT,
+                role TEXT, name TEXT, agent_id TEXT, content TEXT, timestamp INTEGER, deleted_at INTEGER
+             );
+             CREATE TABLE agents (owner_type TEXT, agent_id TEXT, name TEXT);
+             CREATE TABLE active_generations (owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT);
+             INSERT INTO agents VALUES ('agent', 'a', '成员');
+             INSERT INTO active_generations VALUES ('group','g','t','active');",
+        ).execute(&pool).await.unwrap();
+        for (id, text, timestamp, deleted) in [
+            ("old", "older".into(), 1, None),
+            ("large", "中".repeat(100), 2, None),
+            ("new-a", "甲".into(), 3, None),
+            ("new-z", "乙".into(), 3, None),
+            ("active", "unfinished".into(), 4, None),
+            ("deleted", "deleted".into(), 5, Some(9)),
+        ] {
+            sqlx::query("INSERT INTO messages VALUES ('group','g','t',?,'assistant',NULL,'a',?,?,?)")
+                .bind(id).bind(text).bind(timestamp).bind(deleted).execute(&pool).await.unwrap();
+        }
+        let key = TopicKey::new("group", "g", "t");
+        let history = load_chat_plain_text_history_for_context(&pool, &key, 200, 70).await.unwrap();
+        assert_eq!(history.iter().map(|message| message.id.as_str()).collect::<Vec<_>>(), ["new-a", "new-z"]);
+        assert_eq!(history[0].content, "甲");
+        assert_eq!(history[0].name.as_deref(), Some("成员"));
+        assert!(history.iter().all(|message| message.attachments.is_none() && message.blocks.is_none()));
+        let limited = load_chat_plain_text_history_for_context(&pool, &key, 1, 70).await.unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].id, "new-z");
+        assert!(load_chat_plain_text_history_for_context(&pool, &key, 200, 1).await.unwrap().is_empty());
+    }
+}
+
 /// 为 Agent 和 Group 组装大模型上下文提供专用的轻量历史查询。
 /// 只查询消息纯文本和附件（在需要时提取文本），完全跳过 render_content 反序列化和 UI shell 预计算。
 pub async fn load_chat_text_history_for_context(
@@ -1428,6 +1537,15 @@ enum StreamCommit {
     Removed,
 }
 
+/// A transport result that still needs its durable transaction. RequestOutput
+/// owns the same allocation during a retry; live partials are not cached here.
+#[derive(Clone)]
+pub(crate) struct PendingStreamTerminal {
+    content: String,
+    finish_reason: String,
+    agent_id: Option<String>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn finalize_stream_message<R: tauri::Runtime>(
     app_handle: AppHandle<R>,
@@ -1439,15 +1557,22 @@ pub(crate) async fn finalize_stream_message<R: tauri::Runtime>(
     stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
     agent_id: Option<String>,
 ) -> Result<Option<FinalizedStreamMessage>, String> {
+    let terminal = std::sync::Arc::new(PendingStreamTerminal {
+        content: full_content,
+        finish_reason: if is_aborted {
+            "cancelled_by_user".to_string()
+        } else {
+            finish_reason.unwrap_or_else(|| "completed".to_string())
+        },
+        agent_id,
+    });
+    crate::vcp_modules::vcp_client::retain_request_terminal(&app_handle, message_key, terminal.clone());
     finalize_stream_message_inner(
         app_handle,
         pool,
         message_key,
-        full_content,
-        is_aborted,
-        finish_reason,
+        terminal,
         stream_channel,
-        agent_id,
         false,
     )
     .await
@@ -1469,26 +1594,29 @@ pub(crate) async fn finalize_recovered_stream_message<R: tauri::Runtime>(
         app_handle,
         pool,
         message_key,
-        full_content,
-        finish_reason == "cancelled_by_user",
-        Some(finish_reason),
+        std::sync::Arc::new(PendingStreamTerminal { content: full_content, finish_reason, agent_id }),
         Some(stream_channel),
-        agent_id,
         true,
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
+pub(crate) async fn retry_stream_terminal<R: tauri::Runtime>(
+    app_handle: AppHandle<R>,
+    pool: &sqlx::Pool<sqlx::Sqlite>,
+    message_key: &MessageKey,
+    terminal: std::sync::Arc<PendingStreamTerminal>,
+    stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
+) -> Result<Option<FinalizedStreamMessage>, String> {
+    finalize_stream_message_inner(app_handle, pool, message_key, terminal, stream_channel, true).await
+}
+
 async fn finalize_stream_message_inner<R: tauri::Runtime>(
     app_handle: AppHandle<R>,
     pool: &sqlx::Pool<sqlx::Sqlite>,
     message_key: &MessageKey,
-    full_content: String,
-    is_aborted: bool,
-    finish_reason: Option<String>,
+    terminal: std::sync::Arc<PendingStreamTerminal>,
     stream_channel: Option<Channel<crate::vcp_modules::vcp_client::StreamEvent>>,
-    agent_id: Option<String>,
     replayed: bool,
 ) -> Result<Option<FinalizedStreamMessage>, String> {
     let owner_id = message_key.topic.owner_id.as_str();
@@ -1497,12 +1625,12 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
     let message_id = message_key.msg_id.as_str();
     let final_ts = crate::vcp_modules::infra::utils::now_millis() as u64;
 
-    let final_content = full_content;
+    let final_content = &terminal.content;
 
     let is_group = owner_type == "group";
 
     let final_agent_id = if is_group {
-        agent_id
+        terminal.agent_id.clone()
     } else {
         Some(owner_id.to_string())
     };
@@ -1520,11 +1648,7 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
         }
     }
 
-    let terminal_reason = if is_aborted {
-        "cancelled_by_user".to_string()
-    } else {
-        finish_reason.unwrap_or_else(|| "completed".to_string())
-    };
+    let terminal_reason = &terminal.finish_reason;
     let mut context = if owner_id.is_empty() || topic_id.is_empty() {
         None
     } else if is_group {
@@ -1557,9 +1681,9 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
             match commit_stream_message(
                 &db_state,
                 message_key,
-                &final_content,
+                final_content,
                 final_ts,
-                &terminal_reason,
+                terminal_reason,
                 final_agent_id.as_deref(),
                 agent_name.as_deref(),
             )
@@ -1643,9 +1767,10 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
         );
     }
 
+    let terminal = std::sync::Arc::unwrap_or_clone(terminal);
     Ok(Some(FinalizedStreamMessage {
-        content: final_content,
-        finish_reason: terminal_reason,
+        content: terminal.content,
+        finish_reason: terminal.finish_reason,
         timestamp: end_timestamp,
         topic_updated_at,
     }))

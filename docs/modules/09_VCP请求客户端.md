@@ -19,6 +19,10 @@ related: [aurora_pipeline.rs, media_processor/, content_parser.rs, agent_chat_ap
 
 > 2026-10-17 资源收尾：网络层以 `VcpResponse` 移交正文、结束原因和取消状态，单聊/群聊/恢复直接把正文移动到 finalizer；内部恢复返回 `RecoveryStatus`，权威正文仍只经原终态 Channel 交付。渲染缓存采用 JSON 直接写入 zstd 编码器，避免完整未压缩 JSON 中间缓冲；worker 输入与终态事件的共享优化未实施。范围及验证见 [资源收尾记录](../../plan/vcpmobile-ios-compatibility-research/phase-5/02-SSE资源收尾重构.md)。
 
+已经取得完整终态、但 SQLite 提交失败时，没有 helper 交接副本的路径由现有 `RequestOutput.pending_terminal` 保留共享的 `PendingStreamTerminal`（正文、结束原因、Agent 身份）。生成 lease 退出后只保留这一待提交 owner；同进程恢复先重新认领并重试原终态提交，不重新 POST，也不把已有正文替换为空的“后台进程销毁”错误。提交成功、已有持久终态、消息移除或显式删除后释放该 owner。Android 已有 helper handoff 或完成文件继续由其原有交接路径持有，不额外保留第二份。此机制只保留已取得的终态，不增加生成期间正文落盘，也不改变进程死亡后未持久化正文可能丢失的边界。
+
+Android helper 的 HTTP 失败诊断保留状态码，异常和 reason phrase 只使用非空文本；HTTP/2 没有 reason phrase 时仍能区分 401、429、500 等失败。错误正文不另行读取，终态与资源交接流程不变。
+
 其核心职责包括：
 - 使用 Rust 设置快照冻结本次 turn 的最终 Chat 端点并组装 HTTP 请求
 - 在请求预处理阶段完成**多模态本地文件编码**（图片/视频/音频 → data URL）

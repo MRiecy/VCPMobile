@@ -85,7 +85,7 @@ date: 2026-08-13
 | **单层状态源** | `layoutStore.leftDrawerOpen` 是侧边栏可见性的唯一真相源，任何组件（包括手势、遮罩点击、物理返回键）均通过 `setLeftDrawer(bool)` 修改，禁止直接赋值 |
 | **触控优先** | 全部手势为 Android 触控设计：Swipe 展开编辑、拖拽排序柄（`.drag-handle`）、边缘滑动打开/关闭；大宽度 Android 窗口可把侧栏常驻，但不建立桌面端交互支持 |
 | **本地过滤** | 搜索过滤纯前端进行，不调用后端 Command，保证 0 网络延迟；过滤字段仅限 `name`，保证性能 |
-| **乐观更新** | 拖拽排序后先更新本地 `settingsStore.settings.agentOrder`，再异步持久化到后端；若后端失败，下次启动时自动回读到旧顺序 |
+| **乐观更新** | `agentOrderStore` 立即显示最后一次拖拽顺序，300ms 防抖后串行保存；失败保留本地顺序并提示再次拖动重试，不改写配置中心的已提交快照 |
 | **手势仲裁** | Swipe 与垂直滚动、侧边栏关闭、排序拖拽共享同一触控面，通过方向锁定（`hasDeterminedDirection`）+ 排序状态互斥 + `stopPropagation` 分层解决冲突 |
 
 ---
@@ -353,35 +353,12 @@ const filteredCombinedItems = computed(() => {
 | Store | 使用的状态 | 用途 |
 |-------|-----------|------|
 | `assistantStore` | `agents`, `groups`, `combinedItems`, `unreadCounts`, `loading` | 原始数据与加载态 |
-| `settingsStore` | `settings.agentOrder`, `settings.groupOrder` | 自定义排序序列 |
+| `agentOrderStore` | `orderedAgents`, `orderedGroups` | 合并待保存顺序与已提交的 `navigation.agentOrder/groupOrder` |
 | `sessionStore` | `currentSelectedItem` | 当前选中高亮 |
 
-列表并非直接使用 `assistantStore.agents`，而是通过 `computed` 进行**订单化重排**：
+`AgentList.vue` 消费 `agentOrderStore` 的两个有序列表。Store 优先使用待保存顺序，没有草稿时使用配置中心已提交的 `navigation` 顺序，再调用 `agentOrder.ts` 的 `sortByOrder` 投影实体列表。
 
-```ts
-const orderedAgents = computed(() => {
-  const agents = assistantStore.agents;
-  const order = settingsStore.settings?.agentOrder || [];
-  if (order.length === 0) return agents;
-
-  const sorted = [...agents].sort((a, b) => {
-    const indexA = order.indexOf(a.id);
-    const indexB = order.indexOf(b.id);
-    if (indexA === -1 && indexB === -1) return 0;
-    if (indexA === -1) return 1;   // 未排序项置后
-    if (indexB === -1) return -1;
-    return indexA - indexB;
-  });
-  return sorted;
-});
-```
-
-> 源码位置：`src/features/agent/AgentList.vue` 第 46–60 行
-
-`orderedGroups` 使用相同算法（第 30–44 行）。排序逻辑特点：
-- `order` 数组存储的是 ID 序列，而非完整对象 — 紧凑、可序列化
-- 新 Agent（ID 不在 `order` 中）默认排在末尾（`return 1`）
-- 排序是**纯函数**，不修改 `assistantStore.agents` 原数组
+排序先建立 ID → 排名 Map，比较器不反复执行 `indexOf`；重复 ID 保留第一次出现的排名。未列入顺序的实体稳定排在末尾，空顺序直接返回原列表，非空顺序只排序副本。实体删除会从待保存顺序移除，新实体按当前清单顺序补入；仅名称等元数据刷新不重启保存计时器。
 
 ### 5.2 单条 Agent 卡片结构
 
@@ -518,69 +495,15 @@ onUnmounted(() => agentSortable?.destroy());
 
 ### 6.2 排序变更的本地更新
 
-`onEnd` 回调在拖拽释放时触发，计算新顺序并立即更新 Store：
+`onEnd` 校验当前列表和被拖实体，从 Sortable 已排列的 DOM 读取最终 ID 顺序；再把手动移动的节点恢复到 Vue 上次已知位置，交给 `orderStore.setOrder(ownerType, newOrder)` 驱动响应式更新，避免 Vue keyed diff 重复移动。
 
-```ts
-onEnd: (evt) => {
-  isSorting.value = false;
-  const newOrder = orderedAgents.value.map((a) => a.id);
-  const [movedItem] = newOrder.splice(evt.oldIndex!, 1);
-  newOrder.splice(evt.newIndex!, 0, movedItem);
-  settingsStore.updateSettings({ agentOrder: newOrder });
-}
-```
-
-> 源码位置：`src/features/agent/AgentList.vue` 第 127–133 行（Agent 列表）；第 94–100 行（Group 列表）
-
-更新流程：
-
-```
-用户释放拖拽
-    │
-    ▼
-┌─────────────────────┐
-│ 读取当前 orderedXxx │──> computed 自动反映旧顺序
-│ 的 ID 序列          │
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│ 用 splice 调整顺序  │──> oldIndex 移除，newIndex 插入
-│ (纯数组操作)         │
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│ settingsStore.      │──> 乐观更新：本地 settings.agentOrder
-│ updateSettings({    │    立即变更，列表响应式重排
-│   agentOrder: ...   │
-│ })                  │
-└──────────┬──────────┘
-           ▼
-┌─────────────────────┐
-│ 异步持久化到后端     │──> update_settings Command
-│ (updateSettings 内部)│    失败时不回滚（下次启动回读）
-└─────────────────────┘
-```
+`agentOrderStore` 立即展示该顺序，每次新拖拽重置 300ms 防抖。每种实体只保留一份最新草稿，切换侧栏页签或列表重挂载不丢失待保存顺序；不堆积中间拖拽结果。
 
 ### 6.3 排序持久化到后端
 
-`settingsStore.updateSettings` 将 `agentOrder` / `groupOrder` 持久化到 Rust 后端：
+同一种列表的保存串行执行：前一次保存返回后，才通过 `settingsStore.updateFields` 为最新草稿构造请求，使用当前已确认的领域 revision 与字段基线。持久字段为 `navigation.agentOrder` 和 `navigation.groupOrder`，由配置中心 `update_settings` 的字段补丁写入 SQLite。
 
-```ts
-const updateSettings = async (updates: Record<string, any>) => {
-  // 合并到本地 settings 对象
-  Object.assign(settings.value, updates);
-  // 异步保存到后端
-  await saveSettings();
-};
-```
-
-> 源码位置：`src/core/stores/settings.ts` 第 70–85 行
-
-Rust 后端对应的字段：
-- `agentOrder: string[]` — Agent ID 数组
-- `groupOrder: string[]` — Group ID 数组
-
-持久化策略为**全量覆盖**（`saveSettings` 将整个 settings 对象序列化后写入 SQLite），而非增量 patch。由于 settings 对象体积很小，全量覆盖的开销可忽略。
+保存成功且没有后续拖拽时清除草稿，显示已提交快照；保存期间的新草稿继续保留，防抖到期后再提交。失败显示“排序未保存”，保留本地展示顺序，用户再次拖动可重试；不把失败草稿写进 `settingsStore.settings`。
 
 ---
 
@@ -906,17 +829,17 @@ SortableJS onEnd
     │
     ├──► isSorting = false
     │
-    ├──► 计算 newOrder（splice 调整）
+    ├──► 读取 DOM 最终 ID 顺序，恢复 Vue 原 DOM 顺序
     │
-    └──► settingsStore.updateSettings({ agentOrder: newOrder })
+    └──► agentOrderStore.setOrder(ownerType, newOrder)
             │
-            ├──► Object.assign(settings, { agentOrder })
+            ├──► 替换本地最新顺序草稿
             │       │
             │       └──► orderedAgents computed 自动重排
             │
-            └──► 异步 saveSettings() → Rust update_settings
+            └──► 300ms 防抖 + 同列表串行 → settingsStore.updateFields
                         │
-                        └──► SQLite settings 表全量写入
+                        └──► Rust update_settings → SQLite navigation 领域补丁
 ```
 
 ---
@@ -939,7 +862,7 @@ SortableJS onEnd
 | `get_avatar` | `VcpAvatar.vue` 内部 | `{ ownerType, ownerId }` | `AvatarResult \| null` | 头像组件挂载时加载头像 |
 | `get_unread_counts` | `assistantStore.refreshUnreadCounts()` | — | `Record<string, number>` | fetchAgents / fetchGroups 后批量刷新未读 |
 | `get_topics` | `sessionStore.selectItem()` | `{ ownerId, ownerType }` | `Topic[]` | 切换 Agent/Group 时获取话题列表 |
-| `update_settings` | `settingsStore.saveSettings()` (内部) | `Settings` 对象 | `boolean` | 拖拽排序后持久化顺序、任何设置变更 |
+| `update_settings` | `agentOrderStore` → `settingsStore.updateFields()` | `{ request: ConfigUpdate }` | `ConfigSaveResult` | 防抖后保存最终排序字段，保留 revision 与字段冲突检查 |
 
 ### 10.2 事件监听表
 

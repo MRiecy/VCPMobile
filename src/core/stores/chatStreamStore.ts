@@ -13,6 +13,7 @@ import { triggerMessageHaptic } from "../utils/nativeHaptics";
 import { useVoiceCallStore } from "../../features/chat/voice/voiceCallStore";
 import type {
   ActiveGenerationDto,
+  AuroraUpdate,
   ActiveGroupTurnDto,
   AuroraRecoverySnapshot,
   ChatMessage,
@@ -335,6 +336,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     streamId: number | null;
     tailCursor: TailFrameCursor | null;
     needsSnapshotReason: string | null;
+    snapshotBlocked: boolean;
     animationFrameId: number | null;
   }
   const rAFPendingUpdates = new Map<string, PendingRenderUpdate>();
@@ -348,6 +350,13 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     if (update.tailOp !== null) message.tailOp = update.tailOp;
     if (update.tailSnapshot !== null) message.tailSnapshot = update.tailSnapshot;
     if (update.tailFrame !== null) message.tailFrame = update.tailFrame;
+    if (update.snapshotBlocked) {
+      // A bounded recovery that cannot bridge its cursor keeps receiving text,
+      // but cannot grow another full-message compilation loop for this stream.
+      if (message.tailBlock) message.tailBlock = { ...message.tailBlock, render_mode: "plain" };
+      message.tailFrame = undefined;
+      message.tailSnapshot = undefined;
+    }
   };
 
   // 只清除待提交投影；流身份、连续性游标和恢复原因由各自的接管路径处理。
@@ -380,6 +389,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
    * 物理防线：强行中止、强制同步刷新并安全清理指定消息的 rAF 帧状态，杜绝任何泄漏与闪烁
    */
   const clearRAFUpdate = (messageKey: string, forceFlush = false) => {
+    finishAuroraRecovery(messageKey, null);
     const up = rAFPendingUpdates.get(messageKey);
     if (up) {
       if (up.animationFrameId !== null) {
@@ -414,7 +424,51 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     });
   };
 
-  const auroraSnapshotJobs = new Map<string, Promise<boolean>>();
+  interface AuroraSnapshotJob {
+    // null means ownership was replaced, not that reconstruction failed.
+    promise: Promise<boolean | null>;
+    resolve: (recovered: boolean | null) => void;
+    updates: AuroraUpdate[];
+    bytes: number;
+    mutations: number;
+  }
+  const auroraSnapshotJobs = new Map<string, AuroraSnapshotJob>();
+  const MAX_RECOVERY_UPDATES = 64;
+  const MAX_RECOVERY_BYTES = 1024 * 1024;
+
+  function finishAuroraRecovery(messageKey: string, recovered: boolean | null): void {
+    const job = auroraSnapshotJobs.get(messageKey);
+    if (!job) return;
+    auroraSnapshotJobs.delete(messageKey);
+    job.updates.length = 0;
+    job.resolve(recovered);
+  }
+
+  function blockAuroraRecovery(messageKey: string): void {
+    const pending = rAFPendingUpdates.get(messageKey);
+    if (pending) {
+      pending.snapshotBlocked = true;
+      pending.needsSnapshotReason = null;
+      scheduleRAFUpdate(messageKey);
+    }
+    finishAuroraRecovery(messageKey, false);
+  }
+
+  function retainRecoveryUpdate(messageKey: string, aurora: AuroraUpdate): void {
+    const job = auroraSnapshotJobs.get(messageKey);
+    if (!job) return;
+    const bytes = JSON.stringify(aurora).length * 2;
+    const mutations = aurora.tailFrame?.mutations?.length ?? 0;
+    if (job.updates.length >= MAX_RECOVERY_UPDATES
+      || job.bytes + bytes > MAX_RECOVERY_BYTES
+      || job.mutations + mutations > MAX_PENDING_TAIL_MUTATIONS) {
+      blockAuroraRecovery(messageKey);
+      return;
+    }
+    job.updates.push(aurora);
+    job.bytes += bytes;
+    job.mutations += mutations;
+  }
 
   const cursorFromFrame = (frame?: TailFrame): TailFrameCursor | null => frame
     ? {
@@ -435,99 +489,259 @@ export const useChatStreamStore = defineStore("chatStream", () => {
     && left.revision === right.revision
     && left.frameSeq === right.frameSeq;
 
+  function mergeAuroraProjection(
+    update: PendingRenderUpdate,
+    message: ChatMessage,
+    aurora: AuroraUpdate,
+    forceSnapshot: boolean,
+  ): boolean {
+    const eventStreamId = aurora.streamId ?? aurora.tailFrame?.streamId;
+    let streamChanged = false;
+    if (eventStreamId !== undefined) {
+      if (!Number.isSafeInteger(eventStreamId) || eventStreamId <= 0) return false;
+      if (
+        aurora.tailFrame &&
+        aurora.tailFrame.streamId !== eventStreamId
+      ) return false;
+      if (update.streamId !== null && eventStreamId < update.streamId) return false;
+      if (update.streamId === null || eventStreamId > update.streamId) {
+        streamChanged = update.streamId !== null;
+        clearPendingRender(update);
+        update.streamId = eventStreamId;
+        update.tailCursor = null;
+        update.needsSnapshotReason = null;
+        update.snapshotBlocked = false;
+      }
+    }
+
+    let mergedTailFrame: TailFrame | null = null;
+    if (aurora.tailFrame) {
+      if (eventStreamId === undefined) return false;
+      if (import.meta.env.DEV && isStreamDebugEnabled()) {
+        streamDebugLog(
+          `[chatStreamStore] Received tailFrame stream=${aurora.tailFrame.streamId} seq=${aurora.tailFrame.frameSeq} mutations=${aurora.tailFrame.mutations?.length || 0} for ${message.id}`,
+        );
+      }
+      const latestSnapshot =
+        aurora.tailFrame.snapshot ??
+        aurora.tailBlock?.nodes;
+      const merged = mergeTailFrame(
+        update.tailFrame,
+        update.tailCursor,
+        aurora.tailFrame,
+        latestSnapshot,
+        streamChanged
+          || !!update.needsSnapshotReason
+          || forceSnapshot,
+      );
+      if (!merged.accepted || !merged.cursor) return false;
+      update.tailCursor = merged.cursor;
+      if (merged.needsSnapshot) {
+        update.tailFrame = null;
+        update.needsSnapshotReason = merged.needsSnapshot;
+      } else if (merged.frame) {
+        mergedTailFrame = merged.frame;
+        update.needsSnapshotReason = null;
+      }
+    }
+
+    // 3. 覆盖 Snapshot，或按基线身份应用 Delta。
+    if (typeof aurora.content === "string") {
+      update.content = aurora.content;
+    } else if (aurora.chunk) {
+      const currentBase =
+        update.content !== null ? update.content : message.content || "";
+      update.content = currentBase + aurora.chunk;
+    }
+
+    if (aurora.kind === "snapshot") {
+      if (typeof aurora.content === "string" && aurora.stableBlocks) update.snapshotBlocked = false;
+      if (aurora.stableBlocks) {
+        update.blocks = aurora.stableBlocks;
+      }
+      const snapshotMode: TailRenderMode = aurora.tailMode
+        ?? (aurora.tailBlock?.nodes ? "ast" : "plain");
+      update.tailContent = aurora.tailBlock?.content || "";
+      update.tailBlock = aurora.tailBlock
+        ? { ...aurora.tailBlock, render_mode: snapshotMode }
+        : null;
+      update.tailBlockChanged = true;
+      update.tailOp = buildTailSnapshotOp(update.tailBlock, snapshotMode);
+    } else if (aurora.kind === "delta") {
+      if (aurora.stableAppend) {
+        const stableBase = update.blocks ?? message.blocks ?? [];
+        if (stableBase.length === aurora.stableAppend.baseCount) {
+          update.blocks = [
+            ...stableBase,
+            ...aurora.stableAppend.blocks,
+          ];
+        } else {
+          update.needsSnapshotReason = "stable_base_mismatch";
+        }
+      }
+
+      if (aurora.tailOp) {
+        if (update.tailOp && aurora.tailOp.op === "append") {
+          if (update.tailOp.op === "append") {
+            update.tailOp = {
+              ...aurora.tailOp,
+              content: update.tailOp.content + aurora.tailOp.content,
+              previousHash: update.tailOp.previousHash,
+            };
+          } else if (update.tailOp.op === "replace") {
+            update.tailOp = {
+              ...update.tailOp,
+              content: update.tailOp.content + aurora.tailOp.content,
+              hash: aurora.tailOp.hash,
+            };
+          } else {
+            update.tailOp = aurora.tailOp;
+          }
+        } else {
+          update.tailOp = aurora.tailOp;
+        }
+
+        const currentBlock = update.tailBlockChanged ? update.tailBlock ?? undefined : message.tailBlock;
+        const currentContent = update.tailContent !== null
+          ? update.tailContent
+          : message.tailContent || "";
+        if (aurora.tailOp.op === "clear") {
+          update.tailContent = "";
+          update.tailBlock = null;
+          update.tailBlockChanged = true;
+          update.tailSnapshot = [];
+        } else if (aurora.tailOp.op === "replace") {
+          update.tailContent = aurora.tailOp.content;
+          update.tailBlock = buildTailBlockFromOp(
+            aurora.tailOp,
+            aurora.tailOp.content,
+            currentBlock,
+          );
+          update.tailBlockChanged = true;
+        } else {
+          const currentHash = currentBlock?.hash
+            ? String(currentBlock.hash)
+            : undefined;
+          if (currentHash !== aurora.tailOp.previousHash) {
+            update.needsSnapshotReason = "tail_base_mismatch";
+          } else {
+            const nextContent = currentContent + aurora.tailOp.content;
+            update.tailContent = nextContent;
+            update.tailBlock = buildTailBlockFromOp(
+              aurora.tailOp,
+              nextContent,
+              currentBlock,
+            );
+            update.tailBlockChanged = true;
+          }
+        }
+      }
+    }
+
+    if (mergedTailFrame) {
+      update.tailFrame = mergedTailFrame;
+      if (mergedTailFrame.snapshot !== undefined) {
+        update.tailSnapshot = mergedTailFrame.snapshot;
+      }
+    }
+    return true;
+  }
+
   const requestAuroraSnapshotByKey = (
     messageKey: string,
     reason: string,
-  ): Promise<boolean> => {
+  ): Promise<boolean | null> => {
     const existing = auroraSnapshotJobs.get(messageKey);
-    if (existing) return existing;
+    if (existing) return existing.promise;
+    if (disposed || hasStreamTerminalTombstone(messageKey)) return Promise.resolve(null);
+    const message = activeStreamMessages.get(messageKey);
+    const pending = rAFPendingUpdates.get(messageKey);
+    if (!message || !pending) return Promise.resolve(null);
+    if (pending.snapshotBlocked) return Promise.resolve(false);
 
-    const job = (async () => {
-      // 同一消息最多保留一个在途请求；若流在编译期间前进，就直接追赶最新 source/cursor。
-      for (;;) {
-        if (disposed || hasStreamTerminalTombstone(messageKey)) return false;
-        const message = activeStreamMessages.get(messageKey);
-        const pending = rAFPendingUpdates.get(messageKey);
-        if (!message || !pending) return false;
+    const source = pending.content ?? message.content ?? "";
+    const consumerRevision = streamConsumerRevisions.get(messageKey);
+    const cursor = pending.tailCursor ?? cursorFromFrame(message.tailFrame);
+    if (!cursor) return Promise.resolve(false);
 
-        const source = pending.content ?? message.content ?? "";
-        const consumerRevision = streamConsumerRevisions.get(messageKey);
-        const cursor = pending.tailCursor ?? cursorFromFrame(message.tailFrame);
-        if (!cursor) return false;
-
+    let resolve!: (recovered: boolean | null) => void;
+    const promise = new Promise<boolean | null>(done => { resolve = done; });
+    const job: AuroraSnapshotJob = { promise, resolve, updates: [], bytes: 0, mutations: 0 };
+    auroraSnapshotJobs.set(messageKey, job);
+    void (async () => {
+      try {
         if (import.meta.env.DEV && isStreamDebugEnabled()) {
-          streamDebugLog(
-            `[chatStreamStore] Requesting Aurora snapshot for ${message.id}: ${reason}`,
-          );
+          streamDebugLog("[chatStreamStore] Requesting Aurora snapshot:", message.id, reason);
         }
-
-        let snapshot: AuroraRecoverySnapshot;
-        try {
-          snapshot = await invoke<AuroraRecoverySnapshot>(
-            "rebuild_aurora_snapshot",
-            { content: source },
-          );
-        } catch (error) {
-          console.error(
-            `[chatStreamStore] Failed to rebuild Aurora snapshot for ${message.id}:`,
-            error,
-          );
-          return false;
-        }
-
-        if (disposed || hasStreamTerminalTombstone(messageKey)) return false;
+        // Compile one fixed cursor. Accepted live deltas remain bounded until
+        // this baseline can be replayed; output never has to pause to recover.
+        const snapshot = await invoke<AuroraRecoverySnapshot>(
+          "rebuild_aurora_snapshot", { content: source },
+        );
+        if (auroraSnapshotJobs.get(messageKey) !== job) return;
         const latestMessage = activeStreamMessages.get(messageKey);
         const latestPending = rAFPendingUpdates.get(messageKey);
-        if (!latestMessage || !latestPending) return false;
-        const latestSource = latestPending.content
-          ?? latestMessage.content
-          ?? "";
-        const latestCursor = latestPending.tailCursor
-          ?? cursorFromFrame(latestMessage.tailFrame);
-        if (streamConsumerRevisions.get(messageKey) !== consumerRevision
-          || latestSource !== source || !cursorsEqual(latestCursor, cursor)) {
-          continue;
+        if (disposed || hasStreamTerminalTombstone(messageKey)
+          || !latestMessage || latestPending !== pending
+          || streamConsumerRevisions.get(messageKey) !== consumerRevision) {
+          finishAuroraRecovery(messageKey, null);
+          return;
         }
 
         const mode: TailRenderMode = snapshot.tailMode
           ?? (snapshot.tailSnapshot.length > 0 ? "ast" : "plain");
         const tailBlock = snapshot.tailBlock
-          ? { ...snapshot.tailBlock, render_mode: mode }
-          : null;
-        const resetFrame: TailFrame = {
+          ? { ...snapshot.tailBlock, render_mode: mode } : null;
+        const replay: PendingRenderUpdate = {
+          content: source,
+          blocks: snapshot.stableBlocks,
+          tailContent: tailBlock?.content ?? "",
+          tailBlock,
+          tailBlockChanged: true,
+          tailOp: buildTailSnapshotOp(tailBlock, mode),
+          tailFrame: { ...cursor, reset: true, snapshot: snapshot.tailSnapshot, mutations: [] },
+          tailSnapshot: snapshot.tailSnapshot,
           streamId: cursor.streamId,
-          epoch: cursor.epoch,
-          revision: cursor.revision,
-          frameSeq: cursor.frameSeq,
-          reset: true,
-          snapshot: snapshot.tailSnapshot,
-          mutations: [],
+          tailCursor: cursor,
+          needsSnapshotReason: null,
+          snapshotBlocked: false,
+          animationFrameId: null,
         };
+        for (const update of job.updates) {
+          if (!mergeAuroraProjection(replay, latestMessage, update, false)
+            || replay.needsSnapshotReason) {
+            blockAuroraRecovery(messageKey);
+            return;
+          }
+        }
+        const latestSource = latestPending.content ?? latestMessage.content ?? "";
+        const latestCursor = latestPending.tailCursor ?? cursorFromFrame(latestMessage.tailFrame);
+        if (replay.content !== latestSource || !cursorsEqual(replay.tailCursor, latestCursor)) {
+          blockAuroraRecovery(messageKey);
+          return;
+        }
 
-        // Snapshot 是一次性原子恢复点：直接提交到响应式消息，避免等待下一次 rAF
-        // 期间组件再次挂载并重复请求同一快照。
+        // No await separates the baseline, its deltas and the final projection.
+        // Vue observes only the current result, never an older visible prefix.
         if (latestPending.animationFrameId !== null) {
           cancelAnimationFrame(latestPending.animationFrameId);
           latestPending.animationFrameId = null;
         }
-        latestMessage.content = latestSource;
-        replaceRenderProjection(latestMessage, snapshot.stableBlocks, {
-          block: tailBlock,
-          mode,
-          snapshot: snapshot.tailSnapshot,
-          frame: resetFrame,
-        });
-
+        commitPendingRender(latestMessage, replay);
         clearPendingRender(latestPending);
+        latestPending.tailCursor = replay.tailCursor;
         latestPending.needsSnapshotReason = null;
-        return true;
+        finishAuroraRecovery(messageKey, true);
+      } catch (error) {
+        if (auroraSnapshotJobs.get(messageKey) !== job) return;
+        console.error("[chatStreamStore] Failed to rebuild Aurora snapshot:", message.id, error);
+        // Transport/command errors do not invalidate the next cursor. Keep the
+        // renderer's existing retry/downgrade policy; only unbridgeable replay
+        // or a bounded-buffer overflow blocks this stream's local recovery.
+        finishAuroraRecovery(messageKey, false);
       }
-    })().finally(() => {
-      if (auroraSnapshotJobs.get(messageKey) === job) auroraSnapshotJobs.delete(messageKey);
-    });
-
-    auroraSnapshotJobs.set(messageKey, job);
-    return job;
+    })();
+    return promise;
   };
 
   const requestAuroraSnapshot = (
@@ -943,14 +1157,17 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       } else if (activity?.active === false && previousTurn?.turnId === ctx.turnId) {
         activeGroupTurns.delete(conversationKey);
       }
-      if (activity?.active === false && activity.stopReason === "error" && !ctx.replayed
+      if (activity?.active === false
+        && (activity.stopReason === "error" || activity.stopReason === "network_fallback_stop") && !ctx.replayed
         && (!previousTurn || previousTurn.turnId === ctx.turnId)) {
+        const networkFallback = activity.stopReason === "network_fallback_stop";
         useNotificationStore().addNotification({
           id: `group-session-error:${conversationKey}:${ctx.turnId}`,
           oncePerWebview: true,
-          type: "error",
+          type: networkFallback ? "info" : "error",
           title: "群聊已停止",
-          message: activity.error || "群聊决策或发言失败，请检查配置后继续。",
+          message: networkFallback ? "网络异常，已结束群聊"
+            : activity.error || "群聊决策或发言失败，请检查配置后继续。",
           duration: 6000,
         });
       }
@@ -1126,165 +1343,33 @@ export const useChatStreamStore = defineStore("chatStream", () => {
             streamId: null,
             tailCursor: null,
             needsSnapshotReason: null,
+            snapshotBlocked: false,
             animationFrameId: null,
           };
           rAFPendingUpdates.set(messageKey, update);
         }
 
-        // 2. 先认领 Aurora 流身份与帧序列，再合并同一事件的 chunk/blocks/tail。
-        // 重复或迟到事件必须整体丢弃，否则即使忽略 AST frame，chunk 仍会被重复追加。
-        const eventStreamId = aurora.streamId ?? aurora.tailFrame?.streamId;
-        let streamChanged = false;
-        if (eventStreamId !== undefined) {
-          if (!Number.isSafeInteger(eventStreamId) || eventStreamId <= 0) return;
-          if (
-            aurora.tailFrame &&
-            aurora.tailFrame.streamId !== eventStreamId
-          ) return;
-          if (update.streamId !== null && eventStreamId < update.streamId) return;
-          if (update.streamId === null || eventStreamId > update.streamId) {
-            streamChanged = update.streamId !== null;
+        if (!mergeAuroraProjection(update, msg!, aurora, typeof document !== "undefined" && document.hidden)) return;
+
+        if (aurora.kind === "snapshot" && typeof aurora.content === "string"
+          && aurora.stableBlocks && !update.needsSnapshotReason) {
+          // A complete owner baseline supersedes an in-flight local rebuild.
+          // Publish before resolving so a remount cannot reclaim the old frame.
+          if (auroraSnapshotJobs.has(messageKey)) {
+            if (update.animationFrameId !== null) cancelAnimationFrame(update.animationFrameId);
+            update.animationFrameId = null;
+            commitPendingRender(msg!, update);
             clearPendingRender(update);
-            update.streamId = eventStreamId;
-            update.tailCursor = null;
-            update.needsSnapshotReason = null;
+            finishAuroraRecovery(messageKey, true);
           }
-        }
-
-        let mergedTailFrame: TailFrame | null = null;
-        if (aurora.tailFrame) {
-          if (eventStreamId === undefined) return;
-          if (import.meta.env.DEV && isStreamDebugEnabled()) {
-            streamDebugLog(
-              `[chatStreamStore] Received tailFrame stream=${aurora.tailFrame.streamId} seq=${aurora.tailFrame.frameSeq} mutations=${aurora.tailFrame.mutations?.length || 0} for ${actualMessageId}`,
-            );
-          }
-          const latestSnapshot =
-            aurora.tailFrame.snapshot ??
-            aurora.tailBlock?.nodes;
-          const merged = mergeTailFrame(
-            update.tailFrame,
-            update.tailCursor,
-            aurora.tailFrame,
-            latestSnapshot,
-            streamChanged
-              || !!update.needsSnapshotReason
-              || (typeof document !== "undefined" && document.hidden),
-          );
-          if (!merged.accepted || !merged.cursor) return;
-          update.tailCursor = merged.cursor;
-          if (merged.needsSnapshot) {
-            update.tailFrame = null;
-            update.needsSnapshotReason = merged.needsSnapshot;
-          } else if (merged.frame) {
-            mergedTailFrame = merged.frame;
-            update.needsSnapshotReason = null;
-          }
-        }
-
-        // 3. 覆盖 Snapshot，或按基线身份应用 Delta。
-        if (typeof aurora.content === "string") {
-          update.content = aurora.content;
-        } else if (aurora.chunk) {
-          const currentBase =
-            update.content !== null ? update.content : msg!.content || "";
-          update.content = currentBase + aurora.chunk;
-        }
-
-        if (aurora.kind === "snapshot") {
-          if (aurora.stableBlocks) {
-            update.blocks = aurora.stableBlocks;
-          }
-          const snapshotMode: TailRenderMode = aurora.tailMode
-            ?? (aurora.tailBlock?.nodes ? "ast" : "plain");
-          update.tailContent = aurora.tailBlock?.content || "";
-          update.tailBlock = aurora.tailBlock
-            ? { ...aurora.tailBlock, render_mode: snapshotMode }
-            : null;
-          update.tailBlockChanged = true;
-          update.tailOp = buildTailSnapshotOp(update.tailBlock, snapshotMode);
-        } else if (aurora.kind === "delta") {
-          if (aurora.stableAppend) {
-            const stableBase = update.blocks ?? msg!.blocks ?? [];
-            if (stableBase.length === aurora.stableAppend.baseCount) {
-              update.blocks = [
-                ...stableBase,
-                ...aurora.stableAppend.blocks,
-              ];
-            } else {
-              update.needsSnapshotReason = "stable_base_mismatch";
-            }
-          }
-
-          if (aurora.tailOp) {
-            if (update.tailOp && aurora.tailOp.op === "append") {
-              if (update.tailOp.op === "append") {
-                update.tailOp = {
-                  ...aurora.tailOp,
-                  content: update.tailOp.content + aurora.tailOp.content,
-                  previousHash: update.tailOp.previousHash,
-                };
-              } else if (update.tailOp.op === "replace") {
-                update.tailOp = {
-                  ...update.tailOp,
-                  content: update.tailOp.content + aurora.tailOp.content,
-                  hash: aurora.tailOp.hash,
-                };
-              } else {
-                update.tailOp = aurora.tailOp;
-              }
-            } else {
-              update.tailOp = aurora.tailOp;
-            }
-
-            const currentBlock = update.tailBlock ?? msg!.tailBlock;
-            const currentContent = update.tailContent !== null
-              ? update.tailContent
-              : msg!.tailContent || "";
-            if (aurora.tailOp.op === "clear") {
-              update.tailContent = "";
-              update.tailBlock = null;
-              update.tailBlockChanged = true;
-              update.tailSnapshot = [];
-            } else if (aurora.tailOp.op === "replace") {
-              update.tailContent = aurora.tailOp.content;
-              update.tailBlock = buildTailBlockFromOp(
-                aurora.tailOp,
-                aurora.tailOp.content,
-                currentBlock,
-              );
-              update.tailBlockChanged = true;
-            } else {
-              const currentHash = currentBlock?.hash
-                ? String(currentBlock.hash)
-                : undefined;
-              if (currentHash !== aurora.tailOp.previousHash) {
-                update.needsSnapshotReason = "tail_base_mismatch";
-              } else {
-                const nextContent = currentContent + aurora.tailOp.content;
-                update.tailContent = nextContent;
-                update.tailBlock = buildTailBlockFromOp(
-                  aurora.tailOp,
-                  nextContent,
-                  currentBlock,
-                );
-                update.tailBlockChanged = true;
-              }
-            }
-          }
-        }
-
-        if (mergedTailFrame) {
-          update.tailFrame = mergedTailFrame;
-          if (mergedTailFrame.snapshot !== undefined) {
-            update.tailSnapshot = mergedTailFrame.snapshot;
-          }
+        } else {
+          retainRecoveryUpdate(messageKey, aurora);
         }
 
         // 4. 申请硬件级 rAF 渲染调度（合并原子提交）
         scheduleRAFUpdate(messageKey);
         if (
-          update.needsSnapshotReason
+          update.needsSnapshotReason && !update.snapshotBlocked
           && (typeof document === "undefined" || !document.hidden)
         ) {
           void requestAuroraSnapshotByKey(
@@ -1489,6 +1574,7 @@ export const useChatStreamStore = defineStore("chatStream", () => {
       }
     });
     rAFPendingUpdates.clear();
+    for (const messageKey of auroraSnapshotJobs.keys()) finishAuroraRecovery(messageKey, null);
     streamTerminalTombstones.clear();
     streamConsumerRevisions.clear();
   });

@@ -11,7 +11,7 @@ use crate::vcp_modules::group_service::{read_group_config, GroupManagerState};
 use crate::vcp_modules::group_types::GroupChatMode;
 use crate::vcp_modules::group_speaking_policy::{
     build_jev_request, determine_naturerandom_speakers, determine_sequential_speakers,
-    parse_jev_decision, GroupMemberHistoryStats,
+    append_jev_history, fallback_jev_decision, parse_jev_decision, GroupMemberHistoryStats,
 };
 use crate::vcp_modules::group::group_session::{GroupSession, GroupReplyScope, GroupInputReservation, ScopeCancellation};
 use crate::vcp_modules::message_service;
@@ -559,6 +559,36 @@ async fn load_group_member_history_stats(
     }).collect())
 }
 
+fn extract_group_mentions(content: &str, members: &[(String, String)]) -> Vec<String> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut candidates = members.iter().filter_map(|(id, name)| {
+        let name = name.trim().to_lowercase();
+        (!name.is_empty() && names.insert(name.clone())).then_some((name, id.as_str()))
+    }).collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    // Match the existing composer precedence: one longest name per occurrence,
+    // then preserve appearance order and invite each member once.
+    candidates.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+    let text = content.to_lowercase();
+    let mut offset = 0;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut mentions = Vec::new();
+    while let Some(relative) = text[offset..].find('@') {
+        let start = offset + relative + 1;
+        if let Some((name, id)) = candidates.iter().find(|(name, _)| text[start..].starts_with(name)) {
+            if seen.insert(*id) {
+                mentions.push((*id).to_owned());
+            }
+            offset = start + name.len();
+        } else {
+            offset = start;
+        }
+    }
+    mentions
+}
+
 pub(crate) async fn submit_group_session_input(
     app: &AppHandle,
     reservation: GroupInputReservation,
@@ -615,7 +645,7 @@ pub(crate) async fn submit_group_session_input(
     );
     // The text is already durably stored by the normal typed/voice entry point.
     // Mentions only use actual members; no user-facing message is fabricated.
-    let mut mentions = Vec::new();
+    let mut members = Vec::new();
     let key = app
         .state::<ActiveGroupTurns>()
         .topic_for_session(&session)
@@ -626,17 +656,14 @@ pub(crate) async fn submit_group_session_input(
         key.owner_id.clone(),
     )
     .await?;
-    let text = message.content.to_lowercase();
     for id in &config.members {
         if let Ok(member) =
             read_agent_config_internal(app, &app.state::<AgentConfigState>(), id, Some(false)).await
         {
-            if !member.name.is_empty() && text.contains(&format!("@{}", member.name.to_lowercase()))
-            {
-                mentions.push(id.clone());
-            }
+            members.push((id.clone(), member.name));
         }
     }
+    let mentions = extract_group_mentions(&message.content, &members);
     crate::vcp_modules::chat::voice_service::feed_chat_event(
         app,
         &StreamEvent {
@@ -797,22 +824,42 @@ async fn run_jev_session(
             }
             continue;
         }
-        let history = message_service::load_chat_text_history_for_context(
-            app,
-            &key,
-            Some(config.local_settings.mode_settings.jev.history_window as usize),
-            None,
-            false,
-        )
-        .await?;
         let db = app.state::<DbState>();
         let history_stats = load_group_member_history_stats(&db.pool, &key).await?;
-        let request = build_jev_request(&members, &history, &config, &runtime, &history_stats);
         let settings = read_config(app.clone(), app.state::<SettingsState>()).await?;
-        let cancellation = ScopeCancellation::new(turn.child_token(), runtime.scope.as_ref());
+        let mut request = build_jev_request(&members, &config, &runtime, &history_stats)?;
+        let history_budget = crate::vcp_modules::group::jev_client::history_byte_budget(
+            &settings.jev, &request,
+        ).map_err(|error| error.to_string())?;
+        let history = message_service::load_chat_plain_text_history_for_context(
+            &db.pool,
+            &key,
+            config.local_settings.mode_settings.jev.history_window as usize,
+            history_budget,
+        ).await?;
+        let preparation_cancellation = runtime.cancellation.clone();
+        let preparation = tokio::task::spawn_blocking(move || {
+            append_jev_history(&mut request, history, history_budget, &preparation_cancellation)?;
+            Ok::<_, String>(request)
+        });
+        let prepared = tokio::select! {
+            biased;
+            _ = runtime.cancellation.cancelled() => None,
+            result = preparation => Some(result),
+        };
+        if runtime.cancellation.is_cancelled() || !session.revision_is_current(runtime.revision) {
+            session.decision_finished();
+            continue;
+        }
+        let Some(prepared) = prepared else {
+            session.decision_finished();
+            continue;
+        };
+        let request = Arc::new(prepared.map_err(|error| format!("Jev 上下文装配任务失败：{error}"))??);
+        let cancellation = ScopeCancellation::new(runtime.cancellation.clone(), runtime.scope.as_ref());
         let response = crate::vcp_modules::group::jev_client::decide(
             &settings.jev,
-            &request,
+            request.clone(),
             cancellation.token.clone(),
         )
         .await;
@@ -828,11 +875,25 @@ async fn run_jev_session(
             session.close(Some("cancelled_by_user".into()));
             return Ok(());
         }
-        let response = match response {
-            Ok(response) => response,
+        let (ids, reason) = match response {
+            Ok(response) => parse_jev_decision(
+                &response,
+                &request,
+                &members,
+                &config,
+                runtime.force_continue,
+            )?,
             Err(error) if error.is_cancelled() => {
                 session.close(Some("cancelled_by_user".into()));
                 return Ok(());
+            }
+            Err(error) if error.is_retry_exhausted() => {
+                log::warn!(
+                    "[GroupChat] JEV retries exhausted, applying configured fallback: code={}, status={:?}",
+                    error.code,
+                    error.status
+                );
+                fallback_jev_decision(&members, &config)
             }
             Err(error) => {
                 log::warn!(
@@ -843,13 +904,6 @@ async fn run_jev_session(
                 return Err(error.to_string());
             }
         };
-        let (ids, reason) = parse_jev_decision(
-            &response,
-            &request,
-            &members,
-            &config,
-            runtime.force_continue,
-        )?;
         let stop = reason.is_some();
         if session.accept_decision(runtime.revision, &ids, reason)? && stop {
             return Ok(());
@@ -950,6 +1004,32 @@ mod group_turn_tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
+    fn jev_mentions_choose_longest_names_and_preserve_text_order() {
+        let members = vec![
+            ("short".into(), "小明".into()),
+            ("long".into(), "小明2".into()),
+            ("alpha".into(), "Alpha".into()),
+            ("alpha-beta".into(), "AlphaBeta".into()),
+        ];
+        assert_eq!(extract_group_mentions("@小明2，请回应 @ALPHABETA；再请 @小明。@小明2", &members),
+            ["long", "alpha-beta", "short"]);
+        assert_eq!(extract_group_mentions("@AlphaBeta @Alpha", &members), ["alpha-beta", "alpha"]);
+    }
+
+    #[test]
+    fn jev_mentions_keep_first_duplicate_name_and_existing_halfwidth_syntax() {
+        let members = vec![
+            ("first".into(), "  Nova  ".into()),
+            ("duplicate".into(), "NOVA".into()),
+            ("blank".into(), "  ".into()),
+            ("unicode".into(), "小助手🤖".into()),
+        ];
+        assert_eq!(extract_group_mentions("＠Nova @unknown @小助手🤖 @nova @NOVA", &members),
+            ["unicode", "first"]);
+        assert!(extract_group_mentions("普通正文 @", &members).is_empty());
+    }
+
+    #[test]
     fn blank_jev_navigator_uses_default_in_request_without_overwriting_saved_value() {
         let members = vec![AgentConfig { id: "a".into(), name: "A".into(), ..Default::default() }];
         let mut group = GroupConfig::default();
@@ -957,7 +1037,7 @@ mod group_turn_tests {
         let runtime = session.decision_context(0).unwrap().unwrap();
         for saved in ["", " \t\n", "  Custom routing instructions  "] {
             group.local_settings.mode_settings.jev.navigator_prompt = saved.into();
-            let request = build_jev_request(&members, &[], &group, &runtime, &BTreeMap::new());
+            let request = build_jev_request(&members, &group, &runtime, &BTreeMap::new()).unwrap();
             assert!(request.validate().is_ok());
             let body = serde_json::to_value(request).unwrap();
             let expected = if saved.trim().is_empty() {
@@ -1021,7 +1101,7 @@ mod group_turn_tests {
         let session = GroupSession::new("stats".into(), CancellationToken::new(), "user_message", false);
         let runtime = session.decision_context(0).unwrap().unwrap();
         // Even an empty/restricted text window must not erase full-history facts.
-        let request = build_jev_request(&members, &[], &group, &runtime, &stats);
+        let request = build_jev_request(&members, &group, &runtime, &stats).unwrap();
         assert_eq!(request.state["members"][0]["messagesSinceLastSpeech"], 3);
         assert_eq!(request.state["members"][0]["totalSpeechCount"], 2);
         assert!(request.state["members"][1]["messagesSinceLastSpeech"].is_null());
@@ -1081,13 +1161,13 @@ mod group_turn_tests {
         let members: Vec<AgentConfig> = serde_json::from_value(json!([{"id":"member","name":"Member","model":"test","streamOutput":false}])).unwrap();
         let session = GroupSession::new("fixture".into(), CancellationToken::new(), "user_message", false);
         let runtime = session.decision_context(0).unwrap().unwrap();
-        let request = build_jev_request(&members, &[], &group, &runtime, &BTreeMap::new());
+        let request = Arc::new(build_jev_request(&members, &group, &runtime, &BTreeMap::new()).unwrap());
         let mut config = crate::vcp_modules::infra::settings_manager::types::JevConfig::default();
         config.enabled = true;
         config.typesafe.api_url = format!("{endpoint}/decision");
         config.typesafe.api_key = "fixture-key".into();
         config.max_retries = 0;
-        let response = crate::vcp_modules::group::jev_client::decide(&config, &request, CancellationToken::new()).await.unwrap();
+        let response = crate::vcp_modules::group::jev_client::decide(&config, request.clone(), CancellationToken::new()).await.unwrap();
         let (ids, reason) = parse_jev_decision(&response, &request, &members, &group, false).unwrap();
         assert_eq!(ids, ["member"]);
         assert!(reason.is_none());

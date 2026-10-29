@@ -599,7 +599,7 @@ pub async fn get_assistants_snapshot(
         repair_app.state::<AgentConfigState>().invalidate_cache();
     }).await?;
     let repair_app = app_handle.clone();
-    crate::vcp_modules::group_service::normalize_group_configurations(&db_state, move || {
+    crate::vcp_modules::group_service::normalize_group_configurations(&db_state, None, move || {
         repair_app.state::<GroupManagerState>().invalidate_cache();
     }).await?;
     build_assistants_snapshot(&db_state.pool).await

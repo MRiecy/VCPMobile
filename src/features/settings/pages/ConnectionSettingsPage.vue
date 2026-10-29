@@ -76,7 +76,7 @@ const applyImport = async (backup: ParsedConfigBackup): Promise<BackupImportResu
     return await applyConfigBackup(backup, async (changes, groupPreferences) => {
       const snapshot = settingsStore.snapshot;
       if (!snapshot) throw new Error('配置尚未加载');
-      const result = await settingsStore.importBackup(buildSettingsUpdate(snapshot, changes), groupPreferences);
+      const { result, missingGroups } = await settingsStore.importBackup(buildSettingsUpdate(snapshot, changes), groupPreferences);
       if (result.status !== 'saved') {
         const issues = result.status === 'rejected' ? result.issues : result.conflicts;
         throw new Error(issues.map(issue => `${issue.domain}.${issue.field}: ${issue.message}`).join('\n'));
@@ -94,6 +94,7 @@ const applyImport = async (backup: ParsedConfigBackup): Promise<BackupImportResu
           });
         }
       }
+      return missingGroups;
     });
   } finally {
     actionBusy.value = false;

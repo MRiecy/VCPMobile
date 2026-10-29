@@ -91,6 +91,8 @@ struct SessionState {
     current: Option<String>,
     current_scope: Option<Arc<GroupReplyScope>>,
     latest_scope: Option<Arc<GroupReplyScope>>,
+    latest_input_id: u64,
+    current_decision_cancellation: Option<CancellationToken>,
     phase: &'static str,
     revision: u64,
     rounds: u32,
@@ -103,6 +105,15 @@ struct SessionState {
     error: Option<String>,
 }
 
+impl SessionState {
+    fn advance_revision(&mut self) {
+        self.revision += 1;
+        if let Some(cancellation) = self.current_decision_cancellation.take() {
+            cancellation.cancel();
+        }
+    }
+}
+
 pub(crate) struct GroupSession {
     pub turn_id: String,
     pub cancellation: CancellationToken,
@@ -113,6 +124,7 @@ pub(crate) struct GroupSession {
 
 pub(crate) struct GroupDecisionContext {
     pub revision: u64,
+    pub cancellation: CancellationToken,
     pub rounds: u32,
     pub counts: BTreeMap<String, u32>,
     pub force_continue: bool,
@@ -139,13 +151,36 @@ impl GroupInputReservation {
             }
             state.pending_inputs.remove(&self.id);
             self.consumed = true;
-            state.revision += 1;
-            let old = state.latest_scope.replace(scope);
-            for id in mentions.iter().rev() {
-                if state.current.as_deref() != Some(id) {
-                    state.queue.retain(|queued| queued != id);
-                    if state.queue.len() < MAX_QUEUED_MEMBERS {
-                        state.queue.push_front(id.clone());
+            state.advance_revision();
+            // Persistence and member reads can settle out of admission order.
+            // A late origin must never take cancellation ownership from a newer input.
+            let is_latest = self.id > state.latest_input_id;
+            let old = if is_latest {
+                state.latest_input_id = self.id;
+                state.latest_scope.replace(scope.clone())
+            } else {
+                Some(scope.clone())
+            };
+            if !scope.cancellation.is_cancelled() {
+                if is_latest {
+                    for id in mentions.iter().rev() {
+                        if state.current.as_deref() != Some(id) {
+                            state.queue.retain(|queued| queued != id);
+                            if state.queue.len() < MAX_QUEUED_MEMBERS {
+                                state.queue.push_front(id.clone());
+                            }
+                        }
+                    }
+                } else {
+                    // Keep an earlier explicit invitation without moving it ahead
+                    // of newer input or manual work already accepted by the owner.
+                    for id in mentions {
+                        if state.current.as_deref() != Some(id)
+                            && !state.queue.contains(id)
+                            && state.queue.len() < MAX_QUEUED_MEMBERS
+                        {
+                            state.queue.push_back(id.clone());
+                        }
                     }
                 }
             }
@@ -157,7 +192,11 @@ impl GroupInputReservation {
             })
         };
         if let Some(old) = old {
-            old.finish();
+            if old.cancellation.is_cancelled() {
+                old.finish_with_result(Ok(serde_json::json!({"status":"cancelled"})));
+            } else {
+                old.finish();
+            }
         }
         self.session.changed.notify_one();
         Ok(())
@@ -192,6 +231,8 @@ impl GroupSession {
                 current: None,
                 current_scope: None,
                 latest_scope: None,
+                latest_input_id: 0,
+                current_decision_cancellation: None,
                 phase: "waiting",
                 revision: 0,
                 rounds: 0,
@@ -239,7 +280,7 @@ impl GroupSession {
         if state.pending_inputs.len() >= MAX_PENDING_INPUTS {
             return Err("等待保存的群消息过多，请稍后重试。".into());
         }
-        state.revision += 1; // An admitted input invalidates an in-flight decision before its IO.
+        state.advance_revision(); // Admission preempts the old decision before input IO.
         let id = state.revision;
         state.pending_inputs.insert(id, cancellation);
         Ok(GroupInputReservation {
@@ -273,7 +314,7 @@ impl GroupSession {
             return Err("群聊待发言队列已满。".into());
         }
         state.queue = next;
-        state.revision += 1;
+        state.advance_revision();
         self.changed.notify_one();
         Ok(())
     }
@@ -297,7 +338,7 @@ impl GroupSession {
         state.current = Some(id.clone());
         state.current_scope = scope.clone();
         state.phase = "speaking";
-        state.revision += 1;
+        state.advance_revision();
         Ok(Some((id, scope)))
     }
 
@@ -313,7 +354,7 @@ impl GroupSession {
                     *state.counts.entry(id).or_default() += 1;
                 }
             }
-            state.revision += 1;
+            state.advance_revision();
             state.phase = "waiting";
             state.current_scope.take().filter(|old| {
                 !state
@@ -353,14 +394,18 @@ impl GroupSession {
             || !state.pending_inputs.is_empty()
             || !state.queue.is_empty()
             || state.closed
+            || self.cancellation.is_cancelled()
         {
             return Ok(None);
         }
         state.phase = "deciding";
-        state.revision += 1;
+        state.advance_revision();
+        let cancellation = self.cancellation.child_token();
+        state.current_decision_cancellation = Some(cancellation.clone());
         state.current_scope = state.latest_scope.clone();
         Ok(Some(GroupDecisionContext {
             revision: state.revision,
+            cancellation,
             rounds: state.rounds,
             counts: state.counts.clone(),
             force_continue: state.force_continue,
@@ -371,6 +416,7 @@ impl GroupSession {
 
     pub(crate) fn decision_finished(&self) {
         let retired = self.state.lock().ok().and_then(|mut state| {
+            state.current_decision_cancellation = None;
             state.current_scope.take().filter(|old| {
                 !state
                     .latest_scope
@@ -399,7 +445,7 @@ impl GroupSession {
             return Ok(false);
         }
         state.rounds += 1;
-        state.revision += 1;
+        state.advance_revision();
         state.force_continue = false;
         state.phase = "waiting";
         state
@@ -420,7 +466,7 @@ impl GroupSession {
 
     pub(crate) fn invalidate(&self) {
         if let Ok(mut state) = self.state.lock() {
-            state.revision += 1;
+            state.advance_revision();
         }
         self.changed.notify_one();
     }
@@ -472,11 +518,18 @@ impl GroupSession {
 
     pub(crate) fn finish_cancelled_scope(&self, scope: &Arc<GroupReplyScope>) {
         let owns_work = self.state.lock().is_ok_and(|mut state| {
-            state.revision += 1;
-            state
+            let owns_work = state
                 .current_scope
                 .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, scope))
+                .is_some_and(|current| Arc::ptr_eq(current, scope));
+            let is_latest = state
+                .latest_scope
+                .as_ref()
+                .is_some_and(|latest| Arc::ptr_eq(latest, scope));
+            if owns_work || is_latest {
+                state.advance_revision();
+            }
+            owns_work
         });
         if !owns_work {
             scope.finish_with_result(Ok(serde_json::json!({"status":"cancelled"})));
@@ -490,7 +543,7 @@ impl GroupSession {
             state.phase = "idle";
             state.queue.clear();
             state.current = None;
-            state.revision += 1;
+            state.advance_revision();
             if reason.is_some() {
                 state.stop_reason = reason;
             }
@@ -655,6 +708,94 @@ mod tests {
         voice.wait().await.unwrap();
         assert_eq!(finished.load(Ordering::SeqCst), 1);
         assert!(!session.latest_scope_cancelled());
+    }
+
+    #[tokio::test]
+    async fn late_cancelled_voice_input_cannot_replace_a_committed_typed_input() {
+        let session = GroupSession::new("turn".into(), CancellationToken::new(), "user_message", false);
+        let voice_cancel = CancellationToken::new();
+        let voice_finished = Arc::new(AtomicUsize::new(0));
+        let typed_finished = Arc::new(AtomicUsize::new(0));
+        let voice = scope("voice", voice_cancel.clone(), voice_finished.clone());
+        let typed = scope("typed", CancellationToken::new(), typed_finished.clone());
+        let slow_voice = session.reserve_with_cancellation(voice_cancel.clone()).unwrap();
+        let later_typed = session.reserve().unwrap();
+
+        // The text submitted after hangup can finish persistence/member reads
+        // while the earlier voice submission still owns its reservation.
+        later_typed.commit(typed.clone(), &["typed-member".into()]).unwrap();
+        voice_cancel.cancel();
+        slow_voice.commit(voice.clone(), &["voice-member".into()]).unwrap();
+        assert_eq!(voice.wait().await.unwrap()["status"], "cancelled");
+        assert_eq!(voice_finished.load(Ordering::SeqCst), 1);
+        assert_eq!(typed_finished.load(Ordering::SeqCst), 0);
+        assert!(!session.latest_scope_cancelled());
+        assert_eq!(session.snapshot().unwrap().queued_agent_ids, ["typed-member"]);
+
+        let (member, selected_scope) = session.next_speaker(session.snapshot().unwrap().revision)
+            .unwrap().unwrap();
+        assert_eq!(member, "typed-member");
+        assert!(Arc::ptr_eq(selected_scope.as_ref().unwrap(), &typed));
+        session.speaker_finished(true, Ok(serde_json::json!({"status":"completed"}))).unwrap();
+        let next = session.decision_context(session.snapshot().unwrap().revision).unwrap().unwrap();
+        // A late cancellation watcher belonging to the retired origin must not
+        // preempt the newer input's arbitration or change its revision.
+        session.finish_cancelled_scope(&voice);
+        assert!(session.revision_is_current(next.revision));
+        assert!(!next.cancellation.is_cancelled());
+        session.close(Some("end_option_selected".into()));
+        assert_eq!(typed.wait().await.unwrap()["status"], "completed");
+        assert_eq!(typed_finished.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn late_valid_input_keeps_newer_scope_and_invitation_priority() {
+        let session = GroupSession::new("turn".into(), CancellationToken::new(), "user_message", false);
+        let earlier_scope = scope("earlier", CancellationToken::new(), Arc::new(AtomicUsize::new(0)));
+        let newer_scope = scope("newer", CancellationToken::new(), Arc::new(AtomicUsize::new(0)));
+        let earlier = session.reserve().unwrap();
+        let newer = session.reserve().unwrap();
+        newer.commit(newer_scope.clone(), &["new".into(), "shared".into()]).unwrap();
+        earlier.commit(earlier_scope.clone(), &["old".into(), "shared".into()]).unwrap();
+
+        assert_eq!(earlier_scope.wait().await.unwrap()["status"], "completed");
+        assert_eq!(session.snapshot().unwrap().queued_agent_ids, ["new", "shared", "old"]);
+        let (_, selected_scope) = session.next_speaker(session.snapshot().unwrap().revision)
+            .unwrap().unwrap();
+        assert!(Arc::ptr_eq(selected_scope.as_ref().unwrap(), &newer_scope));
+        session.close(None);
+    }
+
+    #[test]
+    fn accepted_input_manual_queue_and_history_changes_preempt_only_the_old_decision() {
+        let root = CancellationToken::new();
+        let session = GroupSession::new("turn".into(), root.clone(), "continue", true);
+        let first = session.decision_context(0).unwrap().unwrap();
+        let input = session.reserve().unwrap();
+        assert!(first.cancellation.is_cancelled());
+        assert!(!root.is_cancelled());
+        assert!(!session.accept_decision(first.revision, &[], Some("end_option_selected".into())).unwrap());
+        session.decision_finished();
+        drop(input);
+
+        let second = session.decision_context(session.snapshot().unwrap().revision).unwrap().unwrap();
+        assert!(!second.cancellation.is_cancelled());
+        session.enqueue(&["manual".into()]).unwrap();
+        assert!(second.cancellation.is_cancelled());
+        assert!(!root.is_cancelled());
+        session.decision_finished();
+        assert_eq!(session.next_speaker(session.snapshot().unwrap().revision).unwrap().unwrap().0, "manual");
+        session.speaker_finished(true, Ok(serde_json::json!({"status":"completed"}))).unwrap();
+
+        let third = session.decision_context(session.snapshot().unwrap().revision).unwrap().unwrap();
+        session.invalidate();
+        assert!(third.cancellation.is_cancelled());
+        session.decision_finished();
+        let fourth = session.decision_context(session.snapshot().unwrap().revision).unwrap().unwrap();
+        assert!(!fourth.cancellation.is_cancelled());
+        assert_eq!(fourth.rounds, 0, "preempted decisions consume no autonomous budget");
+        root.cancel();
+        assert!(fourth.cancellation.is_cancelled());
     }
 
     #[test]

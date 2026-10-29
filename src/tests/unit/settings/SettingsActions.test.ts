@@ -17,7 +17,7 @@ import SettingsTextField from '../../../components/settings/SettingsTextField.vu
 import VcpConfirm from '../../../components/ui/VcpConfirm.vue';
 import { invokeMock, mockInvoke } from '../../mocks/tauri';
 import { SETTINGS_DEFAULTS } from '../../../core/config/generated/defaults';
-import type { ConfigSnapshot, ConfigSaveResult, ConfigUpdate } from '../../../core/config/generated/config';
+import type { ConfigSnapshot, ConfigSaveResult, ConfigBackupImportResult, ConfigUpdate } from '../../../core/config/generated/config';
 import { applySettingsFields, cloneConfig, readSetting, type SettingsFieldValues } from '../../../core/config/fields';
 import { CONNECTION_FIELDS } from '../../../features/settings/editing/fieldSets';
 
@@ -135,7 +135,7 @@ describe('依赖配置提交的设置动作', () => {
   for (const { component, label, command } of cases) {
     it(`${label}：保存失败保留错误，不执行后续任务`, async () => {
       const commit = vi.fn(async (): Promise<SettingsSaveResult> => ({ ok: false, error: '磁盘不可写' }));
-      const wrapper = render(component, { settings: connectionDraft(), active: true, disabled: false, commit, applyImport: vi.fn() });
+      const wrapper = render(component, { ...(component === ConfigBackupSection ? {} : { settings: connectionDraft() }), active: true, disabled: false, commit, applyImport: vi.fn() });
 
       await action(wrapper, label).get('button').trigger('click');
       await flushPromises();
@@ -148,7 +148,7 @@ describe('依赖配置提交的设置动作', () => {
     it(`${label}：保存等待中隐藏页面，不再启动后续任务`, async () => {
       const pending = deferred<SettingsSaveResult>();
       const commit = vi.fn(() => pending.promise);
-      const wrapper = render(component, { settings: connectionDraft(), active: true, disabled: false, commit, applyImport: vi.fn() });
+      const wrapper = render(component, { ...(component === ConfigBackupSection ? {} : { settings: connectionDraft() }), active: true, disabled: false, commit, applyImport: vi.fn() });
 
       await action(wrapper, label).get('button').trigger('click');
       expect(commit).toHaveBeenCalledTimes(1);
@@ -203,6 +203,17 @@ describe('依赖配置提交的设置动作', () => {
     pending.resolve({ server: { apiKey: 'committed-key' } });
     await flushPromises();
     expect(callsFor('plugin:vcp-mobile|save_to_downloads')).toHaveLength(0);
+  });
+
+  it('原生存储权限被拒绝后显示失败，不重复申请权限或再次保存', async () => {
+    mockInvoke('plugin:vcp-mobile|save_to_downloads', () => { throw new Error('保存文件需要储存空间权限'); });
+    const wrapper = render(ConfigBackupSection, { active: true, commit: async () => saved(), applyImport: vi.fn() });
+    await action(wrapper, '导出').get('button').trigger('click');
+    await flushPromises();
+    expect(callsFor('plugin:vcp-mobile|save_to_downloads')).toHaveLength(1);
+    expect(callsFor('plugin:vcp-mobile|request_android_permission')).toHaveLength(0);
+    expect(wrapper.text()).toContain('导出失败');
+    expect(wrapper.text()).toContain('保存文件需要储存空间权限');
   });
 
   it('打开同步面板等待连接保存，等待期间重复点击不重复打开', async () => {
@@ -333,7 +344,7 @@ describe('连接设置页与真实编辑会话的集成', () => {
     });
     mockInvoke('import_settings_backup', (args) => {
       persisted = applyRequest(persisted, args?.request as ConfigUpdate);
-      return { status: 'saved', snapshot: persisted };
+      return { result: { status: 'saved', snapshot: persisted }, missingGroups: false };
     });
     return render(ConnectionSettingsPage, { active: true });
   }
@@ -569,13 +580,35 @@ describe('连接设置页与真实编辑会话的集成', () => {
     expect(wrapper.text()).toContain('配置导入成功');
   });
 
+  it('缺失群只提示先同步再导入，其他设置照常恢复且不逐群展示', async () => {
+    const groupPreferences = { 'missing-a': { chatMode: 'jev' }, 'missing-b': { chatMode: 'sequential' } };
+    mockInvoke('plugin:vcp-mobile|pick_file', () => ({ path: 'tests/fixtures/groups-before-sync.vcpcfg' }));
+    mockInvoke('parse_config_backup', () => ({ domains: { server: { apiKey: 'restored-key' } }, groupPreferences, exportedAt: '' }));
+    mockInvoke('get_assistants_snapshot', () => ({ agents: [], groups: [], unreadCounts: {} }));
+    const wrapper = renderPage();
+    mockInvoke('import_settings_backup', (args) => ({
+      result: { status: 'saved', snapshot: applyRequest(snapshot(), args?.request as ConfigUpdate) },
+      missingGroups: true,
+    }));
+    await flushPromises();
+    await action(wrapper, '导入').get('button').trigger('click');
+    await flushPromises();
+    await confirmImport(wrapper);
+    await flushPromises();
+    expect(useSettingsStore().settings?.server.apiKey).toBe('restored-key');
+    expect(wrapper.text().match(/请先同步，再次导入/g)).toHaveLength(1);
+    expect(wrapper.text()).not.toContain('missing-a');
+    expect(wrapper.text()).not.toContain('missing-b');
+    expect(callsFor('import_settings_backup')).toHaveLength(1);
+  });
+
   it('导入应用期间冻结本页动作；失败后恢复输入并保留原草稿', async () => {
     mockInvoke('plugin:vcp-mobile|pick_file', () => ({ path: 'tests/fixtures/connection.vcpcfg' }));
     mockInvoke('parse_config_backup', () => ({ domains: { server: { apiKey: 'imported-key' } }, exportedAt: '' }));
     const wrapper = renderPage();
     await flushPromises();
     await field(wrapper, 'API Key').setValue('unsubmitted-key');
-    const updating = deferred<ConfigSaveResult>();
+    const updating = deferred<ConfigBackupImportResult>();
     mockInvoke('import_settings_backup', () => updating.promise);
     await action(wrapper, '导入').get('button').trigger('click');
     await flushPromises();

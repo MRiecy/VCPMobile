@@ -9,12 +9,17 @@
  */
 export function sortByOrder<T extends { id: string }>(items: T[], order: string[]): T[] {
   if (order.length === 0) return items;
+  const ranks = new Map<string, number>();
+  order.forEach((id, index) => {
+    // indexOf used the first occurrence when a saved order contained duplicates.
+    if (!ranks.has(id)) ranks.set(id, index);
+  });
   return [...items].sort((a, b) => {
-    const indexA = order.indexOf(a.id);
-    const indexB = order.indexOf(b.id);
-    if (indexA === -1 && indexB === -1) return 0;
-    if (indexA === -1) return 1;
-    if (indexB === -1) return -1;
+    const indexA = ranks.get(a.id);
+    const indexB = ranks.get(b.id);
+    if (indexA === undefined && indexB === undefined) return 0;
+    if (indexA === undefined) return 1;
+    if (indexB === undefined) return -1;
     return indexA - indexB;
   });
 }

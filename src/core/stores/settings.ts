@@ -3,7 +3,7 @@ import { computed, shallowRef, ref, onScopeDispose } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useNotificationStore } from "./notification";
-import type { ConfigSnapshot, ConfigUpdate, ConfigSaveResult, Settings } from "../config/generated/config";
+import type { ConfigSnapshot, ConfigUpdate, ConfigSaveResult, ConfigBackupImportResult, Settings } from "../config/generated/config";
 import { buildSettingsUpdate, cloneConfig, type SettingsFieldValues } from "../config/fields";
 import type { GroupLocalSettingsPatch } from '../types/assistant';
 export type { ChatEndpointMode } from "../config/generated/config";
@@ -65,38 +65,41 @@ export const useSettingsStore = defineStore("settings", () => {
     }
   });
 
-  const submitSettingsChange = (
+  function submitSettingsChange(command: 'update_settings', request: ConfigUpdate): Promise<ConfigSaveResult>;
+  function submitSettingsChange(command: 'import_settings_backup', request: ConfigUpdate, groupPreferences: Record<string, GroupLocalSettingsPatch>): Promise<ConfigBackupImportResult>;
+  function submitSettingsChange(
     command: 'update_settings' | 'import_settings_backup',
     request: ConfigUpdate,
     groupPreferences?: Record<string, GroupLocalSettingsPatch>,
-  ): Promise<ConfigSaveResult> => {
+  ): Promise<ConfigSaveResult | ConfigBackupImportResult> {
     const captured = cloneConfig(request);
     const capturedGroups = groupPreferences === undefined ? undefined : cloneConfig(groupPreferences);
     return enqueueOperation(async () => {
       error.value = null;
       try {
-        const result = await invoke<ConfigSaveResult>(command, {
+        const response = await invoke<ConfigSaveResult | ConfigBackupImportResult>(command, {
           request: captured,
           ...(capturedGroups === undefined ? {} : { groupPreferences: capturedGroups }),
         });
+        const result = 'result' in response ? response.result : response;
         if (result.status === "saved" || result.status === "conflict") acceptSnapshot(result.snapshot);
-        if (result.status === "saved") {
+        if (result.status === "saved" && command === 'update_settings') {
           notificationStore.addNotification({
             type: "success", toastOnly: true,
             title: '设置已保存',
             message: '配置变更已保存',
           });
-        } else {
+        } else if (result.status !== 'saved') {
           const issues = result.status === "rejected" ? result.issues : result.conflicts;
           error.value = issues.map(issue => issue.message).join("；");
         }
-        return result;
+        return response;
       } catch {
         error.value = '设置保存失败，请重试';
         throw new Error(error.value);
       }
     });
-  };
+  }
 
   const updateSettings = (request: ConfigUpdate) => submitSettingsChange('update_settings', request);
   const importBackup = (request: ConfigUpdate, groupPreferences: Record<string, GroupLocalSettingsPatch>) =>

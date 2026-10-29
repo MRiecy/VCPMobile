@@ -5,11 +5,10 @@ import { useAssistantStore } from "../../core/stores/assistant";
 import { useChatSessionStore } from "../../core/stores/chatSessionStore";
 import { useChatStreamStore } from "../../core/stores/chatStreamStore";
 import { useLayoutStore } from "../../core/stores/layout";
-import { useSettingsStore } from "../../core/stores/settings";
 import { useOverlayStore } from "../../core/stores/overlay";
 import VcpAvatar from "../../components/ui/VcpAvatar.vue";
 import AvatarWaveSlot from "../../components/ui/AvatarWaveSlot.vue";
-import { sortByOrder } from "./agentOrder";
+import { useAgentOrderStore } from "./agentOrderStore";
 import { activeSwipeId, currentSwipeX, MAX_SWIPE } from "./swipeController";
 import type {
   AgentListItemDto,
@@ -30,24 +29,15 @@ const assistantStore = useAssistantStore();
 const sessionStore = useChatSessionStore();
 const streamStore = useChatStreamStore();
 const layoutStore = useLayoutStore();
-const settingsStore = useSettingsStore();
+const orderStore = useAgentOrderStore();
 const overlayStore = useOverlayStore();
 
 // --- Sorting Logic ---
 const groupListRef = ref<HTMLElement | null>(null);
 const agentListRef = ref<HTMLElement | null>(null);
 
-const orderedGroups = computed(() => {
-  const groups = assistantStore.groups;
-  const order = settingsStore.settings?.navigation.groupOrder || [];
-  return sortByOrder(groups, order);
-});
-
-const orderedAgents = computed(() => {
-  const agents = assistantStore.agents;
-  const order = settingsStore.settings?.navigation.agentOrder || [];
-  return sortByOrder(agents, order);
-});
+const orderedGroups = computed(() => orderStore.orderedGroups);
+const orderedAgents = computed(() => orderStore.orderedAgents);
 
 // --- Shared Swipe State ---
 const isSorting = ref(false);
@@ -102,20 +92,21 @@ const createSortable = (
       evt.oldIndex === evt.newIndex
     ) return;
 
-    const newOrder = (ownerType === "group"
+    const list = ownerType === "group" ? groupListRef.value : agentListRef.value;
+    if (evt.from !== list) return;
+    const current = (ownerType === "group"
       ? orderedGroups.value
       : orderedAgents.value
     ).map((item) => item.id);
-    const [movedItem] = newOrder.splice(evt.oldIndex, 1);
-    if (!movedItem) return;
-    newOrder.splice(evt.newIndex, 0, movedItem);
-    void settingsStore.updateFields(
-      ownerType === "group"
-        ? { 'navigation.groupOrder': newOrder }
-        : { 'navigation.agentOrder': newOrder },
-    ).catch((error) => {
-      console.error(`[AgentList] Failed to persist ${ownerType} order:`, error);
-    });
+    const originalIndex = current.indexOf(evt.item.dataset.ownerId ?? '');
+    if (originalIndex < 0) return;
+    const newOrder = Array.from(evt.from.children, child => (child as HTMLElement).dataset.ownerId)
+      .filter((id): id is string => id !== undefined);
+    // Restore Vue's previous DOM order before it applies the optimistic reorder.
+    // Leaving Sortable's manual move in place would make keyed diff move it twice.
+    evt.item.remove();
+    evt.from.insertBefore(evt.item, evt.from.children[originalIndex] ?? null);
+    orderStore.setOrder(ownerType, newOrder);
   },
 });
 
@@ -341,7 +332,7 @@ const filteredCombinedItems = computed<AssistantListItem[]>(() => {
             group.name
               .toLowerCase()
               .includes(searchQuery.toLowerCase().trim()),
-        )" :key="group.id" class="relative w-full drag-handle mb-2">
+        )" :key="group.id" :data-owner-id="group.id" class="relative w-full drag-handle mb-2">
           
           <!-- 背景设置按钮 -->
           <div class="absolute inset-0 rounded-xl overflow-hidden z-0 pointer-events-none">
@@ -410,7 +401,7 @@ const filteredCombinedItems = computed<AssistantListItem[]>(() => {
             agent.name
               .toLowerCase()
               .includes(searchQuery.toLowerCase().trim()),
-        )" :key="agent.id" v-guide="'agent-row-' + agent.id" class="relative w-full drag-handle mb-2">
+        )" :key="agent.id" :data-owner-id="agent.id" v-guide="'agent-row-' + agent.id" class="relative w-full drag-handle mb-2">
           
           <!-- 背景设置按钮 -->
           <div class="absolute inset-0 rounded-xl overflow-hidden z-0 pointer-events-none">

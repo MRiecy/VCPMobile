@@ -1,12 +1,16 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { mount } from "@vue/test-utils";
-import { createPinia, setActivePinia } from "pinia";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { flushPromises, mount } from "@vue/test-utils";
+import { createPinia, disposePinia, setActivePinia, type Pinia } from "pinia";
 import { invoke } from "@tauri-apps/api/core";
 
 import AgentList from "@/features/agent/AgentList.vue";
 import { useAssistantStore } from "@/core/stores/assistant";
 import { useChatStreamStore } from "@/core/stores/chatStreamStore";
+import { useSettingsStore } from "@/core/stores/settings";
 import type { StreamEventDto } from "@/core/types/chat";
+import type { ConfigUpdate } from "@/core/config/generated/config";
+import { applyConfigRequest, makeConfigSnapshot } from '../../helpers/config';
+import { mockInvoke } from '../../mocks/tauri';
 
 const streamEvent = (partial: Partial<StreamEventDto> & Pick<StreamEventDto, "type">): StreamEventDto => ({
   messageId: "",
@@ -36,8 +40,10 @@ vi.mock("sortablejs", () => ({
 }));
 
 describe("AgentList drag lifecycle", () => {
+  let pinia: Pinia;
   beforeEach(() => {
-    setActivePinia(createPinia());
+    pinia = createPinia();
+    setActivePinia(pinia);
     sortableHarness.instances.length = 0;
     sortableHarness.create.mockReset();
     sortableHarness.create.mockImplementation(() => {
@@ -48,6 +54,56 @@ describe("AgentList drag lifecycle", () => {
       sortableHarness.instances.push(instance);
       return instance;
     });
+  });
+
+  afterEach(() => {
+    disposePinia(pinia);
+    vi.useRealTimers();
+  });
+
+  it('keeps the final visible order and pending save across a sidebar tab unmount', async () => {
+    vi.useFakeTimers();
+    let snapshot = makeConfigSnapshot();
+    const requests: ConfigUpdate[] = [];
+    mockInvoke('read_settings', () => snapshot);
+    mockInvoke('update_settings', args => {
+      const request = args!.request as ConfigUpdate;
+      requests.push(request);
+      snapshot = applyConfigRequest(snapshot, request);
+      return { status: 'saved', snapshot };
+    });
+    await useSettingsStore().fetchSettings();
+    useAssistantStore().agents = ['a', 'b', 'c'].map(id => ({ id, name: id, model: 'test', avatarCalculatedColor: null }));
+    const render = () => mount(AgentList, {
+      props: { searchQuery: '' },
+      global: { stubs: { VcpAvatar: true }, directives: { guide: {} } },
+    });
+    const wrapper = render();
+    await flushPromises();
+    const [list, handlers] = sortableHarness.create.mock.calls[0];
+    const move = async (from: number, to: number) => {
+      const item = list.children[from];
+      item.remove();
+      list.insertBefore(item, list.children[to] ?? null);
+      handlers.onEnd({ from: list, item, oldIndex: from, newIndex: to });
+      await wrapper.vm.$nextTick();
+    };
+    const visible = () => Array.from(list.children, child => (child as HTMLElement).dataset.ownerId);
+    await move(0, 1);
+    expect(visible()).toEqual(['b', 'a', 'c']);
+    await vi.advanceTimersByTimeAsync(200);
+    await move(2, 1);
+    expect(visible()).toEqual(['b', 'c', 'a']);
+    wrapper.unmount();
+    const reopened = render();
+    await flushPromises();
+    expect(reopened.findAll('[data-owner-id]').map(row => row.attributes('data-owner-id'))).toEqual(['b', 'c', 'a']);
+    await vi.advanceTimersByTimeAsync(299);
+    expect(requests).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].patches[0].changes).toEqual({ agentOrder: ['b', 'c', 'a'] });
+    reopened.unmount();
   });
 
   it("rebinds Sortable when a loading refresh replaces the list DOM", async () => {

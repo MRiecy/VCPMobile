@@ -1,4 +1,4 @@
-import { computed, onUnmounted, ref, watch } from "vue";
+import { computed, onUnmounted, ref, shallowRef, watch } from "vue";
 import morphdom from "morphdom";
 import type { ChatMessage, ContentBlock, TailFrame } from "../../../core/types/chat";
 import { applyFrame, cleanupRegistry, rebuildSnapshot } from "../../../core/utils/astExecutor";
@@ -11,8 +11,8 @@ interface MessageTailRendererOptions {
   renderTailHtml: (block: ContentBlock) => string;
   isInlineHtmlBlock: (type: string) => boolean;
   shouldAnimateFrame: (frame: TailFrame) => boolean;
-  /** 没有可恢复的会话时返回 null，不切换当前 DOM 的执行模式。 */
-  requestSnapshot: (messageId: string, reason: string) => Promise<boolean> | null;
+  /** 无会话直接返回 null；异步 null 表示被新 owner/终态接管，不算恢复失败。 */
+  requestSnapshot: (messageId: string, reason: string) => Promise<boolean | null> | null;
 }
 
 function isAstDebugEnabled(): boolean {
@@ -28,8 +28,11 @@ export function useMessageTailRenderer(options: MessageTailRendererOptions) {
   const tailRootRef = ref<HTMLElement | null>(null);
   const thoughtTailSandboxRef = ref<HTMLElement | null>(null);
   const enableAstDiff = ref(true);
-  const isAstRecoveryPending = ref(false);
-  let astRecoveryPromise: Promise<boolean> | null = null;
+  const astRequestPending = ref(false);
+  const pendingOwnerFrame = shallowRef<{ frame?: TailFrame } | null>(null);
+  const isAstRecoveryPending = computed(() => astRequestPending.value
+    || pendingOwnerFrame.value !== null && pendingOwnerFrame.value.frame === options.getMessage().tailFrame);
+  let astRecoveryPromise: Promise<boolean | null> | null = null;
   let lastAppliedFrameSeq = 0;
   let localTailStreamId = -1;
   let localTailEpoch = -1;
@@ -59,15 +62,34 @@ export function useMessageTailRenderer(options: MessageTailRendererOptions) {
     return !!message.tailFrame || !!message.tailBlock?.nodes || !!message.tailSnapshot;
   });
 
-  function requestCurrentTailSnapshot(reason: string): Promise<boolean> {
+  function requestCurrentTailSnapshot(reason: string): Promise<boolean | null> {
     if (astRecoveryPromise) return astRecoveryPromise;
     const recovery = options.requestSnapshot(options.getMessage().id, reason);
     if (!recovery) return Promise.resolve(false);
 
-    isAstRecoveryPending.value = true;
-    const completion = recovery.finally(() => {
+    astRequestPending.value = true;
+    const completion = recovery.then(recovered => {
+      if (disposed || astRecoveryPromise !== completion) return recovered;
+      if (recovered === true) {
+        pendingOwnerFrame.value = null;
+        astFailureCount = 0;
+      } else if (recovered === false) {
+        pendingOwnerFrame.value = null;
+        astFailureCount += 1;
+        if (astFailureCount >= 2) {
+          enableAstDiff.value = false;
+          cleanupRegistry(options.getMessage().id);
+        }
+      } else {
+        // connected/stop can precede the replacement projection. Keep text
+        // visible until that owner's frame arrives instead of retrying the
+        // detached frame or counting its cancellation as another failure.
+        pendingOwnerFrame.value = { frame: options.getMessage().tailFrame };
+      }
+      return recovered;
+    }).finally(() => {
       if (disposed || astRecoveryPromise !== completion) return;
-      isAstRecoveryPending.value = false;
+      astRequestPending.value = false;
       astRecoveryPromise = null;
     });
     astRecoveryPromise = completion;
@@ -75,20 +97,11 @@ export function useMessageTailRenderer(options: MessageTailRendererOptions) {
   }
 
   function recoverTailSnapshotOrDowngrade(reason: string): void {
-    if (disposed || !enableAstDiff.value) return;
-    astFailureCount += 1;
+    if (disposed || !enableAstDiff.value || astRecoveryPromise) return;
     if (isAstDebugEnabled()) {
       console.warn(`[AST Diff Recovery] ${options.getMessage().id}: ${reason}. failureCount=${astFailureCount}`);
     }
-    void requestCurrentTailSnapshot(reason).then((recovered) => {
-      if (disposed) return;
-      if (recovered) {
-        astFailureCount = 0;
-      } else if (astFailureCount >= 2) {
-        enableAstDiff.value = false;
-        cleanupRegistry(options.getMessage().id);
-      }
-    });
+    void requestCurrentTailSnapshot(reason);
   }
 
   function markTailFrameApplied(frame: TailFrame): void {
@@ -164,6 +177,7 @@ export function useMessageTailRenderer(options: MessageTailRendererOptions) {
     [() => options.getMessage().tailFrame, () => options.getMessage().tailSnapshot, tailSandboxRef],
     ([frame, _snapshot, sandbox]) => {
       const message = options.getMessage();
+      if (pendingOwnerFrame.value && pendingOwnerFrame.value.frame !== frame) pendingOwnerFrame.value = null;
       const debugEnabled = isAstDebugEnabled();
       if (debugEnabled) {
         console.warn(`[AST Diff Watch] Msg ${message.id} stream=${frame?.streamId ?? "none"}, frame=${frame?.frameSeq ?? "none"}, mutations=${frame?.mutations?.length || 0}, sandbox=${sandbox ? "Ready" : "Null"}, epoch=${frame?.epoch}, revision=${frame?.revision}`);

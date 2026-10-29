@@ -361,7 +361,15 @@ internal class SseSessionCoordinator(
                 override fun onFailure(eventSource: EventSource, t: Throwable?, response: Response?) {
                     session.requestBody?.close()
                     if (!isCurrentSession(session)) return
-                    val errorMsg = t?.message ?: response?.message ?: "Unknown network error"
+                    val detail = t?.message?.takeIf { it.isNotBlank() }
+                        ?: response?.message?.takeIf { it.isNotBlank() }
+                    // HTTP/2 has no reason phrase; its status remains useful even
+                    // when OkHttp reports neither an exception nor a message.
+                    val errorMsg = when {
+                        response != null && detail != null -> "HTTP ${response.code}: $detail"
+                        response != null -> "HTTP ${response.code}"
+                        else -> detail ?: "Unknown network error"
+                    }
                     Log.w(TAG, "SSE Failed: id=$requestId, error=$errorMsg")
                     completeSession(session, "error", errorMsg)
                 }

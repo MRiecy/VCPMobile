@@ -204,6 +204,9 @@ describe('Mermaid message rendering and delegation', () => {
       { type: 'diary', maid: 'Agent', date: '2026-10-18', content: 'diary', nodes: [code('graph TD; diary-->X')] },
       { type: 'tool-result', tool_name: 'Tool', status: 'success', details: [{ key: 'result', value: '```mermaid\ngraph TD; tool-->X\n```' }], footer: '' },
     ]));
+    await vi.waitFor(() => expect(wrapper.findAll('.vcp-mermaid-wrapper')).toHaveLength(2));
+    expect(wrapper.find('.vcp-tool-block .tool-content-scrollable pre').exists()).toBe(false);
+    await wrapper.get('.vcp-tool-block > .tool-header-content:first-child').trigger('click');
     await vi.waitFor(() => expect(wrapper.findAll('.vcp-mermaid-wrapper')).toHaveLength(3));
     for (const diagram of wrapper.findAll('[data-content-kind="mermaid"]')) {
       await diagram.get('svg').trigger('click');

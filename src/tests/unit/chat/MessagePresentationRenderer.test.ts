@@ -8,6 +8,7 @@ import { useChatSessionStore } from '@/core/stores/chatSessionStore';
 import { useChatStreamStore } from '@/core/stores/chatStreamStore';
 import { useChatPreferencesStore } from '@/features/chat/preferences/store';
 import { invokeMock, mockInvoke } from '@/tests/mocks/tauri';
+import * as astRenderer from '@/core/utils/astRenderer';
 
 const { mermaidRenderMock } = vi.hoisted(() => ({
   mermaidRenderMock: vi.fn(() => ({ svg: '<svg viewBox="0 0 10 10"></svg>' })),
@@ -185,6 +186,49 @@ async function seedRemountTail(
 }
 
 describe('MessageRenderer presentation shell', () => {
+  it('does not re-render stable Markdown in other bubbles while the tail advances', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const stream = useChatStreamStore();
+    useChatSessionStore().setConversation({ id: 'agent-a', type: 'agent' }, 'topic-a');
+    stream.addSessionStream('agent-a', 'agent', 'topic-a', 'split-stream');
+    const markdown = (content: string): StreamBlock => ({
+      type: 'markdown', content, hash: content,
+      nodes: [{ type: 'paragraph', children: [{ type: 'text', value: content }] }],
+    });
+    const brk: StreamBlock = { type: 'markdown', content: '<!--brk-->', hash: 'brk' };
+    const message = reactive<ChatMessage>({
+      id: 'split-stream', role: 'assistant', timestamp: 1,
+      shell: { avatarColor: '', displayName: 'Agent', isUser: false },
+      blocks: [markdown('first'), brk, markdown('second'), brk],
+      tailBlock: { type: 'markdown', content: 'tail', hash: 'tail', render_mode: 'plain' },
+    });
+    const render = vi.spyOn(astRenderer, 'renderMarkdownNodes');
+    const wrapper = mountStreamRenderer(message, pinia);
+    try {
+      await nextTick();
+      expect(render).toHaveBeenCalledTimes(2);
+      const stableElements = wrapper.findAll('[data-message-render-region="stable"]').map(block => block.element);
+      for (const content of ['tail a', 'tail ab', 'tail abc']) {
+        message.tailBlock = { type: 'markdown', content, hash: content, render_mode: 'plain' };
+        await nextTick();
+        expect(wrapper.get('.streaming-tail').text()).toBe(content);
+        expect(render).toHaveBeenCalledTimes(2);
+      }
+      // A new stable bubble changes the outer list, but existing ASTs still have
+      // their own cached HTML instead of contending for a nested v-memo slot.
+      message.blocks = [...message.blocks!, markdown('third'), brk];
+      await nextTick();
+      expect(render).toHaveBeenCalledTimes(3);
+      expect(wrapper.findAll('[data-message-render-region="stable"]').slice(0, 2).map(block => block.element))
+        .toEqual(stableElements);
+    } finally {
+      wrapper.unmount();
+      stream.$dispose();
+      render.mockRestore();
+    }
+  });
+
   it('renders guidance as plain tail and preserves expansion through closure and final hashes', async () => {
     const pinia = createPinia();
     setActivePinia(pinia);
@@ -355,6 +399,7 @@ describe('MessageRenderer presentation shell', () => {
     expect(cards).toHaveLength(2);
     expect(cards[0].get('.tool-label').text()).toBe('JEVToolUse');
     expect(cards[0].get('.tool-name').text()).toBe('B站获取');
+    await cards[0].get('.tool-header-content').trigger('click');
     expect(cards[0].get('pre').element.textContent).toBe(raw);
     expect(cards[0].find('img').exists()).toBe(false);
     expect(cards[1].get('.tool-label').text()).toBe('JEVToolUse');
@@ -1381,6 +1426,57 @@ describe('MessageRenderer presentation shell', () => {
       ([command]) => command === 'rebuild_aurora_snapshot',
     )).toHaveLength(2);
     newWrapper.unmount();
+  });
+
+  it('does not downgrade a replacement owner when its predecessor cancels a second recovery', async () => {
+    const pinia = createPinia();
+    setActivePinia(pinia);
+    const stream = useChatStreamStore();
+    useChatSessionStore().setConversation({ id: 'agent-a', type: 'agent' }, 'topic-a');
+    const seeded = await seedRemountTail(stream, 'consumer-replacement', 40);
+    const obsolete = deferred<never>();
+    let attempts = 0;
+    mockInvoke('rebuild_aurora_snapshot', () => ++attempts === 1
+      ? Promise.reject(new Error('first failure')) : obsolete.promise);
+    const wrapper = mountStreamRenderer(seeded.message, pinia);
+    try {
+      await vi.waitFor(() => expect(attempts).toBe(2));
+      await stream.processStreamEvent({
+        ...seeded.eventBase, type: 'connected', consumerRevision: 2, messageId: seeded.message.id,
+        context: seeded.context, aurora: null,
+      });
+      await nextTick();
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(attempts).toBe(2);
+      expect(wrapper.get('.streaming-tail').text()).toContain('abcde');
+      await stream.processStreamEvent({
+        ...seeded.eventBase, type: 'aurora', consumerRevision: 2, messageId: seeded.message.id,
+        context: seeded.context,
+        aurora: {
+          kind: 'snapshot', streamId: 41, content: 'new', stableBlocks: [], tailMode: 'ast',
+          tailBlock: { type: 'markdown', content: 'new', hash: 'new' },
+          tailFrame: { streamId: 41, epoch: 1, revision: 1, frameSeq: 1, reset: true,
+            snapshot: [{ type: 'paragraph', children: [{ type: 'text', value: 'new' }] }], mutations: [] },
+        },
+      });
+      await vi.waitFor(() => expect(wrapper.get('.vcp-ast-sandbox').text()).toBe('new'));
+      obsolete.reject(new Error('obsolete command failure'));
+      await stream.processStreamEvent({
+        ...seeded.eventBase, type: 'aurora', consumerRevision: 2, messageId: seeded.message.id,
+        context: seeded.context,
+        aurora: {
+          kind: 'delta', streamId: 41, chunk: '!',
+          tailOp: { op: 'append', previousHash: 'new', content: '!', hash: 'new!', mode: 'ast', blockType: 'markdown' },
+          tailFrame: { streamId: 41, epoch: 1, revision: 2, frameSeq: 2,
+            mutations: [{ op: 'append', id: 't0.i0', chunk: '!' }] },
+        },
+      });
+      await vi.waitFor(() => expect(wrapper.get('.vcp-ast-sandbox').text()).toBe('new!'));
+      expect(attempts).toBe(2);
+    } finally {
+      wrapper.unmount();
+      stream.$dispose();
+    }
   });
 
   it('renders an AST-less streaming tail as literal plaintext', async () => {

@@ -15,6 +15,12 @@ vi.mock('@/features/chat/chatMutationPolicy', () => ({
 }));
 
 const copy = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
 const makeGroup = (): GroupConfigDto => ({
   id: 'g1', name: '研究讨论', avatarCalculatedColor: null,
   members: ['a1', 'a2', 'a3'], mode: 'sequential', chatMode: 'sequential',
@@ -284,6 +290,100 @@ describe('GroupSettingsView editing and return saving', () => {
     overlay.promptConfig?.onConfirm('36');
     await nextTick();
     expect(windowChip.text()).toContain('36条');
+  });
+
+  it.each(['button', 'system-back'] as const)('joins the pending name save before closing via %s', async closeBy => {
+    const save = deferred<GroupConfigDto>();
+    mockInvoke('update_group_config', () => save.promise);
+    const view = await open();
+    await view.get('button[aria-label="编辑群组名称"]').trigger('click');
+    await control('群组名称').setValue('等待保存后返回');
+    await control('群组名称').trigger('blur');
+
+    const back = view.get<HTMLButtonElement>('button[aria-label="返回并保存群组设置"]');
+    expect(back.element.disabled).toBe(false);
+    if (closeBy === 'button') back.element.click();
+    else useModalHistory().closeTopModal();
+    await nextTick();
+    expect(view.emitted('close')).toBeUndefined();
+    expect(changes()).toHaveLength(1);
+
+    save.resolve({ ...persisted, name: '等待保存后返回' });
+    await flushPromises();
+    expect(changes()).toHaveLength(1);
+    expect(view.emitted('close')).toHaveLength(1);
+    expect(useOverlayStore().isGroupSettingsOpen).toBe(false);
+  });
+
+  it('keeps the draft and allows retry when the joined blur save fails', async () => {
+    const save = deferred<GroupConfigDto>();
+    mockInvoke('update_group_config', () => save.promise);
+    const view = await open();
+    await view.get('button[aria-label="编辑群组名称"]').trigger('click');
+    await control('群组名称').setValue('失败后仍保留');
+    await control('群组名称').trigger('blur');
+    await view.get('button[aria-label="返回并保存群组设置"]').trigger('click');
+    save.reject(new Error('storage busy'));
+    await flushPromises();
+
+    expect(view.emitted('close')).toBeUndefined();
+    expect(changes()).toHaveLength(1);
+    expect(view.get('[role="alert"]').text()).toContain('storage busy');
+    expect((control('群组名称').element as HTMLInputElement).value).toBe('失败后仍保留');
+    mockInvoke('update_group_config', args => ({ ...persisted, ...copy(args?.updates as Partial<GroupConfigDto>) }));
+    await view.get('button[aria-label="返回并保存群组设置"]').trigger('click');
+    await flushPromises();
+    expect(changes()).toHaveLength(2);
+    expect(view.emitted('close')).toHaveLength(1);
+  });
+
+  it.each(['other-group', 'same-group-reopened'] as const)('does not close a newer editor when the joined save finishes (%s)', async context => {
+    const save = deferred<GroupConfigDto>();
+    mockInvoke('update_group_config', () => save.promise);
+    const view = await open();
+    await view.get('button[aria-label="编辑群组名称"]').trigger('click');
+    await control('群组名称').setValue('旧页面提交');
+    await control('群组名称').trigger('blur');
+    await view.get('button[aria-label="返回并保存群组设置"]').trigger('click');
+
+    if (context === 'other-group') {
+      mockInvoke('read_group_config', () => ({ ...copy(persisted), id: 'g2', name: '另一个群' }));
+      useOverlayStore().closeGroupSettings();
+      useOverlayStore().openGroupSettings('g2');
+      await view.setProps({ id: 'g2' });
+      await flushPromises();
+    } else {
+      await view.setProps({ isOpen: false });
+      await view.setProps({ isOpen: true });
+    }
+    persisted.name = '旧页面提交';
+    save.resolve(copy(persisted));
+    await flushPromises();
+
+    expect(view.emitted('close')).toBeUndefined();
+    expect(changes()).toHaveLength(1);
+    expect(view.props()).toMatchObject({ isOpen: true });
+    expect((control('群组名称').element as HTMLInputElement).value)
+      .toBe(context === 'other-group' ? '另一个群' : '旧页面提交');
+  });
+
+  it('honors a new close intent while the reopened group still awaits its earlier save', async () => {
+    const save = deferred<GroupConfigDto>();
+    mockInvoke('update_group_config', () => save.promise);
+    const view = await open();
+    await view.get('button[aria-label="编辑群组名称"]').trigger('click');
+    await control('群组名称').setValue('正在提交的名称');
+    await control('群组名称').trigger('blur');
+    await view.setProps({ isOpen: false });
+    await view.setProps({ isOpen: true });
+    await view.get('button[aria-label="返回并保存群组设置"]').trigger('click');
+    expect(view.emitted('close')).toBeUndefined();
+
+    persisted.name = '正在提交的名称';
+    save.resolve(copy(persisted));
+    await flushPromises();
+    expect(changes()).toHaveLength(1);
+    expect(view.emitted('close')).toHaveLength(1);
   });
 
   it('saves defaults silently without alert popups when invalid values are entered via prompt dialogs', async () => {

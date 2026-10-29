@@ -57,6 +57,7 @@ fn outputs() -> Result<Vec<(&'static str, String)>, String> {
         DomainPatch,
         ConfigUpdate,
         ConfigSaveResult,
+        ConfigBackupImportResult,
         FieldKind,
         ConfigEffect,
         FieldDescriptor,

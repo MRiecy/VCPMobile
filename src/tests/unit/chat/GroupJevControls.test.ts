@@ -142,6 +142,31 @@ describe('JEV group controls', () => {
     expect(notifications.historyList).toHaveLength(1);
   });
 
+  it('explains a network fallback stop once without surfacing internal codes or replaying notices', async () => {
+    const view = await mountGroup();
+    await useChatStreamStore().checkAndRecoverInterruptedStreams();
+    const notifications = useNotificationStore();
+    emitTurn(turn);
+    const stopped = { ...turn, phase: 'idle' as const, revision: 2, stopReason: 'network_fallback_stop' };
+    emitTurn(stopped, false);
+    emitTurn(stopped, false);
+    await nextTick();
+
+    expect(useChatStreamStore().isGroupGenerating).toBe(false);
+    expect(view.find('[aria-label="发起群聊"]').exists()).toBe(true);
+    expect(notifications.activeToasts).toEqual([expect.objectContaining({
+      type: 'info', message: '网络异常，已结束群聊',
+    })]);
+    expect(notifications.historyList).toHaveLength(1);
+    output?.emit({
+      type: 'group_turn', messageId: '', consumerRevision: 10,
+      context: { ownerId: 'g1', ownerType: 'group', topicId: 't1', turnId: 'replayed-turn', replayed: true },
+      chunk: { ...stopped, active: false },
+    });
+    expect(notifications.activeToasts).toHaveLength(1);
+    expect(notifications.historyList).toHaveLength(1);
+  });
+
   it('submits start and continue to the Rust owner without inventing a user message', async () => {
     mockInvoke('control_group_session', () => ({ status: 'accepted' }));
     const view = await mountGroup();

@@ -50,9 +50,20 @@ const props = withDefaults(
     defaultExpanded: false,
   }
 );
+const emit = defineEmits<{ contentMounted: [] }>();
 
 const isExpanded = ref(props.defaultExpanded);
+const hasExpanded = ref(props.defaultExpanded);
 let hasManualExpansion = false;
+
+// The parent's tool key owns interaction identity. Reused stable/final blocks
+// retain this subtree; a new tool identity starts with an unmounted body.
+watch(isExpanded, (expanded) => {
+  if (expanded) hasExpanded.value = true;
+}, { flush: 'sync' });
+watch(hasExpanded, () => {
+  emit('contentMounted');
+}, { flush: 'post' });
 
 watch(
   () => props.defaultExpanded,
@@ -176,10 +187,10 @@ const isImageValue = (key: string, value: string): boolean => {
     <!-- Content -->
     <div v-show="isExpanded"
       class="tool-header-content border-t border-black/10 dark:border-white/10 p-3 animate-slide-down tool-content-scrollable vcp-scrollable">
-      <template v-if="type !== 'tool-result'">
+      <template v-if="hasExpanded && type !== 'tool-result'">
         <pre class="text-[11px] font-mono whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{{ content }}</pre>
       </template>
-      <template v-else>
+      <template v-else-if="hasExpanded">
         <div class="space-y-3">
           <div v-for="(item, index) in block.details" :key="item.key" 
             class="text-xs flex flex-col"

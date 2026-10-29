@@ -5,6 +5,34 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
+use std::io::Write;
+
+pub(crate) const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+
+/// Count the actual UTF-8 JSON representation without allocating another body.
+pub(crate) fn encoded_json_len<T: Serialize>(
+    value: &T,
+    limit: usize,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<usize, serde_json::Error> {
+    struct Counter<'a> { bytes: usize, limit: usize, cancellation: Option<&'a tokio_util::sync::CancellationToken> }
+    impl Write for Counter<'_> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.cancellation.is_some_and(|token| token.is_cancelled()) {
+                return Err(std::io::Error::other("JEV request cancelled"));
+            }
+            if bytes.len() > self.limit.saturating_sub(self.bytes) {
+                return Err(std::io::Error::other("JEV JSON byte budget exceeded"));
+            }
+            self.bytes += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+    }
+    let mut counter = Counter { bytes: 0, limit, cancellation };
+    serde_json::to_writer(&mut counter, value)?;
+    Ok(counter.bytes)
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct JevDecisionRequest {

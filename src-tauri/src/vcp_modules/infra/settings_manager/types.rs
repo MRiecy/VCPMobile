@@ -370,6 +370,14 @@ pub enum ConfigSaveResult {
     },
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "config-export", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigBackupImportResult {
+    pub result: ConfigSaveResult,
+    pub missing_groups: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "config-export", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]

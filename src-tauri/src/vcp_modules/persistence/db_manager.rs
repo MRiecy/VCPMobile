@@ -628,9 +628,16 @@ async fn bootstrap_fresh_install(
         BASELINE_VERSION
     );
 
+    // Baseline DDL 与覆盖它的迁移记录必须一起提交；否则中断后会留下
+    // messages 已存在但没有 baseline 记录、无法再次识别为新安装的半库。
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|e| format!("Fresh bootstrap: failed to begin transaction: {e}"))?;
+
     // 整份执行 baseline（sqlx::raw_sql 支持多语句 DDL）
     sqlx::raw_sql(baseline.sql.clone())
-        .execute(pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| {
             format!(
@@ -639,11 +646,7 @@ async fn bootstrap_fresh_install(
             )
         })?;
 
-    // 单事务内 seed 迁移记录（原子、可重试），checksum 与 sqlx 运行期校验同源
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|e| format!("Fresh bootstrap: failed to begin transaction: {e}"))?;
+    // 在同一事务内 seed 迁移记录，checksum 与 sqlx 运行期校验同源。
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS _sqlx_migrations (
             version        BIGINT PRIMARY KEY,
@@ -683,7 +686,7 @@ async fn bootstrap_fresh_install(
     }
     tx.commit()
         .await
-        .map_err(|e| format!("Fresh bootstrap: failed to commit seed records: {e}"))?;
+        .map_err(|e| format!("Fresh bootstrap: failed to commit baseline and seed records: {e}"))?;
 
     log::info!(
         "[DBManager] Fresh bootstrap complete: baseline v{} applied, {} migrations seeded.",
@@ -1171,6 +1174,76 @@ mod tests {
                     .expect("inspect table");
             assert!(exists, "fresh install must create {}", name);
         }
+    }
+
+    #[tokio::test]
+    async fn fresh_bootstrap_seed_failure_rolls_back_schema_and_records() {
+        let temp_dir = tempfile::tempdir().expect("create bootstrap failure directory");
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(temp_dir.path().join("bootstrap-failure.sqlite"))
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options.clone())
+            .await
+            .expect("open bootstrap failure database");
+
+        // An empty SQLx tracking table is still a fresh install. Fail its final
+        // covered record, after the baseline DDL and earlier seed inserts ran.
+        sqlx::raw_sql(
+            "CREATE TABLE _sqlx_migrations (
+                version BIGINT PRIMARY KEY,
+                description TEXT NOT NULL,
+                installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                success BOOLEAN NOT NULL,
+                checksum BLOB NOT NULL,
+                execution_time BIGINT NOT NULL
+             );
+             CREATE TRIGGER fail_baseline_seed BEFORE INSERT ON _sqlx_migrations
+             WHEN NEW.version = 100
+             BEGIN SELECT RAISE(ABORT, 'bootstrap seed failure'); END;",
+        )
+        .execute(&pool)
+        .await
+        .expect("install seed failure trigger");
+
+        let error = run_migrations(&pool)
+            .await
+            .expect_err("the baseline seed must fail");
+        assert!(error.contains("failed to seed migration v100"), "{error}");
+        assert!(error.contains("bootstrap seed failure"), "{error}");
+        pool.close().await;
+
+        // Reopen the file so the assertions observe durable state, including
+        // FTS shadow tables and triggers created by the multi-statement DDL.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("reopen failed bootstrap database");
+        let objects: Vec<String> = sqlx::query_scalar(
+            "SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name",
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("inspect rolled-back schema");
+        assert_eq!(objects, ["_sqlx_migrations", "fail_baseline_seed"]);
+        let applied: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+            .fetch_one(&pool)
+            .await
+            .expect("inspect rolled-back seed records");
+        assert_eq!(applied, 0);
+        assert!(is_fresh_install(&pool).await.expect("check fresh retry"));
+
+        sqlx::query("DROP TRIGGER fail_baseline_seed")
+            .execute(&pool)
+            .await
+            .expect("remove injected failure");
+        run_migrations(&pool).await.expect("retry fresh bootstrap");
+        run_migrations(&pool)
+            .await
+            .expect("validate committed migration checksums on restart");
+        pool.close().await;
     }
 
     #[tokio::test]

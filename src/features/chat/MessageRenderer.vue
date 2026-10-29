@@ -359,9 +359,11 @@ const stableBubbleProjection = computed(() => {
   return { bubbles: list, lastBlockIsBrk };
 });
 
+const needsTailBubble = computed(() => showMessageTail.value && Boolean(props.message.tailBlock)
+  && stableBubbleProjection.value.lastBlockIsBrk);
 const messageBubbles = computed(() => {
-  const { bubbles, lastBlockIsBrk } = stableBubbleProjection.value;
-  if (showMessageTail.value && props.message.tailBlock && lastBlockIsBrk) {
+  const { bubbles } = stableBubbleProjection.value;
+  if (needsTailBubble.value) {
     return [...bubbles, { id: `${props.message.id}-bubble-${bubbles.length}`, blocks: [] }];
   }
   return bubbles.length ? bubbles : [{ id: `${props.message.id}-bubble-0`, blocks: [] }];
@@ -419,6 +421,17 @@ function renderBlockHtml(block: ContentBlock): string {
     default:
       return "";
   }
+}
+
+// Stable blocks are immutable projections. Each message owns its HTML cache; the
+// nested bubble loops cannot share Vue's single v-memo slot as their cache owner.
+const stableBlockHtml = new WeakMap<ContentBlock, { messageId: string; html: string }>();
+function renderStableBlockHtml(block: ContentBlock): string {
+  const cached = stableBlockHtml.get(block);
+  if (cached?.messageId === props.message.id) return cached.html;
+  const html = renderBlockHtml(block);
+  stableBlockHtml.set(block, { messageId: props.message.id, html });
+  return html;
 }
 
 type ToolContentBlock = Extract<ContentBlock, { type: "tool-use" | "jev-tool-use" | "tool-result" }>;
@@ -1050,7 +1063,7 @@ onUnmounted(() => {
                   <div
                     v-else-if="isInlineHtmlBlock(block.type)"
                     data-message-content
-                    v-html="renderBlockHtml(block)"
+                    v-html="renderStableBlockHtml(block)"
                   />
                   <!-- eslint-enable vue/no-v-html -->
 
@@ -1060,6 +1073,7 @@ onUnmounted(() => {
                     :content="block.content"
                     :block="block"
                     :default-expanded="expandToolsByDefault"
+                    @content-mounted="renderHeavyContent()"
                   />
 
                   <ThoughtBlock

@@ -21,12 +21,16 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import okhttp3.Protocol
 import okhttp3.Request
+import okhttp3.Response
 import okhttp3.sse.EventSource
+import okhttp3.sse.EventSourceListener
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataInputStream
 import java.io.DataOutputStream
+import java.io.IOException
 import java.io.OutputStream
 import java.net.ConnectException
 import java.net.InetSocketAddress
@@ -222,6 +226,7 @@ class SseProxyConnectionOwnershipTest {
 class SseProxyProtocolTest {
     private lateinit var context: Context
     private lateinit var coordinator: SseSessionCoordinator
+    private lateinit var upstreamListener: EventSourceListener
     private val connections = mutableListOf<ClientConnection>()
     private val stopRequests = AtomicInteger(0)
 
@@ -245,7 +250,8 @@ class SseProxyProtocolTest {
         coordinator = SseSessionCoordinator(
             context,
             stopService = { stopRequests.incrementAndGet() },
-            eventSourceFactory = EventSource.Factory { request, _ ->
+            eventSourceFactory = EventSource.Factory { request, listener ->
+                upstreamListener = listener
                 object : EventSource {
                     override fun request(): Request = request
                     override fun cancel() = Unit
@@ -356,6 +362,57 @@ class SseProxyProtocolTest {
         assertFalse(session.isCompleted)
         assertEquals("字".repeat(20_005), session.fullContent.toString())
         assertFalse(java.io.File(context.cacheDir, "sse_offline_completed").exists())
+    }
+
+    @Test
+    fun http2FailuresKeepStatusInTheTerminalFrameWithoutAReasonPhrase() {
+        for (status in listOf(401, 429, 500)) {
+            val session = session()
+            val (stream, output) = connection()
+            session.replaceConnection(stream)
+            val source = requireNotNull(session.eventSource)
+            val response = Response.Builder().request(source.request())
+                .protocol(Protocol.HTTP_2).code(status).message("").build()
+
+            upstreamListener.onFailure(source, null, response)
+
+            val terminal = frames(stream, output).single { it.optString("eventType") == "terminal" }
+            assertEquals("error", terminal.getString("finishReason"))
+            assertEquals("HTTP $status", terminal.getString("error"))
+            assertEquals("HTTP $status", session.terminalError)
+            assertSame(session, coordinator.findSession(session.requestId))
+            assertNull(session.eventSource)
+        }
+    }
+
+    @Test
+    fun streamReadFailureKeepsTheHttpStatusAndNetworkCauseWithThePartialBody() {
+        val session = session("partial reply")
+        val (stream, output) = connection()
+        session.replaceConnection(stream)
+        val source = requireNotNull(session.eventSource)
+        val response = Response.Builder().request(source.request())
+            .protocol(Protocol.HTTP_1_1).code(200).message("OK").build()
+
+        upstreamListener.onFailure(source, IOException("Connection reset"), response)
+
+        val terminal = frames(stream, output).single { it.optString("eventType") == "terminal" }
+        assertEquals("HTTP 200: Connection reset", terminal.getString("error"))
+        assertEquals("partial reply", session.fullContent.toString())
+        assertEquals("error", session.lastFinishReason)
+    }
+
+    @Test
+    fun connectionFailureBeforeResponseKeepsItsNetworkCause() {
+        val session = session()
+        val (stream, output) = connection()
+        session.replaceConnection(stream)
+
+        upstreamListener.onFailure(requireNotNull(session.eventSource), IOException("Connection refused"), null)
+
+        val terminal = frames(stream, output).single { it.optString("eventType") == "terminal" }
+        assertEquals("Connection refused", terminal.getString("error"))
+        assertTrue(session.isCompleted)
     }
 
     @Test

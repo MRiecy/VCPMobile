@@ -305,7 +305,7 @@ const saveChanges = async (): Promise<boolean> => {
       const canonical = normalizeGroupConfig(await assistantStore.saveGroup(draft, baseline));
       const retained = retainedDrafts.get(draft.id);
       if (retained && JSON.stringify(retained.draft) === JSON.stringify(draft)) retainedDrafts.delete(draft.id);
-      if (!isOpenEditorCurrent(epoch, draft.id)) return false;
+      if (!isOpenEditorCurrent(epoch, draft.id)) return true;
       groupConfig.value = canonical;
       originalConfig.value = cloneConfig(canonical);
       retainedDrafts.delete(draft.id);
@@ -332,14 +332,18 @@ const saveChanges = async (): Promise<boolean> => {
 // until the frozen draft has been saved successfully.
 const requestClose = (): boolean => {
   if (!mounted) return true;
-  if (!props.isOpen || isLeaving.value || isSaving.value || isDeleting.value) return false;
+  if (!props.isOpen || isLeaving.value || isDeleting.value) return false;
   const epoch = editorEpoch;
   const groupId = props.id;
+  const pendingSave = pendingSaves.get(groupId);
+  // A name blur may already be saving this draft before the return click arrives.
+  // Avatar uploads share isSaving but are not configuration saves to join here.
+  if (isSaving.value && !pendingSave) return false;
   isLeaving.value = true;
   cancelAvatarPicker();
   closeSelection();
   closeLocalSheets();
-  const save = isLoading.value || !groupConfig.value ? Promise.resolve(true) : saveChanges();
+  const save = pendingSave ?? (isLoading.value || !groupConfig.value ? Promise.resolve(true) : saveChanges());
   void save.then(saved => {
     if (saved && isOpenEditorCurrent(epoch, groupId)) emit("close");
   }).finally(() => {
@@ -752,7 +756,7 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
     :aria-hidden="!props.isOpen" aria-label="群组设置" role="dialog" :aria-modal="props.isOpen ? 'true' : undefined">
     <div class="group-settings-view flex flex-col h-full w-full min-w-0 text-primary-text">
       <header class="group-settings-header flex items-center gap-3 shrink-0 px-3 border-b border-[var(--border-color)]">
-        <button type="button" class="group-icon-button" :disabled="(isSaving && !isLeaving) || isDeleting" aria-label="返回并保存群组设置" @click="requestClose">
+        <button type="button" class="group-icon-button" :disabled="isLeaving || isDeleting || (isSaving && !pendingSaves.has(props.id))" aria-label="返回并保存群组设置" @click="requestClose">
           <ArrowLeft :size="22" :stroke-width="1.8" aria-hidden="true" />
         </button>
         <h2 class="m-0 text-base font-semibold flex-1">群组设置</h2>

@@ -63,7 +63,7 @@ pub async fn import_settings_backup<R: Runtime>(
     state: State<'_, SettingsState>,
     request: ConfigUpdate,
     group_preferences: serde_json::Value,
-) -> Result<ConfigSaveResult, String> {
+) -> Result<ConfigBackupImportResult, String> {
     let preferences =
         crate::vcp_modules::group::group_service::parse_group_local_settings_backup(&group_preferences)?;
     let group_ids: Vec<_> = preferences.keys().cloned().collect();

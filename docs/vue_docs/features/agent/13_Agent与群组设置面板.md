@@ -10,7 +10,7 @@ date: 2026-07-04
 
 2026-10-28 Agent 设置更新：`AgentSettingsView` 使用外置章节头与 8px 台面，`AgentVoiceSettings` 编辑随 Agent 保存的独立音色，声音库管理与试听复用 voice 领域组件。`saveAgent(draft, baseline)` 在 Rust 事务内比较实际编辑字段并返回最新配置；返回等待保存及试听停止，失败留页，迟到响应不得覆盖其他 Agent。原模型参数和删除拦截保持。音色支持“无”，删除资产不级联改写 Agent。下文历史代码示例须以当前实现及[实施决策](../../../../plan/vcpmobile-agent-voice-and-settings-refactor/05-实施决策与验证记录.md)核对。
 
-2026-10-19 群设置更新：`GroupSettingsView` 使用语音同款 `SettingsCanvas`，提供独立群聊模式、顺序上下调整、模式专属 JEV/标签编辑，以及成员模型上下文窗口。`chatMode` 默认顺序发言，不继承共享 `mode`；界面不提供跟随选项，不展示本机覆盖或同步实现说明。返回先保存，失败留页并保留草稿；`saveGroup(draft, baseline)` 只提交实际改动的字段，接纳后端返回的最新共享资料。JEV 连接设置在全局「JEV 设置」页面，群页面管理讨论行为。
+`GroupSettingsView` 使用语音同款 `SettingsCanvas`，提供独立群聊模式、顺序上下调整、模式专属 JEV/标签编辑，以及成员模型上下文窗口。`chatMode` 默认顺序发言，不继承共享 `mode`；界面不提供跟随选项，不展示本机覆盖或同步实现说明。群名失焦自动保存；若此时返回，关闭意图等待同群已有保存，成功后关闭，失败留页并保留草稿，不吞掉首次返回操作。关闭与保存回执均核对群 ID 和编辑世代，旧页面回执不能关闭后来重开的页面。`saveGroup(draft, baseline)` 只提交实际改动的字段，接纳后端返回的最新共享资料。JEV 连接设置在全局「JEV 设置」页面，群页面管理讨论行为。
 
 ## 1. 概述
 
@@ -365,7 +365,9 @@ const extractDominantColorFromBlob = (blobUrl: string): Promise<string> => {
 
 ---
 
-## 5. 配置保存策略（关闭时保存）
+## 5. 配置保存策略
+
+当前群设置保留群名失焦自动保存；返回通过 `pendingSaves` 接续同群保存，并在失败时留页。没有进行中的保存时，返回先保存当前草稿再关闭。以下 v1.1.2 代码用于说明历史演进，不代表当前 `GroupSettingsView` 的关闭与卸载实现。
 
 ### 5.1 关闭时保存（saveOnClose）— v1.1.2 重构，v1.1.3 沿用
 

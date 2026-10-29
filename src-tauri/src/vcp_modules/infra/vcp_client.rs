@@ -366,6 +366,8 @@ struct RequestOutputState {
     origin_user_message_id: Option<String>,
     chat_feed: Option<Arc<dyn Fn(&StreamEvent) + Send + Sync>>,
     has_chat_listener: Option<Arc<dyn Fn(&str) -> bool + Send + Sync>>,
+    pending_terminal: Option<Arc<crate::vcp_modules::chat::message_service::PendingStreamTerminal>>,
+    discarded: bool,
 }
 
 static NEXT_CONSUMER_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -374,9 +376,9 @@ fn next_consumer_revision() -> u64 {
     NEXT_CONSUMER_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// The request retains one output consumer, not another copy of its content.
-/// AuroraBuffer remains in the producer; a replacement consumer starts with a
-/// snapshot from that buffer before any subsequent delta is committed.
+/// AuroraBuffer owns live content. Once a transport without a helper finishes,
+/// this owner retains its terminal result until SQLite accepts it or history is
+/// explicitly discarded. A failed commit must not become a lost generation.
 #[derive(Default)]
 struct RequestOutput {
     state: std::sync::Mutex<RequestOutputState>,
@@ -396,6 +398,25 @@ struct HelperHandoff {
 }
 
 impl RequestOutput {
+    fn pending_terminal(&self) -> Option<Arc<crate::vcp_modules::chat::message_service::PendingStreamTerminal>> {
+        self.state.lock().ok()?.pending_terminal.clone()
+    }
+
+    fn settle_terminal(&self, discarded: bool) {
+        if let Ok(mut state) = self.state.lock() {
+            state.pending_terminal = None;
+            state.discarded |= discarded;
+        }
+    }
+
+    fn reopen_for_terminal_retry(&self) -> Result<(), String> {
+        let mut state = self.state.lock().map_err(|error| error.to_string())?;
+        state.closed = state.discarded;
+        state.owner_released = false;
+        state.channel = None;
+        Ok(())
+    }
+
     fn bind_chat_feed<R: Runtime>(&self, app: &AppHandle<R>) {
         if let Ok(mut state) = self.state.lock() {
             if state.chat_feed.is_none() {
@@ -576,6 +597,8 @@ impl RequestOutput {
         if let Ok(mut state) = self.state.lock() {
             state.closed = true;
             state.channel = None;
+            state.chat_feed = None;
+            state.has_chat_listener = None;
         }
     }
 }
@@ -621,6 +644,28 @@ pub(crate) fn deliver_request_event<R: Runtime>(
     request_output(app, key, channel).send(event);
 }
 
+pub(crate) fn retain_request_terminal<R: Runtime>(
+    app: &AppHandle<R>,
+    key: &MessageKey,
+    terminal: Arc<crate::vcp_modules::chat::message_service::PendingStreamTerminal>,
+) {
+    let Some(output) = app.try_state::<ActiveRequests>()
+        .and_then(|requests| requests.0.get(key).map(|entry| entry.output.clone())) else {
+        return;
+    };
+    // Android already retains these results through its helper handoff. Do not
+    // keep a second resident owner beside a live helper or its completed file.
+    #[cfg(target_os = "android")]
+    if output.helper_handoff.lock().is_ok_and(|handoff| handoff.is_some()) {
+        return;
+    }
+    if let Ok(mut state) = output.state.lock() {
+        if !state.discarded && state.pending_terminal.is_none() {
+            state.pending_terminal = Some(terminal);
+        }
+    };
+}
+
 /// Only the durable owner can acknowledge a helper result. Delivery to a
 /// WebView is deliberately unrelated to this resource handoff.
 pub(crate) async fn release_committed_helper<R: Runtime>(app: &AppHandle<R>, key: &MessageKey) {
@@ -635,11 +680,15 @@ pub(crate) async fn discard_request_helper<R: Runtime>(app: &AppHandle<R>, key: 
 /// process has restarted and no local request lease exists anymore.
 pub(crate) async fn discard_deleted_generation<R: Runtime>(app: &AppHandle<R>, key: &MessageKey) {
     if let Some(requests) = app.try_state::<ActiveRequests>() {
-        if let Some(request) = requests.0.get(key) {
+        if let Some(request) = requests.0.get(key).map(|entry| entry.value().clone()) {
+            request.output.settle_terminal(true);
             request.output.send_activity(key, request.attempt_id, false);
             request.output.close();
+            let _ = requests.cancel(key);
+            if request.released.is_cancelled() {
+                requests.0.remove_if(key, |_, current| current.attempt_id == request.attempt_id);
+            }
         }
-        let _ = requests.cancel(key);
     }
     #[cfg(target_os = "android")]
     {
@@ -696,11 +745,14 @@ pub(crate) async fn discard_deleted_generation<R: Runtime>(app: &AppHandle<R>, k
 }
 
 async fn settle_helper_handoff<R: Runtime>(app: &AppHandle<R>, key: &MessageKey, committed: bool) {
+    let output = app
+        .try_state::<ActiveRequests>()
+        .and_then(|requests| requests.0.get(key).map(|entry| entry.output.clone()));
+    if let Some(output) = &output {
+        output.settle_terminal(!committed);
+    }
     #[cfg(target_os = "android")]
     {
-        let output = app
-            .try_state::<ActiveRequests>()
-            .and_then(|requests| requests.0.get(key).map(|entry| entry.output.clone()));
         let handoff = output.and_then(|output| {
             output
                 .helper_handoff
@@ -786,6 +838,7 @@ impl ActiveRequestLease {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn try_acquire(
         requests: ActiveRequestMap,
         key: MessageKey,
@@ -798,31 +851,51 @@ impl ActiveRequestLease {
         key: MessageKey,
         cancellation_token: CancellationToken,
     ) -> Result<(Self, CancellationToken), String> {
+        Self::try_acquire_inner(requests, key, cancellation_token, false)
+    }
+
+    fn try_acquire_recovery(
+        requests: ActiveRequestMap,
+        key: MessageKey,
+    ) -> Result<(Self, CancellationToken), String> {
+        Self::try_acquire_inner(requests, key, CancellationToken::new(), true)
+    }
+
+    fn try_acquire_inner(
+        requests: ActiveRequestMap,
+        key: MessageKey,
+        cancellation_token: CancellationToken,
+        recovering: bool,
+    ) -> Result<(Self, CancellationToken), String> {
         let attempt_id = uuid::Uuid::new_v4();
-        let entry = Arc::new(ActiveRequestEntry {
+        let make_entry = |output| Arc::new(ActiveRequestEntry {
             attempt_id,
             cancellation_token: cancellation_token.clone(),
-            output: Arc::default(),
+            output,
             released: CancellationToken::new(),
         });
 
-        match requests.entry(key.clone()) {
+        let entry = match requests.entry(key.clone()) {
             Entry::Vacant(slot) => {
+                let entry = make_entry(Arc::default());
                 slot.insert(entry.clone());
-                Ok((
-                    Self {
-                        requests: requests.clone(),
-                        key,
-                        entry,
-                    },
-                    cancellation_token,
-                ))
+                entry
             }
-            Entry::Occupied(_) => Err(format!(
+            Entry::Occupied(mut slot) if recovering && slot.get().released.is_cancelled() => {
+                // The producer finished, but its terminal result still belongs
+                // to this output. Only one recovery may take the next lease.
+                let output = slot.get().output.clone();
+                output.reopen_for_terminal_retry()?;
+                let entry = make_entry(output);
+                slot.insert(entry.clone());
+                entry
+            }
+            Entry::Occupied(_) => return Err(format!(
                 "Request {} is already active for {}/{}/{}; duplicate attempt rejected",
                 key.msg_id, key.topic.owner_type, key.topic.owner_id, key.topic.topic_id
             )),
-        }
+        };
+        Ok((Self { requests, key, entry }, cancellation_token))
     }
 }
 
@@ -832,7 +905,12 @@ impl Drop for ActiveRequestLease {
         self.entry.output.close();
         if let Entry::Occupied(entry) = self.requests.entry(self.key.clone()) {
             if entry.get().attempt_id == self.entry.attempt_id {
-                entry.remove();
+                // Publish release under the map guard so deletion cannot miss
+                // both this cleanup and the retained-entry cleanup path.
+                self.entry.released.cancel();
+                if self.entry.output.pending_terminal().is_none() {
+                    entry.remove();
+                }
             }
         }
         self.entry.released.cancel();
@@ -1154,14 +1232,24 @@ pub async fn interruptGroupTurn(
 }
 
 fn schedule_pending_stop<R: Runtime>(app: &AppHandle<R>, requests: &ActiveRequests, key: MessageKey) {
-    if let Some(entry) = requests.0.get(&key) {
+    let producer = requests.0.get(&key)
+        .filter(|entry| !entry.released.is_cancelled())
+        .map(|entry| entry.value().clone());
+    if let Some(entry) = &producer {
         entry.cancellation_token.cancel();
-        return;
     }
     let channel = requests.1.lock().ok().and_then(|connection| connection.as_ref()
         .map(|connection| connection.channel.clone())).unwrap_or_else(|| Channel::new(|_| Ok(())));
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        if let Some(entry) = producer {
+            entry.released.cancelled().await;
+            // Successful cancellation or deletion already settled the owner.
+            // Only a received terminal whose commit failed needs this retry.
+            if entry.output.pending_terminal().is_none() {
+                return;
+            }
+        }
         if let Err(error) = recover_active_generation(
             app.clone(), app.state::<ActiveRequests>(), key.topic.owner_id,
             key.topic.owner_type, key.topic.topic_id, key.msg_id, channel,
@@ -2485,11 +2573,13 @@ pub async fn interruptRequest(
     )
     .bind(&key.topic.owner_type).bind(&key.topic.owner_id).bind(&key.topic.topic_id).bind(&key.msg_id)
     .execute(&db.pool).await.map_err(|error| error.to_string())?.rows_affected() != 0;
-    let entry = state.0.get(&key).map(|entry| entry.value().clone());
-    if let Some(entry) = &entry {
-        entry.cancellation_token.cancel();
-    } else if pending {
+    let entry = state.0.get(&key)
+        .filter(|entry| !entry.released.is_cancelled())
+        .map(|entry| entry.value().clone());
+    if entry.is_some() || pending {
         schedule_pending_stop(&app, &state, key.clone());
+    }
+    if entry.is_none() && pending {
         return Ok(json!({ "success": true, "status": "cancelling" }));
     }
     let settlement = async {
@@ -2507,9 +2597,14 @@ pub async fn interruptRequest(
         .fetch_optional(&db.pool)
         .await
         .map_err(|error| error.to_string())?;
+        let retained_terminal = state.0.get(&key).is_some_and(|entry|
+            entry.released.is_cancelled() && entry.output.pending_terminal().is_some());
         match reason.flatten() {
             Some(reason) => {
                 Ok(json!({ "success": true, "status": "completed", "finishReason": reason }))
+            }
+            None if retained_terminal => {
+                Ok(json!({ "success": true, "status": "cancelling" }))
             }
             None if pending => Ok(json!({ "success": true, "status": "cancelling" })),
             None => Err(format!("Request {} has no committed terminal result", message_id)),
@@ -3203,7 +3298,7 @@ async fn recover_active_generation<R: Runtime>(
                 stream_channel = channel.channel.clone();
             }
         }
-        match ActiveRequestLease::try_acquire(active_requests.0.clone(), key.clone()) {
+        match ActiveRequestLease::try_acquire_recovery(active_requests.0.clone(), key.clone()) {
             Ok(claim) => break claim,
             Err(_) => {
                 let Some(entry) = active_requests
@@ -3241,6 +3336,14 @@ async fn recover_active_generation<R: Runtime>(
     };
     let output = request_output(&app, &key, Some(stream_channel.clone()));
     let result = async {
+
+    if let Some(terminal) = output.pending_terminal() {
+        let db = app.state::<DbState>();
+        let committed = crate::vcp_modules::chat::message_service::retry_stream_terminal(
+            app.clone(), &db.pool, &key, terminal, Some(stream_channel.clone()),
+        ).await?;
+        return Ok(if committed.is_some() { RecoveryStatus::Completed } else { RecoveryStatus::NotFound });
+    }
 
     if let Some(recovered) = recover_offline_generation(&app, &key, stream_channel.clone()).await? {
         return Ok(recovered);
@@ -3603,6 +3706,188 @@ mod offline_completed_tests {
             let _ = sender.send(body.deserialize::<Value>()?);
             Ok(())
         }), receiver)
+    }
+
+    async fn reject_terminal_commits(pool: &sqlx::SqlitePool) {
+        sqlx::raw_sql(
+            "CREATE TRIGGER reject_terminal_commit BEFORE UPDATE OF finish_reason ON messages
+             WHEN NEW.finish_reason IS NOT NULL
+             BEGIN SELECT RAISE(ABORT, 'forced terminal commit failure'); END;",
+        ).execute(pool).await.unwrap();
+    }
+
+    async fn receive_event(
+        events: &mut tokio::sync::mpsc::UnboundedReceiver<Value>,
+        event_type: &str,
+    ) -> Value {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = events.recv().await.expect("stream channel remains available");
+                if event["type"] == event_type {
+                    return event;
+                }
+            }
+        }).await.expect("stream event")
+    }
+
+    #[tokio::test]
+    async fn failed_terminal_commit_recovers_its_body_and_reason_on_a_new_connection() {
+        for (aborted, reason) in [(false, "length"), (true, "cancelled_by_user")] {
+            let (db, key, _directory, _path) = fixture().await;
+            let pool = db.pool.clone();
+            let app = tauri::test::mock_app();
+            app.manage(db);
+            app.manage(ActiveRequests::default());
+            app.manage(ActiveGroupTurns::default());
+            let requests = app.state::<ActiveRequests>();
+            let (lease, cancellation) = ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).unwrap();
+            let output = Arc::downgrade(&lease.entry.output);
+            let (original, mut original_events) = channel();
+            lease.bind_output(app.handle(), Some(original.clone())).unwrap();
+            if aborted { cancellation.cancel(); }
+            reject_terminal_commits(&pool).await;
+            let content = "已收到的回答 🦀\n\n```rust\nlet x = 1;\n```";
+            let error = crate::vcp_modules::chat::message_service::finalize_stream_message(
+                app.handle().clone(), &pool, &key, content.into(), aborted, Some(reason.into()),
+                Some(original), Some("offline-agent".into()),
+            ).await.expect_err("the injected transaction failure must surface");
+            assert!(error.contains("forced terminal commit failure"));
+            assert_eq!(receive_event(&mut original_events, "error").await["content"], content);
+            drop(lease);
+            let unfinished: (String, Option<String>) = sqlx::query_as("SELECT content, finish_reason FROM messages")
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(unfinished, (String::new(), None), "the failed transaction must not claim persistence");
+            sqlx::query("DROP TRIGGER reject_terminal_commit").execute(&pool).await.unwrap();
+
+            let (replacement, mut events) = channel();
+            let receipt = reconnect_chat_output(app.handle().clone(), "replacement".into(), Some(replacement))
+                .await.unwrap();
+            assert_eq!(receipt.generations.len(), 1);
+            let end = receive_event(&mut events, "end").await;
+            assert_eq!(end["content"], content);
+            assert_eq!(end["finishReason"], reason);
+            assert_eq!(end["context"]["replayed"], true);
+            let durable: (String, String) = sqlx::query_as("SELECT content, finish_reason FROM messages")
+                .fetch_one(&pool).await.unwrap();
+            assert_eq!(durable, (content.into(), reason.into()));
+            assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM active_generations")
+                .fetch_one(&pool).await.unwrap(), 0);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while output.upgrade().is_some() { tokio::task::yield_now().await; }
+            }).await.expect("committed terminal owner must be released");
+            while let Ok(event) = original_events.try_recv() {
+                assert_ne!(event["type"], "end");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_after_repeated_commit_failure_settles_the_received_terminal() {
+        let (db, key, _directory, _path) = fixture().await;
+        let pool = db.pool.clone();
+        let app = tauri::test::mock_app();
+        app.manage(db);
+        app.manage(ActiveRequests::default());
+        app.manage(ActiveGroupTurns::default());
+        let requests = app.state::<ActiveRequests>();
+        let (lease, _) = ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).unwrap();
+        reject_terminal_commits(&pool).await;
+        assert!(crate::vcp_modules::chat::message_service::finalize_stream_message(
+            app.handle().clone(), &pool, &key, "complete response".into(), false,
+            Some("completed".into()), None, Some("offline-agent".into()),
+        ).await.is_err());
+        drop(lease);
+        let (replacement, mut events) = channel();
+        *requests.1.lock().unwrap() = Some(ChatOutputConnection {
+            id: "replacement".into(), channel: replacement.clone(),
+        });
+        assert!(recover_active_generation(
+            app.handle().clone(), app.state::<ActiveRequests>(), key.topic.owner_id.clone(),
+            key.topic.owner_type.clone(), key.topic.topic_id.clone(), key.msg_id.clone(), replacement,
+        ).await.is_err());
+        assert_eq!(receive_event(&mut events, "error").await["content"], "complete response");
+        sqlx::query("DROP TRIGGER reject_terminal_commit").execute(&pool).await.unwrap();
+        // This is the same durable intent / scheduling boundary used by the
+        // stop commands when no producer lease remains.
+        sqlx::query("UPDATE active_generations SET stop_requested = 1")
+            .execute(&pool).await.unwrap();
+        schedule_pending_stop(app.handle(), &requests, key);
+        let end = receive_event(&mut events, "end").await;
+        assert_eq!(end["content"], "complete response");
+        assert_eq!(end["finishReason"], "completed", "stop cannot rewrite a result already received");
+        let durable: (String, String) = sqlx::query_as("SELECT content, finish_reason FROM messages")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(durable, ("complete response".into(), "completed".into()));
+    }
+
+    #[tokio::test]
+    async fn stop_waits_for_a_producer_that_leaves_a_failed_terminal() {
+        let (db, key, _directory, _path) = fixture().await;
+        let pool = db.pool.clone();
+        let app = tauri::test::mock_app();
+        app.manage(db);
+        app.manage(ActiveRequests::default());
+        let requests = app.state::<ActiveRequests>();
+        let (lease, _) = ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).unwrap();
+        let (consumer, mut events) = channel();
+        *requests.1.lock().unwrap() = Some(ChatOutputConnection {
+            id: "current".into(), channel: consumer,
+        });
+        reject_terminal_commits(&pool).await;
+        assert!(crate::vcp_modules::chat::message_service::finalize_stream_message(
+            app.handle().clone(), &pool, &key, "received before stop".into(), false,
+            Some("length".into()), None, Some("offline-agent".into()),
+        ).await.is_err());
+        sqlx::query("UPDATE active_generations SET stop_requested = 1").execute(&pool).await.unwrap();
+        schedule_pending_stop(app.handle(), &requests, key);
+        sqlx::query("DROP TRIGGER reject_terminal_commit").execute(&pool).await.unwrap();
+        drop(lease);
+        let end = receive_event(&mut events, "end").await;
+        assert_eq!(end["content"], "received before stop");
+        assert_eq!(end["finishReason"], "length");
+        assert_eq!(sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM active_generations")
+            .fetch_one(&pool).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn deleting_a_failed_terminal_releases_it_without_replaying_the_body() {
+        for release_producer_first in [false, true] {
+            let (db, key, _directory, _path) = fixture().await;
+            let pool = db.pool.clone();
+            let app = tauri::test::mock_app();
+            app.manage(db);
+            app.manage(ActiveRequests::default());
+            let requests = app.state::<ActiveRequests>();
+            let (lease, _) = ActiveRequestLease::try_acquire(requests.0.clone(), key.clone()).unwrap();
+            let output = Arc::downgrade(&lease.entry.output);
+            let (consumer, mut events) = channel();
+            reject_terminal_commits(&pool).await;
+            assert!(crate::vcp_modules::chat::message_service::finalize_stream_message(
+                app.handle().clone(), &pool, &key, "discarded answer".into(), false,
+                Some("completed".into()), Some(consumer), Some("offline-agent".into()),
+            ).await.is_err());
+            assert_eq!(receive_event(&mut events, "error").await["content"], "discarded answer");
+            let mut lease = Some(lease);
+            if release_producer_first { drop(lease.take()); }
+            let deletion = crate::vcp_modules::chat::message_service::delete_messages(
+                &app.state::<DbState>(), &key.topic, vec![key.msg_id.clone()], None,
+            ).await.unwrap();
+            assert_eq!(deletion.active_ids, vec![key.msg_id.clone()]);
+            discard_deleted_generation(app.handle(), &key).await;
+            drop(lease);
+            assert!(output.upgrade().is_none(), "deleted terminal must have no retained owner");
+            sqlx::query("DROP TRIGGER reject_terminal_commit").execute(&pool).await.unwrap();
+            let (replacement, mut replacement_events) = channel();
+            assert_eq!(recover_active_generation(
+                app.handle().clone(), app.state::<ActiveRequests>(), key.topic.owner_id.clone(),
+                key.topic.owner_type.clone(), key.topic.topic_id.clone(), key.msg_id.clone(), replacement,
+            ).await.unwrap(), RecoveryStatus::NotFound);
+            while let Ok(event) = replacement_events.try_recv() {
+                assert_ne!(event["type"], "end");
+            }
+            assert!(sqlx::query_scalar::<_, Option<i64>>("SELECT deleted_at FROM messages")
+                .fetch_one(&pool).await.unwrap().is_some());
+        }
     }
 
     #[tokio::test]

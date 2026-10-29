@@ -205,7 +205,7 @@ describe("stream render projection commits", () => {
     await store.processStreamEvent(event({ type: "end", content: "final", finishReason: "completed", blocks }));
     finishRecovery({ stableBlocks: [], tailBlock: { type: "markdown", content: "obsolete", hash: "obsolete" }, tailSnapshot: [] });
 
-    expect(await recovery).toBe(false);
+    expect(await recovery).toBeNull();
     expect(current.blocks).toEqual(blocks);
     expect(current.tailBlock).toBeUndefined();
     expect(current.tailOp).toBeUndefined();

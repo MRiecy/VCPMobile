@@ -11,7 +11,7 @@ use super::schema::{
     set_value_at_path, settings_from_domains, value_at_path,
 };
 use super::types::{
-    ConfigDomain, ConfigSaveResult, ConfigSnapshot, ConfigUpdate,
+    ConfigBackupImportResult, ConfigDomain, ConfigSaveResult, ConfigSnapshot, ConfigUpdate,
     DomainStatus, FieldIssue, Settings,
 };
 use crate::vcp_modules::db_manager::DbState;
@@ -141,6 +141,7 @@ impl SettingsState {
     {
         self.mutate(db, ConfigMutation::Update(request), on_committed)
             .await
+            .map(|response| response.result)
     }
 
     pub(crate) async fn import_backup<F>(
@@ -149,7 +150,7 @@ impl SettingsState {
         request: ConfigUpdate,
         group_preferences: BTreeMap<String, GroupLocalSettingsPatch>,
         on_committed: F,
-    ) -> Result<ConfigSaveResult, String>
+    ) -> Result<ConfigBackupImportResult, String>
     where
         F: FnOnce(Arc<Settings>, Arc<ConfigSnapshot>) + Send + 'static,
     {
@@ -162,7 +163,7 @@ impl SettingsState {
         db: &DbState,
         request: ConfigMutation,
         on_committed: F,
-    ) -> Result<ConfigSaveResult, String>
+    ) -> Result<ConfigBackupImportResult, String>
     where
         F: FnOnce(Arc<Settings>, Arc<ConfigSnapshot>) + Send + 'static,
     {
@@ -180,7 +181,7 @@ impl SettingsState {
         request: ConfigMutation,
         guard: OwnedMutexGuard<()>,
         on_committed: F,
-    ) -> Result<ConfigSaveResult, String>
+    ) -> Result<ConfigBackupImportResult, String>
     where
         F: FnOnce(Arc<Settings>, Arc<ConfigSnapshot>),
     {
@@ -210,7 +211,10 @@ impl SettingsState {
                 if normalized {
                     on_committed(previous_settings.unwrap_or_else(|| current.settings.clone()), current.snapshot.clone());
                 }
-                return Ok(ConfigSaveResult::Rejected { issues });
+                return Ok(ConfigBackupImportResult {
+                    result: ConfigSaveResult::Rejected { issues },
+                    missing_groups: false,
+                });
             }
             PreparedUpdate::Conflict(conflicts) => {
                 transaction.commit().await?;
@@ -219,9 +223,12 @@ impl SettingsState {
                 if normalized {
                     on_committed(previous_settings.unwrap_or_else(|| current.settings.clone()), current.snapshot.clone());
                 }
-                return Ok(ConfigSaveResult::Conflict {
-                    snapshot: current.snapshot.as_ref().clone(),
-                    conflicts,
+                return Ok(ConfigBackupImportResult {
+                    result: ConfigSaveResult::Conflict {
+                        snapshot: current.snapshot.as_ref().clone(),
+                        conflicts,
+                    },
+                    missing_groups: false,
                 });
             }
             PreparedUpdate::Ready(writes) => writes,
@@ -233,20 +240,25 @@ impl SettingsState {
             if normalized {
                 on_committed(previous_settings.unwrap_or_else(|| current.settings.clone()), current.snapshot.clone());
             }
-            return Ok(ConfigSaveResult::Saved {
-                snapshot: current.snapshot.as_ref().clone(),
+            return Ok(ConfigBackupImportResult {
+                result: ConfigSaveResult::Saved {
+                    snapshot: current.snapshot.as_ref().clone(),
+                },
+                missing_groups: false,
             });
         }
 
         // Group-local preferences and configuration domains share this commit.
         // Neither a conflict nor an invalid domain patch may partially restore groups.
-        if !group_preferences.is_empty() {
+        let missing_groups = if !group_preferences.is_empty() {
             crate::vcp_modules::group::group_service::import_group_local_settings(
                 &mut transaction,
                 &group_preferences,
             )
-            .await?;
-        }
+            .await?
+        } else {
+            false
+        };
 
         let mut next_records = records;
         for write in writes {
@@ -262,8 +274,11 @@ impl SettingsState {
         // This synchronous hook only schedules domain side effects. It is inside
         // the durable owner and must run even if the IPC JoinHandle is dropped.
         on_committed(previous_settings.unwrap_or_else(|| current.settings.clone()), next.snapshot.clone());
-        Ok(ConfigSaveResult::Saved {
-            snapshot: next.snapshot.as_ref().clone(),
+        Ok(ConfigBackupImportResult {
+            result: ConfigSaveResult::Saved {
+                snapshot: next.snapshot.as_ref().clone(),
+            },
+            missing_groups,
         })
     }
 }
@@ -913,7 +928,8 @@ mod tests {
             patch(&base, ConfigDomain::Log, json!({"url":"invalid-url", "key":"valid-key"})),
             patch(&base, ConfigDomain::Identity, json!({"userName":"must-not-import"})),
         ] }, preferences, |_, _| panic!("rejected import must not publish")).await.unwrap();
-        assert_eq!(rejected_fields(result), vec![(ConfigDomain::Log, "url".into())]);
+        assert!(!result.missing_groups);
+        assert_eq!(rejected_fields(result.result), vec![(ConfigDomain::Log, "url".into())]);
         assert_eq!(state.read_snapshot(&db).await.unwrap(), base);
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_local_settings")
             .fetch_one(&db.pool).await.unwrap();
@@ -1347,11 +1363,13 @@ mod tests {
             .execute(&db.pool).await.unwrap();
         sqlx::raw_sql(include_str!("../../../../migrations/0104_group_local_settings.sql"))
             .execute(&db.pool).await.unwrap();
+        sqlx::query("INSERT INTO groups(owner_type,group_id) VALUES('group','synced-group')")
+            .execute(&db.pool).await.unwrap();
         let state = SettingsState::new();
         let base = state.read_snapshot(&db).await.unwrap();
         let local = GroupLocalSettings { chat_mode: crate::vcp_modules::group_types::GroupChatMode::Jev, ..Default::default() };
         let preferences = group_service::parse_group_local_settings_backup(&json!({
-            "pending-group": { "chatMode": "jev" }
+            "synced-group": { "chatMode": "jev" }
         })).unwrap();
         let update = ConfigUpdate { patches: vec![patch(&base, ConfigDomain::Jev, json!({"enabled":true,"openrouter.apiKey":"backup-key"}))] };
         sqlx::raw_sql("CREATE TRIGGER fail_jev_restore BEFORE UPDATE ON config_domains WHEN NEW.domain='jev' BEGIN SELECT RAISE(ABORT,'fixture failure'); END;")
@@ -1363,21 +1381,25 @@ mod tests {
         assert_eq!(state.read_snapshot(&db).await.unwrap(), base);
         sqlx::query("DROP TRIGGER fail_jev_restore").execute(&db.pool).await.unwrap();
 
-        let result = saved(state.import_backup(&db, update, preferences, |_, _| {}).await.unwrap());
+        let imported = state.import_backup(&db, update, preferences, |_, _| {}).await.unwrap();
+        assert!(!imported.missing_groups);
+        let result = saved(imported.result);
         assert!(result.data.jev.enabled);
         assert_eq!(result.data.jev.openrouter.api_key, "backup-key");
         let restored = crate::vcp_modules::group::group_service::export_group_local_settings(&db).await.unwrap();
-        assert_eq!(restored["pending-group"], local);
+        assert_eq!(restored["synced-group"], local);
         assert_eq!(state.read_snapshot(&db).await.unwrap(), result);
     }
 
     #[tokio::test]
-    async fn group_backup_applies_present_fields_to_current_state_or_new_device_defaults() {
+    async fn group_backup_restores_present_entities_and_reports_unsynced_groups() {
         use crate::vcp_modules::group::{group_service, group_types::GroupLocalSettings};
         let db = database(None).await;
         sqlx::query("CREATE TABLE groups (owner_type TEXT NOT NULL, group_id TEXT NOT NULL, deleted_at BIGINT, PRIMARY KEY(owner_type,group_id))")
             .execute(&db.pool).await.unwrap();
         sqlx::raw_sql(include_str!("../../../../migrations/0104_group_local_settings.sql"))
+            .execute(&db.pool).await.unwrap();
+        sqlx::query("INSERT INTO groups(owner_type,group_id,deleted_at) VALUES ('group','existing',NULL), ('group','new-device',NULL), ('group','deleted',1)")
             .execute(&db.pool).await.unwrap();
         let state = SettingsState::new();
         let mut original = GroupLocalSettings {
@@ -1388,19 +1410,30 @@ mod tests {
         };
         original.mode_settings.jev.navigator_prompt = "保留当前群导航".into();
         let seed = group_service::parse_group_local_settings_backup(&json!({"existing": original})).unwrap();
-        saved(state.import_backup(&db, ConfigUpdate::default(), seed, |_, _| {}).await.unwrap());
+        saved(state.import_backup(&db, ConfigUpdate::default(), seed, |_, _| {}).await.unwrap().result);
 
         let patches = group_service::parse_group_local_settings_backup(&json!({
             "existing": {"modeSettings":{"jev":{"speakerThreshold":0.25}}},
-            "new-device": {"modeSettings":{"jev":{"speakerThreshold":0.25}}}
+            "new-device": {"modeSettings":{"jev":{"speakerThreshold":0.25}}},
+            "missing": {"chatMode":"jev"},
+            "deleted": {"chatMode":"jev"}
         })).unwrap();
-        saved(state.import_backup(&db, ConfigUpdate::default(), patches, |_, _| {}).await.unwrap());
+        let base = state.read_snapshot(&db).await.unwrap();
+        let update = ConfigUpdate { patches: vec![patch(&base, ConfigDomain::Identity, json!({"userName":"restored"}))] };
+        let imported = state.import_backup(&db, update, patches, |_, _| {}).await.unwrap();
+        assert!(imported.missing_groups);
+        assert_eq!(saved(imported.result).data.identity.user_name, "restored", "missing groups do not block unrelated configuration");
         let restored = group_service::export_group_local_settings(&db).await.unwrap();
         original.mode_settings.jev.speaker_threshold = 0.25;
         assert_eq!(restored["existing"], original, "omitted local fields must survive backup import");
         let mut fresh = GroupLocalSettings::default();
         fresh.mode_settings.jev.speaker_threshold = 0.25;
-        assert_eq!(restored["new-device"], fresh, "a previously unknown group starts from current defaults");
+        assert_eq!(restored["new-device"], fresh, "a synced group without local preferences starts from current defaults");
+        assert!(!restored.contains_key("missing"));
+        assert!(!restored.contains_key("deleted"));
+        let absent: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_local_settings WHERE group_id IN ('missing','deleted')")
+            .fetch_one(&db.pool).await.unwrap();
+        assert_eq!(absent, 0, "neither unsynced nor tombstoned groups acquire local preferences");
     }
 
     #[tokio::test]

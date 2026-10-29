@@ -86,11 +86,26 @@ fn stored_local_settings_json(row: &sqlx::sqlite::SqliteRow) -> Result<Option<St
     }
 }
 
+async fn stored_group_local_settings_rows<'a, E>(
+    executor: E,
+    group_id: Option<&str>,
+) -> Result<Vec<sqlx::sqlite::SqliteRow>, String>
+where E: sqlx::Executor<'a, Database = sqlx::Sqlite> {
+    match group_id {
+        Some(group_id) => sqlx::query("SELECT group_id,settings_json FROM group_local_settings WHERE group_id=?")
+            .bind(group_id).fetch_all(executor).await,
+        None => sqlx::query("SELECT group_id,settings_json FROM group_local_settings")
+            .fetch_all(executor).await,
+    }.map_err(|error| error.to_string())
+}
+
 // Read again under the writer transaction. A normalization never writes the
 // earlier read snapshot over a settings import or a local editor's commit.
-async fn normalize_stored_group_local_settings(connection: &mut SqliteConnection) -> Result<bool, String> {
-    let rows = sqlx::query("SELECT group_id,settings_json FROM group_local_settings")
-        .fetch_all(&mut *connection).await.map_err(|error| error.to_string())?;
+async fn normalize_stored_group_local_settings(
+    connection: &mut SqliteConnection,
+    group_id: Option<&str>,
+) -> Result<bool, String> {
+    let rows = stored_group_local_settings_rows(&mut *connection, group_id).await?;
     let mut changed = false;
     for row in rows {
         let group_id: String = row.try_get("group_id").map_err(|error| error.to_string())?;
@@ -106,9 +121,11 @@ async fn normalize_stored_group_local_settings(connection: &mut SqliteConnection
 
 /// Config decoding persists typed defaults without changing business timestamps
 /// or shared sync data. Actual database errors still reach the caller.
-pub(crate) async fn normalize_group_local_settings(db: &DbState) -> Result<bool, String> {
-    let rows = sqlx::query("SELECT settings_json FROM group_local_settings")
-        .fetch_all(&db.pool).await.map_err(|error| error.to_string())?;
+pub(crate) async fn normalize_group_local_settings(
+    db: &DbState,
+    group_id: Option<&str>,
+) -> Result<bool, String> {
+    let rows = stored_group_local_settings_rows(&db.pool, group_id).await?;
     let mut needed = false;
     for row in rows {
         let raw = stored_local_settings_json(&row)?;
@@ -116,7 +133,7 @@ pub(crate) async fn normalize_group_local_settings(db: &DbState) -> Result<bool,
     }
     if needed {
         let mut transaction = db.write_transaction("identity.group.normalize_settings").await?;
-        let changed = normalize_stored_group_local_settings(&mut transaction).await?;
+        let changed = normalize_stored_group_local_settings(&mut transaction, group_id).await?;
         transaction.commit().await.map_err(|error| error.to_string())?;
         return Ok(changed);
     }
@@ -182,24 +199,40 @@ fn decode_group_fields(row: &sqlx::sqlite::SqliteRow) -> Result<(GroupConfig, bo
     }, changed))
 }
 
-/// Repair stored settings in the write transaction, preserving valid fields and
-/// keeping shared hashes consistent. A later read never writes an old snapshot.
-pub(crate) async fn normalize_group_configurations<F>(db: &DbState, mut on_repaired: F) -> Result<bool, String>
+async fn stored_group_configuration_rows<'a, E>(
+    executor: E,
+    group_id: Option<&str>,
+) -> Result<Vec<sqlx::sqlite::SqliteRow>, String>
+where E: sqlx::Executor<'a, Database = sqlx::Sqlite> {
+    match group_id {
+        Some(group_id) => sqlx::query("SELECT * FROM groups WHERE owner_type='group' AND group_id=? AND deleted_at IS NULL")
+            .bind(group_id).fetch_all(executor).await,
+        None => sqlx::query("SELECT * FROM groups WHERE owner_type='group' AND deleted_at IS NULL")
+            .fetch_all(executor).await,
+    }.map_err(|error| error.to_string())
+}
+
+/// Repair only the requested group, or all groups for a list read. Re-reading
+/// within the write transaction preserves concurrent edits and shared hashes.
+pub(crate) async fn normalize_group_configurations<F>(
+    db: &DbState,
+    group_id: Option<&str>,
+    mut on_repaired: F,
+) -> Result<bool, String>
 where F: FnMut() + Send + 'static {
     let db = db.clone();
+    let group_id = group_id.map(str::to_owned);
     tokio::spawn(async move {
-        let local_changed = normalize_group_local_settings(&db).await?;
+        let local_changed = normalize_group_local_settings(&db, group_id.as_deref()).await?;
         if local_changed { on_repaired(); }
-        let rows = sqlx::query("SELECT * FROM groups WHERE owner_type='group' AND deleted_at IS NULL")
-            .fetch_all(&db.pool).await.map_err(|error| error.to_string())?;
+        let rows = stored_group_configuration_rows(&db.pool, group_id.as_deref()).await?;
         let mut needed = false;
         for row in &rows {
             if decode_group_fields(row)?.1 { needed = true; break; }
         }
         if !needed { return Ok(local_changed); }
         let mut tx = db.write_transaction("identity.group.normalize_config").await?;
-        let rows = sqlx::query("SELECT * FROM groups WHERE owner_type='group' AND deleted_at IS NULL")
-            .fetch_all(&mut *tx).await.map_err(|error| error.to_string())?;
+        let rows = stored_group_configuration_rows(&mut *tx, group_id.as_deref()).await?;
         let mut changed = false;
         for row in rows {
             let (mut config, invalid) = decode_group_fields(&row)?;
@@ -227,13 +260,11 @@ where F: FnMut() + Send + 'static {
 pub async fn export_group_local_settings(
     db: &DbState,
 ) -> Result<BTreeMap<String, GroupLocalSettings>, String> {
-    normalize_group_local_settings(db).await?;
+    normalize_group_local_settings(db, None).await?;
     let rows = sqlx::query(
         "SELECT l.group_id, l.settings_json FROM group_local_settings l
-         WHERE NOT EXISTS (
-             SELECT 1 FROM groups g WHERE g.owner_type = 'group'
-               AND g.group_id = l.group_id AND g.deleted_at IS NOT NULL
-         ) ORDER BY l.group_id",
+         JOIN groups g ON g.owner_type = 'group' AND g.group_id = l.group_id
+         WHERE g.deleted_at IS NULL ORDER BY l.group_id",
     )
     .fetch_all(&db.pool)
     .await
@@ -302,20 +333,33 @@ async fn update_group_local_settings(
 }
 
 /// 调用者持有 settings 导入事务；本函数不提交，提交后须失效 GroupManagerState 缓存。
-/// 缺失项保留原值，未出现过的群 ID 可等待后续同步，墓碑身份不能恢复偏好。
+/// 缺失字段保留原值；仅恢复本机已有存活群。返回是否有尚未同步的群，墓碑静默跳过。
 pub async fn import_group_local_settings(
     connection: &mut SqliteConnection,
     preferences: &BTreeMap<String, GroupLocalSettingsPatch>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
+    let mut missing_groups = false;
     for (group_id, patch) in preferences {
         if group_id.trim().is_empty() || patch.is_empty() {
             continue;
+        }
+        let deleted_at: Option<Option<i64>> = sqlx::query_scalar(
+            "SELECT deleted_at FROM groups WHERE owner_type='group' AND group_id=?",
+        )
+        .bind(group_id)
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|error| error.to_string())?;
+        match deleted_at {
+            None => { missing_groups = true; continue; }
+            Some(Some(_)) => continue,
+            Some(None) => {}
         }
         let current = read_stored_local_settings(connection, group_id).await?;
         let restored = patch.apply(&current)?;
         write_group_local_settings(connection, group_id, &restored).await?;
     }
-    Ok(())
+    Ok(missing_groups)
 }
 
 async fn write_group_local_settings(
@@ -328,8 +372,8 @@ async fn write_group_local_settings(
     let json = serde_json::to_string(&settings).map_err(|error| error.to_string())?;
     let result = sqlx::query(
         "INSERT INTO group_local_settings (group_id, settings_json, updated_at)
-         SELECT ?, ?, ? WHERE NOT EXISTS (
-             SELECT 1 FROM groups WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NOT NULL
+         SELECT ?, ?, ? WHERE EXISTS (
+             SELECT 1 FROM groups WHERE owner_type = 'group' AND group_id = ? AND deleted_at IS NULL
          )
          ON CONFLICT(group_id) DO UPDATE SET
              settings_json = excluded.settings_json, updated_at = excluded.updated_at
@@ -374,7 +418,7 @@ async fn read_group_config_locked<R: Runtime>(
     }
     let db_state = app_handle.state::<DbState>();
     let app = app_handle.clone();
-    normalize_group_configurations(&db_state, move || {
+    normalize_group_configurations(&db_state, Some(group_id), move || {
         if let Some(state) = app.try_state::<GroupManagerState>() { state.invalidate_cache(); }
     }).await?;
     let cache_generation = state.current_cache_generation();
@@ -479,7 +523,7 @@ pub async fn get_groups(
     let start_total = std::time::Instant::now();
     let db_state = app_handle.state::<DbState>();
     let app = app_handle.clone();
-    normalize_group_configurations(&db_state, move || {
+    normalize_group_configurations(&db_state, None, move || {
         if let Some(state) = app.try_state::<GroupManagerState>() { state.invalidate_cache(); }
     }).await?;
     let pool = &db_state.pool;
@@ -1150,7 +1194,7 @@ mod local_settings_tests {
         // A different local field changes after a caller's earlier read.
         sqlx::query("UPDATE group_local_settings SET settings_json=json_set(settings_json,'$.contextMessageWindowSize',321) WHERE group_id='bad'")
             .execute(&mut connection).await.unwrap();
-        assert!(normalize_stored_group_local_settings(&mut connection).await.unwrap());
+        assert!(normalize_stored_group_local_settings(&mut connection, None).await.unwrap());
         let (raw, time): (String, i64) = sqlx::query_as("SELECT settings_json,updated_at FROM group_local_settings WHERE group_id='bad'")
             .fetch_one(&mut connection).await.unwrap();
         let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
@@ -1167,14 +1211,14 @@ mod local_settings_tests {
             .fetch_one(&mut connection).await.unwrap();
         assert_eq!(serde_json::from_str::<GroupLocalSettings>(&broken).unwrap(), GroupLocalSettings::default());
         assert_eq!(time, 99);
-        assert!(!normalize_stored_group_local_settings(&mut connection).await.unwrap());
+        assert!(!normalize_stored_group_local_settings(&mut connection, None).await.unwrap());
     }
 
     #[tokio::test]
     async fn local_normalization_keeps_real_database_failures_visible() {
         let mut connection = database().await;
         sqlx::query("DROP TABLE group_local_settings").execute(&mut connection).await.unwrap();
-        assert!(normalize_stored_group_local_settings(&mut connection).await.is_err());
+        assert!(normalize_stored_group_local_settings(&mut connection, None).await.is_err());
     }
 
     #[test]
@@ -1193,21 +1237,23 @@ mod local_settings_tests {
         let mut connection = database().await;
         sqlx::query("INSERT INTO group_local_settings VALUES ('blob', ?, 41)")
             .bind(br#"{"chatMode":"jev"}"#.as_slice()).execute(&mut connection).await.unwrap();
-        assert!(normalize_stored_group_local_settings(&mut connection).await.unwrap());
+        assert!(normalize_stored_group_local_settings(&mut connection, None).await.unwrap());
         let (raw, stamp): (String, i64) = sqlx::query_as("SELECT settings_json,updated_at FROM group_local_settings WHERE group_id='blob'")
             .fetch_one(&mut connection).await.unwrap();
         assert_eq!(parse_group_local_settings(Some(&raw)), GroupLocalSettings::default());
         assert_eq!(stamp, 41);
-        assert!(!normalize_stored_group_local_settings(&mut connection).await.unwrap());
+        assert!(!normalize_stored_group_local_settings(&mut connection, None).await.unwrap());
         // Simulate stored corruption; ordinary writes are already constrained.
         sqlx::query("PRAGMA ignore_check_constraints=ON").execute(&mut connection).await.unwrap();
         sqlx::query("UPDATE group_local_settings SET settings_json=CAST(x'ff' AS TEXT)").execute(&mut connection).await.unwrap();
         sqlx::query("PRAGMA ignore_check_constraints=OFF").execute(&mut connection).await.unwrap();
-        assert!(normalize_stored_group_local_settings(&mut connection).await.unwrap());
+        assert!(normalize_stored_group_local_settings(&mut connection, None).await.unwrap());
         assert_eq!(read_stored_local_settings(&mut connection, "blob").await.unwrap(), GroupLocalSettings::default());
         sqlx::query("PRAGMA ignore_check_constraints=ON").execute(&mut connection).await.unwrap();
         sqlx::query("UPDATE group_local_settings SET settings_json=x'ff'").execute(&mut connection).await.unwrap();
         sqlx::query("PRAGMA ignore_check_constraints=OFF").execute(&mut connection).await.unwrap();
+        sqlx::query("INSERT INTO groups(owner_type,group_id,name,updated_at) VALUES('group','blob','Synced',1)")
+            .execute(&mut connection).await.unwrap();
         let changes = serde_json::json!({"blob":{"contextMessageWindowSize":333}});
         import_group_local_settings(&mut connection, &parse_group_local_settings_backup(&changes).unwrap()).await.unwrap();
         assert_eq!(read_stored_local_settings(&mut connection, "blob").await.unwrap().context_message_window_size, 333);
@@ -1222,7 +1268,7 @@ mod local_settings_tests {
             .bind(r#"{"a":"keep","b":1e400}"#).execute(&pool).await.unwrap();
         sqlx::query("INSERT INTO group_members VALUES ('g','a',0,42)").execute(&pool).await.unwrap();
         let db = DbState::new(pool.clone(), std::path::PathBuf::new());
-        assert!(normalize_group_configurations(&db, || {}).await.unwrap());
+        assert!(normalize_group_configurations(&db, None, || {}).await.unwrap());
         let row = sqlx::query("SELECT * FROM groups WHERE group_id='g'").fetch_one(&pool).await.unwrap();
         let (mut config, invalid) = decode_group_fields(&row).unwrap();
         assert!(!invalid);
@@ -1238,13 +1284,61 @@ mod local_settings_tests {
         assert_eq!(row.get::<String, _>("config_hash"), HashAggregator::compute_group_config_hash(&GroupSyncDTO::from(&config)));
         assert_eq!(row.get::<String, _>("content_hash"), "untouched-content");
         assert!(row.get::<i64, _>("updated_at") > 42);
-        assert!(!normalize_group_configurations(&db, || {}).await.unwrap());
+        assert!(!normalize_group_configurations(&db, None, || {}).await.unwrap());
         // Storage failure must not masquerade as a successful default recovery.
         sqlx::query("UPDATE groups SET name=x'ff' WHERE group_id='g'").execute(&pool).await.unwrap();
         sqlx::raw_sql("CREATE TRIGGER reject_repair BEFORE UPDATE ON groups BEGIN SELECT RAISE(ABORT,'write failed'); END;").execute(&pool).await.unwrap();
-        assert!(normalize_group_configurations(&db, || {}).await.is_err());
+        assert!(normalize_group_configurations(&db, None, || {}).await.is_err());
         let storage_type: String = sqlx::query_scalar("SELECT typeof(name) FROM groups WHERE group_id='g'").fetch_one(&pool).await.unwrap();
         assert_eq!(storage_type, "blob");
+    }
+
+    #[tokio::test]
+    async fn single_group_cold_read_repairs_only_its_scope_and_full_scope_repairs_the_rest() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1).connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(include_str!("../../../migrations/0100_baseline_v2.sql")).execute(&pool).await.unwrap();
+        sqlx::raw_sql(include_str!("../../../migrations/0104_group_local_settings.sql")).execute(&pool).await.unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO groups(owner_type,group_id,name,group_prompt,config_hash,updated_at) VALUES
+                ('group','target',x'ff','keep target prompt','before',42),
+                ('group','other',x'ff','keep other prompt','before',42);
+             INSERT INTO group_local_settings VALUES
+                ('target','{\"chatMode\":\"jev\"}',42),('other','false',42);
+             CREATE TRIGGER reject_unrelated_shared_repair BEFORE UPDATE ON groups
+                WHEN OLD.group_id='other' BEGIN SELECT RAISE(ABORT,'unrelated shared repair'); END;
+             CREATE TRIGGER reject_unrelated_local_repair BEFORE UPDATE ON group_local_settings
+                WHEN OLD.group_id='other' BEGIN SELECT RAISE(ABORT,'unrelated local repair'); END;",
+        ).execute(&pool).await.unwrap();
+        let db = DbState::new(pool.clone(), std::path::PathBuf::new());
+        let app = tauri::test::mock_app();
+        app.manage(db.clone());
+        app.manage(GroupManagerState::new());
+
+        let config = read_group_config_internal(
+            app.handle(), &app.state::<GroupManagerState>(), "target",
+        ).await.expect("a single-group read must not repair unrelated groups");
+        assert_eq!(config.name, GroupConfig::default().name);
+        assert_eq!(config.group_prompt.as_deref(), Some("keep target prompt"));
+        assert_eq!(config.local_settings.chat_mode, GroupChatMode::Jev);
+        let other: (String, String, i64, String, i64) = sqlx::query_as(
+            "SELECT typeof(g.name),g.config_hash,g.updated_at,l.settings_json,l.updated_at
+             FROM groups g JOIN group_local_settings l ON l.group_id=g.group_id
+             WHERE g.group_id='other'",
+        ).fetch_one(&pool).await.unwrap();
+        assert_eq!(other, ("blob".into(), "before".into(), 42, "false".into(), 42));
+
+        sqlx::raw_sql("DROP TRIGGER reject_unrelated_shared_repair; DROP TRIGGER reject_unrelated_local_repair;")
+            .execute(&pool).await.unwrap();
+        assert!(normalize_group_configurations(&db, None, || {}).await.unwrap());
+        let other = sqlx::query("SELECT * FROM groups WHERE group_id='other'").fetch_one(&pool).await.unwrap();
+        let (config, invalid) = decode_group_fields(&other).unwrap();
+        assert!(!invalid);
+        assert_eq!(config.name, GroupConfig::default().name);
+        assert_eq!(config.group_prompt.as_deref(), Some("keep other prompt"));
+        let settings: String = sqlx::query_scalar("SELECT settings_json FROM group_local_settings WHERE group_id='other'")
+            .fetch_one(&pool).await.unwrap();
+        assert_eq!(serde_json::from_str::<GroupLocalSettings>(&settings).unwrap(), GroupLocalSettings::default());
+        assert!(!normalize_group_configurations(&db, None, || {}).await.unwrap());
     }
 
     #[tokio::test]
@@ -1498,7 +1592,7 @@ mod local_settings_tests {
     }
 
     #[tokio::test]
-    async fn imported_unbound_preferences_survive_binding_but_not_owner_deletion() {
+    async fn backup_requires_synced_group_then_explicit_reimport_and_skips_tombstones() {
         let mut connection = database().await;
         let settings = GroupLocalSettings {
             chat_mode: GroupChatMode::Jev,
@@ -1507,28 +1601,35 @@ mod local_settings_tests {
         let preferences = parse_group_local_settings_backup(&serde_json::json!({
             "future-group":{"chatMode":"jev"}
         }))
-        .expect("parse pending group patch");
+        .expect("parse group patch");
+        assert!(import_group_local_settings(&mut connection, &preferences)
+            .await.expect("report missing group"));
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_local_settings")
+            .fetch_one(&mut connection).await.expect("no unbound preferences");
+        assert_eq!(count, 0);
+        sqlx::query("INSERT INTO groups(owner_type,group_id,name,updated_at) VALUES('group','future-group','Synced',1)")
+            .execute(&mut connection).await.expect("sync group entity");
+        assert_eq!(read_stored_local_settings(&mut connection, "future-group").await.unwrap(), GroupLocalSettings::default(),
+            "syncing an entity must not automatically restore an earlier backup");
         let mut transaction = connection.begin().await.expect("begin backup import");
-        import_group_local_settings(&mut transaction, &preferences)
+        assert!(!import_group_local_settings(&mut transaction, &preferences)
             .await
-            .expect("import pending group");
+            .expect("import synced group"));
         transaction.rollback().await.expect("rollback whole backup");
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_local_settings")
             .fetch_one(&mut connection)
             .await
             .expect("count rolled back preferences");
         assert_eq!(count, 0);
-        import_group_local_settings(&mut connection, &preferences)
+        assert!(!import_group_local_settings(&mut connection, &preferences)
             .await
-            .expect("import pending group");
-        sqlx::query("INSERT INTO groups(owner_type,group_id,name,updated_at) VALUES('group','future-group','Synced',1)")
-            .execute(&mut connection).await.expect("bind synced group");
+            .expect("explicitly import after syncing"));
         let raw: String = sqlx::query_scalar(
             "SELECT settings_json FROM group_local_settings WHERE group_id='future-group'",
         )
         .fetch_one(&mut connection)
         .await
-        .expect("pending preferences survived");
+        .expect("read restored preferences");
         assert_eq!(
             parse_group_local_settings(Some(&raw)),
             settings
@@ -1537,9 +1638,9 @@ mod local_settings_tests {
             .execute(&mut connection)
             .await
             .expect("apply remote tombstone");
-        import_group_local_settings(&mut connection, &preferences)
+        assert!(!import_group_local_settings(&mut connection, &preferences)
             .await
-            .expect("deleted group does not restore");
+            .expect("deleted group is silently skipped"));
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM group_local_settings")
             .fetch_one(&mut connection)
             .await

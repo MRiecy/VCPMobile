@@ -82,8 +82,8 @@ date: 2026-08-11
 | **选中状态独立** | `currentSelectedItem` 与 `currentTopicId` 由 `chatSessionStore` 独立管理，解耦列表管理与会话路由 |
 | **懒加载 + 流式** | 话题列表通过 Tauri `Channel` 流式接收，避免大数据量阻塞主线程；头像按需获取并 LRU 缓存 |
 | **乐观更新** | 话题的未读计数、消息计数、锁定状态在 UI 上先变更，后同步到后端 |
-| **排序外置持久化** | 拖拽排序结果保存在 `settingsStore.settings.agentOrder / groupOrder`，而非 Agent/Group 配置本身，保持后端数据纯净 |
-| **防抖自动保存** | Agent/Group 设置页监听配置变化，800ms–1000ms 防抖后自动落盘，减少用户心智负担 |
+| **排序外置持久化** | `agentOrderStore` 持有待保存顺序，300ms 防抖后串行提交 `navigation.agentOrder / groupOrder`；不写入 Agent/Group 共享配置 |
+| **设置保存** | 页面持有草稿与基线，返回等待保存；群名失焦自动保存，随后返回接续同群已有保存 |
 
 ---
 
@@ -164,34 +164,9 @@ const lastActiveTopicMap = ref<Record<string, string>>({}); // 每个 item 最�
 
 ### 2.4 Agent 排序与拖拽
 
-排序逻辑不在 Store 中，而在消费组件 `AgentList.vue` 内，通过 **SortableJS** 实现：
+`AgentList.vue` 的 SortableJS 回调读取拖拽后的最终 ID 顺序，再交给 `agentOrderStore.setOrder`。Store 独立于列表组件生命周期，立即显示本地最新顺序；300ms 防抖后按 Agent/Group 分别串行保存，每次提交基于前一次已确认的配置版本。保存失败保留草稿并提示，后续拖动重试。
 
-> 文件位置：`src/features/agent/AgentList.vue` 第 70–136 行
-
-```typescript
-Sortable.create(agentListRef.value, {
-  animation: 150,
-  handle: ".drag-handle",      // 仅拖拽手柄响应
-  delay: 200,                  // 移动端延迟，避免与点击/滑动冲突
-  delayOnTouchOnly: true,
-  touchStartThreshold: 3,
-  direction: "vertical",
-  forceFallback: true,
-  ghostClass: "opacity-50",
-  onEnd: (evt) => {
-    const newOrder = orderedAgents.value.map((a) => a.id);
-    const [movedItem] = newOrder.splice(evt.oldIndex!, 1);
-    newOrder.splice(evt.newIndex!, 0, movedItem);
-    settingsStore.updateSettings({ agentOrder: newOrder });
-  },
-});
-```
-
-排序结果通过 `settingsStore.updateSettings` 持久化到 Rust 后端的 `settings` 表：`agentOrder` 和 `groupOrder` 是两个字符串数组，分别保存 Agent ID 和 Group ID 的展示顺序。
-
-列表渲染时，`orderedAgents` / `orderedGroups` 计算属性根据 `settings.agentOrder` / `settings.groupOrder` 对原始数组重排：
-
-> 文件位置：`src/features/agent/AgentList.vue` 第 46–60 行
+持久化通过 `settingsStore.updateFields` 提交 `navigation.agentOrder` / `navigation.groupOrder` 字段补丁。`orderedAgents` / `orderedGroups` 优先投影待保存顺序，否则读取已提交快照；`sortByOrder` 预建排名 Map，保留重复 ID 的首次排名，未列入的实体稳定排在末尾。详细 DOM 交接与保存流程见 [侧边栏与列表交互](../features/agent/12_Agent侧边栏与列表交互.md#6-拖拽排序)。
 
 ```typescript
 const orderedAgents = computed(() => {

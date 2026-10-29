@@ -991,7 +991,7 @@ Agent/Group 同步写绕过业务 Facade，因此 session 成功或失败退出�
 | **三段流水线** | Reader → Processor → Writer 的现有预渲染缓存刷新管线 | `message_repository.rs` L74 |
 | **复合主键** | messages 表主键为 `(owner_type, owner_id, topic_id, msg_id)` | `0100_baseline_v2.sql` |
 | **内容寻址** | attachments 表以 SHA-256 hash 为主键，物理文件同名存储 | `db_manager.rs` L401 |
-| **0100 baseline** | 全新安装的终态 Schema；不兼容旧库在启动时被拒绝 | `db_manager.rs` |
+| **0100 baseline** | 全新安装的终态 Schema 与 `_sqlx_migrations` seed 在同一事务提交，失败整体回滚；不兼容旧库在启动时被拒绝 | `db_manager.rs` |
 | **懒渲染缓存** | render_cache 命中直接反序列化 blocks；未命中编译后异步回写 | `message_service.rs` |
 | **re_render_message** | 手动强制重新编译单条消息并更新 render_cache 的 Tauri 命令 | `message_service.rs` |
 | **快照读** | WAL 模式下读操作基于事务开始时的数据库快照 | `db_manager.rs` L44 |
@@ -1008,5 +1008,5 @@ Agent/Group 同步写绕过业务 Facade，因此 session 成功或失败退出�
 > 4. **存储格式分工**：`messages.content` 保存明文 TEXT，`render_cache.render_content` 保存 zstd 压缩 AST。
 > 5. **哈希更新分工**：Topic 元数据批次校验并去重更新受影响 Owner 根；TopicMessages 先 Flush，再由 SyncFinalizer 统一重算 Topic/Owner 消息根。
 > 6. **懒渲染缓存闭环**：加载时 render_cache 命中即走；未命中实时编译并异步回写，确保首次访问后的后续加载均为 O(1) 反序列化。
-> 7. **Schema 基线**：全新安装执行 0100 baseline；不兼容旧数据库由启动检查明确拒绝。
+> 7. **Schema 基线**：全新安装在同一事务执行 0100 baseline DDL 与迁移 seed，提交后继续后续迁移；不兼容旧数据库由启动检查明确拒绝。
 > 8. **Flush 错误交付**：历史写错误仅在 oneshot ACK 成功发送后清除；取消 waiter 不得吞掉错误或产生伪成功。

@@ -124,7 +124,7 @@ export function captureBackupPreferences(): ConfigBackupFile['preferences'] {
 /** Apply present, normalized fields through their existing persistence owners. */
 export async function applyConfigBackup(
   backup: ParsedConfigBackup,
-  applySettings: (changes: Partial<SettingsFieldValues>, groupPreferences: Record<string, GroupLocalSettingsPatch>) => Promise<void>,
+  applySettings: (changes: Partial<SettingsFieldValues>, groupPreferences: Record<string, GroupLocalSettingsPatch>) => Promise<boolean>,
 ): Promise<BackupImportResult> {
   backup = normalizeParsedConfigBackup(backup);
   const result: BackupImportResult = { applied: [], skipped: [], failed: [] };
@@ -135,8 +135,9 @@ export async function applyConfigBackup(
   if (hasFields(backup.groupPreferences)) databaseScopes.push('群聊设置');
   if (databaseScopes.length) {
     try {
-      await applySettings(backupFieldChanges(backup.domains), backup.groupPreferences ?? {});
+      const missingGroups = await applySettings(backupFieldChanges(backup.domains), backup.groupPreferences ?? {});
       result.applied.push(...databaseScopes);
+      if (missingGroups) result.skipped.push('部分群聊尚未同步到本机，请先同步，再次导入');
     } catch (error) {
       result.failed.push({ scope: databaseScopes.join('、'), message: String(error) });
     }
@@ -259,7 +260,7 @@ async function invokeSaveToDownloads(
 
 /**
  * 导出当前配置到系统下载目录。
- * API 26–28 首次导出时若缺少储存空间权限，会先发起权限申请并重试一次。
+ * API 26–28 的储存空间权限由原生文件保存所有者处理。
  * @returns 保存结果（含展示文件名）
  */
 export async function exportConfigBackup(
@@ -278,17 +279,8 @@ export async function exportConfigBackup(
   const contentBase64 = bytesToBase64(bytes);
   const fileName = buildBackupFileName();
 
-  return withNativeFileOperation(operationId, async reservationToken => {
-    try {
-      return await invokeSaveToDownloads(fileName, contentBase64, operationId, reservationToken);
-    } catch (e: any) {
-      const message = String(e);
-      if (!isAndroid || !message.includes("储存空间权限")) throw e;
-      // API 26–28：引导用户授予储存空间权限后重试一次
-      await invoke("plugin:vcp-mobile|request_android_permission", { pType: "storage" });
-      return await invokeSaveToDownloads(fileName, contentBase64, operationId, reservationToken);
-    }
-  });
+  return withNativeFileOperation(operationId, reservationToken =>
+    invokeSaveToDownloads(fileName, contentBase64, operationId, reservationToken));
 }
 
 /** Native staging is released after Rust has returned the validated patch. */
