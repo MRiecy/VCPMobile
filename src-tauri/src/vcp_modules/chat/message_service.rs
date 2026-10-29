@@ -1528,6 +1528,8 @@ pub(crate) struct FinalizedStreamMessage {
     pub(crate) finish_reason: String,
     pub(crate) timestamp: u64,
     pub(crate) topic_updated_at: Option<i64>,
+    /// A late error must not count an existing terminal as a new speaker completion.
+    pub(crate) newly_committed: bool,
 }
 
 #[derive(Debug)]
@@ -1773,6 +1775,7 @@ async fn finalize_stream_message_inner<R: tauri::Runtime>(
         finish_reason: terminal.finish_reason,
         timestamp: end_timestamp,
         topic_updated_at,
+        newly_committed: true,
     }))
 }
 
@@ -1830,6 +1833,7 @@ async fn commit_stream_message(
             finish_reason: reason,
             timestamp: fingerprint_timestamp,
             topic_updated_at: Some(activity.updated_at),
+            newly_committed: false,
         }));
     }
     if !row.get::<bool, _>("pending") {

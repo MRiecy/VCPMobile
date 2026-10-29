@@ -2871,79 +2871,21 @@ pub(crate) async fn finalize_stream_error<R: Runtime>(
     partial_content: String,
     error: String,
     stream_channel: Option<Channel<StreamEvent>>,
+    agent_id: Option<String>,
 ) -> Result<Option<String>, String> {
-    use sqlx::Row;
-    let failure_channel = stream_channel.clone();
-    let result: Result<Option<String>, String> = async {
-
-    let pending = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(
-            SELECT 1 FROM active_generations
-            WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?
-         )",
-    )
-    .bind(&key.topic.owner_type)
-    .bind(&key.topic.owner_id)
-    .bind(&key.topic.topic_id)
-    .bind(&key.msg_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|e| e.to_string())?;
-
-    if pending {
-        let agent_id_row = sqlx::query(
-            "SELECT agent_id FROM messages
-             WHERE owner_type = ? AND owner_id = ? AND topic_id = ? AND msg_id = ?",
-        )
-        .bind(&key.topic.owner_type)
-        .bind(&key.topic.owner_id)
-        .bind(&key.topic.topic_id)
-        .bind(&key.msg_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| e.to_string())?;
-        let agent_id = agent_id_row.and_then(|r| r.get::<Option<String>, _>("agent_id"));
-
-        let error = if error.trim().is_empty() {
-            "生成意外中断"
-        } else {
-            error.as_str()
-        };
-        let final_content = stream_error_content(&partial_content, error);
-
-        let committed = crate::vcp_modules::chat::message_service::finalize_stream_message(
-            app_handle.clone(),
-            pool,
-            key,
-            final_content,
-            false,
-            Some("error".to_string()),
-            stream_channel,
-            agent_id,
-        )
-        .await?;
-        return Ok(committed.map(|message| message.content));
+    let error = if error.trim().is_empty() {
+        "生成意外中断"
     } else {
-        // Another owner may have committed the terminal message after recovery began.
-        // Terminal rows are immutable: a late recovery must be an idempotent no-op.
-        log::info!(
-            "[VCPClient] Generation {} is no longer pending; skipping late error finalization.",
-            key.msg_id
-        );
-        discard_request_helper(app_handle, key).await;
-    }
-    Ok(None)
-    }.await;
-    if let Err(error) = &result {
-        let mut event = StreamEvent::error(
-            key.msg_id.clone(), recovery_state_event(key, "error").context, error.clone(),
-        );
-        event.content = Some(partial_content);
-        // Query failures precede the finalizer; commit failures may already
-        // have emitted an error. RequestOutput closes that delivery once.
-        deliver_request_event(app_handle, key, failure_channel, event);
-    }
-    result
+        error.as_str()
+    };
+    // The caller already owns the speaker identity. Retain the complete error
+    // terminal before any database access; the finalizer's transaction alone
+    // decides whether the message is pending, already settled, or removed.
+    let committed = crate::vcp_modules::chat::message_service::finalize_stream_message(
+        app_handle.clone(), pool, key, stream_error_content(&partial_content, error),
+        false, Some("error".to_string()), stream_channel, agent_id,
+    ).await?;
+    Ok(committed.filter(|message| message.newly_committed).map(|message| message.content))
 }
 
 #[derive(Debug, Deserialize)]
@@ -3415,6 +3357,7 @@ async fn recover_active_generation<R: Runtime>(
             String::new(),
             "后台进程已被系统销毁，流式对话中断".to_string(),
             Some(stream_channel.clone()),
+            agent_id,
         )
         .await?;
 
@@ -3489,6 +3432,7 @@ async fn handle_recovery_failure<R: Runtime>(
     key: &MessageKey,
     failure: VcpRequestFailure,
     stream_channel: Channel<StreamEvent>,
+    agent_id: Option<String>,
 ) -> Result<RecoveryStatus, String> {
     let recovery_pending = failure.is_recovery_pending();
     let stop_pending = failure.is_stop_pending();
@@ -3512,7 +3456,7 @@ async fn handle_recovery_failure<R: Runtime>(
         if let Some(stored_partial) = stop {
             let committed = crate::vcp_modules::chat::message_service::finalize_stream_message(
                 app.clone(), &db.pool, key, partial_content.or(stored_partial).unwrap_or_default(),
-                true, Some("cancelled_by_user".to_string()), Some(stream_channel), None,
+                true, Some("cancelled_by_user".to_string()), Some(stream_channel), agent_id,
             ).await?;
             return Ok(if committed.is_some() { RecoveryStatus::Completed } else { RecoveryStatus::NotFound });
         }
@@ -3549,7 +3493,7 @@ async fn handle_recovery_failure<R: Runtime>(
     let db = app.state::<DbState>();
     let pool = &db.pool;
     let committed_content =
-        finalize_stream_error(app, pool, key, partial_content, error, Some(stream_channel)).await?;
+        finalize_stream_error(app, pool, key, partial_content, error, Some(stream_channel), agent_id).await?;
     if committed_content.is_none() {
         return terminal_generation_result(pool, key).await;
     }
@@ -3609,7 +3553,7 @@ async fn resume_claimed_generation<R: Runtime>(
                 "[VCPClient] Claimed recovery failed during handle_streaming_request: {}",
                 failure
             );
-            return handle_recovery_failure(app, key, failure, stream_channel).await;
+            return handle_recovery_failure(app, key, failure, stream_channel, agent_id).await;
         }
     };
 
@@ -3634,8 +3578,13 @@ mod offline_completed_tests {
     use super::*;
 
     async fn fixture() -> (DbState, MessageKey, tempfile::TempDir, std::path::PathBuf) {
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
+        fixture_with_options(sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)).await
+    }
+
+    async fn fixture_with_options(
+        options: sqlx::sqlite::SqlitePoolOptions,
+    ) -> (DbState, MessageKey, tempfile::TempDir, std::path::PathBuf) {
+        let pool = options
             .connect("sqlite::memory:")
             .await
             .expect("test database");
@@ -3777,6 +3726,120 @@ mod offline_completed_tests {
             }).await.expect("committed terminal owner must be released");
             while let Ok(event) = original_events.try_recv() {
                 assert_ne!(event["type"], "end");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_error_query_retains_group_body_reason_and_speaker_for_recovery() {
+        let (db, _, _directory, _path) = fixture_with_options(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(Duration::from_millis(100)),
+        ).await;
+        let pool = db.pool.clone();
+        sqlx::raw_sql(
+            "INSERT INTO groups (owner_type, group_id, name, updated_at)
+             VALUES ('group', 'error-group', 'Group', 1);
+             INSERT INTO topics (topic_id, owner_type, owner_id, title, created_at, updated_at)
+             VALUES ('error-topic', 'group', 'error-group', 'Topic', 1, 1);",
+        ).execute(&pool).await.unwrap();
+        let key = MessageKey::new(TopicKey::new("group", "error-group", "error-topic"), "error-message");
+        crate::vcp_modules::chat::message_service::begin_stream_message(
+            &db, &key, Some("offline-agent"), Some("Agent"),
+        ).await.unwrap();
+        let app = tauri::test::mock_app();
+        app.manage(db);
+        app.manage(ActiveRequests::default());
+        app.manage(ActiveGroupTurns::default());
+        let (lease, _) = ActiveRequestLease::try_acquire(
+            app.state::<ActiveRequests>().0.clone(), key.clone(),
+        ).unwrap();
+        let output = Arc::downgrade(&lease.entry.output);
+        let (original, mut original_events) = channel();
+        lease.bind_output(app.handle(), Some(original.clone())).unwrap();
+
+        // Exhaust the pool before the error entry point's first database access.
+        let connection = pool.acquire().await.unwrap();
+        let partial = "网络断开前已收到的群回复 🦀";
+        let expected = format!("{partial}\n\n> VCP流式错误: connection reset");
+        let error = finalize_stream_error(
+            app.handle(), &pool, &key, partial.into(), "connection reset".into(), Some(original),
+            Some("offline-agent".into()),
+        ).await.expect_err("the first database access must time out");
+        assert!(error.contains("timed out"), "unexpected database failure: {error}");
+        drop(lease);
+        drop(connection);
+        assert!(output.upgrade().is_some(), "failed error finalization must retain its terminal owner");
+        assert_eq!(receive_event(&mut original_events, "error").await["content"], expected);
+
+        let (replacement, mut events) = channel();
+        let recovered = recover_active_generation(
+            app.handle().clone(), app.state::<ActiveRequests>(), key.topic.owner_id.clone(),
+            key.topic.owner_type.clone(), key.topic.topic_id.clone(), key.msg_id.clone(), replacement,
+        ).await.unwrap();
+        assert!(matches!(recovered, RecoveryStatus::Completed));
+        let end = receive_event(&mut events, "end").await;
+        assert_eq!(end["content"], expected);
+        assert_eq!(end["finishReason"], "error");
+        assert_eq!(end["context"]["agentId"], "offline-agent");
+        assert_eq!(end["context"]["replayed"], true);
+        let (content, reason, agent_id, name, timestamp, hash):
+            (String, String, String, String, i64, String) = sqlx::query_as(
+                "SELECT content, finish_reason, agent_id, name, timestamp, content_hash
+                 FROM messages WHERE msg_id = 'error-message'",
+            ).fetch_one(&pool).await.unwrap();
+        assert_eq!(content, expected);
+        assert_eq!(reason, "error");
+        assert_eq!(agent_id, "offline-agent");
+        assert_eq!(hash, crate::vcp_modules::sync_hash::HashAggregator::compute_message_fingerprint(
+            &key.msg_id, "assistant", Some(&name), &content, timestamp as u64, Some(&agent_id), &[],
+        ));
+        assert_eq!(sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM active_generations WHERE msg_id = 'error-message'",
+        ).fetch_one(&pool).await.unwrap(), 0);
+        assert!(output.upgrade().is_none(), "committed terminal owner must be released");
+    }
+
+    #[tokio::test]
+    async fn late_error_does_not_advance_a_settled_or_deleted_message() {
+        for deleted in [false, true] {
+            let (db, key, _directory, _path) = fixture().await;
+            let pool = db.pool.clone();
+            let app = tauri::test::mock_app();
+            app.manage(db);
+            app.manage(ActiveRequests::default());
+            crate::vcp_modules::chat::message_service::finalize_stream_message(
+                app.handle().clone(), &pool, &key, "already completed".into(), false,
+                Some("stop".into()), None, Some("offline-agent".into()),
+            ).await.unwrap();
+            if deleted {
+                sqlx::query("UPDATE messages SET deleted_at = 42").execute(&pool).await.unwrap();
+            }
+            let (lease, _) = ActiveRequestLease::try_acquire(
+                app.state::<ActiveRequests>().0.clone(), key.clone(),
+            ).unwrap();
+            let output = Arc::downgrade(&lease.entry.output);
+            let (replacement, mut events) = channel();
+            lease.bind_output(app.handle(), Some(replacement.clone())).unwrap();
+            let result = finalize_stream_error(
+                app.handle(), &pool, &key, "late partial".into(), "late failure".into(), Some(replacement),
+                Some("offline-agent".into()),
+            ).await.unwrap();
+            assert!(result.is_none(), "late errors must not count as a new group speaker completion");
+            drop(lease);
+            assert!(output.upgrade().is_none());
+            let row: (String, String, Option<i64>) = sqlx::query_as(
+                "SELECT content, finish_reason, deleted_at FROM messages",
+            ).fetch_one(&pool).await.unwrap();
+            assert_eq!(row, ("already completed".into(), "stop".into(), deleted.then_some(42)));
+            while let Ok(event) = events.try_recv() {
+                assert_ne!(event["type"], "error");
+                if event["type"] == "end" {
+                    assert!(!deleted, "deleted messages must not be replayed");
+                    assert_eq!(event["content"], "already completed");
+                    assert_eq!(event["context"]["replayed"], true);
+                }
             }
         }
     }
@@ -4132,7 +4195,9 @@ mod offline_completed_tests {
             output.attach(channel.clone()).expect("replacement WebView");
             let reason = failure.to_string();
             let expected_partial = failure.partial_content.clone();
-            let result = handle_recovery_failure(app.handle(), &key, failure, old_channel).await;
+            let result = handle_recovery_failure(
+                app.handle(), &key, failure, old_channel, Some("offline-agent".into()),
+            ).await;
             assert_eq!(
                 result.expect_err("attachment failure must remain retryable"),
                 reason

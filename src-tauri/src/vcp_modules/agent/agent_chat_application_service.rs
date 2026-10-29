@@ -318,6 +318,7 @@ pub(crate) async fn process_prepared_agent_chat_message(
                 partial_content.unwrap_or_default(),
                 error,
                 stream_channel,
+                Some(agent_id.clone()),
             )
             .await
             .is_err()

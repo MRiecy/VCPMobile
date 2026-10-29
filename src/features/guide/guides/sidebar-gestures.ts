@@ -7,26 +7,19 @@
  */
 import { useMediaQuery } from '@vueuse/core';
 import { defineGuide, hasTarget } from '../registry';
-import { sortByOrder } from '../../agent/agentOrder';
+import { useAgentOrderStore } from '../../agent/agentOrderStore';
 import { swipeClose, swipeOpen } from '../../agent/swipeController';
 import { sidebarTab } from '../../agent/sidebarTab';
 import { useAssistantStore } from '../../../core/stores/assistant';
-import { useSettingsStore } from '../../../core/stores/settings';
 import { useLayoutStore } from '../../../core/stores/layout';
 import { useOverlayStore } from '../../../core/stores/overlay';
 
 /** 平板断点常驻栏（与 useSidebarSwipe / AgentSidebar 的 1024px 断点一致）。 */
 const isTabletMin1024 = useMediaQuery('(min-width: 1024px)');
 
-/** 与 AgentList 渲染同源：agentOrder 优先、未知 id 置后，取排位第一个 Agent。 */
+/** 与 AgentList 共用实际显示顺序，包括尚未保存的拖拽结果。 */
 export const firstAgentId = (): string | null => {
-  const assistantStore = useAssistantStore();
-  const settingsStore = useSettingsStore();
-  const sorted = sortByOrder(
-    assistantStore.agents,
-    settingsStore.settings?.navigation.agentOrder ?? [],
-  );
-  return sorted[0]?.id ?? null;
+  return useAgentOrderStore().orderedAgents[0]?.id ?? null;
 };
 
 const firstAgentRowTarget = (): string => {

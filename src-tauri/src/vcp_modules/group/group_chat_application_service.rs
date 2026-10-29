@@ -344,6 +344,7 @@ async fn run_group_speaker_turn<R: Runtime>(
                 partial_content.unwrap_or_default(),
                 error,
                 stream_channel.clone(),
+                Some(agent_id.clone()),
             )
             .await;
             Ok(match finalized {
