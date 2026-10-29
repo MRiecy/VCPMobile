@@ -24,6 +24,54 @@ import java.util.concurrent.atomic.AtomicReference
 @Config(sdk = [28])
 @LooperMode(LooperMode.Mode.PAUSED)
 class SensorStatusManagerTest {
+    private fun sampleMotion(acceleration: List<Double>, angularSpeed: List<Double> = listOf(0.0)): String {
+        val sensors = mockk<SensorManager>(relaxed = true)
+        val locations = mockk<LocationManager>(relaxed = true)
+        val accelerometer = mockk<Sensor>()
+        val gyroscope = mockk<Sensor>()
+        every { sensors.getDefaultSensor(any()) } returns null
+        every { sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER) } returns accelerometer
+        every { sensors.getDefaultSensor(Sensor.TYPE_GYROSCOPE) } returns gyroscope
+        val context = mockk<Context>()
+        every { context.getSystemService(Context.SENSOR_SERVICE) } returns sensors
+        every { context.getSystemService(Context.LOCATION_SERVICE) } returns locations
+        val manager = SensorStatusManager(context)
+        var result: String? = null
+        manager.sample(location = false, motion = true, ambient = false) { result = it.getString("motion") }
+        // Supply a two-second burst at the classifier's input boundary. No wall-clock
+        // sleeps or invented sensor callbacks are needed to verify the reported physical state.
+        fun fillBurst(field: String, values: List<Double>) {
+            @Suppress("UNCHECKED_CAST")
+            val burst = SensorStatusManager::class.java.getDeclaredField(field).apply { isAccessible = true }
+                .get(manager) as ArrayList<Double>
+            burst.addAll(values)
+        }
+        fillBurst("burstAccelSamples", acceleration)
+        fillBurst("burstGyroSamples", angularSpeed)
+        manager.shutdown()
+        return requireNotNull(result)
+    }
+
+    @Test fun gravityAndSmallSensorNoiseRemainStationary() {
+        val gravity = SensorManager.GRAVITY_EARTH.toDouble()
+        val motion = sampleMotion(List(20) { gravity + if (it % 2 == 0) 0.03 else -0.03 })
+        assertTrue(motion.contains("状态: 静止"))
+    }
+
+    @Test fun rotationIsDetectedEvenWhenAccelerationMagnitudeStaysAtGravity() {
+        val gravity = SensorManager.GRAVITY_EARTH.toDouble()
+        assertTrue(sampleMotion(List(20) { gravity }, List(20) { 0.3 }).contains("状态: 轻微移动"))
+        assertTrue(sampleMotion(List(20) { gravity }, List(20) { 1.7 }).contains("状态: 运动中"))
+    }
+
+    @Test fun oppositeAccelerationExcursionsDoNotCancelIntoARestingAverage() {
+        val gravity = SensorManager.GRAVITY_EARTH.toDouble()
+        val walking = sampleMotion(List(20) { gravity + if (it % 2 == 0) 1.0 else -1.0 })
+        val vigorous = sampleMotion(List(20) { gravity + if (it % 2 == 0) 3.0 else -3.0 })
+        assertTrue(walking.contains("状态: 步行中"))
+        assertTrue(vigorous.contains("状态: 运动中"))
+    }
+
     @Test
     fun shutdownReleasesSamplingAndRejectsAnAlreadyQueuedStart() {
         val sensors = mockk<SensorManager>(relaxed = true)

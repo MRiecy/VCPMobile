@@ -15,6 +15,7 @@ import android.util.Log
 import androidx.core.content.ContextCompat
 import app.tauri.plugin.JSObject
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.sqrt
 
 class SensorStatusManager(private val context: Context) {
@@ -331,6 +332,9 @@ class SensorStatusManager(private val context: Context) {
 
         val accelAvg = accelList.average()
         val accelMax = accelList.maxOrNull() ?: 0.0
+        // TYPE_ACCELEROMETER includes gravity. Average deviations before reducing the
+        // burst so resting gravity is neutral and opposite accelerations do not cancel.
+        val accelDeviation = accelList.sumOf { abs(it - SensorManager.GRAVITY_EARTH) } / accelList.size
 
         val gyroAvg = if (gyroList.isNotEmpty()) gyroList.average() else 0.0
         val gyroMax = if (gyroList.isNotEmpty()) gyroList.maxOrNull() ?: 0.0 else 0.0
@@ -338,11 +342,11 @@ class SensorStatusManager(private val context: Context) {
         val magAvg = if (magList.isNotEmpty()) magList.average() else 0.0
 
         var state = "静止"
-        if (accelAvg > 12.0 || gyroAvg > 1.5) {
+        if (accelDeviation > 2.2 || gyroAvg > 1.5) {
             state = "运动中"
-        } else if (accelAvg > 10.5 || gyroAvg > 0.5) {
+        } else if (accelDeviation > 0.7 || gyroAvg > 0.5) {
             state = "步行中"
-        } else if (accelAvg > 9.5 || gyroAvg > 0.1) {
+        } else if (accelDeviation > 0.3 || gyroAvg > 0.1) {
             state = "轻微移动"
         }
 
