@@ -123,7 +123,7 @@ class VcpMobilePlugin(private val activity: Activity) : Plugin(activity) {
 
     private val runtime = PluginTaskRuntime()
     private val keyboardInsetsManager = KeyboardInsetsManager(activity)
-    private val webViewResume = NativeWebViewResume(activity)
+    private val webViewResume = NativeWebViewResume(activity, keyboardInsetsManager::connectDocument)
     private val mediaProcessor = NativeMediaProcessor(activity)
     private val lifecycleBridge = LifecycleBridge()
     private val batteryStatusManager = BatteryStatusManager(activity)

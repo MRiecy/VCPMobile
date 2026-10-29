@@ -19,7 +19,10 @@ import org.json.JSONObject
 import java.util.UUID
 
 /** Owns one native, process-local last frame. It never changes WebView visibility or its client. */
-internal class NativeWebViewResume(private val activity: Activity) : ComponentCallbacks2 {
+internal class NativeWebViewResume(
+    private val activity: Activity,
+    private val onDocumentConnected: (WebView, String) -> Unit,
+) : ComponentCallbacks2 {
     private data class Capture(
         val bitmap: Bitmap,
         val attachment: Long,
@@ -35,6 +38,7 @@ internal class NativeWebViewResume(private val activity: Activity) : ComponentCa
     private var attachment = 0L
     private var cycle = 0L
     private var serial = 0L
+    private var connectionSerial = 0L
     private var paused = false
     private var stopped = false
     private var resumed = false
@@ -219,9 +223,12 @@ internal class NativeWebViewResume(private val activity: Activity) : ComponentCa
     fun connect(id: String): String? {
         val target = webView ?: return null
         val currentAttachment = attachment
+        val connection = ++connectionSerial
         verifyMarker(target, id, null) { valid ->
-            if (!valid || destroyed || webView !== target || attachment != currentAttachment) return@verifyMarker
+            if (!valid || destroyed || webView !== target || attachment != currentAttachment ||
+                connectionSerial != connection) return@verifyMarker
             documentId = id
+            onDocumentConnected(target, id)
             dispatchResume()
         }
         return token

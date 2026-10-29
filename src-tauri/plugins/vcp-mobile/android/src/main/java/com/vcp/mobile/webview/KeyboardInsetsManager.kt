@@ -5,6 +5,7 @@ import android.util.Log
 import android.webkit.WebView
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import org.json.JSONObject
 
 /**
  * 键盘 IME Insets 管理器
@@ -20,30 +21,37 @@ class KeyboardInsetsManager(private val activity: Activity) {
 
     private var webViewRef: WebView? = null
     private var rootView: android.view.View? = null
+    private var attachment = 0L
+    private var documentId: String? = null
+    private var latest: InsetSnapshot? = null
     private var lastSent: InsetSnapshot? = null
+    private var inFlight: InsetSnapshot? = null
+    private var deliverySerial = 0L
     private var pending: InsetSnapshot? = null
     private var frameScheduled = false
     private val frameCallback = Runnable {
         frameScheduled = false
         val snapshot = pending ?: return@Runnable
         pending = null
-        if (snapshot != lastSent) {
-            lastSent = snapshot
+        if (!alreadyDeliveredOrInFlight(snapshot)) {
             emitSnapshot(snapshot)
         }
     }
 
     fun attach(webView: WebView) {
         val rootView = activity.window.decorView.rootView
-        // load is a document boundary even when Android reuses the WebView.
-        // Dedupe belongs to that document; an unchanged inset still needs replay.
-        val previous = if (this.rootView === rootView) pending ?: lastSent else null
+        // Plugin load attaches a View, not each subsequent document in that View.
+        val previous = if (this.rootView === rootView) latest else null
         this.rootView?.let { previousRoot ->
             previousRoot.removeCallbacks(frameCallback)
             ViewCompat.setOnApplyWindowInsetsListener(previousRoot, null)
         }
         pending = null
+        attachment += 1
+        documentId = null
+        latest = null
         lastSent = null
+        inFlight = null
         frameScheduled = false
         webViewRef = webView
         this.rootView = rootView
@@ -58,21 +66,37 @@ class KeyboardInsetsManager(private val activity: Activity) {
         ViewCompat.requestApplyInsets(rootView)
     }
 
+    /** Called only after the resume bridge validates this document's marker. */
+    internal fun connectDocument(webView: WebView, id: String) {
+        if (webView !== webViewRef) return
+        if (documentId != id) {
+            documentId = id
+            lastSent = null
+            inFlight = null
+            deliverySerial += 1
+        }
+        val view = rootView ?: return
+        (ViewCompat.getRootWindowInsets(view)?.let(::snapshotFrom) ?: latest)?.let(::schedule)
+        ViewCompat.requestApplyInsets(view)
+    }
+
     fun detach() {
         val view = rootView
         if (view != null) {
             view.removeCallbacks(frameCallback)
             ViewCompat.setOnApplyWindowInsetsListener(view, null)
         }
-        val previous = pending
-            ?: lastSent
+        val previous = latest
             ?: view?.let(ViewCompat::getRootWindowInsets)?.let(::snapshotFrom)
         val detached = previous?.withoutIme()
         if (detached != null && detached != lastSent) {
-            lastSent = detached
             emitSnapshot(detached)
         }
         pending = null
+        attachment += 1
+        documentId = null
+        latest = null
+        inFlight = null
         frameScheduled = false
         lastSent = null
         rootView = null
@@ -80,13 +104,17 @@ class KeyboardInsetsManager(private val activity: Activity) {
     }
 
     private fun schedule(snapshot: InsetSnapshot) {
-        if (snapshot == lastSent && !frameScheduled) return
+        latest = snapshot
+        if (!frameScheduled && alreadyDeliveredOrInFlight(snapshot)) return
         pending = snapshot
         if (!frameScheduled) {
             frameScheduled = true
             rootView?.postOnAnimation(frameCallback)
         }
     }
+
+    private fun alreadyDeliveredOrInFlight(snapshot: InsetSnapshot): Boolean =
+        snapshot == inFlight || (inFlight == null && snapshot == lastSent)
 
     private fun emitSnapshot(snapshot: InsetSnapshot) {
         Log.d(
@@ -96,9 +124,25 @@ class KeyboardInsetsManager(private val activity: Activity) {
                 "imeBottom=${snapshot.imeBottomPx}, imeVisible=${snapshot.imeVisible}",
         )
         val targetWebView = webViewRef ?: return
-        val script = buildInsetsJavascript(snapshot)
-        activity.runOnUiThread {
-            targetWebView.evaluateJavascript(script, null)
+        val id = documentId ?: return
+        val currentAttachment = attachment
+        val delivery = ++deliverySerial
+        inFlight = snapshot
+        // A reload can begin between marker validation and this evaluation.
+        // Only the matching document can consume or acknowledge these Insets.
+        val script = "(function(){var m=window.__vcpWebViewResume;" +
+            "if(!m||m.documentId!==${JSONObject.quote(id)})return false;" +
+            buildInsetsJavascript(snapshot) + ";return true;})()"
+        try {
+            targetWebView.evaluateJavascript(script) { result ->
+                if (webViewRef !== targetWebView || attachment != currentAttachment ||
+                    documentId != id || deliverySerial != delivery) return@evaluateJavascript
+                inFlight = null
+                if (result == "true") lastSent = snapshot
+            }
+        } catch (error: Exception) {
+            inFlight = null
+            Log.w("VCPKeyboard", "Native Insets delivery unavailable", error)
         }
     }
 
