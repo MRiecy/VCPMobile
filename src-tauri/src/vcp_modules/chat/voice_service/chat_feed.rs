@@ -10,6 +10,16 @@ use crate::vcp_modules::{
 };
 use std::sync::Arc;
 
+const TRUNCATION_NOTICE: &str = "语音内容过长，剩余内容已截断";
+
+fn bounded_prefix(text: &str, byte_limit: usize) -> &str {
+    let mut end = byte_limit.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// One message owns its parser, accepted guidance, readable text and emission
 /// position. Both call replies and complete bubble narration use this state.
 pub(super) struct MessageSpeech {
@@ -20,6 +30,8 @@ pub(super) struct MessageSpeech {
     instruction: Option<Arc<str>>,
     guidance_locked: bool,
     finished: bool,
+    truncated: bool,
+    truncation_notice_pending: bool,
 }
 
 impl MessageSpeech {
@@ -32,13 +44,27 @@ impl MessageSpeech {
             instruction: None,
             guidance_locked: false,
             finished: false,
+            truncated: false,
+            truncation_notice_pending: false,
         }
     }
 
     pub(super) fn update(&mut self, text: &str, finished: bool) -> Result<(), String> {
-        if text.len() > MAX_TEXT_BYTES {
-            return Err("模型回复超过语音朗读大小限制，已停止朗读。".into());
+        // Bubble narration shares the raw-input cap with chat narration. Its
+        // fixed notice is a separate piece, outside the accepted-text budget.
+        if self.truncated {
+            return Ok(());
         }
+        let truncated = text.len() > MAX_TEXT_BYTES;
+        self.replace_accepted(bounded_prefix(text, MAX_TEXT_BYTES), finished || truncated)?;
+        if truncated {
+            self.truncated = true;
+            self.truncation_notice_pending = true;
+        }
+        Ok(())
+    }
+
+    fn replace_accepted(&mut self, text: &str, finished: bool) -> Result<(), String> {
         if self.finished {
             return if text == self.text && finished {
                 Ok(())
@@ -46,15 +72,43 @@ impl MessageSpeech {
                 Err("已结束的语音回复不能继续追加。".into())
             };
         }
-        if !text.starts_with(&self.text) {
+        let rebuild = !text.starts_with(&self.text);
+        if rebuild {
             // Rebuild only parsing/projection caches. Guidance and the already
             // emitted prefix remain owned by this message and cannot rewind.
             self.parser.reset();
             self.stable_spoken.clear();
+            self.text.clear();
+            self.text.push_str(text);
+        } else {
+            self.text.push_str(&text[self.text.len()..]);
         }
-        self.text = text.to_owned();
+        self.parse_accepted(finished, rebuild)
+    }
+
+    fn append_accepted(&mut self, delta: &str, finished: bool) -> Result<(), String> {
+        if self.finished {
+            return if delta.is_empty() && finished {
+                Ok(())
+            } else {
+                Err("已结束的语音回复不能继续追加。".into())
+            };
+        }
+        self.text.push_str(delta);
+        self.parse_accepted(finished, false)
+    }
+
+    fn finish_accepted(&mut self) -> Result<(), String> {
+        if !self.finished {
+            self.parse_accepted(true, false)?;
+        }
+        Ok(())
+    }
+
+    fn parse_accepted(&mut self, finished: bool, rebuild: bool) -> Result<(), String> {
+        let previous_stable = self.stable_spoken.len();
         if finished {
-            let (blocks, terminal) = self.parser.finish_for_speech(text);
+            let (blocks, terminal) = self.parser.finish_for_speech(&self.text);
             self.accept_blocks(blocks);
             if let Some(terminal) = terminal {
                 let readable = if terminal.unclosed_block.is_some() {
@@ -66,10 +120,15 @@ impl MessageSpeech {
             }
             self.guidance_locked = true;
         } else {
-            let (blocks, _, _) = self.parser.process(text);
+            let blocks = self.parser.process_stable(&self.text);
             self.accept_blocks(blocks);
         }
-        self.reply.update(self.stable_spoken.clone(), finished)?;
+        let finished = finished || self.truncated;
+        if rebuild {
+            self.reply.update(self.stable_spoken.clone(), finished)?;
+        } else {
+            self.reply.append(&self.stable_spoken[previous_stable..], finished)?;
+        }
         self.finished = finished;
         Ok(())
     }
@@ -93,20 +152,44 @@ impl MessageSpeech {
     }
 
     fn append_readable(&mut self, text: &str) {
-        if !text.is_empty() {
-            if !self.stable_spoken.is_empty() {
-                self.stable_spoken.push('\n');
-            }
-            self.stable_spoken.push_str(text);
+        if text.is_empty() || self.truncated {
+            return;
+        }
+        let separator = usize::from(!self.stable_spoken.is_empty());
+        let remaining = MAX_TEXT_BYTES - self.stable_spoken.len();
+        let accepted = bounded_prefix(text, remaining.saturating_sub(separator));
+        if remaining >= separator {
+            if separator != 0 { self.stable_spoken.push('\n'); }
+            self.stable_spoken.push_str(accepted);
+        }
+        // Markdown projection can expand bytes (e.g. table separators become
+        // Chinese pauses). It obeys its own cap without turning normal drain
+        // into an error or charging the fixed notice to this buffer.
+        if accepted.len() != text.len() {
+            self.truncated = true;
+            self.truncation_notice_pending = true;
         }
     }
 
+    #[cfg(test)]
     pub(super) fn next(&mut self) -> (ReplyPiece, Option<Arc<str>>) {
-        (self.reply.next(), self.instruction.clone())
+        let (piece, instruction, _) = self.next_piece();
+        (piece, instruction)
+    }
+
+    pub(super) fn next_piece(&mut self) -> (ReplyPiece, Option<Arc<str>>, bool) {
+        let piece = self.reply.next();
+        if matches!(piece, ReplyPiece::Finished)
+            && std::mem::take(&mut self.truncation_notice_pending)
+        {
+            // Do not inherit model style/guidance for this fixed explanation.
+            return (ReplyPiece::Text(TRUNCATION_NOTICE.into()), None, true);
+        }
+        (piece, self.instruction.clone(), false)
     }
 
     pub(super) fn has_spoken_text(&self) -> bool {
-        self.reply.has_spoken_body()
+        self.truncation_notice_pending || self.reply.has_spoken_body()
     }
 }
 
@@ -122,6 +205,7 @@ pub(super) struct SpeechPiece {
     pub agent_id: Option<String>,
     pub text: String,
     pub instruction: Option<Arc<str>>,
+    pub notice: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -140,6 +224,9 @@ pub(super) struct ChatFeed {
     finished: bool,
     dirty: bool,
     cursor: usize,
+    accepted_text_bytes: usize,
+    truncated: bool,
+    truncation_notice_queued: bool,
 }
 
 impl ChatFeed {
@@ -264,20 +351,8 @@ impl ChatFeed {
             let previous = index
                 .map(|index| self.messages[index].speech.text.len())
                 .unwrap_or(0);
-            let next_size = replacement
-                .map(str::len)
-                .unwrap_or_else(|| previous.saturating_add(delta.map(str::len).unwrap_or(0)));
-            if self
-                .messages
-                .iter()
-                .map(|message| message.speech.text.len())
-                .sum::<usize>()
-                .saturating_sub(previous)
-                .saturating_add(next_size)
-                > MAX_TEXT_BYTES
-            {
-                return Err("模型回复超过语音朗读大小限制，已停止朗读。".into());
-            }
+            let other_bytes = self.accepted_text_bytes - previous;
+            let message_budget = MAX_TEXT_BYTES - other_bytes;
             let index = index.unwrap_or_else(|| {
                 self.messages.push(MessageText {
                     id: event.message_id.clone(),
@@ -286,14 +361,29 @@ impl ChatFeed {
                 });
                 self.messages.len() - 1
             });
-            let text = if let Some(text) = replacement {
-                text.to_owned()
+            let speech = &mut self.messages[index].speech;
+            let truncated = if let Some(text) = replacement {
+                let accepted = bounded_prefix(text, message_budget);
+                let truncated = accepted.len() != text.len();
+                speech.replace_accepted(accepted, normal_end || truncated)?;
+                truncated
             } else if let Some(text) = delta {
-                format!("{}{text}", self.messages[index].speech.text)
+                let accepted = bounded_prefix(text, message_budget - previous);
+                let truncated = accepted.len() != text.len();
+                speech.append_accepted(accepted, normal_end || truncated)?;
+                truncated
             } else {
                 unreachable!("replacement or delta was present")
             };
-            self.messages[index].speech.update(&text, normal_end)?;
+            self.accepted_text_bytes = other_bytes + speech.text.len();
+            let truncated = truncated || speech.truncated;
+            if truncated {
+                // Seal the whole task at its accepted prefix. Previously queued
+                // text/PCM stays owned by normal playback and drains in order.
+                self.finished = true;
+                self.truncated = true;
+                speech.truncation_notice_pending = false;
+            }
             self.dirty = true;
         }
         if normal_end {
@@ -302,8 +392,11 @@ impl ChatFeed {
                 .iter_mut()
                 .find(|message| message.id == event.message_id)
             {
-                let text = message.speech.text.clone();
-                message.speech.update(&text, true)?;
+                message.speech.finish_accepted()?;
+                if message.speech.truncated {
+                    self.truncated = true;
+                    self.finished = true;
+                }
             }
             self.dirty = true;
         }
@@ -320,21 +413,30 @@ impl ChatFeed {
         }
         for message in &mut self.messages {
             if self.finished && !message.speech.finished {
-                let text = message.speech.text.clone();
-                message.speech.update(&text, true)?;
+                message.speech.finish_accepted()?;
+            }
+            if std::mem::take(&mut message.speech.truncation_notice_pending) {
+                self.truncated = true;
+            }
+        }
+        if self.truncated && !self.truncation_notice_queued {
+            if let Some(last) = self.messages.last_mut() {
+                last.speech.truncation_notice_pending = true;
+                self.truncation_notice_queued = true;
             }
         }
         let mut pieces = Vec::new();
         // A member's unfinished tail must not be prepended to the next member,
         // nor may later members interleave with that member's speech.
         while let Some(message) = self.messages.get_mut(self.cursor) {
-            let (piece, instruction) = message.speech.next();
+            let (piece, instruction, notice) = message.speech.next_piece();
             match piece {
                 ReplyPiece::Text(text) => pieces.push(SpeechPiece {
                     message_id: message.id.clone(),
                     agent_id: message.agent_id.clone(),
                     text,
                     instruction,
+                    notice,
                 }),
                 ReplyPiece::Wait => break,
                 ReplyPiece::Finished => self.cursor += 1,
@@ -363,6 +465,7 @@ mod tests {
             agent_id: None,
             text: text.into(),
             instruction: instruction.map(Arc::from),
+            notice: text == TRUNCATION_NOTICE,
         }
     }
 
@@ -395,6 +498,139 @@ mod tests {
 
     fn guidance(text: &str) -> String {
         format!("<voice_guidance>\n{text}\n</voice_guidance>\n")
+    }
+
+    fn delta(id: &str, text: &str, group: bool) -> StreamEvent {
+        let mut event = update(id, "", group);
+        event.aurora = Some(serde_json::from_value(json!({
+            "kind": "delta", "chunk": text,
+        })).unwrap());
+        event
+    }
+
+    fn drain_feed(feed: &mut ChatFeed) -> Vec<SpeechPiece> {
+        feed.take_update().unwrap().map_or_else(Vec::new, |update| update.pieces)
+    }
+
+    #[test]
+    fn delta_fragments_match_the_complete_speech_without_replacing_stable_prefixes() {
+        let raw = format!(
+            "{}第一段已经完整。\n\n<think>不朗读</think>\n第二段带有 **强调** 和中文。\n\n最后一句。",
+            guidance("自然清晰"),
+        );
+        let mut complete = ChatFeed::new();
+        complete.accept(&member("message", &raw)).unwrap();
+        let expected = drain_feed(&mut complete);
+        let mut incremental = ChatFeed::new();
+        let mut actual = Vec::new();
+        for ch in raw.chars() {
+            incremental.accept(&delta("message", &ch.to_string(), true)).unwrap();
+            actual.extend(drain_feed(&mut incremental));
+        }
+        incremental.accept(&member("message", &raw)).unwrap();
+        actual.extend(drain_feed(&mut incremental));
+        assert_eq!(actual, expected);
+        assert_eq!(incremental.accepted_text_bytes, raw.len());
+    }
+
+    #[test]
+    fn bubble_limit_keeps_a_utf8_prefix_and_emits_one_notice_outside_its_budget() {
+        for tail in ["中", "😀"] {
+            let prefix = "a".repeat(MAX_TEXT_BYTES - 1);
+            let raw = format!("{prefix}{tail}后续内容");
+            let mut speech = MessageSpeech::new();
+            speech.update(&raw, false).unwrap();
+            assert_eq!(speech.text, prefix);
+            assert!(speech.finished);
+            let spoken = drain_speech(&mut speech);
+            assert_eq!(spoken.last(), Some(&(TRUNCATION_NOTICE.into(), None)));
+            assert_eq!(spoken[..spoken.len() - 1].iter().map(|(text, _)| text.as_str()).collect::<String>(), prefix);
+            speech.update(&raw, true).unwrap();
+            speech.update("迟到的不同终态", true).unwrap();
+            assert!(drain_speech(&mut speech).is_empty());
+            assert!(matches!(speech.next().0, ReplyPiece::Finished));
+        }
+    }
+
+    #[test]
+    fn group_limit_is_shared_and_late_terminals_cannot_repeat_the_notice() {
+        let mut feed = ChatFeed::new();
+        let first = "a".repeat(MAX_TEXT_BYTES - 7);
+        feed.accept(&member("first", &first)).unwrap();
+        let mut pieces = drain_feed(&mut feed);
+        feed.accept(&delta("second", "中文😀之后", true)).unwrap();
+        assert_eq!(feed.accepted_text_bytes, MAX_TEXT_BYTES - 1);
+        assert_eq!(feed.messages[1].speech.text, "中文");
+        let final_update = feed.take_update().unwrap().unwrap();
+        assert!(final_update.finished);
+        pieces.extend(final_update.pieces);
+        assert_eq!(pieces.last(), Some(&piece("second", TRUNCATION_NOTICE, None)));
+        assert_eq!(pieces.iter().filter(|piece| piece.text == TRUNCATION_NOTICE).count(), 1);
+        assert!(!feed.accept(&member("second", "中文😀之后的完整终态")).unwrap());
+        assert!(!feed.accept(&member("third", "后续成员")).unwrap());
+        feed.finish_submission();
+        assert!(drain_feed(&mut feed).is_empty());
+    }
+
+    #[test]
+    fn group_truncation_drains_an_earlier_unclosed_tail_before_the_last_member_notice() {
+        let mut feed = ChatFeed::new();
+        let first = format!("<think>{}", "a".repeat(MAX_TEXT_BYTES - 14));
+        feed.accept(&delta("first", &first, true)).unwrap();
+        assert!(drain_feed(&mut feed).is_empty());
+        feed.accept(&delta("second", "中文😀之后", true)).unwrap();
+        assert!(feed.cursor < feed.messages.len());
+        let update = feed.take_update().unwrap().unwrap();
+        assert!(update.finished);
+        assert_eq!(update.pieces.first().unwrap().message_id, "first");
+        assert_eq!(update.pieces.last(), Some(&piece("second", TRUNCATION_NOTICE, None)));
+        assert!(update.pieces.iter().any(|piece| piece.message_id == "second" && piece.text == "中文"));
+        assert!(!feed.accept(&delta("second", "迟到增量", true)).unwrap());
+        assert!(feed.take_update().unwrap().is_none());
+    }
+
+    #[test]
+    fn expanded_table_projection_seals_group_on_contentless_end_and_coalesces_notices() {
+        let table = format!("{}|\n{}|\n{}", "|a".repeat(16), "|---".repeat(16),
+            format!("{}\n", "|".repeat(17)).repeat(1500));
+        assert!(table.len() * 2 < MAX_TEXT_BYTES);
+        assert!(readable::project_markdown_block(&table).len() > MAX_TEXT_BYTES);
+        let mut feed = ChatFeed::new();
+        feed.accept(&delta("first", &table, true)).unwrap();
+        feed.accept(&delta("second", &table, true)).unwrap();
+        assert!(drain_feed(&mut feed).is_empty());
+        let mut end = member("first", "");
+        end.content = None;
+        feed.accept(&end).unwrap();
+        let update = feed.take_update().unwrap().unwrap();
+        assert!(update.finished);
+        assert_eq!(update.pieces.iter().filter(|piece| piece.notice).count(), 1);
+        assert!(update.pieces.last().unwrap().notice);
+        assert_eq!(update.pieces.last().unwrap().message_id, "second");
+        assert!(feed.messages.iter().all(|message| message.speech.stable_spoken.len() <= MAX_TEXT_BYTES));
+        assert!(!feed.accept(&delta("third", "迟到成员", true)).unwrap());
+        feed.finish_submission();
+        assert!(drain_feed(&mut feed).is_empty());
+    }
+
+    #[test]
+    fn truncation_preserves_emitted_prefix_checks_for_full_replacements() {
+        let mut feed = ChatFeed::new();
+        let prefix = "这段已经稳定并且已经被朗读。\n\n";
+        feed.accept(&delta("message", prefix, true)).unwrap();
+        assert!(!drain_feed(&mut feed).is_empty());
+        let replacement = format!("改写已经朗读的内容。{}", "a".repeat(MAX_TEXT_BYTES));
+        assert!(feed.accept(&update("message", &replacement, true)).unwrap_err().contains("已开始朗读"));
+
+        let mut feed = ChatFeed::new();
+        feed.accept(&delta("message", prefix, true)).unwrap();
+        let mut pieces = drain_feed(&mut feed);
+        let replacement = format!("{prefix}{}", "b".repeat(MAX_TEXT_BYTES));
+        feed.accept(&update("message", &replacement, true)).unwrap();
+        pieces.extend(drain_feed(&mut feed));
+        assert_eq!(feed.accepted_text_bytes, MAX_TEXT_BYTES);
+        assert_eq!(pieces.last().unwrap().text, TRUNCATION_NOTICE);
+        assert_eq!(pieces.iter().filter(|piece| piece.text == TRUNCATION_NOTICE).count(), 1);
     }
 
     #[test]

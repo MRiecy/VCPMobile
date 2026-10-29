@@ -357,6 +357,20 @@ impl StreamBlockParser {
     /// 处理累积的全文，返回 (已完成的块列表, 尾部纯文本, 未闭合特种块类型)。
     /// 已闭合的块从 tail 中移除加入 stable blocks；普通 Markdown tail 的类型为 None。
     pub fn process(&mut self, full_text: &str) -> (Vec<StreamBlock>, String, Option<BlockType>) {
+        let (blocks, tail, tail_type) = self.process_borrowed(full_text);
+        (blocks, tail.to_owned(), tail_type)
+    }
+
+    /// Speech consumes only stable blocks while generation is active. Reuse
+    /// the same scanner without allocating its growing, unspoken display tail.
+    pub(crate) fn process_stable(&mut self, full_text: &str) -> Vec<StreamBlock> {
+        self.process_borrowed(full_text).0
+    }
+
+    fn process_borrowed<'a>(
+        &mut self,
+        full_text: &'a str,
+    ) -> (Vec<StreamBlock>, &'a str, Option<BlockType>) {
         let mut blocks = Vec::new();
         let base = self.processed_len.min(full_text.len());
         let mut pos = base;
@@ -423,7 +437,7 @@ impl StreamBlockParser {
                         let nodes =
                             crate::vcp_modules::pre_renderer::parse_markdown_to_ast(&md_tail);
                         let hash = HashAggregator::compute_content_hash(&md_tail);
-                        blocks.push(StreamBlock::markdown(md_tail, Some(nodes), hash));
+                        blocks.push(StreamBlock::markdown(md_tail.to_owned(), Some(nodes), hash));
                     }
                 }
 
@@ -500,7 +514,7 @@ impl StreamBlockParser {
                     });
                     // 起始扫描游标停在 tail 起点：标记行下一帧重扫（覆盖 ``` → ```rust 扩展）
                     self.marker_scan_end = pos + start;
-                    return (blocks, remaining[start..].to_string(), Some(block_type));
+                    return (blocks, &remaining[start..], Some(block_type));
                 }
             } else {
                 // 4. 无任何特种块标记 → 全部按段落分割
@@ -519,10 +533,10 @@ impl StreamBlockParser {
                 self.break_scan_end = full_text.len();
                 if md_tail.is_empty() {
                     self.processed_len = full_text.len();
-                    return (blocks, String::new(), None);
+                    return (blocks, "", None);
                 } else {
                     self.processed_len = pos + remaining.len() - md_tail.len();
-                    return (blocks, md_tail.to_string(), None);
+                    return (blocks, md_tail, None);
                 }
             }
         }
@@ -530,7 +544,7 @@ impl StreamBlockParser {
         self.processed_len = full_text.len();
         self.marker_scan_end = full_text.len();
         self.break_scan_end = full_text.len();
-        (blocks, String::new(), None)
+        (blocks, "", None)
     }
 
     /// 流结束：强制处理剩余 tail 为最后一个 Markdown 块
@@ -562,7 +576,7 @@ impl StreamBlockParser {
         &mut self,
         full_text: &str,
     ) -> (Vec<StreamBlock>, Option<TerminalSpeechText>) {
-        let (blocks, tail, tail_type) = self.process(full_text);
+        let (blocks, tail, tail_type) = self.process_borrowed(full_text);
         let offset = self.tail_marker_len.unwrap_or(0);
         let terminal = (!tail.is_empty()).then(|| TerminalSpeechText {
             content: tail[offset..].to_string(),
@@ -928,9 +942,9 @@ fn build_stream_block(
 
 /// 将纯文本按 \n\n 分割为 Markdown 段落块
 /// 返回 (completed_blocks, tail_text)
-fn split_markdown_paragraphs(text: &str, break_from: usize) -> (Vec<StreamBlock>, String) {
+fn split_markdown_paragraphs(text: &str, break_from: usize) -> (Vec<StreamBlock>, &str) {
     if text.is_empty() {
-        return (Vec::new(), String::new());
+        return (Vec::new(), "");
     }
 
     // 断点续扫窗口：[0, break_from) 内由调用方保证不存在 "\n\n"；窗口起点向下对齐
@@ -959,10 +973,10 @@ fn split_markdown_paragraphs(text: &str, break_from: usize) -> (Vec<StreamBlock>
         }
 
         let blocks = extract_inline_buttons(blocks);
-        (blocks, tail.to_string())
+        (blocks, tail)
     } else {
         // 全程没有 \n\n，直接以 tail 形式返回
-        (Vec::new(), text.to_string())
+        (Vec::new(), text)
     }
 }
 
@@ -1073,6 +1087,31 @@ fn parse_tool_result(content: &str) -> (String, String, Vec<ToolResultDetail>, S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stable_speech_and_display_share_the_scanner_without_copying_the_tail() {
+        let raw = "首段。\n\n<think>隐私</think>\n正文不断增长。\n\n```text\ncode\n```\n尾部";
+        let mut display = StreamBlockParser::new();
+        let mut speech = StreamBlockParser::new();
+        let mut borrowed = StreamBlockParser::new();
+        for (offset, ch) in raw.char_indices() {
+            let text = &raw[..offset + ch.len_utf8()];
+            let (display_blocks, display_tail, display_type) = display.process(text);
+            let speech_blocks = speech.process_stable(text);
+            let (borrowed_blocks, borrowed_tail, borrowed_type) = borrowed.process_borrowed(text);
+            assert_eq!(serde_json::to_value(&speech_blocks).unwrap(), serde_json::to_value(&display_blocks).unwrap());
+            assert_eq!(serde_json::to_value(&borrowed_blocks).unwrap(), serde_json::to_value(&display_blocks).unwrap());
+            assert_eq!(borrowed_tail, display_tail);
+            assert_eq!(borrowed_type, display_type);
+            assert_eq!(speech.tail_start(), display.tail_start());
+            if !borrowed_tail.is_empty() {
+                assert_eq!(borrowed_tail.as_ptr(), text[borrowed.tail_start()..].as_ptr());
+            }
+        }
+        let (blocks, terminal) = speech.finish_for_speech(raw);
+        assert!(blocks.is_empty());
+        assert_eq!(terminal.unwrap().content.trim(), "尾部");
+    }
 
     fn tool_request(inner: &str) -> String {
         format!("<<<[TOOL_REQUEST]>>>\n{inner}\n<<<[END_TOOL_REQUEST]>>>")

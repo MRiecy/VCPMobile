@@ -934,7 +934,8 @@ async fn speak_inner<R: Runtime>(
         }
     };
     let mut source = NarrationReader {
-        app, narration, speech_queue: VecDeque::new(), chat_finished: false, current_voice: None,
+        app, narration, speech_queue: VecDeque::new(), chat_finished: false,
+        current_voice: None, last_spoken_voice: None,
     };
     let mut player = NativeConsumer { app, narration, started: false };
     if let Some(audio) = sample_audio {
@@ -994,9 +995,11 @@ struct NarrationReader<'a, R: Runtime> {
     narration: &'a Arc<TtsJob>,
     speech_queue: VecDeque<SpeechPiece>,
     chat_finished: bool,
-    // Only the current message is retained. Prefetched pieces own their own
-    // Arc lease, so a group turn never accumulates every imported audio file.
+    // Keep the current resolution and at most one preceding playable voice for
+    // the fixed truncation notice. Prefetched pieces own their own Arc leases;
+    // a group turn never accumulates every imported audio file.
     current_voice: Option<(String, Arc<PreparedVoice>)>,
+    last_spoken_voice: Option<Arc<PreparedVoice>>,
 }
 
 impl<R: Runtime> SegmentSource for NarrationReader<'_, R> {
@@ -1007,7 +1010,7 @@ impl<R: Runtime> SegmentSource for NarrationReader<'_, R> {
             if cancel.is_cancelled() { return Err(network::CANCELLED.into()); }
             let notified = self.narration.ready.notified();
             let mut speaker = None;
-            let (piece, guidance) = {
+            let (piece, guidance, notice) = {
                 let mut input = self.narration.input.lock().map_err(|error| error.to_string())?;
                 match &mut *input {
                     NarrationInput::Chat(feed) => {
@@ -1018,18 +1021,45 @@ impl<R: Runtime> SegmentSource for NarrationReader<'_, R> {
                         if let Some(piece) = self.speech_queue.pop_front() {
                             log::debug!("[VoiceTts] preparing message={}", piece.message_id);
                             speaker = Some((piece.message_id, piece.agent_id, feed.is_group()));
-                            (ReplyPiece::Text(piece.text), piece.instruction)
+                            (ReplyPiece::Text(piece.text), piece.instruction, piece.notice)
                         } else if self.chat_finished {
-                            (ReplyPiece::Finished, None)
-                        } else { (ReplyPiece::Wait, None) }
+                            (ReplyPiece::Finished, None, false)
+                        } else { (ReplyPiece::Wait, None, false) }
                     }
-                    NarrationInput::Bubble(message) => message.next(),
-                    NarrationInput::Preview(reply) => (reply.next(), None),
+                    NarrationInput::Bubble(message) => message.next_piece(),
+                    NarrationInput::Preview(reply) => (reply.next(), None, false),
                     NarrationInput::Sample(_) => return Err("原声试听不接受合成文本。".into()),
                 }
             };
             match piece {
                 ReplyPiece::Text(text) => {
+                    if notice {
+                        // An unvoiced final group member must not swallow the
+                        // task's explanation. Reuse the last playable voice;
+                        // without one, honor the already chosen global voice.
+                        let voice = if let Some((message_id, agent_id, _)) = &speaker {
+                            if let Some(voice) = &self.last_spoken_voice {
+                                Some(voice.clone())
+                            } else {
+                                // A message containing only suppressed syntax
+                                // may reach its cap before any ordinary piece.
+                                // Its independently selected voice still owns
+                                // the explanation even without prior playback.
+                                let current = if let Some((_, voice)) = self.current_voice.as_ref()
+                                    .filter(|(id, _)| id == message_id) {
+                                    voice.clone()
+                                } else {
+                                    Arc::new(prepare_speaker(self.app, &self.narration.config, agent_id.as_deref(), cancel).await?)
+                                };
+                                let voice = if current.config.has_selected_voice() { current } else {
+                                    Arc::new(prepare_voice(self.app, self.narration.config.clone(), cancel).await?)
+                                };
+                                if !voice.config.has_selected_voice() { continue; }
+                                Some(voice)
+                            }
+                        } else { None };
+                        return Ok(Some(NarrationPiece { text, guidance: None, voice }));
+                    }
                     let voice = if let Some((message_id, agent_id, group)) = speaker {
                         if self.current_voice.as_ref().is_none_or(|(id, _)| id != &message_id) {
                             let agent_id = agent_id.as_deref().ok_or("无法确定回复的发言者，已停止朗读。")?;
@@ -1044,6 +1074,9 @@ impl<R: Runtime> SegmentSource for NarrationReader<'_, R> {
                     } else {
                         None
                     };
+                    if let Some(voice) = &voice {
+                        self.last_spoken_voice = Some(voice.clone());
+                    }
                     return Ok(Some(NarrationPiece { text, guidance, voice }));
                 }
                 ReplyPiece::Finished => return Ok(None),
@@ -1166,6 +1199,34 @@ mod tests {
     }
     fn bubble_source() -> BubbleSource {
         BubbleSource { topic: TopicKey::new("agent", "a", "t"), message_id: "message".into() }
+    }
+
+    #[tokio::test]
+    async fn truncated_bubble_drains_its_notice_normally_but_stop_cancels_it_before_dequeue() {
+        for stop_after_body in [false, true] {
+            let app = tauri::test::mock_app();
+            let mut registry = Registry::default();
+            let narration = install_kind(&mut registry, "truncated", NarrationKind::Bubble(bubble_source()));
+            let mut speech = MessageSpeech::new();
+            speech.update(&format!("正在朗读。\n\n{}", " ".repeat(network::MAX_TEXT_BYTES)), true).unwrap();
+            *narration.input.lock().unwrap() = NarrationInput::Bubble(speech);
+            let mut reader = NarrationReader {
+                app: app.handle(), narration: &narration, speech_queue: VecDeque::new(),
+                chat_finished: false, current_voice: None, last_spoken_voice: None,
+            };
+            assert_eq!(reader.next(&narration.cancel).await.unwrap().unwrap().text, "正在朗读。");
+            if stop_after_body {
+                registry.stop(&narration.id);
+                assert!(matches!(reader.next(&narration.cancel).await, Err(error) if error == network::CANCELLED));
+            } else {
+                assert_eq!(reader.next(&narration.cancel).await.unwrap().unwrap().text, "语音内容过长，剩余内容已截断");
+                assert!(reader.next(&narration.cancel).await.unwrap().is_none());
+                assert!(!narration.cancel.is_cancelled());
+                // Ending text admission is not playback completion. The speak
+                // owner must still await NativeConsumer::finish's native drain.
+                assert!(!narration.terminal.load(Ordering::Acquire));
+            }
+        }
     }
     fn install_kind(registry: &mut Registry, id: &str, kind: NarrationKind) -> Arc<TtsJob> {
         let cancel = registry.reserve(id.into(), kind.clone()).unwrap();
@@ -1462,6 +1523,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn truncation_notice_uses_previous_playable_voice_when_the_last_group_member_is_unvoiced() {
+        let app = tauri::test::mock_app();
+        let narration = group_narration_fixture(&app, "https://example.invalid/v1",
+            crate::vcp_modules::agent_types::AgentVoiceConfig { enabled: false, ..Default::default() });
+        let body = "上一位已朗读。";
+        feed_member(&app, "first", "b", &format!("{body}{}", " ".repeat(network::MAX_TEXT_BYTES - 8 - body.len())));
+        feed_member(&app, "last", "a", "没有选择音色的末位成员触发截断。");
+        let mut reader = NarrationReader {
+            app: app.handle(), narration: &narration, speech_queue: VecDeque::new(),
+            chat_finished: false, current_voice: None, last_spoken_voice: None,
+        };
+        let first = reader.next(&narration.cancel).await.unwrap().unwrap();
+        assert_eq!(first.text, body);
+        let notice = reader.next(&narration.cancel).await.unwrap().unwrap();
+        assert_eq!(notice.text, "语音内容过长，剩余内容已截断");
+        assert!(notice.guidance.is_none());
+        assert!(Arc::ptr_eq(first.voice.as_ref().unwrap(), notice.voice.as_ref().unwrap()));
+        assert_eq!(notice.voice.unwrap().config.voice, "苏打");
+        assert!(reader.next(&narration.cancel).await.unwrap().is_none());
+        assert!(!narration.cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn truncation_before_any_spoken_body_keeps_the_current_members_independent_voice() {
+        let app = tauri::test::mock_app();
+        let narration = group_narration_fixture(&app, "https://example.invalid/v1",
+            crate::vcp_modules::agent_types::AgentVoiceConfig { enabled: false, ..Default::default() });
+        feed_member(&app, "first", "b", &" ".repeat(network::MAX_TEXT_BYTES + 1));
+        let mut reader = NarrationReader {
+            app: app.handle(), narration: &narration, speech_queue: VecDeque::new(),
+            chat_finished: false, current_voice: None, last_spoken_voice: None,
+        };
+        let notice = reader.next(&narration.cancel).await.unwrap().unwrap();
+        assert_eq!(notice.text, "语音内容过长，剩余内容已截断");
+        assert_eq!(notice.voice.unwrap().config.voice, "苏打");
+        assert!(notice.guidance.is_none());
+        assert!(reader.next(&narration.cancel).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn disabled_agent_voice_inherits_the_current_committed_global_voice() {
         use crate::vcp_modules::{
             agent_service::{create_default_config, AgentConfigState},
@@ -1607,7 +1708,7 @@ mod tests {
             feed_member(&app, "second", "b", "第二位继续朗读。");
             finish_tts_chat(app.handle().clone(), narration.id.clone()).await.unwrap();
             let mut reader = NarrationReader { app: app.handle(), narration: &narration,
-                speech_queue: VecDeque::new(), chat_finished: false, current_voice: None };
+                speech_queue: VecDeque::new(), chat_finished: false, current_voice: None, last_spoken_voice: None };
             let piece = reader.next(&narration.cancel).await.unwrap().unwrap();
             assert_eq!(piece.text, "第二位继续朗读。");
             assert_eq!(piece.voice.as_ref().unwrap().config.voice, "苏打");
@@ -1630,7 +1731,7 @@ mod tests {
         });
         feed_member(&app, "first", "a", &"第一位的长回复继续使用同一份声音。".repeat(40));
         let mut reader = NarrationReader { app: app.handle(), narration: &narration,
-            speech_queue: VecDeque::new(), chat_finished: false, current_voice: None };
+            speech_queue: VecDeque::new(), chat_finished: false, current_voice: None, last_spoken_voice: None };
         let first = reader.next(&narration.cancel).await.unwrap().unwrap().voice.unwrap();
         assert!(first.sample.is_some());
         assert!(samples::delete_voice_clone_sample(app.handle().clone(), id).await.unwrap());
@@ -1722,7 +1823,7 @@ mod tests {
         let cache = TtsCache::open(temporary.path().into()).await.unwrap();
         let mut reader = NarrationReader {
             app: app.handle(), narration: &job, speech_queue: VecDeque::new(),
-            chat_finished: false, current_voice: None,
+            chat_finished: false, current_voice: None, last_spoken_voice: None,
         };
         while let Some(piece) = reader.next(&job.cancel).await.unwrap() {
             let segment = Arc::new(SegmentBuffer::default());
@@ -1757,7 +1858,7 @@ mod tests {
         }
         let mut reader = NarrationReader {
             app: app.handle(), narration: &job, speech_queue: VecDeque::new(),
-            chat_finished: false, current_voice: None,
+            chat_finished: false, current_voice: None, last_spoken_voice: None,
         };
         let first = reader.next(&job.cancel).await.unwrap().unwrap();
         app.state::<AgentConfigState>().caches.get_mut("a").unwrap().voice.voice = "苏打".into();

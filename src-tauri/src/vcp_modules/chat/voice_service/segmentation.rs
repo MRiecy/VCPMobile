@@ -143,6 +143,24 @@ impl ReplyBuffer {
         Ok(())
     }
 
+    /// Stable speech only grows on the delta path. Snapshot replacements still
+    /// use `update` to validate the already emitted prefix before replacing it.
+    pub(super) fn append(&mut self, suffix: &str, finished: bool) -> Result<(), String> {
+        if self.text.len().saturating_add(suffix.len()) > MAX_TEXT_BYTES {
+            return Err("语音回复超过 64 KiB，已停止本次朗读。".into());
+        }
+        if self.finished && (!suffix.is_empty() || !finished) {
+            return Err("已结束的语音回复不能继续追加。".into());
+        }
+        self.text.push_str(suffix);
+        self.finished = finished;
+        if self.emitted_bytes == 0 {
+            self.global_style = None;
+            self.style_decided = false;
+        }
+        Ok(())
+    }
+
     pub(super) fn has_spoken_body(&self) -> bool {
         let style_end = global_style(&self.text, self.inherit_global_style).map_or(0, |style| {
             self.text.len() - self.text.trim_start().len() + style.len()
