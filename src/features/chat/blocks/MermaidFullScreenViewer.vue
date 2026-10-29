@@ -347,7 +347,7 @@ const exportToGallery = async () => {
           <!-- eslint-disable vue/no-v-html -- SVG comes from strict-mode Mermaid or guarded message HTML; instanceSvg only rebases identifiers. -->
           <div 
             ref="fullscreenCanvasRef"
-            class="inline-flex items-center justify-center min-w-full min-h-full p-8 box-border origin-center"
+            class="mermaid-fullscreen-canvas inline-flex items-center justify-center min-w-full min-h-full p-8 box-border origin-center"
             :style="{
               transform: `translate(${translateX}px, ${translateY}px) scale(${scale})`,
               transition: isDragging ? 'none' : 'transform 0.1s ease-out'
@@ -389,8 +389,8 @@ const exportToGallery = async () => {
 </template>
 
 <style scoped>
-/* Ensure custom SVGs are responsive inside canvas */
-:deep(svg) {
+/* Resize only the diagram root; KaTeX's nested SVGs own their symbol heights. */
+.mermaid-fullscreen-canvas :deep(> svg) {
   max-width: none !important;
   height: auto !important;
 }

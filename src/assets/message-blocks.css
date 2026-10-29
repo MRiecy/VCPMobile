@@ -742,7 +742,8 @@ html.dark .vcp-diary-update-block.is-valet .vcp-diary-update-content {
   .vcp-markdown-block [style*="display:flex"] {
     flex-wrap: wrap !important;
   }
-  .vcp-markdown-block svg {
+  /* KaTeX's stretchy symbols require their explicit SVG heights. */
+  .vcp-markdown-block svg:not(.katex svg) {
     max-width: 100% !important;
     height: auto !important;
   }
