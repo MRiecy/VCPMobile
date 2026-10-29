@@ -6,6 +6,7 @@ import type { MessageActionKey } from '../../../core/stores/chatHistoryStore';
 import { useChatSessionStore, type ConversationKey } from '../../../core/stores/chatSessionStore';
 import { useNotificationStore } from '../../../core/stores/notification';
 import { useVoiceCallStore } from './voiceCallStore';
+import { useVoiceDocumentStore } from './voiceDocument';
 
 interface NarrationTask {
   key: MessageActionKey;
@@ -27,6 +28,7 @@ function sameMessage(a: MessageActionKey, b: MessageActionKey) {
 export const useBubbleNarration = defineStore('bubbleNarration', () => {
   const session = useChatSessionStore();
   const voiceCall = useVoiceCallStore();
+  const voiceDocument = useVoiceDocumentStore();
   const notifications = useNotificationStore();
   const activeTask = shallowRef<NarrationTask | null>(null);
   let ownedTask: NarrationTask | null = null;
@@ -115,10 +117,12 @@ export const useBubbleNarration = defineStore('bubbleNarration', () => {
         if (!rawText.trim()) { notify('此消息没有可朗读的正文内容。', task); return; }
         await ensureListening();
         if (!current()) return;
+        const documentId = await voiceDocument.connect();
+        if (!current()) return;
         ownedTask = task;
         task.submitted = true;
         const result = await invoke<{ configured: boolean }>('start_tts_session', {
-          ttsId: task.id, originUserMessageId: null,
+          ttsId: task.id, documentId, originUserMessageId: null,
           bubbleSource: { topic: {
             ownerId: key.conversation.ownerId, ownerType: key.conversation.ownerType, topicId: key.conversation.topicId,
           }, messageId: key.messageId },

@@ -18,6 +18,7 @@ import type {
 } from '../types/native';
 import { bootMark, reportBootTrace, trackBootStage } from '../utils/bootTrace';
 import { useNotificationProcessor } from '../composables/useNotificationProcessor';
+import { useVoiceDocumentStore } from '../../features/chat/voice/voiceDocument';
 
 export type AppState = 'PERMISSIONS' | 'BOOTING' | 'CONNECTING' | 'PRELOADING' | 'READY' | 'ERROR' | 'OPTIMIZING';
 
@@ -382,6 +383,11 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         isBootstrapping.value = true;
         errorMsg.value = null;
         hasBootstrapped.value = false;
+
+        // Retire previous page-owned playback even if this document stops at
+        // the permission guide. This owner needs no database initialization.
+        // The cached connection is never repeated on foreground/online.
+        await useVoiceDocumentStore().connect();
 
         // Android keeps its existing required keepalive setup. iOS notification
         // authorization is optional and is requested only by the user's action.

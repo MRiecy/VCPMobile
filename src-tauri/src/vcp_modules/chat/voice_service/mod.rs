@@ -30,6 +30,7 @@ pub use call::{
 pub use input::handle_audio_event;
 pub use input::{close_voice_microphone, start_voice_microphone, VoiceServiceState};
 pub use tts::{
+    allocate_tts_document, connect_tts_document,
     feed_chat_event, has_chat_listener, preview_tts, preview_voice_clone_sample, start_tts_session, stop_chat_reply_by_origin, stop_tts,
     submit_tts_text, TtsServiceState,
 };

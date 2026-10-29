@@ -27,6 +27,7 @@ beforeEach(() => {
   setActivePinia(pinia);
   context.voice = reactive({ active: false });
   context.notify.mockReset();
+  mockInvoke('allocate_tts_document', () => '42');
   useChatSessionStore().setConversation({ id: 'agent', type: 'agent' }, 'topic');
   mockInvoke('start_tts_session', () => ({ configured: true }));
   mockInvoke('stop_tts', () => undefined);
@@ -43,11 +44,13 @@ describe('application bubble narration owner', () => {
     expect(calls('start_tts_session')[0][1]?.bubbleSource).toEqual({
       topic: { ownerType: 'agent', ownerId: 'agent', topicId: 'topic' }, messageId: 'a',
     });
+    expect(calls('start_tts_session')[0][1]?.documentId).toBe('42');
     await owner.startBubbleNarration(key('b'), '第二条');
     expect(calls('stop_tts')[0][1]?.ttsId).toBe(id);
     expect(listenMock.mock.calls.filter(([event]) => event === 'vcp-tts')).toHaveLength(1);
     emitTauriEvent('vcp-tts', { ttsId: id, kind: 'error', message: 'old' });
     expect(owner.activeMessageId).toBe('b');
+    expect(calls('connect_tts_document')).toHaveLength(1);
     expect(context.notify).not.toHaveBeenCalled();
   });
 

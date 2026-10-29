@@ -23,7 +23,7 @@ const toggle = async () => {
   // Freeze the visible draft before any asynchronous admission.
   const settings = cloneConfig({ connection: props.settings.connection, tts: props.settings.tts });
   const previewText = text.value.trim();
-  await start(ttsId => invoke('preview_tts', { ttsId, text: previewText, settings }));
+  await start((ttsId, documentId) => invoke('preview_tts', { ttsId, documentId, text: previewText, settings }));
 };
 defineExpose({ stop, busy });
 </script>

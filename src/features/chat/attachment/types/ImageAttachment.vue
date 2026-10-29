@@ -62,14 +62,14 @@ watch([() => props.file.hash, () => props.file.thumbnailPath], ([hash, thumbnail
     if (!active || requestedFallback || !hash) return;
     requestedFallback = true;
     try {
-      const image = await invoke<{ path: string }>("get_attachment_image", {
+      const image = await invoke<{ path: string; owned: boolean }>("get_attachment_image", {
         hash, purpose: "display", maxDimension: 512,
       });
       if (!active) {
-        await invoke("release_attachment_image", { path: image.path }).catch(console.warn);
+        if (image.owned) await invoke("release_attachment_image", { path: image.path }).catch(console.warn);
         return;
       }
-      ownedPath = image.path;
+      ownedPath = image.owned ? image.path : undefined;
       safeSrc.value = convertFileSrc(image.path);
     } catch (error) {
       if (active) {

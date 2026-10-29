@@ -2,8 +2,14 @@ use super::*;
 use crate::vcp_modules::media_processor::image_extractor::{derive_image, DerivedImage};
 use tokio::io::AsyncWriteExt;
 
+#[cfg(any(target_os = "android", test))]
+mod avif;
+
 const TEXT_PREVIEW_BYTES: u64 = 128 * 1024;
 const DISPLAY_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+#[cfg(any(target_os = "android", test))]
+const AVIF_DISPLAY_SOURCE_BYTES: u64 = 24 * 1024 * 1024;
+const DISPLAY_IMAGE_PIXELS: u64 = 4 * 1024 * 1024;
 const REMOTE_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Serialize)]
@@ -83,12 +89,40 @@ async fn display_image(
             &source,
             &stem,
             dimension,
-            4 * 1024 * 1024,
+            DISPLAY_IMAGE_PIXELS,
             DISPLAY_IMAGE_BYTES,
         )
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Display consumers release only images they own. A bounded AVIF original is
+/// borrowed from the CAS and must never enter the temporary-file deletion path.
+#[derive(Serialize)]
+pub struct AttachmentImage {
+    #[serde(flatten)]
+    image: DerivedImage,
+    owned: bool,
+}
+
+#[cfg(any(target_os = "android", test))]
+fn borrow_avif_display(file: &AttachmentCasFile) -> Result<AttachmentImage, String> {
+    let metadata = avif::probe(&file.path, AVIF_DISPLAY_SOURCE_BYTES, DISPLAY_IMAGE_PIXELS)
+        .map_err(|error| format!("此 AVIF 无法在显示预算内预览：{error}。请使用系统预览。"))?;
+    if metadata.size != file.size_bytes {
+        return Err("AVIF 原件大小发生变化，请重新导入".into());
+    }
+    Ok(AttachmentImage {
+        image: DerivedImage {
+            path: file.path.to_string_lossy().into_owned(),
+            mime: "image/avif".into(),
+            size: metadata.size,
+            width: metadata.width,
+            height: metadata.height,
+        },
+        owned: false,
+    })
 }
 
 #[tauri::command]
@@ -98,12 +132,29 @@ pub async fn get_attachment_image(
     hash: String,
     purpose: String,
     max_dimension: Option<u32>,
-) -> Result<DerivedImage, String> {
+) -> Result<AttachmentImage, String> {
     if !matches!(purpose.as_str(), "display" | "avatar") {
         return Err("无效的图片用途".into());
     }
     let file = resolve_attachment_cas_file(&app_handle, &db_state.pool, &hash).await?;
-    display_image(&app_handle, file.path, max_dimension).await
+    match display_image(&app_handle, file.path.clone(), max_dimension).await {
+        Ok(image) => Ok(AttachmentImage { image, owned: true }),
+        Err(error) => {
+            #[cfg(target_os = "android")]
+            if purpose == "display"
+                && file.mime_type == "image/avif"
+                && error.contains("image_decode:")
+            {
+                // WebView's AVIF support is independent of the OS decoder. The
+                // encoded-byte and source-pixel budgets are separate: a small
+                // compressed file is not evidence of a small decoded surface.
+                return tokio::task::spawn_blocking(move || borrow_avif_display(&file))
+                    .await
+                    .map_err(|error| format!("AVIF 显示准备失败：{error}"))?;
+            }
+            Err(error)
+        }
+    }
 }
 
 async fn remove_owned_file(root: PathBuf, path: String) -> Result<(), String> {
@@ -392,6 +443,31 @@ pub async fn release_rendered_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn avif_display_borrows_a_real_encoded_image_without_owning_its_file() {
+        // Generated with Pillow/libavif: one static 32x16 RGB image.
+        let path = PathBuf::from("tests/fixtures/images/display.avif");
+        let size = std::fs::metadata(&path).unwrap().len();
+        let file = AttachmentCasFile {
+            path: path.clone(),
+            mime_type: "image/avif".into(),
+            size_bytes: size,
+            sha256: "unused-by-display".into(),
+        };
+        let image = borrow_avif_display(&file).unwrap();
+        assert!(!image.owned);
+        assert_eq!(image.image.path, path.to_string_lossy());
+        assert_eq!((image.image.width, image.image.height), (32, 16));
+        assert_eq!(image.image.size, size);
+        assert_eq!(image.image.mime, "image/avif");
+        drop(image);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), size);
+
+        let changed = AttachmentCasFile { size_bytes: size + 1, ..file };
+        assert!(borrow_avif_display(&changed).is_err());
+    }
+
     #[test]
     fn truncated_text_does_not_invent_a_replacement_character() {
         assert_eq!(

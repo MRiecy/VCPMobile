@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, disposePinia, setActivePinia, type Pinia } from 'pinia';
+import { flushPromises } from '@vue/test-utils';
 import { useAppLifecycleStore } from '../../../core/stores/appLifecycle';
 import { useNotificationStore } from '../../../core/stores/notification';
 import { useNotificationProcessor } from '../../../core/composables/useNotificationProcessor';
@@ -57,6 +58,7 @@ describe('platform-aware bootstrap', () => {
     backgroundServiceFailures = [];
     logStatus = 'connected';
     logConfigurationError = null;
+    mockInvoke('allocate_tts_document', () => '42');
     mockInvoke('get_system_snapshot', () => ({
       lifecycle: null,
       core: 'ready',
@@ -72,6 +74,36 @@ describe('platform-aware bootstrap', () => {
   afterEach(() => {
     disposePinia(pinia);
     vi.useRealTimers();
+  });
+
+  it('waits for independent playback release before READY and never reconnects on foreground hydration', async () => {
+    let release!: () => void;
+    mockInvoke('connect_tts_document', () => new Promise<void>(resolve => { release = resolve; }));
+    const lifecycle = useAppLifecycleStore();
+    const boot = lifecycle.bootstrap();
+    await flushPromises();
+    expect(lifecycle.state).not.toBe('READY');
+    expect(invokeMock).toHaveBeenCalledWith('connect_tts_document', { documentId: '42' });
+    release();
+    await boot;
+    expect(lifecycle.state).toBe('READY');
+    await lifecycle.hydrateSystemStatus();
+    await lifecycle.bootstrap(true);
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'connect_tts_document')).toHaveLength(1);
+  });
+
+  it('keeps a failed native release in the startup retry flow using the same document', async () => {
+    let failed = true;
+    mockInvoke('connect_tts_document', () => failed ? Promise.reject(new Error('native stop failed')) : undefined);
+    const lifecycle = useAppLifecycleStore();
+    await expect(lifecycle.bootstrap()).rejects.toThrow('native stop failed');
+    expect(lifecycle.state).toBe('ERROR');
+    failed = false;
+    await lifecycle.bootstrap(true);
+    expect(lifecycle.state).toBe('READY');
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'allocate_tts_document')).toHaveLength(1);
+    expect(invokeMock.mock.calls.filter(([command]) => command === 'connect_tts_document')
+      .map(([, args]) => args?.documentId)).toEqual(['42', '42']);
   });
 
   it.each(['snapshot', 'realtime'])('shows a saved connection configuration error when %s arrives first without blocking startup', async first => {
@@ -232,6 +264,8 @@ describe('platform-aware bootstrap', () => {
     await lifecycle.bootstrap();
     expect(lifecycle.state).toBe('PERMISSIONS');
     expect(invokeMock.mock.calls.map(([command]) => command)).toEqual([
+      'allocate_tts_document',
+      'connect_tts_document',
       'plugin:vcp-mobile|check_all_permissions',
       'plugin:vcp-mobile|check_notification_listener_permission',
     ]);

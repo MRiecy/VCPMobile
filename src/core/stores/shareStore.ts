@@ -46,23 +46,32 @@ export const useShareStore = defineStore('share', () => {
   const failures = computed(() => current.value?.items.filter(item => item.error) ?? []);
   const identity = (value: ShareIdentity): ShareIdentity => ({ generation: value.generation, deliveryId: value.deliveryId });
   const isCurrent = (value: ShareIdentity) => current.value?.generation === value.generation && current.value?.deliveryId === value.deliveryId;
+  const isTerminal = (value: CurrentShare) => value.state === 'sent' || value.state === 'discarded';
   const closeSelector = () => {
     dismissedShare = current.value ? identity(current.value) : null;
     selectorOpen.value = false;
   };
   const showSelector = () => {
+    if (!current.value || !['ready', 'prepared', 'draft', 'failed'].includes(current.value.state)) return;
     if (!dismissedShare || !isCurrent(dismissedShare)) selectorOpen.value = true;
   };
   const notify = (error: unknown) => useNotificationStore().addNotification({
     type: 'error', title: '分享处理失败', message: error instanceof Error ? error.message : String(error), toastOnly: false,
   });
-  const apply = (value: CurrentShare | null) => {
-    if (value && current.value && value.generation < current.value.generation) return;
-    if (value && current.value?.deliveryId === value.deliveryId && value.revision < current.value.revision) return;
+  const apply = (value: CurrentShare | null): boolean => {
+    if (value && current.value && value.generation < current.value.generation) return false;
+    if (value && current.value && isCurrent(value)) {
+      if (value.revision < current.value.revision) return false;
+      // Rust's sent/discarded states cannot return to a draft. Their revision
+      // does not advance, so an older read/import can otherwise revive them.
+      if (isTerminal(current.value) && !isTerminal(value)) return false;
+    }
     const changed = value?.deliveryId !== current.value?.deliveryId;
     if (changed) { pendingEdit = null; selectorOpen.value = false; }
     current.value = value;
+    if (value && isTerminal(value)) selectorOpen.value = false;
     if (value && !['sent', 'discarded', 'receiving'].includes(value.state) && changed) showSelector();
+    return true;
   };
   const prepare = async () => {
     const share = current.value;
@@ -71,18 +80,19 @@ export const useShareStore = defineStore('share', () => {
     busy.value = true;
     try {
       const result = await invoke<CurrentShare>('prepare_current_share', { ...identity(share) });
-      if (isCurrent(share)) { apply(result); if (!activeDraft.value) showSelector(); }
+      if (isCurrent(share) && apply(result) && !activeDraft.value) showSelector();
     } catch (error) { if (isCurrent(share)) throw error; }
     finally { if (preparingId === share.deliveryId) { preparingId = null; busy.value = false; } }
   };
   const readCurrent = (): Promise<void> => {
     if (readInFlight) { readAgain = true; return readInFlight; }
     readInFlight = (async () => {
+      const observed = current.value;
       const value = await invoke<CurrentShare | null>('read_current_share');
-      const previous = current.value;
-      // A local edit waiting for its CAS revision must not be overwritten by an older read.
-      if (value && previous?.deliveryId === value.deliveryId && value.revision < previous.revision) return;
-      apply(value);
+      // An empty read has no generation; it cannot erase a share accepted or
+      // settled while this snapshot was in flight.
+      if (value === null && current.value !== observed) return;
+      if (!apply(value)) return;
       if (value && ['ready', 'draft'].includes(value.state)) void prepare().catch(notify);
       else if (value && ['draft', 'prepared', 'failed'].includes(value.state) && !activeDraft.value) showSelector();
     })().finally(() => {
@@ -113,14 +123,15 @@ export const useShareStore = defineStore('share', () => {
         error: typeof source.error === 'string' ? source.error : null,
         payloadRevision: source.payloadRevision, payloadState: source.state,
       });
-      apply(value);
-      if (source.error) showSelector();
+      const accepted = apply(value);
+      if (accepted && source.error) showSelector();
       if (source.state !== 'ready') { androidInFlight.delete(snapshotId); return; }
       // Ready processing is detached from acceptance; a later share can immediately invalidate it.
+      // Even a stale UI snapshot must finish the native handoff so Rust can ACK its files.
       void invoke<CurrentShare>('finish_android_share', {
         ...identity(value), text: typeof source.text === 'string' ? source.text : '', files: Array.isArray(source.files) ? source.files : [],
         payloadRevision: source.payloadRevision,
-      }).then(async result => { if (isCurrent(value)) { apply(result); await prepare(); } }).catch(error => {
+      }).then(async result => { if (isCurrent(value) && apply(result)) await prepare(); }).catch(error => {
         if (isCurrent(value)) { notify(error); void readCurrent().catch(notify); }
       }).finally(() => androidInFlight.delete(snapshotId));
     }).catch(error => { androidInFlight.delete(snapshotId); notify(error); });
@@ -135,8 +146,7 @@ export const useShareStore = defineStore('share', () => {
       const result = await invoke<CurrentShare>('bind_current_share', {
         ...identity(share), agentId, allowPartial,
       });
-      if (!isCurrent(share)) return;
-      apply(result);
+      if (!isCurrent(share) || !apply(result)) return;
       if (!assistant.agents.length) await assistant.fetchAgentsAndGroups();
       if (!isCurrent(share) || !result.agentId || !result.topicId) return;
       await useTopicStore().loadTopicList(result.agentId, 'agent');
@@ -184,7 +194,7 @@ export const useShareStore = defineStore('share', () => {
     const share = identity(current.value);
     try {
       await invoke('discard_current_share', { ...share });
-      if (isCurrent(share) && current.value) { current.value = { ...current.value, state: 'discarded' }; selectorOpen.value = false; }
+      if (isCurrent(share) && current.value && current.value.state !== 'sent') { current.value = { ...current.value, state: 'discarded' }; selectorOpen.value = false; }
     } catch (error) { notify(error); }
   };
   return { current, activeDraft, failures, selectorOpen, busy, sending, refresh, prepare, receiveAndroid, pollAndroid, openDraft, editDraft, flushDraft, commit, discard, closeSelector, notify };

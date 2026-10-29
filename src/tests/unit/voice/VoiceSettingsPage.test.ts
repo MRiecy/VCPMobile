@@ -52,6 +52,7 @@ beforeEach(() => {
   setActivePinia(pinia);
   database = snapshot();
   revision = 1;
+  mockInvoke('allocate_tts_document', () => '42');
   context.openStyleGuidance.mockReset();
   vi.spyOn(useOverlayStore(), 'openVoiceStyleGuidance').mockImplementation(context.openStyleGuidance);
   context.voice = reactive({
@@ -699,6 +700,7 @@ describe('语音设置使用正式设置快照', () => {
     await wrapper.get('.voice-preview-button').trigger('click');
     await flushPromises();
     const previewCall = invokeMock.mock.calls.find(([command]) => command === 'preview_tts')!;
+    expect(previewCall[1]?.documentId).toBe('42');
     expect(previewCall[1]?.settings).toMatchObject({ connection: { apiBaseUrl: '', apiKey: 'draft-preview-key' }, tts: { voice: '冰糖' } });
     expect(updates()).toHaveLength(0);
     expect(wrapper.get('.voice-preview-button').text()).toBe('停止试听');
@@ -858,6 +860,7 @@ describe('语音设置使用正式设置快照', () => {
     await manager.findAll('button').find(button => button.text() === '试听原声')!.trigger('click');
     await flushPromises();
     const submitted = invokeMock.mock.calls.find(([command]) => command === 'preview_voice_clone_sample')?.[1];
+    expect(submitted?.documentId).toBe('42');
     expect(submitted).toMatchObject({ sampleId: asset.id, ttsId: expect.any(String) });
     emitTauriEvent('vcp-tts', { ttsId: 'unrelated-task', kind: 'stopped' });
     await flushPromises();

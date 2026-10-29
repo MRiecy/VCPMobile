@@ -100,14 +100,14 @@ watch([() => props.isOpen, () => props.file], async ([open, file], _old, onClean
       isTextTruncated.value = result.truncated;
     } else if (isImage.value) {
       const target = Math.min(2048, Math.ceil(Math.max(window.innerWidth, window.innerHeight) * window.devicePixelRatio));
-      const image = await invoke<{ path: string }>("get_attachment_image", {
+      const image = await invoke<{ path: string; owned: boolean }>("get_attachment_image", {
         hash: file.hash, purpose: "display", maxDimension: target,
       });
       if (!active) {
-        await invoke("release_attachment_image", { path: image.path }).catch(console.warn);
+        if (image.owned) await invoke("release_attachment_image", { path: image.path }).catch(console.warn);
         return;
       }
-      ownedImagePath = image.path;
+      ownedImagePath = image.owned ? image.path : undefined;
       renderSrc.value = convertFileSrc(image.path);
     }
   } catch (error) {

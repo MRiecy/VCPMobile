@@ -2,6 +2,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { useVoiceCallStore } from './voiceCallStore';
+import { useVoiceDocumentStore } from './voiceDocument';
 
 interface PreviewTask {
   id: string;
@@ -15,6 +16,7 @@ interface PreviewTask {
 /** Frontend ownership of a Rust preview, shared by synthesis and source audio. */
 export function useVoicePreviewTask(active: () => boolean, disabled: () => boolean) {
   const voiceCall = useVoiceCallStore();
+  const voiceDocument = useVoiceDocumentStore();
   const busy = ref(false);
   const feedback = ref('');
   const unavailable = computed(() => voiceCall.active ? '通话结束后可试听。'
@@ -45,7 +47,7 @@ export function useVoicePreviewTask(active: () => boolean, disabled: () => boole
     return operation;
   };
 
-  const start = async (submit: (ttsId: string) => Promise<unknown>) => {
+  const start = async (submit: (ttsId: string, documentId: string) => Promise<unknown>) => {
     if (!canStart.value) return;
     if (task) {
       try { await stop(); } catch { return; }
@@ -68,13 +70,14 @@ export function useVoicePreviewTask(active: () => boolean, disabled: () => boole
         }
       });
       current.unlisten = unlisten;
+      const documentId = await voiceDocument.connect();
       if (!mounted || current.cancelled || task !== current || !canStart.value) {
         unlisten();
         if (task === current) { task = null; busy.value = false; }
         return;
       }
       current.submitted = true;
-      await submit(current.id);
+      await submit(current.id, documentId);
     })();
     try {
       await current.ready;

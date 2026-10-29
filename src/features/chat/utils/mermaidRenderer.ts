@@ -5,8 +5,12 @@ const cache = new Map<string, { svg: string; bytes: number }>();
 let cacheBytes = 0;
 let serial = 0;
 type PeleModule = typeof import('pele');
+type MathModule = typeof import('./mermaidMath');
 let peleModule: PeleModule | null = null;
+let mathModule: MathModule | null = null;
 let loadingPele: Promise<PeleModule> | null = null;
+type Rendering = { controller: AbortController; consumers: number; promise: Promise<string> };
+const rendering = new Map<string, Rendering>();
 
 function abortError() { return new DOMException('图表渲染已取消', 'AbortError'); }
 
@@ -30,9 +34,10 @@ function remember(key: string, svg: string) {
 function loadPele(): Promise<PeleModule> {
   if (peleModule) return Promise.resolve(peleModule);
   if (!loadingPele) {
-    loadingPele = import('pele')
-      .then(mod => {
+    loadingPele = Promise.all([import('pele'), import('./mermaidMath')])
+      .then(([mod, math]) => {
         peleModule = mod;
+        mathModule = math;
         return mod;
       })
       .finally(() => {
@@ -71,9 +76,48 @@ export async function renderMermaidTemplate(source: string, signal: AbortSignal)
     cache.set(source, cachedAfterLoad);
     return cachedAfterLoad.svg;
   }
-  const { svg } = pele.render(source, { idPrefix: `vcp-mermaid-template-${++serial}` });
-  remember(source, svg);
-  return svg;
+  let job = rendering.get(source);
+  if (!job) {
+    const controller = new AbortController();
+    const idPrefix = `vcp-mermaid-template-${++serial}`;
+    const created: Rendering = { controller, consumers: 0, promise: Promise.resolve('') };
+    created.promise = Promise.resolve().then(async () => {
+      const svg = await mathModule!.renderWithMermaidMath(
+        math => pele.render(source, { idPrefix, math }).svg,
+        controller.signal,
+      );
+      if (controller.signal.aborted) throw abortError();
+      remember(source, svg);
+      return svg;
+    }).finally(() => { if (rendering.get(source) === created) rendering.delete(source); });
+    rendering.set(source, created);
+    job = created;
+  }
+  const currentJob = job;
+  currentJob.consumers++;
+  return new Promise<string>((resolve, reject) => {
+    let finished = false;
+    const finish = () => {
+      if (finished) return false;
+      finished = true;
+      signal.removeEventListener('abort', onAbort);
+      currentJob.consumers--;
+      return true;
+    };
+    const onAbort = () => {
+      if (!finish()) return;
+      if (!currentJob.consumers) {
+        currentJob.controller.abort();
+        if (rendering.get(source) === currentJob) rendering.delete(source);
+      }
+      reject(abortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    currentJob.promise.then(
+      svg => { if (finish()) resolve(svg); },
+      error => { if (finish()) reject(error); },
+    );
+  });
 }
 
 function escapeRegExp(value: string) { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }

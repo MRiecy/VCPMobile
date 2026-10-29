@@ -142,7 +142,7 @@ const toggleOriginal = async (sample: VoiceCloneModelDto) => {
   try { await preview.stop(); } catch { return; }
   if (!props.active || blocked.value || currentGeneration !== generation) return;
   playingId.value = sample.id;
-  await preview.start(ttsId => invoke('preview_voice_clone_sample', { ttsId, sampleId: sample.id }));
+  await preview.start((ttsId, documentId) => invoke('preview_voice_clone_sample', { ttsId, documentId, sampleId: sample.id }));
 };
 const remove = async (sample: VoiceCloneModelDto) => {
   if (blocked.value || !managerOpen.value) return;

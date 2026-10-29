@@ -2,7 +2,8 @@
 //! parser/output buffers; original attachments remain available when extraction stops.
 
 use quick_xml::events::{BytesStart, Event};
-use quick_xml::Reader;
+use quick_xml::name::{NamespaceResolver, ResolveResult};
+use quick_xml::NsReader;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
@@ -20,6 +21,10 @@ const MAX_TEXT_CHARS: usize = 10_000_000;
 const MAX_PARTS: usize = 4096;
 const MAX_COLUMNS: usize = 16_384;
 const TRUNCATED: &str = "……（文本过长已截断）";
+const OFFICE_RELATIONSHIPS: [&str; 2] = [
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
+    "http://purl.oclc.org/ooxml/officeDocument/relationships",
+];
 
 // All callers already run extraction on blocking workers. Keep the permit in
 // that worker, including when its async caller is cancelled or disappears.
@@ -94,7 +99,7 @@ fn read_part(
     archive: &mut ZipArchive<File>,
     name: &str,
     remaining: &mut usize,
-    mut consume: impl FnMut(Event<'_>) -> Result<bool, String>,
+    mut consume: impl FnMut(Event<'_>, &NamespaceResolver) -> Result<bool, String>,
 ) -> Result<bool, String> {
     let file = match archive.by_name(name) {
         Ok(file) => file,
@@ -110,7 +115,7 @@ fn read_part(
         part_remaining: MAX_XML_BYTES,
         event_remaining: MAX_BUFFER_BYTES,
     };
-    let mut reader = Reader::from_reader(BufReader::with_capacity(8192, source));
+    let mut reader = NsReader::from_reader(BufReader::with_capacity(8192, source));
     reader.config_mut().expand_empty_elements = true;
     let mut buffer = Vec::new();
     let mut depth = 0usize;
@@ -132,7 +137,7 @@ fn read_part(
             Event::Eof => break,
             _ => {}
         }
-        if !consume(event)? {
+        if !consume(event, reader.resolver())? {
             break;
         }
     }
@@ -224,30 +229,193 @@ fn text<'a>(event: &'a Event<'_>) -> Result<Option<Cow<'a, str>>, String> {
     })
 }
 
-fn parts(archive: &ZipArchive<File>, prefix: &str) -> Result<Vec<String>, String> {
-    let mut names = Vec::new();
-    let mut name_bytes = 0usize;
-    for name in archive.file_names() {
-        let name = name.map_err(|e| e.to_string())?;
-        if name.starts_with(prefix) && name.ends_with(".xml") {
-            if names.len() >= MAX_PARTS || name.len() > MAX_BUFFER_BYTES.saturating_sub(name_bytes)
-            {
-                return Err("Office 工作表或幻灯片数量超过提取预算".into());
-            }
-            name_bytes += name.len();
-            names.push(name.into_owned());
-        }
-    }
-    names.sort_by_key(|name| part_number(name));
-    Ok(names)
+struct ManifestPart {
+    relationship_id: String,
+    sheet: Option<(u32, String)>,
 }
 
-fn part_number(name: &str) -> usize {
-    name.chars()
-        .filter(|c| c.is_ascii_digit())
-        .collect::<String>()
-        .parse()
-        .unwrap_or(0)
+struct PartRelationship {
+    kind: String,
+    target: String,
+    external: bool,
+}
+
+impl PartRelationship {
+    fn is_kind(&self, kind: &str) -> bool {
+        OFFICE_RELATIONSHIPS.iter().any(|namespace| {
+            self.kind
+                .strip_prefix(namespace)
+                .and_then(|suffix| suffix.strip_prefix('/'))
+                == Some(kind)
+        })
+    }
+
+    fn internal_target(&self, manifest: &str) -> Result<String, String> {
+        if self.external {
+            return Err("Office 工作表或幻灯片引用了外部目标".into());
+        }
+        // Resolve package URIs only. The result is used by ZipArchive::by_name,
+        // never as a filesystem path or a network URL.
+        if self.target.is_empty() || self.target.contains(['\\', ':', '?', '#']) {
+            return Err("Office 关系目标不是有效的包内路径".into());
+        }
+        let (directory, _) = manifest.rsplit_once('/').ok_or("Office 主文档路径无效")?;
+        let mut components: Vec<&str> = if self.target.starts_with('/') {
+            Vec::new()
+        } else {
+            directory.split('/').collect()
+        };
+        for component in self
+            .target
+            .strip_prefix('/')
+            .unwrap_or(&self.target)
+            .split('/')
+        {
+            match component {
+                "" => return Err("Office 关系目标不是有效的包内路径".into()),
+                "." => {}
+                ".." => {
+                    components.pop().ok_or("Office 关系目标超出包内根目录")?;
+                }
+                _ => components.push(component),
+            }
+        }
+        if components.is_empty() {
+            return Err("Office 关系目标缺少部件名称".into());
+        }
+        Ok(components.join("/"))
+    }
+}
+
+fn relationship_id(
+    start: &BytesStart<'_>,
+    namespaces: &NamespaceResolver,
+) -> Result<String, String> {
+    for attribute in start.attributes() {
+        let attribute = attribute.map_err(|e| e.to_string())?;
+        let (namespace, name) = namespaces.resolve_attribute(attribute.key);
+        if name.as_ref() == "id"
+            && matches!(namespace, ResolveResult::Bound(namespace) if OFFICE_RELATIONSHIPS.contains(&namespace.as_ref()))
+        {
+            let id = attribute
+                .normalized_value(quick_xml::XmlVersion::Implicit1_0)
+                .map_err(|e| e.to_string())?
+                .into_owned();
+            if !id.is_empty() {
+                return Ok(id);
+            }
+        }
+    }
+    Err("Office 主文档部件缺少关系 ID".into())
+}
+
+fn reserve_metadata(bytes: &mut usize, added: usize) -> Result<(), String> {
+    if added > MAX_BUFFER_BYTES.saturating_sub(*bytes) {
+        return Err("Office 部件清单或关系表超过提取预算".into());
+    }
+    *bytes += added;
+    Ok(())
+}
+
+fn manifest_parts(
+    archive: &mut ZipArchive<File>,
+    remaining: &mut usize,
+    metadata_bytes: &mut usize,
+    manifest: &str,
+    list_name: &str,
+    part_name: &str,
+) -> Result<Vec<ManifestPart>, String> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut in_list = false;
+    if !read_part(archive, manifest, remaining, |event, namespaces| {
+        match event {
+            Event::Start(start) => {
+                depth += 1;
+                if depth == 2 && start.local_name().as_ref() == list_name {
+                    in_list = true;
+                } else if depth == 3 && in_list && start.local_name().as_ref() == part_name {
+                    if parts.len() >= MAX_PARTS {
+                        return Err("Office 工作表或幻灯片数量超过提取预算".into());
+                    }
+                    let relationship_id = relationship_id(&start, namespaces)?;
+                    reserve_metadata(metadata_bytes, relationship_id.len())?;
+                    let sheet = if part_name == "sheet" {
+                        let id = attribute(&start, "sheetId")?
+                            .ok_or("XLSX 工作表缺少 sheetId")?
+                            .parse::<u32>()
+                            .map_err(|_| "XLSX 工作表 sheetId 无效")?;
+                        let title = attribute(&start, "name")?.ok_or("XLSX 工作表缺少名称")?;
+                        reserve_metadata(metadata_bytes, title.len())?;
+                        Some((id, title))
+                    } else {
+                        None
+                    };
+                    parts.push(ManifestPart {
+                        relationship_id,
+                        sheet,
+                    });
+                }
+            }
+            Event::End(_) => {
+                if depth == 2 {
+                    in_list = false;
+                }
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+        Ok(true)
+    })? {
+        return Err(format!("Office 缺少主文档 {manifest}"));
+    }
+    Ok(parts)
+}
+
+fn relationships(
+    archive: &mut ZipArchive<File>,
+    remaining: &mut usize,
+    metadata_bytes: &mut usize,
+    manifest: &str,
+) -> Result<HashMap<String, PartRelationship>, String> {
+    let (directory, filename) = manifest.rsplit_once('/').ok_or("Office 主文档路径无效")?;
+    let path = format!("{directory}/_rels/{filename}.rels");
+    let mut relationships = HashMap::new();
+    if !read_part(archive, &path, remaining, |event, _| {
+        if let Event::Start(start) = event {
+            if start.local_name().as_ref() == "Relationship" {
+                if relationships.len() >= MAX_PARTS {
+                    return Err("Office 关系数量超过提取预算".into());
+                }
+                let id = attribute(&start, "Id")?.ok_or("Office 关系缺少 Id")?;
+                let kind = attribute(&start, "Type")?.ok_or("Office 关系缺少 Type")?;
+                let target = attribute(&start, "Target")?.ok_or("Office 关系缺少 Target")?;
+                let external = match attribute(&start, "TargetMode")?.as_deref() {
+                    None | Some("Internal") => false,
+                    Some("External") => true,
+                    _ => return Err("Office 关系 TargetMode 无效".into()),
+                };
+                reserve_metadata(metadata_bytes, id.len() + kind.len() + target.len())?;
+                if relationships
+                    .insert(
+                        id,
+                        PartRelationship {
+                            kind,
+                            target,
+                            external,
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err("Office 关系 ID 重复".into());
+                }
+            }
+        }
+        Ok(true)
+    })? {
+        return Err(format!("Office 缺少关系表 {path}"));
+    }
+    Ok(relationships)
 }
 
 fn heading(value: &str) -> usize {
@@ -282,7 +450,7 @@ fn docx(
     let mut bold_open = false;
     let mut level = 0;
     let mut list = false;
-    if !read_part(archive, "word/document.xml", remaining, |event| {
+    if !read_part(archive, "word/document.xml", remaining, |event, _| {
         match &event {
             Event::Start(start) => match start.local_name().as_ref() {
                 "t" => in_text = true,
@@ -402,10 +570,28 @@ fn pptx(
     remaining: &mut usize,
     output: &mut TextOutput,
 ) -> Result<(), String> {
-    for (index, name) in parts(archive, "ppt/slides/slide")?.iter().enumerate() {
+    let manifest = "ppt/presentation.xml";
+    let mut metadata_bytes = 0;
+    let slides = manifest_parts(
+        archive,
+        remaining,
+        &mut metadata_bytes,
+        manifest,
+        "sldIdLst",
+        "sldId",
+    )?;
+    let relationships = relationships(archive, remaining, &mut metadata_bytes, manifest)?;
+    for (index, part) in slides.into_iter().enumerate() {
+        let relationship = relationships
+            .get(&part.relationship_id)
+            .ok_or("PPTX 幻灯片关系缺失")?;
+        if !relationship.is_kind("slide") {
+            return Err("PPTX 幻灯片关系类型无效".into());
+        }
+        let name = relationship.internal_target(manifest)?;
         let mut slide = String::new();
         let mut in_text = false;
-        read_part(archive, name, remaining, |event| {
+        if !read_part(archive, &name, remaining, |event, _| {
             match &event {
                 Event::Start(start) => match start.local_name().as_ref() {
                     "t" => in_text = true,
@@ -426,7 +612,9 @@ fn pptx(
                 }
             }
             Ok(true)
-        })?;
+        })? {
+            return Err(format!("PPTX 缺少幻灯片部件 {name}"));
+        }
         if !slide.trim().is_empty() {
             output.push(&format!("\n--- Slide {} ---\n", index + 1));
             output.push(&slide);
@@ -512,33 +700,21 @@ fn xlsx(
     remaining: &mut usize,
     output: &mut TextOutput,
 ) -> Result<(), String> {
-    let mut sheet_names = HashMap::new();
-    let mut sheet_name_bytes = 0usize;
-    read_part(archive, "xl/workbook.xml", remaining, |event| {
-        if let Event::Start(start) = event {
-            if start.local_name().as_ref() == "sheet" {
-                if sheet_names.len() >= MAX_PARTS {
-                    return Err("XLSX 工作表数量超过提取预算".into());
-                }
-                if let (Some(id), Some(name)) =
-                    (attribute(&start, "sheetId")?, attribute(&start, "name")?)
-                {
-                    if name.len() > MAX_BUFFER_BYTES.saturating_sub(sheet_name_bytes) {
-                        return Err("XLSX 工作表名称超过提取预算".into());
-                    }
-                    sheet_name_bytes += name.len();
-                    if let Ok(id) = id.parse::<usize>() {
-                        sheet_names.insert(id, name);
-                    }
-                }
-            }
-        }
-        Ok(true)
-    })?;
+    let manifest = "xl/workbook.xml";
+    let mut metadata_bytes = 0;
+    let sheets = manifest_parts(
+        archive,
+        remaining,
+        &mut metadata_bytes,
+        manifest,
+        "sheets",
+        "sheet",
+    )?;
+    let relationships = relationships(archive, remaining, &mut metadata_bytes, manifest)?;
     let mut shared = Vec::new();
     let mut shared_bytes = 0usize;
     let mut rich = RichString::default();
-    read_part(archive, "xl/sharedStrings.xml", remaining, |event| {
+    read_part(archive, "xl/sharedStrings.xml", remaining, |event, _| {
         if let Some(value) = rich.event(&event, "si")? {
             if shared.len() >= MAX_SHARED_ITEMS
                 || value.len() > MAX_SHARED_BYTES.saturating_sub(shared_bytes)
@@ -550,12 +726,20 @@ fn xlsx(
         }
         Ok(true)
     })?;
-    for name in parts(archive, "xl/worksheets/sheet")? {
-        let id = part_number(&name);
-        let title = sheet_names
-            .get(&id)
-            .cloned()
-            .unwrap_or_else(|| format!("Sheet {id}"));
+    for part in sheets {
+        let relationship = relationships
+            .get(&part.relationship_id)
+            .ok_or("XLSX 工作表关系缺失")?;
+        // Chart/dialog sheets have no worksheet cells; retain the existing scope
+        // of text extraction without interpreting their XML as a worksheet.
+        if relationship.is_kind("chartsheet") || relationship.is_kind("dialogsheet") {
+            continue;
+        }
+        if !relationship.is_kind("worksheet") {
+            return Err("XLSX 工作表关系类型无效".into());
+        }
+        let name = relationship.internal_target(manifest)?;
+        let (id, title) = part.sheet.ok_or("XLSX 工作表描述缺失")?;
         let mut emitted_header = false;
         let mut row = Vec::<(usize, String)>::new();
         let mut row_bytes = 0usize;
@@ -566,7 +750,7 @@ fn xlsx(
         let mut value_present = false;
         let mut in_value = false;
         let mut inline = RichString::default();
-        read_part(archive, &name, remaining, |event| {
+        if !read_part(archive, &name, remaining, |event, _| {
             if let Some(value) = inline.event(&event, "is")? {
                 cell_value = value;
                 value_present = true;
@@ -649,7 +833,9 @@ fn xlsx(
                 _ => {}
             }
             Ok(!output.truncated)
-        })?;
+        })? {
+            return Err(format!("XLSX 缺少工作表部件 {name}"));
+        }
         if output.truncated {
             break;
         }

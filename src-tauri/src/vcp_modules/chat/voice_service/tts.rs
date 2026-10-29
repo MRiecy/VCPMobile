@@ -136,11 +136,22 @@ struct Slot {
 struct Registry {
     current: Option<Slot>,
     retired: VecDeque<String>,
+    issued_document: u64,
+    document: u64,
+    document_ready: bool,
 }
 #[derive(Default)]
-pub struct TtsServiceState(Mutex<Registry>);
+pub struct TtsServiceState(Mutex<Registry>, tokio::sync::Mutex<()>);
 
 impl Registry {
+    fn validate_document(&self, document_id: Option<&str>) -> Result<(), String> {
+        let document = document_id.and_then(|id| id.parse::<u64>().ok());
+        if !self.document_ready || document != Some(self.document) {
+            return Err("cancelled: 朗读所属页面已重新加载，请重试。".into());
+        }
+        Ok(())
+    }
+
     fn reserve(&mut self, id: String, kind: NarrationKind) -> Result<CancellationToken, String> {
         if self.retired.contains(&id) {
             return Err(network::CANCELLED.into());
@@ -214,6 +225,48 @@ impl Registry {
         }
         job
     }
+}
+
+/// Allocation has no playback side effects. An old document that receives a
+/// late reply cannot activate after destruction, while an already-sent connect
+/// always carries a ticket older than the replacement document's allocation.
+#[tauri::command]
+pub fn allocate_tts_document<R: Runtime>(app: AppHandle<R>) -> Result<String, String> {
+    let state = app.state::<TtsServiceState>();
+    let mut registry = state.0.lock().map_err(|error| error.to_string())?;
+    registry.issued_document = registry.issued_document.checked_add(1)
+        .ok_or("朗读页面标识已耗尽，请重新启动应用。")?;
+    Ok(registry.issued_document.to_string())
+}
+
+#[tauri::command]
+pub async fn connect_tts_document<R: Runtime>(app: AppHandle<R>, document_id: String) -> Result<(), String> {
+    let document = document_id.parse::<u64>().map_err(|_| "朗读页面标识无效。")?;
+    let state = app.state::<TtsServiceState>();
+    // Repeated bootstrap attempts share the same physical-stop barrier. Neither
+    // this document nor a newer one is ready before the old native sink releases.
+    let _connection = state.1.lock().await;
+    let previous = {
+        let mut registry = state.0.lock().map_err(|error| error.to_string())?;
+        if document == 0 || document > registry.issued_document {
+            return Err("朗读页面标识无效。".into());
+        }
+        if document < registry.document {
+            return Err("cancelled: 朗读所属页面已重新加载，请重试。".into());
+        }
+        if document == registry.document && registry.document_ready { return Ok(()); }
+        registry.document = document;
+        registry.document_ready = false;
+        let previous = registry.current.as_ref()
+            .filter(|slot| !matches!(&slot.kind, NarrationKind::Chat))
+            .map(|slot| slot.id.clone());
+        if let Some(id) = &previous { registry.stop(id); }
+        previous
+    };
+    if let Some(id) = previous { stop_tts(app.clone(), id).await?; }
+    // The connection mutex serializes activations; only readiness changes here.
+    state.0.lock().map_err(|error| error.to_string())?.document_ready = true;
+    Ok(())
 }
 
 pub(super) struct PreparedNarration {
@@ -316,6 +369,7 @@ impl TtsPreviewSettings {
 pub async fn preview_tts<R: Runtime>(
     app: AppHandle<R>,
     tts_id: String,
+    document_id: String,
     text: String,
     settings: TtsPreviewSettings,
 ) -> Result<VoiceServiceStart, String> {
@@ -329,6 +383,7 @@ pub async fn preview_tts<R: Runtime>(
         None,
         NarrationSource::Preview(settings.into_policy()),
         None,
+        Some(document_id),
     )
     .await?;
     if !started.configured {
@@ -349,10 +404,11 @@ pub async fn preview_tts<R: Runtime>(
 pub async fn preview_voice_clone_sample<R: Runtime>(
     app: AppHandle<R>,
     tts_id: String,
+    document_id: String,
     sample_id: String,
 ) -> Result<VoiceServiceStart, String> {
     let started = start_narration(
-        app.clone(), tts_id.clone(), None, NarrationSource::Sample(sample_id), None,
+        app.clone(), tts_id.clone(), None, NarrationSource::Sample(sample_id), None, Some(document_id),
     ).await?;
     if super::call::is_active(&app)? {
         stop_tts(app, tts_id).await?;
@@ -559,10 +615,11 @@ fn wake<R: Runtime>(app: &AppHandle<R>, job: &Arc<TtsJob>) {
 pub async fn start_tts_session<R: Runtime>(
     app: AppHandle<R>,
     tts_id: String,
+    document_id: String,
     origin_user_message_id: Option<String>,
     bubble_source: Option<BubbleSource>,
 ) -> Result<VoiceServiceStart, String> {
-    start_narration(app, tts_id, origin_user_message_id, NarrationSource::Stored, bubble_source).await
+    start_narration(app, tts_id, origin_user_message_id, NarrationSource::Stored, bubble_source, Some(document_id)).await
 }
 
 pub(super) async fn start_prepared_narration<R: Runtime>(
@@ -577,6 +634,7 @@ pub(super) async fn start_prepared_narration<R: Runtime>(
         Some(origin_user_message_id),
         NarrationSource::Prepared(prepared),
         None,
+        None,
     )
     .await
 }
@@ -587,6 +645,7 @@ async fn start_narration<R: Runtime>(
     origin_user_message_id: Option<String>,
     source: NarrationSource,
     bubble_source: Option<BubbleSource>,
+    document_id: Option<String>,
 ) -> Result<VoiceServiceStart, String> {
     if tts_id.is_empty()
         || tts_id.len() > 128
@@ -618,6 +677,11 @@ async fn start_narration<R: Runtime>(
     let cancel = {
         let state = app.state::<TtsServiceState>();
         let mut registry = state.0.lock().map_err(|error| error.to_string())?;
+        // Check the caller's document under the slot admission lock, including
+        // commands dispatched by a destroyed WebView but only polled now.
+        if !matches!(&kind, NarrationKind::Chat) {
+            registry.validate_document(document_id.as_deref())?;
+        }
         // A call reserves itself before stopping the current bubble. Holding
         // the TTS slot lock around this check closes the opposite admission order.
         kind.validate_admission(super::call::is_active(&app)?)?;
@@ -1099,6 +1163,8 @@ async fn prepare_segment(
 ) -> Result<(), String> {
     let config = piece.voice.as_ref().map_or(&narration.config, |voice| &voice.config);
     let sample = piece.voice.as_ref().map_or(narration.sample.as_ref(), |voice| voice.sample.as_ref());
+    // Preparation validates the identity and shares reference audio. The large
+    // JSON body is materialized only if synthesis is needed after this lookup.
     let request = network::prepare_synthesis(config, &piece.text, piece.guidance.as_deref(), sample)?;
     let key = cache::segment_key(&request.identity);
     if let Some(cache) = cache {
@@ -1199,6 +1265,96 @@ mod tests {
     }
     fn bubble_source() -> BubbleSource {
         BubbleSource { topic: TopicKey::new("agent", "a", "t"), message_id: "message".into() }
+    }
+
+    #[tokio::test]
+    async fn new_documents_retire_every_independent_kind_but_leave_chat_owned_audio() {
+        for kind in [NarrationKind::Bubble(bubble_source()), NarrationKind::Preview,
+            NarrationKind::SamplePreview, NarrationKind::Chat] {
+            let app = tauri::test::mock_app();
+            app.manage(TtsServiceState::default());
+            let old_document = allocate_tts_document(app.handle().clone()).unwrap();
+            connect_tts_document(app.handle().clone(), old_document.clone()).await.unwrap();
+            let state = app.state::<TtsServiceState>();
+            let is_chat = matches!(&kind, NarrationKind::Chat);
+            let old = install_kind(&mut state.0.lock().unwrap(), "old", kind);
+            let next = allocate_tts_document(app.handle().clone()).unwrap();
+            connect_tts_document(app.handle().clone(), next.clone()).await.unwrap();
+            assert_eq!(old.cancel.is_cancelled(), !is_chat);
+            let registry = state.0.lock().unwrap();
+            assert_eq!(registry.current.is_some(), is_chat);
+            assert!(registry.validate_document(Some(&next)).is_ok());
+            assert!(registry.validate_document(Some(&old_document)).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn late_document_registration_and_unpolled_preview_cannot_reopen_old_admission() {
+        let app = tauri::test::mock_app();
+        app.manage(TtsServiceState::default());
+        let old = allocate_tts_document(app.handle().clone()).unwrap();
+        let current = allocate_tts_document(app.handle().clone()).unwrap();
+        connect_tts_document(app.handle().clone(), current.clone()).await.unwrap();
+        assert!(connect_tts_document(app.handle().clone(), old.clone()).await.is_err());
+        let error = preview_voice_clone_sample(app.handle().clone(), "late-sample".into(), old,
+            "sample-that-must-never-be-read".into()).await.err().unwrap();
+        assert!(error.starts_with("cancelled:"));
+        // A late allocation alone is harmless until its still-live caller connects.
+        let _unused = allocate_tts_document(app.handle().clone()).unwrap();
+        let state = app.state::<TtsServiceState>();
+        let registry = state.0.lock().unwrap();
+        assert!(registry.validate_document(Some(&current)).is_ok());
+        assert!(registry.current.is_none());
+    }
+
+    #[tokio::test]
+    async fn document_registration_waits_for_stop_ack_and_same_document_retry_is_idempotent() {
+        let app = tauri::test::mock_app();
+        app.manage(TtsServiceState::default());
+        let first = allocate_tts_document(app.handle().clone()).unwrap();
+        connect_tts_document(app.handle().clone(), first).await.unwrap();
+        let state = app.state::<TtsServiceState>();
+        let old = install_kind(&mut state.0.lock().unwrap(), "old", NarrationKind::Preview);
+        // Hold the same barrier as an existing in-flight native stop.
+        let stopping = old.stop_lock.lock().await;
+        let next = allocate_tts_document(app.handle().clone()).unwrap();
+        let connect = connect_tts_document(app.handle().clone(), next.clone());
+        let retry = connect_tts_document(app.handle().clone(), next.clone());
+        tokio::pin!(connect, retry);
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(10), &mut connect).await.is_err());
+        assert!(old.cancel.is_cancelled());
+        assert!(state.0.lock().unwrap().validate_document(Some(&next)).is_err());
+        assert!(tokio::time::timeout(std::time::Duration::from_millis(10), &mut retry).await.is_err());
+        drop(stopping);
+        connect.await.unwrap();
+        retry.await.unwrap();
+        let fresh = install_kind(&mut state.0.lock().unwrap(), "fresh", NarrationKind::SamplePreview);
+        connect_tts_document(app.handle().clone(), next).await.unwrap();
+        assert!(!fresh.cancel.is_cancelled());
+        assert_eq!(state.0.lock().unwrap().current.as_ref().unwrap().id, "fresh");
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    #[tokio::test]
+    async fn failed_document_stop_keeps_the_slot_and_requires_a_real_retry() {
+        let app = tauri::test::mock_app();
+        app.manage(TtsServiceState::default());
+        let first = allocate_tts_document(app.handle().clone()).unwrap();
+        connect_tts_document(app.handle().clone(), first).await.unwrap();
+        let state = app.state::<TtsServiceState>();
+        let old = install_kind(&mut state.0.lock().unwrap(), "old", NarrationKind::Preview);
+        state.0.lock().unwrap().admit_player(&old).unwrap();
+        let next = allocate_tts_document(app.handle().clone()).unwrap();
+        // Host has no native sink: both attempts must propagate its real failure,
+        // rather than a repeated document connection bypassing the release.
+        for _ in 0..2 {
+            assert!(connect_tts_document(app.handle().clone(), next.clone()).await.is_err());
+            let registry = state.0.lock().unwrap();
+            assert!(registry.validate_document(Some(&next)).is_err());
+            assert!(Arc::ptr_eq(registry.current.as_ref().unwrap().job.as_ref().unwrap(), &old));
+            assert!(old.cancel.is_cancelled());
+            assert!(old.player_started.load(Ordering::Acquire));
+        }
     }
 
     #[tokio::test]
@@ -1511,7 +1667,7 @@ mod tests {
             current: Some(Slot { id: narration.id.clone(), cancel: narration.cancel.clone(),
                 job: Some(narration.clone()), kind: NarrationKind::Chat }),
             ..Default::default()
-        })));
+        }), tokio::sync::Mutex::new(())));
         narration
     }
 
@@ -1680,11 +1836,13 @@ mod tests {
     async fn invalid_builtin_and_unselected_clone_previews_release_their_slots() {
         let app = tauri::test::mock_app();
         app.manage(TtsServiceState::default());
+        let document = allocate_tts_document(app.handle().clone()).unwrap();
+        connect_tts_document(app.handle().clone(), document.clone()).await.unwrap();
         for (id, mode, voice, expected_error) in [
             ("builtin-invalid", VoiceTtsMode::Builtin, "none", "音色配置无效"),
             ("clone-empty", VoiceTtsMode::Clone, "冰糖", "未选择朗读音色"),
         ] {
-            let error = preview_tts(app.handle().clone(), id.into(), "试听正文".into(), TtsPreviewSettings {
+            let error = preview_tts(app.handle().clone(), id.into(), document.clone(), "试听正文".into(), TtsPreviewSettings {
                 connection: VoiceConnectionConfig { api_key: "fixture-key".into(), ..Default::default() },
                 tts: VoiceTtsConfig { mode, voice: voice.into(), ..Default::default() },
             }).await.err().unwrap();
@@ -2082,6 +2240,8 @@ mod tests {
     async fn deleted_source_cannot_start_after_mutation_missed_a_pending_frontend_read() {
         let app = tauri::test::mock_app();
         app.manage(TtsServiceState::default());
+        let document = allocate_tts_document(app.handle().clone()).unwrap();
+        connect_tts_document(app.handle().clone(), document.clone()).await.unwrap();
         let pool = sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
             .connect("sqlite::memory:").await.unwrap();
         sqlx::query("CREATE TABLE messages (owner_type TEXT, owner_id TEXT, topic_id TEXT, msg_id TEXT, content TEXT, deleted_at INTEGER);
@@ -2094,7 +2254,7 @@ mod tests {
         sqlx::query("UPDATE messages SET deleted_at = 1 WHERE msg_id = 'message'")
             .execute(&pool).await.unwrap();
         stop_bubble_for_messages(app.handle(), &source.topic, &[source.message_id.clone()]).await.unwrap();
-        assert!(start_tts_session(app.handle().clone(), "late".into(), None, Some(source)).await.is_err());
+        assert!(start_tts_session(app.handle().clone(), "late".into(), document, None, Some(source)).await.is_err());
         assert!(app.state::<TtsServiceState>().0.lock().unwrap().current.is_none());
     }
 }

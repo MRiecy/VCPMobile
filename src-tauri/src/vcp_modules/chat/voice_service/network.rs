@@ -11,7 +11,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use bytes::Bytes;
 use futures_util::StreamExt;
 use serde_json::{json, Value};
-use std::{future::Future, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
 pub(super) const MAX_TEXT_BYTES: usize = 64 * 1024;
@@ -24,8 +24,28 @@ const MAX_TTS_JSON_BYTES: usize = MAX_AUDIO_FILE_BYTES.div_ceil(3) * 4 + 64 * 10
 
 pub(super) struct SynthesisRequest {
     pub identity: TtsCacheIdentity,
-    body: Value,
+    // Clone references can approach 9 MiB of base64. Cache lookup needs only the
+    // identity; retain their existing allocation until HTTP actually needs it.
+    voice: Arc<str>,
     stream: bool,
+}
+
+impl SynthesisRequest {
+    fn body(&self) -> Value {
+        let mut messages = Vec::with_capacity(2);
+        if let Some(prompt) = &self.identity.guidance {
+            messages.push(json!({"role": "user", "content": prompt}));
+        }
+        messages.push(json!({"role": "assistant", "content": self.identity.text}));
+        let mut audio = json!({"format": if self.stream { "pcm16" } else { "wav" }});
+        audio["voice"] = Value::String(self.voice.to_string());
+        let mut body = json!({"model": self.identity.model, "stream": self.stream});
+        // Assign owned Values instead of passing them through json!, which
+        // serializes borrowed Values and would copy the reference audio again.
+        body["messages"] = Value::Array(messages);
+        body["audio"] = audio;
+        body
+    }
 }
 
 #[derive(Debug)]
@@ -249,27 +269,17 @@ pub(super) fn prepare_synthesis(
         .map_err(|_| String::from("语音 API 地址无效。"))?
         .to_string();
     let stream = config.tts_streaming();
-    let mut audio = json!({"format": if stream { "pcm16" } else { "wav" }});
-    let model = match config.tts_mode {
-        VoiceTtsMode::Builtin => {
-            audio["voice"] = json!(config.voice);
-            "mimo-v2.5-tts"
-        }
+    let (model, voice) = match config.tts_mode {
+        VoiceTtsMode::Builtin => ("mimo-v2.5-tts", Arc::from(config.voice.as_str())),
         VoiceTtsMode::Clone => {
             let sample = sample.ok_or_else(|| String::from("音色复刻参考音频未准备完成。"))?;
-            audio["voice"] = json!(sample.data_url.as_ref());
-            "mimo-v2.5-tts-voiceclone"
+            ("mimo-v2.5-tts-voiceclone", sample.data_url.clone())
         }
     };
     let prompt = guidance.unwrap_or_default().trim();
     if text.len() > MAX_TEXT_BYTES || prompt.chars().count() > VOICE_GUIDANCE_MAX_CHARS {
         return Err(String::from("单段语音正文或指导过长。"));
     }
-    let mut messages = Vec::with_capacity(2);
-    if !prompt.is_empty() {
-        messages.push(json!({"role": "user", "content": prompt}));
-    }
-    messages.push(json!({"role": "assistant", "content": text}));
     Ok(SynthesisRequest {
         identity: TtsCacheIdentity {
             endpoint,
@@ -281,7 +291,7 @@ pub(super) fn prepare_synthesis(
             guidance: (!prompt.is_empty()).then(|| prompt.to_string()),
             text: text.to_string(),
         },
-        body: json!({ "model": model, "stream": stream, "messages": messages, "audio": audio }),
+        voice,
         stream,
     })
 }
@@ -324,7 +334,7 @@ async fn request_synthesis(
         .post(&prepared.identity.endpoint)
         .bearer_auth(&config.api_key)
         .timeout(Duration::from_secs(120))
-        .json(&prepared.body)
+        .json(&prepared.body())
         .send();
     let response = tokio::select! {
         biased;
@@ -1106,25 +1116,26 @@ mod tests {
         config.voice = "mimo_default".into();
         let text = "  原样正文。\n";
         let request = prepare_synthesis(&config, text, Some("  轻声\n"), None).unwrap();
+        let body = request.body();
         assert_eq!(
             request.identity.endpoint,
             "https://voice.example/v1/chat/completions"
         );
         assert_eq!(request.identity.text, text);
         assert_eq!(
-            request.body["messages"][1]["content"],
+            body["messages"][1]["content"],
             request.identity.text
         );
         assert_eq!(
-            request.body["messages"][0]["content"],
+            body["messages"][0]["content"],
             request.identity.guidance.as_deref().unwrap()
         );
         assert_eq!(
-            request.body["model"],
+            body["model"],
             request.identity.model.as_deref().unwrap()
         );
         assert_eq!(
-            request.body["audio"]["voice"],
+            body["audio"]["voice"],
             request.identity.voice.as_deref().unwrap()
         );
         assert!(request.identity.clone_sample_id.is_none());
@@ -1147,7 +1158,11 @@ mod tests {
             Some("sample-identity")
         );
         assert!(clone.identity.voice.is_none());
-        assert_eq!(clone.body["audio"]["voice"], sample.data_url.as_ref());
+        assert!(
+            Arc::ptr_eq(&clone.voice, &sample.data_url),
+            "cache preparation must share reference audio"
+        );
+        assert_eq!(clone.body()["audio"]["voice"], sample.data_url.as_ref());
         assert_eq!(
             clone.identity.model.as_deref(),
             Some("mimo-v2.5-tts-voiceclone")
@@ -1369,7 +1384,7 @@ mod tests {
             for guidance in [None, Some(" \n")] {
                 let request = prepare_synthesis(&config, "正文", guidance, Some(&sample)).unwrap();
                 assert_eq!(
-                    request.body["messages"],
+                    request.body()["messages"],
                     json!([{"role":"assistant", "content":"正文"}])
                 );
                 assert_eq!(request.identity.guidance, None);
@@ -1377,7 +1392,7 @@ mod tests {
             let request =
                 prepare_synthesis(&config, "正文", Some("本条指导"), Some(&sample)).unwrap();
             assert_eq!(
-                request.body["messages"],
+                request.body()["messages"],
                 json!([
                     {"role":"user", "content":"本条指导"},
                     {"role":"assistant", "content":"正文"}
