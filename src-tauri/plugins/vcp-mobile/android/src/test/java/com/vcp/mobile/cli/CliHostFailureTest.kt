@@ -1,6 +1,9 @@
 package com.vcp.mobile.cli
 
 import android.content.Context
+import android.os.Process as AndroidProcess
+import android.system.Os
+import android.system.OsConstants
 import androidx.test.core.app.ApplicationProvider
 import app.tauri.plugin.JSObject
 import com.vcp.mobile.service.ForegroundGuardian
@@ -16,6 +19,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import java.io.File
 import java.io.IOException
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -234,5 +240,158 @@ class CliHostFailureTest {
         assertThrows(IllegalStateException::class.java) { request.run() }
         request.rejectBeforeStart("closed")
         assertEquals(0, failures.get())
+    }
+
+    @Test fun groupDisappearingDuringIdentityCheckIsTerminalWithoutSendingASignal() {
+        val identity = ProcIdentity(4242, 4242, 4242, 1, AndroidProcess.myUid())
+        mockkObject(OwnedProcessGroup, recordPrivateCalls = true)
+        mockkStatic(Os::class)
+        every { Os.kill(any(), any()) } just Runs
+        every { OwnedProcessGroup.isAlive(identity.pgid) } returnsMany listOf(true, false)
+        every { OwnedProcessGroup.readIdentity(identity.pid) } returns null
+        every { OwnedProcessGroup["groupHasOnlyVisibleAppUidMembers"](identity.pgid) } returns false
+
+        val result = OwnedProcessGroup.terminate(identity, 0)
+
+        assertTrue(result.groupGone)
+        assertFalse(result.termSent)
+        assertFalse(result.killSent)
+        verify(exactly = 0) { Os.kill(any(), any()) }
+    }
+
+    @Test fun liveReplacementIdentityCannotBeTerminated() {
+        val identity = ProcIdentity(4242, 4242, 4242, 1, AndroidProcess.myUid())
+        mockkObject(OwnedProcessGroup)
+        mockkStatic(Os::class)
+        every { Os.kill(any(), any()) } just Runs
+        every { OwnedProcessGroup.isAlive(identity.pgid) } returns true
+        every { OwnedProcessGroup.readIdentity(identity.pid) } returns identity.copy(startTimeTicks = 2)
+
+        assertThrows(IllegalStateException::class.java) { OwnedProcessGroup.terminate(identity, 0) }
+
+        verify(exactly = 0) { Os.kill(any(), any()) }
+    }
+
+    @Test fun groupDisappearingBeforeKillDoesNotTurnItsExitIntoAnOwnershipFailure() {
+        val identity = ProcIdentity(4242, 4242, 4242, 1, AndroidProcess.myUid())
+        mockkObject(OwnedProcessGroup, recordPrivateCalls = true)
+        mockkStatic(Os::class)
+        every { Os.kill(any(), any()) } just Runs
+        every { OwnedProcessGroup.isAlive(identity.pgid) } returnsMany listOf(true, true, true, false)
+        every { OwnedProcessGroup.readIdentity(identity.pid) } returnsMany listOf(identity, null, null)
+        every { OwnedProcessGroup["groupHasOnlyVisibleAppUidMembers"](identity.pgid) } returns false
+
+        val result = OwnedProcessGroup.terminate(identity, 0)
+
+        assertTrue(result.groupGone)
+        assertTrue(result.termSent)
+        assertFalse(result.killSent)
+        verify(exactly = 1) { Os.kill(-identity.pgid, OsConstants.SIGTERM) }
+        // The initial TERM is the only signal: disappearance must not issue another one.
+        // Count the OS boundary calls because host Android stubs can alias signal constants.
+        verify(exactly = 1) { Os.kill(any(), any()) }
+    }
+
+    @Test fun cancellationCompletesAfterTheOnlyWaiterFailed() = assertTerminalConvergence(waiterFails = true)
+
+    @Test fun naturalExitAndConcurrentCancellationsDrainAndFinalizeOnce() = assertTerminalConvergence(waiterFails = false)
+
+    private fun assertTerminalConvergence(waiterFails: Boolean) {
+        val identity = ProcIdentity(4242, 4242, 4242, 1, AndroidProcess.myUid())
+        val readerGate = CountDownLatch(1)
+        val readersStarted = CountDownLatch(2)
+        val waiterAttempted = CountDownLatch(1)
+        val terminationCalls = AtomicInteger()
+        val stdout = File(prepared.output, "terminal.stdout")
+        val stderr = File(prepared.output, "terminal.stderr")
+        val budget = ArtifactBudget(1024, stdout, stderr)
+        fun delayedInput(value: String) = object : ByteArrayInputStream(value.toByteArray()) {
+            override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+                readersStarted.countDown()
+                readerGate.await()
+                return super.read(buffer, offset, length)
+            }
+        }
+        val stdoutReader = budget.startDrainThread("fixture-stdout", delayedInput("last stdout"), ArtifactStream.STDOUT)
+        val stderrReader = budget.startDrainThread("fixture-stderr", delayedInput("last stderr"), ArtifactStream.STDERR)
+        val process = mockk<Process>()
+        every { process.waitFor() } returns 0
+        every { process.waitFor(any(), any()) } returns true
+        every { process.exitValue() } returns 0
+        every { process.isAlive } returns false
+        every { process.destroyForcibly() } returns process
+        every { process.inputStream } returns ByteArrayInputStream(byteArrayOf())
+        every { process.errorStream } returns ByteArrayInputStream(byteArrayOf())
+        every { process.outputStream } returns ByteArrayOutputStream()
+        mockkObject(OwnedProcessGroup)
+        every { OwnedProcessGroup.isAlive(identity.pgid) } returns false
+        every { OwnedProcessGroup.terminate(identity, any()) } answers {
+            val first = terminationCalls.incrementAndGet() == 1
+            waiterAttempted.countDown()
+            if (first && waiterFails) throw IllegalStateException("identity read interrupted before terminal publication")
+            GroupTermination(false, false, true)
+        }
+        mockkObject(ForegroundGuardian)
+        every { ForegroundGuardian.release(any(), any(), any()) } just Runs
+
+        val keyClass = Class.forName("com.vcp.mobile.cli.ProcessKey")
+        val key = keyClass.getDeclaredConstructor(String::class.java, String::class.java, Long::class.javaPrimitiveType)
+            .apply { isAccessible = true }.newInstance("job", "attempt", 1L)
+        val leaseClass = Class.forName("com.vcp.mobile.cli.CliForegroundLease")
+        val lease = leaseClass.getDeclaredConstructor(String::class.java, Long::class.javaPrimitiveType)
+            .apply { isAccessible = true }.newInstance("cli:job:attempt", 31L)
+        val handleClass = Class.forName("com.vcp.mobile.cli.CliProcessHandle")
+        val handle = handleClass.declaredConstructors.single().apply { isAccessible = true }.newInstance(
+            key, "fingerprint", identity, process, stdout, stderr, budget,
+            stdoutReader, stderrReader, File(prepared.prootTmpParent, "terminal").apply { mkdirs() }, lease,
+        )
+        @Suppress("UNCHECKED_CAST")
+        val handles = CliProcessHost::class.java.getDeclaredField("handles").apply { isAccessible = true }
+            .get(host) as ConcurrentHashMap<Any, Any>
+        handles[key] = handle
+        val finished = handleClass.getDeclaredMethod("getFinished").apply { isAccessible = true }
+            .invoke(handle) as CountDownLatch
+        val waiter = CliProcessHost::class.java.getDeclaredMethod("startWaiter", handleClass)
+            .apply { isAccessible = true }.invoke(host, handle) as Thread
+        handleClass.getDeclaredMethod("setWaiter", Thread::class.java).apply { isAccessible = true }
+            .invoke(handle, waiter)
+        try {
+            assertTrue(readersStarted.await(2, TimeUnit.SECONDS))
+            assertTrue(waiterAttempted.await(2, TimeUnit.SECONDS))
+            if (waiterFails) {
+                waiter.join(2_000)
+                assertFalse(waiter.isAlive)
+            }
+            val responses = CountDownLatch(2)
+            val failures = AtomicReference<String?>(null)
+            repeat(2) { index ->
+                host.cancel(CancelCliProcessArgs().apply {
+                    operationId = "cancel-$index"
+                    jobId = "job"
+                    attemptId = "attempt"
+                    runtimeGeneration = 1
+                    graceMs = 0
+                }, { response ->
+                    if (!response.getBoolean("groupGone") || response.getInt("exitCode") != 0) {
+                        failures.set("cancel did not report the completed process")
+                    }
+                    responses.countDown()
+                }, { failures.set(it); responses.countDown() })
+            }
+            assertEquals(1L, finished.count)
+            verify(exactly = 0) { ForegroundGuardian.release(any(), any(), any()) }
+            readerGate.countDown()
+            assertTrue(responses.await(5, TimeUnit.SECONDS))
+            assertNull(failures.get())
+            assertEquals(0L, finished.count)
+            assertEquals("last stdout", stdout.readText())
+            assertEquals("last stderr", stderr.readText())
+            verify(exactly = 1) { ForegroundGuardian.release(context, "cli:job:attempt", 31L) }
+        } finally {
+            readerGate.countDown()
+            waiter.join(2_000)
+            stdoutReader.join(2_000)
+            stderrReader.join(2_000)
+        }
     }
 }

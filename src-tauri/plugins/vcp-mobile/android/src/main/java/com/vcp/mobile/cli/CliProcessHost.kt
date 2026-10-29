@@ -30,7 +30,6 @@ private const val MAX_CANCEL_GRACE_MS = 5_000L
 private const val HANDSHAKE_TIMEOUT_MS = 3_000L
 private const val ORPHAN_GRACE_MS = 250L
 private const val THREAD_JOIN_MS = 2_000L
-private const val TERMINAL_DRAIN_WAIT_MS = 10_000L
 private const val FOREGROUND_READINESS_WAIT_MS = 6_000L
 // Must stay above ~2.1 GiB: bionic's dynamic linker reserves a ~2 GiB CFI shadow
 // (MAP_NORESERVE, no committed RAM) when exec'ing the host PRoot PIE. A smaller
@@ -618,9 +617,16 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
             null
         }
         if (code != null) handle.exitCode.compareAndSet(null, code)
-        val termination = runCatching { OwnedProcessGroup.terminate(handle.identity, ORPHAN_GRACE_MS) }.getOrNull()
-        if (termination?.groupGone == true && drainReadersForTerminal(handle)) {
-            finalizeHandle(handle)
+        synchronized(handle.terminationLock) {
+            if (!handle.isCompleted()) {
+                try {
+                    val termination = OwnedProcessGroup.terminate(handle.identity, ORPHAN_GRACE_MS)
+                    if (termination.groupGone) completeHandleAfterGroupGone(handle, THREAD_JOIN_MS)
+                } catch (error: Exception) {
+                    // A later cancel can retry containment/drain and publish the terminal state.
+                    Log.w(TAG, "CLI waiter could not finish ${handle.key.jobId}", error)
+                }
+            }
         }
     }, "vcp-cli-wait-${safeFileStem(handle.key).take(12)}").apply {
         isDaemon = true
@@ -677,14 +683,12 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
                 Thread.currentThread().interrupt()
             }
         }
-        try {
-            if (!handle.finished.await(maxOf(waitMs, TERMINAL_DRAIN_WAIT_MS), TimeUnit.MILLISECONDS)) {
-                throw IllegalStateException("CLI output drain did not reach terminal state")
-            }
-        } catch (error: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw IllegalStateException("interrupted while waiting for CLI output drain", error)
-        }
+        check(!handle.process.isAlive) { "CLI direct child remained alive after process group exit" }
+        handle.exitCode.compareAndSet(null, handle.process.exitValue())
+        check(drainReadersForTerminal(handle)) { "CLI output drain did not reach terminal state" }
+        // Both the waiter and cancellation own this path under terminationLock. Cancellation
+        // must be able to finish even when the one-shot waiter already failed and returned.
+        finalizeHandle(handle)
     }
 
     private fun abortUnregisteredProcess(
@@ -776,9 +780,11 @@ internal class CliProcessHost(private val context: Context) : AutoCloseable {
         }
         synchronized(lifecycleLock) {
             handles.values.forEach { handle ->
-                cleanupCliResource("process group during host close") {
-                    val termination = OwnedProcessGroup.terminate(handle.identity, graceMs = 0)
-                    if (termination.groupGone) completeHandleAfterGroupGone(handle, THREAD_JOIN_MS)
+                synchronized(handle.terminationLock) {
+                    cleanupCliResource("process group during host close") {
+                        val termination = OwnedProcessGroup.terminate(handle.identity, graceMs = 0)
+                        if (termination.groupGone) completeHandleAfterGroupGone(handle, THREAD_JOIN_MS)
+                    }
                 }
                 cleanupCliResource("direct child during host close") { handle.process.destroyForcibly() }
                 closeProcessStreams(handle.process)

@@ -108,10 +108,9 @@ internal object OwnedProcessGroup {
     }
 
     fun terminate(identity: ProcIdentity, graceMs: Long): GroupTermination {
-        if (!isAlive(identity.pgid)) {
+        if (!ownedGroupIsAlive(identity)) {
             return GroupTermination(termSent = false, killSent = false, groupGone = true)
         }
-        require(canSignalOwnedIdentity(identity)) { "CLI process identity no longer matches its owned process group" }
         val termSent = signalGroup(identity.pgid, OsConstants.SIGTERM)
         if (waitForGroupGone(identity.pgid, graceMs)) {
             return GroupTermination(termSent = termSent, killSent = false, groupGone = true)
@@ -125,13 +124,26 @@ internal object OwnedProcessGroup {
         ) {
             return GroupTermination(termSent = termSent, killSent = false, groupGone = true)
         }
-        require(canSignalOwnedIdentity(identity)) { "CLI process group ownership changed before SIGKILL" }
+        if (!ownedGroupIsAlive(identity)) {
+            return GroupTermination(termSent = termSent, killSent = false, groupGone = true)
+        }
         val killSent = signalGroup(identity.pgid, OsConstants.SIGKILL)
         return GroupTermination(
             termSent = termSent,
             killSent = killSent,
             groupGone = waitForGroupGone(identity.pgid, GROUP_KILL_WAIT_MS),
         )
+    }
+
+    private fun ownedGroupIsAlive(identity: ProcIdentity): Boolean {
+        if (!isAlive(identity.pgid)) return false
+        if (canSignalOwnedIdentity(identity)) return true
+        // The last member can exit between kill(0) and the /proc identity reads.
+        // Only disappearance settles the owner; a live replacement is never signaled.
+        check(!isAlive(identity.pgid)) {
+            "CLI process identity no longer matches its owned process group"
+        }
+        return false
     }
 
     private fun canSignalOwnedIdentity(identity: ProcIdentity): Boolean {
