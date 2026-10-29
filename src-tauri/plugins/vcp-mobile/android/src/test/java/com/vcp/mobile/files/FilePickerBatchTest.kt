@@ -3,8 +3,12 @@ package com.vcp.mobile.files
 import android.app.Activity
 import android.content.ClipData
 import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.content.pm.ApplicationInfo
+import android.content.pm.ResolveInfo
 import android.net.Uri
 import androidx.activity.result.ActivityResult
+import androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia
 import androidx.core.content.FileProvider
 import app.tauri.plugin.Invoke
 import app.tauri.plugin.JSObject
@@ -30,6 +34,11 @@ import java.util.concurrent.TimeUnit
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [28])
 class FilePickerBatchTest {
+    companion object {
+        // Android 13 wire constants; this suite compiles against an Android 9 test stub.
+        private const val PICK_IMAGES = "android.provider.action.PICK_IMAGES"
+        private const val PICK_IMAGES_MAX = "android.provider.extra.PICK_IMAGES_MAX"
+    }
     class PickerActivity : Activity() {
         lateinit var pickerCache: File
         override fun getCacheDir(): File = if (::pickerCache.isInitialized) pickerCache else super.getCacheDir()
@@ -44,6 +53,18 @@ class FilePickerBatchTest {
     @Before fun setUp() {
         val cache = temporary.newFolder("cache")
         activity = Robolectric.buildActivity(PickerActivity::class.java).create().get().apply { pickerCache = cache }
+        // Model a system-provided Photo Picker on pre-Android 13 devices.
+        shadowOf(activity.packageManager).addResolveInfoForIntent(
+            Intent(PickVisualMedia.ACTION_SYSTEM_FALLBACK_PICK_IMAGES),
+            ResolveInfo().apply {
+                isDefault = true
+                activityInfo = ActivityInfo().apply {
+                    packageName = "com.example.systemphotopicker"
+                    name = "PhotoPickerActivity"
+                    applicationInfo = ApplicationInfo().apply { flags = ApplicationInfo.FLAG_SYSTEM }
+                }
+            },
+        )
         uploads = File(cache, "uploads").apply { mkdirs() }
         runtime = PluginTaskRuntime()
         picker = NativeFilePicker(
@@ -91,6 +112,66 @@ class FilePickerBatchTest {
     }
 
     private fun drain() { runtime.domains.fileIoExecutor.submit { }.get(10, TimeUnit.SECONDS) }
+
+    @Test @Config(sdk = [34])
+    fun galleryUsesFrameworkPhotoPickerWithMultipleSelectionAndImportsBothImages() {
+        val invoke = start(mode = "gallery")
+        assertEquals(PICK_IMAGES, launched.action)
+        assertEquals("image/*", launched.type)
+        assertEquals(16, launched.getIntExtra(PICK_IMAGES_MAX, 0))
+        assertFalse(launched.hasCategory(Intent.CATEGORY_OPENABLE))
+        val response = slot<JSObject>()
+        every { invoke.resolve(capture(response)) } just Runs
+        deliver(invoke, source("first-image", byteArrayOf(1)), source("second-image", byteArrayOf(2)))
+        drain()
+        assertEquals(2, response.captured.getJSONArray("files").length())
+        assertEquals(0, response.captured.getJSONArray("errors").length())
+    }
+
+    @Test @Config(sdk = [34])
+    fun avatarAlwaysUsesSinglePhotoSelectionAndCancelReleasesThePicker() {
+        val avatar = start(mode = "avatar", maxFiles = 16)
+        assertEquals(PICK_IMAGES, launched.action)
+        assertEquals("image/*", launched.type)
+        assertFalse(launched.hasExtra(PICK_IMAGES_MAX))
+        assertFalse(launched.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false))
+        picker.onPickFileResult(avatar, ActivityResult(Activity.RESULT_CANCELED, null))
+        verify(exactly = 1) { avatar.reject("cancelled: file picker") }
+
+        val file = start()
+        assertEquals(Intent.ACTION_OPEN_DOCUMENT, launched.action)
+        assertEquals("*/*", launched.type)
+        assertTrue(launched.hasCategory(Intent.CATEGORY_OPENABLE))
+        assertTrue(launched.getBooleanExtra(Intent.EXTRA_ALLOW_MULTIPLE, false))
+        verify(exactly = 0) { file.reject(any<String>()) }
+    }
+
+    @Test fun olderAndroidUsesTheAvailableSystemPhotoPicker() {
+        val gallery = start(mode = "gallery")
+        assertEquals(PickVisualMedia.ACTION_SYSTEM_FALLBACK_PICK_IMAGES, launched.action)
+        assertEquals("com.example.systemphotopicker", launched.component?.packageName)
+        assertEquals("image/*", launched.type)
+        assertEquals(16, launched.getIntExtra(PickVisualMedia.EXTRA_SYSTEM_FALLBACK_PICK_IMAGES_MAX, 0))
+        picker.onPickFileResult(gallery, ActivityResult(Activity.RESULT_CANCELED, null))
+
+        start(mode = "avatar")
+        assertEquals(PickVisualMedia.ACTION_SYSTEM_FALLBACK_PICK_IMAGES, launched.action)
+        assertFalse(launched.hasExtra(PickVisualMedia.EXTRA_SYSTEM_FALLBACK_PICK_IMAGES_MAX))
+    }
+
+    @Test fun missingPhotoPickerReportsAnErrorWithoutOpeningDocumentsAndReleasesTheSlot() {
+        shadowOf(activity.packageManager).removeResolveInfosForIntent(
+            Intent(PickVisualMedia.ACTION_SYSTEM_FALLBACK_PICK_IMAGES), "com.example.systemphotopicker",
+        )
+        for (mode in listOf("gallery", "avatar")) {
+            val invoke = start(mode = mode)
+            verify(exactly = 1) { invoke.reject(match<String> { it.contains("没有可用的系统照片选择器") }) }
+            assertFalse(::launched.isInitialized)
+        }
+        val file = start()
+        assertEquals(Intent.ACTION_OPEN_DOCUMENT, launched.action)
+        verify(exactly = 0) { file.reject(any<String>()) }
+    }
 
     @Test fun middleCopyFailureKeepsSuccessesAndRemovesPartialFile() {
         val first = source("first", byteArrayOf(1, 2))

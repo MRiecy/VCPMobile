@@ -9,6 +9,9 @@ import android.os.CancellationSignal
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import androidx.activity.result.ActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts.PickMultipleVisualMedia
+import androidx.activity.result.contract.ActivityResultContracts.PickVisualMedia
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import app.tauri.annotation.InvokeArg
@@ -130,9 +133,22 @@ internal class NativeFilePicker(
                         requestPermission("camera", invoke, "onCameraPermissionResult")
                     } else { launchCameraIntent(invoke) }
                 }
+                "gallery", "avatar" -> {
+                    // AndroidX otherwise silently falls back to the document picker.
+                    check(PickVisualMedia.isPhotoPickerAvailable(activity)) {
+                        "当前设备没有可用的系统照片选择器，请更新系统后重试"
+                    }
+                    val request = PickVisualMediaRequest(PickVisualMedia.ImageOnly)
+                    val intent = if (args.selectionLimit > 1) {
+                        PickMultipleVisualMedia(args.selectionLimit).createIntent(activity, request)
+                    } else {
+                        PickVisualMedia().createIntent(activity, request)
+                    }
+                    launchActivity(invoke, intent, "onPickFileResult")
+                }
                 else -> {
                     val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-                        type = if (args.mode == "gallery" || args.mode == "avatar") "image/*" else "*/*"
+                        type = "*/*"
                         addCategory(Intent.CATEGORY_OPENABLE)
                         putExtra(Intent.EXTRA_ALLOW_MULTIPLE, args.selectionLimit > 1)
                         if (args.mode == "config") {

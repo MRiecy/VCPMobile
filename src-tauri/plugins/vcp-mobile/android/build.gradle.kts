@@ -78,6 +78,8 @@ dependencies {
     // CPU-only ORT built for Silero's exact operators/types. No Maven full-runtime fallback.
     implementation(sileroRuntimeClasses)
     implementation(project(":tauri-android"))
+    // Photo Picker contracts; aligned with the host app's Activity dependency.
+    implementation("androidx.activity:activity:1.10.1")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.lifecycle:lifecycle-common:2.7.0")

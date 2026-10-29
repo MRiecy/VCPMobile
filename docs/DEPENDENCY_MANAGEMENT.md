@@ -170,6 +170,7 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `androidx.webkit:webkit` | `1.14.0` | 每季度检查 | Google Maven | WebView 扩展 |
 | `androidx.appcompat:appcompat` | `1.7.1` | 每季度检查 | Google Maven | AppCompat |
 | `androidx.activity:activity-ktx` | `1.10.1` | 每季度检查 | Google Maven | Activity KTX |
+| `androidx.activity:activity` | `1.10.1` | 与 Activity KTX 同步 | Google Maven | 移动插件显式依赖照片选择器 contracts，与宿主版本对齐 |
 | `com.google.android.material:material` | `1.12.0` | 每季度检查 | Google Maven | Material Design |
 | `androidx.lifecycle:lifecycle-process` | `2.10.0` | 每季度检查 | Google Maven | Tauri 自动生成依赖 |
 | `junit:junit` | `4.13.2` | 仅安全补丁 | Maven Central | 测试框架 |
