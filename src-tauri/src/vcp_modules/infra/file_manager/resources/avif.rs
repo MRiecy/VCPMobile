@@ -491,7 +491,7 @@ mod tests {
     }
 
     fn parse(bytes: &[u8], max_pixels: u64) -> ProbeResult<Metadata> {
-        check_file(bytes, 24 * 1024 * 1024, max_pixels)
+        check_file(bytes, 16 * 1024 * 1024, max_pixels)
     }
 
     #[test]

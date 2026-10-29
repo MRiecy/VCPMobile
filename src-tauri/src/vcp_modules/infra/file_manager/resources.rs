@@ -8,7 +8,7 @@ mod avif;
 const TEXT_PREVIEW_BYTES: u64 = 128 * 1024;
 const DISPLAY_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 #[cfg(any(target_os = "android", test))]
-const AVIF_DISPLAY_SOURCE_BYTES: u64 = 24 * 1024 * 1024;
+const AVIF_DISPLAY_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 const DISPLAY_IMAGE_PIXELS: u64 = 4 * 1024 * 1024;
 const REMOTE_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 
