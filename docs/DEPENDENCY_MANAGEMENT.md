@@ -70,6 +70,7 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 | `fancy-regex` | `0.16.2` | 每半年检查 | crates.io | 传递依赖，实际版本由 Cargo.lock 冻结 |
 | `zstd` | `0.13` | 每半年检查 | crates.io | 压缩 |
 | `zip` | `9.0.5` | 每半年检查 | crates.io | ZIP 处理，禁用默认 feature，仅启用 deflate |
+| `quick-xml` | `=0.42.0` | Office/XML 解析需求变更时检查 | crates.io / 官方文档 | Office 有界事件流；启用 `encoding`，复用 `encoding_rs` 流式读取 UTF-8/UTF-16，不构建完整 XML DOM |
 | `office_oxide` | `0.1.15` | 每季度检查 | crates.io | 文档解析传递依赖，与 zip 9 共同检查 |
 | `quinn-proto` | `0.11.19` | 仅安全补丁 | crates.io | 网络栈传递依赖，记录 Cargo.lock 解析结果 |
 | `dashmap` | `6` | 每季度检查 | crates.io | 并发 HashMap |

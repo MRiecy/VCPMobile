@@ -12,7 +12,7 @@
 //!
 //! 另覆盖文本文件 BOM/编码解码路径与超大文件 OOM 防护路径。
 
-use std::io::Write;
+use std::io::{Read, Write};
 use tempfile::NamedTempFile;
 
 #[allow(dead_code)]
@@ -28,6 +28,73 @@ fn write_fixture(bytes: &[u8], ext: &str) -> NamedTempFile {
 }
 
 fn write_office(parts: &[(&str, &str)], extension: &str) -> NamedTempFile {
+    let main = match extension {
+        "docx" => "word/document.xml",
+        "pptx" => "ppt/presentation.xml",
+        "xlsx" => "xl/workbook.xml",
+        _ => panic!("unsupported test package"),
+    };
+    write_office_package(parts, extension, main)
+}
+
+fn xml_root(xml: &str) -> String {
+    let mut reader = quick_xml::Reader::from_str(xml);
+    loop {
+        match reader.read_event() {
+            Ok(quick_xml::events::Event::Start(start) | quick_xml::events::Event::Empty(start)) => {
+                return start.local_name().as_ref().to_string();
+            }
+            Ok(quick_xml::events::Event::Eof) | Err(_) => return String::new(),
+            _ => {}
+        }
+    }
+}
+
+// Build a minimal OPC package, including the package relationship and content
+// types. Format tests supply actual namespaces and relationships explicitly.
+fn write_office_package(parts: &[(&str, &str)], extension: &str, main: &str) -> NamedTempFile {
+    let root_relationships = format!(
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="main" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="{main}"/></Relationships>"#
+    );
+    let main_type = match extension {
+        "docx" => {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"
+        }
+        "pptx" => {
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"
+        }
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+        _ => panic!("unsupported test package"),
+    };
+    let mut types = String::from(
+        r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/>"#,
+    );
+    for (name, xml) in parts
+        .iter()
+        .filter(|(name, _)| *name != "[Content_Types].xml" && !name.ends_with(".rels"))
+    {
+        let kind = if *name == main {
+            main_type
+        } else {
+            match xml_root(xml).as_str() {
+                "worksheet" => {
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"
+                }
+                "chartsheet" => {
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml"
+                }
+                "sst" => {
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"
+                }
+                "sld" => "application/vnd.openxmlformats-officedocument.presentationml.slide+xml",
+                _ => "application/xml",
+            }
+        };
+        types.push_str(&format!(
+            r#"<Override PartName="/{name}" ContentType="{kind}"/>"#
+        ));
+    }
+    types.push_str("</Types>");
     let file = tempfile::Builder::new()
         .suffix(&format!(".{extension}"))
         .tempfile_in("tests")
@@ -35,6 +102,22 @@ fn write_office(parts: &[(&str, &str)], extension: &str) -> NamedTempFile {
     let mut archive = zip::ZipWriter::new(file.reopen().expect("open Office fixture"));
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
+    if !parts.iter().any(|(name, _)| *name == "_rels/.rels") {
+        archive
+            .start_file("_rels/.rels", options)
+            .expect("start package relationships");
+        archive
+            .write_all(root_relationships.as_bytes())
+            .expect("write package relationships");
+    }
+    if !parts.iter().any(|(name, _)| *name == "[Content_Types].xml") {
+        archive
+            .start_file("[Content_Types].xml", options)
+            .expect("start content types");
+        archive
+            .write_all(types.as_bytes())
+            .expect("write content types");
+    }
     for (name, content) in parts {
         archive.start_file(*name, options).expect("start XML part");
         archive
@@ -47,12 +130,415 @@ fn write_office(parts: &[(&str, &str)], extension: &str) -> NamedTempFile {
 
 const SINGLE_SHEET_WORKBOOK: (&str, &str) = (
     "xl/workbook.xml",
-    r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet 1" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+    r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet 1" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
 );
 const SINGLE_SHEET_RELATIONSHIPS: (&str, &str) = (
     "xl/_rels/workbook.xml.rels",
-    r#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
 );
+const SINGLE_SHEET_WITH_STRINGS_RELATIONSHIPS: (&str, &str) = (
+    "xl/_rels/workbook.xml.rels",
+    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="strings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>"#,
+);
+
+const SHARED_CELL: (&str, &str) = (
+    "xl/worksheets/sheet1.xml",
+    r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>"#,
+);
+
+fn extracted(file: &NamedTempFile) -> String {
+    try_extract_text(file.path(), "application/octet-stream").expect("Office extraction result")
+}
+
+fn assert_incomplete(file: &NamedTempFile) {
+    let text = extracted(file);
+    assert!(text.contains("Office 文本提取未完成"), "{text}");
+    assert!(text.contains("原附件已保留"), "{text}");
+}
+
+// Relocate/replace parts of a real package while retaining every unrelated
+// entry. This checks content equivalence independently of synthetic fixtures.
+fn transform_package(
+    bytes: &[u8],
+    extension: &str,
+    mut transform: impl FnMut(&str, Vec<u8>) -> (String, Vec<u8>),
+) -> NamedTempFile {
+    let file = tempfile::Builder::new()
+        .suffix(&format!(".{extension}"))
+        .tempfile_in("tests")
+        .unwrap();
+    let mut source = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut target = zip::ZipWriter::new(file.reopen().unwrap());
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for index in 0..source.len() {
+        let mut part = source.by_index(index).unwrap();
+        let mut content = Vec::new();
+        part.read_to_end(&mut content).unwrap();
+        let name = part.name().expect("valid ZIP part name");
+        let (name, content) = transform(&name, content);
+        target.start_file(name, options).unwrap();
+        target.write_all(&content).unwrap();
+    }
+    target.finish().unwrap();
+    file
+}
+
+#[test]
+fn xlsx_relocated_real_shared_strings_preserve_all_extracted_text() {
+    let original = include_bytes!("fixtures/file_extractor/sample.xlsx");
+    let before = extracted(&write_fixture(original, "xlsx"));
+    assert!(before.contains("蒙特卡罗方法计算 π 值"));
+    for target in ["strings/unique.xml", "/xl/strings/unique.xml"] {
+        let relocated = transform_package(original, "xlsx", |name, content| {
+            let content = if name == "xl/_rels/workbook.xml.rels" {
+                String::from_utf8(content)
+                    .unwrap()
+                    .replace(
+                        "Target=\"sharedStrings.xml\"",
+                        &format!("Target=\"{target}\""),
+                    )
+                    .into_bytes()
+            } else if name == "[Content_Types].xml" {
+                String::from_utf8(content)
+                    .unwrap()
+                    .replace("/xl/sharedStrings.xml", "/xl/strings/unique.xml")
+                    .into_bytes()
+            } else {
+                content
+            };
+            let name = if name == "xl/sharedStrings.xml" {
+                "xl/strings/unique.xml"
+            } else {
+                name
+            };
+            (name.to_string(), content)
+        });
+        assert_eq!(
+            extracted(&relocated),
+            before,
+            "relationship target: {target}"
+        );
+    }
+}
+
+#[test]
+fn office_main_parts_can_move_without_changing_text() {
+    for (extension, bytes, old, new) in [
+        (
+            "docx",
+            include_bytes!("fixtures/file_extractor/sample.docx").as_slice(),
+            "word/document.xml",
+            "word/main.xml",
+        ),
+        (
+            "xlsx",
+            include_bytes!("fixtures/file_extractor/sample.xlsx").as_slice(),
+            "xl/workbook.xml",
+            "xl/main.xml",
+        ),
+        (
+            "pptx",
+            include_bytes!("fixtures/file_extractor/sample.pptx").as_slice(),
+            "ppt/presentation.xml",
+            "ppt/main.xml",
+        ),
+    ] {
+        let before = extracted(&write_fixture(bytes, extension));
+        assert!(!before.contains("Office 文本提取未完成"));
+        let directory = old.rsplit_once('/').unwrap().0;
+        let old_rels = format!("{directory}/_rels/{}.rels", old.rsplit('/').next().unwrap());
+        let new_rels = format!("{directory}/_rels/main.xml.rels");
+        let moved = transform_package(bytes, extension, |name, content| {
+            let content = if name == "_rels/.rels" || name == "[Content_Types].xml" {
+                String::from_utf8(content)
+                    .unwrap()
+                    .replace(old, new)
+                    .into_bytes()
+            } else {
+                content
+            };
+            let name = if name == old {
+                new
+            } else if name == old_rels {
+                &new_rels
+            } else {
+                name
+            };
+            (name.to_string(), content)
+        });
+        assert_eq!(extracted(&moved), before, "{extension}");
+    }
+}
+
+#[test]
+fn xlsx_root_level_and_cross_directory_main_parts_resolve_relationships() {
+    for (main, rels, sheet_target, strings_target) in [
+        (
+            "book.xml",
+            "_rels/book.xml.rels",
+            "sheets/data.xml",
+            "strings/values.xml",
+        ),
+        (
+            "documents/book.xml",
+            "documents/_rels/book.xml.rels",
+            "../sheets/data.xml",
+            "../strings/values.xml",
+        ),
+    ] {
+        let relationships = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="{sheet_target}"/><Relationship Id="strings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="{strings_target}"/></Relationships>"#
+        );
+        let file = write_office_package(
+            &[
+                (main, SINGLE_SHEET_WORKBOOK.1),
+                (rels, &relationships),
+                ("sheets/data.xml", SHARED_CELL.1),
+                (
+                    "strings/values.xml",
+                    r#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>Moved together</t></si></sst>"#,
+                ),
+            ],
+            "xlsx",
+            main,
+        );
+        assert_eq!(
+            extracted(&file),
+            "\n--- Sheet 1: Sheet 1 ---\nMoved together\n",
+            "{main}"
+        );
+    }
+}
+
+#[test]
+fn xlsx_standard_utf16_shared_strings_match_utf8_text() {
+    let xml = r#"<?xml version="1.0" encoding="UTF-16"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>中文 🙂 &amp; café</t></si></sst>"#;
+    let file = write_office(
+        &[
+            SINGLE_SHEET_WORKBOOK,
+            SINGLE_SHEET_WITH_STRINGS_RELATIONSHIPS,
+            SHARED_CELL,
+            ("xl/sharedStrings.xml", xml),
+        ],
+        "xlsx",
+    );
+    let original = std::fs::read(file.path()).unwrap();
+    for little_endian in [true, false] {
+        let encoded = transform_package(&original, "xlsx", |name, content| {
+            if name != "xl/sharedStrings.xml" {
+                return (name.to_string(), content);
+            }
+            let mut data = if little_endian {
+                vec![0xff, 0xfe]
+            } else {
+                vec![0xfe, 0xff]
+            };
+            for unit in xml.encode_utf16() {
+                data.extend_from_slice(&if little_endian {
+                    unit.to_le_bytes()
+                } else {
+                    unit.to_be_bytes()
+                });
+            }
+            (name.to_string(), data)
+        });
+        assert_eq!(
+            extracted(&encoded),
+            "\n--- Sheet 1: Sheet 1 ---\n中文 🙂 & café\n"
+        );
+    }
+}
+
+#[test]
+fn xlsx_strict_namespaces_and_arbitrary_prefixes_preserve_text() {
+    let file = write_office(
+        &[
+            (
+                "_rels/.rels",
+                r#"<pkg:Relationships xmlns:pkg="http://schemas.openxmlformats.org/package/2006/relationships"><pkg:Relationship Id="main" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument" Target="xl/workbook.xml"/></pkg:Relationships>"#,
+            ),
+            (
+                "xl/workbook.xml",
+                r#"<s:workbook xmlns:s="http://purl.oclc.org/ooxml/spreadsheetml/main" xmlns:link="http://purl.oclc.org/ooxml/officeDocument/relationships"><s:sheets><s:sheet name="Strict" sheetId="7" link:id="sheet"/></s:sheets></s:workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="sheet" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="strings" Type="http://purl.oclc.org/ooxml/officeDocument/relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<tab:worksheet xmlns:tab="http://purl.oclc.org/ooxml/spreadsheetml/main"><tab:sheetData><tab:row><tab:c r="B1" t="s"><tab:v>0</tab:v></tab:c></tab:row></tab:sheetData></tab:worksheet>"#,
+            ),
+            (
+                "xl/sharedStrings.xml",
+                r#"<s:sst xmlns:s="http://purl.oclc.org/ooxml/spreadsheetml/main"><s:si><s:t>Prefix independent</s:t></s:si></s:sst>"#,
+            ),
+        ],
+        "xlsx",
+    );
+    assert_eq!(
+        extracted(&file),
+        "\n--- Sheet 7: Strict ---\n\tPrefix independent\n"
+    );
+}
+
+#[test]
+fn xlsx_decodes_office_string_escapes_once_after_xml_entities() {
+    let file = write_office(
+        &[
+            (
+                "xl/workbook.xml",
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Sheet_x0020_1" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+            ),
+            SINGLE_SHEET_WITH_STRINGS_RELATIONSHIPS,
+            (
+                "xl/sharedStrings.xml",
+                r#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>_x0041_ _x005F_x0041_ _xD83D__xDE42_ &amp;</t></si></sst>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c r="A1" t="s"><v>0</v></c><c r="B1" t="inlineStr"><is><r><t>_x0042_</t></r><r><t xml:space="preserve"> _x005F_x0042_</t></r></is></c><c r="C1" t="inlineStr"><is><r><t>_x00</t></r><r><t>41_</t></r></is></c></row></sheetData></worksheet>"#,
+            ),
+        ],
+        "xlsx",
+    );
+    assert_eq!(
+        extracted(&file),
+        "\n--- Sheet 1: Sheet 1 ---\nA _x0041_ 🙂 &\tB _x0042_\t_x0041_\n"
+    );
+}
+
+#[test]
+fn xlsx_preserves_cached_values_without_evaluating_formulas_or_styles() {
+    let file = write_office(
+        &[
+            SINGLE_SHEET_WORKBOOK,
+            SINGLE_SHEET_RELATIONSHIPS,
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1"><v>12.50</v></c><c r="B1" t="b"><v>1</v></c><c r="C1" t="e"><v>#DIV/0!</v></c><c r="D1"><f>SUM(A1,5)</f><v>17.5</v></c><c r="E1" t="str"><f>CONCAT("A","B")</f><v>Cached_x0020_text</v></c><c r="F1"><f>NOW()</f></c></row></sheetData></worksheet>"#,
+            ),
+        ],
+        "xlsx",
+    );
+    assert_eq!(
+        extracted(&file),
+        "\n--- Sheet 1: Sheet 1 ---\n12.50\t1\t#DIV/0!\t17.5\tCached text\n"
+    );
+}
+
+#[test]
+fn xlsx_missing_external_or_duplicate_shared_string_relationships_are_not_guessed() {
+    for extra in [
+        "", // A physical default-named table is not a relationship.
+        r#"<Relationship Id="strings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="missing.xml"/>"#,
+        r#"<Relationship Id="strings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="https://example.com/sst.xml" TargetMode="External"/>"#,
+        r#"<Relationship Id="strings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/><Relationship Id="other" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="other.xml"/>"#,
+        r#"<Relationship Id="strings" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings"/>"#,
+    ] {
+        let relationships = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>{extra}</Relationships>"#
+        );
+        let file = write_office(
+            &[
+                SINGLE_SHEET_WORKBOOK,
+                ("xl/_rels/workbook.xml.rels", &relationships),
+                SHARED_CELL,
+                (
+                    "xl/sharedStrings.xml",
+                    r#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>Unbound text</t></si></sst>"#,
+                ),
+                (
+                    "xl/other.xml",
+                    r#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>Ambiguous</t></si></sst>"#,
+                ),
+            ],
+            "xlsx",
+        );
+        assert_incomplete(&file);
+        assert!(!extracted(&file).contains("Unbound text"));
+    }
+}
+
+#[test]
+fn office_rejects_incomplete_or_ambiguous_package_entrypoints() {
+    for root_relationships in [
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="a" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/><Relationship Id="b" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/other.xml"/></Relationships>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="a" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="https://example.com/book.xml" TargetMode="External"/></Relationships>"#,
+        r#"<Relationships xmlns="urn:unrelated"><Relationship Id="a" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#,
+    ] {
+        let file = write_office(
+            &[
+                ("_rels/.rels", root_relationships),
+                SINGLE_SHEET_WORKBOOK,
+                SINGLE_SHEET_RELATIONSHIPS,
+            ],
+            "xlsx",
+        );
+        assert_incomplete(&file);
+    }
+}
+
+#[test]
+fn office_rejects_truncated_multiple_root_and_dtd_xml() {
+    for xml in [
+        r#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>truncated</t></si>"#,
+        r#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>first</t></si></sst><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>"#,
+        r#"<!DOCTYPE sst [<!ENTITY text "expanded">]><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>&text;</t></si></sst>"#,
+        r#"<sst xmlns="urn:unrelated"><si><t>wrong vocabulary</t></si></sst>"#,
+    ] {
+        let file = write_office(
+            &[
+                SINGLE_SHEET_WORKBOOK,
+                SINGLE_SHEET_WITH_STRINGS_RELATIONSHIPS,
+                SHARED_CELL,
+                ("xl/sharedStrings.xml", xml),
+            ],
+            "xlsx",
+        );
+        assert_incomplete(&file);
+    }
+}
+
+#[test]
+fn xlsx_foreign_extensions_do_not_add_sheets_cells_or_string_text() {
+    let file = write_office(
+        &[
+            (
+                "xl/workbook.xml",
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:x="urn:extension"><sheets><x:sheet name="Foreign" sheetId="99" r:id="missing"/><sheet name="Sheet 1" sheetId="1" r:id="rId1"/></sheets></workbook>"#,
+            ),
+            SINGLE_SHEET_WITH_STRINGS_RELATIONSHIPS,
+            (
+                "xl/sharedStrings.xml",
+                r#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x="urn:extension"><x:si><x:t>not an item</x:t></x:si><si><r><t>Actual</t></r><x:t>foreign text</x:t><rPh><t>pronunciation</t></rPh><r><t xml:space="preserve"> value</t></r></si></sst>"#,
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:x="urn:extension"><sheetData><row><x:c r="B1" t="inlineStr"><x:is><x:t>foreign cell</x:t></x:is></x:c><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>"#,
+            ),
+        ],
+        "xlsx",
+    );
+    assert_eq!(
+        extracted(&file),
+        "\n--- Sheet 1: Sheet 1 ---\nActual value\n"
+    );
+}
+
+#[test]
+fn docx_foreign_extension_subtrees_are_not_document_paragraphs() {
+    let file = write_office(
+        &[(
+            "word/document.xml",
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:x="urn:extension"><w:body><x:p><x:t>Foreign paragraph</x:t></x:p><w:p><w:r><w:t>Actual paragraph</w:t><x:t>Foreign text</x:t></w:r></w:p></w:body></w:document>"#,
+        )],
+        "docx",
+    );
+    assert_eq!(extracted(&file), "Actual paragraph\n");
+}
 
 #[test]
 fn xlsx_inline_strings_keep_labels_and_sparse_columns() {
@@ -62,7 +548,7 @@ fn xlsx_inline_strings_keep_labels_and_sparse_columns() {
             SINGLE_SHEET_RELATIONSHIPS,
             (
                 "xl/worksheets/sheet1.xml",
-                r#"<worksheet><sheetData><row>
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row>
         <c r="A1" t="inlineStr"><is><r><t xml:space="preserve">Invoice </t></r><r><t>total</t></r></is></c>
         <c r="C1"><v>123</v></c>
         </row></sheetData></worksheet>"#,
@@ -83,17 +569,17 @@ fn xlsx_shared_rich_text_is_one_item_including_empty_items() {
     let file = write_office(
         &[
             SINGLE_SHEET_WORKBOOK,
-            SINGLE_SHEET_RELATIONSHIPS,
+            SINGLE_SHEET_WITH_STRINGS_RELATIONSHIPS,
             (
                 "xl/sharedStrings.xml",
-                r#"<sst>
+                r#"<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
             <si><r><t xml:space="preserve">Invoice </t></r><r><t>total</t></r><rPh><t>annotation</t></rPh></si>
             <si/><si><t>Second cell &amp; &#x4E2D;</t></si>
             </sst>"#,
             ),
             (
                 "xl/worksheets/sheet1.xml",
-                r#"<worksheet><sheetData><row>
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row>
             <c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c><c r="C1" t="s"><v>2</v></c>
             </row></sheetData></worksheet>"#,
             ),
@@ -120,7 +606,7 @@ fn xlsx_invalid_shared_index_reports_incomplete_extraction() {
             SINGLE_SHEET_RELATIONSHIPS,
             (
                 "xl/worksheets/sheet1.xml",
-                r#"<worksheet><sheetData><row><c r="A1" t="s"><v>123</v></c></row></sheetData></worksheet>"#,
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c r="A1" t="s"><v>123</v></c></row></sheetData></worksheet>"#,
             ),
         ],
         "xlsx",
@@ -130,7 +616,10 @@ fn xlsx_invalid_shared_index_reports_incomplete_extraction() {
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
     .unwrap();
-    assert!(text.contains("共享字符串索引越界"), "{text}");
+    assert!(
+        text.contains("Office 文本提取未完成") && text.contains("共享字符串"),
+        "{text}"
+    );
     assert!(!text.contains("--- Sheet"));
 }
 
@@ -139,7 +628,7 @@ fn docx_preserves_headings_lists_bold_and_tables() {
     let file = write_office(
         &[(
             "word/document.xml",
-            r#"<w:document xmlns:w="urn:word"><w:body>
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
         <w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Heading</w:t></w:r></w:p>
         <w:p><w:pPr><w:numPr/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>Bold</w:t></w:r><w:r><w:t xml:space="preserve"> plain</w:t></w:r></w:p>
         <w:tbl><w:tr><w:tc><w:p><w:r><w:t>First</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Second</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
@@ -170,15 +659,15 @@ fn pptx_reads_manifest_order_through_relationships() {
             ),
             (
                 "ppt/_rels/presentation.xml.rels",
-                r#"<Relationships><Relationship Id="firstCreated" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="/ppt/slides/slide2.xml"/><Relationship Id="lastCreated" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide10.xml"/><Relationship Id="website" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/" TargetMode="External"/></Relationships>"#,
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="firstCreated" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="/ppt/slides/slide2.xml"/><Relationship Id="lastCreated" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide10.xml"/><Relationship Id="website" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/" TargetMode="External"/></Relationships>"#,
             ),
             (
                 "ppt/slides/slide10.xml",
-                "<slide><p><t>Tenth</t></p></slide>",
+                r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:x="urn:extension"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Tenth</a:t><x:t>Foreign text</x:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
             ),
             (
                 "ppt/slides/slide2.xml",
-                "<slide><p><t>Second</t></p></slide>",
+                r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>Second</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
             ),
         ],
         "pptx",
@@ -200,27 +689,27 @@ fn xlsx_binds_sheet_names_and_order_to_relationships_not_filenames() {
         &[
             (
                 "xl/workbook.xml",
-                r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Expenses" sheetId="42" r:id="expensePart"/><sheet name="Chart" sheetId="43" r:id="chartPart"/><sheet name="Income" sheetId="7" r:id="incomePart"/></sheets></workbook>"#,
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Expenses" sheetId="42" r:id="expensePart"/><sheet name="Chart" sheetId="43" r:id="chartPart"/><sheet name="Income" sheetId="7" r:id="incomePart"/></sheets></workbook>"#,
             ),
             (
                 "xl/_rels/workbook.xml.rels",
-                r#"<Relationships><Relationship Id="incomePart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="expensePart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="/xl/worksheets/expenses.xml"/><Relationship Id="chartPart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet" Target="chartsheets/sheet1.xml"/></Relationships>"#,
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="incomePart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="expensePart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="/xl/worksheets/expenses.xml"/><Relationship Id="chartPart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet" Target="chartsheets/sheet1.xml"/></Relationships>"#,
             ),
             (
                 "xl/worksheets/sheet1.xml",
-                "<worksheet><sheetData><row><c><v>900</v></c></row></sheetData></worksheet>",
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c><v>900</v></c></row></sheetData></worksheet>"#,
             ),
             (
                 "xl/worksheets/expenses.xml",
-                "<worksheet><sheetData><row><c><v>250</v></c></row></sheetData></worksheet>",
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c><v>250</v></c></row></sheetData></worksheet>"#,
             ),
             (
                 "xl/chartsheets/sheet1.xml",
-                "<chartsheet/>",
+                r#"<chartsheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"/>"#,
             ),
             (
                 "xl/worksheets/sheet999.xml",
-                "<worksheet><sheetData><row><c><v>Unreferenced</v></c></row></sheetData></worksheet>",
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row><c><v>Unreferenced</v></c></row></sheetData></worksheet>"#,
             ),
         ],
         "xlsx",
@@ -248,31 +737,19 @@ fn office_missing_manifest_does_not_guess_parts_from_filenames() {
     ] {
         let file = write_office(&[(name, xml)], extension);
         let text = try_extract_text(file.path(), "application/octet-stream").unwrap();
-        assert!(text.contains("缺少主文档"), "{text}");
+        assert!(text.contains("Office 文本提取未完成"), "{text}");
         assert!(text.contains("原附件已保留"), "{text}");
     }
 }
 
 #[test]
 fn xlsx_invalid_references_report_incomplete_extraction() {
-    for (relationships, expected) in [
-        ("<Relationships/>", "工作表关系缺失"),
-        (
-            r#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/missing.xml"/></Relationships>"#,
-            "缺少工作表部件",
-        ),
-        (
-            r#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="https://example.com/sheet.xml" TargetMode="External"/></Relationships>"#,
-            "引用了外部目标",
-        ),
-        (
-            r#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="../../sheet.xml"/></Relationships>"#,
-            "超出包内根目录",
-        ),
-        (
-            r#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
-            "关系 ID 重复",
-        ),
+    for relationships in [
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/missing.xml"/></Relationships>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="https://example.com/sheet.xml" TargetMode="External"/></Relationships>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="../../sheet.xml"/></Relationships>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#,
     ] {
         let file = write_office(
             &[
@@ -286,7 +763,7 @@ fn xlsx_invalid_references_report_incomplete_extraction() {
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
         .unwrap();
-        assert!(text.contains(expected), "{text}");
+        assert!(text.contains("Office 文本提取未完成"), "{text}");
         assert!(text.contains("原附件已保留"), "{text}");
     }
 }
@@ -294,7 +771,7 @@ fn xlsx_invalid_references_report_incomplete_extraction() {
 #[test]
 fn compressed_docx_with_oversized_xml_event_stops_and_next_document_still_works() {
     let xml = format!(
-        "<document><p><t>{}</t></p></document>",
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{}</w:t></w:r></w:p></w:body></w:document>"#,
         "x".repeat(9 * 1024 * 1024)
     );
     let file = write_office(&[("word/document.xml", &xml)], "docx");
@@ -308,7 +785,7 @@ fn compressed_docx_with_oversized_xml_event_stops_and_next_document_still_works(
     let normal = write_office(
         &[(
             "word/document.xml",
-            "<document><p><t>Still readable</t></p></document>",
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Still readable</w:t></w:r></w:p></w:body></w:document>"#,
         )],
         "docx",
     );
