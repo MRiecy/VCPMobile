@@ -145,8 +145,8 @@ describe('JEV group controls', () => {
   it('submits start and continue to the Rust owner without inventing a user message', async () => {
     mockInvoke('control_group_session', () => ({ status: 'accepted' }));
     const view = await mountGroup();
-    for (const action of [{ label: '开始', value: 'start' }, { label: '继续', value: 'continue' }]) {
-      await view.findAll('button').find(button => button.text() === action.label)!.trigger('click');
+    for (const action of [{ label: '发起群聊', value: 'start' }, { label: '继续群聊', value: 'continue' }]) {
+      await view.findAll('button').find(button => button.text().includes(action.label))!.trigger('click');
       await flushPromises();
       expect(invokeMock).toHaveBeenCalledWith('control_group_session', expect.objectContaining({
         payload: { groupId: 'g1', topicId: 't1', action: action.value },
