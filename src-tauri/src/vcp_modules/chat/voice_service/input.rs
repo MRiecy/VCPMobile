@@ -152,6 +152,47 @@ impl Registry {
         }
         slot.session.clone()
     }
+    fn prepare_microphone_close(
+        &mut self,
+        call_id: &str,
+        requested_id: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        // An explicit ID also revokes a start that has not been polled yet.
+        // Never replace that exact target with a newer microphone of this call.
+        let id = match requested_id {
+            Some(id) => {
+                if self.inputs.get(id).is_some_and(|slot| slot.call_id != call_id) {
+                    return Err("voice_call_not_active: microphone belongs to another call".into());
+                }
+                id.to_string()
+            }
+            None => match self.active.as_ref().filter(|id| {
+                self.inputs.get(*id).is_some_and(|slot| slot.call_id == call_id)
+            }) {
+                Some(id) => id.clone(),
+                None => return Ok(None),
+            },
+        };
+        self.remember_cancelled(&id);
+        if let Some(slot) = self.inputs.get_mut(&id) {
+            slot.closed = true;
+            if slot.session.is_none() {
+                // Configuration is still loading. It must not publish readiness
+                // or acquire hardware after this close intent has been accepted.
+                slot.cancel.cancel();
+                self.inputs.remove(&id);
+                if self.active.as_deref() == Some(id.as_str()) {
+                    self.active = None;
+                }
+            }
+            // Ready input keeps its ASR token and registry identity until the
+            // physical stop receipt seals it. A failed stop can then be retried.
+        }
+        Ok(Some(id))
+    }
+    fn allows_start(&self, id: &str) -> bool {
+        self.inputs.get(id).is_some_and(|slot| !slot.closed && !slot.cancel.is_cancelled())
+    }
     fn cancel(&mut self, id: &str) -> Option<Arc<VoiceSession>> {
         self.remember_cancelled(id);
         if self.active.as_deref() == Some(id) {
@@ -601,6 +642,10 @@ pub async fn start_voice_microphone(
         call::input_stopped(&app, &call_id, &session_id, "background", false);
         return Err("cancelled: microphone start crossed a lifecycle transition".into());
     }
+    if !app.state::<VoiceServiceState>().registry.lock()
+        .map_err(|error| error.to_string())?.allows_start(&session_id) {
+        return Err(network::CANCELLED.into());
+    }
     if let Err(error) = tauri_plugin_vcp_mobile::voice::start_voice_audio(
         app.clone(),
         session_id.clone(),
@@ -636,8 +681,15 @@ pub async fn start_voice_microphone(
 #[tauri::command]
 pub async fn close_voice_microphone(
     app: AppHandle,
-    session_id: String,
-) -> Result<tauri_plugin_vcp_mobile::voice::CaptureStopReceipt, String> {
+    call_id: String,
+    session_id: Option<String>,
+) -> Result<(), String> {
+    validate_id(&call_id)?;
+    if let Some(id) = &session_id { validate_id(id)?; }
+    let session_id = app.state::<VoiceServiceState>().registry.lock()
+        .map_err(|error| error.to_string())?
+        .prepare_microphone_close(&call_id, session_id.as_deref())?;
+    let Some(session_id) = session_id else { return Ok(()); };
     let receipt =
         match tauri_plugin_vcp_mobile::voice::stop_voice_audio(app.clone(), session_id.clone())
             .await
@@ -667,7 +719,7 @@ pub async fn close_voice_microphone(
         Some(receipt.sample_index),
     )
     .await?;
-    Ok(receipt)
+    Ok(())
 }
 
 pub async fn close_voice_input(
@@ -937,6 +989,54 @@ mod tests {
         assert!(!registry.inputs.contains_key("pending"));
         registry.reserve("next".into(), "call".into()).unwrap();
         assert!(registry.reserve("pending".into(), "call".into()).is_err());
+    }
+    #[test]
+    fn recovered_call_closes_its_ready_capture_without_cancelling_accepted_asr() {
+        let mut registry = Registry::default();
+        let input = install(&mut registry, "surviving-mic", "call");
+        let asr = input.cancel.child_token();
+        assert_eq!(registry.prepare_microphone_close("call", None).unwrap().as_deref(), Some("surviving-mic"));
+        assert!(!registry.allows_start("surviving-mic"));
+        assert!(!asr.is_cancelled());
+        // Until native acknowledges, keep the exact owner available for a
+        // failed-stop retry and prevent a new capture from racing hardware.
+        assert!(registry.reserve("next".into(), "call".into()).is_err());
+        assert_eq!(registry.prepare_microphone_close("call", None).unwrap().as_deref(), Some("surviving-mic"));
+        assert!(Arc::ptr_eq(&registry.close("surviving-mic").unwrap(), &input));
+        assert!(!asr.is_cancelled());
+        registry.reserve("next".into(), "call".into()).unwrap();
+    }
+    #[test]
+    fn call_close_revokes_configuration_and_an_explicit_start_not_yet_polled() {
+        let mut registry = Registry::default();
+        let (pending, _) = registry.reserve("configuring".into(), "call".into()).unwrap();
+        assert_eq!(registry.prepare_microphone_close("call", None).unwrap().as_deref(), Some("configuring"));
+        assert!(pending.is_cancelled());
+        assert!(!registry.inputs.contains_key("configuring"));
+        assert!(!registry.allows_start("configuring"));
+        assert_eq!(registry.prepare_microphone_close("call", Some("not-polled")).unwrap().as_deref(), Some("not-polled"));
+        assert!(registry.reserve("not-polled".into(), "call".into()).is_err());
+        assert!(registry.reserve("configuring".into(), "call".into()).is_err());
+        registry.reserve("next".into(), "call".into()).unwrap();
+    }
+    #[test]
+    fn delayed_close_never_retargets_a_new_microphone_or_a_different_call() {
+        let mut registry = Registry::default();
+        let old = install(&mut registry, "old", "call");
+        registry.close("old");
+        let next = install(&mut registry, "next", "call");
+        registry.prepare_microphone_close("call", Some("old")).unwrap();
+        assert!(registry.allows_start("next"));
+        assert_eq!(registry.active.as_deref(), Some("next"));
+        registry.close("next");
+        let other = install(&mut registry, "other", "other-call");
+        assert!(registry.prepare_microphone_close("call", None).unwrap().is_none());
+        assert!(registry.prepare_microphone_close("call", Some("other")).is_err());
+        assert!(registry.allows_start("other"));
+        assert_eq!(registry.active.as_deref(), Some("other"));
+        assert!(!old.cancel.is_cancelled());
+        assert!(!next.cancel.is_cancelled());
+        assert!(!other.cancel.is_cancelled());
     }
     #[test]
     fn hangup_cancels_all_input_children_of_only_its_call() {

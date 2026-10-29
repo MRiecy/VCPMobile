@@ -28,7 +28,7 @@ vi.mock('@/core/utils/platform', () => ({ isAndroid: true, isIOS: false }));
 vi.mock('@/features/chat/voice/microphoneMonitor', () => ({
   createMicrophoneMonitor: (_onLevel: unknown, onEnded: (event: VoiceAudioEnd) => void) => {
     audio.emitEnded.mockImplementation(onEnded);
-    return { start: audio.startMonitor, stop: audio.stopMonitor, detach: vi.fn() };
+    return { start: audio.startMonitor, stop: audio.stopMonitor, observe: vi.fn(), detach: vi.fn() };
   },
 }));
 vi.mock('@/core/composables/useKeyboardInsets', async () => {
@@ -117,6 +117,7 @@ beforeEach(() => {
   attachMenuOpen.value = false;
   for (const mock of Object.values(audio)) mock.mockReset();
   audio.startMonitor.mockResolvedValue(true);
+  audio.stopMonitor.mockResolvedValue(undefined);
   window.history.replaceState({ vcpRoot: true, vcpMain: true }, '', '#/chat');
   vi.spyOn(window.history, 'back').mockImplementation(() => {
     window.history.replaceState({ vcpRoot: true, vcpMain: true }, '');

@@ -31,7 +31,7 @@ vi.mock('../../../core/stores/appLifecycle', () => ({ useAppLifecycleStore: () =
 vi.mock('../../../features/chat/voice/voiceConversation', () => ({
   createVoiceConversation: (options: { onSnapshot: (snapshot: VoiceCallSnapshot | null) => void }) => {
     context.onSnapshot = options.onSnapshot;
-    return { begin: vi.fn(), start: vi.fn().mockResolvedValue('call'), stop: context.endCall,
+    return { begin: vi.fn(), start: vi.fn().mockResolvedValue('call'), stop: context.endCall, closeMicrophone: vi.fn().mockResolvedValue(undefined),
       recover: context.recover, dispose: context.disposeConversation };
   },
 }));
@@ -41,7 +41,7 @@ vi.mock('../../../features/chat/voice/microphoneMonitor', () => ({
     context.onLevel = onLevel;
     context.onEnded = onEnded;
     context.onFrame = onFrame;
-    return { start: context.start, stop: context.stop, detach: context.detach };
+    return { start: context.start, stop: context.stop, observe: vi.fn(), detach: context.detach };
   },
 }));
 
@@ -66,7 +66,7 @@ beforeEach(() => {
   });
   context.lifecycle = reactive({ isBackground: false });
   context.start.mockReset().mockResolvedValue(true);
-  context.stop.mockReset().mockImplementation(() => context.onLevel?.(0, []));
+  context.stop.mockReset().mockImplementation(async () => { context.onLevel?.(0, []); });
   context.detach.mockReset();
   context.endCall.mockReset();
   context.disposeConversation.mockReset();
@@ -161,6 +161,7 @@ describe('voice call lifecycle', () => {
     expect(store.bands).toEqual([0.2, 0.8, 0.4]);
 
     context.lifecycle.isBackground = true;
+    await flushPromises();
     expect(context.stop).toHaveBeenCalledOnce();
     expect(store.active).toBe(true);
     expect(store.microphoneState).toBe('off');
@@ -220,6 +221,7 @@ describe('voice call lifecycle', () => {
     expect(store.playbackActive).toBe(true);
 
     store.toggleMicrophone();
+    await flushPromises();
     expect(store.playbackActive).toBe(false);
   });
 

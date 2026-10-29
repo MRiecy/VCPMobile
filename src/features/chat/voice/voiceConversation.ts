@@ -176,6 +176,14 @@ export function createVoiceConversation(options: Options) {
     return run.id;
   };
 
+  const closeMicrophone = async (): Promise<void> => {
+    const run = call;
+    if (disposed || !run) return;
+    // Rust resolves the current capture, including one surviving a document
+    // reload. The view does not need to reconstruct microphone ownership.
+    await invoke<void>('close_voice_microphone', { callId: run.id });
+  };
+
   const dispose = () => {
     disposed = true;
     intentEpoch += 1;
@@ -184,5 +192,5 @@ export function createVoiceConversation(options: Options) {
     // Listener disposal has no authority to cancel the Rust call or its work.
   };
 
-  return { begin, start, stop, recover, dispose };
+  return { begin, start, stop, closeMicrophone, recover, dispose };
 }

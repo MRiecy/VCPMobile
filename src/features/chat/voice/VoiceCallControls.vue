@@ -26,7 +26,7 @@ const inputLevel = computed(() => microphoneOn.value && Number.isFinite(props.le
 const status = computed(() => {
   // One presentation owner: errors stay visible, then transcript/service progress.
   // Capture transitions and VAD frames only affect the controls and waveform.
-  if (props.microphoneState === 'error') {
+  if (props.errorMessage?.trim() || props.microphoneState === 'error') {
     return { text: props.errorMessage?.trim() || '麦克风暂不可用，请重试', error: true };
   }
   if (props.serviceState === 'error') {

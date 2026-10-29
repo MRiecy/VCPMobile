@@ -14,7 +14,9 @@ const createMicrophoneMonitor = (...callbacks: [
   Parameters<typeof createNativeMicrophoneMonitor>[0],
   Parameters<typeof createNativeMicrophoneMonitor>[1],
   Parameters<typeof createNativeMicrophoneMonitor>[2],
-]) => createNativeMicrophoneMonitor(...callbacks, { beforeStart: async () => 'call-1' });
+]) => createNativeMicrophoneMonitor(...callbacks, {
+  beforeStart: async () => 'call-1', closeCurrent: async () => {},
+});
 
 let monitor: ReturnType<typeof createMicrophoneMonitor> | undefined;
 const startCommand = 'start_voice_microphone';
@@ -38,12 +40,25 @@ function emitFrame(sessionId: string, overrides: Partial<VoiceAudioFrame> = {}) 
 }
 
 afterEach(() => {
-  monitor?.stop();
+  monitor?.detach();
   monitor = undefined;
   vi.useRealTimers();
 });
 
 describe('native microphone client', () => {
+  it('releases a recovered display subscription that finishes installing after disposal', async () => {
+    const installed = deferred<() => void>();
+    const unlisten = vi.fn();
+    listenMock.mockImplementationOnce(() => installed.promise);
+    monitor = createMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn());
+    monitor.observe('surviving-capture');
+    monitor.detach();
+    installed.resolve(unlisten);
+    await flushPromises();
+    expect(unlisten).toHaveBeenCalledOnce();
+    expect(invokeMock).not.toHaveBeenCalled();
+  });
+
   it('installs the event listener before starting native audio and uses one session UUID', async () => {
     const installed = deferred<() => void>();
     const unlisten = vi.fn();
@@ -57,9 +72,9 @@ describe('native microphone client', () => {
     await expect(started).resolves.toBe(true);
     expect(invokeMock).toHaveBeenCalledExactlyOnceWith(startCommand, { sessionId: currentSession(), callId: 'call-1' });
 
-    monitor.stop();
+    await monitor.stop();
     expect(unlisten).toHaveBeenCalledOnce();
-    expect(invokeMock).toHaveBeenLastCalledWith(stopCommand, { sessionId: currentSession() });
+    expect(invokeMock).toHaveBeenLastCalledWith(stopCommand, { callId: 'call-1', sessionId: currentSession() });
   });
 
   it('reports the native permission failure and releases its installed listener', async () => {
@@ -71,7 +86,7 @@ describe('native microphone client', () => {
     emitFrame(currentSession());
     expect(onFrame).not.toHaveBeenCalled();
     expect(onEnded).not.toHaveBeenCalled();
-    expect(invokeMock).toHaveBeenCalledWith(stopCommand, { sessionId: currentSession() });
+    expect(invokeMock).toHaveBeenCalledWith(stopCommand, { callId: 'call-1', sessionId: currentSession() });
   });
 
   it('cancels immediately during listener installation and releases the late listener without starting audio', async () => {
@@ -100,9 +115,9 @@ describe('native microphone client', () => {
     const oldId = currentSession();
     monitor.stop();
     await expect(first).resolves.toBe(false);
-    expect(invokeMock).toHaveBeenCalledWith(stopCommand, { sessionId: oldId });
+    expect(invokeMock).toHaveBeenCalledWith(stopCommand, { callId: 'call-1', sessionId: oldId });
 
-    mockInvoke(startCommand, () => undefined);
+    mockInvoke(startCommand, () => ({ configured: true }));
     await expect(monitor.start()).resolves.toBe(true);
     const nextId = currentSession();
     expect(nextId).not.toBe(oldId);
@@ -149,8 +164,8 @@ describe('native microphone client', () => {
 
     monitor.stop();
     await expect(first).resolves.toBe(false);
-    expect(invokeMock).toHaveBeenCalledWith(stopCommand, { sessionId: firstId });
-    mockInvoke(startCommand, () => undefined);
+    expect(invokeMock).toHaveBeenCalledWith(stopCommand, { callId: 'call-1', sessionId: firstId });
+    mockInvoke(startCommand, () => ({ configured: true }));
     const next = monitor.start();
     await flushPromises();
     expect(invokeMock.mock.calls.filter(([command]) => command === startCommand)).toHaveLength(1);
@@ -226,7 +241,7 @@ describe('native microphone client', () => {
 
   it('does not interpret suspended WebView frames as a native capture failure', async () => {
     vi.useFakeTimers();
-    const pending = deferred<void>();
+    const pending = deferred<{ configured: boolean }>();
     mockInvoke(startCommand, () => pending.promise);
     const onEnded = vi.fn();
     const onLevel = vi.fn();
@@ -235,7 +250,7 @@ describe('native microphone client', () => {
     await vi.advanceTimersByTimeAsync(10_000);
     expect(onEnded).not.toHaveBeenCalled();
 
-    pending.resolve();
+    pending.resolve({ configured: true });
     await expect(started).resolves.toBe(true);
     const id = currentSession();
     await vi.advanceTimersByTimeAsync(2999);
@@ -246,7 +261,7 @@ describe('native microphone client', () => {
     expect(onEnded).not.toHaveBeenCalled();
     expect(invokeMock.mock.calls.some(([name]) => name === stopCommand)).toBe(false);
 
-    mockInvoke(startCommand, () => undefined);
+    mockInvoke(startCommand, () => ({ configured: true }));
     await monitor.start();
     monitor.stop();
     await vi.advanceTimersByTimeAsync(6000);
@@ -257,12 +272,12 @@ describe('native microphone client', () => {
     const stopped = deferred<{ audioEpoch: number; sampleIndex: number }>();
     mockInvoke(stopCommand, () => stopped.promise);
     monitor = createNativeMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn(), {
-      beforeStart: async () => 'call-1',
+      beforeStart: async () => 'call-1', closeCurrent: async () => {},
     });
     await monitor.start();
     const id = currentSession();
     monitor.stop();
-    expect(invokeMock).toHaveBeenLastCalledWith(stopCommand, { sessionId: id });
+    expect(invokeMock).toHaveBeenLastCalledWith(stopCommand, { callId: 'call-1', sessionId: id });
     stopped.resolve({ audioEpoch: 3, sampleIndex: 731 });
     await flushPromises();
     expect(invokeMock.mock.calls.some(([name]) => name === 'close_voice_input')).toBe(false);
@@ -271,7 +286,7 @@ describe('native microphone client', () => {
   it('projects native background termination without issuing a second seal or stop', async () => {
     const onEnded = vi.fn();
     monitor = createNativeMicrophoneMonitor(vi.fn(), onEnded, vi.fn(), {
-      beforeStart: async () => 'call-1',
+      beforeStart: async () => 'call-1', closeCurrent: async () => {},
     });
     await monitor.start();
     const id = currentSession();
@@ -284,7 +299,7 @@ describe('native microphone client', () => {
     let epoch = 3;
     const ready = deferred<string>();
     monitor = createNativeMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn(), {
-      beforeStart: () => ready.promise, currentLifecycleEpoch: () => epoch,
+      beforeStart: () => ready.promise, closeCurrent: async () => {}, currentLifecycleEpoch: () => epoch,
     });
     const starting = monitor.start();
     await flushPromises();
@@ -300,7 +315,9 @@ describe('native microphone client', () => {
 
   it('cancels an input intent awaiting call readiness without starting or closing native capture', async () => {
     const ready = deferred<string>();
-    monitor = createNativeMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn(), { beforeStart: () => ready.promise });
+    monitor = createNativeMicrophoneMonitor(vi.fn(), vi.fn(), vi.fn(), {
+      beforeStart: () => ready.promise, closeCurrent: async () => {},
+    });
     const starting = monitor.start();
     await flushPromises();
     monitor.stop();

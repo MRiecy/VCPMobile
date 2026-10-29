@@ -76,6 +76,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
       partialText.value = view.partialText;
     },
     onSnapshot: snapshot => {
+      monitor.observe(snapshot?.active && snapshot.micState === 'listening' ? snapshot.inputSessionId : null);
       active.value = snapshot?.active ?? false;
       conversation.value = snapshot?.active && session.currentConversationKey
         ? { ...session.currentConversationKey } : null;
@@ -124,6 +125,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
     },
     {
       beforeStart: voiceConversation.start,
+      closeCurrent: voiceConversation.closeMicrophone,
       currentLifecycleEpoch: () => lifecycle.lifecycleSnapshot?.transitionEpoch ?? null,
       onConfigured: configured => {
         if (!configured && !['recognizing', 'thinking', 'speaking'].includes(serviceState.value)) {
@@ -135,11 +137,18 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   );
 
   const stopMicrophone = () => {
-    microphoneGeneration += 1;
-    monitor.stop();
-    syncPlaybackState();
-    microphoneState.value = 'off';
-    errorMessage.value = '';
+    const generation = ++microphoneGeneration;
+    return monitor.stop().then(() => {
+      if (generation !== microphoneGeneration || !active.value) return;
+      syncPlaybackState();
+      microphoneState.value = 'off';
+      errorMessage.value = '';
+    }).catch(error => {
+      if (generation !== microphoneGeneration || !active.value) return;
+      // Keep the latest native projection and a usable close button. A failed
+      // command does not prove that capture stopped, and must remain retryable.
+      errorMessage.value = audioErrorMessage(error, '麦克风关闭失败，请重试。');
+    });
   };
 
   const enableMicrophone = async () => {

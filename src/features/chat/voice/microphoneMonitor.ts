@@ -26,18 +26,17 @@ export interface VoiceAudioEnd {
   sampleIndex?: number;
 }
 
-export interface CaptureStopReceipt {
-  audioEpoch: number;
-  sampleIndex: number;
-}
-
-interface CaptureRequest {
+interface AudioObservation {
   sessionId: string;
   epoch: number;
   sampleIndex: number;
+  unlisten?: UnlistenFn;
+}
+
+interface CaptureRequest extends AudioObservation {
+  callId?: string;
   expectedLifecycleEpoch?: number | null;
   startSubmitted: boolean;
-  unlisten?: UnlistenFn;
   cancel: () => void;
   cancelled: Promise<false>;
 }
@@ -51,21 +50,77 @@ export function createMicrophoneMonitor(
   onFrame: (frame: VoiceAudioFrame) => void,
   lifecycle: {
     beforeStart: (sessionId: string) => Promise<string>;
+    closeCurrent: () => Promise<void>;
     currentLifecycleEpoch?: () => number | null;
     onConfigured?: (configured: boolean) => void;
   },
 ) {
   let current: CaptureRequest | null = null;
-  let pendingStop: Promise<CaptureStopReceipt> | null = null;
+  let observed: AudioObservation | null = null;
+  let pendingStop: Promise<void> | null = null;
 
-  const stopNative = (request: CaptureRequest, beforeNextStart = true) => {
-    // Never await start or its permission dialog before submitting cancellation.
-    const stopping = invoke<CaptureStopReceipt>('close_voice_microphone', { sessionId: request.sessionId });
+  const deliver = (cursor: AudioObservation, payload: VoiceAudioFrame | VoiceAudioEnd, finish: () => void) => {
+    if (payload.sessionId !== cursor.sessionId || !Number.isSafeInteger(payload.audioEpoch)
+      || payload.audioEpoch < 0 || payload.audioEpoch < cursor.epoch) return;
+    if (payload.kind === 'frame') {
+      if (!Number.isSafeInteger(payload.sampleIndex) || payload.sampleIndex < 0
+        || (payload.audioEpoch === cursor.epoch && payload.sampleIndex <= cursor.sampleIndex)) return;
+      if (!Number.isFinite(payload.level) || !Number.isFinite(payload.probability)
+        || !Array.isArray(payload.bands) || payload.bands.length !== 32
+        || !payload.bands.every(Number.isFinite)) return;
+      cursor.epoch = payload.audioEpoch;
+      cursor.sampleIndex = payload.sampleIndex;
+      // Both fresh and recovered views receive only bounded display data.
+      const frame = {
+        ...payload, level: Math.min(1, Math.max(0, payload.level)),
+        probability: Math.min(1, Math.max(0, payload.probability)),
+        bands: payload.bands.map(value => Math.min(1, Math.max(0, value))),
+      };
+      onLevel(frame.level, frame.bands);
+      onFrame(frame);
+    } else if (payload.kind === 'stopped' || payload.kind === 'error') {
+      // Native terminals already seal input in Rust; this is display cleanup.
+      finish();
+      onLevel(0, SILENT_BANDS);
+      onEnded(payload);
+    }
+  };
+
+  const releaseObserved = () => {
+    observed?.unlisten?.();
+    observed = null;
+  };
+
+  const observe = (sessionId: string | null) => {
+    if (observed?.sessionId === sessionId) return;
+    releaseObserved();
+    if (!sessionId || current?.sessionId === sessionId) return;
+    const observation: AudioObservation = { sessionId, epoch: -1, sampleIndex: -1 };
+    observed = observation;
+    void listen<VoiceAudioFrame | VoiceAudioEnd>('vcp-voice-audio', ({ payload }) => {
+      if (observed === observation) deliver(observation, payload, releaseObserved);
+    }).then(unlisten => {
+      if (observed === observation) observation.unlisten = unlisten;
+      else unlisten();
+    }).catch(error => {
+      if (observed === observation) observed = null;
+      console.warn('[VoiceAudio] Display listener unavailable:', String(error).slice(0, 512));
+    });
+  };
+
+  const trackStop = (stopping: Promise<void>, beforeNextStart = true) => {
     if (beforeNextStart) pendingStop = stopping;
     void stopping.finally(() => {
       if (pendingStop === stopping) pendingStop = null;
     }).catch(error => console.warn('[VoiceAudio] Failed to stop native capture:', String(error).slice(0, 512)));
     return stopping;
+  };
+
+  const stopNative = (request: CaptureRequest, beforeNextStart = true) => {
+    // Never await start or its permission dialog before submitting cancellation.
+    return trackStop(invoke<void>('close_voice_microphone', {
+      callId: request.callId, sessionId: request.sessionId,
+    }), beforeNextStart);
   };
 
   const release = (request: CaptureRequest, cancel = true) => {
@@ -79,22 +134,30 @@ export function createMicrophoneMonitor(
     release(request, cancel);
     // Rust closes capture and seals ASR in one intent even if this WebView
     // suspends before the acknowledgement. No second JS completion is needed.
-    if (request.startSubmitted) void stopNative(request).catch(() => {});
+    return request.startSubmitted ? stopNative(request) : Promise.resolve();
   };
 
   const stop = () => {
     const request = current;
-    if (request) haltInput(request);
-    onLevel(0, SILENT_BANDS);
+    const previousObservation = observed;
+    // A recovered view has no CaptureRequest. Its close intent still belongs
+    // to the Rust call owner; absence of a JS monitor is not evidence of silence.
+    const stopping = request ? haltInput(request) : pendingStop ?? trackStop(lifecycle.closeCurrent());
+    return stopping.then(() => {
+      if (observed === previousObservation) releaseObserved();
+      if (!current && !observed) onLevel(0, SILENT_BANDS);
+    });
   };
 
   const detach = () => {
     if (current) release(current);
+    releaseObserved();
     onLevel(0, SILENT_BANDS);
   };
 
   const start = (): Promise<boolean> => {
-    stop();
+    if (current) void haltInput(current).catch(() => {});
+    releaseObserved();
     const previousStop = pendingStop;
     let cancel!: () => void;
     const cancelled = new Promise<false>(resolve => { cancel = () => resolve(false); });
@@ -107,32 +170,7 @@ export function createMicrophoneMonitor(
     const work = (async () => {
       try {
         const unlisten = await listen<VoiceAudioFrame | VoiceAudioEnd>('vcp-voice-audio', ({ payload }) => {
-          if (current !== request || !request.startSubmitted || payload.sessionId !== request.sessionId) return;
-          if (!Number.isSafeInteger(payload.audioEpoch) || payload.audioEpoch < 0 || payload.audioEpoch < request.epoch) return;
-          if (payload.kind === 'frame') {
-            if (!Number.isSafeInteger(payload.sampleIndex) || payload.sampleIndex < 0
-              || (payload.audioEpoch === request.epoch && payload.sampleIndex <= request.sampleIndex)) return;
-            if (!Number.isFinite(payload.level) || !Number.isFinite(payload.probability)
-              || !Array.isArray(payload.bands) || payload.bands.length !== 32
-              || !payload.bands.every(Number.isFinite)) return;
-            request.epoch = payload.audioEpoch;
-            request.sampleIndex = payload.sampleIndex;
-            // Bound values at the UI boundary; neither raw PCM nor full-session
-            // history is copied across the native event channel.
-            const frame = {
-              ...payload, level: Math.min(1, Math.max(0, payload.level)),
-              probability: Math.min(1, Math.max(0, payload.probability)),
-              bands: payload.bands.map(value => Math.min(1, Math.max(0, value))),
-            };
-            onLevel(frame.level, frame.bands);
-            onFrame(frame);
-          } else if (payload.kind === 'stopped' || payload.kind === 'error') {
-            // Native background/error terminals already seal input in Rust.
-            // The event is display data, never a second business completion.
-            release(request);
-            onLevel(0, SILENT_BANDS);
-            onEnded(payload);
-          }
+          if (current === request && request.startSubmitted) deliver(request, payload, () => release(request));
         });
         if (current !== request) {
           unlisten();
@@ -146,6 +184,7 @@ export function createMicrophoneMonitor(
         if (current !== request) return false;
         const callId = await lifecycle.beforeStart(request.sessionId);
         if (current !== request) return false;
+        request.callId = callId;
         request.startSubmitted = true;
         const result = await invoke<{ configured: boolean }>('start_voice_microphone', {
           sessionId: request.sessionId, callId,
@@ -164,7 +203,7 @@ export function createMicrophoneMonitor(
         if (current !== request) return false;
         // Preserve a failed start as a rejection instead of resolving its
         // cancellation race before the real permission/runtime error arrives.
-        haltInput(request, false);
+        void haltInput(request, false).catch(() => {});
         onLevel(0, SILENT_BANDS);
         throw error;
       }
@@ -172,5 +211,5 @@ export function createMicrophoneMonitor(
     return Promise.race([work, cancelled]);
   };
 
-  return { start, stop, detach };
+  return { start, stop, observe, detach };
 }
