@@ -61,6 +61,9 @@ impl CallInput {
             return Err(super::network::CANCELLED.into());
         }
         let mut state = self.state.lock().map_err(|error| error.to_string())?;
+        if state.current.as_ref().is_some_and(|batch| batch.parts.len() >= 64) {
+            return Err("连续语音片段过多，请结束当前输入后重试。".into());
+        }
         let barge = if state.current.is_none() {
             state.last_claimed.clone()
         } else {
@@ -81,10 +84,6 @@ impl CallInput {
             .as_mut()
             .ok_or_else(|| "语音聚合状态已失效。".to_string())?;
         batch.offer = None;
-        if batch.parts.len() >= 64 {
-            batch.needs_retry = true;
-            return Err("连续语音片段过多，请结束当前输入后重试。".into());
-        }
         batch.needs_retry = false;
         batch.parts.insert(
             sequence,
@@ -320,5 +319,28 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(offer.text, "真正的下一句");
+    }
+
+    #[test]
+    fn saturation_rejects_only_new_speech_and_accepted_recognition_can_still_be_claimed() {
+        let call = CallInput::new("call".into());
+        let parts: Vec<_> = (0..64).map(|_| call.begin().unwrap()).collect();
+        assert!(call.begin().is_err());
+        for part in &parts[..63] {
+            assert!(matches!(call.complete(&part.batch_id, part.sequence, "已接受".into()).unwrap(),
+                BatchCompletion::Pending));
+        }
+        let last = &parts[63];
+        let ready = offered(call.complete(&last.batch_id, last.sequence, "末句".into()).unwrap());
+        assert_eq!(ready.text.split_whitespace().count(), 64);
+        // Rejection must also preserve an offer that already exists, including
+        // when reply preparation has not reached the claim boundary yet.
+        assert!(call.begin().is_err());
+        assert!(call.has_offer(&ready.offer_id));
+        assert!(call.claim(&ready.offer_id).unwrap());
+        let next = call.begin().unwrap();
+        assert_eq!(next.sequence, 64);
+        assert_ne!(next.batch_id, last.batch_id);
+        assert_eq!(offered(call.complete(&next.batch_id, next.sequence, "下一批".into()).unwrap()).text, "下一批");
     }
 }
