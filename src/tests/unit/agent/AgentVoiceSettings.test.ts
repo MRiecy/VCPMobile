@@ -16,6 +16,9 @@ const wrappers: VueWrapper[] = [];
 beforeEach(() => {
   pinia = createPinia();
   setActivePinia(pinia);
+  const overlays = document.createElement('div');
+  overlays.id = 'vcp-feature-overlays';
+  document.body.append(overlays);
   context.voice = reactive({ active: false, playbackActive: false });
   mockInvoke('read_settings', () => makeConfigSnapshot(makeSettings({
     'voice.connection.apiBaseUrl': 'https://voice.example/v1', 'voice.connection.apiKey': 'voice-key',

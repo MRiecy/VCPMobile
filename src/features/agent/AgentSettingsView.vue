@@ -10,6 +10,7 @@ import { useOverlayStore } from "../../core/stores/overlay";
 import { SETTINGS_DEFAULTS } from "../../core/config/generated/defaults";
 import { LAYER_PAGE_BASE } from "../../core/constants/layers";
 import { useModalHistory } from "../../core/composables/useModalHistory";
+import { useKeyboardInsets } from "../../core/composables/useKeyboardInsets";
 import AgentVoiceSettings from "./AgentVoiceSettings.vue";
 import { isAndroid, isIOS } from "../../core/utils/platform";
 import SlidePage from "../../components/ui/SlidePage.vue";
@@ -38,6 +39,22 @@ const notificationStore = useNotificationStore();
 const overlayStore = useOverlayStore();
 const { registerModal } = useModalHistory();
 const pageActive = computed(() => props.isOpen && props.active);
+const formScroll = ref<HTMLElement | null>(null);
+const { keyboardHeight } = useKeyboardInsets();
+const revealFocusedField = () => {
+  const scroller = formScroll.value;
+  const field = document.activeElement;
+  if (!pageActive.value || !scroller || !(field instanceof HTMLElement) || !scroller.contains(field)
+    || !field.matches('input, textarea, [contenteditable="true"]')) return;
+  const bounds = field.getBoundingClientRect();
+  const viewport = scroller.getBoundingClientRect();
+  // Move only this form's scroll position after its keyboard inset has been applied.
+  if (bounds.top < viewport.top) scroller.scrollTop += bounds.top - viewport.top;
+  else if (bounds.bottom > viewport.bottom) {
+    scroller.scrollTop += Math.min(bounds.bottom - viewport.bottom, bounds.top - viewport.top);
+  }
+};
+watch(keyboardHeight, height => { if (height > 0) revealFocusedField(); }, { flush: "post" });
 const isLeaving = ref(false);
 let mounted = true;
 const createEmptyConfig = (id = ""): AgentConfigDto => ({
@@ -423,7 +440,8 @@ const handleDelete = async () => {
       </header>
 
       <!-- Scrollable Form Area -->
-      <div class="flex-1 overflow-y-auto p-5 space-y-6 pb-[calc(var(--vcp-safe-bottom,48px))] no-rubber-band">
+      <div ref="formScroll" class="agent-settings-scroll flex-1 min-h-0 overflow-y-auto p-5 space-y-6 pb-[calc(var(--vcp-safe-bottom,48px))] no-rubber-band"
+        @focusin="revealFocusedField">
         <p v-if="loading" role="status" class="m-0 text-xs opacity-60">正在加载助手设置…</p>
         <p v-else-if="loadError" role="alert" class="m-0 text-xs text-red-500">
           无法读取助手设置：{{ loadError }}
@@ -579,6 +597,9 @@ const handleDelete = async () => {
 <style scoped>
 .agent-settings-view {
   background-color: var(--primary-bg);
+  box-sizing: border-box;
+  padding-bottom: var(--vcp-ime-offset, 0px);
+  overflow: hidden;
 }
 
 .plate-container {

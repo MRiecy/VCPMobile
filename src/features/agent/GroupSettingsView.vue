@@ -383,10 +383,19 @@ watch(keyboardHeight, (nextHeight) => {
   if (nextHeight <= 0) return;
   const activeElement = document.activeElement;
   if (!(activeElement instanceof HTMLElement)) return;
-  if (memberSheetRef.value?.contains(activeElement) || rosterSheetRef.value?.contains(activeElement)) {
-    activeElement.scrollIntoView({ block: "nearest" });
+  const sheet = [memberSheetRef.value, rosterSheetRef.value].find(element => element?.contains(activeElement));
+  const scroller = activeElement.closest<HTMLElement>(".group-sheet-body");
+  if (!sheet || !scroller || !sheet.contains(scroller)) return;
+
+  // Insets already lift the sheet. Reveal only within its body, never scroll the page/WebView again.
+  const fieldBounds = activeElement.getBoundingClientRect();
+  const scrollBounds = scroller.getBoundingClientRect();
+  if (fieldBounds.top < scrollBounds.top) {
+    scroller.scrollTop += fieldBounds.top - scrollBounds.top;
+  } else if (fieldBounds.bottom > scrollBounds.bottom) {
+    scroller.scrollTop += Math.min(fieldBounds.bottom - scrollBounds.bottom, fieldBounds.top - scrollBounds.top);
   }
-});
+}, { flush: "post" });
 
 const isEditingName = ref(false);
 const nameInputRef = ref<HTMLInputElement | null>(null);
@@ -1451,7 +1460,6 @@ watch([() => props.isOpen, () => props.id], ([isOpen, id]) => updateEditor(isOpe
   padding-bottom: var(--vcp-ime-offset, 0px);
   box-sizing: border-box;
   background: rgba(0, 0, 0, 0.5);
-  transition: padding-bottom 120ms ease;
 }
 .group-bottom-sheet {
   width: 100%;

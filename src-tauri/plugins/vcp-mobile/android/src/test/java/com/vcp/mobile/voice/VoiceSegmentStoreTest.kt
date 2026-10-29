@@ -13,6 +13,61 @@ class VoiceSegmentStoreTest {
 
     private fun value(index: Long): Short = ((index % 20_000) - 10_000).toShort()
 
+    @Test fun firstExportRemovesPreviousProcessSegmentsButPreservesUnknownFiles() {
+        val directory = temporary.newFolder()
+        val stale = File(directory, "voice-old-session-123.wav").apply { writeBytes(byteArrayOf(1)) }
+        val unknown = File(directory, "reference.wav").apply { writeBytes(byteArrayOf(2)) }
+        val nested = File(directory, "voice-unknown.wav").apply { mkdirs() }
+        val store = VoiceSegmentStore(1)
+
+        val current = store.writeWav(directory, "current", shortArrayOf(3))
+
+        assertFalse(stale.exists())
+        assertArrayEquals(byteArrayOf(2), unknown.readBytes())
+        assertTrue(nested.isDirectory)
+        assertTrue(current.isFile)
+        store.close()
+        store.cleanupIfClosed()
+    }
+
+    @Test fun laterCapturePreparationPreservesExportsStillOwnedByAnotherSession() {
+        val directory = temporary.newFolder()
+        val first = VoiceSegmentStore(1)
+        val firstFile = first.writeWav(directory, "first", shortArrayOf(1))
+        first.seal()
+
+        VoiceSegmentStore.prepareCache(File(directory, "."))
+        val next = VoiceSegmentStore(1)
+        val nextFile = next.writeWav(directory, "next", shortArrayOf(2))
+
+        assertTrue(firstFile.isFile)
+        assertTrue(nextFile.isFile)
+        first.close()
+        first.cleanupIfClosed()
+        assertFalse(firstFile.exists())
+        assertTrue(nextFile.isFile)
+        next.close()
+        next.cleanupIfClosed()
+    }
+
+    @Test fun failedPreparationDoesNotAdmitAnExportOrSkipCleanupOnTheNextAttempt() {
+        val directory = temporary.newFile()
+        val store = VoiceSegmentStore(1)
+        assertEquals("voice_segment_cache_unavailable", runCatching {
+            store.writeWav(directory, "blocked", shortArrayOf(1))
+        }.exceptionOrNull()?.message)
+
+        assertTrue(directory.delete())
+        assertTrue(directory.mkdir())
+        val stale = File(directory, "voice-old-session-123.wav").apply { writeBytes(byteArrayOf(1)) }
+        val current = store.writeWav(directory, "retried", shortArrayOf(2))
+
+        assertFalse(stale.exists())
+        assertTrue(current.isFile)
+        store.close()
+        store.cleanupIfClosed()
+    }
+
     @Test fun wrappedRingReturnsTheExactHalfOpenIntervalAndNeverClipsExpiredAudio() {
         val store = VoiceSegmentStore(7)
         repeat(1_002) { index ->

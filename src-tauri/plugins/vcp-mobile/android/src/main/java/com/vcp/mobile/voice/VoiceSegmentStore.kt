@@ -9,6 +9,24 @@ import kotlin.math.roundToInt
 
 /** A 32-second ring at the same 16 kHz sample clock reported to the VAD consumer. */
 internal class VoiceSegmentStore(initialEpoch: Long) {
+    companion object {
+        private val preparedDirectories = mutableSetOf<String>()
+
+        /** Every capture/export passes this process-wide boundary before creating owned files. */
+        @Synchronized
+        fun prepareCache(directory: File) {
+            val path = directory.canonicalPath
+            if (path in preparedDirectories) return
+            check(directory.isDirectory || directory.mkdirs()) { "voice_segment_cache_unavailable" }
+            val entries = checkNotNull(directory.listFiles()) { "voice_segment_cache_unavailable" }
+            entries.filter { it.isFile && it.name.startsWith("voice-") && it.name.endsWith(".wav") }
+                .forEach { file ->
+                    check(file.delete() || !file.exists()) { "voice_segment_cache_unavailable" }
+                }
+            preparedDirectories.add(path)
+        }
+    }
+
     private val pcm = ShortArray(32 * 16_000)
     private val pcmLock = Any()
     private val fileLock = Any()
@@ -50,6 +68,7 @@ internal class VoiceSegmentStore(initialEpoch: Long) {
     fun writeWav(directory: File, sessionId: String, samples: ShortArray): File {
         require(samples.isNotEmpty() && samples.size <= 30 * 16_000) { "invalid_voice_segment_range" }
         check(!closed) { "cancelled:voice_segment" }
+        prepareCache(directory)
         val expired = synchronized(fileLock) { files.toList() }.filter { !it.exists() }
         synchronized(fileLock) { files.removeAll(expired.toSet()) }
         check(synchronized(fileLock) { files.size < 8 }) { "voice_segment_file_limit" }

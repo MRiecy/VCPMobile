@@ -115,6 +115,44 @@ describe('GroupSettingsView editing and return saving', () => {
     expect(changes()).toHaveLength(0);
   });
 
+  it.each([
+    { fieldTop: 380, fieldBottom: 480, expectedScroll: 80 },
+    { fieldTop: 260, fieldBottom: 360, expectedScroll: 0 },
+  ])('keeps keyboard reveal inside the member sheet (field bottom: $fieldBottom)', async ({ fieldTop, fieldBottom, expectedScroll }) => {
+    const view = await open();
+    await openMemberConfig('Luna');
+    const field = control('Luna 的发言风格').element as HTMLTextAreaElement;
+    const sheet = view.get('[aria-label="Luna 群内配置"]').element as HTMLElement;
+    const scroller = sheet.querySelector<HTMLElement>('.group-sheet-body')!;
+    const scrollAncestors = vi.spyOn(field, 'scrollIntoView');
+    vi.spyOn(field, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, fieldTop, 320, fieldBottom - fieldTop));
+    vi.spyOn(scroller, 'getBoundingClientRect').mockImplementation(() => {
+      // The keyboard event also patches the sheet padding: reveal must use the updated layout.
+      expect(sheet.style.paddingBottom).toBe('8px');
+      return new DOMRect(0, 200, 360, 200);
+    });
+    field.focus();
+    const focus = vi.spyOn(field, 'focus');
+    const blur = vi.spyOn(field, 'blur');
+    try {
+      window.dispatchEvent(new CustomEvent('vcp-keyboard-inset', {
+        detail: { imeBottomPx: 300, imeVisible: true, safeBottomPx: 0 },
+      }));
+      await nextTick();
+
+      expect(document.activeElement).toBe(field);
+      expect(focus).not.toHaveBeenCalled();
+      expect(blur).not.toHaveBeenCalled();
+      expect(scrollAncestors).not.toHaveBeenCalled();
+      expect(scroller.scrollTop).toBe(expectedScroll);
+    } finally {
+      window.dispatchEvent(new CustomEvent('vcp-keyboard-inset', {
+        detail: { imeBottomPx: 0, imeVisible: false, safeBottomPx: 0 },
+      }));
+      await nextTick();
+    }
+  });
+
   it('retains each mode draft and explicit speaker order across repeated mode changes', async () => {
     const view = await open();
     await view.get('button[aria-label="下移 Nova"]').trigger('click');

@@ -59,6 +59,8 @@ final class VoiceSegmentCache {
 /// File-queue only. Each session has a separate generated cache directory; no
 /// user-supplied identifier becomes a path. Idle files expire after one minute.
 final class VoiceSegmentFiles {
+    private static let preparationLock = NSLock()
+    private static var preparedRoot: URL?
     private let queue: DispatchQueue
     private let timer: DispatchSourceTimer
     private var directory: URL?
@@ -73,6 +75,33 @@ final class VoiceSegmentFiles {
         timer.resume()
     }
 
+    /// Every instance passes this process-wide gate before creating a session
+    /// directory. A successful sweep never runs again over live exports.
+    static func prepareStorage() throws -> URL {
+        dispatchPrecondition(condition: .notOnQueue(.main))
+        preparationLock.lock()
+        defer { preparationLock.unlock() }
+        if let root = preparedRoot { return root }
+        let fileManager = FileManager.default
+        guard let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            throw voiceAudioFailure("voice_segment_cache_unavailable")
+        }
+        let root = caches.appendingPathComponent("VCPVoiceSegments", isDirectory: true)
+        try fileManager.createDirectory(at: root, withIntermediateDirectories: true)
+        let entries = try fileManager.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        for entry in entries {
+            // Only our generated session directories belong to this cleanup.
+            guard UUID(uuidString: entry.lastPathComponent)?.uuidString == entry.lastPathComponent else { continue }
+            let values = try entry.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard values.isDirectory == true, values.isSymbolicLink != true else { continue }
+            try fileManager.removeItem(at: entry)
+        }
+        // Failed preparation leaves the gate closed; the next explicit start
+        // may retry without any current-process exports having been admitted.
+        preparedRoot = root
+        return root
+    }
+
     func write(_ snapshot: VoiceSegmentSnapshot) throws -> VoiceSegmentExport {
         dispatchPrecondition(condition: .onQueue(queue))
         guard !closed else { throw voiceAudioFailure("cancelled:voice_segment") }
@@ -82,11 +111,7 @@ final class VoiceSegmentFiles {
         let folder: URL
         if let existing = directory { folder = existing }
         else {
-            guard let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first else {
-                throw voiceAudioFailure("voice_segment_cache_unavailable")
-            }
-            folder = caches.appendingPathComponent("VCPVoiceSegments", isDirectory: true)
-                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            folder = try Self.prepareStorage().appendingPathComponent(UUID().uuidString, isDirectory: true)
             try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
             directory = folder
         }

@@ -3,7 +3,7 @@
 
 use super::{bounded_read, sample_path, VoiceCloneModelDto, MAX_SAMPLE_BYTES};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashSet, io::ErrorKind, path::{Path, PathBuf}, time::{Duration, SystemTime}};
+use std::{collections::HashSet, future::Future, io::ErrorKind, path::{Path, PathBuf}, time::{Duration, SystemTime}};
 use tokio::io::AsyncWriteExt;
 
 const MAX_REGISTRY_BYTES: u64 = 4 * 1024 * 1024;
@@ -104,23 +104,67 @@ async fn ensure_library_directory(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug)]
+enum CommitError {
+    Unpublished(String),
+    Published(String),
+}
+
+impl From<CommitError> for String {
+    fn from(error: CommitError) -> Self {
+        match error { CommitError::Unpublished(message) | CommitError::Published(message) => message }
+    }
+}
+
+async fn rename_registry(source: PathBuf, destination: PathBuf) -> Result<(), String> {
+    tokio::fs::rename(source, destination).await.map_err(|e| e.to_string())
+}
+
+async fn persist_registry(root: PathBuf, destination: PathBuf) -> Result<(), String> {
+    sync_directory(&root).await?;
+    flush_published_file(&destination).await
+}
+
 pub(super) async fn commit(root: &Path, registry: &Registry) -> Result<(), String> {
-    let bytes = serde_json::to_vec(registry).map_err(|e| e.to_string())?;
-    if bytes.len() as u64 > MAX_REGISTRY_BYTES { return Err("声音库索引已达到容量上限。".into()); }
-    ensure_library_directory(root).await?;
+    commit_with_io(root, registry, rename_registry, persist_registry).await.map_err(String::from)
+}
+
+// Keep the actual rename as the publication boundary. Per-call operations also
+// let failure tests exercise the real file/registry sequence without global hooks.
+async fn commit_with_io<R, RF, B, BF>(root: &Path, registry: &Registry, rename: R, barrier: B) -> Result<(), CommitError>
+where
+    R: FnOnce(PathBuf, PathBuf) -> RF,
+    RF: Future<Output = Result<(), String>>,
+    B: FnOnce(PathBuf, PathBuf) -> BF,
+    BF: Future<Output = Result<(), String>>,
+{
+    let bytes = serde_json::to_vec(registry).map_err(|e| CommitError::Unpublished(e.to_string()))?;
+    if bytes.len() as u64 > MAX_REGISTRY_BYTES { return Err(CommitError::Unpublished("声音库索引已达到容量上限。".into())); }
+    ensure_library_directory(root).await.map_err(CommitError::Unpublished)?;
     let pending = root.join(format!(".pending-registry-{}", uuid::Uuid::new_v4().simple()));
+    let destination = root.join("registry.json");
     let result = async {
         write_durable(&pending, &bytes).await?;
-        let destination = root.join("registry.json");
-        tokio::fs::rename(&pending, &destination).await.map_err(|e| e.to_string())?;
-        sync_directory(root).await?;
-        flush_published_file(&destination).await
+        rename(pending.clone(), destination.clone()).await
     }.await;
-    if result.is_err() { let _ = tokio::fs::remove_file(&pending).await; }
-    result
+    if let Err(error) = result {
+        let _ = tokio::fs::remove_file(&pending).await;
+        return Err(CommitError::Unpublished(error));
+    }
+    barrier(root.to_owned(), destination).await.map_err(CommitError::Published)
 }
 
 pub(super) async fn publish(root: &Path, sample: VoiceCloneModelDto, bytes: &[u8]) -> Result<VoiceCloneModelDto, String> {
+    publish_with_io(root, sample, bytes, rename_registry, persist_registry).await
+}
+
+async fn publish_with_io<R, RF, B, BF>(root: &Path, sample: VoiceCloneModelDto, bytes: &[u8], rename: R, barrier: B) -> Result<VoiceCloneModelDto, String>
+where
+    R: FnOnce(PathBuf, PathBuf) -> RF,
+    RF: Future<Output = Result<(), String>>,
+    B: FnOnce(PathBuf, PathBuf) -> BF,
+    BF: Future<Output = Result<(), String>>,
+{
     let mut registry = load(root).await?;
     ensure_library_directory(root).await?;
     let directory = root.join("samples");
@@ -143,10 +187,29 @@ pub(super) async fn publish(root: &Path, sample: VoiceCloneModelDto, bytes: &[u8
         return Err(error);
     }
     registry.samples.push(sample.clone());
-    // Once registry publication begins its rename may already have succeeded
-    // even if the following persistence barrier fails. Never roll back audio
-    // referenced by that possibly published registry.
-    commit(root, &registry).await?;
+    if let Err(error) = commit_with_io(root, &registry, rename, barrier).await {
+        match error {
+            CommitError::Unpublished(error) => {
+                // The old registry cannot reference this import. Roll back only
+                // the audio we own; never scan unknown or registered assets.
+                let rollback = async {
+                    match tokio::fs::remove_file(&destination).await {
+                        Ok(()) => {},
+                        Err(error) if error.kind() == ErrorKind::NotFound => {},
+                        Err(error) => return Err(error.to_string()),
+                    }
+                    sync_directory(&directory).await
+                }.await;
+                return Err(match rollback {
+                    Ok(()) => error,
+                    Err(cleanup) => format!("{error}；本次导入音频回收失败：{cleanup}"),
+                });
+            },
+            // Rename succeeded: a failed durability barrier must not remove
+            // the complete audio already referenced by the visible registry.
+            CommitError::Published(error) => return Err(error),
+        }
+    }
     Ok(sample)
 }
 
@@ -224,6 +287,92 @@ mod tests {
             format: CloneSampleFormat::Wav, file_bytes: 4, duration_ms: 1,
             file_hash: "a".repeat(64), created_at: 1, updated_at: 1,
         }
+    }
+
+    async fn assert_no_pending(root: &Path) {
+        for directory in [root.to_owned(), root.join("samples")] {
+            let mut entries = tokio::fs::read_dir(directory).await.unwrap();
+            while let Some(entry) = entries.next_entry().await.unwrap() {
+                assert!(!entry.file_name().to_string_lossy().starts_with(".pending-"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn index_capacity_failure_rolls_back_only_the_new_audio() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let root = temp.path().join("library");
+        let kept = publish(&root, sample(), b"keep").await.unwrap();
+        let mut registry = load(&root).await.unwrap();
+        // Fixed-size valid metadata fills the index up to less than one entry
+        // below the real limit; no lowered test-only capacity is involved.
+        let entry_bytes = serde_json::to_vec(&sample()).unwrap().len() + 1;
+        let available = MAX_REGISTRY_BYTES as usize - serde_json::to_vec(&registry).unwrap().len();
+        registry.samples.extend((0..available / entry_bytes).map(|_| sample()));
+        commit(&root, &registry).await.unwrap();
+        let before = tokio::fs::read(root.join("registry.json")).await.unwrap();
+        let unknown = root.join("samples/unknown");
+        tokio::fs::write(&unknown, b"unrelated").await.unwrap();
+        let imported = sample();
+        let destination = audio_path(&root, &imported).unwrap();
+
+        let error = publish(&root, imported, b"data").await.unwrap_err();
+
+        assert!(error.contains("容量上限"), "{error}");
+        assert!(!destination.exists());
+        assert_eq!(tokio::fs::read(root.join("registry.json")).await.unwrap(), before);
+        assert_eq!(tokio::fs::read(audio_path(&root, &kept).unwrap()).await.unwrap(), b"keep");
+        assert_eq!(tokio::fs::read(unknown).await.unwrap(), b"unrelated");
+        assert_no_pending(&root).await;
+    }
+
+    #[tokio::test]
+    async fn index_rename_failure_rolls_back_audio_and_staged_index() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let root = temp.path().join("library");
+        let kept = publish(&root, sample(), b"keep").await.unwrap();
+        let before = tokio::fs::read(root.join("registry.json")).await.unwrap();
+        let imported = sample();
+        let destination = audio_path(&root, &imported).unwrap();
+        let observed_audio = destination.clone();
+
+        let result = publish_with_io(&root, imported, b"data", move |source, destination| async move {
+            assert_eq!(tokio::fs::read(observed_audio).await.unwrap(), b"data");
+            assert!(source.is_file());
+            // An unusable parent path produces a real filesystem rename failure.
+            rename_registry(source, destination.join("missing/registry.json")).await
+        }, persist_registry).await;
+
+        assert!(result.is_err());
+        assert!(!destination.exists());
+        assert_eq!(tokio::fs::read(root.join("registry.json")).await.unwrap(), before);
+        assert_eq!(tokio::fs::read(audio_path(&root, &kept).unwrap()).await.unwrap(), b"keep");
+        assert_no_pending(&root).await;
+    }
+
+    #[tokio::test]
+    async fn failed_barrier_after_index_rename_preserves_published_audio() {
+        let temp = tempfile::tempdir_in(".").unwrap();
+        let root = temp.path().join("library");
+        let kept = publish(&root, sample(), b"keep").await.unwrap();
+        let imported = sample();
+        let imported_id = imported.id.clone();
+        let destination = audio_path(&root, &imported).unwrap();
+
+        let result = publish_with_io(&root, imported, b"data", rename_registry, |root, destination| async move {
+            // The failure occurs only after the real rename made both entries
+            // visible. It must not trigger the unpublished-import rollback.
+            assert_eq!(load(&root).await.unwrap().samples.len(), 2);
+            assert!(destination.is_file());
+            Err("injected registry durability failure".into())
+        }).await;
+
+        assert_eq!(result.unwrap_err(), "injected registry durability failure");
+        let reopened = load(&root).await.unwrap();
+        assert!(reopened.samples.iter().any(|item| item.id == imported_id));
+        assert_eq!(tokio::fs::read(destination).await.unwrap(), b"data");
+        assert_eq!(tokio::fs::read(audio_path(&root, &kept).unwrap()).await.unwrap(), b"keep");
+        assert_no_pending(&root).await;
     }
 
     #[tokio::test]

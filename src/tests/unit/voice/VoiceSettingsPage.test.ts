@@ -100,7 +100,7 @@ async function renderOverlay(mode: 'settings' | 'styleGuidance' = 'settings') {
   const wrapper = mount(VoiceOptionsView, {
     attachTo: document.body,
     props: { mode, isOpen: true, active: true, zIndex: 40 },
-    global: { stubs: { SlidePage: { template: '<div><slot /></div>' } } },
+    global: { stubs: { SlidePage: { props: ['isOpen'], template: '<div v-show="isOpen"><slot /></div>' } } },
   });
   wrappers.push(wrapper);
   await flushPromises();
@@ -537,7 +537,7 @@ describe('语音设置使用正式设置快照', () => {
     expect(modals.modalStackLength()).toBe(3);
     modals.closeTopModal();
     await flushPromises();
-    expect(document.querySelector('[role="dialog"][aria-label="音色管理"]')).toBeNull();
+    expect(new DOMWrapper(document.querySelector('[role="dialog"][aria-label="音色管理"]')!).isVisible()).toBe(false);
     expect(document.querySelector('[role="dialog"][aria-label="选择复刻音色"]')).not.toBeNull();
     expect(modals.modalStackLength()).toBe(2);
     modals.closeTopModal();
@@ -871,7 +871,7 @@ describe('语音设置使用正式设置快照', () => {
     expect(document.querySelector('[role="dialog"][aria-label="音色管理"]')).not.toBeNull();
     stopping.resolve(undefined);
     await flushPromises();
-    expect(document.querySelector('[role="dialog"][aria-label="音色管理"]')).toBeNull();
+    expect(new DOMWrapper(document.querySelector('[role="dialog"][aria-label="音色管理"]')!).isVisible()).toBe(false);
   });
 
   it('关闭上传后迟到的原生文件选择只清理副本，不导入资产', async () => {

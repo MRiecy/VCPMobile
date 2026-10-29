@@ -297,6 +297,8 @@ internal class NativeVoiceAudio(
         var samplesSeen = 0L
         try {
             if (!isCurrent(session)) return
+            VoiceSegmentStore.prepareCache(File(activity.cacheDir, "voice-segments"))
+            if (!isCurrent(session)) return
             // Only this serialized worker can ask for a route lease. Its prior
             // session has already released the recorder and posted route.close.
             val openRoute = FutureTask {

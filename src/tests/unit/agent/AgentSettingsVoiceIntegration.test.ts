@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createPinia, disposePinia, setActivePinia, type Pinia } from 'pinia';
-import { reactive } from 'vue';
+import { nextTick, reactive } from 'vue';
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils';
 import AgentSettingsView from '../../../features/agent/AgentSettingsView.vue';
 import GlobalOverlayManager from '../../../components/GlobalOverlayManager.vue';
@@ -70,6 +70,39 @@ async function render() {
 }
 
 describe('Agent settings with the real voice section', () => {
+  it('reveals the preview field inside the form after the keyboard opens without refocusing it', async () => {
+    const wrapper = await render();
+    await wrapper.get('[role="switch"][aria-label="启用独立音色"]').trigger('click');
+    const field = wrapper.get('[aria-label="试听文本"]').element as HTMLInputElement;
+    const scroller = wrapper.get('.agent-settings-scroll').element as HTMLElement;
+    let visibleHeight = 700;
+    vi.spyOn(scroller, 'getBoundingClientRect').mockImplementation(() => new DOMRect(0, 80, 360, visibleHeight));
+    vi.spyOn(field, 'getBoundingClientRect').mockReturnValue(new DOMRect(20, 600, 250, 44));
+    const scrollAncestors = vi.spyOn(field, 'scrollIntoView');
+    field.focus();
+    const focus = vi.spyOn(field, 'focus');
+    const blur = vi.spyOn(field, 'blur');
+    expect(scroller.scrollTop).toBe(0);
+
+    try {
+      visibleHeight = 400;
+      window.dispatchEvent(new CustomEvent('vcp-keyboard-inset', {
+        detail: { imeBottomPx: 300, imeVisible: true, safeBottomPx: 0 },
+      }));
+      await nextTick();
+      expect(scroller.scrollTop).toBe(164);
+      expect(document.activeElement).toBe(field);
+      expect(focus).not.toHaveBeenCalled();
+      expect(blur).not.toHaveBeenCalled();
+      expect(scrollAncestors).not.toHaveBeenCalled();
+    } finally {
+      window.dispatchEvent(new CustomEvent('vcp-keyboard-inset', {
+        detail: { imeBottomPx: 0, imeVisible: false, safeBottomPx: 0 },
+      }));
+      await nextTick();
+    }
+  });
+
   it('keeps the full voice form visible and enables editing with the independent switch', async () => {
     const wrapper = await render();
     const section = wrapper.get('[aria-labelledby="agent-voice-settings-title"]');

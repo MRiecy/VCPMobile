@@ -4,6 +4,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { Check, ChevronRight, Circle, Play, Plus, Search, Square, X } from '@lucide/vue';
 import { useOverlayStore } from '../../../core/stores/overlay';
 import { useModalHistory } from '../../../core/composables/useModalHistory';
+import { LAYER_SHEET } from '../../../core/constants/layers';
+import SlidePage from '../../../components/ui/SlidePage.vue';
 import type { ConfirmConfig } from '../../../core/types/overlay';
 import { useVoiceLibraryStore, voiceSampleDetail, type VoiceCloneModelDto } from './voiceLibraryStore';
 import { useVoicePreviewTask } from './useVoicePreviewTask';
@@ -237,8 +239,9 @@ defineExpose({ cancelPending, stop, busy, locked });
         </footer>
       </section>
     </div>
-    <div v-if="managerOpen && active" class="vcp-viewport-surface fixed inset-0 z-sheet pointer-events-auto">
-      <section ref="managerSurface" class="voice-library-manager vcp-safe-inline" role="dialog" aria-modal="true" aria-label="音色管理" :inert="uploadOpen || !!confirmation || stopping">
+    <SlidePage :is-open="managerOpen && active" :z-index="LAYER_SHEET" :aria-hidden="!managerOpen || !active"
+      :inert="!managerOpen || !active || uploadOpen || !!confirmation || stopping">
+      <section ref="managerSurface" class="voice-library-manager" role="dialog" aria-modal="true" aria-label="音色管理">
         <header class="voice-library-header">
           <h3>音色管理</h3>
           <button ref="closeButton" type="button" class="voice-library-close" :disabled="stopping && previewBusy" aria-label="关闭音色管理" @click="requestCloseManager"><X :size="18" /></button>
@@ -271,7 +274,7 @@ defineExpose({ cancelPending, stop, busy, locked });
         <p v-if="unavailable" class="px-4 text-sm text-[var(--secondary-text)]">{{ unavailable }}</p>
         <p v-if="operationError || previewError || library.error" role="alert" class="voice-library-feedback px-4">{{ operationError || previewError || library.error }}</p>
       </section>
-    </div>
+    </SlidePage>
   </Teleport>
   <VoiceCloneUpload ref="upload" :open="uploadOpen" :active="active && managerOpen" @close="uploadOpen = false" @imported="onImported" />
 </template>

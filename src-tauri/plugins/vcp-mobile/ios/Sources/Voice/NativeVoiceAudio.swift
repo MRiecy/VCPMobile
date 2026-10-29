@@ -199,11 +199,32 @@ final class NativeVoiceAudio {
                         guard UIApplication.shared.applicationState != .background else {
                             self.finish(reason: "background", error: false); return
                         }
-                        self.prepare(run)
+                        self.prepareSegmentStorage(run)
                     }
                 }
             }
         } catch { invoke.reject("invalid_voice_start_args: \(error.localizedDescription)") }
+    }
+
+    private func prepareSegmentStorage(_ run: Run) {
+        dispatchPrecondition(condition: .onQueue(.main))
+        fileWorker.async { [weak self, weak run] in
+            guard let self = self, let run = run, !run.cancelled.load(ordering: .acquiring) else { return }
+            let result = Result { _ = try VoiceSegmentFiles.prepareStorage() }
+            DispatchQueue.main.async { [weak self, weak run] in
+                guard let self = self, let run = run, self.active === run,
+                      !self.disposed, !run.cancelled.load(ordering: .acquiring) else { return }
+                guard UIApplication.shared.applicationState != .background,
+                      self.webView?.window?.windowScene?.activationState != .background else {
+                    self.finish(reason: "background", error: false); return
+                }
+                switch result {
+                case .success: self.prepare(run)
+                case .failure(let error):
+                    self.finish(reason: voiceAudioReason(error, fallback: "voice_segment_cache_cleanup_failed"), error: true)
+                }
+            }
+        }
     }
 
     private func prepare(_ run: Run) {
