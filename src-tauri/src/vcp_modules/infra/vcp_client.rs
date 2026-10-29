@@ -12,6 +12,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
 use tauri::{ipc::Channel, AppHandle, Manager, Runtime};
+use tokio::sync::{futures::OwnedNotified, Notify};
 use tokio_util::codec::FramedRead;
 #[cfg(target_os = "android")]
 use tokio_util::codec::LengthDelimitedCodec;
@@ -920,6 +921,7 @@ impl Drop for ActiveRequestLease {
 struct ActiveGroupTurnEntry {
     turn_id: uuid::Uuid,
     cancellation_token: CancellationToken,
+    released: Arc<Notify>,
     channel: std::sync::Mutex<Option<Channel<StreamEvent>>>,
     origin_user_message_id: std::sync::Mutex<Option<String>>,
     chat_feed: std::sync::Mutex<Option<Arc<dyn Fn(&StreamEvent) + Send + Sync>>>,
@@ -963,12 +965,24 @@ impl ActiveGroupTurns {
         key: TopicKey,
         cancellation_token: CancellationToken,
     ) -> Result<ActiveGroupTurnLease, String> {
+        self.try_acquire_or_wait(key.clone(), cancellation_token).map_err(|_| format!(
+            "Group turn is already active for {}/{}/{}",
+            key.owner_type, key.owner_id, key.topic_id
+        ))
+    }
 
+    /// Atomically acquire the slot or subscribe to its current owner's release.
+    pub(crate) fn try_acquire_or_wait(
+        &self,
+        key: TopicKey,
+        cancellation_token: CancellationToken,
+    ) -> Result<ActiveGroupTurnLease, OwnedNotified> {
         match self.0.entry(key.clone()) {
             Entry::Vacant(slot) => {
                 slot.insert(Arc::new(ActiveGroupTurnEntry {
                     turn_id: uuid::Uuid::new_v4(),
                     cancellation_token: cancellation_token.clone(),
+                    released: Arc::new(Notify::new()),
                     channel: std::sync::Mutex::new(None),
                     origin_user_message_id: std::sync::Mutex::new(None),
                     chat_feed: std::sync::Mutex::new(None),
@@ -980,10 +994,9 @@ impl ActiveGroupTurns {
                     cancellation_token,
                 })
             }
-            Entry::Occupied(_) => Err(format!(
-                "Group turn is already active for {}/{}/{}",
-                key.owner_type, key.owner_id, key.topic_id
-            )),
+            // Construct the future under the map guard. notify_waiters also
+            // reaches futures created before release but first polled afterward.
+            Entry::Occupied(slot) => Err(slot.get().released.clone().notified_owned()),
         }
     }
 
@@ -1162,6 +1175,7 @@ impl Drop for ActiveGroupTurnLease {
                     let _ = channel.send(event);
                 }
             }
+            turn.released.notify_waiters();
         }
     }
 }
@@ -4969,6 +4983,21 @@ mod active_request_tests {
         assert_eq!(events[0].context.as_ref().unwrap()["originUserMessageId"], "voice-origin");
         let later = turns.try_acquire(topic).unwrap();
         assert!(!later.is_cancelled(), "a later unrelated group turn owns another token");
+    }
+
+    #[tokio::test]
+    async fn group_release_reaches_all_waiters_even_before_their_first_poll() {
+        let turns = ActiveGroupTurns::default();
+        let topic = TopicKey::new("group", "group", "topic");
+        let turn = turns.try_acquire(topic.clone()).unwrap();
+        let first = turns.try_acquire_or_wait(topic.clone(), CancellationToken::new()).err().unwrap();
+        let second = turns.try_acquire_or_wait(topic.clone(), CancellationToken::new()).err().unwrap();
+        let mut first = Box::pin(first);
+        let mut second = Box::pin(second);
+        drop(turn);
+        assert!(futures_util::poll!(&mut first).is_ready());
+        assert!(futures_util::poll!(&mut second).is_ready());
+        assert!(turns.try_acquire(topic).is_ok());
     }
 
     #[test]

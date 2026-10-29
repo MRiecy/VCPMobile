@@ -1,5 +1,5 @@
 //! A voice turn enters the same chat owners as a typed message. Group admission
-//! briefly waits for the interrupted turn to release its owner before any
+//! waits for the interrupted turn to release its owner before any
 //! persistence or model request starts. The call owner claims each stable origin
 //! once; a database upsert is not a substitute for that admission.
 
@@ -22,7 +22,7 @@ use crate::vcp_modules::vcp_client::{
     freeze_chat_connection, ActiveGroupTurnLease, ActiveGroupTurns, ActiveRequests,
 };
 use serde_json::{json, Value};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 use tauri::{AppHandle, Manager, Runtime};
 use tokio_util::sync::CancellationToken;
 
@@ -101,28 +101,25 @@ async fn acquire_voice_group_turn(
     if cancellation.is_cancelled() {
         return Err("语音提交已取消。".into());
     }
-    // Speech already requested a stop. Repeat once at submission/retry in case
+    // Speech already requested a stop. Repeat once at submission in case
     // another input started a turn meanwhile; never remove a live owner's lease.
     turns.cancel(target);
-    tokio::time::timeout(Duration::from_millis(500), async {
-        loop {
-            if cancellation.is_cancelled() {
-                return Err("语音提交已取消。".into());
-            }
-            // A new group turn has its own hard-stop lifetime. A later typed
-            // input may join it independently of this voice origin's token.
-            if let Ok(turn) = turns.try_acquire(target.clone()) {
-                return Ok(turn);
-            }
-            tokio::select! {
-                biased;
-                _ = cancellation.cancelled() => return Err("语音提交已取消。".into()),
-                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
-            }
+    loop {
+        if cancellation.is_cancelled() {
+            return Err("语音提交已取消。".into());
         }
-    })
-    .await
-    .map_err(|_| "上一轮群聊仍在停止，语音文本已保留，请稍后重新提交。".to_string())?
+        // A new group turn has its own hard-stop lifetime. A later typed
+        // input may join it independently of this voice origin's token.
+        let released = match turns.try_acquire_or_wait(target.clone(), CancellationToken::new()) {
+            Ok(turn) => return Ok(turn),
+            Err(released) => released,
+        };
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Err("语音提交已取消。".into()),
+            _ = released => {}
+        }
+    }
 }
 
 impl PreparedVoiceSubmission {
@@ -233,7 +230,10 @@ mod tests {
         assert!(turns.try_acquire(target.clone()).is_err());
 
         drop(old);
-        let next = admission.await.unwrap();
+        let std::task::Poll::Ready(Ok(next)) = futures_util::poll!(&mut admission) else {
+            panic!("release must resume admission without advancing the clock");
+        };
+        drop(admission);
         cancellation.cancel();
         assert!(!next.is_cancelled(), "the group and voice origin have separate lifetimes");
         assert!(turns.try_acquire(target.clone()).is_err());
@@ -242,17 +242,37 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn group_admission_timeout_does_not_remove_the_stopping_owner() {
+    async fn group_admission_waits_for_real_release_without_a_timer_deadline() {
         let turns = ActiveGroupTurns::default();
         let target = TopicKey::new("group", "group", "topic");
         let old = turns.try_acquire(target.clone()).unwrap();
-        let error = acquire_voice_group_turn(&turns, &target, &CancellationToken::new())
-            .await.err().unwrap();
-        assert!(error.contains("语音文本已保留"));
+        let cancellation = CancellationToken::new();
+        let mut admission = Box::pin(acquire_voice_group_turn(&turns, &target, &cancellation));
+        assert!(futures_util::poll!(&mut admission).is_pending());
+        tokio::time::advance(std::time::Duration::from_secs(30)).await;
+        assert!(futures_util::poll!(&mut admission).is_pending());
         assert!(old.is_cancelled());
         assert!(turns.try_acquire(target.clone()).is_err());
         drop(old);
+        let next = admission.await.unwrap();
+        drop(next);
         assert!(turns.try_acquire(target).is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn group_admission_follows_a_competing_owner_without_cancelling_it() {
+        let turns = ActiveGroupTurns::default();
+        let target = TopicKey::new("group", "group", "topic");
+        let old = turns.try_acquire(target.clone()).unwrap();
+        let cancellation = CancellationToken::new();
+        let mut admission = Box::pin(acquire_voice_group_turn(&turns, &target, &cancellation));
+        assert!(futures_util::poll!(&mut admission).is_pending());
+        drop(old);
+        let competing = turns.try_acquire(target.clone()).unwrap();
+        assert!(futures_util::poll!(&mut admission).is_pending());
+        assert!(!competing.is_cancelled());
+        drop(competing);
+        assert!(matches!(futures_util::poll!(&mut admission), std::task::Poll::Ready(Ok(_))));
     }
 
     #[tokio::test(start_paused = true)]

@@ -64,7 +64,7 @@ impl CallInput {
         }
         let mut state = self.state.lock().map_err(|error| error.to_string())?;
         if state.current.as_ref().is_some_and(|batch| batch.parts.len() >= MAX_BATCH_PARTS) {
-            return Err("连续语音片段已达 128 段，请等待当前输入发送；发送失败后可重新提交。".into());
+            return Err("连续语音片段已达 128 段，请等待当前输入完成。".into());
         }
         let barge = if state.current.is_none() {
             state.last_claimed.clone()
@@ -225,11 +225,14 @@ impl CallInput {
         })
     }
 
-    pub fn offered(&self, offer_id: &str) -> Result<Option<Offer>, String> {
-        let state = self.state.lock().map_err(|error| error.to_string())?;
-        Ok(state.current.as_ref().and_then(|batch| batch.offer.as_ref())
-            .filter(|offer| offer.offer_id == offer_id && !self.cancel.is_cancelled())
-            .cloned())
+    pub fn discard_offer(&self, offer_id: &str) {
+        if let Ok(mut state) = self.state.lock() {
+            if state.current.as_ref().and_then(|batch| batch.offer.as_ref())
+                .is_some_and(|offer| offer.offer_id == offer_id)
+            {
+                state.current = None;
+            }
+        }
     }
 
     /// Only the call coordinator uses this, while holding its admission lock.

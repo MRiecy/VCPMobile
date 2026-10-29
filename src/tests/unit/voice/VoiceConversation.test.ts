@@ -28,7 +28,7 @@ function snapshot(overrides: Partial<VoiceCallSnapshot> = {}): VoiceCallSnapshot
     callId: 'restored-call', target: { ownerId: 'agent', ownerType: 'agent', topicId: 'topic' },
     revision: 1, active: true, micState: 'closed', micStopReason: null, inputState: 'idle',
     replyState: 'idle', ttsState: 'idle', partial: '', error: null, notice: null,
-    inputSessionId: null, originUserMessageId: null, ttsId: null, lastPersistedMessageId: null, retryOfferId: null,
+    inputSessionId: null, originUserMessageId: null, ttsId: null, lastPersistedMessageId: null,
     ...overrides,
   };
 }
@@ -47,36 +47,6 @@ beforeEach(() => {
 afterEach(() => controller.dispose());
 
 describe('Rust voice conversation projection', () => {
-  it('retries only the current offered input without forwarding transcript text or opening the microphone', async () => {
-    mockInvoke('get_voice_conversation_snapshot', () => snapshot({
-      inputState: 'error', error: '群回复仍在结束', partial: '保留的 128 段内容', retryOfferId: 'offer-128',
-    }));
-    mockInvoke('retry_voice_submission', () => undefined);
-    await controller.recover();
-    await controller.retrySubmission('offer-128');
-    expect(invokeMock).toHaveBeenLastCalledWith('retry_voice_submission', { callId: 'restored-call', offerId: 'offer-128' });
-    emitTauriEvent('vcp-voice-call', snapshot({ revision: 2, inputState: 'submitting' }));
-    await controller.retrySubmission('offer-128');
-    expect(invokeMock.mock.calls.filter(([name]) => name === 'retry_voice_submission')).toHaveLength(1);
-    expect(onView).toHaveBeenLastCalledWith({ state: 'recognizing', message: '正在发送', partialText: '' });
-    expect(connectDocument).toHaveBeenCalledOnce();
-    expect(invokeMock.mock.calls.some(([name]) => name === 'start_voice_microphone')).toBe(false);
-  });
-
-  it('ignores a retry failure after its offer is superseded or the call ends', async () => {
-    mockInvoke('get_voice_conversation_snapshot', () => snapshot({ retryOfferId: 'old-offer' }));
-    const pending = deferred<void>();
-    mockInvoke('retry_voice_submission', () => pending.promise);
-    await controller.recover();
-    const retry = controller.retrySubmission('old-offer');
-    emitTauriEvent('vcp-voice-call', snapshot({ revision: 2, retryOfferId: 'new-offer' }));
-    pending.reject('迟到的旧错误');
-    await expect(retry).resolves.toBeUndefined();
-    controller.stop();
-    await controller.retrySubmission('new-offer');
-    expect(invokeMock.mock.calls.filter(([name]) => name === 'retry_voice_submission')).toHaveLength(1);
-  });
-
   it('binds an explicit start intent to its target without exporting the Vue epoch', async () => {
     const callId = await beginCall();
     expect(invokeMock).toHaveBeenCalledWith('begin_voice_conversation', {

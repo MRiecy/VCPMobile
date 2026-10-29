@@ -34,7 +34,6 @@ pub struct VoiceCallSnapshot {
     pub mic_state: &'static str,
     pub mic_stop_reason: Option<String>,
     pub input_state: &'static str,
-    pub retry_offer_id: Option<String>,
     pub reply_state: &'static str,
     pub tts_state: &'static str,
     pub partial: String,
@@ -163,17 +162,14 @@ impl CallInner {
             }
         }
         self.snapshot.input_state = "recording";
-        self.snapshot.retry_offer_id = None;
         self.snapshot.error = None;
         self.snapshot.notice = None;
         Ok((began, stop))
     }
 
-    fn queue_offer(&mut self, input: &CallInput, offer: &Offer, reply: &Arc<Reply>, retry: bool) -> bool {
+    fn queue_offer(&mut self, input: &CallInput, offer: &Offer, reply: &Arc<Reply>) -> bool {
         if !self.snapshot.active || !input.has_offer(&offer.offer_id)
             || self.pending.as_ref().is_some_and(|pending| pending.offer_id == offer.offer_id)
-            || (retry && (self.pending.is_some()
-                || self.snapshot.retry_offer_id.as_deref() != Some(&offer.offer_id)))
         {
             return false;
         }
@@ -182,7 +178,6 @@ impl CallInner {
         }
         self.pending = Some(Pending { offer_id: offer.offer_id.clone(), reply: reply.clone() });
         self.snapshot.input_state = "submitting";
-        self.snapshot.retry_offer_id = None;
         self.snapshot.partial = offer.text.clone();
         self.snapshot.error = None;
         self.snapshot.notice = None;
@@ -194,11 +189,12 @@ impl CallInner {
         if !self.pending.as_ref().is_some_and(|pending| Arc::ptr_eq(&pending.reply, reply)) {
             return false;
         }
-        self.snapshot.retry_offer_id = self.pending.take()
-            .filter(|pending| input.has_offer(&pending.offer_id))
-            .map(|pending| pending.offer_id);
+        if let Some(pending) = self.pending.take() {
+            input.discard_offer(&pending.offer_id);
+        }
         self.work = None;
         self.snapshot.input_state = "error";
+        self.snapshot.partial.clear();
         self.snapshot.error = Some(error);
         true
     }
@@ -218,7 +214,6 @@ impl CallInner {
         self.work = None;
         self.reply = Some(reply.clone());
         self.snapshot.input_state = "idle";
-        self.snapshot.retry_offer_id = None;
         self.snapshot.partial.clear();
         self.snapshot.origin_user_message_id = Some(reply.origin.clone());
         self.snapshot.tts_id = Some(reply.tts_id.clone());
@@ -311,7 +306,6 @@ fn reserve_conversation<R: Runtime>(
             mic_state: "closed",
             mic_stop_reason: None,
             input_state: "idle",
-            retry_offer_id: None,
             reply_state: "idle",
             tts_state: "idle",
             partial: String::new(),
@@ -432,7 +426,6 @@ pub async fn end_voice_conversation(app: AppHandle, call_id: String) -> Result<(
         inner.snapshot.active = false;
         inner.snapshot.mic_state = "closed";
         inner.snapshot.input_state = "idle";
-        inner.snapshot.retry_offer_id = None;
         inner.snapshot.partial.clear();
         inner.work = None;
         let mut ids = Vec::new();
@@ -650,19 +643,6 @@ pub(super) fn begin_speech<R: Runtime>(app: &AppHandle<R>, input: &Arc<CallInput
 }
 
 pub(super) fn offer(app: &AppHandle, offer: Offer) {
-    submit_offer(app, offer, false);
-}
-
-#[tauri::command]
-pub fn retry_voice_submission(app: AppHandle, call_id: String, offer_id: String) -> Result<(), String> {
-    let Some(call) = call(&app, &call_id) else { return Ok(()); };
-    if let Some(offer) = call.input.offered(&offer_id)? {
-        submit_offer(&app, offer, true);
-    }
-    Ok(())
-}
-
-fn submit_offer(app: &AppHandle, offer: Offer, retry: bool) {
     let Some(call) = call(app, &offer.call_id) else {
         return;
     };
@@ -677,7 +657,7 @@ fn submit_offer(app: &AppHandle, offer: Offer, retry: bool) {
         let Ok(mut inner) = call.inner.lock() else {
             return;
         };
-        if !inner.queue_offer(&call.input, &offer, &reply, retry) {
+        if !inner.queue_offer(&call.input, &offer, &reply) {
             return;
         }
         inner.work.get_or_insert_with(|| WorkLease::acquire(app));
@@ -888,7 +868,6 @@ mod tests {
                 mic_state: "closed",
                 mic_stop_reason: None,
                 input_state: "idle",
-                retry_offer_id: None,
                 reply_state: "idle",
                 tts_state: "idle",
                 partial: String::new(),
@@ -1024,7 +1003,7 @@ mod tests {
     }
 
     #[test]
-    fn full_batch_retries_failed_admission_without_new_speech_and_claims_only_once() {
+    fn failed_preparation_ends_a_full_batch_and_next_speech_starts_fresh() {
         let input = CallInput::new("call".into());
         let mut inner = inner();
         let parts: Vec<_> = (0..super::super::batch::MAX_BATCH_PARTS)
@@ -1034,61 +1013,46 @@ mod tests {
                 BatchCompletion::Pending));
         }
         let ready = offer(&input, &parts[127], "末句");
-        let original_text = ready.text.clone();
         let failed = reply("failed");
-        assert!(inner.queue_offer(&input, &ready, &failed, false));
-        let turns = ActiveGroupTurns::default();
-        let target = TopicKey::new("group", "g", "t");
-        let busy = turns.try_acquire(target.clone()).unwrap();
-        let error = turns.try_acquire(target.clone()).err().unwrap();
-        assert!(inner.submission_failed(&input, &failed, error));
-        assert_eq!(inner.snapshot.retry_offer_id.as_deref(), Some(ready.offer_id.as_str()));
         assert!(inner.begin_speech(&input).is_err());
-        drop(busy);
-
-        let retry = input.offered(&ready.offer_id).unwrap().unwrap();
-        assert_eq!(retry.text, original_text);
-        assert_eq!(retry.text.split_whitespace().count(), 128);
-        let next = reply("retry");
-        assert!(inner.queue_offer(&input, &retry, &next, true));
-        assert!(inner.snapshot.retry_offer_id.is_none());
-        assert!(inner.snapshot.error.is_none());
-        // A repeated UI intent cannot replace or cancel the accepted preparation.
-        assert!(!inner.queue_offer(&input, &retry, &reply("duplicate"), true));
-        assert!(!next.cancel.is_cancelled());
-        let _turn = turns.try_acquire(target).unwrap();
-        assert!(inner.admit(&input, &retry, &next));
-        assert!(!inner.admit(&input, &retry, &next));
-        assert!(input.offered(&ready.offer_id).unwrap().is_none());
-        assert!(!inner.queue_offer(&input, &retry, &reply("late"), true));
-        assert!(inner.begin_speech(&input).is_ok());
+        assert!(inner.queue_offer(&input, &ready, &failed));
+        assert!(inner.submission_failed(&input, &failed, "配置读取失败".into()));
+        assert_eq!(inner.snapshot.input_state, "error");
+        assert_eq!(inner.snapshot.error.as_deref(), Some("配置读取失败"));
+        assert!(inner.snapshot.partial.is_empty());
+        assert!(!input.has_offer(&ready.offer_id));
+        assert!(!inner.admit(&input, &ready, &failed));
+        let next = inner.begin_speech(&input).unwrap().0;
+        assert_ne!(next.batch_id, parts[127].batch_id);
+        let fresh = offer(&input, &next, "新的输入");
+        assert_eq!(fresh.text, "新的输入");
+        let prepared = reply("fresh");
+        assert!(inner.queue_offer(&input, &fresh, &prepared));
+        assert!(inner.admit(&input, &fresh, &prepared));
+        assert!(!inner.admit(&input, &fresh, &prepared));
     }
 
     #[test]
-    fn new_speech_or_hangup_revokes_a_retry_without_losing_supplementary_text() {
+    fn stale_preparation_failure_cannot_discard_new_speech() {
         let input = CallInput::new("call".into());
         let mut inner = inner();
         let first = inner.begin_speech(&input).unwrap().0;
         let ready = offer(&input, &first, "第一句");
         let failed = reply("failed");
-        assert!(inner.queue_offer(&input, &ready, &failed, false));
-        assert!(inner.submission_failed(&input, &failed, "准备失败".into()));
-        let cached_retry = input.offered(&ready.offer_id).unwrap().unwrap();
+        assert!(inner.queue_offer(&input, &ready, &failed));
         let more = inner.begin_speech(&input).unwrap().0;
-        assert!(inner.snapshot.retry_offer_id.is_none());
-        assert!(!inner.queue_offer(&input, &cached_retry, &reply("stale"), true));
         let merged = offer(&input, &more, "第二句");
         assert_eq!(merged.text, "第一句 第二句");
         let pending = reply("pending");
-        assert!(inner.queue_offer(&input, &merged, &pending, false));
-        input.cancel.cancel();
-        inner.snapshot.active = false;
-        assert!(!inner.admit(&input, &merged, &pending));
-        assert!(input.offered(&merged.offer_id).unwrap().is_none());
+        assert!(inner.queue_offer(&input, &merged, &pending));
+        assert!(!inner.submission_failed(&input, &failed, "过期错误".into()));
+        assert!(input.has_offer(&merged.offer_id));
+        assert!(inner.snapshot.error.is_none());
+        assert!(inner.admit(&input, &merged, &pending));
     }
 
     #[tokio::test]
-    async fn speech_cancels_only_its_target_group_and_failed_offer_survives_mic_reopen() {
+    async fn speech_cancels_only_its_target_group() {
         let app = tauri::test::mock_app();
         app.manage(VoiceCallState::default());
         app.manage(super::super::VoiceServiceState::default());
@@ -1098,23 +1062,9 @@ mod tests {
         let other = app.state::<ActiveGroupTurns>().try_acquire(TopicKey::new("group", "g", "other")).unwrap();
         reserve_conversation(app.handle().clone(), "call".into(), target).unwrap();
         let current = call(app.handle(), "call").unwrap();
-        let began = begin_speech(app.handle(), &current.input).unwrap();
+        begin_speech(app.handle(), &current.input).unwrap();
         assert!(old.is_cancelled());
         assert!(!other.is_cancelled());
-        let ready = offer(&current.input, &began, "已识别");
-        let failed = reply("failed");
-        {
-            let mut inner = current.inner.lock().unwrap();
-            assert!(inner.queue_offer(&current.input, &ready, &failed, false));
-            assert!(inner.submission_failed(&current.input, &failed, "准备失败".into()));
-        }
-        input_starting(app.handle(), "call", "new-mic", &CancellationToken::new());
-        input_status(app.handle(), "call", "new-mic", "ready", None, None);
-        input_status(app.handle(), "call", "new-mic", "listening", None, None);
-        let inner = current.inner.lock().unwrap();
-        assert_eq!(inner.snapshot.retry_offer_id.as_deref(), Some(ready.offer_id.as_str()));
-        assert_eq!(inner.snapshot.partial, "已识别");
-        assert!(current.input.has_offer(&ready.offer_id));
     }
 
     #[test]

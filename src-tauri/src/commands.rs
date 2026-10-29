@@ -39,7 +39,6 @@ macro_rules! app_command_handler {
         };
         use crate::vcp_modules::chat::voice_service::{
             begin_voice_conversation, end_voice_conversation, get_voice_conversation_snapshot,
-            retry_voice_submission,
             start_voice_microphone, close_voice_microphone,
             allocate_voice_document, connect_voice_document, connect_tts_document,
             start_tts_session, stop_tts, submit_tts_text,
@@ -204,7 +203,6 @@ macro_rules! app_command_handler {
                 begin_voice_conversation,
                 end_voice_conversation,
                 get_voice_conversation_snapshot,
-                retry_voice_submission,
                 close_voice_microphone,
                 start_voice_microphone,
                 allocate_voice_document,
