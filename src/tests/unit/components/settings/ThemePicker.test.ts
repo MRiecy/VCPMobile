@@ -103,6 +103,45 @@ describe('ThemePicker draft, preview and presentation controls', () => {
     expect(wrapper.find('[role="alert"]').exists()).toBe(false);
   });
 
+  it('navigates through themes using prev and next buttons', async () => {
+    const store = useThemeStore();
+    wrapper = mount(ThemePicker, { global: { plugins: [pinia] } });
+    await flushPromises();
+
+    const prevBtn = wrapper.find('[data-testid="theme-nav-prev"]');
+    const nextBtn = wrapper.find('[data-testid="theme-nav-next"]');
+    expect(prevBtn.exists()).toBe(true);
+    expect(nextBtn.exists()).toBe(true);
+
+    // Initial theme is themes-bear-holiday.ts (index 0)
+    expect(prevBtn.attributes()).toHaveProperty('disabled');
+    expect(nextBtn.attributes()).not.toHaveProperty('disabled');
+
+    // Click next -> switches to theme at index 1
+    await nextBtn.trigger('click');
+    await flushPromises();
+
+    expect(prevBtn.attributes()).not.toHaveProperty('disabled');
+    const secondTheme = store.availableThemes[1]?.fileName;
+    expect(wrapper.find(`[data-theme-key="${secondTheme}"]`).classes()).toContain('is-selected');
+
+    // Click prev -> returns to theme at index 0
+    await prevBtn.trigger('click');
+    await flushPromises();
+
+    expect(prevBtn.attributes()).toHaveProperty('disabled');
+    const firstTheme = store.availableThemes[0]?.fileName;
+    expect(wrapper.find(`[data-theme-key="${firstTheme}"]`).classes()).toContain('is-selected');
+  });
+
+  it('disables navigation buttons when ThemePicker is inactive', async () => {
+    wrapper = mount(ThemePicker, { props: { active: false }, global: { plugins: [pinia] } });
+    await flushPromises();
+
+    expect(wrapper.get('[data-testid="theme-nav-prev"]').attributes()).toHaveProperty('disabled');
+    expect(wrapper.get('[data-testid="theme-nav-next"]').attributes()).toHaveProperty('disabled');
+  });
+
 
   it('shares the presentation owner with the chat shortcut in both directions', async () => {
     wrapper = mount(ChatPreferencesPage, { global: { plugins: [pinia] } });

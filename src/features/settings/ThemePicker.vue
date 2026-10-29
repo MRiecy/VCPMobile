@@ -36,6 +36,27 @@ const draftIndex = computed(() => {
   return themeStore.availableThemes.findIndex((theme) => theme.fileName === draftThemeKey.value);
 });
 
+const hasPreviousTheme = computed(() => draftIndex.value > 0);
+const hasNextTheme = computed(() => {
+  return draftIndex.value >= 0 && draftIndex.value < themeStore.availableThemes.length - 1;
+});
+
+const goToPreviousTheme = () => {
+  if (!hasPreviousTheme.value || !props.active) return;
+  const targetTheme = themeStore.availableThemes[draftIndex.value - 1];
+  if (targetTheme) {
+    selectTheme(targetTheme, true);
+  }
+};
+
+const goToNextTheme = () => {
+  if (!hasNextTheme.value || !props.active) return;
+  const targetTheme = themeStore.availableThemes[draftIndex.value + 1];
+  if (targetTheme) {
+    selectTheme(targetTheme, true);
+  }
+};
+
 const isDirty = computed(() => {
   return Boolean(draftThemeKey.value && draftThemeKey.value !== appliedThemeKey.value);
 });
@@ -103,7 +124,9 @@ const selectNearestTheme = () => {
   const theme = key
     ? themeStore.availableThemes.find((candidate) => candidate.fileName === key)
     : undefined;
-  if (theme) selectTheme(theme, false);
+  if (theme && theme.fileName !== draftThemeKey.value) {
+    selectTheme(theme, false);
+  }
 };
 
 const handleRailScroll = () => {
@@ -115,7 +138,19 @@ const handleRailScroll = () => {
       scrollMeasureFrame = null;
       selectNearestTheme();
     });
-  }, 100);
+  }, 60);
+};
+
+const handleRailScrollEnd = () => {
+  if (scrollIdleTimer !== null) {
+    window.clearTimeout(scrollIdleTimer);
+    scrollIdleTimer = null;
+  }
+  if (scrollMeasureFrame !== null) {
+    cancelAnimationFrame(scrollMeasureFrame);
+    scrollMeasureFrame = null;
+  }
+  selectNearestTheme();
 };
 
 const applyDraftTheme = async () => {
@@ -196,7 +231,22 @@ onBeforeUnmount(() => {
           </span>
         </div>
 
-        <div ref="railRef" class="theme-carousel" data-testid="theme-carousel" @scroll.passive="handleRailScroll">
+        <div class="theme-carousel-wrapper">
+          <button
+            type="button"
+            class="theme-nav-btn is-prev"
+            data-testid="theme-nav-prev"
+            :disabled="!hasPreviousTheme || !active"
+            aria-label="上一个主题"
+            @click="goToPreviousTheme"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="15 18 9 12 15 6"></polyline>
+            </svg>
+          </button>
+
+          <div ref="railRef" class="theme-carousel" data-testid="theme-carousel" @scroll.passive="handleRailScroll" @scrollend.passive="handleRailScrollEnd">
           <button v-for="theme in themeStore.availableThemes" :key="theme.fileName" type="button"
             class="theme-card" :class="draftThemeKey === theme.fileName ? 'is-selected' : ''"
             :data-theme-key="theme.fileName" :aria-pressed="draftThemeKey === theme.fileName"
@@ -209,6 +259,21 @@ onBeforeUnmount(() => {
               viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"
               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <polyline points="20 6 9 17 4 12"></polyline>
+            </svg>
+          </button>
+        </div>
+
+          <button
+            type="button"
+            class="theme-nav-btn is-next"
+            data-testid="theme-nav-next"
+            :disabled="!hasNextTheme || !active"
+            aria-label="下一个主题"
+            @click="goToNextTheme"
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"
+              stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="9 18 15 12 9 6"></polyline>
             </svg>
           </button>
         </div>
@@ -284,6 +349,13 @@ onBeforeUnmount(() => {
   text-align: right;
 }
 
+.theme-carousel-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+
 .theme-carousel {
   display: flex;
   gap: 0.625rem;
@@ -308,11 +380,19 @@ onBeforeUnmount(() => {
   border: 2px solid transparent;
   border-radius: 0.875rem;
   scroll-snap-align: center;
+  scroll-snap-stop: always;
+  opacity: 0.68;
+  transform: scale(0.95);
+  transition: transform 0.22s cubic-bezier(0.2, 0.8, 0.4, 1), opacity 0.22s ease, border-color 0.22s ease;
+  will-change: transform, opacity;
   text-align: left;
 }
 
 .theme-card.is-selected {
+  opacity: 1;
+  transform: scale(1);
   border-color: var(--highlight-text);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
 }
 
 .theme-card-visual {
@@ -388,6 +468,47 @@ onBeforeUnmount(() => {
   line-height: 1.4;
 }
 
+.theme-nav-btn {
+  position: absolute;
+  top: 50%;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+  color: var(--primary-text);
+  background-color: var(--vcp-panel-bg-90);
+  border: 1px solid var(--vcp-border-subtle);
+  border-radius: 50%;
+  transform: translateY(-50%);
+  cursor: pointer;
+  touch-action: manipulation;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  transition: opacity 0.18s ease, transform 0.18s ease, background-color 0.18s ease;
+}
+
+.theme-nav-btn.is-prev {
+  left: 0.25rem;
+}
+
+.theme-nav-btn.is-next {
+  right: 0.25rem;
+}
+
+.theme-nav-btn:active:not(:disabled) {
+  transform: translateY(-50%) scale(0.9);
+  background-color: var(--secondary-bg);
+}
+
+.theme-nav-btn:disabled {
+  opacity: 0.2;
+  cursor: not-allowed;
+  pointer-events: none;
+  box-shadow: none;
+}
+
 @media (min-width: 480px) {
   .theme-card {
     flex-basis: calc((100% - 1.25rem) / 2.2);
@@ -412,7 +533,9 @@ onBeforeUnmount(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .theme-apply-button {
+  .theme-apply-button,
+  .theme-card,
+  .theme-nav-btn {
     transition: none;
   }
 }
