@@ -25,7 +25,7 @@ mod workers;
 
 pub use call::{
     begin_voice_conversation, end_voice_conversation, get_voice_conversation_snapshot,
-    VoiceCallState,
+    retry_voice_submission, VoiceCallState,
 };
 pub use document::{allocate_voice_document, connect_voice_document, VoiceDocumentState};
 #[cfg(any(target_os = "android", target_os = "ios", test))]

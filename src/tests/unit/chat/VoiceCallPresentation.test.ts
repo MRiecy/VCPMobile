@@ -17,7 +17,7 @@ import { useTopicStore } from '@/core/stores/topicListManager';
 import { useOverlayStore } from '@/core/stores/overlay';
 import { useModalHistory } from '@/core/composables/useModalHistory';
 import { mountWithPinia } from '@/tests/utils/mount';
-import { emitTauriEvent, mockInvoke } from '@/tests/mocks/tauri';
+import { emitTauriEvent, invokeMock, mockInvoke } from '@/tests/mocks/tauri';
 
 const audio = vi.hoisted(() => ({
   startCapture: vi.fn(), stopCapture: vi.fn(),
@@ -265,13 +265,57 @@ describe('voice entry from the existing composer', () => {
 });
 
 describe('chat scene voice transitions', () => {
+  it('offers an explicit retry for retained speech, suppresses duplicate clicks and hides it once submission starts', async () => {
+    const snapshot: VoiceCallSnapshot = {
+      callId: 'retained-call', target: { ownerId: 'voice-agent', ownerType: 'agent', topicId: 'voice-topic' },
+      revision: 1, active: true, micState: 'closed', micStopReason: null, inputState: 'error',
+      replyState: 'cancelled', ttsState: 'cancelled', partial: '保留的完整语音批次', error: '群回复仍在结束', notice: null,
+      inputSessionId: null, originUserMessageId: null, ttsId: null, lastPersistedMessageId: null, retryOfferId: 'offer-128',
+    };
+    const pending = deferred<void>();
+    mockInvoke('get_voice_conversation_snapshot', () => ({ ...snapshot }));
+    mockInvoke('retry_voice_submission', () => pending.promise);
+    const view = mountComposer(ChatView);
+    const voice = useVoiceCallStore();
+    await voice.recover();
+    await nextTick();
+    const retry = view.get('.voice-retry-button');
+    expect(retry.text()).toBe('重新提交');
+    await retry.trigger('click');
+    await retry.trigger('click');
+    expect(retry.attributes('disabled')).toBeDefined();
+    expect(invokeMock.mock.calls.filter(([name]) => name === 'retry_voice_submission')).toEqual([
+      ['retry_voice_submission', { callId: 'retained-call', offerId: 'offer-128' }],
+    ]);
+    expect(audio.startCapture).not.toHaveBeenCalled();
+    expect(audio.stopCapture).not.toHaveBeenCalled();
+
+    snapshot.revision += 1;
+    emitTauriEvent('vcp-voice-call', { ...snapshot, inputState: 'submitting', error: null, retryOfferId: null });
+    pending.resolve();
+    await flushPromises();
+    expect(view.find('.voice-retry-button').exists()).toBe(false);
+    expect(view.find('[aria-label="开启麦克风"]').exists()).toBe(true);
+    expect(view.find('[aria-label="挂断并退出语音模式"]').exists()).toBe(true);
+
+    // Reopening capture may project idle while the failed complete offer survives.
+    snapshot.revision += 1;
+    emitTauriEvent('vcp-voice-call', { ...snapshot, micState: 'listening', inputState: 'idle' });
+    await nextTick();
+    expect(view.find('.voice-retry-button').exists()).toBe(true);
+    snapshot.revision += 1;
+    emitTauriEvent('vcp-voice-call', { ...snapshot, error: '语音识别失败', retryOfferId: null });
+    await nextTick();
+    expect(view.find('.voice-retry-button').exists()).toBe(false);
+  });
+
   it('keeps the native interruption visible through closed snapshots and clears it when the mic restarts', async () => {
     const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const snapshot: VoiceCallSnapshot = {
       callId: '', target: { ownerId: 'voice-agent', ownerType: 'agent', topicId: 'voice-topic' },
       revision: 1, active: true, micState: 'closed', micStopReason: null, inputState: 'idle',
       replyState: 'idle', ttsState: 'idle', partial: '', error: null, notice: null,
-      inputSessionId: null, originUserMessageId: null, ttsId: null, lastPersistedMessageId: null,
+      inputSessionId: null, originUserMessageId: null, ttsId: null, lastPersistedMessageId: null, retryOfferId: null,
     };
     mockInvoke('begin_voice_conversation', args => {
       snapshot.callId = args!.callId as string;
@@ -322,7 +366,7 @@ describe('chat scene voice transitions', () => {
       callId: '', target: { ownerId: 'voice-agent', ownerType: 'agent', topicId: 'voice-topic' },
       revision: 1, active: true, micState: 'closed', micStopReason: null, inputState: 'idle',
       replyState: 'idle', ttsState: 'idle', partial: '', error: null, notice: null,
-      inputSessionId: null, originUserMessageId: null, ttsId: null, lastPersistedMessageId: null,
+      inputSessionId: null, originUserMessageId: null, ttsId: null, lastPersistedMessageId: null, retryOfferId: null,
     };
     mockInvoke('begin_voice_conversation', args => {
       snapshot.callId = args!.callId as string;

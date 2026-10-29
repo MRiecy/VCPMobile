@@ -28,7 +28,7 @@ const recovered: VoiceCallSnapshot = {
   callId: 'surviving-call', target, revision: 7, active: true,
   micState: 'listening', micStopReason: null, inputState: 'recording', replyState: 'idle',
   ttsState: 'idle', partial: '', error: null, notice: null, inputSessionId: 'surviving-input',
-  originUserMessageId: null, ttsId: null, lastPersistedMessageId: null,
+  originUserMessageId: null, ttsId: null, lastPersistedMessageId: null, retryOfferId: null,
 };
 let pinia: Pinia;
 let revision: number;

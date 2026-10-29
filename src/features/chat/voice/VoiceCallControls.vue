@@ -11,11 +11,14 @@ const props = defineProps<{
   serviceMessage?: string;
   partialText?: string;
   errorMessage?: string;
+  canRetrySubmission?: boolean;
+  retryPending?: boolean;
 }>();
 
 const emit = defineEmits<{
   toggleMicrophone: [];
   hangup: [];
+  retrySubmission: [];
 }>();
 
 const microphoneOn = computed(() => props.microphoneState === 'on');
@@ -66,6 +69,8 @@ const bars = computed(() => Array.from({ length: 32 }, (_, index) => {
       <p class="voice-service-status" :class="{ 'is-error': status.error }" :title="status.text">
         {{ status.text }}
       </p>
+      <button v-if="canRetrySubmission" type="button" class="voice-retry-button"
+        :disabled="retryPending" @click="emit('retrySubmission')">重新提交</button>
     </div>
 
     <div class="voice-control-actions">
@@ -131,6 +136,10 @@ const bars = computed(() => Array.from({ length: 32 }, (_, index) => {
 }
 
 .voice-control-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   width: 100%;
   max-width: 420px;
   padding: 4px 8px 0;
@@ -138,6 +147,7 @@ const bars = computed(() => Array.from({ length: 32 }, (_, index) => {
 }
 
 .voice-service-status {
+  min-width: 0;
   margin: 0;
   height: 16px;
   font-size: 11px;
@@ -151,6 +161,24 @@ const bars = computed(() => Array.from({ length: 32 }, (_, index) => {
 .voice-service-status.is-error {
   color: #ef4444;
   opacity: 1;
+}
+
+.voice-retry-button {
+  flex-shrink: 0;
+  min-height: 32px;
+  padding: 4px;
+  border: 0;
+  background: transparent;
+  color: var(--primary-text);
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.voice-retry-button:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .voice-control-actions {

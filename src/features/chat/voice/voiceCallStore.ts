@@ -69,6 +69,9 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   const inputState = ref<VoiceCallSnapshot['inputState']>('idle');
   const replyState = ref<VoiceCallSnapshot['replyState']>('idle');
   const ttsState = ref<VoiceCallSnapshot['ttsState']>('idle');
+  const retryOfferId = ref<string | null>(null);
+  const retryPending = ref(false);
+  const canRetrySubmission = computed(() => active.value && !!retryOfferId.value);
   let microphoneGeneration = 0;
   let microphoneStopReason: string | null = null;
 
@@ -93,6 +96,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
       inputState.value = snapshot?.inputState ?? 'idle';
       replyState.value = snapshot?.replyState ?? 'idle';
       ttsState.value = snapshot?.ttsState ?? 'idle';
+      retryOfferId.value = snapshot?.active ? snapshot.retryOfferId : null;
       const reasonChanged = microphoneStopReason !== (snapshot?.micStopReason ?? null);
       microphoneStopReason = snapshot?.micStopReason ?? null;
       captureState.value = snapshot?.active ? snapshot.micState : 'closed';
@@ -182,6 +186,20 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
 
   const recover = () => voiceConversation.recover();
 
+  const retrySubmission = async () => {
+    const offerId = retryOfferId.value;
+    if (!active.value || !offerId || retryPending.value) return;
+    retryPending.value = true;
+    try {
+      await voiceConversation.retrySubmission(offerId);
+    } catch (error) {
+      serviceState.value = 'error';
+      serviceMessage.value = errorDetail(error).slice(0, 200) || '重新提交失败，请重试。';
+    } finally {
+      retryPending.value = false;
+    }
+  };
+
   const toggleMicrophone = () => {
     if (!active.value) return;
     if (microphoneState.value === 'on' || microphoneState.value === 'requesting') stopMicrophone();
@@ -203,6 +221,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
     active, microphoneState, level, bands,
     playbackActive, errorMessage, serviceState, serviceMessage, partialText,
     inputState, replyState, ttsState,
-    start, end, toggleMicrophone, recover,
+    canRetrySubmission, retryPending,
+    start, end, toggleMicrophone, retrySubmission, recover,
   };
 });

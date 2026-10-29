@@ -1,7 +1,7 @@
-//! A voice turn enters the same chat owners as a typed message. Admission is
-//! synchronous so the call owner can retain the exact cancellation token before
-//! any persistence or model request starts. The call owner claims each stable
-//! origin once; a database upsert is not a substitute for that admission.
+//! A voice turn enters the same chat owners as a typed message. Group admission
+//! briefly waits for the interrupted turn to release its owner before any
+//! persistence or model request starts. The call owner claims each stable origin
+//! once; a database upsert is not a substitute for that admission.
 
 use crate::vcp_modules::agent_chat_application_service::{
     process_prepared_agent_chat_message, AgentChatPayload, PreparedAgentRequest,
@@ -12,9 +12,8 @@ use crate::vcp_modules::chat_manager::ChatMessage;
 use crate::vcp_modules::db_manager::DbState;
 use crate::vcp_modules::infra::vcp_http_endpoint::ChatRequestPurpose;
 use crate::vcp_modules::group_chat_application_service::{
-    process_prepared_group_chat_message, submit_group_session_input, GroupChatParams,
+    process_prepared_group_chat_message, GroupChatParams,
 };
-use crate::vcp_modules::group::group_session::GroupInputReservation;
 use crate::vcp_modules::group_service::GroupManagerState;
 use crate::vcp_modules::message_service::{self, MessageWriteResultDto};
 use crate::vcp_modules::settings_manager::{read_config, SettingsState};
@@ -23,14 +22,13 @@ use crate::vcp_modules::vcp_client::{
     freeze_chat_connection, ActiveGroupTurnLease, ActiveGroupTurns, ActiveRequests,
 };
 use serde_json::{json, Value};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 use tauri::{AppHandle, Manager, Runtime};
 use tokio_util::sync::CancellationToken;
 
 enum PreparedChatOwner {
     Agent(PreparedAgentRequest),
     Group(ActiveGroupTurnLease),
-    GroupSession(GroupInputReservation),
 }
 
 pub(crate) struct PreparedVoiceSubmission {
@@ -42,11 +40,11 @@ pub(crate) struct PreparedVoiceSubmission {
     reply_policy: Arc<VoiceReplyPolicy>,
 }
 
-/// Register only in memory. A token cancelled before registration stays
-/// cancelled in the real owner; dropping an unaccepted preparation releases it.
+/// Register only in memory. Admission observes the voice cancellation token;
+/// dropping an unaccepted preparation releases its owner without persistence.
 /// Output binding can call the Rust narration consumer, so call this outside
 /// the voice call's state lock.
-pub(crate) fn prepare_voice_submission(
+pub(crate) async fn prepare_voice_submission(
     app: &AppHandle,
     target: TopicKey,
     origin: String,
@@ -65,16 +63,12 @@ pub(crate) fn prepare_voice_submission(
         ..Default::default()
     };
     let owner = if target.owner_type == "group" {
-        if let Some(session) = app.state::<ActiveGroupTurns>().session(&target) {
-            PreparedChatOwner::GroupSession(session.reserve_with_cancellation(cancellation.clone())?)
-        } else {
-            // The session's hard stop and this voice origin have separate
-            // lifetimes once a later typed input joins the same JEV session.
-            let turn = app.state::<ActiveGroupTurns>().try_acquire(target.clone())?;
-            turn.set_origin_user_message(&message.id)?;
-            turn.bind_optional_output(app, None)?;
-            PreparedChatOwner::Group(turn)
-        }
+        let turn = acquire_voice_group_turn(
+            &app.state::<ActiveGroupTurns>(), &target, &cancellation,
+        ).await?;
+        turn.set_origin_user_message(&message.id)?;
+        turn.bind_optional_output(app, None)?;
+        PreparedChatOwner::Group(turn)
     } else {
         let request = PreparedAgentRequest::acquire(
             app,
@@ -97,6 +91,38 @@ pub(crate) fn prepare_voice_submission(
         owner,
         reply_policy,
     })
+}
+
+async fn acquire_voice_group_turn(
+    turns: &ActiveGroupTurns,
+    target: &TopicKey,
+    cancellation: &CancellationToken,
+) -> Result<ActiveGroupTurnLease, String> {
+    if cancellation.is_cancelled() {
+        return Err("语音提交已取消。".into());
+    }
+    // Speech already requested a stop. Repeat once at submission/retry in case
+    // another input started a turn meanwhile; never remove a live owner's lease.
+    turns.cancel(target);
+    tokio::time::timeout(Duration::from_millis(500), async {
+        loop {
+            if cancellation.is_cancelled() {
+                return Err("语音提交已取消。".into());
+            }
+            // A new group turn has its own hard-stop lifetime. A later typed
+            // input may join it independently of this voice origin's token.
+            if let Ok(turn) = turns.try_acquire(target.clone()) {
+                return Ok(turn);
+            }
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Err("语音提交已取消。".into()),
+                _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+            }
+        }
+    })
+    .await
+    .map_err(|_| "上一轮群聊仍在停止，语音文本已保留，请稍后重新提交。".to_string())?
 }
 
 impl PreparedVoiceSubmission {
@@ -138,10 +164,6 @@ impl PreparedVoiceSubmission {
                     Some(reply_policy),
                 )
                 .await
-            }
-            PreparedChatOwner::GroupSession(reservation) => {
-                let scope = submit_group_session_input(&app, reservation, &message, Some(reply_policy), cancellation).await?;
-                scope.wait().await
             }
             PreparedChatOwner::Group(turn) => {
                 process_prepared_group_chat_message(
@@ -198,6 +220,86 @@ async fn persist_voice_message<R: Runtime>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn group_admission_waits_for_release_and_keeps_the_new_turn_independent() {
+        let turns = ActiveGroupTurns::default();
+        let target = TopicKey::new("group", "group", "topic");
+        let old = turns.try_acquire(target.clone()).unwrap();
+        let cancellation = CancellationToken::new();
+        let mut admission = Box::pin(acquire_voice_group_turn(&turns, &target, &cancellation));
+        assert!(futures_util::poll!(&mut admission).is_pending());
+        assert!(old.is_cancelled());
+        assert!(turns.try_acquire(target.clone()).is_err());
+
+        drop(old);
+        let next = admission.await.unwrap();
+        cancellation.cancel();
+        assert!(!next.is_cancelled(), "the group and voice origin have separate lifetimes");
+        assert!(turns.try_acquire(target.clone()).is_err());
+        drop(next);
+        assert!(turns.try_acquire(target).is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn group_admission_timeout_does_not_remove_the_stopping_owner() {
+        let turns = ActiveGroupTurns::default();
+        let target = TopicKey::new("group", "group", "topic");
+        let old = turns.try_acquire(target.clone()).unwrap();
+        let error = acquire_voice_group_turn(&turns, &target, &CancellationToken::new())
+            .await.err().unwrap();
+        assert!(error.contains("语音文本已保留"));
+        assert!(old.is_cancelled());
+        assert!(turns.try_acquire(target.clone()).is_err());
+        drop(old);
+        assert!(turns.try_acquire(target).is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelled_group_admission_does_not_acquire_after_release() {
+        let turns = ActiveGroupTurns::default();
+        let target = TopicKey::new("group", "group", "topic");
+        let old = turns.try_acquire(target.clone()).unwrap();
+        let cancellation = CancellationToken::new();
+        let mut admission = Box::pin(acquire_voice_group_turn(&turns, &target, &cancellation));
+        assert!(futures_util::poll!(&mut admission).is_pending());
+        cancellation.cancel();
+        drop(old);
+        assert!(admission.await.is_err());
+        assert!(turns.try_acquire(target).is_ok());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn group_voice_replaces_a_cancelled_jev_session_instead_of_joining_it() {
+        let turns = ActiveGroupTurns::default();
+        let target = TopicKey::new("group", "group", "topic");
+        let old = turns.try_acquire(target.clone()).unwrap();
+        let old_session = old.start_session("user_message", false).unwrap();
+        let cancellation = CancellationToken::new();
+        let mut admission = Box::pin(acquire_voice_group_turn(&turns, &target, &cancellation));
+        assert!(futures_util::poll!(&mut admission).is_pending());
+        assert!(old_session.cancellation.is_cancelled());
+        assert!(old_session.reserve().is_err());
+        assert!(!old_session.released.is_cancelled());
+
+        drop(old);
+        let next = admission.await.unwrap();
+        let next_session = next.start_session("user_message", false).unwrap();
+        assert!(old_session.released.is_cancelled());
+        assert_ne!(next_session.turn_id, old_session.turn_id);
+        assert!(next_session.reserve().is_ok());
+    }
+
+    #[tokio::test]
+    async fn already_cancelled_voice_admission_leaves_the_current_group_alone() {
+        let turns = ActiveGroupTurns::default();
+        let target = TopicKey::new("group", "group", "topic");
+        let old = turns.try_acquire(target.clone()).unwrap();
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        assert!(acquire_voice_group_turn(&turns, &target, &cancellation).await.is_err());
+        assert!(!old.is_cancelled());
+    }
 
     async fn fixture() -> (tauri::App<tauri::test::MockRuntime>, TopicKey, ChatMessage) {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()

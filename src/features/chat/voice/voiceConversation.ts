@@ -21,6 +21,7 @@ export interface VoiceCallSnapshot {
   originUserMessageId: string | null;
   ttsId: string | null;
   lastPersistedMessageId: string | null;
+  retryOfferId: string | null;
 }
 
 export interface VoiceServiceView {
@@ -56,7 +57,10 @@ const projectView = (snapshot: VoiceCallSnapshot): VoiceServiceView => {
   if (snapshot.replyState === 'generating' || snapshot.ttsState === 'synthesizing') {
     return { state: 'thinking', message: snapshot.error?.slice(0, 200) || '正在回复', partialText };
   }
-  if (snapshot.inputState === 'transcribing' || snapshot.inputState === 'submitting') {
+  if (snapshot.inputState === 'submitting') {
+    return { state: 'recognizing', message: '正在发送', partialText };
+  }
+  if (snapshot.inputState === 'transcribing') {
     return { state: 'recognizing', message: '正在识别', partialText };
   }
   if (snapshot.error) return { state: 'error', message: snapshot.error.slice(0, 200), partialText };
@@ -221,6 +225,18 @@ export function createVoiceConversation(options: Options) {
     });
   };
 
+  const retrySubmission = async (offerId: string): Promise<void> => {
+    const run = call;
+    if (disposed || !run || !options.isConversationCurrent(run.key)
+      || projectedSnapshot?.retryOfferId !== offerId) return;
+    try {
+      await invoke<void>('retry_voice_submission', { callId: run.id, offerId });
+    } catch (error) {
+      if (disposed || call !== run || projectedSnapshot?.retryOfferId !== offerId) return;
+      throw error;
+    }
+  };
+
   const dispose = () => {
     disposed = true;
     intentEpoch += 1;
@@ -230,5 +246,5 @@ export function createVoiceConversation(options: Options) {
     // Listener disposal has no authority to cancel the Rust call or its work.
   };
 
-  return { begin, stop, openMicrophone, closeMicrophone, recover, dispose };
+  return { begin, stop, openMicrophone, closeMicrophone, retrySubmission, recover, dispose };
 }
