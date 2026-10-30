@@ -15,8 +15,7 @@ use tauri::{AppHandle, Manager, Runtime};
 use tokio::{io::AsyncReadExt, sync::{Mutex, OwnedMutexGuard}};
 use tokio_util::sync::CancellationToken;
 
-const MAX_BASE64_BYTES: usize = 10_000_000;
-pub(super) const MAX_SAMPLE_BYTES: u64 = 7_000_000;
+pub(super) const MAX_SAMPLE_BYTES: u64 = 32 * 1024 * 1024;
 static SAMPLE_FILES: LazyLock<Arc<Mutex<()>>> = LazyLock::new(|| Arc::new(Mutex::new(())));
 
 /// Serializes publication, reads and explicit deletion of local audio assets.
@@ -243,8 +242,8 @@ fn valid_mp3(bytes: &[u8]) -> bool {
 }
 
 fn detect_format(data: &[u8]) -> Result<CloneSampleFormat, String> {
-    if data.is_empty() || data.len().div_ceil(3) * 4 > MAX_BASE64_BYTES {
-        return Err("声音样本为空或过大，Base64 编码后不能超过 10 MB。".into());
+    if data.is_empty() || data.len() as u64 > MAX_SAMPLE_BYTES {
+        return Err(format!("声音样本为空或超过 {} MiB。", MAX_SAMPLE_BYTES / (1024 * 1024)));
     }
     if valid_wav(data) {
         return Ok(CloneSampleFormat::Wav);
@@ -545,9 +544,9 @@ mod tests {
     }
 
     #[test]
-    fn base64_budget_and_cancel_apply_before_submission() {
+    fn sample_budget_and_cancel_apply_before_submission() {
         let mut bytes = mp3();
-        bytes.resize(MAX_BASE64_BYTES / 4 * 3, 0);
+        bytes.resize(MAX_SAMPLE_BYTES as usize, 0);
         assert!(detect_format(&bytes).is_ok());
         bytes.push(0);
         assert!(detect_format(&bytes).is_err());
@@ -573,14 +572,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_and_read_enforce_seven_decimal_megabytes() {
+    async fn import_and_read_accept_full_sample_budget_and_reject_an_extra_byte() {
         let temp = tempfile::tempdir_in(".").unwrap();
         let root = temp.path().join("voice-samples");
         let source = temp.path().join("reference.wav");
         let mut bytes = wav();
-        bytes.resize(7_000_000, 0);
-        bytes[4..8].copy_from_slice(&6_999_992u32.to_le_bytes());
-        bytes[40..44].copy_from_slice(&6_999_956u32.to_le_bytes());
+        bytes.resize(MAX_SAMPLE_BYTES as usize, 0);
+        bytes[4..8].copy_from_slice(&((MAX_SAMPLE_BYTES - 8) as u32).to_le_bytes());
+        bytes[40..44].copy_from_slice(&((MAX_SAMPLE_BYTES - 44) as u32).to_le_bytes());
         tokio::fs::write(&source, &bytes).await.unwrap();
 
         let sample = import_picked(&root, &source, "声音", None).await.unwrap();

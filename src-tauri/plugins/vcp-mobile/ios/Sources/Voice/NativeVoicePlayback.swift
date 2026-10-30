@@ -2,11 +2,11 @@ import AVFoundation
 import Foundation
 import Tauri
 
-/// Main owns playback and a two-second frame budget, including scheduled audio.
+/// Main owns playback and a ten-second frame budget, including scheduled audio.
 /// The decode queue holds at most one bounded append. Tiny transport packets are
 /// coalesced before scheduling, so packet count cannot prevent startup admission.
 final class NativeVoicePlayback {
-    private static let capacityFrames = 48_000
+    private static let capacityFrames = 240_000
     private static let minimumChunkFrames = 480
     private static let maximumChunkFrames = 2_400
     private static let scheduledChunkLimit = capacityFrames / minimumChunkFrames

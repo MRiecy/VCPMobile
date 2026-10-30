@@ -7,7 +7,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.roundToInt
 
-/** A 32-second ring at the same 16 kHz sample clock reported to the VAD consumer. */
+/** A 120-second (3.84 MB) ring at the 16 kHz sample clock reported to VAD. */
 internal class VoiceSegmentStore(initialEpoch: Long) {
     companion object {
         private val preparedDirectories = mutableSetOf<String>()
@@ -27,7 +27,7 @@ internal class VoiceSegmentStore(initialEpoch: Long) {
         }
     }
 
-    private val pcm = ShortArray(32 * 16_000)
+    private val pcm = ShortArray(120 * 16_000)
     private val pcmLock = Any()
     private val fileLock = Any()
     private val files = LinkedHashSet<File>()
@@ -71,7 +71,7 @@ internal class VoiceSegmentStore(initialEpoch: Long) {
         prepareCache(directory)
         val expired = synchronized(fileLock) { files.toList() }.filter { !it.exists() }
         synchronized(fileLock) { files.removeAll(expired.toSet()) }
-        check(synchronized(fileLock) { files.size < 8 }) { "voice_segment_file_limit" }
+        check(synchronized(fileLock) { files.size < 32 }) { "voice_segment_file_limit" }
         check(directory.isDirectory || directory.mkdirs()) { "voice_segment_cache_unavailable" }
         val file = File.createTempFile("voice-$sessionId-", ".wav", directory)
         val registered = synchronized(fileLock) { if (closed) false else { files.add(file); true } }

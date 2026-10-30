@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, future::Future, io::ErrorKind, path::{Path, PathBuf}, time::{Duration, SystemTime}};
 use tokio::io::AsyncWriteExt;
 
-const MAX_REGISTRY_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_REGISTRY_BYTES: u64 = 16 * 1024 * 1024;
 
 #[derive(Deserialize, Serialize)]
 pub(super) struct Registry {

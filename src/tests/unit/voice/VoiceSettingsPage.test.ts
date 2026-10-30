@@ -804,7 +804,7 @@ describe('语音设置使用正式设置快照', () => {
     await upload.get('input').setValue('My voice');
     await upload.trigger('submit');
     await flushPromises();
-    expect(invokeMock.mock.calls.find(([command]) => command === 'plugin:vcp-mobile|pick_file')?.[1]).toMatchObject({ mode: 'file', maxBytes: 7_000_000 });
+    expect(invokeMock.mock.calls.find(([command]) => command === 'plugin:vcp-mobile|pick_file')?.[1]).toMatchObject({ mode: 'file', maxBytes: 32 * 1024 * 1024 });
     expect(invokeMock.mock.calls.find(([command]) => command === 'import_voice_clone_sample')?.[1]).toEqual({ path: '/native/staging/voice.wav', name: 'My voice', fileName: 'voice.wav' });
     expect(wrapper.get('button[aria-label="当前音色"]').text()).toContain(asset.name);
     expect(deleteTempFile).toHaveBeenCalledWith('/native/staging/voice.wav');

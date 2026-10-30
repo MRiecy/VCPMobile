@@ -88,14 +88,14 @@ internal class NativeVoiceAudio(
 
     private val main = Handler(Looper.getMainLooper())
     private val current = AtomicReference<Session?>(null)
-    private val pendingFrames = ArrayBlockingQueue<Frame>(8)
+    private val pendingFrames = ArrayBlockingQueue<Frame>(128) // 4.096 seconds of 32 ms analysis frames.
     private val framePosted = AtomicBoolean(false)
     private val capture = ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue(1),
         { runnable -> Thread(runnable, "vcp-voice-capture").apply { isDaemon = true } }, ThreadPoolExecutor.AbortPolicy())
-    private val segmentIo = ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue(4),
+    private val segmentIo = ThreadPoolExecutor(1, 1, 0L, TimeUnit.MILLISECONDS, ArrayBlockingQueue(31),
         { runnable -> Thread(runnable, "vcp-voice-export").apply { isDaemon = true } }, ThreadPoolExecutor.AbortPolicy())
     private val segmentCleanup = ConcurrentHashMap.newKeySet<VoiceSegmentStore>()
-    private val segmentSlots = Semaphore(5)
+    private val segmentSlots = Semaphore(32) // One running export plus 31 queued exports.
     private val retainedCaptures = ConcurrentHashMap<String, Session>()
     private val releasedSegmentIds = LinkedHashSet<String>()
     private val cleanupPosted = AtomicBoolean(false)
@@ -179,7 +179,7 @@ internal class NativeVoiceAudio(
         if (!audioSession.hasCall(args.callId)) { invoke.deliverError("cancelled:voice_call"); return@onMain }
         if (!eventsReady()) { invoke.deliverError("voice_events_unavailable"); return@onMain }
         if (current.get() != null || permissionWaiter != null) { invoke.deliverError("voice_session_busy"); return@onMain }
-        if (retainedCaptures.size >= 4) { invoke.deliverError("voice_segment_sessions_busy"); return@onMain }
+        if (retainedCaptures.size >= 16) { invoke.deliverError("voice_segment_sessions_busy"); return@onMain }
         val session = Session(args.sessionId, args.callId, invoke)
         current.set(session)
         if (ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {

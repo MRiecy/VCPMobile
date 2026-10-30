@@ -11,10 +11,10 @@ struct VoiceSegmentSnapshot {
     let sampleCount: UInt64
 }
 
-/// Inference-queue only. One fixed 32-second PCM16 ring, in the same 16 kHz
+/// Inference-queue only. One fixed 120-second (3.84 MB) PCM16 ring, in the same 16 kHz
 /// sample domain as VAD frames. No filesystem work runs on this hot queue.
 final class VoiceSegmentCache {
-    private static let capacity = 32 * 16_000
+    private static let capacity = 120 * 16_000
     private var samples: [Int16]
     private var endSample: UInt64 = 0
 
@@ -107,7 +107,7 @@ final class VoiceSegmentFiles {
         guard !closed else { throw voiceAudioFailure("cancelled:voice_segment") }
         let fileManager = FileManager.default
         removeExpiredExports()
-        guard exports.count < 4 else { throw voiceAudioFailure("voice_segment_exports_busy") }
+        guard exports.count < 32 else { throw voiceAudioFailure("voice_segment_exports_busy") }
         let folder: URL
         if let existing = directory { folder = existing }
         else {

@@ -6,9 +6,9 @@ import kotlin.math.cos
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
-/** A two-second input-domain ring and one bounded pending append. Tiny packets consume frames, not slots. */
+/** A ten-second input-domain ring and one bounded pending append. Tiny packets consume frames, not slots. */
 internal class VoicePlaybackQueue(
-    private val capacityFrames: Int = 48_000,
+    private val capacityFrames: Int = 240_000, // 10 seconds at 24 kHz; startup uses its own watermark.
     private val startupFrames: Int,
 ) {
     data class Read(val samples: ShortArray?, val finished: Boolean, val segmentEnd: Boolean = false)

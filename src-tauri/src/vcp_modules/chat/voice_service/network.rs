@@ -14,9 +14,9 @@ use serde_json::{json, Value};
 use std::{future::Future, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
 
-pub(super) const MAX_TEXT_BYTES: usize = 64 * 1024;
-const MAX_JSON_BYTES: usize = 8 * 1024 * 1024;
-const MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const MAX_TEXT_BYTES: usize = 1024 * 1024;
+const MAX_JSON_BYTES: usize = 32 * 1024 * 1024;
+const MAX_STREAM_BYTES: usize = 128 * 1024 * 1024;
 pub(super) const CANCELLED: &str = "voice_cancelled";
 // JSON carries base64 plus the provider's message envelope. This bound is
 // independent of ASR's smaller text-only response limit.
@@ -24,7 +24,7 @@ const MAX_TTS_JSON_BYTES: usize = MAX_AUDIO_FILE_BYTES.div_ceil(3) * 4 + 64 * 10
 
 pub(super) struct SynthesisRequest {
     pub identity: TtsCacheIdentity,
-    // Clone references can approach 9 MiB of base64. Cache lookup needs only the
+    // Clone references can approach 43 MiB of base64. Cache lookup needs only the
     // identity; retain their existing allocation until HTTP actually needs it.
     voice: Arc<str>,
     stream: bool,

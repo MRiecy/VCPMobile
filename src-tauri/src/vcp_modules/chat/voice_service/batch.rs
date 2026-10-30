@@ -4,7 +4,7 @@ use super::network::MAX_TEXT_BYTES;
 use std::{collections::BTreeMap, sync::Mutex};
 use tokio_util::sync::CancellationToken;
 
-pub(super) const MAX_BATCH_PARTS: usize = 128;
+pub(super) const MAX_BATCH_PARTS: usize = 512;
 
 struct Part {
     active: bool,
@@ -337,7 +337,6 @@ mod tests {
     fn saturation_rejects_only_new_speech_and_accepted_recognition_can_still_be_claimed() {
         let call = CallInput::new("call".into());
         let parts: Vec<_> = (0..MAX_BATCH_PARTS).map(|_| call.begin().unwrap()).collect();
-        assert_eq!(parts.len(), 128);
         assert!(call.begin().is_err());
         for part in &parts[..MAX_BATCH_PARTS - 1] {
             assert!(matches!(call.complete(&part.batch_id, part.sequence, "已接受".into()).unwrap(),
@@ -345,14 +344,14 @@ mod tests {
         }
         let last = &parts[MAX_BATCH_PARTS - 1];
         let ready = offered(call.complete(&last.batch_id, last.sequence, "末句".into()).unwrap());
-        assert_eq!(ready.text.split_whitespace().count(), 128);
+        assert_eq!(ready.text.split_whitespace().count(), MAX_BATCH_PARTS);
         // Rejection must also preserve an offer that already exists, including
         // when reply preparation has not reached the claim boundary yet.
         assert!(call.begin().is_err());
         assert!(call.has_offer(&ready.offer_id));
         assert!(call.claim(&ready.offer_id).unwrap());
         let next = call.begin().unwrap();
-        assert_eq!(next.sequence, 128);
+        assert_eq!(next.sequence, MAX_BATCH_PARTS as u64);
         assert_ne!(next.batch_id, last.batch_id);
         assert_eq!(offered(call.complete(&next.batch_id, next.sequence, "下一批".into()).unwrap()).text, "下一批");
     }

@@ -21,13 +21,13 @@ use tokio_util::sync::CancellationToken;
 use super::network::CANCELLED;
 use super::pipeline::PacketConsumer;
 
-pub(super) const MAX_PCM_BYTES: usize = 8 * 1024 * 1024;
-pub(super) const MAX_AUDIO_FILE_BYTES: usize = 16 * 1024 * 1024;
+pub(super) const MAX_PCM_BYTES: usize = 32 * 1024 * 1024;
+pub(super) const MAX_AUDIO_FILE_BYTES: usize = 64 * 1024 * 1024;
 pub(super) const PCM_PACKET_BYTES: usize = 32_768;
 const OUTPUT_RATE: u32 = 24_000;
 const CONVERSION_FRAMES: usize = 1024;
 // Bound the FFT workspace before construction, including uncommon coprime rates.
-const MAX_RESAMPLE_BLOCK_FRAMES: usize = 32_768;
+const MAX_RESAMPLE_BLOCK_FRAMES: usize = 131_072;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ContainerFormat {
@@ -107,7 +107,7 @@ pub(super) async fn decode(
     }
     if bytes.len() > MAX_AUDIO_FILE_BYTES {
         return Err(DecodeError::Resource(
-            "语音音频文件超过 16 MiB 上限。".into(),
+            format!("语音音频文件超过 {} MiB 上限。", MAX_AUDIO_FILE_BYTES / (1024 * 1024)),
         ));
     }
     let cancel = cancel.clone();
@@ -144,7 +144,7 @@ pub(super) async fn decode_stream<C: PacketConsumer>(
     }
     let local = cancel.child_token();
     let decoding = local.clone();
-    let (sender, mut receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(2);
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
     let worker = tokio::task::spawn_blocking(move || {
         let result = (|| {
         let mut pending = Vec::with_capacity(PCM_PACKET_BYTES);
@@ -342,7 +342,7 @@ fn check_cancelled(cancel: &CancellationToken) -> Result<(), DecodeError> {
 }
 
 fn pcm_limit() -> DecodeError {
-    DecodeError::Resource("单句语音解码后的 PCM 超过 8 MiB 上限。".into())
+    DecodeError::Resource(format!("单句语音解码后的 PCM 超过 {} MiB 上限。", MAX_PCM_BYTES / (1024 * 1024)))
 }
 
 fn output_frames(input_frames: u64, source_rate: u32, max_bytes: Option<usize>) -> Result<usize, DecodeError> {
@@ -587,7 +587,7 @@ fn read_u32(bytes: &[u8]) -> u32 {
 /// Wrap a completed PCM16/24k/mono response in a conventional 44-byte WAV header.
 pub(super) fn pcm_wav(pcm: &[u8]) -> Result<Vec<u8>, String> {
     if pcm.is_empty() || pcm.len() % 2 != 0 || pcm.len() > MAX_PCM_BYTES {
-        return Err("待缓存的 PCM 音频为空、不完整或超过 8 MiB 上限。".into());
+        return Err(format!("待缓存的 PCM 音频为空、不完整或超过 {} MiB 上限。", MAX_PCM_BYTES / (1024 * 1024)));
     }
     let mut wav = Vec::new();
     wav.try_reserve_exact(44 + pcm.len())
@@ -771,11 +771,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn long_local_wav_streams_in_bounded_packets_without_relaxing_tts_limit() {
+    async fn long_local_wav_exceeds_old_budget_in_complete_and_streaming_decode() {
         // A valid 6.4 MB reference expands to 9.6 MB at native playback rate.
         let reference = Bytes::from(wav(16_000, 1, &vec![0; 16_000 * 2 * 200]));
         assert!(reference.len() < 7_000_000);
-        assert_eq!(decode(reference.clone(), &CancellationToken::new()).await.unwrap_err(), pcm_limit());
+        let decoded = decode(reference.clone(), &CancellationToken::new()).await.unwrap();
+        assert_eq!(decoded.pcm_24k_mono.len(), 24_000 * 2 * 200);
         let mut consumer = CountingConsumer::default();
         decode_stream(reference, &CancellationToken::new(), &mut consumer).await.unwrap();
         assert_eq!(consumer.bytes, 24_000 * 2 * 200);
@@ -783,17 +784,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn long_real_mp3_streams_beyond_the_complete_tts_sentence_limit() {
+    async fn long_real_mp3_exceeds_old_budget_in_complete_and_streaming_decode() {
         // The project encoder emits plain MPEG frames without a LAME/Xing tag.
         // Concatenating these independent frame sequences yields a long MP3.
         let encoded = vcp_voice_mp3::encode_pcm16_mono(&sine(16_000, 160_000, 440.0, 1), || false).unwrap();
         let reference = Bytes::from(encoded.repeat(20));
         assert!(reference.len() < 7_000_000);
-        assert_eq!(decode(reference.clone(), &CancellationToken::new()).await.unwrap_err(), pcm_limit());
+        let decoded = decode(reference.clone(), &CancellationToken::new()).await.unwrap();
+        assert!(decoded.pcm_24k_mono.len() > 8 * 1024 * 1024);
         let mut consumer = CountingConsumer::default();
         decode_stream(reference, &CancellationToken::new(), &mut consumer).await.unwrap();
         assert!(consumer.bytes > 24_000 * 2 * 200, "retain encoder padding rather than guessing it away");
         assert!(consumer.bytes < 24_000 * 2 * 205);
+        assert_eq!(consumer.bytes, decoded.pcm_24k_mono.len());
         assert_eq!(consumer.largest_packet, PCM_PACKET_BYTES);
     }
 

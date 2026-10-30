@@ -1,6 +1,6 @@
 //! Bounded SSE framing. UTF-8 is decoded only after a complete line arrives.
 
-const MAX_EVENT_BYTES: usize = 2 * 1024 * 1024;
+const MAX_EVENT_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Default)]
 pub(super) struct SseDecoder {

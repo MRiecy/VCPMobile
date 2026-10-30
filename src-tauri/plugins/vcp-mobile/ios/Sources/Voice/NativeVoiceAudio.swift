@@ -59,7 +59,7 @@ final class NativeVoiceAudio {
     private final class Run {
         let sessionId: String
         let epoch: UInt64
-        let deliverySlots = DispatchSemaphore(value: 8)
+        let deliverySlots = DispatchSemaphore(value: 128) // 4.096 seconds of 32 ms analysis frames.
         let cancelled = Atomic<Bool>(false)
         let released = Atomic<Bool>(false)
         let playbackCaptureState = VoicePlaybackCaptureState()
@@ -263,7 +263,7 @@ final class NativeVoiceAudio {
                 guard active == nil else { invoke.reject("voice_audio_busy"); return }
                 // Reserve the eventual frozen-cache slot before opening input;
                 // stopping hardware must never fail because retention is full.
-                guard sealedCaptures.count < 4 else { invoke.reject("voice_segment_retention_busy"); return }
+                guard sealedCaptures.count < 16 else { invoke.reject("voice_segment_retention_busy"); return }
                 guard webView != nil, UIApplication.shared.applicationState == .active else {
                     invoke.reject("voice_requires_foreground"); return
                 }

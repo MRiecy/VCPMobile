@@ -20,8 +20,10 @@ use tauri_plugin_vcp_mobile::voice::{SpeechTransition, VoiceAudioEvent, VoiceVad
 use tokio::sync::{mpsc, Notify, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 
-const INPUT_LIMIT: usize = 4;
-const AUDIO_SLOTS: usize = 3;
+const INPUT_LIMIT: usize = 16;
+// Includes export, encoding, queued segments and ASR requests across inputs.
+// 32 full 30-second PCM16 segments occupy about 29.3 MiB before encoding.
+const AUDIO_SLOTS: usize = 32;
 const CANCELLED_IDS: usize = 128;
 
 pub(super) struct PreparedSegment {

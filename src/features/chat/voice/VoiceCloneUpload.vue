@@ -63,7 +63,7 @@ const chooseFile = async () => {
   picking.value = true;
   error.value = '';
   try {
-    const result = await pickFile('file', { operationId, maxBytes: 7_000_000 });
+    const result = await pickFile('file', { operationId, maxBytes: 32 * 1024 * 1024 });
     if (!mounted || current !== generation || !props.open || !props.active) {
       await releasePicked(result);
       return;
@@ -132,7 +132,7 @@ defineExpose({ cancelPending, busy });
             <button type="button" class="voice-file" :disabled="busy" @click="chooseFile">
               {{ picking ? '正在选择…' : importing ? '正在导入…' : picked?.name || '选择 MP3 / WAV 文件' }}
             </button>
-            <p class="m-0 text-[11px] text-[var(--secondary-text)]">建议使用清晰的单人录音，文件不超过 7 MB。</p>
+            <p class="m-0 text-[11px] text-[var(--secondary-text)]">建议使用清晰的单人录音，文件不超过 32 MiB。</p>
           </div>
           <p v-if="error" role="alert" class="m-0 text-xs text-red-500 break-words">{{ error }}</p>
         </div>

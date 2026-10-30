@@ -50,6 +50,24 @@ class VoicePlaybackPcmTest {
         assertArrayEquals(shortArrayOf(42), queue.take().samples) // the startup gate opens once
     }
 
+    @Test fun severalSecondsCanBeQueuedAheadAndStartAtTheExistingWatermark() {
+        val queue = VoicePlaybackQueue(startupFrames = 5_760)
+        val packet = ShortArray(12_000) { it.toShort() }
+        var accepted = 0
+        repeat(12) { queue.append(packet) { assertNull(it); accepted++ } }
+        assertEquals(12, accepted) // Six seconds are accepted before the consumer runs.
+        queue.seal()
+        var consumed = 0
+        do {
+            val read = queue.take()
+            read.samples?.forEach { sample ->
+                assertEquals(packet[consumed % packet.size], sample)
+                consumed++
+            }
+        } while (!read.finished)
+        assertEquals(144_000, consumed)
+    }
+
     @Test fun shortCompletedSegmentStartsBeforeTheJobEndsAndEmptySegmentsDoNotOpenTheGate() {
         val queue = VoicePlaybackQueue(startupFrames = 5_760)
         queue.endSegment()

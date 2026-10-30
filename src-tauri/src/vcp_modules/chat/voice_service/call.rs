@@ -1008,11 +1008,12 @@ mod tests {
         let mut inner = inner();
         let parts: Vec<_> = (0..super::super::batch::MAX_BATCH_PARTS)
             .map(|_| inner.begin_speech(&input).unwrap().0).collect();
-        for part in &parts[..127] {
+        let (last, preceding) = parts.split_last().unwrap();
+        for part in preceding {
             assert!(matches!(input.complete(&part.batch_id, part.sequence, "已识别".into()).unwrap(),
                 BatchCompletion::Pending));
         }
-        let ready = offer(&input, &parts[127], "末句");
+        let ready = offer(&input, last, "末句");
         let failed = reply("failed");
         assert!(inner.begin_speech(&input).is_err());
         assert!(inner.queue_offer(&input, &ready, &failed));
@@ -1023,7 +1024,7 @@ mod tests {
         assert!(!input.has_offer(&ready.offer_id));
         assert!(!inner.admit(&input, &ready, &failed));
         let next = inner.begin_speech(&input).unwrap().0;
-        assert_ne!(next.batch_id, parts[127].batch_id);
+        assert_ne!(next.batch_id, last.batch_id);
         let fresh = offer(&input, &next, "新的输入");
         assert_eq!(fresh.text, "新的输入");
         let prepared = reply("fresh");

@@ -10,7 +10,7 @@ use std::{
 use tokio::sync::{mpsc, Notify};
 use tokio_util::sync::CancellationToken;
 
-const PREFETCH_SEGMENTS: usize = 2;
+const PREFETCH_SEGMENTS: usize = 6;
 
 #[derive(Default)]
 struct SegmentState {
@@ -144,7 +144,7 @@ pub(super) trait PacketConsumer {
 }
 
 /// There is one HTTP producer and one native consumer. A permit is acquired
-/// before reading the next text piece or touching its cache/network, so K=2
+/// before reading the next text piece or touching its cache/network, so the budget
 /// includes a segment which is still being synthesized. The prepare owner must
 /// finish its buffer once the complete audio has been received and validated.
 pub(super) async fn run<S, P, F, C>(
@@ -263,7 +263,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn slow_native_append_allows_two_complete_prefetches_but_not_a_third_request() {
+    async fn slow_native_append_fills_prefetch_budget_then_resumes_in_order() {
         let cancel = CancellationToken::new();
         let gate = Arc::new(Semaphore::new(0));
         let release = gate.clone();
@@ -275,7 +275,7 @@ mod tests {
             };
             run(
                 &cancel,
-                Source((0..4).collect()),
+                Source((0..PREFETCH_SEGMENTS as u8 + 2).collect()),
                 |piece, segment, _| {
                     let requested = requested.clone();
                     async move {
@@ -290,14 +290,15 @@ mod tests {
             .unwrap();
             consumer.output
         });
-        for expected in 0..3 {
+        for expected in 0..=PREFETCH_SEGMENTS as u8 {
             assert_eq!(requests.recv().await, Some(expected));
         }
         tokio::task::yield_now().await;
         assert!(requests.try_recv().is_err());
         release.add_permits(1);
-        assert_eq!(requests.recv().await, Some(3));
-        assert_eq!(worker.await.unwrap(), vec![0, 0, 1, 0, 2, 0, 3, 0]);
+        assert_eq!(requests.recv().await, Some(PREFETCH_SEGMENTS as u8 + 1));
+        let expected: Vec<_> = (0..PREFETCH_SEGMENTS as u8 + 2).flat_map(|piece| [piece, 0]).collect();
+        assert_eq!(worker.await.unwrap(), expected);
     }
 
     #[tokio::test(start_paused = true)]

@@ -23,7 +23,7 @@ final class VoicePlaybackCaptureState {
 /// An overrun is a discontinuity and stops the operation instead of silently
 /// concatenating noncontiguous samples into Silero's recurrent state.
 final class VoiceAudioPipe {
-    private static let capacity = 8
+    private static let capacity = 128 // 4 MiB of preallocated tap PCM at maxFrames.
     private static let maxFrames = 8192
     private let samples: UnsafeMutablePointer<Float>
     private let lengths: UnsafeMutablePointer<Int>

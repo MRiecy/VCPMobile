@@ -534,6 +534,22 @@ mod tests {
     }
 
     #[test]
+    fn long_bedtime_story_is_read_in_full_by_call_and_bubble_narration() {
+        let sentence = "小狐狸沿着月光照亮的小路慢慢走回家，森林里的朋友们已经睡着了。";
+        let story = sentence.repeat(900 * 1024 / sentence.len());
+        let mut speech = MessageSpeech::new();
+        speech.update(&story, true).unwrap();
+        let spoken = drain_speech(&mut speech);
+        assert_eq!(spoken.iter().map(|(text, _)| text.as_str()).collect::<String>(), story);
+
+        let mut feed = ChatFeed::new();
+        feed.accept(&member("story", &story)).unwrap();
+        let pieces = drain_feed(&mut feed);
+        assert!(pieces.iter().all(|piece| !piece.notice));
+        assert_eq!(pieces.iter().map(|piece| piece.text.as_str()).collect::<String>(), story);
+    }
+
+    #[test]
     fn bubble_limit_keeps_a_utf8_prefix_and_emits_one_notice_outside_its_budget() {
         for tail in ["中", "😀"] {
             let prefix = "a".repeat(MAX_TEXT_BYTES - 1);
@@ -592,7 +608,7 @@ mod tests {
     #[test]
     fn expanded_table_projection_seals_group_on_contentless_end_and_coalesces_notices() {
         let table = format!("{}|\n{}|\n{}", "|a".repeat(16), "|---".repeat(16),
-            format!("{}\n", "|".repeat(17)).repeat(1500));
+            format!("{}\n", "|".repeat(17)).repeat(MAX_TEXT_BYTES / 44));
         assert!(table.len() * 2 < MAX_TEXT_BYTES);
         assert!(readable::project_markdown_block(&table).len() > MAX_TEXT_BYTES);
         let mut feed = ChatFeed::new();

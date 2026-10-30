@@ -13,7 +13,7 @@ use tauri::AppHandle;
 use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, OwnedSemaphorePermit};
 
-const MAX_WAV_BYTES: u64 = 1024 * 1024;
+const MAX_WAV_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(super) async fn prepare_audio(
     data: Vec<u8>,

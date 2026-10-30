@@ -70,11 +70,11 @@ class VoiceSegmentStoreTest {
 
     @Test fun wrappedRingReturnsTheExactHalfOpenIntervalAndNeverClipsExpiredAudio() {
         val store = VoiceSegmentStore(7)
-        repeat(1_002) { index ->
+        repeat(3_752) { index ->
             val start = index * 512L
             assertTrue(store.append(7, start + 512, FloatArray(512) { value(start + it) / 32768f }))
         }
-        val start = 32L * 16_000 - 32
+        val start = 120L * 16_000 - 32
         assertArrayEquals(ShortArray(64) { value(start + it) }, store.copy(7, start, start + 64))
         assertTrue(runCatching { store.copy(7, 0, 512) }.exceptionOrNull()?.message == "voice_segment_expired_or_unavailable")
         assertTrue(runCatching { store.copy(7, 2_000, 2_000 + 30L * 16_000 + 1) }.exceptionOrNull()?.message == "invalid_voice_segment_range")
@@ -92,6 +92,15 @@ class VoiceSegmentStoreTest {
         store.close()
         assertFalse(store.append(2, 1_024, FloatArray(512)))
         assertTrue(runCatching { store.copy(2, 10, 12) }.isFailure)
+    }
+
+    @Test fun delayedExportKeepsAnEntireUtteranceAfterOneMinuteOfCapture() {
+        val store = VoiceSegmentStore(1)
+        repeat(1_875) { index ->
+            val start = index * 512L
+            store.append(1, start + 512, FloatArray(512) { value(start + it) / 32768f })
+        }
+        assertArrayEquals(ShortArray(25 * 16_000) { value(it.toLong()) }, store.copy(1, 0, 25L * 16_000))
     }
 
     @Test fun sealedCapturePreservesRecordedAudioUntilExplicitRelease() {
@@ -133,7 +142,7 @@ class VoiceSegmentStoreTest {
     @Test fun temporaryFileBudgetIsReclaimedWhenRustDeletesAnExport() {
         val store = VoiceSegmentStore(1)
         val directory = temporary.newFolder()
-        val files = List(8) { store.writeWav(directory, "bounded", shortArrayOf(1, 2)) }
+        val files = List(32) { store.writeWav(directory, "bounded", shortArrayOf(1, 2)) }
         assertTrue(runCatching { store.writeWav(directory, "too-many", shortArrayOf(3)) }.exceptionOrNull()?.message == "voice_segment_file_limit")
         assertTrue(files.first().delete())
         val replacement = store.writeWav(directory, "replacement", shortArrayOf(4))
