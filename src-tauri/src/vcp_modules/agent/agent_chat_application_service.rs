@@ -38,19 +38,21 @@ impl PreparedAgentRequest {
     pub(crate) fn acquire(
         app: &AppHandle,
         requests: &ActiveRequests,
-        payload: &AgentChatPayload,
+        agent_id: &str,
+        topic_id: &str,
+        origin_user_message_id: &str,
         channel: Option<Channel<StreamEvent>>,
         cancellation_token: CancellationToken,
     ) -> Result<Self, String> {
         let key = MessageKey::new(
-            TopicKey::new("agent", &payload.agent_id, &payload.topic_id),
+            TopicKey::new("agent", agent_id, topic_id),
             format!("msg_{}", uuid::Uuid::new_v4()),
         );
         let (lease, cancellation_token) =
             ActiveRequestLease::try_acquire_with_cancellation(
                 requests.0.clone(), key.clone(), cancellation_token,
             )?;
-        lease.set_origin_user_message(&payload.user_message.id)?;
+        lease.set_origin_user_message(origin_user_message_id)?;
         lease.bind_output(app, channel)?;
         Ok(Self { key, lease, cancellation_token })
     }
@@ -69,7 +71,9 @@ pub async fn handle_agent_chat_message(
     let request = PreparedAgentRequest::acquire(
         &app_handle,
         &active_requests,
-        &payload,
+        &payload.agent_id,
+        &payload.topic_id,
+        &payload.user_message.id,
         Some(stream_channel.clone()),
         CancellationToken::new(),
     )?;
@@ -103,7 +107,9 @@ pub async fn internal_process_agent_chat_message(
     let request = PreparedAgentRequest::acquire(
         &app_handle,
         &active_requests,
-        &payload,
+        &payload.agent_id,
+        &payload.topic_id,
+        &payload.user_message.id,
         Some(stream_channel.clone()),
         CancellationToken::new(),
     )?;

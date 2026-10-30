@@ -7,21 +7,20 @@ use tokio_util::sync::CancellationToken;
 pub(super) const MAX_BATCH_PARTS: usize = 512;
 
 struct Part {
-    active: bool,
     partial: String,
     final_text: Option<String>,
 }
 struct Batch {
     id: String,
     parts: BTreeMap<u64, Part>,
-    offer: Option<Offer>,
+    offer_id: Option<String>,
     needs_retry: bool,
 }
 #[derive(Default)]
 struct BatchState {
     current: Option<Batch>,
     next_sequence: u64,
-    last_claimed: Option<String>,
+    has_claimed: bool,
 }
 
 pub(super) struct CallInput {
@@ -40,7 +39,7 @@ pub(super) struct Offer {
 pub(super) struct Began {
     pub batch_id: String,
     pub sequence: u64,
-    pub barge: Option<String>,
+    pub barge: bool,
 }
 
 pub(super) enum BatchCompletion {
@@ -66,16 +65,12 @@ impl CallInput {
         if state.current.as_ref().is_some_and(|batch| batch.parts.len() >= MAX_BATCH_PARTS) {
             return Err("连续语音片段已达 128 段，请等待当前输入完成。".into());
         }
-        let barge = if state.current.is_none() {
-            state.last_claimed.clone()
-        } else {
-            None
-        };
+        let barge = state.current.is_none() && state.has_claimed;
         if state.current.is_none() {
             state.current = Some(Batch {
                 id: uuid::Uuid::new_v4().to_string(),
                 parts: BTreeMap::new(),
-                offer: None,
+                offer_id: None,
                 needs_retry: false,
             });
         }
@@ -85,12 +80,11 @@ impl CallInput {
             .current
             .as_mut()
             .ok_or_else(|| "语音聚合状态已失效。".to_string())?;
-        batch.offer = None;
+        batch.offer_id = None;
         batch.needs_retry = false;
         batch.parts.insert(
             sequence,
             Part {
-                active: true,
                 partial: String::new(),
                 final_text: None,
             },
@@ -102,26 +96,10 @@ impl CallInput {
         })
     }
 
-    pub fn sent_turn(&self) -> Option<String> {
-        let state = self.state.lock().ok()?;
-        if state.current.is_none() {
-            state.last_claimed.clone()
-        } else {
-            None
-        }
-    }
-
-    pub fn end_speech(&self, batch_id: &str, sequence: u64) {
-        if let Ok(mut state) = self.state.lock() {
-            if let Some(part) = state
-                .current
-                .as_mut()
-                .filter(|batch| batch.id == batch_id)
-                .and_then(|batch| batch.parts.get_mut(&sequence))
-            {
-                part.active = false;
-            }
-        }
+    pub fn has_sent_turn(&self) -> bool {
+        self.state
+            .lock()
+            .is_ok_and(|state| state.current.is_none() && state.has_claimed)
     }
 
     pub fn partial(
@@ -175,31 +153,32 @@ impl CallInput {
             return Ok(BatchCompletion::Pending);
         };
         part.final_text = Some(text);
-        part.partial.clear();
-        part.active = false;
-        let text = join_parts(batch);
-        if text.len() > MAX_TEXT_BYTES {
+        part.partial = String::new();
+        let mut ready = !batch.needs_retry && batch.offer_id.is_none();
+        let mut text_bytes = 0;
+        for part in batch.parts.values() {
+            ready &= part.final_text.is_some();
+            let text = part.final_text.as_ref().unwrap_or(&part.partial).trim();
+            if !text.is_empty() {
+                text_bytes += text.len() + usize::from(text_bytes > 0);
+            }
+        }
+        if text_bytes > MAX_TEXT_BYTES {
             return Err("待发送的语音转写过长，请分段重试。".into());
         }
-        if batch.needs_retry
-            || batch
-                .parts
-                .values()
-                .any(|part| part.active || part.final_text.is_none())
-            || batch.offer.is_some()
-        {
+        if !ready {
             return Ok(BatchCompletion::Pending);
         }
-        if text.trim().is_empty() {
+        if text_bytes == 0 {
             state.current = None;
             return Ok(BatchCompletion::Empty);
         }
         let offer = Offer {
             call_id: self.id.clone(),
             offer_id: uuid::Uuid::new_v4().to_string(),
-            text,
+            text: join_parts(batch),
         };
-        batch.offer = Some(offer.clone());
+        batch.offer_id = Some(offer.offer_id.clone());
         Ok(BatchCompletion::Offered(offer))
     }
 
@@ -207,7 +186,7 @@ impl CallInput {
         if let Ok(mut state) = self.state.lock() {
             if let Some(batch) = state.current.as_mut().filter(|batch| batch.id == batch_id) {
                 batch.parts.remove(&sequence);
-                batch.offer = None;
+                batch.offer_id = None;
                 // Preserve already recognized preceding speech. A fresh spoken
                 // retry can complete it; failure must not silently send a gap.
                 batch.needs_retry = true;
@@ -220,15 +199,15 @@ impl CallInput {
             state
                 .current
                 .as_ref()
-                .and_then(|batch| batch.offer.as_ref())
-                .is_some_and(|offer| offer.offer_id == offer_id && !self.cancel.is_cancelled())
+                .and_then(|batch| batch.offer_id.as_ref())
+                .is_some_and(|id| id == offer_id && !self.cancel.is_cancelled())
         })
     }
 
     pub fn discard_offer(&self, offer_id: &str) {
         if let Ok(mut state) = self.state.lock() {
-            if state.current.as_ref().and_then(|batch| batch.offer.as_ref())
-                .is_some_and(|offer| offer.offer_id == offer_id)
+            if state.current.as_ref().and_then(|batch| batch.offer_id.as_ref())
+                .is_some_and(|id| id == offer_id)
             {
                 state.current = None;
             }
@@ -241,12 +220,11 @@ impl CallInput {
         let current = state
             .current
             .as_ref()
-            .and_then(|batch| batch.offer.as_ref())
-            .filter(|offer| offer.offer_id == offer_id && !self.cancel.is_cancelled())
-            .cloned();
-        if let Some(offer) = current {
+            .and_then(|batch| batch.offer_id.as_ref())
+            .is_some_and(|id| id == offer_id && !self.cancel.is_cancelled());
+        if current {
             state.current = None;
-            state.last_claimed = Some(offer.offer_id.clone());
+            state.has_claimed = true;
             Ok(true)
         } else {
             Ok(false)
@@ -255,13 +233,18 @@ impl CallInput {
 }
 
 fn join_parts(batch: &Batch) -> String {
-    batch
-        .parts
-        .values()
-        .map(|part| part.final_text.as_ref().unwrap_or(&part.partial).trim())
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut joined = String::new();
+    for part in batch.parts.values() {
+        let text = part.final_text.as_ref().unwrap_or(&part.partial).trim();
+        if text.is_empty() {
+            continue;
+        }
+        if !joined.is_empty() {
+            joined.push(' ');
+        }
+        joined.push_str(text);
+    }
+    joined
 }
 
 #[cfg(test)]
@@ -276,11 +259,10 @@ mod tests {
     #[test]
     fn out_of_order_recognition_merges_in_recording_order_and_claim_is_unique() {
         let call = CallInput::new("call".into());
+        assert!(!call.has_sent_turn());
         let first = call.begin().unwrap();
-        call.end_speech(&first.batch_id, first.sequence);
         let second = call.begin().unwrap();
-        call.end_speech(&second.batch_id, second.sequence);
-        assert!(second.barge.is_none());
+        assert!(!second.barge);
         assert!(matches!(
             call.complete(&second.batch_id, second.sequence, "第二句".into())
                 .unwrap(),
@@ -293,7 +275,9 @@ mod tests {
         assert_eq!(offer.text, "第一句 第二句");
         assert!(call.claim(&offer.offer_id).unwrap());
         assert!(!call.claim(&offer.offer_id).unwrap());
-        assert_eq!(call.begin().unwrap().barge, Some(offer.offer_id));
+        assert!(call.has_sent_turn());
+        assert!(call.begin().unwrap().barge);
+        assert!(!call.has_sent_turn());
     }
     #[test]
     fn speech_before_claim_invalidates_offer_without_losing_its_text() {
@@ -304,7 +288,7 @@ mod tests {
                 .unwrap(),
         );
         let more = call.begin().unwrap();
-        assert!(more.barge.is_none());
+        assert!(!more.barge);
         assert!(!call.claim(&old.offer_id).unwrap());
         let new = offered(
             call.complete(&more.batch_id, more.sequence, "后半句".into())
@@ -331,6 +315,34 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(offer.text, "真正的下一句");
+    }
+
+    #[test]
+    fn completed_text_limit_preserves_trim_empty_parts_and_separator_accounting() {
+        let call = CallInput::new("call".into());
+        let first = call.begin().unwrap();
+        let empty = call.begin().unwrap();
+        let last = call.begin().unwrap();
+        assert!(matches!(
+            call.complete(&first.batch_id, first.sequence, format!(" {} ", "a".repeat(MAX_TEXT_BYTES - 2))).unwrap(),
+            BatchCompletion::Pending
+        ));
+        assert!(matches!(
+            call.complete(&empty.batch_id, empty.sequence, " \n\t ".into()).unwrap(),
+            BatchCompletion::Pending
+        ));
+        let offer = offered(call.complete(&last.batch_id, last.sequence, " b ".into()).unwrap());
+        assert_eq!(offer.text.len(), MAX_TEXT_BYTES);
+        assert!(offer.text.ends_with("a b"));
+    }
+
+    #[test]
+    fn completion_enforces_text_limit_even_while_another_part_is_pending() {
+        let call = CallInput::new("call".into());
+        let first = call.begin().unwrap();
+        let pending = call.begin().unwrap();
+        call.partial(&pending.batch_id, pending.sequence, "b".into()).unwrap();
+        assert!(call.complete(&first.batch_id, first.sequence, "a".repeat(MAX_TEXT_BYTES - 1)).is_err());
     }
 
     #[test]

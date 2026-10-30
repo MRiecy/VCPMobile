@@ -28,7 +28,7 @@ function snapshot(overrides: Partial<VoiceCallSnapshot> = {}): VoiceCallSnapshot
     callId: 'restored-call', target: { ownerId: 'agent', ownerType: 'agent', topicId: 'topic' },
     revision: 1, active: true, micState: 'closed', micStopReason: null, inputState: 'idle',
     replyState: 'idle', ttsState: 'idle', partial: '', error: null, notice: null,
-    inputSessionId: null, originUserMessageId: null, ttsId: null, lastPersistedMessageId: null,
+    inputSessionId: null, lastPersistedMessageId: null,
     ...overrides,
   };
 }
@@ -83,7 +83,7 @@ describe('Rust voice conversation projection', () => {
     await controller.recover();
     onView.mockClear();
     onSnapshot.mockClear();
-    const event = snapshot({ revision: 7, inputState: 'submitting', originUserMessageId: 'voice-user' });
+    const event = snapshot({ revision: 7, inputState: 'submitting' });
     emitTauriEvent('vcp-voice-call', event);
     emitTauriEvent('vcp-voice-call', event);
     emitTauriEvent('vcp-voice-service', { kind: 'transcript', text: '已交给 Rust', offerId: 'offer' });

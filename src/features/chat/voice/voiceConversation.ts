@@ -18,8 +18,6 @@ export interface VoiceCallSnapshot {
   error: string | null;
   notice: string | null;
   inputSessionId: string | null;
-  originUserMessageId: string | null;
-  ttsId: string | null;
   lastPersistedMessageId: string | null;
 }
 

@@ -117,7 +117,6 @@ impl SessionState {
 pub(crate) struct GroupSession {
     pub turn_id: String,
     pub cancellation: CancellationToken,
-    pub released: CancellationToken,
     state: Mutex<SessionState>,
     changed: Notify,
 }
@@ -224,7 +223,6 @@ impl GroupSession {
         Arc::new(Self {
             turn_id,
             cancellation,
-            released: CancellationToken::new(),
             changed: Notify::new(),
             state: Mutex::new(SessionState {
                 queue: VecDeque::new(),

@@ -40,7 +40,7 @@ pub struct VoiceCallSnapshot {
     pub error: Option<String>,
     pub notice: Option<String>,
     pub input_session_id: Option<String>,
-    pub origin_user_message_id: Option<String>,
+    #[serde(skip)]
     pub tts_id: Option<String>,
     pub last_persisted_message_id: Option<String>,
 }
@@ -120,13 +120,8 @@ impl Reply {
         !self.cancel.is_cancelled()
     }
     async fn released(&self) {
-        loop {
-            let notified = self.done.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.finished.load(Ordering::Acquire) {
-                return;
-            }
+        let notified = self.done.notified();
+        if !self.finished.load(Ordering::Acquire) {
             notified.await;
         }
     }
@@ -154,7 +149,7 @@ impl CallInner {
             pending.reply.cancel.cancel();
             stop.push(pending.reply.tts_id.clone());
         }
-        if began.barge.is_some() {
+        if began.barge {
             if let Some(reply) = &self.reply {
                 reply.cancel.cancel();
                 stop.push(reply.tts_id.clone());
@@ -168,13 +163,8 @@ impl CallInner {
     }
 
     fn queue_offer(&mut self, input: &CallInput, offer: &Offer, reply: &Arc<Reply>) -> bool {
-        if !self.snapshot.active || !input.has_offer(&offer.offer_id)
-            || self.pending.as_ref().is_some_and(|pending| pending.offer_id == offer.offer_id)
-        {
+        if !self.snapshot.active || !input.has_offer(&offer.offer_id) {
             return false;
-        }
-        if let Some(old) = self.pending.take() {
-            old.reply.cancel.cancel();
         }
         self.pending = Some(Pending { offer_id: offer.offer_id.clone(), reply: reply.clone() });
         self.snapshot.input_state = "submitting";
@@ -201,7 +191,7 @@ impl CallInner {
 
     fn admit(&mut self, input: &CallInput, offer: &Offer, reply: &Arc<Reply>) -> bool {
         let current = self.pending.as_ref().is_some_and(|pending| {
-            pending.offer_id == offer.offer_id && Arc::ptr_eq(&pending.reply, reply)
+            Arc::ptr_eq(&pending.reply, reply)
         });
         if !current
             || !self.snapshot.active
@@ -215,7 +205,6 @@ impl CallInner {
         self.reply = Some(reply.clone());
         self.snapshot.input_state = "idle";
         self.snapshot.partial.clear();
-        self.snapshot.origin_user_message_id = Some(reply.origin.clone());
         self.snapshot.tts_id = Some(reply.tts_id.clone());
         self.snapshot.reply_state = "generating";
         true
@@ -312,7 +301,6 @@ fn reserve_conversation<R: Runtime>(
             error: None,
             notice: None,
             input_session_id: None,
-            origin_user_message_id: None,
             tts_id: None,
             last_persisted_message_id: None,
         },
@@ -692,7 +680,7 @@ pub(super) fn offer(app: &AppHandle, offer: Offer) {
             &app,
             target,
             reply.origin.clone(),
-            offer.text.clone(),
+            &offer.text,
             reply.cancel.clone(),
             narration.policy.clone(),
         ).await {
@@ -809,10 +797,9 @@ fn submission_failed(app: &AppHandle, call: &Call, reply: &Arc<Reply>, error: St
 fn message_persisted(
     app: &AppHandle,
     call: &Call,
-    mut message: ChatMessage,
+    message: ChatMessage,
     saved: MessageWriteResultDto,
 ) {
-    message.blocks = serde_json::to_value(saved.blocks).ok();
     if let Ok(mut inner) = call.inner.lock() {
         inner.snapshot.last_persisted_message_id = Some(message.id.clone());
         publish(app, &mut inner);
@@ -874,7 +861,6 @@ mod tests {
                 error: None,
                 notice: None,
                 input_session_id: None,
-                origin_user_message_id: None,
                 tts_id: None,
                 last_persisted_message_id: None,
             },
@@ -1073,8 +1059,7 @@ mod tests {
         let input = CallInput::new("call".into());
         let mut inner = inner();
         let recorded = inner.begin_speech(&input).unwrap().0;
-        // Same production batch transition used by seal after native background.
-        input.end_speech(&recorded.batch_id, recorded.sequence);
+        // Recognition can finish after native capture has closed in background.
         inner.snapshot.mic_state = "closed";
         let ready = offer(&input, &recorded, "后台继续发送");
         let actual = reply("actual");

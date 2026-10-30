@@ -48,17 +48,14 @@ pub(crate) async fn prepare_voice_submission(
     app: &AppHandle,
     target: TopicKey,
     origin: String,
-    text: String,
+    text: &str,
     cancellation: CancellationToken,
     reply_policy: Arc<VoiceReplyPolicy>,
 ) -> Result<PreparedVoiceSubmission, String> {
-    if !target.is_valid() || origin.is_empty() || text.trim().is_empty() {
-        return Err("语音消息的会话、标识或正文无效。".into());
-    }
     let message = ChatMessage {
         id: origin,
         role: "user".into(),
-        content: text.trim().to_string(),
+        content: text.to_owned(),
         timestamp: chrono::Utc::now().timestamp_millis().max(0) as u64,
         ..Default::default()
     };
@@ -73,11 +70,9 @@ pub(crate) async fn prepare_voice_submission(
         let request = PreparedAgentRequest::acquire(
             app,
             &app.state::<ActiveRequests>(),
-            &AgentChatPayload {
-                agent_id: target.owner_id.clone(),
-                topic_id: target.topic_id.clone(),
-                user_message: message.clone(),
-            },
+            &target.owner_id,
+            &target.topic_id,
+            &message.id,
             None,
             cancellation.clone(),
         )?;
@@ -110,7 +105,7 @@ async fn acquire_voice_group_turn(
         }
         // A new group turn has its own hard-stop lifetime. A later typed
         // input may join it independently of this voice origin's token.
-        let released = match turns.try_acquire_or_wait(target.clone(), CancellationToken::new()) {
+        let released = match turns.try_acquire_or_wait(target.clone()) {
             Ok(turn) => return Ok(turn),
             Err(released) => released,
         };
@@ -300,12 +295,10 @@ mod tests {
         assert!(futures_util::poll!(&mut admission).is_pending());
         assert!(old_session.cancellation.is_cancelled());
         assert!(old_session.reserve().is_err());
-        assert!(!old_session.released.is_cancelled());
 
         drop(old);
         let next = admission.await.unwrap();
         let next_session = next.start_session("user_message", false).unwrap();
-        assert!(old_session.released.is_cancelled());
         assert_ne!(next_session.turn_id, old_session.turn_id);
         assert!(next_session.reserve().is_ok());
     }

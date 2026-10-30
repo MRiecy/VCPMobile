@@ -57,8 +57,7 @@ function publishCapture(micState: VoiceCallSnapshot['micState'], micStopReason: 
   context.onSnapshot?.({
     callId: 'call', target: { ownerId: 'agent', ownerType: 'agent', topicId: 'topic' }, revision: 1,
     active: true, micState, micStopReason, inputState: 'idle', replyState: 'idle', ttsState: 'idle',
-    partial: '', error: null, notice: null, inputSessionId: 'capture', originUserMessageId: null,
-    ttsId: null, lastPersistedMessageId: null,
+    partial: '', error: null, notice: null, inputSessionId: 'capture', lastPersistedMessageId: null,
   });
 }
 beforeEach(() => {
@@ -79,7 +78,7 @@ beforeEach(() => {
   });
   context.stop.mockReset().mockImplementation(async () => { publishCapture('closed', 'requested'); });
   context.detach.mockReset();
-  context.endCall.mockReset();
+  context.endCall.mockReset().mockImplementation(() => context.onSnapshot?.(null));
   context.disposeConversation.mockReset();
   context.recover.mockReset().mockResolvedValue(null);
   context.onLevel = undefined;
@@ -275,14 +274,12 @@ describe('voice call lifecycle', () => {
       callId: 'restored', target: { ownerId: 'agent', ownerType: 'agent', topicId: 'topic' },
       revision: 8, active: true, micState: 'closed', micStopReason: null, inputState: 'transcribing',
       replyState: 'finished', ttsState: 'speaking', partial: '已录内容', error: null, notice: null,
-      inputSessionId: null, originUserMessageId: 'msg_voice_user', ttsId: 'tts', lastPersistedMessageId: null,
+      inputSessionId: null, lastPersistedMessageId: null,
     };
     context.recover.mockImplementation(async () => { context.onSnapshot!(snapshot); return snapshot; });
     await store.recover();
     expect(store.active).toBe(true);
     expect(store.microphoneState).toBe('off');
-    expect(store.inputState).toBe('transcribing');
-    expect(store.replyState).toBe('finished');
     expect(store.ttsState).toBe('speaking');
     expect(store.playbackActive).toBe(true);
     expect(context.start).not.toHaveBeenCalled();
@@ -298,7 +295,7 @@ describe('voice call lifecycle', () => {
       callId: 'restored', target: { ownerId: 'agent', ownerType: 'agent', topicId: 'topic' },
       revision: 1, active: true, micState: 'closed', micStopReason: 'audio_focus_lost', inputState: 'idle',
       replyState: 'idle', ttsState: 'idle', partial: '', error: null, notice: null,
-      inputSessionId: null, originUserMessageId: null, ttsId: null, lastPersistedMessageId: null,
+      inputSessionId: null, lastPersistedMessageId: null,
     };
     context.onSnapshot!(snapshot);
     expect(store.microphoneState).toBe('error');

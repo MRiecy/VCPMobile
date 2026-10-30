@@ -66,8 +66,6 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   const serviceState = ref<VoiceServiceView['state']>('off');
   const serviceMessage = ref('');
   const partialText = ref('');
-  const inputState = ref<VoiceCallSnapshot['inputState']>('idle');
-  const replyState = ref<VoiceCallSnapshot['replyState']>('idle');
   const ttsState = ref<VoiceCallSnapshot['ttsState']>('idle');
   let microphoneGeneration = 0;
   let microphoneStopReason: string | null = null;
@@ -90,8 +88,6 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
       active.value = snapshot?.active ?? false;
       conversation.value = snapshot?.active && session.currentConversationKey
         ? { ...session.currentConversationKey } : null;
-      inputState.value = snapshot?.inputState ?? 'idle';
-      replyState.value = snapshot?.replyState ?? 'idle';
       ttsState.value = snapshot?.ttsState ?? 'idle';
       const reasonChanged = microphoneStopReason !== (snapshot?.micStopReason ?? null);
       microphoneStopReason = snapshot?.micStopReason ?? null;
@@ -108,7 +104,6 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
             ? audioErrorText(reason, '麦克风已被系统中断，点击麦克风重试。') : '';
           level.value = 0;
           bands.value = [];
-          syncPlaybackState();
         }
       } else errorMessage.value = snapshot.micStopReason
         ? audioErrorText(snapshot.micStopReason, '麦克风操作失败，请重试。') : '';
@@ -172,12 +167,6 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
     // command that could admit an unsent transcript while hangup cancels it.
     microphoneGeneration += 1;
     monitor.detach();
-    syncPlaybackState();
-    captureState.value = 'closed';
-    microphonePending.value = false;
-    errorMessage.value = '';
-    active.value = false;
-    conversation.value = null;
   };
 
   const recover = () => voiceConversation.recover();
@@ -202,7 +191,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   return {
     active, microphoneState, level, bands,
     playbackActive, errorMessage, serviceState, serviceMessage, partialText,
-    inputState, replyState, ttsState,
+    ttsState,
     start, end, toggleMicrophone, recover,
   };
 });

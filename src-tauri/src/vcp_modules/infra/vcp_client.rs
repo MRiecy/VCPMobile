@@ -957,15 +957,7 @@ impl ActiveGroupTurns {
     }
 
     pub(crate) fn try_acquire(&self, key: TopicKey) -> Result<ActiveGroupTurnLease, String> {
-        self.try_acquire_with_cancellation(key, CancellationToken::new())
-    }
-
-    pub(crate) fn try_acquire_with_cancellation(
-        &self,
-        key: TopicKey,
-        cancellation_token: CancellationToken,
-    ) -> Result<ActiveGroupTurnLease, String> {
-        self.try_acquire_or_wait(key.clone(), cancellation_token).map_err(|_| format!(
+        self.try_acquire_or_wait(key.clone()).map_err(|_| format!(
             "Group turn is already active for {}/{}/{}",
             key.owner_type, key.owner_id, key.topic_id
         ))
@@ -975,10 +967,10 @@ impl ActiveGroupTurns {
     pub(crate) fn try_acquire_or_wait(
         &self,
         key: TopicKey,
-        cancellation_token: CancellationToken,
     ) -> Result<ActiveGroupTurnLease, OwnedNotified> {
         match self.0.entry(key.clone()) {
             Entry::Vacant(slot) => {
+                let cancellation_token = CancellationToken::new();
                 slot.insert(Arc::new(ActiveGroupTurnEntry {
                     turn_id: uuid::Uuid::new_v4(),
                     cancellation_token: cancellation_token.clone(),
@@ -1165,7 +1157,6 @@ impl Drop for ActiveGroupTurnLease {
             if let Ok(session) = turn.session.lock() {
                 if let Some(session) = session.as_ref() {
                     session.close(if self.cancellation_token.is_cancelled() { Some("cancelled_by_user".into()) } else { None });
-                    session.released.cancel();
                 }
             }
             let event = group_turn_event(&self.key, &turn, false);
@@ -4951,14 +4942,13 @@ mod active_request_tests {
     }
 
     #[test]
-    fn voice_group_without_webview_keeps_the_feed_and_exact_call_cancellation() {
+    fn voice_group_without_webview_keeps_the_feed_and_group_cancellation() {
         let app = tauri::test::mock_app();
         app.manage(ActiveRequests::default());
         app.manage(ActiveGroupTurns::default());
         let turns = app.state::<ActiveGroupTurns>();
         let topic = TopicKey::new("group", "voice-group", "voice-topic");
-        let cancellation = CancellationToken::new();
-        let turn = turns.try_acquire_with_cancellation(topic.clone(), cancellation.clone()).unwrap();
+        let turn = turns.try_acquire(topic.clone()).unwrap();
         turn.set_origin_user_message("voice-origin").unwrap();
         turn.bind_optional_output(app.handle(), None).unwrap();
         let events = Arc::new(std::sync::Mutex::new(Vec::<StreamEvent>::new()));
@@ -4972,7 +4962,7 @@ mod active_request_tests {
             }));
         }
         let speaker = turn.child_token();
-        cancellation.cancel();
+        turn.cancel();
         assert!(turn.is_cancelled());
         assert!(speaker.is_cancelled());
         drop(turn);
@@ -4990,8 +4980,8 @@ mod active_request_tests {
         let turns = ActiveGroupTurns::default();
         let topic = TopicKey::new("group", "group", "topic");
         let turn = turns.try_acquire(topic.clone()).unwrap();
-        let first = turns.try_acquire_or_wait(topic.clone(), CancellationToken::new()).err().unwrap();
-        let second = turns.try_acquire_or_wait(topic.clone(), CancellationToken::new()).err().unwrap();
+        let first = turns.try_acquire_or_wait(topic.clone()).err().unwrap();
+        let second = turns.try_acquire_or_wait(topic.clone()).err().unwrap();
         let mut first = Box::pin(first);
         let mut second = Box::pin(second);
         drop(turn);

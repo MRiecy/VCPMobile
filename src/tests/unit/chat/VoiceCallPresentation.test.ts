@@ -271,7 +271,7 @@ describe('chat scene voice transitions', () => {
       callId: '', target: { ownerId: 'voice-agent', ownerType: 'agent', topicId: 'voice-topic' },
       revision: 1, active: true, micState: 'closed', micStopReason: null, inputState: 'idle',
       replyState: 'idle', ttsState: 'idle', partial: '', error: null, notice: null,
-      inputSessionId: null, originUserMessageId: null, ttsId: null, lastPersistedMessageId: null,
+      inputSessionId: null, lastPersistedMessageId: null,
     };
     mockInvoke('begin_voice_conversation', args => {
       snapshot.callId = args!.callId as string;
@@ -322,7 +322,7 @@ describe('chat scene voice transitions', () => {
       callId: '', target: { ownerId: 'voice-agent', ownerType: 'agent', topicId: 'voice-topic' },
       revision: 1, active: true, micState: 'closed', micStopReason: null, inputState: 'idle',
       replyState: 'idle', ttsState: 'idle', partial: '', error: null, notice: null,
-      inputSessionId: null, originUserMessageId: null, ttsId: null, lastPersistedMessageId: null,
+      inputSessionId: null, lastPersistedMessageId: null,
     };
     mockInvoke('begin_voice_conversation', args => {
       snapshot.callId = args!.callId as string;

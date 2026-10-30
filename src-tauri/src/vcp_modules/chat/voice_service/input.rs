@@ -524,9 +524,6 @@ fn seal(app: &AppHandle, session: &Arc<VoiceSession>, epoch: Option<u32>, sample
             .filter(|index| *index >= inner.last_sample)
             .unwrap_or(inner.last_sample);
         let jobs = if let Some(mut capture) = inner.capture.take() {
-            session
-                .call
-                .end_speech(&capture.turn.batch_id, capture.turn.sequence);
             if epoch.is_some() && epoch != inner.audio_epoch {
                 failed = Some(capture.turn);
                 Vec::new()
@@ -979,7 +976,7 @@ pub fn handle_audio_event(app: &AppHandle, event: &VoiceAudioEvent) {
                 });
                 inner.utterances.insert(turn.id.clone(), turn.clone());
                 created = Some((turn, receiver));
-            } else if input.call.sent_turn().is_some() {
+            } else if input.call.has_sent_turn() {
                 call::interrupt_reply(app, &input.call.id);
             }
         }
@@ -993,10 +990,7 @@ pub fn handle_audio_event(app: &AppHandle, event: &VoiceAudioEvent) {
                 .collect();
         }
         if finished {
-            if let Some(capture) = inner.capture.take() {
-                input
-                    .call
-                    .end_speech(&capture.turn.batch_id, capture.turn.sequence);
+            if inner.capture.take().is_some() {
                 // Custom short pauses and long onset confirmation must not
                 // let the next utterance export already-submitted audio.
                 inner.allowed_after = frame.sample_index;
