@@ -43,7 +43,7 @@ const restartApp = async () => {
     </div>
   </Transition>
 
-  <!-- 0.3 数据库存储优化进度展示层 -->
+  <!-- 数据库核查或存储维护期间，显示核心返回的当前阶段。 -->
   <Transition name="fade">
     <div v-if="lifecycleStore.state === 'OPTIMIZING'"
       class="vcp-viewport-surface vcp-boot-surface vcp-safe-inline fixed inset-0 z-boot bg-white/96 dark:bg-gray-950/96 flex flex-col items-center justify-center gap-6 px-8 text-center">
@@ -54,9 +54,9 @@ const restartApp = async () => {
         </div>
       </div>
       <div class="flex flex-col items-center gap-2 max-w-xs">
-        <p class="text-[11px] font-black tracking-[0.45em] text-blue-500/80 pl-[0.45em]">DATABASE OPTIMIZATION</p>
-        <h2 class="text-2xl font-black tracking-tight text-primary-text">正在优化数据库...</h2>
-        <p class="text-sm opacity-70 leading-6">{{ lifecycleStore.currentPhaseLabel }}</p>
+        <p class="text-[11px] font-black tracking-[0.45em] text-blue-500/80 pl-[0.45em]">DATABASE MAINTENANCE</p>
+        <h2 class="text-2xl font-black tracking-tight text-primary-text">正在维护数据库</h2>
+        <p class="text-sm opacity-70 leading-6">{{ lifecycleStore.coreStatus.message }}</p>
         <p class="text-[10px] opacity-45 font-mono uppercase tracking-[0.3em]">{{ lifecycleStore.state }}</p>
       </div>
     </div>

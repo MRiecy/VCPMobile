@@ -389,25 +389,57 @@ pub(crate) async fn refresh_attachment_paths<R: tauri::Runtime>(
     attachment.thumbnail_path = projection.thumbnail_path;
 }
 
-/// Repair old local paths before startup GC. Missing-file identity survives;
-/// message timestamps and synchronization hashes are deliberately untouched.
+const ATTACHMENT_STORAGE_ROOTS_KEY: &str = "attachment_storage_roots";
+
+/// Absolute CAS paths change when the OS relocates the app container. An old
+/// database without a marker also needs one pass. File availability is still
+/// checked when history, shares or native consumers resolve an attachment.
 pub(crate) async fn reconcile_attachment_storage<R: tauri::Runtime>(
     app: &AppHandle<R>,
     db: &DbState,
 ) -> Result<(), String> {
+    reconcile_attachment_storage_at(
+        app,
+        db,
+        get_attachments_root_dir(app)?,
+        get_thumbnails_root_dir(app)?,
+    ).await
+}
+
+async fn reconcile_attachment_storage_at<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    db: &DbState,
+    attachments_root: PathBuf,
+    thumbnails_root: PathBuf,
+) -> Result<(), String> {
+    let roots = serde_json::to_string(&(&attachments_root, &thumbnails_root))
+        .map_err(|error| error.to_string())?;
+    let roots_match = || {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM settings WHERE key = ? AND value = ?)",
+        )
+        .bind(ATTACHMENT_STORAGE_ROOTS_KEY)
+        .bind(&roots)
+    };
+    if roots_match().fetch_one(&db.pool).await.map_err(|e| e.to_string())? {
+        return Ok(());
+    }
+
+    // Serialize root changes with concurrent imports and draft updates.
+    let mut tx = db.write_transaction("file.attachment.relocate").await?;
+    if roots_match().fetch_one(&mut *tx).await.map_err(|e| e.to_string())? {
+        return tx.commit().await;
+    }
     type Row = (String, i64, String, Option<String>);
     let rows: Vec<Row> = sqlx::query_as("SELECT hash, size, internal_path, thumbnail_path FROM attachments")
-        .fetch_all(&db.pool).await.map_err(|error| error.to_string())?;
-    let attachments_root = get_attachments_root_dir(app)?;
-    let thumbnails_root = get_thumbnails_root_dir(app).ok();
+        .fetch_all(&mut *tx).await.map_err(|error| error.to_string())?;
     let projections = tokio::task::spawn_blocking(move || {
         rows.into_iter().map(|(hash, size, stored, thumbnail)| {
             let size = u64::try_from(size).map_err(|_| "attachment CAS size metadata is invalid".to_string())?;
-            let projection = project_attachment_paths(&attachments_root, thumbnails_root.as_deref(), &hash, size, &stored, thumbnail.as_deref())?;
+            let projection = project_attachment_paths(&attachments_root, Some(&thumbnails_root), &hash, size, &stored, thumbnail.as_deref())?;
             Ok((hash, projection))
         }).collect::<Result<Vec<_>, String>>()
     }).await.map_err(|error| format!("attachment relocation task failed: {error}"))??;
-    let mut tx = db.write_transaction("file.attachment.relocate").await?;
     for (hash, projection) in projections {
         sqlx::query("UPDATE attachments SET internal_path = ?, thumbnail_path = ?
                      WHERE hash = ? AND (internal_path IS NOT ? OR thumbnail_path IS NOT ?)")
@@ -424,7 +456,13 @@ pub(crate) async fn reconcile_attachment_storage<R: tauri::Runtime>(
             .execute(&mut *tx).await.map_err(|error| error.to_string())?;
     }
     super::share_inbox::reconcile_current_share_paths(app, &mut tx).await?;
-    tx.commit().await.map_err(|error| error.to_string())
+    sqlx::query("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
+        .bind(ATTACHMENT_STORAGE_ROOTS_KEY)
+        .bind(&roots)
+        .bind(super::utils::now_secs())
+        .execute(&mut *tx).await.map_err(|error| error.to_string())?;
+    tx.commit().await
 }
 
 pub(crate) async fn resolve_attachment_cas_file<R: tauri::Runtime>(
@@ -1613,9 +1651,6 @@ pub fn clear_upload_cache(app_handle: &AppHandle) {
                 }
             }
         }
-
-        // 3. 自动收敛多模态结果缓存 (300MB 阈值，收敛至 150MB)
-        evict_multimodal_cache_if_needed(app_handle, 300 * 1024 * 1024, 150 * 1024 * 1024);
     }
 }
 
@@ -1825,28 +1860,28 @@ fn validated_attachment_file(
 }
 
 /// 删除无引用 CAS 的主文件与派生缓存。空路径表示 metadata-only，无需主文件。
-pub async fn delete_attachment_physical<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
+pub(crate) async fn delete_attachment_physical(
+    attachments_root: &Path,
+    thumbnails_root: &Path,
+    cache_root: &Path,
     hash: &str,
     internal_path: &str,
 ) -> std::io::Result<()> {
     if !crate::vcp_modules::infra::utils::is_valid_cas_hash(hash) {
         return Err(invalid_delete_target("附件哈希格式无效"));
     }
-    let attachments_root = get_attachments_root_dir(app_handle).map_err(invalid_delete_target)?;
-    let attachment_path = match current_attachment_path(&attachments_root, hash, internal_path)
+    let attachment_path = match current_attachment_path(attachments_root, hash, internal_path)
         .map_err(invalid_delete_target)? {
-        Some(path) => validated_attachment_file(&attachments_root, hash, &path)?,
+        Some(path) => validated_attachment_file(attachments_root, hash, &path)?,
         None => None,
     };
 
     // 统一处理缩略图定位与删除
-    let thumbnails_root = get_thumbnails_root_dir(app_handle).map_err(invalid_delete_target)?;
     let mut thumbnail_paths = Vec::new();
     for extension in ["webp", "jpg", "png"] {
         let name = format!("{hash}_thumb.{extension}");
         if let Some(path) = validated_direct_file(
-            &thumbnails_root,
+            thumbnails_root,
             &thumbnails_root.join(&name),
             std::ffi::OsStr::new(&name),
         )? {
@@ -1855,11 +1890,10 @@ pub async fn delete_attachment_physical<R: tauri::Runtime>(
     }
 
     // 统一处理多模态持久化缓存删除
-    let cache_root = get_multimodal_cache_dir(app_handle).map_err(invalid_delete_target)?;
     let cache_name = format!("{}.json", hash);
     let cache_path = cache_root.join(&cache_name);
     let multimodal_path =
-        validated_direct_file(&cache_root, &cache_path, std::ffi::OsStr::new(&cache_name))?;
+        validated_direct_file(cache_root, &cache_path, std::ffi::OsStr::new(&cache_name))?;
 
     for validated in [attachment_path, multimodal_path]
         .into_iter()
@@ -1901,6 +1935,63 @@ mod security_boundary_tests {
     use super::{check_existing_cas_size, check_existing_cas_size_async};
     use crate::vcp_modules::db_manager::DbState;
     use std::fs;
+
+    #[tokio::test]
+    async fn attachment_relocation_only_runs_for_new_roots_and_retries_a_failed_draft_repair() {
+        let temp = tempfile::tempdir().unwrap();
+        let attachments = temp.path().join("attachments");
+        let thumbnails = temp.path().join("thumbnails");
+        fs::create_dir(&attachments).unwrap();
+        let hash = "b".repeat(64);
+        let name = format!("{hash}.txt");
+        fs::write(attachments.join(&name), b"data").unwrap();
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1).connect("sqlite::memory:").await.unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER);
+             CREATE TABLE attachments (hash TEXT PRIMARY KEY, size INTEGER, internal_path TEXT, thumbnail_path TEXT);
+             CREATE TABLE message_attachments (hash TEXT, src TEXT, status TEXT);
+             CREATE TABLE current_share (singleton INTEGER PRIMARY KEY, record TEXT);",
+        ).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO attachments VALUES (?, 4, ?, NULL)")
+            .bind(&hash).bind(format!("/old/{name}")).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO message_attachments VALUES (?, '', 'desktop_only')")
+            .bind(&hash).execute(&pool).await.unwrap();
+        let db = DbState::new(pool, temp.path().join("test.db"));
+        let app = tauri::test::mock_app();
+        let reconcile = |files: &std::path::Path, thumbs: &std::path::Path| {
+            super::reconcile_attachment_storage_at(app.handle(), &db, files.to_owned(), thumbs.to_owned())
+        };
+        let read = || sqlx::query_as::<_, (String, String, String)>(
+            "SELECT internal_path, src, status FROM attachments JOIN message_attachments USING (hash)",
+        ).fetch_one(&db.pool);
+
+        reconcile(&attachments, &thumbnails).await.unwrap();
+        let initial = read().await.unwrap();
+        assert_eq!(initial.0, attachments.join(&name).to_string_lossy());
+        assert!(initial.1.starts_with("file://"));
+        assert_eq!(initial.2, "ready");
+
+        // A matching marker does not read even the draft. A cache-only root
+        // change does, and its failure must roll back both the catalog and marker.
+        let new_thumbs = temp.path().join("new-cache").join("thumbnails");
+        fs::remove_file(attachments.join(&name)).unwrap();
+        sqlx::query("INSERT INTO current_share VALUES (1, 'invalid draft')")
+            .execute(&db.pool).await.unwrap();
+        reconcile(&attachments, &thumbnails).await.unwrap();
+        assert!(reconcile(&attachments, &new_thumbs).await.is_err());
+        assert_eq!(read().await.unwrap(), initial);
+        sqlx::query("UPDATE current_share SET record = ?")
+            .bind(r#"{"generation":3,"deliveryId":"keep","state":"draft","revision":5}"#)
+            .execute(&db.pool).await.unwrap();
+        reconcile(&attachments, &new_thumbs).await.unwrap();
+        assert_eq!(read().await.unwrap(), (initial.0, String::new(), "desktop_only".into()));
+
+        let new_files = temp.path().join("new-container").join("attachments");
+        reconcile(&new_files, &new_thumbs).await.unwrap();
+        assert_eq!(read().await.unwrap().0, new_files.join(&name).to_string_lossy());
+    }
 
     #[test]
     fn canonical_staging_gate_accepts_only_direct_files_inside_its_owner_root() {

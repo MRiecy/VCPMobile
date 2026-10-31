@@ -95,6 +95,7 @@ impl WriteCoordinator {
         // Waiting for the FIFO gate remains cancellation-safe. Once this await returns there is no
         // further yield before the durable BEGIN task owns the lease.
         let lease = self.acquire_lease(operation).await;
+        super::db_health::ensure_writable()?;
         let pool = pool.clone();
         let coordinator = self.clone();
         let task = self
@@ -297,6 +298,9 @@ pub(crate) struct DbWriteTransaction {
 
 impl DbWriteTransaction {
     pub(crate) async fn commit(mut self) -> Result<(), String> {
+        // On refusal Drop owns the rollback. The connection hook also vetoes
+        // a fault observed between this check and SQLite's actual commit.
+        super::db_health::ensure_writable()?;
         let active = self
             .active
             .take()

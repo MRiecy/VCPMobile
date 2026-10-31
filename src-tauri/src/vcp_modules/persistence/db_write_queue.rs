@@ -1343,9 +1343,12 @@ impl DbWriteQueue {
                 let result = tokio::task::spawn_blocking(move || {
                     let mut write_lease = write_lease;
                     write_lease.mark_outcome("transaction_failed");
+                    let _database_scope = super::db_health::MainRusqliteScope::enter();
+                    super::db_health::ensure_writable().map_err(Self::sync_contract_error)?;
                     let mut guard = ch.lock().unwrap();
                     if guard.is_none() {
                         let conn = rusqlite::Connection::open(&db_path)?;
+                        super::db_health::protect_rusqlite(&conn)?;
                         let journal_mode: String =
                             conn.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
                         if !journal_mode.eq_ignore_ascii_case("wal") {

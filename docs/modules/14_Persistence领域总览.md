@@ -105,7 +105,7 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, PathBuf), 
 数据库自愈遵循 fail-closed 边界，不能把任意 open/check 错误解释为损坏：
 
 1. 在任何 SQLite open 之前检查文件集合。主 DB 缺失但 `-wal` 或 `-shm` 任一存在时，立即停止初始化并保留现场；不得让 `create_if_missing` 先创建空主库、间接清掉旁车；
-2. `PRAGMA quick_check(1)` 只有返回非 `ok`，或错误码 primary code 为 `SQLITE_CORRUPT(11)` / `SQLITE_NOTADB(26)` 时，才授权恢复；BUSY、LOCKED、IOERR 等全部归类为“暂不可用”，不重建；
+2. 正常启动直接开库。主库读写报 `SQLITE_CORRUPT` 或 `SQLITE_NOTADB` 时，记录库外核查标志并暂停写入。打开主库时遇到损坏信号或已有标志，使用独立只读连接执行 `PRAGMA integrity_check(1)`。核查通过后解除隔离，仅在复核确认损坏后归档。BUSY、LOCKED、FULL、一般 IOERR 等按普通错误处理，保留原库；
 3. 已确认损坏时先关闭连接池，再把主 DB、WAL、SHM 移入同一个唯一恢复目录。普通 rename 失败会反向回滚此前移动，不删除任何旁车；
 4. 归档成功后才创建干净数据库。恢复通知及 archive path 保存在 `LifecycleState.database_recovery`，并通过 `get_system_snapshot` 交给前端持久警告，避免启动早期一次性事件丢失。
 

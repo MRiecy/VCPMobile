@@ -76,6 +76,35 @@ describe('platform-aware bootstrap', () => {
     vi.useRealTimers();
   });
 
+  it.each([
+    ['ready', 'initializing'],
+    ['error', 'optimizing'],
+  ] as const)('preserves core %s when an earlier %s snapshot arrives during bootstrap', async (terminal, stale) => {
+    let releaseSnapshot!: () => void;
+    mockInvoke('get_system_snapshot', () => new Promise(resolve => {
+      releaseSnapshot = () => resolve({
+        core: stale, message: stale, log: 'connected', sync: 'disconnected',
+        lifecycle: null, databaseRecovery: null, backgroundServiceFailures: [],
+      });
+    }));
+    mockInvoke('get_last_error', () => 'database unavailable');
+    const lifecycle = useAppLifecycleStore();
+    const boot = lifecycle.bootstrap();
+    await flushPromises();
+    useNotificationProcessor().processPayload({ type: 'vcp-core-status', status: terminal, message: terminal });
+    releaseSnapshot();
+
+    if (terminal === 'ready') {
+      await boot;
+      expect(lifecycle.state).toBe('READY');
+    } else {
+      await expect(boot).rejects.toThrow('database unavailable');
+      expect(lifecycle.state).toBe('ERROR');
+    }
+    expect(useNotificationStore().vcpCoreStatus.status).toBe(terminal);
+    expect(useNotificationStore().vcpStatus.status).toBe('connected');
+  });
+
   it('starts voice document admission without blocking READY on physical release', async () => {
     let release!: () => void;
     mockInvoke('connect_voice_document', () => new Promise<void>(resolve => { release = resolve; }));

@@ -7,15 +7,19 @@ use crate::vcp_modules::file_manager::{
     get_multimodal_cache_dir, get_thumbnails_root_dir,
 };
 use crate::vcp_modules::infra::utils::{is_valid_cas_hash, now_secs, YieldCounter};
-use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, State};
 
 struct AttachmentGcSnapshot {
     live_hashes: HashSet<String>,
-    indexed_attachments: Vec<(String, String)>,
+    indexed_attachments: HashMap<String, String>,
 }
 
 const LAST_AUTOMATIC_MAINTENANCE_KEY: &str = "last_automatic_maintenance";
+const ATTACHMENT_GC_KEY: &str = "attachment_gc_candidates_v1";
+const ATTACHMENT_SCAN_INTERVAL: i64 = 3 * 24 * 60 * 60;
 
 async fn last_automatic_maintenance(pool: &sqlx::SqlitePool) -> Result<i64, String> {
     let value: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key = ?")
@@ -51,20 +55,16 @@ async fn record_automatic_maintenance(db_state: &DbState, time: i64) -> Result<(
 
 #[derive(Debug, Default)]
 pub struct AttachmentGcReport {
-    pub retained: usize,
     pub reclaimed: usize,
     pub ghost_files: usize,
 }
 
-/// 在同一 SQLite 快照中确定存活消息和当前分享草稿持有的 CAS。
-async fn load_attachment_gc_snapshot(
-    tx: &mut sqlx::SqliteConnection,
-) -> Result<AttachmentGcSnapshot, String> {
-    let mut live_hashes: HashSet<String> = sqlx::query_as::<_, (String,)>(
-        "SELECT DISTINCT ma.hash FROM message_attachments ma \
-             INNER JOIN messages m ON ma.owner_type = m.owner_type AND ma.owner_id = m.owner_id \
+// SQLite CROSS JOIN fixes loop order. For a pending plan the first step must
+// seek idx_message_attachments_hash, then probe just those messages and topics.
+const LIVE_ATTACHMENT_HASHES: &str = "SELECT DISTINCT ma.hash FROM message_attachments ma \
+             CROSS JOIN messages m ON ma.owner_type = m.owner_type AND ma.owner_id = m.owner_id \
                 AND ma.topic_id = m.topic_id AND ma.msg_id = m.msg_id \
-             INNER JOIN topics t ON m.owner_type = t.owner_type AND m.owner_id = t.owner_id \
+             CROSS JOIN topics t ON m.owner_type = t.owner_type AND m.owner_id = t.owner_id \
                 AND m.topic_id = t.topic_id \
              WHERE m.deleted_at IS NULL \
                AND t.deleted_at IS NULL \
@@ -77,14 +77,38 @@ async fn load_attachment_gc_snapshot(
                    SELECT 1 FROM groups g WHERE g.owner_type = 'group' \
                      AND g.group_id = t.owner_id AND g.deleted_at IS NULL\
                  ))\
-               )",
-    )
-    .fetch_all(&mut *tx)
-    .await
-    .map_err(|error| format!("读取附件 GC 有效引用失败: {error}"))?
-    .into_iter()
-    .map(|(hash,)| hash)
-    .collect();
+               )";
+
+/// Read live messages, recoverable share drafts and the CAS index at one revision.
+async fn load_attachment_gc_snapshot(
+    tx: &mut sqlx::SqliteConnection,
+    candidate_hashes: Option<&str>,
+) -> Result<AttachmentGcSnapshot, String> {
+    // The cold-start variant probes the hash indexes; an optional OR predicate
+    // in the full-scan SQL would still make SQLite visit unrelated references.
+    let index_sql = "SELECT hash, internal_path FROM attachments";
+    let (references, indexed) = match candidate_hashes {
+        Some(hashes) => (
+            sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+                "{LIVE_ATTACHMENT_HASHES} AND ma.hash IN (SELECT value FROM json_each(?))"
+            )))
+            .bind(hashes),
+            sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                "{index_sql} WHERE hash IN (SELECT value FROM json_each(?))"
+            )))
+            .bind(hashes),
+        ),
+        None => (
+            sqlx::query_scalar(LIVE_ATTACHMENT_HASHES),
+            sqlx::query_as(index_sql),
+        ),
+    };
+    let mut live_hashes: HashSet<String> = references
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| format!("读取附件 GC 有效引用失败: {error}"))?
+        .into_iter()
+        .collect();
 
     let current_share: Option<String> =
         sqlx::query_scalar("SELECT record FROM current_share WHERE singleton = 1")
@@ -97,11 +121,12 @@ async fn load_attachment_gc_snapshot(
         live_hashes.extend(super::share_inbox::active_attachment_hashes(&record)?);
     }
 
-    let indexed_attachments =
-        sqlx::query_as::<_, (String, String)>("SELECT hash, internal_path FROM attachments")
-            .fetch_all(&mut *tx)
-            .await
-            .map_err(|error| format!("读取附件 GC 索引失败: {error}"))?;
+    let indexed_attachments = indexed
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| format!("读取附件 GC 索引失败: {error}"))?
+        .into_iter()
+        .collect();
 
     Ok(AttachmentGcSnapshot {
         live_hashes,
@@ -130,152 +155,297 @@ fn is_managed_attachment_temp(name: &str) -> bool {
     stem.strip_prefix(".thumb-").is_some_and(is_hash_uuid_temp)
 }
 
-async fn sweep_attachment_files(
-    root: &std::path::Path,
-    protected_hashes: &HashSet<String>,
-) -> usize {
-    let Ok(mut entries) = tokio::fs::read_dir(root).await else {
-        return 0;
-    };
-    let mut removed = 0;
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-        let Ok(metadata) = tokio::fs::symlink_metadata(&path).await else {
-            continue;
-        };
-        if !metadata.file_type().is_file() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        let is_managed_temp = is_managed_attachment_temp(name);
-        let is_unindexed_cas = std::path::Path::new(name)
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .is_some_and(|hash| is_valid_cas_hash(hash) && !protected_hashes.contains(hash));
-        if (is_managed_temp || is_unindexed_cas) && tokio::fs::remove_file(&path).await.is_ok() {
-            removed += 1;
-        }
-    }
-    removed
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+enum GcDirectory {
+    Attachments,
+    Thumbnails,
+    Multimodal,
 }
 
-async fn sweep_unindexed_derived_files(
-    root: &std::path::Path,
-    indexed_hashes: &HashSet<String>,
-    hash_from_name: fn(&str) -> Option<&str>,
-) -> usize {
-    let Ok(mut entries) = tokio::fs::read_dir(root).await else {
-        return 0;
-    };
-    let mut removed = 0;
-    while let Ok(Some(entry)) = entries.next_entry().await {
-        let path = entry.path();
-        let Ok(metadata) = tokio::fs::symlink_metadata(&path).await else {
-            continue;
-        };
-        if !metadata.file_type().is_file() {
-            continue;
+struct GcRoots {
+    attachments: PathBuf,
+    thumbnails: PathBuf,
+    multimodal: PathBuf,
+}
+
+impl GcRoots {
+    fn for_app<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<Self, String> {
+        Ok(Self {
+            attachments: get_attachments_root_dir(app)?,
+            thumbnails: get_thumbnails_root_dir(app)?,
+            multimodal: get_multimodal_cache_dir(app)?,
+        })
+    }
+
+    fn path(&self, directory: GcDirectory) -> &Path {
+        match directory {
+            GcDirectory::Attachments => &self.attachments,
+            GcDirectory::Thumbnails => &self.thumbnails,
+            GcDirectory::Multimodal => &self.multimodal,
         }
-        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        if is_managed_attachment_temp(name) {
-            if tokio::fs::remove_file(&path).await.is_ok() {
-                removed += 1;
+    }
+}
+
+const GC_DIRECTORIES: [GcDirectory; 3] = [
+    GcDirectory::Attachments,
+    GcDirectory::Thumbnails,
+    GcDirectory::Multimodal,
+];
+
+async fn directory_exists(root: &Path) -> Result<bool, String> {
+    match tokio::fs::symlink_metadata(root).await {
+        Ok(metadata) if metadata.is_dir() => Ok(true),
+        Ok(_) => Err(format!("附件维护根不是普通目录: {}", root.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("无法检查附件目录 {}: {error}", root.display())),
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+enum GcCandidate {
+    Indexed(String),
+    File(GcDirectory, String),
+}
+
+enum ManagedFile<'a> {
+    Temporary,
+    Cas(&'a str),
+}
+
+fn managed_file(directory: GcDirectory, name: &str) -> Option<ManagedFile<'_>> {
+    if Path::new(name).file_name()?.to_str()? != name || name.contains(['/', '\\']) {
+        return None;
+    }
+    if is_managed_attachment_temp(name) {
+        return Some(ManagedFile::Temporary);
+    }
+    // native_media writes <CAS>.<hyphenated UUID>.tmp beside the final JSON.
+    if matches!(directory, GcDirectory::Multimodal) {
+        if let Some((hash, id)) = name.strip_suffix(".tmp").and_then(|stem| stem.split_once('.')) {
+            if is_valid_cas_hash(hash) && id.len() == 36 && uuid::Uuid::parse_str(id).is_ok() {
+                return Some(ManagedFile::Temporary);
             }
-            continue;
-        }
-        let Some(hash) = hash_from_name(name).filter(|hash| is_valid_cas_hash(hash)) else {
-            continue;
-        };
-        if !indexed_hashes.contains(hash) && tokio::fs::remove_file(&path).await.is_ok() {
-            removed += 1;
         }
     }
-    removed
+    let hash = match directory {
+        GcDirectory::Attachments => Path::new(name).file_stem()?.to_str(),
+        GcDirectory::Thumbnails => name
+            .strip_suffix("_thumb.webp")
+            .or_else(|| name.strip_suffix("_thumb.jpg"))
+            .or_else(|| name.strip_suffix("_thumb.png")),
+        GcDirectory::Multimodal => name.strip_suffix(".json"),
+    }?;
+    is_valid_cas_hash(hash).then_some(ManagedFile::Cas(hash))
 }
 
-/// 在 Core Ready 之前回收上一会话遗留的无引用 CAS。
-/// 此时上传 staging 已清空，前端尚不能创建新的暂存附件，因此无需在线租约或墓碑。
-pub async fn reclaim_orphaned_attachments<R: tauri::Runtime>(
-    app_handle: &tauri::AppHandle<R>,
-    db_state: &DbState,
-) -> Result<AttachmentGcReport, String> {
-    let pool = &db_state.pool;
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|error| format!("开启附件 GC 快照失败: {error}"))?;
-    let snapshot = load_attachment_gc_snapshot(&mut tx).await?;
-    tx.commit()
-        .await
-        .map_err(|error| format!("结束附件 GC 快照失败: {error}"))?;
+async fn scan_attachment_gc(db: &DbState, roots: &GcRoots) -> Result<(), String> {
+    let mut tx = db.pool.begin().await.map_err(|e| e.to_string())?;
+    let snapshot = load_attachment_gc_snapshot(&mut tx, None).await?;
+    tx.commit().await.map_err(|e| e.to_string())?;
 
-    let mut report = AttachmentGcReport {
-        retained: snapshot.live_hashes.len(),
-        ..Default::default()
-    };
-    let mut reclaimed_hashes = Vec::new();
-    for (hash, internal_path) in snapshot.indexed_attachments {
-        if snapshot.live_hashes.contains(&hash) || !is_valid_cas_hash(&hash) {
-            continue;
-        }
-        if let Err(error) = delete_attachment_physical(app_handle, &hash, &internal_path).await {
-            log::warn!("[Maintenance] Attachment GC kept {hash}: {error}");
-            continue;
-        }
-        reclaimed_hashes.push(hash);
-    }
-    if !reclaimed_hashes.is_empty() {
-        let mut write_tx = db_state
-            .write_transaction("maintenance.attachment-gc")
-            .await?;
-        for hash in &reclaimed_hashes {
-            sqlx::query("DELETE FROM attachments WHERE hash = ?")
-                .bind(hash)
-                .execute(&mut *write_tx)
-                .await
-                .map_err(|error| format!("删除附件索引 {hash} 失败: {error}"))?;
-        }
-        write_tx
-            .commit()
-            .await
-            .map_err(|error| format!("提交附件 GC 索引清理失败: {error}"))?;
-        report.reclaimed = reclaimed_hashes.len();
-    }
-
-    let indexed_attachments =
-        sqlx::query_as::<_, (String, String)>("SELECT hash, internal_path FROM attachments")
-            .fetch_all(pool)
-            .await
-            .map_err(|error| format!("读取附件 GC 最终索引失败: {error}"))?;
-    let indexed_hashes: HashSet<String> = indexed_attachments
-        .iter()
-        .map(|(hash, _)| hash.clone())
+    let mut candidates: Vec<GcCandidate> = snapshot
+        .indexed_attachments
+        .keys()
+        .filter(|hash| is_valid_cas_hash(hash) && !snapshot.live_hashes.contains(*hash))
+        .cloned()
+        .map(GcCandidate::Indexed)
         .collect();
-    // Local roots can change after an iOS update/restore. A referenced hash is
-    // never a ghost merely because its previous absolute path differs.
-    let protected_hashes = indexed_hashes.union(&snapshot.live_hashes).cloned().collect();
-    let attachments_root = get_attachments_root_dir(app_handle)?;
-    let thumbnails_root = get_thumbnails_root_dir(app_handle)?;
-    let multimodal_root = get_multimodal_cache_dir(app_handle)?;
-    report.ghost_files += sweep_attachment_files(&attachments_root, &protected_hashes).await;
-    report.ghost_files +=
-        sweep_unindexed_derived_files(&thumbnails_root, &indexed_hashes, |name| {
-            name.strip_suffix("_thumb.webp")
-                .or_else(|| name.strip_suffix("_thumb.jpg"))
-                .or_else(|| name.strip_suffix("_thumb.png"))
-        })
-        .await;
-    report.ghost_files +=
-        sweep_unindexed_derived_files(&multimodal_root, &indexed_hashes, |name| {
-            name.strip_suffix(".json")
-        })
-        .await;
+    for directory in GC_DIRECTORIES {
+        let root = roots.path(directory);
+        if !directory_exists(root).await? {
+            continue;
+        }
+        let mut entries = tokio::fs::read_dir(root).await.map_err(|e| e.to_string())?;
+        while let Some(entry) = entries.next_entry().await.map_err(|e| e.to_string())? {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            match managed_file(directory, name) {
+                None => continue,
+                Some(ManagedFile::Cas(hash)) if snapshot.live_hashes.contains(hash) => continue,
+                _ => {}
+            }
+            if entry
+                .file_type()
+                .await
+                .map_err(|e| e.to_string())?
+                .is_file()
+            {
+                candidates.push(GcCandidate::File(directory, name.to_owned()));
+            }
+        }
+    }
+    // A directory or database error leaves the previous plan and deadline intact.
+    let value = serde_json::to_string(&candidates).map_err(|e| e.to_string())?;
+    let mut tx = db
+        .write_transaction("maintenance.attachment-gc-scan")
+        .await?;
+    sqlx::query(
+        "INSERT INTO settings (key,value,updated_at) VALUES (?,?,?) \
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+    )
+    .bind(ATTACHMENT_GC_KEY)
+    .bind(value)
+    .bind(now_secs())
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+    tx.commit().await
+}
 
+fn seconds_until_attachment_scan(last: Option<i64>, now: i64) -> i64 {
+    last.filter(|&stamp| (1..=now).contains(&stamp))
+        .map_or(0, |stamp| (ATTACHMENT_SCAN_INTERVAL - (now - stamp)).max(0))
+}
+
+async fn next_attachment_scan<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<i64, String> {
+    let db = app.state::<DbState>();
+    let last: Option<i64> = sqlx::query_scalar("SELECT updated_at FROM settings WHERE key = ?")
+        .bind(ATTACHMENT_GC_KEY)
+        .fetch_optional(&db.pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    let remaining = seconds_until_attachment_scan(last, now_secs());
+    if remaining > 0 {
+        return Ok(remaining);
+    }
+    scan_attachment_gc(&db, &GcRoots::for_app(app)?).await?;
+    Ok(ATTACHMENT_SCAN_INTERVAL)
+}
+
+async fn delete_candidate_file(root: &Path, name: &str) -> std::io::Result<bool> {
+    let path = root.join(name);
+    match tokio::fs::symlink_metadata(&path).await {
+        Ok(metadata) if metadata.is_file() => {
+            tokio::fs::remove_file(path).await?;
+            Ok(true)
+        }
+        Ok(_) => Err(std::io::Error::other("拒绝删除非普通附件文件")),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+// The cold-start owner runs before upload intake. Keep the write transaction
+// through revalidation so a draft/message cannot acquire ownership mid-delete.
+async fn consume_attachment_gc(
+    db: &DbState,
+    roots: &GcRoots,
+) -> Result<AttachmentGcReport, String> {
+    let mut tx = db.write_transaction("maintenance.attachment-gc").await?;
+    let raw: Option<String> = sqlx::query_scalar("SELECT value FROM settings WHERE key=?")
+        .bind(ATTACHMENT_GC_KEY)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    let candidates: Vec<GcCandidate> = serde_json::from_str(raw.as_deref().unwrap_or("[]"))
+        .map_err(|e| format!("附件清理清单无效: {e}"))?;
+    if candidates.is_empty() {
+        return Ok(Default::default());
+    }
+    let mut hashes = HashSet::new();
+    for candidate in &candidates {
+        match candidate {
+            GcCandidate::Indexed(hash) if is_valid_cas_hash(hash) => {
+                hashes.insert(hash.as_str());
+            }
+            GcCandidate::File(directory, name) => match managed_file(*directory, name) {
+                Some(ManagedFile::Cas(hash)) => {
+                    hashes.insert(hash);
+                }
+                Some(ManagedFile::Temporary) => {}
+                None => return Err(format!("附件清理文件名无效: {name}")),
+            },
+            _ => return Err("附件清理哈希无效".into()),
+        }
+    }
+    let hashes = serde_json::to_string(&hashes).map_err(|e| e.to_string())?;
+    let mut current = load_attachment_gc_snapshot(&mut tx, Some(&hashes)).await?;
+    for directory in GC_DIRECTORIES {
+        directory_exists(roots.path(directory)).await?;
+    }
+    let mut report = AttachmentGcReport::default();
+    let mut failed = Vec::new();
+    let mut failed_indexes = HashSet::new();
+    for candidate in candidates {
+        match &candidate {
+            GcCandidate::Indexed(hash) => {
+                if current.live_hashes.contains(hash) {
+                    continue;
+                }
+                let Some(path) = current.indexed_attachments.get(hash) else {
+                    continue;
+                };
+                if let Err(e) = delete_attachment_physical(
+                    &roots.attachments,
+                    &roots.thumbnails,
+                    &roots.multimodal,
+                    hash,
+                    path,
+                )
+                .await
+                {
+                    log::warn!("[Maintenance] Retaining indexed attachment {hash}: {e}");
+                    failed_indexes.insert(hash.clone());
+                    failed.push(candidate);
+                    continue;
+                }
+                sqlx::query("DELETE FROM attachments WHERE hash=?")
+                    .bind(hash)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                current.indexed_attachments.remove(hash);
+                report.reclaimed += 1;
+            }
+            GcCandidate::File(directory, name) => {
+                if let Some(ManagedFile::Cas(hash)) = managed_file(*directory, name) {
+                    // An indexed deletion can fail after partially unlinking its
+                    // files. Keep its named siblings for the same cold-start retry.
+                    if failed_indexes.contains(hash) {
+                        failed.push(candidate);
+                        continue;
+                    }
+                    if current.live_hashes.contains(hash)
+                        || current.indexed_attachments.contains_key(hash)
+                    {
+                        continue;
+                    }
+                }
+                match delete_candidate_file(roots.path(*directory), name).await {
+                    Ok(removed) => report.ghost_files += usize::from(removed),
+                    Err(error) => {
+                        log::warn!("[Maintenance] Retaining attachment file {name}: {error}");
+                        failed.push(candidate);
+                    }
+                }
+            }
+        }
+    }
+    sqlx::query("UPDATE settings SET value=? WHERE key=?")
+        .bind(serde_json::to_string(&failed).map_err(|e| e.to_string())?)
+        .bind(ATTACHMENT_GC_KEY)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+    tx.commit().await?;
     Ok(report)
+}
+
+/// Cold start only consumes the previous online scan; a new install has no plan.
+pub async fn reclaim_orphaned_attachments<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    db: &DbState,
+) -> Result<AttachmentGcReport, String> {
+    let pending: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM settings WHERE key=? AND value!='[]')")
+            .bind(ATTACHMENT_GC_KEY)
+            .fetch_one(&db.pool)
+            .await
+            .map_err(|e| e.to_string())?;
+    if !pending {
+        return Ok(Default::default());
+    }
+    consume_attachment_gc(db, &GcRoots::for_app(app)?).await
 }
 
 /// 辅助函数：异步深度遍历计算目录大小（带协作式 CPU 挂起出让，每 200 个文件出让一次时间片）
@@ -393,6 +563,19 @@ pub async fn reconstruct_system_cache(
 
 /// 初始化自动维护逻辑（在 App 启动时调用）。
 pub async fn init_automatic_maintenance(app: AppHandle) {
+    let gc_app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            let delay = match next_attachment_scan(&gc_app).await {
+                Ok(delay) => delay,
+                Err(error) => {
+                    log::warn!("[Maintenance] Attachment candidate scan failed: {error}");
+                    ATTACHMENT_SCAN_INTERVAL
+                }
+            };
+            tokio::time::sleep(std::time::Duration::from_secs(delay as u64)).await;
+        }
+    });
     // 异步清理超过 24 小时的孤立 SSE 缓存文件，防止磁盘文件泄露
     let app_clone = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -485,7 +668,18 @@ pub async fn init_automatic_maintenance(app: AppHandle) {
 mod tests {
     use super::{
         last_automatic_maintenance, load_attachment_gc_snapshot, record_automatic_maintenance,
+        scan_attachment_gc, consume_attachment_gc, DbState, GcRoots, GC_DIRECTORIES, ATTACHMENT_GC_KEY,
     };
+
+    #[test]
+    fn attachment_gc_deadline_handles_first_boot_interval_and_clock_rollback() {
+        use super::{seconds_until_attachment_scan as delay, ATTACHMENT_SCAN_INTERVAL as interval};
+        assert_eq!(delay(None, 100), 0);
+        assert_eq!(delay(Some(100), 100), interval);
+        assert_eq!(delay(Some(100), 99 + interval), 1);
+        assert_eq!(delay(Some(100), 100 + interval), 0);
+        assert_eq!(delay(Some(i64::MAX), 100), 0);
+    }
 
     #[tokio::test]
     async fn maintenance_completion_uses_its_own_record_without_rewriting_configuration() {
@@ -597,6 +791,156 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cold_gc_revalidates_the_durable_plan_and_retries_file_failures() {
+        async fn read_plan(db: &DbState) -> (String, i64) {
+            sqlx::query_as("SELECT value,updated_at FROM settings WHERE key=?")
+                .bind(ATTACHMENT_GC_KEY).fetch_one(&db.pool).await.unwrap()
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(temp.path().join("gc.sqlite")).create_if_missing(true);
+        let connect = || sqlx::sqlite::SqlitePoolOptions::new().max_connections(1)
+            .connect_with(options.clone());
+        let pool = connect().await.unwrap();
+        create_live_set_tables(&pool).await;
+        sqlx::raw_sql("CREATE TABLE settings(key TEXT PRIMARY KEY,value TEXT NOT NULL,updated_at BIGINT NOT NULL);
+            CREATE TABLE attachments(hash TEXT PRIMARY KEY,internal_path TEXT NOT NULL);
+            INSERT INTO agents VALUES ('agent','owner',NULL);
+            INSERT INTO topics VALUES ('agent','owner','topic',NULL);
+            INSERT INTO messages VALUES ('agent','owner','topic','message',NULL);")
+            .execute(&pool).await.unwrap();
+        let db = DbState::new(pool, Default::default());
+        let roots = GcRoots {
+            attachments: temp.path().join("original"),
+            thumbnails: temp.path().join("thumb"),
+            multimodal: temp.path().join("multimodal"),
+        };
+        for dir in GC_DIRECTORIES {
+            std::fs::create_dir(roots.path(dir)).unwrap();
+        }
+        let from_message = "a".repeat(64);
+        let from_share = "b".repeat(64);
+        let orphan = "c".repeat(64);
+        let ghost = "d".repeat(64);
+        let indexed_later = "e".repeat(64);
+        let not_scanned = roots.attachments.join(format!("{}.bin", "f".repeat(64)));
+        for hash in [&from_message, &from_share, &orphan, &ghost, &indexed_later] {
+            let filename = format!("{hash}.bin");
+            std::fs::write(roots.attachments.join(&filename), b"original").unwrap();
+            std::fs::write(roots.thumbnails.join(format!("{hash}_thumb.jpg")), b"thumb").unwrap();
+            std::fs::write(roots.multimodal.join(format!("{hash}.json")), b"json").unwrap();
+        }
+        for hash in [&from_message, &orphan] {
+            sqlx::query("INSERT INTO attachments VALUES (?,?)")
+                .bind(hash)
+                .bind(format!("/old/sandbox/{hash}.bin"))
+                .execute(&db.pool)
+                .await
+                .unwrap();
+        }
+        let stale_temp = roots
+            .attachments
+            .join(format!(".ingest-{}.tmp", uuid::Uuid::new_v4()));
+        std::fs::write(&stale_temp, b"temp").unwrap();
+        let extra_original = roots.attachments.join(format!("{orphan}.jpg"));
+        std::fs::write(&extra_original, b"older extension").unwrap();
+        let media_temp = format!("{from_message}.{}.tmp", uuid::Uuid::new_v4());
+        let lookalike = format!("{from_message}.unmanaged.tmp");
+        std::fs::write(roots.multimodal.join(&media_temp), b"unfinished").unwrap();
+        std::fs::write(roots.attachments.join(&media_temp), b"not a managed temp here").unwrap();
+        std::fs::write(roots.multimodal.join(&lookalike), b"unknown file").unwrap();
+        scan_attachment_gc(&db, &roots).await.unwrap();
+        assert!(stale_temp.exists());
+        let planned = read_plan(&db).await;
+        assert!(planned.1 > 0);
+        // Fail after the first directory has already been scanned.
+        let saved = temp.path().join("saved-thumbnails");
+        std::fs::rename(&roots.thumbnails, &saved).unwrap();
+        std::fs::write(&roots.thumbnails, b"not a directory").unwrap();
+        assert!(scan_attachment_gc(&db, &roots).await.is_err());
+        assert_eq!(read_plan(&db).await, planned);
+        std::fs::remove_file(&roots.thumbnails).unwrap();
+        std::fs::rename(saved, &roots.thumbnails).unwrap();
+
+        sqlx::query(
+            "INSERT INTO message_attachments(owner_type,owner_id,topic_id,msg_id,hash)
+            VALUES ('agent','owner','topic','message',?)",
+        )
+        .bind(&from_message)
+        .execute(&db.pool)
+        .await
+        .unwrap();
+        let share = serde_json::json!({"generation":1, "deliveryId":"d", "state":"draft",
+            "items":[{"itemId":"x", "fileName":"x.bin", "sha256":from_share}]});
+        sqlx::query("INSERT INTO current_share VALUES (1,?)")
+            .bind(share.to_string())
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO attachments VALUES (?,?)")
+            .bind(&indexed_later)
+            .bind(format!("{indexed_later}.bin"))
+            .execute(&db.pool)
+            .await
+            .unwrap();
+        std::fs::write(&not_scanned, b"arrived after scan").unwrap();
+        // A candidate replaced with a directory must survive and stay on the retry list.
+        std::fs::remove_file(&stale_temp).unwrap();
+        std::fs::create_dir(&stale_temp).unwrap();
+        let invalid_thumbnail = roots.thumbnails.join(format!("{orphan}_thumb.png"));
+        std::fs::create_dir(&invalid_thumbnail).unwrap();
+        db.pool.close().await;
+        let db = DbState::new(connect().await.unwrap(), Default::default());
+        let report = consume_attachment_gc(&db, &roots).await.unwrap();
+        assert_eq!(report.reclaimed, 0);
+        assert_eq!(report.ghost_files, 4);
+        assert!(!roots.multimodal.join(&media_temp).exists());
+        assert!(roots.attachments.join(&media_temp).exists());
+        assert!(roots.multimodal.join(&lookalike).exists());
+        assert!(not_scanned.exists() && stale_temp.is_dir());
+        for hash in [&from_message, &from_share, &indexed_later, &orphan] {
+            assert!(roots.attachments.join(format!("{hash}.bin")).exists());
+            assert!(roots.thumbnails.join(format!("{hash}_thumb.jpg")).exists());
+            assert!(roots.multimodal.join(format!("{hash}.json")).exists());
+        }
+        assert!(!roots.attachments.join(format!("{ghost}.bin")).exists());
+        assert!(!roots.thumbnails.join(format!("{ghost}_thumb.jpg")).exists());
+        assert!(!roots.multimodal.join(format!("{ghost}.json")).exists());
+        let remaining: Vec<String> =
+            sqlx::query_scalar("SELECT hash FROM attachments ORDER BY hash")
+                .fetch_all(&db.pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, [&from_message, &orphan, &indexed_later].map(String::as_str));
+        let retry = read_plan(&db).await;
+        assert!(retry.0.contains(".ingest-"));
+        assert_eq!(retry.1, planned.1);
+        std::fs::remove_dir(&stale_temp).unwrap();
+        std::fs::remove_dir(&invalid_thumbnail).unwrap();
+        let retried = consume_attachment_gc(&db, &roots).await.unwrap();
+        assert_eq!((retried.reclaimed, retried.ghost_files), (1, 1));
+        assert!(!roots.attachments.join(format!("{orphan}.bin")).exists());
+        assert!(!roots.thumbnails.join(format!("{orphan}_thumb.jpg")).exists());
+        assert!(!roots.multimodal.join(format!("{orphan}.json")).exists());
+        assert!(!extra_original.exists());
+        let orphan_index: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM attachments WHERE hash=?")
+            .bind(&orphan).fetch_one(&db.pool).await.unwrap();
+        assert_eq!(orphan_index, 0);
+        assert_eq!(read_plan(&db).await, ("[]".into(), planned.1));
+
+        let outside_name = format!("{}.bin", "9".repeat(64));
+        let outside = temp.path().join(&outside_name);
+        std::fs::write(&outside, b"outside CAS").unwrap();
+        let bad_plan = serde_json::json!([{"File":["Attachments", format!("../{outside_name}")]}]);
+        sqlx::query("UPDATE settings SET value=? WHERE key=?")
+            .bind(bad_plan.to_string()).bind(ATTACHMENT_GC_KEY).execute(&db.pool).await.unwrap();
+        assert!(consume_attachment_gc(&db, &roots).await.is_err());
+        assert!(outside.is_file());
+        assert_eq!(read_plan(&db).await.0, bad_plan.to_string());
+        db.pool.close().await;
+    }
+
+    #[tokio::test]
     async fn restart_gc_retains_unsent_share_files_until_the_share_is_discarded() {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
@@ -621,7 +965,7 @@ mod tests {
             .await
             .expect("persist draft");
         let mut tx = pool.begin().await.expect("begin snapshot");
-        let snapshot = load_attachment_gc_snapshot(&mut tx)
+        let snapshot = load_attachment_gc_snapshot(&mut tx, None)
             .await
             .expect("read live refs");
         assert!(snapshot.live_hashes.contains("draft-hash"));
@@ -635,7 +979,7 @@ mod tests {
             .await
             .expect("discard share");
         let mut tx = pool.begin().await.expect("begin later snapshot");
-        assert!(load_attachment_gc_snapshot(&mut tx)
+        assert!(load_attachment_gc_snapshot(&mut tx, None)
             .await
             .expect("read terminal refs")
             .live_hashes
@@ -654,7 +998,7 @@ mod tests {
         // The first live-reference query is valid, but the attachment index query fails.
         // The caller receives no partial snapshot and therefore has nothing it may delete.
         let mut tx = pool.begin().await.expect("begin snapshot");
-        let error = load_attachment_gc_snapshot(&mut tx)
+        let error = load_attachment_gc_snapshot(&mut tx, None)
             .await
             .err()
             .expect("missing attachments table must fail closed");
@@ -717,7 +1061,7 @@ mod tests {
         .expect("insert attachment index");
 
         let mut tx = pool.begin().await.expect("begin snapshot");
-        let snapshot = load_attachment_gc_snapshot(&mut tx)
+        let snapshot = load_attachment_gc_snapshot(&mut tx, None)
             .await
             .expect("complete live-set snapshot");
         assert!(snapshot.live_hashes.contains("live-hash"));
@@ -749,7 +1093,7 @@ mod tests {
         .expect("create desktop-only fixture");
 
         let mut tx = pool.begin().await.expect("begin snapshot");
-        let snapshot = load_attachment_gc_snapshot(&mut tx)
+        let snapshot = load_attachment_gc_snapshot(&mut tx, None)
             .await
             .expect("desktop-only attachment is a logical live reference");
         assert!(snapshot.live_hashes.contains("desktop-hash"));
@@ -787,7 +1131,7 @@ mod tests {
             .expect("insert orphan index");
 
         let mut tx = pool.begin().await.expect("begin snapshot");
-        let snapshot = load_attachment_gc_snapshot(&mut tx)
+        let snapshot = load_attachment_gc_snapshot(&mut tx, None)
             .await
             .expect("read GC snapshot");
         assert!(!snapshot.live_hashes.contains("orphan-hash"));

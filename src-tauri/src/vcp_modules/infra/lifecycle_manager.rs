@@ -88,8 +88,8 @@ pub async fn bootstrap(app: &AppHandle) -> Result<(), String> {
     match attachment_cleanup {
         Ok(report) if report.reclaimed > 0 || report.ghost_files > 0 => {
             info!(
-                "[Lifecycle] Attachment GC reclaimed {} indexed CAS entries and {} ghost files; retained {} live hashes.",
-                report.reclaimed, report.ghost_files, report.retained
+                "[Lifecycle] Rechecked attachment candidates and removed {} indexed CAS entries and {} orphan files.",
+                report.reclaimed, report.ghost_files
             );
         }
         Ok(_) => {}

@@ -76,6 +76,7 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
     db_path.push("vcp_avatar.db");
 
     validate_sqlite_file_set(&db_path)?;
+    super::db_health::install(&db_path)?;
 
     log::info!("[DBManager] Initializing SQLite at: {:?}", db_path);
 
@@ -95,22 +96,20 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
         .pragma("cache_size", "-8000")
         .pragma("foreign_keys", "1");
 
-    let pool = match open_and_check_db(&connect_options, &db_path).await {
+    let pool = match prepare_database(app_handle, &connect_options, &db_path).await {
         Ok(p) => p,
         Err(DbOpenFailure::Unavailable(e)) => {
             return Err(format!("数据库暂不可用，已保留原文件且不会自动重建: {}", e));
         }
-        Err(DbOpenFailure::ConfirmedCorruption { reason, pool }) => {
+        Err(DbOpenFailure::ConfirmedCorruption(reason)) => {
             log::warn!(
                 "[DBManager] Confirmed database corruption: {}. Preserving recovery unit...",
                 reason
             );
 
-            if let Some(pool) = pool {
-                pool.close().await;
-            }
-
             let archive_path = archive_corrupt_db(&db_path).await?;
+            super::db_health::resume_after_verification(&super::db_health::marker_path(&db_path))
+                .map_err(|error| format!("解除已归档数据库写入隔离失败: {error}"))?;
             let recovery_message = format!(
                 "检测到数据库损坏，原 DB/WAL/SHM 已完整归档至 {}，正在创建干净数据库",
                 archive_path.display()
@@ -142,7 +141,7 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
             );
 
             // 重新尝试创建并建立干净连接
-            match open_and_check_db(&connect_options, &db_path).await {
+            match prepare_database(app_handle, &connect_options, &db_path).await {
                 Ok(pool) => pool,
                 Err(err) => {
                     return Err(format!(
@@ -155,14 +154,37 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
         }
     };
 
-    // 运行结构版本迁移引擎
-    run_migrations(&pool).await?;
+    use crate::vcp_modules::infra::lifecycle_state::{CoreStatus, LifecycleState};
+    let lifecycle = app_handle.state::<LifecycleState>();
+    if *lifecycle.status.read().await == CoreStatus::Optimizing {
+        *lifecycle.status_message.write().await = "核心引擎初始化中...".into();
+        *lifecycle.status.write().await = CoreStatus::Initializing;
+    }
+    Ok((pool, db_path))
+}
 
-    // 检测 page_size 是否需要物理升级至 16KB 闪存友好对齐
-    let page_size: i32 = sqlx::query_scalar("PRAGMA page_size")
-        .fetch_one(&pool)
-        .await
-        .unwrap_or(4096);
+async fn prepare_database(
+    app_handle: &AppHandle,
+    options: &sqlx::sqlite::SqliteConnectOptions,
+    db_path: &Path,
+) -> Result<Pool<Sqlite>, DbOpenFailure> {
+    let checking = || report_database_optimization(app_handle, "正在核查数据库完整性…");
+    let pool = open_and_check_db(options, db_path, checking).await?;
+    let preparation = async {
+        run_migrations(&pool).await?;
+        sqlx::query_scalar::<_, i32>("PRAGMA page_size")
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| format!("读取数据库页大小失败: {e}"))
+    }
+    .await;
+    let page_size = match preparation {
+        Ok(size) => size,
+        Err(error) => {
+            pool.close().await;
+            return Err(check_startup_failure(db_path, checking, error).await);
+        }
+    };
 
     let pool = if page_size != 16384 {
         log::info!(
@@ -170,156 +192,135 @@ pub async fn init_db(app_handle: &AppHandle) -> Result<(Pool<Sqlite>, std::path:
             page_size
         );
 
-        let lifecycle =
-            app_handle.state::<crate::vcp_modules::infra::lifecycle_state::LifecycleState>();
-        {
-            let mut status_lock = lifecycle.status.write().await;
-            *status_lock = crate::vcp_modules::infra::lifecycle_state::CoreStatus::Optimizing;
-            let mut msg_lock = lifecycle.status_message.write().await;
-            *msg_lock = "正在优化数据库存储以提高运行效率...".to_string();
-        }
-
-        let _ = app_handle.emit(
-            "vcp-system-event",
-            serde_json::json!({
-                "type": "vcp-core-status",
-                "status": "optimizing",
-                "message": "正在优化数据库存储以提高运行效率...",
-                "source": "Core"
-            }),
-        );
+        report_database_optimization(app_handle, "正在优化数据库存储以提高运行效率...").await;
 
         // SQLite 在 WAL 模式下不允许变更 page_size。
         // 我们必须彻底关闭当前 pool 释放所有锁，然后使用单连接临时切换出 WAL 模式并执行 VACUUM。
         pool.close().await;
 
-        let temp_options = sqlx::sqlite::SqliteConnectOptions::new()
-            .filename(&db_path)
-            .create_if_missing(true)
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete);
-
-        match sqlx::sqlite::SqliteConnection::connect_with(&temp_options).await {
-            Ok(mut temp_conn) => {
-                let _ = sqlx::query("PRAGMA page_size = 16384")
-                    .execute(&mut temp_conn)
-                    .await;
-                if let Err(e) = sqlx::query("VACUUM").execute(&mut temp_conn).await {
-                    log::error!("[DBManager] Page size VACUUM optimization failed: {}", e);
-                } else {
-                    log::info!("[DBManager] Page size successfully upgraded to 16KB.");
-                }
-                let _ = temp_conn.close().await;
+        if let Err(error) = upgrade_page_size(db_path).await {
+            if is_corruption_signal(&error) {
+                super::db_health::persist_marker(&super::db_health::marker_path(db_path))
+                    .map_err(|e| DbOpenFailure::Unavailable(e.to_string()))?;
             }
-            Err(e) => {
-                log::error!(
-                    "[DBManager] Failed to open temp connection for page size optimization: {}",
-                    e
-                );
-            }
+            // The page-size conversion is optional. An ordinary failure can
+            // reopen in WAL; a suspected database must pass the verifier first.
+            log::warn!("[DBManager] Page size upgrade failed: {error}");
         }
-
-        // 重新打开正常的 WAL 连接池并接管连接
-        let pool = match open_and_check_db(&connect_options, &db_path).await {
-            Ok(p) => p,
-            Err(err) => return Err(format!("重建连接池失败: {}", err.message())),
-        };
-
-        // 整理完成后重置回 Initializing 状态以继续引导
-        {
-            let mut status_lock = lifecycle.status.write().await;
-            *status_lock = crate::vcp_modules::infra::lifecycle_state::CoreStatus::Initializing;
-        }
-        pool
+        open_and_check_db(options, db_path, checking).await?
     } else {
         pool
     };
 
     // 运行系统内置高级规则的多模态无损同步器
-    crate::vcp_modules::chat::context_injection::sync_system_preset_rules(&pool)
-        .await
-        .map_err(|e| format!("[DBManager] Failed to sync preset rules: {}", e))?;
-
-    Ok((pool, db_path))
+    if let Err(error) =
+        crate::vcp_modules::chat::context_injection::sync_system_preset_rules(&pool).await
+    {
+        pool.close().await;
+        return Err(check_startup_failure(db_path, checking, error).await);
+    }
+    Ok(pool)
 }
 
-async fn open_and_check_db(
+async fn upgrade_page_size(db_path: &Path) -> Result<(), sqlx::Error> {
+    super::db_health::ensure_writable().map_err(sqlx::Error::Protocol)?;
+    let options = super::db_health::pool_options(
+        sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(db_path)
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Delete),
+    );
+    let mut connection = sqlx::SqliteConnection::connect_with(&options).await?;
+    let upgrade: Result<(), sqlx::Error> = async {
+        super::db_health::protect_sqlx(&mut connection).await?;
+        sqlx::query("PRAGMA page_size = 16384")
+            .execute(&mut connection)
+            .await?;
+        super::db_health::ensure_writable().map_err(sqlx::Error::Protocol)?;
+        sqlx::query("VACUUM").execute(&mut connection).await?;
+        Ok(())
+    }
+    .await;
+    let closed = connection.close().await;
+    upgrade?;
+    closed
+}
+
+async fn check_startup_failure<F: std::future::Future<Output = ()>>(
+    db_path: &Path,
+    on_check: impl Fn() -> F,
+    error: String,
+) -> DbOpenFailure {
+    let marker = super::db_health::marker_path(db_path);
+    match verify_if_needed(db_path, &marker, on_check).await {
+        Ok(()) => DbOpenFailure::Unavailable(error),
+        Err(failure) => failure,
+    }
+}
+
+async fn verify_if_needed<F: std::future::Future<Output = ()>>(
+    db_path: &Path, marker: &Path, on_check: impl Fn() -> F,
+) -> Result<(), DbOpenFailure> {
+    if super::db_health::is_quarantined()
+        || tokio::fs::try_exists(marker).await.map_err(|e| DbOpenFailure::Unavailable(e.to_string()))?
+    {
+        on_check().await;
+        verify_before_open(db_path, marker).await?;
+    }
+    Ok(())
+}
+
+async fn report_database_optimization(app: &AppHandle, message: &str) {
+    use crate::vcp_modules::infra::lifecycle_state::{CoreStatus, LifecycleState};
+    let lifecycle = app.state::<LifecycleState>();
+    *lifecycle.status_message.write().await = message.into();
+    *lifecycle.status.write().await = CoreStatus::Optimizing;
+    let _ = app.emit(
+        "vcp-system-event",
+        serde_json::json!({
+            "type": "vcp-core-status", "status": "optimizing", "message": message, "source": "Core"
+        }),
+    );
+}
+
+async fn open_and_check_db<F: std::future::Future<Output = ()>>(
     connect_options: &sqlx::sqlite::SqliteConnectOptions,
     db_path: &std::path::Path,
+    on_check: impl Fn() -> F,
 ) -> Result<Pool<Sqlite>, DbOpenFailure> {
-    let mut retry_count = 0;
-    let pool = loop {
-        if let Err(e) = bootstrap_persistent_pragmas(db_path).await {
-            if is_confirmed_sqlite_corruption(&e) {
-                return Err(DbOpenFailure::ConfirmedCorruption {
-                    reason: e.to_string(),
-                    pool: None,
-                });
-            }
-            retry_count += 1;
-            if retry_count >= 3 {
-                return Err(DbOpenFailure::Unavailable(format!(
-                    "数据库持久 PRAGMA 初始化失败 (已重试 {} 次): {}",
-                    retry_count, e
-                )));
-            }
-            log::warn!(
-                "[DBManager] Persistent PRAGMA bootstrap failed: {}. Retrying in {}ms... (Attempt {})",
-                e,
-                retry_count * 50,
-                retry_count
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(retry_count * 50)).await;
-            continue;
-        }
-        match SqlitePoolOptions::new()
-            .max_connections(5)
-            .connect_with(connect_options.clone())
-            .await
-        {
-            Ok(p) => break p,
-            Err(e) => {
-                if is_confirmed_sqlite_corruption(&e) {
-                    return Err(DbOpenFailure::ConfirmedCorruption {
-                        reason: e.to_string(),
-                        pool: None,
-                    });
-                }
-                retry_count += 1;
-                if retry_count >= 3 {
-                    return Err(DbOpenFailure::Unavailable(format!(
-                        "数据库连接重试失败 (已重试 {} 次): {}",
-                        retry_count, e
-                    )));
-                }
-                log::warn!(
-                    "[DBManager] Connection failed: {}. Retrying in {}ms... (Attempt {})",
-                    e,
-                    retry_count * 50,
-                    retry_count
-                );
-                tokio::time::sleep(std::time::Duration::from_millis(retry_count * 50)).await;
-            }
-        }
-    };
+    let marker = super::db_health::marker_path(db_path);
+    verify_if_needed(db_path, &marker, &on_check).await?;
 
-    // 冷启动时运行轻量化快速自检；SQL 执行错误与明确损坏必须分流。
-    if db_path.exists() {
-        match check_integrity(&pool).await {
-            Ok(()) => {}
-            Err(IntegrityFailure::Confirmed(reason)) => {
-                return Err(DbOpenFailure::ConfirmedCorruption {
-                    reason,
-                    pool: Some(pool),
-                });
+    let mut attempt = 0;
+    loop {
+        let result = async {
+            bootstrap_persistent_pragmas(db_path).await?;
+            SqlitePoolOptions::new()
+                .max_connections(5)
+                .after_connect(|conn, _| Box::pin(super::db_health::protect_sqlx(conn)))
+                .connect_with(super::db_health::pool_options(connect_options.clone()))
+                .await
+        }
+        .await;
+        match result {
+            Ok(pool) => return Ok(pool),
+            Err(error) if is_corruption_signal(&error) || super::db_health::is_quarantined() => {
+                super::db_health::persist_marker(&marker).map_err(|e| {
+                    DbOpenFailure::Unavailable(format!("无法保存数据库核查标志: {e}"))
+                })?;
+                // A transient error which the independent handle could not
+                // reproduce never authorizes replacing the original files.
+                return Err(check_startup_failure(db_path, on_check, error.to_string()).await);
             }
-            Err(IntegrityFailure::Unavailable(reason)) => {
-                pool.close().await;
-                return Err(DbOpenFailure::Unavailable(reason));
+            Err(error) => {
+                attempt += 1;
+                if attempt == 3 {
+                    return Err(DbOpenFailure::Unavailable(error.to_string()));
+                }
+                log::warn!("[DBManager] Database open failed (attempt {attempt}): {error}");
+                tokio::time::sleep(std::time::Duration::from_millis(attempt * 50)).await;
             }
         }
     }
-
-    Ok(pool)
 }
 
 /// Applies file-persistent SQLite settings once before a runtime pool is opened.
@@ -356,43 +357,50 @@ async fn bootstrap_persistent_pragmas(db_path: &Path) -> Result<(), sqlx::Error>
 
 enum DbOpenFailure {
     Unavailable(String),
-    ConfirmedCorruption {
-        reason: String,
-        pool: Option<Pool<Sqlite>>,
-    },
+    ConfirmedCorruption(String),
 }
 
 impl DbOpenFailure {
     fn message(&self) -> &str {
         match self {
             Self::Unavailable(message) => message,
-            Self::ConfirmedCorruption { reason, .. } => reason,
+            Self::ConfirmedCorruption(reason) => reason,
         }
     }
 }
 
-enum IntegrityFailure {
-    Unavailable(String),
-    Confirmed(String),
-}
-
-async fn check_integrity(pool: &Pool<Sqlite>) -> Result<(), IntegrityFailure> {
-    let check: Result<String, sqlx::Error> = sqlx::query_scalar("PRAGMA quick_check(1)")
-        .fetch_one(pool)
-        .await;
+/// Only called while no application pool or writer owns the database. The
+/// verifier uses a separate read-only connection which cannot create a lost
+/// main file; normal SQLite locking keeps committed WAL data visible.
+async fn verify_before_open(db_path: &Path, marker: &Path) -> Result<(), DbOpenFailure> {
+    let options = sqlx::sqlite::SqliteConnectOptions::new()
+        .filename(db_path)
+        .read_only(true);
+    let check: Result<String, sqlx::Error> = async {
+        let mut connection = sqlx::SqliteConnection::connect_with(&options).await?;
+        let result = sqlx::query_scalar("PRAGMA integrity_check(1)")
+            .fetch_one(&mut connection)
+            .await;
+        connection.close().await?;
+        result
+    }
+    .await;
     match check {
-        Ok(result) if result.trim().eq_ignore_ascii_case("ok") => Ok(()),
-        Ok(result) => Err(IntegrityFailure::Confirmed(format!(
-            "PRAGMA quick_check(1) reported corruption: {}",
+        Ok(result) if result.trim().eq_ignore_ascii_case("ok") => {
+            super::db_health::resume_after_verification(marker)
+                .map_err(|e| DbOpenFailure::Unavailable(format!("清除数据库核查标志失败: {e}")))
+        }
+        Ok(result) => Err(DbOpenFailure::ConfirmedCorruption(format!(
+            "PRAGMA integrity_check(1) reported corruption: {}",
             result
         ))),
         Err(e) => {
-            log::error!("[DBManager] Integrity quick check failed: {}", e);
-            if is_confirmed_sqlite_corruption(&e) {
-                Err(IntegrityFailure::Confirmed(e.to_string()))
+            log::error!("[DBManager] Integrity check failed: {}", e);
+            if is_corruption_signal(&e) {
+                Err(DbOpenFailure::ConfirmedCorruption(e.to_string()))
             } else {
-                Err(IntegrityFailure::Unavailable(format!(
-                    "PRAGMA quick_check(1) could not run: {}",
+                Err(DbOpenFailure::Unavailable(format!(
+                    "PRAGMA integrity_check(1) could not run: {}",
                     e
                 )))
             }
@@ -400,7 +408,7 @@ async fn check_integrity(pool: &Pool<Sqlite>) -> Result<(), IntegrityFailure> {
     }
 }
 
-fn is_confirmed_sqlite_corruption(error: &sqlx::Error) -> bool {
+fn is_corruption_signal(error: &sqlx::Error) -> bool {
     let Some(database_error) = error.as_database_error() else {
         return false;
     };
@@ -412,17 +420,14 @@ fn is_confirmed_sqlite_corruption(error: &sqlx::Error) -> bool {
     };
 
     // SQLite extended result codes keep the primary code in the low byte.
-    // SQLITE_CORRUPT=11 and SQLITE_NOTADB=26 are the only open/check errors
-    // that authorize destructive-path recovery. BUSY/LOCKED/IOERR remain
-    // unavailable errors and must never cause a fresh database to be created.
-    is_confirmed_sqlite_corruption_code(code)
+    is_corruption_code(code)
 }
 
-fn is_confirmed_sqlite_corruption_code(code: i32) -> bool {
-    matches!(code & 0xff, 11 | 26)
+pub(super) fn is_corruption_code(code: i32) -> bool {
+    matches!(code & 0xff, rusqlite::ffi::SQLITE_CORRUPT | rusqlite::ffi::SQLITE_NOTADB)
 }
 
-fn sqlite_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
+pub(super) fn sqlite_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
     let mut path = db_path.as_os_str().to_os_string();
     path.push(suffix);
     PathBuf::from(path)
@@ -475,16 +480,23 @@ async fn archive_corrupt_db(db_path: &Path) -> Result<PathBuf, String> {
         archive_path
     );
 
+    let wal_path = sqlite_sidecar_path(db_path, "-wal");
+    let shm_path = sqlite_sidecar_path(db_path, "-shm");
+    let mut sources = vec![db_path.to_path_buf()];
+    for sidecar in [wal_path, shm_path, super::db_health::marker_path(db_path)] {
+        if tokio::fs::try_exists(&sidecar)
+            .await
+            .map_err(|e| format!("无法检查数据库恢复单元 {}: {e}", sidecar.display()))?
+        {
+            sources.push(sidecar);
+        }
+    }
     tokio::fs::create_dir(&archive_path)
         .await
         .map_err(|e| format!("创建数据库恢复目录失败: {}", e))?;
-
-    let wal_path = sqlite_sidecar_path(db_path, "-wal");
-    let shm_path = sqlite_sidecar_path(db_path, "-shm");
-    let sources = [db_path.to_path_buf(), wal_path, shm_path];
     let mut moved: Vec<(PathBuf, PathBuf)> = Vec::new();
 
-    for source in sources.into_iter().filter(|path| path.exists()) {
+    for source in sources {
         let destination = archive_path.join(
             source
                 .file_name()
@@ -516,10 +528,6 @@ async fn archive_corrupt_db(db_path: &Path) -> Result<PathBuf, String> {
             ));
         }
         moved.push((source, destination));
-    }
-
-    if moved.is_empty() {
-        return Err(format!("数据库恢复单元为空: {}", db_path.display()));
     }
 
     Ok(archive_path)
@@ -1047,6 +1055,196 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn real_corruption_quarantines_only_the_main_database() {
+        use super::super::db_health;
+        use std::io::{Seek, SeekFrom, Write};
+
+        // SQLite's logger is global. Run each driver in a fresh process so
+        // registration can never race the other database tests in this binary.
+        const DRIVER: &str = "VCP_SQLITE_QUARANTINE_TEST_DRIVER";
+        let Ok(driver) = std::env::var(DRIVER) else {
+            let name = std::thread::current().name().unwrap().to_string();
+            for driver in ["sqlx", "rusqlite"] {
+                let child = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", &name, "--nocapture"])
+                    .env(DRIVER, driver)
+                    .output()
+                    .unwrap();
+                assert!(
+                    child.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&child.stderr)
+                );
+                assert!(String::from_utf8_lossy(&child.stdout).contains("1 passed"));
+            }
+            return;
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vcp_avatar.db");
+        let marker = db_health::marker_path(&path);
+        db_health::install(&path).unwrap();
+
+        // Break one leaf page, leaving the header, schema and writable table
+        // readable. A full scan on the unmarked boot would detect it.
+        let offset = {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE good(i INTEGER UNIQUE); CREATE TABLE broken(v); INSERT INTO broken VALUES (1)").unwrap();
+            let page: i64 = conn
+                .query_row(
+                    "SELECT rootpage FROM sqlite_schema WHERE name='broken'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let size: i64 = conn
+                .pragma_query_value(None, "page_size", |row| row.get(0))
+                .unwrap();
+            u64::try_from((page - 1) * size).unwrap()
+        };
+        let mut file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        file.write_all(&[0xff]).unwrap();
+        drop(file);
+
+        let other = dir.path().join("unrelated.db");
+        fs::write(&other, [0xff; 512]).unwrap();
+        let conn = rusqlite::Connection::open(other).unwrap();
+        assert!(conn
+            .query_row("SELECT count(*) FROM sqlite_schema", [], |r| r
+                .get::<_, i64>(0))
+            .is_err());
+        assert!(!marker.exists());
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&path)
+            .busy_timeout(std::time::Duration::from_millis(40));
+        let pool = open_and_check_db(&options, &path, || async {
+            panic!("unmarked boot scanned")
+        })
+        .await
+        .unwrap_or_else(|e| panic!("{}", e.message()));
+        let db = DbState::new(pool.clone(), path.clone());
+        let mut writer = rusqlite::Connection::open(&path).unwrap();
+        db_health::protect_rusqlite(&writer).unwrap();
+        sqlx::query("INSERT INTO good VALUES (1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(sqlx::query("INSERT INTO good VALUES (1)")
+            .execute(&pool)
+            .await
+            .is_err());
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let busy = sqlx::query("INSERT INTO good VALUES (3)")
+            .execute(&pool)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            busy.as_database_error().unwrap().code().as_deref(),
+            Some("5")
+        );
+        writer.execute_batch("ROLLBACK").unwrap();
+        {
+            let _scope = db_health::MainRusqliteScope::enter();
+            let pages: i64 = writer
+                .pragma_query_value(None, "page_count", |r| r.get(0))
+                .unwrap();
+            writer.pragma_update(None, "max_page_count", pages).unwrap();
+            let full = writer
+                .execute("INSERT INTO good VALUES (zeroblob(1000000))", [])
+                .unwrap_err();
+            assert_eq!(
+                full.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::DiskFull)
+            );
+        }
+        assert!(
+            !marker.exists(),
+            "constraint, BUSY and FULL do not quarantine"
+        );
+
+        if driver == "sqlx" {
+            let tx = writer.transaction().unwrap();
+            tx.execute("INSERT INTO good VALUES (2)", []).unwrap();
+            let error = sqlx::query("SELECT v FROM broken")
+                .fetch_all(&pool)
+                .await
+                .unwrap_err();
+            assert!(is_corruption_signal(&error));
+            assert!(marker.is_file(), "SQLx read did not persist the fault");
+            assert!(tx.commit().is_err(), "in-flight rusqlite writer committed");
+        } else {
+            let mut tx = pool.begin().await.unwrap();
+            sqlx::query("INSERT INTO good VALUES (2)")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            {
+                let _scope = db_health::MainRusqliteScope::enter();
+                assert!(writer
+                    .query_row("SELECT v FROM broken", [], |r| r.get::<_, i64>(0))
+                    .is_err());
+            }
+            assert!(marker.is_file(), "rusqlite read did not persist the fault");
+            assert!(
+                tx.commit().await.is_err(),
+                "in-flight SQLx writer committed"
+            );
+        }
+        assert!(db.write_transaction("test.quarantine").await.is_err());
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM good")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        drop(writer);
+        pool.close().await;
+        assert!(matches!(
+            verify_before_open(&path, &marker).await,
+            Err(DbOpenFailure::ConfirmedCorruption(_))
+        ));
+        let archive = archive_corrupt_db(&path).await.unwrap();
+        assert!(archive.join("vcp_avatar.db").exists());
+        assert!(archive.join("vcp_avatar.db.needs-check").exists());
+    }
+
+    #[tokio::test]
+    async fn startup_verifier_only_clears_a_marker_after_a_clean_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vcp_avatar.db");
+        let marker = super::super::db_health::marker_path(&path);
+        super::super::db_health::persist_marker(&marker).unwrap();
+        assert!(matches!(
+            verify_before_open(&path, &marker).await,
+            Err(DbOpenFailure::Unavailable(_))
+        ));
+        assert!(marker.exists());
+        assert!(!path.exists(), "verifier created the missing database");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE intact(x); INSERT INTO intact VALUES (1)")
+            .unwrap();
+        drop(conn);
+        verify_before_open(&path, &marker)
+            .await
+            .unwrap_or_else(|e| panic!("{}", e.message()));
+        assert!(!marker.exists());
+        let options = sqlx::sqlite::SqliteConnectOptions::new().filename(&path);
+        fs::write(&path, [0xff; 512]).unwrap();
+        let checks = std::sync::atomic::AtomicUsize::new(0);
+        let result = open_and_check_db(&options, &path, || async {
+            checks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        })
+        .await;
+        assert!(matches!(result, Err(DbOpenFailure::ConfirmedCorruption(_))));
+        assert_eq!(
+            checks.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "opening NOTADB requires an independent check"
+        );
+        assert!(marker.exists());
+    }
+
+    #[tokio::test]
     async fn persistent_pragmas_are_bootstrapped_before_the_runtime_pool() {
         let temp_dir = tempfile::tempdir().expect("create pragma bootstrap directory");
         let db_path = temp_dir.path().join("pragma-bootstrap.sqlite");
@@ -1057,7 +1255,7 @@ mod tests {
             .busy_timeout(std::time::Duration::from_secs(2))
             .pragma("foreign_keys", "1");
 
-        let pool = open_and_check_db(&runtime_options, &db_path)
+        let pool = open_and_check_db(&runtime_options, &db_path, || async {})
             .await
             .unwrap_or_else(|error| {
                 panic!(

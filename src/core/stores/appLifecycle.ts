@@ -102,7 +102,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
       case 'PRELOADING':
         return currentPhaseLabel.value || '正在预加载核心数据...';
       case 'OPTIMIZING':
-        return '正在优化数据库...';
+        return '正在维护数据库';
       case 'ERROR':
         return errorMsg.value || '启动失败';
       case 'READY':
@@ -140,12 +140,6 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
     isBootstrapping.value = false;
     bootstrapPromise = null;
     setState('ERROR', message);
-    // 统一更新通知系统的核心状态槽
-    notificationStore.updateCoreStatus({ 
-      status: 'error', 
-      message, 
-      source: 'Core' 
-    });
     console.error('[Lifecycle] FATAL:', message);
   };
 
@@ -283,7 +277,7 @@ export const useAppLifecycleStore = defineStore('appLifecycle', () => {
         (newStatus) => {
           if (settled) return;
 
-          // 数据库物理优化可能超过 15 秒，期间暂停核心就绪超时。
+          // 数据库故障核查和旧库物理升级可能超过普通启动的等待期限。
           if (newStatus === 'optimizing') {
             state.value = 'OPTIMIZING';
             currentPhaseLabel.value = notificationStore.vcpCoreStatus.message;

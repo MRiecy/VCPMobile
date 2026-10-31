@@ -47,6 +47,10 @@ export const useNotificationStore = defineStore('notification', () => {
   };
 
   const updateCoreStatus = (payload: VcpStatus) => {
+    // Rust bootstraps once per process. A late snapshot or event may still describe its startup.
+    const current = vcpCoreStatus.value.status;
+    if ((current === 'ready' || current === 'error') &&
+        (payload.status === 'initializing' || payload.status === 'optimizing')) return;
     vcpCoreStatus.value = payload;
   };
 

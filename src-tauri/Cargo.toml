@@ -54,7 +54,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 rand = "0.8"
 log = { version = "0.4", features = ["release_max_level_info"] }
 sqlx = { version = "=0.9.0", default-features = false, features = ["sqlite", "runtime-tokio", "macros", "migrate"] }
-rusqlite = { version = "=0.39.0", features = ["bundled", "limits"] }
+rusqlite = { version = "=0.39.0", features = ["bundled", "limits", "hooks", "trace"] }
 sha2 = "0.11"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }

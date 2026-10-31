@@ -277,6 +277,7 @@ type RenderCacheWrite = (MessageKey, String, Vec<u8>);
 
 fn open_maintenance_rusqlite(db_path: &std::path::Path) -> Result<rusqlite::Connection, String> {
     let conn = rusqlite::Connection::open(db_path).map_err(|e| e.to_string())?;
+    super::db_health::protect_rusqlite(&conn).map_err(|error| error.to_string())?;
     let journal_mode: String = conn
         .pragma_query_value(None, "journal_mode", |row| row.get(0))
         .map_err(|error| error.to_string())?;
@@ -397,6 +398,8 @@ fn run_render_cache_update_writer(
             tokio::task::spawn_blocking(move || -> Result<(), String> {
                 let mut write_lease = write_lease;
                 write_lease.mark_outcome("transaction_failed");
+                let _database_scope = super::db_health::MainRusqliteScope::enter();
+                super::db_health::ensure_writable()?;
                 let mut connection = connection
                     .lock()
                     .map_err(|_| "预渲染缓存连接锁已损坏".to_string())?;
