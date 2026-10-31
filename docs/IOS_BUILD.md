@@ -1,12 +1,24 @@
-# iPhone / iPad 无签名归档
+# iPhone / iPad 下载、构建与自签
 
-VCP Mobile 的 iOS 构建产物是面向 arm64 真机的无签名 Xcode 归档，最低支持 iOS/iPadOS 26.0。仓库维护工程、语音资源和分享扩展，安装者负责授权、签名和安装。
+VCP Mobile 为运行 iOS/iPadOS 26.0 或更新系统的 arm64 真机提供无签名应用。安装者负责授权、签名和安装。
 
-## 构建与下载
+## 从 GitHub Release 下载
+
+维护者为 `vX.Y.Z` 标签点击一次 **Publish release**，工作流即从同一标签构建 Android 与 iOS。构建、核验成功后，对应版本的 **Assets** 提供以下文件，每个文件都有同名追加 `.sha256` 的校验文件。[发布页](https://github.com/MRiecy/VCPMobile/releases) · [发布工作流](../.github/workflows/release.yml)
+
+| 文件 | 用途 |
+| --- | --- |
+| `VCPMobile_vX.Y.Z_arm64-v8a.apk` | 已签名的 Android 安装包。 |
+| `VCPMobile_vX.Y.Z_ios-arm64.unsigned.ipa` | 使用接受 IPA 的工具自签，包内含主应用和分享扩展。 |
+| `VCPMobile_vX.Y.Z_ios-arm64.app.zip` | 使用需要 `.app` 目录的签名工具时，先解压这份文件。 |
+
+iOS 用户根据签名工具选择其中一种格式，校验下载文件的 SHA-256，再按下文处理主应用和扩展的签名。
+
+## 从 GitHub Actions 手动构建
 
 1. 在 GitHub Actions 选择 **iOS Device Archive**，点击 **Run workflow**，选择要构建的分支。[工作流定义](../.github/workflows/ios-archive.yml)
-2. 默认的 `release` 使用优化构建。需要定位调试配置下的问题时选 `debug`。两者都在 GitHub 的 macOS runner 上编译完整应用及分享扩展。
-3. 成功后，从该次运行的 **Artifacts** 下载产物。附件包含 `.xcarchive.zip` 和 `manifest.json`。清单记录提交 SHA、profile、Xcode/SDK 版本及归档 SHA-256，可据此核对下载文件。解压归档后，主应用位于 `.xcarchive/Products/Applications/`，内嵌扩展位于主应用的 `PlugIns/VCPShare.appex`。
+2. 默认的 `release` 与发布版使用同一优化配置。需要定位调试配置下的问题时选 `debug`。两者都生成供自签的 IPA 和应用 ZIP，调试包在文件名中标有 `debug`。
+3. 手动构建的文件在该次运行的 **Artifacts** 下载。除自签包和校验文件外，还保留完整的 `.xcarchive.zip` 和 `manifest.json`。清单记录提交 SHA、profile、Xcode/SDK 版本和归档 SHA-256。解压归档后，主应用位于 `.xcarchive/Products/Applications/`，内嵌扩展位于主应用的 `PlugIns/VCPShare.appex`。
 4. 构建或归档核验失败时，在运行页打开失败步骤，查看工具输出。记录提交 SHA、构建配置和该次运行的链接，便于复现。
 
 清单分别记录主应用和分享扩展可执行文件的实际架构与 Mach-O 平台。真机 arm64 产物应显示 `arm64` 和 `IOS`，`IOSSIMULATOR` 表示模拟器。

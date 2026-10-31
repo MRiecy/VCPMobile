@@ -9,18 +9,29 @@ on:
         type: choice
         default: release
         options: [release, debug]
+  workflow_call:
+    inputs:
+      profile:
+        type: string
+        default: release
+    outputs:
+      artifact_id:
+        description: ID of the verified archive and self-signing packages from this build
+        value: ${{ jobs.device-archive.outputs.artifact_id }}
 
 permissions:
   contents: read
 
 concurrency:
-  group: ios-archive-${{ github.ref }}-${{ inputs.profile }}
+  group: ios-archive-${{ github.event_name }}-${{ github.ref }}-${{ inputs.profile }}
   cancel-in-progress: true
 
 jobs:
   device-archive:
     runs-on: macos-15
     timeout-minutes: 90
+    outputs:
+      artifact_id: ${{ steps.artifacts.outputs.artifact-id }}
     defaults:
       run:
         shell: bash
@@ -32,6 +43,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Load pinned toolchain versions
         run: grep -E '^[A-Za-z_][A-Za-z0-9_]*=' .github/toolchain.env >> "$GITHUB_ENV"
@@ -82,7 +94,8 @@ jobs:
         run: node tools/ios/build-archive.mjs "$IOS_ARCHIVE_PROFILE"
       - name: Verify and package the archive
         run: node tools/ios/verify-archive.mjs src-tauri/gen/apple "$RUNNER_TEMP/ios-artifacts"
-      - name: Upload verified archive and manifest
+      - name: Upload verified archive and self-signing packages
+        id: artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ios-${{ inputs.profile }}-${{ github.sha }}-${{ github.run_attempt }}

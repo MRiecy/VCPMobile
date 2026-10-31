@@ -182,7 +182,7 @@ Tauri 核心组件必须**严格同版本或遵循官方发布的兼容矩阵**�
 
 | 工具 | 当前版本 | 更新频率建议 | 来源 | 备注 |
 |------|---------|-------------|------|------|
-| Node.js | `24.14.1` (LTS) | 每年 major / 每季度 minor | nodejs.org | CI、Android Release 与 iOS 阶段诊断共享 `.github/toolchain.env` |
+| Node.js | `24.14.1` (LTS) | 每年 major / 每季度 minor | nodejs.org | CI 与 Android、iOS 构建共享 `.github/toolchain.env` |
 | pnpm | `12.6.0` | 每季度检查 | pnpm.io | 三条 workflow 共享 `.github/toolchain.env`，解析由 lockfile 冻结 |
 | Rust Toolchain | `1.97.1` | 每季度检查 | rustup | 由 `rust-toolchain.toml` 固定完整版本 |
 | Java (Temurin) | `17.0.20+8` | 每年 LTS | adoptium.net | CI/Release 固定完整版本，Android 构建必需 |
@@ -456,7 +456,7 @@ Robolectric 的 instrumented Android JAR 由测试运行期解析。仓库只保
 - 从仓库根目录运行 `pnpm check:release` 即可执行与 CI 相同的发布前检查。命令在初始化 Android 工程前后，对照 Git 暂存区检查 `src-tauri/gen/android` 和 `src-tauri/plugins/vcp-mobile/permissions`。若这两处有预期改动，先核对并暂存即可在提交前复查。Gradle JVM 测试使用本机 JDK 和 Android SDK。
 - Release 核对 tag/HEAD/event SHA、四处版本源和 Android versionCode；构建产物经固定版本（37.0.0）build-tools 验签。
 - 签名 secrets 只进入恢复、构建与验证步骤；缺任一输入即失败。验签步骤要求 APK 单一签名者且拒绝调试证书。
-- Release 只上传 arm64 签名 APK 与其 `.sha256`；不发布可被主 WebView 独立加载的前端 ZIP。
+- 同一 Release 标签发布 Android 签名 APK 和 iOS 自签 IPA、应用 ZIP，每个包附同名 `.sha256`。WebView 资源随各自的完整应用包分发。
 
 ---
 

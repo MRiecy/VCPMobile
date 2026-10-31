@@ -30,7 +30,7 @@
 - **Android WebView 基线**：内核须为 117 或更新版本，与 Android minSdk 26 分别管理；共享前端 JS/CSS 目标为 `chrome117` / `safari26.0`。启动后的兼容说明复用“帮助与指引”，不承担旧内核启动失败前的检测或兜底。
 - **iOS 运行与构建基线**：
   - **最低系统**：iOS/iPadOS 26.0（Tauri 配置与项目 Swift manifest 同步维护，高于 26.0 的 API 须处理实际 availability 与运行条件；早期 15.0 历史记录不再约束当前产品）。
-  - **实施与审计**：沿用 `plan/vcpmobile-ios-compatibility-research/09-Magi综合裁决与待决策清单.md` 的产品裁决。Windows 上运行 `pnpm check:ios` 检查输入与归档校验逻辑，Apple device archive 在 GitHub Actions 手动构建。见 [iOS 构建说明](docs/IOS_BUILD.md)。
+  - **实施与审计**：沿用 `plan/vcpmobile-ios-compatibility-research/09-Magi综合裁决与待决策清单.md` 的产品裁决。Windows 上运行 `pnpm check:ios` 检查输入与归档校验逻辑。Apple device archive 可手动构建，发布时由同一 Release 标签自动触发。见 [iOS 构建说明](docs/IOS_BUILD.md)。
   - **测试与签名边界**：不建设项目 iOS 实机测试体系，正式签名与付费 Team 均不在项目范围内；Android 正式链路继续保留，双端构建结果分别独立记录。
   - **功能范围依据**：遵循 [跨平台开发规范](docs/CROSS_PLATFORM_DEVELOPMENT.md)；功能范围与权限提示以 [Phase 2 功能权限与提示审议表](plan/vcpmobile-ios-compatibility-research/phase-2/09-功能权限与提示审议表.md) 为权威依据，新增意见优先于旧延期和隐藏建议。
 ---
@@ -258,7 +258,7 @@ Agent 对设备的日常操作必须使用 `pnpm android:debug:*`，只允许操
 
 ## 7. 部署与发布流程
 
-CI 与 Release 的当前行为由 `.github/workflows/ci.yml`、`.github/workflows/release.yml` 及其实际读取的配置定义。普通开发任务不展开、不修改发布流程；只有用户明确要求 CI、版本、签名或发布变更时才读取当前 workflow 并完成对应验证。未经用户明确要求不得 push、创建 Release 或执行发布动作。
+CI 与双端发布的行为由 `.github/workflows/ci.yml`、`.github/workflows/release.yml`、`.github/workflows/ios-archive.yml` 及其实际读取的配置定义。普通开发任务不展开、不修改发布流程；只有用户明确要求 CI、版本、签名或发布变更时才读取当前 workflow 并完成对应验证。未经用户明确要求不得 push、创建 Release 或执行发布动作。
 
 ---
 

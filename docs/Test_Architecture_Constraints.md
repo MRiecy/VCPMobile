@@ -23,7 +23,7 @@
 | 当前工具 | Vitest + happy-dom / cargo test + Criterion / JUnit + Robolectric + MockK / Node.js + adb | ✅ 已落地 |
 | 当前 CI | 单一 `.github/workflows/ci.yml` 执行前端、Rust、生成树、Android JVM 与审计门禁 | ✅ 已落地 |
 | 设备证据 | 具名 Android 设备截图、触控与 WebView 证据 | `DEVICE-EVIDENCE-PENDING` |
-| iOS 验收 | Windows 源码审计与工程输入检查，GitHub Actions 手动构建 Apple 归档。项目不建设 iOS 实机测试体系 | [iOS 构建说明](IOS_BUILD.md) |
+| iOS 验收 | Windows 源码审计与工程输入检查，GitHub Actions 构建并核验 Apple 归档和自签包。项目不建设 iOS 实机测试体系 | [iOS 构建说明](IOS_BUILD.md) |
 
 ---
 
@@ -87,7 +87,8 @@ VCPMobile/
 │   └── perf/scripts/                   # 手工性能/体积/启动诊断
 └── .github/workflows/
     ├── ci.yml                          # 单一 PR/push 软件门禁
-    └── release.yml                     # 已发布 Release 的签名 arm64 APK 构建
+    ├── ios-archive.yml                 # Apple device 归档与自签包，支持手动运行
+    └── release.yml                     # 已发布 Release 的 Android 与 iOS 资产
 ```
 
 ---
@@ -139,7 +140,7 @@ VCPMobile/
 | 证据面 | 触发条件 | 当前内容 | 能证明 / 不能证明 |
 |---|---|---|---|
 | `.github/workflows/ci.yml` | main/master push 与 PR | vue-tsc、Vitest、生产 build、Rust fmt/test/integration/clippy、Android 生成树漂移、插件 JVM tests、pnpm 依赖审计 | 证明软件与生成物静态契约；不证明真机 CSS 几何/触控 |
-| `.github/workflows/release.yml` | GitHub Release published | 校验版本源/签名并发布 arm64 APK | 证明发布 artifact 治理；不是发布前设备实验室 |
+| `.github/workflows/release.yml` | GitHub Release published | 同一标签的 Android 签名 APK、iOS 自签 IPA 和应用 ZIP，以及对应的 SHA-256 | 证明对应提交的构建及发布结果 |
 | Android Debug Agent | 具名人工执行 | Debug-only 安装/权限/USB Dev/PID 日志/状态/单张截图 | 证明指定设备启动与诊断状态；不自动遍历 UI，不触碰 Release |
 | 多设备 UI 验收 | Release 前具名执行 | 手机/平板/折叠屏窗口、WebView、截图与触控矩阵 | 是 `DEVICE-VERIFIED` 的必要证据，当前 `DEVICE-EVIDENCE-PENDING` |
 | 性能脚本 | 独立性能候选人工执行 | APK size、`am start -W`、dumpsys、Criterion、具名页面帧 A/B | 仅报告；不构成自动 Release SLA |

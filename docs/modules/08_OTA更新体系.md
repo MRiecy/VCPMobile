@@ -15,14 +15,14 @@ updated_at: "2026-08-17"
 
 ## 1. 当前边界
 
-VCP Mobile 只发布并安装完整 APK。HTML、CSS、JavaScript 等前端资源随 APK
+Android 客户端通过应用内更新安装完整 APK。HTML、CSS、JavaScript 等前端资源随 APK
 一同签名和发布，运行时始终由 Tauri 提供 APK 内嵌资源。
 
 旧版本曾支持独立的前端资源热更新。该机制现已完全停用：
 
 - 不再检查、下载或应用 `frontend-dist-*.zip`；
 - 不再从 `frontend_updates/<version>/` 读取 WebView 资源；
-- GitHub Release 只上传签名 APK 与其 SHA-256 旁车文件；
+- Android 更新器从 GitHub Release 选择签名 APK 与其 SHA-256 旁车文件，iOS 自签包由用户从发布页下载；
 - 启动时仅在固定应用私有目录通过 canonical 校验后，尽力清理遗留文件。
 
 ## 2. 架构：Rust 状态机 + 事件广播
