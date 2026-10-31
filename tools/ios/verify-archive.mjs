@@ -43,6 +43,29 @@ async function verifyBundle(bundle, expected, run) {
   return info;
 }
 
+async function inspectMachO(binary, run) {
+  let architectures;
+  try {
+    const output = (await run('xcrun', ['lipo', '-archs', binary])).trim();
+    if (!output) throw new Error('No architectures reported');
+    architectures = output.split(/\s+/);
+  } catch (error) {
+    return { error: { tool: 'lipo', reason: error.message } };
+  }
+
+  const slices = await Promise.all(architectures.map(async architecture => {
+    try {
+      const output = await run('xcrun', ['vtool', '-arch', architecture, '-show-build', binary]);
+      const platforms = Array.from(output.matchAll(/^[ \t]*platform[ \t]+(\S.*)$/gm), match => match[1].trim());
+      if (!platforms.length) throw new Error('No build platform reported');
+      return { architecture, platforms };
+    } catch (error) {
+      return { architecture, error: { tool: 'vtool', reason: error.message } };
+    }
+  }));
+  return { slices };
+}
+
 async function verifyVoice(app, root) {
   const voiceRoot = join(root, 'runtime-assets', 'voice');
   const sources = join(voiceRoot, 'assets', 'voice');
@@ -93,12 +116,14 @@ export async function verifyAndPackage(project, destination, { commit, profile, 
     throw new Error('VCPShare.appex: invalid Share Extension point');
   }
   const resources = await verifyVoice(app, root);
-  const bundleRecord = (bundle, info) => ({
+  const bundleRecord = async (bundle, info) => ({
     name: basename(bundle), identifier: info.CFBundleIdentifier, executable: info.CFBundleExecutable,
     version: info.CFBundleShortVersionString, bundleVersion: info.CFBundleVersion,
     minimumOSVersion: info.MinimumOSVersion, appGroup: info.VCPShareAppGroup,
     sdkName: info.DTSDKName, xcodeBuild: info.DTXcodeBuild,
+    machO: await inspectMachO(join(bundle, info.CFBundleExecutable), run),
   });
+  const [appRecord, shareRecord] = await Promise.all([bundleRecord(app, mainInfo), bundleRecord(extension, shareInfo)]);
 
   // Stage both files next to the destination; publish them together, after ditto and hashing succeed.
   await mkdir(dirname(output), { recursive: true });
@@ -110,8 +135,8 @@ export async function verifyAndPackage(project, destination, { commit, profile, 
     const manifest = {
       commit, profile, xcode, sdkVersion,
       archive: { file, bytes: (await stat(zip)).size, sha256: await sha256(zip) },
-      app: bundleRecord(app, mainInfo),
-      share: { ...bundleRecord(extension, shareInfo), extensionPoint: shareInfo.NSExtension.NSExtensionPointIdentifier },
+      app: appRecord,
+      share: { ...shareRecord, extensionPoint: shareInfo.NSExtension.NSExtensionPointIdentifier },
       voiceResources: resources,
     };
     await writeFile(join(stage, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n');

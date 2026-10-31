@@ -60,11 +60,13 @@ async function fixture(t, bundleVersion) {
   await writeFile(join(sources, 'runtime.lock.json'), JSON.stringify({ ortModelSha256: digest(resources['silero_vad.ort']) }));
 
   // Metadata validation, file hashing and publication use the real temporary tree.
-  // macOS also exercises binary plists and ditto; Windows substitutes only those Apple commands.
+  // Most cases only need metadata. The platform-recording test supplies its own binaries.
   let compressions = 0;
   const run = async (command, args) => {
     if (command === 'xcodebuild') return 'Xcode 26.2\nBuild version 17C52';
-    if (command === 'xcrun') return '26.2';
+    if (command === 'xcrun' && args[0] === '--sdk') return '26.2';
+    if (command === 'xcrun' && args[0] === 'lipo') return 'arm64';
+    if (command === 'xcrun' && args[0] === 'vtool') return 'Load command 1\n      cmd LC_BUILD_VERSION\n platform IOS';
     if (command === 'ditto') compressions++;
     if (mac) return execFileSync(command, args, { encoding: 'utf8' });
     if (command === 'plutil') return readFile(args.at(-1), 'utf8');
@@ -97,6 +99,50 @@ for (const bundleVersion of [undefined, '42']) {
     assert.equal(f.compressions(), 1);
   });
 }
+
+test('records the actual platform of each bundled executable independently of its SDK plist', async t => {
+  const f = await fixture(t);
+  const main = join(f.app, f.main.CFBundleExecutable);
+  const share = join(f.share, f.extension.CFBundleExecutable);
+  if (mac) {
+    for (const [sdk, target, binary] of [
+      ['iphoneos', 'arm64-apple-ios26.0', main],
+      ['iphonesimulator', 'arm64-apple-ios26.0-simulator', share],
+    ]) {
+      const sysroot = execFileSync('xcrun', ['--sdk', sdk, '--show-sdk-path'], { encoding: 'utf8' }).trim();
+      execFileSync('xcrun', ['--sdk', sdk, 'clang', '-target', target, '-isysroot', sysroot, '-x', 'c', '-', '-o', binary],
+        { input: 'int main(void) { return 0; }' });
+    }
+  }
+  const report = await f.publish(async (command, args) => {
+    if (command !== 'xcrun' || args[0] === '--sdk') return f.run(command, args);
+    if (mac) return execFileSync(command, args, { encoding: 'utf8' });
+    const binary = args.at(-1);
+    assert([main, share].includes(binary));
+    if (args[0] === 'lipo') {
+      assert.deepEqual(args, ['lipo', '-archs', binary]);
+      return 'arm64\n';
+    }
+    assert.deepEqual(args, ['vtool', '-arch', 'arm64', '-show-build', binary]);
+    return `Load command 1\n      cmd LC_BUILD_VERSION\n platform ${binary === main ? 'IOS' : 'IOSSIMULATOR'}\n`;
+  });
+  assert.deepEqual(report.app.machO.slices, [{ architecture: 'arm64', platforms: ['IOS'] }]);
+  assert.deepEqual(report.share.machO.slices, [{ architecture: 'arm64', platforms: ['IOSSIMULATOR'] }]);
+});
+
+test('records which executable could not be inspected without inventing a platform', async t => {
+  const f = await fixture(t);
+  const report = await f.publish((command, args) => {
+    if (args[0] === 'vtool' && args.at(-1) === join(f.share, f.extension.CFBundleExecutable)) {
+      throw new Error('unreadable load commands');
+    }
+    return f.run(command, args);
+  });
+  assert.deepEqual(report.app.machO.slices[0].platforms, ['IOS']);
+  assert.deepEqual(report.share.machO.slices, [
+    { architecture: 'arm64', error: { tool: 'vtool', reason: 'unreadable load commands' } },
+  ]);
+});
 
 const wrongPlists = [
   ['app', 'CFBundleIdentifier', 'com.example.foreign'],
