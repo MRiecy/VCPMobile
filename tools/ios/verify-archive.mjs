@@ -18,6 +18,21 @@ async function sha256(file) {
   return hash.digest('hex');
 }
 
+async function artifactRecord(path) {
+  return { file: basename(path), bytes: (await stat(path)).size, sha256: await sha256(path) };
+}
+
+async function verifyIpa(ipa, appName, mainExecutable, shareExecutable, run) {
+  const entries = (await run('unzip', ['-Z1', ipa])).trimEnd().split(/\r?\n/);
+  const app = `Payload/${appName}/`;
+  if (entries.some(entry => entry !== 'Payload/' && !entry.startsWith(app))) {
+    throw new Error(`IPA must contain exactly Payload/${appName}`);
+  }
+  for (const path of ['Info.plist', mainExecutable, 'PlugIns/VCPShare.appex/Info.plist', `PlugIns/VCPShare.appex/${shareExecutable}`]) {
+    if (!entries.includes(app + path)) throw new Error(`Missing IPA entry: ${app}${path}`);
+  }
+}
+
 async function onlyBundle(parent, suffix) {
   const entries = (await readdir(parent, { withFileTypes: true }))
     .filter(entry => entry.isDirectory() && entry.name.endsWith(suffix));
@@ -125,16 +140,34 @@ export async function verifyAndPackage(project, destination, { commit, profile, 
   });
   const [appRecord, shareRecord] = await Promise.all([bundleRecord(app, mainInfo), bundleRecord(extension, shareInfo)]);
 
-  // Stage both files next to the destination; publish them together, after ditto and hashing succeed.
+  // Publish the archive, both install inputs and their checksums as one directory.
   await mkdir(dirname(output), { recursive: true });
   const stage = await mkdtemp(join(dirname(output), '.ios-archive-'));
   try {
-    const file = `${basename(archive)}.zip`;
-    const zip = join(stage, file);
-    await run('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', archive, zip]);
+    const archiveZip = join(stage, `${basename(archive)}.zip`);
+    await run('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', archive, archiveZip]);
+    const appName = basename(app);
+    const prefix = `VCPMobile_v${appRecord.version}_ios-arm64${profile === 'debug' ? '-debug' : ''}`;
+    if (prefix.includes('/') || prefix.includes('\\')) throw new Error('Invalid version for package filename');
+    const appZip = join(stage, `${prefix}.app.zip`);
+    const ipa = join(stage, `${prefix}.unsigned.ipa`);
+    const scratch = await mkdtemp(join(stage, '.packaging-'));
+    await run('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', app, appZip]);
+    const payload = join(scratch, 'Payload');
+    await mkdir(payload);
+    await run('ditto', [app, join(payload, appName)]);
+    // iOS Payload contains the data fork and Unix permissions; omit macOS resource sidecars.
+    await run('ditto', ['-c', '-k', '--norsrc', '--keepParent', payload, ipa]);
+    await verifyIpa(ipa, appName, mainInfo.CFBundleExecutable, shareInfo.CFBundleExecutable, run);
+    await rm(scratch, { recursive: true });
+
+    const [archiveArtifact, appArtifact, ipaArtifact] = await Promise.all([archiveZip, appZip, ipa].map(artifactRecord));
+    for (const artifact of [appArtifact, ipaArtifact]) {
+      await writeFile(join(stage, `${artifact.file}.sha256`), `${artifact.sha256}  ${artifact.file}\n`);
+    }
     const manifest = {
       commit, profile, xcode, sdkVersion,
-      archive: { file, bytes: (await stat(zip)).size, sha256: await sha256(zip) },
+      archive: archiveArtifact, appZip: appArtifact, ipa: ipaArtifact,
       app: appRecord,
       share: { ...shareRecord, extensionPoint: shareInfo.NSExtension.NSExtensionPointIdentifier },
       voiceResources: resources,
@@ -154,5 +187,7 @@ if (import.meta.main) {
   const result = await verifyAndPackage(project, destination, {
     commit: process.env.GITHUB_SHA, profile: process.env.IOS_ARCHIVE_PROFILE,
   });
-  console.log(`Verified ${result.archive.file} (${result.archive.sha256})`);
+  for (const artifact of [result.archive, result.appZip, result.ipa]) {
+    console.log(`Verified ${artifact.file} (${artifact.sha256})`);
+  }
 }
