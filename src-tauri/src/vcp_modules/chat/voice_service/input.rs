@@ -92,11 +92,29 @@ struct Registry {
     inputs: HashMap<String, SessionSlot>,
     calls: HashMap<String, Arc<CallInput>>,
     active: Option<String>,
+    switch: Option<MicrophoneSwitch>,
     cancelled: VecDeque<String>,
     cancelled_calls: VecDeque<String>,
 }
 
+struct MicrophoneSwitch {
+    call_id: String,
+    previous: String,
+    next: String,
+}
+
 impl Registry {
+    // A mute can arrive after the old recorder stopped and before the new
+    // recorder was reserved. Revoke that exact future start in the same lock.
+    fn cancel_switch(&mut self, call_id: &str, session_id: Option<&str>) {
+        if let Some(switch) = self.switch.take_if(|switch| {
+            switch.call_id == call_id
+                && session_id.is_none_or(|id| id == switch.previous || id == switch.next)
+        }) {
+            self.remember_cancelled(&switch.next);
+        }
+    }
+
     fn remember_cancelled(&mut self, id: &str) {
         if self.cancelled.iter().any(|old| old == id) {
             return;
@@ -126,6 +144,11 @@ impl Registry {
         }
         if !self.calls.contains_key(&call_id) && self.calls.len() >= INPUT_LIMIT {
             return Err("仍有语音通话尚未结束。".into());
+        }
+        if self.switch.as_ref().is_some_and(|switch| switch.next == id) {
+            self.switch = None;
+        } else {
+            self.cancel_switch(&call_id, None);
         }
         let call = self
             .calls
@@ -217,6 +240,7 @@ impl Registry {
     }
 
     fn cancel_call(&mut self, call_id: &str) -> Vec<String> {
+        self.cancel_switch(call_id, None);
         if !self.cancelled_calls.iter().any(|old| old == call_id) {
             if self.cancelled_calls.len() == CANCELLED_IDS {
                 self.cancelled_calls.pop_front();
@@ -247,7 +271,54 @@ struct CaptureClose {
     serial: Arc<tokio::sync::Mutex<()>>,
 }
 
+pub(super) struct DeviceSwitch {
+    close: CaptureClose,
+    next: String,
+}
+
+pub(super) fn prepare_device_switch<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>, call_id: &str, expected_session: Option<&str>, document_id: &str,
+) -> Result<Option<DeviceSwitch>, String> {
+    let state = app.state::<VoiceServiceState>();
+    let mut registry = state.registry.lock().map_err(|error| error.to_string())?;
+    if registry.switch.is_some() || registry.active.as_deref() != expected_session {
+        return Err("voice_session_busy".into());
+    }
+    let Some(previous) = expected_session else { return Ok(None); };
+    if !registry.inputs.get(previous).is_some_and(|slot|
+        slot.call_id == call_id && slot.document_id == document_id && !slot.closed) {
+        return Err("voice_session_busy".into());
+    }
+    let close = registry.prepare_close(call_id, Some(previous))?
+        .ok_or_else(|| network::CANCELLED.to_string())?;
+    let next = uuid::Uuid::new_v4().to_string();
+    registry.switch = Some(MicrophoneSwitch {
+        call_id: call_id.into(), previous: previous.into(), next: next.clone(),
+    });
+    Ok(Some(DeviceSwitch { close, next }))
+}
+
+pub(super) async fn finish_device_switch(
+    app: AppHandle, switch: DeviceSwitch, document_id: String, lifecycle_epoch: Option<u64>,
+) -> Result<(), String> {
+    let call_id = switch.close.call_id.clone();
+    let result = async {
+        finish_capture_close(app.clone(), switch.close, "requested", false).await?;
+        start_voice_microphone(app.clone(), switch.next.clone(), call_id.clone(), document_id, lifecycle_epoch).await?;
+        Ok(())
+    }.await;
+    // Failed close, stale document, or background admission before reserve().
+    let state = app.state::<VoiceServiceState>();
+    state.registry.lock().map_err(|error| error.to_string())?.cancel_switch(&call_id, Some(&switch.next));
+    result
+}
+
 impl Registry {
+    fn prepare_mute(&mut self, call_id: &str, requested: Option<&str>) -> Result<Option<CaptureClose>, String> {
+        self.cancel_switch(call_id, requested);
+        self.prepare_close(call_id, requested)
+    }
+
     fn prepare_close(&mut self, call_id: &str, requested: Option<&str>) -> Result<Option<CaptureClose>, String> {
         let Some(session_id) = self.prepare_microphone_close(call_id, requested)? else { return Ok(None); };
         let serial = self.inputs.get(&session_id).map(|slot| slot.closing.clone())
@@ -562,13 +633,16 @@ async fn start_voice_service(
     session_id: String,
     call_id: String,
     document_id: &str,
-) -> Result<Arc<VoiceSession>, String> {
+) -> Result<(Arc<VoiceSession>, Option<String>), String> {
     validate_id(&session_id)?;
     validate_id(&call_id)?;
-    let vad_config = call::input_vad_config(&app, &call_id)?;
-    let (cancel, capture_cancel, call) = app.state::<VoiceDocumentState>().with_current(document_id, || {
-        app.state::<VoiceServiceState>().registry.lock().map_err(|error| error.to_string())?
-            .reserve(session_id.clone(), call_id.clone(), document_id.into())
+    // Selection and admission share the document lock; a start cannot apply
+    // a preference read before another valid device choice.
+    let ((vad_config, input_device_id), (cancel, capture_cancel, call)) = app.state::<VoiceDocumentState>().with_current(document_id, || {
+        let config = call::input_config(&app, &call_id)?;
+        let slot = app.state::<VoiceServiceState>().registry.lock().map_err(|error| error.to_string())?
+            .reserve(session_id.clone(), call_id.clone(), document_id.into())?;
+        Ok((config, slot))
     })?;
     call::input_starting(&app, &call_id, &session_id, &capture_cancel);
     let result = read_config(app.clone(), app.state::<SettingsState>())
@@ -627,7 +701,7 @@ async fn start_voice_service(
         None,
         None,
     );
-    Ok(input)
+    Ok((input, input_device_id))
 }
 
 #[tauri::command]
@@ -660,7 +734,7 @@ pub async fn start_voice_microphone(
     // A new intent may arrive before a preceding close's IPC response. The
     // backend waits for that exact native receipt, never for a permission dialog.
     await_closing_capture(&app, &document_id).await?;
-    let started = match start_voice_service(app.clone(), session_id.clone(), call_id.clone(), &document_id).await
+    let (started, input_device_id) = match start_voice_service(app.clone(), session_id.clone(), call_id.clone(), &document_id).await
     {
         Ok(started) => started,
         Err(error) => {
@@ -691,14 +765,9 @@ pub async fn start_voice_microphone(
         return Err(network::CANCELLED.into());
     }
     if let Err(error) = tauri_plugin_vcp_mobile::voice::start_voice_audio(
-        app.clone(),
-        session_id.clone(),
-        call_id.clone(),
-        document_id,
-        started.vad_config,
-    )
-    .await
-    {
+        app.clone(), session_id.clone(), call_id.clone(), document_id,
+        started.vad_config, input_device_id,
+    ).await {
         // A start failure is not a physical-stop receipt. Keep a failed cleanup
         // retryable and retain accepted ASR exactly like an ordinary mute.
         let close = app.state::<VoiceServiceState>().registry.lock()
@@ -724,8 +793,9 @@ pub async fn close_voice_microphone(
     validate_id(&call_id)?;
     if let Some(id) = &session_id { validate_id(id)?; }
     let close = app.state::<VoiceDocumentState>().with_current(&document_id, || {
-        app.state::<VoiceServiceState>().registry.lock().map_err(|error| error.to_string())?
-            .prepare_close(&call_id, session_id.as_deref())
+        let state = app.state::<VoiceServiceState>();
+        let mut registry = state.registry.lock().map_err(|error| error.to_string())?;
+        registry.prepare_mute(&call_id, session_id.as_deref())
     })?;
     let Some(close) = close else { return Ok(()); };
     finish_capture_close(app, close, "requested", false).await
@@ -1054,6 +1124,21 @@ mod tests {
         registry.inputs.get_mut(id).unwrap().session = Some(input.clone());
         input
     }
+    #[test]
+    fn mute_between_device_release_and_reopen_cancels_only_the_replacement() {
+        let app = tauri::test::mock_app();
+        app.manage(VoiceServiceState::default());
+        let state = app.state::<VoiceServiceState>();
+        let old = install(&mut state.registry.lock().unwrap(), "old", "call");
+        let change = prepare_device_switch(app.handle(), "call", Some("old"), "1").unwrap().unwrap();
+        let mut registry = state.registry.lock().unwrap();
+        registry.close("old");
+        assert!(registry.prepare_mute("call", None).unwrap().is_none());
+        assert!(registry.reserve(change.next, "call".into(), "1".into()).is_err());
+        assert!(!old.cancel.is_cancelled());
+        assert!(registry.reserve("explicit-unmute".into(), "call".into(), "1".into()).is_ok());
+    }
+
     #[test]
     fn mute_keeps_accepted_asr_alive_and_new_microphone_shares_the_call_batch() {
         let mut registry = Registry::default();

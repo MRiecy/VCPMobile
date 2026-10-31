@@ -4,6 +4,18 @@ import type { ConversationKey } from '../../../core/stores/chatSessionStore';
 
 export type VoiceCallTarget = Pick<ConversationKey, 'ownerId' | 'ownerType' | 'topicId'>;
 
+interface VoiceInputDevice {
+  id: string;
+  label: string;
+  kind: 'builtin' | 'bluetooth' | 'wired' | 'usb' | 'other';
+}
+
+export interface VoiceInputDevices {
+  devices: VoiceInputDevice[];
+  routeOptions?: VoiceInputDevice[];
+  activeId: string | null;
+}
+
 export interface VoiceCallSnapshot {
   callId: string;
   target: VoiceCallTarget;
@@ -19,6 +31,7 @@ export interface VoiceCallSnapshot {
   error: string | null;
   notice: string | null;
   inputSessionId: string | null;
+  inputDeviceId?: string | null;
   lastPersistedMessageId: string | null;
 }
 
@@ -223,6 +236,25 @@ export function createVoiceConversation(options: Options) {
     });
   };
 
+  const inputDeviceScope = async () => {
+    const run = call;
+    if (!run) throw new Error('voice_call_not_active');
+    await run.ready;
+    if (disposed || call !== run || !options.isConversationCurrent(run.key)) throw new Error('voice_call_not_active');
+    const documentId = await options.connectDocument();
+    if (disposed || call !== run || !options.isConversationCurrent(run.key)) throw new Error('voice_call_not_active');
+    return { callId: run.id, documentId };
+  };
+
+  const listInputs = async () =>
+    invoke<VoiceInputDevices>('voice_call_list_inputs', await inputDeviceScope());
+
+  const selectInput = async (inputDeviceId: string | null, expectedLifecycleEpoch: number | null) => {
+    const expectedSessionId = projectedSnapshot?.inputSessionId ?? null;
+    const scope = await inputDeviceScope();
+    await invoke<void>('voice_call_select_input', { ...scope, inputDeviceId, expectedSessionId, expectedLifecycleEpoch });
+  };
+
   const dispose = () => {
     disposed = true;
     intentEpoch += 1;
@@ -232,5 +264,5 @@ export function createVoiceConversation(options: Options) {
     // Listener disposal has no authority to cancel the Rust call or its work.
   };
 
-  return { begin, stop, openMicrophone, closeMicrophone, recover, dispose };
+  return { begin, stop, openMicrophone, closeMicrophone, listInputs, selectInput, recover, dispose };
 }

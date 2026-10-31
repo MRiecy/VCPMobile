@@ -276,12 +276,38 @@ pub async fn invalidate_voice_document<R: Runtime>(app: AppHandle<R>, document_i
     native_call(app, "invalidateVoiceDocument", serde_json::json!({ "documentId": document_id }), None).await
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VoiceInputKind { Builtin, Bluetooth, Wired, Usb, Other }
+
+#[derive(Deserialize, Serialize)]
+pub struct VoiceInputDevice {
+    pub id: String,
+    pub label: String,
+    pub kind: VoiceInputKind,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceInputDevices {
+    pub devices: Vec<VoiceInputDevice>,
+    /// Explicit routing choices for inputs the OS exposes only after switching audio profiles.
+    #[serde(default)]
+    pub route_options: Vec<VoiceInputDevice>,
+    pub active_id: Option<String>,
+}
+
+pub async fn list_voice_input_devices<R: Runtime>(app: AppHandle<R>) -> Result<VoiceInputDevices, String> {
+    native_result_call(app, "listVoiceInputDevices", serde_json::json!({}), None).await
+}
+
 pub async fn start_voice_audio<R: Runtime>(
     app: AppHandle<R>,
     session_id: String,
     call_id: String,
     document_id: String,
     vad_config: VoiceVadConfig,
+    input_device_id: Option<String>,
 ) -> Result<(), String> {
     validate_session(&session_id)?;
     validate_session(&call_id)?;
@@ -294,7 +320,8 @@ pub async fn start_voice_audio<R: Runtime>(
     let result = native_call(
         app.clone(),
         "startVoiceAudio",
-        serde_json::json!({ "sessionId": session_id, "callId": call_id, "documentId": document_id }),
+        serde_json::json!({ "sessionId": session_id, "callId": call_id,
+            "documentId": document_id, "inputDeviceId": input_device_id }),
         Some((session_id.clone(), generation)),
     )
     .await;

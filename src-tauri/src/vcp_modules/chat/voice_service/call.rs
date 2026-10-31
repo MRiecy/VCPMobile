@@ -42,6 +42,8 @@ pub struct VoiceCallSnapshot {
     pub error: Option<String>,
     pub notice: Option<String>,
     pub input_session_id: Option<String>,
+    /// The user's choice for this call. Hardware identities are scoped to the device connection.
+    pub input_device_id: Option<String>,
     #[serde(skip)]
     pub tts_id: Option<String>,
     pub last_persisted_message_id: Option<String>,
@@ -221,12 +223,13 @@ struct Call {
 }
 
 impl Call {
-    fn input_vad_config(&self) -> Result<VoiceVadConfig, String> {
+    fn input_config(&self) -> Result<(VoiceVadConfig, Option<String>), String> {
         let inner = self.inner.lock().map_err(|error| error.to_string())?;
         if !inner.snapshot.active || self.input.cancel.is_cancelled() {
             return Err(network::CANCELLED.into());
         }
-        self.vad_config.get().copied().ok_or_else(|| "语音通话仍在准备中。".into())
+        let vad = self.vad_config.get().copied().ok_or("语音通话仍在准备中。")?;
+        Ok((vad, inner.snapshot.input_device_id.clone()))
     }
 }
 #[derive(Default)]
@@ -305,6 +308,7 @@ fn reserve_conversation<R: Runtime>(
             error: None,
             notice: None,
             input_session_id: None,
+            input_device_id: None,
             tts_id: None,
             last_persisted_message_id: None,
         },
@@ -463,12 +467,54 @@ pub async fn end_voice_conversation(app: AppHandle, call_id: String) -> Result<(
 
 /// Must precede any native capture/ASR setup, including retries after mute.
 pub(super) fn validate_input<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(), String> {
-    input_vad_config(app, id).map(|_| ())
+    input_config(app, id).map(|_| ())
 }
 
-pub(super) fn input_vad_config<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<VoiceVadConfig, String> {
+pub(super) fn input_config<R: Runtime>(app: &AppHandle<R>, id: &str) -> Result<(VoiceVadConfig, Option<String>), String> {
     let call = call(app, id).ok_or_else(|| "语音通话已结束。".to_string())?;
-    call.input_vad_config()
+    call.input_config()
+}
+
+#[tauri::command]
+pub async fn voice_call_list_inputs(
+    app: AppHandle, call_id: String, document_id: String,
+) -> Result<tauri_plugin_vcp_mobile::voice::VoiceInputDevices, String> {
+    let validate = || app.state::<super::VoiceDocumentState>().with_current(&document_id, || validate_input(&app, &call_id));
+    validate()?;
+    let devices = tauri_plugin_vcp_mobile::voice::list_voice_input_devices(app.clone()).await?;
+    validate()?;
+    Ok(devices)
+}
+
+#[tauri::command]
+pub async fn voice_call_select_input(
+    app: AppHandle, call_id: String, document_id: String, input_device_id: Option<String>,
+    expected_session_id: Option<String>, expected_lifecycle_epoch: Option<u64>,
+) -> Result<(), String> {
+    if let Some(id) = input_device_id.as_deref() {
+        let inputs = voice_call_list_inputs(app.clone(), call_id.clone(), document_id.clone()).await?;
+        if !inputs.devices.iter().chain(&inputs.route_options).any(|device| device.id == id) {
+            return Err("voice_input_device_unavailable".into());
+        }
+    }
+    let current = call(&app, &call_id).ok_or_else(|| network::CANCELLED.to_string())?;
+    let switch = app.state::<super::VoiceDocumentState>().with_current(&document_id, || {
+        let mut inner = current.inner.lock().map_err(|error| error.to_string())?;
+        if !inner.snapshot.active { return Err(network::CANCELLED.into()); }
+        if inner.snapshot.input_session_id != expected_session_id ||
+            !matches!(inner.snapshot.mic_state, "listening" | "closed") {
+            return Err("voice_session_busy".into());
+        }
+        if inner.snapshot.input_device_id == input_device_id { return Ok(None); }
+        let switch = input::prepare_device_switch(&app, &call_id, expected_session_id.as_deref(), &document_id)?;
+        inner.snapshot.input_device_id = input_device_id;
+        publish(&app, &mut inner);
+        Ok(switch)
+    })?;
+    if let Some(switch) = switch {
+        input::finish_device_switch(app, switch, document_id, expected_lifecycle_epoch).await?;
+    }
+    Ok(())
 }
 
 pub(super) fn input_work(app: &AppHandle, id: &str) -> Option<Arc<WorkLease>> {
@@ -869,6 +915,7 @@ mod tests {
                 error: None,
                 notice: None,
                 input_session_id: None,
+                input_device_id: None,
                 tts_id: None,
                 last_persisted_message_id: None,
             },
@@ -911,13 +958,13 @@ mod tests {
             inner: Mutex::new(inner()),
             vad_config: OnceCell::new(),
         };
-        assert!(call.input_vad_config().is_err());
+        assert!(call.input_config().is_err());
         let mut settings = crate::vcp_modules::settings_manager::Settings::default();
         settings.voice.vad.end_silence_ms = 777;
         call.vad_config.set(settings.voice_vad_config()).unwrap();
-        assert_eq!(call.input_vad_config().unwrap().end_silence_ms, 777);
+        assert_eq!(call.input_config().unwrap().0.end_silence_ms, 777);
         call.input.cancel.cancel();
-        assert!(call.input_vad_config().is_err());
+        assert!(call.input_config().is_err());
     }
 
     #[test]

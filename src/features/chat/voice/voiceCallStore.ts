@@ -16,6 +16,7 @@ const AUDIO_ERRORS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bmicrophone_silenced\b/, '麦克风已被系统暂停，请检查是否被其他应用占用。'],
   [/\bbluetooth_disconnected\b/, '蓝牙音频已断开，确认音频路线后重新开启麦克风。'],
   [/\baudio_route_unavailable\b/, '当前录音或播放设备不可用，请确认系统音频输出后重新开启麦克风。'],
+  [/\b(voice_input_unavailable|voice_input_device_unavailable)\b/, '所选麦克风不可用，请点击「麦克风」选择其他输入，再开启麦克风。'],
   [/\baudio_interrupted\b/, '音频已被系统中断，点击麦克风重新开启。'],
   [/\b(audio_route_changed|audio_configuration_changed|route_changed|route-change)\b/, '音频路线已改变，请重新开启麦克风。'],
   [/\b(audio_services_lost|audio_services_reset)\b/, '系统音频服务已重置，请重新开启麦克风。'],
@@ -54,6 +55,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   const active = ref(false);
   const conversation = shallowRef<ConversationKey | null>(null);
   const captureState = ref<VoiceCallSnapshot['micState']>('closed');
+  const inputDeviceId = ref<string | null>(null);
   const microphonePending = ref(false);
   const level = ref(0);
   const bands = shallowRef<readonly number[]>([]);
@@ -96,6 +98,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
       const reasonChanged = microphoneStopReason !== (snapshot?.micStopReason ?? null);
       microphoneStopReason = snapshot?.micStopReason ?? null;
       captureState.value = snapshot?.active ? snapshot.micState : 'closed';
+      inputDeviceId.value = snapshot?.active ? snapshot.inputDeviceId ?? null : null;
       if (!snapshot?.active || snapshot.micState !== 'closed' || reasonChanged) microphonePending.value = false;
       if (!snapshot?.active || snapshot.micState === 'closed') {
         if (!microphonePending.value || !snapshot?.active) {
@@ -175,6 +178,9 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
 
   const recover = () => voiceConversation.recover();
 
+  const selectInput = (deviceId: string | null) =>
+    voiceConversation.selectInput(deviceId, lifecycle.lifecycleSnapshot?.transitionEpoch ?? null);
+
   const toggleMicrophone = () => {
     if (!active.value) return;
     if (microphoneState.value === 'on' || microphoneState.value === 'requesting') stopMicrophone();
@@ -193,7 +199,7 @@ export const useVoiceCallStore = defineStore('voiceCall', () => {
   });
 
   return {
-    active, microphoneState, level, bands,
+    active, microphoneState, inputDeviceId, listInputs: voiceConversation.listInputs, selectInput, level, bands,
     playbackActive, errorMessage, serviceState, serviceMessage, partialText,
     ttsState, speakingMessageId,
     start, end, toggleMicrophone, recover,
